@@ -14,7 +14,8 @@
     }
     #toolbar a { color: #00d4aa; text-decoration: none; margin-right: 16px; }
     #toolbar a:hover { text-decoration: underline; }
-    #toolbar .session-name { color: #e0e0e0; font-weight: 500; margin-right: 16px; }
+    #toolbar .session-name { color: #e0e0e0; font-weight: 500; margin-right: 16px; cursor: pointer; }
+    #toolbar .session-name:hover { color: #00d4aa; }
     #toolbar .viewers { color: #e94560; margin-left: auto; }
     #terminal { height: calc(100% - 32px); width: 100%; }
     #status {
@@ -29,7 +30,7 @@
 <body>
   <div id="toolbar">
     <a href="/">&#8592; Sessions</a>
-    <span id="sessionName" class="session-name"></span>
+    <span id="sessionName" class="session-name" onclick="renameSession()" title="Click to rename"></span>
     <span id="viewers" class="viewers"></span>
   </div>
   <div id="status">connecting...</div>
@@ -105,6 +106,19 @@
       const s = list.find(x => x.id === sessionId);
       if (s) document.getElementById('viewers').textContent = `${s.clients} viewer${s.clients !== 1 ? 's' : ''}`;
     }, 5000);
+
+    async function renameSession() {
+      const el = document.getElementById('sessionName');
+      const name = prompt('New session name:', el.textContent);
+      if (!name || name === el.textContent) return;
+      await fetch(`/api/sessions/${sessionId}`, {
+        method: 'PATCH',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ name })
+      });
+      el.textContent = name;
+      document.title = `${name} - Web Terminal`;
+    }
 
     connect();
   </script>

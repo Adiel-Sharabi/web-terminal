@@ -58,7 +58,7 @@
       }
       container.innerHTML = list.map(s => `
         <div class="session-card">
-          <h3>${s.name}</h3>
+          <h3 onclick="renameSession('${s.id}', this)" title="Click to rename" style="cursor:pointer">${s.name}</h3>
           <div class="meta">PID ${s.pid} &middot; ${s.cwd}</div>
           <div class="clients">${s.clients} viewer${s.clients !== 1 ? 's' : ''} connected</div>
           <div class="actions">
@@ -67,6 +67,17 @@
           </div>
         </div>
       `).join('');
+    }
+
+    async function renameSession(id, el) {
+      const name = prompt('New session name:', el.textContent);
+      if (!name || name === el.textContent) return;
+      await fetch(`/api/sessions/${id}`, {
+        method: 'PATCH',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ name })
+      });
+      el.textContent = name;
     }
 
     async function createSession() {
