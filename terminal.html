@@ -1,0 +1,112 @@
+<!DOCTYPE html>
+<html>
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>Web Terminal</title>
+  <link rel="stylesheet" href="https://cdn.jsdelivr.net/npm/@xterm/xterm@5.5.0/css/xterm.min.css">
+  <style>
+    * { margin: 0; padding: 0; box-sizing: border-box; }
+    html, body { height: 100%; background: #1e1e1e; overflow: hidden; }
+    #toolbar {
+      height: 32px; background: #16213e; display: flex; align-items: center; padding: 0 12px;
+      font: 13px 'Segoe UI', sans-serif; color: #888; border-bottom: 1px solid #0f3460;
+    }
+    #toolbar a { color: #00d4aa; text-decoration: none; margin-right: 16px; }
+    #toolbar a:hover { text-decoration: underline; }
+    #toolbar .session-name { color: #e0e0e0; font-weight: 500; margin-right: 16px; }
+    #toolbar .viewers { color: #e94560; margin-left: auto; }
+    #terminal { height: calc(100% - 32px); width: 100%; }
+    #status {
+      position: fixed; top: 40px; right: 12px; z-index: 10;
+      padding: 4px 10px; border-radius: 12px; font: 12px monospace;
+      background: #333; color: #888; transition: opacity 0.5s;
+    }
+    #status.connected { background: #1a3a1a; color: #4a4; }
+    #status.disconnected { background: #3a1a1a; color: #a44; }
+  </style>
+</head>
+<body>
+  <div id="toolbar">
+    <a href="/">&#8592; Sessions</a>
+    <span id="sessionName" class="session-name"></span>
+    <span id="viewers" class="viewers"></span>
+  </div>
+  <div id="status">connecting...</div>
+  <div id="terminal"></div>
+
+  <script src="https://cdn.jsdelivr.net/npm/@xterm/xterm@5.5.0/lib/xterm.min.js"></script>
+  <script src="https://cdn.jsdelivr.net/npm/@xterm/addon-fit@0.10.0/lib/addon-fit.min.js"></script>
+  <script src="https://cdn.jsdelivr.net/npm/@xterm/addon-web-links@0.11.0/lib/addon-web-links.min.js"></script>
+  <script>
+    const sessionId = location.pathname.split('/').pop();
+    const status = document.getElementById('status');
+
+    const term = new window.Terminal({
+      cursorBlink: true,
+      fontSize: 14,
+      fontFamily: '"Cascadia Code", "Consolas", monospace',
+      theme: { background: '#1e1e1e', foreground: '#d4d4d4', cursor: '#d4d4d4' }
+    });
+
+    const fitAddon = new window.FitAddon.FitAddon();
+    term.loadAddon(fitAddon);
+    term.loadAddon(new window.WebLinksAddon.WebLinksAddon());
+    term.open(document.getElementById('terminal'));
+    fitAddon.fit();
+
+    let ws;
+    function connect() {
+      const proto = location.protocol === 'https:' ? 'wss:' : 'ws:';
+      ws = new WebSocket(`${proto}//${location.host}/ws/${sessionId}`);
+
+      ws.onopen = () => {
+        status.textContent = 'connected';
+        status.className = 'connected';
+        setTimeout(() => { status.style.opacity = '0'; }, 3000);
+        ws.send(JSON.stringify({ resize: { cols: term.cols, rows: term.rows } }));
+      };
+
+      ws.onmessage = e => term.write(e.data);
+
+      ws.onclose = () => {
+        status.textContent = 'disconnected — reconnecting...';
+        status.className = 'disconnected';
+        status.style.opacity = '1';
+        setTimeout(connect, 2000);
+      };
+
+      ws.onerror = () => ws.close();
+    }
+
+    term.onData(data => {
+      if (ws && ws.readyState === WebSocket.OPEN) ws.send(data);
+    });
+
+    window.addEventListener('resize', () => {
+      fitAddon.fit();
+      if (ws && ws.readyState === WebSocket.OPEN) {
+        ws.send(JSON.stringify({ resize: { cols: term.cols, rows: term.rows } }));
+      }
+    });
+
+    // Load session info
+    fetch('/api/sessions').then(r => r.json()).then(list => {
+      const s = list.find(x => x.id === sessionId);
+      if (s) {
+        document.getElementById('sessionName').textContent = s.name;
+        document.title = `${s.name} - Web Terminal`;
+      }
+    });
+
+    // Update viewer count
+    setInterval(async () => {
+      const list = await (await fetch('/api/sessions')).json();
+      const s = list.find(x => x.id === sessionId);
+      if (s) document.getElementById('viewers').textContent = `${s.clients} viewer${s.clients !== 1 ? 's' : ''}`;
+    }, 5000);
+
+    connect();
+  </script>
+</body>
+</html>

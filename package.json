@@ -1,0 +1,14 @@
+{
+  "name": "web-terminal",
+  "version": "1.0.0",
+  "description": "Browser-based terminal with shared sessions, basic auth, and Tailscale support",
+  "main": "server.js",
+  "scripts": {
+    "start": "node server.js"
+  },
+  "dependencies": {
+    "express": "^4.21.0",
+    "express-ws": "^5.0.2",
+    "node-pty": "^1.0.0"
+  }
+}
