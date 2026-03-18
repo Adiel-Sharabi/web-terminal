@@ -63,15 +63,15 @@ Login with your credentials. You'll see a session lobby where you can:
 1. Open a session from your phone
 2. Type:
    ```bash
-   cd /c/dev/AM8_Core && claude
+   cd /c/dev/my-project && claude
    ```
 3. Work as if you were at the local console
 
 ### Multiple sessions
 
 Create sessions for different projects:
-- Session 1: `C:\dev\AM8_Core` — main project
-- Session 2: `C:\dev\am8` — legacy project
+- Session 1: `C:\dev\project-a`
+- Session 2: `C:\dev\project-b`
 - Session 3: general purpose
 
 Each session runs independently. Multiple viewers can watch the same session.

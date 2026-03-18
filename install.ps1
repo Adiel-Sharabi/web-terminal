@@ -18,7 +18,7 @@ param(
     [string]$User = "admin",
     [string]$Password = "admin",
     [string]$Shell = "C:\Program Files\Git\bin\bash.exe",
-    [string]$DefaultCwd = "$env:USERPROFILE",
+    [string]$DefaultCwd = "C:\dev",
     [switch]$SkipTailscale,
     [switch]$Uninstall
 )
