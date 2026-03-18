@@ -7,7 +7,7 @@ const PORT = parseInt(process.env.WT_PORT || '7681');
 const USER = process.env.WT_USER || 'admin';
 const PASS = process.env.WT_PASS || 'admin';
 const SHELL = process.env.WT_SHELL || 'C:\\Program Files\\Git\\bin\\bash.exe';
-const DEFAULT_CWD = process.env.WT_CWD || 'C:\\Users\\yourname';
+const DEFAULT_CWD = process.env.WT_CWD || 'C:\\dev';
 
 const app = express();
 expressWs(app);
@@ -22,7 +22,7 @@ function createSession(id, cwd, name) {
     cols: 120,
     rows: 30,
     cwd: cwd || DEFAULT_CWD,
-    env: Object.assign({}, process.env, { TERM: 'xterm-256color', HOME: 'C:\\Users\\yourname' })
+    env: Object.assign({}, process.env, { TERM: 'xterm-256color', HOME: process.env.USERPROFILE || 'C:\\Users\\yourname' })
   });
 
   const session = { term, clients: new Set(), scrollback: [], name: name || `Session ${id}`, cwd: cwd || DEFAULT_CWD };
