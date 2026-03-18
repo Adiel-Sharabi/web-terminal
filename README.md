@@ -17,7 +17,7 @@ Browser-based terminal for Windows. Monitor and control CLI sessions (including 
 
 ```powershell
 # Clone
-git clone https://github.com/AdiSharabi/web-terminal.git C:\tools\web-terminal
+git clone https://github.com/Adiel-Sharabi/web-terminal.git C:\tools\web-terminal
 
 # Install and start (run as Administrator)
 powershell -ExecutionPolicy Bypass -File C:\tools\web-terminal\install.ps1
@@ -75,6 +75,60 @@ Create sessions for different projects:
 - Session 3: general purpose
 
 Each session runs independently. Multiple viewers can watch the same session.
+
+## Remote Access via Tailscale
+
+[Tailscale](https://tailscale.com/download) creates a secure mesh VPN across all your devices. Once set up, you can access Web Terminal from your phone, tablet, or another PC — anywhere in the world.
+
+### Setup (one-time per device)
+
+1. **Install Tailscale** on every device you want to connect (PC, phone, tablet)
+   - Windows: https://tailscale.com/download/windows
+   - Android: Google Play Store → "Tailscale"
+   - iOS: App Store → "Tailscale"
+
+2. **Sign in** with the same account on all devices
+
+3. **Find your machine's Tailscale IP** (run on the PC):
+   ```powershell
+   tailscale ip -4
+   # Example output: 100.79.226.100
+   ```
+
+4. **Expose Web Terminal** through Tailscale:
+   ```powershell
+   tailscale serve --bg 7681
+   ```
+   The installer does this automatically if Tailscale is detected.
+
+### Access from your phone
+
+1. Open Tailscale app on your phone — make sure it's connected
+2. Open browser and go to: `http://<tailscale-ip>:7681`
+   - Example: `http://100.79.226.100:7681`
+3. Login with your Web Terminal credentials
+4. You're in — full terminal access from your phone
+
+### Security
+
+Three layers of protection:
+1. **Tailscale WireGuard encryption** — only your devices can reach the IP
+2. **Tailscale identity** — tied to your account
+3. **Basic auth** — username/password on the web terminal
+
+### Multiple machines
+
+Install Web Terminal + Tailscale on each machine. Access any machine by its Tailscale IP:
+- `http://100.x.x.x:7681` — Home PC
+- `http://100.y.y.y:7681` — Office PC
+- `http://100.z.z.z:7681` — Laptop
+
+### Troubleshooting
+
+- **Can't reach the page**: Make sure Tailscale is connected on both devices (`tailscale status`)
+- **DNS name not working**: Use the IP address directly instead (more reliable)
+- **Check what's being served**: `tailscale serve status`
+- **Remove Tailscale proxy**: `tailscale serve --https=443 off`
 
 ## Update
 
