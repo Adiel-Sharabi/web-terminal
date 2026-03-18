@@ -1,0 +1,94 @@
+<!DOCTYPE html>
+<html>
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>Web Terminal</title>
+  <style>
+    * { margin: 0; padding: 0; box-sizing: border-box; }
+    body { background: #1a1a2e; color: #e0e0e0; font-family: 'Segoe UI', sans-serif; padding: 20px; min-height: 100vh; }
+    h1 { color: #00d4aa; margin-bottom: 20px; font-size: 24px; }
+    .sessions { display: flex; flex-wrap: wrap; gap: 12px; margin-bottom: 20px; }
+    .session-card {
+      background: #16213e; border: 1px solid #0f3460; border-radius: 8px; padding: 16px;
+      min-width: 250px; cursor: pointer; transition: all 0.2s;
+    }
+    .session-card:hover { border-color: #00d4aa; transform: translateY(-2px); }
+    .session-card h3 { color: #00d4aa; margin-bottom: 6px; }
+    .session-card .meta { color: #888; font-size: 13px; }
+    .session-card .clients { color: #e94560; font-size: 12px; margin-top: 4px; }
+    .session-card .actions { margin-top: 10px; display: flex; gap: 8px; }
+    .btn {
+      padding: 8px 16px; border: none; border-radius: 6px; cursor: pointer;
+      font-size: 14px; font-weight: 500; transition: opacity 0.2s;
+    }
+    .btn:hover { opacity: 0.85; }
+    .btn-open { background: #00d4aa; color: #1a1a2e; }
+    .btn-kill { background: #e94560; color: white; font-size: 12px; padding: 6px 10px; }
+    .btn-new { background: #0f3460; color: #00d4aa; border: 1px solid #00d4aa; font-size: 16px; padding: 12px 24px; }
+    .new-form { background: #16213e; border-radius: 8px; padding: 16px; margin-bottom: 20px; display: none; }
+    .new-form.show { display: block; }
+    .new-form input { background: #1a1a2e; color: #e0e0e0; border: 1px solid #0f3460; padding: 8px 12px; border-radius: 4px; margin-right: 8px; font-size: 14px; }
+    .empty { color: #666; font-style: italic; padding: 40px 0; text-align: center; }
+  </style>
+</head>
+<body>
+  <h1>Web Terminal</h1>
+  <button class="btn btn-new" onclick="toggleForm()">+ New Session</button>
+  <div id="newForm" class="new-form">
+    <input id="sessionName" placeholder="Session name" value="">
+    <input id="sessionCwd" placeholder="Working directory" value="C:\dev\AM8_Core" style="width:300px">
+    <button class="btn btn-open" onclick="createSession()">Create</button>
+  </div>
+  <div id="sessions" class="sessions"></div>
+
+  <script>
+    function toggleForm() {
+      document.getElementById('newForm').classList.toggle('show');
+      document.getElementById('sessionName').focus();
+    }
+
+    async function loadSessions() {
+      const res = await fetch('/api/sessions');
+      const list = await res.json();
+      const container = document.getElementById('sessions');
+      if (list.length === 0) {
+        container.innerHTML = '<div class="empty">No active sessions</div>';
+        return;
+      }
+      container.innerHTML = list.map(s => `
+        <div class="session-card">
+          <h3>${s.name}</h3>
+          <div class="meta">PID ${s.pid} &middot; ${s.cwd}</div>
+          <div class="clients">${s.clients} viewer${s.clients !== 1 ? 's' : ''} connected</div>
+          <div class="actions">
+            <button class="btn btn-open" onclick="location.href='/s/${s.id}'">Open</button>
+            <button class="btn btn-kill" onclick="killSession('${s.id}')">Kill</button>
+          </div>
+        </div>
+      `).join('');
+    }
+
+    async function createSession() {
+      const name = document.getElementById('sessionName').value || undefined;
+      const cwd = document.getElementById('sessionCwd').value || undefined;
+      const res = await fetch('/api/sessions', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ name, cwd })
+      });
+      const { id } = await res.json();
+      location.href = `/s/${id}`;
+    }
+
+    async function killSession(id) {
+      if (!confirm('Kill this session?')) return;
+      await fetch(`/api/sessions/${id}`, { method: 'DELETE' });
+      loadSessions();
+    }
+
+    loadSessions();
+    setInterval(loadSessions, 5000);
+  </script>
+</body>
+</html>
