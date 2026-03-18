@@ -85,6 +85,14 @@ app.post('/api/sessions', express.json(), (req, res) => {
   res.json({ id, name });
 });
 
+// --- API: rename session ---
+app.patch('/api/sessions/:id', express.json(), (req, res) => {
+  const session = sessions.get(req.params.id);
+  if (!session) return res.status(404).json({ error: 'not found' });
+  if (req.body?.name) session.name = req.body.name;
+  res.json({ id: req.params.id, name: session.name });
+});
+
 // --- API: kill session ---
 app.delete('/api/sessions/:id', (req, res) => {
   const session = sessions.get(req.params.id);
