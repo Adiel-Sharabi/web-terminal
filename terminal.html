@@ -9,22 +9,34 @@
     * { margin: 0; padding: 0; box-sizing: border-box; }
     html, body { height: 100%; background: #1e1e1e; overflow: hidden; }
     #toolbar {
-      height: 32px; background: #16213e; display: flex; align-items: center; padding: 0 12px;
+      height: 36px; background: #16213e; display: flex; align-items: center; padding: 0 12px;
       font: 13px 'Segoe UI', sans-serif; color: #888; border-bottom: 1px solid #0f3460;
     }
-    #toolbar a { color: #00d4aa; text-decoration: none; margin-right: 16px; }
+    #toolbar a { color: #00d4aa; text-decoration: none; margin-right: 12px; padding: 4px 0; }
     #toolbar a:hover { text-decoration: underline; }
-    #toolbar .session-name { color: #e0e0e0; font-weight: 500; margin-right: 16px; cursor: pointer; }
+    #toolbar .session-name { color: #e0e0e0; font-weight: 500; margin-right: 8px; cursor: pointer; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; max-width: 40vw; }
     #toolbar .session-name:hover { color: #00d4aa; }
-    #toolbar .viewers { color: #e94560; margin-left: auto; }
-    #terminal { height: calc(100% - 32px); width: 100%; }
+    #toolbar .viewers { color: #e94560; margin-left: auto; white-space: nowrap; }
+    #terminal { height: calc(100% - 36px); width: 100%; }
     #status {
-      position: fixed; top: 40px; right: 12px; z-index: 10;
+      position: fixed; top: 44px; right: 12px; z-index: 10;
       padding: 4px 10px; border-radius: 12px; font: 12px monospace;
       background: #333; color: #888; transition: opacity 0.5s;
     }
     #status.connected { background: #1a3a1a; color: #4a4; }
     #status.disconnected { background: #3a1a1a; color: #a44; }
+    #scrollBtn {
+      display: none; position: fixed; bottom: 16px; right: 16px; z-index: 10;
+      width: 44px; height: 44px; border-radius: 50%; border: none;
+      background: #00d4aa; color: #1a1a2e; font-size: 20px; cursor: pointer;
+      box-shadow: 0 2px 8px rgba(0,0,0,0.4); opacity: 0.8;
+    }
+    #scrollBtn:hover { opacity: 1; }
+    @media (max-width: 600px) {
+      #toolbar { font-size: 12px; height: 32px; padding: 0 8px; }
+      #toolbar .session-name { max-width: 30vw; font-size: 12px; }
+      #terminal { height: calc(100% - 32px); }
+    }
   </style>
 </head>
 <body>
@@ -36,6 +48,7 @@
   </div>
   <div id="status">connecting...</div>
   <div id="terminal"></div>
+  <button id="scrollBtn" onclick="scrollToBottom()" title="Scroll to bottom">&#8595;</button>
 
   <script src="https://cdn.jsdelivr.net/npm/@xterm/xterm@5.5.0/lib/xterm.min.js"></script>
   <script src="https://cdn.jsdelivr.net/npm/@xterm/addon-fit@0.10.0/lib/addon-fit.min.js"></script>
@@ -44,11 +57,15 @@
     const sessionId = location.pathname.split('/').pop();
     const status = document.getElementById('status');
 
+    const isMobile = /Android|iPhone|iPad|iPod/i.test(navigator.userAgent) || window.innerWidth < 600;
     const term = new window.Terminal({
       cursorBlink: true,
-      fontSize: 14,
+      fontSize: isMobile ? 11 : 14,
       fontFamily: '"Cascadia Code", "Consolas", monospace',
-      theme: { background: '#1e1e1e', foreground: '#d4d4d4', cursor: '#d4d4d4' }
+      theme: { background: '#1e1e1e', foreground: '#d4d4d4', cursor: '#d4d4d4' },
+      scrollback: 5000,
+      fastScrollSensitivity: isMobile ? 3 : 1,
+      touchScrollSensitivity: 3
     });
 
     const fitAddon = new window.FitAddon.FitAddon();
@@ -91,6 +108,21 @@
         ws.send(JSON.stringify({ resize: { cols: term.cols, rows: term.rows } }));
       }
     });
+
+    // --- Scroll-to-bottom button (shows when scrolled up) ---
+    const scrollBtn = document.getElementById('scrollBtn');
+    let isAtBottom = true;
+
+    term.onScroll(() => {
+      const buf = term.buffer.active;
+      isAtBottom = buf.viewportY >= buf.baseY;
+      scrollBtn.style.display = isAtBottom ? 'none' : 'block';
+    });
+
+    function scrollToBottom() {
+      term.scrollToBottom();
+      scrollBtn.style.display = 'none';
+    }
 
     // --- Global notification WebSocket (receives from ALL sessions) ---
     function connectNotify() {

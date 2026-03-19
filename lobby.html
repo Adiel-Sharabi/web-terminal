@@ -77,6 +77,24 @@
     .collapsible { display: none; }
     .collapsible.show { display: block; }
 
+    /* Mobile */
+    @media (max-width: 600px) {
+      body { padding: 12px; }
+      h1 { font-size: 20px; }
+      .sessions { flex-direction: column; }
+      .session-card { min-width: unset; max-width: unset; width: 100%; }
+      .btn { padding: 10px 16px; font-size: 15px; }
+      .btn-new { font-size: 15px; padding: 10px 20px; width: 100%; }
+      .new-form.show { flex-direction: column; }
+      .new-form input { width: 100% !important; }
+      .session-card .actions { flex-wrap: wrap; }
+      .session-card .actions .btn { flex: 1; text-align: center; min-width: 70px; }
+      .claude-card { flex-wrap: wrap; gap: 6px; }
+      .claude-card .claude-project { min-width: unset; }
+      .claude-card .claude-summary { width: 100%; order: 10; }
+      .settings-panel { width: 95vw; padding: 16px; }
+    }
+
     /* Settings panel */
     .settings-overlay {
       display: none; position: fixed; top: 0; left: 0; right: 0; bottom: 0;
