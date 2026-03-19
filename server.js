@@ -156,9 +156,32 @@ app.use((req, res, next) => {
   next();
 });
 
-// --- API: config (public, non-sensitive) ---
+// --- API: config ---
 app.get('/api/config', (req, res) => {
-  res.json({ defaultCwd: DEFAULT_CWD, scanFolders: SCAN_FOLDERS });
+  // Return full config (already behind auth)
+  const current = {};
+  try {
+    if (fs.existsSync(CONFIG_FILE)) {
+      Object.assign(current, JSON.parse(fs.readFileSync(CONFIG_FILE, 'utf8')));
+    }
+  } catch (e) {}
+  // Fill in running values
+  current.port = current.port || PORT;
+  current.user = current.user || USER;
+  current.password = current.password || PASS;
+  current.shell = current.shell || SHELL;
+  current.defaultCwd = current.defaultCwd || DEFAULT_CWD;
+  current.scanFolders = current.scanFolders || SCAN_FOLDERS;
+  res.json(current);
+});
+
+app.put('/api/config', express.json(), (req, res) => {
+  try {
+    fs.writeFileSync(CONFIG_FILE, JSON.stringify(req.body, null, 2), 'utf8');
+    res.json({ ok: true, message: 'Saved. Restart server for changes to take effect.' });
+  } catch (e) {
+    res.status(500).json({ error: e.message });
+  }
 });
 
 // --- API: hostname ---
