@@ -5,11 +5,24 @@ const path = require('path');
 const os = require('os');
 const fs = require('fs');
 
-const PORT = parseInt(process.env.WT_PORT || '7681');
-const USER = process.env.WT_USER || 'admin';
-const PASS = process.env.WT_PASS || 'admin';
-const SHELL = process.env.WT_SHELL || 'C:\\Program Files\\Git\\bin\\bash.exe';
-const DEFAULT_CWD = process.env.WT_CWD || 'C:\\dev';
+// --- Config: config.json > env vars > defaults ---
+const CONFIG_FILE = path.join(__dirname, 'config.json');
+const DEFAULT_CONFIG_FILE = path.join(__dirname, 'config.default.json');
+let config = {};
+try {
+  if (fs.existsSync(CONFIG_FILE)) {
+    config = JSON.parse(fs.readFileSync(CONFIG_FILE, 'utf8'));
+  } else if (fs.existsSync(DEFAULT_CONFIG_FILE)) {
+    config = JSON.parse(fs.readFileSync(DEFAULT_CONFIG_FILE, 'utf8'));
+  }
+} catch (e) { console.error('Failed to load config:', e.message); }
+
+const PORT = parseInt(process.env.WT_PORT || config.port || '7681');
+const USER = process.env.WT_USER || config.user || 'admin';
+const PASS = process.env.WT_PASS || config.password || 'admin';
+const SHELL = process.env.WT_SHELL || config.shell || 'C:\\Program Files\\Git\\bin\\bash.exe';
+const DEFAULT_CWD = process.env.WT_CWD || config.defaultCwd || 'C:\\dev';
+const SCAN_FOLDERS = config.scanFolders || [DEFAULT_CWD];
 const SESSIONS_FILE = path.join(__dirname, 'sessions.json');
 const HISTORY_FILE = path.join(__dirname, 'history.json');
 const CLAUDE_PROJECTS_DIR = path.join(process.env.USERPROFILE || 'C:\\Users\\yourname', '.claude', 'projects');
@@ -143,6 +156,11 @@ app.use((req, res, next) => {
   next();
 });
 
+// --- API: config (public, non-sensitive) ---
+app.get('/api/config', (req, res) => {
+  res.json({ defaultCwd: DEFAULT_CWD, scanFolders: SCAN_FOLDERS });
+});
+
 // --- API: hostname ---
 app.get('/api/hostname', (req, res) => {
   res.json({ hostname: os.hostname() });
@@ -208,14 +226,16 @@ function saveFolder(folder) {
 
 app.get('/api/history/folders', (req, res) => {
   const history = loadHistory().folders;
-  // Also scan DEFAULT_CWD subdirectories and merge
+  // Also scan configured folders and their subdirectories
   const scanned = new Set(history);
-  try {
-    scanned.add(DEFAULT_CWD);
-    const dirs = fs.readdirSync(DEFAULT_CWD, { withFileTypes: true })
-      .filter(d => d.isDirectory() && !d.name.startsWith('.') && !d.name.startsWith('$'));
-    for (const d of dirs) scanned.add(path.join(DEFAULT_CWD, d.name));
-  } catch (e) {}
+  for (const baseDir of SCAN_FOLDERS) {
+    try {
+      scanned.add(baseDir);
+      const dirs = fs.readdirSync(baseDir, { withFileTypes: true })
+        .filter(d => d.isDirectory() && !d.name.startsWith('.') && !d.name.startsWith('$'));
+      for (const d of dirs) scanned.add(path.join(baseDir, d.name));
+    } catch (e) {}
+  }
   // History items first, then scanned extras
   const result = [...history];
   for (const f of scanned) {
