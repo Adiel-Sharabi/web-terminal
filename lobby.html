@@ -160,7 +160,7 @@
       </div>
       <div class="field">
         <label>Default auto-command (pre-filled for new sessions)</label>
-        <input id="cfgDefaultCommand" placeholder="e.g. claude --dangerously-skip-permissions">
+        <input id="cfgDefaultCommand" placeholder="e.g. claude">
       </div>
       <div id="saveMsg" class="save-msg"></div>
       <div class="actions">
@@ -183,7 +183,7 @@
     </div>
     <div class="field">
       <label>Auto-command (runs on start/restart)</label>
-      <input id="sessionCmd" placeholder="e.g. claude --continue --dangerously-skip-permissions" value="" style="width:420px">
+      <input id="sessionCmd" placeholder="e.g. claude --continue" value="" style="width:420px">
     </div>
     <button class="btn btn-open" onclick="createSession()" style="align-self:flex-end">Create</button>
   </div>
@@ -212,9 +212,13 @@
       const val = input.value.toLowerCase();
       const matches = folderHistory.filter(f => f.toLowerCase().includes(val) || !val);
       if (matches.length === 0) { container.style.display = 'none'; return; }
-      container.innerHTML = matches.map(f =>
-        `<div onclick="pickFolder('${f.replace(/\\/g, '\\\\')}')">${f}</div>`
-      ).join('');
+      container.textContent = '';
+      for (const f of matches) {
+        const div = document.createElement('div');
+        div.textContent = f;
+        div.addEventListener('click', () => pickFolder(f));
+        container.appendChild(div);
+      }
       container.style.display = 'block';
     }
 
@@ -235,12 +239,20 @@
       document.getElementById('sessionName').focus();
     }
 
+    function el(tag, cls, text) {
+      const e = document.createElement(tag);
+      if (cls) e.className = cls;
+      if (text) e.textContent = text;
+      return e;
+    }
+
     async function loadSessions() {
       const res = await fetch('/api/sessions');
       const list = await res.json();
       const container = document.getElementById('sessions');
+      container.textContent = '';
       if (list.length === 0) {
-        container.innerHTML = '<div class="empty">No active sessions. Click "+ New Session" to start.</div>';
+        container.appendChild(el('div', 'empty', 'No active sessions. Click "+ New Session" to start.'));
         return;
       }
       const statusLabel = { active: 'Active', idle: 'Done / Idle', waiting: 'Needs Input' };
@@ -250,21 +262,46 @@
         if (secs < 3600) return `${Math.floor(secs/60)}m ago`;
         return `${Math.floor(secs/3600)}h ago`;
       };
-      container.innerHTML = list.map(s => `
-        <div class="session-card ${s.status !== 'active' ? s.status : ''}">
-          <h3 onclick="renameSession('${s.id}', this)" title="Click to rename" style="cursor:pointer">${s.name}</h3>
-          <div class="meta">PID ${s.pid} &middot; ${s.cwd}</div>
-          ${s.autoCommand ? `<div class="auto-cmd" onclick="editAutoCmd('${s.id}')" title="Click to edit auto-command">&#9654; ${s.autoCommand}</div>` : ''}
-          <div class="clients">${s.clients} viewer${s.clients !== 1 ? 's' : ''} connected</div>
-          <span class="status-badge status-${s.status}">${statusLabel[s.status] || s.status}</span>
-          <span style="color:#666; font-size:11px; margin-left:6px;">last activity: ${timeAgo(s.lastActivity)}</span>
-          <div class="actions">
-            <button class="btn btn-open" onclick="location.href='/s/${s.id}'">Open</button>
-            <button class="btn btn-edit" onclick="editAutoCmd('${s.id}')" title="Set command that runs on server restart">Auto-cmd</button>
-            <button class="btn btn-kill" onclick="killSession('${s.id}')">Kill</button>
-          </div>
-        </div>
-      `).join('');
+      for (const s of list) {
+        const card = el('div', 'session-card' + (s.status !== 'active' ? ' ' + s.status : ''));
+
+        const h3 = el('h3', null, s.name);
+        h3.style.cursor = 'pointer';
+        h3.title = 'Click to rename';
+        h3.addEventListener('click', () => renameSession(s.id, h3));
+        card.appendChild(h3);
+
+        card.appendChild(el('div', 'meta', 'PID ' + s.pid + ' \u00B7 ' + s.cwd));
+
+        if (s.autoCommand) {
+          const cmd = el('div', 'auto-cmd', '\u25B6 ' + s.autoCommand);
+          cmd.title = 'Click to edit auto-command';
+          cmd.addEventListener('click', () => editAutoCmd(s.id));
+          card.appendChild(cmd);
+        }
+
+        card.appendChild(el('div', 'clients', s.clients + ' viewer' + (s.clients !== 1 ? 's' : '') + ' connected'));
+
+        const badge = el('span', 'status-badge status-' + s.status, statusLabel[s.status] || s.status);
+        card.appendChild(badge);
+
+        const activity = el('span', null, 'last activity: ' + timeAgo(s.lastActivity));
+        activity.style.cssText = 'color:#666; font-size:11px; margin-left:6px;';
+        card.appendChild(activity);
+
+        const actions = el('div', 'actions');
+        const openBtn = el('button', 'btn btn-open', 'Open');
+        openBtn.addEventListener('click', () => { location.href = '/s/' + s.id; });
+        const editBtn = el('button', 'btn btn-edit', 'Auto-cmd');
+        editBtn.title = 'Set command that runs on server restart';
+        editBtn.addEventListener('click', () => editAutoCmd(s.id));
+        const killBtn = el('button', 'btn btn-kill', 'Kill');
+        killBtn.addEventListener('click', () => killSession(s.id));
+        actions.append(openBtn, editBtn, killBtn);
+        card.appendChild(actions);
+
+        container.appendChild(card);
+      }
     }
 
     async function renameSession(id, el) {
@@ -323,11 +360,13 @@
 
     async function loadClaudeSessions() {
       const container = document.getElementById('claudeSessions');
-      container.innerHTML = '<div style="color:#666;padding:10px">Loading...</div>';
+      container.textContent = '';
+      container.appendChild(el('div', null, 'Loading...'));
       try {
         const list = await (await fetch('/api/claude-sessions')).json();
+        container.textContent = '';
         if (list.length === 0) {
-          container.innerHTML = '<div class="empty">No Claude sessions found</div>';
+          container.appendChild(el('div', 'empty', 'No Claude sessions found'));
           return;
         }
         const timeAgo = ts => {
@@ -337,22 +376,27 @@
           if (secs < 86400) return `${Math.floor(secs/3600)}h ago`;
           return `${Math.floor(secs/86400)}d ago`;
         };
-        container.innerHTML = list.map(s => `
-          <div class="claude-card">
-            <span class="claude-project">${s.project}</span>
-            <span class="claude-summary" title="${s.summary}">${s.summary || '(no summary)'}</span>
-            <span class="claude-size">${s.sizeKB}KB</span>
-            <span class="claude-time">${timeAgo(s.lastModified)}</span>
-            <button class="btn btn-resume" onclick="resumeClaude('${s.id}', '${s.projectPath.replace(/\\/g, '\\\\')}', '${s.project}')">Resume</button>
-          </div>
-        `).join('');
+        for (const s of list) {
+          const card = el('div', 'claude-card');
+          card.appendChild(el('span', 'claude-project', s.project));
+          const summary = el('span', 'claude-summary', s.summary || '(no summary)');
+          summary.title = s.summary || '';
+          card.appendChild(summary);
+          card.appendChild(el('span', 'claude-size', s.sizeKB + 'KB'));
+          card.appendChild(el('span', 'claude-time', timeAgo(s.lastModified)));
+          const btn = el('button', 'btn btn-resume', 'Resume');
+          btn.addEventListener('click', () => resumeClaude(s.id, s.projectPath, s.project));
+          card.appendChild(btn);
+          container.appendChild(card);
+        }
       } catch (e) {
-        container.innerHTML = `<div class="empty">Error: ${e.message}</div>`;
+        container.textContent = '';
+        container.appendChild(el('div', 'empty', 'Error: ' + e.message));
       }
     }
 
     async function resumeClaude(sessionId, projectPath, projectName) {
-      const cmd = `claude --resume ${sessionId} --dangerously-skip-permissions`;
+      const cmd = 'claude --resume ' + sessionId;
       const res = await fetch('/api/sessions', {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
@@ -363,7 +407,7 @@
         })
       });
       const { id } = await res.json();
-      location.href = `/s/${id}`;
+      location.href = '/s/' + id;
     }
 
     // --- Settings ---
@@ -416,8 +460,11 @@
     // --- Init ---
     fetch('/api/hostname').then(r => r.json()).then(({ hostname }) => {
       const titleEl = document.getElementById('title');
-      titleEl.innerHTML = `Web Terminal — ${hostname} <button class="btn-gear" onclick="openSettings()" title="Settings">&#9881;</button>`;
-      document.title = `Web Terminal — ${hostname}`;
+      // Clear existing text nodes but keep the gear button
+      const gearBtn = titleEl.querySelector('.btn-gear');
+      titleEl.textContent = 'Web Terminal \u2014 ' + hostname + ' ';
+      if (gearBtn) titleEl.appendChild(gearBtn);
+      document.title = 'Web Terminal \u2014 ' + hostname;
     });
 
     fetch('/api/config').then(r => r.json()).then(cfg => {
