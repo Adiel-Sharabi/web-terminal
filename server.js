@@ -4,6 +4,7 @@ const pty = require('node-pty');
 const path = require('path');
 const os = require('os');
 const fs = require('fs');
+const crypto = require('crypto');
 
 // --- Config: config.json > env vars > defaults ---
 const CONFIG_FILE = path.join(__dirname, 'config.json');
@@ -23,10 +24,10 @@ const PASS = process.env.WT_PASS || config.password || 'admin';
 const SHELL = process.env.WT_SHELL || config.shell || 'C:\\Program Files\\Git\\bin\\bash.exe';
 const DEFAULT_CWD = process.env.WT_CWD || config.defaultCwd || 'C:\\dev';
 const SCAN_FOLDERS = config.scanFolders || [DEFAULT_CWD];
-const DEFAULT_COMMAND = config.defaultCommand || 'claude --dangerously-skip-permissions';
+const DEFAULT_COMMAND = config.defaultCommand || '';
 const SESSIONS_FILE = path.join(__dirname, 'sessions.json');
 const HISTORY_FILE = path.join(__dirname, 'history.json');
-const CLAUDE_PROJECTS_DIR = path.join(process.env.USERPROFILE || 'C:\\Users\\yourname', '.claude', 'projects');
+const CLAUDE_PROJECTS_DIR = path.join(process.env.USERPROFILE || os.homedir(), '.claude', 'projects');
 
 const app = express();
 expressWs(app);
@@ -66,7 +67,7 @@ function createSession(id, cwd, name, autoCommand) {
     cols: 120,
     rows: 30,
     cwd: cwd || DEFAULT_CWD,
-    env: Object.assign({}, process.env, { TERM: 'xterm-256color', HOME: process.env.USERPROFILE || 'C:\\Users\\yourname' })
+    env: Object.assign({}, process.env, { TERM: 'xterm-256color', HOME: process.env.USERPROFILE || os.homedir() })
   });
 
   const session = {
@@ -142,15 +143,40 @@ function createSession(id, cwd, name, autoCommand) {
   return session;
 }
 
+// --- Auth helpers ---
+function parseBasicAuth(authHeader) {
+  if (!authHeader || !authHeader.startsWith('Basic ')) return null;
+  const decoded = Buffer.from(authHeader.split(' ')[1], 'base64').toString();
+  const colonIndex = decoded.indexOf(':');
+  if (colonIndex === -1) return null;
+  return { user: decoded.substring(0, colonIndex), pass: decoded.substring(colonIndex + 1) };
+}
+
+function checkCredentials(user, pass) {
+  if (!user || !pass) return false;
+  try {
+    return crypto.timingSafeEqual(Buffer.from(user), Buffer.from(USER)) &&
+           crypto.timingSafeEqual(Buffer.from(pass), Buffer.from(PASS));
+  } catch (e) { return false; } // different lengths
+}
+
+function authenticateWs(ws, req) {
+  const creds = parseBasicAuth(req.headers.authorization);
+  if (!creds || !checkCredentials(creds.user, creds.pass)) {
+    ws.close(1008, 'Unauthorized');
+    return false;
+  }
+  return true;
+}
+
 // --- Auth middleware ---
 app.use((req, res, next) => {
-  const auth = req.headers.authorization;
-  if (!auth || !auth.startsWith('Basic ')) {
+  const creds = parseBasicAuth(req.headers.authorization);
+  if (!creds) {
     res.set('WWW-Authenticate', 'Basic realm="Web Terminal"');
     return res.status(401).send('Authentication required');
   }
-  const [user, pass] = Buffer.from(auth.split(' ')[1], 'base64').toString().split(':');
-  if (user !== USER || pass !== PASS) {
+  if (!checkCredentials(creds.user, creds.pass)) {
     res.set('WWW-Authenticate', 'Basic realm="Web Terminal"');
     return res.status(401).send('Invalid credentials');
   }
@@ -174,12 +200,30 @@ app.get('/api/config', (req, res) => {
   current.defaultCwd = current.defaultCwd || DEFAULT_CWD;
   current.scanFolders = current.scanFolders || SCAN_FOLDERS;
   current.defaultCommand = current.defaultCommand || DEFAULT_COMMAND;
+  // Never expose password in API response
+  current.password = '***';
   res.json(current);
 });
 
+const ALLOWED_CONFIG_KEYS = ['port', 'user', 'password', 'shell', 'defaultCwd', 'scanFolders', 'defaultCommand'];
+
 app.put('/api/config', express.json(), (req, res) => {
   try {
-    fs.writeFileSync(CONFIG_FILE, JSON.stringify(req.body, null, 2), 'utf8');
+    // Only allow known config keys
+    const sanitized = {};
+    for (const key of ALLOWED_CONFIG_KEYS) {
+      if (req.body[key] !== undefined) sanitized[key] = req.body[key];
+    }
+    // If password is masked, preserve existing password
+    if (sanitized.password === '***' || !sanitized.password) {
+      let existing = {};
+      try { if (fs.existsSync(CONFIG_FILE)) existing = JSON.parse(fs.readFileSync(CONFIG_FILE, 'utf8')); } catch (e) {}
+      sanitized.password = existing.password || PASS;
+    }
+    // Basic type validation
+    if (sanitized.port !== undefined) sanitized.port = parseInt(sanitized.port) || 7681;
+    if (sanitized.scanFolders && !Array.isArray(sanitized.scanFolders)) sanitized.scanFolders = [String(sanitized.scanFolders)];
+    fs.writeFileSync(CONFIG_FILE, JSON.stringify(sanitized, null, 2), 'utf8');
     res.json({ ok: true, message: 'Saved. Restart server for changes to take effect.' });
   } catch (e) {
     res.status(500).json({ error: e.message });
@@ -202,7 +246,7 @@ app.get('/api/sessions', (req, res) => {
 
 // --- API: create session ---
 app.post('/api/sessions', express.json(), (req, res) => {
-  const id = Date.now().toString(36);
+  const id = crypto.randomUUID();
   const cwd = req.body?.cwd || DEFAULT_CWD;
   const name = req.body?.name || `Session ${sessions.size + 1}`;
   const autoCommand = req.body?.autoCommand || '';
@@ -345,12 +389,14 @@ app.get('/s/:id', (req, res) => {
 
 // --- WebSocket: global notifications (all sessions) ---
 app.ws('/ws/notify', (ws, req) => {
+  if (!authenticateWs(ws, req)) return;
   notifyClients.add(ws);
   ws.on('close', () => notifyClients.delete(ws));
 });
 
 // --- WebSocket: attach to session ---
 app.ws('/ws/:id', (ws, req) => {
+  if (!authenticateWs(ws, req)) return;
   const session = sessions.get(req.params.id);
   if (!session) { ws.close(); return; }
 
