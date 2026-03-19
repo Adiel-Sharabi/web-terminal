@@ -76,10 +76,77 @@
     .empty { color: #666; font-style: italic; padding: 40px 0; text-align: center; }
     .collapsible { display: none; }
     .collapsible.show { display: block; }
+
+    /* Settings panel */
+    .settings-overlay {
+      display: none; position: fixed; top: 0; left: 0; right: 0; bottom: 0;
+      background: rgba(0,0,0,0.6); z-index: 200; justify-content: center; align-items: center;
+    }
+    .settings-overlay.show { display: flex; }
+    .settings-panel {
+      background: #16213e; border: 1px solid #0f3460; border-radius: 12px; padding: 24px;
+      width: 500px; max-width: 90vw; max-height: 80vh; overflow-y: auto; box-shadow: 0 8px 32px rgba(0,0,0,0.5);
+    }
+    .settings-panel h2 { color: #00d4aa; margin: 0 0 16px; font-size: 20px; }
+    .settings-panel .field { margin-bottom: 14px; }
+    .settings-panel label { display: block; color: #888; font-size: 12px; margin-bottom: 4px; }
+    .settings-panel input, .settings-panel textarea {
+      width: 100%; background: #1a1a2e; color: #e0e0e0; border: 1px solid #0f3460;
+      padding: 8px 12px; border-radius: 4px; font-size: 14px; font-family: 'Cascadia Code', monospace;
+    }
+    .settings-panel input:focus, .settings-panel textarea:focus { border-color: #00d4aa; outline: none; }
+    .settings-panel textarea { resize: vertical; min-height: 60px; }
+    .settings-panel .hint { color: #555; font-size: 11px; margin-top: 2px; }
+    .settings-panel .actions { display: flex; gap: 8px; margin-top: 18px; justify-content: flex-end; }
+    .settings-panel .save-msg { color: #da4; font-size: 12px; margin-top: 8px; }
+    .btn-gear {
+      background: transparent; border: 1px solid #333; color: #888; font-size: 20px;
+      width: 36px; height: 36px; border-radius: 50%; cursor: pointer; margin-left: 12px;
+      vertical-align: middle; transition: all 0.2s;
+    }
+    .btn-gear:hover { border-color: #00d4aa; color: #00d4aa; }
   </style>
 </head>
 <body>
-  <h1 id="title">Web Terminal</h1>
+  <h1 id="title">Web Terminal <button class="btn-gear" onclick="openSettings()" title="Settings">&#9881;</button></h1>
+
+  <!-- Settings panel -->
+  <div id="settingsOverlay" class="settings-overlay" onclick="if(event.target===this)closeSettings()">
+    <div class="settings-panel">
+      <h2>Settings</h2>
+      <div class="field">
+        <label>Port</label>
+        <input id="cfgPort" type="number">
+      </div>
+      <div class="field">
+        <label>Username</label>
+        <input id="cfgUser">
+      </div>
+      <div class="field">
+        <label>Password</label>
+        <input id="cfgPassword" type="password">
+        <span style="color:#555;font-size:11px;cursor:pointer;margin-left:4px" onclick="togglePw()">show/hide</span>
+      </div>
+      <div class="field">
+        <label>Shell</label>
+        <input id="cfgShell">
+      </div>
+      <div class="field">
+        <label>Default working directory</label>
+        <input id="cfgDefaultCwd">
+      </div>
+      <div class="field">
+        <label>Scan folders (one per line — used for folder suggestions)</label>
+        <textarea id="cfgScanFolders" rows="3"></textarea>
+        <div class="hint">Subdirectories are auto-discovered. Add your project base folders here.</div>
+      </div>
+      <div id="saveMsg" class="save-msg"></div>
+      <div class="actions">
+        <button class="btn" style="background:#333;color:#aaa" onclick="closeSettings()">Cancel</button>
+        <button class="btn btn-open" onclick="saveSettings()">Save</button>
+      </div>
+    </div>
+  </div>
 
   <button class="btn btn-new" onclick="toggleForm()">+ New Session</button>
   <div id="newForm" class="new-form">
@@ -277,13 +344,58 @@
       location.href = `/s/${id}`;
     }
 
+    // --- Settings ---
+    async function openSettings() {
+      const cfg = await (await fetch('/api/config')).json();
+      document.getElementById('cfgPort').value = cfg.port || 7681;
+      document.getElementById('cfgUser').value = cfg.user || 'admin';
+      document.getElementById('cfgPassword').value = cfg.password || '';
+      document.getElementById('cfgShell').value = cfg.shell || '';
+      document.getElementById('cfgDefaultCwd').value = cfg.defaultCwd || '';
+      document.getElementById('cfgScanFolders').value = (cfg.scanFolders || []).join('\n');
+      document.getElementById('saveMsg').textContent = '';
+      document.getElementById('settingsOverlay').classList.add('show');
+    }
+
+    function closeSettings() {
+      document.getElementById('settingsOverlay').classList.remove('show');
+    }
+
+    function togglePw() {
+      const el = document.getElementById('cfgPassword');
+      el.type = el.type === 'password' ? 'text' : 'password';
+    }
+
+    async function saveSettings() {
+      const cfg = {
+        port: parseInt(document.getElementById('cfgPort').value) || 7681,
+        user: document.getElementById('cfgUser').value,
+        password: document.getElementById('cfgPassword').value,
+        shell: document.getElementById('cfgShell').value,
+        defaultCwd: document.getElementById('cfgDefaultCwd').value,
+        scanFolders: document.getElementById('cfgScanFolders').value.split('\n').map(s => s.trim()).filter(Boolean)
+      };
+      const res = await fetch('/api/config', {
+        method: 'PUT',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify(cfg)
+      });
+      const result = await res.json();
+      if (result.ok) {
+        document.getElementById('saveMsg').textContent = 'Saved. Restart server for changes to take effect.';
+        document.getElementById('sessionCwd').value = cfg.defaultCwd;
+      } else {
+        document.getElementById('saveMsg').textContent = 'Error: ' + (result.error || 'unknown');
+      }
+    }
+
     // --- Init ---
     fetch('/api/hostname').then(r => r.json()).then(({ hostname }) => {
-      document.getElementById('title').textContent = `Web Terminal — ${hostname}`;
+      const titleEl = document.getElementById('title');
+      titleEl.innerHTML = `Web Terminal — ${hostname} <button class="btn-gear" onclick="openSettings()" title="Settings">&#9881;</button>`;
       document.title = `Web Terminal — ${hostname}`;
     });
 
-    // Load config and set defaults
     fetch('/api/config').then(r => r.json()).then(cfg => {
       document.getElementById('sessionCwd').value = cfg.defaultCwd || 'C:\\dev';
       document.getElementById('sessionCwd').placeholder = cfg.defaultCwd || 'C:\\dev';
