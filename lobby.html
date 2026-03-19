@@ -11,11 +11,16 @@
     .sessions { display: flex; flex-wrap: wrap; gap: 12px; margin-bottom: 20px; }
     .session-card {
       background: #16213e; border: 1px solid #0f3460; border-radius: 8px; padding: 16px;
-      min-width: 250px; cursor: pointer; transition: all 0.2s;
+      min-width: 280px; max-width: 400px; transition: all 0.2s;
     }
     .session-card:hover { border-color: #00d4aa; transform: translateY(-2px); }
     .session-card h3 { color: #00d4aa; margin-bottom: 6px; }
     .session-card .meta { color: #888; font-size: 13px; }
+    .session-card .auto-cmd {
+      color: #8a8aff; font-size: 12px; margin-top: 4px; font-family: 'Cascadia Code', monospace;
+      cursor: pointer; white-space: nowrap; overflow: hidden; text-overflow: ellipsis;
+    }
+    .session-card .auto-cmd:hover { color: #aaf; text-decoration: underline; }
     .session-card .clients { color: #e94560; font-size: 12px; margin-top: 4px; }
     .session-card .status-badge {
       display: inline-block; padding: 2px 8px; border-radius: 10px; font-size: 11px; font-weight: 600; margin-top: 6px;
@@ -26,7 +31,7 @@
     .session-card.idle { border-color: #da4; }
     .session-card.waiting { border-color: #e94560; }
     @keyframes pulse { 0%,100% { opacity: 1; } 50% { opacity: 0.5; } }
-    .session-card .actions { margin-top: 10px; display: flex; gap: 8px; }
+    .session-card .actions { margin-top: 10px; display: flex; gap: 8px; flex-wrap: wrap; }
     .btn {
       padding: 8px 16px; border: none; border-radius: 6px; cursor: pointer;
       font-size: 14px; font-weight: 500; transition: opacity 0.2s;
@@ -34,10 +39,12 @@
     .btn:hover { opacity: 0.85; }
     .btn-open { background: #00d4aa; color: #1a1a2e; }
     .btn-kill { background: #e94560; color: white; font-size: 12px; padding: 6px 10px; }
+    .btn-edit { background: #0f3460; color: #8a8aff; font-size: 12px; padding: 6px 10px; border: 1px solid #8a8aff; }
     .btn-new { background: #0f3460; color: #00d4aa; border: 1px solid #00d4aa; font-size: 16px; padding: 12px 24px; }
     .new-form { background: #16213e; border-radius: 8px; padding: 16px; margin-bottom: 20px; display: none; }
-    .new-form.show { display: block; }
-    .new-form input { background: #1a1a2e; color: #e0e0e0; border: 1px solid #0f3460; padding: 8px 12px; border-radius: 4px; margin-right: 8px; font-size: 14px; }
+    .new-form.show { display: flex; flex-wrap: wrap; gap: 8px; align-items: center; }
+    .new-form input { background: #1a1a2e; color: #e0e0e0; border: 1px solid #0f3460; padding: 8px 12px; border-radius: 4px; font-size: 14px; }
+    .new-form label { color: #888; font-size: 12px; width: 100%; }
     .empty { color: #666; font-style: italic; padding: 40px 0; text-align: center; }
   </style>
 </head>
@@ -45,8 +52,18 @@
   <h1 id="title">Web Terminal</h1>
   <button class="btn btn-new" onclick="toggleForm()">+ New Session</button>
   <div id="newForm" class="new-form">
-    <input id="sessionName" placeholder="Session name" value="">
-    <input id="sessionCwd" placeholder="Working directory" value="C:\dev" style="width:300px">
+    <div>
+      <label>Name</label>
+      <input id="sessionName" placeholder="e.g. AM8 Core" value="">
+    </div>
+    <div>
+      <label>Working directory</label>
+      <input id="sessionCwd" placeholder="C:\dev" value="C:\dev" style="width:280px">
+    </div>
+    <div>
+      <label>Auto-command (runs on start/restart)</label>
+      <input id="sessionCmd" placeholder="e.g. claude --continue --dangerously-skip-permissions" value="" style="width:420px">
+    </div>
     <button class="btn btn-open" onclick="createSession()">Create</button>
   </div>
   <div id="sessions" class="sessions"></div>
@@ -62,7 +79,7 @@
       const list = await res.json();
       const container = document.getElementById('sessions');
       if (list.length === 0) {
-        container.innerHTML = '<div class="empty">No active sessions</div>';
+        container.innerHTML = '<div class="empty">No active sessions. Click "+ New Session" to start.</div>';
         return;
       }
       const statusLabel = { active: 'Active', idle: 'Done / Idle', waiting: 'Needs Input' };
@@ -76,11 +93,13 @@
         <div class="session-card ${s.status !== 'active' ? s.status : ''}">
           <h3 onclick="renameSession('${s.id}', this)" title="Click to rename" style="cursor:pointer">${s.name}</h3>
           <div class="meta">PID ${s.pid} &middot; ${s.cwd}</div>
+          ${s.autoCommand ? `<div class="auto-cmd" onclick="editAutoCmd('${s.id}', this)" title="Click to edit auto-command">&#9654; ${s.autoCommand}</div>` : ''}
           <div class="clients">${s.clients} viewer${s.clients !== 1 ? 's' : ''} connected</div>
           <span class="status-badge status-${s.status}">${statusLabel[s.status] || s.status}</span>
           <span style="color:#666; font-size:11px; margin-left:6px;">last activity: ${timeAgo(s.lastActivity)}</span>
           <div class="actions">
             <button class="btn btn-open" onclick="location.href='/s/${s.id}'">Open</button>
+            <button class="btn btn-edit" onclick="editAutoCmd('${s.id}')" title="Set command that runs on server restart">Auto-cmd</button>
             <button class="btn btn-kill" onclick="killSession('${s.id}')">Kill</button>
           </div>
         </div>
@@ -95,16 +114,34 @@
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({ name })
       });
-      el.textContent = name;
+      loadSessions();
+    }
+
+    async function editAutoCmd(id) {
+      const res = await fetch('/api/sessions');
+      const list = await res.json();
+      const s = list.find(x => x.id === id);
+      const cmd = prompt(
+        'Auto-command (runs when server restarts):\n\nExamples:\n  claude --continue --dangerously-skip-permissions\n  cd /c/dev/AM8_Core && claude\n\nLeave empty to disable:',
+        s?.autoCommand || ''
+      );
+      if (cmd === null) return; // cancelled
+      await fetch(`/api/sessions/${id}`, {
+        method: 'PATCH',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ autoCommand: cmd })
+      });
+      loadSessions();
     }
 
     async function createSession() {
       const name = document.getElementById('sessionName').value || undefined;
       const cwd = document.getElementById('sessionCwd').value || undefined;
+      const autoCommand = document.getElementById('sessionCmd').value || '';
       const res = await fetch('/api/sessions', {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ name, cwd })
+        body: JSON.stringify({ name, cwd, autoCommand })
       });
       const { id } = await res.json();
       location.href = `/s/${id}`;
