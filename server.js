@@ -2,6 +2,7 @@ const express = require('express');
 const expressWs = require('express-ws');
 const pty = require('node-pty');
 const path = require('path');
+const os = require('os');
 
 const PORT = parseInt(process.env.WT_PORT || '7681');
 const USER = process.env.WT_USER || 'admin';
@@ -25,8 +26,25 @@ function createSession(id, cwd, name) {
     env: Object.assign({}, process.env, { TERM: 'xterm-256color', HOME: process.env.USERPROFILE || 'C:\\Users\\adiel' })
   });
 
-  const session = { term, clients: new Set(), scrollback: [], name: name || `Session ${id}`, cwd: cwd || DEFAULT_CWD };
+  const session = { term, clients: new Set(), scrollback: [], name: name || `Session ${id}`, cwd: cwd || DEFAULT_CWD, idleTimer: null, lastActivity: Date.now() };
   sessions.set(id, session);
+
+  // Patterns that indicate Claude is waiting for user input
+  const NOTIFY_PATTERNS = [
+    { regex: /Do you want to proceed/i, msg: 'Claude is asking to proceed' },
+    { regex: /Allow once|Allow always|Deny/i, msg: 'Claude needs permission' },
+    { regex: /\(y\/n\)/i, msg: 'Claude is waiting for yes/no' },
+    { regex: /\(Y\/n\)|yes\/no/i, msg: 'Claude is waiting for confirmation' },
+    { regex: /Press Enter to continue/i, msg: 'Claude is waiting for Enter' },
+  ];
+  const IDLE_NOTIFY_MS = 10000; // notify after 10s of no output (task likely done)
+
+  function sendNotification(session, type, message) {
+    const payload = JSON.stringify({ notification: { type, message, session: session.name } });
+    for (const client of session.clients) {
+      try { client.send(payload); } catch (e) {}
+    }
+  }
 
   term.onData(data => {
     // Buffer scrollback for replay
@@ -38,6 +56,22 @@ function createSession(id, cwd, name) {
     for (const client of session.clients) {
       try { client.send(data); } catch (e) { /* disconnected */ }
     }
+
+    // Check for notification patterns (strip ANSI codes)
+    const clean = data.replace(/\x1b\[[0-9;]*[a-zA-Z]/g, '');
+    for (const p of NOTIFY_PATTERNS) {
+      if (p.regex.test(clean)) {
+        sendNotification(session, 'input_needed', p.msg);
+        break;
+      }
+    }
+
+    // Reset idle timer — notify when output stops for a while
+    session.lastActivity = Date.now();
+    if (session.idleTimer) clearTimeout(session.idleTimer);
+    session.idleTimer = setTimeout(() => {
+      sendNotification(session, 'idle', 'Claude appears to be done');
+    }, IDLE_NOTIFY_MS);
   });
 
   term.onExit(() => {
@@ -65,6 +99,11 @@ app.use((req, res, next) => {
     return res.status(401).send('Invalid credentials');
   }
   next();
+});
+
+// --- API: hostname ---
+app.get('/api/hostname', (req, res) => {
+  res.json({ hostname: os.hostname() });
 });
 
 // --- API: list sessions ---

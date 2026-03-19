@@ -33,7 +33,7 @@
   </style>
 </head>
 <body>
-  <h1>Web Terminal</h1>
+  <h1 id="title">Web Terminal</h1>
   <button class="btn btn-new" onclick="toggleForm()">+ New Session</button>
   <div id="newForm" class="new-form">
     <input id="sessionName" placeholder="Session name" value="">
@@ -97,6 +97,11 @@
       await fetch(`/api/sessions/${id}`, { method: 'DELETE' });
       loadSessions();
     }
+
+    fetch('/api/hostname').then(r => r.json()).then(({ hostname }) => {
+      document.getElementById('title').textContent = `Web Terminal — ${hostname}`;
+      document.title = `Web Terminal — ${hostname}`;
+    });
 
     loadSessions();
     setInterval(loadSessions, 5000);
