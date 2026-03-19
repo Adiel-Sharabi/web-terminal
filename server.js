@@ -23,6 +23,7 @@ const PASS = process.env.WT_PASS || config.password || 'admin';
 const SHELL = process.env.WT_SHELL || config.shell || 'C:\\Program Files\\Git\\bin\\bash.exe';
 const DEFAULT_CWD = process.env.WT_CWD || config.defaultCwd || 'C:\\dev';
 const SCAN_FOLDERS = config.scanFolders || [DEFAULT_CWD];
+const DEFAULT_COMMAND = config.defaultCommand || 'claude --dangerously-skip-permissions';
 const SESSIONS_FILE = path.join(__dirname, 'sessions.json');
 const HISTORY_FILE = path.join(__dirname, 'history.json');
 const CLAUDE_PROJECTS_DIR = path.join(process.env.USERPROFILE || 'C:\\Users\\adiel', '.claude', 'projects');
@@ -172,6 +173,7 @@ app.get('/api/config', (req, res) => {
   current.shell = current.shell || SHELL;
   current.defaultCwd = current.defaultCwd || DEFAULT_CWD;
   current.scanFolders = current.scanFolders || SCAN_FOLDERS;
+  current.defaultCommand = current.defaultCommand || DEFAULT_COMMAND;
   res.json(current);
 });
 
