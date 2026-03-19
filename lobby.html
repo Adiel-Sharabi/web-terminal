@@ -55,7 +55,7 @@
     .new-form input { background: #1a1a2e; color: #e0e0e0; border: 1px solid #0f3460; padding: 8px 12px; border-radius: 4px; font-size: 14px; }
     .new-form input:focus { border-color: #00d4aa; outline: none; }
 
-    .folder-suggestions { position: absolute; background: #16213e; border: 1px solid #0f3460; border-radius: 4px; z-index: 100; max-height: 200px; overflow-y: auto; }
+    .folder-suggestions { position: absolute; top: 100%; left: 0; width: 280px; background: #16213e; border: 1px solid #0f3460; border-radius: 4px; z-index: 100; max-height: 200px; overflow-y: auto; box-shadow: 0 4px 12px rgba(0,0,0,0.5); }
     .folder-suggestions div {
       padding: 6px 12px; cursor: pointer; font-size: 13px; color: #ccc;
       font-family: 'Cascadia Code', monospace;
@@ -94,7 +94,7 @@
     </div>
     <div class="field">
       <label>Auto-command (runs on start/restart)</label>
-      <input id="sessionCmd" placeholder="e.g. claude --continue --dangerously-skip-permissions" value="" style="width:420px">
+      <input id="sessionCmd" placeholder="e.g. claude --continue --dangerously-skip-permissions" value="claude --dangerously-skip-permissions" style="width:420px">
     </div>
     <button class="btn btn-open" onclick="createSession()" style="align-self:flex-end">Create</button>
   </div>
