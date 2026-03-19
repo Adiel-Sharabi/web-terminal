@@ -31,6 +31,7 @@
   <div id="toolbar">
     <a href="/">&#8592; Sessions</a>
     <span id="sessionName" class="session-name" onclick="renameSession()" title="Click to rename"></span>
+    <span id="hostName" style="color:#00d4aa; font-weight:500; margin-left:8px;"></span>
     <span id="viewers" class="viewers"></span>
   </div>
   <div id="status">connecting...</div>
@@ -68,7 +69,17 @@
         ws.send(JSON.stringify({ resize: { cols: term.cols, rows: term.rows } }));
       };
 
-      ws.onmessage = e => term.write(e.data);
+      ws.onmessage = e => {
+        // Check for notification messages from server
+        if (e.data.startsWith('{"notification":')) {
+          try {
+            const { notification } = JSON.parse(e.data);
+            showNotification(notification);
+          } catch (err) {}
+          return;
+        }
+        term.write(e.data);
+      };
 
       ws.onclose = () => {
         status.textContent = 'disconnected — reconnecting...';
@@ -91,12 +102,20 @@
       }
     });
 
-    // Load session info
-    fetch('/api/sessions').then(r => r.json()).then(list => {
+    // Load session info + hostname
+    let hostname = '';
+    Promise.all([
+      fetch('/api/hostname').then(r => r.json()),
+      fetch('/api/sessions').then(r => r.json())
+    ]).then(([hostData, list]) => {
+      hostname = hostData.hostname;
+      document.getElementById('hostName').textContent = `[${hostname}]`;
       const s = list.find(x => x.id === sessionId);
       if (s) {
         document.getElementById('sessionName').textContent = s.name;
-        document.title = `${s.name} - Web Terminal`;
+        document.title = `${s.name} — ${hostname}`;
+      } else {
+        document.title = `Web Terminal — ${hostname}`;
       }
     });
 
@@ -117,7 +136,39 @@
         body: JSON.stringify({ name })
       });
       el.textContent = name;
-      document.title = `${name} - Web Terminal`;
+      document.title = `${name} — ${hostname || 'Web Terminal'}`;
+    }
+
+    // --- Browser notifications ---
+    if ('Notification' in window && Notification.permission === 'default') {
+      Notification.requestPermission();
+    }
+
+    function showNotification(n) {
+      // Only notify when tab is not focused
+      if (document.hasFocus()) return;
+
+      const title = `${n.session} — ${hostname || 'Web Terminal'}`;
+      const icon = n.type === 'input_needed' ? undefined : undefined;
+
+      if ('Notification' in window && Notification.permission === 'granted') {
+        const notif = new Notification(title, { body: n.message, tag: 'web-terminal-' + sessionId });
+        notif.onclick = () => { window.focus(); notif.close(); };
+        // Auto-close after 10s
+        setTimeout(() => notif.close(), 10000);
+      }
+
+      // Also flash the tab title
+      let original = document.title;
+      let flash = true;
+      const interval = setInterval(() => {
+        document.title = flash ? `** ${n.message} **` : original;
+        flash = !flash;
+      }, 1000);
+      window.addEventListener('focus', () => {
+        clearInterval(interval);
+        document.title = original;
+      }, { once: true });
     }
 
     connect();
