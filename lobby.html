@@ -140,6 +140,10 @@
         <textarea id="cfgScanFolders" rows="3"></textarea>
         <div class="hint">Subdirectories are auto-discovered. Add your project base folders here.</div>
       </div>
+      <div class="field">
+        <label>Default auto-command (pre-filled for new sessions)</label>
+        <input id="cfgDefaultCommand" placeholder="e.g. claude --dangerously-skip-permissions">
+      </div>
       <div id="saveMsg" class="save-msg"></div>
       <div class="actions">
         <button class="btn" style="background:#333;color:#aaa" onclick="closeSettings()">Cancel</button>
@@ -161,7 +165,7 @@
     </div>
     <div class="field">
       <label>Auto-command (runs on start/restart)</label>
-      <input id="sessionCmd" placeholder="e.g. claude --continue --dangerously-skip-permissions" value="claude --dangerously-skip-permissions" style="width:420px">
+      <input id="sessionCmd" placeholder="e.g. claude --continue --dangerously-skip-permissions" value="" style="width:420px">
     </div>
     <button class="btn btn-open" onclick="createSession()" style="align-self:flex-end">Create</button>
   </div>
@@ -353,6 +357,7 @@
       document.getElementById('cfgShell').value = cfg.shell || '';
       document.getElementById('cfgDefaultCwd').value = cfg.defaultCwd || '';
       document.getElementById('cfgScanFolders').value = (cfg.scanFolders || []).join('\n');
+      document.getElementById('cfgDefaultCommand').value = cfg.defaultCommand || '';
       document.getElementById('saveMsg').textContent = '';
       document.getElementById('settingsOverlay').classList.add('show');
     }
@@ -373,7 +378,8 @@
         password: document.getElementById('cfgPassword').value,
         shell: document.getElementById('cfgShell').value,
         defaultCwd: document.getElementById('cfgDefaultCwd').value,
-        scanFolders: document.getElementById('cfgScanFolders').value.split('\n').map(s => s.trim()).filter(Boolean)
+        scanFolders: document.getElementById('cfgScanFolders').value.split('\n').map(s => s.trim()).filter(Boolean),
+        defaultCommand: document.getElementById('cfgDefaultCommand').value
       };
       const res = await fetch('/api/config', {
         method: 'PUT',
@@ -399,6 +405,7 @@
     fetch('/api/config').then(r => r.json()).then(cfg => {
       document.getElementById('sessionCwd').value = cfg.defaultCwd || 'C:\\dev';
       document.getElementById('sessionCwd').placeholder = cfg.defaultCwd || 'C:\\dev';
+      document.getElementById('sessionCmd').value = cfg.defaultCommand || '';
     });
 
     loadFolderHistory();

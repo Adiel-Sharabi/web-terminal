@@ -4,5 +4,6 @@
   "password": "admin",
   "shell": "C:\\Program Files\\Git\\bin\\bash.exe",
   "defaultCwd": "C:\\dev",
-  "scanFolders": ["C:\\dev"]
+  "scanFolders": ["C:\\dev"],
+  "defaultCommand": "claude --dangerously-skip-permissions"
 }
