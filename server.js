@@ -3,22 +3,48 @@ const expressWs = require('express-ws');
 const pty = require('node-pty');
 const path = require('path');
 const os = require('os');
+const fs = require('fs');
 
 const PORT = parseInt(process.env.WT_PORT || '7681');
 const USER = process.env.WT_USER || 'admin';
 const PASS = process.env.WT_PASS || 'admin';
 const SHELL = process.env.WT_SHELL || 'C:\\Program Files\\Git\\bin\\bash.exe';
 const DEFAULT_CWD = process.env.WT_CWD || 'C:\\dev';
+const SESSIONS_FILE = path.join(__dirname, 'sessions.json');
 
 const app = express();
 expressWs(app);
 
-// --- Session manager ---
-const sessions = new Map(); // id -> { term, clients: Set<ws>, scrollback: string[], name: string }
-const notifyClients = new Set(); // global notification subscribers (all open terminal tabs)
-const MAX_SCROLLBACK = 5000; // lines to replay on reconnect
+// --- Session persistence ---
+function loadSessionConfigs() {
+  try {
+    if (fs.existsSync(SESSIONS_FILE)) {
+      return JSON.parse(fs.readFileSync(SESSIONS_FILE, 'utf8'));
+    }
+  } catch (e) {
+    console.error('Failed to load sessions.json:', e.message);
+  }
+  return [];
+}
 
-function createSession(id, cwd, name) {
+function saveSessionConfigs() {
+  const configs = [];
+  for (const [id, s] of sessions) {
+    configs.push({ id, name: s.name, cwd: s.cwd, autoCommand: s.autoCommand || '' });
+  }
+  try {
+    fs.writeFileSync(SESSIONS_FILE, JSON.stringify(configs, null, 2), 'utf8');
+  } catch (e) {
+    console.error('Failed to save sessions.json:', e.message);
+  }
+}
+
+// --- Session manager ---
+const sessions = new Map();
+const notifyClients = new Set();
+const MAX_SCROLLBACK = 5000;
+
+function createSession(id, cwd, name, autoCommand) {
   const term = pty.spawn(SHELL, [], {
     name: 'xterm-256color',
     cols: 120,
@@ -27,7 +53,11 @@ function createSession(id, cwd, name) {
     env: Object.assign({}, process.env, { TERM: 'xterm-256color', HOME: process.env.USERPROFILE || 'C:\\Users\\yourname' })
   });
 
-  const session = { term, clients: new Set(), scrollback: [], name: name || `Session ${id}`, cwd: cwd || DEFAULT_CWD, idleTimer: null, lastActivity: Date.now(), status: 'active' };
+  const session = {
+    term, clients: new Set(), scrollback: [], name: name || `Session ${id}`,
+    cwd: cwd || DEFAULT_CWD, idleTimer: null, lastActivity: Date.now(),
+    status: 'active', autoCommand: autoCommand || ''
+  };
   sessions.set(id, session);
 
   // Patterns that indicate Claude is waiting for user input
@@ -38,28 +68,24 @@ function createSession(id, cwd, name) {
     { regex: /\(Y\/n\)|yes\/no/i, msg: 'Claude is waiting for confirmation' },
     { regex: /Press Enter to continue/i, msg: 'Claude is waiting for Enter' },
   ];
-  const IDLE_NOTIFY_MS = 10000; // notify after 10s of no output (task likely done)
+  const IDLE_NOTIFY_MS = 10000;
 
   function sendNotification(session, type, message) {
     const payload = JSON.stringify({ notification: { type, message, session: session.name, sessionId: id } });
-    // Broadcast to ALL connected clients, not just this session's
     for (const client of notifyClients) {
       try { client.send(payload); } catch (e) {}
     }
   }
 
   term.onData(data => {
-    // Buffer scrollback for replay
     session.scrollback.push(data);
     if (session.scrollback.length > MAX_SCROLLBACK) {
       session.scrollback.splice(0, session.scrollback.length - MAX_SCROLLBACK);
     }
-    // Broadcast to all connected clients
     for (const client of session.clients) {
-      try { client.send(data); } catch (e) { /* disconnected */ }
+      try { client.send(data); } catch (e) {}
     }
 
-    // Check for notification patterns (strip ANSI codes)
     const clean = data.replace(/\x1b\[[0-9;]*[a-zA-Z]/g, '');
     for (const p of NOTIFY_PATTERNS) {
       if (p.regex.test(clean)) {
@@ -69,7 +95,6 @@ function createSession(id, cwd, name) {
       }
     }
 
-    // Reset idle timer — notify when output stops for a while
     session.lastActivity = Date.now();
     session.status = 'active';
     if (session.idleTimer) clearTimeout(session.idleTimer);
@@ -85,9 +110,19 @@ function createSession(id, cwd, name) {
       try { client.send('\r\n\x1b[31m[Session ended]\x1b[0m\r\n'); client.close(); } catch (e) {}
     }
     sessions.delete(id);
+    saveSessionConfigs();
   });
 
-  console.log(`[${new Date().toISOString()}] Session ${id} created (PID ${term.pid}, cwd: ${session.cwd})`);
+  // Auto-run command after shell is ready
+  if (autoCommand) {
+    setTimeout(() => {
+      term.write(autoCommand + '\n');
+      console.log(`[${new Date().toISOString()}] Session ${id} auto-command: ${autoCommand}`);
+    }, 1500); // wait for shell prompt
+  }
+
+  console.log(`[${new Date().toISOString()}] Session ${id} created (PID ${term.pid}, cwd: ${session.cwd}${autoCommand ? ', cmd: ' + autoCommand : ''})`);
+  saveSessionConfigs();
   return session;
 }
 
@@ -115,7 +150,7 @@ app.get('/api/hostname', (req, res) => {
 app.get('/api/sessions', (req, res) => {
   const list = [];
   for (const [id, s] of sessions) {
-    list.push({ id, name: s.name, cwd: s.cwd, clients: s.clients.size, pid: s.term.pid, status: s.status, lastActivity: s.lastActivity });
+    list.push({ id, name: s.name, cwd: s.cwd, clients: s.clients.size, pid: s.term.pid, status: s.status, lastActivity: s.lastActivity, autoCommand: s.autoCommand || '' });
   }
   res.json(list);
 });
@@ -125,16 +160,19 @@ app.post('/api/sessions', express.json(), (req, res) => {
   const id = Date.now().toString(36);
   const cwd = req.body?.cwd || DEFAULT_CWD;
   const name = req.body?.name || `Session ${sessions.size + 1}`;
-  createSession(id, cwd, name);
+  const autoCommand = req.body?.autoCommand || '';
+  createSession(id, cwd, name, autoCommand);
   res.json({ id, name });
 });
 
-// --- API: rename session ---
+// --- API: update session (rename, change autoCommand) ---
 app.patch('/api/sessions/:id', express.json(), (req, res) => {
   const session = sessions.get(req.params.id);
   if (!session) return res.status(404).json({ error: 'not found' });
   if (req.body?.name) session.name = req.body.name;
-  res.json({ id: req.params.id, name: session.name });
+  if (req.body?.autoCommand !== undefined) session.autoCommand = req.body.autoCommand;
+  saveSessionConfigs();
+  res.json({ id: req.params.id, name: session.name, autoCommand: session.autoCommand });
 });
 
 // --- API: kill session ---
@@ -143,6 +181,7 @@ app.delete('/api/sessions/:id', (req, res) => {
   if (!session) return res.status(404).json({ error: 'not found' });
   session.term.kill();
   sessions.delete(req.params.id);
+  saveSessionConfigs();
   res.json({ ok: true });
 });
 
@@ -168,7 +207,6 @@ app.ws('/ws/:id', (ws, req) => {
   const session = sessions.get(req.params.id);
   if (!session) { ws.close(); return; }
 
-  // Replay scrollback so reconnecting client sees history
   for (const chunk of session.scrollback) {
     try { ws.send(chunk); } catch (e) { break; }
   }
@@ -190,12 +228,19 @@ app.ws('/ws/:id', (ws, req) => {
   ws.on('close', () => {
     session.clients.delete(ws);
     console.log(`[${new Date().toISOString()}] Client left session ${req.params.id} (${session.clients.size} clients)`);
-    // Shell stays alive — no kill on disconnect!
   });
 });
 
-// --- Auto-create session 1 on startup ---
-createSession('1', DEFAULT_CWD, 'Default');
+// --- Restore sessions from disk or create default ---
+const savedSessions = loadSessionConfigs();
+if (savedSessions.length > 0) {
+  console.log(`Restoring ${savedSessions.length} session(s) from sessions.json...`);
+  for (const cfg of savedSessions) {
+    createSession(cfg.id, cfg.cwd, cfg.name, cfg.autoCommand);
+  }
+} else {
+  createSession('1', DEFAULT_CWD, 'Default', '');
+}
 
 app.listen(PORT, '0.0.0.0', () => {
   console.log(`Web Terminal running at http://0.0.0.0:${PORT}`);
