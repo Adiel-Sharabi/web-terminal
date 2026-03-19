@@ -1,2 +1,5 @@
 node_modules/
 *.log
+config.json
+sessions.json
+history.json
