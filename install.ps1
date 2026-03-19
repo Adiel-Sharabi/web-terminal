@@ -85,6 +85,23 @@ npm install --production 2>&1 | Out-Null
 Pop-Location
 Write-Host "[OK] Dependencies installed" -ForegroundColor Green
 
+# --- Create config.json (if not exists) ---
+$configPath = Join-Path $InstallDir "config.json"
+if (-not (Test-Path $configPath)) {
+    $configObj = @{
+        port = $Port
+        user = $User
+        password = $Password
+        shell = $Shell
+        defaultCwd = $DefaultCwd
+        scanFolders = @($DefaultCwd)
+    }
+    $configObj | ConvertTo-Json | Set-Content -Path $configPath -Encoding UTF8
+    Write-Host "[OK] Created config.json" -ForegroundColor Green
+} else {
+    Write-Host "[OK] config.json already exists (not overwritten)" -ForegroundColor Green
+}
+
 # --- Create Scheduled Task (auto-start on logon) ---
 Write-Host "`nConfiguring auto-start..." -ForegroundColor Cyan
 
@@ -105,31 +122,10 @@ $settings = New-ScheduledTaskSettingsSet `
     -RestartCount 3 `
     -RestartInterval (New-TimeSpan -Minutes 1)
 
-# Set environment variables for the task
-$envVars = @(
-    "WT_PORT=$Port",
-    "WT_USER=$User",
-    "WT_PASS=$Password",
-    "WT_SHELL=$Shell",
-    "WT_CWD=$DefaultCwd"
-)
-
-# Create a wrapper script that sets env vars and starts the server
-$wrapperContent = @"
-`$env:WT_PORT = "$Port"
-`$env:WT_USER = "$User"
-`$env:WT_PASS = "$Password"
-`$env:WT_SHELL = "$Shell"
-`$env:WT_CWD = "$DefaultCwd"
-Set-Location "$InstallDir"
-node server.js
-"@
-$wrapperPath = Join-Path $InstallDir "start.ps1"
-Set-Content -Path $wrapperPath -Value $wrapperContent -Encoding UTF8
-
+# Config.json holds all settings — no wrapper script needed
 $action = New-ScheduledTaskAction `
-    -Execute "powershell.exe" `
-    -Argument "-ExecutionPolicy Bypass -WindowStyle Hidden -File `"$wrapperPath`"" `
+    -Execute "node.exe" `
+    -Argument "server.js" `
     -WorkingDirectory $InstallDir
 
 Register-ScheduledTask -TaskName $TaskName -Action $action -Trigger $trigger -Settings $settings -Description "Web Terminal on port $Port" | Out-Null
