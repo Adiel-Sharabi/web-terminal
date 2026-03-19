@@ -11,6 +11,8 @@ const PASS = process.env.WT_PASS || 'admin';
 const SHELL = process.env.WT_SHELL || 'C:\\Program Files\\Git\\bin\\bash.exe';
 const DEFAULT_CWD = process.env.WT_CWD || 'C:\\dev';
 const SESSIONS_FILE = path.join(__dirname, 'sessions.json');
+const HISTORY_FILE = path.join(__dirname, 'history.json');
+const CLAUDE_PROJECTS_DIR = path.join(process.env.USERPROFILE || 'C:\\Users\\yourname', '.claude', 'projects');
 
 const app = express();
 expressWs(app);
@@ -162,6 +164,7 @@ app.post('/api/sessions', express.json(), (req, res) => {
   const name = req.body?.name || `Session ${sessions.size + 1}`;
   const autoCommand = req.body?.autoCommand || '';
   createSession(id, cwd, name, autoCommand);
+  saveFolder(cwd);
   res.json({ id, name });
 });
 
@@ -183,6 +186,91 @@ app.delete('/api/sessions/:id', (req, res) => {
   sessions.delete(req.params.id);
   saveSessionConfigs();
   res.json({ ok: true });
+});
+
+// --- Folder history ---
+function loadHistory() {
+  try {
+    if (fs.existsSync(HISTORY_FILE)) return JSON.parse(fs.readFileSync(HISTORY_FILE, 'utf8'));
+  } catch (e) {}
+  return { folders: [] };
+}
+
+function saveFolder(folder) {
+  const history = loadHistory();
+  // Remove if exists, add to front
+  history.folders = history.folders.filter(f => f.toLowerCase() !== folder.toLowerCase());
+  history.folders.unshift(folder);
+  // Keep last 20
+  history.folders = history.folders.slice(0, 20);
+  try { fs.writeFileSync(HISTORY_FILE, JSON.stringify(history, null, 2), 'utf8'); } catch (e) {}
+}
+
+app.get('/api/history/folders', (req, res) => {
+  res.json(loadHistory().folders);
+});
+
+// --- Claude sessions scanner ---
+app.get('/api/claude-sessions', (req, res) => {
+  try {
+    if (!fs.existsSync(CLAUDE_PROJECTS_DIR)) return res.json([]);
+
+    const projects = fs.readdirSync(CLAUDE_PROJECTS_DIR, { withFileTypes: true })
+      .filter(d => d.isDirectory())
+      .map(d => d.name);
+
+    const allSessions = [];
+    for (const project of projects) {
+      const projectDir = path.join(CLAUDE_PROJECTS_DIR, project);
+      // Decode project path: C--dev-AM8-Core -> C:\dev\AM8_Core (approximate)
+      const projectPath = project.replace(/^([A-Z])-/, '$1:\\').replace(/-/g, '\\');
+
+      let files;
+      try {
+        files = fs.readdirSync(projectDir)
+          .filter(f => f.endsWith('.jsonl'))
+          .map(f => {
+            const stat = fs.statSync(path.join(projectDir, f));
+            return { file: f, id: f.replace('.jsonl', ''), mtime: stat.mtimeMs, size: stat.size };
+          })
+          .sort((a, b) => b.mtime - a.mtime)
+          .slice(0, 5); // last 5 sessions per project
+      } catch (e) { continue; }
+
+      for (const f of files) {
+        // Read first user message as summary
+        let summary = '';
+        try {
+          const lines = fs.readFileSync(path.join(projectDir, f.file), 'utf8').split('\n');
+          for (const line of lines.slice(0, 10)) {
+            if (!line.trim()) continue;
+            const obj = JSON.parse(line);
+            if (obj.type === 'user' && obj.message?.content) {
+              summary = typeof obj.message.content === 'string'
+                ? obj.message.content.substring(0, 120)
+                : JSON.stringify(obj.message.content).substring(0, 120);
+              break;
+            }
+          }
+        } catch (e) {}
+
+        allSessions.push({
+          id: f.id,
+          project,
+          projectPath,
+          summary: summary.replace(/[\n\r]+/g, ' ').trim(),
+          lastModified: f.mtime,
+          sizeKB: Math.round(f.size / 1024)
+        });
+      }
+    }
+
+    // Sort all by last modified, return top 20
+    allSessions.sort((a, b) => b.lastModified - a.lastModified);
+    res.json(allSessions.slice(0, 20));
+  } catch (e) {
+    res.status(500).json({ error: e.message });
+  }
 });
 
 // --- Landing page ---

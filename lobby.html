@@ -8,6 +8,8 @@
     * { margin: 0; padding: 0; box-sizing: border-box; }
     body { background: #1a1a2e; color: #e0e0e0; font-family: 'Segoe UI', sans-serif; padding: 20px; min-height: 100vh; }
     h1 { color: #00d4aa; margin-bottom: 20px; font-size: 24px; }
+    h2 { color: #8a8aff; margin: 24px 0 12px; font-size: 18px; }
+
     .sessions { display: flex; flex-wrap: wrap; gap: 12px; margin-bottom: 20px; }
     .session-card {
       background: #16213e; border: 1px solid #0f3460; border-radius: 8px; padding: 16px;
@@ -32,6 +34,7 @@
     .session-card.waiting { border-color: #e94560; }
     @keyframes pulse { 0%,100% { opacity: 1; } 50% { opacity: 0.5; } }
     .session-card .actions { margin-top: 10px; display: flex; gap: 8px; flex-wrap: wrap; }
+
     .btn {
       padding: 8px 16px; border: none; border-radius: 6px; cursor: pointer;
       font-size: 14px; font-weight: 500; transition: opacity 0.2s;
@@ -40,35 +43,104 @@
     .btn-open { background: #00d4aa; color: #1a1a2e; }
     .btn-kill { background: #e94560; color: white; font-size: 12px; padding: 6px 10px; }
     .btn-edit { background: #0f3460; color: #8a8aff; font-size: 12px; padding: 6px 10px; border: 1px solid #8a8aff; }
+    .btn-resume { background: #0f3460; color: #da4; font-size: 12px; padding: 6px 10px; border: 1px solid #da4; }
     .btn-new { background: #0f3460; color: #00d4aa; border: 1px solid #00d4aa; font-size: 16px; padding: 12px 24px; }
-    .new-form { background: #16213e; border-radius: 8px; padding: 16px; margin-bottom: 20px; display: none; }
-    .new-form.show { display: flex; flex-wrap: wrap; gap: 8px; align-items: center; }
+    .btn-section { background: transparent; color: #666; border: 1px solid #333; font-size: 13px; padding: 6px 14px; margin-left: 12px; }
+    .btn-section:hover { border-color: #888; color: #aaa; }
+
+    .new-form { background: #16213e; border-radius: 8px; padding: 16px; margin: 12px 0 20px; display: none; }
+    .new-form.show { display: flex; flex-wrap: wrap; gap: 8px; align-items: flex-end; }
+    .new-form .field { display: flex; flex-direction: column; gap: 4px; }
+    .new-form label { color: #888; font-size: 12px; }
     .new-form input { background: #1a1a2e; color: #e0e0e0; border: 1px solid #0f3460; padding: 8px 12px; border-radius: 4px; font-size: 14px; }
-    .new-form label { color: #888; font-size: 12px; width: 100%; }
+    .new-form input:focus { border-color: #00d4aa; outline: none; }
+
+    .folder-suggestions { position: absolute; background: #16213e; border: 1px solid #0f3460; border-radius: 4px; z-index: 100; max-height: 200px; overflow-y: auto; }
+    .folder-suggestions div {
+      padding: 6px 12px; cursor: pointer; font-size: 13px; color: #ccc;
+      font-family: 'Cascadia Code', monospace;
+    }
+    .folder-suggestions div:hover { background: #0f3460; color: #00d4aa; }
+
+    .claude-sessions { margin-bottom: 20px; }
+    .claude-card {
+      background: #16213e; border: 1px solid #0f3460; border-radius: 6px; padding: 10px 14px;
+      margin-bottom: 6px; display: flex; align-items: center; gap: 12px; transition: all 0.2s;
+    }
+    .claude-card:hover { border-color: #da4; }
+    .claude-card .claude-project { color: #da4; font-size: 13px; font-weight: 500; min-width: 160px; }
+    .claude-card .claude-summary { color: #aaa; font-size: 12px; flex: 1; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+    .claude-card .claude-time { color: #666; font-size: 11px; min-width: 80px; text-align: right; }
+    .claude-card .claude-size { color: #555; font-size: 11px; min-width: 50px; }
+
     .empty { color: #666; font-style: italic; padding: 40px 0; text-align: center; }
+    .collapsible { display: none; }
+    .collapsible.show { display: block; }
   </style>
 </head>
 <body>
   <h1 id="title">Web Terminal</h1>
+
   <button class="btn btn-new" onclick="toggleForm()">+ New Session</button>
   <div id="newForm" class="new-form">
-    <div>
+    <div class="field">
       <label>Name</label>
       <input id="sessionName" placeholder="e.g. AM8 Core" value="">
     </div>
-    <div>
+    <div class="field" style="position:relative">
       <label>Working directory</label>
-      <input id="sessionCwd" placeholder="C:\dev" value="C:\dev" style="width:280px">
+      <input id="sessionCwd" placeholder="C:\dev" value="C:\dev" style="width:280px" onfocus="showFolders()" oninput="showFolders()" autocomplete="off">
+      <div id="folderSuggestions" class="folder-suggestions" style="display:none"></div>
     </div>
-    <div>
+    <div class="field">
       <label>Auto-command (runs on start/restart)</label>
       <input id="sessionCmd" placeholder="e.g. claude --continue --dangerously-skip-permissions" value="" style="width:420px">
     </div>
-    <button class="btn btn-open" onclick="createSession()">Create</button>
+    <button class="btn btn-open" onclick="createSession()" style="align-self:flex-end">Create</button>
   </div>
+
   <div id="sessions" class="sessions"></div>
 
+  <h2>
+    Recent Claude Sessions
+    <button class="btn btn-section" onclick="toggleClaude()">Show / Hide</button>
+  </h2>
+  <div id="claudeSessions" class="claude-sessions collapsible"></div>
+
   <script>
+    let folderHistory = [];
+
+    // --- Folder history ---
+    async function loadFolderHistory() {
+      try {
+        folderHistory = await (await fetch('/api/history/folders')).json();
+      } catch (e) { folderHistory = []; }
+    }
+
+    function showFolders() {
+      const input = document.getElementById('sessionCwd');
+      const container = document.getElementById('folderSuggestions');
+      const val = input.value.toLowerCase();
+      const matches = folderHistory.filter(f => f.toLowerCase().includes(val) || !val);
+      if (matches.length === 0) { container.style.display = 'none'; return; }
+      container.innerHTML = matches.map(f =>
+        `<div onclick="pickFolder('${f.replace(/\\/g, '\\\\')}')">${f}</div>`
+      ).join('');
+      container.style.display = 'block';
+    }
+
+    function pickFolder(f) {
+      document.getElementById('sessionCwd').value = f;
+      document.getElementById('folderSuggestions').style.display = 'none';
+    }
+
+    document.addEventListener('click', e => {
+      if (!e.target.closest('#sessionCwd') && !e.target.closest('#folderSuggestions')) {
+        document.getElementById('folderSuggestions').style.display = 'none';
+      }
+    });
+
+    // --- Active sessions ---
     function toggleForm() {
       document.getElementById('newForm').classList.toggle('show');
       document.getElementById('sessionName').focus();
@@ -93,7 +165,7 @@
         <div class="session-card ${s.status !== 'active' ? s.status : ''}">
           <h3 onclick="renameSession('${s.id}', this)" title="Click to rename" style="cursor:pointer">${s.name}</h3>
           <div class="meta">PID ${s.pid} &middot; ${s.cwd}</div>
-          ${s.autoCommand ? `<div class="auto-cmd" onclick="editAutoCmd('${s.id}', this)" title="Click to edit auto-command">&#9654; ${s.autoCommand}</div>` : ''}
+          ${s.autoCommand ? `<div class="auto-cmd" onclick="editAutoCmd('${s.id}')" title="Click to edit auto-command">&#9654; ${s.autoCommand}</div>` : ''}
           <div class="clients">${s.clients} viewer${s.clients !== 1 ? 's' : ''} connected</div>
           <span class="status-badge status-${s.status}">${statusLabel[s.status] || s.status}</span>
           <span style="color:#666; font-size:11px; margin-left:6px;">last activity: ${timeAgo(s.lastActivity)}</span>
@@ -125,7 +197,7 @@
         'Auto-command (runs when server restarts):\n\nExamples:\n  claude --continue --dangerously-skip-permissions\n  cd /c/dev/AM8_Core && claude\n\nLeave empty to disable:',
         s?.autoCommand || ''
       );
-      if (cmd === null) return; // cancelled
+      if (cmd === null) return;
       await fetch(`/api/sessions/${id}`, {
         method: 'PATCH',
         headers: { 'Content-Type': 'application/json' },
@@ -153,11 +225,65 @@
       loadSessions();
     }
 
+    // --- Claude sessions ---
+    function toggleClaude() {
+      const el = document.getElementById('claudeSessions');
+      el.classList.toggle('show');
+      if (el.classList.contains('show')) loadClaudeSessions();
+    }
+
+    async function loadClaudeSessions() {
+      const container = document.getElementById('claudeSessions');
+      container.innerHTML = '<div style="color:#666;padding:10px">Loading...</div>';
+      try {
+        const list = await (await fetch('/api/claude-sessions')).json();
+        if (list.length === 0) {
+          container.innerHTML = '<div class="empty">No Claude sessions found</div>';
+          return;
+        }
+        const timeAgo = ts => {
+          const secs = Math.floor((Date.now() - ts) / 1000);
+          if (secs < 60) return `${secs}s ago`;
+          if (secs < 3600) return `${Math.floor(secs/60)}m ago`;
+          if (secs < 86400) return `${Math.floor(secs/3600)}h ago`;
+          return `${Math.floor(secs/86400)}d ago`;
+        };
+        container.innerHTML = list.map(s => `
+          <div class="claude-card">
+            <span class="claude-project">${s.project}</span>
+            <span class="claude-summary" title="${s.summary}">${s.summary || '(no summary)'}</span>
+            <span class="claude-size">${s.sizeKB}KB</span>
+            <span class="claude-time">${timeAgo(s.lastModified)}</span>
+            <button class="btn btn-resume" onclick="resumeClaude('${s.id}', '${s.projectPath.replace(/\\/g, '\\\\')}', '${s.project}')">Resume</button>
+          </div>
+        `).join('');
+      } catch (e) {
+        container.innerHTML = `<div class="empty">Error: ${e.message}</div>`;
+      }
+    }
+
+    async function resumeClaude(sessionId, projectPath, projectName) {
+      const cmd = `claude --resume ${sessionId} --dangerously-skip-permissions`;
+      const res = await fetch('/api/sessions', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({
+          name: projectName,
+          cwd: projectPath,
+          autoCommand: cmd
+        })
+      });
+      const { id } = await res.json();
+      location.href = `/s/${id}`;
+    }
+
+    // --- Init ---
     fetch('/api/hostname').then(r => r.json()).then(({ hostname }) => {
       document.getElementById('title').textContent = `Web Terminal — ${hostname}`;
       document.title = `Web Terminal — ${hostname}`;
     });
 
+    loadFolderHistory();
     loadSessions();
     setInterval(loadSessions, 5000);
   </script>
