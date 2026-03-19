@@ -1,0 +1,8 @@
+{
+  "port": 7681,
+  "user": "admin",
+  "password": "admin",
+  "shell": "C:\\Program Files\\Git\\bin\\bash.exe",
+  "defaultCwd": "C:\\dev",
+  "scanFolders": ["C:\\dev"]
+}

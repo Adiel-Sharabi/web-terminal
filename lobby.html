@@ -89,7 +89,7 @@
     </div>
     <div class="field" style="position:relative">
       <label>Working directory</label>
-      <input id="sessionCwd" placeholder="C:\dev" value="C:\dev" style="width:280px" onfocus="showFolders()" oninput="showFolders()" autocomplete="off">
+      <input id="sessionCwd" placeholder="C:\dev" value="" style="width:280px" onfocus="showFolders()" oninput="showFolders()" autocomplete="off">
       <div id="folderSuggestions" class="folder-suggestions" style="display:none"></div>
     </div>
     <div class="field">
@@ -281,6 +281,12 @@
     fetch('/api/hostname').then(r => r.json()).then(({ hostname }) => {
       document.getElementById('title').textContent = `Web Terminal — ${hostname}`;
       document.title = `Web Terminal — ${hostname}`;
+    });
+
+    // Load config and set defaults
+    fetch('/api/config').then(r => r.json()).then(cfg => {
+      document.getElementById('sessionCwd').value = cfg.defaultCwd || 'C:\\dev';
+      document.getElementById('sessionCwd').placeholder = cfg.defaultCwd || 'C:\\dev';
     });
 
     loadFolderHistory();
