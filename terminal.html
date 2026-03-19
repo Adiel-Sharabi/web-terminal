@@ -69,17 +69,7 @@
         ws.send(JSON.stringify({ resize: { cols: term.cols, rows: term.rows } }));
       };
 
-      ws.onmessage = e => {
-        // Check for notification messages from server
-        if (e.data.startsWith('{"notification":')) {
-          try {
-            const { notification } = JSON.parse(e.data);
-            showNotification(notification);
-          } catch (err) {}
-          return;
-        }
-        term.write(e.data);
-      };
+      ws.onmessage = e => term.write(e.data);
 
       ws.onclose = () => {
         status.textContent = 'disconnected — reconnecting...';
@@ -101,6 +91,21 @@
         ws.send(JSON.stringify({ resize: { cols: term.cols, rows: term.rows } }));
       }
     });
+
+    // --- Global notification WebSocket (receives from ALL sessions) ---
+    function connectNotify() {
+      const proto = location.protocol === 'https:' ? 'wss:' : 'ws:';
+      const nws = new WebSocket(`${proto}//${location.host}/ws/notify`);
+      nws.onmessage = e => {
+        try {
+          const { notification } = JSON.parse(e.data);
+          showNotification(notification);
+        } catch (err) {}
+      };
+      nws.onclose = () => setTimeout(connectNotify, 3000);
+      nws.onerror = () => nws.close();
+    }
+    connectNotify();
 
     // Load session info + hostname
     let hostname = '';
@@ -144,31 +149,57 @@
       Notification.requestPermission();
     }
 
+    // Track pending notifications from multiple sessions, cycle in tab title
+    const pendingAlerts = new Map(); // sessionId -> { session, message, type }
+    let flashInterval = null;
+    let originalTitle = '';
+
+    function startFlashing() {
+      if (flashInterval) return;
+      originalTitle = document.title;
+      let idx = 0;
+      flashInterval = setInterval(() => {
+        const alerts = Array.from(pendingAlerts.values());
+        if (alerts.length === 0) { stopFlashing(); return; }
+        const a = alerts[idx % alerts.length];
+        document.title = `** ${a.message} **`;
+        idx++;
+      }, 1500);
+    }
+
+    function stopFlashing() {
+      if (flashInterval) { clearInterval(flashInterval); flashInterval = null; }
+      document.title = originalTitle || `Web Terminal`;
+      pendingAlerts.clear();
+    }
+
+    window.addEventListener('focus', stopFlashing);
+
     function showNotification(n) {
-      // Only notify when tab is not focused
-      if (document.hasFocus()) return;
+      // Always track it (even if focused, for lobby awareness)
+      pendingAlerts.set(n.sessionId, n);
 
-      const title = `${n.session} — ${hostname || 'Web Terminal'}`;
-      const icon = n.type === 'input_needed' ? undefined : undefined;
-
-      if ('Notification' in window && Notification.permission === 'granted') {
-        const notif = new Notification(title, { body: n.message, tag: 'web-terminal-' + sessionId });
-        notif.onclick = () => { window.focus(); notif.close(); };
-        // Auto-close after 10s
-        setTimeout(() => notif.close(), 10000);
+      // Browser notification
+      if (!document.hasFocus() && 'Notification' in window && Notification.permission === 'granted') {
+        const notif = new Notification(n.session, {
+          body: n.message,
+          tag: 'web-terminal-' + n.sessionId,
+          renotify: true
+        });
+        notif.onclick = () => {
+          // Navigate to the session that needs attention
+          if (n.sessionId !== sessionId) {
+            window.location.href = `/s/${n.sessionId}`;
+          } else {
+            window.focus();
+          }
+          notif.close();
+        };
+        setTimeout(() => notif.close(), 15000);
       }
 
-      // Also flash the tab title
-      let original = document.title;
-      let flash = true;
-      const interval = setInterval(() => {
-        document.title = flash ? `** ${n.message} **` : original;
-        flash = !flash;
-      }, 1000);
-      window.addEventListener('focus', () => {
-        clearInterval(interval);
-        document.title = original;
-      }, { once: true });
+      // Flash tab title — cycles through all pending alerts
+      if (!document.hasFocus()) startFlashing();
     }
 
     connect();

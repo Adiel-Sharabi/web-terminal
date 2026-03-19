@@ -17,6 +17,15 @@
     .session-card h3 { color: #00d4aa; margin-bottom: 6px; }
     .session-card .meta { color: #888; font-size: 13px; }
     .session-card .clients { color: #e94560; font-size: 12px; margin-top: 4px; }
+    .session-card .status-badge {
+      display: inline-block; padding: 2px 8px; border-radius: 10px; font-size: 11px; font-weight: 600; margin-top: 6px;
+    }
+    .status-active { background: #1a3a1a; color: #4a4; }
+    .status-idle { background: #3a3a1a; color: #da4; }
+    .status-waiting { background: #3a1a1a; color: #e94560; animation: pulse 1.5s infinite; }
+    .session-card.idle { border-color: #da4; }
+    .session-card.waiting { border-color: #e94560; }
+    @keyframes pulse { 0%,100% { opacity: 1; } 50% { opacity: 0.5; } }
     .session-card .actions { margin-top: 10px; display: flex; gap: 8px; }
     .btn {
       padding: 8px 16px; border: none; border-radius: 6px; cursor: pointer;
@@ -56,11 +65,20 @@
         container.innerHTML = '<div class="empty">No active sessions</div>';
         return;
       }
+      const statusLabel = { active: 'Active', idle: 'Done / Idle', waiting: 'Needs Input' };
+      const timeAgo = ts => {
+        const secs = Math.floor((Date.now() - ts) / 1000);
+        if (secs < 60) return `${secs}s ago`;
+        if (secs < 3600) return `${Math.floor(secs/60)}m ago`;
+        return `${Math.floor(secs/3600)}h ago`;
+      };
       container.innerHTML = list.map(s => `
-        <div class="session-card">
+        <div class="session-card ${s.status !== 'active' ? s.status : ''}">
           <h3 onclick="renameSession('${s.id}', this)" title="Click to rename" style="cursor:pointer">${s.name}</h3>
           <div class="meta">PID ${s.pid} &middot; ${s.cwd}</div>
           <div class="clients">${s.clients} viewer${s.clients !== 1 ? 's' : ''} connected</div>
+          <span class="status-badge status-${s.status}">${statusLabel[s.status] || s.status}</span>
+          <span style="color:#666; font-size:11px; margin-left:6px;">last activity: ${timeAgo(s.lastActivity)}</span>
           <div class="actions">
             <button class="btn btn-open" onclick="location.href='/s/${s.id}'">Open</button>
             <button class="btn btn-kill" onclick="killSession('${s.id}')">Kill</button>

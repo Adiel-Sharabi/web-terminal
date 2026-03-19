@@ -15,6 +15,7 @@ expressWs(app);
 
 // --- Session manager ---
 const sessions = new Map(); // id -> { term, clients: Set<ws>, scrollback: string[], name: string }
+const notifyClients = new Set(); // global notification subscribers (all open terminal tabs)
 const MAX_SCROLLBACK = 5000; // lines to replay on reconnect
 
 function createSession(id, cwd, name) {
@@ -26,7 +27,7 @@ function createSession(id, cwd, name) {
     env: Object.assign({}, process.env, { TERM: 'xterm-256color', HOME: process.env.USERPROFILE || 'C:\\Users\\yourname' })
   });
 
-  const session = { term, clients: new Set(), scrollback: [], name: name || `Session ${id}`, cwd: cwd || DEFAULT_CWD, idleTimer: null, lastActivity: Date.now() };
+  const session = { term, clients: new Set(), scrollback: [], name: name || `Session ${id}`, cwd: cwd || DEFAULT_CWD, idleTimer: null, lastActivity: Date.now(), status: 'active' };
   sessions.set(id, session);
 
   // Patterns that indicate Claude is waiting for user input
@@ -40,8 +41,9 @@ function createSession(id, cwd, name) {
   const IDLE_NOTIFY_MS = 10000; // notify after 10s of no output (task likely done)
 
   function sendNotification(session, type, message) {
-    const payload = JSON.stringify({ notification: { type, message, session: session.name } });
-    for (const client of session.clients) {
+    const payload = JSON.stringify({ notification: { type, message, session: session.name, sessionId: id } });
+    // Broadcast to ALL connected clients, not just this session's
+    for (const client of notifyClients) {
       try { client.send(payload); } catch (e) {}
     }
   }
@@ -61,16 +63,19 @@ function createSession(id, cwd, name) {
     const clean = data.replace(/\x1b\[[0-9;]*[a-zA-Z]/g, '');
     for (const p of NOTIFY_PATTERNS) {
       if (p.regex.test(clean)) {
-        sendNotification(session, 'input_needed', p.msg);
+        session.status = 'waiting';
+        sendNotification(session, 'input_needed', `"${session.name}" — ${p.msg}`);
         break;
       }
     }
 
     // Reset idle timer — notify when output stops for a while
     session.lastActivity = Date.now();
+    session.status = 'active';
     if (session.idleTimer) clearTimeout(session.idleTimer);
     session.idleTimer = setTimeout(() => {
-      sendNotification(session, 'idle', 'Claude appears to be done');
+      session.status = 'idle';
+      sendNotification(session, 'idle', `"${session.name}" — Claude appears to be done`);
     }, IDLE_NOTIFY_MS);
   });
 
@@ -110,7 +115,7 @@ app.get('/api/hostname', (req, res) => {
 app.get('/api/sessions', (req, res) => {
   const list = [];
   for (const [id, s] of sessions) {
-    list.push({ id, name: s.name, cwd: s.cwd, clients: s.clients.size, pid: s.term.pid });
+    list.push({ id, name: s.name, cwd: s.cwd, clients: s.clients.size, pid: s.term.pid, status: s.status, lastActivity: s.lastActivity });
   }
   res.json(list);
 });
@@ -150,6 +155,12 @@ app.get('/', (req, res) => {
 app.get('/s/:id', (req, res) => {
   if (!sessions.has(req.params.id)) return res.redirect('/');
   res.sendFile(path.join(__dirname, 'terminal.html'));
+});
+
+// --- WebSocket: global notifications (all sessions) ---
+app.ws('/ws/notify', (ws, req) => {
+  notifyClients.add(ws);
+  ws.on('close', () => notifyClients.delete(ws));
 });
 
 // --- WebSocket: attach to session ---
