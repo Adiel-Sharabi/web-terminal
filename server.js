@@ -207,7 +207,21 @@ function saveFolder(folder) {
 }
 
 app.get('/api/history/folders', (req, res) => {
-  res.json(loadHistory().folders);
+  const history = loadHistory().folders;
+  // Also scan DEFAULT_CWD subdirectories and merge
+  const scanned = new Set(history);
+  try {
+    scanned.add(DEFAULT_CWD);
+    const dirs = fs.readdirSync(DEFAULT_CWD, { withFileTypes: true })
+      .filter(d => d.isDirectory() && !d.name.startsWith('.') && !d.name.startsWith('$'));
+    for (const d of dirs) scanned.add(path.join(DEFAULT_CWD, d.name));
+  } catch (e) {}
+  // History items first, then scanned extras
+  const result = [...history];
+  for (const f of scanned) {
+    if (!result.find(r => r.toLowerCase() === f.toLowerCase())) result.push(f);
+  }
+  res.json(result);
 });
 
 // --- Claude sessions scanner ---
