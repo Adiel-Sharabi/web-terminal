@@ -87,7 +87,10 @@
         ws.send(JSON.stringify({ resize: { cols: term.cols, rows: term.rows } }));
       };
 
-      ws.onmessage = e => term.write(e.data);
+      ws.onmessage = e => {
+        term.write(e.data);
+        if (autoScroll) term.scrollToBottom();
+      };
 
       ws.onclose = () => {
         status.textContent = 'disconnected — reconnecting...';
@@ -98,6 +101,23 @@
 
       ws.onerror = () => ws.close();
     }
+
+    // Ctrl+V paste, Ctrl+C copy (when selection exists)
+    term.attachCustomKeyEventHandler(e => {
+      if (e.type !== 'keydown') return true;
+      if ((e.ctrlKey || e.metaKey) && e.key === 'v') {
+        navigator.clipboard.readText().then(text => {
+          if (text && ws && ws.readyState === WebSocket.OPEN) ws.send(text);
+        });
+        return false;
+      }
+      if ((e.ctrlKey || e.metaKey) && e.key === 'c' && term.hasSelection()) {
+        navigator.clipboard.writeText(term.getSelection());
+        term.clearSelection();
+        return false;
+      }
+      return true;
+    });
 
     term.onData(data => {
       if (ws && ws.readyState === WebSocket.OPEN) ws.send(data);
@@ -110,24 +130,43 @@
       }
     });
 
-    // --- Scroll-to-bottom button ---
+    // --- Auto-scroll (like a real terminal / CLI) ---
     const scrollBtn = document.getElementById('scrollBtn');
+    let autoScroll = true;
 
-    function checkScroll() {
+    function isAtBottom() {
       const buf = term.buffer.active;
-      const atBottom = buf.viewportY >= buf.baseY;
-      scrollBtn.style.display = atBottom ? 'none' : 'block';
+      return buf.viewportY >= buf.baseY;
     }
 
-    // Check on multiple events — onScroll doesn't always fire on mobile touch
-    term.onScroll(checkScroll);
-    term.onLineFeed(checkScroll);
-    // Also poll on touch since xterm touch scroll doesn't always trigger onScroll
-    document.getElementById('terminal').addEventListener('touchend', () => setTimeout(checkScroll, 200));
-    document.getElementById('terminal').addEventListener('touchmove', () => setTimeout(checkScroll, 100));
+    // When user scrolls: pause auto-scroll if scrolled up, resume if at bottom
+    term.onScroll(() => {
+      autoScroll = isAtBottom();
+      scrollBtn.style.display = autoScroll ? 'none' : 'block';
+    });
+
+    // On new output: auto-scroll if enabled, update button visibility if not
+    term.onLineFeed(() => {
+      if (autoScroll) {
+        term.scrollToBottom();
+      } else {
+        scrollBtn.style.display = 'block';
+      }
+    });
+
+    // Touch events for mobile — xterm touch scroll doesn't always trigger onScroll
+    document.getElementById('terminal').addEventListener('touchend', () => setTimeout(() => {
+      autoScroll = isAtBottom();
+      scrollBtn.style.display = autoScroll ? 'none' : 'block';
+    }, 200));
+    document.getElementById('terminal').addEventListener('touchmove', () => setTimeout(() => {
+      autoScroll = isAtBottom();
+      scrollBtn.style.display = autoScroll ? 'none' : 'block';
+    }, 100));
 
     function scrollToBottom() {
       term.scrollToBottom();
+      autoScroll = true;
       scrollBtn.style.display = 'none';
     }
 
@@ -148,20 +187,23 @@
 
     // Load session info + hostname
     let hostname = '';
+    let sessionTitle = 'Web Terminal';
     Promise.all([
-      fetch('/api/hostname').then(r => r.json()),
-      fetch('/api/sessions').then(r => r.json())
+      fetch('/api/hostname').then(r => r.ok ? r.json() : { hostname: '' }),
+      fetch('/api/sessions').then(r => r.ok ? r.json() : [])
     ]).then(([hostData, list]) => {
       hostname = hostData.hostname;
-      document.getElementById('hostName').textContent = `[${hostname}]`;
+      if (hostname) document.getElementById('hostName').textContent = `[${hostname}]`;
       const s = list.find(x => x.id === sessionId);
       if (s) {
         document.getElementById('sessionName').textContent = s.name;
-        document.title = `${s.name} — ${hostname}`;
-      } else {
-        document.title = `Web Terminal — ${hostname}`;
+        sessionTitle = `${s.name}${hostname ? ' — ' + hostname : ''}`;
+        document.title = sessionTitle;
+      } else if (hostname) {
+        sessionTitle = `Web Terminal — ${hostname}`;
+        document.title = sessionTitle;
       }
-    });
+    }).catch(err => console.warn('Failed to load session info:', err));
 
     // Update viewer count
     setInterval(async () => {
@@ -180,7 +222,8 @@
         body: JSON.stringify({ name })
       });
       el.textContent = name;
-      document.title = `${name} — ${hostname || 'Web Terminal'}`;
+      sessionTitle = `${name}${hostname ? ' — ' + hostname : ''}`;
+      document.title = sessionTitle;
     }
 
     // --- Browser notifications ---
@@ -191,11 +234,9 @@
     // Track pending notifications from multiple sessions, cycle in tab title
     const pendingAlerts = new Map(); // sessionId -> { session, message, type }
     let flashInterval = null;
-    let originalTitle = '';
 
     function startFlashing() {
       if (flashInterval) return;
-      originalTitle = document.title;
       let idx = 0;
       flashInterval = setInterval(() => {
         const alerts = Array.from(pendingAlerts.values());
@@ -208,7 +249,7 @@
 
     function stopFlashing() {
       if (flashInterval) { clearInterval(flashInterval); flashInterval = null; }
-      document.title = originalTitle || `Web Terminal`;
+      document.title = sessionTitle;
       pendingAlerts.clear();
     }
 
