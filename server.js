@@ -247,12 +247,26 @@ app.get('/api/sessions', (req, res) => {
 // --- API: create session ---
 app.post('/api/sessions', express.json(), (req, res) => {
   const id = crypto.randomUUID();
-  const cwd = req.body?.cwd || DEFAULT_CWD;
+  let cwd = req.body?.cwd || DEFAULT_CWD;
   const name = req.body?.name || `Session ${sessions.size + 1}`;
   const autoCommand = req.body?.autoCommand || '';
-  createSession(id, cwd, name, autoCommand);
-  saveFolder(cwd);
-  res.json({ id, name });
+  // Verify cwd exists, fall back to default
+  try {
+    if (!fs.existsSync(cwd) || !fs.statSync(cwd).isDirectory()) {
+      console.warn(`CWD "${cwd}" does not exist, falling back to ${DEFAULT_CWD}`);
+      cwd = DEFAULT_CWD;
+    }
+  } catch (e) {
+    cwd = DEFAULT_CWD;
+  }
+  try {
+    createSession(id, cwd, name, autoCommand);
+    saveFolder(cwd);
+    res.json({ id, name });
+  } catch (e) {
+    console.error(`Failed to create session: ${e.message}`);
+    res.status(500).json({ error: e.message });
+  }
 });
 
 // --- API: update session (rename, change autoCommand) ---
@@ -313,6 +327,47 @@ app.get('/api/history/folders', (req, res) => {
   res.json(result);
 });
 
+// --- Decode Claude project directory name to actual path ---
+function decodeProjectPath(project) {
+  // e.g. "C--dev-web-terminal" -> try "C:\dev\web-terminal", "C:\dev\web\terminal", etc.
+  // First part: drive letter. "C-" at start -> "C:\"
+  const driveMatch = project.match(/^([A-Z])-(.*)$/);
+  if (!driveMatch) return project.replace(/-/g, '\\');
+
+  const drive = driveMatch[1] + ':\\';
+  const rest = driveMatch[2]; // e.g. "-dev-web-terminal" -> "dev-web-terminal"
+  const cleanRest = rest.replace(/^-/, ''); // remove leading dash after drive
+
+  // Split on dashes — each could be a path separator or part of a folder name
+  const parts = cleanRest.split('-');
+
+  // Try to greedily build the path by checking which directories exist
+  let current = drive;
+  let i = 0;
+  while (i < parts.length) {
+    // Try joining increasingly more parts (to handle hyphens in folder names)
+    let found = false;
+    for (let j = parts.length; j > i; j--) {
+      const candidate = parts.slice(i, j).join('-');
+      const candidatePath = path.join(current, candidate);
+      try {
+        if (fs.existsSync(candidatePath) && fs.statSync(candidatePath).isDirectory()) {
+          current = candidatePath;
+          i = j;
+          found = true;
+          break;
+        }
+      } catch (e) {}
+    }
+    if (!found) {
+      // No match found — just use single part as directory name
+      current = path.join(current, parts[i]);
+      i++;
+    }
+  }
+  return current;
+}
+
 // --- Claude sessions scanner ---
 app.get('/api/claude-sessions', (req, res) => {
   try {
@@ -325,8 +380,10 @@ app.get('/api/claude-sessions', (req, res) => {
     const allSessions = [];
     for (const project of projects) {
       const projectDir = path.join(CLAUDE_PROJECTS_DIR, project);
-      // Decode project path: C--dev-AM8-Core -> C:\dev\AM8_Core (approximate)
-      const projectPath = project.replace(/^([A-Z])-/, '$1:\\').replace(/-/g, '\\');
+      // Decode project path: C--dev-AM8-Core -> C:\dev\AM8_Core
+      // The encoding is lossy (hyphens in folder names look like path separators),
+      // so we try the decoded path and fall back to checking the filesystem.
+      const projectPath = decodeProjectPath(project);
 
       let files;
       try {

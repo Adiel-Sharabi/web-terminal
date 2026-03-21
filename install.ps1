@@ -81,7 +81,7 @@ if (Test-Path "$InstallDir\.git") {
 # npm install
 Write-Host "Installing dependencies..."
 Push-Location $InstallDir
-npm install --production 2>&1 | Out-Null
+npm install --omit=dev 2>&1 | Out-Null
 Pop-Location
 Write-Host "[OK] Dependencies installed" -ForegroundColor Green
 
@@ -102,7 +102,7 @@ if (-not (Test-Path $configPath)) {
     Write-Host "[OK] config.json already exists (not overwritten)" -ForegroundColor Green
 }
 
-# --- Create Scheduled Task (auto-start on logon) ---
+# --- Create Scheduled Task (auto-start on logon, runs headless) ---
 Write-Host "`nConfiguring auto-start..." -ForegroundColor Cyan
 
 # Remove existing task
@@ -122,14 +122,10 @@ $settings = New-ScheduledTaskSettingsSet `
     -RestartCount 3 `
     -RestartInterval (New-TimeSpan -Minutes 1)
 
-# Config.json holds all settings — no wrapper script needed
-$action = New-ScheduledTaskAction `
-    -Execute "node.exe" `
-    -Argument "server.js" `
-    -WorkingDirectory $InstallDir
+$principal = New-ScheduledTaskPrincipal -UserId $env:USERNAME -LogonType S4U -RunLevel Highest
 
-Register-ScheduledTask -TaskName $TaskName -Action $action -Trigger $trigger -Settings $settings -Description "Web Terminal on port $Port" | Out-Null
-Write-Host "[OK] Scheduled task '$TaskName' created (starts on logon)" -ForegroundColor Green
+Register-ScheduledTask -TaskName $TaskName -Action $action -Trigger $trigger -Settings $settings -Principal $principal -Description "Web Terminal on port $Port" | Out-Null
+Write-Host "[OK] Scheduled task '$TaskName' created (runs headless, starts on logon)" -ForegroundColor Green
 
 # --- Start now ---
 Write-Host "`nStarting Web Terminal..." -ForegroundColor Cyan
