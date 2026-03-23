@@ -126,7 +126,7 @@
   </style>
 </head>
 <body>
-  <h1 id="title"><svg style="width:28px;height:28px;vertical-align:middle;margin-right:8px" viewBox="0 0 24 24" fill="none"><path d="M16.604 2.073c-.523-.13-1.06.188-1.19.71L12.36 14.39 9.31 8.283a1.01 1.01 0 0 0-.564-.51 1.007 1.007 0 0 0-.758.012L2.41 10.42a1.01 1.01 0 0 0-.498 1.338 1.01 1.01 0 0 0 1.338.498l4.76-2.108 3.55 7.1c.15.301.43.513.765.575.334.063.68-.036.94-.27a1 1 0 0 0 .283-.472l3.257-12.32 1.727 5.18a1.01 1.01 0 0 0 .638.638l2.84.946a1.01 1.01 0 0 0 1.277-.638 1.01 1.01 0 0 0-.638-1.277l-2.2-.734-2.325-6.975a1.01 1.01 0 0 0-.52-.629z" fill="#00d4aa"/></svg><span id="titleText"></span> <button class="btn-gear" onclick="openSettings()" title="Settings">&#9881;</button></h1>
+  <h1 id="title"><svg style="width:28px;height:28px;vertical-align:middle;margin-right:8px" viewBox="0 0 24 24" fill="none"><path d="M16.604 2.073c-.523-.13-1.06.188-1.19.71L12.36 14.39 9.31 8.283a1.01 1.01 0 0 0-.564-.51 1.007 1.007 0 0 0-.758.012L2.41 10.42a1.01 1.01 0 0 0-.498 1.338 1.01 1.01 0 0 0 1.338.498l4.76-2.108 3.55 7.1c.15.301.43.513.765.575.334.063.68-.036.94-.27a1 1 0 0 0 .283-.472l3.257-12.32 1.727 5.18a1.01 1.01 0 0 0 .638.638l2.84.946a1.01 1.01 0 0 0 1.277-.638 1.01 1.01 0 0 0-.638-1.277l-2.2-.734-2.325-6.975a1.01 1.01 0 0 0-.52-.629z" fill="#00d4aa"/></svg><span id="titleText"></span> <button class="btn-gear" onclick="openSettings()" title="Settings">&#9881;</button> <button class="btn-gear" onclick="logout()" title="Logout" style="font-size:16px">&#x23FB;</button></h1>
 
   <!-- Settings panel -->
   <div id="settingsOverlay" class="settings-overlay" onclick="if(event.target===this)closeSettings()">
@@ -176,6 +176,7 @@
       <div class="actions">
         <button class="btn" style="background:#333;color:#aaa" onclick="closeSettings()">Cancel</button>
         <button class="btn btn-open" onclick="saveSettings()">Save</button>
+        <button class="btn" style="background:#e94560;color:#fff;margin-left:auto" onclick="restartServer()">Restart Server</button>
       </div>
     </div>
   </div>
@@ -493,6 +494,19 @@
       document.getElementById('sessionCmd').value = cfg.defaultCommand || '';
       openInNewTab = cfg.openInNewTab !== false;
     });
+
+    async function restartServer() {
+      if (!confirm('Restart the server? All terminal connections will briefly disconnect.')) return;
+      try {
+        await fetch('/api/restart', { method: 'POST' });
+        document.getElementById('saveMsg').textContent = 'Restarting... page will reload in a few seconds.';
+        setTimeout(() => location.reload(), 4000);
+      } catch(e) {
+        setTimeout(() => location.reload(), 3000);
+      }
+    }
+
+    function logout() { location.href = '/logout'; }
 
     loadFolderHistory();
     loadSessions();
