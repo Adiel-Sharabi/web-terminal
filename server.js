@@ -226,13 +226,9 @@ function createSession(id, cwd, name, autoCommand, savedScrollback) {
 }
 
 // --- Auth helpers ---
-function parseBasicAuth(authHeader) {
-  if (!authHeader || !authHeader.startsWith('Basic ')) return null;
-  const decoded = Buffer.from(authHeader.split(' ')[1], 'base64').toString();
-  const colonIndex = decoded.indexOf(':');
-  if (colonIndex === -1) return null;
-  return { user: decoded.substring(0, colonIndex), pass: decoded.substring(colonIndex + 1) };
-}
+const SESSION_SECRET = crypto.randomBytes(32).toString('hex');
+const COOKIE_NAME = 'wt_session';
+const COOKIE_MAX_AGE = 7 * 24 * 60 * 60 * 1000; // 7 days
 
 function checkCredentials(user, pass) {
   if (!user || !pass) return false;
@@ -251,39 +247,111 @@ function checkCredentials(user, pass) {
   } catch (e) { return false; }
 }
 
+function makeSessionToken(user) {
+  const payload = `${user}:${Date.now()}`;
+  const sig = crypto.createHmac('sha256', SESSION_SECRET).update(payload).digest('hex');
+  return `${Buffer.from(payload).toString('base64')}.${sig}`;
+}
+
+function verifySessionToken(token) {
+  if (!token) return false;
+  const dot = token.lastIndexOf('.');
+  if (dot === -1) return false;
+  const payload = token.substring(0, dot);
+  const sig = token.substring(dot + 1);
+  const expected = crypto.createHmac('sha256', SESSION_SECRET).update(Buffer.from(payload, 'base64').toString()).digest('hex');
+  try {
+    return crypto.timingSafeEqual(Buffer.from(sig, 'hex'), Buffer.from(expected, 'hex'));
+  } catch (e) { return false; }
+}
+
+function parseCookies(header) {
+  const cookies = {};
+  if (!header) return cookies;
+  header.split(';').forEach(c => {
+    const [k, ...v] = c.trim().split('=');
+    if (k) cookies[k.trim()] = decodeURIComponent(v.join('='));
+  });
+  return cookies;
+}
+
+function setAuthCookie(res, user) {
+  const token = makeSessionToken(user);
+  res.set('Set-Cookie', `${COOKIE_NAME}=${token}; HttpOnly; SameSite=Strict; Path=/; Max-Age=${COOKIE_MAX_AGE / 1000}`);
+}
+
 function authenticateWs(ws, req) {
-  const creds = parseBasicAuth(req.headers.authorization);
-  if (!creds || !checkCredentials(creds.user, creds.pass)) {
+  const cookies = parseCookies(req.headers.cookie);
+  if (!verifySessionToken(cookies[COOKIE_NAME])) {
     ws.close(1008, 'Unauthorized');
     return false;
   }
   return true;
 }
 
+// --- Login page ---
+const LOGIN_PAGE = `<!DOCTYPE html><html><head>
+<meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1">
+<title>Web Terminal — Login</title>
+<style>
+  *{margin:0;padding:0;box-sizing:border-box}
+  body{background:#1a1a2e;color:#e0e0e0;font-family:'Segoe UI',sans-serif;
+    display:flex;justify-content:center;align-items:center;min-height:100vh;padding:20px}
+  .login{background:#16213e;border:1px solid #0f3460;border-radius:12px;padding:32px;
+    width:360px;max-width:90vw;box-shadow:0 8px 32px rgba(0,0,0,0.5)}
+  h1{color:#00d4aa;font-size:22px;margin-bottom:20px;text-align:center}
+  label{display:block;color:#888;font-size:12px;margin-bottom:4px;margin-top:14px}
+  input{width:100%;background:#1a1a2e;color:#e0e0e0;border:1px solid #0f3460;
+    padding:10px 14px;border-radius:6px;font-size:15px}
+  input:focus{border-color:#00d4aa;outline:none}
+  .btn{width:100%;margin-top:20px;padding:12px;border:none;border-radius:6px;
+    background:#00d4aa;color:#1a1a2e;font-size:16px;font-weight:600;cursor:pointer}
+  .btn:hover{opacity:0.9}
+  .error{color:#e94560;font-size:13px;margin-top:10px;display:none;text-align:center}
+</style>
+</head><body>
+<div class="login">
+  <h1>Web Terminal</h1>
+  <form method="POST" action="/login">
+    <label>Username</label>
+    <input name="user" required autocomplete="username" autofocus>
+    <label>Password</label>
+    <input name="password" type="password" required autocomplete="current-password">
+    <div id="error" class="error">ERRMSG</div>
+    <button type="submit" class="btn">Sign in</button>
+  </form>
+</div>
+</body></html>`;
+
+// --- Public routes (before auth middleware) ---
+app.get('/login', (req, res) => {
+  // If already logged in, redirect to lobby
+  const cookies = parseCookies(req.headers.cookie);
+  if (verifySessionToken(cookies[COOKIE_NAME]) && !needsPasswordChange()) {
+    return res.redirect('/');
+  }
+  res.send(LOGIN_PAGE.replace('ERRMSG', ''));
+});
+
+app.post('/login', express.urlencoded({ extended: false }), (req, res) => {
+  const { user, password } = req.body || {};
+  if (checkCredentials(user, password)) {
+    setAuthCookie(res, user);
+    return res.redirect('/');
+  }
+  res.status(401).send(LOGIN_PAGE.replace('display:none', 'display:block').replace('ERRMSG', 'Invalid username or password'));
+});
+
+app.get('/logout', (req, res) => {
+  res.set('Set-Cookie', `${COOKIE_NAME}=; HttpOnly; SameSite=Strict; Path=/; Max-Age=0`);
+  res.redirect('/login');
+});
+
 // --- Auth middleware ---
 app.use((req, res, next) => {
-  // Setup endpoint is behind auth but not behind setup gate
-  if (req.path === '/api/setup' && req.method === 'POST') {
-    const creds = parseBasicAuth(req.headers.authorization);
-    if (!creds) {
-      res.set('WWW-Authenticate', 'Basic realm="Web Terminal"');
-      return res.status(401).send('Authentication required');
-    }
-    if (!checkCredentials(creds.user, creds.pass)) {
-      res.set('WWW-Authenticate', 'Basic realm="Web Terminal"');
-      return res.status(401).send('Invalid credentials');
-    }
-    return next();
-  }
-
-  const creds = parseBasicAuth(req.headers.authorization);
-  if (!creds) {
-    res.set('WWW-Authenticate', 'Basic realm="Web Terminal"');
-    return res.status(401).send('Authentication required');
-  }
-  if (!checkCredentials(creds.user, creds.pass)) {
-    res.set('WWW-Authenticate', 'Basic realm="Web Terminal"');
-    return res.status(401).send('Invalid credentials');
+  const cookies = parseCookies(req.headers.cookie);
+  if (!verifySessionToken(cookies[COOKIE_NAME])) {
+    return res.redirect('/login');
   }
 
   // Force password change if still using default
@@ -357,15 +425,8 @@ async function save(e) {
     });
     const data = await res.json();
     if (data.ok) {
-      // Clear cached credentials and redirect — browser will prompt for new creds
-      // Use a 401-triggering fetch to force credential re-prompt
       btn.textContent = 'Saved! Redirecting...';
-      // XMLHttpRequest with wrong creds to clear the cached auth
-      const xhr = new XMLHttpRequest();
-      xhr.open('GET', '/api/hostname', false);
-      xhr.setRequestHeader('Authorization', 'Basic ' + btoa('__clear__:__clear__'));
-      try { xhr.send(); } catch(e) {}
-      location.href = '/';
+      location.href = '/logout';
     } else {
       err.textContent = data.error || 'Failed to save';
       err.style.display = 'block';
@@ -659,14 +720,19 @@ app.get('/api/claude-sessions', (req, res) => {
       } catch (e) { continue; }
 
       for (const f of files) {
+        // Skip tiny files (< 1KB) — likely empty or failed sessions
+        if (f.size < 1024) continue;
+
         // Read first user message as summary
         let summary = '';
+        let hasUserMessage = false;
         try {
           const lines = fs.readFileSync(path.join(projectDir, f.file), 'utf8').split('\n');
-          for (const line of lines.slice(0, 10)) {
+          for (const line of lines.slice(0, 20)) {
             if (!line.trim()) continue;
             const obj = JSON.parse(line);
             if (obj.type === 'user' && obj.message?.content) {
+              hasUserMessage = true;
               summary = typeof obj.message.content === 'string'
                 ? obj.message.content.substring(0, 120)
                 : JSON.stringify(obj.message.content).substring(0, 120);
@@ -674,6 +740,9 @@ app.get('/api/claude-sessions', (req, res) => {
             }
           }
         } catch (e) {}
+
+        // Skip sessions with no user message (broken/empty)
+        if (!hasUserMessage) continue;
 
         allSessions.push({
           id: f.id,
@@ -692,6 +761,24 @@ app.get('/api/claude-sessions', (req, res) => {
   } catch (e) {
     res.status(500).json({ error: e.message });
   }
+});
+
+// --- API: restart server ---
+app.post('/api/restart', (req, res) => {
+  res.json({ ok: true, message: 'Restarting...' });
+  console.log(`[${new Date().toISOString()}] Restart requested via API`);
+  setTimeout(() => {
+    saveSessionConfigs();
+    saveAllScrollback();
+    const { spawn } = require('child_process');
+    const child = spawn(process.argv[0], process.argv.slice(1), {
+      cwd: __dirname,
+      detached: true,
+      stdio: 'ignore'
+    });
+    child.unref();
+    process.exit(0);
+  }, 500);
 });
 
 // --- Landing page ---
