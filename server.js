@@ -141,7 +141,24 @@ function createSession(id, cwd, name, autoCommand, savedScrollback) {
     cols: 120,
     rows: 30,
     cwd: cwd || DEFAULT_CWD,
-    env: Object.assign({}, process.env, { TERM: 'xterm-256color', HOME: process.env.USERPROFILE || os.homedir() })
+    env: config.passAllEnv ? Object.assign({}, process.env, { TERM: 'xterm-256color' }) : {
+      TERM: 'xterm-256color',
+      HOME: process.env.USERPROFILE || os.homedir(),
+      USERPROFILE: process.env.USERPROFILE,
+      PATH: process.env.PATH,
+      SystemRoot: process.env.SystemRoot,
+      SystemDrive: process.env.SystemDrive,
+      COMSPEC: process.env.COMSPEC,
+      TEMP: process.env.TEMP,
+      TMP: process.env.TMP,
+      LANG: process.env.LANG || 'en_US.UTF-8',
+      APPDATA: process.env.APPDATA,
+      LOCALAPPDATA: process.env.LOCALAPPDATA,
+      ProgramFiles: process.env.ProgramFiles,
+      'ProgramFiles(x86)': process.env['ProgramFiles(x86)'],
+      HOMEDRIVE: process.env.HOMEDRIVE,
+      HOMEPATH: process.env.HOMEPATH,
+    }
   });
 
   // Restore previous scrollback with a restart separator
@@ -323,6 +340,43 @@ const LOGIN_PAGE = `<!DOCTYPE html><html><head>
 </div>
 </body></html>`;
 
+// --- Rate limiting ---
+const loginAttempts = new Map(); // ip -> { count, firstAttempt }
+const RATE_LIMIT_MAX = 5;
+const RATE_LIMIT_WINDOW = 60 * 1000;  // 60 seconds
+const RATE_LIMIT_BLOCK = 5 * 60 * 1000; // 5 minutes
+
+function isRateLimited(ip) {
+  const record = loginAttempts.get(ip);
+  if (!record) return false;
+  if (Date.now() - record.firstAttempt > RATE_LIMIT_BLOCK) {
+    loginAttempts.delete(ip);
+    return false;
+  }
+  return record.count >= RATE_LIMIT_MAX;
+}
+
+function recordFailedLogin(ip) {
+  const record = loginAttempts.get(ip);
+  if (!record || Date.now() - record.firstAttempt > RATE_LIMIT_WINDOW) {
+    loginAttempts.set(ip, { count: 1, firstAttempt: Date.now() });
+  } else {
+    record.count++;
+  }
+}
+
+function clearLoginAttempts(ip) {
+  loginAttempts.delete(ip);
+}
+
+// Clean up old entries every 10 minutes
+setInterval(() => {
+  const now = Date.now();
+  for (const [ip, record] of loginAttempts) {
+    if (now - record.firstAttempt > RATE_LIMIT_BLOCK) loginAttempts.delete(ip);
+  }
+}, 10 * 60 * 1000);
+
 // --- Public routes (before auth middleware) ---
 app.get('/login', (req, res) => {
   // If already logged in, redirect to lobby
@@ -334,17 +388,32 @@ app.get('/login', (req, res) => {
 });
 
 app.post('/login', express.urlencoded({ extended: false }), (req, res) => {
+  const ip = req.ip || req.connection.remoteAddress;
+  if (isRateLimited(ip)) {
+    return res.status(429).send(LOGIN_PAGE.replace('display:none', 'display:block').replace('ERRMSG', 'Too many failed attempts. Try again in a few minutes.'));
+  }
   const { user, password } = req.body || {};
   if (checkCredentials(user, password)) {
+    clearLoginAttempts(ip);
     setAuthCookie(res, user);
     return res.redirect('/');
   }
+  recordFailedLogin(ip);
   res.status(401).send(LOGIN_PAGE.replace('display:none', 'display:block').replace('ERRMSG', 'Invalid username or password'));
 });
 
 app.get('/logout', (req, res) => {
   res.set('Set-Cookie', `${COOKIE_NAME}=; HttpOnly; SameSite=Strict; Path=/; Max-Age=0`);
   res.redirect('/login');
+});
+
+// --- Security headers ---
+app.use((req, res, next) => {
+  res.set('X-Content-Type-Options', 'nosniff');
+  res.set('X-Frame-Options', 'DENY');
+  res.set('Referrer-Policy', 'no-referrer');
+  res.set('Content-Security-Policy', "default-src 'self'; script-src 'self' 'unsafe-inline' https://cdn.jsdelivr.net; style-src 'self' 'unsafe-inline' https://cdn.jsdelivr.net; connect-src 'self' ws: wss:; img-src 'self' data:");
+  next();
 });
 
 // --- Auth middleware ---
@@ -497,9 +566,9 @@ app.get('/api/config', (req, res) => {
   res.json(current);
 });
 
-const ALLOWED_CONFIG_KEYS = ['port', 'user', 'password', 'shell', 'defaultCwd', 'scanFolders', 'defaultCommand', 'openInNewTab', 'serverName'];
+const ALLOWED_CONFIG_KEYS = ['port', 'host', 'user', 'password', 'shell', 'defaultCwd', 'scanFolders', 'defaultCommand', 'openInNewTab', 'serverName'];
 
-app.put('/api/config', express.json(), (req, res) => {
+app.put('/api/config', express.json({ limit: '16kb' }), (req, res) => {
   try {
     // Only allow known config keys
     const sanitized = {};
@@ -521,7 +590,7 @@ app.put('/api/config', express.json(), (req, res) => {
     fs.writeFileSync(CONFIG_FILE, JSON.stringify(sanitized, null, 2), 'utf8');
     res.json({ ok: true, message: 'Saved. Restart server for changes to take effect.' });
   } catch (e) {
-    res.status(500).json({ error: e.message });
+    console.error(e.message); res.status(500).json({ error: 'Internal error' });
   }
 });
 
@@ -553,7 +622,7 @@ app.post('/api/clipboard-image', express.raw({ type: 'image/*', limit: '10mb' })
       res.json({ ok: true, path: filepath, clipboard: true });
     });
   } catch (e) {
-    res.status(500).json({ error: e.message });
+    console.error(e.message); res.status(500).json({ error: 'Internal error' });
   }
 });
 
@@ -567,11 +636,15 @@ app.get('/api/sessions', (req, res) => {
 });
 
 // --- API: create session ---
-app.post('/api/sessions', express.json(), (req, res) => {
+const MAX_SESSIONS = config.maxSessions || 10;
+app.post('/api/sessions', express.json({ limit: '16kb' }), (req, res) => {
+  if (sessions.size >= MAX_SESSIONS) {
+    return res.status(429).json({ error: `Session limit reached (max ${MAX_SESSIONS})` });
+  }
   const id = crypto.randomUUID();
-  let cwd = req.body?.cwd || DEFAULT_CWD;
-  const name = req.body?.name || `Session ${sessions.size + 1}`;
-  const autoCommand = req.body?.autoCommand || '';
+  let cwd = String(req.body?.cwd || DEFAULT_CWD).substring(0, 260);
+  const name = String(req.body?.name || `Session ${sessions.size + 1}`).substring(0, 100).replace(/[\x00-\x1f]/g, '');
+  const autoCommand = String(req.body?.autoCommand || '').substring(0, 500);
   // Verify cwd exists, fall back to default
   try {
     if (!fs.existsSync(cwd) || !fs.statSync(cwd).isDirectory()) {
@@ -587,16 +660,16 @@ app.post('/api/sessions', express.json(), (req, res) => {
     res.json({ id, name });
   } catch (e) {
     console.error(`Failed to create session: ${e.message}`);
-    res.status(500).json({ error: e.message });
+    res.status(500).json({ error: 'Failed to create session' });
   }
 });
 
 // --- API: update session (rename, change autoCommand) ---
-app.patch('/api/sessions/:id', express.json(), (req, res) => {
+app.patch('/api/sessions/:id', express.json({ limit: '16kb' }), (req, res) => {
   const session = sessions.get(req.params.id);
   if (!session) return res.status(404).json({ error: 'not found' });
-  if (req.body?.name) session.name = req.body.name;
-  if (req.body?.autoCommand !== undefined) session.autoCommand = req.body.autoCommand;
+  if (req.body?.name) session.name = String(req.body.name).substring(0, 100).replace(/[\x00-\x1f]/g, '');
+  if (req.body?.autoCommand !== undefined) session.autoCommand = String(req.body.autoCommand).substring(0, 500);
   saveSessionConfigs();
   res.json({ id: req.params.id, name: session.name, autoCommand: session.autoCommand });
 });
@@ -723,26 +796,31 @@ app.get('/api/claude-sessions', (req, res) => {
         // Skip tiny files (< 1KB) — likely empty or failed sessions
         if (f.size < 1024) continue;
 
-        // Read first user message as summary
+        // Skip sessions older than 14 days — unlikely to resume
+        if (Date.now() - f.mtime > 14 * 24 * 60 * 60 * 1000) continue;
+
+        // Read first user message as summary, verify session has assistant response
         let summary = '';
         let hasUserMessage = false;
+        let hasAssistantResponse = false;
         try {
           const lines = fs.readFileSync(path.join(projectDir, f.file), 'utf8').split('\n');
-          for (const line of lines.slice(0, 20)) {
+          for (const line of lines.slice(0, 40)) {
             if (!line.trim()) continue;
             const obj = JSON.parse(line);
-            if (obj.type === 'user' && obj.message?.content) {
+            if (obj.type === 'user' && obj.message?.content && !hasUserMessage) {
               hasUserMessage = true;
               summary = typeof obj.message.content === 'string'
                 ? obj.message.content.substring(0, 120)
                 : JSON.stringify(obj.message.content).substring(0, 120);
-              break;
             }
+            if (obj.type === 'assistant') hasAssistantResponse = true;
+            if (hasUserMessage && hasAssistantResponse) break;
           }
         } catch (e) {}
 
-        // Skip sessions with no user message (broken/empty)
-        if (!hasUserMessage) continue;
+        // Skip sessions with no real conversation
+        if (!hasUserMessage || !hasAssistantResponse) continue;
 
         allSessions.push({
           id: f.id,
@@ -759,7 +837,21 @@ app.get('/api/claude-sessions', (req, res) => {
     allSessions.sort((a, b) => b.lastModified - a.lastModified);
     res.json(allSessions.slice(0, 20));
   } catch (e) {
-    res.status(500).json({ error: e.message });
+    console.error(e.message); res.status(500).json({ error: 'Internal error' });
+  }
+});
+
+// --- API: delete a claude session file ---
+app.delete('/api/claude-sessions/:project/:id', (req, res) => {
+  const file = path.join(CLAUDE_PROJECTS_DIR, req.params.project, req.params.id + '.jsonl');
+  try {
+    if (fs.existsSync(file)) {
+      fs.unlinkSync(file);
+      return res.json({ ok: true });
+    }
+    res.status(404).json({ error: 'not found' });
+  } catch (e) {
+    console.error(e.message); res.status(500).json({ error: 'Internal error' });
   }
 });
 
@@ -813,10 +905,14 @@ app.ws('/ws/:id', (ws, req) => {
   console.log(`[${new Date().toISOString()}] Client joined session ${req.params.id} (${session.clients.size} clients)`);
 
   ws.on('message', msg => {
+    // Reject oversized messages (64KB)
+    if (msg.length > 65536) return;
     if (typeof msg === 'string' && msg.startsWith('{"resize":')) {
       try {
         const { resize } = JSON.parse(msg);
-        session.term.resize(resize.cols, resize.rows);
+        const cols = Math.max(1, Math.min(500, parseInt(resize.cols) || 80));
+        const rows = Math.max(1, Math.min(200, parseInt(resize.rows) || 24));
+        session.term.resize(cols, rows);
       } catch (e) {}
       return;
     }
@@ -844,7 +940,7 @@ if (savedSessions.length > 0) {
     createSession(cfg.id, cfg.cwd, cfg.name, cmd, savedScrollback);
   }
 } else {
-  createSession('1', DEFAULT_CWD, 'Default', '');
+  createSession(crypto.randomUUID(), DEFAULT_CWD, 'Default', '');
 }
 
 // --- Periodic scrollback save (every 30s) ---
@@ -871,9 +967,10 @@ process.on('exit', () => {
   try { saveSessionConfigs(); saveAllScrollback(); } catch (e) {}
 });
 
-app.listen(PORT, '0.0.0.0', () => {
-  console.log(`Web Terminal running at http://0.0.0.0:${PORT}`);
-  console.log(`Sessions: http://0.0.0.0:${PORT}/`);
+const HOST = process.env.WT_HOST || config.host || '127.0.0.1';
+app.listen(PORT, HOST, () => {
+  console.log(`Web Terminal running at http://${HOST}:${PORT}`);
+  console.log(`Sessions: http://${HOST}:${PORT}/`);
   console.log(`Auth: ${_USER}:***`);
   if (needsPasswordChange()) {
     console.log('\x1b[33m⚠  DEFAULT PASSWORD IN USE — you will be prompted to change it on first login\x1b[0m');

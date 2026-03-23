@@ -5,4 +5,6 @@ config.json.bak
 sessions.json
 sessions.json.bak
 history.json
+scrollback/
+clipboard-images/
 test-results/

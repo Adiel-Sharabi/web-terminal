@@ -408,6 +408,11 @@
           const btn = el('button', 'btn btn-resume', 'Resume');
           btn.addEventListener('click', () => resumeClaude(s.id, s.projectPath, s.project));
           card.appendChild(btn);
+          const delBtn = el('button', 'btn btn-kill', '\u00D7');
+          delBtn.title = 'Remove this session';
+          delBtn.style.cssText = 'padding:4px 8px;font-size:14px;margin-left:4px';
+          delBtn.addEventListener('click', () => deleteClaudeSession(s.project, s.id));
+          card.appendChild(delBtn);
           container.appendChild(card);
         }
       } catch (e) {
@@ -429,6 +434,12 @@
       });
       const { id } = await res.json();
       navigateToSession(id);
+    }
+
+    async function deleteClaudeSession(project, id) {
+      if (!confirm('Remove this Claude session from the list?')) return;
+      await fetch(`/api/claude-sessions/${encodeURIComponent(project)}/${encodeURIComponent(id)}`, { method: 'DELETE' });
+      loadClaudeSessions();
     }
 
     // --- Settings ---
