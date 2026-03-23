@@ -40,7 +40,7 @@ install.ps1 -Port 7682 -Password "my-secret" -DefaultCwd "D:\projects"
 |-----------|---------|-------------|
 | `-Port` | 7681 | HTTP port |
 | `-User` | admin | Login username |
-| `-Password` | admin | Login password |
+| `-Password` | admin | Login password (you'll be prompted to change on first use) |
 | `-Shell` | Git Bash | Shell executable path |
 | `-DefaultCwd` | C:\dev | Default working directory for new sessions |
 | `-SkipTailscale` | false | Don't configure Tailscale |
