@@ -8,3 +8,5 @@ history.json
 scrollback/
 clipboard-images/
 test-results/
+*.crt
+*.key

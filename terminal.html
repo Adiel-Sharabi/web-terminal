@@ -291,15 +291,15 @@
     }).catch(err => console.warn('Failed to load session info:', err));
 
     // --- Sidebar ---
-    let openInNewTab = true;
-    fetch('/api/config').then(r => r.json()).then(cfg => { openInNewTab = cfg.openInNewTab !== false; });
 
     function toggleSidebar() {
       const sb = document.getElementById('sidebar');
       const btn = document.querySelector('.btn-sidebar');
       sb.classList.toggle('open');
       btn.classList.toggle('active');
-      if (sb.classList.contains('open')) loadSidebar();
+      const isOpen = sb.classList.contains('open');
+      if (isOpen) loadSidebar();
+      sessionStorage.setItem('sidebarOpen', isOpen ? '1' : '0');
       setTimeout(doResize, 250);
     }
 
@@ -321,8 +321,8 @@
           `</div>`;
         item.addEventListener('click', () => {
           if (s.id === sessionId) return;
-          const url = '/s/' + s.id;
-          if (openInNewTab) { window.open(url, '_blank'); } else { location.href = url; }
+          sessionStorage.setItem('sidebarOpen', '1');
+          location.href = '/s/' + s.id;
         });
         container.appendChild(item);
       }
@@ -409,6 +409,11 @@
     }
 
     function logout() { location.href = '/logout'; }
+
+    // Re-open sidebar if it was open before switching sessions
+    if (sessionStorage.getItem('sidebarOpen') === '1') {
+      toggleSidebar();
+    }
 
     connect();
   </script>
