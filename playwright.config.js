@@ -30,6 +30,7 @@ module.exports = defineConfig({
       WT_USER: 'testuser',
       WT_PASS: 'testpass:colon',
       WT_CWD: process.env.TEMP || 'C:\\Windows\\Temp',
+      WT_HOST: '127.0.0.1',
     },
     reuseExistingServer: false,
     timeout: 15000,
