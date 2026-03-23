@@ -25,6 +25,8 @@ const SHELL = process.env.WT_SHELL || config.shell || 'C:\\Program Files\\Git\\b
 const DEFAULT_CWD = process.env.WT_CWD || config.defaultCwd || 'C:\\dev';
 const SCAN_FOLDERS = config.scanFolders || [DEFAULT_CWD];
 const DEFAULT_COMMAND = config.defaultCommand || '';
+const OPEN_IN_NEW_TAB = config.openInNewTab !== undefined ? config.openInNewTab : true;
+const SERVER_NAME = config.serverName || os.hostname();
 const SESSIONS_FILE = path.join(__dirname, 'sessions.json');
 const HISTORY_FILE = path.join(__dirname, 'history.json');
 const CLAUDE_PROJECTS_DIR = path.join(process.env.USERPROFILE || os.homedir(), '.claude', 'projects');
@@ -200,12 +202,14 @@ app.get('/api/config', (req, res) => {
   current.defaultCwd = current.defaultCwd || DEFAULT_CWD;
   current.scanFolders = current.scanFolders || SCAN_FOLDERS;
   current.defaultCommand = current.defaultCommand || DEFAULT_COMMAND;
+  current.openInNewTab = current.openInNewTab !== undefined ? current.openInNewTab : OPEN_IN_NEW_TAB;
+  current.serverName = current.serverName || SERVER_NAME;
   // Never expose password in API response
   current.password = '***';
   res.json(current);
 });
 
-const ALLOWED_CONFIG_KEYS = ['port', 'user', 'password', 'shell', 'defaultCwd', 'scanFolders', 'defaultCommand'];
+const ALLOWED_CONFIG_KEYS = ['port', 'user', 'password', 'shell', 'defaultCwd', 'scanFolders', 'defaultCommand', 'openInNewTab', 'serverName'];
 
 app.put('/api/config', express.json(), (req, res) => {
   try {
@@ -223,6 +227,7 @@ app.put('/api/config', express.json(), (req, res) => {
     // Basic type validation
     if (sanitized.port !== undefined) sanitized.port = parseInt(sanitized.port) || 7681;
     if (sanitized.scanFolders && !Array.isArray(sanitized.scanFolders)) sanitized.scanFolders = [String(sanitized.scanFolders)];
+    if (sanitized.openInNewTab !== undefined) sanitized.openInNewTab = !!sanitized.openInNewTab;
     fs.writeFileSync(CONFIG_FILE, JSON.stringify(sanitized, null, 2), 'utf8');
     res.json({ ok: true, message: 'Saved. Restart server for changes to take effect.' });
   } catch (e) {
@@ -232,7 +237,7 @@ app.put('/api/config', express.json(), (req, res) => {
 
 // --- API: hostname ---
 app.get('/api/hostname', (req, res) => {
-  res.json({ hostname: os.hostname() });
+  res.json({ hostname: SERVER_NAME });
 });
 
 // --- API: list sessions ---
@@ -486,7 +491,13 @@ const savedSessions = loadSessionConfigs();
 if (savedSessions.length > 0) {
   console.log(`Restoring ${savedSessions.length} session(s) from sessions.json...`);
   for (const cfg of savedSessions) {
-    createSession(cfg.id, cfg.cwd, cfg.name, cfg.autoCommand);
+    let cmd = cfg.autoCommand || '';
+    // Auto-add --continue when restoring claude sessions so they resume instead of starting fresh
+    if (cmd && /\bclaude\b/i.test(cmd) && !/(--continue|--resume)\b/.test(cmd)) {
+      cmd = cmd.trimEnd() + ' --continue';
+      console.log(`Session ${cfg.id}: auto-added --continue to resume claude`);
+    }
+    createSession(cfg.id, cfg.cwd, cfg.name, cmd);
   }
 } else {
   createSession('1', DEFAULT_CWD, 'Default', '');

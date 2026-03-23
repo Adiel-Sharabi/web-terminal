@@ -133,6 +133,10 @@
     <div class="settings-panel">
       <h2>Settings</h2>
       <div class="field">
+        <label>Server name (displayed in title)</label>
+        <input id="cfgServerName" placeholder="Machine hostname">
+      </div>
+      <div class="field">
         <label>Port</label>
         <input id="cfgPort" type="number">
       </div>
@@ -161,6 +165,12 @@
       <div class="field">
         <label>Default auto-command (pre-filled for new sessions)</label>
         <input id="cfgDefaultCommand" placeholder="e.g. claude">
+      </div>
+      <div class="field">
+        <label style="display:inline;cursor:pointer">
+          <input id="cfgOpenInNewTab" type="checkbox" style="width:auto;margin-right:6px;vertical-align:middle">
+          Open sessions in new tab
+        </label>
       </div>
       <div id="saveMsg" class="save-msg"></div>
       <div class="actions">
@@ -198,6 +208,16 @@
 
   <script>
     let folderHistory = [];
+    let openInNewTab = true;
+
+    function navigateToSession(id) {
+      const url = '/s/' + id;
+      if (openInNewTab) {
+        window.open(url, '_blank');
+      } else {
+        location.href = url;
+      }
+    }
 
     // --- Folder history ---
     async function loadFolderHistory() {
@@ -291,7 +311,7 @@
 
         const actions = el('div', 'actions');
         const openBtn = el('button', 'btn btn-open', 'Open');
-        openBtn.addEventListener('click', () => { location.href = '/s/' + s.id; });
+        openBtn.addEventListener('click', () => { navigateToSession(s.id); });
         const editBtn = el('button', 'btn btn-edit', 'Auto-cmd');
         editBtn.title = 'Set command that runs on server restart';
         editBtn.addEventListener('click', () => editAutoCmd(s.id));
@@ -342,7 +362,7 @@
         body: JSON.stringify({ name, cwd, autoCommand })
       });
       const { id } = await res.json();
-      location.href = `/s/${id}`;
+      navigateToSession(id);
     }
 
     async function killSession(id) {
@@ -407,12 +427,13 @@
         })
       });
       const { id } = await res.json();
-      location.href = '/s/' + id;
+      navigateToSession(id);
     }
 
     // --- Settings ---
     async function openSettings() {
       const cfg = await (await fetch('/api/config')).json();
+      document.getElementById('cfgServerName').value = cfg.serverName || '';
       document.getElementById('cfgPort').value = cfg.port || 7681;
       document.getElementById('cfgUser').value = cfg.user || 'admin';
       document.getElementById('cfgPassword').value = cfg.password || '';
@@ -420,6 +441,7 @@
       document.getElementById('cfgDefaultCwd').value = cfg.defaultCwd || '';
       document.getElementById('cfgScanFolders').value = (cfg.scanFolders || []).join('\n');
       document.getElementById('cfgDefaultCommand').value = cfg.defaultCommand || '';
+      document.getElementById('cfgOpenInNewTab').checked = cfg.openInNewTab !== false;
       document.getElementById('saveMsg').textContent = '';
       document.getElementById('settingsOverlay').classList.add('show');
     }
@@ -435,13 +457,15 @@
 
     async function saveSettings() {
       const cfg = {
+        serverName: document.getElementById('cfgServerName').value,
         port: parseInt(document.getElementById('cfgPort').value) || 7681,
         user: document.getElementById('cfgUser').value,
         password: document.getElementById('cfgPassword').value,
         shell: document.getElementById('cfgShell').value,
         defaultCwd: document.getElementById('cfgDefaultCwd').value,
         scanFolders: document.getElementById('cfgScanFolders').value.split('\n').map(s => s.trim()).filter(Boolean),
-        defaultCommand: document.getElementById('cfgDefaultCommand').value
+        defaultCommand: document.getElementById('cfgDefaultCommand').value,
+        openInNewTab: document.getElementById('cfgOpenInNewTab').checked
       };
       const res = await fetch('/api/config', {
         method: 'PUT',
@@ -471,6 +495,7 @@
       document.getElementById('sessionCwd').value = cfg.defaultCwd || 'C:\\dev';
       document.getElementById('sessionCwd').placeholder = cfg.defaultCwd || 'C:\\dev';
       document.getElementById('sessionCmd').value = cfg.defaultCommand || '';
+      openInNewTab = cfg.openInNewTab !== false;
     });
 
     loadFolderHistory();
