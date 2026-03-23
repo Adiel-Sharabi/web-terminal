@@ -17,7 +17,47 @@
     #toolbar .session-name { color: #e0e0e0; font-weight: 500; margin-right: 8px; cursor: pointer; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; max-width: 40vw; }
     #toolbar .session-name:hover { color: #00d4aa; }
     #toolbar .viewers { color: #e94560; margin-left: auto; white-space: nowrap; }
-    #terminal { height: calc(100% - 36px); width: 100%; }
+    .btn-sidebar {
+      background: transparent; border: 1px solid #333; color: #888; font-size: 16px;
+      width: 28px; height: 28px; border-radius: 4px; cursor: pointer; margin-right: 8px;
+      display: flex; align-items: center; justify-content: center; transition: all 0.2s;
+    }
+    .btn-sidebar:hover { border-color: #00d4aa; color: #00d4aa; }
+    .btn-sidebar.active { border-color: #00d4aa; color: #00d4aa; background: rgba(0,212,170,0.1); }
+    #main { display: flex; height: calc(100% - 36px); }
+    #sidebar {
+      width: 0; overflow: hidden; background: #16213e; border-right: 1px solid #0f3460;
+      transition: width 0.2s; flex-shrink: 0; display: flex; flex-direction: column;
+    }
+    #sidebar.open { width: 220px; }
+    #sidebar .sidebar-header {
+      padding: 8px 12px; color: #888; font: 12px 'Segoe UI', sans-serif;
+      border-bottom: 1px solid #0f3460; display: flex; align-items: center; justify-content: space-between;
+    }
+    #sidebar .sidebar-header a { color: #00d4aa; text-decoration: none; font-size: 11px; }
+    #sidebar .sidebar-header a:hover { text-decoration: underline; }
+    #sidebarList { flex: 1; overflow-y: auto; }
+    .sb-item {
+      padding: 8px 12px; cursor: pointer; border-bottom: 1px solid #0a1a30;
+      font: 12px 'Segoe UI', sans-serif; transition: background 0.15s;
+    }
+    .sb-item:hover { background: #0f3460; }
+    .sb-item.current { background: rgba(0,212,170,0.1); border-left: 3px solid #00d4aa; }
+    .sb-item .sb-name { color: #e0e0e0; font-weight: 500; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+    .sb-item .sb-meta { color: #666; font-size: 11px; margin-top: 2px; display: flex; align-items: center; gap: 6px; }
+    .sb-dot {
+      display: inline-block; width: 8px; height: 8px; border-radius: 50%; flex-shrink: 0;
+    }
+    .sb-dot.active { background: #4a4; }
+    .sb-dot.idle { background: #da4; }
+    .sb-dot.waiting { background: #e94560; animation: pulse 1.5s infinite; }
+    @keyframes pulse { 0%,100% { opacity: 1; } 50% { opacity: 0.4; } }
+    .sb-status { font-size: 10px; }
+    .sb-status.active { color: #4a4; }
+    .sb-status.idle { color: #da4; }
+    .sb-status.waiting { color: #e94560; }
+    .sb-viewers { color: #555; font-size: 10px; margin-left: auto; }
+    #terminal { height: 100%; flex: 1; min-width: 0; }
     #status {
       position: fixed; top: 44px; right: 12px; z-index: 10;
       padding: 4px 10px; border-radius: 12px; font: 12px monospace;
@@ -36,19 +76,26 @@
     @media (max-width: 600px) {
       #toolbar { font-size: 12px; height: 32px; padding: 0 8px; }
       #toolbar .session-name { max-width: 30vw; font-size: 12px; }
-      #terminal { height: calc(100% - 32px); }
+      #sidebar.open { width: 180px; }
     }
   </style>
 </head>
 <body>
   <div id="toolbar">
-    <a href="/">&#8592; Sessions</a>
+    <button class="btn-sidebar" onclick="toggleSidebar()" title="Sessions panel">&#9776;</button>
+    <a href="/">&#8592; Lobby</a>
     <span id="sessionName" class="session-name" onclick="renameSession()" title="Click to rename"></span>
     <span id="hostName" style="color:#00d4aa; font-weight:500; margin-left:8px;"></span>
     <span id="viewers" class="viewers"></span>
   </div>
   <div id="status">connecting...</div>
-  <div id="terminal"></div>
+  <div id="main">
+    <div id="sidebar">
+      <div class="sidebar-header"><span>Sessions</span><a href="/" target="_blank">+ New</a></div>
+      <div id="sidebarList"></div>
+    </div>
+    <div id="terminal"></div>
+  </div>
   <button id="scrollBtn" onclick="scrollToBottom()" title="Scroll to bottom">&#8595;</button>
 
   <script src="https://cdn.jsdelivr.net/npm/@xterm/xterm@5.5.0/lib/xterm.min.js"></script>
@@ -102,9 +149,45 @@
       ws.onerror = () => ws.close();
     }
 
-    // Ctrl+V paste, Ctrl+C copy (when selection exists)
+    // --- Clipboard image upload for Alt+V (Claude CLI image paste) ---
+    async function uploadClipboardImage() {
+      try {
+        const items = await navigator.clipboard.read();
+        for (const item of items) {
+          const imageType = item.types.find(t => t.startsWith('image/'));
+          if (imageType) {
+            const blob = await item.getType(imageType);
+            const res = await fetch('/api/clipboard-image', {
+              method: 'POST',
+              headers: { 'Content-Type': imageType },
+              body: blob
+            });
+            const result = await res.json();
+            if (result.ok && result.clipboard) {
+              // Image is now on server clipboard — send Alt+V to the terminal
+              if (ws && ws.readyState === WebSocket.OPEN) ws.send('\x1bv'); // ESC v = Alt+V
+              return true;
+            } else if (result.ok) {
+              // Clipboard copy failed, but file was saved — type the path instead
+              if (ws && ws.readyState === WebSocket.OPEN) ws.send(result.path);
+              return true;
+            }
+          }
+        }
+      } catch (e) {
+        console.warn('Clipboard image read failed:', e);
+      }
+      return false;
+    }
+
+    // Ctrl+V paste, Ctrl+C copy, Alt+V image paste
     term.attachCustomKeyEventHandler(e => {
       if (e.type !== 'keydown') return true;
+      // Alt+V — upload clipboard image to server clipboard, then forward keystroke
+      if (e.altKey && e.key === 'v') {
+        uploadClipboardImage();
+        return false;
+      }
       if ((e.ctrlKey || e.metaKey) && e.key === 'v') {
         navigator.clipboard.readText().then(text => {
           if (text && ws && ws.readyState === WebSocket.OPEN) ws.send(text);
@@ -123,12 +206,13 @@
       if (ws && ws.readyState === WebSocket.OPEN) ws.send(data);
     });
 
-    window.addEventListener('resize', () => {
+    function doResize() {
       fitAddon.fit();
       if (ws && ws.readyState === WebSocket.OPEN) {
         ws.send(JSON.stringify({ resize: { cols: term.cols, rows: term.rows } }));
       }
-    });
+    }
+    window.addEventListener('resize', doResize);
 
     // --- Auto-scroll (like a real terminal / CLI) ---
     const scrollBtn = document.getElementById('scrollBtn');
@@ -205,11 +289,55 @@
       }
     }).catch(err => console.warn('Failed to load session info:', err));
 
-    // Update viewer count
+    // --- Sidebar ---
+    let openInNewTab = true;
+    fetch('/api/config').then(r => r.json()).then(cfg => { openInNewTab = cfg.openInNewTab !== false; });
+
+    function toggleSidebar() {
+      const sb = document.getElementById('sidebar');
+      const btn = document.querySelector('.btn-sidebar');
+      sb.classList.toggle('open');
+      btn.classList.toggle('active');
+      if (sb.classList.contains('open')) loadSidebar();
+      setTimeout(doResize, 250);
+    }
+
+    const statusLabels = { active: 'Running', idle: 'Idle', waiting: 'Waiting' };
+
+    async function loadSidebar() {
+      const list = await (await fetch('/api/sessions')).json();
+      const container = document.getElementById('sidebarList');
+      container.textContent = '';
+      for (const s of list) {
+        const item = document.createElement('div');
+        item.className = 'sb-item' + (s.id === sessionId ? ' current' : '');
+        item.innerHTML =
+          `<div class="sb-name">${esc(s.name)}</div>` +
+          `<div class="sb-meta">` +
+            `<span class="sb-dot ${s.status}"></span>` +
+            `<span class="sb-status ${s.status}">${statusLabels[s.status] || s.status}</span>` +
+            `<span class="sb-viewers">${s.clients} viewer${s.clients !== 1 ? 's' : ''}</span>` +
+          `</div>`;
+        item.addEventListener('click', () => {
+          if (s.id === sessionId) return;
+          const url = '/s/' + s.id;
+          if (openInNewTab) { window.open(url, '_blank'); } else { location.href = url; }
+        });
+        container.appendChild(item);
+      }
+      // Also update this tab's viewer count
+      const me = list.find(x => x.id === sessionId);
+      if (me) document.getElementById('viewers').textContent = `${me.clients} viewer${me.clients !== 1 ? 's' : ''}`;
+    }
+
+    function esc(s) { const d = document.createElement('div'); d.textContent = s; return d.innerHTML; }
+
+    // Refresh sidebar + viewer count every 5s
     setInterval(async () => {
       const list = await (await fetch('/api/sessions')).json();
-      const s = list.find(x => x.id === sessionId);
-      if (s) document.getElementById('viewers').textContent = `${s.clients} viewer${s.clients !== 1 ? 's' : ''}`;
+      const me = list.find(x => x.id === sessionId);
+      if (me) document.getElementById('viewers').textContent = `${me.clients} viewer${me.clients !== 1 ? 's' : ''}`;
+      if (document.getElementById('sidebar').classList.contains('open')) loadSidebar();
     }, 5000);
 
     async function renameSession() {
@@ -256,7 +384,9 @@
     window.addEventListener('focus', stopFlashing);
 
     function showNotification(n) {
-      // Always track it (even if focused, for lobby awareness)
+      // Only flash/alert for this tab's own session
+      if (n.sessionId !== sessionId) return;
+
       pendingAlerts.set(n.sessionId, n);
 
       // Browser notification
@@ -267,18 +397,13 @@
           renotify: true
         });
         notif.onclick = () => {
-          // Navigate to the session that needs attention
-          if (n.sessionId !== sessionId) {
-            window.location.href = `/s/${n.sessionId}`;
-          } else {
-            window.focus();
-          }
+          window.focus();
           notif.close();
         };
         setTimeout(() => notif.close(), 15000);
       }
 
-      // Flash tab title — cycles through all pending alerts
+      // Flash tab title only for this session
       if (!document.hasFocus()) startFlashing();
     }
 
