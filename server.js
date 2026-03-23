@@ -5,6 +5,7 @@ const path = require('path');
 const os = require('os');
 const fs = require('fs');
 const crypto = require('crypto');
+const { execFile } = require('child_process');
 
 // --- Config: config.json > env vars > defaults ---
 const CONFIG_FILE = path.join(__dirname, 'config.json');
@@ -19,8 +20,8 @@ try {
 } catch (e) { console.error('Failed to load config:', e.message); }
 
 const PORT = parseInt(process.env.WT_PORT || config.port || '7681');
-const USER = process.env.WT_USER || config.user || 'admin';
-const PASS = process.env.WT_PASS || config.password || 'admin';
+let _USER = process.env.WT_USER || config.user || 'admin';
+let PASS = process.env.WT_PASS || config.password || 'admin';
 const SHELL = process.env.WT_SHELL || config.shell || 'C:\\Program Files\\Git\\bin\\bash.exe';
 const DEFAULT_CWD = process.env.WT_CWD || config.defaultCwd || 'C:\\dev';
 const SCAN_FOLDERS = config.scanFolders || [DEFAULT_CWD];
@@ -28,8 +29,47 @@ const DEFAULT_COMMAND = config.defaultCommand || '';
 const OPEN_IN_NEW_TAB = config.openInNewTab !== undefined ? config.openInNewTab : true;
 const SERVER_NAME = config.serverName || os.hostname();
 const SESSIONS_FILE = path.join(__dirname, 'sessions.json');
+const SCROLLBACK_DIR = path.join(__dirname, 'scrollback');
+const CLIPBOARD_DIR = path.join(__dirname, 'clipboard-images');
 const HISTORY_FILE = path.join(__dirname, 'history.json');
 const CLAUDE_PROJECTS_DIR = path.join(process.env.USERPROFILE || os.homedir(), '.claude', 'projects');
+
+// --- Password helpers ---
+const DEFAULT_PASSWORDS = ['admin'];
+
+function needsPasswordChange() {
+  return DEFAULT_PASSWORDS.includes(PASS);
+}
+
+function hashPassword(password) {
+  const salt = crypto.randomBytes(16).toString('hex');
+  const hash = crypto.scryptSync(password, salt, 64).toString('hex');
+  return `$scrypt$${salt}$${hash}`;
+}
+
+function verifyPassword(password, stored) {
+  if (!stored.startsWith('$scrypt$')) return password === stored;
+  const parts = stored.split('$');
+  const salt = parts[2];
+  const hash = parts[3];
+  const derived = crypto.scryptSync(password, salt, 64).toString('hex');
+  try {
+    return crypto.timingSafeEqual(Buffer.from(hash, 'hex'), Buffer.from(derived, 'hex'));
+  } catch (e) { return false; }
+}
+
+// --- Auto-hash plaintext password on startup ---
+if (PASS && !DEFAULT_PASSWORDS.includes(PASS) && !PASS.startsWith('$scrypt$')) {
+  const hashed = hashPassword(PASS);
+  let cfg = {};
+  try { if (fs.existsSync(CONFIG_FILE)) cfg = JSON.parse(fs.readFileSync(CONFIG_FILE, 'utf8')); } catch (e) {}
+  cfg.password = hashed;
+  try {
+    fs.writeFileSync(CONFIG_FILE, JSON.stringify(cfg, null, 2), 'utf8');
+    PASS = hashed;
+    console.log('Password auto-hashed in config.json');
+  } catch (e) { console.error('Failed to auto-hash password:', e.message); }
+}
 
 const app = express();
 expressWs(app);
@@ -63,7 +103,39 @@ const sessions = new Map();
 const notifyClients = new Set();
 const MAX_SCROLLBACK = 5000;
 
-function createSession(id, cwd, name, autoCommand) {
+// --- Scrollback persistence ---
+try { if (!fs.existsSync(SCROLLBACK_DIR)) fs.mkdirSync(SCROLLBACK_DIR); } catch (e) {}
+try { if (!fs.existsSync(CLIPBOARD_DIR)) fs.mkdirSync(CLIPBOARD_DIR); } catch (e) {}
+
+function saveScrollback(id, session) {
+  try {
+    const file = path.join(SCROLLBACK_DIR, id + '.json');
+    fs.writeFileSync(file, JSON.stringify(session.scrollback), 'utf8');
+  } catch (e) {}
+}
+
+function loadScrollback(id) {
+  try {
+    const file = path.join(SCROLLBACK_DIR, id + '.json');
+    if (fs.existsSync(file)) return JSON.parse(fs.readFileSync(file, 'utf8'));
+  } catch (e) {}
+  return [];
+}
+
+function deleteScrollback(id) {
+  try {
+    const file = path.join(SCROLLBACK_DIR, id + '.json');
+    if (fs.existsSync(file)) fs.unlinkSync(file);
+  } catch (e) {}
+}
+
+function saveAllScrollback() {
+  for (const [id, session] of sessions) {
+    saveScrollback(id, session);
+  }
+}
+
+function createSession(id, cwd, name, autoCommand, savedScrollback) {
   const term = pty.spawn(SHELL, [], {
     name: 'xterm-256color',
     cols: 120,
@@ -72,8 +144,15 @@ function createSession(id, cwd, name, autoCommand) {
     env: Object.assign({}, process.env, { TERM: 'xterm-256color', HOME: process.env.USERPROFILE || os.homedir() })
   });
 
+  // Restore previous scrollback with a restart separator
+  const scrollback = [];
+  if (savedScrollback && savedScrollback.length > 0) {
+    scrollback.push(...savedScrollback);
+    scrollback.push('\r\n\x1b[33m--- server restarted ---\x1b[0m\r\n\r\n');
+  }
+
   const session = {
-    term, clients: new Set(), scrollback: [], name: name || `Session ${id}`,
+    term, clients: new Set(), scrollback, name: name || `Session ${id}`,
     cwd: cwd || DEFAULT_CWD, idleTimer: null, lastActivity: Date.now(),
     status: 'active', autoCommand: autoCommand || ''
   };
@@ -129,6 +208,7 @@ function createSession(id, cwd, name, autoCommand) {
       try { client.send('\r\n\x1b[31m[Session ended]\x1b[0m\r\n'); client.close(); } catch (e) {}
     }
     sessions.delete(id);
+    deleteScrollback(id);
     saveSessionConfigs();
   });
 
@@ -157,9 +237,18 @@ function parseBasicAuth(authHeader) {
 function checkCredentials(user, pass) {
   if (!user || !pass) return false;
   try {
-    return crypto.timingSafeEqual(Buffer.from(user), Buffer.from(USER)) &&
-           crypto.timingSafeEqual(Buffer.from(pass), Buffer.from(PASS));
-  } catch (e) { return false; } // different lengths
+    const userMatch = crypto.timingSafeEqual(
+      crypto.createHash('sha256').update(user).digest(),
+      crypto.createHash('sha256').update(_USER).digest()
+    );
+    const passMatch = PASS.startsWith('$scrypt$')
+      ? verifyPassword(pass, PASS)
+      : crypto.timingSafeEqual(
+          crypto.createHash('sha256').update(pass).digest(),
+          crypto.createHash('sha256').update(PASS).digest()
+        );
+    return userMatch && passMatch;
+  } catch (e) { return false; }
 }
 
 function authenticateWs(ws, req) {
@@ -173,6 +262,20 @@ function authenticateWs(ws, req) {
 
 // --- Auth middleware ---
 app.use((req, res, next) => {
+  // Setup endpoint is behind auth but not behind setup gate
+  if (req.path === '/api/setup' && req.method === 'POST') {
+    const creds = parseBasicAuth(req.headers.authorization);
+    if (!creds) {
+      res.set('WWW-Authenticate', 'Basic realm="Web Terminal"');
+      return res.status(401).send('Authentication required');
+    }
+    if (!checkCredentials(creds.user, creds.pass)) {
+      res.set('WWW-Authenticate', 'Basic realm="Web Terminal"');
+      return res.status(401).send('Invalid credentials');
+    }
+    return next();
+  }
+
   const creds = parseBasicAuth(req.headers.authorization);
   if (!creds) {
     res.set('WWW-Authenticate', 'Basic realm="Web Terminal"');
@@ -182,7 +285,131 @@ app.use((req, res, next) => {
     res.set('WWW-Authenticate', 'Basic realm="Web Terminal"');
     return res.status(401).send('Invalid credentials');
   }
+
+  // Force password change if still using default
+  if (needsPasswordChange() && req.path !== '/api/setup') {
+    return res.send(SETUP_PAGE);
+  }
+
   next();
+});
+
+const SETUP_PAGE = `<!DOCTYPE html>
+<html><head>
+<meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1">
+<title>Web Terminal — Setup</title>
+<style>
+  * { margin: 0; padding: 0; box-sizing: border-box; }
+  body { background: #1a1a2e; color: #e0e0e0; font-family: 'Segoe UI', sans-serif;
+    display: flex; justify-content: center; align-items: center; min-height: 100vh; padding: 20px; }
+  .setup { background: #16213e; border: 1px solid #0f3460; border-radius: 12px; padding: 32px;
+    width: 400px; max-width: 90vw; box-shadow: 0 8px 32px rgba(0,0,0,0.5); }
+  h1 { color: #00d4aa; font-size: 22px; margin-bottom: 8px; }
+  p { color: #888; font-size: 14px; margin-bottom: 20px; }
+  .warn { background: #3a2a1a; border: 1px solid #da4; border-radius: 6px; padding: 10px 14px;
+    color: #da4; font-size: 13px; margin-bottom: 20px; }
+  label { display: block; color: #888; font-size: 12px; margin-bottom: 4px; margin-top: 14px; }
+  input { width: 100%; background: #1a1a2e; color: #e0e0e0; border: 1px solid #0f3460;
+    padding: 10px 14px; border-radius: 6px; font-size: 15px; }
+  input:focus { border-color: #00d4aa; outline: none; }
+  .btn { width: 100%; margin-top: 20px; padding: 12px; border: none; border-radius: 6px;
+    background: #00d4aa; color: #1a1a2e; font-size: 16px; font-weight: 600; cursor: pointer; }
+  .btn:hover { opacity: 0.9; }
+  .btn:disabled { opacity: 0.4; cursor: not-allowed; }
+  .error { color: #e94560; font-size: 13px; margin-top: 10px; display: none; }
+  .req { color: #666; font-size: 11px; margin-top: 6px; }
+</style>
+</head><body>
+<div class="setup">
+  <h1>Set Your Password</h1>
+  <p>You're using the default password. Please set a secure password before continuing.</p>
+  <div class="warn">Default credentials are publicly known. Change your password now to secure your terminal.</div>
+  <form id="form" onsubmit="return save(event)">
+    <label>New Username</label>
+    <input id="user" value="admin" autocomplete="username">
+    <label>New Password</label>
+    <input id="pass" type="password" required minlength="6" autocomplete="new-password" placeholder="Min 6 characters">
+    <label>Confirm Password</label>
+    <input id="pass2" type="password" required minlength="6" autocomplete="new-password" placeholder="Repeat password">
+    <div class="req">Minimum 6 characters</div>
+    <div id="error" class="error"></div>
+    <button type="submit" class="btn">Save &amp; Continue</button>
+  </form>
+</div>
+<script>
+async function save(e) {
+  e.preventDefault();
+  const err = document.getElementById('error');
+  const user = document.getElementById('user').value.trim();
+  const pass = document.getElementById('pass').value;
+  const pass2 = document.getElementById('pass2').value;
+  if (!user) { err.textContent = 'Username is required'; err.style.display = 'block'; return; }
+  if (pass.length < 6) { err.textContent = 'Password must be at least 6 characters'; err.style.display = 'block'; return; }
+  if (pass !== pass2) { err.textContent = 'Passwords do not match'; err.style.display = 'block'; return; }
+  err.style.display = 'none';
+  const btn = document.querySelector('.btn');
+  btn.disabled = true; btn.textContent = 'Saving...';
+  try {
+    const res = await fetch('/api/setup', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ user, password: pass })
+    });
+    const data = await res.json();
+    if (data.ok) {
+      // Clear cached credentials and redirect — browser will prompt for new creds
+      // Use a 401-triggering fetch to force credential re-prompt
+      btn.textContent = 'Saved! Redirecting...';
+      // XMLHttpRequest with wrong creds to clear the cached auth
+      const xhr = new XMLHttpRequest();
+      xhr.open('GET', '/api/hostname', false);
+      xhr.setRequestHeader('Authorization', 'Basic ' + btoa('__clear__:__clear__'));
+      try { xhr.send(); } catch(e) {}
+      location.href = '/';
+    } else {
+      err.textContent = data.error || 'Failed to save';
+      err.style.display = 'block';
+      btn.disabled = false; btn.textContent = 'Save & Continue';
+    }
+  } catch(e) {
+    err.textContent = 'Connection error';
+    err.style.display = 'block';
+    btn.disabled = false; btn.textContent = 'Save & Continue';
+  }
+}
+</script>
+</body></html>`;
+
+app.post('/api/setup', express.json(), (req, res) => {
+  if (!needsPasswordChange()) {
+    return res.status(403).json({ error: 'Password already set' });
+  }
+  const { user, password } = req.body || {};
+  if (!user || typeof user !== 'string' || user.trim().length === 0) {
+    return res.status(400).json({ error: 'Username is required' });
+  }
+  if (!password || typeof password !== 'string' || password.length < 6) {
+    return res.status(400).json({ error: 'Password must be at least 6 characters' });
+  }
+  if (DEFAULT_PASSWORDS.includes(password)) {
+    return res.status(400).json({ error: 'Please choose a different password' });
+  }
+
+  // Hash and save
+  const hashed = hashPassword(password);
+  let cfg = {};
+  try { if (fs.existsSync(CONFIG_FILE)) cfg = JSON.parse(fs.readFileSync(CONFIG_FILE, 'utf8')); } catch (e) {}
+  cfg.user = user.trim();
+  cfg.password = hashed;
+  fs.writeFileSync(CONFIG_FILE, JSON.stringify(cfg, null, 2), 'utf8');
+
+  // Update running credentials
+  PASS = hashed;
+  // Need to update USER too — but it's const, so we use a module-level let
+  _USER = user.trim();
+
+  console.log(`[${new Date().toISOString()}] Password changed via setup (user: ${_USER})`);
+  res.json({ ok: true });
 });
 
 // --- API: config ---
@@ -196,7 +423,7 @@ app.get('/api/config', (req, res) => {
   } catch (e) {}
   // Fill in running values
   current.port = current.port || PORT;
-  current.user = current.user || USER;
+  current.user = current.user || _USER;
   current.password = current.password || PASS;
   current.shell = current.shell || SHELL;
   current.defaultCwd = current.defaultCwd || DEFAULT_CWD;
@@ -218,11 +445,13 @@ app.put('/api/config', express.json(), (req, res) => {
     for (const key of ALLOWED_CONFIG_KEYS) {
       if (req.body[key] !== undefined) sanitized[key] = req.body[key];
     }
-    // If password is masked, preserve existing password
+    // If password is masked, preserve existing password; otherwise hash the new one
     if (sanitized.password === '***' || !sanitized.password) {
       let existing = {};
       try { if (fs.existsSync(CONFIG_FILE)) existing = JSON.parse(fs.readFileSync(CONFIG_FILE, 'utf8')); } catch (e) {}
       sanitized.password = existing.password || PASS;
+    } else if (!sanitized.password.startsWith('$scrypt$')) {
+      sanitized.password = hashPassword(sanitized.password);
     }
     // Basic type validation
     if (sanitized.port !== undefined) sanitized.port = parseInt(sanitized.port) || 7681;
@@ -238,6 +467,33 @@ app.put('/api/config', express.json(), (req, res) => {
 // --- API: hostname ---
 app.get('/api/hostname', (req, res) => {
   res.json({ hostname: SERVER_NAME });
+});
+
+// --- API: upload image to server clipboard ---
+app.post('/api/clipboard-image', express.raw({ type: 'image/*', limit: '10mb' }), (req, res) => {
+  try {
+    // Determine extension from content-type
+    const ct = req.headers['content-type'] || 'image/png';
+    const ext = ct.includes('jpeg') || ct.includes('jpg') ? '.jpg' : '.png';
+    const filename = `clip-${Date.now()}${ext}`;
+    const filepath = path.join(CLIPBOARD_DIR, filename);
+
+    fs.writeFileSync(filepath, req.body);
+
+    // Copy image to Windows clipboard via PowerShell
+    const ps = `Add-Type -AssemblyName System.Windows.Forms; ` +
+      `[System.Windows.Forms.Clipboard]::SetImage([System.Drawing.Image]::FromFile('${filepath.replace(/'/g, "''")}'))`;
+    execFile('powershell', ['-NoProfile', '-Command', ps], (err) => {
+      if (err) {
+        console.error('Clipboard copy failed:', err.message);
+        // Still return success — file is saved even if clipboard fails
+        return res.json({ ok: true, path: filepath, clipboard: false });
+      }
+      res.json({ ok: true, path: filepath, clipboard: true });
+    });
+  } catch (e) {
+    res.status(500).json({ error: e.message });
+  }
 });
 
 // --- API: list sessions ---
@@ -497,14 +753,42 @@ if (savedSessions.length > 0) {
       cmd = cmd.trimEnd() + ' --continue';
       console.log(`Session ${cfg.id}: auto-added --continue to resume claude`);
     }
-    createSession(cfg.id, cfg.cwd, cfg.name, cmd);
+    const savedScrollback = loadScrollback(cfg.id);
+    createSession(cfg.id, cfg.cwd, cfg.name, cmd, savedScrollback);
   }
 } else {
   createSession('1', DEFAULT_CWD, 'Default', '');
 }
 
+// --- Periodic scrollback save (every 30s) ---
+setInterval(saveAllScrollback, 30000);
+
+// --- Graceful shutdown: save everything before exit ---
+function gracefulShutdown(signal) {
+  console.log(`[${new Date().toISOString()}] ${signal} received — saving state...`);
+  saveSessionConfigs();
+  saveAllScrollback();
+  console.log(`[${new Date().toISOString()}] State saved. Exiting.`);
+  process.exit(0);
+}
+
+process.on('SIGINT', () => gracefulShutdown('SIGINT'));
+process.on('SIGTERM', () => gracefulShutdown('SIGTERM'));
+process.on('SIGHUP', () => gracefulShutdown('SIGHUP'));
+// Windows: handle Ctrl+C and process kill
+if (process.platform === 'win32') {
+  process.on('SIGBREAK', () => gracefulShutdown('SIGBREAK'));
+}
+// Last resort — save on uncaught exit
+process.on('exit', () => {
+  try { saveSessionConfigs(); saveAllScrollback(); } catch (e) {}
+});
+
 app.listen(PORT, '0.0.0.0', () => {
   console.log(`Web Terminal running at http://0.0.0.0:${PORT}`);
   console.log(`Sessions: http://0.0.0.0:${PORT}/`);
-  console.log(`Auth: ${USER}:***`);
+  console.log(`Auth: ${_USER}:***`);
+  if (needsPasswordChange()) {
+    console.log('\x1b[33m⚠  DEFAULT PASSWORD IN USE — you will be prompted to change it on first login\x1b[0m');
+  }
 });
