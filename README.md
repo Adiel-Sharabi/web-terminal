@@ -12,8 +12,8 @@ Browser-based terminal for Windows. Monitor and control CLI sessions (including 
 - **Folder history** — remembers working directories, auto-scans configured base folders
 - **Status monitoring** — live status badges (Active / Idle / Needs Input) per session
 - **Cross-session notifications** — browser notifications from any session, even if you're viewing a different one
-- **Basic auth** — password-protected access
-- **Tailscale ready** — secure remote access over your private mesh VPN
+- **Secure by default** — cookie-based login, scrypt-hashed passwords, forced password change on first use, rate limiting, CSP headers, localhost-only binding
+- **Tailscale ready** — HTTPS with real TLS certificates over your private mesh VPN
 - **Mobile friendly** — works on phone browsers
 
 ## Quick Install
@@ -133,51 +133,51 @@ Examples:
 
 [Tailscale](https://tailscale.com/download) creates a secure mesh VPN across all your devices.
 
-### Setup (one-time per device)
+### Setup
 
-1. **Install Tailscale** on every device (PC, phone, tablet)
-   - Windows: https://tailscale.com/download/windows
-   - Android: Google Play Store -> "Tailscale"
-   - iOS: App Store -> "Tailscale"
+**On each server** (one-time per machine running web-terminal):
 
-2. **Sign in** with the same account on all devices
-
-3. **Find your machine's Tailscale IP**:
+1. **Install Tailscale**: https://tailscale.com/download/windows
+2. **Sign in** with your Tailscale account
+3. **Enable HTTPS** (provisions a real TLS certificate automatically):
    ```powershell
-   tailscale ip -4
-   # Example: 100.79.226.100
+   tailscale serve --https=443 localhost:7681
+   ```
+4. **Verify**:
+   ```powershell
+   tailscale serve status
    ```
 
-4. **Expose Web Terminal** (the installer does this automatically):
-   ```powershell
-   tailscale serve --bg 7681
-   ```
+**On client devices** (phone, tablet, other PCs) — just install Tailscale and sign in. No other setup needed.
 
-### Access from your phone
+### Access from any device
 
 1. Open Tailscale app — make sure it's connected
-2. Browse to `http://<tailscale-ip>:7681`
-3. Login and you're in
+2. Browse to `https://<server-name>.<tailnet>.ts.net`
+3. Login with your Web Terminal credentials
+
+The server binds to `127.0.0.1` by default — it's only reachable through Tailscale's encrypted tunnel. Port 7681 is not exposed on your LAN.
 
 ### Security
 
-Three layers of protection:
-1. **Tailscale WireGuard encryption** — only your devices can reach the IP
-2. **Tailscale identity** — tied to your account
-3. **Basic auth** — username/password
+Four layers of protection:
+1. **Tailscale WireGuard encryption** — only your devices can reach the server
+2. **TLS (HTTPS)** — real Let's Encrypt certificate, no browser warnings
+3. **Tailscale identity** — tied to your account
+4. **Login credentials** — username/password with scrypt-hashed storage
 
 ### Multiple machines
 
-Install on each machine. Access any by its Tailscale IP:
-- `http://100.x.x.x:7681` — Home PC
-- `http://100.y.y.y:7681` — Office PC
+Run the setup on each server. Access any by its Tailscale DNS name:
+- `https://home-pc.<tailnet>.ts.net` — Home PC
+- `https://office-pc.<tailnet>.ts.net` — Office PC
 
 ### Troubleshooting
 
 - **Can't reach the page**: Ensure Tailscale is connected on both devices (`tailscale status`)
-- **DNS name not working**: Use the IP address directly
 - **Check what's being served**: `tailscale serve status`
-- **Remove proxy**: `tailscale serve --https=443 off`
+- **Remove HTTPS proxy**: `tailscale serve --https=443 off`
+- **Certificate issues**: Tailscale auto-provisions certs — ensure HTTPS is enabled on your tailnet (admin console)
 
 ## Update
 
