@@ -20,7 +20,6 @@ module.exports = defineConfig({
   globalTeardown: path.join(__dirname, 'tests', 'global-teardown.js'),
   use: {
     baseURL: 'http://localhost:17681',
-    httpCredentials: { username: 'testuser', password: 'testpass:colon' },
   },
   webServer: {
     command: 'node server.js',
