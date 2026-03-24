@@ -710,11 +710,12 @@ app.put('/api/config', express.json({ limit: '16kb' }), (req, res) => {
     if (sanitized.scanFolders && !Array.isArray(sanitized.scanFolders)) sanitized.scanFolders = [String(sanitized.scanFolders)];
     if (sanitized.openInNewTab !== undefined) sanitized.openInNewTab = !!sanitized.openInNewTab;
     if (sanitized.scrollbackReplayLimit !== undefined) sanitized.scrollbackReplayLimit = Math.max(10240, parseInt(sanitized.scrollbackReplayLimit) || 102400);
+    // Compare restart-sensitive keys against running values
+    const RESTART_KEYS = { port: PORT, host: config.host || '127.0.0.1', shell: SHELL };
+    const needsRestart = Object.entries(RESTART_KEYS).some(
+      ([k, running]) => sanitized[k] !== undefined && String(sanitized[k]) !== String(running)
+    );
     fs.writeFileSync(CONFIG_FILE, JSON.stringify(sanitized, null, 2), 'utf8');
-    // Determine if restart is needed based on which fields changed
-    const RESTART_KEYS = ['port', 'host', 'shell'];
-    const changedKeys = Object.keys(sanitized);
-    const needsRestart = changedKeys.some(k => RESTART_KEYS.includes(k));
     res.json({
       ok: true,
       needsRestart,
