@@ -13,3 +13,4 @@ test-results/
 *.stackdump
 cluster-tokens.json
 api-tokens.json
+.session-secret
