@@ -199,12 +199,28 @@ test.describe('Cluster Auth Required', () => {
     await ctx.dispose();
   });
 
-  test('auth/token endpoint requires auth (cookie)', async () => {
+  test('auth/token endpoint works without cookie (validates credentials)', async () => {
     const ctx = await noAuthCtx();
     const res = await ctx.post('/api/auth/token', {
-      data: { user: AUTH.user, password: AUTH.password }
+      data: { user: AUTH.user, password: AUTH.password, label: 'no-cookie-test' }
     });
-    // This endpoint is behind auth middleware — needs cookie first
+    // This endpoint is before auth middleware — validates credentials itself
+    expect(res.status()).toBe(200);
+    const data = await res.json();
+    expect(data.ok).toBe(true);
+    expect(data.token).toBeTruthy();
+    // Clean up via authenticated context
+    const authC = await authCtx();
+    await authC.delete('/api/auth/tokens/' + data.token);
+    await authC.dispose();
+    await ctx.dispose();
+  });
+
+  test('auth/token rejects wrong credentials without cookie', async () => {
+    const ctx = await noAuthCtx();
+    const res = await ctx.post('/api/auth/token', {
+      data: { user: 'wrong', password: 'wrong' }
+    });
     expect(res.status()).toBe(401);
     await ctx.dispose();
   });
