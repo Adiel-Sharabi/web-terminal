@@ -190,6 +190,7 @@
         return false;
       }
       if ((e.ctrlKey || e.metaKey) && e.key === 'v') {
+        e.preventDefault();
         navigator.clipboard.readText().then(text => {
           if (text && ws && ws.readyState === WebSocket.OPEN) ws.send(text);
         });
