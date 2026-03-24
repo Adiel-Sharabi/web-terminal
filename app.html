@@ -696,18 +696,11 @@
       if (me) document.getElementById('viewers').textContent = `${me.clients} viewer${me.clients !== 1 ? 's' : ''}`;
     }
 
-    // Quick-create session on a specific server
-    async function quickNewSession(serverUrl) {
-      const apiBase = serverUrl ? `/cluster/${encodeURIComponent(serverUrl)}/api` : '/api';
-      const name = prompt('Session name (or empty for default):') || undefined;
-      const res = await fetch(`${apiBase}/sessions`, {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ name })
-      });
-      const data = await res.json();
-      if (data.id) switchSession(data.id, serverUrl);
-      else if (data.error) alert('Error: ' + data.error);
+    // Quick-create session on a specific server — use the inline form
+    function quickNewSession(serverUrl) {
+      const form = document.getElementById('newSessionForm');
+      if (!form.classList.contains('show')) toggleNewForm();
+      document.getElementById('newServer').value = serverUrl || '';
     }
 
     // Prompt login to a remote cluster server
