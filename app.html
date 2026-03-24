@@ -257,6 +257,7 @@
     <div class="spinner"></div>
     <div class="msg">Reconnecting...</div>
     <div class="sub">Server may be restarting</div>
+    <button onclick="cancelReconnect()" style="margin-top:16px;background:#333;border:1px solid #555;color:#ccc;padding:8px 20px;border-radius:6px;cursor:pointer;font-size:13px">Cancel</button>
   </div>
 
   <!-- Settings overlay -->
@@ -337,6 +338,7 @@
     let sessionTitle = 'Web Terminal';
     let ws = null;
     let switching = false;
+    let reconnectTimer = null;
     let autoScroll = true;
     let folderHistory = [];
     let defaultCwd = 'C:\\dev';
@@ -395,15 +397,31 @@
         status.className = 'disconnected';
         status.style.opacity = '1';
         document.getElementById('reconnectOverlay').classList.add('show');
-        setTimeout(connect, 2000);
+        reconnectTimer = setTimeout(connect, 2000);
       };
 
       ws.onerror = () => ws.close();
     }
 
+    function cancelReconnect() {
+      if (reconnectTimer) { clearTimeout(reconnectTimer); reconnectTimer = null; }
+      if (ws) { ws.onclose = null; ws.close(); }
+      ws = null;
+      sessionId = null;
+      sessionServerUrl = null;
+      document.getElementById('reconnectOverlay').classList.remove('show');
+      document.getElementById('terminal').style.display = 'none';
+      document.getElementById('noSession').style.display = 'flex';
+      document.getElementById('sessionName').textContent = '(no session)';
+      status.style.opacity = '0';
+      if (document.getElementById('sidebar').classList.contains('open')) loadSidebar();
+    }
+
     function switchSession(id, serverUrl) {
       if (id === sessionId && serverUrl === sessionServerUrl) return;
       switching = true;
+      if (reconnectTimer) { clearTimeout(reconnectTimer); reconnectTimer = null; }
+      document.getElementById('reconnectOverlay').classList.remove('show');
       if (ws) { ws.onclose = null; ws.close(); }
       sessionId = id;
       sessionServerUrl = serverUrl || null;
