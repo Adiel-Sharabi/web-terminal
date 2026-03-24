@@ -1,0 +1,827 @@
+<!DOCTYPE html>
+<html>
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>Web Terminal</title>
+  <link rel="stylesheet" href="https://cdn.jsdelivr.net/npm/@xterm/xterm@5.5.0/css/xterm.min.css" integrity="sha384-tStR1zLfWgsiXCF3IgfB3lBa8KmBe/lG287CL9WCeKgQYcp1bjb4/+mwN6oti4Co" crossorigin="anonymous">
+  <style>
+    * { margin: 0; padding: 0; box-sizing: border-box; }
+    html, body { height: 100%; background: #1e1e1e; overflow: hidden; }
+    #toolbar {
+      height: 36px; background: #16213e; display: flex; align-items: center; padding: 0 12px;
+      font: 13px 'Segoe UI', sans-serif; color: #888; border-bottom: 1px solid #0f3460;
+    }
+    #toolbar .session-name { color: #e0e0e0; font-weight: 500; margin-right: 8px; cursor: pointer; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; max-width: 40vw; }
+    #toolbar .session-name:hover { color: #00d4aa; }
+    #toolbar .viewers { color: #e94560; margin-left: auto; white-space: nowrap; }
+    .tb-btn {
+      background: transparent; border: 1px solid #333; color: #888; font-size: 16px;
+      width: 28px; height: 28px; border-radius: 4px; cursor: pointer; margin-right: 8px;
+      display: flex; align-items: center; justify-content: center; transition: all 0.2s;
+    }
+    .tb-btn:hover { border-color: #00d4aa; color: #00d4aa; }
+    .tb-btn.active { border-color: #00d4aa; color: #00d4aa; background: rgba(0,212,170,0.1); }
+    #main { display: flex; height: calc(100% - 36px); }
+
+    /* --- Sidebar --- */
+    #sidebar {
+      width: 0; overflow: hidden; background: #16213e; border-right: 1px solid #0f3460;
+      transition: width 0.2s; flex-shrink: 0; display: flex; flex-direction: column;
+    }
+    #sidebar.open { width: 260px; }
+    .sb-section {
+      padding: 6px 12px; color: #666; font: 11px 'Segoe UI', sans-serif; text-transform: uppercase;
+      border-bottom: 1px solid #0f3460; display: flex; align-items: center; justify-content: space-between;
+    }
+    .sb-section button {
+      background: transparent; border: none; color: #00d4aa; font-size: 11px; cursor: pointer; padding: 2px 4px;
+    }
+    .sb-section button:hover { text-decoration: underline; }
+    #sidebarList { flex: 1; overflow-y: auto; }
+    .sb-item {
+      padding: 8px 12px; cursor: pointer; border-bottom: 1px solid #0a1a30;
+      font: 12px 'Segoe UI', sans-serif; transition: background 0.15s;
+    }
+    .sb-item:hover { background: #0f3460; }
+    .sb-item.current { background: rgba(0,212,170,0.1); border-left: 3px solid #00d4aa; }
+    .sb-item .sb-name { color: #e0e0e0; font-weight: 500; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; display: flex; align-items: center; gap: 6px; }
+    .sb-item .sb-meta { color: #666; font-size: 11px; margin-top: 2px; display: flex; align-items: center; gap: 6px; }
+    .sb-item .sb-detail { color: #555; font-size: 10px; margin-top: 2px; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+    .sb-dot { display: inline-block; width: 8px; height: 8px; border-radius: 50%; flex-shrink: 0; }
+    .sb-dot.active { background: #4a4; }
+    .sb-dot.idle { background: #da4; }
+    .sb-dot.waiting { background: #e94560; animation: pulse 1.5s infinite; }
+    @keyframes pulse { 0%,100% { opacity: 1; } 50% { opacity: 0.4; } }
+    .sb-status { font-size: 10px; }
+    .sb-status.active { color: #4a4; }
+    .sb-status.idle { color: #da4; }
+    .sb-status.waiting { color: #e94560; }
+    .sb-viewers { color: #555; font-size: 10px; margin-left: auto; }
+    .sb-kill { background: transparent; border: none; color: #555; font-size: 14px; cursor: pointer; padding: 0 4px; line-height: 1; }
+    .sb-kill:hover { color: #e94560; }
+    .sb-edit { background: transparent; border: none; color: #555; font-size: 11px; cursor: pointer; padding: 0 4px; }
+    .sb-edit:hover { color: #8a8aff; }
+
+    /* --- New session form (inline in sidebar) --- */
+    #newSessionForm {
+      display: none; padding: 8px 12px; border-bottom: 1px solid #0f3460; background: #0a1a30;
+    }
+    #newSessionForm.show { display: block; }
+    #newSessionForm input {
+      width: 100%; background: #1a1a2e; color: #e0e0e0; border: 1px solid #0f3460;
+      padding: 5px 8px; border-radius: 3px; font-size: 12px; margin-bottom: 4px;
+    }
+    #newSessionForm input:focus { border-color: #00d4aa; outline: none; }
+    #newSessionForm .form-row { display: flex; gap: 4px; }
+    #newSessionForm .form-row button {
+      background: #00d4aa; color: #1a1a2e; border: none; border-radius: 3px;
+      padding: 5px 10px; font-size: 11px; font-weight: 600; cursor: pointer; white-space: nowrap;
+    }
+    #newSessionForm .form-row button:hover { opacity: 0.85; }
+    .folder-suggestions {
+      position: absolute; left: 0; right: 0; background: #16213e; border: 1px solid #0f3460;
+      border-radius: 3px; z-index: 100; max-height: 150px; overflow-y: auto; box-shadow: 0 4px 12px rgba(0,0,0,0.5);
+    }
+    .folder-suggestions div { padding: 4px 8px; cursor: pointer; font-size: 11px; color: #ccc; font-family: monospace; }
+    .folder-suggestions div:hover { background: #0f3460; color: #00d4aa; }
+
+    /* --- Claude sessions (in sidebar) --- */
+    #claudeSection { border-top: 1px solid #0f3460; }
+    #claudeList { max-height: 200px; overflow-y: auto; }
+    .cl-item {
+      padding: 6px 12px; cursor: pointer; border-bottom: 1px solid #0a1a30;
+      font: 11px 'Segoe UI', sans-serif; transition: background 0.15s;
+    }
+    .cl-item:hover { background: #0f3460; }
+    .cl-name { color: #da4; font-weight: 500; }
+    .cl-summary { color: #777; font-size: 10px; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; margin-top: 1px; }
+    .cl-meta { color: #555; font-size: 10px; display: flex; gap: 6px; margin-top: 1px; }
+    .cl-del { background: transparent; border: none; color: #555; font-size: 12px; cursor: pointer; float: right; }
+    .cl-del:hover { color: #e94560; }
+
+    /* --- Sidebar footer (settings/logout) --- */
+    #sidebarFooter {
+      padding: 8px 12px; border-top: 1px solid #0f3460;
+      display: flex; gap: 8px; align-items: center;
+    }
+    #sidebarFooter button {
+      background: transparent; border: 1px solid #333; color: #888; font-size: 12px;
+      padding: 4px 10px; border-radius: 4px; cursor: pointer; transition: all 0.2s;
+    }
+    #sidebarFooter button:hover { border-color: #00d4aa; color: #00d4aa; }
+    #hostLabel { color: #00d4aa; font-size: 11px; font-weight: 500; margin-left: auto; }
+
+    /* --- Terminal --- */
+    #terminal { height: 100%; flex: 1; min-width: 0; }
+    #noSession {
+      display: none; flex: 1; justify-content: center; align-items: center;
+      color: #555; font: 16px 'Segoe UI', sans-serif; text-align: center;
+    }
+    #status {
+      position: fixed; top: 44px; right: 12px; z-index: 10;
+      padding: 4px 10px; border-radius: 12px; font: 12px monospace;
+      background: #333; color: #888; transition: opacity 0.5s;
+    }
+    #status.connected { background: #1a3a1a; color: #4a4; }
+    #status.disconnected { background: #3a1a1a; color: #a44; }
+    #scrollBtn {
+      display: none; position: fixed; bottom: 20px; right: 20px; z-index: 10;
+      width: 48px; height: 48px; border-radius: 50%; border: 2px solid rgba(255,255,255,0.2);
+      background: #00d4aa; color: #1a1a2e; font-size: 22px; font-weight: bold;
+      cursor: pointer; box-shadow: 0 4px 12px rgba(0,0,0,0.5); opacity: 0.9;
+      -webkit-tap-highlight-color: transparent;
+    }
+    #scrollBtn:active { opacity: 1; transform: scale(0.9); }
+
+    /* --- Settings overlay --- */
+    .settings-overlay {
+      display: none; position: fixed; top: 0; left: 0; right: 0; bottom: 0;
+      background: rgba(0,0,0,0.6); z-index: 200; justify-content: center; align-items: center;
+    }
+    .settings-overlay.show { display: flex; }
+    .settings-panel {
+      background: #16213e; border: 1px solid #0f3460; border-radius: 12px; padding: 24px;
+      width: 720px; max-width: 95vw; box-shadow: 0 8px 32px rgba(0,0,0,0.5);
+    }
+    .settings-panel h2 { color: #00d4aa; margin: 0 0 16px; font-size: 20px; }
+    .settings-grid { display: grid; grid-template-columns: 1fr 1fr; gap: 12px 16px; }
+    .settings-grid .field-wide { grid-column: 1 / -1; }
+    .settings-panel .field { margin-bottom: 0; }
+    .settings-panel label { display: block; color: #888; font-size: 12px; margin-bottom: 4px; }
+    .settings-panel input, .settings-panel textarea {
+      width: 100%; background: #1a1a2e; color: #e0e0e0; border: 1px solid #0f3460;
+      padding: 8px 12px; border-radius: 4px; font-size: 14px; font-family: 'Cascadia Code', monospace;
+    }
+    .settings-panel input:focus, .settings-panel textarea:focus { border-color: #00d4aa; outline: none; }
+    .settings-panel textarea { resize: vertical; min-height: 60px; }
+    .settings-panel .hint { color: #555; font-size: 11px; margin-top: 2px; }
+    .settings-panel .actions { display: flex; gap: 8px; margin-top: 18px; justify-content: flex-end; }
+    .settings-panel .save-msg { color: #da4; font-size: 12px; margin-top: 8px; }
+
+    /* --- Mobile --- */
+    @media (max-width: 600px) {
+      #toolbar { font-size: 12px; height: 32px; padding: 0 8px; }
+      #toolbar .session-name { max-width: 30vw; font-size: 12px; }
+      #sidebar.open { width: 220px; }
+      .settings-panel { width: 95vw; padding: 16px; }
+      .settings-grid { grid-template-columns: 1fr; }
+    }
+  </style>
+</head>
+<body>
+  <div id="toolbar">
+    <button class="tb-btn" onclick="toggleSidebar()" title="Sessions panel">&#9776;</button>
+    <span id="sessionName" class="session-name" onclick="renameCurrentSession()" title="Click to rename">(no session)</span>
+    <span id="hostName" style="color:#00d4aa; font-weight:500; margin-left:8px;"></span>
+    <span id="viewers" class="viewers"></span>
+    <button class="tb-btn" onclick="logout()" title="Logout" style="margin-left:8px;font-size:14px">&#x23FB;</button>
+  </div>
+  <div id="status" style="display:none">connecting...</div>
+  <div id="main">
+    <div id="sidebar">
+      <div class="sb-section">
+        <span>Sessions</span>
+        <button onclick="toggleNewForm()">+ New</button>
+      </div>
+      <div id="newSessionForm">
+        <input id="newName" placeholder="Name (optional)">
+        <div style="position:relative">
+          <input id="newCwd" placeholder="Working directory" onfocus="showFolders()" oninput="showFolders()" autocomplete="off">
+          <div id="folderSuggestions" class="folder-suggestions" style="display:none"></div>
+        </div>
+        <input id="newCmd" placeholder="Auto-command (optional)">
+        <div class="form-row">
+          <input id="newCmd2" style="display:none">
+          <button onclick="createSession()">Create</button>
+        </div>
+      </div>
+      <div id="sidebarList"></div>
+      <div id="claudeSection">
+        <div class="sb-section">
+          <span>Claude Sessions</span>
+          <button onclick="toggleClaude()">Show</button>
+        </div>
+        <div id="claudeList" style="display:none"></div>
+      </div>
+      <div id="sidebarFooter">
+        <button onclick="openSettings()">Settings</button>
+        <button onclick="restartServer()">Restart</button>
+        <span id="hostLabel"></span>
+      </div>
+    </div>
+    <div id="terminal"></div>
+    <div id="noSession">
+      <div>
+        <div style="font-size:48px;margin-bottom:16px;opacity:0.3">&#9002;</div>
+        <div>No active sessions</div>
+        <div style="font-size:13px;margin-top:8px;color:#444">Open the sidebar and create a new session</div>
+      </div>
+    </div>
+  </div>
+  <button id="scrollBtn" onclick="scrollToBottom()" title="Scroll to bottom">&#8595;</button>
+
+  <!-- Settings overlay -->
+  <div id="settingsOverlay" class="settings-overlay" onclick="if(event.target===this)closeSettings()">
+    <div class="settings-panel">
+      <h2>Settings</h2>
+      <div class="settings-grid">
+        <div class="field">
+          <label>Server name</label>
+          <input id="cfgServerName" placeholder="Machine hostname">
+        </div>
+        <div class="field">
+          <label>Port</label>
+          <input id="cfgPort" type="number">
+        </div>
+        <div class="field">
+          <label>Username</label>
+          <input id="cfgUser">
+        </div>
+        <div class="field">
+          <label>Password <span style="color:#555;font-size:11px;cursor:pointer" onclick="togglePw()">(show/hide)</span></label>
+          <input id="cfgPassword" type="password">
+        </div>
+        <div class="field">
+          <label>Shell</label>
+          <input id="cfgShell">
+        </div>
+        <div class="field">
+          <label>Default working directory</label>
+          <input id="cfgDefaultCwd">
+        </div>
+        <div class="field">
+          <label>Default auto-command</label>
+          <input id="cfgDefaultCommand" placeholder="e.g. claude">
+        </div>
+        <div class="field">
+          <label>Scrollback replay limit (bytes)</label>
+          <input id="cfgScrollbackReplayLimit" type="number" min="10240" step="10240">
+          <div class="hint">Max data sent on session connect (default 100KB)</div>
+        </div>
+        <div class="field field-wide">
+          <label>Scan folders (one per line)</label>
+          <textarea id="cfgScanFolders" rows="2"></textarea>
+        </div>
+      </div>
+      <div id="saveMsg" class="save-msg"></div>
+      <div class="actions">
+        <button class="tb-btn" style="width:auto;padding:6px 14px;font-size:13px;border-color:#333;color:#aaa" onclick="closeSettings()">Cancel</button>
+        <button class="tb-btn" style="width:auto;padding:6px 14px;font-size:13px;border-color:#00d4aa;color:#00d4aa" onclick="saveSettings()">Save</button>
+        <button class="tb-btn" style="width:auto;padding:6px 14px;font-size:13px;border-color:#e94560;color:#e94560;margin-left:auto" onclick="restartServer()">Restart Server</button>
+      </div>
+    </div>
+  </div>
+
+  <script src="https://cdn.jsdelivr.net/npm/@xterm/xterm@5.5.0/lib/xterm.min.js" integrity="sha384-J4qzUjBl1FxyLsl/kQPQIOeINsmp17OHYXDOMpMxlKX53ZfYsL+aWHpgArvOuof9" crossorigin="anonymous"></script>
+  <script src="https://cdn.jsdelivr.net/npm/@xterm/addon-fit@0.10.0/lib/addon-fit.min.js" integrity="sha384-XGqKrV8Jrukp1NITJbOEHwg01tNkuXr6uB6YEj69ebpYU3v7FvoGgEg23C1Gcehk" crossorigin="anonymous"></script>
+  <script src="https://cdn.jsdelivr.net/npm/@xterm/addon-web-links@0.11.0/lib/addon-web-links.min.js" integrity="sha384-S1biLeI8L/bFduIVvCxbn/l4EtaG4nTqQjGF7qCYTbsGXGFe8KgIKXtw4+UWxprv" crossorigin="anonymous"></script>
+  <script>
+    // --- State ---
+    let sessionId = null;
+    let hostname = '';
+    let sessionTitle = 'Web Terminal';
+    let ws = null;
+    let switching = false;
+    let autoScroll = true;
+    let folderHistory = [];
+    let defaultCwd = 'C:\\dev';
+    let defaultCommand = '';
+
+    const status = document.getElementById('status');
+    const scrollBtn = document.getElementById('scrollBtn');
+    const isMobile = /Android|iPhone|iPad|iPod/i.test(navigator.userAgent) || window.innerWidth < 600;
+
+    // --- Terminal ---
+    const term = new window.Terminal({
+      cursorBlink: true,
+      fontSize: isMobile ? 11 : 14,
+      fontFamily: '"Cascadia Code", "Consolas", monospace',
+      theme: { background: '#1e1e1e', foreground: '#d4d4d4', cursor: '#d4d4d4' },
+      scrollback: 5000,
+      fastScrollSensitivity: isMobile ? 3 : 1,
+      touchScrollSensitivity: 3
+    });
+    const fitAddon = new window.FitAddon.FitAddon();
+    term.loadAddon(fitAddon);
+    term.loadAddon(new window.WebLinksAddon.WebLinksAddon());
+    term.open(document.getElementById('terminal'));
+    fitAddon.fit();
+
+    // --- WebSocket ---
+    function connect() {
+      if (!sessionId) return;
+      status.style.display = '';
+      status.textContent = 'connecting...';
+      status.className = '';
+      status.style.opacity = '1';
+      const proto = location.protocol === 'https:' ? 'wss:' : 'ws:';
+      ws = new WebSocket(`${proto}//${location.host}/ws/${sessionId}`);
+
+      ws.onopen = () => {
+        status.textContent = 'connected';
+        status.className = 'connected';
+        setTimeout(() => { status.style.opacity = '0'; }, 3000);
+        ws.send(JSON.stringify({ resize: { cols: term.cols, rows: term.rows } }));
+      };
+
+      ws.onmessage = e => {
+        term.write(e.data);
+        if (autoScroll) term.scrollToBottom();
+      };
+
+      ws.onclose = () => {
+        if (switching) return;
+        status.textContent = 'disconnected — reconnecting...';
+        status.className = 'disconnected';
+        status.style.opacity = '1';
+        setTimeout(connect, 2000);
+      };
+
+      ws.onerror = () => ws.close();
+    }
+
+    function switchSession(id) {
+      if (id === sessionId) return;
+      switching = true;
+      if (ws) { ws.onclose = null; ws.close(); }
+      sessionId = id;
+      history.pushState(null, '', '/app/' + id);
+      term.clear();
+      term.reset();
+      autoScroll = true;
+      // Show terminal, hide placeholder
+      document.getElementById('terminal').style.display = '';
+      document.getElementById('noSession').style.display = 'none';
+      switching = false;
+      connect();
+      updateToolbar();
+      loadSidebar();
+    }
+
+    function updateToolbar() {
+      fetch('/api/sessions').then(r => r.json()).then(list => {
+        const s = list.find(x => x.id === sessionId);
+        if (s) {
+          document.getElementById('sessionName').textContent = s.name;
+          sessionTitle = `${s.name}${hostname ? ' — ' + hostname : ''}`;
+          document.title = sessionTitle;
+          document.getElementById('viewers').textContent = `${s.clients} viewer${s.clients !== 1 ? 's' : ''}`;
+        }
+      });
+    }
+
+    // --- Clipboard ---
+    async function uploadClipboardImage() {
+      try {
+        const items = await navigator.clipboard.read();
+        for (const item of items) {
+          const imageType = item.types.find(t => t.startsWith('image/'));
+          if (imageType) {
+            const blob = await item.getType(imageType);
+            const res = await fetch('/api/clipboard-image', {
+              method: 'POST', headers: { 'Content-Type': imageType }, body: blob
+            });
+            const result = await res.json();
+            if (result.ok && result.clipboard) {
+              if (ws && ws.readyState === WebSocket.OPEN) ws.send('\x1bv');
+              return true;
+            } else if (result.ok) {
+              if (ws && ws.readyState === WebSocket.OPEN) ws.send(result.path);
+              return true;
+            }
+          }
+        }
+      } catch (e) { console.warn('Clipboard image read failed:', e); }
+      return false;
+    }
+
+    term.attachCustomKeyEventHandler(e => {
+      if (e.type !== 'keydown') return true;
+      if (e.altKey && e.key === 'v') { uploadClipboardImage(); return false; }
+      if ((e.ctrlKey || e.metaKey) && e.key === 'v') {
+        e.preventDefault();
+        navigator.clipboard.readText().then(text => {
+          if (text && ws && ws.readyState === WebSocket.OPEN) ws.send(text);
+        });
+        return false;
+      }
+      if ((e.ctrlKey || e.metaKey) && e.key === 'c' && term.hasSelection()) {
+        navigator.clipboard.writeText(term.getSelection());
+        term.clearSelection();
+        return false;
+      }
+      return true;
+    });
+
+    term.onData(data => {
+      if (ws && ws.readyState === WebSocket.OPEN) ws.send(data);
+    });
+
+    function doResize() {
+      fitAddon.fit();
+      if (ws && ws.readyState === WebSocket.OPEN) {
+        ws.send(JSON.stringify({ resize: { cols: term.cols, rows: term.rows } }));
+      }
+    }
+    window.addEventListener('resize', doResize);
+
+    // --- Auto-scroll ---
+    function isAtBottom() { const buf = term.buffer.active; return buf.viewportY >= buf.baseY; }
+    term.onScroll(() => { autoScroll = isAtBottom(); scrollBtn.style.display = autoScroll ? 'none' : 'block'; });
+    term.onLineFeed(() => { if (autoScroll) term.scrollToBottom(); else scrollBtn.style.display = 'block'; });
+    document.getElementById('terminal').addEventListener('touchend', () => setTimeout(() => {
+      autoScroll = isAtBottom(); scrollBtn.style.display = autoScroll ? 'none' : 'block';
+    }, 200));
+    function scrollToBottom() { term.scrollToBottom(); autoScroll = true; scrollBtn.style.display = 'none'; }
+
+    // --- Sidebar ---
+    function toggleSidebar() {
+      const sb = document.getElementById('sidebar');
+      const btn = document.querySelector('.tb-btn');
+      sb.classList.toggle('open');
+      btn.classList.toggle('active');
+      const isOpen = sb.classList.contains('open');
+      if (isOpen) loadSidebar();
+      sessionStorage.setItem('sidebarOpen', isOpen ? '1' : '0');
+      setTimeout(doResize, 250);
+    }
+
+    const statusLabels = { active: 'Running', idle: 'Idle', waiting: 'Waiting' };
+    const timeAgo = ts => {
+      const secs = Math.floor((Date.now() - ts) / 1000);
+      if (secs < 60) return `${secs}s ago`;
+      if (secs < 3600) return `${Math.floor(secs/60)}m ago`;
+      if (secs < 86400) return `${Math.floor(secs/3600)}h ago`;
+      return `${Math.floor(secs/86400)}d ago`;
+    };
+
+    function esc(s) { const d = document.createElement('div'); d.textContent = s; return d.innerHTML; }
+
+    async function loadSidebar() {
+      const list = await (await fetch('/api/sessions')).json();
+      const container = document.getElementById('sidebarList');
+      container.textContent = '';
+
+      if (list.length === 0) {
+        container.innerHTML = '<div style="padding:20px;color:#555;text-align:center;font-size:12px">No sessions. Create one above.</div>';
+        return;
+      }
+
+      for (const s of list) {
+        const item = document.createElement('div');
+        item.className = 'sb-item' + (s.id === sessionId ? ' current' : '');
+        item.innerHTML =
+          `<div class="sb-name"><span class="sb-dot ${s.status}"></span>${esc(s.name)}</div>` +
+          `<div class="sb-meta">` +
+            `<span class="sb-status ${s.status}">${statusLabels[s.status] || s.status}</span>` +
+            `<span class="sb-viewers">${s.clients} viewer${s.clients !== 1 ? 's' : ''}</span>` +
+            `<button class="sb-edit" title="Edit auto-command">&#9998;</button>` +
+            `<button class="sb-kill" title="Kill session">&times;</button>` +
+          `</div>` +
+          `<div class="sb-detail">${esc(s.cwd)}${s.autoCommand ? ' — ' + esc(s.autoCommand) : ''}</div>`;
+
+        item.querySelector('.sb-kill').addEventListener('click', async (e) => {
+          e.stopPropagation();
+          if (!confirm(`Kill "${s.name}"?`)) return;
+          await fetch(`/api/sessions/${s.id}`, { method: 'DELETE' });
+          if (s.id === sessionId) {
+            sessionId = null;
+            document.getElementById('terminal').style.display = 'none';
+            document.getElementById('noSession').style.display = 'flex';
+            document.getElementById('sessionName').textContent = '(no session)';
+            if (ws) { ws.onclose = null; ws.close(); }
+          }
+          loadSidebar();
+        });
+
+        item.querySelector('.sb-edit').addEventListener('click', async (e) => {
+          e.stopPropagation();
+          const cmd = prompt('Auto-command (runs on server restart):\n\nLeave empty to disable:', s.autoCommand || '');
+          if (cmd === null) return;
+          await fetch(`/api/sessions/${s.id}`, {
+            method: 'PATCH', headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({ autoCommand: cmd })
+          });
+          loadSidebar();
+        });
+
+        item.addEventListener('click', (e) => {
+          if (e.target.closest('.sb-kill') || e.target.closest('.sb-edit')) return;
+          switchSession(s.id);
+        });
+
+        // Double-click to rename
+        item.querySelector('.sb-name').addEventListener('dblclick', async (e) => {
+          e.stopPropagation();
+          const name = prompt('Rename session:', s.name);
+          if (!name || name === s.name) return;
+          await fetch(`/api/sessions/${s.id}`, {
+            method: 'PATCH', headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({ name })
+          });
+          if (s.id === sessionId) {
+            document.getElementById('sessionName').textContent = name;
+            sessionTitle = `${name}${hostname ? ' — ' + hostname : ''}`;
+            document.title = sessionTitle;
+          }
+          loadSidebar();
+        });
+
+        container.appendChild(item);
+      }
+
+      // Update viewer count for current session
+      const me = list.find(x => x.id === sessionId);
+      if (me) document.getElementById('viewers').textContent = `${me.clients} viewer${me.clients !== 1 ? 's' : ''}`;
+    }
+
+    // --- New session form ---
+    function toggleNewForm() {
+      const form = document.getElementById('newSessionForm');
+      form.classList.toggle('show');
+      if (form.classList.contains('show')) {
+        document.getElementById('newCwd').value = defaultCwd;
+        document.getElementById('newCmd').value = defaultCommand;
+        document.getElementById('newName').focus();
+      }
+    }
+
+    async function createSession() {
+      const name = document.getElementById('newName').value || undefined;
+      const cwd = document.getElementById('newCwd').value || undefined;
+      const autoCommand = document.getElementById('newCmd').value || '';
+      const res = await fetch('/api/sessions', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ name, cwd, autoCommand })
+      });
+      const data = await res.json();
+      if (data.id) {
+        document.getElementById('newSessionForm').classList.remove('show');
+        document.getElementById('newName').value = '';
+        switchSession(data.id);
+      }
+    }
+
+    // --- Folder suggestions ---
+    async function loadFolderHistory() {
+      try { folderHistory = await (await fetch('/api/history/folders')).json(); } catch (e) { folderHistory = []; }
+    }
+
+    function showFolders() {
+      const input = document.getElementById('newCwd');
+      const container = document.getElementById('folderSuggestions');
+      const val = input.value.toLowerCase();
+      const matches = folderHistory.filter(f => f.toLowerCase().includes(val) || !val);
+      if (matches.length === 0) { container.style.display = 'none'; return; }
+      container.textContent = '';
+      for (const f of matches) {
+        const div = document.createElement('div');
+        div.textContent = f;
+        div.addEventListener('click', () => {
+          document.getElementById('newCwd').value = f;
+          container.style.display = 'none';
+        });
+        container.appendChild(div);
+      }
+      container.style.display = 'block';
+    }
+
+    document.addEventListener('click', e => {
+      if (!e.target.closest('#newCwd') && !e.target.closest('#folderSuggestions'))
+        document.getElementById('folderSuggestions').style.display = 'none';
+    });
+
+    // --- Claude sessions ---
+    function toggleClaude() {
+      const list = document.getElementById('claudeList');
+      const btn = document.querySelector('#claudeSection .sb-section button');
+      if (list.style.display === 'none') {
+        list.style.display = '';
+        btn.textContent = 'Hide';
+        loadClaudeSessions();
+      } else {
+        list.style.display = 'none';
+        btn.textContent = 'Show';
+      }
+    }
+
+    async function loadClaudeSessions() {
+      const container = document.getElementById('claudeList');
+      container.innerHTML = '<div style="padding:8px 12px;color:#555;font-size:11px">Loading...</div>';
+      try {
+        const list = await (await fetch('/api/claude-sessions')).json();
+        container.textContent = '';
+        if (list.length === 0) {
+          container.innerHTML = '<div style="padding:8px 12px;color:#555;font-size:11px">No Claude sessions found</div>';
+          return;
+        }
+        for (const s of list) {
+          const item = document.createElement('div');
+          item.className = 'cl-item';
+          item.innerHTML =
+            `<button class="cl-del" title="Remove">&times;</button>` +
+            `<div class="cl-name">${esc(s.project)}</div>` +
+            `<div class="cl-summary">${esc(s.summary || '(no summary)')}</div>` +
+            `<div class="cl-meta"><span>${s.sizeKB}KB</span><span>${timeAgo(s.lastModified)}</span>${s.skipPermissions ? '<span style="color:#da4">skip-perms</span>' : ''}</div>`;
+
+          item.querySelector('.cl-del').addEventListener('click', async (e) => {
+            e.stopPropagation();
+            if (!confirm('Remove this Claude session from the list?')) return;
+            await fetch(`/api/claude-sessions/${encodeURIComponent(s.project)}/${encodeURIComponent(s.id)}`, { method: 'DELETE' });
+            loadClaudeSessions();
+          });
+
+          item.addEventListener('click', (e) => {
+            if (e.target.closest('.cl-del')) return;
+            resumeClaude(s.id, s.projectPath, s.project, s.skipPermissions);
+          });
+
+          container.appendChild(item);
+        }
+      } catch (e) {
+        container.innerHTML = `<div style="padding:8px 12px;color:#e94560;font-size:11px">Error: ${esc(e.message)}</div>`;
+      }
+    }
+
+    async function resumeClaude(claudeSessionId, projectPath, projectName, skipPermissions) {
+      let cmd = 'claude --resume ' + claudeSessionId;
+      if (skipPermissions) cmd += ' --dangerously-skip-permissions';
+      const res = await fetch('/api/sessions', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ name: projectName, cwd: projectPath, autoCommand: cmd })
+      });
+      const data = await res.json();
+      if (data.id) switchSession(data.id);
+    }
+
+    // --- Rename current session (toolbar click) ---
+    async function renameCurrentSession() {
+      if (!sessionId) return;
+      const el = document.getElementById('sessionName');
+      const name = prompt('Rename session:', el.textContent);
+      if (!name || name === el.textContent) return;
+      await fetch(`/api/sessions/${sessionId}`, {
+        method: 'PATCH', headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ name })
+      });
+      el.textContent = name;
+      sessionTitle = `${name}${hostname ? ' — ' + hostname : ''}`;
+      document.title = sessionTitle;
+      loadSidebar();
+    }
+
+    // --- Settings ---
+    async function openSettings() {
+      const cfg = await (await fetch('/api/config')).json();
+      document.getElementById('cfgServerName').value = cfg.serverName || '';
+      document.getElementById('cfgPort').value = cfg.port || 7681;
+      document.getElementById('cfgUser').value = cfg.user || 'admin';
+      document.getElementById('cfgPassword').value = cfg.password || '';
+      document.getElementById('cfgShell').value = cfg.shell || '';
+      document.getElementById('cfgDefaultCwd').value = cfg.defaultCwd || '';
+      document.getElementById('cfgScanFolders').value = (cfg.scanFolders || []).join('\n');
+      document.getElementById('cfgDefaultCommand').value = cfg.defaultCommand || '';
+      document.getElementById('cfgScrollbackReplayLimit').value = cfg.scrollbackReplayLimit || 102400;
+      document.getElementById('saveMsg').textContent = '';
+      document.getElementById('settingsOverlay').classList.add('show');
+    }
+    function closeSettings() { document.getElementById('settingsOverlay').classList.remove('show'); }
+    function togglePw() { const el = document.getElementById('cfgPassword'); el.type = el.type === 'password' ? 'text' : 'password'; }
+
+    async function saveSettings() {
+      const cfg = {
+        serverName: document.getElementById('cfgServerName').value,
+        port: parseInt(document.getElementById('cfgPort').value) || 7681,
+        user: document.getElementById('cfgUser').value,
+        password: document.getElementById('cfgPassword').value,
+        shell: document.getElementById('cfgShell').value,
+        defaultCwd: document.getElementById('cfgDefaultCwd').value,
+        scanFolders: document.getElementById('cfgScanFolders').value.split('\n').map(s => s.trim()).filter(Boolean),
+        defaultCommand: document.getElementById('cfgDefaultCommand').value,
+        scrollbackReplayLimit: parseInt(document.getElementById('cfgScrollbackReplayLimit').value) || 102400
+      };
+      const res = await fetch('/api/config', {
+        method: 'PUT', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(cfg)
+      });
+      const result = await res.json();
+      document.getElementById('saveMsg').textContent = result.ok
+        ? 'Saved. Restart server for changes to take effect.'
+        : 'Error: ' + (result.error || 'unknown');
+    }
+
+    async function restartServer() {
+      if (!confirm('Restart the server? All terminal connections will briefly disconnect.')) return;
+      try { await fetch('/api/restart', { method: 'POST' }); } catch(e) {}
+      document.getElementById('saveMsg').textContent = 'Restarting...';
+      setTimeout(() => location.reload(), 4000);
+    }
+
+    function logout() { location.href = '/logout'; }
+
+    // --- Notifications ---
+    function connectNotify() {
+      const proto = location.protocol === 'https:' ? 'wss:' : 'ws:';
+      const nws = new WebSocket(`${proto}//${location.host}/ws/notify`);
+      nws.onmessage = e => {
+        try {
+          const { notification } = JSON.parse(e.data);
+          showNotification(notification);
+        } catch (err) {}
+      };
+      nws.onclose = () => setTimeout(connectNotify, 3000);
+      nws.onerror = () => nws.close();
+    }
+
+    if ('Notification' in window && Notification.permission === 'default') Notification.requestPermission();
+    const pendingAlerts = new Map();
+    let flashInterval = null;
+
+    function startFlashing() {
+      if (flashInterval) return;
+      let idx = 0;
+      flashInterval = setInterval(() => {
+        const alerts = Array.from(pendingAlerts.values());
+        if (alerts.length === 0) { stopFlashing(); return; }
+        document.title = `** ${alerts[idx % alerts.length].message} **`;
+        idx++;
+      }, 1500);
+    }
+    function stopFlashing() {
+      if (flashInterval) { clearInterval(flashInterval); flashInterval = null; }
+      document.title = sessionTitle;
+      pendingAlerts.clear();
+    }
+    window.addEventListener('focus', stopFlashing);
+
+    function showNotification(n) {
+      if (n.sessionId !== sessionId) return;
+      pendingAlerts.set(n.sessionId, n);
+      if (!document.hasFocus() && 'Notification' in window && Notification.permission === 'granted') {
+        const notif = new Notification(n.session, { body: n.message, tag: 'web-terminal-' + n.sessionId, renotify: true });
+        notif.onclick = () => { window.focus(); notif.close(); };
+        setTimeout(() => notif.close(), 15000);
+      }
+      if (!document.hasFocus()) startFlashing();
+    }
+
+    // --- Browser back/forward ---
+    window.addEventListener('popstate', () => {
+      const parts = location.pathname.split('/');
+      const id = parts[parts.length - 1];
+      if (id && id !== 'app' && id !== sessionId) switchSession(id);
+    });
+
+    // --- Refresh sidebar every 5s ---
+    setInterval(async () => {
+      if (!document.getElementById('sidebar').classList.contains('open')) return;
+      loadSidebar();
+    }, 5000);
+
+    // --- Init ---
+    async function init() {
+      const [hostData, list, cfg] = await Promise.all([
+        fetch('/api/hostname').then(r => r.json()),
+        fetch('/api/sessions').then(r => r.json()),
+        fetch('/api/config').then(r => r.json())
+      ]);
+
+      hostname = hostData.hostname;
+      defaultCwd = cfg.defaultCwd || 'C:\\dev';
+      defaultCommand = cfg.defaultCommand || '';
+      if (hostname) {
+        document.getElementById('hostName').textContent = `[${hostname}]`;
+        document.getElementById('hostLabel').textContent = hostname;
+      }
+
+      await loadFolderHistory();
+
+      // Try to get session from URL
+      const parts = location.pathname.split('/');
+      const urlSession = parts.length >= 3 ? parts[2] : null;
+
+      if (urlSession && list.find(x => x.id === urlSession)) {
+        switchSession(urlSession);
+      } else if (list.length > 0) {
+        // Auto-select first session
+        switchSession(list[0].id);
+      } else {
+        // No sessions — show placeholder
+        document.getElementById('terminal').style.display = 'none';
+        document.getElementById('noSession').style.display = 'flex';
+      }
+
+      // Open sidebar
+      if (sessionStorage.getItem('sidebarOpen') === '1') {
+        toggleSidebar();
+      }
+
+      connectNotify();
+    }
+
+    init();
+  </script>
+</body>
+</html>
