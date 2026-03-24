@@ -405,8 +405,14 @@
           card.appendChild(summary);
           card.appendChild(el('span', 'claude-size', s.sizeKB + 'KB'));
           card.appendChild(el('span', 'claude-time', timeAgo(s.lastModified)));
+          if (s.skipPermissions) {
+            const badge = el('span', 'claude-size', 'skip-perms');
+            badge.title = 'Session was started with --dangerously-skip-permissions';
+            badge.style.color = '#da4';
+            card.appendChild(badge);
+          }
           const btn = el('button', 'btn btn-resume', 'Resume');
-          btn.addEventListener('click', () => resumeClaude(s.id, s.projectPath, s.project));
+          btn.addEventListener('click', () => resumeClaude(s.id, s.projectPath, s.project, s.skipPermissions));
           card.appendChild(btn);
           const delBtn = el('button', 'btn btn-kill', '\u00D7');
           delBtn.title = 'Remove this session';
@@ -421,8 +427,9 @@
       }
     }
 
-    async function resumeClaude(sessionId, projectPath, projectName) {
-      const cmd = 'claude --resume ' + sessionId;
+    async function resumeClaude(sessionId, projectPath, projectName, skipPermissions) {
+      let cmd = 'claude --resume ' + sessionId;
+      if (skipPermissions) cmd += ' --dangerously-skip-permissions';
       const res = await fetch('/api/sessions', {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },

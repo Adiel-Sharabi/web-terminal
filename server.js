@@ -803,11 +803,13 @@ app.get('/api/claude-sessions', (req, res) => {
         let summary = '';
         let hasUserMessage = false;
         let hasAssistantResponse = false;
+        let permissionMode = '';
         try {
           const lines = fs.readFileSync(path.join(projectDir, f.file), 'utf8').split('\n');
           for (const line of lines.slice(0, 40)) {
             if (!line.trim()) continue;
             const obj = JSON.parse(line);
+            if (obj.permissionMode && !permissionMode) permissionMode = obj.permissionMode;
             if (obj.type === 'user' && obj.message?.content && !hasUserMessage) {
               hasUserMessage = true;
               summary = typeof obj.message.content === 'string'
@@ -815,7 +817,7 @@ app.get('/api/claude-sessions', (req, res) => {
                 : JSON.stringify(obj.message.content).substring(0, 120);
             }
             if (obj.type === 'assistant') hasAssistantResponse = true;
-            if (hasUserMessage && hasAssistantResponse) break;
+            if (hasUserMessage && hasAssistantResponse && permissionMode) break;
           }
         } catch (e) {}
 
@@ -828,7 +830,8 @@ app.get('/api/claude-sessions', (req, res) => {
           projectPath,
           summary: summary.replace(/[\n\r]+/g, ' ').trim(),
           lastModified: f.mtime,
-          sizeKB: Math.round(f.size / 1024)
+          sizeKB: Math.round(f.size / 1024),
+          skipPermissions: permissionMode === 'bypassPermissions'
         });
       }
     }
