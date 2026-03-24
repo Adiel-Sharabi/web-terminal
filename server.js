@@ -1307,6 +1307,17 @@ app.ws('/ws/notify', (ws, req) => {
 });
 
 // --- WebSocket: attach to session ---
+// Debug: test WS auth
+app.ws('/ws/debug', (ws, req) => {
+  const cookies = parseCookies(req.headers.cookie);
+  const hasCookie = verifySessionToken(cookies[COOKIE_NAME]);
+  const queryToken = req.query?.token;
+  const urlToken = new URL(req.url, `http://${req.headers.host}`).searchParams.get('token');
+  const tokenValid = (queryToken && verifyApiToken(queryToken)) || (urlToken && verifyApiToken(urlToken));
+  ws.send(JSON.stringify({ hasCookie, queryToken: !!queryToken, urlToken: !!urlToken, tokenValid, reqUrl: req.url, reqQuery: req.query }));
+  ws.close();
+});
+
 app.ws('/ws/:id', (ws, req) => {
   if (!authenticateWs(ws, req)) return;
   const session = sessions.get(req.params.id);
