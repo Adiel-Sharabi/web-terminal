@@ -23,12 +23,25 @@ const PORT = parseInt(process.env.WT_PORT || config.port || '7681');
 let _USER = process.env.WT_USER || config.user || 'admin';
 let PASS = process.env.WT_PASS || config.password || 'admin';
 const SHELL = process.env.WT_SHELL || config.shell || 'C:\\Program Files\\Git\\bin\\bash.exe';
-const DEFAULT_CWD = process.env.WT_CWD || config.defaultCwd || 'C:\\dev';
-const SCAN_FOLDERS = config.scanFolders || [DEFAULT_CWD];
-const DEFAULT_COMMAND = config.defaultCommand || '';
-const OPEN_IN_NEW_TAB = config.openInNewTab !== undefined ? config.openInNewTab : true;
-const SERVER_NAME = config.serverName || os.hostname();
-const SCROLLBACK_REPLAY_LIMIT = parseInt(config.scrollbackReplayLimit) || 102400; // 100KB default
+const SERVER_NAME = config.serverName || os.hostname(); // startup default
+function getServerName() { return liveConfig('serverName', os.hostname()); }
+
+// Live-reloadable settings (read from disk on each use)
+function liveConfig(key, fallback) {
+  try {
+    if (fs.existsSync(CONFIG_FILE)) {
+      const cfg = JSON.parse(fs.readFileSync(CONFIG_FILE, 'utf8'));
+      if (cfg[key] !== undefined) return cfg[key];
+    }
+  } catch (e) {}
+  return fallback;
+}
+function getDefaultCwd() { return process.env.WT_CWD || liveConfig('defaultCwd', 'C:\\dev'); }
+function getScanFolders() { return liveConfig('scanFolders', [getDefaultCwd()]); }
+function getDefaultCommand() { return liveConfig('defaultCommand', ''); }
+function getScrollbackReplayLimit() { return parseInt(liveConfig('scrollbackReplayLimit', 102400)) || 102400; }
+// Kept for backward compat in startup code
+const DEFAULT_CWD = getDefaultCwd();
 const SESSIONS_FILE = path.join(__dirname, 'sessions.json');
 const SCROLLBACK_DIR = path.join(__dirname, 'scrollback');
 const CLIPBOARD_DIR = path.join(__dirname, 'clipboard-images');
@@ -371,6 +384,17 @@ function saveClusterTokens(tokens) {
   fs.writeFileSync(CLUSTER_TOKENS_FILE, JSON.stringify(tokens, null, 2), 'utf8');
 }
 
+// Read cluster config live from disk (no restart needed)
+function getClusterConfig() {
+  try {
+    if (fs.existsSync(CONFIG_FILE)) {
+      const cfg = JSON.parse(fs.readFileSync(CONFIG_FILE, 'utf8'));
+      return cfg.cluster || [];
+    }
+  } catch (e) {}
+  return [];
+}
+
 // --- Login page ---
 const LOGIN_PAGE = `<!DOCTYPE html><html><head>
 <meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1">
@@ -635,12 +659,12 @@ app.get('/api/config', (req, res) => {
   current.user = current.user || _USER;
   current.password = current.password || PASS;
   current.shell = current.shell || SHELL;
-  current.defaultCwd = current.defaultCwd || DEFAULT_CWD;
-  current.scanFolders = current.scanFolders || SCAN_FOLDERS;
-  current.defaultCommand = current.defaultCommand || DEFAULT_COMMAND;
-  current.openInNewTab = current.openInNewTab !== undefined ? current.openInNewTab : OPEN_IN_NEW_TAB;
-  current.serverName = current.serverName || SERVER_NAME;
-  current.scrollbackReplayLimit = current.scrollbackReplayLimit || SCROLLBACK_REPLAY_LIMIT;
+  current.defaultCwd = current.defaultCwd || getDefaultCwd();
+  current.scanFolders = current.scanFolders || getScanFolders();
+  current.defaultCommand = current.defaultCommand || getDefaultCommand();
+  current.openInNewTab = current.openInNewTab !== undefined ? current.openInNewTab : liveConfig('openInNewTab', true);
+  current.serverName = current.serverName || getServerName();
+  current.scrollbackReplayLimit = current.scrollbackReplayLimit || getScrollbackReplayLimit();
   current.cluster = current.cluster || [];
   // Never expose password in API response
   current.password = '***';
@@ -670,7 +694,17 @@ app.put('/api/config', express.json({ limit: '16kb' }), (req, res) => {
     if (sanitized.openInNewTab !== undefined) sanitized.openInNewTab = !!sanitized.openInNewTab;
     if (sanitized.scrollbackReplayLimit !== undefined) sanitized.scrollbackReplayLimit = Math.max(10240, parseInt(sanitized.scrollbackReplayLimit) || 102400);
     fs.writeFileSync(CONFIG_FILE, JSON.stringify(sanitized, null, 2), 'utf8');
-    res.json({ ok: true, message: 'Saved. Restart server for changes to take effect.' });
+    // Determine if restart is needed based on which fields changed
+    const RESTART_KEYS = ['port', 'host', 'shell'];
+    const changedKeys = Object.keys(sanitized);
+    const needsRestart = changedKeys.some(k => RESTART_KEYS.includes(k));
+    res.json({
+      ok: true,
+      needsRestart,
+      message: needsRestart
+        ? 'Saved. Port, host, or shell changed — restart required.'
+        : 'Saved. Changes are live.'
+    });
   } catch (e) {
     console.error(e.message); res.status(500).json({ error: 'Internal error' });
   }
@@ -678,7 +712,7 @@ app.put('/api/config', express.json({ limit: '16kb' }), (req, res) => {
 
 // --- API: hostname ---
 app.get('/api/hostname', (req, res) => {
-  res.json({ hostname: SERVER_NAME });
+  res.json({ hostname: getServerName() });
 });
 
 // --- API: auth token (for cluster inter-server auth) ---
@@ -719,7 +753,7 @@ const https = require('https');
 
 app.get('/api/cluster/servers', (req, res) => {
   const clusterTokens = loadClusterTokens();
-  const servers = (config.cluster || []).map(s => ({
+  const servers = getClusterConfig().map(s => ({
     name: s.name,
     url: s.url,
     hasToken: !!clusterTokens[s.url]
@@ -733,14 +767,14 @@ app.post('/api/cluster/auth', express.json({ limit: '16kb' }), async (req, res) 
   if (!url || !user || !password) return res.status(400).json({ error: 'url, user, password required' });
 
   // Verify this URL is in our cluster config
-  const server = (config.cluster || []).find(s => s.url === url);
+  const server = getClusterConfig().find(s => s.url === url);
   if (!server) return res.status(400).json({ error: 'Server not in cluster config' });
 
   try {
     const tokenRes = await clusterFetch(url + '/api/auth/token', {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({ user, password, label: `cluster:${SERVER_NAME}` })
+      body: JSON.stringify({ user, password, label: `cluster:${getServerName()}` })
     });
     if (!tokenRes.ok) return res.status(401).json({ error: 'Remote server rejected credentials' });
     const data = JSON.parse(tokenRes.body);
@@ -772,13 +806,13 @@ app.get('/api/cluster/sessions', async (req, res) => {
       id, name: s.name, cwd: s.cwd, status: s.status,
       clients: s.clients.size, pid: s.term.pid,
       lastActivity: s.lastActivity, autoCommand: s.autoCommand || '',
-      server: SERVER_NAME, serverUrl: null // null = local
+      server: getServerName(), serverUrl: null // null = local
     });
   }
 
   // Remote sessions (parallel, with timeout)
   const clusterTokens = loadClusterTokens();
-  const remotePromises = (config.cluster || []).map(async (server) => {
+  const remotePromises = getClusterConfig().map(async (server) => {
     const tokenEntry = clusterTokens[server.url];
     if (!tokenEntry) return { server: server.name, url: server.url, online: false, needsAuth: true, sessions: [] };
     try {
@@ -808,7 +842,7 @@ app.get('/api/cluster/sessions', async (req, res) => {
   res.json({
     sessions: result,
     servers: [
-      { name: SERVER_NAME, url: null, online: true, needsAuth: false },
+      { name: getServerName(), url: null, online: true, needsAuth: false },
       ...remotes.map(r => ({ name: r.server, url: r.url, online: r.online, needsAuth: r.needsAuth }))
     ]
   });
@@ -939,17 +973,18 @@ app.post('/api/sessions', express.json({ limit: '16kb' }), (req, res) => {
     return res.status(429).json({ error: `Session limit reached (max ${MAX_SESSIONS})` });
   }
   const id = crypto.randomUUID();
-  let cwd = String(req.body?.cwd || DEFAULT_CWD).substring(0, 260);
+  const liveCwd = getDefaultCwd();
+  let cwd = String(req.body?.cwd || liveCwd).substring(0, 260);
   const name = String(req.body?.name || `Session ${sessions.size + 1}`).substring(0, 100).replace(/[\x00-\x1f]/g, '');
   const autoCommand = String(req.body?.autoCommand || '').substring(0, 500);
   // Verify cwd exists, fall back to default
   try {
     if (!fs.existsSync(cwd) || !fs.statSync(cwd).isDirectory()) {
-      console.warn(`CWD "${cwd}" does not exist, falling back to ${DEFAULT_CWD}`);
-      cwd = DEFAULT_CWD;
+      console.warn(`CWD "${cwd}" does not exist, falling back to ${liveCwd}`);
+      cwd = liveCwd;
     }
   } catch (e) {
-    cwd = DEFAULT_CWD;
+    cwd = liveCwd;
   }
   try {
     createSession(id, cwd, name, autoCommand);
@@ -1003,7 +1038,7 @@ app.get('/api/history/folders', (req, res) => {
   const history = loadHistory().folders;
   // Also scan configured folders and their subdirectories
   const scanned = new Set(history);
-  for (const baseDir of SCAN_FOLDERS) {
+  for (const baseDir of getScanFolders()) {
     try {
       scanned.add(baseDir);
       const dirs = fs.readdirSync(baseDir, { withFileTypes: true })
@@ -1212,7 +1247,8 @@ app.ws('/ws/:id', (ws, req) => {
   try {
     if (session.scrollback.length) {
       const full = session.scrollback.join('');
-      ws.send(full.length > SCROLLBACK_REPLAY_LIMIT ? full.slice(-SCROLLBACK_REPLAY_LIMIT) : full);
+      const limit = getScrollbackReplayLimit();
+      ws.send(full.length > limit ? full.slice(-limit) : full);
     }
   } catch (e) {}
 
