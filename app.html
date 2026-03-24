@@ -2,7 +2,12 @@
 <html>
 <head>
   <meta charset="utf-8">
-  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0, viewport-fit=cover">
+  <meta name="theme-color" content="#16213e">
+  <meta name="apple-mobile-web-app-capable" content="yes">
+  <meta name="apple-mobile-web-app-status-bar-style" content="black-translucent">
+  <link rel="manifest" href="/manifest.json">
+  <link rel="icon" href="/icon.svg" type="image/svg+xml">
   <title>Web Terminal</title>
   <link rel="stylesheet" href="https://cdn.jsdelivr.net/npm/@xterm/xterm@5.5.0/css/xterm.min.css" integrity="sha384-tStR1zLfWgsiXCF3IgfB3lBa8KmBe/lG287CL9WCeKgQYcp1bjb4/+mwN6oti4Co" crossorigin="anonymous">
   <style>
@@ -52,6 +57,17 @@
     .sb-dot.active { background: #4a4; }
     .sb-dot.idle { background: #da4; }
     .sb-dot.waiting { background: #e94560; animation: pulse 1.5s infinite; }
+    .sb-server {
+      padding: 5px 12px; color: #00d4aa; font: 10px 'Segoe UI', sans-serif; text-transform: uppercase;
+      background: #0a1a30; border-bottom: 1px solid #0f3460; display: flex; align-items: center; gap: 6px;
+      letter-spacing: 0.5px;
+    }
+    .sb-server .srv-dot { display: inline-block; width: 6px; height: 6px; border-radius: 50%; }
+    .sb-server .srv-dot.online { background: #4a4; }
+    .sb-server .srv-dot.offline { background: #a44; }
+    .sb-server .srv-dot.needsauth { background: #da4; }
+    .sb-server .srv-auth { margin-left: auto; color: #da4; font-size: 10px; cursor: pointer; text-transform: none; }
+    .sb-server .srv-auth:hover { text-decoration: underline; }
     @keyframes pulse { 0%,100% { opacity: 1; } 50% { opacity: 0.4; } }
     .sb-status { font-size: 10px; }
     .sb-status.active { color: #4a4; }
@@ -263,6 +279,16 @@
           <label>Scan folders (one per line)</label>
           <textarea id="cfgScanFolders" rows="2"></textarea>
         </div>
+        <div class="field field-wide" style="border-top:1px solid #0f3460;padding-top:12px;margin-top:4px">
+          <label>Cluster — Remote Servers</label>
+          <div id="clusterList" style="margin-bottom:6px"></div>
+          <div style="display:flex;gap:4px">
+            <input id="clusterName" placeholder="Name" style="width:25%">
+            <input id="clusterUrl" placeholder="https://server.ts.net" style="width:55%">
+            <button class="tb-btn" style="width:auto;padding:4px 10px;font-size:11px;border-color:#00d4aa;color:#00d4aa" onclick="addClusterServer()">Add</button>
+          </div>
+          <div class="hint">Add remote web-terminal servers. You'll authenticate to each separately.</div>
+        </div>
       </div>
       <div id="saveMsg" class="save-msg"></div>
       <div class="actions">
@@ -279,6 +305,7 @@
   <script>
     // --- State ---
     let sessionId = null;
+    let sessionServerUrl = null; // null = local, string = remote server URL
     let hostname = '';
     let sessionTitle = 'Web Terminal';
     let ws = null;
@@ -287,6 +314,7 @@
     let folderHistory = [];
     let defaultCwd = 'C:\\dev';
     let defaultCommand = '';
+    let clusterServers = []; // cached from last fetch
 
     const status = document.getElementById('status');
     const scrollBtn = document.getElementById('scrollBtn');
@@ -316,7 +344,10 @@
       status.className = '';
       status.style.opacity = '1';
       const proto = location.protocol === 'https:' ? 'wss:' : 'ws:';
-      ws = new WebSocket(`${proto}//${location.host}/ws/${sessionId}`);
+      const wsPath = sessionServerUrl
+        ? `/cluster/${encodeURIComponent(sessionServerUrl)}/ws/${sessionId}`
+        : `/ws/${sessionId}`;
+      ws = new WebSocket(`${proto}//${location.host}${wsPath}`);
 
       ws.onopen = () => {
         status.textContent = 'connected';
@@ -341,12 +372,13 @@
       ws.onerror = () => ws.close();
     }
 
-    function switchSession(id) {
-      if (id === sessionId) return;
+    function switchSession(id, serverUrl) {
+      if (id === sessionId && serverUrl === sessionServerUrl) return;
       switching = true;
       if (ws) { ws.onclose = null; ws.close(); }
       sessionId = id;
-      history.pushState(null, '', '/app/' + id);
+      sessionServerUrl = serverUrl || null;
+      history.pushState({ id, serverUrl: sessionServerUrl }, '', '/app/' + id);
       term.clear();
       term.reset();
       autoScroll = true;
@@ -360,15 +392,25 @@
     }
 
     function updateToolbar() {
-      fetch('/api/sessions').then(r => r.json()).then(list => {
+      // Use cached cluster data or fetch local
+      const fetchUrl = sessionServerUrl
+        ? `/cluster/${encodeURIComponent(sessionServerUrl)}/api/sessions`
+        : '/api/sessions';
+      fetch(fetchUrl).then(r => r.json()).then(list => {
         const s = list.find(x => x.id === sessionId);
         if (s) {
-          document.getElementById('sessionName').textContent = s.name;
+          const serverLabel = sessionServerUrl ? ` [${getServerName(sessionServerUrl)}]` : '';
+          document.getElementById('sessionName').textContent = s.name + serverLabel;
           sessionTitle = `${s.name}${hostname ? ' — ' + hostname : ''}`;
           document.title = sessionTitle;
           document.getElementById('viewers').textContent = `${s.clients} viewer${s.clients !== 1 ? 's' : ''}`;
         }
       });
+    }
+
+    function getServerName(url) {
+      const srv = clusterServers.find(s => s.url === url);
+      return srv ? srv.name : url;
     }
 
     // --- Clipboard ---
@@ -459,81 +501,147 @@
     function esc(s) { const d = document.createElement('div'); d.textContent = s; return d.innerHTML; }
 
     async function loadSidebar() {
-      const list = await (await fetch('/api/sessions')).json();
+      let data;
+      try {
+        data = await (await fetch('/api/cluster/sessions')).json();
+      } catch (e) {
+        // Fallback to local-only
+        const list = await (await fetch('/api/sessions')).json();
+        data = {
+          sessions: list.map(s => ({ ...s, server: hostname, serverUrl: null })),
+          servers: [{ name: hostname, url: null, online: true }]
+        };
+      }
+
+      clusterServers = data.servers;
       const container = document.getElementById('sidebarList');
       container.textContent = '';
 
-      if (list.length === 0) {
+      if (data.sessions.length === 0 && data.servers.length <= 1) {
         container.innerHTML = '<div style="padding:20px;color:#555;text-align:center;font-size:12px">No sessions. Create one above.</div>';
         return;
       }
 
-      for (const s of list) {
-        const item = document.createElement('div');
-        item.className = 'sb-item' + (s.id === sessionId ? ' current' : '');
-        item.innerHTML =
-          `<div class="sb-name"><span class="sb-dot ${s.status}"></span>${esc(s.name)}</div>` +
-          `<div class="sb-meta">` +
-            `<span class="sb-status ${s.status}">${statusLabels[s.status] || s.status}</span>` +
-            `<span class="sb-viewers">${s.clients} viewer${s.clients !== 1 ? 's' : ''}</span>` +
-            `<button class="sb-edit" title="Edit auto-command">&#9998;</button>` +
-            `<button class="sb-kill" title="Kill session">&times;</button>` +
-          `</div>` +
-          `<div class="sb-detail">${esc(s.cwd)}${s.autoCommand ? ' — ' + esc(s.autoCommand) : ''}</div>`;
+      // Group sessions by server
+      for (const server of data.servers) {
+        // Server header
+        const header = document.createElement('div');
+        header.className = 'sb-server';
+        const statusCls = !server.online ? 'offline' : server.needsAuth ? 'needsauth' : 'online';
+        header.innerHTML = `<span class="srv-dot ${statusCls}"></span>${esc(server.name || 'Local')}`;
+        if (server.needsAuth && server.url) {
+          const authLink = document.createElement('span');
+          authLink.className = 'srv-auth';
+          authLink.textContent = 'Login';
+          authLink.addEventListener('click', () => clusterLogin(server.url, server.name));
+          header.appendChild(authLink);
+        } else if (!server.online && server.url) {
+          header.innerHTML += '<span style="margin-left:auto;color:#a44;font-size:10px">offline</span>';
+        }
+        container.appendChild(header);
 
-        item.querySelector('.sb-kill').addEventListener('click', async (e) => {
-          e.stopPropagation();
-          if (!confirm(`Kill "${s.name}"?`)) return;
-          await fetch(`/api/sessions/${s.id}`, { method: 'DELETE' });
-          if (s.id === sessionId) {
-            sessionId = null;
-            document.getElementById('terminal').style.display = 'none';
-            document.getElementById('noSession').style.display = 'flex';
-            document.getElementById('sessionName').textContent = '(no session)';
-            if (ws) { ws.onclose = null; ws.close(); }
-          }
-          loadSidebar();
-        });
+        // Sessions for this server
+        const serverSessions = data.sessions.filter(s => s.serverUrl === server.url);
+        if (serverSessions.length === 0) {
+          const empty = document.createElement('div');
+          empty.style.cssText = 'padding:6px 12px;color:#444;font-size:11px;border-bottom:1px solid #0a1a30';
+          empty.textContent = server.online ? 'No sessions' : '';
+          container.appendChild(empty);
+          continue;
+        }
 
-        item.querySelector('.sb-edit').addEventListener('click', async (e) => {
-          e.stopPropagation();
-          const cmd = prompt('Auto-command (runs on server restart):\n\nLeave empty to disable:', s.autoCommand || '');
-          if (cmd === null) return;
-          await fetch(`/api/sessions/${s.id}`, {
-            method: 'PATCH', headers: { 'Content-Type': 'application/json' },
-            body: JSON.stringify({ autoCommand: cmd })
+        for (const s of serverSessions) {
+          const item = document.createElement('div');
+          const isCurrent = s.id === sessionId && s.serverUrl === sessionServerUrl;
+          item.className = 'sb-item' + (isCurrent ? ' current' : '');
+          item.innerHTML =
+            `<div class="sb-name"><span class="sb-dot ${s.status}"></span>${esc(s.name)}</div>` +
+            `<div class="sb-meta">` +
+              `<span class="sb-status ${s.status}">${statusLabels[s.status] || s.status}</span>` +
+              `<span class="sb-viewers">${s.clients} viewer${s.clients !== 1 ? 's' : ''}</span>` +
+              `<button class="sb-edit" title="Edit auto-command">&#9998;</button>` +
+              `<button class="sb-kill" title="Kill session">&times;</button>` +
+            `</div>` +
+            `<div class="sb-detail">${esc(s.cwd)}${s.autoCommand ? ' — ' + esc(s.autoCommand) : ''}</div>`;
+
+          const apiBase = s.serverUrl ? `/cluster/${encodeURIComponent(s.serverUrl)}/api` : '/api';
+
+          item.querySelector('.sb-kill').addEventListener('click', async (e) => {
+            e.stopPropagation();
+            if (!confirm(`Kill "${s.name}"?`)) return;
+            await fetch(`${apiBase}/sessions/${s.id}`, { method: 'DELETE' });
+            if (isCurrent) {
+              sessionId = null; sessionServerUrl = null;
+              document.getElementById('terminal').style.display = 'none';
+              document.getElementById('noSession').style.display = 'flex';
+              document.getElementById('sessionName').textContent = '(no session)';
+              if (ws) { ws.onclose = null; ws.close(); }
+            }
+            loadSidebar();
           });
-          loadSidebar();
-        });
 
-        item.addEventListener('click', (e) => {
-          if (e.target.closest('.sb-kill') || e.target.closest('.sb-edit')) return;
-          switchSession(s.id);
-        });
-
-        // Double-click to rename
-        item.querySelector('.sb-name').addEventListener('dblclick', async (e) => {
-          e.stopPropagation();
-          const name = prompt('Rename session:', s.name);
-          if (!name || name === s.name) return;
-          await fetch(`/api/sessions/${s.id}`, {
-            method: 'PATCH', headers: { 'Content-Type': 'application/json' },
-            body: JSON.stringify({ name })
+          item.querySelector('.sb-edit').addEventListener('click', async (e) => {
+            e.stopPropagation();
+            const cmd = prompt('Auto-command (runs on server restart):\n\nLeave empty to disable:', s.autoCommand || '');
+            if (cmd === null) return;
+            await fetch(`${apiBase}/sessions/${s.id}`, {
+              method: 'PATCH', headers: { 'Content-Type': 'application/json' },
+              body: JSON.stringify({ autoCommand: cmd })
+            });
+            loadSidebar();
           });
-          if (s.id === sessionId) {
-            document.getElementById('sessionName').textContent = name;
-            sessionTitle = `${name}${hostname ? ' — ' + hostname : ''}`;
-            document.title = sessionTitle;
-          }
-          loadSidebar();
-        });
 
-        container.appendChild(item);
+          item.addEventListener('click', (e) => {
+            if (e.target.closest('.sb-kill') || e.target.closest('.sb-edit')) return;
+            switchSession(s.id, s.serverUrl);
+          });
+
+          // Double-click to rename
+          item.querySelector('.sb-name').addEventListener('dblclick', async (e) => {
+            e.stopPropagation();
+            const name = prompt('Rename session:', s.name);
+            if (!name || name === s.name) return;
+            await fetch(`${apiBase}/sessions/${s.id}`, {
+              method: 'PATCH', headers: { 'Content-Type': 'application/json' },
+              body: JSON.stringify({ name })
+            });
+            if (isCurrent) {
+              document.getElementById('sessionName').textContent = name;
+              sessionTitle = `${name}${hostname ? ' — ' + hostname : ''}`;
+              document.title = sessionTitle;
+            }
+            loadSidebar();
+          });
+
+          container.appendChild(item);
+        }
       }
 
       // Update viewer count for current session
-      const me = list.find(x => x.id === sessionId);
+      const me = data.sessions.find(x => x.id === sessionId && x.serverUrl === sessionServerUrl);
       if (me) document.getElementById('viewers').textContent = `${me.clients} viewer${me.clients !== 1 ? 's' : ''}`;
+    }
+
+    // Prompt login to a remote cluster server
+    async function clusterLogin(url, name) {
+      const user = prompt(`Login to ${name}\n\nUsername:`);
+      if (!user) return;
+      const password = prompt(`Password for ${user}@${name}:`);
+      if (!password) return;
+      try {
+        const res = await fetch('/api/cluster/auth', {
+          method: 'POST', headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({ url, user, password })
+        });
+        const data = await res.json();
+        if (data.ok) {
+          loadSidebar();
+        } else {
+          alert('Authentication failed: ' + (data.error || 'unknown'));
+        }
+      } catch (e) {
+        alert('Error: ' + e.message);
+      }
     }
 
     // --- New session form ---
@@ -663,7 +771,8 @@
       const el = document.getElementById('sessionName');
       const name = prompt('Rename session:', el.textContent);
       if (!name || name === el.textContent) return;
-      await fetch(`/api/sessions/${sessionId}`, {
+      const apiBase = sessionServerUrl ? `/cluster/${encodeURIComponent(sessionServerUrl)}/api` : '/api';
+      await fetch(`${apiBase}/sessions/${sessionId}`, {
         method: 'PATCH', headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({ name })
       });
@@ -685,6 +794,7 @@
       document.getElementById('cfgScanFolders').value = (cfg.scanFolders || []).join('\n');
       document.getElementById('cfgDefaultCommand').value = cfg.defaultCommand || '';
       document.getElementById('cfgScrollbackReplayLimit').value = cfg.scrollbackReplayLimit || 102400;
+      renderClusterList(cfg.cluster || []);
       document.getElementById('saveMsg').textContent = '';
       document.getElementById('settingsOverlay').classList.add('show');
     }
@@ -701,7 +811,8 @@
         defaultCwd: document.getElementById('cfgDefaultCwd').value,
         scanFolders: document.getElementById('cfgScanFolders').value.split('\n').map(s => s.trim()).filter(Boolean),
         defaultCommand: document.getElementById('cfgDefaultCommand').value,
-        scrollbackReplayLimit: parseInt(document.getElementById('cfgScrollbackReplayLimit').value) || 102400
+        scrollbackReplayLimit: parseInt(document.getElementById('cfgScrollbackReplayLimit').value) || 102400,
+        cluster: getClusterListFromUI()
       };
       const res = await fetch('/api/config', {
         method: 'PUT', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(cfg)
@@ -710,6 +821,47 @@
       document.getElementById('saveMsg').textContent = result.ok
         ? 'Saved. Restart server for changes to take effect.'
         : 'Error: ' + (result.error || 'unknown');
+    }
+
+    // --- Cluster settings UI ---
+    let _clusterList = [];
+
+    function renderClusterList(list) {
+      _clusterList = list || [];
+      const container = document.getElementById('clusterList');
+      container.textContent = '';
+      if (_clusterList.length === 0) {
+        container.innerHTML = '<div style="color:#555;font-size:11px">No remote servers configured</div>';
+        return;
+      }
+      for (let i = 0; i < _clusterList.length; i++) {
+        const s = _clusterList[i];
+        const row = document.createElement('div');
+        row.style.cssText = 'display:flex;align-items:center;gap:6px;padding:3px 0;font-size:12px';
+        row.innerHTML =
+          `<span style="color:#00d4aa;flex:1">${esc(s.name)}</span>` +
+          `<span style="color:#666;font-size:10px;flex:2;overflow:hidden;text-overflow:ellipsis">${esc(s.url)}</span>` +
+          `<button style="background:transparent;border:none;color:#e94560;cursor:pointer;font-size:14px" title="Remove">&times;</button>`;
+        row.querySelector('button').addEventListener('click', () => {
+          _clusterList.splice(i, 1);
+          renderClusterList(_clusterList);
+        });
+        container.appendChild(row);
+      }
+    }
+
+    function addClusterServer() {
+      const name = document.getElementById('clusterName').value.trim();
+      const url = document.getElementById('clusterUrl').value.trim().replace(/\/+$/, '');
+      if (!name || !url) return;
+      _clusterList.push({ name, url });
+      renderClusterList(_clusterList);
+      document.getElementById('clusterName').value = '';
+      document.getElementById('clusterUrl').value = '';
+    }
+
+    function getClusterListFromUI() {
+      return _clusterList;
     }
 
     async function restartServer() {
@@ -768,10 +920,11 @@
     }
 
     // --- Browser back/forward ---
-    window.addEventListener('popstate', () => {
+    window.addEventListener('popstate', (e) => {
       const parts = location.pathname.split('/');
       const id = parts[parts.length - 1];
-      if (id && id !== 'app' && id !== sessionId) switchSession(id);
+      const serverUrl = e.state ? e.state.serverUrl : null;
+      if (id && id !== 'app' && id !== sessionId) switchSession(id, serverUrl);
     });
 
     // --- Refresh sidebar every 5s ---
@@ -802,11 +955,24 @@
       const parts = location.pathname.split('/');
       const urlSession = parts.length >= 3 ? parts[2] : null;
 
-      if (urlSession && list.find(x => x.id === urlSession)) {
-        switchSession(urlSession);
-      } else if (list.length > 0) {
-        // Auto-select first session
-        switchSession(list[0].id);
+      // Load cluster data for sidebar
+      let clusterData;
+      try {
+        clusterData = await (await fetch('/api/cluster/sessions')).json();
+      } catch (e) {
+        clusterData = {
+          sessions: list.map(s => ({ ...s, server: hostname, serverUrl: null })),
+          servers: [{ name: hostname, url: null, online: true }]
+        };
+      }
+      clusterServers = clusterData.servers;
+      const allSessions = clusterData.sessions;
+
+      const urlMatch = allSessions.find(x => x.id === urlSession);
+      if (urlMatch) {
+        switchSession(urlMatch.id, urlMatch.serverUrl);
+      } else if (allSessions.length > 0) {
+        switchSession(allSessions[0].id, allSessions[0].serverUrl);
       } else {
         // No sessions — show placeholder
         document.getElementById('terminal').style.display = 'none';
@@ -819,6 +985,11 @@
       }
 
       connectNotify();
+
+      // Register service worker for PWA
+      if ('serviceWorker' in navigator) {
+        navigator.serviceWorker.register('/sw.js').catch(() => {});
+      }
     }
 
     init();
