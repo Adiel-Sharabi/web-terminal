@@ -34,6 +34,7 @@ const SCROLLBACK_DIR = path.join(__dirname, 'scrollback');
 const CLIPBOARD_DIR = path.join(__dirname, 'clipboard-images');
 const HISTORY_FILE = path.join(__dirname, 'history.json');
 const CLAUDE_PROJECTS_DIR = path.join(process.env.USERPROFILE || os.homedir(), '.claude', 'projects');
+const CLUSTER_TOKENS_FILE = path.join(__dirname, 'cluster-tokens.json');
 
 // --- Password helpers ---
 const DEFAULT_PASSWORDS = ['admin'];
@@ -310,11 +311,64 @@ function setAuthCookie(res, user) {
 
 function authenticateWs(ws, req) {
   const cookies = parseCookies(req.headers.cookie);
-  if (!verifySessionToken(cookies[COOKIE_NAME])) {
-    ws.close(1008, 'Unauthorized');
+  // Try cookie auth first, then Bearer token
+  if (verifySessionToken(cookies[COOKIE_NAME])) return true;
+  // Check for token in query string (WebSocket can't send headers easily)
+  const url = new URL(req.url, `http://${req.headers.host}`);
+  const token = url.searchParams.get('token');
+  if (token && verifyApiToken(token)) return true;
+  ws.close(1008, 'Unauthorized');
+  return false;
+}
+
+// --- API Token auth (for cluster inter-server communication) ---
+const API_TOKENS_FILE = path.join(__dirname, 'api-tokens.json');
+
+function loadApiTokens() {
+  try {
+    if (fs.existsSync(API_TOKENS_FILE)) return JSON.parse(fs.readFileSync(API_TOKENS_FILE, 'utf8'));
+  } catch (e) {}
+  return {};
+}
+
+function saveApiTokens(tokens) {
+  fs.writeFileSync(API_TOKENS_FILE, JSON.stringify(tokens, null, 2), 'utf8');
+}
+
+function verifyApiToken(token) {
+  const tokens = loadApiTokens();
+  const entry = tokens[token];
+  if (!entry) return false;
+  if (entry.expires && Date.now() > entry.expires) {
+    delete tokens[token];
+    saveApiTokens(tokens);
     return false;
   }
   return true;
+}
+
+function createApiToken(label) {
+  const token = crypto.randomBytes(32).toString('hex');
+  const tokens = loadApiTokens();
+  tokens[token] = {
+    label: label || 'cluster',
+    created: Date.now(),
+    expires: Date.now() + 90 * 24 * 60 * 60 * 1000 // 90 days
+  };
+  saveApiTokens(tokens);
+  return token;
+}
+
+// --- Cluster: remote server management ---
+function loadClusterTokens() {
+  try {
+    if (fs.existsSync(CLUSTER_TOKENS_FILE)) return JSON.parse(fs.readFileSync(CLUSTER_TOKENS_FILE, 'utf8'));
+  } catch (e) {}
+  return {};
+}
+
+function saveClusterTokens(tokens) {
+  fs.writeFileSync(CLUSTER_TOKENS_FILE, JSON.stringify(tokens, null, 2), 'utf8');
 }
 
 // --- Login page ---
@@ -388,6 +442,11 @@ setInterval(() => {
   }
 }, 10 * 60 * 1000);
 
+// --- PWA static assets (before auth) ---
+app.get('/manifest.json', (req, res) => res.sendFile(path.join(__dirname, 'manifest.json')));
+app.get('/sw.js', (req, res) => { res.set('Content-Type', 'application/javascript'); res.sendFile(path.join(__dirname, 'sw.js')); });
+app.get('/icon.svg', (req, res) => res.sendFile(path.join(__dirname, 'icon.svg')));
+
 // --- Public routes (before auth middleware) ---
 app.get('/login', (req, res) => {
   // If already logged in, redirect to lobby
@@ -429,17 +488,26 @@ app.use((req, res, next) => {
 
 // --- Auth middleware ---
 app.use((req, res, next) => {
+  // Try cookie auth
   const cookies = parseCookies(req.headers.cookie);
-  if (!verifySessionToken(cookies[COOKIE_NAME])) {
-    return res.redirect('/login');
+  if (verifySessionToken(cookies[COOKIE_NAME])) {
+    // Force password change if still using default
+    if (needsPasswordChange() && req.path !== '/api/setup') {
+      return res.send(SETUP_PAGE);
+    }
+    return next();
   }
-
-  // Force password change if still using default
-  if (needsPasswordChange() && req.path !== '/api/setup') {
-    return res.send(SETUP_PAGE);
+  // Try Bearer token auth (for cluster/API access)
+  const authHeader = req.headers.authorization;
+  if (authHeader && authHeader.startsWith('Bearer ')) {
+    const token = authHeader.substring(7);
+    if (verifyApiToken(token)) return next();
   }
-
-  next();
+  // API routes return 401, pages redirect to login
+  if (req.path.startsWith('/api/') || req.path.startsWith('/cluster/')) {
+    return res.status(401).json({ error: 'Unauthorized' });
+  }
+  return res.redirect('/login');
 });
 
 const SETUP_PAGE = `<!DOCTYPE html>
@@ -573,12 +641,13 @@ app.get('/api/config', (req, res) => {
   current.openInNewTab = current.openInNewTab !== undefined ? current.openInNewTab : OPEN_IN_NEW_TAB;
   current.serverName = current.serverName || SERVER_NAME;
   current.scrollbackReplayLimit = current.scrollbackReplayLimit || SCROLLBACK_REPLAY_LIMIT;
+  current.cluster = current.cluster || [];
   // Never expose password in API response
   current.password = '***';
   res.json(current);
 });
 
-const ALLOWED_CONFIG_KEYS = ['port', 'host', 'user', 'password', 'shell', 'defaultCwd', 'scanFolders', 'defaultCommand', 'openInNewTab', 'serverName', 'scrollbackReplayLimit'];
+const ALLOWED_CONFIG_KEYS = ['port', 'host', 'user', 'password', 'shell', 'defaultCwd', 'scanFolders', 'defaultCommand', 'openInNewTab', 'serverName', 'scrollbackReplayLimit', 'cluster'];
 
 app.put('/api/config', express.json({ limit: '16kb' }), (req, res) => {
   try {
@@ -611,6 +680,221 @@ app.put('/api/config', express.json({ limit: '16kb' }), (req, res) => {
 app.get('/api/hostname', (req, res) => {
   res.json({ hostname: SERVER_NAME });
 });
+
+// --- API: auth token (for cluster inter-server auth) ---
+app.post('/api/auth/token', express.json({ limit: '16kb' }), (req, res) => {
+  const { user, password, label } = req.body || {};
+  if (!checkCredentials(user, password)) {
+    return res.status(401).json({ error: 'Invalid credentials' });
+  }
+  const token = createApiToken(label || 'cluster');
+  res.json({ ok: true, token });
+});
+
+app.get('/api/auth/tokens', (req, res) => {
+  const tokens = loadApiTokens();
+  const list = Object.entries(tokens).map(([token, info]) => ({
+    token: token.substring(0, 8) + '...',
+    tokenFull: token,
+    label: info.label,
+    created: info.created,
+    expires: info.expires
+  }));
+  res.json(list);
+});
+
+app.delete('/api/auth/tokens/:token', (req, res) => {
+  const tokens = loadApiTokens();
+  if (tokens[req.params.token]) {
+    delete tokens[req.params.token];
+    saveApiTokens(tokens);
+    return res.json({ ok: true });
+  }
+  res.status(404).json({ error: 'Token not found' });
+});
+
+// --- Cluster: proxy to remote servers ---
+const http = require('http');
+const https = require('https');
+
+app.get('/api/cluster/servers', (req, res) => {
+  const clusterTokens = loadClusterTokens();
+  const servers = (config.cluster || []).map(s => ({
+    name: s.name,
+    url: s.url,
+    hasToken: !!clusterTokens[s.url]
+  }));
+  res.json(servers);
+});
+
+// Authenticate to a remote server and store its token
+app.post('/api/cluster/auth', express.json({ limit: '16kb' }), async (req, res) => {
+  const { url, user, password } = req.body || {};
+  if (!url || !user || !password) return res.status(400).json({ error: 'url, user, password required' });
+
+  // Verify this URL is in our cluster config
+  const server = (config.cluster || []).find(s => s.url === url);
+  if (!server) return res.status(400).json({ error: 'Server not in cluster config' });
+
+  try {
+    const tokenRes = await clusterFetch(url + '/api/auth/token', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ user, password, label: `cluster:${SERVER_NAME}` })
+    });
+    if (!tokenRes.ok) return res.status(401).json({ error: 'Remote server rejected credentials' });
+    const data = JSON.parse(tokenRes.body);
+    const clusterTokens = loadClusterTokens();
+    clusterTokens[url] = { token: data.token, name: server.name, authenticated: Date.now() };
+    saveClusterTokens(clusterTokens);
+    res.json({ ok: true, name: server.name });
+  } catch (e) {
+    res.status(502).json({ error: `Cannot reach server: ${e.message}` });
+  }
+});
+
+// Remove stored token for a remote server
+app.delete('/api/cluster/auth/:url', (req, res) => {
+  const clusterTokens = loadClusterTokens();
+  const url = decodeURIComponent(req.params.url);
+  delete clusterTokens[url];
+  saveClusterTokens(clusterTokens);
+  res.json({ ok: true });
+});
+
+// Fetch all sessions across cluster
+app.get('/api/cluster/sessions', async (req, res) => {
+  const result = [];
+
+  // Local sessions
+  for (const [id, s] of sessions) {
+    result.push({
+      id, name: s.name, cwd: s.cwd, status: s.status,
+      clients: s.clients.size, pid: s.term.pid,
+      lastActivity: s.lastActivity, autoCommand: s.autoCommand || '',
+      server: SERVER_NAME, serverUrl: null // null = local
+    });
+  }
+
+  // Remote sessions (parallel, with timeout)
+  const clusterTokens = loadClusterTokens();
+  const remotePromises = (config.cluster || []).map(async (server) => {
+    const tokenEntry = clusterTokens[server.url];
+    if (!tokenEntry) return { server: server.name, url: server.url, online: false, needsAuth: true, sessions: [] };
+    try {
+      const r = await clusterFetch(server.url + '/api/sessions', {
+        headers: { 'Authorization': 'Bearer ' + tokenEntry.token },
+        timeout: 3000
+      });
+      if (r.status === 401) {
+        return { server: server.name, url: server.url, online: true, needsAuth: true, sessions: [] };
+      }
+      if (!r.ok) return { server: server.name, url: server.url, online: false, sessions: [] };
+      const remoteSessions = JSON.parse(r.body);
+      return {
+        server: server.name, url: server.url, online: true, needsAuth: false,
+        sessions: remoteSessions.map(s => ({ ...s, server: server.name, serverUrl: server.url }))
+      };
+    } catch (e) {
+      return { server: server.name, url: server.url, online: false, sessions: [] };
+    }
+  });
+
+  const remotes = await Promise.all(remotePromises);
+  for (const r of remotes) {
+    result.push(...r.sessions);
+  }
+
+  res.json({
+    sessions: result,
+    servers: [
+      { name: SERVER_NAME, url: null, online: true, needsAuth: false },
+      ...remotes.map(r => ({ name: r.server, url: r.url, online: r.online, needsAuth: r.needsAuth }))
+    ]
+  });
+});
+
+// Proxy API requests to remote servers
+app.all('/cluster/:serverUrl/api/*', express.json({ limit: '16kb' }), async (req, res) => {
+  const serverUrl = decodeURIComponent(req.params.serverUrl);
+  const clusterTokens = loadClusterTokens();
+  const tokenEntry = clusterTokens[serverUrl];
+  if (!tokenEntry) return res.status(401).json({ error: 'Not authenticated to remote server' });
+
+  const remotePath = '/api/' + req.params[0];
+  try {
+    const r = await clusterFetch(serverUrl + remotePath, {
+      method: req.method,
+      headers: {
+        'Authorization': 'Bearer ' + tokenEntry.token,
+        'Content-Type': req.headers['content-type'] || 'application/json'
+      },
+      body: ['POST', 'PUT', 'PATCH'].includes(req.method) ? JSON.stringify(req.body) : undefined,
+      timeout: 10000
+    });
+    res.status(r.status);
+    try { res.json(JSON.parse(r.body)); } catch (e) { res.send(r.body); }
+  } catch (e) {
+    res.status(502).json({ error: `Remote server unreachable: ${e.message}` });
+  }
+});
+
+// Proxy WebSocket to remote server
+app.ws('/cluster/:serverUrl/ws/:id', (localWs, req) => {
+  if (!authenticateWs(localWs, req)) return;
+
+  const serverUrl = decodeURIComponent(req.params.serverUrl);
+  const clusterTokens = loadClusterTokens();
+  const tokenEntry = clusterTokens[serverUrl];
+  if (!tokenEntry) { localWs.close(1008, 'Not authenticated to remote'); return; }
+
+  const wsUrl = serverUrl.replace(/^http/, 'ws') + '/ws/' + req.params.id + '?token=' + tokenEntry.token;
+  const WebSocket = require('ws');
+  const remoteWs = new WebSocket(wsUrl);
+
+  remoteWs.on('open', () => {
+    // Forward any buffered messages
+  });
+  remoteWs.on('message', data => {
+    try { localWs.send(data); } catch (e) {}
+  });
+  remoteWs.on('close', () => { try { localWs.close(); } catch (e) {} });
+  remoteWs.on('error', () => { try { localWs.close(); } catch (e) {} });
+
+  localWs.on('message', msg => {
+    try { remoteWs.send(msg); } catch (e) {}
+  });
+  localWs.on('close', () => { try { remoteWs.close(); } catch (e) {} });
+});
+
+// Helper: fetch with timeout (works with http and https)
+function clusterFetch(url, opts = {}) {
+  return new Promise((resolve, reject) => {
+    const parsed = new URL(url);
+    const lib = parsed.protocol === 'https:' ? https : http;
+    const timeout = opts.timeout || 5000;
+
+    const reqOpts = {
+      method: opts.method || 'GET',
+      hostname: parsed.hostname,
+      port: parsed.port,
+      path: parsed.pathname + parsed.search,
+      headers: opts.headers || {},
+      rejectUnauthorized: false // Tailscale certs are valid but we're lenient
+    };
+
+    const r = lib.request(reqOpts, response => {
+      let body = '';
+      response.on('data', chunk => { body += chunk; });
+      response.on('end', () => resolve({ ok: response.statusCode >= 200 && response.statusCode < 300, status: response.statusCode, body }));
+    });
+
+    r.setTimeout(timeout, () => { r.destroy(); reject(new Error('Timeout')); });
+    r.on('error', reject);
+    if (opts.body) r.write(opts.body);
+    r.end();
+  });
+}
 
 // --- API: upload image to server clipboard ---
 app.post('/api/clipboard-image', express.raw({ type: 'image/*', limit: '10mb' }), (req, res) => {

@@ -297,16 +297,18 @@ test.describe('XSS Prevention', () => {
     const { id } = await createRes.json();
 
     await loginPage(page);
-    await page.waitForSelector('.session-card');
+    // Open sidebar to see session list
+    await page.click('.tb-btn');
+    await page.waitForSelector('.sb-item');
 
-    // No img element should be injected
-    const imgCount = await page.locator('.session-card img').count();
+    // No img element should be injected in sidebar
+    const imgCount = await page.locator('.sb-item img').count();
     expect(imgCount).toBe(0);
 
-    // Text should appear literally
-    const h3 = page.locator('.session-card h3').filter({ hasText: '<img' });
-    await expect(h3).toHaveCount(1);
-    const text = await h3.textContent();
+    // Text should appear literally (at least one match)
+    const nameEl = page.locator('.sb-name').filter({ hasText: '<img' });
+    expect(await nameEl.count()).toBeGreaterThanOrEqual(1);
+    const text = await nameEl.first().textContent();
     expect(text).toContain(xssPayload);
 
     await ctx.delete('/api/sessions/' + id);
@@ -323,13 +325,15 @@ test.describe('XSS Prevention', () => {
     const { id } = await createRes.json();
 
     await loginPage(page);
-    await page.waitForSelector('.session-card');
+    // Open sidebar
+    await page.click('.tb-btn');
+    await page.waitForSelector('.sb-item');
 
-    const scriptCount = await page.locator('.session-card script').count();
+    const scriptCount = await page.locator('.sb-item script').count();
     expect(scriptCount).toBe(0);
 
-    const cmdDiv = page.locator('.auto-cmd').filter({ hasText: 'alert' });
-    await expect(cmdDiv).toHaveCount(1);
+    const detail = page.locator('.sb-detail').filter({ hasText: 'alert' });
+    expect(await detail.count()).toBeGreaterThanOrEqual(1);
 
     await ctx.delete('/api/sessions/' + id);
     await ctx.dispose();
@@ -340,18 +344,20 @@ test.describe('XSS Prevention', () => {
 // 7. Lobby UI
 // ============================================================
 
-test.describe('Lobby UI', () => {
-  test('lobby shows hostname in title', async ({ page }) => {
+test.describe('App UI', () => {
+  test('app shows hostname in toolbar', async ({ page }) => {
     await loginPage(page);
     await page.waitForLoadState('networkidle');
-    const h1Text = await page.locator('#title').textContent();
-    expect(h1Text.length).toBeGreaterThan(0);
+    const host = await page.locator('#hostName').textContent();
+    expect(host.length).toBeGreaterThan(0);
   });
 
-  test('lobby shows session cards', async ({ page }) => {
+  test('app shows sessions in sidebar', async ({ page }) => {
     await loginPage(page);
-    await page.waitForSelector('.session-card');
-    const cards = await page.locator('.session-card').count();
-    expect(cards).toBeGreaterThan(0);
+    // Open sidebar
+    await page.click('.tb-btn');
+    await page.waitForSelector('.sb-item');
+    const items = await page.locator('.sb-item').count();
+    expect(items).toBeGreaterThan(0);
   });
 });
