@@ -81,26 +81,28 @@
 
     /* --- New session form (inline in sidebar) --- */
     #newSessionForm {
-      display: none; padding: 8px 12px; border-bottom: 1px solid #0f3460; background: #0a1a30;
+      display: none; padding: 10px 12px; border-bottom: 2px solid #00d4aa; background: #0d1f3c;
     }
     #newSessionForm.show { display: block; }
-    #newSessionForm input {
+    #newSessionForm label { display: block; color: #888; font-size: 10px; margin-bottom: 2px; margin-top: 6px; }
+    #newSessionForm label:first-child { margin-top: 0; }
+    #newSessionForm select, #newSessionForm input {
       width: 100%; background: #1a1a2e; color: #e0e0e0; border: 1px solid #0f3460;
-      padding: 5px 8px; border-radius: 3px; font-size: 12px; margin-bottom: 4px;
+      padding: 6px 8px; border-radius: 3px; font-size: 12px;
     }
-    #newSessionForm input:focus { border-color: #00d4aa; outline: none; }
-    #newSessionForm .form-row { display: flex; gap: 4px; }
+    #newSessionForm select:focus, #newSessionForm input:focus { border-color: #00d4aa; outline: none; }
+    #newSessionForm .form-row { display: flex; gap: 4px; margin-top: 8px; }
     #newSessionForm .form-row button {
       background: #00d4aa; color: #1a1a2e; border: none; border-radius: 3px;
-      padding: 5px 10px; font-size: 11px; font-weight: 600; cursor: pointer; white-space: nowrap;
+      padding: 6px 14px; font-size: 12px; font-weight: 600; cursor: pointer; white-space: nowrap; width: 100%;
     }
     #newSessionForm .form-row button:hover { opacity: 0.85; }
     .folder-suggestions {
       position: absolute; left: 0; right: 0; background: #16213e; border: 1px solid #0f3460;
       border-radius: 3px; z-index: 100; max-height: 150px; overflow-y: auto; box-shadow: 0 4px 12px rgba(0,0,0,0.5);
     }
-    .folder-suggestions div { padding: 4px 8px; cursor: pointer; font-size: 11px; color: #ccc; font-family: monospace; }
-    .folder-suggestions div:hover { background: #0f3460; color: #00d4aa; }
+    .folder-suggestions div { padding: 5px 8px; cursor: pointer; font-size: 11px; color: #ccc; font-family: monospace; }
+    .folder-suggestions div:hover, .folder-suggestions div.active { background: #0f3460; color: #00d4aa; }
 
     /* --- Claude sessions (in sidebar) --- */
     #claudeSection { border-top: 1px solid #0f3460; }
@@ -216,18 +218,21 @@
         <button onclick="toggleNewForm()">+ New</button>
       </div>
       <div id="newSessionForm">
-        <select id="newServer" style="width:100%;background:#1a1a2e;color:#e0e0e0;border:1px solid #0f3460;padding:5px 8px;border-radius:3px;font-size:12px;margin-bottom:4px">
+        <label>Server</label>
+        <select id="newServer">
           <option value="">Local</option>
         </select>
-        <input id="newName" placeholder="Name (optional)">
+        <label>Name</label>
+        <input id="newName" placeholder="e.g. My Project">
+        <label>Working directory</label>
         <div style="position:relative">
-          <input id="newCwd" placeholder="Working directory" onfocus="showFolders()" oninput="showFolders()" autocomplete="off">
+          <input id="newCwd" placeholder="C:\dev" onfocus="showFolders()" oninput="showFolders()" onkeydown="folderKeydown(event)" autocomplete="off">
           <div id="folderSuggestions" class="folder-suggestions" style="display:none"></div>
         </div>
-        <input id="newCmd" placeholder="Auto-command (optional)">
+        <label>Auto-command</label>
+        <input id="newCmd" placeholder="e.g. claude --dangerously-skip-permissions">
         <div class="form-row">
-          <input id="newCmd2" style="display:none">
-          <button onclick="createSession()">Create</button>
+          <button onclick="createSession()">Create Session</button>
         </div>
       </div>
       <div id="sidebarList"></div>
@@ -787,9 +792,40 @@
       container.style.display = 'block';
     }
 
+    let folderIdx = -1;
+
+    function folderKeydown(e) {
+      const container = document.getElementById('folderSuggestions');
+      const items = container.querySelectorAll('div');
+      if (!items.length || container.style.display === 'none') return;
+      if (e.key === 'ArrowDown') {
+        e.preventDefault();
+        folderIdx = Math.min(folderIdx + 1, items.length - 1);
+        items.forEach((el, i) => el.classList.toggle('active', i === folderIdx));
+        items[folderIdx].scrollIntoView({ block: 'nearest' });
+      } else if (e.key === 'ArrowUp') {
+        e.preventDefault();
+        folderIdx = Math.max(folderIdx - 1, 0);
+        items.forEach((el, i) => el.classList.toggle('active', i === folderIdx));
+        items[folderIdx].scrollIntoView({ block: 'nearest' });
+      } else if (e.key === 'Enter' && folderIdx >= 0) {
+        e.preventDefault();
+        document.getElementById('newCwd').value = items[folderIdx].textContent;
+        container.style.display = 'none';
+        folderIdx = -1;
+      } else if (e.key === 'Escape') {
+        container.style.display = 'none';
+        folderIdx = -1;
+      } else {
+        folderIdx = -1;
+      }
+    }
+
     document.addEventListener('click', e => {
-      if (!e.target.closest('#newCwd') && !e.target.closest('#folderSuggestions'))
+      if (!e.target.closest('#newCwd') && !e.target.closest('#folderSuggestions')) {
         document.getElementById('folderSuggestions').style.display = 'none';
+        folderIdx = -1;
+      }
     });
 
     // --- Claude sessions ---
