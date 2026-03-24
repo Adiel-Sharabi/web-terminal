@@ -216,6 +216,9 @@
         <button onclick="toggleNewForm()">+ New</button>
       </div>
       <div id="newSessionForm">
+        <select id="newServer" style="width:100%;background:#1a1a2e;color:#e0e0e0;border:1px solid #0f3460;padding:5px 8px;border-radius:3px;font-size:12px;margin-bottom:4px">
+          <option value="">Local</option>
+        </select>
         <input id="newName" placeholder="Name (optional)">
         <div style="position:relative">
           <input id="newCwd" placeholder="Working directory" onfocus="showFolders()" oninput="showFolders()" autocomplete="off">
@@ -698,15 +701,25 @@
       if (form.classList.contains('show')) {
         document.getElementById('newCwd').value = defaultCwd;
         document.getElementById('newCmd').value = defaultCommand;
+        // Populate server dropdown
+        const sel = document.getElementById('newServer');
+        sel.innerHTML = '<option value="">Local</option>';
+        for (const s of clusterServers) {
+          if (s.url && s.online && !s.needsAuth) {
+            sel.innerHTML += `<option value="${esc(s.url)}">${esc(s.name)}</option>`;
+          }
+        }
         document.getElementById('newName').focus();
       }
     }
 
     async function createSession() {
+      const serverUrl = document.getElementById('newServer').value || null;
       const name = document.getElementById('newName').value || undefined;
       const cwd = document.getElementById('newCwd').value || undefined;
       const autoCommand = document.getElementById('newCmd').value || '';
-      const res = await fetch('/api/sessions', {
+      const apiBase = serverUrl ? `/cluster/${encodeURIComponent(serverUrl)}/api` : '/api';
+      const res = await fetch(`${apiBase}/sessions`, {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({ name, cwd, autoCommand })
@@ -715,7 +728,7 @@
       if (data.id) {
         document.getElementById('newSessionForm').classList.remove('show');
         document.getElementById('newName').value = '';
-        switchSession(data.id);
+        switchSession(data.id, serverUrl);
       }
     }
 
