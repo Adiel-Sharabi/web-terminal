@@ -938,19 +938,34 @@ app.ws('/cluster/:serverUrl/ws/:id', (localWs, req) => {
 
   const wsUrl = serverUrl.replace(/^http/, 'ws') + '/ws/' + req.params.id + '?token=' + tokenEntry.token;
   const WebSocket = require('ws');
-  const remoteWs = new WebSocket(wsUrl);
+  const remoteWs = new WebSocket(wsUrl, { rejectUnauthorized: false });
 
+  // Buffer local messages until remote is open
+  const buffered = [];
   remoteWs.on('open', () => {
-    // Forward any buffered messages
+    console.log(`[${new Date().toISOString()}] Cluster WS proxy connected to ${serverUrl}/ws/${req.params.id}`);
+    for (const b of buffered) {
+      try { remoteWs.send(b.msg, { binary: b.isBinary }); } catch (e) {}
+    }
+    buffered.length = 0;
   });
-  remoteWs.on('message', data => {
-    try { localWs.send(data); } catch (e) {}
+  remoteWs.on('message', (data, isBinary) => {
+    try { localWs.send(data, { binary: isBinary }); } catch (e) {}
   });
-  remoteWs.on('close', () => { try { localWs.close(); } catch (e) {} });
-  remoteWs.on('error', () => { try { localWs.close(); } catch (e) {} });
-
-  localWs.on('message', msg => {
-    try { remoteWs.send(msg); } catch (e) {}
+  remoteWs.on('close', (code, reason) => {
+    console.log(`[${new Date().toISOString()}] Cluster WS proxy closed: ${code} ${reason}`);
+    try { localWs.close(); } catch (e) {}
+  });
+  remoteWs.on('error', (err) => {
+    console.error(`[${new Date().toISOString()}] Cluster WS proxy error: ${err.message}`);
+    try { localWs.close(); } catch (e) {}
+  });
+  localWs.on('message', (msg, isBinary) => {
+    if (remoteWs.readyState === WebSocket.OPEN) {
+      try { remoteWs.send(msg, { binary: isBinary }); } catch (e) {}
+    } else {
+      buffered.push({ msg, isBinary });
+    }
   });
   localWs.on('close', () => { try { remoteWs.close(); } catch (e) {} });
 });
