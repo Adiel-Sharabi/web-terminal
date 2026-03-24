@@ -1011,6 +1011,26 @@ function clusterFetch(url, opts = {}) {
   });
 }
 
+// --- API: version info (for cluster version checking) ---
+app.get('/api/version', (req, res) => {
+  try {
+    const { execSync } = require('child_process');
+    const hash = execSync('git rev-parse --short HEAD', { cwd: __dirname, encoding: 'utf8' }).trim();
+    const date = execSync('git log -1 --format=%ci', { cwd: __dirname, encoding: 'utf8' }).trim();
+    const behind = (() => {
+      try {
+        execSync('git fetch --dry-run 2>&1', { cwd: __dirname, encoding: 'utf8', timeout: 5000 });
+        const count = execSync('git rev-list HEAD..@{u} --count', { cwd: __dirname, encoding: 'utf8' }).trim();
+        return parseInt(count) || 0;
+      } catch (e) { return -1; } // -1 = unknown
+    })();
+    const dirty = execSync('git status --porcelain', { cwd: __dirname, encoding: 'utf8' }).trim().length > 0;
+    res.json({ hash, date, behind, dirty, serverName: getServerName() });
+  } catch (e) {
+    res.json({ hash: 'unknown', date: '', behind: -1, dirty: false, serverName: getServerName() });
+  }
+});
+
 // --- API: upload image to server clipboard ---
 app.post('/api/clipboard-image', express.raw({ type: 'image/*', limit: '10mb' }), (req, res) => {
   try {
