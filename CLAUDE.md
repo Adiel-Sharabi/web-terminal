@@ -29,6 +29,13 @@ npx playwright test
 node -c server.js
 ```
 
+### 4. Update README.md
+If new user-facing features were added, update `README.md`:
+- Add to the Features list
+- Add configuration docs for new settings
+- Update the Architecture table if new files were created
+- Keep the Multi-Server Cluster and PWA sections current
+
 ## Architecture
 - `server.js` — Express server, WebSocket, session management, auth, cluster proxy
 - `app.html` — Unified single-page app (terminal + session management + settings)
