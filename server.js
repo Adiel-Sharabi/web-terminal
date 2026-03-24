@@ -28,6 +28,7 @@ const SCAN_FOLDERS = config.scanFolders || [DEFAULT_CWD];
 const DEFAULT_COMMAND = config.defaultCommand || '';
 const OPEN_IN_NEW_TAB = config.openInNewTab !== undefined ? config.openInNewTab : true;
 const SERVER_NAME = config.serverName || os.hostname();
+const SCROLLBACK_REPLAY_LIMIT = parseInt(config.scrollbackReplayLimit) || 102400; // 100KB default
 const SESSIONS_FILE = path.join(__dirname, 'sessions.json');
 const SCROLLBACK_DIR = path.join(__dirname, 'scrollback');
 const CLIPBOARD_DIR = path.join(__dirname, 'clipboard-images');
@@ -171,7 +172,7 @@ function createSession(id, cwd, name, autoCommand, savedScrollback) {
   const session = {
     term, clients: new Set(), scrollback, name: name || `Session ${id}`,
     cwd: cwd || DEFAULT_CWD, idleTimer: null, lastActivity: Date.now(),
-    status: 'active', autoCommand: autoCommand || ''
+    lastUserInput: 0, status: 'active', autoCommand: autoCommand || ''
   };
   sessions.set(id, session);
 
@@ -201,22 +202,32 @@ function createSession(id, cwd, name, autoCommand, savedScrollback) {
       try { client.send(data); } catch (e) {}
     }
 
-    const clean = data.replace(/\x1b\[[0-9;]*[a-zA-Z]/g, '');
-    for (const p of NOTIFY_PATTERNS) {
-      if (p.regex.test(clean)) {
-        session.status = 'waiting';
-        sendNotification(session, 'input_needed', `"${session.name}" — ${p.msg}`);
-        break;
-      }
-    }
-
     session.lastActivity = Date.now();
-    session.status = 'active';
-    if (session.idleTimer) clearTimeout(session.idleTimer);
-    session.idleTimer = setTimeout(() => {
-      session.status = 'idle';
-      sendNotification(session, 'idle', `"${session.name}" — Claude appears to be done`);
-    }, IDLE_NOTIFY_MS);
+
+    // Ignore user typing/resize echo for status detection
+    const isEcho = (Date.now() - session.lastUserInput) < 500;
+    if (!isEcho) {
+      // Check for waiting-for-input patterns first
+      const clean = data.replace(/\x1b\[[0-9;]*[a-zA-Z]/g, '');
+      let isWaiting = false;
+      for (const p of NOTIFY_PATTERNS) {
+        if (p.regex.test(clean)) {
+          session.status = 'waiting';
+          sendNotification(session, 'input_needed', `"${session.name}" — ${p.msg}`);
+          isWaiting = true;
+          break;
+        }
+      }
+
+      if (!isWaiting) session.status = 'active';
+      if (session.idleTimer) clearTimeout(session.idleTimer);
+      session.idleTimer = setTimeout(() => {
+        if (session.status !== 'waiting') {
+          session.status = 'idle';
+          sendNotification(session, 'idle', `"${session.name}" — Claude appears to be done`);
+        }
+      }, IDLE_NOTIFY_MS);
+    }
   });
 
   term.onExit(() => {
@@ -561,12 +572,13 @@ app.get('/api/config', (req, res) => {
   current.defaultCommand = current.defaultCommand || DEFAULT_COMMAND;
   current.openInNewTab = current.openInNewTab !== undefined ? current.openInNewTab : OPEN_IN_NEW_TAB;
   current.serverName = current.serverName || SERVER_NAME;
+  current.scrollbackReplayLimit = current.scrollbackReplayLimit || SCROLLBACK_REPLAY_LIMIT;
   // Never expose password in API response
   current.password = '***';
   res.json(current);
 });
 
-const ALLOWED_CONFIG_KEYS = ['port', 'host', 'user', 'password', 'shell', 'defaultCwd', 'scanFolders', 'defaultCommand', 'openInNewTab', 'serverName'];
+const ALLOWED_CONFIG_KEYS = ['port', 'host', 'user', 'password', 'shell', 'defaultCwd', 'scanFolders', 'defaultCommand', 'openInNewTab', 'serverName', 'scrollbackReplayLimit'];
 
 app.put('/api/config', express.json({ limit: '16kb' }), (req, res) => {
   try {
@@ -587,6 +599,7 @@ app.put('/api/config', express.json({ limit: '16kb' }), (req, res) => {
     if (sanitized.port !== undefined) sanitized.port = parseInt(sanitized.port) || 7681;
     if (sanitized.scanFolders && !Array.isArray(sanitized.scanFolders)) sanitized.scanFolders = [String(sanitized.scanFolders)];
     if (sanitized.openInNewTab !== undefined) sanitized.openInNewTab = !!sanitized.openInNewTab;
+    if (sanitized.scrollbackReplayLimit !== undefined) sanitized.scrollbackReplayLimit = Math.max(10240, parseInt(sanitized.scrollbackReplayLimit) || 102400);
     fs.writeFileSync(CONFIG_FILE, JSON.stringify(sanitized, null, 2), 'utf8');
     res.json({ ok: true, message: 'Saved. Restart server for changes to take effect.' });
   } catch (e) {
@@ -878,7 +891,18 @@ app.post('/api/restart', (req, res) => {
 
 // --- Landing page ---
 app.get('/', (req, res) => {
+  res.sendFile(path.join(__dirname, 'app.html'));
+});
+app.get('/lobby', (req, res) => {
   res.sendFile(path.join(__dirname, 'lobby.html'));
+});
+
+// --- Unified app page (A/B test) ---
+app.get('/app', (req, res) => {
+  res.sendFile(path.join(__dirname, 'app.html'));
+});
+app.get('/app/:id', (req, res) => {
+  res.sendFile(path.join(__dirname, 'app.html'));
 });
 
 // --- Terminal page ---
@@ -900,9 +924,13 @@ app.ws('/ws/:id', (ws, req) => {
   const session = sessions.get(req.params.id);
   if (!session) { ws.close(); return; }
 
-  for (const chunk of session.scrollback) {
-    try { ws.send(chunk); } catch (e) { break; }
-  }
+  // Send scrollback as a single chunk, trimmed to replay limit
+  try {
+    if (session.scrollback.length) {
+      const full = session.scrollback.join('');
+      ws.send(full.length > SCROLLBACK_REPLAY_LIMIT ? full.slice(-SCROLLBACK_REPLAY_LIMIT) : full);
+    }
+  } catch (e) {}
 
   session.clients.add(ws);
   console.log(`[${new Date().toISOString()}] Client joined session ${req.params.id} (${session.clients.size} clients)`);
@@ -916,9 +944,11 @@ app.ws('/ws/:id', (ws, req) => {
         const cols = Math.max(1, Math.min(500, parseInt(resize.cols) || 80));
         const rows = Math.max(1, Math.min(200, parseInt(resize.rows) || 24));
         session.term.resize(cols, rows);
+        session.lastUserInput = Date.now(); // resize redraws produce PTY output — ignore for status
       } catch (e) {}
       return;
     }
+    session.lastUserInput = Date.now();
     session.term.write(msg);
   });
 

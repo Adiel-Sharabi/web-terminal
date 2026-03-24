@@ -57,6 +57,8 @@
     .sb-status.idle { color: #da4; }
     .sb-status.waiting { color: #e94560; }
     .sb-viewers { color: #555; font-size: 10px; margin-left: auto; }
+    .sb-kill { background: transparent; border: none; color: #555; font-size: 14px; cursor: pointer; padding: 0 4px; line-height: 1; }
+    .sb-kill:hover { color: #e94560; }
     #terminal { height: 100%; flex: 1; min-width: 0; }
     #status {
       position: fixed; top: 44px; right: 12px; z-index: 10;
@@ -103,7 +105,7 @@
   <script src="https://cdn.jsdelivr.net/npm/@xterm/addon-fit@0.10.0/lib/addon-fit.min.js" integrity="sha384-XGqKrV8Jrukp1NITJbOEHwg01tNkuXr6uB6YEj69ebpYU3v7FvoGgEg23C1Gcehk" crossorigin="anonymous"></script>
   <script src="https://cdn.jsdelivr.net/npm/@xterm/addon-web-links@0.11.0/lib/addon-web-links.min.js" integrity="sha384-S1biLeI8L/bFduIVvCxbn/l4EtaG4nTqQjGF7qCYTbsGXGFe8KgIKXtw4+UWxprv" crossorigin="anonymous"></script>
   <script>
-    const sessionId = location.pathname.split('/').pop();
+    let sessionId = location.pathname.split('/').pop();
     const status = document.getElementById('status');
 
     const isMobile = /Android|iPhone|iPad|iPod/i.test(navigator.userAgent) || window.innerWidth < 600;
@@ -124,6 +126,8 @@
     fitAddon.fit();
 
     let ws;
+    let switching = false; // suppress reconnect during session switch
+
     function connect() {
       const proto = location.protocol === 'https:' ? 'wss:' : 'ws:';
       ws = new WebSocket(`${proto}//${location.host}/ws/${sessionId}`);
@@ -141,6 +145,7 @@
       };
 
       ws.onclose = () => {
+        if (switching) return;
         status.textContent = 'disconnected — reconnecting...';
         status.className = 'disconnected';
         status.style.opacity = '1';
@@ -148,6 +153,28 @@
       };
 
       ws.onerror = () => ws.close();
+    }
+
+    function switchSession(id) {
+      switching = true;
+      if (ws) { ws.onclose = null; ws.close(); }
+      sessionId = id;
+      history.pushState(null, '', '/s/' + id);
+      term.clear();
+      term.reset();
+      autoScroll = true;
+      switching = false;
+      connect();
+      // Update toolbar
+      fetch('/api/sessions').then(r => r.json()).then(list => {
+        const s = list.find(x => x.id === id);
+        if (s) {
+          document.getElementById('sessionName').textContent = s.name;
+          sessionTitle = `${s.name}${hostname ? ' — ' + hostname : ''}`;
+          document.title = sessionTitle;
+        }
+        if (document.getElementById('sidebar').classList.contains('open')) loadSidebar();
+      });
     }
 
     // --- Clipboard image upload for Alt+V (Claude CLI image paste) ---
@@ -319,11 +346,18 @@
             `<span class="sb-dot ${s.status}"></span>` +
             `<span class="sb-status ${s.status}">${statusLabels[s.status] || s.status}</span>` +
             `<span class="sb-viewers">${s.clients} viewer${s.clients !== 1 ? 's' : ''}</span>` +
+            `<button class="sb-kill" title="Kill session">&times;</button>` +
           `</div>`;
+        item.querySelector('.sb-kill').addEventListener('click', async (e) => {
+          e.stopPropagation();
+          if (!confirm(`Kill "${s.name}"?`)) return;
+          await fetch(`/api/sessions/${s.id}`, { method: 'DELETE' });
+          if (s.id === sessionId) { location.href = '/'; return; }
+          loadSidebar();
+        });
         item.addEventListener('click', () => {
           if (s.id === sessionId) return;
-          sessionStorage.setItem('sidebarOpen', '1');
-          location.href = '/s/' + s.id;
+          switchSession(s.id);
         });
         container.appendChild(item);
       }
@@ -411,7 +445,13 @@
 
     function logout() { location.href = '/logout'; }
 
-    // Re-open sidebar if it was open before switching sessions
+    // Handle browser back/forward
+    window.addEventListener('popstate', () => {
+      const id = location.pathname.split('/').pop();
+      if (id && id !== sessionId) switchSession(id);
+    });
+
+    // Re-open sidebar if it was open before
     if (sessionStorage.getItem('sidebarOpen') === '1') {
       toggleSidebar();
     }
