@@ -1,0 +1,12 @@
+{
+  "name": "Web Terminal",
+  "short_name": "Terminal",
+  "description": "Browser-based terminal with multi-server session management",
+  "start_url": "/app",
+  "display": "standalone",
+  "background_color": "#1e1e1e",
+  "theme_color": "#16213e",
+  "icons": [
+    { "src": "/icon.svg", "sizes": "any", "type": "image/svg+xml" }
+  ]
+}

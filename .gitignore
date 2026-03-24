@@ -10,3 +10,6 @@ clipboard-images/
 test-results/
 *.crt
 *.key
+*.stackdump
+cluster-tokens.json
+api-tokens.json
