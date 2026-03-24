@@ -342,6 +342,7 @@
     let ws = null;
     let switching = false;
     let reconnectTimer = null;
+    let reconnectAttempts = 0;
     let autoScroll = true;
     let folderHistory = [];
     let defaultCwd = 'C:\\dev';
@@ -382,6 +383,7 @@
       ws = new WebSocket(`${proto}//${location.host}${wsPath}`);
 
       ws.onopen = () => {
+        reconnectAttempts = 0;
         status.textContent = 'connected';
         status.className = 'connected';
         setTimeout(() => { status.style.opacity = '0'; }, 3000);
@@ -396,11 +398,24 @@
 
       ws.onclose = () => {
         if (switching) return;
+        reconnectAttempts++;
         status.textContent = 'disconnected — reconnecting...';
         status.className = 'disconnected';
         status.style.opacity = '1';
         document.getElementById('reconnectOverlay').classList.add('show');
-        reconnectTimer = setTimeout(connect, 2000);
+        // After 5 failed attempts, check if we're still authenticated
+        if (reconnectAttempts >= 5) {
+          fetch('/api/hostname').then(r => {
+            if (r.status === 401 || r.redirected) {
+              // Session expired — redirect to login
+              location.href = '/login';
+            } else {
+              reconnectTimer = setTimeout(connect, 3000);
+            }
+          }).catch(() => { reconnectTimer = setTimeout(connect, 3000); });
+        } else {
+          reconnectTimer = setTimeout(connect, 2000);
+        }
       };
 
       ws.onerror = () => ws.close();
@@ -579,6 +594,15 @@
         header.className = 'sb-server';
         const statusCls = !server.online ? 'offline' : server.needsAuth ? 'needsauth' : 'online';
         header.innerHTML = `<span class="srv-dot ${statusCls}"></span>${esc(server.name || 'Local')}`;
+        if (server.online && !server.needsAuth) {
+          const addBtn = document.createElement('span');
+          addBtn.className = 'srv-auth';
+          addBtn.textContent = '+';
+          addBtn.title = 'New session on ' + (server.name || 'Local');
+          addBtn.style.cssText = 'color:#00d4aa;font-size:14px;font-weight:bold;cursor:pointer;margin-left:auto';
+          addBtn.addEventListener('click', () => quickNewSession(server.url));
+          header.appendChild(addBtn);
+        }
         if (server.needsAuth && server.url) {
           const authLink = document.createElement('span');
           authLink.className = 'srv-auth';
@@ -670,6 +694,20 @@
       // Update viewer count for current session
       const me = data.sessions.find(x => x.id === sessionId && x.serverUrl === sessionServerUrl);
       if (me) document.getElementById('viewers').textContent = `${me.clients} viewer${me.clients !== 1 ? 's' : ''}`;
+    }
+
+    // Quick-create session on a specific server
+    async function quickNewSession(serverUrl) {
+      const apiBase = serverUrl ? `/cluster/${encodeURIComponent(serverUrl)}/api` : '/api';
+      const name = prompt('Session name (or empty for default):') || undefined;
+      const res = await fetch(`${apiBase}/sessions`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ name })
+      });
+      const data = await res.json();
+      if (data.id) switchSession(data.id, serverUrl);
+      else if (data.error) alert('Error: ' + data.error);
     }
 
     // Prompt login to a remote cluster server
