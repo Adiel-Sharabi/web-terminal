@@ -279,6 +279,11 @@
           <label>Scan folders (one per line)</label>
           <textarea id="cfgScanFolders" rows="2"></textarea>
         </div>
+        <div class="field field-wide">
+          <label>Public URL (this server's Tailscale address — needed for cluster sync)</label>
+          <input id="cfgPublicUrl" placeholder="https://adiel-home.braid-mintaka.ts.net">
+          <div class="hint">Used to auto-register this server on remotes when you connect to them</div>
+        </div>
         <div class="field field-wide" style="border-top:1px solid #0f3460;padding-top:12px;margin-top:4px">
           <label>Cluster — Remote Servers</label>
           <div id="clusterList" style="margin-bottom:6px"></div>
@@ -794,6 +799,7 @@
       document.getElementById('cfgScanFolders').value = (cfg.scanFolders || []).join('\n');
       document.getElementById('cfgDefaultCommand').value = cfg.defaultCommand || '';
       document.getElementById('cfgScrollbackReplayLimit').value = cfg.scrollbackReplayLimit || 102400;
+      document.getElementById('cfgPublicUrl').value = cfg.publicUrl || '';
       renderClusterList(cfg.cluster || []);
       document.getElementById('saveMsg').textContent = '';
       document.getElementById('settingsOverlay').classList.add('show');
@@ -812,6 +818,7 @@
         scanFolders: document.getElementById('cfgScanFolders').value.split('\n').map(s => s.trim()).filter(Boolean),
         defaultCommand: document.getElementById('cfgDefaultCommand').value,
         scrollbackReplayLimit: parseInt(document.getElementById('cfgScrollbackReplayLimit').value) || 102400,
+        publicUrl: document.getElementById('cfgPublicUrl').value.trim().replace(/\/+$/, ''),
         cluster: getClusterListFromUI()
       };
       const res = await fetch('/api/config', {
