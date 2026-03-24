@@ -543,8 +543,11 @@ app.use((req, res, next) => {
     const token = authHeader.substring(7);
     if (verifyApiToken(token)) return next();
   }
-  // API routes return 401, pages redirect to login
-  if (req.path.startsWith('/api/') || req.path.startsWith('/cluster/')) {
+  // Try query-string token (for WebSocket upgrades through cluster proxy)
+  const qToken = req.query?.token;
+  if (qToken && verifyApiToken(qToken)) return next();
+  // API/cluster/WS routes return 401, pages redirect to login
+  if (req.path.startsWith('/api/') || req.path.startsWith('/cluster/') || req.path.startsWith('/ws/')) {
     return res.status(401).json({ error: 'Unauthorized' });
   }
   return res.redirect('/login');
@@ -1307,17 +1310,6 @@ app.ws('/ws/notify', (ws, req) => {
 });
 
 // --- WebSocket: attach to session ---
-// Debug: test WS auth
-app.ws('/ws/debug', (ws, req) => {
-  const cookies = parseCookies(req.headers.cookie);
-  const hasCookie = verifySessionToken(cookies[COOKIE_NAME]);
-  const queryToken = req.query?.token;
-  const urlToken = new URL(req.url, `http://${req.headers.host}`).searchParams.get('token');
-  const tokenValid = (queryToken && verifyApiToken(queryToken)) || (urlToken && verifyApiToken(urlToken));
-  ws.send(JSON.stringify({ hasCookie, queryToken: !!queryToken, urlToken: !!urlToken, tokenValid, reqUrl: req.url, reqQuery: req.query }));
-  ws.close();
-});
-
 app.ws('/ws/:id', (ws, req) => {
   if (!authenticateWs(ws, req)) return;
   const session = sessions.get(req.params.id);
