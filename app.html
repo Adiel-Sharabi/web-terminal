@@ -847,31 +847,48 @@
       const container = document.getElementById('claudeList');
       container.innerHTML = '<div style="padding:8px 12px;color:#555;font-size:11px">Loading...</div>';
       try {
-        const list = await (await fetch('/api/claude-sessions')).json();
+        // Fetch from all servers in parallel
+        const fetches = [
+          fetch('/api/claude-sessions').then(r => r.ok ? r.json() : []).then(list => list.map(s => ({ ...s, serverUrl: null, serverName: hostname })))
+        ];
+        const clusterTokens = clusterServers.filter(s => s.url && s.online && !s.needsAuth);
+        for (const srv of clusterTokens) {
+          fetches.push(
+            fetch(`/cluster/${encodeURIComponent(srv.url)}/api/claude-sessions`)
+              .then(r => r.ok ? r.json() : [])
+              .then(list => list.map(s => ({ ...s, serverUrl: srv.url, serverName: srv.name })))
+              .catch(() => [])
+          );
+        }
+        const results = await Promise.all(fetches);
+        const allSessions = results.flat().sort((a, b) => b.lastModified - a.lastModified);
+
         container.textContent = '';
-        if (list.length === 0) {
+        if (allSessions.length === 0) {
           container.innerHTML = '<div style="padding:8px 12px;color:#555;font-size:11px">No Claude sessions found</div>';
           return;
         }
-        for (const s of list) {
+        for (const s of allSessions) {
           const item = document.createElement('div');
           item.className = 'cl-item';
+          const serverTag = s.serverUrl ? `<span style="color:#00d4aa;font-size:9px">[${esc(s.serverName)}]</span> ` : '';
           item.innerHTML =
             `<button class="cl-del" title="Remove">&times;</button>` +
-            `<div class="cl-name">${esc(s.project)}</div>` +
+            `<div class="cl-name">${serverTag}${esc(s.project)}</div>` +
             `<div class="cl-summary">${esc(s.summary || '(no summary)')}</div>` +
             `<div class="cl-meta"><span>${s.sizeKB}KB</span><span>${timeAgo(s.lastModified)}</span>${s.skipPermissions ? '<span style="color:#da4">skip-perms</span>' : ''}</div>`;
 
           item.querySelector('.cl-del').addEventListener('click', async (e) => {
             e.stopPropagation();
             if (!confirm('Remove this Claude session from the list?')) return;
-            await fetch(`/api/claude-sessions/${encodeURIComponent(s.project)}/${encodeURIComponent(s.id)}`, { method: 'DELETE' });
+            const apiBase = s.serverUrl ? `/cluster/${encodeURIComponent(s.serverUrl)}/api` : '/api';
+            await fetch(`${apiBase}/claude-sessions/${encodeURIComponent(s.project)}/${encodeURIComponent(s.id)}`, { method: 'DELETE' });
             loadClaudeSessions();
           });
 
           item.addEventListener('click', (e) => {
             if (e.target.closest('.cl-del')) return;
-            resumeClaude(s.id, s.projectPath, s.project, s.skipPermissions);
+            resumeClaude(s.id, s.projectPath, s.project, s.skipPermissions, s.serverUrl);
           });
 
           container.appendChild(item);
@@ -881,16 +898,17 @@
       }
     }
 
-    async function resumeClaude(claudeSessionId, projectPath, projectName, skipPermissions) {
+    async function resumeClaude(claudeSessionId, projectPath, projectName, skipPermissions, serverUrl) {
       let cmd = 'claude --resume ' + claudeSessionId;
       if (skipPermissions) cmd += ' --dangerously-skip-permissions';
-      const res = await fetch('/api/sessions', {
+      const apiBase = serverUrl ? `/cluster/${encodeURIComponent(serverUrl)}/api` : '/api';
+      const res = await fetch(`${apiBase}/sessions`, {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({ name: projectName, cwd: projectPath, autoCommand: cmd })
       });
       const data = await res.json();
-      if (data.id) switchSession(data.id);
+      if (data.id) switchSession(data.id, serverUrl);
     }
 
     // --- Rename current session (toolbar click) ---
