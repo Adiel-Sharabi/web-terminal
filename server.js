@@ -768,11 +768,18 @@ app.delete('/api/auth/tokens/:token', (req, res) => {
   res.status(404).json({ error: 'Token not found' });
 });
 
-// --- Cluster: register endpoint (before auth — validates via token) ---
+// --- Cluster: register endpoint (requires Bearer token auth) ---
 // Allows a remote server to register itself in our cluster config
 app.post('/api/cluster/register', express.json({ limit: '16kb' }), (req, res) => {
+  // Must authenticate with a valid API token (the remote server sends one it just received)
+  const authHeader = req.headers.authorization;
+  if (!authHeader || !authHeader.startsWith('Bearer ') || !verifyApiToken(authHeader.substring(7))) {
+    return res.status(401).json({ error: 'Unauthorized' });
+  }
   const { name, url, token } = req.body || {};
   if (!name || !url || !token) return res.status(400).json({ error: 'name, url, token required' });
+  // Validate URL format
+  try { new URL(url); } catch (e) { return res.status(400).json({ error: 'Invalid URL' }); }
 
   // Add to cluster config if not already there
   let cfg = {};
@@ -1279,7 +1286,14 @@ app.get('/api/claude-sessions', (req, res) => {
 
 // --- API: delete a claude session file ---
 app.delete('/api/claude-sessions/:project/:id', (req, res) => {
-  const file = path.join(CLAUDE_PROJECTS_DIR, req.params.project, req.params.id + '.jsonl');
+  // Sanitize to prevent path traversal
+  const project = path.basename(req.params.project);
+  const id = path.basename(req.params.id).replace(/[^a-zA-Z0-9_-]/g, '');
+  const file = path.join(CLAUDE_PROJECTS_DIR, project, id + '.jsonl');
+  // Verify the resolved path is still under CLAUDE_PROJECTS_DIR
+  if (!path.resolve(file).startsWith(path.resolve(CLAUDE_PROJECTS_DIR))) {
+    return res.status(400).json({ error: 'Invalid path' });
+  }
   try {
     if (fs.existsSync(file)) {
       fs.unlinkSync(file);
