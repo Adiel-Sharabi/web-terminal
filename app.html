@@ -818,9 +818,13 @@
         method: 'PUT', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(cfg)
       });
       const result = await res.json();
-      document.getElementById('saveMsg').textContent = result.ok
-        ? 'Saved. Restart server for changes to take effect.'
-        : 'Error: ' + (result.error || 'unknown');
+      if (result.ok) {
+        document.getElementById('saveMsg').textContent = result.message || 'Saved.';
+        document.getElementById('saveMsg').style.color = result.needsRestart ? '#e94560' : '#4a4';
+      } else {
+        document.getElementById('saveMsg').textContent = 'Error: ' + (result.error || 'unknown');
+        document.getElementById('saveMsg').style.color = '#e94560';
+      }
     }
 
     // --- Cluster settings UI ---
