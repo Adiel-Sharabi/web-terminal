@@ -510,6 +510,22 @@ app.use((req, res, next) => {
   next();
 });
 
+// --- API: auth token creation (before auth middleware — validates credentials itself) ---
+app.post('/api/auth/token', express.json({ limit: '16kb' }), (req, res) => {
+  const ip = req.ip || req.connection.remoteAddress;
+  if (isRateLimited(ip)) {
+    return res.status(429).json({ error: 'Too many attempts' });
+  }
+  const { user, password, label } = req.body || {};
+  if (!checkCredentials(user, password)) {
+    recordFailedLogin(ip);
+    return res.status(401).json({ error: 'Invalid credentials' });
+  }
+  clearLoginAttempts(ip);
+  const token = createApiToken(label || 'cluster');
+  res.json({ ok: true, token });
+});
+
 // --- Auth middleware ---
 app.use((req, res, next) => {
   // Try cookie auth
@@ -715,16 +731,7 @@ app.get('/api/hostname', (req, res) => {
   res.json({ hostname: getServerName() });
 });
 
-// --- API: auth token (for cluster inter-server auth) ---
-app.post('/api/auth/token', express.json({ limit: '16kb' }), (req, res) => {
-  const { user, password, label } = req.body || {};
-  if (!checkCredentials(user, password)) {
-    return res.status(401).json({ error: 'Invalid credentials' });
-  }
-  const token = createApiToken(label || 'cluster');
-  res.json({ ok: true, token });
-});
-
+// --- API: auth token management (listing/deletion require auth) ---
 app.get('/api/auth/tokens', (req, res) => {
   const tokens = loadApiTokens();
   const list = Object.entries(tokens).map(([token, info]) => ({
