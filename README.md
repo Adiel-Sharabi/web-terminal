@@ -1,20 +1,27 @@
 # Web Terminal
 
-Browser-based terminal for Windows. Monitor and control CLI sessions (including Claude Code) remotely from any device — phone, tablet, or another PC.
+Browser-based terminal for Windows. Monitor and control CLI sessions (including Claude Code) remotely from any device — phone, tablet, or another PC. Manage multiple servers from a single window.
 
 ## Features
 
+- **Unified single-page app** — terminal, session management, and settings in one screen
+- **Multi-server cluster** — connect multiple machines and manage all sessions from one window
+- **Auto-sync cluster** — authenticate once and both servers discover each other automatically
+- **PWA (Progressive Web App)** — install as a standalone app on any device
 - **Shared sessions** — open the same terminal from multiple devices simultaneously
 - **Multiple sessions** — run several terminals in parallel, each with its own shell
+- **In-place session switching** — switch between sessions without page reload (WebSocket swap)
 - **Session persistence** — sessions survive server restarts (saved to `sessions.json`)
 - **Auto-command** — configure a command per session that runs on start/restart (e.g., `claude --dangerously-skip-permissions`)
 - **Claude sessions browser** — scan and resume Claude Code conversations started from any terminal
+- **Clipboard image paste** — paste images via Alt+V (uploads to server clipboard for Claude)
 - **Folder history** — remembers working directories, auto-scans configured base folders
-- **Status monitoring** — live status badges (Active / Idle / Needs Input) per session
+- **Smart status monitoring** — detects Claude activity vs user typing (Active / Idle / Needs Input)
 - **Cross-session notifications** — browser notifications from any session, even if you're viewing a different one
-- **Secure by default** — cookie-based login, scrypt-hashed passwords, forced password change on first use, rate limiting, CSP headers, localhost-only binding
+- **Live config** — most settings take effect immediately without restart
+- **Secure by default** — cookie + token auth, scrypt-hashed passwords, rate limiting, CSP headers, localhost binding
 - **Tailscale ready** — HTTPS with real TLS certificates over your private mesh VPN
-- **Mobile friendly** — works on phone browsers
+- **Mobile friendly** — responsive layout, touch scroll, works on phone browsers
 
 ## Quick Install
 
@@ -47,7 +54,9 @@ install.ps1 -Port 7682 -Password "my-secret" -DefaultCwd "D:\projects"
 
 ## Configuration
 
-Copy `config.default.json` to `config.json` and edit:
+Settings are managed via the in-app Settings panel (gear icon). Most changes take effect immediately — only port, host, and shell require a restart.
+
+You can also edit `config.json` directly:
 
 ```json
 {
@@ -56,78 +65,96 @@ Copy `config.default.json` to `config.json` and edit:
   "password": "my-strong-password",
   "shell": "C:\\Program Files\\Git\\bin\\bash.exe",
   "defaultCwd": "D:\\projects",
-  "scanFolders": ["D:\\projects", "C:\\work", "C:\\dev"]
+  "scanFolders": ["D:\\projects", "C:\\work"],
+  "serverName": "My-PC",
+  "publicUrl": "https://my-pc.tailnet.ts.net",
+  "scrollbackReplayLimit": 102400,
+  "cluster": [
+    { "name": "Office", "url": "https://office.tailnet.ts.net" }
+  ]
 }
 ```
 
-| Key | Description |
-|-----|-------------|
-| `port` | HTTP port |
-| `user` / `password` | Login credentials |
-| `shell` | Shell executable (Git Bash, PowerShell, cmd) |
-| `defaultCwd` | Default working directory for new sessions |
-| `scanFolders` | Directories to scan for folder suggestions (subdirs auto-discovered) |
+| Key | Live | Description |
+|-----|------|-------------|
+| `port` | No | HTTP port |
+| `host` | No | Bind address (default: 127.0.0.1) |
+| `shell` | No | Shell executable (Git Bash, PowerShell, cmd) |
+| `user` / `password` | Yes* | Login credentials (*password change requires restart) |
+| `serverName` | Yes | Display name for this server |
+| `defaultCwd` | Yes | Default working directory for new sessions |
+| `scanFolders` | Yes | Directories to scan for folder suggestions |
+| `defaultCommand` | Yes | Pre-filled auto-command for new sessions |
+| `scrollbackReplayLimit` | Yes | Max bytes sent on session connect (default 100KB) |
+| `publicUrl` | Yes | This server's Tailscale URL (for cluster auto-sync) |
+| `cluster` | Yes | Remote servers list |
 
-`config.json` is gitignored — your settings stay local. Environment variables (`WT_PORT`, `WT_USER`, etc.) override config file values.
+`config.json` is gitignored — your settings stay local.
 
 ## Usage
 
-### Open the lobby
+### Open the app
 
 ```
-http://localhost:7681          # local
-http://<tailscale-ip>:7681    # remote
+https://<server-name>.<tailnet>.ts.net   # via Tailscale (recommended)
+http://localhost:7681                     # local
 ```
 
-Login with your credentials. The lobby shows:
-- **Active sessions** with live status (Active / Done / Needs Input)
-- **New Session** button with folder suggestions and auto-command
-- **Recent Claude Sessions** — browse and resume conversations from any terminal
+Login with your credentials. The unified app shows:
+- **Sidebar** — all sessions across all connected servers, grouped by server
+- **Terminal** — full xterm.js terminal with the selected session
+- **Settings** — server config, cluster management
 
 ### Create a session
 
-1. Click **+ New Session**
-2. Name it (e.g., "AM8 Core")
-3. Pick a working directory from the dropdown (auto-scanned from your configured folders)
-4. Auto-command defaults to `claude --dangerously-skip-permissions` — change or clear as needed
-5. Click **Create** — opens the terminal
+1. Open the sidebar (hamburger menu)
+2. Click **+ New**
+3. Fill in name, working directory, and auto-command
+4. Click **Create** — terminal connects instantly
 
-### Resume a Claude session from regular CLI
+### Switch sessions
 
-If you started Claude in a regular terminal (not web terminal), you can continue it:
+Click any session in the sidebar — switches instantly without page reload.
 
-1. Open the lobby
-2. Click **Show / Hide** under "Recent Claude Sessions"
-3. Find your conversation (shows project, first message, time)
-4. Click **Resume** — creates a web terminal with `claude --resume <id> --dangerously-skip-permissions`
+### Clipboard image paste
 
-### Session persistence
+Press **Alt+V** to paste an image from your clipboard into the terminal. The image is uploaded to the server and made available to Claude Code.
 
-Sessions are saved to `sessions.json`. When the server restarts:
-- All sessions are recreated (same name, cwd, auto-command)
-- Auto-commands run automatically (e.g., Claude resumes where it left off)
+### Resume a Claude session
+
+1. Open the sidebar
+2. Expand **Claude Sessions** section
+3. Click a previous conversation to resume it in a new terminal
 
 ### Status monitoring
 
-Each session card shows:
-- **Active** (green) — output is flowing
-- **Done / Idle** (yellow) — no output for 10+ seconds
-- **Needs Input** (red, pulsing) — Claude is waiting for permission or confirmation
+Each session shows a colored dot:
+- **Green (Running)** — Claude is actively producing output
+- **Yellow (Idle)** — no Claude output for 10+ seconds (user typing doesn't trigger Active)
+- **Red (Waiting)** — Claude needs permission or confirmation
 
-Notifications are **cross-session**: viewing session A will still alert you about session B.
+Notifications work cross-session: you'll be alerted about any session needing input.
 
-### Rename sessions
+## Multi-Server Cluster
 
-Click the session name — in the lobby or terminal toolbar — to rename it.
+Connect multiple web-terminal instances and manage all sessions from one window.
 
-### Auto-command
+### Setup
 
-Set a command that runs when the session starts (or restarts). Use the **Auto-cmd** button on any session card, or set it when creating a new session.
+1. **Set Public URL** on each server: Settings → Public URL → `https://server-name.tailnet.ts.net`
+2. **Add remote server** on any one server: Settings → Cluster → add name + URL → Save
+3. **Login to remote**: click **Login** next to the remote server in the sidebar
+4. **Auto-sync**: the remote server automatically discovers and connects back
 
-Examples:
-- `claude --dangerously-skip-permissions` — start Claude with auto-approve
-- `claude --continue --dangerously-skip-permissions` — resume last conversation
-- `cd /c/dev/my-project && claude` — navigate and start
+That's it — both servers can now see each other's sessions. Repeat for additional servers.
+
+### How it works
+
+- Each server has independent credentials (no shared secrets)
+- Inter-server auth uses API tokens (90-day expiry, revokable)
+- All proxied through the server you're connected to (no CORS, single origin)
+- Offline servers show greyed out, reconnect automatically
+- Any server can be the hub — if one goes down, connect to another
 
 ## Remote Access via Tailscale
 
@@ -135,11 +162,11 @@ Examples:
 
 ### Setup
 
-**On each server** (one-time per machine running web-terminal):
+**On each server** (one-time per machine):
 
 1. **Install Tailscale**: https://tailscale.com/download/windows
 2. **Sign in** with your Tailscale account
-3. **Enable HTTPS** (provisions a real TLS certificate automatically):
+3. **Enable HTTPS**:
    ```powershell
    tailscale serve --https=443 localhost:7681
    ```
@@ -148,15 +175,7 @@ Examples:
    tailscale serve status
    ```
 
-**On client devices** (phone, tablet, other PCs) — just install Tailscale and sign in. No other setup needed.
-
-### Access from any device
-
-1. Open Tailscale app — make sure it's connected
-2. Browse to `https://<server-name>.<tailnet>.ts.net`
-3. Login with your Web Terminal credentials
-
-The server binds to `127.0.0.1` by default — it's only reachable through Tailscale's encrypted tunnel. Port 7681 is not exposed on your LAN.
+**On client devices** — just install Tailscale and sign in. No other setup needed.
 
 ### Security
 
@@ -164,13 +183,7 @@ Four layers of protection:
 1. **Tailscale WireGuard encryption** — only your devices can reach the server
 2. **TLS (HTTPS)** — real Let's Encrypt certificate, no browser warnings
 3. **Tailscale identity** — tied to your account
-4. **Login credentials** — username/password with scrypt-hashed storage
-
-### Multiple machines
-
-Run the setup on each server. Access any by its Tailscale DNS name:
-- `https://home-pc.<tailnet>.ts.net` — Home PC
-- `https://office-pc.<tailnet>.ts.net` — Office PC
+4. **Login credentials** — username/password with scrypt-hashed storage, rate limiting
 
 ### Troubleshooting
 
@@ -178,6 +191,16 @@ Run the setup on each server. Access any by its Tailscale DNS name:
 - **Check what's being served**: `tailscale serve status`
 - **Remove HTTPS proxy**: `tailscale serve --https=443 off`
 - **Certificate issues**: Tailscale auto-provisions certs — ensure HTTPS is enabled on your tailnet (admin console)
+
+## PWA (Install as App)
+
+Web Terminal can be installed as a standalone app:
+
+1. Open the app in Chrome/Edge
+2. Click the install icon in the address bar (or menu → "Install app")
+3. The app opens in its own window without browser chrome
+
+Works on desktop, Android, and iOS (Add to Home Screen).
 
 ## Update
 
@@ -205,15 +228,25 @@ powershell -ExecutionPolicy Bypass -File C:\tools\web-terminal\install.ps1 -Unin
 Phone/Tablet ──> Tailscale VPN ──> Web Terminal (Node.js) ──> Git Bash ──> Claude Code
                                         |
 PC Browser ────> localhost:7681 ────────┘
+                                        |
+                          ┌─────────────┘
+                          v
+                   Remote Servers (cluster proxy via Tailscale)
 ```
 
 | File | Purpose |
 |------|---------|
-| `server.js` | Express + WebSocket server, session management, auth, Claude scanner |
-| `lobby.html` | Session list, create/rename/kill, folder history, Claude sessions |
-| `terminal.html` | xterm.js terminal with shared sessions, notifications |
-| `config.default.json` | Default configuration template (copy to `config.json`) |
+| `server.js` | Express + WebSocket server, session management, auth, cluster proxy |
+| `app.html` | Unified single-page app (terminal + sidebar + settings) |
+| `terminal.html` | Legacy terminal-only page (served at /s/:id) |
+| `lobby.html` | Legacy lobby page (served at /lobby) |
+| `sw.js` | Service worker for PWA caching |
+| `manifest.json` | PWA manifest (app name, icon, standalone mode) |
+| `icon.svg` | App icon |
+| `config.default.json` | Default configuration template |
 | `config.json` | Your local config (gitignored) |
 | `sessions.json` | Persisted session configs (gitignored) |
-| `history.json` | Folder history (gitignored) |
-| `install.ps1` | One-command installer |
+| `api-tokens.json` | API auth tokens for cluster (gitignored) |
+| `cluster-tokens.json` | Stored tokens for remote servers (gitignored) |
+| `tests/security.spec.js` | Auth, session CRUD, XSS, config security tests |
+| `tests/cluster.spec.js` | Token auth, cluster API, proxy security tests |
