@@ -326,9 +326,9 @@ function authenticateWs(ws, req) {
   const cookies = parseCookies(req.headers.cookie);
   // Try cookie auth first, then Bearer token
   if (verifySessionToken(cookies[COOKIE_NAME])) return true;
-  // Check for token in query string (WebSocket can't send headers easily)
-  const url = new URL(req.url, `http://${req.headers.host}`);
-  const token = url.searchParams.get('token');
+  // Check for token in query string (express-ws may use req.query or req.url)
+  const token = req.query?.token
+    || new URL(req.url, `http://${req.headers.host}`).searchParams.get('token');
   if (token && verifyApiToken(token)) return true;
   ws.close(1008, 'Unauthorized');
   return false;
