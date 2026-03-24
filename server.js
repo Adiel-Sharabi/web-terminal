@@ -268,7 +268,16 @@ function createSession(id, cwd, name, autoCommand, savedScrollback) {
 }
 
 // --- Auth helpers ---
-const SESSION_SECRET = crypto.randomBytes(32).toString('hex');
+// Persist session secret so cookies survive server restarts
+const SESSION_SECRET_FILE = path.join(__dirname, '.session-secret');
+const SESSION_SECRET = (() => {
+  try {
+    if (fs.existsSync(SESSION_SECRET_FILE)) return fs.readFileSync(SESSION_SECRET_FILE, 'utf8').trim();
+  } catch (e) {}
+  const secret = crypto.randomBytes(32).toString('hex');
+  try { fs.writeFileSync(SESSION_SECRET_FILE, secret, 'utf8'); } catch (e) {}
+  return secret;
+})();
 const COOKIE_NAME = 'wt_session';
 const COOKIE_MAX_AGE = 7 * 24 * 60 * 60 * 1000; // 7 days
 
