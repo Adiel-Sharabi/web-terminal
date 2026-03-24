@@ -682,12 +682,13 @@ app.get('/api/config', (req, res) => {
   current.serverName = current.serverName || getServerName();
   current.scrollbackReplayLimit = current.scrollbackReplayLimit || getScrollbackReplayLimit();
   current.cluster = current.cluster || [];
+  current.publicUrl = current.publicUrl || '';
   // Never expose password in API response
   current.password = '***';
   res.json(current);
 });
 
-const ALLOWED_CONFIG_KEYS = ['port', 'host', 'user', 'password', 'shell', 'defaultCwd', 'scanFolders', 'defaultCommand', 'openInNewTab', 'serverName', 'scrollbackReplayLimit', 'cluster'];
+const ALLOWED_CONFIG_KEYS = ['port', 'host', 'user', 'password', 'shell', 'defaultCwd', 'scanFolders', 'defaultCommand', 'openInNewTab', 'serverName', 'scrollbackReplayLimit', 'cluster', 'publicUrl'];
 
 app.put('/api/config', express.json({ limit: '16kb' }), (req, res) => {
   try {
@@ -754,6 +755,30 @@ app.delete('/api/auth/tokens/:token', (req, res) => {
   res.status(404).json({ error: 'Token not found' });
 });
 
+// --- Cluster: register endpoint (before auth — validates via token) ---
+// Allows a remote server to register itself in our cluster config
+app.post('/api/cluster/register', express.json({ limit: '16kb' }), (req, res) => {
+  const { name, url, token } = req.body || {};
+  if (!name || !url || !token) return res.status(400).json({ error: 'name, url, token required' });
+
+  // Add to cluster config if not already there
+  let cfg = {};
+  try { if (fs.existsSync(CONFIG_FILE)) cfg = JSON.parse(fs.readFileSync(CONFIG_FILE, 'utf8')); } catch (e) {}
+  if (!cfg.cluster) cfg.cluster = [];
+  if (!cfg.cluster.find(s => s.url === url)) {
+    cfg.cluster.push({ name, url });
+    fs.writeFileSync(CONFIG_FILE, JSON.stringify(cfg, null, 2), 'utf8');
+  }
+
+  // Store the token for this remote server
+  const clusterTokens = loadClusterTokens();
+  clusterTokens[url] = { token, name, authenticated: Date.now() };
+  saveClusterTokens(clusterTokens);
+
+  console.log(`[${new Date().toISOString()}] Cluster: registered remote server "${name}" (${url})`);
+  res.json({ ok: true });
+});
+
 // --- Cluster: proxy to remote servers ---
 const http = require('http');
 const https = require('https');
@@ -788,6 +813,27 @@ app.post('/api/cluster/auth', express.json({ limit: '16kb' }), async (req, res) 
     const clusterTokens = loadClusterTokens();
     clusterTokens[url] = { token: data.token, name: server.name, authenticated: Date.now() };
     saveClusterTokens(clusterTokens);
+
+    // Auto-register back: create a token for the remote server and register ourselves there
+    try {
+      const myName = getServerName();
+      const myUrl = liveConfig('publicUrl', null);
+      if (myUrl) {
+        const reverseToken = createApiToken(`cluster:${server.name}`);
+        await clusterFetch(url + '/api/cluster/register', {
+          method: 'POST',
+          headers: {
+            'Content-Type': 'application/json',
+            'Authorization': 'Bearer ' + data.token
+          },
+          body: JSON.stringify({ name: myName, url: myUrl, token: reverseToken })
+        });
+      }
+    } catch (e) {
+      // Non-fatal — reverse registration is best-effort
+      console.warn('Cluster reverse-register failed:', e.message);
+    }
+
     res.json({ ok: true, name: server.name });
   } catch (e) {
     res.status(502).json({ error: `Cannot reach server: ${e.message}` });
