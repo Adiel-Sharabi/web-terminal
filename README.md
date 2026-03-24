@@ -13,12 +13,15 @@ Browser-based terminal for Windows. Monitor and control CLI sessions (including 
 - **In-place session switching** — switch between sessions without page reload (WebSocket swap)
 - **Session persistence** — sessions survive server restarts (saved to `sessions.json`)
 - **Auto-command** — configure a command per session that runs on start/restart (e.g., `claude --dangerously-skip-permissions`)
-- **Claude sessions browser** — scan and resume Claude Code conversations started from any terminal
+- **Claude sessions browser** — scan and resume Claude Code conversations across all servers
 - **Clipboard image paste** — paste images via Alt+V (uploads to server clipboard for Claude)
 - **Folder history** — remembers working directories, auto-scans configured base folders
 - **Smart status monitoring** — detects Claude activity vs user typing (Active / Idle / Needs Input)
 - **Cross-session notifications** — browser notifications from any session, even if you're viewing a different one
 - **Live config** — most settings take effect immediately without restart
+- **Persistent login** — session cookies survive server restarts
+- **Reconnect handling** — auto-reconnects on disconnect, redirects to login if session expired
+- **Per-server session creation** — create sessions on any connected server from the sidebar
 - **Secure by default** — cookie + token auth, scrypt-hashed passwords, rate limiting, CSP headers, localhost binding
 - **Tailscale ready** — HTTPS with real TLS certificates over your private mesh VPN
 - **Mobile friendly** — responsive layout, touch scroll, works on phone browsers
