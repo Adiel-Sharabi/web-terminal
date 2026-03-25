@@ -13,9 +13,11 @@
   <style>
     * { margin: 0; padding: 0; box-sizing: border-box; }
     html, body { height: 100%; background: #1e1e1e; overflow: hidden; }
+    body { display: flex; flex-direction: column; }
     #toolbar {
       height: 36px; background: #16213e; display: flex; align-items: center; padding: 0 12px;
       font: 13px 'Segoe UI', sans-serif; color: #888; border-bottom: 1px solid #0f3460;
+      position: sticky; top: 0; z-index: 50; flex-shrink: 0;
     }
     #toolbar .session-name { color: #e0e0e0; font-weight: 500; margin-right: 8px; cursor: pointer; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; max-width: 40vw; }
     #toolbar .session-name:hover { color: #00d4aa; }
@@ -27,7 +29,7 @@
     }
     .tb-btn:hover { border-color: #00d4aa; color: #00d4aa; }
     .tb-btn.active { border-color: #00d4aa; color: #00d4aa; background: rgba(0,212,170,0.1); }
-    #main { display: flex; height: calc(100% - 36px); }
+    #main { display: flex; flex: 1; min-height: 0; }
 
     /* --- Sidebar --- */
     #sidebar {
@@ -192,11 +194,28 @@
     #reconnectOverlay .msg { color: #ccc; font: 14px 'Segoe UI', sans-serif; }
     #reconnectOverlay .sub { color: #666; font: 12px 'Segoe UI', sans-serif; margin-top: 6px; }
 
+    /* --- Touch keys toolbar --- */
+    #touchKeys {
+      display: none; height: 36px; background: #0a1a30; border-bottom: 1px solid #0f3460;
+      overflow-x: auto; white-space: nowrap; -webkit-overflow-scrolling: touch;
+      scrollbar-width: none; flex-shrink: 0;
+    }
+    #touchKeys::-webkit-scrollbar { display: none; }
+    #touchKeys button {
+      background: #16213e; border: 1px solid #0f3460; color: #ccc; font: 12px 'Cascadia Code', monospace;
+      padding: 4px 10px; margin: 4px 2px; border-radius: 4px; height: 28px; min-width: 36px;
+      cursor: pointer; -webkit-tap-highlight-color: transparent; flex-shrink: 0;
+    }
+    #touchKeys button:active { background: #00d4aa; color: #1a1a2e; }
+    #touchKeys button.sticky { border-color: #00d4aa; color: #00d4aa; }
+    #touchKeys button.sticky.active { background: rgba(0,212,170,0.2); }
+
     /* --- Mobile --- */
     @media (max-width: 600px) {
       #toolbar { font-size: 12px; height: 32px; padding: 0 8px; }
       #toolbar .session-name { max-width: 30vw; font-size: 12px; }
       #sidebar.open { width: 220px; }
+      #touchKeys { display: flex; align-items: center; }
       .settings-panel { width: 95vw; padding: 16px; }
       .settings-grid { grid-template-columns: 1fr; }
     }
@@ -209,6 +228,20 @@
     <span id="hostName" style="color:#00d4aa; font-weight:500; margin-left:8px;"></span>
     <span id="viewers" class="viewers"></span>
     <button class="tb-btn" onclick="logout()" title="Logout" style="margin-left:8px;font-size:14px">&#x23FB;</button>
+  </div>
+  <div id="touchKeys">
+    <button data-key="Escape" data-seq="\x1b">Esc</button>
+    <button data-sticky="ctrl" class="sticky">Ctrl</button>
+    <button data-sticky="alt" class="sticky">Alt</button>
+    <button data-key="Tab" data-seq="\t">Tab</button>
+    <button data-key="ArrowUp" data-seq="\x1b[A">&uarr;</button>
+    <button data-key="ArrowDown" data-seq="\x1b[B">&darr;</button>
+    <button data-key="ArrowLeft" data-seq="\x1b[D">&larr;</button>
+    <button data-key="ArrowRight" data-seq="\x1b[C">&rarr;</button>
+    <button data-key="/" data-char="/">/</button>
+    <button data-key="|" data-char="|">|</button>
+    <button data-key="-" data-char="-">-</button>
+    <button data-key="~" data-char="~">~</button>
   </div>
   <div id="status" style="display:none">connecting...</div>
   <div id="main">
@@ -539,6 +572,51 @@
       }
     }
     window.addEventListener('resize', doResize);
+
+    // --- Touch keys (mobile) ---
+    const stickyState = { ctrl: false, alt: false };
+
+    document.getElementById('touchKeys').addEventListener('click', (e) => {
+      const btn = e.target.closest('button');
+      if (!btn) return;
+
+      // Sticky modifier keys (Ctrl, Alt)
+      const sticky = btn.dataset.sticky;
+      if (sticky) {
+        stickyState[sticky] = !stickyState[sticky];
+        btn.classList.toggle('active', stickyState[sticky]);
+        return;
+      }
+
+      // Build the sequence to send
+      let seq = btn.dataset.seq || btn.dataset.char || '';
+      if (!seq) return;
+
+      // Apply sticky modifiers
+      if (stickyState.ctrl && btn.dataset.char) {
+        // Ctrl+letter = char code 1-26
+        const c = btn.dataset.char.toLowerCase();
+        if (c >= 'a' && c <= 'z') {
+          seq = String.fromCharCode(c.charCodeAt(0) - 96);
+        } else {
+          seq = btn.dataset.seq || btn.dataset.char;
+        }
+      }
+      if (stickyState.alt) {
+        seq = '\x1b' + (btn.dataset.char || seq);
+      }
+
+      if (ws && ws.readyState === WebSocket.OPEN) ws.send(seq);
+
+      // Clear sticky after use
+      if (stickyState.ctrl || stickyState.alt) {
+        stickyState.ctrl = false;
+        stickyState.alt = false;
+        document.querySelectorAll('#touchKeys .sticky').forEach(b => b.classList.remove('active'));
+      }
+
+      term.focus();
+    });
 
     // --- Auto-scroll ---
     function isAtBottom() { const buf = term.buffer.active; return buf.viewportY >= buf.baseY; }
