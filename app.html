@@ -618,6 +618,55 @@
       term.focus();
     });
 
+    // --- Mobile long-press for text selection/copy/paste ---
+    if (isMobile) {
+      let longPressTimer = null;
+      const termEl = document.getElementById('terminal');
+
+      termEl.addEventListener('touchstart', (e) => {
+        if (e.touches.length !== 1) return;
+        longPressTimer = setTimeout(() => {
+          longPressTimer = null;
+          // Show copy/paste menu
+          const sel = term.getSelection();
+          const actions = [];
+          if (sel) actions.push({ label: 'Copy', action: () => { navigator.clipboard.writeText(sel); term.clearSelection(); } });
+          actions.push({ label: 'Paste', action: () => { navigator.clipboard.readText().then(t => { if (t && ws && ws.readyState === WebSocket.OPEN) ws.send(t); }); } });
+          actions.push({ label: 'Select All', action: () => term.selectAll() });
+          showContextMenu(e.touches[0].clientX, e.touches[0].clientY, actions);
+        }, 600);
+      }, { passive: true });
+
+      termEl.addEventListener('touchend', () => { if (longPressTimer) { clearTimeout(longPressTimer); longPressTimer = null; } });
+      termEl.addEventListener('touchmove', () => { if (longPressTimer) { clearTimeout(longPressTimer); longPressTimer = null; } });
+    }
+
+    function showContextMenu(x, y, actions) {
+      // Remove existing menu
+      const old = document.getElementById('ctxMenu');
+      if (old) old.remove();
+
+      const menu = document.createElement('div');
+      menu.id = 'ctxMenu';
+      menu.style.cssText = `position:fixed;left:${x}px;top:${y}px;z-index:500;background:#16213e;border:1px solid #0f3460;border-radius:6px;box-shadow:0 4px 12px rgba(0,0,0,0.5);overflow:hidden`;
+      for (const a of actions) {
+        const btn = document.createElement('div');
+        btn.textContent = a.label;
+        btn.style.cssText = 'padding:10px 20px;color:#e0e0e0;font:14px "Segoe UI",sans-serif;cursor:pointer;-webkit-tap-highlight-color:transparent';
+        btn.addEventListener('click', () => { menu.remove(); a.action(); });
+        menu.appendChild(btn);
+      }
+      document.body.appendChild(menu);
+
+      // Close on next tap anywhere
+      setTimeout(() => {
+        document.addEventListener('touchstart', function dismiss() {
+          menu.remove();
+          document.removeEventListener('touchstart', dismiss);
+        }, { once: true });
+      }, 100);
+    }
+
     // --- Auto-scroll ---
     function isAtBottom() { const buf = term.buffer.active; return buf.viewportY >= buf.baseY; }
     term.onScroll(() => { autoScroll = isAtBottom(); scrollBtn.style.display = autoScroll ? 'none' : 'block'; });
@@ -1210,8 +1259,8 @@
         document.getElementById('noSession').style.display = 'flex';
       }
 
-      // Open sidebar
-      if (sessionStorage.getItem('sidebarOpen') === '1') {
+      // Open sidebar by default (unless user explicitly closed it)
+      if (sessionStorage.getItem('sidebarOpen') !== '0') {
         toggleSidebar();
       }
 
