@@ -14,3 +14,4 @@ test-results/
 cluster-tokens.json
 api-tokens.json
 .session-secret
+*.png
