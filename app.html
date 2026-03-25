@@ -435,8 +435,14 @@
         if (autoScroll) term.scrollToBottom();
       };
 
-      ws.onclose = () => {
+      ws.onclose = (e) => {
         if (switching) return;
+        // Session was killed/ended — navigate to empty state
+        if (e.code === 4000) {
+          cancelReconnect();
+          if (document.getElementById('sidebar').classList.contains('open')) loadSidebar();
+          return;
+        }
         reconnectAttempts++;
         status.textContent = 'disconnected — reconnecting...';
         status.className = 'disconnected';
@@ -890,6 +896,10 @@
         body: JSON.stringify({ name, cwd, autoCommand })
       });
       const data = await res.json();
+      if (!res.ok) {
+        alert(data.error || 'Failed to create session');
+        return;
+      }
       if (data.id) {
         document.getElementById('newSessionForm').classList.remove('show');
         document.getElementById('newName').value = '';
