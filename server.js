@@ -922,22 +922,27 @@ app.get('/api/cluster/sessions', async (req, res) => {
 });
 
 // Proxy API requests to remote servers
-app.all('/cluster/:serverUrl/api/*', express.json({ limit: '16kb' }), async (req, res) => {
+app.all('/cluster/:serverUrl/api/*', express.raw({ type: '*/*', limit: '10mb' }), async (req, res) => {
   const serverUrl = decodeURIComponent(req.params.serverUrl);
   const clusterTokens = loadClusterTokens();
   const tokenEntry = clusterTokens[serverUrl];
   if (!tokenEntry) return res.status(401).json({ error: 'Not authenticated to remote server' });
 
   const remotePath = '/api/' + req.params[0];
+  const contentType = req.headers['content-type'] || 'application/json';
+  let body;
+  if (['POST', 'PUT', 'PATCH'].includes(req.method)) {
+    body = contentType.includes('json') ? JSON.stringify(JSON.parse(req.body.toString() || '{}')) : req.body;
+  }
   try {
     const r = await clusterFetch(serverUrl + remotePath, {
       method: req.method,
       headers: {
         'Authorization': 'Bearer ' + tokenEntry.token,
-        'Content-Type': req.headers['content-type'] || 'application/json'
+        'Content-Type': contentType
       },
-      body: ['POST', 'PUT', 'PATCH'].includes(req.method) ? JSON.stringify(req.body) : undefined,
-      timeout: 10000
+      body,
+      timeout: 30000
     });
     res.status(r.status);
     try { res.json(JSON.parse(r.body)); } catch (e) { res.send(r.body); }
@@ -1001,9 +1006,10 @@ function clusterFetch(url, opts = {}) {
       hostname: parsed.hostname,
       port: parsed.port,
       path: parsed.pathname + parsed.search,
-      headers: opts.headers || {},
+      headers: Object.assign({}, opts.headers || {}),
       rejectUnauthorized: false // Tailscale certs are valid but we're lenient
     };
+    if (opts.body) reqOpts.headers['Content-Length'] = Buffer.byteLength(opts.body);
 
     const r = lib.request(reqOpts, response => {
       let body = '';
