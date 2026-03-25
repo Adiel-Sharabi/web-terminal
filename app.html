@@ -492,7 +492,8 @@
           const imageType = item.types.find(t => t.startsWith('image/'));
           if (imageType) {
             const blob = await item.getType(imageType);
-            const res = await fetch('/api/clipboard-image', {
+            const apiBase = sessionServerUrl ? `/cluster/${encodeURIComponent(sessionServerUrl)}/api` : '/api';
+            const res = await fetch(`${apiBase}/clipboard-image`, {
               method: 'POST', headers: { 'Content-Type': imageType }, body: blob
             });
             const result = await res.json();
