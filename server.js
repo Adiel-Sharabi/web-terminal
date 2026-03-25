@@ -247,7 +247,7 @@ function createSession(id, cwd, name, autoCommand, savedScrollback) {
   term.onExit(() => {
     console.log(`[${new Date().toISOString()}] Session ${id} shell exited`);
     for (const client of session.clients) {
-      try { client.send('\r\n\x1b[31m[Session ended]\x1b[0m\r\n'); client.close(); } catch (e) {}
+      try { client.send('\r\n\x1b[31m[Session ended]\x1b[0m\r\n'); client.close(4000, 'Session ended'); } catch (e) {}
     }
     sessions.delete(id);
     deleteScrollback(id);
@@ -1091,13 +1091,18 @@ app.post('/api/sessions', express.json({ limit: '16kb' }), (req, res) => {
   let cwd = String(req.body?.cwd || liveCwd).substring(0, 260);
   const name = String(req.body?.name || `Session ${sessions.size + 1}`).substring(0, 100).replace(/[\x00-\x1f]/g, '');
   const autoCommand = String(req.body?.autoCommand || '').substring(0, 500);
-  // Verify cwd exists, fall back to default
+  // Verify cwd exists — return error if user specified a bad path
   try {
     if (!fs.existsSync(cwd) || !fs.statSync(cwd).isDirectory()) {
-      console.warn(`CWD "${cwd}" does not exist, falling back to ${liveCwd}`);
+      if (req.body?.cwd) {
+        return res.status(400).json({ error: `Folder does not exist: ${cwd}` });
+      }
       cwd = liveCwd;
     }
   } catch (e) {
+    if (req.body?.cwd) {
+      return res.status(400).json({ error: `Folder does not exist: ${cwd}` });
+    }
     cwd = liveCwd;
   }
   try {
@@ -1362,7 +1367,7 @@ app.ws('/ws/notify', (ws, req) => {
 app.ws('/ws/:id', (ws, req) => {
   if (!authenticateWs(ws, req)) return;
   const session = sessions.get(req.params.id);
-  if (!session) { ws.close(); return; }
+  if (!session) { ws.close(4000, 'Session ended'); return; }
 
   // Send scrollback as a single chunk, trimmed to replay limit
   try {
