@@ -451,7 +451,6 @@
 
       ws.onmessage = e => {
         term.write(e.data);
-        if (autoScroll) term.scrollToBottom();
       };
 
       ws.onclose = (e) => {
@@ -874,19 +873,20 @@
 
     // --- Auto-scroll ---
     function isAtBottom() { const buf = term.buffer.active; return buf.viewportY >= buf.baseY; }
-    let userScrolling = false;
-    // Detect user-initiated scroll (wheel or touch drag on terminal)
+    // Detect user-initiated scroll — disable auto-scroll when user scrolls up
     const termEl2 = document.getElementById('terminal');
-    termEl2.addEventListener('wheel', () => { userScrolling = true; }, { passive: true });
-    termEl2.addEventListener('touchstart', () => { userScrolling = true; }, { passive: true });
-    term.onScroll(() => {
-      if (userScrolling) {
-        autoScroll = isAtBottom();
-        userScrolling = false;
-      }
-      scrollBtn.style.display = autoScroll ? 'none' : 'block';
+    termEl2.addEventListener('wheel', () => { autoScroll = false; }, { passive: true });
+    termEl2.addEventListener('touchmove', () => { autoScroll = false; }, { passive: true });
+    term.onLineFeed(() => {
+      if (autoScroll) term.scrollToBottom();
+      scrollBtn.style.display = isAtBottom() ? 'none' : 'block';
     });
-    term.onLineFeed(() => { if (autoScroll) term.scrollToBottom(); else scrollBtn.style.display = 'block'; });
+    // Re-enable auto-scroll when user scrolls back to bottom
+    term.onScroll(() => {
+      const atBottom = isAtBottom();
+      if (atBottom) autoScroll = true;
+      scrollBtn.style.display = atBottom ? 'none' : 'block';
+    });
     function scrollToBottom() { term.scrollToBottom(); autoScroll = true; scrollBtn.style.display = 'none'; }
 
     // --- Sidebar ---
