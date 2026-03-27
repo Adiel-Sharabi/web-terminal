@@ -65,3 +65,16 @@ If new user-facing features were added, update `README.md`:
 - Tests run on port 17681 with credentials: testuser / testpass:colon
 - Uses Playwright for both API and browser tests
 - Test config in `playwright.config.js`
+- Tests backup/restore config.json but overwrite the password hash — re-apply the correct password after running tests
+
+## Deployment & Operations
+- Server runs as a Windows scheduled task under svchost.exe (Session 0) on machine restart
+- The scheduled task environment may have a stale PATH — if CLI tools (like `claude`) aren't found in sessions after reboot, the server likely needs to be restarted from a user session to pick up the current system PATH
+- To restart: `taskkill /F /IM node.exe` (may need admin elevation if running as service), then `node server.js &`
+- Server listens on port 7681, config in `config.json` (gitignored password hashes)
+
+## Cluster
+- `config.json` has a `cluster` array of `{name, url}` servers and a `publicUrl` for the local server
+- `/api/cluster/sessions` merges local + remote sessions — must skip fetching from servers whose URL matches `publicUrl` to avoid session duplication
+- Cluster auth tokens stored in `cluster-tokens.json`
+- `passAllEnv` config option (default false) controls whether spawned shells get full or limited environment variables
