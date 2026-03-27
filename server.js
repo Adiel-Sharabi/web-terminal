@@ -883,9 +883,11 @@ app.get('/api/cluster/sessions', async (req, res) => {
     });
   }
 
-  // Remote sessions (parallel, with timeout)
+  // Remote sessions (parallel, with timeout) — skip self-reference
   const clusterTokens = loadClusterTokens();
-  const remotePromises = getClusterConfig().map(async (server) => {
+  const publicUrl = liveConfig('publicUrl', null);
+  const remoteServers = getClusterConfig().filter(server => !publicUrl || server.url !== publicUrl);
+  const remotePromises = remoteServers.map(async (server) => {
     const tokenEntry = clusterTokens[server.url];
     if (!tokenEntry) return { server: server.name, url: server.url, online: false, needsAuth: true, sessions: [] };
     try {
