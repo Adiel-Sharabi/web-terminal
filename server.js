@@ -1378,8 +1378,22 @@ app.ws('/ws/:id', (ws, req) => {
     }
   } catch (e) {}
 
+  ws._clientSize = { cols: 80, rows: 24 };
   session.clients.add(ws);
   console.log(`[${new Date().toISOString()}] Client joined session ${req.params.id} (${session.clients.size} clients)`);
+
+  function recalcSessionSize(session) {
+    let maxCols = 0, maxRows = 0;
+    for (const client of session.clients) {
+      if (client._clientSize) {
+        maxCols = Math.max(maxCols, client._clientSize.cols);
+        maxRows = Math.max(maxRows, client._clientSize.rows);
+      }
+    }
+    if (maxCols > 0 && maxRows > 0) {
+      session.term.resize(maxCols, maxRows);
+    }
+  }
 
   ws.on('message', msg => {
     // Reject oversized messages (64KB)
@@ -1389,7 +1403,8 @@ app.ws('/ws/:id', (ws, req) => {
         const { resize } = JSON.parse(msg);
         const cols = Math.max(1, Math.min(500, parseInt(resize.cols) || 80));
         const rows = Math.max(1, Math.min(200, parseInt(resize.rows) || 24));
-        session.term.resize(cols, rows);
+        ws._clientSize = { cols, rows };
+        recalcSessionSize(session);
         session.lastUserInput = Date.now(); // resize redraws produce PTY output — ignore for status
       } catch (e) {}
       return;
@@ -1401,6 +1416,8 @@ app.ws('/ws/:id', (ws, req) => {
   ws.on('close', () => {
     session.clients.delete(ws);
     console.log(`[${new Date().toISOString()}] Client left session ${req.params.id} (${session.clients.size} clients)`);
+    // Recalc size after client leaves so remaining clients get optimal size
+    if (session.clients.size > 0) recalcSessionSize(session);
   });
 });
 
