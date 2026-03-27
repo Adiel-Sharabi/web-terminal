@@ -671,6 +671,10 @@
               .replace(/\\t/g, '\t').replace(/\\n/g, '\n').replace(/\\r/g, '\r');
     }
 
+    // Prevent touch toolbar from stealing focus (dismissing virtual keyboard)
+    document.getElementById('touchKeys').addEventListener('touchstart', (e) => { e.preventDefault(); }, { passive: false });
+    document.getElementById('touchKeys').addEventListener('mousedown', (e) => { e.preventDefault(); });
+
     document.getElementById('touchKeys').addEventListener('click', (e) => {
       const btn = e.target.closest('button');
       if (!btn) return;
@@ -870,11 +874,19 @@
 
     // --- Auto-scroll ---
     function isAtBottom() { const buf = term.buffer.active; return buf.viewportY >= buf.baseY; }
-    term.onScroll(() => { autoScroll = isAtBottom(); scrollBtn.style.display = autoScroll ? 'none' : 'block'; });
+    let userScrolling = false;
+    // Detect user-initiated scroll (wheel or touch drag on terminal)
+    const termEl2 = document.getElementById('terminal');
+    termEl2.addEventListener('wheel', () => { userScrolling = true; }, { passive: true });
+    termEl2.addEventListener('touchstart', () => { userScrolling = true; }, { passive: true });
+    term.onScroll(() => {
+      if (userScrolling) {
+        autoScroll = isAtBottom();
+        userScrolling = false;
+      }
+      scrollBtn.style.display = autoScroll ? 'none' : 'block';
+    });
     term.onLineFeed(() => { if (autoScroll) term.scrollToBottom(); else scrollBtn.style.display = 'block'; });
-    document.getElementById('terminal').addEventListener('touchend', () => setTimeout(() => {
-      autoScroll = isAtBottom(); scrollBtn.style.display = autoScroll ? 'none' : 'block';
-    }, 200));
     function scrollToBottom() { term.scrollToBottom(); autoScroll = true; scrollBtn.style.display = 'none'; }
 
     // --- Sidebar ---
