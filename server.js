@@ -7,6 +7,8 @@ const fs = require('fs');
 const crypto = require('crypto');
 const { execFile } = require('child_process');
 
+const SERVER_VERSION = '1.0.0';
+
 // --- Config: config.json > env vars > defaults ---
 const CONFIG_FILE = path.join(__dirname, 'config.json');
 const DEFAULT_CONFIG_FILE = path.join(__dirname, 'config.default.json');
@@ -1040,9 +1042,9 @@ app.get('/api/version', (req, res) => {
       } catch (e) { return -1; } // -1 = unknown
     })();
     const dirty = execSync('git status --porcelain', { cwd: __dirname, encoding: 'utf8' }).trim().length > 0;
-    res.json({ hash, date, behind, dirty, serverName: getServerName() });
+    res.json({ version: SERVER_VERSION, hash, date, behind, dirty, serverName: getServerName() });
   } catch (e) {
-    res.json({ hash: 'unknown', date: '', behind: -1, dirty: false, serverName: getServerName() });
+    res.json({ version: SERVER_VERSION, hash: 'unknown', date: '', behind: -1, dirty: false, serverName: getServerName() });
   }
 });
 
