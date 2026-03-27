@@ -2,7 +2,7 @@
 <html>
 <head>
   <meta charset="utf-8">
-  <meta name="viewport" content="width=device-width, initial-scale=1.0, viewport-fit=cover">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0, viewport-fit=cover, interactive-widget=resizes-content">
   <meta name="theme-color" content="#16213e">
   <meta name="apple-mobile-web-app-capable" content="yes">
   <meta name="apple-mobile-web-app-status-bar-style" content="black-translucent">
@@ -12,7 +12,7 @@
   <link rel="stylesheet" href="https://cdn.jsdelivr.net/npm/@xterm/xterm@5.5.0/css/xterm.min.css" integrity="sha384-tStR1zLfWgsiXCF3IgfB3lBa8KmBe/lG287CL9WCeKgQYcp1bjb4/+mwN6oti4Co" crossorigin="anonymous">
   <style>
     * { margin: 0; padding: 0; box-sizing: border-box; }
-    html, body { height: 100%; background: #1e1e1e; overflow: hidden; }
+    html, body { height: 100dvh; background: #1e1e1e; overflow: hidden; }
     body { display: flex; flex-direction: column; }
     #toolbar {
       height: 36px; background: #16213e; display: flex; align-items: center; padding: 0 12px;
@@ -207,12 +207,25 @@
       cursor: pointer; -webkit-tap-highlight-color: transparent; flex-shrink: 0;
     }
     #touchKeys button:active { background: #00d4aa; color: #1a1a2e; }
-    #touchKeys button.sticky { border-color: #00d4aa; color: #00d4aa; }
-    #touchKeys button.sticky.active { background: rgba(0,212,170,0.2); }
+    #touchKeys button.sticky.active { background: #00d4aa; color: #1a1a2e; border-color: #00d4aa; }
+
+    /* --- Selection mode floating bar --- */
+    #selectBar {
+      display: none; position: fixed; top: 34px; left: 0; right: 0; z-index: 200;
+      height: 36px; background: #0f3460; border-bottom: 1px solid #00d4aa;
+      align-items: center; justify-content: center; gap: 16px;
+    }
+    #selectBar.show { display: flex; }
+    #selectBar button {
+      background: transparent; border: 1px solid #00d4aa; color: #00d4aa; font: 13px 'Segoe UI', sans-serif;
+      padding: 4px 16px; border-radius: 4px; cursor: pointer;
+    }
+    #selectBar button:active { background: #00d4aa; color: #1a1a2e; }
+    #selectBar .sel-info { color: #888; font: 11px 'Segoe UI', sans-serif; }
 
     /* --- Mobile --- */
     @media (max-width: 600px) {
-      #toolbar { font-size: 12px; height: 32px; padding: 0 8px; position: fixed; top: 0; left: 0; right: 0; }
+      #toolbar { font-size: 12px; height: 32px; padding: 0 8px; position: fixed; top: 0; left: 0; right: 0; z-index: 100; will-change: transform; }
       #toolbar .session-name { max-width: 30vw; font-size: 12px; }
       #touchKeys { display: flex; align-items: center; margin-top: 32px; }
       #sidebar.open { width: 220px; }
@@ -229,10 +242,16 @@
     <span id="viewers" class="viewers"></span>
     <button class="tb-btn" onclick="logout()" title="Logout" style="margin-left:8px;font-size:14px">&#x23FB;</button>
   </div>
+  <div id="selectBar">
+    <span class="sel-info" id="selInfo">Drag to select text</span>
+    <button onclick="copySelection()">Copy</button>
+    <button onclick="exitSelectMode()">Done</button>
+  </div>
   <div id="touchKeys">
     <button data-key="Escape" data-seq="\x1b">Esc</button>
     <button data-sticky="ctrl" class="sticky">Ctrl</button>
     <button data-sticky="alt" class="sticky">Alt</button>
+    <button data-sticky="shift" class="sticky">Shift</button>
     <button data-key="Tab" data-seq="\t">Tab</button>
     <button data-key="ArrowUp" data-seq="\x1b[A">&uarr;</button>
     <button data-key="ArrowDown" data-seq="\x1b[B">&darr;</button>
@@ -551,7 +570,7 @@
 
     term.attachCustomKeyEventHandler(e => {
       if (e.type !== 'keydown') return true;
-      if (e.altKey && e.key === 'v') { uploadClipboardImage(); return false; }
+      if (e.altKey && e.key === 'v') { isMobile ? mobileImagePaste() : uploadClipboardImage(); return false; }
       if ((e.ctrlKey || e.metaKey) && e.key === 'v') {
         e.preventDefault();
         navigator.clipboard.readText().then(text => {
@@ -564,10 +583,53 @@
         term.clearSelection();
         return false;
       }
+      // Mobile: suppress keydown for printable chars to avoid double input
+      // (mobile keyboards fire both input event and keydown for punctuation)
+      if (isMobile && !e.ctrlKey && !e.altKey && !e.metaKey && e.key.length === 1) {
+        return false;
+      }
       return true;
     });
 
     term.onData(data => {
+      // Apply sticky modifiers to mobile keyboard input
+      if (isMobile && (stickyState.ctrl || stickyState.alt || stickyState.shift) && data.length === 1) {
+        let key = stickyState.shift ? data.toUpperCase() : data;
+        // Alt+V on mobile → image picker
+        if (stickyState.alt && data.toLowerCase() === 'v') {
+          clearSticky();
+          mobileImagePaste();
+          return;
+        }
+        // Ctrl+C with selection → copy
+        if (stickyState.ctrl && data.toLowerCase() === 'c' && term.hasSelection()) {
+          navigator.clipboard.writeText(term.getSelection());
+          term.clearSelection();
+          clearSticky();
+          return;
+        }
+        // Ctrl+V → paste text
+        if (stickyState.ctrl && data.toLowerCase() === 'v') {
+          clearSticky();
+          navigator.clipboard.readText().then(text => {
+            if (text && ws && ws.readyState === WebSocket.OPEN) ws.send(text);
+          });
+          return;
+        }
+        let seq = key;
+        if (stickyState.ctrl) {
+          const c = key.toLowerCase();
+          if (c >= 'a' && c <= 'z') {
+            seq = String.fromCharCode(c.charCodeAt(0) - 96);
+          }
+        }
+        if (stickyState.alt) {
+          seq = '\x1b' + seq;
+        }
+        clearSticky();
+        if (ws && ws.readyState === WebSocket.OPEN) ws.send(seq);
+        return;
+      }
       if (ws && ws.readyState === WebSocket.OPEN) ws.send(data);
     });
 
@@ -579,14 +641,41 @@
     }
     window.addEventListener('resize', doResize);
 
+    // Mobile: keep toolbar pinned when virtual keyboard scrolls the viewport
+    if (isMobile && window.visualViewport) {
+      const toolbar = document.getElementById('toolbar');
+      let vpTicking = false;
+      function pinToolbar() {
+        toolbar.style.transform = `translateY(${Math.round(window.visualViewport.offsetTop)}px)`;
+        vpTicking = false;
+      }
+      function schedulePin() {
+        if (!vpTicking) { requestAnimationFrame(pinToolbar); vpTicking = true; }
+      }
+      window.visualViewport.addEventListener('scroll', schedulePin);
+      window.visualViewport.addEventListener('resize', () => { schedulePin(); doResize(); });
+    }
+
     // --- Touch keys (mobile) ---
-    const stickyState = { ctrl: false, alt: false };
+    const stickyState = { ctrl: false, alt: false, shift: false };
+    function clearSticky() {
+      stickyState.ctrl = false;
+      stickyState.alt = false;
+      stickyState.shift = false;
+      document.querySelectorAll('#touchKeys .sticky').forEach(b => b.classList.remove('active'));
+    }
+
+    // HTML data attributes store literal text — unescape \xNN and \t to real chars
+    function unesc(s) {
+      return s.replace(/\\x([0-9a-fA-F]{2})/g, (_, hex) => String.fromCharCode(parseInt(hex, 16)))
+              .replace(/\\t/g, '\t').replace(/\\n/g, '\n').replace(/\\r/g, '\r');
+    }
 
     document.getElementById('touchKeys').addEventListener('click', (e) => {
       const btn = e.target.closest('button');
       if (!btn) return;
 
-      // Sticky modifier keys (Ctrl, Alt)
+      // Sticky modifier keys (Ctrl, Alt, Shift)
       const sticky = btn.dataset.sticky;
       if (sticky) {
         stickyState[sticky] = !stickyState[sticky];
@@ -595,34 +684,105 @@
       }
 
       // Build the sequence to send
-      let seq = btn.dataset.seq || btn.dataset.char || '';
+      let seq = btn.dataset.seq ? unesc(btn.dataset.seq) : (btn.dataset.char || '');
       if (!seq) return;
 
-      // Apply sticky modifiers
-      if (stickyState.ctrl && btn.dataset.char) {
-        // Ctrl+letter = char code 1-26
-        const c = btn.dataset.char.toLowerCase();
+      // Shift+Tab → backtab escape sequence
+      if (stickyState.shift && btn.dataset.key === 'Tab') {
+        seq = '\x1b[Z';
+      } else if (stickyState.shift && btn.dataset.char) {
+        seq = btn.dataset.char.toUpperCase();
+      }
+
+      // Apply Ctrl modifier
+      if (stickyState.ctrl) {
+        const ch = btn.dataset.char || '';
+        const c = ch.toLowerCase();
         if (c >= 'a' && c <= 'z') {
           seq = String.fromCharCode(c.charCodeAt(0) - 96);
-        } else {
-          seq = btn.dataset.seq || btn.dataset.char;
         }
       }
+
+      // Apply Alt modifier
       if (stickyState.alt) {
-        seq = '\x1b' + (btn.dataset.char || seq);
+        seq = '\x1b' + seq;
       }
 
       if (ws && ws.readyState === WebSocket.OPEN) ws.send(seq);
 
       // Clear sticky after use
-      if (stickyState.ctrl || stickyState.alt) {
-        stickyState.ctrl = false;
-        stickyState.alt = false;
-        document.querySelectorAll('#touchKeys .sticky').forEach(b => b.classList.remove('active'));
+      if (stickyState.ctrl || stickyState.alt || stickyState.shift) {
+        clearSticky();
       }
 
       term.focus();
     });
+
+    // --- Mobile image paste via file picker ---
+    function mobileImagePaste() {
+      const input = document.createElement('input');
+      input.type = 'file';
+      input.accept = 'image/*';
+      input.style.display = 'none';
+      input.addEventListener('change', async () => {
+        const file = input.files[0];
+        if (!file) return;
+        try {
+          const apiBase = sessionServerUrl ? `/cluster/${encodeURIComponent(sessionServerUrl)}/api` : '/api';
+          const res = await fetch(`${apiBase}/clipboard-image`, {
+            method: 'POST', headers: { 'Content-Type': file.type }, body: file
+          });
+          const result = await res.json();
+          if (result.ok && result.clipboard) {
+            if (ws && ws.readyState === WebSocket.OPEN) ws.send('\x1bv');
+          } else if (result.ok) {
+            if (ws && ws.readyState === WebSocket.OPEN) ws.send(result.path);
+          }
+        } catch (e) { console.warn('Image upload failed:', e); }
+        input.remove();
+      });
+      document.body.appendChild(input);
+      input.click();
+    }
+
+    // --- Mobile text selection mode ---
+    let selectMode = false;
+    let selStart = null;
+
+    function touchToCell(touch) {
+      const viewport = document.querySelector('#terminal .xterm-screen');
+      if (!viewport) return null;
+      const rect = viewport.getBoundingClientRect();
+      const dims = term._core._renderService.dimensions;
+      if (!dims || !dims.css || !dims.css.cell) return null;
+      const col = Math.floor((touch.clientX - rect.left) / dims.css.cell.width);
+      const row = Math.floor((touch.clientY - rect.top) / dims.css.cell.height);
+      return { col: Math.max(0, Math.min(col, term.cols - 1)), row: Math.max(0, Math.min(row, term.rows - 1)) };
+    }
+
+    function enterSelectMode() {
+      selectMode = true;
+      selStart = null;
+      term.clearSelection();
+      document.getElementById('selectBar').classList.add('show');
+      document.getElementById('selInfo').textContent = 'Drag to select text';
+    }
+
+    function exitSelectMode() {
+      selectMode = false;
+      selStart = null;
+      term.clearSelection();
+      document.getElementById('selectBar').classList.remove('show');
+    }
+
+    function copySelection() {
+      const sel = term.getSelection();
+      if (sel) {
+        navigator.clipboard.writeText(sel);
+        document.getElementById('selInfo').textContent = 'Copied!';
+        setTimeout(() => exitSelectMode(), 600);
+      }
+    }
 
     // --- Mobile long-press for text selection/copy/paste ---
     if (isMobile) {
@@ -630,6 +790,11 @@
       const termEl = document.getElementById('terminal');
 
       termEl.addEventListener('touchstart', (e) => {
+        if (selectMode) {
+          if (e.touches.length !== 1) return;
+          selStart = touchToCell(e.touches[0]);
+          return;
+        }
         if (e.touches.length !== 1) return;
         longPressTimer = setTimeout(() => {
           longPressTimer = null;
@@ -638,13 +803,37 @@
           const actions = [];
           if (sel) actions.push({ label: 'Copy', action: () => { navigator.clipboard.writeText(sel); term.clearSelection(); } });
           actions.push({ label: 'Paste', action: () => { navigator.clipboard.readText().then(t => { if (t && ws && ws.readyState === WebSocket.OPEN) ws.send(t); }); } });
+          actions.push({ label: 'Paste Image', action: () => mobileImagePaste() });
+          actions.push({ label: 'Select', action: () => enterSelectMode() });
           actions.push({ label: 'Select All', action: () => term.selectAll() });
           showContextMenu(e.touches[0].clientX, e.touches[0].clientY, actions);
         }, 600);
       }, { passive: true });
 
-      termEl.addEventListener('touchend', () => { if (longPressTimer) { clearTimeout(longPressTimer); longPressTimer = null; } });
-      termEl.addEventListener('touchmove', () => { if (longPressTimer) { clearTimeout(longPressTimer); longPressTimer = null; } });
+      termEl.addEventListener('touchmove', (e) => {
+        if (selectMode && selStart && e.touches.length === 1) {
+          const cur = touchToCell(e.touches[0]);
+          if (!cur) return;
+          // Calculate linear positions to determine start/end
+          const startPos = selStart.row * term.cols + selStart.col;
+          const curPos = cur.row * term.cols + cur.col;
+          const from = Math.min(startPos, curPos);
+          const to = Math.max(startPos, curPos);
+          const fromRow = Math.floor(from / term.cols);
+          const fromCol = from % term.cols;
+          const length = to - from + 1;
+          term.select(fromCol, fromRow + term.buffer.active.viewportY, length);
+          const sel = term.getSelection();
+          document.getElementById('selInfo').textContent = sel ? `${sel.length} chars` : 'Drag to select';
+          return;
+        }
+        if (longPressTimer) { clearTimeout(longPressTimer); longPressTimer = null; }
+      }, { passive: true });
+
+      termEl.addEventListener('touchend', () => {
+        if (selectMode) { selStart = null; return; }
+        if (longPressTimer) { clearTimeout(longPressTimer); longPressTimer = null; }
+      });
     }
 
     function showContextMenu(x, y, actions) {
@@ -654,23 +843,29 @@
 
       const menu = document.createElement('div');
       menu.id = 'ctxMenu';
-      menu.style.cssText = `position:fixed;left:${x}px;top:${y}px;z-index:500;background:#16213e;border:1px solid #0f3460;border-radius:6px;box-shadow:0 4px 12px rgba(0,0,0,0.5);overflow:hidden`;
+      // Position above the touch point so it doesn't hide behind keyboard
+      const menuHeight = actions.length * 44; // approx height per item
+      const visibleH = window.visualViewport ? window.visualViewport.height : window.innerHeight;
+      const safeY = Math.min(y, visibleH - menuHeight - 10);
+      const safeX = Math.min(x, window.innerWidth - 160);
+      menu.style.cssText = `position:fixed;left:${Math.max(4,safeX)}px;top:${Math.max(4,safeY)}px;z-index:500;background:#16213e;border:1px solid #0f3460;border-radius:6px;box-shadow:0 4px 12px rgba(0,0,0,0.5);overflow:hidden`;
       for (const a of actions) {
         const btn = document.createElement('div');
         btn.textContent = a.label;
-        btn.style.cssText = 'padding:10px 20px;color:#e0e0e0;font:14px "Segoe UI",sans-serif;cursor:pointer;-webkit-tap-highlight-color:transparent';
-        btn.addEventListener('click', () => { menu.remove(); a.action(); });
+        btn.style.cssText = 'padding:12px 24px;color:#e0e0e0;font:15px "Segoe UI",sans-serif;cursor:pointer;-webkit-tap-highlight-color:transparent;border-bottom:1px solid #0f3460';
+        btn.addEventListener('touchend', (e) => { e.stopPropagation(); e.preventDefault(); menu.remove(); a.action(); });
         menu.appendChild(btn);
       }
       document.body.appendChild(menu);
 
-      // Close on next tap anywhere
+      // Close on tap outside menu
       setTimeout(() => {
-        document.addEventListener('touchstart', function dismiss() {
+        document.addEventListener('touchend', function dismiss(e) {
+          if (menu.contains(e.target)) return;
           menu.remove();
-          document.removeEventListener('touchstart', dismiss);
-        }, { once: true });
-      }, 100);
+          document.removeEventListener('touchend', dismiss);
+        }, { capture: true });
+      }, 200);
     }
 
     // --- Auto-scroll ---
