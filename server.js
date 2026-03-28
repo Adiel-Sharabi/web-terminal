@@ -1408,6 +1408,12 @@ app.ws('/ws/:id', (ws, req) => {
   ws.on('close', () => {
     session.clients.delete(ws);
     console.log(`[${new Date().toISOString()}] Client left session ${req.params.id} (${session.clients.size} clients)`);
+    // When down to 1 client, tell it to re-send its resize so PTY matches its screen
+    if (session.clients.size === 1) {
+      for (const client of session.clients) {
+        try { client.send(JSON.stringify({ requestResize: true })); } catch (e) {}
+      }
+    }
   });
 });
 
