@@ -228,6 +228,7 @@
       #toolbar { font-size: 12px; height: 32px; padding: 0 8px; position: fixed; top: 0; left: 0; right: 0; z-index: 100; will-change: transform; }
       #toolbar .session-name { max-width: 30vw; font-size: 12px; }
       #touchKeys { display: flex; align-items: center; margin-top: 32px; }
+      #status { top: 70px; }
       #sidebar.open { width: 220px; }
       .settings-panel { width: 95vw; padding: 16px; }
       .settings-grid { grid-template-columns: 1fr; }
@@ -456,6 +457,12 @@
       };
 
       ws.onmessage = e => {
+        // Server requests resize (e.g., other viewer left, we're now sole client)
+        if (typeof e.data === 'string' && e.data.startsWith('{"requestResize"')) {
+          fitAddon.fit();
+          ws.send(JSON.stringify({ resize: { cols: term.cols, rows: term.rows } }));
+          return;
+        }
         term.write(e.data);
       };
 
