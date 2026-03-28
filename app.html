@@ -687,7 +687,7 @@
     document.getElementById('touchKeys').addEventListener('touchstart', (e) => { e.preventDefault(); }, { passive: false });
     document.getElementById('touchKeys').addEventListener('mousedown', (e) => { e.preventDefault(); });
 
-    document.getElementById('touchKeys').addEventListener('click', (e) => {
+    function handleTouchKey(e) {
       const btn = e.target.closest('button');
       if (!btn) return;
 
@@ -732,7 +732,14 @@
       }
 
       term.focus();
+    }
+    // touchend for mobile (since we preventDefault on touchstart, click won't fire)
+    document.getElementById('touchKeys').addEventListener('touchend', (e) => {
+      e.preventDefault();
+      handleTouchKey(e);
     });
+    // click for desktop fallback
+    document.getElementById('touchKeys').addEventListener('click', handleTouchKey);
 
     // --- Mobile image paste via file picker ---
     function mobileImagePaste() {
