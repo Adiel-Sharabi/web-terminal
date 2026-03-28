@@ -268,6 +268,7 @@
     <div id="sidebar">
       <div class="sb-section">
         <span>Sessions</span>
+        <button id="pinBtn" onclick="togglePin()" title="Pin sidebar open" style="font-size:14px;opacity:0.5">&#x1F4CC;</button>
         <button onclick="toggleNewForm()">+ New</button>
       </div>
       <div id="newSessionForm">
@@ -910,6 +911,31 @@
     function scrollToBottom() { term.scrollToBottom(); autoScroll = true; scrollBtn.style.display = 'none'; }
 
     // --- Sidebar ---
+    const sidebarPinned = (() => {
+      const stored = localStorage.getItem('sidebarPinned');
+      if (stored !== null) return stored === '1';
+      return !isMobile; // default: pinned on desktop, unpinned on mobile
+    })();
+    let pinned = sidebarPinned;
+
+    function updatePinBtn() {
+      const btn = document.getElementById('pinBtn');
+      btn.style.opacity = pinned ? '1' : '0.4';
+      btn.title = pinned ? 'Sidebar pinned (click to unpin)' : 'Sidebar unpinned (click to pin)';
+    }
+
+    function togglePin() {
+      pinned = !pinned;
+      localStorage.setItem('sidebarPinned', pinned ? '1' : '0');
+      updatePinBtn();
+    }
+
+    function closeSidebarIfUnpinned() {
+      if (!pinned && document.getElementById('sidebar').classList.contains('open')) {
+        toggleSidebar();
+      }
+    }
+
     function toggleSidebar() {
       const sb = document.getElementById('sidebar');
       const btn = document.querySelector('.tb-btn');
@@ -1035,6 +1061,7 @@
           item.addEventListener('click', (e) => {
             if (e.target.closest('.sb-kill') || e.target.closest('.sb-edit')) return;
             switchSession(s.id, s.serverUrl);
+            closeSidebarIfUnpinned();
           });
 
           // Double-click to rename
@@ -1131,6 +1158,7 @@
         document.getElementById('newSessionForm').classList.remove('show');
         document.getElementById('newName').value = '';
         switchSession(data.id, serverUrl);
+        closeSidebarIfUnpinned();
       }
     }
 
@@ -1501,6 +1529,7 @@
       }
 
       // Open sidebar by default (unless user explicitly closed it)
+      updatePinBtn();
       if (sessionStorage.getItem('sidebarOpen') !== '0') {
         toggleSidebar();
       }
