@@ -118,7 +118,7 @@ function saveSessionConfigs() {
 // --- Session manager ---
 const sessions = new Map();
 const notifyClients = new Set();
-const MAX_SCROLLBACK = 5000;
+const MAX_SCROLLBACK_SIZE = 2 * 1024 * 1024; // 2MB of scrollback data
 
 // --- Scrollback persistence ---
 try { if (!fs.existsSync(SCROLLBACK_DIR)) fs.mkdirSync(SCROLLBACK_DIR); } catch (e) {}
@@ -185,8 +185,9 @@ function createSession(id, cwd, name, autoCommand, savedScrollback) {
     scrollback.push('\r\n\x1b[33m--- server restarted ---\x1b[0m\r\n\r\n');
   }
 
+  const scrollbackSize = scrollback.reduce((sum, s) => sum + s.length, 0);
   const session = {
-    term, clients: new Set(), scrollback, name: name || `Session ${id}`,
+    term, clients: new Set(), scrollback, scrollbackSize, name: name || `Session ${id}`,
     cwd: cwd || DEFAULT_CWD, idleTimer: null, lastActivity: Date.now(),
     lastUserInput: 0, status: 'active', autoCommand: autoCommand || ''
   };
@@ -211,8 +212,9 @@ function createSession(id, cwd, name, autoCommand, savedScrollback) {
 
   term.onData(data => {
     session.scrollback.push(data);
-    if (session.scrollback.length > MAX_SCROLLBACK) {
-      session.scrollback.splice(0, session.scrollback.length - MAX_SCROLLBACK);
+    session.scrollbackSize = (session.scrollbackSize || 0) + data.length;
+    while (session.scrollbackSize > MAX_SCROLLBACK_SIZE && session.scrollback.length > 1) {
+      session.scrollbackSize -= session.scrollback.shift().length;
     }
     for (const client of session.clients) {
       try { client.send(data); } catch (e) {}
