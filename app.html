@@ -944,7 +944,13 @@
       const isOpen = sb.classList.contains('open');
       if (isOpen) loadSidebar();
       sessionStorage.setItem('sidebarOpen', isOpen ? '1' : '0');
-      setTimeout(doResize, 250);
+      // Resize after CSS transition completes
+      sb.addEventListener('transitionend', function onEnd() {
+        sb.removeEventListener('transitionend', onEnd);
+        doResize();
+      });
+      // Fallback in case transitionend doesn't fire
+      setTimeout(doResize, 350);
     }
 
     const statusLabels = { active: 'Running', idle: 'Idle', waiting: 'Waiting' };
