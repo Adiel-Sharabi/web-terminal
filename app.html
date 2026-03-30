@@ -34,9 +34,15 @@
     /* --- Sidebar --- */
     #sidebar {
       width: 0; overflow: hidden; background: #16213e; border-right: 1px solid #0f3460;
-      transition: width 0.2s; flex-shrink: 0; display: flex; flex-direction: column;
+      transition: width 0.2s; flex-shrink: 0; display: flex; flex-direction: column; position: relative;
     }
-    #sidebar.open { width: 260px; }
+    #sidebar.open { width: var(--sb-width, 260px); }
+    #sidebar.resizing { transition: none; }
+    #sidebarResizer {
+      position: absolute; top: 0; right: -3px; width: 6px; height: 100%;
+      cursor: col-resize; z-index: 10; background: transparent;
+    }
+    #sidebarResizer:hover, #sidebarResizer.active { background: #00d4aa44; }
     .sb-section {
       padding: 6px 12px; color: #666; font: 11px 'Segoe UI', sans-serif; text-transform: uppercase;
       border-bottom: 1px solid #0f3460; display: flex; align-items: center; justify-content: space-between;
@@ -45,7 +51,8 @@
       background: transparent; border: none; color: #00d4aa; font-size: 11px; cursor: pointer; padding: 2px 4px;
     }
     .sb-section button:hover { text-decoration: underline; }
-    #sidebarList { flex: 1; overflow-y: auto; }
+    #sidebarBody { flex: 1; overflow-y: auto; min-height: 0; }
+    #sidebarList { }
     .sb-item {
       padding: 8px 12px; cursor: pointer; border-bottom: 1px solid #0a1a30;
       font: 12px 'Segoe UI', sans-serif; transition: background 0.15s;
@@ -108,7 +115,7 @@
 
     /* --- Claude sessions (in sidebar) --- */
     #claudeSection { border-top: 1px solid #0f3460; }
-    #claudeList { max-height: 200px; overflow-y: auto; }
+    #claudeList { }
     .cl-item {
       padding: 6px 12px; cursor: pointer; border-bottom: 1px solid #0a1a30;
       font: 11px 'Segoe UI', sans-serif; transition: background 0.15s;
@@ -229,7 +236,8 @@
       #toolbar .session-name { max-width: 30vw; font-size: 12px; }
       #touchKeys { display: flex; align-items: center; margin-top: 32px; }
       #status { top: 70px; }
-      #sidebar.open { width: 220px; }
+      #main { overflow-x: auto; -webkit-overflow-scrolling: touch; }
+      #sidebar.open { width: var(--sb-width, 220px); }
       .settings-panel { width: 95vw; padding: 16px; }
       .settings-grid { grid-template-columns: 1fr; }
     }
@@ -266,6 +274,7 @@
   <div id="status" style="display:none">connecting...</div>
   <div id="main">
     <div id="sidebar">
+      <div id="sidebarResizer"></div>
       <div class="sb-section">
         <span>Sessions</span>
         <button id="pinBtn" onclick="togglePin()" title="Pin sidebar open" style="font-size:14px;opacity:0.5">&#x1F4CC;</button>
@@ -290,6 +299,7 @@
           <button onclick="toggleNewForm()" style="background:#333;color:#aaa;width:auto;padding:6px 10px">Cancel</button>
         </div>
       </div>
+      <div id="sidebarBody">
       <div id="sidebarList"></div>
       <div id="claudeSection">
         <div class="sb-section">
@@ -297,6 +307,7 @@
           <button onclick="toggleClaude()">Show</button>
         </div>
         <div id="claudeList" style="display:none"></div>
+      </div>
       </div>
       <div id="sidebarFooter">
         <button onclick="openSettings()">Settings</button>
@@ -434,6 +445,19 @@
     term.loadAddon(new window.WebLinksAddon.WebLinksAddon());
     term.open(document.getElementById('terminal'));
     fitAddon.fit();
+
+    // Enforce minimum terminal width on mobile so narrow PTY
+    // doesn't corrupt scrollback when viewed later on desktop
+    const MIN_TERMINAL_COLS = 80;
+    function ensureMinCols() {
+      if (!isMobile || term.cols >= MIN_TERMINAL_COLS) return;
+      const screen = document.querySelector('#terminal .xterm-screen');
+      if (!screen || term.cols <= 0) return;
+      const cellWidth = screen.clientWidth / term.cols;
+      document.getElementById('terminal').style.minWidth = Math.ceil(MIN_TERMINAL_COLS * cellWidth + 20) + 'px';
+      fitAddon.fit();
+    }
+    ensureMinCols();
 
     // --- WebSocket ---
     function connect() {
@@ -648,6 +672,7 @@
 
     function doResize() {
       fitAddon.fit();
+      ensureMinCols();
       if (ws && ws.readyState === WebSocket.OPEN) {
         ws.send(JSON.stringify({ resize: { cols: term.cols, rows: term.rows } }));
       }
@@ -952,6 +977,52 @@
       // Fallback in case transitionend doesn't fire
       setTimeout(doResize, 350);
     }
+
+    // --- Sidebar resize handle ---
+    (function initSidebarResize() {
+      const resizer = document.getElementById('sidebarResizer');
+      const sidebar = document.getElementById('sidebar');
+      let startX, startW;
+
+      function onPointerDown(e) {
+        if (!sidebar.classList.contains('open')) return;
+        e.preventDefault();
+        startX = e.clientX;
+        startW = sidebar.offsetWidth;
+        sidebar.classList.add('resizing');
+        resizer.classList.add('active');
+        document.addEventListener('pointermove', onPointerMove);
+        document.addEventListener('pointerup', onPointerUp);
+        resizer.setPointerCapture(e.pointerId);
+      }
+
+      function onPointerMove(e) {
+        const w = Math.max(160, Math.min(600, startW + (e.clientX - startX)));
+        sidebar.style.width = w + 'px';
+      }
+
+      function onPointerUp(e) {
+        sidebar.classList.remove('resizing');
+        resizer.classList.remove('active');
+        document.removeEventListener('pointermove', onPointerMove);
+        document.removeEventListener('pointerup', onPointerUp);
+        const finalW = sidebar.offsetWidth;
+        localStorage.setItem('sidebarWidth', finalW);
+        doResize();
+      }
+
+      resizer.addEventListener('pointerdown', onPointerDown);
+
+      // Restore saved width
+      const saved = localStorage.getItem('sidebarWidth');
+      if (saved) {
+        const w = parseInt(saved, 10);
+        if (w >= 160 && w <= 600) {
+          // Override the CSS default via a CSS custom property
+          sidebar.style.setProperty('--sb-width', w + 'px');
+        }
+      }
+    })();
 
     const statusLabels = { active: 'Running', idle: 'Idle', waiting: 'Waiting' };
     const timeAgo = ts => {
@@ -1271,9 +1342,11 @@
           const item = document.createElement('div');
           item.className = 'cl-item';
           const serverTag = s.serverUrl ? `<span style="color:#00d4aa;font-size:9px">[${esc(s.serverName)}]</span> ` : '';
+          // Show last folder segment as friendly name, full path as tooltip
+          const friendlyName = s.projectPath ? s.projectPath.split(/[\\/]/).filter(Boolean).pop() : s.project;
           item.innerHTML =
             `<button class="cl-del" title="Remove">&times;</button>` +
-            `<div class="cl-name">${serverTag}${esc(s.project)}</div>` +
+            `<div class="cl-name" title="${esc(s.projectPath || s.project)}">${serverTag}${esc(friendlyName)}</div>` +
             `<div class="cl-summary">${esc(s.summary || '(no summary)')}</div>` +
             `<div class="cl-meta"><span>${s.sizeKB}KB</span><span>${timeAgo(s.lastModified)}</span>${s.skipPermissions ? '<span style="color:#da4">skip-perms</span>' : ''}</div>`;
 
@@ -1287,7 +1360,7 @@
 
           item.addEventListener('click', (e) => {
             if (e.target.closest('.cl-del')) return;
-            resumeClaude(s.id, s.projectPath, s.project, s.skipPermissions, s.serverUrl);
+            resumeClaude(s.id, s.projectPath, friendlyName, s.skipPermissions, s.serverUrl);
           });
 
           container.appendChild(item);
@@ -1301,13 +1374,24 @@
       let cmd = 'claude --resume ' + claudeSessionId;
       if (skipPermissions) cmd += ' --dangerously-skip-permissions';
       const apiBase = serverUrl ? `/cluster/${encodeURIComponent(serverUrl)}/api` : '/api';
-      const res = await fetch(`${apiBase}/sessions`, {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ name: projectName, cwd: projectPath, autoCommand: cmd })
-      });
-      const data = await res.json();
-      if (data.id) switchSession(data.id, serverUrl);
+      try {
+        const res = await fetch(`${apiBase}/sessions`, {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({ name: projectName, cwd: projectPath, autoCommand: cmd })
+        });
+        const data = await res.json();
+        if (!res.ok) {
+          alert(`Failed to resume: ${data.error || res.statusText}`);
+          return;
+        }
+        if (data.id) {
+          switchSession(data.id, serverUrl);
+          closeSidebarIfUnpinned();
+        }
+      } catch (e) {
+        alert(`Failed to resume: ${e.message}`);
+      }
     }
 
     // --- Rename current session (toolbar click) ---
