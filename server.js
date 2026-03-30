@@ -76,16 +76,22 @@ function verifyPassword(password, stored) {
 }
 
 // --- Auto-hash plaintext password on startup ---
+// Skip persisting to config.json when password came from env var (e.g. test runs)
 if (PASS && !DEFAULT_PASSWORDS.includes(PASS) && !PASS.startsWith('$scrypt$')) {
   const hashed = hashPassword(PASS);
-  let cfg = {};
-  try { if (fs.existsSync(CONFIG_FILE)) cfg = JSON.parse(fs.readFileSync(CONFIG_FILE, 'utf8')); } catch (e) {}
-  cfg.password = hashed;
-  try {
-    fs.writeFileSync(CONFIG_FILE, JSON.stringify(cfg, null, 2), 'utf8');
+  if (process.env.WT_PASS) {
     PASS = hashed;
-    console.log('Password auto-hashed in config.json');
-  } catch (e) { console.error('Failed to auto-hash password:', e.message); }
+    console.log('Password auto-hashed (env var, not persisted to config)');
+  } else {
+    let cfg = {};
+    try { if (fs.existsSync(CONFIG_FILE)) cfg = JSON.parse(fs.readFileSync(CONFIG_FILE, 'utf8')); } catch (e) {}
+    cfg.password = hashed;
+    try {
+      fs.writeFileSync(CONFIG_FILE, JSON.stringify(cfg, null, 2), 'utf8');
+      PASS = hashed;
+      console.log('Password auto-hashed in config.json');
+    } catch (e) { console.error('Failed to auto-hash password:', e.message); }
+  }
 }
 
 const app = express();
