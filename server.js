@@ -1472,9 +1472,14 @@ app.ws('/ws/:id', (ws, req) => {
   // Send scrollback as a single chunk, trimmed to replay limit
   try {
     if (session.scrollback.length) {
-      const full = session.scrollback.join('');
+      let full = session.scrollback.join('');
       const limit = getScrollbackReplayLimit();
-      ws.send(full.length > limit ? full.slice(-limit) : full);
+      if (full.length > limit) full = full.slice(-limit);
+      // Strip sequences that create empty pages in scrollback replay:
+      // - \x1b[2J / \x1b[3J (clear screen) — creates blank pages
+      // - \x1b[?1049h/l (alt screen buffer) — loses scrollback in xterm.js
+      full = full.replace(/\x1b\[[23]J/g, '').replace(/\x1b\[\?1049[hl]/g, '');
+      ws.send(full);
     }
   } catch (e) {}
 
