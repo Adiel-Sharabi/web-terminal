@@ -1487,13 +1487,24 @@ app.ws('/ws/:id', (ws, req) => {
     }
   } catch (e) {}
 
+  // Exclusive viewer: kick existing viewers before adding the new one
+  if (session.clients.size > 0) {
+    const kickMsg = JSON.stringify({ sessionTaken: getServerName() });
+    for (const existing of session.clients) {
+      try { existing.send(kickMsg); } catch (e) {}
+      try { existing.close(4001, 'Session opened elsewhere'); } catch (e) {}
+    }
+    session.clients.clear();
+    console.log(`[${new Date().toISOString()}] Kicked previous viewers from session ${req.params.id}`);
+  }
+
   session.clients.add(ws);
   ws._wtAlive = true;
   ws.on('pong', () => { ws._wtAlive = true; });
   ws.on('error', (err) => {
     console.error(`[${new Date().toISOString()}] WS error session ${req.params.id}: ${err.message}`);
   });
-  console.log(`[${new Date().toISOString()}] Client joined session ${req.params.id} (${session.clients.size} clients)`);
+  console.log(`[${new Date().toISOString()}] Client joined session ${req.params.id} (1 client, exclusive)`);
 
   ws.on('message', msg => {
     if (Buffer.isBuffer(msg)) msg = msg.toString();
@@ -1506,10 +1517,7 @@ app.ws('/ws/:id', (ws, req) => {
         const { resize } = JSON.parse(msg);
         const cols = Math.max(1, Math.min(500, parseInt(resize.cols) || 80));
         const rows = Math.max(1, Math.min(200, parseInt(resize.rows) || 24));
-        // Only resize PTY when this is the sole client — multi-viewer keeps existing size
-        if (session.clients.size <= 1) {
-          session.term.resize(cols, rows);
-        }
+        session.term.resize(cols, rows);
         session.lastUserInput = Date.now(); // resize redraws produce PTY output — ignore for status
       } catch (e) {}
       return;
@@ -1521,18 +1529,6 @@ app.ws('/ws/:id', (ws, req) => {
   ws.on('close', () => {
     session.clients.delete(ws);
     console.log(`[${new Date().toISOString()}] Client left session ${req.params.id} (${session.clients.size} clients)`);
-    // When down to 1 client, delay requestResize to avoid shrinking PTY on transient disconnects
-    if (session.clients.size === 1) {
-      if (session._resizeTimer) clearTimeout(session._resizeTimer);
-      session._resizeTimer = setTimeout(() => {
-        delete session._resizeTimer;
-        if (session.clients.size === 1) {
-          for (const client of session.clients) {
-            try { client.send(JSON.stringify({ requestResize: true })); } catch (e) {}
-          }
-        }
-      }, 10000); // 10s grace period for reconnects
-    }
   });
 });
 
