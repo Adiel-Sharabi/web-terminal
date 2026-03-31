@@ -79,6 +79,8 @@
     .sb-server .srv-auth { margin-left: auto; color: #da4; font-size: 10px; cursor: pointer; text-transform: none; }
     .sb-server .srv-auth:hover { text-decoration: underline; }
     @keyframes pulse { 0%,100% { opacity: 1; } 50% { opacity: 0.4; } }
+    @keyframes flash-idle { 0%,100% { background: transparent; } 25%,75% { background: rgba(218,170,68,0.25); } }
+    .sb-item.flash { animation: flash-idle 0.6s ease 3; }
     .sb-status { font-size: 10px; }
     .sb-status.active { color: #4a4; }
     .sb-status.idle { color: #da4; }
@@ -450,6 +452,19 @@
     function ensureMinCols() {} // no-op — let terminal fit viewport naturally
 
     // --- WebSocket ---
+    let heartbeatTimer = null;
+    function startHeartbeat() {
+      stopHeartbeat();
+      heartbeatTimer = setInterval(() => {
+        if (ws && ws.readyState === WebSocket.OPEN) {
+          try { ws.send('{"heartbeat":1}'); } catch (e) {}
+        }
+      }, 25000); // every 25s — under typical 30s firewall idle timeout
+    }
+    function stopHeartbeat() {
+      if (heartbeatTimer) { clearInterval(heartbeatTimer); heartbeatTimer = null; }
+    }
+
     function connect() {
       if (!sessionId) return;
       status.style.display = '';
@@ -469,6 +484,7 @@
         setTimeout(() => { status.style.opacity = '0'; }, 3000);
         document.getElementById('reconnectOverlay').classList.remove('show');
         ws.send(JSON.stringify({ resize: { cols: term.cols, rows: term.rows } }));
+        startHeartbeat();
       };
 
       ws.onmessage = e => {
@@ -482,6 +498,7 @@
       };
 
       ws.onclose = (e) => {
+        stopHeartbeat();
         if (switching) return;
         // Session was killed/ended — navigate to empty state
         if (e.code === 4000) {
@@ -490,22 +507,23 @@
           return;
         }
         reconnectAttempts++;
-        status.textContent = 'disconnected — reconnecting...';
+        // Exponential backoff: 1s, 2s, 4s, 8s, 16s, capped at 30s
+        const delay = Math.min(30000, 1000 * Math.pow(2, reconnectAttempts - 1));
+        status.textContent = `disconnected — reconnecting in ${Math.round(delay/1000)}s...`;
         status.className = 'disconnected';
         status.style.opacity = '1';
         document.getElementById('reconnectOverlay').classList.add('show');
-        // After 5 failed attempts, check if we're still authenticated
-        if (reconnectAttempts >= 5) {
+        // After 3 failed attempts, check if we're still authenticated
+        if (reconnectAttempts >= 3 && reconnectAttempts % 3 === 0) {
           fetch('/api/hostname').then(r => {
             if (r.status === 401 || r.redirected) {
-              // Session expired — redirect to login
               location.href = '/login';
             } else {
-              reconnectTimer = setTimeout(connect, 3000);
+              reconnectTimer = setTimeout(connect, delay);
             }
-          }).catch(() => { reconnectTimer = setTimeout(connect, 3000); });
+          }).catch(() => { reconnectTimer = setTimeout(connect, delay); });
         } else {
-          reconnectTimer = setTimeout(connect, 2000);
+          reconnectTimer = setTimeout(connect, delay);
         }
       };
 
@@ -513,6 +531,7 @@
     }
 
     function cancelReconnect() {
+      stopHeartbeat();
       if (reconnectTimer) { clearTimeout(reconnectTimer); reconnectTimer = null; }
       if (ws) { ws.onclose = null; ws.close(); }
       ws = null;
@@ -1089,6 +1108,7 @@
           const item = document.createElement('div');
           const isCurrent = s.id === sessionId && s.serverUrl === sessionServerUrl;
           item.className = 'sb-item' + (isCurrent ? ' current' : '');
+          item.dataset.sessionId = s.id;
           item.innerHTML =
             `<div class="sb-name"><span class="sb-dot ${s.status}"></span>${esc(s.name)}</div>` +
             `<div class="sb-meta">` +
@@ -1156,6 +1176,17 @@
       // Update viewer count for current session
       const me = data.sessions.find(x => x.id === sessionId && x.serverUrl === sessionServerUrl);
       if (me) document.getElementById('viewers').textContent = `${me.clients} viewer${me.clients !== 1 ? 's' : ''}`;
+    }
+
+    // Flash a session card in the sidebar when it becomes idle
+    function flashSessionCard(sid) {
+      const card = document.querySelector(`.sb-item[data-session-id="${sid}"]`);
+      if (!card) return;
+      card.classList.remove('flash');
+      // Force reflow so re-adding the class restarts the animation
+      void card.offsetWidth;
+      card.classList.add('flash');
+      card.addEventListener('animationend', () => card.classList.remove('flash'), { once: true });
     }
 
     // Quick-create session on a specific server — use the inline form
@@ -1507,13 +1538,20 @@
     function connectNotify() {
       const proto = location.protocol === 'https:' ? 'wss:' : 'ws:';
       const nws = new WebSocket(`${proto}//${location.host}/ws/notify`);
+      const nwsHb = setInterval(() => {
+        if (nws.readyState === WebSocket.OPEN) try { nws.send('ping'); } catch (e) {}
+      }, 25000);
       nws.onmessage = e => {
         try {
           const { notification } = JSON.parse(e.data);
           showNotification(notification);
+          // Flash the idle session's card in sidebar
+          if (notification.type === 'idle' && notification.sessionId) {
+            flashSessionCard(notification.sessionId);
+          }
         } catch (err) {}
       };
-      nws.onclose = () => setTimeout(connectNotify, 3000);
+      nws.onclose = () => { clearInterval(nwsHb); setTimeout(connectNotify, 3000); };
       nws.onerror = () => nws.close();
     }
 
