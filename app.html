@@ -39,9 +39,10 @@
     #sidebar.open { width: var(--sb-width, 260px); }
     #sidebar.resizing { transition: none; }
     #sidebarResizer {
-      position: absolute; top: 0; right: -3px; width: 6px; height: 100%;
+      display: none; position: absolute; top: 0; right: -3px; width: 6px; height: 100%;
       cursor: col-resize; z-index: 10; background: transparent;
     }
+    #sidebar.open #sidebarResizer { display: block; }
     #sidebarResizer:hover, #sidebarResizer.active { background: #00d4aa44; }
     .sb-section {
       padding: 6px 12px; color: #666; font: 11px 'Segoe UI', sans-serif; text-transform: uppercase;
@@ -236,7 +237,7 @@
       #toolbar .session-name { max-width: 30vw; font-size: 12px; }
       #touchKeys { display: flex; align-items: center; margin-top: 32px; }
       #status { top: 70px; }
-      #main { overflow-x: auto; -webkit-overflow-scrolling: touch; }
+      #main { overflow-x: hidden; }
       #sidebar.open { width: var(--sb-width, 220px); }
       .settings-panel { width: 95vw; padding: 16px; }
       .settings-grid { grid-template-columns: 1fr; }
@@ -446,18 +447,7 @@
     term.open(document.getElementById('terminal'));
     fitAddon.fit();
 
-    // Enforce minimum terminal width on mobile so narrow PTY
-    // doesn't corrupt scrollback when viewed later on desktop
-    const MIN_TERMINAL_COLS = 80;
-    function ensureMinCols() {
-      if (!isMobile || term.cols >= MIN_TERMINAL_COLS) return;
-      const screen = document.querySelector('#terminal .xterm-screen');
-      if (!screen || term.cols <= 0) return;
-      const cellWidth = screen.clientWidth / term.cols;
-      document.getElementById('terminal').style.minWidth = Math.ceil(MIN_TERMINAL_COLS * cellWidth + 20) + 'px';
-      fitAddon.fit();
-    }
-    ensureMinCols();
+    function ensureMinCols() {} // no-op — let terminal fit viewport naturally
 
     // --- WebSocket ---
     function connect() {
@@ -620,9 +610,10 @@
         term.clearSelection();
         return false;
       }
-      // Mobile: suppress keydown for printable chars to avoid double input
-      // (mobile keyboards fire both input event and keydown for punctuation)
-      if (isMobile && !e.ctrlKey && !e.altKey && !e.metaKey && e.key.length === 1) {
+      // Mobile: suppress keydown for printable chars to avoid double input.
+      // Android IME fires keydown with keyCode 229 for composed chars (dots, commas, etc.)
+      // which xterm also receives via the input event — suppress both paths.
+      if (isMobile && !e.ctrlKey && !e.altKey && !e.metaKey && (e.key.length === 1 || e.keyCode === 229)) {
         return false;
       }
       return true;

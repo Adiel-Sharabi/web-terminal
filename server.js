@@ -1188,37 +1188,40 @@ app.get('/api/history/folders', (req, res) => {
 // --- Decode Claude project directory name to actual path ---
 function decodeProjectPath(project) {
   // e.g. "C--dev-web-terminal" -> try "C:\dev\web-terminal", "C:\dev\web\terminal", etc.
-  // First part: drive letter. "C-" at start -> "C:\"
+  // Claude's encoder turns both path separators (\) and underscores (_) into hyphens (-),
+  // so we must try both joiners when reconstructing the path.
   const driveMatch = project.match(/^([A-Z])-(.*)$/);
   if (!driveMatch) return project.replace(/-/g, '\\');
 
   const drive = driveMatch[1] + ':\\';
-  const rest = driveMatch[2]; // e.g. "-dev-web-terminal" -> "dev-web-terminal"
-  const cleanRest = rest.replace(/^-/, ''); // remove leading dash after drive
+  const rest = driveMatch[2];
+  const cleanRest = rest.replace(/^-/, '');
 
-  // Split on dashes — each could be a path separator or part of a folder name
   const parts = cleanRest.split('-');
 
-  // Try to greedily build the path by checking which directories exist
   let current = drive;
   let i = 0;
   while (i < parts.length) {
-    // Try joining increasingly more parts (to handle hyphens in folder names)
     let found = false;
+    // Try joining increasingly more parts — check both hyphen and underscore joins
     for (let j = parts.length; j > i; j--) {
-      const candidate = parts.slice(i, j).join('-');
-      const candidatePath = path.join(current, candidate);
-      try {
-        if (fs.existsSync(candidatePath) && fs.statSync(candidatePath).isDirectory()) {
-          current = candidatePath;
-          i = j;
-          found = true;
-          break;
-        }
-      } catch (e) {}
+      const seg = parts.slice(i, j);
+      const candidates = [seg.join('-')];
+      if (seg.length > 1) candidates.push(seg.join('_'));
+      for (const candidate of candidates) {
+        const candidatePath = path.join(current, candidate);
+        try {
+          if (fs.existsSync(candidatePath) && fs.statSync(candidatePath).isDirectory()) {
+            current = candidatePath;
+            i = j;
+            found = true;
+            break;
+          }
+        } catch (e) {}
+      }
+      if (found) break;
     }
     if (!found) {
-      // No match found — just use single part as directory name
       current = path.join(current, parts[i]);
       i++;
     }
