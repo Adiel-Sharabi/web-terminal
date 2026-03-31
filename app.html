@@ -127,8 +127,9 @@
     .cl-name { color: #da4; font-weight: 500; }
     .cl-summary { color: #777; font-size: 10px; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; margin-top: 1px; }
     .cl-meta { color: #555; font-size: 10px; display: flex; gap: 6px; margin-top: 1px; }
-    .cl-del { background: transparent; border: none; color: #555; font-size: 12px; cursor: pointer; float: right; }
+    .cl-del, .cl-transfer { background: transparent; border: none; color: #555; font-size: 12px; cursor: pointer; float: right; padding: 0 2px; }
     .cl-del:hover { color: #e94560; }
+    .cl-transfer:hover { color: #00d4aa; }
 
     /* --- Sidebar footer (settings/logout) --- */
     #sidebarFooter {
@@ -1366,8 +1367,10 @@
           const serverTag = s.serverUrl ? `<span style="color:#00d4aa;font-size:9px">[${esc(s.serverName)}]</span> ` : '';
           // Show last folder segment as friendly name, full path as tooltip
           const friendlyName = s.projectPath ? s.projectPath.split(/[\\/]/).filter(Boolean).pop() : s.project;
+          const hasCluster = clusterServers.filter(srv => srv.online && !srv.needsAuth).length > 1;
           item.innerHTML =
             `<button class="cl-del" title="Remove">&times;</button>` +
+            (hasCluster ? `<button class="cl-transfer" title="Transfer to another server">&#8644;</button>` : '') +
             `<div class="cl-name" title="${esc(s.projectPath || s.project)}">${serverTag}${esc(friendlyName)}</div>` +
             `<div class="cl-summary">${esc(s.summary || '(no summary)')}</div>` +
             `<div class="cl-meta"><span>${s.sizeKB}KB</span><span>${timeAgo(s.lastModified)}</span>${s.skipPermissions ? '<span style="color:#da4">skip-perms</span>' : ''}</div>`;
@@ -1380,8 +1383,15 @@
             loadClaudeSessions();
           });
 
+          if (hasCluster) {
+            item.querySelector('.cl-transfer').addEventListener('click', (e) => {
+              e.stopPropagation();
+              transferClaude(s, friendlyName);
+            });
+          }
+
           item.addEventListener('click', (e) => {
-            if (e.target.closest('.cl-del')) return;
+            if (e.target.closest('.cl-del') || e.target.closest('.cl-transfer')) return;
             resumeClaude(s.id, s.projectPath, friendlyName, s.skipPermissions, s.serverUrl);
           });
 
@@ -1413,6 +1423,64 @@
         }
       } catch (e) {
         alert(`Failed to resume: ${e.message}`);
+      }
+    }
+
+    // --- Transfer Claude session to another server ---
+    async function transferClaude(session, friendlyName) {
+      // Build list of target servers (exclude the source server)
+      const targets = clusterServers.filter(srv =>
+        srv.online && !srv.needsAuth && srv.url !== session.serverUrl
+      );
+      if (targets.length === 0) {
+        alert('No other online servers available');
+        return;
+      }
+      // Pick target server
+      let target;
+      if (targets.length === 1) {
+        target = targets[0];
+      } else {
+        const choices = targets.map((t, i) => `${i + 1}. ${t.name || t.url}`).join('\n');
+        const pick = prompt(`Transfer "${friendlyName}" to:\n\n${choices}\n\nEnter number:`);
+        if (!pick) return;
+        target = targets[parseInt(pick, 10) - 1];
+        if (!target) { alert('Invalid selection'); return; }
+      }
+
+      const sourceApi = session.serverUrl ? `/cluster/${encodeURIComponent(session.serverUrl)}/api` : '/api';
+      const targetApi = target.url ? `/cluster/${encodeURIComponent(target.url)}/api` : '/api';
+
+      try {
+        // 1. Export from source
+        const expRes = await fetch(`${sourceApi}/claude-sessions/${encodeURIComponent(session.project)}/${encodeURIComponent(session.id)}/export`);
+        if (!expRes.ok) { alert(`Export failed: ${(await expRes.json()).error}`); return; }
+        const expData = await expRes.json();
+
+        // 2. Import to target + auto-resume
+        const impRes = await fetch(`${targetApi}/claude-sessions/import`, {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({
+            project: expData.project,
+            id: expData.id,
+            content: expData.content,
+            autoResume: true,
+            name: friendlyName,
+            skipPermissions: session.skipPermissions
+          })
+        });
+        const impData = await impRes.json();
+        if (!impRes.ok) { alert(`Import failed: ${impData.error}`); return; }
+
+        // 3. Switch to the new session on target server
+        if (impData.sessionId) {
+          switchSession(impData.sessionId, target.url);
+          closeSidebarIfUnpinned();
+        }
+        loadClaudeSessions();
+      } catch (e) {
+        alert(`Transfer failed: ${e.message}`);
       }
     }
 
