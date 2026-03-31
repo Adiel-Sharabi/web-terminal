@@ -489,14 +489,28 @@
       };
 
       ws.onmessage = e => {
-        // Filter control messages — never write JSON protocol frames to the terminal
-        if (typeof e.data === 'string' && e.data.charAt(0) === '{') {
+        if (typeof e.data === 'string') {
+          if (e.data.startsWith('{"sessionTaken"')) {
+            try {
+              const info = JSON.parse(e.data);
+              status.textContent = `Session opened on ${info.sessionTaken}`;
+              status.className = 'disconnected';
+              status.style.opacity = '1';
+            } catch (ex) {}
+            // Disable onclose BEFORE server closes the socket — prevents
+            // reconnect loop (close code may not be 4001 in all browsers)
+            ws.onclose = null;
+            cancelReconnect();
+            sessionId = null;
+            if (document.getElementById('sidebar').classList.contains('open')) loadSidebar();
+            return;
+          }
           if (e.data.startsWith('{"requestResize"')) {
             fitAddon.fit();
             ws.send(JSON.stringify({ resize: { cols: term.cols, rows: term.rows } }));
+            return;
           }
-          // Drop any other JSON control messages (heartbeat, etc.)
-          return;
+          if (e.data.startsWith('{"heartbeat":')) return;
         }
         term.write(e.data);
       };
@@ -504,8 +518,8 @@
       ws.onclose = (e) => {
         stopHeartbeat();
         if (switching) return;
-        // Session was killed/ended — navigate to empty state
-        if (e.code === 4000) {
+        // Session was killed/ended or taken by another viewer
+        if (e.code === 4000 || e.code === 4001) {
           cancelReconnect();
           if (document.getElementById('sidebar').classList.contains('open')) loadSidebar();
           return;
@@ -633,16 +647,20 @@
         term.clearSelection();
         return false;
       }
-      // Mobile: suppress keydown for printable chars to avoid double input.
-      // Android IME fires keydown with keyCode 229 for composed chars (dots, commas, etc.)
-      // which xterm also receives via the input event — suppress both paths.
-      if (isMobile && !e.ctrlKey && !e.altKey && !e.metaKey && (e.key.length === 1 || e.keyCode === 229)) {
-        return false;
-      }
       return true;
     });
 
+    let _lastMobileChar = '', _lastMobileTime = 0;
     term.onData(data => {
+      // Mobile dedup: some Android keyboards (SwiftKey, Gboard) fire both
+      // keydown and input events for punctuation, causing xterm to send the
+      // char twice. Filter rapid duplicate single-chars (< 30ms apart).
+      if (isMobile && data.length === 1) {
+        const now = Date.now();
+        if (data === _lastMobileChar && now - _lastMobileTime < 30) return;
+        _lastMobileChar = data;
+        _lastMobileTime = now;
+      }
       // Apply sticky modifiers to mobile keyboard input
       if (isMobile && (stickyState.ctrl || stickyState.alt || stickyState.shift) && data.length === 1) {
         let key = stickyState.shift ? data.toUpperCase() : data;
