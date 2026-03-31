@@ -1420,7 +1420,11 @@ app.post('/api/restart', (req, res) => {
   setTimeout(() => {
     saveSessionConfigs();
     saveAllScrollback();
-    const { spawn } = require('child_process');
+    const { execSync, spawn } = require('child_process');
+    // Pull latest code before restarting
+    try { execSync('git pull --ff-only', { cwd: __dirname, timeout: 15000 }); } catch (e) {
+      console.error(`[${new Date().toISOString()}] git pull failed: ${e.message}`);
+    }
     const child = spawn(process.argv[0], process.argv.slice(1), {
       cwd: __dirname,
       detached: true,
