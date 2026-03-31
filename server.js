@@ -41,7 +41,7 @@ function liveConfig(key, fallback) {
 function getDefaultCwd() { return process.env.WT_CWD || liveConfig('defaultCwd', 'C:\\dev'); }
 function getScanFolders() { return liveConfig('scanFolders', [getDefaultCwd()]); }
 function getDefaultCommand() { return liveConfig('defaultCommand', ''); }
-function getScrollbackReplayLimit() { return parseInt(liveConfig('scrollbackReplayLimit', 102400)) || 102400; }
+function getScrollbackReplayLimit() { return parseInt(liveConfig('scrollbackReplayLimit', 1048576)) || 1048576; }
 // Kept for backward compat in startup code
 const DEFAULT_CWD = getDefaultCwd();
 const SESSIONS_FILE = path.join(__dirname, 'sessions.json');
@@ -1348,6 +1348,59 @@ app.delete('/api/claude-sessions/:project/:id', (req, res) => {
       return res.json({ ok: true });
     }
     res.status(404).json({ error: 'not found' });
+  } catch (e) {
+    console.error(e.message); res.status(500).json({ error: 'Internal error' });
+  }
+});
+
+// --- API: export a claude session file (for transfer) ---
+app.get('/api/claude-sessions/:project/:id/export', (req, res) => {
+  const project = path.basename(req.params.project);
+  const id = path.basename(req.params.id).replace(/[^a-zA-Z0-9_-]/g, '');
+  const file = path.join(CLAUDE_PROJECTS_DIR, project, id + '.jsonl');
+  if (!path.resolve(file).startsWith(path.resolve(CLAUDE_PROJECTS_DIR))) {
+    return res.status(400).json({ error: 'Invalid path' });
+  }
+  try {
+    if (!fs.existsSync(file)) return res.status(404).json({ error: 'not found' });
+    const content = fs.readFileSync(file, 'utf8');
+    res.json({ project, id, content, size: content.length });
+  } catch (e) {
+    console.error(e.message); res.status(500).json({ error: 'Internal error' });
+  }
+});
+
+// --- API: import a claude session file (from transfer) + optionally create terminal session ---
+app.post('/api/claude-sessions/import', express.json({ limit: '50mb' }), (req, res) => {
+  const { project, id, content, autoResume, name, skipPermissions } = req.body || {};
+  if (!project || !id || !content) {
+    return res.status(400).json({ error: 'Missing project, id, or content' });
+  }
+  const safeProject = path.basename(String(project));
+  const safeId = path.basename(String(id)).replace(/[^a-zA-Z0-9_-]/g, '');
+  const projectDir = path.join(CLAUDE_PROJECTS_DIR, safeProject);
+  const file = path.join(projectDir, safeId + '.jsonl');
+  if (!path.resolve(file).startsWith(path.resolve(CLAUDE_PROJECTS_DIR))) {
+    return res.status(400).json({ error: 'Invalid path' });
+  }
+  try {
+    if (!fs.existsSync(projectDir)) fs.mkdirSync(projectDir, { recursive: true });
+    fs.writeFileSync(file, content, 'utf8');
+    console.log(`[${new Date().toISOString()}] Imported claude session ${safeProject}/${safeId} (${content.length} bytes)`);
+
+    // Optionally create a terminal session to resume this claude session
+    if (autoResume) {
+      const projectPath = decodeProjectPath(safeProject);
+      let cwd = projectPath;
+      try { if (!fs.existsSync(cwd) || !fs.statSync(cwd).isDirectory()) cwd = getDefaultCwd(); } catch (e) { cwd = getDefaultCwd(); }
+      let cmd = 'claude --resume ' + safeId;
+      if (skipPermissions) cmd += ' --dangerously-skip-permissions';
+      const sessionId = crypto.randomUUID();
+      const sessionName = String(name || projectPath.split(path.sep).filter(Boolean).pop() || 'Transferred');
+      createSession(sessionId, cwd, sessionName.substring(0, 100), cmd);
+      return res.json({ ok: true, sessionId, name: sessionName });
+    }
+    res.json({ ok: true });
   } catch (e) {
     console.error(e.message); res.status(500).json({ error: 'Internal error' });
   }
