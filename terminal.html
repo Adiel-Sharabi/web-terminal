@@ -140,20 +140,30 @@
       };
 
       ws.onmessage = e => {
-        // Filter JSON control messages — never write protocol frames to the terminal
-        if (typeof e.data === 'string' && e.data.charAt(0) === '{') {
+        if (typeof e.data === 'string') {
+          if (e.data.startsWith('{"sessionTaken"')) {
+            try {
+              const info = JSON.parse(e.data);
+              status.textContent = `Session opened on ${info.sessionTaken}`;
+            } catch (ex) {}
+            status.className = 'disconnected';
+            status.style.opacity = '1';
+            return;
+          }
           if (e.data.startsWith('{"requestResize"')) {
             fitAddon.fit();
             ws.send(JSON.stringify({ resize: { cols: term.cols, rows: term.rows } }));
+            return;
           }
-          return;
+          if (e.data.startsWith('{"heartbeat":')) return;
         }
         term.write(e.data);
         if (autoScroll) term.scrollToBottom();
       };
 
-      ws.onclose = () => {
+      ws.onclose = (e) => {
         if (switching) return;
+        if (e && e.code === 4001) return; // taken by another viewer, don't reconnect
         status.textContent = 'disconnected — reconnecting...';
         status.className = 'disconnected';
         status.style.opacity = '1';
