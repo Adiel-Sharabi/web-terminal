@@ -95,7 +95,23 @@ if (PASS && !DEFAULT_PASSWORDS.includes(PASS) && !PASS.startsWith('$scrypt$')) {
 }
 
 const app = express();
-expressWs(app);
+const wsInstance = expressWs(app);
+
+// --- WebSocket keepalive: ping every 30s, kill dead connections after 10s grace ---
+const WS_PING_INTERVAL = 30000;
+const WS_PONG_TIMEOUT = 10000;
+setInterval(() => {
+  const wss = wsInstance.getWss();
+  for (const ws of wss.clients) {
+    if (ws._wtAlive === false) {
+      // No pong received since last ping — connection is dead
+      ws.terminate();
+      continue;
+    }
+    ws._wtAlive = false;
+    try { ws.ping(); } catch (e) {}
+  }
+}, WS_PING_INTERVAL);
 
 // --- Session persistence ---
 function loadSessionConfigs() {
@@ -996,12 +1012,18 @@ app.ws('/cluster/:serverUrl/ws/:id', (localWs, req) => {
     console.error(`[${new Date().toISOString()}] Cluster WS proxy error: ${err.message}`);
     try { localWs.close(); } catch (e) {}
   });
+  localWs._wtAlive = true;
+  localWs.on('pong', () => { localWs._wtAlive = true; });
   localWs.on('message', (msg, isBinary) => {
     if (remoteWs.readyState === WebSocket.OPEN) {
       try { remoteWs.send(msg, { binary: isBinary }); } catch (e) {}
     } else {
       buffered.push({ msg, isBinary });
     }
+  });
+  localWs.on('error', (err) => {
+    console.error(`[${new Date().toISOString()}] Cluster WS local error: ${err.message}`);
+    try { remoteWs.close(); } catch (e) {}
   });
   localWs.on('close', () => { try { remoteWs.close(); } catch (e) {} });
 });
@@ -1375,6 +1397,9 @@ app.get('/s/:id', (req, res) => {
 app.ws('/ws/notify', (ws, req) => {
   if (!authenticateWs(ws, req)) return;
   notifyClients.add(ws);
+  ws._wtAlive = true;
+  ws.on('pong', () => { ws._wtAlive = true; });
+  ws.on('error', () => { notifyClients.delete(ws); });
   ws.on('close', () => notifyClients.delete(ws));
 });
 
@@ -1394,11 +1419,18 @@ app.ws('/ws/:id', (ws, req) => {
   } catch (e) {}
 
   session.clients.add(ws);
+  ws._wtAlive = true;
+  ws.on('pong', () => { ws._wtAlive = true; });
+  ws.on('error', (err) => {
+    console.error(`[${new Date().toISOString()}] WS error session ${req.params.id}: ${err.message}`);
+  });
   console.log(`[${new Date().toISOString()}] Client joined session ${req.params.id} (${session.clients.size} clients)`);
 
   ws.on('message', msg => {
     // Reject oversized messages (64KB)
     if (msg.length > 65536) return;
+    // Heartbeat from client — just mark alive, don't forward to PTY
+    if (msg === '{"heartbeat":1}') { ws._wtAlive = true; return; }
     if (typeof msg === 'string' && msg.startsWith('{"resize":')) {
       try {
         const { resize } = JSON.parse(msg);
