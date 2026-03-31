@@ -489,10 +489,13 @@
       };
 
       ws.onmessage = e => {
-        // Server requests resize (e.g., other viewer left, we're now sole client)
-        if (typeof e.data === 'string' && e.data.startsWith('{"requestResize"')) {
-          fitAddon.fit();
-          ws.send(JSON.stringify({ resize: { cols: term.cols, rows: term.rows } }));
+        // Filter control messages — never write JSON protocol frames to the terminal
+        if (typeof e.data === 'string' && e.data.charAt(0) === '{') {
+          if (e.data.startsWith('{"requestResize"')) {
+            fitAddon.fit();
+            ws.send(JSON.stringify({ resize: { cols: term.cols, rows: term.rows } }));
+          }
+          // Drop any other JSON control messages (heartbeat, etc.)
           return;
         }
         term.write(e.data);

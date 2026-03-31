@@ -140,6 +140,14 @@
       };
 
       ws.onmessage = e => {
+        // Filter JSON control messages — never write protocol frames to the terminal
+        if (typeof e.data === 'string' && e.data.charAt(0) === '{') {
+          if (e.data.startsWith('{"requestResize"')) {
+            fitAddon.fit();
+            ws.send(JSON.stringify({ resize: { cols: term.cols, rows: term.rows } }));
+          }
+          return;
+        }
         term.write(e.data);
         if (autoScroll) term.scrollToBottom();
       };
