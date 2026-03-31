@@ -97,16 +97,20 @@ if (PASS && !DEFAULT_PASSWORDS.includes(PASS) && !PASS.startsWith('$scrypt$')) {
 const app = express();
 const wsInstance = expressWs(app);
 
-// --- WebSocket keepalive: ping every 30s, kill dead connections after 10s grace ---
+// --- WebSocket keepalive: ping every 30s, kill after 2 missed pings (tolerates background tabs) ---
 const WS_PING_INTERVAL = 30000;
-const WS_PONG_TIMEOUT = 10000;
 setInterval(() => {
   const wss = wsInstance.getWss();
   for (const ws of wss.clients) {
     if (ws._wtAlive === false) {
-      // No pong received since last ping — connection is dead
-      ws.terminate();
-      continue;
+      // Allow one missed ping — browsers throttle background tabs to ~60s
+      ws._wtMissed = (ws._wtMissed || 0) + 1;
+      if (ws._wtMissed >= 3) {
+        ws.terminate();
+        continue;
+      }
+    } else {
+      ws._wtMissed = 0;
     }
     ws._wtAlive = false;
     try { ws.ping(); } catch (e) {}
@@ -1015,6 +1019,9 @@ app.ws('/cluster/:serverUrl/ws/:id', (localWs, req) => {
   localWs._wtAlive = true;
   localWs.on('pong', () => { localWs._wtAlive = true; });
   localWs.on('message', (msg, isBinary) => {
+    // Absorb client heartbeats — don't forward to remote PTY
+    const str = Buffer.isBuffer(msg) ? msg.toString() : msg;
+    if (typeof str === 'string' && str.startsWith('{"heartbeat":')) { localWs._wtAlive = true; return; }
     if (remoteWs.readyState === WebSocket.OPEN) {
       try { remoteWs.send(msg, { binary: isBinary }); } catch (e) {}
     } else {
@@ -1480,11 +1487,12 @@ app.ws('/ws/:id', (ws, req) => {
   console.log(`[${new Date().toISOString()}] Client joined session ${req.params.id} (${session.clients.size} clients)`);
 
   ws.on('message', msg => {
+    if (Buffer.isBuffer(msg)) msg = msg.toString();
     // Reject oversized messages (64KB)
-    if (msg.length > 65536) return;
+    if (typeof msg === 'string' && msg.length > 65536) return;
     // Heartbeat from client — just mark alive, don't forward to PTY
-    if (msg === '{"heartbeat":1}') { ws._wtAlive = true; return; }
-    if (typeof msg === 'string' && msg.startsWith('{"resize":')) {
+    if (typeof msg === 'string' && msg.startsWith('{"heartbeat":')) { ws._wtAlive = true; return; }
+    if (msg.startsWith('{"resize":')) {
       try {
         const { resize } = JSON.parse(msg);
         const cols = Math.max(1, Math.min(500, parseInt(resize.cols) || 80));
@@ -1504,11 +1512,17 @@ app.ws('/ws/:id', (ws, req) => {
   ws.on('close', () => {
     session.clients.delete(ws);
     console.log(`[${new Date().toISOString()}] Client left session ${req.params.id} (${session.clients.size} clients)`);
-    // When down to 1 client, tell it to re-send its resize so PTY matches its screen
+    // When down to 1 client, delay requestResize to avoid shrinking PTY on transient disconnects
     if (session.clients.size === 1) {
-      for (const client of session.clients) {
-        try { client.send(JSON.stringify({ requestResize: true })); } catch (e) {}
-      }
+      if (session._resizeTimer) clearTimeout(session._resizeTimer);
+      session._resizeTimer = setTimeout(() => {
+        delete session._resizeTimer;
+        if (session.clients.size === 1) {
+          for (const client of session.clients) {
+            try { client.send(JSON.stringify({ requestResize: true })); } catch (e) {}
+          }
+        }
+      }, 10000); // 10s grace period for reconnects
     }
   });
 });
