@@ -1121,6 +1121,40 @@ app.get('/api/sessions', (req, res) => {
   res.json(list);
 });
 
+// --- API: execute command and return output ---
+app.post('/api/exec', express.json({ limit: '64kb' }), (req, res) => {
+  const command = req.body?.command;
+  if (!command || typeof command !== 'string') {
+    return res.status(400).json({ error: 'command is required' });
+  }
+  if (command.length > 4096) {
+    return res.status(400).json({ error: 'command too long (max 4096 chars)' });
+  }
+  const cwd = req.body?.cwd ? String(req.body.cwd).substring(0, 260) : undefined;
+  const timeout = Math.min(Math.max(parseInt(req.body?.timeout) || 30000, 1000), 120000);
+
+  const child = execFile(SHELL, ['-c', command], {
+    cwd: cwd || DEFAULT_CWD,
+    timeout,
+    maxBuffer: 1024 * 1024,
+    env: config.passAllEnv ? Object.assign({}, process.env) : {
+      HOME: process.env.USERPROFILE || os.homedir(),
+      USERPROFILE: process.env.USERPROFILE,
+      PATH: process.env.PATH,
+      SystemRoot: process.env.SystemRoot,
+      SystemDrive: process.env.SystemDrive,
+      TEMP: process.env.TEMP,
+      TMP: process.env.TMP,
+      LANG: process.env.LANG || 'en_US.UTF-8',
+      APPDATA: process.env.APPDATA,
+      LOCALAPPDATA: process.env.LOCALAPPDATA,
+    }
+  }, (err, stdout, stderr) => {
+    const exitCode = err ? (err.code === 'ETIMEDOUT' ? -1 : (err.code || 1)) : 0;
+    res.json({ stdout, stderr, exitCode });
+  });
+});
+
 // --- API: create session ---
 const MAX_SESSIONS = config.maxSessions || 10;
 app.post('/api/sessions', express.json({ limit: '16kb' }), (req, res) => {
