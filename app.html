@@ -239,7 +239,8 @@
     @media (max-width: 600px) {
       #toolbar { font-size: 12px; height: 32px; padding: 0 8px; position: fixed; top: 0; left: 0; right: 0; z-index: 100; will-change: transform; }
       #toolbar .session-name { max-width: 30vw; font-size: 12px; }
-      #touchKeys { display: flex; align-items: center; margin-top: 32px; }
+      #touchKeys { display: flex; align-items: center; margin-top: 32px; flex-wrap: wrap; height: auto; white-space: normal; }
+      #touchKeys button { padding: 4px 8px; min-width: 32px; font-size: 11px; }
       #status { top: 70px; }
       #main { overflow-x: hidden; }
       #sidebar.open { width: var(--sb-width, 220px); }
