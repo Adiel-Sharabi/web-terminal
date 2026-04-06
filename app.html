@@ -656,15 +656,15 @@
       return true;
     });
 
-    let _lastMobileChar = '', _lastMobileTime = 0;
+    let _lastMobileData = '', _lastMobileTime = 0;
     term.onData(data => {
-      // Mobile dedup: some Android keyboards (SwiftKey, Gboard) fire both
-      // keydown and input events for punctuation, causing xterm to send the
-      // char twice. Filter rapid duplicate single-chars (< 30ms apart).
-      if (isMobile && data.length === 1) {
+      // Mobile dedup: Android keyboards (SwiftKey, Gboard) can fire duplicate
+      // events — single-char doubles for punctuation, or full-text re-sends
+      // when period/autocomplete triggers recomposition of the entire input.
+      if (isMobile) {
         const now = Date.now();
-        if (data === _lastMobileChar && now - _lastMobileTime < 30) return;
-        _lastMobileChar = data;
+        if (data === _lastMobileData && now - _lastMobileTime < 80) return;
+        _lastMobileData = data;
         _lastMobileTime = now;
       }
       // Apply sticky modifiers to mobile keyboard input
@@ -1007,13 +1007,14 @@
       const isOpen = sb.classList.contains('open');
       if (isOpen) loadSidebar();
       sessionStorage.setItem('sidebarOpen', isOpen ? '1' : '0');
-      // Resize after CSS transition completes
-      sb.addEventListener('transitionend', function onEnd() {
-        sb.removeEventListener('transitionend', onEnd);
-        doResize();
-      });
-      // Fallback in case transitionend doesn't fire
-      setTimeout(doResize, 350);
+      // Resize terminal after sidebar transition (skip on mobile — sidebar overlays)
+      if (!isMobile) {
+        sb.addEventListener('transitionend', function onEnd() {
+          sb.removeEventListener('transitionend', onEnd);
+          doResize();
+        });
+        setTimeout(doResize, 350);
+      }
     }
 
     // --- Sidebar resize handle ---
