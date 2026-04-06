@@ -2,6 +2,7 @@ node_modules/
 *.log
 config.json
 config.json.bak
+config.test.json
 sessions.json
 sessions.json.bak
 history.json

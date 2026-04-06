@@ -10,7 +10,8 @@ const { execFile } = require('child_process');
 const SERVER_VERSION = '1.0.0';
 
 // --- Config: config.json > env vars > defaults ---
-const CONFIG_FILE = path.join(__dirname, 'config.json');
+// Use separate config file during tests to avoid corrupting production config
+const CONFIG_FILE = process.env.WT_PORT ? path.join(__dirname, 'config.test.json') : path.join(__dirname, 'config.json');
 const DEFAULT_CONFIG_FILE = path.join(__dirname, 'config.default.json');
 let config = {};
 try {
