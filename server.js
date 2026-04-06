@@ -506,7 +506,19 @@ setInterval(() => {
 }, 10 * 60 * 1000);
 
 // --- PWA static assets (before auth) ---
-app.get('/manifest.json', (req, res) => res.sendFile(path.join(__dirname, 'manifest.json')));
+app.get('/manifest.json', (req, res) => {
+  const name = getServerName();
+  res.json({
+    name: `Terminal — ${name}`,
+    short_name: name,
+    description: 'Browser-based terminal with multi-server session management',
+    start_url: '/app',
+    display: 'standalone',
+    background_color: '#1e1e1e',
+    theme_color: '#16213e',
+    icons: [{ src: '/icon.svg', sizes: 'any', type: 'image/svg+xml' }]
+  });
+});
 app.get('/sw.js', (req, res) => { res.set('Content-Type', 'application/javascript'); res.sendFile(path.join(__dirname, 'sw.js')); });
 app.get('/icon.svg', (req, res) => res.sendFile(path.join(__dirname, 'icon.svg')));
 
