@@ -310,7 +310,7 @@ const SESSION_SECRET = (() => {
   return secret;
 })();
 const COOKIE_NAME = 'wt_session';
-const COOKIE_MAX_AGE = 7 * 24 * 60 * 60 * 1000; // 7 days
+const COOKIE_MAX_AGE = 90 * 24 * 60 * 60 * 1000; // 90 days
 
 function checkCredentials(user, pass) {
   if (!user || !pass) return false;
@@ -359,7 +359,7 @@ function parseCookies(header) {
 
 function setAuthCookie(res, user) {
   const token = makeSessionToken(user);
-  res.set('Set-Cookie', `${COOKIE_NAME}=${token}; HttpOnly; SameSite=Strict; Path=/; Max-Age=${COOKIE_MAX_AGE / 1000}`);
+  res.set('Set-Cookie', `${COOKIE_NAME}=${token}; HttpOnly; SameSite=Lax; Path=/; Max-Age=${COOKIE_MAX_AGE / 1000}`);
 }
 
 function authenticateWs(ws, req) {
@@ -549,7 +549,7 @@ app.post('/login', express.urlencoded({ extended: false }), (req, res) => {
 });
 
 app.get('/logout', (req, res) => {
-  res.set('Set-Cookie', `${COOKIE_NAME}=; HttpOnly; SameSite=Strict; Path=/; Max-Age=0`);
+  res.set('Set-Cookie', `${COOKIE_NAME}=; HttpOnly; SameSite=Lax; Path=/; Max-Age=0`);
   res.redirect('/login');
 });
 
@@ -583,6 +583,8 @@ app.use((req, res, next) => {
   // Try cookie auth
   const cookies = parseCookies(req.headers.cookie);
   if (verifySessionToken(cookies[COOKIE_NAME])) {
+    // Refresh cookie so active users stay logged in
+    setAuthCookie(res, _USER);
     // Force password change if still using default
     if (needsPasswordChange() && req.path !== '/api/setup') {
       return res.send(SETUP_PAGE);
