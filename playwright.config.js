@@ -1,17 +1,5 @@
 const { defineConfig } = require('@playwright/test');
 const path = require('path');
-const fs = require('fs');
-
-// Backup config.json before tests, restore after
-const configPath = path.join(__dirname, 'config.json');
-const backupPath = path.join(__dirname, 'config.json.bak');
-
-// Save backup when config loads
-try {
-  if (fs.existsSync(configPath)) {
-    fs.copyFileSync(configPath, backupPath);
-  }
-} catch (e) {}
 
 module.exports = defineConfig({
   testDir: './tests',
