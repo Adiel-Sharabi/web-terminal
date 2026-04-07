@@ -709,6 +709,7 @@
       if (ws && ws.readyState === WebSocket.OPEN) ws.send(data);
     });
 
+    let _resizeTimer = null;
     function doResize() {
       fitAddon.fit();
       ensureMinCols();
@@ -716,7 +717,11 @@
         ws.send(JSON.stringify({ resize: { cols: term.cols, rows: term.rows } }));
       }
     }
-    window.addEventListener('resize', doResize);
+    function debouncedResize() {
+      clearTimeout(_resizeTimer);
+      _resizeTimer = setTimeout(doResize, 150);
+    }
+    window.addEventListener('resize', debouncedResize);
 
     // Mobile: keep toolbar pinned when virtual keyboard scrolls the viewport
     if (isMobile && window.visualViewport) {
@@ -730,8 +735,11 @@
         if (!vpTicking) { requestAnimationFrame(pinToolbar); vpTicking = true; }
       }
       window.visualViewport.addEventListener('scroll', schedulePin);
-      window.visualViewport.addEventListener('resize', () => { schedulePin(); doResize(); });
+      window.visualViewport.addEventListener('resize', () => { schedulePin(); debouncedResize(); });
     }
+
+    // Re-fit after layout settles (mobile especially may not be ready at term.open time)
+    setTimeout(doResize, 500);
 
     // --- Touch keys (mobile) ---
     const stickyState = { ctrl: false, alt: false, shift: false };
