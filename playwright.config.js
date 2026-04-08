@@ -14,11 +14,13 @@ module.exports = defineConfig({
     port: 17681,
     env: {
       ...process.env,
+      WT_TEST: '1',
       WT_PORT: '17681',
       WT_USER: 'testuser',
       WT_PASS: 'testpass:colon',
       WT_CWD: process.env.TEMP || 'C:\\Windows\\Temp',
       WT_HOST: '127.0.0.1',
+      WT_RATE_LIMIT_BLOCK: '1000',
     },
     reuseExistingServer: false,
     timeout: 15000,
