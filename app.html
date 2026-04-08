@@ -658,15 +658,27 @@
     });
 
     let _lastMobileData = '', _lastMobileTime = 0;
+    let _mobileSentBuf = '', _mobileBufTimer = null;
     term.onData(data => {
-      // Mobile dedup: Android keyboards (SwiftKey, Gboard) can fire duplicate
-      // events — single-char doubles for punctuation, or full-text re-sends
-      // when period/autocomplete triggers recomposition of the entire input.
+      // Mobile dedup: Android keyboards (SwiftKey, Gboard) cause duplicates in two ways:
+      // 1. Rapid double-fire of the same char for punctuation (keydown + input events)
+      // 2. Composition re-send: chars are sent one-by-one, then period/autocomplete
+      //    triggers compositionend which re-sends the entire composed text as one chunk
       if (isMobile) {
         const now = Date.now();
-        if (data === _lastMobileData && now - _lastMobileTime < 80) return;
+        // Exact duplicate within 150ms
+        if (data === _lastMobileData && now - _lastMobileTime < 150) return;
+        // Composition re-send: multi-char data that we already sent char-by-char
+        if (data.length > 3 && _mobileSentBuf.length >= data.length) {
+          const tail = _mobileSentBuf.slice(-data.length);
+          // Match: exact, or sent text minus trailing new char (period/space added by keyboard)
+          if (tail === data || tail === data.slice(0, -1)) return;
+        }
         _lastMobileData = data;
         _lastMobileTime = now;
+        _mobileSentBuf += data;
+        clearTimeout(_mobileBufTimer);
+        _mobileBufTimer = setTimeout(() => { _mobileSentBuf = ''; }, 3000);
       }
       // Apply sticky modifiers to mobile keyboard input
       if (isMobile && (stickyState.ctrl || stickyState.alt || stickyState.shift) && data.length === 1) {
