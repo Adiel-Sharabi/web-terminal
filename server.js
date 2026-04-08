@@ -11,8 +11,15 @@ const SERVER_VERSION = '1.0.0';
 
 // --- Config: config.json > env vars > defaults ---
 // Use separate config file during tests to avoid corrupting production config
-const CONFIG_FILE = process.env.WT_PORT ? path.join(__dirname, 'config.test.json') : path.join(__dirname, 'config.json');
+const CONFIG_FILE = process.env.WT_TEST ? path.join(__dirname, 'config.test.json') : path.join(__dirname, 'config.json');
 const DEFAULT_CONFIG_FILE = path.join(__dirname, 'config.default.json');
+
+function readConfig() {
+  try { return fs.existsSync(CONFIG_FILE) ? JSON.parse(fs.readFileSync(CONFIG_FILE, 'utf8')) : {}; } catch (e) { return {}; }
+}
+function writeConfig(cfg) {
+  fs.writeFileSync(CONFIG_FILE, JSON.stringify(cfg, null, 2), 'utf8');
+}
 let config = {};
 try {
   if (fs.existsSync(CONFIG_FILE)) {
@@ -26,7 +33,6 @@ const PORT = parseInt(process.env.WT_PORT || config.port || '7681');
 let _USER = process.env.WT_USER || config.user || 'admin';
 let PASS = process.env.WT_PASS || config.password || 'admin';
 const SHELL = process.env.WT_SHELL || config.shell || 'C:\\Program Files\\Git\\bin\\bash.exe';
-const SERVER_NAME = config.serverName || os.hostname(); // startup default
 function getServerName() { return liveConfig('serverName', os.hostname()); }
 
 // Live-reloadable settings (read from disk on each use)
@@ -43,6 +49,27 @@ function getDefaultCwd() { return process.env.WT_CWD || liveConfig('defaultCwd',
 function getScanFolders() { return liveConfig('scanFolders', [getDefaultCwd()]); }
 function getDefaultCommand() { return liveConfig('defaultCommand', ''); }
 function getScrollbackReplayLimit() { return parseInt(liveConfig('scrollbackReplayLimit', 1048576)) || 1048576; }
+
+function buildSafeEnv() {
+  return config.passAllEnv ? Object.assign({}, process.env, { TERM: 'xterm-256color' }) : {
+    TERM: 'xterm-256color',
+    HOME: process.env.USERPROFILE || os.homedir(),
+    USERPROFILE: process.env.USERPROFILE,
+    PATH: process.env.PATH,
+    SystemRoot: process.env.SystemRoot,
+    SystemDrive: process.env.SystemDrive,
+    COMSPEC: process.env.COMSPEC,
+    TEMP: process.env.TEMP,
+    TMP: process.env.TMP,
+    LANG: process.env.LANG || 'en_US.UTF-8',
+    APPDATA: process.env.APPDATA,
+    LOCALAPPDATA: process.env.LOCALAPPDATA,
+    ProgramFiles: process.env.ProgramFiles,
+    'ProgramFiles(x86)': process.env['ProgramFiles(x86)'],
+    HOMEDRIVE: process.env.HOMEDRIVE,
+    HOMEPATH: process.env.HOMEPATH,
+  };
+}
 // Kept for backward compat in startup code
 const DEFAULT_CWD = getDefaultCwd();
 const SESSIONS_FILE = path.join(__dirname, 'sessions.json');
@@ -84,11 +111,10 @@ if (PASS && !DEFAULT_PASSWORDS.includes(PASS) && !PASS.startsWith('$scrypt$')) {
     PASS = hashed;
     console.log('Password auto-hashed (env var, not persisted to config)');
   } else {
-    let cfg = {};
-    try { if (fs.existsSync(CONFIG_FILE)) cfg = JSON.parse(fs.readFileSync(CONFIG_FILE, 'utf8')); } catch (e) {}
+    const cfg = readConfig();
     cfg.password = hashed;
     try {
-      fs.writeFileSync(CONFIG_FILE, JSON.stringify(cfg, null, 2), 'utf8');
+      writeConfig(cfg);
       PASS = hashed;
       console.log('Password auto-hashed in config.json');
     } catch (e) { console.error('Failed to auto-hash password:', e.message); }
@@ -185,24 +211,7 @@ function createSession(id, cwd, name, autoCommand, savedScrollback) {
     cols: 120,
     rows: 30,
     cwd: cwd || DEFAULT_CWD,
-    env: config.passAllEnv ? Object.assign({}, process.env, { TERM: 'xterm-256color' }) : {
-      TERM: 'xterm-256color',
-      HOME: process.env.USERPROFILE || os.homedir(),
-      USERPROFILE: process.env.USERPROFILE,
-      PATH: process.env.PATH,
-      SystemRoot: process.env.SystemRoot,
-      SystemDrive: process.env.SystemDrive,
-      COMSPEC: process.env.COMSPEC,
-      TEMP: process.env.TEMP,
-      TMP: process.env.TMP,
-      LANG: process.env.LANG || 'en_US.UTF-8',
-      APPDATA: process.env.APPDATA,
-      LOCALAPPDATA: process.env.LOCALAPPDATA,
-      ProgramFiles: process.env.ProgramFiles,
-      'ProgramFiles(x86)': process.env['ProgramFiles(x86)'],
-      HOMEDRIVE: process.env.HOMEDRIVE,
-      HOMEPATH: process.env.HOMEPATH,
-    }
+    env: buildSafeEnv()
   });
 
   // Restore previous scrollback with a restart separator
@@ -473,7 +482,7 @@ const LOGIN_PAGE = `<!DOCTYPE html><html><head>
 const loginAttempts = new Map(); // ip -> { count, firstAttempt }
 const RATE_LIMIT_MAX = 5;
 const RATE_LIMIT_WINDOW = 60 * 1000;  // 60 seconds
-const RATE_LIMIT_BLOCK = 5 * 60 * 1000; // 5 minutes
+const RATE_LIMIT_BLOCK = parseInt(process.env.WT_RATE_LIMIT_BLOCK) || 5 * 60 * 1000; // 5 minutes
 
 function isRateLimited(ip) {
   const record = loginAttempts.get(ip);
@@ -523,6 +532,15 @@ app.get('/manifest.json', (req, res) => {
 app.get('/sw.js', (req, res) => { res.set('Content-Type', 'application/javascript'); res.sendFile(path.join(__dirname, 'sw.js')); });
 app.get('/icon.svg', (req, res) => res.sendFile(path.join(__dirname, 'icon.svg')));
 
+// --- Security headers ---
+app.use((req, res, next) => {
+  res.set('X-Content-Type-Options', 'nosniff');
+  res.set('X-Frame-Options', 'DENY');
+  res.set('Referrer-Policy', 'no-referrer');
+  res.set('Content-Security-Policy', "default-src 'self'; script-src 'self' 'unsafe-inline' https://cdn.jsdelivr.net; style-src 'self' 'unsafe-inline' https://cdn.jsdelivr.net; connect-src 'self' ws: wss:; img-src 'self' data:");
+  next();
+});
+
 // --- Public routes (before auth middleware) ---
 app.get('/login', (req, res) => {
   // If already logged in, redirect to lobby
@@ -551,15 +569,6 @@ app.post('/login', express.urlencoded({ extended: false }), (req, res) => {
 app.get('/logout', (req, res) => {
   res.set('Set-Cookie', `${COOKIE_NAME}=; HttpOnly; SameSite=Lax; Path=/; Max-Age=0`);
   res.redirect('/login');
-});
-
-// --- Security headers ---
-app.use((req, res, next) => {
-  res.set('X-Content-Type-Options', 'nosniff');
-  res.set('X-Frame-Options', 'DENY');
-  res.set('Referrer-Policy', 'no-referrer');
-  res.set('Content-Security-Policy', "default-src 'self'; script-src 'self' 'unsafe-inline' https://cdn.jsdelivr.net; style-src 'self' 'unsafe-inline' https://cdn.jsdelivr.net; connect-src 'self' ws: wss:; img-src 'self' data:");
-  next();
 });
 
 // --- API: auth token creation (before auth middleware — validates credentials itself) ---
@@ -703,11 +712,10 @@ app.post('/api/setup', express.json(), (req, res) => {
 
   // Hash and save
   const hashed = hashPassword(password);
-  let cfg = {};
-  try { if (fs.existsSync(CONFIG_FILE)) cfg = JSON.parse(fs.readFileSync(CONFIG_FILE, 'utf8')); } catch (e) {}
+  const cfg = readConfig();
   cfg.user = user.trim();
   cfg.password = hashed;
-  fs.writeFileSync(CONFIG_FILE, JSON.stringify(cfg, null, 2), 'utf8');
+  writeConfig(cfg);
 
   // Update running credentials
   PASS = hashed;
@@ -756,8 +764,7 @@ app.put('/api/config', express.json({ limit: '16kb' }), (req, res) => {
     }
     // If password is masked, preserve existing password; otherwise hash the new one
     if (sanitized.password === '***' || !sanitized.password) {
-      let existing = {};
-      try { if (fs.existsSync(CONFIG_FILE)) existing = JSON.parse(fs.readFileSync(CONFIG_FILE, 'utf8')); } catch (e) {}
+      const existing = readConfig();
       sanitized.password = existing.password || PASS;
     } else if (!sanitized.password.startsWith('$scrypt$')) {
       sanitized.password = hashPassword(sanitized.password);
@@ -772,7 +779,7 @@ app.put('/api/config', express.json({ limit: '16kb' }), (req, res) => {
     const needsRestart = Object.entries(RESTART_KEYS).some(
       ([k, running]) => sanitized[k] !== undefined && String(sanitized[k]) !== String(running)
     );
-    fs.writeFileSync(CONFIG_FILE, JSON.stringify(sanitized, null, 2), 'utf8');
+    writeConfig(sanitized);
     res.json({
       ok: true,
       needsRestart,
@@ -827,12 +834,11 @@ app.post('/api/cluster/register', express.json({ limit: '16kb' }), (req, res) =>
   try { new URL(url); } catch (e) { return res.status(400).json({ error: 'Invalid URL' }); }
 
   // Add to cluster config if not already there
-  let cfg = {};
-  try { if (fs.existsSync(CONFIG_FILE)) cfg = JSON.parse(fs.readFileSync(CONFIG_FILE, 'utf8')); } catch (e) {}
+  const cfg = readConfig();
   if (!cfg.cluster) cfg.cluster = [];
   if (!cfg.cluster.find(s => s.url === url)) {
     cfg.cluster.push({ name, url });
-    fs.writeFileSync(CONFIG_FILE, JSON.stringify(cfg, null, 2), 'utf8');
+    writeConfig(cfg);
   }
 
   // Store the token for this remote server
@@ -1152,18 +1158,7 @@ app.post('/api/exec', express.json({ limit: '64kb' }), (req, res) => {
     cwd: cwd || DEFAULT_CWD,
     timeout,
     maxBuffer: 1024 * 1024,
-    env: config.passAllEnv ? Object.assign({}, process.env) : {
-      HOME: process.env.USERPROFILE || os.homedir(),
-      USERPROFILE: process.env.USERPROFILE,
-      PATH: process.env.PATH,
-      SystemRoot: process.env.SystemRoot,
-      SystemDrive: process.env.SystemDrive,
-      TEMP: process.env.TEMP,
-      TMP: process.env.TMP,
-      LANG: process.env.LANG || 'en_US.UTF-8',
-      APPDATA: process.env.APPDATA,
-      LOCALAPPDATA: process.env.LOCALAPPDATA,
-    }
+    env: buildSafeEnv()
   }, (err, stdout, stderr) => {
     const exitCode = err ? (err.code === 'ETIMEDOUT' ? -1 : (err.code || 1)) : 0;
     res.json({ stdout, stderr, exitCode });

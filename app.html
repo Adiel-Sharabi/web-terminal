@@ -457,8 +457,6 @@
     term.open(document.getElementById('terminal'));
     fitAddon.fit();
 
-    function ensureMinCols() {} // no-op — let terminal fit viewport naturally
-
     // --- WebSocket ---
     let heartbeatTimer = null;
     function startHeartbeat() {
@@ -726,7 +724,6 @@
     let _resizeTimer = null;
     function doResize() {
       fitAddon.fit();
-      ensureMinCols();
       if (ws && ws.readyState === WebSocket.OPEN) {
         ws.send(JSON.stringify({ resize: { cols: term.cols, rows: term.rows } }));
       }
@@ -1036,7 +1033,6 @@
           sb.removeEventListener('transitionend', onEnd);
           doResize();
         });
-        setTimeout(doResize, 350);
       }
     }
 
