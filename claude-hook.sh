@@ -5,7 +5,10 @@
 [ -z "$WT_SESSION_ID" ] && exit 0
 
 PORT="${WT_SESSION_PORT:-7681}"
-EVENT="$CLAUDE_HOOK_EVENT"
+
+# Event name comes via stdin JSON from Claude Code
+INPUT=$(cat)
+EVENT=$(echo "$INPUT" | sed -n 's/.*"hook_event_name" *: *"\([^"]*\)".*/\1/p' | head -1)
 [ -z "$EVENT" ] && exit 0
 
 # Fire and forget — don't slow down Claude
