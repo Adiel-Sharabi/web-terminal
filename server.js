@@ -619,6 +619,11 @@ app.post('/api/session/:id/hook', express.json({ limit: '16kb' }), (req, res) =>
       notifyType = 'idle';
       notifyMsg = `"${session.name}" — Claude stopped`;
       break;
+    case 'PermissionRequest':
+      session.status = 'waiting';
+      notifyType = 'approval_needed';
+      notifyMsg = `"${session.name}" — Claude needs your approval`;
+      break;
   }
 
   if (prevStatus !== session.status || notifyType) {
