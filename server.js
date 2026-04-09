@@ -206,12 +206,15 @@ function saveAllScrollback() {
 }
 
 function createSession(id, cwd, name, autoCommand, savedScrollback) {
+  const sessionEnv = buildSafeEnv();
+  sessionEnv.WT_SESSION_ID = id;
+  sessionEnv.WT_SESSION_PORT = String(PORT);
   const term = pty.spawn(SHELL, [], {
     name: 'xterm-256color',
     cols: 120,
     rows: 30,
     cwd: cwd || DEFAULT_CWD,
-    env: buildSafeEnv()
+    env: sessionEnv
   });
 
   // Restore previous scrollback with a restart separator
@@ -585,6 +588,54 @@ app.post('/api/auth/token', express.json({ limit: '16kb' }), (req, res) => {
   clearLoginAttempts(ip);
   const token = createApiToken(label || 'cluster');
   res.json({ ok: true, token });
+});
+
+// --- Claude hook endpoint (before auth — validated by session ID knowledge) ---
+// The hook runs inside the PTY as a Claude subprocess; it doesn't have cookies.
+// Knowing a valid session UUID is proof of running inside that PTY.
+app.post('/api/session/:id/hook', express.json({ limit: '16kb' }), (req, res) => {
+  const session = sessions.get(req.params.id);
+  if (!session) return res.status(404).json({ error: 'session not found' });
+  const event = req.body?.event;
+  if (!event) return res.status(400).json({ error: 'event required' });
+
+  const prevStatus = session.status;
+  let notifyType = null, notifyMsg = null;
+
+  switch (event) {
+    case 'UserPromptSubmit':
+    case 'PreToolUse':
+    case 'PostToolUse':
+      session.status = 'working';
+      if (session.idleTimer) { clearTimeout(session.idleTimer); session.idleTimer = null; }
+      break;
+    case 'Notification':
+      session.status = 'idle';
+      notifyType = 'idle';
+      notifyMsg = `"${session.name}" — Claude is done, waiting for input`;
+      break;
+    case 'Stop':
+      session.status = 'idle';
+      notifyType = 'idle';
+      notifyMsg = `"${session.name}" — Claude stopped`;
+      break;
+  }
+
+  if (prevStatus !== session.status || notifyType) {
+    const payload = JSON.stringify({
+      notification: {
+        type: notifyType || 'status',
+        message: notifyMsg || `"${session.name}" — ${session.status}`,
+        session: session.name, sessionId: req.params.id, status: session.status
+      }
+    });
+    for (const client of notifyClients) {
+      try { client.send(payload); } catch (e) {}
+    }
+  }
+
+  session.lastActivity = Date.now();
+  res.json({ ok: true, status: session.status });
 });
 
 // --- Auth middleware ---
