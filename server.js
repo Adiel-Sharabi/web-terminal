@@ -1262,7 +1262,16 @@ app.post('/api/sessions', express.json({ limit: '16kb' }), (req, res) => {
 app.patch('/api/sessions/:id', express.json({ limit: '16kb' }), (req, res) => {
   const session = sessions.get(req.params.id);
   if (!session) return res.status(404).json({ error: 'not found' });
-  if (req.body?.name) session.name = String(req.body.name).substring(0, 100).replace(/[\x00-\x1f]/g, '');
+  const newName = req.body?.name ? String(req.body.name).substring(0, 100).replace(/[\x00-\x1f]/g, '') : null;
+  if (newName) {
+    session.name = newName;
+    // Sync rename to Claude Code session if idle and running claude
+    if ((session.status === 'idle' || session.status === 'active') &&
+        session.autoCommand && /\bclaude\b/i.test(session.autoCommand)) {
+      const safeName = newName.replace(/[`$"\\]/g, '');
+      session.term.write(`/rename ${safeName}\n`);
+    }
+  }
   if (req.body?.autoCommand !== undefined) session.autoCommand = String(req.body.autoCommand).substring(0, 500);
   saveSessionConfigs();
   res.json({ id: req.params.id, name: session.name, autoCommand: session.autoCommand });
