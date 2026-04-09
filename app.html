@@ -292,6 +292,7 @@
         <button onclick="toggleNewForm()">+ New</button>
       </div>
       <div id="newSessionForm">
+        <form onsubmit="event.preventDefault(); createSession()">
         <label>Server</label>
         <select id="newServer">
           <option value="">Local</option>
@@ -306,9 +307,10 @@
         <label>Auto-command</label>
         <input id="newCmd" placeholder="e.g. claude --dangerously-skip-permissions">
         <div class="form-row">
-          <button onclick="createSession()">Create Session</button>
-          <button onclick="toggleNewForm()" style="background:#333;color:#aaa;width:auto;padding:6px 10px">Cancel</button>
+          <button type="submit">Create Session</button>
+          <button type="button" onclick="toggleNewForm()" style="background:#333;color:#aaa;width:auto;padding:6px 10px">Cancel</button>
         </div>
+        </form>
       </div>
       <div id="sidebarBody">
       <div id="sidebarList"></div>
