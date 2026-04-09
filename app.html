@@ -1426,10 +1426,11 @@
           // Show last folder segment as friendly name, full path as tooltip
           const friendlyName = s.projectPath ? s.projectPath.split(/[\\/]/).filter(Boolean).pop() : s.project;
           const hasCluster = clusterServers.filter(srv => srv.online && !srv.needsAuth).length > 1;
+          const displayName = s.sessionTitle || friendlyName;
           item.innerHTML =
             `<button class="cl-del" title="Remove">&times;</button>` +
             (hasCluster ? `<button class="cl-transfer" title="Transfer to another server">&#8644;</button>` : '') +
-            `<div class="cl-name" title="${esc(s.projectPath || s.project)}">${serverTag}${esc(friendlyName)}</div>` +
+            `<div class="cl-name" title="${esc(s.projectPath || s.project)}">${serverTag}${esc(displayName)}</div>` +
             `<div class="cl-summary">${esc(s.summary || '(no summary)')}</div>` +
             `<div class="cl-meta"><span>${s.sizeKB}KB</span><span>${timeAgo(s.lastModified)}</span>${s.skipPermissions ? '<span style="color:#da4">skip-perms</span>' : ''}</div>`;
 
@@ -1450,7 +1451,7 @@
 
           item.addEventListener('click', (e) => {
             if (e.target.closest('.cl-del') || e.target.closest('.cl-transfer')) return;
-            resumeClaude(s.id, s.projectPath, friendlyName, s.skipPermissions, s.serverUrl);
+            resumeClaude(s.id, s.projectPath, displayName, s.skipPermissions, s.serverUrl);
           });
 
           container.appendChild(item);

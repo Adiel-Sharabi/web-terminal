@@ -1410,12 +1410,14 @@ app.get('/api/claude-sessions', (req, res) => {
         let hasUserMessage = false;
         let hasAssistantResponse = false;
         let permissionMode = '';
+        let sessionTitle = '';
         try {
           const lines = fs.readFileSync(path.join(projectDir, f.file), 'utf8').split('\n');
-          for (const line of lines.slice(0, 40)) {
+          for (const line of lines.slice(0, 80)) {
             if (!line.trim()) continue;
             const obj = JSON.parse(line);
             if (obj.permissionMode && !permissionMode) permissionMode = obj.permissionMode;
+            if (obj.slug && !sessionTitle) sessionTitle = obj.slug.replace(/-/g, ' ');
             if (obj.type === 'user' && obj.message?.content && !hasUserMessage) {
               hasUserMessage = true;
               summary = typeof obj.message.content === 'string'
@@ -1423,7 +1425,7 @@ app.get('/api/claude-sessions', (req, res) => {
                 : JSON.stringify(obj.message.content).substring(0, 120);
             }
             if (obj.type === 'assistant') hasAssistantResponse = true;
-            if (hasUserMessage && hasAssistantResponse && permissionMode) break;
+            if (hasUserMessage && hasAssistantResponse && permissionMode && sessionTitle) break;
           }
         } catch (e) {}
 
@@ -1434,6 +1436,7 @@ app.get('/api/claude-sessions', (req, res) => {
           id: f.id,
           project,
           projectPath,
+          sessionTitle: sessionTitle || '',
           summary: summary.replace(/[\n\r]+/g, ' ').trim(),
           lastModified: f.mtime,
           sizeKB: Math.round(f.size / 1024),
