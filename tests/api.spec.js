@@ -117,6 +117,106 @@ test.describe('Session Lifecycle', () => {
 });
 
 // ============================================================
+// 2b. Session Rename Persistence
+// ============================================================
+
+test.describe('Session Rename Persistence', () => {
+  test('rename persists in session list', async () => {
+    const ctx = await authCtx();
+    const createRes = await ctx.post('/api/sessions', {
+      data: { name: 'Before Rename' },
+    });
+    const { id } = await createRes.json();
+
+    try {
+      // Rename
+      const patchRes = await ctx.patch(`/api/sessions/${id}`, {
+        data: { name: 'After Rename' },
+      });
+      expect(patchRes.status()).toBe(200);
+      expect((await patchRes.json()).name).toBe('After Rename');
+
+      // Verify in session list
+      const list = await (await ctx.get('/api/sessions')).json();
+      const s = list.find(x => x.id === id);
+      expect(s).toBeTruthy();
+      expect(s.name).toBe('After Rename');
+    } finally {
+      try { await ctx.delete(`/api/sessions/${id}`); } catch (e) {}
+      await ctx.dispose();
+    }
+  });
+
+  test('rename persists after re-fetching session list', async () => {
+    const ctx = await authCtx();
+    const createRes = await ctx.post('/api/sessions', {
+      data: { name: 'Original Name' },
+    });
+    const { id } = await createRes.json();
+
+    try {
+      // Rename
+      await ctx.patch(`/api/sessions/${id}`, {
+        data: { name: 'Renamed Session' },
+      });
+
+      // Fetch list multiple times to verify it sticks
+      for (let i = 0; i < 3; i++) {
+        const list = await (await ctx.get('/api/sessions')).json();
+        const s = list.find(x => x.id === id);
+        expect(s.name).toBe('Renamed Session');
+      }
+    } finally {
+      try { await ctx.delete(`/api/sessions/${id}`); } catch (e) {}
+      await ctx.dispose();
+    }
+  });
+
+  test('rename with empty string keeps old name', async () => {
+    const ctx = await authCtx();
+    const createRes = await ctx.post('/api/sessions', {
+      data: { name: 'Keep This Name' },
+    });
+    const { id } = await createRes.json();
+
+    try {
+      // Patch with empty name — should not change
+      await ctx.patch(`/api/sessions/${id}`, {
+        data: { name: '' },
+      });
+
+      const list = await (await ctx.get('/api/sessions')).json();
+      const s = list.find(x => x.id === id);
+      expect(s.name).toBe('Keep This Name');
+    } finally {
+      try { await ctx.delete(`/api/sessions/${id}`); } catch (e) {}
+      await ctx.dispose();
+    }
+  });
+
+  test('multiple renames — last one wins', async () => {
+    const ctx = await authCtx();
+    const createRes = await ctx.post('/api/sessions', {
+      data: { name: 'First' },
+    });
+    const { id } = await createRes.json();
+
+    try {
+      await ctx.patch(`/api/sessions/${id}`, { data: { name: 'Second' } });
+      await ctx.patch(`/api/sessions/${id}`, { data: { name: 'Third' } });
+      await ctx.patch(`/api/sessions/${id}`, { data: { name: 'Final Name' } });
+
+      const list = await (await ctx.get('/api/sessions')).json();
+      const s = list.find(x => x.id === id);
+      expect(s.name).toBe('Final Name');
+    } finally {
+      try { await ctx.delete(`/api/sessions/${id}`); } catch (e) {}
+      await ctx.dispose();
+    }
+  });
+});
+
+// ============================================================
 // 3. /api/exec Endpoint
 // ============================================================
 
