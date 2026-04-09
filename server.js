@@ -276,10 +276,12 @@ function createSession(id, cwd, name, autoCommand, savedScrollback) {
         }
       }
 
-      if (!isWaiting) session.status = 'active';
+      // Don't override hook-set 'working' status with PTY-based 'active'
+      if (!isWaiting && session.status !== 'working') session.status = 'active';
       if (session.idleTimer) clearTimeout(session.idleTimer);
       session.idleTimer = setTimeout(() => {
-        if (session.status !== 'waiting') {
+        // Don't override hook-set statuses — hooks are authoritative for Claude sessions
+        if (session.status !== 'waiting' && session.status !== 'working') {
           session.status = 'idle';
           sendNotification(session, 'idle', `"${session.name}" — Claude appears to be done`);
         }
