@@ -65,7 +65,8 @@
     .sb-item .sb-detail { color: #555; font-size: 10px; margin-top: 2px; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
     .sb-dot { display: inline-block; width: 8px; height: 8px; border-radius: 50%; flex-shrink: 0; }
     .sb-dot.active { background: #4a4; }
-    .sb-dot.idle { background: #da4; }
+    .sb-dot.working { background: #f90; animation: pulse 1.5s infinite; }
+    .sb-dot.idle { background: #4a4; }
     .sb-dot.waiting { background: #e94560; animation: pulse 1.5s infinite; }
     .sb-server {
       padding: 5px 12px; color: #00d4aa; font: 10px 'Segoe UI', sans-serif; text-transform: uppercase;
@@ -1092,7 +1093,7 @@
       }
     })();
 
-    const statusLabels = { active: 'Running', idle: 'Idle', waiting: 'Waiting' };
+    const statusLabels = { active: 'Running', working: 'Working', idle: 'Idle', waiting: 'Waiting' };
     const timeAgo = ts => {
       const secs = Math.floor((Date.now() - ts) / 1000);
       if (secs < 60) return `${secs}s ago`;
@@ -1670,6 +1671,11 @@
         try {
           const { notification } = JSON.parse(e.data);
           showNotification(notification);
+          // Update session status dot in sidebar in real-time
+          if (notification.sessionId && notification.status) {
+            const dot = document.querySelector(`.sb-item[data-session-id="${notification.sessionId}"] .sb-dot`);
+            if (dot) { dot.className = `sb-dot ${notification.status}`; }
+          }
           // Flash the idle session's card in sidebar
           if (notification.type === 'idle' && notification.sessionId) {
             flashSessionCard(notification.sessionId);
@@ -1702,12 +1708,16 @@
     window.addEventListener('focus', stopFlashing);
 
     function showNotification(n) {
-      if (n.sessionId !== sessionId) return;
+      // Skip working/status updates — only notify on idle/input_needed
+      if (n.type === 'status') return;
       pendingAlerts.set(n.sessionId, n);
-      if (!document.hasFocus() && 'Notification' in window && Notification.permission === 'granted') {
-        const notif = new Notification(n.session, { body: n.message, tag: 'web-terminal-' + n.sessionId, renotify: true });
-        notif.onclick = () => { window.focus(); notif.close(); };
-        setTimeout(() => notif.close(), 15000);
+      // Browser notification for background sessions or unfocused window
+      if ('Notification' in window && Notification.permission === 'granted') {
+        if (!document.hasFocus() || n.sessionId !== sessionId) {
+          const notif = new Notification(n.session, { body: n.message, tag: 'web-terminal-' + n.sessionId, renotify: true });
+          notif.onclick = () => { window.focus(); if (n.sessionId !== sessionId) switchSession(n.sessionId, null); notif.close(); };
+          setTimeout(() => notif.close(), 15000);
+        }
       }
       if (!document.hasFocus()) startFlashing();
     }

@@ -286,7 +286,70 @@ test.describe('/api/version', () => {
 });
 
 // ============================================================
-// 7. Rate Limiting (MUST be last — triggers rate limit on the test IP)
+// 7. Session Hook Endpoint
+// ============================================================
+
+test.describe('Session Hook', () => {
+  test('hook updates session status without auth', async () => {
+    // Create a session first (needs auth)
+    const ctx = await authCtx();
+    const create = await ctx.post(`${BASE}/api/sessions`, {
+      data: { name: 'HookTest' }
+    });
+    const { id } = await create.json();
+
+    // Hook endpoint works without auth (validated by session ID)
+    const raw = await pwRequest.newContext();
+    const res = await raw.post(`${BASE}/api/session/${id}/hook`, {
+      data: { event: 'UserPromptSubmit' }
+    });
+    expect(res.status()).toBe(200);
+    const body = await res.json();
+    expect(body.status).toBe('working');
+
+    // Verify status persists in session list
+    const list = await (await ctx.get(`${BASE}/api/sessions`)).json();
+    const s = list.find(x => x.id === id);
+    expect(s.status).toBe('working');
+
+    // Notification event changes to idle
+    const res2 = await raw.post(`${BASE}/api/session/${id}/hook`, {
+      data: { event: 'Notification' }
+    });
+    expect((await res2.json()).status).toBe('idle');
+
+    // Cleanup
+    await ctx.delete(`${BASE}/api/sessions/${id}`);
+    await ctx.dispose();
+    await raw.dispose();
+  });
+
+  test('hook rejects invalid session ID', async () => {
+    const raw = await pwRequest.newContext();
+    const res = await raw.post(`${BASE}/api/session/nonexistent/hook`, {
+      data: { event: 'Stop' }
+    });
+    expect(res.status()).toBe(404);
+    await raw.dispose();
+  });
+
+  test('hook rejects missing event', async () => {
+    const ctx = await authCtx();
+    const create = await ctx.post(`${BASE}/api/sessions`, { data: { name: 'HookTest2' } });
+    const { id } = await create.json();
+
+    const raw = await pwRequest.newContext();
+    const res = await raw.post(`${BASE}/api/session/${id}/hook`, { data: {} });
+    expect(res.status()).toBe(400);
+
+    await ctx.delete(`${BASE}/api/sessions/${id}`);
+    await ctx.dispose();
+    await raw.dispose();
+  });
+});
+
+// ============================================================
+// 8. Rate Limiting (MUST be last — triggers rate limit on the test IP)
 // ============================================================
 
 test.describe('Rate Limiting', () => {
