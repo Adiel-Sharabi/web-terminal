@@ -235,7 +235,7 @@ function createSession(id, cwd, name, autoCommand, savedScrollback) {
   // Patterns that indicate Claude is waiting for user input
   const NOTIFY_PATTERNS = [
     { regex: /Do you want to proceed/i, msg: 'Claude is asking to proceed' },
-    { regex: /Allow once|Allow always|Deny/i, msg: 'Claude needs permission' },
+    { regex: /Allow once.*Allow always.*Deny|Allow once.*Deny/i, msg: 'Claude needs permission' },
     { regex: /\(y\/n\)/i, msg: 'Claude is waiting for yes/no' },
     { regex: /\(Y\/n\)|yes\/no/i, msg: 'Claude is waiting for confirmation' },
     { regex: /Press Enter to continue/i, msg: 'Claude is waiting for Enter' },
@@ -269,8 +269,10 @@ function createSession(id, cwd, name, autoCommand, savedScrollback) {
       let isWaiting = false;
       for (const p of NOTIFY_PATTERNS) {
         if (p.regex.test(clean)) {
-          session.status = 'waiting';
-          sendNotification(session, 'input_needed', `"${session.name}" — ${p.msg}`);
+          if (session.status !== 'waiting') {
+            session.status = 'waiting';
+            sendNotification(session, 'input_needed', `"${session.name}" — ${p.msg}`);
+          }
           isWaiting = true;
           break;
         }
@@ -281,7 +283,7 @@ function createSession(id, cwd, name, autoCommand, savedScrollback) {
       if (session.idleTimer) clearTimeout(session.idleTimer);
       session.idleTimer = setTimeout(() => {
         // Don't override hook-set statuses — hooks are authoritative for Claude sessions
-        if (session.status !== 'waiting' && session.status !== 'working') {
+        if (session.status !== 'waiting' && session.status !== 'working' && session.status !== 'idle') {
           session.status = 'idle';
           sendNotification(session, 'idle', `"${session.name}" — Claude appears to be done`);
         }
