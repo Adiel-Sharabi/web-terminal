@@ -492,6 +492,8 @@
         fitAddon.fit(); // re-fit now that layout is settled
         ws.send(JSON.stringify({ resize: { cols: term.cols, rows: term.rows } }));
         startHeartbeat();
+        // Second fit after fonts load and scrollback renders (mobile especially)
+        if (isMobile) setTimeout(doResize, 1000);
       };
 
       ws.onmessage = e => {
@@ -658,27 +660,33 @@
     });
 
     let _lastMobileData = '', _lastMobileTime = 0;
-    let _mobileSentBuf = '', _mobileBufTimer = null;
+    let _mobileSingleChars = 0, _mobileSCTimer = null;
     term.onData(data => {
-      // Mobile dedup: Android keyboards (SwiftKey, Gboard) cause duplicates in two ways:
-      // 1. Rapid double-fire of the same char for punctuation (keydown + input events)
-      // 2. Composition re-send: chars are sent one-by-one, then period/autocomplete
-      //    triggers compositionend which re-sends the entire composed text as one chunk
+      // Mobile dedup: Android keyboards (SwiftKey, Gboard) cause duplicates:
+      // 1. Rapid double-fire of same char for punctuation
+      // 2. Composition re-send: chars sent one-by-one, then period/autocomplete
+      //    triggers compositionend which re-sends the ENTIRE text (often with
+      //    autocorrect changes, so exact string comparison won't match).
+      // Key insight: paste bypasses onData (goes through ws.send directly via
+      // Ctrl+V handler), so any large chunk in onData is a composition re-send.
       if (isMobile) {
         const now = Date.now();
-        // Exact duplicate within 150ms
+        // Exact duplicate within 150ms (handles single-char double-fire)
         if (data === _lastMobileData && now - _lastMobileTime < 150) return;
-        // Composition re-send: multi-char data that we already sent char-by-char
-        if (data.length > 3 && _mobileSentBuf.length >= data.length) {
-          const tail = _mobileSentBuf.slice(-data.length);
-          // Match: exact, or sent text minus trailing new char (period/space added by keyboard)
-          if (tail === data || tail === data.slice(0, -1)) return;
+        // Composition re-send: we've been typing single chars, then get a large
+        // chunk — suppress it. Autocorrect changes the text so we can't compare
+        // strings, but the pattern (many singles → one big chunk) is reliable.
+        if (data.length > 5 && _mobileSingleChars >= data.length) {
+          _mobileSingleChars = 0;
+          return;
         }
         _lastMobileData = data;
         _lastMobileTime = now;
-        _mobileSentBuf += data;
-        clearTimeout(_mobileBufTimer);
-        _mobileBufTimer = setTimeout(() => { _mobileSentBuf = ''; }, 3000);
+        if (data.length <= 2) {
+          _mobileSingleChars += data.length;
+          clearTimeout(_mobileSCTimer);
+          _mobileSCTimer = setTimeout(() => { _mobileSingleChars = 0; }, 3000);
+        }
       }
       // Apply sticky modifiers to mobile keyboard input
       if (isMobile && (stickyState.ctrl || stickyState.alt || stickyState.shift) && data.length === 1) {
