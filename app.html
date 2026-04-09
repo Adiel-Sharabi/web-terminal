@@ -1708,18 +1708,25 @@
     window.addEventListener('focus', stopFlashing);
 
     function showNotification(n) {
-      // Skip working/status updates — only notify on idle/input_needed
+      // Skip working/status updates — only notify on idle/input_needed/approval
       if (n.type === 'status') return;
+      const isUrgent = n.type === 'approval_needed' || n.type === 'input_needed';
       pendingAlerts.set(n.sessionId, n);
-      // Browser notification for background sessions or unfocused window
+      // Browser notification
       if ('Notification' in window && Notification.permission === 'granted') {
-        if (!document.hasFocus() || n.sessionId !== sessionId) {
-          const notif = new Notification(n.session, { body: n.message, tag: 'web-terminal-' + n.sessionId, renotify: true });
+        // Urgent (approval): always notify, even for current session if focused
+        // Non-urgent (idle): only notify for background sessions or unfocused
+        if (isUrgent || !document.hasFocus() || n.sessionId !== sessionId) {
+          const tag = isUrgent ? 'wt-urgent-' + n.sessionId : 'web-terminal-' + n.sessionId;
+          const notif = new Notification(
+            isUrgent ? '\u26a0\ufe0f ' + n.session : n.session,
+            { body: n.message, tag, renotify: true, requireInteraction: isUrgent }
+          );
           notif.onclick = () => { window.focus(); if (n.sessionId !== sessionId) switchSession(n.sessionId, null); notif.close(); };
-          setTimeout(() => notif.close(), 15000);
+          if (!isUrgent) setTimeout(() => notif.close(), 15000);
         }
       }
-      if (!document.hasFocus()) startFlashing();
+      if (!document.hasFocus() || isUrgent) startFlashing();
     }
 
     // --- Browser back/forward ---
