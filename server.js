@@ -1175,7 +1175,7 @@ app.post('/api/sessions', express.json({ limit: '16kb' }), (req, res) => {
   const liveCwd = getDefaultCwd();
   let cwd = String(req.body?.cwd || liveCwd).substring(0, 260);
   const name = String(req.body?.name || `Session ${sessions.size + 1}`).substring(0, 100).replace(/[\x00-\x1f]/g, '');
-  const autoCommand = String(req.body?.autoCommand || '').substring(0, 500);
+  const autoCommand = String(req.body?.autoCommand || getDefaultCommand() || '').substring(0, 500);
   // Verify cwd exists — return error if user specified a bad path
   try {
     if (!fs.existsSync(cwd) || !fs.statSync(cwd).isDirectory()) {
