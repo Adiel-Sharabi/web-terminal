@@ -301,6 +301,14 @@ function createSession(id, cwd, name, autoCommand, savedScrollback) {
 
   term.onExit(() => {
     console.log(`[${new Date().toISOString()}] Session ${id} shell exited`);
+    // Persist session name for Claude sessions so it survives in the old sessions list
+    if (session.autoCommand) {
+      const match = session.autoCommand.match(/claude\s+--resume\s+([a-f0-9-]+)/i);
+      if (match) {
+        const names = loadClaudeSessionNames();
+        if (!names[match[1]]) { names[match[1]] = session.name; saveClaudeSessionNames(names); }
+      }
+    }
     for (const client of session.clients) {
       try { client.send('\r\n\x1b[31m[Session ended]\x1b[0m\r\n'); client.close(4000, 'Session ended'); } catch (e) {}
     }
@@ -1280,6 +1288,11 @@ app.patch('/api/sessions/:id', express.json({ limit: '16kb' }), (req, res) => {
         session.autoCommand && /\bclaude\b/i.test(session.autoCommand)) {
       const safeName = newName.replace(/[`$"\\]/g, '');
       session.term.write(`/rename ${safeName}\n`);
+    }
+    // Persist name for the Claude session history list
+    if (session.autoCommand) {
+      const match = session.autoCommand.match(/claude\s+--resume\s+([a-f0-9-]+)/i);
+      if (match) { const names = loadClaudeSessionNames(); names[match[1]] = newName; saveClaudeSessionNames(names); }
     }
   }
   if (req.body?.autoCommand !== undefined) session.autoCommand = String(req.body.autoCommand).substring(0, 500);
