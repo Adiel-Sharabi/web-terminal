@@ -948,9 +948,23 @@
         if (longPressTimer) { clearTimeout(longPressTimer); longPressTimer = null; }
       }, { passive: true });
 
-      termEl.addEventListener('touchend', () => {
+      termEl.addEventListener('touchend', (e) => {
         if (selectMode) { selStart = null; return; }
-        if (longPressTimer) { clearTimeout(longPressTimer); longPressTimer = null; }
+        if (longPressTimer) {
+          // Quick tap (not long-press) — move cursor to tapped column
+          clearTimeout(longPressTimer); longPressTimer = null;
+          if (e.changedTouches.length === 1 && ws && ws.readyState === WebSocket.OPEN) {
+            const tapped = touchToCell(e.changedTouches[0]);
+            if (tapped) {
+              const cursorCol = term.buffer.active.cursorX;
+              const diff = tapped.col - cursorCol;
+              if (diff !== 0) {
+                const arrow = diff > 0 ? '\x1b[C' : '\x1b[D';
+                ws.send(arrow.repeat(Math.abs(diff)));
+              }
+            }
+          }
+        }
       });
     }
 
@@ -1426,12 +1440,12 @@
           // Show last folder segment as friendly name, full path as tooltip
           const friendlyName = s.projectPath ? s.projectPath.split(/[\\/]/).filter(Boolean).pop() : s.project;
           const hasCluster = clusterServers.filter(srv => srv.online && !srv.needsAuth).length > 1;
-          const displayName = s.sessionTitle || friendlyName;
+          const topic = s.sessionTitle || s.summary || '';
+          const displayName = friendlyName + (topic ? ' — ' + topic.substring(0, 50) : '');
           item.innerHTML =
             `<button class="cl-del" title="Remove">&times;</button>` +
             (hasCluster ? `<button class="cl-transfer" title="Transfer to another server">&#8644;</button>` : '') +
-            `<div class="cl-name" title="${esc(s.projectPath || s.project)}">${serverTag}${esc(displayName)}</div>` +
-            `<div class="cl-summary">${esc(s.summary || '(no summary)')}</div>` +
+            `<div class="cl-name" title="${esc(topic || s.projectPath || s.project)}">${serverTag}${esc(displayName)}</div>` +
             `<div class="cl-meta"><span>${s.sizeKB}KB</span><span>${timeAgo(s.lastModified)}</span>${s.skipPermissions ? '<span style="color:#da4">skip-perms</span>' : ''}</div>`;
 
           item.querySelector('.cl-del').addEventListener('click', async (e) => {
@@ -1448,6 +1462,19 @@
               transferClaude(s, friendlyName);
             });
           }
+
+          // Double-click name to rename
+          item.querySelector('.cl-name').addEventListener('dblclick', async (e) => {
+            e.stopPropagation();
+            const newName = prompt('Rename session:', s.sessionTitle || '');
+            if (!newName || newName === s.sessionTitle) return;
+            const apiBase = s.serverUrl ? `/cluster/${encodeURIComponent(s.serverUrl)}/api` : '/api';
+            await fetch(`${apiBase}/claude-sessions/${encodeURIComponent(s.id)}`, {
+              method: 'PATCH', headers: { 'Content-Type': 'application/json' },
+              body: JSON.stringify({ name: newName })
+            });
+            loadClaudeSessions();
+          });
 
           item.addEventListener('click', (e) => {
             if (e.target.closest('.cl-del') || e.target.closest('.cl-transfer')) return;
