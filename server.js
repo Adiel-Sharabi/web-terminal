@@ -78,6 +78,14 @@ const CLIPBOARD_DIR = path.join(__dirname, 'clipboard-images');
 const HISTORY_FILE = path.join(__dirname, 'history.json');
 const CLAUDE_PROJECTS_DIR = path.join(process.env.USERPROFILE || os.homedir(), '.claude', 'projects');
 const CLUSTER_TOKENS_FILE = path.join(__dirname, 'cluster-tokens.json');
+const CLAUDE_SESSION_NAMES_FILE = path.join(__dirname, 'claude-session-names.json');
+
+function loadClaudeSessionNames() {
+  try { return JSON.parse(fs.readFileSync(CLAUDE_SESSION_NAMES_FILE, 'utf8')); } catch { return {}; }
+}
+function saveClaudeSessionNames(names) {
+  fs.writeFileSync(CLAUDE_SESSION_NAMES_FILE, JSON.stringify(names, null, 2));
+}
 
 // --- Password helpers ---
 const DEFAULT_PASSWORDS = ['admin'];
@@ -1380,6 +1388,7 @@ app.get('/api/claude-sessions', (req, res) => {
       .filter(d => d.isDirectory())
       .map(d => d.name);
 
+    const customNames = loadClaudeSessionNames();
     const allSessions = [];
     for (const project of projects) {
       const projectDir = path.join(CLAUDE_PROJECTS_DIR, project);
@@ -1438,7 +1447,7 @@ app.get('/api/claude-sessions', (req, res) => {
           id: f.id,
           project,
           projectPath,
-          sessionTitle: sessionTitle || '',
+          sessionTitle: customNames[f.id] || sessionTitle || '',
           summary: summary.replace(/[\n\r]+/g, ' ').trim(),
           lastModified: f.mtime,
           sizeKB: Math.round(f.size / 1024),
@@ -1474,6 +1483,17 @@ app.delete('/api/claude-sessions/:project/:id', (req, res) => {
   } catch (e) {
     console.error(e.message); res.status(500).json({ error: 'Internal error' });
   }
+});
+
+// --- API: rename a claude session ---
+app.patch('/api/claude-sessions/:id', express.json(), (req, res) => {
+  const id = req.params.id.replace(/[^a-zA-Z0-9_-]/g, '');
+  const name = (req.body.name || '').trim();
+  if (!name) return res.status(400).json({ error: 'name required' });
+  const names = loadClaudeSessionNames();
+  names[id] = name;
+  saveClaudeSessionNames(names);
+  res.json({ ok: true });
 });
 
 // --- API: export a claude session file (for transfer) ---

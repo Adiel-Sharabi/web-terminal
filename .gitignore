@@ -14,5 +14,6 @@ test-results/
 *.stackdump
 cluster-tokens.json
 api-tokens.json
+claude-session-names.json
 .session-secret
 *.png
