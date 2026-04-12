@@ -302,11 +302,29 @@ function createSession(id, cwd, name, autoCommand, savedScrollback) {
   term.onExit(() => {
     console.log(`[${new Date().toISOString()}] Session ${id} shell exited`);
     // Persist session name for Claude sessions so it survives in the old sessions list
-    if (session.autoCommand) {
-      const match = session.autoCommand.match(/claude\s+--resume\s+([a-f0-9-]+)/i);
-      if (match) {
+    if (session.autoCommand && /\bclaude\b/i.test(session.autoCommand)) {
+      let claudeId = null;
+      // For --resume sessions, extract the ID directly
+      const resumeMatch = session.autoCommand.match(/--resume\s+([a-f0-9-]+)/i);
+      if (resumeMatch) {
+        claudeId = resumeMatch[1];
+      } else {
+        // For new sessions, find the most recently modified JSONL in the project dir
+        try {
+          const projectDir = path.join(CLAUDE_PROJECTS_DIR,
+            session.cwd.replace(/^([A-Z]):\\/, '$1--').replace(/[\\/]/g, '-'));
+          if (fs.existsSync(projectDir)) {
+            const newest = fs.readdirSync(projectDir)
+              .filter(f => f.endsWith('.jsonl'))
+              .map(f => ({ id: f.replace('.jsonl', ''), mtime: fs.statSync(path.join(projectDir, f)).mtimeMs }))
+              .sort((a, b) => b.mtime - a.mtime)[0];
+            if (newest) claudeId = newest.id;
+          }
+        } catch (e) {}
+      }
+      if (claudeId) {
         const names = loadClaudeSessionNames();
-        if (!names[match[1]]) { names[match[1]] = session.name; saveClaudeSessionNames(names); }
+        if (!names[claudeId]) { names[claudeId] = session.name; saveClaudeSessionNames(names); }
       }
     }
     for (const client of session.clients) {
@@ -1290,9 +1308,25 @@ app.patch('/api/sessions/:id', express.json({ limit: '16kb' }), (req, res) => {
       session.term.write(`/rename ${safeName}\n`);
     }
     // Persist name for the Claude session history list
-    if (session.autoCommand) {
-      const match = session.autoCommand.match(/claude\s+--resume\s+([a-f0-9-]+)/i);
-      if (match) { const names = loadClaudeSessionNames(); names[match[1]] = newName; saveClaudeSessionNames(names); }
+    if (session.autoCommand && /\bclaude\b/i.test(session.autoCommand)) {
+      let claudeId = null;
+      const resumeMatch = session.autoCommand.match(/--resume\s+([a-f0-9-]+)/i);
+      if (resumeMatch) {
+        claudeId = resumeMatch[1];
+      } else {
+        try {
+          const projectDir = path.join(CLAUDE_PROJECTS_DIR,
+            session.cwd.replace(/^([A-Z]):\\/, '$1--').replace(/[\\/]/g, '-'));
+          if (fs.existsSync(projectDir)) {
+            const newest = fs.readdirSync(projectDir)
+              .filter(f => f.endsWith('.jsonl'))
+              .map(f => ({ id: f.replace('.jsonl', ''), mtime: fs.statSync(path.join(projectDir, f)).mtimeMs }))
+              .sort((a, b) => b.mtime - a.mtime)[0];
+            if (newest) claudeId = newest.id;
+          }
+        } catch (e) {}
+      }
+      if (claudeId) { const names = loadClaudeSessionNames(); names[claudeId] = newName; saveClaudeSessionNames(names); }
     }
   }
   if (req.body?.autoCommand !== undefined) session.autoCommand = String(req.body.autoCommand).substring(0, 500);
