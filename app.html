@@ -128,8 +128,9 @@
     .cl-name { color: #da4; font-weight: 500; }
     .cl-summary { color: #777; font-size: 10px; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; margin-top: 1px; }
     .cl-meta { color: #555; font-size: 10px; display: flex; gap: 6px; margin-top: 1px; }
-    .cl-del, .cl-transfer { background: transparent; border: none; color: #555; font-size: 12px; cursor: pointer; float: right; padding: 0 2px; }
+    .cl-del, .cl-transfer, .cl-rename { background: transparent; border: none; color: #555; font-size: 12px; cursor: pointer; float: right; padding: 0 2px; }
     .cl-del:hover { color: #e94560; }
+    .cl-rename:hover { color: #da4; }
     .cl-transfer:hover { color: #00d4aa; }
 
     /* --- Sidebar footer (settings/logout) --- */
@@ -1444,6 +1445,7 @@
           const displayName = friendlyName + (topic ? ' — ' + topic.substring(0, 50) : '');
           item.innerHTML =
             `<button class="cl-del" title="Remove">&times;</button>` +
+            `<button class="cl-rename" title="Rename">&#9998;</button>` +
             (hasCluster ? `<button class="cl-transfer" title="Transfer to another server">&#8644;</button>` : '') +
             `<div class="cl-name" title="${esc(topic || s.projectPath || s.project)}">${serverTag}${esc(displayName)}</div>` +
             `<div class="cl-meta"><span>${s.sizeKB}KB</span><span>${timeAgo(s.lastModified)}</span>${s.skipPermissions ? '<span style="color:#da4">skip-perms</span>' : ''}</div>`;
@@ -1456,15 +1458,7 @@
             loadClaudeSessions();
           });
 
-          if (hasCluster) {
-            item.querySelector('.cl-transfer').addEventListener('click', (e) => {
-              e.stopPropagation();
-              transferClaude(s, friendlyName);
-            });
-          }
-
-          // Double-click name to rename
-          item.querySelector('.cl-name').addEventListener('dblclick', async (e) => {
+          item.querySelector('.cl-rename').addEventListener('click', async (e) => {
             e.stopPropagation();
             const newName = prompt('Rename session:', s.sessionTitle || '');
             if (!newName || newName === s.sessionTitle) return;
@@ -1476,8 +1470,15 @@
             loadClaudeSessions();
           });
 
+          if (hasCluster) {
+            item.querySelector('.cl-transfer').addEventListener('click', (e) => {
+              e.stopPropagation();
+              transferClaude(s, friendlyName);
+            });
+          }
+
           item.addEventListener('click', (e) => {
-            if (e.target.closest('.cl-del') || e.target.closest('.cl-transfer')) return;
+            if (e.target.closest('.cl-del') || e.target.closest('.cl-transfer') || e.target.closest('.cl-rename')) return;
             resumeClaude(s.id, s.projectPath, displayName, s.skipPermissions, s.serverUrl);
           });
 
