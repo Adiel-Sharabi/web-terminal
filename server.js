@@ -1341,6 +1341,7 @@ app.patch('/api/sessions/:id', express.json({ limit: '16kb' }), (req, res) => {
 app.delete('/api/sessions/:id', (req, res) => {
   const session = sessions.get(req.params.id);
   if (!session) return res.status(404).json({ error: 'not found' });
+  if (session.idleTimer) clearTimeout(session.idleTimer);
   session.term.kill();
   sessions.delete(req.params.id);
   saveSessionConfigs();
