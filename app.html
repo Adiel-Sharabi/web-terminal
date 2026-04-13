@@ -1505,6 +1505,10 @@
           return;
         }
         if (data.id) {
+          // Collapse Claude sessions list and switch to the new session
+          document.getElementById('claudeList').style.display = 'none';
+          const clBtn = document.querySelector('#claudeSection .sb-section button');
+          if (clBtn) clBtn.textContent = 'Show';
           switchSession(data.id, serverUrl);
           closeSidebarIfUnpinned();
         }
