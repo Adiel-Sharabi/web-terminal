@@ -337,12 +337,30 @@ function createSession(id, cwd, name, autoCommand, savedScrollback) {
     saveSessionConfigs();
   });
 
-  // Auto-run command after shell is ready
+  // Auto-run command after shell prompt is ready
   if (autoCommand) {
+    let autoFired = false;
+    const autoListener = term.onData(data => {
+      if (autoFired) return;
+      // Look for common prompt indicators: $, #, >, or PS1 ending
+      if (/[$#>]\s*$/.test(data.replace(/\x1b\[[0-9;]*[a-zA-Z]/g, ''))) {
+        autoFired = true;
+        autoListener.dispose();
+        setTimeout(() => {
+          term.write(autoCommand + '\n');
+          console.log(`[${new Date().toISOString()}] Session ${id} auto-command: ${autoCommand}`);
+        }, 100); // small delay after prompt appears
+      }
+    });
+    // Fallback in case prompt detection fails
     setTimeout(() => {
-      term.write(autoCommand + '\n');
-      console.log(`[${new Date().toISOString()}] Session ${id} auto-command: ${autoCommand}`);
-    }, 1500); // wait for shell prompt
+      if (!autoFired) {
+        autoFired = true;
+        autoListener.dispose();
+        term.write(autoCommand + '\n');
+        console.log(`[${new Date().toISOString()}] Session ${id} auto-command (fallback): ${autoCommand}`);
+      }
+    }, 5000);
   }
 
   console.log(`[${new Date().toISOString()}] Session ${id} created (PID ${term.pid}, cwd: ${session.cwd}${autoCommand ? ', cmd: ' + autoCommand : ''})`);
