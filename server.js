@@ -236,7 +236,7 @@ function createSession(id, cwd, name, autoCommand, savedScrollback) {
   const session = {
     term, clients: new Set(), scrollback, scrollbackSize, name: name || `Session ${id}`,
     cwd: cwd || DEFAULT_CWD, idleTimer: null, lastActivity: Date.now(),
-    lastUserInput: 0, status: 'active', autoCommand: autoCommand || ''
+    lastUserInput: 0, status: 'active', hookStatus: false, autoCommand: autoCommand || ''
   };
   sessions.set(id, session);
 
@@ -286,16 +286,18 @@ function createSession(id, cwd, name, autoCommand, savedScrollback) {
         }
       }
 
-      // Don't override hook-set 'working' status with PTY-based 'active'
-      if (!isWaiting && session.status !== 'working') session.status = 'active';
-      if (session.idleTimer) clearTimeout(session.idleTimer);
-      session.idleTimer = setTimeout(() => {
-        // Don't override hook-set statuses — hooks are authoritative for Claude sessions
-        if (session.status !== 'waiting' && session.status !== 'working' && session.status !== 'idle') {
-          session.status = 'idle';
-          sendNotification(session, 'idle', `"${session.name}" — Claude appears to be done`);
-        }
-      }, IDLE_NOTIFY_MS);
+      // If hook set the status (authoritative), PTY output shouldn't override it
+      if (!isWaiting && !session.hookStatus) session.status = 'active';
+      // Only run idle timer if hooks haven't claimed the status
+      if (!session.hookStatus) {
+        if (session.idleTimer) clearTimeout(session.idleTimer);
+        session.idleTimer = setTimeout(() => {
+          if (session.status !== 'waiting' && session.status !== 'working' && session.status !== 'idle') {
+            session.status = 'idle';
+            sendNotification(session, 'idle', `"${session.name}" — Claude appears to be done`);
+          }
+        }, IDLE_NOTIFY_MS);
+      }
     }
   });
 
@@ -639,6 +641,7 @@ app.post('/api/session/:id/hook', express.json({ limit: '16kb' }), (req, res) =>
 
   const prevStatus = session.status;
   let notifyType = null, notifyMsg = null;
+  session.hookStatus = true; // hooks are authoritative — PTY heuristics won't override
 
   switch (event) {
     case 'UserPromptSubmit':
@@ -648,14 +651,14 @@ app.post('/api/session/:id/hook', express.json({ limit: '16kb' }), (req, res) =>
       if (session.idleTimer) { clearTimeout(session.idleTimer); session.idleTimer = null; }
       break;
     case 'Notification':
-      session.status = 'idle';
-      notifyType = 'idle';
-      notifyMsg = `"${session.name}" — Claude is done, waiting for input`;
-      break;
     case 'Stop':
       session.status = 'idle';
-      notifyType = 'idle';
-      notifyMsg = `"${session.name}" — Claude stopped`;
+      if (prevStatus !== 'idle') {
+        notifyType = 'idle';
+        notifyMsg = event === 'Stop'
+          ? `"${session.name}" — Claude stopped`
+          : `"${session.name}" — Claude is done, waiting for input`;
+      }
       break;
     case 'PermissionRequest':
       session.status = 'waiting';
