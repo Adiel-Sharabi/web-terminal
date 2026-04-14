@@ -649,11 +649,26 @@ app.post('/api/auth/token', express.json({ limit: '16kb' }), (req, res) => {
 });
 
 // --- Claude hook endpoint (before auth — validated by session ID knowledge) ---
-// The hook runs inside the PTY as a Claude subprocess; it doesn't have cookies.
-// Knowing a valid session UUID is proof of running inside that PTY.
+// Supports two modes:
+// 1. POST /api/session/:id/hook with {event} body (from command hooks)
+// 2. POST /api/hook with X-WT-Session-ID header (from HTTP hooks, no subprocess)
+app.post('/api/hook', express.json({ limit: '16kb' }), (req, res) => {
+  const id = req.headers['x-wt-session-id'];
+  if (!id) return res.status(400).json({ error: 'X-WT-Session-ID header required' });
+  const session = sessions.get(id);
+  if (!session) return res.status(404).json({ error: 'session not found' });
+  // HTTP hooks send Claude's full hook JSON — extract event name
+  req.params = { id };
+  req.body = { event: req.body?.hook_event_name || req.body?.event };
+  handleHook(req, res, session);
+});
 app.post('/api/session/:id/hook', express.json({ limit: '16kb' }), (req, res) => {
   const session = sessions.get(req.params.id);
   if (!session) return res.status(404).json({ error: 'session not found' });
+  req.body = { event: req.body?.hook_event_name || req.body?.event };
+  handleHook(req, res, session);
+});
+function handleHook(req, res, session) {
   const event = req.body?.event;
   if (!event) return res.status(400).json({ error: 'event required' });
 
@@ -700,7 +715,7 @@ app.post('/api/session/:id/hook', express.json({ limit: '16kb' }), (req, res) =>
 
   session.lastActivity = Date.now();
   res.json({ ok: true, status: session.status });
-});
+}
 
 // --- Auth middleware ---
 app.use((req, res, next) => {
