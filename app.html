@@ -21,7 +21,6 @@
     }
     #toolbar .session-name { color: #e0e0e0; font-weight: 500; margin-right: 8px; cursor: pointer; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; max-width: 40vw; }
     #toolbar .session-name:hover { color: #00d4aa; }
-    #toolbar .viewers { color: #e94560; margin-left: auto; white-space: nowrap; }
     .tb-btn {
       background: transparent; border: 1px solid #333; color: #888; font-size: 16px;
       width: 28px; height: 28px; border-radius: 4px; cursor: pointer; margin-right: 8px;
@@ -86,7 +85,6 @@
     .sb-status.active { color: #4a4; }
     .sb-status.idle { color: #da4; }
     .sb-status.waiting { color: #e94560; }
-    .sb-viewers { color: #555; font-size: 10px; margin-left: auto; }
     .sb-kill { background: transparent; border: none; color: #555; font-size: 14px; cursor: pointer; padding: 0 4px; line-height: 1; }
     .sb-kill:hover { color: #e94560; }
     .sb-edit { background: transparent; border: none; color: #555; font-size: 11px; cursor: pointer; padding: 0 4px; }
@@ -261,7 +259,7 @@
     <button class="tb-btn" onclick="toggleSidebar()" title="Sessions panel">&#9776;</button>
     <span id="sessionName" class="session-name" onclick="renameCurrentSession()" title="Click to rename">(no session)</span>
     <span id="hostName" style="color:#00d4aa; font-weight:500; margin-left:8px;"></span>
-    <span id="viewers" class="viewers"></span>
+
     <button id="muteBtn" class="tb-btn" onclick="toggleMute()" title="Mute notifications" style="font-size:14px">&#x1F514;</button>
     <button class="tb-btn" onclick="logout()" title="Logout" style="margin-left:8px;font-size:14px">&#x23FB;</button>
   </div>
@@ -610,7 +608,7 @@
           document.getElementById('sessionName').textContent = s.name + serverLabel;
           sessionTitle = `${s.name}${hostname ? ' — ' + hostname : ''}`;
           document.title = sessionTitle;
-          document.getElementById('viewers').textContent = `${s.clients} viewer${s.clients !== 1 ? 's' : ''}`;
+          // viewer count removed (exclusive mode — always 1)
         }
       });
     }
@@ -1148,7 +1146,8 @@
         const header = document.createElement('div');
         header.className = 'sb-server';
         const statusCls = !server.online ? 'offline' : server.needsAuth ? 'needsauth' : 'online';
-        header.innerHTML = `<span class="srv-dot ${statusCls}"></span>${esc(server.name || 'Local')}`;
+        const versionTag = server.version ? `<span style="color:#555;font-size:9px;margin-left:6px">${esc(server.version)}</span>` : '';
+        header.innerHTML = `<span class="srv-dot ${statusCls}"></span>${esc(server.name || 'Local')}${versionTag}`;
         if (server.online && !server.needsAuth) {
           const addBtn = document.createElement('span');
           addBtn.className = 'srv-auth';
@@ -1188,8 +1187,8 @@
             `<div class="sb-name"><span class="sb-dot ${s.status}"></span>${esc(s.name)}</div>` +
             `<div class="sb-meta">` +
               `<span class="sb-status ${s.status}">${statusLabels[s.status] || s.status}</span>` +
-              `<span class="sb-viewers">${s.clients} viewer${s.clients !== 1 ? 's' : ''}</span>` +
               `<button class="sb-edit" title="Edit auto-command">&#9998;</button>` +
+              (s.claudeSessionId ? `<button class="sb-fork" title="Fork Claude session">&#9095;</button>` : '') +
               `<button class="sb-kill" title="Kill session">&times;</button>` +
             `</div>` +
             `<div class="sb-detail">${esc(s.cwd)}${s.autoCommand ? ' — ' + esc(s.autoCommand) : ''}</div>`;
@@ -1221,8 +1220,22 @@
             loadSidebar();
           });
 
+          if (s.claudeSessionId) {
+            item.querySelector('.sb-fork').addEventListener('click', async (e) => {
+              e.stopPropagation();
+              try {
+                const res = await fetch(`${apiBase}/sessions`, {
+                  method: 'POST', headers: { 'Content-Type': 'application/json' },
+                  body: JSON.stringify({ name: s.name + ' (fork)', cwd: s.cwd, autoCommand: 'claude --resume ' + s.claudeSessionId + ' --fork-session' })
+                });
+                const data = await res.json();
+                if (data.id) { switchSession(data.id, s.serverUrl); closeSidebarIfUnpinned(); }
+              } catch (err) { alert('Fork failed: ' + err.message); }
+            });
+          }
+
           item.addEventListener('click', (e) => {
-            if (e.target.closest('.sb-kill') || e.target.closest('.sb-edit')) return;
+            if (e.target.closest('.sb-kill') || e.target.closest('.sb-edit') || e.target.closest('.sb-fork')) return;
             switchSession(s.id, s.serverUrl);
             closeSidebarIfUnpinned();
           });
@@ -1248,9 +1261,7 @@
         }
       }
 
-      // Update viewer count for current session
-      const me = data.sessions.find(x => x.id === sessionId && x.serverUrl === sessionServerUrl);
-      if (me) document.getElementById('viewers').textContent = `${me.clients} viewer${me.clients !== 1 ? 's' : ''}`;
+      // (viewer count removed — exclusive mode)
     }
 
     // Flash a session card in the sidebar when it becomes idle
@@ -1298,6 +1309,7 @@
       const form = document.getElementById('newSessionForm');
       form.classList.toggle('show');
       if (form.classList.contains('show')) {
+        loadFolderHistory();
         document.getElementById('newCwd').value = defaultCwd;
         document.getElementById('newCmd').value = defaultCommand;
         // Populate server dropdown
