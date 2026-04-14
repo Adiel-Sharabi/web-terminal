@@ -391,6 +391,11 @@
           <textarea id="cfgScanFolders" rows="2"></textarea>
         </div>
         <div class="field field-wide">
+          <label>Claude home (user profile path for Claude session files)</label>
+          <input id="cfgClaudeHome" placeholder="C:\Users\adiel">
+          <div class="hint">Set when server runs as a service with a different USERPROFILE. Leave empty to auto-detect.</div>
+        </div>
+        <div class="field field-wide">
           <label>Public URL (this server's Tailscale address — needed for cluster sync)</label>
           <input id="cfgPublicUrl" placeholder="https://my-server.tailnet.ts.net">
           <div class="hint">Used to auto-register this server on remotes when you connect to them</div>
@@ -1226,7 +1231,7 @@
               try {
                 const res = await fetch(`${apiBase}/sessions`, {
                   method: 'POST', headers: { 'Content-Type': 'application/json' },
-                  body: JSON.stringify({ name: s.name + ' (fork)', cwd: s.cwd, autoCommand: 'claude --resume ' + s.claudeSessionId + ' --fork-session' })
+                  body: JSON.stringify({ name: s.name + ' (fork)', cwd: s.cwd, autoCommand: 'claude --resume ' + s.claudeSessionId + ' --fork-session' + (s.autoCommand && s.autoCommand.includes('--dangerously-skip-permissions') ? ' --dangerously-skip-permissions' : '') })
                 });
                 const data = await res.json();
                 if (data.id) { switchSession(data.id, s.serverUrl); closeSidebarIfUnpinned(); }
@@ -1617,6 +1622,7 @@
       document.getElementById('cfgScanFolders').value = (cfg.scanFolders || []).join('\n');
       document.getElementById('cfgDefaultCommand').value = cfg.defaultCommand || '';
       document.getElementById('cfgScrollbackReplayLimit').value = cfg.scrollbackReplayLimit || 102400;
+      document.getElementById('cfgClaudeHome').value = cfg.claudeHome || '';
       document.getElementById('cfgPublicUrl').value = cfg.publicUrl || '';
       renderClusterList(cfg.cluster || []);
       document.getElementById('saveMsg').textContent = '';
@@ -1640,6 +1646,7 @@
         scanFolders: document.getElementById('cfgScanFolders').value.split('\n').map(s => s.trim()).filter(Boolean),
         defaultCommand: document.getElementById('cfgDefaultCommand').value,
         scrollbackReplayLimit: parseInt(document.getElementById('cfgScrollbackReplayLimit').value) || 102400,
+        claudeHome: document.getElementById('cfgClaudeHome').value.trim(),
         publicUrl: document.getElementById('cfgPublicUrl').value.trim().replace(/\/+$/, ''),
         cluster: getClusterListFromUI()
       };

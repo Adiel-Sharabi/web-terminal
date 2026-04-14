@@ -7,7 +7,7 @@ const fs = require('fs');
 const crypto = require('crypto');
 const { execFile } = require('child_process');
 
-const SERVER_VERSION = '1.2.0';
+const SERVER_VERSION = '1.3.0';
 
 // --- Config: config.json > env vars > defaults ---
 // Use separate config file during tests to avoid corrupting production config
@@ -17,8 +17,10 @@ const DEFAULT_CONFIG_FILE = path.join(__dirname, 'config.default.json');
 function readConfig() {
   try { return fs.existsSync(CONFIG_FILE) ? JSON.parse(fs.readFileSync(CONFIG_FILE, 'utf8')) : {}; } catch (e) { return {}; }
 }
+let _claudeHome = null;
 function writeConfig(cfg) {
   fs.writeFileSync(CONFIG_FILE, JSON.stringify(cfg, null, 2), 'utf8');
+  _claudeHome = null; // re-detect on next use
 }
 let config = {};
 try {
@@ -47,7 +49,13 @@ function liveConfig(key, fallback) {
 }
 function getDefaultCwd() { return process.env.WT_CWD || liveConfig('defaultCwd', 'C:\\dev'); }
 function getScanFolders() { return liveConfig('scanFolders', [getDefaultCwd()]); }
-function getDefaultCommand() { return liveConfig('defaultCommand', ''); }
+function getDefaultCommand() {
+  let cmd = liveConfig('defaultCommand', '');
+  if (!cmd) {
+    try { cmd = JSON.parse(fs.readFileSync(DEFAULT_CONFIG_FILE, 'utf8')).defaultCommand || ''; } catch {}
+  }
+  return cmd;
+}
 function getScrollbackReplayLimit() { return parseInt(liveConfig('scrollbackReplayLimit', 1048576)) || 1048576; }
 
 function buildSafeEnv() {
@@ -76,7 +84,28 @@ const SESSIONS_FILE = path.join(__dirname, 'sessions.json');
 const SCROLLBACK_DIR = path.join(__dirname, 'scrollback');
 const CLIPBOARD_DIR = path.join(__dirname, 'clipboard-images');
 const HISTORY_FILE = path.join(__dirname, 'history.json');
-const CLAUDE_PROJECTS_DIR = path.join(process.env.USERPROFILE || os.homedir(), '.claude', 'projects');
+function detectClaudeHome() {
+  // 1. Explicit config
+  const configured = liveConfig('claudeHome', '');
+  if (configured) return configured;
+  // 2. Current user profile
+  const profile = process.env.USERPROFILE || os.homedir();
+  if (fs.existsSync(path.join(profile, '.claude'))) return profile;
+  // 3. Scan C:\Users for a profile with .claude (handles scheduled task / Session 0)
+  try {
+    const usersDir = 'C:\\Users';
+    for (const d of fs.readdirSync(usersDir)) {
+      if (d === 'Public' || d === 'Default' || d === 'Default User' || d === 'All Users') continue;
+      const candidate = path.join(usersDir, d);
+      if (fs.existsSync(path.join(candidate, '.claude'))) return candidate;
+    }
+  } catch {}
+  return profile;
+}
+function getClaudeProjectsDir() {
+  if (!_claudeHome) _claudeHome = detectClaudeHome();
+  return path.join(_claudeHome, '.claude', 'projects');
+}
 const CLUSTER_TOKENS_FILE = path.join(__dirname, 'cluster-tokens.json');
 const CLAUDE_SESSION_NAMES_FILE = path.join(__dirname, 'claude-session-names.json');
 
@@ -313,7 +342,7 @@ function createSession(id, cwd, name, autoCommand, savedScrollback) {
       } else {
         // For new sessions, find the most recently modified JSONL in the project dir
         try {
-          const projectDir = path.join(CLAUDE_PROJECTS_DIR,
+          const projectDir = path.join(getClaudeProjectsDir(),
             session.cwd.replace(/^([A-Z]):\\/, '$1--').replace(/[\\/]/g, '-'));
           if (fs.existsSync(projectDir)) {
             const newest = fs.readdirSync(projectDir)
@@ -878,12 +907,13 @@ app.get('/api/config', (req, res) => {
   current.scrollbackReplayLimit = current.scrollbackReplayLimit || getScrollbackReplayLimit();
   current.cluster = current.cluster || [];
   current.publicUrl = current.publicUrl || '';
+  current.claudeHome = current.claudeHome || '';
   // Never expose password in API response
   current.password = '***';
   res.json(current);
 });
 
-const ALLOWED_CONFIG_KEYS = ['port', 'host', 'user', 'password', 'shell', 'defaultCwd', 'scanFolders', 'defaultCommand', 'openInNewTab', 'serverName', 'scrollbackReplayLimit', 'cluster', 'publicUrl'];
+const ALLOWED_CONFIG_KEYS = ['port', 'host', 'user', 'password', 'shell', 'defaultCwd', 'scanFolders', 'defaultCommand', 'openInNewTab', 'serverName', 'scrollbackReplayLimit', 'cluster', 'publicUrl', 'claudeHome'];
 
 app.put('/api/config', express.json({ limit: '16kb' }), (req, res) => {
   try {
@@ -1291,7 +1321,7 @@ app.get('/api/sessions', (req, res) => {
         claudeSessionId = resumeMatch[1];
       } else {
         try {
-          const projectDir = path.join(CLAUDE_PROJECTS_DIR,
+          const projectDir = path.join(getClaudeProjectsDir(),
             s.cwd.replace(/^([A-Z]):\\/, '$1--').replace(/[\\/]/g, '-'));
           if (fs.existsSync(projectDir)) {
             const newest = fs.readdirSync(projectDir)
@@ -1387,7 +1417,7 @@ app.patch('/api/sessions/:id', express.json({ limit: '16kb' }), (req, res) => {
         claudeId = resumeMatch[1];
       } else {
         try {
-          const projectDir = path.join(CLAUDE_PROJECTS_DIR,
+          const projectDir = path.join(getClaudeProjectsDir(),
             session.cwd.replace(/^([A-Z]):\\/, '$1--').replace(/[\\/]/g, '-'));
           if (fs.existsSync(projectDir)) {
             const newest = fs.readdirSync(projectDir)
@@ -1502,16 +1532,16 @@ function decodeProjectPath(project) {
 // --- Claude sessions scanner ---
 app.get('/api/claude-sessions', (req, res) => {
   try {
-    if (!fs.existsSync(CLAUDE_PROJECTS_DIR)) return res.json([]);
+    if (!fs.existsSync(getClaudeProjectsDir())) return res.json([]);
 
-    const projects = fs.readdirSync(CLAUDE_PROJECTS_DIR, { withFileTypes: true })
+    const projects = fs.readdirSync(getClaudeProjectsDir(), { withFileTypes: true })
       .filter(d => d.isDirectory())
       .map(d => d.name);
 
     const customNames = loadClaudeSessionNames();
     const allSessions = [];
     for (const project of projects) {
-      const projectDir = path.join(CLAUDE_PROJECTS_DIR, project);
+      const projectDir = path.join(getClaudeProjectsDir(), project);
       // Decode project path: C--dev-AM8-Core -> C:\dev\AM8_Core
       // The encoding is lossy (hyphens in folder names look like path separators),
       // so we try the decoded path and fall back to checking the filesystem.
@@ -1589,9 +1619,9 @@ app.delete('/api/claude-sessions/:project/:id', (req, res) => {
   // Sanitize to prevent path traversal
   const project = path.basename(req.params.project);
   const id = path.basename(req.params.id).replace(/[^a-zA-Z0-9_-]/g, '');
-  const file = path.join(CLAUDE_PROJECTS_DIR, project, id + '.jsonl');
-  // Verify the resolved path is still under CLAUDE_PROJECTS_DIR
-  if (!path.resolve(file).startsWith(path.resolve(CLAUDE_PROJECTS_DIR))) {
+  const file = path.join(getClaudeProjectsDir(), project, id + '.jsonl');
+  // Verify the resolved path is still under getClaudeProjectsDir()
+  if (!path.resolve(file).startsWith(path.resolve(getClaudeProjectsDir()))) {
     return res.status(400).json({ error: 'Invalid path' });
   }
   try {
@@ -1620,8 +1650,8 @@ app.patch('/api/claude-sessions/:id', express.json(), (req, res) => {
 app.get('/api/claude-sessions/:project/:id/export', (req, res) => {
   const project = path.basename(req.params.project);
   const id = path.basename(req.params.id).replace(/[^a-zA-Z0-9_-]/g, '');
-  const file = path.join(CLAUDE_PROJECTS_DIR, project, id + '.jsonl');
-  if (!path.resolve(file).startsWith(path.resolve(CLAUDE_PROJECTS_DIR))) {
+  const file = path.join(getClaudeProjectsDir(), project, id + '.jsonl');
+  if (!path.resolve(file).startsWith(path.resolve(getClaudeProjectsDir()))) {
     return res.status(400).json({ error: 'Invalid path' });
   }
   try {
@@ -1641,9 +1671,9 @@ app.post('/api/claude-sessions/import', express.json({ limit: '50mb' }), (req, r
   }
   const safeProject = path.basename(String(project));
   const safeId = path.basename(String(id)).replace(/[^a-zA-Z0-9_-]/g, '');
-  const projectDir = path.join(CLAUDE_PROJECTS_DIR, safeProject);
+  const projectDir = path.join(getClaudeProjectsDir(), safeProject);
   const file = path.join(projectDir, safeId + '.jsonl');
-  if (!path.resolve(file).startsWith(path.resolve(CLAUDE_PROJECTS_DIR))) {
+  if (!path.resolve(file).startsWith(path.resolve(getClaudeProjectsDir()))) {
     return res.status(400).json({ error: 'Invalid path' });
   }
   try {
