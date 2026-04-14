@@ -1,4 +1,4 @@
-const CACHE_NAME = 'web-terminal-v5';
+const CACHE_NAME = 'web-terminal-v6';
 const SHELL_ASSETS = [
   '/app',
   'https://cdn.jsdelivr.net/npm/@xterm/xterm@5.5.0/css/xterm.min.css',
