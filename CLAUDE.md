@@ -29,7 +29,13 @@ npx playwright test
 node -c server.js
 ```
 
-### 4. Update README.md
+### 4. Bump Version
+Before every commit that will be pushed, bump `SERVER_VERSION` in `server.js` (line 10):
+- Patch bump (1.0.x) for bug fixes
+- Minor bump (1.x.0) for new features
+- Major bump (x.0.0) for breaking changes
+
+### 5. Update README.md
 If new user-facing features were added, update `README.md`:
 - Add to the Features list
 - Add configuration docs for new settings
