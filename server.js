@@ -7,7 +7,7 @@ const fs = require('fs');
 const crypto = require('crypto');
 const { execFile } = require('child_process');
 
-const SERVER_VERSION = '1.0.0';
+const SERVER_VERSION = '1.1.0';
 
 // --- Config: config.json > env vars > defaults ---
 // Use separate config file during tests to avoid corrupting production config
@@ -1066,8 +1066,16 @@ app.get('/api/cluster/sessions', async (req, res) => {
       }
       if (!r.ok) return { server: server.name, url: server.url, online: false, sessions: [] };
       const remoteSessions = JSON.parse(r.body);
+      // Fetch version from remote
+      let version = '';
+      try {
+        const vr = await clusterFetch(server.url + '/api/version', {
+          headers: { 'Authorization': 'Bearer ' + tokenEntry.token }, timeout: 2000
+        });
+        if (vr.ok) { const v = JSON.parse(vr.body); version = `${v.version} (${v.hash})`; }
+      } catch (e) {}
       return {
-        server: server.name, url: server.url, online: true, needsAuth: false,
+        server: server.name, url: server.url, online: true, needsAuth: false, version,
         sessions: remoteSessions.map(s => ({ ...s, server: server.name, serverUrl: server.url }))
       };
     } catch (e) {
@@ -1080,11 +1088,19 @@ app.get('/api/cluster/sessions', async (req, res) => {
     result.push(...r.sessions);
   }
 
+  // Get local version info
+  let localVersion = SERVER_VERSION;
+  try {
+    const { execSync } = require('child_process');
+    const hash = execSync('git rev-parse --short HEAD', { cwd: __dirname, encoding: 'utf8' }).trim();
+    localVersion = `${SERVER_VERSION} (${hash})`;
+  } catch (e) {}
+
   res.json({
     sessions: result,
     servers: [
-      { name: getServerName(), url: null, online: true, needsAuth: false },
-      ...remotes.map(r => ({ name: r.server, url: r.url, online: r.online, needsAuth: r.needsAuth }))
+      { name: getServerName(), url: null, online: true, needsAuth: false, version: localVersion },
+      ...remotes.map(r => ({ name: r.server, url: r.url, online: r.online, needsAuth: r.needsAuth, version: r.version || '' }))
     ]
   });
 });
@@ -1252,7 +1268,27 @@ app.post('/api/clipboard-image', express.raw({ type: 'image/*', limit: '10mb' })
 app.get('/api/sessions', (req, res) => {
   const list = [];
   for (const [id, s] of sessions) {
-    list.push({ id, name: s.name, cwd: s.cwd, clients: s.clients.size, pid: s.term.pid, status: s.status, lastActivity: s.lastActivity, autoCommand: s.autoCommand || '' });
+    // Detect Claude session ID for active Claude sessions
+    let claudeSessionId = null;
+    if (s.autoCommand && /\bclaude\b/i.test(s.autoCommand)) {
+      const resumeMatch = s.autoCommand.match(/--resume\s+([a-f0-9-]+)/i);
+      if (resumeMatch) {
+        claudeSessionId = resumeMatch[1];
+      } else {
+        try {
+          const projectDir = path.join(CLAUDE_PROJECTS_DIR,
+            s.cwd.replace(/^([A-Z]):\\/, '$1--').replace(/[\\/]/g, '-'));
+          if (fs.existsSync(projectDir)) {
+            const newest = fs.readdirSync(projectDir)
+              .filter(f => f.endsWith('.jsonl'))
+              .map(f => ({ id: f.replace('.jsonl', ''), mtime: fs.statSync(path.join(projectDir, f)).mtimeMs }))
+              .sort((a, b) => b.mtime - a.mtime)[0];
+            if (newest) claudeSessionId = newest.id;
+          }
+        } catch (e) {}
+      }
+    }
+    list.push({ id, name: s.name, cwd: s.cwd, clients: s.clients.size, pid: s.term.pid, status: s.status, lastActivity: s.lastActivity, autoCommand: s.autoCommand || '', claudeSessionId });
   }
   res.json(list);
 });
