@@ -1661,18 +1661,23 @@ app.post('/api/restart', (req, res) => {
   setTimeout(() => {
     saveSessionConfigs();
     saveAllScrollback();
-    const { execSync, spawn } = require('child_process');
+    const { execSync } = require('child_process');
     // Pull latest code before restarting
     try { execSync('git pull --ff-only', { cwd: __dirname, timeout: 15000 }); } catch (e) {
       console.error(`[${new Date().toISOString()}] git pull failed: ${e.message}`);
     }
-    const child = spawn(process.argv[0], process.argv.slice(1), {
-      cwd: __dirname,
-      detached: true,
-      stdio: 'ignore'
-    });
-    child.unref();
-    process.exit(0);
+    // Use PM2 if available, otherwise fallback to spawn
+    try {
+      execSync('pm2 restart web-terminal', { cwd: __dirname, timeout: 10000 });
+    } catch (e) {
+      // PM2 not available — fallback to old spawn method
+      const { spawn } = require('child_process');
+      const child = spawn(process.argv[0], process.argv.slice(1), {
+        cwd: __dirname, detached: true, stdio: 'ignore'
+      });
+      child.unref();
+      process.exit(0);
+    }
   }, 500);
 });
 
