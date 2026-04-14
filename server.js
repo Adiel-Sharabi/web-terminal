@@ -683,9 +683,9 @@ app.post('/api/auth/token', express.json({ limit: '16kb' }), (req, res) => {
 // 2. POST /api/hook with X-WT-Session-ID header (from HTTP hooks, no subprocess)
 app.post('/api/hook', express.json({ limit: '16kb' }), (req, res) => {
   const id = req.headers['x-wt-session-id'];
-  if (!id) return res.status(400).json({ error: 'X-WT-Session-ID header required' });
+  if (!id) return res.json({ ok: true, skipped: 'no session ID' }); // silently ignore (old sessions without WT_SESSION_ID)
   const session = sessions.get(id);
-  if (!session) return res.status(404).json({ error: 'session not found' });
+  if (!session) return res.json({ ok: true, skipped: 'session not found' }); // silently ignore (stale session after restart)
   // HTTP hooks send Claude's full hook JSON — extract event name
   req.params = { id };
   req.body = { event: req.body?.hook_event_name || req.body?.event };
