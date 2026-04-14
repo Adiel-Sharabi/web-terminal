@@ -17,3 +17,5 @@ api-tokens.json
 claude-session-names.json
 .session-secret
 *.png
+logs/
+monitor-status.json
