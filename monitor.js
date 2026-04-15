@@ -214,6 +214,15 @@ function startServer() {
       return;
     }
 
+    // Port conflict — another instance is running, don't restart
+    if (code === 2) {
+      console.error('[monitor] Port already in use — another instance is running. Stopping.');
+      appendLog(path.join(LOG_DIR, 'monitor.log'), 'Port in use — stopping (another instance is running).');
+      writeStatus('stopped', { reason: 'port in use — another instance running' });
+      stopping = true;
+      return;
+    }
+
     // Crash
     lastCrashTime = Date.now();
     lastCrashCode = code;
