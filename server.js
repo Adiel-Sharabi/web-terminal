@@ -7,7 +7,7 @@ const fs = require('fs');
 const crypto = require('crypto');
 const { execFile } = require('child_process');
 
-const SERVER_VERSION = '1.3.0';
+const SERVER_VERSION = '1.3.1';
 
 // --- Config: config.json > env vars > defaults ---
 // Use separate config file during tests to avoid corrupting production config
@@ -1866,11 +1866,18 @@ process.on('exit', () => {
 });
 
 const HOST = process.env.WT_HOST || config.host || '127.0.0.1';
-app.listen(PORT, HOST, () => {
+const server = app.listen(PORT, HOST, () => {
   console.log(`Web Terminal running at http://${HOST}:${PORT}`);
   console.log(`Sessions: http://${HOST}:${PORT}/`);
   console.log(`Auth: ${_USER}:***`);
   if (needsPasswordChange()) {
     console.log('\x1b[33m⚠  DEFAULT PASSWORD IN USE — you will be prompted to change it on first login\x1b[0m');
   }
+});
+server.on('error', (err) => {
+  if (err.code === 'EADDRINUSE') {
+    console.error(`Port ${PORT} is already in use — another instance is likely running. Exiting.`);
+    process.exit(2); // Distinct exit code so monitor.js can detect port conflict
+  }
+  throw err;
 });
