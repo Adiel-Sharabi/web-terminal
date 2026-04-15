@@ -10,7 +10,7 @@ Add a feature idea to the PLANS.md backlog with details.
 
 ## Steps
 
-1. **Read** `C:/dev/web-terminal/PLANS.md` to see existing features and sections
+1. **Read** `PLANS.md` in the project root to see existing features and sections
 2. **Determine the right section** for the feature (UI/Sidebar, Session Intelligence, Mobile, Cluster, Developer Experience — or create a new section if none fit)
 3. **Check for duplicates** — if a similar feature already exists, update it instead of adding a new one
 4. **Add the feature** with:

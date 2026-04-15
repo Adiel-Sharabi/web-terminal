@@ -193,7 +193,7 @@
   <div id="newForm" class="new-form">
     <div class="field">
       <label>Name</label>
-      <input id="sessionName" placeholder="e.g. AM8 Core" value="">
+      <input id="sessionName" placeholder="e.g. My Project" value="">
     </div>
     <div class="field" style="position:relative">
       <label>Working directory</label>
@@ -349,7 +349,7 @@
       const list = await res.json();
       const s = list.find(x => x.id === id);
       const cmd = prompt(
-        'Auto-command (runs when server restarts):\n\nExamples:\n  claude --continue --dangerously-skip-permissions\n  cd /c/dev/AM8_Core && claude\n\nLeave empty to disable:',
+        'Auto-command (runs when server restarts):\n\nExamples:\n  claude --continue --dangerously-skip-permissions\n  cd /c/dev/my-project && claude\n\nLeave empty to disable:',
         s?.autoCommand || ''
       );
       if (cmd === null) return;

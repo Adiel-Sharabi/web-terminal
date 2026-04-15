@@ -1,3 +1,4 @@
+Set objFSO = CreateObject("Scripting.FileSystemObject")
 Set objShell = CreateObject("WScript.Shell")
-objShell.CurrentDirectory = "C:\dev\web-terminal"
-objShell.Run "node server.js", 0, False
+objShell.CurrentDirectory = objFSO.GetParentFolderName(WScript.ScriptFullName)
+objShell.Run "node monitor.js", 0, False

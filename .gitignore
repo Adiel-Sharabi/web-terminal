@@ -19,3 +19,9 @@ claude-session-names.json
 *.png
 logs/
 monitor-status.json
+*.restart-bak
+test-emu-*.js
+test-exclusive-*.js
+tests/diagnostic-report.json
+playwright.diag.config.js
+cdp_*.py
