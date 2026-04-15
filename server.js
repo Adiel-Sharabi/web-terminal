@@ -269,23 +269,6 @@ function createSession(id, cwd, name, autoCommand, savedScrollback) {
   };
   sessions.set(id, session);
 
-  // Patterns that indicate Claude is waiting for user input
-  const NOTIFY_PATTERNS = [
-    { regex: /Do you want to proceed/i, msg: 'Claude is asking to proceed' },
-    { regex: /Allow once.*Allow always.*Deny|Allow once.*Deny/i, msg: 'Claude needs permission' },
-    { regex: /\(y\/n\)/i, msg: 'Claude is waiting for yes/no' },
-    { regex: /\(Y\/n\)|yes\/no/i, msg: 'Claude is waiting for confirmation' },
-    { regex: /Press Enter to continue/i, msg: 'Claude is waiting for Enter' },
-  ];
-  const IDLE_NOTIFY_MS = 10000;
-
-  function sendNotification(session, type, message) {
-    const payload = JSON.stringify({ notification: { type, message, session: session.name, sessionId: id } });
-    for (const client of notifyClients) {
-      try { client.send(payload); } catch (e) {}
-    }
-  }
-
   term.onData(data => {
     session.scrollback.push(data);
     session.scrollbackSize = (session.scrollbackSize || 0) + data.length;
@@ -295,39 +278,7 @@ function createSession(id, cwd, name, autoCommand, savedScrollback) {
     for (const client of session.clients) {
       try { client.send(data); } catch (e) {}
     }
-
     session.lastActivity = Date.now();
-
-    // Ignore user typing/resize echo for status detection
-    const isEcho = (Date.now() - session.lastUserInput) < 500;
-    if (!isEcho) {
-      // Check for waiting-for-input patterns first
-      const clean = data.replace(/\x1b\[[0-9;]*[a-zA-Z]/g, '');
-      let isWaiting = false;
-      for (const p of NOTIFY_PATTERNS) {
-        if (p.regex.test(clean)) {
-          if (session.status !== 'waiting') {
-            session.status = 'waiting';
-            sendNotification(session, 'input_needed', `"${session.name}" — ${p.msg}`);
-          }
-          isWaiting = true;
-          break;
-        }
-      }
-
-      // If hook set the status (authoritative), PTY output shouldn't override it
-      if (!isWaiting && !session.hookStatus) session.status = 'active';
-      // Only run idle timer if hooks haven't claimed the status
-      if (!session.hookStatus) {
-        if (session.idleTimer) clearTimeout(session.idleTimer);
-        session.idleTimer = setTimeout(() => {
-          if (session.status !== 'waiting' && session.status !== 'working' && session.status !== 'idle') {
-            session.status = 'idle';
-            sendNotification(session, 'idle', `"${session.name}" — Claude appears to be done`);
-          }
-        }, IDLE_NOTIFY_MS);
-      }
-    }
   });
 
   term.onExit(() => {
@@ -709,6 +660,7 @@ function handleHook(req, res, session) {
     case 'UserPromptSubmit':
     case 'PreToolUse':
     case 'PostToolUse':
+    case 'SubagentStart':
       session.status = 'working';
       if (session.idleTimer) { clearTimeout(session.idleTimer); session.idleTimer = null; }
       break;

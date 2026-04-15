@@ -1112,7 +1112,7 @@
       }
     })();
 
-    const statusLabels = { active: 'Running', working: 'Working', idle: 'Idle', waiting: 'Waiting' };
+    const statusLabels = { active: '', working: 'Working', idle: 'Idle', waiting: 'Waiting' };
     const timeAgo = ts => {
       const secs = Math.floor((Date.now() - ts) / 1000);
       if (secs < 60) return `${secs}s ago`;
