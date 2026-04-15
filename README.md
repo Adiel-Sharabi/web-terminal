@@ -72,6 +72,8 @@ node monitor.js          # recommended — auto-restart, logs, health checks
 node server.js           # direct — no crash recovery
 ```
 
+> **Important:** Do not run both `monitor.js` and `server.js` at the same time. `monitor.js` spawns `server.js` as a child process — running `server.js` separately will cause a port conflict and rapid console window flashing on Windows. If the port is already in use, the server exits with code 2 and the monitor stops gracefully.
+
 For auto-start on Windows boot:
 
 ```powershell
