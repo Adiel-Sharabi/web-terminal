@@ -17,7 +17,6 @@ Before EVERY commit, you MUST complete these checks in order:
 
 ### 2. Run Tests
 ```bash
-cd C:/dev/web-terminal
 npx playwright test
 ```
 - ALL tests must pass before committing

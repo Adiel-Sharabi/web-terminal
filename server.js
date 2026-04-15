@@ -1542,7 +1542,7 @@ app.get('/api/claude-sessions', (req, res) => {
     const allSessions = [];
     for (const project of projects) {
       const projectDir = path.join(getClaudeProjectsDir(), project);
-      // Decode project path: C--dev-AM8-Core -> C:\dev\AM8_Core
+      // Decode project path: C--dev-my-project -> C:\dev\my_project
       // The encoding is lossy (hyphens in folder names look like path separators),
       // so we try the decoded path and fall back to checking the filesystem.
       const projectPath = decodeProjectPath(project);
