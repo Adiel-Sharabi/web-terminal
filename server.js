@@ -7,7 +7,7 @@ const fs = require('fs');
 const crypto = require('crypto');
 const { execFile } = require('child_process');
 
-const SERVER_VERSION = '1.4.1';
+const SERVER_VERSION = '1.4.2';
 const STALE_STATUS_TIMEOUT_MS = 5 * 60 * 1000; // 5 minutes — auto-correct stuck "working"/"waiting" status
 
 // --- Config: config.json > env vars > defaults ---
@@ -934,7 +934,7 @@ app.get('/api/config', (req, res) => {
   current.cluster = current.cluster || [];
   current.publicUrl = current.publicUrl || '';
   current.claudeHome = current.claudeHome || '';
-  current.keepSessionsOpen = current.keepSessionsOpen !== undefined ? current.keepSessionsOpen : false;
+  current.keepSessionsOpen = current.keepSessionsOpen !== undefined ? current.keepSessionsOpen : true;
   // Never expose password in API response
   current.password = '***';
   res.json(current);
@@ -1259,8 +1259,10 @@ app.ws('/cluster/:serverUrl/ws/:id', (localWs, req) => {
         try { ws.send(b.msg, { binary: b.isBinary }); } catch (e) {}
       }
       buffered.length = 0;
-      // Ask remote to re-send current screen state so client isn't stale
-      try { ws.send(JSON.stringify({ requestResize: true })); } catch (e) {}
+      // Ask the local client (browser) to re-send its resize dimensions so
+      // the remote PTY matches the client's terminal size after reconnect.
+      // Sending this to the remote would get it written to the PTY as input.
+      try { localWs.send(JSON.stringify({ requestResize: true })); } catch (e) {}
       startProxyPing();
     });
 
@@ -1915,7 +1917,7 @@ app.ws('/ws/:id', (ws, req) => {
     }
   } catch (e) {}
 
-  const keepOpen = liveConfig('keepSessionsOpen', false);
+  const keepOpen = liveConfig('keepSessionsOpen', true);
 
   if (keepOpen) {
     // keepSessionsOpen mode: defer kick until client sends {"mode":"active"}
@@ -1969,7 +1971,7 @@ app.ws('/ws/:id', (ws, req) => {
           const parsed = JSON.parse(msg);
           if (parsed.mode === 'active' || parsed.mode === 'background') {
             // Feature gate: reject background connections when feature is off
-            if (!liveConfig('keepSessionsOpen', false) && parsed.mode === 'background') {
+            if (!liveConfig('keepSessionsOpen', true) && parsed.mode === 'background') {
               ws.close(4002, 'keepSessionsOpen disabled');
               return;
             }
