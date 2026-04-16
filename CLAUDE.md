@@ -74,7 +74,14 @@ If new user-facing features were added, update `README.md`:
 
 ## Deployment & Operations
 - Server auto-starts on boot via scheduled task or Startup shortcut — both use `wscript.exe` + `start-server.vbs` to run hidden (no console window flashing)
-- **To restart manually:** `taskkill /F /IM node.exe` then `wscript start-server.vbs` from the project directory
+- **To restart manually — SAFE procedure (prevents dual-monitor crash loop):**
+  1. Identify the monitor and server PIDs:
+     `powershell -NoProfile -Command "Get-CimInstance Win32_Process -Filter \"Name='node.exe'\" | Select-Object ProcessId,CommandLine | Format-Table -AutoSize -Wrap"`
+  2. Kill ONLY the monitor.js and server.js PIDs (do NOT use blanket `taskkill /F /IM node.exe` — it kills MCP servers, PM2, and other unrelated node processes, and may fail to kill the monitor before the new one starts):
+     `powershell -NoProfile -Command "Stop-Process -Id <monitor_pid>,<server_pid> -Force"`
+  3. Wait 2-3 seconds for ports to release, then start fresh:
+     `wscript start-server.vbs`
+- **NEVER use `taskkill /F /IM node.exe` to restart** — this is a blanket kill that races with the VBS launcher and can leave an old monitor alive while starting a new one, causing a dual-monitor crash loop (both monitors fight over port 7681, each restart spawns pty sessions that flash console windows)
 - **NEVER run `node server.js` or `node monitor.js` directly** — console-subsystem executables flash windows on Windows. Always use the VBS launcher
 - Session 0 (scheduled task with S4U) may have a stale PATH — if CLI tools aren't found in spawned terminals, kill node.exe and run `wscript start-server.vbs` from a user session instead
 - Server listens on port 7681, config in `config.json` (gitignored password hashes)
