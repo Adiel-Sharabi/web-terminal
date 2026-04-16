@@ -667,6 +667,20 @@
       return true;
     });
 
+    // Input coalescing: buffer rapid keystrokes and send as a single WS message
+    let _inputBuf = '', _inputTimer = null;
+    function sendInput(data) {
+      _inputBuf += data;
+      if (!_inputTimer) {
+        _inputTimer = setTimeout(() => {
+          const buf = _inputBuf;
+          _inputBuf = '';
+          _inputTimer = null;
+          if (buf && ws && ws.readyState === WebSocket.OPEN) ws.send(buf);
+        }, 5);
+      }
+    }
+
     let _lastMobileData = '', _lastMobileTime = 0;
     let _mobileSingleChars = 0, _mobileSCTimer = null;
     term.onData(data => {
@@ -731,10 +745,10 @@
           seq = '\x1b' + seq;
         }
         clearSticky();
-        if (ws && ws.readyState === WebSocket.OPEN) ws.send(seq);
+        sendInput(seq);
         return;
       }
-      if (ws && ws.readyState === WebSocket.OPEN) ws.send(data);
+      sendInput(data);
     });
 
     let _resizeTimer = null;
