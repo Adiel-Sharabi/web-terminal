@@ -73,10 +73,17 @@ If new user-facing features were added, update `README.md`:
 - Tests backup/restore config.json but overwrite the password hash — re-apply the correct password after running tests
 
 ## Deployment & Operations
-- Server runs as a Windows scheduled task under svchost.exe (Session 0) on machine restart
-- The scheduled task environment may have a stale PATH — if CLI tools (like `claude`) aren't found in sessions after reboot, the server likely needs to be restarted from a user session to pick up the current system PATH
-- To restart: `taskkill /F /IM node.exe` (may need admin elevation if running as service), then `node server.js &`
+- Server auto-starts on boot via scheduled task or Startup shortcut — both use `wscript.exe` + `start-server.vbs` to run hidden (no console window flashing)
+- **To restart manually:** `taskkill /F /IM node.exe` then `wscript start-server.vbs` from the project directory
+- **NEVER run `node server.js` or `node monitor.js` directly** — console-subsystem executables flash windows on Windows. Always use the VBS launcher
+- Session 0 (scheduled task with S4U) may have a stale PATH — if CLI tools aren't found in spawned terminals, kill node.exe and run `wscript start-server.vbs` from a user session instead
 - Server listens on port 7681, config in `config.json` (gitignored password hashes)
+
+### Windows Console Flashing Prevention
+Three layers prevent console window flashing on Windows:
+1. **VBS launcher** (`start-server.vbs`) — `wscript.exe` is a GUI-subsystem exe, launches node hidden (window style 0)
+2. **`useConptyDll: true`** in `pty.spawn` — uses the bundled `OpenConsole.exe` instead of the system ConPTY API (which on Windows 11 delegates to Windows Terminal, causing visible flashes)
+3. **`windowsHide: true`** on all `execFile`/`execSync` calls — prevents git, powershell, and other child processes from creating console windows
 
 ## Development Rules
 - **Every code change must be backed by tests** — write failing tests first, then fix, then verify all tests pass

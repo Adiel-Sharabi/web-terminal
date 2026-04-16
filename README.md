@@ -77,12 +77,28 @@ node server.js           # direct — no crash recovery
 For auto-start on Windows boot:
 
 ```powershell
-# Option 1: Scheduled task (run as Administrator)
+# Option 1: Scheduled task (run as Administrator) — starts on boot even without login
 powershell -ExecutionPolicy Bypass -File register-task.ps1
 
-# Option 2: Startup shortcut
+# Option 2: Startup shortcut — starts when user logs in
 powershell -ExecutionPolicy Bypass -File create-startup.ps1
 ```
+
+Both options use `wscript.exe` with `start-server.vbs` to launch the server hidden — no console window flashing.
+
+To restart the server manually (without flashing):
+
+```bash
+taskkill /F /IM node.exe        # stop current instance
+wscript start-server.vbs        # start hidden (run from project directory)
+```
+
+> **Never run `node server.js` or `node monitor.js` directly on Windows** — they are console applications and will flash terminal windows. Always use the VBS launcher.
+
+**How flashing is prevented** (three layers):
+1. **VBS launcher** — `wscript.exe` is a GUI-subsystem executable, so launching node through it creates no visible console window
+2. **`useConptyDll: true`** — terminal sessions use the bundled `OpenConsole.exe` instead of the system ConPTY API, which on Windows 11 delegates to Windows Terminal and causes visible flashes
+3. **`windowsHide: true`** — all child process calls (git, powershell, etc.) use this flag to suppress console windows
 
 ### Automated Install
 
