@@ -295,7 +295,7 @@
       <div id="newSessionForm">
         <form onsubmit="event.preventDefault(); createSession()">
         <label>Server</label>
-        <select id="newServer">
+        <select id="newServer" onchange="loadFolderHistory()">
           <option value="">Local</option>
         </select>
         <label>Name</label>
@@ -1380,7 +1380,11 @@
 
     // --- Folder suggestions ---
     async function loadFolderHistory() {
-      try { folderHistory = await (await fetch('/api/history/folders')).json(); } catch (e) { folderHistory = []; }
+      try {
+        const serverUrl = document.getElementById('newServer').value || null;
+        const apiBase = serverUrl ? `/cluster/${encodeURIComponent(serverUrl)}/api` : '/api';
+        folderHistory = await (await fetch(`${apiBase}/history/folders`)).json();
+      } catch (e) { folderHistory = []; }
     }
 
     function showFolders() {
