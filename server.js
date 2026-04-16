@@ -294,7 +294,7 @@ function createSession(id, cwd, name, autoCommand, savedScrollback, claudeSessio
     rows: 30,
     cwd: spawnCwd,
     env: sessionEnv,
-    useConptyDll: true
+    useConptyDll: liveConfig('useConptyDll', true)
   });
 
   // Restore previous scrollback with a restart separator
@@ -314,11 +314,6 @@ function createSession(id, cwd, name, autoCommand, savedScrollback, claudeSessio
   sessions.set(id, session);
 
   term.onData(data => {
-    // Strip DSR response (\x1b[0n) injected as ConPTY flush hint
-    if (data.includes('\x1b[0n')) {
-      data = data.replace(/\x1b\[0n/g, '');
-      if (!data) return; // pure DSR response, nothing to forward
-    }
     session.scrollback.push(data);
     session.scrollbackSize = (session.scrollbackSize || 0) + data.length;
     while (session.scrollbackSize > MAX_SCROLLBACK_SIZE && session.scrollback.length > 1) {
@@ -1876,10 +1871,6 @@ app.ws('/ws/:id', (ws, req) => {
     }
     session.lastUserInput = Date.now();
     session.term.write(msg);
-    // ConPTY output flush hint: DSR query forces ConPTY to flush its output buffer
-    // immediately instead of waiting for its internal timer (~500-1500ms).
-    // The terminal responds with \x1b[0n which we filter out before sending to clients.
-    session.term.write('\x1b[5n');
   });
 
   ws.on('close', () => {
