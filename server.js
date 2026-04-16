@@ -251,11 +251,13 @@ function createSession(id, cwd, name, autoCommand, savedScrollback) {
   const sessionEnv = buildSafeEnv();
   sessionEnv.WT_SESSION_ID = id;
   sessionEnv.WT_SESSION_PORT = String(PORT);
-  const term = pty.spawn(SHELL, [], {
+  const spawnShell = SHELL.replace(/\\/g, '/');
+  const spawnCwd = (cwd || DEFAULT_CWD).replace(/\\/g, '/');
+  const term = pty.spawn(spawnShell, [], {
     name: 'xterm-256color',
     cols: 120,
     rows: 30,
-    cwd: cwd || DEFAULT_CWD,
+    cwd: spawnCwd,
     env: sessionEnv,
     useConptyDll: true
   });
