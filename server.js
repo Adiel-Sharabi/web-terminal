@@ -7,7 +7,8 @@ const fs = require('fs');
 const crypto = require('crypto');
 const { execFile } = require('child_process');
 
-const SERVER_VERSION = '1.3.1';
+const SERVER_VERSION = '1.3.2';
+const STALE_STATUS_TIMEOUT_MS = 5 * 60 * 1000; // 5 minutes — auto-correct stuck "working"/"waiting" status
 
 // --- Config: config.json > env vars > defaults ---
 // Use separate config file during tests to avoid corrupting production config
@@ -80,7 +81,7 @@ function buildSafeEnv() {
 }
 // Kept for backward compat in startup code
 const DEFAULT_CWD = getDefaultCwd();
-const SESSIONS_FILE = path.join(__dirname, 'sessions.json');
+const SESSIONS_FILE = process.env.WT_TEST ? path.join(__dirname, 'sessions.test.json') : path.join(__dirname, 'sessions.json');
 const SCROLLBACK_DIR = path.join(__dirname, 'scrollback');
 const CLIPBOARD_DIR = path.join(__dirname, 'clipboard-images');
 const HISTORY_FILE = path.join(__dirname, 'history.json');
@@ -159,7 +160,9 @@ if (PASS && !DEFAULT_PASSWORDS.includes(PASS) && !PASS.startsWith('$scrypt$')) {
 }
 
 const app = express();
-const wsInstance = expressWs(app);
+const wsInstance = expressWs(app, null, {
+  wsOptions: { perMessageDeflate: false }
+});
 
 // --- WebSocket keepalive: ping every 30s, kill after 2 missed pings (tolerates background tabs) ---
 const WS_PING_INTERVAL = 30000;
@@ -265,7 +268,7 @@ function createSession(id, cwd, name, autoCommand, savedScrollback) {
   const session = {
     term, clients: new Set(), scrollback, scrollbackSize, name: name || `Session ${id}`,
     cwd: cwd || DEFAULT_CWD, idleTimer: null, lastActivity: Date.now(),
-    lastUserInput: 0, status: 'active', hookStatus: false, autoCommand: autoCommand || ''
+    lastUserInput: 0, status: 'active', hookStatus: false, lastHookActivity: 0, autoCommand: autoCommand || ''
   };
   sessions.set(id, session);
 
@@ -648,6 +651,19 @@ app.post('/api/session/:id/hook', express.json({ limit: '16kb' }), (req, res) =>
   req.body = { event: req.body?.hook_event_name || req.body?.event };
   handleHook(req, res, session);
 });
+// Correct stale session status: if a session has been "working" or "waiting"
+// for longer than STALE_STATUS_TIMEOUT_MS without any hook activity, downgrade to "idle".
+// This handles the case where Claude crashes without sending a Stop hook.
+function correctStaleStatus(session) {
+  if ((session.status === 'working' || session.status === 'waiting') &&
+      session.lastHookActivity && (Date.now() - session.lastHookActivity) > STALE_STATUS_TIMEOUT_MS) {
+    const prevStatus = session.status;
+    session.status = 'idle';
+    console.log(`[${new Date().toISOString()}] Stale correction: session "${session.name}" status ${prevStatus} → idle (last hook ${Math.round((Date.now() - session.lastHookActivity) / 60000)}m ago)`);
+  }
+  return session.status;
+}
+
 function handleHook(req, res, session) {
   const event = req.body?.event;
   if (!event) return res.status(400).json({ error: 'event required' });
@@ -681,6 +697,10 @@ function handleHook(req, res, session) {
       break;
   }
 
+  if (prevStatus !== session.status) {
+    console.log(`[${new Date().toISOString()}] Hook: session "${session.name}" (${req.params.id}) status ${prevStatus} → ${session.status} (event: ${event})`);
+  }
+
   if (prevStatus !== session.status || notifyType) {
     const payload = JSON.stringify({
       notification: {
@@ -695,6 +715,7 @@ function handleHook(req, res, session) {
   }
 
   session.lastActivity = Date.now();
+  session.lastHookActivity = Date.now();
   res.json({ ok: true, status: session.status });
 }
 
@@ -1038,6 +1059,7 @@ app.get('/api/cluster/sessions', async (req, res) => {
 
   // Local sessions
   for (const [id, s] of sessions) {
+    correctStaleStatus(s);
     result.push({
       id, name: s.name, cwd: s.cwd, status: s.status,
       clients: s.clients.size, pid: s.term.pid,
@@ -1082,6 +1104,13 @@ app.get('/api/cluster/sessions', async (req, res) => {
 
   const remotes = await Promise.all(remotePromises);
   for (const r of remotes) {
+    if (r.sessions.length > 0) {
+      const summary = r.sessions.map(s => {
+        const ageMins = s.lastActivity ? Math.round((Date.now() - s.lastActivity) / 60000) : '?';
+        return `"${s.name}"(${s.status}, ${ageMins}m ago)`;
+      }).join(', ');
+      console.log(`[${new Date().toISOString()}] Cluster fetch: ${r.server} (${r.online ? 'online' : 'offline'}) → ${r.sessions.length} sessions: ${summary}`);
+    }
     result.push(...r.sessions);
   }
 
@@ -1169,8 +1198,12 @@ app.ws('/cluster/:serverUrl/ws/:id', (localWs, req) => {
   localWs.on('pong', () => { localWs._wtAlive = true; });
   localWs.on('message', (msg, isBinary) => {
     // Absorb client heartbeats — don't forward to remote PTY
-    const str = Buffer.isBuffer(msg) ? msg.toString() : msg;
-    if (typeof str === 'string' && str.startsWith('{"heartbeat":')) { localWs._wtAlive = true; return; }
+    // Fast path: only convert to string if first byte is '{' (0x7B)
+    const firstByte = Buffer.isBuffer(msg) ? msg[0] : (msg.length > 0 ? msg.charCodeAt(0) : 0);
+    if (firstByte === 0x7B) {
+      const str = Buffer.isBuffer(msg) ? msg.toString() : msg;
+      if (str.startsWith('{"heartbeat":')) { localWs._wtAlive = true; return; }
+    }
     if (remoteWs.readyState === WebSocket.OPEN) {
       try { remoteWs.send(msg, { binary: isBinary }); } catch (e) {}
     } else {
@@ -1285,10 +1318,32 @@ app.get('/api/sessions', (req, res) => {
         } catch (e) {}
       }
     }
+    correctStaleStatus(s);
     list.push({ id, name: s.name, cwd: s.cwd, clients: s.clients.size, pid: s.term.pid, status: s.status, lastActivity: s.lastActivity, autoCommand: s.autoCommand || '', claudeSessionId });
+  }
+  // Log when a remote server fetches our sessions (Bearer = cluster call)
+  if (req.headers.authorization && req.headers.authorization.startsWith('Bearer ')) {
+    const summary = list.map(s => {
+      const ageMins = s.lastActivity ? Math.round((Date.now() - s.lastActivity) / 60000) : '?';
+      return `"${s.name}"(${s.status}, ${ageMins}m ago, ${s.clients} clients)`;
+    }).join(', ');
+    console.log(`[${new Date().toISOString()}] Sessions served to cluster caller: ${list.length} sessions: ${summary}`);
   }
   res.json(list);
 });
+
+// --- Test helper: artificially age a session's lastActivity (test mode only) ---
+if (process.env.WT_TEST) {
+  app.post('/api/test/age-session/:id', express.json(), (req, res) => {
+    const session = sessions.get(req.params.id);
+    if (!session) return res.status(404).json({ error: 'session not found' });
+    const ageMinutes = req.body?.ageMinutes || 10;
+    const aged = Date.now() - (ageMinutes * 60 * 1000);
+    session.lastActivity = aged;
+    session.lastHookActivity = aged;
+    res.json({ ok: true, lastActivity: aged, lastHookActivity: aged });
+  });
+}
 
 // --- API: execute command and return output ---
 app.post('/api/exec', express.json({ limit: '64kb' }), (req, res) => {
@@ -1752,18 +1807,21 @@ app.ws('/ws/:id', (ws, req) => {
   ws.on('message', msg => {
     if (Buffer.isBuffer(msg)) msg = msg.toString();
     // Reject oversized messages (64KB)
-    if (typeof msg === 'string' && msg.length > 65536) return;
-    // Heartbeat from client — just mark alive, don't forward to PTY
-    if (typeof msg === 'string' && msg.startsWith('{"heartbeat":')) { ws._wtAlive = true; return; }
-    if (msg.startsWith('{"resize":')) {
-      try {
-        const { resize } = JSON.parse(msg);
-        const cols = Math.max(1, Math.min(500, parseInt(resize.cols) || 80));
-        const rows = Math.max(1, Math.min(200, parseInt(resize.rows) || 24));
-        session.term.resize(cols, rows);
-        session.lastUserInput = Date.now(); // resize redraws produce PTY output — ignore for status
-      } catch (e) {}
-      return;
+    if (msg.length > 65536) return;
+    // Fast path: only check for JSON commands if first char is '{'
+    if (msg.charCodeAt(0) === 0x7B) {
+      // Heartbeat from client — just mark alive, don't forward to PTY
+      if (msg.startsWith('{"heartbeat":')) { ws._wtAlive = true; return; }
+      if (msg.startsWith('{"resize":')) {
+        try {
+          const { resize } = JSON.parse(msg);
+          const cols = Math.max(1, Math.min(500, parseInt(resize.cols) || 80));
+          const rows = Math.max(1, Math.min(200, parseInt(resize.rows) || 24));
+          session.term.resize(cols, rows);
+          session.lastUserInput = Date.now();
+        } catch (e) {}
+        return;
+      }
     }
     session.lastUserInput = Date.now();
     session.term.write(msg);
