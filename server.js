@@ -217,10 +217,12 @@ const MAX_SCROLLBACK_SIZE = 2 * 1024 * 1024; // 2MB of scrollback data
 try { if (!fs.existsSync(SCROLLBACK_DIR)) fs.mkdirSync(SCROLLBACK_DIR); } catch (e) {}
 try { if (!fs.existsSync(CLIPBOARD_DIR)) fs.mkdirSync(CLIPBOARD_DIR); } catch (e) {}
 
-function saveScrollback(id, session) {
+function saveScrollback(id, session, sync) {
   try {
     const file = path.join(SCROLLBACK_DIR, id + '.json');
-    fs.writeFileSync(file, JSON.stringify(session.scrollback), 'utf8');
+    const data = JSON.stringify(session.scrollback);
+    if (sync) fs.writeFileSync(file, data, 'utf8');
+    else fs.writeFile(file, data, 'utf8', () => {}); // async — don't block event loop
   } catch (e) {}
 }
 
@@ -239,9 +241,9 @@ function deleteScrollback(id) {
   } catch (e) {}
 }
 
-function saveAllScrollback() {
+function saveAllScrollback(sync) {
   for (const [id, session] of sessions) {
-    saveScrollback(id, session);
+    saveScrollback(id, session, sync);
   }
 }
 
@@ -1172,11 +1174,16 @@ app.ws('/cluster/:serverUrl/ws/:id', (localWs, req) => {
 
   const wsUrl = serverUrl.replace(/^http/, 'ws') + '/ws/' + req.params.id + '?token=' + tokenEntry.token;
   const WebSocket = require('ws');
-  const remoteWs = new WebSocket(wsUrl, { rejectUnauthorized: false });
+  const remoteWs = new WebSocket(wsUrl, { rejectUnauthorized: false, perMessageDeflate: false });
+
+  // Disable Nagle on local side of proxy — send each keystroke immediately
+  if (localWs._socket) localWs._socket.setNoDelay(true);
 
   // Buffer local messages until remote is open
   const buffered = [];
   remoteWs.on('open', () => {
+    // Disable Nagle on remote side too — send output to client immediately
+    if (remoteWs._socket) remoteWs._socket.setNoDelay(true);
     console.log(`[${new Date().toISOString()}] Cluster WS proxy connected to ${serverUrl}/ws/${req.params.id}`);
     for (const b of buffered) {
       try { remoteWs.send(b.msg, { binary: b.isBinary }); } catch (e) {}
@@ -1712,7 +1719,7 @@ app.post('/api/restart', (req, res) => {
   console.log(`[${new Date().toISOString()}] Restart requested via API`);
   setTimeout(() => {
     saveSessionConfigs();
-    saveAllScrollback();
+    saveAllScrollback(true); // sync before restart
     const { execSync } = require('child_process');
     // Pull latest code before restarting
     try { execSync('git pull --ff-only', { cwd: __dirname, timeout: 15000 }); } catch (e) {
@@ -1770,6 +1777,9 @@ app.ws('/ws/:id', (ws, req) => {
   if (!authenticateWs(ws, req)) return;
   const session = sessions.get(req.params.id);
   if (!session) { ws.close(4000, 'Session ended'); return; }
+
+  // Disable Nagle — send each PTY output chunk immediately
+  if (ws._socket) ws._socket.setNoDelay(true);
 
   // Send scrollback as a single chunk, trimmed to replay limit
   try {
@@ -1858,7 +1868,7 @@ setInterval(saveAllScrollback, 30000);
 function gracefulShutdown(signal) {
   console.log(`[${new Date().toISOString()}] ${signal} received — saving state...`);
   saveSessionConfigs();
-  saveAllScrollback();
+  saveAllScrollback(true); // sync on shutdown — must complete before exit
   console.log(`[${new Date().toISOString()}] State saved. Exiting.`);
   process.exit(0);
 }
@@ -1872,7 +1882,7 @@ if (process.platform === 'win32') {
 }
 // Last resort — save on uncaught exit
 process.on('exit', () => {
-  try { saveSessionConfigs(); saveAllScrollback(); } catch (e) {}
+  try { saveSessionConfigs(); saveAllScrollback(true); } catch (e) {}
 });
 
 const HOST = process.env.WT_HOST || config.host || '127.0.0.1';
