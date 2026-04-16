@@ -9,6 +9,7 @@ Browser-based terminal manager for Windows. Monitor and control CLI sessions (in
 ### Terminal & Sessions
 - **Multiple sessions** — run several terminals in parallel, each with its own shell
 - **In-place switching** — switch between sessions without page reload
+- **Instant switching** — optional `keepSessionsOpen` mode keeps background WebSocket connections to all sessions, caches scrollback in memory, and switches instantly without re-downloading data
 - **Session persistence** — sessions survive server restarts with scrollback replay
 - **Auto-command** — startup command per session, waits for shell prompt before executing
 - **Fork session** — duplicate a Claude session with `--fork-session` from the sidebar
@@ -137,6 +138,7 @@ Config is stored in `config.json` (gitignored):
 | `cluster` | Yes | Remote servers list `[{name, url}]` |
 | `claudeHome` | Yes | User profile path for Claude session files (auto-detected if empty) |
 | `openInNewTab` | Yes | Whether new sessions open in a new browser tab |
+| `keepSessionsOpen` | Yes | Keep background WebSocket connections to all sessions for instant switching (default false) |
 
 ## Multi-Server Cluster
 

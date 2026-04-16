@@ -7,7 +7,7 @@ const fs = require('fs');
 const crypto = require('crypto');
 const { execFile } = require('child_process');
 
-const SERVER_VERSION = '1.3.6';
+const SERVER_VERSION = '1.4.0';
 const STALE_STATUS_TIMEOUT_MS = 5 * 60 * 1000; // 5 minutes — auto-correct stuck "working"/"waiting" status
 
 // --- Config: config.json > env vars > defaults ---
@@ -934,12 +934,13 @@ app.get('/api/config', (req, res) => {
   current.cluster = current.cluster || [];
   current.publicUrl = current.publicUrl || '';
   current.claudeHome = current.claudeHome || '';
+  current.keepSessionsOpen = current.keepSessionsOpen !== undefined ? current.keepSessionsOpen : false;
   // Never expose password in API response
   current.password = '***';
   res.json(current);
 });
 
-const ALLOWED_CONFIG_KEYS = ['port', 'host', 'user', 'password', 'shell', 'defaultCwd', 'scanFolders', 'defaultCommand', 'openInNewTab', 'serverName', 'scrollbackReplayLimit', 'cluster', 'publicUrl', 'claudeHome'];
+const ALLOWED_CONFIG_KEYS = ['port', 'host', 'user', 'password', 'shell', 'defaultCwd', 'scanFolders', 'defaultCommand', 'openInNewTab', 'serverName', 'scrollbackReplayLimit', 'cluster', 'publicUrl', 'claudeHome', 'keepSessionsOpen'];
 
 app.put('/api/config', express.json({ limit: '16kb' }), (req, res) => {
   try {
@@ -959,6 +960,7 @@ app.put('/api/config', express.json({ limit: '16kb' }), (req, res) => {
     if (sanitized.port !== undefined) sanitized.port = parseInt(sanitized.port) || 7681;
     if (sanitized.scanFolders && !Array.isArray(sanitized.scanFolders)) sanitized.scanFolders = [String(sanitized.scanFolders)];
     if (sanitized.openInNewTab !== undefined) sanitized.openInNewTab = !!sanitized.openInNewTab;
+    if (sanitized.keepSessionsOpen !== undefined) sanitized.keepSessionsOpen = !!sanitized.keepSessionsOpen;
     if (sanitized.scrollbackReplayLimit !== undefined) sanitized.scrollbackReplayLimit = Math.max(10240, parseInt(sanitized.scrollbackReplayLimit) || 102400);
     // Compare restart-sensitive keys against running values
     const RESTART_KEYS = { port: PORT, host: config.host || '127.0.0.1', shell: SHELL };
@@ -1831,15 +1833,24 @@ app.ws('/ws/:id', (ws, req) => {
     }
   } catch (e) {}
 
-  // Exclusive viewer: kick existing viewers before adding the new one
-  if (session.clients.size > 0) {
-    const kickMsg = JSON.stringify({ sessionTaken: getServerName() });
-    for (const existing of session.clients) {
-      try { existing.send(kickMsg); } catch (e) {}
-      try { existing.close(4001, 'Session opened elsewhere'); } catch (e) {}
+  const keepOpen = liveConfig('keepSessionsOpen', false);
+
+  if (keepOpen) {
+    // keepSessionsOpen mode: defer kick until client sends {"mode":"active"}
+    // New connections start as "pending" — no kick, no PTY input until mode is declared
+    ws._wtBackground = true; // default to background until mode message
+    ws._wtBrowserId = null;
+  } else {
+    // Legacy exclusive viewer: kick existing viewers before adding the new one
+    if (session.clients.size > 0) {
+      const kickMsg = JSON.stringify({ sessionTaken: getServerName() });
+      for (const existing of session.clients) {
+        try { existing.send(kickMsg); } catch (e) {}
+        try { existing.close(4001, 'Session opened elsewhere'); } catch (e) {}
+      }
+      session.clients.clear();
+      console.log(`[${new Date().toISOString()}] Kicked previous viewers from session ${req.params.id}`);
     }
-    session.clients.clear();
-    console.log(`[${new Date().toISOString()}] Kicked previous viewers from session ${req.params.id}`);
   }
 
   session.clients.add(ws);
@@ -1848,7 +1859,7 @@ app.ws('/ws/:id', (ws, req) => {
   ws.on('error', (err) => {
     console.error(`[${new Date().toISOString()}] WS error session ${req.params.id}: ${err.message}`);
   });
-  console.log(`[${new Date().toISOString()}] Client joined session ${req.params.id} (1 client, exclusive)`);
+  console.log(`[${new Date().toISOString()}] Client joined session ${req.params.id} (${session.clients.size} client(s)${keepOpen ? ', keepOpen' : ', exclusive'})`);
 
   ws.on('message', msg => {
     if (Buffer.isBuffer(msg)) msg = msg.toString();
@@ -1859,6 +1870,8 @@ app.ws('/ws/:id', (ws, req) => {
       // Heartbeat from client — just mark alive, don't forward to PTY
       if (msg.startsWith('{"heartbeat":')) { ws._wtAlive = true; return; }
       if (msg.startsWith('{"resize":')) {
+        // Background listeners should not resize the PTY
+        if (ws._wtBackground) return;
         try {
           const { resize } = JSON.parse(msg);
           const cols = Math.max(1, Math.min(500, parseInt(resize.cols) || 80));
@@ -1868,7 +1881,43 @@ app.ws('/ws/:id', (ws, req) => {
         } catch (e) {}
         return;
       }
+      // Handle mode messages for keepSessionsOpen
+      if (msg.startsWith('{"mode":')) {
+        try {
+          const parsed = JSON.parse(msg);
+          if (parsed.mode === 'active' || parsed.mode === 'background') {
+            // Feature gate: reject background connections when feature is off
+            if (!liveConfig('keepSessionsOpen', false) && parsed.mode === 'background') {
+              ws.close(4002, 'keepSessionsOpen disabled');
+              return;
+            }
+            const browserId = typeof parsed.browserId === 'string' ? parsed.browserId.slice(0, 64) : null;
+            ws._wtBrowserId = browserId;
+
+            if (parsed.mode === 'active') {
+              ws._wtBackground = false;
+              // Kick active viewers from DIFFERENT browserIds only
+              const kickMsg = JSON.stringify({ sessionTaken: getServerName() });
+              for (const existing of session.clients) {
+                if (existing === ws) continue;
+                if (existing._wtBrowserId === browserId && existing._wtBackground) continue; // same browser's background stays
+                if (existing._wtBackground) continue; // don't kick other browsers' background connections
+                // Kick other active viewers from different browsers
+                if (existing._wtBrowserId !== browserId) {
+                  try { existing.send(kickMsg); } catch (e) {}
+                  try { existing.close(4001, 'Session opened elsewhere'); } catch (e) {}
+                }
+              }
+            } else {
+              ws._wtBackground = true;
+            }
+          }
+        } catch (e) {}
+        return;
+      }
     }
+    // Block PTY input from background listeners
+    if (ws._wtBackground) return;
     session.lastUserInput = Date.now();
     session.term.write(msg);
   });
