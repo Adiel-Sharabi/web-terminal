@@ -1381,6 +1381,8 @@ app.post('/api/exec', express.json({ limit: '64kb' }), (req, res) => {
 
 // --- API: create session ---
 const MAX_SESSIONS = config.maxSessions || 10;
+const DEDUP_WINDOW_MS = 2000; // reject duplicate name+cwd within 2 seconds
+let _lastSessionCreate = { name: '', cwd: '', time: 0 };
 app.post('/api/sessions', express.json({ limit: '16kb' }), (req, res) => {
   if (sessions.size >= MAX_SESSIONS) {
     return res.status(429).json({ error: `Session limit reached (max ${MAX_SESSIONS})` });
@@ -1390,6 +1392,12 @@ app.post('/api/sessions', express.json({ limit: '16kb' }), (req, res) => {
   let cwd = String(req.body?.cwd || liveCwd).substring(0, 260);
   const name = String(req.body?.name || `Session ${sessions.size + 1}`).substring(0, 100).replace(/[\x00-\x1f]/g, '');
   const autoCommand = String(req.body?.autoCommand || getDefaultCommand() || '').substring(0, 500);
+  // Deduplicate rapid session creation (same name + cwd within time window)
+  const now = Date.now();
+  if (name === _lastSessionCreate.name && cwd === _lastSessionCreate.cwd && now - _lastSessionCreate.time < DEDUP_WINDOW_MS) {
+    return res.status(409).json({ error: 'Duplicate session — please wait before creating another with the same name and folder' });
+  }
+  _lastSessionCreate = { name, cwd, time: now };
   // Verify cwd exists — return error if user specified a bad path
   try {
     if (!fs.existsSync(cwd) || !fs.statSync(cwd).isDirectory()) {
