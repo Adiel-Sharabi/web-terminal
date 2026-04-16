@@ -22,6 +22,7 @@ let _claudeHome = null;
 function writeConfig(cfg) {
   fs.writeFileSync(CONFIG_FILE, JSON.stringify(cfg, null, 2), 'utf8');
   _claudeHome = null; // re-detect on next use
+  _liveConfigCache = cfg; _liveConfigTime = Date.now(); // update cache
 }
 let config = {};
 try {
@@ -38,14 +39,25 @@ let PASS = process.env.WT_PASS || config.password || 'admin';
 const SHELL = process.env.WT_SHELL || config.shell || 'C:\\Program Files\\Git\\bin\\bash.exe';
 function getServerName() { return liveConfig('serverName', os.hostname()); }
 
-// Live-reloadable settings (read from disk on each use)
-function liveConfig(key, fallback) {
+// Live-reloadable settings (cached, refreshed every 5s to avoid sync I/O stalls)
+let _liveConfigCache = null;
+let _liveConfigTime = 0;
+const LIVE_CONFIG_TTL = 5000; // 5 seconds
+
+function _refreshLiveConfig() {
   try {
     if (fs.existsSync(CONFIG_FILE)) {
-      const cfg = JSON.parse(fs.readFileSync(CONFIG_FILE, 'utf8'));
-      if (cfg[key] !== undefined) return cfg[key];
+      _liveConfigCache = JSON.parse(fs.readFileSync(CONFIG_FILE, 'utf8'));
     }
   } catch (e) {}
+  _liveConfigTime = Date.now();
+}
+
+function liveConfig(key, fallback) {
+  if (!_liveConfigCache || Date.now() - _liveConfigTime > LIVE_CONFIG_TTL) {
+    _refreshLiveConfig();
+  }
+  if (_liveConfigCache && _liveConfigCache[key] !== undefined) return _liveConfigCache[key];
   return fallback;
 }
 function getDefaultCwd() { return process.env.WT_CWD || liveConfig('defaultCwd', 'C:\\dev'); }
@@ -465,15 +477,21 @@ function authenticateWs(ws, req) {
 // --- API Token auth (for cluster inter-server communication) ---
 const API_TOKENS_FILE = path.join(__dirname, 'api-tokens.json');
 
+let _apiTokensCache = null, _apiTokensTime = 0;
 function loadApiTokens() {
-  try {
-    if (fs.existsSync(API_TOKENS_FILE)) return JSON.parse(fs.readFileSync(API_TOKENS_FILE, 'utf8'));
-  } catch (e) {}
-  return {};
+  if (!_apiTokensCache || Date.now() - _apiTokensTime > LIVE_CONFIG_TTL) {
+    try {
+      if (fs.existsSync(API_TOKENS_FILE)) _apiTokensCache = JSON.parse(fs.readFileSync(API_TOKENS_FILE, 'utf8'));
+      else _apiTokensCache = {};
+    } catch (e) { _apiTokensCache = {}; }
+    _apiTokensTime = Date.now();
+  }
+  return _apiTokensCache;
 }
 
 function saveApiTokens(tokens) {
   fs.writeFileSync(API_TOKENS_FILE, JSON.stringify(tokens, null, 2), 'utf8');
+  _apiTokensCache = tokens; _apiTokensTime = Date.now(); // update cache immediately
 }
 
 function verifyApiToken(token) {
@@ -501,26 +519,26 @@ function createApiToken(label) {
 }
 
 // --- Cluster: remote server management ---
+let _clusterTokensCache = null, _clusterTokensTime = 0;
 function loadClusterTokens() {
-  try {
-    if (fs.existsSync(CLUSTER_TOKENS_FILE)) return JSON.parse(fs.readFileSync(CLUSTER_TOKENS_FILE, 'utf8'));
-  } catch (e) {}
-  return {};
+  if (!_clusterTokensCache || Date.now() - _clusterTokensTime > LIVE_CONFIG_TTL) {
+    try {
+      if (fs.existsSync(CLUSTER_TOKENS_FILE)) _clusterTokensCache = JSON.parse(fs.readFileSync(CLUSTER_TOKENS_FILE, 'utf8'));
+      else _clusterTokensCache = {};
+    } catch (e) { _clusterTokensCache = {}; }
+    _clusterTokensTime = Date.now();
+  }
+  return _clusterTokensCache;
 }
 
 function saveClusterTokens(tokens) {
   fs.writeFileSync(CLUSTER_TOKENS_FILE, JSON.stringify(tokens, null, 2), 'utf8');
+  _clusterTokensCache = tokens; _clusterTokensTime = Date.now();
 }
 
-// Read cluster config live from disk (no restart needed)
+// Read cluster config (uses cached liveConfig)
 function getClusterConfig() {
-  try {
-    if (fs.existsSync(CONFIG_FILE)) {
-      const cfg = JSON.parse(fs.readFileSync(CONFIG_FILE, 'utf8'));
-      return cfg.cluster || [];
-    }
-  } catch (e) {}
-  return [];
+  return liveConfig('cluster', []);
 }
 
 // --- Login page ---
