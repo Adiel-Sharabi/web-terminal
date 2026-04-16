@@ -178,6 +178,13 @@ test.describe('Cluster API', () => {
     expect(res.status()).toBe(401);
     await ctx.dispose();
   });
+
+  test('cluster proxy rejects unauthenticated remote server for folder history', async () => {
+    const ctx = await authCtx();
+    const res = await ctx.get('/cluster/' + encodeURIComponent('https://fake.example.com') + '/api/history/folders');
+    expect(res.status()).toBe(401);
+    await ctx.dispose();
+  });
 });
 
 // ============================================================

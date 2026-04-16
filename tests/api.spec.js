@@ -534,6 +534,34 @@ test.describe('/api/version', () => {
 });
 
 // ============================================================
+// 6b. /api/history/folders
+// ============================================================
+
+test.describe('/api/history/folders', () => {
+  test('returns an array of folder paths', async () => {
+    const ctx = await authCtx();
+    const res = await ctx.get('/api/history/folders');
+    expect(res.status()).toBe(200);
+    const data = await res.json();
+    expect(Array.isArray(data)).toBe(true);
+    // Should contain at least one folder (scanned from config)
+    expect(data.length).toBeGreaterThan(0);
+    // Each entry should be a string
+    for (const f of data) {
+      expect(typeof f).toBe('string');
+    }
+    await ctx.dispose();
+  });
+
+  test('requires authentication', async () => {
+    const ctx = await noAuthCtx();
+    const res = await ctx.get('/api/history/folders');
+    expect(res.status()).toBe(401);
+    await ctx.dispose();
+  });
+});
+
+// ============================================================
 // 7. Session Hook Endpoint
 // ============================================================
 
