@@ -7,7 +7,7 @@ const fs = require('fs');
 const crypto = require('crypto');
 const { execFile } = require('child_process');
 
-const SERVER_VERSION = '1.3.3';
+const SERVER_VERSION = '1.3.4';
 const STALE_STATUS_TIMEOUT_MS = 5 * 60 * 1000; // 5 minutes — auto-correct stuck "working"/"waiting" status
 
 // --- Config: config.json > env vars > defaults ---
@@ -117,6 +117,29 @@ function saveClaudeSessionNames(names) {
   fs.writeFileSync(CLAUDE_SESSION_NAMES_FILE, JSON.stringify(names, null, 2));
 }
 
+/** Detect the most recently modified Claude session ID from the project's JSONL files */
+function detectClaudeSessionIdFromDir(cwd) {
+  try {
+    const projectDir = path.join(getClaudeProjectsDir(),
+      cwd.replace(/^([A-Z]):\\/, '$1--').replace(/[\\/]/g, '-'));
+    if (fs.existsSync(projectDir)) {
+      const newest = fs.readdirSync(projectDir)
+        .filter(f => f.endsWith('.jsonl'))
+        .map(f => ({ id: f.replace('.jsonl', ''), mtime: fs.statSync(path.join(projectDir, f)).mtimeMs }))
+        .sort((a, b) => b.mtime - a.mtime)[0];
+      if (newest) return newest.id;
+    }
+  } catch (e) {}
+  return null;
+}
+
+/** Extract Claude session ID from a command string (--resume flag) */
+function extractClaudeSessionIdFromCmd(cmd) {
+  if (!cmd) return null;
+  const match = cmd.match(/--resume\s+([a-f0-9-]+)/i);
+  return match ? match[1] : null;
+}
+
 // --- Password helpers ---
 const DEFAULT_PASSWORDS = ['admin'];
 
@@ -199,7 +222,7 @@ function loadSessionConfigs() {
 function saveSessionConfigs() {
   const configs = [];
   for (const [id, s] of sessions) {
-    configs.push({ id, name: s.name, cwd: s.cwd, autoCommand: s.autoCommand || '' });
+    configs.push({ id, name: s.name, cwd: s.cwd, autoCommand: s.autoCommand || '', claudeSessionId: s.claudeSessionId || null });
   }
   try {
     fs.writeFileSync(SESSIONS_FILE, JSON.stringify(configs, null, 2), 'utf8');
@@ -247,7 +270,7 @@ function saveAllScrollback(sync) {
   }
 }
 
-function createSession(id, cwd, name, autoCommand, savedScrollback) {
+function createSession(id, cwd, name, autoCommand, savedScrollback, claudeSessionId) {
   const sessionEnv = buildSafeEnv();
   sessionEnv.WT_SESSION_ID = id;
   sessionEnv.WT_SESSION_PORT = String(PORT);
@@ -273,7 +296,8 @@ function createSession(id, cwd, name, autoCommand, savedScrollback) {
   const session = {
     term, clients: new Set(), scrollback, scrollbackSize, name: name || `Session ${id}`,
     cwd: cwd || DEFAULT_CWD, idleTimer: null, lastActivity: Date.now(),
-    lastUserInput: 0, status: 'active', hookStatus: false, lastHookActivity: 0, autoCommand: autoCommand || ''
+    lastUserInput: 0, status: 'active', hookStatus: false, lastHookActivity: 0, autoCommand: autoCommand || '',
+    claudeSessionId: claudeSessionId || null
   };
   sessions.set(id, session);
 
@@ -293,26 +317,11 @@ function createSession(id, cwd, name, autoCommand, savedScrollback) {
     console.log(`[${new Date().toISOString()}] Session ${id} shell exited`);
     // Persist session name for Claude sessions so it survives in the old sessions list
     if (session.autoCommand && /\bclaude\b/i.test(session.autoCommand)) {
-      let claudeId = null;
-      // For --resume sessions, extract the ID directly
-      const resumeMatch = session.autoCommand.match(/--resume\s+([a-f0-9-]+)/i);
-      if (resumeMatch) {
-        claudeId = resumeMatch[1];
-      } else {
-        // For new sessions, find the most recently modified JSONL in the project dir
-        try {
-          const projectDir = path.join(getClaudeProjectsDir(),
-            session.cwd.replace(/^([A-Z]):\\/, '$1--').replace(/[\\/]/g, '-'));
-          if (fs.existsSync(projectDir)) {
-            const newest = fs.readdirSync(projectDir)
-              .filter(f => f.endsWith('.jsonl'))
-              .map(f => ({ id: f.replace('.jsonl', ''), mtime: fs.statSync(path.join(projectDir, f)).mtimeMs }))
-              .sort((a, b) => b.mtime - a.mtime)[0];
-            if (newest) claudeId = newest.id;
-          }
-        } catch (e) {}
-      }
+      const claudeId = session.claudeSessionId
+        || extractClaudeSessionIdFromCmd(session.autoCommand)
+        || detectClaudeSessionIdFromDir(session.cwd);
       if (claudeId) {
+        session.claudeSessionId = claudeId;
         const names = loadClaudeSessionNames();
         if (!names[claudeId]) { names[claudeId] = session.name; saveClaudeSessionNames(names); }
       }
@@ -349,6 +358,27 @@ function createSession(id, cwd, name, autoCommand, savedScrollback) {
         console.log(`[${new Date().toISOString()}] Session ${id} auto-command (fallback): ${autoCommand}`);
       }
     }, 5000);
+  }
+
+  // Proactively detect Claude session ID if this is a Claude session
+  if (autoCommand && /\bclaude\b/i.test(autoCommand)) {
+    // Extract from --resume in the command itself
+    const cmdClaudeId = extractClaudeSessionIdFromCmd(autoCommand);
+    if (cmdClaudeId) {
+      session.claudeSessionId = cmdClaudeId;
+    } else {
+      // Schedule detection after Claude has time to create its session file
+      setTimeout(() => {
+        if (!session.claudeSessionId) {
+          const detected = detectClaudeSessionIdFromDir(session.cwd);
+          if (detected) {
+            session.claudeSessionId = detected;
+            console.log(`[${new Date().toISOString()}] Session ${id} detected Claude session: ${detected}`);
+            saveSessionConfigs();
+          }
+        }
+      }, 15000); // 15s — give Claude time to initialize
+    }
   }
 
   console.log(`[${new Date().toISOString()}] Session ${id} created (PID ${term.pid}, cwd: ${session.cwd}${autoCommand ? ', cmd: ' + autoCommand : ''})`);
@@ -1308,25 +1338,12 @@ app.post('/api/clipboard-image', express.raw({ type: 'image/*', limit: '10mb' })
 app.get('/api/sessions', (req, res) => {
   const list = [];
   for (const [id, s] of sessions) {
-    // Detect Claude session ID for active Claude sessions
-    let claudeSessionId = null;
-    if (s.autoCommand && /\bclaude\b/i.test(s.autoCommand)) {
-      const resumeMatch = s.autoCommand.match(/--resume\s+([a-f0-9-]+)/i);
-      if (resumeMatch) {
-        claudeSessionId = resumeMatch[1];
-      } else {
-        try {
-          const projectDir = path.join(getClaudeProjectsDir(),
-            s.cwd.replace(/^([A-Z]):\\/, '$1--').replace(/[\\/]/g, '-'));
-          if (fs.existsSync(projectDir)) {
-            const newest = fs.readdirSync(projectDir)
-              .filter(f => f.endsWith('.jsonl'))
-              .map(f => ({ id: f.replace('.jsonl', ''), mtime: fs.statSync(path.join(projectDir, f)).mtimeMs }))
-              .sort((a, b) => b.mtime - a.mtime)[0];
-            if (newest) claudeSessionId = newest.id;
-          }
-        } catch (e) {}
-      }
+    // Detect Claude session ID for active Claude sessions (use cached value or detect fresh)
+    let claudeSessionId = s.claudeSessionId || null;
+    if (!claudeSessionId && s.autoCommand && /\bclaude\b/i.test(s.autoCommand)) {
+      claudeSessionId = extractClaudeSessionIdFromCmd(s.autoCommand)
+        || detectClaudeSessionIdFromDir(s.cwd);
+      if (claudeSessionId) s.claudeSessionId = claudeSessionId; // cache it
     }
     correctStaleStatus(s);
     list.push({ id, name: s.name, cwd: s.cwd, clients: s.clients.size, pid: s.term.pid, status: s.status, lastActivity: s.lastActivity, autoCommand: s.autoCommand || '', claudeSessionId });
@@ -1437,24 +1454,13 @@ app.patch('/api/sessions/:id', express.json({ limit: '16kb' }), (req, res) => {
     }
     // Persist name for the Claude session history list
     if (session.autoCommand && /\bclaude\b/i.test(session.autoCommand)) {
-      let claudeId = null;
-      const resumeMatch = session.autoCommand.match(/--resume\s+([a-f0-9-]+)/i);
-      if (resumeMatch) {
-        claudeId = resumeMatch[1];
-      } else {
-        try {
-          const projectDir = path.join(getClaudeProjectsDir(),
-            session.cwd.replace(/^([A-Z]):\\/, '$1--').replace(/[\\/]/g, '-'));
-          if (fs.existsSync(projectDir)) {
-            const newest = fs.readdirSync(projectDir)
-              .filter(f => f.endsWith('.jsonl'))
-              .map(f => ({ id: f.replace('.jsonl', ''), mtime: fs.statSync(path.join(projectDir, f)).mtimeMs }))
-              .sort((a, b) => b.mtime - a.mtime)[0];
-            if (newest) claudeId = newest.id;
-          }
-        } catch (e) {}
+      const claudeId = session.claudeSessionId
+        || extractClaudeSessionIdFromCmd(session.autoCommand)
+        || detectClaudeSessionIdFromDir(session.cwd);
+      if (claudeId) {
+        session.claudeSessionId = claudeId;
+        const names = loadClaudeSessionNames(); names[claudeId] = newName; saveClaudeSessionNames(names);
       }
-      if (claudeId) { const names = loadClaudeSessionNames(); names[claudeId] = newName; saveClaudeSessionNames(names); }
     }
   }
   if (req.body?.autoCommand !== undefined) session.autoCommand = String(req.body.autoCommand).substring(0, 500);
@@ -1861,13 +1867,18 @@ if (savedSessions.length > 0) {
   console.log(`Restoring ${savedSessions.length} session(s) from sessions.json...`);
   for (const cfg of savedSessions) {
     let cmd = cfg.autoCommand || '';
-    // Auto-add --continue when restoring claude sessions so they resume instead of starting fresh
+    // Auto-add --resume or --continue when restoring claude sessions so they resume instead of starting fresh
     if (cmd && /\bclaude\b/i.test(cmd) && !/(--continue|--resume)\b/.test(cmd)) {
-      cmd = cmd.trimEnd() + ' --continue';
-      console.log(`Session ${cfg.id}: auto-added --continue to resume claude`);
+      if (cfg.claudeSessionId) {
+        cmd = cmd.trimEnd() + ' --resume ' + cfg.claudeSessionId;
+        console.log(`Session ${cfg.id}: auto-added --resume ${cfg.claudeSessionId} to resume specific claude session`);
+      } else {
+        cmd = cmd.trimEnd() + ' --continue';
+        console.log(`Session ${cfg.id}: auto-added --continue to resume claude (no session ID saved)`);
+      }
     }
     const savedScrollback = loadScrollback(cfg.id);
-    createSession(cfg.id, cfg.cwd, cfg.name, cmd, savedScrollback);
+    createSession(cfg.id, cfg.cwd, cfg.name, cmd, savedScrollback, cfg.claudeSessionId || null);
   }
 } else {
   createSession(crypto.randomUUID(), DEFAULT_CWD, 'Default', '');
