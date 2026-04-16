@@ -4,7 +4,8 @@ const { authCtx } = require('./test-helpers');
 const fs = require('fs');
 const path = require('path');
 
-const SESSIONS_FILE = path.join(__dirname, '..', 'sessions.json');
+// Test server uses WT_TEST=1, so sessions file is sessions.test.json
+const SESSIONS_FILE = path.join(__dirname, '..', 'sessions.test.json');
 
 // ============================================================
 // Claude Session ID Persistence (Fix #4: Wrong session continue)
@@ -12,9 +13,21 @@ const SESSIONS_FILE = path.join(__dirname, '..', 'sessions.json');
 
 test.describe('Claude Session ID Persistence', () => {
 
+  /** Helper: delete all sessions except the first one to free up capacity */
+  async function cleanupSessions(ctx) {
+    const listRes = await ctx.get('/api/sessions');
+    const sessions = await listRes.json();
+    // Keep only the first session (default), delete the rest
+    for (let i = 1; i < sessions.length; i++) {
+      try { await ctx.delete('/api/sessions/' + sessions[i].id); } catch (e) {}
+    }
+  }
+
   test('session config saves and loads claudeSessionId', async () => {
     const ctx = await authCtx();
     try {
+      await cleanupSessions(ctx);
+
       // Create a session with a claude autoCommand that includes --resume
       const fakeClaudeId = 'abcd1234-5678-9abc-def0-123456789abc';
       const res = await ctx.post('/api/sessions', {
@@ -52,6 +65,8 @@ test.describe('Claude Session ID Persistence', () => {
   test('--resume flag is used when claudeSessionId is available in sessions.json', async () => {
     const ctx = await authCtx();
     try {
+      await cleanupSessions(ctx);
+
       // Create a session with a plain claude command (no --resume or --continue)
       const res = await ctx.post('/api/sessions', {
         data: {
@@ -91,6 +106,8 @@ test.describe('Claude Session ID Persistence', () => {
   test('--continue fallback when no claudeSessionId is saved', async () => {
     const ctx = await authCtx();
     try {
+      await cleanupSessions(ctx);
+
       // Create a session with a plain claude command
       const res = await ctx.post('/api/sessions', {
         data: {
@@ -121,6 +138,8 @@ test.describe('Claude Session ID Persistence', () => {
   test('session with --resume in autoCommand extracts claudeSessionId at creation', async () => {
     const ctx = await authCtx();
     try {
+      await cleanupSessions(ctx);
+
       const fakeId = 'face0000-1111-2222-3333-444455556666';
       const res = await ctx.post('/api/sessions', {
         data: {
@@ -156,6 +175,8 @@ test.describe('Claude Session ID Persistence', () => {
   test('non-claude sessions have null claudeSessionId', async () => {
     const ctx = await authCtx();
     try {
+      await cleanupSessions(ctx);
+
       const res = await ctx.post('/api/sessions', {
         data: { name: 'Plain Shell', autoCommand: '' },
       });
