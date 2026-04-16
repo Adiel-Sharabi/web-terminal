@@ -14,8 +14,8 @@ async function getSessions(request) {
   return resp.json();
 }
 
-function connectWs(page, sessionId) {
-  return page.evaluate((id) => {
+function connectWs(page, sessionId, browserId) {
+  return page.evaluate(({ id, bid }) => {
     return new Promise((resolve, reject) => {
       const proto = location.protocol === 'https:' ? 'wss:' : 'ws:';
       const ws = new WebSocket(`${proto}//${location.host}/ws/${id}`);
@@ -24,13 +24,18 @@ function connectWs(page, sessionId) {
       ws.onmessage = e => {
         if (typeof e.data === 'string') window._testMessages.push(e.data);
       };
-      ws.onopen = () => resolve('open');
+      ws.onopen = () => {
+        // Declare active mode so server applies exclusive viewer behavior
+        // (keepSessionsOpen defaults to true, which requires explicit mode declaration)
+        ws.send(JSON.stringify({ mode: 'active', browserId: bid || ('test-' + Math.random().toString(36).slice(2)) }));
+        resolve('open');
+      };
       ws.onerror = () => reject('ws error');
       ws.onclose = (e) => {
         window._testMessages.push(`__CLOSE__:${e.code}`);
       };
     });
-  }, sessionId);
+  }, { id: sessionId, bid: browserId });
 }
 
 test.describe('Exclusive Viewer', () => {
