@@ -78,6 +78,13 @@ If new user-facing features were added, update `README.md`:
 - To restart: `taskkill /F /IM node.exe` (may need admin elevation if running as service), then `node server.js &`
 - Server listens on port 7681, config in `config.json` (gitignored password hashes)
 
+## Development Rules
+- **Every code change must be backed by tests** — write failing tests first, then fix, then verify all tests pass
+- **Never stop or restart the production server** without explicit user permission
+- **All tests must pass before committing** — no exceptions
+- **No secrets in commits** — passwords, tokens, API keys must never appear in tracked files
+- **No personal info in tracked git** — personal data, machine-specific paths, and user-identifying info must stay out of version control
+
 ## Cluster
 - `config.json` has a `cluster` array of `{name, url}` servers and a `publicUrl` for the local server
 - `/api/cluster/sessions` merges local + remote sessions — must skip fetching from servers whose URL matches `publicUrl` to avoid session duplication
