@@ -449,7 +449,7 @@
     let defaultCwd = 'C:\\dev';
     let defaultCommand = '';
     let clusterServers = []; // cached from last fetch
-    let keepSessionsOpen = false;
+    let keepSessionsOpen = true;
     const browserId = sessionStorage.getItem('wt_browserId') || (() => {
       const id = crypto.randomUUID();
       sessionStorage.setItem('wt_browserId', id);
@@ -2106,7 +2106,7 @@
       hostname = hostData.hostname;
       defaultCwd = cfg.defaultCwd || 'C:\\dev';
       defaultCommand = cfg.defaultCommand || '';
-      keepSessionsOpen = !!cfg.keepSessionsOpen;
+      keepSessionsOpen = cfg.keepSessionsOpen !== undefined ? !!cfg.keepSessionsOpen : true;
       if (hostname) {
         document.getElementById('hostName').textContent = `[${hostname}]`;
         document.getElementById('hostLabel').textContent = hostname;
