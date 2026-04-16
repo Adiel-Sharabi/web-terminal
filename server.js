@@ -7,7 +7,7 @@ const fs = require('fs');
 const crypto = require('crypto');
 const { execFile } = require('child_process');
 
-const SERVER_VERSION = '1.3.4';
+const SERVER_VERSION = '1.3.5';
 const STALE_STATUS_TIMEOUT_MS = 5 * 60 * 1000; // 5 minutes — auto-correct stuck "working"/"waiting" status
 
 // --- Config: config.json > env vars > defaults ---
@@ -314,6 +314,11 @@ function createSession(id, cwd, name, autoCommand, savedScrollback, claudeSessio
   sessions.set(id, session);
 
   term.onData(data => {
+    // Strip DSR response (\x1b[0n) injected as ConPTY flush hint
+    if (data.includes('\x1b[0n')) {
+      data = data.replace(/\x1b\[0n/g, '');
+      if (!data) return; // pure DSR response, nothing to forward
+    }
     session.scrollback.push(data);
     session.scrollbackSize = (session.scrollbackSize || 0) + data.length;
     while (session.scrollbackSize > MAX_SCROLLBACK_SIZE && session.scrollback.length > 1) {
@@ -1871,6 +1876,10 @@ app.ws('/ws/:id', (ws, req) => {
     }
     session.lastUserInput = Date.now();
     session.term.write(msg);
+    // ConPTY output flush hint: DSR query forces ConPTY to flush its output buffer
+    // immediately instead of waiting for its internal timer (~500-1500ms).
+    // The terminal responds with \x1b[0n which we filter out before sending to clients.
+    session.term.write('\x1b[5n');
   });
 
   ws.on('close', () => {
