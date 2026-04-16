@@ -30,7 +30,7 @@ test.describe('Stale session status detection', () => {
     ctx = await authCtx();
     // Create a fresh session
     const res = await ctx.post('/api/sessions', {
-      data: { name: 'StaleTest' },
+      data: { name: `StaleTest-${Date.now()}` },
     });
     const body = await res.json();
     sessionId = body.id;

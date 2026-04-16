@@ -89,6 +89,57 @@ test.describe('Session Lifecycle', () => {
     await ctx.dispose();
   });
 
+  test('rapid duplicate session creation returns 409', async () => {
+    const ctx = await authCtx();
+    const created = [];
+    try {
+      // Create first session
+      const res1 = await ctx.post('/api/sessions', {
+        data: { name: 'Dup Test', cwd: 'C:\\dev' },
+      });
+      expect(res1.status()).toBe(200);
+      created.push((await res1.json()).id);
+
+      // Immediately create another with same name + cwd — should be rejected
+      const res2 = await ctx.post('/api/sessions', {
+        data: { name: 'Dup Test', cwd: 'C:\\dev' },
+      });
+      expect(res2.status()).toBe(409);
+      const data = await res2.json();
+      expect(data.error).toContain('Duplicate');
+    } finally {
+      for (const id of created) {
+        try { await ctx.delete('/api/sessions/' + id); } catch (e) {}
+      }
+      await ctx.dispose();
+    }
+  });
+
+  test('different name or cwd is not rejected as duplicate', async () => {
+    const ctx = await authCtx();
+    const created = [];
+    try {
+      // Create first session
+      const res1 = await ctx.post('/api/sessions', {
+        data: { name: 'Unique A' },
+      });
+      expect(res1.status()).toBe(200);
+      created.push((await res1.json()).id);
+
+      // Different name — should succeed
+      const res2 = await ctx.post('/api/sessions', {
+        data: { name: 'Unique B' },
+      });
+      expect(res2.status()).toBe(200);
+      created.push((await res2.json()).id);
+    } finally {
+      for (const id of created) {
+        try { await ctx.delete('/api/sessions/' + id); } catch (e) {}
+      }
+      await ctx.dispose();
+    }
+  });
+
   test('PATCH session with autoCommand update', async () => {
     const ctx = await authCtx();
     const createRes = await ctx.post('/api/sessions', {

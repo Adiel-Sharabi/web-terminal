@@ -1343,27 +1343,38 @@
       }
     }
 
+    let _creatingSession = false;
     async function createSession() {
-      const serverUrl = document.getElementById('newServer').value || null;
-      const name = document.getElementById('newName').value || undefined;
-      const cwd = document.getElementById('newCwd').value || undefined;
-      const autoCommand = document.getElementById('newCmd').value || '';
-      const apiBase = serverUrl ? `/cluster/${encodeURIComponent(serverUrl)}/api` : '/api';
-      const res = await fetch(`${apiBase}/sessions`, {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ name, cwd, autoCommand })
-      });
-      const data = await res.json();
-      if (!res.ok) {
-        alert(data.error || 'Failed to create session');
-        return;
-      }
-      if (data.id) {
-        document.getElementById('newSessionForm').classList.remove('show');
-        document.getElementById('newName').value = '';
-        switchSession(data.id, serverUrl);
-        closeSidebarIfUnpinned();
+      if (_creatingSession) return;
+      _creatingSession = true;
+      const submitBtn = document.querySelector('#newSessionForm button[type="submit"]');
+      if (submitBtn) submitBtn.disabled = true;
+      try {
+        const serverUrl = document.getElementById('newServer').value || null;
+        const name = document.getElementById('newName').value || undefined;
+        const cwd = document.getElementById('newCwd').value || undefined;
+        const autoCommand = document.getElementById('newCmd').value || '';
+        const apiBase = serverUrl ? `/cluster/${encodeURIComponent(serverUrl)}/api` : '/api';
+        const res = await fetch(`${apiBase}/sessions`, {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({ name, cwd, autoCommand })
+        });
+        const data = await res.json();
+        if (!res.ok) {
+          alert(data.error || 'Failed to create session');
+          return;
+        }
+        if (data.id) {
+          document.getElementById('newSessionForm').classList.remove('show');
+          document.getElementById('newName').value = '';
+          switchSession(data.id, serverUrl);
+          closeSidebarIfUnpinned();
+        }
+      } finally {
+        _creatingSession = false;
+        const submitBtn = document.querySelector('#newSessionForm button[type="submit"]');
+        if (submitBtn) submitBtn.disabled = false;
       }
     }
 
