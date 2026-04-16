@@ -5,6 +5,8 @@ module.exports = defineConfig({
   testDir: './tests',
   timeout: 30000,
   retries: 0,
+  workers: 1,
+  testIgnore: ['**/diagnostic*', '**/mobile-debug*'],
   globalTeardown: path.join(__dirname, 'tests', 'global-teardown.js'),
   use: {
     baseURL: 'http://localhost:17681',

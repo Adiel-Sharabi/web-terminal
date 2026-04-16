@@ -92,6 +92,22 @@ Three layers prevent console window flashing on Windows:
 - **No secrets in commits** — passwords, tokens, API keys must never appear in tracked files
 - **No personal info in tracked git** — personal data, machine-specific paths, and user-identifying info must stay out of version control
 
+## Testing Notes
+- `diagnostic.spec.js` and `mobile-debug.spec.js` require special env vars/setup and are excluded from default `npx playwright test` runs
+- `diagnostic.spec.js` needs `DIAG_PASS` env var and its own config: `DIAG_PASS=yourpass npx playwright test tests/diagnostic.spec.js --config playwright.diag.config.js`
+- Tests run serially (`workers: 1`) because the max session limit (10) causes flaky failures when tests create sessions in parallel
+- The `conpty_console_list_agent.js: AttachConsole failed` errors in test output are harmless node-pty warnings when killing sessions in Session 0 / test environment
+- GitHub repo: `Adiel-Sharabi/web-terminal`
+
+## Issue Workflow
+When working through GitHub issues, use this process:
+1. `gh issue list --state open` to check for new issues
+2. Read each issue, assess clarity — comment if unclear
+3. Reproduce the bug before fixing (do not fix what you can't reproduce)
+4. Write tests first, then fix, then verify all tests pass
+5. Use sub-agents for individual issue fixes to keep the orchestrator context clean
+6. Commit and push when all tests pass
+
 ## Cluster
 - `config.json` has a `cluster` array of `{name, url}` servers and a `publicUrl` for the local server
 - `/api/cluster/sessions` merges local + remote sessions — must skip fetching from servers whose URL matches `publicUrl` to avoid session duplication
