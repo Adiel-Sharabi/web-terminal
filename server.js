@@ -7,7 +7,7 @@ const fs = require('fs');
 const crypto = require('crypto');
 const { execFile } = require('child_process');
 
-const SERVER_VERSION = '1.4.0';
+const SERVER_VERSION = '1.4.1';
 const STALE_STATUS_TIMEOUT_MS = 5 * 60 * 1000; // 5 minutes — auto-correct stuck "working"/"waiting" status
 
 // --- Config: config.json > env vars > defaults ---
@@ -1216,7 +1216,7 @@ app.all('/cluster/:serverUrl/api/*', express.raw({ type: '*/*', limit: '10mb' })
   }
 });
 
-// Proxy WebSocket to remote server
+// Proxy WebSocket to remote server (with transparent reconnection)
 app.ws('/cluster/:serverUrl/ws/:id', (localWs, req) => {
   if (!authenticateWs(localWs, req)) return;
 
@@ -1227,54 +1227,136 @@ app.ws('/cluster/:serverUrl/ws/:id', (localWs, req) => {
 
   const wsUrl = serverUrl.replace(/^http/, 'ws') + '/ws/' + req.params.id + '?token=' + tokenEntry.token;
   const WebSocket = require('ws');
-  const remoteWs = new WebSocket(wsUrl, { rejectUnauthorized: false, perMessageDeflate: false });
+  const sessionId = req.params.id;
+  const logPfx = `Cluster proxy ${serverUrl}/ws/${sessionId.substring(0, 8)}`;
 
-  // Disable Nagle on local side of proxy — send each keystroke immediately
+  // Disable Nagle on local side of proxy
   if (localWs._socket) localWs._socket.setNoDelay(true);
 
-  // Buffer local messages until remote is open
+  // Mutable remote connection — replaced on reconnect
+  let remoteWs = null;
+  let remoteAlive = false;
+  let localClosed = false;
+  let reconnectAttempts = 0;
+  let reconnectTimer = null;
+  let proxyPingTimer = null;
   const buffered = [];
-  remoteWs.on('open', () => {
-    // Disable Nagle on remote side too — send output to client immediately
-    if (remoteWs._socket) remoteWs._socket.setNoDelay(true);
-    console.log(`[${new Date().toISOString()}] Cluster WS proxy connected to ${serverUrl}/ws/${req.params.id}`);
-    for (const b of buffered) {
-      try { remoteWs.send(b.msg, { binary: b.isBinary }); } catch (e) {}
+  const MAX_RECONNECT_ATTEMPTS = 10;
+  const MAX_BUFFER_SIZE = 100;
+
+  function connectRemote() {
+    const ws = new WebSocket(wsUrl, { rejectUnauthorized: false, perMessageDeflate: false });
+
+    ws.on('open', () => {
+      if (ws._socket) ws._socket.setNoDelay(true);
+      remoteWs = ws;
+      remoteAlive = true;
+      reconnectAttempts = 0;
+      const label = reconnectAttempts === 0 ? 'connected' : 'reconnected';
+      console.log(`[${new Date().toISOString()}] ${logPfx}: ${label}`);
+      // Flush buffered input
+      for (const b of buffered) {
+        try { ws.send(b.msg, { binary: b.isBinary }); } catch (e) {}
+      }
+      buffered.length = 0;
+      // Ask remote to re-send current screen state so client isn't stale
+      try { ws.send(JSON.stringify({ requestResize: true })); } catch (e) {}
+      startProxyPing();
+    });
+
+    ws.on('message', (data, isBinary) => {
+      if (localClosed) return;
+      try { localWs.send(data, { binary: isBinary }); } catch (e) {}
+    });
+
+    ws.on('pong', () => { remoteAlive = true; });
+
+    ws.on('close', (code, reason) => {
+      const reasonStr = reason ? reason.toString() : '';
+      console.log(`[${new Date().toISOString()}] ${logPfx}: remote closed (${code} ${reasonStr})`);
+      stopProxyPing();
+      // Session-level closes: don't reconnect, propagate to browser
+      if (code === 4000 || code === 4001) {
+        try { localWs.close(code, reason); } catch (e) {}
+        return;
+      }
+      // Unexpected close: try transparent reconnect
+      if (!localClosed) attemptReconnect();
+    });
+
+    ws.on('error', (err) => {
+      console.error(`[${new Date().toISOString()}] ${logPfx}: remote error: ${err.message}`);
+      stopProxyPing();
+      // The 'close' event will fire after 'error', which triggers reconnect
+    });
+  }
+
+  function attemptReconnect() {
+    if (localClosed) return;
+    if (reconnectAttempts >= MAX_RECONNECT_ATTEMPTS) {
+      console.log(`[${new Date().toISOString()}] ${logPfx}: giving up after ${MAX_RECONNECT_ATTEMPTS} reconnect attempts`);
+      try { localWs.close(1001, 'Remote unreachable'); } catch (e) {}
+      return;
     }
-    buffered.length = 0;
-  });
-  remoteWs.on('message', (data, isBinary) => {
-    try { localWs.send(data, { binary: isBinary }); } catch (e) {}
-  });
-  remoteWs.on('close', (code, reason) => {
-    console.log(`[${new Date().toISOString()}] Cluster WS proxy closed: ${code} ${reason}`);
-    try { localWs.close(); } catch (e) {}
-  });
-  remoteWs.on('error', (err) => {
-    console.error(`[${new Date().toISOString()}] Cluster WS proxy error: ${err.message}`);
-    try { localWs.close(); } catch (e) {}
-  });
+    reconnectAttempts++;
+    // Exponential backoff: 500ms, 1s, 2s, 4s, capped at 5s
+    const delay = Math.min(5000, 500 * Math.pow(2, reconnectAttempts - 1));
+    console.log(`[${new Date().toISOString()}] ${logPfx}: reconnecting in ${delay}ms (attempt ${reconnectAttempts})`);
+    reconnectTimer = setTimeout(() => {
+      if (!localClosed) connectRemote();
+    }, delay);
+  }
+
+  // Ping remote every 20s to detect dead connections faster than the 30s server keepalive
+  function startProxyPing() {
+    stopProxyPing();
+    proxyPingTimer = setInterval(() => {
+      if (!remoteWs || remoteWs.readyState !== WebSocket.OPEN) return;
+      if (!remoteAlive) {
+        // Missed pong — connection is dead, force reconnect
+        console.log(`[${new Date().toISOString()}] ${logPfx}: remote ping timeout, forcing reconnect`);
+        try { remoteWs.terminate(); } catch (e) {}
+        return;
+      }
+      remoteAlive = false;
+      try { remoteWs.ping(); } catch (e) {}
+    }, 20000);
+  }
+
+  function stopProxyPing() {
+    if (proxyPingTimer) { clearInterval(proxyPingTimer); proxyPingTimer = null; }
+  }
+
+  function cleanup() {
+    localClosed = true;
+    stopProxyPing();
+    if (reconnectTimer) { clearTimeout(reconnectTimer); reconnectTimer = null; }
+    if (remoteWs) { try { remoteWs.close(); } catch (e) {} }
+  }
+
+  // Start first connection
+  connectRemote();
+
   localWs._wtAlive = true;
   localWs.on('pong', () => { localWs._wtAlive = true; });
   localWs.on('message', (msg, isBinary) => {
     // Absorb client heartbeats — don't forward to remote PTY
-    // Fast path: only convert to string if first byte is '{' (0x7B)
     const firstByte = Buffer.isBuffer(msg) ? msg[0] : (msg.length > 0 ? msg.charCodeAt(0) : 0);
     if (firstByte === 0x7B) {
       const str = Buffer.isBuffer(msg) ? msg.toString() : msg;
       if (str.startsWith('{"heartbeat":')) { localWs._wtAlive = true; return; }
     }
-    if (remoteWs.readyState === WebSocket.OPEN) {
+    if (remoteWs && remoteWs.readyState === WebSocket.OPEN) {
       try { remoteWs.send(msg, { binary: isBinary }); } catch (e) {}
-    } else {
+    } else if (buffered.length < MAX_BUFFER_SIZE) {
       buffered.push({ msg, isBinary });
     }
   });
   localWs.on('error', (err) => {
-    console.error(`[${new Date().toISOString()}] Cluster WS local error: ${err.message}`);
-    try { remoteWs.close(); } catch (e) {}
+    console.error(`[${new Date().toISOString()}] ${logPfx}: local error: ${err.message}`);
+    cleanup();
   });
-  localWs.on('close', () => { try { remoteWs.close(); } catch (e) {} });
+  localWs.on('close', () => { cleanup(); });
 });
 
 // Helper: fetch with timeout (works with http and https)
