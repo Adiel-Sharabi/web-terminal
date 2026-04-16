@@ -7,7 +7,7 @@ const fs = require('fs');
 const crypto = require('crypto');
 const { execFile } = require('child_process');
 
-const SERVER_VERSION = '1.3.2';
+const SERVER_VERSION = '1.3.3';
 const STALE_STATUS_TIMEOUT_MS = 5 * 60 * 1000; // 5 minutes — auto-correct stuck "working"/"waiting" status
 
 // --- Config: config.json > env vars > defaults ---
@@ -256,7 +256,8 @@ function createSession(id, cwd, name, autoCommand, savedScrollback) {
     cols: 120,
     rows: 30,
     cwd: cwd || DEFAULT_CWD,
-    env: sessionEnv
+    env: sessionEnv,
+    useConptyDll: true
   });
 
   // Restore previous scrollback with a restart separator
@@ -1120,7 +1121,7 @@ app.get('/api/cluster/sessions', async (req, res) => {
   let localVersion = SERVER_VERSION;
   try {
     const { execSync } = require('child_process');
-    const hash = execSync('git rev-parse --short HEAD', { cwd: __dirname, encoding: 'utf8' }).trim();
+    const hash = execSync('git rev-parse --short HEAD', { cwd: __dirname, encoding: 'utf8', windowsHide: true }).trim();
     localVersion = `${SERVER_VERSION} (${hash})`;
   } catch (e) {}
 
@@ -1258,16 +1259,16 @@ function clusterFetch(url, opts = {}) {
 app.get('/api/version', (req, res) => {
   try {
     const { execSync } = require('child_process');
-    const hash = execSync('git rev-parse --short HEAD', { cwd: __dirname, encoding: 'utf8' }).trim();
-    const date = execSync('git log -1 --format=%ci', { cwd: __dirname, encoding: 'utf8' }).trim();
+    const hash = execSync('git rev-parse --short HEAD', { cwd: __dirname, encoding: 'utf8', windowsHide: true }).trim();
+    const date = execSync('git log -1 --format=%ci', { cwd: __dirname, encoding: 'utf8', windowsHide: true }).trim();
     const behind = (() => {
       try {
-        execSync('git fetch --dry-run 2>&1', { cwd: __dirname, encoding: 'utf8', timeout: 5000 });
-        const count = execSync('git rev-list HEAD..@{u} --count', { cwd: __dirname, encoding: 'utf8' }).trim();
+        execSync('git fetch --dry-run 2>&1', { cwd: __dirname, encoding: 'utf8', timeout: 5000, windowsHide: true });
+        const count = execSync('git rev-list HEAD..@{u} --count', { cwd: __dirname, encoding: 'utf8', windowsHide: true }).trim();
         return parseInt(count) || 0;
       } catch (e) { return -1; } // -1 = unknown
     })();
-    const dirty = execSync('git status --porcelain', { cwd: __dirname, encoding: 'utf8' }).trim().length > 0;
+    const dirty = execSync('git status --porcelain', { cwd: __dirname, encoding: 'utf8', windowsHide: true }).trim().length > 0;
     res.json({ version: SERVER_VERSION, hash, date, behind, dirty, serverName: getServerName() });
   } catch (e) {
     res.json({ version: SERVER_VERSION, hash: 'unknown', date: '', behind: -1, dirty: false, serverName: getServerName() });
@@ -1288,7 +1289,7 @@ app.post('/api/clipboard-image', express.raw({ type: 'image/*', limit: '10mb' })
     // Copy image to Windows clipboard via PowerShell
     const ps = `Add-Type -AssemblyName System.Windows.Forms; ` +
       `[System.Windows.Forms.Clipboard]::SetImage([System.Drawing.Image]::FromFile('${filepath.replace(/'/g, "''")}'))`;
-    execFile('powershell', ['-NoProfile', '-Command', ps], (err) => {
+    execFile('powershell', ['-NoProfile', '-Command', ps], { windowsHide: true }, (err) => {
       if (err) {
         console.error('Clipboard copy failed:', err.message);
         // Still return success — file is saved even if clipboard fails
@@ -1368,7 +1369,8 @@ app.post('/api/exec', express.json({ limit: '64kb' }), (req, res) => {
     cwd: cwd || DEFAULT_CWD,
     timeout,
     maxBuffer: 1024 * 1024,
-    env: buildSafeEnv()
+    env: buildSafeEnv(),
+    windowsHide: true
   }, (err, stdout, stderr) => {
     const exitCode = err ? (err.code === 'ETIMEDOUT' ? -1 : (err.code || 1)) : 0;
     res.json({ stdout, stderr, exitCode });
@@ -1722,17 +1724,17 @@ app.post('/api/restart', (req, res) => {
     saveAllScrollback(true); // sync before restart
     const { execSync } = require('child_process');
     // Pull latest code before restarting
-    try { execSync('git pull --ff-only', { cwd: __dirname, timeout: 15000 }); } catch (e) {
+    try { execSync('git pull --ff-only', { cwd: __dirname, timeout: 15000, windowsHide: true }); } catch (e) {
       console.error(`[${new Date().toISOString()}] git pull failed: ${e.message}`);
     }
     // Use PM2 if available, otherwise fallback to spawn
     try {
-      execSync('pm2 restart web-terminal', { cwd: __dirname, timeout: 10000 });
+      execSync('pm2 restart web-terminal', { cwd: __dirname, timeout: 10000, windowsHide: true });
     } catch (e) {
       // PM2 not available — fallback to old spawn method
       const { spawn } = require('child_process');
       const child = spawn(process.argv[0], process.argv.slice(1), {
-        cwd: __dirname, detached: true, stdio: 'ignore'
+        cwd: __dirname, detached: true, stdio: 'ignore', windowsHide: true
       });
       child.unref();
       process.exit(0);
