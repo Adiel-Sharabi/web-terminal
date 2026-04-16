@@ -400,6 +400,11 @@
           <input id="cfgPublicUrl" placeholder="https://my-server.tailnet.ts.net">
           <div class="hint">Used to auto-register this server on remotes when you connect to them</div>
         </div>
+        <div class="field field-wide" style="display:flex;align-items:center;gap:8px;margin-top:4px">
+          <input type="checkbox" id="cfgKeepSessionsOpen" style="width:auto;margin:0">
+          <label for="cfgKeepSessionsOpen" style="margin:0;cursor:pointer">Keep sessions open for instant switching</label>
+          <div class="hint" style="margin:0;margin-left:auto">Keeps background WebSocket connections to all sessions</div>
+        </div>
         <div class="field field-wide" style="border-top:1px solid #0f3460;padding-top:12px;margin-top:4px">
           <label>Cluster — Remote Servers</label>
           <div id="clusterList" style="margin-bottom:6px"></div>
@@ -444,6 +449,13 @@
     let defaultCwd = 'C:\\dev';
     let defaultCommand = '';
     let clusterServers = []; // cached from last fetch
+    let keepSessionsOpen = false;
+    const browserId = sessionStorage.getItem('wt_browserId') || (() => {
+      const id = crypto.randomUUID();
+      sessionStorage.setItem('wt_browserId', id);
+      return id;
+    })();
+    const sessionCache = new Map(); // sessionId -> { ws, scrollback, serverUrl, connected, heartbeatTimer, reconnectTimer }
 
     const status = document.getElementById('status');
     const scrollBtn = document.getElementById('scrollBtn');
@@ -479,6 +491,22 @@
       if (heartbeatTimer) { clearInterval(heartbeatTimer); heartbeatTimer = null; }
     }
 
+    // Per-session heartbeats for background connections
+    function startCacheHeartbeat(id) {
+      const entry = sessionCache.get(id);
+      if (!entry) return;
+      stopCacheHeartbeat(id);
+      entry.heartbeatTimer = setInterval(() => {
+        if (entry.ws && entry.ws.readyState === WebSocket.OPEN) {
+          try { entry.ws.send('{"heartbeat":1}'); } catch (e) {}
+        }
+      }, 25000);
+    }
+    function stopCacheHeartbeat(id) {
+      const entry = sessionCache.get(id);
+      if (entry && entry.heartbeatTimer) { clearInterval(entry.heartbeatTimer); entry.heartbeatTimer = null; }
+    }
+
     function connect() {
       if (!sessionId) return;
       status.style.display = '';
@@ -498,8 +526,19 @@
         setTimeout(() => { status.style.opacity = '0'; }, 3000);
         document.getElementById('reconnectOverlay').classList.remove('show');
         fitAddon.fit(); // re-fit now that layout is settled
+        // Send mode declaration if keepSessionsOpen is enabled
+        if (keepSessionsOpen) {
+          ws.send(JSON.stringify({ mode: 'active', browserId }));
+        }
         ws.send(JSON.stringify({ resize: { cols: term.cols, rows: term.rows } }));
         startHeartbeat();
+        // Update session cache entry
+        if (keepSessionsOpen && sessionId) {
+          const entry = sessionCache.get(sessionId) || { scrollback: '', serverUrl: sessionServerUrl, connected: false };
+          entry.ws = ws;
+          entry.connected = true;
+          sessionCache.set(sessionId, entry);
+        }
         // Second fit after fonts load and scrollback renders (mobile especially)
         if (isMobile) setTimeout(doResize, 1000);
       };
@@ -529,6 +568,17 @@
           if (e.data.startsWith('{"heartbeat":')) return;
         }
         term.write(e.data);
+        // Also accumulate in cache for keepSessionsOpen
+        if (keepSessionsOpen && sessionId) {
+          const entry = sessionCache.get(sessionId);
+          if (entry) {
+            entry.scrollback += (typeof e.data === 'string' ? e.data : '');
+            // Cap at 1 MB
+            if (entry.scrollback.length > 1048576) {
+              entry.scrollback = entry.scrollback.slice(-1048576);
+            }
+          }
+        }
       };
 
       ws.onclose = (e) => {
@@ -536,6 +586,10 @@
         if (switching) return;
         // Session was killed/ended or taken by another viewer
         if (e.code === 4000 || e.code === 4001) {
+          // Clean up cache entry for this session
+          if (keepSessionsOpen && sessionId) {
+            cleanupCacheEntry(sessionId);
+          }
           cancelReconnect();
           if (document.getElementById('sidebar').classList.contains('open')) loadSidebar();
           return;
@@ -564,6 +618,69 @@
       ws.onerror = () => ws.close();
     }
 
+    // Connect a background WebSocket for keepSessionsOpen mode
+    function connectBackground(id, serverUrl) {
+      if (!keepSessionsOpen) return;
+      if (id === sessionId) return; // active session uses main connect()
+      const existing = sessionCache.get(id);
+      if (existing && existing.connected) return; // already connected
+
+      const entry = existing || { ws: null, scrollback: '', serverUrl: serverUrl || null, connected: false, heartbeatTimer: null, reconnectTimer: null };
+      sessionCache.set(id, entry);
+
+      const proto = location.protocol === 'https:' ? 'wss:' : 'ws:';
+      const wsPath = serverUrl
+        ? `/cluster/${encodeURIComponent(serverUrl)}/ws/${id}`
+        : `/ws/${id}`;
+      const bgWs = new WebSocket(`${proto}//${location.host}${wsPath}`);
+
+      bgWs.onopen = () => {
+        entry.ws = bgWs;
+        entry.connected = true;
+        bgWs.send(JSON.stringify({ mode: 'background', browserId }));
+        startCacheHeartbeat(id);
+      };
+
+      bgWs.onmessage = e => {
+        if (typeof e.data === 'string') {
+          // Ignore control messages in background
+          if (e.data.startsWith('{"sessionTaken"') || e.data.startsWith('{"requestResize"') || e.data.startsWith('{"heartbeat":')) return;
+          entry.scrollback += e.data;
+          if (entry.scrollback.length > 1048576) {
+            entry.scrollback = entry.scrollback.slice(-1048576);
+          }
+        }
+      };
+
+      bgWs.onclose = (e) => {
+        entry.connected = false;
+        stopCacheHeartbeat(id);
+        // Don't reconnect if feature was rejected (4002) or session ended (4000) or kicked (4001)
+        if (e.code === 4002 || e.code === 4000 || e.code === 4001) {
+          if (e.code === 4000) cleanupCacheEntry(id);
+          return;
+        }
+        // Silent reconnect with 5s delay for background connections
+        if (keepSessionsOpen && id !== sessionId) {
+          entry.reconnectTimer = setTimeout(() => {
+            entry.scrollback = ''; // clear stale cache on reconnect
+            connectBackground(id, serverUrl);
+          }, 5000);
+        }
+      };
+
+      bgWs.onerror = () => bgWs.close();
+    }
+
+    function cleanupCacheEntry(id) {
+      const entry = sessionCache.get(id);
+      if (!entry) return;
+      stopCacheHeartbeat(id);
+      if (entry.reconnectTimer) { clearTimeout(entry.reconnectTimer); entry.reconnectTimer = null; }
+      if (entry.ws) { try { entry.ws.onclose = null; entry.ws.close(); } catch (e) {} }
+      sessionCache.delete(id);
+    }
+
     function cancelReconnect() {
       stopHeartbeat();
       if (reconnectTimer) { clearTimeout(reconnectTimer); reconnectTimer = null; }
@@ -584,7 +701,51 @@
       switching = true;
       if (reconnectTimer) { clearTimeout(reconnectTimer); reconnectTimer = null; }
       document.getElementById('reconnectOverlay').classList.remove('show');
-      if (ws) { ws.onclose = null; ws.close(); }
+
+      // Demote current active session to background (keep WS open) if keepSessionsOpen
+      if (keepSessionsOpen && sessionId && ws && ws.readyState === WebSocket.OPEN) {
+        const oldId = sessionId;
+        const oldWs = ws;
+        const oldServerUrl = sessionServerUrl;
+        // Move to cache as background
+        const entry = sessionCache.get(oldId) || { scrollback: '', serverUrl: oldServerUrl, connected: true, heartbeatTimer: null, reconnectTimer: null };
+        entry.ws = oldWs;
+        entry.connected = true;
+        sessionCache.set(oldId, entry);
+        // Tell server this connection is now background
+        try { oldWs.send(JSON.stringify({ mode: 'background', browserId })); } catch (e) {}
+        // Rewire the old WS to accumulate into cache instead of writing to term
+        oldWs.onmessage = (e) => {
+          if (typeof e.data === 'string') {
+            if (e.data.startsWith('{"sessionTaken"') || e.data.startsWith('{"requestResize"') || e.data.startsWith('{"heartbeat":')) return;
+            entry.scrollback += e.data;
+            if (entry.scrollback.length > 1048576) {
+              entry.scrollback = entry.scrollback.slice(-1048576);
+            }
+          }
+        };
+        oldWs.onclose = (e) => {
+          entry.connected = false;
+          stopCacheHeartbeat(oldId);
+          if (e.code === 4000 || e.code === 4001 || e.code === 4002) {
+            if (e.code === 4000) cleanupCacheEntry(oldId);
+            return;
+          }
+          if (keepSessionsOpen && oldId !== sessionId) {
+            entry.reconnectTimer = setTimeout(() => {
+              entry.scrollback = '';
+              connectBackground(oldId, oldServerUrl);
+            }, 5000);
+          }
+        };
+        oldWs.onerror = () => oldWs.close();
+        // Stop main heartbeat, start per-session heartbeat
+        stopHeartbeat();
+        startCacheHeartbeat(oldId);
+      } else {
+        if (ws) { ws.onclose = null; ws.close(); }
+      }
+
       sessionId = id;
       sessionServerUrl = serverUrl || null;
       history.pushState({ id, serverUrl: sessionServerUrl }, '', '/app/' + id);
@@ -596,9 +757,98 @@
       document.getElementById('noSession').style.display = 'none';
       switching = false;
       doResize(); // fit terminal to visible container before connecting
-      connect();
+
+      // Try to use cached background connection
+      const cached = keepSessionsOpen ? sessionCache.get(id) : null;
+      if (cached && cached.connected && cached.ws && cached.ws.readyState === WebSocket.OPEN) {
+        // Instant switch: replay cached scrollback
+        if (cached.scrollback) {
+          term.write(cached.scrollback);
+        }
+        // Promote background WS to active
+        ws = cached.ws;
+        stopCacheHeartbeat(id);
+        ws.send(JSON.stringify({ mode: 'active', browserId }));
+        ws.send(JSON.stringify({ resize: { cols: term.cols, rows: term.rows } }));
+        // Rewire to write to terminal
+        ws.onmessage = (e) => {
+          if (typeof e.data === 'string') {
+            if (e.data.startsWith('{"sessionTaken"')) {
+              try {
+                const info = JSON.parse(e.data);
+                status.textContent = `Session opened on ${info.sessionTaken}`;
+                status.className = 'disconnected';
+                status.style.opacity = '1';
+              } catch (ex) {}
+              ws.onclose = null;
+              cancelReconnect();
+              sessionId = null;
+              if (document.getElementById('sidebar').classList.contains('open')) loadSidebar();
+              return;
+            }
+            if (e.data.startsWith('{"requestResize"')) {
+              fitAddon.fit();
+              ws.send(JSON.stringify({ resize: { cols: term.cols, rows: term.rows } }));
+              return;
+            }
+            if (e.data.startsWith('{"heartbeat":')) return;
+          }
+          term.write(e.data);
+          if (keepSessionsOpen) {
+            cached.scrollback += (typeof e.data === 'string' ? e.data : '');
+            if (cached.scrollback.length > 1048576) cached.scrollback = cached.scrollback.slice(-1048576);
+          }
+        };
+        ws.onclose = (e) => {
+          stopHeartbeat();
+          if (switching) return;
+          if (e.code === 4000 || e.code === 4001) {
+            cleanupCacheEntry(id);
+            cancelReconnect();
+            if (document.getElementById('sidebar').classList.contains('open')) loadSidebar();
+            return;
+          }
+          reconnectAttempts++;
+          const delay = Math.min(30000, 1000 * Math.pow(2, reconnectAttempts - 1));
+          status.textContent = `disconnected — reconnecting in ${Math.round(delay/1000)}s...`;
+          status.className = 'disconnected';
+          status.style.opacity = '1';
+          document.getElementById('reconnectOverlay').classList.add('show');
+          reconnectTimer = setTimeout(connect, delay);
+        };
+        ws.onerror = () => ws.close();
+        startHeartbeat();
+        reconnectAttempts = 0;
+        status.textContent = 'connected';
+        status.className = 'connected';
+        setTimeout(() => { status.style.opacity = '0'; }, 3000);
+        document.getElementById('reconnectOverlay').classList.remove('show');
+      } else {
+        // No cache hit — fresh connect (same as legacy path)
+        if (cached) cleanupCacheEntry(id); // clean up stale cache entry
+        connect();
+      }
+
       updateToolbar();
       loadSidebar();
+    }
+
+    // Lazy connect all sessions in background (staggered)
+    function lazyConnectAll() {
+      if (!keepSessionsOpen) return;
+      // Get all session IDs from sidebar
+      const items = document.querySelectorAll('.sb-item[data-session-id]');
+      let delay = 0;
+      for (const item of items) {
+        const sid = item.dataset.sessionId;
+        if (sid === sessionId) continue; // active session already connected
+        if (sessionCache.has(sid) && sessionCache.get(sid).connected) continue;
+        // Determine serverUrl from the sidebar item's click handler context
+        // We'll look it up from the cluster data
+        const serverUrl = item._wtServerUrl || null;
+        delay += 500;
+        setTimeout(() => connectBackground(sid, serverUrl), delay);
+      }
     }
 
     function updateToolbar() {
@@ -1218,6 +1468,8 @@
             e.stopPropagation();
             if (!confirm(`Kill "${s.name}"?`)) return;
             await fetch(`${apiBase}/sessions/${s.id}`, { method: 'DELETE' });
+            // Clean up background cache for killed session
+            if (keepSessionsOpen) cleanupCacheEntry(s.id);
             if (isCurrent) {
               sessionId = null; sessionServerUrl = null;
               document.getElementById('terminal').style.display = 'none';
@@ -1276,11 +1528,14 @@
             loadSidebar();
           });
 
+          item._wtServerUrl = s.serverUrl || null;
           container.appendChild(item);
         }
       }
 
       // (viewer count removed — exclusive mode)
+      // Lazy-connect background sessions for instant switching
+      lazyConnectAll();
     }
 
     // Flash a session card in the sidebar when it becomes idle
@@ -1653,6 +1908,7 @@
       document.getElementById('cfgScrollbackReplayLimit').value = cfg.scrollbackReplayLimit || 102400;
       document.getElementById('cfgClaudeHome').value = cfg.claudeHome || '';
       document.getElementById('cfgPublicUrl').value = cfg.publicUrl || '';
+      document.getElementById('cfgKeepSessionsOpen').checked = !!cfg.keepSessionsOpen;
       renderClusterList(cfg.cluster || []);
       document.getElementById('saveMsg').textContent = '';
       document.getElementById('verClient').textContent = CLIENT_VERSION;
@@ -1677,6 +1933,7 @@
         scrollbackReplayLimit: parseInt(document.getElementById('cfgScrollbackReplayLimit').value) || 102400,
         claudeHome: document.getElementById('cfgClaudeHome').value.trim(),
         publicUrl: document.getElementById('cfgPublicUrl').value.trim().replace(/\/+$/, ''),
+        keepSessionsOpen: document.getElementById('cfgKeepSessionsOpen').checked,
         cluster: getClusterListFromUI()
       };
       const res = await fetch('/api/config', {
@@ -1849,6 +2106,7 @@
       hostname = hostData.hostname;
       defaultCwd = cfg.defaultCwd || 'C:\\dev';
       defaultCommand = cfg.defaultCommand || '';
+      keepSessionsOpen = !!cfg.keepSessionsOpen;
       if (hostname) {
         document.getElementById('hostName').textContent = `[${hostname}]`;
         document.getElementById('hostLabel').textContent = hostname;
