@@ -823,6 +823,12 @@
         status.className = 'connected';
         setTimeout(() => { status.style.opacity = '0'; }, 3000);
         document.getElementById('reconnectOverlay').classList.remove('show');
+        // Issue #7: On mobile, the sidebar close transition (~200ms) has not
+        // completed when doResize() ran above, so term.cols is stuck at the
+        // pre-transition narrow width. Mirror the fresh-connect path's
+        // delayed re-fit so the terminal (and server-side PTY) end up with
+        // the correct post-transition dimensions.
+        if (isMobile) setTimeout(doResize, 1000);
       } else {
         // No cache hit — fresh connect (same as legacy path)
         if (cached) cleanupCacheEntry(id); // clean up stale cache entry
