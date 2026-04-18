@@ -1,64 +1,94 @@
 #!/usr/bin/env node
 /**
- * Web Terminal Server Monitor
+ * Web Terminal Server Monitor (Phase 5: worker + web supervisor)
  *
- * Wraps server.js as a child process with:
- * - Log files with rotation (stdout + stderr)
- * - Smart restart with exponential backoff
- * - Crash budget (stops after repeated crashes)
- * - Health check (HTTP ping)
- * - Status file for dashboard visibility
- * - Crash diagnostics saved to logs/crashes.json
+ * Supervises TWO children independently:
+ *   - pty-worker.js (owns PTY state — must survive web.js restarts)
+ *   - server.js / web.js (HTTP + WS front end — reloadable)
  *
- * Usage: node monitor.js
- * Instead of: node server.js
+ * Features:
+ *   - Log files with rotation (stdout + stderr per child)
+ *   - Independent crash detection and restart with backoff per child
+ *   - Crash budget per child (stops that child after N crashes in window)
+ *   - Status file showing both processes (PIDs, uptimes, restart counts)
+ *   - Crash diagnostics saved to logs/crashes.json
+ *   - Graceful shutdown: stops web first, then worker
+ *
+ * Policy:
+ *   - Worker crashes → kill web (stale IPC), respawn worker, then respawn web
+ *   - Web crashes   → respawn web only; PTYs keep running in the worker
+ *
+ * Usage: node monitor.js   (preferred via start-server.vbs)
  */
 
 const { spawn } = require('child_process');
 const fs = require('fs');
+const net = require('net');
 const path = require('path');
 const http = require('http');
 
 // --- Config ---
+const WORKER_SCRIPT = path.join(__dirname, 'pty-worker.js');
 const SERVER_SCRIPT = path.join(__dirname, 'server.js');
 const LOG_DIR = path.join(__dirname, 'logs');
-const STATUS_FILE = path.join(__dirname, 'monitor-status.json');
+const STATUS_FILE = process.env.WT_MONITOR_STATUS_FILE || path.join(__dirname, 'monitor-status.json');
 const CRASH_LOG = path.join(LOG_DIR, 'crashes.json');
-const MAX_LOG_SIZE = 5 * 1024 * 1024; // 5MB per log file
-const MAX_LOG_FILES = 3; // keep 3 rotated copies
-const HEALTH_CHECK_INTERVAL = 30000; // 30s
-const HEALTH_CHECK_TIMEOUT = 5000; // 5s
+const MAX_LOG_SIZE = 5 * 1024 * 1024;
+const MAX_LOG_FILES = 3;
+const HEALTH_CHECK_INTERVAL = 30000;
+const HEALTH_CHECK_TIMEOUT = 5000;
 const CRASH_BUDGET_WINDOW = 5 * 60 * 1000; // 5 minutes
-const CRASH_BUDGET_MAX = 5; // max crashes in window before stopping
-const BACKOFF_INITIAL = 2000; // 2s
-const BACKOFF_MAX = 30000; // 30s
-const BACKOFF_MULTIPLIER = 2;
+const CRASH_BUDGET_MAX = parseInt(process.env.WT_MONITOR_CRASH_BUDGET) || 5;
+// Backoff can be tuned for tests via env vars.
+const BACKOFF_INITIAL = parseInt(process.env.WT_MONITOR_BACKOFF_INITIAL) || 2000;
+const BACKOFF_MAX = parseInt(process.env.WT_MONITOR_BACKOFF_MAX) || 30000;
+const BACKOFF_MULTIPLIER = parseFloat(process.env.WT_MONITOR_BACKOFF_MULT) || 2;
+const WORKER_READY_TIMEOUT = 20000;        // wait up to 20s for pipe to accept a connection
+const WORKER_READY_RETRY_MS = 150;
 
-// --- State ---
-let serverProcess = null;
-let restartCount = 0;
-let totalRestarts = 0;
-let lastStartTime = null;
-let lastCrashTime = null;
-let lastCrashCode = null;
-let lastCrashError = '';
-let backoffDelay = BACKOFF_INITIAL;
-let crashTimestamps = [];
-let healthTimer = null;
+const WORKER_PIPE = process.env.WT_WORKER_PIPE || (
+  process.platform === 'win32'
+    ? '\\\\.\\pipe\\web-terminal-pty'
+    : '/tmp/web-terminal-pty.sock'
+);
+
+// --- State: per-child bookkeeping --------------------------------------------
+function makeChildState(name, logFile) {
+  return {
+    name,
+    logFile,
+    proc: null,
+    startedAt: null,           // last start time
+    restarts: 0,
+    totalCrashes: 0,
+    lastCrash: null,           // { time, exitCode, signal, error }
+    crashTimestamps: [],       // for budget
+    backoffDelay: BACKOFF_INITIAL,
+    recentStderr: '',
+    stoppedForever: false,     // crash budget exceeded or port-in-use
+    stoppedReason: null,
+    // Used to coordinate restarts: when worker crashes, web's exit is an expected
+    // consequence, not a crash. This flag suppresses web's crash handling for one exit.
+    expectedExit: false,
+  };
+}
+
+const worker = makeChildState('worker', path.join(LOG_DIR, 'worker.log'));
+const web = makeChildState('web', path.join(LOG_DIR, 'server.log'));
+
 let stopping = false;
 let startedAt = Date.now();
+let healthTimer = null;
 
-// --- Ensure log directory ---
+// --- Ensure log directory ----------------------------------------------------
 if (!fs.existsSync(LOG_DIR)) fs.mkdirSync(LOG_DIR, { recursive: true });
 
-// --- Log rotation ---
+// --- Log rotation ------------------------------------------------------------
 function rotateLog(logPath) {
   try {
     if (!fs.existsSync(logPath)) return;
     const stat = fs.statSync(logPath);
     if (stat.size < MAX_LOG_SIZE) return;
-
-    // Shift old logs: .2 -> .3, .1 -> .2, current -> .1
     for (let i = MAX_LOG_FILES - 1; i >= 1; i--) {
       const from = i === 1 ? logPath : `${logPath}.${i}`;
       const to = `${logPath}.${i + 1}`;
@@ -78,206 +108,411 @@ function appendLog(logPath, data) {
   const timestamp = new Date().toISOString();
   const lines = data.toString().split('\n').filter(l => l.trim());
   const stamped = lines.map(l => `[${timestamp}] ${l}`).join('\n') + '\n';
-  fs.appendFileSync(logPath, stamped, 'utf8');
+  try { fs.appendFileSync(logPath, stamped, 'utf8'); } catch {}
 }
 
-// --- Crash log ---
-function saveCrash(exitCode, signal, errorOutput) {
+function monitorLog(msg) {
+  console.log(`[monitor] ${msg}`);
+  appendLog(path.join(LOG_DIR, 'monitor.log'), msg);
+}
+
+// --- Crash log ---------------------------------------------------------------
+function saveCrash(child, exitCode, signal, errorOutput) {
   const crashes = loadCrashes();
   crashes.push({
     time: new Date().toISOString(),
+    child: child.name,
     exitCode,
     signal,
-    error: errorOutput.slice(-2000), // last 2KB of stderr
-    uptime: lastStartTime ? Date.now() - lastStartTime : 0,
-    restartCount: totalRestarts
+    error: (errorOutput || '').slice(-2000),
+    uptime: child.startedAt ? Date.now() - child.startedAt : 0,
+    restartCount: child.restarts,
   });
-  // Keep last 20 crashes
-  while (crashes.length > 20) crashes.shift();
-  try {
-    fs.writeFileSync(CRASH_LOG, JSON.stringify(crashes, null, 2), 'utf8');
-  } catch (e) {}
+  while (crashes.length > 40) crashes.shift();
+  try { fs.writeFileSync(CRASH_LOG, JSON.stringify(crashes, null, 2), 'utf8'); } catch {}
 }
 
 function loadCrashes() {
   try {
     if (fs.existsSync(CRASH_LOG)) return JSON.parse(fs.readFileSync(CRASH_LOG, 'utf8'));
-  } catch (e) {}
+  } catch {}
   return [];
 }
 
-// --- Status file ---
-function writeStatus(status, extra) {
-  const data = {
-    status,
-    pid: serverProcess?.pid || null,
-    startedAt: new Date(startedAt).toISOString(),
-    uptime: lastStartTime ? Date.now() - lastStartTime : 0,
-    totalRestarts,
-    lastCrash: lastCrashTime ? {
-      time: new Date(lastCrashTime).toISOString(),
-      exitCode: lastCrashCode,
-      error: lastCrashError.slice(-500)
+// --- Status file -------------------------------------------------------------
+function serializeChild(c) {
+  return {
+    pid: c.proc?.pid || null,
+    startedAt: c.startedAt ? new Date(c.startedAt).toISOString() : null,
+    uptime: c.startedAt ? Date.now() - c.startedAt : 0,
+    restarts: c.restarts,
+    totalCrashes: c.totalCrashes,
+    lastCrash: c.lastCrash ? {
+      time: new Date(c.lastCrash.time).toISOString(),
+      exitCode: c.lastCrash.exitCode,
+      signal: c.lastCrash.signal,
+      error: (c.lastCrash.error || '').slice(-500),
     } : null,
-    ...extra
+    stoppedForever: c.stoppedForever,
+    stoppedReason: c.stoppedReason,
   };
-  try {
-    fs.writeFileSync(STATUS_FILE, JSON.stringify(data, null, 2), 'utf8');
-  } catch (e) {}
 }
 
-// --- Health check ---
-function startHealthCheck() {
-  if (healthTimer) clearInterval(healthTimer);
-  healthTimer = setInterval(() => {
-    if (!serverProcess || stopping) return;
-
-    // Read port from config
-    let port = 7681;
-    try {
-      const cfg = JSON.parse(fs.readFileSync(path.join(__dirname, 'config.json'), 'utf8'));
-      port = cfg.port || 7681;
-    } catch (e) {}
-
-    const req = http.get(`http://127.0.0.1:${port}/api/hostname`, { timeout: HEALTH_CHECK_TIMEOUT }, (res) => {
-      // Server responded — healthy
-      let body = '';
-      res.on('data', d => { body += d; });
-      res.on('end', () => {});
-    });
-
-    req.on('error', (e) => {
-      console.error(`[monitor] Health check failed: ${e.message}`);
-      appendLog(path.join(LOG_DIR, 'monitor.log'), `Health check failed: ${e.message}`);
-      // Don't auto-restart on health check failure — could be temporary
-      // Just log it for diagnostics
-    });
-
-    req.on('timeout', () => {
-      req.destroy();
-      console.error('[monitor] Health check timed out');
-      appendLog(path.join(LOG_DIR, 'monitor.log'), 'Health check timed out');
-    });
-  }, HEALTH_CHECK_INTERVAL);
+function writeStatus(overallStatus, extra) {
+  const data = {
+    status: overallStatus,
+    monitorStartedAt: new Date(startedAt).toISOString(),
+    monitorUptime: Date.now() - startedAt,
+    workerPipe: WORKER_PIPE,
+    worker: serializeChild(worker),
+    web: serializeChild(web),
+    // Back-compat (legacy single-child fields): mirror web's state so existing
+    // consumers keep working.
+    pid: web.proc?.pid || null,
+    startedAt: web.startedAt ? new Date(web.startedAt).toISOString() : null,
+    uptime: web.startedAt ? Date.now() - web.startedAt : 0,
+    totalRestarts: web.restarts,
+    lastCrash: web.lastCrash ? {
+      time: new Date(web.lastCrash.time).toISOString(),
+      exitCode: web.lastCrash.exitCode,
+      error: (web.lastCrash.error || '').slice(-500),
+    } : null,
+    ...(extra || {}),
+  };
+  try { fs.writeFileSync(STATUS_FILE, JSON.stringify(data, null, 2), 'utf8'); } catch {}
 }
 
-// --- Server process management ---
-function startServer() {
-  if (stopping) return;
+// --- Worker readiness probe --------------------------------------------------
+// Resolve as soon as the pipe accepts a connection (we don't hold it open).
+function waitForPipeReady(pipe, timeoutMs) {
+  const deadline = Date.now() + timeoutMs;
+  return new Promise((resolve, reject) => {
+    const attempt = () => {
+      if (stopping) return reject(new Error('stopping'));
+      if (!worker.proc || worker.proc.exitCode !== null) {
+        return reject(new Error('worker process exited before pipe came up'));
+      }
+      const sock = net.createConnection(pipe);
+      let settled = false;
+      const done = (err) => {
+        if (settled) return;
+        settled = true;
+        try { sock.destroy(); } catch {}
+        if (err) {
+          if (Date.now() > deadline) return reject(new Error(`worker pipe not ready after ${timeoutMs}ms: ${err.message}`));
+          setTimeout(attempt, WORKER_READY_RETRY_MS);
+        } else {
+          resolve();
+        }
+      };
+      sock.once('connect', () => done());
+      sock.once('error', (e) => done(e));
+    };
+    attempt();
+  });
+}
 
-  lastStartTime = Date.now();
-  let recentStderr = '';
+// --- Spawn helpers -----------------------------------------------------------
+function spawnWorker() {
+  if (stopping || worker.stoppedForever) return;
+  worker.startedAt = Date.now();
+  worker.recentStderr = '';
+  monitorLog(`starting worker (restart #${worker.restarts}) pipe=${WORKER_PIPE}`);
 
-  console.log(`[monitor] Starting server (restart #${totalRestarts})...`);
-  appendLog(path.join(LOG_DIR, 'monitor.log'), `Starting server (restart #${totalRestarts})`);
-
-  serverProcess = spawn(process.execPath, [SERVER_SCRIPT], {
+  const proc = spawn(process.execPath, [WORKER_SCRIPT], {
     cwd: __dirname,
     stdio: ['ignore', 'pipe', 'pipe'],
-    env: process.env,
-    windowsHide: true
+    env: { ...process.env, WT_WORKER_PIPE: WORKER_PIPE },
+    windowsHide: true,
+  });
+  worker.proc = proc;
+
+  proc.stdout.on('data', (data) => {
+    process.stdout.write(data);
+    appendLog(worker.logFile, data);
+  });
+  proc.stderr.on('data', (data) => {
+    process.stderr.write(data);
+    appendLog(path.join(LOG_DIR, 'error.log'), `[worker] ` + data);
+    worker.recentStderr += data.toString();
+    if (worker.recentStderr.length > 5000) worker.recentStderr = worker.recentStderr.slice(-5000);
   });
 
-  writeStatus('running');
-
-  serverProcess.stdout.on('data', (data) => {
-    process.stdout.write(data); // mirror to console
-    appendLog(path.join(LOG_DIR, 'server.log'), data);
-  });
-
-  serverProcess.stderr.on('data', (data) => {
-    process.stderr.write(data); // mirror to console
-    appendLog(path.join(LOG_DIR, 'error.log'), data);
-    recentStderr += data.toString();
-    if (recentStderr.length > 5000) recentStderr = recentStderr.slice(-5000);
-  });
-
-  serverProcess.on('exit', (code, signal) => {
-    serverProcess = null;
-    const uptime = Date.now() - lastStartTime;
-    const msg = `Server exited: code=${code} signal=${signal} uptime=${Math.round(uptime / 1000)}s`;
-    console.log(`[monitor] ${msg}`);
-    appendLog(path.join(LOG_DIR, 'monitor.log'), msg);
+  proc.on('exit', (code, signal) => {
+    const uptime = Date.now() - worker.startedAt;
+    const msg = `worker exited: code=${code} signal=${signal} uptime=${Math.round(uptime / 1000)}s`;
+    monitorLog(msg);
+    worker.proc = null;
 
     if (stopping) {
       writeStatus('stopped');
       return;
     }
 
-    // Clean exit (code 0) = intentional restart (API restart)
+    // Worker died unexpectedly — web's IPC is broken; kill web so we can cleanly
+    // respawn both in order. Web will likely already be exiting on its own
+    // (onExit handler) but we force the issue to avoid a long race.
+    if (web.proc) {
+      web.expectedExit = true;
+      monitorLog('killing web because worker is gone (IPC dead)');
+      try { web.proc.kill('SIGTERM'); } catch {}
+      setTimeout(() => { try { if (web.proc) web.proc.kill('SIGKILL'); } catch {} }, 2500).unref();
+    }
+
+    // Clean exit code 0 → intentional restart
     if (code === 0) {
-      backoffDelay = BACKOFF_INITIAL;
-      totalRestarts++;
-      writeStatus('restarting', { reason: 'clean restart' });
-      console.log(`[monitor] Clean restart in ${BACKOFF_INITIAL}ms...`);
-      setTimeout(startServer, BACKOFF_INITIAL);
+      worker.backoffDelay = BACKOFF_INITIAL;
+      worker.restarts++;
+      writeStatus('restarting', { reason: 'worker clean restart' });
+      setTimeout(() => { spawnWorker(); scheduleWebAfterWorker(); }, BACKOFF_INITIAL);
       return;
     }
 
-    // Port conflict — another instance is running, don't restart
+    // Crash
+    worker.totalCrashes++;
+    worker.restarts++;
+    worker.lastCrash = { time: Date.now(), exitCode: code, signal, error: worker.recentStderr };
+    saveCrash(worker, code, signal, worker.recentStderr);
+    worker.crashTimestamps.push(Date.now());
+    worker.crashTimestamps = worker.crashTimestamps.filter(t => Date.now() - t < CRASH_BUDGET_WINDOW);
+
+    if (worker.crashTimestamps.length >= CRASH_BUDGET_MAX) {
+      monitorLog(`worker crash budget exceeded (${CRASH_BUDGET_MAX} in ${CRASH_BUDGET_WINDOW/1000}s) — stopping`);
+      worker.stoppedForever = true;
+      worker.stoppedReason = `${CRASH_BUDGET_MAX} crashes in ${CRASH_BUDGET_WINDOW/1000}s`;
+      writeStatus('crashed', { reason: 'worker crash budget exceeded' });
+      stopping = true;
+      // Also kill web if alive
+      if (web.proc) { try { web.proc.kill('SIGTERM'); } catch {} }
+      return;
+    }
+
+    const delay = worker.backoffDelay;
+    worker.backoffDelay = Math.min(worker.backoffDelay * BACKOFF_MULTIPLIER, BACKOFF_MAX);
+    writeStatus('restarting', { reason: `worker crash (code ${code})`, nextAttemptIn: delay });
+    monitorLog(`worker crash restart in ${delay}ms (crash ${worker.crashTimestamps.length}/${CRASH_BUDGET_MAX})`);
+    setTimeout(() => { spawnWorker(); scheduleWebAfterWorker(); }, delay);
+  });
+}
+
+// Spawn web once worker is ready. Used after worker (re)starts.
+async function scheduleWebAfterWorker() {
+  if (stopping) return;
+  try {
+    await waitForPipeReady(WORKER_PIPE, WORKER_READY_TIMEOUT);
+  } catch (err) {
+    monitorLog(`worker pipe wait failed: ${err.message}`);
+    // If worker died before pipe came up its exit handler will recover.
+    return;
+  }
+  if (stopping) return;
+  // Ensure any previous web process has fully exited before spawning a new one.
+  // (On worker crash we kill web; its exit event is asynchronous.)
+  const waitForPrior = async () => {
+    const deadline = Date.now() + 5000;
+    while (web.proc && Date.now() < deadline) {
+      await new Promise(r => setTimeout(r, 50));
+    }
+  };
+  await waitForPrior();
+  if (stopping) return;
+  spawnWeb();
+}
+
+function spawnWeb() {
+  if (stopping || web.stoppedForever) return;
+  if (web.proc) return; // already running
+  web.startedAt = Date.now();
+  web.recentStderr = '';
+  web.expectedExit = false;
+  monitorLog(`starting web (restart #${web.restarts})`);
+
+  const proc = spawn(process.execPath, [SERVER_SCRIPT], {
+    cwd: __dirname,
+    stdio: ['ignore', 'pipe', 'pipe'],
+    env: {
+      ...process.env,
+      WT_WORKER_PIPE: WORKER_PIPE,
+      // Make sure server.js does NOT also spawn its own worker — we own it.
+      WT_SPAWN_WORKER: '',
+    },
+    windowsHide: true,
+  });
+  web.proc = proc;
+  writeStatus('running');
+
+  proc.stdout.on('data', (data) => {
+    process.stdout.write(data);
+    appendLog(web.logFile, data);
+  });
+  proc.stderr.on('data', (data) => {
+    process.stderr.write(data);
+    appendLog(path.join(LOG_DIR, 'error.log'), data);
+    web.recentStderr += data.toString();
+    if (web.recentStderr.length > 5000) web.recentStderr = web.recentStderr.slice(-5000);
+  });
+
+  proc.on('exit', (code, signal) => {
+    const uptime = Date.now() - web.startedAt;
+    const msg = `web exited: code=${code} signal=${signal} uptime=${Math.round(uptime / 1000)}s`;
+    monitorLog(msg);
+    web.proc = null;
+
+    if (stopping) {
+      writeStatus('stopped');
+      return;
+    }
+
+    // Expected exit (worker crash is triggering the restart cycle) — skip crash
+    // accounting. Worker's exit handler already scheduled scheduleWebAfterWorker.
+    if (web.expectedExit) {
+      web.expectedExit = false;
+      monitorLog('web exit was expected (worker crash) — not counting as crash');
+      return;
+    }
+
+    // Clean exit (restart via /api/restart) → start back up quickly
+    if (code === 0) {
+      web.backoffDelay = BACKOFF_INITIAL;
+      web.restarts++;
+      writeStatus('restarting', { reason: 'web clean restart' });
+      setTimeout(spawnWeb, BACKOFF_INITIAL);
+      return;
+    }
+
+    // Port conflict — another instance is running
     if (code === 2) {
-      console.error('[monitor] Port already in use — another instance is running. Stopping.');
-      appendLog(path.join(LOG_DIR, 'monitor.log'), 'Port in use — stopping (another instance is running).');
+      monitorLog('web: port in use — stopping');
+      web.stoppedForever = true;
+      web.stoppedReason = 'port in use';
       writeStatus('stopped', { reason: 'port in use — another instance running' });
       stopping = true;
       return;
     }
 
     // Crash
-    lastCrashTime = Date.now();
-    lastCrashCode = code;
-    lastCrashError = recentStderr;
-    totalRestarts++;
-    saveCrash(code, signal, recentStderr);
+    web.totalCrashes++;
+    web.restarts++;
+    web.lastCrash = { time: Date.now(), exitCode: code, signal, error: web.recentStderr };
+    saveCrash(web, code, signal, web.recentStderr);
+    web.crashTimestamps.push(Date.now());
+    web.crashTimestamps = web.crashTimestamps.filter(t => Date.now() - t < CRASH_BUDGET_WINDOW);
 
-    // Check crash budget
-    crashTimestamps.push(Date.now());
-    crashTimestamps = crashTimestamps.filter(t => Date.now() - t < CRASH_BUDGET_WINDOW);
-
-    if (crashTimestamps.length >= CRASH_BUDGET_MAX) {
-      console.error(`[monitor] Crash budget exceeded (${CRASH_BUDGET_MAX} crashes in ${CRASH_BUDGET_WINDOW / 1000}s). Stopping.`);
-      appendLog(path.join(LOG_DIR, 'monitor.log'), `CRASH BUDGET EXCEEDED — stopping. Fix the code and restart manually.`);
-      writeStatus('crashed', { reason: `${CRASH_BUDGET_MAX} crashes in ${CRASH_BUDGET_WINDOW / 1000}s` });
-      stopping = true;
+    if (web.crashTimestamps.length >= CRASH_BUDGET_MAX) {
+      monitorLog(`web crash budget exceeded (${CRASH_BUDGET_MAX} in ${CRASH_BUDGET_WINDOW/1000}s) — stopping`);
+      web.stoppedForever = true;
+      web.stoppedReason = `${CRASH_BUDGET_MAX} crashes in ${CRASH_BUDGET_WINDOW/1000}s`;
+      writeStatus('crashed', { reason: 'web crash budget exceeded' });
+      // Do NOT stop the monitor — worker keeps running so PTYs survive.
       return;
     }
 
-    writeStatus('restarting', { reason: `crash (code ${code})`, nextAttemptIn: backoffDelay });
-    console.log(`[monitor] Crash restart in ${backoffDelay}ms (attempt ${crashTimestamps.length}/${CRASH_BUDGET_MAX})...`);
-    setTimeout(startServer, backoffDelay);
-    backoffDelay = Math.min(backoffDelay * BACKOFF_MULTIPLIER, BACKOFF_MAX);
+    const delay = web.backoffDelay;
+    web.backoffDelay = Math.min(web.backoffDelay * BACKOFF_MULTIPLIER, BACKOFF_MAX);
+    writeStatus('restarting', { reason: `web crash (code ${code})`, nextAttemptIn: delay });
+    monitorLog(`web crash restart in ${delay}ms (crash ${web.crashTimestamps.length}/${CRASH_BUDGET_MAX})`);
+    setTimeout(spawnWeb, delay);
   });
-
-  startHealthCheck();
 }
 
-// --- Graceful shutdown ---
+// --- Health check (web only) -------------------------------------------------
+function startHealthCheck() {
+  if (healthTimer) clearInterval(healthTimer);
+  healthTimer = setInterval(() => {
+    if (!web.proc || stopping) return;
+    let port = 7681;
+    try {
+      const cfgFile = process.env.WT_TEST ? path.join(__dirname, 'config.test.json') : path.join(__dirname, 'config.json');
+      const cfg = JSON.parse(fs.readFileSync(cfgFile, 'utf8'));
+      port = parseInt(process.env.WT_PORT) || cfg.port || 7681;
+    } catch {}
+    const req = http.get(`http://127.0.0.1:${port}/api/hostname`, { timeout: HEALTH_CHECK_TIMEOUT }, (res) => {
+      res.on('data', () => {});
+      res.on('end', () => {});
+    });
+    req.on('error', (e) => {
+      monitorLog(`health check failed: ${e.message}`);
+    });
+    req.on('timeout', () => {
+      req.destroy();
+      monitorLog('health check timed out');
+    });
+  }, HEALTH_CHECK_INTERVAL);
+  healthTimer.unref?.();
+}
+
+// --- Graceful shutdown -------------------------------------------------------
 function shutdown(signal) {
-  console.log(`[monitor] Received ${signal}, shutting down...`);
+  if (stopping) return;
+  monitorLog(`received ${signal}, shutting down...`);
   stopping = true;
   if (healthTimer) clearInterval(healthTimer);
-  if (serverProcess) {
-    serverProcess.kill('SIGTERM');
-    setTimeout(() => {
-      if (serverProcess) {
-        console.log('[monitor] Force killing server...');
-        serverProcess.kill('SIGKILL');
-      }
-      writeStatus('stopped');
-      process.exit(0);
-    }, 5000);
-  } else {
+
+  const killTree = async () => {
+    // 1) Stop web first so it can flush session state to worker
+    if (web.proc) {
+      try { web.proc.kill('SIGTERM'); } catch {}
+      await waitForExit(web.proc, 5000);
+      if (web.proc) { try { web.proc.kill('SIGKILL'); } catch {} }
+    }
+    // 2) Then stop worker
+    if (worker.proc) {
+      try { worker.proc.kill('SIGTERM'); } catch {}
+      await waitForExit(worker.proc, 5000);
+      if (worker.proc) { try { worker.proc.kill('SIGKILL'); } catch {} }
+    }
     writeStatus('stopped');
     process.exit(0);
-  }
+  };
+  killTree().catch(() => process.exit(0));
+}
+
+function waitForExit(proc, timeoutMs) {
+  return new Promise((resolve) => {
+    if (!proc || proc.exitCode !== null || proc.signalCode !== null) return resolve();
+    let done = false;
+    const t = setTimeout(() => { if (!done) { done = true; resolve(); } }, timeoutMs);
+    proc.once('exit', () => { if (!done) { done = true; clearTimeout(t); resolve(); } });
+  });
 }
 
 process.on('SIGINT', () => shutdown('SIGINT'));
 process.on('SIGTERM', () => shutdown('SIGTERM'));
+if (process.platform === 'win32') {
+  process.on('SIGBREAK', () => shutdown('SIGBREAK'));
+}
 
-// --- Start ---
+// Windows-friendly shutdown channel: a parent process (tests, CLI) can write
+// `shutdown\n` to the monitor's stdin to trigger a graceful stop, since
+// `proc.kill('SIGTERM')` on Windows forcefully terminates instead of invoking
+// the SIGTERM handler. Enabled only when WT_MONITOR_STDIN_SHUTDOWN=1 so the
+// VBS launcher (which redirects stdin from NUL) isn't affected.
+if (process.env.WT_MONITOR_STDIN_SHUTDOWN === '1' && process.stdin) {
+  let stdinBuf = '';
+  process.stdin.on('data', (chunk) => {
+    stdinBuf += chunk.toString('utf8');
+    if (/\b(shutdown|stop|quit)\b/i.test(stdinBuf)) {
+      stdinBuf = '';
+      shutdown('stdin-shutdown');
+    }
+  });
+  process.stdin.on('end', () => shutdown('stdin-closed'));
+  try { process.stdin.resume(); } catch {}
+}
+
+// --- Periodic status refresh (so uptime stays current) -----------------------
+const statusRefresh = setInterval(() => {
+  if (!stopping) writeStatus('running');
+}, 5000);
+statusRefresh.unref?.();
+
+// --- Start -------------------------------------------------------------------
 console.log('[monitor] Web Terminal Monitor starting...');
 console.log(`[monitor] Logs: ${LOG_DIR}`);
 console.log(`[monitor] Status: ${STATUS_FILE}`);
-console.log(`[monitor] Crash budget: ${CRASH_BUDGET_MAX} crashes per ${CRASH_BUDGET_WINDOW / 1000}s`);
-startServer();
+console.log(`[monitor] Worker pipe: ${WORKER_PIPE}`);
+console.log(`[monitor] Crash budget (per child): ${CRASH_BUDGET_MAX} crashes per ${CRASH_BUDGET_WINDOW / 1000}s`);
+writeStatus('starting');
+spawnWorker();
+scheduleWebAfterWorker();
+startHealthCheck();

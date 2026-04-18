@@ -7,7 +7,7 @@ const crypto = require('crypto');
 const { execFile, spawn } = require('child_process');
 const workerClientLib = require('./lib/worker-client');
 
-const SERVER_VERSION = '1.6.0';
+const SERVER_VERSION = '1.7.0';
 // Stale status auto-correction now lives in pty-worker.js.
 
 // --- Config: config.json > env vars > defaults ---
