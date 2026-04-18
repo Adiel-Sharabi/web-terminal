@@ -1,14 +1,14 @@
 const express = require('express');
 const expressWs = require('express-ws');
-const pty = require('node-pty');
 const path = require('path');
 const os = require('os');
 const fs = require('fs');
 const crypto = require('crypto');
-const { execFile } = require('child_process');
+const { execFile, spawn } = require('child_process');
+const workerClientLib = require('./lib/worker-client');
 
-const SERVER_VERSION = '1.4.4';
-const STALE_STATUS_TIMEOUT_MS = 5 * 60 * 1000; // 5 minutes — auto-correct stuck "working"/"waiting" status
+const SERVER_VERSION = '1.5.0';
+// Stale status auto-correction now lives in pty-worker.js.
 
 // --- Config: config.json > env vars > defaults ---
 // Use separate config file during tests to avoid corrupting production config
@@ -93,8 +93,7 @@ function buildSafeEnv() {
 }
 // Kept for backward compat in startup code
 const DEFAULT_CWD = getDefaultCwd();
-const SESSIONS_FILE = process.env.WT_TEST ? path.join(__dirname, 'sessions.test.json') : path.join(__dirname, 'sessions.json');
-const SCROLLBACK_DIR = path.join(__dirname, 'scrollback');
+// Session + scrollback persistence paths are now owned by pty-worker.js.
 const CLIPBOARD_DIR = path.join(__dirname, 'clipboard-images');
 const HISTORY_FILE = path.join(__dirname, 'history.json');
 function detectClaudeHome() {
@@ -219,184 +218,93 @@ setInterval(() => {
   }
 }, WS_PING_INTERVAL);
 
-// --- Session persistence ---
-function loadSessionConfigs() {
-  try {
-    if (fs.existsSync(SESSIONS_FILE)) {
-      return JSON.parse(fs.readFileSync(SESSIONS_FILE, 'utf8'));
-    }
-  } catch (e) {
-    console.error('Failed to load sessions.json:', e.message);
-  }
-  return [];
-}
-
-function saveSessionConfigs() {
-  const configs = [];
-  for (const [id, s] of sessions) {
-    configs.push({ id, name: s.name, cwd: s.cwd, autoCommand: s.autoCommand || '', claudeSessionId: s.claudeSessionId || null });
-  }
-  try {
-    fs.writeFileSync(SESSIONS_FILE, JSON.stringify(configs, null, 2), 'utf8');
-  } catch (e) {
-    console.error('Failed to save sessions.json:', e.message);
-  }
-}
-
-// --- Session manager ---
-const sessions = new Map();
+// --- Session manager: all PTY state now lives in pty-worker.js (see lib/worker-client.js). ---
+// server.js holds only notifyClients (browser notification WS set) and a per-session
+// Map of WebSocket clients currently attached to each session id.
 const notifyClients = new Set();
-const MAX_SCROLLBACK_SIZE = 2 * 1024 * 1024; // 2MB of scrollback data
 
-// --- Scrollback persistence ---
-try { if (!fs.existsSync(SCROLLBACK_DIR)) fs.mkdirSync(SCROLLBACK_DIR); } catch (e) {}
+// Map<sessionId, Set<ws>> — which browser WebSockets are subscribed to each session.
+// Needed for exclusive-viewer kick logic and for fanning out PTY data events from the worker.
+const sessionClients = new Map();
+function getSessionClients(id) {
+  let set = sessionClients.get(id);
+  if (!set) { set = new Set(); sessionClients.set(id, set); }
+  return set;
+}
+
 try { if (!fs.existsSync(CLIPBOARD_DIR)) fs.mkdirSync(CLIPBOARD_DIR); } catch (e) {}
 
-function saveScrollback(id, session, sync) {
-  try {
-    const file = path.join(SCROLLBACK_DIR, id + '.json');
-    const data = JSON.stringify(session.scrollback);
-    if (sync) fs.writeFileSync(file, data, 'utf8');
-    else fs.writeFile(file, data, 'utf8', () => {}); // async — don't block event loop
-  } catch (e) {}
-}
+// --- Worker client setup --------------------------------------------------
+const WORKER_PIPE_PATH = process.env.WT_WORKER_PIPE || (
+  process.platform === 'win32'
+    ? '\\\\.\\pipe\\web-terminal-pty'
+    : '/tmp/web-terminal-pty.sock'
+);
+const workerClient = workerClientLib.create();
 
-function loadScrollback(id) {
-  try {
-    const file = path.join(SCROLLBACK_DIR, id + '.json');
-    if (fs.existsSync(file)) return JSON.parse(fs.readFileSync(file, 'utf8'));
-  } catch (e) {}
-  return [];
+// Optionally spawn the worker ourselves (controlled by WT_SPAWN_WORKER=1).
+// In production, monitor.js spawns the worker; for tests we spawn it here.
+let _spawnedWorker = null;
+function maybeSpawnWorker() {
+  if (!process.env.WT_SPAWN_WORKER) return;
+  const workerPath = path.join(__dirname, 'pty-worker.js');
+  const child = spawn(process.execPath, [workerPath], {
+    env: {
+      ...process.env,
+      WT_WORKER_PIPE: WORKER_PIPE_PATH,
+    },
+    stdio: ['ignore', 'inherit', 'inherit'],
+    windowsHide: true,
+  });
+  _spawnedWorker = child;
+  child.on('exit', (code, sig) => {
+    console.error(`[${new Date().toISOString()}] pty-worker exited (${code}/${sig}) — exiting server so monitor restarts both`);
+    process.exit(1);
+  });
 }
+maybeSpawnWorker();
 
-function deleteScrollback(id) {
-  try {
-    const file = path.join(SCROLLBACK_DIR, id + '.json');
-    if (fs.existsSync(file)) fs.unlinkSync(file);
-  } catch (e) {}
-}
-
-function saveAllScrollback(sync) {
-  for (const [id, session] of sessions) {
-    saveScrollback(id, session, sync);
+// Forward worker-pushed events to browser clients.
+workerClient.on('ptyData', ({ id, data }) => {
+  const set = sessionClients.get(id);
+  if (!set) return;
+  for (const client of set) {
+    try { client.send(data); } catch {}
   }
-}
+});
 
-function createSession(id, cwd, name, autoCommand, savedScrollback, claudeSessionId) {
-  const sessionEnv = buildSafeEnv();
-  sessionEnv.WT_SESSION_ID = id;
-  sessionEnv.WT_SESSION_PORT = String(PORT);
-  const spawnShell = SHELL.replace(/\\/g, '/');
-  const spawnCwd = (cwd || DEFAULT_CWD).replace(/\\/g, '/');
-  const term = pty.spawn(spawnShell, [], {
-    name: 'xterm-256color',
-    cols: 120,
-    rows: 30,
-    cwd: spawnCwd,
-    env: sessionEnv,
-    useConptyDll: liveConfig('useConptyDll', true)
-  });
-
-  // Restore previous scrollback with a restart separator
-  const scrollback = [];
-  if (savedScrollback && savedScrollback.length > 0) {
-    scrollback.push(...savedScrollback);
-    scrollback.push('\r\n\x1b[33m--- server restarted ---\x1b[0m\r\n\r\n');
-  }
-
-  const scrollbackSize = scrollback.reduce((sum, s) => sum + s.length, 0);
-  const session = {
-    term, clients: new Set(), scrollback, scrollbackSize, name: name || `Session ${id}`,
-    cwd: cwd || DEFAULT_CWD, idleTimer: null, lastActivity: Date.now(),
-    lastUserInput: 0, status: 'active', hookStatus: false, lastHookActivity: 0, autoCommand: autoCommand || '',
-    claudeSessionId: claudeSessionId || null
-  };
-  sessions.set(id, session);
-
-  term.onData(data => {
-    session.scrollback.push(data);
-    session.scrollbackSize = (session.scrollbackSize || 0) + data.length;
-    while (session.scrollbackSize > MAX_SCROLLBACK_SIZE && session.scrollback.length > 1) {
-      session.scrollbackSize -= session.scrollback.shift().length;
-    }
-    for (const client of session.clients) {
-      try { client.send(data); } catch (e) {}
-    }
-    session.lastActivity = Date.now();
-  });
-
-  term.onExit(() => {
-    console.log(`[${new Date().toISOString()}] Session ${id} shell exited`);
-    // Persist session name for Claude sessions so it survives in the old sessions list
-    if (session.autoCommand && /\bclaude\b/i.test(session.autoCommand)) {
-      const claudeId = session.claudeSessionId
-        || extractClaudeSessionIdFromCmd(session.autoCommand)
-        || detectClaudeSessionIdFromDir(session.cwd);
-      if (claudeId) {
-        session.claudeSessionId = claudeId;
-        const names = loadClaudeSessionNames();
-        if (!names[claudeId]) { names[claudeId] = session.name; saveClaudeSessionNames(names); }
-      }
-    }
-    for (const client of session.clients) {
-      try { client.send('\r\n\x1b[31m[Session ended]\x1b[0m\r\n'); client.close(4000, 'Session ended'); } catch (e) {}
-    }
-    sessions.delete(id);
-    deleteScrollback(id);
-    saveSessionConfigs();
-  });
-
-  // Auto-run command after shell prompt is ready
-  if (autoCommand) {
-    let autoFired = false;
-    const autoListener = term.onData(data => {
-      if (autoFired) return;
-      // Look for common prompt indicators: $, #, >, or PS1 ending
-      if (/[$#>]\s*$/.test(data.replace(/\x1b\[[0-9;]*[a-zA-Z]/g, ''))) {
-        autoFired = true;
-        autoListener.dispose();
-        setTimeout(() => {
-          term.write(autoCommand + '\n');
-          console.log(`[${new Date().toISOString()}] Session ${id} auto-command: ${autoCommand}`);
-        }, 100); // small delay after prompt appears
-      }
+workerClient.on('statusChanged', ({ id, status, notifyType, notifyMsg }) => {
+  // Fan out to notifyClients (browser notify WS subscribers)
+  // sessionName is retrieved lazily via session list RPC? Instead, pull name from
+  // notifyMsg (which carries it) or skip when not set.
+  if (!notifyType && !notifyMsg) {
+    // Status change without notification; still broadcast to notifyClients for UI.
+    const payload = JSON.stringify({
+      notification: { type: 'status', message: '', session: '', sessionId: id, status }
     });
-    // Fallback in case prompt detection fails
-    setTimeout(() => {
-      if (!autoFired) {
-        autoFired = true;
-        autoListener.dispose();
-        term.write(autoCommand + '\n');
-        console.log(`[${new Date().toISOString()}] Session ${id} auto-command (fallback): ${autoCommand}`);
-      }
-    }, 5000);
+    for (const client of notifyClients) { try { client.send(payload); } catch {} }
+    return;
   }
+  const payload = JSON.stringify({
+    notification: { type: notifyType || 'status', message: notifyMsg || '', session: '', sessionId: id, status }
+  });
+  for (const client of notifyClients) { try { client.send(payload); } catch {} }
+});
 
-  // Proactively detect Claude session ID if this is a Claude session
-  if (autoCommand && /\bclaude\b/i.test(autoCommand)) {
-    // Extract from --resume in the command itself
-    const cmdClaudeId = extractClaudeSessionIdFromCmd(autoCommand);
-    if (cmdClaudeId) {
-      session.claudeSessionId = cmdClaudeId;
-    } else {
-      // Schedule detection after Claude has time to create its session file
-      setTimeout(() => {
-        if (!session.claudeSessionId) {
-          const detected = detectClaudeSessionIdFromDir(session.cwd);
-          if (detected) {
-            session.claudeSessionId = detected;
-            console.log(`[${new Date().toISOString()}] Session ${id} detected Claude session: ${detected}`);
-            saveSessionConfigs();
-          }
-        }
-      }, 15000); // 15s — give Claude time to initialize
+workerClient.on('sessionExited', ({ id }) => {
+  const set = sessionClients.get(id);
+  if (set) {
+    for (const client of set) {
+      try { client.send('\r\n\x1b[31m[Session ended]\x1b[0m\r\n'); client.close(4000, 'Session ended'); } catch {}
     }
+    sessionClients.delete(id);
   }
+});
 
-  console.log(`[${new Date().toISOString()}] Session ${id} created (PID ${term.pid}, cwd: ${session.cwd}${autoCommand ? ', cmd: ' + autoCommand : ''})`);
-  saveSessionConfigs();
-  return session;
-}
+workerClient.onExit(() => {
+  console.error(`[${new Date().toISOString()}] Worker IPC disconnected — server exiting so monitor restarts`);
+  process.exit(1);
+});
 
 // --- Auth helpers ---
 // Persist session secret so cookies survive server restarts
@@ -688,89 +596,30 @@ app.post('/api/auth/token', express.json({ limit: '16kb' }), (req, res) => {
 // Supports two modes:
 // 1. POST /api/session/:id/hook with {event} body (from command hooks)
 // 2. POST /api/hook with X-WT-Session-ID header (from HTTP hooks, no subprocess)
-app.post('/api/hook', express.json({ limit: '16kb' }), (req, res) => {
+app.post('/api/hook', express.json({ limit: '16kb' }), async (req, res) => {
   const id = req.headers['x-wt-session-id'];
-  if (!id) return res.json({ ok: true, skipped: 'no session ID' }); // silently ignore (old sessions without WT_SESSION_ID)
-  const session = sessions.get(id);
-  if (!session) return res.json({ ok: true, skipped: 'session not found' }); // silently ignore (stale session after restart)
-  // HTTP hooks send Claude's full hook JSON — extract event name
-  req.params = { id };
-  req.body = { event: req.body?.hook_event_name || req.body?.event };
-  handleHook(req, res, session);
-});
-app.post('/api/session/:id/hook', express.json({ limit: '16kb' }), (req, res) => {
-  const session = sessions.get(req.params.id);
-  if (!session) return res.status(404).json({ error: 'session not found' });
-  req.body = { event: req.body?.hook_event_name || req.body?.event };
-  handleHook(req, res, session);
-});
-// Correct stale session status: if a session has been "working" or "waiting"
-// for longer than STALE_STATUS_TIMEOUT_MS without any hook activity, downgrade to "idle".
-// This handles the case where Claude crashes without sending a Stop hook.
-function correctStaleStatus(session) {
-  if ((session.status === 'working' || session.status === 'waiting') &&
-      session.lastHookActivity && (Date.now() - session.lastHookActivity) > STALE_STATUS_TIMEOUT_MS) {
-    const prevStatus = session.status;
-    session.status = 'idle';
-    console.log(`[${new Date().toISOString()}] Stale correction: session "${session.name}" status ${prevStatus} → idle (last hook ${Math.round((Date.now() - session.lastHookActivity) / 60000)}m ago)`);
+  if (!id) return res.json({ ok: true, skipped: 'no session ID' });
+  const event = req.body?.hook_event_name || req.body?.event;
+  try {
+    const result = await workerClient.rpc('hookEvent', { id, event });
+    res.json({ ok: true, status: result.status });
+  } catch (e) {
+    if (/not found/i.test(e.message)) return res.json({ ok: true, skipped: 'session not found' });
+    res.status(500).json({ error: e.message });
   }
-  return session.status;
-}
-
-function handleHook(req, res, session) {
-  const event = req.body?.event;
+});
+app.post('/api/session/:id/hook', express.json({ limit: '16kb' }), async (req, res) => {
+  const event = req.body?.hook_event_name || req.body?.event;
   if (!event) return res.status(400).json({ error: 'event required' });
-
-  const prevStatus = session.status;
-  let notifyType = null, notifyMsg = null;
-  session.hookStatus = true; // hooks are authoritative — PTY heuristics won't override
-
-  switch (event) {
-    case 'UserPromptSubmit':
-    case 'PreToolUse':
-    case 'PostToolUse':
-    case 'SubagentStart':
-      session.status = 'working';
-      if (session.idleTimer) { clearTimeout(session.idleTimer); session.idleTimer = null; }
-      break;
-    case 'Notification':
-    case 'Stop':
-      session.status = 'idle';
-      if (prevStatus !== 'idle') {
-        notifyType = 'idle';
-        notifyMsg = event === 'Stop'
-          ? `"${session.name}" — Claude stopped`
-          : `"${session.name}" — Claude is done, waiting for input`;
-      }
-      break;
-    case 'PermissionRequest':
-      session.status = 'waiting';
-      notifyType = 'approval_needed';
-      notifyMsg = `"${session.name}" — Claude needs your approval`;
-      break;
+  try {
+    const result = await workerClient.rpc('hookEvent', { id: req.params.id, event });
+    res.json({ ok: true, status: result.status });
+  } catch (e) {
+    if (/not found/i.test(e.message)) return res.status(404).json({ error: 'session not found' });
+    if (/event required/i.test(e.message)) return res.status(400).json({ error: 'event required' });
+    res.status(500).json({ error: e.message });
   }
-
-  if (prevStatus !== session.status) {
-    console.log(`[${new Date().toISOString()}] Hook: session "${session.name}" (${req.params.id}) status ${prevStatus} → ${session.status} (event: ${event})`);
-  }
-
-  if (prevStatus !== session.status || notifyType) {
-    const payload = JSON.stringify({
-      notification: {
-        type: notifyType || 'status',
-        message: notifyMsg || `"${session.name}" — ${session.status}`,
-        session: session.name, sessionId: req.params.id, status: session.status
-      }
-    });
-    for (const client of notifyClients) {
-      try { client.send(payload); } catch (e) {}
-    }
-  }
-
-  session.lastActivity = Date.now();
-  session.lastHookActivity = Date.now();
-  res.json({ ok: true, status: session.status });
-}
+});
 
 // --- Auth middleware ---
 app.use((req, res, next) => {
@@ -1112,15 +961,19 @@ app.delete('/api/cluster/auth/:url', (req, res) => {
 app.get('/api/cluster/sessions', async (req, res) => {
   const result = [];
 
-  // Local sessions
-  for (const [id, s] of sessions) {
-    correctStaleStatus(s);
-    result.push({
-      id, name: s.name, cwd: s.cwd, status: s.status,
-      clients: s.clients.size, pid: s.term.pid,
-      lastActivity: s.lastActivity, autoCommand: s.autoCommand || '',
-      server: getServerName(), serverUrl: null // null = local
-    });
+  // Local sessions (via worker)
+  try {
+    const { sessions: localList } = await workerClient.rpc('listSessions');
+    for (const s of localList) {
+      result.push({
+        id: s.id, name: s.name, cwd: s.cwd, status: s.status,
+        clients: s.clients || 0, pid: s.pid,
+        lastActivity: s.lastActivity, autoCommand: s.autoCommand || '',
+        server: getServerName(), serverUrl: null,
+      });
+    }
+  } catch (e) {
+    console.error('worker listSessions failed:', e.message);
   }
 
   // Remote sessions (parallel, with timeout) — skip self-reference
@@ -1439,40 +1292,42 @@ app.post('/api/clipboard-image', express.raw({ type: 'image/*', limit: '10mb' })
 });
 
 // --- API: list sessions ---
-app.get('/api/sessions', (req, res) => {
-  const list = [];
-  for (const [id, s] of sessions) {
-    // Detect Claude session ID for active Claude sessions (use cached value or detect fresh)
-    let claudeSessionId = s.claudeSessionId || null;
-    if (!claudeSessionId && s.autoCommand && /\bclaude\b/i.test(s.autoCommand)) {
-      claudeSessionId = extractClaudeSessionIdFromCmd(s.autoCommand)
-        || detectClaudeSessionIdFromDir(s.cwd);
-      if (claudeSessionId) s.claudeSessionId = claudeSessionId; // cache it
+app.get('/api/sessions', async (req, res) => {
+  try {
+    const { sessions: list } = await workerClient.rpc('listSessions');
+    const shaped = list.map(s => ({
+      id: s.id, name: s.name, cwd: s.cwd,
+      clients: s.clients || 0, pid: s.pid, status: s.status,
+      lastActivity: s.lastActivity, autoCommand: s.autoCommand || '',
+      claudeSessionId: s.claudeSessionId,
+    }));
+    // Log when a remote server fetches our sessions (Bearer = cluster call)
+    if (req.headers.authorization && req.headers.authorization.startsWith('Bearer ')) {
+      const summary = shaped.map(s => {
+        const ageMins = s.lastActivity ? Math.round((Date.now() - s.lastActivity) / 60000) : '?';
+        return `"${s.name}"(${s.status}, ${ageMins}m ago, ${s.clients} clients)`;
+      }).join(', ');
+      console.log(`[${new Date().toISOString()}] Sessions served to cluster caller: ${shaped.length} sessions: ${summary}`);
     }
-    correctStaleStatus(s);
-    list.push({ id, name: s.name, cwd: s.cwd, clients: s.clients.size, pid: s.term.pid, status: s.status, lastActivity: s.lastActivity, autoCommand: s.autoCommand || '', claudeSessionId });
+    res.json(shaped);
+  } catch (e) {
+    console.error('listSessions failed:', e.message);
+    res.status(500).json({ error: 'Failed to list sessions' });
   }
-  // Log when a remote server fetches our sessions (Bearer = cluster call)
-  if (req.headers.authorization && req.headers.authorization.startsWith('Bearer ')) {
-    const summary = list.map(s => {
-      const ageMins = s.lastActivity ? Math.round((Date.now() - s.lastActivity) / 60000) : '?';
-      return `"${s.name}"(${s.status}, ${ageMins}m ago, ${s.clients} clients)`;
-    }).join(', ');
-    console.log(`[${new Date().toISOString()}] Sessions served to cluster caller: ${list.length} sessions: ${summary}`);
-  }
-  res.json(list);
 });
 
 // --- Test helper: artificially age a session's lastActivity (test mode only) ---
 if (process.env.WT_TEST) {
-  app.post('/api/test/age-session/:id', express.json(), (req, res) => {
-    const session = sessions.get(req.params.id);
-    if (!session) return res.status(404).json({ error: 'session not found' });
+  app.post('/api/test/age-session/:id', express.json(), async (req, res) => {
     const ageMinutes = req.body?.ageMinutes || 10;
     const aged = Date.now() - (ageMinutes * 60 * 1000);
-    session.lastActivity = aged;
-    session.lastHookActivity = aged;
-    res.json({ ok: true, lastActivity: aged, lastHookActivity: aged });
+    try {
+      const result = await workerClient.rpc('ageSession', { id: req.params.id, lastActivity: aged, lastHookActivity: aged });
+      res.json({ ok: true, lastActivity: aged, lastHookActivity: aged, ...result });
+    } catch (e) {
+      if (/not found/i.test(e.message)) return res.status(404).json({ error: 'session not found' });
+      res.status(500).json({ error: e.message });
+    }
   });
 }
 
@@ -1504,39 +1359,36 @@ app.post('/api/exec', express.json({ limit: '64kb' }), (req, res) => {
 const MAX_SESSIONS = config.maxSessions || 10;
 const DEDUP_WINDOW_MS = 2000; // reject duplicate name+cwd within 2 seconds
 let _lastSessionCreate = { name: '', cwd: '', time: 0 };
-app.post('/api/sessions', express.json({ limit: '16kb' }), (req, res) => {
-  if (sessions.size >= MAX_SESSIONS) {
-    return res.status(429).json({ error: `Session limit reached (max ${MAX_SESSIONS})` });
-  }
-  const id = crypto.randomUUID();
-  const liveCwd = getDefaultCwd();
-  let cwd = String(req.body?.cwd || liveCwd).substring(0, 260);
-  const name = String(req.body?.name || `Session ${sessions.size + 1}`).substring(0, 100).replace(/[\x00-\x1f]/g, '');
-  const autoCommand = String(req.body?.autoCommand || getDefaultCommand() || '').substring(0, 500);
-  // Deduplicate rapid session creation (same name + cwd within time window)
-  const now = Date.now();
-  if (name === _lastSessionCreate.name && cwd === _lastSessionCreate.cwd && now - _lastSessionCreate.time < DEDUP_WINDOW_MS) {
-    return res.status(409).json({ error: 'Duplicate session — please wait before creating another with the same name and folder' });
-  }
-  _lastSessionCreate = { name, cwd, time: now };
-  // Verify cwd exists — return error if user specified a bad path
+app.post('/api/sessions', express.json({ limit: '16kb' }), async (req, res) => {
   try {
-    if (!fs.existsSync(cwd) || !fs.statSync(cwd).isDirectory()) {
-      if (req.body?.cwd) {
-        return res.status(400).json({ error: `Folder does not exist: ${cwd}` });
+    const { sessions: existing } = await workerClient.rpc('listSessions');
+    if (existing.length >= MAX_SESSIONS) {
+      return res.status(429).json({ error: `Session limit reached (max ${MAX_SESSIONS})` });
+    }
+    const id = crypto.randomUUID();
+    const liveCwd = getDefaultCwd();
+    let cwd = String(req.body?.cwd || liveCwd).substring(0, 260);
+    const name = String(req.body?.name || `Session ${existing.length + 1}`).substring(0, 100).replace(/[\x00-\x1f]/g, '');
+    const autoCommand = String(req.body?.autoCommand || getDefaultCommand() || '').substring(0, 500);
+    // Deduplicate rapid session creation (same name + cwd within time window)
+    const now = Date.now();
+    if (name === _lastSessionCreate.name && cwd === _lastSessionCreate.cwd && now - _lastSessionCreate.time < DEDUP_WINDOW_MS) {
+      return res.status(409).json({ error: 'Duplicate session — please wait before creating another with the same name and folder' });
+    }
+    _lastSessionCreate = { name, cwd, time: now };
+    // Verify cwd exists — return error if user specified a bad path
+    try {
+      if (!fs.existsSync(cwd) || !fs.statSync(cwd).isDirectory()) {
+        if (req.body?.cwd) return res.status(400).json({ error: `Folder does not exist: ${cwd}` });
+        cwd = liveCwd;
       }
+    } catch (e) {
+      if (req.body?.cwd) return res.status(400).json({ error: `Folder does not exist: ${cwd}` });
       cwd = liveCwd;
     }
-  } catch (e) {
-    if (req.body?.cwd) {
-      return res.status(400).json({ error: `Folder does not exist: ${cwd}` });
-    }
-    cwd = liveCwd;
-  }
-  try {
-    createSession(id, cwd, name, autoCommand);
+    const created = await workerClient.rpc('createSession', { id, cwd, name, autoCommand });
     saveFolder(cwd);
-    res.json({ id, name });
+    res.json({ id: created.id, name: created.name });
   } catch (e) {
     console.error(`Failed to create session: ${e.message}`);
     res.status(500).json({ error: 'Failed to create session' });
@@ -1544,43 +1396,47 @@ app.post('/api/sessions', express.json({ limit: '16kb' }), (req, res) => {
 });
 
 // --- API: update session (rename, change autoCommand) ---
-app.patch('/api/sessions/:id', express.json({ limit: '16kb' }), (req, res) => {
-  const session = sessions.get(req.params.id);
-  if (!session) return res.status(404).json({ error: 'not found' });
-  const newName = req.body?.name ? String(req.body.name).substring(0, 100).replace(/[\x00-\x1f]/g, '') : null;
-  if (newName) {
-    session.name = newName;
-    // Sync rename to Claude Code session if idle and running claude
-    if ((session.status === 'idle' || session.status === 'active') &&
-        session.autoCommand && /\bclaude\b/i.test(session.autoCommand)) {
-      const safeName = newName.replace(/[`$"\\]/g, '');
-      session.term.write(`/rename ${safeName}\n`);
+app.patch('/api/sessions/:id', express.json({ limit: '16kb' }), async (req, res) => {
+  try {
+    // Verify session exists.
+    let current;
+    try { current = await workerClient.rpc('getSession', { id: req.params.id }); }
+    catch (e) {
+      if (/not found/i.test(e.message)) return res.status(404).json({ error: 'not found' });
+      throw e;
     }
-    // Persist name for the Claude session history list
-    if (session.autoCommand && /\bclaude\b/i.test(session.autoCommand)) {
-      const claudeId = session.claudeSessionId
-        || extractClaudeSessionIdFromCmd(session.autoCommand)
-        || detectClaudeSessionIdFromDir(session.cwd);
-      if (claudeId) {
-        session.claudeSessionId = claudeId;
-        const names = loadClaudeSessionNames(); names[claudeId] = newName; saveClaudeSessionNames(names);
-      }
+    const newName = req.body?.name ? String(req.body.name).substring(0, 100).replace(/[\x00-\x1f]/g, '') : null;
+    if (newName) await workerClient.rpc('renameSession', { id: req.params.id, name: newName });
+    let autoCommand = current.autoCommand;
+    if (req.body?.autoCommand !== undefined) {
+      const r = await workerClient.rpc('updateSessionAutoCommand', {
+        id: req.params.id,
+        autoCommand: String(req.body.autoCommand).substring(0, 500),
+      });
+      autoCommand = r.autoCommand;
     }
+    res.json({ id: req.params.id, name: newName || current.name, autoCommand });
+  } catch (e) {
+    console.error(`PATCH /api/sessions failed: ${e.message}`);
+    res.status(500).json({ error: 'Failed to update session' });
   }
-  if (req.body?.autoCommand !== undefined) session.autoCommand = String(req.body.autoCommand).substring(0, 500);
-  saveSessionConfigs();
-  res.json({ id: req.params.id, name: session.name, autoCommand: session.autoCommand });
 });
 
 // --- API: kill session ---
-app.delete('/api/sessions/:id', (req, res) => {
-  const session = sessions.get(req.params.id);
-  if (!session) return res.status(404).json({ error: 'not found' });
-  if (session.idleTimer) clearTimeout(session.idleTimer);
-  session.term.kill();
-  sessions.delete(req.params.id);
-  saveSessionConfigs();
-  res.json({ ok: true });
+app.delete('/api/sessions/:id', async (req, res) => {
+  try {
+    // Verify session exists before delete so we return 404 properly.
+    try { await workerClient.rpc('getSession', { id: req.params.id }); }
+    catch (e) {
+      if (/not found/i.test(e.message)) return res.status(404).json({ error: 'not found' });
+      throw e;
+    }
+    await workerClient.rpc('killSession', { id: req.params.id });
+    res.json({ ok: true });
+  } catch (e) {
+    console.error(`DELETE /api/sessions failed: ${e.message}`);
+    res.status(500).json({ error: 'Failed to kill session' });
+  }
 });
 
 // --- Folder history ---
@@ -1800,7 +1656,7 @@ app.get('/api/claude-sessions/:project/:id/export', (req, res) => {
 });
 
 // --- API: import a claude session file (from transfer) + optionally create terminal session ---
-app.post('/api/claude-sessions/import', express.json({ limit: '50mb' }), (req, res) => {
+app.post('/api/claude-sessions/import', express.json({ limit: '50mb' }), async (req, res) => {
   const { project, id, content, autoResume, name, skipPermissions } = req.body || {};
   if (!project || !id || !content) {
     return res.status(400).json({ error: 'Missing project, id, or content' });
@@ -1826,7 +1682,9 @@ app.post('/api/claude-sessions/import', express.json({ limit: '50mb' }), (req, r
       if (skipPermissions) cmd += ' --dangerously-skip-permissions';
       const sessionId = crypto.randomUUID();
       const sessionName = String(name || projectPath.split(path.sep).filter(Boolean).pop() || 'Transferred');
-      createSession(sessionId, cwd, sessionName.substring(0, 100), cmd);
+      await workerClient.rpc('createSession', {
+        id: sessionId, cwd, name: sessionName.substring(0, 100), autoCommand: cmd,
+      });
       return res.json({ ok: true, sessionId, name: sessionName });
     }
     res.json({ ok: true });
@@ -1839,9 +1697,8 @@ app.post('/api/claude-sessions/import', express.json({ limit: '50mb' }), (req, r
 app.post('/api/restart', (req, res) => {
   res.json({ ok: true, message: 'Restarting...' });
   console.log(`[${new Date().toISOString()}] Restart requested via API`);
-  setTimeout(() => {
-    saveSessionConfigs();
-    saveAllScrollback(true); // sync before restart
+  setTimeout(async () => {
+    try { await workerClient.rpc('flushState'); } catch (e) {}
     const { execSync } = require('child_process');
     // Pull latest code before restarting
     try { execSync('git pull --ff-only', { cwd: __dirname, timeout: 15000, windowsHide: true }); } catch (e) {
@@ -1879,9 +1736,13 @@ app.get('/app/:id', (req, res) => {
 });
 
 // --- Terminal page ---
-app.get('/s/:id', (req, res) => {
-  if (!sessions.has(req.params.id)) return res.redirect('/');
-  res.sendFile(path.join(__dirname, 'terminal.html'));
+app.get('/s/:id', async (req, res) => {
+  try {
+    await workerClient.rpc('getSession', { id: req.params.id });
+    res.sendFile(path.join(__dirname, 'terminal.html'));
+  } catch (e) {
+    res.redirect('/');
+  }
 });
 
 // --- WebSocket: global notifications (all sessions) ---
@@ -1897,80 +1758,43 @@ app.ws('/ws/notify', (ws, req) => {
 // --- WebSocket: attach to session ---
 app.ws('/ws/:id', (ws, req) => {
   if (!authenticateWs(ws, req)) return;
-  const session = sessions.get(req.params.id);
-  if (!session) { ws.close(4000, 'Session ended'); return; }
+  const id = req.params.id;
 
   // Disable Nagle — send each PTY output chunk immediately
   if (ws._socket) ws._socket.setNoDelay(true);
 
-  // Send scrollback as a single chunk, trimmed to replay limit
-  try {
-    if (session.scrollback.length) {
-      let full = session.scrollback.join('');
-      const limit = getScrollbackReplayLimit();
-      if (full.length > limit) full = full.slice(-limit);
-      // Strip sequences that create empty pages in scrollback replay:
-      // - \x1b[2J / \x1b[3J (clear screen) — creates blank pages
-      // - \x1b[?1049h/l (alt screen buffer) — loses scrollback in xterm.js
-      full = full.replace(/\x1b\[[23]J/g, '').replace(/\x1b\[\?1049[hl]/g, '');
-      ws.send(full);
-    }
-  } catch (e) {}
+  const clientsSet = getSessionClients(id);
+  let attached = false;
+  const pendingMessages = []; // messages received before attach completes
 
-  const keepOpen = liveConfig('keepSessionsOpen', true);
-
-  if (keepOpen) {
-    // keepSessionsOpen mode: defer kick until client sends {"mode":"active"}
-    // New connections start as "pending" — no kick, no PTY input until mode is declared
-    ws._wtBackground = true; // default to background until mode message
-    ws._wtBrowserId = null;
-  } else {
-    // Legacy exclusive viewer: kick existing viewers before adding the new one
-    if (session.clients.size > 0) {
-      const kickMsg = JSON.stringify({ sessionTaken: getServerName() });
-      for (const existing of session.clients) {
-        try { existing.send(kickMsg); } catch (e) {}
-        try { existing.close(4001, 'Session opened elsewhere'); } catch (e) {}
-      }
-      session.clients.clear();
-      console.log(`[${new Date().toISOString()}] Kicked previous viewers from session ${req.params.id}`);
-    }
-  }
-
-  session.clients.add(ws);
+  // Set up message/close handlers IMMEDIATELY so early mode messages aren't dropped.
   ws._wtAlive = true;
+  ws._wtBackground = true;   // default until mode message arrives
+  ws._wtBrowserId = null;
   ws.on('pong', () => { ws._wtAlive = true; });
   ws.on('error', (err) => {
-    console.error(`[${new Date().toISOString()}] WS error session ${req.params.id}: ${err.message}`);
+    console.error(`[${new Date().toISOString()}] WS error session ${id}: ${err.message}`);
   });
-  console.log(`[${new Date().toISOString()}] Client joined session ${req.params.id} (${session.clients.size} client(s)${keepOpen ? ', keepOpen' : ', exclusive'})`);
 
-  ws.on('message', msg => {
+  function handleMessage(msg) {
     if (Buffer.isBuffer(msg)) msg = msg.toString();
-    // Reject oversized messages (64KB)
     if (msg.length > 65536) return;
-    // Fast path: only check for JSON commands if first char is '{'
     if (msg.charCodeAt(0) === 0x7B) {
-      // Heartbeat from client — just mark alive, don't forward to PTY
       if (msg.startsWith('{"heartbeat":')) { ws._wtAlive = true; return; }
       if (msg.startsWith('{"resize":')) {
-        // Background listeners should not resize the PTY
         if (ws._wtBackground) return;
         try {
           const { resize } = JSON.parse(msg);
           const cols = Math.max(1, Math.min(500, parseInt(resize.cols) || 80));
           const rows = Math.max(1, Math.min(200, parseInt(resize.rows) || 24));
-          session.term.resize(cols, rows);
-          session.lastUserInput = Date.now();
+          workerClient.rpc('resizeSession', { id, cols, rows }).catch(() => {});
         } catch (e) {}
         return;
       }
-      // Handle mode messages for keepSessionsOpen
       if (msg.startsWith('{"mode":')) {
         try {
           const parsed = JSON.parse(msg);
           if (parsed.mode === 'active' || parsed.mode === 'background') {
-            // Feature gate: reject background connections when feature is off
             if (!liveConfig('keepSessionsOpen', true) && parsed.mode === 'background') {
               ws.close(4002, 'keepSessionsOpen disabled');
               return;
@@ -1980,13 +1804,11 @@ app.ws('/ws/:id', (ws, req) => {
 
             if (parsed.mode === 'active') {
               ws._wtBackground = false;
-              // Kick active viewers from DIFFERENT browserIds only
               const kickMsg = JSON.stringify({ sessionTaken: getServerName() });
-              for (const existing of session.clients) {
+              for (const existing of clientsSet) {
                 if (existing === ws) continue;
-                if (existing._wtBrowserId === browserId && existing._wtBackground) continue; // same browser's background stays
-                if (existing._wtBackground) continue; // don't kick other browsers' background connections
-                // Kick other active viewers from different browsers
+                if (existing._wtBrowserId === browserId && existing._wtBackground) continue;
+                if (existing._wtBackground) continue;
                 if (existing._wtBrowserId !== browserId) {
                   try { existing.send(kickMsg); } catch (e) {}
                   try { existing.close(4001, 'Session opened elsewhere'); } catch (e) {}
@@ -2000,78 +1822,119 @@ app.ws('/ws/:id', (ws, req) => {
         return;
       }
     }
-    // Block PTY input from background listeners
     if (ws._wtBackground) return;
-    session.lastUserInput = Date.now();
-    session.term.write(msg);
+    workerClient.rpc('writeSession', { id, data: msg }).catch(() => {});
+  }
+
+  ws.on('message', (msg) => {
+    if (!attached) { pendingMessages.push(msg); return; }
+    handleMessage(msg);
   });
 
+  let closedEarly = false;
   ws.on('close', () => {
-    session.clients.delete(ws);
-    console.log(`[${new Date().toISOString()}] Client left session ${req.params.id} (${session.clients.size} clients)`);
+    closedEarly = !attached;
+    clientsSet.delete(ws);
+    if (attached) {
+      workerClient.rpc('detachSession', { id }).catch(() => {});
+    }
+    console.log(`[${new Date().toISOString()}] Client left session ${id} (${clientsSet.size} clients)`);
   });
+
+  // Attach to the worker session (also verifies existence). Returns scrollback.
+  (async () => {
+    let attachRes;
+    try {
+      attachRes = await workerClient.rpc('attachSession', { id, scrollbackLimit: getScrollbackReplayLimit() });
+    } catch (e) {
+      try { ws.close(4000, 'Session ended'); } catch {}
+      return;
+    }
+    if (closedEarly || ws.readyState !== 1) {
+      try { await workerClient.rpc('detachSession', { id }); } catch {}
+      return;
+    }
+
+    // Send scrollback as a single chunk
+    try {
+      let full = attachRes.scrollback || '';
+      if (full.length) {
+        full = full.replace(/\x1b\[[23]J/g, '').replace(/\x1b\[\?1049[hl]/g, '');
+        ws.send(full);
+      }
+    } catch (e) {}
+
+    const keepOpen = liveConfig('keepSessionsOpen', true);
+    if (keepOpen) {
+      // ws._wtBackground is already true — stays until mode message arrives
+    } else {
+      // Legacy exclusive viewer: kick existing viewers before adding the new one
+      if (clientsSet.size > 0) {
+        const kickMsg = JSON.stringify({ sessionTaken: getServerName() });
+        for (const existing of clientsSet) {
+          try { existing.send(kickMsg); } catch {}
+          try { existing.close(4001, 'Session opened elsewhere'); } catch {}
+        }
+        clientsSet.clear();
+        console.log(`[${new Date().toISOString()}] Kicked previous viewers from session ${id}`);
+      }
+      // In legacy mode, treat all connections as active (no background)
+      ws._wtBackground = false;
+    }
+
+    clientsSet.add(ws);
+    attached = true;
+    console.log(`[${new Date().toISOString()}] Client joined session ${id} (${clientsSet.size} client(s)${keepOpen ? ', keepOpen' : ', exclusive'})`);
+
+    // Drain pending messages that arrived during attach.
+    for (const m of pendingMessages) {
+      try { handleMessage(m); } catch {}
+    }
+    pendingMessages.length = 0;
+  })();
 });
 
-// --- Restore sessions from disk or create default ---
-const savedSessions = loadSessionConfigs();
-if (savedSessions.length > 0) {
-  console.log(`Restoring ${savedSessions.length} session(s) from sessions.json...`);
-  for (const cfg of savedSessions) {
-    let cmd = cfg.autoCommand || '';
-    // Auto-add --resume or --continue when restoring claude sessions so they resume instead of starting fresh
-    if (cmd && /\bclaude\b/i.test(cmd) && !/(--continue|--resume)\b/.test(cmd)) {
-      if (cfg.claudeSessionId) {
-        cmd = cmd.trimEnd() + ' --resume ' + cfg.claudeSessionId;
-        console.log(`Session ${cfg.id}: auto-added --resume ${cfg.claudeSessionId} to resume specific claude session`);
-      } else {
-        cmd = cmd.trimEnd() + ' --continue';
-        console.log(`Session ${cfg.id}: auto-added --continue to resume claude (no session ID saved)`);
-      }
-    }
-    const savedScrollback = loadScrollback(cfg.id);
-    createSession(cfg.id, cfg.cwd, cfg.name, cmd, savedScrollback, cfg.claudeSessionId || null);
-  }
-} else {
-  createSession(crypto.randomUUID(), DEFAULT_CWD, 'Default', '');
-}
-
-// --- Periodic scrollback save (every 30s) ---
-setInterval(saveAllScrollback, 30000);
-
-// --- Graceful shutdown: save everything before exit ---
-function gracefulShutdown(signal) {
-  console.log(`[${new Date().toISOString()}] ${signal} received — saving state...`);
-  saveSessionConfigs();
-  saveAllScrollback(true); // sync on shutdown — must complete before exit
-  console.log(`[${new Date().toISOString()}] State saved. Exiting.`);
+// --- Graceful shutdown: flush worker state before exit ---
+async function gracefulShutdown(signal) {
+  console.log(`[${new Date().toISOString()}] ${signal} received — flushing worker state...`);
+  try { await workerClient.rpc('flushState'); } catch {}
+  console.log(`[${new Date().toISOString()}] Exiting.`);
   process.exit(0);
 }
 
 process.on('SIGINT', () => gracefulShutdown('SIGINT'));
 process.on('SIGTERM', () => gracefulShutdown('SIGTERM'));
 process.on('SIGHUP', () => gracefulShutdown('SIGHUP'));
-// Windows: handle Ctrl+C and process kill
 if (process.platform === 'win32') {
   process.on('SIGBREAK', () => gracefulShutdown('SIGBREAK'));
 }
-// Last resort — save on uncaught exit
-process.on('exit', () => {
-  try { saveSessionConfigs(); saveAllScrollback(true); } catch (e) {}
-});
 
 const HOST = process.env.WT_HOST || config.host || '127.0.0.1';
-const server = app.listen(PORT, HOST, () => {
-  console.log(`Web Terminal running at http://${HOST}:${PORT}`);
-  console.log(`Sessions: http://${HOST}:${PORT}/`);
-  console.log(`Auth: ${_USER}:***`);
-  if (needsPasswordChange()) {
-    console.log('\x1b[33m⚠  DEFAULT PASSWORD IN USE — you will be prompted to change it on first login\x1b[0m');
+
+// Connect to the worker before starting the HTTP server.
+// If the worker isn't ready after ~12 seconds, exit with code 1 so monitor restarts.
+(async () => {
+  try {
+    await workerClient.connect(WORKER_PIPE_PATH, { maxAttempts: 60, delayMs: 200 });
+    console.log(`Connected to pty-worker at ${WORKER_PIPE_PATH}`);
+  } catch (e) {
+    console.error(`FATAL: could not connect to pty-worker: ${e.message}`);
+    process.exit(1);
   }
-});
-server.on('error', (err) => {
-  if (err.code === 'EADDRINUSE') {
-    console.error(`Port ${PORT} is already in use — another instance is likely running. Exiting.`);
-    process.exit(2); // Distinct exit code so monitor.js can detect port conflict
-  }
-  throw err;
-});
+
+  const server = app.listen(PORT, HOST, () => {
+    console.log(`Web Terminal running at http://${HOST}:${PORT}`);
+    console.log(`Sessions: http://${HOST}:${PORT}/`);
+    console.log(`Auth: ${_USER}:***`);
+    if (needsPasswordChange()) {
+      console.log('\x1b[33m⚠  DEFAULT PASSWORD IN USE — you will be prompted to change it on first login\x1b[0m');
+    }
+  });
+  server.on('error', (err) => {
+    if (err.code === 'EADDRINUSE') {
+      console.error(`Port ${PORT} is already in use — another instance is likely running. Exiting.`);
+      process.exit(2);
+    }
+    throw err;
+  });
+})();
