@@ -13,7 +13,7 @@ const crypto = require('crypto');
 const pty = require('node-pty');
 const ipc = require('./lib/ipc');
 
-const WORKER_VERSION = '0.3.0';
+const WORKER_VERSION = '0.4.0';
 const STALE_STATUS_TIMEOUT_MS = 5 * 60 * 1000;
 const MAX_SCROLLBACK_SIZE = 2 * 1024 * 1024;
 
@@ -194,9 +194,46 @@ function saveAllScrollback(sync) {
 const sessions = new Map();
 const attachedConnections = new Set(); // currently-connected web.js connections (for event push)
 
+// Per-connection subscription map: conn -> Map<sessionId, refCount>
+// refCount allows the same web.js connection to attach to the same session
+// multiple times (one WS client per attach) and only stop forwarding when
+// the last reference is detached.
+const connSubs = new WeakMap();
+
+function getSubs(conn) {
+  let subs = connSubs.get(conn);
+  if (!subs) { subs = new Map(); connSubs.set(conn, subs); }
+  return subs;
+}
+
+function subscribeConn(conn, sessionId) {
+  const subs = getSubs(conn);
+  subs.set(sessionId, (subs.get(sessionId) || 0) + 1);
+}
+
+function unsubscribeConn(conn, sessionId) {
+  const subs = connSubs.get(conn);
+  if (!subs) return;
+  const next = (subs.get(sessionId) || 0) - 1;
+  if (next <= 0) subs.delete(sessionId);
+  else subs.set(sessionId, next);
+}
+
 function broadcastEvent(event, params) {
   const frame = ipc.encodeJson({ event, params });
   for (const conn of attachedConnections) {
+    try { conn.send(frame); } catch {}
+  }
+}
+
+// Route binary PTY output only to connections subscribed to that session.
+function broadcastPtyOut(sessionId, data) {
+  const buf = Buffer.isBuffer(data) ? data : Buffer.from(data);
+  let frame = null;
+  for (const conn of attachedConnections) {
+    const subs = connSubs.get(conn);
+    if (!subs || !subs.has(sessionId)) continue;
+    if (!frame) frame = ipc.encodePtyOut(sessionId, buf);
     try { conn.send(frame); } catch {}
   }
 }
@@ -286,9 +323,10 @@ function createSession(id, cwd, name, autoCommand, savedScrollback, claudeSessio
       session.scrollbackSize -= session.scrollback.shift().length;
     }
     session.lastActivity = Date.now();
-    // Stream PTY data to any subscribed web.js clients (fan-out to browser WS is done server-side).
+    // Stream PTY data as binary TYPE_PTY_OUT frames to subscribed connections only.
+    // (fan-out to browser WS is done server-side.)
     if (session.clientCount > 0) {
-      broadcastEvent('ptyData', { id, data });
+      broadcastPtyOut(id, data);
     }
   });
 
@@ -507,33 +545,28 @@ const rpcHandlers = {
     return { ok: true };
   },
 
-  // Subscribe server.js to PTY output for this session, and return scrollback replay.
-  // Server.js tracks WS clients separately and fans out 'ptyData' events to them.
-  // Each attachSession call increments the client count by 1.
-  attachSession: async (params) => {
+  // Subscribe server.js (the calling connection) to PTY output for this session
+  // and return scrollback replay. Server.js tracks WS clients separately and
+  // fans out PTY_OUT frames to them.
+  // Each attachSession call increments the client count by 1 AND adds a
+  // per-connection subscription so PTY_OUT frames are routed to this conn.
+  attachSession: async (params, conn) => {
     const session = sessions.get(params.id);
     if (!session) throw new Error('session not found');
     session.clientCount = (session.clientCount || 0) + 1;
+    if (conn) subscribeConn(conn, params.id);
     const limit = parseInt(params.scrollbackLimit) || 1048576;
     let full = session.scrollback.join('');
     if (full.length > limit) full = full.slice(-limit);
     return { clients: session.clientCount, scrollback: full };
   },
 
-  detachSession: async (params) => {
+  detachSession: async (params, conn) => {
     const session = sessions.get(params.id);
+    if (conn) unsubscribeConn(conn, params.id);
     if (!session) return { ok: true };
     session.clientCount = Math.max(0, (session.clientCount || 0) - 1);
     return { clients: session.clientCount };
-  },
-
-  // Write PTY input — called when the browser sends typed bytes over WS.
-  writeSession: async (params) => {
-    const session = sessions.get(params.id);
-    if (!session) throw new Error('session not found');
-    try { session.term.write(params.data); } catch {}
-    session.lastUserInput = Date.now();
-    return { ok: true };
   },
 
   // Flush sessions.json + scrollback files to disk synchronously.
@@ -625,10 +658,32 @@ server.on('connection', (conn) => {
       if (msg && typeof msg.method === 'string' && typeof msg.id === 'number') {
         handleRpc(conn, msg);
       }
+      return;
     }
-    // PTY_IN / PTY_OUT frames — Phase 4.
+    if (frame.type === ipc.TYPE_PTY_IN) {
+      // Binary keystroke frame from web.js — write to the session's PTY.
+      let parsed;
+      try { parsed = ipc.parsePtyFrame(frame); } catch { return; }
+      const session = sessions.get(parsed.sessionId);
+      if (!session) return;
+      try { session.term.write(parsed.data); } catch {}
+      session.lastUserInput = Date.now();
+      return;
+    }
+    // Other binary types are ignored server-side.
   });
   conn.on('close', () => {
+    // Release the client-count references held by this connection's
+    // attachments, so sessions no longer broadcast to a gone conn.
+    const subs = connSubs.get(conn);
+    if (subs) {
+      for (const [sid, count] of subs) {
+        const s = sessions.get(sid);
+        if (!s) continue;
+        s.clientCount = Math.max(0, (s.clientCount || 0) - count);
+      }
+      connSubs.delete(conn);
+    }
     attachedConnections.delete(conn);
     log('web.js disconnected');
   });

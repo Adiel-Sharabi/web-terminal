@@ -7,7 +7,7 @@ const crypto = require('crypto');
 const { execFile, spawn } = require('child_process');
 const workerClientLib = require('./lib/worker-client');
 
-const SERVER_VERSION = '1.5.0';
+const SERVER_VERSION = '1.6.0';
 // Stale status auto-correction now lives in pty-worker.js.
 
 // --- Config: config.json > env vars > defaults ---
@@ -232,6 +232,32 @@ function getSessionClients(id) {
   return set;
 }
 
+// Map<sessionId, () => void> — active PTY_OUT dispose handles (one per session,
+// regardless of how many browser WS clients are attached).
+const ptyOutDisposers = new Map();
+
+function ensurePtyOutSubscription(id) {
+  if (ptyOutDisposers.has(id)) return;
+  const dispose = workerClient.onPtyOut(id, (buf) => {
+    const set = sessionClients.get(id);
+    if (!set || set.size === 0) return;
+    for (const client of set) {
+      try { client.send(buf); } catch {}
+    }
+  });
+  ptyOutDisposers.set(id, dispose);
+}
+
+function releasePtyOutSubscription(id) {
+  const set = sessionClients.get(id);
+  if (set && set.size > 0) return; // still has clients
+  const dispose = ptyOutDisposers.get(id);
+  if (dispose) {
+    try { dispose(); } catch {}
+    ptyOutDisposers.delete(id);
+  }
+}
+
 try { if (!fs.existsSync(CLIPBOARD_DIR)) fs.mkdirSync(CLIPBOARD_DIR); } catch (e) {}
 
 // --- Worker client setup --------------------------------------------------
@@ -265,13 +291,8 @@ function maybeSpawnWorker() {
 maybeSpawnWorker();
 
 // Forward worker-pushed events to browser clients.
-workerClient.on('ptyData', ({ id, data }) => {
-  const set = sessionClients.get(id);
-  if (!set) return;
-  for (const client of set) {
-    try { client.send(data); } catch {}
-  }
-});
+// Binary PTY output: per-session subscription is set up in the WS attach path.
+// (Legacy ptyData JSON event was removed in Phase 4.)
 
 workerClient.on('statusChanged', ({ id, status, notifyType, notifyMsg }) => {
   // Fan out to notifyClients (browser notify WS subscribers)
@@ -298,6 +319,11 @@ workerClient.on('sessionExited', ({ id }) => {
       try { client.send('\r\n\x1b[31m[Session ended]\x1b[0m\r\n'); client.close(4000, 'Session ended'); } catch {}
     }
     sessionClients.delete(id);
+  }
+  const dispose = ptyOutDisposers.get(id);
+  if (dispose) {
+    try { dispose(); } catch {}
+    ptyOutDisposers.delete(id);
   }
 });
 
@@ -1823,7 +1849,11 @@ app.ws('/ws/:id', (ws, req) => {
       }
     }
     if (ws._wtBackground) return;
-    workerClient.rpc('writeSession', { id, data: msg }).catch(() => {});
+    // Send keystrokes as a TYPE_PTY_IN binary frame (no per-keystroke RPC).
+    try {
+      const buf = Buffer.isBuffer(msg) ? msg : Buffer.from(msg);
+      workerClient.sendPtyIn(id, buf);
+    } catch {}
   }
 
   ws.on('message', (msg) => {
@@ -1838,6 +1868,7 @@ app.ws('/ws/:id', (ws, req) => {
     if (attached) {
       workerClient.rpc('detachSession', { id }).catch(() => {});
     }
+    releasePtyOutSubscription(id);
     console.log(`[${new Date().toISOString()}] Client left session ${id} (${clientsSet.size} clients)`);
   });
 
@@ -1883,6 +1914,7 @@ app.ws('/ws/:id', (ws, req) => {
     }
 
     clientsSet.add(ws);
+    ensurePtyOutSubscription(id);
     attached = true;
     console.log(`[${new Date().toISOString()}] Client joined session ${id} (${clientsSet.size} client(s)${keepOpen ? ', keepOpen' : ', exclusive'})`);
 
