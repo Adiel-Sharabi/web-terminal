@@ -47,7 +47,8 @@ Browser-based terminal manager for Windows. Monitor and control CLI sessions (in
 - **Input length limits** on all user-facing inputs
 
 ### Operations
-- **Server monitor** (`monitor.js`) — auto-restart with exponential backoff, crash budget, log rotation, health checks
+- **Server monitor** (`monitor.js`) — supervises `pty-worker` + `server.js` as separate children, auto-restart with exponential backoff, crash budget, log rotation, health checks
+- **Hot reload** — web layer (HTTP/WS) can be restarted without losing PTY sessions. The worker owns session state over a named pipe; killing `server.js` leaves shells running and reattaches on restart
 - **Live config** — most settings apply immediately without restart
 - **Tailscale ready** — HTTPS with real TLS certificates over your private mesh VPN
 
@@ -190,9 +191,12 @@ PC Browser ────> localhost:7681 ────────┘
 
 | File | Purpose |
 |------|---------|
-| `server.js` | Express + WebSocket server, session management, auth, cluster proxy, hooks |
+| `server.js` | Express + WebSocket server, auth, cluster proxy, hooks — delegates PTY state to the worker over IPC |
+| `pty-worker.js` | PTY owner — node-pty sessions, scrollback, session persistence; survives web.js restarts |
+| `lib/ipc.js` | Framing + named-pipe server/client for worker ↔ web IPC (JSON control + binary PTY frames) |
+| `lib/worker-client.js` | High-level RPC/event client used by `server.js` to talk to the worker |
 | `app.html` | Unified single-page app (terminal + sidebar + settings) |
-| `monitor.js` | Process manager — auto-restart, log rotation, crash diagnostics |
+| `monitor.js` | Process manager — supervises worker + web independently, auto-restart, log rotation, crash diagnostics |
 | `sw.js` | Service worker for PWA caching |
 | `lobby.html` | Multi-server lobby page |
 | `terminal.html` | Legacy standalone terminal page |
