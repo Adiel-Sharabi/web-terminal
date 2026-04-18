@@ -35,7 +35,7 @@ Browser-based terminal manager for Windows. Monitor and control CLI sessions (in
 - **Touch toolbar** — Esc, Ctrl, Alt, Shift (sticky), Tab, arrows, plus `/`, `|`, `-`, `~`
 - **Long-press context menu** — Copy, Paste, Paste Image, Select, Select All
 - **Drag-to-select** — character count shown, floating Copy/Done bar
-- **IME deduplication** — handles Android keyboard (SwiftKey, Gboard) duplicate events
+- **IME deduplication & autocorrect** — handles Android keyboard (SwiftKey, Gboard) composition re-sends without duplication; autocorrect changes are transparently applied via backspace rewrite so the corrected word reaches the shell once
 - **Responsive layout** — adapts to phone, tablet, and desktop
 
 ### Security

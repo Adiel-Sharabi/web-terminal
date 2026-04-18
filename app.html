@@ -476,6 +476,9 @@
     term.loadAddon(new window.WebLinksAddon.WebLinksAddon());
     term.open(document.getElementById('terminal'));
     fitAddon.fit();
+    // Expose on window for test hooks and live debugging — harmless since
+    // any page script can already access these via closures.
+    window.term = term;
 
     // --- WebSocket ---
     let heartbeatTimer = null;
@@ -937,33 +940,99 @@
       }
     }
 
+    // --- Mobile dedup state (issue #8) ---
+    // Android keyboards (SwiftKey, Gboard) cause duplicates because they
+    // deliver per-tap characters as individual onData calls AND then, when
+    // the user finalizes a word via space/period, fire compositionend which
+    // xterm.js forwards as a single onData call containing the whole word
+    // (often with autocorrect changes). Without dedup that becomes "hihi"
+    // or, under autocorrect, "tehthe" instead of "the".
+    //
+    // Strategy: track the current in-progress word (single printable chars
+    // typed in quick succession). When a multi-char chunk arrives shortly
+    // after, compare it to the pending word:
+    //   - exact match               → suppress the chunk (pure re-send)
+    //   - chunk starts with pending → send only the new suffix
+    //   - similar length, first char same → autocorrect: emit backspaces to
+    //     erase the typed form on the server, then send the corrected chunk
+    //   - otherwise                 → pass the chunk through unchanged
+    // Non-letter singles (space, punctuation, control) reset the word.
     let _lastMobileData = '', _lastMobileTime = 0;
-    let _mobileSingleChars = 0, _mobileSCTimer = null;
+    let _mobileWord = '', _mobileWordTime = 0, _mobileWordTimer = null;
+    const MOBILE_WORD_IDLE_MS = 1200; // word expires after this idle gap
+    const MOBILE_CHUNK_GAP_MS = 500;  // chunk must arrive within this of last single
+    function _mobileResetWord() {
+      _mobileWord = '';
+      _mobileWordTime = 0;
+      if (_mobileWordTimer) { clearTimeout(_mobileWordTimer); _mobileWordTimer = null; }
+    }
+    function _mobileIsWordChar(c) {
+      // Letters, digits, apostrophe (contractions) — what autocorrect operates on
+      return /^[A-Za-z0-9']$/.test(c);
+    }
+    function _mobileHandleChunk(chunk, now) {
+      // Only consider a chunk a candidate for dedup if a word is in progress
+      // AND the chunk arrived very soon after the last single (typical
+      // composition-finalize timing on mobile is <100ms, we allow 500ms).
+      if (!_mobileWord || now - _mobileWordTime > MOBILE_CHUNK_GAP_MS) return chunk;
+      const w = _mobileWord;
+      // Case 1: exact repeat — drop the chunk entirely
+      if (chunk === w) { _mobileResetWord(); return ''; }
+      // Case 2: chunk starts with the pending word — send only the new suffix.
+      // (User typed "hi", autocomplete tacked on " there" → chunk "hi there").
+      if (chunk.startsWith(w)) { _mobileResetWord(); return chunk.slice(w.length); }
+      // Case 3: autocorrect replacement. Heuristic:
+      //  - pending word is at least 2 chars (random collisions rare)
+      //  - lengths differ by at most 3 chars
+      //  - first character matches (autocorrect virtually never changes it)
+      // In that case, emit backspaces to erase what we already sent, then
+      // deliver the corrected chunk. Net result on the server: the word
+      // appears exactly once, in corrected form.
+      if (w.length >= 2
+          && Math.abs(chunk.length - w.length) <= 3
+          && chunk[0] === w[0]) {
+        _mobileResetWord();
+        return '\b'.repeat(w.length) + chunk;
+      }
+      // Otherwise the chunk is unrelated — pass it through. Reset the word
+      // since the chunk represents a distinct event (paste, different phrase).
+      _mobileResetWord();
+      return chunk;
+    }
+
     term.onData(data => {
-      // Mobile dedup: Android keyboards (SwiftKey, Gboard) cause duplicates:
-      // 1. Rapid double-fire of same char for punctuation
-      // 2. Composition re-send: chars sent one-by-one, then period/autocomplete
-      //    triggers compositionend which re-sends the ENTIRE text (often with
-      //    autocorrect changes, so exact string comparison won't match).
-      // Key insight: paste bypasses onData (goes through ws.send directly via
-      // Ctrl+V handler), so any large chunk in onData is a composition re-send.
       if (isMobile) {
         const now = Date.now();
-        // Exact duplicate within 150ms (handles single-char double-fire)
-        if (data === _lastMobileData && now - _lastMobileTime < 150) return;
-        // Composition re-send: we've been typing single chars, then get a large
-        // chunk — suppress it. Autocorrect changes the text so we can't compare
-        // strings, but the pattern (many singles → one big chunk) is reliable.
-        if (data.length > 5 && _mobileSingleChars >= data.length) {
-          _mobileSingleChars = 0;
-          return;
-        }
+        // 1. Rapid exact duplicate of a non-word char (single-char double-fire
+        //    on punctuation/space/enter). We intentionally exclude word chars
+        //    here — consecutive identical letters (e.g., the "ll" in "hello")
+        //    are legitimate and must not be dropped.
+        if (data === _lastMobileData
+            && data.length === 1
+            && !_mobileIsWordChar(data)
+            && now - _lastMobileTime < 150) return;
         _lastMobileData = data;
         _lastMobileTime = now;
-        if (data.length <= 2) {
-          _mobileSingleChars += data.length;
-          clearTimeout(_mobileSCTimer);
-          _mobileSCTimer = setTimeout(() => { _mobileSingleChars = 0; }, 3000);
+
+        // 2. Word-buffer tracking for composition re-send / autocorrect.
+        //    Only applies to printable characters / short chunks; control
+        //    sequences (arrows, Enter, Ctrl+C etc) are never part of a word.
+        if (data.length === 1) {
+          if (_mobileIsWordChar(data)) {
+            _mobileWord += data;
+            _mobileWordTime = now;
+            clearTimeout(_mobileWordTimer);
+            _mobileWordTimer = setTimeout(_mobileResetWord, MOBILE_WORD_IDLE_MS);
+          } else {
+            // Non-word single (space, punctuation, newline) — word boundary.
+            _mobileResetWord();
+          }
+        } else if (data.length > 1) {
+          // Potential composition re-send. Check against the pending word
+          // and transform appropriately.
+          const transformed = _mobileHandleChunk(data, now);
+          if (transformed === '') return;          // suppressed
+          if (transformed !== data) { data = transformed; } // rewritten
         }
       }
       // Apply sticky modifiers to mobile keyboard input

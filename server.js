@@ -7,7 +7,7 @@ const fs = require('fs');
 const crypto = require('crypto');
 const { execFile } = require('child_process');
 
-const SERVER_VERSION = '1.4.3';
+const SERVER_VERSION = '1.4.4';
 const STALE_STATUS_TIMEOUT_MS = 5 * 60 * 1000; // 5 minutes — auto-correct stuck "working"/"waiting" status
 
 // --- Config: config.json > env vars > defaults ---
