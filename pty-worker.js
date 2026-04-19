@@ -446,6 +446,16 @@ function handleHook(session, event) {
 }
 
 // --- RPC handlers ---------------------------------------------------------
+// Defense-in-depth: any session id received from IPC is used as a filesystem
+// key (scrollback file name). Reject non-UUIDs so a malicious IPC peer can't
+// smuggle "../" into a path via params.id. Throw "session not found" so the
+// server.js error mapping returns 404 (matches behavior pre-validation).
+const UUID_RE = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
+function requireUuid(id) {
+  if (typeof id !== 'string' || !UUID_RE.test(id)) throw new Error('session not found');
+  return id;
+}
+
 const rpcHandlers = {
   ping: async () => ({ ok: true, version: WORKER_VERSION }),
 
@@ -456,7 +466,7 @@ const rpcHandlers = {
   },
 
   createSession: async (params) => {
-    const id = params.id || crypto.randomUUID();
+    const id = params.id ? requireUuid(params.id) : crypto.randomUUID();
     const cwd = String(params.cwd || getDefaultCwd()).substring(0, 260);
     const name = String(params.name || `Session ${sessions.size + 1}`).substring(0, 100).replace(/[\x00-\x1f]/g, '');
     const autoCommand = String(params.autoCommand || '').substring(0, 500);
@@ -466,7 +476,7 @@ const rpcHandlers = {
   },
 
   renameSession: async (params) => {
-    const session = sessions.get(params.id);
+    const session = sessions.get(requireUuid(params.id));
     if (!session) throw new Error('session not found');
     const newName = String(params.name || '').substring(0, 100).replace(/[\x00-\x1f]/g, '');
     if (!newName) throw new Error('name required');
@@ -492,7 +502,7 @@ const rpcHandlers = {
   },
 
   updateSessionAutoCommand: async (params) => {
-    const session = sessions.get(params.id);
+    const session = sessions.get(requireUuid(params.id));
     if (!session) throw new Error('session not found');
     session.autoCommand = String(params.autoCommand || '').substring(0, 500);
     saveSessionConfigs();
@@ -500,7 +510,8 @@ const rpcHandlers = {
   },
 
   killSession: async (params) => {
-    const session = sessions.get(params.id);
+    const id = requireUuid(params.id);
+    const session = sessions.get(id);
     if (!session) return { ok: true }; // already gone
     if (session.idleTimer) clearTimeout(session.idleTimer);
     try { session.term.kill(); } catch {}
@@ -508,20 +519,21 @@ const rpcHandlers = {
     // (matches legacy server.js behavior). The onExit handler still fires later
     // for cleanup (delete scrollback, save configs, broadcast event) but it's
     // idempotent via sessions.delete.
-    sessions.delete(params.id);
-    deleteScrollback(params.id);
+    sessions.delete(id);
+    deleteScrollback(id);
     saveSessionConfigs();
     return { ok: true };
   },
 
   getSession: async (params) => {
-    const session = sessions.get(params.id);
+    const id = requireUuid(params.id);
+    const session = sessions.get(id);
     if (!session) throw new Error('session not found');
-    return sessionSummary(params.id, session);
+    return sessionSummary(id, session);
   },
 
   getScrollback: async (params) => {
-    const session = sessions.get(params.id);
+    const session = sessions.get(requireUuid(params.id));
     if (!session) throw new Error('session not found');
     const limit = parseInt(params.limit) || 1048576;
     let full = session.scrollback.join('');
@@ -530,13 +542,13 @@ const rpcHandlers = {
   },
 
   hookEvent: async (params) => {
-    const session = sessions.get(params.id);
+    const session = sessions.get(requireUuid(params.id));
     if (!session) throw new Error('session not found');
     return handleHook(session, params.event);
   },
 
   resizeSession: async (params) => {
-    const session = sessions.get(params.id);
+    const session = sessions.get(requireUuid(params.id));
     if (!session) throw new Error('session not found');
     const cols = Math.max(1, Math.min(500, parseInt(params.cols) || 80));
     const rows = Math.max(1, Math.min(200, parseInt(params.rows) || 24));
@@ -551,10 +563,11 @@ const rpcHandlers = {
   // Each attachSession call increments the client count by 1 AND adds a
   // per-connection subscription so PTY_OUT frames are routed to this conn.
   attachSession: async (params, conn) => {
-    const session = sessions.get(params.id);
+    const id = requireUuid(params.id);
+    const session = sessions.get(id);
     if (!session) throw new Error('session not found');
     session.clientCount = (session.clientCount || 0) + 1;
-    if (conn) subscribeConn(conn, params.id);
+    if (conn) subscribeConn(conn, id);
     const limit = parseInt(params.scrollbackLimit) || 1048576;
     let full = session.scrollback.join('');
     if (full.length > limit) full = full.slice(-limit);
@@ -562,8 +575,9 @@ const rpcHandlers = {
   },
 
   detachSession: async (params, conn) => {
-    const session = sessions.get(params.id);
-    if (conn) unsubscribeConn(conn, params.id);
+    const id = requireUuid(params.id);
+    const session = sessions.get(id);
+    if (conn) unsubscribeConn(conn, id);
     if (!session) return { ok: true };
     session.clientCount = Math.max(0, (session.clientCount || 0) - 1);
     return { clients: session.clientCount };
