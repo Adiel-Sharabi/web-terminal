@@ -241,8 +241,13 @@ function ensurePtyOutSubscription(id) {
   const dispose = workerClient.onPtyOut(id, (buf) => {
     const set = sessionClients.get(id);
     if (!set || set.size === 0) return;
+    // Browser xterm.js expects WS text frames with UTF-8 string payload.
+    // If we forward the raw Buffer via ws.send(buf), browsers deliver a Blob
+    // which xterm cannot render (produces garbled overlapping output).
+    // Convert once here and send as a string to all subscribed WS clients.
+    const str = buf.toString('utf8');
     for (const client of set) {
-      try { client.send(buf); } catch {}
+      try { client.send(str); } catch {}
     }
   });
   ptyOutDisposers.set(id, dispose);
