@@ -177,8 +177,11 @@ test.describe('Claude Session ID Persistence', () => {
     try {
       await cleanupSessions(ctx);
 
+      // Use an explicit non-claude autoCommand — passing '' would trigger the
+      // server's default-command fallback (config.default.json may set claude),
+      // defeating the intent of this test.
       const res = await ctx.post('/api/sessions', {
-        data: { name: 'Plain Shell', autoCommand: '' },
+        data: { name: 'Plain Shell', autoCommand: 'echo hello' },
       });
       expect(res.status()).toBe(200);
       const { id } = await res.json();
