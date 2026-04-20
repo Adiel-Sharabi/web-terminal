@@ -62,6 +62,7 @@ const cluster = Object.entries(URLS)
   .map(([k, url]) => ({ name: k === 'office' ? 'ShadowOffice' : (k === 'home' ? 'ShadowHome' : 'ShadowXps'), url }));
 const config = {
   port: PORT,
+  host: '0.0.0.0',
   user: 'admin',
   password: PASSHASH,
   shell: 'C:\\Program Files\\Git\\bin\\bash.exe',
