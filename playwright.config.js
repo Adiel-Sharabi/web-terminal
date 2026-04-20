@@ -1,5 +1,11 @@
 const { defineConfig } = require('@playwright/test');
+const crypto = require('crypto');
 const path = require('path');
+
+// Issue #18: test-run-scoped handshake token shared by server.js and the
+// pty-worker it spawns (WT_SPAWN_WORKER=1). Unique per run so parallel/
+// previous-run stragglers can't accidentally authenticate.
+const TEST_IPC_TOKEN = crypto.randomBytes(32).toString('base64');
 
 module.exports = defineConfig({
   testDir: './tests',
@@ -30,6 +36,8 @@ module.exports = defineConfig({
       WT_WORKER_PIPE: process.platform === 'win32'
         ? '\\\\.\\pipe\\web-terminal-pty-test'
         : '/tmp/web-terminal-pty-test.sock',
+      // Issue #18: shared handshake token for server.js <-> pty-worker IPC.
+      WT_IPC_TOKEN: TEST_IPC_TOKEN,
     },
     reuseExistingServer: false,
     timeout: 30000,
