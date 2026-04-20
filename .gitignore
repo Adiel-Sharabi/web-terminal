@@ -16,6 +16,7 @@ cluster-tokens.json
 api-tokens.json
 claude-session-names.json
 .session-secret
+.hook-token
 *.png
 logs/
 monitor-status.json

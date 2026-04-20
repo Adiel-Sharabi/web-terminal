@@ -5,6 +5,21 @@ const id = process.env.WT_SESSION_ID;
 if (!id) process.exit(0);
 
 const port = process.env.WT_SESSION_PORT || '7681';
+
+// H1: read the per-process hook token from .hook-token alongside server.js.
+// The file is written by server.js on startup (chmod 0600 on unix).
+const fs = require('fs');
+const path = require('path');
+let hookToken = '';
+try {
+  hookToken = fs.readFileSync(path.join(__dirname, '.hook-token'), 'utf8').trim();
+} catch (e) {
+  // No token file -> silently exit (server may not be up, or this isn't the
+  // web-terminal hook install). Don't break Claude if the hook can't authenticate.
+  process.exit(0);
+}
+if (!hookToken) process.exit(0);
+
 let input = '';
 process.stdin.on('data', d => { input += d; });
 process.stdin.on('end', () => {
@@ -17,7 +32,11 @@ process.stdin.on('end', () => {
   const req = http.request({
     hostname: '127.0.0.1', port, method: 'POST',
     path: `/api/session/${id}/hook`,
-    headers: { 'Content-Type': 'application/json', 'Content-Length': body.length }
+    headers: {
+      'Content-Type': 'application/json',
+      'Content-Length': body.length,
+      'X-WT-Hook-Token': hookToken,
+    }
   });
   req.on('error', () => {});
   req.end(body);

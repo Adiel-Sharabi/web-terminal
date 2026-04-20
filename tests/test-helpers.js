@@ -1,8 +1,15 @@
 // @ts-check
 const { request: pwRequest } = require('@playwright/test');
+const fs = require('fs');
+const path = require('path');
 
 const BASE = 'http://localhost:17681';
 const AUTH = { user: 'testuser', password: 'testpass:colon' };
+
+/** Read per-process hook token (H1) from .hook-token so tests can hit hook endpoints. */
+function readHookToken() {
+  try { return fs.readFileSync(path.join(__dirname, '..', '.hook-token'), 'utf8').trim(); } catch { return ''; }
+}
 
 /** Create a request context with cookie auth */
 async function authCtx() {
@@ -15,7 +22,10 @@ async function authCtx() {
   await ctx.dispose();
   return pwRequest.newContext({
     baseURL: BASE,
-    extraHTTPHeaders: { Cookie: setCookie.split(';')[0] },
+    extraHTTPHeaders: {
+      Cookie: setCookie.split(';')[0],
+      'X-WT-Hook-Token': readHookToken(),
+    },
   });
 }
 
@@ -33,4 +43,4 @@ async function loginPage(page) {
   await page.waitForURL('**/');
 }
 
-module.exports = { BASE, AUTH, authCtx, noAuthCtx, loginPage };
+module.exports = { BASE, AUTH, authCtx, noAuthCtx, loginPage, readHookToken };

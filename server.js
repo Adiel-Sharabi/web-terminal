@@ -382,6 +382,38 @@ const SESSION_SECRET = (() => {
   try { fs.writeFileSync(SESSION_SECRET_FILE, secret, 'utf8'); } catch (e) {}
   return secret;
 })();
+
+// H1: per-process hook token. Written to .hook-token in the same dir so
+// claude-hook.js / claude-hook.sh (which live alongside) can read it. The
+// token is regenerated on each fresh startup if the file is missing. Unix
+// chmod 0600; Windows has no equivalent.
+const HOOK_TOKEN_FILE = path.join(__dirname, '.hook-token');
+const HOOK_TOKEN = (() => {
+  try {
+    if (fs.existsSync(HOOK_TOKEN_FILE)) {
+      const existing = fs.readFileSync(HOOK_TOKEN_FILE, 'utf8').trim();
+      if (existing && existing.length >= 32) return existing;
+    }
+  } catch (e) {}
+  const tok = crypto.randomBytes(32).toString('hex');
+  try {
+    fs.writeFileSync(HOOK_TOKEN_FILE, tok, 'utf8');
+    if (process.platform !== 'win32') {
+      try { fs.chmodSync(HOOK_TOKEN_FILE, 0o600); } catch {}
+    }
+  } catch (e) {}
+  return tok;
+})();
+const HOOK_TOKEN_BUF = Buffer.from(HOOK_TOKEN, 'utf8');
+
+function verifyHookToken(headerVal) {
+  if (!headerVal || typeof headerVal !== 'string') return false;
+  const got = Buffer.from(headerVal, 'utf8');
+  if (got.length !== HOOK_TOKEN_BUF.length) return false;
+  try {
+    return crypto.timingSafeEqual(got, HOOK_TOKEN_BUF);
+  } catch (e) { return false; }
+}
 const COOKIE_NAME = 'wt_session';
 const COOKIE_MAX_AGE = 90 * 24 * 60 * 60 * 1000; // 90 days
 
@@ -699,11 +731,17 @@ app.post('/api/auth/token', express.json({ limit: '16kb' }), (req, res) => {
   res.json({ ok: true, token });
 });
 
-// --- Claude hook endpoint (before auth — validated by session ID knowledge) ---
+// --- Claude hook endpoint (before auth middleware) ---
+// H1: gated by X-WT-Hook-Token header (per-process secret in .hook-token).
+// The token is generated on startup; hook senders (claude-hook.js /
+// claude-hook.sh) read it from the same file.
 // Supports two modes:
 // 1. POST /api/session/:id/hook with {event} body (from command hooks)
 // 2. POST /api/hook with X-WT-Session-ID header (from HTTP hooks, no subprocess)
 app.post('/api/hook', express.json({ limit: '16kb' }), async (req, res) => {
+  if (!verifyHookToken(req.headers['x-wt-hook-token'])) {
+    return res.status(401).json({ error: 'Unauthorized' });
+  }
   const id = req.headers['x-wt-session-id'];
   if (!id) return res.json({ ok: true, skipped: 'no session ID' });
   const event = req.body?.hook_event_name || req.body?.event;
@@ -716,6 +754,9 @@ app.post('/api/hook', express.json({ limit: '16kb' }), async (req, res) => {
   }
 });
 app.post('/api/session/:id/hook', express.json({ limit: '16kb' }), async (req, res) => {
+  if (!verifyHookToken(req.headers['x-wt-hook-token'])) {
+    return res.status(401).json({ error: 'Unauthorized' });
+  }
   const event = req.body?.hook_event_name || req.body?.event;
   if (!event) return res.status(400).json({ error: 'event required' });
   try {
