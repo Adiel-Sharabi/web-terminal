@@ -26,3 +26,5 @@ tests/diagnostic-report.json
 playwright.diag.config.js
 cdp_*.py
 sessions.test.json
+.tmp-*
+.claude/
