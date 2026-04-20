@@ -93,7 +93,10 @@ function histogram(arr) {
 
   // 1. Create a session on the target (local to it)
   console.log(`[setup] creating session on ${TARGET}...`);
-  const create = await httpJson('POST', TGT.url + '/api/sessions', TGT.token, { cwd: 'C:\\dev', name: 'typing-probe' });
+  // Use a plain bash shell so the probe measures PTY RTT, not Claude CLI
+  // startup latency. Pass ":" (bash no-op builtin) to block the server-side
+  // "empty → default command" substitution and land on a ready bash prompt.
+  const create = await httpJson('POST', TGT.url + '/api/sessions', TGT.token, { cwd: 'C:\\dev', name: 'typing-probe', autoCommand: ':' });
   if (create.status !== 200) { console.error('create failed:', create); process.exit(1); }
   const sid = create.body.id;
   console.log(`[setup] session ${sid}`);
@@ -106,10 +109,15 @@ function histogram(arr) {
   //    proxy: ws://office/cluster/<target-url>/ws/<sid>?token=<office-token>
   let wsUrl;
   if (MODE === 'direct') {
-    const cl = await httpJson('GET', OFFICE.url + '/api/cluster/sessions', OFFICE.token);
-    const ours = cl.body.sessions.find(s => s.id === sid);
-    if (!ours || !ours.directUrl) { console.error('no directUrl:', ours); process.exit(1); }
-    wsUrl = ours.directUrl;
+    if (TARGET === 'office') {
+      // Office IS the cluster hub — no "direct" indirection; just WS straight in via token query.
+      wsUrl = `ws://100.75.82.89:7784/ws/${sid}?token=${OFFICE.token}`;
+    } else {
+      const cl = await httpJson('GET', OFFICE.url + '/api/cluster/sessions', OFFICE.token);
+      const ours = cl.body.sessions.find(s => s.id === sid);
+      if (!ours || !ours.directUrl) { console.error('no directUrl:', ours); process.exit(1); }
+      wsUrl = ours.directUrl;
+    }
   } else if (MODE === 'proxy') {
     wsUrl = `ws://100.75.82.89:7784/cluster/${encodeURIComponent(TGT.url)}/ws/${sid}?token=${OFFICE.token}`;
   } else {
@@ -162,8 +170,8 @@ function histogram(arr) {
   ws.on('open', () => {
     ws.send(JSON.stringify({ mode: 'active', browserId: 'typing-probe' }));
     ws.send(JSON.stringify({ resize: { cols: 120, rows: 30 } }));
-    // Wait for scrollback + steady state — ~800ms of quiet = settled.
-    settleTimer = setTimeout(() => { attached = true; fireKey(); }, 800);
+    // Wait for scrollback + steady state — 2s of quiet = settled (bash prompt).
+    settleTimer = setTimeout(() => { attached = true; fireKey(); }, 2000);
   });
 
   ws.on('message', (data) => {
