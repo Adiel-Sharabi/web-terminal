@@ -5,10 +5,40 @@ const os = require('os');
 const fs = require('fs');
 const crypto = require('crypto');
 const { execFile, spawn } = require('child_process');
+const { performance } = require('perf_hooks');
 const workerClientLib = require('./lib/worker-client');
 const { mintDirectToken, verifyDirectToken } = require('./lib/cluster-token');
 
-const SERVER_VERSION = '1.10.0';
+const SERVER_VERSION = '1.10.1';
+
+// --- Optional latency instrumentation (opt-in via WT_LATENCY_DEBUG=1) -----
+// Event-loop lag monitor: interval is 10ms; anything ≥ 50ms slip is a stall.
+// Slow-op wrapper: call sites tag sync/async blocks and we log any > 30ms.
+const _LATENCY_DEBUG = process.env.WT_LATENCY_DEBUG === '1';
+if (_LATENCY_DEBUG) {
+  let _lagLast = performance.now();
+  const _lagTimer = setInterval(() => {
+    const now = performance.now();
+    const lag = now - _lagLast - 10;
+    if (lag > 50) {
+      const mem = process.memoryUsage();
+      console.log(`[latency-lag] ${new Date().toISOString()} stall=${lag.toFixed(0)}ms heap=${(mem.heapUsed / 1024 / 1024).toFixed(0)}MB`);
+    }
+    _lagLast = performance.now();
+  }, 10);
+  if (typeof _lagTimer.unref === 'function') _lagTimer.unref();
+}
+function _slowOp(name, fn) {
+  if (!_LATENCY_DEBUG) return fn;
+  return async function _wrapped(...args) {
+    const t0 = performance.now();
+    try { return await fn.apply(this, args); }
+    finally {
+      const dur = performance.now() - t0;
+      if (dur > 30) console.log(`[slow-op] ${new Date().toISOString()} ${name} dur=${dur.toFixed(0)}ms`);
+    }
+  };
+}
 // Stale status auto-correction now lives in pty-worker.js.
 
 // --- Config: config.json > env vars > defaults ---
@@ -1115,7 +1145,12 @@ app.get('/api/cluster/sessions', async (req, res) => {
     }
   });
 
+  const _tClusterFetch = _LATENCY_DEBUG ? performance.now() : 0;
   const remotes = await Promise.all(remotePromises);
+  if (_LATENCY_DEBUG) {
+    const dur = performance.now() - _tClusterFetch;
+    if (dur > 30) console.log(`[slow-op] ${new Date().toISOString()} cluster-sessions-fetch peers=${remotePromises.length} dur=${dur.toFixed(0)}ms`);
+  }
   for (const r of remotes) {
     if (r.sessions.length > 0) {
       const summary = r.sessions.map(s => {
