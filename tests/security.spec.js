@@ -361,3 +361,61 @@ test.describe('App UI', () => {
     expect(items).toBeGreaterThan(0);
   });
 });
+
+// ============================================================
+// 8. Session cookie expiry (M1)
+// ============================================================
+
+test.describe('Session cookie expiry', () => {
+  test('expired cookie is rejected even with valid HMAC', async () => {
+    const fs = require('fs');
+    const path = require('path');
+    const crypto = require('crypto');
+    const secretFile = path.join(__dirname, '..', '.session-secret');
+    const SESSION_SECRET = fs.readFileSync(secretFile, 'utf8').trim();
+
+    // Build a cookie with a timestamp 91 days in the past and sign it with
+    // the CURRENT secret. This proves the rejection is the expiry check,
+    // not the HMAC.
+    const ninetyOneDays = 91 * 24 * 60 * 60 * 1000;
+    const payload = `testuser:${Date.now() - ninetyOneDays}`;
+    const sig = crypto.createHmac('sha256', SESSION_SECRET).update(payload).digest('hex');
+    const token = `${Buffer.from(payload).toString('base64')}.${sig}`;
+
+    const ctx = await pwRequest.newContext({
+      baseURL: BASE,
+      extraHTTPHeaders: { Cookie: `wt_session=${token}` },
+    });
+
+    // Protected page should redirect to /login (cookie rejected).
+    const pageRes = await ctx.get('/', { maxRedirects: 0 });
+    expect(pageRes.status()).toBe(302);
+    expect(pageRes.headers()['location']).toBe('/login');
+
+    // Protected API should return 401.
+    const apiRes = await ctx.get('/api/sessions');
+    expect(apiRes.status()).toBe(401);
+
+    await ctx.dispose();
+  });
+
+  test('fresh cookie is accepted (control)', async () => {
+    const fs = require('fs');
+    const path = require('path');
+    const crypto = require('crypto');
+    const secretFile = path.join(__dirname, '..', '.session-secret');
+    const SESSION_SECRET = fs.readFileSync(secretFile, 'utf8').trim();
+
+    const payload = `testuser:${Date.now()}`;
+    const sig = crypto.createHmac('sha256', SESSION_SECRET).update(payload).digest('hex');
+    const token = `${Buffer.from(payload).toString('base64')}.${sig}`;
+
+    const ctx = await pwRequest.newContext({
+      baseURL: BASE,
+      extraHTTPHeaders: { Cookie: `wt_session=${token}` },
+    });
+    const res = await ctx.get('/api/sessions');
+    expect(res.status()).toBe(200);
+    await ctx.dispose();
+  });
+});
