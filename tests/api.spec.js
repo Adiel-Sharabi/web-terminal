@@ -570,7 +570,9 @@ test.describe('/api/history/folders', () => {
 // ============================================================
 
 test.describe('Session Hook', () => {
-  test('hook updates session status without auth', async () => {
+  const { readHookToken } = require('./test-helpers');
+
+  test('hook with valid X-WT-Hook-Token updates session status', async () => {
     // Create a session first (needs auth)
     const ctx = await authCtx();
     const create = await ctx.post(`${BASE}/api/sessions`, {
@@ -578,8 +580,12 @@ test.describe('Session Hook', () => {
     });
     const { id } = await create.json();
 
-    // Hook endpoint works without auth (validated by session ID)
-    const raw = await pwRequest.newContext();
+    const hookToken = readHookToken();
+    // Hook endpoint works without the user auth cookie, but REQUIRES the
+    // per-process hook token (H1).
+    const raw = await pwRequest.newContext({
+      extraHTTPHeaders: { 'X-WT-Hook-Token': hookToken },
+    });
     const res = await raw.post(`${BASE}/api/session/${id}/hook`, {
       data: { event: 'UserPromptSubmit' }
     });
@@ -604,8 +610,30 @@ test.describe('Session Hook', () => {
     await raw.dispose();
   });
 
-  test('hook rejects invalid session ID', async () => {
+  test('hook without X-WT-Hook-Token returns 401', async () => {
     const raw = await pwRequest.newContext();
+    const res = await raw.post(`${BASE}/api/session/nonexistent/hook`, {
+      data: { event: 'Stop' }
+    });
+    expect(res.status()).toBe(401);
+    await raw.dispose();
+  });
+
+  test('hook with wrong X-WT-Hook-Token returns 401', async () => {
+    const raw = await pwRequest.newContext({
+      extraHTTPHeaders: { 'X-WT-Hook-Token': 'not-the-real-token' },
+    });
+    const res = await raw.post(`${BASE}/api/session/nonexistent/hook`, {
+      data: { event: 'Stop' }
+    });
+    expect(res.status()).toBe(401);
+    await raw.dispose();
+  });
+
+  test('hook with valid token + invalid session ID returns 404', async () => {
+    const raw = await pwRequest.newContext({
+      extraHTTPHeaders: { 'X-WT-Hook-Token': readHookToken() },
+    });
     const res = await raw.post(`${BASE}/api/session/nonexistent/hook`, {
       data: { event: 'Stop' }
     });
@@ -618,7 +646,9 @@ test.describe('Session Hook', () => {
     const create = await ctx.post(`${BASE}/api/sessions`, { data: { name: 'HookTest2' } });
     const { id } = await create.json();
 
-    const raw = await pwRequest.newContext();
+    const raw = await pwRequest.newContext({
+      extraHTTPHeaders: { 'X-WT-Hook-Token': readHookToken() },
+    });
     const res = await raw.post(`${BASE}/api/session/${id}/hook`, { data: {} });
     expect(res.status()).toBe(400);
 

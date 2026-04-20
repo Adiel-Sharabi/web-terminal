@@ -1,8 +1,14 @@
 // @ts-check
 const { test, expect, request: pwRequest } = require('@playwright/test');
+const fs = require('fs');
+const path = require('path');
 
 const BASE = 'http://localhost:17681';
 const AUTH = { user: 'testuser', password: 'testpass:colon' };
+
+function readHookToken() {
+  try { return fs.readFileSync(path.join(__dirname, '..', '.hook-token'), 'utf8').trim(); } catch { return ''; }
+}
 
 async function authCtx() {
   const ctx = await pwRequest.newContext({ baseURL: BASE });
@@ -14,7 +20,10 @@ async function authCtx() {
   await ctx.dispose();
   return pwRequest.newContext({
     baseURL: BASE,
-    extraHTTPHeaders: { Cookie: setCookie.split(';')[0] },
+    extraHTTPHeaders: {
+      Cookie: setCookie.split(';')[0],
+      'X-WT-Hook-Token': readHookToken(),
+    },
   });
 }
 

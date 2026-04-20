@@ -204,14 +204,14 @@ For real-time session status (Working/Idle/Waiting), configure Claude Code hooks
 ```json
 {
   "hooks": {
-    "UserPromptSubmit": [{"hooks": [{"type": "http", "url": "http://127.0.0.1:7681/api/hook", "headers": {"X-WT-Session-ID": "$WT_SESSION_ID"}, "allowedEnvVars": ["WT_SESSION_ID"]}]}],
-    "Notification": [{"hooks": [{"type": "http", "url": "http://127.0.0.1:7681/api/hook", "headers": {"X-WT-Session-ID": "$WT_SESSION_ID"}, "allowedEnvVars": ["WT_SESSION_ID"]}]}],
-    "Stop": [{"hooks": [{"type": "http", "url": "http://127.0.0.1:7681/api/hook", "headers": {"X-WT-Session-ID": "$WT_SESSION_ID"}, "allowedEnvVars": ["WT_SESSION_ID"]}]}]
+    "UserPromptSubmit": [{"hooks": [{"type": "http", "url": "http://127.0.0.1:7681/api/hook", "headers": {"X-WT-Session-ID": "$WT_SESSION_ID", "X-WT-Hook-Token": "$WT_HOOK_TOKEN"}, "allowedEnvVars": ["WT_SESSION_ID", "WT_HOOK_TOKEN"]}]}],
+    "Notification": [{"hooks": [{"type": "http", "url": "http://127.0.0.1:7681/api/hook", "headers": {"X-WT-Session-ID": "$WT_SESSION_ID", "X-WT-Hook-Token": "$WT_HOOK_TOKEN"}, "allowedEnvVars": ["WT_SESSION_ID", "WT_HOOK_TOKEN"]}]}],
+    "Stop": [{"hooks": [{"type": "http", "url": "http://127.0.0.1:7681/api/hook", "headers": {"X-WT-Session-ID": "$WT_SESSION_ID", "X-WT-Hook-Token": "$WT_HOOK_TOKEN"}, "allowedEnvVars": ["WT_SESSION_ID", "WT_HOOK_TOKEN"]}]}]
   }
 }
 ```
 
-The HTTP hook type sends requests directly — no subprocess, no console window flash on Windows. Sessions started outside the web terminal (regular CLI) are silently ignored.
+The HTTP hook type sends requests directly — no subprocess, no console window flash on Windows. Sessions started outside the web terminal (regular CLI) don't have `WT_HOOK_TOKEN` set, so their hook requests are rejected with 401 (harmless — status just doesn't update for non-web sessions). The token is auto-generated per install into `.hook-token` (chmod 0600 on unix) and exposed to spawned shells via the `WT_HOOK_TOKEN` env var.
 
 ## Remote Access via Tailscale
 
