@@ -168,6 +168,11 @@ function saveScrollback(id, session, sync) {
     const data = JSON.stringify(session.scrollback);
     if (sync) fs.writeFileSync(file, data, 'utf8');
     else fs.writeFile(file, data, 'utf8', () => {});
+    // Clear the dirty flag optimistically — a new chunk of PTY output
+    // arriving between now and the next save will re-set it via term.onData.
+    // Async write is fire-and-forget; if it fails, next tick's term.onData
+    // either re-dirties the session or the data was truly empty.
+    if (session) session.dirty = false;
   } catch {}
 }
 
@@ -189,7 +194,13 @@ function deleteScrollback(id) {
 // Async save: yields to the event loop between sessions so JSON.stringify of
 // large scrollbacks across many sessions doesn't block input/output/RPC.
 // Used by the periodic timer, flushState RPC, and signal-based shutdown.
-async function saveAllScrollback(sync) {
+//
+// Issue #10: when `force` is false (the periodic path), skip sessions whose
+// scrollback is unchanged since their last save. When `force` is true
+// (flushState, shutdown), save every session regardless — that matters for
+// correctness on restart, because saveAllScrollbackSync in process.on('exit')
+// needs to be able to write everything if a sync flush was somehow missed.
+async function saveAllScrollback(sync, force) {
   // Snapshot entries so concurrent session mutation during await points
   // doesn't trip the iterator. A session deleted mid-loop will still get
   // its stale scrollback written — harmless; the next tick overwrites or
@@ -197,7 +208,9 @@ async function saveAllScrollback(sync) {
   const entries = Array.from(sessions);
   for (let i = 0; i < entries.length; i++) {
     const [id, session] = entries[i];
-    saveScrollback(id, session, sync);
+    if (force || session.dirty) {
+      saveScrollback(id, session, sync);
+    }
     // Yield after each session except the last to release the event loop.
     if (i < entries.length - 1) {
       await new Promise(r => setImmediate(r));
@@ -208,6 +221,8 @@ async function saveAllScrollback(sync) {
 // Synchronous-only save — for the `process.on('exit')` handler, which runs
 // after the event loop has stopped and cannot await. Normal shutdown paths
 // already flushed via the async version; this is a last-resort safety net.
+// Always saves every session (force=true semantics) — we can't risk losing
+// scrollback on final exit.
 function saveAllScrollbackSync() {
   for (const [id, session] of sessions) saveScrollback(id, session, true);
 }
@@ -337,6 +352,14 @@ function createSession(id, cwd, name, autoCommand, savedScrollback, claudeSessio
     autoCommand: autoCommand || '',
     claudeSessionId: claudeSessionId || null,
     clientCount: 0,
+    // Issue #10: set to true whenever scrollback is mutated (term.onData,
+    // test injection). Cleared by saveScrollback on successful save. The
+    // periodic saveAllScrollback(sync=false, force=false) skips sessions
+    // with !dirty to avoid writing ~MB of unchanged data every 30s.
+    // Initialize to true if we have carry-over scrollback from restore
+    // (the "--- server restarted ---" banner needs to be persisted so a
+    // second restart-without-output doesn't silently drop it).
+    dirty: (scrollback.length > 0),
   };
   sessions.set(id, session);
 
@@ -346,6 +369,8 @@ function createSession(id, cwd, name, autoCommand, savedScrollback, claudeSessio
     while (session.scrollbackSize > MAX_SCROLLBACK_SIZE && session.scrollback.length > 1) {
       session.scrollbackSize -= session.scrollback.shift().length;
     }
+    // Issue #10: mark dirty so the next periodic save writes this session.
+    session.dirty = true;
     session.lastActivity = Date.now();
     // Stream PTY data as binary TYPE_PTY_OUT frames to subscribed connections only.
     // (fan-out to browser WS is done server-side.)
@@ -609,9 +634,11 @@ const rpcHandlers = {
 
   // Flush sessions.json + scrollback files to disk synchronously.
   // Used by server.js on graceful shutdown and by tests before worker restart.
+  // force=true so we write every session regardless of dirty flag — shutdown
+  // must not lose scrollback.
   flushState: async () => {
     saveSessionConfigs();
-    await saveAllScrollback(true);
+    await saveAllScrollback(true, true);
     return { ok: true };
   },
 
@@ -642,16 +669,22 @@ const rpcHandlers = {
         session.scrollbackSize = (session.scrollbackSize || 0) + piece.length;
         written += take;
       }
+      // Issue #10: mimic term.onData's dirty marking so tests exercise the
+      // same code path real PTY output takes.
+      session.dirty = true;
     }
     return { size: session.scrollbackSize || 0, chunks: session.scrollback.length };
   },
 
   // Test-only: explicitly trigger periodic-style save path (async, non-sync
   // writes). Resolves after the async loop and its inter-session yields.
+  // `force` defaults to false to match the periodic timer's semantics — tests
+  // that want to exercise the shutdown path pass force=true.
   __testSaveAllScrollback: async (params) => {
     if (!process.env.WT_TEST) throw new Error('test-only RPC');
     const sync = !!params.sync;
-    await saveAllScrollback(sync);
+    const force = !!params.force;
+    await saveAllScrollback(sync, force);
     return { ok: true };
   },
 
@@ -664,6 +697,10 @@ const rpcHandlers = {
   __testMeasureSaveBlock: async (params) => {
     if (!process.env.WT_TEST) throw new Error('test-only RPC');
     const sync = !!params.sync;
+    // Default to force=true so the measurement is meaningful even if
+    // sessions aren't dirty — tests want to measure the save itself,
+    // not whether the dirty-skip short-circuits.
+    const force = params.force === undefined ? true : !!params.force;
     const gaps = [];
     let last = Date.now();
     let probing = true;
@@ -675,7 +712,7 @@ const rpcHandlers = {
     }
     setImmediate(probe);
     const start = Date.now();
-    await saveAllScrollback(sync);
+    await saveAllScrollback(sync, force);
     const duration = Date.now() - start;
     probing = false;
     // Wait one tick so the probe stops cleanly.
@@ -795,8 +832,11 @@ server.on('error', (err) => {
 
 // Periodic scrollback save (every 30s). Async with per-session yield so a
 // cluster of large scrollbacks doesn't freeze the event loop in one tick.
+// Issue #10: force=false skips sessions whose scrollback hasn't changed
+// since their last save — 10 idle sessions × ~2 MB = ~20 MB not rewritten
+// every 30s.
 const scrollbackTimer = setInterval(() => {
-  saveAllScrollback(false).catch(e => log('periodic scrollback save failed:', e.message));
+  saveAllScrollback(false, false).catch(e => log('periodic scrollback save failed:', e.message));
 }, 30000);
 scrollbackTimer.unref();
 
@@ -811,7 +851,8 @@ async function shutdown(signal) {
   setTimeout(() => process.exit(0), 3000).unref();
   try {
     saveSessionConfigs();
-    await saveAllScrollback(true);
+    // force=true: shutdown must save every session regardless of dirty flag.
+    await saveAllScrollback(true, true);
   } catch (e) { log('shutdown save error:', e.message); }
   try { await server.close(); } catch {}
   process.exit(0);
