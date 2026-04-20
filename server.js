@@ -1162,13 +1162,9 @@ app.get('/api/cluster/sessions', async (req, res) => {
     result.push(...r.sessions);
   }
 
-  // Get local version info
-  let localVersion = SERVER_VERSION;
-  try {
-    const { execSync } = require('child_process');
-    const hash = execSync('git rev-parse --short HEAD', { cwd: __dirname, encoding: 'utf8', windowsHide: true }).trim();
-    localVersion = `${SERVER_VERSION} (${hash})`;
-  } catch (e) {}
+  // Get local version info (cached — no sync git per request). See _getGitInfo().
+  const _gitInfo = _getGitInfo();
+  const localVersion = `${SERVER_VERSION} (${_gitInfo.hash})`;
 
   res.json({
     sessions: result,
@@ -1354,6 +1350,104 @@ app.ws('/cluster/:serverUrl/ws/:id', (localWs, req) => {
   localWs.on('close', () => { cleanup(); });
 });
 
+// --- Git version info cache --------------------------------------------
+// /api/version and /api/cluster/sessions both want the current git hash +
+// staleness data. Each of them calls execSync('git ...') several times,
+// and one of the calls (`git fetch --dry-run`) allows a 5s timeout which
+// under network trouble blocks the Node event loop for up to 5s. Since
+// peers cross-poll each other every 5s, the practical impact is severe:
+// a single slow `git fetch --dry-run` on one peer blocks keystroke echo
+// on every peer that cross-polls it. This was the top p99 offender.
+//
+// Fix: cache the expensive computation and recompute in the background.
+//   - Cheap keys (hash, date, dirty, local-hash)  — refreshed every 30s.
+//   - Expensive keys (behind = `git fetch --dry-run` + `rev-list`) —
+//     refreshed every 5 minutes, never on the request path.
+// On request we just return the cached struct synchronously. If the
+// cache is empty (first call) we do a single sync call (for `hash`
+// only — cheap), and schedule a full refresh. Behind=-1 until ready.
+let _gitCache = null;       // { hash, date, behind, dirty, hashOnlyFallback }
+let _gitCacheTime = 0;
+let _gitRefreshing = false;
+let _gitBehindRefreshing = false;
+let _gitBehindTime = 0;
+const GIT_CACHE_TTL = 30 * 1000;        // refresh cheap keys every 30s
+const GIT_BEHIND_TTL = 5 * 60 * 1000;   // refresh behind every 5 min
+
+function _gitExecAsync(cmd, args, timeoutMs) {
+  return new Promise((resolve) => {
+    execFile(cmd, args, { cwd: __dirname, encoding: 'utf8', windowsHide: true, timeout: timeoutMs || 3000 }, (err, stdout) => {
+      resolve(err ? null : String(stdout || '').trim());
+    });
+  });
+}
+
+async function _gitRefresh(includeBehind) {
+  if (_gitRefreshing) return;
+  _gitRefreshing = true;
+  try {
+    const [hash, date, dirtyRaw] = await Promise.all([
+      _gitExecAsync('git', ['rev-parse', '--short', 'HEAD']),
+      _gitExecAsync('git', ['log', '-1', '--format=%ci']),
+      _gitExecAsync('git', ['status', '--porcelain']),
+    ]);
+    let behind = _gitCache ? _gitCache.behind : -1;
+    if (includeBehind && !_gitBehindRefreshing) {
+      _gitBehindRefreshing = true;
+      try {
+        // git fetch --dry-run with 5s timeout — in background so it NEVER
+        // blocks the request path. Once it returns, the cached `behind`
+        // updates and subsequent responses pick it up.
+        const fetchOk = await _gitExecAsync('git', ['fetch', '--dry-run'], 5000);
+        if (fetchOk !== null) {
+          const count = await _gitExecAsync('git', ['rev-list', 'HEAD..@{u}', '--count']);
+          behind = (count != null && count !== '') ? (parseInt(count) || 0) : 0;
+          _gitBehindTime = Date.now();
+        } else {
+          behind = -1;
+        }
+      } finally {
+        _gitBehindRefreshing = false;
+      }
+    }
+    _gitCache = {
+      hash: hash || 'unknown',
+      date: date || '',
+      behind,
+      dirty: (dirtyRaw || '').length > 0,
+    };
+    _gitCacheTime = Date.now();
+  } finally {
+    _gitRefreshing = false;
+  }
+}
+
+function _getGitInfo() {
+  // Kick off a refresh if stale (non-blocking).
+  const now = Date.now();
+  const cheapStale = !_gitCache || (now - _gitCacheTime) > GIT_CACHE_TTL;
+  const behindStale = !_gitCache || (now - _gitBehindTime) > GIT_BEHIND_TTL;
+  if (cheapStale || behindStale) {
+    // Fire and forget. Will complete within a few hundred ms typically,
+    // up to the fetch-dry-run 5s timeout for the `behind` calc.
+    _gitRefresh(behindStale).catch(() => {});
+  }
+  if (_gitCache) return _gitCache;
+  // Cold start: no cached value at all. Do ONE cheap sync call (git rev-parse
+  // is fast — ~50ms typical — and the alternative is reporting `unknown`
+  // forever until the first async refresh lands, which is awkward for the
+  // UI. Behind=-1 until the async refresh arrives.
+  try {
+    const { execSync } = require('child_process');
+    const hash = execSync('git rev-parse --short HEAD', { cwd: __dirname, encoding: 'utf8', windowsHide: true }).trim();
+    _gitCache = { hash, date: '', behind: -1, dirty: false };
+    _gitCacheTime = Date.now();
+  } catch {
+    _gitCache = { hash: 'unknown', date: '', behind: -1, dirty: false };
+  }
+  return _gitCache;
+}
+
 // Helper: fetch with timeout (works with http and https)
 function clusterFetch(url, opts = {}) {
   return new Promise((resolve, reject) => {
@@ -1385,23 +1479,20 @@ function clusterFetch(url, opts = {}) {
 }
 
 // --- API: version info (for cluster version checking) ---
+// Reads from the 30s cache so the endpoint never blocks. See _getGitInfo()
+// for the caching strategy. Peer cross-polling (every 5s from each browser)
+// previously drove `git fetch --dry-run` on the hot path which blocked the
+// event loop for up to 5s under network trouble.
 app.get('/api/version', (req, res) => {
-  try {
-    const { execSync } = require('child_process');
-    const hash = execSync('git rev-parse --short HEAD', { cwd: __dirname, encoding: 'utf8', windowsHide: true }).trim();
-    const date = execSync('git log -1 --format=%ci', { cwd: __dirname, encoding: 'utf8', windowsHide: true }).trim();
-    const behind = (() => {
-      try {
-        execSync('git fetch --dry-run 2>&1', { cwd: __dirname, encoding: 'utf8', timeout: 5000, windowsHide: true });
-        const count = execSync('git rev-list HEAD..@{u} --count', { cwd: __dirname, encoding: 'utf8', windowsHide: true }).trim();
-        return parseInt(count) || 0;
-      } catch (e) { return -1; } // -1 = unknown
-    })();
-    const dirty = execSync('git status --porcelain', { cwd: __dirname, encoding: 'utf8', windowsHide: true }).trim().length > 0;
-    res.json({ version: SERVER_VERSION, hash, date, behind, dirty, serverName: getServerName() });
-  } catch (e) {
-    res.json({ version: SERVER_VERSION, hash: 'unknown', date: '', behind: -1, dirty: false, serverName: getServerName() });
-  }
+  const info = _getGitInfo();
+  res.json({
+    version: SERVER_VERSION,
+    hash: info.hash,
+    date: info.date,
+    behind: info.behind,
+    dirty: info.dirty,
+    serverName: getServerName(),
+  });
 });
 
 // --- API: upload image to server clipboard ---
