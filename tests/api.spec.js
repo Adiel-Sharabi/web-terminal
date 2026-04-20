@@ -531,6 +531,32 @@ test.describe('/api/version', () => {
     expect(data.serverName).toBeTruthy();
     await ctx.dispose();
   });
+
+  // Regression: /api/version used to call execSync('git rev-parse'), execSync
+  // ('git log -1'), execSync('git fetch --dry-run', timeout=5s), execSync
+  // ('git rev-list'), and execSync('git status') on the request path. With
+  // peers cross-polling every 5s, a single slow `git fetch --dry-run` could
+  // block the event loop for up to 5s, causing multi-second typing stalls.
+  // After the fix, results are cached for 30s (behind: 5 min) and refreshed
+  // in the background. 20 back-to-back /api/version calls must complete
+  // quickly because they read from the cache.
+  test('cached: 20 rapid calls complete well under what 20 git invocations would cost', async () => {
+    const ctx = await authCtx();
+    // Warm the cache
+    await ctx.get('/api/version');
+    const t0 = Date.now();
+    const N = 20;
+    const promises = [];
+    for (let i = 0; i < N; i++) promises.push(ctx.get('/api/version'));
+    const results = await Promise.all(promises);
+    const elapsed = Date.now() - t0;
+    for (const r of results) expect(r.status()).toBe(200);
+    // Each uncached call did 4-5 git shell invocations (~50-200ms each) so
+    // 20 uncached calls would easily take >1000ms. Cached calls should
+    // finish in well under 500ms on any reasonable machine.
+    expect(elapsed).toBeLessThan(500);
+    await ctx.dispose();
+  });
 });
 
 // ============================================================
