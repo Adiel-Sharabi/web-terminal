@@ -415,9 +415,22 @@ function verifySessionToken(token) {
   const payload = token.substring(0, dot);
   const sig = token.substring(dot + 1);
   const expected = crypto.createHmac('sha256', SESSION_SECRET).update(Buffer.from(payload, 'base64').toString()).digest('hex');
+  let hmacOk = false;
   try {
-    return crypto.timingSafeEqual(Buffer.from(sig, 'hex'), Buffer.from(expected, 'hex'));
+    hmacOk = crypto.timingSafeEqual(Buffer.from(sig, 'hex'), Buffer.from(expected, 'hex'));
   } catch (e) { return false; }
+  if (!hmacOk) return false;
+  // M1: enforce server-side cookie expiry. Payload is `user:timestampMs`.
+  // Reject if timestamp is older than COOKIE_MAX_AGE, or unparseable (fail closed).
+  try {
+    const decoded = Buffer.from(payload, 'base64').toString();
+    const colon = decoded.lastIndexOf(':');
+    if (colon === -1) return false;
+    const ts = Number(decoded.substring(colon + 1));
+    if (!Number.isFinite(ts) || ts <= 0) return false;
+    if (Date.now() - ts > COOKIE_MAX_AGE) return false;
+  } catch (e) { return false; }
+  return true;
 }
 
 function parseCookies(header) {
