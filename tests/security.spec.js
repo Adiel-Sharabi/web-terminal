@@ -363,6 +363,195 @@ test.describe('App UI', () => {
 });
 
 // ============================================================
+// 8b. /api/exec opt-in + rate limit + audit log (M3)
+// ============================================================
+
+test.describe('/api/exec opt-in (M3)', () => {
+  test('returns 404 when enableRemoteExec is missing/false', async () => {
+    // Default test config does not set enableRemoteExec; the route should not
+    // be registered.
+    const ctx = await authCtx();
+    const res = await ctx.post('/api/exec', { data: { command: 'echo hi' } });
+    expect(res.status()).toBe(404);
+    await ctx.dispose();
+  });
+});
+
+test.describe('/api/exec when enabled (M3)', () => {
+  // Spawn an isolated server with WT_ENABLE_REMOTE_EXEC=1 on a separate port.
+  const { spawn } = require('child_process');
+  const http = require('http');
+  const path = require('path');
+  const os = require('os');
+  const fs = require('fs');
+  const crypto = require('crypto');
+
+  const SERVER_SCRIPT = path.join(__dirname, '..', 'server.js');
+
+  function makeTempDir() {
+    const dir = path.join(os.tmpdir(), 'wt-exec-test-' + crypto.randomUUID());
+    fs.mkdirSync(dir, { recursive: true });
+    fs.mkdirSync(path.join(dir, 'scrollback'), { recursive: true });
+    fs.mkdirSync(path.join(dir, 'logs'), { recursive: true });
+    return dir;
+  }
+
+  function httpGetOk(url, timeoutMs = 2000) {
+    return new Promise((resolve) => {
+      const req = http.get(url, { timeout: timeoutMs }, (res) => {
+        res.on('data', () => {});
+        res.on('end', () => resolve(res.statusCode >= 200 && res.statusCode < 500));
+      });
+      req.on('error', () => resolve(false));
+      req.on('timeout', () => { req.destroy(); resolve(false); });
+    });
+  }
+
+  let serverProc = null;
+  let serverPort = 0;
+  let serverDataDir = null;
+  let auditFilePath = null;
+  let bearerToken = null;
+
+  test.beforeAll(async () => {
+    serverPort = 17800 + Math.floor(Math.random() * 100);
+    serverDataDir = makeTempDir();
+    auditFilePath = path.join(serverDataDir, 'logs', 'exec-audit.log');
+
+    // Seed an api token + enableRemoteExec into a dedicated config file under
+    // the data dir. server.js reads config.test.json from its own cwd when
+    // WT_TEST=1, so instead we run it with a fresh cwd pointing at the data
+    // dir AND override via env. Since server.js looks up the config via
+    // __dirname (the server's source dir), we use the env-var escape hatch
+    // WT_ENABLE_REMOTE_EXEC=1 instead of writing a config.
+    const pipe = process.platform === 'win32'
+      ? `\\\\.\\pipe\\wt-exec-test-${crypto.randomUUID().slice(0, 8)}`
+      : `/tmp/wt-exec-test-${crypto.randomUUID().slice(0, 8)}.sock`;
+
+    const env = {
+      ...process.env,
+      WT_TEST: '1',
+      WT_PORT: String(serverPort),
+      WT_HOST: '127.0.0.1',
+      WT_USER: 'testuser',
+      WT_PASS: 'testpass:colon',
+      WT_CWD: os.tmpdir(),
+      WT_SPAWN_WORKER: '1',
+      WT_WORKER_PIPE: pipe,
+      WT_WORKER_DATA_DIR: serverDataDir,
+      WT_IPC_TOKEN: crypto.randomBytes(32).toString('base64'),
+      WT_RATE_LIMIT_BLOCK: '1000',
+      WT_ENABLE_REMOTE_EXEC: '1',
+      WT_EXEC_AUDIT_FILE: auditFilePath,
+      WT_WORKER_QUIET: '1',
+      WT_WORKER_NO_DEFAULT: '1',
+    };
+
+    serverProc = spawn(process.execPath, [SERVER_SCRIPT], {
+      cwd: path.dirname(SERVER_SCRIPT),
+      stdio: ['pipe', 'pipe', 'pipe'],
+      env,
+      windowsHide: true,
+    });
+    let stderr = '';
+    serverProc.stdout.on('data', () => {});
+    serverProc.stderr.on('data', (d) => { stderr += d.toString(); });
+
+    // Wait for healthy.
+    const deadline = Date.now() + 20000;
+    while (Date.now() < deadline) {
+      if (await httpGetOk(`http://127.0.0.1:${serverPort}/login`)) break;
+      await new Promise(r => setTimeout(r, 200));
+    }
+
+    // Mint a bearer token via /api/auth/token (cleartext creds).
+    const tokRes = await new Promise((resolve, reject) => {
+      const body = JSON.stringify({ user: 'testuser', password: 'testpass:colon', label: 'exec-test' });
+      const req = http.request({
+        hostname: '127.0.0.1', port: serverPort, method: 'POST',
+        path: '/api/auth/token',
+        headers: { 'Content-Type': 'application/json', 'Content-Length': Buffer.byteLength(body) },
+      }, (res) => {
+        let buf = '';
+        res.on('data', (d) => { buf += d; });
+        res.on('end', () => resolve({ status: res.statusCode, body: buf }));
+      });
+      req.on('error', reject);
+      req.end(body);
+    });
+    if (tokRes.status !== 200) {
+      throw new Error(`mint token failed: status=${tokRes.status} body=${tokRes.body}\nstderr=${stderr.slice(-1500)}`);
+    }
+    bearerToken = JSON.parse(tokRes.body).token;
+  });
+
+  test.afterAll(async () => {
+    if (serverProc && serverProc.exitCode === null) {
+      try { serverProc.kill('SIGKILL'); } catch {}
+    }
+  });
+
+  async function execCall(command) {
+    return new Promise((resolve, reject) => {
+      const body = JSON.stringify({ command });
+      const req = http.request({
+        hostname: '127.0.0.1', port: serverPort, method: 'POST',
+        path: '/api/exec',
+        headers: {
+          'Content-Type': 'application/json',
+          'Content-Length': Buffer.byteLength(body),
+          'Authorization': `Bearer ${bearerToken}`,
+        },
+      }, (res) => {
+        let buf = '';
+        res.on('data', (d) => { buf += d; });
+        res.on('end', () => resolve({ status: res.statusCode, headers: res.headers, body: buf }));
+      });
+      req.on('error', reject);
+      req.end(body);
+    });
+  }
+
+  test('audit log line written for each accepted call', async () => {
+    // Read current audit size, make a call, verify a new line was appended.
+    let before = 0;
+    try { before = fs.statSync(auditFilePath).size; } catch {}
+
+    const r = await execCall('echo audit-log-test');
+    expect(r.status).toBe(200);
+    // Give the append time to flush.
+    await new Promise(res => setTimeout(res, 100));
+    const after = fs.statSync(auditFilePath).size;
+    expect(after).toBeGreaterThan(before);
+    const tail = fs.readFileSync(auditFilePath, 'utf8').trim().split('\n').slice(-1)[0];
+    const entry = JSON.parse(tail);
+    expect(entry.ts).toBeTruthy();
+    expect(entry.label).toBe('exec-test');
+    expect(entry.cmdSha256).toMatch(/^[a-f0-9]{64}$/);
+    expect(typeof entry.exitCode).toBe('number');
+    expect(typeof entry.durationMs).toBe('number');
+    // command body itself MUST NOT be logged
+    expect(tail).not.toContain('audit-log-test');
+  });
+
+  test('first call succeeds; 31st within the minute returns 429 with Retry-After', async () => {
+    test.setTimeout(60000);
+
+    // The previous test used 1 call; we have 29 left before hitting the cap.
+    // Run 29 more — all should succeed.
+    for (let i = 0; i < 29; i++) {
+      const r = await execCall('echo rate-limit-test-bulk');
+      expect(r.status).toBe(200);
+    }
+
+    // 31st call within the same minute -> 429.
+    const over = await execCall('echo rate-limit-test-over');
+    expect(over.status).toBe(429);
+    expect(over.headers['retry-after']).toBeTruthy();
+  });
+});
+
+// ============================================================
 // 8. Session cookie expiry (M1)
 // ============================================================
 
