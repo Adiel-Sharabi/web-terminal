@@ -739,17 +739,26 @@ app.use((req, res, next) => {
     if (needsPasswordChange() && req.path !== '/api/setup') {
       return res.send(SETUP_PAGE);
     }
+    req._wtAuth = { mode: 'cookie', identity: `cookie:${_USER}`, label: _USER };
     return next();
   }
   // Try Bearer token auth (for cluster/API access)
   const authHeader = req.headers.authorization;
   if (authHeader && authHeader.startsWith('Bearer ')) {
     const token = authHeader.substring(7);
-    if (verifyApiToken(token)) return next();
+    if (verifyApiToken(token)) {
+      const tok = loadApiTokens()[token];
+      req._wtAuth = { mode: 'bearer', identity: `bearer:${token}`, label: (tok && tok.label) || 'bearer' };
+      return next();
+    }
   }
   // Try query-string token (for WebSocket upgrades through cluster proxy)
   const qToken = req.query?.token;
-  if (qToken && verifyApiToken(qToken)) return next();
+  if (qToken && verifyApiToken(qToken)) {
+    const tok = loadApiTokens()[qToken];
+    req._wtAuth = { mode: 'bearer', identity: `bearer:${qToken}`, label: (tok && tok.label) || 'bearer' };
+    return next();
+  }
   // Issue #20: direct-mode WS — let the /ws/:id handler validate the `dt`
   // token itself (it knows the :id to verify against). We defer here to
   // avoid parsing the token twice. Only applies to /ws/ paths with ?dt=.
@@ -1576,28 +1585,88 @@ if (process.env.WT_TEST) {
 }
 
 // --- API: execute command and return output ---
-app.post('/api/exec', express.json({ limit: '64kb' }), (req, res) => {
-  const command = req.body?.command;
-  if (!command || typeof command !== 'string') {
-    return res.status(400).json({ error: 'command is required' });
-  }
-  if (command.length > 4096) {
-    return res.status(400).json({ error: 'command too long (max 4096 chars)' });
-  }
-  const cwd = req.body?.cwd ? String(req.body.cwd).substring(0, 260) : undefined;
-  const timeout = Math.min(Math.max(parseInt(req.body?.timeout) || 30000, 1000), 120000);
+// M3: opt-in (enableRemoteExec config key, default false), per-token sliding-window
+// rate limit (30/min), audit logged to logs/exec-audit.log. The route is only
+// registered when the feature is enabled, so it returns 404 when disabled.
+const EXEC_RATE_MAX = 30;               // 30 calls/min/token
+const EXEC_RATE_WINDOW_MS = 60 * 1000;  // 1 minute
+const _execRateBuckets = new Map();     // identity -> [timestamps...]
 
-  const child = execFile(SHELL, ['-c', command], {
-    cwd: cwd || DEFAULT_CWD,
-    timeout,
-    maxBuffer: 1024 * 1024,
-    env: buildSafeEnv(),
-    windowsHide: true
-  }, (err, stdout, stderr) => {
-    const exitCode = err ? (err.code === 'ETIMEDOUT' ? -1 : (err.code || 1)) : 0;
-    res.json({ stdout, stderr, exitCode });
+function _execRateCheck(identity) {
+  const now = Date.now();
+  let arr = _execRateBuckets.get(identity);
+  if (!arr) { arr = []; _execRateBuckets.set(identity, arr); }
+  // Drop timestamps outside the sliding window.
+  while (arr.length && arr[0] <= now - EXEC_RATE_WINDOW_MS) arr.shift();
+  if (arr.length >= EXEC_RATE_MAX) {
+    const retryMs = EXEC_RATE_WINDOW_MS - (now - arr[0]);
+    return { allowed: false, retryAfter: Math.max(1, Math.ceil(retryMs / 1000)) };
+  }
+  arr.push(now);
+  return { allowed: true };
+}
+
+const EXEC_AUDIT_FILE = process.env.WT_EXEC_AUDIT_FILE || path.join(__dirname, 'logs', 'exec-audit.log');
+const EXEC_AUDIT_DIR = path.dirname(EXEC_AUDIT_FILE);
+function _execAudit(entry) {
+  // Tolerate log-write errors — never fail the request because of logging.
+  try {
+    try { fs.mkdirSync(EXEC_AUDIT_DIR, { recursive: true }); } catch {}
+    const line = JSON.stringify(entry) + '\n';
+    fs.appendFileSync(EXEC_AUDIT_FILE, line, 'utf8');
+  } catch (e) {
+    try { console.warn('[exec-audit] write failed:', e.message); } catch {}
+  }
+}
+
+function _registerExecRoute() {
+  app.post('/api/exec', express.json({ limit: '64kb' }), (req, res) => {
+    const auth = req._wtAuth || { identity: 'unknown', label: 'unknown' };
+    const rl = _execRateCheck(auth.identity);
+    if (!rl.allowed) {
+      res.set('Retry-After', String(rl.retryAfter));
+      return res.status(429).json({ error: 'rate limit exceeded (30 calls/min/token)' });
+    }
+    const command = req.body?.command;
+    if (!command || typeof command !== 'string') {
+      return res.status(400).json({ error: 'command is required' });
+    }
+    if (command.length > 4096) {
+      return res.status(400).json({ error: 'command too long (max 4096 chars)' });
+    }
+    const cwd = req.body?.cwd ? String(req.body.cwd).substring(0, 260) : undefined;
+    const timeout = Math.min(Math.max(parseInt(req.body?.timeout) || 30000, 1000), 120000);
+
+    const cmdSha256 = crypto.createHash('sha256').update(command).digest('hex');
+    const clientIp = (req.ip || req.connection?.remoteAddress || '').toString();
+    const startedAt = Date.now();
+
+    const child = execFile(SHELL, ['-c', command], {
+      cwd: cwd || DEFAULT_CWD,
+      timeout,
+      maxBuffer: 1024 * 1024,
+      env: buildSafeEnv(),
+      windowsHide: true
+    }, (err, stdout, stderr) => {
+      const exitCode = err ? (err.code === 'ETIMEDOUT' ? -1 : (err.code || 1)) : 0;
+      _execAudit({
+        ts: new Date(startedAt).toISOString(),
+        label: auth.label,
+        cmdSha256,
+        clientIp,
+        exitCode,
+        durationMs: Date.now() - startedAt,
+      });
+      res.json({ stdout, stderr, exitCode });
+    });
   });
-});
+}
+
+const _execEnabled = (liveConfig('enableRemoteExec', false) === true) || process.env.WT_ENABLE_REMOTE_EXEC === '1';
+if (_execEnabled) {
+  _registerExecRoute();
+  console.log(`[${new Date().toISOString()}] /api/exec is ENABLED (enableRemoteExec=true) — rate-limited 30/min/token, audited to logs/exec-audit.log`);
+}
 
 // --- API: create session ---
 const MAX_SESSIONS = config.maxSessions || 10;

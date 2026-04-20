@@ -365,41 +365,19 @@ test.describe('Claude Session Name Persistence', () => {
 });
 
 // ============================================================
-// 3. /api/exec Endpoint
+// 3. /api/exec Endpoint — M3: opt-in via enableRemoteExec (default: off).
+// Behaviour when enabled (rate-limit, audit log, 4KB cap) is covered in
+// tests/security.spec.js using an isolated server spawned with the flag on.
+// Here we only assert the default-off behaviour.
 // ============================================================
 
-test.describe('/api/exec Endpoint', () => {
-  test('execute echo command returns stdout', async () => {
+test.describe('/api/exec Endpoint (default off)', () => {
+  test('returns 404 when enableRemoteExec is not set', async () => {
     const ctx = await authCtx();
     const res = await ctx.post('/api/exec', {
       data: { command: 'echo hello' },
     });
-    expect(res.status()).toBe(200);
-    const data = await res.json();
-    expect(data.stdout).toContain('hello');
-    expect(data.exitCode).toBe(0);
-    await ctx.dispose();
-  });
-
-  test('missing command returns 400', async () => {
-    const ctx = await authCtx();
-    const res = await ctx.post('/api/exec', {
-      data: {},
-    });
-    expect(res.status()).toBe(400);
-    const data = await res.json();
-    expect(data.error).toContain('command is required');
-    await ctx.dispose();
-  });
-
-  test('command too long returns 400', async () => {
-    const ctx = await authCtx();
-    const res = await ctx.post('/api/exec', {
-      data: { command: 'a'.repeat(4097) },
-    });
-    expect(res.status()).toBe(400);
-    const data = await res.json();
-    expect(data.error).toContain('too long');
+    expect(res.status()).toBe(404);
     await ctx.dispose();
   });
 });
