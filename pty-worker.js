@@ -417,6 +417,7 @@ function unsubscribeConn(conn, sessionId) {
 function broadcastEvent(event, params) {
   const frame = ipc.encodeJson({ event, params });
   for (const conn of attachedConnections) {
+    if (conn._wtDraining) continue; // Issue #15: skip draining conns for events too
     try { conn.send(frame); } catch {}
   }
 }
@@ -430,14 +431,46 @@ function broadcastEvent(event, params) {
 // previous per-broadcast Buffer.from(data) copy is gone — on Linux this is
 // the original PTY byte Buffer (no decode), on Windows it's the Buffer
 // produced once by the onData normalizer (not once per subscriber).
+//
+// Issue #15 — BACKPRESSURE:
+//   If conn.send returns false, the underlying socket has buffered the write
+//   in user-space. Without backpressure, subsequent frames keep piling into
+//   that buffer, and a slow web.js (or a stalled web client behind it) can
+//   drive the worker OOM — killing every PTY including all Claude sessions.
+//
+//   Fix: track an isDraining flag per connection. When we see false from
+//   send(), flip the flag and DROP new PTY_OUT frames for that conn until
+//   the conn's 'drain' event clears it. Dropping is correct here because
+//   scrollback is persisted and replayed on re-attach — the gap heals
+//   automatically as soon as the slow consumer catches up.
+//
+//   The even harder safety net (overflow → destroy conn) lives in lib/ipc.js
+//   IpcConnection.send; we just listen for the 'overflow' event to log.
 function broadcastPtyOut(session, data) {
   const sessionId = session.id;
   let frame = null;
   for (const conn of attachedConnections) {
     const subs = connSubs.get(conn);
     if (!subs || !subs.has(sessionId)) continue;
+    // Drop frames to this conn while it drains. Scrollback catches up on
+    // re-attach. We count dropped bytes so the drain log can summarize.
+    if (conn._wtDraining) {
+      conn._wtDroppedBytes = (conn._wtDroppedBytes || 0) + data.length;
+      conn._wtDroppedFrames = (conn._wtDroppedFrames || 0) + 1;
+      continue;
+    }
     if (!frame) frame = ipc.encodePtyOutFromBytes(session.idBytes, data);
-    try { conn.send(frame); } catch {}
+    let ok = false;
+    try { ok = conn.send(frame); } catch { ok = false; }
+    if (!ok && !conn._closed) {
+      // Transition into draining. Log once per burst; _wtDrainingSince
+      // records when it started so the clear-log can report duration.
+      conn._wtDraining = true;
+      conn._wtDrainingSince = Date.now();
+      conn._wtDroppedBytes = 0;
+      conn._wtDroppedFrames = 0;
+      log(`conn draining — PTY_OUT backpressure (queue=${conn.writeQueueBytes} bytes); dropping frames until drain`);
+    }
   }
 }
 
@@ -999,6 +1032,58 @@ const rpcHandlers = {
     return { sessionId: detectClaudeSessionIdFromDir(cwd) };
   },
 
+  // Test-only (Issue #15): flood the calling conn with JSON frames of the
+  // given size on the NEXT tick, then emit a `__testFloodResult` event frame
+  // reporting counts. Returns immediately so the RPC reply can be sent
+  // BEFORE the flood starts (otherwise a paused reader would never see the
+  // RPC reply because the flood fills the write buffer).
+  //
+  // Callers use this pattern:
+  //   1. await RPC reply (confirms worker received the request)
+  //   2. pause reads
+  //   3. the worker's flood runs on the next tick; backpressure trips
+  //   4. caller resumes reads later and collects the __testFloodResult event
+  //      to confirm what happened
+  __testFloodConn: async (params, conn) => {
+    if (!process.env.WT_TEST) throw new Error('test-only RPC');
+    const frames = Math.max(1, parseInt(params.frames) || 1);
+    const bytes = Math.max(1, parseInt(params.bytes) || 1024);
+    const delayMs = Math.max(0, parseInt(params.delayMs) || 0);
+    const payload = Buffer.alloc(bytes, 0x41);
+    const frame = ipc.encodeFrame(ipc.TYPE_JSON, payload);
+    const doFlood = () => {
+      let sent = 0, falseReturns = 0;
+      for (let i = 0; i < frames; i++) {
+        if (conn._closed) break;
+        if (conn._wtDraining) break;
+        let ok = false;
+        try { ok = conn.send(frame); } catch { ok = false; break; }
+        sent++;
+        if (!ok) {
+          falseReturns++;
+          conn._wtDraining = true;
+          conn._wtDrainingSince = Date.now();
+          break;
+        }
+      }
+      // Emit a result event. When the peer eventually drains and reads it,
+      // they can assert on the recorded state.
+      try {
+        conn.send(ipc.encodeJson({
+          event: '__testFloodResult',
+          params: {
+            sent, falseReturns,
+            isDraining: !!conn._wtDraining,
+            closed: !!conn._closed,
+            writeQueueBytes: conn.writeQueueBytes,
+          },
+        }));
+      } catch {}
+    };
+    setTimeout(doFlood, delayMs);
+    return { ok: true };
+  },
+
   // Test-only: measure the worker's event-loop block time during a save.
   // Starts a setImmediate probe loop, runs saveAllScrollback, and reports
   // the longest gap between probe ticks. A non-yielding (blocking) save
@@ -1098,6 +1183,23 @@ server.listening().then(() => {
 server.on('connection', (conn) => {
   log('web.js connected');
   attachedConnections.add(conn);
+  // Issue #15: reset backpressure state on (re)connect. See broadcastPtyOut.
+  conn._wtDraining = false;
+  conn._wtDrainingSince = 0;
+  conn._wtDroppedBytes = 0;
+  conn._wtDroppedFrames = 0;
+  conn.on('drain', () => {
+    if (!conn._wtDraining) return;
+    const ms = Date.now() - (conn._wtDrainingSince || Date.now());
+    log(`conn drained — PTY_OUT backpressure cleared after ${ms}ms (dropped ${conn._wtDroppedFrames || 0} frames / ${conn._wtDroppedBytes || 0} bytes)`);
+    conn._wtDraining = false;
+    conn._wtDrainingSince = 0;
+    conn._wtDroppedBytes = 0;
+    conn._wtDroppedFrames = 0;
+  });
+  conn.on('overflow', (err) => {
+    log('conn overflow — IPC queue limit exceeded, destroying connection:', err.message);
+  });
   conn.on('frame', (frame) => {
     if (frame.type === ipc.TYPE_JSON) {
       let msg;
