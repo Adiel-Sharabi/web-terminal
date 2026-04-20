@@ -255,6 +255,13 @@
   </style>
 </head>
 <body>
+  <!-- Latency overlay (opt-in via ?rtt=1) — rendered only when enabled -->
+  <div id="rttOverlay" style="display:none; position:fixed; top:8px; right:8px; z-index:9999; font:12px/1.35 monospace; background:rgba(0,0,0,0.75); color:#eee; padding:6px 8px; border:1px solid #444; border-radius:4px; pointer-events:none; min-width:170px;">
+    <div>RTT <span id="rttLast" style="font-weight:bold;">—</span> ms</div>
+    <div>p50 <span id="rttP50">—</span> / p99 <span id="rttP99">—</span></div>
+    <div>stalls&gt;100ms: <span id="rttStalls">0</span></div>
+    <div style="color:#888; font-size:10px;">samples: <span id="rttN">0</span></div>
+  </div>
   <div id="toolbar">
     <button class="tb-btn" onclick="toggleSidebar()" title="Sessions panel">&#9776;</button>
     <span id="sessionName" class="session-name" onclick="renameCurrentSession()" title="Click to rename">(no session)</span>
@@ -444,6 +451,89 @@
     }
 
     const CLIENT_VERSION = '1.0.0';
+
+    // --- Optional live typing-RTT overlay (enable with ?rtt=1 in URL) ------
+    // Tracks round-trip between a keystroke send(text) and the next received
+    // message, which in a typical terminal is the echo of that keystroke.
+    // Fuzzy — PTY echo is not byte-for-byte — but fine for order-of-magnitude.
+    const _RTT_DEBUG = (() => {
+      try { return new URLSearchParams(location.search).get('rtt') === '1'; }
+      catch { return false; }
+    })();
+    const _rttState = { samples: [], pending: [], stalls: 0 };
+    function _rttPercentile(sorted, p) {
+      if (!sorted.length) return null;
+      return sorted[Math.min(sorted.length - 1, Math.floor(sorted.length * p))];
+    }
+    function _rttRender() {
+      const el = document.getElementById('rttOverlay');
+      if (!el) return;
+      el.style.display = 'block';
+      const samples = _rttState.samples;
+      const last = samples.length ? samples[samples.length - 1] : null;
+      const lastEl = document.getElementById('rttLast');
+      if (lastEl) {
+        lastEl.textContent = last == null ? '—' : last.toFixed(0);
+        lastEl.style.color = last == null ? '#eee' : (last <= 30 ? '#4ade80' : (last <= 80 ? '#facc15' : '#f87171'));
+      }
+      if (samples.length) {
+        const sorted = [...samples].sort((a, b) => a - b);
+        document.getElementById('rttP50').textContent = _rttPercentile(sorted, 0.5).toFixed(0);
+        document.getElementById('rttP99').textContent = _rttPercentile(sorted, 0.99).toFixed(0);
+      }
+      document.getElementById('rttStalls').textContent = String(_rttState.stalls);
+      document.getElementById('rttN').textContent = String(samples.length);
+    }
+    function _rttOnSend(text) {
+      if (!_RTT_DEBUG) return;
+      if (!text || typeof text !== 'string') return;
+      // Skip JSON control frames (mode/heartbeat/resize) — they are never
+      // echoed as PTY output and would pollute the sample.
+      if (text.charCodeAt(0) === 0x7B /* '{' */) return;
+      const now = performance.now();
+      for (let i = 0; i < text.length; i++) _rttState.pending.push(now);
+      // Cap the pending buffer — big pastes shouldn't keep growing.
+      if (_rttState.pending.length > 500) _rttState.pending.splice(0, _rttState.pending.length - 500);
+    }
+    function _rttOnMessage() {
+      if (!_RTT_DEBUG) return;
+      if (!_rttState.pending.length) return;
+      const now = performance.now();
+      // Treat the first pending as "acked" by this response frame.
+      const t0 = _rttState.pending.shift();
+      const rtt = now - t0;
+      _rttState.samples.push(rtt);
+      if (_rttState.samples.length > 50) _rttState.samples.shift();
+      if (rtt > 100) _rttState.stalls++;
+      _rttRender();
+    }
+    // Wrap WebSocket.send + hook onmessage on construction so every ws instance
+    // is instrumented regardless of how it was built in the rest of the app.
+    if (_RTT_DEBUG && typeof WebSocket !== 'undefined') {
+      const _origSend = WebSocket.prototype.send;
+      WebSocket.prototype.send = function (data) {
+        try { if (typeof data === 'string') _rttOnSend(data); } catch {}
+        return _origSend.call(this, data);
+      };
+      // Wrap WebSocket constructor so we can attach a message listener before
+      // the app gets its hands on the ws. Listener fires in addition to any
+      // onmessage the app sets (addEventListener doesn't collide with the
+      // .onmessage slot).
+      const _OrigWS = window.WebSocket;
+      function PatchedWS(url, protocols) {
+        const ws = protocols !== undefined ? new _OrigWS(url, protocols) : new _OrigWS(url);
+        try { ws.addEventListener('message', _rttOnMessage); } catch {}
+        return ws;
+      }
+      PatchedWS.prototype = _OrigWS.prototype;
+      PatchedWS.CONNECTING = _OrigWS.CONNECTING;
+      PatchedWS.OPEN = _OrigWS.OPEN;
+      PatchedWS.CLOSING = _OrigWS.CLOSING;
+      PatchedWS.CLOSED = _OrigWS.CLOSED;
+      window.WebSocket = PatchedWS;
+      if (document.readyState !== 'loading') _rttRender();
+      else document.addEventListener('DOMContentLoaded', _rttRender);
+    }
 
     // --- State ---
     let sessionId = null;
