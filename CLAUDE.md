@@ -42,13 +42,31 @@ If new user-facing features were added, update `README.md`:
 - Keep the Multi-Server Cluster and PWA sections current
 
 ## Architecture
-- `server.js` — Express server, WebSocket, session management, auth, cluster proxy
-- `app.html` — Unified single-page app (terminal + session management + settings)
-- `terminal.html` — Legacy terminal-only page (served at /s/:id)
-- `lobby.html` — Legacy lobby page (served at /lobby)
-- `sw.js` — Service worker for PWA caching
-- `tests/security.spec.js` — Auth, session CRUD, XSS, config security tests
-- `tests/cluster.spec.js` — Token auth, cluster API, proxy security tests
+Three supervised Node.js processes. See `ARCHITECTURE.md` for the full walkthrough.
+
+- `monitor.js` — supervisor. Mints the IPC handshake token (`WT_IPC_TOKEN`), spawns worker + web, restarts on crash with exponential backoff, rotates logs
+- `pty-worker.js` — owns all `node-pty` sessions (binary mode), scrollback buffers, session persistence, Claude hook state. Survives `server.js` restarts
+- `server.js` — Express + WebSocket, auth, cluster proxy, REST API. Stateless with respect to PTYs — all session state goes through IPC
+- `lib/ipc.js` — framing + named-pipe / unix-socket transport for worker <-> web IPC (JSON control + binary PTY frames), handshake auth, backpressure (`WT_IPC_MAX_INFLIGHT`)
+- `lib/worker-client.js` — high-level RPC/event client used by `server.js` to talk to the worker
+- `lib/cluster-token.js` — pure HMAC-SHA256 mint/verify for direct terminal mode tokens (60s TTL, signed with the shared cluster bearer token)
+- `app.html` — unified single-page app (terminal + sidebar + settings). Polyfills `crypto.randomUUID` for plain-HTTP contexts. `?rtt=1` enables the per-keystroke RTT overlay
+- `terminal.html` — legacy terminal-only page (served at `/s/:id`)
+- `lobby.html` — legacy lobby page (served at `/lobby`)
+- `sw.js` — service worker for PWA caching
+- `tests/security.spec.js` — auth, session CRUD, XSS, config security
+- `tests/cluster.spec.js` / `tests/cluster-direct-mode.spec.js` / `tests/cluster-token.spec.js` — token auth, cluster API, proxy security, direct mode
+- `tests/ipc*.spec.js` + `tests/worker-*.spec.js` + `tests/hot-reload.spec.js` — IPC, worker internals, hot-reload
+
+## Features (high-level)
+- Multiple terminal sessions, in-place switching, optional instant-switch (`keepSessionsOpen`)
+- Session persistence across server + worker restarts (scrollback replay, binary-safe)
+- Multi-server cluster (proxy by default; `directConnect: true` enables direct-terminal mode with signed short-lived tokens)
+- Hot reload: killing only `server.js` leaves PTYs running; the new `server.js` reattaches over IPC
+- PWA with mobile toolbar, IME-aware input, long-press menu
+- Claude Code hook integration (status dots, notifications, session browser, image paste)
+- Optional latency instrumentation: `WT_LATENCY_DEBUG=1` env (server + worker) and `?rtt=1` query (browser overlay)
+- Dev tooling under `scripts/` — typing probe, WS latency harnesses (do not edit without coordinating; sanitisation workstream owns these)
 
 ## Auth System
 - Cookie-based session auth (primary, for browser users)
