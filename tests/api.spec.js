@@ -610,23 +610,24 @@ test.describe('Session Hook', () => {
     await raw.dispose();
   });
 
-  test('hook without X-WT-Hook-Token returns 401', async () => {
+  // H1 + localhost bypass — see server.js:isLocalhostReq for rationale.
+  test('hook without X-WT-Hook-Token from localhost bypasses auth (404 on missing session)', async () => {
     const raw = await pwRequest.newContext();
     const res = await raw.post(`${BASE}/api/session/nonexistent/hook`, {
       data: { event: 'Stop' }
     });
-    expect(res.status()).toBe(401);
+    expect(res.status()).toBe(404);
     await raw.dispose();
   });
 
-  test('hook with wrong X-WT-Hook-Token returns 401', async () => {
+  test('hook with wrong X-WT-Hook-Token from localhost still bypasses (404 on missing session)', async () => {
     const raw = await pwRequest.newContext({
       extraHTTPHeaders: { 'X-WT-Hook-Token': 'not-the-real-token' },
     });
     const res = await raw.post(`${BASE}/api/session/nonexistent/hook`, {
       data: { event: 'Stop' }
     });
-    expect(res.status()).toBe(401);
+    expect(res.status()).toBe(404);
     await raw.dispose();
   });
 

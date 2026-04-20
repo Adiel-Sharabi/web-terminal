@@ -562,16 +562,24 @@ test.describe('Hook endpoint auth (H1)', () => {
     try { return fs.readFileSync(path.join(__dirname, '..', '.hook-token'), 'utf8').trim(); } catch { return ''; }
   }
 
-  test('hook request without X-WT-Hook-Token returns 401', async () => {
+  // H1 + localhost bypass: the token is enforced on the wire (non-loopback
+  // callers), but localhost requests (127.0.0.1 / ::1) skip the token check.
+  // Rationale: on Windows .hook-token is world-readable (no chmod equivalent),
+  // so the token was never a real local-process boundary; requiring it just
+  // forced a pty-worker restart — losing all Claude sessions — to inject the
+  // env var. Tests below hit 127.0.0.1 so they exercise the bypass path; the
+  // non-localhost deny path is documented in server.js:isLocalhostReq.
+  test('hook request without X-WT-Hook-Token from localhost reaches handler (bypass)', async () => {
     const raw = await pwRequest.newContext({ baseURL: BASE });
     const res = await raw.post('/api/session/anything/hook', {
       data: { event: 'UserPromptSubmit' },
     });
-    expect(res.status()).toBe(401);
+    // Auth check passes → handler runs → session not found → 404
+    expect(res.status()).toBe(404);
     await raw.dispose();
   });
 
-  test('hook request with wrong X-WT-Hook-Token returns 401', async () => {
+  test('hook request with wrong X-WT-Hook-Token from localhost still reaches handler (bypass)', async () => {
     const raw = await pwRequest.newContext({
       baseURL: BASE,
       extraHTTPHeaders: { 'X-WT-Hook-Token': 'definitely-not-the-real-token' },
@@ -579,7 +587,7 @@ test.describe('Hook endpoint auth (H1)', () => {
     const res = await raw.post('/api/session/anything/hook', {
       data: { event: 'UserPromptSubmit' },
     });
-    expect(res.status()).toBe(401);
+    expect(res.status()).toBe(404);
     await raw.dispose();
   });
 
@@ -605,13 +613,16 @@ test.describe('Hook endpoint auth (H1)', () => {
     await raw.dispose();
   });
 
-  test('/api/hook (no :id) also requires X-WT-Hook-Token', async () => {
+  test('/api/hook (no :id) from localhost also bypasses token', async () => {
     const raw = await pwRequest.newContext({ baseURL: BASE });
     const res = await raw.post('/api/hook', {
       data: { event: 'UserPromptSubmit' },
       headers: { 'X-WT-Session-ID': 'whatever' },
     });
-    expect(res.status()).toBe(401);
+    // Auth passes → unknown session ID returns 200 with skipped reason
+    expect(res.status()).toBe(200);
+    const body = await res.json();
+    expect(body.ok).toBe(true);
     await raw.dispose();
   });
 });
