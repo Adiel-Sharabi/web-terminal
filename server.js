@@ -6,8 +6,9 @@ const fs = require('fs');
 const crypto = require('crypto');
 const { execFile, spawn } = require('child_process');
 const workerClientLib = require('./lib/worker-client');
+const { mintDirectToken, verifyDirectToken } = require('./lib/cluster-token');
 
-const SERVER_VERSION = '1.9.0';
+const SERVER_VERSION = '1.10.0';
 // Stale status auto-correction now lives in pty-worker.js.
 
 // --- Config: config.json > env vars > defaults ---
@@ -404,14 +405,43 @@ function setAuthCookie(res, user) {
   res.set('Set-Cookie', `${COOKIE_NAME}=${token}; HttpOnly; SameSite=Lax; Path=/; Max-Age=${COOKIE_MAX_AGE / 1000}`);
 }
 
-function authenticateWs(ws, req) {
+function authenticateWs(ws, req, opts) {
   const cookies = parseCookies(req.headers.cookie);
   // Try cookie auth first, then Bearer token
   if (verifySessionToken(cookies[COOKIE_NAME])) return true;
   // Check for token in query string (express-ws may use req.query or req.url)
-  const token = req.query?.token
-    || new URL(req.url, `http://${req.headers.host}`).searchParams.get('token');
+  const url = new URL(req.url, `http://${req.headers.host}`);
+  const token = req.query?.token || url.searchParams.get('token');
   if (token && verifyApiToken(token)) return true;
+  // Issue #20 direct terminal: accept a short-lived signed token bound to this
+  // session id. HMAC key is any of our api-tokens (the peer that minted it
+  // used the token we issued to them as the shared secret).
+  if (opts && opts.expectedSid) {
+    const dt = req.query?.dt || url.searchParams.get('dt');
+    if (dt) {
+      const apiTokens = loadApiTokens();
+      const candidates = Object.keys(apiTokens).filter(k => {
+        const entry = apiTokens[k];
+        return !(entry && entry.expires && Date.now() > entry.expires);
+      });
+      const vr = verifyDirectToken(dt, candidates);
+      if (vr.valid && vr.payload && vr.payload.sid === opts.expectedSid) {
+        // Authenticated as vr.payload.user — attach for downstream use.
+        ws._wtUser = vr.payload.user;
+        ws._wtAuthMode = 'direct';
+        return true;
+      }
+      // Specific close codes so the client can tell expired vs wrong:
+      //   4003 = direct token expired (client should refresh session list)
+      //   4004 = direct token invalid (wrong sig / sid mismatch / malformed)
+      if (vr.expired) {
+        try { ws.close(4003, 'Direct token expired'); } catch {}
+      } else {
+        try { ws.close(4004, 'Direct token invalid'); } catch {}
+      }
+      return false;
+    }
+  }
   ws.close(1008, 'Unauthorized');
   return false;
 }
@@ -677,6 +707,10 @@ app.use((req, res, next) => {
   // Try query-string token (for WebSocket upgrades through cluster proxy)
   const qToken = req.query?.token;
   if (qToken && verifyApiToken(qToken)) return next();
+  // Issue #20: direct-mode WS — let the /ws/:id handler validate the `dt`
+  // token itself (it knows the :id to verify against). We defer here to
+  // avoid parsing the token twice. Only applies to /ws/ paths with ?dt=.
+  if (req.path.startsWith('/ws/') && req.query?.dt) return next();
   // API/cluster/WS routes return 401, pages redirect to login
   if (req.path.startsWith('/api/') || req.path.startsWith('/cluster/') || req.path.startsWith('/ws/')) {
     return res.status(401).json({ error: 'Unauthorized' });
@@ -1010,10 +1044,27 @@ app.get('/api/cluster/sessions', async (req, res) => {
     console.error('worker listSessions failed:', e.message);
   }
 
+  // Direct-mode (issue #20): look up the current user from the session cookie so
+  // minted tokens bind to them. Cluster API calls via Bearer have no cookie —
+  // in that case we fall back to the configured server user.
+  const reqUser = (() => {
+    try {
+      const cookies = parseCookies(req.headers.cookie);
+      const tok = cookies[COOKIE_NAME];
+      if (!tok) return _USER;
+      const dot = tok.lastIndexOf('.');
+      if (dot === -1) return _USER;
+      const payload = Buffer.from(tok.substring(0, dot), 'base64').toString();
+      const colon = payload.indexOf(':');
+      return colon > 0 ? payload.substring(0, colon) : _USER;
+    } catch { return _USER; }
+  })();
+
   // Remote sessions (parallel, with timeout) — skip self-reference
   const clusterTokens = loadClusterTokens();
   const publicUrl = liveConfig('publicUrl', null);
-  const remoteServers = getClusterConfig().filter(server => !publicUrl || server.url !== publicUrl);
+  const clusterCfg = getClusterConfig();
+  const remoteServers = clusterCfg.filter(server => !publicUrl || server.url !== publicUrl);
   const remotePromises = remoteServers.map(async (server) => {
     const tokenEntry = clusterTokens[server.url];
     if (!tokenEntry) return { server: server.name, url: server.url, online: false, needsAuth: true, sessions: [] };
@@ -1035,9 +1086,29 @@ app.get('/api/cluster/sessions', async (req, res) => {
         });
         if (vr.ok) { const v = JSON.parse(vr.body); version = `${v.version} (${v.hash})`; }
       } catch (e) {}
+      // Issue #20: if this peer opts into direct-mode, mint a short-lived
+      // HMAC token per session so the browser can WS straight to the peer.
+      // HMAC key is our stored bearer for that peer (peer has same value in
+      // its api-tokens.json, so it can verify without new key exchange).
+      const directConnect = server.directConnect === true;
+      const mapped = remoteSessions.map(s => {
+        const base = { ...s, server: server.name, serverUrl: server.url };
+        if (directConnect && tokenEntry.token) {
+          try {
+            const dt = mintDirectToken(tokenEntry.token, { sid: s.id, user: reqUser });
+            const wsBase = server.url.replace(/^http/, 'ws').replace(/\/+$/, '');
+            base.directUrl = `${wsBase}/ws/${encodeURIComponent(s.id)}?dt=${encodeURIComponent(dt)}`;
+            base.directToken = dt;
+          } catch (e) {
+            // Mint failed — silently omit directUrl so client falls back to proxy
+            console.warn(`[cluster/direct] mint failed for ${server.name}: ${e.message}`);
+          }
+        }
+        return base;
+      });
       return {
         server: server.name, url: server.url, online: true, needsAuth: false, version,
-        sessions: remoteSessions.map(s => ({ ...s, server: server.name, serverUrl: server.url }))
+        directConnect, sessions: mapped
       };
     } catch (e) {
       return { server: server.name, url: server.url, online: false, sessions: [] };
@@ -1068,7 +1139,7 @@ app.get('/api/cluster/sessions', async (req, res) => {
     sessions: result,
     servers: [
       { name: getServerName(), url: null, online: true, needsAuth: false, version: localVersion },
-      ...remotes.map(r => ({ name: r.server, url: r.url, online: r.online, needsAuth: r.needsAuth, version: r.version || '' }))
+      ...remotes.map(r => ({ name: r.server, url: r.url, online: r.online, needsAuth: r.needsAuth, version: r.version || '', directConnect: r.directConnect === true }))
     ]
   });
 });
@@ -1791,7 +1862,7 @@ app.ws('/ws/notify', (ws, req) => {
 
 // --- WebSocket: attach to session ---
 app.ws('/ws/:id', (ws, req) => {
-  if (!authenticateWs(ws, req)) return;
+  if (!authenticateWs(ws, req, { expectedSid: req.params.id })) return;
   const id = req.params.id;
 
   // Disable Nagle — send each PTY output chunk immediately

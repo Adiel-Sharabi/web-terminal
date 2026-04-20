@@ -137,7 +137,7 @@ Config is stored in `config.json` (gitignored):
 | `defaultCommand` | Yes | Pre-filled auto-command for new sessions |
 | `scrollbackReplayLimit` | Yes | Max bytes replayed on reconnect (default 1MB) |
 | `publicUrl` | Yes | This server's URL for cluster auto-sync |
-| `cluster` | Yes | Remote servers list `[{name, url}]` |
+| `cluster` | Yes | Remote servers list `[{name, url, directConnect?}]`. Set `directConnect: true` on a peer to enable direct-terminal mode (browser WS skips the local proxy hop for that peer's sessions). |
 | `claudeHome` | Yes | User profile path for Claude session files (auto-detected if empty) |
 | `openInNewTab` | Yes | Whether new sessions open in a new browser tab |
 | `keepSessionsOpen` | Yes | Keep background WebSocket connections to all sessions for instant switching (default false) |
@@ -149,7 +149,20 @@ Config is stored in `config.json` (gitignored):
 3. **Login to remote** — click Login next to the server in the sidebar
 4. **Done** — both servers auto-discover each other. Repeat for more servers.
 
-Each server keeps its own credentials. Inter-server auth uses API tokens (90-day expiry). All traffic proxies through your connected server — no CORS issues.
+Each server keeps its own credentials. Inter-server auth uses API tokens (90-day expiry). By default all traffic proxies through your connected server — no CORS issues.
+
+### Direct Terminal Mode (Optional)
+
+Set `"directConnect": true` on a peer entry in `cluster` to skip the local server's proxy hop for that peer's sessions. The browser WebSocket connects straight to the peer using a short-lived (60 s) HMAC-signed token minted by your local server. Saves one network hop of latency when your browser already has direct network reachability to the peer.
+
+```json
+"cluster": [
+  { "name": "Home", "url": "https://home.example:7681", "directConnect": true },
+  { "name": "XPS",  "url": "https://xps.example:7681" }
+]
+```
+
+The signing key is the bearer token you already share with the peer (stored in `cluster-tokens.json` locally and `api-tokens.json` on the peer). Disabled by default; the legacy proxy path is always available as fallback.
 
 ## Claude Code Hooks Setup
 
