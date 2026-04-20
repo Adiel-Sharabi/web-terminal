@@ -13,7 +13,7 @@ const crypto = require('crypto');
 const pty = require('node-pty');
 const ipc = require('./lib/ipc');
 
-const WORKER_VERSION = '0.4.0';
+const WORKER_VERSION = '0.5.0';
 const STALE_STATUS_TIMEOUT_MS = 5 * 60 * 1000;
 const MAX_SCROLLBACK_SIZE = 2 * 1024 * 1024;
 
@@ -201,6 +201,76 @@ function saveClaudeSessionNames(names) {
   try { fs.writeFileSync(CLAUDE_SESSION_NAMES_FILE, JSON.stringify(names, null, 2)); } catch {}
 }
 
+// --- Scrollback chunk store ----------------------------------------------
+// Issue #12: store scrollback as a list of chunks + running total byte length
+// instead of joining to a single string on every append/read.
+//
+// Before:
+//   - scrollback: string[] plus a manually-maintained scrollbackSize int
+//   - attachSession / getScrollback called scrollback.join('') on every call,
+//     re-allocating the full ~1-2 MB buffer per reconnect. 5 sessions × 1 MB
+//     × N reconnects is GB of alloc + GC pressure.
+//
+// After:
+//   - scrollback: { chunks: (string|Buffer)[], totalLen: number }
+//   - append is O(1) push + add; trim shifts/head-slices the oldest chunk.
+//   - read does exactly one concatenation (concatScrollback) per call.
+//
+// Today chunks are strings (node-pty emits strings). Issue #13 will switch
+// node-pty to binary mode and chunks will become Buffers; concatScrollback
+// is the single seam that needs to change — see @todo marker.
+function newScrollback(initialChunks) {
+  const sb = { chunks: [], totalLen: 0 };
+  if (initialChunks && initialChunks.length) {
+    for (const c of initialChunks) {
+      if (c == null || c.length === 0) continue;
+      sb.chunks.push(c);
+      sb.totalLen += c.length;
+    }
+  }
+  return sb;
+}
+
+function appendScrollback(sb, data) {
+  if (data == null || data.length === 0) return;
+  sb.chunks.push(data);
+  sb.totalLen += data.length;
+}
+
+function trimScrollback(sb, maxBytes) {
+  while (sb.totalLen > maxBytes && sb.chunks.length > 0) {
+    const head = sb.chunks[0];
+    const overflow = sb.totalLen - maxBytes;
+    if (head.length <= overflow) {
+      // Drop the whole head chunk.
+      sb.chunks.shift();
+      sb.totalLen -= head.length;
+    } else {
+      // Head-slice: keep the tail of this chunk so totalLen lands at maxBytes.
+      // slice() works for both strings and Buffers, so this stays correct
+      // once issue #13 switches chunks to Buffers.
+      sb.chunks[0] = head.slice(overflow);
+      sb.totalLen -= overflow;
+      break;
+    }
+  }
+}
+
+// @todo: buffer in #13 — once node-pty emits Buffers, switch to
+// Buffer.concat(sb.chunks).toString('utf8') (or keep as Buffer if the caller
+// wants bytes).
+function concatScrollback(sb) {
+  if (sb.chunks.length === 0) return '';
+  if (sb.chunks.length === 1) return typeof sb.chunks[0] === 'string' ? sb.chunks[0] : sb.chunks[0].toString('utf8');
+  // All-strings fast path (current reality). Buffer.concat path handles the
+  // mixed / all-Buffer case that will exist after #13.
+  let allStrings = true;
+  for (const c of sb.chunks) { if (typeof c !== 'string') { allStrings = false; break; } }
+  if (allStrings) return sb.chunks.join('');
+  const bufs = sb.chunks.map(c => typeof c === 'string' ? Buffer.from(c, 'utf8') : c);
+  return Buffer.concat(bufs).toString('utf8');
+}
+
 // --- Persistence ----------------------------------------------------------
 function loadSessionConfigs() {
   try {
@@ -221,7 +291,12 @@ function saveSessionConfigs() {
 function saveScrollback(id, session, sync) {
   try {
     const file = path.join(SCROLLBACK_DIR, id + '.json');
-    const data = JSON.stringify(session.scrollback);
+    // Issue #12: serialize the concatenated scrollback as a single-element
+    // JSON array so the on-disk format matches the legacy string[] shape
+    // (loadScrollback returns an array that createSession spreads into chunks).
+    // One concat per save is equivalent cost to the old string[] JSON.stringify.
+    const joined = concatScrollback(session.scrollback);
+    const data = JSON.stringify(joined.length > 0 ? [joined] : []);
     if (sync) fs.writeFileSync(file, data, 'utf8');
     else fs.writeFile(file, data, 'utf8', () => {});
     // Clear the dirty flag optimistically — a new chunk of PTY output
@@ -235,7 +310,15 @@ function saveScrollback(id, session, sync) {
 function loadScrollback(id) {
   try {
     const file = path.join(SCROLLBACK_DIR, id + '.json');
-    if (fs.existsSync(file)) return JSON.parse(fs.readFileSync(file, 'utf8'));
+    if (!fs.existsSync(file)) return [];
+    const parsed = JSON.parse(fs.readFileSync(file, 'utf8'));
+    // Legacy format: array of strings (many chunks).
+    // New format (issue #12): array with one joined string.
+    // Both are just arrays of strings — the loader returns them as-is and
+    // createSession will spread them into the chunks list.
+    if (Array.isArray(parsed)) return parsed;
+    // Defensive: if someone hand-edited the file to a bare string, accept it.
+    if (typeof parsed === 'string') return [parsed];
   } catch {}
   return [];
 }
@@ -389,12 +472,11 @@ function createSession(id, cwd, name, autoCommand, savedScrollback, claudeSessio
     useConptyDll: liveConfig('useConptyDll', true),
   });
 
-  const scrollback = [];
-  if (savedScrollback && savedScrollback.length > 0) {
-    scrollback.push(...savedScrollback);
-    scrollback.push('\r\n\x1b[33m--- server restarted ---\x1b[0m\r\n\r\n');
+  // Issue #12: scrollback is now { chunks, totalLen } — see newScrollback.
+  const scrollback = newScrollback(savedScrollback);
+  if (scrollback.chunks.length > 0) {
+    appendScrollback(scrollback, '\r\n\x1b[33m--- server restarted ---\x1b[0m\r\n\r\n');
   }
-  const scrollbackSize = scrollback.reduce((sum, s) => sum + s.length, 0);
 
   const session = {
     id,
@@ -403,8 +485,8 @@ function createSession(id, cwd, name, autoCommand, savedScrollback, claudeSessio
     // replace + Buffer.from(hex) allocation on the hot path).
     idBytes: ipc.uuidToBytes(id),
     term,
+    // Issue #12: scrollback is { chunks: (string|Buffer)[], totalLen: number }.
     scrollback,
-    scrollbackSize,
     name: name || `Session ${id}`,
     cwd: cwd || getDefaultCwd(),
     idleTimer: null,
@@ -423,16 +505,15 @@ function createSession(id, cwd, name, autoCommand, savedScrollback, claudeSessio
     // Initialize to true if we have carry-over scrollback from restore
     // (the "--- server restarted ---" banner needs to be persisted so a
     // second restart-without-output doesn't silently drop it).
-    dirty: (scrollback.length > 0),
+    dirty: (scrollback.chunks.length > 0),
   };
   sessions.set(id, session);
 
   term.onData((data) => {
-    session.scrollback.push(data);
-    session.scrollbackSize = (session.scrollbackSize || 0) + data.length;
-    while (session.scrollbackSize > MAX_SCROLLBACK_SIZE && session.scrollback.length > 1) {
-      session.scrollbackSize -= session.scrollback.shift().length;
-    }
+    // Issue #12: append a chunk (O(1)) and head-trim past MAX_SCROLLBACK_SIZE.
+    // No join/reduce on the hot path — readers concat once per call.
+    appendScrollback(session.scrollback, data);
+    trimScrollback(session.scrollback, MAX_SCROLLBACK_SIZE);
     // Issue #10: mark dirty so the next periodic save writes this session.
     session.dirty = true;
     session.lastActivity = Date.now();
@@ -649,7 +730,8 @@ const rpcHandlers = {
     const session = sessions.get(requireUuid(params.id));
     if (!session) throw new Error('session not found');
     const limit = parseInt(params.limit) || 1048576;
-    let full = session.scrollback.join('');
+    // Issue #12: one concat per call instead of re-joining on every access.
+    let full = concatScrollback(session.scrollback);
     if (full.length > limit) full = full.slice(-limit);
     return { data: full };
   },
@@ -682,7 +764,10 @@ const rpcHandlers = {
     session.clientCount = (session.clientCount || 0) + 1;
     if (conn) subscribeConn(conn, id);
     const limit = parseInt(params.scrollbackLimit) || 1048576;
-    let full = session.scrollback.join('');
+    // Issue #12: one concat per attach — the hot reconnect path. Underlying
+    // chunks array is preserved across attaches, so repeated reconnects no
+    // longer re-allocate-and-free the full scrollback per call.
+    let full = concatScrollback(session.scrollback);
     if (full.length > limit) full = full.slice(-limit);
     return { clients: session.clientCount, scrollback: full };
   },
@@ -723,21 +808,54 @@ const rpcHandlers = {
     const session = sessions.get(requireUuid(params.id));
     if (!session) throw new Error('session not found');
     const bytes = Math.max(0, parseInt(params.bytes) || 0);
+    const skipTrim = !!params.skipTrim; // test-only: let test #10 inject beyond cap
     if (bytes > 0) {
       const chunk = 'x'.repeat(1024);
       let written = 0;
       while (written < bytes) {
         const take = Math.min(chunk.length, bytes - written);
         const piece = take === chunk.length ? chunk : chunk.slice(0, take);
-        session.scrollback.push(piece);
-        session.scrollbackSize = (session.scrollbackSize || 0) + piece.length;
+        appendScrollback(session.scrollback, piece);
         written += take;
       }
+      if (!skipTrim) trimScrollback(session.scrollback, MAX_SCROLLBACK_SIZE);
       // Issue #10: mimic term.onData's dirty marking so tests exercise the
       // same code path real PTY output takes.
       session.dirty = true;
     }
-    return { size: session.scrollbackSize || 0, chunks: session.scrollback.length };
+    return { size: session.scrollback.totalLen, chunks: session.scrollback.chunks.length };
+  },
+
+  // Test-only (Issue #12): inject a specific chunk into scrollback without
+  // trimming, and optionally read it back. Exposes the chunked layout for
+  // tests that verify reads don't clobber the underlying chunks array.
+  __testInjectScrollbackChunk: async (params) => {
+    if (!process.env.WT_TEST) throw new Error('test-only RPC');
+    const session = sessions.get(requireUuid(params.id));
+    if (!session) throw new Error('session not found');
+    const data = String(params.data || '');
+    if (data.length > 0) {
+      appendScrollback(session.scrollback, data);
+      trimScrollback(session.scrollback, MAX_SCROLLBACK_SIZE);
+      session.dirty = true;
+    }
+    return {
+      totalLen: session.scrollback.totalLen,
+      numChunks: session.scrollback.chunks.length,
+    };
+  },
+
+  // Test-only (Issue #12): read scrollback chunk metadata for assertions
+  // about the internal layout (number of chunks, totalLen). Doesn't return
+  // the raw chunks themselves to keep the IPC payload small.
+  __testScrollbackMeta: async (params) => {
+    if (!process.env.WT_TEST) throw new Error('test-only RPC');
+    const session = sessions.get(requireUuid(params.id));
+    if (!session) throw new Error('session not found');
+    return {
+      totalLen: session.scrollback.totalLen,
+      numChunks: session.scrollback.chunks.length,
+    };
   },
 
   // Test-only: explicitly trigger periodic-style save path (async, non-sync
