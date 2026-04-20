@@ -456,6 +456,23 @@
       return id;
     })();
     const sessionCache = new Map(); // sessionId -> { ws, scrollback, serverUrl, connected, heartbeatTimer, reconnectTimer }
+    // Issue #20 — direct terminal mode: map of sessionId -> directUrl (fully qualified ws(s)://…/ws/:id?dt=…)
+    // Populated by loadSidebar() from /api/cluster/sessions when a peer has `directConnect: true`.
+    // Tokens expire after 60s — refreshed on every sidebar load.
+    const directUrlCache = new Map();
+
+    // Build the WebSocket URL for a session. Prefers direct-mode URL (when the
+    // owning peer opts in) to skip the office proxy hop; otherwise falls back
+    // to the existing /cluster/<url>/ws/:id proxy path (or /ws/:id for local).
+    function getWsUrl(sessionId, serverUrl) {
+      const direct = directUrlCache.get(sessionId);
+      if (direct) return direct;
+      const proto = location.protocol === 'https:' ? 'wss:' : 'ws:';
+      const wsPath = serverUrl
+        ? `/cluster/${encodeURIComponent(serverUrl)}/ws/${sessionId}`
+        : `/ws/${sessionId}`;
+      return `${proto}//${location.host}${wsPath}`;
+    }
 
     const status = document.getElementById('status');
     const scrollBtn = document.getElementById('scrollBtn');
@@ -516,11 +533,7 @@
       status.textContent = 'connecting...';
       status.className = '';
       status.style.opacity = '1';
-      const proto = location.protocol === 'https:' ? 'wss:' : 'ws:';
-      const wsPath = sessionServerUrl
-        ? `/cluster/${encodeURIComponent(sessionServerUrl)}/ws/${sessionId}`
-        : `/ws/${sessionId}`;
-      ws = new WebSocket(`${proto}//${location.host}${wsPath}`);
+      ws = new WebSocket(getWsUrl(sessionId, sessionServerUrl));
 
       ws.onopen = () => {
         reconnectAttempts = 0;
@@ -597,6 +610,17 @@
           if (document.getElementById('sidebar').classList.contains('open')) loadSidebar();
           return;
         }
+        // Issue #20: direct-mode token expired (4003) or invalid (4004) — drop
+        // the stale token, refresh session list to mint a new one, then retry.
+        if ((e.code === 4003 || e.code === 4004) && sessionId) {
+          directUrlCache.delete(sessionId);
+          loadSidebar().then(() => {
+            reconnectTimer = setTimeout(connect, 200);
+          }).catch(() => {
+            reconnectTimer = setTimeout(connect, 1000);
+          });
+          return;
+        }
         reconnectAttempts++;
         // Exponential backoff: 1s, 2s, 4s, 8s, 16s, capped at 30s
         const delay = Math.min(30000, 1000 * Math.pow(2, reconnectAttempts - 1));
@@ -631,11 +655,7 @@
       const entry = existing || { ws: null, scrollback: '', serverUrl: serverUrl || null, connected: false, heartbeatTimer: null, reconnectTimer: null };
       sessionCache.set(id, entry);
 
-      const proto = location.protocol === 'https:' ? 'wss:' : 'ws:';
-      const wsPath = serverUrl
-        ? `/cluster/${encodeURIComponent(serverUrl)}/ws/${id}`
-        : `/ws/${id}`;
-      const bgWs = new WebSocket(`${proto}//${location.host}${wsPath}`);
+      const bgWs = new WebSocket(getWsUrl(id, serverUrl));
 
       bgWs.onopen = () => {
         entry.ws = bgWs;
@@ -1476,6 +1496,15 @@
       }
 
       clusterServers = data.servers;
+
+      // Issue #20: refresh the direct-URL cache from the fresh session list.
+      // Tokens are only valid for 60s, so rebuilding on every sidebar load
+      // keeps them fresh and also picks up peers that just flipped
+      // directConnect on/off.
+      directUrlCache.clear();
+      for (const s of data.sessions || []) {
+        if (s.directUrl) directUrlCache.set(s.id, s.directUrl);
+      }
       const container = document.getElementById('sidebarList');
       container.textContent = '';
 
