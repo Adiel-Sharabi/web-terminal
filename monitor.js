@@ -26,6 +26,7 @@ const fs = require('fs');
 const net = require('net');
 const path = require('path');
 const http = require('http');
+const ipc = require('./lib/ipc');
 
 // --- Config ---
 const WORKER_SCRIPT = path.join(__dirname, 'pty-worker.js');
@@ -51,6 +52,13 @@ const WORKER_PIPE = process.env.WT_WORKER_PIPE || (
     ? '\\\\.\\pipe\\web-terminal-pty'
     : '/tmp/web-terminal-pty.sock'
 );
+
+// Issue #18: generate a random shared-secret token for the worker/web IPC
+// handshake (defense in depth on top of OS ACLs). Monitor generates once,
+// both children inherit via env var. If an outer process already exported
+// WT_IPC_TOKEN (unusual — only tests do this), preserve it so inter-process
+// coordination keeps working. Never log the token.
+const WORKER_IPC_TOKEN = process.env[ipc.ENV_TOKEN_VAR] || ipc.generateToken();
 
 // --- State: per-child bookkeeping --------------------------------------------
 function makeChildState(name, logFile) {
@@ -222,7 +230,12 @@ function spawnWorker() {
   const proc = spawn(process.execPath, [WORKER_SCRIPT], {
     cwd: __dirname,
     stdio: ['ignore', 'pipe', 'pipe'],
-    env: { ...process.env, WT_WORKER_PIPE: WORKER_PIPE },
+    env: {
+      ...process.env,
+      WT_WORKER_PIPE: WORKER_PIPE,
+      // Issue #18: share the handshake token with the worker. Never logged.
+      [ipc.ENV_TOKEN_VAR]: WORKER_IPC_TOKEN,
+    },
     windowsHide: true,
   });
   worker.proc = proc;
@@ -333,6 +346,8 @@ function spawnWeb() {
     env: {
       ...process.env,
       WT_WORKER_PIPE: WORKER_PIPE,
+      // Issue #18: same handshake token as the worker.
+      [ipc.ENV_TOKEN_VAR]: WORKER_IPC_TOKEN,
       // Make sure server.js does NOT also spawn its own worker — we own it.
       WT_SPAWN_WORKER: '',
     },
