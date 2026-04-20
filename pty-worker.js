@@ -320,13 +320,17 @@ function broadcastEvent(event, params) {
 }
 
 // Route binary PTY output only to connections subscribed to that session.
-function broadcastPtyOut(sessionId, data) {
+// Issue #11: uses encodePtyOutFromBytes with the session's pre-computed
+// idBytes buffer, avoiding a uuid hex parse + 16-byte Buffer alloc on every
+// PTY output chunk (the hottest path in this worker).
+function broadcastPtyOut(session, data) {
+  const sessionId = session.id;
   const buf = Buffer.isBuffer(data) ? data : Buffer.from(data);
   let frame = null;
   for (const conn of attachedConnections) {
     const subs = connSubs.get(conn);
     if (!subs || !subs.has(sessionId)) continue;
-    if (!frame) frame = ipc.encodePtyOut(sessionId, buf);
+    if (!frame) frame = ipc.encodePtyOutFromBytes(session.idBytes, buf);
     try { conn.send(frame); } catch {}
   }
 }
@@ -394,6 +398,10 @@ function createSession(id, cwd, name, autoCommand, savedScrollback, claudeSessio
 
   const session = {
     id,
+    // Issue #11: precompute the 16-byte UUID buffer once at session creation
+    // so broadcastPtyOut can reuse it on every PTY output chunk (skips the
+    // replace + Buffer.from(hex) allocation on the hot path).
+    idBytes: ipc.uuidToBytes(id),
     term,
     scrollback,
     scrollbackSize,
@@ -431,7 +439,7 @@ function createSession(id, cwd, name, autoCommand, savedScrollback, claudeSessio
     // Stream PTY data as binary TYPE_PTY_OUT frames to subscribed connections only.
     // (fan-out to browser WS is done server-side.)
     if (session.clientCount > 0) {
-      broadcastPtyOut(id, data);
+      broadcastPtyOut(session, data);
     }
   });
 
