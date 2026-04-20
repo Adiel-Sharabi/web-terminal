@@ -204,6 +204,10 @@ function saveClaudeSessionNames(names) {
 // --- Scrollback chunk store ----------------------------------------------
 // Issue #12: store scrollback as a list of chunks + running total byte length
 // instead of joining to a single string on every append/read.
+// Issue #13: chunks are now Buffers (bytes), not strings. See the term.onData
+// handler in createSession — it normalizes PTY output to Buffer once before
+// appending, and broadcastPtyOut uses the same Buffer directly (no per-
+// destination Buffer.from copy).
 //
 // Before:
 //   - scrollback: string[] plus a manually-maintained scrollbackSize int
@@ -212,20 +216,24 @@ function saveClaudeSessionNames(names) {
 //     × N reconnects is GB of alloc + GC pressure.
 //
 // After:
-//   - scrollback: { chunks: (string|Buffer)[], totalLen: number }
+//   - scrollback: { chunks: Buffer[], totalLen: number }
 //   - append is O(1) push + add; trim shifts/head-slices the oldest chunk.
-//   - read does exactly one concatenation (concatScrollback) per call.
+//   - read does exactly one Buffer.concat + toString('utf8') per call.
 //
-// Today chunks are strings (node-pty emits strings). Issue #13 will switch
-// node-pty to binary mode and chunks will become Buffers; concatScrollback
-// is the single seam that needs to change — see @todo marker.
+// Note: MAX_SCROLLBACK_SIZE and .length arithmetic work identically for
+// strings and Buffers (both report byte/char length; for ASCII-heavy
+// terminal output they match, and for multi-byte UTF-8 the Buffer's
+// byte length is the correct resource-limit metric anyway).
 function newScrollback(initialChunks) {
   const sb = { chunks: [], totalLen: 0 };
   if (initialChunks && initialChunks.length) {
     for (const c of initialChunks) {
       if (c == null || c.length === 0) continue;
-      sb.chunks.push(c);
-      sb.totalLen += c.length;
+      // Defensive: normalize any strings (legacy on-disk format, hand-edited
+      // files) to Buffers so the runtime invariant "chunks are Buffers" holds.
+      const buf = Buffer.isBuffer(c) ? c : Buffer.from(String(c), 'utf8');
+      sb.chunks.push(buf);
+      sb.totalLen += buf.length;
     }
   }
   return sb;
@@ -233,8 +241,14 @@ function newScrollback(initialChunks) {
 
 function appendScrollback(sb, data) {
   if (data == null || data.length === 0) return;
-  sb.chunks.push(data);
-  sb.totalLen += data.length;
+  // Normalize strings to Buffers — term.onData already hands us Buffers, but
+  // test-only __testInjectScrollback helpers and the restart banner pass
+  // strings. Doing the conversion here keeps the chunk-list invariant
+  // "all entries are Buffers" so concatScrollback can skip the per-chunk
+  // type check on the hot read path.
+  const buf = Buffer.isBuffer(data) ? data : Buffer.from(String(data), 'utf8');
+  sb.chunks.push(buf);
+  sb.totalLen += buf.length;
 }
 
 function trimScrollback(sb, maxBytes) {
@@ -247,8 +261,7 @@ function trimScrollback(sb, maxBytes) {
       sb.totalLen -= head.length;
     } else {
       // Head-slice: keep the tail of this chunk so totalLen lands at maxBytes.
-      // slice() works for both strings and Buffers, so this stays correct
-      // once issue #13 switches chunks to Buffers.
+      // Buffer.slice() returns a view (no copy) — cheap.
       sb.chunks[0] = head.slice(overflow);
       sb.totalLen -= overflow;
       break;
@@ -256,19 +269,12 @@ function trimScrollback(sb, maxBytes) {
   }
 }
 
-// @todo: buffer in #13 — once node-pty emits Buffers, switch to
-// Buffer.concat(sb.chunks).toString('utf8') (or keep as Buffer if the caller
-// wants bytes).
+// Issue #13: chunks are Buffers — one Buffer.concat + UTF-8 decode per call.
+// For the single-chunk case we skip the concat allocation.
 function concatScrollback(sb) {
   if (sb.chunks.length === 0) return '';
-  if (sb.chunks.length === 1) return typeof sb.chunks[0] === 'string' ? sb.chunks[0] : sb.chunks[0].toString('utf8');
-  // All-strings fast path (current reality). Buffer.concat path handles the
-  // mixed / all-Buffer case that will exist after #13.
-  let allStrings = true;
-  for (const c of sb.chunks) { if (typeof c !== 'string') { allStrings = false; break; } }
-  if (allStrings) return sb.chunks.join('');
-  const bufs = sb.chunks.map(c => typeof c === 'string' ? Buffer.from(c, 'utf8') : c);
-  return Buffer.concat(bufs).toString('utf8');
+  if (sb.chunks.length === 1) return sb.chunks[0].toString('utf8');
+  return Buffer.concat(sb.chunks).toString('utf8');
 }
 
 // --- Persistence ----------------------------------------------------------
@@ -312,13 +318,26 @@ function loadScrollback(id) {
     const file = path.join(SCROLLBACK_DIR, id + '.json');
     if (!fs.existsSync(file)) return [];
     const parsed = JSON.parse(fs.readFileSync(file, 'utf8'));
-    // Legacy format: array of strings (many chunks).
-    // New format (issue #12): array with one joined string.
-    // Both are just arrays of strings — the loader returns them as-is and
-    // createSession will spread them into the chunks list.
-    if (Array.isArray(parsed)) return parsed;
+    // On-disk format is still a JSON array of UTF-8 strings (same shape as
+    // every prior version). Issue #13 switched the in-memory chunk list to
+    // Buffers; convert at load so the runtime invariant holds. Each string
+    // becomes a single Buffer; the typical modern case is a one-element
+    // array (per saveScrollback's single-concat write), but legacy multi-
+    // chunk files still decode correctly.
+    if (Array.isArray(parsed)) {
+      const out = [];
+      for (const entry of parsed) {
+        if (typeof entry === 'string' && entry.length > 0) {
+          out.push(Buffer.from(entry, 'utf8'));
+        } else if (Buffer.isBuffer(entry) && entry.length > 0) {
+          // Shouldn't happen via JSON.parse but tolerate.
+          out.push(entry);
+        }
+      }
+      return out;
+    }
     // Defensive: if someone hand-edited the file to a bare string, accept it.
-    if (typeof parsed === 'string') return [parsed];
+    if (typeof parsed === 'string' && parsed.length > 0) return [Buffer.from(parsed, 'utf8')];
   } catch {}
   return [];
 }
@@ -406,14 +425,18 @@ function broadcastEvent(event, params) {
 // Issue #11: uses encodePtyOutFromBytes with the session's pre-computed
 // idBytes buffer, avoiding a uuid hex parse + 16-byte Buffer alloc on every
 // PTY output chunk (the hottest path in this worker).
+// Issue #13: term.onData normalizes to Buffer once before appending to
+// scrollback and calling this function, so `data` is always a Buffer. The
+// previous per-broadcast Buffer.from(data) copy is gone — on Linux this is
+// the original PTY byte Buffer (no decode), on Windows it's the Buffer
+// produced once by the onData normalizer (not once per subscriber).
 function broadcastPtyOut(session, data) {
   const sessionId = session.id;
-  const buf = Buffer.isBuffer(data) ? data : Buffer.from(data);
   let frame = null;
   for (const conn of attachedConnections) {
     const subs = connSubs.get(conn);
     if (!subs || !subs.has(sessionId)) continue;
-    if (!frame) frame = ipc.encodePtyOutFromBytes(session.idBytes, buf);
+    if (!frame) frame = ipc.encodePtyOutFromBytes(session.idBytes, data);
     try { conn.send(frame); } catch {}
   }
 }
@@ -463,12 +486,25 @@ function createSession(id, cwd, name, autoCommand, savedScrollback, claudeSessio
   sessionEnv.WT_SESSION_PORT = String(PORT_HINT);
   const spawnShell = SHELL.replace(/\\/g, '/');
   const spawnCwd = (cwd || getDefaultCwd()).replace(/\\/g, '/');
+  // Issue #13: ask node-pty for binary output (Buffers) instead of UTF-8
+  // decoded strings. On Linux this means onData emits the raw PTY bytes with
+  // no intermediate UTF-8 decode — correct for TUIs that emit non-UTF-8 byte
+  // sequences, and one fewer string→Buffer allocation on the hot path.
+  //
+  // NOTE — Windows: node-pty hardcodes _outSocket.setEncoding('utf8') in
+  // windowsPtyAgent.js regardless of the `encoding` option. The option is
+  // silently ignored, so onData still yields strings on Windows. The
+  // term.onData handler below normalizes string→Buffer once so the rest of
+  // the worker (scrollback chunks, broadcastPtyOut) sees Buffers uniformly.
+  // This is a node-pty limitation; we keep `encoding: null` so that if/when
+  // upstream fixes Windows, we pick up the correct behavior automatically.
   const term = pty.spawn(spawnShell, [], {
     name: 'xterm-256color',
     cols: 120,
     rows: 30,
     cwd: spawnCwd,
     env: sessionEnv,
+    encoding: null,
     useConptyDll: liveConfig('useConptyDll', true),
   });
 
@@ -510,9 +546,18 @@ function createSession(id, cwd, name, autoCommand, savedScrollback, claudeSessio
   sessions.set(id, session);
 
   term.onData((data) => {
+    // Issue #13: normalize PTY output to Buffer once here so the rest of the
+    // worker (scrollback chunks, broadcastPtyOut) operates on Buffers.
+    // - Linux: `data` is already a Buffer (encoding: null honored).
+    // - Windows: `data` is a UTF-8 string — node-pty forces setEncoding('utf8')
+    //   on the outSocket and ignores the `encoding` option (see createSession
+    //   comment). We pay one string→Buffer alloc per PTY chunk on Windows,
+    //   but it's still a strict win over the old code, which did one Buffer
+    //   allocation per BROADCAST DESTINATION (N subscribers = N allocs).
+    const buf = Buffer.isBuffer(data) ? data : Buffer.from(data, 'utf8');
     // Issue #12: append a chunk (O(1)) and head-trim past MAX_SCROLLBACK_SIZE.
     // No join/reduce on the hot path — readers concat once per call.
-    appendScrollback(session.scrollback, data);
+    appendScrollback(session.scrollback, buf);
     trimScrollback(session.scrollback, MAX_SCROLLBACK_SIZE);
     // Issue #10: mark dirty so the next periodic save writes this session.
     session.dirty = true;
@@ -520,7 +565,7 @@ function createSession(id, cwd, name, autoCommand, savedScrollback, claudeSessio
     // Stream PTY data as binary TYPE_PTY_OUT frames to subscribed connections only.
     // (fan-out to browser WS is done server-side.)
     if (session.clientCount > 0) {
-      broadcastPtyOut(session, data);
+      broadcastPtyOut(session, buf);
     }
   });
 
@@ -550,7 +595,11 @@ function createSession(id, cwd, name, autoCommand, savedScrollback, claudeSessio
     let autoFired = false;
     const autoListener = term.onData((data) => {
       if (autoFired) return;
-      if (/[$#>]\s*$/.test(data.replace(/\x1b\[[0-9;]*[a-zA-Z]/g, ''))) {
+      // Issue #13: `data` may be a Buffer (Linux, encoding: null honored) or
+      // a string (Windows, encoding option ignored by node-pty). Normalize
+      // to string for the prompt-detection regex.
+      const str = Buffer.isBuffer(data) ? data.toString('utf8') : data;
+      if (/[$#>]\s*$/.test(str.replace(/\x1b\[[0-9;]*[a-zA-Z]/g, ''))) {
         autoFired = true;
         autoListener.dispose();
         setTimeout(() => {
@@ -843,6 +892,63 @@ const rpcHandlers = {
       totalLen: session.scrollback.totalLen,
       numChunks: session.scrollback.chunks.length,
     };
+  },
+
+  // Test-only (Issue #13): inject a Buffer chunk from hex-encoded bytes. The
+  // IPC JSON envelope can't round-trip arbitrary binary bytes in a string
+  // (non-UTF-8 sequences get replacement-char'd), so tests pass the bytes
+  // as a hex string and we decode here.
+  __testInjectScrollbackBytes: async (params) => {
+    if (!process.env.WT_TEST) throw new Error('test-only RPC');
+    const session = sessions.get(requireUuid(params.id));
+    if (!session) throw new Error('session not found');
+    const hex = String(params.hex || '');
+    if (hex.length > 0) {
+      if (!/^[0-9a-fA-F]*$/.test(hex) || hex.length % 2 !== 0) {
+        throw new Error('hex must be an even-length hex string');
+      }
+      const buf = Buffer.from(hex, 'hex');
+      appendScrollback(session.scrollback, buf);
+      trimScrollback(session.scrollback, MAX_SCROLLBACK_SIZE);
+      session.dirty = true;
+    }
+    return {
+      totalLen: session.scrollback.totalLen,
+      numChunks: session.scrollback.chunks.length,
+    };
+  },
+
+  // Test-only (Issue #13): return the concatenated scrollback bytes as a
+  // hex-encoded string so tests can verify exact byte-level content
+  // (including non-UTF-8 sequences) without the JSON-IPC UTF-8 round-trip
+  // that getScrollback does.
+  __testScrollbackBytesHex: async (params) => {
+    if (!process.env.WT_TEST) throw new Error('test-only RPC');
+    const session = sessions.get(requireUuid(params.id));
+    if (!session) throw new Error('session not found');
+    if (session.scrollback.chunks.length === 0) return { hex: '' };
+    const buf = session.scrollback.chunks.length === 1
+      ? session.scrollback.chunks[0]
+      : Buffer.concat(session.scrollback.chunks);
+    return { hex: buf.toString('hex') };
+  },
+
+  // Test-only (Issue #13): assert that the scrollback chunk list is all
+  // Buffers — exposes the runtime invariant so tests can check it directly.
+  __testScrollbackChunkTypes: async (params) => {
+    if (!process.env.WT_TEST) throw new Error('test-only RPC');
+    const session = sessions.get(requireUuid(params.id));
+    if (!session) throw new Error('session not found');
+    let allBuffers = true;
+    let firstNonBufferIdx = -1;
+    for (let i = 0; i < session.scrollback.chunks.length; i++) {
+      if (!Buffer.isBuffer(session.scrollback.chunks[i])) {
+        allBuffers = false;
+        firstNonBufferIdx = i;
+        break;
+      }
+    }
+    return { allBuffers, firstNonBufferIdx, numChunks: session.scrollback.chunks.length };
   },
 
   // Test-only (Issue #12): read scrollback chunk metadata for assertions
