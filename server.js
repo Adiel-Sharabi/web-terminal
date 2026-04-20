@@ -9,7 +9,7 @@ const { performance } = require('perf_hooks');
 const workerClientLib = require('./lib/worker-client');
 const { mintDirectToken, verifyDirectToken } = require('./lib/cluster-token');
 
-const SERVER_VERSION = '1.11.0';
+const SERVER_VERSION = '1.11.1';
 
 // --- Optional latency instrumentation (opt-in via WT_LATENCY_DEBUG=1) -----
 // Event-loop lag monitor: interval is 10ms; anything ≥ 50ms slip is a stall.
@@ -406,6 +406,18 @@ const HOOK_TOKEN = (() => {
 })();
 const HOOK_TOKEN_BUF = Buffer.from(HOOK_TOKEN, 'utf8');
 
+// Localhost-only callers may skip the hook token. On Windows .hook-token is
+// world-readable (no chmod 0600 equivalent), so H1's protection against
+// same-host processes was never real there; requiring the token still forces
+// a worker-restart cycle to inject WT_HOOK_TOKEN into existing PTY env,
+// which drops every running Claude session. Accepting loopback traffic
+// closes that gap without weakening the wire-level protection against
+// non-localhost callers.
+function isLocalhostReq(req) {
+  const ip = req.ip || req.connection?.remoteAddress || '';
+  return ip === '127.0.0.1' || ip === '::1' || ip === '::ffff:127.0.0.1';
+}
+
 function verifyHookToken(headerVal) {
   if (!headerVal || typeof headerVal !== 'string') return false;
   const got = Buffer.from(headerVal, 'utf8');
@@ -739,7 +751,7 @@ app.post('/api/auth/token', express.json({ limit: '16kb' }), (req, res) => {
 // 1. POST /api/session/:id/hook with {event} body (from command hooks)
 // 2. POST /api/hook with X-WT-Session-ID header (from HTTP hooks, no subprocess)
 app.post('/api/hook', express.json({ limit: '16kb' }), async (req, res) => {
-  if (!verifyHookToken(req.headers['x-wt-hook-token'])) {
+  if (!isLocalhostReq(req) && !verifyHookToken(req.headers['x-wt-hook-token'])) {
     return res.status(401).json({ error: 'Unauthorized' });
   }
   const id = req.headers['x-wt-session-id'];
@@ -754,7 +766,7 @@ app.post('/api/hook', express.json({ limit: '16kb' }), async (req, res) => {
   }
 });
 app.post('/api/session/:id/hook', express.json({ limit: '16kb' }), async (req, res) => {
-  if (!verifyHookToken(req.headers['x-wt-hook-token'])) {
+  if (!isLocalhostReq(req) && !verifyHookToken(req.headers['x-wt-hook-token'])) {
     return res.status(401).json({ error: 'Unauthorized' });
   }
   const event = req.body?.hook_event_name || req.body?.event;
