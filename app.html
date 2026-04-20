@@ -13,7 +13,7 @@
   <style>
     * { margin: 0; padding: 0; box-sizing: border-box; }
     html, body { height: 100dvh; background: #1e1e1e; overflow: hidden; }
-    body { display: flex; flex-direction: column; padding-bottom: env(safe-area-inset-bottom, 0px); }
+    body { display: flex; flex-direction: column; }
     #toolbar {
       height: 36px; background: #16213e; display: flex; align-items: center; padding: 0 12px;
       font: 13px 'Segoe UI', sans-serif; color: #888; border-bottom: 1px solid #0f3460;
@@ -657,9 +657,6 @@
         }
         // Second fit after fonts load and scrollback renders (mobile especially)
         if (isMobile) setTimeout(doResize, 1000);
-        // After scrollback replay finishes, force TUI repaint so Claude's
-        // prompt box (which uses absolute positioning) lands correctly.
-        setTimeout(() => forceRedrawAfterReplay(ws), 700);
       };
 
       ws.onmessage = e => {
@@ -896,8 +893,6 @@
         stopCacheHeartbeat(id);
         ws.send(JSON.stringify({ mode: 'active', browserId }));
         ws.send(JSON.stringify({ resize: { cols: term.cols, rows: term.rows } }));
-        // Force Claude / TUI repaint — replay left cursor state stale
-        setTimeout(() => forceRedrawAfterReplay(ws), 150);
         // Rewire to write to terminal
         ws.onmessage = (e) => {
           if (typeof e.data === 'string') {
@@ -1212,26 +1207,6 @@
       clearTimeout(_resizeTimer);
       _resizeTimer = setTimeout(doResize, 150);
     }
-
-    // After scrollback replay, Claude Code / other TUIs don't know their
-    // cursor state changed — the prompt box they drew earlier may be
-    // mispositioned or invisible. Nudge the PTY size by 1 row so the TUI
-    // receives SIGWINCH and repaints. Same-dimension resizes are no-ops on
-    // the PTY side, so we have to actually change rows briefly.
-    function forceRedrawAfterReplay(sock) {
-      if (!sock || sock.readyState !== WebSocket.OPEN) return;
-      term.scrollToBottom();
-      autoScroll = true;
-      scrollBtn.style.display = 'none';
-      const cols = term.cols;
-      const rows = term.rows;
-      if (rows <= 2) return;
-      try { sock.send(JSON.stringify({ resize: { cols, rows: rows - 1 } })); } catch {}
-      setTimeout(() => {
-        if (sock.readyState !== WebSocket.OPEN) return;
-        try { sock.send(JSON.stringify({ resize: { cols, rows } })); } catch {}
-      }, 80);
-    }
     window.addEventListener('resize', debouncedResize);
 
     // Mobile: keep toolbar pinned when virtual keyboard scrolls the viewport
@@ -1251,21 +1226,6 @@
 
     // Re-fit after layout settles (mobile especially may not be ready at term.open time)
     setTimeout(doResize, 500);
-
-    // Mobile #touchKeys wraps to 2+ rows only after font/layout settles — its
-    // final height isn't known at first fit. Observe it so the terminal gets
-    // re-fit whenever its height changes (initial wrap, rotation, etc). This
-    // keeps the last row from being clipped off-screen below the nav bar.
-    if (isMobile) {
-      const tk = document.getElementById('touchKeys');
-      if (tk && 'ResizeObserver' in window) {
-        let tkH = tk.offsetHeight;
-        new ResizeObserver(() => {
-          const h = tk.offsetHeight;
-          if (h !== tkH) { tkH = h; debouncedResize(); }
-        }).observe(tk);
-      }
-    }
 
     // --- Touch keys (mobile) ---
     const stickyState = { ctrl: false, alt: false, shift: false };
