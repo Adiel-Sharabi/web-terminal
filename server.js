@@ -9,7 +9,7 @@ const { performance } = require('perf_hooks');
 const workerClientLib = require('./lib/worker-client');
 const { mintDirectToken, verifyDirectToken } = require('./lib/cluster-token');
 
-const SERVER_VERSION = '1.11.1';
+const SERVER_VERSION = '1.11.2';
 
 // --- Optional latency instrumentation (opt-in via WT_LATENCY_DEBUG=1) -----
 // Event-loop lag monitor: interval is 10ms; anything ≥ 50ms slip is a stall.
@@ -269,14 +269,24 @@ const ptyOutDisposers = new Map();
 
 function ensurePtyOutSubscription(id) {
   if (ptyOutDisposers.has(id)) return;
+  // Browser xterm.js expects WS text frames with UTF-8 string payload. Raw
+  // Buffers arrive as Blobs in the browser which xterm cannot render.
+  //
+  // Per-session streaming decoder: when a Claude Code redraw pushes bytes
+  // through IPC in chunks, a chunk boundary can fall inside a multi-byte
+  // UTF-8 codepoint (e.g., box-drawing `╭` is 3 bytes). A stateless
+  // buf.toString('utf8') per chunk replaces the partial bytes with U+FFFD
+  // and corrupts the next chunk's orphan continuation bytes — so Claude's
+  // prompt-box corners disappear and the UI ends up rendered in the middle
+  // of the viewport. TextDecoder with { stream: true } keeps incomplete
+  // sequences pending across calls, so codepoints split at chunk boundaries
+  // are delivered intact on the following chunk.
+  const decoder = new TextDecoder('utf-8', { fatal: false, ignoreBOM: true });
   const dispose = workerClient.onPtyOut(id, (buf) => {
     const set = sessionClients.get(id);
     if (!set || set.size === 0) return;
-    // Browser xterm.js expects WS text frames with UTF-8 string payload.
-    // If we forward the raw Buffer via ws.send(buf), browsers deliver a Blob
-    // which xterm cannot render (produces garbled overlapping output).
-    // Convert once here and send as a string to all subscribed WS clients.
-    const str = buf.toString('utf8');
+    const str = decoder.decode(buf, { stream: true });
+    if (!str) return;
     for (const client of set) {
       try { client.send(str); } catch {}
     }
