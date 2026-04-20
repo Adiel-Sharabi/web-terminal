@@ -10,10 +10,30 @@ const path = require('path');
 const fs = require('fs');
 const os = require('os');
 const crypto = require('crypto');
+const { performance } = require('perf_hooks');
 const pty = require('node-pty');
 const ipc = require('./lib/ipc');
 
-const WORKER_VERSION = '0.5.0';
+const WORKER_VERSION = '0.5.1';
+
+// --- Optional latency instrumentation (opt-in via WT_LATENCY_DEBUG=1) -----
+const _LATENCY_DEBUG = process.env.WT_LATENCY_DEBUG === '1';
+if (_LATENCY_DEBUG) {
+  let _lagLast = performance.now();
+  const _lagTimer = setInterval(() => {
+    const now = performance.now();
+    const lag = now - _lagLast - 10;
+    if (lag > 50) {
+      const mem = process.memoryUsage();
+      console.log(`[latency-lag] ${new Date().toISOString()} stall=${lag.toFixed(0)}ms heap=${(mem.heapUsed / 1024 / 1024).toFixed(0)}MB`);
+    }
+    _lagLast = performance.now();
+  }, 10);
+  if (typeof _lagTimer.unref === 'function') _lagTimer.unref();
+}
+function _slowOpLog(name, dur) {
+  if (dur > 30) console.log(`[slow-op] ${new Date().toISOString()} ${name} dur=${dur.toFixed(0)}ms`);
+}
 const STALE_STATUS_TIMEOUT_MS = 5 * 60 * 1000;
 const MAX_SCROLLBACK_SIZE = 2 * 1024 * 1024;
 
@@ -146,6 +166,15 @@ const _claudeSessionIdCache = new Map(); // cwd -> { sessionId, dirMtime }
 let _claudeDetectReaddirCount = 0;
 
 function detectClaudeSessionIdFromDir(cwd) {
+  const _t0 = _LATENCY_DEBUG ? performance.now() : 0;
+  const _res = _detectClaudeSessionIdFromDirInner(cwd);
+  if (_LATENCY_DEBUG) {
+    const dur = performance.now() - _t0;
+    if (dur > 30) console.log(`[slow-op] ${new Date().toISOString()} detectClaudeSessionIdFromDir cwd=${cwd || ''} dur=${dur.toFixed(0)}ms`);
+  }
+  return _res;
+}
+function _detectClaudeSessionIdFromDirInner(cwd) {
   if (!cwd) return null;
   let projectDir;
   try {
@@ -198,7 +227,12 @@ function loadClaudeSessionNames() {
   try { return JSON.parse(fs.readFileSync(CLAUDE_SESSION_NAMES_FILE, 'utf8')); } catch { return {}; }
 }
 function saveClaudeSessionNames(names) {
+  const _t0 = _LATENCY_DEBUG ? performance.now() : 0;
   try { fs.writeFileSync(CLAUDE_SESSION_NAMES_FILE, JSON.stringify(names, null, 2)); } catch {}
+  if (_LATENCY_DEBUG) {
+    const dur = performance.now() - _t0;
+    if (dur > 30) console.log(`[slow-op] ${new Date().toISOString()} saveClaudeSessionNames entries=${Object.keys(names).length} dur=${dur.toFixed(0)}ms`);
+  }
 }
 
 // --- Scrollback chunk store ----------------------------------------------
@@ -359,20 +393,32 @@ function deleteScrollback(id) {
 // correctness on restart, because saveAllScrollbackSync in process.on('exit')
 // needs to be able to write everything if a sync flush was somehow missed.
 async function saveAllScrollback(sync, force) {
+  const _t0 = _LATENCY_DEBUG ? performance.now() : 0;
   // Snapshot entries so concurrent session mutation during await points
   // doesn't trip the iterator. A session deleted mid-loop will still get
   // its stale scrollback written — harmless; the next tick overwrites or
   // deleteScrollback cleans up.
   const entries = Array.from(sessions);
+  let writtenCount = 0;
   for (let i = 0; i < entries.length; i++) {
     const [id, session] = entries[i];
     if (force || session.dirty) {
+      const _tSess = _LATENCY_DEBUG ? performance.now() : 0;
       saveScrollback(id, session, sync);
+      writtenCount++;
+      if (_LATENCY_DEBUG) {
+        const d = performance.now() - _tSess;
+        if (d > 30) console.log(`[slow-op] ${new Date().toISOString()} saveScrollback[${id.substring(0,8)}] sync=${!!sync} bytes=${session.scrollback.totalLen} dur=${d.toFixed(0)}ms`);
+      }
     }
     // Yield after each session except the last to release the event loop.
     if (i < entries.length - 1) {
       await new Promise(r => setImmediate(r));
     }
+  }
+  if (_LATENCY_DEBUG) {
+    const dur = performance.now() - _t0;
+    if (dur > 30) console.log(`[slow-op] ${new Date().toISOString()} saveAllScrollback sync=${!!sync} force=${!!force} sessions=${entries.length} written=${writtenCount} dur=${dur.toFixed(0)}ms`);
   }
 }
 
@@ -447,6 +493,7 @@ function broadcastEvent(event, params) {
 //   The even harder safety net (overflow → destroy conn) lives in lib/ipc.js
 //   IpcConnection.send; we just listen for the 'overflow' event to log.
 function broadcastPtyOut(session, data) {
+  const _t0 = _LATENCY_DEBUG ? performance.now() : 0;
   const sessionId = session.id;
   let frame = null;
   for (const conn of attachedConnections) {
@@ -471,6 +518,10 @@ function broadcastPtyOut(session, data) {
       conn._wtDroppedFrames = 0;
       log(`conn draining — PTY_OUT backpressure (queue=${conn.writeQueueBytes} bytes); dropping frames until drain`);
     }
+  }
+  if (_LATENCY_DEBUG) {
+    const dur = performance.now() - _t0;
+    if (dur > 30) console.log(`[slow-op] ${new Date().toISOString()} broadcastPtyOut bytes=${data.length} dur=${dur.toFixed(0)}ms`);
   }
 }
 
@@ -1120,6 +1171,7 @@ const rpcHandlers = {
 };
 
 async function handleRpc(conn, msg) {
+  const _t0 = _LATENCY_DEBUG ? performance.now() : 0;
   const handler = rpcHandlers[msg.method];
   if (!handler) {
     conn.send(ipc.encodeJson({ id: msg.id, error: `unknown method: ${msg.method}` }));
@@ -1130,6 +1182,10 @@ async function handleRpc(conn, msg) {
     conn.send(ipc.encodeJson({ id: msg.id, result }));
   } catch (e) {
     conn.send(ipc.encodeJson({ id: msg.id, error: e.message || String(e) }));
+  }
+  if (_LATENCY_DEBUG) {
+    const dur = performance.now() - _t0;
+    if (dur > 30) console.log(`[slow-op] ${new Date().toISOString()} rpc:${msg.method} dur=${dur.toFixed(0)}ms`);
   }
 }
 
