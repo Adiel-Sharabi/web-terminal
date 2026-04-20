@@ -186,8 +186,30 @@ function deleteScrollback(id) {
   } catch {}
 }
 
-function saveAllScrollback(sync) {
-  for (const [id, session] of sessions) saveScrollback(id, session, sync);
+// Async save: yields to the event loop between sessions so JSON.stringify of
+// large scrollbacks across many sessions doesn't block input/output/RPC.
+// Used by the periodic timer, flushState RPC, and signal-based shutdown.
+async function saveAllScrollback(sync) {
+  // Snapshot entries so concurrent session mutation during await points
+  // doesn't trip the iterator. A session deleted mid-loop will still get
+  // its stale scrollback written — harmless; the next tick overwrites or
+  // deleteScrollback cleans up.
+  const entries = Array.from(sessions);
+  for (let i = 0; i < entries.length; i++) {
+    const [id, session] = entries[i];
+    saveScrollback(id, session, sync);
+    // Yield after each session except the last to release the event loop.
+    if (i < entries.length - 1) {
+      await new Promise(r => setImmediate(r));
+    }
+  }
+}
+
+// Synchronous-only save — for the `process.on('exit')` handler, which runs
+// after the event loop has stopped and cannot await. Normal shutdown paths
+// already flushed via the async version; this is a last-resort safety net.
+function saveAllScrollbackSync() {
+  for (const [id, session] of sessions) saveScrollback(id, session, true);
 }
 
 // --- Session map ----------------------------------------------------------
@@ -589,7 +611,7 @@ const rpcHandlers = {
   // Used by server.js on graceful shutdown and by tests before worker restart.
   flushState: async () => {
     saveSessionConfigs();
-    saveAllScrollback(true);
+    await saveAllScrollback(true);
     return { ok: true };
   },
 
@@ -600,6 +622,67 @@ const rpcHandlers = {
     if (params.lastActivity !== undefined) session.lastActivity = params.lastActivity;
     if (params.lastHookActivity !== undefined) session.lastHookActivity = params.lastHookActivity;
     return { ok: true };
+  },
+
+  // Test-only: inject a scrollback payload of roughly `bytes` size so tests
+  // can exercise the periodic-save path with realistic payloads without
+  // having to coax the PTY into producing megabytes of output.
+  __testInjectScrollback: async (params) => {
+    if (!process.env.WT_TEST) throw new Error('test-only RPC');
+    const session = sessions.get(requireUuid(params.id));
+    if (!session) throw new Error('session not found');
+    const bytes = Math.max(0, parseInt(params.bytes) || 0);
+    if (bytes > 0) {
+      const chunk = 'x'.repeat(1024);
+      let written = 0;
+      while (written < bytes) {
+        const take = Math.min(chunk.length, bytes - written);
+        const piece = take === chunk.length ? chunk : chunk.slice(0, take);
+        session.scrollback.push(piece);
+        session.scrollbackSize = (session.scrollbackSize || 0) + piece.length;
+        written += take;
+      }
+    }
+    return { size: session.scrollbackSize || 0, chunks: session.scrollback.length };
+  },
+
+  // Test-only: explicitly trigger periodic-style save path (async, non-sync
+  // writes). Resolves after the async loop and its inter-session yields.
+  __testSaveAllScrollback: async (params) => {
+    if (!process.env.WT_TEST) throw new Error('test-only RPC');
+    const sync = !!params.sync;
+    await saveAllScrollback(sync);
+    return { ok: true };
+  },
+
+  // Test-only: measure the worker's event-loop block time during a save.
+  // Starts a setImmediate probe loop, runs saveAllScrollback, and reports
+  // the longest gap between probe ticks. A non-yielding (blocking) save
+  // produces one huge gap equal to the save's total duration; a yielding
+  // save produces many small gaps because setImmediate fires between
+  // per-session iterations.
+  __testMeasureSaveBlock: async (params) => {
+    if (!process.env.WT_TEST) throw new Error('test-only RPC');
+    const sync = !!params.sync;
+    const gaps = [];
+    let last = Date.now();
+    let probing = true;
+    function probe() {
+      const now = Date.now();
+      gaps.push(now - last);
+      last = now;
+      if (probing) setImmediate(probe);
+    }
+    setImmediate(probe);
+    const start = Date.now();
+    await saveAllScrollback(sync);
+    const duration = Date.now() - start;
+    probing = false;
+    // Wait one tick so the probe stops cleanly.
+    await new Promise(r => setImmediate(r));
+    let maxGap = 0;
+    for (const g of gaps) if (g > maxGap) maxGap = g;
+    return { duration, maxGap, ticks: gaps.length };
   },
 };
 
@@ -710,30 +793,38 @@ server.on('error', (err) => {
   console.error('[pty-worker] server error:', err.message);
 });
 
-// Periodic scrollback save (every 30s)
-const scrollbackTimer = setInterval(() => saveAllScrollback(false), 30000);
+// Periodic scrollback save (every 30s). Async with per-session yield so a
+// cluster of large scrollbacks doesn't freeze the event loop in one tick.
+const scrollbackTimer = setInterval(() => {
+  saveAllScrollback(false).catch(e => log('periodic scrollback save failed:', e.message));
+}, 30000);
 scrollbackTimer.unref();
 
 // --- Graceful shutdown ----------------------------------------------------
 let shuttingDown = false;
-function shutdown(signal) {
+async function shutdown(signal) {
   if (shuttingDown) return;
   shuttingDown = true;
   log(`${signal} received — shutting down`);
+  // Kick a 3s hard-exit fallback immediately so a stuck async save can't
+  // hang the process forever.
+  setTimeout(() => process.exit(0), 3000).unref();
   try {
     saveSessionConfigs();
-    saveAllScrollback(true);
+    await saveAllScrollback(true);
   } catch (e) { log('shutdown save error:', e.message); }
-  server.close().then(() => process.exit(0));
-  setTimeout(() => process.exit(0), 3000).unref();
+  try { await server.close(); } catch {}
+  process.exit(0);
 }
 
-process.on('SIGINT', () => shutdown('SIGINT'));
-process.on('SIGTERM', () => shutdown('SIGTERM'));
-process.on('SIGHUP', () => shutdown('SIGHUP'));
+function runShutdown(sig) { shutdown(sig).catch(e => log('shutdown error:', e && e.message)); }
+process.on('SIGINT', () => runShutdown('SIGINT'));
+process.on('SIGTERM', () => runShutdown('SIGTERM'));
+process.on('SIGHUP', () => runShutdown('SIGHUP'));
 if (process.platform === 'win32') {
-  process.on('SIGBREAK', () => shutdown('SIGBREAK'));
+  process.on('SIGBREAK', () => runShutdown('SIGBREAK'));
 }
 process.on('exit', () => {
-  try { saveSessionConfigs(); saveAllScrollback(true); } catch {}
+  // The event loop is stopped here — must be strictly synchronous.
+  try { saveSessionConfigs(); saveAllScrollbackSync(); } catch {}
 });
