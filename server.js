@@ -7,7 +7,7 @@ const crypto = require('crypto');
 const { execFile, spawn } = require('child_process');
 const workerClientLib = require('./lib/worker-client');
 
-const SERVER_VERSION = '1.8.4';
+const SERVER_VERSION = '1.8.5';
 // Stale status auto-correction now lives in pty-worker.js.
 
 // --- Config: config.json > env vars > defaults ---
@@ -330,6 +330,9 @@ workerClient.on('sessionExited', ({ id }) => {
     try { dispose(); } catch {}
     ptyOutDisposers.delete(id);
   }
+  // Issue #11: drop the cached idBytes entry so long-running servers don't
+  // accumulate entries for dead sessions.
+  try { workerClient.forgetSession(id); } catch {}
 });
 
 workerClient.onExit(() => {
