@@ -552,6 +552,71 @@ test.describe('/api/exec when enabled (M3)', () => {
 });
 
 // ============================================================
+// 8c. Hook endpoint auth (H1): X-WT-Hook-Token required
+// ============================================================
+
+test.describe('Hook endpoint auth (H1)', () => {
+  const fs = require('fs');
+  const path = require('path');
+  function readHookToken() {
+    try { return fs.readFileSync(path.join(__dirname, '..', '.hook-token'), 'utf8').trim(); } catch { return ''; }
+  }
+
+  test('hook request without X-WT-Hook-Token returns 401', async () => {
+    const raw = await pwRequest.newContext({ baseURL: BASE });
+    const res = await raw.post('/api/session/anything/hook', {
+      data: { event: 'UserPromptSubmit' },
+    });
+    expect(res.status()).toBe(401);
+    await raw.dispose();
+  });
+
+  test('hook request with wrong X-WT-Hook-Token returns 401', async () => {
+    const raw = await pwRequest.newContext({
+      baseURL: BASE,
+      extraHTTPHeaders: { 'X-WT-Hook-Token': 'definitely-not-the-real-token' },
+    });
+    const res = await raw.post('/api/session/anything/hook', {
+      data: { event: 'UserPromptSubmit' },
+    });
+    expect(res.status()).toBe(401);
+    await raw.dispose();
+  });
+
+  test('hook request with correct token and valid session ID returns 200', async () => {
+    // Create a real session via the auth API
+    const ctx = await authCtx();
+    const create = await ctx.post('/api/sessions', { data: { name: 'HookAuthTest' } });
+    const { id } = await create.json();
+
+    const raw = await pwRequest.newContext({
+      baseURL: BASE,
+      extraHTTPHeaders: { 'X-WT-Hook-Token': readHookToken() },
+    });
+    const res = await raw.post(`/api/session/${id}/hook`, {
+      data: { event: 'UserPromptSubmit' },
+    });
+    expect(res.status()).toBe(200);
+    const body = await res.json();
+    expect(body.ok).toBe(true);
+
+    await ctx.delete(`/api/sessions/${id}`);
+    await ctx.dispose();
+    await raw.dispose();
+  });
+
+  test('/api/hook (no :id) also requires X-WT-Hook-Token', async () => {
+    const raw = await pwRequest.newContext({ baseURL: BASE });
+    const res = await raw.post('/api/hook', {
+      data: { event: 'UserPromptSubmit' },
+      headers: { 'X-WT-Session-ID': 'whatever' },
+    });
+    expect(res.status()).toBe(401);
+    await raw.dispose();
+  });
+});
+
+// ============================================================
 // 8. Session cookie expiry (M1)
 // ============================================================
 

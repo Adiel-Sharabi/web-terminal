@@ -568,6 +568,15 @@ function createSession(id, cwd, name, autoCommand, savedScrollback, claudeSessio
   const sessionEnv = buildSafeEnv();
   sessionEnv.WT_SESSION_ID = id;
   sessionEnv.WT_SESSION_PORT = String(PORT_HINT);
+  // H1: expose the per-process hook token to spawned shells so Claude's
+  // HTTP-type hook configs can authenticate. Read from the same file server.js
+  // writes on startup.
+  try {
+    const hookTokenFile = path.join(__dirname, '.hook-token');
+    if (fs.existsSync(hookTokenFile)) {
+      sessionEnv.WT_HOOK_TOKEN = fs.readFileSync(hookTokenFile, 'utf8').trim();
+    }
+  } catch {}
   const spawnShell = SHELL.replace(/\\/g, '/');
   const spawnCwd = (cwd || getDefaultCwd()).replace(/\\/g, '/');
   // Issue #13: ask node-pty for binary output (Buffers) instead of UTF-8
