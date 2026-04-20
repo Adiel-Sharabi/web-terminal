@@ -250,8 +250,9 @@ function correctStaleStatus(session) {
 }
 
 function sessionIdOf(session) {
-  for (const [id, s] of sessions) if (s === session) return id;
-  return null;
+  // Issue #9: the session object caches its own id at creation time
+  // (see createSession), so this is O(1) instead of O(N).
+  return session ? session.id : null;
 }
 
 function sessionSummary(id, s) {
@@ -299,6 +300,7 @@ function createSession(id, cwd, name, autoCommand, savedScrollback, claudeSessio
   const scrollbackSize = scrollback.reduce((sum, s) => sum + s.length, 0);
 
   const session = {
+    id,
     term,
     scrollback,
     scrollbackSize,
