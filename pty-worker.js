@@ -97,6 +97,8 @@ const log = (...args) => {
 let _claudeHome = null;
 
 function detectClaudeHome() {
+  // Tests override via WT_CLAUDE_HOME to point at a temp dir.
+  if (process.env.WT_CLAUDE_HOME) return process.env.WT_CLAUDE_HOME;
   const configured = liveConfig('claudeHome', '');
   if (configured) return configured;
   const profile = process.env.USERPROFILE || os.homedir();
@@ -117,19 +119,73 @@ function getClaudeProjectsDir() {
   return path.join(_claudeHome, '.claude', 'projects');
 }
 
+// Issue #16: cache per-cwd session-id detection.
+//
+// Before: every sessionSummary (i.e. every listSessions RPC and every event
+// broadcast) called detectClaudeSessionIdFromDir, which did a full readdir +
+// per-file statSync of `~/.claude/projects/<encoded-cwd>`. With dozens of
+// accumulated Claude .jsonl session logs per project, cost grew linearly in
+// history depth and the work was repeated on every tick.
+//
+// After: per-cwd cache keyed by the encoded project dir mtime. A single stat
+// of the dir is cheap; when mtimeMs hasn't moved, we reuse the last answer.
+// When Claude writes a new .jsonl or touches an existing one, the parent
+// dir's mtime advances on all major filesystems (NTFS, ext4, APFS), so we
+// invalidate naturally. Misses (dir absent) are also cached so repeated
+// polls during session startup don't each stat a missing dir; the cached
+// miss is invalidated the next time the dir appears (fs.statSync succeeds
+// with a different mtime than the sentinel).
+//
+// The cache is a Map keyed by cwd (not by encoded dir) so we don't recompute
+// the encoding string on every call.
+//
+// Test hook (WT_TEST only): __testClaudeDetectCounters RPC exposes hit/miss
+// counters and can reset them. The counters wrap the readdir path so tests
+// can assert "cache hit did NOT walk the dir".
+const _claudeSessionIdCache = new Map(); // cwd -> { sessionId, dirMtime }
+let _claudeDetectReaddirCount = 0;
+
 function detectClaudeSessionIdFromDir(cwd) {
+  if (!cwd) return null;
+  let projectDir;
   try {
-    const projectDir = path.join(getClaudeProjectsDir(),
+    projectDir = path.join(getClaudeProjectsDir(),
       cwd.replace(/^([A-Z]):\\/, '$1--').replace(/[\\/]/g, '-'));
-    if (fs.existsSync(projectDir)) {
-      const newest = fs.readdirSync(projectDir)
-        .filter(f => f.endsWith('.jsonl'))
-        .map(f => ({ id: f.replace('.jsonl', ''), mtime: fs.statSync(path.join(projectDir, f)).mtimeMs }))
-        .sort((a, b) => b.mtime - a.mtime)[0];
-      if (newest) return newest.id;
-    }
-  } catch {}
-  return null;
+  } catch { return null; }
+
+  let dirMtime;
+  try {
+    dirMtime = fs.statSync(projectDir).mtimeMs;
+  } catch {
+    // Dir doesn't exist (ENOENT) or is otherwise unreadable. Clear any stale
+    // cached answer and return null. We intentionally do NOT cache the miss
+    // — a single stat per call is cheap and guarantees we pick up the dir
+    // the instant Claude creates it, without needing any cache-invalidation
+    // signal from the spawn path.
+    _claudeSessionIdCache.delete(cwd);
+    return null;
+  }
+
+  const cached = _claudeSessionIdCache.get(cwd);
+  if (cached && cached.dirMtime === dirMtime) {
+    return cached.sessionId;
+  }
+
+  // mtime changed (or first lookup) — do the full readdir.
+  let sessionId = null;
+  try {
+    _claudeDetectReaddirCount++;
+    const newest = fs.readdirSync(projectDir)
+      .filter(f => f.endsWith('.jsonl'))
+      .map(f => ({ id: f.replace('.jsonl', ''), mtime: fs.statSync(path.join(projectDir, f)).mtimeMs }))
+      .sort((a, b) => b.mtime - a.mtime)[0];
+    if (newest) sessionId = newest.id;
+  } catch {
+    // Race: dir vanished between stat and readdir. Fall through; null is
+    // a valid cacheable answer for this mtime snapshot.
+  }
+  _claudeSessionIdCache.set(cwd, { sessionId, dirMtime });
+  return sessionId;
 }
 
 function extractClaudeSessionIdFromCmd(cmd) {
@@ -686,6 +742,29 @@ const rpcHandlers = {
     const force = !!params.force;
     await saveAllScrollback(sync, force);
     return { ok: true };
+  },
+
+  // Test-only (Issue #16): inspect / reset the Claude session-id detection
+  // cache counters. Returns { readdirCount, cacheSize } and optionally resets
+  // the readdir counter (params.reset === true). Tests use readdirCount to
+  // assert that a sequence of detection calls hit the cache instead of
+  // walking the dir.
+  __testClaudeDetectCounters: async (params) => {
+    if (!process.env.WT_TEST) throw new Error('test-only RPC');
+    const before = _claudeDetectReaddirCount;
+    if (params && params.reset) _claudeDetectReaddirCount = 0;
+    if (params && params.clearCache) _claudeSessionIdCache.clear();
+    return { readdirCount: before, cacheSize: _claudeSessionIdCache.size };
+  },
+
+  // Test-only (Issue #16): invoke detectClaudeSessionIdFromDir directly for
+  // a given cwd. Returns { sessionId } — null if no .jsonl found. This
+  // decouples the test from the full createSession path (which would spawn
+  // a real shell), letting us exercise the cache in isolation.
+  __testDetectClaudeSessionId: async (params) => {
+    if (!process.env.WT_TEST) throw new Error('test-only RPC');
+    const cwd = String(params.cwd || '');
+    return { sessionId: detectClaudeSessionIdFromDir(cwd) };
   },
 
   // Test-only: measure the worker's event-loop block time during a save.
