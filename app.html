@@ -236,8 +236,12 @@
     #selectBar button:active { background: #00d4aa; color: #1a1a2e; }
     #selectBar .sel-info { color: #888; font: 11px 'Segoe UI', sans-serif; }
 
-    /* --- Mobile --- */
-    @media (max-width: 600px) {
+    /* --- Mobile ---
+       Both breakpoints trigger the mobile layout: narrow portrait phones
+       (max-width 600px) and short-height landscape phones (max-height 500px)
+       — the latter fixes issue #27 where the top touchKeys row disappeared
+       when a phone rotated to landscape. */
+    @media (max-width: 600px), (max-height: 500px) {
       #toolbar { font-size: 12px; height: 32px; padding: 0 8px; position: fixed; top: 0; left: 0; right: 0; z-index: 100; will-change: transform; }
       #toolbar .session-name { max-width: 30vw; font-size: 12px; }
       #touchKeys { display: flex; align-items: center; margin-top: 32px; flex-wrap: wrap; height: auto; white-space: normal; }
@@ -299,6 +303,7 @@
     <button data-key="ArrowLeft" data-seq="\x1b[D">&larr;</button>
     <button data-key="ArrowRight" data-seq="\x1b[C">&rarr;</button>
     <button data-key="/" data-char="/">/</button>
+    <button data-key="\" data-char="\">\</button>
     <button data-key="|" data-char="|">|</button>
     <button data-key="-" data-char="-">-</button>
     <button data-key="~" data-char="~">~</button>
