@@ -244,6 +244,14 @@
       #status { top: 70px; }
       #main { overflow-x: hidden; }
       #sidebar.open { width: var(--sb-width, 220px); }
+      /* Issue #22: new-session form was cramped and Cancel button overflowed. */
+      #sidebar.open #sidebarResizer { display: none; }
+      #newSessionForm { padding: 12px 12px 14px; }
+      #newSessionForm label { font-size: 11px; margin-top: 10px; }
+      #newSessionForm select,
+      #newSessionForm input { font-size: 16px; padding: 9px 10px; }
+      #newSessionForm .form-row { flex-direction: column; gap: 8px; margin-top: 14px; }
+      #newSessionForm .form-row button { padding: 13px 14px; font-size: 14px; width: 100% !important; min-height: 44px; }
       .settings-panel { width: 95vw; padding: 14px; max-height: 85vh; }
       .settings-panel h2 { font-size: 16px; margin-bottom: 10px; }
       .settings-grid { grid-template-columns: 1fr; gap: 8px; }
