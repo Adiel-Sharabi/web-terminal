@@ -1,8 +1,34 @@
-# Web Terminal
+<p align="center">
+  <img src="icon.svg" width="80" alt="Web Terminal">
+</p>
 
-Browser-based terminal manager for Windows. Monitor and control CLI sessions (including AI coding agents like Claude Code) remotely from any device — phone, tablet, or another PC. Manage multiple servers from a single window.
+<h1 align="center">Web Terminal</h1>
 
-![License](https://img.shields.io/badge/license-MIT-blue)
+<p align="center">
+  Browser-based terminal manager for Windows.<br>
+  Run, monitor, and control multiple CLI sessions from any device.
+</p>
+
+<p align="center">
+  <strong>Built for <a href="https://claude.ai/claude-code">Claude Code</a></strong> &mdash; but works with any CLI tool.
+  <br>
+  <img src="https://img.shields.io/badge/license-MIT-blue" alt="License: MIT">
+</p>
+
+---
+
+> **Platform note:** Web Terminal is designed for Windows, where browser-based terminal solutions are scarce. Linux and macOS users have excellent alternatives like [ttyd](https://github.com/tsl0922/ttyd), [gotty](https://github.com/sorenisanerd/gotty), and [code-server](https://github.com/coder/code-server).
+
+## Why?
+
+Running Claude Code (or any long-running CLI) on a remote Windows machine? You need to:
+
+- Check on it from your phone while away from the desk
+- Run multiple sessions across multiple machines
+- Get notified when something needs your attention
+- Resume conversations without SSH or RDP
+
+Web Terminal solves all of this, running as a single `node monitor.js` on each host.
 
 ## Features
 
