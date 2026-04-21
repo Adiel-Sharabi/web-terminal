@@ -268,6 +268,10 @@
     <span id="hostName" style="color:#00d4aa; font-weight:500; margin-left:8px;"></span>
 
     <button id="muteBtn" class="tb-btn" onclick="toggleMute()" title="Mute notifications" style="font-size:14px">&#x1F514;</button>
+    <!-- Issue #19: PWA has no pull-to-refresh. Expose a button so installed
+         PWA users can force-reload the page (clears xterm state and picks up
+         any deployed app.html update). Also useful on desktop for the same. -->
+    <button class="tb-btn" onclick="location.reload()" title="Refresh" style="margin-left:8px;font-size:14px">&#x21BB;</button>
     <button class="tb-btn" onclick="logout()" title="Logout" style="margin-left:8px;font-size:14px">&#x23FB;</button>
   </div>
   <div id="selectBar">
