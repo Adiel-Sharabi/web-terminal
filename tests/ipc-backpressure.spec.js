@@ -274,7 +274,10 @@ test.describe('IPC backpressure (Issue #15)', () => {
       expect(res).not.toBeNull();
       expect(res.sent).toBeGreaterThan(0);
       expect(res.falseReturns).toBeGreaterThanOrEqual(1);
-      expect(res.isDraining).toBe(true);
+      // Renamed from isDraining (Issue #15 revisit): we no longer drop
+      // PTY_OUT frames on ~64KB backpressure, only flag the conn as behind
+      // for diagnostic logging. The 50MB hard cap is the real safety net.
+      expect(res.isBehind).toBe(true);
       expect(res.closed).toBe(false);
       expect(res.writeQueueBytes).toBeGreaterThan(0);
       expect(res.writeQueueBytes).toBeLessThan(MAX_INFLIGHT);

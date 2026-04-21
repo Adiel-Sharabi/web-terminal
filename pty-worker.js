@@ -487,7 +487,6 @@ function unsubscribeConn(conn, sessionId) {
 function broadcastEvent(event, params) {
   const frame = ipc.encodeJson({ event, params });
   for (const conn of attachedConnections) {
-    if (conn._wtDraining) continue; // Issue #15: skip draining conns for events too
     try { conn.send(frame); } catch {}
   }
 }
@@ -520,27 +519,29 @@ function broadcastPtyOut(session, data) {
   const _t0 = _LATENCY_DEBUG ? performance.now() : 0;
   const sessionId = session.id;
   let frame = null;
+  // Issue #15 revisited: the original implementation tripped a frame-drop at
+  // Node's default ~64 KB socket highWaterMark, which is trivially crossed on
+  // a normal Claude Code redraw burst. Every drop corrupts an in-flight CSI
+  // sequence and leaves the user's terminal rendering Claude's UI at wrong
+  // rows until a full reconnect. The real OOM safety net is the 50 MB hard
+  // cap in lib/ipc.js IpcConnection.send — that destroys a connection whose
+  // peer is genuinely unable to drain. Between 64 KB and 50 MB we simply let
+  // net.Socket buffer (that's what it's there for); server.js runs on the
+  // same host and drains the pipe on its event loop, so normal bursts catch
+  // up in a few ms. We still surface the send's boolean return in a
+  // _wtBehind flag purely for diagnostics so the 'drain' event can log when
+  // a connection was briefly behind.
   for (const conn of attachedConnections) {
     const subs = connSubs.get(conn);
     if (!subs || !subs.has(sessionId)) continue;
-    // Drop frames to this conn while it drains. Scrollback catches up on
-    // re-attach. We count dropped bytes so the drain log can summarize.
-    if (conn._wtDraining) {
-      conn._wtDroppedBytes = (conn._wtDroppedBytes || 0) + data.length;
-      conn._wtDroppedFrames = (conn._wtDroppedFrames || 0) + 1;
-      continue;
-    }
+    if (conn._closed) continue;
     if (!frame) frame = ipc.encodePtyOutFromBytes(session.idBytes, data);
     let ok = false;
     try { ok = conn.send(frame); } catch { ok = false; }
-    if (!ok && !conn._closed) {
-      // Transition into draining. Log once per burst; _wtDrainingSince
-      // records when it started so the clear-log can report duration.
-      conn._wtDraining = true;
-      conn._wtDrainingSince = Date.now();
-      conn._wtDroppedBytes = 0;
-      conn._wtDroppedFrames = 0;
-      log(`conn draining — PTY_OUT backpressure (queue=${conn.writeQueueBytes} bytes); dropping frames until drain`);
+    if (!ok && !conn._wtBehind) {
+      conn._wtBehind = true;
+      conn._wtBehindSince = Date.now();
+      log(`conn behind — PTY_OUT user-space queue=${conn.writeQueueBytes} bytes (hard cap 50MB; not dropping)`);
     }
   }
   if (_LATENCY_DEBUG) {
@@ -1139,14 +1140,15 @@ const rpcHandlers = {
       let sent = 0, falseReturns = 0;
       for (let i = 0; i < frames; i++) {
         if (conn._closed) break;
-        if (conn._wtDraining) break;
         let ok = false;
         try { ok = conn.send(frame); } catch { ok = false; break; }
         sent++;
         if (!ok) {
           falseReturns++;
-          conn._wtDraining = true;
-          conn._wtDrainingSince = Date.now();
+          if (!conn._wtBehind) {
+            conn._wtBehind = true;
+            conn._wtBehindSince = Date.now();
+          }
           break;
         }
       }
@@ -1157,7 +1159,7 @@ const rpcHandlers = {
           event: '__testFloodResult',
           params: {
             sent, falseReturns,
-            isDraining: !!conn._wtDraining,
+            isBehind: !!conn._wtBehind,
             closed: !!conn._closed,
             writeQueueBytes: conn.writeQueueBytes,
           },
@@ -1272,19 +1274,19 @@ server.listening().then(() => {
 server.on('connection', (conn) => {
   log('web.js connected');
   attachedConnections.add(conn);
-  // Issue #15: reset backpressure state on (re)connect. See broadcastPtyOut.
-  conn._wtDraining = false;
-  conn._wtDrainingSince = 0;
-  conn._wtDroppedBytes = 0;
-  conn._wtDroppedFrames = 0;
+  // Issue #15 (revisited): we no longer drop PTY_OUT frames at the 64 KB
+  // socket highWaterMark; only the 50 MB hard cap in lib/ipc.js protects
+  // against genuine runaway slow consumers. The _wtBehind flag here is
+  // purely diagnostic — the 'drain' event logs how long the conn was
+  // briefly behind so latency regressions remain observable in logs.
+  conn._wtBehind = false;
+  conn._wtBehindSince = 0;
   conn.on('drain', () => {
-    if (!conn._wtDraining) return;
-    const ms = Date.now() - (conn._wtDrainingSince || Date.now());
-    log(`conn drained — PTY_OUT backpressure cleared after ${ms}ms (dropped ${conn._wtDroppedFrames || 0} frames / ${conn._wtDroppedBytes || 0} bytes)`);
-    conn._wtDraining = false;
-    conn._wtDrainingSince = 0;
-    conn._wtDroppedBytes = 0;
-    conn._wtDroppedFrames = 0;
+    if (!conn._wtBehind) return;
+    const ms = Date.now() - (conn._wtBehindSince || Date.now());
+    log(`conn drained — PTY_OUT caught up after ${ms}ms behind`);
+    conn._wtBehind = false;
+    conn._wtBehindSince = 0;
   });
   conn.on('overflow', (err) => {
     log('conn overflow — IPC queue limit exceeded, destroying connection:', err.message);
