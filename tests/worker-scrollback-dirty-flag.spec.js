@@ -48,6 +48,7 @@ function spawnWorker(pipePath, dataDir, extraEnv = {}) {
       WT_WORKER_PIPE: pipePath,
       WT_WORKER_DATA_DIR: dataDir,
       WT_WORKER_QUIET: '1',
+      WT_PERSIST_SCROLLBACK: '1',
       WT_WORKER_NO_DEFAULT: '1',
       ...extraEnv,
     },
