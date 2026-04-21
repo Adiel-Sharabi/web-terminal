@@ -661,6 +661,10 @@
         }
         // Second fit after fonts load and scrollback renders (mobile especially)
         if (isMobile) setTimeout(doResize, 1000);
+        // Give scrollback replay ~700ms to land, then flick PTY rows so
+        // Claude/ink re-measures and redraws its prompt at the correct row.
+        // Prevents stuck prompt-position after refresh / reconnect.
+        setTimeout(() => nudgeRedraw(ws), 700);
       };
 
       ws.onmessage = e => {
@@ -897,6 +901,9 @@
         stopCacheHeartbeat(id);
         ws.send(JSON.stringify({ mode: 'active', browserId }));
         ws.send(JSON.stringify({ resize: { cols: term.cols, rows: term.rows } }));
+        // Replay left Claude's cursor state stale — flick rows so SIGWINCH
+        // forces a re-measure and redraw at the correct row.
+        setTimeout(() => nudgeRedraw(ws), 150);
         // Rewire to write to terminal
         ws.onmessage = (e) => {
           if (typeof e.data === 'string') {
@@ -1220,6 +1227,25 @@
       _resizeTimer = setTimeout(doResize, 150);
     }
     window.addEventListener('resize', debouncedResize);
+
+    // After a fresh WS connect / session switch, Claude's ink renderer
+    // holds whatever cols/rows it last measured — NOT our freshly-attached
+    // dimensions. Same-dimension resize messages are no-ops on the PTY side,
+    // so we have to flick rows by 1 to deliver a real SIGWINCH. Claude then
+    // re-measures and redraws its prompt at the correct position. Called
+    // from ws.onopen (fresh connect) and switchSession's cached path after
+    // scrollback replay has settled.
+    function nudgeRedraw(sock) {
+      if (!sock || sock.readyState !== WebSocket.OPEN) return;
+      const cols = term.cols, rows = term.rows;
+      if (rows <= 2) return;
+      try { term.scrollToBottom(); autoScroll = true; scrollBtn.style.display = 'none'; } catch {}
+      try { sock.send(JSON.stringify({ resize: { cols, rows: rows - 1 } })); } catch {}
+      setTimeout(() => {
+        if (sock.readyState !== WebSocket.OPEN) return;
+        try { sock.send(JSON.stringify({ resize: { cols, rows } })); } catch {}
+      }, 80);
+    }
 
     // Mobile: keep toolbar pinned when virtual keyboard scrolls the viewport
     if (isMobile && window.visualViewport) {

@@ -57,6 +57,9 @@ function spawnWorker(pipePath, dataDir, extraEnv = {}) {
       WT_WORKER_DATA_DIR: dataDir,
       WT_WORKER_QUIET: '1',
       WT_WORKER_NO_DEFAULT: '1',
+      // The persistence round-trip test below requires scrollback writes to
+      // actually hit disk; commit 7bc229a made that opt-in via this env var.
+      WT_PERSIST_SCROLLBACK: '1',
       ...extraEnv,
     },
     stdio: ['ignore', 'pipe', 'pipe'],
