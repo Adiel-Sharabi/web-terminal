@@ -328,7 +328,27 @@ function saveSessionConfigs() {
   catch (e) { log('failed to save sessions.json:', e.message); }
 }
 
+// Persist scrollback to disk only when explicitly enabled in config. Off by
+// default: scrollback captures everything typed into shells (including
+// secrets, env dumps, SSH key paste, aws sts output, git config contents
+// etc.) and plaintext-on-disk is a weak security posture. When disabled:
+// - save/saveAll are no-ops
+// - load returns []
+// - delete is a no-op (nothing to clean)
+// Existing scrollback files are left on disk — users can `rm -rf scrollback/`
+// to clean them up after flipping the switch.
+function _scrollbackPersistEnabled() {
+  // Env var takes precedence (tests + ops override). Default: off.
+  if (process.env.WT_PERSIST_SCROLLBACK === '1') return true;
+  if (process.env.WT_PERSIST_SCROLLBACK === '0') return false;
+  return liveConfig('persistScrollback', false) === true;
+}
+
 function saveScrollback(id, session, sync) {
+  if (!_scrollbackPersistEnabled()) {
+    if (session) session.dirty = false;
+    return;
+  }
   try {
     const file = path.join(SCROLLBACK_DIR, id + '.json');
     // Issue #12: serialize the concatenated scrollback as a single-element
@@ -348,6 +368,7 @@ function saveScrollback(id, session, sync) {
 }
 
 function loadScrollback(id) {
+  if (!_scrollbackPersistEnabled()) return [];
   try {
     const file = path.join(SCROLLBACK_DIR, id + '.json');
     if (!fs.existsSync(file)) return [];
@@ -377,6 +398,7 @@ function loadScrollback(id) {
 }
 
 function deleteScrollback(id) {
+  if (!_scrollbackPersistEnabled()) return;
   try {
     const file = path.join(SCROLLBACK_DIR, id + '.json');
     if (fs.existsSync(file)) fs.unlinkSync(file);
@@ -393,6 +415,7 @@ function deleteScrollback(id) {
 // correctness on restart, because saveAllScrollbackSync in process.on('exit')
 // needs to be able to write everything if a sync flush was somehow missed.
 async function saveAllScrollback(sync, force) {
+  if (!_scrollbackPersistEnabled()) return;
   const _t0 = _LATENCY_DEBUG ? performance.now() : 0;
   // Snapshot entries so concurrent session mutation during await points
   // doesn't trip the iterator. A session deleted mid-loop will still get
@@ -428,6 +451,7 @@ async function saveAllScrollback(sync, force) {
 // Always saves every session (force=true semantics) — we can't risk losing
 // scrollback on final exit.
 function saveAllScrollbackSync() {
+  if (!_scrollbackPersistEnabled()) return;
   for (const [id, session] of sessions) saveScrollback(id, session, true);
 }
 
