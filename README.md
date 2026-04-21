@@ -56,6 +56,7 @@ Web Terminal solves all of this, running as a single `node monitor.js` on each h
 - **Claude sessions browser** — scan, resume, and transfer Claude Code conversations across servers
 - **Session names** — auto-extracted from Claude conversation titles, synced via `/rename` on sidebar rename
 - **Clipboard image paste** — Alt+V to paste images directly into Claude Code
+- **Drag-and-drop images** — drop an image file on the terminal to upload it (same path as Alt+V)
 
 ### Mobile & PWA
 - **Progressive Web App** — install as standalone app; name reflects server name
