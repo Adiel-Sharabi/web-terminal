@@ -1611,23 +1611,35 @@
 
     // --- Auto-scroll ---
     function isAtBottom() { const buf = term.buffer.active; return buf.viewportY >= buf.baseY; }
-    // Drive autoScroll purely from term.onScroll so it reflects the actual
-    // viewport position in both directions: scrolled up → autoScroll off,
-    // back at bottom → autoScroll on. The previous wheel/touchmove handlers
-    // unconditionally set autoScroll=false on every touch event, so even a
-    // tap to focus on mobile disabled auto-scroll, and since Claude's
-    // in-place CSI prompt redraws don't emit line feeds, nothing re-armed
-    // it — next keystroke landed below the visible viewport.
+    // autoScroll flips only on USER-driven scroll gestures. Programmatic
+    // scrolls (from xterm's own rendering during heavy streaming — e.g.
+    // Claude's "thinking" spinner) must NOT re-enable autoScroll just
+    // because the viewport transiently touches the bottom. Prior to this
+    // guard, scrolling up while Claude streamed output would snap you
+    // back to the bottom on the next frame.
+    let _userScrollGestureUntil = 0;
+    function markUserScrollGesture() {
+      _userScrollGestureUntil = Date.now() + 250;
+    }
+    const _scrollGestureTarget = document.getElementById('terminal');
+    ['wheel', 'touchstart', 'touchmove'].forEach(ev => {
+      _scrollGestureTarget.addEventListener(ev, markUserScrollGesture, { passive: true, capture: true });
+    });
     term.onLineFeed(() => {
       if (autoScroll) term.scrollToBottom();
       scrollBtn.style.display = isAtBottom() ? 'none' : 'block';
     });
     term.onScroll(() => {
       const atBottom = isAtBottom();
-      autoScroll = atBottom;
+      // Only reflect the view state into autoScroll during a live user
+      // gesture. A programmatic scroll from rendering doesn't change intent.
+      if (Date.now() <= _userScrollGestureUntil) autoScroll = atBottom;
       scrollBtn.style.display = atBottom ? 'none' : 'block';
     });
     function scrollToBottom() { term.scrollToBottom(); autoScroll = true; scrollBtn.style.display = 'none'; }
+    // Test hooks — inspect/force autoScroll from outside (test spec uses these).
+    window.__readAutoScroll = () => autoScroll;
+    window.__setAutoScroll = (v) => { autoScroll = !!v; };
 
     // --- Sidebar ---
     const sidebarPinned = (() => {
