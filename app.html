@@ -1142,8 +1142,13 @@
       if (_mobileWordTimer) { clearTimeout(_mobileWordTimer); _mobileWordTimer = null; }
     }
     function _mobileIsWordChar(c) {
-      // Letters, digits, apostrophe (contractions) — what autocorrect operates on
-      return /^[A-Za-z0-9']$/.test(c);
+      // Letters, digits, apostrophe (contractions), AND the trailing
+      // punctuation that Android keyboards include in the compositionend
+      // chunk. Issue #26: without '.' and ',' in this set, typing "hello."
+      // resets the word buffer the instant the dot arrives, so the
+      // immediately-following compositionend chunk "hello." looks fresh
+      // and gets duplicated ("hello.hello.").
+      return /^[A-Za-z0-9'.,!?;:]$/.test(c);
     }
     function _mobileHandleChunk(chunk, now) {
       // Only consider a chunk a candidate for dedup if a word is in progress
@@ -1174,6 +1179,15 @@
       _mobileResetWord();
       return chunk;
     }
+
+    // Expose the mobile-dedup helpers for unit-level testing (issue #26).
+    window.__wtMobileDedup = {
+      isWordChar: _mobileIsWordChar,
+      handleChunk: _mobileHandleChunk,
+      setWord: (w) => { _mobileWord = w; _mobileWordTime = Date.now(); },
+      reset: _mobileResetWord,
+      getWord: () => _mobileWord,
+    };
 
     term.onData(data => {
       if (isMobile) {
