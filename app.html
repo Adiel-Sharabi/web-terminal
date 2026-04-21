@@ -1053,6 +1053,14 @@
     // Input coalescing: buffer rapid keystrokes and send as a single WS message
     let _inputBuf = '', _inputTimer = null;
     function sendInput(data) {
+      // User is typing — they want to see the result. Any prior touch-scroll
+      // that disabled autoScroll must be re-armed now, otherwise Claude's
+      // in-place CSI prompt redraws happen below the current viewport and
+      // the user sees their chars "land somewhere" off-screen. Scroll to
+      // bottom synchronously so the first echoed char is visible.
+      autoScroll = true;
+      try { term.scrollToBottom(); } catch {}
+      scrollBtn.style.display = 'none';
       _inputBuf += data;
       if (!_inputTimer) {
         _inputTimer = setTimeout(() => {
@@ -1470,18 +1478,20 @@
 
     // --- Auto-scroll ---
     function isAtBottom() { const buf = term.buffer.active; return buf.viewportY >= buf.baseY; }
-    // Detect user-initiated scroll — disable auto-scroll when user scrolls up
-    const termEl2 = document.getElementById('terminal');
-    termEl2.addEventListener('wheel', () => { autoScroll = false; }, { passive: true });
-    termEl2.addEventListener('touchmove', () => { autoScroll = false; }, { passive: true });
+    // Drive autoScroll purely from term.onScroll so it reflects the actual
+    // viewport position in both directions: scrolled up → autoScroll off,
+    // back at bottom → autoScroll on. The previous wheel/touchmove handlers
+    // unconditionally set autoScroll=false on every touch event, so even a
+    // tap to focus on mobile disabled auto-scroll, and since Claude's
+    // in-place CSI prompt redraws don't emit line feeds, nothing re-armed
+    // it — next keystroke landed below the visible viewport.
     term.onLineFeed(() => {
       if (autoScroll) term.scrollToBottom();
       scrollBtn.style.display = isAtBottom() ? 'none' : 'block';
     });
-    // Re-enable auto-scroll when user scrolls back to bottom
     term.onScroll(() => {
       const atBottom = isAtBottom();
-      if (atBottom) autoScroll = true;
+      autoScroll = atBottom;
       scrollBtn.style.display = atBottom ? 'none' : 'block';
     });
     function scrollToBottom() { term.scrollToBottom(); autoScroll = true; scrollBtn.style.display = 'none'; }
