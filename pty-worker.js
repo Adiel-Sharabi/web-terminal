@@ -848,13 +848,18 @@ const rpcHandlers = {
       try { session.term.write(`/rename ${safeName}\n`); } catch {}
     }
     if (session.autoCommand && /\bclaude\b/i.test(session.autoCommand)) {
-      const claudeId = session.claudeSessionId
-        || extractClaudeSessionIdFromCmd(session.autoCommand)
-        || detectClaudeSessionIdFromDir(session.cwd);
-      if (claudeId) {
-        session.claudeSessionId = claudeId;
+      // Claude Code forks a resumed conversation into a NEW jsonl (new UUID) on disk.
+      // Save the rename under BOTH the --resume id and the newest-on-disk id so the
+      // "old sessions" list reflects the rename on whichever entry is shown.
+      const fromCmd = session.claudeSessionId || extractClaudeSessionIdFromCmd(session.autoCommand);
+      const fromDir = detectClaudeSessionIdFromDir(session.cwd);
+      const claudeIds = new Set([fromCmd, fromDir].filter(Boolean));
+      if (claudeIds.size > 0) {
+        // Track the newest-on-disk id as the canonical one for subsequent saves/exits.
+        if (fromDir) session.claudeSessionId = fromDir;
+        else if (fromCmd) session.claudeSessionId = fromCmd;
         const names = loadClaudeSessionNames();
-        names[claudeId] = newName;
+        for (const cid of claudeIds) names[cid] = newName;
         saveClaudeSessionNames(names);
       }
     }
