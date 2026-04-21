@@ -144,7 +144,8 @@
     #hostLabel { color: #00d4aa; font-size: 11px; font-weight: 500; margin-left: auto; }
 
     /* --- Terminal --- */
-    #terminal { height: 100%; flex: 1; min-width: 0; }
+    #terminal { height: 100%; flex: 1; min-width: 0; position: relative; }
+    #terminal.drag-over { outline: 2px dashed #00d4aa; outline-offset: -6px; }
     #noSession {
       display: none; flex: 1; justify-content: center; align-items: center;
       color: #555; font: 16px 'Segoe UI', sans-serif; text-align: center;
@@ -1374,6 +1375,63 @@
       document.body.appendChild(input);
       input.click();
     }
+
+    // Issue #24: Drag & drop images onto the terminal (same backend as Alt+V).
+    async function uploadImageBlob(blob, mime) {
+      try {
+        const apiBase = sessionServerUrl ? `/cluster/${encodeURIComponent(sessionServerUrl)}/api` : '/api';
+        const res = await fetch(`${apiBase}/clipboard-image`, {
+          method: 'POST', headers: { 'Content-Type': mime || blob.type || 'application/octet-stream' }, body: blob,
+        });
+        const result = await res.json();
+        if (result.ok && result.clipboard) {
+          if (ws && ws.readyState === WebSocket.OPEN) ws.send('\x1bv');
+          return true;
+        } else if (result.ok) {
+          if (ws && ws.readyState === WebSocket.OPEN) ws.send(result.path);
+          return true;
+        }
+      } catch (e) { console.warn('Image upload failed:', e); }
+      return false;
+    }
+
+    (function initTerminalDropZone() {
+      const dropZone = document.getElementById('terminal');
+      if (!dropZone) return;
+
+      function hasImage(dt) {
+        if (!dt) return false;
+        if (dt.files) for (const f of dt.files) if (f.type && f.type.startsWith('image/')) return true;
+        if (dt.items) for (const it of dt.items) if (it.kind === 'file' && it.type && it.type.startsWith('image/')) return true;
+        return false;
+      }
+
+      dropZone.addEventListener('dragover', (e) => {
+        if (!hasImage(e.dataTransfer)) return;
+        e.preventDefault();
+        e.dataTransfer.dropEffect = 'copy';
+        dropZone.classList.add('drag-over');
+      });
+      dropZone.addEventListener('dragleave', (e) => {
+        if (e.target === dropZone) dropZone.classList.remove('drag-over');
+      });
+      dropZone.addEventListener('drop', async (e) => {
+        if (!hasImage(e.dataTransfer)) return;
+        e.preventDefault();
+        dropZone.classList.remove('drag-over');
+        // Only upload the first image — matches paste-clipboard behavior.
+        let file = null;
+        if (e.dataTransfer.files) {
+          for (const f of e.dataTransfer.files) { if (f.type && f.type.startsWith('image/')) { file = f; break; } }
+        }
+        if (!file && e.dataTransfer.items) {
+          for (const it of e.dataTransfer.items) {
+            if (it.kind === 'file' && it.type && it.type.startsWith('image/')) { file = it.getAsFile(); if (file) break; }
+          }
+        }
+        if (file) await uploadImageBlob(file, file.type);
+      });
+    })();
 
     // --- Mobile text selection mode ---
     let selectMode = false;
