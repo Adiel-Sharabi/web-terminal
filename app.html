@@ -655,7 +655,7 @@
         status.textContent = 'connected';
         status.className = 'connected';
         setTimeout(() => { status.style.opacity = '0'; }, 3000);
-        document.getElementById('reconnectOverlay').classList.remove('show');
+        hideReconnectOverlay();
         fitAddon.fit(); // re-fit now that layout is settled
         // Send mode declaration if keepSessionsOpen is enabled
         if (keepSessionsOpen) {
@@ -746,7 +746,7 @@
         status.textContent = `disconnected — reconnecting in ${Math.round(delay/1000)}s...`;
         status.className = 'disconnected';
         status.style.opacity = '1';
-        document.getElementById('reconnectOverlay').classList.add('show');
+        scheduleReconnectOverlay();
         // After 3 failed attempts, check if we're still authenticated
         if (reconnectAttempts >= 3 && reconnectAttempts % 3 === 0) {
           fetch('/api/hostname').then(r => {
@@ -823,6 +823,26 @@
       sessionCache.delete(id);
     }
 
+    // Issue #25: the reconnect modal was shown immediately on every disconnect,
+    // which made brief blips (tab visibility, throttled timers, network hiccups)
+    // surface as a full-screen "Reconnecting..." flash. Defer the modal until
+    // the disconnect actually persists for a few seconds — the small status
+    // pill already conveys the transient state, and most reconnects finish
+    // before the delay elapses.
+    const RECONNECT_OVERLAY_DELAY_MS = 3500;
+    let _reconnectOverlayDelayTimer = null;
+    function scheduleReconnectOverlay() {
+      if (_reconnectOverlayDelayTimer) return;
+      _reconnectOverlayDelayTimer = setTimeout(() => {
+        _reconnectOverlayDelayTimer = null;
+        scheduleReconnectOverlay();
+      }, RECONNECT_OVERLAY_DELAY_MS);
+    }
+    function hideReconnectOverlay() {
+      if (_reconnectOverlayDelayTimer) { clearTimeout(_reconnectOverlayDelayTimer); _reconnectOverlayDelayTimer = null; }
+      document.getElementById('reconnectOverlay').classList.remove('show');
+    }
+
     function cancelReconnect() {
       stopHeartbeat();
       if (reconnectTimer) { clearTimeout(reconnectTimer); reconnectTimer = null; }
@@ -830,7 +850,7 @@
       ws = null;
       sessionId = null;
       sessionServerUrl = null;
-      document.getElementById('reconnectOverlay').classList.remove('show');
+      hideReconnectOverlay();
       document.getElementById('terminal').style.display = 'none';
       document.getElementById('noSession').style.display = 'flex';
       document.getElementById('sessionName').textContent = '(no session)';
@@ -842,7 +862,7 @@
       if (id === sessionId && serverUrl === sessionServerUrl) return;
       switching = true;
       if (reconnectTimer) { clearTimeout(reconnectTimer); reconnectTimer = null; }
-      document.getElementById('reconnectOverlay').classList.remove('show');
+      hideReconnectOverlay();
 
       // Demote current active session to background (keep WS open) if keepSessionsOpen
       if (keepSessionsOpen && sessionId && ws && ws.readyState === WebSocket.OPEN) {
@@ -958,7 +978,7 @@
           status.textContent = `disconnected — reconnecting in ${Math.round(delay/1000)}s...`;
           status.className = 'disconnected';
           status.style.opacity = '1';
-          document.getElementById('reconnectOverlay').classList.add('show');
+          scheduleReconnectOverlay();
           reconnectTimer = setTimeout(connect, delay);
         };
         ws.onerror = () => ws.close();
@@ -967,7 +987,7 @@
         status.textContent = 'connected';
         status.className = 'connected';
         setTimeout(() => { status.style.opacity = '0'; }, 3000);
-        document.getElementById('reconnectOverlay').classList.remove('show');
+        hideReconnectOverlay();
         // Issue #7: On mobile, the sidebar close transition (~200ms) has not
         // completed when doResize() ran above, so term.cols is stuck at the
         // pre-transition narrow width. Mirror the fresh-connect path's
