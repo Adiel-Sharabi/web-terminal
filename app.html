@@ -549,7 +549,9 @@
 
     // --- State ---
     let sessionId = null;
-    let sessionServerUrl = null; // null = local, string = remote server URL
+    // sessionServerUrl + clusterServers are declared with `var` so they attach
+    // to `window` — simplifies test hooks without changing runtime semantics.
+    var sessionServerUrl = null; // null = local, string = remote server URL
     let hostname = '';
     let sessionTitle = 'Web Terminal';
     let ws = null;
@@ -560,7 +562,7 @@
     let folderHistory = [];
     let defaultCwd = 'C:\\dev';
     let defaultCommand = '';
-    let clusterServers = []; // cached from last fetch
+    var clusterServers = []; // cached from last fetch
     let keepSessionsOpen = true;
     const browserId = sessionStorage.getItem('wt_browserId') || (() => {
       const id = crypto.randomUUID();
@@ -1835,10 +1837,11 @@
       const form = document.getElementById('newSessionForm');
       form.classList.toggle('show');
       if (form.classList.contains('show')) {
-        loadFolderHistory();
         document.getElementById('newCwd').value = defaultCwd;
         document.getElementById('newCmd').value = defaultCommand;
-        // Populate server dropdown
+        // Issue #23: populate & pre-select the server dropdown BEFORE fetching
+        // the folder list — otherwise loadFolderHistory reads the stale value
+        // and shows folders for the wrong server.
         const sel = document.getElementById('newServer');
         sel.innerHTML = '<option value="">Local</option>';
         for (const s of clusterServers) {
@@ -1846,6 +1849,10 @@
             sel.innerHTML += `<option value="${esc(s.url)}">${esc(s.name)}</option>`;
           }
         }
+        // Default to the server of the currently-active session so folder
+        // suggestions match the user's context.
+        sel.value = sessionServerUrl || '';
+        loadFolderHistory();
         document.getElementById('newName').focus();
       }
     }
