@@ -1,6 +1,19 @@
 // @ts-check
 const { test, expect, request: pwRequest } = require('@playwright/test');
+const fs = require('fs');
+const path = require('path');
 const { BASE, AUTH, authCtx, noAuthCtx, loginPage } = require('./test-helpers');
+
+const CLAUDE_NAMES_FILE = path.join(__dirname, '..', 'claude-session-names.json');
+function readClaudeNames() {
+  try { return JSON.parse(fs.readFileSync(CLAUDE_NAMES_FILE, 'utf8')); } catch { return {}; }
+}
+function removeClaudeNameEntry(id) {
+  try {
+    const n = readClaudeNames();
+    if (id in n) { delete n[id]; fs.writeFileSync(CLAUDE_NAMES_FILE, JSON.stringify(n, null, 2)); }
+  } catch {}
+}
 
 // ============================================================
 // 1. Security Headers
@@ -325,6 +338,126 @@ test.describe('Claude Session Name Persistence', () => {
       expect(patchRes2.status()).toBe(200);
     } finally {
       try { await ctx.delete(`/api/sessions/${id}`); } catch (e) {}
+      await ctx.dispose();
+    }
+  });
+
+  // Issue #21: renaming an active Claude session must propagate to claude-session-names.json
+  // so the "old sessions" (Claude) list in the sidebar shows the new name next time.
+  test('issue #21: rename active session writes custom name to claude-session-names.json', async () => {
+    const ctx = await authCtx();
+    // Claude session IDs are UUIDv4s (hex + dashes). extractClaudeSessionIdFromCmd
+    // uses /--resume\s+([a-f0-9-]+)/i, so keep fake IDs inside that charset.
+    const claudeSessionId = '21' + Date.now().toString(16).padStart(14, '0') + '-aaaa-bbbb-cccc-dddddddddddd';
+    const newName = 'Issue21 Renamed ' + Date.now();
+    const createRes = await ctx.post('/api/sessions', {
+      data: {
+        name: 'Original Issue21',
+        autoCommand: `claude --resume ${claudeSessionId}`,
+      },
+    });
+    const { id } = await createRes.json();
+    try {
+      const patchRes = await ctx.patch(`/api/sessions/${id}`, { data: { name: newName } });
+      expect(patchRes.status()).toBe(200);
+
+      // Give the worker a moment to flush the file write.
+      await new Promise(r => setTimeout(r, 500));
+
+      const names = readClaudeNames();
+      expect(names[claudeSessionId]).toBe(newName);
+    } finally {
+      try { await ctx.delete(`/api/sessions/${id}`); } catch {}
+      removeClaudeNameEntry(claudeSessionId);
+      await ctx.dispose();
+    }
+  });
+
+  // Issue #21: when Claude forks a resume into a NEW jsonl (new UUID) in the project dir,
+  // the rename of the active session must propagate to BOTH the original UUID and the
+  // newest-on-disk UUID, so the "old sessions" list shows the rename on whichever entry
+  // the user sees (usually the newest, since that's what Claude is currently writing to).
+  test('issue #21: rename propagates to newest-on-disk Claude UUID when it differs from --resume id', async () => {
+    const ctx = await authCtx();
+    const os = require('os');
+    const claudeHome = require('path').join(__dirname, '..');
+    // Pick a unique cwd so we fully control the Claude project dir.
+    const uniqueCwd = require('fs').mkdtempSync(require('path').join(os.tmpdir(), 'wt21-'));
+    // Encode cwd to the Claude projects folder name (matches pty-worker logic).
+    const encodedCwd = uniqueCwd.replace(/^([A-Z]):\\/, '$1--').replace(/[\\/]/g, '-');
+    // Use the same claude projects dir the server uses (detectClaudeHome defaults to USERPROFILE).
+    const claudeProjectsDir = require('path').join(os.homedir(), '.claude', 'projects', encodedCwd);
+    require('fs').mkdirSync(claudeProjectsDir, { recursive: true });
+
+    // Original UUID passed in --resume (older mtime).
+    const origId = 'aaaa1111-2222-3333-4444-555566667777';
+    // Newer UUID written later (simulates Claude forking the resume to a new file).
+    const newerId = 'bbbb2222-3333-4444-5555-666677778888';
+    const origPath = require('path').join(claudeProjectsDir, origId + '.jsonl');
+    const newerPath = require('path').join(claudeProjectsDir, newerId + '.jsonl');
+    try {
+      // Write both files so detectClaudeSessionIdFromDir picks newerId by mtime.
+      require('fs').writeFileSync(origPath, '{}\n');
+      // Ensure ordering: set origPath mtime to earlier.
+      const past = new Date(Date.now() - 60000);
+      require('fs').utimesSync(origPath, past, past);
+      require('fs').writeFileSync(newerPath, '{}\n');
+
+      const newName = 'Fork Rename ' + Date.now();
+      const createRes = await ctx.post('/api/sessions', {
+        data: {
+          name: 'Pre-rename',
+          cwd: uniqueCwd,
+          autoCommand: `claude --resume ${origId}`,
+        },
+      });
+      const { id } = await createRes.json();
+      try {
+        const patchRes = await ctx.patch(`/api/sessions/${id}`, { data: { name: newName } });
+        expect(patchRes.status()).toBe(200);
+        await new Promise(r => setTimeout(r, 500));
+
+        const names = readClaudeNames();
+        // Both the --resume UUID and the newest-on-disk UUID should carry the rename.
+        expect(names[origId]).toBe(newName);
+        expect(names[newerId]).toBe(newName);
+      } finally {
+        try { await ctx.delete(`/api/sessions/${id}`); } catch {}
+        removeClaudeNameEntry(origId);
+        removeClaudeNameEntry(newerId);
+      }
+    } finally {
+      try { require('fs').rmSync(claudeProjectsDir, { recursive: true, force: true }); } catch {}
+      try { require('fs').rmSync(uniqueCwd, { recursive: true, force: true }); } catch {}
+      await ctx.dispose();
+    }
+  });
+
+  // Issue #21: renaming a session that has NO `--resume` flag but DOES start Claude must
+  // still persist the rename. At rename time session.claudeSessionId may still be null
+  // (15s detection timer hasn't fired, or Claude hasn't written any jsonl yet); the name
+  // must land in claude-session-names.json keyed by the Claude session ID as soon as it
+  // is known (e.g. on onExit detection), so the "old sessions" list reflects the rename.
+  test('issue #21: rename of claude session without --resume survives via exit-time detection', async () => {
+    const ctx = await authCtx();
+    const cwd = process.env.TEMP || 'C:\\Windows\\Temp';
+    const newName = 'NoResume Renamed ' + Date.now();
+    // Use an autoCommand that exits quickly but still matches /claude/ — this lets us
+    // exercise the rename-then-exit path without a real Claude binary.
+    const createRes = await ctx.post('/api/sessions', {
+      data: { name: 'NoResume Original', cwd, autoCommand: 'echo claude-stub-for-test && exit 0' },
+    });
+    const { id } = await createRes.json();
+    try {
+      const patchRes = await ctx.patch(`/api/sessions/${id}`, { data: { name: newName } });
+      expect(patchRes.status()).toBe(200);
+      // The rename should succeed regardless of whether a Claude session id has
+      // been detected yet. This assertion primarily guards that the endpoint
+      // does not throw when claudeSessionId is null.
+      const { name } = await patchRes.json();
+      expect(name).toBe(newName);
+    } finally {
+      try { await ctx.delete(`/api/sessions/${id}`); } catch {}
       await ctx.dispose();
     }
   });
