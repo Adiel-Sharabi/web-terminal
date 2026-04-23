@@ -559,7 +559,7 @@
     // to `window` — simplifies test hooks without changing runtime semantics.
     var sessionServerUrl = null; // null = local, string = remote server URL
     let hostname = '';
-    let sessionTitle = 'Web Terminal';
+    let sessionTitle = `Web Terminal v${CLIENT_VERSION}`;
     let ws = null;
     let switching = false;
     let reconnectTimer = null;
@@ -1037,7 +1037,7 @@
         if (s) {
           const serverLabel = sessionServerUrl ? ` [${getServerName(sessionServerUrl)}]` : '';
           document.getElementById('sessionName').textContent = s.name + serverLabel;
-          sessionTitle = `${s.name}${hostname ? ' — ' + hostname : ''}`;
+          sessionTitle = `${s.name}${hostname ? ' — ' + hostname : ''} v${CLIENT_VERSION}`;
           document.title = sessionTitle;
           // viewer count removed (exclusive mode — always 1)
         }
@@ -1895,7 +1895,7 @@
             });
             if (isCurrent) {
               document.getElementById('sessionName').textContent = name;
-              sessionTitle = `${name}${hostname ? ' — ' + hostname : ''}`;
+              sessionTitle = `${name}${hostname ? ' — ' + hostname : ''} v${CLIENT_VERSION}`;
               document.title = sessionTitle;
             }
             loadSidebar();
@@ -2267,7 +2267,7 @@
         body: JSON.stringify({ name })
       });
       el.textContent = name;
-      sessionTitle = `${name}${hostname ? ' — ' + hostname : ''}`;
+      sessionTitle = `${name}${hostname ? ' — ' + hostname : ''} v${CLIENT_VERSION}`;
       document.title = sessionTitle;
       loadSidebar();
     }
