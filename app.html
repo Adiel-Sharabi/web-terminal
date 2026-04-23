@@ -248,7 +248,16 @@
       #touchKeys button { padding: 4px 8px; min-width: 32px; font-size: 11px; }
       #status { top: 70px; }
       #main { overflow-x: hidden; }
-      #sidebar.open { width: var(--sb-width, 220px); }
+      /* On mobile the sidebar overlays the terminal as a full-width drawer
+         instead of stealing layout space. Squishing the terminal to a 200-px
+         column was unusable, and resizing it on every open/close caused the
+         PTY to thrash. Now: terminal stays at full size, sidebar floats
+         above it. */
+      #sidebar {
+        position: fixed; top: 32px; left: 0; bottom: 0;
+        z-index: 50; flex-shrink: 0;
+      }
+      #sidebar.open { width: 100vw; }
       /* Issue #22: new-session form was cramped and Cancel button overflowed. */
       #sidebar.open #sidebarResizer { display: none; }
       #newSessionForm { padding: 12px 12px 14px; }
