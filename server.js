@@ -9,7 +9,7 @@ const { performance } = require('perf_hooks');
 const workerClientLib = require('./lib/worker-client');
 const { mintDirectToken, verifyDirectToken } = require('./lib/cluster-token');
 
-const SERVER_VERSION = '1.12.5';
+const SERVER_VERSION = '1.12.6';
 
 // --- Optional latency instrumentation (opt-in via WT_LATENCY_DEBUG=1) -----
 // Event-loop lag monitor: interval is 10ms; anything ≥ 50ms slip is a stall.
@@ -695,7 +695,11 @@ app.get('/manifest.json', (req, res) => {
     icons: [{ src: '/icon.svg', sizes: 'any', type: 'image/svg+xml' }]
   });
 });
-app.get('/sw.js', (req, res) => { res.set('Content-Type', 'application/javascript'); res.sendFile(path.join(__dirname, 'sw.js')); });
+app.get('/sw.js', (req, res) => {
+  res.set('Content-Type', 'application/javascript');
+  res.set('Cache-Control', 'no-cache, no-store, must-revalidate');
+  res.sendFile(path.join(__dirname, 'sw.js'));
+});
 app.get('/icon.svg', (req, res) => res.sendFile(path.join(__dirname, 'icon.svg')));
 
 // --- Security headers ---
@@ -2096,19 +2100,35 @@ app.post('/api/restart', (req, res) => {
 });
 
 // --- Landing page ---
-app.get('/', (req, res) => {
-  res.sendFile(path.join(__dirname, 'app.html'));
-});
+// Serve app.html with cache-busting headers AND a server-version stamp so the
+// client can tell if it's running stale JS. Without these, browsers used
+// heuristic freshness (~10% of file age) and held an old app.html for minutes
+// even after a deploy + click-the-refresh-button.
+function _readAppHtml() {
+  let html;
+  try { html = fs.readFileSync(path.join(__dirname, 'app.html'), 'utf8'); }
+  catch { return null; }
+  // Replace the CLIENT_VERSION placeholder with the live server version so the
+  // toolbar shows the actual deployed app revision, not a hardcoded constant.
+  return html.replace(
+    /const CLIENT_VERSION = '[^']*';/,
+    `const CLIENT_VERSION = '${SERVER_VERSION}';`
+  );
+}
+function _serveApp(req, res) {
+  const html = _readAppHtml();
+  if (!html) return res.status(500).send('app.html unreadable');
+  res.set('Cache-Control', 'no-cache, no-store, must-revalidate');
+  res.set('Pragma', 'no-cache');
+  res.set('Expires', '0');
+  res.set('Content-Type', 'text/html; charset=utf-8');
+  res.send(html);
+}
+app.get('/', _serveApp);
+app.get('/app', _serveApp);
+app.get('/app/:id', _serveApp);
 app.get('/lobby', (req, res) => {
   res.sendFile(path.join(__dirname, 'lobby.html'));
-});
-
-// --- Unified app page (A/B test) ---
-app.get('/app', (req, res) => {
-  res.sendFile(path.join(__dirname, 'app.html'));
-});
-app.get('/app/:id', (req, res) => {
-  res.sendFile(path.join(__dirname, 'app.html'));
 });
 
 // --- Terminal page ---
