@@ -284,7 +284,7 @@
     <!-- Issue #19: PWA has no pull-to-refresh. Expose a button so installed
          PWA users can force-reload the page (clears xterm state and picks up
          any deployed app.html update). Also useful on desktop for the same. -->
-    <button class="tb-btn" onclick="location.reload()" title="Refresh" style="margin-left:8px;font-size:14px">&#x21BB;</button>
+    <button class="tb-btn" onclick="hardRefresh()" title="Refresh (clears cache)" style="margin-left:8px;font-size:14px">&#x21BB;</button>
     <button class="tb-btn" onclick="logout()" title="Logout" style="margin-left:8px;font-size:14px">&#x23FB;</button>
   </div>
   <div id="selectBar">
@@ -2532,6 +2532,26 @@
       if ('serviceWorker' in navigator) {
         navigator.serviceWorker.register('/sw.js').catch(() => {});
       }
+    }
+
+    // Hard refresh that purges the SW cache + unregisters the SW so a stale
+    // PWA install picks up the latest app shell on the next page load. The
+    // toolbar refresh button calls this; users were reporting that a normal
+    // reload still showed the old version under PWA.
+    async function hardRefresh() {
+      try {
+        if ('caches' in window) {
+          const keys = await caches.keys();
+          await Promise.all(keys.map(k => caches.delete(k)));
+        }
+      } catch {}
+      try {
+        if ('serviceWorker' in navigator) {
+          const regs = await navigator.serviceWorker.getRegistrations();
+          await Promise.all(regs.map(r => r.unregister()));
+        }
+      } catch {}
+      location.reload();
     }
 
     init();
