@@ -26,6 +26,27 @@ test.describe('Scroll stays up during streamed output', () => {
     expect(result).toBe(false);
   });
 
+  test('nudgeRedraw on WS reconnect does NOT clobber user-scrolled-up state', async ({ page }) => {
+    // Symptom from the field: viewing a remote session through the cluster
+    // proxy, any WS reconnect (network blip, hot reload, cluster proxy
+    // re-establish) used to fire ws.onopen → nudgeRedraw → autoScroll=true,
+    // snapping the view to the bottom while Claude was streaming.
+    const result = await page.evaluate(async () => {
+      const term = window.term;
+      window.__setAutoScroll(false);
+      // Simulate the ws.onopen → nudgeRedraw path by calling nudgeRedraw
+      // directly with a fake "open" socket. The real one calls term.resize +
+      // scrollToBottom; we just need to know whether autoScroll gets stomped.
+      const before = window.__readAutoScroll();
+      const fakeSock = { readyState: 1, send: () => {} }; // 1 = OPEN
+      window.nudgeRedraw && window.nudgeRedraw(fakeSock);
+      await new Promise(r => setTimeout(r, 50));
+      return { before, after: window.__readAutoScroll() };
+    });
+    expect(result.before).toBe(false);
+    expect(result.after).toBe(false);
+  });
+
   test('user wheel followed by scroll-up DOES set autoScroll to false', async ({ page }) => {
     const result = await page.evaluate(async () => {
       // Pretend we're at the bottom.
