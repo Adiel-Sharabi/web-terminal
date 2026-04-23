@@ -1111,6 +1111,7 @@
       // the user sees their chars "land somewhere" off-screen. Scroll to
       // bottom synchronously so the first echoed char is visible.
       autoScroll = true;
+      try { window.__releaseScrollPin && window.__releaseScrollPin(); } catch {}
       try { term.scrollToBottom(); } catch {}
       scrollBtn.style.display = 'none';
       _inputBuf += data;
@@ -1655,7 +1656,44 @@
       if (Date.now() <= _userScrollGestureUntil) autoScroll = atBottom;
       scrollBtn.style.display = atBottom ? 'none' : 'block';
     });
-    function scrollToBottom() { term.scrollToBottom(); autoScroll = true; scrollBtn.style.display = 'none'; }
+
+    // The escape hatch: xterm's renderer directly mutates
+    // .xterm-viewport.scrollTop to keep the cursor visible during streaming
+    // (Claude's spinner / "thinking" dot redraws position the cursor at the
+    // bottom row, and xterm follows). That bypasses every public method we
+    // guard above. So we pin the viewport's scrollTop ourselves: when the
+    // user scrolls up, remember their position, and on every subsequent
+    // *non-user* scroll snap back to it. Only released when the user
+    // deliberately scrolls (or types) all the way back to the bottom.
+    (function pinViewportScroll() {
+      const vp = document.querySelector('#terminal .xterm-viewport');
+      if (!vp) return; // renderer not active yet — fine, fix is best-effort
+      let pinned = -1;          // -1 = not pinned (auto-follow allowed)
+      let restoring = false;    // re-entrancy guard for our own scrollTop set
+      vp.addEventListener('scroll', () => {
+        if (restoring) { restoring = false; return; }
+        const max = vp.scrollHeight - vp.clientHeight;
+        const inGesture = Date.now() <= _userScrollGestureUntil;
+        if (inGesture) {
+          // User-driven scroll. If they reached the bottom, release the pin
+          // (auto-follow resumes). Otherwise, pin at the current position.
+          pinned = (vp.scrollTop >= max - 4) ? -1 : vp.scrollTop;
+        } else if (pinned >= 0 && vp.scrollTop > pinned) {
+          // Programmatic scroll past the user's pinned spot — snap back.
+          restoring = true;
+          vp.scrollTop = pinned;
+        }
+      }, { passive: true });
+      // Re-pin when sendInput / scrollToBottom() explicitly resets autoScroll
+      // to true — those flows already manage user intent and want auto-follow.
+      window.__releaseScrollPin = () => { pinned = -1; };
+    })();
+    function scrollToBottom() {
+      try { window.__releaseScrollPin && window.__releaseScrollPin(); } catch {}
+      term.scrollToBottom();
+      autoScroll = true;
+      scrollBtn.style.display = 'none';
+    }
     // Test hooks — inspect/force autoScroll from outside (test spec uses these).
     window.__readAutoScroll = () => autoScroll;
     window.__setAutoScroll = (v) => { autoScroll = !!v; };
