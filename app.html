@@ -1635,16 +1635,21 @@
     // back to the bottom on the next frame.
     let _userScrollGestureUntil = 0;
     function markUserScrollGesture() {
-      _userScrollGestureUntil = Date.now() + 400;
+      // Long window — xterm's wheel handler is async and momentum scrolls
+      // fire scroll events well after touchend. The previous 400ms was too
+      // tight; 2s reliably covers both desktop wheels and mobile flings.
+      _userScrollGestureUntil = Date.now() + 2000;
     }
-    // Listen on document (capture) so we catch user input regardless of which
-    // descendant element the event lands on (xterm renders into deeply nested
-    // children). mousedown covers scrollbar-drag; keydown covers PageUp/Down,
-    // arrows, Home/End. mousemove is intentionally excluded — it fires
-    // continuously on desktop and would defeat the gate.
     ['wheel', 'touchstart', 'touchmove', 'mousedown', 'keydown'].forEach(ev => {
       document.addEventListener(ev, markUserScrollGesture, { passive: true, capture: true });
     });
+    // Wheel-up / touch-drag are immediate "I want to scroll up" signals —
+    // disable autoScroll synchronously rather than waiting for the resulting
+    // scroll event, since xterm may snap the viewport back to bottom on the
+    // next stream chunk before the scroll event arrives.
+    document.addEventListener('wheel', (e) => {
+      if (e.deltaY < 0) autoScroll = false;
+    }, { capture: true, passive: true });
     term.onLineFeed(() => {
       if (autoScroll) term.scrollToBottom();
       scrollBtn.style.display = isAtBottom() ? 'none' : 'block';
@@ -1667,26 +1672,42 @@
     // deliberately scrolls (or types) all the way back to the bottom.
     (function pinViewportScroll() {
       const vp = document.querySelector('#terminal .xterm-viewport');
-      if (!vp) return; // renderer not active yet — fine, fix is best-effort
+      if (!vp) return;
       let pinned = -1;          // -1 = not pinned (auto-follow allowed)
-      let restoring = false;    // re-entrancy guard for our own scrollTop set
+      let restoring = false;
+      // Scroll-event handler: tracks user intent and snaps back on
+      // programmatic drift. Source of truth for the pin value.
       vp.addEventListener('scroll', () => {
         if (restoring) { restoring = false; return; }
         const max = vp.scrollHeight - vp.clientHeight;
         const inGesture = Date.now() <= _userScrollGestureUntil;
         if (inGesture) {
-          // User-driven scroll. If they reached the bottom, release the pin
-          // (auto-follow resumes). Otherwise, pin at the current position.
           pinned = (vp.scrollTop >= max - 4) ? -1 : vp.scrollTop;
         } else if (pinned >= 0 && vp.scrollTop > pinned) {
-          // Programmatic scroll past the user's pinned spot — snap back.
           restoring = true;
           vp.scrollTop = pinned;
         }
       }, { passive: true });
-      // Re-pin when sendInput / scrollToBottom() explicitly resets autoScroll
-      // to true — those flows already manage user intent and want auto-follow.
+      // RAF enforcement loop. Runs every frame the page is visible. xterm's
+      // renderer may set .xterm-viewport.scrollTop during a paint without
+      // firing a synchronous scroll event (or the event may fire after the
+      // user perceives the snap). This loop guarantees the user's pinned
+      // position is restored within one paint cycle.
+      function enforce() {
+        if (pinned >= 0 && !restoring) {
+          if (vp.scrollTop > pinned) {
+            restoring = true;
+            vp.scrollTop = pinned;
+          }
+        }
+        requestAnimationFrame(enforce);
+      }
+      requestAnimationFrame(enforce);
+      // Explicit user-intent paths (sendInput, scrollToBottom button, session
+      // switch) call this to release the pin and resume auto-follow.
       window.__releaseScrollPin = () => { pinned = -1; };
+      // Diagnostic hook for the field-debug snippet.
+      window.__readScrollPin = () => pinned;
     })();
     function scrollToBottom() {
       try { window.__releaseScrollPin && window.__releaseScrollPin(); } catch {}
