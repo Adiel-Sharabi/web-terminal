@@ -1289,7 +1289,13 @@
       if (!sock || sock.readyState !== WebSocket.OPEN) return;
       const cols = term.cols, rows = term.rows;
       if (rows <= 2) return;
-      try { term.scrollToBottom(); autoScroll = true; scrollBtn.style.display = 'none'; } catch {}
+      // Respect the user's scroll intent: only snap to bottom if they were
+      // already there. Reconnects (network blip / hot-reload / cluster-proxy
+      // re-establish) used to forcibly jump the view down even when the user
+      // was reading earlier output during Claude's "working" stream.
+      try {
+        if (autoScroll) { term.scrollToBottom(); scrollBtn.style.display = 'none'; }
+      } catch {}
       try { sock.send(JSON.stringify({ resize: { cols, rows: rows - 1 } })); } catch {}
       setTimeout(() => {
         if (sock.readyState !== WebSocket.OPEN) return;
@@ -1619,11 +1625,15 @@
     // back to the bottom on the next frame.
     let _userScrollGestureUntil = 0;
     function markUserScrollGesture() {
-      _userScrollGestureUntil = Date.now() + 250;
+      _userScrollGestureUntil = Date.now() + 400;
     }
-    const _scrollGestureTarget = document.getElementById('terminal');
-    ['wheel', 'touchstart', 'touchmove'].forEach(ev => {
-      _scrollGestureTarget.addEventListener(ev, markUserScrollGesture, { passive: true, capture: true });
+    // Listen on document (capture) so we catch user input regardless of which
+    // descendant element the event lands on (xterm renders into deeply nested
+    // children). mousedown covers scrollbar-drag; keydown covers PageUp/Down,
+    // arrows, Home/End. mousemove is intentionally excluded — it fires
+    // continuously on desktop and would defeat the gate.
+    ['wheel', 'touchstart', 'touchmove', 'mousedown', 'keydown'].forEach(ev => {
+      document.addEventListener(ev, markUserScrollGesture, { passive: true, capture: true });
     });
     term.onLineFeed(() => {
       if (autoScroll) term.scrollToBottom();
