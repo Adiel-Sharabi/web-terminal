@@ -589,7 +589,11 @@ function sessionSummary(id, s) {
   };
 }
 
-function createSession(id, cwd, name, autoCommand, savedScrollback, claudeSessionId) {
+// runCommand (optional): the command actually typed at the shell prompt.
+// Defaults to autoCommand. Restore uses this to send `claude --resume <id>`
+// while keeping the user-facing autoCommand (e.g. "claude --continue") intact
+// in sessions.json — so the UI doesn't suddenly show a derived --resume form.
+function createSession(id, cwd, name, autoCommand, savedScrollback, claudeSessionId, runCommand) {
   const sessionEnv = buildSafeEnv();
   sessionEnv.WT_SESSION_ID = id;
   sessionEnv.WT_SESSION_PORT = String(PORT_HINT);
@@ -708,8 +712,11 @@ function createSession(id, cwd, name, autoCommand, savedScrollback, claudeSessio
   // Track write from server.js (force client count reset) — not needed here;
   // server.js will call detachSession on WS close.
 
-  // Auto-command
-  if (autoCommand) {
+  // Auto-command — runCommand is what we type at the prompt; autoCommand is
+  // what we persist to sessions.json (so the UI keeps showing the user's
+  // original input even after restore rewrites --continue → --resume <id>).
+  const cmdToRun = runCommand || autoCommand;
+  if (cmdToRun) {
     let autoFired = false;
     const autoListener = term.onData((data) => {
       if (autoFired) return;
@@ -721,8 +728,8 @@ function createSession(id, cwd, name, autoCommand, savedScrollback, claudeSessio
         autoFired = true;
         autoListener.dispose();
         setTimeout(() => {
-          term.write(autoCommand + '\n');
-          log(`session ${id} auto-command: ${autoCommand}`);
+          term.write(cmdToRun + '\n');
+          log(`session ${id} auto-command: ${cmdToRun}`);
         }, 100);
       }
     });
@@ -730,18 +737,18 @@ function createSession(id, cwd, name, autoCommand, savedScrollback, claudeSessio
       if (!autoFired) {
         autoFired = true;
         autoListener.dispose();
-        term.write(autoCommand + '\n');
-        log(`session ${id} auto-command (fallback): ${autoCommand}`);
+        term.write(cmdToRun + '\n');
+        log(`session ${id} auto-command (fallback): ${cmdToRun}`);
       }
     }, 5000);
   }
 
   // Claude session ID detection
-  if (autoCommand && /\bclaude\b/i.test(autoCommand)) {
-    const cmdClaudeId = extractClaudeSessionIdFromCmd(autoCommand);
-    if (cmdClaudeId) {
+  if (cmdToRun && /\bclaude\b/i.test(cmdToRun)) {
+    const cmdClaudeId = extractClaudeSessionIdFromCmd(cmdToRun);
+    if (cmdClaudeId && !session.claudeSessionId) {
       session.claudeSessionId = cmdClaudeId;
-    } else {
+    } else if (!cmdClaudeId) {
       setTimeout(() => {
         if (!session.claudeSessionId) {
           const detected = detectClaudeSessionIdFromDir(session.cwd);
@@ -755,17 +762,34 @@ function createSession(id, cwd, name, autoCommand, savedScrollback, claudeSessio
     }
   }
 
-  log(`session ${id} created (pid ${term.pid}, cwd ${session.cwd}${autoCommand ? ', cmd ' + autoCommand : ''})`);
+  log(`session ${id} created (pid ${term.pid}, cwd ${session.cwd}${cmdToRun ? ', cmd ' + cmdToRun : ''})`);
   saveSessionConfigs();
   return session;
 }
 
 // --- Hook handling --------------------------------------------------------
-function handleHook(session, event) {
+function handleHook(session, event, claudeSessionId) {
   if (!event) throw new Error('event required');
   const prevStatus = session.status;
   let notifyType = null, notifyMsg = null;
   session.hookStatus = true;
+
+  // Pin the authoritative Claude session UUID reported by Claude itself.
+  // Why: filesystem-mtime detection (detectClaudeSessionIdFromDir) returns the
+  // newest .jsonl in the project dir, which collides when two web-terminal
+  // sessions share a cwd — both end up with the same UUID and after a server
+  // restart both --resume the same Claude session, losing the original.
+  // The hook payload is the only source that is per-run authoritative.
+  if (claudeSessionId && UUID_RE.test(claudeSessionId) &&
+      session.claudeSessionId !== claudeSessionId) {
+    session.claudeSessionId = claudeSessionId;
+    session.claudeSessionIdFromHook = true;
+    saveSessionConfigs();
+  } else if (claudeSessionId && UUID_RE.test(claudeSessionId)) {
+    // Same value — just mark it as hook-confirmed so later detection paths
+    // (rename, exit) don't replace it with a possibly-stale dir scan.
+    session.claudeSessionIdFromHook = true;
+  }
 
   switch (event) {
     case 'UserPromptSubmit':
@@ -911,7 +935,7 @@ const rpcHandlers = {
   hookEvent: async (params) => {
     const session = sessions.get(requireUuid(params.id));
     if (!session) throw new Error('session not found');
-    return handleHook(session, params.event);
+    return handleHook(session, params.event, params.claudeSessionId);
   },
 
   resizeSession: async (params) => {
@@ -1247,17 +1271,30 @@ function restoreSessionsOnStartup() {
   }
   log(`restoring ${saved.length} session(s) from ${SESSIONS_FILE}`);
   for (const cfg of saved) {
-    let cmd = cfg.autoCommand || '';
-    if (cmd && /\bclaude\b/i.test(cmd) && !/(--continue|--resume)\b/.test(cmd)) {
+    const original = cfg.autoCommand || '';
+    let runCmd = original;
+    if (runCmd && /\bclaude\b/i.test(runCmd)) {
+      // If we know the exact Claude session UUID this terminal was tied to
+      // (hook-reported or --resume-extracted), always restore with --resume
+      // <id>. --continue resumes the most recently modified session in the
+      // cwd, which collides when several web-terminal sessions share a cwd:
+      // both restored shells would end up on the same Claude session and the
+      // original would be lost. Strip any existing --continue/--resume <id?>
+      // before appending the canonical --resume. The user's original
+      // autoCommand is preserved in sessions.json (passed separately to
+      // createSession) so the UI keeps showing what they typed.
       if (cfg.claudeSessionId) {
-        cmd = cmd.trimEnd() + ' --resume ' + cfg.claudeSessionId;
-      } else {
-        cmd = cmd.trimEnd() + ' --continue';
+        runCmd = runCmd
+          .replace(/\s*--resume\s+\S+/g, '')
+          .replace(/\s*--continue\b/g, '')
+          .trimEnd() + ' --resume ' + cfg.claudeSessionId;
+      } else if (!/(--continue|--resume)\b/.test(runCmd)) {
+        runCmd = runCmd.trimEnd() + ' --continue';
       }
     }
     const savedScrollback = loadScrollback(cfg.id);
     try {
-      createSession(cfg.id, cfg.cwd, cfg.name, cmd, savedScrollback, cfg.claudeSessionId || null);
+      createSession(cfg.id, cfg.cwd, cfg.name, original, savedScrollback, cfg.claudeSessionId || null, runCmd);
     } catch (e) {
       log(`failed to restore session ${cfg.id}: ${e.message}`);
     }

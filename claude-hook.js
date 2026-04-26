@@ -23,12 +23,20 @@ if (!hookToken) process.exit(0);
 let input = '';
 process.stdin.on('data', d => { input += d; });
 process.stdin.on('end', () => {
-  let event = '';
-  try { event = JSON.parse(input).hook_event_name; } catch (e) {}
+  let event = '', sessionId = '';
+  try {
+    const parsed = JSON.parse(input);
+    event = parsed.hook_event_name;
+    sessionId = parsed.session_id;
+  } catch (e) {}
   if (!event) process.exit(0);
 
   const http = require('http');
-  const body = JSON.stringify({ event });
+  // Forward Claude's own session UUID alongside the event so the worker can
+  // pin it to this terminal — disambiguates two web-terminal sessions sharing
+  // a cwd (filesystem-mtime detection collides; the hook payload is per-run
+  // authoritative).
+  const body = JSON.stringify(sessionId ? { event, session_id: sessionId } : { event });
   const req = http.request({
     hostname: '127.0.0.1', port, method: 'POST',
     path: `/api/session/${id}/hook`,
