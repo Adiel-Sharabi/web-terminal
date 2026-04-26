@@ -16,12 +16,21 @@ HOOK_TOKEN=$(tr -d '[:space:]' < "$HOOK_TOKEN_FILE")
 # Event name comes via stdin JSON from Claude Code
 INPUT=$(cat)
 EVENT=$(echo "$INPUT" | sed -n 's/.*"hook_event_name" *: *"\([^"]*\)".*/\1/p' | head -1)
+# Claude's own session UUID — forwarded so the worker can pin it to this
+# terminal. Disambiguates two web-terminal sessions sharing a cwd.
+CLAUDE_SID=$(echo "$INPUT" | sed -n 's/.*"session_id" *: *"\([0-9a-fA-F-]*\)".*/\1/p' | head -1)
 [ -z "$EVENT" ] && exit 0
+
+if [ -n "$CLAUDE_SID" ]; then
+  PAYLOAD="{\"event\":\"${EVENT}\",\"session_id\":\"${CLAUDE_SID}\"}"
+else
+  PAYLOAD="{\"event\":\"${EVENT}\"}"
+fi
 
 # Fire and forget — don't slow down Claude
 curl -sf "http://127.0.0.1:${PORT}/api/session/${WT_SESSION_ID}/hook" \
   -H "Content-Type: application/json" \
   -H "X-WT-Hook-Token: ${HOOK_TOKEN}" \
-  -d "{\"event\":\"${EVENT}\"}" \
+  -d "$PAYLOAD" \
   -o /dev/null 2>/dev/null &
 exit 0

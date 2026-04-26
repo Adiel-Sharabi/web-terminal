@@ -9,7 +9,7 @@ const { performance } = require('perf_hooks');
 const workerClientLib = require('./lib/worker-client');
 const { mintDirectToken, verifyDirectToken } = require('./lib/cluster-token');
 
-const SERVER_VERSION = '1.12.10';
+const SERVER_VERSION = '1.12.11';
 
 // --- Optional latency instrumentation (opt-in via WT_LATENCY_DEBUG=1) -----
 // Event-loop lag monitor: interval is 10ms; anything ≥ 50ms slip is a stall.
@@ -771,8 +771,9 @@ app.post('/api/hook', express.json({ limit: '16kb' }), async (req, res) => {
   const id = req.headers['x-wt-session-id'];
   if (!id) return res.json({ ok: true, skipped: 'no session ID' });
   const event = req.body?.hook_event_name || req.body?.event;
+  const claudeSessionId = req.body?.session_id;
   try {
-    const result = await workerClient.rpc('hookEvent', { id, event });
+    const result = await workerClient.rpc('hookEvent', { id, event, claudeSessionId });
     res.json({ ok: true, status: result.status });
   } catch (e) {
     if (/not found/i.test(e.message)) return res.json({ ok: true, skipped: 'session not found' });
@@ -785,8 +786,9 @@ app.post('/api/session/:id/hook', express.json({ limit: '16kb' }), async (req, r
   }
   const event = req.body?.hook_event_name || req.body?.event;
   if (!event) return res.status(400).json({ error: 'event required' });
+  const claudeSessionId = req.body?.session_id;
   try {
-    const result = await workerClient.rpc('hookEvent', { id: req.params.id, event });
+    const result = await workerClient.rpc('hookEvent', { id: req.params.id, event, claudeSessionId });
     res.json({ ok: true, status: result.status });
   } catch (e) {
     if (/not found/i.test(e.message)) return res.status(404).json({ error: 'session not found' });
