@@ -14,12 +14,27 @@ const { BASE, loginPage } = require('./test-helpers');
 test.use({ viewport: { width: 393, height: 851 } });
 
 async function openSidebarAndForm(page) {
+  // Pre-page-load: tell init() the sidebar is already user-closed so it
+  // skips its end-of-init toggleSidebar() call, which otherwise races with
+  // our forced-open state below and (on mobile) leaves the sidebar at
+  // width:0 — making the form measure wrong (scrollWidth>>clientWidth).
+  await page.addInitScript(() => {
+    try { sessionStorage.setItem('sidebarOpen', '0'); } catch {}
+    try { localStorage.removeItem('sidebarWidth'); } catch {}
+  });
   await loginPage(page);
   await page.goto(BASE + '/app');
-  // Force the sidebar open and the form visible, regardless of init()'s state.
-  // Also make sure no saved sidebar width dwarfs the mobile default.
+  // Wait for init() to finish (clusterServers is the last thing it sets
+  // before its skipped toggleSidebar). We assert on it explicitly so the
+  // test can't run measurements while init is still mutating the DOM.
+  await page.waitForFunction(
+    () => typeof clusterServers !== 'undefined' && Array.isArray(clusterServers),
+    null,
+    { timeout: 10000 }
+  );
+  // Force the sidebar open and the form visible — now init is done so it
+  // won't undo this.
   await page.evaluate(() => {
-    try { localStorage.removeItem('sidebarWidth'); } catch {}
     const sb = document.getElementById('sidebar');
     if (sb) {
       sb.style.removeProperty('--sb-width');
@@ -29,8 +44,8 @@ async function openSidebarAndForm(page) {
     const form = document.getElementById('newSessionForm');
     if (form) form.classList.add('show');
   });
-  // Let the transition settle.
-  await page.waitForTimeout(250);
+  // Brief settle for layout.
+  await page.waitForTimeout(100);
 }
 
 test.describe('Issue #22: mobile new-session dialog', () => {

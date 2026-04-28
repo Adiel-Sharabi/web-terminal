@@ -20,20 +20,33 @@ test.describe('Issue #23: folder list per target server', () => {
         body: JSON.stringify([]),
       });
     });
+    // Pin /api/cluster/sessions so init() / loadSidebar can't race-overwrite
+    // window.clusterServers between our setup and toggleNewForm().
+    const FAKE_CLUSTER = {
+      sessions: [],
+      servers: [
+        { url: 'https://xps.example:7681', name: 'XPS', online: true, needsAuth: false },
+        { url: 'https://office.example:7681', name: 'Office', online: true, needsAuth: false },
+      ],
+    };
+    await page.route(/\/api\/cluster\/sessions(\?|$)/, async (route) => {
+      await route.fulfill({ status: 200, contentType: 'application/json', body: JSON.stringify(FAKE_CLUSTER) });
+    });
 
     await loginPage(page);
     await page.goto(BASE + '/app');
 
-    // Give init() a moment to finish its startup fetches so they don't leak
-    // into our assertions.
-    await page.waitForTimeout(300);
+    // Wait for init's loadSidebar to have run at least once — clusterServers
+    // is set inside loadSidebar; waiting for it pins state before we set our
+    // own values, so the test isn't racing with a startup fetch.
+    await page.waitForFunction(
+      () => Array.isArray(window.clusterServers) && window.clusterServers.some(s => s.url === 'https://xps.example:7681'),
+      null,
+      { timeout: 5000 }
+    );
 
     await page.evaluate(() => {
       window.sessionServerUrl = 'https://xps.example:7681';
-      window.clusterServers = [
-        { url: 'https://xps.example:7681', name: 'XPS', online: true, needsAuth: false },
-        { url: 'https://office.example:7681', name: 'Office', online: true, needsAuth: false },
-      ];
     });
 
     // Clear any folder-history requests triggered by the initial page load.
@@ -60,14 +73,23 @@ test.describe('Issue #23: folder list per target server', () => {
       fetchedUrls.push(req.url());
       await route.fulfill({ status: 200, contentType: 'application/json', body: '[]' });
     });
+    const FAKE_CLUSTER = {
+      sessions: [],
+      servers: [{ url: 'https://xps.example:7681', name: 'XPS', online: true, needsAuth: false }],
+    };
+    await page.route(/\/api\/cluster\/sessions(\?|$)/, async (route) => {
+      await route.fulfill({ status: 200, contentType: 'application/json', body: JSON.stringify(FAKE_CLUSTER) });
+    });
 
     await loginPage(page);
     await page.goto(BASE + '/app');
+    await page.waitForFunction(
+      () => Array.isArray(window.clusterServers) && window.clusterServers.some(s => s.url === 'https://xps.example:7681'),
+      null,
+      { timeout: 5000 }
+    );
     await page.evaluate(() => {
       window.sessionServerUrl = null; // local
-      window.clusterServers = [
-        { url: 'https://xps.example:7681', name: 'XPS', online: true, needsAuth: false },
-      ];
     });
 
     fetchedUrls.length = 0;
