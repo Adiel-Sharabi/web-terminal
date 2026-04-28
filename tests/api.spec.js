@@ -696,6 +696,38 @@ test.describe('/api/history/folders', () => {
     expect(res.status()).toBe(401);
     await ctx.dispose();
   });
+
+  test('filters out history entries that no longer exist on disk', async () => {
+    const HISTORY_FILE = path.join(__dirname, '..', 'history.json');
+    const backup = fs.existsSync(HISTORY_FILE) ? fs.readFileSync(HISTORY_FILE, 'utf8') : null;
+
+    // Pick a real path (the project dir) and a fake path that cannot exist.
+    const realDir = path.join(__dirname, '..');
+    const fakeDir = process.platform === 'win32'
+      ? 'Z:\\definitely\\not\\a\\real\\folder\\xyz123'
+      : '/definitely/not/a/real/folder/xyz123';
+
+    try {
+      fs.writeFileSync(HISTORY_FILE, JSON.stringify({ folders: [fakeDir, realDir] }, null, 2), 'utf8');
+
+      const ctx = await authCtx();
+      const res = await ctx.get('/api/history/folders');
+      expect(res.status()).toBe(200);
+      const data = await res.json();
+
+      const lc = (s) => String(s).toLowerCase();
+      expect(data.some(f => lc(f) === lc(fakeDir))).toBe(false);
+      expect(data.some(f => lc(f) === lc(realDir))).toBe(true);
+      await ctx.dispose();
+
+      // The endpoint should also persist the cleanup back to history.json.
+      const after = JSON.parse(fs.readFileSync(HISTORY_FILE, 'utf8'));
+      expect(after.folders.some(f => lc(f) === lc(fakeDir))).toBe(false);
+    } finally {
+      if (backup !== null) fs.writeFileSync(HISTORY_FILE, backup, 'utf8');
+      else try { fs.unlinkSync(HISTORY_FILE); } catch {}
+    }
+  });
 });
 
 // ============================================================

@@ -9,7 +9,7 @@ const { performance } = require('perf_hooks');
 const workerClientLib = require('./lib/worker-client');
 const { mintDirectToken, verifyDirectToken } = require('./lib/cluster-token');
 
-const SERVER_VERSION = '1.12.11';
+const SERVER_VERSION = '1.12.12';
 
 // --- Optional latency instrumentation (opt-in via WT_LATENCY_DEBUG=1) -----
 // Event-loop lag monitor: interval is 10ms; anything ≥ 50ms slip is a stall.
@@ -1839,13 +1839,24 @@ function saveFolder(folder) {
   try { fs.writeFileSync(HISTORY_FILE, JSON.stringify(history, null, 2), 'utf8'); } catch (e) {}
 }
 
+function dirExists(p) {
+  try { return fs.statSync(p).isDirectory(); } catch (e) { return false; }
+}
+
 app.get('/api/history/folders', (req, res) => {
-  const history = loadHistory().folders;
-  // Also scan configured folders and their subdirectories
+  const rawHistory = loadHistory().folders;
+  // Drop history entries whose directory no longer exists, so suggestions
+  // stay in sync with the actual filesystem. Persist the cleanup so we
+  // don't keep re-checking the same dead paths on every request.
+  const history = rawHistory.filter(dirExists);
+  if (history.length !== rawHistory.length) {
+    try { fs.writeFileSync(HISTORY_FILE, JSON.stringify({ folders: history }, null, 2), 'utf8'); } catch (e) {}
+  }
+  // Also scan configured folders and their subdirectories (live each request).
   const scanned = new Set(history);
   for (const baseDir of getScanFolders()) {
     try {
-      scanned.add(baseDir);
+      if (dirExists(baseDir)) scanned.add(baseDir);
       const dirs = fs.readdirSync(baseDir, { withFileTypes: true })
         .filter(d => d.isDirectory() && !d.name.startsWith('.') && !d.name.startsWith('$'));
       for (const d of dirs) scanned.add(path.join(baseDir, d.name));
