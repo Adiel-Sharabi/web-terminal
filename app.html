@@ -78,6 +78,14 @@
     .sb-server .srv-dot.needsauth { background: #da4; }
     .sb-server .srv-auth { margin-left: auto; color: #da4; font-size: 10px; cursor: pointer; text-transform: none; }
     .sb-server .srv-auth:hover { text-decoration: underline; }
+    .sb-server { cursor: pointer; user-select: none; }
+    .sb-server .srv-chev { display: inline-block; width: 10px; color: #00d4aa; transition: transform 0.15s; flex-shrink: 0; text-align: center; font-size: 10px; }
+    .sb-server.collapsed .srv-chev { transform: rotate(-90deg); }
+    .sb-item.dragging { opacity: 0.4; }
+    .sb-item.drop-above { border-top: 2px solid #00d4aa; }
+    .sb-item.drop-below { border-bottom: 2px solid #00d4aa; }
+    .sb-item[draggable="true"] { cursor: grab; }
+    .sb-item[draggable="true"]:active { cursor: grabbing; }
     @keyframes pulse { 0%,100% { opacity: 1; } 50% { opacity: 0.4; } }
     @keyframes flash-idle { 0%,100% { background: transparent; } 25%,75% { background: rgba(218,170,68,0.25); } }
     .sb-item.flash { animation: flash-idle 0.6s ease 3; }
@@ -1855,35 +1863,50 @@
         // Server header
         const header = document.createElement('div');
         header.className = 'sb-server';
+        const serverKey = server.url || '__local__';
+        header.dataset.serverKey = serverKey;
+        const isCollapsed = isServerCollapsed(serverKey);
+        if (isCollapsed) header.classList.add('collapsed');
         const statusCls = !server.online ? 'offline' : server.needsAuth ? 'needsauth' : 'online';
         const versionTag = server.version ? `<span style="color:#555;font-size:9px;margin-left:6px">${esc(server.version)}</span>` : '';
-        header.innerHTML = `<span class="srv-dot ${statusCls}"></span>${esc(server.name || 'Local')}${versionTag}`;
+        header.innerHTML = `<span class="srv-chev">&#9662;</span><span class="srv-dot ${statusCls}"></span>${esc(server.name || 'Local')}${versionTag}`;
         if (server.online && !server.needsAuth) {
           const addBtn = document.createElement('span');
           addBtn.className = 'srv-auth';
           addBtn.textContent = '+';
           addBtn.title = 'New session on ' + (server.name || 'Local');
           addBtn.style.cssText = 'color:#00d4aa;font-size:14px;font-weight:bold;cursor:pointer;margin-left:auto';
-          addBtn.addEventListener('click', () => quickNewSession(server.url));
+          addBtn.addEventListener('click', (e) => { e.stopPropagation(); quickNewSession(server.url); });
           header.appendChild(addBtn);
         }
         if (server.needsAuth && server.url) {
           const authLink = document.createElement('span');
           authLink.className = 'srv-auth';
           authLink.textContent = 'Login';
-          authLink.addEventListener('click', () => clusterLogin(server.url, server.name));
+          authLink.addEventListener('click', (e) => { e.stopPropagation(); clusterLogin(server.url, server.name); });
           header.appendChild(authLink);
         } else if (!server.online && server.url) {
           header.innerHTML += '<span style="margin-left:auto;color:#a44;font-size:10px">offline</span>';
         }
+        // Click anywhere on the header (except action buttons) toggles collapse.
+        header.addEventListener('click', (e) => {
+          if (e.target.closest('.srv-auth')) return;
+          const nowCollapsed = !header.classList.contains('collapsed');
+          header.classList.toggle('collapsed', nowCollapsed);
+          setServerCollapsed(serverKey, nowCollapsed);
+          applyCollapseToGroup(header, nowCollapsed);
+        });
         container.appendChild(header);
 
         // Sessions for this server
         const serverSessions = data.sessions.filter(s => s.serverUrl === server.url);
         if (serverSessions.length === 0) {
           const empty = document.createElement('div');
+          empty.className = 'sb-empty';
+          empty.dataset.serverKey = serverKey;
           empty.style.cssText = 'padding:6px 12px;color:#444;font-size:11px;border-bottom:1px solid #0a1a30';
           empty.textContent = server.online ? 'No sessions' : '';
+          if (isCollapsed) empty.style.display = 'none';
           container.appendChild(empty);
           continue;
         }
@@ -1970,6 +1993,9 @@
           });
 
           item._wtServerUrl = s.serverUrl || null;
+          item.dataset.serverKey = serverKey;
+          if (isCollapsed) item.style.display = 'none';
+          attachReorderDnd(item);
           container.appendChild(item);
         }
       }
@@ -1977,6 +2003,101 @@
       // (viewer count removed — exclusive mode)
       // Lazy-connect background sessions for instant switching
       lazyConnectAll();
+    }
+
+    // --- Sidebar: per-server collapse state (UI-only, localStorage) -------
+    const COLLAPSE_KEY = 'wt.sidebar.collapsed';
+    function loadCollapseSet() {
+      try {
+        const raw = localStorage.getItem(COLLAPSE_KEY);
+        if (!raw) return new Set();
+        const arr = JSON.parse(raw);
+        return new Set(Array.isArray(arr) ? arr : []);
+      } catch { return new Set(); }
+    }
+    function saveCollapseSet(set) {
+      try { localStorage.setItem(COLLAPSE_KEY, JSON.stringify([...set])); } catch {}
+    }
+    function isServerCollapsed(serverKey) { return loadCollapseSet().has(serverKey); }
+    function setServerCollapsed(serverKey, collapsed) {
+      const set = loadCollapseSet();
+      if (collapsed) set.add(serverKey); else set.delete(serverKey);
+      saveCollapseSet(set);
+    }
+    // Toggle visibility of all .sb-item / .sb-empty rows that belong to this
+    // server header — they sit as sibling nodes after the header in #sidebarList.
+    function applyCollapseToGroup(headerEl, collapsed) {
+      const key = headerEl.dataset.serverKey;
+      let n = headerEl.nextElementSibling;
+      while (n && !n.classList.contains('sb-server')) {
+        if (n.dataset.serverKey === key) n.style.display = collapsed ? 'none' : '';
+        n = n.nextElementSibling;
+      }
+    }
+
+    // --- Sidebar: drag-and-drop session reorder (within a server only) ----
+    let _wtDragId = null;
+    let _wtDragServerKey = null;
+    function attachReorderDnd(item) {
+      item.draggable = true;
+      item.addEventListener('dragstart', (e) => {
+        _wtDragId = item.dataset.sessionId;
+        _wtDragServerKey = item.dataset.serverKey;
+        item.classList.add('dragging');
+        try { e.dataTransfer.effectAllowed = 'move'; e.dataTransfer.setData('text/plain', _wtDragId); } catch {}
+      });
+      item.addEventListener('dragend', () => {
+        item.classList.remove('dragging');
+        document.querySelectorAll('.sb-item.drop-above,.sb-item.drop-below').forEach(el => {
+          el.classList.remove('drop-above'); el.classList.remove('drop-below');
+        });
+        _wtDragId = null;
+        _wtDragServerKey = null;
+      });
+      item.addEventListener('dragover', (e) => {
+        if (!_wtDragId || _wtDragId === item.dataset.sessionId) return;
+        if (item.dataset.serverKey !== _wtDragServerKey) return; // cross-server drop disallowed
+        e.preventDefault();
+        e.dataTransfer.dropEffect = 'move';
+        const r = item.getBoundingClientRect();
+        const above = (e.clientY - r.top) < r.height / 2;
+        item.classList.toggle('drop-above', above);
+        item.classList.toggle('drop-below', !above);
+      });
+      item.addEventListener('dragleave', () => {
+        item.classList.remove('drop-above');
+        item.classList.remove('drop-below');
+      });
+      item.addEventListener('drop', async (e) => {
+        if (!_wtDragId || _wtDragId === item.dataset.sessionId) return;
+        if (item.dataset.serverKey !== _wtDragServerKey) return;
+        e.preventDefault();
+        const above = item.classList.contains('drop-above');
+        item.classList.remove('drop-above'); item.classList.remove('drop-below');
+        const draggedEl = document.querySelector(`.sb-item[data-session-id="${CSS.escape(_wtDragId)}"]`);
+        if (!draggedEl) return;
+        // Optimistic DOM reorder.
+        item.parentNode.insertBefore(draggedEl, above ? item : item.nextSibling);
+        const orderedIds = collectOrderedIdsForGroup(item.dataset.serverKey);
+        const apiBase = item._wtServerUrl ? `/cluster/${encodeURIComponent(item._wtServerUrl)}/api` : '/api';
+        try {
+          const r = await fetch(`${apiBase}/sessions/order`, {
+            method: 'POST', headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({ orderedIds })
+          });
+          if (!r.ok) throw new Error('reorder failed');
+        } catch (err) {
+          // Revert by reloading from server.
+          loadSidebar();
+        }
+      });
+    }
+    function collectOrderedIdsForGroup(serverKey) {
+      const ids = [];
+      document.querySelectorAll(`#sidebarList .sb-item[data-server-key="${CSS.escape(serverKey)}"]`).forEach(el => {
+        if (el.dataset.sessionId) ids.push(el.dataset.sessionId);
+      });
+      return ids;
     }
 
     // Flash a session card in the sidebar when it becomes idle

@@ -9,7 +9,7 @@ const { performance } = require('perf_hooks');
 const workerClientLib = require('./lib/worker-client');
 const { mintDirectToken, verifyDirectToken } = require('./lib/cluster-token');
 
-const SERVER_VERSION = '1.12.13';
+const SERVER_VERSION = '1.13.0';
 
 // --- Optional latency instrumentation (opt-in via WT_LATENCY_DEBUG=1) -----
 // Event-loop lag monitor: interval is 10ms; anything ≥ 50ms slip is a stall.
@@ -1801,6 +1801,26 @@ app.patch('/api/sessions/:id', express.json({ limit: '16kb' }), async (req, res)
   } catch (e) {
     console.error(`PATCH /api/sessions failed: ${e.message}`);
     res.status(500).json({ error: 'Failed to update session' });
+  }
+});
+
+// --- API: reorder sessions ---
+// Body: { orderedIds: string[] } — applied as the new in-memory + on-disk order.
+// Idempotent. Unknown ids are silently dropped; live sessions not in the list
+// are appended in their existing order (race-safe for concurrent creates).
+app.post('/api/sessions/order', express.json({ limit: '64kb' }), async (req, res) => {
+  try {
+    const orderedIds = req.body?.orderedIds;
+    if (!Array.isArray(orderedIds)) return res.status(400).json({ error: 'orderedIds must be an array' });
+    if (orderedIds.length > 1000) return res.status(400).json({ error: 'orderedIds too long' });
+    if (!orderedIds.every(id => typeof id === 'string' && id.length <= 64)) {
+      return res.status(400).json({ error: 'orderedIds must be strings <= 64 chars' });
+    }
+    const result = await workerClient.rpc('reorderSessions', { orderedIds });
+    res.json(result);
+  } catch (e) {
+    console.error(`POST /api/sessions/order failed: ${e.message}`);
+    res.status(500).json({ error: 'Failed to reorder sessions' });
   }
 });
 
