@@ -515,6 +515,42 @@ if (process.env.WT_MONITOR_STDIN_SHUTDOWN === '1' && process.stdin) {
   try { process.stdin.resume(); } catch {}
 }
 
+// --- Capture monitor's own death so the next launch has a tombstone ---------
+// Without these handlers an uncaughtException/unhandledRejection prints to a
+// stderr the VBS launcher discards, leaving zero evidence of why the supervisor
+// died. We log a final line to monitor.log + crashes.json before exiting.
+function logMonitorDeath(reason, err) {
+  try {
+    const detail = err ? (err.stack || err.message || String(err)) : '';
+    monitorLog(`MONITOR DYING (${reason})${detail ? ': ' + detail : ''}`);
+    const crashes = loadCrashes();
+    crashes.push({
+      time: new Date().toISOString(),
+      child: 'monitor',
+      exitCode: typeof process.exitCode === 'number' ? process.exitCode : null,
+      signal: null,
+      error: (detail || reason).slice(-2000),
+      uptime: Date.now() - startedAt,
+      restartCount: 0,
+    });
+    while (crashes.length > 40) crashes.shift();
+    fs.writeFileSync(CRASH_LOG, JSON.stringify(crashes, null, 2), 'utf8');
+    try { writeStatus('crashed', { reason: `monitor: ${reason}` }); } catch {}
+  } catch {}
+}
+
+process.on('uncaughtException', (err) => {
+  logMonitorDeath('uncaughtException', err);
+  process.exit(1);
+});
+process.on('unhandledRejection', (reason) => {
+  logMonitorDeath('unhandledRejection', reason instanceof Error ? reason : new Error(String(reason)));
+  process.exit(1);
+});
+process.on('exit', (code) => {
+  try { monitorLog(`monitor exit code=${code} uptime=${Math.round((Date.now() - startedAt) / 1000)}s`); } catch {}
+});
+
 // --- Periodic status refresh (so uptime stays current) -----------------------
 const statusRefresh = setInterval(() => {
   if (!stopping) writeStatus('running');
