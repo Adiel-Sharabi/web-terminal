@@ -850,6 +850,25 @@ const rpcHandlers = {
     return { sessions: list };
   },
 
+  // Reorder the in-memory sessions Map (and persist) to match the requested
+  // id order. Unknown ids are ignored; live sessions not present in the input
+  // are appended in their existing order so a stale client list can't drop
+  // a session that was just created elsewhere.
+  reorderSessions: async (params) => {
+    const orderedIds = Array.isArray(params?.orderedIds) ? params.orderedIds : null;
+    if (!orderedIds) throw new Error('orderedIds must be an array');
+    const snapshot = new Map(sessions);
+    sessions.clear();
+    for (const id of orderedIds) {
+      if (typeof id === 'string' && snapshot.has(id)) sessions.set(id, snapshot.get(id));
+    }
+    for (const [id, s] of snapshot) {
+      if (!sessions.has(id)) sessions.set(id, s);
+    }
+    saveSessionConfigs();
+    return { ok: true, count: sessions.size };
+  },
+
   createSession: async (params) => {
     const id = params.id ? requireUuid(params.id) : crypto.randomUUID();
     const cwd = String(params.cwd || getDefaultCwd()).substring(0, 260);
