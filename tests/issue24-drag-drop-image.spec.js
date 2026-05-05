@@ -17,7 +17,7 @@ test.describe('Issue #24: drag & drop image onto terminal', () => {
       await route.fulfill({
         status: 200,
         contentType: 'application/json',
-        body: JSON.stringify({ ok: true, clipboard: true }),
+        body: JSON.stringify({ ok: true, path: 'C:\\fake\\clip-1.png' }),
       });
     });
 
