@@ -9,7 +9,7 @@ const { performance } = require('perf_hooks');
 const workerClientLib = require('./lib/worker-client');
 const { mintDirectToken, verifyDirectToken } = require('./lib/cluster-token');
 
-const SERVER_VERSION = '1.13.0';
+const SERVER_VERSION = '1.13.2';
 
 // --- Optional latency instrumentation (opt-in via WT_LATENCY_DEBUG=1) -----
 // Event-loop lag monitor: interval is 10ms; anything ≥ 50ms slip is a stall.
@@ -1586,28 +1586,21 @@ app.get('/api/version', (req, res) => {
   });
 });
 
-// --- API: upload image to server clipboard ---
+// --- API: upload image, return path for bracketed-paste insert ---
+// Claude Code's paste handler detects absolute image paths in pasted text and
+// reads the file directly via readFileBytesSync, so we don't touch the Windows
+// clipboard at all — that path was unreliable and only worked locally. The
+// path-paste flow works for remote cluster sessions too: the request hits the
+// remote server, the file is saved on the remote disk, and the remote Claude
+// Code reads its own local file.
 app.post('/api/clipboard-image', express.raw({ type: 'image/*', limit: '10mb' }), (req, res) => {
   try {
-    // Determine extension from content-type
     const ct = req.headers['content-type'] || 'image/png';
     const ext = ct.includes('jpeg') || ct.includes('jpg') ? '.jpg' : '.png';
     const filename = `clip-${Date.now()}${ext}`;
     const filepath = path.join(CLIPBOARD_DIR, filename);
-
     fs.writeFileSync(filepath, req.body);
-
-    // Copy image to Windows clipboard via PowerShell
-    const ps = `Add-Type -AssemblyName System.Windows.Forms; ` +
-      `[System.Windows.Forms.Clipboard]::SetImage([System.Drawing.Image]::FromFile('${filepath.replace(/'/g, "''")}'))`;
-    execFile('powershell', ['-NoProfile', '-Command', ps], { windowsHide: true }, (err) => {
-      if (err) {
-        console.error('Clipboard copy failed:', err.message);
-        // Still return success — file is saved even if clipboard fails
-        return res.json({ ok: true, path: filepath, clipboard: false });
-      }
-      res.json({ ok: true, path: filepath, clipboard: true });
-    });
+    res.json({ ok: true, path: filepath });
   } catch (e) {
     console.error(e.message); res.status(500).json({ error: 'Internal error' });
   }

@@ -1067,6 +1067,15 @@
     }
 
     // --- Clipboard ---
+    // Send a file path as a bracketed paste so Claude Code's paste handler
+    // sees it and reads the image off disk via its built-in path-detection
+    // (regex /\.(png|jpe?g|gif|webp)$/i + readFileBytesSync). This avoids the
+    // Windows clipboard entirely and works for remote cluster sessions, since
+    // the path is on the same machine where Claude Code is running.
+    function sendImagePath(p) {
+      if (!p || !ws || ws.readyState !== WebSocket.OPEN) return;
+      ws.send('\x1b[200~' + p + '\x1b[201~');
+    }
     async function uploadClipboardImage() {
       try {
         const items = await navigator.clipboard.read();
@@ -1079,13 +1088,7 @@
               method: 'POST', headers: { 'Content-Type': imageType }, body: blob
             });
             const result = await res.json();
-            if (result.ok && result.clipboard) {
-              if (ws && ws.readyState === WebSocket.OPEN) ws.send('\x1bv');
-              return true;
-            } else if (result.ok) {
-              if (ws && ws.readyState === WebSocket.OPEN) ws.send(result.path);
-              return true;
-            }
+            if (result.ok && result.path) { sendImagePath(result.path); return true; }
           }
         }
       } catch (e) { console.warn('Clipboard image read failed:', e); }
@@ -1098,7 +1101,7 @@
       if ((e.ctrlKey || e.metaKey) && e.key === 'v') {
         e.preventDefault();
         navigator.clipboard.readText().then(text => {
-          if (text && ws && ws.readyState === WebSocket.OPEN) ws.send(text);
+          if (text) term.paste(text);
         });
         return false;
       }
@@ -1262,7 +1265,7 @@
         if (stickyState.ctrl && data.toLowerCase() === 'v') {
           clearSticky();
           navigator.clipboard.readText().then(text => {
-            if (text && ws && ws.readyState === WebSocket.OPEN) ws.send(text);
+            if (text) term.paste(text);
           });
           return;
         }
@@ -1427,11 +1430,7 @@
             method: 'POST', headers: { 'Content-Type': file.type }, body: file
           });
           const result = await res.json();
-          if (result.ok && result.clipboard) {
-            if (ws && ws.readyState === WebSocket.OPEN) ws.send('\x1bv');
-          } else if (result.ok) {
-            if (ws && ws.readyState === WebSocket.OPEN) ws.send(result.path);
-          }
+          if (result.ok && result.path) sendImagePath(result.path);
         } catch (e) { console.warn('Image upload failed:', e); }
         input.remove();
       });
@@ -1447,13 +1446,7 @@
           method: 'POST', headers: { 'Content-Type': mime || blob.type || 'application/octet-stream' }, body: blob,
         });
         const result = await res.json();
-        if (result.ok && result.clipboard) {
-          if (ws && ws.readyState === WebSocket.OPEN) ws.send('\x1bv');
-          return true;
-        } else if (result.ok) {
-          if (ws && ws.readyState === WebSocket.OPEN) ws.send(result.path);
-          return true;
-        }
+        if (result.ok && result.path) { sendImagePath(result.path); return true; }
       } catch (e) { console.warn('Image upload failed:', e); }
       return false;
     }
@@ -2044,7 +2037,7 @@
         _wtDragId = item.dataset.sessionId;
         _wtDragServerKey = item.dataset.serverKey;
         item.classList.add('dragging');
-        try { e.dataTransfer.effectAllowed = 'move'; e.dataTransfer.setData('text/plain', _wtDragId); } catch {}
+        try { e.dataTransfer.effectAllowed = 'move'; } catch {}
       });
       item.addEventListener('dragend', () => {
         item.classList.remove('dragging');
