@@ -86,10 +86,31 @@ function getDefaultCwd() { return process.env.WT_CWD || liveConfig('defaultCwd',
 const SHELL = process.env.WT_SHELL || liveConfig('shell', process.platform === 'win32' ? 'C:\\Program Files\\Git\\bin\\bash.exe' : '/bin/bash');
 const PORT_HINT = parseInt(process.env.WT_PORT || liveConfig('port', '7681'));
 
+// Write a minimal readline config that enables bracketed paste mode.
+// Bash 4.4 ships with the setting available but OFF by default; this opts it
+// back on without overriding the user's own .inputrc (we $include it first).
+// Written once per worker process; sessions share the same file.
+const _WT_INPUTRC_PATH = path.join(__dirname, '.wt_inputrc');
+(function _ensureInputrc() {
+  try {
+    const content = [
+      '# Web-terminal generated — enables bracketed paste mode for this shell.',
+      '# Your own ~/.inputrc is included first so your keybindings still apply.',
+      '$include /etc/inputrc',
+      '$include ~/.inputrc',
+      'set enable-bracketed-paste on',
+    ].join('\n') + '\n';
+    fs.writeFileSync(_WT_INPUTRC_PATH, content, 'utf8');
+  } catch (e) {
+    log('warning: could not write .wt_inputrc:', e.message);
+  }
+})();
+
 function buildSafeEnv() {
-  if (liveConfig('passAllEnv', false)) return Object.assign({}, process.env, { TERM: 'xterm-256color' });
+  if (liveConfig('passAllEnv', false)) return Object.assign({}, process.env, { TERM: 'xterm-256color', INPUTRC: _WT_INPUTRC_PATH });
   return {
     TERM: 'xterm-256color',
+    INPUTRC: _WT_INPUTRC_PATH,
     HOME: process.env.USERPROFILE || os.homedir(),
     USERPROFILE: process.env.USERPROFILE,
     PATH: process.env.PATH,
