@@ -12,7 +12,7 @@ module.exports = defineConfig({
   timeout: 30000,
   retries: 0,
   workers: 1,
-  testIgnore: ['**/diagnostic*', '**/mobile-debug*'],
+  testIgnore: ['**/diagnostic*', '**/mobile-debug*', '**/paste-diag*'],
   globalTeardown: path.join(__dirname, 'tests', 'global-teardown.js'),
   use: {
     baseURL: 'http://localhost:17681',

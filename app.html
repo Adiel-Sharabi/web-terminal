@@ -633,6 +633,9 @@
     // Expose on window for test hooks and live debugging — harmless since
     // any page script can already access these via closures.
     window.term = term;
+    // ws changes on every session switch — expose a live getter so tests/diag
+    // can always reach the active socket without re-navigating.
+    Object.defineProperty(window, 'wtWs', { get: () => ws, configurable: true });
 
     // --- WebSocket ---
     let heartbeatTimer = null;
@@ -1101,7 +1104,8 @@
       if ((e.ctrlKey || e.metaKey) && e.key === 'v') {
         e.preventDefault();
         navigator.clipboard.readText().then(text => {
-          if (text) term.paste(text);
+          if (!text) return;
+          term.paste(text);
         });
         return false;
       }
@@ -1131,7 +1135,9 @@
           const buf = _inputBuf;
           _inputBuf = '';
           _inputTimer = null;
-          if (buf && ws && ws.readyState === WebSocket.OPEN) ws.send(buf);
+          if (buf && ws && ws.readyState === WebSocket.OPEN) {
+            ws.send(buf);
+          }
         }, 5);
       }
     }

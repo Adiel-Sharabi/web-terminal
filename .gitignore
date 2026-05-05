@@ -28,4 +28,5 @@ playwright.diag.config.js
 cdp_*.py
 sessions.test.json
 .tmp-*
+.wt_inputrc
 .claude/
