@@ -9,7 +9,7 @@ const { performance } = require('perf_hooks');
 const workerClientLib = require('./lib/worker-client');
 const { mintDirectToken, verifyDirectToken } = require('./lib/cluster-token');
 
-const SERVER_VERSION = '1.13.3';
+const SERVER_VERSION = '1.13.4';
 
 // --- Optional latency instrumentation (opt-in via WT_LATENCY_DEBUG=1) -----
 // Event-loop lag monitor: interval is 10ms; anything ≥ 50ms slip is a stall.
@@ -764,7 +764,11 @@ app.post('/api/auth/token', express.json({ limit: '16kb' }), (req, res) => {
 // Supports two modes:
 // 1. POST /api/session/:id/hook with {event} body (from command hooks)
 // 2. POST /api/hook with X-WT-Session-ID header (from HTTP hooks, no subprocess)
-app.post('/api/hook', express.json({ limit: '16kb' }), async (req, res) => {
+// Claude Code hook payloads include the full tool_input / tool_response, which
+// can exceed 16kb easily (e.g. Bash output, file reads). Bumped to 256kb to
+// stop the steady drip of PayloadTooLargeError in error.log without
+// accepting unbounded payloads.
+app.post('/api/hook', express.json({ limit: '256kb' }), async (req, res) => {
   if (!isLocalhostReq(req) && !verifyHookToken(req.headers['x-wt-hook-token'])) {
     return res.status(401).json({ error: 'Unauthorized' });
   }
@@ -780,7 +784,7 @@ app.post('/api/hook', express.json({ limit: '16kb' }), async (req, res) => {
     res.status(500).json({ error: e.message });
   }
 });
-app.post('/api/session/:id/hook', express.json({ limit: '16kb' }), async (req, res) => {
+app.post('/api/session/:id/hook', express.json({ limit: '256kb' }), async (req, res) => {
   if (!isLocalhostReq(req) && !verifyHookToken(req.headers['x-wt-hook-token'])) {
     return res.status(401).json({ error: 'Unauthorized' });
   }
@@ -1146,8 +1150,28 @@ app.delete('/api/cluster/auth/:url', (req, res) => {
   res.json({ ok: true });
 });
 
-// Fetch all sessions across cluster
-app.get('/api/cluster/sessions', async (req, res) => {
+// Fetch all sessions across cluster.
+//
+// Cached per-user for CLUSTER_SESSIONS_TTL_MS so N concurrent browser tabs all
+// share a single fan-out to peers (each call hits every peer with 2 GETs;
+// without coalescing this becomes a polling storm that wedges the event loop
+// and trips the monitor's health check).
+const CLUSTER_SESSIONS_TTL_MS = 1500;
+const _clusterSessionsCache = new Map(); // user -> { ts, promise }
+
+// Throttle for verbose cluster-fan-out logs. We only emit when the session
+// summary changes OR CLUSTER_LOG_MIN_GAP_MS has passed.
+const CLUSTER_LOG_MIN_GAP_MS = 30000;
+const _clusterLogState = new Map(); // key -> { ts, summary }
+function _throttledClusterLog(key, summary, format) {
+  const prev = _clusterLogState.get(key);
+  const now = Date.now();
+  if (prev && prev.summary === summary && now - prev.ts < CLUSTER_LOG_MIN_GAP_MS) return;
+  _clusterLogState.set(key, { ts: now, summary });
+  console.log(format(new Date().toISOString()));
+}
+
+async function _computeClusterSessions(reqUser) {
   const result = [];
 
   // Local sessions (via worker)
@@ -1164,22 +1188,6 @@ app.get('/api/cluster/sessions', async (req, res) => {
   } catch (e) {
     console.error('worker listSessions failed:', e.message);
   }
-
-  // Direct-mode (issue #20): look up the current user from the session cookie so
-  // minted tokens bind to them. Cluster API calls via Bearer have no cookie —
-  // in that case we fall back to the configured server user.
-  const reqUser = (() => {
-    try {
-      const cookies = parseCookies(req.headers.cookie);
-      const tok = cookies[COOKIE_NAME];
-      if (!tok) return _USER;
-      const dot = tok.lastIndexOf('.');
-      if (dot === -1) return _USER;
-      const payload = Buffer.from(tok.substring(0, dot), 'base64').toString();
-      const colon = payload.indexOf(':');
-      return colon > 0 ? payload.substring(0, colon) : _USER;
-    } catch { return _USER; }
-  })();
 
   // Remote sessions (parallel, with timeout) — skip self-reference
   const clusterTokens = loadClusterTokens();
@@ -1248,7 +1256,8 @@ app.get('/api/cluster/sessions', async (req, res) => {
         const ageMins = s.lastActivity ? Math.round((Date.now() - s.lastActivity) / 60000) : '?';
         return `"${s.name}"(${s.status}, ${ageMins}m ago)`;
       }).join(', ');
-      console.log(`[${new Date().toISOString()}] Cluster fetch: ${r.server} (${r.online ? 'online' : 'offline'}) → ${r.sessions.length} sessions: ${summary}`);
+      _throttledClusterLog(`fetch:${r.server}`, `${r.online ? '1' : '0'}|${r.sessions.length}|${summary}`,
+        (ts) => `[${ts}] Cluster fetch: ${r.server} (${r.online ? 'online' : 'offline'}) → ${r.sessions.length} sessions: ${summary}`);
     }
     result.push(...r.sessions);
   }
@@ -1257,13 +1266,49 @@ app.get('/api/cluster/sessions', async (req, res) => {
   const _gitInfo = _getGitInfo();
   const localVersion = `${SERVER_VERSION} (${_gitInfo.hash})`;
 
-  res.json({
+  return {
     sessions: result,
     servers: [
       { name: getServerName(), url: null, online: true, needsAuth: false, version: localVersion },
       ...remotes.map(r => ({ name: r.server, url: r.url, online: r.online, needsAuth: r.needsAuth, version: r.version || '', directConnect: r.directConnect === true }))
     ]
-  });
+  };
+}
+
+app.get('/api/cluster/sessions', async (req, res) => {
+  // Direct-mode (issue #20): look up the current user from the session cookie so
+  // minted tokens bind to them. Cluster API calls via Bearer have no cookie —
+  // in that case we fall back to the configured server user.
+  const reqUser = (() => {
+    try {
+      const cookies = parseCookies(req.headers.cookie);
+      const tok = cookies[COOKIE_NAME];
+      if (!tok) return _USER;
+      const dot = tok.lastIndexOf('.');
+      if (dot === -1) return _USER;
+      const payload = Buffer.from(tok.substring(0, dot), 'base64').toString();
+      const colon = payload.indexOf(':');
+      return colon > 0 ? payload.substring(0, colon) : _USER;
+    } catch { return _USER; }
+  })();
+
+  try {
+    const now = Date.now();
+    let entry = _clusterSessionsCache.get(reqUser);
+    if (!entry || now - entry.ts > CLUSTER_SESSIONS_TTL_MS) {
+      entry = { ts: now, promise: _computeClusterSessions(reqUser).catch((e) => {
+        // On failure, evict so the next caller retries instead of getting cached error.
+        if (_clusterSessionsCache.get(reqUser) === entry) _clusterSessionsCache.delete(reqUser);
+        throw e;
+      }) };
+      _clusterSessionsCache.set(reqUser, entry);
+    }
+    const payload = await entry.promise;
+    res.json(payload);
+  } catch (e) {
+    console.error('cluster/sessions failed:', e.message);
+    res.status(500).json({ error: 'Failed to fetch cluster sessions' });
+  }
 });
 
 // Proxy API requests to remote servers
@@ -1616,13 +1661,17 @@ app.get('/api/sessions', async (req, res) => {
       lastActivity: s.lastActivity, autoCommand: s.autoCommand || '',
       claudeSessionId: s.claudeSessionId,
     }));
-    // Log when a remote server fetches our sessions (Bearer = cluster call)
+    // Log when a remote server fetches our sessions (Bearer = cluster call).
+    // Throttled to avoid hammering the disk: only logs on change or after
+    // CLUSTER_LOG_MIN_GAP_MS. Without this, peer polling produces multiple
+    // log lines per second and stalls the event loop on synchronous fs writes.
     if (req.headers.authorization && req.headers.authorization.startsWith('Bearer ')) {
       const summary = shaped.map(s => {
         const ageMins = s.lastActivity ? Math.round((Date.now() - s.lastActivity) / 60000) : '?';
         return `"${s.name}"(${s.status}, ${ageMins}m ago, ${s.clients} clients)`;
       }).join(', ');
-      console.log(`[${new Date().toISOString()}] Sessions served to cluster caller: ${shaped.length} sessions: ${summary}`);
+      _throttledClusterLog('served', `${shaped.length}|${summary}`,
+        (ts) => `[${ts}] Sessions served to cluster caller: ${shaped.length} sessions: ${summary}`);
     }
     res.json(shaped);
   } catch (e) {
