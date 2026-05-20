@@ -9,7 +9,7 @@ const { performance } = require('perf_hooks');
 const workerClientLib = require('./lib/worker-client');
 const { mintDirectToken, verifyDirectToken } = require('./lib/cluster-token');
 
-const SERVER_VERSION = '1.14.1';
+const SERVER_VERSION = '1.14.2';
 
 // --- Optional latency instrumentation (opt-in via WT_LATENCY_DEBUG=1) -----
 // Event-loop lag monitor: interval is 10ms; anything ≥ 50ms slip is a stall.
@@ -1182,6 +1182,7 @@ async function _computeClusterSessions(reqUser) {
         id: s.id, name: s.name, cwd: s.cwd, status: s.status,
         clients: s.clients || 0, pid: s.pid,
         lastActivity: s.lastActivity, autoCommand: s.autoCommand || '',
+        claudeSessionId: s.claudeSessionId,
         server: getServerName(), serverUrl: null,
       });
     }
