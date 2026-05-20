@@ -522,6 +522,37 @@
       };
     }
 
+    // Clipboard copy that also works in non-secure contexts (plain HTTP over
+    // LAN/tailscale IP), where navigator.clipboard is undefined. Without the
+    // fallback, copy attempts throw and Ctrl+C leaks through to the terminal
+    // as SIGINT — two of them exit Claude. Must not throw: callers rely on
+    // returning false from the key handler afterwards.
+    function copyToClipboard(text) {
+      if (!text) return;
+      if (navigator.clipboard && navigator.clipboard.writeText) {
+        navigator.clipboard.writeText(text).catch(() => execCommandCopy(text));
+        return;
+      }
+      execCommandCopy(text);
+    }
+    function execCommandCopy(text) {
+      try {
+        const prevFocus = document.activeElement;
+        const ta = document.createElement('textarea');
+        ta.value = text;
+        ta.setAttribute('readonly', '');
+        ta.style.position = 'fixed';
+        ta.style.top = '0';
+        ta.style.left = '-9999px';
+        document.body.appendChild(ta);
+        ta.focus();
+        ta.select();
+        document.execCommand('copy');
+        document.body.removeChild(ta);
+        if (prevFocus && prevFocus.focus) { try { prevFocus.focus(); } catch (e) {} }
+      } catch (e) { console.warn('Clipboard copy failed:', e); }
+    }
+
     const CLIENT_VERSION = '1.0.0';
 
     // --- Optional live typing-RTT overlay (enable with ?rtt=1 in URL) ------
@@ -1170,7 +1201,7 @@
         return false;
       }
       if ((e.ctrlKey || e.metaKey) && e.key === 'c' && term.hasSelection()) {
-        navigator.clipboard.writeText(term.getSelection());
+        copyToClipboard(term.getSelection());
         term.clearSelection();
         return false;
       }
@@ -1458,7 +1489,7 @@
         }
         // Ctrl+C with selection → copy
         if (stickyState.ctrl && data.toLowerCase() === 'c' && term.hasSelection()) {
-          navigator.clipboard.writeText(term.getSelection());
+          copyToClipboard(term.getSelection());
           term.clearSelection();
           clearSticky();
           return;
@@ -1753,7 +1784,7 @@
     function copySelection() {
       const sel = term.getSelection();
       if (sel) {
-        navigator.clipboard.writeText(sel);
+        copyToClipboard(sel);
         document.getElementById('selInfo').textContent = 'Copied!';
         setTimeout(() => exitSelectMode(), 600);
       }
@@ -1776,7 +1807,7 @@
           // Show copy/paste menu
           const sel = term.getSelection();
           const actions = [];
-          if (sel) actions.push({ label: 'Copy', action: () => { navigator.clipboard.writeText(sel); term.clearSelection(); } });
+          if (sel) actions.push({ label: 'Copy', action: () => { copyToClipboard(sel); term.clearSelection(); } });
           actions.push({ label: 'Paste', action: () => { navigator.clipboard.readText().then(t => { if (t && ws && ws.readyState === WebSocket.OPEN) ws.send(t); }); } });
           actions.push({ label: 'Paste Image', action: () => mobileImagePaste() });
           actions.push({ label: 'Select', action: () => enterSelectMode() });
