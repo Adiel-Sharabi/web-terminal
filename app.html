@@ -244,6 +244,33 @@
     #selectBar button:active { background: #00d4aa; color: #1a1a2e; }
     #selectBar .sel-info { color: #888; font: 11px 'Segoe UI', sans-serif; }
 
+    /* --- Mobile compose input bar --- */
+    #composeBar {
+      display: none; flex-shrink: 0; align-items: flex-end; gap: 6px;
+      background: #0a1a30; border-top: 1px solid #0f3460; padding: 6px 8px;
+    }
+    #composeInput {
+      flex: 1; min-width: 0; resize: none; height: 40px; max-height: 120px;
+      background: #1e1e1e; color: #e0e0e0; border: 1px solid #0f3460;
+      border-radius: 6px; padding: 9px 10px; overflow-y: auto;
+      font: 15px 'Cascadia Code', monospace; line-height: 1.25;
+    }
+    #composeInput:focus { border-color: #00d4aa; outline: none; }
+    #composeInput.live { border-color: #da4; background: #241f12; }
+    #composeAttachBtn, #composeSendBtn {
+      flex-shrink: 0; width: 44px; height: 44px; border-radius: 6px;
+      border: 1px solid #0f3460; cursor: pointer; -webkit-tap-highlight-color: transparent;
+      display: flex; align-items: center; justify-content: center;
+    }
+    #composeAttachBtn { background: #16213e; color: #aaa; font-size: 18px; }
+    #composeAttachBtn:active { background: #0f3460; }
+    #composeSendBtn { background: #00d4aa; color: #1a1a2e; font-size: 18px; font-weight: bold; }
+    #composeSendBtn:active { opacity: 0.8; }
+    #composeSendBtn:disabled { background: #2a3a4a; color: #667; }
+    /* compose/raw mode toggle — lives in the #touchKeys row, always visible */
+    #composeModeBtn { font-weight: 600; }
+    #composeModeBtn.compose-on { background: #00d4aa; color: #1a1a2e; border-color: #00d4aa; }
+
     /* --- Mobile ---
        Both breakpoints trigger the mobile layout: narrow portrait phones
        (max-width 600px) and short-height landscape phones (max-height 500px)
@@ -255,6 +282,7 @@
       #touchKeys { display: flex; align-items: center; margin-top: 32px; flex-wrap: wrap; height: auto; white-space: normal; }
       #touchKeys button { padding: 4px 8px; min-width: 32px; font-size: 11px; }
       #status { top: 70px; }
+      #scrollBtn { bottom: 92px; }
       #main { overflow-x: hidden; }
       /* On mobile the sidebar overlays the terminal as a full-width drawer
          instead of stealing layout space. Squishing the terminal to a 200-px
@@ -310,6 +338,7 @@
     <button onclick="exitSelectMode()">Done</button>
   </div>
   <div id="touchKeys">
+    <button data-action="composeMode" id="composeModeBtn" title="Toggle input mode (compose / raw)">Type</button>
     <button data-key="Escape" data-seq="\x1b">Esc</button>
     <button data-sticky="ctrl" class="sticky">Ctrl</button>
     <button data-sticky="alt" class="sticky">Alt</button>
@@ -379,6 +408,14 @@
         <div style="font-size:13px;margin-top:8px;color:#444">Open the sidebar and create a new session</div>
       </div>
     </div>
+  </div>
+  <!-- Mobile compose input bar — type into a buffer, Send to flush. A line
+       starting with "/" streams live so Claude's own slash menu narrows. -->
+  <div id="composeBar">
+    <textarea id="composeInput" rows="1" enterkeyhint="send" autocapitalize="off"
+      autocomplete="off" spellcheck="false" placeholder="Type a message — / for commands"></textarea>
+    <button id="composeAttachBtn" onclick="mobileImagePaste()" title="Attach image">&#128247;</button>
+    <button id="composeSendBtn" onclick="composeSend()" title="Send">&#9658;</button>
   </div>
   <button id="scrollBtn" onclick="scrollToBottom()" title="Scroll to bottom">&#8595;</button>
 
@@ -587,6 +624,15 @@
     let defaultCommand = '';
     var clusterServers = []; // cached from last fetch
     let keepSessionsOpen = true;
+    // --- Mobile compose-input state ---
+    let composeMode = false;        // true = type into a buffer, Send to flush (mobile only)
+    let composeLive = false;        // true while the current line is a '/'-prefixed live-streamed line
+    let composeLiveSent = '';       // chars already streamed to the terminal for the live line
+    let composeHistory = [];        // last 50 sent buffers (sessionStorage-backed)
+    let composeHistoryIdx = 0;
+    let composeHistoryActive = false; // true while walking history (so further ↑/↓ keep walking)
+    let _composeBarH = 0;           // last applied compose-input height — skip redundant refits
+    const composeDrafts = new Map(); // sessionId -> uncommitted buffer text, restored on switch-back
     const browserId = sessionStorage.getItem('wt_browserId') || (() => {
       const id = crypto.randomUUID();
       sessionStorage.setItem('wt_browserId', id);
@@ -885,6 +931,9 @@
 
     function switchSession(id, serverUrl) {
       if (id === sessionId && serverUrl === sessionServerUrl) return;
+      // Stash the outgoing session's uncommitted compose buffer (a live
+      // '/'-line is mid-stream against the old terminal — discard it).
+      if (composeMode && sessionId && !composeLive) composeDrafts.set(sessionId, composeInput.value);
       switching = true;
       if (reconnectTimer) { clearTimeout(reconnectTimer); reconnectTimer = null; }
       hideReconnectOverlay();
@@ -1023,6 +1072,17 @@
         // No cache hit — fresh connect (same as legacy path)
         if (cached) cleanupCacheEntry(id); // clean up stale cache entry
         connect();
+      }
+
+      // Restore the incoming session's compose draft (if any).
+      if (composeMode) {
+        composeLive = false;
+        composeLiveSent = '';
+        composeInput.value = composeDrafts.get(id) || '';
+        composeInput.classList.remove('live');
+        composeHistoryActive = false;
+        autosizeCompose();
+        updateComposeSendBtn();
       }
 
       updateToolbar();
@@ -1216,8 +1276,144 @@
       getWord: () => _mobileWord,
     };
 
+    // --- Mobile compose input bar -------------------------------------------
+    // Raw per-keystroke passthrough fights the device keyboard's composition /
+    // autocorrect / swipe behaviour (duplications, lag, broken autocomplete).
+    // Compose mode lets the user type into a normal <textarea> — full native
+    // keyboard behaviour — then flush the whole buffer on Send. A '/'-prefixed
+    // line is the exception: it streams to the terminal live (prefix-diff) so
+    // Claude's own dynamic slash-command menu renders and narrows as you type.
+    // Raw mode (toggle in the #touchKeys row) restores per-keystroke
+    // passthrough for full-screen TUIs (vim, htop).
+    const composeInput = document.getElementById('composeInput');
+    const composeBar = document.getElementById('composeBar');
+    const composeSendBtn = document.getElementById('composeSendBtn');
+    try { composeHistory = JSON.parse(sessionStorage.getItem('wt_composeHistory')) || []; } catch (e) { composeHistory = []; }
+    composeHistoryIdx = composeHistory.length;
+
+    function updateComposeSendBtn() {
+      composeSendBtn.disabled = composeInput.value === '' && !composeLive;
+    }
+    function autosizeCompose() {
+      composeInput.style.height = 'auto';
+      const h = Math.min(composeInput.scrollHeight, 120);
+      composeInput.style.height = h + 'px';
+      // The bar's height only changes when the buffer wraps to a new line —
+      // refit the terminal then, not on every keystroke.
+      if (h !== _composeBarH) { _composeBarH = h; doResize(); }
+    }
+    function clearComposeInput() {
+      composeInput.value = '';
+      composeLive = false;
+      composeLiveSent = '';
+      composeInput.classList.remove('live');
+      composeHistoryActive = false;
+      autosizeCompose();
+      updateComposeSendBtn();
+    }
+    function pushComposeHistory(text) {
+      text = (text || '').replace(/[\r\n]+$/, '');
+      if (!text) return;
+      if (composeHistory[composeHistory.length - 1] !== text) composeHistory.push(text);
+      if (composeHistory.length > 50) composeHistory = composeHistory.slice(-50);
+      try { sessionStorage.setItem('wt_composeHistory', JSON.stringify(composeHistory)); } catch (e) {}
+      composeHistoryIdx = composeHistory.length;
+      composeHistoryActive = false;
+    }
+    function composeHistoryNav(dir) {
+      if (composeHistory.length === 0) return;
+      if (!composeHistoryActive) { composeHistoryIdx = composeHistory.length; composeHistoryActive = true; }
+      composeHistoryIdx = Math.max(0, Math.min(composeHistory.length, composeHistoryIdx + dir));
+      composeInput.value = composeHistoryIdx >= composeHistory.length ? '' : composeHistory[composeHistoryIdx];
+      autosizeCompose();
+      updateComposeSendBtn();
+    }
+    // Stream the prefix-diff between what we've already sent for the live line
+    // and the textarea's current value: backspaces erase removed chars, then
+    // the new suffix follows. Self-correcting against keyboard re-sends.
+    function composeStreamLive(val) {
+      let i = 0;
+      const n = Math.min(composeLiveSent.length, val.length);
+      while (i < n && composeLiveSent[i] === val[i]) i++;
+      const out = '\x7f'.repeat(composeLiveSent.length - i) + val.slice(i).replace(/\n/g, '\r');
+      composeLiveSent = val;
+      if (out) sendInput(out);
+    }
+    function composeSend() {
+      if (!ws || ws.readyState !== WebSocket.OPEN) return; // WS down — keep the buffer
+      const val = composeInput.value;
+      if (composeLive) {
+        // Body already streamed char-by-char; just commit with CR.
+        sendInput('\r');
+        pushComposeHistory(val);
+        clearComposeInput();
+        return;
+      }
+      if (val === '') { sendInput('\r'); return; } // bare Enter on an empty buffer
+      if (val.includes('\n')) {
+        // Multi-line: bracketed paste so Claude / readline treat it atomically.
+        // Strip any bracketed-paste markers in the buffer first so user content
+        // cannot prematurely close our wrapper.
+        const safe = val.replace(/\x1b\[2(?:00|01)~/g, '').replace(/\r?\n/g, '\r');
+        sendInput('\x1b[200~' + safe + '\x1b[201~\r');
+      } else {
+        sendInput(val + '\r');
+      }
+      pushComposeHistory(val);
+      clearComposeInput();
+    }
+    function applyComposeMode() {
+      const modeBtn = document.getElementById('composeModeBtn');
+      if (composeMode) {
+        composeBar.style.display = 'flex';
+        if (modeBtn) { modeBtn.textContent = 'Type'; modeBtn.classList.add('compose-on'); }
+        setTimeout(() => { try { composeInput.focus(); } catch (e) {} }, 60);
+      } else {
+        composeBar.style.display = 'none';
+        if (modeBtn) { modeBtn.textContent = 'Raw'; modeBtn.classList.remove('compose-on'); }
+        try { term.focus(); } catch (e) {}
+      }
+      _composeBarH = 0;
+      doResize();
+    }
+    function toggleComposeMode() {
+      if (composeMode && composeInput.value &&
+          !confirm('Discard typed text and switch to raw mode?')) return;
+      if (composeMode) clearComposeInput();
+      composeMode = !composeMode;
+      try { localStorage.setItem('wt_composeMode', composeMode ? '1' : '0'); } catch (e) {}
+      applyComposeMode();
+    }
+    composeInput.addEventListener('input', () => {
+      composeHistoryActive = false; // any manual edit ends history walking
+      const val = composeInput.value;
+      // A buffer starting with '/' goes live: stream to the terminal so
+      // Claude's own slash menu renders. Stays live until Enter or empty.
+      if (!composeLive && val.charAt(0) === '/') { composeLive = true; composeLiveSent = ''; }
+      if (composeLive) {
+        composeStreamLive(val);
+        if (val === '') { composeLive = false; composeLiveSent = ''; }
+      }
+      composeInput.classList.toggle('live', composeLive);
+      updateComposeSendBtn();
+      autosizeCompose();
+    });
+    composeInput.addEventListener('keydown', (e) => {
+      if (e.key === 'Enter' && !e.shiftKey) {
+        if (e.isComposing) return; // let the IME finish committing first
+        e.preventDefault();
+        composeSend();
+      }
+    });
+
+    // Compose mode is on by default for mobile; a per-browser localStorage
+    // override (set by the in-bar toggle) always wins. Desktop is never compose.
+    composeMode = isMobile && (localStorage.getItem('wt_composeMode') !== '0');
+    applyComposeMode();
+    updateComposeSendBtn();
+
     term.onData(data => {
-      if (isMobile) {
+      if (isMobile && !composeMode) {
         const now = Date.now();
         // 1. Rapid exact duplicate of a non-word char (single-char double-fire
         //    on punctuation/space/enter). We intentionally exclude word chars
@@ -1371,6 +1567,31 @@
       const btn = e.target.closest('button');
       if (!btn) return;
 
+      // Compose/raw mode toggle button
+      if (btn.dataset.action === 'composeMode') { toggleComposeMode(); return; }
+
+      // In compose mode the #touchKeys arrows drive the compose buffer, not
+      // the terminal: ↑/↓ walk send-history, ←/→ move the textarea caret.
+      // (composeLive lines are exempt — there the arrows pass through so they
+      // navigate Claude's live slash menu.)
+      if (composeMode && !composeLive && document.activeElement === composeInput) {
+        const k = btn.dataset.key;
+        if (k === 'ArrowUp' || k === 'ArrowDown') {
+          if (composeInput.value === '' || composeHistoryActive) {
+            composeHistoryNav(k === 'ArrowUp' ? -1 : 1);
+          }
+          try { composeInput.focus(); } catch (e2) {}
+          return;
+        }
+        if (k === 'ArrowLeft' || k === 'ArrowRight') {
+          const pos = Math.max(0, Math.min(composeInput.value.length,
+            (composeInput.selectionStart || 0) + (k === 'ArrowLeft' ? -1 : 1)));
+          composeInput.setSelectionRange(pos, pos);
+          try { composeInput.focus(); } catch (e2) {}
+          return;
+        }
+      }
+
       // Sticky modifier keys (Ctrl, Alt, Shift)
       const sticky = btn.dataset.sticky;
       if (sticky) {
@@ -1411,7 +1632,8 @@
         clearSticky();
       }
 
-      term.focus();
+      if (composeMode) { try { composeInput.focus(); } catch (e2) {} }
+      else term.focus();
     }
     // touchend for mobile (since we preventDefault on touchstart, click won't fire)
     document.getElementById('touchKeys').addEventListener('touchend', (e) => {
@@ -1514,6 +1736,8 @@
       selectMode = true;
       selStart = null;
       term.clearSelection();
+      // Drop the soft keyboard so the full terminal is reachable for the drag.
+      if (composeMode) { try { composeInput.blur(); } catch (e) {} }
       document.getElementById('selectBar').classList.add('show');
       document.getElementById('selInfo').textContent = 'Drag to select text';
     }
@@ -1523,6 +1747,7 @@
       selStart = null;
       term.clearSelection();
       document.getElementById('selectBar').classList.remove('show');
+      if (composeMode) { try { composeInput.focus(); } catch (e) {} }
     }
 
     function copySelection() {
@@ -1583,9 +1808,13 @@
       termEl.addEventListener('touchend', (e) => {
         if (selectMode) { selStart = null; return; }
         if (longPressTimer) {
-          // Quick tap (not long-press) — move cursor to tapped column
           clearTimeout(longPressTimer); longPressTimer = null;
-          if (e.changedTouches.length === 1 && ws && ws.readyState === WebSocket.OPEN) {
+          if (composeMode) {
+            // In compose mode the terminal is display-only — a tap just
+            // returns focus to the compose input (don't move the shell cursor).
+            try { composeInput.focus(); } catch (e2) {}
+          } else if (e.changedTouches.length === 1 && ws && ws.readyState === WebSocket.OPEN) {
+            // Quick tap (not long-press) — move cursor to tapped column
             const tapped = touchToCell(e.changedTouches[0]);
             if (tapped) {
               const cursorCol = term.buffer.active.cursorX;
