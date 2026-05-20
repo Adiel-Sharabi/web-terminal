@@ -25,6 +25,10 @@ const pixel5 = devices['Pixel 5'];
  *     user's typed input. */
 function swiftkeyInitScript() {
   return () => {
+    // The IME dedup heuristic only runs in raw mode — compose mode (the mobile
+    // default) bypasses term.onData entirely. These tests exercise the dedup
+    // path, so force raw mode before the app boots.
+    try { localStorage.setItem('wt_composeMode', '0'); } catch (e) {}
     window.__wtSends = [];
     const origSend = WebSocket.prototype.send;
     WebSocket.prototype.send = function(data) {

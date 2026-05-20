@@ -62,10 +62,12 @@ Web Terminal solves all of this, running as a single `node monitor.js` on each h
 
 ### Mobile & PWA
 - **Progressive Web App** — install as standalone app; name reflects server name
-- **Touch toolbar** — Esc, Ctrl, Alt, Shift (sticky), Tab, arrows, plus `/`, `|`, `-`, `~`
+- **Compose input bar** — on mobile, type into a normal text field with full native keyboard behaviour (autocomplete, swipe, predictive text), then **Send** (or Enter) to flush the whole buffer to the terminal. Sidesteps the duplication / lag / broken autocomplete that comes from streaming every keystroke of a composition-oriented mobile keyboard into a terminal. Shift+Enter inserts a newline; multi-line buffers are sent as a bracketed paste. ↑/↓ on the touch toolbar walk send-history, ←/→ move the caret. A line starting with `/` streams live so Claude's own slash-command menu renders and narrows as you type.
+- **Compose / Raw toggle** — a button in the touch toolbar switches between compose mode (default on mobile) and raw per-keystroke passthrough for full-screen TUIs (vim, htop, less). The choice persists per browser.
+- **Touch toolbar** — compose/raw toggle, Esc, Ctrl, Alt, Shift (sticky), Tab, arrows, plus `/`, `|`, `-`, `~`
 - **Long-press context menu** — Copy, Paste, Paste Image, Select, Select All
 - **Drag-to-select** — character count shown, floating Copy/Done bar
-- **IME deduplication & autocorrect** — handles Android keyboard (SwiftKey, Gboard) composition re-sends without duplication; autocorrect changes are transparently applied via backspace rewrite so the corrected word reaches the shell once
+- **IME deduplication & autocorrect** — in raw mode, handles Android keyboard (SwiftKey, Gboard) composition re-sends without duplication; autocorrect changes are transparently applied via backspace rewrite so the corrected word reaches the shell once
 - **Responsive layout** — adapts to phone, tablet, and desktop
 
 ### Security
