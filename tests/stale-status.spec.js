@@ -74,10 +74,14 @@ test.describe('Stale session status detection', () => {
     await ctx.post(`/api/session/${sessionId}/hook`, {
       data: { event: 'UserPromptSubmit' },
     });
-    // Then Stop
+    // Then Stop — debounced through processHookEvent so we wait the window
+    // before asserting. The debounce keeps "Stop between agentic turns" from
+    // briefly flashing "stopped" in the UI; see server.js HOOK_STOP_DEBOUNCE_MS.
     await ctx.post(`/api/session/${sessionId}/hook`, {
       data: { event: 'Stop' },
     });
+    const debounceMs = parseInt(process.env.WT_HOOK_STOP_DEBOUNCE_MS, 10) || 200;
+    await new Promise(r => setTimeout(r, debounceMs + 400));
     const res = await ctx.get('/api/sessions');
     const s = (await res.json()).find(s => s.id === sessionId);
     expect(s.status).toBe('idle');
@@ -142,10 +146,13 @@ test.describe('Stale session status detection', () => {
   });
 
   test('"idle" sessions are NOT affected by stale detection even if old', async () => {
-    // Set to idle
+    // Set to idle — Stop is debounced in server.js, so wait the window before
+    // continuing or the session will still be in the pre-Stop state.
     await ctx.post(`/api/session/${sessionId}/hook`, {
       data: { event: 'Stop' },
     });
+    const debounceMs = parseInt(process.env.WT_HOOK_STOP_DEBOUNCE_MS, 10) || 200;
+    await new Promise(r => setTimeout(r, debounceMs + 400));
 
     // Age it
     await ctx.post(`/api/test/age-session/${sessionId}`, {

@@ -38,6 +38,9 @@ module.exports = defineConfig({
         : '/tmp/web-terminal-pty-test.sock',
       // Issue #18: shared handshake token for server.js <-> pty-worker IPC.
       WT_IPC_TOKEN: TEST_IPC_TOKEN,
+      // Shorten the hook-event idle debounce so tests don't wait 750ms per
+      // debounce assertion. server.js reads this on startup.
+      WT_HOOK_STOP_DEBOUNCE_MS: '200',
     },
     reuseExistingServer: false,
     timeout: 30000,

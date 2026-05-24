@@ -240,7 +240,8 @@ For real-time session status (Working/Idle/Waiting), configure Claude Code hooks
     "PreToolUse": [{"hooks": [{"type": "http", "url": "http://127.0.0.1:7681/api/hook", "headers": {"X-WT-Session-ID": "$WT_SESSION_ID", "X-WT-Hook-Token": "$WT_HOOK_TOKEN"}, "allowedEnvVars": ["WT_SESSION_ID", "WT_HOOK_TOKEN"]}]}],
     "PostToolUse": [{"hooks": [{"type": "http", "url": "http://127.0.0.1:7681/api/hook", "headers": {"X-WT-Session-ID": "$WT_SESSION_ID", "X-WT-Hook-Token": "$WT_HOOK_TOKEN"}, "allowedEnvVars": ["WT_SESSION_ID", "WT_HOOK_TOKEN"]}]}],
     "Notification": [{"hooks": [{"type": "http", "url": "http://127.0.0.1:7681/api/hook", "headers": {"X-WT-Session-ID": "$WT_SESSION_ID", "X-WT-Hook-Token": "$WT_HOOK_TOKEN"}, "allowedEnvVars": ["WT_SESSION_ID", "WT_HOOK_TOKEN"]}]}],
-    "Stop": [{"hooks": [{"type": "http", "url": "http://127.0.0.1:7681/api/hook", "headers": {"X-WT-Session-ID": "$WT_SESSION_ID", "X-WT-Hook-Token": "$WT_HOOK_TOKEN"}, "allowedEnvVars": ["WT_SESSION_ID", "WT_HOOK_TOKEN"]}]}]
+    "Stop": [{"hooks": [{"type": "http", "url": "http://127.0.0.1:7681/api/hook", "headers": {"X-WT-Session-ID": "$WT_SESSION_ID", "X-WT-Hook-Token": "$WT_HOOK_TOKEN"}, "allowedEnvVars": ["WT_SESSION_ID", "WT_HOOK_TOKEN"]}]}],
+    "SubagentStop": [{"hooks": [{"type": "http", "url": "http://127.0.0.1:7681/api/hook", "headers": {"X-WT-Session-ID": "$WT_SESSION_ID", "X-WT-Hook-Token": "$WT_HOOK_TOKEN"}, "allowedEnvVars": ["WT_SESSION_ID", "WT_HOOK_TOKEN"]}]}]
   }
 }
 ```
@@ -248,6 +249,14 @@ For real-time session status (Working/Idle/Waiting), configure Claude Code hooks
 The HTTP hook type sends requests directly — no subprocess, no console window flash on Windows. Sessions started outside the web terminal (regular CLI) don't have `WT_HOOK_TOKEN` set, so their hook requests are rejected with 401 (harmless — status just doesn't update for non-web sessions). The token is auto-generated per install into `.hook-token` (chmod 0600 on unix) and exposed to spawned shells via the `WT_HOOK_TOKEN` env var.
 
 `PreToolUse` / `PostToolUse` are required — they fire on every tool call and act as a heartbeat that keeps the status dot showing **Working** during long Claude turns. Without them, the worker's stale-status guard (5-min timeout) flips long-running sessions to **Idle** even while Claude is actively working. `SubagentStart` is needed for the same reason during subagent runs.
+
+### Hook event transform
+
+Claude's raw hook stream produces noisy status (every `Notification` subtype shares one event name; `Stop` fires between agentic turns even when the next turn starts a few ms later; `Stop` inside a subagent is auto-converted to `SubagentStop`). `server.js` reshapes the events before they hit the worker:
+
+- `Notification` is demuxed by payload (`notification_type` / `message`): permission prompts → **Waiting**, idle prompts → **Idle**, others → dropped.
+- `Stop` and idle Notification are debounced (~750ms, override with `WT_HOOK_STOP_DEBOUNCE_MS`). Any working event arriving in the window cancels the idle transition, eliminating the "flash of stopped" between agentic turns.
+- `SubagentStop` is dropped — the parent agent is still working and its own events will move status correctly.
 
 ## Remote Access via Tailscale
 
