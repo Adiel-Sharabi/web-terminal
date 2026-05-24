@@ -763,11 +763,19 @@ test.describe('Session Hook', () => {
     const s = list.find(x => x.id === id);
     expect(s.status).toBe('working');
 
-    // Notification event changes to idle
+    // Notification with idle_prompt subtype eventually maps to idle (debounced
+    // in the server.js transform layer — see processHookEvent). The HTTP
+    // response is "pending" while the timer is running, then status flips to
+    // "idle" once the window expires with no follow-up working event.
     const res2 = await raw.post(`${BASE}/api/session/${id}/hook`, {
-      data: { event: 'Notification' }
+      data: { event: 'Notification', notification_type: 'idle_prompt', message: 'Claude is waiting for your input' }
     });
-    expect((await res2.json()).status).toBe('idle');
+    expect((await res2.json()).status).toBe('pending');
+
+    const debounceMs = parseInt(process.env.WT_HOOK_STOP_DEBOUNCE_MS, 10) || 200;
+    await new Promise(r => setTimeout(r, debounceMs + 400));
+    const list2 = await (await ctx.get(`${BASE}/api/sessions`)).json();
+    expect(list2.find(x => x.id === id).status).toBe('idle');
 
     // Cleanup
     await ctx.delete(`${BASE}/api/sessions/${id}`);

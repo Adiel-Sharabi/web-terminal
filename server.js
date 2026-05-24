@@ -9,7 +9,7 @@ const { performance } = require('perf_hooks');
 const workerClientLib = require('./lib/worker-client');
 const { mintDirectToken, verifyDirectToken } = require('./lib/cluster-token');
 
-const SERVER_VERSION = '1.14.2';
+const SERVER_VERSION = '1.14.3';
 
 // --- Optional latency instrumentation (opt-in via WT_LATENCY_DEBUG=1) -----
 // Event-loop lag monitor: interval is 10ms; anything ≥ 50ms slip is a stall.
@@ -359,6 +359,7 @@ workerClient.on('statusChanged', ({ id, status, notifyType, notifyMsg }) => {
 });
 
 workerClient.on('sessionExited', ({ id }) => {
+  hookForgetSession(id);
   const set = sessionClients.get(id);
   if (set) {
     for (const client of set) {
@@ -768,6 +769,136 @@ app.post('/api/auth/token', express.json({ limit: '16kb' }), (req, res) => {
 // can exceed 16kb easily (e.g. Bash output, file reads). Bumped to 256kb to
 // stop the steady drip of PayloadTooLargeError in error.log without
 // accepting unbounded payloads.
+//
+// --- Hook event transform layer ---
+// Claude's raw events alone produce noisy status: every Notification subtype
+// (permission_prompt, idle_prompt, auth_success, elicitation_dialog) maps to
+// the same hook_event_name, Stop fires between agentic turns even when the
+// next turn starts ms later, and SubagentStop (which Stop auto-converts to
+// inside an Agent tool) was previously dropped on the floor. We shape events
+// here so the worker only sees clean transitions:
+//   - Notification: read the payload `message` to decide
+//       permission text  → PermissionRequest (waiting)
+//       idle text        → Notification     (idle, after Claude's own 60s)
+//       anything else    → dropped (don't flip status)
+//   - Stop / Notification(idle): held for HOOK_STOP_DEBOUNCE_MS. Any non-idle
+//     event arriving during the window cancels the pending idle so the user
+//     never sees a flash of "stopped" between agentic turns.
+//   - SubagentStop: dropped. The parent agent is still working; the next
+//     PreToolUse/Stop from the parent will move status correctly.
+const HOOK_STOP_DEBOUNCE_MS = parseInt(process.env.WT_HOOK_STOP_DEBOUNCE_MS, 10) || 750;
+const _hookState = new Map(); // sessionId -> { pendingIdle, lastSeq }
+let _hookSeqCounter = 0;
+// Same regex the worker uses to reject non-UUID session ids. Mirrored here so
+// processHookEvent can return a clean "session not found" before kicking off
+// a debounce timer for an id that the worker would never accept anyway.
+const _HOOK_UUID_RE = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
+const _isWorkingEvent = (e) =>
+  e === 'UserPromptSubmit' || e === 'PreToolUse' || e === 'PostToolUse' ||
+  e === 'SubagentStart' || e === 'PermissionRequest';
+
+function _hookGetState(id) {
+  let s = _hookState.get(id);
+  if (!s) { s = { pendingIdle: null, lastSeq: 0 }; _hookState.set(id, s); }
+  return s;
+}
+function _hookCancelPending(state) {
+  if (state.pendingIdle) {
+    clearTimeout(state.pendingIdle.timer);
+    state.pendingIdle = null;
+  }
+}
+function _classifyNotification(body) {
+  // Claude payload shape varies by version; check the common fields. The
+  // matcher value comes through as `notification_type` in newer versions and
+  // as part of `message` in older ones — match both.
+  const matcher = String(body?.notification_type || body?.matcher || '').toLowerCase();
+  const msg = String(body?.message || '').toLowerCase();
+  if (matcher === 'permission_prompt' || /\bpermission\b|\bapprov/.test(msg)) return 'permission';
+  if (matcher === 'idle_prompt' || /waiting for your input|idle/.test(msg)) return 'idle';
+  if (matcher === 'auth_success' || matcher === 'elicitation_dialog') return 'drop';
+  return 'drop';
+}
+
+// Drop tracked state when a session is removed so we don't leak Maps.
+function hookForgetSession(id) {
+  const s = _hookState.get(id);
+  if (s) { _hookCancelPending(s); _hookState.delete(id); }
+}
+
+// Returns { status } like the worker RPC. Resolves immediately for transient
+// transforms (drop/debounce) so the calling HTTP handler can reply.
+async function processHookEvent(id, rawEvent, claudeSessionId, body) {
+  if (!id || !rawEvent) return { status: 'unchanged', skipped: 'no id/event' };
+
+  // SubagentStop: parent is still in the loop, ignore entirely. Bail before
+  // any state allocation so a flood of SubagentStops can't grow _hookState.
+  if (rawEvent === 'SubagentStop') {
+    return { status: 'unchanged', skipped: 'subagent-stop' };
+  }
+
+  // Reject invalid session ids before any state allocation or debounce
+  // scheduling so callers get a real 404 instead of a fire-and-forget 200,
+  // and a flood of bogus ids can't grow _hookState. The worker uses the
+  // same regex, so anything that fails here would have failed at the worker.
+  if (!_HOOK_UUID_RE.test(id)) {
+    throw new Error('session not found');
+  }
+
+  const state = _hookGetState(id);
+  const seq = ++_hookSeqCounter;
+
+  let event = rawEvent;
+  let isIdleEvent = false;
+
+  if (event === 'Notification') {
+    const kind = _classifyNotification(body);
+    if (kind === 'permission') { event = 'PermissionRequest'; }
+    else if (kind === 'idle')  { event = 'Notification'; isIdleEvent = true; }
+    else                       { return { status: 'unchanged', skipped: 'notification-other' }; }
+  } else if (event === 'Stop') {
+    isIdleEvent = true;
+  }
+
+  // Any working signal cancels a pending idle (the agent is clearly still
+  // active — Stop between turns was a false alarm).
+  if (_isWorkingEvent(event) && state.pendingIdle) {
+    _hookCancelPending(state);
+  }
+
+  if (isIdleEvent) {
+    // Coalesce: replace any prior pending idle with this one. The debounce
+    // window starts from the latest idle event we saw.
+    _hookCancelPending(state);
+    state.pendingIdle = {
+      event,
+      claudeSessionId,
+      seq,
+      timer: setTimeout(() => {
+        const s = _hookState.get(id);
+        if (!s || !s.pendingIdle || s.pendingIdle.seq !== seq) return;
+        const { event: pendingEvent, claudeSessionId: pendingCsid } = s.pendingIdle;
+        s.pendingIdle = null;
+        workerClient.rpc('hookEvent', { id, event: pendingEvent, claudeSessionId: pendingCsid })
+          .catch(() => {})
+          .finally(() => {
+            // Drop the state entry if nothing else is keeping it alive. This
+            // keeps the map from accumulating one entry per UUID that ever
+            // sent us an idle event (incl. valid-format UUIDs the worker
+            // rejected as "not found").
+            const cur = _hookState.get(id);
+            if (cur && !cur.pendingIdle) _hookState.delete(id);
+          });
+      }, HOOK_STOP_DEBOUNCE_MS),
+    };
+    if (typeof state.pendingIdle.timer.unref === 'function') state.pendingIdle.timer.unref();
+    return { status: 'pending', deferred: event };
+  }
+
+  state.lastSeq = seq;
+  return workerClient.rpc('hookEvent', { id, event, claudeSessionId });
+}
+
 app.post('/api/hook', express.json({ limit: '256kb' }), async (req, res) => {
   if (!isLocalhostReq(req) && !verifyHookToken(req.headers['x-wt-hook-token'])) {
     return res.status(401).json({ error: 'Unauthorized' });
@@ -777,8 +908,8 @@ app.post('/api/hook', express.json({ limit: '256kb' }), async (req, res) => {
   const event = req.body?.hook_event_name || req.body?.event;
   const claudeSessionId = req.body?.session_id;
   try {
-    const result = await workerClient.rpc('hookEvent', { id, event, claudeSessionId });
-    res.json({ ok: true, status: result.status });
+    const result = await processHookEvent(id, event, claudeSessionId, req.body);
+    res.json({ ok: true, status: result.status, ...(result.skipped ? { skipped: result.skipped } : {}), ...(result.deferred ? { deferred: result.deferred } : {}) });
   } catch (e) {
     if (/not found/i.test(e.message)) return res.json({ ok: true, skipped: 'session not found' });
     res.status(500).json({ error: e.message });
@@ -792,8 +923,8 @@ app.post('/api/session/:id/hook', express.json({ limit: '256kb' }), async (req, 
   if (!event) return res.status(400).json({ error: 'event required' });
   const claudeSessionId = req.body?.session_id;
   try {
-    const result = await workerClient.rpc('hookEvent', { id: req.params.id, event, claudeSessionId });
-    res.json({ ok: true, status: result.status });
+    const result = await processHookEvent(req.params.id, event, claudeSessionId, req.body);
+    res.json({ ok: true, status: result.status, ...(result.skipped ? { skipped: result.skipped } : {}), ...(result.deferred ? { deferred: result.deferred } : {}) });
   } catch (e) {
     if (/not found/i.test(e.message)) return res.status(404).json({ error: 'session not found' });
     if (/event required/i.test(e.message)) return res.status(400).json({ error: 'event required' });
