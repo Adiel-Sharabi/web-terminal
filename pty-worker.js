@@ -37,6 +37,25 @@ function _slowOpLog(name, dur) {
 const STALE_STATUS_TIMEOUT_MS = 5 * 60 * 1000;
 const MAX_SCROLLBACK_SIZE = 2 * 1024 * 1024;
 
+// Bracketed-paste mode (DECSET/DECRST 2004). Apps like Claude Code enable it
+// once at startup with ESC[?2004h. xterm.js only wraps pastes in the
+// ESC[200~ … ESC[201~ markers while that mode is on — without them a
+// multi-line paste sends bare CRs, so each line submits and only the last one
+// survives. The enable sequence scrolls out of the capped scrollback buffer on
+// long sessions, so a freshly-opened browser tab (re-attach) never sees it. We
+// track the mode per session from the PTY stream and re-assert it on attach.
+const BP_ON = Buffer.from('\x1b[?2004h');
+const BP_OFF = Buffer.from('\x1b[?2004l');
+// Returns the resulting bracketed-paste state if `buf` contains a 2004 toggle,
+// else null (leave the session's current state unchanged). Whichever marker
+// appears last in the chunk wins.
+function scanBracketedPaste(buf) {
+  const on = buf.lastIndexOf(BP_ON);
+  const off = buf.lastIndexOf(BP_OFF);
+  if (on === -1 && off === -1) return null;
+  return on > off;
+}
+
 // --- Config ----------------------------------------------------------------
 // Pipe path — overrideable for tests
 const PIPE_PATH = process.env.WT_WORKER_PIPE || (
@@ -677,6 +696,9 @@ function createSession(id, cwd, name, autoCommand, savedScrollback, claudeSessio
     autoCommand: autoCommand || '',
     claudeSessionId: claudeSessionId || null,
     clientCount: 0,
+    // Bracketed-paste mode (ESC[?2004h/l), tracked from PTY output and
+    // re-asserted on attach. Seed from any carry-over/restored scrollback.
+    bracketedPaste: scanBracketedPaste(concatScrollback(scrollback)) === true,
     // Issue #10: set to true whenever scrollback is mutated (term.onData,
     // test injection). Cleared by saveScrollback on successful save. The
     // periodic saveAllScrollback(sync=false, force=false) skips sessions
@@ -698,6 +720,10 @@ function createSession(id, cwd, name, autoCommand, savedScrollback, claudeSessio
     //   but it's still a strict win over the old code, which did one Buffer
     //   allocation per BROADCAST DESTINATION (N subscribers = N allocs).
     const buf = Buffer.isBuffer(data) ? data : Buffer.from(data, 'utf8');
+    // Track bracketed-paste mode so we can re-assert it on re-attach (the
+    // enable sequence may have scrolled out of the replayed scrollback).
+    const bp = scanBracketedPaste(buf);
+    if (bp !== null) session.bracketedPaste = bp;
     // Issue #12: append a chunk (O(1)) and head-trim past MAX_SCROLLBACK_SIZE.
     // No join/reduce on the hot path — readers concat once per call.
     appendScrollback(session.scrollback, buf);
@@ -1005,6 +1031,13 @@ const rpcHandlers = {
     // longer re-allocate-and-free the full scrollback per call.
     let full = concatScrollback(session.scrollback);
     if (full.length > limit) full = full.slice(-limit);
+    // Re-assert bracketed-paste mode for the freshly-attached terminal. If the
+    // app turned it on but the enable sequence has scrolled out of `full`, the
+    // new xterm would otherwise default to off and break multi-line paste.
+    // Prepending is safe: any 2004 toggles inside the replay still apply in
+    // order, so the final state matches what the app actually wants.
+    // (concatScrollback returns a UTF-8 string; the marker is pure ASCII.)
+    if (session.bracketedPaste) full = '\x1b[?2004h' + full;
     return { clients: session.clientCount, scrollback: full };
   },
 
@@ -1095,6 +1128,9 @@ const rpcHandlers = {
         throw new Error('hex must be an even-length hex string');
       }
       const buf = Buffer.from(hex, 'hex');
+      // Mimic term.onData: track bracketed-paste mode from the injected bytes.
+      const bp = scanBracketedPaste(buf);
+      if (bp !== null) session.bracketedPaste = bp;
       appendScrollback(session.scrollback, buf);
       trimScrollback(session.scrollback, MAX_SCROLLBACK_SIZE);
       session.dirty = true;
