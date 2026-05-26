@@ -1161,6 +1161,26 @@
     }
 
     // --- Clipboard ---
+    // Paste text into the terminal. Multi-line paste depends on bracketed
+    // paste (ESC[200~ … ESC[201~) so the receiving app (Claude Code, bash,
+    // readline) treats it as one block; without it the embedded CRs each act
+    // as Enter and only the last line survives. xterm.paste() only adds the
+    // markers when it has observed the app's ESC[?2004h — but on a long
+    // session that enable scrolls out of the replayed scrollback, so a freshly
+    // opened tab's xterm has the mode off. When that happens for multi-line
+    // text we bracket it ourselves. (The worker also re-asserts the mode on
+    // attach; this is the client-side belt-and-suspenders that needs no worker
+    // restart.) Single-line pastes always go through xterm.paste unchanged.
+    function pasteText(text) {
+      const multiline = /[\r\n]/.test(text);
+      const bpModeOff = !(term.modes && term.modes.bracketedPasteMode);
+      if (multiline && bpModeOff) {
+        const safe = text.replace(/\x1b\[2(?:00|01)~/g, '').replace(/\r?\n/g, '\r');
+        sendInput('\x1b[200~' + safe + '\x1b[201~', true);
+      } else {
+        term.paste(text);
+      }
+    }
     // Send a file path as a bracketed paste so Claude Code's paste handler
     // sees it and reads the image off disk via its built-in path-detection
     // (regex /\.(png|jpe?g|gif|webp)$/i + readFileBytesSync). This avoids the
@@ -1196,7 +1216,7 @@
         e.preventDefault();
         navigator.clipboard.readText().then(text => {
           if (!text) return;
-          term.paste(text);
+          pasteText(text);
         });
         return false;
       }
@@ -1515,7 +1535,7 @@
         if (stickyState.ctrl && data.toLowerCase() === 'v') {
           clearSticky();
           navigator.clipboard.readText().then(text => {
-            if (text) term.paste(text);
+            if (text) pasteText(text);
           });
           return;
         }
