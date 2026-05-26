@@ -1211,8 +1211,15 @@
 
     term.attachCustomKeyEventHandler(e => {
       if (e.type !== 'keydown') return true;
-      if (e.altKey && e.key === 'v') { isMobile ? mobileImagePaste() : uploadClipboardImage(); return false; }
-      if ((e.ctrlKey || e.metaKey) && e.key === 'v') {
+      // Match the PHYSICAL key (e.code) as well as e.key so copy/paste shortcuts
+      // work under non-Latin layouts (Hebrew, Russian, Arabic, …), where e.key
+      // is the layout's character (e.g. 'ה'/'ב'), not 'v'/'c'. e.code is
+      // layout-independent ('KeyV'/'KeyC'); the e.key fallback covers Latin
+      // remaps like Dvorak where the letter sits on a different physical key.
+      const isV = e.code === 'KeyV' || (e.key && e.key.toLowerCase() === 'v');
+      const isC = e.code === 'KeyC' || (e.key && e.key.toLowerCase() === 'c');
+      if (e.altKey && isV) { isMobile ? mobileImagePaste() : uploadClipboardImage(); return false; }
+      if ((e.ctrlKey || e.metaKey) && isV) {
         e.preventDefault();
         navigator.clipboard.readText().then(text => {
           if (!text) return;
@@ -1220,7 +1227,7 @@
         });
         return false;
       }
-      if ((e.ctrlKey || e.metaKey) && e.key === 'c' && term.hasSelection()) {
+      if ((e.ctrlKey || e.metaKey) && isC && term.hasSelection()) {
         copyToClipboard(term.getSelection());
         term.clearSelection();
         return false;
