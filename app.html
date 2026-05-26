@@ -1208,18 +1208,35 @@
       return true;
     });
 
-    // Input coalescing: buffer rapid keystrokes and send as a single WS message
+    // A real keypress / IME composition / paste fires a DOM input event on a
+    // focused element synchronously *before* xterm emits the corresponding
+    // onData. xterm's automatic answerback replies — cursor-position and
+    // device-attribute reports, which Claude's TUI requests constantly while
+    // it works — also flow through onData, but with NO preceding DOM event.
+    // We use that to tell genuine typing from machine chatter so the latter
+    // can't yank a scrolled-up reader back to the bottom (the "can't scroll up
+    // while Claude is working" bug). Capture phase so it lands before xterm.
+    let _lastTypedAt = 0;
+    ['keydown', 'beforeinput', 'input', 'compositionstart', 'compositionupdate', 'compositionend', 'paste'].forEach(ev => {
+      document.addEventListener(ev, () => { _lastTypedAt = Date.now(); }, { capture: true, passive: true });
+    });
+
+    // Input coalescing: buffer rapid keystrokes and send as a single WS message.
+    // userInitiated: true for explicit user actions (compose send button, which
+    // fires no keydown). onData callers omit it and rely on the _lastTypedAt
+    // heuristic so xterm's auto-replies don't trigger the scroll-follow.
     let _inputBuf = '', _inputTimer = null;
-    function sendInput(data) {
-      // User is typing — they want to see the result. Any prior touch-scroll
-      // that disabled autoScroll must be re-armed now, otherwise Claude's
-      // in-place CSI prompt redraws happen below the current viewport and
-      // the user sees their chars "land somewhere" off-screen. Scroll to
-      // bottom synchronously so the first echoed char is visible.
-      autoScroll = true;
-      try { window.__releaseScrollPin && window.__releaseScrollPin(); } catch {}
-      try { term.scrollToBottom(); } catch {}
-      scrollBtn.style.display = 'none';
+    function sendInput(data, userInitiated) {
+      // Follow output to the bottom only for genuine user input — they want to
+      // see the result, and Claude's in-place CSI redraws land below a stale
+      // viewport otherwise. Machine auto-replies (no recent DOM input event)
+      // leave a scrolled-up reader exactly where they are.
+      if (userInitiated || (Date.now() - _lastTypedAt < 150)) {
+        autoScroll = true;
+        try { window.__releaseScrollPin && window.__releaseScrollPin(); } catch {}
+        try { term.scrollToBottom(); } catch {}
+        scrollBtn.style.display = 'none';
+      }
       _inputBuf += data;
       if (!_inputTimer) {
         _inputTimer = setTimeout(() => {
@@ -1368,27 +1385,27 @@
       while (i < n && composeLiveSent[i] === val[i]) i++;
       const out = '\x7f'.repeat(composeLiveSent.length - i) + val.slice(i).replace(/\n/g, '\r');
       composeLiveSent = val;
-      if (out) sendInput(out);
+      if (out) sendInput(out, true);
     }
     function composeSend() {
       if (!ws || ws.readyState !== WebSocket.OPEN) return; // WS down — keep the buffer
       const val = composeInput.value;
       if (composeLive) {
         // Body already streamed char-by-char; just commit with CR.
-        sendInput('\r');
+        sendInput('\r', true);
         pushComposeHistory(val);
         clearComposeInput();
         return;
       }
-      if (val === '') { sendInput('\r'); return; } // bare Enter on an empty buffer
+      if (val === '') { sendInput('\r', true); return; } // bare Enter on an empty buffer
       if (val.includes('\n')) {
         // Multi-line: bracketed paste so Claude / readline treat it atomically.
         // Strip any bracketed-paste markers in the buffer first so user content
         // cannot prematurely close our wrapper.
         const safe = val.replace(/\x1b\[2(?:00|01)~/g, '').replace(/\r?\n/g, '\r');
-        sendInput('\x1b[200~' + safe + '\x1b[201~\r');
+        sendInput('\x1b[200~' + safe + '\x1b[201~\r', true);
       } else {
-        sendInput(val + '\r');
+        sendInput(val + '\r', true);
       }
       pushComposeHistory(val);
       clearComposeInput();
@@ -1791,6 +1808,9 @@
     }
 
     // --- Mobile long-press for text selection/copy/paste ---
+    // The long-press Copy/Paste/Select popup is currently hidden on mobile —
+    // it interfered with scrolling and felt unreliable. Flip this to re-enable.
+    const MOBILE_LONGPRESS_MENU = false;
     if (isMobile) {
       let longPressTimer = null;
       const termEl = document.getElementById('terminal');
@@ -1802,8 +1822,12 @@
           return;
         }
         if (e.touches.length !== 1) return;
+        // The timer still distinguishes a quick tap (cursor move, handled in
+        // touchend) from a long hold. With the menu disabled, a long hold
+        // simply does nothing rather than popping the context menu.
         longPressTimer = setTimeout(() => {
           longPressTimer = null;
+          if (!MOBILE_LONGPRESS_MENU) return;
           // Show copy/paste menu
           const sel = term.getSelection();
           const actions = [];
@@ -1942,13 +1966,30 @@
       if (!vp) return;
       let pinned = -1;          // -1 = not pinned (auto-follow allowed)
       let restoring = false;
+      // On mobile the 2s _userScrollGestureUntil window is too coarse to drive
+      // the pin: every flick keeps it "recent", so when xterm's renderer snaps
+      // scrollTop to the bottom mid-stream that programmatic scroll gets read
+      // as "the user is at the bottom" and the pin releases — yanking you back
+      // down and making it impossible to stay scrolled up while Claude works.
+      // Track the actual finger instead. A real touch (plus a short momentum
+      // grace) is the only reliable signal that a scroll is user-driven.
+      let touching = false;
+      let touchGraceUntil = 0;
+      const inTouchScroll = () => touching || Date.now() <= touchGraceUntil;
+      vp.addEventListener('touchstart', () => { touching = true; }, { passive: true });
+      const endTouch = () => { touching = false; touchGraceUntil = Date.now() + 500; };
+      vp.addEventListener('touchend', endTouch, { passive: true });
+      vp.addEventListener('touchcancel', endTouch, { passive: true });
       // Scroll-event handler: tracks user intent and snaps back on
       // programmatic drift. Source of truth for the pin value.
       vp.addEventListener('scroll', () => {
         if (restoring) { restoring = false; return; }
         const max = vp.scrollHeight - vp.clientHeight;
-        const inGesture = Date.now() <= _userScrollGestureUntil;
-        if (inGesture) {
+        // On mobile, only the finger (or its settling momentum) counts as user
+        // intent; on desktop fall back to the wheel/key gesture window.
+        const userDriven = isMobile ? inTouchScroll() : (Date.now() <= _userScrollGestureUntil);
+        if (userDriven) {
+          // Release auto-follow only when the user themselves reaches bottom.
           pinned = (vp.scrollTop >= max - 4) ? -1 : vp.scrollTop;
         } else if (pinned >= 0 && vp.scrollTop > pinned) {
           restoring = true;
@@ -1959,9 +2000,11 @@
       // renderer may set .xterm-viewport.scrollTop during a paint without
       // firing a synchronous scroll event (or the event may fire after the
       // user perceives the snap). This loop guarantees the user's pinned
-      // position is restored within one paint cycle.
+      // position is restored within one paint cycle — except while a finger is
+      // actively dragging (or its momentum is settling), where fighting the
+      // native scroll is exactly what made mobile scrolling feel janky.
       function enforce() {
-        if (pinned >= 0 && !restoring) {
+        if (pinned >= 0 && !restoring && !inTouchScroll()) {
           if (vp.scrollTop > pinned) {
             restoring = true;
             vp.scrollTop = pinned;
