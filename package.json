@@ -35,7 +35,7 @@
     "syntax-check": "node -c server.js && node -c monitor.js && node -c pty-worker.js"
   },
   "dependencies": {
-    "express": "^4.21.0",
+    "express": "^4.22.2",
     "express-ws": "^5.0.2",
     "node-pty": "^1.0.0"
   },
