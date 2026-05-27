@@ -8,6 +8,15 @@ updates:
     open-pull-requests-limit: 5
     labels:
       - dependencies
+    ignore:
+      # Express 5 is a breaking change and express-ws does not support it yet
+      - dependency-name: "express"
+        update-types: ["version-update:semver-major"]
+      # ESLint 10+ requires Node >=20; this project targets Node >=18
+      - dependency-name: "eslint"
+        update-types: ["version-update:semver-major"]
+      - dependency-name: "@eslint/js"
+        update-types: ["version-update:semver-major"]
 
   - package-ecosystem: github-actions
     directory: /
