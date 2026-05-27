@@ -1,11 +1,38 @@
 {
   "name": "web-terminal",
   "version": "1.0.0",
-  "description": "Browser-based terminal with shared sessions, basic auth, and Tailscale support",
+  "description": "Browser-based terminal manager for Windows — multi-session, multi-server cluster, PWA, and Claude Code hook integration.",
+  "keywords": [
+    "terminal",
+    "web-terminal",
+    "node-pty",
+    "websocket",
+    "pwa",
+    "windows",
+    "claude-code",
+    "xterm",
+    "remote-shell"
+  ],
+  "homepage": "https://github.com/Adiel-Sharabi/web-terminal#readme",
+  "bugs": {
+    "url": "https://github.com/Adiel-Sharabi/web-terminal/issues"
+  },
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/Adiel-Sharabi/web-terminal.git"
+  },
+  "license": "MIT",
+  "author": "Adiel Sharabi",
   "main": "server.js",
+  "engines": {
+    "node": ">=18"
+  },
   "scripts": {
-    "start": "node server.js",
-    "test": "npx playwright test"
+    "start": "node monitor.js",
+    "start:server": "node server.js",
+    "test": "playwright test",
+    "lint": "eslint .",
+    "syntax-check": "node -c server.js && node -c monitor.js && node -c pty-worker.js"
   },
   "dependencies": {
     "express": "^4.21.0",
@@ -13,6 +40,9 @@
     "node-pty": "^1.0.0"
   },
   "devDependencies": {
-    "@playwright/test": "^1.58.2"
+    "@eslint/js": "^9.39.4",
+    "@playwright/test": "^1.58.2",
+    "eslint": "^9.39.4",
+    "globals": "^15.15.0"
   }
 }

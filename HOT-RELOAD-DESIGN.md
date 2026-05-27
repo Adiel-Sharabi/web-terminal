@@ -152,7 +152,7 @@ The browser already handles WS drops with exponential backoff reconnect, and the
 - **Deliverable:** `tests/hot-reload.spec.js` passes
 
 **Phase 7: Ready for manual testing on this machine**
-- You verify it locally on Office before merging to master
+- You verify it locally before merging to master
 - Then decide when to deploy to other servers
 
 ## Files changed / added
