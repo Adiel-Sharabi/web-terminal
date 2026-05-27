@@ -31,6 +31,10 @@ on:
 jobs:
   test:
     name: Test (Node ${{ matrix.node-version }}, Windows)
+    # Only build when the repo is PUBLIC (Actions is free for public repos).
+    # On a private repo this skips with zero runner minutes, so CI never
+    # bills against the Actions quota — windows-latest costs 2x minutes.
+    if: ${{ github.event.repository.private == false }}
     runs-on: windows-latest
     continue-on-error: false
 
