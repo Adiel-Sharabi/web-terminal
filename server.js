@@ -9,7 +9,7 @@ const { performance } = require('perf_hooks');
 const workerClientLib = require('./lib/worker-client');
 const { mintDirectToken, verifyDirectToken } = require('./lib/cluster-token');
 
-const SERVER_VERSION = '1.14.7';
+const SERVER_VERSION = '1.15.0';
 
 // --- Optional latency instrumentation (opt-in via WT_LATENCY_DEBUG=1) -----
 // Event-loop lag monitor: interval is 10ms; anything ≥ 50ms slip is a stall.
@@ -930,6 +930,232 @@ app.post('/api/session/:id/hook', express.json({ limit: '256kb' }), async (req, 
     if (/event required/i.test(e.message)) return res.status(400).json({ error: 'event required' });
     res.status(500).json({ error: e.message });
   }
+});
+
+// --- Peer relay (Claude <-> Codex mediator) ---
+// Localhost-only message bus so two agents running in separate PTY sessions
+// on this host can ask each other for second opinions. State is in-memory
+// and resets on server reload (which the protocol doc warns about).
+// Rate limits exist to stop runaway back-and-forth burning tokens overnight.
+const RELAY_MAX_TURNS = Math.max(1, parseInt(process.env.WT_RELAY_MAX_TURNS_PER_CONV, 10) || 6);
+const RELAY_DAILY_MAX = Math.max(1, parseInt(process.env.WT_RELAY_DAILY_MAX, 10) || 50);
+const RELAY_MAX_MSG_BYTES = Math.max(256, parseInt(process.env.WT_RELAY_MAX_MSG_BYTES, 10) || 16384);
+const RELAY_LONGPOLL_MAX_MS = Math.max(1000, parseInt(process.env.WT_RELAY_LONGPOLL_MAX_MS, 10) || 30000);
+const RELAY_QUEUE_MAX = Math.max(10, parseInt(process.env.WT_RELAY_QUEUE_MAX, 10) || 100);
+const RELAY_CONV_IDLE_MS = 60 * 60 * 1000; // drop conversation records after 1h idle
+
+// Per-agent inbox: each conversation is buffered until the asker closes it
+// with more=false. A conv is "ready" once its last message has more=false.
+// recv only returns messages from ready convs (so batched asks are delivered
+// as one unit and the answerer doesn't reply mid-batch).
+const _relayBoxes = new Map();       // agent -> { convs: Map<conv_id, {messages:[], ready:bool}>, waiters: [] }
+const _relayConvs = new Map();       // conv_id -> { turns, lastTs, participants: Set }
+let _relayDay = '';
+let _relayDayUsed = 0;
+
+function _relayToday() { return new Date().toISOString().slice(0, 10); }
+function _relayCheckDay() {
+  const today = _relayToday();
+  if (today !== _relayDay) { _relayDay = today; _relayDayUsed = 0; }
+}
+function _relayBox(agent) {
+  let box = _relayBoxes.get(agent);
+  if (!box) { box = { convs: new Map(), waiters: [] }; _relayBoxes.set(agent, box); }
+  return box;
+}
+function _relayBoxTotal(box) {
+  let n = 0;
+  for (const c of box.convs.values()) n += c.messages.length;
+  return n;
+}
+function _relayBoxHasReady(box, convFilter) {
+  for (const [id, c] of box.convs) {
+    if (!c.ready) continue;
+    if (convFilter && id !== convFilter) continue;
+    return true;
+  }
+  return false;
+}
+function _relayDrain(box, convFilter) {
+  const out = [];
+  for (const [id, c] of [...box.convs]) {
+    if (!c.ready) continue;
+    if (convFilter && id !== convFilter) continue;
+    for (const m of c.messages) out.push(m);
+    box.convs.delete(id);
+  }
+  out.sort((a, b) => a.ts - b.ts);
+  return out;
+}
+function _relayCleanConvs() {
+  const now = Date.now();
+  for (const [id, c] of _relayConvs) {
+    if (now - c.lastTs > RELAY_CONV_IDLE_MS) _relayConvs.delete(id);
+  }
+}
+function _relayValidAgent(name) {
+  return typeof name === 'string' && /^[a-zA-Z0-9_.-]{1,32}$/.test(name);
+}
+
+app.post('/api/relay/send', express.json({ limit: '64kb' }), (req, res) => {
+  if (!isLocalhostReq(req)) return res.status(401).json({ error: 'Unauthorized' });
+  const { from, to, message } = req.body || {};
+  let conv_id = req.body?.conv_id;
+  const more = req.body?.more === true; // true = batch open, withhold delivery; false/missing = ready to deliver
+  if (!_relayValidAgent(from)) return res.status(400).json({ error: 'invalid from' });
+  if (!_relayValidAgent(to)) return res.status(400).json({ error: 'invalid to' });
+  if (from === to) return res.status(400).json({ error: 'from and to must differ' });
+  if (typeof message !== 'string' || !message.length) return res.status(400).json({ error: 'message required' });
+  if (Buffer.byteLength(message, 'utf8') > RELAY_MAX_MSG_BYTES) {
+    return res.status(413).json({ error: 'message too large', max_bytes: RELAY_MAX_MSG_BYTES });
+  }
+
+  _relayCheckDay();
+  if (_relayDayUsed >= RELAY_DAILY_MAX) {
+    return res.status(429).json({
+      error: 'daily-cap',
+      daily_max: RELAY_DAILY_MAX,
+      daily_used: _relayDayUsed,
+      resets_at: _relayToday() + 'T24:00:00Z',
+    });
+  }
+
+  let conv;
+  if (conv_id) {
+    if (typeof conv_id !== 'string' || conv_id.length > 64) return res.status(400).json({ error: 'invalid conv_id' });
+    conv = _relayConvs.get(conv_id);
+    if (!conv) return res.status(404).json({ error: 'conv not found (it may have expired)' });
+    if (conv.turns >= RELAY_MAX_TURNS) {
+      return res.status(429).json({
+        error: 'conv-cap',
+        conv_id,
+        turns: conv.turns,
+        max_turns: RELAY_MAX_TURNS,
+        hint: 'this conversation hit its turn cap; start a new conv_id only if a fresh question is justified',
+      });
+    }
+  } else {
+    conv_id = crypto.randomUUID();
+    conv = { turns: 0, lastTs: Date.now(), participants: new Set() };
+    _relayConvs.set(conv_id, conv);
+  }
+  conv.turns += 1;
+  conv.lastTs = Date.now();
+  conv.participants.add(from);
+  conv.participants.add(to);
+  _relayDayUsed += 1;
+
+  const box = _relayBox(to);
+  // Bound total per-agent buffered messages: drop oldest from the largest buffered conv.
+  if (_relayBoxTotal(box) >= RELAY_QUEUE_MAX) {
+    let victim = null, victimSize = -1;
+    for (const [id, c] of box.convs) {
+      if (c.messages.length > victimSize) { victim = id; victimSize = c.messages.length; }
+    }
+    if (victim) {
+      const c = box.convs.get(victim);
+      c.messages.shift();
+      if (c.messages.length === 0) box.convs.delete(victim);
+    }
+  }
+  const entry = { conv_id, from, to, message, ts: Date.now(), turn: conv.turns, more };
+  let cbuf = box.convs.get(conv_id);
+  if (!cbuf) { cbuf = { messages: [], ready: false }; box.convs.set(conv_id, cbuf); }
+  cbuf.messages.push(entry);
+  cbuf.ready = !more;
+
+  if (cbuf.ready) {
+    // Wake a waiter that's interested in this conv (or any conv).
+    for (let i = 0; i < box.waiters.length; i++) {
+      const w = box.waiters[i];
+      if (!w.convFilter || w.convFilter === conv_id) {
+        box.waiters.splice(i, 1);
+        clearTimeout(w.timer);
+        w.resolve();
+        break;
+      }
+    }
+  }
+
+  res.json({
+    ok: true,
+    conv_id,
+    turn: conv.turns,
+    more,
+    buffered: cbuf.messages.length,
+    remaining_turns: Math.max(0, RELAY_MAX_TURNS - conv.turns),
+    daily_remaining: Math.max(0, RELAY_DAILY_MAX - _relayDayUsed),
+  });
+});
+
+app.get('/api/relay/recv', (req, res) => {
+  if (!isLocalhostReq(req)) return res.status(401).json({ error: 'Unauthorized' });
+  const agent = String(req.query.agent || '');
+  if (!_relayValidAgent(agent)) return res.status(400).json({ error: 'invalid agent' });
+  const convFilter = req.query.conv_id ? String(req.query.conv_id) : null;
+  const waitMsRaw = parseInt(req.query.wait, 10);
+  const waitMs = isNaN(waitMsRaw) ? 0 : Math.min(Math.max(0, waitMsRaw * 1000), RELAY_LONGPOLL_MAX_MS);
+  _relayCheckDay();
+  _relayCleanConvs();
+  const box = _relayBox(agent);
+
+  const immediate = _relayDrain(box, convFilter);
+  if (immediate.length || waitMs === 0) {
+    return res.json({ messages: immediate, daily_remaining: Math.max(0, RELAY_DAILY_MAX - _relayDayUsed) });
+  }
+
+  const waiter = { convFilter };
+  const p = new Promise((resolve) => { waiter.resolve = resolve; });
+  waiter.timer = setTimeout(() => {
+    const idx = box.waiters.indexOf(waiter);
+    if (idx >= 0) box.waiters.splice(idx, 1);
+    waiter.resolve();
+  }, waitMs);
+  if (typeof waiter.timer.unref === 'function') waiter.timer.unref();
+  box.waiters.push(waiter);
+  req.on('close', () => {
+    clearTimeout(waiter.timer);
+    const idx = box.waiters.indexOf(waiter);
+    if (idx >= 0) box.waiters.splice(idx, 1);
+  });
+  p.then(() => {
+    if (res.writableEnded) return;
+    const msgs = _relayDrain(box, convFilter);
+    res.json({ messages: msgs, daily_remaining: Math.max(0, RELAY_DAILY_MAX - _relayDayUsed) });
+  });
+});
+
+app.get('/api/relay/status', (req, res) => {
+  if (!isLocalhostReq(req)) return res.status(401).json({ error: 'Unauthorized' });
+  _relayCheckDay();
+  _relayCleanConvs();
+  const queues = Object.create(null); // null-proto so a hostile agent name (e.g. __proto__) cannot pollute it
+  for (const [name, box] of _relayBoxes) {
+    let total = 0, ready = 0, pending = 0;
+    for (const c of box.convs.values()) {
+      total += c.messages.length;
+      if (c.ready) ready += c.messages.length; else pending += c.messages.length;
+    }
+    queues[name] = { total, ready, pending, waiters: box.waiters.length };
+  }
+  const convs = [];
+  for (const [id, c] of _relayConvs) {
+    convs.push({ conv_id: id, turns: c.turns, max_turns: RELAY_MAX_TURNS, participants: [...c.participants], last_ts: c.lastTs });
+  }
+  res.json({
+    limits: {
+      max_turns_per_conv: RELAY_MAX_TURNS,
+      daily_max: RELAY_DAILY_MAX,
+      max_msg_bytes: RELAY_MAX_MSG_BYTES,
+      longpoll_max_ms: RELAY_LONGPOLL_MAX_MS,
+      queue_max: RELAY_QUEUE_MAX,
+    },
+    day: _relayDay || _relayToday(),
+    daily_used: _relayDayUsed,
+    daily_remaining: Math.max(0, RELAY_DAILY_MAX - _relayDayUsed),
+    queues,
+    conversations: convs,
+  });
 });
 
 // --- Auth middleware ---

@@ -59,6 +59,7 @@ Web Terminal solves all of this, running as a single `node monitor.js` on each h
 - **Session names** — auto-extracted from Claude conversation titles, synced via `/rename` on sidebar rename
 - **Clipboard image paste** — Alt+V to paste images directly into Claude Code
 - **Drag-and-drop images** — drop an image file on the terminal to upload it (same path as Alt+V)
+- **Peer relay** — two agents running side-by-side (e.g. Claude + Codex) can ask each other for a second opinion via a localhost-only message bus at `/api/relay/{send,recv,status}`. Supports batched messages (`more:true` buffers, `more:false` flushes so the peer answers once). Hard rate limits (default: 6 turns per conversation, 50 messages per day, 16 KB per message — overridable via `WT_RELAY_*` env vars) stop runaway loops from burning the token budget overnight. Contract for both agents lives in [PEER_PROTOCOL.md](PEER_PROTOCOL.md).
 
 ### Mobile & PWA
 - **Progressive Web App** — install as standalone app; name reflects server name
