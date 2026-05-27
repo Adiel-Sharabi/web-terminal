@@ -13,13 +13,13 @@
     "xterm",
     "remote-shell"
   ],
-  "homepage": "https://github.com/Adiel-Sharabi/web-terminal#readme",
+  "homepage": "https://github.com/Adiel-Sharabi/web-agent-terminal#readme",
   "bugs": {
-    "url": "https://github.com/Adiel-Sharabi/web-terminal/issues"
+    "url": "https://github.com/Adiel-Sharabi/web-agent-terminal/issues"
   },
   "repository": {
     "type": "git",
-    "url": "git+https://github.com/Adiel-Sharabi/web-terminal.git"
+    "url": "git+https://github.com/Adiel-Sharabi/web-agent-terminal.git"
   },
   "license": "MIT",
   "author": "Adiel Sharabi",

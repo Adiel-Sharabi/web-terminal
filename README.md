@@ -103,8 +103,8 @@ Web Terminal solves all of this, running as a single `node monitor.js` on each h
 **Requirements**: [Node.js](https://nodejs.org) 18+, [Git for Windows](https://git-scm.com/download/win)
 
 ```bash
-git clone https://github.com/Adiel-Sharabi/web-terminal.git
-cd web-terminal
+git clone https://github.com/Adiel-Sharabi/web-agent-terminal.git
+cd web-agent-terminal
 npm install
 node monitor.js
 ```
@@ -321,7 +321,7 @@ The smoke tests (`smoke-test-hot-reload.js`, `smoke-test-longproc.js`) at the re
 ## Update
 
 ```bash
-cd web-terminal
+cd web-agent-terminal
 git pull
 npm install --production
 # Restart via Settings button, or:

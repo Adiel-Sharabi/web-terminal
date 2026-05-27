@@ -11,8 +11,8 @@ Thank you for your interest in contributing. This is a single-maintainer project
 **Requirements:** Node.js 18+, Git for Windows
 
 ```bash
-git clone https://github.com/Adiel-Sharabi/web-terminal.git
-cd web-terminal
+git clone https://github.com/Adiel-Sharabi/web-agent-terminal.git
+cd web-agent-terminal
 npm install
 node monitor.js
 ```
@@ -127,7 +127,7 @@ Before opening an issue, try to reproduce the bug with a minimal case and note t
 
 **Do not open public GitHub issues for security vulnerabilities.**
 
-Report security issues privately via [GitHub's private vulnerability reporting](https://github.com/Adiel-Sharabi/web-terminal/security/advisories/new) or by contacting the maintainer directly through GitHub at https://github.com/Adiel-Sharabi. See [SECURITY.md](SECURITY.md) if present.
+Report security issues privately via [GitHub's private vulnerability reporting](https://github.com/Adiel-Sharabi/web-agent-terminal/security/advisories/new) or by contacting the maintainer directly through GitHub at https://github.com/Adiel-Sharabi. See [SECURITY.md](SECURITY.md) if present.
 
 ---
 
