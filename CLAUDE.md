@@ -126,7 +126,7 @@ Three layers prevent console window flashing on Windows:
 - `diagnostic.spec.js` needs `DIAG_PASS` env var and its own config: `DIAG_PASS=yourpass npx playwright test tests/diagnostic.spec.js --config playwright.diag.config.js`
 - Tests run serially (`workers: 1`) because the max session limit (10) causes flaky failures when tests create sessions in parallel
 - The `conpty_console_list_agent.js: AttachConsole failed` errors in test output are harmless node-pty warnings when killing sessions in Session 0 / test environment
-- GitHub repo: `Adiel-Sharabi/web-terminal`
+- GitHub repo: `Adiel-Sharabi/web-agent-terminal`
 
 ## Issue Workflow
 When working through GitHub issues, use this process:
