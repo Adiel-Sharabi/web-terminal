@@ -89,7 +89,7 @@ Tests run against a dedicated server instance on port **17681** with credentials
 
 Key notes:
 - Tests run **serially** (`workers: 1`). The max-session limit (10) causes flaky failures when tests run in parallel.
-- `diagnostic.spec.js`, `mobile-debug.spec.js`, and `paste-diag.spec.js` are excluded from the default run. They require special env vars or setup — see the CLAUDE.md Testing Notes section.
+- `diagnostic.spec.js`, `mobile-debug.spec.js`, and `paste-diag.spec.js` are excluded from the default run (see `testIgnore` in `playwright.config.js`). They require special environment variables or extra setup — see the comment header at the top of each spec file.
 - The `conpty_console_list_agent.js: AttachConsole failed` warning in test output is **harmless** — it is a node-pty warning that appears when killing sessions in Session 0 or test environments.
 - The test run backs up and restores `config.json`, but overwrites the password hash. If you run tests against a local dev instance, re-apply the correct password afterward.
 
