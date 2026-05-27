@@ -17,6 +17,8 @@ ssl/
 *.pfx
 *.jks
 *.keystore
+.env
+.env.*
 *.stackdump
 cluster-tokens.json
 api-tokens.json
