@@ -1,0 +1,80 @@
+# CI workflow for web-terminal
+#
+# NOTE: This workflow runs on windows-latest because node-pty uses native ConPTY
+# bindings. node-pty 1.x ships win32-x64 prebuilds so no node-gyp/MSVC step is
+# needed — npm ci alone is sufficient.
+#
+# The Playwright config (playwright.config.js) has a `webServer` block that
+# starts `node server.js` automatically before the test suite, so no separate
+# "start server" step is required. Credentials and port are injected via the
+# env vars WT_TEST / WT_USER / WT_PASS / WT_PORT / WT_SPAWN_WORKER defined in
+# playwright.config.js. config.test.json is gitignored but the server falls
+# back gracefully to env vars when the file is absent, which is the correct
+# behaviour for CI.
+#
+# Things we could not fully verify in a live CI run:
+# - Whether Windows Server (the OS under windows-latest) exposes a functional
+#   ConPTY API to the test runner; if not, PTY-dependent tests may time out.
+#   The server is configured to use the bundled OpenConsole.exe (useConptyDll),
+#   which reduces exposure to host-OS ConPTY issues.
+# - playwright install --with-deps is documented as a no-op on Windows (deps
+#   are bundled in the Chromium download), but we include it for correctness.
+
+name: CI
+
+on:
+  push:
+    branches: [master]
+  pull_request:
+    branches: [master]
+
+jobs:
+  test:
+    name: Test (Node ${{ matrix.node-version }}, Windows)
+    runs-on: windows-latest
+    continue-on-error: false
+
+    strategy:
+      matrix:
+        node-version: ['20.x']
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Set up Node.js ${{ matrix.node-version }}
+        uses: actions/setup-node@v4
+        with:
+          node-version: ${{ matrix.node-version }}
+          cache: 'npm'
+
+      - name: Install dependencies
+        # node-pty 1.x ships win32-x64 prebuilds; no native build tools needed.
+        run: npm ci
+
+      - name: Install Playwright browsers
+        # --with-deps is a no-op on Windows (dependencies are bundled), but
+        # including it avoids confusion if the flag behaviour changes.
+        run: npx playwright install --with-deps chromium
+
+      - name: Syntax check
+        run: node -c server.js && node -c monitor.js && node -c pty-worker.js
+
+      - name: Lint
+        # eslint.config.js downgrades domain-intentional rules to warnings; the
+        # gate fails only on real errors. Warnings are surfaced but non-blocking.
+        run: npx eslint .
+
+      - name: Run tests
+        # The webServer block in playwright.config.js starts node server.js
+        # automatically on port 17681 with WT_TEST=1 / WT_SPAWN_WORKER=1.
+        # No config.json or pre-existing server is required.
+        run: npx playwright test
+
+      - name: Upload Playwright report on failure
+        if: failure()
+        uses: actions/upload-artifact@v4
+        with:
+          name: playwright-report
+          path: playwright-report/
+          retention-days: 7

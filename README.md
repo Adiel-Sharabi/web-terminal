@@ -314,7 +314,7 @@ The smoke tests (`smoke-test-hot-reload.js`, `smoke-test-longproc.js`) at the re
 ## Troubleshooting
 
 - **`crypto.randomUUID is not a function`** — triggered when loading the app over plain HTTP on a LAN/Tailscale IP, because `window.crypto.randomUUID` is only exposed in secure contexts. The client polyfills it automatically; if you still hit this, make sure your browser has loaded the latest `app.html` (force-refresh past the service worker).
-- **Dual-monitor crash loop with the console flashing** — caused by `taskkill /F /IM node.exe` races. Follow the manual-restart procedure in CLAUDE.md and kill the monitor + worker + server PIDs explicitly.
+- **Dual-monitor crash loop with the console flashing** — caused by `taskkill /F /IM node.exe` races. Follow the manual-restart procedure in the [Production Setup](#production-setup) section and kill the monitor + worker + server PIDs explicitly.
 - **`conpty_console_list_agent.js: AttachConsole failed`** in test output — harmless node-pty warning when killing sessions in Session 0 / test environments.
 - **CLI tools missing in spawned shells after auto-start** — Session 0 scheduled tasks can have a stale PATH. Kill node and run `wscript start-server.vbs` from your logged-in user session to refresh it.
 

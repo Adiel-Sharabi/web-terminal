@@ -11,6 +11,12 @@ clipboard-images/
 test-results/
 *.crt
 *.key
+*.pem
+ssl/
+*.p12
+*.pfx
+*.jks
+*.keystore
 *.stackdump
 cluster-tokens.json
 api-tokens.json
@@ -23,6 +29,14 @@ monitor-status.json
 *.restart-bak
 test-emu-*.js
 test-exclusive-*.js
+# local scratch / experiment files (never published)
+check-server.js
+evloop-test.js
+local-burst-test.js
+pty-test.js
+pty-test2.js
+raw-pipe-test.js
+server-evloop.js
 tests/diagnostic-report.json
 playwright.diag.config.js
 cdp_*.py
