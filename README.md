@@ -37,6 +37,7 @@ Web Terminal solves all of this, running as a single `node monitor.js` on each h
 - **In-place switching** — switch between sessions without page reload
 - **Instant switching** — optional `keepSessionsOpen` mode keeps background WebSocket connections to all sessions, caches scrollback in memory, and switches instantly without re-downloading data
 - **Session persistence** — sessions survive server restarts with scrollback replay
+- **Lazy scrollback** — initial attach replays a small chunk (default 32 KB) for fast first paint; scrolling xterm to the top fetches older bytes on demand from `/api/sessions/:id/scrollback`, up to the worker's stored history
 - **Auto-command** — startup command per session, waits for shell prompt before executing
 - **Fork session** — duplicate a Claude session with `--fork-session` from the sidebar
 - **Exclusive viewer** — one device per session prevents display corruption from mixed screen sizes
@@ -189,7 +190,7 @@ Config is stored in `config.json` (gitignored):
 | `defaultCwd` | Yes | Default working directory for new sessions |
 | `scanFolders` | Yes | Directories to scan for folder autocomplete |
 | `defaultCommand` | Yes | Pre-filled auto-command for new sessions |
-| `scrollbackReplayLimit` | Yes | Max bytes replayed on reconnect (default 1MB) |
+| `scrollbackReplayLimit` | Yes | Bytes replayed on initial attach (default 32 KB). Older history is fetched on demand when xterm scrolls to the top. |
 | `publicUrl` | Yes | This server's URL for cluster auto-sync |
 | `cluster` | Yes | Remote servers list `[{name, url, directConnect?}]`. Set `directConnect: true` on a peer to enable direct-terminal mode (browser WS skips the local proxy hop for that peer's sessions). |
 | `claudeHome` | Yes | User profile path for Claude session files (auto-detected if empty) |
