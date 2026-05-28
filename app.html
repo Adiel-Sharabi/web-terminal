@@ -670,6 +670,25 @@
       return id;
     })();
     const sessionCache = new Map(); // sessionId -> { ws, scrollback, serverUrl, connected, heartbeatTimer, reconnectTimer }
+
+    // --- Scroll-up history backfill state (per active session) -------------
+    // Initial attach replays only ~32 KB; older bytes are fetched on demand
+    // when the user scrolls xterm's viewport to the top. See triggerBackfill().
+    let historyTotal = 0;            // server-reported total available bytes (string units)
+    let historyOffset = 0;           // bytes already prepended into the displayBuffer beyond the initial replay
+    let historyLoadPending = false;  // true while we're rewriting xterm; gates live WS data
+    const historyQueue = [];         // live WS messages buffered during a rewrite
+    let isFetchingHistory = false;   // prevents concurrent backfill requests
+    let displayBuffer = '';          // mirror of what's currently written into xterm (live + backfilled)
+    const DISPLAY_BUFFER_CAP = 4 * 1024 * 1024;
+    function resetHistoryState() {
+      historyTotal = 0;
+      historyOffset = 0;
+      historyLoadPending = false;
+      historyQueue.length = 0;
+      isFetchingHistory = false;
+      displayBuffer = '';
+    }
     // Issue #20 — direct terminal mode: map of sessionId -> directUrl (fully qualified ws(s)://…/ws/:id?dt=…)
     // Populated by loadSidebar() from /api/cluster/sessions when a peer has `directConnect: true`.
     // Tokens expire after 60s — refreshed on every sidebar load.
@@ -746,6 +765,7 @@
 
     function connect() {
       if (!sessionId) return;
+      resetHistoryState();
       status.style.display = '';
       status.textContent = 'connecting...';
       status.className = '';
@@ -803,6 +823,11 @@
             return;
           }
           if (e.data.startsWith('{"heartbeat":')) return;
+        }
+        if (historyLoadPending) { historyQueue.push(e.data); return; }
+        if (typeof e.data === 'string') {
+          displayBuffer += e.data;
+          if (displayBuffer.length > DISPLAY_BUFFER_CAP) displayBuffer = displayBuffer.slice(-DISPLAY_BUFFER_CAP);
         }
         term.write(e.data);
         // Also accumulate in cache for keepSessionsOpen
@@ -1018,6 +1043,7 @@
       history.pushState({ id, serverUrl: sessionServerUrl }, '', '/app/' + id);
       term.clear();
       term.reset();
+      resetHistoryState();
       autoScroll = true;
       // Show terminal, hide placeholder
       document.getElementById('terminal').style.display = '';
@@ -1062,6 +1088,11 @@
               return;
             }
             if (e.data.startsWith('{"heartbeat":')) return;
+          }
+          if (historyLoadPending) { historyQueue.push(e.data); return; }
+          if (typeof e.data === 'string') {
+            displayBuffer += e.data;
+            if (displayBuffer.length > DISPLAY_BUFFER_CAP) displayBuffer = displayBuffer.slice(-DISPLAY_BUFFER_CAP);
           }
           term.write(e.data);
           if (keepSessionsOpen) {
@@ -2045,7 +2076,116 @@
       window.__releaseScrollPin = () => { pinned = -1; };
       // Diagnostic hook for the field-debug snippet.
       window.__readScrollPin = () => pinned;
+      // Setter used after a scroll-up backfill rewrite to re-pin to the
+      // translated scrollTop (since prepended content shifts every line down).
+      window.__setScrollPin = (v) => { pinned = (typeof v === 'number' && v >= 0) ? v : -1; };
     })();
+
+    // --- Scroll-to-top: trigger backfill of older scrollback ---------------
+    // When the user scrolls xterm to the very top, fetch the next older chunk
+    // from /api/sessions/:id/scrollback, prepend it into the display buffer,
+    // and rewrite the terminal. Live PTY data arriving during the rewrite is
+    // queued via historyLoadPending and drained inside the term.write callback.
+    (function backfillOnScrollTop() {
+      const vp = document.querySelector('#terminal .xterm-viewport');
+      if (!vp) return;
+      let backfillDebounce = 0;
+      vp.addEventListener('scroll', () => {
+        // Only react to genuine user-driven scrolls; programmatic snaps would
+        // otherwise spam fetches every time the renderer adjusts the viewport.
+        const userDriven = Date.now() <= _userScrollGestureUntil;
+        if (!userDriven) return;
+        if (vp.scrollTop > 16) return;
+        if (!sessionId) return;
+        clearTimeout(backfillDebounce);
+        backfillDebounce = setTimeout(triggerBackfill, 250);
+      }, { passive: true });
+    })();
+
+    async function triggerBackfill() {
+      if (!sessionId) return;
+      if (isFetchingHistory || historyLoadPending) return;
+      if (historyTotal > 0 && historyOffset >= historyTotal) return;
+      isFetchingHistory = true;
+      try {
+        // Compute the byte window. We always fetch the chunk immediately older
+        // than what we've already prepended: total - historyOffset - 32768 ..
+        // total - historyOffset. For the first fetch we don't know total yet,
+        // so request offset=0 and the server returns the leading chunk; that's
+        // wrong shape (we want the chunk just before the visible tail), so the
+        // first fetch is treated as a "probe" — we discover total, then issue
+        // the real fetch.
+        const CHUNK = 32768;
+        let url;
+        if (historyTotal === 0) {
+          // Probe: request the very first byte to learn total cheaply.
+          url = '/api/sessions/' + encodeURIComponent(sessionId) + '/scrollback?offset=0&limit=1';
+        } else {
+          const start = Math.max(0, historyTotal - historyOffset - CHUNK);
+          const len = Math.max(0, (historyTotal - historyOffset) - start);
+          if (len <= 0) { isFetchingHistory = false; return; }
+          url = '/api/sessions/' + encodeURIComponent(sessionId) + '/scrollback?offset=' + start + '&limit=' + len;
+        }
+        const resp = await fetch(url, { credentials: 'include' });
+        if (!resp.ok) { isFetchingHistory = false; return; }
+        const json = await resp.json();
+        const prevTotal = historyTotal;
+        historyTotal = json.total || 0;
+        if (prevTotal === 0) {
+          // Probe complete — total now known. Fetch the real chunk.
+          isFetchingHistory = false;
+          return triggerBackfill();
+        }
+        const olderChunk = json.data || '';
+        if (!olderChunk) { isFetchingHistory = false; return; }
+
+        // Pause the live stream and prepare the rewrite.
+        historyLoadPending = true;
+        const oldBaseY = (term.buffer && term.buffer.active) ? term.buffer.active.baseY : 0;
+        const vp = document.querySelector('#terminal .xterm-viewport');
+        const oldScrollTop = vp ? vp.scrollTop : 0;
+
+        // Prepend older content into the mirror buffer, then rewrite xterm.
+        displayBuffer = olderChunk + displayBuffer;
+        if (displayBuffer.length > DISPLAY_BUFFER_CAP) {
+          // Keep the most recent bytes; drop oldest. Note: this also caps how
+          // far back we can keep displaying after many backfills.
+          displayBuffer = displayBuffer.slice(-DISPLAY_BUFFER_CAP);
+        }
+        term.reset();
+        term.write(displayBuffer, () => {
+          try {
+            const newBaseY = (term.buffer && term.buffer.active) ? term.buffer.active.baseY : 0;
+            const addedLines = Math.max(0, newBaseY - oldBaseY);
+            if (vp) {
+              const rowH = vp.scrollHeight / Math.max(1, newBaseY + term.rows);
+              const newScrollTop = Math.max(0, Math.min(vp.scrollHeight - vp.clientHeight, oldScrollTop + addedLines * rowH));
+              vp.scrollTop = newScrollTop;
+              // Update the pin so pinViewportScroll's RAF loop doesn't yank
+              // the viewport back to the pre-rewrite scrollTop on the next frame.
+              if (typeof window.__readScrollPin === 'function' && window.__readScrollPin() >= 0) {
+                window.__setScrollPin(newScrollTop);
+              }
+            }
+          } catch (e) {}
+          // Drain any live data that arrived during the rewrite.
+          historyLoadPending = false;
+          while (historyQueue.length) {
+            const msg = historyQueue.shift();
+            if (typeof msg === 'string') {
+              displayBuffer += msg;
+              if (displayBuffer.length > DISPLAY_BUFFER_CAP) displayBuffer = displayBuffer.slice(-DISPLAY_BUFFER_CAP);
+            }
+            try { term.write(msg); } catch (e) {}
+          }
+          historyOffset += olderChunk.length;
+          isFetchingHistory = false;
+        });
+      } catch (e) {
+        historyLoadPending = false;
+        isFetchingHistory = false;
+      }
+    }
     function scrollToBottom() {
       try { window.__releaseScrollPin && window.__releaseScrollPin(); } catch {}
       term.scrollToBottom();
@@ -2801,7 +2941,7 @@
       document.getElementById('cfgDefaultCwd').value = cfg.defaultCwd || '';
       document.getElementById('cfgScanFolders').value = (cfg.scanFolders || []).join('\n');
       document.getElementById('cfgDefaultCommand').value = cfg.defaultCommand || '';
-      document.getElementById('cfgScrollbackReplayLimit').value = cfg.scrollbackReplayLimit || 102400;
+      document.getElementById('cfgScrollbackReplayLimit').value = cfg.scrollbackReplayLimit || 32768;
       document.getElementById('cfgClaudeHome').value = cfg.claudeHome || '';
       document.getElementById('cfgPublicUrl').value = cfg.publicUrl || '';
       document.getElementById('cfgKeepSessionsOpen').checked = !!cfg.keepSessionsOpen;
@@ -2826,7 +2966,7 @@
         defaultCwd: document.getElementById('cfgDefaultCwd').value,
         scanFolders: document.getElementById('cfgScanFolders').value.split('\n').map(s => s.trim()).filter(Boolean),
         defaultCommand: document.getElementById('cfgDefaultCommand').value,
-        scrollbackReplayLimit: parseInt(document.getElementById('cfgScrollbackReplayLimit').value) || 102400,
+        scrollbackReplayLimit: parseInt(document.getElementById('cfgScrollbackReplayLimit').value) || 32768,
         claudeHome: document.getElementById('cfgClaudeHome').value.trim(),
         publicUrl: document.getElementById('cfgPublicUrl').value.trim().replace(/\/+$/, ''),
         keepSessionsOpen: document.getElementById('cfgKeepSessionsOpen').checked,

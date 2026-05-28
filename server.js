@@ -9,7 +9,7 @@ const { performance } = require('perf_hooks');
 const workerClientLib = require('./lib/worker-client');
 const { mintDirectToken, verifyDirectToken } = require('./lib/cluster-token');
 
-const SERVER_VERSION = '1.15.0';
+const SERVER_VERSION = '1.16.0'; // 2026-05-28: scroll-up backfill, smaller initial replay
 
 // --- Optional latency instrumentation (opt-in via WT_LATENCY_DEBUG=1) -----
 // Event-loop lag monitor: interval is 10ms; anything ≥ 50ms slip is a stall.
@@ -100,7 +100,7 @@ function getDefaultCommand() {
   }
   return cmd;
 }
-function getScrollbackReplayLimit() { return parseInt(liveConfig('scrollbackReplayLimit', 1048576)) || 1048576; }
+function getScrollbackReplayLimit() { return parseInt(liveConfig('scrollbackReplayLimit', 32768)) || 32768; }
 
 function buildSafeEnv() {
   return config.passAllEnv ? Object.assign({}, process.env, { TERM: 'xterm-256color' }) : {
@@ -2238,6 +2238,35 @@ app.delete('/api/sessions/:id', async (req, res) => {
   } catch (e) {
     console.error(`DELETE /api/sessions failed: ${e.message}`);
     res.status(500).json({ error: 'Failed to kill session' });
+  }
+});
+
+// --- API: ranged scrollback (browser backfill on scroll-to-top) ---
+// Offsets and lengths are in JavaScript string units (UTF-16 code units),
+// matching what the worker returns from getScrollback after decoding.
+const SCROLLBACK_RANGE_MAX = 524288;
+app.get('/api/sessions/:id/scrollback', async (req, res) => {
+  const offset = Math.max(0, parseInt(req.query.offset, 10) || 0);
+  let limit = parseInt(req.query.limit, 10);
+  if (!Number.isFinite(limit) || limit <= 0) limit = 32768;
+  if (limit > SCROLLBACK_RANGE_MAX) limit = SCROLLBACK_RANGE_MAX;
+  if (!Number.isFinite(offset)) return res.status(400).json({ error: 'bad offset' });
+  try {
+    let full;
+    try {
+      const r = await workerClient.rpc('getScrollback', { id: req.params.id, limit: 4 * 1024 * 1024 });
+      full = (r && r.data) || '';
+    } catch (e) {
+      if (/not found/i.test(e.message)) return res.status(404).json({ error: 'not found' });
+      throw e;
+    }
+    const total = full.length;
+    const start = Math.min(offset, total);
+    const end = Math.min(start + limit, total);
+    res.json({ data: full.slice(start, end), total, offset: start, limit: end - start });
+  } catch (e) {
+    console.error(`GET /api/sessions/:id/scrollback failed: ${e.message}`);
+    res.status(500).json({ error: 'Failed to read scrollback' });
   }
 });
 
