@@ -291,6 +291,7 @@ PC Browser ────> localhost:7681 ────────┘
 | `lib/ipc.js` | Framing + named-pipe / unix-socket server and client for worker <-> web IPC (JSON control + binary PTY frames), with handshake auth and backpressure |
 | `lib/worker-client.js` | High-level RPC/event client used by `server.js` to talk to the worker |
 | `lib/cluster-token.js` | HMAC-SHA256 mint/verify for the short-lived tokens used by direct terminal mode |
+| `lib/git-safe.js` | Hardened runner for the version/update-check git calls — disables credential prompts (`credential.interactive=false`, `GIT_TERMINAL_PROMPT=0`) and tree-kills on timeout so a broken HTTPS remote can't hang `git-credential-manager` and leak process trees |
 | `app.html` | Unified single-page app (terminal + sidebar + settings) |
 | `sw.js` | Service worker for PWA caching |
 | `lobby.html` | Multi-server lobby page |
