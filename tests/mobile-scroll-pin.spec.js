@@ -103,6 +103,38 @@ test.describe('Mobile scroll pin holds while output streams', () => {
     await context.close();
   });
 
+  test('xterm snap-to-bottom DURING the momentum grace does NOT release the pin', async ({ browser }) => {
+    // The gap the "holds" test above misses: it waits out the 500ms grace so the
+    // snap is unambiguously programmatic. But while Claude streams, the snap
+    // lands *inside* the grace window — finger lifted <500ms ago — which is when
+    // the old code (gating release on inTouchScroll()) wrongly released the pin
+    // and yanked a scrolled-up reader to the bottom on every chunk.
+    const { page, context } = await mobilePage(browser);
+    expect(await makeScrollable(page)).toBe(true);
+
+    const res = await page.evaluate(async () => {
+      const vp = document.querySelector('#terminal .xterm-viewport');
+      const max = vp.scrollHeight - vp.clientHeight;
+      window.__setAutoScroll(false);
+      // User drags up and lifts their finger.
+      vp.dispatchEvent(new Event('touchstart'));
+      vp.scrollTop = max - 500;
+      vp.dispatchEvent(new Event('scroll'));
+      vp.dispatchEvent(new Event('touchend'));
+      // Renderer snaps to the bottom 100ms later — still inside the 500ms grace.
+      await new Promise(r => setTimeout(r, 100));
+      vp.scrollTop = max;
+      vp.dispatchEvent(new Event('scroll'));
+      await new Promise(r => setTimeout(r, 60));
+      return { max, pinAfterSnap: window.__readScrollPin(), scrollTopAfter: vp.scrollTop };
+    });
+
+    // Pin survived the in-grace snap and the viewport was restored upward.
+    expect(res.pinAfterSnap).toBeGreaterThanOrEqual(0);
+    expect(res.scrollTopAfter).toBeLessThan(res.max - 100);
+    await context.close();
+  });
+
   test('user scrolling all the way to the bottom releases the pin', async ({ browser }) => {
     const { page, context } = await mobilePage(browser);
     expect(await makeScrollable(page)).toBe(true);

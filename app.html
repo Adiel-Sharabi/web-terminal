@@ -763,6 +763,16 @@
       if (entry && entry.heartbeatTimer) { clearInterval(entry.heartbeatTimer); entry.heartbeatTimer = null; }
     }
 
+    // Strip replay-unsafe terminal queries (DA/DSR) + screen-clears from cached
+    // scrollback before replaying it into xterm on instant-switch. Mirrors the
+    // server-side lib/replay-sanitize.js. Without this, a stale DA query in the
+    // cache makes xterm answer "ESC[?1;2c" into an idle shell, leaving "1;2c"
+    // garbage on the prompt (the fresh-connect path is already sanitized server-
+    // side before the scrollback is sent).
+    function sanitizeReplay(s) {
+      return s ? s.replace(/\x1b\[[23]J|\x1b\[\?1049[hl]|\x1b\[[?>=]?[0-9;]*[cn]/g, '') : s;
+    }
+
     function connect() {
       if (!sessionId) return;
       resetHistoryState();
@@ -1056,7 +1066,7 @@
       if (cached && cached.connected && cached.ws && cached.ws.readyState === WebSocket.OPEN) {
         // Instant switch: replay cached scrollback
         if (cached.scrollback) {
-          term.write(cached.scrollback);
+          term.write(sanitizeReplay(cached.scrollback));
         }
         // Promote background WS to active
         ws = cached.ws;
@@ -2007,7 +2017,15 @@
       const atBottom = isAtBottom();
       // Only reflect the view state into autoScroll during a live user
       // gesture. A programmatic scroll from rendering doesn't change intent.
-      if (Date.now() <= _userScrollGestureUntil) autoScroll = atBottom;
+      // And never re-arm auto-follow while the viewport pin is still holding the
+      // user scrolled up: during the 2s gesture window a stray snap-to-bottom
+      // (xterm keeping the cursor visible mid-stream) would otherwise flip
+      // autoScroll back on and restart the snap war. Only a real pin release
+      // (handled in pinViewportScroll / sendInput) may set autoScroll true.
+      if (Date.now() <= _userScrollGestureUntil) {
+        const pinHolding = (typeof window.__readScrollPin === 'function') && window.__readScrollPin() >= 0;
+        autoScroll = atBottom && !pinHolding;
+      }
       scrollBtn.style.display = atBottom ? 'none' : 'block';
     });
 
@@ -2043,13 +2061,41 @@
       vp.addEventListener('scroll', () => {
         if (restoring) { restoring = false; return; }
         const max = vp.scrollHeight - vp.clientHeight;
+        const atBottom = vp.scrollTop >= max - 4;
         // On mobile, only the finger (or its settling momentum) counts as user
         // intent; on desktop fall back to the wheel/key gesture window.
         const userDriven = isMobile ? inTouchScroll() : (Date.now() <= _userScrollGestureUntil);
-        if (userDriven) {
-          // Release auto-follow only when the user themselves reaches bottom.
-          pinned = (vp.scrollTop >= max - 4) ? -1 : vp.scrollTop;
+        // Releasing the pin (pinned = -1) resumes auto-follow, so it must happen
+        // ONLY when the user deliberately scrolled to the bottom. While Claude
+        // streams, xterm snaps scrollTop to the bottom to keep the cursor
+        // visible; that snap fires a scroll event with NO finger down — and it
+        // routinely lands inside the 500ms momentum grace, where inTouchScroll()
+        // is still true. Gating the release on `touching` (a finger physically
+        // on the glass) instead of the looser grace keeps a scrolled-up reader
+        // pinned through those snaps — the old code released here, yanking the
+        // reader to the bottom on every streamed chunk. The browser ignores
+        // programmatic scrollTop writes while a finger is actively dragging, so
+        // a bottom-reaching scroll with the finger down is genuinely the user
+        // arriving at the bottom. Desktop has no touch, so it keeps the gesture
+        // window.
+        const releaseToBottom = isMobile ? touching : (Date.now() <= _userScrollGestureUntil);
+        if (atBottom && releaseToBottom) {
+          pinned = -1;
+          // Back at the bottom on purpose — resume auto-follow.
+          autoScroll = true;
+        } else if (userDriven && !atBottom) {
+          // Track the user's (or settling momentum's) position as the new pin.
+          pinned = vp.scrollTop;
+          // CRITICAL: kill auto-follow synchronously the instant the user scrolls
+          // up. Otherwise term.onLineFeed keeps calling term.scrollToBottom() ~60x
+          // a second while the pin reverts it ~60x a second — a war that resolves
+          // invisibly in headless but reads as constant "jumpiness" on a real
+          // device (async compositor scroll + touch momentum). xterm's own
+          // onScroll flips autoScroll too, but only on a later async frame; this
+          // closes that gap so the snap never fires in the first place.
+          autoScroll = false;
         } else if (pinned >= 0 && vp.scrollTop > pinned) {
+          // Programmatic drift toward the bottom — snap back to the pin.
           restoring = true;
           vp.scrollTop = pinned;
         }
@@ -2153,7 +2199,10 @@
           displayBuffer = displayBuffer.slice(-DISPLAY_BUFFER_CAP);
         }
         term.reset();
-        term.write(displayBuffer, () => {
+        // Sanitize before the bulk rewrite: displayBuffer mirrors the raw live
+        // stream (incl. Claude's DA/DSR queries). Re-writing those into xterm
+        // would have it answer them into an idle shell — the "1;2c" prompt bug.
+        term.write(sanitizeReplay(displayBuffer), () => {
           try {
             const newBaseY = (term.buffer && term.buffer.active) ? term.buffer.active.baseY : 0;
             const addedLines = Math.max(0, newBaseY - oldBaseY);
@@ -2195,6 +2244,118 @@
     // Test hooks — inspect/force autoScroll from outside (test spec uses these).
     window.__readAutoScroll = () => autoScroll;
     window.__setAutoScroll = (v) => { autoScroll = !!v; };
+
+    // --- On-device scroll tracer (opt-in via ?scrolldbg=1) -------------------
+    // Records every viewport-position change with the most likely culprit and a
+    // stack trace for the snap-to-bottom calls, then shows a copyable overlay.
+    // Completely inert unless the query flag is present. Used to diagnose
+    // "view jumps back down" on real phones where headless can't reproduce.
+    (function scrollTracer() {
+      try {
+        // Activate via ?scrolldbg=1 OR a persisted localStorage flag. Visiting
+        // the URL once (in any browser tab on this origin) latches it on so the
+        // installed PWA — which has no address bar — also shows the tracer on its
+        // next launch. Turn off with ?scrolldbg=0.
+        const qs = location.search || '';
+        let on = /[?&]scrolldbg=1/.test(qs);
+        try {
+          if (/[?&]scrolldbg=0/.test(qs)) localStorage.removeItem('scrolldbg');
+          else if (on) localStorage.setItem('scrolldbg', '1');
+          if (!/[?&]scrolldbg=0/.test(qs) && localStorage.getItem('scrolldbg') === '1') on = true;
+        } catch {}
+        if (!on) return;
+        const MARKER = 'scrolldbg-v1'; // bump to confirm the device has fresh app.html
+        const vp = document.querySelector('#terminal .xterm-viewport');
+        if (!vp) return;
+        const log = [];
+        let lastTop = vp.scrollTop;
+        let lastStBAt = -1e9, lastStBStack = '';
+        let lastResizeAt = -1e9;
+        let lastReleaseAt = -1e9, lastReleaseStack = '';
+        let fingerDown = false;
+        const T0 = performance.now();
+        const now = () => Math.round(performance.now() - T0);
+        const shortStack = () => {
+          try {
+            return (new Error().stack || '').split('\n').slice(2, 6)
+              .map(s => s.trim().replace(/^at\s+/, '').replace(/\s*\(.*app[^)]*\)/, '').replace(/https?:\/\/[^ ]*\//, ''))
+              .join(' < ');
+          } catch { return '?'; }
+        };
+        const push = (e) => { log.push(e); if (log.length > 120) log.shift(); render(); };
+
+        // Wrap the two "pull-down" levers so we capture who fired them.
+        const origStB = term.scrollToBottom.bind(term);
+        term.scrollToBottom = function () {
+          lastStBAt = now(); lastStBStack = shortStack();
+          push({ t: lastStBAt, k: 'scrollToBottom()', via: lastStBStack });
+          return origStB();
+        };
+        const origRelease = window.__releaseScrollPin;
+        window.__releaseScrollPin = function () {
+          lastReleaseAt = now(); lastReleaseStack = shortStack();
+          push({ t: lastReleaseAt, k: 'PIN RELEASE', via: lastReleaseStack });
+          return origRelease && origRelease.apply(this, arguments);
+        };
+
+        vp.addEventListener('touchstart', () => { fingerDown = true; push({ t: now(), k: 'touchstart' }); }, { passive: true });
+        const end = () => { fingerDown = false; push({ t: now(), k: 'touchend' }); };
+        vp.addEventListener('touchend', end, { passive: true });
+        vp.addEventListener('touchcancel', end, { passive: true });
+        window.addEventListener('resize', () => { lastResizeAt = now(); push({ t: now(), k: 'window.resize' }); });
+        if (window.visualViewport) {
+          window.visualViewport.addEventListener('resize', () => { lastResizeAt = now(); push({ t: now(), k: 'visualViewport.resize' }); });
+        }
+
+        vp.addEventListener('scroll', () => {
+          const top = vp.scrollTop, max = vp.scrollHeight - vp.clientHeight;
+          const d = top - lastTop; lastTop = top;
+          const pin = (window.__readScrollPin && window.__readScrollPin()) ?? null;
+          const auto = window.__readAutoScroll && window.__readAutoScroll();
+          // Only the DOWNWARD moves while the reader expects to stay up matter.
+          const goingDown = d > 2;
+          const nearBottom = top >= max - 8;
+          if (!goingDown && !nearBottom) { return; } // ignore upward/noise
+          let culprit = 'native/momentum';
+          if (now() - lastStBAt < 60) culprit = 'scrollToBottom: ' + lastStBStack;
+          else if (now() - lastResizeAt < 350) culprit = 'resize/fit reflow';
+          else if (!fingerDown) culprit = 'renderer-direct scrollTop';
+          else culprit = 'finger';
+          push({ t: now(), k: 'DOWN', top, max, d, pin, auto, finger: fingerDown, culprit });
+        }, { passive: true });
+
+        // --- overlay ---
+        const box = document.createElement('div');
+        box.style.cssText = 'position:fixed;left:0;right:0;top:0;z-index:2147483647;max-height:42vh;overflow:auto;background:rgba(0,0,0,.86);color:#0f0;font:10px/1.25 monospace;padding:4px 6px;white-space:pre-wrap;border-bottom:1px solid #0f0';
+        const bar = document.createElement('div');
+        bar.style.cssText = 'position:sticky;top:0;background:#000;padding:2px 0;display:flex;gap:6px;align-items:center';
+        const mkBtn = (label, fn) => { const b = document.createElement('button'); b.textContent = label; b.style.cssText = 'font:11px monospace;padding:3px 8px'; b.addEventListener('click', fn); return b; };
+        const live = document.createElement('span'); live.style.flex = '1';
+        const copyBtn = mkBtn('Copy', async () => {
+          const text = MARKER + '\n' + log.map(e => JSON.stringify(e)).join('\n');
+          try { await navigator.clipboard.writeText(text); copyBtn.textContent = 'Copied!'; setTimeout(() => copyBtn.textContent = 'Copy', 1200); }
+          catch { pre.contentEditable = 'true'; const r = document.createRange(); r.selectNodeContents(pre); const s = getSelection(); s.removeAllRanges(); s.addRange(r); copyBtn.textContent = 'select+copy'; }
+        });
+        const clearBtn = mkBtn('Clear', () => { log.length = 0; render(); });
+        bar.append(live, copyBtn, clearBtn);
+        const pre = document.createElement('div');
+        box.append(bar, pre);
+        document.body.appendChild(box);
+        function render() {
+          const top = vp.scrollTop, max = vp.scrollHeight - vp.clientHeight;
+          const pin = (window.__readScrollPin && window.__readScrollPin()) ?? null;
+          live.textContent = MARKER + ` top=${top}/${max} pin=${pin} auto=${window.__readAutoScroll && window.__readAutoScroll()} finger=${fingerDown}`;
+          pre.textContent = log.slice(-40).map(e =>
+            e.k === 'DOWN'
+              ? `${e.t} DOWN top=${e.top}/${e.max} d=${e.d} pin=${e.pin} auto=${e.auto} :: ${e.culprit}`
+              : `${e.t} ${e.k}${e.via ? ' :: ' + e.via : ''}`
+          ).join('\n');
+        }
+        render();
+        window.__scrollTracerActive = true;
+        push({ t: now(), k: 'tracer-ready ' + MARKER });
+      } catch (e) { /* tracer must never break the app */ }
+    })();
 
     // --- Sidebar ---
     const sidebarPinned = (() => {

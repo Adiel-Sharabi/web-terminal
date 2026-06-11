@@ -8,8 +8,9 @@ const { execFile, spawn } = require('child_process');
 const { performance } = require('perf_hooks');
 const workerClientLib = require('./lib/worker-client');
 const { mintDirectToken, verifyDirectToken } = require('./lib/cluster-token');
+const { sanitizeReplay } = require('./lib/replay-sanitize');
 
-const SERVER_VERSION = '1.16.0'; // 2026-05-28: scroll-up backfill, smaller initial replay
+const SERVER_VERSION = '1.16.1'; // 2026-05-31: strip DA/DSR queries from scrollback replay (fixes "1;2c" garbage on prompt)
 
 // --- Optional latency instrumentation (opt-in via WT_LATENCY_DEBUG=1) -----
 // Event-loop lag monitor: interval is 10ms; anything ≥ 50ms slip is a stall.
@@ -2255,7 +2256,10 @@ app.get('/api/sessions/:id/scrollback', async (req, res) => {
     let full;
     try {
       const r = await workerClient.rpc('getScrollback', { id: req.params.id, limit: 4 * 1024 * 1024 });
-      full = (r && r.data) || '';
+      // Sanitize identically to the attach replay path so scroll-up backfill
+      // can't re-introduce terminal queries (DA/DSR) and so offsets computed
+      // here stay consistent with the sanitized initial replay.
+      full = sanitizeReplay((r && r.data) || '');
     } catch (e) {
       if (/not found/i.test(e.message)) return res.status(404).json({ error: 'not found' });
       throw e;
@@ -2722,7 +2726,11 @@ app.ws('/ws/:id', (ws, req) => {
     try {
       let full = attachRes.scrollback || '';
       if (full.length) {
-        full = full.replace(/\x1b\[[23]J/g, '').replace(/\x1b\[\?1049[hl]/g, '');
+        // Strip replay-unsafe sequences: erase-display, alt-screen toggles, and
+        // — critically — terminal queries (DA/DSR). Replaying a stale DA query
+        // makes xterm answer "ESC[?1;2c" into an idle shell, leaving "1;2c"
+        // garbage on the prompt. See lib/replay-sanitize.js.
+        full = sanitizeReplay(full);
         ws.send(full);
       }
     } catch (e) {}
