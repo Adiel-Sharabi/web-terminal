@@ -9,8 +9,9 @@ const { performance } = require('perf_hooks');
 const workerClientLib = require('./lib/worker-client');
 const { mintDirectToken, verifyDirectToken } = require('./lib/cluster-token');
 const { sanitizeReplay } = require('./lib/replay-sanitize');
+const { execGit, gitSafeArgs, gitSafeEnv } = require('./lib/git-safe');
 
-const SERVER_VERSION = '1.16.1'; // 2026-05-31: strip DA/DSR queries from scrollback replay (fixes "1;2c" garbage on prompt)
+const SERVER_VERSION = '1.16.2'; // 2026-06-11: git-safe update-check hardening (no credential-prompt hang/OOM) atop 1.16.1 replay sanitize
 
 // --- Optional latency instrumentation (opt-in via WT_LATENCY_DEBUG=1) -----
 // Event-loop lag monitor: interval is 10ms; anything ≥ 50ms slip is a stall.
@@ -1870,6 +1871,13 @@ const GIT_CACHE_TTL = 30 * 1000;        // refresh cheap keys every 30s
 const GIT_BEHIND_TTL = 5 * 60 * 1000;   // refresh behind every 5 min
 
 function _gitExecAsync(cmd, args, timeoutMs) {
+  // All version/update-check git calls go through the hardened runner so they
+  // can never prompt for credentials (which would hang git-credential-manager
+  // forever in the headless service context and leak process trees until the
+  // machine OOMs). See lib/git-safe.js.
+  if (cmd === 'git') {
+    return execGit(args, { cwd: __dirname, timeoutMs: timeoutMs || 3000 });
+  }
   return new Promise((resolve) => {
     execFile(cmd, args, { cwd: __dirname, encoding: 'utf8', windowsHide: true, timeout: timeoutMs || 3000 }, (err, stdout) => {
       resolve(err ? null : String(stdout || '').trim());
@@ -1934,7 +1942,7 @@ function _getGitInfo() {
   // UI. Behind=-1 until the async refresh arrives.
   try {
     const { execSync } = require('child_process');
-    const hash = execSync('git rev-parse --short HEAD', { cwd: __dirname, encoding: 'utf8', windowsHide: true }).trim();
+    const hash = execSync(`git ${gitSafeArgs(['rev-parse', '--short', 'HEAD']).join(' ')}`, { cwd: __dirname, encoding: 'utf8', windowsHide: true, env: gitSafeEnv() }).trim();
     _gitCache = { hash, date: '', behind: -1, dirty: false };
     _gitCacheTime = Date.now();
   } catch {
@@ -2546,8 +2554,9 @@ app.post('/api/restart', (req, res) => {
   setTimeout(async () => {
     try { await workerClient.rpc('flushState'); } catch (e) {}
     const { execSync } = require('child_process');
-    // Pull latest code before restarting
-    try { execSync('git pull --ff-only', { cwd: __dirname, timeout: 15000, windowsHide: true }); } catch (e) {
+    // Pull latest code before restarting. Hardened so a broken HTTPS remote
+    // credential can't hang git-credential-manager and leak process trees.
+    try { execSync(`git ${gitSafeArgs(['pull', '--ff-only']).join(' ')}`, { cwd: __dirname, timeout: 15000, windowsHide: true, env: gitSafeEnv() }); } catch (e) {
       console.error(`[${new Date().toISOString()}] git pull failed: ${e.message}`);
     }
     // Use PM2 if available, otherwise fallback to spawn
