@@ -54,6 +54,7 @@ Web Terminal solves all of this, running as a single `node monitor.js` on each h
 
 ### AI Agent Integration (Claude Code)
 - **Session intelligence** — real-time status tracking via Claude Code hooks: Working (orange), Idle (green), Waiting for input (red)
+- **API-error auto-recovery** — detects `API Error: …` in a Claude session's output, highlights the session **bold red** in the sidebar and fires a notification so you know to retry. On a transient/overload error (529, 500, timeouts, etc.) it auto-recovers: sends `continue` twice, then `/compact` and replays your last prompt — up to 3 attempts per error, then leaves it highlighted for you. Toggle with `autoContinueOnApiError` (Settings → "Auto-recover from Claude API errors", default on). Non-transient errors (400/401) only highlight + notify.
 - **Smart notifications** — urgent alerts for permission prompts (always shown), quiet notifications for idle sessions (background only)
 - **Mute button** — toggle notifications while keeping sidebar status dots live
 - **Claude sessions browser** — scan, resume, and transfer Claude Code conversations across servers
@@ -196,6 +197,7 @@ Config is stored in `config.json` (gitignored):
 | `claudeHome` | Yes | User profile path for Claude session files (auto-detected if empty) |
 | `openInNewTab` | Yes | Whether new sessions open in a new browser tab |
 | `keepSessionsOpen` | Yes | Keep background WebSocket connections to all sessions for instant switching (default false) |
+| `autoContinueOnApiError` | Yes | Auto-recover from transient Claude API errors: `continue` ×2, then `/compact` + replay your last prompt (up to 3 attempts per error). Default **true**. Highlight + notify happen regardless of this setting. Override per-process with the `WT_AUTO_CONTINUE_API_ERROR` env var (`0`/`1`). |
 | `passAllEnv` | Yes | Pass the full parent environment to spawned shells (default false — a limited set of variables is forwarded) |
 
 ### Environment Variables

@@ -105,6 +105,48 @@ function getDefaultCwd() { return process.env.WT_CWD || liveConfig('defaultCwd',
 const SHELL = process.env.WT_SHELL || liveConfig('shell', process.platform === 'win32' ? 'C:\\Program Files\\Git\\bin\\bash.exe' : '/bin/bash');
 const PORT_HINT = parseInt(process.env.WT_PORT || liveConfig('port', '7681'));
 
+// --- API-error detection + auto-continue ----------------------------------
+// Claude Code prints "API Error: <code> <msg>" into the PTY stream when a
+// request fails (no hook fires for it), so we sniff it out of the output path.
+// On a transient/overload error we walk an escalation ladder: continue,
+// continue, then /compact + replay the user's last prompt. Non-transient
+// errors (400/401 — retrying won't help) only flag + notify.
+const _apiErrFast = process.env.WT_API_ERROR_FAST === '1'; // tests: shrink timers
+// Backoff before each auto action (overload often needs a breather to subside).
+const API_ERROR_BACKOFF_MS = _apiErrFast ? [40, 40, 40] : [5000, 15000, 30000];
+const API_ERROR_MAX_ATTEMPTS = 3;     // total auto actions per episode
+const API_ERROR_COMPACT_ATTEMPT = 3;  // the attempt that runs /compact + replay
+const API_ERROR_EPISODE_MS = 120000;  // a new error this long after the last auto
+                                       // action starts a fresh episode (resets count)
+const API_ERROR_COMPACT_MIN_WAIT_MS = _apiErrFast ? 10 : 1500;       // ignore the settle-idle right after /compact
+const API_ERROR_COMPACT_FALLBACK_MS = _apiErrFast ? 300 : 45000;     // replay anyway if no idle hook arrives
+const API_ERROR_NEEDLE = Buffer.from('API Error');
+
+function autoContinueEnabled() {
+  // Ops/test override wins, then live config (default ON).
+  if (process.env.WT_AUTO_CONTINUE_API_ERROR === '0') return false;
+  if (process.env.WT_AUTO_CONTINUE_API_ERROR === '1') return true;
+  return liveConfig('autoContinueOnApiError', true) === true;
+}
+
+function isClaudeSession(session) {
+  return !!(session.hookStatus
+    || session.claudeSessionId
+    || (session.autoCommand && /\bclaude\b/i.test(session.autoCommand)));
+}
+
+function stripAnsiForScan(s) {
+  // CSI sequences (incl. SGR colour codes) wrap the error text; strip them so
+  // the status code / phrase classification sees clean text.
+  return s.replace(/\x1b\[[0-9;?]*[ -/]*[@-~]/g, '');
+}
+
+function isTransientApiError(line) {
+  // Retryable: overload, rate limit, gateway/timeout, transport errors.
+  if (/\b(408|409|425|429|500|502|503|504|520|521|522|523|524|529)\b/.test(line)) return true;
+  return /overload|rate.?limit|temporar|time(?:d)?\s*out|timeout|connection (?:error|reset)|econnreset|etimedout|enetunreach|fetch failed|socket hang up|service unavailable|bad gateway|gateway time/i.test(line);
+}
+
 // Write a minimal readline config that enables bracketed paste mode.
 // Bash 4.4 ships with the setting available but OFF by default; this opts it
 // back on without overriding the user's own .inputrc (we $include it first).
@@ -531,6 +573,131 @@ function broadcastEvent(event, params) {
   }
 }
 
+// --- API-error detection + auto-continue (see constants block up top) ------
+
+// Per-PTY-chunk sniff. Hot path: a single Buffer.includes() memmem when not
+// already flagged; the toString + regex only runs on the rare chunk that
+// actually carries "API Error". Gated to Claude sessions so a logfile that
+// happens to contain the phrase in a plain shell doesn't trip it.
+function detectApiErrorInOutput(session, buf) {
+  if (session.apiError) return;            // already flagged — wait for clear
+  if (!isClaudeSession(session)) return;
+  if (!buf.includes(API_ERROR_NEEDLE)) return;
+  const text = stripAnsiForScan(buf.toString('utf8'));
+  const m = /API Error[^\n\r]*/.exec(text);
+  if (!m) return;
+  markApiError(session, m[0].trim().slice(0, 200));
+}
+
+function markApiError(session, line) {
+  const transient = isTransientApiError(line);
+  session.apiError = true;
+  session.apiErrorText = line;
+  session.lastApiErrorAt = Date.now();
+  log(`api-error: "${session.name}" (${session.id}) ${transient ? 'transient' : 'non-transient'}: ${line}`);
+  broadcastEvent('apiError', { id: session.id, name: session.name, apiError: true, text: line, transient });
+  if (transient) scheduleAutoContinue(session);
+}
+
+// Clears the highlight (called when Claude next starts working — a retry, ours
+// or the user's). Cancels a pending auto-continue timer but deliberately does
+// NOT reset the attempt counter: a brief working blip between two overload
+// errors must stay in the same episode, else the ladder loops forever. The
+// counter only resets via the episode-timeout in scheduleAutoContinue.
+function clearApiError(session) {
+  if (session._autoContinueTimer) { clearTimeout(session._autoContinueTimer); session._autoContinueTimer = null; }
+  if (!session.apiError) return false;
+  session.apiError = false;
+  session.apiErrorText = '';
+  log(`api-error: "${session.name}" (${session.id}) cleared`);
+  broadcastEvent('apiError', { id: session.id, name: session.name, apiError: false, text: '', cleared: true });
+  return true;
+}
+
+function scheduleAutoContinue(session) {
+  if (!autoContinueEnabled()) return;
+  const now = Date.now();
+  if (!session._lastAutoContinueAt || (now - session._lastAutoContinueAt) > API_ERROR_EPISODE_MS) {
+    session.autoContinueCount = 0; // fresh episode
+  }
+  const count = session.autoContinueCount || 0;
+  if (count >= API_ERROR_MAX_ATTEMPTS) {
+    log(`api-error: "${session.name}" exhausted ${API_ERROR_MAX_ATTEMPTS} auto-continue attempts; leaving highlighted`);
+    return;
+  }
+  const attempt = count + 1;
+  session.autoContinueCount = attempt;
+  session._lastAutoContinueAt = now;
+  const delay = API_ERROR_BACKOFF_MS[Math.min(attempt - 1, API_ERROR_BACKOFF_MS.length - 1)];
+  if (session._autoContinueTimer) clearTimeout(session._autoContinueTimer);
+  session._autoContinueTimer = setTimeout(() => {
+    session._autoContinueTimer = null;
+    const s = sessions.get(session.id);
+    if (!s) return;
+    if (attempt >= API_ERROR_COMPACT_ATTEMPT) {
+      // Failed twice — shrink context with /compact, then replay the last
+      // prompt once Claude settles (idle hook or fallback timer).
+      try { s.term.write('/compact\n'); } catch (e) { log(`api-error: /compact write failed: ${e.message}`); return; }
+      log(`api-error: "${s.name}" auto attempt ${attempt}/${API_ERROR_MAX_ATTEMPTS}: sent /compact`);
+      armCompactReplay(s);
+      broadcastEvent('apiError', { id: s.id, name: s.name, apiError: true, text: s.apiErrorText || '', transient: true, autoContinue: attempt, action: 'compact' });
+    } else {
+      try { s.term.write('continue\n'); } catch (e) { log(`api-error: continue write failed: ${e.message}`); return; }
+      log(`api-error: "${s.name}" auto attempt ${attempt}/${API_ERROR_MAX_ATTEMPTS}: sent continue`);
+      broadcastEvent('apiError', { id: s.id, name: s.name, apiError: true, text: s.apiErrorText || '', transient: true, autoContinue: attempt, action: 'continue' });
+    }
+  }, delay);
+  if (typeof session._autoContinueTimer.unref === 'function') session._autoContinueTimer.unref();
+}
+
+function armCompactReplay(session) {
+  const text = (session.lastPrompt && session.lastPrompt.trim()) ? session.lastPrompt : 'continue';
+  session._compactReplay = { text, setAt: Date.now() };
+  if (session._compactReplayTimer) clearTimeout(session._compactReplayTimer);
+  session._compactReplayTimer = setTimeout(() => doCompactReplay(session, 'timeout'), API_ERROR_COMPACT_FALLBACK_MS);
+  if (typeof session._compactReplayTimer.unref === 'function') session._compactReplayTimer.unref();
+}
+
+function doCompactReplay(session, reason) {
+  const s = sessions.get(session.id);
+  if (!s || !s._compactReplay) return;
+  const { text } = s._compactReplay;
+  s._compactReplay = null;
+  if (s._compactReplayTimer) { clearTimeout(s._compactReplayTimer); s._compactReplayTimer = null; }
+  writePromptToTerm(s, text);
+  log(`api-error: "${s.name}" compact-replay (${reason}): ${text.slice(0, 80)}`);
+  broadcastEvent('apiError', { id: s.id, name: s.name, apiError: !!s.apiError, text: s.apiErrorText || '', autoContinue: API_ERROR_COMPACT_ATTEMPT, action: 'replay-prompt', replayText: text.slice(0, 200) });
+}
+
+// Submit text to Claude's TUI. Multi-line prompts go through bracketed paste so
+// embedded newlines don't submit early; a trailing CR then sends it.
+function writePromptToTerm(session, text) {
+  try {
+    if (text.includes('\n')) {
+      session.term.write('\x1b[200~' + text + '\x1b[201~');
+      setTimeout(() => { try { session.term.write('\r'); } catch {} }, 60);
+    } else {
+      session.term.write(text + '\n');
+    }
+  } catch (e) { log(`api-error: prompt replay write failed: ${e.message}`); }
+}
+
+// Per-chunk PTY output processing — shared by the real term.onData handler and
+// the test-only __testInjectOutput RPC so both exercise the same path.
+function processPtyOutput(session, buf) {
+  // Track bracketed-paste mode so we can re-assert it on re-attach.
+  const bp = scanBracketedPaste(buf);
+  if (bp !== null) session.bracketedPaste = bp;
+  appendScrollback(session.scrollback, buf);
+  trimScrollback(session.scrollback, MAX_SCROLLBACK_SIZE);
+  session.dirty = true;
+  session.lastActivity = Date.now();
+  detectApiErrorInOutput(session, buf);
+  if (session.clientCount > 0) {
+    broadcastPtyOut(session, buf);
+  }
+}
+
 // Route binary PTY output only to connections subscribed to that session.
 // Issue #11: uses encodePtyOutFromBytes with the session's pre-computed
 // idBytes buffer, avoiding a uuid hex parse + 16-byte Buffer alloc on every
@@ -626,6 +793,8 @@ function sessionSummary(id, s) {
     autoCommand: s.autoCommand || '',
     claudeSessionId,
     hookStatus: !!s.hookStatus,
+    apiError: !!s.apiError,
+    apiErrorText: s.apiError ? (s.apiErrorText || '') : '',
   };
 }
 
@@ -720,26 +889,18 @@ function createSession(id, cwd, name, autoCommand, savedScrollback, claudeSessio
     //   but it's still a strict win over the old code, which did one Buffer
     //   allocation per BROADCAST DESTINATION (N subscribers = N allocs).
     const buf = Buffer.isBuffer(data) ? data : Buffer.from(data, 'utf8');
-    // Track bracketed-paste mode so we can re-assert it on re-attach (the
-    // enable sequence may have scrolled out of the replayed scrollback).
-    const bp = scanBracketedPaste(buf);
-    if (bp !== null) session.bracketedPaste = bp;
-    // Issue #12: append a chunk (O(1)) and head-trim past MAX_SCROLLBACK_SIZE.
-    // No join/reduce on the hot path — readers concat once per call.
-    appendScrollback(session.scrollback, buf);
-    trimScrollback(session.scrollback, MAX_SCROLLBACK_SIZE);
-    // Issue #10: mark dirty so the next periodic save writes this session.
-    session.dirty = true;
-    session.lastActivity = Date.now();
-    // Stream PTY data as binary TYPE_PTY_OUT frames to subscribed connections only.
-    // (fan-out to browser WS is done server-side.)
-    if (session.clientCount > 0) {
-      broadcastPtyOut(session, buf);
-    }
+    // Issue #12/#10: append+trim scrollback, mark dirty, track bracketed paste,
+    // sniff for API errors, and fan out to subscribers. Shared with the
+    // test-only __testInjectOutput RPC via processPtyOutput().
+    processPtyOutput(session, buf);
   });
 
   term.onExit(() => {
     log(`session ${id} shell exited`);
+    // Drop any pending API-error recovery timers so they don't fire at a dead PTY.
+    if (session._autoContinueTimer) { clearTimeout(session._autoContinueTimer); session._autoContinueTimer = null; }
+    if (session._compactReplayTimer) { clearTimeout(session._compactReplayTimer); session._compactReplayTimer = null; }
+    session._compactReplay = null;
     if (session.autoCommand && /\bclaude\b/i.test(session.autoCommand)) {
       const claudeId = session.claudeSessionId
         || extractClaudeSessionIdFromCmd(session.autoCommand)
@@ -815,11 +976,21 @@ function createSession(id, cwd, name, autoCommand, savedScrollback, claudeSessio
 }
 
 // --- Hook handling --------------------------------------------------------
-function handleHook(session, event, claudeSessionId) {
+function handleHook(session, event, claudeSessionId, prompt) {
   if (!event) throw new Error('event required');
   const prevStatus = session.status;
   let notifyType = null, notifyMsg = null;
   session.hookStatus = true;
+
+  // Remember the user's last real prompt so the API-error /compact escalation
+  // can replay it. Skip our own auto-sends ("continue") and slash commands so
+  // a recovery action doesn't overwrite the genuine task prompt.
+  if (event === 'UserPromptSubmit' && typeof prompt === 'string') {
+    const p = prompt.trim();
+    if (p && p !== 'continue' && !p.startsWith('/')) {
+      session.lastPrompt = prompt.slice(0, 8000);
+    }
+  }
 
   // Pin the authoritative Claude session UUID reported by Claude itself.
   // Why: filesystem-mtime detection (detectClaudeSessionIdFromDir) returns the
@@ -845,10 +1016,18 @@ function handleHook(session, event, claudeSessionId) {
     case 'SubagentStart':
       session.status = 'working';
       if (session.idleTimer) { clearTimeout(session.idleTimer); session.idleTimer = null; }
+      // Claude resumed (a retry — ours or the user's): drop the API-error mark.
+      clearApiError(session);
       break;
     case 'Notification':
     case 'Stop':
       session.status = 'idle';
+      // If a /compact recovery is in flight, Claude reaching idle means compact
+      // finished — replay the captured prompt now (the fallback timer is a
+      // backstop). Ignore the immediate settle-idle right after we sent it.
+      if (session._compactReplay && (Date.now() - session._compactReplay.setAt) > API_ERROR_COMPACT_MIN_WAIT_MS) {
+        doCompactReplay(session, 'idle-hook');
+      }
       if (prevStatus !== 'idle') {
         notifyType = 'idle';
         notifyMsg = event === 'Stop'
@@ -1001,7 +1180,7 @@ const rpcHandlers = {
   hookEvent: async (params) => {
     const session = sessions.get(requireUuid(params.id));
     if (!session) throw new Error('session not found');
-    return handleHook(session, params.event, params.claudeSessionId);
+    return handleHook(session, params.event, params.claudeSessionId, params.prompt);
   },
 
   resizeSession: async (params) => {
@@ -1072,6 +1251,17 @@ const rpcHandlers = {
   // Test-only: inject a scrollback payload of roughly `bytes` size so tests
   // can exercise the periodic-save path with realistic payloads without
   // having to coax the PTY into producing megabytes of output.
+  // Test-only: feed bytes through the exact PTY-output path real term.onData
+  // uses (scrollback append/trim, dirty, bracketed-paste, API-error sniff,
+  // fan-out). Lets tests exercise API-error detection without a real Claude.
+  __testInjectOutput: async (params) => {
+    if (!process.env.WT_TEST) throw new Error('test-only RPC');
+    const session = sessions.get(requireUuid(params.id));
+    if (!session) throw new Error('session not found');
+    processPtyOutput(session, Buffer.from(String(params.data || ''), 'utf8'));
+    return { ok: true, apiError: !!session.apiError };
+  },
+
   __testInjectScrollback: async (params) => {
     if (!process.env.WT_TEST) throw new Error('test-only RPC');
     const session = sessions.get(requireUuid(params.id));
