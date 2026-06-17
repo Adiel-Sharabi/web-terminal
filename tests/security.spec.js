@@ -266,6 +266,20 @@ test.describe('Config API Security', () => {
     expect(res.status()).toBe(200);
     await ctx.dispose();
   });
+
+  test('autoContinueOnApiError round-trips as a boolean and defaults true', async () => {
+    const ctx = await authCtx();
+    // Save false, read back false.
+    await ctx.put('/api/config', { data: { port: 17681, password: '***', autoContinueOnApiError: false } });
+    let cfg = await (await ctx.get('/api/config')).json();
+    expect(cfg.autoContinueOnApiError).toBe(false);
+
+    // Save true, read back true (and confirm it's coerced to a real boolean).
+    await ctx.put('/api/config', { data: { port: 17681, password: '***', autoContinueOnApiError: 'yes' } });
+    cfg = await (await ctx.get('/api/config')).json();
+    expect(cfg.autoContinueOnApiError).toBe(true);
+    await ctx.dispose();
+  });
 });
 
 // ============================================================

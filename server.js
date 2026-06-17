@@ -11,7 +11,7 @@ const { mintDirectToken, verifyDirectToken } = require('./lib/cluster-token');
 const { sanitizeReplay } = require('./lib/replay-sanitize');
 const { execGit, gitSafeArgs, gitSafeEnv } = require('./lib/git-safe');
 
-const SERVER_VERSION = '1.16.2'; // 2026-06-11: git-safe update-check hardening (no credential-prompt hang/OOM) atop 1.16.1 replay sanitize
+const SERVER_VERSION = '1.17.0'; // 2026-06-17: detect Claude API errors in PTY output — bold-highlight the session + notify, and auto-recover (continue ×2 → /compact + replay last prompt)
 
 // --- Optional latency instrumentation (opt-in via WT_LATENCY_DEBUG=1) -----
 // Event-loop lag monitor: interval is 10ms; anything ≥ 50ms slip is a stall.
@@ -356,6 +356,26 @@ workerClient.on('statusChanged', ({ id, status, notifyType, notifyMsg }) => {
   }
   const payload = JSON.stringify({
     notification: { type: notifyType || 'status', message: notifyMsg || '', session: '', sessionId: id, status }
+  });
+  for (const client of notifyClients) { try { client.send(payload); } catch {} }
+});
+
+// API-error detection from the worker. Fan out to notify clients so the UI can
+// highlight the session (and pop a browser notification on first detection).
+// `cleared` flips the highlight off; `autoContinue`/`action` are progress-only
+// (sent as type 'status' so they don't spawn a browser notification per retry).
+workerClient.on('apiError', ({ id, name, apiError, text, transient, cleared, autoContinue, action, replayText }) => {
+  const isInitialDetect = apiError === true && !autoContinue && !cleared;
+  const type = isInitialDetect ? 'api_error' : 'status';
+  // The notification title already carries the session name, so the body is
+  // just the error line.
+  const message = isInitialDetect ? (text || 'API error') : '';
+  const payload = JSON.stringify({
+    notification: {
+      type, message, session: name || '', sessionId: id,
+      apiError: !!apiError, apiErrorText: apiError ? (text || '') : '',
+      transient: !!transient, autoContinue: autoContinue || 0, action: action || '', replayText: replayText || '',
+    }
   });
   for (const client of notifyClients) { try { client.send(payload); } catch {} }
 });
@@ -898,7 +918,11 @@ async function processHookEvent(id, rawEvent, claudeSessionId, body) {
   }
 
   state.lastSeq = seq;
-  return workerClient.rpc('hookEvent', { id, event, claudeSessionId });
+  // Forward the user's prompt on UserPromptSubmit so the worker can replay it
+  // during API-error /compact recovery. (Claude's hook payload carries `prompt`.)
+  const prompt = (event === 'UserPromptSubmit' && body && typeof body.prompt === 'string')
+    ? body.prompt : undefined;
+  return workerClient.rpc('hookEvent', { id, event, claudeSessionId, prompt });
 }
 
 app.post('/api/hook', express.json({ limit: '256kb' }), async (req, res) => {
@@ -1336,12 +1360,13 @@ app.get('/api/config', (req, res) => {
   current.publicUrl = current.publicUrl || '';
   current.claudeHome = current.claudeHome || '';
   current.keepSessionsOpen = current.keepSessionsOpen !== undefined ? current.keepSessionsOpen : true;
+  current.autoContinueOnApiError = current.autoContinueOnApiError !== undefined ? current.autoContinueOnApiError : true;
   // Never expose password in API response
   current.password = '***';
   res.json(current);
 });
 
-const ALLOWED_CONFIG_KEYS = ['port', 'host', 'user', 'password', 'shell', 'defaultCwd', 'scanFolders', 'defaultCommand', 'openInNewTab', 'serverName', 'scrollbackReplayLimit', 'cluster', 'publicUrl', 'claudeHome', 'keepSessionsOpen'];
+const ALLOWED_CONFIG_KEYS = ['port', 'host', 'user', 'password', 'shell', 'defaultCwd', 'scanFolders', 'defaultCommand', 'openInNewTab', 'serverName', 'scrollbackReplayLimit', 'cluster', 'publicUrl', 'claudeHome', 'keepSessionsOpen', 'autoContinueOnApiError'];
 
 app.put('/api/config', express.json({ limit: '16kb' }), (req, res) => {
   try {
@@ -1362,6 +1387,7 @@ app.put('/api/config', express.json({ limit: '16kb' }), (req, res) => {
     if (sanitized.scanFolders && !Array.isArray(sanitized.scanFolders)) sanitized.scanFolders = [String(sanitized.scanFolders)];
     if (sanitized.openInNewTab !== undefined) sanitized.openInNewTab = !!sanitized.openInNewTab;
     if (sanitized.keepSessionsOpen !== undefined) sanitized.keepSessionsOpen = !!sanitized.keepSessionsOpen;
+    if (sanitized.autoContinueOnApiError !== undefined) sanitized.autoContinueOnApiError = !!sanitized.autoContinueOnApiError;
     if (sanitized.scrollbackReplayLimit !== undefined) sanitized.scrollbackReplayLimit = Math.max(10240, parseInt(sanitized.scrollbackReplayLimit) || 102400);
     // Compare restart-sensitive keys against running values
     const RESTART_KEYS = { port: PORT, host: config.host || '127.0.0.1', shell: SHELL };

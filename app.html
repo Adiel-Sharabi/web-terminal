@@ -89,6 +89,10 @@
     @keyframes pulse { 0%,100% { opacity: 1; } 50% { opacity: 0.4; } }
     @keyframes flash-idle { 0%,100% { background: transparent; } 25%,75% { background: rgba(218,170,68,0.25); } }
     .sb-item.flash { animation: flash-idle 0.6s ease 3; }
+    /* API error: make the session stand out so you know to retry it. */
+    .sb-item.api-error { background: rgba(233,69,96,0.12); box-shadow: inset 3px 0 0 #e94560; }
+    .sb-item.api-error .sb-name { color: #ff6b81; font-weight: 700; }
+    .sb-item.api-error .sb-name::before { content: '\26A0'; margin-right: 2px; }
     .sb-status { font-size: 10px; }
     .sb-status.active { color: #4a4; }
     .sb-status.idle { color: #da4; }
@@ -483,6 +487,11 @@
           <input type="checkbox" id="cfgKeepSessionsOpen" style="width:auto;margin:0">
           <label for="cfgKeepSessionsOpen" style="margin:0;cursor:pointer">Keep sessions open for instant switching</label>
           <div class="hint" style="margin:0;margin-left:auto">Keeps background WebSocket connections to all sessions</div>
+        </div>
+        <div class="field field-wide" style="display:flex;align-items:center;gap:8px;margin-top:4px">
+          <input type="checkbox" id="cfgAutoContinueOnApiError" style="width:auto;margin:0">
+          <label for="cfgAutoContinueOnApiError" style="margin:0;cursor:pointer">Auto-recover from Claude API errors</label>
+          <div class="hint" style="margin:0;margin-left:auto">On a transient error: retry "continue" twice, then /compact + replay your last prompt</div>
         </div>
         <div class="field field-wide" style="border-top:1px solid #0f3460;padding-top:12px;margin-top:4px">
           <label>Cluster — Remote Servers</label>
@@ -2544,7 +2553,8 @@
         for (const s of serverSessions) {
           const item = document.createElement('div');
           const isCurrent = s.id === sessionId && s.serverUrl === sessionServerUrl;
-          item.className = 'sb-item' + (isCurrent ? ' current' : '');
+          item.className = 'sb-item' + (isCurrent ? ' current' : '') + (s.apiError ? ' api-error' : '');
+          if (s.apiError && s.apiErrorText) item.title = s.apiErrorText;
           item.dataset.sessionId = s.id;
           item.innerHTML =
             `<div class="sb-name"><span class="sb-dot ${s.status}"></span>${esc(s.name)}</div>` +
@@ -3106,6 +3116,7 @@
       document.getElementById('cfgClaudeHome').value = cfg.claudeHome || '';
       document.getElementById('cfgPublicUrl').value = cfg.publicUrl || '';
       document.getElementById('cfgKeepSessionsOpen').checked = !!cfg.keepSessionsOpen;
+      document.getElementById('cfgAutoContinueOnApiError').checked = cfg.autoContinueOnApiError !== false;
       renderClusterList(cfg.cluster || []);
       document.getElementById('saveMsg').textContent = '';
       document.getElementById('verClient').textContent = CLIENT_VERSION;
@@ -3131,6 +3142,7 @@
         claudeHome: document.getElementById('cfgClaudeHome').value.trim(),
         publicUrl: document.getElementById('cfgPublicUrl').value.trim().replace(/\/+$/, ''),
         keepSessionsOpen: document.getElementById('cfgKeepSessionsOpen').checked,
+        autoContinueOnApiError: document.getElementById('cfgAutoContinueOnApiError').checked,
         cluster: getClusterListFromUI()
       };
       const res = await fetch('/api/config', {
@@ -3212,8 +3224,17 @@
             const dot = document.querySelector(`.sb-item[data-session-id="${notification.sessionId}"] .sb-dot`);
             if (dot) { dot.className = `sb-dot ${notification.status}`; }
           }
-          // Flash the idle session's card in sidebar
-          if (notification.type === 'idle' && notification.sessionId) {
+          // Toggle the API-error highlight (bold red) on the session card.
+          if (notification.sessionId && 'apiError' in notification) {
+            const card = document.querySelector(`.sb-item[data-session-id="${notification.sessionId}"]`);
+            if (card) {
+              card.classList.toggle('api-error', !!notification.apiError);
+              if (notification.apiError && notification.apiErrorText) card.title = notification.apiErrorText;
+              else card.removeAttribute('title');
+            }
+          }
+          // Flash the card on idle, or on first API-error detection.
+          if (notification.sessionId && (notification.type === 'idle' || notification.type === 'api_error')) {
             flashSessionCard(notification.sessionId);
           }
         } catch (err) {}
