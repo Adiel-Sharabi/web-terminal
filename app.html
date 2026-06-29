@@ -100,6 +100,16 @@
       50%      { box-shadow: inset 4px 0 0 #ff2d4b, 0 0 9px 1px rgba(255,45,75,0.6); }
     }
     @media (prefers-reduced-motion: reduce) { .sb-item.api-error { animation: none; } }
+    /* Favorites: pinned group across all servers + per-row star toggle. */
+    .sb-fav-header { display: flex; align-items: center; gap: 6px; padding: 8px 12px; font-size: 11px; font-weight: 700; letter-spacing: .04em; text-transform: uppercase; color: #f2c14e; background: #0d2137; border-bottom: 1px solid #0a1a30; cursor: pointer; user-select: none; }
+    .sb-fav-header .srv-chev { font-size: 10px; color: #f2c14e; transition: transform .15s; }
+    .sb-fav-header.collapsed .srv-chev { transform: rotate(-90deg); }
+    .sb-fav-header .fav-count { margin-left: auto; color: #7a8aa0; font-weight: 600; }
+    .sb-fav-empty { padding: 6px 14px; color: #556; font-size: 11px; border-bottom: 1px solid #0a1a30; }
+    .sb-server-badge { font-size: 9px; color: #00d4aa; background: rgba(0,212,170,0.12); border-radius: 3px; padding: 1px 5px; margin-left: 6px; font-weight: 600; white-space: nowrap; flex: none; }
+    .sb-star { background: transparent; border: none; color: #55617a; font-size: 14px; cursor: pointer; padding: 0 4px; line-height: 1; }
+    .sb-star:hover { color: #f2c14e; }
+    .sb-star.on { color: #f2c14e; }
     .sb-status { font-size: 10px; }
     .sb-status.active { color: #4a4; }
     .sb-status.idle { color: #da4; }
@@ -2504,6 +2514,9 @@
         return;
       }
 
+      // Pinned favorites across all servers (UI-only, per-browser localStorage).
+      renderFavoritesGroup(container, data.sessions);
+
       // Group sessions by server
       for (const server of data.servers) {
         // Server header
@@ -2560,6 +2573,7 @@
         for (const s of serverSessions) {
           const item = document.createElement('div');
           const isCurrent = s.id === sessionId && s.serverUrl === sessionServerUrl;
+          const fav = isFavorite(s.id);
           item.className = 'sb-item' + (isCurrent ? ' current' : '') + (s.apiError ? ' api-error' : '');
           if (s.apiError && s.apiErrorText) item.title = s.apiErrorText;
           item.dataset.sessionId = s.id;
@@ -2567,6 +2581,7 @@
             `<div class="sb-name"><span class="sb-dot ${s.status}"></span>${esc(s.name)}</div>` +
             `<div class="sb-meta">` +
               `<span class="sb-status ${s.status}">${statusLabels[s.status] || s.status}</span>` +
+              `<button class="sb-star${fav ? ' on' : ''}" title="${fav ? 'Remove from favorites' : 'Add to favorites'}">${fav ? '&#9733;' : '&#9734;'}</button>` +
               `<button class="sb-edit" title="Edit auto-command">&#9998;</button>` +
               (s.claudeSessionId ? `<button class="sb-fork" title="Fork Claude session">&#9095;</button>` : '') +
               `<button class="sb-kill" title="Kill session">&times;</button>` +
@@ -2616,8 +2631,14 @@
             });
           }
 
+          item.querySelector('.sb-star').addEventListener('click', (e) => {
+            e.stopPropagation();
+            toggleFavorite(s.id);
+            loadSidebar();
+          });
+
           item.addEventListener('click', (e) => {
-            if (e.target.closest('.sb-kill') || e.target.closest('.sb-edit') || e.target.closest('.sb-fork')) return;
+            if (e.target.closest('.sb-kill') || e.target.closest('.sb-edit') || e.target.closest('.sb-fork') || e.target.closest('.sb-star')) return;
             switchSession(s.id, s.serverUrl);
             closeSidebarIfUnpinned();
           });
@@ -2679,6 +2700,89 @@
       while (n && !n.classList.contains('sb-server')) {
         if (n.dataset.serverKey === key) n.style.display = collapsed ? 'none' : '';
         n = n.nextElementSibling;
+      }
+    }
+
+    // --- Sidebar: favorites (UI-only, per-browser localStorage) -----------
+    // Keyed by session id (a globally-unique UUID), so a favorite stays stable
+    // regardless of which cluster server you logged into. Favorited sessions are
+    // pinned in a group at the very top of the sidebar, each badged with the
+    // server it lives on (Home / Office / ...). Mirrors the collapse-state
+    // pattern: this is browser-local UI state, like the server-group collapse.
+    const FAV_KEY = 'wt.favorites';
+    function loadFavSet() {
+      try {
+        const arr = JSON.parse(localStorage.getItem(FAV_KEY) || '[]');
+        return new Set(Array.isArray(arr) ? arr : []);
+      } catch { return new Set(); }
+    }
+    function saveFavSet(set) {
+      try { localStorage.setItem(FAV_KEY, JSON.stringify([...set])); } catch {}
+    }
+    function isFavorite(id) { return loadFavSet().has(id); }
+    function toggleFavorite(id) {
+      const set = loadFavSet();
+      if (set.has(id)) set.delete(id); else set.add(id);
+      saveFavSet(set);
+      return set.has(id);
+    }
+
+    // Render the pinned "Favorites" group at the top of the sidebar. `sessions`
+    // is the merged cluster list; each carries `server` (name) + `serverUrl`.
+    function renderFavoritesGroup(container, sessions) {
+      const favSet = loadFavSet();
+      if (favSet.size === 0) return;
+      const favs = sessions.filter(s => favSet.has(s.id));
+
+      const collapsed = isServerCollapsed('__favorites__');
+      const header = document.createElement('div');
+      header.className = 'sb-fav-header' + (collapsed ? ' collapsed' : '');
+      header.dataset.serverKey = '__favorites__';
+      header.innerHTML = `<span class="srv-chev">&#9662;</span><span>&#9733; Favorites</span><span class="fav-count">${favs.length}</span>`;
+      header.addEventListener('click', () => {
+        const now = !header.classList.contains('collapsed');
+        header.classList.toggle('collapsed', now);
+        setServerCollapsed('__favorites__', now);
+        applyCollapseToGroup(header, now);
+      });
+      container.appendChild(header);
+
+      if (favs.length === 0) {
+        const note = document.createElement('div');
+        note.className = 'sb-fav-empty';
+        note.dataset.serverKey = '__favorites__';
+        note.textContent = 'Favorited sessions are offline or gone';
+        if (collapsed) note.style.display = 'none';
+        container.appendChild(note);
+        return;
+      }
+
+      for (const s of favs) {
+        const isCurrent = s.id === sessionId && s.serverUrl === sessionServerUrl;
+        const item = document.createElement('div');
+        item.className = 'sb-item sb-fav-item' + (isCurrent ? ' current' : '') + (s.apiError ? ' api-error' : '');
+        item.dataset.favId = s.id;             // distinct from data-session-id to avoid query collisions
+        item.dataset.serverKey = '__favorites__';
+        if (s.apiError && s.apiErrorText) item.title = s.apiErrorText;
+        const serverLabel = s.server || hostname || 'Local';
+        item.innerHTML =
+          `<div class="sb-name"><span class="sb-dot ${s.status}"></span>${esc(s.name)}<span class="sb-server-badge">${esc(serverLabel)}</span></div>` +
+          `<div class="sb-meta">` +
+            `<span class="sb-status ${s.status}">${statusLabels[s.status] || s.status}</span>` +
+            `<button class="sb-star on" title="Remove from favorites">&#9733;</button>` +
+          `</div>`;
+        item.querySelector('.sb-star').addEventListener('click', (e) => {
+          e.stopPropagation();
+          toggleFavorite(s.id);
+          loadSidebar();
+        });
+        item.addEventListener('click', (e) => {
+          if (e.target.closest('.sb-star')) return;
+          switchSession(s.id, s.serverUrl);
+          closeSidebarIfUnpinned();
+        });
+        if (collapsed) item.style.display = 'none';
+        container.appendChild(item);
       }
     }
 
@@ -3239,6 +3343,18 @@
               if (notification.apiError && notification.apiErrorText) card.title = notification.apiErrorText;
               else card.removeAttribute('title');
             }
+          }
+          // Mirror live status + API-error onto the pinned Favorites copy, if any
+          // (it uses data-fav-id, so the queries above don't reach it).
+          if (notification.sessionId) {
+            document.querySelectorAll(`.sb-fav-item[data-fav-id="${notification.sessionId}"]`).forEach(favEl => {
+              if (notification.status) { const d = favEl.querySelector('.sb-dot'); if (d) d.className = `sb-dot ${notification.status}`; }
+              if ('apiError' in notification) {
+                favEl.classList.toggle('api-error', !!notification.apiError);
+                if (notification.apiError && notification.apiErrorText) favEl.title = notification.apiErrorText;
+                else favEl.removeAttribute('title');
+              }
+            });
           }
           // Flash the card on idle, or on first API-error detection.
           if (notification.sessionId && (notification.type === 'idle' || notification.type === 'api_error')) {
