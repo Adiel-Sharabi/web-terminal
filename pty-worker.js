@@ -121,6 +121,10 @@ const API_ERROR_EPISODE_MS = 120000;  // a new error this long after the last au
 const API_ERROR_COMPACT_MIN_WAIT_MS = _apiErrFast ? 10 : 1500;       // ignore the settle-idle right after /compact
 const API_ERROR_COMPACT_FALLBACK_MS = _apiErrFast ? 300 : 45000;     // replay anyway if no idle hook arrives
 const API_ERROR_NEEDLE = Buffer.from('API Error');
+// Gap between typing text and the CR that submits it. Claude's TUI reads input
+// in raw mode where Enter is CR (\r) — not LF (\n) — and debounces fast bursts
+// as pastes, so we type the text, pause, then send the CR on its own.
+const CLAUDE_SUBMIT_GAP_MS = _apiErrFast ? 10 : 60;
 
 function autoContinueEnabled() {
   // Ops/test override wins, then live config (default ON).
@@ -637,12 +641,12 @@ function scheduleAutoContinue(session) {
     if (attempt >= API_ERROR_COMPACT_ATTEMPT) {
       // Failed twice — shrink context with /compact, then replay the last
       // prompt once Claude settles (idle hook or fallback timer).
-      try { s.term.write('/compact\n'); } catch (e) { log(`api-error: /compact write failed: ${e.message}`); return; }
+      try { claudeSubmitLine(s, '/compact'); } catch (e) { log(`api-error: /compact write failed: ${e.message}`); return; }
       log(`api-error: "${s.name}" auto attempt ${attempt}/${API_ERROR_MAX_ATTEMPTS}: sent /compact`);
       armCompactReplay(s);
       broadcastEvent('apiError', { id: s.id, name: s.name, apiError: true, text: s.apiErrorText || '', transient: true, autoContinue: attempt, action: 'compact' });
     } else {
-      try { s.term.write('continue\n'); } catch (e) { log(`api-error: continue write failed: ${e.message}`); return; }
+      try { claudeSubmitLine(s, 'continue'); } catch (e) { log(`api-error: continue write failed: ${e.message}`); return; }
       log(`api-error: "${s.name}" auto attempt ${attempt}/${API_ERROR_MAX_ATTEMPTS}: sent continue`);
       broadcastEvent('apiError', { id: s.id, name: s.name, apiError: true, text: s.apiErrorText || '', transient: true, autoContinue: attempt, action: 'continue' });
     }
@@ -669,15 +673,36 @@ function doCompactReplay(session, reason) {
   broadcastEvent('apiError', { id: s.id, name: s.name, apiError: !!s.apiError, text: s.apiErrorText || '', autoContinue: API_ERROR_COMPACT_ATTEMPT, action: 'replay-prompt', replayText: text.slice(0, 200) });
 }
 
+// Low-level write to a session's PTY. Mirrors the write into a per-session
+// buffer under WT_TEST so specs can assert the exact bytes we send to Claude
+// (CR-vs-LF is the difference between "submitted" and "stuck in the box").
+function claudeTermWrite(session, data) {
+  if (process.env.WT_TEST) (session._testWrites || (session._testWrites = [])).push(data);
+  session.term.write(data);
+}
+
+// Submit a single line to Claude's interactive TUI. Claude reads its input box
+// in raw mode where the Enter/submit key is CR (\r) — NOT LF (\n): sending \n
+// just leaves the text sitting unsubmitted (the bug that silently broke
+// auto-continue). Type the text, then send the CR on a short delay so the TUI
+// has ingested the text — and doesn't treat the burst as a paste — before Enter.
+function claudeSubmitLine(session, text) {
+  claudeTermWrite(session, text); // may throw → caller's try/catch decides
+  const t = setTimeout(() => { try { claudeTermWrite(session, '\r'); } catch (e) { log(`api-error: submit CR failed: ${e.message}`); } }, CLAUDE_SUBMIT_GAP_MS);
+  if (typeof t.unref === 'function') t.unref();
+}
+
 // Submit text to Claude's TUI. Multi-line prompts go through bracketed paste so
-// embedded newlines don't submit early; a trailing CR then sends it.
+// embedded newlines don't submit early; a trailing CR then sends it. Single
+// lines go through claudeSubmitLine (text + CR).
 function writePromptToTerm(session, text) {
   try {
     if (text.includes('\n')) {
-      session.term.write('\x1b[200~' + text + '\x1b[201~');
-      setTimeout(() => { try { session.term.write('\r'); } catch {} }, 60);
+      claudeTermWrite(session, '\x1b[200~' + text + '\x1b[201~');
+      const t = setTimeout(() => { try { claudeTermWrite(session, '\r'); } catch {} }, CLAUDE_SUBMIT_GAP_MS);
+      if (typeof t.unref === 'function') t.unref();
     } else {
-      session.term.write(text + '\n');
+      claudeSubmitLine(session, text);
     }
   } catch (e) { log(`api-error: prompt replay write failed: ${e.message}`); }
 }
@@ -1260,6 +1285,15 @@ const rpcHandlers = {
     if (!session) throw new Error('session not found');
     processPtyOutput(session, Buffer.from(String(params.data || ''), 'utf8'));
     return { ok: true, apiError: !!session.apiError };
+  },
+
+  // Returns the exact byte-strings written to the PTY via claudeTermWrite (the
+  // auto-recovery submit path). Lets specs verify Enter is sent as CR, not LF.
+  __testGetWrites: async (params) => {
+    if (!process.env.WT_TEST) throw new Error('test-only RPC');
+    const session = sessions.get(requireUuid(params.id));
+    if (!session) throw new Error('session not found');
+    return { writes: (session._testWrites || []).slice() };
   },
 
   __testInjectScrollback: async (params) => {

@@ -11,7 +11,7 @@ const { mintDirectToken, verifyDirectToken } = require('./lib/cluster-token');
 const { sanitizeReplay } = require('./lib/replay-sanitize');
 const { execGit, gitSafeArgs, gitSafeEnv } = require('./lib/git-safe');
 
-const SERVER_VERSION = '1.17.0'; // 2026-06-17: detect Claude API errors in PTY output — bold-highlight the session + notify, and auto-recover (continue ×2 → /compact + replay last prompt)
+const SERVER_VERSION = '1.17.1'; // 2026-06-29: fix API-error auto-recovery — submit continue/compact/replay with CR (\r) not LF (\n) so Claude's TUI actually receives Enter; louder pulsing-red session flag
 
 // --- Optional latency instrumentation (opt-in via WT_LATENCY_DEBUG=1) -----
 // Event-loop lag monitor: interval is 10ms; anything ≥ 50ms slip is a stall.

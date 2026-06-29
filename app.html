@@ -90,9 +90,16 @@
     @keyframes flash-idle { 0%,100% { background: transparent; } 25%,75% { background: rgba(218,170,68,0.25); } }
     .sb-item.flash { animation: flash-idle 0.6s ease 3; }
     /* API error: make the session stand out so you know to retry it. */
-    .sb-item.api-error { background: rgba(233,69,96,0.12); box-shadow: inset 3px 0 0 #e94560; }
-    .sb-item.api-error .sb-name { color: #ff6b81; font-weight: 700; }
-    .sb-item.api-error .sb-name::before { content: '\26A0'; margin-right: 2px; }
+    .sb-item.api-error { background: rgba(233,69,96,0.20); box-shadow: inset 4px 0 0 #ff2d4b; animation: apiErrPulse 1.5s ease-in-out infinite; }
+    .sb-item.api-error.current { background: rgba(233,69,96,0.30); }
+    .sb-item.api-error .sb-name { color: #ff5c70; font-weight: 800; }
+    .sb-item.api-error .sb-name::before { content: '\26A0'; margin-right: 3px; }
+    .sb-item.api-error .sb-dot { background: #ff2d4b !important; box-shadow: 0 0 6px #ff2d4b; }
+    @keyframes apiErrPulse {
+      0%, 100% { box-shadow: inset 4px 0 0 #ff2d4b, 0 0 0 0 rgba(255,45,75,0); }
+      50%      { box-shadow: inset 4px 0 0 #ff2d4b, 0 0 9px 1px rgba(255,45,75,0.6); }
+    }
+    @media (prefers-reduced-motion: reduce) { .sb-item.api-error { animation: none; } }
     .sb-status { font-size: 10px; }
     .sb-status.active { color: #4a4; }
     .sb-status.idle { color: #da4; }
