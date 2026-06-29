@@ -328,6 +328,77 @@ test.describe('API-error detection + auto-continue', () => {
     }
   });
 
+  test('auto-continue submits with CR (\\r), never LF (\\n)', async () => {
+    // Claude's TUI reads input in raw mode where Enter is CR. Sending LF leaves
+    // the text unsubmitted, which silently broke auto-continue in production.
+    const pipe = workerPipePath();
+    const dataDir = makeTempDataDir();
+    const worker = spawnWorker(pipe, dataDir, { WT_AUTO_CONTINUE_API_ERROR: '1' });
+    try {
+      const client = await connectClient(pipe);
+      const ev = makeEventCollector(client);
+      const { id } = await rpc(client, 'createSession', { cwd: os.tmpdir(), name: 'crsubmit', autoCommand: '' });
+      await rpc(client, 'hookEvent', { id, event: 'UserPromptSubmit', prompt: 'do the thing' });
+
+      await inject(client, id, OVERLOADED);
+      await ev.waitFor(e => e.event === 'apiError' && e.params.autoContinue === 1 && e.params.action === 'continue');
+      await sleep(120); // let the deferred CR land
+
+      const { writes } = await rpc(client, '__testGetWrites', { id });
+      // Typed text and the submit key are written separately; the submit is CR.
+      expect(writes).toContain('continue');
+      expect(writes).toContain('\r');
+      // The old bug: a single "continue\n" that Claude's TUI never submits.
+      expect(writes).not.toContain('continue\n');
+      expect(writes.some(w => w.includes('\n'))).toBe(false);
+
+      ev.stop();
+      await rpc(client, 'killSession', { id });
+      await client.close();
+    } finally {
+      await worker.stop();
+      rmRf(dataDir);
+    }
+  });
+
+  test('compact-replay submits the captured prompt with CR, not LF', async () => {
+    const pipe = workerPipePath();
+    const dataDir = makeTempDataDir();
+    const worker = spawnWorker(pipe, dataDir, { WT_AUTO_CONTINUE_API_ERROR: '1' });
+    try {
+      const client = await connectClient(pipe);
+      const ev = makeEventCollector(client);
+      const { id } = await rpc(client, 'createSession', { cwd: os.tmpdir(), name: 'replaycr', autoCommand: '' });
+      await rpc(client, 'hookEvent', { id, event: 'UserPromptSubmit', prompt: 'finish the refactor in foo.js' });
+
+      // Walk to attempt 3 (/compact), clearing the flag between errors.
+      await inject(client, id, OVERLOADED);
+      await ev.waitFor(e => e.event === 'apiError' && e.params.autoContinue === 1);
+      await rpc(client, 'hookEvent', { id, event: 'UserPromptSubmit' });
+      await inject(client, id, OVERLOADED);
+      await ev.waitFor(e => e.event === 'apiError' && e.params.autoContinue === 2);
+      await rpc(client, 'hookEvent', { id, event: 'UserPromptSubmit' });
+      await inject(client, id, OVERLOADED);
+      await ev.waitFor(e => e.event === 'apiError' && e.params.autoContinue === 3 && e.params.action === 'compact');
+      await rpc(client, 'hookEvent', { id, event: 'Stop' });
+      await ev.waitFor(e => e.event === 'apiError' && e.params.action === 'replay-prompt');
+      await sleep(120); // let the deferred CR land
+
+      const { writes } = await rpc(client, '__testGetWrites', { id });
+      expect(writes).toContain('/compact');
+      expect(writes).toContain('finish the refactor in foo.js');
+      expect(writes).toContain('\r');
+      expect(writes.some(w => w.includes('\n'))).toBe(false);
+
+      ev.stop();
+      await rpc(client, 'killSession', { id });
+      await client.close();
+    } finally {
+      await worker.stop();
+      rmRf(dataDir);
+    }
+  });
+
   test('replay falls back to "continue" when no prompt was captured', async () => {
     const pipe = workerPipePath();
     const dataDir = makeTempDataDir();
