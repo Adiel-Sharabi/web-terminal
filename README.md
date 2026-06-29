@@ -43,6 +43,7 @@ Web Terminal solves all of this, running as a single `node monitor.js` on each h
 - **Exclusive viewer** — one device per session prevents display corruption from mixed screen sizes
 - **Drag-reorder sessions** — drag a session row in the sidebar to change its order within the same server (cross-server reorder is disallowed). Order persists on disk and survives restarts
 - **Collapsible server groups** — click a server header in the sidebar to fold its session list away. State is per-browser (localStorage) and persists across reloads
+- **Favorite sessions** — click the star on any session row to pin it to a **Favorites** group at the top of the sidebar, spanning all servers. Each favorite is badged with the server it lives on (Home / Office / …) so you always know where it is. Per-browser (localStorage), collapsible, and click-to-switch like any session row
 
 ### Multi-Server Cluster
 - **Unified dashboard** — see and manage sessions across all servers in one sidebar
