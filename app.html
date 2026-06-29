@@ -110,6 +110,7 @@
     .sb-star { background: transparent; border: none; color: #55617a; font-size: 14px; cursor: pointer; padding: 0 4px; line-height: 1; }
     .sb-star:hover { color: #f2c14e; }
     .sb-star.on { color: #f2c14e; }
+    .sb-fav-item.fav-reordering { background: rgba(0,212,170,0.10); }
     .sb-status { font-size: 10px; }
     .sb-status.active { color: #4a4; }
     .sb-status.idle { color: #da4; }
@@ -2719,6 +2720,9 @@
     function saveFavSet(set) {
       try { localStorage.setItem(FAV_KEY, JSON.stringify([...set])); } catch {}
     }
+    function saveFavOrder(arr) {
+      try { localStorage.setItem(FAV_KEY, JSON.stringify(arr)); } catch {}
+    }
     function isFavorite(id) { return loadFavSet().has(id); }
     function toggleFavorite(id) {
       const set = loadFavSet();
@@ -2730,9 +2734,12 @@
     // Render the pinned "Favorites" group at the top of the sidebar. `sessions`
     // is the merged cluster list; each carries `server` (name) + `serverUrl`.
     function renderFavoritesGroup(container, sessions) {
-      const favSet = loadFavSet();
-      if (favSet.size === 0) return;
-      const favs = sessions.filter(s => favSet.has(s.id));
+      const order = [...loadFavSet()];
+      if (order.length === 0) return;
+      // Render in the stored (drag-reorderable) order, dropping any whose
+      // session isn't currently available (e.g. its server is offline).
+      const byId = new Map(sessions.map(s => [s.id, s]));
+      const favs = order.map(id => byId.get(id)).filter(Boolean);
 
       const collapsed = isServerCollapsed('__favorites__');
       const header = document.createElement('div');
@@ -2782,8 +2789,113 @@
           closeSidebarIfUnpinned();
         });
         if (collapsed) item.style.display = 'none';
+        attachFavReorder(item);
         container.appendChild(item);
       }
+    }
+
+    // --- Favorites: drag / long-press reorder (client-side, localStorage) --
+    // Desktop uses native HTML5 drag-and-drop; mobile uses a long-press to grab
+    // then drag (native DnD doesn't fire on touch). Both rewrite the stored
+    // favorites order and re-render. Kept separate from the server-side session
+    // reorder (distinct id attribute + drag state) so the two never interfere.
+    let _wtFavDragId = null;
+    function clearFavDropMarks() {
+      document.querySelectorAll('.sb-fav-item.drop-above, .sb-fav-item.drop-below')
+        .forEach(el => el.classList.remove('drop-above', 'drop-below'));
+    }
+    function markFavDropTarget(item, clientY) {
+      const r = item.getBoundingClientRect();
+      const above = (clientY - r.top) < r.height / 2;
+      item.classList.toggle('drop-above', above);
+      item.classList.toggle('drop-below', !above);
+    }
+    function commitFavReorder(dragId, targetId, above) {
+      if (!dragId || dragId === targetId) return;
+      const order = [...loadFavSet()];
+      const from = order.indexOf(dragId);
+      if (from === -1) return;
+      order.splice(from, 1);
+      let to = order.indexOf(targetId);
+      if (to === -1) { saveFavOrder(order); loadSidebar(); return; }
+      if (!above) to += 1;
+      order.splice(to, 0, dragId);
+      saveFavOrder(order);
+      loadSidebar();
+    }
+    function attachFavReorder(item) {
+      // Desktop: native HTML5 drag-and-drop.
+      item.draggable = true;
+      item.addEventListener('dragstart', (e) => {
+        _wtFavDragId = item.dataset.favId;
+        item.classList.add('dragging');
+        try { e.dataTransfer.effectAllowed = 'move'; } catch {}
+      });
+      item.addEventListener('dragend', () => {
+        item.classList.remove('dragging'); clearFavDropMarks(); _wtFavDragId = null;
+      });
+      item.addEventListener('dragover', (e) => {
+        if (!_wtFavDragId || _wtFavDragId === item.dataset.favId) return;
+        e.preventDefault();
+        try { e.dataTransfer.dropEffect = 'move'; } catch {}
+        markFavDropTarget(item, e.clientY);
+      });
+      item.addEventListener('dragleave', () => item.classList.remove('drop-above', 'drop-below'));
+      item.addEventListener('drop', (e) => {
+        if (!_wtFavDragId || _wtFavDragId === item.dataset.favId) return;
+        e.preventDefault();
+        const above = item.classList.contains('drop-above');
+        const dragId = _wtFavDragId;
+        item.classList.remove('drop-above', 'drop-below');
+        commitFavReorder(dragId, item.dataset.favId, above);
+      });
+
+      // Mobile: long-press (~400ms) to grab, then drag a finger to reorder.
+      let timer = null, armed = false, sx = 0, sy = 0;
+      const disarm = () => {
+        if (timer) { clearTimeout(timer); timer = null; }
+        if (armed) {
+          armed = false;
+          item.classList.remove('dragging');
+          document.querySelectorAll('.sb-fav-item').forEach(el => el.classList.remove('fav-reordering'));
+        }
+      };
+      item.addEventListener('touchstart', (e) => {
+        if (e.target.closest('.sb-star') || e.touches.length !== 1) return;
+        const t = e.touches[0]; sx = t.clientX; sy = t.clientY;
+        timer = setTimeout(() => {
+          timer = null; armed = true; _wtFavDragId = item.dataset.favId;
+          item.classList.add('dragging');
+          document.querySelectorAll('.sb-fav-item').forEach(el => el.classList.add('fav-reordering'));
+          try { navigator.vibrate && navigator.vibrate(15); } catch {}
+        }, 400);
+      }, { passive: true });
+      item.addEventListener('touchmove', (e) => {
+        const t = e.touches[0]; if (!t) return;
+        if (!armed) {
+          // Moved before the grab fired → it's a scroll/swipe, not a long-press.
+          if (timer && (Math.abs(t.clientX - sx) > 10 || Math.abs(t.clientY - sy) > 10)) {
+            clearTimeout(timer); timer = null;
+          }
+          return;
+        }
+        e.preventDefault();   // grabbed → this is a drag, suppress sidebar scroll
+        clearFavDropMarks();
+        const under = document.elementFromPoint(t.clientX, t.clientY);
+        const target = under && under.closest('.sb-fav-item');
+        if (target && target.dataset.favId !== _wtFavDragId) markFavDropTarget(target, t.clientY);
+      }, { passive: false });
+      item.addEventListener('touchend', (e) => {
+        if (!armed) { if (timer) { clearTimeout(timer); timer = null; } return; }
+        e.preventDefault();   // swallow the post-drag click so it doesn't switch sessions
+        const target = document.querySelector('.sb-fav-item.drop-above, .sb-fav-item.drop-below');
+        const dragId = _wtFavDragId;
+        const above = !!(target && target.classList.contains('drop-above'));
+        const targetId = target && target.dataset.favId;
+        disarm(); clearFavDropMarks(); _wtFavDragId = null;
+        if (targetId) commitFavReorder(dragId, targetId, above);
+      });
+      item.addEventListener('touchcancel', () => { disarm(); clearFavDropMarks(); _wtFavDragId = null; });
     }
 
     // --- Sidebar: drag-and-drop session reorder (within a server only) ----

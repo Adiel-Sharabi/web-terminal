@@ -11,7 +11,7 @@ const { mintDirectToken, verifyDirectToken } = require('./lib/cluster-token');
 const { sanitizeReplay } = require('./lib/replay-sanitize');
 const { execGit, gitSafeArgs, gitSafeEnv } = require('./lib/git-safe');
 
-const SERVER_VERSION = '1.18.0'; // 2026-06-29: favorite sessions — per-browser star toggle + pinned "Favorites" group at top of sidebar, badged with the server each lives on (client-only, hot-reloadable)
+const SERVER_VERSION = '1.18.1'; // 2026-06-29: favorites are drag-reorderable (HTML5 DnD on desktop, long-press-then-drag on mobile); order persists per-browser
 
 // --- Optional latency instrumentation (opt-in via WT_LATENCY_DEBUG=1) -----
 // Event-loop lag monitor: interval is 10ms; anything ≥ 50ms slip is a stall.
