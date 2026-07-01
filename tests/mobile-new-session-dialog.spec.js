@@ -55,14 +55,18 @@ test.describe('Issue #22: mobile new-session dialog', () => {
     const cancelBtn = page.locator('#newSessionForm button:has-text("Cancel")');
     await expect(cancelBtn).toBeVisible();
 
-    const sidebarBox = await sidebar.boundingBox();
-    const cancelBox = await cancelBtn.boundingBox();
-    expect(sidebarBox).not.toBeNull();
-    expect(cancelBox).not.toBeNull();
-    if (!sidebarBox || !cancelBox) return;
-    const cancelRight = cancelBox.x + cancelBox.width;
-    const sidebarRight = sidebarBox.x + sidebarBox.width;
-    expect(cancelRight).toBeLessThanOrEqual(sidebarRight + 1);
+    // Retry until layout settles: the auto-restored session's delayed
+    // doResize() can reflow the sidebar shortly after first paint, which
+    // otherwise makes this single-shot measurement flaky (~40%).
+    await expect(async () => {
+      const sidebarBox = await sidebar.boundingBox();
+      const cancelBox = await cancelBtn.boundingBox();
+      expect(sidebarBox).not.toBeNull();
+      expect(cancelBox).not.toBeNull();
+      const cancelRight = cancelBox.x + cancelBox.width;
+      const sidebarRight = sidebarBox.x + sidebarBox.width;
+      expect(cancelRight).toBeLessThanOrEqual(sidebarRight + 1);
+    }).toPass({ timeout: 5000 });
   });
 
   test('inputs use >=16px font to avoid iOS zoom on focus', async ({ page }) => {

@@ -72,6 +72,7 @@ Web Terminal solves all of this, running as a single `node monitor.js` on each h
 - **Long-press context menu** — Copy, Paste, Paste Image, Select, Select All
 - **Drag-to-select** — character count shown, floating Copy/Done bar
 - **IME deduplication & autocorrect** — in raw mode, handles Android keyboard (SwiftKey, Gboard) composition re-sends without duplication; autocorrect changes are transparently applied via backspace rewrite so the corrected word reaches the shell once
+- **Instant reconnect on app-switch** — a backgrounded mobile browser/PWA is suspended by the OS (timers freeze, the WebSocket is dropped), so returning to the app used to mean waiting out a stale exponential-backoff timer. The terminal now reconnects the moment the page returns to the foreground (`visibilitychange` / `pageshow` / `focus` / `online`), so switching back feels seamless. A still-open socket is just kept warm rather than needlessly torn down
 - **Responsive layout** — adapts to phone, tablet, and desktop
 
 ### Security

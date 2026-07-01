@@ -676,6 +676,7 @@
     let switching = false;
     let reconnectTimer = null;
     let reconnectAttempts = 0;
+    let _wtResumeAt = 0;         // when the page last returned to the foreground (mobile app-switch)
     let autoScroll = true;
     let folderHistory = [];
     let defaultCwd = 'C:\\dev';
@@ -904,6 +905,20 @@
           });
           return;
         }
+        // Mobile app-switch: the OS froze us and closed/terminated the socket.
+        // If we just returned to the foreground, reconnect near-instantly instead
+        // of waiting out the (possibly frozen) exponential backoff. One-shot per
+        // resume so a genuinely-down server still falls back to normal backoff.
+        if (_wtResumeAt && (Date.now() - _wtResumeAt < 8000) && document.visibilityState !== 'hidden') {
+          _wtResumeAt = 0;
+          reconnectAttempts = 0;
+          status.textContent = 'reconnecting…';
+          status.className = 'disconnected';
+          status.style.opacity = '1';
+          if (reconnectTimer) clearTimeout(reconnectTimer);
+          reconnectTimer = setTimeout(connect, 150);
+          return;
+        }
         reconnectAttempts++;
         // Exponential backoff: 1s, 2s, 4s, 8s, 16s, capped at 30s
         const delay = Math.min(30000, 1000 * Math.pow(2, reconnectAttempts - 1));
@@ -927,6 +942,40 @@
 
       ws.onerror = () => ws.close();
     }
+
+    // --- Mobile app-switch resilience --------------------------------------
+    // A backgrounded browser/PWA is suspended by the OS: timers freeze and the
+    // WebSocket is closed (the server also terminates it after missed pings).
+    // Nothing can keep a socket alive while backgrounded — so instead we
+    // reconnect the instant the page returns to the foreground, skipping the
+    // (frozen) backoff timer, so switching back into the app feels seamless.
+    function ensureTerminalConnected() {
+      if (!sessionId || switching) return;
+      _wtResumeAt = Date.now();   // arm the fast-reconnect path in ws.onclose
+      const st = ws ? ws.readyState : WebSocket.CLOSED;
+      if (st === WebSocket.OPEN) {
+        // Looks alive — keep it warm. If it's actually a stale half-open socket
+        // the OS left behind, the server already terminated it and onclose will
+        // fire shortly, where the fast-resume path reconnects near-instantly.
+        try { ws.send('{"heartbeat":1}'); } catch (e) {}
+        return;
+      }
+      if (st === WebSocket.CONNECTING) return;   // already reconnecting
+      // Closed/closing/null → reconnect now instead of waiting out the backoff.
+      if (reconnectTimer) { clearTimeout(reconnectTimer); reconnectTimer = null; }
+      reconnectAttempts = 0;
+      connect();
+    }
+    // Only a genuine background→foreground transition (or a bfcache restore /
+    // network return) triggers a reconnect — NOT initial load or a plain window
+    // focus, which fire spuriously and can race with first-paint layout.
+    let _wtWasHidden = false;
+    document.addEventListener('visibilitychange', () => {
+      if (document.visibilityState === 'hidden') { _wtWasHidden = true; return; }
+      if (_wtWasHidden) { _wtWasHidden = false; ensureTerminalConnected(); }
+    });
+    window.addEventListener('pageshow', (e) => { if (e && e.persisted) ensureTerminalConnected(); });
+    window.addEventListener('online', () => { if (sessionId) ensureTerminalConnected(); });
 
     // Connect a background WebSocket for keepSessionsOpen mode
     function connectBackground(id, serverUrl) {
@@ -1144,6 +1193,17 @@
             cleanupCacheEntry(id);
             cancelReconnect();
             if (document.getElementById('sidebar').classList.contains('open')) loadSidebar();
+            return;
+          }
+          // Mobile app-switch fast-resume (see connect()'s onclose).
+          if (_wtResumeAt && (Date.now() - _wtResumeAt < 8000) && document.visibilityState !== 'hidden') {
+            _wtResumeAt = 0;
+            reconnectAttempts = 0;
+            status.textContent = 'reconnecting…';
+            status.className = 'disconnected';
+            status.style.opacity = '1';
+            if (reconnectTimer) clearTimeout(reconnectTimer);
+            reconnectTimer = setTimeout(connect, 150);
             return;
           }
           reconnectAttempts++;
