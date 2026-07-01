@@ -11,7 +11,7 @@ const { mintDirectToken, verifyDirectToken } = require('./lib/cluster-token');
 const { sanitizeReplay } = require('./lib/replay-sanitize');
 const { execGit, gitSafeArgs, gitSafeEnv } = require('./lib/git-safe');
 
-const SERVER_VERSION = '1.18.1'; // 2026-06-29: favorites are drag-reorderable (HTML5 DnD on desktop, long-press-then-drag on mobile); order persists per-browser
+const SERVER_VERSION = '1.18.2'; // 2026-07-01: mobile app-switch — reconnect the terminal instantly on foreground (visibilitychange/pageshow/focus/online) instead of waiting out the frozen backoff timer
 
 // --- Optional latency instrumentation (opt-in via WT_LATENCY_DEBUG=1) -----
 // Event-loop lag monitor: interval is 10ms; anything ≥ 50ms slip is a stall.
