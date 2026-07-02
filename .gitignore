@@ -46,3 +46,6 @@ sessions.test.json
 .tmp-*
 .wt_inputrc
 .claude/
+
+# Per-session push notification levels (ntfy)
+notify-prefs.json

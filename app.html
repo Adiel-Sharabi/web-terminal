@@ -110,6 +110,10 @@
     .sb-star { background: transparent; border: none; color: #55617a; font-size: 14px; cursor: pointer; padding: 0 4px; line-height: 1; }
     .sb-star:hover { color: #f2c14e; }
     .sb-star.on { color: #f2c14e; }
+    .sb-bell { background: transparent; border: none; cursor: pointer; padding: 0 3px; line-height: 1; font-size: 12px; }
+    .sb-bell.nl-off { opacity: 0.4; filter: grayscale(1); }
+    .sb-bell.nl-important { opacity: 0.9; }
+    .sb-bell.nl-all { opacity: 1; }
     .sb-fav-item.fav-reordering { background: rgba(0,212,170,0.10); }
     .sb-status { font-size: 10px; }
     .sb-status.active { color: #4a4; }
@@ -2534,6 +2538,13 @@
     })();
 
     const statusLabels = { active: '', working: 'Working', idle: 'Idle', waiting: 'Waiting' };
+    // Per-session push (ntfy) level — bell icon + click-cycle order.
+    const NOTIFY_BELL = {
+      off:       { icon: '&#128277;', label: 'Off (no push)' },        // 🔕
+      important: { icon: '&#128276;', label: 'Important (approval + API errors)' }, // 🔔
+      all:       { icon: '&#128266;', label: 'All (+ finished/idle)' }, // 🔊
+    };
+    const NOTIFY_NEXT = { important: 'all', all: 'off', off: 'important' };
     const timeAgo = ts => {
       const secs = Math.floor((Date.now() - ts) / 1000);
       if (secs < 60) return `${secs}s ago`;
@@ -2635,6 +2646,7 @@
           const item = document.createElement('div');
           const isCurrent = s.id === sessionId && s.serverUrl === sessionServerUrl;
           const fav = isFavorite(s.id);
+          const lvl = s.notifyLevel || 'important';
           item.className = 'sb-item' + (isCurrent ? ' current' : '') + (s.apiError ? ' api-error' : '');
           if (s.apiError && s.apiErrorText) item.title = s.apiErrorText;
           item.dataset.sessionId = s.id;
@@ -2642,6 +2654,7 @@
             `<div class="sb-name"><span class="sb-dot ${s.status}"></span>${esc(s.name)}</div>` +
             `<div class="sb-meta">` +
               `<span class="sb-status ${s.status}">${statusLabels[s.status] || s.status}</span>` +
+              `<button class="sb-bell nl-${lvl}" title="Notifications: ${NOTIFY_BELL[lvl].label} — click to change">${NOTIFY_BELL[lvl].icon}</button>` +
               `<button class="sb-star${fav ? ' on' : ''}" title="${fav ? 'Remove from favorites' : 'Add to favorites'}">${fav ? '&#9733;' : '&#9734;'}</button>` +
               `<button class="sb-edit" title="Edit auto-command">&#9998;</button>` +
               (s.claudeSessionId ? `<button class="sb-fork" title="Fork Claude session">&#9095;</button>` : '') +
@@ -2698,8 +2711,20 @@
             loadSidebar();
           });
 
+          item.querySelector('.sb-bell').addEventListener('click', async (e) => {
+            e.stopPropagation();
+            const next = NOTIFY_NEXT[lvl] || 'important';
+            try {
+              await fetch(`${apiBase}/sessions/${s.id}/notify-level`, {
+                method: 'PATCH', headers: { 'Content-Type': 'application/json' },
+                body: JSON.stringify({ level: next })
+              });
+            } catch (err) {}
+            loadSidebar();
+          });
+
           item.addEventListener('click', (e) => {
-            if (e.target.closest('.sb-kill') || e.target.closest('.sb-edit') || e.target.closest('.sb-fork') || e.target.closest('.sb-star')) return;
+            if (e.target.closest('.sb-kill') || e.target.closest('.sb-edit') || e.target.closest('.sb-fork') || e.target.closest('.sb-star') || e.target.closest('.sb-bell')) return;
             switchSession(s.id, s.serverUrl);
             closeSidebarIfUnpinned();
           });

@@ -10,8 +10,9 @@ const workerClientLib = require('./lib/worker-client');
 const { mintDirectToken, verifyDirectToken } = require('./lib/cluster-token');
 const { sanitizeReplay } = require('./lib/replay-sanitize');
 const { execGit, gitSafeArgs, gitSafeEnv } = require('./lib/git-safe');
+const notifyPush = require('./lib/notify-push');
 
-const SERVER_VERSION = '1.18.2'; // 2026-07-01: mobile app-switch — reconnect the terminal instantly on foreground (visibilitychange/pageshow/focus/online) instead of waiting out the frozen backoff timer
+const SERVER_VERSION = '1.19.0'; // 2026-07-02: ntfy push on approval + stuck API errors (per-session level: off/important/all, default important); sidebar bell toggle
 
 // --- Optional latency instrumentation (opt-in via WT_LATENCY_DEBUG=1) -----
 // Event-loop lag monitor: interval is 10ms; anything ≥ 50ms slip is a stall.
@@ -342,7 +343,78 @@ maybeSpawnWorker();
 // Binary PTY output: per-session subscription is set up in the WS attach path.
 // (Legacy ptyData JSON event was removed in Phase 4.)
 
+// --- ntfy push notifications ----------------------------------------------
+// Per-session level (off/important/all, default important) stored server-side
+// so the push decision — which happens here, when a hook event arrives — can
+// read it. All server-side + a gitignored prefs file → hot-reloadable, no
+// worker change, no new npm dependency (ntfy is a plain HTTPS POST).
+const NOTIFY_PREFS_FILE = path.join(__dirname, 'notify-prefs.json');
+let _notifyPrefs = null, _notifyPrefsAt = 0;
+function loadNotifyPrefs() {
+  if (!_notifyPrefs || Date.now() - _notifyPrefsAt > 5000) {
+    try { _notifyPrefs = fs.existsSync(NOTIFY_PREFS_FILE) ? JSON.parse(fs.readFileSync(NOTIFY_PREFS_FILE, 'utf8')) : {}; }
+    catch { _notifyPrefs = {}; }
+    _notifyPrefsAt = Date.now();
+  }
+  return _notifyPrefs;
+}
+function getNotifyLevel(id) { return notifyPush.normalizeLevel(loadNotifyPrefs()[id]); }
+function setNotifyLevel(id, level) {
+  const lv = notifyPush.normalizeLevel(level);
+  const prefs = loadNotifyPrefs();
+  if (lv === notifyPush.DEFAULT_LEVEL) delete prefs[id]; else prefs[id] = lv; // store only overrides
+  try { fs.writeFileSync(NOTIFY_PREFS_FILE, JSON.stringify(prefs, null, 2)); } catch (e) { console.error('notify-prefs write failed:', e.message); }
+  _notifyPrefs = prefs; _notifyPrefsAt = Date.now();
+  return lv;
+}
+function pruneNotifyPref(id) {
+  const prefs = loadNotifyPrefs();
+  if (prefs[id]) { delete prefs[id]; try { fs.writeFileSync(NOTIFY_PREFS_FILE, JSON.stringify(prefs, null, 2)); } catch {} }
+}
+
+function ntfyConfig() {
+  const c = liveConfig('ntfy', null);
+  if (!c || c.enabled === false || !c.topic) return null;
+  return { server: String(c.server || 'https://ntfy.sh').replace(/\/+$/, ''), topic: String(c.topic) };
+}
+// Tests capture pushes instead of hitting the network.
+const _NTFY_SINK = process.env.WT_NTFY_TEST ? [] : null;
+
+// Send an ntfy push for one session event, gated by that session's level
+// (unless force=true, for the manual test endpoint).
+async function pushNotify(kind, { id, name, reason, force } = {}) {
+  if (!force && !notifyPush.shouldPush(kind, getNotifyLevel(id))) return;
+  const cfg = ntfyConfig();
+  const pub = liveConfig('publicUrl', null);
+  const click = pub ? `${String(pub).replace(/\/+$/, '')}/app/${encodeURIComponent(id)}` : undefined;
+  const msg = notifyPush.buildNtfyMessage(kind, { sessionName: name, serverName: getServerName(), reason, click });
+  if (_NTFY_SINK) { _NTFY_SINK.push({ kind, id, ...msg }); return; }
+  if (!cfg) return;
+  try {
+    await fetch(cfg.server, {
+      method: 'POST', headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ topic: cfg.topic, title: msg.title, message: msg.message, priority: msg.priority, tags: msg.tags, click: msg.click }),
+    });
+  } catch (e) { console.error('ntfy push failed:', e.message); }
+}
+
+// Anti-flood timers per session. Approval pushes immediately (debounced); an
+// API error only pushes if it hasn't cleared ~25s later (so quick auto-recovery
+// blips stay silent); idle only pushes if it stays idle ~2 min (settled), and
+// only when the session is on the "all" level.
+const _notifyState = new Map(); // id -> { idleTimer, apiErrTimer, apiErrCooldownUntil, lastApprovalAt }
+const _NOTIFY_IDLE_MS = process.env.WT_NOTIFY_FAST ? 300 : 120000;
+const _NOTIFY_APIERR_MS = process.env.WT_NOTIFY_FAST ? 200 : 25000;
+const _NOTIFY_APPROVAL_DEBOUNCE_MS = 60000;
+const _NOTIFY_APIERR_COOLDOWN_MS = 300000;
+function _nstate(id) { let s = _notifyState.get(id); if (!s) { s = {}; _notifyState.set(id, s); } return s; }
+
 workerClient.on('statusChanged', ({ id, status, notifyType, notifyMsg }) => {
+  // ntfy: any move away from idle cancels a pending settled-idle push.
+  if (status && status !== 'idle') {
+    const st = _notifyState.get(id);
+    if (st && st.idleTimer) { clearTimeout(st.idleTimer); st.idleTimer = null; }
+  }
   // Fan out to notifyClients (browser notify WS subscribers)
   // sessionName is retrieved lazily via session list RPC? Instead, pull name from
   // notifyMsg (which carries it) or skip when not set.
@@ -358,6 +430,24 @@ workerClient.on('statusChanged', ({ id, status, notifyType, notifyMsg }) => {
     notification: { type: notifyType || 'status', message: notifyMsg || '', session: '', sessionId: id, status }
   });
   for (const client of notifyClients) { try { client.send(payload); } catch {} }
+
+  // ntfy push gating.
+  try {
+    const { name, reason } = notifyPush.splitNotifyMsg(notifyMsg);
+    if (notifyType === 'approval_needed') {
+      const st = _nstate(id); const now = Date.now();
+      if (!st.lastApprovalAt || now - st.lastApprovalAt > _NOTIFY_APPROVAL_DEBOUNCE_MS) {
+        st.lastApprovalAt = now;
+        pushNotify('approval', { id, name, reason });
+      }
+    } else if (notifyType === 'idle' && getNotifyLevel(id) === 'all') {
+      // Only push if it STAYS idle a while — a mid-task pause shouldn't ping.
+      const st = _nstate(id);
+      if (st.idleTimer) clearTimeout(st.idleTimer);
+      st.idleTimer = setTimeout(() => { st.idleTimer = null; pushNotify('idle', { id, name, reason }); }, _NOTIFY_IDLE_MS);
+      if (st.idleTimer.unref) st.idleTimer.unref();
+    }
+  } catch (e) { console.error('notify(status) failed:', e.message); }
 });
 
 // API-error detection from the worker. Fan out to notify clients so the UI can
@@ -378,10 +468,35 @@ workerClient.on('apiError', ({ id, name, apiError, text, transient, cleared, aut
     }
   });
   for (const client of notifyClients) { try { client.send(payload); } catch {} }
+
+  // ntfy push gating: only alert if the error is STUCK — i.e. it hasn't cleared
+  // ~25s after detection (so quick auto-recovery blips stay silent). Cleared
+  // cancels a pending alert.
+  try {
+    const st = _nstate(id);
+    if (cleared) {
+      if (st.apiErrTimer) { clearTimeout(st.apiErrTimer); st.apiErrTimer = null; }
+    } else if (isInitialDetect) {
+      const now = Date.now();
+      if (!st.apiErrTimer && (!st.apiErrCooldownUntil || now > st.apiErrCooldownUntil)) {
+        const reason = text ? `API error — ${String(text).slice(0, 140)}` : 'API error (session stuck)';
+        st.apiErrTimer = setTimeout(() => {
+          st.apiErrTimer = null;
+          st.apiErrCooldownUntil = Date.now() + _NOTIFY_APIERR_COOLDOWN_MS;
+          pushNotify('apierror', { id, name, reason });
+        }, _NOTIFY_APIERR_MS);
+        if (st.apiErrTimer.unref) st.apiErrTimer.unref();
+      }
+    }
+  } catch (e) { console.error('notify(apiError) failed:', e.message); }
 });
 
 workerClient.on('sessionExited', ({ id }) => {
   hookForgetSession(id);
+  // ntfy: drop any pending timers + stored level for the dead session.
+  const nst = _notifyState.get(id);
+  if (nst) { if (nst.idleTimer) clearTimeout(nst.idleTimer); if (nst.apiErrTimer) clearTimeout(nst.apiErrTimer); _notifyState.delete(id); }
+  pruneNotifyPref(id);
   const set = sessionClients.get(id);
   if (set) {
     for (const client of set) {
@@ -1569,6 +1684,7 @@ async function _computeClusterSessions(reqUser) {
         lastActivity: s.lastActivity, autoCommand: s.autoCommand || '',
         claudeSessionId: s.claudeSessionId,
         server: getServerName(), serverUrl: null,
+        notifyLevel: getNotifyLevel(s.id),
       });
     }
   } catch (e) {
@@ -2053,6 +2169,7 @@ app.get('/api/sessions', async (req, res) => {
       clients: s.clients || 0, pid: s.pid, status: s.status,
       lastActivity: s.lastActivity, autoCommand: s.autoCommand || '',
       claudeSessionId: s.claudeSessionId,
+      notifyLevel: getNotifyLevel(s.id),
     }));
     // Log when a remote server fetches our sessions (Bearer = cluster call).
     // Throttled to avoid hammering the disk: only logs on change or after
@@ -2237,6 +2354,25 @@ app.patch('/api/sessions/:id', express.json({ limit: '16kb' }), async (req, res)
     console.error(`PATCH /api/sessions failed: ${e.message}`);
     res.status(500).json({ error: 'Failed to update session' });
   }
+});
+
+// --- API: per-session push (ntfy) level ---
+app.get('/api/sessions/:id/notify-level', (req, res) => {
+  res.json({ id: req.params.id, level: getNotifyLevel(req.params.id) });
+});
+app.patch('/api/sessions/:id/notify-level', express.json({ limit: '1kb' }), (req, res) => {
+  const level = req.body?.level;
+  if (!notifyPush.LEVELS.includes(level)) {
+    return res.status(400).json({ error: 'level must be one of ' + notifyPush.LEVELS.join(', ') });
+  }
+  res.json({ id: req.params.id, level: setNotifyLevel(req.params.id, level) });
+});
+// Manual verification: fire a sample push (force past the level gate). Returns
+// whether ntfy is configured so the UI can tell you if setup is missing.
+app.post('/api/notify-test', express.json({ limit: '1kb' }), async (req, res) => {
+  const name = req.body?.name ? String(req.body.name).slice(0, 100) : 'Test';
+  await pushNotify('approval', { id: 'notify-test', name, reason: 'ntfy test — if you see this on your phone, it works ✅', force: true });
+  res.json({ ok: true, configured: !!ntfyConfig() });
 });
 
 // --- API: reorder sessions ---
