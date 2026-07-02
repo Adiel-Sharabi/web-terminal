@@ -114,6 +114,16 @@
     .sb-bell.nl-off { opacity: 0.4; filter: grayscale(1); }
     .sb-bell.nl-important { opacity: 0.9; }
     .sb-bell.nl-all { opacity: 1; }
+    .nl-menu { position: fixed; z-index: 1000; min-width: 220px; background: #12263f; border: 1px solid #24405f; border-radius: 8px; box-shadow: 0 8px 24px rgba(0,0,0,0.5); padding: 4px; }
+    .nl-menu .nl-head { font-size: 10px; text-transform: uppercase; letter-spacing: .05em; color: #7a8aa0; padding: 6px 8px 4px; }
+    .nl-opt { display: flex; align-items: center; gap: 10px; width: 100%; background: transparent; border: none; color: #e0e0e0; text-align: left; padding: 9px 8px; border-radius: 6px; cursor: pointer; }
+    .nl-opt:hover { background: #0f3460; }
+    .nl-opt.active { background: rgba(0,212,170,0.12); }
+    .nl-opt .nl-ic { font-size: 16px; flex: none; width: 20px; text-align: center; }
+    .nl-opt .nl-txt { display: flex; flex-direction: column; line-height: 1.25; flex: 1; }
+    .nl-opt .nl-txt b { font-weight: 600; font-size: 13px; }
+    .nl-opt .nl-txt small { color: #7a8aa0; font-size: 11px; }
+    .nl-opt .nl-ck { color: #00d4aa; font-weight: 700; flex: none; width: 14px; }
     .sb-fav-item.fav-reordering { background: rgba(0,212,170,0.10); }
     .sb-status { font-size: 10px; }
     .sb-status.active { color: #4a4; }
@@ -2544,7 +2554,76 @@
       important: { icon: '&#128276;', label: 'Important (approval + API errors)' }, // 🔔
       all:       { icon: '&#128266;', label: 'All (+ finished/idle)' }, // 🔊
     };
-    const NOTIFY_NEXT = { important: 'all', all: 'off', off: 'important' };
+    // Explicit per-session level picker (mobile-friendly: tap, not hover).
+    const NOTIFY_OPTS = [
+      { level: 'off',       icon: '&#128277;', label: 'Off',       desc: 'No phone notifications' },
+      { level: 'important', icon: '&#128276;', label: 'Important', desc: 'Approval + stuck API errors' },
+      { level: 'all',       icon: '&#128266;', label: 'All',       desc: '+ finished / waiting for input' },
+    ];
+    function closeNotifyMenu() {
+      const m = document.getElementById('nlMenu');
+      if (m) {
+        if (m._dismiss) {
+          document.removeEventListener('click', m._dismiss, true);
+          document.removeEventListener('touchstart', m._dismiss, true);
+        }
+        m.remove();
+      }
+    }
+    function bellLevelOf(el) {
+      for (const lv of ['off', 'important', 'all']) if (el.classList.contains('nl-' + lv)) return lv;
+      return 'important';
+    }
+    function setBellLevel(el, level) {
+      el.classList.remove('nl-off', 'nl-important', 'nl-all');
+      el.classList.add('nl-' + level);
+      el.innerHTML = NOTIFY_BELL[level].icon;
+      el.title = `Notifications: ${NOTIFY_BELL[level].label} — click to change`;
+    }
+    function showNotifyLevelMenu(anchor, sessionId, apiBase) {
+      closeNotifyMenu();
+      const curLevel = bellLevelOf(anchor);
+      const menu = document.createElement('div');
+      menu.id = 'nlMenu';
+      menu.className = 'nl-menu';
+      menu.innerHTML =
+        `<div class="nl-head">Notify me on this session</div>` +
+        NOTIFY_OPTS.map(o =>
+          `<button class="nl-opt${o.level === curLevel ? ' active' : ''}" data-level="${o.level}">` +
+            `<span class="nl-ic">${o.icon}</span>` +
+            `<span class="nl-txt"><b>${o.label}</b><small>${o.desc}</small></span>` +
+            `<span class="nl-ck">${o.level === curLevel ? '&#10003;' : ''}</span>` +
+          `</button>`
+        ).join('');
+      menu.querySelectorAll('.nl-opt').forEach(btn => {
+        btn.addEventListener('click', async (e) => {
+          e.stopPropagation();
+          const level = btn.dataset.level;
+          closeNotifyMenu();
+          setBellLevel(anchor, level); // optimistic in-place update (cluster list is cached)
+          try {
+            await fetch(`${apiBase}/sessions/${sessionId}/notify-level`, {
+              method: 'PATCH', headers: { 'Content-Type': 'application/json' },
+              body: JSON.stringify({ level })
+            });
+          } catch (err) {}
+        });
+      });
+      document.body.appendChild(menu);
+      // Position under the bell, clamped to the viewport.
+      const r = anchor.getBoundingClientRect();
+      const top = Math.min(window.innerHeight - menu.offsetHeight - 8, r.bottom + 4);
+      const left = Math.min(window.innerWidth - menu.offsetWidth - 8, Math.max(8, r.left - menu.offsetWidth + r.width));
+      menu.style.top = `${Math.max(8, top)}px`;
+      menu.style.left = `${left}px`;
+      // Dismiss on any outside tap/click (capture so it beats other handlers).
+      const dismiss = (ev) => { if (!menu.contains(ev.target)) closeNotifyMenu(); };
+      menu._dismiss = dismiss;
+      setTimeout(() => {
+        document.addEventListener('click', dismiss, true);
+        document.addEventListener('touchstart', dismiss, true);
+      }, 0);
+    }
     const timeAgo = ts => {
       const secs = Math.floor((Date.now() - ts) / 1000);
       if (secs < 60) return `${secs}s ago`;
@@ -2711,16 +2790,9 @@
             loadSidebar();
           });
 
-          item.querySelector('.sb-bell').addEventListener('click', async (e) => {
+          item.querySelector('.sb-bell').addEventListener('click', (e) => {
             e.stopPropagation();
-            const next = NOTIFY_NEXT[lvl] || 'important';
-            try {
-              await fetch(`${apiBase}/sessions/${s.id}/notify-level`, {
-                method: 'PATCH', headers: { 'Content-Type': 'application/json' },
-                body: JSON.stringify({ level: next })
-              });
-            } catch (err) {}
-            loadSidebar();
+            showNotifyLevelMenu(e.currentTarget, s.id, apiBase);
           });
 
           item.addEventListener('click', (e) => {

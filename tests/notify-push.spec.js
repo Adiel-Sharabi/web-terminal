@@ -1,7 +1,7 @@
 // @ts-check
 // Per-session push (ntfy): pure gating/message logic + the notify-level REST API.
 const { test, expect } = require('@playwright/test');
-const { authCtx } = require('./test-helpers');
+const { BASE, authCtx, loginPage } = require('./test-helpers');
 const np = require('../lib/notify-push');
 
 test.describe('notify-push pure logic', () => {
@@ -87,6 +87,43 @@ test.describe('notify-level REST API', () => {
       expect(body.ok).toBe(true);
       expect(body.configured).toBe(false); // no ntfy config in the test server
     } finally {
+      await ctx.dispose();
+    }
+  });
+});
+
+test.describe('notify-level picker UI', () => {
+  test('the bell opens a picker; choosing a level marks that session', async ({ page }) => {
+    await loginPage(page);
+    const ctx = await authCtx();
+    const created = (await (await ctx.post('/api/sessions', { data: { name: 'Bell Pick' } })).json()).id;
+
+    page.on('dialog', d => d.dismiss().catch(() => {}));
+    try {
+      await page.goto(BASE + '/');
+      const row = page.locator(`.sb-item[data-session-id="${created}"]`);
+      await expect(row).toBeVisible({ timeout: 5000 });
+
+      // Open the picker — the default level (important) is marked active.
+      await row.locator('.sb-bell').click();
+      const menu = page.locator('#nlMenu');
+      await expect(menu).toBeVisible();
+      await expect(menu.locator('.nl-opt')).toHaveCount(3);
+      await expect(menu.locator('.nl-opt.active')).toHaveAttribute('data-level', 'important');
+
+      // Choose "All" → menu closes, level persists server-side.
+      await menu.locator('.nl-opt[data-level="all"]').click();
+      await expect(page.locator('#nlMenu')).toHaveCount(0);
+      await expect.poll(async () =>
+        (await (await ctx.get(`/api/sessions/${created}/notify-level`)).json()).level
+      ).toBe('all');
+
+      // Reopen — "All" is now the marked one.
+      await row.locator('.sb-bell').click();
+      await expect(page.locator('#nlMenu .nl-opt.active')).toHaveAttribute('data-level', 'all');
+    } finally {
+      try { await ctx.patch(`/api/sessions/${created}/notify-level`, { data: { level: 'important' } }); } catch {}
+      try { await ctx.delete(`/api/sessions/${created}`); } catch {}
       await ctx.dispose();
     }
   });

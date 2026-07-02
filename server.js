@@ -12,7 +12,7 @@ const { sanitizeReplay } = require('./lib/replay-sanitize');
 const { execGit, gitSafeArgs, gitSafeEnv } = require('./lib/git-safe');
 const notifyPush = require('./lib/notify-push');
 
-const SERVER_VERSION = '1.19.0'; // 2026-07-02: ntfy push on approval + stuck API errors (per-session level: off/important/all, default important); sidebar bell toggle
+const SERVER_VERSION = '1.19.1'; // 2026-07-02: per-session notify level is now an explicit tap-to-pick menu (off/important/all) on the sidebar bell, not a blind cycle — mobile-friendly
 
 // --- Optional latency instrumentation (opt-in via WT_LATENCY_DEBUG=1) -----
 // Event-loop lag monitor: interval is 10ms; anything ≥ 50ms slip is a stall.
