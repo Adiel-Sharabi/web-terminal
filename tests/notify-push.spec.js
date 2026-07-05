@@ -19,6 +19,15 @@ test.describe('notify-push pure logic', () => {
     expect(np.shouldPush('approval', undefined)).toBe(true);
   });
 
+  test('shouldPush: clear bypasses the level gate (a dismissal, not an alert)', () => {
+    // G3: a 'clear' resolves/auto-dismisses a prior alert, so it must be
+    // delivered regardless of the session's level — even 'off' (there may be a
+    // stale notification on the device to dismiss).
+    for (const lv of ['off', 'important', 'all', 'bogus', undefined]) {
+      expect(np.shouldPush('clear', lv)).toBe(true);
+    }
+  });
+
   test('buildNtfyMessage leads with server + session and carries reason/priority', () => {
     const m = np.buildNtfyMessage('approval', {
       sessionName: 'DroneLocator', serverName: 'Office',
@@ -34,6 +43,16 @@ test.describe('notify-push pure logic', () => {
     expect(np.buildNtfyMessage('idle', { sessionName: 'S', serverName: 'Home' }).priority).toBe(3);
     // no server name → just the session name
     expect(np.buildNtfyMessage('approval', { sessionName: 'Solo' }).title).toBe('Solo');
+  });
+
+  test('buildNtfyMessage: clear is a low-priority resolution marker', () => {
+    // G3: a 'clear' is a silent dismissal, not an alert. The ntfy transport
+    // can't recall a delivered push (server treats clear as a no-op there), but
+    // the shape is defined + tested so a future transport can render it.
+    const m = np.buildNtfyMessage('clear', { sessionName: 'DroneLocator', serverName: 'Office' });
+    expect(m.title).toBe('Office: DroneLocator');
+    expect(m.priority).toBe(1); // min priority — never buzzes the phone
+    expect(m.tags).toContain('white_check_mark');
   });
 
   test('detail (Claude\'s last message) is appended as a second block', () => {
@@ -56,6 +75,70 @@ test.describe('notify-push pure logic', () => {
     // hyphen variant + a plain string fallback
     expect(np.splitNotifyMsg('"Web Terminal" - done').name).toBe('Web Terminal');
     expect(np.splitNotifyMsg('no quotes here')).toEqual({ name: '', reason: 'no quotes here' });
+  });
+});
+
+test.describe('attention record pure logic', () => {
+  test('makeAttention stamps cleared:false + normalizes reason/name', () => {
+    const a = np.makeAttention('approval', { reason: 'needs approval', name: 'Drone', at: 111 });
+    expect(a).toEqual({ kind: 'approval', reason: 'needs approval', name: 'Drone', at: 111, cleared: false });
+    // Missing reason/name normalize to '' (never undefined on the wire).
+    const b = np.makeAttention('apierror', { at: 222 });
+    expect(b).toEqual({ kind: 'apierror', reason: '', name: '', at: 222, cleared: false });
+    // at defaults to a real timestamp when not injected.
+    expect(typeof np.makeAttention('idle').at).toBe('number');
+  });
+
+  test('buildAttentionResponse: empty state → all event fields null, but ids/message present', () => {
+    const r = np.buildAttentionResponse({ id: 'sess-1', serverName: 'Home', lastAttention: null, lastMessage: '' });
+    expect(r).toEqual({
+      id: 'sess-1', serverName: 'Home',
+      kind: null, reason: null, name: null, at: null, cleared: null,
+      lastMessage: '',
+    });
+    // Absent lastMessage coerces to '' so the companion never gets undefined.
+    expect(np.buildAttentionResponse({ id: 'x', serverName: 'Y' }).lastMessage).toBe('');
+  });
+
+  test('buildAttentionResponse: a recorded (uncleared) attention surfaces its fields', () => {
+    const att = np.makeAttention('approval', { reason: 'needs approval', name: 'Drone', at: 999 });
+    const r = np.buildAttentionResponse({ id: 'sess-2', serverName: 'Office', lastAttention: att, lastMessage: 'hi there' });
+    expect(r).toEqual({
+      id: 'sess-2', serverName: 'Office',
+      kind: 'approval', reason: 'needs approval', name: 'Drone', at: 999, cleared: false,
+      lastMessage: 'hi there',
+    });
+  });
+
+  test('buildAttentionResponse: cleared flag is reflected (and coerced to a real boolean)', () => {
+    const att = { ...np.makeAttention('apierror', { at: 5 }), cleared: true };
+    expect(np.buildAttentionResponse({ id: 'i', serverName: 's', lastAttention: att }).cleared).toBe(true);
+  });
+
+  test('statusClearsApproval: only an off-waiting change clears an uncleared approval (G3a)', () => {
+    const approval = np.makeAttention('approval', { at: 1 });
+    // Positive: the user answered → status moved off 'waiting'.
+    expect(np.statusClearsApproval('working', approval)).toBe(true);
+    expect(np.statusClearsApproval('idle', approval)).toBe(true);
+    // Still waiting → not resolved.
+    expect(np.statusClearsApproval('waiting', approval)).toBe(false);
+    // No/blank status → nothing to conclude.
+    expect(np.statusClearsApproval('', approval)).toBe(false);
+    expect(np.statusClearsApproval(undefined, approval)).toBe(false);
+    // Already cleared → don't clear again (prevents duplicate 'clear' pushes).
+    expect(np.statusClearsApproval('working', { ...approval, cleared: true })).toBe(false);
+    // Wrong kind / no record → not an approval resolution.
+    expect(np.statusClearsApproval('working', np.makeAttention('apierror', { at: 1 }))).toBe(false);
+    expect(np.statusClearsApproval('working', null)).toBe(false);
+  });
+
+  test('apiRecoveryClearsError: clears only an uncleared apierror (G3b)', () => {
+    const apierr = np.makeAttention('apierror', { at: 1 });
+    expect(np.apiRecoveryClearsError(apierr)).toBe(true);
+    // Already cleared, wrong kind, or no record → no clear.
+    expect(np.apiRecoveryClearsError({ ...apierr, cleared: true })).toBe(false);
+    expect(np.apiRecoveryClearsError(np.makeAttention('approval', { at: 1 }))).toBe(false);
+    expect(np.apiRecoveryClearsError(null)).toBe(false);
   });
 });
 

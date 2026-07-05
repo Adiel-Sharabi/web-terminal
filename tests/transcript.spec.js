@@ -5,7 +5,10 @@ const { test, expect } = require('@playwright/test');
 const fs = require('fs');
 const os = require('os');
 const path = require('path');
-const { lastAssistantText } = require('../lib/transcript');
+const {
+  lastAssistantText, isAllowedTranscriptPath,
+  parseTranscriptTurn, scanTurnsBackward, encodeCursor, decodeCursor, stripAnsi,
+} = require('../lib/transcript');
 
 // Write lines (objects) as JSONL to a unique temp file; returns the path.
 let _n = 0;
@@ -85,5 +88,285 @@ test.describe('lib/transcript.lastAssistantText', () => {
     const p = writeTranscript([user('only user turns here')]);
     try { expect(lastAssistantText(p)).toBe(''); }
     finally { fs.unlinkSync(p); }
+  });
+});
+
+// M1: pure containment/extension gate. It receives ALREADY-realpath'd paths from
+// server.js (safeTranscriptPath), so a '..' traversal shows up here as a resolved
+// path that no longer sits under the root. `platform` is injected so both OS rules
+// are testable on any host.
+test.describe('lib/transcript.isAllowedTranscriptPath', () => {
+  const ROOT_NIX = '/home/u/.claude/projects';
+  const ROOT_WIN = 'C:\\Users\\u\\.claude\\projects';
+
+  test('accepts a .jsonl strictly under the root (posix)', () => {
+    expect(isAllowedTranscriptPath(`${ROOT_NIX}/proj/x.jsonl`, ROOT_NIX, 'linux')).toBe(true);
+    expect(isAllowedTranscriptPath(`${ROOT_NIX}/a/b/c.jsonl`, ROOT_NIX, 'linux')).toBe(true);
+  });
+
+  test('accepts under a root written with a trailing separator', () => {
+    expect(isAllowedTranscriptPath(`${ROOT_NIX}/proj/x.jsonl`, ROOT_NIX + '/', 'linux')).toBe(true);
+  });
+
+  test('win32: mixed separators + differing case are still contained', () => {
+    expect(isAllowedTranscriptPath('C:/Users/U/.CLAUDE/projects/proj/X.JSONL', ROOT_WIN, 'win32')).toBe(true);
+    expect(isAllowedTranscriptPath('c:\\users\\u\\.claude\\projects\\p\\x.jsonl', ROOT_WIN, 'win32')).toBe(true);
+  });
+
+  test('rejects a wrong / doubled extension', () => {
+    expect(isAllowedTranscriptPath(`${ROOT_NIX}/proj/x.txt`, ROOT_NIX, 'linux')).toBe(false);
+    expect(isAllowedTranscriptPath(`${ROOT_NIX}/proj/x.jsonl.txt`, ROOT_NIX, 'linux')).toBe(false);
+    expect(isAllowedTranscriptPath(`${ROOT_NIX}/proj/xjsonl`, ROOT_NIX, 'linux')).toBe(false);
+  });
+
+  test('rejects a path resolving OUTSIDE the root (traversal outcome)', () => {
+    expect(isAllowedTranscriptPath('/home/u/.claude/secrets/x.jsonl', ROOT_NIX, 'linux')).toBe(false);
+    expect(isAllowedTranscriptPath('/etc/passwd.jsonl', ROOT_NIX, 'linux')).toBe(false);
+  });
+
+  test('rejects the root itself (must be a file strictly inside)', () => {
+    expect(isAllowedTranscriptPath(ROOT_NIX, ROOT_NIX, 'linux')).toBe(false);
+  });
+
+  test('rejects a prefix-collision sibling dir (root /a/b vs /a/b-evil/x.jsonl)', () => {
+    expect(isAllowedTranscriptPath('/a/b-evil/x.jsonl', '/a/b', 'linux')).toBe(false);
+    expect(isAllowedTranscriptPath('C:\\a\\b-evil\\x.jsonl', 'C:\\a\\b', 'win32')).toBe(false);
+  });
+
+  test('posix is case-sensitive (a case-mismatched root is a different dir)', () => {
+    expect(isAllowedTranscriptPath('/HOME/u/.claude/projects/p/x.jsonl', ROOT_NIX, 'linux')).toBe(false);
+  });
+
+  test('rejects non-string / empty inputs', () => {
+    expect(isAllowedTranscriptPath(null, ROOT_NIX, 'linux')).toBe(false);
+    expect(isAllowedTranscriptPath(undefined, ROOT_NIX, 'linux')).toBe(false);
+    expect(isAllowedTranscriptPath(123, ROOT_NIX, 'linux')).toBe(false);
+    expect(isAllowedTranscriptPath('', ROOT_NIX, 'linux')).toBe(false);
+    expect(isAllowedTranscriptPath(`${ROOT_NIX}/x.jsonl`, '', 'linux')).toBe(false);
+  });
+});
+
+// ============================================================
+// G5: structured transcript — parseTranscriptTurn (pure, one JSONL line → turn)
+// ============================================================
+const ESC = String.fromCharCode(0x1b); // keep raw ESC bytes out of this source
+const jl = (o) => JSON.stringify(o);
+const asstLine = (blocks, extra = {}) => jl({ type: 'assistant', message: { role: 'assistant', content: blocks }, ...extra });
+const userLine = (content, extra = {}) => jl({ type: 'user', message: { role: 'user', content }, ...extra });
+
+test.describe('lib/transcript.parseTranscriptTurn', () => {
+  test('assistant text-only turn → role/text, empty toolUses, null ts', () => {
+    const turn = parseTranscriptTurn(asstLine([{ type: 'text', text: 'Hello there.' }]));
+    expect(turn).toEqual({ role: 'assistant', text: 'Hello there.', toolUses: [], ts: null });
+  });
+
+  test('assistant turn with text + tool_use → both captured; preview is stringified input', () => {
+    const turn = parseTranscriptTurn(asstLine([
+      { type: 'text', text: 'Running it.' },
+      { type: 'tool_use', name: 'Bash', input: { command: 'npm test' } },
+    ]));
+    expect(turn.role).toBe('assistant');
+    expect(turn.text).toBe('Running it.');
+    expect(turn.toolUses).toEqual([{ name: 'Bash', inputPreview: '{"command":"npm test"}' }]);
+  });
+
+  test('assistant tool_use-ONLY turn is KEPT (text empty, toolUses populated)', () => {
+    const turn = parseTranscriptTurn(asstLine([{ type: 'tool_use', name: 'Read', input: { file: 'a.js' } }]));
+    expect(turn.role).toBe('assistant');
+    expect(turn.text).toBe('');
+    expect(turn.toolUses).toEqual([{ name: 'Read', inputPreview: '{"file":"a.js"}' }]);
+  });
+
+  test('assistant turn with neither text nor tool_use → null (skipped)', () => {
+    expect(parseTranscriptTurn(asstLine([{ type: 'thinking', thinking: 'hmm' }]))).toBeNull();
+  });
+
+  test('inputPreview is capped at 80 chars with an ellipsis', () => {
+    const turn = parseTranscriptTurn(asstLine([{ type: 'tool_use', name: 'Bash', input: { command: 'x'.repeat(300) } }]));
+    expect(turn.toolUses[0].inputPreview.length).toBe(80);
+    expect(turn.toolUses[0].inputPreview.endsWith('…')).toBe(true);
+  });
+
+  test('user turn with string content → text extracted', () => {
+    expect(parseTranscriptTurn(userLine('do the thing'))).toEqual({ role: 'user', text: 'do the thing', toolUses: [], ts: null });
+  });
+
+  test('user turn with text blocks → joined text', () => {
+    const turn = parseTranscriptTurn(userLine([{ type: 'text', text: 'line one' }, { type: 'text', text: 'line two' }]));
+    expect(turn.role).toBe('user');
+    expect(turn.text).toBe('line one\nline two');
+  });
+
+  test('user tool_result-ONLY line → null (plumbing, skipped)', () => {
+    expect(parseTranscriptTurn(userLine([{ type: 'tool_result', tool_use_id: 't', content: 'ok' }]))).toBeNull();
+  });
+
+  test('malformed JSON → null', () => {
+    expect(parseTranscriptTurn('{not json')).toBeNull();
+    expect(parseTranscriptTurn('')).toBeNull();
+    expect(parseTranscriptTurn('null')).toBeNull();
+  });
+
+  test('non-conversational line types (system/summary) → null', () => {
+    expect(parseTranscriptTurn(jl({ type: 'system', content: 'x' }))).toBeNull();
+    expect(parseTranscriptTurn(jl({ type: 'summary', summary: 'x' }))).toBeNull();
+  });
+
+  test('ts is read from the line timestamp when present', () => {
+    const turn = parseTranscriptTurn(asstLine([{ type: 'text', text: 'hi' }], { timestamp: '2026-07-05T12:00:00Z' }));
+    expect(turn.ts).toBe('2026-07-05T12:00:00Z');
+  });
+
+  test('ANSI escape sequences are stripped from turn text', () => {
+    const dirty = ESC + '[31mred' + ESC + '[0m and ' + ESC + ']0;title' + String.fromCharCode(0x07) + 'done';
+    const turn = parseTranscriptTurn(asstLine([{ type: 'text', text: dirty }]));
+    expect(turn.text).toBe('red and done');
+    expect(turn.text.includes(ESC)).toBe(false);
+  });
+
+  test('a turn longer than 64KB is truncated with an ellipsis', () => {
+    const huge = 'y'.repeat(70000);
+    const turn = parseTranscriptTurn(asstLine([{ type: 'text', text: huge }]));
+    expect(turn.text.length).toBe(65536);
+    expect(turn.text.endsWith('…')).toBe(true);
+  });
+});
+
+test.describe('lib/transcript.stripAnsi', () => {
+  test('removes CSI, OSC, and lone escapes; leaves plain prose', () => {
+    expect(stripAnsi('plain text')).toBe('plain text');
+    expect(stripAnsi(ESC + '[1;32mgreen' + ESC + '[0m')).toBe('green');
+    expect(stripAnsi(ESC + ']8;;http://x' + String.fromCharCode(0x07) + 'link')).toBe('link');
+    expect(stripAnsi(123)).toBe(''); // non-string → ''
+  });
+});
+
+// ============================================================
+// G5: cursor codec — opaque base64 of a byte offset
+// ============================================================
+test.describe('lib/transcript.cursor codec', () => {
+  test('round-trips a byte offset', () => {
+    for (const n of [0, 1, 42, 1024, 5_000_000]) {
+      expect(decodeCursor(encodeCursor(n))).toBe(n);
+    }
+  });
+
+  test('rejects non-string, empty, non-digit, and non-canonical inputs', () => {
+    expect(decodeCursor('')).toBeNull();
+    expect(decodeCursor(null)).toBeNull();
+    expect(decodeCursor(undefined)).toBeNull();
+    expect(decodeCursor('!!!not base64!!!')).toBeNull();
+    expect(decodeCursor(Buffer.from('foo').toString('base64'))).toBeNull();     // decodes to 'foo'
+    expect(decodeCursor(Buffer.from('-5').toString('base64'))).toBeNull();      // negative
+    expect(decodeCursor(Buffer.from('1.5').toString('base64'))).toBeNull();     // non-integer
+    expect(decodeCursor(Buffer.from(' 12').toString('base64'))).toBeNull();     // whitespace → non-canonical
+  });
+});
+
+// ============================================================
+// G5: scanTurnsBackward — backward paginator over an injected chunk reader
+// ============================================================
+test.describe('lib/transcript.scanTurnsBackward', () => {
+  // Build a JSONL "file" as a Buffer + a reader closure over it. Returns the
+  // fixture plus how many lines are genuinely conversational (skips excluded).
+  function buildFile(count) {
+    const lines = [];
+    let convo = 0;
+    for (let i = 0; i < count; i++) {
+      lines.push(userLine('q' + i)); convo++;
+      if (i % 4 === 0) lines.push(userLine([{ type: 'tool_result', tool_use_id: 't', content: 'r' }])); // skipped
+      const blocks = [{ type: 'text', text: 'a' + i }];
+      if (i % 3 === 0) blocks.push({ type: 'tool_use', name: 'Bash', input: { command: 'c' + i } });
+      lines.push(asstLine(blocks)); convo++;
+    }
+    lines.splice(3, 0, '{ malformed'); // one unparseable line, skipped
+    const buf = Buffer.from(lines.join('\n') + '\n', 'utf8');
+    return { buf, fileSize: buf.length, convo, reader: (off, len) => buf.slice(off, off + len) };
+  }
+
+  test('no cursor → the LAST `limit` turns, newest-last, with a cursor + hasMore', () => {
+    const { fileSize, reader } = buildFile(60); // 120 conversational turns
+    const r = scanTurnsBackward(reader, fileSize, { limit: 50 });
+    expect(r.turns.length).toBe(50);
+    expect(r.hasMore).toBe(true);
+    expect(r.cursor).not.toBeNull();
+    // newest-last: final turn is the very last assistant line
+    expect(r.turns[r.turns.length - 1]).toMatchObject({ role: 'assistant', text: 'a59' });
+    // roles alternate sanely and none are skipped types
+    expect(r.turns.every(t => t.role === 'user' || t.role === 'assistant')).toBe(true);
+  });
+
+  test('default limit is 50 when omitted', () => {
+    const { fileSize, reader } = buildFile(60);
+    expect(scanTurnsBackward(reader, fileSize, {}).turns.length).toBe(50);
+  });
+
+  test('limit is capped at 200', () => {
+    const { fileSize, reader } = buildFile(150); // 300 turns
+    const r = scanTurnsBackward(reader, fileSize, { limit: 9999 });
+    expect(r.turns.length).toBe(200);
+  });
+
+  test('walking `before` cursors reaches the file start with hasMore=false', () => {
+    const { fileSize, convo, reader } = buildFile(60);
+    let before = null, all = [], pages = 0;
+    for (;;) {
+      const r = scanTurnsBackward(reader, fileSize, { before, limit: 50 });
+      all = r.turns.concat(all); // prepend the older page
+      pages++;
+      if (!r.hasMore) { expect(r.cursor).toBeNull(); break; }
+      before = decodeCursor(r.cursor);
+      expect(before).not.toBeNull();
+      expect(pages).toBeLessThan(20); // guard against a pagination loop
+    }
+    expect(all.length).toBe(convo);
+    expect(all[0]).toMatchObject({ role: 'user', text: 'q0' });           // oldest
+    expect(all[all.length - 1]).toMatchObject({ role: 'assistant', text: 'a59' }); // newest
+  });
+
+  test('malformed + tool_result-only lines are skipped (never appear as turns)', () => {
+    const { fileSize, convo, reader } = buildFile(10);
+    const r = scanTurnsBackward(reader, fileSize, { limit: 500 });
+    expect(r.turns.length).toBe(convo);           // exactly the conversational lines
+    expect(r.turns.some(t => t.text === undefined)).toBe(false);
+    expect(r.turns.every(t => typeof t.text === 'string')).toBe(true);
+  });
+
+  test('a file with fewer turns than limit returns them all with hasMore=false', () => {
+    const { fileSize, convo, reader } = buildFile(3); // 6 turns
+    const r = scanTurnsBackward(reader, fileSize, { limit: 50 });
+    expect(r.turns.length).toBe(convo);
+    expect(r.hasMore).toBe(false);
+    expect(r.cursor).toBeNull();
+  });
+
+  test('identical results regardless of chunk size (cross-boundary line reconstruction)', () => {
+    const { fileSize, reader } = buildFile(40);
+    const big = scanTurnsBackward(reader, fileSize, { limit: 200, chunkSize: 1 << 20 });
+    for (const cs of [1, 3, 7, 64, 500]) {
+      const small = scanTurnsBackward(reader, fileSize, { limit: 200, chunkSize: cs });
+      expect(small.turns).toEqual(big.turns);
+      expect(small.hasMore).toBe(big.hasMore);
+    }
+  });
+
+  test('before=0 yields an empty page at the file start', () => {
+    const { fileSize, reader } = buildFile(10);
+    const r = scanTurnsBackward(reader, fileSize, { before: 0, limit: 50 });
+    expect(r.turns).toEqual([]);
+    expect(r.hasMore).toBe(false);
+    expect(r.cursor).toBeNull();
+  });
+
+  test('the returned cursor points at the oldest turn on the page (next page continues from there)', () => {
+    const { fileSize, reader } = buildFile(60);
+    const p1 = scanTurnsBackward(reader, fileSize, { limit: 20 });
+    const oldestOnP1 = p1.turns[0];
+    const p2 = scanTurnsBackward(reader, fileSize, { before: decodeCursor(p1.cursor), limit: 20 });
+    // p2's newest turn is strictly older than p1's oldest — no overlap, no gap.
+    expect(p2.turns[p2.turns.length - 1].text).not.toBe(oldestOnP1.text);
+    // Concatenated, p2 then p1 are contiguous in the original order.
+    const merged = p2.turns.concat(p1.turns).map(t => t.text);
+    expect(new Set(merged).size).toBe(merged.length); // no duplicates
   });
 });

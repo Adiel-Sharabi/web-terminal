@@ -12,8 +12,9 @@ const { sanitizeReplay } = require('./lib/replay-sanitize');
 const { execGit, gitSafeArgs, gitSafeEnv } = require('./lib/git-safe');
 const notifyPush = require('./lib/notify-push');
 const transcript = require('./lib/transcript');
+const fcm = require('./lib/fcm');
 
-const SERVER_VERSION = '1.21.0'; // 2026-07-05: ntfy phone pushes now quote Claude's last message (from the session transcript) so you see what Claude said/asked, not just that it wants attention
+const SERVER_VERSION = '1.22.0'; // 2026-07-05: promote Phase 0 (attention/clear/capabilities/FCM push-devices) + G5 transcript endpoint to production — enables companion app FCM, chat lens, structured attention
 
 // --- Optional latency instrumentation (opt-in via WT_LATENCY_DEBUG=1) -----
 // Event-loop lag monitor: interval is 10ms; anything ≥ 50ms slip is a stall.
@@ -151,6 +152,41 @@ function detectClaudeHome() {
 function getClaudeProjectsDir() {
   if (!_claudeHome) _claudeHome = detectClaudeHome();
   return path.join(_claudeHome, '.claude', 'projects');
+}
+// M1: sanitize a hook-supplied transcript_path before we ever trust it. Any hook
+// can set transcript_path, and /attention + the ntfy detail then read + expose
+// that file — so realpath it (resolves symlinks + '..'), then require a .jsonl
+// strictly under the Claude projects root. Anything else returns '' (ignored —
+// never throws into the hook). The pure containment/extension decision lives in
+// lib/transcript.js (isAllowedTranscriptPath) and is unit-tested there.
+function safeTranscriptPath(p) {
+  if (!p || typeof p !== 'string') return '';
+  try {
+    const resolved = fs.realpathSync(p);
+    let root;
+    try { root = fs.realpathSync(getClaudeProjectsDir()); }
+    catch { root = getClaudeProjectsDir(); } // projects root may not exist yet
+    return transcript.isAllowedTranscriptPath(resolved, root) ? resolved : '';
+  } catch { return ''; } // missing file / bad path → ignore
+}
+
+// G5 persistence sub-gap mitigation. _nstate(id).transcriptPath is in-memory, so a
+// server restart loses it until the next hook fires. When a transcript request
+// arrives with no stashed path, derive one from the session's persisted
+// claudeSessionId + cwd (same cwd→project-dir encoding the claude-sessions scanner
+// uses). The candidate is run back through safeTranscriptPath — the identical
+// .jsonl-strictly-under-the-projects-root trust chain — so derivation can never
+// widen what a request may read. Returns '' on any miss (no session, no
+// claudeSessionId yet, file absent, or path rejected).
+async function deriveTranscriptPath(id) {
+  try {
+    const s = await workerClient.rpc('getSession', { id });
+    const csid = s && s.claudeSessionId;
+    const cwd = s && s.cwd;
+    if (!csid || !cwd) return '';
+    const dirName = cwd.replace(/^([A-Z]):\\/, '$1--').replace(/[\\/]/g, '-');
+    return safeTranscriptPath(path.join(getClaudeProjectsDir(), dirName, csid + '.jsonl'));
+  } catch { return ''; }
 }
 const CLUSTER_TOKENS_FILE = path.join(__dirname, 'cluster-tokens.json');
 const CLAUDE_SESSION_NAMES_FILE = path.join(__dirname, 'claude-session-names.json');
@@ -380,33 +416,186 @@ function ntfyConfig() {
 // Tests capture pushes instead of hitting the network.
 const _NTFY_SINK = process.env.WT_NTFY_TEST ? [] : null;
 
-// Send an ntfy push for one session event, gated by that session's level
-// (unless force=true, for the manual test endpoint).
-async function pushNotify(kind, { id, name, reason, force } = {}) {
-  if (!force && !notifyPush.shouldPush(kind, getNotifyLevel(id))) return;
-  const cfg = ntfyConfig();
-  const pub = liveConfig('publicUrl', null);
-  const click = pub ? `${String(pub).replace(/\/+$/, '')}/app/${encodeURIComponent(id)}` : undefined;
-  // Quote Claude's last message (from its transcript) so the push shows *what*
-  // Claude said/asked, not just that it wants attention. Best-effort: '' when
-  // the transcript path is unknown or unreadable, leaving the body unchanged.
-  const detail = transcript.lastAssistantText(_nstate(id).transcriptPath);
-  const msg = notifyPush.buildNtfyMessage(kind, { sessionName: name, serverName: getServerName(), reason, click, detail });
-  if (_NTFY_SINK) { _NTFY_SINK.push({ kind, id, ...msg }); return; }
-  if (!cfg) return;
+// --- FCM transport + device registry (G1/G2) ------------------------------
+// Content-free data-only wake messages (see COMPANION-APP-DESIGN.md). The pure
+// message/JWT/token-cache logic lives in lib/fcm.js; server.js owns the registry
+// file, the service-account read, and the fire-and-forget dispatch.
+const PUSH_DEVICES_FILE = path.join(__dirname, 'push-devices.json');
+// Tests capture FCM sends instead of hitting the network.
+const _FCM_SINK = process.env.WT_FCM_TEST ? [] : null;
+
+// Which transport(s) to use. BACK-COMPAT: absent `push` config (and no env
+// override) behaves EXACTLY as today — ntfy only, from the `ntfy` config key.
+// 'fcm' disables ntfy; 'both' sends both. WT_PUSH_PROVIDER overrides (tests).
+// Precedence/validation is pure logic in lib/fcm.js (unit-tested); this is the
+// thin I/O wrapper that reads env + live config.
+function pushProvider() {
+  const p = liveConfig('push', null);
+  return fcm.resolvePushProvider({ env: process.env.WT_PUSH_PROVIDER, configProvider: p && p.provider });
+}
+
+// Gitignored device registry: [{token, deviceName, platform, registeredAt}].
+// Same cache-with-TTL pattern as loadApiTokens/loadNotifyPrefs.
+let _pushDevicesCache = null, _pushDevicesTime = 0;
+function loadPushDevices() {
+  if (!_pushDevicesCache || Date.now() - _pushDevicesTime > LIVE_CONFIG_TTL) {
+    try {
+      _pushDevicesCache = fs.existsSync(PUSH_DEVICES_FILE) ? JSON.parse(fs.readFileSync(PUSH_DEVICES_FILE, 'utf8')) : [];
+      if (!Array.isArray(_pushDevicesCache)) _pushDevicesCache = [];
+    } catch { _pushDevicesCache = []; }
+    _pushDevicesTime = Date.now();
+  }
+  return _pushDevicesCache;
+}
+function savePushDevices(devices) {
+  fs.writeFileSync(PUSH_DEVICES_FILE, JSON.stringify(devices, null, 2), 'utf8');
+  _pushDevicesCache = devices; _pushDevicesTime = Date.now();
+}
+function pruneDevice(token) {
+  const devices = loadPushDevices();
+  const idx = devices.findIndex(d => d.token === token);
+  if (idx !== -1) { devices.splice(idx, 1); try { savePushDevices(devices); } catch {} }
+}
+
+// FCM is "configured" when a service account is set (production) OR the test sink
+// is active. Drives the 'fcm' capability flag and lazy client creation.
+// Capability honesty (code-review #6): this advertises that FCM is *configured*,
+// not that the client is live-healthy. We deliberately do NOT flip it off on a
+// service-account load failure — getFcmClient() now backs off and re-attempts the
+// build (self-healing within CLIENT_BUILD_BACKOFF_MS) instead of latching dead, so
+// a transient failure is at most a ~60s window, and flapping the capability on
+// transient I/O would be noisier and less truthful than "config present".
+function fcmConfigured() {
+  if (_FCM_SINK) return true;
+  const p = liveConfig('push', null);
+  return !!(p && p.fcm && p.fcm.serviceAccountPath);
+}
+// Lazily load the service account (absolute path, outside the repo) and build a
+// client. Cached on success. A load failure does NOT latch FCM dead until the
+// next restart: it records an "errored until" deadline and backs off for
+// CLIENT_BUILD_BACKOFF_MS (mirrors the token-exchange negative cache), then
+// re-attempts — so a transiently locked / half-written SA file self-heals.
+// Key material is never logged (F4: fixed string + e.code/e.name only; a
+// JSON.parse SyntaxError message can echo file-content snippets). Returns null in
+// sink mode (server captures directly).
+let _fcmClient = null, _fcmClientErrUntil = 0;
+function getFcmClient() {
+  if (_FCM_SINK) return null;
+  if (_fcmClient) return _fcmClient;
+  const p = liveConfig('push', null);
+  const saPath = p && p.fcm && p.fcm.serviceAccountPath;
+  if (!saPath) return null;
+  // Still inside the post-failure backoff window → don't re-attempt the load yet.
+  if (!fcm.shouldRetryClientBuild(_fcmClientErrUntil, Date.now())) return null;
   try {
-    await fetch(cfg.server, {
-      method: 'POST', headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({ topic: cfg.topic, title: msg.title, message: msg.message, priority: msg.priority, tags: msg.tags, click: msg.click }),
+    const sa = JSON.parse(fs.readFileSync(saPath, 'utf8'));
+    _fcmClient = fcm.createFcmClient({ serviceAccount: sa });
+    _fcmClientErrUntil = 0; // clear any prior backoff on success
+    return _fcmClient;
+  } catch (e) {
+    _fcmClientErrUntil = Date.now() + fcm.CLIENT_BUILD_BACKOFF_MS; // retry after backoff
+    console.error('FCM service account load failed:', e.code || e.name); // never e.message (may embed key material)
+    return null;
+  }
+}
+
+// Fire a content-free FCM wake to every registered device for one session event.
+// Fire-and-forget: never throws into pushNotify. Prunes tokens FCM reports dead.
+async function fcmDispatch(kind, { id, click }) {
+  if (!fcm.providerSendsFcm(pushProvider())) return;
+  const devices = loadPushDevices();
+  if (!devices.length) return;
+  const ts = Date.now();
+  const client = getFcmClient(); // null in sink mode
+  for (const dev of devices.slice()) {
+    const body = fcm.buildFcmMessage(kind, {
+      serverName: getServerName(), sessionId: id, ts, deepLink: click || '', token: dev.token,
     });
-  } catch (e) { console.error('ntfy push failed:', e.message); }
+    if (_FCM_SINK) { _FCM_SINK.push({ token: dev.token, ...body.message }); continue; }
+    if (!client) continue;
+    try {
+      const r = await client.send(body);
+      if (!r.ok && fcm.shouldPruneOnError(r.errorCode)) pruneDevice(dev.token);
+    } catch (e) { console.error('FCM send failed:', e.message); }
+  }
+}
+
+// Deep-link click URL for a session, or undefined when no publicUrl is set.
+// Shared by the ntfy push, the FCM wake, and the G3 'clear' path.
+function sessionClickUrl(id) {
+  const pub = liveConfig('publicUrl', null);
+  return pub ? `${String(pub).replace(/\/+$/, '')}/app/${encodeURIComponent(id)}` : undefined;
+}
+
+// Send a push for one session event, gated by that session's level (unless
+// force=true, for the manual test endpoint). The attention record is written
+// UNCONDITIONALLY (before the gate) — only the actual push delivery is gated.
+async function pushNotify(kind, { id, name, reason, force } = {}) {
+  // G3 clear: a resolution, not a fresh alert. Handled BEFORE the level gate so
+  // it works even for a session set to 'off' (there may be a delivered
+  // notification to dismiss). Flip the recorded attention to cleared so
+  // GET /api/sessions/:id/attention reflects it (and a companion app can stop
+  // nagging). ntfy can't recall a delivered push, so there's nothing to send on
+  // that transport; FCM uses the collapse_key'd 'clear' to auto-dismiss. Never
+  // records a new 'clear' attention.
+  if (kind === 'clear') {
+    const att = _nstate(id).lastAttention;
+    if (att) att.cleared = true;
+    // FCM: a real dismissal — the collapse_key'd 'clear' supersedes the earlier
+    // push on the device. No-op for ntfy (can't recall). fcmDispatch self-gates
+    // on the provider. Fire-and-forget.
+    fcmDispatch('clear', { id, click: sessionClickUrl(id) })
+      .catch(e => console.error('FCM clear dispatch failed:', e.message));
+    return;
+  }
+  // Record what needs attention so a companion app / voice layer can pull the
+  // real content privately over the LAN via GET /api/sessions/:id/attention,
+  // rather than trusting it to the push relay. Recorded UNCONDITIONALLY — a muted
+  // ('off') session, or an 'idle' below the 'important' threshold, still needs
+  // its state queryable even though no push is sent. cleared flips true once the
+  // state resolves (see the statusChanged / apiError handlers, G3).
+  _nstate(id).lastAttention = notifyPush.makeAttention(kind, { reason, name });
+  // Level gate: below-threshold / muted sessions record attention but send nothing.
+  if (!force && !notifyPush.shouldPush(kind, getNotifyLevel(id))) return;
+
+  const provider = pushProvider();
+  const click = sessionClickUrl(id);
+  // ntfy (a plain HTTPS POST): build + send only when this provider sends ntfy —
+  // in fcm-only mode we skip the config read, the transcript read, and the
+  // message build entirely.
+  if (fcm.providerSendsNtfy(provider)) {
+    const cfg = ntfyConfig();
+    // Quote Claude's last message (from its transcript) so the push shows *what*
+    // Claude said/asked. Set ntfy.includeContent=false to keep sensitive content
+    // OFF the push relay (e.g. public ntfy.sh) — a companion app then fetches it
+    // over the private network via /attention instead. Default (true) keeps
+    // today's behavior. NOTE: this feeds ONLY the ntfy detail; /attention does
+    // its own independent transcript read, so that path is unaffected here.
+    const includeContent = (liveConfig('ntfy', {}) || {}).includeContent !== false;
+    const detail = includeContent ? transcript.lastAssistantText(_nstate(id).transcriptPath) : '';
+    const msg = notifyPush.buildNtfyMessage(kind, { sessionName: name, serverName: getServerName(), reason, click, detail });
+    if (_NTFY_SINK) { _NTFY_SINK.push({ kind, id, ...msg }); }
+    else if (cfg) {
+      try {
+        await fetch(cfg.server, {
+          method: 'POST', headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({ topic: cfg.topic, title: msg.title, message: msg.message, priority: msg.priority, tags: msg.tags, click: msg.click }),
+        });
+      } catch (e) { console.error('ntfy push failed:', e.message); }
+    }
+  }
+  // FCM: content-free wake to every registered device (fire-and-forget). Gated
+  // here so fcm-absent (ntfy-only) mode skips the device load + async hop.
+  if (fcm.providerSendsFcm(provider)) {
+    fcmDispatch(kind, { id, click }).catch(e => console.error('FCM dispatch failed:', e.message));
+  }
 }
 
 // Anti-flood timers per session. Approval pushes immediately (debounced); an
 // API error only pushes if it hasn't cleared ~25s later (so quick auto-recovery
 // blips stay silent); idle only pushes if it stays idle ~2 min (settled), and
 // only when the session is on the "all" level.
-const _notifyState = new Map(); // id -> { idleTimer, apiErrTimer, apiErrCooldownUntil, lastApprovalAt }
+const _notifyState = new Map(); // id -> { idleTimer, apiErrTimer, apiErrCooldownUntil, lastApprovalAt, lastAttention, transcriptPath }
 const _NOTIFY_IDLE_MS = process.env.WT_NOTIFY_FAST ? 300 : 120000;
 const _NOTIFY_APIERR_MS = process.env.WT_NOTIFY_FAST ? 200 : 25000;
 const _NOTIFY_APPROVAL_DEBOUNCE_MS = 60000;
@@ -418,6 +607,14 @@ workerClient.on('statusChanged', ({ id, status, notifyType, notifyMsg }) => {
   if (status && status !== 'idle') {
     const st = _notifyState.get(id);
     if (st && st.idleTimer) { clearTimeout(st.idleTimer); st.idleTimer = null; }
+  }
+  // G3: an approval resolves when the session moves off 'waiting'. Flip the
+  // recorded attention to cleared and emit a 'clear' push so a companion app can
+  // auto-dismiss the approval notification. Placed before the early-return path
+  // below since the resolving status change usually carries no notifyType.
+  {
+    const att = _notifyState.get(id)?.lastAttention;
+    if (notifyPush.statusClearsApproval(status, att)) pushNotify('clear', { id, name: att.name });
   }
   // Fan out to notifyClients (browser notify WS subscribers)
   // sessionName is retrieved lazily via session list RPC? Instead, pull name from
@@ -480,6 +677,10 @@ workerClient.on('apiError', ({ id, name, apiError, text, transient, cleared, aut
     const st = _nstate(id);
     if (cleared) {
       if (st.apiErrTimer) { clearTimeout(st.apiErrTimer); st.apiErrTimer = null; }
+      // G3: a stuck API error that already pushed and has now recovered resolves
+      // the attention — emit a 'clear' so the companion app can auto-dismiss it.
+      const att = st.lastAttention;
+      if (notifyPush.apiRecoveryClearsError(att)) pushNotify('clear', { id, name: att.name });
     } else if (isInitialDetect) {
       const now = Date.now();
       if (!st.apiErrTimer && (!st.apiErrCooldownUntil || now > st.apiErrCooldownUntil)) {
@@ -992,9 +1193,12 @@ async function processHookEvent(id, rawEvent, claudeSessionId, body) {
   // Remember where this session's Claude transcript lives so a later push can
   // quote its last message. Every http-hook payload carries transcript_path;
   // stash it before any early return. Cleaned up on sessionExited with the rest
-  // of the notify-state.
+  // of the notify-state. M1: validate it (realpath'd .jsonl under the Claude
+  // projects root) before trusting it — an unvalidated path would let a hook
+  // steer /attention + the ntfy detail at any file on disk.
   if (body && typeof body.transcript_path === 'string' && body.transcript_path) {
-    _nstate(id).transcriptPath = body.transcript_path;
+    const safe = safeTranscriptPath(body.transcript_path);
+    if (safe) _nstate(id).transcriptPath = safe;
   }
 
   let event = rawEvent;
@@ -2142,6 +2346,13 @@ function clusterFetch(url, opts = {}) {
 // event loop for up to 5s under network trouble.
 app.get('/api/version', (req, res) => {
   const info = _getGitInfo();
+  // G8: features this server implements, so the companion app can gate per
+  // server during a rolling upgrade (never assume a homogeneous fleet). The
+  // device registry is always available; 'fcm' is advertised only when a
+  // service account is configured (or the test sink is active) — a server with
+  // no FCM key can still take registrations but won't send FCM.
+  const capabilities = ['attention', 'clear', 'push-devices', 'transcript'];
+  if (fcmConfigured()) capabilities.push('fcm');
   res.json({
     version: SERVER_VERSION,
     hash: info.hash,
@@ -2149,6 +2360,7 @@ app.get('/api/version', (req, res) => {
     behind: info.behind,
     dirty: info.dirty,
     serverName: getServerName(),
+    capabilities,
   });
 });
 
@@ -2378,6 +2590,86 @@ app.patch('/api/sessions/:id/notify-level', express.json({ limit: '1kb' }), (req
   }
   res.json({ id: req.params.id, level: setNotifyLevel(req.params.id, level) });
 });
+// Structured "what needs my attention" for one session: the last recorded
+// attention event (kind/reason) plus Claude's freshly-read last message. Lets a
+// companion app or voice layer pull the real content over the private network,
+// so the push relay can stay content-free (ntfy.includeContent=false). Behind
+// the same auth as the other session routes; never cached.
+app.get('/api/sessions/:id/attention', (req, res) => {
+  res.set('Cache-Control', 'no-store');
+  const st = _notifyState.get(req.params.id) || {};
+  res.json(notifyPush.buildAttentionResponse({
+    id: req.params.id,
+    serverName: getServerName(),
+    lastAttention: st.lastAttention,
+    lastMessage: transcript.lastAssistantText(st.transcriptPath),
+  }));
+});
+// --- G5: structured transcript for the companion chat view ---
+// GET /api/sessions/:id/transcript?before=<cursor>&limit=<n>
+// Returns the session's Claude conversation as typed turns (newest-LAST), paged
+// BACKWARD: no `before` → the last `limit` turns (default 50, cap 200); a
+// `before=<cursor>` → the `limit` turns preceding that opaque cursor (base64 of a
+// line-start byte offset). Response: { messages, cursor, hasMore }; cursor is null
+// once the file start is reached. The parser lives SERVER-side (lib/transcript.js)
+// so JSONL schema drift is a server fix, not an app release. Serves full Claude
+// content, so: behind the same /api auth middleware as every session route; the
+// file path comes ONLY from the validated stash (or a re-validated derivation),
+// never from the request; Cache-Control: no-store. Reads only the chunks a page
+// needs — a tens-of-MB transcript costs a few 256KB reads, not a full-file load.
+app.get('/api/sessions/:id/transcript', async (req, res) => {
+  res.set('Cache-Control', 'no-store');
+  const id = req.params.id;
+
+  // Validate `limit`: positive integer, capped at 200 (the parser caps too).
+  let limit = transcript.DEFAULT_PAGE;
+  if (req.query.limit != null && req.query.limit !== '') {
+    const n = Number(req.query.limit);
+    if (!Number.isInteger(n) || n < 1) return res.status(400).json({ error: 'limit must be a positive integer' });
+    limit = Math.min(transcript.MAX_PAGE, n);
+  }
+
+  // Validate `before`: opaque cursor → non-negative byte offset. Garbage → 400.
+  let before = null;
+  if (req.query.before != null && req.query.before !== '') {
+    before = transcript.decodeCursor(String(req.query.before));
+    if (before == null) return res.status(400).json({ error: 'invalid cursor' });
+  }
+
+  // Resolve the transcript path: the in-memory stash (set + validated by the
+  // http-hook) first, then a validated derivation if the stash is empty.
+  let tpath = (_notifyState.get(id) || {}).transcriptPath || '';
+  if (!tpath) {
+    tpath = await deriveTranscriptPath(id);
+    if (tpath) _nstate(id).transcriptPath = tpath; // stash so later pages skip derivation
+  }
+  if (!tpath) return res.status(404).json({ error: 'no transcript for session' });
+
+  let fd;
+  try {
+    const size = fs.statSync(tpath).size;
+    // A stale cursor past EOF just reads the tail rather than erroring.
+    if (before != null && before > size) before = size;
+    fd = fs.openSync(tpath, 'r');
+    const readChunk = (off, len) => {
+      const buf = Buffer.alloc(len);
+      let read = 0;
+      while (read < len) {
+        const n = fs.readSync(fd, buf, read, len - read, off + read);
+        if (n <= 0) break;
+        read += n;
+      }
+      return read === len ? buf : buf.slice(0, read);
+    };
+    const { turns, cursor, hasMore } = transcript.scanTurnsBackward(readChunk, size, { before, limit });
+    res.json({ messages: turns, cursor, hasMore });
+  } catch (e) {
+    console.error(`GET /api/sessions/${id}/transcript failed: ${e.message}`);
+    res.status(500).json({ error: 'Failed to read transcript' });
+  } finally {
+    if (fd !== undefined) { try { fs.closeSync(fd); } catch {} }
+  }
+});
 // Manual verification: fire a sample push (force past the level gate). Returns
 // whether ntfy is configured so the UI can tell you if setup is missing.
 app.post('/api/notify-test', express.json({ limit: '1kb' }), async (req, res) => {
@@ -2385,6 +2677,72 @@ app.post('/api/notify-test', express.json({ limit: '1kb' }), async (req, res) =>
   await pushNotify('approval', { id: 'notify-test', name, reason: 'ntfy test — if you see this on your phone, it works ✅', force: true });
   res.json({ ok: true, configured: !!ntfyConfig() });
 });
+
+// --- API: FCM device registry (G1) ---
+// The companion app POSTs its FCM token here on startup / onNewToken / foreground
+// / network-regain (to every server). Behind the same auth as other API routes.
+// Registry file is gitignored; tokens are semi-sensitive and never echoed in full.
+app.post('/api/push/devices', express.json({ limit: '8kb' }), (req, res) => {
+  // Validation/normalization is pure logic in lib/fcm.js (unit-tested).
+  const v = fcm.normalizeDeviceRegistration(req.body || {});
+  if (!v.ok) return res.status(400).json({ error: v.error });
+  const { token, deviceName, platform } = v.device;
+  const devices = loadPushDevices();
+  const existing = devices.find(d => d.token === token);
+  // Cap the registry so a runaway client can't grow it without bound. Upsert of
+  // an existing token is always allowed; a NEW token is refused at the cap.
+  if (!fcm.canRegisterDevice(devices.length, !!existing)) {
+    return res.status(400).json({ error: `device registry full (max ${fcm.MAX_DEVICES})` });
+  }
+  if (existing) {
+    // Upsert by token: keep the original registeredAt, refresh name/platform.
+    existing.deviceName = deviceName;
+    existing.platform = platform;
+  } else {
+    devices.push({ token, deviceName, platform, registeredAt: Date.now() });
+  }
+  savePushDevices(devices);
+  res.json({ ok: true, count: devices.length });
+});
+app.delete('/api/push/devices/:token', (req, res) => {
+  const token = req.params.token;
+  const devices = loadPushDevices();
+  const idx = devices.findIndex(d => d.token === token);
+  if (idx === -1) return res.status(404).json({ error: 'device not found' });
+  devices.splice(idx, 1);
+  savePushDevices(devices);
+  res.json({ ok: true, count: devices.length });
+});
+app.get('/api/push/devices', (req, res) => {
+  res.json(loadPushDevices().map(d => ({
+    token: fcm.truncateToken(d.token), // display only — never the full token
+    deviceName: d.deviceName || '',
+    platform: d.platform || 'android',
+    registeredAt: d.registeredAt || null,
+  })));
+});
+
+// Test-only: drain the FCM sink (captured sends). Registered only under
+// WT_FCM_TEST so it can never exist in production. Behind auth (declared here,
+// after the auth middleware). Reading clears the sink.
+if (process.env.WT_FCM_TEST) {
+  app.get('/api/push/test-sink', (req, res) => {
+    const items = _FCM_SINK.slice();
+    _FCM_SINK.length = 0;
+    res.json({ items });
+  });
+}
+// Test-only: drain the ntfy sink (captured ntfy publishes). Registered only under
+// WT_NTFY_TEST. Lets an integration test inspect the exact ntfy message body
+// (e.g. that includeContent=false omits Claude's content). Behind auth; reading
+// clears the sink.
+if (process.env.WT_NTFY_TEST) {
+  app.get('/api/push/ntfy-test-sink', (req, res) => {
+    const items = _NTFY_SINK.slice();
+    _NTFY_SINK.length = 0;
+    res.json({ items });
+  });
+}
 
 // --- API: reorder sessions ---
 // Body: { orderedIds: string[] } — applied as the new in-memory + on-disk order.

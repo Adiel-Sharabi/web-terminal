@@ -1,8 +1,9 @@
 // @ts-check
 const { test, expect, request: pwRequest } = require('@playwright/test');
 const fs = require('fs');
+const os = require('os');
 const path = require('path');
-const { BASE, AUTH, authCtx, noAuthCtx, loginPage } = require('./test-helpers');
+const { BASE, AUTH, authCtx, noAuthCtx, loginPage, readHookToken } = require('./test-helpers');
 
 const CLAUDE_NAMES_FILE = path.join(__dirname, '..', 'claude-session-names.json');
 function readClaudeNames() {
@@ -643,6 +644,17 @@ test.describe('/api/version', () => {
     await ctx.dispose();
   });
 
+  // G8: capabilities let the companion app feature-gate per server during a
+  // rolling upgrade (never assume a homogeneous fleet).
+  test('reports a capabilities array advertising the attention/clear features', async () => {
+    const ctx = await authCtx();
+    const data = await (await ctx.get('/api/version')).json();
+    expect(Array.isArray(data.capabilities)).toBe(true);
+    expect(data.capabilities).toContain('attention');
+    expect(data.capabilities).toContain('clear');
+    await ctx.dispose();
+  });
+
   // Regression: /api/version used to call execSync('git rev-parse'), execSync
   // ('git log -1'), execSync('git fetch --dry-run', timeout=5s), execSync
   // ('git rev-list'), and execSync('git status') on the request path. With
@@ -856,6 +868,203 @@ test.describe('Session Hook', () => {
     await ctx.delete(`${BASE}/api/sessions/${id}`);
     await ctx.dispose();
     await raw.dispose();
+  });
+});
+
+// ============================================================
+// 7b. GET /api/sessions/:id/attention  (companion "what needs my attention")
+// ============================================================
+
+test.describe('Session attention', () => {
+  // safeTranscriptPath() (M1) only trusts a .jsonl strictly under the realpath'd
+  // Claude projects root (<claudeHome>/.claude/projects). Mirror server.js
+  // detectClaudeHome() so "accepted" fixtures land under that ONE trusted root;
+  // "rejected" fixtures go to os.tmpdir() (outside it) or carry a wrong extension.
+  function claudeProjectsRoot() {
+    let home = '';
+    try {
+      const cfg = JSON.parse(fs.readFileSync(path.join(__dirname, '..', 'config.json'), 'utf8'));
+      if (cfg && cfg.claudeHome) home = String(cfg.claudeHome);
+    } catch {}
+    if (!home) home = process.env.USERPROFILE || os.homedir();
+    return path.join(home, '.claude', 'projects');
+  }
+  // Our own scratch subdir under the trusted root — created lazily, removed whole
+  // in afterAll (we only ever delete this subtree, never the projects root).
+  const FIXTURE_DIR = path.join(claudeProjectsRoot(), '__wt-test-fixture__');
+  let _n = 0;
+  // Write a JSONL transcript UNDER the trusted root → safeTranscriptPath accepts it.
+  function writeTranscript(lines, ext = '.jsonl') {
+    fs.mkdirSync(FIXTURE_DIR, { recursive: true });
+    const p = path.join(FIXTURE_DIR, `wt_att_${process.pid}_${++_n}${ext}`);
+    fs.writeFileSync(p, lines.map(l => JSON.stringify(l)).join('\n') + '\n', 'utf8');
+    return p;
+  }
+  // Write the same content OUTSIDE the trusted root (os.tmpdir) → must be rejected.
+  function writeTranscriptOutsideRoot(lines) {
+    const p = path.join(os.tmpdir(), `wt_att_out_${process.pid}_${++_n}.jsonl`);
+    fs.writeFileSync(p, lines.map(l => JSON.stringify(l)).join('\n') + '\n', 'utf8');
+    return p;
+  }
+  test.afterAll(() => { try { fs.rmSync(FIXTURE_DIR, { recursive: true, force: true }); } catch {} });
+  // POST a hook event for a session via the X-WT-Session-ID header path.
+  function hookCtx() {
+    return pwRequest.newContext({
+      baseURL: BASE,
+      extraHTTPHeaders: { 'X-WT-Hook-Token': readHookToken() },
+    });
+  }
+
+  test('requires authentication', async () => {
+    const ctx = await noAuthCtx();
+    const res = await ctx.get('/api/sessions/whatever/attention');
+    expect(res.status()).toBe(401);
+    await ctx.dispose();
+  });
+
+  test('empty state: nulls, no-store, still names the server', async () => {
+    const ctx = await authCtx();
+    const created = (await (await ctx.post('/api/sessions', { data: { name: 'Att Empty' } })).json()).id;
+    try {
+      const res = await ctx.get(`/api/sessions/${created}/attention`);
+      expect(res.status()).toBe(200);
+      // Never cached — the companion always pulls fresh content on wake.
+      expect(res.headers()['cache-control']).toBe('no-store');
+      const body = await res.json();
+      expect(body.id).toBe(created);
+      expect(body.serverName).toBeTruthy();     // server identity is always present
+      expect(body.kind).toBeNull();             // nothing has needed attention yet
+      expect(body.reason).toBeNull();
+      expect(body.name).toBeNull();
+      expect(body.at).toBeNull();
+      expect(body.cleared).toBeNull();
+      expect(body.lastMessage).toBe('');        // no transcript stashed yet
+    } finally {
+      await ctx.delete(`/api/sessions/${created}`);
+      await ctx.dispose();
+    }
+  });
+
+  test('stashing a transcript path via a hook surfaces Claude\'s last message', async () => {
+    const ctx = await authCtx();
+    const raw = await hookCtx();
+    const created = (await (await ctx.post('/api/sessions', { data: { name: 'Att Msg' } })).json()).id;
+    const fixture = writeTranscript([
+      { type: 'user', message: { role: 'user', content: [{ type: 'text', text: 'do it' }] } },
+      { type: 'assistant', message: { role: 'assistant', content: [{ type: 'text', text: 'All done — 23 tests pass.' }] } },
+    ]);
+    try {
+      // Every http-hook payload carries transcript_path; server stashes it so a
+      // later /attention read can quote Claude's last message over the LAN.
+      const hr = await raw.post('/api/hook', {
+        headers: { 'X-WT-Session-ID': created },
+        data: { hook_event_name: 'UserPromptSubmit', transcript_path: fixture, prompt: 'do it' },
+      });
+      expect(hr.status()).toBe(200);
+
+      const body = await (await ctx.get(`/api/sessions/${created}/attention`)).json();
+      expect(body.lastMessage).toBe('All done — 23 tests pass.');
+    } finally {
+      try { fs.unlinkSync(fixture); } catch {}
+      await ctx.delete(`/api/sessions/${created}`);
+      await ctx.dispose();
+      await raw.dispose();
+    }
+  });
+
+  // M1 rejection (a): a transcript_path OUTSIDE the trusted root is silently
+  // ignored — the hook still succeeds, but /attention exposes no message. Proves
+  // safeTranscriptPath can't be steered at an arbitrary file elsewhere on disk.
+  test('a transcript path outside the Claude projects root is rejected (lastMessage stays empty)', async () => {
+    const ctx = await authCtx();
+    const raw = await hookCtx();
+    const created = (await (await ctx.post('/api/sessions', { data: { name: 'Att Outside' } })).json()).id;
+    const fixture = writeTranscriptOutsideRoot([
+      { type: 'assistant', message: { role: 'assistant', content: [{ type: 'text', text: 'secret from outside the root' }] } },
+    ]);
+    try {
+      const hr = await raw.post('/api/hook', {
+        headers: { 'X-WT-Session-ID': created },
+        data: { hook_event_name: 'UserPromptSubmit', transcript_path: fixture, prompt: 'do it' },
+      });
+      expect(hr.status()).toBe(200); // hook accepted; the path is just not trusted
+      const body = await (await ctx.get(`/api/sessions/${created}/attention`)).json();
+      expect(body.lastMessage).toBe(''); // rejected → nothing stashed → nothing surfaced
+    } finally {
+      try { fs.unlinkSync(fixture); } catch {}
+      await ctx.delete(`/api/sessions/${created}`);
+      await ctx.dispose();
+      await raw.dispose();
+    }
+  });
+
+  // M1 rejection (b): a file UNDER the trusted root but WITHOUT a .jsonl extension
+  // is rejected by the extension gate, even though its content is a valid transcript.
+  test('a non-.jsonl file under the root is rejected (lastMessage stays empty)', async () => {
+    const ctx = await authCtx();
+    const raw = await hookCtx();
+    const created = (await (await ctx.post('/api/sessions', { data: { name: 'Att BadExt' } })).json()).id;
+    const fixture = writeTranscript([
+      { type: 'assistant', message: { role: 'assistant', content: [{ type: 'text', text: 'valid content, wrong extension' }] } },
+    ], '.txt');
+    try {
+      const hr = await raw.post('/api/hook', {
+        headers: { 'X-WT-Session-ID': created },
+        data: { hook_event_name: 'UserPromptSubmit', transcript_path: fixture, prompt: 'do it' },
+      });
+      expect(hr.status()).toBe(200);
+      const body = await (await ctx.get(`/api/sessions/${created}/attention`)).json();
+      expect(body.lastMessage).toBe(''); // extension gate rejected it
+    } finally {
+      try { fs.unlinkSync(fixture); } catch {}
+      await ctx.delete(`/api/sessions/${created}`);
+      await ctx.dispose();
+      await raw.dispose();
+    }
+  });
+
+  // W1 recording + W2 (G3) clear: an approval is recorded as attention, then
+  // flips to cleared:true once the session moves off 'waiting'.
+  test('records an approval, then G3 clears it when the session leaves waiting', async () => {
+    const ctx = await authCtx();
+    const raw = await hookCtx();
+    const created = (await (await ctx.post('/api/sessions', { data: { name: 'Att Approval' } })).json()).id;
+    try {
+      // Notification carrying permission prose → synthesized PermissionRequest →
+      // worker status 'waiting' + approval_needed → server records attention.
+      const hr = await raw.post('/api/hook', {
+        headers: { 'X-WT-Session-ID': created },
+        data: { hook_event_name: 'Notification', message: 'Claude needs your permission to run a command' },
+      });
+      expect(hr.status()).toBe(200);
+
+      // The statusChanged → pushNotify hop is async over IPC; poll for it.
+      await expect.poll(async () =>
+        (await (await ctx.get(`/api/sessions/${created}/attention`)).json()).kind
+      ).toBe('approval');
+      const recorded = await (await ctx.get(`/api/sessions/${created}/attention`)).json();
+      expect(recorded.reason).toContain('approval');
+      expect(recorded.cleared).toBe(false); // freshly recorded, not yet resolved
+      expect(typeof recorded.at).toBe('number');
+
+      // The user answers → UserPromptSubmit → status 'working' → G3 clear fires.
+      const hr2 = await raw.post('/api/hook', {
+        headers: { 'X-WT-Session-ID': created },
+        data: { hook_event_name: 'UserPromptSubmit', prompt: 'yes go ahead' },
+      });
+      expect(hr2.status()).toBe(200);
+
+      await expect.poll(async () =>
+        (await (await ctx.get(`/api/sessions/${created}/attention`)).json()).cleared
+      ).toBe(true);
+      // The recorded attention is unchanged apart from the cleared flag.
+      const cleared = await (await ctx.get(`/api/sessions/${created}/attention`)).json();
+      expect(cleared.kind).toBe('approval');
+    } finally {
+      await ctx.delete(`/api/sessions/${created}`);
+      await ctx.dispose();
+      await raw.dispose();
+    }
   });
 });
 
