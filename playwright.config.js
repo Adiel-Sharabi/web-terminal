@@ -41,6 +41,10 @@ module.exports = defineConfig({
       // Shorten the hook-event idle debounce so tests don't wait 750ms per
       // debounce assertion. server.js reads this on startup.
       WT_HOOK_STOP_DEBOUNCE_MS: '200',
+      // G2 FCM transport: capture sends to an in-memory sink (no network) and
+      // drive the FCM path alongside ntfy so integration tests exercise it.
+      WT_FCM_TEST: '1',
+      WT_PUSH_PROVIDER: 'both',
     },
     reuseExistingServer: false,
     timeout: 30000,

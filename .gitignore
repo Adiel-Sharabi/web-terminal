@@ -49,3 +49,6 @@ sessions.test.json
 
 # Per-session push notification levels (ntfy)
 notify-prefs.json
+
+# FCM device registry (companion app push tokens — semi-sensitive)
+push-devices.json
