@@ -36,6 +36,20 @@ test.describe('notify-push pure logic', () => {
     expect(np.buildNtfyMessage('approval', { sessionName: 'Solo' }).title).toBe('Solo');
   });
 
+  test('detail (Claude\'s last message) is appended as a second block', () => {
+    const last = 'Fixed the drone timeout and all 23 tests pass. Want me to commit?';
+    // idle: generic line, then Claude's actual last words.
+    const idle = np.buildNtfyMessage('idle', { sessionName: 'S', serverName: 'Home', detail: last });
+    expect(idle.message).toBe(`Claude is done, waiting for input\n\n${last}`);
+    // approval keeps its reason and appends the detail.
+    const appr = np.buildNtfyMessage('approval', { sessionName: 'S', reason: 'Claude needs your approval', detail: last });
+    expect(appr.message).toBe(`Claude needs your approval\n\n${last}`);
+    // No detail → body is unchanged (backward compatible).
+    expect(np.buildNtfyMessage('idle', { sessionName: 'S' }).message).toBe('Claude is done, waiting for input');
+    // Empty-string detail is treated as "no detail".
+    expect(np.buildNtfyMessage('idle', { sessionName: 'S', detail: '' }).message).toBe('Claude is done, waiting for input');
+  });
+
   test('splitNotifyMsg extracts name + reason from the worker message', () => {
     expect(np.splitNotifyMsg('"DroneLocator" — Claude needs your approval'))
       .toEqual({ name: 'DroneLocator', reason: 'Claude needs your approval' });

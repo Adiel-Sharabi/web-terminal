@@ -11,8 +11,9 @@ const { mintDirectToken, verifyDirectToken } = require('./lib/cluster-token');
 const { sanitizeReplay } = require('./lib/replay-sanitize');
 const { execGit, gitSafeArgs, gitSafeEnv } = require('./lib/git-safe');
 const notifyPush = require('./lib/notify-push');
+const transcript = require('./lib/transcript');
 
-const SERVER_VERSION = '1.20.0'; // 2026-07-05: New Session folder list is a live per-server filesystem scan on every open — no history/memory, no cache (Cache-Control: no-store)
+const SERVER_VERSION = '1.21.0'; // 2026-07-05: ntfy phone pushes now quote Claude's last message (from the session transcript) so you see what Claude said/asked, not just that it wants attention
 
 // --- Optional latency instrumentation (opt-in via WT_LATENCY_DEBUG=1) -----
 // Event-loop lag monitor: interval is 10ms; anything ≥ 50ms slip is a stall.
@@ -386,7 +387,11 @@ async function pushNotify(kind, { id, name, reason, force } = {}) {
   const cfg = ntfyConfig();
   const pub = liveConfig('publicUrl', null);
   const click = pub ? `${String(pub).replace(/\/+$/, '')}/app/${encodeURIComponent(id)}` : undefined;
-  const msg = notifyPush.buildNtfyMessage(kind, { sessionName: name, serverName: getServerName(), reason, click });
+  // Quote Claude's last message (from its transcript) so the push shows *what*
+  // Claude said/asked, not just that it wants attention. Best-effort: '' when
+  // the transcript path is unknown or unreadable, leaving the body unchanged.
+  const detail = transcript.lastAssistantText(_nstate(id).transcriptPath);
+  const msg = notifyPush.buildNtfyMessage(kind, { sessionName: name, serverName: getServerName(), reason, click, detail });
   if (_NTFY_SINK) { _NTFY_SINK.push({ kind, id, ...msg }); return; }
   if (!cfg) return;
   try {
@@ -983,6 +988,14 @@ async function processHookEvent(id, rawEvent, claudeSessionId, body) {
 
   const state = _hookGetState(id);
   const seq = ++_hookSeqCounter;
+
+  // Remember where this session's Claude transcript lives so a later push can
+  // quote its last message. Every http-hook payload carries transcript_path;
+  // stash it before any early return. Cleaned up on sessionExited with the rest
+  // of the notify-state.
+  if (body && typeof body.transcript_path === 'string' && body.transcript_path) {
+    _nstate(id).transcriptPath = body.transcript_path;
+  }
 
   let event = rawEvent;
   let isIdleEvent = false;
