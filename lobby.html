@@ -231,7 +231,7 @@
     // --- Folder history ---
     async function loadFolderHistory() {
       try {
-        folderHistory = await (await fetch('/api/history/folders')).json();
+        folderHistory = await (await fetch('/api/history/folders', { cache: 'no-store' })).json();
       } catch (e) { folderHistory = []; }
     }
 

@@ -675,6 +675,11 @@ test.describe('/api/version', () => {
 // ============================================================
 
 test.describe('/api/history/folders', () => {
+  const lc = (s) => String(s).toLowerCase();
+  // The server scans WT_CWD (= process.env.TEMP, see playwright.config.js)
+  // because config.test.json defines no scanFolders. Tests share that base.
+  const SCAN_BASE = process.env.TEMP || 'C:\\Windows\\Temp';
+
   test('returns an array of folder paths', async () => {
     const ctx = await authCtx();
     const res = await ctx.get('/api/history/folders');
@@ -697,32 +702,54 @@ test.describe('/api/history/folders', () => {
     await ctx.dispose();
   });
 
-  test('filters out history entries that no longer exist on disk', async () => {
+  test('is served with Cache-Control: no-store (never cached)', async () => {
+    const ctx = await authCtx();
+    const res = await ctx.get('/api/history/folders');
+    expect(res.status()).toBe(200);
+    expect(String(res.headers()['cache-control'] || '')).toContain('no-store');
+    await ctx.dispose();
+  });
+
+  test('is a live scan: a new subfolder appears and a removed one disappears', async () => {
+    const created = path.join(SCAN_BASE, `__wt_livescan_${process.pid}_${Date.now()}`);
+    fs.mkdirSync(created);
+    try {
+      const ctx = await authCtx();
+
+      // Freshly-created folder shows up on the very next request — no cache.
+      let data = await (await ctx.get('/api/history/folders')).json();
+      expect(data.some(f => lc(f) === lc(created))).toBe(true);
+
+      // Remove it and it's gone on the next request — the list is dynamic,
+      // not remembered.
+      fs.rmdirSync(created);
+      data = await (await ctx.get('/api/history/folders')).json();
+      expect(data.some(f => lc(f) === lc(created))).toBe(false);
+
+      await ctx.dispose();
+    } finally {
+      try { fs.rmdirSync(created); } catch {}
+    }
+  });
+
+  test('ignores history.json entirely (no remembered folders)', async () => {
+    // history.json is a dead file now — the endpoint must never surface a
+    // path from it. Seed it with a real dir that is NOT under any scan root
+    // and assert it does not leak into the suggestions.
     const HISTORY_FILE = path.join(__dirname, '..', 'history.json');
     const backup = fs.existsSync(HISTORY_FILE) ? fs.readFileSync(HISTORY_FILE, 'utf8') : null;
-
-    // Pick a real path (the project dir) and a fake path that cannot exist.
-    const realDir = path.join(__dirname, '..');
-    const fakeDir = process.platform === 'win32'
-      ? 'Z:\\definitely\\not\\a\\real\\folder\\xyz123'
-      : '/definitely/not/a/real/folder/xyz123';
-
+    const unscannedRealDir = process.platform === 'win32'
+      ? (process.env.SystemRoot || 'C:\\Windows')
+      : '/usr';
     try {
-      fs.writeFileSync(HISTORY_FILE, JSON.stringify({ folders: [fakeDir, realDir] }, null, 2), 'utf8');
+      fs.writeFileSync(HISTORY_FILE, JSON.stringify({ folders: [unscannedRealDir] }, null, 2), 'utf8');
 
       const ctx = await authCtx();
       const res = await ctx.get('/api/history/folders');
       expect(res.status()).toBe(200);
       const data = await res.json();
-
-      const lc = (s) => String(s).toLowerCase();
-      expect(data.some(f => lc(f) === lc(fakeDir))).toBe(false);
-      expect(data.some(f => lc(f) === lc(realDir))).toBe(true);
+      expect(data.some(f => lc(f) === lc(unscannedRealDir))).toBe(false);
       await ctx.dispose();
-
-      // The endpoint should also persist the cleanup back to history.json.
-      const after = JSON.parse(fs.readFileSync(HISTORY_FILE, 'utf8'));
-      expect(after.folders.some(f => lc(f) === lc(fakeDir))).toBe(false);
     } finally {
       if (backup !== null) fs.writeFileSync(HISTORY_FILE, backup, 'utf8');
       else try { fs.unlinkSync(HISTORY_FILE); } catch {}

@@ -3225,7 +3225,9 @@
       try {
         const serverUrl = document.getElementById('newServer').value || null;
         const apiBase = serverUrl ? `/cluster/${encodeURIComponent(serverUrl)}/api` : '/api';
-        folderHistory = await (await fetch(`${apiBase}/history/folders`)).json();
+        // Live scan, never cached — always reflects the target server's
+        // current folder contents (no browser/proxy caching, no memory).
+        folderHistory = await (await fetch(`${apiBase}/history/folders`, { cache: 'no-store' })).json();
       } catch (e) { folderHistory = []; }
     }
 
