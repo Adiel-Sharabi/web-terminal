@@ -24,7 +24,7 @@ Three processes supervised by `monitor.js`:
 **`pty-worker.js`** (new, rarely changes):
 - Owns the `sessions` Map: PTY, scrollback buffer, status, timers
 - Owns `sessions.json`, `scrollback/*.json` persistence
-- Owns `claude-session-names.json`, `history.json`
+- Owns `claude-session-names.json`
 - Listens on named pipe `\\.\pipe\web-terminal-pty`
 - Accepts ONE client at a time (web.js); rejects others
 

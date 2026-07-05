@@ -134,7 +134,6 @@ The legacy proxy path is always available as fallback — direct mode is purely 
 | `sessions.json` | Saved session configs (survive server restarts) |
 | `api-tokens.json` | API auth tokens this server has minted for its peers |
 | `cluster-tokens.json` | Tokens this server has been issued by its peers |
-| `history.json` | Folder history for the New Session dialog |
 | `logs/` | Monitor-rotated stdout/stderr from worker + web |
 
 ### Tests (Playwright)

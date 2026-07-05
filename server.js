@@ -12,7 +12,7 @@ const { sanitizeReplay } = require('./lib/replay-sanitize');
 const { execGit, gitSafeArgs, gitSafeEnv } = require('./lib/git-safe');
 const notifyPush = require('./lib/notify-push');
 
-const SERVER_VERSION = '1.19.1'; // 2026-07-02: per-session notify level is now an explicit tap-to-pick menu (off/important/all) on the sidebar bell, not a blind cycle — mobile-friendly
+const SERVER_VERSION = '1.20.0'; // 2026-07-05: New Session folder list is a live per-server filesystem scan on every open — no history/memory, no cache (Cache-Control: no-store)
 
 // --- Optional latency instrumentation (opt-in via WT_LATENCY_DEBUG=1) -----
 // Event-loop lag monitor: interval is 10ms; anything ≥ 50ms slip is a stall.
@@ -129,7 +129,6 @@ function buildSafeEnv() {
 const DEFAULT_CWD = getDefaultCwd();
 // Session + scrollback persistence paths are now owned by pty-worker.js.
 const CLIPBOARD_DIR = path.join(__dirname, 'clipboard-images');
-const HISTORY_FILE = path.join(__dirname, 'history.json');
 function detectClaudeHome() {
   // 1. Explicit config
   const configured = liveConfig('claudeHome', '');
@@ -2321,7 +2320,6 @@ app.post('/api/sessions', express.json({ limit: '16kb' }), async (req, res) => {
       cwd = liveCwd;
     }
     const created = await workerClient.rpc('createSession', { id, cwd, name, autoCommand });
-    saveFolder(cwd);
     res.json({ id: created.id, name: created.name });
   } catch (e) {
     console.error(`Failed to create session: ${e.message}`);
@@ -2444,39 +2442,21 @@ app.get('/api/sessions/:id/scrollback', async (req, res) => {
   }
 });
 
-// --- Folder history ---
-function loadHistory() {
-  try {
-    if (fs.existsSync(HISTORY_FILE)) return JSON.parse(fs.readFileSync(HISTORY_FILE, 'utf8'));
-  } catch (e) {}
-  return { folders: [] };
-}
-
-function saveFolder(folder) {
-  const history = loadHistory();
-  // Remove if exists, add to front
-  history.folders = history.folders.filter(f => f.toLowerCase() !== folder.toLowerCase());
-  history.folders.unshift(folder);
-  // Keep last 20
-  history.folders = history.folders.slice(0, 20);
-  try { fs.writeFileSync(HISTORY_FILE, JSON.stringify(history, null, 2), 'utf8'); } catch (e) {}
-}
-
+// --- Folder list (live scan of the configured "dev" folders) ---
 function dirExists(p) {
   try { return fs.statSync(p).isDirectory(); } catch (e) { return false; }
 }
 
+// Returns the folders offered in the New Session dialog. This is a live,
+// dynamic scan of the configured scanFolders on every request — no history,
+// no memory, no caching. The list always reflects the actual current
+// filesystem content, so a folder created/removed under a scan root shows
+// up (or disappears) the next time the dialog is opened. Cluster peers each
+// serve their own scan against their own disk (the request is proxied per
+// server), so switching servers reflects that server's real folders.
 app.get('/api/history/folders', (req, res) => {
-  const rawHistory = loadHistory().folders;
-  // Drop history entries whose directory no longer exists, so suggestions
-  // stay in sync with the actual filesystem. Persist the cleanup so we
-  // don't keep re-checking the same dead paths on every request.
-  const history = rawHistory.filter(dirExists);
-  if (history.length !== rawHistory.length) {
-    try { fs.writeFileSync(HISTORY_FILE, JSON.stringify({ folders: history }, null, 2), 'utf8'); } catch (e) {}
-  }
-  // Also scan configured folders and their subdirectories (live each request).
-  const scanned = new Set(history);
+  res.set('Cache-Control', 'no-store');
+  const scanned = new Set();
   for (const baseDir of getScanFolders()) {
     try {
       if (dirExists(baseDir)) scanned.add(baseDir);
@@ -2485,12 +2465,7 @@ app.get('/api/history/folders', (req, res) => {
       for (const d of dirs) scanned.add(path.join(baseDir, d.name));
     } catch (e) {}
   }
-  // History items first, then scanned extras
-  const result = [...history];
-  for (const f of scanned) {
-    if (!result.find(r => r.toLowerCase() === f.toLowerCase())) result.push(f);
-  }
-  res.json(result);
+  res.json([...scanned]);
 });
 
 // --- Decode Claude project directory name to actual path ---
