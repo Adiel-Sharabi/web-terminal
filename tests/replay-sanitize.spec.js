@@ -10,7 +10,7 @@
 // Pure module test — no server, no worker, no browser.
 
 const { test, expect } = require('@playwright/test');
-const { sanitizeReplay } = require('../lib/replay-sanitize');
+const { sanitizeReplay, endsInAltScreen } = require('../lib/replay-sanitize');
 
 const ESC = '\x1b';
 
@@ -39,10 +39,16 @@ test.describe('sanitizeReplay', () => {
     expect(sanitizeReplay(`${ESC}[?6n`)).toBe('');
   });
 
-  test('still strips erase-display and alt-screen toggles (legacy behavior)', () => {
+  test('strips erase-display in the normal buffer (so replay does not wipe scrollback)', () => {
     expect(sanitizeReplay(`${ESC}[2Jx`)).toBe('x');
     expect(sanitizeReplay(`${ESC}[3Jx`)).toBe('x');
-    expect(sanitizeReplay(`${ESC}[?1049hx${ESC}[?1049l`)).toBe('x');
+  });
+
+  test('PRESERVES alt-screen toggles (fullscreen replay must re-enter the alt buffer)', () => {
+    // Buffer-aware: ?1049h/l are kept; the text inside the alt buffer is plain
+    // so it survives untouched. See fullscreen-mode.spec.js for the full matrix.
+    const s = `${ESC}[?1049hx${ESC}[?1049l`;
+    expect(sanitizeReplay(s)).toBe(s);
   });
 
   test('does NOT strip SGR color sequences (end in m)', () => {
@@ -80,5 +86,29 @@ test.describe('sanitizeReplay', () => {
     const input = `${ESC}[?2004h$ ${ESC}[6nclaude${ESC}[c starting${ESC}[0m`;
     // Bracketed-paste enable and SGR survive; DA + DSR removed.
     expect(sanitizeReplay(input)).toBe(`${ESC}[?2004h$ claude starting${ESC}[0m`);
+  });
+});
+
+test.describe('endsInAltScreen (restore desync guard)', () => {
+  test('true when scrollback ends inside the alt buffer (unmatched ?1049h)', () => {
+    expect(endsInAltScreen(`hist${ESC}[?1049h frozen frame`)).toBe(true);
+  });
+
+  test('false when the alt buffer was left again (?1049h ... ?1049l)', () => {
+    expect(endsInAltScreen(`${ESC}[?1049h frame ${ESC}[?1049l back at prompt`)).toBe(false);
+  });
+
+  test('false when the session never entered the alt buffer', () => {
+    expect(endsInAltScreen(`plain shell output\r\n$ `)).toBe(false);
+  });
+
+  test('uses the LAST toggle — re-entered alt counts as in-alt', () => {
+    expect(endsInAltScreen(`${ESC}[?1049h a ${ESC}[?1049l b ${ESC}[?1049h c`)).toBe(true);
+  });
+
+  test('empty / falsy input is not in alt', () => {
+    expect(endsInAltScreen('')).toBe(false);
+    expect(endsInAltScreen(null)).toBe(false);
+    expect(endsInAltScreen(undefined)).toBe(false);
   });
 });

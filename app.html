@@ -831,6 +831,27 @@
     const fitAddon = new window.FitAddon.FitAddon();
     term.loadAddon(fitAddon);
     term.loadAddon(new window.WebLinksAddon.WebLinksAddon());
+
+    // OSC 52 (set-clipboard) handler. Claude Code's "/tui fullscreen" mode turns
+    // on mouse capture, which suppresses xterm's native click-drag selection;
+    // instead Claude does its own in-app selection and emits the selected text
+    // via OSC 52 ("ESC ] 52 ; <targets> ; <base64> BEL"). xterm has no built-in
+    // OSC 52 writer, so without this fullscreen copy silently fails in the
+    // browser. Route it through copyToClipboard() so it also works over plain
+    // HTTP (LAN/tailscale), where navigator.clipboard is unavailable. We ignore
+    // OSC 52 *read* requests ("...;?") — we never expose the clipboard to the PTY.
+    term.parser.registerOscHandler(52, (data) => {
+      const semi = data.indexOf(';');
+      if (semi < 0) return false;
+      const b64 = data.slice(semi + 1);
+      if (b64 === '?' || b64 === '') return false;
+      try {
+        const bytes = Uint8Array.from(atob(b64), (c) => c.charCodeAt(0));
+        copyToClipboard(new TextDecoder('utf-8').decode(bytes));
+      } catch (e) { return false; }
+      return true;
+    });
+
     term.open(document.getElementById('terminal'));
     fitAddon.fit();
     // Expose on window for test hooks and live debugging — harmless since
@@ -870,14 +891,33 @@
       if (entry && entry.heartbeatTimer) { clearInterval(entry.heartbeatTimer); entry.heartbeatTimer = null; }
     }
 
-    // Strip replay-unsafe terminal queries (DA/DSR) + screen-clears from cached
-    // scrollback before replaying it into xterm on instant-switch. Mirrors the
-    // server-side lib/replay-sanitize.js. Without this, a stale DA query in the
-    // cache makes xterm answer "ESC[?1;2c" into an idle shell, leaving "1;2c"
-    // garbage on the prompt (the fresh-connect path is already sanitized server-
-    // side before the scrollback is sent).
+    // Strip replay-unsafe terminal queries (DA/DSR) from cached scrollback before
+    // replaying it into xterm on instant-switch. Mirrors the server-side
+    // lib/replay-sanitize.js EXACTLY (the backfill offsets depend on both sides
+    // transforming identically). Without this, a stale DA query in the cache
+    // makes xterm answer "ESC[?1;2c" into an idle shell, leaving "1;2c" garbage
+    // on the prompt (the fresh-connect path is already sanitized server-side
+    // before the scrollback is sent).
+    //
+    // Buffer-aware: the ?1049h/l alt-screen toggles are PRESERVED so a fullscreen
+    // TUI (Claude /tui fullscreen) re-enters the alt buffer on replay, and
+    // erase-display (2J/3J) is stripped only OUTSIDE the alt buffer (inside it the
+    // clear is kept so the fullscreen frame repaints cleanly). See replay-sanitize.js.
+    const _DA_DSR_RE = /\x1b\[[?>=]?[0-9;]*[cn]/g;
+    const _ERASE_RE = /\x1b\[[23]J/g;
     function sanitizeReplay(s) {
-      return s ? s.replace(/\x1b\[[23]J|\x1b\[\?1049[hl]|\x1b\[[?>=]?[0-9;]*[cn]/g, '') : s;
+      if (!s) return s;
+      const parts = s.split(/(\x1b\[\?1049[hl])/);
+      let inAlt = false, out = '';
+      for (let i = 0; i < parts.length; i++) {
+        const part = parts[i];
+        if (part === '\x1b[?1049h') { inAlt = true; out += part; continue; }
+        if (part === '\x1b[?1049l') { inAlt = false; out += part; continue; }
+        let seg = part.replace(_DA_DSR_RE, '');
+        if (!inAlt) seg = seg.replace(_ERASE_RE, '');
+        out += seg;
+      }
+      return out;
     }
 
     function connect() {

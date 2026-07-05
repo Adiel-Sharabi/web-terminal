@@ -17,9 +17,10 @@ const { resolveRestoreRunCommand } = require('./lib/restore-command');
 const { claudeProjectDirName } = require('./lib/transcript');
 const agents = require('./lib/agents');
 const { splitTrailingCr, isEscapeKey, endsBracketedPaste } = require('./lib/submit-frames');
+const { endsInAltScreen } = require('./lib/replay-sanitize');
 const { scanOsc9 } = require('./lib/osc9-notify');
 
-const WORKER_VERSION = '0.6.1'; // 0.6.1: the submit gap is measured against the wire, not the frame — a lone CR landing on a just-closed bracketed paste (the images-only submit) is withheld too. Worker-side, so `ping` is the only way to tell a restarted worker from a stale one.
+const WORKER_VERSION = '0.6.2'; // 0.6.2: a session restored from a scrollback that ends mid-alt-screen (Claude killed while in /tui fullscreen, so ?1049l never arrived) gets a corrective ?1049l appended, instead of stranding xterm in the alt buffer showing a frozen frame over a live shell. Prior 0.6.1: the submit gap is measured against the wire, not the frame.
 
 // --- Optional latency instrumentation (opt-in via WT_LATENCY_DEBUG=1) -----
 const _LATENCY_DEBUG = process.env.WT_LATENCY_DEBUG === '1';
@@ -2187,7 +2188,16 @@ function restoreSessionsOnStartup() {
     // starts fresh (NO implicit `--continue`, which would hijack the last
     // conversation in the cwd — #23). See lib/restore-command.js for rationale.
     const runCmd = resolveRestoreRunCommand(cfg);
-    const savedScrollback = loadScrollback(cfg.id);
+    let savedScrollback = loadScrollback(cfg.id);
+    // The restored session gets a FRESH shell in the NORMAL screen buffer. If the
+    // saved scrollback ends mid-alt-screen (Claude killed in fullscreen, so it never
+    // emitted ?1049l), replaying it as-is strands xterm in the alt buffer — a frozen
+    // stale frame sitting over a live normal-mode shell, which reads to the user as
+    // "I can't type". Append a corrective ?1049l so the replay lands back in the
+    // normal buffer; a resumed Claude that re-enters fullscreen re-emits ?1049h itself.
+    if (savedScrollback.length && endsInAltScreen(Buffer.concat(savedScrollback).toString('latin1'))) {
+      savedScrollback = savedScrollback.concat(Buffer.from('\x1b[?1049l', 'latin1'));
+    }
     try {
       // cfg.agent is absent for sessions persisted before the field existed; null
       // there means "infer from the command", preserving their behaviour on restore.
