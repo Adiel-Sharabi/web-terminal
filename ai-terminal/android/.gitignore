@@ -1,8 +1,7 @@
-gradle-wrapper.jar
+# NOTE: the Gradle wrapper (gradlew, gradlew.bat, gradle-wrapper.jar) IS tracked
+# here so a fresh clone can build Android without the standalone repo.
 /.gradle
 /captures/
-/gradlew
-/gradlew.bat
 /local.properties
 GeneratedPluginRegistrant.java
 .cxx/

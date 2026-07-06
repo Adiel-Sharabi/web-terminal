@@ -1,45 +1,48 @@
-# Windows desktop build
+# Building AiTerminal (Android + Windows)
 
-The Android build ships FCM push (Firebase). The **desktop build strips Firebase**:
-FCM is mobile-only, and the Firebase C++ SDK's bundled flatbuffers fails to link
-on Windows MSVC (`LNK2019: unresolved external symbol __std_find_first_of_trivial_pos_1`).
-Push is guarded off on desktop anyway (`pushSupported` in `lib/main.dart`), so
-Firebase is pure dead weight there.
+AiTerminal lives in `web-terminal/ai-terminal/` and builds from here — no
+separate repo/worktree. Keep the Windows and Android builds **version-matched**
+and deploy **both** after any change.
 
-Rather than fork `pubspec.yaml`, the desktop build is done in a **detached git
-worktree** so the main tree keeps Firebase for Android.
+## Local files the build needs (gitignored — never committed)
+These are not in git; they must exist in your working tree to build:
+- `lib/spike_config.dart` — seed server list (imported by `server_store.dart`).
+- `android/app/google-services.json` — FCM config for the **Android** build only.
 
-## Prerequisites
-- Windows Developer Mode ON (Settings → Privacy & security → For developers).
-  Flutter plugin symlinks need it. If off:
-  `reg add "HKLM\SOFTWARE\Microsoft\Windows\CurrentVersion\AppModelUnlock" /v AllowDevelopmentWithoutDevLicense /t REG_DWORD /d 1 /f` (elevated)
-- Visual Studio 2022 with "Desktop development with C++".
+If you clone fresh, recreate these two before building.
 
-## Build (in a throwaway worktree)
+## Android (FCM / Firebase)
+Builds straight from this directory — Firebase is Android-only:
 ```bash
-cd C:/dev/ai-terminal
-git worktree add -f C:/dev/ai-terminal-win HEAD
-cd C:/dev/ai-terminal-win
-
-# 1. Remove firebase_core + firebase_messaging from pubspec.yaml dependencies.
-# 2. In lib/main.dart, drop the firebase_core + services/push_service imports and
-#    the `if (pushSupported) { Firebase.initializeApp(); PushService.init(); }`
-#    block (pushSupported is always false on desktop, so nothing is lost).
-# 3. Copy the gitignored config the app needs:
-cp C:/dev/ai-terminal/lib/spike_config.dart lib/spike_config.dart
-
-flutter pub get
-flutter build windows --release
-# -> build/windows/x64/runner/Release/  (ai_terminal.exe + flutter_windows.dll + data/)
+export PATH="/c/src/flutter/bin:$PATH"
+flutter build apk --release --build-name=<X.Y.Z> --build-number=<N>
+# -> build/app/outputs/flutter-apk/app-release.apk
+adb -s <device> install -r build/app/outputs/flutter-apk/app-release.apk
 ```
 
-## Install (per-user, no admin)
-Copy the whole `Release/` folder to `%LOCALAPPDATA%\Programs\AiTerminal\` and make
-Desktop + Start-menu shortcuts to `ai_terminal.exe` (see the PowerShell used at
-install time). The exe needs the sibling DLLs + `data/` — copy the folder, not
-just the exe.
+## Windows (Firebase stripped)
+`firebase_core`'s Windows plugin tries to download+extract the Firebase C++ SDK
+and fails (`Unable to generate build files` / `firebase_cpp_sdk_windows_*.zip`),
+and `firebase_messaging` has no Windows support. Push is guarded off on desktop
+anyway (`pushSupported` in `lib/main.dart`), so Firebase is dead weight there.
 
-## Notes
-- The main tree (Android) is untouched — Firebase stays for FCM.
-- Re-run the same steps to rebuild after app changes; the worktree can be kept
-  between builds (`git worktree remove C:/dev/ai-terminal-win` to discard).
+`scripts/build-windows.sh` copies the tree to a scratch dir
+(`C:\dev\ai-terminal-winbuild`), strips the (fully isolated) Firebase bits, and
+builds — the canonical tree is never modified:
+```bash
+export PATH="/c/src/flutter/bin:$PATH"
+bash scripts/build-windows.sh <X.Y.Z> <N>
+# -> C:/dev/ai-terminal-winbuild/build/windows/x64/runner/Release/
+```
+The strip is line-based (two imports + two call-lines in `main.dart`, two
+`pubspec.yaml` deps); it leaves a harmless empty `if (pushSupported) {}`.
+
+### Prerequisites
+- Windows Developer Mode ON (Flutter plugin symlinks need it):
+  `reg add "HKLM\SOFTWARE\Microsoft\Windows\CurrentVersion\AppModelUnlock" /v AllowDevelopmentWithoutDevLicense /t REG_DWORD /d 1 /f` (elevated).
+- Visual Studio 2022 with "Desktop development with C++".
+
+### Install (per-user, no admin)
+Copy the whole `Release/` folder (exe + sibling DLLs + `data/`) to
+`%LOCALAPPDATA%\Programs\AiTerminal\`, then relaunch `ai_terminal.exe`. The Dart
+AOT lives in `data/app.so` — check its timestamp to confirm a fresh build.
