@@ -14,7 +14,7 @@ const notifyPush = require('./lib/notify-push');
 const transcript = require('./lib/transcript');
 const fcm = require('./lib/fcm');
 
-const SERVER_VERSION = '1.22.0'; // 2026-07-05: promote Phase 0 (attention/clear/capabilities/FCM push-devices) + G5 transcript endpoint to production — enables companion app FCM, chat lens, structured attention
+const SERVER_VERSION = '1.23.0'; // 2026-07-06: /api/claude-status accepts statusline metrics (ctx%/5h/7d/model/effort); exposed per-session for the companion app chat header
 
 // --- Optional latency instrumentation (opt-in via WT_LATENCY_DEBUG=1) -----
 // Event-loop lag monitor: interval is 10ms; anything ≥ 50ms slip is a stall.
@@ -1289,6 +1289,53 @@ app.post('/api/session/:id/hook', express.json({ limit: '256kb' }), async (req, 
   }
 });
 
+// Claude Code status-line metrics (ctx%, 5h/7d rate-limit %, model, effort).
+// Pushed by the global statusline script (throttled, safe-fail) — the only
+// source for these numbers, which Claude Code exposes to nothing but its own
+// statusLine invocation. Keyed by Claude session id; ephemeral (reposted every
+// few seconds), so a plain in-memory Map is fine — it self-heals after a
+// server hot-reload. Localhost-only: same trust boundary as the local hooks.
+const claudeStatusMetrics = new Map(); // claudeSessionId -> { ctx, fiveH, sevenD, model, effort, ts }
+const CLAUDE_STATUS_TTL_MS = 2 * 60 * 1000; // treat metrics older than this as stale
+
+function getStatusMetrics(claudeSessionId) {
+  if (!claudeSessionId) return null;
+  const m = claudeStatusMetrics.get(claudeSessionId);
+  if (!m || Date.now() - m.ts > CLAUDE_STATUS_TTL_MS) return null;
+  return { ctx: m.ctx, fiveH: m.fiveH, sevenD: m.sevenD, model: m.model, effort: m.effort };
+}
+
+// Drop stale entries so the Map can't grow without bound as sessions come and go.
+function pruneStatusMetrics() {
+  const now = Date.now();
+  for (const [k, v] of claudeStatusMetrics) {
+    if (now - v.ts > CLAUDE_STATUS_TTL_MS) claudeStatusMetrics.delete(k);
+  }
+}
+
+app.post('/api/claude-status', express.json({ limit: '16kb' }), (req, res) => {
+  if (!isLocalhostReq(req)) return res.status(401).json({ error: 'Unauthorized' });
+  const b = req.body || {};
+  const sid = typeof b.session_id === 'string' ? b.session_id : '';
+  if (!sid) return res.json({ ok: true, skipped: 'no session_id' });
+  const num = (v) => {
+    if (v === '' || v == null) return null; // Number('') === 0 — treat blank as absent, not 0%
+    const n = Number(v);
+    return Number.isFinite(n) ? Math.max(0, Math.min(100, Math.round(n))) : null;
+  };
+  const str = (v) => (typeof v === 'string' && v.length <= 40 ? v : null);
+  claudeStatusMetrics.set(sid, {
+    ctx: num(b.ctx),
+    fiveH: num(b.five),
+    sevenD: num(b.seven),
+    model: str(b.model),
+    effort: str(b.effort),
+    ts: Date.now(),
+  });
+  if (claudeStatusMetrics.size > 200) pruneStatusMetrics();
+  res.json({ ok: true });
+});
+
 // --- Peer relay (Claude <-> Codex mediator) ---
 // Localhost-only message bus so two agents running in separate PTY sessions
 // on this host can ask each other for second opinions. State is in-memory
@@ -1901,6 +1948,7 @@ async function _computeClusterSessions(reqUser) {
         claudeSessionId: s.claudeSessionId,
         server: getServerName(), serverUrl: null,
         notifyLevel: getNotifyLevel(s.id),
+        metrics: getStatusMetrics(s.claudeSessionId),
       });
     }
   } catch (e) {
@@ -2351,7 +2399,7 @@ app.get('/api/version', (req, res) => {
   // device registry is always available; 'fcm' is advertised only when a
   // service account is configured (or the test sink is active) — a server with
   // no FCM key can still take registrations but won't send FCM.
-  const capabilities = ['attention', 'clear', 'push-devices', 'transcript'];
+  const capabilities = ['attention', 'clear', 'push-devices', 'transcript', 'status-metrics'];
   if (fcmConfigured()) capabilities.push('fcm');
   res.json({
     version: SERVER_VERSION,
@@ -2394,6 +2442,7 @@ app.get('/api/sessions', async (req, res) => {
       lastActivity: s.lastActivity, autoCommand: s.autoCommand || '',
       claudeSessionId: s.claudeSessionId,
       notifyLevel: getNotifyLevel(s.id),
+      metrics: getStatusMetrics(s.claudeSessionId),
     }));
     // Log when a remote server fetches our sessions (Bearer = cluster call).
     // Throttled to avoid hammering the disk: only logs on change or after
