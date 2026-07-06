@@ -1,0 +1,505 @@
+/// Aggregates sessions across all configured servers into one reactive stream.
+///
+/// [refresh] fetches every server in parallel, tolerates per-server failure
+/// (keeping the last-known sessions for an offline server so they read as stale
+/// rather than vanishing), sorts the merged list attention-first, and feeds the
+/// notification name cache. In the foreground it also listens to each server's
+/// `/ws/notify` stream and re-fetches on events, backed by a 30s poll.
+///
+/// **Instant cold-launch paint.** Every successful [refresh] persists the merged
+/// list to [SharedPreferences] (key [_cacheKey]). On [startForeground] the repo
+/// first [primeFromCache]s — emitting that last-known list immediately so the
+/// dashboard paints the previous session set before the (possibly slow, on a
+/// waking tailnet) network refresh returns — then runs a retrying initial
+/// refresh. A failed refresh never blanks the list: the cached sessions are also
+/// seeded into the per-server last-known buckets, so an all-offline refresh
+/// re-emits them (flagged stale via [serverOnline]) rather than an empty list.
+///
+/// **Stable server grouping (Complaint B).** This repo intentionally emits a
+/// single flat list sorted attention-then-recency ([compareSessions]) — it does
+/// NOT order by server. The dashboard groups that list by server using the
+/// user's configured order ([AppConfig.servers] via `groupSessionsByServer`), so
+/// group order is stable; [compareSessions] only decides the order *within* a
+/// group. Do not reintroduce server into [compareSessions].
+library;
+
+import 'dart:async';
+import 'dart:convert';
+
+import 'package:flutter/foundation.dart';
+import 'package:shared_preferences/shared_preferences.dart';
+
+import '../api/api_client.dart';
+import '../api/models.dart';
+import 'notification_service.dart';
+import 'server_store.dart';
+
+/// Builds an [ApiClient] for a server. Injectable so tests can supply a
+/// fake-transport client; production uses [ApiClient.new].
+typedef ApiClientFactory = ApiClient Function(ServerConfig server);
+
+/// Singleton store of the merged, sorted session list.
+class SessionRepository {
+  SessionRepository._()
+      : _store = ServerStore.instance,
+        _clientFactory = ApiClient.new;
+
+  /// The shared instance.
+  static final SessionRepository instance = SessionRepository._();
+
+  /// Creates an isolated instance for tests, with an injectable server [store]
+  /// and [ApiClient] factory so [refresh] / [primeFromCache] run against fakes
+  /// (no real network, no shared singletons). Production uses [instance].
+  @visibleForTesting
+  SessionRepository.forTest({
+    ServerStore? store,
+    ApiClientFactory? clientFactory,
+  })  : _store = store ?? ServerStore.instance,
+        _clientFactory = clientFactory ?? ApiClient.new;
+
+  /// The [SharedPreferences] key holding the last successfully-merged session
+  /// list, replayed on the next cold launch for an instant first paint.
+  static const String _cacheKey = 'wt.lastSessions';
+
+  /// Source of the configured servers (defaults to [ServerStore.instance], which
+  /// is exactly what [AppConfig] exposes). Injected in tests.
+  final ServerStore _store;
+
+  /// Constructs the per-server [ApiClient]s. Injected in tests.
+  final ApiClientFactory _clientFactory;
+
+  final StreamController<List<Session>> _sessions =
+      StreamController<List<Session>>.broadcast();
+  final StreamController<Map<String, bool>> _online =
+      StreamController<Map<String, bool>>.broadcast();
+
+  final Map<String, ApiClient> _clients = <String, ApiClient>{};
+  final Map<String, List<Session>> _lastByServer = <String, List<Session>>{};
+  final Map<String, bool> _serverOnline = <String, bool>{};
+  final Set<String> _namesResolved = <String>{};
+
+  // Live `/ws/notify` subscriptions, keyed by server base URL, alongside the
+  // exact [ServerConfig] each was opened with (to detect a token change).
+  // Re-synced from [AppConfig.serversStream] as servers are added/removed.
+  final Map<String, StreamSubscription<NotifyEvent>> _notifySubs =
+      <String, StreamSubscription<NotifyEvent>>{};
+  final Map<String, ServerConfig> _notifyConfigs = <String, ServerConfig>{};
+  StreamSubscription<List<ServerConfig>>? _serversSub;
+
+  // Live per-session API-error state. `/api/sessions` never reports api-error
+  // status, so the ONLY source is the `/ws/notify` frames consumed in
+  // [_applyNotify]. Pruned in [refresh] when a session leaves the list.
+  final Map<String, ApiErrorInfo> _apiErrors = <String, ApiErrorInfo>{};
+
+  List<Session> _current = const <Session>[];
+  Timer? _pollTimer;
+  Timer? _debounce;
+  bool _foreground = false;
+
+  /// Broadcast stream of the merged session list, sorted attention-first.
+  Stream<List<Session>> get sessions => _sessions.stream;
+
+  /// The most recently emitted session list (empty before the first refresh).
+  List<Session> get current => _current;
+
+  /// The live API-error state for [id], or `null` when the session is not in an
+  /// API error. Folded from `/ws/notify` frames (never present in
+  /// `/api/sessions`). The `sessions` stream re-emits whenever this map changes,
+  /// so the dashboard can read this getter during the triggered rebuild to badge
+  /// a session (and show [ApiErrorInfo.text] / retry progress).
+  ApiErrorInfo? apiErrorFor(String id) => _apiErrors[id];
+
+  /// Broadcast stream of per-server reachability (`baseUrl → online`).
+  Stream<Map<String, bool>> get serverOnlineStream => _online.stream;
+
+  /// Snapshot of per-server reachability (`baseUrl → online`), updated on every
+  /// [refresh].
+  Map<String, bool> get serverOnline => Map<String, bool>.unmodifiable(_serverOnline);
+
+  /// Fetches all configured servers in parallel and emits the merged, sorted
+  /// list. A server that fails is marked offline and contributes its last-known
+  /// (stale) sessions instead of dropping out entirely.
+  Future<void> refresh() async {
+    await _ensureServerNames();
+    final servers = _store.servers;
+    final results = await Future.wait(servers.map(_fetchServer));
+    final merged = <Session>[for (final r in results) ...r]..sort(compareSessions);
+
+    _current = merged;
+    _pruneApiErrors(merged);
+    if (!_sessions.isClosed) _sessions.add(merged);
+    if (!_online.isClosed) _online.add(serverOnline);
+    await _cacheNames(merged);
+    // Persist the merged list for the next cold launch — but only when at least
+    // one server actually responded this round, so a total outage can't blank
+    // the cache the instant-paint path relies on.
+    if (_anyServerReachable()) await _writeCache(merged);
+  }
+
+  /// Begins foreground live-updates: subscribes to every server's `/ws/notify`
+  /// stream (re-fetching on events, debounced), watches [AppConfig.serversStream]
+  /// so added/removed servers are picked up live, starts a 30s poll and boots
+  /// the list (cache paint + retrying initial refresh). Idempotent — the
+  /// `_foreground` guard means the repeated calls from `main()` and every
+  /// foreground resume never double-subscribe.
+  void startForeground() {
+    if (_foreground) return;
+    _foreground = true;
+    _syncNotifySubs();
+    _serversSub = _store.changes.listen((_) => _onServersChanged());
+    _pollTimer = Timer.periodic(const Duration(seconds: 30), (_) => refresh());
+    unawaited(_bootstrap());
+  }
+
+  /// Paints the cached list instantly, then runs the retrying initial refresh.
+  Future<void> _bootstrap() async {
+    await primeFromCache();
+    await _initialRefreshWithRetry();
+  }
+
+  /// Fires an immediate [refresh]; if it reaches no configured server (DNS /
+  /// tailnet routing often lags for a second or two right after launch), retries
+  /// after 2s then 5s. Bails the moment a server responds or the app leaves the
+  /// foreground, so it never keeps polling a backgrounded app.
+  Future<void> _initialRefreshWithRetry() async {
+    await refresh();
+    for (final delay in const [Duration(seconds: 2), Duration(seconds: 5)]) {
+      if (!_foreground || _anyServerReachable()) return;
+      await Future<void>.delayed(delay);
+      if (!_foreground) return;
+      await refresh();
+    }
+  }
+
+  /// Seeds the session list from the last-known cache so the dashboard paints
+  /// instantly on a cold launch, ahead of the first network [refresh].
+  ///
+  /// Reads the merged list persisted by [refresh] under [_cacheKey], maps every
+  /// cached session back onto its currently-configured [ServerConfig] (dropping
+  /// any whose server is no longer configured), sorts it and emits it on
+  /// [sessions]. It also seeds the per-server last-known buckets so a subsequent
+  /// all-offline [refresh] re-emits these sessions instead of blanking the list.
+  ///
+  /// No-op once a list is already present (e.g. a foreground resume, or a
+  /// network refresh that raced ahead), so it never clobbers live data. Safe to
+  /// call from `main()` before `runApp` to also populate [current] for the first
+  /// frame.
+  Future<void> primeFromCache() async {
+    if (_current.isNotEmpty) return;
+    final cached = await _readCache();
+    if (cached.isEmpty || _current.isNotEmpty) return;
+    for (final s in cached) {
+      (_lastByServer[s.server.baseUrl] ??= <Session>[]).add(s);
+    }
+    final sorted = <Session>[...cached]..sort(compareSessions);
+    _current = sorted;
+    if (!_sessions.isClosed) _sessions.add(sorted);
+  }
+
+  /// Stops foreground live-updates (WS subscriptions + server watch + poll).
+  /// Idempotent.
+  void stopForeground() {
+    _foreground = false;
+    _serversSub?.cancel();
+    _serversSub = null;
+    for (final sub in _notifySubs.values) {
+      sub.cancel();
+    }
+    _notifySubs.clear();
+    _notifyConfigs.clear();
+    _pollTimer?.cancel();
+    _pollTimer = null;
+    _debounce?.cancel();
+    _debounce = null;
+  }
+
+  /// Orders sessions per the Phase 1 UI spec: needs-attention first, then by
+  /// status, then most-recent first.
+  ///
+  /// The `/api/sessions` list carries only `status` (no attention `kind`), so
+  /// both the attention rank and the status rank are derived from `status`:
+  /// `waiting`→approval, `api_error`→apierror, `idle`→done, everything else→none.
+  static int compareSessions(Session a, Session b) {
+    final byAttention = _attentionRank(a.status).compareTo(_attentionRank(b.status));
+    if (byAttention != 0) return byAttention;
+    final byStatus = _statusRank(a.status).compareTo(_statusRank(b.status));
+    if (byStatus != 0) return byStatus;
+    return (b.lastActivity ?? 0).compareTo(a.lastActivity ?? 0);
+  }
+
+  // --- internals ----------------------------------------------------------
+
+  /// Handles one `/ws/notify` frame: folds api-error state (for the instant
+  /// highlight) and schedules the debounced list refresh (existing behavior).
+  void _onNotify(NotifyEvent evt) {
+    _applyNotify(evt);
+    _scheduleRefresh();
+  }
+
+  /// Reacts to a change in the configured server set (from
+  /// [AppConfig.serversStream]): re-syncs the `/ws/notify` subscriptions and, if
+  /// a server was actually added, removed or re-tokenized, refreshes the list.
+  /// A name-only change (server renamed after `/api/version`) touches no
+  /// subscription, so it doesn't trigger a redundant refresh here — the refresh
+  /// that resolved the name already re-emits the list.
+  void _onServersChanged() {
+    if (!_foreground) return;
+    if (_syncNotifySubs()) _scheduleRefresh();
+  }
+
+  /// Aligns the live `/ws/notify` subscriptions with [AppConfig.servers]: opens
+  /// one per newly-added server, tears down subscriptions for removed servers
+  /// (and forgets their cached state), and re-opens a subscription when a
+  /// server's bearer token changed. Returns `true` if any subscription was
+  /// added or removed.
+  bool _syncNotifySubs() {
+    final current = <String, ServerConfig>{
+      for (final s in _store.servers) s.baseUrl: s,
+    };
+    var changed = false;
+
+    // Drop subscriptions for servers that are gone or whose token changed.
+    for (final key in _notifySubs.keys.toList()) {
+      final cfg = current[key];
+      final gone = cfg == null;
+      final tokenChanged =
+          cfg != null && cfg.bearerToken != _notifyConfigs[key]?.bearerToken;
+      if (gone || tokenChanged) {
+        _notifySubs.remove(key)!.cancel();
+        _notifyConfigs.remove(key);
+        changed = true;
+        if (gone) _forgetServer(key);
+      }
+    }
+
+    // Open subscriptions for servers we're not yet watching.
+    for (final entry in current.entries) {
+      if (_notifySubs.containsKey(entry.key)) continue;
+      _notifyConfigs[entry.key] = entry.value;
+      _notifySubs[entry.key] = _clientFor(entry.value).notifyStream().listen(
+            _onNotify,
+            onError: (_) {/* stream self-reconnects */},
+          );
+      changed = true;
+    }
+    return changed;
+  }
+
+  /// Forgets all cached state for a removed server so it stops contributing
+  /// stale sessions and its HTTP client is released.
+  void _forgetServer(String baseUrl) {
+    _clients.remove(baseUrl)?.close();
+    _lastByServer.remove(baseUrl);
+    _serverOnline.remove(baseUrl);
+    _namesResolved.remove(baseUrl);
+  }
+
+  /// Updates [_apiErrors] from a notify frame.
+  ///
+  /// Only frames that actually carry api-error state ([NotifyEvent
+  /// .hasApiErrorSignal]) touch the map — an ordinary status/approval/idle frame
+  /// (which has `apiError == false` merely by default) is ignored, so it can't
+  /// wrongly clear an active error. On such a frame: `apiError && !cleared` sets
+  /// or refreshes the entry (carrying the latest text/retry detail); otherwise
+  /// (recovery — `apiError == false`, or an explicit `cleared`) the entry is
+  /// removed. Re-emits the session list on any change so the dashboard rebuilds
+  /// immediately, ahead of the debounced [refresh].
+  void _applyNotify(NotifyEvent evt) {
+    if (evt.sessionId.isEmpty || !evt.hasApiErrorSignal) return;
+    final id = evt.sessionId;
+    if (evt.apiError && !evt.cleared) {
+      _apiErrors[id] = ApiErrorInfo(
+        active: true,
+        text: evt.apiErrorText,
+        transient: evt.transient,
+        autoContinue: evt.autoContinue,
+        action: evt.action,
+      );
+      _emitSessions();
+    } else if (_apiErrors.remove(id) != null) {
+      _emitSessions();
+    }
+  }
+
+  /// Drops api-error entries for sessions no longer in [sessions].
+  void _pruneApiErrors(List<Session> sessions) {
+    if (_apiErrors.isEmpty) return;
+    final live = <String>{for (final s in sessions) s.id};
+    _apiErrors.removeWhere((id, _) => !live.contains(id));
+  }
+
+  /// Re-emits the current session list (unchanged contents) so listeners rebuild
+  /// and re-read [apiErrorFor].
+  void _emitSessions() {
+    if (!_sessions.isClosed) _sessions.add(_current);
+  }
+
+  Future<List<Session>> _fetchServer(ServerConfig server) async {
+    try {
+      final list = await _clientFor(server).listSessions();
+      _serverOnline[server.baseUrl] = true;
+      _lastByServer[server.baseUrl] = list;
+      return list;
+    } catch (_) {
+      _serverOnline[server.baseUrl] = false;
+      return _lastByServer[server.baseUrl] ?? const <Session>[];
+    }
+  }
+
+  /// Whether any currently-configured server responded on the last [refresh].
+  bool _anyServerReachable() =>
+      _store.servers.any((s) => _serverOnline[s.baseUrl] == true);
+
+  /// Reads and decodes the persisted last-known session list, mapping each entry
+  /// onto a currently-configured server (dropping the rest). Empty on any error.
+  Future<List<Session>> _readCache() async {
+    try {
+      final prefs = await SharedPreferences.getInstance();
+      final raw = prefs.getString(_cacheKey);
+      if (raw == null || raw.isEmpty) return const <Session>[];
+      return decodeSessionCache(raw, _store.servers);
+    } catch (_) {
+      return const <Session>[];
+    }
+  }
+
+  /// Persists [sessions] as the last-known list for the next cold launch.
+  /// Best-effort — a storage failure is swallowed.
+  Future<void> _writeCache(List<Session> sessions) async {
+    try {
+      final prefs = await SharedPreferences.getInstance();
+      await prefs.setString(_cacheKey, encodeSessionCache(sessions));
+    } catch (_) {/* best-effort */}
+  }
+
+  /// Serializes [sessions] to the JSON stored under [_cacheKey]: the fields the
+  /// dashboard needs to paint a stale row plus the owning `serverBaseUrl` (used
+  /// on load to re-attach the current [ServerConfig]).
+  @visibleForTesting
+  static String encodeSessionCache(List<Session> sessions) => jsonEncode([
+        for (final s in sessions)
+          <String, dynamic>{
+            'id': s.id,
+            'name': s.name,
+            'cwd': s.cwd,
+            'status': s.status,
+            'claudeSessionId': s.claudeSessionId,
+            'lastActivity': s.lastActivity,
+            'notifyLevel': s.notifyLevel,
+            'autoCommand': s.autoCommand,
+            'serverBaseUrl': s.server.baseUrl,
+          },
+      ]);
+
+  /// Rebuilds the cached sessions, re-attaching each to the matching entry in
+  /// [servers] by `serverBaseUrl`. Sessions whose server is no longer configured
+  /// are dropped; a corrupt payload decodes to an empty list.
+  @visibleForTesting
+  static List<Session> decodeSessionCache(
+    String raw,
+    List<ServerConfig> servers,
+  ) {
+    try {
+      final decoded = jsonDecode(raw);
+      if (decoded is! List) return const <Session>[];
+      final byUrl = <String, ServerConfig>{
+        for (final s in servers) s.baseUrl: s,
+      };
+      final out = <Session>[];
+      for (final e in decoded) {
+        if (e is! Map) continue;
+        final server = byUrl[(e['serverBaseUrl'] ?? '').toString()];
+        if (server == null) continue;
+        out.add(Session(
+          id: (e['id'] ?? '').toString(),
+          name: (e['name'] ?? '').toString(),
+          cwd: (e['cwd'] ?? '').toString(),
+          status: (e['status'] ?? 'idle').toString(),
+          claudeSessionId: e['claudeSessionId']?.toString(),
+          lastActivity: _asInt(e['lastActivity']),
+          notifyLevel: (e['notifyLevel'] ?? 'important').toString(),
+          autoCommand: (e['autoCommand'] ?? '').toString(),
+          server: server,
+        ));
+      }
+      return out;
+    } catch (_) {
+      return const <Session>[];
+    }
+  }
+
+  /// Coerces a dynamic JSON value to `int?` (accepts numbers and numeric
+  /// strings), matching the defensive parsing in `models.dart`.
+  static int? _asInt(dynamic v) {
+    if (v == null) return null;
+    if (v is int) return v;
+    if (v is num) return v.toInt();
+    return int.tryParse(v.toString());
+  }
+
+  ApiClient _clientFor(ServerConfig server) {
+    final existing = _clients[server.baseUrl];
+    // Recreate when the config changed (e.g. the display name was resolved from
+    // /api/version) so freshly-tagged sessions carry the up-to-date server.
+    if (existing != null && existing.server == server) return existing;
+    existing?.close();
+    final client = _clientFactory(server);
+    _clients[server.baseUrl] = client;
+    return client;
+  }
+
+  /// Resolves each server's display name from `/api/version` once (best-effort;
+  /// retried on a later refresh if the server is unreachable). Updates the server
+  /// store in place so the fallback `Shadow` name upgrades to the real one.
+  Future<void> _ensureServerNames() async {
+    await Future.wait(_store.servers.map((server) async {
+      if (_namesResolved.contains(server.baseUrl)) return;
+      try {
+        final info = await _clientFor(server).version();
+        if (info.serverName.isNotEmpty) {
+          _store.updateServerName(server.baseUrl, info.serverName);
+        }
+        _namesResolved.add(server.baseUrl);
+      } catch (_) {/* retry next refresh */}
+    }));
+  }
+
+  void _scheduleRefresh() {
+    _debounce?.cancel();
+    _debounce = Timer(const Duration(milliseconds: 300), refresh);
+  }
+
+  Future<void> _cacheNames(List<Session> sessions) async {
+    if (sessions.isEmpty) return;
+    final entries = <String, String>{
+      for (final s in sessions) NotificationService.nameCacheKey(s.id): s.name,
+    };
+    await NotificationService.updateNameCache(entries);
+  }
+
+  static int _attentionRank(String status) {
+    switch (status) {
+      case 'waiting':
+        return 0; // approval
+      case 'api_error':
+        return 1; // apierror
+      case 'idle':
+        return 2; // done
+      default:
+        return 3; // none
+    }
+  }
+
+  static int _statusRank(String status) {
+    switch (status) {
+      case 'waiting':
+        return 0;
+      case 'api_error':
+        return 1;
+      case 'working':
+        return 2;
+      default:
+        return 3;
+    }
+  }
+}

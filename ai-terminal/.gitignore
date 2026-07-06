@@ -1,0 +1,12 @@
+# Flutter/Dart
+.dart_tool/
+build/
+.flutter-plugins*
+.packages
+*.iml
+.idea/
+# Secrets — never commit
+lib/spike_config.dart
+android/app/google-services.json
+*.keystore
+*.jks
