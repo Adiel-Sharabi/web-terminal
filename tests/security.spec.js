@@ -743,3 +743,32 @@ test.describe('Claude status metrics', () => {
     await ctx.dispose();
   });
 });
+
+// ============================================================
+// Pending interactive question (/api/sessions/:id/pending-question) — #19
+// ============================================================
+
+test.describe('Pending question', () => {
+  test('requires auth', async () => {
+    const ctx = await noAuthCtx();
+    const res = await ctx.get('/api/sessions/whatever/pending-question');
+    expect(res.status()).toBe(401);
+    await ctx.dispose();
+  });
+
+  test('404s for a session with no transcript', async () => {
+    const ctx = await authCtx();
+    const res = await ctx.get('/api/sessions/does-not-exist/pending-question');
+    expect(res.status()).toBe(404);
+    await ctx.dispose();
+  });
+
+  test('pending-question capability advertised', async () => {
+    const ctx = await authCtx();
+    const res = await ctx.get('/api/version');
+    expect(res.status()).toBe(200);
+    const caps = (await res.json()).capabilities || [];
+    expect(caps).toContain('pending-question');
+    await ctx.dispose();
+  });
+});

@@ -8,6 +8,7 @@ const path = require('path');
 const {
   lastAssistantText, isAllowedTranscriptPath,
   parseTranscriptTurn, scanTurnsBackward, encodeCursor, decodeCursor, stripAnsi,
+  pendingQuestion,
 } = require('../lib/transcript');
 
 // Write lines (objects) as JSONL to a unique temp file; returns the path.
@@ -384,5 +385,77 @@ test.describe('lib/transcript.scanTurnsBackward', () => {
     // Concatenated, p2 then p1 are contiguous in the original order.
     const merged = p2.turns.concat(p1.turns).map(t => t.text);
     expect(new Set(merged).size).toBe(merged.length); // no duplicates
+  });
+});
+
+// --- #19: pendingQuestion (structured AskUserQuestion from the transcript) ---
+const askLine = (id, questions) => JSON.stringify({
+  type: 'assistant',
+  message: { role: 'assistant', content: [{ type: 'tool_use', id, name: 'AskUserQuestion', input: { questions } }] },
+});
+const resultLine = (toolUseId) => JSON.stringify({
+  type: 'user',
+  message: { role: 'user', content: [{ type: 'tool_result', tool_use_id: toolUseId, content: 'answered' }] },
+});
+const oneQ = [{ header: 'DB', question: 'Which database?', multiSelect: false,
+  options: [{ label: 'Postgres', description: 'default' }, { label: 'MySQL', description: '' }] }];
+
+test.describe('pendingQuestion', () => {
+  test('returns null for empty / non-question transcript', () => {
+    expect(pendingQuestion('')).toBeNull();
+    expect(pendingQuestion(JSON.stringify(asst('just talking')))).toBeNull();
+  });
+
+  test('parses a pending single-question prompt', () => {
+    const q = pendingQuestion(askLine('toolu_1', oneQ));
+    expect(q).not.toBeNull();
+    expect(q.toolUseId).toBe('toolu_1');
+    expect(q.questions).toHaveLength(1);
+    expect(q.questions[0].header).toBe('DB');
+    expect(q.questions[0].multiSelect).toBe(false);
+    expect(q.questions[0].options.map(o => o.label)).toEqual(['Postgres', 'MySQL']);
+  });
+
+  test('parses a multi-question (tabbed) prompt', () => {
+    const twoQ = [
+      { header: 'Lang', question: 'Language?', options: [{ label: 'Dart' }, { label: 'Go' }] },
+      { header: 'CI', question: 'CI?', multiSelect: true, options: [{ label: 'GH Actions' }, { label: 'None' }] },
+    ];
+    const q = pendingQuestion(askLine('toolu_x', twoQ));
+    expect(q.questions).toHaveLength(2);
+    expect(q.questions[1].multiSelect).toBe(true);
+    expect(q.questions[1].options.map(o => o.label)).toEqual(['GH Actions', 'None']);
+  });
+
+  test('an answered question (matching tool_result) is not pending', () => {
+    const text = [askLine('toolu_1', oneQ), resultLine('toolu_1')].join('\n');
+    expect(pendingQuestion(text)).toBeNull();
+  });
+
+  test('returns the newest pending when an older one was answered', () => {
+    const text = [
+      askLine('toolu_old', oneQ),
+      resultLine('toolu_old'),
+      askLine('toolu_new', [{ header: 'X', question: 'Pick', options: [{ label: 'A' }] }]),
+    ].join('\n');
+    const q = pendingQuestion(text);
+    expect(q.toolUseId).toBe('toolu_new');
+    expect(q.questions[0].options[0].label).toBe('A');
+  });
+
+  test('drops options with no label and caps/sanitizes strings', () => {
+    const dirty = [{ header: 'H', question: 'Q', options: [
+      { label: '', description: 'no label -> dropped' },
+      { label: 'Keep', description: 'x'.repeat(2000) },
+    ] }];
+    const q = pendingQuestion(askLine('toolu_d', dirty));
+    expect(q.questions[0].options).toHaveLength(1);
+    expect(q.questions[0].options[0].label).toBe('Keep');
+    expect(q.questions[0].options[0].description.length).toBeLessThanOrEqual(800);
+  });
+
+  test('a question with no valid options yields no pending question', () => {
+    const empty = [{ header: 'H', question: 'Q', options: [{ description: 'x' }] }];
+    expect(pendingQuestion(askLine('toolu_e', empty))).toBeNull();
   });
 });
