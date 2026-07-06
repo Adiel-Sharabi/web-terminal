@@ -698,3 +698,48 @@ test.describe('Session cookie expiry', () => {
     await ctx.dispose();
   });
 });
+
+// ============================================================
+// Claude status-line metrics (/api/claude-status)
+// ============================================================
+
+test.describe('Claude status metrics', () => {
+  test('accepts metrics push (localhost)', async () => {
+    const ctx = await noAuthCtx(); // tests run on localhost → isLocalhostReq passes
+    const res = await ctx.post('/api/claude-status', {
+      data: { session_id: 'test-csid-1', ctx: 42, five: 18, seven: 63, model: 'Opus', effort: 'high' },
+    });
+    expect(res.status()).toBe(200);
+    expect((await res.json()).ok).toBe(true);
+    await ctx.dispose();
+  });
+
+  test('skips when session_id missing', async () => {
+    const ctx = await noAuthCtx();
+    const res = await ctx.post('/api/claude-status', { data: { ctx: 10 } });
+    expect(res.status()).toBe(200);
+    expect((await res.json()).skipped).toBeTruthy();
+    await ctx.dispose();
+  });
+
+  test('/api/sessions items carry a metrics field', async () => {
+    const ctx = await authCtx();
+    const res = await ctx.get('/api/sessions');
+    expect(res.status()).toBe(200);
+    const list = await res.json();
+    expect(Array.isArray(list)).toBe(true);
+    for (const s of list) {
+      expect(s).toHaveProperty('metrics'); // null unless a live statusline matched its claudeSessionId
+    }
+    await ctx.dispose();
+  });
+
+  test('status-metrics capability advertised', async () => {
+    const ctx = await authCtx();
+    const res = await ctx.get('/api/version');
+    expect(res.status()).toBe(200);
+    const caps = (await res.json()).capabilities || [];
+    expect(caps).toContain('status-metrics');
+    await ctx.dispose();
+  });
+});
