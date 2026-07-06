@@ -14,7 +14,7 @@ const notifyPush = require('./lib/notify-push');
 const transcript = require('./lib/transcript');
 const fcm = require('./lib/fcm');
 
-const SERVER_VERSION = '1.23.0'; // 2026-07-06: /api/claude-status accepts statusline metrics (ctx%/5h/7d/model/effort); exposed per-session for the companion app chat header
+const SERVER_VERSION = '1.23.1'; // 2026-07-06: keep last-known statusline metrics for hours (idle sessions stop posting) so they don't fall back to folder-only
 
 // --- Optional latency instrumentation (opt-in via WT_LATENCY_DEBUG=1) -----
 // Event-loop lag monitor: interval is 10ms; anything ≥ 50ms slip is a stall.
@@ -1296,7 +1296,11 @@ app.post('/api/session/:id/hook', express.json({ limit: '256kb' }), async (req, 
 // few seconds), so a plain in-memory Map is fine — it self-heals after a
 // server hot-reload. Localhost-only: same trust boundary as the local hooks.
 const claudeStatusMetrics = new Map(); // claudeSessionId -> { ctx, fiveH, sevenD, model, effort, ts }
-const CLAUDE_STATUS_TTL_MS = 2 * 60 * 1000; // treat metrics older than this as stale
+// Idle sessions stop rendering their status line, so they stop posting. Keep the
+// last-known metrics for hours: context % is frozen while idle (accurate), and
+// stale 5h/7d numbers are low-stakes. Prevents an idle session showing only its
+// folder. Bounded by the 200-entry prune + a session vanishing from /api/sessions.
+const CLAUDE_STATUS_TTL_MS = 4 * 60 * 60 * 1000;
 
 function getStatusMetrics(claudeSessionId) {
   if (!claudeSessionId) return null;
