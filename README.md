@@ -306,6 +306,7 @@ PC Browser ────> localhost:7681 ────────┘
 | `claude-hook.js` | Claude Code hook script (Node.js, for Windows) |
 | `scripts/` | Developer tooling — typing-RTT probe, WS latency harnesses, etc. (see Dev Tooling) |
 | `tests/` | Playwright tests (security, cluster, IPC, worker, hot-reload, exclusive viewer) |
+| `ai-terminal/` | **AiTerminal** — the native Flutter client (Android + Windows) for this server: chat/terminal lenses, session browser, FCM push, and the interactive-question overlay. Talks to the same REST/WebSocket API; built with `flutter` (see `ai-terminal/WINDOWS-BUILD.md`). Its own Dart tests run via `flutter test`, separate from the Playwright suite |
 
 See [ARCHITECTURE.md](ARCHITECTURE.md) for a detailed technical walkthrough.
 

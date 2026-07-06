@@ -1,0 +1,915 @@
+/// The Chat lens — the centerpiece the owner wants over the raw terminal:
+/// Claude's conversation rendered as a chat transcript instead of a VT100
+/// screen. Assistant turns on the left, user turns muted on the right,
+/// fenced code blocks in their own tap-to-copy containers, tool calls as
+/// collapsed chips, native text selection throughout (no markdown package —
+/// selection is the whole point).
+///
+/// Data comes from `GET /api/sessions/:id/transcript`, backward-paginated
+/// (newest-last per page; `before=<cursor>` walks further into history) via
+/// `ApiClient.transcript()` / `TranscriptPage` / `TranscriptTurn` / `ToolUse`
+/// (lib/api/api_client.dart, lib/api/models.dart).
+library;
+
+import 'dart:async';
+
+import 'package:flutter/material.dart';
+import 'package:flutter/services.dart';
+import 'package:flutter_markdown/flutter_markdown.dart';
+
+import '../api/api_client.dart';
+import '../api/models.dart';
+import '../theme/app_theme.dart';
+import 'empty_state.dart';
+import 'format_utils.dart';
+
+/// Turns per page — matches the server's default.
+const int _kPageSize = 50;
+
+/// How close to an edge (in pixels) counts as "there" for pin-to-bottom and
+/// load-older-on-scroll-to-top detection.
+const double _kEdgeThreshold = 80;
+
+/// Injectable transcript fetch signature — the default calls the real
+/// (bridged) `ApiClient.transcript`; tests supply canned pages instead.
+typedef TranscriptFetcher =
+    Future<TranscriptPage> Function(
+      String sessionId, {
+      String? before,
+      int? limit,
+    });
+
+class ConversationView extends StatefulWidget {
+  const ConversationView({
+    super.key,
+    required this.session,
+    this.onNoTranscript,
+    this.fetchPage,
+  });
+
+  final Session session;
+
+  /// Called once if the initial load 404s (no transcript for this session) —
+  /// the caller (SessionScreen) falls back to the Terminal lens silently.
+  final VoidCallback? onNoTranscript;
+
+  /// Injectable for tests; defaults to `ApiClient(session.server).transcript`.
+  final TranscriptFetcher? fetchPage;
+
+  @override
+  State<ConversationView> createState() => _ConversationViewState();
+}
+
+class _ConversationViewState extends State<ConversationView> {
+  late final TranscriptFetcher _fetch = widget.fetchPage ?? _defaultFetch;
+
+  final ScrollController _scrollController = ScrollController();
+  List<TranscriptTurn> _turns = const [];
+  String? _oldestCursor;
+  bool _hasMoreOlder = false;
+  bool _loadingInitial = true;
+  bool _loadingOlder = false;
+  String? _error;
+  bool _pinnedToBottom = true;
+  bool _showNewPill = false;
+  Timer? _pollTimer;
+  final List<Timer> _scrollTimers = <Timer>[];
+
+  Future<TranscriptPage> _defaultFetch(
+    String sessionId, {
+    String? before,
+    int? limit,
+  }) {
+    return ApiClient(
+      widget.session.server,
+    ).transcript(sessionId, before: before, limit: limit);
+  }
+
+  @override
+  void initState() {
+    super.initState();
+    _scrollController.addListener(_onScroll);
+    _loadInitial();
+    _setPolling(widget.session.status == 'working');
+  }
+
+  @override
+  void didUpdateWidget(covariant ConversationView oldWidget) {
+    super.didUpdateWidget(oldWidget);
+    if (oldWidget.session.id != widget.session.id) {
+      _resetAndReload();
+      return;
+    }
+    final wasWorking = oldWidget.session.status == 'working';
+    final isWorking = widget.session.status == 'working';
+    if (isWorking != wasWorking) _setPolling(isWorking);
+    // Session is a plain value object created fresh on every repository
+    // emission, so comparing a couple of fields (rather than the whole
+    // object, which has no `==`) is the cheap, reliable "did anything
+    // relevant change" signal — covers /ws/notify-triggered repo refreshes
+    // without this view needing its own repository subscription.
+    if (oldWidget.session.lastActivity != widget.session.lastActivity ||
+        oldWidget.session.status != widget.session.status) {
+      unawaited(_refreshLastPage());
+    }
+  }
+
+  @override
+  void dispose() {
+    _pollTimer?.cancel();
+    for (final t in _scrollTimers) {
+      t.cancel();
+    }
+    _scrollController.removeListener(_onScroll);
+    _scrollController.dispose();
+    super.dispose();
+  }
+
+  void _resetAndReload() {
+    setState(() {
+      _turns = const [];
+      _oldestCursor = null;
+      _hasMoreOlder = false;
+      _error = null;
+      _showNewPill = false;
+      _pinnedToBottom = true;
+    });
+    _loadInitial();
+    _setPolling(widget.session.status == 'working');
+  }
+
+  void _setPolling(bool enabled) {
+    _pollTimer?.cancel();
+    _pollTimer = enabled
+        ? Timer.periodic(
+            const Duration(seconds: 4),
+            (_) => unawaited(_refreshLastPage()),
+          )
+        : null;
+  }
+
+  Future<void> _loadInitial() async {
+    setState(() {
+      _loadingInitial = true;
+      _error = null;
+    });
+    try {
+      final page = await _fetch(widget.session.id, limit: _kPageSize);
+      if (!mounted) return;
+      setState(() {
+        _turns = page.messages;
+        _oldestCursor = page.cursor;
+        _hasMoreOlder = page.hasMore;
+        _loadingInitial = false;
+      });
+      _scrollToBottom(jump: true);
+    } catch (e) {
+      if (!mounted) return;
+      if (e is ApiException && e.status == 404) {
+        // The caller (SessionScreen) is expected to stop building this
+        // widget in response — but don't leave it stuck showing an
+        // indeterminate spinner forever on the off chance it doesn't.
+        setState(() => _loadingInitial = false);
+        widget.onNoTranscript?.call();
+        return;
+      }
+      setState(() {
+        _error = '$e';
+        _loadingInitial = false;
+      });
+    }
+  }
+
+  Future<void> _loadOlder() async {
+    if (_loadingOlder || !_hasMoreOlder) return;
+    setState(() => _loadingOlder = true);
+    try {
+      final page = await _fetch(
+        widget.session.id,
+        before: _oldestCursor,
+        limit: _kPageSize,
+      );
+      if (!mounted) return;
+      final hadClients = _scrollController.hasClients;
+      final oldExtent = hadClients
+          ? _scrollController.position.maxScrollExtent
+          : 0.0;
+      setState(() {
+        _turns = [...page.messages, ..._turns];
+        _oldestCursor = page.cursor;
+        _hasMoreOlder = page.hasMore;
+        _loadingOlder = false;
+      });
+      if (hadClients) {
+        WidgetsBinding.instance.addPostFrameCallback((_) {
+          if (!mounted || !_scrollController.hasClients) return;
+          final newExtent = _scrollController.position.maxScrollExtent;
+          _scrollController.jumpTo(
+            _scrollController.position.pixels + (newExtent - oldExtent),
+          );
+        });
+      }
+    } catch (_) {
+      // Best-effort — scrolling again naturally retries via the listener.
+      if (mounted) setState(() => _loadingOlder = false);
+    }
+  }
+
+  /// Refetches the last page and replaces the equivalent trailing window of
+  /// `_turns` with it — the simplest robust merge given turns have no ids.
+  /// Skips the rebuild entirely when the fetched tail is unchanged.
+  Future<void> _refreshLastPage() async {
+    final TranscriptPage page;
+    try {
+      page = await _fetch(widget.session.id, limit: _kPageSize);
+    } catch (_) {
+      return; // best-effort background refresh
+    }
+    if (!mounted) return;
+    final freshTail = page.messages;
+    if (freshTail.isEmpty) return;
+    final existingTail = _turns.length >= freshTail.length
+        ? _turns.sublist(_turns.length - freshTail.length)
+        : _turns;
+    if (_turnListEquals(existingTail, freshTail)) return;
+
+    final keepCount = _turns.length > freshTail.length
+        ? _turns.length - freshTail.length
+        : 0;
+    setState(() => _turns = [..._turns.sublist(0, keepCount), ...freshTail]);
+    if (_pinnedToBottom) {
+      _scrollToBottom();
+    } else {
+      setState(() => _showNewPill = true);
+    }
+  }
+
+  /// `TranscriptTurn`/`ToolUse` have no `==` override, so the "did the tail
+  /// actually change" check compares the fields that matter (role, text, ts,
+  /// and each tool use's name/inputPreview) by hand.
+  bool _turnListEquals(List<TranscriptTurn> a, List<TranscriptTurn> b) {
+    if (a.length != b.length) return false;
+    for (var i = 0; i < a.length; i++) {
+      final ta = a[i];
+      final tb = b[i];
+      if (ta.role != tb.role || ta.text != tb.text || ta.ts != tb.ts) {
+        return false;
+      }
+      if (ta.toolUses.length != tb.toolUses.length) return false;
+      for (var j = 0; j < ta.toolUses.length; j++) {
+        if (ta.toolUses[j].name != tb.toolUses[j].name ||
+            ta.toolUses[j].inputPreview != tb.toolUses[j].inputPreview) {
+          return false;
+        }
+      }
+    }
+    return true;
+  }
+
+  void _onScroll() {
+    if (!_scrollController.hasClients) return;
+    final pos = _scrollController.position;
+    final atBottom = pos.pixels >= pos.maxScrollExtent - _kEdgeThreshold;
+    if (atBottom != _pinnedToBottom) {
+      setState(() {
+        _pinnedToBottom = atBottom;
+        if (atBottom) _showNewPill = false;
+      });
+    }
+    if (pos.pixels <= pos.minScrollExtent + _kEdgeThreshold &&
+        _hasMoreOlder &&
+        !_loadingOlder) {
+      unawaited(_loadOlder());
+    }
+  }
+
+  void _scrollToBottom({bool jump = false}) {
+    if (jump) {
+      // A ListView.builder only *estimates* maxScrollExtent until the tail
+      // turns are actually laid out, so a single jump on open lands short and
+      // leaves older messages showing. Jump now, again next frame, and twice
+      // more after layout settles so we always end on the newest turn.
+      void go() {
+        if (!mounted || !_scrollController.hasClients) return;
+        _scrollController.jumpTo(_scrollController.position.maxScrollExtent);
+      }
+
+      WidgetsBinding.instance.addPostFrameCallback((_) {
+        go();
+        WidgetsBinding.instance.addPostFrameCallback((_) => go());
+      });
+      _scrollTimers.add(Timer(const Duration(milliseconds: 150), go));
+      _scrollTimers.add(Timer(const Duration(milliseconds: 400), go));
+      return;
+    }
+    WidgetsBinding.instance.addPostFrameCallback((_) {
+      if (!mounted || !_scrollController.hasClients) return;
+      _scrollController.animateTo(
+        _scrollController.position.maxScrollExtent,
+        duration: const Duration(milliseconds: 200),
+        curve: Curves.easeOut,
+      );
+    });
+  }
+
+  void _jumpToNew() {
+    setState(() => _showNewPill = false);
+    _scrollToBottom();
+  }
+
+  /// Approximate context-window % from the newest assistant turn's token count,
+  /// used only when the live status line hasn't posted a real ctx (e.g. an idle
+  /// session). Assumes a 200k window; shown with a `~` to signal it's an
+  /// estimate. Returns null if the server didn't provide token usage.
+  int? _deriveCtxFromTranscript() {
+    if (widget.session.metrics?.ctx != null) return null; // live value wins
+    for (var i = _turns.length - 1; i >= 0; i--) {
+      final t = _turns[i];
+      if (t.isAssistant && t.ctxTokens != null) {
+        return ((t.ctxTokens! / 200000) * 100).round().clamp(0, 100);
+      }
+    }
+    return null;
+  }
+
+  @override
+  Widget build(BuildContext context) {
+    if (_loadingInitial) {
+      return const Center(child: CircularProgressIndicator());
+    }
+    if (_error != null) {
+      return Center(
+        child: Padding(
+          padding: const EdgeInsets.all(24),
+          child: Column(
+            mainAxisSize: MainAxisSize.min,
+            children: [
+              Text(
+                'Could not load the conversation.',
+                style: Theme.of(context).textTheme.bodyLarge,
+              ),
+              const SizedBox(height: 4),
+              Text(
+                _error!,
+                textAlign: TextAlign.center,
+                style: Theme.of(context).textTheme.bodySmall?.copyWith(
+                  color: Theme.of(context).colorScheme.onSurfaceVariant,
+                ),
+              ),
+              const SizedBox(height: 12),
+              OutlinedButton(
+                onPressed: _loadInitial,
+                child: const Text('Retry'),
+              ),
+            ],
+          ),
+        ),
+      );
+    }
+    if (_turns.isEmpty) {
+      return const EmptyState(
+        icon: Icons.forum_outlined,
+        title: 'No messages yet',
+        subtitle: 'Claude\'s replies will appear here as a conversation',
+      );
+    }
+
+    final working = widget.session.status == 'working';
+    final leadingLoader = _loadingOlder ? 1 : 0;
+    return Column(
+      children: [
+        _MetricsHeader(
+          session: widget.session,
+          derivedCtx: _deriveCtxFromTranscript(),
+        ),
+        Expanded(
+          child: Stack(
+            children: [
+        ListView.builder(
+          controller: _scrollController,
+          padding: const EdgeInsets.symmetric(vertical: 8),
+          itemCount: _turns.length + leadingLoader + (working ? 1 : 0),
+          itemBuilder: (context, index) {
+            if (_loadingOlder && index == 0) {
+              return const Padding(
+                padding: EdgeInsets.all(12),
+                child: Center(
+                  child: SizedBox(
+                    width: 18,
+                    height: 18,
+                    child: CircularProgressIndicator(strokeWidth: 2),
+                  ),
+                ),
+              );
+            }
+            final turnIndex = index - leadingLoader;
+            // Trailing "Claude is working…" indicator while the agent is mid-turn.
+            if (working && turnIndex == _turns.length) {
+              return const _WorkingIndicator();
+            }
+            return _TurnBubble(turn: _turns[turnIndex]);
+          },
+        ),
+        if (_showNewPill)
+          Positioned(
+            bottom: 12,
+            left: 0,
+            right: 0,
+            child: Center(
+              child: Material(
+                color: Theme.of(context).colorScheme.primary,
+                borderRadius: BorderRadius.circular(AppShape.large),
+                child: InkWell(
+                  onTap: _jumpToNew,
+                  borderRadius: BorderRadius.circular(AppShape.large),
+                  child: Padding(
+                    padding: const EdgeInsets.symmetric(
+                      horizontal: 14,
+                      vertical: 8,
+                    ),
+                    child: Row(
+                      mainAxisSize: MainAxisSize.min,
+                      children: [
+                        Icon(
+                          Icons.arrow_downward,
+                          size: 14,
+                          color: Theme.of(context).colorScheme.onPrimary,
+                        ),
+                        const SizedBox(width: 6),
+                        Text(
+                          'New',
+                          style: Theme.of(context).textTheme.labelLarge
+                              ?.copyWith(
+                                color: Theme.of(context).colorScheme.onPrimary,
+                              ),
+                        ),
+                      ],
+                    ),
+                  ),
+                ),
+              ),
+            ),
+          ),
+        // Jump-to-bottom button whenever scrolled up (even with no new content),
+        // so you can always get back to the latest turn.
+        if (!_pinnedToBottom && !_showNewPill)
+          Positioned(
+            right: 12,
+            bottom: 12,
+            child: FloatingActionButton.small(
+              heroTag: 'chat-jump-bottom',
+              backgroundColor:
+                  Theme.of(context).colorScheme.surfaceContainerHigh,
+              foregroundColor: Theme.of(context).colorScheme.primary,
+              onPressed: () => _scrollToBottom(),
+              child: const Icon(Icons.keyboard_double_arrow_down),
+            ),
+          ),
+            ],
+          ),
+        ),
+      ],
+    );
+  }
+}
+
+/// A slim header strip at the top of chat mode showing the folder plus, when
+/// available, the live status-line metrics: context % and the 5h / 7d
+/// rate-limit usage. Mirrors the Claude Code status line so you can gauge
+/// context/limit pressure from the phone.
+class _MetricsHeader extends StatelessWidget {
+  const _MetricsHeader({required this.session, this.derivedCtx});
+
+  final Session session;
+
+  /// Approximate ctx% derived from the transcript when the live status line
+  /// isn't posting; shown with a `~`. Null when a live ctx exists or none known.
+  final int? derivedCtx;
+
+  @override
+  Widget build(BuildContext context) {
+    final theme = Theme.of(context);
+    final m = session.metrics;
+    final folder = _folderName(session.cwd);
+
+    final chips = <Widget>[];
+    if (folder.isNotEmpty) {
+      chips.add(_chip(theme, Icons.folder_outlined, folder,
+          theme.colorScheme.onSurfaceVariant));
+    }
+    // Context fills fast and matters most — warn early (50%), danger at 70%.
+    // Prefer the live status-line value; fall back to the transcript estimate.
+    if (m?.ctx != null) {
+      chips.add(_chip(theme, Icons.data_usage, 'ctx ${m!.ctx}%',
+          _loadColor(theme, m.ctx!, 50, 70)));
+    } else if (derivedCtx != null) {
+      chips.add(_chip(theme, Icons.data_usage, 'ctx ~$derivedCtx%',
+          _loadColor(theme, derivedCtx!, 50, 70)));
+    }
+    if (m?.fiveH != null) {
+      chips.add(_chip(theme, Icons.schedule, '5h ${m!.fiveH}%',
+          _loadColor(theme, m.fiveH!, 60, 85)));
+    }
+    if (m?.sevenD != null) {
+      chips.add(_chip(theme, Icons.calendar_today, '7d ${m!.sevenD}%',
+          _loadColor(theme, m.sevenD!, 60, 85)));
+    }
+    if (chips.isEmpty) return const SizedBox.shrink();
+
+    return Container(
+      width: double.infinity,
+      padding: const EdgeInsets.symmetric(horizontal: 12, vertical: 6),
+      decoration: BoxDecoration(
+        color: theme.colorScheme.surfaceContainerLow,
+        border: Border(
+          bottom: BorderSide(color: theme.dividerColor.withValues(alpha: 0.4)),
+        ),
+      ),
+      child: SingleChildScrollView(
+        scrollDirection: Axis.horizontal,
+        child: Row(children: chips),
+      ),
+    );
+  }
+
+  static String _folderName(String cwd) {
+    if (cwd.isEmpty) return '';
+    final parts = cwd.split(RegExp(r'[\\/]')).where((p) => p.isNotEmpty).toList();
+    return parts.isEmpty ? cwd : parts.last;
+  }
+
+  // Green below [warn], amber to [danger], red at/above — quick pressure read.
+  static Color _loadColor(ThemeData theme, int pct, int warn, int danger) {
+    if (pct >= danger) return theme.colorScheme.error;
+    if (pct >= warn) return const Color(0xFFE0A030);
+    return theme.colorScheme.primary;
+  }
+
+  static Widget _chip(ThemeData theme, IconData icon, String label, Color color) {
+    return Padding(
+      padding: const EdgeInsets.only(right: 8),
+      child: Row(
+        mainAxisSize: MainAxisSize.min,
+        children: [
+          Icon(icon, size: 13, color: color),
+          const SizedBox(width: 4),
+          Text(
+            label,
+            style: theme.textTheme.labelSmall?.copyWith(
+              color: color,
+              fontFeatures: const [FontFeature.tabularFigures()],
+            ),
+          ),
+        ],
+      ),
+    );
+  }
+}
+
+/// A left-aligned "Claude is working…" bubble with three pulsing dots, shown
+/// while the session status is `working`.
+class _WorkingIndicator extends StatefulWidget {
+  const _WorkingIndicator();
+  @override
+  State<_WorkingIndicator> createState() => _WorkingIndicatorState();
+}
+
+class _WorkingIndicatorState extends State<_WorkingIndicator>
+    with SingleTickerProviderStateMixin {
+  late final AnimationController _c = AnimationController(
+    vsync: this,
+    duration: const Duration(milliseconds: 1200),
+  )..repeat();
+
+  @override
+  void dispose() {
+    _c.dispose();
+    super.dispose();
+  }
+
+  @override
+  Widget build(BuildContext context) {
+    final theme = Theme.of(context);
+    return Align(
+      alignment: Alignment.centerLeft,
+      child: Container(
+        margin: const EdgeInsets.fromLTRB(12, 4, 48, 4),
+        padding: const EdgeInsets.symmetric(horizontal: 14, vertical: 12),
+        decoration: BoxDecoration(
+          color: theme.colorScheme.surfaceContainer,
+          borderRadius: BorderRadius.circular(AppShape.medium),
+        ),
+        child: Row(
+          mainAxisSize: MainAxisSize.min,
+          children: [
+            Text(
+              'Claude is working',
+              style: theme.textTheme.bodyMedium?.copyWith(
+                color: theme.colorScheme.onSurfaceVariant,
+              ),
+            ),
+            const SizedBox(width: 8),
+            AnimatedBuilder(
+              animation: _c,
+              builder: (context, _) {
+                return Row(
+                  mainAxisSize: MainAxisSize.min,
+                  children: List.generate(3, (i) {
+                    // Stagger each dot's pulse across the 0..1 cycle.
+                    final t = (_c.value + i / 3) % 1.0;
+                    final op = 0.3 + 0.7 * (1 - (2 * t - 1).abs());
+                    return Padding(
+                      padding: const EdgeInsets.symmetric(horizontal: 2),
+                      child: Opacity(
+                        opacity: op,
+                        child: Container(
+                          width: 6,
+                          height: 6,
+                          decoration: BoxDecoration(
+                            color: theme.colorScheme.primary,
+                            shape: BoxShape.circle,
+                          ),
+                        ),
+                      ),
+                    );
+                  }),
+                );
+              },
+            ),
+          ],
+        ),
+      ),
+    );
+  }
+}
+
+/// Markdown style for a chat bubble's prose. Fenced code blocks are split out
+/// to [_CodeBlock] before markdown runs, so this mainly styles headings, bold,
+/// italics, lists, links, inline code and blockquotes to match the bubble text.
+MarkdownStyleSheet _markdownStyle(
+  ThemeData theme,
+  TextStyle? body,
+  TextStyle? codeSpan,
+) {
+  final base = body ?? const TextStyle();
+  final fs = base.fontSize ?? 14;
+  return MarkdownStyleSheet.fromTheme(theme).copyWith(
+    p: base,
+    pPadding: EdgeInsets.zero,
+    a: TextStyle(
+      color: theme.colorScheme.primary,
+      decoration: TextDecoration.underline,
+    ),
+    code: (codeSpan ?? base).copyWith(fontSize: fs - 1),
+    h1: base.copyWith(fontSize: fs + 8, fontWeight: FontWeight.bold),
+    h2: base.copyWith(fontSize: fs + 5, fontWeight: FontWeight.bold),
+    h3: base.copyWith(fontSize: fs + 3, fontWeight: FontWeight.bold),
+    h4: base.copyWith(fontSize: fs + 1, fontWeight: FontWeight.bold),
+    h5: base.copyWith(fontWeight: FontWeight.bold),
+    h6: base.copyWith(fontWeight: FontWeight.bold),
+    strong: base.copyWith(fontWeight: FontWeight.bold),
+    em: base.copyWith(fontStyle: FontStyle.italic),
+    listBullet: base,
+    blockquote: base.copyWith(color: theme.colorScheme.onSurfaceVariant),
+    blockquoteDecoration: BoxDecoration(
+      color: theme.colorScheme.surfaceContainerHigh,
+      borderRadius: BorderRadius.circular(4),
+    ),
+    codeblockDecoration: BoxDecoration(
+      color: theme.colorScheme.surfaceContainerHigh,
+      borderRadius: BorderRadius.circular(6),
+    ),
+  );
+}
+
+class _TurnBubble extends StatelessWidget {
+  const _TurnBubble({required this.turn});
+
+  final TranscriptTurn turn;
+
+  @override
+  Widget build(BuildContext context) {
+    final theme = Theme.of(context);
+    final isAssistant = turn.isAssistant;
+    final segments = _splitCodeBlocks(turn.text);
+    final bodyStyle = isAssistant
+        ? theme.textTheme.bodyLarge
+        : theme.textTheme.bodyLarge?.copyWith(
+            color: theme.colorScheme.onSurfaceVariant,
+          );
+    final codeSpanStyle = bodyStyle?.copyWith(
+      fontFamily: 'monospace',
+      backgroundColor: theme.colorScheme.surfaceContainerHigh,
+    );
+    final epoch = _parseIsoToEpoch(turn.ts);
+
+    return Align(
+      alignment: isAssistant ? Alignment.centerLeft : Alignment.centerRight,
+      child: ConstrainedBox(
+        constraints: BoxConstraints(
+          maxWidth: MediaQuery.sizeOf(context).width * 0.82,
+        ),
+        child: Container(
+          margin: const EdgeInsets.symmetric(
+            vertical: 4,
+            horizontal: AppSpacing.screenPadding,
+          ),
+          padding: const EdgeInsets.all(12),
+          decoration: BoxDecoration(
+            color: isAssistant
+                ? theme.colorScheme.surfaceContainer
+                : theme.colorScheme.surfaceContainerHigh.withValues(alpha: 0.5),
+            borderRadius: BorderRadius.circular(AppShape.medium),
+          ),
+          child: Column(
+            crossAxisAlignment: isAssistant
+                ? CrossAxisAlignment.start
+                : CrossAxisAlignment.end,
+            mainAxisSize: MainAxisSize.min,
+            children: [
+              for (final seg in segments)
+                if (seg.kind == _SegmentKind.code)
+                  Padding(
+                    padding: const EdgeInsets.symmetric(vertical: 4),
+                    child: _CodeBlock(code: seg.content),
+                  )
+                else if (seg.content.trim().isNotEmpty)
+                  Padding(
+                    padding: const EdgeInsets.symmetric(vertical: 2),
+                    child: MarkdownBody(
+                      data: seg.content,
+                      selectable: true,
+                      fitContent: true,
+                      styleSheet: _markdownStyle(theme, bodyStyle, codeSpanStyle),
+                    ),
+                  ),
+              for (final tool in turn.toolUses) _ToolChip(tool: tool),
+              if (epoch != null)
+                Padding(
+                  padding: const EdgeInsets.only(top: 4),
+                  child: Text(
+                    relativeTime(epoch),
+                    style: theme.textTheme.bodySmall?.copyWith(
+                      color: theme.colorScheme.onSurfaceVariant,
+                    ),
+                  ),
+                ),
+            ],
+          ),
+        ),
+      ),
+    );
+  }
+}
+
+class _CodeBlock extends StatelessWidget {
+  const _CodeBlock({required this.code});
+
+  final String code;
+
+  Future<void> _copy(BuildContext context) async {
+    await Clipboard.setData(ClipboardData(text: code));
+    if (context.mounted) {
+      ScaffoldMessenger.of(context).showSnackBar(
+        const SnackBar(content: Text('Copied'), duration: Duration(seconds: 1)),
+      );
+    }
+  }
+
+  @override
+  Widget build(BuildContext context) {
+    final theme = Theme.of(context);
+    return Container(
+      width: double.infinity,
+      padding: const EdgeInsets.all(10),
+      decoration: BoxDecoration(
+        color: theme.colorScheme.surfaceContainerHigh,
+        borderRadius: BorderRadius.circular(AppShape.small),
+        border: Border.all(color: theme.colorScheme.outlineVariant),
+      ),
+      child: Stack(
+        children: [
+          Padding(
+            padding: const EdgeInsets.only(right: 28),
+            child: SelectableText(
+              code,
+              style: theme.textTheme.bodyMedium?.copyWith(
+                fontFamily: 'monospace',
+              ),
+            ),
+          ),
+          Positioned(
+            top: -4,
+            right: -4,
+            child: IconButton(
+              onPressed: () => _copy(context),
+              icon: const Icon(Icons.copy_all_outlined, size: 16),
+              tooltip: 'Copy code',
+              visualDensity: VisualDensity.compact,
+              color: theme.colorScheme.onSurfaceVariant,
+            ),
+          ),
+        ],
+      ),
+    );
+  }
+}
+
+class _ToolChip extends StatefulWidget {
+  const _ToolChip({required this.tool});
+
+  final ToolUse tool;
+
+  @override
+  State<_ToolChip> createState() => _ToolChipState();
+}
+
+class _ToolChipState extends State<_ToolChip> {
+  static const int _collapsedChars = 40;
+  bool _expanded = false;
+
+  @override
+  Widget build(BuildContext context) {
+    final theme = Theme.of(context);
+    final full = widget.tool.inputPreview;
+    final canExpand = full.length > _collapsedChars;
+    final shown = (!_expanded && canExpand)
+        ? '${full.substring(0, _collapsedChars)}…'
+        : full;
+    final label = widget.tool.name.isEmpty ? 'Tool' : widget.tool.name;
+
+    return Padding(
+      padding: const EdgeInsets.only(top: 4),
+      child: Material(
+        color: theme.colorScheme.surfaceContainerHigh,
+        borderRadius: BorderRadius.circular(AppShape.small),
+        child: InkWell(
+          onTap: canExpand
+              ? () => setState(() => _expanded = !_expanded)
+              : null,
+          borderRadius: BorderRadius.circular(AppShape.small),
+          child: Padding(
+            padding: const EdgeInsets.symmetric(horizontal: 8, vertical: 4),
+            child: Text(
+              shown.isEmpty ? '▸ $label' : '▸ $label — $shown',
+              style: theme.textTheme.bodySmall?.copyWith(
+                fontFamily: 'monospace',
+                color: theme.colorScheme.onSurfaceVariant,
+              ),
+            ),
+          ),
+        ),
+      ),
+    );
+  }
+}
+
+// --- text segmentation (no markdown package) --------------------------------
+
+enum _SegmentKind { text, code }
+
+class _Segment {
+  const _Segment(this.kind, this.content);
+  final _SegmentKind kind;
+  final String content;
+}
+
+final RegExp _fencedCodeRe = RegExp(r'```([\s\S]*?)```');
+final RegExp _langTagRe = RegExp(r'^[a-zA-Z0-9_+-]{1,20}$');
+
+/// Splits turn text into alternating plain-text and fenced-code-block
+/// segments. A leading language tag on a fenced block (` ```dart `) is
+/// dropped from the rendered code.
+List<_Segment> _splitCodeBlocks(String text) {
+  final segments = <_Segment>[];
+  var last = 0;
+  for (final match in _fencedCodeRe.allMatches(text)) {
+    if (match.start > last) {
+      segments.add(
+        _Segment(_SegmentKind.text, text.substring(last, match.start)),
+      );
+    }
+    var code = match.group(1) ?? '';
+    final firstNewline = code.indexOf('\n');
+    if (firstNewline != -1 &&
+        _langTagRe.hasMatch(code.substring(0, firstNewline).trim())) {
+      code = code.substring(firstNewline + 1);
+    }
+    segments.add(_Segment(_SegmentKind.code, code));
+    last = match.end;
+  }
+  if (last < text.length) {
+    segments.add(_Segment(_SegmentKind.text, text.substring(last)));
+  }
+  if (segments.isEmpty) segments.add(_Segment(_SegmentKind.text, text));
+  return segments;
+}
+
+int? _parseIsoToEpoch(String? ts) {
+  if (ts == null || ts.isEmpty) return null;
+  try {
+    return DateTime.parse(ts).millisecondsSinceEpoch;
+  } catch (_) {
+    return null;
+  }
+}

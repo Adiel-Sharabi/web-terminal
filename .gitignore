@@ -26,6 +26,9 @@ claude-session-names.json
 .session-secret
 .hook-token
 *.png
+# The AiTerminal client's icons/launcher assets are real source — exempt the
+# whole subtree from the repo-wide *.png ignore (that rule is for server shots).
+!ai-terminal/**/*.png
 logs/
 monitor-status.json
 *.restart-bak
