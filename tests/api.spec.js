@@ -972,6 +972,47 @@ test.describe('Session attention', () => {
     }
   });
 
+  // #19: a LIVE AskUserQuestion is only knowable from the PreToolUse hook — the
+  // transcript doesn't get the tool_use until it's answered. The hook stashes
+  // the questions; the endpoint serves them; PostToolUse clears them.
+  test('a live AskUserQuestion (PreToolUse hook) surfaces via pending-question, then clears on PostToolUse', async () => {
+    const ctx = await authCtx();
+    const raw = await hookCtx();
+    const created = (await (await ctx.post('/api/sessions', { data: { name: 'AskQ Live' } })).json()).id;
+    const toolInput = {
+      questions: [{
+        header: 'Pick', question: 'Which?', multiSelect: false,
+        options: [{ label: 'Alpha', description: 'a' }, { label: 'Beta' }],
+      }],
+    };
+    try {
+      const hr = await raw.post('/api/hook', {
+        headers: { 'X-WT-Session-ID': created },
+        data: { hook_event_name: 'PreToolUse', tool_name: 'AskUserQuestion', tool_input: toolInput },
+      });
+      expect(hr.status()).toBe(200);
+
+      const body = await (await ctx.get(`/api/sessions/${created}/pending-question`)).json();
+      expect(body.pending).toBe(true);
+      expect(body.question.questions[0].header).toBe('Pick');
+      expect(body.question.questions[0].multiSelect).toBe(false);
+      expect(body.question.questions[0].options.map((o) => o.label)).toEqual(['Alpha', 'Beta']);
+
+      // PostToolUse = answered → the live question is cleared.
+      await raw.post('/api/hook', {
+        headers: { 'X-WT-Session-ID': created },
+        data: { hook_event_name: 'PostToolUse', tool_name: 'AskUserQuestion', tool_input: toolInput },
+      });
+      const after = await ctx.get(`/api/sessions/${created}/pending-question`);
+      // No live question and no transcript stashed → not pending (404).
+      expect(after.status()).toBe(404);
+    } finally {
+      await ctx.delete(`/api/sessions/${created}`);
+      await ctx.dispose();
+      await raw.dispose();
+    }
+  });
+
   // M1 rejection (a): a transcript_path OUTSIDE the trusted root is silently
   // ignored — the hook still succeeds, but /attention exposes no message. Proves
   // safeTranscriptPath can't be steered at an arbitrary file elsewhere on disk.

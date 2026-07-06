@@ -8,7 +8,7 @@ const path = require('path');
 const {
   lastAssistantText, isAllowedTranscriptPath,
   parseTranscriptTurn, scanTurnsBackward, encodeCursor, decodeCursor, stripAnsi,
-  pendingQuestion,
+  pendingQuestion, shapeQuestions,
 } = require('../lib/transcript');
 
 // Write lines (objects) as JSONL to a unique temp file; returns the path.
@@ -399,6 +399,25 @@ const resultLine = (toolUseId) => JSON.stringify({
 });
 const oneQ = [{ header: 'DB', question: 'Which database?', multiSelect: false,
   options: [{ label: 'Postgres', description: 'default' }, { label: 'MySQL', description: '' }] }];
+
+test.describe('shapeQuestions (live PreToolUse hook input)', () => {
+  test('shapes a raw AskUserQuestion tool_input into the app-facing list', () => {
+    const shaped = shapeQuestions({ questions: oneQ });
+    expect(shaped).toHaveLength(1);
+    expect(shaped[0].header).toBe('DB');
+    expect(shaped[0].multiSelect).toBe(false);
+    expect(shaped[0].options.map((o) => o.label)).toEqual(['Postgres', 'MySQL']);
+  });
+
+  test('drops options with no label and returns [] for junk', () => {
+    const shaped = shapeQuestions({
+      questions: [{ header: 'H', question: 'Q', options: [{ label: '' }, { label: 'Keep' }] }],
+    });
+    expect(shaped[0].options.map((o) => o.label)).toEqual(['Keep']);
+    expect(shapeQuestions(null)).toEqual([]);
+    expect(shapeQuestions({ questions: 'nope' })).toEqual([]);
+  });
+});
 
 test.describe('pendingQuestion', () => {
   test('returns null for empty / non-question transcript', () => {
