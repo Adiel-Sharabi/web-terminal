@@ -157,7 +157,23 @@ const userLine = (content, extra = {}) => jl({ type: 'user', message: { role: 'u
 test.describe('lib/transcript.parseTranscriptTurn', () => {
   test('assistant text-only turn → role/text, empty toolUses, null ts', () => {
     const turn = parseTranscriptTurn(asstLine([{ type: 'text', text: 'Hello there.' }]));
-    expect(turn).toEqual({ role: 'assistant', text: 'Hello there.', toolUses: [], ts: null });
+    expect(turn).toEqual({ role: 'assistant', text: 'Hello there.', toolUses: [], ts: null, ctxTokens: null });
+  });
+
+  test('assistant turn exposes ctxTokens = input + both cache tiers', () => {
+    const turn = parseTranscriptTurn(asstLine([{ type: 'text', text: 'hi' }], {
+      message: {
+        role: 'assistant',
+        content: [{ type: 'text', text: 'hi' }],
+        usage: { input_tokens: 1200, cache_read_input_tokens: 40000, cache_creation_input_tokens: 800 },
+      },
+    }));
+    expect(turn.ctxTokens).toBe(42000);
+  });
+
+  test('assistant turn without a usage block → ctxTokens null', () => {
+    const turn = parseTranscriptTurn(asstLine([{ type: 'text', text: 'hi' }]));
+    expect(turn.ctxTokens).toBeNull();
   });
 
   test('assistant turn with text + tool_use → both captured; preview is stringified input', () => {

@@ -14,7 +14,7 @@ const notifyPush = require('./lib/notify-push');
 const transcript = require('./lib/transcript');
 const fcm = require('./lib/fcm');
 
-const SERVER_VERSION = '1.23.1'; // 2026-07-06: keep last-known statusline metrics for hours (idle sessions stop posting) so they don't fall back to folder-only
+const SERVER_VERSION = '1.24.0'; // 2026-07-06: transcript turns expose ctxTokens (input+cache) so the app can derive an approx ctx% for sessions whose status line isn't posting
 
 // --- Optional latency instrumentation (opt-in via WT_LATENCY_DEBUG=1) -----
 // Event-loop lag monitor: interval is 10ms; anything ≥ 50ms slip is a stall.
