@@ -14,7 +14,7 @@ const notifyPush = require('./lib/notify-push');
 const transcript = require('./lib/transcript');
 const fcm = require('./lib/fcm');
 
-const SERVER_VERSION = '1.25.0'; // 2026-07-06: GET /api/sessions/:id/pending-question surfaces Claude's AskUserQuestion (structured) so the app renders a native question overlay (#19)
+const SERVER_VERSION = '1.26.0'; // 2026-07-06: #19 detect LIVE AskUserQuestion via PreToolUse hook (transcript only gets the tool_use after it's answered, so it can't reveal a pending prompt); pending-question endpoint now serves the hook-stashed question
 
 // --- Optional latency instrumentation (opt-in via WT_LATENCY_DEBUG=1) -----
 // Event-loop lag monitor: interval is 10ms; anything ≥ 50ms slip is a stall.
@@ -1199,6 +1199,28 @@ async function processHookEvent(id, rawEvent, claudeSessionId, body) {
   if (body && typeof body.transcript_path === 'string' && body.transcript_path) {
     const safe = safeTranscriptPath(body.transcript_path);
     if (safe) _nstate(id).transcriptPath = safe;
+  }
+
+  // #19: track a LIVE interactive question. Claude writes the AskUserQuestion
+  // tool_use to the transcript only once it's ANSWERED, so the transcript can't
+  // reveal a prompt while it's on screen. The PreToolUse hook carries the full
+  // questions up front — stash them so the app can render the overlay while the
+  // prompt is pending; clear on PostToolUse (answered), a new user turn, Stop,
+  // or the next (different) tool.
+  const _tool = body && body.tool_name;
+  if (rawEvent === 'PreToolUse' && _tool === 'AskUserQuestion') {
+    const questions = transcript.shapeQuestions(body.tool_input);
+    if (questions.length) {
+      _nstate(id).pendingQuestion = { toolUseId: `hook-${id}-${seq}`, questions };
+    }
+  } else if (
+    (rawEvent === 'PostToolUse' && _tool === 'AskUserQuestion') ||
+    rawEvent === 'PreToolUse' || // a different tool started → prior question resolved
+    rawEvent === 'UserPromptSubmit' ||
+    rawEvent === 'Stop'
+  ) {
+    const ns = _notifyState.get(id);
+    if (ns && ns.pendingQuestion) ns.pendingQuestion = null;
   }
 
   let event = rawEvent;
@@ -2733,6 +2755,11 @@ app.get('/api/sessions/:id/transcript', async (req, res) => {
 app.get('/api/sessions/:id/pending-question', async (req, res) => {
   res.set('Cache-Control', 'no-store');
   const id = req.params.id;
+  // Prefer the LIVE question captured from the PreToolUse hook — it's present
+  // while the prompt is on screen, unlike the transcript (which only gets the
+  // tool_use after the answer). The transcript scan below stays as a fallback.
+  const live = (_notifyState.get(id) || {}).pendingQuestion;
+  if (live) return res.json({ pending: true, question: live });
   let tpath = (_notifyState.get(id) || {}).transcriptPath || '';
   if (!tpath) {
     tpath = await deriveTranscriptPath(id);
