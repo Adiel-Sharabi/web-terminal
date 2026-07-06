@@ -14,7 +14,7 @@ const notifyPush = require('./lib/notify-push');
 const transcript = require('./lib/transcript');
 const fcm = require('./lib/fcm');
 
-const SERVER_VERSION = '1.24.0'; // 2026-07-06: transcript turns expose ctxTokens (input+cache) so the app can derive an approx ctx% for sessions whose status line isn't posting
+const SERVER_VERSION = '1.25.0'; // 2026-07-06: GET /api/sessions/:id/pending-question surfaces Claude's AskUserQuestion (structured) so the app renders a native question overlay (#19)
 
 // --- Optional latency instrumentation (opt-in via WT_LATENCY_DEBUG=1) -----
 // Event-loop lag monitor: interval is 10ms; anything ≥ 50ms slip is a stall.
@@ -2403,7 +2403,7 @@ app.get('/api/version', (req, res) => {
   // device registry is always available; 'fcm' is advertised only when a
   // service account is configured (or the test sink is active) — a server with
   // no FCM key can still take registrations but won't send FCM.
-  const capabilities = ['attention', 'clear', 'push-devices', 'transcript', 'status-metrics'];
+  const capabilities = ['attention', 'clear', 'push-devices', 'transcript', 'status-metrics', 'pending-question'];
   if (fcmConfigured()) capabilities.push('fcm');
   res.json({
     version: SERVER_VERSION,
@@ -2721,6 +2721,42 @@ app.get('/api/sessions/:id/transcript', async (req, res) => {
     res.status(500).json({ error: 'Failed to read transcript' });
   } finally {
     if (fd !== undefined) { try { fs.closeSync(fd); } catch {} }
+  }
+});
+
+// GET /api/sessions/:id/pending-question  (#19)
+// The newest UNanswered AskUserQuestion prompt for the session, as structured
+// JSON pulled from the transcript (questions/options/multiSelect), so the app
+// can render a native question overlay instead of forcing the user to drive
+// Claude's TUI selector. { pending: false } when there's nothing to answer.
+// Same path-resolution + Cache-Control: no-store contract as /transcript.
+app.get('/api/sessions/:id/pending-question', async (req, res) => {
+  res.set('Cache-Control', 'no-store');
+  const id = req.params.id;
+  let tpath = (_notifyState.get(id) || {}).transcriptPath || '';
+  if (!tpath) {
+    tpath = await deriveTranscriptPath(id);
+    if (tpath) _nstate(id).transcriptPath = tpath;
+  }
+  if (!tpath) return res.status(404).json({ error: 'no transcript for session' });
+  try {
+    const size = fs.statSync(tpath).size;
+    const TAIL = 262144; // 256KB tail — a pending question is the last tool_use
+    const start = Math.max(0, size - TAIL);
+    const len = size - start;
+    let text = '';
+    if (len > 0) {
+      const buf = Buffer.alloc(len);
+      const fd = fs.openSync(tpath, 'r');
+      try { fs.readSync(fd, buf, 0, len, start); } finally { fs.closeSync(fd); }
+      text = buf.toString('utf8');
+      if (start > 0) { const nl = text.indexOf('\n'); if (nl >= 0) text = text.slice(nl + 1); }
+    }
+    const q = transcript.pendingQuestion(text);
+    res.json(q ? { pending: true, question: q } : { pending: false });
+  } catch (e) {
+    console.error(`GET /api/sessions/${id}/pending-question failed: ${e.message}`);
+    res.status(500).json({ error: 'Failed to read transcript' });
   }
 });
 // Manual verification: fire a sample push (force past the level gate). Returns
