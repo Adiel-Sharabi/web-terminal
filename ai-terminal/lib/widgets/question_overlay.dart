@@ -72,6 +72,15 @@ List<AnswerFrame> buildAnswerFrames(
   return frames;
 }
 
+/// True when [frames] end in a confirming Enter — i.e. multi-select (digits
+/// toggle, Enter confirms) or multi-question (Enter finalizes the Submit-review
+/// screen). Single-select-single ends in its own auto-submitting digit and
+/// needs no confirm. The caller uses this to decide whether to verify the Enter
+/// actually landed (it can be coalesced away by cluster-path bunching) and
+/// re-send it.
+bool answerNeedsConfirm(List<AnswerFrame> frames) =>
+    frames.isNotEmpty && frames.last.keys == '\r';
+
 class QuestionOverlay extends StatefulWidget {
   const QuestionOverlay({
     super.key,

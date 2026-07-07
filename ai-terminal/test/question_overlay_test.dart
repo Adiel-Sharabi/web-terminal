@@ -61,6 +61,35 @@ void main() {
     });
   });
 
+  group('answerNeedsConfirm (cluster-path Enter re-send gate)', () {
+    test('single-select single question needs no confirm (digit auto-submits)',
+        () {
+      final frames = buildAnswerFrames([_q(['A', 'B', 'C'])], [
+        {1}
+      ]);
+      expect(answerNeedsConfirm(frames), isFalse);
+    });
+
+    test('multi-select needs a confirm (trailing Enter)', () {
+      final frames = buildAnswerFrames([_q(['A', 'B', 'C'], multi: true)], [
+        {0, 2}
+      ]);
+      expect(answerNeedsConfirm(frames), isTrue);
+    });
+
+    test('multi-question needs a confirm (Submit-review Enter)', () {
+      final frames = buildAnswerFrames([_q(['A', 'B']), _q(['X', 'Y'])], [
+        {0},
+        {1}
+      ]);
+      expect(answerNeedsConfirm(frames), isTrue);
+    });
+
+    test('empty frame list needs no confirm', () {
+      expect(answerNeedsConfirm(const []), isFalse);
+    });
+  });
+
   group('PendingQuestion.fromJson', () {
     test('pending:false -> null', () {
       expect(PendingQuestion.fromJson({'pending': false}), isNull);

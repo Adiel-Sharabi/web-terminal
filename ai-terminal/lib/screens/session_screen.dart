@@ -286,6 +286,7 @@ class _SessionScreenState extends State<SessionScreen>
   /// Each frame carries its own settle delay so transition frames land in
   /// separate reads. Hides the overlay optimistically; the next poll confirms.
   Future<void> _answerQuestion(List<AnswerFrame> frames) async {
+    final toolUseId = _pendingQuestion?.toolUseId;
     setState(() => _pendingQuestion = null);
     for (var i = 0; i < frames.length; i++) {
       if (!mounted) return;
@@ -295,6 +296,41 @@ class _SessionScreenState extends State<SessionScreen>
       }
     }
     if (mounted) _scrollToBottom();
+    // Answers ending in a confirming Enter (multi-select / multi-question) rely
+    // on that Enter arriving in its own stdin read. Over the cluster path,
+    // network bunching can coalesce it with the preceding digit so Claude's
+    // batched update drops it (same failure family as #19) — the option is left
+    // marked but unsubmitted. Verify the prompt actually cleared; if the same
+    // one is still pending, the Enter was lost — re-send a lone one.
+    if (toolUseId != null && answerNeedsConfirm(frames)) {
+      await _confirmAnswerLanded(toolUseId);
+    }
+  }
+
+  /// Re-sends a lone confirming Enter if the just-answered prompt is still
+  /// pending — i.e. the Enter that [buildAnswerFrames] appended was coalesced
+  /// away in transit. Polls up to 3× (~900ms apart) and stops the instant the
+  /// prompt clears (or a different one replaces it), so a confirm that DID land
+  /// never triggers a stray keystroke. A re-sent Enter arrives seconds later, on
+  /// its own, guaranteeing a separate stdin read.
+  Future<void> _confirmAnswerLanded(String toolUseId) async {
+    final api = _api;
+    if (api == null) return;
+    for (var attempt = 0; attempt < 3; attempt++) {
+      await Future<void>.delayed(const Duration(milliseconds: 900));
+      if (!mounted) return;
+      final PendingQuestion? q;
+      try {
+        q = await api.pendingQuestion(widget.sessionId);
+      } catch (_) {
+        return; // best-effort — don't spam Enters when polling is failing
+      }
+      if (!mounted) return;
+      // Cleared, or a different prompt took its place → the answer landed.
+      if (q == null || q.toolUseId != toolUseId) return;
+      // Same prompt still up → the confirm was dropped; send it again alone.
+      _connection?.sendInput('\r');
+    }
   }
 
   /// Chat is the default lens when eligible (Claude session + capability +
