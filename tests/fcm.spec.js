@@ -33,10 +33,24 @@ test.describe('fcm.buildFcmMessage', () => {
     expect(fcm.buildFcmMessage('apierror', { sessionId: 's' }).message.android.ttl).toBe('600s');
     expect(fcm.buildFcmMessage('clear', { sessionId: 's' }).message.android.priority).toBe('high');
     expect(fcm.buildFcmMessage('clear', { sessionId: 's' }).message.android.ttl).toBe('60s');
-    // idle is the only normal-priority kind (protects the high-priority quota).
+    // #25: idle is now high-priority too, so an 'all'-level "finished" push
+    // wakes the phone through Android Doze instead of being deferred/dropped.
+    // Delivery priority is independent of display — idle still renders on the
+    // silent, low-importance channel. Its long (non-urgent) TTL is kept.
     const idle = fcm.buildFcmMessage('idle', { sessionId: 's' });
-    expect(idle.message.android.priority).toBe('normal');
+    expect(idle.message.android.priority).toBe('high');
     expect(idle.message.android.ttl).toBe('3600s');
+  });
+
+  test('#25: an all-level idle/finished push is BOTH gated-in and high-priority', () => {
+    const np = require('../lib/notify-push');
+    // The level gate lets idle through only at 'all' (not 'important'/'off')…
+    expect(np.shouldPush('idle', 'all')).toBe(true);
+    expect(np.shouldPush('idle', 'important')).toBe(false);
+    // …and once built, its FCM message is high-priority so it actually wakes the
+    // phone through Doze (the missing half that broke mobile delivery).
+    expect(fcm.buildFcmMessage('idle', { sessionId: 's' }).message.android.priority)
+      .toBe('high');
   });
 
   test('missing fields coerce to empty strings (never "undefined")', () => {
