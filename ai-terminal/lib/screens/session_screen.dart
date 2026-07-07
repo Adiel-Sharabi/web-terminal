@@ -22,6 +22,7 @@ import 'package:image/image.dart' as img;
 import 'package:image_picker/image_picker.dart';
 import 'package:pasteboard/pasteboard.dart';
 import 'package:shared_preferences/shared_preferences.dart';
+import 'package:url_launcher/url_launcher.dart';
 import 'package:xterm/xterm.dart';
 
 import '../api/api_client.dart';
@@ -32,6 +33,7 @@ import '../services/notification_service.dart';
 import '../services/session_repository.dart';
 import '../theme/app_theme.dart';
 import '../theme/status_colors.dart';
+import '../util/terminal_links.dart';
 import '../widgets/compose_bar.dart';
 import '../widgets/conversation_view.dart';
 import '../widgets/format_utils.dart';
@@ -854,6 +856,34 @@ class _SessionScreenState extends State<SessionScreen>
     _scrollToBottom();
   }
 
+  /// #26: opens a printed http/https URL when its cell is tapped. The tapped
+  /// [cell] carries an absolute buffer-line index; the line is rebuilt column-
+  /// aligned (empty cells → spaces, since `getText()` drops them) so the tapped
+  /// column maps to the right character. A tap that ends a drag-selection is
+  /// ignored, and only http/https ever launches (see [urlAtColumn]).
+  Future<void> _onTerminalTapUp(TapUpDetails details, CellOffset cell) async {
+    if (_terminalController.selection != null) return;
+    final lines = _terminal.buffer.lines;
+    final y = cell.y;
+    if (y < 0 || y >= lines.length) return;
+    final width = _terminal.viewWidth;
+    final line = lines[y];
+    final sb = StringBuffer();
+    for (var i = 0; i < width; i++) {
+      final cp = line.getCodePoint(i);
+      sb.writeCharCode(cp == 0 ? 0x20 : cp);
+    }
+    final url = urlAtColumn(sb.toString(), cell.x);
+    if (url == null) return;
+    final uri = Uri.tryParse(url);
+    if (uri == null) return;
+    try {
+      await launchUrl(uri, mode: LaunchMode.externalApplication);
+    } catch (_) {
+      // No handler / launch refused — best-effort, never crash the terminal.
+    }
+  }
+
   /// App-wide hardware-key hook (only Alt+V, to paste a clipboard image). Runs
   /// before focus dispatch, so it works while the terminal owns the keyboard in
   /// raw mode. Returns true to consume the key.
@@ -1396,6 +1426,10 @@ class _SessionScreenState extends State<SessionScreen>
                           // typing (vim, TUIs, Claude's arrow-key menus).
                           hardwareKeyboardOnly: !_rawMode,
                           readOnly: !_rawMode,
+                          // #26: tap a printed http/https URL to open it in the
+                          // system browser (additive — focus/keyboard still run
+                          // via the view's own tap-down handler).
+                          onTapUp: _onTerminalTapUp,
                         ),
                       ),
                       // Floats above the terminal instead of taking a Column
