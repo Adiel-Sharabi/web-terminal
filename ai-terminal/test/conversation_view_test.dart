@@ -121,7 +121,7 @@ void main() {
     expect(find.textContaining('print(1)'), findsOneWidget);
   });
 
-  testWidgets('renders a collapsed tool-use chip that expands on tap', (
+  testWidgets('a Bash tool card shows the command and expands to the output', (
     tester,
   ) async {
     final page = TranscriptPage(
@@ -132,8 +132,10 @@ void main() {
           toolUses: [
             ToolUse(
               name: 'Bash',
-              inputPreview:
-                  '{"command":"a very long command that should be truncated when collapsed"}',
+              inputPreview: '{"command":"npm test"}',
+              id: 'tu_1',
+              input: {'command': 'npm test'},
+              result: 'PASS — 3 tests OUTPUT_MARKER',
             ),
           ],
           ts: null,
@@ -152,13 +154,15 @@ void main() {
     );
     await tester.pumpAndSettle();
 
-    expect(find.textContaining('▸ Bash'), findsOneWidget);
-    expect(find.textContaining('should be truncated'), findsNothing);
+    // Collapsed: command in the title, output hidden.
+    expect(find.textContaining('Bash — npm test'), findsOneWidget);
+    expect(find.textContaining('OUTPUT_MARKER'), findsNothing);
 
-    await tester.tap(find.textContaining('▸ Bash'));
+    await tester.tap(find.textContaining('Bash — npm test'));
     await tester.pumpAndSettle();
 
-    expect(find.textContaining('should be truncated'), findsOneWidget);
+    // Expanded: the tool's output (tool_result) is shown.
+    expect(find.textContaining('OUTPUT_MARKER'), findsOneWidget);
   });
 
   testWidgets(
@@ -202,6 +206,60 @@ void main() {
       expect(find.textContaining('code()'), findsOneWidget);
     },
   );
+
+  group('summarizeTool (rich tool cards)', () {
+    test('Bash: command in the title, output in the detail', () {
+      final s = summarizeTool(const ToolUse(
+        name: 'Bash',
+        inputPreview: '',
+        input: {'command': 'npm test'},
+        result: 'PASS',
+      ));
+      expect(s.title, 'Bash — npm test');
+      expect(s.detail, 'PASS');
+    });
+
+    test('Task: description + subagent in the title, prompt+report in detail', () {
+      final s = summarizeTool(const ToolUse(
+        name: 'Task',
+        inputPreview: '',
+        input: {'description': 'find bug', 'subagent_type': 'search', 'prompt': 'go look'},
+        result: 'found it',
+      ));
+      expect(s.title, 'Task — find bug (search)');
+      expect(s.detail, contains('go look'));
+      expect(s.detail, contains('found it'));
+    });
+
+    test('Read/Edit: basename title; Edit detail carries a diff', () {
+      expect(
+        summarizeTool(const ToolUse(
+                name: 'Read', inputPreview: '', input: {'file_path': '/a/b/c.dart'}))
+            .title,
+        'Read — c.dart',
+      );
+      final edit = summarizeTool(const ToolUse(
+        name: 'Edit',
+        inputPreview: '',
+        input: {'file_path': '/x/y.dart', 'old_string': 'foo', 'new_string': 'bar'},
+      ));
+      expect(edit.title, 'Edit — y.dart');
+      expect(edit.detail, '- foo\n+ bar');
+    });
+
+    test('WebFetch shows the host; unknown tool falls back to name + preview', () {
+      expect(
+        summarizeTool(const ToolUse(
+                name: 'WebFetch', inputPreview: '', input: {'url': 'https://example.com/x'}))
+            .title,
+        'Fetch — example.com',
+      );
+      expect(
+        summarizeTool(const ToolUse(name: 'Frobnicate', inputPreview: '{"a":1}')).title,
+        'Frobnicate — {"a":1}',
+      );
+    });
+  });
 
   group('#32 parseCommandInvocation', () {
     test('extracts name (slash stripped), args, and body', () {

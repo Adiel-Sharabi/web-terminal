@@ -955,7 +955,7 @@ class _TurnBubble extends StatelessWidget {
                             _markdownStyle(theme, bodyStyle, codeSpanStyle),
                       ),
                     ),
-              for (final tool in turn.toolUses) _ToolChip(tool: tool),
+              for (final tool in turn.toolUses) _ToolCard(tool: tool),
               if (epoch != null)
                 Padding(
                   padding: const EdgeInsets.only(top: 4),
@@ -1111,50 +1111,192 @@ class _CommandInvocationChipState extends State<_CommandInvocationChip> {
   }
 }
 
-class _ToolChip extends StatefulWidget {
-  const _ToolChip({required this.tool});
+/// A one-line title + an expandable detail body for a tool-use card.
+class ToolCardSummary {
+  const ToolCardSummary({required this.title, required this.detail});
+
+  /// Compact one-liner shown collapsed (e.g. `Bash — npm test`).
+  final String title;
+
+  /// Expandable body (command + output, prompt + report, a diff, …); '' when
+  /// there's nothing more to show.
+  final String detail;
+}
+
+String _firstLine(String s) {
+  final i = s.indexOf('\n');
+  return (i == -1 ? s : s.substring(0, i)).trim();
+}
+
+String _basename(String p) {
+  final parts = p.split(RegExp(r'[\\/]')).where((x) => x.isNotEmpty).toList();
+  return parts.isEmpty ? p : parts.last;
+}
+
+/// Builds a compact title + expandable detail for a tool card from its
+/// structured input + captured result. Reflects what the terminal shows —
+/// shells (Bash), subagents (Task), file ops (Read/Edit/Write), search, fetch.
+/// Pure, so the mapping is unit-testable.
+ToolCardSummary summarizeTool(ToolUse t) {
+  final input = t.input;
+  String s(String k) => (input[k] ?? '').toString();
+  final name = t.name.isEmpty ? 'Tool' : t.name;
+  final result = (t.result ?? '').trim();
+  String join2(String a, String b) =>
+      [if (a.isNotEmpty) a, if (b.isNotEmpty) b].join('\n\n');
+
+  switch (t.name) {
+    case 'Bash':
+      final cmd = s('command');
+      return ToolCardSummary(
+        title: cmd.isEmpty ? 'Bash' : 'Bash — ${_firstLine(cmd)}',
+        detail: join2(cmd.contains('\n') ? cmd : '', result),
+      );
+    case 'Task':
+      final desc = s('description');
+      final sub = s('subagent_type');
+      return ToolCardSummary(
+        title: 'Task'
+            '${desc.isEmpty ? '' : ' — $desc'}'
+            '${sub.isEmpty ? '' : ' ($sub)'}',
+        detail: join2(s('prompt'), result),
+      );
+    case 'Read':
+    case 'Write':
+    case 'Edit':
+    case 'MultiEdit':
+      final fp = s('file_path');
+      final title = fp.isEmpty ? name : '${t.name} — ${_basename(fp)}';
+      String detail = result;
+      if (t.name == 'Edit' &&
+          (s('old_string').isNotEmpty || s('new_string').isNotEmpty)) {
+        detail = join2('- ${s('old_string')}\n+ ${s('new_string')}', result);
+      } else if (t.name == 'Write' && s('content').isNotEmpty) {
+        detail = join2(s('content'), result);
+      }
+      return ToolCardSummary(title: title, detail: detail);
+    case 'Grep':
+    case 'Glob':
+      final p = s('pattern');
+      return ToolCardSummary(
+          title: p.isEmpty ? name : '${t.name} — $p', detail: result);
+    case 'WebFetch':
+      final url = s('url');
+      final u = Uri.tryParse(url);
+      final host = (u != null && u.host.isNotEmpty) ? u.host : url;
+      return ToolCardSummary(
+          title: url.isEmpty ? name : 'Fetch — $host', detail: result);
+    default:
+      final preview = t.inputPreview.trim();
+      return ToolCardSummary(
+          title: preview.isEmpty ? name : '$name — $preview', detail: result);
+  }
+}
+
+/// A tool invocation rendered as a compact, expandable card that reflects the
+/// terminal — the shell command + its output, a subagent's task + report, a
+/// file edit's diff, etc. Collapsed by default to keep the chat scannable.
+class _ToolCard extends StatefulWidget {
+  const _ToolCard({required this.tool});
 
   final ToolUse tool;
 
   @override
-  State<_ToolChip> createState() => _ToolChipState();
+  State<_ToolCard> createState() => _ToolCardState();
 }
 
-class _ToolChipState extends State<_ToolChip> {
-  static const int _collapsedChars = 40;
+class _ToolCardState extends State<_ToolCard> {
   bool _expanded = false;
+
+  static IconData _iconFor(String name) {
+    switch (name) {
+      case 'Bash':
+        return Icons.terminal_rounded;
+      case 'Task':
+        return Icons.account_tree_outlined;
+      case 'Read':
+        return Icons.description_outlined;
+      case 'Edit':
+      case 'MultiEdit':
+      case 'Write':
+        return Icons.edit_outlined;
+      case 'Grep':
+      case 'Glob':
+        return Icons.search;
+      case 'WebFetch':
+        return Icons.public;
+      default:
+        return Icons.build_outlined;
+    }
+  }
 
   @override
   Widget build(BuildContext context) {
     final theme = Theme.of(context);
-    final full = widget.tool.inputPreview;
-    final canExpand = full.length > _collapsedChars;
-    final shown = (!_expanded && canExpand)
-        ? '${full.substring(0, _collapsedChars)}…'
-        : full;
-    final label = widget.tool.name.isEmpty ? 'Tool' : widget.tool.name;
-
+    final s = summarizeTool(widget.tool);
+    final hasDetail = s.detail.isNotEmpty;
     return Padding(
       padding: const EdgeInsets.only(top: 4),
-      child: Material(
-        color: theme.colorScheme.surfaceContainerHigh,
-        borderRadius: BorderRadius.circular(AppShape.small),
-        child: InkWell(
-          onTap: canExpand
-              ? () => setState(() => _expanded = !_expanded)
-              : null,
-          borderRadius: BorderRadius.circular(AppShape.small),
-          child: Padding(
-            padding: const EdgeInsets.symmetric(horizontal: 8, vertical: 4),
-            child: Text(
-              shown.isEmpty ? '▸ $label' : '▸ $label — $shown',
-              style: theme.textTheme.bodySmall?.copyWith(
-                fontFamily: 'monospace',
-                color: theme.colorScheme.onSurfaceVariant,
+      child: Column(
+        crossAxisAlignment: CrossAxisAlignment.start,
+        mainAxisSize: MainAxisSize.min,
+        children: [
+          Material(
+            color: theme.colorScheme.surfaceContainerHigh,
+            borderRadius: BorderRadius.circular(AppShape.small),
+            child: InkWell(
+              borderRadius: BorderRadius.circular(AppShape.small),
+              onTap:
+                  hasDetail ? () => setState(() => _expanded = !_expanded) : null,
+              child: Padding(
+                padding: const EdgeInsets.symmetric(horizontal: 8, vertical: 5),
+                child: Row(
+                  children: [
+                    Icon(_iconFor(widget.tool.name),
+                        size: 14, color: theme.colorScheme.primary),
+                    const SizedBox(width: 6),
+                    Expanded(
+                      child: Text(
+                        s.title,
+                        maxLines: _expanded ? null : 1,
+                        overflow:
+                            _expanded ? TextOverflow.clip : TextOverflow.ellipsis,
+                        style: theme.textTheme.bodySmall?.copyWith(
+                          fontFamily: 'monospace',
+                          color: theme.colorScheme.onSurfaceVariant,
+                        ),
+                      ),
+                    ),
+                    if (hasDetail)
+                      Icon(_expanded ? Icons.expand_less : Icons.expand_more,
+                          size: 15, color: theme.colorScheme.onSurfaceVariant),
+                  ],
+                ),
               ),
             ),
           ),
-        ),
+          if (_expanded && hasDetail)
+            Container(
+              width: double.infinity,
+              margin: const EdgeInsets.only(top: 4),
+              padding: const EdgeInsets.all(8),
+              constraints: const BoxConstraints(maxHeight: 260),
+              decoration: BoxDecoration(
+                color: theme.colorScheme.surfaceContainer,
+                borderRadius: BorderRadius.circular(AppShape.small),
+                border: Border.all(color: theme.colorScheme.outlineVariant),
+              ),
+              child: SingleChildScrollView(
+                child: Text(
+                  s.detail,
+                  style: theme.textTheme.bodySmall?.copyWith(
+                    fontFamily: 'monospace',
+                    color: theme.colorScheme.onSurfaceVariant,
+                  ),
+                ),
+              ),
+            ),
+        ],
       ),
     );
   }
