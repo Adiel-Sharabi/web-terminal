@@ -55,6 +55,39 @@ void main() {
     expect(find.byTooltip('Enter'), findsOneWidget);
   });
 
+  // #34: the strip's arrow buttons emit raw CSI arrow sequences via onKey, so
+  // (wired to the terminal in SessionScreen) they reach the PTY and drive
+  // Claude's native arrow TUI — matching the web client's arrow buttons.
+  testWidgets('arrow buttons emit raw CSI sequences via onKey', (tester) async {
+    final sent = <String>[];
+    await tester.pumpWidget(
+      _wrap(
+        TerminalKeyStrip(
+          onKey: sent.add,
+          ctrlActive: false,
+          onToggleCtrl: () {},
+          altActive: false,
+          onToggleAlt: () {},
+          onPaste: () {},
+          onImage: () {},
+          rawMode: false,
+          onToggleRawMode: () {},
+        ),
+      ),
+    );
+
+    final arrows = <(IconData, String)>[
+      (Icons.keyboard_arrow_up, '\x1b[A'),
+      (Icons.keyboard_arrow_down, '\x1b[B'),
+      (Icons.keyboard_arrow_left, '\x1b[D'),
+      (Icons.keyboard_arrow_right, '\x1b[C'),
+    ];
+    for (final (icon, _) in arrows) {
+      await tester.tap(find.byIcon(icon));
+    }
+    expect(sent, [for (final (_, seq) in arrows) seq]);
+  });
+
   // #30/#11: the raw-keyboard toggle is shown by default (mobile) but hidden
   // when showRawToggle is false (desktop), where it stranded the user.
   testWidgets('raw-keyboard toggle shows by default, hides when suppressed',
