@@ -67,4 +67,27 @@ void main() {
     const line = 'https://example.com/x';
     expect(urlAtColumn(line, 0), 'https://example.com/x');
   });
+
+  group('isLaunchableHttpUrl (chat link safety gate)', () {
+    test('accepts http/https with a host', () {
+      expect(isLaunchableHttpUrl('http://example.com'), isTrue);
+      expect(isLaunchableHttpUrl('https://example.com/a?b=c#d'), isTrue);
+    });
+
+    test('rejects non-web schemes, hostless, and empty', () {
+      for (final bad in [
+        'javascript:alert(1)',
+        'file:///etc/passwd',
+        'data:text/html,<script>',
+        'mailto:x@y.com',
+        'ftp://example.com',
+        'https://', // no host
+        'example.com', // no scheme
+        '',
+      ]) {
+        expect(isLaunchableHttpUrl(bad), isFalse, reason: bad);
+      }
+      expect(isLaunchableHttpUrl(null), isFalse);
+    });
+  });
 }

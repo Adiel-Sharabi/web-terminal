@@ -16,10 +16,13 @@ import 'dart:async';
 import 'package:flutter/material.dart';
 import 'package:flutter/services.dart';
 import 'package:flutter_markdown/flutter_markdown.dart';
+import 'package:markdown/markdown.dart' as md;
+import 'package:url_launcher/url_launcher.dart';
 
 import '../api/api_client.dart';
 import '../api/models.dart';
 import '../theme/app_theme.dart';
+import '../util/terminal_links.dart';
 import 'empty_state.dart';
 import 'format_utils.dart';
 
@@ -862,6 +865,18 @@ CommandInvocation? parseCommandInvocation(String text) {
   return CommandInvocation(name: name, args: args, body: body);
 }
 
+/// Opens a tapped chat link in the system browser — http/https only
+/// ([isLaunchableHttpUrl]); other schemes are ignored. Best-effort, never
+/// throws into the widget tree.
+Future<void> _openChatLink(String? href) async {
+  if (!isLaunchableHttpUrl(href)) return;
+  try {
+    await launchUrl(Uri.parse(href!), mode: LaunchMode.externalApplication);
+  } catch (_) {
+    // No handler / launch refused — never crash the chat.
+  }
+}
+
 class _TurnBubble extends StatelessWidget {
   const _TurnBubble({required this.turn});
 
@@ -928,6 +943,12 @@ class _TurnBubble extends StatelessWidget {
                         // a self-selectable body would break cross-bubble drags.
                         selectable: false,
                         fitContent: true,
+                        // Chat-side of the clickable-URL work: gitHubWeb turns
+                        // bare `https://…` into links (flutter_markdown doesn't
+                        // autolink by default), and onTapLink opens them in the
+                        // system browser — http/https only (isLaunchableHttpUrl).
+                        extensionSet: md.ExtensionSet.gitHubWeb,
+                        onTapLink: (text, href, title) => _openChatLink(href),
                         styleSheet:
                             _markdownStyle(theme, bodyStyle, codeSpanStyle),
                       ),

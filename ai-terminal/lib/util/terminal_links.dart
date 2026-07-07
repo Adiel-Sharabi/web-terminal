@@ -18,6 +18,18 @@
 /// and similar schemes can never be launched.
 library;
 
+/// Whether [href] is a launchable http/https URL — the safety gate before
+/// handing a chat markdown link (or autolinked bare URL) to `url_launcher`.
+/// Rejects `javascript:` / `file:` / `data:` / `mailto:` and anything without a
+/// host, so only real web links ever open. Pure, so it's unit-testable.
+bool isLaunchableHttpUrl(String? href) {
+  if (href == null || href.isEmpty) return false;
+  final uri = Uri.tryParse(href);
+  return uri != null &&
+      (uri.scheme == 'http' || uri.scheme == 'https') &&
+      uri.host.isNotEmpty;
+}
+
 /// Whitespace test on a single UTF-16 code unit (space, tab, NBSP, and the
 /// space we substitute for empty terminal cells all count as boundaries).
 bool _isSpace(int cu) => cu == 0x20 || cu == 0x09 || cu == 0xA0 || cu == 0x00;
