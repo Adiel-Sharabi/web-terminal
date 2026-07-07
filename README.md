@@ -203,6 +203,7 @@ Config is stored in `config.json` (gitignored):
 | `keepSessionsOpen` | Yes | Keep background WebSocket connections to all sessions for instant switching (default false) |
 | `autoContinueOnApiError` | Yes | Auto-recover from transient Claude API errors: `continue` ×2, then `/compact` + replay your last prompt (up to 3 attempts per error). Default **true**. Highlight + notify happen regardless of this setting. Override per-process with the `WT_AUTO_CONTINUE_API_ERROR` env var (`0`/`1`). |
 | `passAllEnv` | Yes | Pass the full parent environment to spawned shells (default false — a limited set of variables is forwarded) |
+| `exclusiveViewer` | Yes | Restore single-owner session takeover: opening a session on a second device force-disconnects the first (old behavior). Default **false** — multiple devices now share one PTY (shared input/output), so phone + desktop can view/drive the same session at once. |
 
 ### Environment Variables
 

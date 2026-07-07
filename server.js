@@ -14,7 +14,7 @@ const notifyPush = require('./lib/notify-push');
 const transcript = require('./lib/transcript');
 const fcm = require('./lib/fcm');
 
-const SERVER_VERSION = '1.27.0'; // 2026-07-07: #24 — POST /api/sessions/:id/attention/clear clears a session's attention across devices (flips recorded attention, FCM 'clear' to dismiss phone toasts, broadcasts a 'clear' notify frame so in-app viewers drop the chip); capability 'attention-clear'. Prior 1.26.1: (a) #23 fix — restore no longer appends implicit `--continue` to an unknown-id claude session (that resumed the most-recent conversation in the cwd, so a new session came up "Resumed" to the last one). Unknown-id restore now starts fresh; `--resume <own-id>` and explicit user --continue/--resume still honored (lib/restore-command.js). (b) /api/cluster/sessions cache (1500ms) is now invalidated on session create/delete/rename/reorder, so a just-created session shows in the sidebar immediately instead of after the TTL
+const SERVER_VERSION = '1.28.0'; // 2026-07-07: #21 — session takeover relaxed: multiple devices now SHARE one PTY (shared I/O) by default instead of the second viewer force-disconnecting the first. Opt back into the old single-owner kick with config `exclusiveViewer: true`. Prior 1.27.0: #24 — POST /api/sessions/:id/attention/clear clears a session's attention across devices (flips recorded attention, FCM 'clear' to dismiss phone toasts, broadcasts a 'clear' notify frame so in-app viewers drop the chip); capability 'attention-clear'. Prior 1.26.1: (a) #23 fix — restore no longer appends implicit `--continue` to an unknown-id claude session (that resumed the most-recent conversation in the cwd, so a new session came up "Resumed" to the last one). Unknown-id restore now starts fresh; `--resume <own-id>` and explicit user --continue/--resume still honored (lib/restore-command.js). (b) /api/cluster/sessions cache (1500ms) is now invalidated on session create/delete/rename/reorder, so a just-created session shows in the sidebar immediately instead of after the TTL
 
 // --- Optional latency instrumentation (opt-in via WT_LATENCY_DEBUG=1) -----
 // Event-loop lag monitor: interval is 10ms; anything ≥ 50ms slip is a stall.
@@ -1770,7 +1770,7 @@ app.get('/api/config', (req, res) => {
   res.json(current);
 });
 
-const ALLOWED_CONFIG_KEYS = ['port', 'host', 'user', 'password', 'shell', 'defaultCwd', 'scanFolders', 'defaultCommand', 'openInNewTab', 'serverName', 'scrollbackReplayLimit', 'cluster', 'publicUrl', 'claudeHome', 'keepSessionsOpen', 'autoContinueOnApiError'];
+const ALLOWED_CONFIG_KEYS = ['port', 'host', 'user', 'password', 'shell', 'defaultCwd', 'scanFolders', 'defaultCommand', 'openInNewTab', 'serverName', 'scrollbackReplayLimit', 'cluster', 'publicUrl', 'claudeHome', 'keepSessionsOpen', 'autoContinueOnApiError', 'exclusiveViewer'];
 
 app.put('/api/config', express.json({ limit: '16kb' }), (req, res) => {
   try {
@@ -3325,14 +3325,23 @@ app.ws('/ws/:id', (ws, req) => {
 
             if (parsed.mode === 'active') {
               ws._wtBackground = false;
-              const kickMsg = JSON.stringify({ sessionTaken: getServerName() });
-              for (const existing of clientsSet) {
-                if (existing === ws) continue;
-                if (existing._wtBrowserId === browserId && existing._wtBackground) continue;
-                if (existing._wtBackground) continue;
-                if (existing._wtBrowserId !== browserId) {
-                  try { existing.send(kickMsg); } catch (e) {}
-                  try { existing.close(4001, 'Session opened elsewhere'); } catch (e) {}
+              // #21: by default, multiple devices share one PTY (shared I/O) —
+              // opening a session on a second device no longer force-disconnects
+              // the first. There is a single PTY that echoes once and broadcasts
+              // to every attached viewer, so there is no double-echo; input from
+              // any active viewer is written to that one PTY. Set
+              // `exclusiveViewer: true` to restore the old single-owner takeover
+              // (kick every other active viewer with a different browserId).
+              if (liveConfig('exclusiveViewer', false)) {
+                const kickMsg = JSON.stringify({ sessionTaken: getServerName() });
+                for (const existing of clientsSet) {
+                  if (existing === ws) continue;
+                  if (existing._wtBrowserId === browserId && existing._wtBackground) continue;
+                  if (existing._wtBackground) continue;
+                  if (existing._wtBrowserId !== browserId) {
+                    try { existing.send(kickMsg); } catch (e) {}
+                    try { existing.close(4001, 'Session opened elsewhere'); } catch (e) {}
+                  }
                 }
               }
             } else {
