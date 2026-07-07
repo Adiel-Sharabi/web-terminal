@@ -63,11 +63,6 @@ class DashboardScreen extends StatefulWidget {
 class _DashboardScreenState extends State<DashboardScreen> {
   String _filter = _kAllServers;
 
-  /// Session ids whose attention chip was locally dismissed (spec §3
-  /// "Dismiss notification": no server call in Phase 1 — this simply hides
-  /// the chip until the next status change re-derives it).
-  final Set<String> _dismissedAttention = {};
-
   /// Per-group collapse state, keyed by [kFavoritesGroupKey] or a server's
   /// base URL. Loaded from (and persisted to) [SharedPreferences].
   Map<String, bool> _collapsed = const <String, bool>{};
@@ -150,7 +145,8 @@ class _DashboardScreenState extends State<DashboardScreen> {
     required bool favoriteRow,
     int? reorderIndex,
   }) {
-    final attentionKind = _dismissedAttention.contains(session.id)
+    final attentionKind =
+        SessionRepository.instance.isAttentionDismissed(session.id)
         ? null
         : attentionKindForStatus(session.status);
     void openActions() => showSessionActionsSheet(
@@ -179,7 +175,7 @@ class _DashboardScreenState extends State<DashboardScreen> {
             ),
       onAttentionDismiss: attentionKind == null
           ? null
-          : () => setState(() => _dismissedAttention.add(session.id)),
+          : () => SessionRepository.instance.dismissAttention(session),
       onToggleFavorite: () => FavoritesService.instance.toggle(session.id),
       onBellTap: () => showNotifyLevelPicker(
         context,

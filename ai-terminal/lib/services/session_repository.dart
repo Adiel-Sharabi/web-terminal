@@ -91,6 +91,12 @@ class SessionRepository {
   // [_applyNotify]. Pruned in [refresh] when a session leaves the list.
   final Map<String, ApiErrorInfo> _apiErrors = <String, ApiErrorInfo>{};
 
+  // Session ids whose attention has been acknowledged (opened/viewed/dismissed)
+  // — the chip is hidden for these (#24). Synced cross-device: seeded by a
+  // 'clear' notify frame from any device, and re-armed (removed) by a genuine
+  // new alert for the session. Replaces the dashboard's old device-local set.
+  final Set<String> _dismissedAttention = <String>{};
+
   List<Session> _current = const <Session>[];
   Timer? _pollTimer;
   Timer? _debounce;
@@ -232,9 +238,28 @@ class SessionRepository {
   /// Handles one `/ws/notify` frame: folds api-error state (for the instant
   /// highlight) and schedules the debounced list refresh (existing behavior).
   void _onNotify(NotifyEvent evt) {
+    // #24 cross-device attention sync.
+    if (evt.sessionId.isNotEmpty) {
+      if (evt.type == 'clear' || evt.cleared) {
+        // Another device opened/dismissed this session — clear its chip here too.
+        if (_dismissedAttention.add(evt.sessionId)) _reemit();
+      } else if (isFreshAlert(evt)) {
+        // A genuine NEW alert re-arms a previously-acknowledged session so its
+        // chip shows again (a bare status poll does not — no resurrect on noise).
+        _dismissedAttention.remove(evt.sessionId);
+      }
+    }
     _applyNotify(evt);
     _scheduleRefresh();
   }
+
+  /// Whether a notify frame is a genuine new attention alert (carries a message
+  /// and a needs-attention condition) versus a bare status/poll frame. Used to
+  /// re-arm a dismissed session's chip (#24) — a bare poll must NOT resurrect it.
+  @visibleForTesting
+  static bool isFreshAlert(NotifyEvent e) =>
+      e.message.isNotEmpty &&
+      (e.status == 'waiting' || e.status == 'api_error' || e.apiError);
 
   /// Reacts to a change in the configured server set (from
   /// [AppConfig.serversStream]): re-syncs the `/ws/notify` subscriptions and, if
@@ -435,6 +460,32 @@ class SessionRepository {
     if (v is int) return v;
     if (v is num) return v.toInt();
     return int.tryParse(v.toString());
+  }
+
+  /// Whether [id]'s attention chip is currently acknowledged/hidden (#24).
+  /// Synced across devices via 'clear' notify frames.
+  bool isAttentionDismissed(String id) => _dismissedAttention.contains(id);
+
+  /// Acknowledges (clears) a session's attention on THIS and every other device
+  /// (#24): hides the chip locally at once, then tells the server, which flips
+  /// the recorded attention, dismisses phone notifications (FCM 'clear') and
+  /// broadcasts a 'clear' frame so other in-app viewers drop the chip too.
+  /// Called when the session is opened/viewed or its chip is dismissed.
+  Future<void> dismissAttention(Session session) async {
+    if (_dismissedAttention.add(session.id)) _reemit();
+    try {
+      await _clientFor(session.server).clearAttention(session.id);
+    } catch (_) {
+      // Best-effort: the local hide already happened; other devices reconcile
+      // on the next alert/refresh.
+    }
+  }
+
+  /// Re-emits the current list so the dashboard rebuilds (StreamBuilder fires on
+  /// every event regardless of list identity). Used when a derived overlay
+  /// ([_dismissedAttention], server order) changes without a new fetch.
+  void _reemit() {
+    if (!_sessions.isClosed) _sessions.add(_current);
   }
 
   /// A session's position in its server's last-received order — the
