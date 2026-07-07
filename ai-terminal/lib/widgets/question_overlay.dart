@@ -81,6 +81,18 @@ List<AnswerFrame> buildAnswerFrames(
 bool answerNeedsConfirm(List<AnswerFrame> frames) =>
     frames.isNotEmpty && frames.last.keys == '\r';
 
+/// The text of the most recent non-empty assistant turn in [turns] — the
+/// message that led up to the question, so it can be shown as context above the
+/// overlay ("read the whole answer before the question"). Null when there's no
+/// assistant prose yet. Pure, so it's unit-testable.
+String? lastAssistantText(List<TranscriptTurn> turns) {
+  for (var i = turns.length - 1; i >= 0; i--) {
+    final t = turns[i];
+    if (t.isAssistant && t.text.trim().isNotEmpty) return t.text.trim();
+  }
+  return null;
+}
+
 class QuestionOverlay extends StatefulWidget {
   const QuestionOverlay({
     super.key,
@@ -88,9 +100,15 @@ class QuestionOverlay extends StatefulWidget {
     required this.onSend,
     required this.onDismiss,
     required this.onKey,
+    this.contextText,
   });
 
   final PendingQuestion question;
+
+  /// Claude's preceding message (the lead-up to the question), shown scrollable
+  /// above the question so the full answer is readable before answering. Null
+  /// when unavailable.
+  final String? contextText;
 
   /// Send the built answer as timed frames (the caller honours each delay).
   final void Function(List<AnswerFrame> frames) onSend;
@@ -169,6 +187,8 @@ class _QuestionOverlayState extends State<QuestionOverlay> {
                 mainAxisSize: MainAxisSize.min,
                 children: [
                   _header(theme, questions.length),
+                  if ((widget.contextText ?? '').trim().isNotEmpty)
+                    _contextPanel(theme, widget.contextText!.trim()),
                   if (questions.length > 1) _tabs(theme, questions),
                   Flexible(child: _optionList(theme, q)),
                   _footer(theme, q),
@@ -177,6 +197,50 @@ class _QuestionOverlayState extends State<QuestionOverlay> {
             ),
           ),
         ),
+      ),
+    );
+  }
+
+  /// Claude's preceding message, scrollable, so the full answer is readable
+  /// before answering (the question alone often carries only the tail).
+  Widget _contextPanel(ThemeData theme, String text) {
+    return Container(
+      margin: const EdgeInsets.fromLTRB(12, 0, 12, 6),
+      padding: const EdgeInsets.all(10),
+      constraints: const BoxConstraints(maxHeight: 160),
+      decoration: BoxDecoration(
+        color: theme.colorScheme.surfaceContainer,
+        borderRadius: BorderRadius.circular(AppShape.medium),
+        border: Border.all(color: theme.colorScheme.outlineVariant),
+      ),
+      child: Column(
+        crossAxisAlignment: CrossAxisAlignment.start,
+        mainAxisSize: MainAxisSize.min,
+        children: [
+          Row(
+            children: [
+              Icon(Icons.forum_outlined,
+                  size: 13, color: theme.colorScheme.onSurfaceVariant),
+              const SizedBox(width: 5),
+              Text(
+                'Claude said',
+                style: theme.textTheme.labelSmall?.copyWith(
+                  color: theme.colorScheme.onSurfaceVariant,
+                ),
+              ),
+            ],
+          ),
+          const SizedBox(height: 6),
+          Flexible(
+            child: SingleChildScrollView(
+              child: Text(
+                text,
+                style: theme.textTheme.bodyMedium
+                    ?.copyWith(color: theme.colorScheme.onSurface),
+              ),
+            ),
+          ),
+        ],
       ),
     );
   }
