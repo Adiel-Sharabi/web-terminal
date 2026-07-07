@@ -148,6 +148,7 @@ class _DashboardScreenState extends State<DashboardScreen> {
     BuildContext context,
     Session session, {
     required bool favoriteRow,
+    int? reorderIndex,
   }) {
     final attentionKind = _dismissedAttention.contains(session.id)
         ? null
@@ -185,7 +186,51 @@ class _DashboardScreenState extends State<DashboardScreen> {
         session,
         onChanged: SessionRepository.instance.refresh,
       ),
+      // Issue #22: drag handle only in the main per-server list. The handle
+      // (not the whole card) starts a reorder, so the card's long-press stays
+      // bound to the actions sheet. ReorderableDragStartListener works for both
+      // a desktop mouse-drag and a mobile touch-drag on the handle.
+      dragHandle: reorderIndex == null
+          ? null
+          : ReorderableDragStartListener(
+              index: reorderIndex,
+              child: Padding(
+                padding: const EdgeInsets.only(left: 4),
+                child: Icon(
+                  Icons.drag_handle,
+                  size: 18,
+                  color: Theme.of(context).colorScheme.onSurfaceVariant,
+                ),
+              ),
+            ),
     );
+  }
+
+  /// A server group's rows as a reorderable sliver (issue #22). Rows are dragged
+  /// by their handle (see [_buildCard]); [onReorder] persists the new order.
+  Widget _reorderableGroup(List<Session> sessions, ServerConfig server) {
+    return SliverReorderableList(
+      itemCount: sessions.length,
+      // onReorderItem delivers newIndex already adjusted for the removed item,
+      // so no manual `if (newIndex > oldIndex) newIndex--` dance.
+      onReorderItem: (oldIndex, newIndex) =>
+          _onReorderGroup(server, sessions, oldIndex, newIndex),
+      itemBuilder: (context, i) =>
+          _buildCard(context, sessions[i], favoriteRow: false, reorderIndex: i),
+    );
+  }
+
+  void _onReorderGroup(
+    ServerConfig server,
+    List<Session> ordered,
+    int oldIndex,
+    int newIndex,
+  ) {
+    if (newIndex == oldIndex) return;
+    final ids = [for (final s in ordered) s.id];
+    final moved = ids.removeAt(oldIndex);
+    ids.insert(newIndex, moved);
+    SessionRepository.instance.reorderServerSessions(server, ids);
   }
 
   @override
@@ -303,17 +348,14 @@ class _DashboardScreenState extends State<DashboardScreen> {
                             ),
                           ),
                           if (!_isCollapsed(group.server.baseUrl))
-                            SliverList(
-                              delegate: SliverChildBuilderDelegate((
-                                context,
-                                i,
-                              ) {
-                                return _buildCard(
-                                  context,
-                                  group.sessions[i],
-                                  favoriteRow: false,
-                                );
-                              }, childCount: group.sessions.length),
+                            // Issue #22: render each group in the server's
+                            // persisted (drag) order and let the user reorder by
+                            // the per-row handle. Order comes from the server,
+                            // so it's consistent across devices and survives
+                            // reconnect.
+                            _reorderableGroup(
+                              orderedSessionsFor(group, SessionRepository.instance),
+                              group.server,
                             ),
                         ],
                         const SliverToBoxAdapter(child: SizedBox(height: 96)),
@@ -332,6 +374,21 @@ class _DashboardScreenState extends State<DashboardScreen> {
       },
     );
   }
+}
+
+/// Orders a server group's sessions by the server's persisted (drag) order
+/// (issue #22) instead of the flat attention/recency sort, so a user-set order
+/// is honored and consistent across devices. [repo.serverOrderIndex] returns
+/// each session's position in the server's last-received list; unknown ids sort
+/// last (a freshly-created session appends). Pulled out (and taking [repo]
+/// explicitly) so it's unit-testable without pumping the dashboard.
+@visibleForTesting
+List<Session> orderedSessionsFor(ServerGroup group, SessionRepository repo) {
+  final out = [...group.sessions];
+  out.sort((a, b) => repo
+      .serverOrderIndex(group.server.baseUrl, a.id)
+      .compareTo(repo.serverOrderIndex(group.server.baseUrl, b.id)));
+  return out;
 }
 
 /// One server's bucket of sessions, in their incoming (attention-sorted)

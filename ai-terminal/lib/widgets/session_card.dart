@@ -39,6 +39,7 @@ class SessionCard extends StatelessWidget {
     this.onBellTap,
     this.onMoreTap,
     this.selected = false,
+    this.dragHandle,
   });
 
   final Session session;
@@ -77,6 +78,12 @@ class SessionCard extends StatelessWidget {
   /// True when this row is the one shown in the split view's detail pane —
   /// draws a primary-colored outline so the active session is obvious.
   final bool selected;
+
+  /// Optional drag handle (issue #22). The main list wraps a handle icon in a
+  /// `ReorderableDragStartListener` so the row can be drag-reordered by the
+  /// handle only — the whole-card long-press stays bound to the actions sheet.
+  /// `null` (favorites, split view) shows no handle.
+  final Widget? dragHandle;
 
   @override
   Widget build(BuildContext context) {
@@ -169,6 +176,7 @@ class SessionCard extends StatelessWidget {
                       tooltip: 'More actions',
                       onTap: onMoreTap,
                     ),
+                  ?dragHandle,
                 ],
               ),
               const SizedBox(height: 4),

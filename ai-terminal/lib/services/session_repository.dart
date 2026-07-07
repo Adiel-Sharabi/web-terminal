@@ -437,6 +437,52 @@ class SessionRepository {
     return int.tryParse(v.toString());
   }
 
+  /// A session's position in its server's last-received order — the
+  /// server-persisted display order that drag-reorder sets (#22). Because
+  /// `/api/sessions` returns sessions in the server's stored order, the last
+  /// fetched list ([_lastByServer]) *is* that order. Unknown ids sort last so a
+  /// freshly-created session (not yet in a persisted order) appends at the end.
+  /// The dashboard sorts each server group by this, rather than the flat
+  /// attention/recency sort, so a dragged order is honored and survives
+  /// reconnect (the server is the source of truth).
+  int serverOrderIndex(String baseUrl, String id) {
+    final list = _lastByServer[baseUrl];
+    if (list == null) return 1 << 30;
+    final i = list.indexWhere((s) => s.id == id);
+    return i < 0 ? (1 << 30) : i;
+  }
+
+  /// Persists a new order for one server's sessions (#22) and applies it
+  /// optimistically so every viewer of this device updates instantly. [orderedIds]
+  /// is that server's full id list in the desired order; ids not present are
+  /// appended in their prior order (matches the server's reorder semantics).
+  /// Best-effort persistence — a failed POST is reconciled by the next refresh,
+  /// which re-reads the authoritative order from the server.
+  Future<void> reorderServerSessions(
+    ServerConfig server,
+    List<String> orderedIds,
+  ) async {
+    final base = server.baseUrl;
+    final prior = _lastByServer[base] ?? const <Session>[];
+    final byId = <String, Session>{for (final s in prior) s.id: s};
+    final reordered = <Session>[
+      for (final id in orderedIds)
+        if (byId[id] != null) byId[id]!,
+      for (final s in prior)
+        if (!orderedIds.contains(s.id)) s,
+    ];
+    _lastByServer[base] = reordered;
+    // Re-emit the (unchanged) flat list so the dashboard re-groups and re-reads
+    // serverOrderIndex — StreamBuilder rebuilds on every event regardless of
+    // list identity.
+    if (!_sessions.isClosed) _sessions.add(_current);
+    try {
+      await _clientFor(server).reorderSessions(orderedIds);
+    } catch (_) {
+      // Next refresh reconciles from the server's authoritative order.
+    }
+  }
+
   ApiClient _clientFor(ServerConfig server) {
     final existing = _clients[server.baseUrl];
     // Recreate when the config changed (e.g. the display name was resolved from
