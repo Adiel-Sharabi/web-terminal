@@ -1589,7 +1589,14 @@ class _SessionScreenState extends State<SessionScreen>
           SafeArea(
             top: false,
             child: TerminalKeyStrip(
-              onKey: _handleKeyStripKeyPress,
+              // #34: the on-screen key strip is a *terminal* control — its keys
+              // (Esc, Tab, and the arrows) go straight to the PTY, matching the
+              // web client's arrow buttons, so Claude's native arrow-driven TUI
+              // (subagent switcher, menus) is navigable from the app. Only the
+              // compose field's own hardware arrows stay compose-aware (caret /
+              // history) via ComposeBar.onArrow below — that's the one place a
+              // typed arrow is meant to edit text.
+              onKey: _sendRawToTerminal,
               ctrlActive: _ctrlSticky,
               onToggleCtrl: () => setState(() => _ctrlSticky = !_ctrlSticky),
               altActive: _altSticky,
