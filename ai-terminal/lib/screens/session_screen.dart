@@ -62,6 +62,33 @@ bool canForkFromMenu(Session session) => session.claudeSessionId != null;
 bool composeBarVisible({required bool rawMode, required String activeLens}) =>
     activeLens == 'chat' || !rawMode;
 
+/// True on desktop platforms (a real hardware keyboard). One definition so the
+/// raw-mode default, the '/' live-stream gate (#28), and image-paste routing
+/// all read the same rule.
+bool isDesktopPlatform() =>
+    !kIsWeb && (Platform.isWindows || Platform.isMacOS || Platform.isLinux);
+
+/// Whether a compose buffer that just became '/'-prefixed should switch to the
+/// live slash-stream (mirroring Claude's slash menu in the terminal). It's a
+/// touch-first affordance: on desktop it flipped to the Terminal lens and —
+/// with raw mode defaulting on — hid the compose bar, stranding the user with
+/// nowhere to type (#28). On desktop '/' is therefore an ordinary character;
+/// the line is sent as plain text on Enter and Claude runs the slash command
+/// the same way. Pure so the gate is testable.
+bool slashStartsLiveStream({required String text, required bool isDesktop}) =>
+    text.startsWith('/') && !isDesktop;
+
+/// Where an Alt+V clipboard-image paste should land: the chat compose field
+/// (when the Chat lens is active — the terminal is offstage there — or the
+/// compose field holds focus), else straight to the terminal PTY (raw typing).
+/// Makes Alt+V work while composing in chat (#29) with no regression to the
+/// terminal path. Pure so the routing is testable.
+bool pasteImageIntoCompose({
+  required String activeLens,
+  required bool composeFocused,
+}) =>
+    activeLens == 'chat' || composeFocused;
+
 class SessionScreen extends StatefulWidget {
   const SessionScreen({
     super.key,
@@ -195,8 +222,7 @@ class _SessionScreenState extends State<SessionScreen>
     // arrows, Ctrl and command history are handled natively by the terminal
     // (Claude's TUI). Mobile defaults to compose-first. A per-session toggle
     // overrides either way.
-    final isDesktop =
-        !kIsWeb && (Platform.isWindows || Platform.isMacOS || Platform.isLinux);
+    final isDesktop = isDesktopPlatform();
     final rawMode =
         prefs.getBool('wt_rawmode_${widget.sessionId}') ?? isDesktop;
     final historyJson = prefs.getString('wt_history_${widget.sessionId}');
@@ -707,10 +733,12 @@ class _SessionScreenState extends State<SessionScreen>
         return;
       }
       _historyActive = false;
-      // A buffer starting with '/' goes live: stream it to the terminal so
-      // Claude's own slash-command menu renders and narrows as you type.
-      // Stays live until Enter or the buffer becomes empty.
-      if (!_composeLive && text.startsWith('/')) {
+      // A buffer starting with '/' goes live (mobile): stream it to the
+      // terminal so Claude's slash-command menu renders and narrows as you
+      // type. On desktop this is suppressed — it hid the compose bar and
+      // stranded the user (#28); there '/' is a plain character sent on Enter.
+      if (!_composeLive &&
+          slashStartsLiveStream(text: text, isDesktop: isDesktopPlatform())) {
         _composeLive = true;
         _composeLiveSent = '';
         // The live menu renders in the terminal — useless if the Chat lens
@@ -1059,8 +1087,20 @@ class _SessionScreenState extends State<SessionScreen>
       final reference = await ApiClient(
         session.server,
       ).uploadClipboardImage(session.id, png.bytes, mime: png.mime);
-      _connection?.sendInput(reference);
-      _scrollToBottom();
+      if (pasteImageIntoCompose(
+        activeLens: _activeLens,
+        composeFocused: _composeFocusNode.hasFocus,
+      )) {
+        // #29: composing in chat — insert the plain image path (strip the PTY
+        // bracketed-paste wrapper) into the compose field so it's visible and
+        // sent with the message; Claude reads the file from the path.
+        _pasteIntoCompose(
+          reference.replaceAll(RegExp('\x1b\\[2(?:00|01)~'), ''),
+        );
+      } else {
+        _connection?.sendInput(reference);
+        _scrollToBottom();
+      }
     } catch (e) {
       if (mounted) {
         ScaffoldMessenger.of(
