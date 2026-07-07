@@ -473,6 +473,10 @@ class SessionRepository {
   /// Called when the session is opened/viewed or its chip is dismissed.
   Future<void> dismissAttention(Session session) async {
     if (_dismissedAttention.add(session.id)) _reemit();
+    // Cancel THIS device's OS notification now (#2). The server's FCM 'clear'
+    // is for *other* devices and never fires on a foreground app, so opening
+    // the session here must dismiss its own notification directly.
+    await NotificationService.cancelForSession(session.id);
     try {
       await _clientFor(session.server).clearAttention(session.id);
     } catch (_) {

@@ -130,8 +130,17 @@ test.describe('Keep Sessions Open', () => {
     await setKeepSessionsOpen(ctx, false);
   });
 
-  test('different browserId kicks active viewer', async ({ browser }) => {
-    await setKeepSessionsOpen(ctx, true);
+  // #21: sharing is now the default — a different-browserId active viewer joins
+  // the same PTY instead of force-disconnecting the first. (The opt-in
+  // exclusiveViewer=true takeover is covered by exclusive-viewer.spec.js.)
+  test('different browserId does NOT kick active viewer (shared by default, #21)', async ({ browser }) => {
+    // keepSessionsOpen on, and pin exclusiveViewer off so a stray earlier test
+    // that enabled it can't turn this into a takeover.
+    const cfg = await (await ctx.get(`${BASE}/api/config`)).json();
+    cfg.keepSessionsOpen = true;
+    cfg.exclusiveViewer = false;
+    await ctx.put(`${BASE}/api/config`, { data: cfg });
+
     const sessions = await getSessions(ctx);
     const sessionId = sessions[0].id;
 
@@ -146,18 +155,18 @@ test.describe('Keep Sessions Open', () => {
     await connectWsWithMode(page1, sessionId, 'active', 'browser-X');
     await page1.waitForTimeout(500);
 
-    // Viewer 2 connects as active with browserId Y — should kick viewer 1
+    // Viewer 2 connects as active with browserId Y — shared, must NOT kick #1
     await connectWsWithMode(page2, sessionId, 'active', 'browser-Y');
     await page2.waitForTimeout(500);
 
-    // Viewer 1 should have been kicked
+    // Viewer 1 was NOT kicked: no sessionTaken, no 4001 close, socket still open.
     const msgs1 = await page1.evaluate(({ id }) => window._testMsgs[id + '_active'], { id: sessionId });
-    const hasSessionTaken = msgs1.some(m => m.includes('"sessionTaken"'));
-    const hasClose4001 = msgs1.some(m => m === '__CLOSE__:4001');
-    expect(hasSessionTaken).toBe(true);
-    expect(hasClose4001).toBe(true);
+    expect(msgs1.some(m => m.includes('"sessionTaken"'))).toBe(false);
+    expect(msgs1.some(m => m === '__CLOSE__:4001')).toBe(false);
+    const ws1State = await page1.evaluate(({ id }) => window._testWsList[id + '_active'].readyState, { id: sessionId });
+    expect(ws1State).toBe(1); // still OPEN — shares the PTY
 
-    // Viewer 2 should still be connected
+    // Viewer 2 is also connected.
     const ws2State = await page2.evaluate(({ id }) => window._testWsList[id + '_active'].readyState, { id: sessionId });
     expect(ws2State).toBe(1); // OPEN
 

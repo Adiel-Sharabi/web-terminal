@@ -28,6 +28,7 @@ import '../api/api_client.dart';
 import '../api/models.dart';
 import '../services/desktop_alert_service.dart';
 import '../services/detach_window_service.dart';
+import '../services/notification_service.dart';
 import '../services/session_repository.dart';
 import '../theme/app_theme.dart';
 import '../theme/status_colors.dart';
@@ -369,9 +370,13 @@ class _SessionScreenState extends State<SessionScreen>
     if (firstLoad) {
       _attach();
       _checkTranscriptCapability();
-      // #24: opening a session acknowledges its attention on every device —
-      // clear it (and dismiss its phone notification) elsewhere too. Only when
-      // it actually needs attention, so a plain open isn't a needless round-trip.
+      // Opening a session dismisses any pending OS notification for it on THIS
+      // device immediately (#2) — cheap, local, covers every kind incl. an
+      // 'idle'/finished push whose status isn't waiting/api_error.
+      NotificationService.cancelForSession(match.id);
+      // #24: when it actually needs attention, also clear it on every OTHER
+      // device (server flips attention + fans out an FCM 'clear'). Gated so a
+      // plain open isn't a needless round-trip.
       if (match.status == 'waiting' || match.status == 'api_error') {
         SessionRepository.instance.dismissAttention(match);
       }
