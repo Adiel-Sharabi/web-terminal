@@ -1,6 +1,8 @@
 // Widget tests for the Chat lens (ConversationView): turn rendering, fenced
 // code blocks, tool-use chips, and empty/error states. Network access is
 // avoided entirely via the injectable `fetchPage`.
+import 'dart:async';
+
 import 'package:flutter/material.dart';
 import 'package:flutter_test/flutter_test.dart';
 
@@ -198,6 +200,141 @@ void main() {
       // self-selecting SelectableText competes with the SelectionArea.
       expect(find.byType(SelectableText), findsNothing);
       expect(find.textContaining('code()'), findsOneWidget);
+    },
+  );
+
+  group('#32 parseCommandInvocation', () {
+    test('extracts name (slash stripped), args, and body', () {
+      const text =
+          '<command-name>/task</command-name>\n<command-message>task</command-message>\n'
+          '<command-args>build the thing</command-args>\n\nFULL SKILL BODY LINE 1\nLINE 2';
+      final c = parseCommandInvocation(text);
+      expect(c, isNotNull);
+      expect(c!.name, 'task');
+      expect(c.args, 'build the thing');
+      expect(c.body, 'FULL SKILL BODY LINE 1\nLINE 2');
+    });
+
+    test('empty args and no body', () {
+      const text =
+          '<command-name>compact</command-name><command-args></command-args>';
+      final c = parseCommandInvocation(text);
+      expect(c!.name, 'compact');
+      expect(c.args, isEmpty);
+      expect(c.body, isEmpty);
+    });
+
+    test('plain prose is not a command', () {
+      expect(parseCommandInvocation('just a normal message'), isNull);
+      expect(parseCommandInvocation('use /task later, not now'), isNull);
+    });
+  });
+
+  testWidgets(
+    '#32: a skill turn renders the compact command, not the whole body',
+    (tester) async {
+      final page = TranscriptPage(
+        messages: const [
+          TranscriptTurn(
+            role: 'user',
+            text:
+                '<command-name>/task</command-name>\n<command-args>do X</command-args>\n\n'
+                'ENORMOUS_SKILL_BODY_MARKER should be hidden by default',
+            toolUses: [],
+            ts: null,
+          ),
+        ],
+        cursor: null,
+        hasMore: false,
+      );
+      await tester.pumpWidget(
+        _wrap(
+          ConversationView(
+            session: _session(),
+            fetchPage: (id, {before, limit}) async => page,
+          ),
+        ),
+      );
+      await tester.pumpAndSettle();
+
+      // Compact invocation shown; the injected body is collapsed away.
+      expect(find.text('/task do X'), findsOneWidget);
+      expect(find.textContaining('ENORMOUS_SKILL_BODY_MARKER'), findsNothing);
+
+      // Expanding reveals the body.
+      await tester.tap(find.text('/task do X'));
+      await tester.pumpAndSettle();
+      expect(find.textContaining('ENORMOUS_SKILL_BODY_MARKER'), findsOneWidget);
+    },
+  );
+
+  testWidgets(
+    '#31: a submitted prompt echoes as Queued, then reconciles when it lands',
+    (tester) async {
+      final prompts = StreamController<String>.broadcast();
+      addTearDown(prompts.close);
+      var calls = 0;
+      Future<TranscriptPage> fetch(String id, {String? before, int? limit}) async {
+        calls++;
+        if (calls == 1) {
+          return const TranscriptPage(
+            messages: [
+              TranscriptTurn(role: 'assistant', text: 'hi', toolUses: [], ts: null),
+            ],
+            cursor: null,
+            hasMore: false,
+          );
+        }
+        // The user's prompt has now landed in the real transcript.
+        return const TranscriptPage(
+          messages: [
+            TranscriptTurn(role: 'assistant', text: 'hi', toolUses: [], ts: null),
+            TranscriptTurn(
+                role: 'user', text: 'run the build', toolUses: [], ts: null),
+          ],
+          cursor: null,
+          hasMore: false,
+        );
+      }
+
+      // Explicit lastActivity so a change reliably triggers _refreshLastPage.
+      // (status is 'idle', not 'working', to avoid the working indicator's
+      // infinite repeat animation which would hang pumpAndSettle.)
+      Session sess(int lastActivity) => Session(
+            id: 'sess-1',
+            name: 'proj',
+            cwd: '/x',
+            status: 'idle',
+            claudeSessionId: 'claude-1',
+            lastActivity: lastActivity,
+            notifyLevel: 'important',
+            server: _server(),
+            autoCommand: '',
+          );
+      Widget build(Session s) => _wrap(
+            ConversationView(
+              key: const ValueKey('cv'),
+              session: s,
+              fetchPage: fetch,
+              submittedPrompts: prompts.stream,
+            ),
+          );
+
+      await tester.pumpWidget(build(sess(1000)));
+      await tester.pumpAndSettle();
+
+      // Submit → immediate optimistic "Queued" echo (before the transcript has it).
+      prompts.add('run the build');
+      await tester.pumpAndSettle();
+      expect(find.text('run the build'), findsOneWidget);
+      expect(find.text('Queued'), findsOneWidget);
+
+      // The real turn lands: a lastActivity change triggers a transcript refresh
+      // → the echo reconciles away, no duplicate.
+      await tester.pumpWidget(build(sess(2000)));
+      await tester.pumpAndSettle();
+      expect(find.text('Queued'), findsNothing);
+      expect(find.text('run the build'), findsOneWidget);
     },
   );
 
