@@ -54,4 +54,30 @@ void main() {
 
     expect(find.byTooltip('Enter'), findsOneWidget);
   });
+
+  // #30/#11: the raw-keyboard toggle is shown by default (mobile) but hidden
+  // when showRawToggle is false (desktop), where it stranded the user.
+  testWidgets('raw-keyboard toggle shows by default, hides when suppressed',
+      (tester) async {
+    Widget strip({required bool showRawToggle}) => TerminalKeyStrip(
+          onKey: (_) {},
+          ctrlActive: false,
+          onToggleCtrl: () {},
+          altActive: false,
+          onToggleAlt: () {},
+          onPaste: () {},
+          onImage: () {},
+          rawMode: false,
+          onToggleRawMode: () {},
+          showRawToggle: showRawToggle,
+        );
+
+    await tester.pumpWidget(_wrap(strip(showRawToggle: true)));
+    expect(find.byTooltip('Raw keyboard mode'), findsOneWidget);
+
+    await tester.pumpWidget(_wrap(strip(showRawToggle: false)));
+    expect(find.byTooltip('Raw keyboard mode'), findsNothing);
+    // The other keys remain (only the raw toggle is gated).
+    expect(find.byTooltip('Enter'), findsOneWidget);
+  });
 }

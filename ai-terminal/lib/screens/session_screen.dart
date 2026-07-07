@@ -1588,6 +1588,11 @@ class _SessionScreenState extends State<SessionScreen>
               onImage: _pickAndSendImage,
               rawMode: _rawMode,
               onToggleRawMode: () => _setRawMode(!_rawMode),
+              // #30/#11: hide the raw-keyboard toggle on desktop — there it
+              // stranded the user (raw ON → Terminal lens, compose hidden) and
+              // the on-screen keyboard is redundant with a physical one. Desktop
+              // input follows the lens toggle instead.
+              showRawToggle: !isDesktopPlatform(),
             ),
           ),
         ],

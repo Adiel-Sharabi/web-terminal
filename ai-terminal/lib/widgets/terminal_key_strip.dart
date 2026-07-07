@@ -24,6 +24,7 @@ class TerminalKeyStrip extends StatelessWidget {
     required this.onImage,
     required this.rawMode,
     required this.onToggleRawMode,
+    this.showRawToggle = true,
   });
 
   /// Called with the raw sequence a key sends (e.g. `'\x1b'`, `'\x1b[A'`).
@@ -51,6 +52,13 @@ class TerminalKeyStrip extends StatelessWidget {
   final bool rawMode;
 
   final VoidCallback onToggleRawMode;
+
+  /// Whether to show the raw-mode (on-screen "keyboard") toggle. Hidden on
+  /// desktop (#30/#11): there a physical keyboard makes it redundant, and
+  /// toggling raw ON there switched to the Terminal lens and hid the compose
+  /// bar — stranding the user with nowhere to type. On desktop input follows
+  /// the lens instead (Chat = compose, Terminal = raw terminal).
+  final bool showRawToggle;
 
   @override
   Widget build(BuildContext context) {
@@ -91,12 +99,13 @@ class TerminalKeyStrip extends StatelessWidget {
             tooltip: 'Send image',
             onTap: onImage,
           ),
-          _KeyButton(
-            icon: Icons.keyboard_rounded,
-            tooltip: 'Raw keyboard mode',
-            active: rawMode,
-            onTap: onToggleRawMode,
-          ),
+          if (showRawToggle)
+            _KeyButton(
+              icon: Icons.keyboard_rounded,
+              tooltip: 'Raw keyboard mode',
+              active: rawMode,
+              onTap: onToggleRawMode,
+            ),
         ],
       ),
     );
