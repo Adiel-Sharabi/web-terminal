@@ -142,3 +142,6 @@ When working through GitHub issues, use this process:
 - `/api/cluster/sessions` merges local + remote sessions — must skip fetching from servers whose URL matches `publicUrl` to avoid session duplication
 - Cluster auth tokens stored in `cluster-tokens.json`
 - `passAllEnv` config option (default false) controls whether spawned shells get full or limited environment variables
+
+## Engineering Standards (shared, non-negotiable)
+@ENGINEERING_STANDARDS.md
