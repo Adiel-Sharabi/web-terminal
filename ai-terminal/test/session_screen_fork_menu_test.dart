@@ -53,4 +53,45 @@ void main() {
       expect(composeBarVisible(rawMode: true, activeLens: 'chat'), isTrue);
     });
   });
+
+  group('slashStartsLiveStream (#28: "/" must not strand desktop chat)', () {
+    test('desktop: a "/"-line never goes live (stays a plain field char)', () {
+      expect(slashStartsLiveStream(text: '/', isDesktop: true), isFalse);
+      expect(slashStartsLiveStream(text: '/task', isDesktop: true), isFalse);
+    });
+
+    test('mobile: a "/"-line goes live (Claude slash menu)', () {
+      expect(slashStartsLiveStream(text: '/', isDesktop: false), isTrue);
+      expect(slashStartsLiveStream(text: '/task', isDesktop: false), isTrue);
+    });
+
+    test('a non-slash line never goes live, on any platform', () {
+      expect(slashStartsLiveStream(text: 'hello', isDesktop: false), isFalse);
+      expect(slashStartsLiveStream(text: 'a/b', isDesktop: false), isFalse);
+      expect(slashStartsLiveStream(text: '', isDesktop: false), isFalse);
+    });
+  });
+
+  group('pasteImageIntoCompose (#29: Alt+V lands where you type)', () {
+    test('chat lens -> compose (terminal is offstage there)', () {
+      expect(
+        pasteImageIntoCompose(activeLens: 'chat', composeFocused: false),
+        isTrue,
+      );
+    });
+
+    test('terminal lens with the compose field focused -> compose', () {
+      expect(
+        pasteImageIntoCompose(activeLens: 'terminal', composeFocused: true),
+        isTrue,
+      );
+    });
+
+    test('terminal lens, terminal focused (raw typing) -> PTY, unchanged', () {
+      expect(
+        pasteImageIntoCompose(activeLens: 'terminal', composeFocused: false),
+        isFalse,
+      );
+    });
+  });
 }
