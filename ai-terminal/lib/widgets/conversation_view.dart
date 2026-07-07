@@ -385,7 +385,14 @@ class _ConversationViewState extends State<ConversationView> {
         Expanded(
           child: Stack(
             children: [
-        ListView.builder(
+        // #27: one SelectionArea over the whole list so a mouse drag selects
+        // across lines AND across message bubbles (individual SelectableText /
+        // MarkdownBody islands could only select within themselves). The inner
+        // bubbles render plain, non-selectable Text/Markdown and let this
+        // ancestor own the selection; taps (tool-chip expand, code copy) still
+        // pass through. Auto-scrolls while dragging past an edge.
+        SelectionArea(
+          child: ListView.builder(
           controller: _scrollController,
           padding: const EdgeInsets.symmetric(vertical: 8),
           itemCount: _turns.length + leadingLoader + (working ? 1 : 0),
@@ -409,6 +416,7 @@ class _ConversationViewState extends State<ConversationView> {
             }
             return _TurnBubble(turn: _turns[turnIndex]);
           },
+        ),
         ),
         if (_showNewPill)
           Positioned(
@@ -738,7 +746,9 @@ class _TurnBubble extends StatelessWidget {
                     padding: const EdgeInsets.symmetric(vertical: 2),
                     child: MarkdownBody(
                       data: seg.content,
-                      selectable: true,
+                      // Selection is owned by the ancestor SelectionArea (#27);
+                      // a self-selectable body would break cross-bubble drags.
+                      selectable: false,
                       fitContent: true,
                       styleSheet: _markdownStyle(theme, bodyStyle, codeSpanStyle),
                     ),
@@ -791,7 +801,10 @@ class _CodeBlock extends StatelessWidget {
         children: [
           Padding(
             padding: const EdgeInsets.only(right: 28),
-            child: SelectableText(
+            // Plain Text — the ancestor SelectionArea (#27) makes it selectable
+            // as part of a conversation-wide drag; the copy button still grabs
+            // the whole block regardless of selection.
+            child: Text(
               code,
               style: theme.textTheme.bodyMedium?.copyWith(
                 fontFamily: 'monospace',

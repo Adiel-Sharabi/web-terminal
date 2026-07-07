@@ -159,6 +159,48 @@ void main() {
     expect(find.textContaining('should be truncated'), findsOneWidget);
   });
 
+  testWidgets(
+    '#27: the message list is wrapped in one SelectionArea (cross-bubble drag), '
+    'and bubbles no longer self-select',
+    (tester) async {
+      final page = TranscriptPage(
+        messages: const [
+          TranscriptTurn(
+            role: 'user',
+            text: 'first message',
+            toolUses: [],
+            ts: null,
+          ),
+          TranscriptTurn(
+            role: 'assistant',
+            text: 'second message\n```\ncode()\n```',
+            toolUses: [],
+            ts: null,
+          ),
+        ],
+        cursor: null,
+        hasMore: false,
+      );
+      await tester.pumpWidget(
+        _wrap(
+          ConversationView(
+            session: _session(),
+            fetchPage: (id, {before, limit}) async => page,
+          ),
+        ),
+      );
+      await tester.pumpAndSettle();
+
+      // A single ancestor SelectionArea owns selection for the whole list, so a
+      // drag can span lines and adjacent bubbles.
+      expect(find.byType(SelectionArea), findsOneWidget);
+      // Inner islands are gone: code blocks are plain Text now, and no
+      // self-selecting SelectableText competes with the SelectionArea.
+      expect(find.byType(SelectableText), findsNothing);
+      expect(find.textContaining('code()'), findsOneWidget);
+    },
+  );
+
   testWidgets('shows an empty state when there are no turns', (tester) async {
     await tester.pumpWidget(
       _wrap(
