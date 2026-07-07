@@ -520,13 +520,34 @@ class ToolUse {
   /// A short preview (~first 80 chars) of the tool input.
   final String inputPreview;
 
+  /// The tool_use id (pairs with its result server-side); '' if unknown.
+  final String id;
+
+  /// The tool's input, ANSI-stripped and per-field-capped, for rich cards
+  /// (e.g. `command`, `file_path`, `description`, `pattern`, `url`).
+  final Map<String, dynamic> input;
+
+  /// The tool's OUTPUT (tool_result text, capped), or null if none was captured.
+  final String? result;
+
   /// Creates a tool-use summary.
-  const ToolUse({required this.name, required this.inputPreview});
+  const ToolUse({
+    required this.name,
+    required this.inputPreview,
+    this.id = '',
+    this.input = const {},
+    this.result,
+  });
 
   /// Parses one element of a turn's `toolUses` array.
   factory ToolUse.fromJson(Map<String, dynamic> json) => ToolUse(
         name: (json['name'] ?? '').toString(),
         inputPreview: (json['inputPreview'] ?? '').toString(),
+        id: (json['id'] ?? '').toString(),
+        input: json['input'] is Map
+            ? Map<String, dynamic>.from(json['input'] as Map)
+            : const <String, dynamic>{},
+        result: json['result']?.toString(),
       );
 
   @override

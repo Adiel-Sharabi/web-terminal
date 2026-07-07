@@ -296,6 +296,28 @@ void main() {
     });
   });
 
+  group('ToolUse.fromJson', () {
+    test('parses id, structured input, and result; back-compat defaults', () {
+      final t = ToolUse.fromJson({
+        'name': 'Bash',
+        'inputPreview': '{"command":"npm test"}',
+        'id': 'tu_1',
+        'input': {'command': 'npm test'},
+        'result': 'PASS',
+      });
+      expect(t.name, 'Bash');
+      expect(t.id, 'tu_1');
+      expect(t.input['command'], 'npm test');
+      expect(t.result, 'PASS');
+
+      // Old-server payload (no id/input/result) → safe defaults.
+      final old = ToolUse.fromJson({'name': 'Read', 'inputPreview': '{"file":"a"}'});
+      expect(old.id, '');
+      expect(old.input, isEmpty);
+      expect(old.result, isNull);
+    });
+  });
+
   group('TranscriptTurn.ctxTokens', () {
     test('parsed when present and positive', () {
       final t = TranscriptTurn.fromJson(

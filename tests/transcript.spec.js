@@ -8,8 +8,14 @@ const path = require('path');
 const {
   lastAssistantText, isAllowedTranscriptPath,
   parseTranscriptTurn, scanTurnsBackward, encodeCursor, decodeCursor, stripAnsi,
-  pendingQuestion, shapeQuestions,
+  extractToolResults, pendingQuestion, shapeQuestions,
 } = require('../lib/transcript');
+
+// In-memory chunk reader for scanTurnsBackward (mirrors server.js's fs reader).
+function memReader(lineObjs) {
+  const data = Buffer.from(lineObjs.map((l) => JSON.stringify(l)).join('\n') + '\n', 'utf8');
+  return { read: (off, len) => data.slice(off, off + len), size: data.length };
+}
 
 // Write lines (objects) as JSONL to a unique temp file; returns the path.
 let _n = 0;
@@ -184,14 +190,35 @@ test.describe('lib/transcript.parseTranscriptTurn', () => {
     ]));
     expect(turn.role).toBe('assistant');
     expect(turn.text).toBe('Running it.');
-    expect(turn.toolUses).toEqual([{ name: 'Bash', inputPreview: '{"command":"npm test"}' }]);
+    expect(turn.toolUses).toEqual([
+      { name: 'Bash', inputPreview: '{"command":"npm test"}', id: '', input: { command: 'npm test' } },
+    ]);
   });
 
   test('assistant tool_use-ONLY turn is KEPT (text empty, toolUses populated)', () => {
     const turn = parseTranscriptTurn(asstLine([{ type: 'tool_use', name: 'Read', input: { file: 'a.js' } }]));
     expect(turn.role).toBe('assistant');
     expect(turn.text).toBe('');
-    expect(turn.toolUses).toEqual([{ name: 'Read', inputPreview: '{"file":"a.js"}' }]);
+    expect(turn.toolUses).toEqual([
+      { name: 'Read', inputPreview: '{"file":"a.js"}', id: '', input: { file: 'a.js' } },
+    ]);
+  });
+
+  test('tool_use exposes id + structured input (for rich chat cards)', () => {
+    const turn = parseTranscriptTurn(asstLine([
+      { type: 'tool_use', id: 'tu_9', name: 'Task',
+        input: { description: 'find bug', subagent_type: 'search' } },
+    ]));
+    expect(turn.toolUses[0].id).toBe('tu_9');
+    expect(turn.toolUses[0].input).toEqual({ description: 'find bug', subagent_type: 'search' });
+  });
+
+  test('a huge tool input string field is capped', () => {
+    const turn = parseTranscriptTurn(asstLine([
+      { type: 'tool_use', id: 't', name: 'Bash', input: { command: 'x'.repeat(5000) } },
+    ]));
+    expect(turn.toolUses[0].input.command.length).toBe(2000);
+    expect(turn.toolUses[0].input.command.endsWith('…')).toBe(true);
   });
 
   test('assistant turn with neither text nor tool_use → null (skipped)', () => {
@@ -399,6 +426,65 @@ const resultLine = (toolUseId) => JSON.stringify({
 });
 const oneQ = [{ header: 'DB', question: 'Which database?', multiSelect: false,
   options: [{ label: 'Postgres', description: 'default' }, { label: 'MySQL', description: '' }] }];
+
+test.describe('rich tool cards: extractToolResults + result pairing', () => {
+  test('extractToolResults pulls tool_result text by tool_use_id', () => {
+    const line = JSON.stringify({
+      type: 'user',
+      message: { role: 'user', content: [
+        { type: 'tool_result', tool_use_id: 'tu_1', content: 'PASS 3 tests' },
+        { type: 'tool_result', tool_use_id: 'tu_2', content: [
+          { type: 'text', text: 'line one' }, { type: 'image' }, { type: 'text', text: 'line two' },
+        ] },
+      ] },
+    });
+    expect(extractToolResults(line)).toEqual([
+      { id: 'tu_1', text: 'PASS 3 tests' },
+      { id: 'tu_2', text: 'line one\n[image]\nline two' },
+    ]);
+  });
+
+  test('a tool_result text is capped at 4000 chars', () => {
+    const line = JSON.stringify({
+      type: 'user',
+      message: { role: 'user', content: [
+        { type: 'tool_result', tool_use_id: 't', content: 'y'.repeat(9000) },
+      ] },
+    });
+    const [r] = extractToolResults(line);
+    expect(r.text.length).toBe(4000);
+    expect(r.text.endsWith('…')).toBe(true);
+  });
+
+  test('scanTurnsBackward attaches each tool output to its tool_use by id', () => {
+    // Order in file: assistant calls the tool (older), then its result (newer).
+    const { read, size } = memReader([
+      { type: 'assistant', message: { role: 'assistant', content: [
+        { type: 'text', text: 'Running it.' },
+        { type: 'tool_use', id: 'tu_7', name: 'Bash', input: { command: 'npm test' } },
+      ] } },
+      { type: 'user', message: { role: 'user', content: [
+        { type: 'tool_result', tool_use_id: 'tu_7', content: 'PASS — 3 passed' },
+      ] } },
+    ]);
+    const page = scanTurnsBackward(read, size, { limit: 10 });
+    const tool = page.turns.flatMap((t) => t.toolUses).find((tu) => tu.id === 'tu_7');
+    expect(tool.name).toBe('Bash');
+    expect(tool.result).toBe('PASS — 3 passed');
+  });
+
+  test('a tool_use with no result gets no `result` field', () => {
+    const { read, size } = memReader([
+      { type: 'assistant', message: { role: 'assistant', content: [
+        { type: 'tool_use', id: 'tu_x', name: 'Read', input: { file_path: 'a.js' } },
+      ] } },
+    ]);
+    const page = scanTurnsBackward(read, size, { limit: 10 });
+    const tool = page.turns.flatMap((t) => t.toolUses)[0];
+    expect(tool.id).toBe('tu_x');
+    expect(tool.result).toBeUndefined();
+  });
+});
 
 test.describe('shapeQuestions (live PreToolUse hook input)', () => {
   test('shapes a raw AskUserQuestion tool_input into the app-facing list', () => {
