@@ -161,6 +161,33 @@ test.describe('Cluster API', () => {
     await ctx.dispose();
   });
 
+  // Regression: /api/cluster/sessions caches the merged list for 1500ms. That
+  // cache must be invalidated on session create/delete, or a just-created
+  // session is missing from the sidebar for up to 1.5s (the favorites tests
+  // create-then-immediately-load and were failing on exactly this).
+  test('a newly created session appears in /api/cluster/sessions immediately (cache invalidated)', async () => {
+    const ctx = await authCtx();
+    // Warm the cache so a stale entry would be served if we did not invalidate.
+    await ctx.get('/api/cluster/sessions');
+
+    const create = await ctx.post('/api/sessions', { data: { name: 'Cache Invalidate Probe' } });
+    expect(create.status()).toBe(200);
+    const { id } = await create.json();
+
+    // No wait — the create must have busted the cache.
+    const data = await (await ctx.get('/api/cluster/sessions')).json();
+    const found = (data.sessions || []).find(s => s.id === id);
+    expect(found, 'created session should be in the cluster list with no TTL wait').toBeTruthy();
+
+    // And a delete must drop it immediately too.
+    const del = await ctx.delete('/api/sessions/' + id);
+    expect(del.status()).toBe(200);
+    const after = await (await ctx.get('/api/cluster/sessions')).json();
+    expect((after.sessions || []).find(s => s.id === id)).toBeFalsy();
+
+    await ctx.dispose();
+  });
+
   test('POST /api/cluster/auth rejects unknown server URL', async () => {
     const ctx = await authCtx();
     const res = await ctx.post('/api/cluster/auth', {

@@ -14,7 +14,7 @@ const notifyPush = require('./lib/notify-push');
 const transcript = require('./lib/transcript');
 const fcm = require('./lib/fcm');
 
-const SERVER_VERSION = '1.26.0'; // 2026-07-06: #19 detect LIVE AskUserQuestion via PreToolUse hook (transcript only gets the tool_use after it's answered, so it can't reveal a pending prompt); pending-question endpoint now serves the hook-stashed question
+const SERVER_VERSION = '1.26.1'; // 2026-07-07: (a) #23 fix — restore no longer appends implicit `--continue` to an unknown-id claude session (that resumed the most-recent conversation in the cwd, so a new session came up "Resumed" to the last one). Unknown-id restore now starts fresh; `--resume <own-id>` and explicit user --continue/--resume still honored (lib/restore-command.js). (b) /api/cluster/sessions cache (1500ms) is now invalidated on session create/delete/rename/reorder, so a just-created session shows in the sidebar immediately instead of after the TTL
 
 // --- Optional latency instrumentation (opt-in via WT_LATENCY_DEBUG=1) -----
 // Event-loop lag monitor: interval is 10ms; anything ≥ 50ms slip is a stall.
@@ -1948,6 +1948,14 @@ app.delete('/api/cluster/auth/:url', (req, res) => {
 const CLUSTER_SESSIONS_TTL_MS = 1500;
 const _clusterSessionsCache = new Map(); // user -> { ts, promise }
 
+// Drop the cached cluster-session list so the next /api/cluster/sessions call
+// recomputes. Call after any local session mutation (create/delete/rename/
+// reorder) — otherwise a just-created session is invisible in the sidebar until
+// the TTL lapses (a session you create doesn't show for up to 1.5s). Cheap: the
+// next fetch simply re-fans-out. Clears all users (a local mutation is visible
+// to every viewer).
+function invalidateClusterSessionsCache() { _clusterSessionsCache.clear(); }
+
 // Throttle for verbose cluster-fan-out logs. We only emit when the session
 // summary changes OR CLUSTER_LOG_MIN_GAP_MS has passed.
 const CLUSTER_LOG_MIN_GAP_MS = 30000;
@@ -2620,6 +2628,7 @@ app.post('/api/sessions', express.json({ limit: '16kb' }), async (req, res) => {
       cwd = liveCwd;
     }
     const created = await workerClient.rpc('createSession', { id, cwd, name, autoCommand });
+    invalidateClusterSessionsCache(); // new session must show in the sidebar immediately
     res.json({ id: created.id, name: created.name });
   } catch (e) {
     console.error(`Failed to create session: ${e.message}`);
@@ -2647,6 +2656,7 @@ app.patch('/api/sessions/:id', express.json({ limit: '16kb' }), async (req, res)
       });
       autoCommand = r.autoCommand;
     }
+    if (newName || req.body?.autoCommand !== undefined) invalidateClusterSessionsCache();
     res.json({ id: req.params.id, name: newName || current.name, autoCommand });
   } catch (e) {
     console.error(`PATCH /api/sessions failed: ${e.message}`);
@@ -2873,6 +2883,7 @@ app.post('/api/sessions/order', express.json({ limit: '64kb' }), async (req, res
       return res.status(400).json({ error: 'orderedIds must be strings <= 64 chars' });
     }
     const result = await workerClient.rpc('reorderSessions', { orderedIds });
+    invalidateClusterSessionsCache(); // reflect the new order in the sidebar immediately
     res.json(result);
   } catch (e) {
     console.error(`POST /api/sessions/order failed: ${e.message}`);
@@ -2890,6 +2901,7 @@ app.delete('/api/sessions/:id', async (req, res) => {
       throw e;
     }
     await workerClient.rpc('killSession', { id: req.params.id });
+    invalidateClusterSessionsCache(); // removed session must drop from the sidebar immediately
     res.json({ ok: true });
   } catch (e) {
     console.error(`DELETE /api/sessions failed: ${e.message}`);

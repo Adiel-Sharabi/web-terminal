@@ -13,6 +13,7 @@ const crypto = require('crypto');
 const { performance } = require('perf_hooks');
 const pty = require('node-pty');
 const ipc = require('./lib/ipc');
+const { resolveRestoreRunCommand } = require('./lib/restore-command');
 
 const WORKER_VERSION = '0.5.1';
 
@@ -1572,26 +1573,11 @@ function restoreSessionsOnStartup() {
   log(`restoring ${saved.length} session(s) from ${SESSIONS_FILE}`);
   for (const cfg of saved) {
     const original = cfg.autoCommand || '';
-    let runCmd = original;
-    if (runCmd && /\bclaude\b/i.test(runCmd)) {
-      // If we know the exact Claude session UUID this terminal was tied to
-      // (hook-reported or --resume-extracted), always restore with --resume
-      // <id>. --continue resumes the most recently modified session in the
-      // cwd, which collides when several web-terminal sessions share a cwd:
-      // both restored shells would end up on the same Claude session and the
-      // original would be lost. Strip any existing --continue/--resume <id?>
-      // before appending the canonical --resume. The user's original
-      // autoCommand is preserved in sessions.json (passed separately to
-      // createSession) so the UI keeps showing what they typed.
-      if (cfg.claudeSessionId) {
-        runCmd = runCmd
-          .replace(/\s*--resume\s+\S+/g, '')
-          .replace(/\s*--continue\b/g, '')
-          .trimEnd() + ' --resume ' + cfg.claudeSessionId;
-      } else if (!/(--continue|--resume)\b/.test(runCmd)) {
-        runCmd = runCmd.trimEnd() + ' --continue';
-      }
-    }
+    // Resolve the command to actually run at the restored prompt. Known Claude
+    // conversations reattach with `--resume <id>`; an unknown-id claude session
+    // starts fresh (NO implicit `--continue`, which would hijack the last
+    // conversation in the cwd — #23). See lib/restore-command.js for rationale.
+    const runCmd = resolveRestoreRunCommand(cfg);
     const savedScrollback = loadScrollback(cfg.id);
     try {
       createSession(cfg.id, cfg.cwd, cfg.name, original, savedScrollback, cfg.claudeSessionId || null, runCmd);
