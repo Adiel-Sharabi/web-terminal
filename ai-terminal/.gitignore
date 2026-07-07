@@ -10,3 +10,6 @@ lib/spike_config.dart
 android/app/google-services.json
 *.keystore
 *.jks
+
+# Test coverage output
+coverage/
