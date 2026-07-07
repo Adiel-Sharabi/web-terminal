@@ -79,6 +79,14 @@ class _AiTerminalAppState extends State<AiTerminalApp>
       // owns alerting, so events aren't toasted once per open window.
       unawaited(DesktopAlertService.instance.start());
       _tapSub = NotificationService.onNotificationTap.listen(_openSession);
+      // Issue #20: a toast clicked while the app was CLOSED cold-launches it.
+      // The foreground stream above only covers taps while running; the
+      // cold-launch payload is recoverable only via this one-shot launch-details
+      // check — the desktop branch was missing it, so a closed-app toast click
+      // opened the app but routed nowhere.
+      NotificationService.initialTapSessionId().then((id) {
+        if (id != null) _openSession(id);
+      });
     }
   }
 

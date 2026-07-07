@@ -16,6 +16,8 @@ import 'dart:convert';
 import 'dart:typed_data';
 import 'dart:ui' show Color;
 
+import 'package:flutter/foundation.dart' show visibleForTesting;
+
 import 'package:flutter_local_notifications/flutter_local_notifications.dart';
 import 'package:shared_preferences/shared_preferences.dart';
 
@@ -214,6 +216,11 @@ class NotificationService {
   /// `null` if the app was launched normally.
   static Future<String?> initialTapSessionId() async {
     try {
+      // Ensure the plugin is initialized first. On Windows the launch-details
+      // read throws a StateError until `initialize()` has run, and on a cold
+      // toast launch nobody may have called init() yet (issue #20). init() is
+      // idempotent, so this is cheap on the mobile path where it already ran.
+      await init();
       final details = await _plugin.getNotificationAppLaunchDetails();
       if (details?.didNotificationLaunchApp ?? false) {
         return _sessionIdFromPayload(details!.notificationResponse?.payload);
@@ -230,6 +237,14 @@ class NotificationService {
       _tapController.add(sessionId);
     }
   }
+
+  /// Extracts the `sessionId` from a notification payload (the `{sessionId,
+  /// serverName}` JSON set on every toast/push). Returns null for a
+  /// null/empty/malformed payload or one without a sessionId. Exposed for tests
+  /// because it is the routing key for every notification tap (issue #20).
+  @visibleForTesting
+  static String? sessionIdFromPayload(String? payload) =>
+      _sessionIdFromPayload(payload);
 
   static String? _sessionIdFromPayload(String? payload) {
     if (payload == null || payload.isEmpty) return null;
