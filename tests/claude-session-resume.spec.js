@@ -103,7 +103,11 @@ test.describe('Claude Session ID Persistence', () => {
     }
   });
 
-  test('--continue fallback when no claudeSessionId is saved', async () => {
+  // #23: a plain claude session with no recorded id persists a null
+  // claudeSessionId; on restore it starts FRESH (no implicit --continue — that
+  // fallback was removed). The command-resolution itself is unit-tested in
+  // restore-command.spec.js; here we just assert the persisted id stays null.
+  test('plain claude session persists a null claudeSessionId (no fake resume id)', async () => {
     const ctx = await authCtx();
     try {
       await cleanupSessions(ctx);
