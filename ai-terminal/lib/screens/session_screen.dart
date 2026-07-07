@@ -163,6 +163,11 @@ class _SessionScreenState extends State<SessionScreen>
   // --- Compose-first input state ------------------------------------------
   final TextEditingController _composeController = TextEditingController();
   final FocusNode _composeFocusNode = FocusNode();
+  // Broadcasts prompts the user submits so the Chat lens can echo them
+  // immediately (#31). Broadcast because ConversationView subscribes only while
+  // the Chat lens is mounted.
+  final StreamController<String> _submittedPrompts =
+      StreamController<String>.broadcast();
   bool _rawMode =
       false; // false = compose-first (default); true = direct terminal typing
   bool _composeLive = false; // true while a '/'-prefixed line is streaming live
@@ -815,6 +820,9 @@ class _SessionScreenState extends State<SessionScreen>
       _scrollToBottom();
       return;
     }
+    // Optimistic Chat echo (#31): show the prompt immediately, before Claude's
+    // transcript reflects it. Reconciled/deduped in ConversationView.
+    _submittedPrompts.add(val);
     if (val.contains('\n')) {
       // Multi-line: bracketed paste so Claude/readline treat it as one atomic
       // block. Strip any bracketed-paste markers already in the buffer (so user
@@ -1264,6 +1272,7 @@ class _SessionScreenState extends State<SessionScreen>
     _draftDebounce?.cancel();
     _disconnectDebounce?.cancel();
     _questionPoll?.cancel();
+    _submittedPrompts.close();
     for (final t in _scrollTimers) {
       t.cancel();
     }
@@ -1543,6 +1552,7 @@ class _SessionScreenState extends State<SessionScreen>
                   ConversationView(
                     session: session,
                     onNoTranscript: _handleNoTranscript,
+                    submittedPrompts: _submittedPrompts.stream,
                   ),
                 // Native overlay for Claude's interactive question (#19), above
                 // whichever lens is showing. The key strip below stays usable as

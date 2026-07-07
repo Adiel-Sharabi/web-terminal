@@ -45,6 +45,7 @@ class ConversationView extends StatefulWidget {
     required this.session,
     this.onNoTranscript,
     this.fetchPage,
+    this.submittedPrompts,
   });
 
   final Session session;
@@ -55,6 +56,12 @@ class ConversationView extends StatefulWidget {
 
   /// Injectable for tests; defaults to `ApiClient(session.server).transcript`.
   final TranscriptFetcher? fetchPage;
+
+  /// Prompts the user just submitted in the compose bar (#31). Each is echoed
+  /// immediately as a "Queued" bubble so the user sees their input registered
+  /// even while Claude is still working, then reconciled away when the matching
+  /// real transcript turn arrives.
+  final Stream<String>? submittedPrompts;
 
   @override
   State<ConversationView> createState() => _ConversationViewState();
@@ -75,6 +82,10 @@ class _ConversationViewState extends State<ConversationView> {
   Timer? _pollTimer;
   final List<Timer> _scrollTimers = <Timer>[];
 
+  /// Optimistic user-prompt echoes not yet reflected in the transcript (#31).
+  final List<_PendingEcho> _pendingEchoes = <_PendingEcho>[];
+  StreamSubscription<String>? _promptSub;
+
   Future<TranscriptPage> _defaultFetch(
     String sessionId, {
     String? before,
@@ -89,6 +100,7 @@ class _ConversationViewState extends State<ConversationView> {
   void initState() {
     super.initState();
     _scrollController.addListener(_onScroll);
+    _promptSub = widget.submittedPrompts?.listen(_addEcho);
     _loadInitial();
     _setPolling(widget.session.status == 'working');
   }
@@ -117,12 +129,47 @@ class _ConversationViewState extends State<ConversationView> {
   @override
   void dispose() {
     _pollTimer?.cancel();
+    _promptSub?.cancel();
     for (final t in _scrollTimers) {
       t.cancel();
     }
     _scrollController.removeListener(_onScroll);
     _scrollController.dispose();
     super.dispose();
+  }
+
+  /// Normalizes text for echo↔transcript matching (trim + collapse whitespace),
+  /// tolerating the CR/LF and bracketed-paste reshaping the send path applies.
+  static String _normEcho(String s) => s.trim().replaceAll(RegExp(r'\s+'), ' ');
+
+  /// Adds an optimistic echo for a just-submitted prompt (#31), unless the
+  /// transcript already shows it (a fast round-trip).
+  void _addEcho(String text) {
+    final t = text.trim();
+    if (t.isEmpty) return;
+    final norm = _normEcho(t);
+    final already =
+        _turns.any((x) => !x.isAssistant && _normEcho(x.text) == norm) ||
+            _pendingEchoes.any((e) => _normEcho(e.text) == norm);
+    if (already) return;
+    setState(() => _pendingEchoes
+        .add(_PendingEcho(t, DateTime.now().millisecondsSinceEpoch)));
+    _scrollToBottom();
+  }
+
+  /// Drops echoes once their real turn lands (dedupe) or after a safety timeout
+  /// (so an unmatched echo never becomes a permanent ghost). Called whenever
+  /// `_turns` is refreshed.
+  void _reconcileEchoes() {
+    if (_pendingEchoes.isEmpty) return;
+    final userTexts = <String>{
+      for (final t in _turns)
+        if (!t.isAssistant) _normEcho(t.text),
+    };
+    final now = DateTime.now().millisecondsSinceEpoch;
+    _pendingEchoes.removeWhere(
+      (e) => userTexts.contains(_normEcho(e.text)) || now - e.at > 90000,
+    );
   }
 
   void _resetAndReload() {
@@ -161,6 +208,7 @@ class _ConversationViewState extends State<ConversationView> {
         _oldestCursor = page.cursor;
         _hasMoreOlder = page.hasMore;
         _loadingInitial = false;
+        _reconcileEchoes();
       });
       _scrollToBottom(jump: true);
     } catch (e) {
@@ -236,7 +284,10 @@ class _ConversationViewState extends State<ConversationView> {
     final keepCount = _turns.length > freshTail.length
         ? _turns.length - freshTail.length
         : 0;
-    setState(() => _turns = [..._turns.sublist(0, keepCount), ...freshTail]);
+    setState(() {
+      _turns = [..._turns.sublist(0, keepCount), ...freshTail];
+      _reconcileEchoes();
+    });
     if (_pinnedToBottom) {
       _scrollToBottom();
     } else {
@@ -366,7 +417,7 @@ class _ConversationViewState extends State<ConversationView> {
         ),
       );
     }
-    if (_turns.isEmpty) {
+    if (_turns.isEmpty && _pendingEchoes.isEmpty) {
       return const EmptyState(
         icon: Icons.forum_outlined,
         title: 'No messages yet',
@@ -395,7 +446,10 @@ class _ConversationViewState extends State<ConversationView> {
           child: ListView.builder(
           controller: _scrollController,
           padding: const EdgeInsets.symmetric(vertical: 8),
-          itemCount: _turns.length + leadingLoader + (working ? 1 : 0),
+          itemCount: _turns.length +
+              leadingLoader +
+              (working ? 1 : 0) +
+              _pendingEchoes.length,
           itemBuilder: (context, index) {
             if (_loadingOlder && index == 0) {
               return const Padding(
@@ -409,12 +463,16 @@ class _ConversationViewState extends State<ConversationView> {
                 ),
               );
             }
-            final turnIndex = index - leadingLoader;
+            var i = index - leadingLoader;
+            if (i < _turns.length) return _TurnBubble(turn: _turns[i]);
+            i -= _turns.length;
             // Trailing "Claude is working…" indicator while the agent is mid-turn.
-            if (working && turnIndex == _turns.length) {
-              return const _WorkingIndicator();
+            if (working) {
+              if (i == 0) return const _WorkingIndicator();
+              i -= 1;
             }
-            return _TurnBubble(turn: _turns[turnIndex]);
+            // Optimistic echoes of prompts queued while Claude works (#31).
+            return _PendingEchoBubble(text: _pendingEchoes[i].text);
           },
         ),
         ),
@@ -690,6 +748,120 @@ MarkdownStyleSheet _markdownStyle(
   );
 }
 
+/// An optimistic echo of a prompt the user submitted but that hasn't shown up
+/// in the transcript yet (#31). [at] is epoch-ms, used only to age out an echo
+/// that never matched a real turn.
+class _PendingEcho {
+  _PendingEcho(this.text, this.at);
+  final String text;
+  final int at;
+}
+
+/// Renders a queued/pending user prompt (#31): styled like a user bubble but
+/// muted, with a "Queued" clock tag, so the user sees their input registered
+/// while Claude is still working. Removed once the real transcript turn lands.
+class _PendingEchoBubble extends StatelessWidget {
+  const _PendingEchoBubble({required this.text});
+
+  final String text;
+
+  @override
+  Widget build(BuildContext context) {
+    final theme = Theme.of(context);
+    return Align(
+      alignment: Alignment.centerRight,
+      child: ConstrainedBox(
+        constraints: BoxConstraints(
+          maxWidth: MediaQuery.sizeOf(context).width * 0.82,
+        ),
+        child: Container(
+          margin: const EdgeInsets.symmetric(
+            vertical: 4,
+            horizontal: AppSpacing.screenPadding,
+          ),
+          padding: const EdgeInsets.all(12),
+          decoration: BoxDecoration(
+            color: theme.colorScheme.surfaceContainerHigh.withValues(alpha: 0.35),
+            borderRadius: BorderRadius.circular(AppShape.medium),
+            border: Border.all(
+              color: theme.colorScheme.outlineVariant.withValues(alpha: 0.5),
+            ),
+          ),
+          child: Column(
+            crossAxisAlignment: CrossAxisAlignment.end,
+            mainAxisSize: MainAxisSize.min,
+            children: [
+              Text(
+                text,
+                style: theme.textTheme.bodyLarge?.copyWith(
+                  color: theme.colorScheme.onSurfaceVariant,
+                ),
+              ),
+              const SizedBox(height: 4),
+              Row(
+                mainAxisSize: MainAxisSize.min,
+                children: [
+                  Icon(Icons.schedule,
+                      size: 12, color: theme.colorScheme.onSurfaceVariant),
+                  const SizedBox(width: 4),
+                  Text(
+                    'Queued',
+                    style: theme.textTheme.bodySmall?.copyWith(
+                      color: theme.colorScheme.onSurfaceVariant,
+                    ),
+                  ),
+                ],
+              ),
+            ],
+          ),
+        ),
+      ),
+    );
+  }
+}
+
+/// A parsed slash-command / skill invocation from a transcript turn (#32).
+class CommandInvocation {
+  const CommandInvocation({
+    required this.name,
+    required this.args,
+    required this.body,
+  });
+
+  /// The command name without its leading slash (e.g. `task`).
+  final String name;
+
+  /// The user's arguments to the command (may be empty).
+  final String args;
+
+  /// The injected/expanded remainder (the full SKILL.md text) — hidden by
+  /// default, shown only if the user expands it. Empty when there's nothing
+  /// beyond the wrapper.
+  final String body;
+}
+
+final RegExp _cmdNameRe =
+    RegExp(r'<command-name>\s*/?\s*([^<]*?)\s*</command-name>');
+final RegExp _cmdArgsRe = RegExp(r'<command-args>([\s\S]*?)</command-args>');
+final RegExp _cmdWrapperRe =
+    RegExp(r'<command-(name|message|args)>[\s\S]*?</command-\1>');
+
+/// Detects a slash-command/skill invocation in a transcript turn (#32). Claude
+/// Code injects the expanded skill as a user turn wrapped in
+/// `<command-name>`/`<command-message>`/`<command-args>` plus the full SKILL.md
+/// body; rendered verbatim it floods the chat. Returns the command name, args,
+/// and the (collapsible) body, or null when the turn isn't a command. Pure, so
+/// the parsing is unit-testable.
+CommandInvocation? parseCommandInvocation(String text) {
+  final nameM = _cmdNameRe.firstMatch(text);
+  if (nameM == null) return null;
+  final name = nameM.group(1)!.trim();
+  if (name.isEmpty) return null;
+  final args = (_cmdArgsRe.firstMatch(text)?.group(1) ?? '').trim();
+  final body = text.replaceAll(_cmdWrapperRe, '').trim();
+  return CommandInvocation(name: name, args: args, body: body);
+}
+
 class _TurnBubble extends StatelessWidget {
   const _TurnBubble({required this.turn});
 
@@ -699,6 +871,9 @@ class _TurnBubble extends StatelessWidget {
   Widget build(BuildContext context) {
     final theme = Theme.of(context);
     final isAssistant = turn.isAssistant;
+    // #32: a slash-command/skill turn renders as a compact chip, not the whole
+    // injected SKILL.md body.
+    final command = isAssistant ? null : parseCommandInvocation(turn.text);
     final segments = _splitCodeBlocks(turn.text);
     final bodyStyle = isAssistant
         ? theme.textTheme.bodyLarge
@@ -735,24 +910,28 @@ class _TurnBubble extends StatelessWidget {
                 : CrossAxisAlignment.end,
             mainAxisSize: MainAxisSize.min,
             children: [
-              for (final seg in segments)
-                if (seg.kind == _SegmentKind.code)
-                  Padding(
-                    padding: const EdgeInsets.symmetric(vertical: 4),
-                    child: _CodeBlock(code: seg.content),
-                  )
-                else if (seg.content.trim().isNotEmpty)
-                  Padding(
-                    padding: const EdgeInsets.symmetric(vertical: 2),
-                    child: MarkdownBody(
-                      data: seg.content,
-                      // Selection is owned by the ancestor SelectionArea (#27);
-                      // a self-selectable body would break cross-bubble drags.
-                      selectable: false,
-                      fitContent: true,
-                      styleSheet: _markdownStyle(theme, bodyStyle, codeSpanStyle),
+              if (command != null)
+                _CommandInvocationChip(command: command)
+              else
+                for (final seg in segments)
+                  if (seg.kind == _SegmentKind.code)
+                    Padding(
+                      padding: const EdgeInsets.symmetric(vertical: 4),
+                      child: _CodeBlock(code: seg.content),
+                    )
+                  else if (seg.content.trim().isNotEmpty)
+                    Padding(
+                      padding: const EdgeInsets.symmetric(vertical: 2),
+                      child: MarkdownBody(
+                        data: seg.content,
+                        // Selection is owned by the ancestor SelectionArea (#27);
+                        // a self-selectable body would break cross-bubble drags.
+                        selectable: false,
+                        fitContent: true,
+                        styleSheet:
+                            _markdownStyle(theme, bodyStyle, codeSpanStyle),
+                      ),
                     ),
-                  ),
               for (final tool in turn.toolUses) _ToolChip(tool: tool),
               if (epoch != null)
                 Padding(
@@ -824,6 +1003,87 @@ class _CodeBlock extends StatelessWidget {
           ),
         ],
       ),
+    );
+  }
+}
+
+/// #32: a slash-command/skill invocation rendered compactly as `/name args`.
+/// The injected skill body (if any) is collapsed behind a tap-to-expand.
+class _CommandInvocationChip extends StatefulWidget {
+  const _CommandInvocationChip({required this.command});
+
+  final CommandInvocation command;
+
+  @override
+  State<_CommandInvocationChip> createState() => _CommandInvocationChipState();
+}
+
+class _CommandInvocationChipState extends State<_CommandInvocationChip> {
+  bool _expanded = false;
+
+  @override
+  Widget build(BuildContext context) {
+    final theme = Theme.of(context);
+    final c = widget.command;
+    final hasBody = c.body.isNotEmpty;
+    final label = c.args.isEmpty ? '/${c.name}' : '/${c.name} ${c.args}';
+    return Column(
+      crossAxisAlignment: CrossAxisAlignment.end,
+      mainAxisSize: MainAxisSize.min,
+      children: [
+        Material(
+          color: theme.colorScheme.primaryContainer.withValues(alpha: 0.5),
+          borderRadius: BorderRadius.circular(AppShape.small),
+          child: InkWell(
+            borderRadius: BorderRadius.circular(AppShape.small),
+            onTap: hasBody ? () => setState(() => _expanded = !_expanded) : null,
+            child: Padding(
+              padding: const EdgeInsets.symmetric(horizontal: 10, vertical: 6),
+              child: Row(
+                mainAxisSize: MainAxisSize.min,
+                children: [
+                  Icon(Icons.terminal_rounded,
+                      size: 15, color: theme.colorScheme.primary),
+                  const SizedBox(width: 6),
+                  Flexible(
+                    child: Text(
+                      label,
+                      style: theme.textTheme.bodyMedium?.copyWith(
+                        fontFamily: 'monospace',
+                        color: theme.colorScheme.onSurface,
+                      ),
+                    ),
+                  ),
+                  if (hasBody) ...[
+                    const SizedBox(width: 4),
+                    Icon(_expanded ? Icons.expand_less : Icons.expand_more,
+                        size: 16, color: theme.colorScheme.onSurfaceVariant),
+                  ],
+                ],
+              ),
+            ),
+          ),
+        ),
+        if (_expanded && hasBody)
+          Padding(
+            padding: const EdgeInsets.only(top: 6),
+            child: Container(
+              padding: const EdgeInsets.all(10),
+              decoration: BoxDecoration(
+                color: theme.colorScheme.surfaceContainerHigh,
+                borderRadius: BorderRadius.circular(AppShape.small),
+                border: Border.all(color: theme.colorScheme.outlineVariant),
+              ),
+              child: Text(
+                c.body,
+                style: theme.textTheme.bodySmall?.copyWith(
+                  fontFamily: 'monospace',
+                  color: theme.colorScheme.onSurfaceVariant,
+                ),
+              ),
+            ),
+          ),
+      ],
     );
   }
 }
