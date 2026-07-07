@@ -145,6 +145,7 @@ class _SessionScreenState extends State<SessionScreen>
   // --- Interactive question overlay (#19) ----------------------------------
   PendingQuestion? _pendingQuestion;
   String? _dismissedQuestionId; // a question the user chose to answer in-terminal
+  String? _questionContext; // Claude's preceding message, shown above the question
   Timer? _questionPoll;
 
   // --- Chat/Terminal lens ---------------------------------------------------
@@ -307,7 +308,27 @@ class _SessionScreenState extends State<SessionScreen>
       _dismissedQuestionId = null;
     }
     if (q?.toolUseId != _pendingQuestion?.toolUseId) {
-      setState(() => _pendingQuestion = q);
+      setState(() {
+        _pendingQuestion = q;
+        _questionContext = null; // refilled below for a genuinely new question
+      });
+      // Pull Claude's lead-up message so the overlay can show the whole answer,
+      // not just the question's tail.
+      if (q != null) unawaited(_loadQuestionContext());
+    }
+  }
+
+  /// Fetches the transcript tail and stashes Claude's most recent message as
+  /// the pending question's context (shown above the question in the overlay).
+  Future<void> _loadQuestionContext() async {
+    final api = _api;
+    if (api == null) return;
+    try {
+      final page = await api.transcript(widget.sessionId, limit: 12);
+      final text = lastAssistantText(page.messages);
+      if (mounted) setState(() => _questionContext = text);
+    } catch (_) {
+      // Best-effort — the overlay just omits the context panel.
     }
   }
 
@@ -1561,6 +1582,7 @@ class _SessionScreenState extends State<SessionScreen>
                     _pendingQuestion!.toolUseId != _dismissedQuestionId)
                   QuestionOverlay(
                     question: _pendingQuestion!,
+                    contextText: _questionContext,
                     onSend: _answerQuestion,
                     onKey: _sendRawToTerminal,
                     onDismiss: () => setState(() =>
