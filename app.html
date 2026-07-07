@@ -1094,6 +1094,10 @@
       if (reconnectTimer) { clearTimeout(reconnectTimer); reconnectTimer = null; }
       hideReconnectOverlay();
 
+      // Opening a session dismisses its alert on every device, incl. the phone
+      // push (#24). No-op unless the session actually has a live alert.
+      maybeClearAttention(id, serverUrl);
+
       // Demote current active session to background (keep WS open) if keepSessionsOpen
       if (keepSessionsOpen && sessionId && ws && ws.readyState === WebSocket.OPEN) {
         const oldId = sessionId;
@@ -3600,6 +3604,12 @@
       nws.onmessage = e => {
         try {
           const { notification } = JSON.parse(e.data);
+          // A 'clear' frame (a device opened/dismissed the session) acknowledges
+          // the alert — drop it, don't render a notification (#24).
+          if (notification && notification.type === 'clear') {
+            handleAttentionCleared(notification.sessionId);
+            return;
+          }
           showNotification(notification);
           // Update session status dot in sidebar in real-time
           if (notification.sessionId && notification.status) {
@@ -3639,7 +3649,47 @@
 
     if ('Notification' in window && Notification.permission === 'default') Notification.requestPermission();
     const pendingAlerts = new Map();
+    // Sessions with a live alert. Unlike pendingAlerts (which stopFlashing()
+    // wipes on window focus), this persists so switchSession can tell whether
+    // opening a session should fire a cross-device attention-clear (#24).
+    const attentionSessions = new Set();
+    // Open browser Notification objects by sessionId, so a cross-device 'clear'
+    // frame (another device opened/dismissed the session) can close them.
+    const browserNotifs = new Map();
     let flashInterval = null;
+
+    // Opening a session acknowledges its alert everywhere (#24): if it has a
+    // live alert, ask the owning server to clear attention — the server flips
+    // the recorded attention and fans out an FCM 'clear' that dismisses the
+    // phone push. Gated on an actual alert so a plain switch isn't a needless
+    // round-trip / FCM fan-out.
+    function sessionHasAlert(id) {
+      if (attentionSessions.has(id)) return true;
+      const dot = document.querySelector(
+        `.sb-item[data-session-id="${id}"] .sb-dot, .sb-fav-item[data-fav-id="${id}"] .sb-dot`);
+      return !!(dot && /\b(waiting|api_error|input_needed)\b/.test(dot.className));
+    }
+    function maybeClearAttention(id, serverUrl) {
+      if (!id || !sessionHasAlert(id)) return;
+      attentionSessions.delete(id);
+      pendingAlerts.delete(id);
+      const apiBase = serverUrl ? `/cluster/${encodeURIComponent(serverUrl)}/api` : '/api';
+      fetch(`${apiBase}/sessions/${id}/attention/clear`, { method: 'POST' }).catch(() => {});
+    }
+    // Inbound 'clear' frame (this or another device acknowledged the session):
+    // drop the alert state and close any open browser notification for it.
+    function handleAttentionCleared(id) {
+      if (!id) return;
+      attentionSessions.delete(id);
+      pendingAlerts.delete(id);
+      const notif = browserNotifs.get(id);
+      if (notif) { try { notif.close(); } catch (e) {} browserNotifs.delete(id); }
+      document.querySelectorAll(
+        `.sb-item[data-session-id="${id}"], .sb-fav-item[data-fav-id="${id}"]`).forEach(el => {
+          el.classList.remove('api-error'); el.removeAttribute('title');
+        });
+      if (pendingAlerts.size === 0) stopFlashing();
+    }
 
     function startFlashing() {
       if (flashInterval) return;
@@ -3674,8 +3724,10 @@
     function showNotification(n) {
       // Skip working/status updates — only notify on idle/input_needed/approval
       if (n.type === 'status') return;
+      if (n.type === 'clear') return; // acknowledged elsewhere; handled by handleAttentionCleared
       const isUrgent = n.type === 'approval_needed' || n.type === 'input_needed';
       pendingAlerts.set(n.sessionId, n);
+      attentionSessions.add(n.sessionId);
       // Browser notification — skip if muted
       if (!muted && 'Notification' in window && Notification.permission === 'granted') {
         // Urgent (approval): always notify, even for current session if focused
@@ -3687,6 +3739,8 @@
             { body: n.message, tag, renotify: true, requireInteraction: isUrgent }
           );
           notif.onclick = () => { window.focus(); if (n.sessionId !== sessionId) switchSession(n.sessionId, null); notif.close(); };
+          notif.onclose = () => { if (browserNotifs.get(n.sessionId) === notif) browserNotifs.delete(n.sessionId); };
+          browserNotifs.set(n.sessionId, notif);
           if (!isUrgent) setTimeout(() => notif.close(), 15000);
         }
       }

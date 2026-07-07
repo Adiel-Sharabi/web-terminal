@@ -62,7 +62,15 @@ class PushService {
 
     // Foreground messages: refresh the in-app list; the OS notification is
     // rendered only from the background handler (avoid double-notifying).
-    FirebaseMessaging.onMessage.listen((_) {
+    // Exception — a 'clear' (another device opened/dismissed the session) must
+    // still cancel this device's OS notification (#2); the background handler
+    // doesn't run while the app is foreground, so route it through showFromPush,
+    // whose 'clear' branch cancels rather than posts.
+    FirebaseMessaging.onMessage.listen((m) {
+      final data = _stringData(m.data);
+      if (data['kind'] == 'clear') {
+        unawaited(NotificationService.showFromPush(data));
+      }
       unawaited(SessionRepository.instance.refresh());
     });
   }

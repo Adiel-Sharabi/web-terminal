@@ -101,8 +101,9 @@ class NotificationService {
       if (spec == null) return;
       final body = buildBody(kind, name);
       final title = serverName.isEmpty ? 'AiTerminal' : serverName;
+      final key = notifKey(sessionId);
       await _plugin.show(
-        id: _stableId(sessionId),
+        id: key.id,
         title: title,
         body: body,
         notificationDetails: NotificationDetails(
@@ -111,7 +112,7 @@ class NotificationService {
             spec.channelName,
             importance: spec.importance,
             priority: spec.priority,
-            tag: 'wt-$sessionId',
+            tag: key.tag,
             autoCancel: true,
             styleInformation: BigTextStyleInformation(body),
           ),
@@ -139,8 +140,9 @@ class NotificationService {
       final serverName = data['serverName'] ?? '';
       if (sessionId.isEmpty) return;
 
-      final tag = 'wt-$sessionId';
-      final id = _stableId(sessionId);
+      final key = notifKey(sessionId);
+      final tag = key.tag;
+      final id = key.id;
 
       if (kind == 'clear') {
         await _plugin.cancel(id: id, tag: tag);
@@ -174,6 +176,30 @@ class NotificationService {
       );
     } catch (_) {
       // A malformed/partial push must never crash the background isolate.
+    }
+  }
+
+  /// The (id, tag) a session's notification is posted AND cancelled under.
+  /// Centralized so `show*` and [cancelForSession] target the exact same OS
+  /// notification — the id is a stable per-session hash, the tag namespaces it.
+  /// Exposed for tests to lock the contract that show and cancel agree.
+  @visibleForTesting
+  static ({int id, String tag}) notifKey(String sessionId) =>
+      (id: _stableId(sessionId), tag: 'wt-$sessionId');
+
+  /// Cancels this device's OS notification for [sessionId] — used when the user
+  /// opens/views the session locally (#2). The FCM 'clear' round-trip only
+  /// dismisses *other* devices and does not fire while this app is foreground,
+  /// so the local open must cancel directly. Mirrors the id/tag the `show*`
+  /// paths post with (via [notifKey]) so the right notification is targeted.
+  /// Never throws.
+  static Future<void> cancelForSession(String sessionId) async {
+    if (sessionId.isEmpty) return;
+    final key = notifKey(sessionId);
+    try {
+      await _plugin.cancel(id: key.id, tag: key.tag);
+    } catch (_) {
+      // A cancel failure must never break session open.
     }
   }
 
