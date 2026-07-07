@@ -867,8 +867,10 @@ CommandInvocation? parseCommandInvocation(String text) {
 
 /// Opens a tapped chat link in the system browser — http/https only
 /// ([isLaunchableHttpUrl]); other schemes are ignored. Best-effort, never
-/// throws into the widget tree.
-Future<void> _openChatLink(String? href) async {
+/// throws into the widget tree. Public + [visibleForTesting] so the launch
+/// path (and the "javascript: never launches" guard) can be asserted directly.
+@visibleForTesting
+Future<void> openChatLink(String? href) async {
   if (!isLaunchableHttpUrl(href)) return;
   try {
     await launchUrl(Uri.parse(href!), mode: LaunchMode.externalApplication);
@@ -948,7 +950,7 @@ class _TurnBubble extends StatelessWidget {
                         // autolink by default), and onTapLink opens them in the
                         // system browser — http/https only (isLaunchableHttpUrl).
                         extensionSet: md.ExtensionSet.gitHubWeb,
-                        onTapLink: (text, href, title) => _openChatLink(href),
+                        onTapLink: (text, href, title) => openChatLink(href),
                         styleSheet:
                             _markdownStyle(theme, bodyStyle, codeSpanStyle),
                       ),
