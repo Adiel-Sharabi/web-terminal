@@ -107,6 +107,15 @@ class ApiClient {
     return AttentionInfo.fromJson(_asMap(_decode(res)));
   }
 
+  /// Clears a session's attention across every device (issue #24): the server
+  /// flips the recorded attention to cleared, fans out an FCM 'clear' so phones
+  /// dismiss their OS notification, and broadcasts a 'clear' notify frame so
+  /// other in-app viewers drop the chip. Called when the session is opened/viewed
+  /// or its chip is dismissed. Idempotent server-side.
+  Future<void> clearAttention(String sessionId) async {
+    await _send('POST', '/api/sessions/$sessionId/attention/clear', body: {});
+  }
+
   /// Reads the per-session push level (`GET /api/sessions/:id/notify-level`),
   /// one of `off` / `important` / `all`.
   Future<String> notifyLevel(String sessionId) async {

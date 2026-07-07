@@ -369,6 +369,12 @@ class _SessionScreenState extends State<SessionScreen>
     if (firstLoad) {
       _attach();
       _checkTranscriptCapability();
+      // #24: opening a session acknowledges its attention on every device —
+      // clear it (and dismiss its phone notification) elsewhere too. Only when
+      // it actually needs attention, so a plain open isn't a needless round-trip.
+      if (match.status == 'waiting' || match.status == 'api_error') {
+        SessionRepository.instance.dismissAttention(match);
+      }
     }
     if (match.status == 'api_error' && previousStatus != 'api_error') {
       _loadAttentionReason();

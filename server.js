@@ -14,7 +14,7 @@ const notifyPush = require('./lib/notify-push');
 const transcript = require('./lib/transcript');
 const fcm = require('./lib/fcm');
 
-const SERVER_VERSION = '1.26.1'; // 2026-07-07: (a) #23 fix — restore no longer appends implicit `--continue` to an unknown-id claude session (that resumed the most-recent conversation in the cwd, so a new session came up "Resumed" to the last one). Unknown-id restore now starts fresh; `--resume <own-id>` and explicit user --continue/--resume still honored (lib/restore-command.js). (b) /api/cluster/sessions cache (1500ms) is now invalidated on session create/delete/rename/reorder, so a just-created session shows in the sidebar immediately instead of after the TTL
+const SERVER_VERSION = '1.27.0'; // 2026-07-07: #24 — POST /api/sessions/:id/attention/clear clears a session's attention across devices (flips recorded attention, FCM 'clear' to dismiss phone toasts, broadcasts a 'clear' notify frame so in-app viewers drop the chip); capability 'attention-clear'. Prior 1.26.1: (a) #23 fix — restore no longer appends implicit `--continue` to an unknown-id claude session (that resumed the most-recent conversation in the cwd, so a new session came up "Resumed" to the last one). Unknown-id restore now starts fresh; `--resume <own-id>` and explicit user --continue/--resume still honored (lib/restore-command.js). (b) /api/cluster/sessions cache (1500ms) is now invalidated on session create/delete/rename/reorder, so a just-created session shows in the sidebar immediately instead of after the TTL
 
 // --- Optional latency instrumentation (opt-in via WT_LATENCY_DEBUG=1) -----
 // Event-loop lag monitor: interval is 10ms; anything ≥ 50ms slip is a stall.
@@ -2433,7 +2433,7 @@ app.get('/api/version', (req, res) => {
   // device registry is always available; 'fcm' is advertised only when a
   // service account is configured (or the test sink is active) — a server with
   // no FCM key can still take registrations but won't send FCM.
-  const capabilities = ['attention', 'clear', 'push-devices', 'transcript', 'status-metrics', 'pending-question'];
+  const capabilities = ['attention', 'clear', 'attention-clear', 'push-devices', 'transcript', 'status-metrics', 'pending-question'];
   if (fcmConfigured()) capabilities.push('fcm');
   res.json({
     version: SERVER_VERSION,
@@ -2689,6 +2689,20 @@ app.get('/api/sessions/:id/attention', (req, res) => {
     lastAttention: st.lastAttention,
     lastMessage: transcript.lastAssistantText(st.transcriptPath),
   }));
+});
+
+// POST /api/sessions/:id/attention/clear — a device opened/viewed the session or
+// dismissed its alert (#24). Clears the attention EVERYWHERE: flips the recorded
+// attention to cleared (so /attention reflects it), fans out an FCM 'clear' so
+// every phone auto-dismisses its OS notification, and broadcasts a 'clear' frame
+// to the live notify sockets so other in-app viewers drop the attention chip.
+// Idempotent — clearing an already-clear (or attention-less) session is a no-op.
+app.post('/api/sessions/:id/attention/clear', (req, res) => {
+  const id = req.params.id;
+  pushNotify('clear', { id }); // flips lastAttention.cleared + FCM 'clear' dispatch
+  const payload = JSON.stringify({ notification: { type: 'clear', sessionId: id, cleared: true } });
+  for (const client of notifyClients) { try { client.send(payload); } catch {} }
+  res.json({ ok: true });
 });
 // --- G5: structured transcript for the companion chat view ---
 // GET /api/sessions/:id/transcript?before=<cursor>&limit=<n>
