@@ -38,11 +38,18 @@
     #sidebar.open { width: var(--sb-width, 260px); }
     #sidebar.resizing { transition: none; }
     #sidebarResizer {
-      display: none; position: absolute; top: 0; right: -3px; width: 6px; height: 100%;
+      display: none; position: absolute; top: 0; right: 0; width: 7px; height: 100%;
       cursor: col-resize; z-index: 10; background: transparent;
     }
     #sidebar.open #sidebarResizer { display: block; }
-    #sidebarResizer:hover, #sidebarResizer.active { background: #00d4aa44; }
+    /* Persistent grip so the resize handle is discoverable, not hover-only. */
+    #sidebarResizer::before {
+      content: ''; position: absolute; top: 50%; left: 50%;
+      transform: translate(-50%, -50%); width: 3px; height: 30px;
+      border-radius: 2px; background: #2c4266; transition: background 0.15s;
+    }
+    #sidebarResizer:hover, #sidebarResizer.active { background: #00d4aa22; }
+    #sidebarResizer:hover::before, #sidebarResizer.active::before { background: #00d4aa; }
     .sb-section {
       padding: 6px 12px; color: #666; font: 11px 'Segoe UI', sans-serif; text-transform: uppercase;
       border-bottom: 1px solid #0f3460; display: flex; align-items: center; justify-content: space-between;
@@ -2525,7 +2532,11 @@
 
       function onPointerMove(e) {
         const w = Math.max(160, Math.min(600, startW + (e.clientX - startX)));
-        sidebar.style.width = w + 'px';
+        // --sb-width is the single source of truth for sidebar width (the
+        // `#sidebar.open` rule reads var(--sb-width)). Drive it directly so
+        // drag and restore-on-load share one mechanism and no inline width is
+        // left behind to override the collapsed/base rule after a toggle.
+        sidebar.style.setProperty('--sb-width', w + 'px');
       }
 
       function onPointerUp(e) {
@@ -2533,6 +2544,9 @@
         resizer.classList.remove('active');
         document.removeEventListener('pointermove', onPointerMove);
         document.removeEventListener('pointerup', onPointerUp);
+        // Width lives only in --sb-width — clear any legacy inline width so
+        // toggling the sidebar closed falls back to the base (0) width.
+        sidebar.style.removeProperty('width');
         const finalW = sidebar.offsetWidth;
         localStorage.setItem('sidebarWidth', finalW);
         doResize();
