@@ -252,16 +252,27 @@ function getClaudeProjectsDir() {
 const _claudeSessionIdCache = new Map(); // cwd -> { sessionId, dirMtime }
 let _claudeDetectReaddirCount = 0;
 
-function detectClaudeSessionIdFromDir(cwd) {
+// Newest .jsonl in the cwd's Claude project dir, WITH its mtime.
+// Returns { sessionId, mtimeMs } or null. The mtime is what lets callers tell
+// a conversation that predates a freshly-created session (a *previous* one)
+// from one the session wrote itself — see ownClaudeSessionId (#23).
+function detectClaudeSessionFromDir(cwd) {
   const _t0 = _LATENCY_DEBUG ? performance.now() : 0;
-  const _res = _detectClaudeSessionIdFromDirInner(cwd);
+  const _res = _detectClaudeSessionFromDirInner(cwd);
   if (_LATENCY_DEBUG) {
     const dur = performance.now() - _t0;
-    if (dur > 30) console.log(`[slow-op] ${new Date().toISOString()} detectClaudeSessionIdFromDir cwd=${cwd || ''} dur=${dur.toFixed(0)}ms`);
+    if (dur > 30) console.log(`[slow-op] ${new Date().toISOString()} detectClaudeSessionFromDir cwd=${cwd || ''} dur=${dur.toFixed(0)}ms`);
   }
   return _res;
 }
-function _detectClaudeSessionIdFromDirInner(cwd) {
+// Back-compat: id only, regardless of when it was written. Callers that
+// genuinely want the newest-on-disk id (e.g. rename, which tracks the forked
+// jsonl Claude creates when resuming) use this.
+function detectClaudeSessionIdFromDir(cwd) {
+  const r = detectClaudeSessionFromDir(cwd);
+  return r ? r.sessionId : null;
+}
+function _detectClaudeSessionFromDirInner(cwd) {
   if (!cwd) return null;
   let projectDir;
   try {
@@ -284,24 +295,44 @@ function _detectClaudeSessionIdFromDirInner(cwd) {
 
   const cached = _claudeSessionIdCache.get(cwd);
   if (cached && cached.dirMtime === dirMtime) {
-    return cached.sessionId;
+    return cached.sessionId ? { sessionId: cached.sessionId, mtimeMs: cached.mtimeMs } : null;
   }
 
   // mtime changed (or first lookup) — do the full readdir.
-  let sessionId = null;
+  let sessionId = null, mtimeMs = 0;
   try {
     _claudeDetectReaddirCount++;
     const newest = fs.readdirSync(projectDir)
       .filter(f => f.endsWith('.jsonl'))
       .map(f => ({ id: f.replace('.jsonl', ''), mtime: fs.statSync(path.join(projectDir, f)).mtimeMs }))
       .sort((a, b) => b.mtime - a.mtime)[0];
-    if (newest) sessionId = newest.id;
+    if (newest) { sessionId = newest.id; mtimeMs = newest.mtime; }
   } catch {
     // Race: dir vanished between stat and readdir. Fall through; null is
     // a valid cacheable answer for this mtime snapshot.
   }
-  _claudeSessionIdCache.set(cwd, { sessionId, dirMtime });
-  return sessionId;
+  _claudeSessionIdCache.set(cwd, { sessionId, mtimeMs, dirMtime });
+  return sessionId ? { sessionId, mtimeMs } : null;
+}
+
+// The Claude conversation id we can PROVE belongs to THIS session:
+//   1. an explicit `--resume <id>` the user put in its command, or
+//   2. the newest .jsonl in the cwd — but ONLY if it was written at/after the
+//      session started.
+// #23 — a brand-new `claude` session opened in a folder that already holds
+// older conversations must NOT adopt one of them. Before it has written its
+// own .jsonl the newest file on disk is a *previous* conversation; adopting it
+// made a fresh session come up "Resumed" (and auto-opened the Chat lens on the
+// old transcript). Gating by the session's start time drops that pre-existing
+// id, so an unknown session starts fresh; once the session's own claude writes
+// its .jsonl (mtime after startedAt) detection succeeds again. Returns null
+// when nothing is provably this session's own.
+function ownClaudeSessionId(session) {
+  const fromCmd = extractClaudeSessionIdFromCmd(session.autoCommand);
+  if (fromCmd) return fromCmd;
+  const found = detectClaudeSessionFromDir(session.cwd);
+  if (found && found.mtimeMs >= (session.startedAt || 0)) return found.sessionId;
+  return null;
 }
 
 function extractClaudeSessionIdFromCmd(cmd) {
@@ -803,8 +834,9 @@ function sessionIdOf(session) {
 function sessionSummary(id, s) {
   let claudeSessionId = s.claudeSessionId || null;
   if (!claudeSessionId && s.autoCommand && /\bclaude\b/i.test(s.autoCommand)) {
-    claudeSessionId = extractClaudeSessionIdFromCmd(s.autoCommand)
-      || detectClaudeSessionIdFromDir(s.cwd);
+    // #23: only adopt an id provably written by THIS session — never a
+    // pre-existing conversation left in the cwd by an earlier session.
+    claudeSessionId = ownClaudeSessionId(s);
     if (claudeSessionId) s.claudeSessionId = claudeSessionId;
   }
   correctStaleStatus(s);
@@ -884,6 +916,10 @@ function createSession(id, cwd, name, autoCommand, savedScrollback, claudeSessio
     cwd: cwd || getDefaultCwd(),
     idleTimer: null,
     lastActivity: Date.now(),
+    // Immutable spawn time (lastActivity mutates on every PTY output). Used by
+    // ownClaudeSessionId (#23) to reject a cwd's pre-existing conversations —
+    // only a .jsonl written at/after this instant can be this session's own.
+    startedAt: Date.now(),
     lastUserInput: 0,
     status: 'active',
     hookStatus: false,
@@ -928,9 +964,8 @@ function createSession(id, cwd, name, autoCommand, savedScrollback, claudeSessio
     if (session._compactReplayTimer) { clearTimeout(session._compactReplayTimer); session._compactReplayTimer = null; }
     session._compactReplay = null;
     if (session.autoCommand && /\bclaude\b/i.test(session.autoCommand)) {
-      const claudeId = session.claudeSessionId
-        || extractClaudeSessionIdFromCmd(session.autoCommand)
-        || detectClaudeSessionIdFromDir(session.cwd);
+      // #23: at exit, only attribute a conversation this session provably owns.
+      const claudeId = session.claudeSessionId || ownClaudeSessionId(session);
       if (claudeId) {
         session.claudeSessionId = claudeId;
         const names = loadClaudeSessionNames();
@@ -985,7 +1020,8 @@ function createSession(id, cwd, name, autoCommand, savedScrollback, claudeSessio
     } else if (!cmdClaudeId) {
       setTimeout(() => {
         if (!session.claudeSessionId) {
-          const detected = detectClaudeSessionIdFromDir(session.cwd);
+          // #23: gate on start time so we don't adopt a pre-existing jsonl.
+          const detected = ownClaudeSessionId(session);
           if (detected) {
             session.claudeSessionId = detected;
             log(`session ${id} detected Claude session: ${detected}`);
@@ -1445,6 +1481,20 @@ const rpcHandlers = {
     if (!process.env.WT_TEST) throw new Error('test-only RPC');
     const cwd = String(params.cwd || '');
     return { sessionId: detectClaudeSessionIdFromDir(cwd) };
+  },
+
+  // Test-only (#23): exercise ownClaudeSessionId's start-time gate with a
+  // synthetic session (cwd + autoCommand + startedAt), without spawning a
+  // real shell. Proves a new session in a used folder starts fresh.
+  __testOwnClaudeSessionId: async (params) => {
+    if (!process.env.WT_TEST) throw new Error('test-only RPC');
+    return {
+      sessionId: ownClaudeSessionId({
+        cwd: String(params.cwd || ''),
+        autoCommand: String(params.autoCommand || ''),
+        startedAt: Number(params.startedAt) || 0,
+      }),
+    };
   },
 
   // Test-only (Issue #15): flood the calling conn with JSON frames of the
