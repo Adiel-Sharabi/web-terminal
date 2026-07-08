@@ -111,7 +111,16 @@ class _ConversationViewState extends State<ConversationView> {
   @override
   void didUpdateWidget(covariant ConversationView oldWidget) {
     super.didUpdateWidget(oldWidget);
-    if (oldWidget.session.id != widget.session.id) {
+    // A different PTY session id — or the SAME PTY session re-pinned to a
+    // different Claude conversation — means everything we hold is stale, so
+    // reload from scratch. /clear (and a /compact that starts a fresh session)
+    // mints a new Claude session id → a new .jsonl the server now serves; the
+    // PTY id doesn't change, so comparing only it left the chat showing the
+    // pre-clear transcript forever (#35). Comparing old vs new (not the current
+    // value against a constant) means this fires only on an actual change —
+    // covers null→id, id→different, and id→null — never on every rebuild.
+    if (oldWidget.session.id != widget.session.id ||
+        oldWidget.session.claudeSessionId != widget.session.claudeSessionId) {
       _resetAndReload();
       return;
     }
@@ -266,9 +275,22 @@ class _ConversationViewState extends State<ConversationView> {
     }
   }
 
-  /// Refetches the last page and replaces the equivalent trailing window of
-  /// `_turns` with it — the simplest robust merge given turns have no ids.
-  /// Skips the rebuild entirely when the fetched tail is unchanged.
+  /// Refetches the last page and reconciles it into `_turns` — the simplest
+  /// robust merge given turns have no ids. Skips the rebuild entirely when
+  /// nothing changed.
+  ///
+  /// Two cases, keyed off the page's `hasMore`:
+  ///  * `!hasMore` — this page IS the whole transcript (no older turns beyond
+  ///    it), so it's authoritative: replace `_turns` wholesale. This is what
+  ///    reflects a /clear or /compact that reset or shrank the transcript; an
+  ///    append-only merge can only grow and would leave the stale pre-clear
+  ///    prefix (and an empty fresh transcript) showing forever (#35). In normal
+  ///    small-transcript streaming this already resolved to a full replace, so
+  ///    it's no behaviour change there — only the shrink/reset case is fixed.
+  ///  * `hasMore` — older turns remain that we're not refetching, so keep the
+  ///    prefix we already hold and swap in just the refreshed trailing window
+  ///    (the common "grows while working" fast path; the cheap tail-only
+  ///    comparison avoids rebuilding a large held transcript every poll).
   Future<void> _refreshLastPage() async {
     final TranscriptPage page;
     try {
@@ -278,17 +300,31 @@ class _ConversationViewState extends State<ConversationView> {
     }
     if (!mounted) return;
     final freshTail = page.messages;
+
+    if (!page.hasMore) {
+      if (_turnListEquals(_turns, freshTail)) return;
+      _applyRefreshedTurns(freshTail);
+      return;
+    }
+
     if (freshTail.isEmpty) return;
     final existingTail = _turns.length >= freshTail.length
         ? _turns.sublist(_turns.length - freshTail.length)
         : _turns;
     if (_turnListEquals(existingTail, freshTail)) return;
-
     final keepCount = _turns.length > freshTail.length
         ? _turns.length - freshTail.length
         : 0;
+    _applyRefreshedTurns([..._turns.sublist(0, keepCount), ...freshTail]);
+  }
+
+  /// Commits a freshly-merged turn list from [_refreshLastPage] and follows the
+  /// content: re-pin to the bottom when already there, else raise the "New"
+  /// pill. Single owner of the apply+scroll step so both merge paths behave
+  /// identically.
+  void _applyRefreshedTurns(List<TranscriptTurn> turns) {
     setState(() {
-      _turns = [..._turns.sublist(0, keepCount), ...freshTail];
+      _turns = turns;
       _reconcileEchoes();
     });
     if (_pinnedToBottom) {
