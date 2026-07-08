@@ -34,125 +34,13 @@ void main() {
     });
   });
 
-  group('composeBarVisible — mobile/touch (compose is the only usable input)', () {
-    // The reported bug: on touch, a Chat-AVAILABLE session in Terminal lens + raw
-    // mode hid the compose bar, and the raw terminal line has no soft keyboard —
-    // so there was NO way to type. On mobile the compose bar must ALWAYS show,
-    // for every lens/raw/chat combination.
-    test('always shown on mobile, every lens/raw/chat combo', () {
-      for (final raw in [true, false]) {
-        for (final lens in ['terminal', 'chat']) {
-          for (final chat in [true, false]) {
-            expect(
-              composeBarVisible(
-                rawMode: raw,
-                activeLens: lens,
-                chatAvailable: chat,
-                isDesktop: false,
-              ),
-              isTrue,
-              reason:
-                  'mobile raw=$raw lens=$lens chat=$chat must show the compose bar',
-            );
-          }
-        }
-      }
-    });
-
-    // The exact stranding case the user hit: Chat available, Terminal lens, raw on.
-    test('mobile: shown for a chat-available session in terminal + raw', () {
-      expect(
-        composeBarVisible(
-          rawMode: true,
-          activeLens: 'terminal',
-          chatAvailable: true,
-          isDesktop: false,
-        ),
-        isTrue,
-      );
-    });
-  });
-
-  group('composeBarVisible — desktop (raw = type into the terminal directly)', () {
-    // Compose mode (not raw): the compose bar is the primary input, always shown.
-    test('shown in compose mode on either lens', () {
-      expect(
-        composeBarVisible(
-          rawMode: false,
-          activeLens: 'terminal',
-          chatAvailable: true,
-          isDesktop: true,
-        ),
-        isTrue,
-      );
-      expect(
-        composeBarVisible(
-          rawMode: false,
-          activeLens: 'chat',
-          chatAvailable: true,
-          isDesktop: true,
-        ),
-        isTrue,
-      );
-    });
-
-    // Raw + Terminal + Chat available: the hardware keyboard drives the terminal
-    // and Chat is one toggle away, so the compose bar is intentionally hidden.
-    test('hidden in raw mode on the terminal lens when chat is available', () {
-      expect(
-        composeBarVisible(
-          rawMode: true,
-          activeLens: 'terminal',
-          chatAvailable: true,
-          isDesktop: true,
-        ),
-        isFalse,
-      );
-    });
-
-    // Raw + Chat lens must STILL show the compose bar (issue #12).
-    test('shown in raw mode when the chat lens is active', () {
-      expect(
-        composeBarVisible(
-          rawMode: true,
-          activeLens: 'chat',
-          chatAvailable: true,
-          isDesktop: true,
-        ),
-        isTrue,
-      );
-    });
-
-    // #43 desktop guard: no Chat + Terminal + raw would leave no input and no Chat
-    // to fall back to — the compose bar must stay visible.
-    test('shown when chat is UNAVAILABLE even in raw mode on the terminal lens', () {
-      expect(
-        composeBarVisible(
-          rawMode: true,
-          activeLens: 'terminal',
-          chatAvailable: false,
-          isDesktop: true,
-        ),
-        isTrue,
-      );
-    });
-
-    // The invariant: a no-chat session always has a compose bar (input) on desktop.
-    test('#43: some usable input for a no-chat session in every state', () {
-      for (final raw in [true, false]) {
-        for (final lens in ['terminal', 'chat']) {
-          expect(
-            composeBarVisible(
-              rawMode: raw,
-              activeLens: lens,
-              chatAvailable: false,
-              isDesktop: true,
-            ),
-            isTrue,
-            reason: 'raw=$raw lens=$lens chatAvailable=false must show input',
-          );
-        }
-      }
+  group('composeBarVisible', () {
+    // #43: the compose bar is ALWAYS shown — it's the one input path that works in
+    // every state (touch/desktop, chat/no-chat, raw/not, connected or not). Every
+    // prior rule that hid it in raw mode stranded some real session with no usable
+    // input. Raw mode now only decides whether the TERMINAL also takes direct keys.
+    test('always shown — the guaranteed PTY input', () {
+      expect(composeBarVisible(), isTrue);
     });
   });
 
