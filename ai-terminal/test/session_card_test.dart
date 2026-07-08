@@ -15,6 +15,7 @@ Session _session({
   required String status,
   String name = 'my-project',
   String id = 'abc12345',
+  SessionMetrics? metrics,
 }) => Session(
   id: id,
   name: name,
@@ -25,6 +26,7 @@ Session _session({
   notifyLevel: 'important',
   server: _server(),
   autoCommand: '',
+  metrics: metrics,
 );
 
 Widget _wrap(Widget child) => MaterialApp(
@@ -233,6 +235,37 @@ void main() {
 
     await tester.pumpWidget(_wrap(SessionCard(session: session)));
     expect(find.byIcon(Icons.notifications_outlined), findsNothing);
+  });
+
+  testWidgets('#38: ctx badge shows metrics.ctx% on the list row', (
+    tester,
+  ) async {
+    final session = _session(
+      status: 'working',
+      metrics: const SessionMetrics(ctx: 80),
+    );
+    await tester.pumpWidget(_wrap(SessionCard(session: session)));
+
+    expect(find.text('80%'), findsOneWidget);
+  });
+
+  testWidgets('#38: no ctx badge when metrics is null', (tester) async {
+    final session = _session(status: 'working'); // metrics == null
+    await tester.pumpWidget(_wrap(SessionCard(session: session)));
+
+    expect(find.textContaining('%'), findsNothing);
+  });
+
+  testWidgets('#38: no ctx badge when metrics present but ctx is null', (
+    tester,
+  ) async {
+    final session = _session(
+      status: 'working',
+      metrics: const SessionMetrics(fiveH: 30), // ctx null → no badge
+    );
+    await tester.pumpWidget(_wrap(SessionCard(session: session)));
+
+    expect(find.textContaining('%'), findsNothing);
   });
 
   testWidgets('status label shows for working/idle/waiting, hidden for active', (

@@ -261,4 +261,43 @@ test.describe('Stale session status detection', () => {
     expect(s).toBeTruthy();
     expect(s.status).toBe('idle');
   });
+
+  // ============================================================
+  // #38 — Claude context-window % on each session list row.
+  // The list endpoints already attach `metrics` per session; these pin that
+  // contract because the web sidebar + companion list read metrics.ctx
+  // straight off the payload (never recompute it client-side).
+  // ============================================================
+
+  test('#38: /api/sessions attaches metrics.ctx after a claude-status post', async () => {
+    // Pin a Claude UUID onto the session via the hook, then post a status-line
+    // update keyed by that UUID and assert it surfaces per-session.
+    const claudeUuid = '38383838-0000-0000-0000-000000000042';
+    const hookRes = await ctx.post(`/api/session/${sessionId}/hook`, {
+      data: { event: 'UserPromptSubmit', session_id: claudeUuid },
+    });
+    expect(hookRes.ok()).toBeTruthy();
+    await new Promise(r => setTimeout(r, 200)); // let the worker persist the UUID
+
+    // The session must now carry the pinned Claude UUID (the metrics key).
+    let s = (await (await ctx.get('/api/sessions')).json()).find(x => x.id === sessionId);
+    expect(s.claudeSessionId).toBe(claudeUuid);
+
+    // Status-line push (localhost-only) keyed by that UUID.
+    const statusRes = await ctx.post('/api/claude-status', {
+      data: { session_id: claudeUuid, ctx: 42 },
+    });
+    expect(statusRes.ok()).toBeTruthy();
+
+    s = (await (await ctx.get('/api/sessions')).json()).find(x => x.id === sessionId);
+    expect(s.metrics).toBeTruthy();
+    expect(s.metrics.ctx).toBe(42);
+  });
+
+  test('#38: a session with no claude-status reports metrics === null', async () => {
+    // Graceful absence: no status line was ever posted for this session, so the
+    // frontends render no ctx badge (guard: metrics && metrics.ctx != null).
+    const s = (await (await ctx.get('/api/sessions')).json()).find(x => x.id === sessionId);
+    expect(s.metrics).toBeNull();
+  });
 });

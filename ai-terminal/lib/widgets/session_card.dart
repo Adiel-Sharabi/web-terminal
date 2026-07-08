@@ -191,6 +191,22 @@ class SessionCard extends StatelessWidget {
                           color: StatusColor.forStatus(status),
                         ),
                       ),
+                    // #38 — live Claude context-window % (never recomputed;
+                    // read straight off the session payload). Color via the
+                    // shared ctxColor SSOT (warn 50 / danger 70). Absent/stale
+                    // metrics.ctx → no badge.
+                    if (session.metrics?.ctx != null) ...[
+                      if (label.isNotEmpty && !hasApiError)
+                        const SizedBox(width: 8),
+                      Text(
+                        '${session.metrics!.ctx}%',
+                        style: theme.textTheme.bodySmall?.copyWith(
+                          color: ctxColor(theme, session.metrics!.ctx!),
+                          fontWeight: FontWeight.w600,
+                          fontFeatures: const [FontFeature.tabularFigures()],
+                        ),
+                      ),
+                    ],
                     const Spacer(),
                     if (onBellTap != null)
                       _IconTapTarget(

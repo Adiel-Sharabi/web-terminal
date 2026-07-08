@@ -136,6 +136,12 @@
     .sb-status.active { color: #4a4; }
     .sb-status.idle { color: #da4; }
     .sb-status.waiting { color: #e94560; }
+    /* #38 — Claude context-window % badge. Thresholds (50/70) live in the
+       ctxBadge() helper; palette reuses idle amber / waiting red. */
+    .sb-ctx { font-size: 10px; font-weight: 600; }
+    .sb-ctx.ctx-lo { color: #6a7a8a; }
+    .sb-ctx.ctx-mid { color: #da4; }
+    .sb-ctx.ctx-hi { color: #e94560; }
     .sb-kill { background: transparent; border: none; color: #555; font-size: 14px; cursor: pointer; padding: 0 4px; line-height: 1; }
     .sb-kill:hover { color: #e94560; }
     .sb-edit { background: transparent; border: none; color: #555; font-size: 11px; cursor: pointer; padding: 0 4px; }
@@ -2566,6 +2572,17 @@
     })();
 
     const statusLabels = { active: '', working: 'Working', idle: 'Idle', waiting: 'Waiting' };
+    // #38 — Claude context-window % badge for a sidebar row. Reads metrics.ctx
+    // straight off the /api/cluster/sessions payload (never recomputed).
+    // getStatusMetrics() already returns null when absent/stale, and ctx itself
+    // can be null, so guard on ctx != null. Thresholds mirror the companion's
+    // shared ctxColor SSOT: warn 50, danger 70.
+    function ctxBadge(s){
+      const c = s.metrics && s.metrics.ctx;
+      if (c == null) return '';                      // absent/stale/blank → no badge
+      const cls = c >= 70 ? 'ctx-hi' : c >= 50 ? 'ctx-mid' : 'ctx-lo';
+      return `<span class="sb-ctx ${cls}" title="Claude context window">${c}%</span>`;
+    }
     // Per-session push (ntfy) level — bell icon + click-cycle order.
     const NOTIFY_BELL = {
       off:       { icon: '&#128277;', label: 'Off (no push)' },        // 🔕
@@ -2751,6 +2768,7 @@
             `<div class="sb-name"><span class="sb-dot ${s.status}"></span>${esc(s.name)}</div>` +
             `<div class="sb-meta">` +
               `<span class="sb-status ${s.status}">${statusLabels[s.status] || s.status}</span>` +
+              ctxBadge(s) +
               `<button class="sb-bell nl-${lvl}" title="Notifications: ${NOTIFY_BELL[lvl].label} — click to change">${NOTIFY_BELL[lvl].icon}</button>` +
               `<button class="sb-star${fav ? ' on' : ''}" title="${fav ? 'Remove from favorites' : 'Add to favorites'}">${fav ? '&#9733;' : '&#9734;'}</button>` +
               `<button class="sb-edit" title="Edit auto-command">&#9998;</button>` +
@@ -2951,6 +2969,7 @@
           `<div class="sb-name"><span class="sb-dot ${s.status}"></span>${esc(s.name)}<span class="sb-server-badge">${esc(serverLabel)}</span></div>` +
           `<div class="sb-meta">` +
             `<span class="sb-status ${s.status}">${statusLabels[s.status] || s.status}</span>` +
+            ctxBadge(s) +
             `<button class="sb-star on" title="Remove from favorites">&#9733;</button>` +
           `</div>`;
         item.querySelector('.sb-star').addEventListener('click', (e) => {

@@ -605,11 +605,13 @@ class _MetricsHeader extends StatelessWidget {
     // Context fills fast and matters most — warn early (50%), danger at 70%.
     // Prefer the live status-line value; fall back to the transcript estimate.
     if (m?.ctx != null) {
+      // Shared SSOT thresholds (warn 50 / danger 70) via ctxColor — same helper
+      // the session list uses, so the two surfaces can never drift apart.
       chips.add(_chip(theme, Icons.data_usage, 'ctx ${m!.ctx}%',
-          _loadColor(theme, m.ctx!, 50, 70)));
+          ctxColor(theme, m.ctx!)));
     } else if (derivedCtx != null) {
       chips.add(_chip(theme, Icons.data_usage, 'ctx ~$derivedCtx%',
-          _loadColor(theme, derivedCtx!, 50, 70)));
+          ctxColor(theme, derivedCtx!)));
     }
     if (m?.fiveH != null) {
       chips.add(_chip(theme, Icons.schedule, '5h ${m!.fiveH}%',
