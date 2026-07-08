@@ -34,7 +34,46 @@ void main() {
     });
   });
 
-  group('composeBarVisible', () {
+  group('composeBarVisible — mobile/touch (compose is the only usable input)', () {
+    // The reported bug: on touch, a Chat-AVAILABLE session in Terminal lens + raw
+    // mode hid the compose bar, and the raw terminal line has no soft keyboard —
+    // so there was NO way to type. On mobile the compose bar must ALWAYS show,
+    // for every lens/raw/chat combination.
+    test('always shown on mobile, every lens/raw/chat combo', () {
+      for (final raw in [true, false]) {
+        for (final lens in ['terminal', 'chat']) {
+          for (final chat in [true, false]) {
+            expect(
+              composeBarVisible(
+                rawMode: raw,
+                activeLens: lens,
+                chatAvailable: chat,
+                isDesktop: false,
+              ),
+              isTrue,
+              reason:
+                  'mobile raw=$raw lens=$lens chat=$chat must show the compose bar',
+            );
+          }
+        }
+      }
+    });
+
+    // The exact stranding case the user hit: Chat available, Terminal lens, raw on.
+    test('mobile: shown for a chat-available session in terminal + raw', () {
+      expect(
+        composeBarVisible(
+          rawMode: true,
+          activeLens: 'terminal',
+          chatAvailable: true,
+          isDesktop: false,
+        ),
+        isTrue,
+      );
+    });
+  });
+
+  group('composeBarVisible — desktop (raw = type into the terminal directly)', () {
     // Compose mode (not raw): the compose bar is the primary input, always shown.
     test('shown in compose mode on either lens', () {
       expect(
@@ -42,6 +81,7 @@ void main() {
           rawMode: false,
           activeLens: 'terminal',
           chatAvailable: true,
+          isDesktop: true,
         ),
         isTrue,
       );
@@ -50,55 +90,54 @@ void main() {
           rawMode: false,
           activeLens: 'chat',
           chatAvailable: true,
+          isDesktop: true,
         ),
         isTrue,
       );
     });
 
-    // Raw mode + Terminal lens, with Chat AVAILABLE: the terminal itself takes
-    // keystrokes and the user can switch to Chat for input, so the compose bar is
-    // intentionally hidden (not stranded — Chat is one toggle away).
+    // Raw + Terminal + Chat available: the hardware keyboard drives the terminal
+    // and Chat is one toggle away, so the compose bar is intentionally hidden.
     test('hidden in raw mode on the terminal lens when chat is available', () {
       expect(
         composeBarVisible(
           rawMode: true,
           activeLens: 'terminal',
           chatAvailable: true,
+          isDesktop: true,
         ),
         isFalse,
       );
     });
 
-    // The regression this guards: raw mode + Chat lens must STILL show the
-    // compose bar, or there's no way to type in chat view (issue #12).
+    // Raw + Chat lens must STILL show the compose bar (issue #12).
     test('shown in raw mode when the chat lens is active', () {
       expect(
         composeBarVisible(
           rawMode: true,
           activeLens: 'chat',
           chatAvailable: true,
+          isDesktop: true,
         ),
         isTrue,
       );
     });
 
-    // #43 stranding guard: a session with NO Chat is force-pinned to the Terminal
-    // lens; if raw mode is also persisted ON, the old rule hid the compose bar AND
-    // there was no Chat to fall back to -> no usable input at all. The compose bar
-    // (which sends straight to the PTY in the Terminal lens) must stay visible.
+    // #43 desktop guard: no Chat + Terminal + raw would leave no input and no Chat
+    // to fall back to — the compose bar must stay visible.
     test('shown when chat is UNAVAILABLE even in raw mode on the terminal lens', () {
       expect(
         composeBarVisible(
           rawMode: true,
           activeLens: 'terminal',
           chatAvailable: false,
+          isDesktop: true,
         ),
         isTrue,
       );
     });
 
-    // Sanity: the invariant holds across every lens+raw combo when chat is gone —
-    // there is ALWAYS a compose bar (usable input) for a no-transcript session.
+    // The invariant: a no-chat session always has a compose bar (input) on desktop.
     test('#43: some usable input for a no-chat session in every state', () {
       for (final raw in [true, false]) {
         for (final lens in ['terminal', 'chat']) {
@@ -107,6 +146,7 @@ void main() {
               rawMode: raw,
               activeLens: lens,
               chatAvailable: false,
+              isDesktop: true,
             ),
             isTrue,
             reason: 'raw=$raw lens=$lens chatAvailable=false must show input',
