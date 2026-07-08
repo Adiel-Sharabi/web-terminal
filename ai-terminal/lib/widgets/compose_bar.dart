@@ -33,6 +33,10 @@ class _TabIntent extends Intent {
   const _TabIntent();
 }
 
+class _BackspaceIntent extends Intent {
+  const _BackspaceIntent();
+}
+
 /// Sends an arrow key to the terminal when the compose field is empty (you're
 /// driving Claude, not editing text) OR while a live '/' line is streaming (so
 /// hardware ↑/↓ navigate Claude's slash menu even though the field has text).
@@ -72,6 +76,29 @@ class _TabAction extends Action<_TabIntent> {
   }
 }
 
+/// Sends a backspace to the terminal when a live '/' line is streaming AND the
+/// compose field is already empty. Tab-completing a slash command adds chars to
+/// Claude's input line that the field never tracked, so once the field empties
+/// the leftover completion can't be deleted through it — this forwards further
+/// backspaces raw so the whole line clears. While the field still has text,
+/// backspace edits it normally (the stream sends the DELs). Disabled otherwise.
+class _BackspaceAction extends Action<_BackspaceIntent> {
+  _BackspaceAction(this.controller, this.onBackspace, this.isLive);
+  final TextEditingController controller;
+  final VoidCallback? onBackspace;
+  final bool isLive;
+
+  @override
+  bool isEnabled(_BackspaceIntent intent) =>
+      onBackspace != null && isLive && controller.text.isEmpty;
+
+  @override
+  Object? invoke(_BackspaceIntent intent) {
+    onBackspace?.call();
+    return null;
+  }
+}
+
 class ComposeBar extends StatelessWidget {
   const ComposeBar({
     super.key,
@@ -83,6 +110,7 @@ class ComposeBar extends StatelessWidget {
     this.onEscape,
     this.onArrow,
     this.onTab,
+    this.onBackspace,
   });
 
   final TextEditingController controller;
@@ -103,6 +131,11 @@ class ComposeBar extends StatelessWidget {
   /// Hardware Tab → send Tab to the terminal, only while a live '/' line is
   /// streaming (autocomplete the highlighted slash command). `null` disables it.
   final VoidCallback? onTab;
+
+  /// Hardware Backspace → send a backspace to the terminal, only while a live
+  /// '/' line is streaming AND the field is already empty (clears the leftover
+  /// of a Tab-completed command). `null` disables it.
+  final VoidCallback? onBackspace;
 
   /// True while the buffer is a `/`-prefixed line streaming live to the
   /// terminal so Claude's own slash-command menu can render. Tints the
@@ -155,6 +188,9 @@ class ComposeBar extends StatelessWidget {
                 },
                 if (onTab != null)
                   const SingleActivator(LogicalKeyboardKey.tab): _TabIntent(),
+                if (onBackspace != null)
+                  const SingleActivator(LogicalKeyboardKey.backspace):
+                      _BackspaceIntent(),
               },
               child: Actions(
                 actions: <Type, Action<Intent>>{
@@ -178,6 +214,11 @@ class ComposeBar extends StatelessWidget {
                   ),
                   _ArrowIntent: _ArrowAction(controller, onArrow, isLive),
                   _TabIntent: _TabAction(onTab, isLive),
+                  _BackspaceIntent: _BackspaceAction(
+                    controller,
+                    onBackspace,
+                    isLive,
+                  ),
                 },
                 child: TextField(
                   controller: controller,
