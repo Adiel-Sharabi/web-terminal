@@ -3,6 +3,24 @@
 /// here is hand-rolled.
 library;
 
+import 'package:flutter/material.dart';
+
+/// Context-window pressure thresholds — the SINGLE source of truth for the
+/// ctx% color, shared by the session list ([SessionCard]) and the in-session
+/// metrics header (conversation_view `_MetricsHeader`). Context fills fast and
+/// matters most, so warn early (50%) and flag danger at 70%. Do not copy these
+/// numbers into a call site; import [ctxColor] instead.
+const int kCtxWarnPct = 50;
+const int kCtxDangerPct = 70;
+
+/// Green below [kCtxWarnPct], amber up to [kCtxDangerPct], red at/above — the
+/// quick context-pressure read shown everywhere a ctx% appears.
+Color ctxColor(ThemeData theme, int pct) {
+  if (pct >= kCtxDangerPct) return theme.colorScheme.error;
+  if (pct >= kCtxWarnPct) return const Color(0xFFE0A030);
+  return theme.colorScheme.primary;
+}
+
 /// Relative time per spec §2: `<60s "just now"; <1h "Nm ago"; <24h "Nh ago";
 /// else "Nd ago"`. [epochMs] is milliseconds since epoch (as returned by the
 /// API); `null` renders as `'—'`.
