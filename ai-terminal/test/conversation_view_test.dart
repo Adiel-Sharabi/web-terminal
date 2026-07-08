@@ -396,6 +396,196 @@ void main() {
     },
   );
 
+  testWidgets(
+    '#35: /clear (new claudeSessionId, same pty session) resets — stale turns gone',
+    (tester) async {
+      // The PTY session id is constant throughout; only the Claude session id
+      // changes, exactly as it does on /clear (Claude mints a new session → a
+      // new .jsonl the server then serves). lastActivity is held constant so the
+      // ONLY thing that can trigger a reset is the claudeSessionId change.
+      TranscriptPage current = const TranscriptPage(
+        messages: [
+          TranscriptTurn(
+              role: 'assistant', text: 'OLD_A_MESSAGE', toolUses: [], ts: null),
+        ],
+        cursor: null,
+        hasMore: false,
+      );
+      Future<TranscriptPage> fetch(String id,
+              {String? before, int? limit}) async =>
+          current;
+
+      Session sess(String? claudeId) => Session(
+            id: 'sess-1',
+            name: 'proj',
+            cwd: '/x',
+            status: 'idle',
+            claudeSessionId: claudeId,
+            lastActivity: 1000,
+            notifyLevel: 'important',
+            server: _server(),
+            autoCommand: '',
+          );
+      Widget build(Session s) =>
+          _wrap(ConversationView(session: s, fetchPage: fetch));
+
+      await tester.pumpWidget(build(sess('claude-1')));
+      await tester.pumpAndSettle();
+      expect(find.text('OLD_A_MESSAGE'), findsOneWidget);
+
+      // /clear: a new Claude session id, and the server now serves the fresh
+      // (post-clear) transcript.
+      current = const TranscriptPage(
+        messages: [
+          TranscriptTurn(
+              role: 'assistant', text: 'NEW_B_MESSAGE', toolUses: [], ts: null),
+        ],
+        cursor: null,
+        hasMore: false,
+      );
+      await tester.pumpWidget(build(sess('claude-2')));
+      await tester.pumpAndSettle();
+
+      expect(find.text('OLD_A_MESSAGE'), findsNothing);
+      expect(find.text('NEW_B_MESSAGE'), findsOneWidget);
+    },
+  );
+
+  testWidgets(
+    '#35: a transcript that shrinks in place is reflected, not left stale',
+    (tester) async {
+      // Same claudeSessionId throughout, so the didUpdateWidget reset path is
+      // NOT taken — this isolates _refreshLastPage's ability to shrink/replace.
+      var calls = 0;
+      Future<TranscriptPage> fetch(String id,
+          {String? before, int? limit}) async {
+        calls++;
+        if (calls == 1) {
+          return const TranscriptPage(
+            messages: [
+              TranscriptTurn(
+                  role: 'user', text: 'STALE_1', toolUses: [], ts: null),
+              TranscriptTurn(
+                  role: 'assistant', text: 'STALE_2', toolUses: [], ts: null),
+              TranscriptTurn(
+                  role: 'user', text: 'STALE_3', toolUses: [], ts: null),
+            ],
+            cursor: null,
+            hasMore: false,
+          );
+        }
+        // Transcript reset in place to a single fresh turn (fewer than we hold).
+        return const TranscriptPage(
+          messages: [
+            TranscriptTurn(
+                role: 'assistant', text: 'FRESH_ONLY', toolUses: [], ts: null),
+          ],
+          cursor: null,
+          hasMore: false,
+        );
+      }
+
+      Session sess(int lastActivity) => Session(
+            id: 'sess-1',
+            name: 'proj',
+            cwd: '/x',
+            status: 'idle',
+            claudeSessionId: 'claude-1',
+            lastActivity: lastActivity,
+            notifyLevel: 'important',
+            server: _server(),
+            autoCommand: '',
+          );
+      Widget build(Session s) =>
+          _wrap(ConversationView(session: s, fetchPage: fetch));
+
+      await tester.pumpWidget(build(sess(1000)));
+      await tester.pumpAndSettle();
+      expect(find.text('STALE_1'), findsOneWidget);
+      expect(find.text('STALE_3'), findsOneWidget);
+
+      // A lastActivity bump triggers _refreshLastPage; the fetch now returns the
+      // shrunken transcript.
+      await tester.pumpWidget(build(sess(2000)));
+      await tester.pumpAndSettle();
+
+      expect(find.text('FRESH_ONLY'), findsOneWidget);
+      expect(find.text('STALE_1'), findsNothing);
+      expect(find.text('STALE_2'), findsNothing);
+      expect(find.text('STALE_3'), findsNothing);
+    },
+  );
+
+  testWidgets(
+    '#35: an emptied transcript clears the chat (hasMore=false, no turns)',
+    (tester) async {
+      var calls = 0;
+      Future<TranscriptPage> fetch(String id,
+          {String? before, int? limit}) async {
+        calls++;
+        if (calls == 1) {
+          return const TranscriptPage(
+            messages: [
+              TranscriptTurn(
+                  role: 'assistant',
+                  text: 'BEFORE_CLEAR',
+                  toolUses: [],
+                  ts: null),
+            ],
+            cursor: null,
+            hasMore: false,
+          );
+        }
+        return const TranscriptPage(messages: [], cursor: null, hasMore: false);
+      }
+
+      Session sess(int lastActivity) => Session(
+            id: 'sess-1',
+            name: 'proj',
+            cwd: '/x',
+            status: 'idle',
+            claudeSessionId: 'claude-1',
+            lastActivity: lastActivity,
+            notifyLevel: 'important',
+            server: _server(),
+            autoCommand: '',
+          );
+      Widget build(Session s) =>
+          _wrap(ConversationView(session: s, fetchPage: fetch));
+
+      await tester.pumpWidget(build(sess(1000)));
+      await tester.pumpAndSettle();
+      expect(find.text('BEFORE_CLEAR'), findsOneWidget);
+
+      await tester.pumpWidget(build(sess(2000)));
+      await tester.pumpAndSettle();
+
+      expect(find.text('BEFORE_CLEAR'), findsNothing);
+      expect(find.textContaining('No messages'), findsOneWidget);
+    },
+  );
+
+  // #35 /compact: two possible transcript behaviours, decided by real data.
+  //  * If /compact mints a NEW Claude session id (a new .jsonl), it is
+  //    behaviourally identical to /clear — the "new claudeSessionId resets"
+  //    test above already covers it (the chat resets to the fresh, compacted
+  //    session). On-disk evidence supports this: every transcript .jsonl carries
+  //    a single stable sessionId, i.e. a session id maps 1:1 to a file.
+  //  * If instead /compact stays in the SAME .jsonl and appends a
+  //    `type:"summary"` compaction boundary, the server would need to surface
+  //    that boundary (lib/transcript.js). That format could NOT be confirmed
+  //    from any real transcript on disk (no `type:"summary"` line exists), so
+  //    per the engineering standards it is intentionally left unimplemented and
+  //    is pinned here as a skipped, on-device-verification-required test rather
+  //    than guessed at. Note that even unhandled, the same-file case merely
+  //    keeps showing the (legitimately) continuing conversation — it is not the
+  //    "chat wiped by /clear" failure #35 is about.
+  testWidgets(
+    '#35: /compact same-file summary boundary — needs on-device verification',
+    (tester) async {},
+    skip: true,
+  );
+
   testWidgets('shows an empty state when there are no turns', (tester) async {
     await tester.pumpWidget(
       _wrap(
