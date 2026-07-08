@@ -181,6 +181,8 @@ class _SessionScreenState extends State<SessionScreen>
   String _composeLiveSent =
       ''; // chars already streamed to the terminal for the live line
   String? _lensBeforeLive; // lens to restore to once a live '/' command is sent
+  bool _liveTabbed =
+      false; // Tab completed the live line — the terminal owns extra chars now
   bool _historyActive =
       false; // true while walking send-history (further ↑/↓ keep walking)
   int _historyIndex = 0;
@@ -781,6 +783,7 @@ class _SessionScreenState extends State<SessionScreen>
       if (!_composeLive && slashStartsLiveStream(text)) {
         _composeLive = true;
         _composeLiveSent = '';
+        _liveTabbed = false;
         if (_activeLens != 'terminal') {
           _lensBeforeLive = _activeLens;
           _activeLens = 'terminal';
@@ -788,9 +791,11 @@ class _SessionScreenState extends State<SessionScreen>
       }
       if (_composeLive) {
         _streamComposeLive(text);
-        if (text.isEmpty) {
-          // Deleted the whole line before sending — leave live mode and hop
-          // back to wherever we came from.
+        // Deleted the whole typed line before sending — leave live mode and hop
+        // back. Suppressed once Tab has completed the command: the terminal then
+        // holds chars the field never had, and Backspace-on-empty (onBackspace)
+        // forwards raw DELs to clear them, so the empty field is NOT the end.
+        if (text.isEmpty && !_liveTabbed) {
           _composeLive = false;
           _composeLiveSent = '';
           _restoreLensAfterLive();
@@ -896,10 +901,21 @@ class _SessionScreenState extends State<SessionScreen>
     _settingComposeProgrammatically = true;
     _composeLive = false;
     _composeLiveSent = '';
+    _liveTabbed = false;
     _historyActive = false;
     _composeController.clear();
     _restoreLensAfterLive();
     unawaited(_saveDraft());
+  }
+
+  /// Esc from the compose bar sends ESC to the terminal (interrupt / close a
+  /// menu). While a live '/' line is up, it also cancels the line client-side —
+  /// clearing the field and hopping back to the lens we came from — so the user
+  /// can always bail out of the slash menu cleanly (incl. after a Tab completion
+  /// left the field and terminal out of length-sync).
+  void _composeEscape() {
+    _sendRawToTerminal('\x1b');
+    if (_composeLive) _clearComposeInput();
   }
 
   /// After a live '/' command ends (sent or deleted), hop back to the lens the
@@ -1627,11 +1643,16 @@ class _SessionScreenState extends State<SessionScreen>
               // Hardware Esc reaches the terminal; hardware arrows (while the
               // compose field is empty) go through the same routing as the
               // on-screen keys — ↑/↓ walk send-history, ←/→ move the caret.
-              onEscape: () => _sendRawToTerminal('\x1b'),
+              onEscape: _composeEscape,
               onArrow: _handleKeyStripKeyPress,
               // Tab autocompletes the highlighted slash command — only while a
-              // live '/' line is streaming (ComposeBar gates it on isLive).
-              onTab: () => _sendRawToTerminal('\t'),
+              // live '/' line is streaming (ComposeBar gates it on isLive). Mark
+              // the line Tab-completed so deleting to an empty field doesn't end
+              // live mode while the terminal still holds the completed remainder.
+              onTab: () {
+                _sendRawToTerminal('\t');
+                _liveTabbed = true;
+              },
               // Backspace on an already-empty field during a live line clears
               // the leftover of a Tab-completed command (which the field never
               // tracked) straight from Claude's input line.
