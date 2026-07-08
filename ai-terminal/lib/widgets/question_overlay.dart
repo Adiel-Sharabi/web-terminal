@@ -42,12 +42,32 @@ class AnswerFrame {
 /// - multi-select: each digit toggles its row; a trailing `Enter` confirms.
 /// - multi-question: after every tab is answered a Submit review appears whose
 ///   default is "Submit answers", so a trailing `Enter` finalizes it.
+/// - free-text ("Other"), SINGLE-SELECT single question only: Claude's selector
+///   renders an implied "Type something." row just after the real options (row
+///   `options.length + 1`). Answering with free text is THREE separate, delayed
+///   stdin writes: the row digit (consumed as the selector, NOT part of the
+///   answer), the text, then Enter to submit — each in its own PTY read (a
+///   text+CR burst reads as a paste, not a submit). See [otherText].
+///
+/// [otherText] is an optional per-question free-text answer (parallel to
+/// [selections]); a non-empty, non-whitespace entry routes a single-select
+/// single question through the "Other" path above instead of its numeric
+/// selection. It is consumed ONLY on that proven path. Multi-select and
+/// multi-question are deferred and never consume [otherText]:
+/// - multi-select: on-device, the "Type something." row is a checkbox that
+///   toggles rather than opening a free-text input, so digit+text+Enter would
+///   submit a checked-but-empty option and lose the text;
+/// - multi-question: the tab-advance semantics of a free-text submit are
+///   unverified on-device.
+/// The overlay correspondingly hides the Other row unless there is exactly one,
+/// non-multiSelect question.
 ///
 /// Pure, so the mapping is unit-testable.
 List<AnswerFrame> buildAnswerFrames(
   List<PendingQuestionItem> questions,
-  List<Set<int>> selections,
-) {
+  List<Set<int>> selections, {
+  List<String?> otherText = const [],
+}) {
   const gap = 600; // between frames that must be read separately
   const settle = 250; // between absolute toggles (safe to coalesce)
   final frames = <AnswerFrame>[];
@@ -55,7 +75,18 @@ List<AnswerFrame> buildAnswerFrames(
   for (var qi = 0; qi < questions.length; qi++) {
     final q = questions[qi];
     final sel = qi < selections.length ? selections[qi] : const <int>{};
-    if (q.multiSelect) {
+    final other = qi < otherText.length ? otherText[qi]?.trim() : null;
+    if (!multiQuestion && !q.multiSelect && other != null && other.isNotEmpty) {
+      // Free-text ("Other"): select the implied "Type something." row, type the
+      // answer, submit. The three land in SEPARATE stdin reads (each carries
+      // [gap]) so Claude treats the text as an answer, not a paste.
+      // SINGLE-SELECT only: in multi-select the "Type something." row is a
+      // checkbox that toggles (no free-text input), so this path is gated off
+      // and the multi-select branch below ignores otherText entirely.
+      frames.add(AnswerFrame('${q.options.length + 1}', gap)); // "Type something."
+      frames.add(AnswerFrame(other, gap)); // the free-text answer
+      frames.add(const AnswerFrame('\r', gap)); // submit
+    } else if (q.multiSelect) {
       final rows = sel.toList()..sort();
       for (final i in rows) {
         frames.add(AnswerFrame('${i + 1}', settle)); // toggle row i
@@ -127,24 +158,47 @@ class _QuestionOverlayState extends State<QuestionOverlay> {
   int _tab = 0;
   late List<Set<int>> _selected;
 
+  /// Per-question free-text ("Other") answer, parallel to [_selected]. `null`
+  /// means Other is NOT the active choice for that tab (numeric-selection mode);
+  /// a non-null value (even `''`) means Other is active, and its trimmed text is
+  /// the answer. Only ever populated for single-question prompts.
+  late List<String?> _otherText;
+
+  /// Backs the single free-text field. One controller suffices because the
+  /// Other row is only shown for single-question prompts (one tab).
+  final TextEditingController _otherController = TextEditingController();
+
   @override
   void initState() {
     super.initState();
     _selected = [for (final _ in widget.question.questions) <int>{}];
+    _otherText = [for (final _ in widget.question.questions) null];
   }
 
   @override
   void didUpdateWidget(covariant QuestionOverlay old) {
     super.didUpdateWidget(old);
-    // A different prompt arrived → reset selection + active tab.
+    // A different prompt arrived → reset selection, free text + active tab.
     if (old.question.toolUseId != widget.question.toolUseId) {
       _tab = 0;
       _selected = [for (final _ in widget.question.questions) <int>{}];
+      _otherText = [for (final _ in widget.question.questions) null];
+      _otherController.clear();
     }
   }
 
+  @override
+  void dispose() {
+    _otherController.dispose();
+    super.dispose();
+  }
+
+  bool get _otherActive => _otherText[_tab] != null;
+
   void _toggle(PendingQuestionItem q, int i) {
     setState(() {
+      // Choosing a listed option exits Other mode (mutually exclusive).
+      _otherText[_tab] = null;
       final set = _selected[_tab];
       if (q.multiSelect) {
         set.contains(i) ? set.remove(i) : set.add(i);
@@ -156,11 +210,28 @@ class _QuestionOverlayState extends State<QuestionOverlay> {
     });
   }
 
-  bool get _everyQuestionAnswered =>
-      _selected.every((s) => s.isNotEmpty);
+  /// Activates the free-text ("Other") answer for the current tab: clears any
+  /// numeric picks (Other is mutually exclusive) and reveals the text field.
+  void _chooseOther() {
+    setState(() {
+      _selected[_tab].clear();
+      _otherText[_tab] = _otherController.text;
+    });
+  }
+
+  bool get _everyQuestionAnswered => List.generate(
+        _selected.length,
+        (i) =>
+            _selected[i].isNotEmpty ||
+            (_otherText[i]?.trim().isNotEmpty ?? false),
+      ).every((answered) => answered);
 
   void _send() {
-    widget.onSend(buildAnswerFrames(widget.question.questions, _selected));
+    widget.onSend(buildAnswerFrames(
+      widget.question.questions,
+      _selected,
+      otherText: _otherText,
+    ));
   }
 
   @override
@@ -305,8 +376,88 @@ class _QuestionOverlayState extends State<QuestionOverlay> {
             ),
           for (var i = 0; i < q.options.length; i++)
             _optionTile(theme, q, i),
+          // Free-text ("Other") answer. Offered ONLY for a single-select single
+          // question — the proven path. Multi-select's "Type something." row is
+          // a checkbox with no free-text input, and multi-question tab-advance
+          // is unverified; both are deferred (see buildAnswerFrames).
+          if (widget.question.questions.length == 1 && !q.multiSelect) ...[
+            _otherTile(theme),
+            if (_otherActive) _otherField(theme),
+          ],
           const SizedBox(height: 4),
         ],
+      ),
+    );
+  }
+
+  /// The "Other…" row — same shell as [_optionTile]. Tapping it activates the
+  /// free-text answer for this tab.
+  Widget _otherTile(ThemeData theme) {
+    final active = _otherActive;
+    return Padding(
+      padding: const EdgeInsets.symmetric(vertical: 3),
+      child: Material(
+        color: active
+            ? theme.colorScheme.primaryContainer
+            : theme.colorScheme.surfaceContainer,
+        borderRadius: BorderRadius.circular(AppShape.medium),
+        child: InkWell(
+          borderRadius: BorderRadius.circular(AppShape.medium),
+          onTap: _chooseOther,
+          child: Padding(
+            padding: const EdgeInsets.symmetric(horizontal: 12, vertical: 10),
+            child: Row(
+              children: [
+                Icon(
+                  active ? Icons.radio_button_checked : Icons.edit_outlined,
+                  size: 20,
+                  color: active
+                      ? theme.colorScheme.primary
+                      : theme.colorScheme.onSurfaceVariant,
+                ),
+                const SizedBox(width: 10),
+                Expanded(
+                  child: Text('Other…', style: theme.textTheme.bodyLarge),
+                ),
+              ],
+            ),
+          ),
+        ),
+      ),
+    );
+  }
+
+  /// The revealed free-text field, styled like [_contextPanel]'s container.
+  Widget _otherField(ThemeData theme) {
+    return Padding(
+      padding: const EdgeInsets.fromLTRB(0, 3, 0, 3),
+      child: TextField(
+        controller: _otherController,
+        autofocus: true,
+        minLines: 1,
+        maxLines: 4,
+        textInputAction: TextInputAction.send,
+        style: theme.textTheme.bodyLarge,
+        onChanged: (v) => setState(() => _otherText[_tab] = v),
+        onSubmitted: (_) {
+          if (_everyQuestionAnswered) _send();
+        },
+        decoration: InputDecoration(
+          hintText: 'Type your answer…',
+          isDense: true,
+          filled: true,
+          fillColor: theme.colorScheme.surfaceContainer,
+          contentPadding:
+              const EdgeInsets.symmetric(horizontal: 12, vertical: 10),
+          border: OutlineInputBorder(
+            borderRadius: BorderRadius.circular(AppShape.medium),
+            borderSide: BorderSide(color: theme.colorScheme.outlineVariant),
+          ),
+          enabledBorder: OutlineInputBorder(
+            borderRadius: BorderRadius.circular(AppShape.medium),
+            borderSide: BorderSide(color: theme.colorScheme.outlineVariant),
+          ),
+        ),
       ),
     );
   }

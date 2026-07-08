@@ -59,6 +59,108 @@ void main() {
       ]);
       expect(frames.single.delayMs, greaterThanOrEqualTo(500));
     });
+
+    test(
+        'single-select via Other free-text: "Type something." row, text, submit',
+        () {
+      final qs = [_q(['A', 'B', 'C'])];
+      final frames = buildAnswerFrames(
+        qs,
+        [<int>{}],
+        otherText: const ['deploy to staging'],
+      );
+      // 3 options -> the implied "Type something." row is digit 4; the digit is
+      // CONSUMED (selects the row, not part of the answer); then the free text;
+      // then Enter submits.
+      expect(_keys(frames), ['4', 'deploy to staging', '\r']);
+      // All three must land in SEPARATE stdin reads (text+CR in one burst reads
+      // as a paste, not a submit) -> each carries the full inter-frame gap.
+      for (final f in frames) {
+        expect(f.delayMs, greaterThanOrEqualTo(500));
+      }
+    });
+
+    test('Other free-text is trimmed before it is sent', () {
+      final qs = [_q(['A', 'B', 'C'])];
+      expect(
+        _keys(buildAnswerFrames(qs, [<int>{}], otherText: const ['  hi there '])),
+        ['4', 'hi there', '\r'],
+      );
+    });
+
+    test('multi-select ignores Other entirely (no free-text path)', () {
+      // On-device: in multi-select the "Type something." row is a CHECKBOX —
+      // digit N+1 only toggles it, it does NOT open a free-text input and any
+      // typed text is discarded. So Other is not offered for multi-select and
+      // buildAnswerFrames must ignore otherText here, emitting the normal
+      // toggle+confirm frames instead.
+      final qs = [_q(['A', 'B', 'C'], multi: true)];
+      expect(
+        _keys(buildAnswerFrames(qs, [
+          {0, 2}
+        ], otherText: const ['custom'])),
+        ['1', '3', '\r'],
+      );
+    });
+
+    test('blank/whitespace Other falls back to the numeric selection', () {
+      final qs = [_q(['A', 'B', 'C'])];
+      expect(
+        _keys(buildAnswerFrames(qs, [
+          {1}
+        ], otherText: const ['   '])),
+        ['2'],
+      );
+    });
+
+    test('otherText default does not change existing (non-Other) frames', () {
+      final qs = [_q(['A', 'B', 'C'])];
+      // Regression guard: passing otherText:[null] must be byte-for-byte
+      // identical to omitting it entirely.
+      expect(
+        _keys(buildAnswerFrames(qs, [
+          {0}
+        ])),
+        _keys(buildAnswerFrames(qs, [
+          {0}
+        ], otherText: const [null])),
+      );
+    });
+
+    test(
+      'multi-question + Other is deferred (unverified TUI tab-advance semantics)',
+      () {
+        // The on-device proof covers a SINGLE question only. Whether a
+        // free-text submit advances to the next tab like a single-select digit
+        // does is unverified, so the overlay hides the Other row when there is
+        // more than one question and buildAnswerFrames ignores otherText in the
+        // multi-question case. This test pins that intent; unskip it once the
+        // multi-question mechanism is verified on-device.
+        final qs = [_q(['A', 'B']), _q(['X', 'Y'])];
+        final frames = buildAnswerFrames(
+          qs,
+          [<int>{}, {0}],
+          otherText: const ['freeform', null],
+        );
+        expect(_keys(frames), isNot(contains('freeform')));
+      },
+      skip: 'multi-question + Other deferred until the TUI mechanism is verified',
+    );
+
+    test(
+      'multi-select + Other is deferred (checkbox row, no free-text input)',
+      () {
+        // On-device: the multi-select "Type something." row is a CHECKBOX that
+        // toggles rather than opening a free-text field, so the digit+text+CR
+        // sequence would submit a checked-but-EMPTY option and lose the typed
+        // text. Other is therefore restricted to single-select single questions
+        // and buildAnswerFrames never emits the free-text path for multi-select.
+        final qs = [_q(['A', 'B', 'C'], multi: true)];
+        final frames = buildAnswerFrames(qs, [<int>{}], otherText: const ['x']);
+        expect(_keys(frames), isNot(contains('x')));
+      },
+      skip: 'multi-select Other deferred: TUI checkbox row has no free-text input',
+    );
   });
 
   group('answerNeedsConfirm (cluster-path Enter re-send gate)', () {
@@ -82,6 +184,12 @@ void main() {
         {0},
         {1}
       ]);
+      expect(answerNeedsConfirm(frames), isTrue);
+    });
+
+    test('Other free-text answer ends in Enter -> needs confirm', () {
+      final frames = buildAnswerFrames([_q(['A', 'B', 'C'])], [<int>{}],
+          otherText: const ['hello']);
       expect(answerNeedsConfirm(frames), isTrue);
     });
 
@@ -252,5 +360,137 @@ void main() {
     await tester.tap(find.widgetWithText(OutlinedButton, 'Enter'));
     await tester.pump();
     expect(key, '\r');
+  });
+
+  testWidgets(
+      'Other row reveals a field; Send gated on text; sends digit+text+Enter',
+      (tester) async {
+    List<AnswerFrame>? sent;
+    final pq = PendingQuestion(
+      toolUseId: 'other1',
+      questions: [_q(['Alpha', 'Beta', 'Gamma'])],
+    );
+    await tester.pumpWidget(
+      MaterialApp(
+        theme: AppTheme.dark,
+        home: Scaffold(
+          body: Stack(
+            children: [
+              QuestionOverlay(
+                question: pq,
+                onSend: (s) => sent = s,
+                onKey: (_) {},
+                onDismiss: () {},
+              ),
+            ],
+          ),
+        ),
+      ),
+    );
+
+    // Nothing picked yet -> Send disabled, no free-text field shown.
+    expect(find.byType(TextField), findsNothing);
+    expect(
+      tester
+          .widget<FilledButton>(
+              find.widgetWithText(FilledButton, 'Pick an option'))
+          .onPressed,
+      isNull,
+    );
+
+    // Choose the free-text ("Other") row -> a field appears.
+    await tester.tap(find.text('Other…'));
+    await tester.pumpAndSettle();
+    expect(find.byType(TextField), findsOneWidget);
+
+    // Gating: still disabled while the field is empty.
+    expect(
+      tester
+          .widget<FilledButton>(
+              find.widgetWithText(FilledButton, 'Pick an option'))
+          .onPressed,
+      isNull,
+    );
+
+    await tester.enterText(find.byType(TextField), 'deploy to staging');
+    await tester.pumpAndSettle();
+
+    final ready = find.widgetWithText(FilledButton, 'Send answer');
+    expect(tester.widget<FilledButton>(ready).onPressed, isNotNull);
+    await tester.tap(ready);
+    await tester.pumpAndSettle();
+
+    // 3 options -> "Type something." is row 4, then the text, then submit.
+    expect(_keys(sent!), ['4', 'deploy to staging', '\r']);
+  });
+
+  testWidgets('picking a listed option after Other exits free-text mode',
+      (tester) async {
+    List<AnswerFrame>? sent;
+    final pq = PendingQuestion(
+      toolUseId: 'other2',
+      questions: [_q(['Alpha', 'Beta', 'Gamma'])],
+    );
+    await tester.pumpWidget(
+      MaterialApp(
+        theme: AppTheme.dark,
+        home: Scaffold(
+          body: Stack(
+            children: [
+              QuestionOverlay(
+                question: pq,
+                onSend: (s) => sent = s,
+                onKey: (_) {},
+                onDismiss: () {},
+              ),
+            ],
+          ),
+        ),
+      ),
+    );
+
+    await tester.tap(find.text('Other…'));
+    await tester.pumpAndSettle();
+    await tester.enterText(find.byType(TextField), 'ignore me');
+    await tester.pumpAndSettle();
+
+    // Switching back to a real option must clear Other (field disappears) and
+    // send the plain row digit, not the free text.
+    await tester.tap(find.text('Beta'));
+    await tester.pumpAndSettle();
+    expect(find.byType(TextField), findsNothing);
+
+    await tester.tap(find.widgetWithText(FilledButton, 'Send answer'));
+    await tester.pumpAndSettle();
+    expect(_keys(sent!), ['2']);
+  });
+
+  testWidgets('Other row is not offered for a multi-select question',
+      (tester) async {
+    // Multi-select's "Type something." row is a TUI checkbox that never opens a
+    // free-text input (on-device verified), so the overlay must not offer Other.
+    await tester.pumpWidget(
+      MaterialApp(
+        theme: AppTheme.dark,
+        home: Scaffold(
+          body: Stack(
+            children: [
+              QuestionOverlay(
+                question: PendingQuestion(
+                  toolUseId: 'ms1',
+                  questions: [_q(['Alpha', 'Beta', 'Gamma'], multi: true)],
+                ),
+                onSend: (_) {},
+                onKey: (_) {},
+                onDismiss: () {},
+              ),
+            ],
+          ),
+        ),
+      ),
+    );
+    await tester.pumpAndSettle();
+    expect(find.text('Other…'), findsNothing);
+    expect(find.byType(TextField), findsNothing);
   });
 }
