@@ -25,6 +25,7 @@ import '../services/favorites_service.dart';
 import '../services/session_repository.dart';
 import '../theme/app_theme.dart';
 import '../theme/status_colors.dart';
+import '../widgets/app_version_label.dart';
 import '../widgets/attention_detail_sheet.dart';
 import '../widgets/empty_state.dart';
 import '../widgets/favorites_group.dart';
@@ -257,6 +258,9 @@ class _DashboardScreenState extends State<DashboardScreen> {
                     SliverAppBar.large(
                       title: const Text('Sessions'),
                       actions: [
+                        // The running build's version (issue #40) — muted, so
+                        // the deployed build is identifiable at a glance.
+                        const AppVersionBadge(),
                         IconButton(
                           icon: const Icon(Icons.settings_outlined),
                           tooltip: 'Settings',
