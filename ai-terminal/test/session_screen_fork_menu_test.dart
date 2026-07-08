@@ -37,20 +37,82 @@ void main() {
   group('composeBarVisible', () {
     // Compose mode (not raw): the compose bar is the primary input, always shown.
     test('shown in compose mode on either lens', () {
-      expect(composeBarVisible(rawMode: false, activeLens: 'terminal'), isTrue);
-      expect(composeBarVisible(rawMode: false, activeLens: 'chat'), isTrue);
+      expect(
+        composeBarVisible(
+          rawMode: false,
+          activeLens: 'terminal',
+          chatAvailable: true,
+        ),
+        isTrue,
+      );
+      expect(
+        composeBarVisible(
+          rawMode: false,
+          activeLens: 'chat',
+          chatAvailable: true,
+        ),
+        isTrue,
+      );
     });
 
-    // Raw mode + Terminal lens: the terminal itself takes keystrokes, so the
-    // compose bar is intentionally hidden.
-    test('hidden in raw mode on the terminal lens', () {
-      expect(composeBarVisible(rawMode: true, activeLens: 'terminal'), isFalse);
+    // Raw mode + Terminal lens, with Chat AVAILABLE: the terminal itself takes
+    // keystrokes and the user can switch to Chat for input, so the compose bar is
+    // intentionally hidden (not stranded — Chat is one toggle away).
+    test('hidden in raw mode on the terminal lens when chat is available', () {
+      expect(
+        composeBarVisible(
+          rawMode: true,
+          activeLens: 'terminal',
+          chatAvailable: true,
+        ),
+        isFalse,
+      );
     });
 
     // The regression this guards: raw mode + Chat lens must STILL show the
     // compose bar, or there's no way to type in chat view (issue #12).
     test('shown in raw mode when the chat lens is active', () {
-      expect(composeBarVisible(rawMode: true, activeLens: 'chat'), isTrue);
+      expect(
+        composeBarVisible(
+          rawMode: true,
+          activeLens: 'chat',
+          chatAvailable: true,
+        ),
+        isTrue,
+      );
+    });
+
+    // #43 stranding guard: a session with NO Chat is force-pinned to the Terminal
+    // lens; if raw mode is also persisted ON, the old rule hid the compose bar AND
+    // there was no Chat to fall back to -> no usable input at all. The compose bar
+    // (which sends straight to the PTY in the Terminal lens) must stay visible.
+    test('shown when chat is UNAVAILABLE even in raw mode on the terminal lens', () {
+      expect(
+        composeBarVisible(
+          rawMode: true,
+          activeLens: 'terminal',
+          chatAvailable: false,
+        ),
+        isTrue,
+      );
+    });
+
+    // Sanity: the invariant holds across every lens+raw combo when chat is gone —
+    // there is ALWAYS a compose bar (usable input) for a no-transcript session.
+    test('#43: some usable input for a no-chat session in every state', () {
+      for (final raw in [true, false]) {
+        for (final lens in ['terminal', 'chat']) {
+          expect(
+            composeBarVisible(
+              rawMode: raw,
+              activeLens: lens,
+              chatAvailable: false,
+            ),
+            isTrue,
+            reason: 'raw=$raw lens=$lens chatAvailable=false must show input',
+          );
+        }
+      }
     });
   });
 

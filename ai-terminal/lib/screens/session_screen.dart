@@ -53,14 +53,21 @@ const int _kMaxHistory = 50;
 bool canForkFromMenu(Session session) => session.claudeSessionId != null;
 
 /// Whether the compose (text input) bar should be shown. It's the user's only
-/// place to type in TWO situations: compose mode (not raw), and — regardless
-/// of raw mode — whenever the Chat lens is active, because there the terminal
-/// is offstage so "raw = type into the terminal" has nothing visible to type
-/// into. Without the chat clause, raw mode + Chat lens leaves no input widget
-/// at all (issue #12: "keyboard icon marked, can't type in chat view"). Pure
-/// function so the rule is testable without pumping the whole screen.
-bool composeBarVisible({required bool rawMode, required String activeLens}) =>
-    activeLens == 'chat' || !rawMode;
+/// place to type in THREE situations: compose mode (not raw); whenever the Chat
+/// lens is active (there the terminal is offstage, so "raw = type into the
+/// terminal" has nothing visible to type into — issue #12); and — the #43 safety
+/// net — whenever the Chat lens is UNAVAILABLE for the session. In that last case
+/// the lens is force-pinned to Terminal, so a persisted raw mode would otherwise
+/// hide the compose bar AND there's no Chat to fall back to, stranding the user
+/// with no usable input (direct xterm typing is unusable on touch). Since the
+/// compose bar sends straight to the PTY in the Terminal lens, keeping it visible
+/// IS the direct-terminal fallback. Pure function so the rule is testable without
+/// pumping the whole screen.
+bool composeBarVisible({
+  required bool rawMode,
+  required String activeLens,
+  required bool chatAvailable,
+}) => activeLens == 'chat' || !rawMode || !chatAvailable;
 
 /// True on desktop platforms (a real hardware keyboard). One definition so the
 /// raw-mode default, the '/' live-stream gate (#28), and image-paste routing
@@ -385,14 +392,22 @@ class _SessionScreenState extends State<SessionScreen>
     }
   }
 
+  /// Whether the Chat lens is available for THIS session: the server advertises
+  /// the transcript capability, it's a Claude session, and its transcript hasn't
+  /// 404'd. SINGLE source of truth — drives the lens default
+  /// (_recomputeActiveLens), the app-bar toggle's visibility, and the #43
+  /// compose-bar guarantee (when Chat is unavailable the compose bar must never be
+  /// hidden, or a raw-mode session is stranded with no usable input).
+  bool get _chatAvailable =>
+      _serverHasTranscript == true &&
+      _session?.claudeSessionId != null &&
+      !_transcriptUnavailableForSession;
+
   /// Chat is the default lens when eligible (Claude session + capability +
   /// hasn't already 404d) and no explicit past choice says otherwise;
   /// Terminal-only (toggle hidden) when not eligible at all.
   void _recomputeActiveLens() {
-    final eligible =
-        _serverHasTranscript == true &&
-        _session?.claudeSessionId != null &&
-        !_transcriptUnavailableForSession;
+    final eligible = _chatAvailable;
     final desired = eligible ? (_persistedLens ?? 'chat') : 'terminal';
     if (desired != _activeLens && mounted) {
       setState(() => _activeLens = desired);
@@ -926,7 +941,11 @@ class _SessionScreenState extends State<SessionScreen>
   /// straight through so they can navigate Claude's live slash menu.
   void _handleKeyStripKeyPress(String sequence) {
     final composeActive =
-        composeBarVisible(rawMode: _rawMode, activeLens: _activeLens) &&
+        composeBarVisible(
+          rawMode: _rawMode,
+          activeLens: _activeLens,
+          chatAvailable: _chatAvailable,
+        ) &&
         _composeFocusNode.hasFocus &&
         !_composeLive;
     if (composeActive) {
@@ -1361,9 +1380,7 @@ class _SessionScreenState extends State<SessionScreen>
           ],
         ),
         actions: [
-          if (_serverHasTranscript == true &&
-              session.claudeSessionId != null &&
-              !_transcriptUnavailableForSession)
+          if (_chatAvailable)
             Padding(
               padding: const EdgeInsets.only(right: 8),
               child: _LensToggle(value: _activeLens, onChanged: _setLens),
@@ -1591,7 +1608,11 @@ class _SessionScreenState extends State<SessionScreen>
               ],
             ),
           ),
-          if (composeBarVisible(rawMode: _rawMode, activeLens: _activeLens))
+          if (composeBarVisible(
+            rawMode: _rawMode,
+            activeLens: _activeLens,
+            chatAvailable: _chatAvailable,
+          ))
             ComposeBar(
               controller: _composeController,
               focusNode: _composeFocusNode,
