@@ -14,6 +14,7 @@ const { performance } = require('perf_hooks');
 const pty = require('node-pty');
 const ipc = require('./lib/ipc');
 const { resolveRestoreRunCommand } = require('./lib/restore-command');
+const { claudeProjectDirName } = require('./lib/transcript');
 
 const WORKER_VERSION = '0.5.1';
 
@@ -276,8 +277,7 @@ function _detectClaudeSessionFromDirInner(cwd) {
   if (!cwd) return null;
   let projectDir;
   try {
-    projectDir = path.join(getClaudeProjectsDir(),
-      cwd.replace(/^([A-Z]):\\/, '$1--').replace(/[\\/]/g, '-'));
+    projectDir = path.join(getClaudeProjectsDir(), claudeProjectDirName(cwd));
   } catch { return null; }
 
   let dirMtime;

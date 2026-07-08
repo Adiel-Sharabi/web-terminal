@@ -8,7 +8,7 @@ const path = require('path');
 const {
   lastAssistantText, isAllowedTranscriptPath,
   parseTranscriptTurn, scanTurnsBackward, encodeCursor, decodeCursor, stripAnsi,
-  extractToolResults, pendingQuestion, shapeQuestions,
+  extractToolResults, pendingQuestion, shapeQuestions, claudeProjectDirName,
 } = require('../lib/transcript');
 
 // In-memory chunk reader for scanTurnsBackward (mirrors server.js's fs reader).
@@ -26,6 +26,29 @@ function writeTranscript(lines) {
 }
 const asst = (text) => ({ type: 'assistant', message: { role: 'assistant', content: [{ type: 'text', text }] } });
 const user = (text) => ({ type: 'user', message: { role: 'user', content: [{ type: 'text', text }] } });
+
+// #42: cwd -> Claude project-dir encoding. The ONE encoder both server.js and
+// pty-worker.js use to resolve a session's transcript. The old inline copies only
+// mapped '\'/'/', leaving '_'/'.'/space intact, so those cwds resolved to a
+// non-existent dir and Chat vanished. Ground truth taken from real dir names in
+// ~/.claude/projects.
+test.describe('lib/transcript.claudeProjectDirName', () => {
+  test('maps the reported bug case: C:\\dev\\Acme_Core -> C--dev-Acme-Core', () => {
+    // Was C--dev-Acme_Core under the old encoder (underscore kept) -> 404 -> no Chat.
+    expect(claudeProjectDirName('C:\\dev\\Acme_Core')).toBe('C--dev-Acme-Core');
+  });
+  test('replaces EVERY non-alphanumeric char (dot, space, underscore), case preserved, runs not collapsed', () => {
+    expect(claudeProjectDirName('C:\\dev\\web-terminal')).toBe('C--dev-web-terminal');
+    expect(claudeProjectDirName('C:\\dev\\am8\\.claude-tmp')).toBe('C--dev-am8--claude-tmp'); // '\.' -> '--'
+    expect(claudeProjectDirName('C:\\Users\\a b\\My.Proj')).toBe('C--Users-a-b-My-Proj');
+    expect(claudeProjectDirName('/home/user/App_v2')).toBe('-home-user-App-v2');
+  });
+  test('non-string / empty input -> empty string (never throws)', () => {
+    expect(claudeProjectDirName('')).toBe('');
+    expect(claudeProjectDirName(null)).toBe('');
+    expect(claudeProjectDirName(undefined)).toBe('');
+  });
+});
 
 test.describe('lib/transcript.lastAssistantText', () => {
   test('returns the newest assistant text turn', () => {

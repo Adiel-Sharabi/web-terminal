@@ -4,6 +4,7 @@ const fs = require('fs');
 const os = require('os');
 const path = require('path');
 const { BASE, AUTH, authCtx, noAuthCtx, loginPage, readHookToken } = require('./test-helpers');
+const { claudeProjectDirName } = require('../lib/transcript');
 
 const CLAUDE_NAMES_FILE = path.join(__dirname, '..', 'claude-session-names.json');
 function readClaudeNames() {
@@ -384,8 +385,8 @@ test.describe('Claude Session Name Persistence', () => {
     const claudeHome = require('path').join(__dirname, '..');
     // Pick a unique cwd so we fully control the Claude project dir.
     const uniqueCwd = require('fs').mkdtempSync(require('path').join(os.tmpdir(), 'wt21-'));
-    // Encode cwd to the Claude projects folder name (matches pty-worker logic).
-    const encodedCwd = uniqueCwd.replace(/^([A-Z]):\\/, '$1--').replace(/[\\/]/g, '-');
+    // Encode cwd to the Claude projects folder name (shared SSOT encoder).
+    const encodedCwd = claudeProjectDirName(uniqueCwd);
     // Use the same claude projects dir the server uses (detectClaudeHome defaults to USERPROFILE).
     const claudeProjectsDir = require('path').join(os.homedir(), '.claude', 'projects', encodedCwd);
     require('fs').mkdirSync(claudeProjectsDir, { recursive: true });
