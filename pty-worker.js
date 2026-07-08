@@ -815,8 +815,18 @@ function broadcastPtyOut(session, data) {
 }
 
 function correctStaleStatus(session) {
+  // #37 — a session running a build / background process / in-flight subagent
+  // produces continuous PTY output (build logs, Claude's elapsed-time spinner
+  // redraw) but fires NO Claude hook, so keying the stale-flip only on
+  // lastHookActivity wrongly marked it idle-green after 5 min while it was still
+  // busy. Require BOTH the hook clock AND the output clock (lastActivity, bumped
+  // on every PTY chunk in processPtyOutput) to be stale before flipping. This is
+  // self-bounding: a genuinely hung process emits nothing, so lastActivity also
+  // goes stale and the session still corrects to idle after the timeout.
+  const now = Date.now();
   if ((session.status === 'working' || session.status === 'waiting') &&
-      session.lastHookActivity && (Date.now() - session.lastHookActivity) > STALE_STATUS_TIMEOUT_MS) {
+      session.lastHookActivity && (now - session.lastHookActivity) > STALE_STATUS_TIMEOUT_MS &&
+      (now - (session.lastActivity || 0)) > STALE_STATUS_TIMEOUT_MS) {
     const prev = session.status;
     session.status = 'idle';
     log(`stale correction: "${session.name}" ${prev} → idle`);

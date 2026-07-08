@@ -185,6 +185,61 @@ test.describe('Stale session status detection', () => {
     expect(s.status).toBe('idle');
   });
 
+  test('#37: recent PTY output keeps a working session from stale-flip (build/bg process)', async () => {
+    // A build or background process produces continuous PTY output but fires no
+    // Claude hook. Age ONLY the hook clock (stale) while lastActivity stays
+    // fresh — the session must NOT be flipped to idle.
+    const hookRes = await ctx.post(`/api/session/${sessionId}/hook`, {
+      data: { event: 'UserPromptSubmit' },
+    });
+    expect((await hookRes.json()).status).toBe('working');
+
+    const ageRes = await ctx.post(`/api/test/age-session/${sessionId}`, {
+      data: { ageMinutes: 10, hookOnly: true },
+    });
+    expect(ageRes.ok()).toBeTruthy();
+
+    const res = await ctx.get('/api/sessions');
+    const s = (await res.json()).find(s => s.id === sessionId);
+    // Before the fix: correctStaleStatus keyed only on the hook clock → 'idle'.
+    // After: fresh lastActivity keeps it 'working'.
+    expect(s.status).toBe('working');
+  });
+
+  test('#37: a subagent-working session with fresh output stays working', async () => {
+    // SubagentStart sets working; a long subagent refreshes no parent hook, but
+    // the terminal keeps emitting output (spinner). Stale hook clock alone must
+    // not flip it.
+    const hookRes = await ctx.post(`/api/session/${sessionId}/hook`, {
+      data: { event: 'SubagentStart' },
+    });
+    expect((await hookRes.json()).status).toBe('working');
+
+    await ctx.post(`/api/test/age-session/${sessionId}`, {
+      data: { ageMinutes: 10, hookOnly: true },
+    });
+
+    const res = await ctx.get('/api/sessions');
+    const s = (await res.json()).find(s => s.id === sessionId);
+    expect(s.status).toBe('working');
+  });
+
+  test('#37: a truly silent session (both clocks stale) still self-corrects to idle', async () => {
+    // Self-bounding: no output AND no hook for >5 min → genuinely hung → idle.
+    const hookRes = await ctx.post(`/api/session/${sessionId}/hook`, {
+      data: { event: 'UserPromptSubmit' },
+    });
+    expect((await hookRes.json()).status).toBe('working');
+
+    await ctx.post(`/api/test/age-session/${sessionId}`, {
+      data: { ageMinutes: 10 }, // both clocks
+    });
+
+    const res = await ctx.get('/api/sessions');
+    const s = (await res.json()).find(s => s.id === sessionId);
+    expect(s.status).toBe('idle');
+  });
+
   test('cluster/sessions also reflects stale correction for local sessions', async () => {
     // Set to working then age
     const hookRes = await ctx.post(`/api/session/${sessionId}/hook`, {
