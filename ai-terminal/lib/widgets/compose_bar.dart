@@ -29,21 +29,45 @@ class _ArrowIntent extends Intent {
   final String seq;
 }
 
-/// Sends an arrow key to the terminal, but ONLY while the compose field is
-/// empty (you're driving Claude, not editing text). When it's disabled the key
-/// falls through to the field's normal caret/line navigation.
+class _TabIntent extends Intent {
+  const _TabIntent();
+}
+
+/// Sends an arrow key to the terminal when the compose field is empty (you're
+/// driving Claude, not editing text) OR while a live '/' line is streaming (so
+/// hardware ↑/↓ navigate Claude's slash menu even though the field has text).
+/// When disabled the key falls through to the field's normal caret/line nav.
 class _ArrowAction extends Action<_ArrowIntent> {
-  _ArrowAction(this.controller, this.onArrow);
+  _ArrowAction(this.controller, this.onArrow, this.isLive);
   final TextEditingController controller;
   final void Function(String seq)? onArrow;
+  final bool isLive;
 
   @override
   bool isEnabled(_ArrowIntent intent) =>
-      onArrow != null && controller.text.isEmpty;
+      onArrow != null && (controller.text.isEmpty || isLive);
 
   @override
   Object? invoke(_ArrowIntent intent) {
     onArrow?.call(intent.seq);
+    return null;
+  }
+}
+
+/// Sends Tab to the terminal ONLY while a live '/' line is streaming, so Tab
+/// autocompletes the highlighted slash command in Claude's menu. Disabled
+/// otherwise, so a normal Tab keeps its default focus-traversal behavior.
+class _TabAction extends Action<_TabIntent> {
+  _TabAction(this.onTab, this.isLive);
+  final VoidCallback? onTab;
+  final bool isLive;
+
+  @override
+  bool isEnabled(_TabIntent intent) => onTab != null && isLive;
+
+  @override
+  Object? invoke(_TabIntent intent) {
+    onTab?.call();
     return null;
   }
 }
@@ -58,6 +82,7 @@ class ComposeBar extends StatelessWidget {
     this.onPasteImage,
     this.onEscape,
     this.onArrow,
+    this.onTab,
   });
 
   final TextEditingController controller;
@@ -70,9 +95,14 @@ class ComposeBar extends StatelessWidget {
   /// Hardware Esc → send ESC to the terminal (always). `null` disables it.
   final VoidCallback? onEscape;
 
-  /// Hardware arrows → send the escape sequence to the terminal, but only when
-  /// the compose field is empty. `null` disables it.
+  /// Hardware arrows → send the escape sequence to the terminal, when the field
+  /// is empty or while a live '/' line is streaming (slash-menu nav). `null`
+  /// disables it.
   final void Function(String seq)? onArrow;
+
+  /// Hardware Tab → send Tab to the terminal, only while a live '/' line is
+  /// streaming (autocomplete the highlighted slash command). `null` disables it.
+  final VoidCallback? onTab;
 
   /// True while the buffer is a `/`-prefixed line streaming live to the
   /// terminal so Claude's own slash-command menu can render. Tints the
@@ -123,6 +153,8 @@ class ComposeBar extends StatelessWidget {
                     '\x1b[D',
                   ),
                 },
+                if (onTab != null)
+                  const SingleActivator(LogicalKeyboardKey.tab): _TabIntent(),
               },
               child: Actions(
                 actions: <Type, Action<Intent>>{
@@ -144,7 +176,8 @@ class ComposeBar extends StatelessWidget {
                       return null;
                     },
                   ),
-                  _ArrowIntent: _ArrowAction(controller, onArrow),
+                  _ArrowIntent: _ArrowAction(controller, onArrow, isLive),
+                  _TabIntent: _TabAction(onTab, isLive),
                 },
                 child: TextField(
                   controller: controller,

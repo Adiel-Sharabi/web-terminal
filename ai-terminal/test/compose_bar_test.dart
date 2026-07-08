@@ -204,4 +204,63 @@ void main() {
     await tester.pump();
     expect(seqs, ['\x1b[A']); // unchanged
   });
+
+  testWidgets('while live, arrows reach the terminal even with text (slash-menu nav)',
+      (tester) async {
+    final seqs = <String>[];
+    final controller = TextEditingController(text: '/comp');
+    final fn = FocusNode();
+    await tester.pumpWidget(
+      _wrap(
+        ComposeBar(
+          controller: controller,
+          focusNode: fn,
+          onSend: () {},
+          isLive: true, // a '/' line is streaming
+          onArrow: seqs.add,
+        ),
+      ),
+    );
+    fn.requestFocus();
+    await tester.pump();
+
+    // Text present but live → ↑/↓ navigate Claude's menu (reach the terminal).
+    await tester.sendKeyEvent(LogicalKeyboardKey.arrowDown);
+    await tester.pump();
+    await tester.sendKeyEvent(LogicalKeyboardKey.arrowUp);
+    await tester.pump();
+    expect(seqs, ['\x1b[B', '\x1b[A']);
+  });
+
+  testWidgets('Tab autocompletes only while live', (tester) async {
+    var tabs = 0;
+    final controller = TextEditingController(text: '/comp');
+    final fn = FocusNode();
+
+    Widget build(bool live) => _wrap(
+          ComposeBar(
+            controller: controller,
+            focusNode: fn,
+            onSend: () {},
+            isLive: live,
+            onTab: () => tabs++,
+          ),
+        );
+
+    // Not live → Tab does NOT autocomplete (falls through to focus traversal).
+    await tester.pumpWidget(build(false));
+    fn.requestFocus();
+    await tester.pump();
+    await tester.sendKeyEvent(LogicalKeyboardKey.tab);
+    await tester.pump();
+    expect(tabs, 0);
+
+    // Live → Tab fires onTab (autocomplete the highlighted command).
+    await tester.pumpWidget(build(true));
+    fn.requestFocus();
+    await tester.pump();
+    await tester.sendKeyEvent(LogicalKeyboardKey.tab);
+    await tester.pump();
+    expect(tabs, 1);
+  });
 }

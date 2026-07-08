@@ -1629,6 +1629,9 @@ class _SessionScreenState extends State<SessionScreen>
               // on-screen keys — ↑/↓ walk send-history, ←/→ move the caret.
               onEscape: () => _sendRawToTerminal('\x1b'),
               onArrow: _handleKeyStripKeyPress,
+              // Tab autocompletes the highlighted slash command — only while a
+              // live '/' line is streaming (ComposeBar gates it on isLive).
+              onTab: () => _sendRawToTerminal('\t'),
             ),
           // No viewInsets padding here: Scaffold's resizeToAvoidBottomInset
           // already shrinks the body for the keyboard — padding again doubles
