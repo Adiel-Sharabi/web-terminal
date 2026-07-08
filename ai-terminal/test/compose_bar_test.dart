@@ -263,4 +263,49 @@ void main() {
     await tester.pump();
     expect(tabs, 1);
   });
+
+  testWidgets('Backspace clears the terminal line only when live AND field empty',
+      (tester) async {
+    var backspaces = 0;
+    final controller = TextEditingController();
+    final fn = FocusNode();
+
+    Widget build(bool live) => _wrap(
+          ComposeBar(
+            controller: controller,
+            focusNode: fn,
+            onSend: () {},
+            isLive: live,
+            onBackspace: () => backspaces++,
+          ),
+        );
+
+    // Not live, empty → default backspace, no raw send.
+    await tester.pumpWidget(build(false));
+    fn.requestFocus();
+    await tester.pump();
+    await tester.sendKeyEvent(LogicalKeyboardKey.backspace);
+    await tester.pump();
+    expect(backspaces, 0);
+
+    // Live but field has text → the field edits normally (stream sends the DEL),
+    // so the raw forwarder does NOT fire.
+    controller.text = '/comp';
+    await tester.pumpWidget(build(true));
+    fn.requestFocus();
+    await tester.pump();
+    await tester.sendKeyEvent(LogicalKeyboardKey.backspace);
+    await tester.pump();
+    expect(backspaces, 0);
+
+    // Live AND field empty → forward a raw backspace to clear a Tab-completed
+    // leftover in Claude's input line.
+    controller.clear();
+    await tester.pumpWidget(build(true));
+    fn.requestFocus();
+    await tester.pump();
+    await tester.sendKeyEvent(LogicalKeyboardKey.backspace);
+    await tester.pump();
+    expect(backspaces, 1);
+  });
 }

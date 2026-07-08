@@ -1632,6 +1632,10 @@ class _SessionScreenState extends State<SessionScreen>
               // Tab autocompletes the highlighted slash command — only while a
               // live '/' line is streaming (ComposeBar gates it on isLive).
               onTab: () => _sendRawToTerminal('\t'),
+              // Backspace on an already-empty field during a live line clears
+              // the leftover of a Tab-completed command (which the field never
+              // tracked) straight from Claude's input line.
+              onBackspace: () => _sendRawToTerminal('\x7f'),
             ),
           // No viewInsets padding here: Scaffold's resizeToAvoidBottomInset
           // already shrinks the body for the keyboard — padding again doubles
