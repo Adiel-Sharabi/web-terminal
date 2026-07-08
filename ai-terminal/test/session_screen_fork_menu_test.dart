@@ -44,21 +44,20 @@ void main() {
     });
   });
 
-  group('slashStartsLiveStream (#28: "/" must not strand desktop chat)', () {
-    test('desktop: a "/"-line never goes live (stays a plain field char)', () {
-      expect(slashStartsLiveStream(text: '/', isDesktop: true), isFalse);
-      expect(slashStartsLiveStream(text: '/task', isDesktop: true), isFalse);
+  group('slashStartsLiveStream (Claude slash menu on every platform)', () {
+    // Now enabled on desktop too (was suppressed for #28's stranding, which the
+    // always-visible compose bar fixed) — a '/'-prefixed line streams to Claude's
+    // real menu, on any platform.
+    test('a "/"-prefixed line goes live', () {
+      expect(slashStartsLiveStream('/'), isTrue);
+      expect(slashStartsLiveStream('/compact'), isTrue);
+      expect(slashStartsLiveStream('/clear'), isTrue);
     });
 
-    test('mobile: a "/"-line goes live (Claude slash menu)', () {
-      expect(slashStartsLiveStream(text: '/', isDesktop: false), isTrue);
-      expect(slashStartsLiveStream(text: '/task', isDesktop: false), isTrue);
-    });
-
-    test('a non-slash line never goes live, on any platform', () {
-      expect(slashStartsLiveStream(text: 'hello', isDesktop: false), isFalse);
-      expect(slashStartsLiveStream(text: 'a/b', isDesktop: false), isFalse);
-      expect(slashStartsLiveStream(text: '', isDesktop: false), isFalse);
+    test('a non-slash line never goes live', () {
+      expect(slashStartsLiveStream('hello'), isFalse);
+      expect(slashStartsLiveStream('a/b'), isFalse);
+      expect(slashStartsLiveStream(''), isFalse);
     });
   });
 

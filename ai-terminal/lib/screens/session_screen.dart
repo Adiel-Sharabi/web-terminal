@@ -74,14 +74,15 @@ bool isDesktopPlatform() =>
     !kIsWeb && (Platform.isWindows || Platform.isMacOS || Platform.isLinux);
 
 /// Whether a compose buffer that just became '/'-prefixed should switch to the
-/// live slash-stream (mirroring Claude's slash menu in the terminal). It's a
-/// touch-first affordance: on desktop it flipped to the Terminal lens and —
-/// with raw mode defaulting on — hid the compose bar, stranding the user with
-/// nowhere to type (#28). On desktop '/' is therefore an ordinary character;
-/// the line is sent as plain text on Enter and Claude runs the slash command
-/// the same way. Pure so the gate is testable.
-bool slashStartsLiveStream({required String text, required bool isDesktop}) =>
-    text.startsWith('/') && !isDesktop;
+/// live slash-stream (mirroring Claude's own slash menu, which renders + narrows
+/// in the terminal as you type). Enabled on EVERY platform: it's the real menu
+/// (SSOT — no hardcoded command list), same as the web app and mobile. It was
+/// once suppressed on desktop because flipping to the Terminal lens hid the
+/// compose bar and stranded the user (#28); the compose bar is now always shown,
+/// so that reason is gone and desktop gets the same live autocomplete — the caller
+/// records the prior lens and restores it once the command is sent. Pure so the
+/// gate is testable.
+bool slashStartsLiveStream(String text) => text.startsWith('/');
 
 /// Where an Alt+V clipboard-image paste should land: the chat compose field
 /// (when the Chat lens is active — the terminal is offstage there — or the
@@ -179,6 +180,7 @@ class _SessionScreenState extends State<SessionScreen>
   bool _composeLive = false; // true while a '/'-prefixed line is streaming live
   String _composeLiveSent =
       ''; // chars already streamed to the terminal for the live line
+  String? _lensBeforeLive; // lens to restore to once a live '/' command is sent
   bool _historyActive =
       false; // true while walking send-history (further ↑/↓ keep walking)
   int _historyIndex = 0;
@@ -772,23 +774,26 @@ class _SessionScreenState extends State<SessionScreen>
         return;
       }
       _historyActive = false;
-      // A buffer starting with '/' goes live (mobile): stream it to the
-      // terminal so Claude's slash-command menu renders and narrows as you
-      // type. On desktop this is suppressed — it hid the compose bar and
-      // stranded the user (#28); there '/' is a plain character sent on Enter.
-      if (!_composeLive &&
-          slashStartsLiveStream(text: text, isDesktop: isDesktopPlatform())) {
+      // A buffer starting with '/' goes live (every platform): stream it to the
+      // terminal so Claude's own slash-command menu renders and narrows as you
+      // type. The menu lives in the terminal, so switch there to show it —
+      // remembering the prior lens so we can hop back once the command is sent.
+      if (!_composeLive && slashStartsLiveStream(text)) {
         _composeLive = true;
         _composeLiveSent = '';
-        // The live menu renders in the terminal — useless if the Chat lens
-        // is hiding it. Switch so the user can actually see it narrow.
-        if (_activeLens == 'chat') _activeLens = 'terminal';
+        if (_activeLens != 'terminal') {
+          _lensBeforeLive = _activeLens;
+          _activeLens = 'terminal';
+        }
       }
       if (_composeLive) {
         _streamComposeLive(text);
         if (text.isEmpty) {
+          // Deleted the whole line before sending — leave live mode and hop
+          // back to wherever we came from.
           _composeLive = false;
           _composeLiveSent = '';
+          _restoreLensAfterLive();
         }
       }
     }
@@ -893,7 +898,19 @@ class _SessionScreenState extends State<SessionScreen>
     _composeLiveSent = '';
     _historyActive = false;
     _composeController.clear();
+    _restoreLensAfterLive();
     unawaited(_saveDraft());
+  }
+
+  /// After a live '/' command ends (sent or deleted), hop back to the lens the
+  /// user was on when they started typing it — so running /compact from Chat
+  /// returns to Chat, not the terminal the menu rendered in. No-op for lines
+  /// that never went live (a normal chat send leaves _lensBeforeLive null).
+  void _restoreLensAfterLive() {
+    if (_lensBeforeLive != null) {
+      _activeLens = _lensBeforeLive!;
+      _lensBeforeLive = null;
+    }
   }
 
   /// Walks send history: first press (from empty, or continuing a walk)
