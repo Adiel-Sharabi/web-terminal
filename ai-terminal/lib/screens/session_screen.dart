@@ -52,32 +52,20 @@ const int _kMaxHistory = 50;
 /// without pumping the whole screen.
 bool canForkFromMenu(Session session) => session.claudeSessionId != null;
 
-/// Whether the compose (text input) bar should be shown.
+/// The compose (text input) bar is ALWAYS shown. It sends straight to the PTY in
+/// the Terminal lens and to Claude in the Chat lens, so it is the one input path
+/// that works in every state — touch (where typing into the xterm view has no
+/// IME/soft-keyboard) and desktop alike, with or without Chat, connected or not.
 ///
-/// On TOUCH (mobile) the compose bar is ALWAYS shown: it's the only usable text
-/// input, because typing directly into the xterm view has no IME/soft-keyboard
-/// (see the library doc). Raw mode's whole point — "hide the bar, type straight
-/// into the terminal" — only makes sense with a hardware keyboard, i.e. on
-/// desktop. So raw mode hides the bar ONLY on desktop. Hiding it on touch left
-/// sessions with no way to type at all (compose gone AND the raw terminal line
-/// blocked) — the bug this guards.
-///
-/// On DESKTOP the bar is shown in compose mode (not raw); whenever the Chat lens
-/// is active (the terminal is offstage there — issue #12); and whenever the Chat
-/// lens is UNAVAILABLE (force-pinned to Terminal, so a persisted raw mode would
-/// otherwise leave no input and no Chat to fall back to — #43). It is hidden only
-/// when a desktop user is deliberately in raw mode on the Terminal lens with Chat
-/// reachable — there the hardware keyboard drives the terminal directly.
-///
-/// The compose bar sends straight to the PTY in the Terminal lens, so keeping it
-/// visible IS the direct-terminal input path. Pure function so the rule is
-/// testable without pumping the whole screen.
-bool composeBarVisible({
-  required bool rawMode,
-  required String activeLens,
-  required bool chatAvailable,
-  required bool isDesktop,
-}) => !isDesktop || activeLens == 'chat' || !rawMode || !chatAvailable;
+/// Earlier versions hid it in raw mode so the user could type directly into the
+/// terminal, gated on lens/chat/platform. Every such rule left some real session
+/// stranded with no usable input (compose gone AND the terminal line
+/// read-only/unfocused) — reported repeatedly (#43). Raw mode now controls ONLY
+/// whether the TERMINAL additionally accepts direct keystrokes
+/// (readOnly/hardwareKeyboardOnly on the TerminalView), never whether an input
+/// exists at all. Kept as a named predicate so the "always an input" invariant
+/// has one enforceable home.
+bool composeBarVisible() => true;
 
 /// True on desktop platforms (a real hardware keyboard). One definition so the
 /// raw-mode default, the '/' live-stream gate (#28), and image-paste routing
@@ -951,14 +939,7 @@ class _SessionScreenState extends State<SessionScreen>
   /// straight through so they can navigate Claude's live slash menu.
   void _handleKeyStripKeyPress(String sequence) {
     final composeActive =
-        composeBarVisible(
-          rawMode: _rawMode,
-          activeLens: _activeLens,
-          chatAvailable: _chatAvailable,
-          isDesktop: isDesktopPlatform(),
-        ) &&
-        _composeFocusNode.hasFocus &&
-        !_composeLive;
+        composeBarVisible() && _composeFocusNode.hasFocus && !_composeLive;
     if (composeActive) {
       if (sequence == '\x1b[A' || sequence == '\x1b[B') {
         final dir = sequence == '\x1b[A' ? -1 : 1;
@@ -1619,12 +1600,7 @@ class _SessionScreenState extends State<SessionScreen>
               ],
             ),
           ),
-          if (composeBarVisible(
-            rawMode: _rawMode,
-            activeLens: _activeLens,
-            chatAvailable: _chatAvailable,
-            isDesktop: isDesktopPlatform(),
-          ))
+          if (composeBarVisible())
             ComposeBar(
               controller: _composeController,
               focusNode: _composeFocusNode,
