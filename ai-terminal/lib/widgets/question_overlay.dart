@@ -39,7 +39,9 @@ class AnswerFrame {
 ///
 /// Verified against Claude's TUI:
 /// - single-select: the digit selects AND submits, advancing to the next tab.
-/// - multi-select: each digit toggles its row; a trailing `Enter` confirms.
+/// - multi-select (single question): each digit toggles its row; Enter does NOT
+///   submit (it toggles the highlighted row), so we send Right-arrow to jump to
+///   the "Submit" review then digit "1" ("Submit answers") to finalize (#39).
 /// - multi-question: after every tab is answered a Submit review appears whose
 ///   default is "Submit answers", so a trailing `Enter` finalizes it.
 /// - free-text ("Other"), SINGLE-SELECT single question only: Claude's selector
@@ -91,7 +93,21 @@ List<AnswerFrame> buildAnswerFrames(
       for (final i in rows) {
         frames.add(AnswerFrame('${i + 1}', settle)); // toggle row i
       }
-      frames.add(const AnswerFrame('\r', gap)); // confirm this tab
+      if (multiQuestion) {
+        // Multi-select tab inside a multi-question prompt: a trailing Enter
+        // advances to the next tab (the final Submit-review Enter is added
+        // once, after the loop). Unchanged; multi-question+multi-select is not
+        // what #39 covers.
+        frames.add(const AnswerFrame('\r', gap));
+      } else {
+        // #39 — single multi-select question. Enter here does NOT submit: it
+        // TOGGLES the highlighted row and stays in the selector, so the answer
+        // never took. Verified on-device (2026-07-08): after toggling the
+        // rows, Right-arrow jumps to the "Submit" review screen (header shows
+        // "Submit →"), and digit "1" ("Submit answers", the default) finalizes.
+        frames.add(const AnswerFrame('\x1b[C', gap)); // → jump to Submit review
+        frames.add(const AnswerFrame('1', gap)); // "Submit answers"
+      }
     } else {
       final idx = sel.isEmpty ? 0 : sel.first;
       frames.add(AnswerFrame('${idx + 1}', gap)); // select + submit/advance
@@ -103,12 +119,13 @@ List<AnswerFrame> buildAnswerFrames(
   return frames;
 }
 
-/// True when [frames] end in a confirming Enter — i.e. multi-select (digits
-/// toggle, Enter confirms) or multi-question (Enter finalizes the Submit-review
-/// screen). Single-select-single ends in its own auto-submitting digit and
-/// needs no confirm. The caller uses this to decide whether to verify the Enter
-/// actually landed (it can be coalesced away by cluster-path bunching) and
-/// re-send it.
+/// True when [frames] end in a confirming Enter — i.e. multi-question (Enter
+/// finalizes the Submit-review screen). Single-select-single ends in its own
+/// auto-submitting digit, and single multi-select now ends in digit "1"
+/// ("Submit answers") after a Right-arrow (#39) — both auto-submit, so neither
+/// needs a re-sent Enter (and for multi-select a stray Enter would toggle a
+/// row). The caller uses this to decide whether to verify the Enter actually
+/// landed (it can be coalesced away by cluster-path bunching) and re-send it.
 bool answerNeedsConfirm(List<AnswerFrame> frames) =>
     frames.isNotEmpty && frames.last.keys == '\r';
 

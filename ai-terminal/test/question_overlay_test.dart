@@ -36,12 +36,29 @@ void main() {
       ])), ['3']);
     });
 
-    test('multi-select: a digit per selected row (toggle) then Enter', () {
+    test('multi-select (single question): toggle digits, Right-arrow, "1" (#39)',
+        () {
       final qs = [_q(['A', 'B', 'C'], multi: true)];
-      // select A and C -> toggle 1, toggle 3, confirm
+      // Verified on-device: select A and C -> toggle 1, toggle 3; then Enter
+      // would only TOGGLE the highlighted row (never submits), so Right-arrow
+      // jumps to the "Submit" review and digit "1" ("Submit answers") finalizes.
       expect(_keys(buildAnswerFrames(qs, [
         {0, 2}
-      ])), ['1', '3', '\r']);
+      ])), ['1', '3', '\x1b[C', '1']);
+    });
+
+    test('multi-select toggle+submit frames land in separate PTY reads (#39)',
+        () {
+      // The toggles may coalesce safely (settle), but the Right-arrow and the
+      // "1" must each be read separately (a coalesced Right+1 would misfire).
+      final frames = buildAnswerFrames([_q(['A', 'B', 'C'], multi: true)], [
+        {0, 2}
+      ]);
+      // last two frames = Right-arrow, then "1"
+      expect(frames[frames.length - 2].keys, '\x1b[C');
+      expect(frames.last.keys, '1');
+      expect(frames[frames.length - 2].delayMs, greaterThanOrEqualTo(500));
+      expect(frames.last.delayMs, greaterThanOrEqualTo(500));
     });
 
     test('multiple questions: a digit per tab, then a final Submit Enter', () {
@@ -99,7 +116,7 @@ void main() {
         _keys(buildAnswerFrames(qs, [
           {0, 2}
         ], otherText: const ['custom'])),
-        ['1', '3', '\r'],
+        ['1', '3', '\x1b[C', '1'],
       );
     });
 
@@ -172,11 +189,15 @@ void main() {
       expect(answerNeedsConfirm(frames), isFalse);
     });
 
-    test('multi-select needs a confirm (trailing Enter)', () {
+    test('multi-select (single question) needs no confirm — ends in digit "1"',
+        () {
+      // #39: the sequence now ends in "1" ("Submit answers"), which auto-submits
+      // like a single-select digit. A re-sent Enter would toggle a row, so this
+      // must NOT trigger the confirm re-send.
       final frames = buildAnswerFrames([_q(['A', 'B', 'C'], multi: true)], [
         {0, 2}
       ]);
-      expect(answerNeedsConfirm(frames), isTrue);
+      expect(answerNeedsConfirm(frames), isFalse);
     });
 
     test('multi-question needs a confirm (Submit-review Enter)', () {
