@@ -81,7 +81,7 @@ Interconnected code means one fix ripples into new breakage. Contain it:
 - **Match the surrounding code.** New code reads like the code around it — same naming, idioms, comment density, error handling. Consistency > personal preference.
 - **Smallest diff that fully solves the problem.** Resist scope creep. If you notice unrelated issues, note them separately; don't fold them in.
 - **No speculative abstraction.** Don't build for imagined future needs. Solve today's problem cleanly; abstract on the *second* real use, not the first guess.
-- **No dead code, no commented-out blocks, no TODO-as-implementation.** Delete it or do it.
+- **No dead code, no commented-out blocks, no placeholder stubs left as implementation.** Delete it or finish it (track deferred work in the issue tracker, not in the source).
 - **Reversibility check.** For anything hard to undo or outward-facing (deletes, migrations, external calls, force-pushes), confirm before acting. Approval for one action does not extend to the next.
 
 ---
