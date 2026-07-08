@@ -9,6 +9,7 @@ const os = require('os');
 const path = require('path');
 const { randomUUID } = require('crypto');
 const { BASE, authCtx, noAuthCtx, readHookToken } = require('./test-helpers');
+const { claudeProjectDirName } = require('../lib/transcript');
 
 // safeTranscriptPath() only trusts a .jsonl strictly under the realpath'd Claude
 // projects root (<claudeHome>/.claude/projects). Mirror server.js detectClaudeHome()
@@ -91,6 +92,43 @@ test.describe('Session transcript (G5)', () => {
       expect(res.headers()['cache-control']).toBe('no-store');
     } finally {
       await ctx.delete(`/api/sessions/${id}`);
+      await ctx.dispose();
+    }
+  });
+
+  // #42: a session whose cwd carries a special char ('_'/'.'/space) must still
+  // resolve its transcript via deriveTranscriptPath. The old inline encoder only
+  // mapped '\'/'/', so an underscore cwd resolved to a non-existent project dir
+  // -> 404 -> Chat lens hidden. With the shared claudeProjectDirName encoder the
+  // derive path finds <projects>/<encoded>/<csid>.jsonl. Fails before, passes after.
+  test('#42: derives the transcript for an underscore cwd (special chars in project dir)', async () => {
+    const ctx = await authCtx();
+    const csid = randomUUID();
+    // Real, existing cwd containing an underscore (so old vs new encoders diverge).
+    const parent = fs.mkdtempSync(path.join(os.tmpdir(), 'wt42-'));
+    const cwd = path.join(parent, 'AM8_Core'); // underscore is the discriminator
+    fs.mkdirSync(cwd, { recursive: true });
+    // Stash the transcript at the CORRECTLY-encoded project dir under the trusted root.
+    const projDir = path.join(claudeProjectsRoot(), claudeProjectDirName(cwd));
+    fs.mkdirSync(projDir, { recursive: true });
+    const jsonl = path.join(projDir, csid + '.jsonl');
+    fs.writeFileSync(jsonl,
+      JSON.stringify({ type: 'user', message: { role: 'user', content: [{ type: 'text', text: 'hello 42' }] } }) + '\n' +
+      JSON.stringify({ type: 'assistant', message: { role: 'assistant', content: [{ type: 'text', text: 'answer 42' }] } }) + '\n',
+      'utf8');
+    // Session whose worker adopts claudeSessionId=csid from the --resume flag.
+    const id = (await (await ctx.post('/api/sessions', {
+      data: { name: 'Tr Underscore', cwd, autoCommand: `claude --resume ${csid}` },
+    })).json()).id;
+    try {
+      const res = await ctx.get(`/api/sessions/${id}/transcript`);
+      expect(res.status()).toBe(200); // was 404 with the lossy encoder
+      const body = await res.json();
+      expect(body.messages.map(m => m.text)).toEqual(['hello 42', 'answer 42']);
+    } finally {
+      await ctx.delete(`/api/sessions/${id}`);
+      try { fs.rmSync(projDir, { recursive: true, force: true }); } catch {}
+      try { fs.rmSync(parent, { recursive: true, force: true }); } catch {}
       await ctx.dispose();
     }
   });
