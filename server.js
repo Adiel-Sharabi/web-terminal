@@ -16,7 +16,7 @@ const agentsLib = require('./lib/agents');
 const { getAdapter } = agentsLib;
 const fcm = require('./lib/fcm');
 
-const SERVER_VERSION = '1.31.0'; // 2026-07-09: multi-agent support — a session now knows WHICH AI CLI agent it runs (Claude Code or Codex), and everything agent-specific lives behind ONE provider registry (lib/agents.js): per-agent transcript parser, transcript root, transcript-resolution strategy, subagent-trace capability, label + colour. Adding another CLI agent = one parser module + one registry entry; no branching in server.js / pty-worker.js / the clients. New `agent` field on sessions (persisted in sessions.json; null = plain shell, never coerced to 'claude'), accepted at POST /api/sessions (unknown value → 400) and returned on /api/sessions, /api/cluster/sessions and the transcript response. New GET /api/agents serves the catalogue so the web + companion pickers and per-agent tint need no client release when an agent is added. Codex support: lib/transcript-codex.js parses its rollout JSONL (~/.codex/sessions/YYYY/MM/DD/rollout-<iso>-<uuid>.jsonl) into the SAME typed turn shape — its tool calls are one line each (not blocks in an assistant message), `function_call.arguments` is a JSON *string*, `function_call_output.output` a plain string, and `custom_tool_call_output.output` a JSON envelope {output,metadata} that is unwrapped; event_msg lines are skipped (they restate response_item text and would double every turn). lib/codex-sessions.js resolves a rollout by cwd — Codex keys rollouts by date+uuid, never by cwd, so it reads each candidate's session_meta head line, newest-first, bounded to 200 files (win32 compare ignores case, separator and the \\?\ prefix). scanTurnsBackward gained injectable opts.parseLine/opts.extractResults (defaulting to the Claude parsers, so every existing caller is untouched) — one paginator, one cursor codec, one set of size caps across agents. safeTranscriptPath now admits a .jsonl strictly inside ANY provider's root (roots derived from the registry), applying the identical containment predicate per root — it widens WHICH files may be read, never HOW the check is made. An EXPLICIT agent is authoritative: a session declared 'claude' is never served a Codex transcript; only a session with no recorded agent (plain shell) gets cross-provider discovery. pty-worker's `/\bclaude\b/` command grep is gone — the agent id is now the SSOT for "is this a Claude session", so the #23 own-conversation-id gate runs only for real Claude sessions. WORKER code changed → needs a COLD restart (a hot server-only reload leaves the old worker without the `agent` field). Prior 1.30.0: chat-mode subagent trace — GET /api/sessions/:id/transcript now stamps each Task tool_use with a { agentType, description, running } subagent stub (present when a subagents/agent-*.meta.json links that tool_use id), and a NEW GET /api/sessions/:id/subagent/:toolUseId lazily pages that subagent's OWN transcript (reusing scanTurnsBackward — the sidechain .jsonl shares the main turn shape, so ONE parser). Lets the companion Chat view drill into a running subagent's nested tool calls, mirroring the terminal's arrow-navigable subagent panel. `running` = subagent exists but its Task has no tool_result yet. Additive + backward-compatible (older app ignores the stub; new app vs old server falls back to the flat Task card). Prior 1.29.6: #42 — Chat lens now resolves the transcript for cwds with special chars ('_'/'.'/space). The cwd→Claude-project-dir encoder was duplicated in 3 places (server deriveTranscriptPath + server detectClaudeSessionIdFromDir + pty-worker) and lossy — it only mapped '\'/'/', leaving '_'/'.'/space intact, so e.g. C:\dev\AM8_Core resolved to a non-existent C--dev-AM8_Core dir (Claude actually uses C--dev-AM8-Core) → /transcript 404 → Chat hidden. One SSOT encoder now lives in lib/transcript.js (claudeProjectDirName: replace EVERY non-alphanumeric char with '-', case preserved, verified vs ~/.claude/projects); server + pty-worker both call it, and the dead server-side detectClaudeSessionIdFromDir copy was removed. server.js hot-reloadable; the pty-worker leg needs a cold restart. Prior 1.29.5: #37b — the "finished/idle" push (notify level 'all') no longer fires while a background build / in-flight subagent is still emitting output. The idle debounce now re-checks the worker's output clock (lastActivity via getSession) when it fires: if output landed within the window the session isn't finished, so it re-arms and waits for a genuine quiet period before pushing "Claude is done" (a non-idle statusChanged still cancels). Same output-clock signal #37 gave correctStaleStatus — SSOT. server.js-only → hot-reload. Prior 1.29.4: #38 — Claude context-window % now shows on each session tab/list row (web sidebar + companion list), not only inside the session. Both list endpoints already attach per-session `metrics` (getStatusMetrics); the web sidebar (new ctxBadge helper → .sb-ctx) and the companion SessionCard now render metrics.ctx as a small badge, colored by shared warn-50/danger-70 thresholds (companion ctxColor SSOT in lib/widgets/format_utils.dart, reused by the in-session _MetricsHeader). No server logic changed — asset/version bump only. Prior 1.29.3: #37 — a session running a build / background process / in-flight subagent no longer flips to idle-green while still busy. correctStaleStatus (pty-worker.js) now requires BOTH the hook clock (lastHookActivity) AND the output clock (lastActivity, bumped on every PTY chunk) to be stale past the 5-min timeout before force-flipping working/waiting → idle: a busy session emits continuous output (build logs / Claude's spinner redraw) so it stays non-idle, while a genuinely silent hang still self-corrects (both clocks go stale). Test endpoint /api/test/age-session gains hookOnly/activityOnly to age each clock independently. WORKER code → needs a cold restart to take effect. Prior 1.29.2: #41 — desktop sidebar resize handle fixed + made discoverable. `--sb-width` is now the SINGLE source of truth for width: drag sets the custom property (was inline `style.width`, a separate path from restore-on-load's `--sb-width`); pointerup removes any lingering inline width so toggling the sidebar closed after a resize collapses correctly (was stuck at the dragged width). Handle moved inside the panel (`right:0`, no longer clipped by `overflow:hidden`) + a persistent grip pill (::before, hover/active states) — desktop only; doResize still re-fits the terminal; width clamped 160–600px. app.html-only (served asset → version bump). Prior 1.29.1: #23 (regression) — a NEW claude session in a folder that already holds older conversations no longer adopts one of them. pty-worker's cwd-newest-.jsonl detection (sessionSummary / onExit / 15s timer) now gates on the session's start time via ownClaudeSessionId(): a .jsonl is only attributed to a session if it was written at/after that session started, so a fresh session starts clean (was: mislabeled with the previous conversation's id → auto-opened the Chat lens on the old transcript). Explicit --resume <id> still honored; rename's newest-on-disk name-tracking unchanged. WORKER code → needs a cold restart to take effect. Prior 1.29.0: rich transcript tool data — GET /api/sessions/:id/transcript now includes, per tool_use, its `id`, a per-field-capped structured `input`, and the paired tool_result `result` (output). lib/transcript.js pairs results→tool_uses by id during the backward scan and exposes extractToolResults; the app renders shells (Bash cmd+output), subagents (Task desc/report), and file ops as rich cards. Backward-compatible (name/inputPreview unchanged). Prior 1.28.2: attention-clear now fires on session OPEN — the web app (app.html switchSession) calls POST /api/sessions/:id/attention/clear when foregrounding a session that has a live alert, so opening it in the browser dismisses the phone push (was mobile-only). Web also handles inbound 'clear' notify frames (drops the chip / closes the browser toast) — previously a 'clear' frame fell through to showNotification and could pop an "undefined" toast. Mobile companion (#2): opening a session now cancels its OS notification locally (NotificationService.cancelForSession) instead of relying on a dead FCM 'clear' round-trip that never fires while the app is foreground; a foreground 'clear' push is also routed to cancel. Prior 1.28.1: #25 — idle/'finished' FCM pushes are now high-priority so an 'all'-level session's finish notification wakes the phone through Android Doze (was normal-priority → deferred/dropped). Prior 1.28.0: #21 — session takeover relaxed: multiple devices now SHARE one PTY (shared I/O) by default instead of the second viewer force-disconnecting the first. Opt back into the old single-owner kick with config `exclusiveViewer: true`. Prior 1.27.0: #24 — POST /api/sessions/:id/attention/clear clears a session's attention across devices (flips recorded attention, FCM 'clear' to dismiss phone toasts, broadcasts a 'clear' notify frame so in-app viewers drop the chip); capability 'attention-clear'. Prior 1.26.1: (a) #23 fix — restore no longer appends implicit `--continue` to an unknown-id claude session (that resumed the most-recent conversation in the cwd, so a new session came up "Resumed" to the last one). Unknown-id restore now starts fresh; `--resume <own-id>` and explicit user --continue/--resume still honored (lib/restore-command.js). (b) /api/cluster/sessions cache (1500ms) is now invalidated on session create/delete/rename/reorder, so a just-created session shows in the sidebar immediately instead of after the TTL
+const SERVER_VERSION = '1.32.0'; // 2026-07-10: Codex sessions get a Chat lens + usage badges. (a) Usage metrics for agents that RECORD their own usage: Claude PUSHES its status line to POST /api/claude-status, but Codex writes the same numbers into its rollout every turn, so a provider may now expose readMetrics(tailText) (lib/agents.js) and server.js fills the SAME `metrics: {ctx, fiveH, sevenD, model, effort}` shape from the transcript instead — which is why no client change was needed to render a Codex ctx badge. lib/metrics-codex.js is the pure parser. ctx% = last_token_usage.input_tokens / model_context_window; `total_token_usage.total_tokens` is the session's CUMULATIVE spend (millions on a long session) and would report thousands of percent, and `cached_input_tokens` is a SUBSET of input_tokens, not an addition. The 5h/7d windows are matched by window_minutes (300 / 10080), never by primary/secondary ORDER. The read is memoised on (size, mtime) so sidebar polling costs one stat, and a session whose transcript cannot be resolved is negative-cached for 60s so a Codex derivation never re-walks the rollouts tree per poll; a plain shell (agent null -> the default provider, which has no readMetrics) never touches the disk at all. Because turn_context (the model/effort labels) is written once per USER turn, a single long agent turn pushes it outside the tail, so the HEAD is read too and head+tail are scanned backward: the newest token_count still wins. (b) The web ctx tooltip is now agent-neutral. server.js-only + app.html -> HOT RELOAD (the worker is untouched). Prior 1.31.0: multi-agent support — a session now knows WHICH AI CLI agent it runs (Claude Code or Codex), and everything agent-specific lives behind ONE provider registry (lib/agents.js): per-agent transcript parser, transcript root, transcript-resolution strategy, subagent-trace capability, label + colour. Adding another CLI agent = one parser module + one registry entry; no branching in server.js / pty-worker.js / the clients. New `agent` field on sessions (persisted in sessions.json; null = plain shell, never coerced to 'claude'), accepted at POST /api/sessions (unknown value → 400) and returned on /api/sessions, /api/cluster/sessions and the transcript response. New GET /api/agents serves the catalogue so the web + companion pickers and per-agent tint need no client release when an agent is added. Codex support: lib/transcript-codex.js parses its rollout JSONL (~/.codex/sessions/YYYY/MM/DD/rollout-<iso>-<uuid>.jsonl) into the SAME typed turn shape — its tool calls are one line each (not blocks in an assistant message), `function_call.arguments` is a JSON *string*, `function_call_output.output` a plain string, and `custom_tool_call_output.output` a JSON envelope {output,metadata} that is unwrapped; event_msg lines are skipped (they restate response_item text and would double every turn). lib/codex-sessions.js resolves a rollout by cwd — Codex keys rollouts by date+uuid, never by cwd, so it reads each candidate's session_meta head line, newest-first, bounded to 200 files (win32 compare ignores case, separator and the \\?\ prefix). scanTurnsBackward gained injectable opts.parseLine/opts.extractResults (defaulting to the Claude parsers, so every existing caller is untouched) — one paginator, one cursor codec, one set of size caps across agents. safeTranscriptPath now admits a .jsonl strictly inside ANY provider's root (roots derived from the registry), applying the identical containment predicate per root — it widens WHICH files may be read, never HOW the check is made. An EXPLICIT agent is authoritative: a session declared 'claude' is never served a Codex transcript; only a session with no recorded agent (plain shell) gets cross-provider discovery. pty-worker's `/\bclaude\b/` command grep is gone — the agent id is now the SSOT for "is this a Claude session", so the #23 own-conversation-id gate runs only for real Claude sessions. WORKER code changed → needs a COLD restart (a hot server-only reload leaves the old worker without the `agent` field). Prior 1.30.0: chat-mode subagent trace — GET /api/sessions/:id/transcript now stamps each Task tool_use with a { agentType, description, running } subagent stub (present when a subagents/agent-*.meta.json links that tool_use id), and a NEW GET /api/sessions/:id/subagent/:toolUseId lazily pages that subagent's OWN transcript (reusing scanTurnsBackward — the sidechain .jsonl shares the main turn shape, so ONE parser). Lets the companion Chat view drill into a running subagent's nested tool calls, mirroring the terminal's arrow-navigable subagent panel. `running` = subagent exists but its Task has no tool_result yet. Additive + backward-compatible (older app ignores the stub; new app vs old server falls back to the flat Task card). Prior 1.29.6: #42 — Chat lens now resolves the transcript for cwds with special chars ('_'/'.'/space). The cwd→Claude-project-dir encoder was duplicated in 3 places (server deriveTranscriptPath + server detectClaudeSessionIdFromDir + pty-worker) and lossy — it only mapped '\'/'/', leaving '_'/'.'/space intact, so e.g. C:\dev\AM8_Core resolved to a non-existent C--dev-AM8_Core dir (Claude actually uses C--dev-AM8-Core) → /transcript 404 → Chat hidden. One SSOT encoder now lives in lib/transcript.js (claudeProjectDirName: replace EVERY non-alphanumeric char with '-', case preserved, verified vs ~/.claude/projects); server + pty-worker both call it, and the dead server-side detectClaudeSessionIdFromDir copy was removed. server.js hot-reloadable; the pty-worker leg needs a cold restart. Prior 1.29.5: #37b — the "finished/idle" push (notify level 'all') no longer fires while a background build / in-flight subagent is still emitting output. The idle debounce now re-checks the worker's output clock (lastActivity via getSession) when it fires: if output landed within the window the session isn't finished, so it re-arms and waits for a genuine quiet period before pushing "Claude is done" (a non-idle statusChanged still cancels). Same output-clock signal #37 gave correctStaleStatus — SSOT. server.js-only → hot-reload. Prior 1.29.4: #38 — Claude context-window % now shows on each session tab/list row (web sidebar + companion list), not only inside the session. Both list endpoints already attach per-session `metrics` (getStatusMetrics); the web sidebar (new ctxBadge helper → .sb-ctx) and the companion SessionCard now render metrics.ctx as a small badge, colored by shared warn-50/danger-70 thresholds (companion ctxColor SSOT in lib/widgets/format_utils.dart, reused by the in-session _MetricsHeader). No server logic changed — asset/version bump only. Prior 1.29.3: #37 — a session running a build / background process / in-flight subagent no longer flips to idle-green while still busy. correctStaleStatus (pty-worker.js) now requires BOTH the hook clock (lastHookActivity) AND the output clock (lastActivity, bumped on every PTY chunk) to be stale past the 5-min timeout before force-flipping working/waiting → idle: a busy session emits continuous output (build logs / Claude's spinner redraw) so it stays non-idle, while a genuinely silent hang still self-corrects (both clocks go stale). Test endpoint /api/test/age-session gains hookOnly/activityOnly to age each clock independently. WORKER code → needs a cold restart to take effect. Prior 1.29.2: #41 — desktop sidebar resize handle fixed + made discoverable. `--sb-width` is now the SINGLE source of truth for width: drag sets the custom property (was inline `style.width`, a separate path from restore-on-load's `--sb-width`); pointerup removes any lingering inline width so toggling the sidebar closed after a resize collapses correctly (was stuck at the dragged width). Handle moved inside the panel (`right:0`, no longer clipped by `overflow:hidden`) + a persistent grip pill (::before, hover/active states) — desktop only; doResize still re-fits the terminal; width clamped 160–600px. app.html-only (served asset → version bump). Prior 1.29.1: #23 (regression) — a NEW claude session in a folder that already holds older conversations no longer adopts one of them. pty-worker's cwd-newest-.jsonl detection (sessionSummary / onExit / 15s timer) now gates on the session's start time via ownClaudeSessionId(): a .jsonl is only attributed to a session if it was written at/after that session started, so a fresh session starts clean (was: mislabeled with the previous conversation's id → auto-opened the Chat lens on the old transcript). Explicit --resume <id> still honored; rename's newest-on-disk name-tracking unchanged. WORKER code → needs a cold restart to take effect. Prior 1.29.0: rich transcript tool data — GET /api/sessions/:id/transcript now includes, per tool_use, its `id`, a per-field-capped structured `input`, and the paired tool_result `result` (output). lib/transcript.js pairs results→tool_uses by id during the backward scan and exposes extractToolResults; the app renders shells (Bash cmd+output), subagents (Task desc/report), and file ops as rich cards. Backward-compatible (name/inputPreview unchanged). Prior 1.28.2: attention-clear now fires on session OPEN — the web app (app.html switchSession) calls POST /api/sessions/:id/attention/clear when foregrounding a session that has a live alert, so opening it in the browser dismisses the phone push (was mobile-only). Web also handles inbound 'clear' notify frames (drops the chip / closes the browser toast) — previously a 'clear' frame fell through to showNotification and could pop an "undefined" toast. Mobile companion (#2): opening a session now cancels its OS notification locally (NotificationService.cancelForSession) instead of relying on a dead FCM 'clear' round-trip that never fires while the app is foreground; a foreground 'clear' push is also routed to cancel. Prior 1.28.1: #25 — idle/'finished' FCM pushes are now high-priority so an 'all'-level session's finish notification wakes the phone through Android Doze (was normal-priority → deferred/dropped). Prior 1.28.0: #21 — session takeover relaxed: multiple devices now SHARE one PTY (shared I/O) by default instead of the second viewer force-disconnecting the first. Opt back into the old single-owner kick with config `exclusiveViewer: true`. Prior 1.27.0: #24 — POST /api/sessions/:id/attention/clear clears a session's attention across devices (flips recorded attention, FCM 'clear' to dismiss phone toasts, broadcasts a 'clear' notify frame so in-app viewers drop the chip); capability 'attention-clear'. Prior 1.26.1: (a) #23 fix — restore no longer appends implicit `--continue` to an unknown-id claude session (that resumed the most-recent conversation in the cwd, so a new session came up "Resumed" to the last one). Unknown-id restore now starts fresh; `--resume <own-id>` and explicit user --continue/--resume still honored (lib/restore-command.js). (b) /api/cluster/sessions cache (1500ms) is now invalidated on session create/delete/rename/reorder, so a just-created session shows in the sidebar immediately instead of after the TTL
 
 // --- Optional latency instrumentation (opt-in via WT_LATENCY_DEBUG=1) -----
 // Event-loop lag monitor: interval is 10ms; anything ≥ 50ms slip is a stall.
@@ -1500,6 +1500,95 @@ function pruneStatusMetrics() {
   }
 }
 
+// --- transcript-recorded metrics (Codex) -------------------------------------
+// Claude PUSHES its status line to /api/claude-status; Codex writes the same numbers
+// into its rollout every turn. For agents whose provider exposes readMetrics we read
+// the transcript's TAIL instead — no extra process, no extra endpoint.
+//
+// The session list is polled, so the read is memoised on the file's identity
+// (size + mtime): an unchanged rollout costs one stat, a changed one costs a single
+// bounded tail read. Nothing is cached across a rewrite of the file.
+const METRICS_TAIL_BYTES = 262144; // 256KB — a turn's token_count sits near the end
+// Codex writes `turn_context` (the model + effort labels) ONCE PER USER TURN, near the
+// start of that turn. A single long turn — an agent grinding through dozens of tool
+// calls — pushes it far outside the tail, so the head is read too. Concatenating
+// head + tail and scanning BACKWARD keeps the semantics right: the newest token_count
+// (tail) wins, and the scan only falls through to the head for a label the tail lacks.
+const METRICS_HEAD_BYTES = 65536; // 64KB — session_meta + the first turn_context
+const _transcriptMetricsCache = new Map(); // path -> { size, mtimeMs, metrics }
+
+function _readSlice(fd, start, len) {
+  const buf = Buffer.alloc(len);
+  let read = 0;
+  while (read < len) {
+    const n = fs.readSync(fd, buf, read, len - read, start + read);
+    if (n <= 0) break;
+    read += n;
+  }
+  return buf.slice(0, read).toString('utf8');
+}
+
+function readTranscriptMetrics(tpath, adapter) {
+  if (!tpath || !adapter || typeof adapter.readMetrics !== 'function') return null;
+  let st;
+  try { st = fs.statSync(tpath); } catch { return null; }
+  const hit = _transcriptMetricsCache.get(tpath);
+  if (hit && hit.size === st.size && hit.mtimeMs === st.mtimeMs) return hit.metrics;
+
+  let metrics = null;
+  try {
+    if (st.size > 0) {
+      const fd = fs.openSync(tpath, 'r');
+      let text;
+      try {
+        if (st.size <= METRICS_HEAD_BYTES + METRICS_TAIL_BYTES) {
+          text = _readSlice(fd, 0, st.size); // small enough — no need to splice
+        } else {
+          // Head: cut back to the last complete line so a partial one can't be parsed.
+          let head = _readSlice(fd, 0, METRICS_HEAD_BYTES);
+          const cut = head.lastIndexOf('\n');
+          head = cut >= 0 ? head.slice(0, cut) : '';
+          // Tail: drop the leading partial line for the same reason.
+          const start = st.size - METRICS_TAIL_BYTES;
+          let tail = _readSlice(fd, start, METRICS_TAIL_BYTES);
+          const nl = tail.indexOf('\n');
+          tail = nl >= 0 ? tail.slice(nl + 1) : '';
+          text = head + '\n' + tail;
+        }
+      } finally { fs.closeSync(fd); }
+      metrics = adapter.readMetrics(text);
+    }
+  } catch { metrics = null; } // unreadable/racing file → no metrics, never a 500
+  _transcriptMetricsCache.set(tpath, { size: st.size, mtimeMs: st.mtimeMs, metrics });
+  return metrics;
+}
+
+// A session whose transcript cannot be resolved would otherwise re-derive on EVERY
+// session-list poll — and a Codex derivation walks the rollouts tree. Remember the
+// miss briefly so a transcript-less session costs nothing, while one that appears
+// (the agent's first turn) is picked up within the window.
+const _metricsMissTtlMs = 60000;
+const _metricsMiss = new Map(); // session id -> ts of the last failed resolution
+
+// The metrics for one session, from whichever source its agent provides. Claude's
+// pushed status line wins when present (it is live and richer); otherwise an agent
+// that records its own usage has it read from the transcript. A plain shell (agent
+// null → the default provider, which has no readMetrics) never triggers a file read.
+async function sessionMetrics(s) {
+  const pushed = getStatusMetrics(s.claudeSessionId);
+  if (pushed) return pushed;
+  const adapter = getAdapter(s.agent);
+  if (typeof adapter.readMetrics !== 'function') return null;
+
+  const missedAt = _metricsMiss.get(s.id);
+  if (missedAt && Date.now() - missedAt < _metricsMissTtlMs) return null;
+
+  const tpath = await resolveSessionTranscriptPath(s.id);
+  if (!tpath) { _metricsMiss.set(s.id, Date.now()); return null; }
+  _metricsMiss.delete(s.id);
+  return readTranscriptMetrics(tpath, adapter);
+}
+
 app.post('/api/claude-status', express.json({ limit: '16kb' }), (req, res) => {
   if (!isLocalhostReq(req)) return res.status(401).json({ error: 'Unauthorized' });
   const b = req.body || {};
@@ -2143,7 +2232,8 @@ async function _computeClusterSessions(reqUser) {
   // Local sessions (via worker)
   try {
     const { sessions: localList } = await workerClient.rpc('listSessions');
-    for (const s of localList) {
+    const localMetrics = await Promise.all(localList.map((s) => sessionMetrics(s).catch(() => null)));
+    localList.forEach((s, i) => {
       result.push({
         id: s.id, name: s.name, cwd: s.cwd, status: s.status,
         clients: s.clients || 0, pid: s.pid,
@@ -2154,9 +2244,9 @@ async function _computeClusterSessions(reqUser) {
         claudeSessionId: s.claudeSessionId,
         server: getServerName(), serverUrl: null,
         notifyLevel: getNotifyLevel(s.id),
-        metrics: getStatusMetrics(s.claudeSessionId),
+        metrics: localMetrics[i],
       });
-    }
+    });
   } catch (e) {
     console.error('worker listSessions failed:', e.message);
   }
@@ -2642,7 +2732,8 @@ app.post('/api/clipboard-image', express.raw({ type: 'image/*', limit: '10mb' })
 app.get('/api/sessions', async (req, res) => {
   try {
     const { sessions: list } = await workerClient.rpc('listSessions');
-    const shaped = list.map(s => ({
+    const listMetrics = await Promise.all(list.map((s) => sessionMetrics(s).catch(() => null)));
+    const shaped = list.map((s, i) => ({
       id: s.id, name: s.name, cwd: s.cwd,
       clients: s.clients || 0, pid: s.pid, status: s.status,
       lastActivity: s.lastActivity, autoCommand: s.autoCommand || '',
@@ -2651,7 +2742,7 @@ app.get('/api/sessions', async (req, res) => {
       agent: s.agent ?? null,
       claudeSessionId: s.claudeSessionId,
       notifyLevel: getNotifyLevel(s.id),
-      metrics: getStatusMetrics(s.claudeSessionId),
+      metrics: listMetrics[i],
     }));
     // Log when a remote server fetches our sessions (Bearer = cluster call).
     // Throttled to avoid hammering the disk: only logs on change or after

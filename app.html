@@ -2588,7 +2588,9 @@
       const c = s.metrics && s.metrics.ctx;
       if (c == null) return '';                      // absent/stale/blank → no badge
       const cls = c >= 70 ? 'ctx-hi' : c >= 50 ? 'ctx-mid' : 'ctx-lo';
-      return `<span class="sb-ctx ${cls}" title="Claude context window">${c}%</span>`;
+      // Agent-neutral: Codex sessions report the same metric, read from their rollout.
+      const who = (s.agent && agents[s.agent] && agents[s.agent].label) || 'Agent';
+      return `<span class="sb-ctx ${cls}" title="${esc(who)} context window">${c}%</span>`;
     }
     // --- AI agents (GET /api/agents) -----------------------------------------
     // The server's provider registry is the SSOT: the picker options and the
