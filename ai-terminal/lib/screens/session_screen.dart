@@ -153,21 +153,55 @@ class _ComposeAttachment {
 /// overlay flashes back until Claude starts working. A genuinely NEW question
 /// (different toolUseId) clears the dismissal upstream (_pollPendingQuestion) and
 /// shows normally. Pure + one home so render and answer paths can't drift.
-bool questionOverlayVisible(PendingQuestion? pending, String? dismissedId) =>
-    pending != null && pending.toolUseId != dismissedId;
+bool questionOverlayVisible(PendingQuestion? pending, String? dismissedKey) =>
+    pending != null && questionSignature(pending) != dismissedKey;
+
+/// A STABLE identity for a pending question, derived from its CONTENT (headers,
+/// question text, multiSelect, option labels) instead of the volatile
+/// `toolUseId`.
+///
+/// The server reports a synthetic `hook-<session>-<seq>` id while the question is
+/// LIVE (captured from the PreToolUse hook), but the real `toolu_…` id once it
+/// falls back to scanning the transcript — and that `seq` changes on every hook
+/// event. Keying "already answered / dismissed" on the id therefore made the SAME
+/// question look brand-new: the dismissal was cleared, the overlay re-appeared,
+/// and the user answered a SECOND time. Claude had already closed the selector by
+/// then, so that second frame set was typed as literal text onto the prompt line
+/// — needing a manual Enter/clear. Content is stable across both id forms.
+/// Pure so the identity rule is enforceable.
+String questionSignature(PendingQuestion? q) {
+  if (q == null) return '';
+  final b = StringBuffer();
+  for (final item in q.questions) {
+    b
+      ..write(item.header)
+      ..write('\u0001')
+      ..write(item.question)
+      ..write('\u0001')
+      ..write(item.multiSelect ? '1' : '0')
+      ..write('\u0001');
+    for (final o in item.options) {
+      b
+        ..write(o.label)
+        ..write('\u0002');
+    }
+    b.write('\u0003');
+  }
+  return b.toString();
+}
 
 /// After verifying a submitted answer, whether the overlay must be re-shown: the
 /// same prompt is [stillPending] (the answer never landed after every retry) AND
-/// it's still the one we optimistically dismissed ([dismissedId] == the answered
-/// id — the user hasn't since dismissed or moved to another prompt). Prevents a
-/// dropped answer from leaving a hidden, silently-stuck question (#19 follow-up).
-/// Pure so the recovery rule is enforceable.
+/// it's still the one we optimistically dismissed ([dismissedKey] == the answered
+/// signature — the user hasn't since dismissed or moved to another prompt).
+/// Prevents a dropped answer from leaving a hidden, silently-stuck question
+/// (#19 follow-up). Pure so the recovery rule is enforceable.
 bool shouldResurfaceAfterAnswer({
   required bool stillPending,
-  required String answeredToolUseId,
-  required String? dismissedId,
+  required String answeredKey,
+  required String? dismissedKey,
 }) =>
-    stillPending && dismissedId == answeredToolUseId;
+    stillPending && dismissedKey == answeredKey;
 
 class SessionScreen extends StatefulWidget {
   const SessionScreen({
@@ -224,7 +258,12 @@ class _SessionScreenState extends State<SessionScreen>
 
   // --- Interactive question overlay (#19) ----------------------------------
   PendingQuestion? _pendingQuestion;
-  String? _dismissedQuestionId; // a question the user chose to answer in-terminal
+  // Signature (see questionSignature) of a question the user already dealt with —
+  // dismissed to answer in-terminal, or just answered via the overlay. Keyed on
+  // CONTENT, not toolUseId: the server's id flips between a synthetic
+  // `hook-<id>-<seq>` (live) and the real `toolu_…` (transcript), which used to
+  // read as a brand-new question and re-show the overlay.
+  String? _dismissedQuestionKey;
   String? _questionContext; // Claude's preceding message, shown above the question
   Timer? _questionPoll;
 
@@ -406,9 +445,12 @@ class _SessionScreenState extends State<SessionScreen>
       return; // best-effort; keep whatever's on screen
     }
     if (!mounted) return;
-    // Once a *different* question arrives, forget any prior dismissal.
-    if (q != null && q.toolUseId != _dismissedQuestionId) {
-      _dismissedQuestionId = null;
+    // Once a genuinely *different* question arrives, forget any prior dismissal.
+    // Compared by CONTENT: the same question re-reported under a new toolUseId
+    // (synthetic hook id → real transcript id, or a re-fired PreToolUse) must not
+    // clear the dismissal and re-show the overlay.
+    if (q != null && questionSignature(q) != _dismissedQuestionKey) {
+      _dismissedQuestionKey = null;
     }
     if (q?.toolUseId != _pendingQuestion?.toolUseId) {
       setState(() {
@@ -441,14 +483,14 @@ class _SessionScreenState extends State<SessionScreen>
   /// Each frame carries its own settle delay so transition frames land in
   /// separate reads. Hides the overlay optimistically; the next poll confirms.
   Future<void> _answerQuestion(List<AnswerFrame> frames) async {
-    final toolUseId = _pendingQuestion?.toolUseId;
+    final answeredKey = questionSignature(_pendingQuestion);
     // Mark this question dealt-with so the next 4s poll can't flash the overlay
     // back: it stays pending server-side until Claude consumes the answer (writes
     // a tool_result), which lags the keystrokes by seconds. A genuinely new
     // question clears the dismissal in _pollPendingQuestion and shows.
     setState(() {
       _pendingQuestion = null;
-      _dismissedQuestionId = toolUseId;
+      _dismissedQuestionKey = answeredKey;
     });
     for (var i = 0; i < frames.length; i++) {
       if (!mounted) return;
@@ -461,31 +503,48 @@ class _SessionScreenState extends State<SessionScreen>
     // Verify the answer actually landed — and un-strand it if it didn't. We just
     // dismissed the overlay optimistically, so a dropped answer would otherwise
     // sit hidden-but-pending forever (the user only learns Claude never moved).
-    if (toolUseId != null) {
-      await _verifyAnswerLanded(toolUseId, resendEnter: answerNeedsConfirm(frames));
+    if (answeredKey.isNotEmpty) {
+      await _verifyAnswerLanded(answeredKey,
+          resendEnter: answerNeedsConfirm(frames));
     }
   }
 
+  /// How long to wait for the server to stop reporting the answered question
+  /// before concluding the answer never landed. The server's LIVE question stash
+  /// is cleared only by a later hook event (PostToolUse / Stop / the next
+  /// PreToolUse) — never by the answer keystrokes themselves — so its latency is
+  /// unbounded relative to us. The old budget (3 × 900ms ≈ 2.7s) routinely expired
+  /// while the answer was in fact landing, which resurfaced the overlay, invited a
+  /// SECOND answer, and typed that frame set as literal text into the prompt line
+  /// of an already-closed selector. A longer budget makes the false "never landed"
+  /// verdict rare; a genuinely dropped answer still recovers, just later.
+  static const int _answerVerifyAttempts = 8; // × 900ms ≈ 7.2s
+
   /// Confirms the just-answered prompt cleared, and recovers if it didn't.
   ///
-  /// Polls up to 3× (~900ms apart), stopping the instant the prompt clears (or a
-  /// different one replaces it) — the answer landed. While it's still pending:
-  /// when [resendEnter] (the answer ended in a confirming Enter, which cluster-
-  /// path bunching can coalesce away — same failure family as #19) a lone Enter
-  /// is re-sent each round, arriving on its own in a separate stdin read. Answers
-  /// that auto-submit on their last digit pass `resendEnter: false` so no stray
-  /// keystroke is sent.
+  /// Polls up to [_answerVerifyAttempts]× (~900ms apart), stopping the instant the
+  /// prompt clears (or a genuinely different one replaces it — compared by
+  /// CONTENT, see [questionSignature]) — the answer landed.
+  ///
+  /// When [resendEnter] (the answer ended in a confirming Enter, which cluster-
+  /// path bunching can coalesce away — same failure family as #19) a lone Enter is
+  /// re-sent ONCE, on the first round that still shows the prompt, arriving in its
+  /// own stdin read. It is not repeated: if the selector has in fact closed, every
+  /// extra `\r` submits whatever sits on Claude's prompt line. Answers that
+  /// auto-submit on their last digit pass `resendEnter: false`, so no stray
+  /// keystroke is sent at all.
   ///
   /// If the prompt is STILL pending after every retry, the answer never took —
   /// so we clear the optimistic dismissal and re-show the overlay. Without this
   /// the user is silently stranded: overlay gone, question unanswered, Claude
   /// waiting, and (pre-#19-dismissal) not even a re-bump to signal it.
-  Future<void> _verifyAnswerLanded(String toolUseId,
+  Future<void> _verifyAnswerLanded(String answeredKey,
       {required bool resendEnter}) async {
     final api = _api;
     if (api == null) return;
     PendingQuestion? stillPending;
-    for (var attempt = 0; attempt < 3; attempt++) {
+    var resentEnter = false;
+    for (var attempt = 0; attempt < _answerVerifyAttempts; attempt++) {
       await Future<void>.delayed(const Duration(milliseconds: 900));
       if (!mounted) return;
       final PendingQuestion? q;
@@ -495,21 +554,24 @@ class _SessionScreenState extends State<SessionScreen>
         return; // best-effort — don't spam Enters when polling is failing
       }
       if (!mounted) return;
-      // Cleared, or a different prompt took its place → the answer landed.
-      if (q == null || q.toolUseId != toolUseId) return;
+      // Cleared, or a genuinely different prompt took its place → answer landed.
+      if (q == null || questionSignature(q) != answeredKey) return;
       stillPending = q;
-      if (resendEnter) _connection?.sendInput('\r'); // dropped confirm → resend
+      if (resendEnter && !resentEnter) {
+        resentEnter = true;
+        _connection?.sendInput('\r'); // dropped confirm → resend exactly once
+      }
     }
     // Exhausted retries with the same prompt up → surface it again so the user
     // can retry, instead of a silently stuck, hidden question.
     if (mounted &&
         shouldResurfaceAfterAnswer(
           stillPending: stillPending != null,
-          answeredToolUseId: toolUseId,
-          dismissedId: _dismissedQuestionId,
+          answeredKey: answeredKey,
+          dismissedKey: _dismissedQuestionKey,
         )) {
       setState(() {
-        _dismissedQuestionId = null;
+        _dismissedQuestionKey = null;
         _pendingQuestion = stillPending;
       });
     }
@@ -1771,14 +1833,15 @@ class _SessionScreenState extends State<SessionScreen>
                 // Native overlay for Claude's interactive question (#19), above
                 // whichever lens is showing. The key strip below stays usable as
                 // a manual fallback.
-                if (questionOverlayVisible(_pendingQuestion, _dismissedQuestionId))
+                if (questionOverlayVisible(_pendingQuestion, _dismissedQuestionKey))
                   QuestionOverlay(
                     question: _pendingQuestion!,
                     contextText: _questionContext,
                     onSend: _answerQuestion,
                     onKey: _sendRawToTerminal,
                     onDismiss: () => setState(() =>
-                        _dismissedQuestionId = _pendingQuestion?.toolUseId),
+                        _dismissedQuestionKey =
+                            questionSignature(_pendingQuestion)),
                   ),
               ],
             ),
