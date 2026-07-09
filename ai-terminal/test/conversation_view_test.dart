@@ -4,6 +4,7 @@
 import 'dart:async';
 
 import 'package:flutter/material.dart';
+import 'package:flutter/services.dart';
 import 'package:flutter_test/flutter_test.dart';
 
 import 'package:ai_terminal/api/api_client.dart';
@@ -296,6 +297,63 @@ void main() {
       expect(find.textContaining('code()'), findsOneWidget);
     },
   );
+
+  // Links are non-selectable gesture spans in the SelectionArea, so a long-press
+  // (touch) / right-click (desktop) exposes an Open/Copy menu — the way to grab a
+  // URL without opening it (the "can't mark & copy a URL in chat" report).
+  testWidgets('a chat URL long-press shows an Open/Copy menu; Copy grabs the URL', (
+    tester,
+  ) async {
+    // Deterministic clipboard: capture what Copy writes (avoids the real channel).
+    String? clip;
+    tester.binding.defaultBinaryMessenger.setMockMethodCallHandler(
+      SystemChannels.platform,
+      (call) async {
+        if (call.method == 'Clipboard.setData') {
+          clip = (call.arguments as Map)['text'] as String?;
+        }
+        return null;
+      },
+    );
+    addTearDown(() => tester.binding.defaultBinaryMessenger
+        .setMockMethodCallHandler(SystemChannels.platform, null));
+
+    final page = TranscriptPage(
+      messages: const [
+        TranscriptTurn(
+          role: 'assistant',
+          text: 'see [example](https://example.com/x)',
+          toolUses: [],
+          ts: null,
+        ),
+      ],
+      cursor: null,
+      hasMore: false,
+    );
+    await tester.pumpWidget(
+      _wrap(
+        ConversationView(
+          session: _session(),
+          fetchPage: (id, {before, limit}) async => page,
+        ),
+      ),
+    );
+    await tester.pumpAndSettle();
+
+    // The link renders as its label text (via the custom _ChatLink builder).
+    expect(find.text('example'), findsOneWidget);
+
+    // Long-press → the Open/Copy-link menu.
+    await tester.longPress(find.text('example'));
+    await tester.pumpAndSettle();
+    expect(find.text('Open link'), findsOneWidget);
+    expect(find.text('Copy link'), findsOneWidget);
+
+    // Copy → the URL (not the label) lands on the clipboard.
+    await tester.tap(find.text('Copy link'));
+    await tester.pumpAndSettle();
+    expect(clip, 'https://example.com/x');
+  });
 
   group('summarizeTool (rich tool cards)', () {
     test('Bash: command in the title, output in the detail', () {

@@ -943,6 +943,86 @@ Future<void> openChatLink(String? href) async {
   }
 }
 
+/// A chat markdown link. Tap opens it (browser); a long-press (touch) or a
+/// right-click (desktop) opens a small menu to **Open** or **Copy link**. Links
+/// are gesture-carrying spans, so the ancestor SelectionArea (#27) can't select
+/// them — the Copy-link menu is how you grab a URL without opening it.
+class _ChatLink extends StatelessWidget {
+  const _ChatLink({required this.text, required this.href, required this.style});
+
+  final String text;
+  final String? href;
+  final TextStyle style;
+
+  Future<void> _copy(BuildContext context) async {
+    final url = href;
+    if (url == null || url.isEmpty) return;
+    await Clipboard.setData(ClipboardData(text: url));
+    if (context.mounted) {
+      ScaffoldMessenger.of(context).showSnackBar(
+        const SnackBar(
+            content: Text('Link copied'), duration: Duration(seconds: 1)),
+      );
+    }
+  }
+
+  Future<void> _menu(BuildContext context, Offset globalPos) async {
+    if (href == null || href!.isEmpty) return;
+    final overlay =
+        Overlay.of(context).context.findRenderObject() as RenderBox?;
+    if (overlay == null) return;
+    final selected = await showMenu<String>(
+      context: context,
+      position: RelativeRect.fromRect(
+        Rect.fromPoints(globalPos, globalPos),
+        Offset.zero & overlay.size,
+      ),
+      items: [
+        if (isLaunchableHttpUrl(href))
+          const PopupMenuItem<String>(value: 'open', child: Text('Open link')),
+        const PopupMenuItem<String>(value: 'copy', child: Text('Copy link')),
+      ],
+    );
+    if (selected == 'open') {
+      await openChatLink(href);
+    } else if (selected == 'copy' && context.mounted) {
+      await _copy(context);
+    }
+  }
+
+  @override
+  Widget build(BuildContext context) {
+    // Bound the width so a long bare URL wraps inside the bubble instead of
+    // overflowing (a WidgetSpan is otherwise laid out at its intrinsic width).
+    final maxWidth = MediaQuery.sizeOf(context).width * 0.82;
+    return GestureDetector(
+      onTap: () => openChatLink(href),
+      onLongPressStart: (d) => _menu(context, d.globalPosition),
+      onSecondaryTapDown: (d) => _menu(context, d.globalPosition),
+      child: ConstrainedBox(
+        constraints: BoxConstraints(maxWidth: maxWidth),
+        child: Text(text, style: style, softWrap: true),
+      ),
+    );
+  }
+}
+
+/// Renders markdown `<a>` links as [_ChatLink] (tap-to-open + long-press/
+/// right-click Open/Copy menu) instead of the default recognizer-only span.
+class _MarkdownLinkBuilder extends MarkdownElementBuilder {
+  _MarkdownLinkBuilder(this.linkStyle);
+
+  final TextStyle linkStyle;
+
+  @override
+  Widget? visitElementAfter(md.Element element, TextStyle? preferredStyle) {
+    final href = element.attributes['href'];
+    final text =
+        element.textContent.isNotEmpty ? element.textContent : (href ?? '');
+    return _ChatLink(text: text, href: href, style: linkStyle);
+  }
+}
+
 class _TurnBubble extends StatelessWidget {
   const _TurnBubble({required this.turn, this.subFetch});
 
@@ -969,6 +1049,12 @@ class _TurnBubble extends StatelessWidget {
       fontFamily: 'monospace',
       backgroundColor: theme.colorScheme.surfaceContainerHigh,
     );
+    final mdStyle = _markdownStyle(theme, bodyStyle, codeSpanStyle);
+    final linkStyle = mdStyle.a ??
+        TextStyle(
+          color: theme.colorScheme.primary,
+          decoration: TextDecoration.underline,
+        );
     final epoch = _parseIsoToEpoch(turn.ts);
 
     return Align(
@@ -1013,14 +1099,14 @@ class _TurnBubble extends StatelessWidget {
                         // a self-selectable body would break cross-bubble drags.
                         selectable: false,
                         fitContent: true,
-                        // Chat-side of the clickable-URL work: gitHubWeb turns
-                        // bare `https://…` into links (flutter_markdown doesn't
-                        // autolink by default), and onTapLink opens them in the
-                        // system browser — http/https only (isLaunchableHttpUrl).
+                        // gitHubWeb turns bare `https://…` into links. Links are
+                        // rendered by _MarkdownLinkBuilder — tap opens, and a
+                        // long-press / right-click gives an Open/Copy-link menu
+                        // (URL spans are non-selectable in the SelectionArea, so
+                        // a menu is how you grab a URL without opening it).
                         extensionSet: md.ExtensionSet.gitHubWeb,
-                        onTapLink: (text, href, title) => openChatLink(href),
-                        styleSheet:
-                            _markdownStyle(theme, bodyStyle, codeSpanStyle),
+                        builders: {'a': _MarkdownLinkBuilder(linkStyle)},
+                        styleSheet: mdStyle,
                       ),
                     ),
               for (final tool in turn.toolUses)
