@@ -44,6 +44,24 @@ String _encodeServers(List<ServerConfig> servers) => jsonEncode([
 ApiClient _offlineFactory(ServerConfig s) =>
     ApiClient(s, httpClient: MockClient((_) async => http.Response('', 503)));
 
+/// A client factory whose `/api/sessions` returns one session (id `<name>1`);
+/// everything else (e.g. `/api/version`) 503s. Used to prove a refresh
+/// populates [SessionRepository.current].
+ApiClient _onlineFactory(ServerConfig s) => ApiClient(
+      s,
+      httpClient: MockClient((req) async {
+        if (req.url.path == '/api/sessions') {
+          return http.Response(
+            jsonEncode([
+              {'id': '${s.name}1', 'name': 'proj', 'status': 'idle', 'lastActivity': 1000},
+            ]),
+            200,
+          );
+        }
+        return http.Response('', 503);
+      }),
+    );
+
 /// A loaded, isolated [ServerStore] over the current mock prefs.
 Future<ServerStore> _store() async {
   final store = ServerStore.forTest();
@@ -222,6 +240,26 @@ void main() {
       expect(decoded.map((s) => s.id), ['s1']);
       expect(decoded.first.name, 'one');
       expect(decoded.first.notifyLevel, 'all');
+    });
+
+    // The `sessions` stream is broadcast (no replay), so a screen opened from a
+    // notification tap seeds itself from `current` instead of waiting for the
+    // next emission. This guards that seed source: after a reachable refresh,
+    // `current` holds the session — so a late subscriber can find it at once
+    // rather than flashing "session not found".
+    test('current holds the session after a refresh (notification-tap seed source)',
+        () async {
+      SharedPreferences.setMockInitialValues({
+        ServerStore.storageKey: _encodeServers([_serverA]),
+      });
+      final repo = SessionRepository.forTest(
+        store: await _store(),
+        clientFactory: _onlineFactory,
+      );
+
+      expect(repo.current, isEmpty); // nothing before the first fetch
+      await repo.refresh();
+      expect(repo.current.map((s) => s.id), ['A1']);
     });
 
     test('an all-offline refresh with no prior cache does NOT write the cache',
