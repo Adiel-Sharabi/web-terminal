@@ -16,7 +16,7 @@
 // through (see playwright.config.js).
 const { test, expect, request: pwRequest } = require('@playwright/test');
 
-const BASE = 'http://localhost:17681';
+const BASE = 'http://127.0.0.1:17681';
 const AUTH = { user: 'testuser', password: 'testpass:colon' };
 // Tests assume the server was started with WT_HOOK_STOP_DEBOUNCE_MS=200.
 // Polling slack is generous so a sluggy CI box doesn't flake.

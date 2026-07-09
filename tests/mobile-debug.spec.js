@@ -1,7 +1,7 @@
 // @ts-check
 const { test, expect, request: pwRequest, devices } = require('@playwright/test');
 
-const BASE = 'http://localhost:17681';
+const BASE = 'http://127.0.0.1:17681';
 const AUTH = { user: 'testuser', password: 'testpass:colon' };
 
 // Pixel 5 device emulation

@@ -6,7 +6,7 @@
 // the viewport's scrollTop trajectory every frame to see if it snaps back down.
 const { test, expect } = require('@playwright/test');
 
-const BASE = 'http://localhost:17681';
+const BASE = 'http://127.0.0.1:17681';
 const AUTH = { user: 'testuser', password: 'testpass:colon' };
 const PORTRAIT = { width: 390, height: 844 };
 

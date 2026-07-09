@@ -16,7 +16,7 @@ const path = require('path');
 
 const { mintDirectToken } = require(path.join(__dirname, '..', 'lib', 'cluster-token.js'));
 
-const BASE = 'http://localhost:17681';
+const BASE = 'http://127.0.0.1:17681';
 const AUTH = { user: 'testuser', password: 'testpass:colon' };
 
 async function authCtx() {
@@ -139,7 +139,7 @@ test.describe('WS /ws/:id?dt= — direct token acceptance', () => {
     const sid = await createSession(ctx);
     try {
       const dt = mintDirectToken(token, { sid, user: AUTH.user, ttlMs: 30_000 });
-      const wsUrl = `ws://localhost:17681/ws/${encodeURIComponent(sid)}?dt=${encodeURIComponent(dt)}`;
+      const wsUrl = `ws://127.0.0.1:17681/ws/${encodeURIComponent(sid)}?dt=${encodeURIComponent(dt)}`;
       const r = await openWs(wsUrl);
       expect(r.ws).toBeTruthy();
       expect(r.ws.readyState).toBe(WebSocket.OPEN);
@@ -156,7 +156,7 @@ test.describe('WS /ws/:id?dt= — direct token acceptance', () => {
     const ctx = await authCtx();
     const sid = await createSession(ctx);
     try {
-      const r = await openWs(`ws://localhost:17681/ws/${encodeURIComponent(sid)}`);
+      const r = await openWs(`ws://127.0.0.1:17681/ws/${encodeURIComponent(sid)}`);
       // Unauthenticated upgrade is rejected before the handler runs — the
       // auth middleware returns HTTP 401, which surfaces to ws clients as
       // close code 1005 (no status) or 1006 (abnormal). Either way, no ws.
@@ -175,7 +175,7 @@ test.describe('WS /ws/:id?dt= — direct token acceptance', () => {
     try {
       // ttlMs negative → exp already in the past
       const dt = mintDirectToken(token, { sid, user: AUTH.user, ttlMs: -5_000 });
-      const wsUrl = `ws://localhost:17681/ws/${encodeURIComponent(sid)}?dt=${encodeURIComponent(dt)}`;
+      const wsUrl = `ws://127.0.0.1:17681/ws/${encodeURIComponent(sid)}?dt=${encodeURIComponent(dt)}`;
       const r = await openWs(wsUrl);
       expect(r.ws).toBeNull();
       expect(r.code).toBe(4003);
@@ -192,7 +192,7 @@ test.describe('WS /ws/:id?dt= — direct token acceptance', () => {
     try {
       // Sign with a key that is NOT in the server's api-tokens.json.
       const dt = mintDirectToken('not-in-api-tokens-' + Date.now(), { sid, user: AUTH.user, ttlMs: 30_000 });
-      const wsUrl = `ws://localhost:17681/ws/${encodeURIComponent(sid)}?dt=${encodeURIComponent(dt)}`;
+      const wsUrl = `ws://127.0.0.1:17681/ws/${encodeURIComponent(sid)}?dt=${encodeURIComponent(dt)}`;
       const r = await openWs(wsUrl);
       expect(r.ws).toBeNull();
       expect(r.code).toBe(4004);
@@ -210,7 +210,7 @@ test.describe('WS /ws/:id?dt= — direct token acceptance', () => {
     try {
       // Mint for sid1, try to use on sid2 — must be rejected.
       const dt = mintDirectToken(token, { sid: sid1, user: AUTH.user, ttlMs: 30_000 });
-      const wsUrl = `ws://localhost:17681/ws/${encodeURIComponent(sid2)}?dt=${encodeURIComponent(dt)}`;
+      const wsUrl = `ws://127.0.0.1:17681/ws/${encodeURIComponent(sid2)}?dt=${encodeURIComponent(dt)}`;
       const r = await openWs(wsUrl);
       expect(r.ws).toBeNull();
       expect(r.code).toBe(4004);
@@ -229,7 +229,7 @@ test.describe('WS /ws/:id?dt= — direct token acceptance', () => {
       // Attacker doesn't know any valid HMAC key: even a well-formed token
       // signed with a guessed key won't verify.
       const dt = mintDirectToken('attacker-guess', { sid, user: 'root', ttlMs: 30_000 });
-      const wsUrl = `ws://localhost:17681/ws/${encodeURIComponent(sid)}?dt=${encodeURIComponent(dt)}`;
+      const wsUrl = `ws://127.0.0.1:17681/ws/${encodeURIComponent(sid)}?dt=${encodeURIComponent(dt)}`;
       const r = await openWs(wsUrl);
       expect(r.ws).toBeNull();
       expect(r.code).toBe(4004);
@@ -243,7 +243,7 @@ test.describe('WS /ws/:id?dt= — direct token acceptance', () => {
     const ctx = await authCtx();
     const sid = await createSession(ctx);
     try {
-      const wsUrl = `ws://localhost:17681/ws/${encodeURIComponent(sid)}?dt=not-a-valid-token`;
+      const wsUrl = `ws://127.0.0.1:17681/ws/${encodeURIComponent(sid)}?dt=not-a-valid-token`;
       const r = await openWs(wsUrl);
       expect(r.ws).toBeNull();
       expect(r.code).toBe(4004);
@@ -275,7 +275,7 @@ test.describe('WS — backward compatibility', () => {
       const cookiePair = setCookie.split(';')[0];
       await ctx2.dispose();
 
-      const r = await openWs(`ws://localhost:17681/ws/${encodeURIComponent(sid)}`, { Cookie: cookiePair });
+      const r = await openWs(`ws://127.0.0.1:17681/ws/${encodeURIComponent(sid)}`, { Cookie: cookiePair });
       expect(r.ws).toBeTruthy();
       expect(r.ws.readyState).toBe(WebSocket.OPEN);
       r.ws.close();
@@ -290,7 +290,7 @@ test.describe('WS — backward compatibility', () => {
     const token = await createApiToken(ctx, 'legacy-bearer');
     const sid = await createSession(ctx);
     try {
-      const wsUrl = `ws://localhost:17681/ws/${encodeURIComponent(sid)}?token=${encodeURIComponent(token)}`;
+      const wsUrl = `ws://127.0.0.1:17681/ws/${encodeURIComponent(sid)}?token=${encodeURIComponent(token)}`;
       const r = await openWs(wsUrl);
       expect(r.ws).toBeTruthy();
       expect(r.ws.readyState).toBe(WebSocket.OPEN);

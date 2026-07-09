@@ -6,7 +6,7 @@ const { test, expect, request: pwRequest } = require('@playwright/test');
 
 // Defaults to the standard test server so the test runs without any special setup.
 // Override with DIAG_URL / DIAG_USER / DIAG_PASS to run against the live server.
-const BASE = process.env.DIAG_URL  || 'http://localhost:17681';
+const BASE = process.env.DIAG_URL  || 'http://127.0.0.1:17681';
 const AUTH = { user: process.env.DIAG_USER || 'testuser', password: process.env.DIAG_PASS || 'testpass:colon' };
 
 async function authCtx() {
