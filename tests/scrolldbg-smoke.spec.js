@@ -1,5 +1,5 @@
 const { test, expect } = require('@playwright/test');
-const BASE = 'http://localhost:17681';
+const BASE = 'http://127.0.0.1:17681';
 const AUTH = { user: 'testuser', password: 'testpass:colon' };
 test('tracer: off by default, latches on, off-switch clears it; app boots', async ({ browser }) => {
   const ctx = await browser.newContext({ viewport: { width: 390, height: 844 }, isMobile: true, hasTouch: true,

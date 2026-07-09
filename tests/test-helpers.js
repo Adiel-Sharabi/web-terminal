@@ -3,7 +3,7 @@ const { request: pwRequest } = require('@playwright/test');
 const fs = require('fs');
 const path = require('path');
 
-const BASE = 'http://localhost:17681';
+const BASE = 'http://127.0.0.1:17681';
 const AUTH = { user: 'testuser', password: 'testpass:colon' };
 
 /** Read per-process hook token (H1) from .hook-token so tests can hit hook endpoints. */

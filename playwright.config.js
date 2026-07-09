@@ -15,11 +15,11 @@ module.exports = defineConfig({
   testIgnore: ['**/diagnostic*', '**/mobile-debug*', '**/paste-diag*'],
   globalTeardown: path.join(__dirname, 'tests', 'global-teardown.js'),
   use: {
-    baseURL: 'http://localhost:17681',
+    baseURL: 'http://127.0.0.1:17681',
   },
   webServer: {
     command: 'node server.js',
-    port: 17681,
+    url: 'http://127.0.0.1:17681/login',
     env: {
       ...process.env,
       WT_TEST: '1',

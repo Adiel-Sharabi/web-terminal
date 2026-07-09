@@ -8,7 +8,7 @@ const { authCtx } = require('./test-helpers');
 const WebSocket = require('ws');
 const http = require('http');
 
-const BASE = 'http://localhost:17681';
+const BASE = 'http://127.0.0.1:17681';
 const AUTH = { user: 'testuser', password: 'testpass:colon' };
 
 /** Log in over raw http and return the session cookie for a manual ws upgrade. */
