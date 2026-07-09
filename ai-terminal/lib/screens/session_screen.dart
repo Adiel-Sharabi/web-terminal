@@ -208,16 +208,6 @@ class _SessionScreenState extends State<SessionScreen>
     // bar) owns the keyboard.
     HardwareKeyboard.instance.addHandler(_globalKeyHandler);
     _repoSub = SessionRepository.instance.sessions.listen(_onSessionsUpdate);
-    // The sessions stream is broadcast (no replay), so this screen — often opened
-    // from a notification tap — would otherwise receive nothing until the next
-    // emission (up to the 30s poll), flashing "session not found" for a session
-    // that is already loaded (backing out re-emits and reveals it). Seed
-    // synchronously from the current snapshot: a known session shows + attaches at
-    // once; an unknown one falls through to the 8s timer + the live stream.
-    // _onSessionsUpdate does the single first-load attach, so no standalone
-    // _attach()/_checkTranscriptCapability() is needed here (both no-op while
-    // _session is null anyway).
-    _onSessionsUpdate(SessionRepository.instance.current);
     // Tell the desktop alert path we're showing this session so it won't toast
     // an event for the session already on screen (issue #16).
     if (DesktopAlertService.supported) {
@@ -230,11 +220,26 @@ class _SessionScreenState extends State<SessionScreen>
         if (mounted && _session == null) setState(() => _notFound = true);
       });
     }
+    _attach();
     _loadPersisted();
+    _checkTranscriptCapability();
     // Poll for Claude's interactive question unconditionally (#19/#20): the
     // endpoint returns null/404 on a server that doesn't support it, so this
     // can't be defeated by opening the session before the server was upgraded.
     _startQuestionPolling();
+    // The sessions stream is broadcast (no replay), so this screen — often opened
+    // from a notification tap — would otherwise receive nothing until the next
+    // emission (up to the 30s poll), flashing "session not found" for a session
+    // already in the repo (backing out re-emits and reveals it). Seed from the
+    // current snapshot AFTER the first frame, so _onSessionsUpdate runs exactly
+    // like a normal stream emission (view built, event loop ready — never a
+    // synchronous attach mid-initState). Guarded so it no-ops if the live stream
+    // already delivered the session.
+    WidgetsBinding.instance.addPostFrameCallback((_) {
+      if (mounted && _session == null) {
+        _onSessionsUpdate(SessionRepository.instance.current);
+      }
+    });
   }
 
   Future<void> _loadPersisted() async {
