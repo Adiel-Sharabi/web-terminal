@@ -6,6 +6,7 @@ library;
 
 import 'package:flutter/material.dart';
 
+import '../api/agent_catalog.dart';
 import '../api/api_client.dart';
 import '../api/models.dart';
 import '../services/session_repository.dart';
@@ -85,6 +86,12 @@ class _NewSessionSheetState extends State<_NewSessionSheet> {
   bool _creating = false;
   String? _error;
 
+  // The AI agent picker. `null` is "Auto (detect from command)" — the same
+  // default behavior as omitting the field entirely. Agent choices are
+  // per-server, so a server switch resets this back to Auto.
+  List<AgentInfo> _agents = const [];
+  String? _agent;
+
   @override
   void initState() {
     super.initState();
@@ -134,11 +141,27 @@ class _NewSessionSheetState extends State<_NewSessionSheet> {
     } catch (_) {
       if (mounted) setState(() => _folders = const []);
     }
+    // ApiClient.agents() never throws (failures yield an empty list), so an
+    // unreachable server or an older build without the endpoint just leaves
+    // the picker showing "Auto" only — it never blocks session creation.
+    final agents = await api.agents();
+    // Feed the shared catalogue too, so the session-list chips learn any provider
+    // this fetch just discovered without a second round-trip.
+    for (final a in agents) {
+      AgentCatalog.instance.adopt(a);
+    }
+    if (!mounted || _server != server) return;
+    setState(() => _agents = agents);
   }
 
   void _onServerChanged(ServerConfig? value) {
     if (value == null || value == _server) return;
-    setState(() => _server = value);
+    setState(() {
+      _server = value;
+      // Agent choices are per-server; reset to Auto rather than carry a
+      // selection that may not exist on the new server.
+      _agent = null;
+    });
     _loadForServer(value);
   }
 
@@ -169,6 +192,7 @@ class _NewSessionSheetState extends State<_NewSessionSheet> {
         name: name.isEmpty ? null : name,
         cwd: cwd.isEmpty ? null : cwd,
         autoCommand: command.isEmpty ? null : command,
+        agent: _agent,
       );
       await SessionRepository.instance.refresh();
       if (!mounted) return;
@@ -282,6 +306,23 @@ class _NewSessionSheetState extends State<_NewSessionSheet> {
               decoration: const InputDecoration(labelText: 'Command (optional)'),
               textInputAction: TextInputAction.done,
               onSubmitted: (_) => _submit(),
+            ),
+            const SizedBox(height: 12),
+            // Auto is always first and always available, even when
+            // GET /api/agents failed or returned nothing — a picker with only
+            // "Auto" never blocks session creation.
+            DropdownButtonFormField<String?>(
+              initialValue: _agent,
+              decoration: const InputDecoration(labelText: 'AI agent'),
+              items: [
+                const DropdownMenuItem<String?>(
+                  value: null,
+                  child: Text('Auto (detect from command)'),
+                ),
+                for (final a in _agents)
+                  DropdownMenuItem<String?>(value: a.id, child: Text(a.label)),
+              ],
+              onChanged: (value) => setState(() => _agent = value),
             ),
             if (_error != null) ...[
               const SizedBox(height: 8),

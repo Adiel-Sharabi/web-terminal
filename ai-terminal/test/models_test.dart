@@ -48,6 +48,16 @@ void main() {
       final s = Session.fromJson(_server, {'id': 'x', 'lastActivity': '42'});
       expect(s.lastActivity, 42);
     });
+
+    test('parses the agent id when the server reports one', () {
+      final s = Session.fromJson(_server, {'id': 'x', 'agent': 'codex'});
+      expect(s.agent, 'codex');
+    });
+
+    test('agent is null for a plain shell, NOT defaulted to "claude"', () {
+      final s = Session.fromJson(_server, {'id': 'x'});
+      expect(s.agent, isNull);
+    });
   });
 
   group('AttentionInfo.fromJson', () {
@@ -332,6 +342,26 @@ void main() {
           TranscriptTurn.fromJson({'role': 'user', 'text': 'x', 'ctxTokens': 0})
               .ctxTokens,
           isNull);
+    });
+  });
+
+  group('AgentInfo.fromJson', () {
+    test('parses id, label and color', () {
+      final a = AgentInfo.fromJson({
+        'id': 'codex',
+        'label': 'Codex',
+        'color': '#10a37f',
+      });
+      expect(a.id, 'codex');
+      expect(a.label, 'Codex');
+      expect(a.color, '#10a37f');
+    });
+
+    test('applies defaults for missing fields', () {
+      final a = AgentInfo.fromJson({});
+      expect(a.id, '');
+      expect(a.label, '');
+      expect(a.color, '');
     });
   });
 

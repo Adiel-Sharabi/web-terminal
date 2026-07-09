@@ -93,6 +93,12 @@ class Session {
   /// `null` when none have been reported for this session recently.
   final SessionMetrics? metrics;
 
+  /// The AI CLI agent provider driving this session (e.g. `claude`, `codex`),
+  /// or `null` for a plain shell. Comes straight from the server's provider
+  /// registry — never defaulted to `'claude'` here, since `null` is itself a
+  /// meaningful "no agent" signal the UI relies on to hide the agent chip.
+  final String? agent;
+
   /// Creates a session value object. [autoCommand] is optional (default `''`)
   /// so existing call sites and tests that predate the field keep compiling.
   const Session({
@@ -106,6 +112,7 @@ class Session {
     required this.server,
     this.autoCommand = '',
     this.metrics,
+    this.agent,
   });
 
   /// Builds a [Session] from one element of the `GET /api/sessions` array,
@@ -122,6 +129,7 @@ class Session {
       autoCommand: (json['autoCommand'] ?? '').toString(),
       server: server,
       metrics: SessionMetrics.fromJson(json['metrics']),
+      agent: json['agent']?.toString(),
     );
   }
 
@@ -473,6 +481,34 @@ class ServerRuntimeConfig {
       'ServerRuntimeConfig($serverName, cwd=$defaultCwd, ${scanFolders.length} roots)';
 }
 
+/// One entry from `GET /api/agents`: an AI CLI agent provider the server can
+/// launch a session with — its stable id (passed back as `POST /api/sessions`'
+/// `agent` field), display label and accent color. Powers the New Session
+/// sheet's agent picker.
+class AgentInfo {
+  /// Stable provider id (e.g. `claude`, `codex`).
+  final String id;
+
+  /// Human-readable display label (e.g. `Claude Code`).
+  final String label;
+
+  /// Accent color as `#rrggbb`; '' if the server omitted it.
+  final String color;
+
+  /// Creates an agent-info value object.
+  const AgentInfo({required this.id, required this.label, required this.color});
+
+  /// Parses one element of the `agents` array.
+  factory AgentInfo.fromJson(Map<String, dynamic> json) => AgentInfo(
+        id: (json['id'] ?? '').toString(),
+        label: (json['label'] ?? '').toString(),
+        color: (json['color'] ?? '').toString(),
+      );
+
+  @override
+  String toString() => 'AgentInfo($id, $label, $color)';
+}
+
 /// A ranged slice of a session's sanitized scrollback, from
 /// `GET /api/sessions/:id/scrollback`.
 class ScrollbackChunk {
@@ -673,11 +709,17 @@ class TranscriptPage {
   /// paginating when [cursor] is `null`, not solely on [hasMore].
   final bool hasMore;
 
+  /// The provider that parsed this transcript (e.g. `claude`, `codex`), or
+  /// `null` if the server didn't report one (an older server, or a session
+  /// with no resolvable agent).
+  final String? agent;
+
   /// Creates a transcript page.
   const TranscriptPage({
     required this.messages,
     required this.cursor,
     required this.hasMore,
+    this.agent,
   });
 
   /// Parses the `/api/sessions/:id/transcript` response body.
@@ -692,12 +734,13 @@ class TranscriptPage {
           : const <TranscriptTurn>[],
       cursor: json['cursor']?.toString(),
       hasMore: json['hasMore'] == true,
+      agent: json['agent']?.toString(),
     );
   }
 
   @override
   String toString() =>
-      'TranscriptPage(${messages.length} turns, hasMore=$hasMore)';
+      'TranscriptPage(${messages.length} turns, hasMore=$hasMore, agent=$agent)';
 }
 
 /// One backward-paginated page of a *subagent's* transcript from

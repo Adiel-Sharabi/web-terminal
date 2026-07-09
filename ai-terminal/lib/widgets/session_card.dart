@@ -3,7 +3,7 @@
 ///
 /// ```
 /// ┌──────────────────────────────────────────────┐
-/// │  ●  Session Name                      [Home] │
+/// │  ●  Session Name              [Codex] [Home] │  ← agent chip only when Session.agent != null
 /// │     Working        🔔 ☆        2m ago         │  ← status label + bell + star + time
 /// │     [Needs approval ×]                        │  ← only when kind != null
 /// └──────────────────────────────────────────────┘
@@ -17,6 +17,7 @@ library;
 import 'package:flutter/material.dart';
 
 import '../api/models.dart';
+import '../api/agent_catalog.dart';
 import '../theme/app_theme.dart';
 import '../theme/status_colors.dart';
 import 'attention_chip.dart';
@@ -169,6 +170,10 @@ class SessionCard extends StatelessWidget {
                     ),
                   ),
                   const SizedBox(width: 8),
+                  if (session.agent != null) ...[
+                    _AgentChip(agentId: session.agent!),
+                    const SizedBox(width: 8),
+                  ],
                   ServerBadge(name: session.server.name),
                   if (onMoreTap != null)
                     _IconTapTarget(
@@ -277,6 +282,51 @@ IconData _bellIcon(String level) => switch (level) {
   'all' => Icons.notifications_active,
   _ => Icons.notifications_outlined,
 };
+
+final RegExp _hexColorRe = RegExp(r'^#[0-9a-fA-F]{6}$');
+
+/// Parses a `#rrggbb` string into a [Color]; falls back to [fallback] when
+/// [hex] is `null` or doesn't match the pattern, so a malformed or missing
+/// color can never crash the chip.
+Color parseAgentColor(String? hex, Color fallback) {
+  if (hex == null || !_hexColorRe.hasMatch(hex)) return fallback;
+  return Color(0xFF000000 | int.parse(hex.substring(1), radix: 16));
+}
+
+/// A small pill naming the AI CLI agent driving this session (Claude Code,
+/// Codex, …), tinted with the agent's accent color. [SessionCard] instantiates
+/// this only when [Session.agent] is non-null — a plain shell gets no chip.
+///
+/// Label and colour come from [AgentCatalog], which mirrors the server's
+/// `GET /api/agents` registry — the SINGLE source of truth. The app deliberately
+/// keeps no table of its own, so a CLI agent added server-side is chipped here with
+/// no app release. An id the catalogue has not seen yet still renders (labelled with
+/// the raw id, tinted with the theme default) rather than hiding the session.
+class _AgentChip extends StatelessWidget {
+  const _AgentChip({required this.agentId});
+
+  final String agentId;
+
+  @override
+  Widget build(BuildContext context) {
+    final theme = Theme.of(context);
+    final known = AgentCatalog.instance[agentId];
+    final label = known?.label ?? agentId;
+    final color = parseAgentColor(known?.color, theme.colorScheme.onSurfaceVariant);
+    return Container(
+      padding: const EdgeInsets.symmetric(horizontal: 6, vertical: 2),
+      decoration: BoxDecoration(
+        color: color.withValues(alpha: 0.15),
+        borderRadius: BorderRadius.circular(AppShape.small),
+        border: Border.all(color: color.withValues(alpha: 0.4)),
+      ),
+      child: Text(
+        label,
+        style: theme.textTheme.labelSmall?.copyWith(color: color),
+      ),
+    );
+  }
+}
 
 /// Small, tap-friendly icon button used for the bell/star row — compact
 /// enough that both fit next to the timestamp without crowding the card.

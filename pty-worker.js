@@ -15,6 +15,7 @@ const pty = require('node-pty');
 const ipc = require('./lib/ipc');
 const { resolveRestoreRunCommand } = require('./lib/restore-command');
 const { claudeProjectDirName } = require('./lib/transcript');
+const agents = require('./lib/agents');
 
 const WORKER_VERSION = '0.5.1';
 
@@ -440,7 +441,7 @@ function loadSessionConfigs() {
 function saveSessionConfigs() {
   const configs = [];
   for (const [id, s] of sessions) {
-    configs.push({ id, name: s.name, cwd: s.cwd, autoCommand: s.autoCommand || '', claudeSessionId: s.claudeSessionId || null });
+    configs.push({ id, name: s.name, cwd: s.cwd, autoCommand: s.autoCommand || '', agent: s.agent || null, claudeSessionId: s.claudeSessionId || null });
   }
   try { fs.writeFileSync(SESSIONS_FILE, JSON.stringify(configs, null, 2), 'utf8'); }
   catch (e) { log('failed to save sessions.json:', e.message); }
@@ -841,9 +842,22 @@ function sessionIdOf(session) {
   return session ? session.id : null;
 }
 
+// The AI agent this session runs: the explicit choice made at create time, else
+// inferred from the launch command, else null for a plain shell. Never throws — an
+// unknown value degrades to inference, so a session written by a newer server loads.
+function sessionAgent(s) {
+  const explicit = s && s.agent;
+  if (agents.isKnownAgent(explicit)) return explicit;
+  return agents.detectAgentFromCommand((s && s.autoCommand) || '');
+}
+
 function sessionSummary(id, s) {
+  const agent = sessionAgent(s);
   let claudeSessionId = s.claudeSessionId || null;
-  if (!claudeSessionId && s.autoCommand && /\bclaude\b/i.test(s.autoCommand)) {
+  // Claude records its conversation id in the cwd's project dir; other agents do not.
+  // Gate on the command actually launching Claude — identical to the old inline
+  // `/\bclaude\b/` grep, but the program-name test now lives in lib/agents.js.
+  if (!claudeSessionId && agent === 'claude' && agents.commandLaunches('claude', s.autoCommand)) {
     // #23: only adopt an id provably written by THIS session — never a
     // pre-existing conversation left in the cwd by an earlier session.
     claudeSessionId = ownClaudeSessionId(s);
@@ -859,6 +873,7 @@ function sessionSummary(id, s) {
     lastActivity: s.lastActivity,
     clients: s.clientCount || 0,
     autoCommand: s.autoCommand || '',
+    agent,
     claudeSessionId,
     hookStatus: !!s.hookStatus,
     apiError: !!s.apiError,
@@ -870,7 +885,7 @@ function sessionSummary(id, s) {
 // Defaults to autoCommand. Restore uses this to send `claude --resume <id>`
 // while keeping the user-facing autoCommand (e.g. "claude --continue") intact
 // in sessions.json — so the UI doesn't suddenly show a derived --resume form.
-function createSession(id, cwd, name, autoCommand, savedScrollback, claudeSessionId, runCommand) {
+function createSession(id, cwd, name, autoCommand, savedScrollback, claudeSessionId, runCommand, agent) {
   const sessionEnv = buildSafeEnv();
   sessionEnv.WT_SESSION_ID = id;
   sessionEnv.WT_SESSION_PORT = String(PORT_HINT);
@@ -935,6 +950,10 @@ function createSession(id, cwd, name, autoCommand, savedScrollback, claudeSessio
     hookStatus: false,
     lastHookActivity: 0,
     autoCommand: autoCommand || '',
+    // Which AI agent this session runs. An explicit choice (the new-session picker)
+    // is authoritative and persisted; null means "infer from the command", which is
+    // what every session created before this field existed does.
+    agent: agents.isKnownAgent(agent) ? agent : null,
     claudeSessionId: claudeSessionId || null,
     clientCount: 0,
     // Bracketed-paste mode (ESC[?2004h/l), tracked from PTY output and
@@ -1172,9 +1191,11 @@ const rpcHandlers = {
     const cwd = String(params.cwd || getDefaultCwd()).substring(0, 260);
     const name = String(params.name || `Session ${sessions.size + 1}`).substring(0, 100).replace(/[\x00-\x1f]/g, '');
     const autoCommand = String(params.autoCommand || '').substring(0, 500);
-    createSession(id, cwd, name, autoCommand, null, null);
-    broadcastEvent('sessionCreated', { id, name, cwd, autoCommand });
-    return { id, name };
+    // Explicit agent choice from the new-session picker; unknown/absent → inferred.
+    const agent = agents.isKnownAgent(params.agent) ? params.agent : null;
+    createSession(id, cwd, name, autoCommand, null, null, undefined, agent);
+    broadcastEvent('sessionCreated', { id, name, cwd, autoCommand, agent });
+    return { id, name, agent };
   },
 
   renameSession: async (params) => {
@@ -1640,7 +1661,9 @@ function restoreSessionsOnStartup() {
     const runCmd = resolveRestoreRunCommand(cfg);
     const savedScrollback = loadScrollback(cfg.id);
     try {
-      createSession(cfg.id, cfg.cwd, cfg.name, original, savedScrollback, cfg.claudeSessionId || null, runCmd);
+      // cfg.agent is absent for sessions persisted before the field existed; null
+      // there means "infer from the command", preserving their behaviour on restore.
+      createSession(cfg.id, cfg.cwd, cfg.name, original, savedScrollback, cfg.claudeSessionId || null, runCmd, cfg.agent || null);
     } catch (e) {
       log(`failed to restore session ${cfg.id}: ${e.message}`);
     }

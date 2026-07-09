@@ -409,6 +409,59 @@ void main() {
     });
   });
 
+  group('summarizeTool (Codex tool cards)', () {
+    test('shell_command: command in the title, output in the detail', () {
+      final s = summarizeTool(const ToolUse(
+        name: 'shell_command',
+        inputPreview: '',
+        input: {'command': 'npm test'},
+        result: 'PASS',
+      ));
+      expect(s.title, 'Shell — npm test');
+      expect(s.detail, 'PASS');
+    });
+
+    test('shell_command: multiline command also appears in the detail', () {
+      final s = summarizeTool(const ToolUse(
+        name: 'shell_command',
+        inputPreview: '',
+        input: {'command': 'set -e\nnpm test'},
+        result: 'PASS',
+      ));
+      expect(s.title, 'Shell — set -e');
+      expect(s.detail, 'set -e\nnpm test\n\nPASS');
+    });
+
+    test('apply_patch: fixed "Patch" title, raw patch + result in the detail',
+        () {
+      const patch = '*** Begin Patch\n*** Update File: a.dart\n*** End Patch';
+      final s = summarizeTool(const ToolUse(
+        name: 'apply_patch',
+        inputPreview: '',
+        input: {'input': patch},
+        result: 'applied',
+      ));
+      expect(s.title, 'Patch');
+      expect(s.detail, '$patch\n\napplied');
+    });
+
+    test('web_search: query in the title, result in the detail', () {
+      final s = summarizeTool(const ToolUse(
+        name: 'web_search',
+        inputPreview: '',
+        input: {'query': 'flutter dropdown initialValue'},
+        result: 'top hit: docs.flutter.dev',
+      ));
+      expect(s.title, 'Search — flutter dropdown initialValue');
+      expect(s.detail, 'top hit: docs.flutter.dev');
+    });
+
+    test('web_search falls back to the tool name when query is empty', () {
+      final s = summarizeTool(const ToolUse(name: 'web_search', inputPreview: ''));
+      expect(s.title, 'web_search');
+    });
+  });
+
   group('#32 parseCommandInvocation', () {
     test('extracts name (slash stripped), args, and body', () {
       const text =

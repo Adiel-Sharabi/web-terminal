@@ -93,6 +93,25 @@ void main() {
       expect(p.hasMore, isTrue);
       expect(p.cursor, isNull);
     });
+
+    test('parses the agent field naming the provider that parsed it', () {
+      final p = TranscriptPage.fromJson({
+        'messages': [],
+        'cursor': null,
+        'hasMore': false,
+        'agent': 'codex',
+      });
+      expect(p.agent, 'codex');
+    });
+
+    test('agent is null when the server omits it', () {
+      final p = TranscriptPage.fromJson({
+        'messages': [],
+        'cursor': null,
+        'hasMore': false,
+      });
+      expect(p.agent, isNull);
+    });
   });
 
   group('subagent trace models', () {

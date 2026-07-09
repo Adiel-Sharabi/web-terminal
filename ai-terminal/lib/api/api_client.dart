@@ -83,6 +83,27 @@ class ApiClient {
     return ServerRuntimeConfig.fromJson(_asMap(_decode(res)));
   }
 
+  /// Fetches the AI CLI agents this server can launch a session with
+  /// (`GET /api/agents`), for the New Session sheet's agent picker.
+  ///
+  /// Best-effort: any failure (unreachable server, malformed body, an older
+  /// server without the endpoint) yields an empty list rather than throwing —
+  /// a picker that can't load extra agents must still let "Auto" through, so a
+  /// failure here can never block session creation.
+  Future<List<AgentInfo>> agents() async {
+    try {
+      final res = await _send('GET', '/api/agents');
+      final list = _asMap(_decode(res))['agents'];
+      if (list is! List) return const <AgentInfo>[];
+      return list
+          .whereType<Map<String, dynamic>>()
+          .map(AgentInfo.fromJson)
+          .toList(growable: false);
+    } catch (_) {
+      return const <AgentInfo>[];
+    }
+  }
+
   /// Lists the folders offered in the New Session picker
   /// (`GET /api/history/folders`).
   ///
@@ -149,15 +170,21 @@ class ApiClient {
   /// partially populated: [Session.cwd] echoes the requested [cwd] (or empty),
   /// [Session.status] defaults to `idle` and [Session.notifyLevel] to
   /// `important`. Call [listSessions] to get the fully-resolved record.
+  ///
+  /// [agent] selects the AI CLI provider (`claude`/`codex`/…) to launch;
+  /// omit it to let the server infer from [autoCommand]. Sent only when
+  /// non-null, so older servers without agent support never see the field.
   Future<Session> createSession({
     String? name,
     String? cwd,
     String? autoCommand,
+    String? agent,
   }) async {
     final params = <String, String>{};
     if (name != null) params['name'] = name;
     if (cwd != null) params['cwd'] = cwd;
     if (autoCommand != null) params['autoCommand'] = autoCommand;
+    if (agent != null) params['agent'] = agent;
     final res = await _send('POST', '/api/sessions', body: params);
     final j = _asMap(_decode(res));
     return Session(
@@ -170,6 +197,10 @@ class ApiClient {
       notifyLevel: 'important',
       autoCommand: autoCommand ?? '',
       server: server,
+      // Echoes only what was explicitly requested — when omitted (server
+      // infers it), the resolved id isn't known yet; [listSessions] picks it
+      // up on the next fetch.
+      agent: agent,
     );
   }
 
