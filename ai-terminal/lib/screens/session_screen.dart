@@ -107,6 +107,19 @@ bool pasteImageIntoCompose({
 bool questionOverlayVisible(PendingQuestion? pending, String? dismissedId) =>
     pending != null && pending.toolUseId != dismissedId;
 
+/// After verifying a submitted answer, whether the overlay must be re-shown: the
+/// same prompt is [stillPending] (the answer never landed after every retry) AND
+/// it's still the one we optimistically dismissed ([dismissedId] == the answered
+/// id — the user hasn't since dismissed or moved to another prompt). Prevents a
+/// dropped answer from leaving a hidden, silently-stuck question (#19 follow-up).
+/// Pure so the recovery rule is enforceable.
+bool shouldResurfaceAfterAnswer({
+  required bool stillPending,
+  required String answeredToolUseId,
+  required String? dismissedId,
+}) =>
+    stillPending && dismissedId == answeredToolUseId;
+
 class SessionScreen extends StatefulWidget {
   const SessionScreen({
     super.key,
@@ -389,26 +402,33 @@ class _SessionScreenState extends State<SessionScreen>
       }
     }
     if (mounted) _scrollToBottom();
-    // Answers ending in a confirming Enter (multi-select / multi-question) rely
-    // on that Enter arriving in its own stdin read. Over the cluster path,
-    // network bunching can coalesce it with the preceding digit so Claude's
-    // batched update drops it (same failure family as #19) — the option is left
-    // marked but unsubmitted. Verify the prompt actually cleared; if the same
-    // one is still pending, the Enter was lost — re-send a lone one.
-    if (toolUseId != null && answerNeedsConfirm(frames)) {
-      await _confirmAnswerLanded(toolUseId);
+    // Verify the answer actually landed — and un-strand it if it didn't. We just
+    // dismissed the overlay optimistically, so a dropped answer would otherwise
+    // sit hidden-but-pending forever (the user only learns Claude never moved).
+    if (toolUseId != null) {
+      await _verifyAnswerLanded(toolUseId, resendEnter: answerNeedsConfirm(frames));
     }
   }
 
-  /// Re-sends a lone confirming Enter if the just-answered prompt is still
-  /// pending — i.e. the Enter that [buildAnswerFrames] appended was coalesced
-  /// away in transit. Polls up to 3× (~900ms apart) and stops the instant the
-  /// prompt clears (or a different one replaces it), so a confirm that DID land
-  /// never triggers a stray keystroke. A re-sent Enter arrives seconds later, on
-  /// its own, guaranteeing a separate stdin read.
-  Future<void> _confirmAnswerLanded(String toolUseId) async {
+  /// Confirms the just-answered prompt cleared, and recovers if it didn't.
+  ///
+  /// Polls up to 3× (~900ms apart), stopping the instant the prompt clears (or a
+  /// different one replaces it) — the answer landed. While it's still pending:
+  /// when [resendEnter] (the answer ended in a confirming Enter, which cluster-
+  /// path bunching can coalesce away — same failure family as #19) a lone Enter
+  /// is re-sent each round, arriving on its own in a separate stdin read. Answers
+  /// that auto-submit on their last digit pass `resendEnter: false` so no stray
+  /// keystroke is sent.
+  ///
+  /// If the prompt is STILL pending after every retry, the answer never took —
+  /// so we clear the optimistic dismissal and re-show the overlay. Without this
+  /// the user is silently stranded: overlay gone, question unanswered, Claude
+  /// waiting, and (pre-#19-dismissal) not even a re-bump to signal it.
+  Future<void> _verifyAnswerLanded(String toolUseId,
+      {required bool resendEnter}) async {
     final api = _api;
     if (api == null) return;
+    PendingQuestion? stillPending;
     for (var attempt = 0; attempt < 3; attempt++) {
       await Future<void>.delayed(const Duration(milliseconds: 900));
       if (!mounted) return;
@@ -421,8 +441,21 @@ class _SessionScreenState extends State<SessionScreen>
       if (!mounted) return;
       // Cleared, or a different prompt took its place → the answer landed.
       if (q == null || q.toolUseId != toolUseId) return;
-      // Same prompt still up → the confirm was dropped; send it again alone.
-      _connection?.sendInput('\r');
+      stillPending = q;
+      if (resendEnter) _connection?.sendInput('\r'); // dropped confirm → resend
+    }
+    // Exhausted retries with the same prompt up → surface it again so the user
+    // can retry, instead of a silently stuck, hidden question.
+    if (mounted &&
+        shouldResurfaceAfterAnswer(
+          stillPending: stillPending != null,
+          answeredToolUseId: toolUseId,
+          dismissedId: _dismissedQuestionId,
+        )) {
+      setState(() {
+        _dismissedQuestionId = null;
+        _pendingQuestion = stillPending;
+      });
     }
   }
 

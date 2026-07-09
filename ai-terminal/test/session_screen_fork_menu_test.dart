@@ -85,6 +85,40 @@ void main() {
     });
   });
 
+  group('shouldResurfaceAfterAnswer (#19: dropped answer must not stay hidden)', () {
+    test('still pending + still our dismissal -> re-show', () {
+      expect(
+        shouldResurfaceAfterAnswer(
+            stillPending: true, answeredToolUseId: 't1', dismissedId: 't1'),
+        isTrue,
+      );
+    });
+
+    test('answer landed (not pending) -> stay hidden', () {
+      expect(
+        shouldResurfaceAfterAnswer(
+            stillPending: false, answeredToolUseId: 't1', dismissedId: 't1'),
+        isFalse,
+      );
+    });
+
+    test('a different prompt was dismissed since -> do not clobber it', () {
+      expect(
+        shouldResurfaceAfterAnswer(
+            stillPending: true, answeredToolUseId: 't1', dismissedId: 't2'),
+        isFalse,
+      );
+    });
+
+    test('user cleared the dismissal -> do not resurface', () {
+      expect(
+        shouldResurfaceAfterAnswer(
+            stillPending: true, answeredToolUseId: 't1', dismissedId: null),
+        isFalse,
+      );
+    });
+  });
+
   group('pasteImageIntoCompose (#29: Alt+V lands where you type)', () {
     test('chat lens -> compose (terminal is offstage there)', () {
       expect(
