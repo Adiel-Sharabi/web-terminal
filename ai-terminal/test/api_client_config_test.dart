@@ -83,6 +83,83 @@ void main() {
     });
   });
 
+  group('ApiClient.agents', () {
+    test('GETs /api/agents and returns the parsed list', () async {
+      late http.Request captured;
+      final client = ApiClient(
+        _server,
+        httpClient: MockClient((req) async {
+          captured = req;
+          return http.Response(
+            jsonEncode({
+              'agents': [
+                {'id': 'claude', 'label': 'Claude Code', 'color': '#d97757'},
+                {'id': 'codex', 'label': 'Codex', 'color': '#10a37f'},
+              ],
+              'default': 'claude',
+            }),
+            200,
+          );
+        }),
+      );
+
+      final agents = await client.agents();
+      expect(captured.method, 'GET');
+      expect(captured.url.path, '/api/agents');
+      expect(agents.map((a) => a.id), ['claude', 'codex']);
+      expect(agents.first.label, 'Claude Code');
+      expect(agents.first.color, '#d97757');
+    });
+
+    test('never throws — a failure yields an empty list', () async {
+      final client = ApiClient(
+        _server,
+        httpClient: MockClient((req) async => http.Response('', 500)),
+      );
+      expect(await client.agents(), isEmpty);
+    });
+
+    test('a malformed body (no agents array) yields an empty list', () async {
+      final client = ApiClient(
+        _server,
+        httpClient: MockClient((req) async => http.Response('{}', 200)),
+      );
+      expect(await client.agents(), isEmpty);
+    });
+  });
+
+  group('ApiClient.createSession agent field', () {
+    test('includes agent in the POST body when provided', () async {
+      late http.Request captured;
+      final client = ApiClient(
+        _server,
+        httpClient: MockClient((req) async {
+          captured = req;
+          return http.Response(jsonEncode({'id': 's1', 'name': 'n'}), 200);
+        }),
+      );
+
+      final created = await client.createSession(agent: 'codex');
+      expect(jsonDecode(captured.body)['agent'], 'codex');
+      expect(created.agent, 'codex');
+    });
+
+    test('omits agent entirely when not provided (server infers it)', () async {
+      late http.Request captured;
+      final client = ApiClient(
+        _server,
+        httpClient: MockClient((req) async {
+          captured = req;
+          return http.Response(jsonEncode({'id': 's1', 'name': 'n'}), 200);
+        }),
+      );
+
+      final created = await client.createSession();
+      expect(jsonDecode(captured.body).containsKey('agent'), isFalse);
+      expect(created.agent, isNull);
+    });
+  });
+
   group('ApiClient.reorderSessions', () {
     test('POSTs /api/sessions/order with {orderedIds}', () async {
       late http.Request captured;

@@ -1344,6 +1344,21 @@ ToolCardSummary summarizeTool(ToolUse t) {
       final host = (u != null && u.host.isNotEmpty) ? u.host : url;
       return ToolCardSummary(
           title: url.isEmpty ? name : 'Fetch — $host', detail: result);
+    // Codex tool names (server-side provider registry): shell_command mirrors
+    // Claude's Bash exactly, apply_patch shows the raw patch text, web_search
+    // mirrors WebFetch's "action — subject" shape.
+    case 'shell_command':
+      final cmd = s('command');
+      return ToolCardSummary(
+        title: cmd.isEmpty ? 'Shell' : 'Shell — ${_firstLine(cmd)}',
+        detail: join2(cmd.contains('\n') ? cmd : '', result),
+      );
+    case 'apply_patch':
+      return ToolCardSummary(title: 'Patch', detail: join2(s('input'), result));
+    case 'web_search':
+      final query = s('query');
+      return ToolCardSummary(
+          title: query.isEmpty ? name : 'Search — $query', detail: result);
     default:
       final preview = t.inputPreview.trim();
       return ToolCardSummary(
@@ -1369,6 +1384,7 @@ class _ToolCardState extends State<_ToolCard> {
   static IconData _iconFor(String name) {
     switch (name) {
       case 'Bash':
+      case 'shell_command':
         return Icons.terminal_rounded;
       case 'Task':
         return Icons.account_tree_outlined;
@@ -1377,11 +1393,13 @@ class _ToolCardState extends State<_ToolCard> {
       case 'Edit':
       case 'MultiEdit':
       case 'Write':
+      case 'apply_patch':
         return Icons.edit_outlined;
       case 'Grep':
       case 'Glob':
         return Icons.search;
       case 'WebFetch':
+      case 'web_search':
         return Icons.public;
       default:
         return Icons.build_outlined;

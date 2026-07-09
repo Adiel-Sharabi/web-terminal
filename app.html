@@ -139,6 +139,9 @@
     /* #38 — Claude context-window % badge. Thresholds (50/70) live in the
        ctxBadge() helper; palette reuses idle amber / waiting red. */
     .sb-ctx { font-size: 10px; font-weight: 600; }
+    /* Agent chip. Colour is set inline from GET /api/agents (validated hex). */
+    .sb-agent { font-size: 9px; font-weight: 600; text-transform: uppercase; letter-spacing: .3px;
+                padding: 1px 5px; border-radius: 7px; border: 1px solid currentColor; opacity: .85; }
     .sb-ctx.ctx-lo { color: #6a7a8a; }
     .sb-ctx.ctx-mid { color: #da4; }
     .sb-ctx.ctx-hi { color: #e94560; }
@@ -425,6 +428,10 @@
           <input id="newCwd" placeholder="C:\dev" onfocus="showFolders()" oninput="showFolders()" onkeydown="folderKeydown(event)" autocomplete="off">
           <div id="folderSuggestions" class="folder-suggestions" style="display:none"></div>
         </div>
+        <label>AI agent</label>
+        <select id="newAgent">
+          <option value="">Auto (detect from command)</option>
+        </select>
         <label>Auto-command</label>
         <input id="newCmd" placeholder="e.g. claude --dangerously-skip-permissions">
         <div class="form-row">
@@ -2583,6 +2590,36 @@
       const cls = c >= 70 ? 'ctx-hi' : c >= 50 ? 'ctx-mid' : 'ctx-lo';
       return `<span class="sb-ctx ${cls}" title="Claude context window">${c}%</span>`;
     }
+    // --- AI agents (GET /api/agents) -----------------------------------------
+    // The server's provider registry is the SSOT: the picker options and the
+    // per-agent tint both come from it, so adding a CLI agent server-side needs no
+    // change here. `agents` maps id -> { label, color }.
+    let agents = {};
+    let agentDefault = 'claude';
+    // A colour is interpolated into a style attribute, so accept only a hex literal.
+    // Anything else (a compromised/rogue server) is dropped rather than injected.
+    const safeColor = (c) => (/^#[0-9a-fA-F]{6}$/.test(String(c || '')) ? c : '');
+    async function loadAgents() {
+      try {
+        const data = await (await fetch('/api/agents')).json();
+        agents = {};
+        for (const a of (data.agents || [])) agents[a.id] = { label: a.label, color: a.color };
+        agentDefault = data.default || 'claude';
+      } catch { agents = {}; }
+      const sel = document.getElementById('newAgent');
+      if (!sel) return;
+      sel.innerHTML = '<option value="">Auto (detect from command)</option>' +
+        Object.entries(agents).map(([id, a]) => `<option value="${esc(id)}">${esc(a.label)}</option>`).join('');
+    }
+    // Small tinted chip naming the session's agent. Absent for a plain shell, whose
+    // `agent` is null — those must not be labelled as any agent.
+    function agentBadge(s){
+      const a = s.agent && agents[s.agent];
+      if (!a) return '';
+      const col = safeColor(a.color);
+      const style = col ? ` style="color:${col};border-color:${col}"` : '';
+      return `<span class="sb-agent"${style} title="AI agent: ${esc(a.label)}">${esc(a.label)}</span>`;
+    }
     // Per-session push (ntfy) level — bell icon + click-cycle order.
     const NOTIFY_BELL = {
       off:       { icon: '&#128277;', label: 'Off (no push)' },        // 🔕
@@ -2768,6 +2805,7 @@
             `<div class="sb-name"><span class="sb-dot ${s.status}"></span>${esc(s.name)}</div>` +
             `<div class="sb-meta">` +
               `<span class="sb-status ${s.status}">${statusLabels[s.status] || s.status}</span>` +
+              agentBadge(s) +
               ctxBadge(s) +
               `<button class="sb-bell nl-${lvl}" title="Notifications: ${NOTIFY_BELL[lvl].label} — click to change">${NOTIFY_BELL[lvl].icon}</button>` +
               `<button class="sb-star${fav ? ' on' : ''}" title="${fav ? 'Remove from favorites' : 'Add to favorites'}">${fav ? '&#9733;' : '&#9734;'}</button>` +
@@ -3233,11 +3271,14 @@
         const name = document.getElementById('newName').value || undefined;
         const cwd = document.getElementById('newCwd').value || undefined;
         const autoCommand = document.getElementById('newCmd').value || '';
+        // '' = let the server infer the agent from the command. Only send an explicit
+        // pick, which the server then treats as authoritative for this session.
+        const agent = document.getElementById('newAgent').value || undefined;
         const apiBase = serverUrl ? `/cluster/${encodeURIComponent(serverUrl)}/api` : '/api';
         const res = await fetch(`${apiBase}/sessions`, {
           method: 'POST',
           headers: { 'Content-Type': 'application/json' },
-          body: JSON.stringify({ name, cwd, autoCommand })
+          body: JSON.stringify({ name, cwd, autoCommand, agent })
         });
         const data = await res.json();
         if (!res.ok) {
@@ -3799,7 +3840,10 @@
       const [hostData, list, cfg] = await Promise.all([
         fetch('/api/hostname').then(r => r.json()),
         fetch('/api/sessions').then(r => r.json()),
-        fetch('/api/config').then(r => r.json())
+        fetch('/api/config').then(r => r.json()),
+        // Agent catalogue: fills the new-session picker + the sidebar tint. Failure is
+        // non-fatal (no chips, "Auto" only) — never block the app on it.
+        loadAgents()
       ]);
 
       hostname = hostData.hostname;

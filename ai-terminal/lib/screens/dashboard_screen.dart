@@ -19,6 +19,8 @@ library;
 import 'package:flutter/material.dart';
 import 'package:shared_preferences/shared_preferences.dart';
 
+import '../api/agent_catalog.dart';
+import '../api/api_client.dart';
 import '../api/models.dart';
 import '../services/app_config.dart';
 import '../services/favorites_service.dart';
@@ -72,6 +74,19 @@ class _DashboardScreenState extends State<DashboardScreen> {
   void initState() {
     super.initState();
     _loadCollapsed();
+    _loadAgentCatalog();
+  }
+
+  /// Seed the agent catalogue so each session row can chip its agent. Every server
+  /// runs the same provider registry, so the first reachable one answers for all;
+  /// a failure is silent (ApiClient.agents never throws) and simply leaves rows
+  /// unchipped until the next load.
+  Future<void> _loadAgentCatalog() async {
+    for (final server in AppConfig.servers) {
+      await AgentCatalog.instance.refresh(ApiClient(server));
+      if (!AgentCatalog.instance.isEmpty) break;
+    }
+    if (mounted && !AgentCatalog.instance.isEmpty) setState(() {});
   }
 
   Future<void> _loadCollapsed() async {

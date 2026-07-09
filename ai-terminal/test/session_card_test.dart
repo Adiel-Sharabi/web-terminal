@@ -3,6 +3,7 @@
 import 'package:flutter/material.dart';
 import 'package:flutter_test/flutter_test.dart';
 
+import 'package:ai_terminal/api/agent_catalog.dart';
 import 'package:ai_terminal/api/models.dart';
 import 'package:ai_terminal/theme/app_theme.dart';
 import 'package:ai_terminal/widgets/attention_chip.dart';
@@ -16,6 +17,7 @@ Session _session({
   String name = 'my-project',
   String id = 'abc12345',
   SessionMetrics? metrics,
+  String? agent,
 }) => Session(
   id: id,
   name: name,
@@ -27,6 +29,7 @@ Session _session({
   server: _server(),
   autoCommand: '',
   metrics: metrics,
+  agent: agent,
 );
 
 Widget _wrap(Widget child) => MaterialApp(
@@ -266,6 +269,72 @@ void main() {
     await tester.pumpWidget(_wrap(SessionCard(session: session)));
 
     expect(find.textContaining('%'), findsNothing);
+  });
+
+  testWidgets('agent chip shows the label the SERVER catalogue supplies', (
+    tester,
+  ) async {
+    // The app keeps no table of agents — the label and tint come from
+    // GET /api/agents via AgentCatalog. Seeding it here is what a real launch does.
+    AgentCatalog.instance.clear();
+    AgentCatalog.instance.adopt(
+      const AgentInfo(id: 'codex', label: 'Codex', color: '#10a37f'),
+    );
+    addTearDown(AgentCatalog.instance.clear);
+
+    final session = _session(status: 'idle', agent: 'codex');
+    await tester.pumpWidget(_wrap(SessionCard(session: session)));
+
+    expect(find.text('Codex'), findsOneWidget);
+  });
+
+  testWidgets('a server-side rename of an agent needs no app release', (
+    tester,
+  ) async {
+    // Same id, a label this build has never hardcoded — it must still render,
+    // proving the catalogue (not the app) is the source of truth.
+    AgentCatalog.instance.clear();
+    AgentCatalog.instance.adopt(
+      const AgentInfo(id: 'codex', label: 'OpenAI Codex CLI', color: '#123456'),
+    );
+    addTearDown(AgentCatalog.instance.clear);
+
+    final session = _session(status: 'idle', agent: 'codex');
+    await tester.pumpWidget(_wrap(SessionCard(session: session)));
+
+    expect(find.text('OpenAI Codex CLI'), findsOneWidget);
+  });
+
+  testWidgets('agent chip is hidden for a plain shell (agent == null)', (
+    tester,
+  ) async {
+    final session = _session(status: 'idle'); // agent defaults to null
+    await tester.pumpWidget(_wrap(SessionCard(session: session)));
+
+    expect(find.text('Codex'), findsNothing);
+    expect(find.text('Claude Code'), findsNothing);
+  });
+
+  testWidgets('agent chip falls back to the raw id for an unknown agent', (
+    tester,
+  ) async {
+    // An id the catalogue has never seen (server newer than this app, or a
+    // fetch that failed) must still chip the row rather than hide the session.
+    AgentCatalog.instance.clear();
+    addTearDown(AgentCatalog.instance.clear);
+
+    final session = _session(status: 'idle', agent: 'some-future-agent');
+    await tester.pumpWidget(_wrap(SessionCard(session: session)));
+
+    expect(find.text('some-future-agent'), findsOneWidget);
+  });
+
+  test('parseAgentColor accepts a valid #rrggbb and rejects garbage', () {
+    const fallback = Colors.grey;
+    expect(parseAgentColor('#10a37f', fallback), const Color(0xFF10A37F));
+    expect(parseAgentColor('not-a-color', fallback), fallback);
+    expect(parseAgentColor('#12345', fallback), fallback); // too short
+    expect(parseAgentColor(null, fallback), fallback);
   });
 
   testWidgets('status label shows for working/idle/waiting, hidden for active', (

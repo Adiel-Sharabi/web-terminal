@@ -2,6 +2,8 @@
 // filter, mirroring the web's showFolders: case-insensitive substring match,
 // empty query shows everything) and the server dropdown's visibility (owner:
 // "there is no server selection" — it must show even with a single server).
+import 'dart:convert';
+
 import 'package:flutter/material.dart';
 import 'package:flutter_test/flutter_test.dart';
 import 'package:http/http.dart' as http;
@@ -138,6 +140,92 @@ void main() {
       // Enter creates the session from the working-dir field (issue #18).
       expect(cwdField.textInputAction, TextInputAction.done);
       expect(cwdField.onSubmitted, isNotNull);
+    });
+  });
+
+  group('agent picker', () {
+    const server = ServerConfig(
+      name: 'Solo',
+      baseUrl: 'http://x',
+      bearerToken: 't',
+    );
+
+    Future<void> pumpSheet(
+      WidgetTester tester,
+      Future<http.Response> Function(http.Request) handler,
+    ) async {
+      await tester.pumpWidget(
+        MaterialApp(
+          theme: AppTheme.dark,
+          home: Scaffold(
+            body: Builder(
+              builder: (context) => ElevatedButton(
+                onPressed: () => showNewSessionSheet(
+                  context,
+                  servers: const [server],
+                  initialServer: server,
+                  onCreated: (_) {},
+                  clientBuilder: (server) =>
+                      ApiClient(server, httpClient: MockClient(handler)),
+                ),
+                child: const Text('open'),
+              ),
+            ),
+          ),
+        ),
+      );
+      await tester.tap(find.text('open'));
+      await tester.pumpAndSettle();
+    }
+
+    testWidgets('lists Auto plus every agent from GET /api/agents', (
+      tester,
+    ) async {
+      await pumpSheet(tester, (req) async {
+        if (req.url.path == '/api/agents') {
+          return http.Response(
+            jsonEncode({
+              'agents': [
+                {'id': 'claude', 'label': 'Claude Code', 'color': '#d97757'},
+                {'id': 'codex', 'label': 'Codex', 'color': '#10a37f'},
+              ],
+              'default': 'claude',
+            }),
+            200,
+          );
+        }
+        return http.Response('{}', 200);
+      });
+
+      expect(find.text('AI agent'), findsOneWidget);
+      // DropdownButtonFormField doesn't expose `items` itself (only the
+      // FormField wrapper) — the underlying DropdownButton it builds does.
+      final dropdown = tester.widget<DropdownButton<String?>>(
+        find.byType(DropdownButton<String?>),
+      );
+      final labels = dropdown.items!
+          .map((i) => (i.child as Text).data)
+          .toList(growable: false);
+      expect(labels, [
+        'Auto (detect from command)',
+        'Claude Code',
+        'Codex',
+      ]);
+    });
+
+    testWidgets('shows only Auto when GET /api/agents fails', (tester) async {
+      await pumpSheet(
+        tester,
+        (req) async => http.Response('', 500),
+      );
+
+      final dropdown = tester.widget<DropdownButton<String?>>(
+        find.byType(DropdownButton<String?>),
+      );
+      final labels = dropdown.items!
+          .map((i) => (i.child as Text).data)
+          .toList(growable: false);
+      expect(labels, ['Auto (detect from command)']);
     });
   });
 
