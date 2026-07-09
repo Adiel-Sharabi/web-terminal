@@ -61,6 +61,30 @@ void main() {
     });
   });
 
+  group('questionOverlayVisible (#19: answered question must not re-flash)', () {
+    PendingQuestion q(String id) =>
+        PendingQuestion(toolUseId: id, questions: const []);
+
+    test('a fresh pending question shows', () {
+      expect(questionOverlayVisible(q('t1'), null), isTrue);
+    });
+
+    test('no pending question -> hidden', () {
+      expect(questionOverlayVisible(null, null), isFalse);
+      expect(questionOverlayVisible(null, 't1'), isFalse);
+    });
+
+    test('the just-answered question stays hidden while it lingers pending', () {
+      // _answerQuestion sets _dismissedQuestionId = the answered id; the poll
+      // keeps returning that same question for seconds until Claude consumes it.
+      expect(questionOverlayVisible(q('t1'), 't1'), isFalse);
+    });
+
+    test('a genuinely new question (different id) shows again', () {
+      expect(questionOverlayVisible(q('t2'), 't1'), isTrue);
+    });
+  });
+
   group('pasteImageIntoCompose (#29: Alt+V lands where you type)', () {
     test('chat lens -> compose (terminal is offstage there)', () {
       expect(
