@@ -11,6 +11,16 @@ import 'package:ai_terminal/widgets/compose_bar.dart';
 Widget _wrap(Widget child) =>
     MaterialApp(theme: AppTheme.dark, home: Scaffold(body: child));
 
+/// A valid 1×1 transparent PNG, so attachment-thumbnail tests exercise the real
+/// Image.memory path (not the error fallback).
+Uint8List _png1x1() => Uint8List.fromList(const [
+      137, 80, 78, 71, 13, 10, 26, 10, 0, 0, 0, 13, 73, 72, 68, 82, //
+      0, 0, 0, 1, 0, 0, 0, 1, 8, 6, 0, 0, 0, 31, 21, 196, 137, //
+      0, 0, 0, 13, 73, 68, 65, 84, 120, 156, 99, 250, 207, 0, 0, //
+      0, 3, 1, 1, 0, 24, 221, 141, 219, 0, 0, 0, 0, 73, 69, 78, 68, //
+      174, 66, 96, 130,
+    ]);
+
 void main() {
   testWidgets('the compose field is configured so Return inserts a newline', (
     tester,
@@ -307,5 +317,59 @@ void main() {
     await tester.sendKeyEvent(LogicalKeyboardKey.backspace);
     await tester.pump();
     expect(backspaces, 1);
+  });
+
+  // #29: image attachments render as removable thumbnail chips, and enable send
+  // even with empty text.
+  testWidgets('#29: attachment chips render a remove ✕ and enable send when text is empty', (
+    tester,
+  ) async {
+    var sent = false;
+    var removed = -1;
+    final controller = TextEditingController(); // no text — attachments alone
+    await tester.pumpWidget(
+      _wrap(
+        ComposeBar(
+          controller: controller,
+          focusNode: FocusNode(),
+          onSend: () => sent = true,
+          isLive: false,
+          attachments: [_png1x1(), _png1x1()],
+          onRemoveAttachment: (i) => removed = i,
+        ),
+      ),
+    );
+    await tester.pump();
+
+    // Two attachments → two remove ✕ affordances.
+    expect(find.byIcon(Icons.close), findsNWidgets(2));
+
+    // Send is enabled despite the empty text field (attachments count).
+    final sendButton = tester.widget<IconButton>(find.byType(IconButton));
+    expect(sendButton.onPressed, isNotNull);
+    await tester.tap(find.byIcon(Icons.send));
+    expect(sent, isTrue);
+
+    // Tapping the first chip's ✕ reports index 0.
+    await tester.tap(find.byIcon(Icons.close).first);
+    expect(removed, 0);
+  });
+
+  testWidgets('#29: with no attachments and empty text, send stays disabled', (
+    tester,
+  ) async {
+    await tester.pumpWidget(
+      _wrap(
+        ComposeBar(
+          controller: TextEditingController(),
+          focusNode: FocusNode(),
+          onSend: () {},
+          isLive: false,
+          attachments: const [],
+        ),
+      ),
+    );
+    final sendButton = tester.widget<IconButton>(find.byType(IconButton));
+    expect(sendButton.onPressed, isNull);
   });
 }

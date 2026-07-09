@@ -95,6 +95,41 @@ bool pasteImageIntoCompose({
 }) =>
     activeLens == 'chat' || composeFocused;
 
+/// The exact bytes that submit a composed prompt to the PTY, INCLUDING the
+/// trailing submit CR, as ONE atomic frame — matching the web client
+/// (`app.html` composeSend). Single-line → `text\r`. Multi-line → bracketed
+/// paste (`ESC[200~ … ESC[201~`) with interior newlines as CR and any existing
+/// paste markers stripped (so user content can't close the wrapper early), then
+/// the submit `\r` AFTER the close marker.
+///
+/// Sending the body and its `\r` together — not as a delayed second write — is
+/// the #44 fix: the old split (`_submitToPty` wrote the body, then `\r` 90ms
+/// later) could lose the `\r` when `_connection` was nulled on background or
+/// replaced by a reconnect in that gap, leaving the text on the shared PTY input
+/// line unsent (it then "vanished" from chat when the optimistic echo timed out).
+/// Pure so the payload is exhaustively testable.
+String buildComposeSubmission(String val) {
+  if (val.contains('\n')) {
+    final safe = val
+        .replaceAll(RegExp('\x1b\\[2(?:00|01)~'), '')
+        .replaceAll(RegExp(r'\r?\n'), '\r');
+    return '\x1b[200~$safe\x1b[201~\r';
+  }
+  return '$val\r';
+}
+
+/// A staged compose-bar image attachment (#29): the thumbnail [bytes] shown in
+/// the removable chip, and the server [path] delivered to Claude on submit.
+class _ComposeAttachment {
+  const _ComposeAttachment({required this.bytes, required this.path});
+  final Uint8List bytes;
+  final String path;
+
+  /// The PTY payload for this image — the path wrapped in bracketed paste, as
+  /// the upload API returns it, so Claude reads it as a pasted file path.
+  String get reference => '\x1b[200~$path\x1b[201~';
+}
+
 /// Whether the interactive-question overlay (#19) should be visible. A question
 /// shows unless it's the one the user already dealt with — [dismissedId] is set
 /// both when they dismiss to answer in-terminal AND right after they answer via
@@ -200,6 +235,10 @@ class _SessionScreenState extends State<SessionScreen>
   // the Chat lens is mounted.
   final StreamController<String> _submittedPrompts =
       StreamController<String>.broadcast();
+  // Image attachments staged in the compose bar (#29): pasted/added images shown
+  // as removable thumbnail chips; their file paths are sent to the PTY on submit
+  // (as pasted paths), not typed into the field as raw text.
+  final List<_ComposeAttachment> _attachments = <_ComposeAttachment>[];
   bool _rawMode =
       false; // false = compose-first (default); true = direct terminal typing
   bool _composeLive = false; // true while a '/'-prefixed line is streaming live
@@ -897,53 +936,42 @@ class _SessionScreenState extends State<SessionScreen>
     }
   }
 
-  /// Sends [body] to the PTY, then the submit Enter as a SEPARATE frame after a
-  /// short gap. Claude Code treats text and a trailing CR arriving in one burst
-  /// as a *paste* (the CR becomes a newline in the message, not a submit) — so
-  /// the message would land in the input box but not send until you pressed
-  /// Enter again. A discrete, slightly-delayed CR is read as a real submit
-  /// keystroke.
-  void _submitToPty(String body) {
-    _connection?.sendInput(body);
-    Future.delayed(const Duration(milliseconds: 90), () {
-      _connection?.sendInput('\r');
-    });
-  }
-
-  /// Sends the composed buffer. Single-line → raw `text + '\r'`. Multi-line →
-  /// bracketed-paste (via [Terminal.paste]) so Claude/readline treat it as
-  /// one atomic block, then a trailing `'\r'`. A live '/' line just needs a
-  /// commit `'\r'` (its body already streamed char-by-char). An empty buffer
-  /// still sends a bare `'\r'` — e.g. to dismiss a prompt.
+  /// Sends the composed buffer as ONE atomic PTY frame (body + submit `\r`
+  /// together — see [buildComposeSubmission], the #44 fix). Any staged image
+  /// attachments (#29) are pasted first, so Claude has the file paths buffered
+  /// before the prompt + submit land. A live '/' line just needs a commit `'\r'`
+  /// (its body already streamed char-by-char). An empty buffer with no
+  /// attachments still sends a bare `'\r'` — e.g. to dismiss a prompt.
+  ///
+  /// Guards on a live connection first: if there's no PTY to submit to, the
+  /// buffer is kept (not cleared into the void) so the user's text survives to
+  /// retry — mirroring the web client's `if (WS not open) return`.
   void _sendCompose() {
+    final conn = _connection;
+    if (conn == null) return; // no PTY — keep the buffer, don't clear (#44)
     final val = _composeController.text;
     if (_composeLive) {
-      _connection?.sendInput('\r');
+      conn.sendInput('\r');
       _pushComposeHistory(val);
       _clearComposeInput();
       _scrollToBottom();
       return;
     }
-    if (val.isEmpty) {
-      _connection?.sendInput('\r');
+    // Nothing to send (no text, no images) → a bare submit Enter.
+    if (val.isEmpty && _attachments.isEmpty) {
+      conn.sendInput('\r');
       _scrollToBottom();
       return;
     }
-    // Optimistic Chat echo (#31): show the prompt immediately, before Claude's
-    // transcript reflects it. Reconciled/deduped in ConversationView.
-    _submittedPrompts.add(val);
-    if (val.contains('\n')) {
-      // Multi-line: bracketed paste so Claude/readline treat it as one atomic
-      // block. Strip any bracketed-paste markers already in the buffer (so user
-      // content can't close our wrapper early) and convert interior newlines to
-      // CR. The submit Enter is sent SEPARATELY below.
-      final safe = val
-          .replaceAll(RegExp('\x1b\\[2(?:00|01)~'), '')
-          .replaceAll(RegExp(r'\r?\n'), '\r');
-      _submitToPty('\x1b[200~$safe\x1b[201~');
-    } else {
-      _submitToPty(val);
+    // #29: paste each staged image's path (bracketed-paste) before the prompt.
+    for (final a in _attachments) {
+      conn.sendInput(a.reference);
     }
+    // Optimistic Chat echo (#31): show the prompt immediately, before Claude's
+    // transcript reflects it. Reconciled/deduped in ConversationView. Skipped for
+    // an image-only send (empty text) — the echo path ignores empty strings.
+    if (val.isNotEmpty) _submittedPrompts.add(val);
+    conn.sendInput(buildComposeSubmission(val));
     _pushComposeHistory(val);
     _clearComposeInput();
     _scrollToBottom();
@@ -969,6 +997,12 @@ class _SessionScreenState extends State<SessionScreen>
     _liveTabbed = false;
     _historyActive = false;
     _composeController.clear();
+    // #29: drop any staged image chips too (they were just sent). setState so the
+    // chip strip disappears — the controller listener only rebuilds the field.
+    if (_attachments.isNotEmpty) {
+      _attachments.clear();
+      if (mounted) setState(() {});
+    }
     _restoreLensAfterLive();
     unawaited(_saveDraft());
   }
@@ -1127,6 +1161,20 @@ class _SessionScreenState extends State<SessionScreen>
     );
   }
 
+  /// Stages an image as a compose-bar attachment chip (#29): [bytes] is the
+  /// thumbnail preview, [path] the server file path delivered to Claude on send.
+  void _addComposeAttachment(Uint8List bytes, String path) {
+    if (!mounted) return;
+    setState(() => _attachments.add(_ComposeAttachment(bytes: bytes, path: path)));
+    // Make sure the compose bar has focus so the new chip + send are right there.
+    _composeFocusNode.requestFocus();
+  }
+
+  void _removeComposeAttachment(int index) {
+    if (index < 0 || index >= _attachments.length) return;
+    setState(() => _attachments.removeAt(index));
+  }
+
   Future<ImageSource?> _chooseImageSource() {
     return showModalBottomSheet<ImageSource>(
       context: context,
@@ -1178,8 +1226,20 @@ class _SessionScreenState extends State<SessionScreen>
       final reference = await ApiClient(
         session.server,
       ).uploadClipboardImage(session.id, bytes, mime: mime);
-      _connection?.sendInput(reference);
-      _scrollToBottom();
+      // #29: composing in chat → stage as a removable thumbnail chip like Alt+V,
+      // not a raw PTY paste. Otherwise (raw terminal) send straight to the PTY.
+      if (pasteImageIntoCompose(
+        activeLens: _activeLens,
+        composeFocused: _composeFocusNode.hasFocus,
+      )) {
+        _addComposeAttachment(
+          bytes,
+          reference.replaceAll(RegExp('\x1b\\[2(?:00|01)~'), ''),
+        );
+      } else {
+        _connection?.sendInput(reference);
+        _scrollToBottom();
+      }
     } catch (e) {
       if (mounted) {
         ScaffoldMessenger.of(
@@ -1229,12 +1289,12 @@ class _SessionScreenState extends State<SessionScreen>
         activeLens: _activeLens,
         composeFocused: _composeFocusNode.hasFocus,
       )) {
-        // #29: composing in chat — insert the plain image path (strip the PTY
-        // bracketed-paste wrapper) into the compose field so it's visible and
-        // sent with the message; Claude reads the file from the path.
-        _pasteIntoCompose(
-          reference.replaceAll(RegExp('\x1b\\[2(?:00|01)~'), ''),
-        );
+        // #29: composing in chat — stage the image as a removable thumbnail chip
+        // (NOT the raw path text). The bare path (bracketed-paste wrapper
+        // stripped) is kept for delivery; on send it's pasted to the PTY so
+        // Claude reads the file. png.bytes drives the thumbnail preview.
+        final path = reference.replaceAll(RegExp('\x1b\\[2(?:00|01)~'), '');
+        _addComposeAttachment(png.bytes, path);
       } else {
         _connection?.sendInput(reference);
         _scrollToBottom();
@@ -1704,6 +1764,9 @@ class _SessionScreenState extends State<SessionScreen>
               onSend: _sendCompose,
               isLive: _composeLive,
               onPasteImage: _pasteClipboardImage,
+              // #29: staged image thumbnails (bytes) + remove (✕) callback.
+              attachments: [for (final a in _attachments) a.bytes],
+              onRemoveAttachment: _removeComposeAttachment,
               // Hardware Esc reaches the terminal; hardware arrows (while the
               // compose field is empty) go through the same routing as the
               // on-screen keys — ↑/↓ walk send-history, ←/→ move the caret.
