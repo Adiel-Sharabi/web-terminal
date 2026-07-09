@@ -142,6 +142,27 @@ void main() {
     });
   });
 
+  // The terminal lens is a LIVE terminal (web parity): keys go straight to the
+  // PTY and a tap raises the keyboard. Previously this was bolted to `_rawMode`,
+  // which defaults OFF on phones — so the terminal was readOnly there, a tap did
+  // nothing, and Claude's TUI selector couldn't be answered by typing.
+  group('terminalAcceptsInput (terminal lens is always live)', () {
+    test('terminal lens takes direct input on every platform', () {
+      expect(terminalAcceptsInput('terminal'), isTrue);
+    });
+
+    test('chat lens does not — the offstage terminal never steals keys', () {
+      expect(terminalAcceptsInput('chat'), isFalse);
+    });
+
+    test('it does not depend on raw mode (no rawMode parameter at all)', () {
+      // Regression guard: input must not be gated on _rawMode again. If someone
+      // reintroduces that coupling this predicate would need a second argument.
+      expect(terminalAcceptsInput('terminal'), isTrue);
+      expect(terminalAcceptsInput('terminal'), isTrue);
+    });
+  });
+
   group('buildComposeSubmission (#44: atomic submit — body + CR in one frame)', () {
     test('single-line: text + trailing CR, in one string', () {
       expect(buildComposeSubmission('hello world'), 'hello world\r');

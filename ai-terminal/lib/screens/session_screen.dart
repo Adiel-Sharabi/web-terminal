@@ -67,6 +67,20 @@ bool canForkFromMenu(Session session) => session.claudeSessionId != null;
 /// has one enforceable home.
 bool composeBarVisible() => true;
 
+/// Whether the terminal view takes input directly — keys straight to the PTY and
+/// a tap raises the keyboard — which is true exactly when the Terminal lens is
+/// showing, on every platform. This mirrors the web client, whose xterm view is
+/// never read-only and forwards every key to the socket (`app.html` term.onData
+/// → sendInput → ws.send); only Alt+V / Ctrl+V / Ctrl+C are skimmed off.
+///
+/// Deliberately NOT tied to `_rawMode`: that flag defaulted OFF on phones, which
+/// left the terminal `readOnly` there, so tapping it did nothing and Claude's TUI
+/// selector could not be answered by typing. `_rawMode` now only decides whether
+/// the terminal AUTO-grabs the keyboard. Gating on the lens also keeps the
+/// offstage terminal from taking keys while Chat is showing. Pure + testable so
+/// the "terminal lens is always live" invariant has one enforceable home.
+bool terminalAcceptsInput(String activeLens) => activeLens == 'terminal';
+
 /// True on desktop platforms (a real hardware keyboard). One definition so the
 /// raw-mode default, the '/' live-stream gate (#28), and image-paste routing
 /// all read the same rule.
@@ -239,8 +253,11 @@ class _SessionScreenState extends State<SessionScreen>
   // as removable thumbnail chips; their file paths are sent to the PTY on submit
   // (as pasted paths), not typed into the field as raw text.
   final List<_ComposeAttachment> _attachments = <_ComposeAttachment>[];
-  bool _rawMode =
-      false; // false = compose-first (default); true = direct terminal typing
+  // Whether the terminal AUTO-GRABS the keyboard (raw-first) rather than leaving
+  // focus on the compose bar. It no longer gates typing: in the terminal lens the
+  // view is always live, so a tap focuses it and keys flow to the PTY (web
+  // parity). Defaults to `isDesktop` (see _loadPersisted), persisted per session.
+  bool _rawMode = false;
   bool _composeLive = false; // true while a '/'-prefixed line is streaming live
   String _composeLiveSent =
       ''; // chars already streamed to the terminal for the live line
@@ -1690,15 +1707,24 @@ class _SessionScreenState extends State<SessionScreen>
                             fontFamily: 'monospace',
                           ),
                           autofocus: false,
-                          // View-only in compose mode: no on-screen keyboard
-                          // on tap (`hardwareKeyboardOnly`), no input reaches
-                          // the PTY from the terminal itself (`readOnly`) —
-                          // all typing goes through the compose bar instead.
-                          // Scrolling/selection/copy are unaffected by either
-                          // flag. Raw mode flips both off for direct terminal
-                          // typing (vim, TUIs, Claude's arrow-key menus).
-                          hardwareKeyboardOnly: !_rawMode,
-                          readOnly: !_rawMode,
+                          // The TERMINAL LENS is a live terminal — exactly like
+                          // the web client, whose xterm view is never read-only
+                          // and forwards every key straight to the PTY
+                          // (app.html: term.onData -> sendInput -> ws.send).
+                          // Tapping it focuses + raises the keyboard, and typing
+                          // (digits, arrows, Enter, Esc) goes to the PTY, so
+                          // Claude's TUI menus / question selector can be driven
+                          // natively. Previously BOTH flags were bolted to
+                          // `_rawMode`, which defaults OFF on phones — so the
+                          // terminal was read-only there and a tap did nothing.
+                          // Gated on the lens (not `_rawMode`) so the offstage
+                          // terminal can never take keys while Chat is showing.
+                          // `_rawMode` now only decides whether the terminal
+                          // GRABS the keyboard automatically (see _setRawMode /
+                          // _setLens); it no longer gates input at all.
+                          hardwareKeyboardOnly:
+                              !terminalAcceptsInput(_activeLens),
+                          readOnly: !terminalAcceptsInput(_activeLens),
                           // #26: tap a printed http/https URL to open it in the
                           // system browser (additive — focus/keyboard still run
                           // via the view's own tap-down handler).
