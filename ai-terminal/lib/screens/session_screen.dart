@@ -52,6 +52,20 @@ const int _kMaxHistory = 50;
 /// without pumping the whole screen.
 bool canForkFromMenu(Session session) => session.claudeSessionId != null;
 
+/// Whether [session] runs an AI agent that keeps a transcript, and so can have a
+/// Chat lens at all. Pure, for the same reason as [canForkFromMenu].
+///
+/// `agent` is the server's answer — `null` means a plain shell, which has no
+/// conversation to show. `claudeSessionId` is the pre-`agent` fallback so a session
+/// served by an OLDER server still gets its Chat lens.
+///
+/// Gating on `claudeSessionId` alone hid Chat for every Codex session: only Claude
+/// records a conversation id, yet the transcript is fetched by `session.id` and never
+/// needs one.
+bool sessionKeepsTranscript(Session? session) =>
+    session != null &&
+    (session.agent != null || session.claudeSessionId != null);
+
 /// The compose (text input) bar is ALWAYS shown. It sends straight to the PTY in
 /// the Terminal lens and to Claude in the Chat lens, so it is the one input path
 /// that works in every state — touch (where typing into the xterm view has no
@@ -578,17 +592,18 @@ class _SessionScreenState extends State<SessionScreen>
   }
 
   /// Whether the Chat lens is available for THIS session: the server advertises
-  /// the transcript capability, it's a Claude session, and its transcript hasn't
-  /// 404'd. SINGLE source of truth — drives the lens default
-  /// (_recomputeActiveLens), the app-bar toggle's visibility, and the #43
+  /// the transcript capability, the session runs a transcript-keeping agent
+  /// ([sessionKeepsTranscript] — Claude Code, Codex, or any provider a newer server
+  /// adds), and its transcript hasn't 404'd. SINGLE source of truth — drives the lens
+  /// default (_recomputeActiveLens), the app-bar toggle's visibility, and the #43
   /// compose-bar guarantee (when Chat is unavailable the compose bar must never be
   /// hidden, or a raw-mode session is stranded with no usable input).
   bool get _chatAvailable =>
       _serverHasTranscript == true &&
-      _session?.claudeSessionId != null &&
+      sessionKeepsTranscript(_session) &&
       !_transcriptUnavailableForSession;
 
-  /// Chat is the default lens when eligible (Claude session + capability +
+  /// Chat is the default lens when eligible (agent session + capability +
   /// hasn't already 404d) and no explicit past choice says otherwise;
   /// Terminal-only (toggle hidden) when not eligible at all.
   void _recomputeActiveLens() {

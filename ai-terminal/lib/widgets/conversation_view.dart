@@ -143,8 +143,11 @@ class _ConversationViewState extends State<ConversationView> {
     // pre-clear transcript forever (#35). Comparing old vs new (not the current
     // value against a constant) means this fires only on an actual change —
     // covers null→id, id→different, and id→null — never on every rebuild.
+    // `agent` moves when a session's provider is first detected (null → 'codex'),
+    // which changes WHICH transcript the server will serve for the same PTY id.
     if (oldWidget.session.id != widget.session.id ||
-        oldWidget.session.claudeSessionId != widget.session.claudeSessionId) {
+        oldWidget.session.claudeSessionId != widget.session.claudeSessionId ||
+        oldWidget.session.agent != widget.session.agent) {
       _resetAndReload();
       return;
     }
