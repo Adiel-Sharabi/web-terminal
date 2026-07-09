@@ -42,12 +42,23 @@ typedef TranscriptFetcher =
       int? limit,
     });
 
+/// Fetches one page of a subagent's transcript, already bound to a session — so a
+/// nested subagent card can drill deeper with the same closure. Injectable for
+/// tests; defaults to `ApiClient(session.server).subagent(session.id, …)`.
+typedef SubagentFetcher =
+    Future<SubagentPage> Function(
+      String toolUseId, {
+      String? before,
+      int? limit,
+    });
+
 class ConversationView extends StatefulWidget {
   const ConversationView({
     super.key,
     required this.session,
     this.onNoTranscript,
     this.fetchPage,
+    this.fetchSubagent,
     this.submittedPrompts,
   });
 
@@ -59,6 +70,10 @@ class ConversationView extends StatefulWidget {
 
   /// Injectable for tests; defaults to `ApiClient(session.server).transcript`.
   final TranscriptFetcher? fetchPage;
+
+  /// Injectable for tests; defaults to `ApiClient(session.server).subagent`.
+  /// Drives the drill-in subagent panels on `Task` tool cards.
+  final SubagentFetcher? fetchSubagent;
 
   /// Prompts the user just submitted in the compose bar (#31). Each is echoed
   /// immediately as a "Queued" bubble so the user sees their input registered
@@ -98,6 +113,15 @@ class _ConversationViewState extends State<ConversationView> {
       widget.session.server,
     ).transcript(sessionId, before: before, limit: limit);
   }
+
+  late final SubagentFetcher _subFetch = widget.fetchSubagent ??
+      ((String toolUseId, {String? before, int? limit}) =>
+          ApiClient(widget.session.server).subagent(
+            widget.session.id,
+            toolUseId,
+            before: before,
+            limit: limit,
+          ));
 
   @override
   void initState() {
@@ -503,7 +527,9 @@ class _ConversationViewState extends State<ConversationView> {
               );
             }
             var i = index - leadingLoader;
-            if (i < _turns.length) return _TurnBubble(turn: _turns[i]);
+            if (i < _turns.length) {
+              return _TurnBubble(turn: _turns[i], subFetch: _subFetch);
+            }
             i -= _turns.length;
             // Trailing "Claude is working…" indicator while the agent is mid-turn.
             if (working) {
@@ -918,9 +944,13 @@ Future<void> openChatLink(String? href) async {
 }
 
 class _TurnBubble extends StatelessWidget {
-  const _TurnBubble({required this.turn});
+  const _TurnBubble({required this.turn, this.subFetch});
 
   final TranscriptTurn turn;
+
+  /// Lets a `Task` tool card drill into its subagent's turns (null in contexts
+  /// with no session binding, e.g. some tests — those fall back to flat cards).
+  final SubagentFetcher? subFetch;
 
   @override
   Widget build(BuildContext context) {
@@ -993,7 +1023,11 @@ class _TurnBubble extends StatelessWidget {
                             _markdownStyle(theme, bodyStyle, codeSpanStyle),
                       ),
                     ),
-              for (final tool in turn.toolUses) _ToolCard(tool: tool),
+              for (final tool in turn.toolUses)
+                if (tool.subagent != null && subFetch != null)
+                  _SubagentCard(tool: tool, subFetch: subFetch!)
+                else
+                  _ToolCard(tool: tool),
               if (epoch != null)
                 Padding(
                   padding: const EdgeInsets.only(top: 4),
@@ -1335,6 +1369,277 @@ class _ToolCardState extends State<_ToolCard> {
               ),
             ),
         ],
+      ),
+    );
+  }
+}
+
+/// A `Task` tool_use rendered as a live, drill-in subagent panel — the chat-native
+/// equivalent of the terminal's arrow-navigable subagent view. Collapsed it shows
+/// the agent type + description and a pulsing dot while the subagent runs; tapping
+/// to expand lazily fetches the subagent's OWN transcript and renders its nested
+/// tool calls. A nested `Task` keeps its own panel, so drilling continues to any
+/// depth via the same [subFetch]. While expanded AND running it re-polls every 4s
+/// so you can watch the subagent work, exactly like the terminal panel.
+class _SubagentCard extends StatefulWidget {
+  const _SubagentCard({required this.tool, required this.subFetch});
+
+  final ToolUse tool;
+  final SubagentFetcher subFetch;
+
+  @override
+  State<_SubagentCard> createState() => _SubagentCardState();
+}
+
+class _SubagentCardState extends State<_SubagentCard> {
+  bool _expanded = false;
+  bool _loading = false;
+  String? _error;
+  SubagentPage? _page;
+  Timer? _poll;
+
+  SubagentTrace get _stub => widget.tool.subagent!;
+  // Prefer the freshly-fetched running state; fall back to the transcript stub
+  // until the first drill load lands.
+  bool get _running => _page?.running ?? _stub.running;
+
+  @override
+  void didUpdateWidget(covariant _SubagentCard old) {
+    super.didUpdateWidget(old);
+    // The parent refetches the transcript (~4s while working); when this Task's
+    // stub flips to done, stop watching.
+    if (!_running) _stopPoll();
+  }
+
+  @override
+  void dispose() {
+    _stopPoll();
+    super.dispose();
+  }
+
+  Future<void> _toggle() async {
+    setState(() => _expanded = !_expanded);
+    if (_expanded) {
+      if (_page == null) await _load();
+      _maybePoll();
+    } else {
+      _stopPoll();
+    }
+  }
+
+  void _maybePoll() {
+    if (_expanded && _running && _poll == null) {
+      _poll = Timer.periodic(const Duration(seconds: 4), (_) => _load());
+    }
+  }
+
+  void _stopPoll() {
+    _poll?.cancel();
+    _poll = null;
+  }
+
+  Future<void> _load() async {
+    if (_loading) return;
+    setState(() {
+      _loading = true;
+      _error = null;
+    });
+    try {
+      final page = await widget.subFetch(widget.tool.id);
+      if (!mounted) return;
+      setState(() {
+        _page = page;
+        _loading = false;
+      });
+      if (_running) {
+        _maybePoll();
+      } else {
+        _stopPoll();
+      }
+    } catch (_) {
+      if (!mounted) return;
+      setState(() {
+        _error = 'Could not load subagent activity.';
+        _loading = false;
+      });
+      _stopPoll();
+    }
+  }
+
+  // "Task — description (type)" — built from the stub + the tool's own name, so
+  // it's correct whatever the host calls the spawner (CLI `Task`, others `Agent`),
+  // not tied to summarizeTool's Task-only case.
+  String get _title {
+    final label = widget.tool.name.isEmpty ? 'Subagent' : widget.tool.name;
+    final desc = _stub.description.trim();
+    final type = _stub.agentType.trim();
+    return '$label'
+        '${desc.isEmpty ? '' : ' — $desc'}'
+        '${type.isEmpty ? '' : ' ($type)'}';
+  }
+
+  @override
+  Widget build(BuildContext context) {
+    final theme = Theme.of(context);
+    return Padding(
+      padding: const EdgeInsets.only(top: 4),
+      child: Column(
+        crossAxisAlignment: CrossAxisAlignment.start,
+        mainAxisSize: MainAxisSize.min,
+        children: [
+          Material(
+            color: theme.colorScheme.surfaceContainerHigh,
+            borderRadius: BorderRadius.circular(AppShape.small),
+            child: InkWell(
+              borderRadius: BorderRadius.circular(AppShape.small),
+              onTap: _toggle,
+              child: Padding(
+                padding: const EdgeInsets.symmetric(horizontal: 8, vertical: 5),
+                child: Row(
+                  children: [
+                    Icon(Icons.account_tree_outlined,
+                        size: 14, color: theme.colorScheme.primary),
+                    const SizedBox(width: 6),
+                    Expanded(
+                      child: Text(
+                        _title,
+                        maxLines: _expanded ? null : 1,
+                        overflow:
+                            _expanded ? TextOverflow.clip : TextOverflow.ellipsis,
+                        style: theme.textTheme.bodySmall?.copyWith(
+                          fontFamily: 'monospace',
+                          color: theme.colorScheme.onSurfaceVariant,
+                        ),
+                      ),
+                    ),
+                    if (_running) ...[
+                      const SizedBox(width: 6),
+                      const _RunningDot(),
+                    ],
+                    Icon(_expanded ? Icons.expand_less : Icons.expand_more,
+                        size: 15, color: theme.colorScheme.onSurfaceVariant),
+                  ],
+                ),
+              ),
+            ),
+          ),
+          if (_expanded)
+            Container(
+              width: double.infinity,
+              margin: const EdgeInsets.only(top: 4),
+              padding: const EdgeInsets.all(8),
+              constraints: const BoxConstraints(maxHeight: 360),
+              decoration: BoxDecoration(
+                color: theme.colorScheme.surfaceContainer,
+                borderRadius: BorderRadius.circular(AppShape.small),
+                border: Border.all(color: theme.colorScheme.outlineVariant),
+              ),
+              child: _buildBody(theme),
+            ),
+        ],
+      ),
+    );
+  }
+
+  Widget _buildBody(ThemeData theme) {
+    if (_error != null) {
+      return Text(
+        _error!,
+        style: theme.textTheme.bodySmall?.copyWith(color: theme.colorScheme.error),
+      );
+    }
+    final page = _page;
+    if (page == null) {
+      return const Center(
+        child: Padding(
+          padding: EdgeInsets.all(8),
+          child: SizedBox(
+            width: 16,
+            height: 16,
+            child: CircularProgressIndicator(strokeWidth: 2),
+          ),
+        ),
+      );
+    }
+    if (page.messages.isEmpty) {
+      return Text(
+        _running ? 'Starting…' : 'No activity recorded.',
+        style: theme.textTheme.bodySmall
+            ?.copyWith(color: theme.colorScheme.onSurfaceVariant),
+      );
+    }
+    return SingleChildScrollView(
+      child: Column(
+        crossAxisAlignment: CrossAxisAlignment.start,
+        mainAxisSize: MainAxisSize.min,
+        children: [
+          for (final m in page.messages) ..._nestedRows(theme, m),
+        ],
+      ),
+    );
+  }
+
+  // One nested subagent turn as compact sub-transcript rows: its prose (if any)
+  // followed by its tool cards. A nested Task keeps its own drill-in panel (same
+  // [subFetch]); every other tool reuses the flat [_ToolCard].
+  List<Widget> _nestedRows(ThemeData theme, TranscriptTurn m) {
+    return [
+      if (m.text.trim().isNotEmpty)
+        Padding(
+          padding: const EdgeInsets.symmetric(vertical: 2),
+          child: Text(
+            m.text.trim(),
+            style: theme.textTheme.bodySmall?.copyWith(
+              color: m.isAssistant
+                  ? theme.colorScheme.onSurface
+                  : theme.colorScheme.onSurfaceVariant,
+            ),
+          ),
+        ),
+      for (final tool in m.toolUses)
+        if (tool.subagent != null)
+          _SubagentCard(tool: tool, subFetch: widget.subFetch)
+        else
+          _ToolCard(tool: tool),
+    ];
+  }
+}
+
+/// A small pulsing dot marking a subagent that is still running.
+class _RunningDot extends StatefulWidget {
+  const _RunningDot();
+  @override
+  State<_RunningDot> createState() => _RunningDotState();
+}
+
+class _RunningDotState extends State<_RunningDot>
+    with SingleTickerProviderStateMixin {
+  late final AnimationController _c = AnimationController(
+    vsync: this,
+    duration: const Duration(milliseconds: 1000),
+  )..repeat(reverse: true);
+
+  @override
+  void dispose() {
+    _c.dispose();
+    super.dispose();
+  }
+
+  @override
+  Widget build(BuildContext context) {
+    final theme = Theme.of(context);
+    return AnimatedBuilder(
+      animation: _c,
+      builder: (context, _) => Opacity(
+        opacity: 0.3 + 0.7 * _c.value,
+        child: Container(
+          width: 7,
+          height: 7,
+          decoration: BoxDecoration(
+            color: theme.colorScheme.primary,
+            shape: BoxShape.circle,
+          ),
+        ),
       ),
     );
   }

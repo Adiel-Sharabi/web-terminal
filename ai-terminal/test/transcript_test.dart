@@ -95,6 +95,57 @@ void main() {
     });
   });
 
+  group('subagent trace models', () {
+    test('ToolUse parses a Task subagent stub', () {
+      final u = ToolUse.fromJson({
+        'name': 'Task',
+        'inputPreview': '',
+        'id': 'tu_task',
+        'input': {'description': 'Investigate X', 'subagent_type': 'Explore'},
+        'subagent': {
+          'agentType': 'Explore',
+          'description': 'Investigate X',
+          'running': true,
+        },
+      });
+      expect(u.subagent, isNotNull);
+      expect(u.subagent!.agentType, 'Explore');
+      expect(u.subagent!.description, 'Investigate X');
+      expect(u.subagent!.running, isTrue);
+    });
+
+    test('ToolUse.subagent is null when the stub is absent', () {
+      final u = ToolUse.fromJson({'name': 'Bash', 'inputPreview': 'ls'});
+      expect(u.subagent, isNull);
+    });
+
+    test('SubagentTrace.running defaults to false for a non-bool', () {
+      final s = SubagentTrace.fromJson({'agentType': 'X'});
+      expect(s.running, isFalse);
+      expect(s.description, '');
+    });
+
+    test('SubagentPage parses identity, running, and nested messages', () {
+      final p = SubagentPage.fromJson({
+        'agentType': 'Explore',
+        'description': 'Investigate X',
+        'running': true,
+        'messages': [
+          {'role': 'assistant', 'text': 'Looking', 'toolUses': [
+            {'name': 'Bash', 'inputPreview': 'grep foo', 'id': 'b1'},
+          ], 'ts': null},
+        ],
+        'cursor': 'MTIz',
+        'hasMore': true,
+      });
+      expect(p.agentType, 'Explore');
+      expect(p.running, isTrue);
+      expect(p.messages.single.toolUses.single.name, 'Bash');
+      expect(p.cursor, 'MTIz');
+      expect(p.hasMore, isTrue);
+    });
+  });
+
   group('ApiClient.transcript', () {
     test('builds before + limit query and parses the page', () async {
       late Uri captured;
@@ -157,6 +208,51 @@ void main() {
       await expectLater(
         client.transcript('s1', before: 'garbage'),
         throwsA(isA<ApiException>().having((e) => e.status, 'status', 400)),
+      );
+    });
+  });
+
+  group('ApiClient.subagent', () {
+    test('builds the /subagent path (encoded id) + query and parses the page',
+        () async {
+      late Uri captured;
+      final client = ApiClient(_server, httpClient: MockClient((req) async {
+        captured = req.url;
+        return http.Response(
+          jsonEncode({
+            'agentType': 'Explore',
+            'description': 'Investigate X',
+            'running': true,
+            'messages': [
+              {'role': 'assistant', 'text': 'found it', 'toolUses': [], 'ts': null}
+            ],
+            'cursor': 'abc',
+            'hasMore': false,
+          }),
+          200,
+        );
+      }));
+
+      final page =
+          await client.subagent('s1', 'toolu_task', before: 'cur0', limit: 25);
+
+      expect(captured.path, '/api/sessions/s1/subagent/toolu_task');
+      expect(captured.queryParameters['before'], 'cur0');
+      expect(captured.queryParameters['limit'], '25');
+      expect(page.agentType, 'Explore');
+      expect(page.running, isTrue);
+      expect(page.messages.single.text, 'found it');
+    });
+
+    test('404 (no subagent) surfaces as ApiException(404)', () async {
+      final client = ApiClient(_server, httpClient: MockClient((req) async {
+        return http.Response(
+            jsonEncode({'error': 'no subagent for tool_use'}), 404);
+      }));
+
+      await expectLater(
+        client.subagent('s1', 'toolu_missing'),
+        throwsA(isA<ApiException>().having((e) => e.status, 'status', 404)),
       );
     });
   });
