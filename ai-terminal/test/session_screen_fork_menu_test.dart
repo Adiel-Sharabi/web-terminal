@@ -62,26 +62,40 @@ void main() {
   });
 
   group('questionOverlayVisible (#19: answered question must not re-flash)', () {
-    PendingQuestion q(String id) =>
-        PendingQuestion(toolUseId: id, questions: const []);
+    // Identity is the question's CONTENT (questionSignature), not its toolUseId.
+    PendingQuestion q(String prompt, {String id = 'toolu_x'}) => PendingQuestion(
+          toolUseId: id,
+          questions: [
+            PendingQuestionItem(
+              header: 'H',
+              question: prompt,
+              multiSelect: false,
+              options: const [QuestionOption(label: 'Yes', description: '')],
+            ),
+          ],
+        );
 
     test('a fresh pending question shows', () {
-      expect(questionOverlayVisible(q('t1'), null), isTrue);
+      expect(questionOverlayVisible(q('one'), null), isTrue);
     });
 
     test('no pending question -> hidden', () {
       expect(questionOverlayVisible(null, null), isFalse);
-      expect(questionOverlayVisible(null, 't1'), isFalse);
+      expect(questionOverlayVisible(null, 'somekey'), isFalse);
     });
 
     test('the just-answered question stays hidden while it lingers pending', () {
-      // _answerQuestion sets _dismissedQuestionId = the answered id; the poll
-      // keeps returning that same question for seconds until Claude consumes it.
-      expect(questionOverlayVisible(q('t1'), 't1'), isFalse);
+      // _answerQuestion sets _dismissedQuestionKey = the answered signature; the
+      // poll keeps returning that same question for seconds until Claude consumes
+      // it — even under a DIFFERENT toolUseId (hook-… → toolu_…).
+      final key = questionSignature(q('one', id: 'hook-s-1'));
+      expect(questionOverlayVisible(q('one', id: 'hook-s-1'), key), isFalse);
+      expect(questionOverlayVisible(q('one', id: 'toolu_01ABC'), key), isFalse);
     });
 
-    test('a genuinely new question (different id) shows again', () {
-      expect(questionOverlayVisible(q('t2'), 't1'), isTrue);
+    test('a genuinely new question (different content) shows again', () {
+      final key = questionSignature(q('one'));
+      expect(questionOverlayVisible(q('two'), key), isTrue);
     });
   });
 
@@ -89,7 +103,7 @@ void main() {
     test('still pending + still our dismissal -> re-show', () {
       expect(
         shouldResurfaceAfterAnswer(
-            stillPending: true, answeredToolUseId: 't1', dismissedId: 't1'),
+            stillPending: true, answeredKey: 'k1', dismissedKey: 'k1'),
         isTrue,
       );
     });
@@ -97,7 +111,7 @@ void main() {
     test('answer landed (not pending) -> stay hidden', () {
       expect(
         shouldResurfaceAfterAnswer(
-            stillPending: false, answeredToolUseId: 't1', dismissedId: 't1'),
+            stillPending: false, answeredKey: 'k1', dismissedKey: 'k1'),
         isFalse,
       );
     });
@@ -105,7 +119,7 @@ void main() {
     test('a different prompt was dismissed since -> do not clobber it', () {
       expect(
         shouldResurfaceAfterAnswer(
-            stillPending: true, answeredToolUseId: 't1', dismissedId: 't2'),
+            stillPending: true, answeredKey: 'k1', dismissedKey: 'k2'),
         isFalse,
       );
     });
@@ -113,9 +127,60 @@ void main() {
     test('user cleared the dismissal -> do not resurface', () {
       expect(
         shouldResurfaceAfterAnswer(
-            stillPending: true, answeredToolUseId: 't1', dismissedId: null),
+            stillPending: true, answeredKey: 'k1', dismissedKey: null),
         isFalse,
       );
+    });
+  });
+
+  // The dismissal/answered identity must key on question CONTENT, not toolUseId:
+  // the server reports a synthetic `hook-<id>-<seq>` while the question is live
+  // and the real `toolu_…` once it falls back to the transcript. Keying on the id
+  // made the SAME question look new → dismissal cleared → overlay re-shown → the
+  // user answered twice → the second frame set was typed as literal text into a
+  // selector Claude had already closed.
+  group('questionSignature (stable identity across toolUseId churn)', () {
+    PendingQuestion q(String toolUseId, {String label = 'Yes'}) => PendingQuestion(
+          toolUseId: toolUseId,
+          questions: [
+            PendingQuestionItem(
+              header: 'Ship',
+              question: 'Deploy now?',
+              multiSelect: false,
+              options: [
+                QuestionOption(label: label, description: 'do it'),
+                const QuestionOption(label: 'No', description: 'wait'),
+              ],
+            ),
+          ],
+        );
+
+    test('same content under a synthetic hook id and the real toolu id matches', () {
+      expect(questionSignature(q('hook-sess-7')), questionSignature(q('toolu_01ABC')));
+    });
+
+    test('a re-fired PreToolUse (new seq) is still the same question', () {
+      expect(questionSignature(q('hook-sess-7')), questionSignature(q('hook-sess-9')));
+    });
+
+    test('genuinely different content -> different signature', () {
+      expect(
+        questionSignature(q('hook-sess-7')),
+        isNot(questionSignature(q('hook-sess-7', label: 'Absolutely'))),
+      );
+    });
+
+    test('null question -> empty signature (never equals a real one)', () {
+      expect(questionSignature(null), '');
+      expect(questionSignature(null), isNot(questionSignature(q('t'))));
+    });
+
+    test('overlay visibility keys on the signature, not the id', () {
+      final key = questionSignature(q('hook-sess-7'));
+      // Same question re-reported under the real transcript id stays dismissed.
+      expect(questionOverlayVisible(q('toolu_01ABC'), key), isFalse);
+      // A different question shows.
+      expect(questionOverlayVisible(q('toolu_01ABC', label: 'Maybe'), key), isTrue);
     });
   });
 
