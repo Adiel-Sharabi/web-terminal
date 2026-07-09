@@ -141,4 +141,42 @@ void main() {
       );
     });
   });
+
+  group('buildComposeSubmission (#44: atomic submit — body + CR in one frame)', () {
+    test('single-line: text + trailing CR, in one string', () {
+      expect(buildComposeSubmission('hello world'), 'hello world\r');
+    });
+
+    test('the payload ALWAYS ends in the submit CR (never split off)', () {
+      // The #44 property: the submit \r is part of the same payload, so it can
+      // never be lost to a nulled/replaced connection between two writes.
+      expect(buildComposeSubmission('a').endsWith('\r'), isTrue);
+      expect(buildComposeSubmission('a\nb').endsWith('\r'), isTrue);
+      expect(buildComposeSubmission('').endsWith('\r'), isTrue);
+    });
+
+    test('multi-line: bracketed paste with CR after the close marker', () {
+      // Interior newline -> CR; wrapper + submit CR after ESC[201~.
+      expect(buildComposeSubmission('line1\nline2'),
+          '\x1b[200~line1\rline2\x1b[201~\r');
+    });
+
+    test('CRLF newlines normalize to CR inside the paste', () {
+      expect(buildComposeSubmission('a\r\nb'),
+          '\x1b[200~a\rb\x1b[201~\r');
+    });
+
+    test('strips existing bracketed-paste markers so user text cannot close the wrapper', () {
+      // A pasted-in ESC[201~ must not prematurely end our bracketed paste.
+      final out = buildComposeSubmission('x\x1b[201~y\nz');
+      expect(out, '\x1b[200~xy\rz\x1b[201~\r');
+      // exactly one open + one close marker (the ones we added)
+      expect('\x1b[200~'.allMatches(out).length, 1);
+      expect('\x1b[201~'.allMatches(out).length, 1);
+    });
+
+    test('empty buffer -> a bare submit CR', () {
+      expect(buildComposeSubmission(''), '\r');
+    });
+  });
 }

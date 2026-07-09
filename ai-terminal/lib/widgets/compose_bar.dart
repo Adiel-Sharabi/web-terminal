@@ -111,11 +111,21 @@ class ComposeBar extends StatelessWidget {
     this.onArrow,
     this.onTab,
     this.onBackspace,
+    this.attachments = const <Uint8List>[],
+    this.onRemoveAttachment,
   });
 
   final TextEditingController controller;
   final FocusNode focusNode;
   final VoidCallback onSend;
+
+  /// Pasted/added image attachments (#29), as thumbnail bytes, shown as a strip
+  /// of removable chips above the field. The underlying file paths live in
+  /// `SessionScreen` and are sent to the PTY on submit; only the preview is here.
+  final List<Uint8List> attachments;
+
+  /// Remove the attachment at `index` (the chip's ✕). `null` disables removal.
+  final void Function(int index)? onRemoveAttachment;
 
   /// Paste an image from the clipboard (Alt+V). `null` disables the shortcut.
   final VoidCallback? onPasteImage;
@@ -142,7 +152,8 @@ class ComposeBar extends StatelessWidget {
   /// field's border to signal "this is live, not just a local draft".
   final bool isLive;
 
-  bool get _canSend => controller.text.isNotEmpty || isLive;
+  bool get _canSend =>
+      controller.text.isNotEmpty || isLive || attachments.isNotEmpty;
 
   @override
   Widget build(BuildContext context) {
@@ -153,7 +164,12 @@ class ComposeBar extends StatelessWidget {
     return Container(
       color: theme.colorScheme.surfaceContainer,
       padding: const EdgeInsets.fromLTRB(12, 8, 8, 8),
-      child: Row(
+      child: Column(
+        mainAxisSize: MainAxisSize.min,
+        crossAxisAlignment: CrossAxisAlignment.stretch,
+        children: [
+          if (attachments.isNotEmpty) _attachmentStrip(theme),
+          Row(
         crossAxisAlignment: CrossAxisAlignment.end,
         children: [
           Expanded(
@@ -272,13 +288,97 @@ class ComposeBar extends StatelessWidget {
           AnimatedBuilder(
             animation: controller,
             builder: (context, _) {
-              final enabled = controller.text.isNotEmpty || isLive;
+              final enabled = controller.text.isNotEmpty ||
+                  isLive ||
+                  attachments.isNotEmpty;
               return IconButton.filled(
                 onPressed: enabled ? onSend : null,
                 icon: const Icon(Icons.send),
               );
             },
           ),
+        ],
+          ),
+        ],
+      ),
+    );
+  }
+
+  /// Horizontal strip of removable image-attachment thumbnails, shown above the
+  /// text field when there are attachments (#29).
+  Widget _attachmentStrip(ThemeData theme) {
+    return Container(
+      height: 60,
+      margin: const EdgeInsets.only(bottom: 8),
+      alignment: Alignment.centerLeft,
+      child: ListView.separated(
+        scrollDirection: Axis.horizontal,
+        itemCount: attachments.length,
+        separatorBuilder: (_, _) => const SizedBox(width: 8),
+        itemBuilder: (context, i) => _AttachmentThumb(
+          bytes: attachments[i],
+          onRemove:
+              onRemoveAttachment == null ? null : () => onRemoveAttachment!(i),
+        ),
+      ),
+    );
+  }
+}
+
+/// One image attachment: a rounded thumbnail with a small ✕ to remove it (#29).
+class _AttachmentThumb extends StatelessWidget {
+  const _AttachmentThumb({required this.bytes, this.onRemove});
+
+  final Uint8List bytes;
+  final VoidCallback? onRemove;
+
+  @override
+  Widget build(BuildContext context) {
+    final theme = Theme.of(context);
+    return SizedBox(
+      width: 52,
+      height: 52,
+      child: Stack(
+        clipBehavior: Clip.none,
+        children: [
+          ClipRRect(
+            borderRadius: BorderRadius.circular(AppShape.small),
+            child: Image.memory(
+              bytes,
+              width: 52,
+              height: 52,
+              fit: BoxFit.cover,
+              gaplessPlayback: true,
+              // A decode failure shouldn't crash the compose bar — show a generic
+              // image glyph instead.
+              errorBuilder: (_, _, _) => Container(
+                width: 52,
+                height: 52,
+                color: theme.colorScheme.surfaceContainerHigh,
+                child: Icon(Icons.image_outlined,
+                    color: theme.colorScheme.onSurfaceVariant),
+              ),
+            ),
+          ),
+          if (onRemove != null)
+            Positioned(
+              top: 1,
+              right: 1,
+              child: GestureDetector(
+                onTap: onRemove,
+                child: Container(
+                  decoration: BoxDecoration(
+                    color: theme.colorScheme.surface.withValues(alpha: 0.85),
+                    shape: BoxShape.circle,
+                    border:
+                        Border.all(color: theme.colorScheme.outlineVariant),
+                  ),
+                  padding: const EdgeInsets.all(1),
+                  child: Icon(Icons.close,
+                      size: 13, color: theme.colorScheme.onSurface),
+                ),
+              ),
+            ),
         ],
       ),
     );
