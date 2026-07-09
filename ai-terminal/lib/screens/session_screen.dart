@@ -95,6 +95,18 @@ bool pasteImageIntoCompose({
 }) =>
     activeLens == 'chat' || composeFocused;
 
+/// Whether the interactive-question overlay (#19) should be visible. A question
+/// shows unless it's the one the user already dealt with — [dismissedId] is set
+/// both when they dismiss to answer in-terminal AND right after they answer via
+/// the overlay. That second case matters: a just-answered question stays
+/// "pending" server-side for seconds until Claude consumes the answer (writes a
+/// tool_result), so the 4s poll keeps returning it; without this suppression the
+/// overlay flashes back until Claude starts working. A genuinely NEW question
+/// (different toolUseId) clears the dismissal upstream (_pollPendingQuestion) and
+/// shows normally. Pure + one home so render and answer paths can't drift.
+bool questionOverlayVisible(PendingQuestion? pending, String? dismissedId) =>
+    pending != null && pending.toolUseId != dismissedId;
+
 class SessionScreen extends StatefulWidget {
   const SessionScreen({
     super.key,
@@ -361,7 +373,14 @@ class _SessionScreenState extends State<SessionScreen>
   /// separate reads. Hides the overlay optimistically; the next poll confirms.
   Future<void> _answerQuestion(List<AnswerFrame> frames) async {
     final toolUseId = _pendingQuestion?.toolUseId;
-    setState(() => _pendingQuestion = null);
+    // Mark this question dealt-with so the next 4s poll can't flash the overlay
+    // back: it stays pending server-side until Claude consumes the answer (writes
+    // a tool_result), which lags the keystrokes by seconds. A genuinely new
+    // question clears the dismissal in _pollPendingQuestion and shows.
+    setState(() {
+      _pendingQuestion = null;
+      _dismissedQuestionId = toolUseId;
+    });
     for (var i = 0; i < frames.length; i++) {
       if (!mounted) return;
       _connection?.sendInput(frames[i].keys);
@@ -1633,8 +1652,7 @@ class _SessionScreenState extends State<SessionScreen>
                 // Native overlay for Claude's interactive question (#19), above
                 // whichever lens is showing. The key strip below stays usable as
                 // a manual fallback.
-                if (_pendingQuestion != null &&
-                    _pendingQuestion!.toolUseId != _dismissedQuestionId)
+                if (questionOverlayVisible(_pendingQuestion, _dismissedQuestionId))
                   QuestionOverlay(
                     question: _pendingQuestion!,
                     contextText: _questionContext,
