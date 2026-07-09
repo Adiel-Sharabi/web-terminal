@@ -166,6 +166,96 @@ void main() {
   });
 
   testWidgets(
+    'a Task with a subagent stub drills into the subagent\'s nested tool calls',
+    (tester) async {
+      // A finished subagent (running:false) so there is no perpetual pulse
+      // animation / poll timer to hang pumpAndSettle.
+      final page = TranscriptPage(
+        messages: const [
+          TranscriptTurn(
+            role: 'assistant',
+            text: 'Delegating.',
+            toolUses: [
+              ToolUse(
+                name: 'Task',
+                inputPreview: '',
+                id: 'tu_task',
+                input: {
+                  'description': 'Investigate X',
+                  'subagent_type': 'Explore',
+                  'prompt': 'go look',
+                },
+                subagent: SubagentTrace(
+                  agentType: 'Explore',
+                  description: 'Investigate X',
+                  running: false,
+                ),
+              ),
+            ],
+            ts: null,
+          ),
+        ],
+        cursor: null,
+        hasMore: false,
+      );
+      const subPage = SubagentPage(
+        agentType: 'Explore',
+        description: 'Investigate X',
+        running: false,
+        messages: [
+          TranscriptTurn(
+            role: 'assistant',
+            text: 'Looking around.',
+            toolUses: [
+              ToolUse(
+                name: 'Bash',
+                inputPreview: '',
+                id: 'tu_b',
+                input: {'command': 'grep -r foo .'},
+                result: 'foo at bar.js:12 NESTED_MARKER',
+              ),
+            ],
+            ts: null,
+          ),
+        ],
+        cursor: null,
+        hasMore: false,
+      );
+      var drilledId = '';
+      await tester.pumpWidget(
+        _wrap(
+          ConversationView(
+            session: _session(),
+            fetchPage: (id, {before, limit}) async => page,
+            fetchSubagent: (toolUseId, {before, limit}) async {
+              drilledId = toolUseId;
+              return subPage;
+            },
+          ),
+        ),
+      );
+      await tester.pumpAndSettle();
+
+      // Collapsed: the Task card shows its subagent identity; nested output hidden.
+      expect(find.textContaining('Task — Investigate X (Explore)'), findsOneWidget);
+      expect(find.textContaining('NESTED_MARKER'), findsNothing);
+
+      // Tap to drill in → the subagent's own Bash tool card appears.
+      await tester.tap(find.textContaining('Task — Investigate X (Explore)'));
+      await tester.pumpAndSettle();
+
+      expect(drilledId, 'tu_task'); // drilled with the Task's tool_use id
+      expect(find.textContaining('Looking around.'), findsOneWidget);
+      expect(find.textContaining('Bash — grep -r foo .'), findsOneWidget);
+
+      // The nested Bash card itself expands to its output.
+      await tester.tap(find.textContaining('Bash — grep -r foo .'));
+      await tester.pumpAndSettle();
+      expect(find.textContaining('NESTED_MARKER'), findsOneWidget);
+    },
+  );
+
+  testWidgets(
     '#27: the message list is wrapped in one SelectionArea (cross-bubble drag), '
     'and bubbles no longer self-select',
     (tester) async {

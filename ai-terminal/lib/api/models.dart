@@ -530,6 +530,12 @@ class ToolUse {
   /// The tool's OUTPUT (tool_result text, capped), or null if none was captured.
   final String? result;
 
+  /// For a `Task` tool_use that spawned a subagent: a light stub the chat view
+  /// uses to show a running dot and offer to drill into the subagent's own turns
+  /// (lazily, via `GET /api/sessions/:id/subagent/:toolUseId`). `null` for tools
+  /// with no subagent trace on disk (and for servers that predate the feature).
+  final SubagentTrace? subagent;
+
   /// Creates a tool-use summary.
   const ToolUse({
     required this.name,
@@ -537,6 +543,7 @@ class ToolUse {
     this.id = '',
     this.input = const {},
     this.result,
+    this.subagent,
   });
 
   /// Parses one element of a turn's `toolUses` array.
@@ -548,10 +555,47 @@ class ToolUse {
             ? Map<String, dynamic>.from(json['input'] as Map)
             : const <String, dynamic>{},
         result: json['result']?.toString(),
+        subagent: json['subagent'] is Map
+            ? SubagentTrace.fromJson(
+                Map<String, dynamic>.from(json['subagent'] as Map))
+            : null,
       );
 
   @override
   String toString() => 'ToolUse($name)';
+}
+
+/// A `Task` tool_use's subagent trace stub, attached by the server when the
+/// subagent left a transcript on disk. Just enough to render the collapsed card
+/// (agent type + description) and a live running dot; the subagent's actual turns
+/// are fetched on demand via `ApiClient.subagent`.
+class SubagentTrace {
+  /// The subagent's type (e.g. `Explore`, `general-purpose`), or ''.
+  final String agentType;
+
+  /// The Task's description (what the subagent was asked to do), or ''.
+  final String description;
+
+  /// Whether the subagent is still running (its Task has no result yet).
+  final bool running;
+
+  /// Creates a subagent trace stub.
+  const SubagentTrace({
+    required this.agentType,
+    required this.description,
+    required this.running,
+  });
+
+  /// Parses a Task tool_use's `subagent` stub.
+  factory SubagentTrace.fromJson(Map<String, dynamic> json) => SubagentTrace(
+        agentType: (json['agentType'] ?? '').toString(),
+        description: (json['description'] ?? '').toString(),
+        running: json['running'] == true,
+      );
+
+  @override
+  String toString() =>
+      'SubagentTrace($agentType, running=$running)';
 }
 
 /// A single conversation turn from a session's transcript.
@@ -654,6 +698,64 @@ class TranscriptPage {
   @override
   String toString() =>
       'TranscriptPage(${messages.length} turns, hasMore=$hasMore)';
+}
+
+/// One backward-paginated page of a *subagent's* transcript from
+/// `GET /api/sessions/:id/subagent/:toolUseId` — the same shape as
+/// [TranscriptPage] (its [messages] can themselves carry nested `Task` subagent
+/// stubs, so the view can drill deeper) plus the subagent's identity + live
+/// running state.
+class SubagentPage {
+  /// The subagent's type (e.g. `Explore`), echoed from its meta sidecar.
+  final String agentType;
+
+  /// The Task description the subagent was spawned with.
+  final String description;
+
+  /// Whether the subagent is still running (its parent Task has no result yet).
+  final bool running;
+
+  /// The subagent's turns, newest-last (same pagination contract as
+  /// [TranscriptPage]).
+  final List<TranscriptTurn> messages;
+
+  /// Opaque cursor for the *older* page; `null` at the start / when empty.
+  final String? cursor;
+
+  /// Whether older turns remain (see [TranscriptPage.hasMore] for the caveat).
+  final bool hasMore;
+
+  /// Creates a subagent transcript page.
+  const SubagentPage({
+    required this.agentType,
+    required this.description,
+    required this.running,
+    required this.messages,
+    required this.cursor,
+    required this.hasMore,
+  });
+
+  /// Parses the `/api/sessions/:id/subagent/:toolUseId` response body.
+  factory SubagentPage.fromJson(Map<String, dynamic> json) {
+    final msgs = json['messages'];
+    return SubagentPage(
+      agentType: (json['agentType'] ?? '').toString(),
+      description: (json['description'] ?? '').toString(),
+      running: json['running'] == true,
+      messages: msgs is List
+          ? msgs
+              .whereType<Map<String, dynamic>>()
+              .map(TranscriptTurn.fromJson)
+              .toList(growable: false)
+          : const <TranscriptTurn>[],
+      cursor: json['cursor']?.toString(),
+      hasMore: json['hasMore'] == true,
+    );
+  }
+
+  @override
+  String toString() =>
+      'SubagentPage($agentType, ${messages.length} turns, running=$running)';
 }
 
 /// One selectable option in a [PendingQuestionItem] (label + optional blurb).

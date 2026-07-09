@@ -14,7 +14,7 @@ const notifyPush = require('./lib/notify-push');
 const transcript = require('./lib/transcript');
 const fcm = require('./lib/fcm');
 
-const SERVER_VERSION = '1.29.6'; // 2026-07-08: #42 — Chat lens now resolves the transcript for cwds with special chars ('_'/'.'/space). The cwd→Claude-project-dir encoder was duplicated in 3 places (server deriveTranscriptPath + server detectClaudeSessionIdFromDir + pty-worker) and lossy — it only mapped '\'/'/', leaving '_'/'.'/space intact, so e.g. C:\dev\AM8_Core resolved to a non-existent C--dev-AM8_Core dir (Claude actually uses C--dev-AM8-Core) → /transcript 404 → Chat hidden. One SSOT encoder now lives in lib/transcript.js (claudeProjectDirName: replace EVERY non-alphanumeric char with '-', case preserved, verified vs ~/.claude/projects); server + pty-worker both call it, and the dead server-side detectClaudeSessionIdFromDir copy was removed. server.js hot-reloadable; the pty-worker leg needs a cold restart. Prior 1.29.5: #37b — the "finished/idle" push (notify level 'all') no longer fires while a background build / in-flight subagent is still emitting output. The idle debounce now re-checks the worker's output clock (lastActivity via getSession) when it fires: if output landed within the window the session isn't finished, so it re-arms and waits for a genuine quiet period before pushing "Claude is done" (a non-idle statusChanged still cancels). Same output-clock signal #37 gave correctStaleStatus — SSOT. server.js-only → hot-reload. Prior 1.29.4: #38 — Claude context-window % now shows on each session tab/list row (web sidebar + companion list), not only inside the session. Both list endpoints already attach per-session `metrics` (getStatusMetrics); the web sidebar (new ctxBadge helper → .sb-ctx) and the companion SessionCard now render metrics.ctx as a small badge, colored by shared warn-50/danger-70 thresholds (companion ctxColor SSOT in lib/widgets/format_utils.dart, reused by the in-session _MetricsHeader). No server logic changed — asset/version bump only. Prior 1.29.3: #37 — a session running a build / background process / in-flight subagent no longer flips to idle-green while still busy. correctStaleStatus (pty-worker.js) now requires BOTH the hook clock (lastHookActivity) AND the output clock (lastActivity, bumped on every PTY chunk) to be stale past the 5-min timeout before force-flipping working/waiting → idle: a busy session emits continuous output (build logs / Claude's spinner redraw) so it stays non-idle, while a genuinely silent hang still self-corrects (both clocks go stale). Test endpoint /api/test/age-session gains hookOnly/activityOnly to age each clock independently. WORKER code → needs a cold restart to take effect. Prior 1.29.2: #41 — desktop sidebar resize handle fixed + made discoverable. `--sb-width` is now the SINGLE source of truth for width: drag sets the custom property (was inline `style.width`, a separate path from restore-on-load's `--sb-width`); pointerup removes any lingering inline width so toggling the sidebar closed after a resize collapses correctly (was stuck at the dragged width). Handle moved inside the panel (`right:0`, no longer clipped by `overflow:hidden`) + a persistent grip pill (::before, hover/active states) — desktop only; doResize still re-fits the terminal; width clamped 160–600px. app.html-only (served asset → version bump). Prior 1.29.1: #23 (regression) — a NEW claude session in a folder that already holds older conversations no longer adopts one of them. pty-worker's cwd-newest-.jsonl detection (sessionSummary / onExit / 15s timer) now gates on the session's start time via ownClaudeSessionId(): a .jsonl is only attributed to a session if it was written at/after that session started, so a fresh session starts clean (was: mislabeled with the previous conversation's id → auto-opened the Chat lens on the old transcript). Explicit --resume <id> still honored; rename's newest-on-disk name-tracking unchanged. WORKER code → needs a cold restart to take effect. Prior 1.29.0: rich transcript tool data — GET /api/sessions/:id/transcript now includes, per tool_use, its `id`, a per-field-capped structured `input`, and the paired tool_result `result` (output). lib/transcript.js pairs results→tool_uses by id during the backward scan and exposes extractToolResults; the app renders shells (Bash cmd+output), subagents (Task desc/report), and file ops as rich cards. Backward-compatible (name/inputPreview unchanged). Prior 1.28.2: attention-clear now fires on session OPEN — the web app (app.html switchSession) calls POST /api/sessions/:id/attention/clear when foregrounding a session that has a live alert, so opening it in the browser dismisses the phone push (was mobile-only). Web also handles inbound 'clear' notify frames (drops the chip / closes the browser toast) — previously a 'clear' frame fell through to showNotification and could pop an "undefined" toast. Mobile companion (#2): opening a session now cancels its OS notification locally (NotificationService.cancelForSession) instead of relying on a dead FCM 'clear' round-trip that never fires while the app is foreground; a foreground 'clear' push is also routed to cancel. Prior 1.28.1: #25 — idle/'finished' FCM pushes are now high-priority so an 'all'-level session's finish notification wakes the phone through Android Doze (was normal-priority → deferred/dropped). Prior 1.28.0: #21 — session takeover relaxed: multiple devices now SHARE one PTY (shared I/O) by default instead of the second viewer force-disconnecting the first. Opt back into the old single-owner kick with config `exclusiveViewer: true`. Prior 1.27.0: #24 — POST /api/sessions/:id/attention/clear clears a session's attention across devices (flips recorded attention, FCM 'clear' to dismiss phone toasts, broadcasts a 'clear' notify frame so in-app viewers drop the chip); capability 'attention-clear'. Prior 1.26.1: (a) #23 fix — restore no longer appends implicit `--continue` to an unknown-id claude session (that resumed the most-recent conversation in the cwd, so a new session came up "Resumed" to the last one). Unknown-id restore now starts fresh; `--resume <own-id>` and explicit user --continue/--resume still honored (lib/restore-command.js). (b) /api/cluster/sessions cache (1500ms) is now invalidated on session create/delete/rename/reorder, so a just-created session shows in the sidebar immediately instead of after the TTL
+const SERVER_VERSION = '1.30.0'; // 2026-07-09: chat-mode subagent trace — GET /api/sessions/:id/transcript now stamps each Task tool_use with a { agentType, description, running } subagent stub (present when a subagents/agent-*.meta.json links that tool_use id), and a NEW GET /api/sessions/:id/subagent/:toolUseId lazily pages that subagent's OWN transcript (reusing scanTurnsBackward — the sidechain .jsonl shares the main turn shape, so ONE parser). Lets the companion Chat view drill into a running subagent's nested tool calls, mirroring the terminal's arrow-navigable subagent panel. `running` = subagent exists but its Task has no tool_result yet. Additive + backward-compatible (older app ignores the stub; new app vs old server falls back to the flat Task card). Prior 1.29.6: #42 — Chat lens now resolves the transcript for cwds with special chars ('_'/'.'/space). The cwd→Claude-project-dir encoder was duplicated in 3 places (server deriveTranscriptPath + server detectClaudeSessionIdFromDir + pty-worker) and lossy — it only mapped '\'/'/', leaving '_'/'.'/space intact, so e.g. C:\dev\AM8_Core resolved to a non-existent C--dev-AM8_Core dir (Claude actually uses C--dev-AM8-Core) → /transcript 404 → Chat hidden. One SSOT encoder now lives in lib/transcript.js (claudeProjectDirName: replace EVERY non-alphanumeric char with '-', case preserved, verified vs ~/.claude/projects); server + pty-worker both call it, and the dead server-side detectClaudeSessionIdFromDir copy was removed. server.js hot-reloadable; the pty-worker leg needs a cold restart. Prior 1.29.5: #37b — the "finished/idle" push (notify level 'all') no longer fires while a background build / in-flight subagent is still emitting output. The idle debounce now re-checks the worker's output clock (lastActivity via getSession) when it fires: if output landed within the window the session isn't finished, so it re-arms and waits for a genuine quiet period before pushing "Claude is done" (a non-idle statusChanged still cancels). Same output-clock signal #37 gave correctStaleStatus — SSOT. server.js-only → hot-reload. Prior 1.29.4: #38 — Claude context-window % now shows on each session tab/list row (web sidebar + companion list), not only inside the session. Both list endpoints already attach per-session `metrics` (getStatusMetrics); the web sidebar (new ctxBadge helper → .sb-ctx) and the companion SessionCard now render metrics.ctx as a small badge, colored by shared warn-50/danger-70 thresholds (companion ctxColor SSOT in lib/widgets/format_utils.dart, reused by the in-session _MetricsHeader). No server logic changed — asset/version bump only. Prior 1.29.3: #37 — a session running a build / background process / in-flight subagent no longer flips to idle-green while still busy. correctStaleStatus (pty-worker.js) now requires BOTH the hook clock (lastHookActivity) AND the output clock (lastActivity, bumped on every PTY chunk) to be stale past the 5-min timeout before force-flipping working/waiting → idle: a busy session emits continuous output (build logs / Claude's spinner redraw) so it stays non-idle, while a genuinely silent hang still self-corrects (both clocks go stale). Test endpoint /api/test/age-session gains hookOnly/activityOnly to age each clock independently. WORKER code → needs a cold restart to take effect. Prior 1.29.2: #41 — desktop sidebar resize handle fixed + made discoverable. `--sb-width` is now the SINGLE source of truth for width: drag sets the custom property (was inline `style.width`, a separate path from restore-on-load's `--sb-width`); pointerup removes any lingering inline width so toggling the sidebar closed after a resize collapses correctly (was stuck at the dragged width). Handle moved inside the panel (`right:0`, no longer clipped by `overflow:hidden`) + a persistent grip pill (::before, hover/active states) — desktop only; doResize still re-fits the terminal; width clamped 160–600px. app.html-only (served asset → version bump). Prior 1.29.1: #23 (regression) — a NEW claude session in a folder that already holds older conversations no longer adopts one of them. pty-worker's cwd-newest-.jsonl detection (sessionSummary / onExit / 15s timer) now gates on the session's start time via ownClaudeSessionId(): a .jsonl is only attributed to a session if it was written at/after that session started, so a fresh session starts clean (was: mislabeled with the previous conversation's id → auto-opened the Chat lens on the old transcript). Explicit --resume <id> still honored; rename's newest-on-disk name-tracking unchanged. WORKER code → needs a cold restart to take effect. Prior 1.29.0: rich transcript tool data — GET /api/sessions/:id/transcript now includes, per tool_use, its `id`, a per-field-capped structured `input`, and the paired tool_result `result` (output). lib/transcript.js pairs results→tool_uses by id during the backward scan and exposes extractToolResults; the app renders shells (Bash cmd+output), subagents (Task desc/report), and file ops as rich cards. Backward-compatible (name/inputPreview unchanged). Prior 1.28.2: attention-clear now fires on session OPEN — the web app (app.html switchSession) calls POST /api/sessions/:id/attention/clear when foregrounding a session that has a live alert, so opening it in the browser dismisses the phone push (was mobile-only). Web also handles inbound 'clear' notify frames (drops the chip / closes the browser toast) — previously a 'clear' frame fell through to showNotification and could pop an "undefined" toast. Mobile companion (#2): opening a session now cancels its OS notification locally (NotificationService.cancelForSession) instead of relying on a dead FCM 'clear' round-trip that never fires while the app is foreground; a foreground 'clear' push is also routed to cancel. Prior 1.28.1: #25 — idle/'finished' FCM pushes are now high-priority so an 'all'-level session's finish notification wakes the phone through Android Doze (was normal-priority → deferred/dropped). Prior 1.28.0: #21 — session takeover relaxed: multiple devices now SHARE one PTY (shared I/O) by default instead of the second viewer force-disconnecting the first. Opt back into the old single-owner kick with config `exclusiveViewer: true`. Prior 1.27.0: #24 — POST /api/sessions/:id/attention/clear clears a session's attention across devices (flips recorded attention, FCM 'clear' to dismiss phone toasts, broadcasts a 'clear' notify frame so in-app viewers drop the chip); capability 'attention-clear'. Prior 1.26.1: (a) #23 fix — restore no longer appends implicit `--continue` to an unknown-id claude session (that resumed the most-recent conversation in the cwd, so a new session came up "Resumed" to the last one). Unknown-id restore now starts fresh; `--resume <own-id>` and explicit user --continue/--resume still honored (lib/restore-command.js). (b) /api/cluster/sessions cache (1500ms) is now invalidated on session create/delete/rename/reorder, so a just-created session shows in the sidebar immediately instead of after the TTL
 
 // --- Optional latency instrumentation (opt-in via WT_LATENCY_DEBUG=1) -----
 // Event-loop lag monitor: interval is 10ms; anything ≥ 50ms slip is a stall.
@@ -188,6 +188,76 @@ async function deriveTranscriptPath(id) {
     return safeTranscriptPath(path.join(getClaudeProjectsDir(), dirName, csid + '.jsonl'));
   } catch { return ''; }
 }
+
+// Resolve a session's transcript path: the in-memory stash (set + validated by the
+// http-hook) first, then a validated derivation (stashed back so later reads skip
+// it). '' on any miss. SSOT for the transcript-read routes (/transcript, /subagent,
+// /pending-question) so the .jsonl-under-projects-root trust chain lives in ONE place.
+async function resolveSessionTranscriptPath(id) {
+  let tpath = (_notifyState.get(id) || {}).transcriptPath || '';
+  if (!tpath) {
+    tpath = await deriveTranscriptPath(id);
+    if (tpath) _nstate(id).transcriptPath = tpath;
+  }
+  return tpath;
+}
+
+// --- subagent trace: a session's spawned-subagent transcripts -----------------
+// Claude Code stores each spawned subagent's own transcript in a sibling dir of
+// the main <sessionId>.jsonl:  <...>/<sessionId>/subagents/agent-<agentId>.jsonl
+// (+ an agent-<agentId>.meta.json sidecar). These three helpers turn that on-disk
+// layout into a Task-tool_use → subagent-file index the /transcript stub and the
+// /subagent drill endpoint share. All I/O is best-effort — a missing dir or a bad
+// sidecar just yields no trace, never an error (the flat Task card still renders).
+function subagentDirForTranscript(tpath) {
+  // tpath = <projectsDir>/<projectDir>/<sessionId>.jsonl → sibling <sessionId>/subagents
+  return path.join(path.dirname(tpath), path.basename(tpath, '.jsonl'), 'subagents');
+}
+
+// Map a Task tool_use id → { file, agentType, description } by reading every
+// agent-*.meta.json sidecar in a session's subagents dir. The agent .jsonl path is
+// built from the real dir entry name (agent-<id>.jsonl), NEVER from a request value,
+// so a caller-supplied toolUseId can only ever be a map key — no path traversal.
+function buildSubagentIndex(subDir) {
+  const map = new Map();
+  let names;
+  try { names = fs.readdirSync(subDir); } catch { return map; } // no subagents → empty
+  for (const name of names) {
+    if (!name.startsWith('agent-') || !name.endsWith('.meta.json')) continue;
+    let meta;
+    try { meta = transcript.parseAgentMeta(fs.readFileSync(path.join(subDir, name), 'utf8')); }
+    catch { continue; }
+    if (!meta) continue;
+    const agentId = name.slice('agent-'.length, name.length - '.meta.json'.length);
+    if (!agentId) continue;
+    map.set(meta.toolUseId, {
+      file: path.join(subDir, `agent-${agentId}.jsonl`),
+      agentType: meta.agentType,
+      description: meta.description,
+    });
+  }
+  return map;
+}
+
+// The set of finished (resolved) tool_use ids from a transcript's last 256KB — the
+// "running" signal for subagent stubs: a Task whose id is NOT resolved is in flight.
+// Reads only the tail (a Task's tool_result lands right after its subagent ends), so
+// it's cheap regardless of transcript size. Returns an empty set on any read error.
+function resolvedIdsTail(tpath) {
+  try {
+    const size = fs.statSync(tpath).size;
+    const start = Math.max(0, size - 262144); // 256KB tail
+    const len = size - start;
+    if (len <= 0) return new Set();
+    const buf = Buffer.alloc(len);
+    const fd = fs.openSync(tpath, 'r');
+    try { fs.readSync(fd, buf, 0, len, start); } finally { fs.closeSync(fd); }
+    let text = buf.toString('utf8');
+    if (start > 0) { const nl = text.indexOf('\n'); if (nl >= 0) text = text.slice(nl + 1); }
+    return transcript.collectResolvedIds(text);
+  } catch { return new Set(); }
+}
+
 const CLUSTER_TOKENS_FILE = path.join(__dirname, 'cluster-tokens.json');
 const CLAUDE_SESSION_NAMES_FILE = path.join(__dirname, 'claude-session-names.json');
 
@@ -2440,7 +2510,7 @@ app.get('/api/version', (req, res) => {
   // device registry is always available; 'fcm' is advertised only when a
   // service account is configured (or the test sink is active) — a server with
   // no FCM key can still take registrations but won't send FCM.
-  const capabilities = ['attention', 'clear', 'attention-clear', 'push-devices', 'transcript', 'status-metrics', 'pending-question'];
+  const capabilities = ['attention', 'clear', 'attention-clear', 'push-devices', 'transcript', 'status-metrics', 'pending-question', 'subagent-trace'];
   if (fcmConfigured()) capabilities.push('fcm');
   res.json({
     version: SERVER_VERSION,
@@ -2754,13 +2824,8 @@ app.get('/api/sessions/:id/transcript', async (req, res) => {
     if (before == null) return res.status(400).json({ error: 'invalid cursor' });
   }
 
-  // Resolve the transcript path: the in-memory stash (set + validated by the
-  // http-hook) first, then a validated derivation if the stash is empty.
-  let tpath = (_notifyState.get(id) || {}).transcriptPath || '';
-  if (!tpath) {
-    tpath = await deriveTranscriptPath(id);
-    if (tpath) _nstate(id).transcriptPath = tpath; // stash so later pages skip derivation
-  }
+  // Resolve the transcript path (stash → validated derivation; SSOT helper).
+  const tpath = await resolveSessionTranscriptPath(id);
   if (!tpath) return res.status(404).json({ error: 'no transcript for session' });
 
   let fd;
@@ -2780,10 +2845,96 @@ app.get('/api/sessions/:id/transcript', async (req, res) => {
       return read === len ? buf : buf.slice(0, read);
     };
     const { turns, cursor, hasMore } = transcript.scanTurnsBackward(readChunk, size, { before, limit });
+    // Stamp each Task tool_use that has a spawned subagent with a light stub so the
+    // chat view can show a running dot + offer to drill in (via /subagent below).
+    // Best-effort: any failure just leaves the flat Task cards as-is.
+    try {
+      const idx = buildSubagentIndex(subagentDirForTranscript(tpath));
+      if (idx.size) {
+        const resolved = resolvedIdsTail(tpath);
+        transcript.attachSubagentStubs(turns, (tid) => idx.get(tid) || null, (tid) => resolved.has(tid));
+      }
+    } catch {}
     res.json({ messages: turns, cursor, hasMore });
   } catch (e) {
     console.error(`GET /api/sessions/${id}/transcript failed: ${e.message}`);
     res.status(500).json({ error: 'Failed to read transcript' });
+  } finally {
+    if (fd !== undefined) { try { fs.closeSync(fd); } catch {} }
+  }
+});
+
+// --- chat-mode subagent trace: drill into ONE subagent's transcript -----------
+// GET /api/sessions/:id/subagent/:toolUseId?before=<cursor>&limit=<n>
+// A Task tool_use in /transcript carries a { agentType, description, running }
+// stub when it spawned a subagent; this lazily pages that subagent's OWN transcript
+// (newest-LAST, same backward cursor as /transcript) so the chat view can show the
+// subagent's nested tool calls — the chat-native equivalent of the terminal's
+// arrow-navigable subagent panel. :toolUseId is only ever a lookup KEY into the
+// meta index built from real dir entries — the agent .jsonl path is never
+// constructed from the request — and the resolved file is re-validated through
+// safeTranscriptPath (.jsonl strictly under the Claude projects root), so this
+// route can read nothing the stash/derivation couldn't. Nested Task tool_uses in
+// the response carry their own stubs (all subagents share one flat subagents dir),
+// so the client drills deeper via the same endpoint. Cache-Control: no-store.
+app.get('/api/sessions/:id/subagent/:toolUseId', async (req, res) => {
+  res.set('Cache-Control', 'no-store');
+  const id = req.params.id;
+  const toolUseId = req.params.toolUseId;
+
+  // Same limit/before validation as /transcript.
+  let limit = transcript.DEFAULT_PAGE;
+  if (req.query.limit != null && req.query.limit !== '') {
+    const n = Number(req.query.limit);
+    if (!Number.isInteger(n) || n < 1) return res.status(400).json({ error: 'limit must be a positive integer' });
+    limit = Math.min(transcript.MAX_PAGE, n);
+  }
+  let before = null;
+  if (req.query.before != null && req.query.before !== '') {
+    before = transcript.decodeCursor(String(req.query.before));
+    if (before == null) return res.status(400).json({ error: 'invalid cursor' });
+  }
+
+  const tpath = await resolveSessionTranscriptPath(id);
+  if (!tpath) return res.status(404).json({ error: 'no transcript for session' });
+
+  // Resolve the subagent file via the meta index (toolUseId is a key, not a path),
+  // then re-validate it through the same .jsonl-under-projects-root trust chain.
+  const entry = buildSubagentIndex(subagentDirForTranscript(tpath)).get(toolUseId);
+  const file = entry ? safeTranscriptPath(entry.file) : '';
+  if (!file) return res.status(404).json({ error: 'no subagent for tool_use' });
+
+  let fd;
+  try {
+    const size = fs.statSync(file).size;
+    if (before != null && before > size) before = size;
+    fd = fs.openSync(file, 'r');
+    const readChunk = (off, len) => {
+      const buf = Buffer.alloc(len);
+      let read = 0;
+      while (read < len) {
+        const n = fs.readSync(fd, buf, read, len - read, off + read);
+        if (n <= 0) break;
+        read += n;
+      }
+      return read === len ? buf : buf.slice(0, read);
+    };
+    const { turns, cursor, hasMore } = transcript.scanTurnsBackward(readChunk, size, { before, limit });
+    // Deeper nesting: a subagent can itself spawn subagents (all in the same flat
+    // subagents dir), so stamp nested Task tool_uses too — resolved-set from THIS
+    // subagent's tail (its nested tool_results live in its own transcript).
+    try {
+      const idx = buildSubagentIndex(subagentDirForTranscript(tpath));
+      const resolved = resolvedIdsTail(file);
+      transcript.attachSubagentStubs(turns, (tid) => idx.get(tid) || null, (tid) => resolved.has(tid));
+    } catch {}
+    // This subagent is running iff the PARENT transcript has no tool_result for its
+    // Task tool_use id yet (same signal the /transcript stub used).
+    const running = !resolvedIdsTail(tpath).has(toolUseId);
+    res.json({ agentType: entry.agentType, description: entry.description, running, messages: turns, cursor, hasMore });
+  } catch (e) {
+    console.error(`GET /api/sessions/${id}/subagent/${toolUseId} failed: ${e.message}`);
+    res.status(500).json({ error: 'Failed to read subagent transcript' });
   } finally {
     if (fd !== undefined) { try { fs.closeSync(fd); } catch {} }
   }
@@ -2803,11 +2954,7 @@ app.get('/api/sessions/:id/pending-question', async (req, res) => {
   // tool_use after the answer). The transcript scan below stays as a fallback.
   const live = (_notifyState.get(id) || {}).pendingQuestion;
   if (live) return res.json({ pending: true, question: live });
-  let tpath = (_notifyState.get(id) || {}).transcriptPath || '';
-  if (!tpath) {
-    tpath = await deriveTranscriptPath(id);
-    if (tpath) _nstate(id).transcriptPath = tpath;
-  }
+  const tpath = await resolveSessionTranscriptPath(id);
   if (!tpath) return res.status(404).json({ error: 'no transcript for session' });
   try {
     const size = fs.statSync(tpath).size;

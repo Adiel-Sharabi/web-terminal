@@ -232,6 +232,29 @@ class ApiClient {
     return TranscriptPage.fromJson(_asMap(_decode(res)));
   }
 
+  /// Fetches one backward-paginated page of a *subagent's* transcript from
+  /// `GET /api/sessions/:id/subagent/:toolUseId`.
+  ///
+  /// [toolUseId] is the id of the `Task` tool_use that spawned the subagent (from
+  /// a [ToolUse.subagent] stub). Same pagination contract as [transcript]: turns
+  /// newest-last, omit [before] for the newest page, pass the previous page's
+  /// cursor to page older. Throws [ApiException] `404` when that tool_use has no
+  /// subagent trace, or `400` for a bad cursor/limit.
+  Future<SubagentPage> subagent(
+    String sessionId,
+    String toolUseId, {
+    String? before,
+    int? limit,
+  }) async {
+    final q = <String, String>{};
+    if (before != null) q['before'] = before;
+    if (limit != null) q['limit'] = '$limit';
+    final res = await _send(
+        'GET', '/api/sessions/$sessionId/subagent/${Uri.encodeComponent(toolUseId)}',
+        query: q.isEmpty ? null : q);
+    return SubagentPage.fromJson(_asMap(_decode(res)));
+  }
+
   /// Fetches the session's pending interactive question (Claude's
   /// AskUserQuestion) from `GET /api/sessions/:id/pending-question`, or `null`
   /// when nothing is pending. A `404` (no transcript) is treated as "none"

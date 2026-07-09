@@ -9,6 +9,7 @@ const {
   lastAssistantText, isAllowedTranscriptPath,
   parseTranscriptTurn, scanTurnsBackward, encodeCursor, decodeCursor, stripAnsi,
   extractToolResults, pendingQuestion, shapeQuestions, claudeProjectDirName,
+  parseAgentMeta, collectResolvedIds, attachSubagentStubs,
 } = require('../lib/transcript');
 
 // In-memory chunk reader for scanTurnsBackward (mirrors server.js's fs reader).
@@ -585,5 +586,107 @@ test.describe('pendingQuestion', () => {
   test('a question with no valid options yields no pending question', () => {
     const empty = [{ header: 'H', question: 'Q', options: [{ description: 'x' }] }];
     expect(pendingQuestion(askLine('toolu_e', empty))).toBeNull();
+  });
+});
+
+// --- subagent trace (chat-mode parity with the terminal subagent panel) -------
+// The pure half of the feature: parse the agent-*.meta.json sidecar, find which
+// tools have finished (resolved ids), and stamp a { agentType, description,
+// running } stub onto each Task tool_use. server.js supplies the file I/O; these
+// three functions carry the linkage + running logic and are exhaustively testable.
+test.describe('lib/transcript.parseAgentMeta', () => {
+  test('parses a well-formed meta sidecar', () => {
+    const m = parseAgentMeta(JSON.stringify({
+      agentType: 'Explore', description: 'Find chat mode',
+      toolUseId: 'toolu_01ABC', parentAgentId: 'x', spawnDepth: 1,
+    }));
+    expect(m).toEqual({ agentType: 'Explore', description: 'Find chat mode', toolUseId: 'toolu_01ABC' });
+  });
+  test('null on malformed JSON', () => {
+    expect(parseAgentMeta('{ not json')).toBeNull();
+    expect(parseAgentMeta('')).toBeNull();
+    expect(parseAgentMeta('[]')).toBeNull(); // array is not a usable object shape here
+  });
+  test('null when there is no toolUseId to link a Task to', () => {
+    expect(parseAgentMeta(JSON.stringify({ agentType: 'X', description: 'd' }))).toBeNull();
+    expect(parseAgentMeta(JSON.stringify({ toolUseId: 123 }))).toBeNull(); // non-string id
+  });
+  test('caps long labels and strips ANSI', () => {
+    const m = parseAgentMeta(JSON.stringify({
+      toolUseId: 't', agentType: 'A', description: '\x1b[31m' + 'z'.repeat(1000),
+    }));
+    expect(m.description.length).toBeLessThanOrEqual(400);
+    expect(m.description).not.toContain('\x1b');
+  });
+});
+
+test.describe('lib/transcript.collectResolvedIds', () => {
+  test('returns the set of tool_use_ids that have a tool_result', () => {
+    const lines = [
+      JSON.stringify(asst('start')),
+      JSON.stringify({ type: 'user', message: { role: 'user', content: [
+        { type: 'tool_result', tool_use_id: 'toolu_a', content: 'ok' },
+      ] } }),
+      JSON.stringify({ type: 'user', message: { role: 'user', content: [
+        { type: 'tool_result', tool_use_id: 'toolu_b', content: [{ type: 'text', text: 'done' }] },
+      ] } }),
+    ].join('\n');
+    const set = collectResolvedIds(lines);
+    expect(set.has('toolu_a')).toBe(true);
+    expect(set.has('toolu_b')).toBe(true);
+    expect(set.has('toolu_missing')).toBe(false);
+  });
+  test('empty / non-string input -> empty set (never throws)', () => {
+    expect(collectResolvedIds('').size).toBe(0);
+    expect(collectResolvedIds(null).size).toBe(0);
+  });
+});
+
+test.describe('lib/transcript.attachSubagentStubs', () => {
+  const taskTurn = (id, result) => ({
+    role: 'assistant', text: '', ts: null,
+    toolUses: [{ name: 'Task', id, inputPreview: '', input: { description: 'd' }, ...(result != null ? { result } : {}) }],
+  });
+  const meta = { agentType: 'Explore', description: 'Find chat mode' };
+
+  test('stamps a stub on a Task with a known subagent; running when unresolved', () => {
+    const turns = [taskTurn('toolu_x')];
+    attachSubagentStubs(turns, (id) => (id === 'toolu_x' ? meta : null), () => false);
+    expect(turns[0].toolUses[0].subagent).toEqual({
+      agentType: 'Explore', description: 'Find chat mode', running: true,
+    });
+  });
+  test('running=false when the Task has an in-page result', () => {
+    const turns = [taskTurn('toolu_x', 'final report')];
+    attachSubagentStubs(turns, () => meta, () => false);
+    expect(turns[0].toolUses[0].subagent.running).toBe(false);
+  });
+  test('running=false when the Task id is in the resolved set (finished off-page)', () => {
+    const turns = [taskTurn('toolu_x')];
+    attachSubagentStubs(turns, () => meta, (id) => id === 'toolu_x');
+    expect(turns[0].toolUses[0].subagent.running).toBe(false);
+  });
+  test('no stub when the tool_use id has no matching subagent meta', () => {
+    const turns = [taskTurn('toolu_x')];
+    attachSubagentStubs(turns, () => null, () => false);
+    expect(turns[0].toolUses[0].subagent).toBeUndefined();
+  });
+  test('a tool_use with no id is never stamped', () => {
+    const turns = [{ role: 'assistant', text: '', ts: null, toolUses: [
+      { name: 'Task', id: '', inputPreview: '', input: {} },
+    ] }];
+    attachSubagentStubs(turns, () => meta, () => false);
+    expect(turns[0].toolUses[0].subagent).toBeUndefined();
+  });
+  // The link is the meta toolUseId, not the tool NAME — the CLI names the spawner
+  // `Task` but other hosts name it `Agent`. Both must be stamped when linked.
+  test('an Agent-named tool_use IS stamped when its id resolves to a subagent', () => {
+    const turns = [{ role: 'assistant', text: '', ts: null, toolUses: [
+      { name: 'Agent', id: 'toolu_agent', inputPreview: '', input: {} },
+    ] }];
+    attachSubagentStubs(turns, (id) => (id === 'toolu_agent' ? meta : null), () => false);
+    expect(turns[0].toolUses[0].subagent).toEqual({
+      agentType: 'Explore', description: 'Find chat mode', running: true,
+    });
   });
 });

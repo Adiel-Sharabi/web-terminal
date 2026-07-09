@@ -295,3 +295,134 @@ test.describe('Session transcript (G5)', () => {
     }
   });
 });
+
+// --- chat-mode subagent trace: /transcript stub + /subagent drill -------------
+// A Task tool_use whose subagent left a transcript on disk gets a { agentType,
+// description, running } stub in /transcript; /subagent/:toolUseId then pages that
+// subagent's OWN transcript. These exercise both routes end-to-end against a
+// planted subagents/ dir (agent-<id>.jsonl + agent-<id>.meta.json sidecar), plus
+// the running flag, the unknown-id 404, and auth.
+test.describe('Session subagent trace', () => {
+  test.afterAll(() => { try { fs.rmSync(FIXTURE_DIR, { recursive: true, force: true }); } catch {} });
+
+  // Build a main transcript with ONE Task tool_use (id=taskId), optionally followed
+  // by its tool_result (done=true → the subagent has finished). Plant the subagent's
+  // own transcript + meta sidecar in the sibling <base>/subagents/ dir the server
+  // derives via subagentDirForTranscript. Returns { path, taskId, agentId }.
+  let _s = 0;
+  function writeSubagentFixture({ done }) {
+    fs.mkdirSync(FIXTURE_DIR, { recursive: true });
+    const tag = `${process.pid}_${++_s}`;
+    const taskId = `toolu_task_${tag}`;
+    const agentId = `agent${tag}`; // dir-entry stem is agent-<agentId>
+    const base = path.join(FIXTURE_DIR, `wt_sa_${tag}`); // <base>.jsonl + <base>/subagents/
+    const mainPath = `${base}.jsonl`;
+
+    const mainLines = [
+      JSON.stringify({ type: 'user', message: { role: 'user', content: [{ type: 'text', text: 'go' }] } }),
+      JSON.stringify({ type: 'assistant', message: { role: 'assistant', content: [
+        { type: 'text', text: 'Spawning a subagent.' },
+        { type: 'tool_use', id: taskId, name: 'Task', input: { description: 'Investigate X', subagent_type: 'Explore', prompt: 'do it' } },
+      ] } }),
+    ];
+    if (done) {
+      mainLines.push(JSON.stringify({ type: 'user', message: { role: 'user', content: [
+        { type: 'tool_result', tool_use_id: taskId, content: 'final report' },
+      ] } }));
+    }
+    fs.writeFileSync(mainPath, mainLines.join('\n') + '\n', 'utf8');
+
+    const subDir = path.join(base, 'subagents');
+    fs.mkdirSync(subDir, { recursive: true });
+    const subLines = [
+      JSON.stringify({ isSidechain: true, agentId, type: 'user', message: { role: 'user', content: [{ type: 'text', text: 'Investigate X' }] } }),
+      JSON.stringify({ isSidechain: true, agentId, type: 'assistant', message: { role: 'assistant', content: [
+        { type: 'text', text: 'Looking around.' },
+        { type: 'tool_use', id: `toolu_bash_${tag}`, name: 'Bash', input: { command: 'grep -r foo .' } },
+      ] } }),
+      JSON.stringify({ isSidechain: true, agentId, type: 'user', message: { role: 'user', content: [
+        { type: 'tool_result', tool_use_id: `toolu_bash_${tag}`, content: 'foo at bar.js:12' },
+      ] } }),
+      JSON.stringify({ isSidechain: true, agentId, type: 'assistant', message: { role: 'assistant', content: [{ type: 'text', text: 'Found it at bar.js:12' }] } }),
+    ];
+    fs.writeFileSync(path.join(subDir, `agent-${agentId}.jsonl`), subLines.join('\n') + '\n', 'utf8');
+    fs.writeFileSync(path.join(subDir, `agent-${agentId}.meta.json`),
+      JSON.stringify({ agentType: 'Explore', description: 'Investigate X', toolUseId: taskId, spawnDepth: 1 }), 'utf8');
+
+    return { path: mainPath, taskId, agentId };
+  }
+
+  test('/transcript stamps a Task tool_use with a running subagent stub (no result yet)', async () => {
+    const ctx = await authCtx();
+    const fx = writeSubagentFixture({ done: false });
+    const id = await sessionWithTranscript(ctx, fx.path, 'SA Running');
+    try {
+      const body = await (await ctx.get(`/api/sessions/${id}/transcript`)).json();
+      const task = body.messages.flatMap(m => m.toolUses).find(t => t.id === fx.taskId);
+      expect(task).toBeTruthy();
+      expect(task.subagent).toEqual({ agentType: 'Explore', description: 'Investigate X', running: true });
+    } finally {
+      await ctx.delete(`/api/sessions/${id}`);
+      await ctx.dispose();
+    }
+  });
+
+  test('/transcript marks the subagent NOT running once the Task has a tool_result', async () => {
+    const ctx = await authCtx();
+    const fx = writeSubagentFixture({ done: true });
+    const id = await sessionWithTranscript(ctx, fx.path, 'SA Done');
+    try {
+      const body = await (await ctx.get(`/api/sessions/${id}/transcript`)).json();
+      const task = body.messages.flatMap(m => m.toolUses).find(t => t.id === fx.taskId);
+      expect(task.subagent.running).toBe(false);
+    } finally {
+      await ctx.delete(`/api/sessions/${id}`);
+      await ctx.dispose();
+    }
+  });
+
+  test('/subagent/:toolUseId pages the subagent\'s own transcript (nested tool calls)', async () => {
+    const ctx = await authCtx();
+    const fx = writeSubagentFixture({ done: false });
+    const id = await sessionWithTranscript(ctx, fx.path, 'SA Drill');
+    try {
+      const res = await ctx.get(`/api/sessions/${id}/subagent/${fx.taskId}`);
+      expect(res.status()).toBe(200);
+      expect(res.headers()['cache-control']).toBe('no-store');
+      const body = await res.json();
+      expect(body.agentType).toBe('Explore');
+      expect(body.description).toBe('Investigate X');
+      expect(body.running).toBe(true); // parent has no tool_result for the Task
+      // newest-last: the final subagent turn is its conclusion
+      expect(body.messages[body.messages.length - 1]).toMatchObject({ role: 'assistant', text: 'Found it at bar.js:12' });
+      // the subagent's Bash tool_use is present, with its paired result
+      const bash = body.messages.flatMap(m => m.toolUses).find(t => t.name === 'Bash');
+      expect(bash).toBeTruthy();
+      expect(bash.result).toMatch(/bar\.js:12/);
+    } finally {
+      await ctx.delete(`/api/sessions/${id}`);
+      await ctx.dispose();
+    }
+  });
+
+  test('/subagent for an unknown tool_use id is a 404', async () => {
+    const ctx = await authCtx();
+    const fx = writeSubagentFixture({ done: false });
+    const id = await sessionWithTranscript(ctx, fx.path, 'SA 404');
+    try {
+      const res = await ctx.get(`/api/sessions/${id}/subagent/toolu_does_not_exist`);
+      expect(res.status()).toBe(404);
+      expect((await res.json()).error).toMatch(/no subagent/i);
+    } finally {
+      await ctx.delete(`/api/sessions/${id}`);
+      await ctx.dispose();
+    }
+  });
+
+  test('/subagent requires authentication', async () => {
+    const ctx = await noAuthCtx();
+    const res = await ctx.get('/api/sessions/whatever/subagent/toolu_x');
+    expect(res.status()).toBe(401);
+    await ctx.dispose();
+  });
+});
