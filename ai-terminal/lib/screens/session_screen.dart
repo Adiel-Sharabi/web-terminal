@@ -146,6 +146,24 @@ String buildComposeSubmission(String val) {
   return '$val\r';
 }
 
+/// One chunk of the terminal's `onOutput`, translated to the bytes the PTY
+/// should receive.
+///
+/// A soft keyboard commits Enter as literal text, not a key event: xterm's
+/// `_onInsert` calls `charToTerminalKey('\n'.trim())`, i.e. `charToTerminalKey('')`,
+/// which is null (length != 1), so it falls back to `terminal.textInput('\n')`
+/// and a raw LF reaches the PTY. Claude's TUI inserts a newline in the prompt on
+/// LF and submits only on CR, so the typed prompt just sat there until the
+/// toolbar's Enter (`onKey('\r')`) was tapped. A hardware Enter never had this
+/// problem — it routes through `keyInput(TerminalKey.enter)`, whose keytab entry
+/// is `Enter-NewLine: "\r"` — and neither does the web client, whose xterm.js
+/// `onData` yields `\r`.
+///
+/// Only a LONE LF is rewritten. `_pasteFromClipboard` routes `Terminal.paste`
+/// through this same callback, where interior newlines are paste content and
+/// must survive verbatim. Sticky Ctrl+J is intercepted before this runs.
+String terminalOutputToPty(String data) => data == '\n' ? '\r' : data;
+
 /// A staged compose-bar image attachment (#29): the thumbnail [bytes] shown in
 /// the removable chip, and the server [path] delivered to Claude on submit.
 class _ComposeAttachment {
@@ -875,7 +893,7 @@ class _SessionScreenState extends State<SessionScreen>
       setState(() => _altSticky = false);
       return;
     }
-    _connection?.sendInput(data);
+    _connection?.sendInput(terminalOutputToPty(data));
   }
 
   void _onSelectionChanged() {

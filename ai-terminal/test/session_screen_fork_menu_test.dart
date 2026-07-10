@@ -228,6 +228,41 @@ void main() {
     });
   });
 
+  // A soft keyboard commits Enter as literal "\n" text, so xterm's _onInsert
+  // falls through to terminal.textInput('\n') and a raw LF hit the PTY. Claude's
+  // TUI inserts a prompt newline on LF and submits only on CR, so a typed prompt
+  // sat there until the toolbar's Enter (which sends '\r') was tapped.
+  group('terminalOutputToPty (soft-keyboard Enter submits)', () {
+    test('a lone LF becomes the submit CR', () {
+      expect(terminalOutputToPty('\n'), '\r');
+    });
+
+    test('ordinary characters pass through untouched', () {
+      expect(terminalOutputToPty('a'), 'a');
+      expect(terminalOutputToPty('hello'), 'hello');
+      expect(terminalOutputToPty('\r'), '\r');
+    });
+
+    test('control bytes and escape sequences pass through untouched', () {
+      expect(terminalOutputToPty('\x1b[A'), '\x1b[A'); // arrow up
+      expect(terminalOutputToPty('\x03'), '\x03'); // Ctrl+C
+      expect(terminalOutputToPty('\x1b'), '\x1b'); // Esc
+    });
+
+    test('a bracketed paste keeps its interior newlines verbatim', () {
+      // _pasteFromClipboard routes Terminal.paste through this same callback:
+      // those newlines are paste CONTENT, not a submit. Rewriting them would
+      // submit each line separately.
+      const paste = '\x1b[200~line one\nline two\x1b[201~';
+      expect(terminalOutputToPty(paste), paste);
+    });
+
+    test('multi-character input containing LF is not rewritten', () {
+      expect(terminalOutputToPty('ab\ncd'), 'ab\ncd');
+      expect(terminalOutputToPty('\n\n'), '\n\n');
+    });
+  });
+
   group('buildComposeSubmission (#44: atomic submit — body + CR in one frame)', () {
     test('single-line: text + trailing CR, in one string', () {
       expect(buildComposeSubmission('hello world'), 'hello world\r');
