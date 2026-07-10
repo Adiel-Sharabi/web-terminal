@@ -16,8 +16,9 @@ const ipc = require('./lib/ipc');
 const { resolveRestoreRunCommand } = require('./lib/restore-command');
 const { claudeProjectDirName } = require('./lib/transcript');
 const agents = require('./lib/agents');
+const { splitTrailingCr } = require('./lib/submit-frames');
 
-const WORKER_VERSION = '0.5.1';
+const WORKER_VERSION = '0.6.0';
 
 // --- Optional latency instrumentation (opt-in via WT_LATENCY_DEBUG=1) -----
 const _LATENCY_DEBUG = process.env.WT_LATENCY_DEBUG === '1';
@@ -124,10 +125,14 @@ const API_ERROR_EPISODE_MS = 120000;  // a new error this long after the last au
 const API_ERROR_COMPACT_MIN_WAIT_MS = _apiErrFast ? 10 : 1500;       // ignore the settle-idle right after /compact
 const API_ERROR_COMPACT_FALLBACK_MS = _apiErrFast ? 300 : 45000;     // replay anyway if no idle hook arrives
 const API_ERROR_NEEDLE = Buffer.from('API Error');
-// Gap between typing text and the CR that submits it. Claude's TUI reads input
-// in raw mode where Enter is CR (\r) — not LF (\n) — and debounces fast bursts
-// as pastes, so we type the text, pause, then send the CR on its own.
-const CLAUDE_SUBMIT_GAP_MS = _apiErrFast ? 10 : 60;
+
+// Gap between typing text and the CR that submits it. An agent TUI reads input in raw
+// mode where Enter is CR (\r) — not LF (\n). How long the CR must trail the text is a
+// property OF THE AGENT, so it lives in the provider registry (lib/agents.js), not here.
+function submitGapMs(session) {
+  if (_apiErrFast) return 10; // tests: shrink timers
+  return agents.submitPolicy(sessionAgent(session)).gapMs;
+}
 
 function autoContinueEnabled() {
   // Ops/test override wins, then live config (default ON).
@@ -674,12 +679,12 @@ function scheduleAutoContinue(session) {
     if (attempt >= API_ERROR_COMPACT_ATTEMPT) {
       // Failed twice — shrink context with /compact, then replay the last
       // prompt once Claude settles (idle hook or fallback timer).
-      try { claudeSubmitLine(s, '/compact'); } catch (e) { log(`api-error: /compact write failed: ${e.message}`); return; }
+      try { submitLine(s, '/compact'); } catch (e) { log(`api-error: /compact write failed: ${e.message}`); return; }
       log(`api-error: "${s.name}" auto attempt ${attempt}/${API_ERROR_MAX_ATTEMPTS}: sent /compact`);
       armCompactReplay(s);
       broadcastEvent('apiError', { id: s.id, name: s.name, apiError: true, text: s.apiErrorText || '', transient: true, autoContinue: attempt, action: 'compact' });
     } else {
-      try { claudeSubmitLine(s, 'continue'); } catch (e) { log(`api-error: continue write failed: ${e.message}`); return; }
+      try { submitLine(s, 'continue'); } catch (e) { log(`api-error: continue write failed: ${e.message}`); return; }
       log(`api-error: "${s.name}" auto attempt ${attempt}/${API_ERROR_MAX_ATTEMPTS}: sent continue`);
       broadcastEvent('apiError', { id: s.id, name: s.name, apiError: true, text: s.apiErrorText || '', transient: true, autoContinue: attempt, action: 'continue' });
     }
@@ -707,37 +712,78 @@ function doCompactReplay(session, reason) {
 }
 
 // Low-level write to a session's PTY. Mirrors the write into a per-session
-// buffer under WT_TEST so specs can assert the exact bytes we send to Claude
+// buffer under WT_TEST so specs can assert the exact bytes we send to the agent
 // (CR-vs-LF is the difference between "submitted" and "stuck in the box").
-function claudeTermWrite(session, data) {
+function termWrite(session, data) {
   if (process.env.WT_TEST) (session._testWrites || (session._testWrites = [])).push(data);
   session.term.write(data);
 }
 
-// Submit a single line to Claude's interactive TUI. Claude reads its input box
+// Submit a single line to an agent's interactive TUI. The TUI reads its input box
 // in raw mode where the Enter/submit key is CR (\r) — NOT LF (\n): sending \n
 // just leaves the text sitting unsubmitted (the bug that silently broke
-// auto-continue). Type the text, then send the CR on a short delay so the TUI
+// auto-continue). Type the text, then send the CR on the agent's delay so the TUI
 // has ingested the text — and doesn't treat the burst as a paste — before Enter.
-function claudeSubmitLine(session, text) {
-  claudeTermWrite(session, text); // may throw → caller's try/catch decides
-  const t = setTimeout(() => { try { claudeTermWrite(session, '\r'); } catch (e) { log(`api-error: submit CR failed: ${e.message}`); } }, CLAUDE_SUBMIT_GAP_MS);
+function submitLine(session, text) {
+  termWrite(session, text); // may throw → caller's try/catch decides
+  const t = setTimeout(() => { try { termWrite(session, '\r'); } catch (e) { log(`api-error: submit CR failed: ${e.message}`); } }, submitGapMs(session));
   if (typeof t.unref === 'function') t.unref();
 }
 
-// Submit text to Claude's TUI. Multi-line prompts go through bracketed paste so
+// Submit text to an agent's TUI. Multi-line prompts go through bracketed paste so
 // embedded newlines don't submit early; a trailing CR then sends it. Single
-// lines go through claudeSubmitLine (text + CR).
+// lines go through submitLine (text + CR).
 function writePromptToTerm(session, text) {
   try {
     if (text.includes('\n')) {
-      claudeTermWrite(session, '\x1b[200~' + text + '\x1b[201~');
-      const t = setTimeout(() => { try { claudeTermWrite(session, '\r'); } catch {} }, CLAUDE_SUBMIT_GAP_MS);
+      termWrite(session, '\x1b[200~' + text + '\x1b[201~');
+      const t = setTimeout(() => { try { termWrite(session, '\r'); } catch {} }, submitGapMs(session));
       if (typeof t.unref === 'function') t.unref();
     } else {
-      claudeSubmitLine(session, text);
+      submitLine(session, text);
     }
   } catch (e) { log(`api-error: prompt replay write failed: ${e.message}`); }
+}
+
+// Deliver a keystroke frame from a client to the PTY.
+//
+// For an agent whose TUI folds a whole read into a paste (Codex — see
+// lib/submit-frames.js), a frame like `hello\r` never submits: the CR becomes a newline
+// in its composer. Hold the CR back and write it alone, submitGapMs later. Frames that
+// arrive during that gap queue behind it, so input order is preserved.
+//
+// Agents without the flag (Claude, and plain shells) take the untouched single write —
+// their clients' atomic `text\r` already submits, and #44 depends on it staying atomic.
+function writeUserInput(session, data) {
+  if (!agents.submitPolicy(sessionAgent(session)).crBurstsAsPaste) {
+    termWrite(session, data);
+    return;
+  }
+  if (session._submitTimer) { (session._inputQueue || (session._inputQueue = [])).push(data); return; }
+  _writeFrame(session, data);
+}
+
+// Write one frame. If it ends in a submit CR, the CR is withheld and the gap is armed.
+function _writeFrame(session, data) {
+  const split = splitTrailingCr(data);
+  if (!split) { termWrite(session, data); return; }
+  termWrite(session, split.head);
+  session._submitTimer = setTimeout(() => {
+    session._submitTimer = null;
+    try { termWrite(session, split.cr); } catch (e) { log(`submit CR failed: ${e.message}`); }
+    _drainInputQueue(session);
+  }, submitGapMs(session));
+  if (typeof session._submitTimer.unref === 'function') session._submitTimer.unref();
+}
+
+// Write queued frames in order. A queued frame that itself ends in CR re-arms the gap and
+// stops the drain — the rest stay queued behind it.
+function _drainInputQueue(session) {
+  const q = session._inputQueue;
+  while (q && q.length && !session._submitTimer) {
+    const next = q.shift();
+    try { _writeFrame(session, next); } catch (e) { log(`queued input write failed: ${e.message}`); }
+  }
 }
 
 // Per-chunk PTY output processing — shared by the real term.onData handler and
@@ -992,6 +1038,8 @@ function createSession(id, cwd, name, autoCommand, savedScrollback, claudeSessio
     if (session._autoContinueTimer) { clearTimeout(session._autoContinueTimer); session._autoContinueTimer = null; }
     if (session._compactReplayTimer) { clearTimeout(session._compactReplayTimer); session._compactReplayTimer = null; }
     session._compactReplay = null;
+    if (session._submitTimer) { clearTimeout(session._submitTimer); session._submitTimer = null; }
+    session._inputQueue = null; // a withheld CR dies with its PTY
     if (session.autoCommand && /\bclaude\b/i.test(session.autoCommand)) {
       // #23: at exit, only attribute a conversation this session provably owns.
       const claudeId = session.claudeSessionId || ownClaudeSessionId(session);
@@ -1242,6 +1290,8 @@ const rpcHandlers = {
     const session = sessions.get(id);
     if (!session) return { ok: true }; // already gone
     if (session.idleTimer) clearTimeout(session.idleTimer);
+    if (session._submitTimer) { clearTimeout(session._submitTimer); session._submitTimer = null; }
+    session._inputQueue = null; // a withheld CR dies with its PTY
     try { session.term.kill(); } catch {}
     // Eagerly remove from the map so immediate follow-up RPCs see it as gone
     // (matches legacy server.js behavior). The onExit handler still fires later
@@ -1355,7 +1405,7 @@ const rpcHandlers = {
     return { ok: true, apiError: !!session.apiError };
   },
 
-  // Returns the exact byte-strings written to the PTY via claudeTermWrite (the
+  // Returns the exact byte-strings written to the PTY via termWrite (the
   // auto-recovery submit path). Lets specs verify Enter is sent as CR, not LF.
   __testGetWrites: async (params) => {
     if (!process.env.WT_TEST) throw new Error('test-only RPC');
@@ -1712,12 +1762,13 @@ server.on('connection', (conn) => {
       return;
     }
     if (frame.type === ipc.TYPE_PTY_IN) {
-      // Binary keystroke frame from web.js — write to the session's PTY.
+      // Binary keystroke frame from web.js — write to the session's PTY, honouring how
+      // this session's agent reads a submit CR (writeUserInput).
       let parsed;
       try { parsed = ipc.parsePtyFrame(frame); } catch { return; }
       const session = sessions.get(parsed.sessionId);
       if (!session) return;
-      try { session.term.write(parsed.data); } catch {}
+      try { writeUserInput(session, parsed.data); } catch {}
       session.lastUserInput = Date.now();
       return;
     }
