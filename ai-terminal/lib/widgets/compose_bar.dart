@@ -6,6 +6,7 @@
 /// live-streaming logic that drives this bar.
 library;
 
+import 'package:flutter/foundation.dart';
 import 'package:flutter/material.dart';
 import 'package:flutter/services.dart';
 
@@ -99,6 +100,32 @@ class _BackspaceAction extends Action<_BackspaceIntent> {
   }
 }
 
+/// Whether the compose field receives Enter through a soft keyboard (mobile),
+/// where the OS commits it as an IME action rather than a hardware
+/// [LogicalKeyboardKey.enter] event. The [_SendIntent] shortcut only sees
+/// hardware key events, so on mobile submit is driven by the IME action instead
+/// (see [composeInputAction]); on desktop the shortcut handles Enter=send and
+/// Shift/Alt+Enter falls through to insert a newline.
+bool composeUsesSoftKeyboard(TargetPlatform platform) =>
+    platform == TargetPlatform.android || platform == TargetPlatform.iOS;
+
+/// The IME action for the compose field. Mobile: [TextInputAction.send] so the
+/// soft keyboard's Enter is a Send key that fires `onSubmitted` — matching the
+/// web app's `enterkeyhint="send"` compose bar (Enter submits; a newline needs
+/// Shift+Enter, a hardware-only chord). Desktop: [TextInputAction.newline], so
+/// the field inserts newlines on Shift/Alt+Enter while the [_SendIntent]
+/// shortcut handles a bare Enter as send.
+TextInputAction composeInputAction(bool softKeyboard) =>
+    softKeyboard ? TextInputAction.send : TextInputAction.newline;
+
+/// The keyboard type for the compose field. Mobile uses [TextInputType.text]
+/// (not `multiline`) so Android honors the `send` action instead of forcing a
+/// newline key onto Enter; the field still wraps and grows to `maxLines` for
+/// long text, and a pasted multi-line block is preserved. Desktop uses
+/// [TextInputType.multiline] so Shift/Alt+Enter can insert a newline.
+TextInputType composeKeyboardType(bool softKeyboard) =>
+    softKeyboard ? TextInputType.text : TextInputType.multiline;
+
 class ComposeBar extends StatelessWidget {
   const ComposeBar({
     super.key,
@@ -160,6 +187,7 @@ class ComposeBar extends StatelessWidget {
     final theme = Theme.of(context);
     final liveColor = StatusColor.serverNeedsAuth;
     final borderColor = isLive ? liveColor : theme.colorScheme.outlineVariant;
+    final softKeyboard = composeUsesSoftKeyboard(defaultTargetPlatform);
 
     return Container(
       color: theme.colorScheme.surfaceContainer,
@@ -241,11 +269,16 @@ class ComposeBar extends StatelessWidget {
                   focusNode: focusNode,
                   minLines: 1,
                   maxLines: 5,
-                  keyboardType: TextInputType.multiline,
-                  // Alt/Shift+Enter inserts a newline (see Shortcuts above); the
-                  // send button and bare Enter submit. A raw Enter key on the
-                  // terminal key strip sends a bare '\r' to the PTY.
-                  textInputAction: TextInputAction.newline,
+                  keyboardType: composeKeyboardType(softKeyboard),
+                  // Mobile: the soft keyboard's Enter is a Send action, firing
+                  // onSubmitted → submit (web-app parity, enterkeyhint="send").
+                  // Desktop: a bare Enter is caught by the _SendIntent shortcut
+                  // for send, and Shift/Alt+Enter falls through here to insert a
+                  // newline. A raw Enter on the terminal key strip sends '\r'.
+                  textInputAction: composeInputAction(softKeyboard),
+                  onSubmitted: (_) {
+                    if (_canSend) onSend();
+                  },
               style: const TextStyle(
                 fontFamily: 'monospace',
                 fontSize: 14,
