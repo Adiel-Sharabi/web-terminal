@@ -3,6 +3,7 @@
 // function, mirroring buildForkAutoCommand, so the rule is testable without
 // pumping the whole SessionScreen (which needs a live ApiClient/
 // SessionRepository/notification stack — out of scope for a unit test).
+import 'package:flutter/foundation.dart';
 import 'package:flutter_test/flutter_test.dart';
 
 import 'package:ai_terminal/api/models.dart';
@@ -298,6 +299,53 @@ void main() {
 
     test('empty buffer -> a bare submit CR', () {
       expect(buildComposeSubmission(''), '\r');
+    });
+  });
+
+  // Phone Chat Enter (owner: "enter will be enter"): a soft keyboard commits
+  // Enter as an inserted newline, not the hardware key event the compose bar's
+  // shortcut catches (and Android ignores TextInputAction.send on a multi-line
+  // field). SessionScreen catches that single inserted newline and submits.
+  group('composeUsesSoftKeyboard (mobile → intercept Enter)', () {
+    test('android and iOS use a soft keyboard', () {
+      expect(composeUsesSoftKeyboard(TargetPlatform.android), isTrue);
+      expect(composeUsesSoftKeyboard(TargetPlatform.iOS), isTrue);
+    });
+    test('desktop platforms do not', () {
+      expect(composeUsesSoftKeyboard(TargetPlatform.windows), isFalse);
+      expect(composeUsesSoftKeyboard(TargetPlatform.macOS), isFalse);
+      expect(composeUsesSoftKeyboard(TargetPlatform.linux), isFalse);
+    });
+  });
+
+  group('isSingleNewlineInsert (a soft-keyboard Enter, not a paste)', () {
+    test('a newline appended to the end is an Enter', () {
+      expect(isSingleNewlineInsert('hello', 'hello\n'), isTrue);
+    });
+    test('a newline inserted mid-buffer is an Enter (cursor was not at the end)', () {
+      expect(isSingleNewlineInsert('ab', 'a\nb'), isTrue);
+    });
+    test('Enter on an empty field inserts a lone newline', () {
+      expect(isSingleNewlineInsert('', '\n'), isTrue);
+    });
+    test('a pasted multi-line block is NOT an Enter (many chars at once)', () {
+      expect(isSingleNewlineInsert('', 'line one\nline two'), isFalse);
+      expect(isSingleNewlineInsert('a', 'a b\nc'), isFalse);
+    });
+    test('typing an ordinary character is not a newline insert', () {
+      expect(isSingleNewlineInsert('hell', 'hello'), isFalse);
+    });
+    test('deleting a character is not an insert', () {
+      expect(isSingleNewlineInsert('hello', 'hell'), isFalse);
+    });
+    test('no change is not an insert', () {
+      expect(isSingleNewlineInsert('hello', 'hello'), isFalse);
+    });
+    test('inserting a single non-newline char is not a newline', () {
+      expect(isSingleNewlineInsert('ab', 'axb'), isFalse);
+    });
+    test('a second appended newline still counts (submit an already-multiline draft)', () {
+      expect(isSingleNewlineInsert('a\nb', 'a\nb\n'), isTrue);
     });
   });
 }
