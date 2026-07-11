@@ -1,6 +1,10 @@
-// Widget tests for ComposeBar's Enter-key behavior (owner: "add 'enter' key
-// for new line ... to actual send to the session"): Return must insert a
-// newline in the compose field, never submit — only the send button submits.
+// Widget tests for ComposeBar's Enter-key behavior. The owner's current ask
+// (2026-07-11) reverses the earlier "Enter = newline" request: on the phone the
+// soft-keyboard Enter must SEND, matching the web app's enterkeyhint="send"
+// compose bar. Desktop keeps hardware Enter = send (via the _SendIntent
+// shortcut) and Shift/Alt+Enter = newline. So the field's IME config is now
+// platform-branched: mobile → send/text, desktop → newline/multiline.
+import 'package:flutter/foundation.dart';
 import 'package:flutter/material.dart';
 import 'package:flutter/services.dart';
 import 'package:flutter_test/flutter_test.dart';
@@ -22,24 +26,112 @@ Uint8List _png1x1() => Uint8List.fromList(const [
     ]);
 
 void main() {
-  testWidgets('the compose field is configured so Return inserts a newline', (
+  // The pure platform→IME-config mapping (SSOT for "how does Enter behave").
+  group('compose IME config per platform', () {
+    test('mobile platforms use a soft keyboard, desktop does not', () {
+      expect(composeUsesSoftKeyboard(TargetPlatform.android), isTrue);
+      expect(composeUsesSoftKeyboard(TargetPlatform.iOS), isTrue);
+      expect(composeUsesSoftKeyboard(TargetPlatform.windows), isFalse);
+      expect(composeUsesSoftKeyboard(TargetPlatform.macOS), isFalse);
+      expect(composeUsesSoftKeyboard(TargetPlatform.linux), isFalse);
+    });
+
+    test('mobile → send action + plain text; desktop → newline + multiline', () {
+      // Mobile: Enter is a Send key (submits via onSubmitted); text keyboard so
+      // Android honors the action instead of forcing a newline key.
+      expect(composeInputAction(true), TextInputAction.send);
+      expect(composeKeyboardType(true), TextInputType.text);
+      // Desktop: newline action + multiline so Shift/Alt+Enter inserts a newline
+      // and the _SendIntent shortcut handles a bare Enter as send.
+      expect(composeInputAction(false), TextInputAction.newline);
+      expect(composeKeyboardType(false), TextInputType.multiline);
+    });
+  });
+
+  testWidgets('desktop: the field is newline/multiline (Shift+Enter → newline)', (
     tester,
   ) async {
-    final controller = TextEditingController();
-    await tester.pumpWidget(
-      _wrap(
-        ComposeBar(
-          controller: controller,
-          focusNode: FocusNode(),
-          onSend: () {},
-          isLive: false,
+    debugDefaultTargetPlatformOverride = TargetPlatform.windows;
+    try {
+      await tester.pumpWidget(
+        _wrap(
+          ComposeBar(
+            controller: TextEditingController(),
+            focusNode: FocusNode(),
+            onSend: () {},
+            isLive: false,
+          ),
         ),
-      ),
-    );
+      );
 
-    final field = tester.widget<TextField>(find.byType(TextField));
-    expect(field.textInputAction, TextInputAction.newline);
-    expect(field.maxLines, greaterThan(1));
+      final field = tester.widget<TextField>(find.byType(TextField));
+      expect(field.textInputAction, TextInputAction.newline);
+      expect(field.keyboardType, TextInputType.multiline);
+      expect(field.maxLines, greaterThan(1));
+    } finally {
+      debugDefaultTargetPlatformOverride = null;
+    }
+  });
+
+  testWidgets('mobile: the field is send/text so soft-keyboard Enter submits', (
+    tester,
+  ) async {
+    debugDefaultTargetPlatformOverride = TargetPlatform.android;
+    try {
+      await tester.pumpWidget(
+        _wrap(
+          ComposeBar(
+            controller: TextEditingController(),
+            focusNode: FocusNode(),
+            onSend: () {},
+            isLive: false,
+          ),
+        ),
+      );
+
+      final field = tester.widget<TextField>(find.byType(TextField));
+      expect(field.textInputAction, TextInputAction.send);
+      expect(field.keyboardType, TextInputType.text);
+    } finally {
+      debugDefaultTargetPlatformOverride = null;
+    }
+  });
+
+  testWidgets('mobile: the IME send action (onSubmitted) submits when it can', (
+    tester,
+  ) async {
+    debugDefaultTargetPlatformOverride = TargetPlatform.android;
+    try {
+      var sends = 0;
+      final controller = TextEditingController(text: 'hello');
+      final fn = FocusNode();
+      await tester.pumpWidget(
+        _wrap(
+          ComposeBar(
+            controller: controller,
+            focusNode: fn,
+            onSend: () => sends++,
+            isLive: false,
+          ),
+        ),
+      );
+      fn.requestFocus();
+      await tester.pump();
+
+      // Drive the real IME 'send' action the soft keyboard fires on Enter.
+      await tester.testTextInput.receiveAction(TextInputAction.send);
+      await tester.pump();
+      expect(sends, 1);
+
+      // Empty field → the send action is a no-op (no stray blank submit).
+      controller.clear();
+      await tester.pump();
+      await tester.testTextInput.receiveAction(TextInputAction.send);
+      await tester.pump();
+      expect(sends, 1);
+    } finally {
+      debugDefaultTargetPlatformOverride = null;
+    }
   });
 
   testWidgets('send button fires onSend and is disabled when empty', (
