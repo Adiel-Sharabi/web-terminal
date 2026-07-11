@@ -318,34 +318,36 @@ void main() {
     });
   });
 
-  group('isSingleNewlineInsert (a soft-keyboard Enter, not a paste)', () {
-    test('a newline appended to the end is an Enter', () {
-      expect(isSingleNewlineInsert('hello', 'hello\n'), isTrue);
+  group('composeSubmitOnSoftNewline (Enter sends; robust to IME autocorrect)', () {
+    test('a plain newline at the end submits the buffer', () {
+      expect(composeSubmitOnSoftNewline('hello', 'hello\n'), 'hello');
     });
-    test('a newline inserted mid-buffer is an Enter (cursor was not at the end)', () {
-      expect(isSingleNewlineInsert('ab', 'a\nb'), isTrue);
+    test('the FIRST Enter submits even when autocorrect commits a word + newline', () {
+      // The real-device failure: Gboard turns "hel" into "hello" AND appends the
+      // newline in one edit — not a clean single-char insert. A strict check
+      // missed this, so it took a second Enter. The trailing-newline rule catches
+      // it on the first press.
+      expect(composeSubmitOnSoftNewline('hel', 'hello\n'), 'hello');
+      expect(composeSubmitOnSoftNewline('teh', 'the\n'), 'the');
     });
-    test('Enter on an empty field inserts a lone newline', () {
-      expect(isSingleNewlineInsert('', '\n'), isTrue);
+    test('trailing newlines are stripped from the submitted buffer', () {
+      expect(composeSubmitOnSoftNewline('hi', 'hi\n\n'), 'hi');
     });
-    test('a pasted multi-line block is NOT an Enter (many chars at once)', () {
-      expect(isSingleNewlineInsert('', 'line one\nline two'), isFalse);
-      expect(isSingleNewlineInsert('a', 'a b\nc'), isFalse);
+    test('Enter on an empty field yields an empty submit (a no-op upstream)', () {
+      expect(composeSubmitOnSoftNewline('', '\n'), '');
     });
-    test('typing an ordinary character is not a newline insert', () {
-      expect(isSingleNewlineInsert('hell', 'hello'), isFalse);
+    test('ordinary typing (ends in a letter) is not a submit', () {
+      expect(composeSubmitOnSoftNewline('hell', 'hello'), isNull);
+      expect(composeSubmitOnSoftNewline('', 'h'), isNull);
     });
-    test('deleting a character is not an insert', () {
-      expect(isSingleNewlineInsert('hello', 'hell'), isFalse);
+    test('a mid-text paste with no trailing newline stays literal', () {
+      expect(composeSubmitOnSoftNewline('', 'line one\nline two'), isNull);
     });
-    test('no change is not an insert', () {
-      expect(isSingleNewlineInsert('hello', 'hello'), isFalse);
+    test('a newline already present (not freshly added) is not a submit', () {
+      expect(composeSubmitOnSoftNewline('a\n', 'a\n'), isNull);
     });
-    test('inserting a single non-newline char is not a newline', () {
-      expect(isSingleNewlineInsert('ab', 'axb'), isFalse);
-    });
-    test('a second appended newline still counts (submit an already-multiline draft)', () {
-      expect(isSingleNewlineInsert('a\nb', 'a\nb\n'), isTrue);
+    test('deleting a character is not a submit', () {
+      expect(composeSubmitOnSoftNewline('hello', 'hell'), isNull);
     });
   });
 }

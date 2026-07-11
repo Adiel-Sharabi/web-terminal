@@ -110,19 +110,19 @@ bool isDesktopPlatform() =>
 bool composeUsesSoftKeyboard(TargetPlatform platform) =>
     platform == TargetPlatform.android || platform == TargetPlatform.iOS;
 
-/// True when [cur] is exactly [prev] with a single `\n` inserted — the fingerprint
-/// of a soft-keyboard Enter (one keystroke) as opposed to a paste (many chars at
-/// once, which must stay literal). The insertion may be anywhere, so an Enter in
-/// the middle of the buffer still counts. Pure so the rule is exhaustively testable.
-bool isSingleNewlineInsert(String prev, String cur) {
-  if (cur.length != prev.length + 1) return false;
-  var i = 0;
-  while (i < prev.length && prev[i] == cur[i]) {
-    i++;
-  }
-  // cur[i] is the first divergence (or the appended tail); it must be the newline,
-  // and everything after it must equal the rest of prev.
-  return cur[i] == '\n' && cur.substring(i + 1) == prev.substring(i);
+/// A soft-keyboard Enter ends the compose buffer with a freshly-typed newline —
+/// the only way to enter one on mobile. Detecting that *trailing* newline (rather
+/// than a strict single-character insert) is what makes this reliable: a real IME
+/// commits an autocorrect/prediction AND the newline in one edit, so the first
+/// Enter is NOT a clean one-char change and a strict check misses it — which is
+/// why an earlier version needed two Enter presses. Returns the buffer to submit
+/// (trailing newlines stripped), or null when this change isn't a fresh trailing
+/// newline: ordinary typing (ends in a letter), a mid-text paste (no trailing
+/// newline), or a newline that was already there. Pure so the rule is testable.
+String? composeSubmitOnSoftNewline(String prev, String cur) {
+  if (!cur.endsWith('\n')) return null;
+  if (prev.endsWith('\n')) return null; // the trailing newline isn't newly added
+  return cur.replaceFirst(RegExp(r'\n+$'), '');
 }
 
 /// Whether a compose buffer that just became '/'-prefixed should switch to the
@@ -1018,24 +1018,26 @@ class _SessionScreenState extends State<SessionScreen>
       // Soft-keyboard Enter (mobile): the OS inserts a newline instead of firing
       // the compose bar's hardware send-shortcut, and Android ignores
       // TextInputAction.send on a multi-line field — so a phone Enter would just
-      // "park" a newline. Catch that single inserted newline and submit the buffer
-      // (Enter sends, matching the web app). Live '/' lines are excluded — their
-      // newline already streams to the terminal as the menu-commit '\r'. An empty
-      // buffer with no attachments is a no-op, mirroring a desktop bare Enter, so a
-      // stray Enter just drops the newline.
-      if (!_composeLive &&
-          composeUsesSoftKeyboard(defaultTargetPlatform) &&
-          isSingleNewlineInsert(prevComposeText, text)) {
-        _settingComposeProgrammatically = true;
-        _composeController.value = TextEditingValue(
-          text: prevComposeText,
-          selection: TextSelection.collapsed(offset: prevComposeText.length),
-        );
-        _lastComposeText = prevComposeText;
-        if (prevComposeText.isNotEmpty || _attachments.isNotEmpty) {
-          _sendCompose();
+      // "park" a newline. Detect the freshly-appended trailing newline (robust to
+      // the IME committing autocorrect + the newline in one edit) and submit the
+      // buffer (Enter sends, matching the web app). Live '/' lines are excluded —
+      // their newline already streams to the terminal as the menu-commit '\r'. An
+      // empty buffer with no attachments is a no-op, mirroring a desktop bare
+      // Enter, so a stray Enter just drops the newline.
+      if (!_composeLive && composeUsesSoftKeyboard(defaultTargetPlatform)) {
+        final submit = composeSubmitOnSoftNewline(prevComposeText, text);
+        if (submit != null) {
+          _settingComposeProgrammatically = true;
+          _composeController.value = TextEditingValue(
+            text: submit,
+            selection: TextSelection.collapsed(offset: submit.length),
+          );
+          _lastComposeText = submit;
+          if (submit.isNotEmpty || _attachments.isNotEmpty) {
+            _sendCompose();
+          }
+          return;
         }
-        return;
       }
       _historyActive = false;
       // A buffer starting with '/' goes live (every platform): stream it to the
