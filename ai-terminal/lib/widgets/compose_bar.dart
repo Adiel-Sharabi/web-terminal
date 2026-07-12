@@ -6,11 +6,25 @@
 /// live-streaming logic that drives this bar.
 library;
 
+import 'package:flutter/foundation.dart';
 import 'package:flutter/material.dart';
 import 'package:flutter/services.dart';
 
 import '../theme/app_theme.dart';
 import '../theme/status_colors.dart';
+
+/// Whether the compose field is driven by a soft (on-screen) keyboard, i.e.
+/// mobile. On a soft keyboard the field is single-line with a native "send"
+/// action so Enter submits directly: a multi-line field makes Android insert a
+/// newline on Enter and ignore [TextInputAction.send], and worse, a buffer with
+/// a newline is sent as a bracketed paste whose trailing submit-CR the Claude/
+/// Codex TUI absorbs (so it never runs). Single-line keeps every submit a plain
+/// `text\r` — the one form both TUIs act on — and lets the IME's own onSubmitted
+/// clear the field cleanly (rewriting the field mid-keystroke desynced Gboard and
+/// left the text stuck). Desktop has a hardware Enter, so it keeps the multi-line
+/// field + the _SendIntent shortcut and Shift/Alt+Enter for newlines. Pure/testable.
+bool composeUsesSoftKeyboard(TargetPlatform platform) =>
+    platform == TargetPlatform.android || platform == TargetPlatform.iOS;
 
 class _SendIntent extends Intent {
   const _SendIntent();
@@ -160,6 +174,7 @@ class ComposeBar extends StatelessWidget {
     final theme = Theme.of(context);
     final liveColor = StatusColor.serverNeedsAuth;
     final borderColor = isLive ? liveColor : theme.colorScheme.outlineVariant;
+    final softKeyboard = composeUsesSoftKeyboard(defaultTargetPlatform);
 
     return Container(
       color: theme.colorScheme.surfaceContainer,
@@ -240,15 +255,22 @@ class ComposeBar extends StatelessWidget {
                   controller: controller,
                   focusNode: focusNode,
                   minLines: 1,
-                  maxLines: 5,
-                  keyboardType: TextInputType.multiline,
-                  // Desktop: a bare Enter is caught by the _SendIntent shortcut
-                  // for send; Shift/Alt+Enter falls through here to insert a
-                  // newline. Mobile has no hardware Enter — a soft-keyboard Enter
-                  // inserts a newline, which SessionScreen intercepts and turns
-                  // into a submit (see isSingleNewlineInsert). A raw Enter on the
-                  // terminal key strip sends '\r' to the PTY.
-                  textInputAction: TextInputAction.newline,
+                  // Mobile: single-line with a native Send action, so Enter fires
+                  // onSubmitted (submits) and never inserts a newline — the only
+                  // combination Android honors, and it keeps every submit a plain
+                  // `text\r` the TUI acts on. Desktop: multi-line; a bare Enter is
+                  // caught by the _SendIntent shortcut and Shift/Alt+Enter inserts
+                  // a newline. A raw Enter on the terminal key strip sends '\r'.
+                  maxLines: softKeyboard ? 1 : 5,
+                  keyboardType: softKeyboard
+                      ? TextInputType.text
+                      : TextInputType.multiline,
+                  textInputAction: softKeyboard
+                      ? TextInputAction.send
+                      : TextInputAction.newline,
+                  onSubmitted: (_) {
+                    if (_canSend) onSend();
+                  },
               style: const TextStyle(
                 fontFamily: 'monospace',
                 fontSize: 14,

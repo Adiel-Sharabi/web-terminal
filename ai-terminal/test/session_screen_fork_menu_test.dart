@@ -3,7 +3,6 @@
 // function, mirroring buildForkAutoCommand, so the rule is testable without
 // pumping the whole SessionScreen (which needs a live ApiClient/
 // SessionRepository/notification stack — out of scope for a unit test).
-import 'package:flutter/foundation.dart';
 import 'package:flutter_test/flutter_test.dart';
 
 import 'package:ai_terminal/api/models.dart';
@@ -302,52 +301,4 @@ void main() {
     });
   });
 
-  // Phone Chat Enter (owner: "enter will be enter"): a soft keyboard commits
-  // Enter as an inserted newline, not the hardware key event the compose bar's
-  // shortcut catches (and Android ignores TextInputAction.send on a multi-line
-  // field). SessionScreen catches that single inserted newline and submits.
-  group('composeUsesSoftKeyboard (mobile → intercept Enter)', () {
-    test('android and iOS use a soft keyboard', () {
-      expect(composeUsesSoftKeyboard(TargetPlatform.android), isTrue);
-      expect(composeUsesSoftKeyboard(TargetPlatform.iOS), isTrue);
-    });
-    test('desktop platforms do not', () {
-      expect(composeUsesSoftKeyboard(TargetPlatform.windows), isFalse);
-      expect(composeUsesSoftKeyboard(TargetPlatform.macOS), isFalse);
-      expect(composeUsesSoftKeyboard(TargetPlatform.linux), isFalse);
-    });
-  });
-
-  group('composeSubmitOnSoftNewline (Enter sends; robust to IME autocorrect)', () {
-    test('a plain newline at the end submits the buffer', () {
-      expect(composeSubmitOnSoftNewline('hello', 'hello\n'), 'hello');
-    });
-    test('the FIRST Enter submits even when autocorrect commits a word + newline', () {
-      // The real-device failure: Gboard turns "hel" into "hello" AND appends the
-      // newline in one edit — not a clean single-char insert. A strict check
-      // missed this, so it took a second Enter. The trailing-newline rule catches
-      // it on the first press.
-      expect(composeSubmitOnSoftNewline('hel', 'hello\n'), 'hello');
-      expect(composeSubmitOnSoftNewline('teh', 'the\n'), 'the');
-    });
-    test('trailing newlines are stripped from the submitted buffer', () {
-      expect(composeSubmitOnSoftNewline('hi', 'hi\n\n'), 'hi');
-    });
-    test('Enter on an empty field yields an empty submit (a no-op upstream)', () {
-      expect(composeSubmitOnSoftNewline('', '\n'), '');
-    });
-    test('ordinary typing (ends in a letter) is not a submit', () {
-      expect(composeSubmitOnSoftNewline('hell', 'hello'), isNull);
-      expect(composeSubmitOnSoftNewline('', 'h'), isNull);
-    });
-    test('a mid-text paste with no trailing newline stays literal', () {
-      expect(composeSubmitOnSoftNewline('', 'line one\nline two'), isNull);
-    });
-    test('a newline already present (not freshly added) is not a submit', () {
-      expect(composeSubmitOnSoftNewline('a\n', 'a\n'), isNull);
-    });
-    test('deleting a character is not a submit', () {
-      expect(composeSubmitOnSoftNewline('hello', 'hell'), isNull);
-    });
-  });
 }

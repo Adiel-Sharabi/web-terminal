@@ -15,7 +15,7 @@ import 'dart:async';
 import 'dart:convert';
 import 'dart:io' show Platform;
 
-import 'package:flutter/foundation.dart' show kIsWeb, defaultTargetPlatform, TargetPlatform;
+import 'package:flutter/foundation.dart' show kIsWeb;
 import 'package:flutter/material.dart';
 import 'package:flutter/services.dart';
 import 'package:image/image.dart' as img;
@@ -101,29 +101,6 @@ bool terminalAcceptsInput(String activeLens) => activeLens == 'terminal';
 bool isDesktopPlatform() =>
     !kIsWeb && (Platform.isWindows || Platform.isMacOS || Platform.isLinux);
 
-/// Whether the compose field is driven by a soft (on-screen) keyboard, i.e.
-/// mobile. A soft keyboard commits Enter as an inserted newline rather than the
-/// hardware [LogicalKeyboardKey.enter] event the compose bar's send-shortcut
-/// listens for — and Android ignores [TextInputAction.send] on a multi-line
-/// field — so on mobile the newline is intercepted and turned into a submit
-/// (see [isSingleNewlineInsert] and [_onComposeChanged]). Pure so it's testable.
-bool composeUsesSoftKeyboard(TargetPlatform platform) =>
-    platform == TargetPlatform.android || platform == TargetPlatform.iOS;
-
-/// A soft-keyboard Enter ends the compose buffer with a freshly-typed newline —
-/// the only way to enter one on mobile. Detecting that *trailing* newline (rather
-/// than a strict single-character insert) is what makes this reliable: a real IME
-/// commits an autocorrect/prediction AND the newline in one edit, so the first
-/// Enter is NOT a clean one-char change and a strict check misses it — which is
-/// why an earlier version needed two Enter presses. Returns the buffer to submit
-/// (trailing newlines stripped), or null when this change isn't a fresh trailing
-/// newline: ordinary typing (ends in a letter), a mid-text paste (no trailing
-/// newline), or a newline that was already there. Pure so the rule is testable.
-String? composeSubmitOnSoftNewline(String prev, String cur) {
-  if (!cur.endsWith('\n')) return null;
-  if (prev.endsWith('\n')) return null; // the trailing newline isn't newly added
-  return cur.replaceFirst(RegExp(r'\n+$'), '');
-}
 
 /// Whether a compose buffer that just became '/'-prefixed should switch to the
 /// live slash-stream (mirroring Claude's own slash menu, which renders + narrows
@@ -1014,30 +991,6 @@ class _SessionScreenState extends State<SessionScreen>
           _altSticky = false;
         });
         return;
-      }
-      // Soft-keyboard Enter (mobile): the OS inserts a newline instead of firing
-      // the compose bar's hardware send-shortcut, and Android ignores
-      // TextInputAction.send on a multi-line field — so a phone Enter would just
-      // "park" a newline. Detect the freshly-appended trailing newline (robust to
-      // the IME committing autocorrect + the newline in one edit) and submit the
-      // buffer (Enter sends, matching the web app). Live '/' lines are excluded —
-      // their newline already streams to the terminal as the menu-commit '\r'. An
-      // empty buffer with no attachments is a no-op, mirroring a desktop bare
-      // Enter, so a stray Enter just drops the newline.
-      if (!_composeLive && composeUsesSoftKeyboard(defaultTargetPlatform)) {
-        final submit = composeSubmitOnSoftNewline(prevComposeText, text);
-        if (submit != null) {
-          _settingComposeProgrammatically = true;
-          _composeController.value = TextEditingValue(
-            text: submit,
-            selection: TextSelection.collapsed(offset: submit.length),
-          );
-          _lastComposeText = submit;
-          if (submit.isNotEmpty || _attachments.isNotEmpty) {
-            _sendCompose();
-          }
-          return;
-        }
       }
       _historyActive = false;
       // A buffer starting with '/' goes live (every platform): stream it to the
