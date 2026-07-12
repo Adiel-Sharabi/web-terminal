@@ -228,6 +228,34 @@ void main() {
     });
   });
 
+  // #46: a typed Enter in the desktop Terminal lens parked (only the key-strip
+  // Enter icon submitted). Root cause is xterm-4.0.0's IME path: it submits Enter
+  // only via onAction(done) but its connection uses TextInputAction.newline, so a
+  // desktop hardware Enter (performAction(newline)) is dropped. Desktop must take
+  // raw hardware keys so Enter routes through keyInput(enter) → '\r'; mobile keeps
+  // the IME path for its soft keyboard.
+  group('terminalHardwareKeyboardOnly (#46 desktop Enter submits)', () {
+    test('live terminal on desktop → hardware-only (Enter submits, not parks)', () {
+      expect(
+        terminalHardwareKeyboardOnly(live: true, desktop: true),
+        isTrue,
+      );
+    });
+
+    test('live terminal on mobile → IME path (soft keyboard needs it)', () {
+      expect(
+        terminalHardwareKeyboardOnly(live: true, desktop: false),
+        isFalse,
+      );
+    });
+
+    test('offstage terminal (chat lens) is hardware-only on both', () {
+      // Not live → readOnly anyway; the flag just must not open an IME.
+      expect(terminalHardwareKeyboardOnly(live: false, desktop: true), isTrue);
+      expect(terminalHardwareKeyboardOnly(live: false, desktop: false), isTrue);
+    });
+  });
+
   // A soft keyboard commits Enter as literal "\n" text, so xterm's _onInsert
   // falls through to terminal.textInput('\n') and a raw LF hit the PTY. Claude's
   // TUI inserts a prompt newline on LF and submits only on CR, so a typed prompt
