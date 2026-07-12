@@ -51,19 +51,23 @@ class _BackspaceIntent extends Intent {
   const _BackspaceIntent();
 }
 
-/// Sends an arrow key to the terminal when the compose field is empty (you're
-/// driving Claude, not editing text) OR while a live '/' line is streaming (so
+/// Sends an arrow key to the terminal when the terminal is the active input
+/// target (the Terminal lens or a live question overlay — #50: drive Claude's
+/// TUI, not the app's focus ring), when the compose field is empty (you're
+/// driving Claude, not editing text), OR while a live '/' line is streaming (so
 /// hardware ↑/↓ navigate Claude's slash menu even though the field has text).
 /// When disabled the key falls through to the field's normal caret/line nav.
 class _ArrowAction extends Action<_ArrowIntent> {
-  _ArrowAction(this.controller, this.onArrow, this.isLive);
+  _ArrowAction(this.controller, this.onArrow, this.isLive, this.terminalActive);
   final TextEditingController controller;
   final void Function(String seq)? onArrow;
   final bool isLive;
+  final bool terminalActive;
 
   @override
   bool isEnabled(_ArrowIntent intent) =>
-      onArrow != null && (controller.text.isEmpty || isLive);
+      onArrow != null &&
+      (terminalActive || controller.text.isEmpty || isLive);
 
   @override
   Object? invoke(_ArrowIntent intent) {
@@ -72,16 +76,21 @@ class _ArrowAction extends Action<_ArrowIntent> {
   }
 }
 
-/// Sends Tab to the terminal ONLY while a live '/' line is streaming, so Tab
-/// autocompletes the highlighted slash command in Claude's menu. Disabled
-/// otherwise, so a normal Tab keeps its default focus-traversal behavior.
+/// Sends Tab to the terminal when the terminal is the active input target (the
+/// Terminal lens or a live question overlay — #50: Tab must reach Claude's TUI,
+/// e.g. its `/status` tabs, not traverse the app's on-screen buttons) OR while a
+/// live '/' line is streaming (Tab autocompletes the highlighted slash command).
+/// Disabled otherwise, so a normal Tab keeps its default focus-traversal
+/// behavior when the user is genuinely editing a compose draft.
 class _TabAction extends Action<_TabIntent> {
-  _TabAction(this.onTab, this.isLive);
+  _TabAction(this.onTab, this.isLive, this.terminalActive);
   final VoidCallback? onTab;
   final bool isLive;
+  final bool terminalActive;
 
   @override
-  bool isEnabled(_TabIntent intent) => onTab != null && isLive;
+  bool isEnabled(_TabIntent intent) =>
+      onTab != null && (terminalActive || isLive);
 
   @override
   Object? invoke(_TabIntent intent) {
@@ -125,6 +134,7 @@ class ComposeBar extends StatelessWidget {
     this.onArrow,
     this.onTab,
     this.onBackspace,
+    this.terminalActive = false,
     this.attachments = const <Uint8List>[],
     this.onRemoveAttachment,
   });
@@ -165,6 +175,14 @@ class ComposeBar extends StatelessWidget {
   /// terminal so Claude's own slash-command menu can render. Tints the
   /// field's border to signal "this is live, not just a local draft".
   final bool isLive;
+
+  /// True when the terminal/PTY is the active input target — the Terminal lens,
+  /// or a live interactive-question overlay (#50). In that state hardware Tab
+  /// and arrows are forwarded straight to the PTY (so Claude's TUI — `/status`
+  /// tabs, menus, the question phase — is driveable) instead of moving focus
+  /// between the app's on-screen buttons. Mirrors the web client, where every
+  /// key reaches the socket.
+  final bool terminalActive;
 
   bool get _canSend =>
       controller.text.isNotEmpty || isLive || attachments.isNotEmpty;
@@ -243,8 +261,9 @@ class ComposeBar extends StatelessWidget {
                       return null;
                     },
                   ),
-                  _ArrowIntent: _ArrowAction(controller, onArrow, isLive),
-                  _TabIntent: _TabAction(onTab, isLive),
+                  _ArrowIntent:
+                      _ArrowAction(controller, onArrow, isLive, terminalActive),
+                  _TabIntent: _TabAction(onTab, isLive, terminalActive),
                   _BackspaceIntent: _BackspaceAction(
                     controller,
                     onBackspace,

@@ -117,6 +117,18 @@ bool isDesktopPlatform() =>
 bool terminalHardwareKeyboardOnly({required bool live, required bool desktop}) =>
     !live || desktop;
 
+/// Whether the terminal/PTY is the active input target — the state in which
+/// hardware Tab and arrows should drive Claude's TUI (its `/status` tabs, menus,
+/// and the multi-question phase) instead of moving focus between the app's
+/// on-screen buttons. True in the Terminal lens ([lensLive]), and whenever the
+/// interactive-question overlay is up ([questionUp] — Claude's question TUI is
+/// live in the terminal beneath it). #50: the compose bar (the always-present
+/// input that normally holds focus) forwards Tab/arrows to the PTY when this is
+/// true, mirroring the web client where every key reaches the socket. Pure so
+/// the rule has one enforceable, testable home.
+bool terminalIsActiveTarget({required bool lensLive, required bool questionUp}) =>
+    lensLive || questionUp;
+
 
 /// Whether a compose buffer that just became '/'-prefixed should switch to the
 /// live slash-stream (mirroring Claude's own slash menu, which renders + narrows
@@ -1907,6 +1919,15 @@ class _SessionScreenState extends State<SessionScreen>
               focusNode: _composeFocusNode,
               onSend: _sendCompose,
               isLive: _composeLive,
+              // #50: when the terminal is the active input target (Terminal lens
+              // or a live question overlay), hardware Tab + arrows go straight to
+              // the PTY so Claude's TUI (`/status` tabs, menus, questions) is
+              // driveable, instead of traversing the app's on-screen buttons.
+              terminalActive: terminalIsActiveTarget(
+                lensLive: terminalAcceptsInput(_activeLens),
+                questionUp: questionOverlayVisible(
+                    _pendingQuestion, _dismissedQuestionKey),
+              ),
               onPasteImage: _pasteClipboardImage,
               // #29: staged image thumbnails (bytes) + remove (✕) callback.
               attachments: [for (final a in _attachments) a.bytes],

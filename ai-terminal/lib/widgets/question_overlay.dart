@@ -10,9 +10,20 @@
 library;
 
 import 'package:flutter/material.dart';
+import 'package:flutter/services.dart';
 
 import '../api/models.dart';
 import '../theme/app_theme.dart';
+
+/// Forwards a raw key sequence to the PTY (#50). Carried by the overlay's
+/// hardware Tab/arrow shortcuts so, while the question overlay is up, those keys
+/// drive Claude's TUI in the terminal beneath instead of traversing the
+/// overlay's on-screen buttons. A focused free-text ("Other") field still keeps
+/// caret arrows — a focused descendant consumes them before this ancestor does.
+class _ForwardKeyIntent extends Intent {
+  const _ForwardKeyIntent(this.seq);
+  final String seq;
+}
 
 /// One outbound frame: send [keys], then wait [delayMs] before the next frame.
 class AnswerFrame {
@@ -263,24 +274,58 @@ class _QuestionOverlayState extends State<QuestionOverlay> {
         child: SafeArea(
           child: Align(
             alignment: Alignment.bottomCenter,
-            child: Container(
-              constraints: const BoxConstraints(maxWidth: 640, maxHeight: 520),
-              margin: const EdgeInsets.all(12),
-              decoration: BoxDecoration(
-                color: theme.colorScheme.surfaceContainerHigh,
-                borderRadius: BorderRadius.circular(AppShape.large),
-                border: Border.all(color: theme.colorScheme.outlineVariant),
-              ),
-              child: Column(
-                mainAxisSize: MainAxisSize.min,
-                children: [
-                  _header(theme, questions.length),
-                  if ((widget.contextText ?? '').trim().isNotEmpty)
-                    _contextPanel(theme, widget.contextText!.trim()),
-                  if (questions.length > 1) _tabs(theme, questions),
-                  Flexible(child: _optionList(theme, q)),
-                  _footer(theme, q),
-                ],
+            // #50: hardware Tab/arrows drive Claude's TUI in the terminal beneath
+            // (its `/status` tabs, menus, question phase) rather than traversing
+            // the overlay's buttons. This Shortcuts sits below WidgetsApp, so it
+            // wins over the default focus-traversal / caret shortcuts. Tab always
+            // forwards; arrows forward ONLY while the free-text ("Other") field
+            // is inactive — when it IS active the arrows are left unmapped so the
+            // caret can move inside that field.
+            child: Shortcuts(
+              shortcuts: <ShortcutActivator, Intent>{
+                const SingleActivator(LogicalKeyboardKey.tab):
+                    const _ForwardKeyIntent('\t'),
+                if (!_otherActive) ...const {
+                  SingleActivator(LogicalKeyboardKey.arrowUp):
+                      _ForwardKeyIntent('\x1b[A'),
+                  SingleActivator(LogicalKeyboardKey.arrowDown):
+                      _ForwardKeyIntent('\x1b[B'),
+                  SingleActivator(LogicalKeyboardKey.arrowRight):
+                      _ForwardKeyIntent('\x1b[C'),
+                  SingleActivator(LogicalKeyboardKey.arrowLeft):
+                      _ForwardKeyIntent('\x1b[D'),
+                },
+              },
+              child: Actions(
+                actions: <Type, Action<Intent>>{
+                  _ForwardKeyIntent: CallbackAction<_ForwardKeyIntent>(
+                    onInvoke: (intent) {
+                      widget.onKey(intent.seq);
+                      return null;
+                    },
+                  ),
+                },
+                child: Container(
+                  constraints:
+                      const BoxConstraints(maxWidth: 640, maxHeight: 520),
+                  margin: const EdgeInsets.all(12),
+                  decoration: BoxDecoration(
+                    color: theme.colorScheme.surfaceContainerHigh,
+                    borderRadius: BorderRadius.circular(AppShape.large),
+                    border: Border.all(color: theme.colorScheme.outlineVariant),
+                  ),
+                  child: Column(
+                    mainAxisSize: MainAxisSize.min,
+                    children: [
+                      _header(theme, questions.length),
+                      if ((widget.contextText ?? '').trim().isNotEmpty)
+                        _contextPanel(theme, widget.contextText!.trim()),
+                      if (questions.length > 1) _tabs(theme, questions),
+                      Flexible(child: _optionList(theme, q)),
+                      _footer(theme, q),
+                    ],
+                  ),
+                ),
               ),
             ),
           ),
