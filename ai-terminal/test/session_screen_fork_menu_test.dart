@@ -4,6 +4,7 @@
 // pumping the whole SessionScreen (which needs a live ApiClient/
 // SessionRepository/notification stack — out of scope for a unit test).
 import 'package:flutter_test/flutter_test.dart';
+import 'package:xterm/xterm.dart';
 
 import 'package:ai_terminal/api/models.dart';
 import 'package:ai_terminal/screens/session_screen.dart';
@@ -283,6 +284,55 @@ void main() {
         terminalIsActiveTarget(lensLive: false, questionUp: false),
         isFalse,
       );
+    });
+  });
+
+  group('terminalContextMenuActions (#49: right-click menu contents)', () {
+    test('with a selection → Copy, Paste, Select All', () {
+      expect(
+        terminalContextMenuActions(hasSelection: true),
+        [
+          TerminalMenuAction.copy,
+          TerminalMenuAction.paste,
+          TerminalMenuAction.selectAll,
+        ],
+      );
+    });
+
+    test('no selection → Paste + Select All only (nothing to copy)', () {
+      expect(
+        terminalContextMenuActions(hasSelection: false),
+        [TerminalMenuAction.paste, TerminalMenuAction.selectAll],
+      );
+    });
+  });
+
+  group('selectAllOnTerminal (#49: Select All grabs the whole buffer)', () {
+    test('selection covers the written text', () {
+      final terminal = Terminal(maxLines: 200);
+      terminal.write('hello world');
+      final controller = TerminalController();
+
+      // Nothing selected yet.
+      expect(controller.selection, isNull);
+
+      selectAllOnTerminal(terminal, controller);
+
+      final sel = controller.selection;
+      expect(sel, isNotNull);
+      expect(terminal.buffer.getText(sel).contains('hello world'), isTrue);
+    });
+
+    test('spans multiple lines of scrollback', () {
+      final terminal = Terminal(maxLines: 200);
+      terminal.write('line-one\r\nline-two\r\nline-three');
+      final controller = TerminalController();
+
+      selectAllOnTerminal(terminal, controller);
+
+      final text = terminal.buffer.getText(controller.selection);
+      expect(text.contains('line-one'), isTrue);
+      expect(text.contains('line-three'), isTrue);
     });
   });
 
