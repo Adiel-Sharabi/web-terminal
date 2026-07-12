@@ -2,6 +2,7 @@
 // builder that drives Claude's TUI selector with ABSOLUTE row digits,
 // PendingQuestion parsing, and the overlay's select-then-send interaction.
 import 'package:flutter/material.dart';
+import 'package:flutter/services.dart';
 import 'package:flutter_test/flutter_test.dart';
 
 import 'package:ai_terminal/api/models.dart';
@@ -381,6 +382,85 @@ void main() {
     await tester.tap(find.widgetWithText(OutlinedButton, 'Enter'));
     await tester.pump();
     expect(key, '\r');
+  });
+
+  testWidgets(
+      '#50: hardware Tab forwards to the PTY; arrows stay with a focused field',
+      (tester) async {
+    final keys = <String>[];
+    await tester.pumpWidget(
+      MaterialApp(
+        theme: AppTheme.dark,
+        home: Scaffold(
+          body: Stack(
+            children: [
+              QuestionOverlay(
+                question: PendingQuestion(
+                  toolUseId: 't50',
+                  questions: [_q(['A', 'B'])], // single-select → Other offered
+                ),
+                onSend: (_) {},
+                onKey: keys.add,
+                onDismiss: () {},
+              ),
+            ],
+          ),
+        ),
+      ),
+    );
+
+    // Reveal + autofocus the free-text ("Other") field, so a control inside the
+    // overlay's Shortcuts subtree holds focus.
+    await tester.tap(find.text('Other…'));
+    await tester.pumpAndSettle();
+    expect(find.byType(TextField), findsOneWidget);
+
+    // Hardware Tab is NOT consumed by a text field → the overlay Shortcuts
+    // forwards it to the PTY (drives Claude's TUI, e.g. /status tabs).
+    await tester.sendKeyEvent(LogicalKeyboardKey.tab);
+    await tester.pump();
+    expect(keys, ['\t']);
+
+    // A hardware arrow IS consumed by the focused field (caret nav) before the
+    // ancestor Shortcuts sees it → not forwarded, so typing in Other still works.
+    await tester.sendKeyEvent(LogicalKeyboardKey.arrowLeft);
+    await tester.pump();
+    expect(keys, ['\t']); // unchanged
+  });
+
+  testWidgets('#50: hardware arrows forward to the PTY from a focused overlay button',
+      (tester) async {
+    final keys = <String>[];
+    await tester.pumpWidget(
+      MaterialApp(
+        theme: AppTheme.dark,
+        home: Scaffold(
+          body: Stack(
+            children: [
+              QuestionOverlay(
+                question: PendingQuestion(
+                  toolUseId: 't50b',
+                  questions: [_q(['A', 'B'])],
+                ),
+                onSend: (_) {},
+                onKey: keys.add,
+                onDismiss: () {},
+              ),
+            ],
+          ),
+        ),
+      ),
+    );
+
+    // Focus a non-text overlay control (Other is inactive → no free-text field),
+    // then prove a HARDWARE arrow is forwarded to the PTY rather than moving the
+    // app's focus ring.
+    FocusScope.of(tester.element(find.byType(QuestionOverlay))).nextFocus();
+    await tester.pump();
+
+    await tester.sendKeyEvent(LogicalKeyboardKey.arrowDown);
+    await tester.pump();
+    expect(keys, ['\x1b[B']);
   });
 
   testWidgets(

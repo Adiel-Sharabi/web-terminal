@@ -256,6 +256,36 @@ void main() {
     });
   });
 
+  group('terminalIsActiveTarget (#50: Tab/arrows drive Claude TUI)', () {
+    test('Terminal lens → terminal is the active target', () {
+      expect(
+        terminalIsActiveTarget(lensLive: true, questionUp: false),
+        isTrue,
+      );
+    });
+
+    test('question overlay up (any lens) → terminal is the active target', () {
+      expect(
+        terminalIsActiveTarget(lensLive: false, questionUp: true),
+        isTrue,
+      );
+    });
+
+    test('both lens live AND a question up → still the active target', () {
+      expect(
+        terminalIsActiveTarget(lensLive: true, questionUp: true),
+        isTrue,
+      );
+    });
+
+    test('chat lens, no question → NOT the active target (compose edits keys)', () {
+      expect(
+        terminalIsActiveTarget(lensLive: false, questionUp: false),
+        isFalse,
+      );
+    });
+  });
+
   // A soft keyboard commits Enter as literal "\n" text, so xterm's _onInsert
   // falls through to terminal.textInput('\n') and a raw LF hit the PTY. Claude's
   // TUI inserts a prompt newline on LF and submits only on CR, so a typed prompt

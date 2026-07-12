@@ -353,6 +353,52 @@ void main() {
     expect(tabs, 1);
   });
 
+  testWidgets('#50: Tab reaches the terminal when the terminal is active (not live)',
+      (tester) async {
+    var tabs = 0;
+    final fn = FocusNode();
+    await tester.pumpWidget(
+      _wrap(
+        ComposeBar(
+          controller: TextEditingController(),
+          focusNode: fn,
+          onSend: () {},
+          isLive: false, // NOT a slash line
+          terminalActive: true, // Terminal lens / question overlay up
+          onTab: () => tabs++,
+        ),
+      ),
+    );
+    fn.requestFocus();
+    await tester.pump();
+    await tester.sendKeyEvent(LogicalKeyboardKey.tab);
+    await tester.pump();
+    expect(tabs, 1); // Tab drives Claude's TUI, not focus traversal
+  });
+
+  testWidgets('#50: arrows reach the terminal when active even with draft text',
+      (tester) async {
+    final seqs = <String>[];
+    final fn = FocusNode();
+    await tester.pumpWidget(
+      _wrap(
+        ComposeBar(
+          controller: TextEditingController(text: 'draft'),
+          focusNode: fn,
+          onSend: () {},
+          isLive: false,
+          terminalActive: true,
+          onArrow: seqs.add,
+        ),
+      ),
+    );
+    fn.requestFocus();
+    await tester.pump();
+    await tester.sendKeyEvent(LogicalKeyboardKey.arrowDown);
+    await tester.pump();
+    expect(seqs, ['\x1b[B']); // arrow reaches the PTY despite the caret text
+  });
+
   testWidgets('Backspace clears the terminal line only when live AND field empty',
       (tester) async {
     var backspaces = 0;
