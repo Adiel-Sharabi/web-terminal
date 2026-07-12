@@ -1,11 +1,9 @@
-// Widget tests for ComposeBar's Enter-key behavior. The field is platform-
-// branched: on mobile it is SINGLE-LINE with a native Send action, so a soft-
-// keyboard Enter fires onSubmitted (submits) and never inserts a newline — the
-// only combination Android honors, and it keeps every submit a plain `text\r`
-// the TUI acts on (a newline would be sent as a bracketed paste whose submit-CR
-// the TUI absorbs). On desktop the field displays multiple lines but is NOT
-// declared multiline to the platform (a done action, not newline), so a bare
-// Enter submits (shortcut + onSubmitted) and Shift+Enter inserts a newline.
+// Widget tests for ComposeBar's Enter-key behavior. The field is STRICT
+// single-line on every platform (maxLines 1) with a native send action, so Enter
+// fires onSubmitted (submits) and can never insert a newline — every submit is a
+// plain `text\r` the Claude/Codex TUI acts on. A multi-line field let the OS
+// insert a newline on the submitting Enter (parking the prompt, or sending it as
+// a bracketed paste whose CR the TUI absorbs). Multi-line prompts go via paste.
 import 'package:flutter/foundation.dart';
 import 'package:flutter/material.dart';
 import 'package:flutter/services.dart';
@@ -30,80 +28,27 @@ Uint8List _png1x1() => Uint8List.fromList(const [
 ]);
 
 void main() {
-  group('composeUsesSoftKeyboard', () {
-    test('mobile platforms use a soft keyboard, desktop does not', () {
-      expect(composeUsesSoftKeyboard(TargetPlatform.android), isTrue);
-      expect(composeUsesSoftKeyboard(TargetPlatform.iOS), isTrue);
-      expect(composeUsesSoftKeyboard(TargetPlatform.windows), isFalse);
-      expect(composeUsesSoftKeyboard(TargetPlatform.macOS), isFalse);
-      expect(composeUsesSoftKeyboard(TargetPlatform.linux), isFalse);
-    });
-  });
-
-  testWidgets(
-    'desktop: multi-line DISPLAY but a done action so Enter submits, not newlines',
-    (tester) async {
-      debugDefaultTargetPlatformOverride = TargetPlatform.windows;
-      try {
-        await tester.pumpWidget(
-          _wrap(
-            ComposeBar(
-              controller: TextEditingController(),
-              focusNode: FocusNode(),
-              onSend: () {},
-              isLive: false,
-            ),
-          ),
-        );
-        final field = tester.widget<TextField>(find.byType(TextField));
-        // NOT declared multiline to the platform — else Windows swallows Enter as
-        // a newline before the submit shortcut sees it (compose Enter parked).
-        expect(field.textInputAction, TextInputAction.done);
-        expect(field.keyboardType, TextInputType.text);
-        // Still displays multiple lines (Shift+Enter / paste).
-        expect(field.maxLines, greaterThan(1));
-      } finally {
-        debugDefaultTargetPlatformOverride = null;
-      }
-    },
-  );
-
-  testWidgets('desktop: Shift+Enter inserts a newline and does NOT submit', (
+  testWidgets('desktop: strict single-line field with a send action', (
     tester,
   ) async {
     debugDefaultTargetPlatformOverride = TargetPlatform.windows;
     try {
-      var sent = 0;
-      final controller = TextEditingController(text: 'hello');
-      final fn = FocusNode();
       await tester.pumpWidget(
         _wrap(
           ComposeBar(
-            controller: controller,
-            focusNode: fn,
-            onSend: () => sent++,
+            controller: TextEditingController(),
+            focusNode: FocusNode(),
+            onSend: () {},
             isLive: false,
           ),
         ),
       );
-      fn.requestFocus();
-      // Caret at end so the newline lands after the text.
-      controller.selection = TextSelection.collapsed(
-        offset: controller.text.length,
-      );
-      await tester.pump();
-
-      await tester.sendKeyDownEvent(LogicalKeyboardKey.shiftLeft);
-      await tester.sendKeyEvent(LogicalKeyboardKey.enter);
-      await tester.sendKeyUpEvent(LogicalKeyboardKey.shiftLeft);
-      await tester.pump();
-
-      expect(sent, 0, reason: 'Shift+Enter must not submit');
-      expect(
-        controller.text,
-        'hello\n',
-        reason: 'Shift+Enter inserts a newline',
-      );
+      final field = tester.widget<TextField>(find.byType(TextField));
+      // Single-line so the OS can never insert a newline on the submitting Enter
+      // (which parked the prompt / sent a bracketed paste whose CR the TUI eats).
+      expect(field.maxLines, 1);
+      expect(field.textInputAction, TextInputAction.send);
+      expect(field.keyboardType, TextInputType.text);
     } finally {
       debugDefaultTargetPlatformOverride = null;
     }
