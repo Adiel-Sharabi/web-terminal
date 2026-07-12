@@ -407,6 +407,29 @@ void main() {
     test('empty buffer -> a bare submit CR', () {
       expect(buildComposeSubmission(''), '\r');
     });
+
+    // The desktop compose field displays multiple lines, and Windows inserts a
+    // newline on the submitting Enter before the send fires — so a single-line
+    // prompt arrives as "hello\n". Stripping the TRAILING newline keeps it a
+    // plain `text\r` (which submits) instead of a bracketed paste (whose CR
+    // Claude absorbs, parking the prompt unsent).
+    test('a trailing newline is stripped: single-line prompt stays plain text\\r',
+        () {
+      expect(buildComposeSubmission('hello\n'), 'hello\r');
+      expect(buildComposeSubmission('hello\r\n'), 'hello\r');
+      // Not a bracketed paste — no ESC[200~.
+      expect(buildComposeSubmission('hello\n').contains('\x1b[200~'), isFalse);
+    });
+
+    test('only the TRAILING newline is stripped; interior newlines still paste',
+        () {
+      expect(buildComposeSubmission('line1\nline2\n'),
+          '\x1b[200~line1\rline2\x1b[201~\r');
+    });
+
+    test('a whitespace-only trailing-newline buffer -> a bare submit CR', () {
+      expect(buildComposeSubmission('\n'), '\r');
+    });
   });
 
 }
