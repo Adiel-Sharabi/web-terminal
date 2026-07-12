@@ -101,6 +101,22 @@ bool terminalAcceptsInput(String activeLens) => activeLens == 'terminal';
 bool isDesktopPlatform() =>
     !kIsWeb && (Platform.isWindows || Platform.isMacOS || Platform.isLinux);
 
+/// Whether the live terminal should take raw hardware key events only (no IME
+/// text-input connection). True unless the terminal is [live] on a non-[desktop]
+/// (mobile) platform, which needs the IME path for its soft keyboard.
+///
+/// #46: xterm-4.0.0's IME path submits Enter only via `onAction(done)`, but its
+/// text connection is configured `TextInputAction.newline`. On a desktop
+/// hardware keyboard, Enter fires `performAction(newline)` — which xterm drops —
+/// and the raw KeyEvent is swallowed by the connection, so it never reaches
+/// `keyInput(TerminalKey.enter)`: the typed prompt parked until the key-strip
+/// Enter (a lone `\r`) was tapped. Desktop has no soft keyboard, so hardware-only
+/// routes Enter as a KeyEvent → `keyInput(enter)` → `\r` and it submits (tap
+/// still focuses the view). Mobile keeps the IME path: a soft keyboard commits
+/// Enter as inserted `'\n'` text, which [terminalOutputToPty] maps to `\r`.
+bool terminalHardwareKeyboardOnly({required bool live, required bool desktop}) =>
+    !live || desktop;
+
 
 /// Whether a compose buffer that just became '/'-prefixed should switch to the
 /// live slash-stream (mirroring Claude's own slash menu, which renders + narrows
@@ -1818,8 +1834,13 @@ class _SessionScreenState extends State<SessionScreen>
                           // `_rawMode` now only decides whether the terminal
                           // GRABS the keyboard automatically (see _setRawMode /
                           // _setLens); it no longer gates input at all.
-                          hardwareKeyboardOnly:
-                              !terminalAcceptsInput(_activeLens),
+                          // Desktop takes raw hardware keys (no IME), so a
+                          // typed Enter submits instead of parking (#46); mobile
+                          // keeps the IME path for its soft keyboard.
+                          hardwareKeyboardOnly: terminalHardwareKeyboardOnly(
+                            live: terminalAcceptsInput(_activeLens),
+                            desktop: isDesktopPlatform(),
+                          ),
                           readOnly: !terminalAcceptsInput(_activeLens),
                           // #26: tap a printed http/https URL to open it in the
                           // system browser (additive — focus/keyboard still run
