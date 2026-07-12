@@ -1,9 +1,11 @@
-// Widget tests for ComposeBar's Enter-key behavior. The field itself is always
-// multiline/newline: on desktop a hardware Enter submits via the _SendIntent
-// shortcut and Shift/Alt+Enter inserts a newline; on mobile the soft keyboard
-// inserts a newline that SessionScreen intercepts and turns into a submit (Enter
-// sends — see isSingleNewlineInsert in session_screen.dart). So the mobile
-// "Enter sends" behavior is tested there, not here.
+// Widget tests for ComposeBar's Enter-key behavior. The field is platform-
+// branched: on mobile it is SINGLE-LINE with a native Send action, so a soft-
+// keyboard Enter fires onSubmitted (submits) and never inserts a newline — the
+// only combination Android honors, and it keeps every submit a plain `text\r`
+// the TUI acts on (a newline would be sent as a bracketed paste whose submit-CR
+// the TUI absorbs). On desktop it is multi-line: a hardware Enter submits via the
+// _SendIntent shortcut and Shift/Alt+Enter inserts a newline.
+import 'package:flutter/foundation.dart';
 import 'package:flutter/material.dart';
 import 'package:flutter/services.dart';
 import 'package:flutter_test/flutter_test.dart';
@@ -25,24 +27,98 @@ Uint8List _png1x1() => Uint8List.fromList(const [
     ]);
 
 void main() {
-  testWidgets('the compose field is multiline/newline (mobile submit is intercepted upstream)', (
+  group('composeUsesSoftKeyboard', () {
+    test('mobile platforms use a soft keyboard, desktop does not', () {
+      expect(composeUsesSoftKeyboard(TargetPlatform.android), isTrue);
+      expect(composeUsesSoftKeyboard(TargetPlatform.iOS), isTrue);
+      expect(composeUsesSoftKeyboard(TargetPlatform.windows), isFalse);
+      expect(composeUsesSoftKeyboard(TargetPlatform.macOS), isFalse);
+      expect(composeUsesSoftKeyboard(TargetPlatform.linux), isFalse);
+    });
+  });
+
+  testWidgets('desktop: multi-line field, newline action (Shift+Enter → newline)', (
     tester,
   ) async {
-    await tester.pumpWidget(
-      _wrap(
-        ComposeBar(
-          controller: TextEditingController(),
-          focusNode: FocusNode(),
-          onSend: () {},
-          isLive: false,
+    debugDefaultTargetPlatformOverride = TargetPlatform.windows;
+    try {
+      await tester.pumpWidget(
+        _wrap(
+          ComposeBar(
+            controller: TextEditingController(),
+            focusNode: FocusNode(),
+            onSend: () {},
+            isLive: false,
+          ),
         ),
-      ),
-    );
+      );
+      final field = tester.widget<TextField>(find.byType(TextField));
+      expect(field.textInputAction, TextInputAction.newline);
+      expect(field.keyboardType, TextInputType.multiline);
+      expect(field.maxLines, greaterThan(1));
+    } finally {
+      debugDefaultTargetPlatformOverride = null;
+    }
+  });
 
-    final field = tester.widget<TextField>(find.byType(TextField));
-    expect(field.textInputAction, TextInputAction.newline);
-    expect(field.keyboardType, TextInputType.multiline);
-    expect(field.maxLines, greaterThan(1));
+  testWidgets('mobile: single-line field, send action so Enter submits', (
+    tester,
+  ) async {
+    debugDefaultTargetPlatformOverride = TargetPlatform.android;
+    try {
+      await tester.pumpWidget(
+        _wrap(
+          ComposeBar(
+            controller: TextEditingController(),
+            focusNode: FocusNode(),
+            onSend: () {},
+            isLive: false,
+          ),
+        ),
+      );
+      final field = tester.widget<TextField>(find.byType(TextField));
+      expect(field.textInputAction, TextInputAction.send);
+      expect(field.keyboardType, TextInputType.text);
+      expect(field.maxLines, 1);
+    } finally {
+      debugDefaultTargetPlatformOverride = null;
+    }
+  });
+
+  testWidgets('mobile: the soft-keyboard send action submits (once, when it can)', (
+    tester,
+  ) async {
+    debugDefaultTargetPlatformOverride = TargetPlatform.android;
+    try {
+      var sends = 0;
+      final controller = TextEditingController(text: 'hello');
+      final fn = FocusNode();
+      await tester.pumpWidget(
+        _wrap(
+          ComposeBar(
+            controller: controller,
+            focusNode: fn,
+            onSend: () => sends++,
+            isLive: false,
+          ),
+        ),
+      );
+      fn.requestFocus();
+      await tester.pump();
+
+      await tester.testTextInput.receiveAction(TextInputAction.send);
+      await tester.pump();
+      expect(sends, 1);
+
+      // Empty field → the send action is a no-op (no stray blank submit).
+      controller.clear();
+      await tester.pump();
+      await tester.testTextInput.receiveAction(TextInputAction.send);
+      await tester.pump();
+      expect(sends, 1);
+    } finally {
+      debugDefaultTargetPlatformOverride = null;
+    }
   });
 
   testWidgets('send button fires onSend and is disabled when empty', (
