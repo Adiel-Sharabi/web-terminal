@@ -22,6 +22,34 @@ import 'theme/app_theme.dart';
 /// Lets the notification-tap listener navigate without a `BuildContext`.
 final navigatorKey = GlobalKey<NavigatorState>();
 
+/// The route name a notification-opened [SessionScreen] is pushed under, so a
+/// later tap can find an already-open copy and collapse the stack onto it
+/// (issue #45).
+String sessionRouteName(String sessionId) => 'session/$sessionId';
+
+/// Models what a notification tap does to the navigation stack (issue #45):
+/// opening a session from a notification must leave exactly one screen above
+/// the list, so a single Back press returns to the list every time.
+///
+/// [stack] is the current route names, bottom→top (index 0 is the session
+/// list). Returns the resulting stack: session screens stacked above the list
+/// are collapsed — popped down to the list, or to an already-open copy of the
+/// [target] (whose live state we keep rather than rebuild) — and [target] ends
+/// up as the single screen on top. Re-tapping the same or another notification
+/// never piles up duplicate screens (Back had to be pressed 3×). Pure mirror of
+/// the `Navigator.popUntil` + dedup in [_AiTerminalAppState._openSession].
+List<String> resolveNotificationStack(List<String> stack, String target) {
+  if (stack.isEmpty) return [target];
+  final result = List<String>.from(stack);
+  // popUntil stops at the first route (from the top) that is the list or an
+  // existing copy of the target.
+  while (result.length > 1 && result.last != target) {
+    result.removeLast();
+  }
+  if (result.last != target) result.add(target);
+  return result;
+}
+
 /// FCM push + local notifications are mobile-only (firebase_messaging has no
 /// desktop support). On Windows/macOS/Linux the app is a full terminal client
 /// minus background push — everything else works.
@@ -91,9 +119,25 @@ class _AiTerminalAppState extends State<AiTerminalApp>
   }
 
   void _openSession(String sessionId) {
-    navigatorKey.currentState?.push(
-      MaterialPageRoute(builder: (_) => SessionScreen(sessionId: sessionId)),
-    );
+    final nav = navigatorKey.currentState;
+    if (nav == null) return;
+    final name = sessionRouteName(sessionId);
+    // Collapse any stacked session screens so a notification tap lands exactly
+    // one screen above the list (issue #45: Back had to be pressed 3×). popUntil
+    // stops at the list (first route) or an already-open copy of this session,
+    // so repeat taps — and the cold-start + foreground double-fire for one
+    // notification — can never push a duplicate. See resolveNotificationStack.
+    var alreadyOpen = false;
+    nav.popUntil((route) {
+      if (route.settings.name == name) alreadyOpen = true;
+      return route.isFirst || route.settings.name == name;
+    });
+    if (!alreadyOpen) {
+      nav.push(MaterialPageRoute(
+        settings: RouteSettings(name: name),
+        builder: (_) => SessionScreen(sessionId: sessionId),
+      ));
+    }
   }
 
   @override
