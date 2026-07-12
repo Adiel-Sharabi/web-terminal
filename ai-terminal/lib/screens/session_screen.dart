@@ -166,8 +166,16 @@ bool pasteImageIntoCompose({
 /// later) could lose the `\r` when `_connection` was nulled on background or
 /// replaced by a reconnect in that gap, leaving the text on the shared PTY input
 /// line unsent (it then "vanished" from chat when the optimistic echo timed out).
+///
+/// A TRAILING newline is stripped first: the desktop compose field displays
+/// multiple lines, and on Windows a maxLines>1 TextField inserts a newline on the
+/// submitting Enter before the send fires, so a plain "hello" prompt reaches here
+/// as "hello\n". Without stripping it, that single-line prompt goes out as a
+/// bracketed paste whose submit CR Claude's TUI absorbs — the text parks in the
+/// input line unsent. Interior newlines (a genuine multi-line prompt) are kept.
 /// Pure so the payload is exhaustively testable.
 String buildComposeSubmission(String val) {
+  val = val.replaceFirst(RegExp(r'[\r\n]+$'), '');
   if (val.contains('\n')) {
     final safe = val
         .replaceAll(RegExp('\x1b\\[2(?:00|01)~'), '')
