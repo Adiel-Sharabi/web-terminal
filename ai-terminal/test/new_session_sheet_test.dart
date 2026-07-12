@@ -5,6 +5,7 @@
 import 'dart:convert';
 
 import 'package:flutter/material.dart';
+import 'package:flutter/services.dart';
 import 'package:flutter_test/flutter_test.dart';
 import 'package:http/http.dart' as http;
 import 'package:http/testing.dart';
@@ -226,6 +227,161 @@ void main() {
           .map((i) => (i.child as Text).data)
           .toList(growable: false);
       expect(labels, ['Auto (detect from command)']);
+    });
+  });
+
+  group('nextFolderHighlight (issue #48 arrow nav math)', () {
+    test('entering an unhighlighted list: Down picks the first row', () {
+      expect(nextFolderHighlight(-1, 1, 3), 0);
+    });
+
+    test('entering an unhighlighted list: Up picks the last row', () {
+      expect(nextFolderHighlight(-1, -1, 3), 2);
+    });
+
+    test('Down/Up step through the rows', () {
+      expect(nextFolderHighlight(0, 1, 3), 1);
+      expect(nextFolderHighlight(1, 1, 3), 2);
+      expect(nextFolderHighlight(2, -1, 3), 1);
+    });
+
+    test('wraps around at both ends', () {
+      expect(nextFolderHighlight(2, 1, 3), 0); // past the bottom → top
+      expect(nextFolderHighlight(0, -1, 3), 2); // above the top → bottom
+    });
+
+    test('an empty list stays unhighlighted', () {
+      expect(nextFolderHighlight(-1, 1, 0), -1);
+      expect(nextFolderHighlight(0, 1, 0), -1);
+    });
+
+    test('a single-row list always lands on that row', () {
+      expect(nextFolderHighlight(-1, 1, 1), 0);
+      expect(nextFolderHighlight(0, 1, 1), 0);
+      expect(nextFolderHighlight(0, -1, 1), 0);
+    });
+  });
+
+  group('folder keyboard nav (issue #48)', () {
+    const server = ServerConfig(
+      name: 'Solo',
+      baseUrl: 'http://x',
+      bearerToken: 't',
+    );
+
+    // Pumps the sheet; `onCreate` captures the POST /api/sessions body so a test
+    // can assert which cwd a keyboard-driven submit sent.
+    Future<void> pumpNav(
+      WidgetTester tester, {
+      void Function(Map<String, dynamic> body)? onCreate,
+    }) async {
+      await tester.pumpWidget(
+        MaterialApp(
+          theme: AppTheme.dark,
+          home: Scaffold(
+            body: Builder(
+              builder: (context) => ElevatedButton(
+                onPressed: () => showNewSessionSheet(
+                  context,
+                  servers: const [server],
+                  initialServer: server,
+                  onCreated: (_) {},
+                  clientBuilder: (server) => ApiClient(
+                    server,
+                    httpClient: MockClient((req) async {
+                      if (req.url.path == '/api/history/folders') {
+                        return http.Response(
+                          '["/dev/web-terminal","/dev/ai-terminal"]',
+                          200,
+                        );
+                      }
+                      if (req.method == 'POST' &&
+                          req.url.path == '/api/sessions') {
+                        onCreate?.call(
+                          jsonDecode(req.body) as Map<String, dynamic>,
+                        );
+                        return http.Response('{"id":"n","name":"x"}', 200);
+                      }
+                      return http.Response('{}', 200);
+                    }),
+                  ),
+                ),
+                child: const Text('open'),
+              ),
+            ),
+          ),
+        ),
+      );
+      await tester.tap(find.text('open'));
+      await tester.pumpAndSettle();
+    }
+
+    Finder cwdField() => find.ancestor(
+          of: find.text('Working directory'),
+          matching: find.byType(TextField),
+        );
+
+    testWidgets('ArrowDown highlights the first folder; Enter starts there', (
+      tester,
+    ) async {
+      String? sentCwd;
+      await pumpNav(tester, onCreate: (b) => sentCwd = b['cwd'] as String?);
+
+      // Focus the working-dir field → the (empty-query = all) list shows.
+      await tester.tap(find.text('Working directory'));
+      await tester.pumpAndSettle();
+      expect(find.text('/dev/web-terminal'), findsOneWidget);
+
+      // Down enters the list at the first row; Enter submits in that folder.
+      await tester.sendKeyEvent(LogicalKeyboardKey.arrowDown);
+      await tester.pumpAndSettle();
+      await tester.testTextInput.receiveAction(TextInputAction.done);
+      await tester.pump();
+
+      expect(sentCwd, '/dev/web-terminal');
+    });
+
+    testWidgets('Down twice lands on the second folder', (tester) async {
+      String? sentCwd;
+      await pumpNav(tester, onCreate: (b) => sentCwd = b['cwd'] as String?);
+
+      await tester.tap(find.text('Working directory'));
+      await tester.pumpAndSettle();
+      await tester.sendKeyEvent(LogicalKeyboardKey.arrowDown);
+      await tester.sendKeyEvent(LogicalKeyboardKey.arrowDown);
+      await tester.pumpAndSettle();
+      await tester.testTextInput.receiveAction(TextInputAction.done);
+      await tester.pump();
+
+      expect(sentCwd, '/dev/ai-terminal');
+    });
+
+    testWidgets('Escape closes the suggestion list', (tester) async {
+      await pumpNav(tester);
+
+      await tester.tap(find.text('Working directory'));
+      await tester.pumpAndSettle();
+      expect(find.text('/dev/web-terminal'), findsOneWidget);
+
+      await tester.sendKeyEvent(LogicalKeyboardKey.escape);
+      await tester.pumpAndSettle();
+
+      expect(find.text('/dev/web-terminal'), findsNothing);
+    });
+
+    testWidgets('with nothing highlighted, Enter submits the typed path (#18)', (
+      tester,
+    ) async {
+      String? sentCwd;
+      await pumpNav(tester, onCreate: (b) => sentCwd = b['cwd'] as String?);
+
+      // Typing resets any highlight, so Enter keeps the #18 behavior.
+      await tester.enterText(cwdField(), r'C:\custom\path');
+      await tester.pumpAndSettle();
+      await tester.testTextInput.receiveAction(TextInputAction.done);
+      await tester.pump();
+
+      expect(sentCwd, r'C:\custom\path');
     });
   });
 

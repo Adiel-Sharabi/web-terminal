@@ -5,6 +5,7 @@
 library;
 
 import 'package:flutter/material.dart';
+import 'package:flutter/services.dart';
 
 import '../api/agent_catalog.dart';
 import '../api/api_client.dart';
@@ -50,6 +51,59 @@ List<String> filterFolders(List<String> folders, String query) {
       .toList(growable: false);
 }
 
+/// Next highlight index after moving [delta] (+1 down / -1 up) through [count]
+/// folder-suggestion rows, from [current] (-1 = nothing highlighted). Entering
+/// an unhighlighted list highlights the first row going down / the last going
+/// up, and it wraps around at both ends — parity with the web `folderKeydown`
+/// (issue #48). Pure/testable.
+int nextFolderHighlight(int current, int delta, int count) {
+  if (count <= 0) return -1;
+  if (current < 0) return delta > 0 ? 0 : count - 1;
+  return ((current + delta) % count + count) % count;
+}
+
+/// Arrow ↑/↓ through the open folder-suggestion list (issue #48).
+class _FolderMoveIntent extends Intent {
+  const _FolderMoveIntent(this.delta);
+  final int delta;
+}
+
+/// Escape closes the folder-suggestion list (web `folderKeydown` parity).
+class _FolderDismissIntent extends Intent {
+  const _FolderDismissIntent();
+}
+
+/// Arrow/Escape are only intercepted while the suggestion list is open and
+/// non-empty; otherwise the Action is disabled so the key keeps its default
+/// behavior (caret nav in the field / dismissing the sheet on Escape).
+class _FolderMoveAction extends Action<_FolderMoveIntent> {
+  _FolderMoveAction(this.state);
+  final _NewSessionSheetState state;
+
+  @override
+  bool isEnabled(_FolderMoveIntent intent) => state._suggestionsVisible;
+
+  @override
+  Object? invoke(_FolderMoveIntent intent) {
+    state._moveHighlight(intent.delta);
+    return null;
+  }
+}
+
+class _FolderDismissAction extends Action<_FolderDismissIntent> {
+  _FolderDismissAction(this.state);
+  final _NewSessionSheetState state;
+
+  @override
+  bool isEnabled(_FolderDismissIntent intent) => state._suggestionsVisible;
+
+  @override
+  Object? invoke(_FolderDismissIntent intent) {
+    state._dismissSuggestions();
+    return null;
+  }
+}
+
 class _NewSessionSheet extends StatefulWidget {
   const _NewSessionSheet({
     required this.servers,
@@ -86,6 +140,15 @@ class _NewSessionSheetState extends State<_NewSessionSheet> {
   bool _creating = false;
   String? _error;
 
+  // Keyboard-highlighted row in the folder suggestion list (issue #48). -1 =
+  // nothing highlighted, so Enter submits the typed path (existing #18
+  // behavior); ArrowDown enters the list at the first row. Reset to -1 whenever
+  // the filtered list can change (typing, server switch), so it never points at
+  // a stale row.
+  int _highlight = -1;
+  final _suggestScroll = ScrollController();
+  static const double _kSuggestRowExtent = 34;
+
   // The AI agent picker. `null` is "Auto (detect from command)" — the same
   // default behavior as omitting the field entirely. Agent choices are
   // per-server, so a server switch resets this back to Auto.
@@ -115,6 +178,7 @@ class _NewSessionSheetState extends State<_NewSessionSheet> {
     _cwd.dispose();
     _command.dispose();
     _cwdFocus.dispose();
+    _suggestScroll.dispose();
     super.dispose();
   }
 
@@ -161,6 +225,8 @@ class _NewSessionSheetState extends State<_NewSessionSheet> {
       // Agent choices are per-server; reset to Auto rather than carry a
       // selection that may not exist on the new server.
       _agent = null;
+      // The folder list is about to be replaced; drop any stale highlight.
+      _highlight = -1;
     });
     _loadForServer(value);
   }
@@ -174,7 +240,50 @@ class _NewSessionSheetState extends State<_NewSessionSheet> {
     _settingProgrammatically = false;
     _cwdEdited = true;
     _cwdFocus.unfocus();
-    setState(() => _showSuggestions = false);
+    setState(() {
+      _showSuggestions = false;
+      _highlight = -1;
+    });
+  }
+
+  /// The folder suggestion list is showing at least one row — the only state in
+  /// which the arrow-nav / Escape shortcuts are active (issue #48).
+  bool get _suggestionsVisible =>
+      _showSuggestions && filterFolders(_folders, _cwd.text).isNotEmpty;
+
+  /// Move the keyboard highlight through the suggestion list (issue #48),
+  /// keeping the highlighted row scrolled into view.
+  void _moveHighlight(int delta) {
+    final n = filterFolders(_folders, _cwd.text).length;
+    if (n == 0) return;
+    setState(() => _highlight = nextFolderHighlight(_highlight, delta, n));
+    _scrollHighlightIntoView();
+  }
+
+  void _dismissSuggestions() {
+    setState(() {
+      _showSuggestions = false;
+      _highlight = -1;
+    });
+  }
+
+  /// Keeps the highlighted row visible in the fixed-extent suggestion list.
+  void _scrollHighlightIntoView() {
+    if (_highlight < 0 || !_suggestScroll.hasClients) return;
+    final pos = _suggestScroll.position;
+    final rowTop = _highlight * _kSuggestRowExtent;
+    final rowBottom = rowTop + _kSuggestRowExtent;
+    double? to;
+    if (rowTop < pos.pixels) {
+      to = rowTop;
+    } else if (rowBottom > pos.pixels + pos.viewportDimension) {
+      to = rowBottom - pos.viewportDimension;
+    }
+    if (to != null) {
+      _suggestScroll.jumpTo(
+        to.clamp(pos.minScrollExtent, pos.maxScrollExtent),
+      );
+    }
   }
 
   Future<void> _submit() async {
@@ -246,16 +355,46 @@ class _NewSessionSheetState extends State<_NewSessionSheet> {
               textInputAction: TextInputAction.next,
             ),
             const SizedBox(height: 12),
-            TextField(
-              controller: _cwd,
-              focusNode: _cwdFocus,
-              decoration: const InputDecoration(labelText: 'Working directory'),
-              autocorrect: false,
-              // Enter from the working-dir field creates the session (issue
-              // #18: "Enter doesn't create"). Command already submits on Enter.
-              textInputAction: TextInputAction.done,
-              onChanged: (_) => setState(() {}),
-              onSubmitted: (_) => _submit(),
+            // Shortcuts intercept ↑/↓/Escape for folder-list navigation (issue
+            // #48) only while the list is open (the Actions are disabled
+            // otherwise, so the keys keep their default field/sheet behavior).
+            Shortcuts(
+              shortcuts: const <ShortcutActivator, Intent>{
+                SingleActivator(LogicalKeyboardKey.arrowDown):
+                    _FolderMoveIntent(1),
+                SingleActivator(LogicalKeyboardKey.arrowUp):
+                    _FolderMoveIntent(-1),
+                SingleActivator(LogicalKeyboardKey.escape):
+                    _FolderDismissIntent(),
+              },
+              child: Actions(
+                actions: <Type, Action<Intent>>{
+                  _FolderMoveIntent: _FolderMoveAction(this),
+                  _FolderDismissIntent: _FolderDismissAction(this),
+                },
+                child: TextField(
+                  controller: _cwd,
+                  focusNode: _cwdFocus,
+                  decoration:
+                      const InputDecoration(labelText: 'Working directory'),
+                  autocorrect: false,
+                  // Enter from the working-dir field creates the session (issue
+                  // #18: "Enter doesn't create"), OR — when a folder row is
+                  // arrow-highlighted (#48) — starts the session in that folder.
+                  textInputAction: TextInputAction.done,
+                  // A new filter can shift/empty the list, so drop the highlight.
+                  onChanged: (_) => setState(() => _highlight = -1),
+                  onSubmitted: (_) {
+                    final suggestions = filterFolders(_folders, _cwd.text);
+                    if (_showSuggestions &&
+                        _highlight >= 0 &&
+                        _highlight < suggestions.length) {
+                      _pickFolder(suggestions[_highlight]);
+                    }
+                    _submit();
+                  },
+                ),
+              ),
             ),
             if (_showSuggestions && suggestions.isNotEmpty)
               // TextFieldTapRegion keeps the working-dir field focused when a
@@ -274,24 +413,30 @@ class _NewSessionSheetState extends State<_NewSessionSheet> {
                     border: Border.all(color: theme.colorScheme.outlineVariant),
                   ),
                   child: ListView.builder(
+                    controller: _suggestScroll,
                     shrinkWrap: true,
                     padding: EdgeInsets.zero,
+                    itemExtent: _kSuggestRowExtent,
                     itemCount: suggestions.length,
                     itemBuilder: (context, i) {
                       final folder = suggestions[i];
+                      final active = i == _highlight;
                       return InkWell(
                         onTap: () => _pickFolder(folder),
-                        child: Padding(
-                          padding: const EdgeInsets.symmetric(
-                            horizontal: 12,
-                            vertical: 8,
-                          ),
+                        child: Container(
+                          color:
+                              active ? theme.colorScheme.primaryContainer : null,
+                          alignment: Alignment.centerLeft,
+                          padding: const EdgeInsets.symmetric(horizontal: 12),
                           child: Text(
                             folder,
                             maxLines: 1,
                             overflow: TextOverflow.ellipsis,
                             style: theme.textTheme.bodySmall?.copyWith(
                               fontFamily: 'monospace',
+                              color: active
+                                  ? theme.colorScheme.onPrimaryContainer
+                                  : null,
                             ),
                           ),
                         ),
