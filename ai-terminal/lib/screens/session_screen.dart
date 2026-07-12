@@ -1382,6 +1382,12 @@ class _SessionScreenState extends State<SessionScreen>
   /// App-wide hardware-key hook (only Alt+V, to paste a clipboard image). Runs
   /// before focus dispatch, so it works while the terminal owns the keyboard in
   /// raw mode. Returns true to consume the key.
+  /// The SINGLE owner of the Alt+V image-paste shortcut (#51). Registered on
+  /// [HardwareKeyboard], it fires for the key regardless of which widget has
+  /// focus, so it covers both the terminal and a focused compose field —
+  /// ComposeBar deliberately does not also bind Alt+V (two handlers = two
+  /// chips). [_pasteClipboardImage] then routes the image to the compose field
+  /// or the terminal via [pasteImageIntoCompose].
   bool _globalKeyHandler(KeyEvent event) {
     if (event is KeyDownEvent &&
         event.logicalKey == LogicalKeyboardKey.keyV &&
@@ -2072,7 +2078,11 @@ class _SessionScreenState extends State<SessionScreen>
                   _dismissedQuestionKey,
                 ),
               ),
-              onPasteImage: _pasteClipboardImage,
+              // Alt+V image paste is owned solely by `_globalKeyHandler` (#51):
+              // it's a HardwareKeyboard handler that fires regardless of focus,
+              // so ComposeBar must NOT also bind Alt+V or one paste adds two
+              // chips. Routing (compose vs terminal) is decided in
+              // `_pasteClipboardImage` via `pasteImageIntoCompose`.
               // #29: staged image thumbnails (bytes) + remove (✕) callback.
               attachments: [for (final a in _attachments) a.bytes],
               onRemoveAttachment: _removeComposeAttachment,

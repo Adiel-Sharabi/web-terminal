@@ -376,6 +376,50 @@ void main() {
     expect(tabs, 1); // Tab drives Claude's TUI, not focus traversal
   });
 
+  testWidgets(
+      '#51: ComposeBar does not consume Alt+V (the global handler owns image paste)',
+      (tester) async {
+    // The app pastes images via a single HardwareKeyboard handler that fires
+    // regardless of focus. If ComposeBar ALSO bound Alt+V, one paste added two
+    // chips (#51). Prove ComposeBar leaves Alt+V alone: it must propagate to an
+    // ancestor key handler rather than being swallowed by the compose field.
+    var altVReachedAncestor = 0;
+    final fn = FocusNode();
+    await tester.pumpWidget(
+      MaterialApp(
+        theme: AppTheme.dark,
+        home: Scaffold(
+          body: Focus(
+            onKeyEvent: (node, event) {
+              if (event is KeyDownEvent &&
+                  event.logicalKey == LogicalKeyboardKey.keyV &&
+                  HardwareKeyboard.instance.isAltPressed) {
+                altVReachedAncestor++;
+                return KeyEventResult.handled;
+              }
+              return KeyEventResult.ignored;
+            },
+            child: ComposeBar(
+              controller: TextEditingController(),
+              focusNode: fn,
+              onSend: () {},
+              isLive: false,
+            ),
+          ),
+        ),
+      ),
+    );
+    fn.requestFocus();
+    await tester.pump();
+
+    await tester.sendKeyDownEvent(LogicalKeyboardKey.altLeft);
+    await tester.sendKeyEvent(LogicalKeyboardKey.keyV);
+    await tester.sendKeyUpEvent(LogicalKeyboardKey.altLeft);
+    await tester.pump();
+
+    expect(altVReachedAncestor, 1);
+  });
+
   testWidgets('#50: arrows reach the terminal when active even with draft text',
       (tester) async {
     final seqs = <String>[];
