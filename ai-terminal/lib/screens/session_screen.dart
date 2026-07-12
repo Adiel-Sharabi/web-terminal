@@ -114,8 +114,10 @@ bool isDesktopPlatform() =>
 /// routes Enter as a KeyEvent → `keyInput(enter)` → `\r` and it submits (tap
 /// still focuses the view). Mobile keeps the IME path: a soft keyboard commits
 /// Enter as inserted `'\n'` text, which [terminalOutputToPty] maps to `\r`.
-bool terminalHardwareKeyboardOnly({required bool live, required bool desktop}) =>
-    !live || desktop;
+bool terminalHardwareKeyboardOnly({
+  required bool live,
+  required bool desktop,
+}) => !live || desktop;
 
 /// Whether the terminal/PTY is the active input target — the state in which
 /// hardware Tab and arrows should drive Claude's TUI (its `/status` tabs, menus,
@@ -126,9 +128,10 @@ bool terminalHardwareKeyboardOnly({required bool live, required bool desktop}) =
 /// input that normally holds focus) forwards Tab/arrows to the PTY when this is
 /// true, mirroring the web client where every key reaches the socket. Pure so
 /// the rule has one enforceable, testable home.
-bool terminalIsActiveTarget({required bool lensLive, required bool questionUp}) =>
-    lensLive || questionUp;
-
+bool terminalIsActiveTarget({
+  required bool lensLive,
+  required bool questionUp,
+}) => lensLive || questionUp;
 
 /// Whether a compose buffer that just became '/'-prefixed should switch to the
 /// live slash-stream (mirroring Claude's own slash menu, which renders + narrows
@@ -149,8 +152,7 @@ bool slashStartsLiveStream(String text) => text.startsWith('/');
 bool pasteImageIntoCompose({
   required String activeLens,
   required bool composeFocused,
-}) =>
-    activeLens == 'chat' || composeFocused;
+}) => activeLens == 'chat' || composeFocused;
 
 /// The exact bytes that submit a composed prompt to the PTY, INCLUDING the
 /// trailing submit CR, as ONE atomic frame — matching the web client
@@ -192,6 +194,34 @@ String buildComposeSubmission(String val) {
 /// through this same callback, where interior newlines are paste content and
 /// must survive verbatim. Sticky Ctrl+J is intercepted before this runs.
 String terminalOutputToPty(String data) => data == '\n' ? '\r' : data;
+
+/// A terminal context-menu action (#49). Right-click on the terminal offers
+/// these clipboard actions, matching the web client's long-press menu.
+enum TerminalMenuAction { copy, paste, selectAll }
+
+/// The context-menu actions to show for the terminal, given whether text is
+/// currently selected. Copy needs a selection to act on; Paste and Select All
+/// are always available (Paste's own no-op-on-empty-clipboard is handled by the
+/// handler). Pure so the menu's contents are testable without a live terminal.
+List<TerminalMenuAction> terminalContextMenuActions({
+  required bool hasSelection,
+}) => <TerminalMenuAction>[
+  if (hasSelection) TerminalMenuAction.copy,
+  TerminalMenuAction.paste,
+  TerminalMenuAction.selectAll,
+];
+
+/// Selects the terminal's entire buffer (#49 — "Select All"), so the existing
+/// copy path then yields the whole scrollback. Anchors span (0,0) → the last
+/// cell of the last line; [TerminalController.setSelection] takes ownership of
+/// the anchors. Factored out so the anchor math is unit-testable against a real
+/// [Terminal] without any Flutter widgets.
+void selectAllOnTerminal(Terminal terminal, TerminalController controller) {
+  final buffer = terminal.buffer;
+  final base = buffer.createAnchor(0, 0);
+  final extent = buffer.createAnchor(terminal.viewWidth - 1, buffer.height - 1);
+  controller.setSelection(base, extent);
+}
 
 /// A staged compose-bar image attachment (#29): the thumbnail [bytes] shown in
 /// the removable chip, and the server [path] delivered to Claude on submit.
@@ -261,8 +291,7 @@ bool shouldResurfaceAfterAnswer({
   required bool stillPending,
   required String answeredKey,
   required String? dismissedKey,
-}) =>
-    stillPending && dismissedKey == answeredKey;
+}) => stillPending && dismissedKey == answeredKey;
 
 class SessionScreen extends StatefulWidget {
   const SessionScreen({
@@ -325,7 +354,8 @@ class _SessionScreenState extends State<SessionScreen>
   // `hook-<id>-<seq>` (live) and the real `toolu_…` (transcript), which used to
   // read as a brand-new question and re-show the overlay.
   String? _dismissedQuestionKey;
-  String? _questionContext; // Claude's preceding message, shown above the question
+  String?
+  _questionContext; // Claude's preceding message, shown above the question
   Timer? _questionPoll;
 
   // --- Chat/Terminal lens ---------------------------------------------------
@@ -436,7 +466,9 @@ class _SessionScreenState extends State<SessionScreen>
         prefs.getBool('wt_rawmode_${widget.sessionId}') ?? isDesktop;
     final historyJson = prefs.getString('wt_history_${widget.sessionId}');
     final lens = prefs.getString('wt_lens_${widget.sessionId}');
-    final fontSize = prefs.getDouble('wt.termFontSize'); // global, not per-session
+    final fontSize = prefs.getDouble(
+      'wt.termFontSize',
+    ); // global, not per-session
     if (fontSize != null && fontSize >= 6 && fontSize <= 24) {
       _termFontSize = fontSize;
     }
@@ -491,8 +523,10 @@ class _SessionScreenState extends State<SessionScreen>
   /// without the endpoint returns null/404, so polling is safe everywhere.
   void _startQuestionPolling() {
     _questionPoll?.cancel();
-    _questionPoll =
-        Timer.periodic(const Duration(seconds: 4), (_) => _pollPendingQuestion());
+    _questionPoll = Timer.periodic(
+      const Duration(seconds: 4),
+      (_) => _pollPendingQuestion(),
+    );
     _pollPendingQuestion();
   }
 
@@ -565,8 +599,10 @@ class _SessionScreenState extends State<SessionScreen>
     // dismissed the overlay optimistically, so a dropped answer would otherwise
     // sit hidden-but-pending forever (the user only learns Claude never moved).
     if (answeredKey.isNotEmpty) {
-      await _verifyAnswerLanded(answeredKey,
-          resendEnter: answerNeedsConfirm(frames));
+      await _verifyAnswerLanded(
+        answeredKey,
+        resendEnter: answerNeedsConfirm(frames),
+      );
     }
   }
 
@@ -599,8 +635,10 @@ class _SessionScreenState extends State<SessionScreen>
   /// so we clear the optimistic dismissal and re-show the overlay. Without this
   /// the user is silently stranded: overlay gone, question unanswered, Claude
   /// waiting, and (pre-#19-dismissal) not even a re-bump to signal it.
-  Future<void> _verifyAnswerLanded(String answeredKey,
-      {required bool resendEnter}) async {
+  Future<void> _verifyAnswerLanded(
+    String answeredKey, {
+    required bool resendEnter,
+  }) async {
     final api = _api;
     if (api == null) return;
     PendingQuestion? stillPending;
@@ -832,7 +870,9 @@ class _SessionScreenState extends State<SessionScreen>
           _connection?.resize(cols, rows);
           // Show the newest output straight away — no need to open the
           // keyboard first to see the current frame.
-          WidgetsBinding.instance.addPostFrameCallback((_) => _scrollToBottom());
+          WidgetsBinding.instance.addPostFrameCallback(
+            (_) => _scrollToBottom(),
+          );
         });
       }
       return;
@@ -946,6 +986,82 @@ class _SessionScreenState extends State<SessionScreen>
     );
   }
 
+  /// Pastes clipboard text into the terminal PTY (#49 context-menu Paste).
+  /// Always targets the terminal (unlike [_pasteFromClipboard], which routes to
+  /// the compose field outside raw mode) — the user explicitly asked the
+  /// terminal to paste. Goes through [Terminal.paste] → `onOutput` →
+  /// [terminalOutputToPty], so bracketed-paste markers and the LF→CR carve-out
+  /// apply exactly as the toolbar Paste does.
+  Future<void> _pasteIntoTerminal() async {
+    final data = await Clipboard.getData(Clipboard.kTextPlain);
+    final text = data?.text;
+    if (text == null || text.isEmpty) return;
+    _terminal.paste(text);
+    _scrollToBottom();
+  }
+
+  /// Selects the whole terminal buffer (#49 "Select All"), then rebuilds so the
+  /// selection toolbar reflects it.
+  void _selectAllTerminal() {
+    selectAllOnTerminal(_terminal, _terminalController);
+    if (mounted) setState(() {});
+  }
+
+  /// Shows the terminal right-click context menu (#49) at [globalPos] with the
+  /// clipboard actions valid for the current selection state, then runs the
+  /// chosen action. Desktop-only in practice: it is wired to a secondary
+  /// (right-button) tap, which touch devices never emit, so touch keeps xterm's
+  /// own long-press selection + the on-selection Copy toolbar unchanged.
+  Future<void> _showTerminalContextMenu(Offset globalPos) async {
+    final overlay =
+        Overlay.of(context).context.findRenderObject() as RenderBox?;
+    if (overlay == null) return;
+    final actions = terminalContextMenuActions(
+      hasSelection: _terminalController.selection != null,
+    );
+    final selected = await showMenu<TerminalMenuAction>(
+      context: context,
+      position: RelativeRect.fromRect(
+        globalPos & const Size(40, 40),
+        Offset.zero & overlay.size,
+      ),
+      items: [
+        for (final a in actions)
+          PopupMenuItem<TerminalMenuAction>(
+            value: a,
+            child: Row(
+              children: [
+                Icon(_terminalMenuIcon(a), size: 18),
+                const SizedBox(width: 10),
+                Text(_terminalMenuLabel(a)),
+              ],
+            ),
+          ),
+      ],
+    );
+    if (selected == null) return;
+    switch (selected) {
+      case TerminalMenuAction.copy:
+        _copySelection();
+      case TerminalMenuAction.paste:
+        await _pasteIntoTerminal();
+      case TerminalMenuAction.selectAll:
+        _selectAllTerminal();
+    }
+  }
+
+  static IconData _terminalMenuIcon(TerminalMenuAction a) => switch (a) {
+    TerminalMenuAction.copy => Icons.copy,
+    TerminalMenuAction.paste => Icons.paste,
+    TerminalMenuAction.selectAll => Icons.select_all,
+  };
+
+  static String _terminalMenuLabel(TerminalMenuAction a) => switch (a) {
+    TerminalMenuAction.copy => 'Copy',
+    TerminalMenuAction.paste => 'Paste',
+    TerminalMenuAction.selectAll => 'Select All',
+  };
+
   /// Forks [session] straight from the app-bar overflow menu, without going
   /// through the full actions sheet — mirrors `_SessionActionsSheet._fork`
   /// (same auto-command, same "(fork)" name suffix) so both entry points
@@ -1006,7 +1122,9 @@ class _SessionScreenState extends State<SessionScreen>
         }
         final ch = text[i];
         _connection?.sendInput(
-          _ctrlSticky ? String.fromCharCode(ch.codeUnitAt(0) & 0x1f) : '\x1b$ch',
+          _ctrlSticky
+              ? String.fromCharCode(ch.codeUnitAt(0) & 0x1f)
+              : '\x1b$ch',
         );
         _settingComposeProgrammatically = true;
         _composeController.value = TextEditingValue(
@@ -1306,7 +1424,9 @@ class _SessionScreenState extends State<SessionScreen>
   /// thumbnail preview, [path] the server file path delivered to Claude on send.
   void _addComposeAttachment(Uint8List bytes, String path) {
     if (!mounted) return;
-    setState(() => _attachments.add(_ComposeAttachment(bytes: bytes, path: path)));
+    setState(
+      () => _attachments.add(_ComposeAttachment(bytes: bytes, path: path)),
+    );
     // Make sure the compose bar has focus so the new chip + send are right there.
     _composeFocusNode.requestFocus();
   }
@@ -1417,7 +1537,9 @@ class _SessionScreenState extends State<SessionScreen>
     if (png == null) {
       if (mounted) {
         ScaffoldMessenger.of(context).showSnackBar(
-          const SnackBar(content: Text('Clipboard image is not a readable image')),
+          const SnackBar(
+            content: Text('Clipboard image is not a readable image'),
+          ),
         );
       }
       return;
@@ -1470,7 +1592,10 @@ class _SessionScreenState extends State<SessionScreen>
     try {
       final decoded = img.decodeImage(input);
       if (decoded == null) return null;
-      return (bytes: Uint8List.fromList(img.encodePng(decoded)), mime: 'image/png');
+      return (
+        bytes: Uint8List.fromList(img.encodePng(decoded)),
+        mime: 'image/png',
+      );
     } catch (_) {
       return null;
     }
@@ -1637,11 +1762,16 @@ class _SessionScreenState extends State<SessionScreen>
               ? Column(
                   mainAxisSize: MainAxisSize.min,
                   children: [
-                    Icon(Icons.search_off,
-                        size: 48, color: theme.colorScheme.onSurfaceVariant),
+                    Icon(
+                      Icons.search_off,
+                      size: 48,
+                      color: theme.colorScheme.onSurfaceVariant,
+                    ),
                     const SizedBox(height: 12),
-                    Text('That session is no longer active.',
-                        style: theme.textTheme.bodyLarge),
+                    Text(
+                      'That session is no longer active.',
+                      style: theme.textTheme.bodyLarge,
+                    ),
                     const SizedBox(height: 16),
                     FilledButton(
                       onPressed: () => Navigator.of(context).maybePop(),
@@ -1814,50 +1944,57 @@ class _SessionScreenState extends State<SessionScreen>
                   offstage: _activeLens != 'terminal',
                   child: Stack(
                     children: [
-                      ColoredBox(
-                        color: AppColors.background,
-                        child: TerminalView(
-                          key: _terminalViewKey,
-                          _terminal,
-                          controller: _terminalController,
-                          scrollController: _scrollController,
-                          theme: AppTheme.terminal,
-                          // Small monospace so a phone fits ~75+ columns —
-                          // near Claude's TUI width, avoiding catastrophic
-                          // line-wrap of wide output. The view auto-derives
-                          // cols from this and resizes the PTY via onResize.
-                          textStyle: TerminalStyle(
-                            fontSize: _termFontSize,
-                            fontFamily: 'monospace',
+                      // #49: right-click (desktop) opens a Copy/Paste/Select All
+                      // context menu. Secondary-tap only, so it never fires on
+                      // touch — xterm keeps its long-press selection there.
+                      GestureDetector(
+                        onSecondaryTapDown: (d) =>
+                            _showTerminalContextMenu(d.globalPosition),
+                        child: ColoredBox(
+                          color: AppColors.background,
+                          child: TerminalView(
+                            key: _terminalViewKey,
+                            _terminal,
+                            controller: _terminalController,
+                            scrollController: _scrollController,
+                            theme: AppTheme.terminal,
+                            // Small monospace so a phone fits ~75+ columns —
+                            // near Claude's TUI width, avoiding catastrophic
+                            // line-wrap of wide output. The view auto-derives
+                            // cols from this and resizes the PTY via onResize.
+                            textStyle: TerminalStyle(
+                              fontSize: _termFontSize,
+                              fontFamily: 'monospace',
+                            ),
+                            autofocus: false,
+                            // The TERMINAL LENS is a live terminal — exactly like
+                            // the web client, whose xterm view is never read-only
+                            // and forwards every key straight to the PTY
+                            // (app.html: term.onData -> sendInput -> ws.send).
+                            // Tapping it focuses + raises the keyboard, and typing
+                            // (digits, arrows, Enter, Esc) goes to the PTY, so
+                            // Claude's TUI menus / question selector can be driven
+                            // natively. Previously BOTH flags were bolted to
+                            // `_rawMode`, which defaults OFF on phones — so the
+                            // terminal was read-only there and a tap did nothing.
+                            // Gated on the lens (not `_rawMode`) so the offstage
+                            // terminal can never take keys while Chat is showing.
+                            // `_rawMode` now only decides whether the terminal
+                            // GRABS the keyboard automatically (see _setRawMode /
+                            // _setLens); it no longer gates input at all.
+                            // Desktop takes raw hardware keys (no IME), so a
+                            // typed Enter submits instead of parking (#46); mobile
+                            // keeps the IME path for its soft keyboard.
+                            hardwareKeyboardOnly: terminalHardwareKeyboardOnly(
+                              live: terminalAcceptsInput(_activeLens),
+                              desktop: isDesktopPlatform(),
+                            ),
+                            readOnly: !terminalAcceptsInput(_activeLens),
+                            // #26: tap a printed http/https URL to open it in the
+                            // system browser (additive — focus/keyboard still run
+                            // via the view's own tap-down handler).
+                            onTapUp: _onTerminalTapUp,
                           ),
-                          autofocus: false,
-                          // The TERMINAL LENS is a live terminal — exactly like
-                          // the web client, whose xterm view is never read-only
-                          // and forwards every key straight to the PTY
-                          // (app.html: term.onData -> sendInput -> ws.send).
-                          // Tapping it focuses + raises the keyboard, and typing
-                          // (digits, arrows, Enter, Esc) goes to the PTY, so
-                          // Claude's TUI menus / question selector can be driven
-                          // natively. Previously BOTH flags were bolted to
-                          // `_rawMode`, which defaults OFF on phones — so the
-                          // terminal was read-only there and a tap did nothing.
-                          // Gated on the lens (not `_rawMode`) so the offstage
-                          // terminal can never take keys while Chat is showing.
-                          // `_rawMode` now only decides whether the terminal
-                          // GRABS the keyboard automatically (see _setRawMode /
-                          // _setLens); it no longer gates input at all.
-                          // Desktop takes raw hardware keys (no IME), so a
-                          // typed Enter submits instead of parking (#46); mobile
-                          // keeps the IME path for its soft keyboard.
-                          hardwareKeyboardOnly: terminalHardwareKeyboardOnly(
-                            live: terminalAcceptsInput(_activeLens),
-                            desktop: isDesktopPlatform(),
-                          ),
-                          readOnly: !terminalAcceptsInput(_activeLens),
-                          // #26: tap a printed http/https URL to open it in the
-                          // system browser (additive — focus/keyboard still run
-                          // via the view's own tap-down handler).
-                          onTapUp: _onTerminalTapUp,
                         ),
                       ),
                       // Floats above the terminal instead of taking a Column
@@ -1900,15 +2037,20 @@ class _SessionScreenState extends State<SessionScreen>
                 // Native overlay for Claude's interactive question (#19), above
                 // whichever lens is showing. The key strip below stays usable as
                 // a manual fallback.
-                if (questionOverlayVisible(_pendingQuestion, _dismissedQuestionKey))
+                if (questionOverlayVisible(
+                  _pendingQuestion,
+                  _dismissedQuestionKey,
+                ))
                   QuestionOverlay(
                     question: _pendingQuestion!,
                     contextText: _questionContext,
                     onSend: _answerQuestion,
                     onKey: _sendRawToTerminal,
-                    onDismiss: () => setState(() =>
-                        _dismissedQuestionKey =
-                            questionSignature(_pendingQuestion)),
+                    onDismiss: () => setState(
+                      () => _dismissedQuestionKey = questionSignature(
+                        _pendingQuestion,
+                      ),
+                    ),
                   ),
               ],
             ),
@@ -1926,7 +2068,9 @@ class _SessionScreenState extends State<SessionScreen>
               terminalActive: terminalIsActiveTarget(
                 lensLive: terminalAcceptsInput(_activeLens),
                 questionUp: questionOverlayVisible(
-                    _pendingQuestion, _dismissedQuestionKey),
+                  _pendingQuestion,
+                  _dismissedQuestionKey,
+                ),
               ),
               onPasteImage: _pasteClipboardImage,
               // #29: staged image thumbnails (bytes) + remove (✕) callback.
