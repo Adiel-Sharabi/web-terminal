@@ -30,10 +30,6 @@ class _SendIntent extends Intent {
   const _SendIntent();
 }
 
-class _PasteImageIntent extends Intent {
-  const _PasteImageIntent();
-}
-
 class _EscapeIntent extends Intent {
   const _EscapeIntent();
 }
@@ -66,8 +62,7 @@ class _ArrowAction extends Action<_ArrowIntent> {
 
   @override
   bool isEnabled(_ArrowIntent intent) =>
-      onArrow != null &&
-      (terminalActive || controller.text.isEmpty || isLive);
+      onArrow != null && (terminalActive || controller.text.isEmpty || isLive);
 
   @override
   Object? invoke(_ArrowIntent intent) {
@@ -129,7 +124,6 @@ class ComposeBar extends StatelessWidget {
     required this.focusNode,
     required this.onSend,
     required this.isLive,
-    this.onPasteImage,
     this.onEscape,
     this.onArrow,
     this.onTab,
@@ -150,9 +144,6 @@ class ComposeBar extends StatelessWidget {
 
   /// Remove the attachment at `index` (the chip's ✕). `null` disables removal.
   final void Function(int index)? onRemoveAttachment;
-
-  /// Paste an image from the clipboard (Alt+V). `null` disables the shortcut.
-  final VoidCallback? onPasteImage;
 
   /// Hardware Esc → send ESC to the terminal (always). `null` disables it.
   final VoidCallback? onEscape;
@@ -203,145 +194,141 @@ class ComposeBar extends StatelessWidget {
         children: [
           if (attachments.isNotEmpty) _attachmentStrip(theme),
           Row(
-        crossAxisAlignment: CrossAxisAlignment.end,
-        children: [
-          Expanded(
-            child: Shortcuts(
-              shortcuts: <ShortcutActivator, Intent>{
-                // Bare Enter sends; Alt/Shift+Enter fall through to the field's
-                // own newline handling. Soft-keyboard Enter on mobile doesn't
-                // emit these key events, so it still inserts a newline there.
-                const SingleActivator(LogicalKeyboardKey.enter):
-                    const _SendIntent(),
-                const SingleActivator(LogicalKeyboardKey.numpadEnter):
-                    const _SendIntent(),
-                if (onPasteImage != null)
-                  const SingleActivator(LogicalKeyboardKey.keyV, alt: true):
-                      const _PasteImageIntent(),
-                if (onEscape != null)
-                  const SingleActivator(LogicalKeyboardKey.escape):
-                      const _EscapeIntent(),
-                if (onArrow != null) ...const {
-                  SingleActivator(LogicalKeyboardKey.arrowUp): _ArrowIntent(
-                    '\x1b[A',
-                  ),
-                  SingleActivator(LogicalKeyboardKey.arrowDown): _ArrowIntent(
-                    '\x1b[B',
-                  ),
-                  SingleActivator(LogicalKeyboardKey.arrowRight): _ArrowIntent(
-                    '\x1b[C',
-                  ),
-                  SingleActivator(LogicalKeyboardKey.arrowLeft): _ArrowIntent(
-                    '\x1b[D',
-                  ),
-                },
-                if (onTab != null)
-                  const SingleActivator(LogicalKeyboardKey.tab): _TabIntent(),
-                if (onBackspace != null)
-                  const SingleActivator(LogicalKeyboardKey.backspace):
-                      _BackspaceIntent(),
-              },
-              child: Actions(
-                actions: <Type, Action<Intent>>{
-                  _SendIntent: CallbackAction<_SendIntent>(
-                    onInvoke: (_) {
-                      if (_canSend) onSend();
-                      return null;
+            crossAxisAlignment: CrossAxisAlignment.end,
+            children: [
+              Expanded(
+                child: Shortcuts(
+                  shortcuts: <ShortcutActivator, Intent>{
+                    // Bare Enter sends; Alt/Shift+Enter fall through to the field's
+                    // own newline handling. Soft-keyboard Enter on mobile doesn't
+                    // emit these key events, so it still inserts a newline there.
+                    const SingleActivator(LogicalKeyboardKey.enter):
+                        const _SendIntent(),
+                    const SingleActivator(LogicalKeyboardKey.numpadEnter):
+                        const _SendIntent(),
+                    if (onEscape != null)
+                      const SingleActivator(LogicalKeyboardKey.escape):
+                          const _EscapeIntent(),
+                    if (onArrow != null) ...const {
+                      SingleActivator(LogicalKeyboardKey.arrowUp): _ArrowIntent(
+                        '\x1b[A',
+                      ),
+                      SingleActivator(LogicalKeyboardKey.arrowDown):
+                          _ArrowIntent('\x1b[B'),
+                      SingleActivator(LogicalKeyboardKey.arrowRight):
+                          _ArrowIntent('\x1b[C'),
+                      SingleActivator(LogicalKeyboardKey.arrowLeft):
+                          _ArrowIntent('\x1b[D'),
                     },
-                  ),
-                  _PasteImageIntent: CallbackAction<_PasteImageIntent>(
-                    onInvoke: (_) {
-                      onPasteImage?.call();
-                      return null;
-                    },
-                  ),
-                  _EscapeIntent: CallbackAction<_EscapeIntent>(
-                    onInvoke: (_) {
-                      onEscape?.call();
-                      return null;
-                    },
-                  ),
-                  _ArrowIntent:
-                      _ArrowAction(controller, onArrow, isLive, terminalActive),
-                  _TabIntent: _TabAction(onTab, isLive, terminalActive),
-                  _BackspaceIntent: _BackspaceAction(
-                    controller,
-                    onBackspace,
-                    isLive,
-                  ),
-                },
-                child: TextField(
-                  controller: controller,
-                  focusNode: focusNode,
-                  minLines: 1,
-                  // Mobile: single-line with a native Send action, so Enter fires
-                  // onSubmitted (submits) and never inserts a newline — the only
-                  // combination Android honors, and it keeps every submit a plain
-                  // `text\r` the TUI acts on. Desktop: multi-line; a bare Enter is
-                  // caught by the _SendIntent shortcut and Shift/Alt+Enter inserts
-                  // a newline. A raw Enter on the terminal key strip sends '\r'.
-                  maxLines: softKeyboard ? 1 : 5,
-                  keyboardType: softKeyboard
-                      ? TextInputType.text
-                      : TextInputType.multiline,
-                  textInputAction: softKeyboard
-                      ? TextInputAction.send
-                      : TextInputAction.newline,
-                  onSubmitted: (_) {
-                    if (_canSend) onSend();
+                    if (onTab != null)
+                      const SingleActivator(LogicalKeyboardKey.tab):
+                          _TabIntent(),
+                    if (onBackspace != null)
+                      const SingleActivator(LogicalKeyboardKey.backspace):
+                          _BackspaceIntent(),
                   },
-              style: const TextStyle(
-                fontFamily: 'monospace',
-                fontSize: 14,
-                color: AppColors.onSurface,
-              ),
-              decoration: InputDecoration(
-                isDense: true,
-                hintText: 'Message — / for commands',
-                hintStyle: TextStyle(
-                  color: theme.colorScheme.onSurfaceVariant,
-                  fontSize: 14,
-                ),
-                filled: true,
-                fillColor: theme.colorScheme.surface,
-                contentPadding: const EdgeInsets.symmetric(
-                  horizontal: 12,
-                  vertical: 10,
-                ),
-                border: OutlineInputBorder(
-                  borderRadius: BorderRadius.circular(AppShape.medium),
-                  borderSide: BorderSide(color: borderColor),
-                ),
-                enabledBorder: OutlineInputBorder(
-                  borderRadius: BorderRadius.circular(AppShape.medium),
-                  borderSide: BorderSide(color: borderColor),
-                ),
-                    focusedBorder: OutlineInputBorder(
-                      borderRadius: BorderRadius.circular(AppShape.medium),
-                      borderSide: BorderSide(
-                        color: isLive ? liveColor : theme.colorScheme.primary,
-                        width: isLive ? 2 : 1,
+                  child: Actions(
+                    actions: <Type, Action<Intent>>{
+                      _SendIntent: CallbackAction<_SendIntent>(
+                        onInvoke: (_) {
+                          if (_canSend) onSend();
+                          return null;
+                        },
+                      ),
+                      _EscapeIntent: CallbackAction<_EscapeIntent>(
+                        onInvoke: (_) {
+                          onEscape?.call();
+                          return null;
+                        },
+                      ),
+                      _ArrowIntent: _ArrowAction(
+                        controller,
+                        onArrow,
+                        isLive,
+                        terminalActive,
+                      ),
+                      _TabIntent: _TabAction(onTab, isLive, terminalActive),
+                      _BackspaceIntent: _BackspaceAction(
+                        controller,
+                        onBackspace,
+                        isLive,
+                      ),
+                    },
+                    child: TextField(
+                      controller: controller,
+                      focusNode: focusNode,
+                      minLines: 1,
+                      // Mobile: single-line with a native Send action, so Enter fires
+                      // onSubmitted (submits) and never inserts a newline — the only
+                      // combination Android honors, and it keeps every submit a plain
+                      // `text\r` the TUI acts on. Desktop: multi-line; a bare Enter is
+                      // caught by the _SendIntent shortcut and Shift/Alt+Enter inserts
+                      // a newline. A raw Enter on the terminal key strip sends '\r'.
+                      maxLines: softKeyboard ? 1 : 5,
+                      keyboardType: softKeyboard
+                          ? TextInputType.text
+                          : TextInputType.multiline,
+                      textInputAction: softKeyboard
+                          ? TextInputAction.send
+                          : TextInputAction.newline,
+                      onSubmitted: (_) {
+                        if (_canSend) onSend();
+                      },
+                      style: const TextStyle(
+                        fontFamily: 'monospace',
+                        fontSize: 14,
+                        color: AppColors.onSurface,
+                      ),
+                      decoration: InputDecoration(
+                        isDense: true,
+                        hintText: 'Message — / for commands',
+                        hintStyle: TextStyle(
+                          color: theme.colorScheme.onSurfaceVariant,
+                          fontSize: 14,
+                        ),
+                        filled: true,
+                        fillColor: theme.colorScheme.surface,
+                        contentPadding: const EdgeInsets.symmetric(
+                          horizontal: 12,
+                          vertical: 10,
+                        ),
+                        border: OutlineInputBorder(
+                          borderRadius: BorderRadius.circular(AppShape.medium),
+                          borderSide: BorderSide(color: borderColor),
+                        ),
+                        enabledBorder: OutlineInputBorder(
+                          borderRadius: BorderRadius.circular(AppShape.medium),
+                          borderSide: BorderSide(color: borderColor),
+                        ),
+                        focusedBorder: OutlineInputBorder(
+                          borderRadius: BorderRadius.circular(AppShape.medium),
+                          borderSide: BorderSide(
+                            color: isLive
+                                ? liveColor
+                                : theme.colorScheme.primary,
+                            width: isLive ? 2 : 1,
+                          ),
+                        ),
                       ),
                     ),
                   ),
                 ),
               ),
-            ),
-          ),
-          const SizedBox(width: 8),
-          AnimatedBuilder(
-            animation: controller,
-            builder: (context, _) {
-              final enabled = controller.text.isNotEmpty ||
-                  isLive ||
-                  attachments.isNotEmpty;
-              return IconButton.filled(
-                onPressed: enabled ? onSend : null,
-                icon: const Icon(Icons.send),
-              );
-            },
-          ),
-        ],
+              const SizedBox(width: 8),
+              AnimatedBuilder(
+                animation: controller,
+                builder: (context, _) {
+                  final enabled =
+                      controller.text.isNotEmpty ||
+                      isLive ||
+                      attachments.isNotEmpty;
+                  return IconButton.filled(
+                    onPressed: enabled ? onSend : null,
+                    icon: const Icon(Icons.send),
+                  );
+                },
+              ),
+            ],
           ),
         ],
       ),
@@ -361,8 +348,9 @@ class ComposeBar extends StatelessWidget {
         separatorBuilder: (_, _) => const SizedBox(width: 8),
         itemBuilder: (context, i) => _AttachmentThumb(
           bytes: attachments[i],
-          onRemove:
-              onRemoveAttachment == null ? null : () => onRemoveAttachment!(i),
+          onRemove: onRemoveAttachment == null
+              ? null
+              : () => onRemoveAttachment!(i),
         ),
       ),
     );
@@ -399,8 +387,10 @@ class _AttachmentThumb extends StatelessWidget {
                 width: 52,
                 height: 52,
                 color: theme.colorScheme.surfaceContainerHigh,
-                child: Icon(Icons.image_outlined,
-                    color: theme.colorScheme.onSurfaceVariant),
+                child: Icon(
+                  Icons.image_outlined,
+                  color: theme.colorScheme.onSurfaceVariant,
+                ),
               ),
             ),
           ),
@@ -414,12 +404,14 @@ class _AttachmentThumb extends StatelessWidget {
                   decoration: BoxDecoration(
                     color: theme.colorScheme.surface.withValues(alpha: 0.85),
                     shape: BoxShape.circle,
-                    border:
-                        Border.all(color: theme.colorScheme.outlineVariant),
+                    border: Border.all(color: theme.colorScheme.outlineVariant),
                   ),
                   padding: const EdgeInsets.all(1),
-                  child: Icon(Icons.close,
-                      size: 13, color: theme.colorScheme.onSurface),
+                  child: Icon(
+                    Icons.close,
+                    size: 13,
+                    color: theme.colorScheme.onSurface,
+                  ),
                 ),
               ),
             ),
