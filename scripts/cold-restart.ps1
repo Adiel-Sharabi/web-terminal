@@ -52,11 +52,22 @@ Start-Sleep -Seconds 3
 Note 'relaunching via start-server.vbs'
 Start-Process -FilePath 'wscript.exe' -ArgumentList (Join-Path $repo 'start-server.vbs') -WorkingDirectory $repo
 
+# Readiness, not identity: /api/version is behind auth, so an unauthenticated probe gets a
+# 401 — which still proves the server is LISTENING again, and is the answer we want here. Any
+# HTTP status means it rebound the port; only a connection error means it did not come back.
+# (Treating that 401 as a failure is what made a healthy restart log "version probe failed".)
 Start-Sleep -Seconds 6
-try {
-  $v = Invoke-RestMethod -Uri 'http://127.0.0.1:7681/api/version' -TimeoutSec 5
-  Note "back up: version $($v.version)"
-} catch {
-  Note "version probe failed: $($_.Exception.Message)"
+$deadline = (Get-Date).AddSeconds(30)
+$up = $false
+while (-not $up -and (Get-Date) -lt $deadline) {
+  try {
+    Invoke-WebRequest -Uri 'http://127.0.0.1:7681/api/version' -TimeoutSec 5 -UseBasicParsing | Out-Null
+    $up = $true
+  } catch {
+    $code = $_.Exception.Response.StatusCode.value__
+    if ($code) { $up = $true; Note "back up: listening (HTTP $code)" }
+    else { Start-Sleep -Seconds 2 }
+  }
 }
+if (-not $up) { Note 'DID NOT COME BACK — no HTTP response on 7681' }
 Note '=== done ==='
