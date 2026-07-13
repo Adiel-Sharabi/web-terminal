@@ -16,7 +16,7 @@ const ipc = require('./lib/ipc');
 const { resolveRestoreRunCommand } = require('./lib/restore-command');
 const { claudeProjectDirName } = require('./lib/transcript');
 const agents = require('./lib/agents');
-const { splitTrailingCr, endsWithPasteSubmitCr } = require('./lib/submit-frames');
+const { splitTrailingCr, isEscapeKey } = require('./lib/submit-frames');
 
 const WORKER_VERSION = '0.6.0';
 
@@ -752,31 +752,58 @@ function writePromptToTerm(session, text) {
 // in its composer. Hold the CR back and write it alone, submitGapMs later. Frames that
 // arrive during that gap queue behind it, so input order is preserved.
 //
-// Agents without the flag (Claude, and plain shells) take the untouched single write —
-// their clients' atomic `text\r` already submits, and #44 depends on it staying atomic.
-//
-// EXCEPT a multi-line prompt, which every client sends as `ESC[200~…ESC[201~\r`: a CR
-// in the SAME read as the paste close is absorbed by Claude's TUI too (verified: a
-// paste+CR never submits, the same paste + a delayed CR submits 4/4), so that trailing
-// CR is split off for EVERY agent — see [endsWithPasteSubmitCr]. Single-line stays
-// atomic.
+// An agent whose TUI does NOT fold a read into a paste takes the untouched single
+// write. Every agent we ship does fold one, so in practice every submit is split — see
+// the measurements on `claude.submit` in lib/agents.js.
 function writeUserInput(session, data) {
-  const mustSplit =
-      agents.submitPolicy(sessionAgent(session)).crBurstsAsPaste ||
-      endsWithPasteSubmitCr(data);
-  if (!mustSplit) {
-    termWrite(session, data);
+  if (!agents.submitPolicy(sessionAgent(session)).crBurstsAsPaste) {
+    deliver(session, data);
     return;
   }
   if (session._submitTimer) { (session._inputQueue || (session._inputQueue = [])).push(data); return; }
   _writeFrame(session, data);
 }
 
+// The ONE point where a frame from a CLIENT reaches the PTY — whether it went straight
+// through or waited its turn in the queue. Status is read off the bytes here, at DELIVERY,
+// never at arrival: a frame that lands mid-gap is held back (see writeUserInput), and
+// reporting an interrupt the PTY has not been given yet would show idle for up to gapMs
+// while the withheld CR was still about to submit. The worker's own writes (auto-command,
+// api-error replay) go through termWrite directly and are never mistaken for a keypress.
+function deliver(session, data) {
+  noteInterrupt(session, data);
+  termWrite(session, data);
+}
+
+// #55 §6 — Esc ends the turn, and the worker is the only component that can know.
+//
+// Status here is otherwise driven entirely by Claude's hooks, and Claude fires NO hook on a
+// user interrupt (Stop does not run when a turn is cancelled). So an interrupted session kept
+// reporting "Claude is working" until correctStaleStatus flipped it — five minutes later, and
+// only once BOTH the hook clock and the output clock had gone quiet — while the terminal lens
+// plainly showed an idle agent.
+//
+// The signal was always here: the worker writes the Esc byte to the PTY itself. A lone 0x1b
+// (never an arrow or a paste — see isEscapeKey) sent to a session that is *working* is an
+// interrupt, so the turn is over. Gated on 'working' on purpose: Esc at a permission prompt
+// ('waiting') REJECTS the tool and Claude carries on, and its next hook reports the truth.
+// Which agents interrupt on Esc is the registry's call, never a branch in here.
+function noteInterrupt(session, data) {
+  if (session.status !== 'working') return;
+  if (!isEscapeKey(data)) return;
+  if (!agents.interruptsOnEscape(sessionAgent(session))) return;
+  session.status = 'idle';
+  log(`interrupt: "${session.name}" working → idle (Esc)`);
+  // No notifyType: the user is at the keyboard — they just pressed Esc. Pushing "Claude is
+  // done" to their phone for an interrupt they performed themselves would be noise.
+  broadcastEvent('statusChanged', { id: sessionIdOf(session), status: session.status });
+}
+
 // Write one frame. If it ends in a submit CR, the CR is withheld and the gap is armed.
 function _writeFrame(session, data) {
   const split = splitTrailingCr(data);
-  if (!split) { termWrite(session, data); return; }
-  termWrite(session, split.head);
+  if (!split) { deliver(session, data); return; }
+  deliver(session, split.head);
   session._submitTimer = setTimeout(() => {
     session._submitTimer = null;
     try { termWrite(session, split.cr); } catch (e) { log(`submit CR failed: ${e.message}`); }

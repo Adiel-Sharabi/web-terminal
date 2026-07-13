@@ -1569,16 +1569,42 @@
       autosizeCompose();
       updateComposeSendBtn();
     }
+    // The live '/' line is mirrored into the agent's own ONE-LINE TUI prompt so its slash
+    // menu narrows as you type. A newline has no meaning there and must NOT be streamed as
+    // '\r' — '\r' is the submit key, so mirroring it would fire the command. That is what
+    // made Enter submit a '/'-line on mobile (and Ctrl+Enter submit one on desktop) while
+    // both insert a newline everywhere else — the lens-dependent behaviour #55 §1 forbids.
+    // The live projection is the buffer with its newlines dropped, and composeLiveSent
+    // tracks that same projection so the backspace diff below stays honest.
+    const composeLiveProjection = (val) => val.replace(/\n/g, '');
     // Stream the prefix-diff between what we've already sent for the live line
     // and the textarea's current value: backspaces erase removed chars, then
     // the new suffix follows. Self-correcting against keyboard re-sends.
     function composeStreamLive(val) {
+      val = composeLiveProjection(val);
       let i = 0;
       const n = Math.min(composeLiveSent.length, val.length);
       while (i < n && composeLiveSent[i] === val[i]) i++;
-      const out = '\x7f'.repeat(composeLiveSent.length - i) + val.slice(i).replace(/\n/g, '\r');
+      const out = '\x7f'.repeat(composeLiveSent.length - i) + val.slice(i);
       composeLiveSent = val;
       if (out) sendInput(out, true);
+    }
+    // Encode a compose buffer into the bytes that submit it — #55 §4, the same three rules
+    // the companion's buildComposeSubmission applies, which is why it is a named function
+    // here too rather than inline in the sender:
+    //   1. strip a trailing newline (a Ctrl+Enter at the end is not an empty last line),
+    //   2. if a newline REMAINS, bracketed-paste it, then '\r',
+    //   3. otherwise text + '\r'.
+    // Bracketed-paste markers typed into the buffer are stripped first so user content
+    // cannot close our wrapper early. It goes out as ONE frame: the worker owns submit
+    // TIMING (it splits the trailing CR off — lib/submit-frames.js), never the client.
+    function buildComposeSubmission(val) {
+      val = val.replace(/[\r\n]+$/, '');
+      if (val.includes('\n')) {
+        const safe = val.replace(/\x1b\[2(?:00|01)~/g, '').replace(/\r?\n/g, '\r');
+        return '\x1b[200~' + safe + '\x1b[201~\r';
+      }
+      return val + '\r';
     }
     function composeSend() {
       if (!ws || ws.readyState !== WebSocket.OPEN) return; // WS down — keep the buffer
@@ -1591,15 +1617,7 @@
         return;
       }
       if (val === '') { sendInput('\r', true); return; } // bare Enter on an empty buffer
-      if (val.includes('\n')) {
-        // Multi-line: bracketed paste so Claude / readline treat it atomically.
-        // Strip any bracketed-paste markers in the buffer first so user content
-        // cannot prematurely close our wrapper.
-        const safe = val.replace(/\x1b\[2(?:00|01)~/g, '').replace(/\r?\n/g, '\r');
-        sendInput('\x1b[200~' + safe + '\x1b[201~\r', true);
-      } else {
-        sendInput(val + '\r', true);
-      }
+      sendInput(buildComposeSubmission(val), true);
       pushComposeHistory(val);
       clearComposeInput();
     }
@@ -1639,13 +1657,47 @@
       updateComposeSendBtn();
       autosizeCompose();
     });
-    composeInput.addEventListener('keydown', (e) => {
-      if (e.key === 'Enter' && !e.shiftKey) {
-        if (e.isComposing) return; // let the IME finish committing first
+    // #55 §1 — the compose bar's Enter contract is chosen by PLATFORM, never by lens:
+    //
+    //   desktop   Enter submits     Ctrl+Enter newline    Send button submits
+    //   mobile    Enter NEWLINES    (n/a)                 Send button submits
+    //
+    // On a hardware keyboard Enter is the natural "go". On a soft keyboard Enter is how a
+    // person breaks a line, and the explicit Send button is how they commit — and that is
+    // the only model that survives the Android IME, which commits Enter as literal "\n"
+    // TEXT rather than as a key event, so an Enter keydown handler is not reliably even
+    // called there. Mobile therefore installs no Enter handler at all: the <textarea> does
+    // what a text box does, and #composeSendBtn is the one way to submit.
+    // Keyed on the PLATFORM, not on `isMobile` — `isMobile` is true for a narrow DESKTOP
+    // window too (it ORs in innerWidth < 600), and that window has a hardware keyboard. It
+    // decides whether the compose bar is SHOWN; the platform decides what Enter MEANS.
+    // Mirrors the companion's composeUsesSoftKeyboard (android || ios).
+    const composeUsesSoftKeyboard = /Android|iPhone|iPad|iPod/i.test(navigator.userAgent);
+    composeInput.enterKeyHint = composeUsesSoftKeyboard ? 'enter' : 'send';
+
+    // A <textarea> inserts a newline on Shift+Enter by itself, but does NOTHING on
+    // Ctrl+Enter — so the newline has to be typed in. execCommand keeps it on the undo
+    // stack and fires the `input` event, which is what re-runs autosize and the live
+    // stream; the manual splice is the fallback if it is ever unavailable.
+    function insertComposeNewline() {
+      composeInput.focus();
+      if (document.execCommand && document.execCommand('insertText', false, '\n')) return;
+      const el = composeInput, s = el.selectionStart, e2 = el.selectionEnd;
+      el.value = el.value.slice(0, s) + '\n' + el.value.slice(e2);
+      el.selectionStart = el.selectionEnd = s + 1;
+      el.dispatchEvent(new Event('input', { bubbles: true }));
+    }
+
+    if (!composeUsesSoftKeyboard) {
+      composeInput.addEventListener('keydown', (e) => {
+        if (e.key !== 'Enter') return;
+        if (e.isComposing) return;   // let the IME finish committing first
+        if (e.shiftKey) return;      // newline — the textarea does it natively
         e.preventDefault();
-        composeSend();
-      }
-    });
+        if (e.ctrlKey || e.metaKey) insertComposeNewline();
+        else composeSend();
+      });
+    }
 
     // Compose mode is on by default for mobile; a per-browser localStorage
     // override (set by the in-bar toggle) always wins. Desktop is never compose.

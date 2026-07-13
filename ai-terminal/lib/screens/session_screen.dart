@@ -185,6 +185,17 @@ String buildComposeSubmission(String val) {
   return '$val\r';
 }
 
+/// What a live '/'-line mirrors into the agent's TUI prompt (#55 §1).
+///
+/// A '/'-prefixed buffer streams to the PTY as you type so the agent's own slash menu
+/// narrows. That prompt is ONE line, and the byte a newline would have to become there is
+/// `\r` — the SUBMIT key. Mirroring it would fire the command, which is precisely what made
+/// Enter submit a '/'-line on mobile (and Ctrl+Enter submit one on desktop) while both only
+/// insert a newline in every other buffer. So newlines are dropped from the projection: the
+/// menu still narrows, and nothing submits until Send (or a desktop Enter) says so.
+/// Pure so it is testable on its own.
+String composeLiveProjection(String val) => val.replaceAll('\n', '');
+
 /// One chunk of the terminal's `onOutput`, translated to the bytes the PTY
 /// should receive.
 ///
@@ -1182,7 +1193,14 @@ class _SessionScreenState extends State<SessionScreen>
   /// Streams the prefix-diff between what's already been sent for the live
   /// line and the field's current value: backspaces erase removed chars,
   /// then the new suffix follows. Self-correcting against IME re-sends.
+  ///
+  /// It streams [composeLiveProjection] of the buffer, not the buffer: the agent's TUI
+  /// prompt this mirrors is ONE line, and a newline streamed as `\r` would SUBMIT it. That
+  /// is what made Enter fire a '/'-line on mobile (and Ctrl+Enter fire one on desktop)
+  /// while both merely insert a newline everywhere else — the lens-dependent Enter that
+  /// #55 §1 forbids. `_composeLiveSent` holds the same projection, so the diff stays honest.
   void _streamComposeLive(String val) {
+    val = composeLiveProjection(val);
     var i = 0;
     final n = _composeLiveSent.length < val.length
         ? _composeLiveSent.length
@@ -1194,7 +1212,7 @@ class _SessionScreenState extends State<SessionScreen>
     final backspaces = backspaceCount > 0
         ? String.fromCharCodes(List.filled(backspaceCount, 0x7f))
         : '';
-    final suffix = val.substring(i).replaceAll('\n', '\r');
+    final suffix = val.substring(i);
     _composeLiveSent = val;
     final out = backspaces + suffix;
     if (out.isNotEmpty) {

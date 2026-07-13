@@ -3,9 +3,11 @@
 //
 // Codex's TUI folds a whole read into a paste, so `hello\r` in one write types `hello`
 // and a NEWLINE — the prompt never submits. Splitting the CR off is the only thing that
-// makes it Enter. Claude has no such detector, so its frames must stay untouched.
+// makes it Enter. Claude's TUI does the same; it just takes a bigger read to trip it
+// (measured: atomic submitted at 20/40/60 chars, NOT at 80/120), which is why it looked
+// exempt for so long. Both split.
 const { test, expect } = require('@playwright/test');
-const { splitTrailingCr, endsWithPasteSubmitCr, CR_FRAME } = require('../lib/submit-frames');
+const { splitTrailingCr, isEscapeKey, CR_FRAME } = require('../lib/submit-frames');
 const agents = require('../lib/agents');
 
 const ESC = String.fromCharCode(0x1b);
@@ -61,24 +63,37 @@ test.describe('splitTrailingCr', () => {
   });
 });
 
-test.describe('endsWithPasteSubmitCr (the post-paste CR every agent splits)', () => {
-  test('true when a frame ends with a bracketed-paste close + CR', () => {
-    expect(endsWithPasteSubmitCr(Buffer.from(`${ESC}[200~a\rb${ESC}[201~\r`))).toBe(true);
-    expect(endsWithPasteSubmitCr(Buffer.from(`${ESC}[201~\r`))).toBe(true);
+test.describe('isEscapeKey (the interrupt — #55 §6)', () => {
+  test('a lone ESC byte is the Esc key', () => {
+    expect(isEscapeKey(Buffer.from([0x1b]))).toBe(true);
   });
 
-  test('false for a plain text + CR — single-line stays atomic (#44)', () => {
-    expect(endsWithPasteSubmitCr(Buffer.from('hello\r'))).toBe(false);
+  test('an escape SEQUENCE is not the Esc key — arrows must never read as an interrupt', () => {
+    expect(isEscapeKey(Buffer.from(`${ESC}[A`))).toBe(false);   // up
+    expect(isEscapeKey(Buffer.from(`${ESC}[B`))).toBe(false);   // down
+    expect(isEscapeKey(Buffer.from(`${ESC}[200~hi${ESC}[201~`))).toBe(false); // paste
+    expect(isEscapeKey(Buffer.from(`${ESC}${ESC}`))).toBe(false); // two Escs in one read
   });
 
-  test('false for a paste close WITHOUT the trailing CR', () => {
-    expect(endsWithPasteSubmitCr(Buffer.from(`${ESC}[200~a\rb${ESC}[201~`))).toBe(false);
+  test('ordinary text, an empty frame, and undefined are not the Esc key', () => {
+    expect(isEscapeKey(Buffer.from('x'))).toBe(false);
+    expect(isEscapeKey(Buffer.from('\r'))).toBe(false);
+    expect(isEscapeKey(Buffer.alloc(0))).toBe(false);
+    expect(isEscapeKey(undefined)).toBe(false);
+  });
+});
+
+test.describe('interrupt policy lives in the registry too (#55 §6)', () => {
+  test('both agents interrupt on Esc', () => {
+    expect(agents.interruptsOnEscape('claude')).toBe(true);
+    expect(agents.interruptsOnEscape('codex')).toBe(true);
   });
 
-  test('false for a bare CR, empty, or undefined', () => {
-    expect(endsWithPasteSubmitCr(Buffer.from('\r'))).toBe(false);
-    expect(endsWithPasteSubmitCr(Buffer.alloc(0))).toBe(false);
-    expect(endsWithPasteSubmitCr(undefined)).toBe(false);
+  test('a plain shell and unknown agents do NOT — Esc there belongs to vim / less / a menu', () => {
+    expect(agents.interruptsOnEscape(null)).toBe(false);
+    expect(agents.interruptsOnEscape(undefined)).toBe(false);
+    expect(agents.interruptsOnEscape('nonesuch')).toBe(false);
+    expect(agents.DEFAULT_INTERRUPT.onEscape).toBe(false);
   });
 });
 
@@ -90,16 +105,21 @@ test.describe('submit policy lives in the registry', () => {
     expect(p.gapMs).toBeGreaterThanOrEqual(60);
   });
 
-  test('claude keeps a single-line text+CR atomic (#44) — only the paste CR splits', () => {
-    // crBurstsAsPaste false ⇒ a plain `text\r` is one write; the multi-line paste
-    // CR is split by endsWithPasteSubmitCr in the worker, not by this flag.
-    expect(agents.submitPolicy('claude').crBurstsAsPaste).toBe(false);
+  test('claude folds a long read into a paste too, so its CR needs a gap', () => {
+    // Measured on the real TUI, atomic `text\r` in ONE write: 20/40/60 chars submitted,
+    // 80 and 120 did NOT — a short prompt worked, a real one was typed and never sent.
+    // With the CR split off, every length submits.
+    const p = agents.submitPolicy('claude');
+    expect(p.crBurstsAsPaste).toBe(true);
+    expect(p.gapMs).toBeGreaterThanOrEqual(60);
   });
 
-  test('a plain shell (agent null) and unknown agents keep the default: no rewriting', () => {
-    expect(agents.submitPolicy(null).crBurstsAsPaste).toBe(false);
-    expect(agents.submitPolicy(undefined).crBurstsAsPaste).toBe(false);
-    expect(agents.submitPolicy('nonesuch').crBurstsAsPaste).toBe(false);
+  test('a plain shell (agent null) and unknown agents fall back to the default', () => {
+    // The default splits too: an unrecorded session is usually an interactive TUI, and
+    // a real shell is unharmed (a lone CR is never split; only text ENDING in CR is).
+    expect(agents.submitPolicy(null).crBurstsAsPaste).toBe(true);
+    expect(agents.submitPolicy(undefined).crBurstsAsPaste).toBe(true);
+    expect(agents.submitPolicy('nonesuch').crBurstsAsPaste).toBe(true);
     expect(agents.submitPolicy(null)).toEqual(agents.DEFAULT_SUBMIT);
   });
 
