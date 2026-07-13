@@ -102,6 +102,19 @@ function copyDir(rel) {
   fs.cpSync(src, path.join(RIG, rel), { recursive: true });
 }
 
+// KNOWN LIMIT — a rig session gets no Claude hooks, so its `status` never leaves 'active'.
+//
+// The hooks live in the user's GLOBAL ~/.claude/settings.json as `type: "http"` entries with
+// a HARD-CODED url (http://127.0.0.1:7681/api/hook — production's port). Claude posts there
+// no matter which web-terminal spawned it, so a rig session's hooks land on the production
+// server, which does not know that session id and drops them. Nothing here can redirect them
+// without editing global settings, which would break production.
+//
+// Consequence: hook-driven state (working / waiting / idle) is NOT observable on the rig.
+// Verify it against the real worker instead — tests/worker-interrupt-status.spec.js drives
+// pty-worker.js over a real IPC pipe with real hookEvent + TYPE_PTY_IN frames. The rig is
+// still the right place for anything the PTY itself can show (see verify-submit.js,
+// verify-interrupt.js): what actually reaches the agent, and what it does about it.
 function sync() {
   ensureDirs();
   linkNodeModules();

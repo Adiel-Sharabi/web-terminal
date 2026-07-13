@@ -432,4 +432,27 @@ void main() {
     });
   });
 
+  group('composeLiveProjection (#55 §1: a live "/" line must never submit itself)', () {
+    // A '/'-prefixed buffer streams to the PTY as you type so the agent's slash menu
+    // narrows. That TUI prompt is ONE line, so the only byte a newline could be mirrored
+    // as is '\r' — the SUBMIT key. Streaming it fired the command, which is why Enter
+    // submitted a '/'-line on mobile (and Ctrl+Enter submitted one on desktop) while both
+    // merely inserted a newline in any other buffer: the lens-dependent Enter §1 forbids.
+    test('newlines are dropped — the projection can never contain a submit CR', () {
+      expect(composeLiveProjection('/help\n'), '/help');
+      expect(composeLiveProjection('/help\nmore'), '/helpmore');
+      expect(composeLiveProjection('/a\n\n\nb'), '/ab');
+    });
+
+    test('a newline NEVER becomes a CR', () {
+      expect(composeLiveProjection('/help\n').contains('\r'), isFalse);
+      expect(composeLiveProjection('/x\ny\nz').contains('\r'), isFalse);
+    });
+
+    test('a buffer with no newline is passed through untouched', () {
+      expect(composeLiveProjection('/help'), '/help');
+      expect(composeLiveProjection(''), '');
+    });
+  });
+
 }

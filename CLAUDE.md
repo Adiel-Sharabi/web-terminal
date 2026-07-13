@@ -85,9 +85,7 @@ An **explicit** agent is authoritative: a session declared `claude` is never ser
 
 ### Codex facts (verified empirically against codex-cli 0.144.0 — do not trust the docs)
 
-**Submit is CR, never LF — for every agent.** Both TUIs read raw mode where Enter is `\r` (0x0D); an `\n` inserts a newline in the prompt box and submits nothing. Android soft keyboards commit Enter as literal `"\n"` *text* (not a key event), so the companion funnels every terminal keystroke through `terminalOutputToPty()` and maps a **lone** LF to CR (interior newlines of a paste must survive verbatim). Two separate bugs have worn the sentence "Enter doesn't run it": that soft-keyboard LF (phone-only), and the Codex burst below (all platforms). Diagnose which byte, and when, before touching either.
-
-**Submitting a prompt to Codex.** Codex's TUI (`paste_burst.rs`) folds every byte of ONE read into a *paste*, so an atomic `text\r` frame types the text and inserts a **newline** — it never submits. Claude Code has no such detector. This is why each provider declares `submit: { gapMs, crBurstsAsPaste }` and `pty-worker.js` withholds a trailing CR for the agents that need it. Measured: gap ≤30ms is still absorbed, ≥60ms submits; bracketed paste does **not** exempt the CR, and LF is not a submit key. **Only a real temporal gap works.** Never "fix" a submit problem by changing the bytes.
+**Submit is CR, never LF — for every agent.** See "Input & Submit Contract" below: that section is the law, and it supersedes any older phrasing here. Both TUIs read raw mode where Enter is `\r` (0x0D); an `\n` inserts a newline in the prompt box and submits nothing.
 
 **Rollout transcripts** live at `~/.codex/sessions/YYYY/MM/DD/rollout-<iso>-<uuid>.jsonl` and are **not cwd-keyed** — `cwd` appears only in the first `session_meta` line (which is ~8 KB; a naive 4 KB read truncates it mid-JSON). `session_id` **is** the rollout UUID. Tool calls are **one line each**, `function_call.arguments` is a JSON **string**, `custom_tool_call_output.output` is a JSON envelope `{output, metadata}` needing unwrap, and `event_msg` lines restate `response_item` text — parse one or every turn doubles.
 
@@ -105,6 +103,55 @@ An **explicit** agent is authoritative: a session declared `claude` is never ser
 
 ### Deployment consequence
 Anything touching `pty-worker.js` (including `lib/agents.js` fields the worker reads) needs a **COLD restart** — a hot `server.js`-only reload leaves the old worker running with the old behaviour. See "Deployment & Operations".
+
+## Input & Submit Contract (issue #55) — this is law, not guidance
+
+The sentence *"Enter doesn't run it"* has described at least four **different** bugs in different layers. A change to input or submit is correct only if it satisfies the rules below, and each rule has a test that fails without it. Full spec: issue #55.
+
+**Compose bar = the app's text box.** Not the agent's own TUI prompt. **Submit = the agent actually starts a turn** — text appearing in its prompt box is *not* submit.
+
+### The keyboard contract — chosen by PLATFORM, never by lens
+Chat and terminal lenses share one compose bar with one set of keys.
+
+| Platform | Enter | Ctrl+Enter | Send button |
+|---|---|---|---|
+| **Desktop** (hardware kbd) | **Submit** | Newline | Submit |
+| **Mobile** (soft kbd) | **Newline** | (n/a) | **Submit** |
+
+Mobile is Send-only because the **Android IME commits Enter as literal `"\n"` *text*, not a key event** — a submit bound to an Enter *keydown* is unreliable by construction there. The gate is `composeUsesSoftKeyboard()` (companion `compose_bar.dart`; `app.html` mirrors it off the UA). In `app.html`, **visibility** of the bar is keyed on `isMobile`, which ORs in `innerWidth < 600` — so a narrow *desktop* window shows the bar and must still submit on Enter. Visibility ≠ platform; do not collapse them.
+
+The bar is **multi-line** (`minLines:1, maxLines:5`), soft-wraps, and a wrapped line contains **no** `\n`.
+
+**A widget test cannot prove any of this.** Synthetic key events never traverse the OS text-input path, so a widget test passes while the shipped app is broken. Desktop Enter needs real injected OS keystrokes (`scripts/rig/probe-drive-windows.ps1` + `tool/compose_probe.dart`); mobile needs a real device.
+
+### Client-side encoding — `buildComposeSubmission` (one function per client)
+1. Strip a **trailing** newline. 2. If a `\n` **remains** → `ESC[200~` + text + `ESC[201~` + `\r`. 3. Else → text + `\r`. 4. Send as **ONE** frame (#44: a client that dies mid-submit must not lose half of it).
+
+A live `/`-line streams to the PTY as you type so the agent's slash menu narrows. That prompt is **one line**, so `composeLiveProjection()` **drops newlines** — mirroring one as `\r` would *submit*, which is exactly how Enter came to fire a `/`-line on mobile while merely newlining everywhere else.
+
+### Server-side delivery — the SSOT, and where the real bug lived
+**Every agent TUI folds one read into a paste and swallows a trailing CR.** Codex does it at any length (`paste_burst.rs`); **Claude does it too** — it just needs a bigger read to trip it. Measured against the real Claude TUI, atomic `text\r` in ONE write:
+
+| chars | atomic `text\r` | CR split off |
+|---|---|---|
+| 20 / 40 / 60 | submitted | submitted |
+| **80 / 120** | **NOT submitted** | submitted |
+
+That single fact explains the whole "sometimes Enter works, sometimes it doesn't" class of report: **a short test prompt submitted, and a real one was typed into the prompt box and never sent.** Claude looked exempt for months because every quick test was short.
+
+- The **worker** owns submit timing. Clients stay unaware and unchanged.
+- A frame that is **text ending in `\r`** is split: write the text now, write the lone `\r` after `submit.gapMs`. Input arriving in the gap **queues behind** it (order preserved).
+- A **bare `\r` is never split** — nothing precedes it to be absorbed. So ordinary char-by-char shell typing is never rewritten and never delayed.
+- Bracketed paste does **not** exempt the CR. Measured: ≤30 ms is still absorbed, ≥60 ms submits. **Only a real temporal gap works — never "fix" a submit problem by changing the bytes.**
+
+### Interrupt (Esc) — status must go idle promptly
+Claude fires **no hook** on a user interrupt (`Stop` does not run), and worker status is otherwise hook-driven — so an interrupted session sat on "Claude is working" until `correctStaleStatus` rescued it **5 minutes** later. But the **worker writes the Esc byte itself**, so it is the one component that can know: a **lone `0x1b`** (`isEscapeKey` — length 1, so an arrow's `ESC [ A` never counts) sent to a **`working`** session flips it to idle at once. Gated on `working` on purpose: Esc at a permission prompt (`waiting`) *rejects the tool* and Claude carries on. No push fires — the user is the one who pressed Esc.
+
+### Where it lives (no branching, ever)
+`lib/agents.js` — the registry: each provider declares `submit: { gapMs, crBurstsAsPaste }` and `interrupt: { onEscape }`. A **plain shell declares `onEscape: false`**, so Esc in vim/less is never read as "the agent stopped". `lib/submit-frames.js` — the pure byte rules (`splitTrailingCr`, `isEscapeKey`). `pty-worker.js` — applies them where bytes meet the PTY. **An `if (agent === 'codex')` in `server.js`, `pty-worker.js`, `app.html` or the companion means the change is in the wrong file — add a registry field instead.**
+
+### How to verify (no production cold-restart to test a hypothesis)
+`node scripts/rig/rig.js up` runs a complete, **isolated** web-terminal (port 7999, own worker pipe, own data dir, own config) from the working tree — it cannot touch production. `node scripts/rig/verify-submit.js` proves a LONG prompt actually submits, end to end. **The PTY/rollout is ground truth; the screen lies** — Claude echoes a submitted prompt back into its transcript, so "is the text still visible" cannot distinguish *typed* from *submitted*. The only valid detector is **"did a turn start"**.
 
 ## Auth System
 - Cookie-based session auth (primary, for browser users)

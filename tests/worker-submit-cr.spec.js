@@ -1,12 +1,15 @@
 // @ts-check
-// The Codex submit fix, driven through the REAL input path.
+// The submit fix (#55 §5), driven through the REAL input path.
 //
 // A prompt sent from chat (or typed+Enter in one burst) reaches the worker as ONE
-// TYPE_PTY_IN frame ending in CR. Codex's TUI folds a whole read into a paste, so that
-// CR lands as a newline in its composer and the prompt is never submitted — the bug
-// where a chat prompt sat there "Queued" forever. The worker must write the text now and
-// the CR alone, submitGapMs later. Claude has no such detector and its clients rely on
-// the frame staying atomic (#44), so a Claude session's bytes must pass through untouched.
+// TYPE_PTY_IN frame ending in CR. Every agent TUI we ship folds one read into a paste, so
+// that CR lands as a newline in its composer and the prompt is never submitted — the bug
+// where a chat prompt sat there "Queued" forever. Codex does it at any length; Claude needs
+// a bigger read to trip it (measured: atomic `text\r` submitted at 20/40/60 chars, NOT at
+// 80 or 120), which is why a short test prompt "worked" and a real one silently parked. The
+// worker must write the text now and the CR alone, submitGapMs later.
+//
+// Ordinary char-by-char typing is untouched: it sends a LONE CR, which is never split.
 //
 // Timers run at their real length here (WT_API_ERROR_FAST off) so the gap is the gap the
 // registry declares — that value is the thing under test.
@@ -133,26 +136,50 @@ test.describe('agent-aware submit CR on the PTY input path', () => {
     expect(writesOf(await rpc(client, '__testGetWrites', { id }))).toEqual(['hello', '\r']);
   });
 
-  test('claude: the atomic frame passes through untouched (#44)', async () => {
+  test('claude: the submit CR is withheld and written alone after the gap', async () => {
+    // Claude folds a long read into a paste as well: measured on the real TUI, an
+    // atomic `text\r` submitted at 20/40/60 chars but NOT at 80 or 120 — a short prompt
+    // worked and a real one was typed and never sent. Splitting submits at any length.
     const id = await newSession('claude');
+    const claudeGap = agents.submitPolicy('claude').gapMs;
 
     typeInto(client, id, 'hello\r');
-    await sleep(Math.max(40, GAP + 60));
 
-    // One write, CR included. No splitting, no delay.
-    expect(writesOf(await rpc(client, '__testGetWrites', { id }))).toEqual(['hello\r']);
+    await sleep(Math.max(20, claudeGap / 4));
+    expect(writesOf(await rpc(client, '__testGetWrites', { id }))).toEqual(['hello']);
+
+    await sleep(claudeGap);
+    expect(writesOf(await rpc(client, '__testGetWrites', { id }))).toEqual(['hello', '\r']);
   });
 
-  test('plain shell (agent null): a single-line text+CR is never rewritten', async () => {
+  test('plain shell (agent null): the default splits the submit CR too', async () => {
     const id = await newSession(null);
+    const gap = agents.submitPolicy(null).gapMs;
 
     typeInto(client, id, 'ls -la\r');
-    await sleep(Math.max(40, GAP + 60));
 
-    expect(writesOf(await rpc(client, '__testGetWrites', { id }))).toEqual(['ls -la\r']);
+    await sleep(Math.max(20, gap / 4));
+    expect(writesOf(await rpc(client, '__testGetWrites', { id }))).toEqual(['ls -la']);
+
+    await sleep(gap);
+    expect(writesOf(await rpc(client, '__testGetWrites', { id }))).toEqual(['ls -la', '\r']);
   });
 
-  test('claude: a multi-line bracketed paste splits the final CR so it submits', async () => {
+  test('plain shell: ordinary char-by-char typing is NEVER rewritten', async () => {
+    // The split only ever touches a frame that is text ENDING in CR (a bulk submit).
+    // A shell user typing normally sends single chars and then a LONE CR, which
+    // splitTrailingCr leaves alone — so interactive typing is untouched and undelayed.
+    const id = await newSession(null);
+
+    typeInto(client, id, 'l');
+    typeInto(client, id, 's');
+    typeInto(client, id, '\r');
+    await sleep(Math.max(40, GAP / 4));
+
+    expect(writesOf(await rpc(client, '__testGetWrites', { id }))).toEqual(['l', 's', '\r']);
+  });
+
+  test('claude: a multi-line bracketed paste keeps the block whole, delays only the CR', async () => {
     const id = await newSession('claude');
     const ESC = String.fromCharCode(0x1b);
     const block = `${ESC}[200~line one\rline two${ESC}[201~`;
@@ -160,12 +187,9 @@ test.describe('agent-aware submit CR on the PTY input path', () => {
 
     typeInto(client, id, block + '\r');
 
-    // The paste block (close marker and all) is written at once; the CR is withheld —
-    // a CR in the same read as the paste close is absorbed by Claude's TUI too.
     await sleep(Math.max(20, claudeGap / 4));
     expect(writesOf(await rpc(client, '__testGetWrites', { id }))).toEqual([block]);
 
-    // After the gap the CR lands alone, and the prompt submits.
     await sleep(claudeGap);
     expect(writesOf(await rpc(client, '__testGetWrites', { id }))).toEqual([block, '\r']);
   });

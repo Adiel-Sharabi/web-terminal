@@ -1,11 +1,22 @@
 // @ts-check
-// Tests for the mobile compose-input bar.
+// Tests for the compose-input bar.
 //
 // On mobile the terminal's raw per-keystroke passthrough is replaced by a
-// compose bar: the user types into a <textarea>, then Send (or Enter) flushes
-// the whole buffer. A '/'-prefixed line is the exception — it streams to the
-// terminal live (prefix-diff) so Claude's own slash menu narrows as you type.
+// compose bar: the user types into a <textarea>, then Send flushes the whole
+// buffer. A '/'-prefixed line is the exception — it streams to the terminal
+// live (prefix-diff) so Claude's own slash menu narrows as you type.
 // A toggle in the #touchKeys row switches to raw passthrough for TUIs.
+//
+// #55 §1 — the Enter contract is chosen by PLATFORM, never by lens:
+//
+//   desktop   Enter submits     Ctrl+Enter newline    Send submits
+//   mobile    Enter NEWLINES    (n/a)                 Send submits
+//
+// A soft keyboard's Enter is how a person breaks a line, and it is the key Android's IME
+// commits as literal "\n" TEXT rather than as a key event — so Send is the only submit that
+// survives there. Note the bar's VISIBILITY is keyed on `isMobile` (which ORs in a viewport
+// narrower than 600px), while what Enter MEANS is keyed on the platform — so a narrow
+// DESKTOP window shows the bar and still submits on Enter. Both are exercised below.
 //
 // These tests drive the real DOM (the compose <textarea>, the Send button,
 // the touch-toolbar buttons) and verify what actually reaches the session
@@ -103,6 +114,21 @@ test.describe('Mobile compose input bar', () => {
     return { context, page };
   }
 
+  /** A DESKTOP browser (hardware keyboard) in a window narrow enough to show the compose
+   *  bar — `isMobile` ORs in innerWidth < 600. This is the only configuration in which the
+   *  web client offers a compose bar to a hardware keyboard, so it is where #55 §1's desktop
+   *  row (Enter submits / Ctrl+Enter newlines) is actually reachable. */
+  async function openNarrowDesktop(browser) {
+    const context = await browser.newContext({ viewport: { width: 520, height: 900 } });
+    await context.addInitScript(wsHookScript());
+    const page = await context.newPage();
+    await loginPage(page);
+    await page.goto(`${BASE}/app/${sessionId}`);
+    await waitForAppReady(page);
+    await expect(page.locator('#composeBar')).toBeVisible();
+    return { context, page };
+  }
+
   test('compose bar is visible on mobile, hidden on desktop', async ({ browser }) => {
     const m = await openMobile(browser);
     await expect(m.page.locator('#composeBar')).toBeVisible();
@@ -130,13 +156,52 @@ test.describe('Mobile compose input bar', () => {
     await context.close();
   });
 
-  test('Enter in the textarea sends the buffer', async ({ browser }) => {
+  test('#55 §1 mobile: Enter inserts a NEWLINE and sends nothing — Send is the only submit', async ({ browser }) => {
+    // The soft keyboard's Enter is how you break a line. It is also the key Android's IME
+    // commits as literal "\n" text rather than as a key event, so a submit bound to it is
+    // unreliable by construction — Send is the contract.
     const { context, page } = await openMobile(browser);
     await resetSends(page);
     await page.locator('#composeInput').fill('ls -la');
     await page.locator('#composeInput').press('Enter');
-    const sends = await drainSends(page);
-    expect(sends.join('')).toBe('ls -la\r');
+
+    expect((await drainSends(page)).join('')).toBe('');
+    await expect(page.locator('#composeInput')).toHaveValue('ls -la\n');
+
+    // ...and Send still submits it, with §4's trailing newline stripped: one line, so a
+    // plain text+CR, NOT a bracketed paste.
+    await page.locator('#composeSendBtn').tap();
+    expect((await drainSends(page)).join('')).toBe('ls -la\r');
+    await context.close();
+  });
+
+  test('#55 §1 desktop: Enter submits, Ctrl+Enter inserts a newline', async ({ browser }) => {
+    // A desktop browser in a narrow window: the bar is shown (isMobile ORs in innerWidth <
+    // 600) but the keyboard is hardware, so the desktop half of the contract applies.
+    const { context, page } = await openNarrowDesktop(browser);
+    await resetSends(page);
+
+    await page.locator('#composeInput').fill('line1');
+    await page.locator('#composeInput').press('Control+Enter');
+    await page.locator('#composeInput').pressSequentially('line2');
+    expect((await drainSends(page)).join('')).toBe('');           // newline sends nothing
+    await expect(page.locator('#composeInput')).toHaveValue('line1\nline2');
+
+    await page.locator('#composeInput').press('Enter');           // ...and Enter submits it
+    const ESC = String.fromCharCode(0x1b);
+    expect((await drainSends(page)).join('')).toBe(`${ESC}[200~line1\rline2${ESC}[201~\r`);
+    await expect(page.locator('#composeInput')).toHaveValue('');
+    await context.close();
+  });
+
+  test('#55 §4: a trailing newline is stripped — one line stays a plain text+CR', async ({ browser }) => {
+    // Without the strip, a buffer ending in a newline still "contains \n" and would ship as
+    // a bracketed paste carrying an extra empty line into the agent's prompt box.
+    const { context, page } = await openMobile(browser);
+    await resetSends(page);
+    await page.locator('#composeInput').fill('hello\n');
+    await page.locator('#composeSendBtn').tap();
+    expect((await drainSends(page)).join('')).toBe('hello\r');
     await context.close();
   });
 
@@ -195,8 +260,8 @@ test.describe('Mobile compose input bar', () => {
     await context.close();
   });
 
-  test('live line: Enter commits with a bare CR, no double-send of the body', async ({ browser }) => {
-    const { context, page } = await openMobile(browser);
+  test('live line, desktop: Enter commits with a bare CR, no double-send of the body', async ({ browser }) => {
+    const { context, page } = await openNarrowDesktop(browser);
     await resetSends(page);
     await page.locator('#composeInput').focus();
     await page.locator('#composeInput').pressSequentially('/help', { delay: 30 });
@@ -205,6 +270,26 @@ test.describe('Mobile compose input bar', () => {
     // Body streamed once during typing, then a single CR — never "/help/help".
     expect(sends.join('')).toBe('/help\r');
     await expect(page.locator('#composeInput')).toHaveValue('');
+    await context.close();
+  });
+
+  test('#55 §1 live line, mobile: Enter newlines and streams NO CR — it must not submit', async ({ browser }) => {
+    // The live projection mirrors the buffer into the agent's ONE-LINE TUI prompt. A newline
+    // there would have to be streamed as '\r' — the SUBMIT key — so Enter in a '/'-line used
+    // to fire the command on mobile while Enter merely newlined in every other buffer. That
+    // is the lens-dependent Enter §1 forbids. The newline is dropped from the projection.
+    const { context, page } = await openMobile(browser);
+    await resetSends(page);
+    await page.locator('#composeInput').focus();
+    await page.locator('#composeInput').pressSequentially('/help', { delay: 30 });
+    expect((await drainSends(page)).join('')).toBe('/help');
+
+    await page.locator('#composeInput').press('Enter');
+    expect((await drainSends(page)).join('')).toBe('');            // NOT a '\r'
+    await expect(page.locator('#composeInput')).toHaveValue('/help\n');
+
+    await page.locator('#composeSendBtn').tap();                   // Send is the submit
+    expect((await drainSends(page)).join('')).toBe('\r');
     await context.close();
   });
 
@@ -283,11 +368,11 @@ test.describe('Mobile compose input bar', () => {
 
   test('touch-toolbar Up arrow recalls send history when the buffer is empty', async ({ browser }) => {
     const { context, page } = await openMobile(browser);
-    // Build two history entries.
+    // Build two history entries. Send — on mobile Enter is a newline (#55 §1), not a submit.
     await page.locator('#composeInput').fill('first cmd');
-    await page.locator('#composeInput').press('Enter');
+    await page.locator('#composeSendBtn').tap();
     await page.locator('#composeInput').fill('second cmd');
-    await page.locator('#composeInput').press('Enter');
+    await page.locator('#composeSendBtn').tap();
     await page.waitForTimeout(150);
 
     await page.evaluate(() => document.getElementById('composeInput').focus());
