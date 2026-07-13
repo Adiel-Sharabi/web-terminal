@@ -936,6 +936,36 @@ function sessionSummary(id, s) {
   };
 }
 
+// A freshly spawned shell can swallow the FIRST byte written to it once it finishes
+// setting up its terminal input (Windows ConPTY + MSYS bash re-arms the tty as it
+// enters readline, discarding whatever is mid-flight). Seen after a COLD restart,
+// where every session restores at once and the shell is slow to settle: the restore
+// typed `claude --resume <id>` and the shell received `laude --resume <id>` →
+// "bash: laude: command not found", so the session came up dead.
+//
+// Two guards, because a bare delay is only ever a bet on how slow the machine is:
+//  1. wait [AUTO_CMD_SETTLE_MS] after the prompt appears (was 100ms — too short
+//     under a restart storm), then
+//  2. send a throwaway PRIME first. `' '` + DEL(0x7f) is typed and immediately
+//     erased by readline, so it leaves the input line clean and prints no extra
+//     prompt — but it is the byte that gets eaten, if one does. The real command
+//     then lands whole.
+const AUTO_CMD_SETTLE_MS = 250; // after the prompt is seen, before we type anything
+const AUTO_CMD_PRIME_MS = 120;  // between the prime and the real command
+const AUTO_CMD_PRIME = ' \x7f'; // space + DEL: types, erases, leaves no trace
+
+function sendAutoCommand(session, id, cmdToRun, how) {
+  termWrite(session, AUTO_CMD_PRIME);
+  setTimeout(() => {
+    try {
+      termWrite(session, cmdToRun + '\n');
+      log(`session ${id} auto-command${how}: ${cmdToRun}`);
+    } catch (e) {
+      log(`session ${id} auto-command write failed: ${e.message}`);
+    }
+  }, AUTO_CMD_PRIME_MS);
+}
+
 // runCommand (optional): the command actually typed at the shell prompt.
 // Defaults to autoCommand. Restore uses this to send `claude --resume <id>`
 // while keeping the user-facing autoCommand (e.g. "claude --continue") intact
@@ -1082,18 +1112,14 @@ function createSession(id, cwd, name, autoCommand, savedScrollback, claudeSessio
       if (/[$#>]\s*$/.test(str.replace(/\x1b\[[0-9;]*[a-zA-Z]/g, ''))) {
         autoFired = true;
         autoListener.dispose();
-        setTimeout(() => {
-          term.write(cmdToRun + '\n');
-          log(`session ${id} auto-command: ${cmdToRun}`);
-        }, 100);
+        setTimeout(() => sendAutoCommand(session, id, cmdToRun, ''), AUTO_CMD_SETTLE_MS);
       }
     });
     setTimeout(() => {
       if (!autoFired) {
         autoFired = true;
         autoListener.dispose();
-        term.write(cmdToRun + '\n');
-        log(`session ${id} auto-command (fallback): ${cmdToRun}`);
+        sendAutoCommand(session, id, cmdToRun, ' (fallback)');
       }
     }, 5000);
   }
