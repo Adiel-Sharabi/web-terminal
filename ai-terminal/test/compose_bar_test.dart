@@ -1,9 +1,8 @@
-// Widget tests for ComposeBar's Enter-key behavior. The field is STRICT
-// single-line on every platform (maxLines 1) with a native send action, so Enter
-// fires onSubmitted (submits) and can never insert a newline — every submit is a
-// plain `text\r` the Claude/Codex TUI acts on. A multi-line field let the OS
-// insert a newline on the submitting Enter (parking the prompt, or sending it as
-// a bracketed paste whose CR the TUI absorbs). Multi-line prompts go via paste.
+// Widget tests for ComposeBar's Enter-key behavior. The field grows 1→5 lines so
+// a long prompt wraps and the box gets taller. DESKTOP: the Enter shortcut
+// submits (Ctrl+Enter inserts a newline), so a typed prompt goes out as `text\r`.
+// MOBILE: the soft-keyboard Enter inserts a newline and the Send BUTTON submits (a
+// multi-line field can't rely on the keyboard's send action there).
 import 'package:flutter/foundation.dart';
 import 'package:flutter/material.dart';
 import 'package:flutter/services.dart';
@@ -28,7 +27,17 @@ Uint8List _png1x1() => Uint8List.fromList(const [
 ]);
 
 void main() {
-  testWidgets('desktop: strict single-line field with a send action', (
+  group('composeUsesSoftKeyboard', () {
+    test('mobile platforms use a soft keyboard, desktop does not', () {
+      expect(composeUsesSoftKeyboard(TargetPlatform.android), isTrue);
+      expect(composeUsesSoftKeyboard(TargetPlatform.iOS), isTrue);
+      expect(composeUsesSoftKeyboard(TargetPlatform.windows), isFalse);
+      expect(composeUsesSoftKeyboard(TargetPlatform.macOS), isFalse);
+      expect(composeUsesSoftKeyboard(TargetPlatform.linux), isFalse);
+    });
+  });
+
+  testWidgets('field grows to wrap long text (multi-line, newline action)', (
     tester,
   ) async {
     debugDefaultTargetPlatformOverride = TargetPlatform.windows;
@@ -44,42 +53,20 @@ void main() {
         ),
       );
       final field = tester.widget<TextField>(find.byType(TextField));
-      // Single-line so the OS can never insert a newline on the submitting Enter
-      // (which parked the prompt / sent a bracketed paste whose CR the TUI eats).
-      expect(field.maxLines, 1);
-      expect(field.textInputAction, TextInputAction.send);
-      expect(field.keyboardType, TextInputType.text);
-    } finally {
-      debugDefaultTargetPlatformOverride = null;
-    }
-  });
-
-  testWidgets('mobile: single-line field, send action so Enter submits', (
-    tester,
-  ) async {
-    debugDefaultTargetPlatformOverride = TargetPlatform.android;
-    try {
-      await tester.pumpWidget(
-        _wrap(
-          ComposeBar(
-            controller: TextEditingController(),
-            focusNode: FocusNode(),
-            onSend: () {},
-            isLive: false,
-          ),
-        ),
-      );
-      final field = tester.widget<TextField>(find.byType(TextField));
-      expect(field.textInputAction, TextInputAction.send);
-      expect(field.keyboardType, TextInputType.text);
-      expect(field.maxLines, 1);
+      // Grows so a long line soft-wraps + the box gets taller (not endless).
+      expect(field.minLines, 1);
+      expect(field.maxLines, 5);
+      expect(field.keyboardType, TextInputType.multiline);
+      // `newline` action → mobile's soft-keyboard Enter inserts a newline; on
+      // desktop the Enter SHORTCUT submits before the field can newline.
+      expect(field.textInputAction, TextInputAction.newline);
     } finally {
       debugDefaultTargetPlatformOverride = null;
     }
   });
 
   testWidgets(
-    'mobile: the soft-keyboard send action submits (once, when it can)',
+    'mobile: hardware Enter does NOT submit (newline); Send button does',
     (tester) async {
       debugDefaultTargetPlatformOverride = TargetPlatform.android;
       try {
@@ -99,14 +86,13 @@ void main() {
         fn.requestFocus();
         await tester.pump();
 
-        await tester.testTextInput.receiveAction(TextInputAction.send);
+        // No Enter shortcut on mobile → Enter is a newline, not a submit.
+        await tester.sendKeyEvent(LogicalKeyboardKey.enter);
         await tester.pump();
-        expect(sends, 1);
+        expect(sends, 0);
 
-        // Empty field → the send action is a no-op (no stray blank submit).
-        controller.clear();
-        await tester.pump();
-        await tester.testTextInput.receiveAction(TextInputAction.send);
+        // The Send button submits.
+        await tester.tap(find.byIcon(Icons.send));
         await tester.pump();
         expect(sends, 1);
       } finally {
@@ -114,6 +100,46 @@ void main() {
       }
     },
   );
+
+  testWidgets('desktop: Ctrl+Enter inserts a newline and does NOT submit', (
+    tester,
+  ) async {
+    debugDefaultTargetPlatformOverride = TargetPlatform.windows;
+    try {
+      var sends = 0;
+      final controller = TextEditingController(text: 'hello');
+      final fn = FocusNode();
+      await tester.pumpWidget(
+        _wrap(
+          ComposeBar(
+            controller: controller,
+            focusNode: fn,
+            onSend: () => sends++,
+            isLive: false,
+          ),
+        ),
+      );
+      fn.requestFocus();
+      controller.selection = TextSelection.collapsed(
+        offset: controller.text.length,
+      );
+      await tester.pump();
+
+      await tester.sendKeyDownEvent(LogicalKeyboardKey.controlLeft);
+      await tester.sendKeyEvent(LogicalKeyboardKey.enter);
+      await tester.sendKeyUpEvent(LogicalKeyboardKey.controlLeft);
+      await tester.pump();
+
+      expect(sends, 0, reason: 'Ctrl+Enter must not submit');
+      expect(
+        controller.text,
+        'hello\n',
+        reason: 'Ctrl+Enter inserts a newline',
+      );
+    } finally {
+      debugDefaultTargetPlatformOverride = null;
+    }
+  });
 
   testWidgets('send button fires onSend and is disabled when empty', (
     tester,
@@ -192,77 +218,93 @@ void main() {
     }
   });
 
-  testWidgets('hardware Enter (no modifier) sends when text is present', (
+  testWidgets(
+    'desktop: hardware Enter (no modifier) sends when text is present',
+    (tester) async {
+      debugDefaultTargetPlatformOverride = TargetPlatform.windows;
+      try {
+        var sent = false;
+        final controller = TextEditingController(text: 'hi');
+        final fn = FocusNode();
+        await tester.pumpWidget(
+          _wrap(
+            ComposeBar(
+              controller: controller,
+              focusNode: fn,
+              onSend: () => sent = true,
+              isLive: false,
+            ),
+          ),
+        );
+        fn.requestFocus();
+        await tester.pump();
+
+        await tester.sendKeyEvent(LogicalKeyboardKey.enter);
+        await tester.pump();
+        expect(sent, isTrue);
+      } finally {
+        debugDefaultTargetPlatformOverride = null;
+      }
+    },
+  );
+
+  testWidgets('desktop: Alt+Enter does NOT send (falls through to a newline)', (
     tester,
   ) async {
-    var sent = false;
-    final controller = TextEditingController(text: 'hi');
-    final fn = FocusNode();
-    await tester.pumpWidget(
-      _wrap(
-        ComposeBar(
-          controller: controller,
-          focusNode: fn,
-          onSend: () => sent = true,
-          isLive: false,
+    debugDefaultTargetPlatformOverride = TargetPlatform.windows;
+    try {
+      var sent = false;
+      final controller = TextEditingController(text: 'hi');
+      final fn = FocusNode();
+      await tester.pumpWidget(
+        _wrap(
+          ComposeBar(
+            controller: controller,
+            focusNode: fn,
+            onSend: () => sent = true,
+            isLive: false,
+          ),
         ),
-      ),
-    );
-    fn.requestFocus();
-    await tester.pump();
+      );
+      fn.requestFocus();
+      await tester.pump();
 
-    await tester.sendKeyEvent(LogicalKeyboardKey.enter);
-    await tester.pump();
-    expect(sent, isTrue);
+      await tester.sendKeyDownEvent(LogicalKeyboardKey.altLeft);
+      await tester.sendKeyEvent(LogicalKeyboardKey.enter);
+      await tester.sendKeyUpEvent(LogicalKeyboardKey.altLeft);
+      await tester.pump();
+      expect(sent, isFalse);
+    } finally {
+      debugDefaultTargetPlatformOverride = null;
+    }
   });
 
-  testWidgets('Alt+Enter does NOT send (falls through to a newline)', (
+  testWidgets('desktop: hardware Enter does not send when empty and not live', (
     tester,
   ) async {
-    var sent = false;
-    final controller = TextEditingController(text: 'hi');
-    final fn = FocusNode();
-    await tester.pumpWidget(
-      _wrap(
-        ComposeBar(
-          controller: controller,
-          focusNode: fn,
-          onSend: () => sent = true,
-          isLive: false,
+    debugDefaultTargetPlatformOverride = TargetPlatform.windows;
+    try {
+      var sent = false;
+      final fn = FocusNode();
+      await tester.pumpWidget(
+        _wrap(
+          ComposeBar(
+            controller: TextEditingController(),
+            focusNode: fn,
+            onSend: () => sent = true,
+            isLive: false,
+          ),
         ),
-      ),
-    );
-    fn.requestFocus();
-    await tester.pump();
+      );
+      fn.requestFocus();
+      await tester.pump();
 
-    await tester.sendKeyDownEvent(LogicalKeyboardKey.altLeft);
-    await tester.sendKeyEvent(LogicalKeyboardKey.enter);
-    await tester.sendKeyUpEvent(LogicalKeyboardKey.altLeft);
-    await tester.pump();
-    expect(sent, isFalse);
-  });
-
-  testWidgets('hardware Enter does not send when empty and not live', (
-    tester,
-  ) async {
-    var sent = false;
-    final fn = FocusNode();
-    await tester.pumpWidget(
-      _wrap(
-        ComposeBar(
-          controller: TextEditingController(),
-          focusNode: fn,
-          onSend: () => sent = true,
-          isLive: false,
-        ),
-      ),
-    );
-    fn.requestFocus();
-    await tester.pump();
-
-    await tester.sendKeyEvent(LogicalKeyboardKey.enter);
-    await tester.pump();
-    expect(sent, isFalse);
+      await tester.sendKeyEvent(LogicalKeyboardKey.enter);
+      await tester.pump();
+      expect(sent, isFalse);
+    } finally {
+      debugDefaultTargetPlatformOverride = null;
+    }
   });
 
   testWidgets('hardware Esc sends the ESC sequence to the terminal', (

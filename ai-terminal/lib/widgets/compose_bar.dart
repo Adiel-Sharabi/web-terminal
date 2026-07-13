@@ -6,11 +6,21 @@
 /// live-streaming logic that drives this bar.
 library;
 
+import 'package:flutter/foundation.dart';
 import 'package:flutter/material.dart';
 import 'package:flutter/services.dart';
 
 import '../theme/app_theme.dart';
 import '../theme/status_colors.dart';
+
+/// Whether the compose field is driven by a soft (on-screen) keyboard (mobile).
+/// Mobile stays a strict single-line field: a multi-line TextField makes Android
+/// treat Enter as a newline action and ignore [TextInputAction.send], so the soft
+/// keyboard's send never submits (hard-won — see the mobile Enter history).
+/// Desktop, with a hardware Enter + the _SendIntent shortcut, grows to wrap.
+/// Pure/testable.
+bool composeUsesSoftKeyboard(TargetPlatform platform) =>
+    platform == TargetPlatform.android || platform == TargetPlatform.iOS;
 
 class _SendIntent extends Intent {
   const _SendIntent();
@@ -31,6 +41,31 @@ class _TabIntent extends Intent {
 
 class _BackspaceIntent extends Intent {
   const _BackspaceIntent();
+}
+
+class _NewlineIntent extends Intent {
+  const _NewlineIntent();
+}
+
+/// Inserts a newline at the caret — desktop Ctrl+Enter (Enter itself submits).
+/// Written straight to the controller so it lands regardless of how the platform
+/// would treat the key.
+class _NewlineAction extends Action<_NewlineIntent> {
+  _NewlineAction(this.controller);
+  final TextEditingController controller;
+
+  @override
+  Object? invoke(_NewlineIntent intent) {
+    final value = controller.value;
+    final sel = value.selection;
+    final start = sel.isValid ? sel.start : value.text.length;
+    final end = sel.isValid ? sel.end : value.text.length;
+    controller.value = TextEditingValue(
+      text: value.text.replaceRange(start, end, '\n'),
+      selection: TextSelection.collapsed(offset: start + 1),
+    );
+    return null;
+  }
 }
 
 /// Sends an arrow key to the terminal when the terminal is the active input
@@ -169,6 +204,7 @@ class ComposeBar extends StatelessWidget {
     final theme = Theme.of(context);
     final liveColor = StatusColor.serverNeedsAuth;
     final borderColor = isLive ? liveColor : theme.colorScheme.outlineVariant;
+    final softKeyboard = composeUsesSoftKeyboard(defaultTargetPlatform);
 
     return Container(
       color: theme.colorScheme.surfaceContainer,
@@ -184,14 +220,23 @@ class ComposeBar extends StatelessWidget {
               Expanded(
                 child: Shortcuts(
                   shortcuts: <ShortcutActivator, Intent>{
-                    // Enter sends. The field is STRICT single-line on every
-                    // platform (maxLines 1), so Enter can never insert a newline
-                    // before the submit fires — a plain `text\r` the TUI acts on.
-                    // A raw Enter on the terminal key strip still sends '\r'.
-                    const SingleActivator(LogicalKeyboardKey.enter):
-                        const _SendIntent(),
-                    const SingleActivator(LogicalKeyboardKey.numpadEnter):
-                        const _SendIntent(),
+                    // DESKTOP: Enter submits, Ctrl+Enter inserts a newline. The
+                    // shortcut consumes the hardware Enter before the field can
+                    // newline it, so every submit is a plain `text\r`. MOBILE has
+                    // no Enter shortcut: a soft-keyboard Enter is a text insert
+                    // (not a key event) so it just adds a newline, and the Send
+                    // button submits.
+                    if (!softKeyboard) ...const {
+                      SingleActivator(LogicalKeyboardKey.enter): _SendIntent(),
+                      SingleActivator(LogicalKeyboardKey.numpadEnter):
+                          _SendIntent(),
+                      SingleActivator(LogicalKeyboardKey.enter, control: true):
+                          _NewlineIntent(),
+                      SingleActivator(
+                        LogicalKeyboardKey.numpadEnter,
+                        control: true,
+                      ): _NewlineIntent(),
+                    },
                     if (onEscape != null)
                       const SingleActivator(LogicalKeyboardKey.escape):
                           const _EscapeIntent(),
@@ -239,26 +284,22 @@ class ComposeBar extends StatelessWidget {
                         onBackspace,
                         isLive,
                       ),
+                      _NewlineIntent: _NewlineAction(controller),
                     },
                     child: TextField(
                       controller: controller,
                       focusNode: focusNode,
+                      // Grows 1→5 lines so a long prompt SOFT-WRAPS and the box
+                      // gets taller instead of running off as one endless line.
+                      // DESKTOP: the Enter shortcut submits (Ctrl+Enter inserts a
+                      // newline), so a typed prompt goes out as `text\r`. MOBILE:
+                      // the soft keyboard's Enter inserts a newline (action below
+                      // is `newline`), and the Send button submits — a multi-line
+                      // field there can't rely on the send *action*, so it doesn't.
                       minLines: 1,
-                      // STRICT single-line on every platform. A multi-line field
-                      // lets the OS insert a newline on the submitting Enter before
-                      // the submit fires (parking the prompt, or sending it as a
-                      // bracketed paste whose CR the TUI absorbs). Single-line makes
-                      // Enter always submit a plain `text\r` — the one form the
-                      // Claude/Codex TUI acts on. Mobile's native send action and a
-                      // desktop hardware Enter both fire onSubmitted here (the
-                      // _SendIntent shortcut is a belt-and-suspenders on desktop).
-                      // Multi-line prompts go via paste.
-                      maxLines: 1,
-                      keyboardType: TextInputType.text,
-                      textInputAction: TextInputAction.send,
-                      onSubmitted: (_) {
-                        if (_canSend) onSend();
-                      },
+                      maxLines: 5,
+                      keyboardType: TextInputType.multiline,
+                      textInputAction: TextInputAction.newline,
                       style: const TextStyle(
                         fontFamily: 'monospace',
                         fontSize: 14,
