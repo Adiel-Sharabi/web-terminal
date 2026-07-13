@@ -143,13 +143,31 @@ test.describe('agent-aware submit CR on the PTY input path', () => {
     expect(writesOf(await rpc(client, '__testGetWrites', { id }))).toEqual(['hello\r']);
   });
 
-  test('plain shell (agent null): bytes are never rewritten', async () => {
+  test('plain shell (agent null): a single-line text+CR is never rewritten', async () => {
     const id = await newSession(null);
 
     typeInto(client, id, 'ls -la\r');
     await sleep(Math.max(40, GAP + 60));
 
     expect(writesOf(await rpc(client, '__testGetWrites', { id }))).toEqual(['ls -la\r']);
+  });
+
+  test('claude: a multi-line bracketed paste splits the final CR so it submits', async () => {
+    const id = await newSession('claude');
+    const ESC = String.fromCharCode(0x1b);
+    const block = `${ESC}[200~line one\rline two${ESC}[201~`;
+    const claudeGap = agents.submitPolicy('claude').gapMs;
+
+    typeInto(client, id, block + '\r');
+
+    // The paste block (close marker and all) is written at once; the CR is withheld —
+    // a CR in the same read as the paste close is absorbed by Claude's TUI too.
+    await sleep(Math.max(20, claudeGap / 4));
+    expect(writesOf(await rpc(client, '__testGetWrites', { id }))).toEqual([block]);
+
+    // After the gap the CR lands alone, and the prompt submits.
+    await sleep(claudeGap);
+    expect(writesOf(await rpc(client, '__testGetWrites', { id }))).toEqual([block, '\r']);
   });
 
   test('codex: a bare CR is written immediately — nothing precedes it to be pasted', async () => {

@@ -5,7 +5,7 @@
 // and a NEWLINE — the prompt never submits. Splitting the CR off is the only thing that
 // makes it Enter. Claude has no such detector, so its frames must stay untouched.
 const { test, expect } = require('@playwright/test');
-const { splitTrailingCr, CR_FRAME } = require('../lib/submit-frames');
+const { splitTrailingCr, endsWithPasteSubmitCr, CR_FRAME } = require('../lib/submit-frames');
 const agents = require('../lib/agents');
 
 const ESC = String.fromCharCode(0x1b);
@@ -61,6 +61,27 @@ test.describe('splitTrailingCr', () => {
   });
 });
 
+test.describe('endsWithPasteSubmitCr (the post-paste CR every agent splits)', () => {
+  test('true when a frame ends with a bracketed-paste close + CR', () => {
+    expect(endsWithPasteSubmitCr(Buffer.from(`${ESC}[200~a\rb${ESC}[201~\r`))).toBe(true);
+    expect(endsWithPasteSubmitCr(Buffer.from(`${ESC}[201~\r`))).toBe(true);
+  });
+
+  test('false for a plain text + CR — single-line stays atomic (#44)', () => {
+    expect(endsWithPasteSubmitCr(Buffer.from('hello\r'))).toBe(false);
+  });
+
+  test('false for a paste close WITHOUT the trailing CR', () => {
+    expect(endsWithPasteSubmitCr(Buffer.from(`${ESC}[200~a\rb${ESC}[201~`))).toBe(false);
+  });
+
+  test('false for a bare CR, empty, or undefined', () => {
+    expect(endsWithPasteSubmitCr(Buffer.from('\r'))).toBe(false);
+    expect(endsWithPasteSubmitCr(Buffer.alloc(0))).toBe(false);
+    expect(endsWithPasteSubmitCr(undefined)).toBe(false);
+  });
+});
+
 test.describe('submit policy lives in the registry', () => {
   test('codex bursts a trailing CR into its paste, so the CR needs a gap', () => {
     const p = agents.submitPolicy('codex');
@@ -69,7 +90,9 @@ test.describe('submit policy lives in the registry', () => {
     expect(p.gapMs).toBeGreaterThanOrEqual(60);
   });
 
-  test('claude accepts an atomic text+CR frame — never rewrite its input (#44)', () => {
+  test('claude keeps a single-line text+CR atomic (#44) — only the paste CR splits', () => {
+    // crBurstsAsPaste false ⇒ a plain `text\r` is one write; the multi-line paste
+    // CR is split by endsWithPasteSubmitCr in the worker, not by this flag.
     expect(agents.submitPolicy('claude').crBurstsAsPaste).toBe(false);
   });
 

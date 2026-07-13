@@ -16,7 +16,7 @@ const ipc = require('./lib/ipc');
 const { resolveRestoreRunCommand } = require('./lib/restore-command');
 const { claudeProjectDirName } = require('./lib/transcript');
 const agents = require('./lib/agents');
-const { splitTrailingCr } = require('./lib/submit-frames');
+const { splitTrailingCr, endsWithPasteSubmitCr } = require('./lib/submit-frames');
 
 const WORKER_VERSION = '0.6.0';
 
@@ -754,8 +754,17 @@ function writePromptToTerm(session, text) {
 //
 // Agents without the flag (Claude, and plain shells) take the untouched single write —
 // their clients' atomic `text\r` already submits, and #44 depends on it staying atomic.
+//
+// EXCEPT a multi-line prompt, which every client sends as `ESC[200~…ESC[201~\r`: a CR
+// in the SAME read as the paste close is absorbed by Claude's TUI too (verified: a
+// paste+CR never submits, the same paste + a delayed CR submits 4/4), so that trailing
+// CR is split off for EVERY agent — see [endsWithPasteSubmitCr]. Single-line stays
+// atomic.
 function writeUserInput(session, data) {
-  if (!agents.submitPolicy(sessionAgent(session)).crBurstsAsPaste) {
+  const mustSplit =
+      agents.submitPolicy(sessionAgent(session)).crBurstsAsPaste ||
+      endsWithPasteSubmitCr(data);
+  if (!mustSplit) {
     termWrite(session, data);
     return;
   }
