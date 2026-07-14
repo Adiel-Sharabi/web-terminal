@@ -840,7 +840,19 @@ class _SessionScreenState extends State<SessionScreen>
     _connection?.close();
     _disconnectDebounce?.cancel();
 
-    final connection = api.openTerminal(session.id);
+    // #59 — state our size IN THE HANDSHAKE. A PTY has ONE size, shared by every
+    // viewer, so a connection that never states its own inherits whatever the last
+    // viewer set: attaching a phone to a session a desktop is watching rendered
+    // desktop-width output, torn, until some unrelated relayout (focusing the compose
+    // field → the soft keyboard → a new body height) happened to fire onResize and
+    // negotiate the size by accident. The view already knows its size here — the
+    // layout that set _lastCols ran while we awaited the scrollback above — so hand
+    // it to the connection instead of waiting to be asked.
+    final connection = api.openTerminal(
+      session.id,
+      cols: _lastCols > 0 ? _lastCols : null,
+      rows: _lastRows > 0 ? _lastRows : null,
+    );
     _connection = connection;
     // Declared once — the connection remembers and replays this (and resize)
     // itself on every reconnect; no need to re-call it reactively.
