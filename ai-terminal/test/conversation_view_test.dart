@@ -1026,13 +1026,25 @@ void main() {
         controller.jumpTo(0);
         await tester.pumpAndSettle();
 
-        // The older page is now in the tree.
-        expect(find.textContaining('OLDER_0'), findsOneWidget);
-
-        // The anchor correction must land the viewport far from the bottom —
-        // not "somewhere", but specifically NOT snapped to the newest turn.
+        // The anchor correction must leave the viewport far from the bottom —
+        // specifically NOT snapped to the newest turn. This is the #47
+        // "done-when": after older history renders, the view stays where the
+        // reader was reading.
         final pos = controller.position;
         expect(pos.maxScrollExtent - pos.pixels, greaterThan(100));
+        // ...and the not-pinned UI state is set, so a later incoming turn will
+        // raise the "New" pill instead of yanking the reader to the bottom.
+        expect(find.byIcon(Icons.keyboard_double_arrow_down), findsOneWidget);
+
+        // Prove the older page actually merged into the list. It sits ABOVE the
+        // anchored viewport, and a ListView.builder only realizes on-screen
+        // items (cacheExtent 250px), so OLDER_0 was never built while anchored —
+        // asserting it there finds 0, which is what tripped the blind test, not
+        // a real bug. Bring the top back into view (hasMoreOlder is false now,
+        // so this fires no further load) and it must be present.
+        controller.jumpTo(pos.minScrollExtent);
+        await tester.pumpAndSettle();
+        expect(find.textContaining('OLDER_0'), findsOneWidget);
       },
     );
 
@@ -1075,9 +1087,10 @@ void main() {
             // Yielding first (a real microtask hop) lands the injected jumpTo
             // on a LATER event-loop turn, outside the caller's own jumpTo
             // call stack — a realistic race, not risky re-entrant recursion.
-            if (controller != null && controller!.hasClients) {
+            final c = controller;
+            if (c != null && c.hasClients) {
               await Future<void>.delayed(Duration.zero);
-              controller!.jumpTo(controller!.position.maxScrollExtent);
+              c.jumpTo(c.position.maxScrollExtent);
             }
             return TranscriptPage(messages: older, cursor: null, hasMore: false);
           }
@@ -1116,7 +1129,6 @@ void main() {
         // the fault-simulated "at bottom" scroll signal mid-fetch.
         controller!.jumpTo(0);
         await tester.pumpAndSettle();
-        expect(find.textContaining('OLDER_0'), findsOneWidget);
 
         // The fault must not have stuck: the jump-to-bottom FAB (shown
         // whenever _pinnedToBottom is false) must still be present — proving
@@ -1143,6 +1155,14 @@ void main() {
         // (both mean "not pinned"; the pill wins the UI slot) — confirms this
         // isn't coincidentally still showing the FAB from before.
         expect(find.byIcon(Icons.keyboard_double_arrow_down), findsNothing);
+
+        // Finally, confirm the older page genuinely merged and survived the
+        // refresh. It sits far above the current (fault-bottom) viewport, so a
+        // virtualized ListView never built it — bring the top into view
+        // (hasMoreOlder is false, so no further load) and it must be there.
+        controller!.jumpTo(controller!.position.minScrollExtent);
+        await tester.pumpAndSettle();
+        expect(find.textContaining('OLDER_0'), findsOneWidget);
       },
     );
 
@@ -1175,13 +1195,38 @@ void main() {
         );
         await tester.pumpAndSettle();
 
-        // The older page did load (proving _loadOlder really fired from the
-        // threshold overlap, not that this test is vacuous).
-        expect(find.textContaining('OLDER_0'), findsOneWidget);
+        final controller =
+            tester.widget<ListView>(find.byType(ListView)).controller!;
 
-        // Still pinned to the bottom — no jump-to-bottom FAB — because there
-        // was nothing to scroll away from; the reader never left the bottom.
+        // The two short turns fit the viewport, so maxScrollExtent is 0: the
+        // reader is at the top AND the bottom at once. A plain jumpTo(0) here
+        // is a no-op (pixels are already 0), fires NO scroll notification, and
+        // so _onScroll never runs — which is exactly why the blind test was
+        // vacuous (_loadOlder never fired). Drive _onScroll the way a real
+        // pull-past-the-top does: force a small overscroll beyond the bottom.
+        // pixels then sits inside BOTH edge thresholds (|pixels| <= 80), so
+        // atBottom stays true (still pinned) while the top-threshold trips
+        // _loadOlder with oldExtent == 0 — the precise overlap wasScrollable
+        // guards.
+        expect(controller.position.maxScrollExtent, lessThan(1.0));
+        controller.jumpTo(50);
+        await tester.pumpAndSettle();
+
+        // The older page did load (nothing else can grow the extent past 0),
+        // proving _loadOlder really fired from the threshold overlap — this
+        // test is not vacuous.
+        expect(controller.position.maxScrollExtent, greaterThan(0));
+
+        // Still pinned to the bottom — no jump-to-bottom FAB — because
+        // oldExtent was 0, so the wasScrollable guard left _pinnedToBottom
+        // alone: the reader never scrolled away from the bottom.
         expect(find.byIcon(Icons.keyboard_double_arrow_down), findsNothing);
+
+        // And the older turns are really in the list (now above the viewport,
+        // so only realized once the top is scrolled in).
+        controller.jumpTo(controller.position.minScrollExtent);
+        await tester.pumpAndSettle();
+        expect(find.textContaining('OLDER_0'), findsOneWidget);
       },
     );
   });
