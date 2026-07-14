@@ -8,7 +8,8 @@
 //     idle → idle, other → dropped).
 //   - Stop / idle Notification are debounced ~750ms so the user never sees a
 //     flash of "stopped" between agentic turns.
-//   - SubagentStop is dropped (parent agent is still working).
+//   - SubagentStop is forwarded to the worker (#61), which counts subagents in
+//     flight. With none in flight it is a no-op on status.
 //
 // All tests assume server.js was launched with
 // WT_HOOK_STOP_DEBOUNCE_MS=200 so the debounce window is short enough for
@@ -137,9 +138,9 @@ test.describe('Hook transform: Notification demux', () => {
         notification_type: 'idle_prompt',
         message: 'Claude is waiting for your input',
       });
-      const body = await res.json();
-      expect(body.status).toBe('pending');
-      expect(body.deferred).toBe('Notification');
+      // The debounce moved into the worker (#61), so the hook's HTTP response now
+      // reports the session's CURRENT status — still working while the flip is held.
+      expect((await res.json()).status).toBe('working');
 
       // Within debounce window: still working
       expect(await getStatus(ctx, id)).toBe('working');
@@ -168,8 +169,8 @@ test.describe('Hook transform: Stop debounce', () => {
       await pollUntil(() => getStatus(ctx, id), s => s === 'working', 2000);
 
       const stop = await sendHook(raw, id, { event: 'Stop' });
-      const stopBody = await stop.json();
-      expect(stopBody.status).toBe('pending');
+      // The flip is held in the worker (#61); the response reports current status.
+      expect((await stop.json()).status).toBe('working');
 
       // Fire PreToolUse well within the debounce window
       await new Promise(r => setTimeout(r, Math.max(20, Math.floor(DEBOUNCE_MS / 4))));
@@ -213,7 +214,7 @@ test.describe('Hook transform: Stop debounce', () => {
   });
 });
 
-test.describe('Hook transform: SubagentStop ignored', () => {
+test.describe('Hook transform: SubagentStop with nothing in flight', () => {
   test('SubagentStop does not change status', async () => {
     const ctx = await authCtx();
     const raw = await rawCtx();
@@ -222,10 +223,11 @@ test.describe('Hook transform: SubagentStop ignored', () => {
       await sendHook(raw, id, { event: 'UserPromptSubmit' });
       await pollUntil(() => getStatus(ctx, id), s => s === 'working', 2000);
 
+      // #61: no longer dropped here — the worker owns the subagent count. With no
+      // SubagentStart before it, there is nothing in flight and nothing to end, so
+      // the session keeps working (the parent's Stop is what ends a turn).
       const res = await sendHook(raw, id, { event: 'SubagentStop' });
-      const body = await res.json();
-      expect(body.ok).toBe(true);
-      expect(body.skipped).toBe('subagent-stop');
+      expect((await res.json()).ok).toBe(true);
 
       await new Promise(r => setTimeout(r, DEBOUNCE_MS + SLACK_MS));
       expect(await getStatus(ctx, id)).toBe('working');

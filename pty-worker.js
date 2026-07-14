@@ -793,6 +793,12 @@ function noteInterrupt(session, data) {
   if (!isEscapeKey(data)) return;
   if (!agents.interruptsOnEscape(sessionAgent(session))) return;
   session.status = 'idle';
+  // Esc cancels the whole turn — subagents included. Their SubagentStop may never
+  // arrive, so drop the tracking with the turn (#61). Cancel any armed idle flip
+  // too: it would otherwise still fire, and applyIdle drives the API-error /compact
+  // replay — re-submitting the very prompt the user just interrupted.
+  cancelPendingIdle(session);
+  resetSubagentTracking(session);
   log(`interrupt: "${session.name}" working → idle (Esc)`);
   // No notifyType: the user is at the keyboard — they just pressed Esc. Pushing "Claude is
   // done" to their phone for an interrupt they performed themselves would be noise.
@@ -897,6 +903,87 @@ function broadcastPtyOut(session, data) {
   }
 }
 
+// #61 — subagent bookkeeping. Lives on the session and ONLY here, so status stays
+// the worker's alone (no second status source, no client counting).
+//
+// Claude's hook payload says WHO fired each event, which is the whole ballgame:
+// every event raised inside a subagent carries `agent_id` (+ `agent_type`), and no
+// main-agent event does — verified against the real hook stream (SubagentStart /
+// SubagentStop / a subagent's own PreToolUse+PostToolUse all carry it; Stop,
+// UserPromptSubmit and the parent's PreToolUse/PostToolUse — including the `Agent`
+// tool call itself — do not). So "is the main agent still working?" is not a guess.
+//
+// Tracked as a SET of agent ids, not a counter: a repeated SubagentStart cannot
+// double-count and a SubagentStop for an id we never saw cannot drive it negative.
+function subagentSet(session) {
+  if (!(session.subagents instanceof Set)) session.subagents = new Set();
+  return session.subagents;
+}
+// Called whenever the turn provably ended (new user prompt, Esc interrupt, stale
+// correction). Without this a subagent that dies without firing SubagentStop would
+// keep the set non-empty and the session could never reach idle again.
+function resetSubagentTracking(session) {
+  subagentSet(session).clear();
+  session.heldStop = null;
+}
+
+// --- The idle decision (#61) ------------------------------------------------
+// Claude fires Stop between agentic turns too, so flipping to idle the instant it
+// arrives flashes "stopped" milliseconds before the next turn starts. The flip is
+// therefore debounced, and any working event cancels it.
+//
+// This debounce used to live in server.js — which is precisely why #61 bit. That
+// layer cannot tell a SUBAGENT's PreToolUse from the main agent's: both post under
+// the same session id. So while background subagents ran, their tool calls landed
+// inside the parent's debounce window and cancelled the parent's REAL Stop before
+// the worker ever saw it. The debounce belongs with the component that owns status
+// and knows the subagent count — this one. Both halves of the decision are here:
+//   Stop with subagents in flight → HELD (status unchanged, no notify)
+//   last SubagentStop             → the held stop is released through the debounce
+const HOOK_IDLE_DEBOUNCE_MS = parseInt(process.env.WT_HOOK_STOP_DEBOUNCE_MS, 10) || 750;
+
+function cancelPendingIdle(session) {
+  if (session.idleTimer) { clearTimeout(session.idleTimer); session.idleTimer = null; }
+}
+
+// Arm the debounced flip to idle. `event` is the idle event being honoured — Stop
+// ("Claude stopped") or an idle Notification ("done, waiting for input") — so a
+// held Stop is delivered with its own wording, not the other one's.
+function armIdle(session, event) {
+  cancelPendingIdle(session);
+  session.idleTimer = setTimeout(() => {
+    session.idleTimer = null;
+    applyIdle(session, event);
+  }, HOOK_IDLE_DEBOUNCE_MS);
+  if (typeof session.idleTimer.unref === 'function') session.idleTimer.unref();
+}
+
+// The ONE place a hook flips a session to idle.
+function applyIdle(session, event) {
+  // The debounce outlives the session if it exited in the window — don't announce
+  // a status for a PTY that is gone (killSession clears the timer; an exit races).
+  if (!sessions.has(sessionIdOf(session))) return;
+  const prevStatus = session.status;
+  session.status = 'idle';
+  // If a /compact recovery is in flight, Claude reaching idle means compact
+  // finished — replay the captured prompt now (the fallback timer is a backstop).
+  // Ignore the immediate settle-idle right after we sent it.
+  if (session._compactReplay && (Date.now() - session._compactReplay.setAt) > API_ERROR_COMPACT_MIN_WAIT_MS) {
+    doCompactReplay(session, 'idle-hook');
+  }
+  let notifyType = null, notifyMsg = null;
+  if (prevStatus !== 'idle') {
+    notifyType = 'idle';
+    notifyMsg = event === 'Stop'
+      ? `"${session.name}" — Claude stopped`
+      : `"${session.name}" — Claude is done, waiting for input`;
+    log(`hook: session "${session.name}" (${sessionIdOf(session)}) status ${prevStatus} → idle (${event})`);
+  }
+  if (prevStatus !== session.status || notifyType) {
+    broadcastEvent('statusChanged', { id: sessionIdOf(session), status: session.status, notifyType, notifyMsg });
+  }
+}
+
 function correctStaleStatus(session) {
   // #37 — a session running a build / background process / in-flight subagent
   // produces continuous PTY output (build logs, Claude's elapsed-time spinner
@@ -912,6 +999,10 @@ function correctStaleStatus(session) {
       (now - (session.lastActivity || 0)) > STALE_STATUS_TIMEOUT_MS) {
     const prev = session.status;
     session.status = 'idle';
+    // The safety net for #61 too: a subagent that crashed without firing
+    // SubagentStop leaves the count above zero, which would otherwise pin this
+    // session non-idle forever. Both clocks are stale — nothing is running.
+    resetSubagentTracking(session);
     log(`stale correction: "${session.name}" ${prev} → idle`);
     broadcastEvent('statusChanged', { id: sessionIdOf(session), status: session.status });
   }
@@ -1061,6 +1152,12 @@ function createSession(id, cwd, name, autoCommand, savedScrollback, claudeSessio
     status: 'active',
     hookStatus: false,
     lastHookActivity: 0,
+    // #61 — the agent_ids of the subagents running right now, and the MAIN agent's
+    // Stop parked until they finish (null when none is held). In-memory only: a
+    // restarted worker knows of no live subagent, which is the safe default —
+    // Stop then behaves exactly as it did before this existed.
+    subagents: new Set(),
+    heldStop: null,
     autoCommand: autoCommand || '',
     // Which AI agent this session runs. An explicit choice (the new-session picker)
     // is authoritative and persisted; null means "infer from the command", which is
@@ -1177,9 +1274,13 @@ function createSession(id, cwd, name, autoCommand, savedScrollback, claudeSessio
 }
 
 // --- Hook handling --------------------------------------------------------
-function handleHook(session, event, claudeSessionId, prompt) {
+// `agentId` is Claude's `agent_id`: present iff the event was raised INSIDE a
+// subagent. It is what lets this function tell "the main agent is working again"
+// from "a subagent is calling a tool" — see subagentSet above.
+function handleHook(session, event, claudeSessionId, prompt, agentId) {
   if (!event) throw new Error('event required');
   const prevStatus = session.status;
+  const fromSubagent = !!agentId;
   let notifyType = null, notifyMsg = null;
   session.hookStatus = true;
 
@@ -1212,32 +1313,62 @@ function handleHook(session, event, claudeSessionId, prompt) {
 
   switch (event) {
     case 'UserPromptSubmit':
+      // A new user turn ends the previous one, so any subagent that never
+      // reported SubagentStop died with it. Reset here (and only here): this is
+      // the one event that provably comes from the MAIN agent, so it cannot be a
+      // subagent's own tool call clearing the parent's deferred Stop.
+      resetSubagentTracking(session);
+      // falls through
     case 'PreToolUse':
     case 'PostToolUse':
     case 'SubagentStart':
+      if (event === 'SubagentStart' && fromSubagent) subagentSet(session).add(agentId);
       session.status = 'working';
-      if (session.idleTimer) { clearTimeout(session.idleTimer); session.idleTimer = null; }
+      // Something is running, so a debounced idle flip was a false alarm.
+      cancelPendingIdle(session);
+      // Only the MAIN agent working again invalidates a held stop: it proves the
+      // parent resumed, so the stop we parked is stale and a fresh one will follow
+      // at the end of this turn. A SUBAGENT's tool call says nothing about the
+      // parent — treating it as "the parent is alive" is exactly how the first cut
+      // of this fix lost the stop it was supposed to hold.
+      if (!fromSubagent) session.heldStop = null;
       // Claude resumed (a retry — ours or the user's): drop the API-error mark.
       clearApiError(session);
       break;
-    case 'Notification':
-    case 'Stop':
-      session.status = 'idle';
-      // If a /compact recovery is in flight, Claude reaching idle means compact
-      // finished — replay the captured prompt now (the fallback timer is a
-      // backstop). Ignore the immediate settle-idle right after we sent it.
-      if (session._compactReplay && (Date.now() - session._compactReplay.setAt) > API_ERROR_COMPACT_MIN_WAIT_MS) {
-        doCompactReplay(session, 'idle-hook');
-      }
-      if (prevStatus !== 'idle') {
-        notifyType = 'idle';
-        notifyMsg = event === 'Stop'
-          ? `"${session.name}" — Claude stopped`
-          : `"${session.name}" — Claude is done, waiting for input`;
+    case 'SubagentStop': {
+      // #61 — the last subagent finishing is what actually ends a turn whose main
+      // agent already stopped. Until then the session is NOT idle: it has work in
+      // flight, the dot must stay amber and no "Claude is done" push may fire.
+      const live = subagentSet(session);
+      if (fromSubagent) live.delete(agentId);
+      else live.clear(); // no id to match (shouldn't happen) — don't strand the session
+      if (live.size === 0 && session.heldStop) {
+        const held = session.heldStop;
+        session.heldStop = null;
+        armIdle(session, held);
       }
       break;
+    }
+    case 'Notification':
+    case 'Stop': {
+      // #61 — the main agent ending its turn does NOT mean the session is done
+      // when subagents are still running. Measured against the real hook stream, a
+      // backgrounded Task returns its PostToolUse to the parent at once and the
+      // parent's Stop lands SECONDS before the subagent's SubagentStop — so the
+      // "done" fired while two agents were still working. Hold the stop; the last
+      // SubagentStop above releases it through the same debounce.
+      const live = subagentSet(session);
+      if (live.size > 0) {
+        session.heldStop = event;
+        log(`hook: session "${session.name}" ${event} held — ${live.size} subagent(s) in flight`);
+        break;
+      }
+      armIdle(session, event);
+      break;
+    }
     case 'PermissionRequest':
       session.status = 'waiting';
+      cancelPendingIdle(session);
       notifyType = 'approval_needed';
       notifyMsg = `"${session.name}" — Claude needs your approval`;
       break;
@@ -1385,7 +1516,7 @@ const rpcHandlers = {
   hookEvent: async (params) => {
     const session = sessions.get(requireUuid(params.id));
     if (!session) throw new Error('session not found');
-    return handleHook(session, params.event, params.claudeSessionId, params.prompt);
+    return handleHook(session, params.event, params.claudeSessionId, params.prompt, params.agentId);
   },
 
   resizeSession: async (params) => {

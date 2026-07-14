@@ -276,10 +276,13 @@ test.describe('pty-worker session RPCs', () => {
     }
   });
 
-  test('hookEvent Stop sets status to idle', async () => {
+  test('hookEvent Stop sets status to idle — debounced (#61: the flip lives in the worker)', async () => {
     const pipe = workerPipePath();
     const dataDir = makeTempDataDir();
-    const worker = spawnWorker(pipe, dataDir);
+    // Stop is held briefly so a Stop *between* agentic turns never flashes "stopped".
+    // The debounce moved out of server.js into the worker, which owns status and is
+    // the only component that can see whether subagents are still in flight.
+    const worker = spawnWorker(pipe, dataDir, { WT_HOOK_STOP_DEBOUNCE_MS: '80' });
     try {
       const client = await connectClient(pipe);
       const { id } = await rpc(client, 'createSession', {
@@ -287,8 +290,40 @@ test.describe('pty-worker session RPCs', () => {
       });
 
       await rpc(client, 'hookEvent', { id, event: 'UserPromptSubmit' });
+      // The RPC answers with the status right now — the flip is still pending.
       const { status } = await rpc(client, 'hookEvent', { id, event: 'Stop' });
-      expect(status).toBe('idle');
+      expect(status).toBe('working');
+
+      await new Promise(r => setTimeout(r, 400));
+      const after = await rpc(client, 'getSession', { id });
+      expect(after.status).toBe('idle');
+
+      await rpc(client, 'killSession', { id });
+      await client.close();
+    } finally {
+      await worker.stop();
+      rmRf(dataDir);
+    }
+  });
+
+  test('a working event inside the debounce window cancels the idle flip (#61)', async () => {
+    const pipe = workerPipePath();
+    const dataDir = makeTempDataDir();
+    const worker = spawnWorker(pipe, dataDir, { WT_HOOK_STOP_DEBOUNCE_MS: '250' });
+    try {
+      const client = await connectClient(pipe);
+      const { id } = await rpc(client, 'createSession', {
+        cwd: os.tmpdir(), name: 'hook-stop-cancel', autoCommand: '',
+      });
+
+      await rpc(client, 'hookEvent', { id, event: 'UserPromptSubmit' });
+      await rpc(client, 'hookEvent', { id, event: 'Stop' });
+      // The next agentic turn starts before the window closes — no idle flash.
+      await rpc(client, 'hookEvent', { id, event: 'PreToolUse' });
+
+      await new Promise(r => setTimeout(r, 500));
+      const after = await rpc(client, 'getSession', { id });
+      expect(after.status).toBe('working');
 
       await rpc(client, 'killSession', { id });
       await client.close();
