@@ -194,4 +194,70 @@ void main() {
       );
     });
   });
+
+  group('ApiClient.setFavorite (#60)', () {
+    test('PATCHes /api/sessions/:id/favorite with {favorite:true, rank}',
+        () async {
+      late http.Request captured;
+      final client = ApiClient(
+        _server,
+        httpClient: MockClient((req) async {
+          captured = req;
+          return http.Response(jsonEncode({'ok': true}), 200);
+        }),
+      );
+
+      await client.setFavorite('sess-1', true, rank: 3);
+      expect(captured.method, 'PATCH');
+      expect(captured.url.path, '/api/sessions/sess-1/favorite');
+      expect(captured.headers['authorization'], 'Bearer tok');
+      expect(captured.headers['content-type'], contains('application/json'));
+      expect(jsonDecode(captured.body), {'favorite': true, 'rank': 3});
+    });
+
+    test('unfavoriting sends only {favorite:false} — no rank key', () async {
+      late http.Request captured;
+      final client = ApiClient(
+        _server,
+        httpClient: MockClient((req) async {
+          captured = req;
+          return http.Response(jsonEncode({'ok': true}), 200);
+        }),
+      );
+
+      await client.setFavorite('sess-1', false);
+      expect(jsonDecode(captured.body), {'favorite': false});
+    });
+
+    test('favoriting with no rank OMITS the key entirely — never sends '
+        'JSON null (the server 400s on an explicit null: '
+        '`rank !== undefined` treats null as present-but-invalid)', () async {
+      late http.Request captured;
+      final client = ApiClient(
+        _server,
+        httpClient: MockClient((req) async {
+          captured = req;
+          return http.Response(jsonEncode({'ok': true}), 200);
+        }),
+      );
+
+      await client.setFavorite('sess-1', true); // no rank — server assigns one
+      final body = jsonDecode(captured.body) as Map;
+      expect(body.containsKey('rank'), isFalse);
+      expect(body, {'favorite': true});
+    });
+
+    test('a 404 (unknown/bogus id) surfaces as an ApiException', () async {
+      final client = ApiClient(
+        _server,
+        httpClient: MockClient((req) async => http.Response(
+            jsonEncode({'error': 'session not found'}), 404)),
+      );
+      await expectLater(
+        client.setFavorite('nope', true, rank: 0),
+        throwsA(isA<ApiException>()
+            .having((e) => e.status, 'status', 404)),
+      );
+    });
+  });
 }

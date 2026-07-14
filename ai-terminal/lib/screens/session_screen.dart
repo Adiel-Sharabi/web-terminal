@@ -242,6 +242,46 @@ void selectAllOnTerminal(Terminal terminal, TerminalController controller) {
   controller.setSelection(base, extent);
 }
 
+/// Copies [controller]'s current selection out of [terminal] to the system
+/// clipboard and clears it. The ONE clipboard-writing implementation for the
+/// terminal (#49 menu Copy, the on-selection toolbar, and #52's Ctrl+C /
+/// Ctrl+Shift+C shortcut all call this — no second `Clipboard.setData` path).
+/// Returns the copied text, or `null` when nothing was selected (a no-op).
+/// Takes the terminal + controller directly (no BuildContext) so it is
+/// exercisable in a widget test against a real [Terminal]/[TerminalController].
+String? copyTerminalSelection(Terminal terminal, TerminalController controller) {
+  final selection = controller.selection;
+  if (selection == null) return null;
+  final text = terminal.buffer.getText(selection);
+  Clipboard.setData(ClipboardData(text: text));
+  controller.clearSelection();
+  return text;
+}
+
+/// Whether a Ctrl+C (Cmd+C on macOS) key press on the terminal should copy the
+/// selection instead of falling through to the terminal's normal handling of
+/// that key — which sends SIGINT (`\x03`, #11) when nothing intercepts it.
+///
+/// Mirrors the web client's model (`app.html`: `(e.ctrlKey||e.metaKey) && isC
+/// && term.hasSelection()`) — the Windows Terminal resolution of the same
+/// physical key doing two jobs: **Ctrl+C copies when there IS a selection,
+/// else it falls through to SIGINT.** Ctrl+Shift+C is an explicit, unambiguous
+/// copy that never interrupts, selection or not — for the times a selection
+/// exists but the plain combo feels ambiguous.
+///
+/// Desktop hardware-keyboard only (touch has #49's long-press menu instead).
+/// Pure/testable without any widget — [desktop] and the modifier states are
+/// passed in rather than read from `HardwareKeyboard`/`Platform` here.
+bool terminalCopyShortcutTriggered({
+  required bool desktop,
+  required bool ctrlOrCmdPressed,
+  required bool shiftPressed,
+  required bool hasSelection,
+}) {
+  if (!desktop || !ctrlOrCmdPressed) return false;
+  return shiftPressed || hasSelection;
+}
+
 /// A staged compose-bar image attachment (#29): the thumbnail [bytes] shown in
 /// the removable chip, and the server [path] delivered to Claude on submit.
 class _ComposeAttachment {
@@ -1002,19 +1042,41 @@ class _SessionScreenState extends State<SessionScreen>
     if (mounted) setState(() {});
   }
 
-  /// Copies the current long-press selection to the clipboard (owner
-  /// priority: fix broken copy/paste). Mirrors xterm's own
-  /// `CopySelectionTextIntent` handler, invoked directly since there's no
-  /// hardware keyboard shortcut on a phone to trigger it.
+  /// Copies the current selection to the clipboard (owner priority: fix
+  /// broken copy/paste) — invoked by the on-selection toolbar, #49's
+  /// right-click/long-press menu, and #52's Ctrl+C / Ctrl+Shift+C shortcut.
+  /// The actual clipboard write is [copyTerminalSelection] (the SSOT all
+  /// three share); this just adds the "Copied" snackbar on top.
   void _copySelection() {
-    final selection = _terminalController.selection;
-    if (selection == null) return;
-    final text = _terminal.buffer.getText(selection);
-    Clipboard.setData(ClipboardData(text: text));
-    _terminalController.clearSelection();
+    final text = copyTerminalSelection(_terminal, _terminalController);
+    if (text == null) return;
     ScaffoldMessenger.of(context).showSnackBar(
       const SnackBar(content: Text('Copied'), duration: Duration(seconds: 1)),
     );
+  }
+
+  /// The terminal's Ctrl+C / Ctrl+Shift+C handler (#52), wired as
+  /// [TerminalView.onKeyEvent] — which `terminal_view.dart` calls BEFORE its
+  /// own default shortcuts (Ctrl+Shift+C copy) and before `Terminal.keyInput`
+  /// (bare Ctrl+C → SIGINT). Returning [KeyEventResult.handled] here pre-empts
+  /// both, so copying never also leaks a `c` or `\x03` to the PTY; returning
+  /// `ignored` for a bare Ctrl+C with no selection lets both run normally, so
+  /// `\x03` still reaches the PTY exactly as before (#11 must not regress).
+  KeyEventResult _handleTerminalCopyShortcut(FocusNode node, KeyEvent event) {
+    if (event is! KeyDownEvent || event.logicalKey != LogicalKeyboardKey.keyC) {
+      return KeyEventResult.ignored;
+    }
+    final hw = HardwareKeyboard.instance;
+    final triggered = terminalCopyShortcutTriggered(
+      desktop: isDesktopPlatform(),
+      ctrlOrCmdPressed:
+          Platform.isMacOS ? hw.isMetaPressed : hw.isControlPressed,
+      shiftPressed: hw.isShiftPressed,
+      hasSelection: _terminalController.selection != null,
+    );
+    if (!triggered) return KeyEventResult.ignored;
+    _copySelection();
+    return KeyEventResult.handled;
   }
 
   /// Pastes clipboard text into the terminal PTY (#49 context-menu Paste).
@@ -2038,6 +2100,11 @@ class _SessionScreenState extends State<SessionScreen>
                             // system browser (additive — focus/keyboard still run
                             // via the view's own tap-down handler).
                             onTapUp: _onTerminalTapUp,
+                            // #52: Ctrl+C copies the selection (else falls through
+                            // to the terminal's own SIGINT handling); Ctrl+Shift+C
+                            // always copies. Runs before xterm's own shortcuts/key
+                            // input — see `_handleTerminalCopyShortcut`.
+                            onKeyEvent: _handleTerminalCopyShortcut,
                           ),
                         ),
                       ),

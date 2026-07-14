@@ -16,6 +16,8 @@
 /// order always changes, it's confusing". See [groupSessionsByServer].
 library;
 
+import 'dart:async';
+
 import 'package:flutter/material.dart';
 import 'package:shared_preferences/shared_preferences.dart';
 
@@ -75,6 +77,25 @@ class _DashboardScreenState extends State<DashboardScreen> {
     super.initState();
     _loadCollapsed();
     _loadAgentCatalog();
+    unawaited(_migrateFavoritesOnce());
+  }
+
+  /// One-shot push of any pre-#60 local favorites up to the server that owns
+  /// each session (see [FavoritesService]). Fire-and-forget: waits for
+  /// whatever session list is/becomes available (the cached instant-paint
+  /// list if one's already loaded, otherwise the first live fetch), then
+  /// migrates and — only if anything was actually pushed — triggers one more
+  /// refresh so the pinned group reflects the newly-server-side favorites.
+  Future<void> _migrateFavoritesOnce() async {
+    var sessions = SessionRepository.instance.current;
+    if (sessions.isEmpty) {
+      sessions = await SessionRepository.instance.sessions.first;
+    }
+    final migrated = await FavoritesService.migrateOnce(
+      sessions,
+      supportsFavorites: SessionRepository.instance.supportsFavorites,
+    );
+    if (migrated) await SessionRepository.instance.refresh();
   }
 
   /// Seed the agent catalogue so each session row can chip its agent. Every server
@@ -153,8 +174,10 @@ class _DashboardScreenState extends State<DashboardScreen> {
 
   /// Builds one session row. Used for both the pinned favorites group and
   /// the main per-server list so both get identical status/api-error
-  /// treatment and actions — [favoriteRow] only changes the star's initial
-  /// (always-filled) state.
+  /// treatment and actions — [favoriteRow] only distinguishes the two
+  /// groups' widget keys (a favorited session renders in BOTH at once).
+  /// `isFavorite`/the star's PATCH both come straight off [Session.favorite]
+  /// (server truth, #60) — there is no local list to fall back to.
   Widget _buildCard(
     BuildContext context,
     Session session, {
@@ -177,8 +200,7 @@ class _DashboardScreenState extends State<DashboardScreen> {
       selected: widget.selectedId == session.id,
       attentionKind: attentionKind,
       apiError: SessionRepository.instance.apiErrorFor(session.id),
-      isFavorite:
-          favoriteRow || FavoritesService.instance.isFavorite(session.id),
+      isFavorite: session.favorite,
       onTap: () => _openSession(session),
       onLongPress: openActions,
       onMoreTap: openActions,
@@ -192,7 +214,15 @@ class _DashboardScreenState extends State<DashboardScreen> {
       onAttentionDismiss: attentionKind == null
           ? null
           : () => SessionRepository.instance.dismissAttention(session),
-      onToggleFavorite: () => FavoritesService.instance.toggle(session.id),
+      // #60: the star is offered only when this session's OWNING server
+      // advertises `favorites-sync` — an older server without the route
+      // never receives a PATCH it can't handle (`onToggleFavorite: null`
+      // hides the star entirely, same treatment SessionCard already gives a
+      // caller that omits it).
+      onToggleFavorite:
+          SessionRepository.instance.supportsFavorites(session.server.baseUrl)
+          ? () => _toggleFavorite(context, session)
+          : null,
       onBellTap: () => showNotifyLevelPicker(
         context,
         session,
@@ -216,6 +246,30 @@ class _DashboardScreenState extends State<DashboardScreen> {
               ),
             ),
     );
+  }
+
+  /// Toggles [session]'s pin (#60): PATCHes the server that OWNS it
+  /// (`ApiClient.setFavorite`) then re-reads via a full repository refresh —
+  /// the star never renders a local guess, only the server's confirmed
+  /// answer. No `rank` is sent: the OWNING server assigns a monotonic
+  /// wall-clock rank itself when pinning (see `Session.pinnedOrder`'s doc) —
+  /// this client never invents a position from the partial set of peers it
+  /// can currently see. On failure (e.g. the owning server just went
+  /// offline), nothing is mutated locally — there is no optimistic flip to
+  /// revert — and the failure is surfaced via a SnackBar, matching every
+  /// other session mutation in this screen (rename/kill/notify-level, see
+  /// session_action_sheet.dart).
+  Future<void> _toggleFavorite(BuildContext context, Session session) async {
+    try {
+      await ApiClient(session.server).setFavorite(session.id, !session.favorite);
+      await SessionRepository.instance.refresh();
+    } catch (e) {
+      if (context.mounted) {
+        ScaffoldMessenger.of(
+          context,
+        ).showSnackBar(SnackBar(content: Text('Favorite failed: $e')));
+      }
+    }
   }
 
   /// A server group's rows as a reorderable sliver (issue #22). Rows are dragged
@@ -324,19 +378,17 @@ class _DashboardScreenState extends State<DashboardScreen> {
                       // Pinned favorites — cross-server, unaffected by the
                       // server filter chips above (mirrors the web sidebar,
                       // where the favorites group always spans every server).
+                      // Membership + order are server truth (#60,
+                      // Session.favorite/favoriteRank) — no local stream to
+                      // wrap this in.
                       SliverToBoxAdapter(
-                        child: StreamBuilder<List<String>>(
-                          stream: FavoritesService.instance.favorites,
-                          initialData: FavoritesService.instance.current,
-                          builder: (context, favSnapshot) => FavoritesGroup(
-                            order: favSnapshot.data ?? const <String>[],
-                            sessions: sessions,
-                            cardBuilder: (context, s) =>
-                                _buildCard(context, s, favoriteRow: true),
-                            collapsed: _isCollapsed(kFavoritesGroupKey),
-                            onToggleCollapsed: () =>
-                                _toggleCollapsed(kFavoritesGroupKey),
-                          ),
+                        child: FavoritesGroup(
+                          sessions: sessions,
+                          cardBuilder: (context, s) =>
+                              _buildCard(context, s, favoriteRow: true),
+                          collapsed: _isCollapsed(kFavoritesGroupKey),
+                          onToggleCollapsed: () =>
+                              _toggleCollapsed(kFavoritesGroupKey),
                         ),
                       ),
                       if (visible!.isEmpty)

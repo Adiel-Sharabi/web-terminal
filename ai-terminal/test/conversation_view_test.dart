@@ -7,6 +7,7 @@ import 'package:flutter/material.dart';
 import 'package:flutter/services.dart';
 import 'package:flutter_test/flutter_test.dart';
 
+import 'package:ai_terminal/api/agent_catalog.dart';
 import 'package:ai_terminal/api/api_client.dart';
 import 'package:ai_terminal/api/models.dart';
 import 'package:ai_terminal/theme/app_theme.dart';
@@ -65,6 +66,109 @@ void main() {
     expect(find.text('hello there'), findsOneWidget);
     expect(find.textContaining('Hi! How can I help'), findsOneWidget);
   });
+
+  testWidgets(
+    '#54: a user turn and an agent turn are distinguished by alignment, '
+    'bubble width, and a role tag naming the agent from the SERVER registry '
+    '(never a hardcoded Claude/Codex palette)',
+    (tester) async {
+      // GET /api/agents via AgentCatalog is the SSOT for an agent's label +
+      // tint — seed it the way a real launch does.
+      AgentCatalog.instance.clear();
+      AgentCatalog.instance.adopt(
+        const AgentInfo(id: 'codex', label: 'Codex', color: '#10a37f'),
+      );
+      addTearDown(AgentCatalog.instance.clear);
+
+      final page = TranscriptPage(
+        messages: const [
+          TranscriptTurn(
+            role: 'user',
+            text: 'hello there',
+            toolUses: [],
+            ts: null,
+          ),
+          TranscriptTurn(
+            role: 'assistant',
+            text: 'Hi! How can I help?',
+            toolUses: [],
+            ts: null,
+          ),
+        ],
+        cursor: null,
+        hasMore: false,
+      );
+      final session = Session(
+        id: 'sess-1',
+        name: 'proj',
+        cwd: '/x',
+        status: 'idle',
+        claudeSessionId: 'claude-1',
+        lastActivity: 1,
+        notifyLevel: 'important',
+        server: _server(),
+        autoCommand: '',
+        agent: 'codex',
+      );
+
+      await tester.pumpWidget(
+        _wrap(
+          ConversationView(
+            session: session,
+            fetchPage: (id, {before, limit}) async => page,
+          ),
+        ),
+      );
+      await tester.pumpAndSettle();
+
+      // Role tags: "You" for the user turn; the CATALOGUE's label (not a
+      // string this client invented) for the agent turn.
+      expect(find.text('You'), findsOneWidget);
+      expect(find.text('Codex'), findsOneWidget);
+
+      // Alignment: the two turns sit on opposite sides — never the same side.
+      final userAlign = tester.widget<Align>(
+        find
+            .ancestor(
+              of: find.text('hello there'),
+              matching: find.byType(Align),
+            )
+            .first,
+      );
+      final agentAlign = tester.widget<Align>(
+        find
+            .ancestor(
+              of: find.textContaining('Hi! How can I help'),
+              matching: find.byType(Align),
+            )
+            .first,
+      );
+      expect(userAlign.alignment, Alignment.centerRight);
+      expect(agentAlign.alignment, Alignment.centerLeft);
+
+      // Width: the user turn is a bounded "landmark" bubble; the agent turn
+      // is allowed to run essentially full width so its code/tool content is
+      // never squeezed into a narrow bubble.
+      final userBox = tester.widget<ConstrainedBox>(
+        find
+            .ancestor(
+              of: find.text('hello there'),
+              matching: find.byType(ConstrainedBox),
+            )
+            .first,
+      );
+      final agentBox = tester.widget<ConstrainedBox>(
+        find
+            .ancestor(
+              of: find.textContaining('Hi! How can I help'),
+              matching: find.byType(ConstrainedBox),
+            )
+            .first,
+      );
+      expect(userBox.constraints.maxWidth, lessThan(700));
+      expect(agentBox.constraints.maxWidth, double.infinity);
+    },
+  );
 
   testWidgets('renders a fenced code block with a copy button', (tester) async {
     final page = TranscriptPage(
@@ -876,5 +980,209 @@ void main() {
     expect(find.text('message number 39'), findsOneWidget);
     // The very first turn should have scrolled out of view.
     expect(find.text('message number 0'), findsNothing);
+  });
+
+  group('#47: scrolling up to load older history must not snap to the bottom', () {
+    List<TranscriptTurn> genTurns(String prefix, int count) => List.generate(
+          count,
+          (i) => TranscriptTurn(
+            role: i.isEven ? 'user' : 'assistant',
+            text: '${prefix}_$i',
+            toolUses: const [],
+            ts: null,
+          ),
+        );
+
+    testWidgets(
+      'the viewport stays anchored near the insertion point, not at maxScrollExtent',
+      (tester) async {
+        final newest = genTurns('NEWEST', 30);
+        final older = genTurns('OLDER', 30);
+
+        Future<TranscriptPage> fetch(
+          String id, {
+          String? before,
+          int? limit,
+        }) async {
+          if (before == 'cur1') {
+            return TranscriptPage(messages: older, cursor: null, hasMore: false);
+          }
+          return TranscriptPage(messages: newest, cursor: 'cur1', hasMore: true);
+        }
+
+        await tester.pumpWidget(
+          _wrap(ConversationView(session: _session(), fetchPage: fetch)),
+        );
+        await tester.pumpAndSettle();
+
+        // Pinned to bottom initially — no jump-to-bottom FAB.
+        expect(find.byIcon(Icons.keyboard_double_arrow_down), findsNothing);
+
+        final controller =
+            tester.widget<ListView>(find.byType(ListView)).controller!;
+
+        // Scroll all the way to the top — this is the real trigger path:
+        // _onScroll sees pixels near 0 and calls _loadOlder().
+        controller.jumpTo(0);
+        await tester.pumpAndSettle();
+
+        // The older page is now in the tree.
+        expect(find.textContaining('OLDER_0'), findsOneWidget);
+
+        // The anchor correction must land the viewport far from the bottom —
+        // not "somewhere", but specifically NOT snapped to the newest turn.
+        final pos = controller.position;
+        expect(pos.maxScrollExtent - pos.pixels, greaterThan(100));
+      },
+    );
+
+    testWidgets(
+      'a status refresh landing right after the older-page load does not '
+      'yank the view down to the newest turn (the reported #47 symptom)',
+      (tester) async {
+        final newestV1 = genTurns('NEWEST', 30);
+        // Same 30 turns but the last one's text changed — models a realistic
+        // "content updated" refresh without changing the page length (a
+        // length change hits an unrelated pre-existing edge case in
+        // _refreshLastPage's tail-window bookkeeping, out of scope for #47).
+        final newestV2 = [
+          ...newestV1.sublist(0, 29),
+          const TranscriptTurn(
+            role: 'assistant',
+            text: 'NEWEST_29_UPDATED',
+            toolUses: [],
+            ts: null,
+          ),
+        ];
+        final older = genTurns('OLDER', 30);
+
+        ScrollController? controller;
+        var refreshCalls = 0;
+
+        Future<TranscriptPage> fetch(
+          String id, {
+          String? before,
+          int? limit,
+        }) async {
+          if (before == 'cur1') {
+            // Fault-injection: simulate the exact race #47 hinges on — some
+            // scroll notification reporting "at the bottom" in the narrow
+            // window between the older-page fetch resolving and _loadOlder's
+            // own anchor-preserving jumpTo (see the PRIME SUSPECT comment on
+            // _loadOlder in conversation_view.dart). This deterministically
+            // reproduces, from a widget test, a race that would otherwise
+            // depend on real ListView layout timing we cannot control here.
+            // Yielding first (a real microtask hop) lands the injected jumpTo
+            // on a LATER event-loop turn, outside the caller's own jumpTo
+            // call stack — a realistic race, not risky re-entrant recursion.
+            if (controller != null && controller!.hasClients) {
+              await Future<void>.delayed(Duration.zero);
+              controller!.jumpTo(controller!.position.maxScrollExtent);
+            }
+            return TranscriptPage(messages: older, cursor: null, hasMore: false);
+          }
+          refreshCalls++;
+          return TranscriptPage(
+            messages: refreshCalls == 1 ? newestV1 : newestV2,
+            cursor: 'cur1',
+            hasMore: true,
+          );
+        }
+
+        Session sess(int lastActivity) => Session(
+              id: 'sess-1',
+              name: 'proj',
+              cwd: '/x',
+              status: 'idle',
+              claudeSessionId: 'claude-1',
+              lastActivity: lastActivity,
+              notifyLevel: 'important',
+              server: _server(),
+              autoCommand: '',
+            );
+        Widget build(Session s) => _wrap(
+              ConversationView(
+                key: const ValueKey('cv-47'),
+                session: s,
+                fetchPage: fetch,
+              ),
+            );
+
+        await tester.pumpWidget(build(sess(1000)));
+        await tester.pumpAndSettle();
+        controller = tester.widget<ListView>(find.byType(ListView)).controller;
+
+        // Scroll to the top -> _loadOlder runs, and the stub above injects
+        // the fault-simulated "at bottom" scroll signal mid-fetch.
+        controller!.jumpTo(0);
+        await tester.pumpAndSettle();
+        expect(find.textContaining('OLDER_0'), findsOneWidget);
+
+        // The fault must not have stuck: the jump-to-bottom FAB (shown
+        // whenever _pinnedToBottom is false) must still be present — proving
+        // the transient mis-latch was corrected, not left to fool the next
+        // refresh.
+        expect(find.byIcon(Icons.keyboard_double_arrow_down), findsOneWidget);
+
+        // A status refresh lands right after (mirrors the real 4s poll / any
+        // lastActivity-driven _refreshLastPage while the user is still
+        // reading older history).
+        await tester.pumpWidget(build(sess(2000)));
+        await tester.pumpAndSettle();
+
+        // Fresh content arrived while not pinned to the bottom, so it must
+        // surface as the "New" pill, never as an auto-scroll-to-bottom (the
+        // literal #47 complaint: "every attempt to page back bounces the
+        // user to the bottom"). Note: this deliberately checks the
+        // _pinnedToBottom-driven UI state rather than raw scroll pixels —
+        // the fault injection above moves the real ScrollController position
+        // as a side effect, which would contaminate a pixel-distance
+        // assertion here regardless of the fix.
+        expect(find.text('New'), findsOneWidget);
+        // The jump-to-bottom FAB is superseded by the "New" pill once shown
+        // (both mean "not pinned"; the pill wins the UI slot) — confirms this
+        // isn't coincidentally still showing the FAB from before.
+        expect(find.byIcon(Icons.keyboard_double_arrow_down), findsNothing);
+      },
+    );
+
+    testWidgets(
+      'a SHORT transcript that fits the viewport (nothing to scroll) does '
+      'not un-pin even though _loadOlder fires (#47 edge case)',
+      (tester) async {
+        // Only a couple of short turns — must fit entirely inside the 600px
+        // viewport from _wrap, so maxScrollExtent stays 0 and the top/bottom
+        // edge thresholds in _onScroll coincide. hasMore:true means older
+        // history genuinely exists beyond this short initial page, so the
+        // jump-to-bottom-on-load can still trigger _loadOlder purely from
+        // that threshold overlap — never from the user actually scrolling.
+        final newest = genTurns('NEWEST', 2);
+        final older = genTurns('OLDER', 10);
+
+        Future<TranscriptPage> fetch(
+          String id, {
+          String? before,
+          int? limit,
+        }) async {
+          if (before == 'cur1') {
+            return TranscriptPage(messages: older, cursor: null, hasMore: false);
+          }
+          return TranscriptPage(messages: newest, cursor: 'cur1', hasMore: true);
+        }
+
+        await tester.pumpWidget(
+          _wrap(ConversationView(session: _session(), fetchPage: fetch)),
+        );
+        await tester.pumpAndSettle();
+
+        // The older page did load (proving _loadOlder really fired from the
+        // threshold overlap, not that this test is vacuous).
+        expect(find.textContaining('OLDER_0'), findsOneWidget);
+
+        // Still pinned to the bottom — no jump-to-bottom FAB — because there
+        // was nothing to scroll away from; the reader never left the bottom.
+        expect(find.byIcon(Icons.keyboard_double_arrow_down), findsNothing);
+      },
+    );
   });
 }

@@ -16,7 +16,6 @@ import 'services/notification_service.dart';
 import 'services/push_service.dart';
 import 'services/server_store.dart';
 import 'services/session_repository.dart';
-import 'services/favorites_service.dart';
 import 'theme/app_theme.dart';
 
 /// Lets the notification-tap listener navigate without a `BuildContext`.
@@ -64,9 +63,11 @@ Future<void> main(List<String> args) async {
     await Firebase.initializeApp();
     await PushService.init();
   }
-  // Pre-warm the favorites and server stores so the dashboard's pinned group
-  // and server list are already loaded on the first frame.
-  await FavoritesService.instance.init();
+  // Pre-warm the server store so the dashboard's server list is already
+  // loaded on the first frame. The pinned Favorites group needs no local
+  // pre-warm (#60): favorite/favoriteRank ride on Session itself, straight
+  // from the server — DashboardScreen's own migrateOnce handles the old
+  // per-device list, if any.
   await ServerStore.instance.init();
   runApp(AiTerminalApp(detached: detached));
 }
