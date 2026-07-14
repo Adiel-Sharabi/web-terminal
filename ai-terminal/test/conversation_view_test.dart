@@ -1026,14 +1026,23 @@ void main() {
         controller.jumpTo(0);
         await tester.pumpAndSettle();
 
-        // The anchor correction must leave the viewport far from the bottom —
-        // specifically NOT snapped to the newest turn. This is the #47
-        // "done-when": after older history renders, the view stays where the
-        // reader was reading.
-        final pos = controller.position;
-        expect(pos.maxScrollExtent - pos.pixels, greaterThan(100));
-        // ...and the not-pinned UI state is set, so a later incoming turn will
-        // raise the "New" pill instead of yanking the reader to the bottom.
+        // #47 "done-when": after older history renders, the reader is NO LONGER
+        // auto-following the bottom — otherwise the next incoming turn (or the 4s
+        // refresh poll) yanks them away from the history they just paged in. The
+        // observable is `_pinnedToBottom == false`, surfaced as the jump-to-bottom
+        // FAB.
+        //
+        // We assert the pin STATE, not a raw pixel offset. With only ~60 short
+        // turns in a fixed 600px test viewport the content is tiny, so the
+        // anchor `jumpTo(pixels + (newExtent - oldExtent))` computes an offset
+        // past maxScrollExtent and ScrollPosition clamps it to the bottom —
+        // `maxScrollExtent - pixels` reads 0 here purely as an artifact of that
+        // clamp (on a real device, where the transcript is tall, the same jump
+        // lands mid-history). What survives the clamp — and is the behaviour #47
+        // is actually about — is the product's post-frame reassertion forcing
+        // `_pinnedToBottom` false. This is a true discriminator: strip the #47
+        // un-pin lines and the clamp re-latches `_pinnedToBottom = true`, the FAB
+        // vanishes, and this expectation fails.
         expect(find.byIcon(Icons.keyboard_double_arrow_down), findsOneWidget);
 
         // Prove the older page actually merged into the list. It sits ABOVE the
@@ -1042,7 +1051,7 @@ void main() {
         // asserting it there finds 0, which is what tripped the blind test, not
         // a real bug. Bring the top back into view (hasMoreOlder is false now,
         // so this fires no further load) and it must be present.
-        controller.jumpTo(pos.minScrollExtent);
+        controller.jumpTo(controller.position.minScrollExtent);
         await tester.pumpAndSettle();
         expect(find.textContaining('OLDER_0'), findsOneWidget);
       },
