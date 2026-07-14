@@ -1,126 +1,254 @@
+// Unit tests for FavoritesService.migrateOnce — the #60 one-shot migration
+// of the OLD per-device favorites list up to the server that owns each
+// session. FavoritesService itself holds no state and is no longer a source
+// of truth; these tests exercise the migration logic directly, mocking the
+// network via an injected ApiClient factory (mirrors SessionRepository's own
+// ApiClientFactory seam).
 import 'dart:convert';
 
+import 'package:ai_terminal/api/api_client.dart';
+import 'package:ai_terminal/api/models.dart';
 import 'package:ai_terminal/services/favorites_service.dart';
 import 'package:flutter_test/flutter_test.dart';
+import 'package:http/http.dart' as http;
+import 'package:http/testing.dart';
 import 'package:shared_preferences/shared_preferences.dart';
 
-/// Builds a fresh, loaded, isolated service over the given initial prefs.
-Future<FavoritesService> _loaded([Map<String, Object> initial = const {}]) async {
-  SharedPreferences.setMockInitialValues(initial);
-  final svc = FavoritesService.forTest();
-  await svc.init();
-  return svc;
-}
+const _server =
+    ServerConfig(name: 'Home', baseUrl: 'http://x:7785', bearerToken: 'tok');
 
-List<String> _stored(SharedPreferences prefs) {
-  final raw = prefs.getString(FavoritesService.storageKey);
-  return raw == null
-      ? const <String>[]
-      : (jsonDecode(raw) as List).map((e) => e.toString()).toList();
-}
+Session _session(
+  String id, {
+  bool favorite = false,
+  int? favoriteRank,
+  ServerConfig server = _server,
+}) => Session(
+  id: id,
+  name: 'n-$id',
+  cwd: '/w/$id',
+  status: 'idle',
+  claudeSessionId: null,
+  lastActivity: 1,
+  notifyLevel: 'important',
+  server: server,
+  autoCommand: '',
+  favorite: favorite,
+  favoriteRank: favoriteRank,
+);
 
 void main() {
   TestWidgetsFlutterBinding.ensureInitialized();
 
-  group('FavoritesService', () {
-    test('loads an existing ordered list from prefs', () async {
-      final svc = await _loaded({
-        FavoritesService.storageKey: jsonEncode(['b', 'a', 'c'])
+  group('FavoritesService.migrateOnce', () {
+    test('no-op and returns false when there was never a local list', () async {
+      SharedPreferences.setMockInitialValues({});
+      final migrated = await FavoritesService.migrateOnce(
+        [_session('a')],
+        supportsFavorites: (_) => true,
+        clientFactory: (s) => ApiClient(
+          s,
+          httpClient:
+              MockClient((_) async => throw StateError('must not be called')),
+        ),
+      );
+      expect(migrated, isFalse);
+    });
+
+    test('PATCHes each resolvable id to its owning server, then clears the key',
+        () async {
+      SharedPreferences.setMockInitialValues({
+        FavoritesService.storageKey: jsonEncode(['a', 'b']),
       });
-      expect(svc.current, ['b', 'a', 'c']);
-      expect(svc.isFavorite('a'), isTrue);
-      expect(svc.isFavorite('z'), isFalse);
-      await svc.dispose();
+      final patched = <String, Map<String, dynamic>>{};
+      ApiClient factory(ServerConfig s) => ApiClient(
+            s,
+            httpClient: MockClient((req) async {
+              if (req.method == 'PATCH') {
+                patched[req.url.pathSegments[2]] =
+                    jsonDecode(req.body) as Map<String, dynamic>;
+                return http.Response('{"ok":true}', 200);
+              }
+              return http.Response('', 404);
+            }),
+          );
+
+      final migrated = await FavoritesService.migrateOnce(
+        [_session('a'), _session('b')],
+        supportsFavorites: (_) => true,
+        clientFactory: factory,
+      );
+
+      expect(migrated, isTrue);
+      expect(patched.keys, containsAll(['a', 'b']));
+      // Ranks are wall-clock timestamps assigned by the client during
+      // migration (see class doc) — one per id, strictly increasing in the
+      // local list's order — rather than any fixed literal.
+      expect(patched['a']!['favorite'], isTrue);
+      expect(patched['b']!['favorite'], isTrue);
+      final rankA = patched['a']!['rank'] as int;
+      final rankB = patched['b']!['rank'] as int;
+      expect(rankB, rankA + 1);
+
+      // Permanently cleared — a second call is a no-op even with the same
+      // (now stale) session list.
+      expect(
+        (await SharedPreferences.getInstance())
+            .getString(FavoritesService.storageKey),
+        isNull,
+      );
+      final second = await FavoritesService.migrateOnce(
+        [_session('a'), _session('b')],
+        supportsFavorites: (_) => true,
+        clientFactory: (s) => ApiClient(
+          s,
+          httpClient:
+              MockClient((_) async => throw StateError('must not be called')),
+        ),
+      );
+      expect(second, isFalse);
     });
 
-    test('empty / missing key → empty list', () async {
-      final svc = await _loaded();
-      expect(svc.current, isEmpty);
-      await svc.dispose();
-    });
-
-    test('toggle appends when absent and persists', () async {
-      final svc = await _loaded();
-      await svc.toggle('a');
-      await svc.toggle('b');
-      expect(svc.current, ['a', 'b']);
-      expect(_stored(await SharedPreferences.getInstance()), ['a', 'b']);
-      await svc.dispose();
-    });
-
-    test('toggle removes when present, keeping the rest in order', () async {
-      final svc = await _loaded({
-        FavoritesService.storageKey: jsonEncode(['a', 'b', 'c'])
+    test('never PATCHes a session whose server lacks favorites-sync', () async {
+      SharedPreferences.setMockInitialValues({
+        FavoritesService.storageKey: jsonEncode(['a']),
       });
-      await svc.toggle('b');
-      expect(svc.current, ['a', 'c']);
-      expect(_stored(await SharedPreferences.getInstance()), ['a', 'c']);
-      await svc.dispose();
+      var called = false;
+      final migrated = await FavoritesService.migrateOnce(
+        [_session('a')],
+        supportsFavorites: (_) => false, // old server — no route
+        clientFactory: (s) => ApiClient(
+          s,
+          httpClient: MockClient((_) async {
+            called = true;
+            return http.Response('{"ok":true}', 200);
+          }),
+        ),
+      );
+      expect(migrated, isFalse);
+      expect(called, isFalse);
     });
 
-    test('toggle re-adds a removed id to the END', () async {
-      final svc = await _loaded({
-        FavoritesService.storageKey: jsonEncode(['a', 'b', 'c'])
+    test('skips an id the server already holds as a favorite', () async {
+      SharedPreferences.setMockInitialValues({
+        FavoritesService.storageKey: jsonEncode(['a']),
       });
-      await svc.toggle('a'); // remove
-      await svc.toggle('a'); // re-add
-      expect(svc.current, ['b', 'c', 'a']);
-      await svc.dispose();
+      var called = false;
+      final migrated = await FavoritesService.migrateOnce(
+        [_session('a', favorite: true, favoriteRank: 3)],
+        supportsFavorites: (_) => true,
+        clientFactory: (s) => ApiClient(
+          s,
+          httpClient: MockClient((_) async {
+            called = true;
+            return http.Response('{"ok":true}', 200);
+          }),
+        ),
+      );
+      expect(migrated, isFalse);
+      expect(called, isFalse);
     });
 
-    test('setOrder replaces the order and persists', () async {
-      final svc = await _loaded({
-        FavoritesService.storageKey: jsonEncode(['a', 'b', 'c'])
+    test('an id whose session cannot currently be resolved is simply dropped',
+        () async {
+      SharedPreferences.setMockInitialValues({
+        FavoritesService.storageKey: jsonEncode(['gone', 'a']),
       });
-      await svc.setOrder(['c', 'a', 'b']);
-      expect(svc.current, ['c', 'a', 'b']);
-      expect(_stored(await SharedPreferences.getInstance()), ['c', 'a', 'b']);
-      await svc.dispose();
+      final patched = <String>[];
+      final migrated = await FavoritesService.migrateOnce(
+        [_session('a')], // 'gone' isn't in the current session list
+        supportsFavorites: (_) => true,
+        clientFactory: (s) => ApiClient(
+          s,
+          httpClient: MockClient((req) async {
+            patched.add(req.url.pathSegments[2]);
+            return http.Response('{"ok":true}', 200);
+          }),
+        ),
+      );
+      expect(migrated, isTrue);
+      expect(patched, ['a']);
+      // The key is still cleared, even though 'gone' was never migrated —
+      // it cannot resurrect a pin removed elsewhere (see class doc).
+      expect(
+        (await SharedPreferences.getInstance())
+            .getString(FavoritesService.storageKey),
+        isNull,
+      );
     });
 
-    test('setOrder drops duplicates keeping first occurrence', () async {
-      final svc = await _loaded();
-      await svc.setOrder(['a', 'b', 'a', 'c', 'b']);
-      expect(svc.current, ['a', 'b', 'c']);
-      await svc.dispose();
-    });
-
-    test('emits the new list on every change', () async {
-      final svc = await _loaded();
-      final seen = <List<String>>[];
-      // Copy each emission to a plain list so the deep-equality matcher below
-      // doesn't trip over UnmodifiableListView's identity-based `==`.
-      final sub = svc.favorites.listen((e) => seen.add(e.toList()));
-      await svc.toggle('a');
-      await svc.toggle('b');
-      await svc.setOrder(['b', 'a']);
-      await Future<void>.delayed(Duration.zero);
-      // onListen replays the initial [], then one emission per change.
-      expect(seen, [
-        <String>[],
-        ['a'],
-        ['a', 'b'],
-        ['b', 'a'],
-      ]);
-      await sub.cancel();
-      await svc.dispose();
-    });
-
-    test('replays the current value to a late subscriber', () async {
-      final svc = await _loaded({
-        FavoritesService.storageKey: jsonEncode(['x', 'y'])
+    test('a per-id PATCH failure is swallowed; the key is still cleared',
+        () async {
+      SharedPreferences.setMockInitialValues({
+        FavoritesService.storageKey: jsonEncode(['a']),
       });
-      final first = await svc.favorites.first;
-      expect(first, ['x', 'y']);
-      await svc.dispose();
+      final migrated = await FavoritesService.migrateOnce(
+        [_session('a')],
+        supportsFavorites: (_) => true,
+        clientFactory: (s) =>
+            ApiClient(s, httpClient: MockClient((_) async => http.Response('', 503))),
+      );
+      expect(migrated, isFalse);
+      expect(
+        (await SharedPreferences.getInstance())
+            .getString(FavoritesService.storageKey),
+        isNull,
+      );
     });
 
-    test('current is unmodifiable', () async {
-      final svc = await _loaded({
-        FavoritesService.storageKey: jsonEncode(['a'])
+    test('assigns a wall-clock rank — independent of any existing favoriteRank',
+        () async {
+      SharedPreferences.setMockInitialValues({
+        FavoritesService.storageKey: jsonEncode(['b']),
       });
-      expect(() => svc.current.add('b'), throwsUnsupportedError);
-      await svc.dispose();
+      final patched = <String, Map<String, dynamic>>{};
+      final before = DateTime.now().millisecondsSinceEpoch;
+      final migrated = await FavoritesService.migrateOnce(
+        [
+          // An existing favorite with a small rank must NOT influence the
+          // migrated id's rank (that was the OLD, now-wrong index scheme).
+          _session('a', favorite: true, favoriteRank: 5),
+          _session('b'),
+        ],
+        supportsFavorites: (_) => true,
+        clientFactory: (s) => ApiClient(
+          s,
+          httpClient: MockClient((req) async {
+            patched[req.url.pathSegments[2]] =
+                jsonDecode(req.body) as Map<String, dynamic>;
+            return http.Response('{"ok":true}', 200);
+          }),
+        ),
+      );
+      final after = DateTime.now().millisecondsSinceEpoch;
+      expect(migrated, isTrue);
+      expect(patched['b']!['favorite'], isTrue);
+      final rank = patched['b']!['rank'] as int;
+      expect(rank, greaterThanOrEqualTo(before));
+      expect(rank, lessThanOrEqualTo(after));
+    });
+
+    test('never sends an explicit rank equal to another session\'s existing '
+        'favoriteRank by construction (wall clock, not index-based)', () async {
+      // Regression guard for the old (wrong) max+1 scheme: 'a' already holds
+      // rank 0, so an index-based "next" rank for 'b' would ALSO be a small
+      // integer that could collide cross-server. A wall-clock rank never is.
+      SharedPreferences.setMockInitialValues({
+        FavoritesService.storageKey: jsonEncode(['b']),
+      });
+      int? sentRank;
+      final migrated = await FavoritesService.migrateOnce(
+        [_session('a', favorite: true, favoriteRank: 0), _session('b')],
+        supportsFavorites: (_) => true,
+        clientFactory: (s) => ApiClient(
+          s,
+          httpClient: MockClient((req) async {
+            sentRank = (jsonDecode(req.body) as Map)['rank'] as int;
+            return http.Response('{"ok":true}', 200);
+          }),
+        ),
+      );
+      expect(migrated, isTrue);
+      expect(sentRank, greaterThan(1000000000000)); // a real wall-clock ms value
     });
   });
 }

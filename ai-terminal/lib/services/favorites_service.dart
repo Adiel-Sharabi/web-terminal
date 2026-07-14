@@ -1,128 +1,110 @@
-/// Local, per-device store of favorited session ids.
+/// One-shot migration of the OLD per-device favorites list (#60).
 ///
-/// Pure local storage — **no network**. Mirrors the web terminal, which keeps
-/// favorites in `localStorage['wt.favorites']` as an *ordered* JSON array of
-/// session-id strings; this service persists the identical shape under the same
-/// key via [SharedPreferences]. The stored order **is** the display order (the
-/// UI renders favorites top-to-bottom in this order and rewrites it on drag).
+/// Before #60, a favorite was purely local: an ordered JSON array of session
+/// ids under [FavoritesService.storageKey] in [SharedPreferences] (mirroring
+/// the web terminal's `localStorage['wt.favorites']`). That made every
+/// browser and every install its own island — starring a session on the phone
+/// did nothing on the web and vice versa, despite the UI implying otherwise.
 ///
-/// Favorites are keyed by session id (a globally-unique UUID), so a favorite is
-/// stable regardless of which cluster server the session lives on.
+/// A favorite is now a PROPERTY OF THE SESSION, stored on the server that owns
+/// it (`favorite` + `favoriteRank` ride on [Session]; see
+/// `ApiClient.setFavorite`). This class is no longer a source of truth — it
+/// exists only to push the old local list up to the server ONCE, then
+/// permanently forget it, so it can never resurrect a pin the user removed on
+/// another device.
 ///
-/// Consume it as: seed the UI with [current] and rebuild on [favorites]. The
-/// production [instance] auto-loads on first use and re-emits its current value
-/// to every new listener, so a late subscriber never misses the loaded list.
+/// [migrateOnce] is deliberately best-effort but NOT retried: the local key is
+/// cleared before/regardless of how many ids actually resolved, because
+/// leaving it around risks exactly the bug #60 fixes (a stale local id
+/// silently re-favoriting something the user deliberately unstarred
+/// elsewhere). An id whose session can't be found right now (its server is
+/// offline, or it was renamed/removed) is simply not migrated — favorites are
+/// a convenience, not data worth that risk.
 library;
 
-import 'dart:async';
 import 'dart:convert';
 
-import 'package:flutter/foundation.dart';
 import 'package:shared_preferences/shared_preferences.dart';
 
-/// Singleton store of the ordered favorite session-id list.
+import '../api/api_client.dart';
+import '../api/models.dart';
+
 class FavoritesService {
-  /// The [SharedPreferences] key holding the ordered JSON array of ids. Matches
-  /// the web terminal's `localStorage` key so the concept stays 1:1.
+  /// The [SharedPreferences] key that used to hold the ordered JSON array of
+  /// favorite ids. Read (and permanently cleared) by [migrateOnce]; nothing
+  /// else may read or write it.
   static const String storageKey = 'wt.favorites';
 
-  FavoritesService._() {
-    // The production singleton loads eagerly so [current] is populated as soon
-    // as possible; listeners still get the loaded list via the onListen replay.
-    unawaited(init());
-  }
+  FavoritesService._();
 
-  /// The shared instance (auto-loads persisted favorites on construction).
-  static final FavoritesService instance = FavoritesService._();
-
-  /// Creates an isolated, non-auto-loading instance for tests. Call [init]
-  /// yourself after `SharedPreferences.setMockInitialValues(...)`.
-  @visibleForTesting
-  FavoritesService.forTest();
-
-  late final StreamController<List<String>> _controller =
-      StreamController<List<String>>.broadcast(
-    onListen: () => scheduleMicrotask(_emit),
-  );
-
-  List<String> _ids = <String>[];
-  SharedPreferences? _prefs;
-
-  /// Broadcast stream of the ordered favorite ids. Emits on every change and
-  /// replays the current value to each new listener.
-  Stream<List<String>> get favorites => _controller.stream;
-
-  /// The current ordered favorite ids (empty until [init] has loaded them).
-  List<String> get current => List<String>.unmodifiable(_ids);
-
-  /// Whether [id] is currently favorited.
-  bool isFavorite(String id) => _ids.contains(id);
-
-  /// Loads persisted favorites and emits them. Safe to call more than once
-  /// (re-reads storage). Awaited by tests; the production [instance] calls it
-  /// automatically.
-  Future<void> init() async {
-    final prefs = await _prefsInstance();
-    _ids = _read(prefs);
-    _emit();
-  }
-
-  /// Toggles [id]: appends it to the end when absent, removes it when present.
-  /// Persists and emits the new order.
-  Future<void> toggle(String id) async {
-    final prefs = await _prefsInstance();
-    final next = List<String>.of(_ids);
-    if (next.remove(id)) {
-      // was present → now removed
-    } else {
-      next.add(id); // absent → append to the end
-    }
-    _ids = next;
-    await _persist(prefs);
-    _emit();
-  }
-
-  /// Replaces the whole order with [ids] (used by drag-reorder). Duplicates are
-  /// dropped, keeping the first occurrence, so the no-duplicates invariant
-  /// holds. Persists and emits.
-  Future<void> setOrder(List<String> ids) async {
-    final prefs = await _prefsInstance();
-    final seen = <String>{};
-    final deduped = <String>[];
-    for (final id in ids) {
-      if (seen.add(id)) deduped.add(id);
-    }
-    _ids = deduped;
-    await _persist(prefs);
-    _emit();
-  }
-
-  /// Closes the change stream. Intended for tests; the production singleton
-  /// lives for the app's lifetime.
-  @visibleForTesting
-  Future<void> dispose() => _controller.close();
-
-  // --- internals ----------------------------------------------------------
-
-  Future<SharedPreferences> _prefsInstance() async =>
-      _prefs ??= await SharedPreferences.getInstance();
-
-  List<String> _read(SharedPreferences prefs) {
+  /// Pushes any pre-#60 local favorites up to the server that owns each
+  /// session, using [sessions] (the current merged, cross-server list — e.g.
+  /// `SessionRepository.current`) to resolve each id to its owning [Session].
+  /// Only sessions whose server currently advertises `favorites-sync` are
+  /// pushed — pass `SessionRepository.instance.supportsFavorites` as
+  /// [supportsFavorites] so this never fires a PATCH at a server that can't
+  /// take it.
+  ///
+  /// Ranks are explicit wall-clock timestamps (`now + i`, one per pushed id,
+  /// in the local list's order) rather than left for each owning server to
+  /// assign independently: a plain `{favorite:true}` PATCH would let servers
+  /// racing this same migration interleave their own clocks and scramble the
+  /// list's original relative order, where a single client-chosen, strictly
+  /// increasing sequence preserves it — mirrors the web migration exactly.
+  ///
+  /// Idempotent and safe to call on every app start: a no-op after the first
+  /// successful call (or if there was never a local list), since the key is
+  /// gone. Returns `true` if anything was actually pushed, so the caller knows
+  /// a repository refresh is worth doing.
+  ///
+  /// [clientFactory] builds the [ApiClient] used for each PATCH — defaults to
+  /// the real [ApiClient.new]; tests inject a factory wrapping a mock
+  /// `http.Client` (see `SessionRepository`'s identical `ApiClientFactory`
+  /// seam) so this never touches the network in a test run.
+  static Future<bool> migrateOnce(
+    List<Session> sessions, {
+    required bool Function(String baseUrl) supportsFavorites,
+    ApiClient Function(ServerConfig server)? clientFactory,
+  }) async {
+    final buildClient = clientFactory ?? ApiClient.new;
+    final prefs = await SharedPreferences.getInstance();
     final raw = prefs.getString(storageKey);
-    if (raw == null || raw.isEmpty) return <String>[];
+    if (raw == null) return false; // already migrated, or never had any
+
+    List<String> ids;
     try {
       final decoded = jsonDecode(raw);
-      if (decoded is List) {
-        return decoded.map((e) => e.toString()).toList();
+      ids = decoded is List
+          ? decoded.map((e) => e.toString()).toList()
+          : <String>[];
+    } catch (_) {
+      ids = <String>[];
+    }
+
+    // Clear FIRST, unconditionally: a crash/kill mid-loop below must not
+    // leave this key alive to run again — see the class doc.
+    await prefs.remove(storageKey);
+    if (ids.isEmpty) return false;
+
+    final byId = {for (final s in sessions) s.id: s};
+    final base = DateTime.now().millisecondsSinceEpoch;
+    var offset = 0;
+    var pushed = false;
+    for (final id in ids) {
+      final session = byId[id];
+      if (session == null || session.favorite) {
+        continue; // unresolved right now, or the server already holds it
       }
-    } catch (_) {/* corrupt value → treat as empty */}
-    return <String>[];
-  }
-
-  Future<void> _persist(SharedPreferences prefs) =>
-      prefs.setString(storageKey, jsonEncode(_ids));
-
-  void _emit() {
-    if (!_controller.isClosed) _controller.add(List<String>.unmodifiable(_ids));
+      if (!supportsFavorites(session.server.baseUrl)) continue;
+      try {
+        await buildClient(session.server)
+            .setFavorite(id, true, rank: base + offset);
+        offset++;
+        pushed = true;
+      } catch (_) {
+        // Best-effort — this id's local pin is simply dropped (see class doc).
+      }
+    }
+    return pushed;
   }
 }

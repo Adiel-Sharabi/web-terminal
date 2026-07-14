@@ -14,9 +14,10 @@ const notifyPush = require('./lib/notify-push');
 const transcript = require('./lib/transcript');
 const agentsLib = require('./lib/agents');
 const { getAdapter } = agentsLib;
+const { rollUpUsage, METRICS_TTL_MS } = require('./lib/usage-rollup');
 const fcm = require('./lib/fcm');
 
-const SERVER_VERSION = '1.35.0'; // 2026-07-14: #61 — a main agent that stops while its SUBAGENTS are still running no longer reports the session idle, and no longer pushes "Claude is done". CAPTURED FROM THE REAL HOOK STREAM (a probe server + a project-local .claude/settings.json, so production was untouched — the docs do not describe this): a BACKGROUNDED Task returns its PostToolUse to the parent immediately, and the parent's Stop then lands SECONDS before the subagent's SubagentStop — `PreToolUse(Agent)[main] → SubagentStart[sub] → PostToolUse(Agent)[main] → Stop[main] … 13s … → SubagentStop[sub]`. That Stop was the false "done". The same capture settles the question every earlier attempt guessed at: EVERY event raised inside a subagent carries `agent_id` (+ `agent_type`) — SubagentStart/SubagentStop and the subagent's own PreToolUse/PostToolUse — and NO main-agent event does, not even the PreToolUse/PostToolUse of the Agent tool call that launches it. So "is the main agent working again?" is a fact in the payload, not an inference. The fix: (a) the whole idle decision MOVES INTO THE WORKER (armIdle/applyIdle — debounce, cancellation, /compact-recovery replay and notify wording are now ONE path). It used to be split: server.js debounced Stop for 750ms and cancelled it on any "working" event while the worker owned status, so a subagent's PreToolUse (posted under the PARENT's session id) cancelled the parent's REAL Stop before the worker ever saw it — a naive fix that counts subagents in the worker but leaves the debounce in the server therefore never receives the Stop it means to hold. (b) The worker tracks the SET of in-flight agent_ids (a set, not a counter: a duplicate SubagentStart can't double-count and a SubagentStop for an unknown id can't drive it negative). A main-agent Stop with the set non-empty is HELD (status stays working, no notify); the LAST SubagentStop releases it through the same debounce — idle, exactly one push. A SUBAGENT's tool call never invalidates a held stop; a MAIN-agent event always does (the parent demonstrably resumed, and its own next Stop will end the turn) — which is what stops a stale held stop from firing a phantom "Claude stopped" mid-turn. Tracking can't get stuck: a new UserPromptSubmit, an Esc interrupt (which now also cancels an armed idle — it otherwise still fired and could re-submit, via the /compact replay, the very prompt the user interrupted) and the 5-min stale-status guard each reset it. server.js's transform layer is now demux-only (Notification subtype → event name) and decides no status; it just passes `agent_id` through. fix-hooks.js installs all SEVEN hooks (it wrote only four — no SubagentStop, no PreToolUse/PostToolUse — which with this change would hold every Stop forever). A session with no subagents behaves exactly as before. No client change. WORKER code changed → needs a COLD restart (a server-only hot reload would leave the debounce on NEITHER side). Prior 1.34.0: #55 — the input/submit contract, enforced. (a) §5 SUBMIT: every agent TUI folds one read into a paste and swallows a trailing CR — Codex at any length, Claude once the read is big enough. Measured against the real Claude TUI with an atomic `text\r` in ONE write: 20/40/60 chars submitted, 80 and 120 did NOT; with the CR split off, every length submits. That one fact is the whole "sometimes Enter works, sometimes it doesn't" class of bug — a short test prompt submitted, a real one was typed into the prompt box and never sent. So claude.submit.crBurstsAsPaste (and the default) flip false→true: the worker now withholds the trailing CR of ANY frame that is text ending in CR and writes it alone after submit.gapMs, queueing input that arrives in the gap so order is preserved. The old ESC[201~-only special case (endsWithPasteSubmitCr) is retired — it was the same bug seen through a keyhole. Ordinary char-by-char shell typing is untouched: it sends a LONE CR, which is never split. (b) §6 INTERRUPT: pressing Esc to stop a turn left the session stuck on "Claude is working" until correctStaleStatus rescued it 5 minutes later — Claude fires NO hook on a user interrupt (Stop does not run), and worker status is otherwise hook-driven. But the worker WRITES the Esc byte itself, so it is the one component that can know: a lone 0x1b (never an arrow — see isEscapeKey) sent to a *working* session now flips it to idle at once and broadcasts statusChanged. Gated on 'working' on purpose — Esc at a permission prompt ('waiting') rejects the tool and Claude carries on. No notify push fires: the user is the one who pressed Esc. Which agents interrupt on Esc is a registry field (lib/agents.js `interrupt.onEscape`, true for claude+codex, FALSE for a plain shell so Esc in vim/less is never read as "the agent stopped") — never a branch in the worker. WORKER code changed → needs a COLD restart. Prior 1.33.1: session restore no longer loses the FIRST character of its auto-command — a freshly spawned shell can swallow the first byte written to it as it arms its terminal input (Windows ConPTY + MSYS bash entering readline). After a COLD restart, where every session restores at once and the shell is slow to settle, `claude --resume <id>` reached bash as `laude --resume <id>` ("command not found") and the session came up dead. The 100ms wait after the prompt appears was a bet on machine speed; now the worker waits AUTO_CMD_SETTLE_MS (250) and then sends a throwaway PRIME (space + DEL — readline types it and erases it, leaving the line clean with no extra prompt) before the real command, so the byte that gets eaten is spent on the prime and the command lands whole (pty-worker.js sendAutoCommand; tests/worker-auto-command.spec.js drives the real worker and asserts the prime precedes an intact command). WORKER code changed → needs a COLD restart. Prior 1.33.0: multi-line prompts submit for Claude (and every agent) — a compose buffer with a line break is sent as a bracketed paste `ESC[200~…ESC[201~\r`, and Claude's TUI absorbs a CR that lands in the SAME read as the paste close (measured: paste+CR 0/4 submits, paste + a 150ms-delayed CR 4/4), so the prompt was typed but never ran (the companion's Enter=newline / Send on mobile made this routine). The worker now splits that trailing CR for EVERY agent when a frame ends with `ESC[201~\r` (lib/submit-frames.js endsWithPasteSubmitCr), writing the block then the CR after submit.gapMs — a single-line `text\r` still passes through atomically (#44 unchanged) unless the agent is a full burst-paster (Codex). claude.submit.gapMs 60→150 (the proven paste gap; also its auto-recovery replay CR). WORKER code changed → needs a COLD restart. Prior 1.32.1: Codex prompts submit again — a prompt sent from chat (or typed+Enter in one burst) reaches the worker as ONE TYPE_PTY_IN frame ending in CR, and Codex's TUI (paste_burst.rs) folds a whole read into a PASTE, so that CR became a newline in its composer: the prompt was typed but never sent, and chat's optimistic 'Queued' bubble never reconciled. Claude Code has no such detector, which is why the atomic frame both clients send (#44 — a delayed CR can be dropped if the socket dies in the gap) looked universally correct. Measured against codex 0.144.0: a CR split off by <=30ms is still absorbed, >=60ms submits; bracketed paste does NOT exempt it (a CR right after the ESC[201~ close in the same write is absorbed too) and LF is not a submit key — only the gap matters. So each provider now declares submit: { gapMs, crBurstsAsPaste } in lib/agents.js (codex 120/true, claude 60/false, default 60/false), the pure split rule lives in lib/submit-frames.js, and pty-worker.js — the ONE component that knows both the session's agent and the raw bytes — withholds a trailing CR and writes it alone gapMs later, queueing frames that arrive during the gap so input order is preserved. Agents without the flag (Claude, plain shells) keep the byte-identical single write, so #44 still holds and their blast radius is zero. The clients are unchanged and unaware, which is why this fixes web + companion + phone at once with NO app release. Also retires the duplicated submit gap: CLAUDE_SUBMIT_GAP_MS is gone and the worker's own replay writer (auto-recovery) reads gapMs from the registry too; claudeTermWrite/claudeSubmitLine are renamed termWrite/submitLine now that they serve every agent. WORKER code changed → needs a COLD restart (a hot server-only reload leaves the old worker still eating the CR). Prior 1.32.0: Codex sessions get a Chat lens + usage badges. (a) Usage metrics for agents that RECORD their own usage: Claude PUSHES its status line to POST /api/claude-status, but Codex writes the same numbers into its rollout every turn, so a provider may now expose readMetrics(tailText) (lib/agents.js) and server.js fills the SAME `metrics: {ctx, fiveH, sevenD, model, effort}` shape from the transcript instead — which is why no client change was needed to render a Codex ctx badge. lib/metrics-codex.js is the pure parser. ctx% = last_token_usage.input_tokens / model_context_window; `total_token_usage.total_tokens` is the session's CUMULATIVE spend (millions on a long session) and would report thousands of percent, and `cached_input_tokens` is a SUBSET of input_tokens, not an addition. The 5h/7d windows are matched by window_minutes (300 / 10080), never by primary/secondary ORDER. The read is memoised on (size, mtime) so sidebar polling costs one stat, and a session whose transcript cannot be resolved is negative-cached for 60s so a Codex derivation never re-walks the rollouts tree per poll; a plain shell (agent null -> the default provider, which has no readMetrics) never touches the disk at all. Because turn_context (the model/effort labels) is written once per USER turn, a single long agent turn pushes it outside the tail, so the HEAD is read too and head+tail are scanned backward: the newest token_count still wins. (b) The web ctx tooltip is now agent-neutral. server.js-only + app.html -> HOT RELOAD (the worker is untouched). Prior 1.31.0: multi-agent support — a session now knows WHICH AI CLI agent it runs (Claude Code or Codex), and everything agent-specific lives behind ONE provider registry (lib/agents.js): per-agent transcript parser, transcript root, transcript-resolution strategy, subagent-trace capability, label + colour. Adding another CLI agent = one parser module + one registry entry; no branching in server.js / pty-worker.js / the clients. New `agent` field on sessions (persisted in sessions.json; null = plain shell, never coerced to 'claude'), accepted at POST /api/sessions (unknown value → 400) and returned on /api/sessions, /api/cluster/sessions and the transcript response. New GET /api/agents serves the catalogue so the web + companion pickers and per-agent tint need no client release when an agent is added. Codex support: lib/transcript-codex.js parses its rollout JSONL (~/.codex/sessions/YYYY/MM/DD/rollout-<iso>-<uuid>.jsonl) into the SAME typed turn shape — its tool calls are one line each (not blocks in an assistant message), `function_call.arguments` is a JSON *string*, `function_call_output.output` a plain string, and `custom_tool_call_output.output` a JSON envelope {output,metadata} that is unwrapped; event_msg lines are skipped (they restate response_item text and would double every turn). lib/codex-sessions.js resolves a rollout by cwd — Codex keys rollouts by date+uuid, never by cwd, so it reads each candidate's session_meta head line, newest-first, bounded to 200 files (win32 compare ignores case, separator and the \\?\ prefix). scanTurnsBackward gained injectable opts.parseLine/opts.extractResults (defaulting to the Claude parsers, so every existing caller is untouched) — one paginator, one cursor codec, one set of size caps across agents. safeTranscriptPath now admits a .jsonl strictly inside ANY provider's root (roots derived from the registry), applying the identical containment predicate per root — it widens WHICH files may be read, never HOW the check is made. An EXPLICIT agent is authoritative: a session declared 'claude' is never served a Codex transcript; only a session with no recorded agent (plain shell) gets cross-provider discovery. pty-worker's `/\bclaude\b/` command grep is gone — the agent id is now the SSOT for "is this a Claude session", so the #23 own-conversation-id gate runs only for real Claude sessions. WORKER code changed → needs a COLD restart (a hot server-only reload leaves the old worker without the `agent` field). Prior 1.30.0: chat-mode subagent trace — GET /api/sessions/:id/transcript now stamps each Task tool_use with a { agentType, description, running } subagent stub (present when a subagents/agent-*.meta.json links that tool_use id), and a NEW GET /api/sessions/:id/subagent/:toolUseId lazily pages that subagent's OWN transcript (reusing scanTurnsBackward — the sidechain .jsonl shares the main turn shape, so ONE parser). Lets the companion Chat view drill into a running subagent's nested tool calls, mirroring the terminal's arrow-navigable subagent panel. `running` = subagent exists but its Task has no tool_result yet. Additive + backward-compatible (older app ignores the stub; new app vs old server falls back to the flat Task card). Prior 1.29.6: #42 — Chat lens now resolves the transcript for cwds with special chars ('_'/'.'/space). The cwd→Claude-project-dir encoder was duplicated in 3 places (server deriveTranscriptPath + server detectClaudeSessionIdFromDir + pty-worker) and lossy — it only mapped '\'/'/', leaving '_'/'.'/space intact, so e.g. C:\dev\AM8_Core resolved to a non-existent C--dev-AM8_Core dir (Claude actually uses C--dev-AM8-Core) → /transcript 404 → Chat hidden. One SSOT encoder now lives in lib/transcript.js (claudeProjectDirName: replace EVERY non-alphanumeric char with '-', case preserved, verified vs ~/.claude/projects); server + pty-worker both call it, and the dead server-side detectClaudeSessionIdFromDir copy was removed. server.js hot-reloadable; the pty-worker leg needs a cold restart. Prior 1.29.5: #37b — the "finished/idle" push (notify level 'all') no longer fires while a background build / in-flight subagent is still emitting output. The idle debounce now re-checks the worker's output clock (lastActivity via getSession) when it fires: if output landed within the window the session isn't finished, so it re-arms and waits for a genuine quiet period before pushing "Claude is done" (a non-idle statusChanged still cancels). Same output-clock signal #37 gave correctStaleStatus — SSOT. server.js-only → hot-reload. Prior 1.29.4: #38 — Claude context-window % now shows on each session tab/list row (web sidebar + companion list), not only inside the session. Both list endpoints already attach per-session `metrics` (getStatusMetrics); the web sidebar (new ctxBadge helper → .sb-ctx) and the companion SessionCard now render metrics.ctx as a small badge, colored by shared warn-50/danger-70 thresholds (companion ctxColor SSOT in lib/widgets/format_utils.dart, reused by the in-session _MetricsHeader). No server logic changed — asset/version bump only. Prior 1.29.3: #37 — a session running a build / background process / in-flight subagent no longer flips to idle-green while still busy. correctStaleStatus (pty-worker.js) now requires BOTH the hook clock (lastHookActivity) AND the output clock (lastActivity, bumped on every PTY chunk) to be stale past the 5-min timeout before force-flipping working/waiting → idle: a busy session emits continuous output (build logs / Claude's spinner redraw) so it stays non-idle, while a genuinely silent hang still self-corrects (both clocks go stale). Test endpoint /api/test/age-session gains hookOnly/activityOnly to age each clock independently. WORKER code → needs a cold restart to take effect. Prior 1.29.2: #41 — desktop sidebar resize handle fixed + made discoverable. `--sb-width` is now the SINGLE source of truth for width: drag sets the custom property (was inline `style.width`, a separate path from restore-on-load's `--sb-width`); pointerup removes any lingering inline width so toggling the sidebar closed after a resize collapses correctly (was stuck at the dragged width). Handle moved inside the panel (`right:0`, no longer clipped by `overflow:hidden`) + a persistent grip pill (::before, hover/active states) — desktop only; doResize still re-fits the terminal; width clamped 160–600px. app.html-only (served asset → version bump). Prior 1.29.1: #23 (regression) — a NEW claude session in a folder that already holds older conversations no longer adopts one of them. pty-worker's cwd-newest-.jsonl detection (sessionSummary / onExit / 15s timer) now gates on the session's start time via ownClaudeSessionId(): a .jsonl is only attributed to a session if it was written at/after that session started, so a fresh session starts clean (was: mislabeled with the previous conversation's id → auto-opened the Chat lens on the old transcript). Explicit --resume <id> still honored; rename's newest-on-disk name-tracking unchanged. WORKER code → needs a cold restart to take effect. Prior 1.29.0: rich transcript tool data — GET /api/sessions/:id/transcript now includes, per tool_use, its `id`, a per-field-capped structured `input`, and the paired tool_result `result` (output). lib/transcript.js pairs results→tool_uses by id during the backward scan and exposes extractToolResults; the app renders shells (Bash cmd+output), subagents (Task desc/report), and file ops as rich cards. Backward-compatible (name/inputPreview unchanged). Prior 1.28.2: attention-clear now fires on session OPEN — the web app (app.html switchSession) calls POST /api/sessions/:id/attention/clear when foregrounding a session that has a live alert, so opening it in the browser dismisses the phone push (was mobile-only). Web also handles inbound 'clear' notify frames (drops the chip / closes the browser toast) — previously a 'clear' frame fell through to showNotification and could pop an "undefined" toast. Mobile companion (#2): opening a session now cancels its OS notification locally (NotificationService.cancelForSession) instead of relying on a dead FCM 'clear' round-trip that never fires while the app is foreground; a foreground 'clear' push is also routed to cancel. Prior 1.28.1: #25 — idle/'finished' FCM pushes are now high-priority so an 'all'-level session's finish notification wakes the phone through Android Doze (was normal-priority → deferred/dropped). Prior 1.28.0: #21 — session takeover relaxed: multiple devices now SHARE one PTY (shared I/O) by default instead of the second viewer force-disconnecting the first. Opt back into the old single-owner kick with config `exclusiveViewer: true`. Prior 1.27.0: #24 — POST /api/sessions/:id/attention/clear clears a session's attention across devices (flips recorded attention, FCM 'clear' to dismiss phone toasts, broadcasts a 'clear' notify frame so in-app viewers drop the chip); capability 'attention-clear'. Prior 1.26.1: (a) #23 fix — restore no longer appends implicit `--continue` to an unknown-id claude session (that resumed the most-recent conversation in the cwd, so a new session came up "Resumed" to the last one). Unknown-id restore now starts fresh; `--resume <own-id>` and explicit user --continue/--resume still honored (lib/restore-command.js). (b) /api/cluster/sessions cache (1500ms) is now invalidated on session create/delete/rename/reorder, so a just-created session shows in the sidebar immediately instead of after the TTL
+const SERVER_VERSION = '1.37.0'; // 2026-07-15: #60 — favorites (the pinned group) STOP BEING PER-DEVICE: the pin and its position move to the server, so every client that reads that answer shows the SAME pinned group. They were per-device by construction — an ordered id array in localStorage['wt.favorites'] on web, the same key mirrored in SharedPreferences on the companion — so every browser and every install had a different pinned group. The design decision the issue asks for: a favorite is a PROPERTY OF THE SESSION, so it is stored on the server that OWNS that session, exactly like notifyLevel — same proven shape (a small gitignored JSON file, favorites.json; GET/PATCH /api/sessions/:id/favorite behind auth; surfaced as `favorite` + `favoriteRank` on /api/sessions AND /api/cluster/sessions). No new mechanism, no 'home server', no central list: the pinned group's ORDER is DERIVED by sorting the union of every server's favorites by (favoriteRank, id), and a reorder is N small PATCHes of the ranks that actually changed, each landing on the server that owns that session. That is what makes it correct across a cluster — a pin on a peer lives on the peer and survives, and a peer that is DOWN simply contributes nothing to the union (it never wipes the list, never throws; the sidebar says its favorites are not shown rather than pretending the group is short). RANKS ARE WALL CLOCKS, ASSIGNED BY THE OWNING SERVER (nextFavoriteRank): a bare {favorite:true} gets Date.now(). They deliberately need NO global knowledge, because no component HAS any — no server holds another server's sessions and a client only sees the peers that are UP, so an "index" rank (max+1 over the visible union) reuses a rank an OFFLINE peer already holds and the group silently rearranges when it reconnects. A timestamp needs no coordination; two servers can only collide inside one millisecond, where the (rank, id) tiebreak is still deterministic. A DRAG is the one operation that sends an explicit rank, and it PERMUTES the rank values the group already holds (never renumbers to 0..N-1, which would jump every visible pin ahead of an offline peer's timestamp-ranked ones). A reorder is N writes to N INDEPENDENT servers with no transaction between them, so a partial failure is REPORTED, not papered over: every write is settled (not Promise.all, which rejects on the first failure and leaves the rest in flight → a permanently half-renumbered cluster), then the client names the server that refused and re-reads the servers' truth. MIXED FLEET IS THE NORMAL STATE (boxes upgrade one at a time), so 'favorites-sync' is a CAPABILITY (serverCapabilities() — one list, served on /api/version AND attached to every servers[] entry of /api/cluster/sessions, carrying each peer's own answer): a client checks the OWNING server's capability BEFORE offering the star, and greys it out with an "upgrade this server" tooltip instead of firing a PATCH that 404s and letting the star snap back with nothing said. A PEER MUST THEREFORE ALSO BE ON >= 1.37.0 FOR ITS SESSIONS' STARS TO SYNC. MIGRATION IS ONE SHOT: the old localStorage array is read ONCE, pushed up to the servers that own those sessions (order preserved), and then DELETED unconditionally — a surviving queue is a second source of truth that re-PATCHes favorite:true on every load and resurrects a pin the user later unstarred on another device. What could not be pushed (owner offline, or too old to have the route) is reported once — re-star it. The web client keeps NO divergent copy: the star reads s.favorite off the session list and writes the server, optimistically re-rendering from the cached payload and falling back to the server's truth if the write fails. A mutating call PROXIED to a peer now also drops our 1.5s merged-cluster cache, so a pin (or rename/kill) done on a peer does not appear to bounce back for a poll. Non-UUID session ids are rejected 404 by the route, so nothing bogus can ever become a persisted key. server.js + app.html only -> HOT RELOAD (the worker is not involved). Prior 1.36.0: 2026-07-14: #56 — the 5h/7d capacity windows move to the SERVER header row, because they were never per-session: they are ACCOUNT-wide (every session on a box shares one quota), and repeating them on every row implied a per-session budget that does not exist. ctx% stays per session — it genuinely IS per session. The roll-up is computed SERVER-SIDE (lib/usage-rollup.js — pure, unit-tested) and rides on GET /api/cluster/sessions as a `usage` block on each entry of servers[]; no client picks a max() or a freshest-of, so web + companion are two renderers of ONE fact. Quotas are PER AGENT and never merged: Claude and Codex bill separate accounts, so a single blended '5h 42%' would be a lie about both — and a server reports only the agents that actually reported on it. Two facts had to be recovered to make that possible. (a) WHEN: getStatusMetrics dropped `ts` on the floor, so the freshest report per agent was unknowable and 'is this number still true?' unanswerable; it now rides along, and an agent that RECORDS its usage instead of pushing it (Codex) gets the equivalent signal from its transcript's mtime — a property of the SOURCE, not of any agent, so nothing branches. (b) WHOSE: a report is attributed by its SOURCE, not by the session's declared agent — a user who types `claude` inside a plain shell gets a Claude conversation id pinned onto a session that declares no agent, and its status line is pushed under it all the same, so keying the quota on session.agent would silently drop those numbers. The registry now names the pusher (lib/agents.js `pushesStatus` -> statusPushAgent()) and the metric carries `agent`; server.js hardcodes no agent id anywhere. STALENESS: past the 4h metrics TTL (now ONE constant — METRICS_TTL_MS, shared by the pushed map and the roll-up) a report is UNKNOWN, and unknown renders as NOTHING — never as 0%, which would read as 'plenty left' at the exact moment we cannot say. Metrics are frozen-while-idle by design, so an idle server keeps showing its last known numbers with '3m ago' beside them; that age is the whole point of the row. A peer reports its RAW numbers on its own /api/sessions (a bare array — it cannot carry a server-level block) and the SAME rule rolls them up here: one rule for local and remote, no extra fan-out GET per poll, and a peer too old to send `ts` reports nothing rather than something wrong. An unattributable or hostile agent id from a peer can never become a key. Offline server rows are untouched. server.js + app.html only -> HOT RELOAD (the worker is not involved). Prior 1.35.0: 2026-07-14: #61 — a main agent that stops while its SUBAGENTS are still running no longer reports the session idle, and no longer pushes "Claude is done". CAPTURED FROM THE REAL HOOK STREAM (a probe server + a project-local .claude/settings.json, so production was untouched — the docs do not describe this): a BACKGROUNDED Task returns its PostToolUse to the parent immediately, and the parent's Stop then lands SECONDS before the subagent's SubagentStop — `PreToolUse(Agent)[main] → SubagentStart[sub] → PostToolUse(Agent)[main] → Stop[main] … 13s … → SubagentStop[sub]`. That Stop was the false "done". The same capture settles the question every earlier attempt guessed at: EVERY event raised inside a subagent carries `agent_id` (+ `agent_type`) — SubagentStart/SubagentStop and the subagent's own PreToolUse/PostToolUse — and NO main-agent event does, not even the PreToolUse/PostToolUse of the Agent tool call that launches it. So "is the main agent working again?" is a fact in the payload, not an inference. The fix: (a) the whole idle decision MOVES INTO THE WORKER (armIdle/applyIdle — debounce, cancellation, /compact-recovery replay and notify wording are now ONE path). It used to be split: server.js debounced Stop for 750ms and cancelled it on any "working" event while the worker owned status, so a subagent's PreToolUse (posted under the PARENT's session id) cancelled the parent's REAL Stop before the worker ever saw it — a naive fix that counts subagents in the worker but leaves the debounce in the server therefore never receives the Stop it means to hold. (b) The worker tracks the SET of in-flight agent_ids (a set, not a counter: a duplicate SubagentStart can't double-count and a SubagentStop for an unknown id can't drive it negative). A main-agent Stop with the set non-empty is HELD (status stays working, no notify); the LAST SubagentStop releases it through the same debounce — idle, exactly one push. A SUBAGENT's tool call never invalidates a held stop; a MAIN-agent event always does (the parent demonstrably resumed, and its own next Stop will end the turn) — which is what stops a stale held stop from firing a phantom "Claude stopped" mid-turn. Tracking can't get stuck: a new UserPromptSubmit, an Esc interrupt (which now also cancels an armed idle — it otherwise still fired and could re-submit, via the /compact replay, the very prompt the user interrupted) and the 5-min stale-status guard each reset it. server.js's transform layer is now demux-only (Notification subtype → event name) and decides no status; it just passes `agent_id` through. fix-hooks.js installs all SEVEN hooks (it wrote only four — no SubagentStop, no PreToolUse/PostToolUse — which with this change would hold every Stop forever). A session with no subagents behaves exactly as before. No client change. WORKER code changed → needs a COLD restart (a server-only hot reload would leave the debounce on NEITHER side). Prior 1.34.0: #55 — the input/submit contract, enforced. (a) §5 SUBMIT: every agent TUI folds one read into a paste and swallows a trailing CR — Codex at any length, Claude once the read is big enough. Measured against the real Claude TUI with an atomic `text\r` in ONE write: 20/40/60 chars submitted, 80 and 120 did NOT; with the CR split off, every length submits. That one fact is the whole "sometimes Enter works, sometimes it doesn't" class of bug — a short test prompt submitted, a real one was typed into the prompt box and never sent. So claude.submit.crBurstsAsPaste (and the default) flip false→true: the worker now withholds the trailing CR of ANY frame that is text ending in CR and writes it alone after submit.gapMs, queueing input that arrives in the gap so order is preserved. The old ESC[201~-only special case (endsWithPasteSubmitCr) is retired — it was the same bug seen through a keyhole. Ordinary char-by-char shell typing is untouched: it sends a LONE CR, which is never split. (b) §6 INTERRUPT: pressing Esc to stop a turn left the session stuck on "Claude is working" until correctStaleStatus rescued it 5 minutes later — Claude fires NO hook on a user interrupt (Stop does not run), and worker status is otherwise hook-driven. But the worker WRITES the Esc byte itself, so it is the one component that can know: a lone 0x1b (never an arrow — see isEscapeKey) sent to a *working* session now flips it to idle at once and broadcasts statusChanged. Gated on 'working' on purpose — Esc at a permission prompt ('waiting') rejects the tool and Claude carries on. No notify push fires: the user is the one who pressed Esc. Which agents interrupt on Esc is a registry field (lib/agents.js `interrupt.onEscape`, true for claude+codex, FALSE for a plain shell so Esc in vim/less is never read as "the agent stopped") — never a branch in the worker. WORKER code changed → needs a COLD restart. Prior 1.33.1: session restore no longer loses the FIRST character of its auto-command — a freshly spawned shell can swallow the first byte written to it as it arms its terminal input (Windows ConPTY + MSYS bash entering readline). After a COLD restart, where every session restores at once and the shell is slow to settle, `claude --resume <id>` reached bash as `laude --resume <id>` ("command not found") and the session came up dead. The 100ms wait after the prompt appears was a bet on machine speed; now the worker waits AUTO_CMD_SETTLE_MS (250) and then sends a throwaway PRIME (space + DEL — readline types it and erases it, leaving the line clean with no extra prompt) before the real command, so the byte that gets eaten is spent on the prime and the command lands whole (pty-worker.js sendAutoCommand; tests/worker-auto-command.spec.js drives the real worker and asserts the prime precedes an intact command). WORKER code changed → needs a COLD restart. Prior 1.33.0: multi-line prompts submit for Claude (and every agent) — a compose buffer with a line break is sent as a bracketed paste `ESC[200~…ESC[201~\r`, and Claude's TUI absorbs a CR that lands in the SAME read as the paste close (measured: paste+CR 0/4 submits, paste + a 150ms-delayed CR 4/4), so the prompt was typed but never ran (the companion's Enter=newline / Send on mobile made this routine). The worker now splits that trailing CR for EVERY agent when a frame ends with `ESC[201~\r` (lib/submit-frames.js endsWithPasteSubmitCr), writing the block then the CR after submit.gapMs — a single-line `text\r` still passes through atomically (#44 unchanged) unless the agent is a full burst-paster (Codex). claude.submit.gapMs 60→150 (the proven paste gap; also its auto-recovery replay CR). WORKER code changed → needs a COLD restart. Prior 1.32.1: Codex prompts submit again — a prompt sent from chat (or typed+Enter in one burst) reaches the worker as ONE TYPE_PTY_IN frame ending in CR, and Codex's TUI (paste_burst.rs) folds a whole read into a PASTE, so that CR became a newline in its composer: the prompt was typed but never sent, and chat's optimistic 'Queued' bubble never reconciled. Claude Code has no such detector, which is why the atomic frame both clients send (#44 — a delayed CR can be dropped if the socket dies in the gap) looked universally correct. Measured against codex 0.144.0: a CR split off by <=30ms is still absorbed, >=60ms submits; bracketed paste does NOT exempt it (a CR right after the ESC[201~ close in the same write is absorbed too) and LF is not a submit key — only the gap matters. So each provider now declares submit: { gapMs, crBurstsAsPaste } in lib/agents.js (codex 120/true, claude 60/false, default 60/false), the pure split rule lives in lib/submit-frames.js, and pty-worker.js — the ONE component that knows both the session's agent and the raw bytes — withholds a trailing CR and writes it alone gapMs later, queueing frames that arrive during the gap so input order is preserved. Agents without the flag (Claude, plain shells) keep the byte-identical single write, so #44 still holds and their blast radius is zero. The clients are unchanged and unaware, which is why this fixes web + companion + phone at once with NO app release. Also retires the duplicated submit gap: CLAUDE_SUBMIT_GAP_MS is gone and the worker's own replay writer (auto-recovery) reads gapMs from the registry too; claudeTermWrite/claudeSubmitLine are renamed termWrite/submitLine now that they serve every agent. WORKER code changed → needs a COLD restart (a hot server-only reload leaves the old worker still eating the CR). Prior 1.32.0: Codex sessions get a Chat lens + usage badges. (a) Usage metrics for agents that RECORD their own usage: Claude PUSHES its status line to POST /api/claude-status, but Codex writes the same numbers into its rollout every turn, so a provider may now expose readMetrics(tailText) (lib/agents.js) and server.js fills the SAME `metrics: {ctx, fiveH, sevenD, model, effort}` shape from the transcript instead — which is why no client change was needed to render a Codex ctx badge. lib/metrics-codex.js is the pure parser. ctx% = last_token_usage.input_tokens / model_context_window; `total_token_usage.total_tokens` is the session's CUMULATIVE spend (millions on a long session) and would report thousands of percent, and `cached_input_tokens` is a SUBSET of input_tokens, not an addition. The 5h/7d windows are matched by window_minutes (300 / 10080), never by primary/secondary ORDER. The read is memoised on (size, mtime) so sidebar polling costs one stat, and a session whose transcript cannot be resolved is negative-cached for 60s so a Codex derivation never re-walks the rollouts tree per poll; a plain shell (agent null -> the default provider, which has no readMetrics) never touches the disk at all. Because turn_context (the model/effort labels) is written once per USER turn, a single long agent turn pushes it outside the tail, so the HEAD is read too and head+tail are scanned backward: the newest token_count still wins. (b) The web ctx tooltip is now agent-neutral. server.js-only + app.html -> HOT RELOAD (the worker is untouched). Prior 1.31.0: multi-agent support — a session now knows WHICH AI CLI agent it runs (Claude Code or Codex), and everything agent-specific lives behind ONE provider registry (lib/agents.js): per-agent transcript parser, transcript root, transcript-resolution strategy, subagent-trace capability, label + colour. Adding another CLI agent = one parser module + one registry entry; no branching in server.js / pty-worker.js / the clients. New `agent` field on sessions (persisted in sessions.json; null = plain shell, never coerced to 'claude'), accepted at POST /api/sessions (unknown value → 400) and returned on /api/sessions, /api/cluster/sessions and the transcript response. New GET /api/agents serves the catalogue so the web + companion pickers and per-agent tint need no client release when an agent is added. Codex support: lib/transcript-codex.js parses its rollout JSONL (~/.codex/sessions/YYYY/MM/DD/rollout-<iso>-<uuid>.jsonl) into the SAME typed turn shape — its tool calls are one line each (not blocks in an assistant message), `function_call.arguments` is a JSON *string*, `function_call_output.output` a plain string, and `custom_tool_call_output.output` a JSON envelope {output,metadata} that is unwrapped; event_msg lines are skipped (they restate response_item text and would double every turn). lib/codex-sessions.js resolves a rollout by cwd — Codex keys rollouts by date+uuid, never by cwd, so it reads each candidate's session_meta head line, newest-first, bounded to 200 files (win32 compare ignores case, separator and the \\?\ prefix). scanTurnsBackward gained injectable opts.parseLine/opts.extractResults (defaulting to the Claude parsers, so every existing caller is untouched) — one paginator, one cursor codec, one set of size caps across agents. safeTranscriptPath now admits a .jsonl strictly inside ANY provider's root (roots derived from the registry), applying the identical containment predicate per root — it widens WHICH files may be read, never HOW the check is made. An EXPLICIT agent is authoritative: a session declared 'claude' is never served a Codex transcript; only a session with no recorded agent (plain shell) gets cross-provider discovery. pty-worker's `/\bclaude\b/` command grep is gone — the agent id is now the SSOT for "is this a Claude session", so the #23 own-conversation-id gate runs only for real Claude sessions. WORKER code changed → needs a COLD restart (a hot server-only reload leaves the old worker without the `agent` field). Prior 1.30.0: chat-mode subagent trace — GET /api/sessions/:id/transcript now stamps each Task tool_use with a { agentType, description, running } subagent stub (present when a subagents/agent-*.meta.json links that tool_use id), and a NEW GET /api/sessions/:id/subagent/:toolUseId lazily pages that subagent's OWN transcript (reusing scanTurnsBackward — the sidechain .jsonl shares the main turn shape, so ONE parser). Lets the companion Chat view drill into a running subagent's nested tool calls, mirroring the terminal's arrow-navigable subagent panel. `running` = subagent exists but its Task has no tool_result yet. Additive + backward-compatible (older app ignores the stub; new app vs old server falls back to the flat Task card). Prior 1.29.6: #42 — Chat lens now resolves the transcript for cwds with special chars ('_'/'.'/space). The cwd→Claude-project-dir encoder was duplicated in 3 places (server deriveTranscriptPath + server detectClaudeSessionIdFromDir + pty-worker) and lossy — it only mapped '\'/'/', leaving '_'/'.'/space intact, so e.g. C:\dev\AM8_Core resolved to a non-existent C--dev-AM8_Core dir (Claude actually uses C--dev-AM8-Core) → /transcript 404 → Chat hidden. One SSOT encoder now lives in lib/transcript.js (claudeProjectDirName: replace EVERY non-alphanumeric char with '-', case preserved, verified vs ~/.claude/projects); server + pty-worker both call it, and the dead server-side detectClaudeSessionIdFromDir copy was removed. server.js hot-reloadable; the pty-worker leg needs a cold restart. Prior 1.29.5: #37b — the "finished/idle" push (notify level 'all') no longer fires while a background build / in-flight subagent is still emitting output. The idle debounce now re-checks the worker's output clock (lastActivity via getSession) when it fires: if output landed within the window the session isn't finished, so it re-arms and waits for a genuine quiet period before pushing "Claude is done" (a non-idle statusChanged still cancels). Same output-clock signal #37 gave correctStaleStatus — SSOT. server.js-only → hot-reload. Prior 1.29.4: #38 — Claude context-window % now shows on each session tab/list row (web sidebar + companion list), not only inside the session. Both list endpoints already attach per-session `metrics` (getStatusMetrics); the web sidebar (new ctxBadge helper → .sb-ctx) and the companion SessionCard now render metrics.ctx as a small badge, colored by shared warn-50/danger-70 thresholds (companion ctxColor SSOT in lib/widgets/format_utils.dart, reused by the in-session _MetricsHeader). No server logic changed — asset/version bump only. Prior 1.29.3: #37 — a session running a build / background process / in-flight subagent no longer flips to idle-green while still busy. correctStaleStatus (pty-worker.js) now requires BOTH the hook clock (lastHookActivity) AND the output clock (lastActivity, bumped on every PTY chunk) to be stale past the 5-min timeout before force-flipping working/waiting → idle: a busy session emits continuous output (build logs / Claude's spinner redraw) so it stays non-idle, while a genuinely silent hang still self-corrects (both clocks go stale). Test endpoint /api/test/age-session gains hookOnly/activityOnly to age each clock independently. WORKER code → needs a cold restart to take effect. Prior 1.29.2: #41 — desktop sidebar resize handle fixed + made discoverable. `--sb-width` is now the SINGLE source of truth for width: drag sets the custom property (was inline `style.width`, a separate path from restore-on-load's `--sb-width`); pointerup removes any lingering inline width so toggling the sidebar closed after a resize collapses correctly (was stuck at the dragged width). Handle moved inside the panel (`right:0`, no longer clipped by `overflow:hidden`) + a persistent grip pill (::before, hover/active states) — desktop only; doResize still re-fits the terminal; width clamped 160–600px. app.html-only (served asset → version bump). Prior 1.29.1: #23 (regression) — a NEW claude session in a folder that already holds older conversations no longer adopts one of them. pty-worker's cwd-newest-.jsonl detection (sessionSummary / onExit / 15s timer) now gates on the session's start time via ownClaudeSessionId(): a .jsonl is only attributed to a session if it was written at/after that session started, so a fresh session starts clean (was: mislabeled with the previous conversation's id → auto-opened the Chat lens on the old transcript). Explicit --resume <id> still honored; rename's newest-on-disk name-tracking unchanged. WORKER code → needs a cold restart to take effect. Prior 1.29.0: rich transcript tool data — GET /api/sessions/:id/transcript now includes, per tool_use, its `id`, a per-field-capped structured `input`, and the paired tool_result `result` (output). lib/transcript.js pairs results→tool_uses by id during the backward scan and exposes extractToolResults; the app renders shells (Bash cmd+output), subagents (Task desc/report), and file ops as rich cards. Backward-compatible (name/inputPreview unchanged). Prior 1.28.2: attention-clear now fires on session OPEN — the web app (app.html switchSession) calls POST /api/sessions/:id/attention/clear when foregrounding a session that has a live alert, so opening it in the browser dismisses the phone push (was mobile-only). Web also handles inbound 'clear' notify frames (drops the chip / closes the browser toast) — previously a 'clear' frame fell through to showNotification and could pop an "undefined" toast. Mobile companion (#2): opening a session now cancels its OS notification locally (NotificationService.cancelForSession) instead of relying on a dead FCM 'clear' round-trip that never fires while the app is foreground; a foreground 'clear' push is also routed to cancel. Prior 1.28.1: #25 — idle/'finished' FCM pushes are now high-priority so an 'all'-level session's finish notification wakes the phone through Android Doze (was normal-priority → deferred/dropped). Prior 1.28.0: #21 — session takeover relaxed: multiple devices now SHARE one PTY (shared I/O) by default instead of the second viewer force-disconnecting the first. Opt back into the old single-owner kick with config `exclusiveViewer: true`. Prior 1.27.0: #24 — POST /api/sessions/:id/attention/clear clears a session's attention across devices (flips recorded attention, FCM 'clear' to dismiss phone toasts, broadcasts a 'clear' notify frame so in-app viewers drop the chip); capability 'attention-clear'. Prior 1.26.1: (a) #23 fix — restore no longer appends implicit `--continue` to an unknown-id claude session (that resumed the most-recent conversation in the cwd, so a new session came up "Resumed" to the last one). Unknown-id restore now starts fresh; `--resume <own-id>` and explicit user --continue/--resume still honored (lib/restore-command.js). (b) /api/cluster/sessions cache (1500ms) is now invalidated on session create/delete/rename/reorder, so a just-created session shows in the sidebar immediately instead of after the TTL
 
 // --- Optional latency instrumentation (opt-in via WT_LATENCY_DEBUG=1) -----
 // Event-loop lag monitor: interval is 10ms; anything ≥ 50ms slip is a stall.
@@ -550,6 +551,82 @@ function pruneNotifyPref(id) {
   if (prefs[id]) { delete prefs[id]; try { fs.writeFileSync(NOTIFY_PREFS_FILE, JSON.stringify(prefs, null, 2)); } catch {} }
 }
 
+// --- Favorites (#60) -------------------------------------------------------
+// A favorite is a PROPERTY OF A SESSION, so it lives on the server that OWNS the
+// session — exactly like notifyLevel above, and for the same reason: one truth,
+// every device reads it. Same proven shape: a small gitignored JSON file + a
+// GET/PATCH pair behind auth, surfaced as fields on the session lists.
+//
+// The file is `{ "<sessionId>": <rank> }` — PRESENCE is the flag, the value is
+// the session's position in the pinned group. The group's ORDER is therefore
+// DERIVED, never stored centrally: a client sorts the union of every server's
+// favorites by (favoriteRank, id). That is what makes this work across a cluster
+// with no "home server" — a peer holds its own sessions' pins, and a peer that
+// is down simply contributes nothing to the union (it never wipes it).
+const FAVORITES_FILE = path.join(__dirname, 'favorites.json');
+let _favorites = null, _favoritesAt = 0;
+function loadFavorites() {
+  if (!_favorites || Date.now() - _favoritesAt > 5000) {
+    try { _favorites = fs.existsSync(FAVORITES_FILE) ? JSON.parse(fs.readFileSync(FAVORITES_FILE, 'utf8')) : {}; }
+    catch { _favorites = {}; }
+    _favoritesAt = Date.now();
+  }
+  return _favorites;
+}
+function writeFavorites(favs) {
+  try { fs.writeFileSync(FAVORITES_FILE, JSON.stringify(favs, null, 2)); }
+  catch (e) { console.error('favorites write failed:', e.message); }
+  _favorites = favs; _favoritesAt = Date.now();
+}
+/** Rank of a favorited session, or null when it isn't favorited. */
+function getFavoriteRank(id) {
+  const v = loadFavorites()[id];
+  return typeof v === 'number' && Number.isFinite(v) ? v : null;
+}
+/** The two fields every session list carries — derived from ONE map, so the
+ *  flag and the rank can never disagree. */
+function favoriteFields(id) {
+  const rank = getFavoriteRank(id);
+  return { favorite: rank !== null, favoriteRank: rank };
+}
+/** The rank a NEWLY pinned session gets: a monotonic wall-clock timestamp.
+ *
+ *  This is the ONE place a new pin's position is decided, and it deliberately needs
+ *  NO knowledge of what any other server holds. An "index" rank (max + 1) can only
+ *  ever be computed from a PARTIAL view — no server holds another server's sessions,
+ *  and a client can only see the peers that are up — so a pin made while a peer is
+ *  offline reuses a rank that peer already holds, and the pinned group silently
+ *  rearranges when it reconnects. A timestamp needs no coordination: pins are
+ *  globally ordered by WHEN they were made, and two servers can only pick the same
+ *  value inside the same millisecond (where the (rank, id) tiebreak still makes the
+ *  order deterministic). Math.max keeps it strictly increasing on this server even
+ *  when two pins land in the same millisecond.
+ */
+function nextFavoriteRank(favs) {
+  const maxExisting = Object.values(favs).reduce(
+    (m, v) => (typeof v === 'number' && Number.isFinite(v) && v > m ? v : m), 0);
+  return Math.max(Date.now(), maxExisting + 1);
+}
+function setFavorite(id, favorite, rank) {
+  const favs = loadFavorites();
+  if (!favorite) {
+    if (Object.prototype.hasOwnProperty.call(favs, id)) { delete favs[id]; writeFavorites(favs); }
+    return null;
+  }
+  // An explicit rank is only ever sent by a DRAG-REORDER (the one operation that
+  // means "put it exactly here"). A plain star sends no rank and gets the timestamp
+  // above — so no client has to know, or guess, what the rest of the cluster holds.
+  const next = typeof rank === 'number' && Number.isFinite(rank)
+    ? Math.trunc(rank)
+    : nextFavoriteRank(favs);
+  if (favs[id] !== next) { favs[id] = next; writeFavorites(favs); }
+  return next;
+}
+function pruneFavorite(id) {
+  const favs = loadFavorites();
+  if (Object.prototype.hasOwnProperty.call(favs, id)) { delete favs[id]; writeFavorites(favs); }
+}
+
 function ntfyConfig() {
   const c = liveConfig('ntfy', null);
   if (!c || c.enabled === false || !c.topic) return null;
@@ -862,6 +939,7 @@ workerClient.on('sessionExited', ({ id }) => {
   const nst = _notifyState.get(id);
   if (nst) { if (nst.idleTimer) clearTimeout(nst.idleTimer); if (nst.apiErrTimer) clearTimeout(nst.apiErrTimer); _notifyState.delete(id); }
   pruneNotifyPref(id);
+  pruneFavorite(id);   // #60: a dead session leaves no pin behind
   const set = sessionClients.get(id);
   if (set) {
     for (const client of set) {
@@ -1426,20 +1504,32 @@ const claudeStatusMetrics = new Map(); // claudeSessionId -> { ctx, fiveH, seven
 // last-known metrics for hours: context % is frozen while idle (accurate), and
 // stale 5h/7d numbers are low-stakes. Prevents an idle session showing only its
 // folder. Bounded by the 200-entry prune + a session vanishing from /api/sessions.
-const CLAUDE_STATUS_TTL_MS = 4 * 60 * 60 * 1000;
+// The TTL itself lives in lib/usage-rollup.js (METRICS_TTL_MS) — one definition of
+// "too old to trust" shared by the pushed map, the roll-up, and any future source.
+
+// #56 — the agent whose CLI pushes its status line here. Asked once of the registry,
+// never hardcoded: it is the OWNER of every pushed report, including one carried by a
+// session that declares no agent (a `claude` run inside a plain shell).
+const STATUS_PUSH_AGENT = agentsLib.statusPushAgent();
 
 function getStatusMetrics(claudeSessionId) {
   if (!claudeSessionId) return null;
   const m = claudeStatusMetrics.get(claudeSessionId);
-  if (!m || Date.now() - m.ts > CLAUDE_STATUS_TTL_MS) return null;
-  return { ctx: m.ctx, fiveH: m.fiveH, sevenD: m.sevenD, model: m.model, effort: m.effort };
+  if (!m || Date.now() - m.ts > METRICS_TTL_MS) return null;
+  // #56: `ts` (when this landed) and `agent` (whose account quota it describes) ride along.
+  // The 5h/7d windows are account-wide, so the server-side roll-up needs both to pick the
+  // freshest report per agent — and to say nothing at all when the newest one is stale.
+  return {
+    ctx: m.ctx, fiveH: m.fiveH, sevenD: m.sevenD, model: m.model, effort: m.effort,
+    ts: m.ts, agent: STATUS_PUSH_AGENT,
+  };
 }
 
 // Drop stale entries so the Map can't grow without bound as sessions come and go.
 function pruneStatusMetrics() {
   const now = Date.now();
   for (const [k, v] of claudeStatusMetrics) {
-    if (now - v.ts > CLAUDE_STATUS_TTL_MS) claudeStatusMetrics.delete(k);
+    if (now - v.ts > METRICS_TTL_MS) claudeStatusMetrics.delete(k);
   }
 }
 
@@ -1500,6 +1590,15 @@ function readTranscriptMetrics(tpath, adapter) {
         }
       } finally { fs.closeSync(fd); }
       metrics = adapter.readMetrics(text);
+      if (metrics) {
+        // #56 — the two facts a pushed report carries in its envelope, recovered for a
+        // report that was RECORDED instead: it is exactly as fresh as the last write of
+        // the transcript holding it, and it describes the quota of the agent whose
+        // transcript that is. Both are properties of the SOURCE, not of any one agent, so
+        // there is nothing to branch on here.
+        metrics.ts = st.mtimeMs;
+        metrics.agent = adapter.id;
+      }
     }
   } catch { metrics = null; } // unreadable/racing file → no metrics, never a 500
   _transcriptMetricsCache.set(tpath, { size: st.size, mtimeMs: st.mtimeMs, metrics });
@@ -2171,13 +2270,17 @@ function _throttledClusterLog(key, summary, format) {
 
 async function _computeClusterSessions(reqUser) {
   const result = [];
+  // #56 — the local server's own account usage, rolled up from the sessions below. Kept
+  // apart from `result` (which accumulates the peers' sessions too) so each server's block
+  // is computed from ITS OWN reports only.
+  const localShaped = [];
 
   // Local sessions (via worker)
   try {
     const { sessions: localList } = await workerClient.rpc('listSessions');
     const localMetrics = await Promise.all(localList.map((s) => sessionMetrics(s).catch(() => null)));
     localList.forEach((s, i) => {
-      result.push({
+      localShaped.push({
         id: s.id, name: s.name, cwd: s.cwd, status: s.status,
         clients: s.clients || 0, pid: s.pid,
         lastActivity: s.lastActivity, autoCommand: s.autoCommand || '',
@@ -2187,9 +2290,13 @@ async function _computeClusterSessions(reqUser) {
         claudeSessionId: s.claudeSessionId,
         server: getServerName(), serverUrl: null,
         notifyLevel: getNotifyLevel(s.id),
+        // #60 — the pin + its rank in the pinned group. Peers already carry both
+        // on their own /api/sessions, so the spread above keeps them.
+        ...favoriteFields(s.id),
         metrics: localMetrics[i],
       });
     });
+    result.push(...localShaped);
   } catch (e) {
     console.error('worker listSessions failed:', e.message);
   }
@@ -2212,13 +2319,22 @@ async function _computeClusterSessions(reqUser) {
       }
       if (!r.ok) return { server: server.name, url: server.url, online: false, sessions: [] };
       const remoteSessions = JSON.parse(r.body);
-      // Fetch version from remote
-      let version = '';
+      // Fetch version from remote — and its CAPABILITIES, which ride the same answer.
+      // A client must be able to ask "can the server that owns this session take this
+      // write?" BEFORE offering the control; discovering it as a 404 means the user
+      // sees the action flash on and snap off with no explanation. A peer too old to
+      // answer (or one whose probe fails) reports none — the client then offers
+      // nothing, which is the honest thing to do.
+      let version = '', capabilities = [];
       try {
         const vr = await clusterFetch(server.url + '/api/version', {
           headers: { 'Authorization': 'Bearer ' + tokenEntry.token }, timeout: 2000
         });
-        if (vr.ok) { const v = JSON.parse(vr.body); version = `${v.version} (${v.hash})`; }
+        if (vr.ok) {
+          const v = JSON.parse(vr.body);
+          version = `${v.version} (${v.hash})`;
+          if (Array.isArray(v.capabilities)) capabilities = v.capabilities.filter(c => typeof c === 'string');
+        }
       } catch (e) {}
       // Issue #20: if this peer opts into direct-mode, mint a short-lived
       // HMAC token per session so the browser can WS straight to the peer.
@@ -2241,8 +2357,14 @@ async function _computeClusterSessions(reqUser) {
         return base;
       });
       return {
-        server: server.name, url: server.url, online: true, needsAuth: false, version,
-        directConnect, sessions: mapped
+        server: server.name, url: server.url, online: true, needsAuth: false, version, capabilities,
+        directConnect, sessions: mapped,
+        // #56 — the peer's OWN account usage. It reports the raw facts (each session's
+        // metrics, now carrying `agent` + `ts`) on its /api/sessions, which is a bare array
+        // and cannot carry a server-level block; the SAME roll-up rule is applied to them
+        // here, so local and remote are one rule, not two. No extra fan-out GET, and a peer
+        // too old to send `ts` simply reports nothing rather than a wrong number.
+        usage: rollUpUsage(mapped),
       };
     } catch (e) {
       return { server: server.name, url: server.url, online: false, sessions: [] };
@@ -2271,11 +2393,21 @@ async function _computeClusterSessions(reqUser) {
   const _gitInfo = _getGitInfo();
   const localVersion = `${SERVER_VERSION} (${_gitInfo.hash})`;
 
+  // #56 — per-server account usage. The 5h/7d windows are ACCOUNT-wide, not per-session,
+  // so they hang off the server, once, per agent (Claude and Codex bill separate quotas and
+  // are never merged). `usage` is omitted entirely when nothing fresh was reported — the
+  // clients then render nothing at all, never a misleading 0%.
+  const localUsage = rollUpUsage(localShaped);
+
   return {
     sessions: result,
     servers: [
-      { name: getServerName(), url: null, online: true, needsAuth: false, version: localVersion },
-      ...remotes.map(r => ({ name: r.server, url: r.url, online: r.online, needsAuth: r.needsAuth, version: r.version || '', directConnect: r.directConnect === true }))
+      { name: getServerName(), url: null, online: true, needsAuth: false, version: localVersion, capabilities: serverCapabilities(), ...(localUsage ? { usage: localUsage } : {}) },
+      ...remotes.map(r => ({
+        name: r.server, url: r.url, online: r.online, needsAuth: r.needsAuth,
+        version: r.version || '', capabilities: r.capabilities || [], directConnect: r.directConnect === true,
+        ...(r.usage ? { usage: r.usage } : {}),
+      }))
     ]
   };
 }
@@ -2339,6 +2471,12 @@ app.all('/cluster/:serverUrl/api/*', express.raw({ type: '*/*', limit: '10mb' })
       body,
       timeout: 30000
     });
+    // A mutating call to a PEER changes what OUR merged /api/cluster/sessions
+    // says (that peer's sessions ride in it), so the 1.5s merged cache has to go
+    // — otherwise a pin/rename/kill done on a peer appears to bounce back for up
+    // to a poll. The peer invalidates its own cache in its own route; this is the
+    // local half of the same fact. (#60)
+    if (r.status < 400 && ['POST', 'PUT', 'PATCH', 'DELETE'].includes(req.method)) invalidateClusterSessionsCache();
     res.status(r.status);
     try { res.json(JSON.parse(r.body)); } catch (e) { res.send(r.body); }
   } catch (e) {
@@ -2626,6 +2764,23 @@ function clusterFetch(url, opts = {}) {
   });
 }
 
+// G8: the features THIS server implements — the ONE list. A client gates a
+// per-session action on the capability of the server that OWNS that session,
+// because the fleet is upgraded one box at a time and a mixed fleet is the NORMAL
+// state, not an edge case (never assume a homogeneous cluster). Served two ways
+// from this one function: verbatim on /api/version, and attached to every entry of
+// `servers[]` on /api/cluster/sessions (a peer's own /api/version answer, fetched
+// in the same fan-out) so a browser can tell, before it offers a control, whether
+// the owning server can even take the write. 'fcm' is advertised only when a
+// service account is configured — a server with no FCM key can still take device
+// registrations but won't send FCM.
+function serverCapabilities() {
+  const caps = ['attention', 'clear', 'attention-clear', 'push-devices', 'transcript',
+    'status-metrics', 'pending-question', 'subagent-trace', 'favorites-sync'];
+  if (fcmConfigured()) caps.push('fcm');
+  return caps;
+}
+
 // --- API: version info (for cluster version checking) ---
 // Reads from the 30s cache so the endpoint never blocks. See _getGitInfo()
 // for the caching strategy. Peer cross-polling (every 5s from each browser)
@@ -2633,13 +2788,6 @@ function clusterFetch(url, opts = {}) {
 // event loop for up to 5s under network trouble.
 app.get('/api/version', (req, res) => {
   const info = _getGitInfo();
-  // G8: features this server implements, so the companion app can gate per
-  // server during a rolling upgrade (never assume a homogeneous fleet). The
-  // device registry is always available; 'fcm' is advertised only when a
-  // service account is configured (or the test sink is active) — a server with
-  // no FCM key can still take registrations but won't send FCM.
-  const capabilities = ['attention', 'clear', 'attention-clear', 'push-devices', 'transcript', 'status-metrics', 'pending-question', 'subagent-trace'];
-  if (fcmConfigured()) capabilities.push('fcm');
   res.json({
     version: SERVER_VERSION,
     hash: info.hash,
@@ -2647,7 +2795,7 @@ app.get('/api/version', (req, res) => {
     behind: info.behind,
     dirty: info.dirty,
     serverName: getServerName(),
-    capabilities,
+    capabilities: serverCapabilities(),
   });
 });
 
@@ -2685,6 +2833,9 @@ app.get('/api/sessions', async (req, res) => {
       agent: s.agent ?? null,
       claudeSessionId: s.claudeSessionId,
       notifyLevel: getNotifyLevel(s.id),
+      // #60 — favorite (pin) + its rank. Server-side so every device sees one
+      // truth; a peer's favorites ride to the cluster list on THIS array.
+      ...favoriteFields(s.id),
       metrics: listMetrics[i],
     }));
     // Log when a remote server fetches our sessions (Bearer = cluster call).
@@ -2905,6 +3056,32 @@ app.patch('/api/sessions/:id/notify-level', express.json({ limit: '1kb' }), (req
     return res.status(400).json({ error: 'level must be one of ' + notifyPush.LEVELS.join(', ') });
   }
   res.json({ id: req.params.id, level: setNotifyLevel(req.params.id, level) });
+});
+
+// --- API: per-session favorite (pin) + its rank in the pinned group (#60) ---
+// Behind the same auth as every other session route. The rank is the session's
+// position in the CLUSTER-WIDE pinned group: a client that can see the whole
+// union (web sidebar, companion) sends the new index for each session whose
+// position changed — reordering is therefore N small PATCHes, each landing on
+// the server that owns that session, and no server ever holds a list of another
+// server's sessions.
+app.get('/api/sessions/:id/favorite', (req, res) => {
+  res.json({ id: req.params.id, ...favoriteFields(req.params.id) });
+});
+app.patch('/api/sessions/:id/favorite', express.json({ limit: '1kb' }), (req, res) => {
+  const id = req.params.id;
+  // A session id is a UUID (the worker rejects anything else) — so a bogus id can
+  // never become a persisted key in favorites.json.
+  if (!_HOOK_UUID_RE.test(id)) return res.status(404).json({ error: 'session not found' });
+  const favorite = req.body?.favorite;
+  if (typeof favorite !== 'boolean') return res.status(400).json({ error: 'favorite must be a boolean' });
+  const rank = req.body?.rank;
+  if (rank !== undefined && !(typeof rank === 'number' && Number.isFinite(rank) && rank >= 0)) {
+    return res.status(400).json({ error: 'rank must be a non-negative number' });
+  }
+  setFavorite(id, favorite, rank);
+  invalidateClusterSessionsCache(); // the pinned group must re-render on the next poll
+  res.json({ id, ...favoriteFields(id) });
 });
 // Structured "what needs my attention" for one session: the last recorded
 // attention event (kind/reason) plus Claude's freshly-read last message. Lets a

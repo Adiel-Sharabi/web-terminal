@@ -99,6 +99,18 @@ class Session {
   /// meaningful "no agent" signal the UI relies on to hide the agent chip.
   final String? agent;
 
+  /// Whether this session is pinned (starred). A PROPERTY OF THE SESSION,
+  /// stored on the server that owns it (`favorites.json` there) — see issue
+  /// #60. This client keeps no divergent copy: the star writes
+  /// `PATCH /api/sessions/:id/favorite` and re-reads, it never flips a local
+  /// list. Rides on `GET /api/sessions` and `GET /api/cluster/sessions`.
+  final bool favorite;
+
+  /// This session's position in the pinned group, or `null` when [favorite]
+  /// is `false`. The pinned group's ORDER is DERIVED — see
+  /// [Session.pinnedOrder] — never stored as a separate list.
+  final int? favoriteRank;
+
   /// Creates a session value object. [autoCommand] is optional (default `''`)
   /// so existing call sites and tests that predate the field keep compiling.
   const Session({
@@ -113,6 +125,8 @@ class Session {
     this.autoCommand = '',
     this.metrics,
     this.agent,
+    this.favorite = false,
+    this.favoriteRank,
   });
 
   /// Builds a [Session] from one element of the `GET /api/sessions` array,
@@ -130,11 +144,34 @@ class Session {
       server: server,
       metrics: SessionMetrics.fromJson(json['metrics']),
       agent: json['agent']?.toString(),
+      favorite: json['favorite'] == true,
+      favoriteRank: _asInt(json['favoriteRank']),
     );
   }
 
   /// A short 8-char id fragment, handy for `Session {shortId}` fallback names.
   String get shortId => id.length <= 8 ? id : id.substring(0, 8);
+
+  /// The pinned group in DISPLAY order: every favorited session in
+  /// [sessions] (which may span several cluster servers), sorted by
+  /// `(favoriteRank, id)`. Never stored — always recomputed from the live
+  /// session list, exactly mirroring the server's own derivation (#60), so
+  /// every device renders the identical order with no central list anywhere.
+  ///
+  /// Note there is no client-side "next rank" helper: a plain pin PATCHes
+  /// with no `rank` at all, and the OWNING server assigns a monotonic
+  /// wall-clock rank itself (`nextFavoriteRank` in server.js) — the whole
+  /// point being that no single client ever has to invent a position from
+  /// only the partial set of peers it can currently see. An explicit rank on
+  /// the wire is reserved for a drag-reorder (not offered by this client).
+  static List<Session> pinnedOrder(List<Session> sessions) {
+    final favs = sessions.where((s) => s.favorite).toList(growable: false);
+    favs.sort((a, b) {
+      final byRank = (a.favoriteRank ?? 0).compareTo(b.favoriteRank ?? 0);
+      return byRank != 0 ? byRank : a.id.compareTo(b.id);
+    });
+    return favs;
+  }
 
   @override
   String toString() => 'Session($id, $name, $status @ ${server.name})';

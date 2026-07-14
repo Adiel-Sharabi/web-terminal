@@ -88,6 +88,17 @@
     .sb-server { cursor: pointer; user-select: none; }
     .sb-server .srv-chev { display: inline-block; width: 10px; color: #00d4aa; transition: transform 0.15s; flex-shrink: 0; text-align: center; font-size: 10px; }
     .sb-server.collapsed .srv-chev { transform: rotate(-90deg); }
+    /* #56 — account-wide 5h/7d capacity, once per SERVER (those windows belong to the
+       account, not the session). Wraps onto its own line inside the header so a narrow
+       sidebar still reads, and stays quieter than any session row: small, muted, no caps. */
+    .sb-server { flex-wrap: wrap; }
+    .srv-usage { flex-basis: 100%; display: flex; align-items: center; gap: 5px; margin: 3px 0 1px 16px;
+                 font-size: 9px; font-weight: 500; letter-spacing: 0; text-transform: none; color: #55617a; }
+    .srv-usage .u-agent { font-weight: 700; opacity: .85; }
+    .srv-usage .u-sep { opacity: .4; }
+    .srv-usage .u-warn { color: #da4; }
+    .srv-usage .u-hot { color: #e94560; }
+    .srv-usage .u-age { margin-left: auto; opacity: .7; font-style: italic; }
     .sb-item.dragging { opacity: 0.4; }
     .sb-item.drop-above { border-top: 2px solid #00d4aa; }
     .sb-item.drop-below { border-bottom: 2px solid #00d4aa; }
@@ -117,6 +128,9 @@
     .sb-star { background: transparent; border: none; color: #55617a; font-size: 14px; cursor: pointer; padding: 0 4px; line-height: 1; }
     .sb-star:hover { color: #f2c14e; }
     .sb-star.on { color: #f2c14e; }
+    /* #60: the owning server is too old to have a favorite route. Say so up front
+       (greyed + a title) instead of letting the click 404 and the star snap back. */
+    .sb-star:disabled, .sb-star:disabled:hover { color: #2c3446; cursor: not-allowed; }
     .sb-bell { background: transparent; border: none; cursor: pointer; padding: 0 3px; line-height: 1; font-size: 12px; }
     .sb-bell.nl-off { opacity: 0.4; filter: grayscale(1); }
     .sb-bell.nl-important { opacity: 0.9; }
@@ -2644,6 +2658,37 @@
       const who = (s.agent && agents[s.agent] && agents[s.agent].label) || 'Agent';
       return `<span class="sb-ctx ${cls}" title="${esc(who)} context window">${c}%</span>`;
     }
+    // #56 — the 5h / 7d capacity windows for a SERVER header row.
+    //
+    // Unlike ctx% (genuinely per-session) these windows are ACCOUNT-wide: every session on
+    // the server shares them, so they render ONCE here, and PER AGENT — Claude and Codex
+    // bill separate quotas and are never merged into one number. A server shows only the
+    // agents that actually reported on it.
+    //
+    // The roll-up (freshest report per agent, stale ones dropped) is computed SERVER-SIDE
+    // and arrives as `server.usage`; nothing here picks a max or a freshest across rows.
+    // Absent/stale => the key simply isn't there => nothing renders. Never a 0%.
+    function usageHtml(server) {
+      const u = server && server.usage;
+      if (!u || !server.online) return '';  // an offline row is unaffected
+      const cls = (v) => (v >= 90 ? 'u-hot' : v >= 75 ? 'u-warn' : '');
+      const win = (label, v) => (v == null ? '' : `<span class="${cls(v)}">${label} ${Number(v)}%</span>`);
+      let html = '';
+      for (const id of Object.keys(u)) {
+        const w = u[id] || {};
+        const wins = [win('5h', w.fiveH), win('7d', w.sevenD)].filter(Boolean);
+        if (!wins.length) continue;
+        // Label from the agent catalogue (GET /api/agents — the server's registry is the
+        // SSOT); an agent this client doesn't know yet still renders, under its raw id.
+        const label = (agents[id] && agents[id].label) || id;
+        html += `<div class="srv-usage" title="${esc(label)} account usage — shared by every ${esc(label)} session on this server">`
+          + `<span class="u-agent">${esc(label)}</span>`
+          + wins.join('<span class="u-sep">&middot;</span>')
+          + `<span class="u-age">${esc(timeAgo(w.ts))}</span>`
+          + `</div>`;
+      }
+      return html;
+    }
     // --- AI agents (GET /api/agents) -----------------------------------------
     // The server's provider registry is the SSOT: the picker options and the
     // per-agent tint both come from it, so adding a CLI agent server-side needs no
@@ -2760,6 +2805,12 @@
 
     function esc(s) { const d = document.createElement('div'); d.textContent = s; return d.innerHTML; }
 
+    // The last payload from /api/cluster/sessions. It is the render's input, so a
+    // favorite/rank write can flip the field on the session object and re-render
+    // AT ONCE (optimistic), with the server reconciling on the next poll. Kept as
+    // a cache of the server's answer — never as a second source of truth.
+    let _sidebarData = null;
+
     async function loadSidebar() {
       let data;
       try {
@@ -2772,7 +2823,14 @@
           servers: [{ name: hostname, url: null, online: true }]
         };
       }
+      _sidebarData = data;
+      renderSidebar(data);
+      // #60: one-shot push of any pre-server (localStorage) favorites. Fire and
+      // forget — it re-renders itself if it migrated anything.
+      migrateLocalFavorites(data);
+    }
 
+    function renderSidebar(data) {
       clusterServers = data.servers;
 
       // Issue #20: refresh the direct-URL cache from the fresh session list.
@@ -2791,8 +2849,9 @@
         return;
       }
 
-      // Pinned favorites across all servers (UI-only, per-browser localStorage).
-      renderFavoritesGroup(container, data.sessions);
+      // Pinned favorites across all servers — the flag + rank come from the server
+      // that owns each session (#60), so the group is identical on every device.
+      renderFavoritesGroup(container, data);
 
       // Group sessions by server
       for (const server of data.servers) {
@@ -2824,6 +2883,10 @@
         } else if (!server.online && server.url) {
           header.innerHTML += '<span style="margin-left:auto;color:#a44;font-size:10px">offline</span>';
         }
+        // #56 — account-wide 5h/7d capacity, appended LAST so it wraps onto its own line
+        // below the name + actions (insertAdjacentHTML, not `innerHTML +=`: the latter
+        // re-parses the header and would drop the buttons' click listeners above).
+        header.insertAdjacentHTML('beforeend', usageHtml(server));
         // Click anywhere on the header (except action buttons) toggles collapse.
         header.addEventListener('click', (e) => {
           if (e.target.closest('.srv-auth')) return;
@@ -2850,7 +2913,6 @@
         for (const s of serverSessions) {
           const item = document.createElement('div');
           const isCurrent = s.id === sessionId && s.serverUrl === sessionServerUrl;
-          const fav = isFavorite(s.id);
           const lvl = s.notifyLevel || 'important';
           item.className = 'sb-item' + (isCurrent ? ' current' : '') + (s.apiError ? ' api-error' : '');
           if (s.apiError && s.apiErrorText) item.title = s.apiErrorText;
@@ -2862,7 +2924,7 @@
               agentBadge(s) +
               ctxBadge(s) +
               `<button class="sb-bell nl-${lvl}" title="Notifications: ${NOTIFY_BELL[lvl].label} — click to change">${NOTIFY_BELL[lvl].icon}</button>` +
-              `<button class="sb-star${fav ? ' on' : ''}" title="${fav ? 'Remove from favorites' : 'Add to favorites'}">${fav ? '&#9733;' : '&#9734;'}</button>` +
+              starHtml(s) +
               `<button class="sb-edit" title="Edit auto-command">&#9998;</button>` +
               (s.claudeSessionId ? `<button class="sb-fork" title="Fork Claude session">&#9095;</button>` : '') +
               `<button class="sb-kill" title="Kill session">&times;</button>` +
@@ -2914,8 +2976,7 @@
 
           item.querySelector('.sb-star').addEventListener('click', (e) => {
             e.stopPropagation();
-            toggleFavorite(s.id);
-            loadSidebar();
+            toggleFavorite(s);
           });
 
           item.querySelector('.sb-bell').addEventListener('click', (e) => {
@@ -2989,42 +3050,145 @@
       }
     }
 
-    // --- Sidebar: favorites (UI-only, per-browser localStorage) -----------
-    // Keyed by session id (a globally-unique UUID), so a favorite stays stable
-    // regardless of which cluster server you logged into. Favorited sessions are
-    // pinned in a group at the very top of the sidebar, each badged with the
-    // server it lives on (Home / Office / ...). Mirrors the collapse-state
-    // pattern: this is browser-local UI state, like the server-group collapse.
-    const FAV_KEY = 'wt.favorites';
-    function loadFavSet() {
+    // --- Sidebar: favorites (SERVER-side, shared by every device — #60) ---
+    // A favorite is a property of the SESSION, stored on the server that owns it
+    // (`favorite` + `favoriteRank` on the session list, GET/PATCH
+    // /api/sessions/:id/favorite). This browser keeps NO list of its own: star a
+    // session here and it is starred on the phone and in the desktop app too.
+    //
+    // The pinned group's order is DERIVED from those ranks — sort the union of
+    // every server's favorites by (favoriteRank, id). So no server holds a list of
+    // another server's sessions, and a peer that is offline simply contributes
+    // nothing to the union (its pins survive on it; they reappear when it does).
+    function isFavorite(s) { return s.favorite === true; }
+    function favoritesOf(sessions) {
+      return (sessions || []).filter(isFavorite).sort((a, b) =>
+        ((a.favoriteRank ?? 0) - (b.favoriteRank ?? 0)) ||
+        (a.id < b.id ? -1 : a.id > b.id ? 1 : 0));   // stable tiebreak: id
+    }
+    // Can the server that OWNS this session take a favorite write? The fleet is
+    // upgraded one box at a time, so a peer running an older build has no favorite
+    // route at all — that is the NORMAL state during a rollout, not an edge case.
+    // Ask its advertised capability (GET /api/version → `capabilities`, carried onto
+    // each servers[] entry of /api/cluster/sessions) BEFORE offering the star, rather
+    // than discovering it as a 404 that makes the star flash on and snap off.
+    // A LOCAL session needs no check: this page was served by that very server, so it
+    // is the same build by construction.
+    function favoritesSupported(s) {
+      if (!s.serverUrl) return true;
+      const sv = ((_sidebarData && _sidebarData.servers) || []).find(x => x.url === s.serverUrl);
+      return !!(sv && Array.isArray(sv.capabilities) && sv.capabilities.includes('favorites-sync'));
+    }
+    // The star button — ONE markup owner for both the session row and the pinned row.
+    function starHtml(s) {
+      if (!favoritesSupported(s)) {
+        const who = s.server || 'That server';
+        return `<button class="sb-star" disabled title="${esc(who)} can&#39;t sync favorites — it needs a web-terminal upgrade">&#9734;</button>`;
+      }
+      const fav = isFavorite(s);
+      return `<button class="sb-star${fav ? ' on' : ''}" title="${fav ? 'Remove from favorites' : 'Add to favorites'}">${fav ? '&#9733;' : '&#9734;'}</button>`;
+    }
+    function apiBaseFor(s) { return s.serverUrl ? `/cluster/${encodeURIComponent(s.serverUrl)}/api` : '/api'; }
+    // `rank` is optional ON PURPOSE: omit it and the OWNING server assigns a monotonic
+    // timestamp (server.js nextFavoriteRank). A rank is only ever sent by a drag-reorder,
+    // which is the one operation that means "put it exactly here".
+    async function patchFavorite(s, favorite, rank) {
+      const body = favorite
+        ? (rank == null ? { favorite: true } : { favorite: true, rank })
+        : { favorite: false };
+      const r = await fetch(`${apiBaseFor(s)}/sessions/${s.id}/favorite`, {
+        method: 'PATCH', headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify(body)
+      });
+      if (!r.ok) throw new Error('favorite PATCH failed: ' + r.status);
+      return r.json();
+    }
+    // A favorite write did not land. There is NO cross-server transaction to roll back
+    // — these are N independent servers — so don't pretend there is: name the server
+    // that refused, then re-read every server's truth. The UI must never keep showing
+    // an order (or a star) the servers don't actually hold. Uses the same alert() this
+    // page already uses for every other failed write (fork / transfer / resume / login);
+    // a second notification mechanism would be a second thing to keep in sync.
+    function favoriteWriteFailed(sessions, what) {
+      const names = [...new Set(sessions.map(s => s.server || hostname || 'this server'))];
+      loadSidebar();   // the servers are the truth — show it, whatever it says
+      alert(`Favorites: ${what} didn't save on ${names.join(', ')}. Showing what the server${names.length > 1 ? 's' : ''} actually hold${names.length > 1 ? '' : 's'}.`);
+    }
+    // Optimistic: flip the field on the cached session + re-render immediately, then
+    // write. The rank comes back FROM the server (it owns that decision), so a pin is
+    // ordered by when it was made — no client ever invents a rank out of the peers it
+    // happens to be able to see. A failed write re-reads the truth and says so.
+    async function toggleFavorite(s) {
+      if (!favoritesSupported(s)) return;   // no route on that server — never PATCH into a 404
+      const on = !isFavorite(s);
+      const prevFav = isFavorite(s), prevRank = s.favoriteRank ?? null;
+      s.favorite = on;
+      // Placeholder only — same shape as what the server will answer (a wall clock), so
+      // the row lands where it will land. The server's value replaces it below.
+      s.favoriteRank = on ? Date.now() : null;
+      if (_sidebarData) renderSidebar(_sidebarData);
       try {
-        const arr = JSON.parse(localStorage.getItem(FAV_KEY) || '[]');
-        return new Set(Array.isArray(arr) ? arr : []);
-      } catch { return new Set(); }
-    }
-    function saveFavSet(set) {
-      try { localStorage.setItem(FAV_KEY, JSON.stringify([...set])); } catch {}
-    }
-    function saveFavOrder(arr) {
-      try { localStorage.setItem(FAV_KEY, JSON.stringify(arr)); } catch {}
-    }
-    function isFavorite(id) { return loadFavSet().has(id); }
-    function toggleFavorite(id) {
-      const set = loadFavSet();
-      if (set.has(id)) set.delete(id); else set.add(id);
-      saveFavSet(set);
-      return set.has(id);
+        const saved = await patchFavorite(s, on);
+        s.favorite = saved.favorite === true;
+        s.favoriteRank = saved.favoriteRank ?? null;
+        if (_sidebarData) renderSidebar(_sidebarData);
+      } catch (err) {
+        s.favorite = prevFav; s.favoriteRank = prevRank;
+        favoriteWriteFailed([s], on ? 'the pin' : 'removing the pin');
+      }
     }
 
-    // Render the pinned "Favorites" group at the top of the sidebar. `sessions`
-    // is the merged cluster list; each carries `server` (name) + `serverUrl`.
-    function renderFavoritesGroup(container, sessions) {
-      const order = [...loadFavSet()];
-      if (order.length === 0) return;
-      // Render in the stored (drag-reorderable) order, dropping any whose
-      // session isn't currently available (e.g. its server is offline).
-      const byId = new Map(sessions.map(s => [s.id, s]));
-      const favs = order.map(id => byId.get(id)).filter(Boolean);
+    // ONE-SHOT migration of the pre-#60 per-browser list. `wt.favorites` used to BE the
+    // truth (an ordered array of ids in localStorage). It is now neither a truth nor a
+    // queue: it is read ONCE, pushed up to the servers that own those sessions, and then
+    // DELETED — unconditionally, even if some ids could not be pushed.
+    //
+    // It must not survive. A surviving queue re-PATCHes `favorite:true` on every load,
+    // so a pin the user later UNSTARRED on another device comes back from the dead — the
+    // local file would be quietly overruling the SSOT it was supposed to be replaced by.
+    // What can't be pushed (its server is offline, or too old to have the route) is
+    // reported once and re-starred by hand: a bounded, honest cost, not an eternal retry.
+    const FAV_KEY = 'wt.favorites';
+    let _favMigrated = false;
+    async function migrateLocalFavorites(data) {
+      if (_favMigrated) return;
+      _favMigrated = true;
+      let queue = null;
+      try { queue = JSON.parse(localStorage.getItem(FAV_KEY) || 'null'); } catch {}
+      try { localStorage.removeItem(FAV_KEY); } catch {}   // gone for good, right now
+      if (!Array.isArray(queue) || queue.length === 0) return;
+
+      const byId = new Map((data.sessions || []).map(s => [s.id, s]));
+      // Ranks stay wall-clock timestamps (the server's own rule); +i preserves the
+      // local list's order within this one migration.
+      const base = Date.now();
+      let pushed = 0, skipped = 0, i = 0;
+      for (const id of queue) {
+        const s = byId.get(id);
+        if (!s || !favoritesSupported(s)) { skipped++; continue; }
+        if (isFavorite(s)) continue;         // the server already holds it — its truth wins
+        try { await patchFavorite(s, true, base + (i++)); pushed++; }
+        catch { skipped++; }
+      }
+      if (pushed) loadSidebar();             // the server is the truth now — re-read it
+      if (skipped) {
+        alert(`Favorites: ${skipped} pinned session${skipped > 1 ? 's' : ''} from this browser could not be moved to the server `
+          + `(its server is offline, or needs a web-terminal upgrade). Star ${skipped > 1 ? 'them' : 'it'} again to pin `
+          + `${skipped > 1 ? 'them' : 'it'} for every device.`);
+      }
+    }
+
+    // Render the pinned "Favorites" group at the top of the sidebar. `data` is the
+    // merged cluster payload; each session carries `server` (name) + `serverUrl`,
+    // plus the server-owned `favorite` / `favoriteRank` this group is derived from.
+    function renderFavoritesGroup(container, data) {
+      const sessions = data.sessions || [];
+      const favs = favoritesOf(sessions);
+      if (favs.length === 0) return;   // nothing pinned that we can see
+      // A peer that is offline (or needs a login) is not "no favorites" — its pins
+      // are simply unknown right now. Say so instead of silently showing a short
+      // list, and never drop anything on the floor.
+      const unknown = (data.servers || []).filter(sv => sv.url && (!sv.online || sv.needsAuth));
 
       const collapsed = isServerCollapsed('__favorites__');
       const header = document.createElement('div');
@@ -3039,14 +3203,15 @@
       });
       container.appendChild(header);
 
-      if (favs.length === 0) {
+      if (unknown.length > 0) {
         const note = document.createElement('div');
         note.className = 'sb-fav-empty';
         note.dataset.serverKey = '__favorites__';
-        note.textContent = 'Favorited sessions are offline or gone';
+        note.textContent = unknown.length === 1
+          ? `${unknown[0].name || 'A server'} is offline — its favorites aren't shown`
+          : `${unknown.length} servers are offline — their favorites aren't shown`;
         if (collapsed) note.style.display = 'none';
         container.appendChild(note);
-        return;
       }
 
       for (const s of favs) {
@@ -3062,12 +3227,11 @@
           `<div class="sb-meta">` +
             `<span class="sb-status ${s.status}">${statusLabels[s.status] || s.status}</span>` +
             ctxBadge(s) +
-            `<button class="sb-star on" title="Remove from favorites">&#9733;</button>` +
+            starHtml(s) +
           `</div>`;
         item.querySelector('.sb-star').addEventListener('click', (e) => {
           e.stopPropagation();
-          toggleFavorite(s.id);
-          loadSidebar();
+          toggleFavorite(s);
         });
         item.addEventListener('click', (e) => {
           if (e.target.closest('.sb-star')) return;
@@ -3080,11 +3244,13 @@
       }
     }
 
-    // --- Favorites: drag / long-press reorder (client-side, localStorage) --
+    // --- Favorites: drag / long-press reorder (writes the ranks, #60) ------
     // Desktop uses native HTML5 drag-and-drop; mobile uses a long-press to grab
-    // then drag (native DnD doesn't fire on touch). Both rewrite the stored
-    // favorites order and re-render. Kept separate from the server-side session
-    // reorder (distinct id attribute + drag state) so the two never interfere.
+    // then drag (native DnD doesn't fire on touch). Both rewrite the group's
+    // RANKS on the server — the new position of each moved session is PATCHed to
+    // the server that owns it (N is small) — so the reorder shows up on every
+    // device. Kept separate from the per-server session reorder (distinct id
+    // attribute + drag state) so the two never interfere.
     let _wtFavDragId = null;
     function clearFavDropMarks() {
       document.querySelectorAll('.sb-fav-item.drop-above, .sb-fav-item.drop-below')
@@ -3096,18 +3262,40 @@
       item.classList.toggle('drop-above', above);
       item.classList.toggle('drop-below', !above);
     }
-    function commitFavReorder(dragId, targetId, above) {
-      if (!dragId || dragId === targetId) return;
-      const order = [...loadFavSet()];
-      const from = order.indexOf(dragId);
+    async function commitFavReorder(dragId, targetId, above) {
+      if (!dragId || dragId === targetId || !_sidebarData) return;
+      const order = favoritesOf(_sidebarData.sessions);
+      const from = order.findIndex(s => s.id === dragId);
       if (from === -1) return;
-      order.splice(from, 1);
-      let to = order.indexOf(targetId);
-      if (to === -1) { saveFavOrder(order); loadSidebar(); return; }
-      if (!above) to += 1;
-      order.splice(to, 0, dragId);
-      saveFavOrder(order);
-      loadSidebar();
+      const [moved] = order.splice(from, 1);
+      let to = order.findIndex(s => s.id === targetId);
+      if (to === -1) to = order.length; else if (!above) to += 1;
+      order.splice(to, 0, moved);
+      // Renumber by PERMUTING the ranks this group already holds — never by rewriting
+      // them to 0..N-1. A rank is a wall-clock timestamp, and an OFFLINE peer's pins
+      // hold timestamps we cannot see: renumbering the visible rows to small indices
+      // would silently move every one of them ahead of that peer's pins the moment it
+      // came back. Reusing the same rank VALUES keeps the visible group in exactly the
+      // slots of the global order it already occupied, and only reshuffles which
+      // session sits in which slot — which is precisely what a reorder means.
+      const slots = order.map(s => s.favoriteRank ?? 0).sort((a, b) => a - b);
+      const before = new Map(order.map(s => [s.id, s.favoriteRank ?? null]));
+      order.forEach((s, i) => {
+        // Strictly increasing, so the (rank, id) sort can produce ONLY this order —
+        // a legacy duplicate rank (0,0 from a pre-timestamp build) cannot tie and
+        // leave the drag looking like it did nothing.
+        s.favoriteRank = i === 0 ? slots[0] : Math.max(slots[i], order[i - 1].favoriteRank + 1);
+      });
+      const changed = order.filter(s => s.favoriteRank !== before.get(s.id));
+      renderSidebar(_sidebarData);   // optimistic — the drag feels instant
+      // N independent servers: there is no transaction across them, and a Promise.all
+      // that rejects on the FIRST failure leaves the rest of the writes in flight — the
+      // cluster ends up half-renumbered, permanently, with the UI showing an order no
+      // server holds and nothing said to the user. So: settle EVERY write, then, if any
+      // failed, name the server that refused and re-read the servers' truth.
+      const results = await Promise.allSettled(changed.map(s => patchFavorite(s, true, s.favoriteRank)));
+      const failed = changed.filter((_, i) => results[i].status === 'rejected');
+      if (failed.length) favoriteWriteFailed(failed, 'the new order');
     }
     function attachFavReorder(item) {
       // Desktop: native HTML5 drag-and-drop.

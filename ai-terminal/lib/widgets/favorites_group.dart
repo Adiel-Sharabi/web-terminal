@@ -1,18 +1,20 @@
 /// Pinned "★ Favorites" section shown at the very top of the dashboard,
-/// mirroring the web sidebar's `renderFavoritesGroup`: renders the user's
-/// starred sessions (across all servers) in their stored order, silently
-/// dropping any favorite whose session isn't currently present (offline or
-/// killed) rather than showing a placeholder for it.
+/// mirroring the web sidebar's `renderFavoritesGroup`: renders every
+/// favorited session (across all servers), in the DERIVED pinned order (#60
+/// — `Session.pinnedOrder`, sorted by `(favoriteRank, id)`), silently
+/// dropping any session that isn't currently present (offline or killed)
+/// rather than showing a placeholder for it.
 ///
 /// The header is tappable (chevron + whole row) to collapse/expand the
 /// group — the caller owns persisting that choice (mirrors the web
 /// sidebar's collapsible groups); this widget just renders whatever
 /// [collapsed] it's given and reports taps via [onToggleCollapsed].
 ///
-/// Deliberately decoupled from `FavoritesService`/`SessionRepository` — the
-/// caller resolves [order] and [sessions] and supplies a [cardBuilder], so
-/// this widget is a plain function of its inputs and stays unit-testable
-/// without any service singleton.
+/// Deliberately decoupled from `SessionRepository` — the caller passes the
+/// merged [sessions] list and a [cardBuilder], so this widget is a plain,
+/// stateless function of its inputs (favorite/favoriteRank ride on each
+/// [Session] itself — there is no separate order to thread through) and
+/// stays unit-testable without any service singleton.
 library;
 
 import 'package:flutter/material.dart';
@@ -23,18 +25,15 @@ import '../theme/app_theme.dart';
 class FavoritesGroup extends StatelessWidget {
   const FavoritesGroup({
     super.key,
-    required this.order,
     required this.sessions,
     required this.cardBuilder,
     required this.collapsed,
     required this.onToggleCollapsed,
   });
 
-  /// Favorite session ids in the user's stored (drag-reorderable) order.
-  final List<String> order;
-
-  /// The current merged session list (all servers) used to resolve each
-  /// favorite id to its live [Session]; ids with no match are dropped.
+  /// The current merged session list (all servers). Each session's own
+  /// `favorite`/`favoriteRank` fields (server truth) decide membership and
+  /// order — see [Session.pinnedOrder].
   final List<Session> sessions;
 
   /// Builds the row for one favorited [Session] — the caller supplies this
@@ -51,11 +50,7 @@ class FavoritesGroup extends StatelessWidget {
 
   @override
   Widget build(BuildContext context) {
-    final byId = {for (final s in sessions) s.id: s};
-    final favorites = order
-        .map((id) => byId[id])
-        .whereType<Session>()
-        .toList(growable: false);
+    final favorites = Session.pinnedOrder(sessions);
     if (favorites.isEmpty) return const SizedBox.shrink();
 
     final theme = Theme.of(context);

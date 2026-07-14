@@ -150,6 +150,29 @@ class ApiClient {
         body: {'level': level});
   }
 
+  /// Sets or clears [sessionId]'s pin (`PATCH /api/sessions/:id/favorite`,
+  /// issue #60).
+  ///
+  /// [rank] is only ever sent for an explicit reorder (this client has none —
+  /// it's a web-only affordance today). Omit it to pin: the OWNING server then
+  /// assigns a monotonic wall-clock rank itself (`nextFavoriteRank` there), so
+  /// no client ever has to guess a position from the partial set of peers it
+  /// can currently see. The `rank` key is omitted from the request entirely
+  /// when null — sending it as JSON `null` fails the server's validation
+  /// (`rank !== undefined` — a bare `{favorite:true}` is what "just assign
+  /// one" means on the wire).
+  ///
+  /// This is the ONLY write path for a favorite — there is no local list to
+  /// keep in sync. Call only after confirming the owning server advertises
+  /// the `favorites-sync` capability (`ServerInfo.has`); an older server
+  /// without the route 404s, so never fire this blind.
+  Future<void> setFavorite(String sessionId, bool favorite, {int? rank}) async {
+    final body = favorite
+        ? (rank == null ? {'favorite': true} : {'favorite': true, 'rank': rank})
+        : {'favorite': false};
+    await _send('PATCH', '/api/sessions/$sessionId/favorite', body: body);
+  }
+
   /// Registers this device's FCM [fcmToken] with the server
   /// (`POST /api/push/devices`) so it receives content-free wake-up pushes.
   Future<void> registerDevice(

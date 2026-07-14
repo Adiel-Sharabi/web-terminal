@@ -78,6 +78,13 @@ class SessionRepository {
   final Map<String, bool> _serverOnline = <String, bool>{};
   final Set<String> _namesResolved = <String>{};
 
+  /// Per-server `favorites-sync` capability (#60), keyed by base URL. Filled
+  /// from the SAME `/api/version` call [_ensureServerNames] already makes —
+  /// no extra request. Absent (not yet resolved, or the server is too old)
+  /// reads as unsupported via [supportsFavorites], so the star is never
+  /// offered — and no PATCH ever fired — until a server actually confirms it.
+  final Map<String, bool> _favoritesSyncSupported = <String, bool>{};
+
   // Live `/ws/notify` subscriptions, keyed by server base URL, alongside the
   // exact [ServerConfig] each was opened with (to detect a token change).
   // Re-synced from [AppConfig.serversStream] as servers are added/removed.
@@ -121,6 +128,13 @@ class SessionRepository {
   /// Snapshot of per-server reachability (`baseUrl → online`), updated on every
   /// [refresh].
   Map<String, bool> get serverOnline => Map<String, bool>.unmodifiable(_serverOnline);
+
+  /// Whether the server at [baseUrl] advertises `favorites-sync` (#60) — i.e.
+  /// has the `/api/sessions/:id/favorite` route. `false` (never offer the
+  /// star) until a successful `/api/version` call actually confirms it, so a
+  /// server too old for the route — or one not yet reached — never receives a
+  /// PATCH it can't handle.
+  bool supportsFavorites(String baseUrl) => _favoritesSyncSupported[baseUrl] ?? false;
 
   /// Fetches all configured servers in parallel and emits the merged, sorted
   /// list. A server that fails is marked offline and contributes its last-known
@@ -317,6 +331,7 @@ class SessionRepository {
     _lastByServer.remove(baseUrl);
     _serverOnline.remove(baseUrl);
     _namesResolved.remove(baseUrl);
+    _favoritesSyncSupported.remove(baseUrl);
   }
 
   /// Updates [_apiErrors] from a notify frame.
@@ -413,6 +428,11 @@ class SessionRepository {
             'notifyLevel': s.notifyLevel,
             'autoCommand': s.autoCommand,
             'serverBaseUrl': s.server.baseUrl,
+            // #60: so the pinned group's instant cold-launch paint (ahead of
+            // the first live refresh) already reflects the server's truth
+            // instead of momentarily looking unfavorited.
+            'favorite': s.favorite,
+            'favoriteRank': s.favoriteRank,
           },
       ]);
 
@@ -445,6 +465,8 @@ class SessionRepository {
           notifyLevel: (e['notifyLevel'] ?? 'important').toString(),
           autoCommand: (e['autoCommand'] ?? '').toString(),
           server: server,
+          favorite: e['favorite'] == true,
+          favoriteRank: _asInt(e['favoriteRank']),
         ));
       }
       return out;
@@ -549,9 +571,12 @@ class SessionRepository {
     return client;
   }
 
-  /// Resolves each server's display name from `/api/version` once (best-effort;
-  /// retried on a later refresh if the server is unreachable). Updates the server
-  /// store in place so the fallback `Shadow` name upgrades to the real one.
+  /// Resolves each server's display name AND capability set from
+  /// `/api/version` once (best-effort; retried on a later refresh if the
+  /// server is unreachable) — one request answers both, so gating the
+  /// `favorites-sync` star (#60) on [supportsFavorites] costs nothing extra.
+  /// Updates the server store in place so the fallback `Shadow` name upgrades
+  /// to the real one.
   Future<void> _ensureServerNames() async {
     await Future.wait(_store.servers.map((server) async {
       if (_namesResolved.contains(server.baseUrl)) return;
@@ -560,6 +585,7 @@ class SessionRepository {
         if (info.serverName.isNotEmpty) {
           _store.updateServerName(server.baseUrl, info.serverName);
         }
+        _favoritesSyncSupported[server.baseUrl] = info.has('favorites-sync');
         _namesResolved.add(server.baseUrl);
       } catch (_) {/* retry next refresh */}
     }));

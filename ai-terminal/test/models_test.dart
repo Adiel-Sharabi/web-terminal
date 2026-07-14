@@ -58,6 +58,59 @@ void main() {
       final s = Session.fromJson(_server, {'id': 'x'});
       expect(s.agent, isNull);
     });
+
+    test('parses favorite + favoriteRank (#60)', () {
+      final s = Session.fromJson(_server, {
+        'id': 'x',
+        'favorite': true,
+        'favoriteRank': 4,
+      });
+      expect(s.favorite, isTrue);
+      expect(s.favoriteRank, 4);
+    });
+
+    test('defaults to not-favorited, null rank when absent', () {
+      final s = Session.fromJson(_server, {'id': 'x'});
+      expect(s.favorite, isFalse);
+      expect(s.favoriteRank, isNull);
+    });
+
+    test('favorite false is never coerced true by a stray favoriteRank', () {
+      final s = Session.fromJson(_server, {'id': 'x', 'favoriteRank': 2});
+      expect(s.favorite, isFalse);
+    });
+  });
+
+  group('Session.pinnedOrder (#60)', () {
+    Session mk(String id, {bool favorite = false, int? rank}) => Session(
+          id: id,
+          name: id,
+          cwd: '/x',
+          status: 'idle',
+          claudeSessionId: null,
+          lastActivity: 1,
+          notifyLevel: 'important',
+          server: _server,
+          favorite: favorite,
+          favoriteRank: rank,
+        );
+
+    test('pinnedOrder keeps only favorited sessions, sorted by rank', () {
+      final sessions = [
+        mk('a', favorite: true, rank: 2),
+        mk('b'),
+        mk('c', favorite: true, rank: 0),
+      ];
+      expect(Session.pinnedOrder(sessions).map((s) => s.id), ['c', 'a']);
+    });
+
+    test('pinnedOrder ties (equal/absent rank) break on id', () {
+      final sessions = [
+        mk('b', favorite: true),
+        mk('a', favorite: true),
+      ];
+      expect(Session.pinnedOrder(sessions).map((s) => s.id), ['a', 'b']);
+    });
   });
 
   group('AttentionInfo.fromJson', () {

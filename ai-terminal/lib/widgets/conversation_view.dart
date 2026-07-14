@@ -1,9 +1,20 @@
 /// The Chat lens — the centerpiece the owner wants over the raw terminal:
 /// Claude's conversation rendered as a chat transcript instead of a VT100
-/// screen. Assistant turns on the left, user turns muted on the right,
-/// fenced code blocks in their own tap-to-copy containers, tool calls as
-/// collapsed chips, native text selection throughout (no markdown package —
-/// selection is the whole point).
+/// screen.
+///
+/// User and agent turns must read apart at a glance, without reading the
+/// text (#54) — via a COMBINATION of cues, never colour alone: a user turn
+/// is the rarer, higher-signal landmark, so it pops — right-aligned, a
+/// bounded bubble tinted with the app's own accent, fronted by a small "You"
+/// tag. An agent turn is the calm, high-volume bulk, so it stays quiet —
+/// left-aligned, near full width (so its code blocks and tool cards keep
+/// real room instead of being squeezed into a narrow bubble), an
+/// almost-transparent surface with only a thin left accent stripe in the
+/// agent's OWN registry colour (`GET /api/agents` via `AgentCatalog` — never
+/// hardcoded here), fronted by a small tag naming it. Fenced code blocks
+/// render in their own tap-to-copy containers, tool calls as collapsed
+/// chips, native text selection throughout (no markdown package — selection
+/// is the whole point).
 ///
 /// Data comes from `GET /api/sessions/:id/transcript`, backward-paginated
 /// (newest-last per page; `before=<cursor>` walks further into history) via
@@ -19,12 +30,17 @@ import 'package:flutter_markdown/flutter_markdown.dart';
 import 'package:markdown/markdown.dart' as md;
 import 'package:url_launcher/url_launcher.dart';
 
+import '../api/agent_catalog.dart';
 import '../api/api_client.dart';
 import '../api/models.dart';
 import '../theme/app_theme.dart';
 import '../util/terminal_links.dart';
 import 'empty_state.dart';
 import 'format_utils.dart';
+// #54: reuses the SAME hex->Color parser SessionCard's agent chip already
+// uses for GET /api/agents' colour field — one parser, not a second copy
+// that could drift from it.
+import 'session_card.dart' show parseAgentColor;
 
 /// Turns per page — matches the server's default.
 const int _kPageSize = 50;
@@ -281,11 +297,31 @@ class _ConversationViewState extends State<ConversationView> {
       final oldExtent = hadClients
           ? _scrollController.position.maxScrollExtent
           : 0.0;
+      // Reaching here NORMALLY means the user scrolled to the TOP to trigger
+      // this fetch — never the bottom. But _onScroll's top/bottom edge
+      // thresholds are two independent checks against the SAME pixel range,
+      // so when the transcript is short enough to fit the viewport without
+      // scrolling at all (oldExtent == 0 — nothing to scroll), they coincide:
+      // the very first render (or a jump-to-bottom on load) can fire the
+      // "at top" branch even though the reader never moved and is still
+      // genuinely at the bottom. Only treat this as "the user left the
+      // bottom" when there was actually something to scroll away from.
+      final wasScrollable = hadClients && oldExtent > 0;
       setState(() {
         _turns = [...page.messages, ..._turns];
         _oldestCursor = page.cursor;
         _hasMoreOlder = page.hasMore;
         _loadingOlder = false;
+        // Assert this directly rather than trusting _onScroll's own
+        // re-derivation: prepending a large page shifts scroll metrics before
+        // the anchor jump below has run, and a stray scroll notification in
+        // that window can otherwise misread the transient position as "at the
+        // bottom" and latch _pinnedToBottom true — which is exactly what let
+        // the next status refresh's _scrollToBottom() yank the view away from
+        // the history the user just paged into (#47). Gated on [wasScrollable]
+        // so the short-transcript edge case above leaves this alone — the
+        // reader really is still at the bottom and must stay auto-following.
+        if (wasScrollable) _pinnedToBottom = false;
       });
       if (hadClients) {
         WidgetsBinding.instance.addPostFrameCallback((_) {
@@ -294,6 +330,16 @@ class _ConversationViewState extends State<ConversationView> {
           _scrollController.jumpTo(
             _scrollController.position.pixels + (newExtent - oldExtent),
           );
+          // The jump above only preserves the user's reading position — it
+          // must never be (mis)read as "the user reached the bottom" either.
+          // Any onScroll-driven re-pin from the jump's own notification is
+          // synchronous and already happened by the time jumpTo returns, so
+          // this reasserts the true state (#47) — but only when wasScrollable
+          // decided un-pinning was warranted in the first place; otherwise
+          // _pinnedToBottom is already correctly true and must stay that way.
+          if (wasScrollable && _pinnedToBottom) {
+            setState(() => _pinnedToBottom = false);
+          }
         });
       }
     } catch (_) {
@@ -531,7 +577,11 @@ class _ConversationViewState extends State<ConversationView> {
             }
             var i = index - leadingLoader;
             if (i < _turns.length) {
-              return _TurnBubble(turn: _turns[i], subFetch: _subFetch);
+              return _TurnBubble(
+                turn: _turns[i],
+                subFetch: _subFetch,
+                agentId: widget.session.agent,
+              );
             }
             i -= _turns.length;
             // Trailing "Claude is working…" indicator while the agent is mid-turn.
@@ -827,9 +877,10 @@ class _PendingEcho {
   final int at;
 }
 
-/// Renders a queued/pending user prompt (#31): styled like a user bubble but
-/// muted, with a "Queued" clock tag, so the user sees their input registered
-/// while Claude is still working. Removed once the real transcript turn lands.
+/// Renders a queued/pending user prompt (#31): the same "pop" user-bubble
+/// treatment as a real user turn (#54 — right-aligned, tinted with the app's
+/// own accent), but with its text muted and a "Queued" clock tag, so the
+/// state reads as provisional. Removed once the real transcript turn lands.
 class _PendingEchoBubble extends StatelessWidget {
   const _PendingEchoBubble({required this.text});
 
@@ -842,7 +893,7 @@ class _PendingEchoBubble extends StatelessWidget {
       alignment: Alignment.centerRight,
       child: ConstrainedBox(
         constraints: BoxConstraints(
-          maxWidth: MediaQuery.sizeOf(context).width * 0.82,
+          maxWidth: MediaQuery.sizeOf(context).width * 0.78,
         ),
         child: Container(
           margin: const EdgeInsets.symmetric(
@@ -851,16 +902,21 @@ class _PendingEchoBubble extends StatelessWidget {
           ),
           padding: const EdgeInsets.all(12),
           decoration: BoxDecoration(
-            color: theme.colorScheme.surfaceContainerHigh.withValues(alpha: 0.35),
-            borderRadius: BorderRadius.circular(AppShape.medium),
+            color: theme.colorScheme.primary.withValues(alpha: 0.08),
+            borderRadius: BorderRadius.circular(AppShape.large),
             border: Border.all(
-              color: theme.colorScheme.outlineVariant.withValues(alpha: 0.5),
+              color: theme.colorScheme.primary.withValues(alpha: 0.25),
             ),
           ),
           child: Column(
             crossAxisAlignment: CrossAxisAlignment.end,
             mainAxisSize: MainAxisSize.min,
             children: [
+              _RoleTag(
+                label: 'You',
+                color: theme.colorScheme.primary.withValues(alpha: 0.6),
+              ),
+              const SizedBox(height: 6),
               Text(
                 text,
                 style: theme.textTheme.bodyLarge?.copyWith(
@@ -1027,13 +1083,20 @@ class _MarkdownLinkBuilder extends MarkdownElementBuilder {
 }
 
 class _TurnBubble extends StatelessWidget {
-  const _TurnBubble({required this.turn, this.subFetch});
+  const _TurnBubble({required this.turn, this.subFetch, this.agentId});
 
   final TranscriptTurn turn;
 
   /// Lets a `Task` tool card drill into its subagent's turns (null in contexts
   /// with no session binding, e.g. some tests — those fall back to flat cards).
   final SubagentFetcher? subFetch;
+
+  /// The carrying session's `Session.agent` id, looked up in [AgentCatalog]
+  /// (`GET /api/agents` — the server's `lib/agents.js` registry is the single
+  /// source of truth for an agent's label + tint; #54 never hardcodes a
+  /// Claude/Codex palette here). Null for a plain shell or a test with no
+  /// session binding — the role tag then falls back to a neutral label/colour.
+  final String? agentId;
 
   @override
   Widget build(BuildContext context) {
@@ -1043,11 +1106,12 @@ class _TurnBubble extends StatelessWidget {
     // injected SKILL.md body.
     final command = isAssistant ? null : parseCommandInvocation(turn.text);
     final segments = _splitCodeBlocks(turn.text);
-    final bodyStyle = isAssistant
-        ? theme.textTheme.bodyLarge
-        : theme.textTheme.bodyLarge?.copyWith(
-            color: theme.colorScheme.onSurfaceVariant,
-          );
+    // #54: user text is full-strength on BOTH sides now — the old "muted on
+    // the right" treatment read as *lower* priority, exactly backwards: the
+    // user's own turns are the rarer, higher-signal landmark, so they must
+    // pop, not fade. The distinction is carried by alignment + the bubble
+    // treatment below instead.
+    final bodyStyle = theme.textTheme.bodyLarge;
     final codeSpanStyle = bodyStyle?.copyWith(
       fontFamily: 'monospace',
       backgroundColor: theme.colorScheme.surfaceContainerHigh,
@@ -1060,30 +1124,72 @@ class _TurnBubble extends StatelessWidget {
         );
     final epoch = _parseIsoToEpoch(turn.ts);
 
+    // #54: an agent turn is tinted with ITS OWN registry colour so Claude vs
+    // Codex still reads correctly; a user turn always uses the app's own
+    // single accent, deliberately never the agent's tint, so the two can
+    // never collide — though the real distinguishing cue is the alignment +
+    // surface treatment below, never colour alone.
+    final roleColor = isAssistant
+        ? parseAgentColor(
+            AgentCatalog.instance[agentId]?.color,
+            theme.colorScheme.onSurfaceVariant,
+          )
+        : theme.colorScheme.primary;
+    final roleLabel = isAssistant
+        ? (AgentCatalog.instance[agentId]?.label ?? 'Assistant')
+        : 'You';
+
+    // An agent turn runs near full width — it carries code blocks and tool
+    // cards that must not be squeezed into a narrow bubble. A user turn stays
+    // bounded, so its bubble reads as a landmark rather than another
+    // full-width block in the flow.
+    final maxWidth = isAssistant
+        ? double.infinity
+        : MediaQuery.sizeOf(context).width * 0.78;
+
     return Align(
       alignment: isAssistant ? Alignment.centerLeft : Alignment.centerRight,
       child: ConstrainedBox(
-        constraints: BoxConstraints(
-          maxWidth: MediaQuery.sizeOf(context).width * 0.82,
-        ),
+        constraints: BoxConstraints(maxWidth: maxWidth),
         child: Container(
           margin: const EdgeInsets.symmetric(
             vertical: 4,
             horizontal: AppSpacing.screenPadding,
           ),
           padding: const EdgeInsets.all(12),
-          decoration: BoxDecoration(
-            color: isAssistant
-                ? theme.colorScheme.surfaceContainer
-                : theme.colorScheme.surfaceContainerHigh.withValues(alpha: 0.5),
-            borderRadius: BorderRadius.circular(AppShape.medium),
-          ),
+          decoration: isAssistant
+              ? BoxDecoration(
+                  // Quiet: near-transparent surface, no full "bubble" — an
+                  // agent turn is the calm, high-volume bulk of the
+                  // transcript, so it reads as document flow, not a chat
+                  // pill, however many stack up in a row.
+                  color:
+                      theme.colorScheme.surfaceContainer.withValues(alpha: 0.35),
+                  borderRadius: BorderRadius.circular(AppShape.medium),
+                  border: Border(
+                    left: BorderSide(
+                      color: roleColor.withValues(alpha: 0.7),
+                      width: 3,
+                    ),
+                  ),
+                )
+              : BoxDecoration(
+                  // Pop: a real bubble tinted with the app's own accent — the
+                  // landmark a long transcript gets scanned back to.
+                  color: theme.colorScheme.primary.withValues(alpha: 0.14),
+                  borderRadius: BorderRadius.circular(AppShape.large),
+                  border: Border.all(
+                    color: theme.colorScheme.primary.withValues(alpha: 0.4),
+                  ),
+                ),
           child: Column(
             crossAxisAlignment: isAssistant
                 ? CrossAxisAlignment.start
                 : CrossAxisAlignment.end,
             mainAxisSize: MainAxisSize.min,
             children: [
+              _RoleTag(label: roleLabel, color: roleColor),
+              const SizedBox(height: 6),
               if (command != null)
                 _CommandInvocationChip(command: command)
               else
@@ -1131,6 +1237,43 @@ class _TurnBubble extends StatelessWidget {
           ),
         ),
       ),
+    );
+  }
+}
+
+/// A small colour-dot + label fronting a turn (#54) — one of the combined
+/// cues (alongside alignment and the surface treatment) that distinguishes a
+/// user turn from an agent turn without relying on colour alone. [color] is
+/// either the app's own accent (user) or the agent's OWN registry tint
+/// (assistant, via [AgentCatalog] / `GET /api/agents`) — this widget itself
+/// carries no agent knowledge, it only paints what it's given.
+class _RoleTag extends StatelessWidget {
+  const _RoleTag({required this.label, required this.color});
+
+  final String label;
+  final Color color;
+
+  @override
+  Widget build(BuildContext context) {
+    final theme = Theme.of(context);
+    return Row(
+      mainAxisSize: MainAxisSize.min,
+      children: [
+        Container(
+          width: 7,
+          height: 7,
+          decoration: BoxDecoration(color: color, shape: BoxShape.circle),
+        ),
+        const SizedBox(width: 6),
+        Text(
+          label,
+          style: theme.textTheme.labelSmall?.copyWith(
+            color: color,
+            fontWeight: FontWeight.w700,
+            letterSpacing: 0.2,
+          ),
+        ),
+      ],
     );
   }
 }
