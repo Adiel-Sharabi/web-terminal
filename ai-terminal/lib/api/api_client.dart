@@ -364,8 +364,15 @@ class ApiClient {
   /// Opens a live terminal WebSocket (`/ws/:id`) for [sessionId]. The caller
   /// owns the returned [TerminalConnection] and must [TerminalConnection.close]
   /// it when done.
-  TerminalConnection openTerminal(String sessionId) =>
-      TerminalConnection(server, sessionId);
+  ///
+  /// Pass [cols]/[rows] — the size the view is ALREADY laid out at — so the PTY
+  /// learns this client's size in the connect handshake (#59). A PTY has one
+  /// size shared by every viewer, so a connection that never states its own
+  /// inherits whatever the last viewer set: a phone attaching to a session a
+  /// desktop is watching then renders desktop-width output, torn, until some
+  /// unrelated relayout happens to fire a resize.
+  TerminalConnection openTerminal(String sessionId, {int? cols, int? rows}) =>
+      TerminalConnection(server, sessionId, cols: cols, rows: rows);
 
   /// Closes the underlying HTTP client. Call when this client is discarded.
   void close() => _http.close();
@@ -558,16 +565,26 @@ class TerminalConnection {
 
   /// Opens the terminal socket for [sessionId] on [server].
   ///
+  /// [cols]/[rows] seed the size this client renders at, so it is stated in the
+  /// CONNECT HANDSHAKE rather than whenever a relayout next happens to fire
+  /// (#59). They are the same fields [resize] writes, so a later real resize
+  /// simply supersedes them, and both the reconnect replay and the proxy's
+  /// `requestResize` can answer with a size from the very first socket.
+  ///
   /// [socketFactory], [reconnectBackoff] and [heartbeatInterval] are injectable
   /// for testing; production callers use the defaults via
   /// [ApiClient.openTerminal].
   TerminalConnection(
     this._server,
     this._sessionId, {
+    int? cols,
+    int? rows,
     TerminalSocketFactory? socketFactory,
     List<Duration>? reconnectBackoff,
     Duration heartbeatInterval = const Duration(seconds: 25),
-  })  : _socketFactory = socketFactory ?? _defaultTerminalSocketFactory,
+  })  : _lastCols = cols,
+        _lastRows = rows,
+        _socketFactory = socketFactory ?? _defaultTerminalSocketFactory,
         _backoff = reconnectBackoff ??
             const [
               Duration(milliseconds: 500),

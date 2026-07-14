@@ -180,6 +180,115 @@ void main() {
     });
   });
 
+  // #59 — a PTY has ONE size, shared by every viewer. A connection that never states
+  // its own inherits whatever the last viewer set, so a phone attaching to a session a
+  // desktop is watching renders desktop-width output, torn, until some unrelated
+  // relayout happens to fire a resize. The size must be stated in the HANDSHAKE.
+  group('#59 the connection states its size on connect', () {
+    test('a connection opened with a size sends resize in the connect handshake',
+        () async {
+      final s1 = _FakeSocket();
+      final conn = TerminalConnection(_server, 's',
+          cols: 52, rows: 30, socketFactory: (_) => s1);
+      await pump();
+
+      // No resize() call was ever made — this must come from the handshake alone.
+      expect(
+        s1.sentStrings.where((s) => s.contains('"resize"')),
+        contains(contains('"cols":52')),
+        reason: 'the PTY must learn our size at connect, not at the next relayout',
+      );
+      conn.close();
+    });
+
+    test('with no size, the handshake states none (nothing to invent)', () async {
+      final s1 = _FakeSocket();
+      final conn = TerminalConnection(_server, 's', socketFactory: (_) => s1);
+      await pump();
+
+      expect(s1.sentStrings.where((s) => s.contains('"resize"')), isEmpty);
+      conn.close();
+    });
+
+    test('a seeded connection can answer the proxy\'s requestResize immediately',
+        () async {
+      // The cluster proxy asks the client to re-state its size whenever the REMOTE
+      // socket connects (server.js: `localWs.send({requestResize:true})`), precisely
+      // so the remote PTY matches this client. A connection with no size silently
+      // ignored that request — which is why a remotely-viewed session was the worst
+      // case. Seeded, it can answer from the very first socket.
+      final s1 = _FakeSocket();
+      final conn = TerminalConnection(_server, 's',
+          cols: 52, rows: 30, socketFactory: (_) => s1);
+      await pump();
+      s1.sent.clear();
+
+      s1.serverSend('{"requestResize":true}');
+      await pump();
+
+      expect(
+        s1.sentStrings.where((s) => s.contains('"resize"')),
+        contains(contains('"cols":52')),
+        reason: 'the proxy asked for our size; we must be able to answer',
+      );
+      conn.close();
+    });
+
+    test('an UNSEEDED connection cannot answer requestResize — the #59 bug', () async {
+      final s1 = _FakeSocket();
+      final conn = TerminalConnection(_server, 's', socketFactory: (_) => s1);
+      await pump();
+      s1.sent.clear();
+
+      s1.serverSend('{"requestResize":true}');
+      await pump();
+
+      expect(s1.sentStrings.where((s) => s.contains('"resize"')), isEmpty,
+          reason: 'documents WHY the size must be seeded: with none, we stay silent');
+      conn.close();
+    });
+
+    test('the seeded size is replayed on reconnect', () async {
+      final s1 = _FakeSocket();
+      final s2 = _FakeSocket();
+      var i = 0;
+      final conn = TerminalConnection(_server, 's',
+          cols: 52,
+          rows: 30,
+          socketFactory: (_) => i++ == 0 ? s1 : s2,
+          reconnectBackoff: _slowBackoff);
+      await pump();
+      s1.serverDrop();
+      await pump(120);
+
+      expect(s2.sentStrings.where((s) => s.contains('"resize"')),
+          contains(contains('"cols":52')));
+      conn.close();
+    });
+
+    test('a real resize supersedes the seed', () async {
+      final s1 = _FakeSocket();
+      final s2 = _FakeSocket();
+      var i = 0;
+      final conn = TerminalConnection(_server, 's',
+          cols: 52,
+          rows: 30,
+          socketFactory: (_) => i++ == 0 ? s1 : s2,
+          reconnectBackoff: _slowBackoff);
+      await pump();
+      conn.resize(120, 40); // the view actually relaid out
+      s1.serverDrop();
+      await pump(120);
+
+      final replayed =
+          s2.sentStrings.where((s) => s.contains('"resize"')).toList();
+      expect(replayed, contains(contains('"cols":120')));
+      expect(replayed.any((s) => s.contains('"cols":52')), isFalse,
+          reason: 'the stale seed must not outlive a real measurement');
+      conn.close();
+    });
+  });
+
   group('TerminalConnection control frames', () {
     test('filters heartbeat/requestResize; forwards real output', () async {
       final s1 = _FakeSocket();
