@@ -68,6 +68,22 @@ typedef SubagentFetcher =
       int? limit,
     });
 
+/// Every Task subagent in the transcript, in transcript order, de-duped by
+/// tool_use id — the SSOT the pinned strip (#62) lists so a session's subagents
+/// stay reachable however far the conversation has scrolled. Walks turns →
+/// toolUses (there is no flat tool list); a tool is a subagent iff it carries a
+/// [SubagentTrace] stub (`ToolUse.subagent != null`, server-stamped).
+List<ToolUse> collectSubagents(List<TranscriptTurn> turns) {
+  final out = <ToolUse>[];
+  final seen = <String>{};
+  for (final turn in turns) {
+    for (final tool in turn.toolUses) {
+      if (tool.subagent != null && seen.add(tool.id)) out.add(tool);
+    }
+  }
+  return out;
+}
+
 class ConversationView extends StatefulWidget {
   const ConversationView({
     super.key,
@@ -480,6 +496,49 @@ class _ConversationViewState extends State<ConversationView> {
     _scrollToBottom();
   }
 
+  /// Opens a subagent's live drill-in in a focused sheet (#62). Reuses the SAME
+  /// paging path the inline card uses (`_subFetch` → `GET /subagent/:toolUseId`) —
+  /// one fetch path, not a second. Read-only by design: Claude subagents run
+  /// autonomously and there is no channel to send input into one; session input and
+  /// interrupt stay on the always-present compose bar, which this sheet never covers
+  /// for longer than a swipe-down.
+  void _openSubagentSheet(ToolUse tool) {
+    showModalBottomSheet<void>(
+      context: context,
+      isScrollControlled: true,
+      showDragHandle: true,
+      builder: (sheetCtx) {
+        final theme = Theme.of(sheetCtx);
+        final maxH = MediaQuery.of(sheetCtx).size.height * 0.6;
+        return SafeArea(
+          child: Padding(
+            padding: const EdgeInsets.fromLTRB(12, 0, 12, 12),
+            child: Column(
+              mainAxisSize: MainAxisSize.min,
+              crossAxisAlignment: CrossAxisAlignment.start,
+              children: [
+                _SubagentCard(
+                  tool: tool,
+                  subFetch: _subFetch,
+                  initiallyExpanded: true,
+                  expandedMaxHeight: maxH,
+                ),
+                const SizedBox(height: 10),
+                Text(
+                  'Subagents run on their own — this view is read-only. Send a '
+                  'prompt or press Esc to the session from the compose bar below.',
+                  style: theme.textTheme.bodySmall?.copyWith(
+                    color: theme.colorScheme.onSurfaceVariant,
+                  ),
+                ),
+              ],
+            ),
+          ),
+        );
+      },
+    );
+  }
+
   /// Approximate context-window % from the newest assistant turn's token count,
   /// used only when the live status line hasn't posted a real ctx (e.g. an idle
   /// session). Assumes a 200k window; shown with a `~` to signal it's an
@@ -539,12 +598,17 @@ class _ConversationViewState extends State<ConversationView> {
 
     final working = widget.session.status == 'working';
     final leadingLoader = _loadingOlder ? 1 : 0;
+    final subagents = collectSubagents(_turns);
     return Column(
       children: [
         _MetricsHeader(
           session: widget.session,
           derivedCtx: _deriveCtxFromTranscript(),
         ),
+        // #62: the session's subagents pinned above the transcript so they stay
+        // reachable no matter how far it scrolls. Hidden when there are none.
+        if (subagents.isNotEmpty)
+          _SubagentStrip(tools: subagents, onOpen: _openSubagentSheet),
         Expanded(
           child: Stack(
             children: [
@@ -1624,6 +1688,104 @@ class _ToolCardState extends State<_ToolCard> {
   }
 }
 
+/// The pinned strip of a session's subagents at the top of chat mode (#62): one
+/// chip per Task subagent so they stay reachable however far the transcript has
+/// scrolled, mirroring the terminal lens's always-at-hand subagent panel. A live
+/// dot reads running vs finished; tapping opens the drill-in sheet. The strip is
+/// hidden entirely when the session has no subagents (its caller gates on that).
+class _SubagentStrip extends StatelessWidget {
+  const _SubagentStrip({required this.tools, required this.onOpen});
+
+  /// Task tool_uses, each with `subagent != null` (see [collectSubagents]).
+  final List<ToolUse> tools;
+  final void Function(ToolUse) onOpen;
+
+  @override
+  Widget build(BuildContext context) {
+    if (tools.isEmpty) return const SizedBox.shrink();
+    final theme = Theme.of(context);
+    return Container(
+      height: 42,
+      decoration: BoxDecoration(
+        color: theme.colorScheme.surface,
+        border: Border(
+          bottom: BorderSide(color: theme.colorScheme.outlineVariant),
+        ),
+      ),
+      child: ListView.separated(
+        scrollDirection: Axis.horizontal,
+        padding: const EdgeInsets.symmetric(horizontal: 8, vertical: 6),
+        itemCount: tools.length,
+        separatorBuilder: (_, _) => const SizedBox(width: 6),
+        itemBuilder: (_, i) =>
+            _SubagentChip(tool: tools[i], onTap: () => onOpen(tools[i])),
+      ),
+    );
+  }
+}
+
+/// One subagent chip: its agent type (or description) and a live running/done dot.
+/// Running reuses [_RunningDot] behind a RepaintBoundary so the pulse repaints only
+/// the 7px dot, never the strip; finished shows a static muted dot.
+class _SubagentChip extends StatelessWidget {
+  const _SubagentChip({required this.tool, required this.onTap});
+
+  final ToolUse tool;
+  final VoidCallback onTap;
+
+  @override
+  Widget build(BuildContext context) {
+    final theme = Theme.of(context);
+    final sub = tool.subagent!;
+    final type = sub.agentType.trim();
+    final desc = sub.description.trim();
+    final label = type.isNotEmpty ? type : (desc.isNotEmpty ? desc : 'subagent');
+    return Material(
+      color: theme.colorScheme.surfaceContainerHigh,
+      borderRadius: BorderRadius.circular(AppShape.large),
+      child: InkWell(
+        borderRadius: BorderRadius.circular(AppShape.large),
+        onTap: onTap,
+        child: Padding(
+          padding: const EdgeInsets.symmetric(horizontal: 10, vertical: 6),
+          child: Row(
+            mainAxisSize: MainAxisSize.min,
+            children: [
+              Icon(Icons.account_tree_outlined,
+                  size: 13, color: theme.colorScheme.primary),
+              const SizedBox(width: 5),
+              ConstrainedBox(
+                constraints: const BoxConstraints(maxWidth: 130),
+                child: Text(
+                  label,
+                  maxLines: 1,
+                  overflow: TextOverflow.ellipsis,
+                  style: theme.textTheme.labelMedium?.copyWith(
+                    fontFamily: 'monospace',
+                    color: theme.colorScheme.onSurface,
+                  ),
+                ),
+              ),
+              const SizedBox(width: 6),
+              if (sub.running)
+                const RepaintBoundary(child: _RunningDot())
+              else
+                Container(
+                  width: 7,
+                  height: 7,
+                  decoration: BoxDecoration(
+                    color: theme.colorScheme.outline,
+                    shape: BoxShape.circle,
+                  ),
+                ),
+            ],
+          ),
+        ),
+      ),
+    );
+  }
+}
+
 /// A `Task` tool_use rendered as a live, drill-in subagent panel — the chat-native
 /// equivalent of the terminal's arrow-navigable subagent view. Collapsed it shows
 /// the agent type + description and a pulsing dot while the subagent runs; tapping
@@ -1632,10 +1794,23 @@ class _ToolCardState extends State<_ToolCard> {
 /// depth via the same [subFetch]. While expanded AND running it re-polls every 4s
 /// so you can watch the subagent work, exactly like the terminal panel.
 class _SubagentCard extends StatefulWidget {
-  const _SubagentCard({required this.tool, required this.subFetch});
+  const _SubagentCard({
+    required this.tool,
+    required this.subFetch,
+    this.initiallyExpanded = false,
+    this.expandedMaxHeight = 360,
+  });
 
   final ToolUse tool;
   final SubagentFetcher subFetch;
+
+  /// Start already drilled-in — used when hosted in the pinned-subagent sheet
+  /// (#62) so it opens straight onto the transcript, no extra tap.
+  final bool initiallyExpanded;
+
+  /// Max height of the expanded drill body. The sheet passes a taller value so the
+  /// transcript fills it; inline cards keep the compact default.
+  final double expandedMaxHeight;
 
   @override
   State<_SubagentCard> createState() => _SubagentCardState();
@@ -1647,6 +1822,18 @@ class _SubagentCardState extends State<_SubagentCard> {
   String? _error;
   SubagentPage? _page;
   Timer? _poll;
+
+  @override
+  void initState() {
+    super.initState();
+    if (widget.initiallyExpanded) {
+      _expanded = true;
+      // _load() calls setState — illegal during initState; defer a frame.
+      WidgetsBinding.instance.addPostFrameCallback((_) {
+        if (mounted && _page == null) _load();
+      });
+    }
+  }
 
   SubagentTrace get _stub => widget.tool.subagent!;
   // Prefer the freshly-fetched running state; fall back to the transcript stub
@@ -1778,7 +1965,7 @@ class _SubagentCardState extends State<_SubagentCard> {
               width: double.infinity,
               margin: const EdgeInsets.only(top: 4),
               padding: const EdgeInsets.all(8),
-              constraints: const BoxConstraints(maxHeight: 360),
+              constraints: BoxConstraints(maxHeight: widget.expandedMaxHeight),
               decoration: BoxDecoration(
                 color: theme.colorScheme.surfaceContainer,
                 borderRadius: BorderRadius.circular(AppShape.small),
