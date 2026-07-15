@@ -92,6 +92,7 @@ class ConversationView extends StatefulWidget {
     this.fetchPage,
     this.fetchSubagent,
     this.submittedPrompts,
+    this.onSubmitToSession,
   });
 
   final Session session;
@@ -112,6 +113,13 @@ class ConversationView extends StatefulWidget {
   /// even while Claude is still working, then reconciled away when the matching
   /// real transcript turn arrives.
   final Stream<String>? submittedPrompts;
+
+  /// Submits an explicit prompt to the SESSION (the main agent's PTY) via the same
+  /// path the compose bar uses. Lets the subagent drill-in sheet offer a "message
+  /// session" input, mirroring what the terminal lens allows while a subagent runs —
+  /// there is no channel to a specific subagent, so this reaches the session. Null in
+  /// tests / contexts that don't wire it (the sheet then hides the input).
+  final void Function(String)? onSubmitToSession;
 
   @override
   State<ConversationView> createState() => _ConversationViewState();
@@ -498,44 +506,20 @@ class _ConversationViewState extends State<ConversationView> {
 
   /// Opens a subagent's live drill-in in a focused sheet (#62). Reuses the SAME
   /// paging path the inline card uses (`_subFetch` → `GET /subagent/:toolUseId`) —
-  /// one fetch path, not a second. Read-only by design: Claude subagents run
-  /// autonomously and there is no channel to send input into one; session input and
-  /// interrupt stay on the always-present compose bar, which this sheet never covers
-  /// for longer than a swipe-down.
+  /// one fetch path, not a second. The subagent transcript is read-only (subagents run
+  /// autonomously), but the sheet carries a "message session" input so you can type
+  /// from here exactly as the terminal lens lets you — routed to the session via
+  /// [onSubmitToSession], not a fictional per-subagent channel.
   void _openSubagentSheet(ToolUse tool) {
     showModalBottomSheet<void>(
       context: context,
       isScrollControlled: true,
       showDragHandle: true,
-      builder: (sheetCtx) {
-        final theme = Theme.of(sheetCtx);
-        final maxH = MediaQuery.of(sheetCtx).size.height * 0.6;
-        return SafeArea(
-          child: Padding(
-            padding: const EdgeInsets.fromLTRB(12, 0, 12, 12),
-            child: Column(
-              mainAxisSize: MainAxisSize.min,
-              crossAxisAlignment: CrossAxisAlignment.start,
-              children: [
-                _SubagentCard(
-                  tool: tool,
-                  subFetch: _subFetch,
-                  initiallyExpanded: true,
-                  expandedMaxHeight: maxH,
-                ),
-                const SizedBox(height: 10),
-                Text(
-                  'Subagents run on their own — this view is read-only. Send a '
-                  'prompt or press Esc to the session from the compose bar below.',
-                  style: theme.textTheme.bodySmall?.copyWith(
-                    color: theme.colorScheme.onSurfaceVariant,
-                  ),
-                ),
-              ],
-            ),
-          ),
-        );
-      },
+      builder: (sheetCtx) => _SubagentSheet(
+        tool: tool,
+        subFetch: _subFetch,
+        onSubmit: widget.onSubmitToSession,
+      ),
     );
   }
 
@@ -1780,6 +1764,112 @@ class _SubagentChip extends StatelessWidget {
                 ),
             ],
           ),
+        ),
+      ),
+    );
+  }
+}
+
+/// The subagent drill-in shown in a focused bottom sheet (#62): the live, read-only
+/// transcript (reusing [_SubagentCard]'s SAME fetch/poll path) plus a "message
+/// session" input. Typing here submits to the SESSION — the main agent's PTY — via
+/// [onSubmit], exactly as the terminal lens lets you type while a subagent runs;
+/// there is no channel to a specific subagent, so the field is labelled for the
+/// session and the transcript above stays read-only. Sending closes the sheet so the
+/// prompt's "Queued" echo and the reply are visible back in the chat. The input is
+/// hidden when [onSubmit] is null (e.g. no live connection / tests that skip it).
+class _SubagentSheet extends StatefulWidget {
+  const _SubagentSheet({
+    required this.tool,
+    required this.subFetch,
+    this.onSubmit,
+  });
+
+  final ToolUse tool;
+  final SubagentFetcher subFetch;
+  final void Function(String)? onSubmit;
+
+  @override
+  State<_SubagentSheet> createState() => _SubagentSheetState();
+}
+
+class _SubagentSheetState extends State<_SubagentSheet> {
+  final TextEditingController _controller = TextEditingController();
+
+  @override
+  void dispose() {
+    _controller.dispose();
+    super.dispose();
+  }
+
+  void _send() {
+    final text = _controller.text;
+    if (text.trim().isEmpty) return;
+    widget.onSubmit?.call(text);
+    Navigator.of(context).maybePop(); // back to the chat, where the echo + reply land
+  }
+
+  @override
+  Widget build(BuildContext context) {
+    final theme = Theme.of(context);
+    final maxH = MediaQuery.of(context).size.height * 0.5;
+    final canSend = widget.onSubmit != null;
+    return SafeArea(
+      child: Padding(
+        padding: EdgeInsets.only(
+          left: 12,
+          right: 12,
+          bottom: MediaQuery.of(context).viewInsets.bottom + 12,
+        ),
+        child: Column(
+          mainAxisSize: MainAxisSize.min,
+          crossAxisAlignment: CrossAxisAlignment.start,
+          children: [
+            _SubagentCard(
+              tool: widget.tool,
+              subFetch: widget.subFetch,
+              initiallyExpanded: true,
+              expandedMaxHeight: maxH,
+            ),
+            const SizedBox(height: 8),
+            Text(
+              canSend
+                  ? 'Read-only — subagents run on their own. A message here goes to '
+                      'the session (the main agent), the same as typing in the terminal.'
+                  : 'Read-only — subagents run on their own.',
+              style: theme.textTheme.bodySmall
+                  ?.copyWith(color: theme.colorScheme.onSurfaceVariant),
+            ),
+            if (canSend) ...[
+              const SizedBox(height: 8),
+              Row(
+                children: [
+                  Expanded(
+                    child: TextField(
+                      controller: _controller,
+                      textInputAction: TextInputAction.send,
+                      onSubmitted: (_) => _send(),
+                      decoration: InputDecoration(
+                        hintText: 'Message session…',
+                        isDense: true,
+                        border: OutlineInputBorder(
+                          borderRadius: BorderRadius.circular(AppShape.small),
+                        ),
+                        contentPadding: const EdgeInsets.symmetric(
+                            horizontal: 12, vertical: 10),
+                      ),
+                    ),
+                  ),
+                  const SizedBox(width: 6),
+                  IconButton.filled(
+                    onPressed: _send,
+                    icon: const Icon(Icons.send, size: 18),
+                    tooltip: 'Send to session',
+                  ),
+                ],
+              ),
+            ],
+          ],
         ),
       ),
     );

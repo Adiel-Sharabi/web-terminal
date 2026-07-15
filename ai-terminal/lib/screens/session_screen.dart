@@ -1336,6 +1336,23 @@ class _SessionScreenState extends State<SessionScreen>
     _scrollToBottom();
   }
 
+  /// Submit an explicit prompt to the SESSION — the main agent's PTY — via the same
+  /// path the compose bar uses (`buildComposeSubmission` → one frame, plus the #31
+  /// optimistic echo). The chat subagent sheet calls this so you can type from the
+  /// subagent view exactly as the terminal lens lets you while a subagent runs: there
+  /// is no channel to a specific subagent, so this reaches the session and the main
+  /// agent, like any prompt.
+  void sendSessionPrompt(String text) {
+    final conn = _connection;
+    if (conn == null) return; // no PTY — nothing to submit to
+    final val = text.replaceFirst(RegExp(r'[\r\n]+$'), '');
+    if (val.trim().isEmpty) return;
+    _submittedPrompts.add(val); // optimistic "Queued" echo (#31)
+    conn.sendInput(buildComposeSubmission(val));
+    _pushComposeHistory(val);
+    _scrollToBottom();
+  }
+
   void _pushComposeHistory(String text) {
     final trimmed = text.replaceFirst(RegExp(r'[\r\n]+$'), '');
     if (trimmed.isEmpty) return;
@@ -2144,6 +2161,7 @@ class _SessionScreenState extends State<SessionScreen>
                     session: session,
                     onNoTranscript: _handleNoTranscript,
                     submittedPrompts: _submittedPrompts.stream,
+                    onSubmitToSession: sendSessionPrompt,
                   ),
                 // Native overlay for Claude's interactive question (#19), above
                 // whichever lens is showing. The key strip below stays usable as

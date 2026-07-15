@@ -474,8 +474,49 @@ void main() {
 
       expect(drilledId, 'tu_task1'); // reused the subagent paging path, not a new one
       expect(find.textContaining('SUBAGENT_SHEET_MARKER'), findsOneWidget);
-      // Honest, read-only: the sheet says so and offers no "reply to subagent" input.
-      expect(find.textContaining('read-only'), findsOneWidget);
+      // Honest, read-only transcript. With no onSubmitToSession wired, no input row.
+      expect(find.textContaining('Read-only'), findsOneWidget);
+      expect(find.byType(TextField), findsNothing);
+    });
+
+    testWidgets('the sheet\'s "Message session" input submits via onSubmitToSession '
+        '(the terminal-parity path), then closes', (tester) async {
+      String? sent;
+      final page = TranscriptPage(
+        messages: [
+          TranscriptTurn(role: 'assistant', text: 'Delegating.', ts: null,
+              toolUses: [makeTask('tu_task1', 'Explore', running: false)]),
+        ],
+        cursor: null,
+        hasMore: false,
+      );
+      const subPage = SubagentPage(
+        agentType: 'Explore',
+        description: 'do Explore',
+        running: false,
+        messages: [],
+        cursor: null,
+        hasMore: false,
+      );
+      await tester.pumpWidget(_wrap(ConversationView(
+        session: _session(),
+        fetchPage: (id, {before, limit}) async => page,
+        fetchSubagent: (toolUseId, {before, limit}) async => subPage,
+        onSubmitToSession: (t) => sent = t, // the SAME sink the compose bar uses
+      )));
+      await tester.pumpAndSettle();
+
+      await tester.tap(find.text('Explore')); // chip → sheet
+      await tester.pumpAndSettle();
+
+      // The sheet offers a session input — mirroring what the terminal lens allows.
+      expect(find.byType(TextField), findsOneWidget);
+      await tester.enterText(find.byType(TextField), 'run the tests again');
+      await tester.tap(find.byIcon(Icons.send));
+      await tester.pumpAndSettle();
+
+      expect(sent, 'run the tests again'); // routed to the session, not a fake channel
+      expect(find.byType(TextField), findsNothing); // sheet closed after sending
     });
   });
 
