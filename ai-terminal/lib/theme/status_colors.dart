@@ -100,11 +100,12 @@ class Pulse extends StatefulWidget {
   State<Pulse> createState() => _PulseState();
 }
 
-class _PulseState extends State<Pulse> with SingleTickerProviderStateMixin {
+class _PulseState extends State<Pulse>
+    with SingleTickerProviderStateMixin, WidgetsBindingObserver {
   late final AnimationController _controller = AnimationController(
     vsync: this,
     duration: const Duration(milliseconds: 1500),
-  )..repeat(reverse: true);
+  );
 
   late final Animation<double> _opacity = Tween<double>(
     begin: 1,
@@ -112,7 +113,40 @@ class _PulseState extends State<Pulse> with SingleTickerProviderStateMixin {
   ).chain(CurveTween(curve: Curves.easeInOut)).animate(_controller);
 
   @override
+  void initState() {
+    super.initState();
+    // Observe app visibility so the pulse costs nothing when the window is
+    // unfocused/minimized — a repeating 60fps animation otherwise keeps the GPU
+    // busy even when no one is looking at it.
+    WidgetsBinding.instance.addObserver(this);
+    _sync();
+  }
+
+  @override
+  void didUpdateWidget(covariant Pulse oldWidget) {
+    super.didUpdateWidget(oldWidget);
+    if (oldWidget.enabled != widget.enabled) _sync();
+  }
+
+  @override
+  void didChangeAppLifecycleState(AppLifecycleState state) => _sync();
+
+  /// Run the repeating pulse only while enabled AND the window is visible;
+  /// otherwise stop and park at full opacity so a static dot reads as solid.
+  void _sync() {
+    final lifecycle = WidgetsBinding.instance.lifecycleState;
+    final visible = lifecycle == null || lifecycle == AppLifecycleState.resumed;
+    if (widget.enabled && visible) {
+      if (!_controller.isAnimating) _controller.repeat(reverse: true);
+    } else if (_controller.isAnimating) {
+      _controller.stop();
+      _controller.value = 0; // Tween.begin → opacity 1.0
+    }
+  }
+
+  @override
   void dispose() {
+    WidgetsBinding.instance.removeObserver(this);
     _controller.dispose();
     super.dispose();
   }
@@ -120,11 +154,12 @@ class _PulseState extends State<Pulse> with SingleTickerProviderStateMixin {
   @override
   Widget build(BuildContext context) {
     if (!widget.enabled) return widget.child;
-    return AnimatedBuilder(
-      animation: _opacity,
-      builder: (context, child) =>
-          Opacity(opacity: _opacity.value, child: child),
-      child: widget.child,
+    // RepaintBoundary confines the per-frame repaint to the ~10px dot instead of
+    // invalidating the whole session card; FadeTransition composites that cached
+    // layer with alpha, avoiding the per-frame saveLayer the old Opacity widget
+    // forced. Together these drop the pulse from ~1 core / 20% GPU to negligible.
+    return RepaintBoundary(
+      child: FadeTransition(opacity: _opacity, child: widget.child),
     );
   }
 }

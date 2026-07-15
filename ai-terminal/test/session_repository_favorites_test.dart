@@ -96,6 +96,42 @@ void main() {
       await repo.refresh();
       expect(repo.supportsFavorites(_serverA.baseUrl), isFalse);
     });
+
+    test('picks up favorites-sync when the server is UPGRADED mid-session '
+        '(no app restart)', () async {
+      // The bug: the capability was cached on first contact and never re-checked,
+      // so a server cold-restarted onto a favorites-sync build while the app was
+      // already running stayed "unsupported" until the app was restarted. A later
+      // refresh must now flip it true.
+      SharedPreferences.setMockInitialValues({
+        ServerStore.storageKey: _encodeServers([_serverA]),
+      });
+      // /api/version reports the OLD capability set first, then the upgraded one.
+      var caps = <String>['attention', 'clear'];
+      final repo = SessionRepository.forTest(
+        store: await _store(),
+        clientFactory: (s) => ApiClient(
+          s,
+          httpClient: MockClient((req) async {
+            if (req.url.path == '/api/version') {
+              return http.Response(
+                jsonEncode({'serverName': s.name, 'version': '1', 'capabilities': caps}),
+                200,
+              );
+            }
+            return http.Response('[]', 200);
+          }),
+        ),
+      );
+      await repo.refresh();
+      expect(repo.supportsFavorites(_serverA.baseUrl), isFalse,
+          reason: 'old server: no favorites-sync yet');
+
+      caps = <String>['attention', 'clear', 'favorites-sync']; // server upgraded
+      await repo.refresh();
+      expect(repo.supportsFavorites(_serverA.baseUrl), isTrue,
+          reason: 'a later refresh must pick up the upgrade');
+    });
   });
 
   group('Session.favorite/favoriteRank round-trip via refresh (#60)', () {
