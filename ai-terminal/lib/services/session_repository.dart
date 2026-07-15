@@ -579,7 +579,15 @@ class SessionRepository {
   /// to the real one.
   Future<void> _ensureServerNames() async {
     await Future.wait(_store.servers.map((server) async {
-      if (_namesResolved.contains(server.baseUrl)) return;
+      // Names are stable, but `favorites-sync` is not: a server that gains the
+      // capability on upgrade (server cold-restarted while the app was already
+      // running) must be picked up without an app restart. So keep re-fetching
+      // until support is CONFIRMED true, then stop — a supporting server's name
+      // and capability are both settled (#60). A server that never supports it
+      // costs one cheap /api/version per refresh, which is fine.
+      final confirmed = _namesResolved.contains(server.baseUrl) &&
+          (_favoritesSyncSupported[server.baseUrl] ?? false);
+      if (confirmed) return;
       try {
         final info = await _clientFor(server).version();
         if (info.serverName.isNotEmpty) {
