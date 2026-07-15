@@ -160,7 +160,12 @@ void main() {
       conn.close();
     });
 
-    test('caps the offline input buffer at 8KB', () async {
+    // #63 — a long compose submit made in the reconnect window must arrive WHOLE. The old
+    // offline buffer truncated it to fit an 8KB cap (`substring(0, room)`), so the agent got
+    // a half-prompt with the tail silently missing — the exact reported symptom. A single
+    // submit is now flushed intact however long it is; the cap only bounds ACCUMULATION.
+    test('a single long offline submit is flushed WHOLE, never truncated (#63)',
+        () async {
       final s1 = _FakeSocket();
       final s2 = _FakeSocket();
       var i = 0;
@@ -170,12 +175,40 @@ void main() {
       await pump();
       s1.serverDrop();
       await pump(15); // offline window (before the 80ms reconnect)
-      conn.sendInput('a' * 10000); // exceeds the 8KB cap
+      final long = 'x' * 10000; // well past the 8KB cap
+      conn.sendInput(long);
       await pump(120);
 
       final flushed =
-          s2.sentStrings.firstWhere((s) => s.startsWith('a'), orElse: () => '');
-      expect(flushed.length, 8192);
+          s2.sentStrings.firstWhere((s) => s.startsWith('x'), orElse: () => '');
+      expect(flushed, long,
+          reason: 'the whole prompt must arrive — no tail dropped to fit the cap');
+      conn.close();
+    });
+
+    // The cap still does its job: it bounds ACCUMULATED offline input so a sustained outage
+    // can't grow the buffer without limit. It evicts whole OLDEST writes (never cutting a
+    // write), and always keeps the newest submit — the thing the user just did.
+    test('bounds accumulation by evicting whole oldest writes, keeping the newest',
+        () async {
+      final s1 = _FakeSocket();
+      final s2 = _FakeSocket();
+      var i = 0;
+      final conn = TerminalConnection(_server, 's',
+          socketFactory: (_) => i++ == 0 ? s1 : s2,
+          reconnectBackoff: _slowBackoff);
+      await pump();
+      s1.serverDrop();
+      await pump(15); // offline window
+      conn.sendInput('A' * 5000); // oldest — evicted to stay bounded
+      conn.sendInput('B' * 5000); // newest — survives whole (5000+5000 > 8192)
+      await pump(120);
+
+      final flushed =
+          s2.sentStrings.firstWhere((s) => s.contains('B'), orElse: () => '');
+      expect(flushed, 'B' * 5000,
+          reason: 'oldest whole write evicted; newest submit kept intact, never split');
+      expect(flushed.contains('A'), isFalse);
       conn.close();
     });
   });

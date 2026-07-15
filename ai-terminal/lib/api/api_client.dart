@@ -567,8 +567,15 @@ class TerminalConnection {
   final StreamController<void> _reconnected =
       StreamController<void>.broadcast();
 
-  static const int _inputBufferCap = 8192; // 8KB of offline keystrokes
-  final StringBuffer _inputBuffer = StringBuffer();
+  static const int _inputBufferCap = 8192; // bound on ACCUMULATED offline input (bytes)
+  // Offline input is buffered as WHOLE writes, never split. A single sendInput — e.g. a
+  // long compose submit made in the reconnect window after the app foregrounds — is
+  // flushed intact or not at all: truncating it mid-content used to hand a half-prompt to
+  // the agent (#63, "long prompt cut, tail missing"). The cap bounds ACCUMULATION during a
+  // sustained outage by evicting the OLDEST whole writes; it never cuts the newest submit,
+  // so a lone write that itself exceeds the cap still survives whole.
+  final List<String> _inputWrites = <String>[];
+  int _inputBufferLen = 0;
 
   TerminalSocket? _socket;
   StreamSubscription? _sub;
@@ -696,15 +703,21 @@ class TerminalConnection {
   }
 
   void _bufferInput(String data) {
-    final room = _inputBufferCap - _inputBuffer.length;
-    if (room <= 0) return; // full — drop to stay bounded during an outage
-    _inputBuffer.write(data.length <= room ? data : data.substring(0, room));
+    if (data.isEmpty) return;
+    _inputWrites.add(data); // buffer the write WHOLE — never split (#63)
+    _inputBufferLen += data.length;
+    // Stay bounded by dropping whole OLDEST writes, but never evict the newest write:
+    // a single submit that alone exceeds the cap must still flush intact.
+    while (_inputBufferLen > _inputBufferCap && _inputWrites.length > 1) {
+      _inputBufferLen -= _inputWrites.removeAt(0).length;
+    }
   }
 
   void _flushInput() {
-    if (_inputBuffer.isEmpty) return;
-    final pending = _inputBuffer.toString();
-    _inputBuffer.clear();
+    if (_inputWrites.isEmpty) return;
+    final pending = _inputWrites.join();
+    _inputWrites.clear();
+    _inputBufferLen = 0;
     try {
       _socket?.add(pending);
     } catch (_) {/* ignore */}
