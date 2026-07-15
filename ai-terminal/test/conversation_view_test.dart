@@ -360,6 +360,125 @@ void main() {
     },
   );
 
+  group('#62 pinned subagent strip', () {
+    ToolUse makeTask(String id, String type, {required bool running}) => ToolUse(
+          name: 'Task',
+          inputPreview: '',
+          id: id,
+          input: {'description': 'do $type', 'subagent_type': type},
+          subagent: SubagentTrace(
+              agentType: type, description: 'do $type', running: running),
+        );
+
+    test('collectSubagents walks turns→tools, de-dupes by id, keeps order', () {
+      final turns = <TranscriptTurn>[
+        TranscriptTurn(role: 'assistant', text: 'a', ts: null, toolUses: [
+          makeTask('t1', 'Explore', running: true),
+          const ToolUse(
+              name: 'Bash', inputPreview: '', id: 'b1', input: {'command': 'ls'}),
+        ]),
+        TranscriptTurn(role: 'assistant', text: 'b', ts: null, toolUses: [
+          makeTask('t2', 'general-purpose', running: false),
+          makeTask('t1', 'Explore', running: true), // duplicate id — ignored
+        ]),
+      ];
+      expect(collectSubagents(turns).map((t) => t.id).toList(), ['t1', 't2']);
+    });
+
+    testWidgets('no strip when the session has no subagents', (tester) async {
+      final plain = TranscriptPage(
+        messages: const [
+          TranscriptTurn(role: 'assistant', text: 'hi', toolUses: [], ts: null),
+        ],
+        cursor: null,
+        hasMore: false,
+      );
+      await tester.pumpWidget(_wrap(ConversationView(
+          session: _session(),
+          fetchPage: (id, {before, limit}) async => plain)));
+      await tester.pumpAndSettle();
+      // The subagent icon appears only on chips / inline cards — none here.
+      expect(find.byIcon(Icons.account_tree_outlined), findsNothing);
+    });
+
+    testWidgets('renders one chip per subagent above the transcript',
+        (tester) async {
+      final page = TranscriptPage(
+        messages: [
+          TranscriptTurn(role: 'assistant', text: 'Delegating.', ts: null,
+              toolUses: [
+                makeTask('t1', 'Explore', running: false),
+                makeTask('t2', 'general-purpose', running: false),
+              ]),
+        ],
+        cursor: null,
+        hasMore: false,
+      );
+      await tester.pumpWidget(_wrap(ConversationView(
+        session: _session(),
+        fetchPage: (id, {before, limit}) async => page,
+        fetchSubagent: (toolUseId, {before, limit}) async => const SubagentPage(
+            agentType: '',
+            description: '',
+            running: false,
+            messages: [],
+            cursor: null,
+            hasMore: false),
+      )));
+      await tester.pumpAndSettle();
+      // The chip label is the bare agent type; the inline card is "Task — … (type)",
+      // so an EXACT match finds only the chips.
+      expect(find.text('Explore'), findsOneWidget);
+      expect(find.text('general-purpose'), findsOneWidget);
+    });
+
+    testWidgets('tapping a chip opens the drill-in sheet via the SAME subFetch',
+        (tester) async {
+      var drilledId = '';
+      final page = TranscriptPage(
+        messages: [
+          TranscriptTurn(role: 'assistant', text: 'Delegating.', ts: null,
+              toolUses: [makeTask('tu_task1', 'Explore', running: false)]),
+        ],
+        cursor: null,
+        hasMore: false,
+      );
+      const subPage = SubagentPage(
+        agentType: 'Explore',
+        description: 'do Explore',
+        running: false,
+        messages: [
+          TranscriptTurn(
+              role: 'assistant',
+              text: 'SUBAGENT_SHEET_MARKER',
+              toolUses: [],
+              ts: null),
+        ],
+        cursor: null,
+        hasMore: false,
+      );
+      await tester.pumpWidget(_wrap(ConversationView(
+        session: _session(),
+        fetchPage: (id, {before, limit}) async => page,
+        fetchSubagent: (toolUseId, {before, limit}) async {
+          drilledId = toolUseId;
+          return subPage;
+        },
+      )));
+      await tester.pumpAndSettle();
+
+      expect(find.textContaining('SUBAGENT_SHEET_MARKER'), findsNothing);
+
+      await tester.tap(find.text('Explore')); // the chip
+      await tester.pumpAndSettle();
+
+      expect(drilledId, 'tu_task1'); // reused the subagent paging path, not a new one
+      expect(find.textContaining('SUBAGENT_SHEET_MARKER'), findsOneWidget);
+      // Honest, read-only: the sheet says so and offers no "reply to subagent" input.
+      expect(find.textContaining('read-only'), findsOneWidget);
+    });
+  });
+
   testWidgets(
     '#27: the message list is wrapped in one SelectionArea (cross-bubble drag), '
     'and bubbles no longer self-select',
