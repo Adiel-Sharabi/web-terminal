@@ -753,6 +753,105 @@ void main() {
     });
   });
 
+  group('classifyUserTurn (non-human role:user turns)', () {
+    test('a real human prompt is human, body unchanged', () {
+      const text = 'there is a crunch of integration tests, fix them';
+      final c = classifyUserTurn(text);
+      expect(c.kind, UserTurnKind.human);
+      expect(c.from, isEmpty);
+      expect(c.body, text);
+    });
+
+    test('teammate message: extracts id and strips the wrapper', () {
+      const text =
+          'Another Claude session sent a message:\n'
+          '<teammate-message teammate_id="J4b2" color="purple" summary="report">\n'
+          'J4b2 (WI #22789) — read-path rewrite: report. 6 commits, build green.\n'
+          '</teammate-message>';
+      final c = classifyUserTurn(text);
+      expect(c.kind, UserTurnKind.teammate);
+      expect(c.from, 'J4b2');
+      // Preamble + both tags gone; inner report kept.
+      expect(c.body, contains('J4b2 (WI #22789)'));
+      expect(c.body, isNot(contains('Another Claude session')));
+      expect(c.body, isNot(contains('<teammate-message')));
+      expect(c.body, isNot(contains('</teammate-message>')));
+    });
+
+    test('teammate message with no id falls back to empty from', () {
+      const text =
+          'Another Claude session sent a message:\n<teammate-message>hi</teammate-message>';
+      final c = classifyUserTurn(text);
+      expect(c.kind, UserTurnKind.teammate);
+      expect(c.from, isEmpty);
+      expect(c.body, 'hi');
+    });
+
+    test('task-notification is system, tags stripped', () {
+      const text =
+          '<task-notification>\n<task-id>abc</task-id>\nBuild finished.\n</task-notification>';
+      final c = classifyUserTurn(text);
+      expect(c.kind, UserTurnKind.system);
+      expect(c.from, 'Task update');
+      expect(c.body, isNot(contains('<task')));
+      expect(c.body, contains('Build finished.'));
+    });
+
+    test('stop-hook feedback is system', () {
+      final c = classifyUserTurn('Stop hook feedback:\n[all tests pass]: run them');
+      expect(c.kind, UserTurnKind.system);
+      expect(c.from, 'Hook');
+      expect(c.body, isNot(startsWith('Stop hook feedback')));
+    });
+
+    test('compaction summary is system, kept verbatim', () {
+      const text =
+          'This session is being continued from a previous conversation that ran out of context.';
+      final c = classifyUserTurn(text);
+      expect(c.kind, UserTurnKind.system);
+      expect(c.from, 'Session continued');
+      expect(c.body, text);
+    });
+  });
+
+  testWidgets(
+    'a teammate message renders as the teammate, never "You"',
+    (tester) async {
+      final page = TranscriptPage(
+        messages: const [
+          TranscriptTurn(
+            role: 'user',
+            text:
+                'Another Claude session sent a message:\n'
+                '<teammate-message teammate_id="J4b2" summary="report">\n'
+                'TEAMMATE_REPORT_MARKER build green\n'
+                '</teammate-message>',
+            toolUses: [],
+            ts: null,
+          ),
+        ],
+        cursor: null,
+        hasMore: false,
+      );
+      await tester.pumpWidget(
+        _wrap(
+          ConversationView(
+            session: _session(),
+            fetchPage: (id, {before, limit}) async => page,
+          ),
+        ),
+      );
+      await tester.pumpAndSettle();
+
+      // Labelled as the teammate, and the human label is absent.
+      expect(find.text('◆ J4b2'), findsOneWidget);
+      expect(find.text('You'), findsNothing);
+      // Inner report shown; the injection wrapper is stripped.
+      expect(find.textContaining('TEAMMATE_REPORT_MARKER'), findsOneWidget);
+      expect(find.textContaining('Another Claude session'), findsNothing);
+    },
+  );
+
   testWidgets(
     '#32: a skill turn renders the compact command, not the whole body',
     (tester) async {

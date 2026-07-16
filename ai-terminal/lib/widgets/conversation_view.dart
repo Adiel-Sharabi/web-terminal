@@ -1036,6 +1036,87 @@ CommandInvocation? parseCommandInvocation(String text) {
   return CommandInvocation(name: name, args: args, body: body);
 }
 
+/// How a `role:user` transcript turn was actually authored. Claude Code stores
+/// several kinds of NON-human content as `role:user` turns, and the transcript
+/// exposes no flag to tell them apart from a real prompt — only the content
+/// signature does. Left as-is they render as the human ("You"), which is exactly
+/// the bug: a teammate agent's report shows up in your own chat bubble.
+enum UserTurnKind {
+  /// A prompt the human actually typed. Renders as "You" (unchanged).
+  human,
+
+  /// A message from ANOTHER Claude session (multi-agent / workflow run), injected
+  /// as `Another Claude session sent a message:\n<teammate-message …>`.
+  teammate,
+
+  /// Harness-injected, not typed by the human: a `<task-notification>`, Stop-hook
+  /// feedback, or a post-compaction summary.
+  system,
+}
+
+/// The classification of one `role:user` turn: its [kind], the [from] label
+/// (the teammate's id, or a short system source), and the display [body] with
+/// any injection wrapper stripped.
+class UserTurnClass {
+  const UserTurnClass(
+      {required this.kind, required this.from, required this.body});
+
+  /// human | teammate | system.
+  final UserTurnKind kind;
+
+  /// For [UserTurnKind.teammate], the sending agent's id (e.g. `J4b2`); for
+  /// [UserTurnKind.system], a short source label (`Hook`, `Task update`,
+  /// `Session continued`); '' for a human turn.
+  final String from;
+
+  /// The readable inner text with the injection wrapper removed. Equal to the
+  /// input for a human turn (nothing to strip).
+  final String body;
+}
+
+final RegExp _teammateIdRe = RegExp('teammate_id="([^"]*)"');
+final RegExp _teammateTagRe = RegExp(r'</?teammate-message[^>]*>');
+final RegExp _taskTagRe = RegExp(r'</?task-[a-z-]+>');
+
+/// Classifies a `role:user` turn as a real human prompt vs an injected non-human
+/// turn (another session's message, a task-notification, hook feedback, or a
+/// compaction summary), and strips the injection wrapper for display. PURE, so
+/// the signature detection is exhaustively unit-testable. A turn that matches no
+/// signature is [UserTurnKind.human] with `body == text` — the unchanged "You".
+UserTurnClass classifyUserTurn(String text) {
+  final t = text.trimLeft();
+  // Another Claude session's message (multi-agent / workflow). Both the prose
+  // preamble and the raw `<teammate-message>` block are matched — the preamble
+  // is dropped and the inner content kept.
+  if (t.startsWith('Another Claude session sent a message') ||
+      t.startsWith('<teammate-message')) {
+    final id = _teammateIdRe.firstMatch(t)?.group(1)?.trim() ?? '';
+    final body = t
+        .replaceFirst('Another Claude session sent a message:', '')
+        .replaceAll(_teammateTagRe, '')
+        .trim();
+    return UserTurnClass(kind: UserTurnKind.teammate, from: id, body: body);
+  }
+  // Harness task/agent notification injected as a user turn.
+  if (t.startsWith('<task-notification')) {
+    final body =
+        t.replaceAll(_taskTagRe, ' ').replaceAll(RegExp(r'\s+'), ' ').trim();
+    return UserTurnClass(
+        kind: UserTurnKind.system, from: 'Task update', body: body);
+  }
+  // Stop-hook feedback fires on the user's behalf — not typed by them.
+  if (t.startsWith('Stop hook feedback')) {
+    final body = t.replaceFirst('Stop hook feedback:', '').trim();
+    return UserTurnClass(kind: UserTurnKind.system, from: 'Hook', body: body);
+  }
+  // Post-compaction summary, re-injected as a user turn on continue.
+  if (t.startsWith('This session is being continued')) {
+    return UserTurnClass(
+        kind: UserTurnKind.system, from: 'Session continued', body: t);
+  }
+  return UserTurnClass(kind: UserTurnKind.human, from: '', body: text);
+}
+
 /// Opens a tapped chat link in the system browser — http/https only
 /// ([isLaunchableHttpUrl]); other schemes are ignored. Best-effort, never
 /// throws into the widget tree. Public + [visibleForTesting] so the launch
@@ -1150,10 +1231,22 @@ class _TurnBubble extends StatelessWidget {
   Widget build(BuildContext context) {
     final theme = Theme.of(context);
     final isAssistant = turn.isAssistant;
+    // Classify a user turn: a real prompt ("You") vs an injected non-human turn
+    // (another session's message, a task-notification, hook feedback, compaction
+    // summary). null for an assistant turn.
+    final uclass = isAssistant ? null : classifyUserTurn(turn.text);
+    final fromHuman = uclass != null && uclass.kind == UserTurnKind.human;
+    // "Incoming" (left, quiet) treatment for everything that isn't the human's
+    // own turn — assistant AND injected non-human user turns.
+    final incoming = !fromHuman;
     // #32: a slash-command/skill turn renders as a compact chip, not the whole
-    // injected SKILL.md body.
-    final command = isAssistant ? null : parseCommandInvocation(turn.text);
-    final segments = _splitCodeBlocks(turn.text);
+    // injected SKILL.md body. Only a human's own turn can be a slash command.
+    final command = fromHuman ? parseCommandInvocation(turn.text) : null;
+    // Injected turns display their stripped inner body; human/assistant use the
+    // turn text verbatim.
+    final displayText =
+        (uclass != null && !fromHuman) ? uclass.body : turn.text;
+    final segments = _splitCodeBlocks(displayText);
     // #54: user text is full-strength on BOTH sides now — the old "muted on
     // the right" treatment read as *lower* priority, exactly backwards: the
     // user's own turns are the rarer, higher-signal landmark, so they must
@@ -1182,21 +1275,34 @@ class _TurnBubble extends StatelessWidget {
             AgentCatalog.instance[agentId]?.color,
             theme.colorScheme.onSurfaceVariant,
           )
-        : theme.colorScheme.primary;
+        : switch (uclass!.kind) {
+            UserTurnKind.human => theme.colorScheme.primary,
+            // A teammate agent gets its own distinct tint so it can never be
+            // read as your own turn (or as the session's assistant).
+            UserTurnKind.teammate => theme.colorScheme.tertiary,
+            // Harness/system injections stay muted — present but low-signal.
+            UserTurnKind.system => theme.colorScheme.onSurfaceVariant,
+          };
     final roleLabel = isAssistant
         ? (AgentCatalog.instance[agentId]?.label ?? 'Assistant')
-        : 'You';
+        : switch (uclass!.kind) {
+            UserTurnKind.human => 'You',
+            UserTurnKind.teammate =>
+              uclass.from.isEmpty ? '◆ Teammate' : '◆ ${uclass.from}',
+            UserTurnKind.system =>
+              uclass.from.isEmpty ? 'System' : uclass.from,
+          };
 
-    // An agent turn runs near full width — it carries code blocks and tool
-    // cards that must not be squeezed into a narrow bubble. A user turn stays
-    // bounded, so its bubble reads as a landmark rather than another
-    // full-width block in the flow.
-    final maxWidth = isAssistant
+    // An incoming turn (agent or injected) runs near full width — it carries
+    // code blocks and tool cards that must not be squeezed into a narrow bubble.
+    // The human's own turn stays bounded, so its bubble reads as a landmark
+    // rather than another full-width block in the flow.
+    final maxWidth = incoming
         ? double.infinity
         : MediaQuery.sizeOf(context).width * 0.78;
 
     return Align(
-      alignment: isAssistant ? Alignment.centerLeft : Alignment.centerRight,
+      alignment: incoming ? Alignment.centerLeft : Alignment.centerRight,
       child: ConstrainedBox(
         constraints: BoxConstraints(maxWidth: maxWidth),
         child: Container(
@@ -1205,12 +1311,13 @@ class _TurnBubble extends StatelessWidget {
             horizontal: AppSpacing.screenPadding,
           ),
           padding: const EdgeInsets.all(12),
-          decoration: isAssistant
+          decoration: incoming
               ? BoxDecoration(
                   // Quiet: near-transparent surface, no full "bubble" — an
-                  // agent turn is the calm, high-volume bulk of the
+                  // incoming turn is the calm, high-volume bulk of the
                   // transcript, so it reads as document flow, not a chat
-                  // pill, however many stack up in a row.
+                  // pill, however many stack up in a row. Its left border takes
+                  // the role tint (agent / teammate / muted system).
                   color:
                       theme.colorScheme.surfaceContainer.withValues(alpha: 0.35),
                   borderRadius: BorderRadius.circular(AppShape.medium),
@@ -1231,7 +1338,7 @@ class _TurnBubble extends StatelessWidget {
                   ),
                 ),
           child: Column(
-            crossAxisAlignment: isAssistant
+            crossAxisAlignment: incoming
                 ? CrossAxisAlignment.start
                 : CrossAxisAlignment.end,
             mainAxisSize: MainAxisSize.min,
