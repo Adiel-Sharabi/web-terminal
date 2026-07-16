@@ -1077,6 +1077,14 @@ class UserTurnClass {
 final RegExp _teammateIdRe = RegExp('teammate_id="([^"]*)"');
 final RegExp _teammateTagRe = RegExp(r'</?teammate-message[^>]*>');
 final RegExp _taskTagRe = RegExp(r'</?task-[a-z-]+>');
+final RegExp _taskAgentRe = RegExp(r'Agent "([^"]+)"');
+
+/// Inner text of the first `<tag>…</tag>` in [s], trimmed, or '' if absent.
+/// Non-greedy so a C++ `<uint32_t>` inside the body can't swallow the close tag.
+String _innerTag(String s, String tag) {
+  final m = RegExp('<$tag>([\\s\\S]*?)</$tag>').firstMatch(s);
+  return m == null ? '' : m.group(1)!.trim();
+}
 
 /// Classifies a `role:user` turn as a real human prompt vs an injected non-human
 /// turn (another session's message, a task-notification, hook feedback, or a
@@ -1097,12 +1105,24 @@ UserTurnClass classifyUserTurn(String text) {
         .trim();
     return UserTurnClass(kind: UserTurnKind.teammate, from: id, body: body);
   }
-  // Harness task/agent notification injected as a user turn.
+  // Harness task/agent notification injected as a user turn. Show ONLY the
+  // agent's actual output (`<result>`), not the XML envelope (task-id,
+  // tool-use-id, output-file, status, note, usage/token counts). Label it with
+  // the agent's name from `<summary>` ("Agent \"X\" finished") when present.
   if (t.startsWith('<task-notification')) {
-    final body =
-        t.replaceAll(_taskTagRe, ' ').replaceAll(RegExp(r'\s+'), ' ').trim();
+    final result = _innerTag(t, 'result');
+    final summary = _innerTag(t, 'summary');
+    final agent = _taskAgentRe.firstMatch(summary)?.group(1)?.trim() ?? '';
+    // Fall back to the whole thing (tags stripped) only if there's no <result>.
+    final body = result.isNotEmpty
+        ? result
+        : (summary.isNotEmpty
+            ? summary
+            : t.replaceAll(_taskTagRe, ' ').replaceAll(RegExp(r'\s+'), ' ').trim());
     return UserTurnClass(
-        kind: UserTurnKind.system, from: 'Task update', body: body);
+        kind: UserTurnKind.system,
+        from: agent.isNotEmpty ? agent : 'Task update',
+        body: body);
   }
   // Stop-hook feedback fires on the user's behalf — not typed by them.
   if (t.startsWith('Stop hook feedback')) {
