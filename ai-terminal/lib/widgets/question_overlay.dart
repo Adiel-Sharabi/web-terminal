@@ -318,7 +318,14 @@ class _QuestionOverlayState extends State<QuestionOverlay> {
                     mainAxisSize: MainAxisSize.min,
                     children: [
                       _header(theme, questions.length),
-                      if ((widget.contextText ?? '').trim().isNotEmpty)
+                      // While typing a free-text ("Other") answer the soft keyboard
+                      // is up and vertical space is scarce — the card would overflow
+                      // and clip the field + Send button (the reported "can't see the
+                      // input box when the keyboard is open"). The question text has
+                      // already been read by then, so drop this panel to give the
+                      // input room; it returns the moment Other is deselected.
+                      if (!_otherActive &&
+                          (widget.contextText ?? '').trim().isNotEmpty)
                         _contextPanel(theme, widget.contextText!.trim()),
                       if (questions.length > 1) _tabs(theme, questions),
                       Flexible(child: _optionList(theme, q)),
@@ -589,18 +596,23 @@ class _QuestionOverlayState extends State<QuestionOverlay> {
       child: Column(
         children: [
           // Manual fallback: forward the exact TUI nav keys, for a prompt whose
-          // keybindings don't match the built sequence.
-          Row(
-            mainAxisAlignment: MainAxisAlignment.center,
-            children: [
-              _navKey(theme, Icons.keyboard_arrow_up, () => widget.onKey('\x1b[A')),
-              _navKey(theme, Icons.keyboard_arrow_down, () => widget.onKey('\x1b[B')),
-              _navTextKey(theme, 'Space', () => widget.onKey(' ')),
-              _navTextKey(theme, 'Tab', () => widget.onKey('\t')),
-              _navTextKey(theme, 'Enter', () => widget.onKey('\r')),
-            ],
-          ),
-          const SizedBox(height: 8),
+          // keybindings don't match the built sequence. These drive the numeric
+          // selector — useless while typing a free-text ("Other") answer, where
+          // they only steal the vertical room the input needs above the keyboard,
+          // so they're hidden in that mode (you Send with the button / Enter).
+          if (!_otherActive) ...[
+            Row(
+              mainAxisAlignment: MainAxisAlignment.center,
+              children: [
+                _navKey(theme, Icons.keyboard_arrow_up, () => widget.onKey('\x1b[A')),
+                _navKey(theme, Icons.keyboard_arrow_down, () => widget.onKey('\x1b[B')),
+                _navTextKey(theme, 'Space', () => widget.onKey(' ')),
+                _navTextKey(theme, 'Tab', () => widget.onKey('\t')),
+                _navTextKey(theme, 'Enter', () => widget.onKey('\r')),
+              ],
+            ),
+            const SizedBox(height: 8),
+          ],
           Row(
             children: [
               Expanded(

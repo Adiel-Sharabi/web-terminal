@@ -315,6 +315,55 @@ void main() {
     expect(find.textContaining('FULL_ANSWER_CONTEXT'), findsOneWidget);
   });
 
+  testWidgets(
+      'typing a free-text (Other) answer frees vertical room: the context panel '
+      'and the numeric-nav keys hide so the input + Send stay above the keyboard',
+      (tester) async {
+    // The reported bug: with the soft keyboard up, the fixed "Claude said" panel
+    // and the ^/v/Space/Tab/Enter row over-filled the card and clipped the field +
+    // Send button — you could not see what you were typing. Both are useless while
+    // free-texting, so they collapse in that mode.
+    await tester.pumpWidget(
+      MaterialApp(
+        theme: AppTheme.dark,
+        home: Scaffold(
+          body: Stack(
+            children: [
+              QuestionOverlay(
+                question: PendingQuestion(
+                  toolUseId: 'tk',
+                  questions: [_q(['A', 'B'])], // single-select single → Other offered
+                ),
+                contextText: 'CTX_CLAUDE_SAID that should hide while typing.',
+                onSend: (_) {},
+                onKey: (_) {},
+                onDismiss: () {},
+              ),
+            ],
+          ),
+        ),
+      ),
+    );
+    await tester.pumpAndSettle();
+
+    // Numeric mode: the space-eaters are present.
+    expect(find.text('Claude said'), findsOneWidget);
+    expect(find.widgetWithText(OutlinedButton, 'Space'), findsOneWidget);
+
+    // Enter free-text mode and type an answer.
+    await tester.tap(find.text('Other…'));
+    await tester.pumpAndSettle();
+    await tester.enterText(find.byType(TextField), 'my typed answer');
+    await tester.pumpAndSettle();
+
+    // The context panel + nav-key row are gone; the field + Send remain visible.
+    expect(find.text('Claude said'), findsNothing);
+    expect(find.textContaining('CTX_CLAUDE_SAID'), findsNothing);
+    expect(find.widgetWithText(OutlinedButton, 'Space'), findsNothing);
+    expect(find.byType(TextField), findsOneWidget);
+    expect(find.widgetWithText(FilledButton, 'Send answer'), findsOneWidget);
+  });
+
   testWidgets('select an option then Send forwards the built frames',
       (tester) async {
     List<AnswerFrame>? sent;
