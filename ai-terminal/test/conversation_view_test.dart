@@ -787,14 +787,40 @@ void main() {
       expect(c.body, 'hi');
     });
 
-    test('task-notification is system, tags stripped', () {
+    test('task-notification shows only <result>, labeled by agent, no envelope', () {
       const text =
-          '<task-notification>\n<task-id>abc</task-id>\nBuild finished.\n</task-notification>';
+          '<task-notification>\n<task-id>a0d2</task-id>\n'
+          '<tool-use-id>toolu_016</tool-use-id>\n'
+          '<output-file>C:\\Users\\dds\\tasks\\a0d2.output</output-file>\n'
+          '<status>completed</status>\n'
+          '<summary>Agent "Review 22804 test suite" finished</summary>\n'
+          '<note>A task-notification fires each time this agent stops.</note>\n'
+          '<result>Clean. All critical aspects verify: Test integrity holds.</result>\n'
+          '<usage><subagent_tokens>57487</subagent_tokens><tool_uses>28</tool_uses></usage>\n'
+          '</task-notification>';
       final c = classifyUserTurn(text);
       expect(c.kind, UserTurnKind.system);
-      expect(c.from, 'Task update');
-      expect(c.body, isNot(contains('<task')));
-      expect(c.body, contains('Build finished.'));
+      // Labeled by the agent name parsed from <summary>.
+      expect(c.from, 'Review 22804 test suite');
+      // Body is ONLY the agent's result — none of the XML envelope survives.
+      expect(c.body, 'Clean. All critical aspects verify: Test integrity holds.');
+      for (final noise in [
+        'task-notification', 'tool-use-id', 'output-file', 'status',
+        'toolu_016', '.output', '<note>', 'subagent_tokens', '57487', 'duration',
+      ]) {
+        expect(c.body, isNot(contains(noise)), reason: 'leaked: $noise');
+      }
+    });
+
+    test('task-notification with no <result> falls back to the summary', () {
+      const text =
+          '<task-notification>\n<summary>Agent "Builder" finished</summary>\n'
+          '<usage><subagent_tokens>10</subagent_tokens></usage>\n</task-notification>';
+      final c = classifyUserTurn(text);
+      expect(c.kind, UserTurnKind.system);
+      expect(c.from, 'Builder');
+      expect(c.body, 'Agent "Builder" finished');
+      expect(c.body, isNot(contains('subagent_tokens')));
     });
 
     test('stop-hook feedback is system', () {
