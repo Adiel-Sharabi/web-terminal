@@ -214,13 +214,17 @@ class _DashboardScreenState extends State<DashboardScreen> {
       onAttentionDismiss: attentionKind == null
           ? null
           : () => SessionRepository.instance.dismissAttention(session),
-      // #60: the star is offered only when this session's OWNING server
-      // advertises `favorites-sync` — an older server without the route
-      // never receives a PATCH it can't handle (`onToggleFavorite: null`
+      // #60/#66: the star is offered only when this session's OWNING server
+      // both advertises `favorites-sync` AND is currently reachable — an
+      // older server without the route, or one that's simply offline right
+      // now, never receives a PATCH it can't handle (`onToggleFavorite: null`
       // hides the star entirely, same treatment SessionCard already gives a
       // caller that omits it).
-      onToggleFavorite:
-          SessionRepository.instance.supportsFavorites(session.server.baseUrl)
+      onToggleFavorite: favoriteToggleAllowed(
+        supportsFavorites:
+            SessionRepository.instance.supportsFavorites(session.server.baseUrl),
+        serverOnline: SessionRepository.instance.serverOnline[session.server.baseUrl],
+      )
           ? () => _toggleFavorite(context, session)
           : null,
       onBellTap: () => showNotifyLevelPicker(
@@ -380,10 +384,12 @@ class _DashboardScreenState extends State<DashboardScreen> {
                       // where the favorites group always spans every server).
                       // Membership + order are server truth (#60,
                       // Session.favorite/favoriteRank) — no local stream to
-                      // wrap this in.
+                      // wrap this in. #66: a favorite whose owning server is
+                      // currently offline is dropped rather than rendered
+                      // stranded (see [visibleFavoriteSessions]).
                       SliverToBoxAdapter(
                         child: FavoritesGroup(
-                          sessions: sessions,
+                          sessions: visibleFavoriteSessions(sessions, online),
                           cardBuilder: (context, s) =>
                               _buildCard(context, s, favoriteRow: true),
                           collapsed: _isCollapsed(kFavoritesGroupKey),
@@ -442,6 +448,38 @@ class _DashboardScreenState extends State<DashboardScreen> {
     );
   }
 }
+
+/// The pinned Favorites group's session list with any session whose owning
+/// server is currently offline dropped (#66). [SessionRepository] re-emits
+/// an offline peer's last-known stale sessions on purpose (so a group
+/// doesn't blank out the instant one server drops) — but a favorite that
+/// peer owns would otherwise render pinned with a star wired to an
+/// always-failing PATCH. Mirrors the web sidebar, which excludes an offline
+/// peer's contribution from the favorites union entirely. Pulled out (and
+/// taking [serverOnline] explicitly) so it's unit-testable without pumping
+/// the dashboard, matching [groupSessionsByServer].
+@visibleForTesting
+List<Session> visibleFavoriteSessions(
+  List<Session> sessions,
+  Map<String, bool> serverOnline,
+) =>
+    sessions
+        .where((s) => serverOnline[s.server.baseUrl] != false)
+        .toList(growable: false);
+
+/// Whether the pin/unpin star should be offered for a session on its owning
+/// server (#60 + #66): the server must both advertise `favorites-sync` AND
+/// be currently reachable. An offline server would only ever fail the PATCH,
+/// so the star is hidden (`onToggleFavorite: null`, the same convention
+/// [SessionCard] already gives a caller that omits it) rather than wired to
+/// a guaranteed failure. Pulled out so the gate is unit-testable without
+/// pumping the dashboard.
+@visibleForTesting
+bool favoriteToggleAllowed({
+  required bool supportsFavorites,
+  required bool? serverOnline,
+}) =>
+    supportsFavorites && serverOnline != false;
 
 /// Orders a server group's sessions by the server's persisted (drag) order
 /// (issue #22) instead of the flat attention/recency sort, so a user-set order

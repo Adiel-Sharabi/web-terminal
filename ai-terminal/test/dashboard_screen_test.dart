@@ -98,4 +98,86 @@ void main() {
 
     expect(groups.map((g) => g.server.name).toList(), ['Home', 'XPS', 'Old']);
   });
+
+  group('visibleFavoriteSessions (#66)', () {
+    Session favSession(String id, ServerConfig server) => Session(
+          id: id,
+          name: 'proj-$id',
+          cwd: '/home/x',
+          status: 'idle',
+          claudeSessionId: null,
+          lastActivity: 1,
+          notifyLevel: 'important',
+          server: server,
+          autoCommand: '',
+          favorite: true,
+          favoriteRank: 0,
+        );
+
+    test('drops a favorite whose owning server is offline', () {
+      final sessions = [favSession('h1', home), favSession('x1', xps)];
+
+      final visible = visibleFavoriteSessions(sessions, {
+        home.baseUrl: true,
+        xps.baseUrl: false, // XPS is down
+      });
+
+      expect(visible.map((s) => s.id).toList(), ['h1']);
+    });
+
+    test('keeps a favorite whose server has no online entry yet '
+        '(not-yet-refreshed defaults to reachable)', () {
+      final sessions = [favSession('h1', home)];
+
+      final visible = visibleFavoriteSessions(sessions, const {});
+
+      expect(visible.map((s) => s.id).toList(), ['h1']);
+    });
+
+    test('keeps every favorite when all owning servers are online', () {
+      final sessions = [favSession('h1', home), favSession('x1', xps)];
+
+      final visible = visibleFavoriteSessions(sessions, {
+        home.baseUrl: true,
+        xps.baseUrl: true,
+      });
+
+      expect(visible.map((s) => s.id).toSet(), {'h1', 'x1'});
+    });
+  });
+
+  group('favoriteToggleAllowed (#60 + #66)', () {
+    test('allowed when the server supports favorites-sync and is online', () {
+      expect(
+        favoriteToggleAllowed(supportsFavorites: true, serverOnline: true),
+        isTrue,
+      );
+    });
+
+    test('hidden when the owning server is offline, even if it supports '
+        'favorites-sync', () {
+      expect(
+        favoriteToggleAllowed(supportsFavorites: true, serverOnline: false),
+        isFalse,
+        reason: '#66: an offline-owned favorite must not offer a star wired '
+            'to an always-failing PATCH',
+      );
+    });
+
+    test('hidden when the server does not support favorites-sync, even if '
+        'online', () {
+      expect(
+        favoriteToggleAllowed(supportsFavorites: false, serverOnline: true),
+        isFalse,
+      );
+    });
+
+    test('allowed when online-ness is unknown yet (no online entry = not '
+        'confirmed offline)', () {
+      expect(
+        favoriteToggleAllowed(supportsFavorites: true, serverOnline: null),
+        isTrue,
+      );
+    });
+  });
 }

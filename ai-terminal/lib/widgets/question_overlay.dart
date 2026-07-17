@@ -9,11 +9,13 @@
 /// keybindings differ from the model here.
 library;
 
+import 'package:flutter/foundation.dart';
 import 'package:flutter/material.dart';
 import 'package:flutter/services.dart';
 
 import '../api/models.dart';
 import '../theme/app_theme.dart';
+import 'compose_bar.dart' show composeUsesSoftKeyboard;
 
 /// Forwards a raw key sequence to the PTY (#50). Carried by the overlay's
 /// hardware Tab/arrow shortcuts so, while the question overlay is up, those keys
@@ -23,6 +25,15 @@ import '../theme/app_theme.dart';
 class _ForwardKeyIntent extends Intent {
   const _ForwardKeyIntent(this.seq);
   final String seq;
+}
+
+/// Submits the current selection via hardware Enter (issue #64 Gap 2). Desktop
+/// only — see [composeUsesSoftKeyboard]: on a soft keyboard, Enter is a text
+/// commit, not a key event, so binding it here would never fire on mobile
+/// anyway, but the platform gate makes the intent explicit and matches the
+/// compose bar's own contract (#55).
+class _SubmitIntent extends Intent {
+  const _SubmitIntent();
 }
 
 /// One outbound frame: send [keys], then wait [delayMs] before the next frame.
@@ -281,6 +292,14 @@ class _QuestionOverlayState extends State<QuestionOverlay> {
             // forwards; arrows forward ONLY while the free-text ("Other") field
             // is inactive — when it IS active the arrows are left unmapped so the
             // caret can move inside that field.
+            //
+            // #64 Gap 2: hardware Enter submits the current selection — DESKTOP
+            // only, gated by the same `composeUsesSoftKeyboard` predicate the
+            // compose bar uses (#55 SSOT), never reimplemented here. A soft
+            // keyboard's Enter is a text COMMIT, not a key event, so this could
+            // never fire on mobile anyway, but the explicit gate documents the
+            // contract and keeps the two clients in lockstep if that ever
+            // changes.
             child: Shortcuts(
               shortcuts: <ShortcutActivator, Intent>{
                 const SingleActivator(LogicalKeyboardKey.tab):
@@ -295,6 +314,11 @@ class _QuestionOverlayState extends State<QuestionOverlay> {
                   SingleActivator(LogicalKeyboardKey.arrowLeft):
                       _ForwardKeyIntent('\x1b[D'),
                 },
+                if (!composeUsesSoftKeyboard(defaultTargetPlatform)) ...const {
+                  SingleActivator(LogicalKeyboardKey.enter): _SubmitIntent(),
+                  SingleActivator(LogicalKeyboardKey.numpadEnter):
+                      _SubmitIntent(),
+                },
               },
               child: Actions(
                 actions: <Type, Action<Intent>>{
@@ -304,33 +328,52 @@ class _QuestionOverlayState extends State<QuestionOverlay> {
                       return null;
                     },
                   ),
-                },
-                child: Container(
-                  constraints:
-                      const BoxConstraints(maxWidth: 640, maxHeight: 520),
-                  margin: const EdgeInsets.all(12),
-                  decoration: BoxDecoration(
-                    color: theme.colorScheme.surfaceContainerHigh,
-                    borderRadius: BorderRadius.circular(AppShape.large),
-                    border: Border.all(color: theme.colorScheme.outlineVariant),
+                  // Same completeness gate as the Send button (_footer below) —
+                  // an incomplete selection is a no-op, never a partial submit.
+                  _SubmitIntent: CallbackAction<_SubmitIntent>(
+                    onInvoke: (intent) {
+                      if (_everyQuestionAnswered) _send();
+                      return null;
+                    },
                   ),
-                  child: Column(
-                    mainAxisSize: MainAxisSize.min,
-                    children: [
-                      _header(theme, questions.length),
-                      // While typing a free-text ("Other") answer the soft keyboard
-                      // is up and vertical space is scarce — the card would overflow
-                      // and clip the field + Send button (the reported "can't see the
-                      // input box when the keyboard is open"). The question text has
-                      // already been read by then, so drop this panel to give the
-                      // input room; it returns the moment Other is deselected.
-                      if (!_otherActive &&
-                          (widget.contextText ?? '').trim().isNotEmpty)
-                        _contextPanel(theme, widget.contextText!.trim()),
-                      if (questions.length > 1) _tabs(theme, questions),
-                      Flexible(child: _optionList(theme, q)),
-                      _footer(theme, q),
-                    ],
+                },
+                // Deterministically owns focus the moment the overlay mounts
+                // (#64 Gap 2), so hardware Enter/Tab/arrows reach THIS
+                // Shortcuts instead of bubbling from whatever the sibling
+                // ComposeBar's TextField last focused — previously Enter was
+                // silently swallowed as a no-op submit of the (empty) compose
+                // field underneath. Also makes #50's Tab/arrow forwarding
+                // reliable without first requiring a tap inside the overlay.
+                child: Focus(
+                  autofocus: true,
+                  child: Container(
+                    constraints:
+                        const BoxConstraints(maxWidth: 640, maxHeight: 520),
+                    margin: const EdgeInsets.all(12),
+                    decoration: BoxDecoration(
+                      color: theme.colorScheme.surfaceContainerHigh,
+                      borderRadius: BorderRadius.circular(AppShape.large),
+                      border:
+                          Border.all(color: theme.colorScheme.outlineVariant),
+                    ),
+                    child: Column(
+                      mainAxisSize: MainAxisSize.min,
+                      children: [
+                        _header(theme, questions.length),
+                        // While typing a free-text ("Other") answer the soft keyboard
+                        // is up and vertical space is scarce — the card would overflow
+                        // and clip the field + Send button (the reported "can't see the
+                        // input box when the keyboard is open"). The question text has
+                        // already been read by then, so drop this panel to give the
+                        // input room; it returns the moment Other is deselected.
+                        if (!_otherActive &&
+                            (widget.contextText ?? '').trim().isNotEmpty)
+                          _contextPanel(theme, widget.contextText!.trim()),
+                        if (questions.length > 1) _tabs(theme, questions),
+                        Flexible(child: _optionList(theme, q)),
+                        _footer(theme, q),
+                      ],
+                    ),
                   ),
                 ),
               ),

@@ -1,6 +1,7 @@
 // Tests for the interactive-question overlay (issue #19): the pure frame
 // builder that drives Claude's TUI selector with ABSOLUTE row digits,
 // PendingQuestion parsing, and the overlay's select-then-send interaction.
+import 'package:flutter/foundation.dart';
 import 'package:flutter/material.dart';
 import 'package:flutter/services.dart';
 import 'package:flutter_test/flutter_test.dart';
@@ -613,6 +614,142 @@ void main() {
     await tester.tap(find.widgetWithText(FilledButton, 'Send answer'));
     await tester.pumpAndSettle();
     expect(_keys(sent!), ['2']);
+  });
+
+  group('hardware Enter submits the selection (#64 Gap 2)', () {
+    testWidgets(
+        'select an option then a real hardware Enter sends the SAME frames '
+        'as tapping Send', (tester) async {
+      debugDefaultTargetPlatformOverride = TargetPlatform.windows;
+      try {
+        List<AnswerFrame>? sent;
+        final pq = PendingQuestion(
+          toolUseId: 'enter1',
+          questions: [_q(['Alpha', 'Beta', 'Gamma'])],
+        );
+        await tester.pumpWidget(
+          MaterialApp(
+            theme: AppTheme.dark,
+            home: Scaffold(
+              body: Stack(
+                children: [
+                  QuestionOverlay(
+                    question: pq,
+                    onSend: (s) => sent = s,
+                    onKey: (_) {},
+                    onDismiss: () {},
+                  ),
+                ],
+              ),
+            ),
+          ),
+        );
+        await tester.pumpAndSettle();
+
+        await tester.tap(find.text('Gamma'));
+        await tester.pumpAndSettle();
+
+        await tester.sendKeyEvent(LogicalKeyboardKey.enter);
+        await tester.pump();
+
+        // Gamma is index 2 -> the same absolute row digit "3" the Send
+        // button would have sent (see 'select an option then Send forwards
+        // the built frames' above).
+        expect(sent, isNotNull);
+        expect(_keys(sent!), ['3']);
+      } finally {
+        debugDefaultTargetPlatformOverride = null;
+      }
+    });
+
+    testWidgets('Enter before any option is picked is a no-op', (tester) async {
+      debugDefaultTargetPlatformOverride = TargetPlatform.windows;
+      try {
+        List<AnswerFrame>? sent;
+        await tester.pumpWidget(
+          MaterialApp(
+            theme: AppTheme.dark,
+            home: Scaffold(
+              body: Stack(
+                children: [
+                  QuestionOverlay(
+                    question: PendingQuestion(
+                      toolUseId: 'enter2',
+                      questions: [_q(['A', 'B'])],
+                    ),
+                    onSend: (s) => sent = s,
+                    onKey: (_) {},
+                    onDismiss: () {},
+                  ),
+                ],
+              ),
+            ),
+          ),
+        );
+        await tester.pumpAndSettle();
+
+        await tester.sendKeyEvent(LogicalKeyboardKey.enter);
+        await tester.pump();
+
+        expect(sent, isNull, reason: 'an incomplete selection must not submit');
+      } finally {
+        debugDefaultTargetPlatformOverride = null;
+      }
+    });
+
+    testWidgets(
+        'on Android/iOS Enter is NOT bound — a soft-keyboard Enter must not '
+        'submit (#55 mobile contract)', (tester) async {
+      for (final platform in [TargetPlatform.android, TargetPlatform.iOS]) {
+        debugDefaultTargetPlatformOverride = platform;
+        try {
+          List<AnswerFrame>? sent;
+          final pq = PendingQuestion(
+            toolUseId: 'enter3-$platform',
+            questions: [_q(['Alpha', 'Beta'])],
+          );
+          await tester.pumpWidget(
+            MaterialApp(
+              theme: AppTheme.dark,
+              home: Scaffold(
+                body: Stack(
+                  children: [
+                    QuestionOverlay(
+                      question: pq,
+                      onSend: (s) => sent = s,
+                      onKey: (_) {},
+                      onDismiss: () {},
+                    ),
+                  ],
+                ),
+              ),
+            ),
+          );
+          await tester.pumpAndSettle();
+
+          await tester.tap(find.text('Beta'));
+          await tester.pumpAndSettle();
+
+          await tester.sendKeyEvent(LogicalKeyboardKey.enter);
+          await tester.pump();
+
+          expect(
+            sent,
+            isNull,
+            reason: 'mobile Enter must stay unbound (newline/no-op), '
+                'per the #55 platform contract',
+          );
+
+          // The Send button still works — mobile just relies on it instead
+          // of the key.
+          await tester.tap(find.widgetWithText(FilledButton, 'Send answer'));
+          await tester.pumpAndSettle();
+          expect(_keys(sent!), ['2']);
+        } finally {
+          debugDefaultTargetPlatformOverride = null;
+        }
+      }
+    });
   });
 
   testWidgets('Other row is not offered for a multi-select question',
