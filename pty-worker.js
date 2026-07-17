@@ -682,6 +682,7 @@ function scheduleAutoContinue(session) {
       try { submitLine(s, '/compact'); } catch (e) { log(`api-error: /compact write failed: ${e.message}`); return; }
       log(`api-error: "${s.name}" auto attempt ${attempt}/${API_ERROR_MAX_ATTEMPTS}: sent /compact`);
       armCompactReplay(s);
+      setCompacting(s, 'auto-recovery'); // #65 — same indicator as a user's own /compact
       broadcastEvent('apiError', { id: s.id, name: s.name, apiError: true, text: s.apiErrorText || '', transient: true, autoContinue: attempt, action: 'compact' });
     } else {
       try { submitLine(s, 'continue'); } catch (e) { log(`api-error: continue write failed: ${e.message}`); return; }
@@ -709,6 +710,32 @@ function doCompactReplay(session, reason) {
   writePromptToTerm(s, text);
   log(`api-error: "${s.name}" compact-replay (${reason}): ${text.slice(0, 80)}`);
   broadcastEvent('apiError', { id: s.id, name: s.name, apiError: !!s.apiError, text: s.apiErrorText || '', autoContinue: API_ERROR_COMPACT_ATTEMPT, action: 'replay-prompt', replayText: text.slice(0, 200) });
+}
+
+// #65 — unified "compacting" indicator so the chat lens can show a
+// "Compacting conversation…" state regardless of trigger: a user's own
+// /compact (PreCompact hook, source 'hook') or our own auto-recovery /compact
+// (source 'auto-recovery', above). ONE field (session.compacting), read by
+// sessionSummary() and pushed live over the 'compacting' broadcast — no
+// per-source duplicate state. Reuses the same fallback pattern/constant as
+// armCompactReplay: a /compact that never settles (no idle hook arrives)
+// still clears the indicator instead of sticking forever.
+function setCompacting(session, source) {
+  session.compacting = { since: Date.now(), source };
+  if (session._compactingFallbackTimer) clearTimeout(session._compactingFallbackTimer);
+  session._compactingFallbackTimer = setTimeout(() => clearCompacting(session, 'timeout'), API_ERROR_COMPACT_FALLBACK_MS);
+  if (typeof session._compactingFallbackTimer.unref === 'function') session._compactingFallbackTimer.unref();
+  log(`compacting: "${session.name}" (${session.id}) started (${source})`);
+  broadcastEvent('compacting', { id: session.id, compacting: true, since: session.compacting.since });
+}
+
+// Idempotent — clearing an already-clear session is a no-op (no broadcast).
+function clearCompacting(session, reason) {
+  if (session._compactingFallbackTimer) { clearTimeout(session._compactingFallbackTimer); session._compactingFallbackTimer = null; }
+  if (!session.compacting) return;
+  session.compacting = null;
+  log(`compacting: "${session.name}" (${session.id}) cleared (${reason})`);
+  broadcastEvent('compacting', { id: session.id, compacting: false, since: null });
 }
 
 // Low-level write to a session's PTY. Mirrors the write into a per-session
@@ -971,6 +998,9 @@ function applyIdle(session, event) {
   if (session._compactReplay && (Date.now() - session._compactReplay.setAt) > API_ERROR_COMPACT_MIN_WAIT_MS) {
     doCompactReplay(session, 'idle-hook');
   }
+  // #65 — idle means whatever /compact was in flight (user-triggered or ours)
+  // has settled. Idempotent no-op if nothing was compacting.
+  clearCompacting(session, 'idle');
   let notifyType = null, notifyMsg = null;
   if (prevStatus !== 'idle') {
     notifyType = 'idle';
@@ -1051,6 +1081,8 @@ function sessionSummary(id, s) {
     hookStatus: !!s.hookStatus,
     apiError: !!s.apiError,
     apiErrorText: s.apiError ? (s.apiErrorText || '') : '',
+    compacting: !!(s.compacting),
+    compactingSince: s.compacting ? s.compacting.since : null,
   };
 }
 
@@ -1371,6 +1403,15 @@ function handleHook(session, event, claudeSessionId, prompt, agentId) {
       cancelPendingIdle(session);
       notifyType = 'approval_needed';
       notifyMsg = `"${session.name}" — Claude needs your approval`;
+      break;
+    case 'PreCompact':
+      // #65 — a /compact is starting: the user's own (this hook) or ours via
+      // API-error auto-recovery (scheduleAutoContinue, source 'auto-recovery').
+      // Surfaces the "Compacting conversation…" indicator; status itself is
+      // untouched — /compact doesn't end the turn. The next idle hook clears it
+      // (applyIdle); the fallback timer inside setCompacting is the stuck-guard
+      // for a /compact that never settles.
+      setCompacting(session, 'hook');
       break;
   }
 

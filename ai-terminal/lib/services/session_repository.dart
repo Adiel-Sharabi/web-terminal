@@ -98,6 +98,14 @@ class SessionRepository {
   // [_applyNotify]. Pruned in [refresh] when a session leaves the list.
   final Map<String, ApiErrorInfo> _apiErrors = <String, ApiErrorInfo>{};
 
+  // Live per-session compaction state (#65), overlaying status the same way
+  // [_apiErrors] does. Unlike api-error, `/api/sessions` DOES report
+  // `compacting`/`compactingSince` — [refresh] seeds this map from that poll
+  // (see [_seedCompacting]) — and [_applyNotify] additionally folds in the
+  // live `type:'compacting'` `/ws/notify` frame so the indicator can appear
+  // ahead of the next poll. Pruned in [refresh] when a session leaves the list.
+  final Map<String, CompactingInfo> _compacting = <String, CompactingInfo>{};
+
   // Session ids whose attention has been acknowledged (opened/viewed/dismissed)
   // — the chip is hidden for these (#24). Synced cross-device: seeded by a
   // 'clear' notify frame from any device, and re-armed (removed) by a genuine
@@ -121,6 +129,29 @@ class SessionRepository {
   /// so the dashboard can read this getter during the triggered rebuild to badge
   /// a session (and show [ApiErrorInfo.text] / retry progress).
   ApiErrorInfo? apiErrorFor(String id) => _apiErrors[id];
+
+  /// The live compaction state for [id], or `null` when the session isn't
+  /// currently compacting (#65). Seeded from `/api/sessions`' `compacting`
+  /// field on every [refresh] and kept live by the `type:'compacting'`
+  /// `/ws/notify` frame — see [_seedCompacting] / [_applyNotify]. The chat
+  /// lens reads this to show "Compacting conversation…" ahead of
+  /// `SessionStatus.working`.
+  CompactingInfo? compactingFor(String id) => _compacting[id];
+
+  /// Test-only: seeds/clears [_compacting] directly for [id], bypassing the
+  /// notify-frame/poll producers ([_applyNotify] / [_seedCompacting]). Lets a
+  /// widget test drive [compactingFor] — which [ConversationView] reads off
+  /// this singleton — without standing up a fake `ApiClient` or notify
+  /// stream. Re-emits like the production write paths so listeners rebuild.
+  @visibleForTesting
+  void debugSetCompacting(String id, CompactingInfo? info) {
+    if (info == null) {
+      _compacting.remove(id);
+    } else {
+      _compacting[id] = info;
+    }
+    _emitSessions();
+  }
 
   /// Broadcast stream of per-server reachability (`baseUrl → online`).
   Stream<Map<String, bool>> get serverOnlineStream => _online.stream;
@@ -147,6 +178,8 @@ class SessionRepository {
 
     _current = merged;
     _pruneApiErrors(merged);
+    _seedCompacting(merged);
+    _pruneCompacting(merged);
     if (!_sessions.isClosed) _sessions.add(merged);
     if (!_online.isClosed) _online.add(serverOnline);
     await _cacheNames(merged);
@@ -334,30 +367,49 @@ class SessionRepository {
     _favoritesSyncSupported.remove(baseUrl);
   }
 
-  /// Updates [_apiErrors] from a notify frame.
+  /// Updates [_apiErrors] and [_compacting] from a notify frame. The two
+  /// signals are independent (a frame carries at most one, but nothing stops
+  /// either check from also handling the other in one pass).
   ///
-  /// Only frames that actually carry api-error state ([NotifyEvent
-  /// .hasApiErrorSignal]) touch the map — an ordinary status/approval/idle frame
-  /// (which has `apiError == false` merely by default) is ignored, so it can't
-  /// wrongly clear an active error. On such a frame: `apiError && !cleared` sets
-  /// or refreshes the entry (carrying the latest text/retry detail); otherwise
-  /// (recovery — `apiError == false`, or an explicit `cleared`) the entry is
-  /// removed. Re-emits the session list on any change so the dashboard rebuilds
-  /// immediately, ahead of the debounced [refresh].
+  /// **Api-error:** only a frame that actually carries api-error state
+  /// ([NotifyEvent.hasApiErrorSignal]) touches [_apiErrors] — an ordinary
+  /// status/approval/idle frame (which has `apiError == false` merely by
+  /// default) is ignored, so it can't wrongly clear an active error. On such a
+  /// frame: `apiError && !cleared` sets or refreshes the entry (carrying the
+  /// latest text/retry detail); otherwise (recovery — `apiError == false`, or
+  /// an explicit `cleared`) the entry is removed.
+  ///
+  /// **Compacting (#65):** mirrors the same guard via
+  /// [NotifyEvent.hasCompactingSignal] so a frame without the `compacting` key
+  /// leaves [_compacting] untouched. `compacting == true` sets the entry;
+  /// `false` (compaction ended) removes it.
+  ///
+  /// Either branch re-emits the session list on change so the dashboard/chat
+  /// lens rebuilds immediately, ahead of the debounced [refresh].
   void _applyNotify(NotifyEvent evt) {
-    if (evt.sessionId.isEmpty || !evt.hasApiErrorSignal) return;
+    if (evt.sessionId.isEmpty) return;
     final id = evt.sessionId;
-    if (evt.apiError && !evt.cleared) {
-      _apiErrors[id] = ApiErrorInfo(
-        active: true,
-        text: evt.apiErrorText,
-        transient: evt.transient,
-        autoContinue: evt.autoContinue,
-        action: evt.action,
-      );
-      _emitSessions();
-    } else if (_apiErrors.remove(id) != null) {
-      _emitSessions();
+    if (evt.hasApiErrorSignal) {
+      if (evt.apiError && !evt.cleared) {
+        _apiErrors[id] = ApiErrorInfo(
+          active: true,
+          text: evt.apiErrorText,
+          transient: evt.transient,
+          autoContinue: evt.autoContinue,
+          action: evt.action,
+        );
+        _emitSessions();
+      } else if (_apiErrors.remove(id) != null) {
+        _emitSessions();
+      }
+    }
+    if (evt.hasCompactingSignal) {
+      if (evt.compacting) {
+        _compacting[id] = CompactingInfo(active: true, since: evt.compactingSince);
+        _emitSessions();
+      } else if (_compacting.remove(id) != null) {
+        _emitSessions();
+      }
     }
   }
 
@@ -366,6 +418,29 @@ class SessionRepository {
     if (_apiErrors.isEmpty) return;
     final live = <String>{for (final s in sessions) s.id};
     _apiErrors.removeWhere((id, _) => !live.contains(id));
+  }
+
+  /// Seeds/refreshes [_compacting] from each session's own `compacting` /
+  /// `compactingSince` fields (#65) — unlike api-error, `/api/sessions` DOES
+  /// report this directly. Runs on every [refresh] so a session already
+  /// compacting when the app (re)connects — or whose live `/ws/notify` frame
+  /// was missed — still shows the indicator; [_applyNotify] can still update
+  /// the entry sooner, between polls.
+  void _seedCompacting(List<Session> sessions) {
+    for (final s in sessions) {
+      if (s.compacting) {
+        _compacting[s.id] = CompactingInfo(active: true, since: s.compactingSince);
+      } else {
+        _compacting.remove(s.id);
+      }
+    }
+  }
+
+  /// Drops compacting entries for sessions no longer in [sessions] (#65).
+  void _pruneCompacting(List<Session> sessions) {
+    if (_compacting.isEmpty) return;
+    final live = <String>{for (final s in sessions) s.id};
+    _compacting.removeWhere((id, _) => !live.contains(id));
   }
 
   /// Re-emits the current session list (unchanged contents) so listeners rebuild

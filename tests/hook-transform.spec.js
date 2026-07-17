@@ -16,6 +16,8 @@
 // tests to finish quickly. The Playwright runner is configured to pass that
 // through (see playwright.config.js).
 const { test, expect, request: pwRequest } = require('@playwright/test');
+const WebSocket = require('ws');
+const http = require('http');
 
 const BASE = 'http://127.0.0.1:17681';
 const AUTH = { user: 'testuser', password: 'testpass:colon' };
@@ -59,6 +61,27 @@ async function getStatus(ctx, id) {
 
 async function sendHook(raw, id, body) {
   return raw.post(`/api/session/${id}/hook`, { data: body });
+}
+
+/** Log in over raw http and return the session cookie for a manual ws upgrade
+ * (mirrors tests/attention-clear.spec.js). */
+function rawCookie() {
+  return new Promise((resolve, reject) => {
+    const body = `user=${encodeURIComponent(AUTH.user)}&password=${encodeURIComponent(AUTH.password)}`;
+    const req = http.request(
+      BASE + '/login',
+      { method: 'POST', headers: { 'Content-Type': 'application/x-www-form-urlencoded', 'Content-Length': Buffer.byteLength(body) } },
+      (res) => {
+        const sc = res.headers['set-cookie'];
+        res.resume();
+        if (!sc) return reject(new Error('no set-cookie on login'));
+        resolve(sc.map((c) => c.split(';')[0]).join('; '));
+      },
+    );
+    req.on('error', reject);
+    req.write(body);
+    req.end();
+  });
 }
 
 async function pollUntil(fn, predicate, timeoutMs) {
@@ -232,6 +255,44 @@ test.describe('Hook transform: SubagentStop with nothing in flight', () => {
       await new Promise(r => setTimeout(r, DEBOUNCE_MS + SLACK_MS));
       expect(await getStatus(ctx, id)).toBe('working');
     } finally {
+      await ctx.delete(`/api/sessions/${id}`);
+      await ctx.dispose();
+      await raw.dispose();
+    }
+  });
+});
+
+test.describe('Hook transform: PreCompact passthrough (#65)', () => {
+  test('PreCompact is not demuxed/dropped — it reaches the worker and fans out a compacting frame', async () => {
+    // Only 'Notification' is reshaped in processHookEvent (permission/idle/dropped);
+    // every other raw event — PreCompact included — is forwarded to the worker
+    // verbatim (see server.js processHookEvent). apiError-style fields are worker-
+    // owned and never round-trip through the polled /api/sessions REST shape, so
+    // the only way to observe PreCompact having reached the worker is the same way
+    // a real client would: the live 'compacting' frame on /ws/notify.
+    const ctx = await authCtx();
+    const raw = await rawCtx();
+    const cookie = await rawCookie();
+
+    const ws = new WebSocket(BASE.replace('http', 'ws') + '/ws/notify', { headers: { Cookie: cookie } });
+    const frames = [];
+    ws.on('message', (d) => { try { frames.push(JSON.parse(d.toString())); } catch { /* ignore non-JSON */ } });
+    await new Promise((resolve, reject) => { ws.on('open', resolve); ws.on('error', reject); });
+
+    const id = await createSession(ctx, 'HookXform-PreCompact');
+    try {
+      await sendHook(raw, id, { event: 'UserPromptSubmit' });
+      await pollUntil(() => getStatus(ctx, id), s => s === 'working', 2000);
+
+      const res = await sendHook(raw, id, { event: 'PreCompact' });
+      expect(res.status()).toBe(200);
+
+      await expect.poll(
+        () => frames.some(f => f.type === 'compacting' && f.id === id && f.compacting === true && typeof f.since === 'number'),
+        { timeout: 2000 },
+      ).toBe(true);
+    } finally {
+      ws.close();
       await ctx.delete(`/api/sessions/${id}`);
       await ctx.dispose();
       await raw.dispose();

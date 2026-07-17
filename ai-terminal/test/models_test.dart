@@ -79,6 +79,22 @@ void main() {
       final s = Session.fromJson(_server, {'id': 'x', 'favoriteRank': 2});
       expect(s.favorite, isFalse);
     });
+
+    test('parses compacting + compactingSince (#65)', () {
+      final s = Session.fromJson(_server, {
+        'id': 'x',
+        'compacting': true,
+        'compactingSince': 1720000000000,
+      });
+      expect(s.compacting, isTrue);
+      expect(s.compactingSince, 1720000000000);
+    });
+
+    test('defaults to not-compacting, null since when absent', () {
+      final s = Session.fromJson(_server, {'id': 'x'});
+      expect(s.compacting, isFalse);
+      expect(s.compactingSince, isNull);
+    });
   });
 
   group('Session.pinnedOrder (#60)', () {
@@ -250,6 +266,53 @@ void main() {
       expect(e.apiErrorText, isNull);
       expect(e.autoContinue, 0);
     });
+
+    test('parses a compacting frame, whose session id key is "id" not '
+        '"sessionId" (#65)', () {
+      final e = NotifyEvent.fromJson({
+        'notification': {
+          'type': 'compacting',
+          'id': 's9',
+          'compacting': true,
+          'since': 1720000000000,
+        }
+      });
+      expect(e.type, 'compacting');
+      expect(e.sessionId, 's9');
+      expect(e.compacting, isTrue);
+      expect(e.compactingSince, 1720000000000);
+      expect(e.hasCompactingSignal, isTrue);
+      // Independent of the api-error signal.
+      expect(e.hasApiErrorSignal, isFalse);
+    });
+
+    test('a compacting-cleared frame reports compacting false, still signalled',
+        () {
+      final e = NotifyEvent.fromJson({
+        'notification': {
+          'type': 'compacting',
+          'id': 's9',
+          'compacting': false,
+          'since': null,
+        }
+      });
+      expect(e.compacting, isFalse);
+      expect(e.compactingSince, isNull);
+      expect(e.hasCompactingSignal, isTrue);
+    });
+
+    test('an ordinary status frame carries NO compacting signal', () {
+      final e = NotifyEvent.fromJson({
+        'notification': {
+          'type': 'status',
+          'sessionId': 's9',
+          'status': 'working',
+        }
+      });
+      expect(e.compacting, isFalse);
+      expect(e.hasCompactingSignal, isFalse);
+      expect(e.compactingSince, isNull);
+    });
   });
 
   group('ApiErrorInfo', () {
@@ -260,6 +323,14 @@ void main() {
       expect(info.transient, isFalse);
       expect(info.autoContinue, 0);
       expect(info.action, isNull);
+    });
+  });
+
+  group('CompactingInfo (#65)', () {
+    test('defaults', () {
+      const info = CompactingInfo(active: true);
+      expect(info.active, isTrue);
+      expect(info.since, isNull);
     });
   });
 
