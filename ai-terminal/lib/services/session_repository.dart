@@ -595,7 +595,20 @@ class SessionRepository {
         }
         _favoritesSyncSupported[server.baseUrl] = info.has('favorites-sync');
         _namesResolved.add(server.baseUrl);
-      } catch (_) {/* retry next refresh */}
+      } catch (_) {
+        // #66: NOT cleared here on purpose. Once a server is `confirmed`
+        // (both lines above have run at least once), the `if (confirmed)
+        // return;` above means this try block never runs again for it — so
+        // this catch is unreachable for the "was supported, now offline"
+        // case, and clearing a flag that's already false/absent for every
+        // OTHER case (not-yet-confirmed) would be a no-op. Dropping the
+        // `confirmed` short-circuit to force re-verification every refresh
+        // would fix that, but costs a network call/refresh forever and is
+        // out of scope here. The actual "star stays enabled while its
+        // server is down" bug is closed at the decision point instead —
+        // see `favoriteToggleAllowed` in dashboard_screen.dart, which gates
+        // on live `serverOnline` (not this cache) directly.
+      }
     }));
   }
 
