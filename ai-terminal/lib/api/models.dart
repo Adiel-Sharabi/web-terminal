@@ -111,6 +111,16 @@ class Session {
   /// [Session.pinnedOrder] — never stored as a separate list.
   final int? favoriteRank;
 
+  /// Whether this session is currently compacting its context (#65). Rides on
+  /// `GET /api/sessions` / `GET /api/cluster/sessions` — [SessionRepository]
+  /// seeds its `compactingFor` overlay from this on every poll, so a live
+  /// `/ws/notify` push isn't the only way the indicator can show.
+  final bool compacting;
+
+  /// Epoch milliseconds when the current compaction started, or `null` when
+  /// [compacting] is `false` or the server didn't report one.
+  final int? compactingSince;
+
   /// Creates a session value object. [autoCommand] is optional (default `''`)
   /// so existing call sites and tests that predate the field keep compiling.
   const Session({
@@ -127,6 +137,8 @@ class Session {
     this.agent,
     this.favorite = false,
     this.favoriteRank,
+    this.compacting = false,
+    this.compactingSince,
   });
 
   /// Builds a [Session] from one element of the `GET /api/sessions` array,
@@ -146,6 +158,8 @@ class Session {
       agent: json['agent']?.toString(),
       favorite: json['favorite'] == true,
       favoriteRank: _asInt(json['favoriteRank']),
+      compacting: json['compacting'] == true,
+      compactingSince: _asInt(json['compactingSince']),
     );
   }
 
@@ -282,12 +296,15 @@ class AttentionInfo {
 /// A single event pushed over the `/ws/notify` WebSocket. Flattened from the
 /// server's `{notification: {...}}` envelope.
 ///
-/// The server emits three shapes over this socket:
+/// The server emits four shapes over this socket:
 /// * a bare status frame — `{type:'status', sessionId, status}` (no api-error
 ///   keys);
 /// * a status/approval/idle notification — same shape plus a `message`;
 /// * an **api-error** frame — carries `apiError`, `apiErrorText`, `transient`,
-///   `autoContinue`, `action` and `replayText` (but no `status`).
+///   `autoContinue`, `action` and `replayText` (but no `status`);
+/// * a **compacting** frame (#65) — `{type:'compacting', id, compacting,
+///   since}`. Note the session id key is `id`, not `sessionId` — [sessionId]
+///   falls back to `id` so this frame reads like every other one downstream.
 ///
 /// Only api-error frames carry the `apiError` key, so [hasApiErrorSignal]
 /// distinguishes them from ordinary status frames. This matters because the
@@ -346,6 +363,19 @@ class NotifyEvent {
   /// presence.
   final bool hasApiErrorSignal;
 
+  /// True when the event reports an active compaction condition (#65). On a
+  /// `type:'compacting'` frame, `false` means compaction just ended.
+  final bool compacting;
+
+  /// Epoch milliseconds when compaction started, or `null` when absent/ended.
+  final int? compactingSince;
+
+  /// True when this frame actually carried compacting state (the `compacting`
+  /// key was present) — mirrors [hasApiErrorSignal]. An ordinary status frame
+  /// (which also has `compacting == false` merely by default) must not be
+  /// mistaken for an explicit "compaction ended" signal.
+  final bool hasCompactingSignal;
+
   /// Creates a notify event value object.
   const NotifyEvent({
     required this.type,
@@ -360,6 +390,9 @@ class NotifyEvent {
     this.action,
     this.replayText,
     this.hasApiErrorSignal = false,
+    this.compacting = false,
+    this.compactingSince,
+    this.hasCompactingSignal = false,
   });
 
   /// Parses one `/ws/notify` frame. Accepts either the full
@@ -371,7 +404,9 @@ class NotifyEvent {
     return NotifyEvent(
       type: (n['type'] ?? 'status').toString(),
       message: (n['message'] ?? '').toString(),
-      sessionId: (n['sessionId'] ?? '').toString(),
+      // The compacting frame's session-id key is `id`, not `sessionId` (#65)
+      // — fall back so it flows through the same field as every other frame.
+      sessionId: (n['sessionId'] ?? n['id'] ?? '').toString(),
       status: (n['status'] ?? '').toString(),
       apiError: n['apiError'] == true,
       apiErrorText: n['apiErrorText']?.toString(),
@@ -382,6 +417,9 @@ class NotifyEvent {
       replayText: n['replayText']?.toString(),
       hasApiErrorSignal:
           n.containsKey('apiError') || n.containsKey('apiErrorText'),
+      compacting: n['compacting'] == true,
+      compactingSince: _asInt(n['since']),
+      hasCompactingSignal: n.containsKey('compacting'),
     );
   }
 
@@ -426,6 +464,26 @@ class ApiErrorInfo {
   @override
   String toString() =>
       'ApiErrorInfo(active=$active, autoContinue=$autoContinue)';
+}
+
+/// Derived per-session compaction state tracked by the session repository
+/// (#65), mirroring [ApiErrorInfo]'s overlay-on-top-of-status shape. Unlike
+/// api-error state, `compacting`/`compactingSince` also ride `/api/sessions`
+/// (see [Session]) — [active]/[since] are folded from BOTH that poll and the
+/// live `type:'compacting'` `/ws/notify` frame, so the indicator can appear
+/// ahead of the next poll.
+class CompactingInfo {
+  /// Whether the session is currently compacting its context.
+  final bool active;
+
+  /// Epoch milliseconds when compaction started, or `null` if unknown.
+  final int? since;
+
+  /// Creates a compacting info value object.
+  const CompactingInfo({required this.active, this.since});
+
+  @override
+  String toString() => 'CompactingInfo(active=$active, since=$since)';
 }
 
 /// The `GET /api/version` response used for per-server feature gating and the

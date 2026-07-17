@@ -33,6 +33,7 @@ import 'package:url_launcher/url_launcher.dart';
 import '../api/agent_catalog.dart';
 import '../api/api_client.dart';
 import '../api/models.dart';
+import '../services/session_repository.dart';
 import '../theme/app_theme.dart';
 import '../util/terminal_links.dart';
 import 'empty_state.dart';
@@ -581,6 +582,13 @@ class _ConversationViewState extends State<ConversationView> {
     }
 
     final working = widget.session.status == 'working';
+    // #65: an overlay on top of status, exactly like apiError — never a
+    // SessionStatus value. Takes priority over the plain "working" indicator
+    // below when both apply, so a compaction mid-turn reads as what it is
+    // rather than an ordinary slow turn.
+    final compacting =
+        SessionRepository.instance.compactingFor(widget.session.id)?.active ??
+            false;
     final leadingLoader = _loadingOlder ? 1 : 0;
     final subagents = collectSubagents(_turns);
     return Column(
@@ -608,7 +616,7 @@ class _ConversationViewState extends State<ConversationView> {
           padding: const EdgeInsets.symmetric(vertical: 8),
           itemCount: _turns.length +
               leadingLoader +
-              (working ? 1 : 0) +
+              ((working || compacting) ? 1 : 0) +
               _pendingEchoes.length,
           itemBuilder: (context, index) {
             if (_loadingOlder && index == 0) {
@@ -632,9 +640,15 @@ class _ConversationViewState extends State<ConversationView> {
               );
             }
             i -= _turns.length;
-            // Trailing "Claude is working…" indicator while the agent is mid-turn.
-            if (working) {
-              if (i == 0) return const _WorkingIndicator();
+            // Trailing "Claude is working…" indicator while the agent is
+            // mid-turn — superseded by "Compacting conversation…" (#65) when
+            // both apply.
+            if (working || compacting) {
+              if (i == 0) {
+                return compacting
+                    ? const _CompactingIndicator()
+                    : const _WorkingIndicator();
+              }
               i -= 1;
             }
             // Optimistic echoes of prompts queued while Claude works (#31).
@@ -861,6 +875,94 @@ class _WorkingIndicatorState extends State<_WorkingIndicator>
                           height: 6,
                           decoration: BoxDecoration(
                             color: theme.colorScheme.primary,
+                            shape: BoxShape.circle,
+                          ),
+                        ),
+                      ),
+                    );
+                  }),
+                );
+              },
+            ),
+          ],
+        ),
+      ),
+    );
+  }
+}
+
+/// A left-aligned "Compacting conversation…" bubble (#65), shown in place of
+/// [_WorkingIndicator] while `SessionRepository.compactingFor` reports the
+/// session is compacting its context — an overlay on top of status, exactly
+/// like an api-error, never a `SessionStatus` value. Reuses the same
+/// pulsing-dots animation as [_WorkingIndicator] but with a distinct accent
+/// (tertiary, plus a small icon) so a compaction pause doesn't read as an
+/// ordinary slow turn.
+class _CompactingIndicator extends StatefulWidget {
+  const _CompactingIndicator();
+  @override
+  State<_CompactingIndicator> createState() => _CompactingIndicatorState();
+}
+
+class _CompactingIndicatorState extends State<_CompactingIndicator>
+    with SingleTickerProviderStateMixin {
+  late final AnimationController _c = AnimationController(
+    vsync: this,
+    duration: const Duration(milliseconds: 1200),
+  )..repeat();
+
+  @override
+  void dispose() {
+    _c.dispose();
+    super.dispose();
+  }
+
+  @override
+  Widget build(BuildContext context) {
+    final theme = Theme.of(context);
+    return Align(
+      alignment: Alignment.centerLeft,
+      child: Container(
+        margin: const EdgeInsets.fromLTRB(12, 4, 48, 4),
+        padding: const EdgeInsets.symmetric(horizontal: 14, vertical: 12),
+        decoration: BoxDecoration(
+          color: theme.colorScheme.surfaceContainer,
+          borderRadius: BorderRadius.circular(AppShape.medium),
+        ),
+        child: Row(
+          mainAxisSize: MainAxisSize.min,
+          children: [
+            Icon(
+              Icons.compress_outlined,
+              size: 14,
+              color: theme.colorScheme.tertiary,
+            ),
+            const SizedBox(width: 6),
+            Text(
+              'Compacting conversation…',
+              style: theme.textTheme.bodyMedium?.copyWith(
+                color: theme.colorScheme.onSurfaceVariant,
+              ),
+            ),
+            const SizedBox(width: 8),
+            AnimatedBuilder(
+              animation: _c,
+              builder: (context, _) {
+                return Row(
+                  mainAxisSize: MainAxisSize.min,
+                  children: List.generate(3, (i) {
+                    // Stagger each dot's pulse across the 0..1 cycle.
+                    final t = (_c.value + i / 3) % 1.0;
+                    final op = 0.3 + 0.7 * (1 - (2 * t - 1).abs());
+                    return Padding(
+                      padding: const EdgeInsets.symmetric(horizontal: 2),
+                      child: Opacity(
+                        opacity: op,
+                        child: Container(
+                          width: 6,
+                          height: 6,
+                          decoration: BoxDecoration(
+                            color: theme.colorScheme.tertiary,
                             shape: BoxShape.circle,
                           ),
                         ),

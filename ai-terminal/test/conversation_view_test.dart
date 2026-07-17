@@ -10,6 +10,7 @@ import 'package:flutter_test/flutter_test.dart';
 import 'package:ai_terminal/api/agent_catalog.dart';
 import 'package:ai_terminal/api/api_client.dart';
 import 'package:ai_terminal/api/models.dart';
+import 'package:ai_terminal/services/session_repository.dart';
 import 'package:ai_terminal/theme/app_theme.dart';
 import 'package:ai_terminal/widgets/conversation_view.dart';
 
@@ -1521,6 +1522,74 @@ void main() {
         controller.jumpTo(controller.position.minScrollExtent);
         await tester.pumpAndSettle();
         expect(find.textContaining('OLDER_0'), findsOneWidget);
+      },
+    );
+  });
+
+  group('#65 compacting indicator', () {
+    // SessionRepository.instance is a real singleton the widget reads
+    // directly (mirroring SessionRepository.apiErrorFor's dashboard usage) —
+    // debugSetCompacting is the test-only seam for driving it. Always clear
+    // it after each test so state never leaks into unrelated tests reusing
+    // the 'sess-1' id.
+    tearDown(() => SessionRepository.instance.debugSetCompacting('sess-1', null));
+
+    // A single real turn (not an empty transcript) so the trailing indicator
+    // has something to render after — an empty transcript short-circuits to
+    // the "No messages yet" empty state before either indicator is reached.
+    final page = TranscriptPage(
+      messages: const [
+        TranscriptTurn(role: 'assistant', text: 'hi', toolUses: [], ts: null),
+      ],
+      cursor: null,
+      hasMore: false,
+    );
+
+    testWidgets(
+      'a compacting session shows "Compacting conversation…", taking '
+      'priority over "Claude is working" when both apply',
+      (tester) async {
+        SessionRepository.instance.debugSetCompacting(
+          'sess-1',
+          const CompactingInfo(active: true, since: 1000),
+        );
+
+        await tester.pumpWidget(
+          _wrap(
+            ConversationView(
+              session: _session(status: 'working'),
+              fetchPage: (id, {before, limit}) async => page,
+            ),
+          ),
+        );
+        // Bounded pumps, NOT pumpAndSettle: both the working and compacting
+        // indicators repeat their pulse animation forever, which would hang
+        // pumpAndSettle (see the #31/#62 tests above for the same caveat).
+        await tester.pump();
+        await tester.pump(const Duration(milliseconds: 50));
+
+        expect(find.text('Compacting conversation…'), findsOneWidget);
+        expect(find.text('Claude is working'), findsNothing);
+      },
+    );
+
+    testWidgets(
+      'a plain working session (no compacting overlay) still shows '
+      '"Claude is working"',
+      (tester) async {
+        await tester.pumpWidget(
+          _wrap(
+            ConversationView(
+              session: _session(status: 'working'),
+              fetchPage: (id, {before, limit}) async => page,
+            ),
+          ),
+        );
+        await tester.pump();
+        await tester.pump(const Duration(milliseconds: 50));
+
+        expect(find.text('Claude is working'), findsOneWidget);
+        expect(find.text('Compacting conversation…'), findsNothing);
       },
     );
   });

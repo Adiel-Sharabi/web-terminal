@@ -934,6 +934,17 @@ workerClient.on('apiError', ({ id, name, apiError, text, transient, cleared, aut
   } catch (e) { console.error('notify(apiError) failed:', e.message); }
 });
 
+// #65 — unified "compacting" indicator (user's own /compact via the PreCompact
+// hook, or our API-error auto-recovery /compact — both set the same worker-side
+// field, see pty-worker.js setCompacting/clearCompacting). Purely transient UI
+// state for the chat lens's "Compacting conversation…" indicator, fanned out to
+// the live /ws/notify sockets on both set and clear. No FCM push — unlike
+// apiError above this never needs to wake a backgrounded phone.
+workerClient.on('compacting', ({ id, compacting, since }) => {
+  const payload = JSON.stringify({ type: 'compacting', id, compacting: !!compacting, since: since ?? null });
+  for (const client of notifyClients) { try { client.send(payload); } catch {} }
+});
+
 workerClient.on('sessionExited', ({ id }) => {
   // ntfy: drop any pending timers + stored level for the dead session.
   const nst = _notifyState.get(id);
@@ -2836,6 +2847,12 @@ app.get('/api/sessions', async (req, res) => {
       // #60 — favorite (pin) + its rank. Server-side so every device sees one
       // truth; a peer's favorites ride to the cluster list on THIS array.
       ...favoriteFields(s.id),
+      // #65 — compaction in progress. Unlike apiError, this rides the poll (and
+      // the cluster merge) so a client opening/reconnecting mid-compaction still
+      // sees the indicator, and the poll-seed agrees with the live 'compacting'
+      // push instead of clearing it. Worker-owned (sessionSummary), live-pushed too.
+      compacting: s.compacting || false,
+      compactingSince: s.compactingSince ?? null,
       metrics: listMetrics[i],
     }));
     // Log when a remote server fetches our sessions (Bearer = cluster call).
