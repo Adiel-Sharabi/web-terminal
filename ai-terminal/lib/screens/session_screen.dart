@@ -1592,9 +1592,17 @@ class _SessionScreenState extends State<SessionScreen>
     if (session == null) return;
     final source = await _chooseImageSource();
     if (source == null || !mounted) return;
-    XFile? file;
+    // #68: the gallery can attach MANY images in one pick (pickMultiImage); the
+    // camera stays a single capture. Each is uploaded + staged independently.
+    List<XFile> files;
     try {
-      file = await ImagePicker().pickImage(source: source, imageQuality: 90);
+      if (source == ImageSource.gallery) {
+        files = await ImagePicker().pickMultiImage(imageQuality: 90);
+      } else {
+        final one =
+            await ImagePicker().pickImage(source: source, imageQuality: 90);
+        files = one == null ? const <XFile>[] : <XFile>[one];
+      }
     } catch (e) {
       if (mounted) {
         ScaffoldMessenger.of(
@@ -1603,33 +1611,44 @@ class _SessionScreenState extends State<SessionScreen>
       }
       return;
     }
-    if (file == null) return;
-    try {
-      final bytes = await file.readAsBytes();
-      final mime = file.mimeType ?? _mimeFromName(file.name);
-      final reference = await ApiClient(
-        session.server,
-      ).uploadClipboardImage(session.id, bytes, mime: mime);
-      // #29: composing in chat → stage as a removable thumbnail chip like Alt+V,
-      // not a raw PTY paste. Otherwise (raw terminal) send straight to the PTY.
-      if (pasteImageIntoCompose(
-        activeLens: _activeLens,
-        composeFocused: _composeFocusNode.hasFocus,
-      )) {
-        _addComposeAttachment(
-          bytes,
-          reference.replaceAll(RegExp('\x1b\\[2(?:00|01)~'), ''),
-        );
-      } else {
-        _connection?.sendInput(reference);
-        _scrollToBottom();
+    if (files.isEmpty) return;
+    // Decide the destination ONCE, before the loop: the first
+    // _addComposeAttachment steals compose focus, which would otherwise flip
+    // pasteImageIntoCompose mid-loop and split a multi-pick across the compose
+    // bar and the raw PTY. All images from one pick go to the same place.
+    final toCompose = pasteImageIntoCompose(
+      activeLens: _activeLens,
+      composeFocused: _composeFocusNode.hasFocus,
+    );
+    var failures = 0;
+    for (final file in files) {
+      try {
+        final bytes = await file.readAsBytes();
+        final mime = file.mimeType ?? _mimeFromName(file.name);
+        final reference = await ApiClient(
+          session.server,
+        ).uploadClipboardImage(session.id, bytes, mime: mime);
+        // #29: composing in chat → stage as a removable thumbnail chip like
+        // Alt+V, not a raw PTY paste. Otherwise (raw terminal) send to the PTY.
+        if (toCompose) {
+          _addComposeAttachment(
+            bytes,
+            reference.replaceAll(RegExp('\x1b\\[2(?:00|01)~'), ''),
+          );
+        } else {
+          _connection?.sendInput(reference);
+        }
+      } catch (_) {
+        failures++;
       }
-    } catch (e) {
-      if (mounted) {
-        ScaffoldMessenger.of(
-          context,
-        ).showSnackBar(SnackBar(content: Text('Image upload failed: $e')));
-      }
+    }
+    if (!toCompose && mounted) _scrollToBottom();
+    if (failures > 0 && mounted) {
+      ScaffoldMessenger.of(context).showSnackBar(
+        SnackBar(
+          content: Text('$failures of ${files.length} image(s) failed to upload'),
+        ),
+      );
     }
   }
 
