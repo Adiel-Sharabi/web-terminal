@@ -295,6 +295,9 @@
     }
     #touchKeys button:active { background: #00d4aa; color: #1a1a2e; }
     #touchKeys button.sticky.active { background: #00d4aa; color: #1a1a2e; border-color: #00d4aa; }
+    /* Arrow keys auto-repeat on hold (#67) — no scroll/select gesture on the
+       button itself while the finger is down. */
+    #touchKeys button[data-key^="Arrow"] { touch-action: none; user-select: none; -webkit-user-select: none; }
 
     /* --- Selection mode floating bar --- */
     #selectBar {
@@ -1945,10 +1948,47 @@
     // touchend for mobile (since we preventDefault on touchstart, click won't fire)
     document.getElementById('touchKeys').addEventListener('touchend', (e) => {
       e.preventDefault();
+      if (isRepeatArrowTarget(e)) return; // handled by the pointer-repeat listeners below
       handleTouchKey(e);
     });
     // click for desktop fallback
-    document.getElementById('touchKeys').addEventListener('click', handleTouchKey);
+    document.getElementById('touchKeys').addEventListener('click', (e) => {
+      if (isRepeatArrowTarget(e)) return; // handled by the pointer-repeat listeners below
+      handleTouchKey(e);
+    });
+
+    // Issue #67: press-and-hold on an arrow key auto-repeats it, mirroring OS
+    // key-repeat (initial delay, then a fast interval) instead of firing once
+    // per tap. Scoped to the four arrow buttons only — every other key stays
+    // tap-once via touchend/click above. Each repeat replays the exact same
+    // handleTouchKey() a single tap would run (compose-mode caret/history nav,
+    // sticky Ctrl/Alt/Shift, etc.) — no separate send path to keep in sync.
+    const ARROW_REPEAT_DELAY_MS = 450;
+    const ARROW_REPEAT_INTERVAL_MS = 55;
+    const ARROW_KEYS = new Set(['ArrowUp', 'ArrowDown', 'ArrowLeft', 'ArrowRight']);
+    function isRepeatArrowTarget(e) {
+      const btn = e.target.closest('button');
+      return !!btn && ARROW_KEYS.has(btn.dataset.key);
+    }
+    document.querySelectorAll('#touchKeys button[data-key^="Arrow"]').forEach(btn => {
+      let delayTimer = null;
+      let intervalTimer = null;
+      function stopRepeat() {
+        if (delayTimer) { clearTimeout(delayTimer); delayTimer = null; }
+        if (intervalTimer) { clearInterval(intervalTimer); intervalTimer = null; }
+      }
+      btn.addEventListener('pointerdown', (e) => {
+        e.preventDefault();
+        handleTouchKey({ target: btn });
+        stopRepeat();
+        delayTimer = setTimeout(() => {
+          intervalTimer = setInterval(() => handleTouchKey({ target: btn }), ARROW_REPEAT_INTERVAL_MS);
+        }, ARROW_REPEAT_DELAY_MS);
+      });
+      btn.addEventListener('pointerup', stopRepeat);
+      btn.addEventListener('pointercancel', stopRepeat);
+      btn.addEventListener('pointerleave', stopRepeat);
+    });
 
     // --- Mobile image paste via file picker ---
     function mobileImagePaste() {
