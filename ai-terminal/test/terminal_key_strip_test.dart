@@ -113,4 +113,120 @@ void main() {
     // The other keys remain (only the raw toggle is gated).
     expect(find.byTooltip('Enter'), findsOneWidget);
   });
+
+  // #67: holding an arrow key auto-repeats it like OS key-repeat — fire once
+  // immediately, wait an initial delay, then repeat on a fast interval until
+  // released. pumpAndSettle can't be used here: the repeat timer is
+  // periodic and never settles on its own.
+  testWidgets('holding an arrow key auto-repeats after the initial delay',
+      (tester) async {
+    final sent = <String>[];
+    await tester.pumpWidget(
+      _wrap(
+        TerminalKeyStrip(
+          onKey: sent.add,
+          ctrlActive: false,
+          onToggleCtrl: () {},
+          altActive: false,
+          onToggleAlt: () {},
+          onPaste: () {},
+          onImage: () {},
+          rawMode: false,
+          onToggleRawMode: () {},
+        ),
+      ),
+    );
+
+    final gesture = await tester.startGesture(
+      tester.getCenter(find.byIcon(Icons.keyboard_arrow_up)),
+    );
+
+    // The press fires immediately — exactly one emit before the delay.
+    expect(sent, ['\x1b[A']);
+
+    // Held past the ~450ms initial delay, but before a repeat interval.
+    await tester.pump(const Duration(milliseconds: 460));
+    expect(sent.length, 1);
+
+    // A few ~55ms repeat ticks while still held.
+    await tester.pump(const Duration(milliseconds: 55));
+    await tester.pump(const Duration(milliseconds: 55));
+    await tester.pump(const Duration(milliseconds: 55));
+    expect(sent.length, greaterThan(1));
+    expect(sent.every((seq) => seq == '\x1b[A'), isTrue);
+
+    // Releasing stops the repeat immediately — no further emits afterward.
+    final countAtRelease = sent.length;
+    await gesture.up();
+    await tester.pump(const Duration(milliseconds: 300));
+    expect(sent.length, countAtRelease);
+  });
+
+  testWidgets('a quick tap on an arrow key emits exactly once, no repeat',
+      (tester) async {
+    final sent = <String>[];
+    await tester.pumpWidget(
+      _wrap(
+        TerminalKeyStrip(
+          onKey: sent.add,
+          ctrlActive: false,
+          onToggleCtrl: () {},
+          altActive: false,
+          onToggleAlt: () {},
+          onPaste: () {},
+          onImage: () {},
+          rawMode: false,
+          onToggleRawMode: () {},
+        ),
+      ),
+    );
+
+    final gesture = await tester.startGesture(
+      tester.getCenter(find.byIcon(Icons.keyboard_arrow_down)),
+    );
+    // Released well before the initial delay elapses — a real tap.
+    await tester.pump(const Duration(milliseconds: 50));
+    await gesture.up();
+
+    expect(sent, ['\x1b[B']);
+
+    // Confirm no trailing repeat fires even once the delay would have
+    // elapsed had the button still been held.
+    await tester.pump(const Duration(milliseconds: 600));
+    expect(sent, ['\x1b[B']);
+  });
+
+  testWidgets('a pointer cancel while holding an arrow key stops the repeat',
+      (tester) async {
+    final sent = <String>[];
+    await tester.pumpWidget(
+      _wrap(
+        TerminalKeyStrip(
+          onKey: sent.add,
+          ctrlActive: false,
+          onToggleCtrl: () {},
+          altActive: false,
+          onToggleAlt: () {},
+          onPaste: () {},
+          onImage: () {},
+          rawMode: false,
+          onToggleRawMode: () {},
+        ),
+      ),
+    );
+
+    final gesture = await tester.startGesture(
+      tester.getCenter(find.byIcon(Icons.keyboard_arrow_left)),
+    );
+    expect(sent, ['\x1b[D']);
+
+    await tester.pump(const Duration(milliseconds: 460));
+    await tester.pump(const Duration(milliseconds: 55));
+    expect(sent.length, greaterThan(1));
+
+    final countAtCancel = sent.length;
+    await gesture.cancel();
+    await tester.pump(const Duration(milliseconds: 300));
+    expect(sent.length, countAtCancel);
+  });
 }
