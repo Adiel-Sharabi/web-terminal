@@ -428,6 +428,40 @@ void main() {
       expect(m.fiveH, 0);
       expect(m.sevenD, 0);
     });
+
+    // #71 — the context window is SERVED, never assumed here.
+    test('ctxWindow is read from the server', () {
+      final m = SessionMetrics.fromJson({'ctx': 45, 'ctxWindow': 1000000});
+      expect(m!.ctxWindow, 1000000);
+    });
+
+    test('ctxWindow is a token count, NOT a percentage — never clamped to 100', () {
+      // The percentage parser would have turned 1000000 into 100, silently
+      // recreating the very bug this field exists to kill.
+      final m = SessionMetrics.fromJson({'ctx': 45, 'ctxWindow': 1000000});
+      expect(m!.ctxWindow, isNot(100));
+    });
+
+    test('absent/invalid ctxWindow is null — no denominator, no guess', () {
+      expect(SessionMetrics.fromJson({'ctx': 45})!.ctxWindow, isNull);
+      expect(SessionMetrics.fromJson({'ctx': 45, 'ctxWindow': 0})!.ctxWindow, isNull);
+      expect(SessionMetrics.fromJson({'ctx': 45, 'ctxWindow': -1})!.ctxWindow, isNull);
+    });
+
+    test('ctxWindow alone is not a renderable reading', () {
+      // It says how big the window is, not how much of it is used.
+      expect(SessionMetrics.fromJson({'ctxWindow': 1000000}), isNull);
+    });
+
+    // The estimate's arithmetic, pinned against the exact numbers from #71.
+    // The old client divided by a hardcoded 200000; these show why that had to go.
+    test('a 1M-context session at 450k tokens estimates 45%, not 100%', () {
+      int estimate(int tokens, int window) =>
+          ((tokens / window) * 100).round().clamp(0, 100);
+      expect(estimate(450000, 1000000), 45);
+      expect(estimate(450000, 200000), 100); // the old hardcoded denominator
+      expect(estimate(100000, 200000), 50);  // a 200k session is unaffected
+    });
   });
 
   group('ToolUse.fromJson', () {
