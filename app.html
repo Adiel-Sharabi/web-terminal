@@ -395,6 +395,10 @@
     <span id="hostName" style="color:#00d4aa; font-weight:500; margin-left:8px;"></span>
 
     <button id="muteBtn" class="tb-btn" onclick="toggleMute()" title="Mute notifications" style="font-size:14px">&#x1F514;</button>
+    <!-- #70 Phase 1: read the agent's last answer aloud. Hidden entirely when the
+         browser has no speech synthesis (see initSpeak) rather than offering a
+         button that does nothing. -->
+    <button id="speakBtn" class="tb-btn" onclick="toggleSpeak()" title="Read the last answer aloud" style="margin-left:8px;font-size:14px;display:none">&#x1F50A;</button>
     <!-- Issue #19: PWA has no pull-to-refresh. Expose a button so installed
          PWA users can force-reload the page (clears xterm state and picks up
          any deployed app.html update). Also useful on desktop for the same. -->
@@ -4076,6 +4080,89 @@
       document.getElementById('muteBtn').textContent = '\u{1F515}';
       document.getElementById('muteBtn').title = 'Unmute notifications';
     }
+
+    // --- #70 Phase 1: read the last answer aloud ------------------------------
+    // The client does NOT decide what to say. It asks the server for an already-
+    // filtered utterance (GET /api/sessions/:id/speech) and speaks it. Keeping
+    // the rule server-side is what stops this page and the companion drifting
+    // apart — the exact failure #56/#60 were about.
+    //
+    // Speech is rendered by the BROWSER (SpeechSynthesis): every device already
+    // has it, nothing to install, and nothing leaves the machine. If the voice
+    // proves too robotic the server can synthesize audio instead — that changes
+    // this function, not the filtering.
+    const SPEAK_SUPPORTED = typeof window.speechSynthesis !== 'undefined'
+      && typeof window.SpeechSynthesisUtterance !== 'undefined';
+
+    function initSpeak() {
+      // No synthesis (older WebView, some Linux builds) → no button at all.
+      if (!SPEAK_SUPPORTED) return;
+      const b = document.getElementById('speakBtn');
+      if (b) b.style.display = '';
+    }
+    initSpeak();
+
+    function speakSetActive(on) {
+      const b = document.getElementById('speakBtn');
+      if (!b) return;
+      // The icon IS the stop affordance while speaking — a second control that
+      // only exists mid-utterance would be worse than reusing this one.
+      b.textContent = on ? '\u{23F9}' : '\u{1F50A}';
+      b.title = on ? 'Stop reading' : 'Read the last answer aloud';
+    }
+
+    // Transient feedback on the button itself. Deliberately NOT alert(): "nothing
+    // to read aloud yet" is a NORMAL outcome (the agent's last turns were tool
+    // calls), and a modal for it would make the button hostile to press. A muted
+    // icon plus the reason in the tooltip is proportionate.
+    let _speakFlashT = null;
+    function speakFlash(why) {
+      const b = document.getElementById('speakBtn');
+      if (!b) return;
+      clearTimeout(_speakFlashT);
+      b.textContent = '\u{1F507}';
+      b.title = why;
+      _speakFlashT = setTimeout(() => speakSetActive(false), 1600);
+    }
+
+    async function toggleSpeak() {
+      if (!SPEAK_SUPPORTED) return;
+      // Speaking → stop. Barge-in by button is the whole interrupt story for v1;
+      // continuous-mic barge-in costs privacy and battery for little gain.
+      if (window.speechSynthesis.speaking || window.speechSynthesis.pending) {
+        window.speechSynthesis.cancel();
+        speakSetActive(false);
+        return;
+      }
+      if (!sessionId) return;
+      let text = '';
+      try {
+        // A session owned by a PEER is read through the cluster proxy, exactly as
+        // every other per-session call is. Hardcoding '/api' here would 404 on any
+        // remote session — which is most of them in a multi-server setup.
+        const apiBase = sessionServerUrl ? `/cluster/${encodeURIComponent(sessionServerUrl)}/api` : '/api';
+        const r = await fetch(apiBase + '/sessions/' + encodeURIComponent(sessionId) + '/speech',
+          { credentials: 'include' });
+        if (!r.ok) { speakFlash(r.status === 404 ? 'No transcript for this session' : 'Could not read the answer'); return; }
+        text = (await r.json()).text || '';
+      } catch { speakFlash('Could not read the answer'); return; }
+      // An empty utterance is the NORMAL answer for "the last turns were all tool
+      // calls / pure code". Say so quietly; never fall back to raw text, which is
+      // precisely the unusable behaviour the server filter exists to prevent.
+      if (!text) { speakFlash('Nothing to read aloud yet'); return; }
+      const u = new SpeechSynthesisUtterance(text);
+      u.rate = 1.05; // marginally faster than default; this is catch-up listening
+      u.onend = () => speakSetActive(false);
+      u.onerror = () => speakSetActive(false);
+      speakSetActive(true);
+      window.speechSynthesis.speak(u);
+    }
+
+    // Leaving or reloading mid-utterance must not leave a voice running: Chrome
+    // keeps speaking after the page is gone.
+    window.addEventListener('beforeunload', () => {
+      try { if (SPEAK_SUPPORTED) window.speechSynthesis.cancel(); } catch {}
+    });
 
     function showNotification(n) {
       // Skip working/status updates — only notify on idle/input_needed/approval
