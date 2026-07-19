@@ -196,6 +196,18 @@ class Session {
 /// when that number isn't currently known.
 class SessionMetrics {
   final int? ctx;
+
+  /// The model's context window in tokens, as the SERVER reports it (#71).
+  ///
+  /// This is read from Claude's own status-line payload
+  /// (`context_window.context_window_size` — 200000 normally, 1000000 on an
+  /// extended-context session) or from Codex's rollout. The client must never
+  /// assume it: this field replaced a hardcoded `200000` here, which pinned
+  /// every 1M session's badge at ~100% once it passed 200k tokens.
+  ///
+  /// `null` when the server hasn't reported one — in which case no estimate is
+  /// shown at all, because a guessed denominator is what the bug WAS.
+  final int? ctxWindow;
   final int? fiveH;
   final int? sevenD;
   final String? model;
@@ -203,6 +215,7 @@ class SessionMetrics {
 
   const SessionMetrics({
     this.ctx,
+    this.ctxWindow,
     this.fiveH,
     this.sevenD,
     this.model,
@@ -220,13 +233,18 @@ class SessionMetrics {
     }
 
     String? str(dynamic v) => v is String && v.isNotEmpty ? v : null;
+    // A token count, not a percentage — never clamped to 100.
+    int? tokens(dynamic v) => v is num && v > 0 ? v.toInt() : null;
     final m = SessionMetrics(
       ctx: pct(json['ctx']),
+      ctxWindow: tokens(json['ctxWindow']),
       fiveH: pct(json['fiveH']),
       sevenD: pct(json['sevenD']),
       model: str(json['model']),
       effort: str(json['effort']),
     );
+    // ctxWindow alone is not a reading — it says how big the window is, not how
+    // much of it is used — so it does not by itself make a renderable metric.
     if (m.ctx == null && m.fiveH == null && m.sevenD == null) return null;
     return m;
   }

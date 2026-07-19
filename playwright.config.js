@@ -7,6 +7,14 @@ const path = require('path');
 // previous-run stragglers can't accidentally authenticate.
 const TEST_IPC_TOKEN = crypto.randomBytes(32).toString('base64');
 
+// #72 — the Claude metrics mirror. Set on process.env (not just the webServer block)
+// so the spec and the server under test agree on the path without either hardcoding
+// it, and so a run can never write into the production claude-metrics.json that the
+// real server loads on its next restart. The short debounce lets a spec assert the
+// file's content through the ordinary code path instead of waiting out 10s.
+process.env.WT_CLAUDE_METRICS_FILE = path.join(__dirname, 'claude-metrics.test.json');
+process.env.WT_CLAUDE_METRICS_DEBOUNCE_MS = '250';
+
 module.exports = defineConfig({
   testDir: './tests',
   timeout: 30000,

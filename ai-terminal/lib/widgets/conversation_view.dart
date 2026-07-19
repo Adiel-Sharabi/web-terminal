@@ -526,14 +526,26 @@ class _ConversationViewState extends State<ConversationView> {
 
   /// Approximate context-window % from the newest assistant turn's token count,
   /// used only when the live status line hasn't posted a real ctx (e.g. an idle
-  /// session). Assumes a 200k window; shown with a `~` to signal it's an
-  /// estimate. Returns null if the server didn't provide token usage.
+  /// session). Shown with a `~` to signal it's an estimate.
+  ///
+  /// #71 — the denominator comes from the SERVER (`metrics.ctxWindow`), never
+  /// from here. It used to be a hardcoded 200000, which is right for most
+  /// sessions and wrong for every extended-context one: a 1M session at 45%
+  /// computed 450000/200000 = 225%, clamped to 100, and sat pinned at `~100%`
+  /// for most of its life. "How big is the context window" is a fact about the
+  /// model, so the client is the wrong owner of it.
+  ///
+  /// Returns null when the server reported no window — no denominator means no
+  /// estimate. Guessing one is precisely the bug this replaced.
   int? _deriveCtxFromTranscript() {
-    if (widget.session.metrics?.ctx != null) return null; // live value wins
+    final m = widget.session.metrics;
+    if (m?.ctx != null) return null; // live value wins
+    final window = m?.ctxWindow;
+    if (window == null || window <= 0) return null;
     for (var i = _turns.length - 1; i >= 0; i--) {
       final t = _turns[i];
       if (t.isAssistant && t.ctxTokens != null) {
-        return ((t.ctxTokens! / 200000) * 100).round().clamp(0, 100);
+        return ((t.ctxTokens! / window) * 100).round().clamp(0, 100);
       }
     }
     return null;

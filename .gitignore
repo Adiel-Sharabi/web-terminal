@@ -61,3 +61,9 @@ push-devices.json
 
 # local test rig instance (scripts/rig/rig.js creates this outside the repo)
 /wt-rig/
+
+# Mirrored Claude status-line metrics (#72 — keeps idle sessions ctx across a restart)
+claude-metrics.json
+
+# Metrics mirror written by the test run (isolated from the real one)
+claude-metrics.test.json
