@@ -247,4 +247,32 @@ test.describe('agent-aware submit CR on the PTY input path', () => {
     await sleep(GAP);
     expect(writesOf(await rpc(client, '__testGetWrites', { id }))).toEqual([block, '\r']);
   });
+
+  // Renaming a session mirrors the new name into Claude's TUI as `/rename <name>`.
+  // That injection wrote a raw LF and bypassed submitLine entirely, so the slash
+  // command was TYPED into the prompt box and a newline added — never submitted.
+  // It is the same LF-is-not-Enter bug submitLine's own comment records having
+  // broken auto-continue; this call site was simply never migrated. Gated on the
+  // real RPC so the fix is proven through the path the app actually uses.
+  test('renameSession submits /rename with a split CR — never an LF', async () => {
+    // The rename mirror only fires for a Claude session; `echo claude` satisfies
+    // that guard without launching a real agent from the test suite.
+    const { id } = await rpc(client, 'createSession', {
+      cwd: dataDir, name: 'Before', agent: 'claude', autoCommand: 'echo claude',
+    });
+    await sleep(400); // let the PTY + autoCommand settle so we snapshot cleanly
+    const before = writesOf(await rpc(client, '__testGetWrites', { id })).length;
+
+    await rpc(client, 'renameSession', { id, name: 'My New Name' });
+
+    const claudeGap = agents.submitPolicy('claude').gapMs;
+    await sleep(claudeGap + 200);
+    const after = writesOf(await rpc(client, '__testGetWrites', { id })).slice(before);
+
+    // Text first, then the CR ALONE — the split that stops the TUI folding the
+    // whole burst into a paste and swallowing the Enter.
+    expect(after).toEqual(['/rename My New Name', '\r']);
+    // The original bug, pinned explicitly: no LF may reach the PTY.
+    expect(after.join('')).not.toContain('\n');
+  });
 });

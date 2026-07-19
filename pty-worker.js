@@ -1595,7 +1595,12 @@ const rpcHandlers = {
     if ((session.status === 'idle' || session.status === 'active') &&
         session.autoCommand && /\bclaude\b/i.test(session.autoCommand)) {
       const safeName = newName.replace(/[`$"\\]/g, '');
-      try { session.term.write(`/rename ${safeName}\n`); } catch {}
+      // Submit through the SSOT, not a raw write: LF is not Enter (the TUI reads
+      // raw mode, where submit is CR), and the CR must land AFTER the agent's gap
+      // or the TUI folds the whole burst into a paste and swallows it. A raw
+      // `...\n` here typed the slash command into the prompt box and added a
+      // newline — it never ran.
+      try { submitLine(session, `/rename ${safeName}`); } catch {}
     }
     if (session.autoCommand && /\bclaude\b/i.test(session.autoCommand)) {
       // Claude Code forks a resumed conversation into a NEW jsonl (new UUID) on disk.
