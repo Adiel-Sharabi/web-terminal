@@ -30,6 +30,7 @@ import 'package:shared_preferences/shared_preferences.dart';
 import '../api/api_client.dart';
 import '../api/models.dart';
 import '../services/server_store.dart';
+import '../services/speech_service.dart';
 import '../theme/app_theme.dart';
 
 /// The SharedPreferences key holding the global terminal font size, shared
@@ -55,6 +56,7 @@ class SettingsScreen extends StatelessWidget {
       body: Column(
         children: [
           const _FontSizeSection(),
+          if (SpeechService.supported) const _SpeechRateSection(),
           const Divider(height: 1),
           Padding(
             padding: const EdgeInsets.fromLTRB(
@@ -412,6 +414,96 @@ class _ServerEditorSheetState extends State<_ServerEditorSheet> {
 /// Global "Terminal text size" control (owner: "still need an option to
 /// change font size"). Reads/writes [kTermFontSizeKey] directly — the same
 /// key the session screen's font-size dialog uses — so this is just another
+/// Read-aloud pace (#70). Pace is the single biggest listenability lever and the
+/// comfortable value is personal, so it is a setting rather than a constant. The
+/// value lives in [SpeechService] — this widget is a control over that one key,
+/// never a second source of truth. Android-only, like the feature itself.
+class _SpeechRateSection extends StatefulWidget {
+  const _SpeechRateSection();
+
+  @override
+  State<_SpeechRateSection> createState() => _SpeechRateSectionState();
+}
+
+class _SpeechRateSectionState extends State<_SpeechRateSection> {
+  double _rate = SpeechService.defaultRate;
+
+  @override
+  void initState() {
+    super.initState();
+    _load();
+  }
+
+  Future<void> _load() async {
+    final v = await SpeechService.loadRate();
+    if (mounted) setState(() => _rate = v);
+  }
+
+  void _onChanged(double value) {
+    setState(() => _rate = value);
+    unawaited(SpeechService.saveRate(value));
+  }
+
+  @override
+  Widget build(BuildContext context) {
+    final theme = Theme.of(context);
+    return Padding(
+      padding: const EdgeInsets.fromLTRB(
+        AppSpacing.screenPadding,
+        16,
+        AppSpacing.screenPadding,
+        0,
+      ),
+      child: Column(
+        crossAxisAlignment: CrossAxisAlignment.start,
+        children: [
+          Row(
+            children: [
+              Text('Read-aloud speed', style: theme.textTheme.titleMedium),
+              const Spacer(),
+              Text(
+                '${_rate.toStringAsFixed(2)}x',
+                style: theme.textTheme.titleMedium?.copyWith(
+                  color: theme.colorScheme.primary,
+                  fontWeight: FontWeight.w600,
+                ),
+              ),
+            ],
+          ),
+          Slider(
+            min: 0.6,
+            max: 2,
+            divisions: 28,
+            value: _rate.clamp(0.6, 2),
+            label: '${_rate.toStringAsFixed(2)}x',
+            onChanged: _onChanged,
+          ),
+          // Preview uses the SAME speak path as the button, so what you hear
+          // here is what you will hear from an answer.
+          Align(
+            alignment: Alignment.centerLeft,
+            child: TextButton.icon(
+              icon: const Icon(Icons.play_arrow),
+              label: const Text('Preview'),
+              onPressed: () => SpeechService.speak(
+                'This is how the assistant will read its answers to you.',
+                rate: _rate,
+              ),
+            ),
+          ),
+          Text(
+            'Voice quality is set by your device: Settings › General management › '
+            'Text-to-speech. Google\'s engine usually sounds better than the default.',
+            style: theme.textTheme.bodySmall?.copyWith(
+              color: theme.colorScheme.onSurfaceVariant,
+            ),
+          ),
+        ],
+      ),
+    );
+  }
+}
+
 /// place to reach the one persisted value, not a second source of truth.
 class _FontSizeSection extends StatefulWidget {
   const _FontSizeSection();

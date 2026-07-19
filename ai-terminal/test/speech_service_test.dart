@@ -8,6 +8,7 @@
 // "read-aloud works".
 import 'package:flutter/services.dart';
 import 'package:flutter_test/flutter_test.dart';
+import 'package:shared_preferences/shared_preferences.dart';
 
 import 'package:ai_terminal/services/speech_service.dart';
 
@@ -45,11 +46,30 @@ void main() {
         .setMockMethodCallHandler(SpeechService.channel, null);
   });
 
-  test('speak forwards the text to the native channel', () async {
+  test('speak forwards the text AND the rate to the native channel', () async {
     mockNative();
-    expect(await SpeechService.speak('The build passed.'), isTrue);
+    expect(await SpeechService.speak('The build passed.', rate: 1.4), isTrue);
     expect(calls.single.method, 'speak');
-    expect(calls.single.arguments, {'text': 'The build passed.'});
+    expect(calls.single.arguments, {'text': 'The build passed.', 'rate': 1.4});
+  });
+
+  test('the stored rate is used when the caller does not pass one', () async {
+    SharedPreferences.setMockInitialValues({SpeechService.rateKey: 1.6});
+    mockNative();
+    await SpeechService.speak('hello');
+    expect((calls.single.arguments as Map)['rate'], 1.6);
+  });
+
+  test('an out-of-range stored rate falls back to the default', () async {
+    // A corrupt or hand-edited pref must not produce unintelligible speech.
+    SharedPreferences.setMockInitialValues({SpeechService.rateKey: 9.0});
+    expect(await SpeechService.loadRate(), SpeechService.defaultRate);
+  });
+
+  test('saveRate clamps rather than storing an unusable value', () async {
+    SharedPreferences.setMockInitialValues({});
+    await SpeechService.saveRate(99);
+    expect(await SpeechService.loadRate(), 2.5);
   });
 
   test('an EMPTY utterance never reaches the device', () async {

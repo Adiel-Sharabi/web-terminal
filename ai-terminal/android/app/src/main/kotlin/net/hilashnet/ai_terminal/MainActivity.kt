@@ -43,6 +43,13 @@ class MainActivity : FlutterActivity() {
                         if (!ready || text.isBlank()) {
                             result.success(false)
                         } else {
+                            // Pace is the single biggest listenability lever, and
+                            // the right value is personal — so it is a setting,
+                            // applied per utterance rather than fixed at init.
+                            val rate = (call.argument<Double>("rate") ?: 1.0).toFloat()
+                            tts?.setSpeechRate(rate.coerceIn(0.5f, 2.5f))
+                            val pitch = (call.argument<Double>("pitch") ?: 1.0).toFloat()
+                            tts?.setPitch(pitch.coerceIn(0.5f, 2.0f))
                             // QUEUE_FLUSH: pressing read again replaces what is
                             // playing. Queueing would stack minutes of stale
                             // answers behind the one the user actually wants.

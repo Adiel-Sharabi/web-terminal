@@ -90,8 +90,10 @@ test.describe('Session speech (#70)', () => {
       const res = await ctx.get(`/api/sessions/${id}/speech`);
       expect(res.status()).toBe(200);
       const body = await res.json();
-      // Newest prose only; backticks gone, code block gone, URL gone, label kept.
-      expect(body.text).toBe('The fix is in lib/agents.js. See docs.');
+      // Newest prose only; backticks gone, code block gone, URL gone, label kept,
+      // and the path shaped to its basename so it is not spelled out letter by
+      // letter ("lib slash agents dot J S").
+      expect(body.text).toBe('The fix is in agents. See docs.');
       expect(res.headers()['cache-control']).toBe('no-store');
     } finally {
       await ctx.delete(`/api/sessions/${id}`);

@@ -556,6 +556,16 @@
           <input id="cfgPublicUrl" placeholder="https://my-server.tailnet.ts.net">
           <div class="hint">Used to auto-register this server on remotes when you connect to them</div>
         </div>
+        <!-- #70: read-aloud voice + pace. Browser-local (localStorage), not server
+             config — the right voice is a property of the device you listen on. -->
+        <div class="field field-wide" id="speakPrefs" style="display:none;align-items:center;gap:8px;margin-top:4px">
+          <label for="cfgSpeakVoice" style="margin:0">Read-aloud voice</label>
+          <select id="cfgSpeakVoice" style="width:auto;flex:1;min-width:0"></select>
+          <label for="cfgSpeakRate" style="margin:0">Speed</label>
+          <input type="range" id="cfgSpeakRate" min="0.6" max="2" step="0.05" style="width:120px">
+          <span id="cfgSpeakRateVal" class="hint" style="margin:0;min-width:34px"></span>
+          <button type="button" class="tb-btn" onclick="speakPreview()" title="Preview this voice and speed">&#x25B6;</button>
+        </div>
         <div class="field field-wide" style="display:flex;align-items:center;gap:8px;margin-top:4px">
           <input type="checkbox" id="cfgKeepSessionsOpen" style="width:auto;margin:0">
           <label for="cfgKeepSessionsOpen" style="margin:0;cursor:pointer">Keep sessions open for instant switching</label>
@@ -4099,8 +4109,81 @@
       if (!SPEAK_SUPPORTED) return;
       const b = document.getElementById('speakBtn');
       if (b) b.style.display = '';
+      // getVoices() is async in Chrome: the first call after load often returns
+      // [] and the list arrives later on this event. Populate on both.
+      const prefs = document.getElementById('speakPrefs');
+      if (prefs) prefs.style.display = 'flex';
+      try {
+        window.speechSynthesis.onvoiceschanged = fillSpeakVoices;
+        fillSpeakVoices();
+      } catch {}
+      const r = document.getElementById('cfgSpeakRate');
+      const rv = document.getElementById('cfgSpeakRateVal');
+      if (r) {
+        r.value = String(speakRate());
+        if (rv) rv.textContent = Number(r.value).toFixed(2) + 'x';
+        // Persist immediately: these are per-browser display prefs and never go
+        // through the server's config save.
+        r.addEventListener('input', () => {
+          localStorage.setItem('wt_speak_rate', r.value);
+          if (rv) rv.textContent = Number(r.value).toFixed(2) + 'x';
+        });
+      }
+      const sel = document.getElementById('cfgSpeakVoice');
+      if (sel) sel.addEventListener('change', () => localStorage.setItem('wt_speak_voice', sel.value));
     }
     initSpeak();
+
+    // Speak a fixed line so a voice/speed choice can be judged without waiting
+    // for an agent to answer. Uses the SAME path as the real button.
+    function speakPreview() {
+      if (!SPEAK_SUPPORTED) return;
+      try {
+        window.speechSynthesis.cancel();
+        const u = new SpeechSynthesisUtterance(
+          'This is how the assistant will read its answers to you.');
+        u.rate = speakRate();
+        const v = speakVoice();
+        if (v) u.voice = v;
+        window.speechSynthesis.speak(u);
+      } catch {}
+    }
+
+    // Playback rate, 0.6–2.0. Stored per-browser like the other display prefs.
+    function speakRate() {
+      const v = parseFloat(localStorage.getItem('wt_speak_rate') || '1.05');
+      return (Number.isFinite(v) && v >= 0.5 && v <= 2.5) ? v : 1.05;
+    }
+    // The chosen voice object, or null for the browser default. Matched by name
+    // because SpeechSynthesisVoice objects are not stable across reloads.
+    function speakVoice() {
+      const want = localStorage.getItem('wt_speak_voice') || '';
+      if (!want) return null;
+      try {
+        return (window.speechSynthesis.getVoices() || []).find(v => v.name === want) || null;
+      } catch { return null; }
+    }
+    function fillSpeakVoices() {
+      const sel = document.getElementById('cfgSpeakVoice');
+      if (!sel) return;
+      let voices = [];
+      try { voices = window.speechSynthesis.getVoices() || []; } catch {}
+      const want = localStorage.getItem('wt_speak_voice') || '';
+      // Built with DOM nodes, not an HTML string: voice names come from the
+      // platform and textContent can't be made to inject anything.
+      sel.replaceChildren();
+      const dflt = document.createElement('option');
+      dflt.value = '';
+      dflt.textContent = '(browser default)';
+      sel.appendChild(dflt);
+      for (const v of voices) {
+        const o = document.createElement('option');
+        o.value = v.name;
+        o.textContent = `${v.name} — ${v.lang}`;
+        sel.appendChild(o);
+      }
+      sel.value = want;
+    }
 
     function speakSetActive(on) {
       const b = document.getElementById('speakBtn');
@@ -4151,7 +4234,13 @@
       // precisely the unusable behaviour the server filter exists to prevent.
       if (!text) { speakFlash('Nothing to read aloud yet'); return; }
       const u = new SpeechSynthesisUtterance(text);
-      u.rate = 1.05; // marginally faster than default; this is catch-up listening
+      // Rate and voice are the two levers that actually change how listenable
+      // this is, and the best value is per-person — so they are settings, not
+      // constants. Defaults: slightly quick (catch-up listening) and the
+      // browser's own default voice.
+      u.rate = speakRate();
+      const v = speakVoice();
+      if (v) u.voice = v;
       u.onend = () => speakSetActive(false);
       u.onerror = () => speakSetActive(false);
       speakSetActive(true);

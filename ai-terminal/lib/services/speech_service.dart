@@ -18,6 +18,7 @@ import 'dart:io' show Platform;
 
 import 'package:flutter/foundation.dart';
 import 'package:flutter/services.dart';
+import 'package:shared_preferences/shared_preferences.dart';
 
 class SpeechService {
   SpeechService._();
@@ -49,10 +50,32 @@ class SpeechService {
   ///
   /// An empty [text] is the NORMAL "nothing worth saying" answer from the
   /// server, so it is silently ignored rather than treated as an error.
-  static Future<bool> speak(String text) async {
+  /// Playback rate, 1.0 = the engine's normal pace. Persisted per device, since
+  /// the comfortable value depends on the listener and the voice, not the app.
+  static const String rateKey = 'wt.speak.rate';
+  static const double defaultRate = 1.05;
+
+  static Future<double> loadRate() async {
+    try {
+      final p = await SharedPreferences.getInstance();
+      final v = p.getDouble(rateKey);
+      if (v != null && v >= 0.5 && v <= 2.5) return v;
+    } catch (_) {}
+    return defaultRate;
+  }
+
+  static Future<void> saveRate(double v) async {
+    try {
+      final p = await SharedPreferences.getInstance();
+      await p.setDouble(rateKey, v.clamp(0.5, 2.5));
+    } catch (_) {}
+  }
+
+  static Future<bool> speak(String text, {double? rate}) async {
     if (!supported || text.trim().isEmpty) return false;
     try {
-      final ok = await channel.invokeMethod<bool>('speak', {'text': text});
+      final r = rate ?? await loadRate();
+      final ok = await channel.invokeMethod<bool>('speak', {'text': text, 'rate': r});
       return ok ?? false;
     } catch (_) {
       return false;
