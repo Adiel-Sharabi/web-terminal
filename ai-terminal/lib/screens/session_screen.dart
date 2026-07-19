@@ -31,6 +31,7 @@ import '../services/desktop_alert_service.dart';
 import '../services/detach_window_service.dart';
 import '../services/notification_service.dart';
 import '../services/session_repository.dart';
+import '../services/speech_service.dart';
 import '../theme/app_theme.dart';
 import '../theme/status_colors.dart';
 import '../util/terminal_links.dart';
@@ -403,6 +404,7 @@ class _SessionScreenState extends State<SessionScreen>
   int _lastCols = 0, _lastRows = 0; // last size the view reported (for re-send)
   double _termFontSize = 10; // adjustable terminal font (persisted globally)
   bool _notFound = false;
+  bool _speaking = false; // #70: an utterance is playing (drives the stop icon)
   String? _apiErrorReason;
 
   // --- Interactive question overlay (#19) ----------------------------------
@@ -790,6 +792,69 @@ class _SessionScreenState extends State<SessionScreen>
       _transcriptUnavailableForSession = true;
       _activeLens = 'terminal';
     });
+  }
+
+  // --- #70: read the agent's last answer aloud ------------------------------
+  // The SERVER decides what is worth saying (GET /api/sessions/:id/speech strips
+  // code blocks, tables, URLs and tool plumbing). This method only fetches that
+  // utterance and hands it to the device's TTS — it must never substitute raw
+  // transcript text, which is exactly what the filter exists to prevent.
+  Future<void> _toggleSpeak(Session session) async {
+    if (_speaking) {
+      await SpeechService.stop();
+      if (mounted) setState(() => _speaking = false);
+      return;
+    }
+    String text;
+    try {
+      text = await ApiClient(session.server).speech(session.id);
+    } on ApiException catch (e) {
+      if (!mounted) return;
+      // 404 is the ordinary "this session has no transcript" (a plain shell), or
+      // a server older than 1.42.0 — not worth alarming language.
+      _speakSnack(e.status == 404
+          ? 'No transcript for this session'
+          : 'Could not read the answer');
+      return;
+    } catch (_) {
+      if (mounted) _speakSnack('Could not read the answer');
+      return;
+    }
+    if (!mounted) return;
+    if (text.isEmpty) {
+      // Normal outcome: the last turns were tool calls or pure code.
+      _speakSnack('Nothing to read aloud yet');
+      return;
+    }
+    final ok = await SpeechService.speak(text);
+    if (!mounted) return;
+    if (!ok) {
+      _speakSnack('Speech is not available on this device');
+      return;
+    }
+    setState(() => _speaking = true);
+    _pollSpeaking();
+  }
+
+  // Android's TextToSpeech gives no completion callback over this channel, so
+  // the stop icon is driven by polling `isSpeaking`. Cheap (a ~700-char
+  // utterance is under a minute) and it self-terminates.
+  void _pollSpeaking() {
+    Future.delayed(const Duration(milliseconds: 700), () async {
+      if (!mounted || !_speaking) return;
+      if (await SpeechService.speaking()) {
+        _pollSpeaking();
+      } else if (mounted) {
+        setState(() => _speaking = false);
+      }
+    });
+  }
+
+  void _speakSnack(String msg) {
+    ScaffoldMessenger.of(context).showSnackBar(SnackBar(
+      content: Text(msg),
+      duration: const Duration(seconds: 2),
+    ));
   }
 
   void _onSessionsUpdate(List<Session> sessions) {
@@ -1862,6 +1927,8 @@ class _SessionScreenState extends State<SessionScreen>
   @override
   void dispose() {
     WidgetsBinding.instance.removeObserver(this);
+    // #70: leaving the screen must not leave a voice talking.
+    if (_speaking) SpeechService.stop();
     if (DesktopAlertService.supported) {
       DesktopAlertService.instance.markHidden(widget.sessionId);
     }
@@ -1947,6 +2014,15 @@ class _SessionScreenState extends State<SessionScreen>
             Padding(
               padding: const EdgeInsets.only(right: 8),
               child: _LensToggle(value: _activeLens, onChanged: _setLens),
+            ),
+          // #70: read the agent's last answer aloud. Android-only — the desktop
+          // build has no TTS handler, so the control is absent rather than
+          // present-but-broken.
+          if (SpeechService.supported)
+            IconButton(
+              icon: Icon(_speaking ? Icons.stop_circle_outlined : Icons.volume_up),
+              tooltip: _speaking ? 'Stop reading' : 'Read the last answer aloud',
+              onPressed: () => _toggleSpeak(session),
             ),
           if (DetachWindow.supported && !widget.standalone)
             IconButton(
