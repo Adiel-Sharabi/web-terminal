@@ -141,6 +141,30 @@ function autoContinueEnabled() {
   return liveConfig('autoContinueOnApiError', true) === true;
 }
 
+// --- 5h usage-limit auto-resume (issue #69) ---------------------------------
+// A session pinned on its account's 5-hour rate-limit window can only be revived
+// once that window resets. When the reset time is KNOWN — today only for Codex,
+// which records it in its rollout (lib/metrics-codex.js: fiveHResetAt); Claude's
+// status push carries no such field yet, see the stub at POST /api/claude-status —
+// arm a ONE-SHOT timer that sends the SAME 'continue' the API-error ladder sends
+// (via submitLine, below), AUTO_RESUME_DELAY_MS after the window turns over (a
+// small buffer so the account-side counter has actually rolled before we retry).
+//
+// OPT-IN, default OFF, unlike the API-error ladder above (which reacts to a real,
+// observed error): this fires purely off a timestamp with no proof the session is
+// actually stalled on the cap — see the status check in fireAutoResume for the one
+// cheap guard this pass has. Precise blocked-state detection (a real "hit the 5h
+// cap" signal, for both agents) is a follow-up.
+const _autoResumeFast = process.env.WT_AUTO_RESUME_FAST === '1'; // tests: shrink the post-reset delay
+const AUTO_RESUME_DELAY_MS = _autoResumeFast ? 50 : 60000; // #69: resetAt + ~1 minute
+
+function autoResumeOnResetEnabled() {
+  // Ops/test override wins, then live config (default OFF — see config.default.json).
+  if (process.env.WT_AUTO_RESUME_ON_RESET === '0') return false;
+  if (process.env.WT_AUTO_RESUME_ON_RESET === '1') return true;
+  return liveConfig('autoResumeOnReset', false) === true;
+}
+
 function isClaudeSession(session) {
   return !!(session.hookStatus
     || session.claudeSessionId
@@ -446,7 +470,14 @@ function loadSessionConfigs() {
 function saveSessionConfigs() {
   const configs = [];
   for (const [id, s] of sessions) {
-    configs.push({ id, name: s.name, cwd: s.cwd, autoCommand: s.autoCommand || '', agent: s.agent || null, claudeSessionId: s.claudeSessionId || null });
+    configs.push({
+      id, name: s.name, cwd: s.cwd, autoCommand: s.autoCommand || '', agent: s.agent || null, claudeSessionId: s.claudeSessionId || null,
+      // #69 — persisted so a cold restart re-arms the auto-resume timer from the
+      // ABSOLUTE reset time (see restoreSessionsOnStartup) instead of losing it, and
+      // so a window already handled before the restart is never re-fired.
+      fiveHResetAt: s.fiveHResetAt || null,
+      autoResumeFiredForResetAt: s.autoResumeFiredForResetAt || null,
+    });
   }
   try { fs.writeFileSync(SESSIONS_FILE, JSON.stringify(configs, null, 2), 'utf8'); }
   catch (e) { log('failed to save sessions.json:', e.message); }
@@ -712,6 +743,70 @@ function doCompactReplay(session, reason) {
   broadcastEvent('apiError', { id: s.id, name: s.name, apiError: !!s.apiError, text: s.apiErrorText || '', autoContinue: API_ERROR_COMPACT_ATTEMPT, action: 'replay-prompt', replayText: text.slice(0, 200) });
 }
 
+// --- 5h usage-limit auto-resume timer (issue #69) ---------------------------
+// session.fiveHResetAt (ms-epoch | null) arrives via the setFiveHResetAt RPC —
+// server.js calls it whenever sessionMetrics() learns a value (Codex transcript
+// read today; Claude's stub always sends null, a no-op here). session.
+// autoResumeFiredForResetAt is the LAST resetAt this session already acted on,
+// so a window can only ever fire once — comparing against the current
+// fiveHResetAt is what makes a genuinely NEW window (Codex reports a fresh
+// resets_at once the old one passes) re-arm automatically. Both fields are
+// persisted (saveSessionConfigs/restoreSessionsOnStartup) so a cold restart
+// re-arms from the ABSOLUTE deadline instead of losing it.
+
+// Cancel any armed timer without touching autoResumeFiredForResetAt — used on
+// user activity / Esc / a new UserPromptSubmit (same call sites clearApiError
+// uses, see handleHook and noteInterrupt): the user is back, so whatever we were
+// about to say is now stale. This does NOT consume the window — if the session
+// goes quiet again before it resets, a later setFiveHResetAt/restore can still
+// re-arm it.
+function cancelAutoResume(session) {
+  if (session._autoResumeTimer) { clearTimeout(session._autoResumeTimer); session._autoResumeTimer = null; }
+}
+
+// (Re-)arm the one-shot reset timer from session.fiveHResetAt. Safe to call any
+// time fiveHResetAt might have changed (the RPC handler, session restore) — a
+// no-op when the feature is off, resetAt is unknown, or this window is already
+// handled. Arms from the ABSOLUTE fireAt (resetAt + AUTO_RESUME_DELAY_MS): if
+// that has already passed — e.g. the worker was down across the reset — this
+// fires almost immediately on the next call rather than silently dropping the
+// catch-up action.
+function armAutoResumeTimer(session) {
+  cancelAutoResume(session);
+  if (!autoResumeOnResetEnabled()) return;
+  const resetAt = session.fiveHResetAt;
+  if (typeof resetAt !== 'number' || !isFinite(resetAt) || resetAt <= 0) return;
+  if (session.autoResumeFiredForResetAt === resetAt) return; // one-shot: already handled
+  const fireAt = resetAt + AUTO_RESUME_DELAY_MS;
+  const delay = Math.max(0, fireAt - Date.now());
+  session._autoResumeTimer = setTimeout(() => fireAutoResume(session, resetAt), delay);
+  if (typeof session._autoResumeTimer.unref === 'function') session._autoResumeTimer.unref();
+  log(`auto-resume: "${session.name}" (${session.id}) armed for ${new Date(fireAt).toISOString()} (in ${Math.round(delay / 1000)}s)`);
+}
+
+function fireAutoResume(session, resetAt) {
+  session._autoResumeTimer = null;
+  const s = sessions.get(session.id);
+  if (!s) return;
+  // Re-check at fire time, not just at arm time: this wait can be hours long, so
+  // the config can flip, or a fresher resetAt can supersede this one, before it
+  // elapses. A superseding resetAt already re-armed via armAutoResumeTimer, so
+  // this stale timer (its closure still holds the OLD resetAt) must stand down.
+  if (!autoResumeOnResetEnabled() || s.fiveHResetAt !== resetAt) return;
+  s.autoResumeFiredForResetAt = resetAt; // one-shot: consumed whether or not we act below
+  saveSessionConfigs();
+  // Best-effort "is this session actually stalled?" guard — see the comment on
+  // autoResumeOnResetEnabled above: there is no real blocked-state signal yet, so
+  // this only avoids typing 'continue' into a session that is visibly mid-turn.
+  if (s.status === 'working') {
+    log(`auto-resume: "${s.name}" (${s.id}) reset window passed but session is working — skipped`);
+    return;
+  }
+  try { submitLine(s, 'continue'); } catch (e) { log(`auto-resume: continue write failed: ${e.message}`); return; }
+  log(`auto-resume: "${s.name}" (${s.id}) sent continue after 5h reset (${new Date(resetAt).toISOString()})`);
+  broadcastEvent('autoResume', { id: s.id, name: s.name, resetAt });
+}
+
 // #65 — unified "compacting" indicator so the chat lens can show a
 // "Compacting conversation…" state regardless of trigger: a user's own
 // /compact (PreCompact hook, source 'hook') or our own auto-recovery /compact
@@ -826,6 +921,9 @@ function noteInterrupt(session, data) {
   // replay — re-submitting the very prompt the user just interrupted.
   cancelPendingIdle(session);
   resetSubagentTracking(session);
+  // #69 — the user is at the keyboard interrupting a turn; a pending 5h-reset
+  // auto-resume for this session is now stale (same reasoning as clearApiError).
+  cancelAutoResume(session);
   log(`interrupt: "${session.name}" working → idle (Esc)`);
   // No notifyType: the user is at the keyboard — they just pressed Esc. Pushing "Claude is
   // done" to their phone for an interrupt they performed themselves would be noise.
@@ -1083,6 +1181,9 @@ function sessionSummary(id, s) {
     apiErrorText: s.apiError ? (s.apiErrorText || '') : '',
     compacting: !!(s.compacting),
     compactingSince: s.compacting ? s.compacting.since : null,
+    // #69 — surfaced for tests and a future "resumes in Xh" UI. null unless a source
+    // (Codex's transcript today) reported a 5h reset time via setFiveHResetAt.
+    fiveHResetAt: s.fiveHResetAt || null,
   };
 }
 
@@ -1234,6 +1335,7 @@ function createSession(id, cwd, name, autoCommand, savedScrollback, claudeSessio
     if (session._compactReplayTimer) { clearTimeout(session._compactReplayTimer); session._compactReplayTimer = null; }
     session._compactReplay = null;
     if (session._submitTimer) { clearTimeout(session._submitTimer); session._submitTimer = null; }
+    cancelAutoResume(session); // #69 — same reasoning, a dead PTY has nothing to resume
     session._inputQueue = null; // a withheld CR dies with its PTY
     if (session.autoCommand && /\bclaude\b/i.test(session.autoCommand)) {
       // #23: at exit, only attribute a conversation this session provably owns.
@@ -1366,6 +1468,10 @@ function handleHook(session, event, claudeSessionId, prompt, agentId) {
       if (!fromSubagent) session.heldStop = null;
       // Claude resumed (a retry — ours or the user's): drop the API-error mark.
       clearApiError(session);
+      // #69 — same signal: the user (or a retry) is back, so a pending 5h-reset
+      // auto-resume for this session is now stale. Does not consume the window —
+      // see cancelAutoResume.
+      cancelAutoResume(session);
       break;
     case 'SubagentStop': {
       // #61 — the last subagent finishing is what actually ends a turn whose main
@@ -1526,6 +1632,7 @@ const rpcHandlers = {
     if (session.idleTimer) clearTimeout(session.idleTimer);
     if (session._submitTimer) { clearTimeout(session._submitTimer); session._submitTimer = null; }
     session._inputQueue = null; // a withheld CR dies with its PTY
+    cancelAutoResume(session); // #69
     try { session.term.kill(); } catch {}
     // Eagerly remove from the map so immediate follow-up RPCs see it as gone
     // (matches legacy server.js behavior). The onExit handler still fires later
@@ -1558,6 +1665,25 @@ const rpcHandlers = {
     const session = sessions.get(requireUuid(params.id));
     if (!session) throw new Error('session not found');
     return handleHook(session, params.event, params.claudeSessionId, params.prompt, params.agentId);
+  },
+
+  // #69 — server.js calls this whenever sessionMetrics() learns (or loses) this
+  // session's 5h-reset timestamp: Codex's transcript read today, Claude's stub
+  // (always null) once a real signal exists. This is the ONE path fiveHResetAt
+  // reaches the worker — the process that owns the PTY and can survive server.js
+  // restarting. A no-op when the value is unchanged; (re-)arms the auto-resume
+  // timer (armAutoResumeTimer) when it moves, including to null (which cancels).
+  setFiveHResetAt: async (params) => {
+    const session = sessions.get(requireUuid(params.id));
+    if (!session) throw new Error('session not found');
+    const raw = params.fiveHResetAt;
+    const val = (typeof raw === 'number' && Number.isFinite(raw) && raw > 0) ? Math.round(raw) : null;
+    if (session.fiveHResetAt !== val) {
+      session.fiveHResetAt = val;
+      saveSessionConfigs();
+      armAutoResumeTimer(session);
+    }
+    return { ok: true, fiveHResetAt: session.fiveHResetAt };
   },
 
   resizeSession: async (params) => {
@@ -1947,7 +2073,16 @@ function restoreSessionsOnStartup() {
     try {
       // cfg.agent is absent for sessions persisted before the field existed; null
       // there means "infer from the command", preserving their behaviour on restore.
-      createSession(cfg.id, cfg.cwd, cfg.name, original, savedScrollback, cfg.claudeSessionId || null, runCmd, cfg.agent || null);
+      const session = createSession(cfg.id, cfg.cwd, cfg.name, original, savedScrollback, cfg.claudeSessionId || null, runCmd, cfg.agent || null);
+      // #69 — restore the ABSOLUTE reset deadline (and which window is already
+      // handled) so a cold restart re-arms the same wall-clock timer rather than
+      // losing track of it; armAutoResumeTimer fires almost immediately (catch-up)
+      // if that deadline already passed while the worker was down.
+      if (cfg.fiveHResetAt) {
+        session.fiveHResetAt = cfg.fiveHResetAt;
+        session.autoResumeFiredForResetAt = cfg.autoResumeFiredForResetAt || null;
+        armAutoResumeTimer(session);
+      }
     } catch (e) {
       log(`failed to restore session ${cfg.id}: ${e.message}`);
     }

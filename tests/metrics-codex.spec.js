@@ -143,7 +143,49 @@ test('a truncated leading line does not abort the scan', () => {
 
 test('a turn_context with no token_count still reports the model', () => {
   const m = parseMetricsFromTail(turnContext('gpt-5.5', 'high'));
-  expect(m).toEqual({ ctx: null, fiveH: null, sevenD: null, model: 'gpt-5.5', effort: 'high' });
+  expect(m).toEqual({ ctx: null, fiveH: null, sevenD: null, fiveHResetAt: null, model: 'gpt-5.5', effort: 'high' });
+});
+
+// ---- fiveHResetAt (issue #69 — the 5h auto-resume timer's clock) ------------
+test('fiveHResetAt is the 5h window\'s resets_at, converted seconds -> ms', () => {
+  // limits() (above) sets primary (5h) resets_at:1 — 1 second since epoch.
+  const m = parseMetricsFromTail(tokenCount(usage(1000), limits(20, 12)));
+  expect(m.fiveHResetAt).toBe(1000);
+});
+
+test('fiveHResetAt follows the window match, not primary/secondary position', () => {
+  const swapped = tokenCount(usage(1000), {
+    primary: { used_percent: 77, window_minutes: 10080, resets_at: 999 },
+    secondary: { used_percent: 11, window_minutes: 300, resets_at: 555 },
+  });
+  expect(parseMetricsFromTail(swapped).fiveHResetAt).toBe(555000);
+});
+
+test('a malformed or non-positive resets_at yields null, never a garbage timestamp', () => {
+  const bad = tokenCount(usage(1000), {
+    primary: { used_percent: 5, window_minutes: 300, resets_at: 'soon' },
+    secondary: { used_percent: 5, window_minutes: 10080, resets_at: -1 },
+  });
+  expect(parseMetricsFromTail(bad).fiveHResetAt).toBeNull();
+});
+
+test('absent rate_limits yields fiveHResetAt null too', () => {
+  expect(parseMetricsFromTail(tokenCount(usage(1000), null)).fiveHResetAt).toBeNull();
+});
+
+test('fiveHResetAt against a REAL validated rollout sample (2026-07-10, codex 0.144.0)', () => {
+  // rollout-2026-07-10T00-03-21-019f48b1-367f-7861-835c-256d175ac1d2.jsonl on this
+  // machine: primary (300min) resets_at 1783645131 -> 2026-07-10T00:58:51.000Z; the
+  // session_meta timestamp for that rollout is 2026-07-09T21:03:21Z, so the 5h window
+  // ending ~4h later is plausible. secondary (10080min) resets_at 1784231931 ->
+  // 2026-07-16T19:58:51.000Z, six days later, confirming the seconds (not ms) unit.
+  const rl = {
+    limit_id: 'codex',
+    primary: { used_percent: 7, window_minutes: 300, resets_at: 1783645131 },
+    secondary: { used_percent: 1, window_minutes: 10080, resets_at: 1784231931 },
+  };
+  const m = parseMetricsFromTail(tokenCount(usage(1000), rl));
+  expect(new Date(m.fiveHResetAt).toISOString()).toBe('2026-07-10T00:58:51.000Z');
 });
 
 // ---- against a REAL rollout on this machine ---------------------------------
@@ -175,6 +217,11 @@ test('parses plausible metrics out of a real Codex rollout', () => {
   }
   for (const v of [m.fiveH, m.sevenD]) {
     if (v !== null) { expect(v).toBeGreaterThanOrEqual(0); expect(v).toBeLessThanOrEqual(100); }
+  }
+  // fiveHResetAt (#69): a real ms-epoch timestamp when present, never negative/NaN.
+  if (m.fiveHResetAt !== null) {
+    expect(typeof m.fiveHResetAt).toBe('number');
+    expect(m.fiveHResetAt).toBeGreaterThan(0);
   }
   // The whole file contains a turn_context, so the labels must resolve.
   expect(typeof m.model === 'string' || m.model === null).toBe(true);
