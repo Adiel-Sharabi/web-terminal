@@ -286,6 +286,24 @@ class ApiClient {
     return TranscriptPage.fromJson(_asMap(_decode(res)));
   }
 
+  /// Fetches the agent's last answer reduced to a speakable utterance
+  /// (`GET /api/sessions/:id/speech`, #70).
+  ///
+  /// The SERVER decides what is worth saying — it strips code blocks, tables,
+  /// URLs and tool plumbing from the newest assistant prose turn. This client
+  /// must not second-guess that: an **empty** string is the normal answer for
+  /// "the last turns were tool calls or pure code" and means *stay silent*,
+  /// never fall back to raw transcript text.
+  ///
+  /// Throws [ApiException] with status `404` when the session has no transcript
+  /// (a shell-only session), or when the server predates 1.42.0.
+  Future<String> speech(String sessionId) async {
+    final res = await _send('GET', '/api/sessions/$sessionId/speech');
+    final m = _asMap(_decode(res));
+    final t = m['text'];
+    return t is String ? t : '';
+  }
+
   /// Fetches one backward-paginated page of a *subagent's* transcript from
   /// `GET /api/sessions/:id/subagent/:toolUseId`.
   ///
