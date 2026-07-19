@@ -182,6 +182,158 @@ void main() {
     );
   });
 
+  group('buildAnswerFrames — note attached to an option (#64 Gap 1)', () {
+    test(
+        'note on an already-chosen option: highlight move, n, note text, '
+        'submit — as SEPARATE frames', () {
+      final qs = [_q(['A', 'B', 'C'])];
+      final frames = buildAnswerFrames(
+        qs,
+        [
+          {1}
+        ], // "B" already chosen (index 1)
+        noteText: const ['please clarify the deploy target'],
+      );
+      // A single-select digit SELECTS AND SUBMITS (can't be reused here), so
+      // the highlight is walked down from the assumed default top row
+      // instead (1 Down-arrow to reach index 1); then n opens the note
+      // editor, the text, then Enter submits.
+      expect(_keys(frames),
+          ['\x1b[B', 'n', 'please clarify the deploy target', '\r']);
+      // n / note text / submit must each land in a SEPARATE PTY read.
+      expect(frames[1].delayMs, greaterThanOrEqualTo(500));
+      expect(frames[2].delayMs, greaterThanOrEqualTo(500));
+      expect(frames[3].delayMs, greaterThanOrEqualTo(500));
+    });
+
+    test('note on the first option (index 0): no highlight move needed', () {
+      final qs = [_q(['A', 'B', 'C'])];
+      final frames = buildAnswerFrames(
+        qs,
+        [
+          {0}
+        ],
+        noteText: const ['note for A'],
+      );
+      expect(_keys(frames), ['n', 'note for A', '\r']);
+    });
+
+    test('note on the third option: TWO highlight-move frames first', () {
+      final qs = [_q(['A', 'B', 'C'])];
+      final frames = buildAnswerFrames(
+        qs,
+        [
+          {2}
+        ],
+        noteText: const ['note for C'],
+      );
+      expect(_keys(frames), ['\x1b[B', '\x1b[B', 'n', 'note for C', '\r']);
+    });
+
+    test('note text is trimmed before it is sent', () {
+      final qs = [_q(['A', 'B', 'C'])];
+      expect(
+        _keys(buildAnswerFrames(qs, [
+          {0}
+        ], noteText: const ['  hi  '])),
+        ['n', 'hi', '\r'],
+      );
+    });
+
+    test('blank/whitespace note falls back to the plain digit path (no note)',
+        () {
+      final qs = [_q(['A', 'B', 'C'])];
+      expect(
+        _keys(buildAnswerFrames(qs, [
+          {1}
+        ], noteText: const ['   '])),
+        ['2'],
+      );
+    });
+
+    test('no note set does not change the existing single-select path '
+        '(regression guard)', () {
+      final qs = [_q(['A', 'B', 'C'])];
+      expect(
+        _keys(buildAnswerFrames(qs, [
+          {0}
+        ])),
+        _keys(buildAnswerFrames(qs, [
+          {0}
+        ], noteText: const [null])),
+      );
+    });
+
+    test('note is ignored when no option is selected yet (falls back to the '
+        'plain digit path, defaulting to row 1)', () {
+      final qs = [_q(['A', 'B', 'C'])];
+      expect(
+        _keys(buildAnswerFrames(qs, [<int>{}], noteText: const ['orphan'])),
+        ['1'],
+      );
+    });
+
+    test(
+        'note state is independent of otherText: when BOTH are set, Other '
+        'wins and the note is never sent (mutually exclusive at the UI '
+        'layer, but buildAnswerFrames must still resolve deterministically)',
+        () {
+      final qs = [_q(['A', 'B', 'C'])];
+      final frames = buildAnswerFrames(
+        qs,
+        [
+          {1}
+        ],
+        otherText: const ['free text answer'],
+        noteText: const ['should never appear'],
+      );
+      expect(_keys(frames), ['4', 'free text answer', '\r']);
+      expect(_keys(frames), isNot(contains('should never appear')));
+    });
+
+    test(
+        'note state is independent of otherText: a note-only call never '
+        'touches the Other path', () {
+      final qs = [_q(['A', 'B', 'C'])];
+      final frames = buildAnswerFrames(
+        qs,
+        [
+          {0}
+        ],
+        noteText: const ['just a note'],
+      );
+      // No "Type something." row digit (options.length + 1 == "4") appears —
+      // this went through the note path, not Other's.
+      expect(_keys(frames), isNot(contains('4')));
+      expect(_keys(frames), ['n', 'just a note', '\r']);
+    });
+
+    test('note is ignored for multi-select (same deferred scope as Other)',
+        () {
+      final qs = [_q(['A', 'B', 'C'], multi: true)];
+      expect(
+        _keys(buildAnswerFrames(qs, [
+          {0, 2}
+        ], noteText: const ['x'])),
+        ['1', '3', '\x1b[C', '1'],
+      );
+    });
+
+    test('note is ignored for multi-question (same deferred scope as Other)',
+        () {
+      final qs = [_q(['A', 'B']), _q(['X', 'Y'])];
+      final frames = buildAnswerFrames(
+        qs,
+        [
+          {1},
+          {0}
+        ],
+        noteText: const ['x', null],
+      );
+      expect(_keys(frames), isNot(contains('x')));
+    });
+  });
+
   group('answerNeedsConfirm (cluster-path Enter re-send gate)', () {
     test('single-select single question needs no confirm (digit auto-submits)',
         () {
@@ -213,6 +365,13 @@ void main() {
     test('Other free-text answer ends in Enter -> needs confirm', () {
       final frames = buildAnswerFrames([_q(['A', 'B', 'C'])], [<int>{}],
           otherText: const ['hello']);
+      expect(answerNeedsConfirm(frames), isTrue);
+    });
+
+    test('note (#64 Gap 1) ends in Enter -> needs confirm', () {
+      final frames = buildAnswerFrames([_q(['A', 'B', 'C'])], [
+        {1}
+      ], noteText: const ['a note']);
       expect(answerNeedsConfirm(frames), isTrue);
     });
 
@@ -614,6 +773,176 @@ void main() {
     await tester.tap(find.widgetWithText(FilledButton, 'Send answer'));
     await tester.pumpAndSettle();
     expect(_keys(sent!), ['2']);
+  });
+
+  group('note attached to a selected option (#64 Gap 1)', () {
+    testWidgets(
+        'affordance hidden until a real option is picked; toggling it '
+        'reveals a field; Send emits select-move + n + note + submit',
+        (tester) async {
+      List<AnswerFrame>? sent;
+      final pq = PendingQuestion(
+        toolUseId: 'note1',
+        questions: [_q(['Alpha', 'Beta', 'Gamma'])],
+      );
+      await tester.pumpWidget(
+        MaterialApp(
+          theme: AppTheme.dark,
+          home: Scaffold(
+            body: Stack(
+              children: [
+                QuestionOverlay(
+                  question: pq,
+                  onSend: (s) => sent = s,
+                  onKey: (_) {},
+                  onDismiss: () {},
+                ),
+              ],
+            ),
+          ),
+        ),
+      );
+      await tester.pumpAndSettle();
+
+      // No option picked yet -> no note affordance.
+      expect(find.text('Add a note'), findsNothing);
+
+      await tester.tap(find.text('Beta')); // index 1
+      await tester.pumpAndSettle();
+
+      // Now the affordance appears, but the field is not revealed yet.
+      expect(find.text('Add a note'), findsOneWidget);
+      expect(find.byType(TextField), findsNothing);
+
+      await tester.tap(find.text('Add a note'));
+      await tester.pumpAndSettle();
+      expect(find.byType(TextField), findsOneWidget);
+      expect(find.text('Remove note'), findsOneWidget);
+
+      await tester.enterText(
+          find.byType(TextField), 'please explain the tradeoffs');
+      await tester.pumpAndSettle();
+
+      await tester.tap(find.widgetWithText(FilledButton, 'Send answer'));
+      await tester.pumpAndSettle();
+
+      // Beta is index 1 -> one Down-arrow to reach it, then n, note, submit.
+      expect(_keys(sent!),
+          ['\x1b[B', 'n', 'please explain the tradeoffs', '\r']);
+    });
+
+    testWidgets(
+        'note field is independent of the Other field (#64 Gap 1 vs #36)',
+        (tester) async {
+      final pq = PendingQuestion(
+        toolUseId: 'note2',
+        questions: [_q(['Alpha', 'Beta'])],
+      );
+      await tester.pumpWidget(
+        MaterialApp(
+          theme: AppTheme.dark,
+          home: Scaffold(
+            body: Stack(
+              children: [
+                QuestionOverlay(
+                  question: pq,
+                  onSend: (_) {},
+                  onKey: (_) {},
+                  onDismiss: () {},
+                ),
+              ],
+            ),
+          ),
+        ),
+      );
+      await tester.pumpAndSettle();
+
+      await tester.tap(find.text('Alpha'));
+      await tester.pumpAndSettle();
+      await tester.tap(find.text('Add a note'));
+      await tester.pumpAndSettle();
+      await tester.enterText(find.byType(TextField), 'note text');
+      await tester.pumpAndSettle();
+
+      // Switching to Other clears _selected -> the note affordance/field
+      // hide (same gate as picking a listed option), and the Other field
+      // must NOT show the note's text — separate controllers, separate state.
+      await tester.tap(find.text('Other…'));
+      await tester.pumpAndSettle();
+      expect(find.text('Add a note'), findsNothing);
+      expect(find.byType(TextField), findsOneWidget);
+      final field = tester.widget<TextField>(find.byType(TextField));
+      expect(field.controller?.text ?? '', isEmpty);
+    });
+
+    testWidgets('note affordance is not offered for a multi-select question',
+        (tester) async {
+      await tester.pumpWidget(
+        MaterialApp(
+          theme: AppTheme.dark,
+          home: Scaffold(
+            body: Stack(
+              children: [
+                QuestionOverlay(
+                  question: PendingQuestion(
+                    toolUseId: 'msnote1',
+                    questions: [
+                      _q(['Alpha', 'Beta', 'Gamma'], multi: true)
+                    ],
+                  ),
+                  onSend: (_) {},
+                  onKey: (_) {},
+                  onDismiss: () {},
+                ),
+              ],
+            ),
+          ),
+        ),
+      );
+      await tester.pumpAndSettle();
+
+      await tester.tap(find.text('Alpha'));
+      await tester.pumpAndSettle();
+      expect(find.text('Add a note'), findsNothing);
+    });
+
+    testWidgets(
+        'no note set does not regress the plain single-select Send path',
+        (tester) async {
+      List<AnswerFrame>? sent;
+      final pq = PendingQuestion(
+        toolUseId: 'note3',
+        questions: [_q(['Alpha', 'Beta', 'Gamma'])],
+      );
+      await tester.pumpWidget(
+        MaterialApp(
+          theme: AppTheme.dark,
+          home: Scaffold(
+            body: Stack(
+              children: [
+                QuestionOverlay(
+                  question: pq,
+                  onSend: (s) => sent = s,
+                  onKey: (_) {},
+                  onDismiss: () {},
+                ),
+              ],
+            ),
+          ),
+        ),
+      );
+      await tester.pumpAndSettle();
+
+      await tester.tap(find.text('Gamma'));
+      await tester.pumpAndSettle();
+      // The note affordance appeared but was never tapped -> no note active.
+      expect(find.text('Add a note'), findsOneWidget);
+
+      await tester.tap(find.widgetWithText(FilledButton, 'Send answer'));
+      await tester.pumpAndSettle();
+
+      expect(_keys(sent!), ['3']);
+    });
   });
 
   group('hardware Enter submits the selection (#64 Gap 2)', () {

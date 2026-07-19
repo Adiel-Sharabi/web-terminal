@@ -86,11 +86,29 @@ class AnswerFrame {
 /// The overlay correspondingly hides the Other row unless there is exactly one,
 /// non-multiSelect question.
 ///
+/// [noteText] (issue #64 Gap 1) is an optional per-question NOTE attached to
+/// an ALREADY-chosen option — distinct from [otherText]/#36, which REPLACES
+/// the numeric answer with free text. Claude's TUI advertises "press n to add
+/// notes"; a non-empty, non-whitespace entry, paired with a non-empty [sel],
+/// routes a single-select single question through the note path below
+/// instead of the plain auto-submitting digit. If [otherText] is ALSO set for
+/// that question, Other wins (checked first) — the two are never combined.
+/// Same deferred scope as Other: multi-select and multi-question never
+/// consume [noteText].
+///
+/// *** The exact `n` byte sequence below is NOT YET DEVICE-VERIFIED ***
+/// (unlike every other path here, which is). Claude decides when to raise
+/// AskUserQuestion, so this could not be forced against the live TUI while
+/// writing this: confirm on a real device before trusting it the way the
+/// digit / Other / multi-select sequences are trusted. See the note branch
+/// below for the reasoning behind the sequence chosen.
+///
 /// Pure, so the mapping is unit-testable.
 List<AnswerFrame> buildAnswerFrames(
   List<PendingQuestionItem> questions,
   List<Set<int>> selections, {
   List<String?> otherText = const [],
+  List<String?> noteText = const [],
 }) {
   const gap = 600; // between frames that must be read separately
   const settle = 250; // between absolute toggles (safe to coalesce)
@@ -100,6 +118,7 @@ List<AnswerFrame> buildAnswerFrames(
     final q = questions[qi];
     final sel = qi < selections.length ? selections[qi] : const <int>{};
     final other = qi < otherText.length ? otherText[qi]?.trim() : null;
+    final note = qi < noteText.length ? noteText[qi]?.trim() : null;
     if (!multiQuestion && !q.multiSelect && other != null && other.isNotEmpty) {
       // Free-text ("Other"): select the implied "Type something." row, type the
       // answer, submit. The three land in SEPARATE stdin reads (each carries
@@ -109,6 +128,28 @@ List<AnswerFrame> buildAnswerFrames(
       // and the multi-select branch below ignores otherText entirely.
       frames.add(AnswerFrame('${q.options.length + 1}', gap)); // "Type something."
       frames.add(AnswerFrame(other, gap)); // the free-text answer
+      frames.add(const AnswerFrame('\r', gap)); // submit
+    } else if (!multiQuestion &&
+        !q.multiSelect &&
+        sel.isNotEmpty &&
+        note != null &&
+        note.isNotEmpty) {
+      // Note (#64 Gap 1) attached to the option at sel.first. A single-select
+      // digit SELECTS AND SUBMITS (see the class doc above) so it can't be
+      // used to land on the row first — Down-arrow presses instead walk the
+      // highlight down from the TUI's assumed default top row, the same
+      // relative-nav idiom #39 already uses (Right-arrow to the Submit
+      // review) for "move without submitting". Each step is DEVICE-UNVERIFIED
+      // (see the function doc); if verification finds a different default
+      // highlight, keybinding, or that the note editor needs its own
+      // confirm before the final submit, only this branch needs correcting —
+      // buildAnswerFrames stays the one place the fix belongs.
+      final idx = sel.first;
+      for (var i = 0; i < idx; i++) {
+        frames.add(const AnswerFrame('\x1b[B', settle)); // ↓ to the chosen row
+      }
+      frames.add(const AnswerFrame('n', gap)); // open the note editor
+      frames.add(AnswerFrame(note, gap)); // the note text
       frames.add(const AnswerFrame('\r', gap)); // submit
     } else if (q.multiSelect) {
       final rows = sel.toList()..sort();
@@ -207,11 +248,25 @@ class _QuestionOverlayState extends State<QuestionOverlay> {
   /// Other row is only shown for single-question prompts (one tab).
   final TextEditingController _otherController = TextEditingController();
 
+  /// Per-question NOTE attached to the tab's ALREADY-chosen option (#64
+  /// Gap 1) — parallel to [_otherText] but NEVER conflated with it: Other
+  /// (#36) REPLACES the numeric answer with free text, a note AUGMENTS it.
+  /// `null` means the note field is not revealed for that tab; a non-null
+  /// value (even `''`) means it is, and its trimmed text is the note. Only
+  /// ever populated for single-select single-question prompts, same scope as
+  /// Other.
+  late List<String?> _noteText;
+
+  /// Backs the single note field. One controller suffices — same reasoning
+  /// as [_otherController].
+  final TextEditingController _noteController = TextEditingController();
+
   @override
   void initState() {
     super.initState();
     _selected = [for (final _ in widget.question.questions) <int>{}];
     _otherText = [for (final _ in widget.question.questions) null];
+    _noteText = [for (final _ in widget.question.questions) null];
   }
 
   @override
@@ -223,16 +278,27 @@ class _QuestionOverlayState extends State<QuestionOverlay> {
       _selected = [for (final _ in widget.question.questions) <int>{}];
       _otherText = [for (final _ in widget.question.questions) null];
       _otherController.clear();
+      _noteText = [for (final _ in widget.question.questions) null];
+      _noteController.clear();
     }
   }
 
   @override
   void dispose() {
     _otherController.dispose();
+    _noteController.dispose();
     super.dispose();
   }
 
   bool get _otherActive => _otherText[_tab] != null;
+
+  bool get _noteActive => _noteText[_tab] != null;
+
+  /// True while a multi-line free-text field (Other OR a note) is showing —
+  /// SSOT for the "soft keyboard is up, give it vertical room" collapse
+  /// below, which #36 originally guarded on Other alone; #64 Gap 1 adds a
+  /// second field with the identical overflow problem.
+  bool get _textEntryActive => _otherActive || _noteActive;
 
   void _toggle(PendingQuestionItem q, int i) {
     setState(() {
@@ -258,6 +324,22 @@ class _QuestionOverlayState extends State<QuestionOverlay> {
     });
   }
 
+  /// Toggles the note field for the current tab's ALREADY-selected option
+  /// (#64 Gap 1). Unlike Other, a note does not touch [_selected] — it
+  /// augments the numeric pick rather than replacing it, so it is never
+  /// mutually exclusive with a real option (only offered once one is chosen;
+  /// see the gate in [_optionList]).
+  void _toggleNote() {
+    setState(() {
+      if (_noteActive) {
+        _noteText[_tab] = null;
+        _noteController.clear();
+      } else {
+        _noteText[_tab] = _noteController.text;
+      }
+    });
+  }
+
   bool get _everyQuestionAnswered => List.generate(
         _selected.length,
         (i) =>
@@ -270,6 +352,7 @@ class _QuestionOverlayState extends State<QuestionOverlay> {
       widget.question.questions,
       _selected,
       otherText: _otherText,
+      noteText: _noteText,
     ));
   }
 
@@ -289,9 +372,9 @@ class _QuestionOverlayState extends State<QuestionOverlay> {
             // (its `/status` tabs, menus, question phase) rather than traversing
             // the overlay's buttons. This Shortcuts sits below WidgetsApp, so it
             // wins over the default focus-traversal / caret shortcuts. Tab always
-            // forwards; arrows forward ONLY while the free-text ("Other") field
-            // is inactive — when it IS active the arrows are left unmapped so the
-            // caret can move inside that field.
+            // forwards; arrows forward ONLY while a free-text field (Other, or a
+            // note — #64 Gap 1) is inactive — when one IS active the arrows are
+            // left unmapped so the caret can move inside that field.
             //
             // #64 Gap 2: hardware Enter submits the current selection — DESKTOP
             // only, gated by the same `composeUsesSoftKeyboard` predicate the
@@ -304,7 +387,7 @@ class _QuestionOverlayState extends State<QuestionOverlay> {
               shortcuts: <ShortcutActivator, Intent>{
                 const SingleActivator(LogicalKeyboardKey.tab):
                     const _ForwardKeyIntent('\t'),
-                if (!_otherActive) ...const {
+                if (!_textEntryActive) ...const {
                   SingleActivator(LogicalKeyboardKey.arrowUp):
                       _ForwardKeyIntent('\x1b[A'),
                   SingleActivator(LogicalKeyboardKey.arrowDown):
@@ -360,13 +443,14 @@ class _QuestionOverlayState extends State<QuestionOverlay> {
                       mainAxisSize: MainAxisSize.min,
                       children: [
                         _header(theme, questions.length),
-                        // While typing a free-text ("Other") answer the soft keyboard
-                        // is up and vertical space is scarce — the card would overflow
-                        // and clip the field + Send button (the reported "can't see the
-                        // input box when the keyboard is open"). The question text has
-                        // already been read by then, so drop this panel to give the
-                        // input room; it returns the moment Other is deselected.
-                        if (!_otherActive &&
+                        // While typing a free-text ("Other") or note answer the soft
+                        // keyboard is up and vertical space is scarce — the card would
+                        // overflow and clip the field + Send button (the reported
+                        // "can't see the input box when the keyboard is open"). The
+                        // question text has already been read by then, so drop this
+                        // panel to give the input room; it returns the moment
+                        // Other/the note is deselected.
+                        if (!_textEntryActive &&
                             (widget.contextText ?? '').trim().isNotEmpty)
                           _contextPanel(theme, widget.contextText!.trim()),
                         if (questions.length > 1) _tabs(theme, questions),
@@ -488,6 +572,19 @@ class _QuestionOverlayState extends State<QuestionOverlay> {
             ),
           for (var i = 0; i < q.options.length; i++)
             _optionTile(theme, q, i),
+          // Note (#64 Gap 1): a small affordance to attach a note to the
+          // option just picked above — NOT a replacement answer (that's
+          // Other, directly below; see buildAnswerFrames for how the two
+          // never combine). Same proven-safe gate as Other (single-select,
+          // single question) PLUS "a real option is already selected" —
+          // Other clears [_selected], so this naturally hides itself while
+          // free-texting there.
+          if (widget.question.questions.length == 1 &&
+              !q.multiSelect &&
+              _selected[_tab].isNotEmpty) ...[
+            _noteAffordance(theme),
+            if (_noteActive) _noteField(theme),
+          ],
           // Free-text ("Other") answer. Offered ONLY for a single-select single
           // question — the proven path. Multi-select's "Type something." row is
           // a checkbox with no free-text input, and multi-question tab-advance
@@ -574,6 +671,83 @@ class _QuestionOverlayState extends State<QuestionOverlay> {
     );
   }
 
+  /// The "+ Add a note" affordance (#64 Gap 1) — deliberately smaller than
+  /// [_otherTile]'s full option-row shell, since a note augments the option
+  /// already picked above rather than offering a new answer to choose.
+  /// Toggles [_noteField] below it.
+  Widget _noteAffordance(ThemeData theme) {
+    return Padding(
+      padding: const EdgeInsets.only(left: 2, top: 2, bottom: 2),
+      child: Material(
+        color: Colors.transparent,
+        borderRadius: BorderRadius.circular(AppShape.medium),
+        child: InkWell(
+          borderRadius: BorderRadius.circular(AppShape.medium),
+          onTap: _toggleNote,
+          child: Padding(
+            padding: const EdgeInsets.symmetric(horizontal: 6, vertical: 6),
+            child: Row(
+              mainAxisSize: MainAxisSize.min,
+              children: [
+                Icon(
+                  _noteActive
+                      ? Icons.remove_circle_outline
+                      : Icons.add_circle_outline,
+                  size: 16,
+                  color: theme.colorScheme.onSurfaceVariant,
+                ),
+                const SizedBox(width: 6),
+                Text(
+                  _noteActive ? 'Remove note' : 'Add a note',
+                  style: theme.textTheme.labelMedium
+                      ?.copyWith(color: theme.colorScheme.onSurfaceVariant),
+                ),
+              ],
+            ),
+          ),
+        ),
+      ),
+    );
+  }
+
+  /// The revealed note field — same shell as [_otherField] (#64 Gap 1 reuses
+  /// #36's proven layout), backed by its OWN state ([_noteText]/
+  /// [_noteController]) so it is never conflated with the Other free-text
+  /// answer.
+  Widget _noteField(ThemeData theme) {
+    return Padding(
+      padding: const EdgeInsets.fromLTRB(0, 3, 0, 3),
+      child: TextField(
+        controller: _noteController,
+        autofocus: true,
+        minLines: 1,
+        maxLines: 4,
+        textInputAction: TextInputAction.send,
+        style: theme.textTheme.bodyLarge,
+        onChanged: (v) => setState(() => _noteText[_tab] = v),
+        onSubmitted: (_) {
+          if (_everyQuestionAnswered) _send();
+        },
+        decoration: InputDecoration(
+          hintText: 'Add a note for this option…',
+          isDense: true,
+          filled: true,
+          fillColor: theme.colorScheme.surfaceContainer,
+          contentPadding:
+              const EdgeInsets.symmetric(horizontal: 12, vertical: 10),
+          border: OutlineInputBorder(
+            borderRadius: BorderRadius.circular(AppShape.medium),
+            borderSide: BorderSide(color: theme.colorScheme.outlineVariant),
+          ),
+          enabledBorder: OutlineInputBorder(
+            borderRadius: BorderRadius.circular(AppShape.medium),
+            borderSide: BorderSide(color: theme.colorScheme.outlineVariant),
+          ),
+        ),
+      ),
+    );
+  }
+
   Widget _optionTile(ThemeData theme, PendingQuestionItem q, int i) {
     final opt = q.options[i];
     final selected = _selected[_tab].contains(i);
@@ -640,10 +814,11 @@ class _QuestionOverlayState extends State<QuestionOverlay> {
         children: [
           // Manual fallback: forward the exact TUI nav keys, for a prompt whose
           // keybindings don't match the built sequence. These drive the numeric
-          // selector — useless while typing a free-text ("Other") answer, where
-          // they only steal the vertical room the input needs above the keyboard,
-          // so they're hidden in that mode (you Send with the button / Enter).
-          if (!_otherActive) ...[
+          // selector — useless while typing a free-text ("Other") or note answer,
+          // where they only steal the vertical room the input needs above the
+          // keyboard, so they're hidden in that mode (you Send with the button /
+          // Enter).
+          if (!_textEntryActive) ...[
             Row(
               mainAxisAlignment: MainAxisAlignment.center,
               children: [
