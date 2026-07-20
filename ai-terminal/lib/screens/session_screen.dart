@@ -39,7 +39,7 @@ import '../widgets/compose_bar.dart';
 import '../widgets/conversation_view.dart';
 import '../widgets/format_utils.dart';
 import '../widgets/question_overlay.dart';
-import '../widgets/server_badge.dart';
+import '../widgets/session_meta_bar.dart';
 import '../widgets/session_action_sheet.dart';
 import '../widgets/status_dot.dart';
 import '../widgets/terminal_key_strip.dart';
@@ -405,6 +405,10 @@ class _SessionScreenState extends State<SessionScreen>
   double _termFontSize = 10; // adjustable terminal font (persisted globally)
   bool _notFound = false;
   bool _speaking = false; // #70: an utterance is playing (drives the stop icon)
+  /// #74: ctx% derived from the transcript by the chat lens, lifted up so the
+  /// meta bar can show it in either lens. Notifier, not setState, so publishing
+  /// it never rebuilds the whole screen.
+  final ValueNotifier<int?> _derivedCtx = ValueNotifier<int?>(null);
   String? _apiErrorReason;
 
   // --- Interactive question overlay (#19) ----------------------------------
@@ -1927,6 +1931,7 @@ class _SessionScreenState extends State<SessionScreen>
   @override
   void dispose() {
     WidgetsBinding.instance.removeObserver(this);
+    _derivedCtx.dispose();
     // #70: leaving the screen must not leave a voice talking.
     if (_speaking) SpeechService.stop();
     if (DesktopAlertService.supported) {
@@ -1998,53 +2003,25 @@ class _SessionScreenState extends State<SessionScreen>
         ? 'Session ${session.shortId}'
         : session.name;
 
-    // #74: decide what the header can afford BEFORE building it, so the title
-    // keeps its floor instead of absorbing everyone else's shortfall.
-    final fit = headerFit(
-      width: MediaQuery.of(context).size.width,
-      lens: _chatAvailable,
-      speak: SpeechService.supported,
-      detach: DetachWindow.supported && !widget.standalone,
-      serverChip: true,
-    );
-
     return Scaffold(
       appBar: AppBar(
         automaticallyImplyLeading: !widget.embedded && !widget.standalone,
+        // #74: the app bar carries the session's IDENTITY and nothing else. Every
+        // session-level control moved to the meta bar below, because `actions`
+        // are laid out at their intrinsic width first and the title takes the
+        // leftover — so any control here silently steals from the name. The
+        // title is Expanded, not Flexible-inside-a-min-Row, so it claims the
+        // whole bar rather than only what a shrink-wrapped Row asked for.
+        titleSpacing: 0,
         title: Row(
-          mainAxisSize: MainAxisSize.min,
           children: [
+            const SizedBox(width: 4),
             StatusDot(status: status),
             const SizedBox(width: 8),
-            Flexible(child: Text(displayName, overflow: TextOverflow.ellipsis)),
+            Expanded(child: Text(displayName, overflow: TextOverflow.ellipsis)),
           ],
         ),
         actions: [
-          if (_chatAvailable && fit.lens)
-            Padding(
-              padding: const EdgeInsets.only(right: 8),
-              child: _LensToggle(value: _activeLens, onChanged: _setLens),
-            ),
-          // #70: read the agent's last answer aloud. Android-only — the desktop
-          // build has no TTS handler, so the control is absent rather than
-          // present-but-broken.
-          if (SpeechService.supported && fit.speak)
-            IconButton(
-              icon: Icon(_speaking ? Icons.stop_circle_outlined : Icons.volume_up),
-              tooltip: _speaking ? 'Stop reading' : 'Read the last answer aloud',
-              onPressed: () => _toggleSpeak(session),
-            ),
-          if (DetachWindow.supported && !widget.standalone && fit.detach)
-            IconButton(
-              icon: const Icon(Icons.open_in_new),
-              tooltip: 'Open in new window',
-              onPressed: () => DetachWindow.open(session.server, session.id),
-            ),
-          if (fit.serverChip)
-            Padding(
-              padding: const EdgeInsets.only(right: 8),
-              child: Center(child: ServerBadge(name: session.server.name)),
-            ),
           PopupMenuButton<String>(
             onSelected: (value) {
               if (value == 'fork') {
@@ -2079,44 +2056,6 @@ class _SessionScreenState extends State<SessionScreen>
               );
             },
             itemBuilder: (context) => [
-              // #74: anything the width budget folded away lives here, so a
-              // narrow screen loses the CHROME, never the capability.
-              if (!fit.serverChip)
-                PopupMenuItem(
-                  enabled: false,
-                  child: ListTile(
-                    contentPadding: EdgeInsets.zero,
-                    leading: const Icon(Icons.dns_outlined),
-                    title: Text(session.server.name),
-                    subtitle: const Text('Server'),
-                  ),
-                ),
-              if (_chatAvailable && !fit.lens)
-                PopupMenuItem(
-                  value: 'lens',
-                  child: ListTile(
-                    contentPadding: EdgeInsets.zero,
-                    leading: Icon(
-                      _activeLens == 'chat' ? Icons.terminal : Icons.forum_outlined,
-                    ),
-                    title: Text(
-                      _activeLens == 'chat' ? 'Terminal view' : 'Chat view',
-                    ),
-                  ),
-                ),
-              if (SpeechService.supported && !fit.speak)
-                PopupMenuItem(
-                  value: 'speak',
-                  child: ListTile(
-                    contentPadding: EdgeInsets.zero,
-                    leading: Icon(
-                      _speaking ? Icons.stop_circle_outlined : Icons.volume_up,
-                    ),
-                    title: Text(
-                      _speaking ? 'Stop reading' : 'Read the last answer aloud',
-                    ),
-                  ),
-                ),
               PopupMenuItem(
                 value: 'fork',
                 enabled: canForkFromMenu(session),
@@ -2146,6 +2085,51 @@ class _SessionScreenState extends State<SessionScreen>
       ),
       body: Column(
         children: [
+          // #74: the session's meta bar — cwd + usage badges on the flexible
+          // side, session controls on the right. These controls used to sit in
+          // the app bar, where they crowded the title out of existence; here the
+          // thing that yields is the cwd, which can shrink harmlessly. It also
+          // renders in BOTH lenses, so a terminal session finally shows its cwd
+          // and ctx% (it never did while these lived inside the chat lens).
+          ValueListenableBuilder<int?>(
+            valueListenable: _derivedCtx,
+            builder: (context, derived, _) => SessionMetaBar(
+              session: session,
+              derivedCtx: derived,
+              controls: [
+                if (_chatAvailable)
+                  _LensToggle(value: _activeLens, onChanged: _setLens),
+                // #70: read the agent's last answer aloud. Android-only — the
+                // desktop build has no TTS handler, so the control is absent
+                // rather than present-but-broken.
+                if (SpeechService.supported)
+                  IconButton(
+                    visualDensity: VisualDensity.compact,
+                    constraints: const BoxConstraints(minWidth: 36, minHeight: 32),
+                    padding: EdgeInsets.zero,
+                    icon: Icon(
+                      _speaking ? Icons.stop_circle_outlined : Icons.volume_up,
+                      size: 20,
+                    ),
+                    tooltip: _speaking
+                        ? 'Stop reading'
+                        : 'Read the last answer aloud',
+                    onPressed: () => _toggleSpeak(session),
+                  ),
+                if (DetachWindow.supported && !widget.standalone)
+                  IconButton(
+                    visualDensity: VisualDensity.compact,
+                    constraints: const BoxConstraints(minWidth: 36, minHeight: 32),
+                    padding: EdgeInsets.zero,
+                    icon: const Icon(Icons.open_in_new, size: 20),
+                    tooltip: 'Open in new window',
+                    onPressed: () =>
+                        DetachWindow.open(session.server, session.id),
+                  ),
+                MetaServerBadge(name: session.server.name),
+              ],
+            ),
+          ),
           // No modal — a thin animated hairline (debounced ~3s so a blip that
           // self-heals never flashes anything), optionally with a muted
           // "updated Ns ago" note. A separate, precise "Opened elsewhere"
@@ -2315,6 +2299,9 @@ class _SessionScreenState extends State<SessionScreen>
                     onNoTranscript: _handleNoTranscript,
                     submittedPrompts: _submittedPrompts.stream,
                     onSubmitToSession: sendSessionPrompt,
+                    // #74: only this lens can derive ctx% from the transcript;
+                    // the meta bar renders it for both lenses.
+                    derivedCtxSink: _derivedCtx,
                   ),
                 // Native overlay for Claude's interactive question (#19), above
                 // whichever lens is showing. The key strip below stays usable as
@@ -2575,86 +2562,5 @@ class _AttentionBanner extends StatelessWidget {
       ),
     );
   }
-}
-
-/// Which header controls stay inline at a given width (#74).
-class HeaderFit {
-const HeaderFit({
-  required this.lens,
-  required this.speak,
-  required this.detach,
-  required this.serverChip,
-});
-
-final bool lens;
-final bool speak;
-final bool detach;
-final bool serverChip;
-
-/// True when any control was folded away and the overflow menu must carry it.
-bool get anyFolded => !lens || !speak || !detach || !serverChip;
-}
-
-/// The title's guaranteed width, in logical pixels — roughly 11-12 characters at
-/// the app-bar text style. Below this a session name stops being an identifier.
-const double kHeaderTitleFloor = 88;
-
-// Measured intrinsic widths of the header's fixed parts. Approximations on
-// purpose: this is a BUDGET, not a layout pass — it decides what to show, and
-// Flutter still does the real measuring.
-const double _hLeading = 56; // back button
-const double _hDot = 18; // status dot + its gap
-const double _hOverflow = 48; // the ⋮ menu — never folded, it is the escape hatch
-const double _hLens = 96; // segmented Chat|Terminal toggle
-const double _hSpeak = 48;
-const double _hDetach = 48;
-const double _hServerChip = 88; // pill + its 8dp margin
-
-/// The header's width budget (#74) — an EXPLICIT priority rule instead of
-/// leftover space.
-///
-/// `AppBar` lays `actions` out at their intrinsic width FIRST and hands the title
-/// whatever remains. Every control ever added therefore stole from the title in
-/// silence, until a session name on a phone rendered as `● Lo…` — two characters.
-/// The title was the only flexible child, so it absorbed the entire shortfall.
-///
-/// This inverts the relationship: the title is RESERVED [kHeaderTitleFloor], and
-/// controls fold into the overflow menu in a fixed order until it fits. The order
-/// is least-essential-first: the server name is context that also shows in the
-/// sidebar; the lens toggle folds last because switching lens has no other
-/// one-tap path.
-///
-/// The property that matters is not today's arithmetic but the invariant: adding
-/// a control later can only make things fold EARLIER — it can never re-truncate
-/// the title. PURE, so that invariant is unit-testable without pumping a screen.
-HeaderFit headerFit({
-required double width,
-required bool lens,
-required bool speak,
-required bool detach,
-required bool serverChip,
-}) {
-var cLens = lens, cSpeak = speak, cDetach = detach, cChip = serverChip;
-double titleSpace() =>
-    width -
-    _hLeading -
-    _hDot -
-    _hOverflow -
-    (cLens ? _hLens : 0) -
-    (cSpeak ? _hSpeak : 0) -
-    (cDetach ? _hDetach : 0) -
-    (cChip ? _hServerChip : 0);
-
-if (titleSpace() < kHeaderTitleFloor && cChip) cChip = false;
-if (titleSpace() < kHeaderTitleFloor && cDetach) cDetach = false;
-if (titleSpace() < kHeaderTitleFloor && cSpeak) cSpeak = false;
-if (titleSpace() < kHeaderTitleFloor && cLens) cLens = false;
-
-return HeaderFit(
-  lens: cLens,
-  speak: cSpeak,
-  detach: cDetach,
-  serverChip: cChip,
-);
 }
 
