@@ -94,7 +94,16 @@ class ConversationView extends StatefulWidget {
     this.fetchSubagent,
     this.submittedPrompts,
     this.onSubmitToSession,
+    this.derivedCtxSink,
   });
+
+  /// Where to publish the transcript-derived ctx% (#74).
+  ///
+  /// The badges moved out of this widget and up into the session's meta bar, but
+  /// only the chat lens can compute this estimate — it needs the turns. So the
+  /// value is LIFTED rather than dropped: the bar reads it from here. Null in
+  /// contexts that don't render a bar (tests, the subagent sheet).
+  final ValueNotifier<int?>? derivedCtxSink;
 
   final Session session;
 
@@ -537,6 +546,19 @@ class _ConversationViewState extends State<ConversationView> {
   ///
   /// Returns null when the server reported no window — no denominator means no
   /// estimate. Guessing one is precisely the bug this replaced.
+  /// Push the derived ctx% to the meta bar. Deferred to after the frame: this is
+  /// called from build(), and writing a ValueNotifier synchronously there would
+  /// mutate a listener's state mid-build.
+  void _publishDerivedCtx() {
+    final sink = widget.derivedCtxSink;
+    if (sink == null) return;
+    final v = _deriveCtxFromTranscript();
+    if (sink.value == v) return;
+    WidgetsBinding.instance.addPostFrameCallback((_) {
+      if (mounted) sink.value = v;
+    });
+  }
+
   int? _deriveCtxFromTranscript() {
     final m = widget.session.metrics;
     if (m?.ctx != null) return null; // live value wins
@@ -603,12 +625,11 @@ class _ConversationViewState extends State<ConversationView> {
             false;
     final leadingLoader = _loadingOlder ? 1 : 0;
     final subagents = collectSubagents(_turns);
+    // #74: the badges live in the session's meta bar now (so a terminal-lens
+    // session gets them too); publish the estimate only this lens can compute.
+    _publishDerivedCtx();
     return Column(
       children: [
-        _MetricsHeader(
-          session: widget.session,
-          derivedCtx: _deriveCtxFromTranscript(),
-        ),
         // #62: the session's subagents pinned above the transcript so they stay
         // reachable no matter how far it scrolls. Hidden when there are none.
         if (subagents.isNotEmpty)
@@ -735,97 +756,6 @@ class _ConversationViewState extends State<ConversationView> {
 /// available, the live status-line metrics: context % and the 5h / 7d
 /// rate-limit usage. Mirrors the Claude Code status line so you can gauge
 /// context/limit pressure from the phone.
-class _MetricsHeader extends StatelessWidget {
-  const _MetricsHeader({required this.session, this.derivedCtx});
-
-  final Session session;
-
-  /// Approximate ctx% derived from the transcript when the live status line
-  /// isn't posting; shown with a `~`. Null when a live ctx exists or none known.
-  final int? derivedCtx;
-
-  @override
-  Widget build(BuildContext context) {
-    final theme = Theme.of(context);
-    final m = session.metrics;
-    final folder = _folderName(session.cwd);
-
-    final chips = <Widget>[];
-    if (folder.isNotEmpty) {
-      chips.add(_chip(theme, Icons.folder_outlined, folder,
-          theme.colorScheme.onSurfaceVariant));
-    }
-    // Context fills fast and matters most — warn early (50%), danger at 70%.
-    // Prefer the live status-line value; fall back to the transcript estimate.
-    if (m?.ctx != null) {
-      // Shared SSOT thresholds (warn 50 / danger 70) via ctxColor — same helper
-      // the session list uses, so the two surfaces can never drift apart.
-      chips.add(_chip(theme, Icons.data_usage, 'ctx ${m!.ctx}%',
-          ctxColor(theme, m.ctx!)));
-    } else if (derivedCtx != null) {
-      chips.add(_chip(theme, Icons.data_usage, 'ctx ~$derivedCtx%',
-          ctxColor(theme, derivedCtx!)));
-    }
-    if (m?.fiveH != null) {
-      chips.add(_chip(theme, Icons.schedule, '5h ${m!.fiveH}%',
-          _loadColor(theme, m.fiveH!, 60, 85)));
-    }
-    if (m?.sevenD != null) {
-      chips.add(_chip(theme, Icons.calendar_today, '7d ${m!.sevenD}%',
-          _loadColor(theme, m.sevenD!, 60, 85)));
-    }
-    if (chips.isEmpty) return const SizedBox.shrink();
-
-    return Container(
-      width: double.infinity,
-      padding: const EdgeInsets.symmetric(horizontal: 12, vertical: 6),
-      decoration: BoxDecoration(
-        color: theme.colorScheme.surfaceContainerLow,
-        border: Border(
-          bottom: BorderSide(color: theme.dividerColor.withValues(alpha: 0.4)),
-        ),
-      ),
-      child: SingleChildScrollView(
-        scrollDirection: Axis.horizontal,
-        child: Row(children: chips),
-      ),
-    );
-  }
-
-  static String _folderName(String cwd) {
-    if (cwd.isEmpty) return '';
-    final parts = cwd.split(RegExp(r'[\\/]')).where((p) => p.isNotEmpty).toList();
-    return parts.isEmpty ? cwd : parts.last;
-  }
-
-  // Green below [warn], amber to [danger], red at/above — quick pressure read.
-  static Color _loadColor(ThemeData theme, int pct, int warn, int danger) {
-    if (pct >= danger) return theme.colorScheme.error;
-    if (pct >= warn) return const Color(0xFFE0A030);
-    return theme.colorScheme.primary;
-  }
-
-  static Widget _chip(ThemeData theme, IconData icon, String label, Color color) {
-    return Padding(
-      padding: const EdgeInsets.only(right: 8),
-      child: Row(
-        mainAxisSize: MainAxisSize.min,
-        children: [
-          Icon(icon, size: 13, color: color),
-          const SizedBox(width: 4),
-          Text(
-            label,
-            style: theme.textTheme.labelSmall?.copyWith(
-              color: color,
-              fontFeatures: const [FontFeature.tabularFigures()],
-            ),
-          ),
-        ],
-      ),
-    );
-  }
-}
-
 /// A left-aligned "Claude is working…" bubble with three pulsing dots, shown
 /// while the session status is `working`.
 class _WorkingIndicator extends StatefulWidget {
