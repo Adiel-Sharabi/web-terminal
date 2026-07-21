@@ -159,6 +159,12 @@
     .sb-ctx.ctx-lo { color: #6a7a8a; }
     .sb-ctx.ctx-mid { color: #da4; }
     .sb-ctx.ctx-hi { color: #e94560; }
+    /* Model (+ effort) the session is actually talking to. Deliberately quiet —
+       it is a STABLE property, unlike the volatile ctx/5h/7d numbers beside it —
+       and allowed to ellipsize so a long display name never pushes a live
+       percentage out of the row. */
+    .sb-model { font-size: 10px; color: #6a7a8a; opacity: .9;
+                max-width: 11ch; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
     .sb-kill { background: transparent; border: none; color: #555; font-size: 14px; cursor: pointer; padding: 0 4px; line-height: 1; }
     .sb-kill:hover { color: #e94560; }
     .sb-edit { background: transparent; border: none; color: #555; font-size: 11px; cursor: pointer; padding: 0 4px; }
@@ -2712,6 +2718,23 @@
       const who = (s.agent && agents[s.agent] && agents[s.agent].label) || 'Agent';
       return `<span class="sb-ctx ${cls}" title="${esc(who)} context window">${c}%</span>`;
     }
+    // The model (and effort) the session is actually running, next to ctx%.
+    //
+    // Agent-neutral by construction: the server fills the SAME `metrics.model` /
+    // `metrics.effort` for every provider — Claude from its status-line payload's
+    // model.display_name, Codex from its rollout's turn_context — so this reads one
+    // field and never asks which agent it is. Either half may be absent (Codex reports
+    // both; a Claude push before the first API call may carry neither), so the label is
+    // whichever parts exist. Absent => no badge, never an empty chip.
+    function modelBadge(s){
+      const m = s.metrics;
+      if (!m) return '';
+      const parts = [m.model, m.effort].filter(Boolean).map(String);
+      if (!parts.length) return '';
+      const label = parts.join(' · ');
+      const who = (s.agent && agents[s.agent] && agents[s.agent].label) || 'Agent';
+      return `<span class="sb-model" title="${esc(who)} model${m.effort ? ' and reasoning effort' : ''}">${esc(label)}</span>`;
+    }
     // #56 — the 5h / 7d capacity windows for a SERVER header row.
     //
     // Unlike ctx% (genuinely per-session) these windows are ACCOUNT-wide: every session on
@@ -2977,6 +3000,7 @@
               `<span class="sb-status ${s.status}">${statusLabels[s.status] || s.status}</span>` +
               agentBadge(s) +
               ctxBadge(s) +
+              modelBadge(s) +
               `<button class="sb-bell nl-${lvl}" title="Notifications: ${NOTIFY_BELL[lvl].label} — click to change">${NOTIFY_BELL[lvl].icon}</button>` +
               starHtml(s) +
               `<button class="sb-edit" title="Edit auto-command">&#9998;</button>` +
@@ -3281,6 +3305,7 @@
           `<div class="sb-meta">` +
             `<span class="sb-status ${s.status}">${statusLabels[s.status] || s.status}</span>` +
             ctxBadge(s) +
+            modelBadge(s) +
             starHtml(s) +
           `</div>`;
         item.querySelector('.sb-star').addEventListener('click', (e) => {

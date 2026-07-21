@@ -245,11 +245,24 @@ class SessionMetrics {
     );
     // ctxWindow alone is not a reading — it says how big the window is, not how
     // much of it is used — so it does not by itself make a renderable metric.
-    if (m.ctx == null && m.fiveH == null && m.sevenD == null) return null;
+    //
+    // model/effort DO count, though: the meta bar renders them, and they arrive
+    // without any number in a documented real case — a status line pushed before
+    // the session's first API call (and in the gap right after /compact) carries
+    // the STABLE fields only. Gating those away would blank the model chip on
+    // exactly the fresh sessions where "what am I talking to" is least obvious.
+    if (!m.hasAny) return null;
     return m;
   }
 
-  bool get hasAny => ctx != null || fiveH != null || sevenD != null;
+  /// Whether anything renderable was reported. Mirrors what the meta bar draws —
+  /// if a field gets a chip, it belongs here, or the chip silently never shows.
+  bool get hasAny =>
+      ctx != null ||
+      fiveH != null ||
+      sevenD != null ||
+      model != null ||
+      effort != null;
 }
 
 /// The `GET /api/sessions/:id/attention` response: the last recorded attention

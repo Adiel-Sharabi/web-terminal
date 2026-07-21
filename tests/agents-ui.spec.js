@@ -2,8 +2,23 @@
 // Web UI: the new-session agent picker and the per-agent sidebar chip. Both are driven
 // by GET /api/agents (the server's provider registry), so a CLI agent added server-side
 // must appear here with no client change — that is what these tests pin.
+const fs = require('fs');
+const os = require('os');
+const path = require('path');
 const { test, expect } = require('@playwright/test');
 const { BASE, authCtx, loginPage } = require('./test-helpers');
+
+// Pin a Claude conversation id onto a session — that id is what keys the metrics
+// map, so a status push can reach the row. Mirrors metrics-claude.spec.js.
+async function pinnedSession(ctx, tag, uuid) {
+  const cwd = path.join(process.env.TEMP || os.tmpdir(), `wt-agentsui-${tag}-${process.pid}`);
+  fs.mkdirSync(cwd, { recursive: true });
+  const r = await ctx.post('/api/sessions', { data: { name: `ui-${tag}`, cwd, agent: 'claude' } });
+  const id = (await r.json()).id;
+  await ctx.post(`/api/session/${id}/hook`, { data: { event: 'UserPromptSubmit', session_id: uuid } });
+  await new Promise((res) => setTimeout(res, 200)); // let the worker persist the uuid
+  return id;
+}
 
 test.describe('Sidebar UI: AI agents', () => {
   test('the new-session picker is populated from the server catalogue', async ({ page }) => {
@@ -39,6 +54,56 @@ test.describe('Sidebar UI: AI agents', () => {
       await expect(shellRow.locator('.sb-agent')).toHaveCount(0);
     } finally {
       await ctx.delete(`/api/sessions/${codexId}`);
+      await ctx.delete(`/api/sessions/${shellId}`);
+      await ctx.dispose();
+    }
+  });
+
+  // The model badge sits next to ctx% and answers "what am I actually talking to".
+  // It is filled from `metrics.model` / `metrics.effort`, which the server fills
+  // identically for every provider (Claude from its status-line payload, Codex from
+  // its rollout) — so this reads one field and never branches on the agent.
+  test('a session that reported a model shows it next to the ctx badge', async ({ page }) => {
+    await loginPage(page);
+    const ctx = await authCtx();
+    const uuid = '5b0de100-0000-0000-0000-0000000000a1';
+    const id = await pinnedSession(ctx, 'model', uuid);
+
+    page.on('dialog', (d) => d.dismiss().catch(() => {}));
+    try {
+      await ctx.post('/api/claude-status', {
+        data: {
+          session_id: uuid,
+          model: { id: 'claude-opus-4-8', display_name: 'Opus 4.8' },
+          effort: { level: 'xhigh' },
+          context_window: { context_window_size: 200000, used_percentage: 42 },
+        },
+      });
+
+      await page.goto(BASE + '/');
+      const row = page.locator(`.sb-item[data-session-id="${id}"]`);
+      await expect(row).toBeVisible({ timeout: 5000 });
+      await expect(row.locator('.sb-model')).toHaveText('Opus 4.8 · xhigh');
+    } finally {
+      await ctx.delete(`/api/sessions/${id}`);
+      await ctx.dispose();
+    }
+  });
+
+  test('a session with no reported model shows no model badge', async ({ page }) => {
+    // Absent => no chip at all. An empty badge would be a permanent blank gap in
+    // every plain-shell row.
+    await loginPage(page);
+    const ctx = await authCtx();
+    const shellId = (await (await ctx.post('/api/sessions', { data: { name: 'UI NoModel' } })).json()).id;
+
+    page.on('dialog', (d) => d.dismiss().catch(() => {}));
+    try {
+      await page.goto(BASE + '/');
+      const row = page.locator(`.sb-item[data-session-id="${shellId}"]`);
+      await expect(row).toBeVisible({ timeout: 5000 });
+      await expect(row.locator('.sb-model')).toHaveCount(0);
+    } finally {
       await ctx.delete(`/api/sessions/${shellId}`);
       await ctx.dispose();
     }

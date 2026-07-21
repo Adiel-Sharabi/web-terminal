@@ -94,6 +94,56 @@ void main() {
     expect(find.text('ctx ~41%'), findsNothing);
   });
 
+  testWidgets('shows the model and effort the session is talking to',
+      (tester) async {
+    await pumpBar(
+      tester,
+      session: _session(
+        metrics: const SessionMetrics(ctx: 25, model: 'Opus 4.8', effort: 'high'),
+      ),
+    );
+    expect(find.text('Opus 4.8 · high'), findsOneWidget);
+  });
+
+  testWidgets('the model chip is agent-neutral — Codex reports the same fields',
+      (tester) async {
+    // Codex fills model/effort from its rollout's turn_context; Claude from its
+    // status-line payload. The bar reads ONE field either way and must never ask
+    // which agent it is.
+    await pumpBar(
+      tester,
+      session: _session(
+        metrics: const SessionMetrics(ctx: 44, model: 'gpt-5.5', effort: 'high'),
+      ),
+    );
+    expect(find.text('gpt-5.5 · high'), findsOneWidget);
+  });
+
+  testWidgets('renders whichever half of model/effort exists', (tester) async {
+    // A Claude push before the first API call can carry the model with no
+    // effort. Half a label beats no chip; an empty separator beats neither.
+    await pumpBar(
+      tester,
+      session: _session(metrics: const SessionMetrics(ctx: 10, model: 'Opus 4.8')),
+    );
+    expect(find.text('Opus 4.8'), findsOneWidget);
+    expect(find.textContaining('·'), findsNothing);
+  });
+
+  testWidgets('a model-only report still renders — no number required',
+      (tester) async {
+    // The regression: SessionMetrics.fromJson dropped any report carrying no
+    // ctx/5h/7d, so a status line pushed before the session's first API call
+    // (STABLE fields only) blanked the model chip on exactly the fresh sessions
+    // where the model is least obvious.
+    final metrics = SessionMetrics.fromJson(
+      const {'model': 'Opus 4.8', 'effort': 'high'},
+    );
+    expect(metrics, isNotNull, reason: 'a model-only report must survive parsing');
+    await pumpBar(tester, session: _session(metrics: metrics));
+    expect(find.text('Opus 4.8 · high'), findsOneWidget);
+  });
+
   testWidgets('carries the session controls that used to crowd the title',
       (tester) async {
     await pumpBar(
@@ -147,7 +197,8 @@ void main() {
       width: 360,
       session: _session(
         cwd: r'C:\dev\MobileClient',
-        metrics: const SessionMetrics(ctx: 93, fiveH: 34, sevenD: 76),
+        metrics: const SessionMetrics(
+            ctx: 93, fiveH: 34, sevenD: 76, model: 'Opus 4.8', effort: 'high'),
       ),
       controls: [
         const Icon(Icons.forum_outlined),
@@ -155,8 +206,15 @@ void main() {
         const MetaServerBadge(name: 'Server-C'),
       ],
     );
-    // Every badge exists...
-    for (final label in ['MobileClient', 'ctx 93%', '5h 34%', '7d 76%']) {
+    // Every badge exists — the model chip included, since adding a chip to this
+    // row is exactly how the 7d badge silently vanished the first time.
+    for (final label in [
+      'MobileClient',
+      'Opus 4.8 · high',
+      'ctx 93%',
+      '5h 34%',
+      '7d 76%'
+    ]) {
       expect(find.text(label), findsOneWidget, reason: '$label missing');
     }
     // ...and the controls are on their OWN row, so none of the badges is
