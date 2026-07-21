@@ -17,6 +17,7 @@ const { resolveRestoreRunCommand } = require('./lib/restore-command');
 const { claudeProjectDirName } = require('./lib/transcript');
 const agents = require('./lib/agents');
 const { splitTrailingCr, isEscapeKey } = require('./lib/submit-frames');
+const { scanOsc9 } = require('./lib/osc9-notify');
 
 const WORKER_VERSION = '0.6.0';
 
@@ -969,9 +970,46 @@ function processPtyOutput(session, buf) {
   session.dirty = true;
   session.lastActivity = Date.now();
   detectApiErrorInOutput(session, buf);
+  detectStatusNotificationInOutput(session, buf);
   if (session.clientCount > 0) {
     broadcastPtyOut(session, buf);
   }
+}
+
+// --- In-band status for agents without usable hooks (Codex) ----------------
+//
+// Codex writes its notifications into the PTY as OSC 9 (see lib/osc9-notify.js for the
+// measurements and why its hooks are unusable unattended). The worker already reads
+// every byte, so it can drive status from them exactly as Claude's hooks do.
+//
+// Hot path: the overwhelming majority of chunks contain no ESC at all, so the gate is a
+// single Buffer.includes for 0x1b before anything is decoded or allocated. Only a
+// session whose agent DECLARES the channel is scanned — a plain shell that prints an
+// OSC 9 (vim, a build script) must never move a dot.
+const ESC_BYTE = 0x1b;
+function detectStatusNotificationInOutput(session, buf) {
+  const agent = sessionAgent(session);
+  if (!agents.readsStatusFromOutput(agent)) return;
+  // A carry from the previous chunk must still be drained even if THIS chunk has no
+  // ESC — the terminator may be all that is left to arrive.
+  if (!buf.includes(ESC_BYTE) && !session._osc9Carry) return;
+
+  const { bodies, carry } = scanOsc9(session._osc9Carry || '', buf.toString('utf8'));
+  session._osc9Carry = carry;
+  for (const body of bodies) applyOutputStatusNotification(session, agent, body);
+}
+
+function applyOutputStatusNotification(session, agent, body) {
+  const kind = agents.classifyStatusNotification(agent, body);
+  if (!kind) return;
+  log(`osc9: session "${session.name}" ${kind} — ${JSON.stringify(body.slice(0, 120))}`);
+  // Reuse the hook path rather than re-implementing status: an approval is a
+  // PermissionRequest and a finished turn is a Stop, which is what they genuinely
+  // ARE. That inherits the idle debounce, the held-stop rule and the push, and keeps
+  // one status machine instead of two that drift. hookDriven:false is required — see
+  // handleHook.
+  handleHook(session, kind === 'approval' ? 'PermissionRequest' : 'Stop',
+    null, null, null, { hookDriven: false });
 }
 
 // Route binary PTY output only to connections subscribed to that session.
@@ -1430,12 +1468,20 @@ function createSession(id, cwd, name, autoCommand, savedScrollback, claudeSessio
 // `agentId` is Claude's `agent_id`: present iff the event was raised INSIDE a
 // subagent. It is what lets this function tell "the main agent is working again"
 // from "a subagent is calling a tool" — see subagentSet above.
-function handleHook(session, event, claudeSessionId, prompt, agentId) {
+// `opts.hookDriven === false` applies an event that did NOT come from a hook — today,
+// a Codex OSC 9 notification (applyOutputStatusNotification). Everything downstream is
+// identical on purpose: the same status transitions, the same idle debounce, the same
+// broadcast. Only the `hookStatus` flag is withheld, and that is not cosmetic —
+// isClaudeSession() treats it as proof the session is Claude, which gates the API-error
+// sniff and its auto-recovery. Setting it for a Codex session would arm Claude's
+// recovery on it, and that recovery TYPES: it sends "continue", then "/compact" and
+// replays the last prompt. Wrong agent, real damage.
+function handleHook(session, event, claudeSessionId, prompt, agentId, opts) {
   if (!event) throw new Error('event required');
   const prevStatus = session.status;
   const fromSubagent = !!agentId;
   let notifyType = null, notifyMsg = null;
-  session.hookStatus = true;
+  if (!opts || opts.hookDriven !== false) session.hookStatus = true;
 
   // Remember the user's last real prompt so the API-error /compact escalation
   // can replay it. Skip our own auto-sends ("continue") and slash commands so
@@ -1527,7 +1573,10 @@ function handleHook(session, event, claudeSessionId, prompt, agentId) {
       session.status = 'waiting';
       cancelPendingIdle(session);
       notifyType = 'approval_needed';
-      notifyMsg = `"${session.name}" — Claude needs your approval`;
+      // The agent's own label from the registry — this event now reaches the phone for
+      // Codex too, and a Codex approval that says "Claude needs your approval" sends
+      // the user to the wrong session.
+      notifyMsg = `"${session.name}" — ${agents.getAdapter(sessionAgent(session)).label} needs your approval`;
       break;
     case 'PreCompact':
       // #65 — a /compact is starting: the user's own (this hook) or ours via
