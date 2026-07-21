@@ -39,6 +39,11 @@ function _slowOpLog(name, dur) {
   if (dur > 30) console.log(`[slow-op] ${new Date().toISOString()} ${name} dur=${dur.toFixed(0)}ms`);
 }
 const STALE_STATUS_TIMEOUT_MS = 5 * 60 * 1000;
+// Abandonment backstop for 'waiting' ONLY (see correctStaleStatus). Deliberately far
+// beyond any plausible answer delay — a question asked in the evening must still be
+// red in the morning — so this catches only an agent that died mid-question without
+// firing a resolving hook, never a user who simply has not answered yet.
+const WAITING_ABANDONED_TIMEOUT_MS = 12 * 60 * 60 * 1000;
 const MAX_SCROLLBACK_SIZE = 2 * 1024 * 1024;
 
 // Bracketed-paste mode (DECSET/DECRST 2004). Apps like Claude Code enable it
@@ -1121,10 +1126,24 @@ function correctStaleStatus(session) {
   // on every PTY chunk in processPtyOutput) to be stale before flipping. This is
   // self-bounding: a genuinely hung process emits nothing, so lastActivity also
   // goes stale and the session still corrects to idle after the timeout.
+  //
+  // 'waiting' is NOT subject to the 5-minute rule, because for it the heuristic is
+  // inverted. 'working' going quiet suggests the work died. 'waiting' going quiet is
+  // the state's DEFINITION — the session is blocked on the user and emits nothing,
+  // by design, until they answer. Timing it out therefore fired on exactly the
+  // sessions that most needed attention, and did so through one broadcast with three
+  // effects: the red pulsing dot went calm green, statusClearsApproval() flipped the
+  // attention record to cleared, and an FCM 'clear' auto-dismissed the notification
+  // already delivered to the phone. The system retracted its own alarm for a question
+  // still open. A 'waiting' session ends the way it reliably already does — the hook
+  // that fires when the user answers. Only true ABANDONMENT (agent died mid-question,
+  // no resolving hook ever) needs a backstop, at a horizon no real answer delay
+  // reaches, so an overnight question is still red in the morning.
   const now = Date.now();
+  const limit = session.status === 'waiting' ? WAITING_ABANDONED_TIMEOUT_MS : STALE_STATUS_TIMEOUT_MS;
   if ((session.status === 'working' || session.status === 'waiting') &&
-      session.lastHookActivity && (now - session.lastHookActivity) > STALE_STATUS_TIMEOUT_MS &&
-      (now - (session.lastActivity || 0)) > STALE_STATUS_TIMEOUT_MS) {
+      session.lastHookActivity && (now - session.lastHookActivity) > limit &&
+      (now - (session.lastActivity || 0)) > limit) {
     const prev = session.status;
     session.status = 'idle';
     // The safety net for #61 too: a subagent that crashed without firing

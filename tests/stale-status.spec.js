@@ -165,25 +165,13 @@ test.describe('Stale session status detection', () => {
     expect(s.status).toBe('idle');
   });
 
-  test('"waiting" sessions stuck too long are also marked stale', async () => {
-    // Set to waiting
-    const hookRes = await ctx.post(`/api/session/${sessionId}/hook`, {
-      data: { event: 'PermissionRequest' },
-    });
-    expect(hookRes.ok()).toBeTruthy();
-    const hookBody = await hookRes.json();
-    expect(hookBody.status).toBe('waiting');
-
-    // Age it — a permission request pending for 10 min is also suspicious
-    const ageRes = await ctx.post(`/api/test/age-session/${sessionId}`, {
-      data: { ageMinutes: 10 },
-    });
-    expect(ageRes.ok()).toBeTruthy();
-
-    const res = await ctx.get('/api/sessions');
-    const s = (await res.json()).find(s => s.id === sessionId);
-    expect(s.status).toBe('idle');
-  });
+  // REMOVED: '"waiting" sessions stuck too long are also marked stale'. It asserted
+  // that a 10-minute-old PermissionRequest flips to idle, on the rationale that it
+  // was "also suspicious". That rationale is inverted and was the bug: a session in
+  // 'waiting' is blocked ON THE USER, so elapsed silence measures how long they have
+  // not answered — never whether the question resolved. Its legitimate concern (an
+  // ABANDONED wait must not pin forever) is kept, at a horizon that cannot fire on a
+  // live question: see the abandonment-backstop test below.
 
   test('#37: recent PTY output keeps a working session from stale-flip (build/bg process)', async () => {
     // A build or background process produces continuous PTY output but fires no
@@ -233,6 +221,48 @@ test.describe('Stale session status detection', () => {
 
     await ctx.post(`/api/test/age-session/${sessionId}`, {
       data: { ageMinutes: 10 }, // both clocks
+    });
+
+    const res = await ctx.get('/api/sessions');
+    const s = (await res.json()).find(s => s.id === sessionId);
+    expect(s.status).toBe('idle');
+  });
+
+  test('a session WAITING on the user is NEVER stale-flipped to idle', async () => {
+    // The staleness heuristic is INVERTED for 'waiting'. For 'working', silence
+    // means the work probably died, so idle is a sane correction (#37 above).
+    // For 'waiting' silence is the DEFINING condition: the session is blocked on
+    // the user and emits nothing — no hook, no PTY output — until they answer.
+    // Aging both clocks is therefore not evidence the wait ended; it is evidence
+    // the user has not answered YET, which is exactly when the red pulsing dot
+    // matters most. Observed on XPS: PermissionRequest at 08:50:18, stale
+    // correction to idle at 08:55:20, question still live hours later.
+    const hookRes = await ctx.post(`/api/session/${sessionId}/hook`, {
+      data: { event: 'PermissionRequest' },
+    });
+    expect((await hookRes.json()).status).toBe('waiting');
+
+    await ctx.post(`/api/test/age-session/${sessionId}`, {
+      data: { ageMinutes: 10 }, // BOTH clocks — the normal state of a real wait
+    });
+
+    const res = await ctx.get('/api/sessions');
+    const s = (await res.json()).find(s => s.id === sessionId);
+    expect(s.status).toBe('waiting');
+  });
+
+  test('a waiting session still self-corrects at the long abandonment backstop', async () => {
+    // The one case excluding 'waiting' would otherwise pin forever: the agent
+    // died mid-question without ever firing a resolving hook. A backstop far
+    // beyond any plausible answer delay catches that without touching a wait the
+    // user simply has not got to yet.
+    const hookRes = await ctx.post(`/api/session/${sessionId}/hook`, {
+      data: { event: 'PermissionRequest' },
+    });
+    expect((await hookRes.json()).status).toBe('waiting');
+
+    await ctx.post(`/api/test/age-session/${sessionId}`, {
+      data: { ageMinutes: 13 * 60 }, // past WAITING_ABANDONED_TIMEOUT_MS (12h)
     });
 
     const res = await ctx.get('/api/sessions');
