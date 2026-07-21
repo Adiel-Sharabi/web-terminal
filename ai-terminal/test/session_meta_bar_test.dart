@@ -12,7 +12,9 @@
 //   * the FLEXIBLE child is the cwd side — the thing that can shrink harmlessly,
 //   * and it renders for a terminal-lens session too, which the old chat-only
 //     placement never did.
+import 'package:flutter/gestures.dart';
 import 'package:flutter/material.dart';
+import 'package:flutter/services.dart';
 import 'package:flutter_test/flutter_test.dart';
 
 import 'package:ai_terminal/api/models.dart';
@@ -259,6 +261,95 @@ void main() {
     // nothing at all while these chips lived inside the chat lens.
     await pumpBar(tester, session: _session());
     expect(find.text('am8'), findsOneWidget);
+  });
+
+  // #77 — the chip shows the folder NAME, so the full path was nowhere on screen
+  // and nowhere to be grabbed: the label is a plain Text with no gesture, which is
+  // why it alone refused to select while the chat text around it selected fine.
+  // The gesture pair and the menu-then-snackbar shape are lifted from _ChatLink
+  // (conversation_view.dart) rather than invented, so the copy gesture a user
+  // already knows from a chat link is the same one that works here.
+  group('#77 copy the full cwd path', () {
+    late List<MethodCall> platformCalls;
+
+    setUp(() {
+      platformCalls = <MethodCall>[];
+      TestDefaultBinaryMessengerBinding.instance.defaultBinaryMessenger
+          .setMockMethodCallHandler(SystemChannels.platform, (call) async {
+        platformCalls.add(call);
+        return null;
+      });
+    });
+
+    tearDown(() {
+      TestDefaultBinaryMessengerBinding.instance.defaultBinaryMessenger
+          .setMockMethodCallHandler(SystemChannels.platform, null);
+    });
+
+    String? copiedText() {
+      for (final c in platformCalls.reversed) {
+        if (c.method == 'Clipboard.setData') {
+          return (c.arguments as Map)['text'] as String?;
+        }
+      }
+      return null;
+    }
+
+    testWidgets('long-press on the cwd chip offers Copy path', (tester) async {
+      await pumpBar(tester, session: _session());
+      await tester.longPress(find.text('am8'));
+      await tester.pumpAndSettle();
+      expect(find.text('Copy path'), findsOneWidget);
+    });
+
+    testWidgets('copies the WHOLE path, not the folder name shown on the chip',
+        (tester) async {
+      // The point of the issue: selecting the visible label would only ever
+      // yield "am8". The clipboard must carry the path the user came for.
+      await pumpBar(tester, session: _session());
+      await tester.longPress(find.text('am8'));
+      await tester.pumpAndSettle();
+      await tester.tap(find.text('Copy path'));
+      await tester.pumpAndSettle();
+      expect(copiedText(), r'C:\dev\am8');
+    });
+
+    testWidgets('right-click opens the same menu — desktop has no long-press',
+        (tester) async {
+      await pumpBar(tester, session: _session());
+      final gesture =
+          await tester.startGesture(tester.getCenter(find.text('am8')),
+              kind: PointerDeviceKind.mouse, buttons: kSecondaryMouseButton);
+      await gesture.up();
+      await tester.pumpAndSettle();
+      expect(find.text('Copy path'), findsOneWidget);
+    });
+
+    testWidgets('confirms the copy, in the wording the app already uses',
+        (tester) async {
+      await pumpBar(tester, session: _session());
+      await tester.longPress(find.text('am8'));
+      await tester.pumpAndSettle();
+      await tester.tap(find.text('Copy path'));
+      await tester.pump();
+      expect(find.text('Path copied'), findsOneWidget);
+    });
+
+    testWidgets('a session with no cwd offers no menu at all', (tester) async {
+      await pumpBar(tester, session: _session(cwd: ''));
+      // Nothing to copy and no chip to press: the gesture must not exist rather
+      // than sit there copying an empty string.
+      expect(find.byIcon(Icons.folder_outlined), findsNothing);
+    });
+
+    testWidgets('the chip still shows only the folder name — width budget (#74)',
+        (tester) async {
+      // Guards the regression the menu could invite: revealing the full path
+      // inline would re-break the bar the #74 work just fixed.
+      await pumpBar(tester, session: _session());
+      expect(find.text('am8'), findsOneWidget);
+      expect(find.textContaining(r'C:\dev'), findsNothing);
+    });
   });
 
   group('folderName', () {

@@ -16,6 +16,7 @@
 library;
 
 import 'package:flutter/material.dart';
+import 'package:flutter/services.dart';
 
 import '../api/models.dart';
 import '../theme/app_theme.dart';
@@ -52,8 +53,10 @@ class SessionMetaBar extends StatelessWidget {
 
     final chips = <Widget>[];
     if (folder.isNotEmpty) {
-      chips.add(_chip(theme, Icons.folder_outlined, folder,
-          theme.colorScheme.onSurfaceVariant));
+      chips.add(_CwdChip(
+          cwd: session.cwd,
+          label: folder,
+          color: theme.colorScheme.onSurfaceVariant));
     }
     // Which model (and effort) the session is actually talking to. Placed before
     // the numbers because it FRAMES them — `ctx 42%` means something different
@@ -141,6 +144,9 @@ class SessionMetaBar extends StatelessWidget {
   }
 
   /// The last path segment of [cwd] — the folder name the user recognises.
+  ///
+  /// Deliberately lossy: the bar's flexible child is this chip, so it shows the
+  /// name and never the path. [_CwdChip] is how the path itself is retrieved.
   static String folderName(String cwd) {
     if (cwd.isEmpty) return '';
     final parts =
@@ -173,6 +179,67 @@ class SessionMetaBar extends StatelessWidget {
           ),
         ],
       ),
+    );
+  }
+}
+
+/// The cwd chip — the one chip you can act on (#77).
+///
+/// The label is the folder NAME, because the bar's flexible child is this chip
+/// and spelling the path out re-breaks the width budget #74 just fixed. That
+/// left the path on no screen and on no clipboard: a plain `Text` with no
+/// gesture, which is exactly why this one label refused to select while the chat
+/// text around it selected fine. Long-press (touch) or right-click (desktop)
+/// takes the whole path.
+///
+/// The gesture pair, the menu and the one-second confirmation are `_ChatLink`'s
+/// (`conversation_view.dart`), lifted deliberately: copying a path is then the
+/// same gesture as copying a chat link, not a second vocabulary to learn. Copy
+/// is the only item — the chip is a readout, and opening the folder is the
+/// desktop's job, not this bar's.
+class _CwdChip extends StatelessWidget {
+  const _CwdChip({required this.cwd, required this.label, required this.color});
+
+  final String cwd;
+  final String label;
+  final Color color;
+
+  Future<void> _copy(BuildContext context) async {
+    if (cwd.isEmpty) return;
+    await Clipboard.setData(ClipboardData(text: cwd));
+    if (context.mounted) {
+      ScaffoldMessenger.of(context).showSnackBar(
+        const SnackBar(
+            content: Text('Path copied'), duration: Duration(seconds: 1)),
+      );
+    }
+  }
+
+  Future<void> _menu(BuildContext context, Offset globalPos) async {
+    if (cwd.isEmpty) return;
+    final overlay =
+        Overlay.of(context).context.findRenderObject() as RenderBox?;
+    if (overlay == null) return;
+    final selected = await showMenu<String>(
+      context: context,
+      position: RelativeRect.fromRect(
+        Rect.fromPoints(globalPos, globalPos),
+        Offset.zero & overlay.size,
+      ),
+      items: const [
+        PopupMenuItem<String>(value: 'copy', child: Text('Copy path')),
+      ],
+    );
+    if (selected == 'copy' && context.mounted) await _copy(context);
+  }
+
+  @override
+  Widget build(BuildContext context) {
+    return GestureDetector(
+      onLongPressStart: (d) => _menu(context, d.globalPosition),
+      onSecondaryTapDown: (d) => _menu(context, d.globalPosition),
+      child: SessionMetaBar._chip(
+          Theme.of(context), Icons.folder_outlined, label, color),
     );
   }
 }
