@@ -55,6 +55,22 @@ class SessionMetaBar extends StatelessWidget {
       chips.add(_chip(theme, Icons.folder_outlined, folder,
           theme.colorScheme.onSurfaceVariant));
     }
+    // Which model (and effort) the session is actually talking to. Placed before
+    // the numbers because it FRAMES them — `ctx 42%` means something different
+    // against a 200k window than a 1M one — and rendered in the quiet variant
+    // colour because, unlike the percentages, it is a stable property that does
+    // not want the eye.
+    //
+    // Agent-neutral by construction: the server fills the same `model`/`effort`
+    // for every provider (Claude from its status-line payload, Codex from its
+    // rollout's turn_context), so this asks for a field, never for an agent.
+    // Either half may be absent, so the label is whichever parts exist.
+    final modelLabel =
+        [m?.model, m?.effort].where((p) => p != null && p.isNotEmpty).join(' · ');
+    if (modelLabel.isNotEmpty) {
+      chips.add(_chip(theme, Icons.psychology_outlined, modelLabel,
+          theme.colorScheme.onSurfaceVariant));
+    }
     // Context fills fast and matters most — warn early (50%), danger at 70%.
     // Prefer the live status-line value; fall back to the transcript estimate.
     if (m?.ctx != null) {

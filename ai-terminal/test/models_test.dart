@@ -417,8 +417,24 @@ void main() {
       expect(s.metrics, isNull);
     });
 
-    test('null when no numeric metric present', () {
-      expect(SessionMetrics.fromJson({'model': 'Opus'}), isNull);
+    // Was: 'null when no numeric metric present', asserting a model-only report
+    // parsed to null. That rule predated the meta bar rendering the model, and
+    // its rationale ("model is not renderable") is what this change makes false:
+    // a status line pushed before the session's first API call carries the
+    // STABLE fields only, so the old gate blanked the model chip on exactly the
+    // fresh sessions where the model is least obvious.
+    test('a model-only report is renderable — it is not a number, but it is shown', () {
+      final m = SessionMetrics.fromJson({'model': 'Opus'});
+      expect(m, isNotNull);
+      expect(m!.model, 'Opus');
+      expect(m.ctx, isNull);
+    });
+
+    // Still true, and the reason the gate is not simply "any field at all":
+    // ctxWindow says how big the window is, not how much of it is used, and
+    // nothing renders it on its own.
+    test('null when only ctxWindow is present', () {
+      expect(SessionMetrics.fromJson({'ctxWindow': 200000}), isNull);
     });
 
     test('clamps out-of-range percentages', () {

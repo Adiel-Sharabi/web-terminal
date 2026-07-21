@@ -116,6 +116,29 @@ test('model and effort come from the newest turn_context', () => {
   expect(m.effort).toBe('high');
 });
 
+test('an over-long model label is rejected, not rendered', () => {
+  // model/effort become rendered TEXT in both clients and ride to peers on
+  // GET /api/cluster/sessions, so they are length-bound by the shared
+  // metrics-common.label rule — the same one Claude's parser has always used.
+  // The Codex side only type-checked before, which made one fact two rules.
+  const text = [
+    turnContext('x'.repeat(41), 'high'),
+    tokenCount(usage(1000), limits(1, 1)),
+  ].join('\n');
+  const m = parseMetricsFromTail(text);
+  expect(m.model).toBeNull();
+  // A bad model must not take a good effort down with it.
+  expect(m.effort).toBe('high');
+});
+
+test('a model label exactly at the cap is kept', () => {
+  const text = [
+    turnContext('y'.repeat(40), 'high'),
+    tokenCount(usage(1000), limits(1, 1)),
+  ].join('\n');
+  expect(parseMetricsFromTail(text).model).toBe('y'.repeat(40));
+});
+
 test('a turn_context far above the newest token_count is still found', () => {
   // Real shape: turn_context is written once per USER turn, so a long agent turn
   // buries it hundreds of lines above the latest token_count.
