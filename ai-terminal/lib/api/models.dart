@@ -75,6 +75,20 @@ class Session {
   /// plain shell.
   final String? claudeSessionId;
 
+  /// Agent-neutral id of the conversation this session is currently showing.
+  ///
+  /// Equals [claudeSessionId] for Claude; for an agent whose transcript is
+  /// *discovered* rather than derived (Codex) it is the rollout UUID. The chat
+  /// lens drops its cached turns when this changes.
+  ///
+  /// Why it is not just [claudeSessionId]: a Codex conversation had no id on the
+  /// wire at all, so when the server began serving a different rollout the chat
+  /// had nothing to notice and kept showing yesterday beside a live terminal.
+  /// Null for a plain shell, and for a server too old to send it — in which case
+  /// the pre-existing [claudeSessionId] comparison still applies, so an
+  /// un-upgraded server behaves exactly as before.
+  final String? agentSessionId;
+
   /// Epoch milliseconds of the last activity, or `null` if unknown.
   final int? lastActivity;
 
@@ -135,6 +149,7 @@ class Session {
     this.autoCommand = '',
     this.metrics,
     this.agent,
+    this.agentSessionId,
     this.favorite = false,
     this.favoriteRank,
     this.compacting = false,
@@ -150,6 +165,7 @@ class Session {
       cwd: (json['cwd'] ?? '').toString(),
       status: (json['status'] ?? 'idle').toString(),
       claudeSessionId: json['claudeSessionId']?.toString(),
+      agentSessionId: json['agentSessionId']?.toString(),
       lastActivity: _asInt(json['lastActivity']),
       notifyLevel: (json['notifyLevel'] ?? 'important').toString(),
       autoCommand: (json['autoCommand'] ?? '').toString(),

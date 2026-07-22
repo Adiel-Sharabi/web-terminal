@@ -1043,6 +1043,68 @@ void main() {
   );
 
   testWidgets(
+    'a Codex session resets when the rollout changes (agentSessionId)',
+    (tester) async {
+      // The Office report: a live terminal beside a chat lens showing a 17h-old
+      // conversation. claudeSessionId is null for EVERY Codex session, so the #35
+      // reset above could never fire for one — and a Codex transcript is DISCOVERED
+      // ("newest rollout for this cwd") with a new rollout written every run, so the
+      // server legitimately starts serving a different conversation while nothing the
+      // client could see changes. agentSessionId is that missing signal.
+      TranscriptPage current = const TranscriptPage(
+        messages: [
+          TranscriptTurn(
+              role: 'assistant', text: 'YESTERDAYS_ROLLOUT', toolUses: [], ts: null),
+        ],
+        cursor: null,
+        hasMore: false,
+      );
+      Future<TranscriptPage> fetch(String id,
+              {String? before, int? limit}) async =>
+          current;
+
+      // claudeSessionId stays null and lastActivity is held constant, so the ONLY
+      // thing that can trigger the reset is agentSessionId.
+      Session sess(String? rolloutId) => Session(
+            id: 'sess-codex',
+            name: 'Codex bug hunter',
+            cwd: r'C:\\dev\\am8_core',
+            status: 'idle',
+            claudeSessionId: null,
+            agentSessionId: rolloutId,
+            lastActivity: 1000,
+            notifyLevel: 'important',
+            server: _server(),
+            autoCommand: '',
+            agent: 'codex',
+          );
+      Widget build(Session s) =>
+          _wrap(ConversationView(session: s, fetchPage: fetch));
+
+      await tester.pumpWidget(build(sess('019f84c8-410f-77f2-989e-d5a235e46b53')));
+      await tester.pumpAndSettle();
+      expect(find.text('YESTERDAYS_ROLLOUT'), findsOneWidget);
+
+      // Codex started a new session: a different rollout UUID, and the server now
+      // serves that conversation instead.
+      current = const TranscriptPage(
+        messages: [
+          TranscriptTurn(
+              role: 'assistant', text: 'TODAYS_ROLLOUT', toolUses: [], ts: null),
+        ],
+        cursor: null,
+        hasMore: false,
+      );
+      await tester.pumpWidget(build(sess('019f8928-94e9-7072-93d3-271f00fbaea7')));
+      await tester.pumpAndSettle();
+
+      expect(find.text('YESTERDAYS_ROLLOUT'), findsNothing,
+          reason: 'the stale conversation must be dropped, not kept beside the new one');
+      expect(find.text('TODAYS_ROLLOUT'), findsOneWidget);
+    },
+  );
+
+  testWidgets(
     '#35: a transcript that shrinks in place is reflected, not left stale',
     (tester) async {
       // Same claudeSessionId throughout, so the didUpdateWidget reset path is

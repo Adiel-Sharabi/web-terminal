@@ -195,8 +195,17 @@ class _ConversationViewState extends State<ConversationView> {
     // covers null→id, id→different, and id→null — never on every rebuild.
     // `agent` moves when a session's provider is first detected (null → 'codex'),
     // which changes WHICH transcript the server will serve for the same PTY id.
+    // `agentSessionId` is the AGENT-NEUTRAL form of the same signal, and it is what
+    // makes this work for Codex at all. `claudeSessionId` is null for every Codex
+    // session, so when the server moved to a DIFFERENT rollout — which it legitimately
+    // does, because a Codex transcript is discovered ("newest for this cwd") and Codex
+    // writes a new one every run — nothing here changed and the cached turns survived.
+    // The result was a chat lens showing yesterday's conversation next to a live
+    // terminal. Comparing old vs new (never against a constant) keeps this firing only
+    // on a real change, including null->id for a server too old to send the field.
     if (oldWidget.session.id != widget.session.id ||
         oldWidget.session.claudeSessionId != widget.session.claudeSessionId ||
+        oldWidget.session.agentSessionId != widget.session.agentSessionId ||
         oldWidget.session.agent != widget.session.agent) {
       _resetAndReload();
       return;

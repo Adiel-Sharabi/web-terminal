@@ -101,3 +101,43 @@ async function mkSession(ctx, body) {
   const r = await ctx.post('/api/sessions', { data: body });
   return (await r.json()).id;
 }
+
+test('a Codex session reports its rollout UUID as agentSessionId', async () => {
+  // The wire-level half of the fix: without this field a client caching the transcript
+  // has nothing to compare, which is how the companion kept showing a 17h-old
+  // conversation beside a live terminal.
+  const cwd = fs.mkdtempSync(path.join(os.tmpdir(), 'wt-convid-'));
+  const ctx = await authCtx();
+  const uuid = '019f8928-94e9-7072-93d3-271f00fbaea7';
+  const p = path.join(FIXTURE_DIR, `rollout-2097-02-02T00-00-00-${uuid}.jsonl`);
+  fs.mkdirSync(FIXTURE_DIR, { recursive: true });
+  fs.writeFileSync(p, [
+    line('session_meta', { id: uuid, cwd, cli_version: '0.144.6' }),
+    line('response_item', { type: 'message', role: 'assistant', content: [{ type: 'output_text', text: 'hi' }] }),
+  ].join('\n') + '\n', 'utf8');
+  created.push(p);
+
+  const id = await mkSession(ctx, { name: 'codex-convid', cwd, agent: 'codex' });
+  const list = await (await ctx.get('/api/sessions')).json();
+  const arr = Array.isArray(list) ? list : (list.sessions || []);
+  const s = arr.find((x) => x.id === id);
+
+  expect(s.agentSessionId).toBe(uuid);
+  // NOT folded into claudeSessionId: app.html shows the Fork button on that field and
+  // forks with `claude --resume <id>`, which cannot work for a Codex conversation.
+  expect(s.claudeSessionId == null).toBeTruthy();
+
+  await ctx.delete(`/api/sessions/${id}`);
+  await ctx.dispose();
+  try { fs.rmSync(cwd, { recursive: true, force: true }); } catch {}
+});
+
+test('a plain shell reports no conversation id', async () => {
+  const ctx = await authCtx();
+  const id = await mkSession(ctx, { name: 'shell-convid', cwd: os.tmpdir() });
+  const list = await (await ctx.get('/api/sessions')).json();
+  const arr = Array.isArray(list) ? list : (list.sessions || []);
+  expect(arr.find((x) => x.id === id).agentSessionId == null).toBeTruthy();
+  await ctx.delete(`/api/sessions/${id}`);
+  await ctx.dispose();
+});
