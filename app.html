@@ -3557,11 +3557,26 @@
     }
 
     // --- New session form ---
+    // The default folder as it is PRE-FILLED: with a trailing separator, so a
+    // subfolder can be typed straight onto the end (`C:\dev\` + `myproj`) rather
+    // than typing the separator every time. Display only — the server
+    // canonicalises the cwd on create (lib/cwd.js), which is what keeps the
+    // trailing separator out of claudeProjectDirName, where it would name a
+    // project dir Claude never created and lose the Chat lens.
+    // The separator follows the path's own style: this may be a REMOTE server's
+    // default cwd, not this host's. Mirrors cwdWithTrailingSep in the companion's
+    // new_session_sheet.dart.
+    function cwdWithTrailingSep(cwd) {
+      if (!cwd) return cwd;
+      if (/[\\/]$/.test(cwd)) return cwd;
+      return cwd + (cwd.includes('\\') ? '\\' : '/');
+    }
+
     function toggleNewForm() {
       const form = document.getElementById('newSessionForm');
       form.classList.toggle('show');
       if (form.classList.contains('show')) {
-        document.getElementById('newCwd').value = defaultCwd;
+        document.getElementById('newCwd').value = cwdWithTrailingSep(defaultCwd);
         document.getElementById('newCmd').value = defaultCommand;
         // Issue #23: populate & pre-select the server dropdown BEFORE fetching
         // the folder list — otherwise loadFolderHistory reads the stale value

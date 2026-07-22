@@ -216,7 +216,7 @@ Config is stored in `config.json` (gitignored):
 | `shell` | No | Shell path (Git Bash, PowerShell, cmd) |
 | `user` / `password` | Yes | Login credentials (password auto-hashed on startup) |
 | `serverName` | Yes | Display name for this server |
-| `defaultCwd` | Yes | Default working directory for new sessions |
+| `defaultCwd` | Yes | Default working directory for new sessions. Both clients pre-fill the folder field with a **trailing separator** (`C:\dev\`) so a subfolder can be typed straight onto the end; the server strips it again on create (`lib/cwd.js`), because `claudeProjectDirName` gives every non-alphanumeric char its own dash and a trailing one would name a project directory Claude never created — losing the chat transcript while the session itself looks fine |
 | `scanFolders` | Yes | Directories to scan for folder autocomplete |
 | `defaultCommand` | Yes | Pre-filled auto-command for new sessions |
 | `scrollbackReplayLimit` | Yes | Bytes replayed on initial attach (default 32 KB). Older history is fetched on demand when xterm scrolls to the top. |
