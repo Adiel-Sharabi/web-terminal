@@ -217,3 +217,46 @@ test.describe('the codex provider prefers a reported id over any guess', () => {
     expect(codex.resolveTranscript({ cwd: CWD }, io)).toBe(pA);
   });
 });
+
+test.describe('a session is never handed a conversation that is not its own', () => {
+  const CWD = 'C:\dev\acme_core';
+  const pUser = roll('2026-07-22T10-07-16', UUID_A);
+  const pSub = roll('2026-07-22T09-30-00', UUID_B);
+  const meta = (id, threadSource) => JSON.stringify({
+    type: 'session_meta', payload: { id, cwd: CWD, thread_source: threadSource },
+  });
+  const io = {
+    listRollouts: () => [{ path: pSub, mtimeMs: 3000 }, { path: pUser, mtimeMs: 1000 }],
+    // The SUBAGENT is newer, so mtime ranking would pick it.
+    readFirstLine: (p) => (p === pSub ? meta(UUID_B, 'subagent') : meta(UUID_A, 'user')),
+  };
+  const opts = { platform: 'win32' };
+
+  test('a SUBAGENT rollout is never resolved as a session conversation', () => {
+    // Measured on Office: two of the three rollouts in one cwd were subagents, and the
+    // newest of them would have won on mtime. A subagent is a child of a conversation,
+    // not a conversation — its session_id points at the parent.
+    expect(findRolloutForCwd(CWD, io, opts)).toBe(pUser);
+  });
+
+  test('a conversation CLAIMED by another session is skipped', () => {
+    // The freshly-opened-session case: Codex writes no rollout until its first turn
+    // STARTS, so a new session owns nothing yet and mtime would hand it the neighbour's.
+    const claimed = new Set([UUID_A]);
+    expect(findRolloutForCwd(CWD, io, { ...opts, claimedIds: claimed })).toBe('');
+  });
+
+  test('its OWN claim is not skipped — only other sessions claims are', () => {
+    // claimedIds carries only OTHER sessions ids, so a session that owns UUID_A still
+    // resolves it through the exact path.
+    expect(findRolloutForCwd(CWD, io, { ...opts, claimedIds: new Set() })).toBe(pUser);
+  });
+
+  test('parseSessionMeta exposes thread_source', () => {
+    const { parseSessionMeta } = require('../lib/transcript-codex');
+    expect(parseSessionMeta(meta(UUID_B, 'subagent')).threadSource).toBe('subagent');
+    expect(parseSessionMeta(meta(UUID_A, 'user')).threadSource).toBe('user');
+    // Absent on older rollouts — must not be treated as a subagent.
+    expect(parseSessionMeta(JSON.stringify({ type: 'session_meta', payload: { cwd: CWD } })).threadSource).toBe('');
+  });
+});
