@@ -416,4 +416,27 @@ void main() {
       expect(filterFolders(folders, '   '), folders);
     });
   });
+
+  group('cwdWithTrailingSep (pre-filled default folder)', () {
+    test('appends the separator the path itself uses', () {
+      expect(cwdWithTrailingSep(r'C:\dev'), r'C:\dev' '\\');
+      expect(cwdWithTrailingSep('/home/user'), '/home/user/');
+    });
+
+    test('a path that already ends in a separator is left alone', () {
+      // Otherwise re-opening the sheet would keep stacking separators.
+      expect(cwdWithTrailingSep('C:\\dev\\'), 'C:\\dev\\');
+      expect(cwdWithTrailingSep('/home/user/'), '/home/user/');
+    });
+
+    test('a REMOTE posix default keeps posix separators on a windows host', () {
+      // The sheet may show a cluster peer's default cwd, so the separator has to
+      // follow the path's own style rather than this device's.
+      expect(cwdWithTrailingSep('/srv/work'), '/srv/work/');
+    });
+
+    test('empty stays empty — nothing to append to', () {
+      expect(cwdWithTrailingSep(''), '');
+    });
+  });
 }

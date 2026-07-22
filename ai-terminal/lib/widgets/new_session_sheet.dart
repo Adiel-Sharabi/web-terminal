@@ -51,6 +51,23 @@ List<String> filterFolders(List<String> folders, String query) {
       .toList(growable: false);
 }
 
+/// The default folder as it is PRE-FILLED, with a trailing separator so a
+/// subfolder can be typed straight onto the end (`C:\dev\` + `myproj`) instead of
+/// the user having to type the separator every time.
+///
+/// Display only. The server canonicalises the cwd on create (`lib/cwd.js`), which
+/// is what stops the trailing separator reaching `claudeProjectDirName` — it gives
+/// every non-alphanumeric char its own dash, so a trailing one names a project
+/// directory Claude never created and the Chat lens silently finds nothing.
+///
+/// The separator matches the path's own style rather than the host's: this field
+/// may be showing the default cwd of a REMOTE cluster server. Pure/testable.
+String cwdWithTrailingSep(String cwd) {
+  if (cwd.isEmpty) return cwd;
+  if (cwd.endsWith('\\') || cwd.endsWith('/')) return cwd;
+  return cwd + (cwd.contains('\\') ? '\\' : '/');
+}
+
 /// Next highlight index after moving [delta] (+1 down / -1 up) through [count]
 /// folder-suggestion rows, from [current] (-1 = nothing highlighted). Entering
 /// an unhighlighted list highlights the first row going down / the last going
@@ -189,7 +206,7 @@ class _NewSessionSheetState extends State<_NewSessionSheet> {
       if (!mounted || _server != server) return;
       _settingProgrammatically = true;
       if (!_cwdEdited && config.defaultCwd.isNotEmpty) {
-        _cwd.text = config.defaultCwd;
+        _cwd.text = cwdWithTrailingSep(config.defaultCwd);
       }
       if (!_commandEdited && config.defaultCommand.isNotEmpty) {
         _command.text = config.defaultCommand;

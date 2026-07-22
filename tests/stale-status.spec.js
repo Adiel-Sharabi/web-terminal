@@ -261,13 +261,18 @@ test.describe('Stale session status detection', () => {
     });
     expect((await hookRes.json()).status).toBe('waiting');
 
-    await ctx.post(`/api/test/age-session/${sessionId}`, {
-      data: { ageMinutes: 13 * 60 }, // past WAITING_ABANDONED_TIMEOUT_MS (12h)
-    });
-
-    const res = await ctx.get('/api/sessions');
-    const s = (await res.json()).find(s => s.id === sessionId);
-    expect(s.status).toBe('idle');
+    // Re-age on every poll rather than once. A freshly spawned shell emits its
+    // prompt a beat after creation, and that PTY chunk legitimately refreshes
+    // lastActivity — which correctStaleStatus reads as "not silent" and declines
+    // to correct, exactly as #37 intends. Ageing once therefore races the prompt:
+    // it passed alone and failed under full-suite load. Re-stale, then read.
+    await expect.poll(async () => {
+      await ctx.post(`/api/test/age-session/${sessionId}`, {
+        data: { ageMinutes: 13 * 60 }, // past WAITING_ABANDONED_TIMEOUT_MS (12h)
+      });
+      const res = await ctx.get('/api/sessions');
+      return (await res.json()).find(s => s.id === sessionId).status;
+    }, { timeout: 10000 }).toBe('idle');
   });
 
   test('cluster/sessions also reflects stale correction for local sessions', async () => {
