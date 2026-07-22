@@ -50,6 +50,9 @@ test('parseSessionMeta pulls id + cwd (the only record of the working dir)', () 
     cwd: 'C:\\dev\\web-terminal',
     cliVersion: '0.134.0',
     ts: '2026-07-09T12:00:00.000Z',
+    // Absent on this (0.134.0) fixture. Empty, NOT 'subagent' — an older rollout with no
+    // thread_source must still resolve as a session conversation.
+    threadSource: '',
   });
 });
 
