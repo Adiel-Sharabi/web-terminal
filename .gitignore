@@ -67,3 +67,4 @@ claude-metrics.json
 
 # Metrics mirror written by the test run (isolated from the real one)
 claude-metrics.test.json
+codex-sessions.json
