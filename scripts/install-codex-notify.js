@@ -37,6 +37,29 @@ const WANT = [
   ['notification_condition', '"always"'],
 ];
 
+// The ROOT-level `notify` key: the program Codex runs when a turn completes. This is what
+// tells web-terminal which conversation belongs to which session, which is the only thing
+// that lets several Codex sessions share a working directory (scripts/codex-notify.js).
+// Verified on codex-cli 0.144.6: `notify` fires with NO trust prompt, unlike hooks.
+const NOTIFY_PROGRAM = path.join(__dirname, 'codex-notify.js');
+const NOTIFY_VALUE = `notify = ["node", ${JSON.stringify(NOTIFY_PROGRAM)}]`;
+
+// A root key must be written BEFORE the first [table] header — after one, TOML reads it
+// as a member of that table, where Codex would silently never see it.
+function patchNotify(src) {
+  const lines = src.split(/\r?\n/);
+  const at = lines.findIndex((l) => /^\s*notify\s*=/.test(l));
+  if (at !== -1) {
+    if (lines[at].trim() === NOTIFY_VALUE) return { text: src, changed: false };
+    lines[at] = NOTIFY_VALUE;
+    return { text: lines.join('\n'), changed: true };
+  }
+  const firstTable = lines.findIndex((l) => /^\s*\[/.test(l));
+  if (firstTable === -1) lines.push(NOTIFY_VALUE);
+  else lines.splice(firstTable, 0, NOTIFY_VALUE, '');
+  return { text: lines.join('\n'), changed: true };
+}
+
 // A bare `[tui]` header — NOT `[tui.something]`, which is a different table and must
 // not be written into (its keys belong to the subtable, so `notifications` there would
 // be silently ignored, the same class of trap as Codex's camelCase hook keys).
@@ -83,7 +106,11 @@ function main() {
     process.exit(1);
   }
   const src = fs.readFileSync(CONFIG, 'utf8');
-  const { text, added, changed } = patch(src);
+  const tui = patch(src);
+  const notify = patchNotify(tui.text);
+  const text = notify.text;
+  const added = tui.added;
+  const changed = tui.changed.concat(notify.changed ? ['notify'] : []);
 
   if (text === src) {
     console.log(`config.toml already correct (${CONFIG})`);
@@ -112,4 +139,4 @@ function main() {
 }
 
 if (require.main === module) main();
-module.exports = { patch };
+module.exports = { patch, patchNotify };

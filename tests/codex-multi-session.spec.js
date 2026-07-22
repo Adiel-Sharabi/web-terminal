@@ -163,3 +163,57 @@ test.describe('findRolloutForCwd — the Office scenario end to end', () => {
     expect(findRolloutForCwd('C:\\dev\\elsewhere', io, { ...opts, processStartMs: Date.now() })).toBe('');
   });
 });
+
+test.describe('findRolloutById — the exact answer from codex-notify', () => {
+  const { findRolloutById } = require('../lib/codex-sessions');
+  const pA = roll('2026-07-22T10-07-16', UUID_A);
+  const pB = roll('2026-07-22T09-30-00', UUID_B);
+  const io = { listRollouts: () => [{ path: pA, mtimeMs: 2 }, { path: pB, mtimeMs: 1 }] };
+
+  test('resolves by conversation id regardless of cwd or mtime order', () => {
+    // The point: no cwd guessing and no newest-wins. B is OLDER and would never win the
+    // ranking, yet it is the correct answer for the session that owns it.
+    expect(findRolloutById(UUID_B, io)).toBe(pB);
+    expect(findRolloutById(UUID_A, io)).toBe(pA);
+  });
+
+  test('two sessions with reported ids never collide, however many share a folder', () => {
+    expect(findRolloutById(UUID_A, io)).not.toBe(findRolloutById(UUID_B, io));
+  });
+
+  test('an unknown id resolves to nothing rather than the newest', () => {
+    expect(findRolloutById('019f0000-0000-7000-8000-000000000000', io)).toBe('');
+  });
+
+  test('a non-uuid is rejected — it must never become a path fragment', () => {
+    expect(findRolloutById('../../etc/passwd', io)).toBe('');
+    expect(findRolloutById('', io)).toBe('');
+    expect(findRolloutById(null, io)).toBe('');
+  });
+});
+
+test.describe('the codex provider prefers a reported id over any guess', () => {
+  const agents = require('../lib/agents');
+  const CWD = 'C:\dev\acme_core';
+  const pA = roll('2026-07-22T10-07-16', UUID_A);
+  const pB = roll('2026-07-22T09-30-00', UUID_B);
+  const io = {
+    root: 'r',
+    join: require('path').join,
+    listRollouts: () => [{ path: pA, mtimeMs: 2000 }, { path: pB, mtimeMs: 1000 }],
+    readFirstLine: () => JSON.stringify({ type: 'session_meta', payload: { cwd: CWD } }),
+  };
+  const codex = agents.getAdapter('codex');
+
+  test('a reported conversationId wins over newest-in-cwd', () => {
+    // Without the id this session would be handed pA (newest) — the exact collision
+    // seen on Office. With it, it gets its own.
+    expect(codex.resolveTranscript({ cwd: CWD, conversationId: UUID_B }, io)).toBe(pB);
+  });
+
+  test('no reported id falls back to the previous behaviour, not to nothing', () => {
+    // notify only reports once a turn COMPLETES, so a session mid-first-turn must still
+    // resolve something rather than showing an empty lens.
+    expect(codex.resolveTranscript({ cwd: CWD }, io)).toBe(pA);
+  });
+});
