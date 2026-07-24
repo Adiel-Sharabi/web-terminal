@@ -100,6 +100,60 @@ void main() {
     });
   });
 
+  group('pendingQuestionChipVisible (#79: dismissed question still needs a mark)', () {
+    // The gap: an AskUserQuestion leaves the session idle/GREEN (a pending
+    // question emits no output and no hooks, so it stale-corrects to idle after
+    // 5 min while the answer is still owed) — so status colour cannot carry the
+    // signal. The overlay is the indication WHILE it is up, but it is
+    // dismissible, and once dismissed nothing on screen shows the question is
+    // still pending. The chip fills exactly that hole: pending AND overlay
+    // dismissed. It is the complement of questionOverlayVisible — the two are
+    // mutually exclusive and together cover "a question is pending".
+    PendingQuestion q(String prompt, {String id = 'toolu_x'}) => PendingQuestion(
+          toolUseId: id,
+          questions: [
+            PendingQuestionItem(
+              header: 'H',
+              question: prompt,
+              multiSelect: false,
+              options: const [QuestionOption(label: 'Yes', description: '')],
+            ),
+          ],
+        );
+
+    test('no pending question -> no chip', () {
+      expect(pendingQuestionChipVisible(null, null), isFalse);
+      expect(pendingQuestionChipVisible(null, 'somekey'), isFalse);
+    });
+
+    test('pending and NOT dismissed -> no chip (the overlay is the indication)', () {
+      expect(pendingQuestionChipVisible(q('one'), null), isFalse);
+    });
+
+    test('pending and dismissed -> chip shows (the #79 gap)', () {
+      final key = questionSignature(q('one'));
+      expect(pendingQuestionChipVisible(q('one'), key), isTrue);
+    });
+
+    test('chip and overlay are mutually exclusive for the same state', () {
+      // Whatever the state, exactly one of {overlay, chip} is shown when a
+      // question is pending, and neither when none is.
+      final key = questionSignature(q('one'));
+      for (final (pending, dismissed) in [
+        (null, null),
+        (q('one'), null), // fresh -> overlay
+        (q('one'), key), // dismissed -> chip
+      ]) {
+        final overlay = questionOverlayVisible(pending, dismissed);
+        final chip = pendingQuestionChipVisible(pending, dismissed);
+        expect(overlay && chip, isFalse, reason: 'never both at once');
+        if (pending != null) {
+          expect(overlay || chip, isTrue, reason: 'a pending question is always shown somewhere');
+        }
+      }
+    });
+  });
+
   group('shouldResurfaceAfterAnswer (#19: dropped answer must not stay hidden)', () {
     test('still pending + still our dismissal -> re-show', () {
       expect(

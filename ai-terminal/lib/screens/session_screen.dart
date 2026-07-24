@@ -307,6 +307,19 @@ class _ComposeAttachment {
 bool questionOverlayVisible(PendingQuestion? pending, String? dismissedKey) =>
     pending != null && questionSignature(pending) != dismissedKey;
 
+/// #79 — a pending question whose overlay has been DISMISSED, so nothing else on
+/// screen shows it. This is the complement of [questionOverlayVisible]: exactly
+/// one of the two is true while a question is pending, neither when none is.
+///
+/// Why a status colour cannot do this job: an AskUserQuestion leaves the session
+/// `working`, emits no output and no hooks while it waits, and so stale-corrects
+/// to `idle` (GREEN) after 5 minutes with the answer still owed — the same
+/// stale-correction family fixed for `waiting`. A green session that is in fact
+/// blocked on the user is exactly what "looks like it just went quiet" is. So the
+/// signal must come from the pending question itself, not the dot.
+bool pendingQuestionChipVisible(PendingQuestion? pending, String? dismissedKey) =>
+    pending != null && !questionOverlayVisible(pending, dismissedKey);
+
 /// A STABLE identity for a pending question, derived from its CONTENT (headers,
 /// question text, multiSelect, option labels) instead of the volatile
 /// `toolUseId`.
@@ -639,6 +652,14 @@ class _SessionScreenState extends State<SessionScreen>
 
   /// Replays the answer into Claude's TUI as ABSOLUTE row digits (see
   /// [buildAnswerFrames]). Arrows were unreliable: arrow+Enter frames coalesce
+  /// #79 — re-open a dismissed-but-still-pending question. Clearing the dismissal
+  /// key makes questionOverlayVisible true again (the question is unchanged), so
+  /// the native overlay comes back. Invoked from the "A question is waiting" chip.
+  void _reopenQuestion() {
+    if (_pendingQuestion == null) return;
+    setState(() => _dismissedQuestionKey = null);
+  }
+
   /// into one PTY read and the TUI's batched update confirms the stale top row.
   /// Each frame carries its own settle delay so transition frames land in
   /// separate reads. Hides the overlay optimistically; the next poll confirms.
@@ -2192,6 +2213,20 @@ class _SessionScreenState extends State<SessionScreen>
                   ? _apiErrorReason!
                   : 'API error — Claude stopped responding',
               onTap: _scrollToBottom,
+            ),
+          // #79: a question is pending but its overlay was dismissed. Without
+          // this the session can sit idle/green with an unanswered question and
+          // the chat lens shows nothing — the reported "looks like it went
+          // quiet". Shown in both lenses (the question is pending regardless of
+          // which one is up); tapping re-opens the native overlay. Driven off
+          // the pending question, never the status colour — see
+          // pendingQuestionChipVisible.
+          if (pendingQuestionChipVisible(_pendingQuestion, _dismissedQuestionKey))
+            _AttentionBanner(
+              color: StatusColor.waiting,
+              icon: Icons.help_outline,
+              text: 'A question is waiting — tap to answer',
+              onTap: _reopenQuestion,
             ),
           Expanded(
             child: Stack(
