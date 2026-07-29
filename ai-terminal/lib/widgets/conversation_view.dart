@@ -179,8 +179,31 @@ class _ConversationViewState extends State<ConversationView> {
     _scrollController.addListener(_onScroll);
     _promptSub = widget.submittedPrompts?.listen(_addEcho);
     _loadInitial();
-    _setPolling(widget.session.status == 'working');
+    _setPolling(_shouldLivePoll(widget.session));
   }
+
+  /// Whether the chat should live-poll the transcript tail while it is open.
+  ///
+  /// This used to be `status == 'working'`, which is the RIGHT signal for Claude —
+  /// its hooks drive it to 'working' during a turn and back to idle after. But Codex
+  /// has no hooks here, so its status never leaves 'active': the poll timer never
+  /// started, and the chat only advanced when the parent happened to rebuild this
+  /// widget. Measured on Office: one week-long Codex conversation whose terminal (the
+  /// live PTY) had moved on to bug-hunter QA work while the chat lens sat on an
+  /// email draft from 37 minutes earlier — same conversation, same instant, because
+  /// nothing was refreshing the tail. Polling while 'active' closes that gap.
+  ///
+  /// 'active' only ever belongs to an agent session here (a plain shell has no chat
+  /// lens), so this cannot start a poll for something that has no transcript. The
+  /// cost is one bounded last-page fetch every 4s while a chat is open, and
+  /// _refreshLastPage short-circuits via _turnListEquals when nothing changed.
+  ///
+  /// It does NOT make the chat mirror the terminal turn-by-turn: Codex writes an
+  /// assistant MESSAGE only when a turn completes, so a long tool-heavy turn still
+  /// shows the previous message until it finishes — then the chat catches up within
+  /// one poll instead of hanging until the next rebuild.
+  static bool _shouldLivePoll(Session s) =>
+      s.status == 'working' || s.status == 'active';
 
   @override
   void didUpdateWidget(covariant ConversationView oldWidget) {
@@ -210,9 +233,9 @@ class _ConversationViewState extends State<ConversationView> {
       _resetAndReload();
       return;
     }
-    final wasWorking = oldWidget.session.status == 'working';
-    final isWorking = widget.session.status == 'working';
-    if (isWorking != wasWorking) _setPolling(isWorking);
+    final wasPolling = _shouldLivePoll(oldWidget.session);
+    final isPolling = _shouldLivePoll(widget.session);
+    if (isPolling != wasPolling) _setPolling(isPolling);
     // Session is a plain value object created fresh on every repository
     // emission, so comparing a couple of fields (rather than the whole
     // object, which has no `==`) is the cheap, reliable "did anything
@@ -280,7 +303,7 @@ class _ConversationViewState extends State<ConversationView> {
       _pinnedToBottom = true;
     });
     _loadInitial();
-    _setPolling(widget.session.status == 'working');
+    _setPolling(_shouldLivePoll(widget.session));
   }
 
   void _setPolling(bool enabled) {
