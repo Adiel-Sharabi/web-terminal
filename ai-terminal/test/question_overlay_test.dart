@@ -72,6 +72,36 @@ void main() {
       ])), ['2', '1', '\r']);
     });
 
+    test('multi-question + multi-select: advance a multi-select tab with →, not Enter',
+        () {
+      // The bug: this branch sent Enter to advance, but in the multi-select
+      // selector Enter TOGGLES the highlighted row and stays on the tab — so the
+      // trailing Enter un-toggled a row and never advanced, later digits fell on
+      // the wrong question, and the remaining tabs recorded nothing. Proven on
+      // the real Opus-5 TUI (claude 2.1.220): `1,3,Enter,2,Enter` recorded
+      // Red+Blue+Green for Q1 and NOTHING for Q2; `1,3,→,2,Enter` recorded
+      // Red+Green for Q1 and the Q2 pick correctly. Q1 multi-select {A,C} ->
+      // toggle 1, toggle 3, → to next tab; Q2 single {Y} -> digit 2 (advances to
+      // the Submit review); trailing Enter finalizes.
+      final qs = [_q(['A', 'B', 'C'], multi: true), _q(['X', 'Y', 'Z'])];
+      expect(_keys(buildAnswerFrames(qs, [
+        {0, 2},
+        {1}
+      ])), ['1', '3', '\x1b[C', '2', '\r']);
+    });
+
+    test('multi-question ending in a multi-select tab: → reaches Submit, Enter finalizes',
+        () {
+      // A multi-select as the LAST question: the → lands on the Submit review
+      // (one tab past the last question), and the single post-loop Enter submits
+      // — same endpoint as a single-select last tab.
+      final qs = [_q(['A', 'B']), _q(['X', 'Y', 'Z'], multi: true)];
+      expect(_keys(buildAnswerFrames(qs, [
+        {0},
+        {1, 2}
+      ])), ['1', '2', '3', '\x1b[C', '\r']);
+    });
+
     test('transition frames use a gap so they land in separate PTY reads', () {
       final frames = buildAnswerFrames([_q(['A', 'B', 'C'])], [
         {1}
