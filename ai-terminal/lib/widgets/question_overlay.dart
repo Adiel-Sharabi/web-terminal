@@ -59,8 +59,41 @@ class AnswerFrame {
 /// so `Enter` confirms the *stale* default (top) row and the wrong option is
 /// picked. A digit selects an exact row regardless of ordering or coalescing.
 ///
+/// *** The digit does not always submit — the layout decides. ***
+/// When any option carries a `preview`, Claude renders the selector SIDE-BY-SIDE
+/// (option list left, preview box right) and a digit becomes pure NAVIGATION:
+/// it moves the highlight so you can read that option's preview, and Enter is
+/// what commits. In the compact layout (no previews) the same digit selects AND
+/// submits. Measured on the real TUI (claude 2.1.220, node-pty + headless VT,
+/// verdict taken from the transcript's AskUserQuestion tool_result — the screen
+/// cannot tell "highlighted" from "submitted"):
+///
+///   layout        keys    outcome
+///   no preview    `3`     submitted, recorded "Fold themes into Home.md"
+///   preview       `3`     highlight moved to row 3, NOTHING submitted
+///   preview       `3\r`   submitted, recorded "Fold themes into Home.md"
+///   no preview    `3\r`   submitted; the extra Enter lands on an empty prompt
+///                         line and is a no-op
+///
+/// So a single question sends digit THEN Enter: correct in both layouts, and the
+/// redundant Enter of the compact layout is measured harmless. The app cannot
+/// simply branch on the layout — the server's `_shapeQuestions` keeps only
+/// label/description and drops `preview`, so a question's layout is not on the
+/// wire at all.
+///
+/// MULTI-QUESTION IS DELIBERATELY NOT GIVEN THE SAME TREATMENT, and must not be:
+/// there a digit AUTO-ADVANCES to the next tab (compact layout), so a following
+/// Enter would land on the NEXT, still-unanswered question and commit ITS
+/// default top row — silently answering a question the user never saw. The
+/// preview layout breaks multi-question in its own way (every digit piles onto
+/// tab 1 because none of them advance; measured `2,2,\r` left Q2 blank), but
+/// fixing that needs to know the layout, i.e. `preview` must first reach the
+/// client. Tracked separately — do not "fix" it by appending an Enter here.
+///
 /// Verified against Claude's TUI:
-/// - single-select: the digit selects AND submits, advancing to the next tab.
+/// - single-select: the digit lands on the exact row. Whether it ALSO submits
+///   depends on the layout Claude picked — see "the digit does not always
+///   submit" below — so a single question follows its digit with an Enter.
 /// - multi-select (single question): each digit toggles its row; Enter does NOT
 ///   submit (it toggles the highlighted row), so we send Right-arrow to jump to
 ///   the "Submit" review then digit "1" ("Submit answers") to finalize (#39).
@@ -135,10 +168,10 @@ List<AnswerFrame> buildAnswerFrames(
         note != null &&
         note.isNotEmpty) {
       // Note (#64 Gap 1) attached to the option at sel.first. A single-select
-      // digit SELECTS AND SUBMITS (see the class doc above) so it can't be
-      // used to land on the row first — Down-arrow presses instead walk the
-      // highlight down from the TUI's assumed default top row, the same
-      // relative-nav idiom #39 already uses (Right-arrow to the Submit
+      // digit submits outright in the compact layout (see the class doc above),
+      // so it can't be used to land on the row first — Down-arrow presses
+      // instead walk the highlight down from the TUI's assumed default top row,
+      // the same relative-nav idiom #39 already uses (Right-arrow to the Submit
       // review) for "move without submitting". Each step is DEVICE-UNVERIFIED
       // (see the function doc); if verification finds a different default
       // highlight, keybinding, or that the note editor needs its own
@@ -181,7 +214,18 @@ List<AnswerFrame> buildAnswerFrames(
       }
     } else {
       final idx = sel.isEmpty ? 0 : sel.first;
-      frames.add(AnswerFrame('${idx + 1}', gap)); // select + submit/advance
+      frames.add(AnswerFrame('${idx + 1}', gap)); // land on the exact row
+      if (!multiQuestion) {
+        // Commit it. In the preview (side-by-side) layout the digit above only
+        // MOVED the highlight, so without this the answer is never submitted —
+        // the app looked like it had answered while Claude sat waiting, and the
+        // question had to be finished by hand in the terminal. In the compact
+        // layout the digit already submitted and this Enter is a measured no-op
+        // on an empty prompt line. See the layout table in the doc above.
+        // Multi-question is excluded ON PURPOSE (an Enter there would answer the
+        // NEXT tab with its default row) — also explained above.
+        frames.add(const AnswerFrame('\r', gap));
+      }
     }
   }
   if (multiQuestion) {
@@ -190,13 +234,16 @@ List<AnswerFrame> buildAnswerFrames(
   return frames;
 }
 
-/// True when [frames] end in a confirming Enter — i.e. multi-question (Enter
-/// finalizes the Submit-review screen). Single-select-single ends in its own
-/// auto-submitting digit, and single multi-select now ends in digit "1"
-/// ("Submit answers") after a Right-arrow (#39) — both auto-submit, so neither
-/// needs a re-sent Enter (and for multi-select a stray Enter would toggle a
-/// row). The caller uses this to decide whether to verify the Enter actually
-/// landed (it can be coalesced away by cluster-path bunching) and re-send it.
+/// True when [frames] end in a confirming Enter — multi-question (Enter
+/// finalizes the Submit-review screen) and, since the preview-layout fix,
+/// single-select-single too (its digit no longer submits on its own in every
+/// layout, so it now ends in an explicit committing Enter). Single multi-select
+/// ends in digit "1" ("Submit answers") after a Right-arrow (#39), which
+/// auto-submits, so it needs no re-sent Enter — and a stray one there would
+/// toggle a row. The caller uses this to decide whether to verify the Enter
+/// actually landed (it can be coalesced away by cluster-path bunching) and
+/// re-send it: derived from the frames, so it stays true by construction rather
+/// than by a second rule kept in sync.
 bool answerNeedsConfirm(List<AnswerFrame> frames) =>
     frames.isNotEmpty && frames.last.keys == '\r';
 
