@@ -157,11 +157,19 @@ List<AnswerFrame> buildAnswerFrames(
         frames.add(AnswerFrame('${i + 1}', settle)); // toggle row i
       }
       if (multiQuestion) {
-        // Multi-select tab inside a multi-question prompt: a trailing Enter
-        // advances to the next tab (the final Submit-review Enter is added
-        // once, after the loop). Unchanged; multi-question+multi-select is not
-        // what #39 covers.
-        frames.add(const AnswerFrame('\r', gap));
+        // A multi-select question inside a multi-question prompt. Advance to the
+        // NEXT question tab with Right-arrow — NOT Enter. This branch used to
+        // send Enter, and the else-branch below already knew why that is wrong:
+        // in the multi-select selector Enter TOGGLES the highlighted row and
+        // stays put, it does not move between tabs. So the trailing Enter
+        // un-toggled the row the cursor sat on and never advanced; the next
+        // question's digits then landed back on THIS question, and the later
+        // tabs recorded nothing. Verified on the real Opus-5 TUI (claude
+        // 2.1.220): after toggling, Right-arrow moves one tab right (to the next
+        // question, or to the Submit review after the last one), and the single
+        // Submit-review Enter added after the loop finalizes. Same key the
+        // single multi-select case uses, for the same reason.
+        frames.add(const AnswerFrame('\x1b[C', gap)); // → next question tab
       } else {
         // #39 — single multi-select question. Enter here does NOT submit: it
         // TOGGLES the highlighted row and stays in the selector, so the answer
