@@ -127,10 +127,16 @@ test.describe('Stale session status detection', () => {
     // Verify age was actually applied (lastActivity should be ~10 min ago)
     expect(Date.now() - ageBody.lastActivity).toBeGreaterThan(9 * 60 * 1000);
 
-    // Now fetch sessions — stale detection should auto-correct to idle
-    const res = await ctx.get('/api/sessions');
-    const s = (await res.json()).find(s => s.id === sessionId);
-    expect(s.status).toBe('idle');
+    // Re-age on each poll rather than once. A freshly spawned shell emits its
+    // prompt a beat after creation, and that PTY chunk legitimately refreshes
+    // lastActivity — which correctStaleStatus reads as "not silent" and declines
+    // to correct, exactly as #37 intends. Ageing once therefore races the prompt.
+    // Re-stale, then read: the precondition under test is "both clocks stale".
+    await expect.poll(async () => {
+      await ctx.post(`/api/test/age-session/${sessionId}`, { data: { ageMinutes: 10 } });
+      const res = await ctx.get('/api/sessions');
+      return (await res.json()).find(s => s.id === sessionId).status;
+    }, { timeout: 10000 }).toBe('idle');
   });
 
   test('stale detection does NOT downgrade genuinely active sessions', async () => {
@@ -219,13 +225,15 @@ test.describe('Stale session status detection', () => {
     });
     expect((await hookRes.json()).status).toBe('working');
 
-    await ctx.post(`/api/test/age-session/${sessionId}`, {
-      data: { ageMinutes: 10 }, // both clocks
-    });
-
-    const res = await ctx.get('/api/sessions');
-    const s = (await res.json()).find(s => s.id === sessionId);
-    expect(s.status).toBe('idle');
+    // Re-age per poll — the shell's own prompt output races a single ageing and
+    // legitimately keeps the session non-silent (see the note on the test above).
+    await expect.poll(async () => {
+      await ctx.post(`/api/test/age-session/${sessionId}`, {
+        data: { ageMinutes: 10 }, // both clocks
+      });
+      const res = await ctx.get('/api/sessions');
+      return (await res.json()).find(s => s.id === sessionId).status;
+    }, { timeout: 10000 }).toBe('idle');
   });
 
   test('a session WAITING on the user is NEVER stale-flipped to idle', async () => {
@@ -289,12 +297,15 @@ test.describe('Stale session status detection', () => {
     expect(ageBody.ok).toBeTruthy();
     expect(Date.now() - ageBody.lastActivity).toBeGreaterThan(9 * 60 * 1000);
 
-    // Now test via cluster endpoint (which also calls correctStaleStatus for local sessions)
-    const res = await ctx.get('/api/cluster/sessions');
-    const data = await res.json();
-    const s = data.sessions.find(s => s.id === sessionId);
-    expect(s).toBeTruthy();
-    expect(s.status).toBe('idle');
+    // Now test via cluster endpoint (which also calls correctStaleStatus for local
+    // sessions). Re-age per poll — same prompt race as the tests above.
+    await expect.poll(async () => {
+      await ctx.post(`/api/test/age-session/${sessionId}`, { data: { ageMinutes: 10 } });
+      const res = await ctx.get('/api/cluster/sessions');
+      const data = await res.json();
+      const s = data.sessions.find(s => s.id === sessionId);
+      return s ? s.status : null;
+    }, { timeout: 10000 }).toBe('idle');
   });
 
   // ============================================================

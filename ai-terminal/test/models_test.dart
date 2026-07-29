@@ -42,6 +42,28 @@ void main() {
       expect(s.lastActivity, isNull);
       expect(s.notifyLevel, 'important');
       expect(s.autoCommand, '');
+      // An older server sends no such field — nothing running, no badge.
+      expect(s.backgroundTasks, isEmpty);
+    });
+
+    test('parses backgroundTasks, preferring the human description', () {
+      final s = Session.fromJson(_server, {
+        'id': 'x',
+        'backgroundTasks': [
+          {'id': 'bzsosbai7', 'description': 'Launch host unit-test gate', 'startedAt': 1},
+          // A tail that lost the launching tool_use leaves description empty —
+          // fall back to the id rather than rendering a blank chip.
+          {'id': 'bht81bbyu', 'description': '', 'startedAt': 2},
+        ],
+      });
+      expect(s.backgroundTasks, ['Launch host unit-test gate', 'bht81bbyu']);
+    });
+
+    test('a malformed backgroundTasks field degrades to empty, never throws', () {
+      expect(Session.fromJson(_server, {'id': 'x', 'backgroundTasks': 'nope'}).backgroundTasks,
+          isEmpty);
+      expect(Session.fromJson(_server, {'id': 'x', 'backgroundTasks': [{}, 7]}).backgroundTasks,
+          isEmpty);
     });
 
     test('coerces a numeric-string lastActivity', () {

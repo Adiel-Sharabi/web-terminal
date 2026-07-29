@@ -212,6 +212,29 @@ class SessionCard extends StatelessWidget {
                         ),
                       ),
                     ],
+                    // A background command still running. It outlives the turn
+                    // that launched it, so the dot beside it is honestly idle
+                    // while a build is going — green alone reads as "nothing is
+                    // happening". Amber matches the working dot so the two agree,
+                    // without this pretending to BE a status.
+                    if (session.backgroundTasks.isNotEmpty) ...[
+                      const SizedBox(width: 8),
+                      Icon(Icons.sync, size: 12, color: StatusColor.working),
+                      const SizedBox(width: 3),
+                      Flexible(
+                        child: Text(
+                          session.backgroundTasks.length > 1
+                              ? '${session.backgroundTasks.length} running'
+                              : session.backgroundTasks.first,
+                          maxLines: 1,
+                          overflow: TextOverflow.ellipsis,
+                          style: theme.textTheme.bodySmall?.copyWith(
+                            color: StatusColor.working,
+                            fontWeight: FontWeight.w600,
+                          ),
+                        ),
+                      ),
+                    ],
                     const Spacer(),
                     if (onBellTap != null)
                       _IconTapTarget(
