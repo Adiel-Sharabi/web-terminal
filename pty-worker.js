@@ -40,10 +40,11 @@ function _slowOpLog(name, dur) {
   if (dur > 30) console.log(`[slow-op] ${new Date().toISOString()} ${name} dur=${dur.toFixed(0)}ms`);
 }
 const STALE_STATUS_TIMEOUT_MS = 5 * 60 * 1000;
-// Abandonment backstop for 'waiting' ONLY (see correctStaleStatus). Deliberately far
-// beyond any plausible answer delay — a question asked in the evening must still be
-// red in the morning — so this catches only an agent that died mid-question without
-// firing a resolving hook, never a user who simply has not answered yet.
+// Abandonment backstop for a session BLOCKED ON THE USER — 'waiting', or 'working'
+// with a question on screen (#79); see correctStaleStatus. Deliberately far beyond
+// any plausible answer delay — a question asked in the evening must still be red in
+// the morning — so this catches only an agent that died mid-question without firing
+// a resolving hook, never a user who simply has not answered yet.
 const WAITING_ABANDONED_TIMEOUT_MS = 12 * 60 * 60 * 1000;
 const MAX_SCROLLBACK_SIZE = 2 * 1024 * 1024;
 
@@ -1177,8 +1178,18 @@ function correctStaleStatus(session) {
   // that fires when the user answers. Only true ABANDONMENT (agent died mid-question,
   // no resolving hook ever) needs a backstop, at a horizon no real answer delay
   // reaches, so an overnight question is still red in the morning.
+  //
+  // #79 — 'waiting' was only ever the half of that inversion this process could
+  // SEE. A session blocked on an AskUserQuestion is just as silent, and for exactly
+  // the same reason, but it is 'working': the question arrives as a PreToolUse,
+  // which is a working event. So the 5-minute rule went on firing here and the dot
+  // still went calm green on a session that owed an answer — the deeper half of #79,
+  // under the visible one the chat lens fixed. The real predicate is "blocked on the
+  // user", of which the status is only one signal; the other is questionPending,
+  // handed down by server.js in handleHook.
   const now = Date.now();
-  const limit = session.status === 'waiting' ? WAITING_ABANDONED_TIMEOUT_MS : STALE_STATUS_TIMEOUT_MS;
+  const blockedOnUser = session.status === 'waiting' || !!session.questionPending;
+  const limit = blockedOnUser ? WAITING_ABANDONED_TIMEOUT_MS : STALE_STATUS_TIMEOUT_MS;
   if ((session.status === 'working' || session.status === 'waiting') &&
       session.lastHookActivity && (now - session.lastHookActivity) > limit &&
       (now - (session.lastActivity || 0)) > limit) {
@@ -1188,6 +1199,10 @@ function correctStaleStatus(session) {
     // SubagentStop leaves the count above zero, which would otherwise pin this
     // session non-idle forever. Both clocks are stale — nothing is running.
     resetSubagentTracking(session);
+    // Same reasoning for the question: reaching the abandonment horizon means the
+    // agent died mid-question without ever firing a resolving hook. Drop the flag
+    // with the status, or every later turn of this session inherits the 12h limit.
+    session.questionPending = false;
     log(`stale correction: "${session.name}" ${prev} → idle`);
     broadcastEvent('statusChanged', { id: sessionIdOf(session), status: session.status });
   }
@@ -1483,6 +1498,17 @@ function handleHook(session, event, claudeSessionId, prompt, agentId, opts) {
   let notifyType = null, notifyMsg = null;
   if (!opts || opts.hookDriven !== false) session.hookStatus = true;
 
+  // #79 — record whether a question is on screen, as told by server.js (the only
+  // layer that sees the AskUserQuestion payload). Set BEFORE the switch so the
+  // status this event produces and the flag agree for the broadcast below.
+  // An ABSENT value leaves the flag alone rather than clearing it: OSC 9's
+  // synthetic hooks (applyOutputStatusNotification) carry no opinion about
+  // questions, and neither does an older server.js talking to this worker across
+  // a hot reload — clearing on no evidence would quietly re-open this bug.
+  if (opts && typeof opts.questionPending === 'boolean') {
+    session.questionPending = opts.questionPending;
+  }
+
   // Remember the user's last real prompt so the API-error /compact escalation
   // can replay it. Skip our own auto-sends ("continue") and slash commands so
   // a recovery action doesn't overwrite the genuine task prompt.
@@ -1737,7 +1763,8 @@ const rpcHandlers = {
   hookEvent: async (params) => {
     const session = sessions.get(requireUuid(params.id));
     if (!session) throw new Error('session not found');
-    return handleHook(session, params.event, params.claudeSessionId, params.prompt, params.agentId);
+    return handleHook(session, params.event, params.claudeSessionId, params.prompt, params.agentId,
+      { questionPending: params.questionPending });
   },
 
   // #69 — server.js calls this whenever sessionMetrics() learns (or loses) this
