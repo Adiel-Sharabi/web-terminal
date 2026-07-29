@@ -124,6 +124,45 @@ test.describe('scanBackgroundTasks — running = launched − finished', () => {
     expect(running[0].description).toBe('apk build');
   });
 
+  test('a task KILLED from the orchestrator is finished (no notification is written)', () => {
+    // Caught against the live API: a suite I had stopped was still listed as
+    // running. TaskStop writes NO <task-notification> — only the tool call — so
+    // the launch never got an end and lingered until the age backstop.
+    const killLine = JSON.stringify({
+      timestamp: '2026-07-29T10:07:26.000Z',
+      message: {
+        content: [{ type: 'tool_use', id: 'toolu_kill', name: 'TaskStop', input: { task_id: 'bockzxmlr' } }],
+      },
+    });
+    const text = [
+      launchLine('toolu_1', 'Final full server suite run'),
+      launchResultLine('toolu_1', 'bockzxmlr'),
+      killLine,
+    ].join('\n');
+    expect(scanBackgroundTasks(text)).toEqual([]);
+  });
+
+  test('a QUOTED "Successfully stopped task" cannot end a running command', () => {
+    // Same discipline as the launch side: the kill is read off the tool_use, never
+    // off result text, so grepping transcripts can neither invent nor cancel a task.
+    const quotedStop = JSON.stringify({
+      timestamp: '2026-07-29T10:08:00.000Z',
+      message: {
+        content: [{
+          type: 'tool_result',
+          tool_use_id: 'toolu_grep',
+          content: 'Successfully stopped task: bzsosbai7 (some command)',
+        }],
+      },
+    });
+    const text = [
+      launchLine('toolu_1', 'build'),
+      launchResultLine('toolu_1', 'bzsosbai7'),
+      quotedStop,
+    ].join('\n');
+    expect(scanBackgroundTasks(text).map(t => t.id)).toEqual(['bzsosbai7']);
+  });
+
   test('a subagent task-notification cannot finish what it never launched', () => {
     // Subagents notify under their OWN ids (af5772d…). A finish is only ever
     // applied to an id seen launching, so an unrelated id matches nothing.
