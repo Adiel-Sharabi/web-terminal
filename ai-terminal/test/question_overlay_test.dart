@@ -27,15 +27,54 @@ List<String> _keys(List<AnswerFrame> f) => [for (final x in f) x.keys];
 
 void main() {
   group('buildAnswerFrames', () {
-    test('single-select, single question: just the row digit (auto-submits)',
+    test('single-select, single question: the row digit THEN a committing Enter',
         () {
+      // The digit alone is not enough. When any option has a `preview` Claude
+      // renders the selector side-by-side and the digit only MOVES THE
+      // HIGHLIGHT — Enter is what commits. Measured on the real TUI (claude
+      // 2.1.220), verdict read from the transcript's AskUserQuestion
+      // tool_result, because the screen cannot distinguish highlighted from
+      // submitted: preview + `3` => nothing submitted, prompt still up (this is
+      // the reported bug — the app looked like it had answered and the question
+      // had to be finished by hand in the terminal); preview + `3\r` =>
+      // recorded "Fold themes into Home.md". In the compact layout `3` already
+      // submits and the extra Enter is a no-op on an empty prompt line, so one
+      // sequence is correct for both — the client cannot branch on the layout
+      // anyway, since the server drops `preview` from the wire.
       final qs = [_q(['A', 'B', 'C'])];
       expect(_keys(buildAnswerFrames(qs, [
         {0}
-      ])), ['1']);
+      ])), ['1', '\r']);
       expect(_keys(buildAnswerFrames(qs, [
         {2}
-      ])), ['3']);
+      ])), ['3', '\r']);
+    });
+
+    test('single-select single question: the committing Enter gets its own read',
+        () {
+      // A digit+CR folded into ONE stdin read is the paste-burst shape the TUI
+      // swallows, so the Enter must carry a real gap — the same rule the rest of
+      // the submit contract lives by (never "fix" a submit by changing bytes).
+      final frames = buildAnswerFrames([_q(['A', 'B', 'C'])], [
+        {2}
+      ]);
+      expect(frames.last.keys, '\r');
+      expect(frames[frames.length - 2].delayMs, greaterThanOrEqualTo(500));
+    });
+
+    test('multi-question single-select does NOT get a per-question Enter', () {
+      // Guard on the fix above. In the compact layout a multi-question digit
+      // AUTO-ADVANCES to the next tab, so an Enter after each digit would land
+      // on the NEXT, still-unanswered question and commit its default top row —
+      // silently answering something the user never chose. Only the single
+      // post-loop Enter (the Submit review) is allowed here.
+      final qs = [_q(['A', 'B']), _q(['X', 'Y', 'Z'])];
+      final keys = _keys(buildAnswerFrames(qs, [
+        {1},
+        {0}
+      ]));
+      expect(keys, ['2', '1', '\r']);
+      expect(keys.where((k) => k == '\r').length, 1);
     });
 
     test('multi-select (single question): toggle digits, Right-arrow, "1" (#39)',
@@ -106,7 +145,7 @@ void main() {
       final frames = buildAnswerFrames([_q(['A', 'B', 'C'])], [
         {1}
       ]);
-      expect(frames.single.delayMs, greaterThanOrEqualTo(500));
+      expect(frames.first.delayMs, greaterThanOrEqualTo(500));
     });
 
     test(
@@ -158,7 +197,7 @@ void main() {
         _keys(buildAnswerFrames(qs, [
           {1}
         ], otherText: const ['   '])),
-        ['2'],
+        ['2', '\r'],
       );
     });
 
@@ -277,7 +316,7 @@ void main() {
         _keys(buildAnswerFrames(qs, [
           {1}
         ], noteText: const ['   '])),
-        ['2'],
+        ['2', '\r'],
       );
     });
 
@@ -299,7 +338,7 @@ void main() {
       final qs = [_q(['A', 'B', 'C'])];
       expect(
         _keys(buildAnswerFrames(qs, [<int>{}], noteText: const ['orphan'])),
-        ['1'],
+        ['1', '\r'],
       );
     });
 
@@ -365,12 +404,18 @@ void main() {
   });
 
   group('answerNeedsConfirm (cluster-path Enter re-send gate)', () {
-    test('single-select single question needs no confirm (digit auto-submits)',
-        () {
+    test('single-select single question NEEDS a confirm (it ends in the '
+        'committing Enter)', () {
+      // Was isFalse while the digit was believed to always auto-submit. It does
+      // not: in the preview (side-by-side) layout a digit only moves the
+      // highlight, so the sequence now ends in an explicit Enter — and because
+      // answerNeedsConfirm is DERIVED from the frames, the resend-once recovery
+      // in _verifyAnswerLanded starts covering this shape for free, which is
+      // exactly what a dropped answer needed.
       final frames = buildAnswerFrames([_q(['A', 'B', 'C'])], [
         {1}
       ]);
-      expect(answerNeedsConfirm(frames), isFalse);
+      expect(answerNeedsConfirm(frames), isTrue);
     });
 
     test('multi-select (single question) needs no confirm — ends in digit "1"',
@@ -591,8 +636,9 @@ void main() {
     await tester.tap(ready);
     await tester.pumpAndSettle();
 
-    // Gamma is index 2 -> the absolute row digit "3".
-    expect(_keys(sent!), ['3']);
+    // Gamma is index 2 -> the absolute row digit "3", then the committing
+    // Enter (a digit alone does not submit in the preview layout).
+    expect(_keys(sent!), ['3', '\r']);
   });
 
   testWidgets('manual Enter key button forwards a raw CR', (tester) async {
@@ -802,7 +848,7 @@ void main() {
 
     await tester.tap(find.widgetWithText(FilledButton, 'Send answer'));
     await tester.pumpAndSettle();
-    expect(_keys(sent!), ['2']);
+    expect(_keys(sent!), ['2', '\r']);
   });
 
   group('note attached to a selected option (#64 Gap 1)', () {
@@ -971,7 +1017,7 @@ void main() {
       await tester.tap(find.widgetWithText(FilledButton, 'Send answer'));
       await tester.pumpAndSettle();
 
-      expect(_keys(sent!), ['3']);
+      expect(_keys(sent!), ['3', '\r']);
     });
   });
 
@@ -1015,7 +1061,7 @@ void main() {
         // button would have sent (see 'select an option then Send forwards
         // the built frames' above).
         expect(sent, isNotNull);
-        expect(_keys(sent!), ['3']);
+        expect(_keys(sent!), ['3', '\r']);
       } finally {
         debugDefaultTargetPlatformOverride = null;
       }
@@ -1103,7 +1149,7 @@ void main() {
           // of the key.
           await tester.tap(find.widgetWithText(FilledButton, 'Send answer'));
           await tester.pumpAndSettle();
-          expect(_keys(sent!), ['2']);
+          expect(_keys(sent!), ['2', '\r']);
         } finally {
           debugDefaultTargetPlatformOverride = null;
         }
