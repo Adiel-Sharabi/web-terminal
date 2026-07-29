@@ -135,6 +135,15 @@ class Session {
   /// [compacting] is `false` or the server didn't report one.
   final int? compactingSince;
 
+  /// Background commands still RUNNING in this session — descriptions, newest
+  /// last. Empty when nothing is running (or the agent has no such channel).
+  ///
+  /// Deliberately separate from [status]: a `run_in_background` command outlives
+  /// the turn that launched it, so the agent's turn ends, the dot goes idle-green
+  /// and a build is still running underneath. The dot stays honest about the
+  /// agent; this carries the work.
+  final List<String> backgroundTasks;
+
   /// Creates a session value object. [autoCommand] is optional (default `''`)
   /// so existing call sites and tests that predate the field keep compiling.
   const Session({
@@ -154,6 +163,7 @@ class Session {
     this.favoriteRank,
     this.compacting = false,
     this.compactingSince,
+    this.backgroundTasks = const <String>[],
   });
 
   /// Builds a [Session] from one element of the `GET /api/sessions` array,
@@ -176,7 +186,28 @@ class Session {
       favoriteRank: _asInt(json['favoriteRank']),
       compacting: json['compacting'] == true,
       compactingSince: _asInt(json['compactingSince']),
+      backgroundTasks: _backgroundTasks(json['backgroundTasks']),
     );
+  }
+
+  /// Reads the server's `backgroundTasks` array into display labels. Each entry
+  /// is `{id, description, startedAt}`; the description is what a human reads,
+  /// and a tail that lost the launching tool_use leaves it empty — fall back to
+  /// the id so a running build is never rendered as a blank chip. Tolerates a
+  /// missing/short-shaped field so an older server simply reports nothing.
+  static List<String> _backgroundTasks(dynamic raw) {
+    if (raw is! List) return const <String>[];
+    final out = <String>[];
+    for (final e in raw) {
+      if (e is Map) {
+        final d = (e['description'] ?? '').toString().trim();
+        final id = (e['id'] ?? '').toString().trim();
+        if (d.isNotEmpty) { out.add(d); } else if (id.isNotEmpty) { out.add(id); }
+      } else if (e is String && e.trim().isNotEmpty) {
+        out.add(e.trim());
+      }
+    }
+    return List.unmodifiable(out);
   }
 
   /// A short 8-char id fragment, handy for `Session {shortId}` fallback names.

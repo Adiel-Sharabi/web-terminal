@@ -18,6 +18,7 @@ Session _session({
   String id = 'abc12345',
   SessionMetrics? metrics,
   String? agent,
+  List<String> backgroundTasks = const <String>[],
 }) => Session(
   id: id,
   name: name,
@@ -30,6 +31,7 @@ Session _session({
   autoCommand: '',
   metrics: metrics,
   agent: agent,
+  backgroundTasks: backgroundTasks,
 );
 
 Widget _wrap(Widget child) => MaterialApp(
@@ -359,5 +361,44 @@ void main() {
       _wrap(SessionCard(session: _session(status: 'active'))),
     );
     expect(find.text('Active'), findsNothing);
+  });
+
+  // A `run_in_background` command outlives the turn that launched it: the agent's
+  // turn ends, Stop fires, the dot goes idle-green — and the build is still
+  // running. Reported live on Office ("Launch host unit-test gate"). The card must
+  // show the work WITHOUT touching the status the dot reports.
+  group('background work badge', () {
+    testWidgets('an idle session that is still building says so', (tester) async {
+      await tester.pumpWidget(_wrap(SessionCard(
+        session: _session(
+          status: 'idle',
+          backgroundTasks: const ['Launch host unit-test gate'],
+        ),
+      )));
+      // The status label is untouched — the agent really is idle.
+      expect(find.text('Idle'), findsOneWidget);
+      // ...and the work is visible next to it.
+      expect(find.text('Launch host unit-test gate'), findsOneWidget);
+      expect(find.byIcon(Icons.sync), findsOneWidget);
+    });
+
+    testWidgets('several running commands collapse to a count', (tester) async {
+      await tester.pumpWidget(_wrap(SessionCard(
+        session: _session(
+          status: 'idle',
+          backgroundTasks: const ['windows build', 'apk build'],
+        ),
+      )));
+      expect(find.text('2 running'), findsOneWidget);
+      // A single name would not fit two, so neither is shown on its own.
+      expect(find.text('windows build'), findsNothing);
+    });
+
+    testWidgets('no background work renders no badge at all', (tester) async {
+      await tester.pumpWidget(
+        _wrap(SessionCard(session: _session(status: 'idle'))),
+      );
+      expect(find.byIcon(Icons.sync), findsNothing);
+    });
   });
 }

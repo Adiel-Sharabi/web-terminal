@@ -153,6 +153,14 @@
     /* #38 — Claude context-window % badge. Thresholds (50/70) live in the
        ctxBadge() helper; palette reuses idle amber / waiting red. */
     .sb-ctx { font-size: 10px; font-weight: 600; }
+    /* Background work still running while the agent's turn is over (so the dot is
+       idle-green). Amber = the "something is happening" colour the working dot uses,
+       so the two agree without the badge pretending to BE a status. */
+    .sb-bg { font-size: 10px; font-weight: 600; color: #f90; white-space: nowrap; }
+    .sb-bg::before { content: ''; }
+    @media (prefers-reduced-motion: no-preference) {
+      .sb-bg { animation: pulse 1.5s infinite; }
+    }
     /* Agent chip. Colour is set inline from GET /api/agents (validated hex). */
     .sb-agent { font-size: 9px; font-weight: 600; text-transform: uppercase; letter-spacing: .3px;
                 padding: 1px 5px; border-radius: 7px; border: 1px solid currentColor; opacity: .85; }
@@ -2710,6 +2718,19 @@
     // getStatusMetrics() already returns null when absent/stale, and ctx itself
     // can be null, so guard on ctx != null. Thresholds mirror the companion's
     // shared ctxColor SSOT: warn 50, danger 70.
+    // A build (or any `run_in_background` command) still running in this session.
+    //
+    // Deliberately NOT folded into the status dot: the agent's turn really has ended,
+    // so the dot is honestly idle — but the WORK has not, and green alone reads as
+    // "nothing is happening". This is that second fact, next to the dot rather than
+    // inside it. Spinning, because a thing that is running should look like it.
+    function bgBadge(s){
+      const n = (s.backgroundTasks && s.backgroundTasks.length) || 0;
+      if (!n) return '';
+      const names = s.backgroundTasks.map(t => t.description || t.id).filter(Boolean).join(', ');
+      const label = n > 1 ? `${n} running` : 'running';
+      return `<span class="sb-bg" title="${esc(names || 'Background command running')}">⟳ ${esc(label)}</span>`;
+    }
     function ctxBadge(s){
       const c = s.metrics && s.metrics.ctx;
       if (c == null) return '';                      // absent/stale/blank → no badge
@@ -2998,6 +3019,7 @@
             `<div class="sb-name"><span class="sb-dot ${s.status}"></span>${esc(s.name)}</div>` +
             `<div class="sb-meta">` +
               `<span class="sb-status ${s.status}">${statusLabels[s.status] || s.status}</span>` +
+              bgBadge(s) +
               agentBadge(s) +
               ctxBadge(s) +
               modelBadge(s) +
@@ -3304,6 +3326,7 @@
           `<div class="sb-name"><span class="sb-dot ${s.status}"></span>${esc(s.name)}<span class="sb-server-badge">${esc(serverLabel)}</span></div>` +
           `<div class="sb-meta">` +
             `<span class="sb-status ${s.status}">${statusLabels[s.status] || s.status}</span>` +
+            bgBadge(s) +
             ctxBadge(s) +
             modelBadge(s) +
             starHtml(s) +
