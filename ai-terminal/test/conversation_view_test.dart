@@ -1655,4 +1655,54 @@ void main() {
       },
     );
   });
+  group('live-poll gate (#codex chat kept up to date)', () {
+    // The bug: the chat only polled while status=='working', which Claude reaches
+    // via hooks but Codex never does — its status stays 'active'. So a Codex chat
+    // sat frozen while its live terminal moved on (measured on Office: a week-long
+    // conversation whose terminal had reached bug-hunter QA work while the chat
+    // still showed a 37-min-old email). Polling on 'active' closes that gap.
+    TranscriptTurn a(String text, String ts) =>
+        TranscriptTurn(role: 'assistant', text: text, toolUses: const [], ts: ts);
+
+    testWidgets("a Codex ('active') chat live-polls and picks up new turns",
+        (tester) async {
+      var tail = [a('EMAIL_DRAFT', '2026-07-29T12:13:00Z')];
+      await tester.pumpWidget(_wrap(ConversationView(
+        session: _session(status: 'active'),
+        fetchPage: (id, {before, limit}) async => TranscriptPage(
+          messages: tail, cursor: null, hasMore: false),
+      )));
+      await tester.pump();
+      await tester.pump(const Duration(milliseconds: 50));
+      expect(find.text('EMAIL_DRAFT'), findsOneWidget);
+      expect(find.text('QA_RESULT'), findsNothing);
+
+      // The session does a turn: the server tail now ends with the QA result. No
+      // widget rebuild happens — only the poll timer can bring this in.
+      tail = [a('EMAIL_DRAFT', '2026-07-29T12:13:00Z'), a('QA_RESULT', '2026-07-29T12:54:00Z')];
+      await tester.pump(const Duration(seconds: 4)); // one poll tick
+      await tester.pump(const Duration(milliseconds: 50));
+
+      expect(find.text('QA_RESULT'), findsOneWidget,
+          reason: 'an active Codex chat must catch up without a rebuild');
+    });
+
+    testWidgets('an idle session does NOT poll (unchanged for Claude at rest)',
+        (tester) async {
+      var tail = [a('DONE', '2026-07-29T12:00:00Z')];
+      await tester.pumpWidget(_wrap(ConversationView(
+        session: _session(status: 'idle'),
+        fetchPage: (id, {before, limit}) async => TranscriptPage(
+          messages: tail, cursor: null, hasMore: false),
+      )));
+      await tester.pump();
+      await tester.pump(const Duration(milliseconds: 50));
+
+      tail = [a('DONE', '2026-07-29T12:00:00Z'), a('SHOULD_NOT_APPEAR', '2026-07-29T12:01:00Z')];
+      await tester.pump(const Duration(seconds: 5));
+      await tester.pump(const Duration(milliseconds: 50));
+      // No poll timer while idle, and no rebuild, so the new turn is not pulled in.
+      expect(find.text('SHOULD_NOT_APPEAR'), findsNothing);
+    });
+  });
 }
