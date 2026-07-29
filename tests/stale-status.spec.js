@@ -283,6 +283,79 @@ test.describe('Stale session status detection', () => {
     }, { timeout: 10000 }).toBe('idle');
   });
 
+  // ============================================================
+  // #79 — the other half of "blocked on the user", which does not wear the
+  // 'waiting' status. Companion 1.26.0 made the pending question visible in the
+  // chat lens; these pin the colour, which was the deeper bug.
+  // ============================================================
+
+  const ASK_HOOK = {
+    event: 'PreToolUse',
+    tool_name: 'AskUserQuestion',
+    tool_input: {
+      questions: [{
+        header: 'Approach',
+        question: 'Which approach should I take?',
+        options: [{ label: 'Rewrite' }, { label: 'Patch' }],
+      }],
+    },
+  };
+
+  test('#79: a session blocked on a pending question is NEVER stale-flipped to idle', async () => {
+    // An AskUserQuestion leaves the session 'working' — its PreToolUse says so —
+    // and then perfectly silent: no further hook, no PTY output, until the user
+    // answers. That is the same inversion already fixed for 'waiting', wearing a
+    // different status, so the 5-minute rule still fired here: the dot went calm
+    // GREEN on precisely the session that owed an answer. 'waiting' was never the
+    // real predicate; "blocked on the user" is.
+    const hookRes = await ctx.post(`/api/session/${sessionId}/hook`, { data: ASK_HOOK });
+    expect((await hookRes.json()).status).toBe('working');
+
+    // Re-age immediately before each read rather than once. A freshly spawned
+    // shell emits its prompt a beat after creation and that PTY chunk refreshes
+    // lastActivity, which correctStaleStatus reads as "not silent" — so a single
+    // ageing can leave the session 'working' for the wrong reason and pass without
+    // the fix. Several tight re-age-then-read rounds make both clocks genuinely
+    // stale at the moment of the read.
+    for (let i = 0; i < 5; i++) {
+      await ctx.post(`/api/test/age-session/${sessionId}`, { data: { ageMinutes: 10 } });
+      const s = (await (await ctx.get('/api/sessions')).json()).find(x => x.id === sessionId);
+      expect(s.status).toBe('working');
+    }
+  });
+
+  test('#79: answering the question restores the ordinary 5-minute rule', async () => {
+    // The flag must not pin the session non-idle for the rest of its life. Once
+    // the question resolves, silence means what it normally means again.
+    await ctx.post(`/api/session/${sessionId}/hook`, { data: ASK_HOOK });
+    const answered = await ctx.post(`/api/session/${sessionId}/hook`, {
+      data: { event: 'PostToolUse', tool_name: 'AskUserQuestion' },
+    });
+    expect((await answered.json()).status).toBe('working');
+
+    await expect.poll(async () => {
+      await ctx.post(`/api/test/age-session/${sessionId}`, { data: { ageMinutes: 10 } });
+      const res = await ctx.get('/api/sessions');
+      return (await res.json()).find(s => s.id === sessionId).status;
+    }, { timeout: 10000 }).toBe('idle');
+  });
+
+  test('#79: a pending question still self-corrects at the long abandonment backstop', async () => {
+    // Self-bounding, exactly as 'waiting' is: an agent that died mid-question and
+    // never fired a resolving hook must not pin the session forever — but only at
+    // a horizon no real answer delay reaches.
+    const hookRes = await ctx.post(`/api/session/${sessionId}/hook`, { data: ASK_HOOK });
+    expect((await hookRes.json()).status).toBe('working');
+
+    await expect.poll(async () => {
+      await ctx.post(`/api/test/age-session/${sessionId}`, {
+        data: { ageMinutes: 13 * 60 }, // past WAITING_ABANDONED_TIMEOUT_MS (12h)
+      });
+      const res = await ctx.get('/api/sessions');
+      return (await res.json()).find(s => s.id === sessionId).status;
+    }, { timeout: 10000 }).toBe('idle');
+  });
+
   test('cluster/sessions also reflects stale correction for local sessions', async () => {
     // Set to working then age
     const hookRes = await ctx.post(`/api/session/${sessionId}/hook`, {
