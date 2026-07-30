@@ -733,12 +733,26 @@ class TerminalConnection {
 
   void _flushInput() {
     if (_inputWrites.isEmpty) return;
+    final socket = _socket;
+    // Flush only onto a socket that exists, and CLEAR ONLY AFTER the write lands.
+    //
+    // This used to clear first and then `_socket?.add(pending)` inside a bare
+    // `catch (_) {}`. Both halves of that silently destroyed input: if the socket had
+    // gone (dropped between `await socket.ready` and here, or torn down by a racing
+    // reconnect) the `?.` made the send a no-op, and if `add` threw on a closing
+    // socket the throw was swallowed — either way the buffer had already been
+    // emptied, so there was nothing left to retry and no error anywhere. Keeping the
+    // buffer until the write succeeds means a failed flush is retried by the next
+    // one instead of costing the user their prompt.
+    if (socket == null) return;
     final pending = _inputWrites.join();
+    try {
+      socket.add(pending);
+    } catch (_) {
+      return; // still buffered — the next flush retries it
+    }
     _inputWrites.clear();
     _inputBufferLen = 0;
-    try {
-      _socket?.add(pending);
-    } catch (_) {/* ignore */}
   }
 
   Future<void> _connect() async {

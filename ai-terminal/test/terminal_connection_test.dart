@@ -9,9 +9,12 @@ const _server =
 
 /// A controllable fake transport standing in for the real WebSocket.
 class _FakeSocket implements TerminalSocket {
-  _FakeSocket({this.failReady = false});
+  _FakeSocket({this.failReady = false, this.failAdd = false});
 
   final bool failReady;
+
+  /// Writes throw — a socket that connected but died before the flush reached it.
+  final bool failAdd;
   final StreamController<dynamic> _incoming = StreamController<dynamic>();
 
   /// Frames the client sent to us (keystrokes + JSON control frames).
@@ -28,7 +31,10 @@ class _FakeSocket implements TerminalSocket {
   Stream<dynamic> get stream => _incoming.stream;
 
   @override
-  void add(Object data) => sent.add(data);
+  void add(Object data) {
+    if (failAdd) throw StateError('socket is closing');
+    sent.add(data);
+  }
 
   @override
   Future<void> close() async {
@@ -209,6 +215,38 @@ void main() {
       expect(flushed, 'B' * 5000,
           reason: 'oldest whole write evicted; newest submit kept intact, never split');
       expect(flushed.contains('A'), isFalse);
+      conn.close();
+    });
+
+    // Buffering the prompt is only half the promise — the flush has to actually land.
+    // _flushInput used to empty the buffer and THEN write inside a bare `catch (_) {}`,
+    // so a write onto a socket that had just gone away threw, was swallowed, and took
+    // the user's prompt with it: no error, no retry, nothing left to resend. A dropped
+    // whole write is exactly the shape of "my long prompt arrived with the beginning
+    // missing", so the buffer must survive a failed flush.
+    test('a flush whose write FAILS keeps the input buffered for the next one',
+        () async {
+      final s1 = _FakeSocket();
+      final s2 = _FakeSocket(failAdd: true); // reconnects, but the write throws
+      final s3 = _FakeSocket();
+      var i = 0;
+      final conn = TerminalConnection(_server, 's',
+          socketFactory: (_) => <_FakeSocket>[s1, s2, s3][i++],
+          reconnectBackoff: _slowBackoff);
+      await pump();
+      s1.serverDrop();
+      await pump(15); // offline window
+      conn.sendInput('the-whole-long-prompt');
+      await pump(120); // reconnect onto s2 — flush throws
+
+      expect(s2.sentStrings.join(), isNot(contains('the-whole-long-prompt')),
+          reason: 'the failing socket never received it');
+
+      s2.serverDrop();
+      await pump(150); // reconnect onto s3 — the flush must be RETRIED
+
+      expect(s3.sentStrings.join(), contains('the-whole-long-prompt'),
+          reason: 'a failed flush is retried, never silently discarded');
       conn.close();
     });
   });
