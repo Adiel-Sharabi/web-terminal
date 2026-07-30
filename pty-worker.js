@@ -16,10 +16,10 @@ const ipc = require('./lib/ipc');
 const { resolveRestoreRunCommand } = require('./lib/restore-command');
 const { claudeProjectDirName } = require('./lib/transcript');
 const agents = require('./lib/agents');
-const { splitTrailingCr, isEscapeKey } = require('./lib/submit-frames');
+const { splitTrailingCr, isEscapeKey, endsBracketedPaste } = require('./lib/submit-frames');
 const { scanOsc9 } = require('./lib/osc9-notify');
 
-const WORKER_VERSION = '0.6.0';
+const WORKER_VERSION = '0.6.1'; // 0.6.1: the submit gap is measured against the wire, not the frame — a lone CR landing on a just-closed bracketed paste (the images-only submit) is withheld too. Worker-side, so `ping` is the only way to tell a restarted worker from a stale one.
 
 // --- Optional latency instrumentation (opt-in via WT_LATENCY_DEBUG=1) -----
 const _LATENCY_DEBUG = process.env.WT_LATENCY_DEBUG === '1';
@@ -845,7 +845,21 @@ function clearCompacting(session, reason) {
 // (CR-vs-LF is the difference between "submitted" and "stuck in the box").
 function termWrite(session, data) {
   if (process.env.WT_TEST) (session._testWrites || (session._testWrites = [])).push(data);
+  // The one place every byte destined for this PTY passes through, so the one place that
+  // can know whether a paste is still open to a CR arriving behind it. Stamped here rather
+  // than in deliver() because the TUI does not care WHO wrote the close — a worker-side
+  // paste (a replayed prompt) shades a client's next CR exactly as a client paste does.
+  session._pasteClosedAt = endsBracketedPaste(data) ? Date.now() : null;
   session.term.write(data);
+}
+
+// Is the last thing written to this PTY still able to swallow a lone submit CR? True only
+// just after a bracketed-paste close: the agent's own gap is the window the registry
+// already declares to be long enough for a CR to read as Enter, so anything older than
+// that is, by that same measurement, safely separate.
+function pasteStillOpenToCr(session) {
+  if (!session._pasteClosedAt) return false;
+  return Date.now() - session._pasteClosedAt < submitGapMs(session);
 }
 
 // Submit a single line to an agent's interactive TUI. The TUI reads its input box
@@ -938,10 +952,14 @@ function noteInterrupt(session, data) {
 }
 
 // Write one frame. If it ends in a submit CR, the CR is withheld and the gap is armed.
+// A LONE CR is withheld too when it lands on a still-open paste — the images-only submit,
+// where the frame before it was the image's `ESC[200~<path>ESC[201~` and there is no
+// prompt text to carry the CR clear of it. `head` is empty in that case: there is nothing
+// to write now, only the CR to write later.
 function _writeFrame(session, data) {
-  const split = splitTrailingCr(data);
+  const split = splitTrailingCr(data, { afterPasteClose: pasteStillOpenToCr(session) });
   if (!split) { deliver(session, data); return; }
-  deliver(session, split.head);
+  if (split.head.length) deliver(session, split.head);
   session._submitTimer = setTimeout(() => {
     session._submitTimer = null;
     try { termWrite(session, split.cr); } catch (e) { log(`submit CR failed: ${e.message}`); }
