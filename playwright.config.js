@@ -53,6 +53,10 @@ module.exports = defineConfig({
       // drive the FCM path alongside ntfy so integration tests exercise it.
       WT_FCM_TEST: '1',
       WT_PUSH_PROVIDER: 'both',
+      // The running-work badge's stuck backstop, in seconds instead of 6 hours, so a
+      // spec can watch a stranded launch expire for real rather than assert around it.
+      // Only that one code path reads it.
+      WT_BG_TASK_MAX_AGE_MS: '2500',
     },
     reuseExistingServer: false,
     timeout: 30000,
