@@ -13,6 +13,9 @@
 // not invented: the launch text, the task-notification block, and the statuses
 // (`completed`, `killed`) are all as Claude Code actually writes them.
 const { test, expect, request: pwRequest } = require('@playwright/test');
+const fs = require('fs');
+const os = require('os');
+const path = require('path');
 const { scanBackgroundTasks } = require('../lib/background-tasks');
 const agents = require('../lib/agents');
 
@@ -293,5 +296,90 @@ test.describe('GET /api/sessions carries backgroundTasks', () => {
     const s = list.find(x => x.id === sessionId);
     expect(s.status).toBeTruthy();
     expect(s).toHaveProperty('backgroundTasks');
+  });
+});
+
+// safeTranscriptPath() only trusts a .jsonl strictly under the realpath'd Claude
+// projects root, so a fixture must live there. Mirrors transcript-api.spec.js.
+function claudeProjectsRoot() {
+  let home = '';
+  try {
+    const cfg = JSON.parse(fs.readFileSync(path.join(__dirname, '..', 'config.json'), 'utf8'));
+    if (cfg && cfg.claudeHome) home = String(cfg.claudeHome);
+  } catch {}
+  if (!home) home = process.env.USERPROFILE || os.homedir();
+  return path.join(home, '.claude', 'projects');
+}
+
+// A launch whose finish never arrives must still stop being badged.
+//
+// Reported on Home 2026-07-30: an idle session with nothing alive in it showed
+// "Full server suite with the running-shell detection", a command launched 16 HOURS
+// earlier. Its transcript's last line was 30 seconds after that launch — Claude Code
+// exited holding the task, so no <task-notification> was ever written. The 6h backstop
+// exists for precisely that, and it did not fire: it was applied only on the path that
+// re-SCANS the transcript, and an unfinished launch is by definition one whose
+// transcript stopped growing, so the size cache short-circuited to the verdict formed
+// while the task was minutes old — forever. The backstop's own trigger condition
+// disabled it. Freshness is now decided on every return, cache hits included.
+//
+// The horizon is WT_BG_TASK_MAX_AGE_MS (2.5s under test, 6h in production), so this
+// watches a real expiry rather than asserting around one.
+test.describe('a stranded launch expires — a cached badge cannot outlive the backstop', () => {
+  const FIXTURE_DIR = path.join(claudeProjectsRoot(), '__wt-bgtask-fixture__');
+  const fixture = path.join(FIXTURE_DIR, `wt_bg_${process.pid}.jsonl`);
+  let ctx;
+  let sessionId;
+
+  /** The launch pair, timestamped `when` — and NEVER a finish. */
+  function writeStrandedLaunch(when) {
+    fs.writeFileSync(fixture, [
+      launchLine('toolu_stranded', 'Full server suite', when),
+      launchResultLine('toolu_stranded', 'bgstranded', when),
+    ].join('\n') + '\n', 'utf8');
+  }
+
+  test.beforeAll(async () => {
+    ctx = await authCtx();
+    fs.mkdirSync(FIXTURE_DIR, { recursive: true });
+    writeStrandedLaunch(new Date().toISOString());
+    // agent:'claude' — the registry gates who is scanned at all, so a plain shell
+    // session would report nothing no matter what its transcript said.
+    const res = await ctx.post('/api/sessions', {
+      data: { name: `BgStranded-${Date.now()}`, agent: 'claude' },
+    });
+    sessionId = (await res.json()).id;
+    expect(sessionId).toBeTruthy();
+    // Stash the fixture as this session's transcript the way the real hook does.
+    const hr = await ctx.post('/api/hook', {
+      headers: { 'X-WT-Session-ID': sessionId },
+      data: { hook_event_name: 'UserPromptSubmit', transcript_path: fixture, prompt: 'go' },
+    });
+    expect(hr.status()).toBe(200);
+  });
+
+  test.afterAll(async () => {
+    if (sessionId) { try { await ctx.delete(`/api/sessions/${sessionId}`); } catch {} }
+    try { fs.rmSync(FIXTURE_DIR, { recursive: true, force: true }); } catch {}
+    await ctx.dispose();
+  });
+
+  test('badged while fresh, then cleared though the transcript never changes again', async () => {
+    const badge = async () => {
+      const list = await (await ctx.get('/api/sessions')).json();
+      return (list.find(x => x.id === sessionId) || {}).backgroundTasks;
+    };
+    // Re-stamp immediately before the first read so the horizon is spent here, not on
+    // session setup — this is the poll that primes the cache with a genuinely fresh task.
+    writeStrandedLaunch(new Date().toISOString());
+    expect(await badge()).toMatchObject([{ description: 'Full server suite' }]);
+
+    const sizeAtLaunch = fs.statSync(fixture).size;
+    const mtimeAtLaunch = fs.statSync(fixture).mtimeMs;
+    await expect.poll(badge, { timeout: 20000, intervals: [500] }).toEqual([]);
+    // The file is untouched — the badge cleared on age alone, which is the only thing
+    // that can rescue a launch whose agent died before writing its finish.
+    expect(fs.statSync(fixture).size).toBe(sizeAtLaunch);
+    expect(fs.statSync(fixture).mtimeMs).toBe(mtimeAtLaunch);
   });
 });
