@@ -92,6 +92,29 @@ test.describe('cold-restart.ps1 wiring', () => {
     expect(src).toMatch(/nodejs\\node\.exe/);
   });
 
+  // Measured on Office: an /api/exec shell arrives with PATHEXT set to just ".CPL", and
+  // PowerShell then refuses to run node.exe as a program ("Cannot run a document in the
+  // middle of a pipeline") — so the preflight aborted a restart on a healthy peer.
+  test('repairs a PATHEXT that lacks .EXE', () => {
+    const src = fs.readFileSync(COLD_RESTART, 'utf8');
+
+    expect(src).toContain('PATHEXT');
+    expect(src).toMatch(/\$env:PATHEXT\s*=/);
+  });
+
+  // Only a real verdict may block a restart. A check that could not RUN leaves
+  // LASTEXITCODE unset, and treating that as failure is what produced an abort with an
+  // empty message on two healthy machines.
+  test('a check that cannot run is skipped, not treated as a failure', () => {
+    const src = fs.readFileSync(COLD_RESTART, 'utf8');
+
+    const nullGuard = src.indexOf('$null -eq $LASTEXITCODE');
+    const abort = src.indexOf('ABORTED - runtime deps not loadable');
+
+    expect(nullGuard).toBeGreaterThan(-1);
+    expect(nullGuard).toBeLessThan(abort);
+  });
+
   test('-CheckOnly reports the preflight and kills nothing', async () => {
     test.skip(process.platform !== 'win32', 'PowerShell restart script is Windows-only');
 
