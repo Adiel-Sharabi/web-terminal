@@ -203,6 +203,81 @@ test.describe('agent-aware submit CR on the PTY input path', () => {
     expect(writesOf(await rpc(client, '__testGetWrites', { id }))).toEqual(['\r']);
   });
 
+  // An images-only submit, exactly as the companion sends it: the staged image goes out as
+  // its own `ESC[200~<path>ESC[201~` frame, and with no prompt text to carry it there is
+  // nothing left in the submit frame but a BARE CR. Two frames, microseconds apart — which
+  // the TUI reads as one, folding the CR into the paste and swallowing the Enter. Reported
+  // on the S25: the image landed on the terminal line and a second Enter was needed.
+  //
+  // Without the cross-frame rule this test fails on the FIRST assertion: the lone CR is
+  // written immediately, in the same breath as the paste close.
+  test('claude: an image paste + a bare CR still submits — the CR waits out the gap', async () => {
+    const id = await newSession('claude');
+    const claudeGap = agents.submitPolicy('claude').gapMs;
+    const ESC = String.fromCharCode(0x1b);
+    const image = `${ESC}[200~C:\\dev\\web-terminal\\clipboard-images\\clip-1.png${ESC}[201~`;
+
+    typeInto(client, id, image);   // the staged attachment
+    typeInto(client, id, '\r');    // buildComposeSubmission('') — nothing but the submit
+
+    await sleep(Math.max(20, claudeGap / 4));
+    expect(writesOf(await rpc(client, '__testGetWrites', { id }))).toEqual([image]);
+
+    await sleep(claudeGap);
+    expect(writesOf(await rpc(client, '__testGetWrites', { id }))).toEqual([image, '\r']);
+  });
+
+  test('codex: several images then a bare CR — only the last close shades the CR', async () => {
+    const id = await newSession('codex');
+    const ESC = String.fromCharCode(0x1b);
+    const one = `${ESC}[200~/tmp/clip-1.png${ESC}[201~`;
+    const two = `${ESC}[200~/tmp/clip-2.png${ESC}[201~`;
+
+    typeInto(client, id, one);
+    typeInto(client, id, two);
+    typeInto(client, id, '\r');
+
+    await sleep(Math.max(20, GAP / 4));
+    expect(writesOf(await rpc(client, '__testGetWrites', { id }))).toEqual([one, two]);
+
+    await sleep(GAP);
+    expect(writesOf(await rpc(client, '__testGetWrites', { id }))).toEqual([one, two, '\r']);
+  });
+
+  // The other half of the rule, and the one that keeps interactive use honest: the paste
+  // only shades a CR for as long as the agent's own gap. A user who attaches an image and
+  // then thinks for a moment before pressing Enter must not be made to wait again.
+  test('claude: a bare CR long after the paste is written immediately', async () => {
+    const id = await newSession('claude');
+    const claudeGap = agents.submitPolicy('claude').gapMs;
+    const ESC = String.fromCharCode(0x1b);
+    const image = `${ESC}[200~/tmp/clip.png${ESC}[201~`;
+
+    typeInto(client, id, image);
+    await sleep(claudeGap + 80);   // the paste has long since been read
+    typeInto(client, id, '\r');
+    await sleep(30);               // far less than the gap: an undelayed CR is already out
+
+    expect(writesOf(await rpc(client, '__testGetWrites', { id }))).toEqual([image, '\r']);
+  });
+
+  test('claude: a later keystroke clears the paste — the CR after it is not delayed', async () => {
+    // Pins the shading to the LAST bytes written rather than to a sticky "this session has
+    // pasted" flag: once anything else has gone down the wire, the paste is behind us and
+    // every subsequent lone CR is an ordinary lone CR again. Without this, one image attach
+    // would slow every Enter for the rest of the session.
+    const id = await newSession('claude');
+    const ESC = String.fromCharCode(0x1b);
+    const image = `${ESC}[200~/tmp/clip.png${ESC}[201~`;
+
+    typeInto(client, id, image);
+    typeInto(client, id, 'x');
+    typeInto(client, id, '\r');
+    await sleep(40);
+
+    expect(writesOf(await rpc(client, '__testGetWrites', { id }))).toEqual([image, 'x', '\r']);
+  });
+
   test('codex: ordinary keystrokes are not delayed', async () => {
     const id = await newSession('codex');
 

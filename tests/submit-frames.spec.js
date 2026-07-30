@@ -7,7 +7,7 @@
 // (measured: atomic submitted at 20/40/60 chars, NOT at 80/120), which is why it looked
 // exempt for so long. Both split.
 const { test, expect } = require('@playwright/test');
-const { splitTrailingCr, isEscapeKey, CR_FRAME } = require('../lib/submit-frames');
+const { splitTrailingCr, isEscapeKey, endsBracketedPaste, CR_FRAME } = require('../lib/submit-frames');
 const agents = require('../lib/agents');
 
 const ESC = String.fromCharCode(0x1b);
@@ -22,6 +22,23 @@ test.describe('splitTrailingCr', () => {
 
   test('leaves a bare CR alone — nothing precedes it to absorb it', () => {
     expect(splitTrailingCr(Buffer.from('\r'))).toBeNull();
+  });
+
+  // The images-only submit. The compose bar sends each staged image as its own
+  // `ESC[200~<path>ESC[201~` frame; with no prompt text there is nothing left to carry the
+  // CR clear of that close, so the submit goes out as a BARE CR microseconds behind it.
+  // The TUI reads bytes, not frames — it folds the two together and eats the Enter, which
+  // is why the image appeared on the terminal line and the turn never started.
+  test('withholds a bare CR that lands on a still-open paste', () => {
+    const s = splitTrailingCr(Buffer.from('\r'), { afterPasteClose: true });
+    expect(s).not.toBeNull();
+    expect(s.head.length).toBe(0);   // nothing to write now — only the CR, later
+    expect(s.cr).toEqual(CR_FRAME);
+  });
+
+  test('an empty frame is never a submit', () => {
+    expect(splitTrailingCr(Buffer.alloc(0))).toBeNull();
+    expect(splitTrailingCr(Buffer.alloc(0), { afterPasteClose: true })).toBeNull();
   });
 
   test('leaves ordinary typing alone', () => {
@@ -60,6 +77,36 @@ test.describe('splitTrailingCr', () => {
   test('CR_FRAME is exactly one CR byte', () => {
     expect(CR_FRAME).toEqual(Buffer.from([0x0d]));
     expect(CR_FRAME.length).toBe(1);
+  });
+});
+
+// Which frame leaves a paste open behind it. This is the whole of the cross-frame rule:
+// only a paste close can swallow a CR that arrives in the next frame, so only a paste
+// close arms the withholding — ordinary typing never does, and a lone CR after `ls` still
+// runs the command with no delay at all.
+test.describe('endsBracketedPaste', () => {
+  test('a frame ending in the paste close ends a paste', () => {
+    expect(endsBracketedPaste(Buffer.from(`${ESC}[200~C:\\pics\\clip.png${ESC}[201~`))).toBe(true);
+    expect(endsBracketedPaste(`${ESC}[201~`)).toBe(true);   // strings too — the worker writes both
+  });
+
+  test('ordinary typing, an open paste and a CR do not', () => {
+    expect(endsBracketedPaste(Buffer.from('hello'))).toBe(false);
+    expect(endsBracketedPaste(Buffer.from(`${ESC}[200~half typed`))).toBe(false); // still OPEN
+    expect(endsBracketedPaste(Buffer.from('\r'))).toBe(false);
+    expect(endsBracketedPaste(Buffer.from(`${ESC}[201~x`))).toBe(false);          // close, then more
+  });
+
+  test('empty and missing frames are not a paste close', () => {
+    expect(endsBracketedPaste(Buffer.alloc(0))).toBe(false);
+    expect(endsBracketedPaste('')).toBe(false);
+    expect(endsBracketedPaste(null)).toBe(false);
+    expect(endsBracketedPaste(undefined)).toBe(false);
+  });
+
+  test('a frame shorter than the close marker never matches', () => {
+    expect(endsBracketedPaste(Buffer.from('~'))).toBe(false);
+    expect(endsBracketedPaste(Buffer.from('01~'))).toBe(false);
   });
 });
 

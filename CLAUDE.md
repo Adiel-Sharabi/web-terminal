@@ -159,7 +159,8 @@ That single fact explains the whole "sometimes Enter works, sometimes it doesn't
 
 - The **worker** owns submit timing. Clients stay unaware and unchanged.
 - A frame that is **text ending in `\r`** is split: write the text now, write the lone `\r` after `submit.gapMs`. Input arriving in the gap **queues behind** it (order preserved).
-- A **bare `\r` is never split** — nothing precedes it to be absorbed. So ordinary char-by-char shell typing is never rewritten and never delayed.
+- A **bare `\r` on a cold PTY is never split** — nothing was just written, so nothing can absorb it. So ordinary char-by-char shell typing is never rewritten and never delayed.
+- **The gap is measured against the wire, not against the frame.** A bare `\r` written within `submit.gapMs` of a frame that **closed a bracketed paste** IS withheld, and goes out alone after the gap. The burst detector reads bytes; our frame boundaries are invisible to it, so two frames microseconds apart are one read and fold together. This is not a hypothetical — it is the images-only submit: the compose bar sends each staged image as its own `ESC[200~<path>ESC[201~` frame, and with no prompt text the submit behind it is a bare CR. With text it was always fine (`text\r` splits), which is exactly why "attach an image and press Send" typed the image and sent no Enter while every other prompt worked. Keep it **narrow — only a paste close shades a CR**; widening it to "any recent write" would delay every shell Enter, and short non-paste reads are measured to submit fine.
 - Bracketed paste does **not** exempt the CR. Measured: ≤30 ms is still absorbed, ≥60 ms submits. **Only a real temporal gap works — never "fix" a submit problem by changing the bytes.**
 
 ### Interrupt (Esc) — status must go idle promptly
