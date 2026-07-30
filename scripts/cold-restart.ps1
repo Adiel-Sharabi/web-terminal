@@ -16,6 +16,13 @@
 #   * NEVER `taskkill /F /IM node.exe` — that blanket-kills MCP servers, PM2, and every other
 #     unrelated node process on the machine.
 
+#   * PREFLIGHT the runtime deps and ABORT if they cannot load. A wedged worker still owns
+#     live PTYs; a monitor that gave up owns nothing. See scripts/check-deps.js for the
+#     2026-07-30 outage this prevents. -CheckOnly runs just that check and kills nothing,
+#     so a peer's tree can be audited over /api/exec without disturbing it.
+
+param([switch]$CheckOnly)
+
 $ErrorActionPreference = 'SilentlyContinue'
 # Derived from this script's own location, so the same file works on every machine in the
 # cluster — no per-host path to keep in sync.
@@ -25,6 +32,32 @@ $log  = Join-Path $repo 'cold-restart.log'
 function Note($m) { "$(Get-Date -Format o)  $m" | Out-File -FilePath $log -Append -Encoding utf8 }
 
 Note '=== cold restart requested (worker changed) ==='
+
+# --- Preflight: are the runtime deps actually loadable? -------------------------------
+# Must come before the first Stop-Process. Restarting a box whose node_modules is broken
+# replaces a serving-from-memory server with a worker that cannot start at all.
+$nodeExe = (Get-Command node -ErrorAction SilentlyContinue).Source
+if ($nodeExe) {
+  $depOut = (& $nodeExe (Join-Path $repo 'scripts\check-deps.js') 2>&1 | Out-String).Trim()
+  if ($LASTEXITCODE -ne 0) {
+    Note "ABORTED - runtime deps not loadable, nothing killed: $depOut"
+    Write-Output "cold restart ABORTED - runtime deps not loadable, nothing killed:"
+    Write-Output $depOut
+    exit 1
+  }
+  Note "preflight: $depOut"
+} else {
+  # A stale Session-0 PATH can hide node; that is not this failure mode, and blocking the
+  # restart over it would be worse than proceeding.
+  $depOut = 'skipped (node not on PATH)'
+  Note 'preflight SKIPPED - node not on PATH'
+}
+
+if ($CheckOnly) {
+  Note 'check-only: nothing killed'
+  Write-Output "preflight OK: $depOut"
+  exit 0
+}
 
 $procs = Get-CimInstance Win32_Process -Filter "Name='node.exe'"
 
