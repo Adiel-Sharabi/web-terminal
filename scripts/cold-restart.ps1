@@ -43,6 +43,14 @@ Note '=== cold restart requested (worker changed) ==='
 # preflight silently skipped itself in exactly the case it exists for. So fall back to the
 # interpreter ALREADY RUNNING this server (the most authoritative answer available: it is
 # the one the worker will be relaunched with) and then to the default install location.
+
+# That same trimmed environment arrives with PATHEXT set to just ".CPL" — measured on
+# Office over /api/exec. Without .EXE in it PowerShell refuses to run node.exe as a
+# program at all ("Cannot run a document in the middle of a pipeline"), which made this
+# preflight ABORT a restart on a peer whose tree was perfectly healthy. Repair it for this
+# process only; it also lets the PATH lookup below work at all.
+if ($env:PATHEXT -notmatch '(?i)\.EXE') { $env:PATHEXT = '.COM;.EXE;.BAT;.CMD;' + $env:PATHEXT }
+
 function Resolve-NodeExe {
   $onPath = (Get-Command node -ErrorAction SilentlyContinue).Source
   if ($onPath) { return $onPath }
@@ -62,14 +70,24 @@ function Resolve-NodeExe {
 
 $nodeExe = Resolve-NodeExe
 if ($nodeExe) {
+  $global:LASTEXITCODE = $null
   $depOut = (& $nodeExe (Join-Path $repo 'scripts\check-deps.js') 2>&1 | Out-String).Trim()
-  if ($LASTEXITCODE -ne 0) {
+
+  if ($null -eq $LASTEXITCODE) {
+    # The check could not be RUN at all — an environment problem, not a broken tree. Only a
+    # real verdict may block a restart, so this reports rather than aborts. (Without this,
+    # a launch failure left LASTEXITCODE unset and `-ne 0` aborted with an EMPTY message,
+    # which is exactly how a healthy peer was told its deps were unloadable.)
+    $depOut = "skipped (could not run check-deps.js) $depOut".Trim()
+    Note "preflight SKIPPED - could not run the check: $depOut"
+  } elseif ($LASTEXITCODE -ne 0) {
     Note "ABORTED - runtime deps not loadable, nothing killed: $depOut"
     Write-Output "cold restart ABORTED - runtime deps not loadable, nothing killed:"
     Write-Output $depOut
     exit 1
+  } else {
+    Note "preflight: $depOut"
   }
-  Note "preflight: $depOut"
 } else {
   # Nothing running and no node anywhere we know to look: there is nothing to kill, so the
   # relaunch is the only part that matters and blocking it would be worse than proceeding.
