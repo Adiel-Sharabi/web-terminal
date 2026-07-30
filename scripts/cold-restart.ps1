@@ -123,6 +123,36 @@ $targets  | ForEach-Object { Stop-Process -Id $_.ProcessId -Force }
 # Let the port and the named pipe actually release before rebinding them.
 Start-Sleep -Seconds 3
 
+# --- Repair: relink node_modules\.bin, ONLY while the worker is stopped ----------------
+# This window is the whole point: the bins live inside node_modules, and the worker holds
+# node-pty's OpenConsole.exe open, which is what makes an npm write fail half-done.
+#
+# Why it can be missing at all: the 2026-07-30 deletion took .bin with the packages, and
+# the recovery `npm install` did NOT put it back — its reify aborted on the EPERM from that
+# locked binary. The damage is quiet but nasty: without .bin, `npx playwright test` runs a
+# DIFFERENT physical copy of playwright out of the npx cache, the specs register on the
+# local one, and every run reports "No tests found" — a gate that looks like it ran and ran
+# nothing.
+#
+# `rebuild` is chosen deliberately over `ci`/`install`: it RELINKS bins from the packages
+# already on disk — no delete, no download — so a failure here cannot leave the box without
+# node_modules, which is the very outage this script now guards against. --ignore-scripts
+# keeps it away from node-pty's native build. Verified in an isolated tree before shipping:
+# deleting .bin and running this restores all 21 entries.
+$binDir = Join-Path $repo 'node_modules\.bin'
+if ($nodeExe -and -not (Test-Path $binDir)) {
+  $npmCli = Join-Path (Split-Path $nodeExe -Parent) 'node_modules\npm\bin\npm-cli.js'
+  if (Test-Path $npmCli) {
+    Note 'node_modules\.bin missing - relinking (worker stopped, locks released)'
+    Push-Location $repo
+    $rebuildOut = (& $nodeExe $npmCli rebuild --ignore-scripts --no-audit --no-fund 2>&1 | Out-String).Trim()
+    Pop-Location
+    Note "bin relink: exit=$LASTEXITCODE  present=$(Test-Path $binDir)  $rebuildOut"
+  } else {
+    Note "bin relink SKIPPED - npm-cli.js not found at $npmCli"
+  }
+}
+
 # GUI-subsystem launcher: wscript runs node hidden, so no console window flashes.
 Note 'relaunching via start-server.vbs'
 Start-Process -FilePath 'wscript.exe' -ArgumentList (Join-Path $repo 'start-server.vbs') -WorkingDirectory $repo

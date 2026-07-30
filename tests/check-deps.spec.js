@@ -115,6 +115,28 @@ test.describe('cold-restart.ps1 wiring', () => {
     expect(nullGuard).toBeLessThan(abort);
   });
 
+  // The repair only works in the gap between the kill and the relaunch: before the kill
+  // the worker still holds node-pty's OpenConsole.exe (which is what leaves an npm write
+  // half-done), and after the relaunch it would race the new worker.
+  test('relinks .bin after the kill and before the relaunch, non-destructively', () => {
+    const src = fs
+      .readFileSync(COLD_RESTART, 'utf8')
+      .split(/\r?\n/)
+      .filter((line) => !/^\s*#/.test(line))
+      .join('\n');
+
+    const kill = src.indexOf('Stop-Process');
+    const repair = src.indexOf('rebuild');
+    const relaunch = src.indexOf('start-server.vbs');
+
+    expect(repair).toBeGreaterThan(kill);
+    expect(relaunch).toBeGreaterThan(repair);
+
+    // rebuild relinks what is already on disk; ci/install can delete or re-download, and a
+    // failure there would leave the box with no node_modules at all.
+    expect(src).not.toMatch(/npm-cli\.js[^\r\n]*\b(ci|install)\b/);
+  });
+
   test('-CheckOnly reports the preflight and kills nothing', async () => {
     test.skip(process.platform !== 'win32', 'PowerShell restart script is Windows-only');
 
