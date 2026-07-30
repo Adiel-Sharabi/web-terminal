@@ -36,7 +36,31 @@ Note '=== cold restart requested (worker changed) ==='
 # --- Preflight: are the runtime deps actually loadable? -------------------------------
 # Must come before the first Stop-Process. Restarting a box whose node_modules is broken
 # replaces a serving-from-memory server with a worker that cannot start at all.
-$nodeExe = (Get-Command node -ErrorAction SilentlyContinue).Source
+#
+# node is NOT resolved from PATH alone. The documented way to cold-restart a peer is over
+# its /api/exec, whose shell runs with a trimmed environment (config `passAllEnv` defaults
+# to false) — measured on Office and XPS, where `Get-Command node` finds nothing and the
+# preflight silently skipped itself in exactly the case it exists for. So fall back to the
+# interpreter ALREADY RUNNING this server (the most authoritative answer available: it is
+# the one the worker will be relaunched with) and then to the default install location.
+function Resolve-NodeExe {
+  $onPath = (Get-Command node -ErrorAction SilentlyContinue).Source
+  if ($onPath) { return $onPath }
+
+  $running = Get-CimInstance Win32_Process -Filter "Name='node.exe'" |
+    Where-Object { $_.CommandLine -like "*$repo\server.js*" -or $_.CommandLine -like "*$repo\pty-worker.js*" } |
+    Select-Object -First 1
+  if ($running -and $running.ExecutablePath -and (Test-Path $running.ExecutablePath)) {
+    return $running.ExecutablePath
+  }
+
+  foreach ($p in @((Join-Path "$env:ProgramFiles" 'nodejs\node.exe'), 'C:\Program Files\nodejs\node.exe')) {
+    if ($p -and (Test-Path $p)) { return $p }
+  }
+  return $null
+}
+
+$nodeExe = Resolve-NodeExe
 if ($nodeExe) {
   $depOut = (& $nodeExe (Join-Path $repo 'scripts\check-deps.js') 2>&1 | Out-String).Trim()
   if ($LASTEXITCODE -ne 0) {
@@ -47,10 +71,10 @@ if ($nodeExe) {
   }
   Note "preflight: $depOut"
 } else {
-  # A stale Session-0 PATH can hide node; that is not this failure mode, and blocking the
-  # restart over it would be worse than proceeding.
-  $depOut = 'skipped (node not on PATH)'
-  Note 'preflight SKIPPED - node not on PATH'
+  # Nothing running and no node anywhere we know to look: there is nothing to kill, so the
+  # relaunch is the only part that matters and blocking it would be worse than proceeding.
+  $depOut = 'skipped (no node found)'
+  Note 'preflight SKIPPED - no node found on PATH, in the running server, or in Program Files'
 }
 
 if ($CheckOnly) {

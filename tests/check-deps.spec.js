@@ -81,6 +81,17 @@ test.describe('cold-restart.ps1 wiring', () => {
     expect(kill).toBeGreaterThan(abort);
   });
 
+  // Measured on Office and XPS: /api/exec runs with a trimmed environment (passAllEnv
+  // defaults false), so `Get-Command node` finds nothing there and a PATH-only lookup
+  // skipped the preflight in exactly the case it exists for — a peer restart driven from
+  // another machine, which is the documented practice.
+  test('resolves node beyond PATH — the running server, then the default install', () => {
+    const src = fs.readFileSync(COLD_RESTART, 'utf8');
+
+    expect(src).toContain('ExecutablePath');
+    expect(src).toMatch(/nodejs\\node\.exe/);
+  });
+
   test('-CheckOnly reports the preflight and kills nothing', async () => {
     test.skip(process.platform !== 'win32', 'PowerShell restart script is Windows-only');
 
