@@ -42,6 +42,7 @@ import 'format_utils.dart';
 // uses for GET /api/agents' colour field — one parser, not a second copy
 // that could drift from it.
 import 'session_card.dart' show parseAgentColor;
+import 'waiting_banner.dart';
 
 /// Turns per page — matches the server's default.
 const int _kPageSize = 50;
@@ -640,10 +641,21 @@ class _ConversationViewState extends State<ConversationView> {
       );
     }
     if (_turns.isEmpty && _pendingEchoes.isEmpty) {
-      return const EmptyState(
-        icon: Icons.forum_outlined,
-        title: 'No messages yet',
-        subtitle: 'Claude\'s replies will appear here as a conversation',
+      // The banner still belongs here: a session can be blocked before it has
+      // produced any turn at all, and "No messages yet" would otherwise be the
+      // whole story on a session that is actually waiting for the user.
+      return Column(
+        children: [
+          if (widget.session.isWaitingOnUser)
+            WaitingBanner(kind: widget.session.waitingFor!),
+          const Expanded(
+            child: EmptyState(
+              icon: Icons.forum_outlined,
+              title: 'No messages yet',
+              subtitle: 'Claude\'s replies will appear here as a conversation',
+            ),
+          ),
+        ],
       );
     }
 
@@ -662,6 +674,13 @@ class _ConversationViewState extends State<ConversationView> {
     _publishDerivedCtx();
     return Column(
       children: [
+        // #79: a session blocked on the user says so. Pinned ABOVE the transcript
+        // rather than appended to it, because the defining symptom is that no new
+        // turn arrives — an inline marker at the bottom would sit wherever the last
+        // turn happens to be, and the user would have to scroll to find out that
+        // nothing more is coming.
+        if (widget.session.isWaitingOnUser)
+          WaitingBanner(kind: widget.session.waitingFor!),
         // #62: the session's subagents pinned above the transcript so they stay
         // reachable no matter how far it scrolls. Hidden when there are none.
         if (subagents.isNotEmpty)

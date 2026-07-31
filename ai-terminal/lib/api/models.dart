@@ -144,6 +144,23 @@ class Session {
   /// agent; this carries the work.
   final List<String> backgroundTasks;
 
+  /// What this session is blocked on: `'question'`, `'permission'`, or `null`
+  /// when it is not blocked at all (#79).
+  ///
+  /// Derived by the SERVER (`lib/waiting-for.js`) and carried on
+  /// `GET /api/sessions` / `GET /api/cluster/sessions`. Deliberately not
+  /// re-derived here: the chat lens must agree with the status dot beside it,
+  /// and a client that scraped its own transcript copy for "is a question up?"
+  /// would be a second answer to a question the server already settled.
+  ///
+  /// Why it is needed at all: for `waiting`, silence is the DEFINING condition —
+  /// the session emits no further turn until it is answered — so a blocked
+  /// session and an idle one look identical in a transcript.
+  final String? waitingFor;
+
+  /// True when the session is blocked on the user, whatever the kind.
+  bool get isWaitingOnUser => waitingFor != null;
+
   /// Creates a session value object. [autoCommand] is optional (default `''`)
   /// so existing call sites and tests that predate the field keep compiling.
   const Session({
@@ -164,6 +181,7 @@ class Session {
     this.compacting = false,
     this.compactingSince,
     this.backgroundTasks = const <String>[],
+    this.waitingFor,
   });
 
   /// Builds a [Session] from one element of the `GET /api/sessions` array,
@@ -187,7 +205,18 @@ class Session {
       compacting: json['compacting'] == true,
       compactingSince: _asInt(json['compactingSince']),
       backgroundTasks: _backgroundTasks(json['backgroundTasks']),
+      // An OLDER server sends no waitingFor at all. Leaving it null means the
+      // banner simply never shows, rather than the lens guessing from `status`
+      // and disagreeing with a server that knows better.
+      waitingFor: _waitingFor(json['waitingFor']),
     );
+  }
+
+  /// Accepts only the two kinds the server can send, so an unknown future value
+  /// degrades to "not waiting" instead of rendering an empty banner.
+  static String? _waitingFor(dynamic raw) {
+    final v = raw?.toString();
+    return (v == 'question' || v == 'permission') ? v : null;
   }
 
   /// Reads the server's `backgroundTasks` array into display labels. Each entry
