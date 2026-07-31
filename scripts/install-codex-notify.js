@@ -112,7 +112,15 @@ function main() {
   const added = tui.added;
   const changed = tui.changed.concat(notify.changed ? ['notify'] : []);
 
-  if (text === src) {
+  // Decide on SEMANTICS, not on text equality. patch()/patchNotify() split on
+  // /\r?\n/ and join with '\n', so a config containing ANY CRLF comes back
+  // "different" with zero keys added and zero changed. That was harmless while
+  // this was a manual one-off; now that the deploy path runs it on every cold
+  // restart, text-equality would rewrite the file and drop a fresh .bak beside
+  // it on every single deploy, forever. Measured on Home, whose config.toml is
+  // MIXED: 8 CRLF and 81 lone LF, and which reported `WOULD` with an empty
+  // change summary — the tell that nothing semantic was actually different.
+  if (added.length === 0 && changed.length === 0) {
     console.log(`config.toml already correct (${CONFIG})`);
     return;
   }

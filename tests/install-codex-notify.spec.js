@@ -134,6 +134,30 @@ test('applying the config is NON-FATAL when codex is not installed', () => {
   expect(fn).not.toMatch(/LASTEXITCODE/);
 });
 
+test('a CRLF config is left alone — line endings are not a reason to rewrite', () => {
+  // The trap this pins: patch()/patchNotify() split on /\r?\n/ and join with
+  // '\n', so an already-correct config that happens to use CRLF comes back
+  // textually DIFFERENT with nothing added and nothing changed. Deciding by
+  // text equality therefore rewrote the file — and dropped another .bak — on
+  // EVERY cold restart, which is exactly what running this from the deploy
+  // path made unbounded. Real config.toml files are mixed in practice: Home's
+  // had 8 CRLF and 81 lone LF.
+  const home = tempCodexHome('model = "gpt-5.5"\n');
+  const cfg = path.join(home, 'config.toml');
+  expect(runInstaller(home).code).toBe(0);          // first run patches it
+
+  // Re-save the (correct) file with CRLF endings, as an editor on Windows would.
+  const crlf = fs.readFileSync(cfg, 'utf8').replace(/\r?\n/g, '\r\n');
+  fs.writeFileSync(cfg, crlf, 'utf8');
+  const baksBefore = fs.readdirSync(home).filter((f) => f.includes('.bak-wt-')).length;
+
+  const res = runInstaller(home);
+  expect(res.code).toBe(0);
+  expect(res.out).toMatch(/already correct/i);
+  expect(fs.readFileSync(cfg, 'utf8')).toBe(crlf);  // byte-identical: CRLF survived
+  expect(fs.readdirSync(home).filter((f) => f.includes('.bak-wt-'))).toHaveLength(baksBefore);
+});
+
 test('a real run patches a real config.toml, and a second run rewrites nothing', () => {
   const home = tempCodexHome('model = "gpt-5.5"\n\n[tui.model_availability_nux]\n"gpt-5.5" = 2\n');
   const cfg = path.join(home, 'config.toml');
