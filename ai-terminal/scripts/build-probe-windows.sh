@@ -1,16 +1,24 @@
 #!/usr/bin/env bash
-# Build the COMPOSE PROBE (tool/compose_probe.dart) as a Windows exe.
+# Build a REAL-PLATFORM PROBE (anything under tool/) as a Windows exe.
 #
 # Same firebase problem as the app: firebase_core's Windows plugin fails to build,
 # so — exactly like scripts/build-windows.sh — copy the tree to a scratch dir, strip
-# firebase there, and build. The probe hosts the REAL ComposeBar and logs what it
-# would actually send, so it can be driven with REAL OS keystrokes (the thing widget
-# tests can't do).
+# firebase there, and build. A probe hosts the REAL widgets and logs what they
+# actually do, so it can be driven with REAL OS input (the thing widget tests can't
+# do, because synthetic events never traverse the platform input path).
 #
-# Usage:  scripts/build-probe-windows.sh
+# Usage:  scripts/build-probe-windows.sh [target]
+#   e.g.  scripts/build-probe-windows.sh                          # compose (#55)
+#         scripts/build-probe-windows.sh tool/selection_probe.dart # selection (#83)
+#
+# The target is a PARAMETER rather than a second copy of this script: the scratch +
+# firebase-strip recipe is the thing worth having once, and a copied one drifts.
+#
 # Output: <scratch>/build/windows/x64/runner/Release/ai_terminal.exe  (the PROBE)
 # Requires flutter on PATH (Git Bash:  export PATH="/c/src/flutter/bin:$PATH").
 set -euo pipefail
+
+TARGET="${1:-tool/compose_probe.dart}"
 
 SRC="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"   # ai-terminal/
 # Scratch stripped tree — see scripts/scratch-dirs.js, the one place that decides (#80).
@@ -18,6 +26,12 @@ OUT="$(node "$SRC/../scripts/scratch-dirs.js" probe --posix)"
 
 echo "== source: $SRC"
 echo "== scratch probe dir: $OUT"
+echo "== target: $TARGET"
+
+if [ ! -f "$SRC/$TARGET" ]; then
+  echo "!! no such target: $SRC/$TARGET" >&2
+  exit 1
+fi
 
 rm -rf "$OUT"; mkdir -p "$OUT"
 ( cd "$SRC" && tar \
@@ -38,7 +52,7 @@ sed -i -e '/^  firebase_core:/d' -e '/^  firebase_messaging:/d' "$OUT/pubspec.ya
 echo "== firebase stripped; building the probe"
 cd "$OUT"
 flutter pub get
-flutter build windows --release --target=tool/compose_probe.dart
+flutter build windows --release --target="$TARGET"
 
 EXE="$OUT/build/windows/x64/runner/Release/ai_terminal.exe"
 echo ""

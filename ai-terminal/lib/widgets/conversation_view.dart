@@ -86,6 +86,90 @@ List<ToolUse> collectSubagents(List<TranscriptTurn> turns) {
   return out;
 }
 
+/// #88 — whether a turn is MECHANICAL: the agent's step-by-step work rather than
+/// anything it said. True only for an assistant turn that carries no prose at
+/// all, just tool calls.
+///
+/// This rides the TYPED SHAPE (`text` empty + `toolUses` non-empty), never the
+/// text itself. That matters twice over: string-sniffing for "looks like a tool
+/// call" would misfire on an answer that merely discusses one, and because
+/// `lib/transcript.js` and `lib/transcript-codex.js` emit the same turn type, one
+/// rule covers Claude and Codex with no provider branch — the registry rule in
+/// CLAUDE.md applied to rendering.
+///
+/// A turn with BOTH prose and tools stays conversational: it said something, and
+/// its tool cards are already individually collapsed.
+bool isMechanicalTurn(TranscriptTurn t) =>
+    t.role == 'assistant' && t.text.trim().isEmpty && t.toolUses.isNotEmpty;
+
+/// One row of the chat lens: either a single turn, or a run of consecutive
+/// mechanical turns folded behind one marker (#88).
+class TranscriptChunk {
+  TranscriptChunk.turn(TranscriptTurn turn)
+      : turns = <TranscriptTurn>[turn],
+        mechanical = false;
+  TranscriptChunk.mechanical(this.turns) : mechanical = true;
+
+  /// The turns this row stands for — exactly one when [mechanical] is false.
+  final List<TranscriptTurn> turns;
+
+  /// Whether this row is a folded run of mechanical turns.
+  final bool mechanical;
+
+  /// Stable identity for this row, taken from its FIRST turn.
+  ///
+  /// Deliberately not derived from the whole run: on a live session the agent
+  /// keeps appending tool turns, so a key covering every turn would change on
+  /// each 4s poll and slam an expanded fold shut while the user was reading it.
+  /// The first turn's tool-use id is immutable once the run exists.
+  String get foldKey {
+    final first = turns.first;
+    if (first.toolUses.isNotEmpty) return first.toolUses.first.id;
+    return first.ts ?? '${turns.length}';
+  }
+
+  /// Distinct tool names across the run, in first-use order — the marker's
+  /// subtitle, so a fold says WHAT was done, not merely how much.
+  List<String> get toolNames {
+    final seen = <String>{};
+    final out = <String>[];
+    for (final t in turns) {
+      for (final tool in t.toolUses) {
+        if (seen.add(tool.name)) out.add(tool.name);
+      }
+    }
+    return out;
+  }
+}
+
+/// Folds each run of consecutive mechanical turns into one [TranscriptChunk],
+/// leaving conversational turns as single chunks. PURE, so the folding rule is
+/// unit-testable without pumping a widget.
+///
+/// Runs are folded even when only one turn long: the point is a transcript whose
+/// rows are all either something said or one compact "did N things" marker, and
+/// a lone tool turn is no more readable than a pair.
+List<TranscriptChunk> groupTranscriptTurns(List<TranscriptTurn> turns) {
+  final out = <TranscriptChunk>[];
+  var run = <TranscriptTurn>[];
+  void flush() {
+    if (run.isEmpty) return;
+    out.add(TranscriptChunk.mechanical(run));
+    run = <TranscriptTurn>[];
+  }
+
+  for (final t in turns) {
+    if (isMechanicalTurn(t)) {
+      run.add(t);
+    } else {
+      flush();
+      out.add(TranscriptChunk.turn(t));
+    }
+  }
+  flush();
+  return out;
+}
+
 class ConversationView extends StatefulWidget {
   const ConversationView({
     super.key,
@@ -96,7 +180,17 @@ class ConversationView extends StatefulWidget {
     this.submittedPrompts,
     this.onSubmitToSession,
     this.derivedCtxSink,
+    this.selectionSink,
   });
+
+  /// #83 — where to publish the lens's CURRENT selected text ('' when none).
+  ///
+  /// Lifted for the same reason as [derivedCtxSink]: only this widget can see
+  /// the selection (the `SelectionArea` is its own), but only the screen above
+  /// can own a keyboard shortcut that works while the compose field holds focus.
+  /// Publishing the text — rather than exposing the region — keeps the copy path
+  /// a plain clipboard write with nothing to keep in sync.
+  final ValueNotifier<String>? selectionSink;
 
   /// Where to publish the transcript-derived ctx% (#74).
   ///
@@ -668,6 +762,10 @@ class _ConversationViewState extends State<ConversationView> {
         SessionRepository.instance.compactingFor(widget.session.id)?.active ??
             false;
     final leadingLoader = _loadingOlder ? 1 : 0;
+    // #88: rows are CHUNKS, not turns — a run of tool-only turns renders as one
+    // fold. Recomputed per build (pure + cheap); the transcript is already fully
+    // in memory, so there is nothing to cache and nothing to invalidate.
+    final chunks = groupTranscriptTurns(_turns);
     final subagents = collectSubagents(_turns);
     // #74: the badges live in the session's meta bar now (so a terminal-lens
     // session gets them too); publish the estimate only this lens can compute.
@@ -695,10 +793,15 @@ class _ConversationViewState extends State<ConversationView> {
         // ancestor own the selection; taps (tool-chip expand, code copy) still
         // pass through. Auto-scrolls while dragging past an edge.
         SelectionArea(
+          // #83: publish what is selected so the screen above can copy it. The
+          // callback fires on every drag update, so this is also what makes
+          // "is there a selection right now" answerable at all.
+          onSelectionChanged: (content) =>
+              widget.selectionSink?.value = content?.plainText ?? '',
           child: ListView.builder(
           controller: _scrollController,
           padding: const EdgeInsets.symmetric(vertical: 8),
-          itemCount: _turns.length +
+          itemCount: chunks.length +
               leadingLoader +
               ((working || compacting) ? 1 : 0) +
               _pendingEchoes.length,
@@ -716,14 +819,23 @@ class _ConversationViewState extends State<ConversationView> {
               );
             }
             var i = index - leadingLoader;
-            if (i < _turns.length) {
+            if (i < chunks.length) {
+              final chunk = chunks[i];
+              if (chunk.mechanical) {
+                return _MechanicalFold(
+                  key: ValueKey('fold-${chunk.foldKey}'),
+                  chunk: chunk,
+                  subFetch: _subFetch,
+                  agentId: widget.session.agent,
+                );
+              }
               return _TurnBubble(
-                turn: _turns[i],
+                turn: chunk.turns.single,
                 subFetch: _subFetch,
                 agentId: widget.session.agent,
               );
             }
-            i -= _turns.length;
+            i -= chunks.length;
             // Trailing "Claude is working…" indicator while the agent is
             // mid-turn — superseded by "Compacting conversation…" (#65) when
             // both apply.
@@ -1507,6 +1619,112 @@ class _TurnBubble extends StatelessWidget {
           ),
         ),
       ),
+    );
+  }
+}
+
+/// #88 — a folded run of mechanical turns. Collapsed by default to one quiet
+/// row ("6 steps · Read · Edit · Bash"); tapping expands it into the real turn
+/// bubbles, so nothing is hidden, only folded.
+///
+/// The marker is deliberately unlike a turn bubble — no surface, no role tag,
+/// muted text — because the whole point is that the eye skips it while scanning
+/// for what was actually said. It names the tools rather than only counting, so
+/// the fold can be judged without opening it.
+class _MechanicalFold extends StatefulWidget {
+  const _MechanicalFold({
+    super.key,
+    required this.chunk,
+    required this.subFetch,
+    required this.agentId,
+  });
+
+  final TranscriptChunk chunk;
+  final SubagentFetcher? subFetch;
+  final String? agentId;
+
+  @override
+  State<_MechanicalFold> createState() => _MechanicalFoldState();
+}
+
+class _MechanicalFoldState extends State<_MechanicalFold> {
+  bool _expanded = false;
+
+  @override
+  Widget build(BuildContext context) {
+    final theme = Theme.of(context);
+    final turns = widget.chunk.turns;
+    final steps = turns.fold<int>(0, (n, t) => n + t.toolUses.length);
+    final names = widget.chunk.toolNames;
+    final shown = names.take(3).join(' · ');
+    final extra = names.length > 3 ? ' +${names.length - 3}' : '';
+    final muted = theme.colorScheme.onSurfaceVariant;
+
+    return Column(
+      crossAxisAlignment: CrossAxisAlignment.start,
+      children: [
+        Padding(
+          padding: const EdgeInsets.symmetric(
+            horizontal: AppSpacing.screenPadding,
+            vertical: 2,
+          ),
+          child: Material(
+            color: Colors.transparent,
+            borderRadius: BorderRadius.circular(AppShape.small),
+            child: InkWell(
+              borderRadius: BorderRadius.circular(AppShape.small),
+              onTap: () => setState(() => _expanded = !_expanded),
+              child: Padding(
+                padding:
+                    const EdgeInsets.symmetric(horizontal: 8, vertical: 6),
+                child: Row(
+                  mainAxisSize: MainAxisSize.min,
+                  children: [
+                    Icon(
+                      _expanded ? Icons.expand_more : Icons.chevron_right,
+                      size: 16,
+                      color: muted,
+                    ),
+                    const SizedBox(width: 4),
+                    Icon(Icons.build_outlined, size: 14, color: muted),
+                    const SizedBox(width: 6),
+                    Flexible(
+                      child: Text(
+                        steps == 1 ? '1 step' : '$steps steps',
+                        style: theme.textTheme.bodySmall?.copyWith(
+                          color: muted,
+                          fontWeight: FontWeight.w600,
+                        ),
+                      ),
+                    ),
+                    if (shown.isNotEmpty) ...[
+                      const SizedBox(width: 6),
+                      Flexible(
+                        flex: 3,
+                        child: Text(
+                          '$shown$extra',
+                          maxLines: 1,
+                          overflow: TextOverflow.ellipsis,
+                          style: theme.textTheme.bodySmall?.copyWith(
+                            color: muted.withValues(alpha: 0.8),
+                          ),
+                        ),
+                      ),
+                    ],
+                  ],
+                ),
+              ),
+            ),
+          ),
+        ),
+        if (_expanded)
+          for (final t in turns)
+            _TurnBubble(
+              turn: t,
+              subFetch: widget.subFetch,
+              agentId: widget.agentId,
+            ),
+      ],
     );
   }
 }

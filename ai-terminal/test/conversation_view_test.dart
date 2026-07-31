@@ -260,6 +260,15 @@ void main() {
     );
     await tester.pumpAndSettle();
 
+    // #88: this turn is tool-ONLY, so it is now mechanical and folded away by
+    // default. Open the fold first — the card's own behaviour below is
+    // unchanged, and asserting it still through the fold is the point: nothing
+    // was removed, only folded.
+    expect(find.text('1 step'), findsOneWidget);
+    expect(find.textContaining('Bash — npm test'), findsNothing);
+    await tester.tap(find.text('1 step'));
+    await tester.pumpAndSettle();
+
     // Collapsed: command in the title, output hidden.
     expect(find.textContaining('Bash — npm test'), findsOneWidget);
     expect(find.textContaining('OUTPUT_MARKER'), findsNothing);

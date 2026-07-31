@@ -43,7 +43,14 @@ test('the rule is imported, not reimplemented, in server.js', () => {
   const src = fs.readFileSync(path.join(__dirname, '..', 'server.js'), 'utf8');
   expect(src).toContain("require('./lib/waiting-for')");
   // No second copy of the decision anywhere in the server.
-  const inline = src.split(/\r?\n/).filter((l) =>
-    /'waiting'/.test(l) && /'permission'|'question'/.test(l));
+  //
+  // Comments are stripped first. This guard is a text scan, so it cannot tell
+  // code from prose — and SERVER_VERSION's changelog comment necessarily NAMES
+  // the values it shipped ('question' / 'permission' / 'waiting'), which tripped
+  // it on the very commit that introduced the rule. A guard that fires on its
+  // own release note teaches people to ignore it.
+  const inline = src.split(/\r?\n/)
+    .map((l) => l.replace(/\/\/.*$/, ''))
+    .filter((l) => /'waiting'/.test(l) && /'permission'|'question'/.test(l));
   expect(inline).toEqual([]);
 });

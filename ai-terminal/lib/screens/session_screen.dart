@@ -283,6 +283,34 @@ bool terminalCopyShortcutTriggered({
   return shiftPressed || hasSelection;
 }
 
+/// #83 — whether Ctrl+C (Cmd+C on macOS) should copy the CHAT lens's selection.
+///
+/// The chat lens had no copy path at all: `_handleTerminalCopyShortcut` is wired
+/// to `TerminalView.onKeyEvent`, so it only ever sees keys while the TERMINAL has
+/// focus. In the chat lens the compose field normally holds focus on desktop, so
+/// a perfectly good selection could be dragged and then not copied — measured on
+/// the real Windows build, where a mid-drag capture showed the highlight while
+/// Ctrl+C left the clipboard untouched.
+///
+/// Narrow on purpose, because Ctrl+C is overloaded:
+///  * only in the chat lens — in the terminal lens the key must still reach the
+///    PTY as SIGINT (#11/#52), and stealing it would break interrupting;
+///  * only with a chat selection — otherwise the key falls through unchanged;
+///  * never while the compose field owns a real selection, so copying the text
+///    you just highlighted in your own prompt keeps working.
+///
+/// Pure/testable: every input is passed in rather than read from
+/// `HardwareKeyboard`/`Platform` here.
+bool chatCopyShortcutTriggered({
+  required bool chatLens,
+  required bool ctrlOrCmdPressed,
+  required bool hasChatSelection,
+  required bool composeHasSelection,
+}) {
+  if (!chatLens || !ctrlOrCmdPressed) return false;
+  return hasChatSelection && !composeHasSelection;
+}
+
 /// A staged compose-bar image attachment (#29): the thumbnail [bytes] shown in
 /// the removable chip, and the server [path] delivered to Claude on submit.
 class _ComposeAttachment {
@@ -422,6 +450,10 @@ class _SessionScreenState extends State<SessionScreen>
   /// meta bar can show it in either lens. Notifier, not setState, so publishing
   /// it never rebuilds the whole screen.
   final ValueNotifier<int?> _derivedCtx = ValueNotifier<int?>(null);
+
+  /// #83 — the chat lens's current selected text ('' when nothing is selected),
+  /// published upward by [ConversationView] so Ctrl+C can copy it from here.
+  final ValueNotifier<String> _chatSelection = ValueNotifier<String>('');
   String? _apiErrorReason;
 
   // --- Interactive question overlay (#19) ----------------------------------
@@ -1602,6 +1634,22 @@ class _SessionScreenState extends State<SessionScreen>
       _pasteClipboardImage();
       return true;
     }
+    // #83: Ctrl+C copies the chat lens's selection. It lives HERE, with Alt+V,
+    // rather than on a focus-scoped handler precisely because the compose field
+    // normally holds focus in the chat lens — a focus-scoped shortcut is the
+    // reason there was no copy path in the first place.
+    if (event is KeyDownEvent &&
+        event.logicalKey == LogicalKeyboardKey.keyC &&
+        chatCopyShortcutTriggered(
+          chatLens: _activeLens == 'chat',
+          ctrlOrCmdPressed: HardwareKeyboard.instance.isControlPressed ||
+              HardwareKeyboard.instance.isMetaPressed,
+          hasChatSelection: _chatSelection.value.isNotEmpty,
+          composeHasSelection: !_composeController.selection.isCollapsed,
+        )) {
+      Clipboard.setData(ClipboardData(text: _chatSelection.value));
+      return true;
+    }
     return false;
   }
 
@@ -1953,6 +2001,7 @@ class _SessionScreenState extends State<SessionScreen>
   void dispose() {
     WidgetsBinding.instance.removeObserver(this);
     _derivedCtx.dispose();
+    _chatSelection.dispose();
     // #70: leaving the screen must not leave a voice talking.
     if (_speaking) SpeechService.stop();
     if (DesktopAlertService.supported) {
@@ -2337,6 +2386,8 @@ class _SessionScreenState extends State<SessionScreen>
                     // #74: only this lens can derive ctx% from the transcript;
                     // the meta bar renders it for both lenses.
                     derivedCtxSink: _derivedCtx,
+                    // #83: lets Ctrl+C above copy what is selected here.
+                    selectionSink: _chatSelection,
                   ),
                 // Native overlay for Claude's interactive question (#19), above
                 // whichever lens is showing. The key strip below stays usable as
