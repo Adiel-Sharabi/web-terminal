@@ -19,8 +19,15 @@
 // FORCES the approval: on a trusted project (c:\dev is trusted here) Codex otherwise
 // just runs the command and never asks.
 //
+// --from-config DROPS the three tui overrides, so the notification channel can only come
+// from THIS MACHINE'S ~/.codex/config.toml. That is a different claim and the one #82
+// actually needs: not "the code works" but "this box is configured". The default mode
+// cannot fail on an unconfigured machine, which is exactly how the feature shipped in
+// 1.45.0 and sat inert on all three boxes for over a week without any check going red.
+//
 //   node scripts/rig/rig.js up
-//   node scripts/rig/verify-codex-status.js
+//   node scripts/rig/verify-codex-status.js                # mechanism (self-contained)
+//   node scripts/rig/verify-codex-status.js --from-config  # this machine's install
 
 const { login, api } = require('./rig-http');
 const { openTerminal } = require('./rig-ws');
@@ -35,11 +42,21 @@ const CWD = 'C:\\dev\\sampleProject1';
 // string needs them, and bash strips bare double quotes, turning
 // `notification_method="osc9"` into an invalid bare value that Codex rejects at
 // startup. Single-quoting each override is what survives the shell.
-const AUTO = [
-  'codex',
+const FROM_CONFIG = process.argv.includes('--from-config');
+
+// The tui overrides are what make the default mode self-contained; --from-config omits
+// them so the ONLY possible source of an OSC 9 notification is config.toml. The approval
+// and sandbox overrides stay in BOTH modes — they are the test fixture (they force a
+// permission prompt in a trusted project), not the thing under test.
+const TUI_OVERRIDES = [
   "-c 'tui.notifications=true'",
   `-c 'tui.notification_method="osc9"'`,
   `-c 'tui.notification_condition="always"'`,
+];
+
+const AUTO = [
+  'codex',
+  ...(FROM_CONFIG ? [] : TUI_OVERRIDES),
   `-c 'approval_policy="on-request"'`,
   `-c 'sandbox_mode="read-only"'`,
 ].join(' ');
@@ -57,6 +74,19 @@ const AUTO = [
 // 0.144.0 and is not in 0.144.6, so matching it broke on a routine auto-update. The
 // model/effort line is drawn as one run and survived the bump.
 const TUI_READY = /gpt-[0-9.]+(?:-\w+)?\s+(?:minimal|low|medium|high|xhigh)/i;
+
+// Codex's startup update nag BLOCKS the TUI behind a select list:
+//   ✨ Update available! 0.144.6 -> 0.146.0
+//   › 1. Update now (runs `npm install -g @openai/codex`)
+//     2. Skip     3. Skip until next version
+// It appeared on 2026-07-31 and made this verifier time out with perfectly good code —
+// the same false-negative class the TUI_READY comment above warns about, arriving from
+// outside the repo. Any new Codex session hits it, so it is not a rig-only concern.
+//
+// Dismiss with ESC, NEVER Enter: the caret starts on "Update now", so a blind Enter runs
+// a global npm install in the middle of a verification run. Esc cannot select a row.
+// Measured 2026-07-31 against a real 0.144.6 PTY: Esc drops straight to the composer.
+const UPDATE_NAG = /Update available|Update now \(runs/i;
 
 async function statusOf(cookie, id) {
   const list = await api(cookie, 'GET', '/api/sessions');
@@ -77,6 +107,9 @@ async function waitFor(fn, label, timeoutMs, stepMs = 1000) {
 
 (async () => {
   const cookie = await login();
+  console.log(FROM_CONFIG
+    ? 'mode: --from-config (no tui overrides — the notification MUST come from ~/.codex/config.toml)'
+    : 'mode: self-contained (tui overrides passed with -c)');
   const { id } = await api(cookie, 'POST', '/api/sessions', {
     name: 'verify-codex-status', cwd: CWD, autoCommand: AUTO, agent: 'codex',
   });
@@ -85,14 +118,42 @@ async function waitFor(fn, label, timeoutMs, stepMs = 1000) {
   let failed = false;
   const term = await openTerminal(cookie, id);
   try {
-    const up = await waitFor(async () => TUI_READY.test(term.text()), 'tui', 60000);
+    let nagDismissed = false;
+    const up = await waitFor(async () => {
+      if (TUI_READY.test(term.text())) return true;
+      if (!nagDismissed && UPDATE_NAG.test(term.text())) {
+        console.log('update nag detected — dismissing with Esc (never Enter: the caret is on "Update now")');
+        term.send('\x1b');
+        nagDismissed = true;
+      }
+      return false;
+    }, 'tui', 60000);
     if (!up) {
       console.log('--- tail of terminal output ---');
       console.log(term.text().slice(-1500));
       throw new Error('Codex TUI never came up — see the tail above');
     }
     console.log('Codex TUI is up');
-    await sleep(3000); // let MCP servers finish booting; a cold TUI shows "esc to interrupt"
+
+    // Being "up" is NOT being ready for input, and a fixed sleep is a guess that got
+    // falsified: dismissing the update nag makes TUI_READY match EARLIER (the composer's
+    // model/effort line renders while "Starting MCP servers (0/2)" is still ticking), and
+    // 3s was no longer enough. The prompt then went into the composer and was never
+    // submitted — a FAIL that looks exactly like the submit bug this repo has chased four
+    // times, with nothing actually wrong.
+    //
+    // So wait for a real quiet signal instead: two consecutive polls whose NEW output
+    // carries neither the MCP boot line nor the working spinner.
+    const BUSY = /Starting MCP servers|esc to interrupt/i;
+    let mark = term.text().length, calm = 0;
+    const quiet = await waitFor(async () => {
+      const fresh = term.text().slice(mark);
+      mark = term.text().length;
+      calm = BUSY.test(fresh) ? 0 : calm + 1;
+      return calm >= 2;
+    }, 'settle', 60000, 1500);
+    console.log(quiet ? 'composer is idle — safe to submit' : 'WARN: never went quiet; submitting anyway');
+    await sleep(1500);
 
     const before = await statusOf(cookie, id);
     console.log(`status before prompt: ${before}`);
@@ -108,6 +169,12 @@ async function waitFor(fn, label, timeoutMs, stepMs = 1000) {
     } else {
       failed = true;
       console.log(`FAIL: status never became waiting (last=${await statusOf(cookie, id)})`);
+      // Which failure this is depends on the mode, and saying so beats re-deriving it:
+      // in --from-config an unconfigured machine fails here with working code.
+      console.log(FROM_CONFIG
+        ? 'HINT: --from-config relies on ~/.codex/config.toml. Run `node scripts/install-codex-notify.js --check`'
+        + ' — if the three [tui] keys are missing, this box is unconfigured and the CODE is not at fault.'
+        : 'HINT: the tui overrides were passed, so config.toml is not involved — suspect the worker/registry path.');
       console.log('--- tail of terminal output ---');
       console.log(term.text().slice(-1200));
     }

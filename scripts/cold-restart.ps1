@@ -69,6 +69,35 @@ function Resolve-NodeExe {
 }
 
 $nodeExe = Resolve-NodeExe
+
+# --- Machine-local agent config, applied by the deploy path ----------------------------
+# scripts/install-codex-notify.js writes the three [tui] keys that turn on Codex's OSC 9
+# status channel. It used to be a MANUAL per-machine step and the predictable happened
+# (#82): the feature shipped in 1.45.0 and sat inert on every box, because an unconfigured
+# machine is SILENT rather than noisy — notification_condition defaults to "unfocused" and
+# a PTY has no focus state, so nothing is emitted and nothing surfaces the gap.
+#
+# A cold restart is already REQUIRED for this config to take effect (it is worker-side), so
+# it is the one operation that cannot legitimately be skipped — which makes it the right
+# owner. The installer is idempotent (no change => no write, no backup) and re-stamps
+# `notify`'s absolute path, so a repo that moved self-heals on the next deploy.
+#
+# NON-FATAL by construction: a machine with no codex exits 1, and that must never block a
+# restart of the terminal server. Config drift is a warning, not an outage.
+function Invoke-CodexNotifyConfig([switch]$Check) {
+  if (-not $nodeExe) { return 'skipped (no node found)' }
+  $js = Join-Path $repo 'scripts\install-codex-notify.js'
+  if (-not (Test-Path $js)) { return 'skipped (installer not present)' }
+  try {
+    if ($Check) { $out = (& $nodeExe $js --check 2>&1 | Out-String).Trim() }
+    else        { $out = (& $nodeExe $js       2>&1 | Out-String).Trim() }
+  } catch {
+    return "skipped (could not run: $($_.Exception.Message))"
+  }
+  if (-not $out) { $out = '(no output)' }
+  return ($out -replace '\s*\r?\n\s*', ' | ')
+}
+
 if ($nodeExe) {
   $global:LASTEXITCODE = $null
   $depOut = (& $nodeExe (Join-Path $repo 'scripts\check-deps.js') 2>&1 | Out-String).Trim()
@@ -96,8 +125,12 @@ if ($nodeExe) {
 }
 
 if ($CheckOnly) {
-  Note 'check-only: nothing killed'
+  # Report config drift too — auditing a peer over /api/exec is the cheapest moment to
+  # notice that its Codex status channel is unconfigured, and --check changes nothing.
+  $cfgCheck = Invoke-CodexNotifyConfig -Check
+  Note "check-only: nothing killed; codex notify config: $cfgCheck"
   Write-Output "preflight OK: $depOut"
+  Write-Output "codex notify config: $cfgCheck"
   exit 0
 }
 
@@ -152,6 +185,10 @@ if ($nodeExe -and -not (Test-Path $binDir)) {
     Note "bin relink SKIPPED - npm-cli.js not found at $npmCli"
   }
 }
+
+# Apply the machine-local agent config before the relaunch, so a box that was never
+# hand-patched comes back configured instead of silently inert (see the function above).
+Note "codex notify config: $(Invoke-CodexNotifyConfig)"
 
 # GUI-subsystem launcher: wscript runs node hidden, so no console window flashes.
 Note 'relaunching via start-server.vbs'
