@@ -393,6 +393,50 @@ class ApiClient {
     }
   }
 
+  /// Uploads an arbitrary DROPPED file (#90) and returns its path on the
+  /// SERVER's disk.
+  ///
+  /// Unlike [uploadClipboardImage] this takes any content type, because a drop
+  /// is whatever the user grabbed in Explorer. The bytes have to travel for the
+  /// same reason: the agent runs on the server, so the dropping device's own path
+  /// would name a file the agent cannot open on a remote cluster session.
+  ///
+  /// Returns the bare path (no bracketed-paste wrapper) — the caller stages it as
+  /// an attachment and the existing submit path adds the wrapper, so there is
+  /// still exactly one place that decides how an attachment reaches the PTY.
+  Future<String> uploadDroppedFile(List<int> bytes, {required String filename}) async {
+    final uri = Uri.parse('${server.baseUrl}/api/upload-file');
+    try {
+      final res = await _http
+          .post(
+            uri,
+            headers: {
+              'Authorization': 'Bearer ${server.bearerToken}',
+              'Content-Type': 'application/octet-stream',
+              // Sanitised server-side — it is joined onto a path there.
+              'X-Filename': filename,
+            },
+            body: bytes,
+          )
+          .timeout(_uploadTimeout);
+      if (res.statusCode < 200 || res.statusCode >= 300) {
+        throw ApiException(res.statusCode, _errorMessage(res));
+      }
+      final j = _asMap(_decode(res));
+      final path = (j['path'] ?? '').toString();
+      if (j['ok'] != true || path.isEmpty) {
+        throw const ApiException(0, 'File upload failed');
+      }
+      return path;
+    } on ApiException {
+      rethrow;
+    } on TimeoutException {
+      throw const ApiException(0, 'Request timed out');
+    } catch (_) {
+      throw const ApiException(0, 'Server unreachable');
+    }
+  }
+
   // --- WebSocket ----------------------------------------------------------
 
   /// A broadcast stream of `/ws/notify` events for this server.

@@ -583,7 +583,10 @@ void main() {
             focusNode: FocusNode(),
             onSend: () => sent = true,
             isLive: false,
-            attachments: [_png1x1(), _png1x1()],
+            attachments: [
+              ComposeAttachment(name: '', bytes: _png1x1()),
+              ComposeAttachment(name: '', bytes: _png1x1()),
+            ],
             onRemoveAttachment: (i) => removed = i,
           ),
         ),

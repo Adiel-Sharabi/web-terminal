@@ -15,6 +15,7 @@ import 'dart:async';
 import 'dart:convert';
 import 'dart:io' show Platform;
 
+import 'package:desktop_drop/desktop_drop.dart';
 import 'package:flutter/foundation.dart' show kIsWeb;
 import 'package:flutter/material.dart';
 import 'package:flutter/services.dart';
@@ -283,6 +284,25 @@ bool terminalCopyShortcutTriggered({
   return shiftPressed || hasSelection;
 }
 
+/// #90 — whether a dropped file should be staged with an image thumbnail rather
+/// than a named file chip.
+///
+/// Decided from the EXTENSION, not by decoding: this only chooses how the chip is
+/// DRAWN, and a wrong guess costs a generic glyph, never a failed send — the file
+/// is uploaded and its path delivered either way. Decoding every drop to find out
+/// would make dropping a 2 GB archive expensive for a cosmetic answer.
+///
+/// Pure/testable, and deliberately separate from `_mimeFromName`, which answers a
+/// different question (it assumes the input IS an image and only picks which
+/// type), so it can never be used to decide this.
+bool droppedFileIsImage(String name) {
+  final lower = name.toLowerCase();
+  for (final ext in const ['.png', '.jpg', '.jpeg', '.gif', '.webp', '.bmp', '.heic', '.heif']) {
+    if (lower.endsWith(ext)) return true;
+  }
+  return false;
+}
+
 /// #83 — whether Ctrl+C (Cmd+C on macOS) should copy the CHAT lens's selection.
 ///
 /// The chat lens had no copy path at all: `_handleTerminalCopyShortcut` is wired
@@ -314,8 +334,15 @@ bool chatCopyShortcutTriggered({
 /// A staged compose-bar image attachment (#29): the thumbnail [bytes] shown in
 /// the removable chip, and the server [path] delivered to Claude on submit.
 class _ComposeAttachment {
-  const _ComposeAttachment({required this.bytes, required this.path});
-  final Uint8List bytes;
+  const _ComposeAttachment({required this.path, this.bytes, this.name = ''});
+
+  /// Thumbnail bytes for an image; null for a dropped non-image (#90), which
+  /// shows a named chip instead.
+  final Uint8List? bytes;
+
+  /// Display name for a non-image attachment (the dropped file's basename).
+  final String name;
+
   final String path;
 
   /// The PTY payload for this image — the path wrapped in bracketed paste, as
@@ -454,6 +481,10 @@ class _SessionScreenState extends State<SessionScreen>
   /// #83 — the chat lens's current selected text ('' when nothing is selected),
   /// published upward by [ConversationView] so Ctrl+C can copy it from here.
   final ValueNotifier<String> _chatSelection = ValueNotifier<String>('');
+
+  /// #90 — a file drag is hovering the session; drives the "Drop to attach"
+  /// overlay so the gesture has a target the user can see before releasing.
+  bool _dragOver = false;
   String? _apiErrorReason;
 
   // --- Interactive question overlay (#19) ----------------------------------
@@ -1692,6 +1723,120 @@ class _SessionScreenState extends State<SessionScreen>
     _composeFocusNode.requestFocus();
   }
 
+  /// #90 — stage every dropped file as a compose attachment.
+  ///
+  /// Each file's BYTES are uploaded and the SERVER's path is what gets staged;
+  /// the dropping device's own path is never sent, because for a remote cluster
+  /// session it names a file the agent cannot open — and would silently name the
+  /// wrong file if a same-named one existed there. On submit each attachment
+  /// travels the identical `ESC[200~<path>ESC[201~` route a pasted image takes,
+  /// so there is no second submit path to keep in step (#51/#87).
+  Future<void> _attachDroppedFiles(List<DropItem> files) async {
+    final session = _session;
+    if (session == null || files.isEmpty) return;
+    final failures = <String>[];
+    for (final file in files) {
+      try {
+        final bytes = await file.readAsBytes();
+        if (bytes.isEmpty) {
+          // A folder drop reads as empty rather than failing; say so plainly
+          // instead of staging a chip that would deliver nothing.
+          failures.add(file.name);
+          continue;
+        }
+        final path = await ApiClient(
+          session.server,
+        ).uploadDroppedFile(bytes, filename: file.name);
+        if (!mounted) return;
+        setState(() => _attachments.add(_ComposeAttachment(
+              path: path,
+              // Thumbnail only for an image; everything else gets a named chip.
+              bytes: droppedFileIsImage(file.name) ? bytes : null,
+              name: file.name,
+            )));
+      } catch (_) {
+        failures.add(file.name);
+      }
+    }
+    if (!mounted) return;
+    // Focus the compose bar once, after the loop — the chips and Send are there.
+    _composeFocusNode.requestFocus();
+    if (failures.isNotEmpty) {
+      ScaffoldMessenger.of(context).showSnackBar(
+        SnackBar(
+          content: Text(
+            failures.length == 1
+                ? 'Could not attach ${failures.first}'
+                : 'Could not attach ${failures.length} of ${files.length} files',
+          ),
+        ),
+      );
+    }
+  }
+
+  /// #90 — wraps the session body so a file dropped anywhere on it attaches.
+  ///
+  /// Desktop only: drag-and-drop has no phone equivalent, and `DropTarget` would
+  /// simply never fire there. The whole body is the target rather than the compose
+  /// bar alone — on a tall window the bar is a thin strip at the bottom, and
+  /// "aim at the 40px strip" is a worse gesture than the one it replaces.
+  Widget _withFileDrop(Widget child) {
+    if (!isDesktopPlatform()) return child;
+    return DropTarget(
+      onDragEntered: (_) => setState(() => _dragOver = true),
+      onDragExited: (_) => setState(() => _dragOver = false),
+      onDragDone: (detail) {
+        setState(() => _dragOver = false);
+        unawaited(_attachDroppedFiles(detail.files));
+      },
+      child: Stack(
+        children: [
+          child,
+          if (_dragOver)
+            Positioned.fill(
+              child: IgnorePointer(
+                child: Container(
+                  color: AppColors.background.withValues(alpha: 0.72),
+                  child: Center(
+                    child: Container(
+                      padding: const EdgeInsets.symmetric(
+                        horizontal: 22,
+                        vertical: 18,
+                      ),
+                      decoration: BoxDecoration(
+                        color: Theme.of(context).colorScheme.surfaceContainerHigh,
+                        borderRadius: BorderRadius.circular(AppShape.large),
+                        border: Border.all(
+                          color: Theme.of(context).colorScheme.primary,
+                          width: 2,
+                        ),
+                      ),
+                      child: Column(
+                        mainAxisSize: MainAxisSize.min,
+                        children: [
+                          Icon(
+                            Icons.file_download_outlined,
+                            size: 30,
+                            color: Theme.of(context).colorScheme.primary,
+                          ),
+                          const SizedBox(height: 8),
+                          Text(
+                            'Drop to attach',
+                            key: const Key('drop-to-attach'),
+                            style: Theme.of(context).textTheme.titleSmall,
+                          ),
+                        ],
+                      ),
+                    ),
+                  ),
+                ),
+              ),
+            ),
+        ],
+      ),
+    );
+  }
+
   void _removeComposeAttachment(int index) {
     if (index < 0 || index >= _attachments.length) return;
     setState(() => _attachments.removeAt(index));
@@ -2153,7 +2298,8 @@ class _SessionScreenState extends State<SessionScreen>
           ),
         ],
       ),
-      body: Column(
+      // #90: the whole session body is a file drop target on desktop.
+      body: _withFileDrop(Column(
         children: [
           // #74: the session's meta bar — cwd + usage badges on the flexible
           // side, session controls on the right. These controls used to sit in
@@ -2433,7 +2579,10 @@ class _SessionScreenState extends State<SessionScreen>
               // chips. Routing (compose vs terminal) is decided in
               // `_pasteClipboardImage` via `pasteImageIntoCompose`.
               // #29: staged image thumbnails (bytes) + remove (✕) callback.
-              attachments: [for (final a in _attachments) a.bytes],
+              attachments: [
+                for (final a in _attachments)
+                  ComposeAttachment(name: a.name, bytes: a.bytes),
+              ],
               onRemoveAttachment: _removeComposeAttachment,
               // Hardware Esc reaches the terminal; hardware arrows (while the
               // compose field is empty) go through the same routing as the
@@ -2484,7 +2633,7 @@ class _SessionScreenState extends State<SessionScreen>
             ),
           ),
         ],
-      ),
+      )),
     );
   }
 }

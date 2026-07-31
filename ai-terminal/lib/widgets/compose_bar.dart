@@ -150,7 +150,7 @@ class ComposeBar extends StatelessWidget {
     this.onTab,
     this.onBackspace,
     this.terminalActive = false,
-    this.attachments = const <Uint8List>[],
+    this.attachments = const <ComposeAttachment>[],
     this.onRemoveAttachment,
   });
 
@@ -158,10 +158,11 @@ class ComposeBar extends StatelessWidget {
   final FocusNode focusNode;
   final VoidCallback onSend;
 
-  /// Pasted/added image attachments (#29), as thumbnail bytes, shown as a strip
-  /// of removable chips above the field. The underlying file paths live in
-  /// `SessionScreen` and are sent to the PTY on submit; only the preview is here.
-  final List<Uint8List> attachments;
+  /// Staged attachments (#29 pasted/picked images, #90 dropped files), shown as
+  /// a strip of removable chips above the field. The underlying file paths live
+  /// in `SessionScreen` and are sent to the PTY on submit; only the preview is
+  /// here — see [ComposeAttachment].
+  final List<ComposeAttachment> attachments;
 
   /// Remove the attachment at `index` (the chip's ✕). `null` disables removal.
   final void Function(int index)? onRemoveAttachment;
@@ -372,12 +373,110 @@ class ComposeBar extends StatelessWidget {
         scrollDirection: Axis.horizontal,
         itemCount: attachments.length,
         separatorBuilder: (_, _) => const SizedBox(width: 8),
-        itemBuilder: (context, i) => _AttachmentThumb(
-          bytes: attachments[i],
-          onRemove: onRemoveAttachment == null
-              ? null
-              : () => onRemoveAttachment!(i),
-        ),
+        itemBuilder: (context, i) {
+          final a = attachments[i];
+          final remove =
+              onRemoveAttachment == null ? null : () => onRemoveAttachment!(i);
+          return a.isImage
+              ? _AttachmentThumb(bytes: a.bytes!, onRemove: remove)
+              : _AttachmentFileChip(name: a.name, onRemove: remove);
+        },
+      ),
+    );
+  }
+}
+
+/// One staged attachment as the compose bar needs to RENDER it (#29, #90).
+///
+/// [bytes] drives an image thumbnail; a dropped non-image (#90) has none and
+/// renders as a named file chip instead. How an attachment is DELIVERED — its
+/// server-side path and the bracketed-paste wrapper — deliberately stays with
+/// the screen that owns submit, so there is still exactly one place that decides
+/// how an attachment reaches the PTY. This type carries only what is drawn.
+class ComposeAttachment {
+  const ComposeAttachment({required this.name, this.bytes});
+
+  /// Display name — the dropped file's basename, or '' for a pasted image whose
+  /// chip is the thumbnail itself.
+  final String name;
+
+  /// Image preview bytes, or null when this attachment is not an image.
+  final Uint8List? bytes;
+
+  bool get isImage => bytes != null;
+}
+
+/// One NON-image attachment (#90): a named chip with a file glyph and the same
+/// ✕ affordance as an image thumbnail.
+///
+/// It shows the name because that is the only thing distinguishing two dropped
+/// files — a generic glyph strip would leave you unable to tell which one you
+/// grabbed by mistake, and removal is the whole reason the ✕ is there.
+class _AttachmentFileChip extends StatelessWidget {
+  const _AttachmentFileChip({required this.name, this.onRemove});
+
+  final String name;
+  final VoidCallback? onRemove;
+
+  @override
+  Widget build(BuildContext context) {
+    final theme = Theme.of(context);
+    return SizedBox(
+      height: 52,
+      child: Stack(
+        clipBehavior: Clip.none,
+        children: [
+          Container(
+            height: 52,
+            constraints: const BoxConstraints(maxWidth: 168),
+            padding: const EdgeInsets.fromLTRB(10, 8, 22, 8),
+            decoration: BoxDecoration(
+              color: theme.colorScheme.surfaceContainerHigh,
+              borderRadius: BorderRadius.circular(AppShape.small),
+              border: Border.all(color: theme.colorScheme.outlineVariant),
+            ),
+            child: Row(
+              mainAxisSize: MainAxisSize.min,
+              children: [
+                Icon(
+                  Icons.insert_drive_file_outlined,
+                  size: 18,
+                  color: theme.colorScheme.onSurfaceVariant,
+                ),
+                const SizedBox(width: 6),
+                Flexible(
+                  child: Text(
+                    name,
+                    maxLines: 2,
+                    overflow: TextOverflow.ellipsis,
+                    style: theme.textTheme.bodySmall,
+                  ),
+                ),
+              ],
+            ),
+          ),
+          if (onRemove != null)
+            Positioned(
+              top: 1,
+              right: 1,
+              child: GestureDetector(
+                onTap: onRemove,
+                child: Container(
+                  decoration: BoxDecoration(
+                    color: theme.colorScheme.surface.withValues(alpha: 0.85),
+                    shape: BoxShape.circle,
+                    border: Border.all(color: theme.colorScheme.outlineVariant),
+                  ),
+                  padding: const EdgeInsets.all(1),
+                  child: Icon(
+                    Icons.close,
+                    size: 13,
+                    color: theme.colorScheme.onSurface,
+                  ),
+                ),
+              ),
+            ),
+        ],
       ),
     );
   }

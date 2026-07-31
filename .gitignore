@@ -8,6 +8,7 @@ sessions.json.bak
 history.json
 scrollback/
 clipboard-images/
+dropped-files/
 test-results/
 *.crt
 *.key
