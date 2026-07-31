@@ -16,6 +16,7 @@ import 'services/notification_service.dart';
 import 'services/push_service.dart';
 import 'services/server_store.dart';
 import 'services/session_repository.dart';
+import 'services/session_selection.dart';
 import 'theme/app_theme.dart';
 
 /// Lets the notification-tap listener navigate without a `BuildContext`.
@@ -48,6 +49,28 @@ List<String> resolveNotificationStack(List<String> stack, String target) {
   if (result.last != target) result.add(target);
   return result;
 }
+
+/// What a notification tap should DO with the navigation stack (issue #76).
+///
+/// On a wide window the app's normal shape is a master-detail split, where a
+/// session is opened by SELECTING it — so pushing a route covers the very
+/// layout the user is in and forces a Back press to get the list back. On a
+/// narrow window there is no split to select into and the push is correct,
+/// which is exactly what #45 specified and verified.
+///
+/// Pure so the rule can be tested without a navigator: the *decision* is the
+/// part that was wrong, and it was wrong because nothing ever consulted the
+/// breakpoint. Mirrors [_AiTerminalAppState._openSession].
+enum NotificationOpen {
+  /// Set the shared selection and reveal the split (no route is pushed).
+  selectInSplit,
+
+  /// Push one screen above the list, per #45.
+  pushRoute,
+}
+
+NotificationOpen planNotificationOpen({required bool splitCanSelect}) =>
+    splitCanSelect ? NotificationOpen.selectInSplit : NotificationOpen.pushRoute;
 
 /// FCM push + local notifications are mobile-only (firebase_messaging has no
 /// desktop support). On Windows/macOS/Linux the app is a full terminal client
@@ -122,6 +145,20 @@ class _AiTerminalAppState extends State<AiTerminalApp>
   void _openSession(String sessionId) {
     final nav = navigatorKey.currentState;
     if (nav == null) return;
+
+    // #76: on a wide window, open the session the way the app normally does —
+    // by selecting it in the split — instead of pushing a full-screen route
+    // over the layout. Both paths now agree on one answer to "which session is
+    // showing" (SessionSelection), rather than each having its own.
+    if (planNotificationOpen(splitCanSelect: SessionSelection.instance.splitMounted) ==
+        NotificationOpen.selectInSplit) {
+      // Reveal the split: a route pushed while the window was narrow, or by
+      // Fork / the list, would otherwise still be covering it.
+      nav.popUntil((route) => route.isFirst);
+      SessionSelection.instance.selectedId.value = sessionId;
+      return;
+    }
+
     final name = sessionRouteName(sessionId);
     // Collapse any stacked session screens so a notification tap lands exactly
     // one screen above the list (issue #45: Back had to be pressed 3×). popUntil

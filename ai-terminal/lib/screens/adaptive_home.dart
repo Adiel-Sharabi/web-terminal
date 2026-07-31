@@ -2,6 +2,7 @@ import 'package:flutter/material.dart';
 import 'package:shared_preferences/shared_preferences.dart';
 
 import '../api/models.dart';
+import '../services/session_selection.dart';
 import '../widgets/empty_state.dart';
 import 'dashboard_screen.dart';
 import 'session_screen.dart';
@@ -38,7 +39,15 @@ class AdaptiveHome extends StatefulWidget {
 }
 
 class _AdaptiveHomeState extends State<AdaptiveHome> {
-  Session? _selected;
+  final SessionSelection _selection = SessionSelection.instance;
+
+  /// The `Session` OBJECT behind the selected id, when we happen to have one.
+  ///
+  /// Purely an optimisation for [SessionScreen.initialSession] so a list tap
+  /// can paint immediately — the **id** in [SessionSelection] is the source of
+  /// truth. A notification supplies only an id, which is why this is nullable
+  /// and dropped as soon as the selection moves to an id it does not describe.
+  Session? _hint;
 
   /// Single source of truth for the rail width. Seeded from the default, then
   /// overwritten by any persisted value, then by drags.
@@ -48,6 +57,23 @@ class _AdaptiveHomeState extends State<AdaptiveHome> {
   void initState() {
     super.initState();
     _loadRailWidth();
+    _selection.selectedId.addListener(_onSelectionChanged);
+  }
+
+  @override
+  void dispose() {
+    _selection.selectedId.removeListener(_onSelectionChanged);
+    // A torn-down split can no longer show a selection, so the notification
+    // path must go back to pushing a route.
+    _selection.splitMounted = false;
+    super.dispose();
+  }
+
+  void _onSelectionChanged() {
+    if (!mounted) return;
+    setState(() {
+      if (_hint?.id != _selection.selectedId.value) _hint = null;
+    });
   }
 
   Future<void> _loadRailWidth() async {
@@ -75,17 +101,26 @@ class _AdaptiveHomeState extends State<AdaptiveHome> {
     return LayoutBuilder(
       builder: (context, constraints) {
         final wide = constraints.maxWidth >= AdaptiveHome.splitBreakpoint;
+        // Tell the notification path whether SELECTING is a real alternative to
+        // pushing a route (#76). Written during build on purpose: it is the
+        // layout decision itself, and a plain field with no listeners cannot
+        // trigger the rebuild loop a notifier would.
+        _selection.splitMounted = wide;
         if (!wide) {
           // Phone / narrow: the dashboard pushes routes itself.
           return const DashboardScreen();
         }
+        final selectedId = _selection.selectedId.value;
         return Row(
           children: [
             SizedBox(
               width: _railWidth,
               child: DashboardScreen(
-                selectedId: _selected?.id,
-                onSelectSession: (s) => setState(() => _selected = s),
+                selectedId: selectedId,
+                onSelectSession: (s) {
+                  _hint = s;
+                  _selection.selectedId.value = s.id;
+                },
               ),
             ),
             _RailResizeHandle(
@@ -94,7 +129,7 @@ class _AdaptiveHomeState extends State<AdaptiveHome> {
               onDragEnd: _persistRailWidth,
             ),
             Expanded(
-              child: _selected == null
+              child: selectedId == null
                   ? const EmptyState(
                       icon: Icons.dashboard_customize_outlined,
                       title: 'Pick a session',
@@ -104,9 +139,9 @@ class _AdaptiveHomeState extends State<AdaptiveHome> {
                   // A fresh key per id rebuilds the pane (new connection) when
                   // the selection changes.
                   : SessionScreen(
-                      key: ValueKey(_selected!.id),
-                      sessionId: _selected!.id,
-                      initialSession: _selected,
+                      key: ValueKey(selectedId),
+                      sessionId: selectedId,
+                      initialSession: _hint,
                       embedded: true,
                     ),
             ),
