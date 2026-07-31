@@ -19,7 +19,9 @@ NAME="${1:?usage: build-windows.sh <version-name> <version-code>}"
 CODE="${2:?usage: build-windows.sh <version-name> <version-code>}"
 
 SRC="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"   # ai-terminal/
-OUT="/c/dev/ai-terminal-winbuild"                         # scratch stripped tree
+# Scratch stripped tree. Asked for rather than hard-coded, so this and the rig and the
+# probe all move together when the location changes (#80): scripts/scratch-dirs.js.
+OUT="$(node "$SRC/../scripts/scratch-dirs.js" winbuild --posix)"
 
 echo "== source: $SRC"
 echo "== scratch build dir: $OUT"

@@ -8,7 +8,7 @@
 //
 //   port        7999                (production: 7681)
 //   ipc pipe    wt-rig-worker       (production: web-terminal / -shadow-home)
-//   directory   C:\dev\wt-rig       (production: C:\dev\web-terminal)
+//   directory   <scratch>\wt-rig    (production: C:\dev\web-terminal) — scratch-dirs.js
 //   config      <rig>\config.json   (its own — never reads production's)
 //   data        <rig>\.data         (its own sessions.json + scrollback)
 //
@@ -34,7 +34,10 @@ const os = require('os');
 const { spawn, execFileSync } = require('child_process');
 
 const REPO = path.resolve(__dirname, '..', '..');
-const RIG = process.env.WT_RIG_DIR || 'C:\\dev\\wt-rig';
+// Where the scratch trees live is decided once, in scripts/scratch-dirs.js (#80).
+// WT_RIG_DIR still overrides, and the basename stays `wt-rig` on purpose — findRigPids()
+// below globs on it, so a shorter name would widen that match. See that file.
+const RIG = require('../scratch-dirs').DIRS.rig;
 const DATA = path.join(RIG, '.data');
 const PIDS = path.join(DATA, 'rig.pids.json');
 

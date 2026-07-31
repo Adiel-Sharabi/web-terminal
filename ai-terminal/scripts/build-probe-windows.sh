@@ -13,7 +13,8 @@
 set -euo pipefail
 
 SRC="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"   # ai-terminal/
-OUT="/c/dev/ai-terminal-probe"                            # scratch stripped tree
+# Scratch stripped tree — see scripts/scratch-dirs.js, the one place that decides (#80).
+OUT="$(node "$SRC/../scripts/scratch-dirs.js" probe --posix)"
 
 echo "== source: $SRC"
 echo "== scratch probe dir: $OUT"

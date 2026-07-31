@@ -70,7 +70,7 @@ async function main() {
   const cookie = await login();
   const { id } = await api(cookie, 'POST', '/api/sessions', {
     name: 'verify-long-prompt',
-    cwd: 'C:\\dev\\wt-rig',
+    cwd: require('../scratch-dirs').DIRS.rig,
   });
   console.log(`session ${id} created`);
 

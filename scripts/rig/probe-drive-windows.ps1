@@ -127,7 +127,10 @@ public class Fg {
 }
 "@
 
-$exe = 'C:\dev\ai-terminal-probe\build\windows\x64\runner\Release\ai_terminal.exe'
+# Ask the one place that decides where scratch trees live (#80) rather than hard-coding a
+# fourth copy of the path — this and build-probe-windows.sh must never disagree.
+$probeDir = (& node (Join-Path $PSScriptRoot '..\scratch-dirs.js') probe).Trim()
+$exe = Join-Path $probeDir 'build\windows\x64\runner\Release\ai_terminal.exe'
 $log = Join-Path $env:TEMP 'compose-probe.log'
 if (-not (Test-Path $exe)) { throw "probe not built: $exe" }
 

@@ -46,7 +46,7 @@ async function outputOver(term, ms) {
   const cookie = await login();
   const { id } = await api(cookie, 'POST', '/api/sessions', {
     name: 'verify-interrupt',
-    cwd: 'C:\\dev\\wt-rig',
+    cwd: require('../scratch-dirs').DIRS.rig,
     autoCommand: 'claude --dangerously-skip-permissions',
     agent: 'claude',
   });

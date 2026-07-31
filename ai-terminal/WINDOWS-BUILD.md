@@ -26,14 +26,19 @@ and fails (`Unable to generate build files` / `firebase_cpp_sdk_windows_*.zip`),
 and `firebase_messaging` has no Windows support. Push is guarded off on desktop
 anyway (`pushSupported` in `lib/main.dart`), so Firebase is dead weight there.
 
-`scripts/build-windows.sh` copies the tree to a scratch dir
-(`C:\dev\ai-terminal-winbuild`), strips the (fully isolated) Firebase bits, and
-builds — the canonical tree is never modified:
+`scripts/build-windows.sh` copies the tree to a scratch dir, strips the (fully
+isolated) Firebase bits, and builds — the canonical tree is never modified:
 ```bash
 export PATH="/c/src/flutter/bin:$PATH"
 bash scripts/build-windows.sh <X.Y.Z> <N>
-# -> C:/dev/ai-terminal-winbuild/build/windows/x64/runner/Release/
+# -> <scratch>/ai-terminal-winbuild/build/windows/x64/runner/Release/
 ```
+The scratch location is **not hard-coded here**: the script asks
+`scripts/scratch-dirs.js`, the one place that decides where every generated tree
+lives (`node scripts/scratch-dirs.js winbuild` prints it — today
+`C:\dev\.wt-scratch\ai-terminal-winbuild`). See ARCHITECTURE.md →
+"Generated trees outside the repo" for the full list and why they sit outside the
+checkout. Delete any of them freely; the next build recreates it.
 The strip is line-based (two imports + two call-lines in `main.dart`, two
 `pubspec.yaml` deps); it leaves a harmless empty `if (pushSupported) {}`.
 

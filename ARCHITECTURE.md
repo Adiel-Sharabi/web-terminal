@@ -200,3 +200,33 @@ Only 3 production dependencies:
 ```
 
 Everything else (xterm.js, fit addon, web-links addon) is loaded from CDN in the browser. No build step, no bundler, no transpiler.
+
+---
+
+## Generated trees outside the repo (safe to delete)
+
+Some tooling writes to directories **outside** the checkout. They are disposable —
+delete any of them and the next run recreates it — and they all live under one
+dot-prefixed parent, `C:\dev\.wt-scratch\`, so `C:\dev` shows one entry rather than
+four siblings of real repos (#80).
+
+| Path | Written by | What it is |
+|---|---|---|
+| `.wt-scratch\wt-rig` | `scripts/rig/rig.js` | A complete, isolated web-terminal (port 7999, own worker pipe, own config + data). Cannot touch production |
+| `.wt-scratch\ai-terminal-winbuild` | `ai-terminal/scripts/build-windows.sh` | Stripped Flutter tree for the release Windows build (Firebase removed) |
+| `.wt-scratch\ai-terminal-probe` | `ai-terminal/scripts/build-probe-windows.sh` | Stripped Flutter tree for the input probe, driven by `scripts/rig/probe-drive-windows.ps1` |
+
+**One place decides where they are: `scripts/scratch-dirs.js`.** JS callers import it; the
+bash and PowerShell callers shell out to it (`node scripts/scratch-dirs.js winbuild --posix`)
+rather than keeping their own copy of the path. Each entry is individually overridable
+(`WT_RIG_DIR`, `WT_WINBUILD_DIR`, `WT_PROBE_DIR`), and `WT_SCRATCH_DIR` moves all three.
+
+**Why they are not simply moved into the repo.** Two deliberate reasons, both load-bearing:
+`rig.js` identifies its own stray processes by globbing command lines for the rig
+directory's **basename**, which only works while that name cannot appear in a production
+command line; and the Flutter build scripts write a *stripped copy* of the tree they were
+launched from, which must not land inside the tree being copied.
+
+**Do not "tidy" the basenames** to `rig` / `winbuild` / `probe`. `wt-rig` is what keeps that
+process glob specific — a bare `rig` would match any command line containing "rig" and the
+orphan sweep could kill unrelated node processes.

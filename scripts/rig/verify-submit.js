@@ -32,7 +32,7 @@ const COMPOSER = /❯/;
 async function createSession(cookie) {
   const { id } = await api(cookie, 'POST', '/api/sessions', {
     name: 'verify-submit',
-    cwd: 'C:\\dev\\wt-rig',
+    cwd: require('../scratch-dirs').DIRS.rig,
     autoCommand: 'claude --dangerously-skip-permissions',
     agent: 'claude',
   });
