@@ -34,6 +34,7 @@ import '../services/notification_service.dart';
 import '../services/session_repository.dart';
 import '../services/speech_service.dart';
 import '../theme/app_theme.dart';
+import '../util/terminal_write.dart';
 import '../theme/status_colors.dart';
 import '../util/terminal_links.dart';
 import '../widgets/compose_bar.dart';
@@ -1018,7 +1019,9 @@ class _SessionScreenState extends State<SessionScreen>
       final chunk = await api.scrollback(session.id, limit: 5000);
       if (!mounted) return;
       if (chunk.data.isNotEmpty) {
-        _terminal.write(chunk.data);
+        // #81: guarded — xterm 4.0.0 throws on a real Codex stream, and an
+        // unguarded throw here kills the lens outright (blank terminal).
+        safeTerminalWrite(_terminal, chunk.data);
         // Land on the newest line, not the top of the replayed scrollback.
         _jumpToBottomSoon();
       }
@@ -1050,7 +1053,11 @@ class _SessionScreenState extends State<SessionScreen>
     // Declared once — the connection remembers and replays this (and resize)
     // itself on every reconnect; no need to re-call it reactively.
     connection.setMode('active');
-    _outputSub = connection.output.listen(_terminal.write);
+    // #81: guarded. This is the LIVE path and the one that actually broke — a throw
+    // inside a stream listener takes the widget subtree down, so a single bad frame
+    // blanked the terminal for the rest of the session.
+    _outputSub =
+        connection.output.listen((data) => safeTerminalWrite(_terminal, data));
     // Fires on every successful RE-connect, before the server's scrollback
     // replay reaches `output` — clear here or history duplicates.
     _reconnectedSub = connection.reconnected.listen((_) {
