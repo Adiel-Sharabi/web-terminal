@@ -145,6 +145,31 @@
     .nl-opt .nl-txt b { font-weight: 600; font-size: 13px; }
     .nl-opt .nl-txt small { color: #7a8aa0; font-size: 11px; }
     .nl-opt .nl-ck { color: #00d4aa; font-weight: 700; flex: none; width: 14px; }
+    /* --- Session recap card ("where was I in this one?") ---------------------
+       Reuses the .nl-menu popover geometry (fixed, clamped to the viewport,
+       dismissed on any outside tap) so there is one popover behaviour in the
+       sidebar, not two. Wider than the notify menu because its whole job is to
+       show a PROMPT — a card that ellipsises the sentence you are trying to
+       recognise has failed at the only thing it does. */
+    .rc-card { position: fixed; z-index: 1000; width: min(420px, calc(100vw - 24px)); max-height: min(70vh, 560px); overflow-y: auto; background: #12263f; border: 1px solid #24405f; border-radius: 8px; box-shadow: 0 8px 24px rgba(0,0,0,0.5); padding: 10px 12px; }
+    .rc-card h4 { margin: 0 0 2px; font-size: 13px; color: #e0e0e0; font-weight: 600; display: flex; align-items: center; gap: 6px; }
+    .rc-card .rc-sub { color: #7a8aa0; font-size: 10px; margin-bottom: 8px; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+    .rc-sec { margin-top: 9px; }
+    .rc-sec .rc-lbl { font-size: 9px; text-transform: uppercase; letter-spacing: .06em; color: #7a8aa0; margin-bottom: 3px; }
+    /* pre-wrap: a prompt's own line breaks are part of how you recognise it. */
+    .rc-sec .rc-body { color: #d6dce6; font-size: 12px; line-height: 1.45; white-space: pre-wrap; overflow-wrap: anywhere; }
+    .rc-sec.rc-prompt .rc-body { color: #e0e0e0; border-left: 2px solid #00d4aa; padding-left: 8px; }
+    .rc-sec.rc-reply .rc-body { border-left: 2px solid #2c4460; padding-left: 8px; }
+    .rc-tag { display: inline-block; font-size: 9px; font-weight: 700; letter-spacing: .04em; text-transform: uppercase; color: #0b1b2c; background: #00d4aa; border-radius: 3px; padding: 1px 5px; margin-left: 6px; }
+    .rc-when { color: #55617a; font-size: 10px; margin-top: 3px; }
+    .rc-tools { display: flex; flex-wrap: wrap; gap: 4px; margin-top: 4px; }
+    .rc-tool { font-size: 10px; color: #9fb0c6; background: #0f2138; border: 1px solid #24405f; border-radius: 3px; padding: 1px 5px; }
+    .rc-wait { color: #e94560; font-weight: 600; }
+    .rc-empty { color: #55617a; font-size: 11px; font-style: italic; }
+    .rc-task-bar { height: 4px; background: #0f2138; border-radius: 2px; overflow: hidden; margin-top: 4px; }
+    .rc-task-fill { height: 100%; background: #00d4aa; }
+    .sb-recap { background: transparent; border: none; color: #555; font-size: 12px; cursor: pointer; padding: 0 4px; line-height: 1; }
+    .sb-recap:hover { color: #00d4aa; }
     .sb-fav-item.fav-reordering { background: rgba(0,212,170,0.10); }
     .sb-status { font-size: 10px; }
     .sb-status.active { color: #4a4; }
@@ -2933,6 +2958,134 @@
         document.addEventListener('touchstart', dismiss, true);
       }, 0);
     }
+    // --- Session recap card ---------------------------------------------------
+    // "I have many sessions and I lost track where I am." The sidebar row says a
+    // session is working; it cannot say what it is working ON. This shows the last
+    // thing you asked, the agent's latest word, and what it has done since.
+    //
+    // Every judgement — which user turn was actually typed by a human, what to
+    // condense, which task is current — is made SERVER-side by lib/recap.js and
+    // fetched whole from /api/sessions/:id/recap. This function only paints. That
+    // split is deliberate: the companion needs the same card, and a rule duplicated
+    // across the two clients is the drift this codebase keeps paying for.
+    //
+    // Fetched on CLICK, never on the sidebar poll: one recap costs a transcript
+    // tail read, and doing that per row per poll would be a disk storm for text
+    // nobody is looking at.
+    function closeRecapCard() {
+      const el = document.getElementById('rcCard');
+      if (!el) return;
+      if (el._dismiss) {
+        document.removeEventListener('click', el._dismiss, true);
+        document.removeEventListener('touchstart', el._dismiss, true);
+      }
+      el.remove();
+    }
+
+    function rcSection(label, body, extraClass, when) {
+      return `<div class="rc-sec ${extraClass || ''}">` +
+        `<div class="rc-lbl">${esc(label)}</div>` +
+        `<div class="rc-body">${esc(body)}</div>` +
+        (when ? `<div class="rc-when">${esc(when)}</div>` : '') +
+      `</div>`;
+    }
+
+    // An ISO timestamp from the transcript -> "12m ago". Returns '' for anything
+    // unparseable so a missing/odd stamp simply omits the line.
+    function rcAgo(iso) {
+      if (!iso) return '';
+      const t = Date.parse(iso);
+      return Number.isFinite(t) ? timeAgo(t) : '';
+    }
+
+    function renderRecapCard(card) {
+      const waitLabel = { question: 'waiting for your answer', permission: 'waiting for permission' };
+      let html =
+        `<h4>${esc(card.name || 'Session')}` +
+          (card.agent ? `<span class="rc-tag">${esc(card.agent)}</span>` : '') +
+        `</h4>` +
+        `<div class="rc-sub">${esc(card.cwd || '')}` +
+          (card.lastActivity ? ` &middot; ${esc(timeAgo(card.lastActivity))}` : '') +
+        `</div>`;
+
+      if (card.waitingFor) {
+        html += `<div class="rc-sec"><div class="rc-body rc-wait">&#9888; ` +
+          `${esc(waitLabel[card.waitingFor] || card.waitingFor)}</div></div>`;
+      }
+
+      if (card.prompt) {
+        html += rcSection('You asked', card.prompt.text, 'rc-prompt', rcAgo(card.prompt.at));
+      } else {
+        html += `<div class="rc-sec"><div class="rc-lbl">You asked</div>` +
+          `<div class="rc-empty">no prompt found in the recent transcript</div></div>`;
+      }
+
+      if (card.reply) {
+        html += rcSection(card.reply.isSummary ? 'Its summary' : 'It replied',
+                          card.reply.text, 'rc-reply', rcAgo(card.reply.at));
+      }
+
+      const t = card.tasks;
+      if (t && t.total) {
+        const pct = Math.round((t.done / t.total) * 100);
+        html += `<div class="rc-sec"><div class="rc-lbl">Tasks ${t.done}/${t.total}</div>` +
+          (t.current ? `<div class="rc-body">${t.currentIsActive ? '&#9654; ' : ''}${esc(t.current)}</div>` : '') +
+          `<div class="rc-task-bar"><div class="rc-task-fill" style="width:${pct}%"></div></div></div>`;
+      }
+
+      const since = card.since || {};
+      if (since.turns) {
+        html += `<div class="rc-sec"><div class="rc-lbl">Since then</div>` +
+          `<div class="rc-body">${since.turns} turn${since.turns === 1 ? '' : 's'}</div>` +
+          (since.tools && since.tools.length
+            ? `<div class="rc-tools">${since.tools.map(x => `<span class="rc-tool">${esc(x)}</span>`).join('')}</div>`
+            : '') +
+        `</div>`;
+      }
+      return html;
+    }
+
+    async function showRecapCard(anchor, sessionId, apiBase, sessionName) {
+      closeNotifyMenu();
+      closeRecapCard();
+      const card = document.createElement('div');
+      card.id = 'rcCard';
+      card.className = 'rc-card';
+      card.innerHTML = `<h4>${esc(sessionName || 'Session')}</h4><div class="rc-empty">Reading the transcript…</div>`;
+      document.body.appendChild(card);
+
+      // Position and dismissal are identical to the notify menu, deliberately.
+      const place = () => {
+        const r = anchor.getBoundingClientRect();
+        const top = Math.min(window.innerHeight - card.offsetHeight - 8, r.bottom + 4);
+        const left = Math.min(window.innerWidth - card.offsetWidth - 8, Math.max(8, r.left - card.offsetWidth + r.width));
+        card.style.top = `${Math.max(8, top)}px`;
+        card.style.left = `${left}px`;
+      };
+      place();
+      const dismiss = (ev) => { if (!card.contains(ev.target)) closeRecapCard(); };
+      card._dismiss = dismiss;
+      setTimeout(() => {
+        document.addEventListener('click', dismiss, true);
+        document.addEventListener('touchstart', dismiss, true);
+      }, 0);
+
+      try {
+        const res = await fetch(`${apiBase}/sessions/${sessionId}/recap`);
+        if (!res.ok) throw new Error(`HTTP ${res.status}`);
+        const data = await res.json();
+        // The user may have dismissed it while we were reading.
+        if (!document.getElementById('rcCard')) return;
+        card.innerHTML = renderRecapCard(data);
+        place(); // height changed
+      } catch (err) {
+        if (!document.getElementById('rcCard')) return;
+        card.innerHTML = `<h4>${esc(sessionName || 'Session')}</h4>` +
+          `<div class="rc-empty">Could not read this session: ${esc(err.message)}</div>`;
+        place();
+      }
+    }
+
     const timeAgo = ts => {
       const secs = Math.floor((Date.now() - ts) / 1000);
       if (secs < 60) return `${secs}s ago`;
@@ -3065,6 +3218,7 @@
               modelBadge(s) +
               `<button class="sb-bell nl-${lvl}" title="Notifications: ${NOTIFY_BELL[lvl].label} — click to change">${NOTIFY_BELL[lvl].icon}</button>` +
               starHtml(s) +
+              `<button class="sb-recap" title="Recap: last prompt + what it's been doing">&#128172;</button>` +
               `<button class="sb-edit" title="Edit auto-command">&#9998;</button>` +
               (s.claudeSessionId ? `<button class="sb-fork" title="Fork Claude session">&#9095;</button>` : '') +
               `<button class="sb-kill" title="Kill session">&times;</button>` +
@@ -3087,6 +3241,11 @@
               if (ws) { ws.onclose = null; ws.close(); }
             }
             loadSidebar();
+          });
+
+          item.querySelector('.sb-recap').addEventListener('click', (e) => {
+            e.stopPropagation(); // never switch session — the point is to look WITHOUT leaving
+            showRecapCard(e.currentTarget, s.id, apiBase, s.name);
           });
 
           item.querySelector('.sb-edit').addEventListener('click', async (e) => {
@@ -3125,7 +3284,7 @@
           });
 
           item.addEventListener('click', (e) => {
-            if (e.target.closest('.sb-kill') || e.target.closest('.sb-edit') || e.target.closest('.sb-fork') || e.target.closest('.sb-star') || e.target.closest('.sb-bell')) return;
+            if (e.target.closest('.sb-kill') || e.target.closest('.sb-edit') || e.target.closest('.sb-fork') || e.target.closest('.sb-star') || e.target.closest('.sb-bell') || e.target.closest('.sb-recap')) return;
             switchSession(s.id, s.serverUrl);
             closeSidebarIfUnpinned();
           });
@@ -3370,13 +3529,21 @@
             ctxBadge(s) +
             modelBadge(s) +
             starHtml(s) +
+            `<button class="sb-recap" title="Recap: last prompt + what it's been doing">&#128172;</button>` +
           `</div>`;
         item.querySelector('.sb-star').addEventListener('click', (e) => {
           e.stopPropagation();
           toggleFavorite(s);
         });
+        // Favorites are by definition the sessions you switch between most, so this
+        // is the row where "which one was this?" gets asked hardest.
+        item.querySelector('.sb-recap').addEventListener('click', (e) => {
+          e.stopPropagation();
+          const favApiBase = s.serverUrl ? `/cluster/${encodeURIComponent(s.serverUrl)}/api` : '/api';
+          showRecapCard(e.currentTarget, s.id, favApiBase, s.name);
+        });
         item.addEventListener('click', (e) => {
-          if (e.target.closest('.sb-star')) return;
+          if (e.target.closest('.sb-star') || e.target.closest('.sb-recap')) return;
           switchSession(s.id, s.serverUrl);
           closeSidebarIfUnpinned();
         });

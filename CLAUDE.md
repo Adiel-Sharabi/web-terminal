@@ -54,6 +54,7 @@ Three supervised Node.js processes. See `ARCHITECTURE.md` for the full walkthrou
 - `lib/transcript.js` / `lib/transcript-codex.js` — per-agent transcript parsers emitting one shared typed turn shape
 - `lib/codex-sessions.js` — resolves a Codex rollout by cwd; `lib/metrics-codex.js` — parses Codex usage from its rollout; `lib/submit-frames.js` — the pure submit-CR split rule
 - `lib/task-list.js` — the pure task-list rules (#73): status normalisation, the Claude delta fold, the Codex plan snapshot. See "The agent task list" below
+- `lib/recap.js` — the pure session-recap rules: `classifyUserTurn` (which `role:user` turns a human actually TYPED), `condense`, `toolTally`, `summariseTasks`. Serves `GET /api/sessions/:id/recap`. See "The session recap" below
 - `app.html` — unified single-page app (terminal + sidebar + settings). Polyfills `crypto.randomUUID` for plain-HTTP contexts. `?rtt=1` enables the per-keystroke RTT overlay
 - `terminal.html` — legacy terminal-only page (served at `/s/:id`)
 - `lobby.html` — legacy lobby page (served at `/lobby`)
@@ -72,6 +73,40 @@ Three supervised Node.js processes. See `ARCHITECTURE.md` for the full walkthrou
 - Multi-agent sessions — Claude Code or Codex behind one provider registry (see "Multi-Agent Support")
 - Optional latency instrumentation: `WT_LATENCY_DEBUG=1` env (server + worker) and `?rtt=1` query (browser overlay)
 - Dev tooling under `scripts/` — typing probe, WS latency harnesses (do not edit without coordinating; sanitisation workstream owns these)
+
+## The session recap — "my last prompt" is NOT `role === 'user'`
+
+`GET /api/sessions/:id/recap` (rules in `lib/recap.js`, pure) answers *where was I in
+this one?* for a sidebar full of sessions: last prompt, the agent's latest word, the
+current task, and the work done since.
+
+**The trap, and the reason this is a module rather than three lines in `server.js`:** a
+transcript is full of `role:user` turns the human never typed — a teammate message, a
+`<task-notification>`, Stop-hook feedback, a post-compaction summary, and above all
+**slash commands**. Running `/compact` writes a user turn whose text is
+`<command-name>/compact</command-name>`, so in a just-compacted session — precisely
+when you most need a recap — the newest user turn is that echo, and a naive reading
+reports *"your last prompt was: compact"*. **Confidently wrong is worse than absent.**
+Genuine prompts also arrive with `<system-reminder>` blocks stapled on, so even a real
+one needs its wrapper stripped or the card shows injected instructions instead of your
+sentence; a turn that is *nothing but* reminders is not a prompt at all.
+
+**Reuse, don't re-derive.** The reply prefers an author-marked `## TL;DR` through
+`lib/speech.js`'s `extractSummary` — that section exists to be exactly this.
+
+**On demand, never on the poll.** One recap costs a transcript tail read; doing it per
+row per sidebar refresh would be a disk storm for text nobody is looking at.
+
+**Degrades, never 404s.** A plain shell has no transcript, but *"idle, in `<cwd>`, 20m
+ago"* still orients you — and a 404 would make the icon look broken on exactly the rows
+most likely to be clicked. The client always receives the full shape.
+
+> **`classifyUserTurn` currently exists twice** — here and in the companion's
+> `conversation_view.dart`, which uses it for bubble labelling. The server copy is the
+> authority and recognises strictly more (slash commands, system-reminders). Two copies
+> of one rule is the drift this codebase keeps paying for; consolidating the Dart side
+> onto a server-published field is a separate additive change, **not** a "keep them in
+> sync" instruction.
 
 ## The companion vendors `xterm` — do not undo it (#81)
 
