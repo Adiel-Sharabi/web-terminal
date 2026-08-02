@@ -1,19 +1,39 @@
-// #81 — does a REAL Codex byte stream break the terminal widget's buffer?
+// #81 — a REAL Codex byte stream must not corrupt the terminal widget's buffer.
 //
-// The real-input probe showed the symptom the issue reports: with a captured codex
-// PTY stream written into a Terminal, `Terminal.write` threw
-// "Null check operator used on a null value" and every subsequent drag produced a
-// null selection — i.e. selection and copy dead, exactly as reported.
+// THE ROOT CAUSE, measured rather than guessed (two earlier hypotheses were wrong):
 //
-// The stack was Buffer.index() -> CircularBuffer.insert() -> _moveChild() ->
-// IndexedItem._move(), which dereferences `_owner!` on a line the buffer has already
-// detached. In a release build the guarding `assert(attached)` is compiled out, so
-// what would be an assertion failure in debug becomes a hard null-check throw in
-// production — and it takes the widget tree with it.
+// xterm 4.0.0's `Buffer.scrollUp`, `Buffer.scrollDown` and `Buffer.deleteLines`
+// shift a line with `lines[to] = lines[from]`. That does not MOVE the line — it
+// leaves the very same object referenced by both slots. `_adoptChild` then
+// unconditionally detaches whatever occupied the destination, so the next
+// iteration of the loop detaches the line the previous iteration just moved.
 //
-// These tests decide whether that is a genuine defect or an artifact of writing into
-// a terminal that had not been sized yet. That distinction is the whole finding: one
-// is a shipping bug, the other is a broken probe.
+// Instrumenting the vendored copy showed the cascade exactly, on a buffer that was
+// nowhere near full (`len=30 arr=5000`):
+//
+//     WT-DUP adopt index=29 cyc=29 already at slot=28 ...
+//     WT-DUP adopt index=28 cyc=28 already at slot=27 ...   (down to slot 0)
+//
+// The wreckage has two faces, which is why one bug produced two symptoms:
+//   * the lines are still IN `_array`, so the painter still draws them — but they
+//     are detached, and `TerminalController.selection` is null the moment either
+//     anchor is detached. That is "text visible, nothing selects".
+//   * a later `_moveChild` calls `_move` on one of those detached lines, which
+//     dereferences `_owner!`. In debug that is the `assert(attached)` at
+//     circular_buffer.dart:312; in a RELEASE build the assert is compiled out and
+//     it is a hard null-check throw out of `Terminal.write`, called from a stream
+//     listener — which kills the widget subtree and blanks the terminal.
+//
+// It is Codex-specific because the three broken methods are only reached inside a
+// DECSTBM vertical margin, and Codex sets 12 scroll regions on startup where
+// Claude's TUI sets none.
+//
+// `Buffer.insertLines`, immediately above `deleteLines`, already avoids the alias by
+// going through `lines.swap` — so this is an upstream oversight, not a design.
+//
+// xterm 4.0.0 is the LATEST published release, so the fix lives in the vendored copy
+// at ai-terminal/third_party/xterm (see `dependency_overrides` in pubspec.yaml),
+// marked `WEB-TERMINAL PATCH (#81)`.
 import 'dart:io';
 
 import 'package:flutter_test/flutter_test.dart';
@@ -36,17 +56,18 @@ File? _capture() {
   return null;
 }
 
+/// Counts lines that are still in the buffer's backing array but detached from it —
+/// the exact corruption #81 is about. Zero is the invariant.
+int _detachedLines(Terminal t) {
+  var detached = 0;
+  for (var i = 0; i < t.buffer.lines.length; i++) {
+    if (!t.buffer.lines[i].attached) detached++;
+  }
+  return detached;
+}
+
 void main() {
-  // The minimal trigger, independent of any capture file. Codex sets a DECSTBM
-  // scroll region (ESC[1;7r etc — 12 of them in the capture); Claude's TUI sets
-  // none, which is exactly why #81 is Codex-specific. Inside a margin,
-  // Buffer.index() takes the `lines.insert(absoluteMarginBottom + 1, …)` branch,
-  // and CircularBuffer.insert then moves a line the buffer has already detached.
-  // A DECSTBM scroll region on its own does NOT reproduce it — checked, and that
-  // hypothesis was wrong. So bisect the real capture for the shortest prefix that
-  // throws, and print what sits at the boundary. Guessing at the sequence twice is
-  // how a wrong root cause gets written down as fact.
-  test('BISECT: the shortest prefix of the real stream that breaks the buffer', () {
+  test('BISECT: no prefix of the real stream breaks the buffer', () {
     final f = _capture();
     if (f == null) {
       markTestSkipped('no codex capture available');
@@ -64,11 +85,10 @@ void main() {
       }
     }
 
-    if (!throwsAt(data.length)) {
-      // ignore: avoid_print
-      print('BISECT   -> the full stream no longer throws');
-      return;
-    }
+    // Before the patch this bisected to a first throw at byte 4381 of 13047. Kept as
+    // a bisect rather than a single assertion so that a REGRESSION reports where it
+    // starts, not merely that it happened.
+    if (!throwsAt(data.length)) return;
     var lo = 0, hi = data.length;
     while (lo + 1 < hi) {
       final mid = (lo + hi) ~/ 2;
@@ -79,10 +99,8 @@ void main() {
       }
     }
     final ctx = data.substring((hi - 90).clamp(0, hi), hi);
-    // ignore: avoid_print
-    print('BISECT   -> first throws after ${hi} bytes of ${data.length}');
-    // ignore: avoid_print
-    print('BISECT   context: ${ctx.replaceAll("\x1b", "<ESC>").replaceAll("\r", "<CR>").replaceAll("\n", "<LF>")}');
+    fail('the stream throws again after $hi bytes of ${data.length}; context: '
+        '${ctx.replaceAll("\x1b", "<ESC>").replaceAll("\r", "<CR>").replaceAll("\n", "<LF>")}');
   });
 
   test('a real Codex stream written to an UNSIZED terminal', () {
@@ -99,9 +117,8 @@ void main() {
     } catch (e) {
       thrown = e;
     }
-    // Recorded, not asserted either way: this is the configuration the probe hit.
-    // ignore: avoid_print
-    print('UNSIZED  -> ${thrown ?? "no throw"}  lines=${t.buffer.lines.length}');
+    expect(thrown, isNull, reason: 'an unsized terminal must survive too');
+    expect(_detachedLines(t), 0);
   });
 
   test('a real Codex stream written to a SIZED terminal (the app configuration)', () {
@@ -120,15 +137,11 @@ void main() {
     } catch (e) {
       thrown = e;
     }
-    // ignore: avoid_print
-    print('SIZED    -> ${thrown ?? "no throw"}  lines=${t.buffer.lines.length}');
-    // PINS A KNOWN UPSTREAM DEFECT, deliberately asserting the BROKEN behaviour.
-    // xterm 4.0.0 is the latest release, so there is nothing to upgrade to; asserting
-    // isNull here would leave a permanently red suite and block every later commit.
-    // When this starts FAILING, the bug is fixed (or our workaround landed) — flip it
-    // to isNull and delete this note.
-    expect(thrown, isNotNull,
-        reason: 'known: a real Codex stream breaks xterm 4.0.0 (#81)');
+    expect(thrown, isNull, reason: 'a real Codex stream must not break xterm (#81)');
+    // The load-bearing assertion. Not throwing is not enough — the buffer has to be
+    // INTACT, because a detached-but-rendered line is what killed selection.
+    expect(_detachedLines(t), 0,
+        reason: 'every line must stay attached to the circular buffer');
   });
 
   test('the same stream arriving in small CHUNKS, as the WebSocket delivers it', () {
@@ -142,20 +155,58 @@ void main() {
     t.resize(120, 30);
     Object? thrown;
     try {
-      // The companion never writes one big blob — bytes arrive as PTY frames. If
-      // only the blob form throws, the shipped app is not affected and #81 is
-      // something else.
+      // The companion never writes one big blob — bytes arrive as PTY frames. This
+      // is exactly how the shipped app feeds the widget, so it is the case that
+      // matters most.
       for (var i = 0; i < data.length; i += 512) {
         t.write(data.substring(i, (i + 512).clamp(0, data.length)));
       }
     } catch (e) {
       thrown = e;
     }
-    // ignore: avoid_print
-    print('CHUNKED  -> ${thrown ?? "no throw"}  lines=${t.buffer.lines.length}');
-    // Same pin as above, and this is the one that matters: chunked delivery is
-    // exactly how the companion feeds the widget, so the shipped app hits this.
-    expect(thrown, isNotNull,
-        reason: 'known: chunked real-Codex delivery breaks xterm 4.0.0 (#81)');
+    expect(thrown, isNull,
+        reason: 'chunked real-Codex delivery must not break xterm (#81)');
+    expect(_detachedLines(t), 0);
+  });
+
+  // The unit-level statement of the defect, independent of any capture: a scroll
+  // inside a DECSTBM margin must move lines, not alias them. This is the test that
+  // fails if someone re-vendors xterm and drops the patch.
+  test('scrolling inside a DECSTBM margin leaves every line attached', () {
+    final t = Terminal(maxLines: 5000);
+    t.resize(80, 24);
+    t.write('\x1b[1;10r'); // scroll region, rows 1..10 — what Codex sets
+    for (var i = 0; i < 200; i++) {
+      t.write('line $i\r\n');
+    }
+    expect(_detachedLines(t), 0,
+        reason: 'Buffer.scrollUp/scrollDown must MOVE lines, never alias them');
+  });
+
+  test('a line scrolled inside a margin can still anchor a selection', () {
+    // #81 as the user experiences it: drag over the terminal, get nothing.
+    final t = Terminal(maxLines: 5000);
+    t.resize(80, 24);
+    t.write('\x1b[1;10r');
+    for (var i = 0; i < 50; i++) {
+      t.write('line $i\r\n');
+    }
+    t.write('SELECT THIS LINE\r\n');
+
+    var row = -1;
+    for (var i = 0; i < t.buffer.lines.length; i++) {
+      if (t.buffer.lines[i].getText().contains('SELECT THIS')) {
+        row = i;
+        break;
+      }
+    }
+    expect(row, greaterThanOrEqualTo(0), reason: 'the line must have rendered');
+
+    final line = t.buffer.lines[row];
+    expect(line.attached, isTrue);
+    final controller = TerminalController();
+    controller.setSelection(line.createAnchor(0), line.createAnchor(16));
+    expect(controller.selection, isNotNull,
+        reason: 'a selection is null whenever either anchor is detached');
   });
 }

@@ -73,6 +73,43 @@ Three supervised Node.js processes. See `ARCHITECTURE.md` for the full walkthrou
 - Optional latency instrumentation: `WT_LATENCY_DEBUG=1` env (server + worker) and `?rtt=1` query (browser overlay)
 - Dev tooling under `scripts/` — typing probe, WS latency harnesses (do not edit without coordinating; sanitisation workstream owns these)
 
+## The companion vendors `xterm` — do not undo it (#81)
+
+`ai-terminal/third_party/xterm` is stock xterm 4.0.0 **plus one patch**, wired in by
+`dependency_overrides`. Full write-up: `ai-terminal/third_party/xterm/README-PATCH.md`.
+Every hunk is marked `WEB-TERMINAL PATCH (#81)` — **grep for it before re-vendoring or
+"upgrading"**, because 4.0.0 is the latest release and a bare re-vendor silently
+restores the bug.
+
+**One defect produced two symptoms that read as unrelated bugs.** `Buffer.scrollUp`,
+`scrollDown` and `deleteLines` shifted a line with `lines[to] = lines[from]`, which
+copies the *reference*: the line ends up in two slots, and since `_adoptChild`
+unconditionally detaches the destination's previous occupant, the next iteration
+detaches the line the previous one just moved. So a scroll left 27 of 30 lines
+**still in the array but detached from it**. Detached lines still *paint* (the painter
+walks the array), but `TerminalController.selection` is null whenever either anchor is
+detached — that is "text visible, nothing selects". And a later `_moveChild` calls
+`_move` on such a line, dereferencing `_owner!`: in debug an
+`assert(attached)`, in **release** a hard throw out of `Terminal.write` inside a
+WebSocket listener, which kills the widget subtree — that is the blank terminal.
+
+Codex-only because those three methods are reached only inside a DECSTBM margin, and
+Codex sets 12 scroll regions on startup where Claude's TUI sets none. `insertLines`
+right next door already used `lines.swap` and was correct, which is how we know it was
+an oversight rather than a design.
+
+**Two methodological lessons, both of which cost a wrong root cause first.** (1) *A
+blank lens next to a healthy chat lens is not evidence about the server* — chat is
+built server-side from the rollout and never touches xterm, so the two lenses failing
+differently localises the fault to the widget. (2) *Instrument, don't reason about
+buffer internals.* Two confident hypotheses (a DECSTBM sequence; `insert` overflowing a
+full ring) were both wrong; a five-line `print` in `_adoptChild` named the real cause in
+one run and showed the buffer was nowhere near full (`len=30 arr=5000`).
+
+**Verification bar for any change here:** run upstream's own suite against pristine and
+patched copies and compare (README-PATCH.md has the recipe). Both give `+108 ~2 -2`;
+the two `textScaler` failures are pre-existing Flutter-SDK drift.
+
 ## Multi-Agent Support (Claude Code + Codex)
 
 A session knows *which* AI CLI agent it runs. `agent` is a real, persisted session field: `'claude'`, `'codex'`, or `null` for a plain shell. **`null` is never coerced to `'claude'`.**
