@@ -35,14 +35,14 @@
     "syntax-check": "node -c server.js && node -c monitor.js && node -c pty-worker.js"
   },
   "dependencies": {
-    "express": "^4.21.0",
+    "express": "^4.22.2",
     "express-ws": "^5.0.2",
     "node-pty": "^1.0.0"
   },
   "devDependencies": {
-    "@eslint/js": "^9.39.4",
-    "@playwright/test": "^1.58.2",
-    "eslint": "^9.39.4",
-    "globals": "^15.15.0"
+    "@eslint/js": "^9.39.5",
+    "@playwright/test": "^1.61.1",
+    "eslint": "^9.39.5",
+    "globals": "^17.7.0"
   }
 }
