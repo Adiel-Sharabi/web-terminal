@@ -24,6 +24,7 @@ library;
 
 import 'dart:async';
 
+import 'package:flutter/foundation.dart' show listEquals;
 import 'package:flutter/material.dart';
 import 'package:flutter/services.dart';
 import 'package:flutter_markdown/flutter_markdown.dart';
@@ -235,6 +236,12 @@ class _ConversationViewState extends State<ConversationView> {
 
   final ScrollController _scrollController = ScrollController();
   List<TranscriptTurn> _turns = const [];
+
+  /// #73 — the agent's task list, or null when it has none (no panel at all).
+  /// Session state rather than page state: only the newest page reports it, and
+  /// [_applyTaskList] is called on every fetch so it tracks even when the turns
+  /// themselves did not change.
+  List<AgentTask>? _taskList;
   String? _oldestCursor;
   bool _hasMoreOlder = false;
   bool _loadingInitial = true;
@@ -421,6 +428,7 @@ class _ConversationViewState extends State<ConversationView> {
       if (!mounted) return;
       setState(() {
         _turns = page.messages;
+        _taskList = page.taskList;
         _oldestCursor = page.cursor;
         _hasMoreOlder = page.hasMore;
         _loadingInitial = false;
@@ -533,6 +541,11 @@ class _ConversationViewState extends State<ConversationView> {
       return; // best-effort background refresh
     }
     if (!mounted) return;
+    // #73 — BEFORE the turn-merge early-returns. A task's status can move without the
+    // transcript's trailing window changing shape, and every one of the paths below
+    // returns early when the turns compare equal; folding this in after them would make
+    // the panel update only when the conversation happened to grow.
+    _applyTaskList(page.taskList);
     final freshTail = page.messages;
 
     if (!page.hasMore) {
@@ -550,6 +563,17 @@ class _ConversationViewState extends State<ConversationView> {
         ? _turns.length - freshTail.length
         : 0;
     _applyRefreshedTurns([..._turns.sublist(0, keepCount), ...freshTail]);
+  }
+
+  /// Commits a refreshed task list, rebuilding only when something actually moved.
+  /// [AgentTask] is a value type, so an unchanged list on the 4s poll costs one
+  /// comparison and no rebuild — which is also what keeps the panel's expanded/collapsed
+  /// state from being churned by polling.
+  void _applyTaskList(List<AgentTask>? next) {
+    final cur = _taskList;
+    if (cur == null && next == null) return;
+    if (cur != null && next != null && listEquals(cur, next)) return;
+    setState(() => _taskList = next);
   }
 
   /// Commits a freshly-merged turn list from [_refreshLastPage] and follows the
@@ -783,6 +807,13 @@ class _ConversationViewState extends State<ConversationView> {
         // reachable no matter how far it scrolls. Hidden when there are none.
         if (subagents.isNotEmpty)
           _SubagentStrip(tools: subagents, onOpen: _openSubagentSheet),
+        // #73: the agent's task list, pinned above the transcript for the same
+        // reason as the two above — progress you have to scroll to find is
+        // progress you don't have. Renders nothing at all when there is no list,
+        // which is the common case (every plain-shell session, and every agent
+        // turn that never made a plan).
+        if (_taskList != null && _taskList!.isNotEmpty)
+          _TaskListPanel(tasks: _taskList!),
         Expanded(
           child: Stack(
             children: [
@@ -2117,6 +2148,159 @@ class _ToolCardState extends State<_ToolCard> {
 /// scrolled, mirroring the terminal lens's always-at-hand subagent panel. A live
 /// dot reads running vs finished; tapping opens the drill-in sheet. The strip is
 /// hidden entirely when the session has no subagents (its caller gates on that).
+/// #73 — the agent's multi-step task list.
+///
+/// COLLAPSED BY DEFAULT, and that is the deliberate choice the issue asks for. A plan can
+/// be twenty steps; rendered in full above every message it would push the conversation —
+/// the thing the user came for — off the screen. So the header alone carries the two facts
+/// that matter continuously ("how far along" and "what is it doing right now"), and the
+/// full list is one tap away. It auto-expands for nothing: a panel that opened itself
+/// whenever the plan changed would move the transcript under the user's eyes mid-read.
+///
+/// Deliberately NOT a fold of transcript turns like #88: the task list is not a message.
+/// It has no position in the conversation — repeated updates describe one evolving object,
+/// which is exactly why the issue insists on a single live panel instead of one chip per
+/// call.
+class _TaskListPanel extends StatefulWidget {
+  const _TaskListPanel({required this.tasks});
+
+  final List<AgentTask> tasks;
+
+  @override
+  State<_TaskListPanel> createState() => _TaskListPanelState();
+}
+
+class _TaskListPanelState extends State<_TaskListPanel> {
+  bool _expanded = false;
+
+  @override
+  Widget build(BuildContext context) {
+    final theme = Theme.of(context);
+    final tasks = widget.tasks;
+    final done = tasks.where((t) => t.isCompleted).length;
+    // The first in-progress task is what the agent is doing NOW. Falling back to the
+    // first unfinished one keeps the header meaningful between steps, when the agent has
+    // completed something but not yet marked the next one started.
+    final current = tasks.firstWhere(
+      (t) => t.isInProgress,
+      orElse: () => tasks.firstWhere(
+        (t) => !t.isCompleted,
+        orElse: () => tasks.last,
+      ),
+    );
+    final allDone = done == tasks.length;
+
+    return Container(
+      decoration: BoxDecoration(
+        color: theme.colorScheme.surface,
+        border: Border(
+          bottom: BorderSide(color: theme.colorScheme.outlineVariant),
+        ),
+      ),
+      child: Column(
+        mainAxisSize: MainAxisSize.min,
+        children: [
+          InkWell(
+            onTap: () => setState(() => _expanded = !_expanded),
+            child: Padding(
+              padding: const EdgeInsets.symmetric(horizontal: 12, vertical: 8),
+              child: Row(
+                children: [
+                  Icon(
+                    allDone ? Icons.checklist_rtl : Icons.checklist,
+                    size: 18,
+                    color: theme.colorScheme.primary,
+                  ),
+                  const SizedBox(width: 8),
+                  Text(
+                    '$done/${tasks.length}',
+                    style: theme.textTheme.labelMedium?.copyWith(
+                      fontWeight: FontWeight.w600,
+                      color: theme.colorScheme.primary,
+                    ),
+                  ),
+                  const SizedBox(width: 10),
+                  Expanded(
+                    child: Text(
+                      allDone ? 'All tasks complete' : current.displaySubject,
+                      maxLines: 1,
+                      overflow: TextOverflow.ellipsis,
+                      style: theme.textTheme.bodySmall?.copyWith(
+                        color: theme.colorScheme.onSurfaceVariant,
+                      ),
+                    ),
+                  ),
+                  Icon(
+                    _expanded ? Icons.expand_less : Icons.expand_more,
+                    size: 18,
+                    color: theme.colorScheme.onSurfaceVariant,
+                  ),
+                ],
+              ),
+            ),
+          ),
+          if (_expanded)
+            // Bounded so a long plan scrolls inside the panel rather than
+            // squeezing the transcript out of the screen.
+            ConstrainedBox(
+              constraints: const BoxConstraints(maxHeight: 220),
+              child: ListView.builder(
+                shrinkWrap: true,
+                padding: const EdgeInsets.only(bottom: 8),
+                itemCount: tasks.length,
+                itemBuilder: (_, i) => _TaskRow(task: tasks[i]),
+              ),
+            ),
+        ],
+      ),
+    );
+  }
+}
+
+/// One task row. Status is carried by BOTH an icon and the text style — colour alone
+/// would be the only signal for a user who cannot distinguish it.
+class _TaskRow extends StatelessWidget {
+  const _TaskRow({required this.task});
+
+  final AgentTask task;
+
+  @override
+  Widget build(BuildContext context) {
+    final theme = Theme.of(context);
+    final (IconData icon, Color color) = switch (task.status) {
+      'completed' => (Icons.check_circle, theme.colorScheme.primary),
+      'in_progress' => (Icons.play_circle_fill, theme.colorScheme.tertiary),
+      _ => (Icons.radio_button_unchecked, theme.colorScheme.outline),
+    };
+    return Padding(
+      padding: const EdgeInsets.symmetric(horizontal: 14, vertical: 4),
+      child: Row(
+        crossAxisAlignment: CrossAxisAlignment.start,
+        children: [
+          Padding(
+            padding: const EdgeInsets.only(top: 2),
+            child: Icon(icon, size: 15, color: color),
+          ),
+          const SizedBox(width: 8),
+          Expanded(
+            child: Text(
+              task.displaySubject,
+              style: theme.textTheme.bodySmall?.copyWith(
+                color: task.isCompleted
+                    ? theme.colorScheme.onSurfaceVariant
+                    : theme.colorScheme.onSurface,
+                decoration:
+                    task.isCompleted ? TextDecoration.lineThrough : null,
+                fontWeight: task.isInProgress ? FontWeight.w600 : null,
+              ),
+            ),
+          ),
+        ],
+      ),
+    );
+  }
+}
+
 class _SubagentStrip extends StatelessWidget {
   const _SubagentStrip({required this.tools, required this.onOpen});
 

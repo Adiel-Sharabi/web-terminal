@@ -895,10 +895,72 @@ class TranscriptTurn {
 
 /// One backward-paginated page of transcript turns from
 /// `GET /api/sessions/:id/transcript`.
+/// One entry in the agent's multi-step task list (#73).
+///
+/// Both agents produce this same shape server-side — Claude's is folded from its
+/// `TaskCreate`/`TaskUpdate` hook deltas, Codex's is the newest whole `update_plan`
+/// in its rollout — so the client holds no per-agent knowledge and needs no release
+/// when an agent is added. See `lib/task-list.js`.
+class AgentTask {
+  /// Stable within a session. Claude's is the id from its tool result; Codex's is
+  /// the step's position, which is the only identity a plan step has.
+  final String id;
+
+  /// The task's title. May be empty when the list was folded from partway through a
+  /// session and the create was never seen — [displaySubject] covers that.
+  final String subject;
+
+  /// One of `pending`, `in_progress`, `completed`. The server normalises every
+  /// agent's vocabulary into exactly these three.
+  final String status;
+
+  /// Creates a task entry.
+  const AgentTask({required this.id, required this.subject, required this.status});
+
+  /// Parses one entry from the transcript response.
+  factory AgentTask.fromJson(Map<String, dynamic> json) => AgentTask(
+        id: json['id']?.toString() ?? '',
+        subject: json['subject']?.toString() ?? '',
+        status: json['status']?.toString() ?? 'pending',
+      );
+
+  /// What to render. A task whose create we never saw still has an id, and showing
+  /// "Task #7" is honest — dropping the row would hide work that is in progress.
+  String get displaySubject => subject.trim().isEmpty ? 'Task #$id' : subject;
+
+  bool get isCompleted => status == 'completed';
+  bool get isInProgress => status == 'in_progress';
+
+  // A value type on purpose. The 4s transcript poll re-parses this list every time, so
+  // without equality the panel would rebuild (and any expansion state churn) on every
+  // tick even when nothing moved.
+  @override
+  bool operator ==(Object other) =>
+      identical(this, other) ||
+      other is AgentTask &&
+          other.id == id &&
+          other.subject == subject &&
+          other.status == status;
+
+  @override
+  int get hashCode => Object.hash(id, subject, status);
+
+  @override
+  String toString() => 'AgentTask($id, $status)';
+}
+
 class TranscriptPage {
   /// Turns in chronological order — **newest last** — ready to append to the
   /// bottom of a chat view.
   final List<TranscriptTurn> messages;
+
+  /// The agent's current task list, or `null` when it has none — which is the
+  /// common case and must render as *no panel at all*, not an empty one.
+  ///
+  /// Only the newest page carries it: it is session state, not page state, so
+  /// paging back through history leaves it `null` rather than replacing the
+  /// panel with an older plan.
+  final List<AgentTask>? taskList;
 
   /// Opaque cursor for the *older* page: pass it back as the `before` argument.
   /// `null` when there are no older turns ([hasMore] is false) or the page is
@@ -922,6 +984,7 @@ class TranscriptPage {
     required this.cursor,
     required this.hasMore,
     this.agent,
+    this.taskList,
   });
 
   /// Parses the `/api/sessions/:id/transcript` response body.
@@ -937,6 +1000,15 @@ class TranscriptPage {
       cursor: json['cursor']?.toString(),
       hasMore: json['hasMore'] == true,
       agent: json['agent']?.toString(),
+      // Absent (an older server) and null (this agent has no task list) are the same
+      // answer to the client: no panel. An empty LIST is different — Codex genuinely
+      // reporting zero steps — and also renders nothing, so both collapse safely.
+      taskList: json['taskList'] is List
+          ? (json['taskList'] as List)
+              .whereType<Map<String, dynamic>>()
+              .map(AgentTask.fromJson)
+              .toList(growable: false)
+          : null,
     );
   }
 
