@@ -34,6 +34,7 @@ import 'package:markdown/markdown.dart' as md;
 import 'package:flutter_markdown/flutter_markdown.dart';
 
 import 'package:flutter/services.dart';
+import 'package:xterm/xterm.dart';
 
 import 'package:ai_terminal/api/models.dart';
 import 'package:ai_terminal/screens/session_screen.dart'
@@ -110,6 +111,7 @@ class _ProbeState extends State<_Probe> {
       _log.writeAsStringSync('');
     } catch (_) {}
     _write('MODE   $_mode');
+    if (_mode == 'terminal') _initTerminal();
     HardwareKeyboard.instance.addHandler(_copyKeyHandler);
     _selection.addListener(() => _write(
         'SINK   ${_selection.value.isEmpty ? '<empty>' : esc(_selection.value)}'));
@@ -164,8 +166,109 @@ class _ProbeState extends State<_Probe> {
 
   /// Modes that mount their own SelectionArea (the real widget, or m3 which
   /// deliberately replicates the real nesting) must not be wrapped in a second.
+  /// `terminal` is excluded for a different reason: xterm owns selection through
+  /// its own TerminalController, and a SelectionArea above it would compete for
+  /// the drag and make the result meaningless.
   bool get _ownsSelection =>
-      _mode != 'real' && _mode != 'churn' && _mode != 'm3';
+      _mode != 'real' && _mode != 'churn' && _mode != 'm3' && _mode != 'terminal';
+
+  // ---- #81: the TERMINAL lens, fed a REAL Codex byte stream ----------------
+  //
+  // The issue is that a Codex session's terminal cannot be selected. A widget test
+  // already shows a drag through this nesting selects, and a PTY capture already
+  // shows Codex sets no mouse reporting and no alternate buffer — but both use
+  // synthetic pointers. This mode closes the last gap: the real Windows build, the
+  // real xterm widget, real bytes captured off a real codex TUI, and a real OS
+  // drag driven by SendInput.
+  Terminal? _term;
+  TerminalController? _termCtl;
+
+  void _initTerminal() {
+    final t = Terminal(maxLines: 5000);
+    final c = TerminalController();
+    // Bytes captured off a real `codex` PTY (probe-dec-modes.js). Falls back to
+    // synthetic lines so the probe still runs if the capture is missing — the
+    // MODE line records which, because a fallback run proves much less.
+    final capture = Platform.environment['SELPROBE_CAPTURE'] ?? '';
+    var loaded = false;
+    String payload = '';
+    if (capture.isNotEmpty) {
+      try {
+        payload = String.fromCharCodes(File(capture).readAsBytesSync());
+        loaded = true;
+      } catch (_) {
+        loaded = false;
+      }
+    }
+    if (!loaded) {
+      payload = List.generate(
+        20,
+        (i) => 'codex line $i — selectable text for the drag probe\r\n',
+      ).join();
+    }
+    // FED AFTER THE FIRST FRAME, and that is not a style choice. Writing into a
+    // Terminal whose TerminalView has not been laid out yet CRASHES xterm 4.0.0:
+    // Buffer.index() -> CircularBuffer.insert -> _moveChild -> IndexedItem._move,
+    // which dereferences `_owner!` on a line the buffer has already detached. The
+    // guarding assert is compiled out of a release build, so it surfaces as
+    // "Null check operator used on a null value" and takes the whole widget tree
+    // with it — a grey window, which looks exactly like "the terminal renders
+    // nothing" if you are not reading stdout.
+    WidgetsBinding.instance.addPostFrameCallback((_) {
+      try {
+        t.write(payload);
+        _write('TERM   fed ${payload.length}B after layout — '
+            'capture=${loaded ? "real codex PTY" : "synthetic"} '
+            'mouseMode=${t.mouseMode} alt=${t.isUsingAltBuffer}');
+      } catch (e) {
+        _write('TERM   WRITE THREW: $e');
+      }
+    });
+    // The readback. Without it "no selection" cannot be told from "the driver
+    // never delivered a click" — the same ambiguity that made me report #83
+    // reproduced twice when it was not.
+    c.addListener(() {
+      final sel = c.selection;
+      if (sel == null) {
+        _write('SEL    (null)');
+      } else {
+        _write('SEL    ${esc(t.buffer.getText(sel))}');
+      }
+    });
+    _term = t;
+    _termCtl = c;
+  }
+
+  /// Mirrors session_screen.dart's terminal-lens nesting exactly.
+  Widget _terminalLens() => Stack(
+        children: [
+          Offstage(
+            offstage: false,
+            child: Stack(
+              children: [
+                GestureDetector(
+                  onSecondaryTapDown: (_) {},
+                  child: ColoredBox(
+                    color: const Color(0xFF000000),
+                    child: TerminalView(
+                      _term!,
+                      controller: _termCtl!,
+                      scrollController: ScrollController(),
+                      theme: TerminalThemes.defaultTheme,
+                      textStyle: const TerminalStyle(
+                        fontSize: 13,
+                        fontFamily: 'monospace',
+                      ),
+                      autofocus: false,
+                      readOnly: false,
+                    ),
+                  ),
+                ),
+              ],
+            ),
+          ),
+        ],
+      );
 
   /// A stand-in for `_TurnBubble`'s wrapper chain (it is private to
   /// conversation_view.dart): Align > ConstrainedBox > Container > Column, with
@@ -226,6 +329,8 @@ class _ProbeState extends State<_Probe> {
 
   Widget _body() {
     switch (_mode) {
+      case 'terminal':
+        return _terminalLens();
       case 'text':
         return ListView(
           padding: const EdgeInsets.all(16),
