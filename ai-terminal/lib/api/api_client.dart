@@ -286,6 +286,23 @@ class ApiClient {
     return TranscriptPage.fromJson(_asMap(_decode(res)));
   }
 
+  /// Fetches a session's recap (`GET /api/sessions/:id/recap`) — the answer to
+  /// *"where was I in this one?"*: the last prompt the USER typed, the agent's
+  /// latest word, the task it is on, and the work done since.
+  ///
+  /// Every judgement is the server's (`lib/recap.js`) — in particular *which*
+  /// `role:user` turn was actually typed by a human, which is emphatically not
+  /// "the newest one": slash commands, task-notifications and teammate messages
+  /// all arrive as user turns. This client must not second-guess it.
+  ///
+  /// Never 404s for a live session: one with no transcript still returns
+  /// name/cwd/status with null prompt/reply. A `404` means the session id is
+  /// unknown; older servers (< 1.57.0) also 404 the route itself.
+  Future<SessionRecap> recap(String sessionId) async {
+    final res = await _send('GET', '/api/sessions/$sessionId/recap');
+    return SessionRecap.fromJson(_asMap(_decode(res)));
+  }
+
   /// Fetches the agent's last answer reduced to a speakable utterance
   /// (`GET /api/sessions/:id/speech`, #70).
   ///

@@ -38,6 +38,7 @@ class SessionCard extends StatelessWidget {
     this.onAttentionDismiss,
     this.onToggleFavorite,
     this.onBellTap,
+    this.onRecapTap,
     this.onMoreTap,
     this.selected = false,
     this.dragHandle,
@@ -69,6 +70,11 @@ class SessionCard extends StatelessWidget {
 
   /// Tapping the bell — opens the notify-level picker. `null` hides the bell.
   final VoidCallback? onBellTap;
+
+  /// Tapping the recap icon — opens the "where was I in this one?" sheet.
+  /// `null` hides it. Deliberately NOT wired to [onTap]: the whole point is to
+  /// look into a session without leaving the one you are in.
+  final VoidCallback? onRecapTap;
 
   /// Tapping the trailing overflow (⋮) button — opens the same actions sheet
   /// as [onLongPress]. Long-press isn't always discoverable, so this gives
@@ -236,6 +242,12 @@ class SessionCard extends StatelessWidget {
                       ),
                     ],
                     const Spacer(),
+                    if (onRecapTap != null)
+                      _IconTapTarget(
+                        icon: Icons.chat_outlined,
+                        tooltip: 'Recap: last prompt and what it has been doing',
+                        onTap: onRecapTap,
+                      ),
                     if (onBellTap != null)
                       _IconTapTarget(
                         icon: _bellIcon(session.notifyLevel),

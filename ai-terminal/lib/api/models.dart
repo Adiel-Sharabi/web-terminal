@@ -1164,3 +1164,140 @@ int? _asInt(dynamic v) {
   if (v is num) return v.toInt();
   return int.tryParse(v.toString());
 }
+
+/// One session's recap — the answer to *"where was I in this one?"* when the
+/// list is full of sessions and the row only tells you that something is running
+/// (`GET /api/sessions/:id/recap`).
+///
+/// Every judgement behind these fields is made SERVER-side by `lib/recap.js`:
+/// which `role:user` turn a human actually typed (a transcript is full of ones
+/// nobody did — slash commands, task-notifications, teammate messages), what to
+/// condense, and which task is current. This class only carries the answer. That
+/// split is deliberate — the same card exists in `app.html`, and a rule
+/// duplicated across the two clients is guaranteed drift.
+///
+/// Always fully shaped: a session with no transcript still returns
+/// name/cwd/status with `prompt` and `reply` null, because *"idle, in `<cwd>`,
+/// 20m ago"* still orients you.
+class SessionRecap {
+  const SessionRecap({
+    required this.name,
+    required this.cwd,
+    required this.status,
+    this.agent,
+    this.lastActivity,
+    this.waitingFor,
+    this.prompt,
+    this.reply,
+    this.sinceTurns = 0,
+    this.tools = const [],
+    this.tasks,
+  });
+
+  final String name;
+  final String cwd;
+  final String status;
+
+  /// Provider that parsed the transcript (`claude`, `codex`), or null.
+  final String? agent;
+
+  /// Epoch millis of the session's last PTY activity, or null.
+  final int? lastActivity;
+
+  /// `question` | `permission` | null — what this session is blocked on (#79).
+  final String? waitingFor;
+
+  /// The newest turn the USER typed. Null when none was found in the scanned
+  /// window, which is normal for an autoCommand-started agent — not an error.
+  final RecapEntry? prompt;
+
+  /// The agent's newest prose since that prompt.
+  final RecapEntry? reply;
+
+  /// How many turns have happened since the prompt.
+  final int sinceTurns;
+
+  /// Tools used since the prompt, pre-tallied by the server (`Edit ×3`).
+  final List<String> tools;
+
+  /// Task-list progress, or null when the agent has no list.
+  final RecapTasks? tasks;
+
+  static SessionRecap fromJson(Map<String, dynamic> j) {
+    final since = j['since'];
+    final sinceMap = since is Map ? since.cast<String, dynamic>() : const {};
+    final toolsRaw = sinceMap['tools'];
+    return SessionRecap(
+      name: (j['name'] ?? '').toString(),
+      cwd: (j['cwd'] ?? '').toString(),
+      status: (j['status'] ?? '').toString(),
+      agent: j['agent']?.toString(),
+      lastActivity: _asInt(j['lastActivity']),
+      waitingFor: j['waitingFor']?.toString(),
+      prompt: RecapEntry.fromJson(j['prompt']),
+      reply: RecapEntry.fromJson(j['reply']),
+      sinceTurns: _asInt(sinceMap['turns']) ?? 0,
+      tools: toolsRaw is List
+          ? toolsRaw.map((e) => e.toString()).toList(growable: false)
+          : const [],
+      tasks: RecapTasks.fromJson(j['tasks']),
+    );
+  }
+}
+
+/// One quoted piece of the conversation: the text plus when it happened.
+class RecapEntry {
+  const RecapEntry({required this.text, this.at, this.isSummary = false});
+
+  final String text;
+
+  /// ISO-8601 timestamp from the transcript, or null when the line had none.
+  final String? at;
+
+  /// True when this came from an author-marked `## TL;DR` rather than the
+  /// opening prose — worth labelling, because it is the author's own recap.
+  final bool isSummary;
+
+  /// Returns null for a null/!Map input, so `prompt`/`reply` decode directly.
+  static RecapEntry? fromJson(dynamic v) {
+    if (v is! Map) return null;
+    final text = (v['text'] ?? '').toString();
+    if (text.isEmpty) return null;
+    return RecapEntry(
+      text: text,
+      at: v['at']?.toString(),
+      isSummary: v['isSummary'] == true,
+    );
+  }
+}
+
+/// Task-list progress reduced to what a card has room for.
+class RecapTasks {
+  const RecapTasks({
+    required this.done,
+    required this.total,
+    this.current,
+    this.currentIsActive = false,
+  });
+
+  final int done;
+  final int total;
+
+  /// The in-progress task, else the first not-yet-done one.
+  final String? current;
+
+  /// Whether [current] is genuinely `in_progress` (vs. merely next up).
+  final bool currentIsActive;
+
+  static RecapTasks? fromJson(dynamic v) {
+    if (v is! Map) return null;
+    final total = _asInt(v['total']) ?? 0;
+    if (total <= 0) return null;
+    return RecapTasks(
+      done: _asInt(v['done']) ?? 0,
+      total: total,
+      current: v['current']?.toString(),
+      currentIsActive: v['currentIsActive'] == true,
+    );
+  }
+}

@@ -35,6 +35,7 @@ import '../widgets/empty_state.dart';
 import '../widgets/favorites_group.dart';
 import '../widgets/new_session_sheet.dart';
 import '../widgets/offline_banner.dart';
+import '../widgets/recap_sheet.dart';
 import '../widgets/session_action_sheet.dart';
 import '../widgets/session_card.dart';
 import '../widgets/status_dot.dart';
@@ -204,6 +205,14 @@ class _DashboardScreenState extends State<DashboardScreen> {
       onTap: () => _openSession(session),
       onLongPress: openActions,
       onMoreTap: openActions,
+      // Peek at what this session was doing WITHOUT opening it — the whole point
+      // is to keep the session you are already in.
+      onRecapTap: () => showRecapSheet(
+        context,
+        client: ApiClient(session.server),
+        sessionId: session.id,
+        sessionName: session.name,
+      ),
       onAttentionTap: attentionKind == null
           ? null
           : () => showAttentionDetailSheet(
