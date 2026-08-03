@@ -253,8 +253,14 @@ test.describe('Session transcript (G5)', () => {
     const list = await (await ctx.get('/api/sessions')).json();
     const cwd = (list.find(s => s.id === id) || {}).cwd;
     const csid = randomUUID();
-    const dirName = cwd.replace(/^([A-Z]):\\/, '$1--').replace(/[\\/]/g, '-');
-    const projDir = path.join(claudeProjectsRoot(), dirName);
+    // Use the SHARED encoder, never a local copy. A hand-rolled version here only
+    // replaced the separators, while claudeProjectDirName replaces EVERY
+    // non-alphanumeric char — identical for a tidy path like C:\Windows\Temp, and
+    // different the moment the cwd contains anything else (a CI runner's tmpdir is
+    // C:\Users\RUNNER~1\AppData\Local\Temp, and the `~` is exactly where the two
+    // diverged). The test then planted its fixture in a folder the server would
+    // never look in, and failed as a 404 that looked like a server bug.
+    const projDir = path.join(claudeProjectsRoot(), claudeProjectDirName(cwd));
     const fixturePath = path.join(projDir, csid + '.jsonl');
     try {
       // Assign claudeSessionId WITHOUT stashing a transcript path.
