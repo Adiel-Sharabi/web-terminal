@@ -9,7 +9,7 @@ These are not in git; they must exist in your working tree to build:
 - `lib/spike_config.dart` — seed server list (imported by `server_store.dart`).
 - `android/app/google-services.json` — FCM config for the **Android** build only.
 
-If you clone fresh, recreate these two before building.
+If you clone fresh, recreate these two before building. For `spike_config.dart` there is a committed template with empty values — `cp lib/spike_config.example.dart lib/spike_config.dart` — which is enough to compile and to run `flutter test`; the Android build additionally needs a real `google-services.json`.
 
 ## Android (FCM / Firebase)
 Builds straight from this directory — Firebase is Android-only:

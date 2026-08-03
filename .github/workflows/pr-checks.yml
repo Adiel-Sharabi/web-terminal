@@ -78,6 +78,14 @@ jobs:
           channel: stable
           cache: true
 
+      - name: Seed the gitignored spike_config
+        # lib/spike_config.dart holds server URLs and bearer tokens, so it is
+        # gitignored — which means a FRESH CLONE cannot compile the companion at
+        # all, CI included. The committed template has empty values, which
+        # server_store.dart treats as "no seed servers" rather than as an error.
+        working-directory: ai-terminal
+        run: cp lib/spike_config.example.dart lib/spike_config.dart
+
       - name: flutter test
         working-directory: ai-terminal
         run: flutter test

@@ -29,7 +29,7 @@ Full instructions, prerequisites, and install steps: **[WINDOWS-BUILD.md](WINDOW
 
 Two **gitignored** local files must exist in your working tree before a build — recreate them after a fresh clone:
 
-- `lib/spike_config.dart` — seed server list, imported by `server_store.dart`
+- `lib/spike_config.dart` — seed server list, imported by `server_store.dart`. **Copy the committed template:** `cp lib/spike_config.example.dart lib/spike_config.dart`. Empty values are supported — the app just starts with no servers and you add them in the UI. The real file is gitignored because it holds bearer tokens
 - `android/app/google-services.json` — FCM config, **Android build only**
 
 ```bash
