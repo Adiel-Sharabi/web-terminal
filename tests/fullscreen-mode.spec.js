@@ -152,7 +152,7 @@ test.describe('fullscreen rendering in xterm', () => {
       await new Promise((r) => term.write(window.sanitizeReplay(corrected), r));
       const afterReplay = term.buffer.active.type;
       // 2) Fresh bash shell output arrives live (normal mode, no ?1049h).
-      await new Promise((r) => term.write('\r\nadiel@host MINGW64 ~\r\n$ ', r));
+      await new Promise((r) => term.write('\r\nuser@host MINGW64 ~\r\n$ ', r));
       // 3) User types — bash echoes it live.
       await new Promise((r) => term.write('echo it_types', r));
       const buf = term.buffer.active; let visible = '';

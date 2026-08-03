@@ -40,7 +40,7 @@ test.describe('lib/transcript.claudeProjectDirName', () => {
   });
   test('replaces EVERY non-alphanumeric char (dot, space, underscore), case preserved, runs not collapsed', () => {
     expect(claudeProjectDirName('C:\\dev\\web-terminal')).toBe('C--dev-web-terminal');
-    expect(claudeProjectDirName('C:\\dev\\am8\\.claude-tmp')).toBe('C--dev-am8--claude-tmp'); // '\.' -> '--'
+    expect(claudeProjectDirName('C:\\dev\\acme\\.claude-tmp')).toBe('C--dev-acme--claude-tmp'); // '\.' -> '--'
     expect(claudeProjectDirName('C:\\Users\\a b\\My.Proj')).toBe('C--Users-a-b-My-Proj');
     expect(claudeProjectDirName('/home/user/App_v2')).toBe('-home-user-App-v2');
   });

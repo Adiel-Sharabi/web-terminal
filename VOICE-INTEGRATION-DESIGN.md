@@ -273,7 +273,7 @@ NuGet.** This removes the constraint from §6 entirely rather than working aroun
 
 ### 7.5 Fully-local stack (privacy posture)
 
-**⚠️ Hardware reality on the serving box (`server-b`/Home, measured 2026-07-19):**
+**⚠️ Hardware reality on the serving box (measured 2026-07-19):**
 Intel UHD 770 **integrated** graphics (2 GB shared) — **no discrete GPU / no CUDA** —
 i7-12700K (8P+4E), 64 GB RAM. This rules out the GPU-class recommendations below and
 forces a CPU-only stack.

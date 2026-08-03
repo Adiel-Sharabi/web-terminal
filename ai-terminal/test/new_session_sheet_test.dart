@@ -405,7 +405,7 @@ void main() {
     });
 
     test('matches on any path segment, not just a prefix', () {
-      expect(filterFolders(folders, 'adiel'), [r'C:\Users\yourname\projects']);
+      expect(filterFolders(folders, 'yourname'), [r'C:\Users\yourname\projects']);
     });
 
     test('no matches returns an empty list', () {

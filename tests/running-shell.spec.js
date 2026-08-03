@@ -7,7 +7,7 @@
 // `powershell.exe -NoProfile -NonInteractive` was alive under its agent. Only the
 // process tree can see that.
 //
-// Every fixture below is a TRANSCRIPTION of a real tree sampled from server-b
+// Every fixture below is a TRANSCRIPTION of a real tree sampled from a live server
 // on 2026-07-29, including the two sessions that had nothing running — those are
 // what make the discriminator ("a shell BELOW the agent") trustworthy rather than
 // merely plausible, because they prove MCP servers never look like work.
@@ -25,7 +25,7 @@ const SANITY_147 = [
   { pid: 52192, ppid: 41304, name: 'node.exe' },      // MCP: MSSQLMCP_DBA
   { pid: 60716, ppid: 41304, name: 'node.exe' },      // MCP: azure-devops
   { pid: 50416, ppid: 41304, name: 'memory.exe' },    // MCP: memory server
-  { pid: 62040, ppid: 41304, name: 'node.exe' },      // MCP: am8-bridge
+  { pid: 62040, ppid: 41304, name: 'node.exe' },      // MCP: acme-bridge
   { pid: 66316, ppid: 41304, name: 'powershell.exe' }, // *** the running command
   { pid: 16316, ppid: 52192, name: 'conhost.exe' },
   { pid: 23344, ppid: 50416, name: 'python.exe' },    // MCP: mcp-memory-service

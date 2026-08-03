@@ -34,9 +34,18 @@ const { openTerminal } = require('./rig-ws');
 
 const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
 
-// An already-trusted cwd that no live session uses — a fresh dir would hit Codex's
-// trust prompt and block forever.
-const CWD = 'C:\\dev\\sampleProject1';
+// The cwd the probe session runs in. Two hard requirements, both learned the hard way:
+// it must be a project Codex ALREADY TRUSTS (a fresh dir hits Codex's trust prompt and
+// blocks forever, with nobody to answer it), and no live session may be using it (a probe
+// writes a NEWER rollout for that directory, which would hijack that session's chat lens
+// via findRolloutForCwd). Set WT_RIG_CWD to a directory on your machine that satisfies
+// both — there is no default that can be correct on someone else's box.
+const CWD = process.env.WT_RIG_CWD;
+if (!CWD) {
+  console.error('WT_RIG_CWD is required: an already-trusted Codex project that no live session is using.');
+  console.error('  e.g. WT_RIG_CWD="C:\\\\dev\\\\scratch" node scripts/rig/verify-codex-status.js');
+  process.exit(2);
+}
 
 // The autoCommand is run BY A SHELL, so every -c value must keep its quotes: a TOML
 // string needs them, and bash strips bare double quotes, turning
@@ -61,7 +70,7 @@ const AUTO = [
   `-c 'sandbox_mode="read-only"'`,
 ].join(' ');
 
-// The composer's status line — `gpt-5.5 high · C:\dev\sampleProject1` — which only
+// The composer's status line — `gpt-5.5 high · <cwd>` — which only
 // renders once the TUI is interactive and ready for input.
 //
 // Deliberately NOT "esc to interrupt" or a caret glyph: a cold start prints "Booting

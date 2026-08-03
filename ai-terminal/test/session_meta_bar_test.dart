@@ -22,9 +22,9 @@ import 'package:ai_terminal/theme/app_theme.dart';
 import 'package:ai_terminal/widgets/session_meta_bar.dart';
 
 ServerConfig _server() =>
-    const ServerConfig(name: 'Server-C', baseUrl: 'http://x', bearerToken: 't');
+    const ServerConfig(name: 'Server-B', baseUrl: 'http://x', bearerToken: 't');
 
-Session _session({SessionMetrics? metrics, String cwd = r'C:\dev\am8'}) =>
+Session _session({SessionMetrics? metrics, String cwd = r'C:\dev\acme'}) =>
     Session(
       id: 'sess-1',
       name: 'Alarm zone - sensor',
@@ -65,7 +65,7 @@ Future<void> pumpBar(
 void main() {
   testWidgets('shows the cwd folder name, not the whole path', (tester) async {
     await pumpBar(tester, session: _session());
-    expect(find.text('am8'), findsOneWidget);
+    expect(find.text('acme'), findsOneWidget);
     expect(find.textContaining(r'C:\dev'), findsNothing);
   });
 
@@ -153,11 +153,11 @@ void main() {
       session: _session(),
       controls: [
         const Icon(Icons.volume_up),
-        const MetaServerBadge(name: 'Server-C'),
+        const MetaServerBadge(name: 'Server-B'),
       ],
     );
     expect(find.byIcon(Icons.volume_up), findsOneWidget);
-    expect(find.text('Server-C'), findsOneWidget);
+    expect(find.text('Server-B'), findsOneWidget);
   });
 
   testWidgets('the cwd side is the flexible child — controls are not',
@@ -169,7 +169,7 @@ void main() {
       tester,
       width: 1200, // single-row mode, where the Expanded exists
       session: _session(),
-      controls: [const MetaServerBadge(name: 'Server-C')],
+      controls: [const MetaServerBadge(name: 'Server-B')],
     );
     final expanded = tester.widget<Expanded>(
       find.descendant(
@@ -180,7 +180,7 @@ void main() {
     expect(
       find.descendant(
         of: find.byWidget(expanded),
-        matching: find.text('am8'),
+        matching: find.text('acme'),
       ),
       findsOneWidget,
       reason: 'the cwd must sit inside the Expanded, not the controls',
@@ -205,7 +205,7 @@ void main() {
       controls: [
         const Icon(Icons.forum_outlined),
         const Icon(Icons.volume_up),
-        const MetaServerBadge(name: 'Server-C'),
+        const MetaServerBadge(name: 'Server-B'),
       ],
     );
     // Every badge exists — the model chip included, since adding a chip to this
@@ -240,12 +240,12 @@ void main() {
       tester,
       width: 1200,
       session: _session(metrics: const SessionMetrics(ctx: 93, fiveH: 34)),
-      controls: [const MetaServerBadge(name: 'Server-C')],
+      controls: [const MetaServerBadge(name: 'Server-B')],
     );
     // One row means the badges and the controls share a vertical centre.
     expect(
       tester.getCenter(find.text('ctx 93%')).dy,
-      closeTo(tester.getCenter(find.text('Server-C')).dy, 1.0),
+      closeTo(tester.getCenter(find.text('Server-B')).dy, 1.0),
     );
   });
 
@@ -253,14 +253,14 @@ void main() {
       (tester) async {
     await pumpBar(tester, session: _session(cwd: ''));
     expect(find.byType(SizedBox), findsWidgets);
-    expect(find.text('am8'), findsNothing);
+    expect(find.text('acme'), findsNothing);
   });
 
   testWidgets('renders for a session with no metrics at all', (tester) async {
     // A terminal-lens / plain shell session still gets its cwd — it showed
     // nothing at all while these chips lived inside the chat lens.
     await pumpBar(tester, session: _session());
-    expect(find.text('am8'), findsOneWidget);
+    expect(find.text('acme'), findsOneWidget);
   });
 
   // #77 — the chip shows the folder NAME, so the full path was nowhere on screen
@@ -297,7 +297,7 @@ void main() {
 
     testWidgets('long-press on the cwd chip offers Copy path', (tester) async {
       await pumpBar(tester, session: _session());
-      await tester.longPress(find.text('am8'));
+      await tester.longPress(find.text('acme'));
       await tester.pumpAndSettle();
       expect(find.text('Copy path'), findsOneWidget);
     });
@@ -305,20 +305,20 @@ void main() {
     testWidgets('copies the WHOLE path, not the folder name shown on the chip',
         (tester) async {
       // The point of the issue: selecting the visible label would only ever
-      // yield "am8". The clipboard must carry the path the user came for.
+      // yield "acme". The clipboard must carry the path the user came for.
       await pumpBar(tester, session: _session());
-      await tester.longPress(find.text('am8'));
+      await tester.longPress(find.text('acme'));
       await tester.pumpAndSettle();
       await tester.tap(find.text('Copy path'));
       await tester.pumpAndSettle();
-      expect(copiedText(), r'C:\dev\am8');
+      expect(copiedText(), r'C:\dev\acme');
     });
 
     testWidgets('right-click opens the same menu — desktop has no long-press',
         (tester) async {
       await pumpBar(tester, session: _session());
       final gesture =
-          await tester.startGesture(tester.getCenter(find.text('am8')),
+          await tester.startGesture(tester.getCenter(find.text('acme')),
               kind: PointerDeviceKind.mouse, buttons: kSecondaryMouseButton);
       await gesture.up();
       await tester.pumpAndSettle();
@@ -328,7 +328,7 @@ void main() {
     testWidgets('confirms the copy, in the wording the app already uses',
         (tester) async {
       await pumpBar(tester, session: _session());
-      await tester.longPress(find.text('am8'));
+      await tester.longPress(find.text('acme'));
       await tester.pumpAndSettle();
       await tester.tap(find.text('Copy path'));
       await tester.pump();
@@ -347,7 +347,7 @@ void main() {
       // Guards the regression the menu could invite: revealing the full path
       // inline would re-break the bar the #74 work just fixed.
       await pumpBar(tester, session: _session());
-      expect(find.text('am8'), findsOneWidget);
+      expect(find.text('acme'), findsOneWidget);
       expect(find.textContaining(r'C:\dev'), findsNothing);
     });
   });
@@ -356,7 +356,7 @@ void main() {
     test('takes the last segment of a windows or posix path', () {
       expect(SessionMetaBar.folderName(r'C:\dev\web-terminal'), 'web-terminal');
       expect(SessionMetaBar.folderName('/home/user/proj'), 'proj');
-      expect(SessionMetaBar.folderName(r'C:\dev\am8\'), 'am8');
+      expect(SessionMetaBar.folderName(r'C:\dev\acme\'), 'acme');
     });
 
     test('empty and degenerate paths do not throw', () {

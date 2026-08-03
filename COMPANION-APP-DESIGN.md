@@ -17,7 +17,7 @@ A native **Android companion app** (Flutter — owner decision 2026-07-05, see S
 
 **Flutter** (owner decision 2026-07-05, overriding the panel's Kotlin+Compose recommendation — the panel ranked Flutter runner-up).
 
-- Firebase project: `<firebase-project-id>`, applicationId `net.hilashnet.aiTerminal`; `google-services.json` saved at `C:\secrets-dir\google-services.json`.
+- Firebase: each deployment uses its **own** project. `google-services.json` (Android client config) and the server's service-account JSON are **gitignored and stored outside the checkout**, referenced by absolute path via `config.push.fcm.serviceAccountPath` — never committed, never inside the repo tree.
 - Plugins: `firebase_messaging` (FlutterFire, first-party), `flutter_tts`, `speech_to_text`, `flutter_local_notifications` (channels/actions/auto-dismiss), `flutter_secure_storage` (Keystore-backed credentials).
 - **Known risk (accepted):** background FCM handlers run in a separate Dart isolate — the "push arrives while app is killed → speak aloud" flow is harder than Kotlin's in-process path. Mitigation: implement in the background isolate first (flutter_local_notifications + flutter_tts both claim background support); if unreliable on the S25, add a small native Kotlin bridge (MethodChannel) for exactly that flow. This is the first thing Phase 1 must prove (build the read-aloud-on-push spike BEFORE the rest of the app).
 - Upside: one codebase for Android + **Windows desktop** — the PC client becomes a Flutter build target instead of a separate project. Desktop voice plugins are weak, but desktop was speced voice-less anyway.

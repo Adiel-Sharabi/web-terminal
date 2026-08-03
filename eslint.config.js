@@ -112,9 +112,19 @@ module.exports = [
         ...globals.browser,
         // App-internal globals referenced inside page.evaluate() browser-context
         // callbacks (defined in app.html, not visible to the Node linter).
+        // Each one must actually exist in app.html — this list documents the
+        // browser context the spec runs in, it is not a way to silence a typo.
         ws: 'readonly',
         clusterServers: 'readonly',
         switchSession: 'readonly',
+        showNotification: 'readonly',
+        attentionSessions: 'readonly',
+        sessionHasAlert: 'readonly',
+        maybeClearAttention: 'readonly',
+        handleAttentionCleared: 'readonly',
+        pendingAlerts: 'readonly',
+        // Written, not just read: a spec sets it to force a long backoff.
+        reconnectAttempts: 'writable',
       },
     },
     rules: {

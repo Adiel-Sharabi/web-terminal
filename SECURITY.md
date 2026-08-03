@@ -16,7 +16,7 @@ development snapshots are not supported — please upgrade to the latest
 Please report vulnerabilities **privately** via GitHub's private
 vulnerability reporting:
 
-https://github.com/Adiel-Sharabi/web-agent-terminal/security/advisories/new
+https://github.com/Adiel-Sharabi/web-terminal/security/advisories/new
 
 Do not open a public issue or discussion for security reports.
 

@@ -11,8 +11,8 @@ Thank you for your interest in contributing. This is a single-maintainer project
 **Requirements:** Node.js 18+, Git for Windows
 
 ```bash
-git clone https://github.com/Adiel-Sharabi/web-agent-terminal.git
-cd web-agent-terminal
+git clone https://github.com/Adiel-Sharabi/web-terminal.git
+cd web-terminal
 npm install
 node monitor.js
 ```
@@ -36,6 +36,10 @@ The three-process model is the core of the architecture:
 | `server.js` | Express + WebSocket, auth, cluster proxy, REST API; stateless — delegates all PTY state to the worker over IPC |
 
 Supporting modules live in `lib/` (`ipc.js`, `worker-client.js`, `cluster-token.js`). The full file-by-file table is in the Architecture section of [README.md](README.md), and a detailed technical walkthrough is in [ARCHITECTURE.md](ARCHITECTURE.md).
+
+**`lib/agents.js` is the one place that knows anything agent-specific** — parser, transcript root and resolution strategy, submit policy, interrupt policy, label and colour. Adding a CLI agent is one parser module plus one registry entry. If a change has you writing `if (agent === 'codex')` anywhere else, it belongs in the registry instead; see the PR gate below.
+
+`ai-terminal/` holds **AiTerminal**, the native Flutter companion client (Android + Windows). It is a separate toolchain with its own tests (`flutter test`) and its own build docs ([`ai-terminal/WINDOWS-BUILD.md`](ai-terminal/WINDOWS-BUILD.md), [`ai-terminal/README.md`](ai-terminal/README.md)) — the Playwright suite does not cover it. Server changes that alter an API shape must keep the companion working; prefer additive fields over renames.
 
 ---
 
@@ -105,15 +109,70 @@ Key notes:
 
 ---
 
-## Pull Request Process
+## Pull Request Gate
 
-1. Fork the repo (or create a branch off `master`).
-2. Keep PRs focused — one bug fix or feature per PR.
-3. Ensure all five pre-commit gates pass before opening the PR.
-4. Describe the change: what it does, why it is needed, and how it was tested.
-5. For bug fixes: include a reproduction case (ideally a new or modified test that fails without the fix).
+**A PR is merged only when every gate below is green.** They are listed in the order they are checked, cheapest first — a PR that fails an early gate is returned without the later ones being reviewed. None of them is waived for a "small" change; small changes are exactly where the skipped gate bites.
 
-PRs that add features without tests, skip the version bump, or break the Windows-first behavior will be asked to revise before merging.
+### Gate 1 — Automated (CI must be green)
+
+[`.github/workflows/ci.yml`](.github/workflows/ci.yml) runs on every PR against `master` and is **blocking**:
+
+| Check | Command | Passes when |
+|---|---|---|
+| Syntax | `node -c server.js && node -c monitor.js && node -c pty-worker.js` | exit 0 |
+| Lint | `npx eslint .` | **0 errors** (warnings are tolerated — `eslint.config.js` downgrades domain-intentional rules) |
+| Tests | `npx playwright test` | every spec passes |
+
+Run all three locally before opening the PR — CI is the backstop, not your test runner. **A red CI is not negotiable and never merged "because it's unrelated".** If a failure genuinely predates your branch, say so in the PR and link the failing run on `master`; otherwise it is yours to fix.
+
+### Gate 2 — Mechanical, checked by review
+
+Each of these is a yes/no with no judgement involved, and each has a line in the [PR template](.github/pull_request_template.md):
+
+- [ ] **`SERVER_VERSION` bumped** in `server.js` — patch for a fix, minor for a feature, major for a break. A PR without a bump cannot be deployed or rolled back cleanly, so it is returned unread.
+- [ ] **One logical change.** One bug fix or one feature per PR. A refactor smuggled inside a fix makes the diff unreviewable and will be asked to split.
+- [ ] **No secrets in the diff** — passwords, tokens, API keys, private keys, `.env`, service-account JSON. Check the whole branch, not just the last commit: `git diff master...HEAD`.
+- [ ] **No personal or machine-specific data** — absolute paths from your machine, hostnames, private IPs, internal project names, real transcript captures.
+- [ ] **README updated** if user-facing behavior changed — features list, config table, architecture table.
+- [ ] **`windowsHide: true`** on every new `execFile` / `execSync` / `spawn` call.
+
+### Gate 3 — Tests that actually prove the change
+
+Coverage is not counted; what is checked is whether a test would have **caught the bug**:
+
+- **A bug fix ships with a regression test that fails without the fix.** Verify that literally: stash the fix, watch the new test go red, restore it, watch it go green. State in the PR that you did.
+- **A feature ships with tests for its rules**, not just a smoke test that it renders.
+- **A pure rule belongs in a pure module** (`lib/*.js`) with unit tests, not inline in `server.js` where only an integration test can reach it.
+- **Don't assert on the screen when the ground truth is on disk.** For agent behaviour, the transcript/rollout says whether a turn started; the terminal output cannot distinguish "typed into the prompt box" from "submitted".
+
+### Gate 4 — Design review (where a PR is most often returned)
+
+This is judgement, and it is where quality is actually kept. Reviewed against [ENGINEERING_STANDARDS.md](ENGINEERING_STANDARDS.md):
+
+1. **Root cause, stated in one sentence.** "X happens because Y." A fix that suppresses a symptom — a special-case `if`, a `try/catch` that swallows instead of prevents, a retry around a race — is rejected even when it makes the report go away. If the same class of bug is being fixed in a second place, the cause is upstream of both.
+2. **Single source of truth.** A value, rule or type gets exactly one owner and everyone else imports it. "Keep these two in sync" is a rejection, not a caveat. If your change adds a second copy of an existing rule, consolidate first in its own PR.
+3. **No agent branching.** `if (agent === 'codex')` in `server.js`, `pty-worker.js`, `app.html` or the companion means the change is in the wrong file — add a field to the provider registry in `lib/agents.js` instead. This one is absolute; the registry exists precisely so agent support stays additive.
+4. **Layer boundaries hold.** Session state lives in `pty-worker.js`; HTTP/WS lives in `server.js`; clients render what the server derived and re-derive nothing. A client that computes an answer the server already publishes is guaranteed drift.
+5. **Smallest change that fully solves it.** Note unrelated problems in an issue; don't fold them in. Broad rewrites need sign-off *before* you write them.
+6. **Verified end-to-end, not just compiled.** Say what you ran and what you saw. "Should work" and "tests pass" are different claims from "I observed it working".
+
+### Gate 5 — What the PR itself must say
+
+The description is part of the deliverable. Required:
+
+- **What** changed and **why** — link the issue (`Fixes #N`).
+- **Root cause** for a fix, in one sentence.
+- **How it was verified** — the commands run and what was observed, including any manual steps beyond the suite.
+- **Blast radius** — which callers of a shared function are affected, if you touched one.
+- **Deployment note** — if the change touches `pty-worker.js` or a `lib/` module the worker loads, say so: those need a **cold restart**, and a hot `server.js`-only reload silently leaves the old behaviour running.
+
+### Automatic rejection
+
+A PR is closed or returned without detailed review if it: is generated wholesale without the author being able to explain the root cause; breaks Windows-first behavior or adds a hard Linux/macOS runtime dependency; contains a secret (revoke it, then re-open a clean branch — force-pushing over it does not remove it from the fork's history); bundles unrelated changes; or disables, deletes, or `.skip`s a failing test instead of fixing what it caught.
+
+### Scope
+
+Bug fixes and focused improvements are welcome without asking first. **Open an issue before building a large feature** — this is a single-maintainer project with a strong opinion about its architecture, and a rejected 2,000-line PR wastes far more of your time than a five-minute conversation would have.
 
 ---
 
@@ -127,7 +186,7 @@ Before opening an issue, try to reproduce the bug with a minimal case and note t
 
 **Do not open public GitHub issues for security vulnerabilities.**
 
-Report security issues privately via [GitHub's private vulnerability reporting](https://github.com/Adiel-Sharabi/web-agent-terminal/security/advisories/new) or by contacting the maintainer directly through GitHub at https://github.com/Adiel-Sharabi. See [SECURITY.md](SECURITY.md) if present.
+Report security issues privately via [GitHub's private vulnerability reporting](https://github.com/Adiel-Sharabi/web-terminal/security/advisories/new) or by contacting the maintainer directly through GitHub at https://github.com/Adiel-Sharabi. See [SECURITY.md](SECURITY.md) if present.
 
 ---
 

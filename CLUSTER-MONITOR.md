@@ -28,7 +28,7 @@ For every line in `logs/server.log` + `logs/error.log` matching the
 All probe samples are also appended to `logs/cluster-monitor.jsonl` so
 you can grep/plot them later.
 
-## Run it (Home server)
+## Run it (on the local server)
 
 Already started:
 
@@ -48,7 +48,7 @@ Get-CimInstance Win32_Process -Filter "Name='node.exe'" |
   Stop-Process -Force
 ```
 
-## Deploy on Server-C and Office
+## Deploy on the peer servers
 
 Copy two files into the peer's web-terminal directory:
 
@@ -62,7 +62,7 @@ wscript start-cluster-monitor.vbs
 ```
 
 Each peer's dashboard will be on `http://<peer>:7682`, reachable over
-Tailscale (`http://server-c:7682`, `http://server-b:7682`).
+Tailscale (`http://peer-a:7682`, `http://peer-b:7682`).
 
 Ways to get the files across without restarting the server:
 
@@ -74,27 +74,27 @@ Ways to get the files across without restarting the server:
 No `npm install` is needed: the script uses only built-ins and the `ws`
 package that the server already has installed.
 
-## Initial findings (local Home server, first ~1 min of probes)
+## Initial findings (local server, first ~1 min of probes)
 
 These are the data points already captured — they explain both symptoms
 you described.
 
-### 1. Disconnect storm to Server-C was a real connectivity outage
+### 1. The disconnect storm to a peer was a real connectivity outage
 
 `logs/error.log` has 672 `Cluster proxy … remote error: connect ETIMEDOUT
 100.x.x.x:443` events between 21:54:37Z and 22:14:58Z on
-2026-04-18 — ~20 minutes of total unreachability on XPS's Tailscale
+2026-04-18 — ~20 minutes of total unreachability on that peer's Tailscale
 address, spread across two live sessions (`55c85885`, `b0fdb722`).
 
 The proxy behaved correctly: exponential back-off, 10 attempts, give up,
 client reconnects, new proxy session, repeat. That's why the browser
 sees a "reconnecting…" overlay flashing in a loop — the work is all on
-the Home→XPS hop, not on the browser→Home hop.
+the local→peer hop, not on the browser→local hop.
 
-### 2. Input-hiccup cause: XPS Tailscale path is unstable even when "direct"
+### 2. Input-hiccup cause: a Tailscale path can be unstable even when "direct"
 
-Four consecutive 15 s probes against `server-c` (MagicDNS → LAN IP
-`192.168.x.x`, reported as `direct`):
+Four consecutive 15 s probes against a peer (MagicDNS → its LAN IP,
+reported as `direct`):
 
 | sample | tailscale ping | HTTP TTFB | WS handshake |
 |---|---|---|---|
@@ -110,26 +110,26 @@ force-reconnects. Each reconnect in turn triggers a fresh TCP + TLS
 handshake — which is why a single flap costs ~1–2.5 s of visible
 "frozen input."
 
-Office, for contrast, is stable at ~22 ms Tailscale / ~350 ms HTTP TTFB
+A second peer, for contrast, is stable at ~22 ms Tailscale / ~350 ms HTTP TTFB
 on the same probes. Its HTTP TTFB is still ~15× its ICMP RTT because
 every probe re-does TCP + TLS (no HTTP keep-alive), but the values are
 consistent.
 
 ### 3. HTTP/WS TTFB is consistently a big multiple of Tailscale RTT
 
-Even on Office (22 ms ping), a cold TCP+TLS handshake is 300–1200 ms.
+Even on the stable peer (22 ms ping), a cold TCP+TLS handshake is 300–1200 ms.
 That's normal for one-shot HTTPS, but it means **the cost of every
 reconnect is dominated by the handshake, not by the network RTT**.
 Reducing reconnect frequency is worth far more than shaving RTT.
 
 ## What the monitor will confirm once it runs on all three nodes
 
-- Whether Office and XPS see the same latency/flapping to Home and to
-  each other, or only Home→XPS is bad.
+- Whether both peers see the same latency/flapping to the local server
+  and to each other, or only one hop is bad.
 - Whether `relay=direct` actually matches reality (if one side switches
   to DERP mid-stream, the `via` field will change).
 - Whether the reconnect storm is symmetric (if it is, it's network; if
-  only Home sees it, it's a Home-side routing issue).
+  only the local server sees it, it's a local routing issue).
 - How often `remote ping timeout` fires vs `remote error` — distinguishes
   a "slow, still alive" connection from a genuinely broken one.
 
