@@ -643,6 +643,62 @@ void main() {
     });
   });
 
+  // The removed `_ChatLink` carried an explicit
+  // `ConstrainedBox(maxWidth: 0.82 * screen)` whose comment said a WidgetSpan is
+  // otherwise laid out at its INTRINSIC width, so a long bare URL would overflow
+  // the bubble. Deleting a guard obliges us to show the guard is unnecessary:
+  // a TextSpan is laid out by the paragraph, and Flutter breaks a word that
+  // cannot fit a line rather than running off the edge.
+  testWidgets('a long unbroken bare URL wraps instead of overflowing', (
+    tester,
+  ) async {
+    const width = 400.0;
+    final longUrl = 'https://example.com/${'x' * 300}';
+    final page = TranscriptPage(
+      messages: [
+        TranscriptTurn(
+          role: 'assistant',
+          text: 'see $longUrl end',
+          toolUses: const [],
+          ts: null,
+        ),
+      ],
+      cursor: null,
+      hasMore: false,
+    );
+    await tester.pumpWidget(
+      MaterialApp(
+        theme: AppTheme.dark,
+        home: Scaffold(
+          body: SizedBox(
+            width: width,
+            height: 600,
+            child: ConversationView(
+              session: _session(),
+              fetchPage: (id, {before, limit}) async => page,
+            ),
+          ),
+        ),
+      ),
+    );
+    await tester.pumpAndSettle();
+
+    final para = tester
+        .widgetList<RichText>(find.byType(RichText))
+        .where((rt) => rt.text.toPlainText().contains('example.com'))
+        .toList();
+    expect(para, hasLength(1), reason: 'still one paragraph');
+
+    final size = tester.getSize(
+      find.byWidget(para.single),
+    );
+    expect(size.width, lessThanOrEqualTo(width),
+        reason: 'a 300-char unbroken URL must wrap inside the bubble, not '
+            'overflow it — the ConstrainedBox that used to force this is gone');
+    // It wrapped, so it occupies many lines rather than one very long one.
+    expect(size.height, greaterThan(40));
+  });
+
   // The tap-to-open path survives the WidgetSpan removal: flutter_markdown
   // attaches a TapGestureRecognizer to the link span. A tap recognizer is
   // defeated by movement, which is why it can coexist with a selection drag

@@ -145,6 +145,58 @@ one run and showed the buffer was nowhere near full (`len=30 arr=5000`).
 patched copies and compare (README-PATCH.md has the recipe). Both give `+108 ~2 -2`;
 the two `textScaler` failures are pre-existing Flutter-SDK drift.
 
+## Chat links are TextSpans — never a widget in the text flow (#83)
+
+**A `MarkdownElementBuilder` can only return a Widget, and a widget cannot live inside
+a paragraph.** That one API fact is the whole bug, and it is worth stating because the
+builder API *looks* like the natural place to add a per-link affordance.
+
+Measured on flutter_markdown 0.7.7+1, rendering the sentence `see LINK tail`
+(where LINK is an ordinary markdown inline link labelled `example`):
+
+| | RichTexts | structure |
+|---|---|---|
+| custom `a` builder | **4** | `"see "` \| `"example"` \| `" tail"` — separate render objects |
+| native `onTapLink` | **2** | one paragraph: `[see ][example ←Tap][ tail]` |
+
+The ancestor `SelectionArea` (#27) walks a **paragraph**, so a shattered sentence is one
+it cannot drag across. That is why the symptom was *"dragging selects nothing"* rather
+than the narrower "the URL itself isn't selectable" — **the link poisons the whole
+sentence around it.** The widget's own `GestureDetector` compounded it: `onLongPressStart`
+holds the gesture arena for exactly the button-down a selection drag begins on.
+
+The same builder also attached the tap recognizer to the **wrong fragment** (`" tail"`),
+so tapping trailing prose opened the link while the link text did nothing. Nobody had
+reported that; it fell out of the instrumentation.
+
+**Two traps, both of which cost a wrong answer first.**
+
+1. **A widget test cannot see this bug, and a *plausible* widget test can be worse than
+   none.** The first test written for the fix asserted "no `WidgetSpan` in the span tree"
+   — and **passed against the buggy code**, because the mechanism is paragraph
+   fragmentation, not a `WidgetSpan`. Assert on the RichText *count* for a sentence, and
+   on which span carries the recognizer. Both are red against the old rendering.
+2. **Instrument, don't reason** (the #81 lesson, again). Printing the real span tree in
+   both configurations named the mechanism in one run, after reasoning had produced a
+   confident wrong one.
+
+**The rule going forward:** any per-link affordance must be reachable from a `TextSpan`
+recognizer or from the `SelectionArea`'s context menu — **never from a widget in the text
+flow**. Reintroducing a builder to add "Copy link" silently reintroduces this bug.
+
+**What the fix traded away, deliberately:** the per-link long-press / right-click
+"Open / Copy link" menu is gone. It existed *because* links were unselectable. For a bare
+autolinked URL — what an agent actually prints — the link text **is** the href, so
+ordinary select + copy now yields the URL. For a labelled link — one whose text differs from its
+URL — the URL is no longer copyable from the UI; a tap still opens it.
+
+**Still not verified by an automated test:** that a real mouse drag on the shipped Windows
+build now highlights. Synthetic pointer events never traverse the OS input path — eight
+widget tests passed against the original report. Use
+`scripts/rig/probe-drive-selection.ps1` with a URL-containing fixture and **always
+`-ShotDuring`**: without the mid-drag screenshot, "nothing was selected" and "nothing was
+rendered to select" are indistinguishable.
+
 ## Multi-Agent Support (Claude Code + Codex)
 
 A session knows *which* AI CLI agent it runs. `agent` is a real, persisted session field: `'claude'`, `'codex'`, or `null` for a plain shell. **`null` is never coerced to `'claude'`.**
