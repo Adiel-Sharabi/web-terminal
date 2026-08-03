@@ -91,8 +91,16 @@ test.describe('Sidebar recap card', () => {
       // never synthesises a `click` at all, so the dismiss handler cannot run and
       // the card survives for a reason that has nothing to do with dismissal.
       // Measured: at (5,5) a document-level capture listener saw NO click and the
-      // card stayed 3/3; at (240,220) it saw the click and the card closed 3/3.
-      await page.locator('#terminal').click({ position: { x: 240, y: 220 }, force: true });
+      // card stayed 3/3; away from the cursor it saw the click and the card closed.
+      //
+      // The point is derived from the element's own box rather than hard-coded.
+      // A fixed (240,220) worked on a dev box and FAILED on the hosted Windows
+      // runner, whose viewport is smaller — with `force: true` the click is not
+      // clamped to the element, so it simply landed somewhere else and no dismiss
+      // ever ran. The centre is always inside the terminal and always far from
+      // the top-left cursor, whatever the viewport.
+      const termBox = await page.locator('#terminal').boundingBox();
+      await page.mouse.click(termBox.x + termBox.width / 2, termBox.y + termBox.height / 2);
       await expect(page.locator('#rcCard')).toHaveCount(0);
     } finally {
       await ctx.delete(`/api/sessions/${id}`);
