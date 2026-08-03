@@ -2,7 +2,7 @@
 ///
 /// Every model is a plain value object with a `fromJson` factory that mirrors
 /// the exact wire shape returned by the web-terminal server (see
-/// `COMPANION-APP-DESIGN.md` for the contract). Parsing is defensive: missing
+/// `../docs/COMPANION-APP-DESIGN.md` for the contract). Parsing is defensive: missing
 /// or wrongly-typed fields fall back to sane defaults rather than throwing, so
 /// a partial/older server response never crashes the app.
 library;

@@ -35,7 +35,7 @@ The three-process model is the core of the architecture:
 | `pty-worker.js` | Owns all node-pty sessions, scrollback buffers, and session persistence; survives `server.js` restarts |
 | `server.js` | Express + WebSocket, auth, cluster proxy, REST API; stateless — delegates all PTY state to the worker over IPC |
 
-Supporting modules live in `lib/` (`ipc.js`, `worker-client.js`, `cluster-token.js`). The full file-by-file table is in the Architecture section of [README.md](README.md), and a detailed technical walkthrough is in [ARCHITECTURE.md](ARCHITECTURE.md).
+Supporting modules live in `lib/` (`ipc.js`, `worker-client.js`, `cluster-token.js`). The full file-by-file map and a technical walkthrough are both in [docs/ARCHITECTURE.md](docs/ARCHITECTURE.md).
 
 **`lib/agents.js` is the one place that knows anything agent-specific** — parser, transcript root and resolution strategy, submit policy, interrupt policy, label and colour. Adding a CLI agent is one parser module plus one registry entry. If a change has you writing `if (agent === 'codex')` anywhere else, it belongs in the registry instead; see the PR gate below.
 
@@ -78,12 +78,23 @@ Increment `SERVER_VERSION` in `server.js` (line 10):
 - Minor (`1.x.0`) for new features
 - Major (`x.0.0`) for breaking changes
 
-### 5. Update README
+### 5. Update the docs
 
-If the change adds or modifies user-facing behavior, update `README.md`:
-- Add to the Features list
-- Add configuration docs for new settings
-- Update the Architecture table if new files were added
+`README.md` is deliberately short — it is the shop window, not the manual. Put detail in
+the topic doc it belongs to, and touch the README only if the change alters the pitch:
+
+| If the change… | Update |
+|---|---|
+| adds or alters a user-facing feature | [`docs/FEATURES.md`](docs/FEATURES.md) |
+| adds or changes a setting or env var | [`docs/CONFIGURATION.md`](docs/CONFIGURATION.md) |
+| affects install, auto-start or updating | [`docs/INSTALL.md`](docs/INSTALL.md) |
+| changes what an agent supports | [`docs/AI-AGENTS.md`](docs/AI-AGENTS.md) — **including its support matrix** |
+| adds a file or moves a responsibility | [`docs/ARCHITECTURE.md`](docs/ARCHITECTURE.md) file map |
+| changes how the server is installed or operated by an agent | [`AGENTS.md`](AGENTS.md) |
+
+**The support matrix in `docs/AI-AGENTS.md` is load-bearing.** It is the one place that
+states plainly which agent gets which feature, and a change that quietly widens or narrows
+that without updating it turns the project's clearest promise into a lie.
 
 ---
 
@@ -147,7 +158,7 @@ Coverage is not counted; what is checked is whether a test would have **caught t
 
 ### Gate 4 — Design review (where a PR is most often returned)
 
-This is judgement, and it is where quality is actually kept. Reviewed against [ENGINEERING_STANDARDS.md](ENGINEERING_STANDARDS.md):
+This is judgement, and it is where quality is actually kept. Reviewed against [ENGINEERING_STANDARDS.md](docs/ENGINEERING_STANDARDS.md):
 
 1. **Root cause, stated in one sentence.** "X happens because Y." A fix that suppresses a symptom — a special-case `if`, a `try/catch` that swallows instead of prevents, a retry around a race — is rejected even when it makes the report go away. If the same class of bug is being fixed in a second place, the cause is upstream of both.
 2. **Single source of truth.** A value, rule or type gets exactly one owner and everyone else imports it. "Keep these two in sync" is a rejection, not a caveat. If your change adds a second copy of an existing rule, consolidate first in its own PR.

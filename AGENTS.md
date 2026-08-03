@@ -13,8 +13,8 @@ traps are called out inline rather than left for you to discover.
 |---|---|
 | **to install / run / deploy the server** | this file |
 | to **change the code** | [CLAUDE.md](CLAUDE.md) — the invariants a change must not break — then [CONTRIBUTING.md](CONTRIBUTING.md) for the PR gate |
-| to understand the design | [ARCHITECTURE.md](ARCHITECTURE.md) |
-| a feature/config reference | [README.md](README.md) |
+| to understand the design | [ARCHITECTURE.md](docs/ARCHITECTURE.md) |
+| a feature/config reference | [docs/FEATURES.md](docs/FEATURES.md) · [docs/CONFIGURATION.md](docs/CONFIGURATION.md) |
 
 Do not skim CLAUDE.md for install steps; it is an engineering-invariants document and
 will send you down the wrong path.
@@ -90,7 +90,7 @@ windows from flashing. See the hard rules below — this is not optional styling
 ## Configure
 
 Prefer the in-app Settings panel (gear icon, sidebar footer); most keys apply live. The
-full key-by-key table is in [README.md → Configuration](README.md#configuration). Only
+full key-by-key table is in [docs/CONFIGURATION.md](docs/CONFIGURATION.md). Only
 `port`, `host` and `shell` need a restart.
 
 ## Optional integrations
@@ -120,8 +120,8 @@ Three traps, each of which has silently cost a working feature:
   unconfigured. Both installers take `--check` to report without changing anything.
 
 For the multi-server cluster and the Android/Windows companion app, see
-[README.md → Multi-Server Cluster](README.md#multi-server-cluster) and
-[README.md → Companion App](README.md#companion-app--aiterminal).
+[docs/CLUSTER.md](docs/CLUSTER.md) and
+[docs/COMPANION.md](docs/COMPANION.md).
 
 ## Restarting — pick the right one
 

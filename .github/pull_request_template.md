@@ -30,7 +30,7 @@ All items must be checked before requesting review. Full rules in [CONTRIBUTING.
 
 - [ ] **Version bumped** — `SERVER_VERSION` in `server.js` incremented (patch / minor / major as appropriate).
 - [ ] **One logical change** — no refactor smuggled into a fix, no unrelated changes bundled.
-- [ ] **README updated** — user-facing changes documented (features list, config table, architecture table).
+- [ ] **Docs updated** — detail went to the right topic doc (`docs/FEATURES.md`, `docs/CONFIGURATION.md`, `docs/INSTALL.md`, `docs/ARCHITECTURE.md`), and `docs/AI-AGENTS.md`'s support matrix was updated if agent support changed.
 - [ ] **No secrets committed** — checked across the whole branch (`git diff master...HEAD`), not just the last commit.
 - [ ] **No personal data** — machine-specific paths, hostnames, private IPs, internal project names, and real transcript captures are absent from tracked files.
 - [ ] **`windowsHide: true`** on any new `execFile` / `execSync` / `spawn` call.

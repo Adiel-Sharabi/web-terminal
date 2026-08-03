@@ -42,7 +42,7 @@ If new user-facing features were added, update `README.md`:
 - Keep the Multi-Server Cluster and PWA sections current
 
 ## Architecture
-Three supervised Node.js processes. See `ARCHITECTURE.md` for the full walkthrough.
+Three supervised Node.js processes. See `docs/ARCHITECTURE.md` for the full walkthrough.
 
 - `monitor.js` — supervisor. Mints the IPC handshake token (`WT_IPC_TOKEN`), spawns worker + web, restarts on crash with exponential backoff, rotates logs
 - `pty-worker.js` — owns all `node-pty` sessions (binary mode), scrollback buffers, session persistence, Claude hook state. Survives `server.js` restarts
@@ -406,4 +406,4 @@ When working through GitHub issues, use this process:
 - `passAllEnv` config option (default false) controls whether spawned shells get full or limited environment variables
 
 ## Engineering Standards (shared, non-negotiable)
-@ENGINEERING_STANDARDS.md
+@docs/ENGINEERING_STANDARDS.md

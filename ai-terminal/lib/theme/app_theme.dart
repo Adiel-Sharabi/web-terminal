@@ -1,5 +1,5 @@
 /// App-wide theme: dark Material 3, dynamic color OFF, palette pinned to
-/// `COMPANION-APP-UI-SPEC.md` §0.1 (mirrors the web terminal's own palette).
+/// `../docs/COMPANION-APP-UI-SPEC.md` §0.1 (mirrors the web terminal's own palette).
 library;
 
 import 'package:flutter/material.dart';

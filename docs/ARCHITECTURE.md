@@ -104,6 +104,15 @@ The legacy proxy path is always available as fallback — direct mode is purely 
 | `lib/ipc.js` | Framing + named-pipe / unix-socket server and client, with handshake auth and backpressure |
 | `lib/worker-client.js` | High-level RPC / event client used by `server.js` to talk to the worker |
 | `lib/cluster-token.js` | Pure-function HMAC-SHA256 mint/verify for direct-mode session tokens |
+| `lib/agents.js` | **AI-agent provider registry — the one place that knows anything agent-specific**: parser, transcript root and resolution strategy, subagent-trace support, submit and interrupt policy, label and colour. Adding an agent is one parser module plus one entry here, with no branching anywhere else. See [AI-AGENTS.md](AI-AGENTS.md) |
+| `lib/transcript.js` / `lib/transcript-codex.js` | Per-agent transcript parsers, both emitting one shared typed turn shape so every consumer stays agent-agnostic |
+| `lib/codex-sessions.js` | Resolves a Codex rollout by cwd — Codex keys rollouts by date + UUID, so the cwd is read from each candidate's `session_meta` head line |
+| `lib/submit-frames.js` | The pure byte rules on the PTY input path: `splitTrailingCr` (hold the submit CR back so a TUI that folds a read into a paste sees Enter, not a newline), `endsBracketedPaste`, and `isEscapeKey` (a *lone* `0x1b` is an interrupt; an arrow's `ESC [ A` is not) |
+| `lib/osc9-notify.js` | Pure extraction of OSC 9 notification bodies from a PTY stream, buffered across chunk boundaries — how a Codex session reports status without usable hooks. What a body *means* is a registry field, not here |
+| `lib/usage-rollup.js` | Pure rule turning per-session metric reports into the per-server usage block: 5h/7d windows are account-wide, so they roll up once per agent and are never merged across agents |
+| `lib/git-safe.js` | Hardened runner for the version/update-check git calls — disables credential prompts and tree-kills on timeout, so a broken HTTPS remote cannot hang `git-credential-manager` and leak process trees |
+| `claude-hook.js` / `claude-hook.sh` | Claude Code hook scripts (Node for Windows, bash elsewhere) |
+| `scripts/install-codex-notify.js` | Writes the three `[tui]` keys that enable Codex's OSC 9 status channel. Applied by `scripts/cold-restart.ps1` on every deploy; `--check` reports without changing anything |
 
 ### Frontend
 

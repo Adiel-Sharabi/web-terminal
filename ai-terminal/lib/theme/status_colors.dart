@@ -1,5 +1,5 @@
 /// Status color tokens and the session/server status enums, mirroring
-/// `COMPANION-APP-UI-SPEC.md` §0.2 (`StatusColor`) and §0.5 (`StatusDot`).
+/// `../docs/COMPANION-APP-UI-SPEC.md` §0.2 (`StatusColor`) and §0.5 (`StatusDot`).
 library;
 
 import 'package:flutter/material.dart';
