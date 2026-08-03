@@ -572,26 +572,82 @@ void main() {
     },
   );
 
-  // Links are non-selectable gesture spans in the SelectionArea, so a long-press
-  // (touch) / right-click (desktop) exposes an Open/Copy menu — the way to grab a
-  // URL without opening it (the "can't mark & copy a URL in chat" report).
-  testWidgets('a chat URL long-press shows an Open/Copy menu; Copy grabs the URL', (
+  // #83 — the regression gate for "dragging selects nothing".
+  //
+  // A widget test CANNOT prove selection works: synthetic pointer events are
+  // injected straight into Flutter's gesture arena and never traverse the
+  // Windows pointer path, which is why eight of them passed against the original
+  // report. What it CAN prove is the structural property that caused it — a link
+  // must be a TextSpan inside the paragraph, never a WidgetSpan. A WidgetSpan is
+  // an opaque box the ancestor SelectionArea (#27) does not walk, and the widget
+  // inside it carried a long-press recognizer that held the arena for exactly the
+  // button-down a selection drag begins with. Pin the cause; the real-input rig
+  // (scripts/rig/probe-drive-selection.ps1 -ShotDuring) pins the symptom.
+  testWidgets('a chat link is a TextSpan in the paragraph, never a WidgetSpan', (
     tester,
   ) async {
-    // Deterministic clipboard: capture what Copy writes (avoids the real channel).
-    String? clip;
-    tester.binding.defaultBinaryMessenger.setMockMethodCallHandler(
-      SystemChannels.platform,
-      (call) async {
-        if (call.method == 'Clipboard.setData') {
-          clip = (call.arguments as Map)['text'] as String?;
-        }
-        return null;
-      },
+    final page = TranscriptPage(
+      messages: const [
+        TranscriptTurn(
+          role: 'assistant',
+          text: 'see [example](https://example.com/x) and https://bare.example/y',
+          toolUses: [],
+          ts: null,
+        ),
+      ],
+      cursor: null,
+      hasMore: false,
     );
-    addTearDown(() => tester.binding.defaultBinaryMessenger
-        .setMockMethodCallHandler(SystemChannels.platform, null));
+    await tester.pumpWidget(
+      _wrap(
+        ConversationView(
+          session: _session(),
+          fetchPage: (id, {before, limit}) async => page,
+        ),
+      ),
+    );
+    await tester.pumpAndSettle();
 
+    // THE assertion: the prose AND the link occupy ONE paragraph, so a drag
+    // across the sentence has a single continuous run of text to walk.
+    //
+    // Measured difference (test/zz_span_probe style instrumentation):
+    //   old builder -> 4 RichTexts: "see " | "example" | " tail" as SEPARATE
+    //                  render objects, with the tap recognizer landing on the
+    //                  WRONG span (" tail" — tapping the trailing prose opened
+    //                  the link);
+    //   onTapLink   -> 2 RichTexts: [see ][example <-Tap][ tail] in one paragraph.
+    // A bubble whose sentence is shattered into per-fragment RichTexts is the
+    // structural signature of this bug.
+    final bodies = tester
+        .widgetList<RichText>(find.byType(RichText))
+        .where((rt) => rt.text.toPlainText().contains('example'))
+        .toList();
+    expect(bodies, hasLength(1),
+        reason: 'the sentence must be ONE paragraph, not one RichText per '
+            'fragment — a split paragraph is what SelectionArea cannot walk');
+
+    final para = bodies.single;
+    final plain = para.text.toPlainText();
+    // Prose either side of the link shares that same paragraph.
+    expect(plain, contains('see '));
+    expect(plain, contains('example'));
+    expect(plain, contains('bare.example'),
+        reason: 'a gitHubWeb autolinked bare URL must share the paragraph too');
+
+    // And no widget sits in the text flow.
+    para.text.visitChildren((span) {
+      expect(span, isNot(isA<WidgetSpan>()),
+          reason: 'a WidgetSpan in chat text breaks SelectionArea (#83)');
+      return true;
+    });
+  });
+
+  // The tap-to-open path survives the WidgetSpan removal: flutter_markdown
+  // attaches a TapGestureRecognizer to the link span. A tap recognizer is
+  // defeated by movement, which is why it can coexist with a selection drag
+  // where the old long-press recognizer could not.
+  testWidgets('a chat link still carries a tap recognizer', (tester) async {
     final page = TranscriptPage(
       messages: const [
         TranscriptTurn(
@@ -614,19 +670,20 @@ void main() {
     );
     await tester.pumpAndSettle();
 
-    // The link renders as its label text (via the custom _ChatLink builder).
-    expect(find.text('example'), findsOneWidget);
-
-    // Long-press → the Open/Copy-link menu.
-    await tester.longPress(find.text('example'));
-    await tester.pumpAndSettle();
-    expect(find.text('Open link'), findsOneWidget);
-    expect(find.text('Copy link'), findsOneWidget);
-
-    // Copy → the URL (not the label) lands on the clipboard.
-    await tester.tap(find.text('Copy link'));
-    await tester.pumpAndSettle();
-    expect(clip, 'https://example.com/x');
+    // The recognizer must sit on the LINK's span, not merely exist somewhere.
+    // Under the old builder it attached to the trailing prose (" tail"), so
+    // tapping ordinary text opened the URL while the link itself did nothing.
+    final tapped = <String>[];
+    for (final rt in tester.widgetList<RichText>(find.byType(RichText))) {
+      rt.text.visitChildren((span) {
+        if (span is TextSpan && span.recognizer != null) {
+          tapped.add(span.text ?? '');
+        }
+        return true;
+      });
+    }
+    expect(tapped, contains('example'),
+        reason: 'the tap recognizer must be on the link text itself');
   });
 
   group('summarizeTool (rich tool cards)', () {
