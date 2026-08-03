@@ -47,6 +47,10 @@ const ALLOW = [
   /host\.tailnet\.ts\.net/, /\byour-server\./,
   // Example user paths.
   /Users\\+yourname/i, /Users\\+user\b/i,
+  // GitHub-hosted runner accounts. These identify no human and appear in docs and
+  // comments explaining CI behaviour — including the comment on the very test that
+  // diverged because of this path's `~`.
+  /Users\\+RUNNER~1/i, /Users\\+runneradmin\b/i,
   // Single-token stand-ins in transcript/path unit tests: C:\Users\x, \u, \a b
   /C:\\+Users\\+([a-z]|[a-z] [a-z])\\+/i,
 ];
