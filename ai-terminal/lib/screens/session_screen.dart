@@ -181,15 +181,47 @@ bool pasteImageIntoCompose({
 /// attachments (#29/#90) need it: one lone file path has no interior newline,
 /// but it must still arrive as a paste — that is what makes Claude treat it as
 /// an attached file rather than as typed prose.
+/// The inner content of a bracketed paste: paste markers removed so nothing in
+/// the body can close the wrapper early, and newlines carried as CR.
+///
+/// **The strip LOOPS until stable, and that is not belt-and-braces.** One pass
+/// is defeated by a body that spells a marker across another one: given
+/// `a ESC[2 ESC[200~ 01~ b`, deleting the inner `ESC[200~` leaves `ESC[2` and
+/// `01~` adjacent — reconstituting `ESC[201~`, which closes the wrapper early.
+/// Everything after it is then typed at the prompt rather than pasted, and a
+/// bare CR in that remainder SUBMITS. Same shape as a naive `../` strip being no
+/// defence against `....//`.
+String _pasteInner(String body) {
+  final marker = RegExp('\x1b\\[2(?:00|01)~');
+  var safe = body;
+  String prev;
+  do {
+    prev = safe;
+    safe = safe.replaceAll(marker, '');
+  } while (safe != prev);
+  return safe.replaceAll(RegExp(r'\r?\n'), '\r');
+}
+
 String buildComposeSubmission(String val, {bool forcePaste = false}) {
   val = val.replaceFirst(RegExp(r'[\r\n]+$'), '');
   if (forcePaste || val.contains('\n')) {
-    final safe = val
-        .replaceAll(RegExp('\x1b\\[2(?:00|01)~'), '')
-        .replaceAll(RegExp(r'\r?\n'), '\r');
-    return '\x1b[200~$safe\x1b[201~\r';
+    return '\x1b[200~${_pasteInner(val)}\x1b[201~\r';
   }
   return '$val\r';
+}
+
+/// Several file paths delivered to the RAW terminal as ONE bracketed paste, and
+/// deliberately with **no** submit CR (#90).
+///
+/// Two things make this its own function rather than a loop of per-file frames.
+/// One frame, because consecutive pastes land in a single PTY read and the agent
+/// TUI folds them — a multi-select pick used to deliver only its FIRST image for
+/// exactly the reason a multi-file drop did. And no trailing CR, because this
+/// destination is the user's own prompt line: they type behind the paths and
+/// press Enter themselves, so submitting here would send a half-written message.
+String buildPastedPaths(List<String> paths) {
+  if (paths.isEmpty) return '';
+  return '\x1b[200~${_pasteInner(paths.join('\n'))}\x1b[201~';
 }
 
 /// The exact bytes a compose submit puts on the wire, given the staged
@@ -206,7 +238,7 @@ String buildComposeSubmission(String val, {bool forcePaste = false}) {
 ///     them, so with two dropped files only the FIRST path survived ("Only one
 ///     of the two reached me in the message" — Claude, on the repro);
 ///   * nothing separated a paste from what followed, so the prompt fused onto
-///     the last path: `…08TE207_TPLE32-8P.pdfName both files I attached.` — a
+///     the last path: `…1785762257992-report.pdfName both files I attached.` — a
 ///     path naming no file, glued to a mangled prompt.
 ///
 /// One paste with newline separators fixes both, keeps the single-frame
@@ -1489,9 +1521,11 @@ class _SessionScreenState extends State<SessionScreen>
   }
 
   /// Sends the composed buffer as ONE atomic PTY frame (body + submit `\r`
-  /// together — see [buildComposeSubmission], the #44 fix). Any staged image
-  /// attachments (#29) are pasted first, so Claude has the file paths buffered
-  /// before the prompt + submit land. A live '/' line just needs a commit `'\r'`
+  /// together — see [buildComposeSubmission], the #44 fix). Any staged
+  /// attachments (#29/#90) share that single frame: every path and then the
+  /// prompt, one per line, inside ONE bracketed paste — see
+  /// [buildAttachmentSubmission] for why a paste per attachment lost files.
+  /// A live '/' line just needs a commit `'\r'`
   /// (its body already streamed char-by-char). An empty buffer with no
   /// attachments still sends a bare `'\r'` — e.g. to dismiss a prompt.
   ///
@@ -1770,9 +1804,11 @@ class _SessionScreenState extends State<SessionScreen>
   /// Each file's BYTES are uploaded and the SERVER's path is what gets staged;
   /// the dropping device's own path is never sent, because for a remote cluster
   /// session it names a file the agent cannot open — and would silently name the
-  /// wrong file if a same-named one existed there. On submit each attachment
-  /// travels the identical `ESC[200~<path>ESC[201~` route a pasted image takes,
-  /// so there is no second submit path to keep in step (#51/#87).
+  /// wrong file if a same-named one existed there. On submit every staged path
+  /// and the prompt share ONE bracketed paste (see [buildAttachmentSubmission]),
+  /// so there is no second submit path to keep in step (#51/#87) — and no run of
+  /// consecutive pastes for the TUI to fold, which is what used to swallow all
+  /// but the first dropped file.
   Future<void> _attachDroppedFiles(List<DropItem> files) async {
     final session = _session;
     if (session == null || files.isEmpty) return;
@@ -1946,6 +1982,7 @@ class _SessionScreenState extends State<SessionScreen>
       composeFocused: _composeFocusNode.hasFocus,
     );
     var failures = 0;
+    final rawPaths = <String>[];
     for (final file in files) {
       try {
         final bytes = await file.readAsBytes();
@@ -1953,19 +1990,26 @@ class _SessionScreenState extends State<SessionScreen>
         final reference = await ApiClient(
           session.server,
         ).uploadClipboardImage(session.id, bytes, mime: mime);
+        final path = reference.replaceAll(RegExp('\x1b\\[2(?:00|01)~'), '');
         // #29: composing in chat → stage as a removable thumbnail chip like
-        // Alt+V, not a raw PTY paste. Otherwise (raw terminal) send to the PTY.
+        // Alt+V, not a raw PTY paste. Otherwise (raw terminal) collect the path
+        // and deliver the whole pick as ONE paste below.
         if (toCompose) {
-          _addComposeAttachment(
-            bytes,
-            reference.replaceAll(RegExp('\x1b\\[2(?:00|01)~'), ''),
-          );
+          _addComposeAttachment(bytes, path);
         } else {
-          _connection?.sendInput(reference);
+          rawPaths.add(path);
         }
       } catch (_) {
         failures++;
       }
+    }
+    // #90: one frame for the whole pick, NOT one per file. Sending a paste per
+    // image here was the same defect the compose path had — consecutive pastes
+    // arrive in one PTY read and the TUI folds them, so a multi-select pick
+    // delivered only its FIRST image. No submit CR: this is the user's own
+    // prompt line and they press Enter themselves.
+    if (rawPaths.isNotEmpty) {
+      _connection?.sendInput(buildPastedPaths(rawPaths));
     }
     if (!toCompose && mounted) _scrollToBottom();
     if (failures > 0 && mounted) {

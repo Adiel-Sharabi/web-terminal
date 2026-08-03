@@ -53,8 +53,13 @@ void main() {
         'Name both files.',
       ]);
 
-      // The specific fusion that was reported: a path immediately followed by
-      // the prompt with nothing between them.
+      // NOTE these two guard less than they look like they do: the old code did
+      // not produce `a.pdfName` ON THE WIRE either — it emitted
+      // `a.pdf ESC[201~ Name…`, and the fusion happened inside the TUI once it
+      // folded the markers away. They pass against the old composition too. The
+      // assertion that actually catches the regression is the inner.split('\r')
+      // equality above. Kept as documentation of the reported string, not as the
+      // gate.
       expect(out.contains('a.pdfName'), isFalse);
       expect(out.contains('b.zipName'), isFalse);
     });
@@ -136,6 +141,22 @@ void main() {
       expect(out.contains('\r\r'), isFalse);
     });
 
+    test('a body cannot reconstitute a paste marker and close the wrapper', () {
+      // A SINGLE-pass strip is defeated by a marker spelled across another one:
+      // deleting the inner ESC[200~ leaves ESC[2 and 01~ adjacent, which spells
+      // ESC[201~ — closing the wrapper early, after which the remainder is typed
+      // at the prompt and any CR in it SUBMITS. The strip must loop until stable.
+      final evil = 'a$esc[2${pasteOpen}01~b\nc';
+      final out = buildComposeSubmission(evil, forcePaste: true);
+
+      expect(pasteOpen.allMatches(out).length, 1);
+      expect(pasteClose.allMatches(out).length, 1);
+      // The one close is the wrapper's own, at the very end.
+      expect(out.endsWith('$pasteClose\r'), isTrue);
+      // Nothing escaped the wrapper: exactly one CR, the submit.
+      expect('\r'.allMatches(out).length, 2); // the \n separator + the submit
+    });
+
     test('exactly one submit CR, at the very end', () {
       // #44: one frame, one submit. A stray CR would submit early and split the
       // prompt across two turns.
@@ -144,6 +165,33 @@ void main() {
       expect(out.endsWith('\r'), isTrue);
       // The only CRs are the separators inside the paste plus the final one.
       expect('\r'.allMatches(out).length, 2);
+    });
+  });
+
+  // The raw-terminal destination (the image picker with the terminal focused).
+  // Same folding defect as the compose path had, and it survived the first pass
+  // of this fix — a multi-select pick still sent one paste per file.
+  group('buildPastedPaths', () {
+    test('several picked images travel as ONE paste, not one each', () {
+      final out = buildPastedPaths([r'C:\up\a.png', r'C:\up\b.png']);
+      expect(pasteOpen.allMatches(out).length, 1);
+      expect(pasteClose.allMatches(out).length, 1);
+      expect(out.contains(r'C:\up\a.png'), isTrue);
+      expect(out.contains(r'C:\up\b.png'), isTrue);
+      expect(out, '${pasteOpen}C:\\up\\a.png\rC:\\up\\b.png$pasteClose');
+    });
+
+    test('NO submit CR — this is the user\'s own prompt line', () {
+      // The compose path submits for you; this one must not. The user types
+      // behind the paths and presses Enter themselves, so a trailing CR here
+      // would send a half-written message.
+      final out = buildPastedPaths([r'C:\up\a.png']);
+      expect(out.endsWith(pasteClose), isTrue);
+      expect(out.contains('\r'), isFalse);
+    });
+
+    test('an empty pick sends nothing at all', () {
+      expect(buildPastedPaths(const []), '');
     });
   });
 }
