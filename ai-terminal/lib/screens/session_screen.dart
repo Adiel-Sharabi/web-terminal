@@ -177,15 +177,47 @@ bool pasteImageIntoCompose({
 /// bracketed paste whose submit CR Claude's TUI absorbs — the text parks in the
 /// input line unsent. Interior newlines (a genuine multi-line prompt) are kept.
 /// Pure so the payload is exhaustively testable.
-String buildComposeSubmission(String val) {
+/// [forcePaste] wraps a SINGLE-line body in bracketed paste too. Staged
+/// attachments (#29/#90) need it: one lone file path has no interior newline,
+/// but it must still arrive as a paste — that is what makes Claude treat it as
+/// an attached file rather than as typed prose.
+String buildComposeSubmission(String val, {bool forcePaste = false}) {
   val = val.replaceFirst(RegExp(r'[\r\n]+$'), '');
-  if (val.contains('\n')) {
+  if (forcePaste || val.contains('\n')) {
     final safe = val
         .replaceAll(RegExp('\x1b\\[2(?:00|01)~'), '')
         .replaceAll(RegExp(r'\r?\n'), '\r');
     return '\x1b[200~$safe\x1b[201~\r';
   }
   return '$val\r';
+}
+
+/// The exact bytes a compose submit puts on the wire, given the staged
+/// attachment [paths] and the typed [text] (#90).
+///
+/// This is the SSOT for "how do an attachment and a prompt share a submit", and
+/// it is a named function rather than three lines inside `_sendCompose` because
+/// the bug it fixes was invisible to a test of [buildComposeSubmission] alone:
+/// the old code sent one bracketed-paste frame PER attachment and then the
+/// prompt, and both defects that produced live only in that composition.
+///
+/// Measured against a real Claude TUI with `scripts/rig/probe-paste-file.js`:
+///   * consecutive bracketed pastes arrive in ONE PTY read and the TUI folds
+///     them, so with two dropped files only the FIRST path survived ("Only one
+///     of the two reached me in the message" — Claude, on the repro);
+///   * nothing separated a paste from what followed, so the prompt fused onto
+///     the last path: `…08TE207_TPLE32-8P.pdfName both files I attached.` — a
+///     path naming no file, glued to a mangled prompt.
+///
+/// One paste with newline separators fixes both, keeps the single-frame
+/// guarantee (#44), and needs no client-side timing — the worker still owns the
+/// submit CR.
+String buildAttachmentSubmission(List<String> paths, String text) {
+  final parts = <String>[
+    ...paths,
+    if (text.isNotEmpty) text,
+  ];
+  return buildComposeSubmission(parts.join('\n'), forcePaste: paths.isNotEmpty);
 }
 
 /// What a live '/'-line mirrors into the agent's TUI prompt (#55 §1).
@@ -344,11 +376,12 @@ class _ComposeAttachment {
   /// Display name for a non-image attachment (the dropped file's basename).
   final String name;
 
+  /// The server-side path delivered to the agent on submit. Wrapping it for the
+  /// PTY is NOT this class's job: every staged path and the prompt share ONE
+  /// bracketed paste built by [buildComposeSubmission] (#90), so a per-attachment
+  /// `reference` getter would be a second place that knows the escape sequence —
+  /// and it was exactly one paste per attachment that lost the files.
   final String path;
-
-  /// The PTY payload for this image — the path wrapped in bracketed paste, as
-  /// the upload API returns it, so Claude reads it as a pasted file path.
-  String get reference => '\x1b[200~$path\x1b[201~';
 }
 
 /// Whether the interactive-question overlay (#19) should be visible. A question
@@ -1482,15 +1515,17 @@ class _SessionScreenState extends State<SessionScreen>
       _scrollToBottom();
       return;
     }
-    // #29: paste each staged image's path (bracketed-paste) before the prompt.
-    for (final a in _attachments) {
-      conn.sendInput(a.reference);
-    }
     // Optimistic Chat echo (#31): show the prompt immediately, before Claude's
     // transcript reflects it. Reconciled/deduped in ConversationView. Skipped for
     // an image-only send (empty text) — the echo path ignores empty strings.
     if (val.isNotEmpty) _submittedPrompts.add(val);
-    conn.sendInput(buildComposeSubmission(val));
+    // #29/#90: every staged path AND the prompt travel in ONE bracketed paste.
+    // The byte rule lives in buildAttachmentSubmission — see its doc for the two
+    // measured defects that one-frame-per-attachment produced.
+    conn.sendInput(buildAttachmentSubmission(
+      [for (final a in _attachments) a.path],
+      val,
+    ));
     _pushComposeHistory(val);
     _clearComposeInput();
     _scrollToBottom();
