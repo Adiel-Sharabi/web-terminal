@@ -27,6 +27,11 @@ on:
     branches: [master]
   pull_request:
     branches: [master]
+  # Manual re-run. Worth having because this suite drives real PTYs on a hosted
+  # Windows runner: a failure can be an environment flake (ConPTY availability)
+  # rather than a code fault, and telling those apart means re-running the same
+  # commit rather than pushing a no-op to provoke a fresh run.
+  workflow_dispatch:
 
 jobs:
   test:
