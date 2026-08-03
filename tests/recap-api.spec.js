@@ -56,6 +56,27 @@ async function mkSession(ctx, body) {
   return await r.json().catch(() => ({}));
 }
 
+// A rollout whose human prompt is buried behind a long tool-only run — the shape
+// that broke the first release. [toolPairs] function_call/output pairs sit AFTER
+// the prompt, so any fixed scan window smaller than the run reports "no prompt".
+function writeBuriedPromptRollout(cwd, toolPairs) {
+  fs.mkdirSync(FIXTURE_DIR, { recursive: true });
+  const p = path.join(FIXTURE_DIR, `rollout-2098-01-02T00-00-00-${process.pid}-${created.length}.jsonl`);
+  const line = (type, payload) => JSON.stringify({ timestamp: '2098-01-02T00:00:00.000Z', type, payload });
+  const lines = [
+    line('session_meta', { id: 'buried-fixture-uuid', cwd, cli_version: '0.144.0' }),
+    line('response_item', { type: 'message', role: 'user', content: [{ type: 'input_text', text: 'the prompt buried behind a long run' }] }),
+  ];
+  for (let i = 0; i < toolPairs; i++) {
+    lines.push(line('response_item', { type: 'function_call', name: 'shell_command', arguments: `{"command":"step ${i}"}`, call_id: `b${i}` }));
+    lines.push(line('response_item', { type: 'function_call_output', call_id: `b${i}`, output: `done ${i}` }));
+  }
+  lines.push(line('response_item', { type: 'message', role: 'assistant', content: [{ type: 'output_text', text: 'finished the long run' }] }));
+  fs.writeFileSync(p, lines.join('\n') + '\n', 'utf8');
+  created.push(p);
+  return p;
+}
+
 test.describe('GET /api/sessions/:id/recap', () => {
   test('is behind auth', async () => {
     // A recap quotes the conversation verbatim. Same trust boundary as /transcript.
@@ -105,6 +126,28 @@ test.describe('GET /api/sessions/:id/recap', () => {
     expect(card.reply.text).toBe('The scroll aliased its lines.');
     // Work done AFTER the prompt: the tool-call turn plus the answer.
     expect(card.since.tools).toContain('shell_command');
+    await ctx.delete(`/api/sessions/${s.id}`);
+    await ctx.dispose();
+  });
+
+  test('finds a prompt buried behind a long tool run (pages backward)', async () => {
+    // THE regression. Measured on the live fleet 2026-08-03: 3 of 12 sessions had
+    // zero user turns in their newest 80 because one tool-heavy stretch buries the
+    // prompt, so the card claimed "no prompt found" for sessions that plainly had
+    // one. 400 pairs is ~800 turns of plumbing after the prompt — comfortably past
+    // any single window — so this fails for any fixed-window scan and passes only
+    // because the endpoint pages until it finds a human turn.
+    const cwd = process.env.TEMP || os.tmpdir();
+    writeBuriedPromptRollout(cwd, 400);
+    const ctx = await authCtx();
+    const s = await mkSession(ctx, { name: 'recap-buried', cwd, agent: 'codex' });
+    const res = await ctx.get(`/api/sessions/${s.id}/recap`);
+    expect(res.status()).toBe(200);
+    const card = await res.json();
+    expect(card.prompt).not.toBeNull();
+    expect(card.prompt.text).toBe('the prompt buried behind a long run');
+    // And the work done since is counted across every page it walked.
+    expect(card.since.turns).toBeGreaterThan(100);
     await ctx.delete(`/api/sessions/${s.id}`);
     await ctx.dispose();
   });
