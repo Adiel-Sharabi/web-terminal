@@ -527,6 +527,47 @@ test.describe('shapeQuestions (live PreToolUse hook input)', () => {
     expect(shapeQuestions(null)).toEqual([]);
     expect(shapeQuestions({ questions: 'nope' })).toEqual([]);
   });
+
+  // The layout a question renders in decides what its keys MEAN, and only the
+  // raw tool_input knows it. Dropping `preview` on the way to the client left
+  // the app unable to tell the two apart, which is how a previewed question got
+  // answered with a key sequence that never committed it.
+  test('publishes hasPreview so the client can tell the two layouts apart', () => {
+    const shaped = shapeQuestions({
+      questions: [
+        { header: 'A', question: 'previewed', options: [
+          { label: 'One', preview: 'a mockup' }, { label: 'Two' },
+        ] },
+        { header: 'B', question: 'plain', options: [{ label: 'X' }, { label: 'Y' }] },
+      ],
+    });
+    expect(shaped[0].hasPreview).toBe(true);
+    expect(shaped[1].hasPreview).toBe(false);
+    // Layout is per-QUESTION: a previewed question next to a plain one does not
+    // drag the plain one side-by-side (measured against claude 2.1.220).
+    expect(shaped.map((q) => q.hasPreview)).toEqual([true, false]);
+  });
+
+  test('hasPreview ignores empty/whitespace/non-string previews', () => {
+    const shaped = shapeQuestions({
+      questions: [
+        { header: 'A', question: 'q', options: [{ label: 'One', preview: '   ' }] },
+        { header: 'B', question: 'q', options: [{ label: 'One', preview: '' }] },
+        { header: 'C', question: 'q', options: [{ label: 'One', preview: { not: 'a string' } }] },
+      ],
+    });
+    expect(shaped.map((q) => q.hasPreview)).toEqual([false, false, false]);
+  });
+
+  test('the preview BODY never reaches the client', () => {
+    // It is free-form, can be large, and nothing renders it — only the fact
+    // that one exists is needed.
+    const shaped = shapeQuestions({
+      questions: [{ header: 'A', question: 'q', options: [{ label: 'One', preview: 'SECRET-MOCKUP' }] }],
+    });
+    expect(JSON.stringify(shaped)).not.toContain('SECRET-MOCKUP');
+    expect(shaped[0].options[0].preview).toBeUndefined();
+  });
 });
 
 test.describe('pendingQuestion', () => {

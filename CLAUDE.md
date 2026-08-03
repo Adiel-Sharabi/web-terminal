@@ -275,6 +275,56 @@ Claude fires **no hook** on a user interrupt (`Stop` does not run), and worker s
 ### How to verify (no production cold-restart to test a hypothesis)
 `node scripts/rig/rig.js up` runs a complete, **isolated** web-terminal (port 7999, own worker pipe, own data dir, own config) from the working tree — it cannot touch production. `node scripts/rig/verify-submit.js` proves a LONG prompt actually submits, end to end. **The PTY/rollout is ground truth; the screen lies** — Claude echoes a submitted prompt back into its transcript, so "is the text still visible" cannot distinguish *typed* from *submitted*. The only valid detector is **"did a turn start"**.
 
+## AskUserQuestion — the LAYOUT decides what the keys mean (#19)
+
+Answering Claude's question overlay drives its real TUI selector by writing keys
+into the PTY, and **the same digit does three different things depending on the
+layout Claude picked**. The layout is not cosmetic and it is not guessable, so it
+travels on the wire: `_shapeQuestions` publishes **`hasPreview`** per question and
+`buildAnswerFrames` is the one place that turns it into keys.
+
+**The rule.** When any option of a question carries a `preview`, that question
+renders **side-by-side** (options left, preview box right); otherwise it renders as
+a **compact** list. Layout is per **QUESTION**, not per prompt — measured against
+claude 2.1.220, a previewed Q1 rendered side-by-side while the same prompt's
+preview-less multi-select Q2 rendered compact.
+
+| question | compact | side-by-side (`hasPreview`) |
+|---|---|---|
+| single-select, **one** question | digit submits; a trailing Enter is a measured no-op | digit only MOVES the highlight; **Enter commits** |
+| single-select, **multi**-question | digit selects **and auto-advances** the tab — an extra Enter would commit the NEXT tab's default row | digit advances nothing; **Enter commits AND advances** |
+| multi-select | digits toggle and stay; **Right-arrow** advances (Enter would toggle) | n/a — previews are not supported on multi-select |
+
+So a compact tab of a multi-question prompt must get **no** Enter and a previewed
+one **must**. That is a branch, never an unconditional trailing Enter — the
+compact layout is measured to answer correctly without it.
+
+**This produced a real bug twice, in the same shape.** Reported 2026-08-03: *"the
+chat lens didn't fill the multiselect part at all even I see and mark it. I had to
+do it on terminal."* The prompt was a previewed single-select Q1 plus a
+multi-select Q2, so every key meant for Q2 landed back on Q1, Q1 submitted blank,
+and the trailing Enter toggled whichever Q2 row the cursor happened to sit on.
+The earlier single-question half of the same rule is #84.
+
+**Verify with `scripts/rig/probe-askq-layout.js`** — it spawns the real `claude`
+on a real PTY, drives a candidate key sequence and reads the verdict from the
+transcript's `tool_result`. **Never assert on the screen: it cannot tell
+*highlighted* from *submitted*.** A **pending** question is not in the transcript
+at all (the `tool_use` is written only once answered), so "nothing recorded" and
+"not yet answered" look identical — assert on *which option came back*. Measured:
+
+```
+preview-mq  2,1,3,→,\r     -> Q1 BLANK, nothing submitted   (the bug)
+preview-mq  2,\r,1,3,→,\r  -> "Pick a color"="Green", "Pick fruits"="Apple, Cherry"
+plain-mq    2,1,3,→,\r     -> "Pick a color"="Green", "Pick fruits"="Apple, Cherry"
+```
+
+The last line is the regression guard: it must keep passing **without** the extra
+Enter, which is why the fix is a branch on `hasPreview` and not a blanket Enter.
+
+The preview **body** is deliberately not forwarded — it is free-form, can be large
+and nothing renders it. Only the fact that one exists crosses the wire.
+
 ## Auth System
 - Cookie-based session auth (primary, for browser users)
 - Bearer token auth (for cluster inter-server communication)

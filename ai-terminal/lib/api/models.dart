@@ -1092,12 +1092,22 @@ class PendingQuestionItem {
   final String header;
   final String question;
   final bool multiSelect;
+
+  /// True when at least one option carries a `preview`, which makes Claude
+  /// render this question SIDE-BY-SIDE rather than as a compact list. It
+  /// changes what the keys mean, so [buildAnswerFrames] needs it — see the
+  /// layout table there. Server-derived (`lib/transcript.js` `_shapeQuestions`)
+  /// and never re-derived here; the preview body itself is not on the wire.
+  /// Defaults to false so an older server, which does not send the field, keeps
+  /// exactly today's compact-layout behaviour.
+  final bool hasPreview;
   final List<QuestionOption> options;
 
   const PendingQuestionItem({
     required this.header,
     required this.question,
     required this.multiSelect,
+    this.hasPreview = false,
     required this.options,
   });
 
@@ -1107,6 +1117,7 @@ class PendingQuestionItem {
       header: (json['header'] ?? '').toString(),
       question: (json['question'] ?? '').toString(),
       multiSelect: json['multiSelect'] == true,
+      hasPreview: json['hasPreview'] == true,
       options: opts is List
           ? opts
               .whereType<Map<String, dynamic>>()

@@ -13,12 +13,14 @@ import 'package:ai_terminal/widgets/question_overlay.dart';
 PendingQuestionItem _q(
   List<String> options, {
   bool multi = false,
+  bool preview = false,
   String header = 'H',
 }) =>
     PendingQuestionItem(
       header: header,
       question: 'Pick',
       multiSelect: multi,
+      hasPreview: preview,
       options: [for (final o in options) QuestionOption(label: o)],
     );
 
@@ -39,8 +41,9 @@ void main() {
       // had to be finished by hand in the terminal); preview + `3\r` =>
       // recorded "Fold themes into Home.md". In the compact layout `3` already
       // submits and the extra Enter is a no-op on an empty prompt line, so one
-      // sequence is correct for both — the client cannot branch on the layout
-      // anyway, since the server drops `preview` from the wire.
+      // sequence is correct for both layouts when there is only one question —
+      // no branch needed here. (Multi-question DOES need the branch, and gets it
+      // from `hasPreview`; see the tests below.)
       final qs = [_q(['A', 'B', 'C'])];
       expect(_keys(buildAnswerFrames(qs, [
         {0}
@@ -75,6 +78,80 @@ void main() {
       ]));
       expect(keys, ['2', '1', '\r']);
       expect(keys.where((k) => k == '\r').length, 1);
+    });
+
+    test('multi-question + PREVIEW: each previewed tab gets a committing Enter',
+        () {
+      // THE regression, reported 2026-08-03: "the chat lens didn't fill the
+      // multiselect part at all even I see and mark it. I had to do it on
+      // terminal." The prompt was Q1 single-select whose 3 options all carried
+      // previews + Q2 multi-select. Q1 therefore rendered SIDE-BY-SIDE, where a
+      // digit only moves the highlight and advances nothing — so every key meant
+      // for Q2 landed back on Q1.
+      //
+      // Reproduced against the real TUI with scripts/rig/probe-askq-layout.js,
+      // verdict from the transcript's tool_result:
+      //   `2,1,3,→,\r`    -> Q1 left BLANK (tab bar still showed an unticked
+      //                      box), nothing submitted, and the trailing Enter
+      //                      toggled whichever Q2 row the cursor sat on;
+      //   `2,\r,1,3,→,\r` -> "Pick a color"="Green", "Pick fruits"="Apple, Cherry".
+      final qs = [
+        _q(['Red', 'Green', 'Blue'], preview: true),
+        _q(['Apple', 'Banana', 'Cherry', 'Date'], multi: true),
+      ];
+      expect(
+        _keys(buildAnswerFrames(qs, [
+          {1},
+          {0, 2}
+        ])),
+        ['2', '\r', '1', '3', '\x1b[C', '\r'],
+      );
+    });
+
+    test('multi-question + preview: the committing Enter gets its own read', () {
+      // Same paste-burst rule as everywhere else in the submit contract — a
+      // digit+CR folded into one stdin read is swallowed, so the Enter needs a
+      // real temporal gap, never a byte-level trick.
+      final frames = buildAnswerFrames([
+        _q(['A', 'B'], preview: true),
+        _q(['X', 'Y'], multi: true),
+      ], [
+        {1},
+        {0}
+      ]);
+      expect(frames[0].keys, '2');
+      expect(frames[1].keys, '\r');
+      expect(frames[0].delayMs, greaterThanOrEqualTo(500));
+    });
+
+    test('a previewed tab does not drag its plain siblings side-by-side', () {
+      // Layout is per-QUESTION, not per-prompt: measured on claude 2.1.220, a
+      // previewed Q1 rendered side-by-side while the same prompt's preview-less
+      // Q2 rendered compact. So only the previewed tab may take the Enter — the
+      // compact one must keep relying on its digit's auto-advance, or that Enter
+      // commits the following tab's default row.
+      final qs = [
+        _q(['A', 'B'], preview: true),
+        _q(['X', 'Y', 'Z']), // plain single-select
+      ];
+      expect(
+        _keys(buildAnswerFrames(qs, [
+          {0},
+          {2}
+        ])),
+        ['1', '\r', '3', '\r'],
+      );
+      final plainFirst = [
+        _q(['A', 'B']), // plain single-select
+        _q(['X', 'Y', 'Z'], preview: true),
+      ];
+      expect(
+        _keys(buildAnswerFrames(plainFirst, [
+          {0},
+          {2}
+        ])),
+        ['1', '3', '\r', '\r'],
+      );
     });
 
     test('multi-select (single question): toggle digits, Right-arrow, "1" (#39)',

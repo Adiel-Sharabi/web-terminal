@@ -85,7 +85,14 @@ test.describe('Sidebar recap card', () => {
       await page.goto(BASE + '/');
       await page.locator(`.sb-item[data-session-id="${id}"] .sb-recap`).click();
       await expect(page.locator('#rcCard')).toBeVisible({ timeout: 5000 });
-      await page.locator('#terminal').click({ position: { x: 5, y: 5 }, force: true });
+      // Click well away from the terminal's top-left. (5,5) lands exactly on the
+      // BLINKING CURSOR of a fresh shell, and xterm swaps that element on every
+      // blink — when the swap falls between mousedown and mouseup the browser
+      // never synthesises a `click` at all, so the dismiss handler cannot run and
+      // the card survives for a reason that has nothing to do with dismissal.
+      // Measured: at (5,5) a document-level capture listener saw NO click and the
+      // card stayed 3/3; at (240,220) it saw the click and the card closed 3/3.
+      await page.locator('#terminal').click({ position: { x: 240, y: 220 }, force: true });
       await expect(page.locator('#rcCard')).toHaveCount(0);
     } finally {
       await ctx.delete(`/api/sessions/${id}`);

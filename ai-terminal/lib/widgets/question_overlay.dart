@@ -76,19 +76,39 @@ class AnswerFrame {
 ///                         line and is a no-op
 ///
 /// So a single question sends digit THEN Enter: correct in both layouts, and the
-/// redundant Enter of the compact layout is measured harmless. The app cannot
-/// simply branch on the layout — the server's `_shapeQuestions` keeps only
-/// label/description and drops `preview`, so a question's layout is not on the
-/// wire at all.
+/// redundant Enter of the compact layout is measured harmless.
 ///
-/// MULTI-QUESTION IS DELIBERATELY NOT GIVEN THE SAME TREATMENT, and must not be:
-/// there a digit AUTO-ADVANCES to the next tab (compact layout), so a following
-/// Enter would land on the NEXT, still-unanswered question and commit ITS
-/// default top row — silently answering a question the user never saw. The
-/// preview layout breaks multi-question in its own way (every digit piles onto
-/// tab 1 because none of them advance; measured `2,2,\r` left Q2 blank), but
-/// fixing that needs to know the layout, i.e. `preview` must first reach the
-/// client. Tracked separately — do not "fix" it by appending an Enter here.
+/// MULTI-QUESTION FOLLOWS THE SAME LAYOUT SPLIT — and the two halves need
+/// OPPOSITE key sequences, which is why the layout has to be known rather than
+/// guessed. [PendingQuestionItem.hasPreview] carries it (server-derived; the
+/// client never re-derives it):
+///
+///   * COMPACT tab (`hasPreview == false`): the digit selects AND auto-advances
+///     to the next tab, so a following Enter would land on the NEXT, still
+///     unanswered question and commit ITS default top row — silently answering
+///     something the user never saw. Send the digit alone.
+///   * SIDE-BY-SIDE tab (`hasPreview == true`): the digit only moves the
+///     highlight and advances nothing, so Enter is what both COMMITS the row and
+///     moves to the next tab. Without it every later key piles onto tab 1.
+///
+/// That second case is the bug reported 2026-08-03 ("the chat lens didn't fill
+/// the multiselect part at all"): a two-question prompt whose Q1 options carried
+/// previews. Reproduced and fixed against the real TUI (claude 2.1.220) with
+/// `scripts/rig/probe-askq-layout.js`, verdict read from the transcript's
+/// `tool_result`:
+///
+///   shape         keys                outcome
+///   preview-mq    `2,1,3,→,\r`        Q1 BLANK, nothing submitted; the trailing
+///                                     Enter toggled whichever Q2 row the cursor
+///                                     happened to sit on
+///   preview-mq    `2,\r,1,3,→,\r`     "Pick a color"="Green",
+///                                     "Pick fruits"="Apple, Cherry"
+///   plain-mq      `2,1,3,→,\r`        "Pick a color"="Green",
+///                                     "Pick fruits"="Apple, Cherry"
+///
+/// The last row is the regression guard: the compact layout still answers
+/// correctly WITHOUT the extra Enter, so this must stay a branch and never
+/// become an unconditional trailing Enter.
 ///
 /// Verified against Claude's TUI:
 /// - single-select: the digit lands on the exact row. Whether it ALSO submits
@@ -215,15 +235,21 @@ List<AnswerFrame> buildAnswerFrames(
     } else {
       final idx = sel.isEmpty ? 0 : sel.first;
       frames.add(AnswerFrame('${idx + 1}', gap)); // land on the exact row
-      if (!multiQuestion) {
-        // Commit it. In the preview (side-by-side) layout the digit above only
-        // MOVED the highlight, so without this the answer is never submitted —
-        // the app looked like it had answered while Claude sat waiting, and the
-        // question had to be finished by hand in the terminal. In the compact
-        // layout the digit already submitted and this Enter is a measured no-op
-        // on an empty prompt line. See the layout table in the doc above.
-        // Multi-question is excluded ON PURPOSE (an Enter there would answer the
-        // NEXT tab with its default row) — also explained above.
+      if (!multiQuestion || q.hasPreview) {
+        // Commit it. In the side-by-side (preview) layout the digit above only
+        // MOVED the highlight, so without this the row is never chosen — the app
+        // looked like it had answered while Claude sat waiting, and the question
+        // had to be finished by hand in the terminal. That holds whether the
+        // prompt has one question or several: in a multi-question prompt this
+        // Enter both commits the row and advances to the next tab, the job the
+        // digit does on its own in the compact layout.
+        //
+        // The exclusion is narrow and deliberate: a COMPACT tab of a
+        // multi-question prompt must NOT get this Enter, because there the digit
+        // already advanced and the Enter would commit the next tab's default row
+        // — answering a question the user never saw. Single question, compact:
+        // the digit already submitted and this Enter is a measured no-op on an
+        // empty prompt line. See the layout table in the doc above.
         frames.add(const AnswerFrame('\r', gap));
       }
     }

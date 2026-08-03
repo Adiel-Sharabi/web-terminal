@@ -984,6 +984,11 @@ test.describe('Session attention', () => {
       questions: [{
         header: 'Pick', question: 'Which?', multiSelect: false,
         options: [{ label: 'Alpha', description: 'a' }, { label: 'Beta' }],
+      }, {
+        // A previewed question alongside a plain one. The layout it implies is
+        // what the client answers with — see the hasPreview assertions below.
+        header: 'Layout', question: 'Which layout?', multiSelect: false,
+        options: [{ label: 'Gamma', preview: 'a mockup' }, { label: 'Delta' }],
       }],
     };
     try {
@@ -998,6 +1003,15 @@ test.describe('Session attention', () => {
       expect(body.question.questions[0].header).toBe('Pick');
       expect(body.question.questions[0].multiSelect).toBe(false);
       expect(body.question.questions[0].options.map((o) => o.label)).toEqual(['Alpha', 'Beta']);
+      // The layout reaches the client, per question. Without it the app cannot
+      // build a correct key sequence: a previewed question needs a committing
+      // Enter that a compact one must NOT get. Asserted on the ENDPOINT, not just
+      // the shaper, because the live hook path is how a question is actually
+      // served while it is still answerable.
+      expect(body.question.questions[0].hasPreview).toBe(false);
+      expect(body.question.questions[1].hasPreview).toBe(true);
+      // The preview BODY stays server-side.
+      expect(JSON.stringify(body)).not.toContain('a mockup');
 
       // PostToolUse = answered → the live question is cleared.
       await raw.post('/api/hook', {
