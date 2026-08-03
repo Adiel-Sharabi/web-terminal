@@ -4,8 +4,12 @@
 import 'dart:async';
 
 import 'package:flutter/material.dart';
-import 'package:flutter/services.dart';
+import 'package:flutter/rendering.dart';
 import 'package:flutter_test/flutter_test.dart';
+
+import 'package:plugin_platform_interface/plugin_platform_interface.dart';
+import 'package:url_launcher_platform_interface/link.dart';
+import 'package:url_launcher_platform_interface/url_launcher_platform_interface.dart';
 
 import 'package:ai_terminal/api/agent_catalog.dart';
 import 'package:ai_terminal/api/api_client.dart';
@@ -28,6 +32,26 @@ Session _session({String status = 'idle'}) => Session(
   server: _server(),
   autoCommand: '',
 );
+
+/// Records every launch that reaches the url_launcher platform, so a test can
+/// assert that an unsafe scheme reached it NOT AT ALL. Same shape as the one in
+/// chat_links_launch_test.dart.
+class _RecordingLauncher extends UrlLauncherPlatform
+    with MockPlatformInterfaceMixin {
+  final List<String> launched = <String>[];
+
+  @override
+  LinkDelegate? get linkDelegate => null;
+
+  @override
+  Future<bool> canLaunch(String url) async => true;
+
+  @override
+  Future<bool> launchUrl(String url, LaunchOptions options) async {
+    launched.add(url);
+    return true;
+  }
+}
 
 Widget _wrap(Widget child) => MaterialApp(
   theme: AppTheme.dark,
@@ -738,8 +762,87 @@ void main() {
         return true;
       });
     }
-    expect(tapped, contains('example'),
-        reason: 'the tap recognizer must be on the link text itself');
+    // Exact, not `contains`: the recognizer must be on the link and on NOTHING
+    // else. The old builder leaked it onto the trailing prose, and a `contains`
+    // assertion would have stayed green through exactly that.
+    expect(tapped, ['example'],
+        reason: 'the tap recognizer must be on the link text itself, alone');
+  });
+
+  // The security gate, pinned AT THE WIDGET. chat_links_launch_test.dart proves
+  // openChatLink refuses unsafe schemes, and the tests above pin the span
+  // structure — but nothing connected the two, so changing the call site to
+  // `onTapLink: (t, h, ti) => launchUrl(Uri.parse(h!))` would pass every test in
+  // the repo while making `javascript:` launchable from a chat message.
+  //
+  // THE POSITIVE CONTROL IS PART OF THE TEST, not politeness. Two earlier drafts
+  // of this "security test" passed with the gate deliberately bypassed:
+  //   * the first asserted only `takeException() == null` — never a launch signal;
+  //   * the second tapped `box.left + 20`, which lands in the leading prose
+  //     ("go "), not on the link glyphs, so NOTHING was ever tapped.
+  // Both reported "javascript: was blocked" while the gate was wide open. A
+  // negative result is worthless unless the same rig can produce a positive one,
+  // so this asserts an https link DOES launch through the identical path.
+  testWidgets('the launch gate holds at the widget: https yes, javascript no', (
+    tester,
+  ) async {
+    Future<List<String>> tapLink(String markdown) async {
+      final launcher = _RecordingLauncher();
+      UrlLauncherPlatform.instance = launcher;
+      final page = TranscriptPage(
+        messages: [
+          TranscriptTurn(
+            role: 'assistant',
+            text: markdown,
+            toolUses: const [],
+            ts: null,
+          ),
+        ],
+        cursor: null,
+        hasMore: false,
+      );
+      // A distinct key per render, and a blank pump between: without them the
+      // second call reuses the FIRST subtree, so the tap lands on the previous
+      // link and the new launcher records the OLD url — which reads as
+      // "javascript: launched" and sent me chasing a bug that wasn't there.
+      await tester.pumpWidget(const SizedBox.shrink());
+      await tester.pumpWidget(
+        _wrap(
+          ConversationView(
+            key: ValueKey(markdown),
+            session: _session(),
+            fetchPage: (id, {before, limit}) async => page,
+          ),
+        ),
+      );
+      await tester.pumpAndSettle();
+
+      // Tap the LINK's glyphs, located from the paragraph rather than guessed.
+      final finder = find
+          .byWidgetPredicate((w) =>
+              w is RichText && w.text.toPlainText().contains('click'))
+          .first;
+      final para = tester.widget<RichText>(finder);
+      final plain = para.text.toPlainText();
+      final start = plain.indexOf('click');
+      final ro = tester.renderObject(finder) as RenderParagraph;
+      final boxes = ro.getBoxesForSelection(
+        TextSelection(baseOffset: start, extentOffset: start + 'click'.length),
+      );
+      expect(boxes, isNotEmpty, reason: 'the link must be laid out to be tapped');
+      final rect =
+          boxes.first.toRect().shift(tester.getRect(finder).topLeft);
+      await tester.tapAt(rect.center);
+      await tester.pumpAndSettle();
+      return launcher.launched;
+    }
+
+    // Positive control — proves the rig can register a launch at all.
+    expect(await tapLink('go [click](https://example.com/x) now'),
+        ['https://example.com/x']);
+
+    // THE assertion: the same tap on an unsafe scheme launches nothing.
+    expect(await tapLink('go [click](javascript:alert%281%29) now'), isEmpty);
   });
 
   group('summarizeTool (rich tool cards)', () {

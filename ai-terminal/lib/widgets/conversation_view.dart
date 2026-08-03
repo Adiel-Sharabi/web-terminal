@@ -1405,6 +1405,18 @@ Future<void> openChatLink(String? href) async {
 // The builder also attached the tap recognizer to the WRONG fragment (" tail"),
 // so tapping trailing prose opened the link.
 //
+// The mechanism, for anyone tempted to register a builder anyway: in
+// flutter_markdown 0.7.7+1, `visitElementAfter` output goes into the BLOCK's
+// children list (builder.dart:564-576) and `_mergeInlineChildren` skips any
+// non-Text child (:891-897) — so the widget is laid out as a block-level child at
+// its INTRINSIC width, which is what the deleted ConstrainedBox was compensating
+// for. Worse, the `else if (tag == 'a') { _linkHandlers.removeLast(); }` at :611
+// sits behind `if (builders.containsKey(tag))` at :564, so registering ANY 'a'
+// builder makes that pop unreachable and the link handler stays on the stack for
+// the NEXT span — which is exactly why the recognizer ended up on the trailing
+// prose. Note that hazard is not specific to 'a'; it is how the else-if chain is
+// built.
+//
 // Links are rendered by the library's own onTapLink path instead (see the
 // MarkdownBody call below). If you are tempted to reintroduce a builder to add a
 // per-link affordance, it will silently reintroduce this: any affordance must be
