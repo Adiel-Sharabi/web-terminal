@@ -46,7 +46,7 @@ import 'package:ai_terminal/widgets/conversation_view.dart';
 /// + inline code containing a Windows path — NOT a link (the issue proves the
 /// parser emits no `<a>` for it), which is why it should be selectable.
 const String kReportedMarkdown =
-    '**`C:\\Users\\dds\\Downloads\\AM8_SQL_Memory_Diagnostics.sql`** — open in '
+    '**`C:\\Users\\yourname\\Downloads\\query-plan.sql`** — open in '
     'Notepad++ now.';
 
 const List<String> kFillerLines = <String>[

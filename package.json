@@ -32,7 +32,10 @@
     "start:server": "node server.js",
     "test": "playwright test",
     "lint": "eslint .",
-    "syntax-check": "node -c server.js && node -c monitor.js && node -c pty-worker.js"
+    "syntax-check": "node -c server.js && node -c monitor.js && node -c pty-worker.js",
+    "check:links": "node scripts/check-links.js",
+    "check:secrets": "node scripts/check-no-secrets.js",
+    "check": "npm run syntax-check && npm run lint && npm run check:links && npm run check:secrets"
   },
   "dependencies": {
     "express": "^4.22.2",

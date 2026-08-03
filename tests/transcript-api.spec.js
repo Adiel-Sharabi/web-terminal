@@ -247,7 +247,7 @@ test.describe('Session transcript (G5)', () => {
   // and confirm the GET still serves the conversation.
   test('derives the transcript from claudeSessionId + cwd when the stash is empty', async () => {
     const ctx = await authCtx();
-    const id = (await (await ctx.post('/api/sessions', { data: { name: 'Tr Derive' } })).json()).id;
+    const id = (await (await ctx.post('/api/sessions', { data: { name: 'Tr Derive', cwd: os.tmpdir() } })).json()).id;
     // Read the cwd the server actually stored, so we encode the SAME project folder
     // deriveTranscriptPath() will compute from it.
     const list = await (await ctx.get('/api/sessions')).json();

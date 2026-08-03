@@ -110,14 +110,14 @@ test.describe('Session Lifecycle', () => {
     try {
       // Create first session
       const res1 = await ctx.post('/api/sessions', {
-        data: { name: 'Dup Test', cwd: 'C:\\dev' },
+        data: { name: 'Dup Test', cwd: os.tmpdir() },
       });
       expect(res1.status()).toBe(200);
       created.push((await res1.json()).id);
 
       // Immediately create another with same name + cwd — should be rejected
       const res2 = await ctx.post('/api/sessions', {
-        data: { name: 'Dup Test', cwd: 'C:\\dev' },
+        data: { name: 'Dup Test', cwd: os.tmpdir() },
       });
       expect(res2.status()).toBe(409);
       const data = await res2.json();

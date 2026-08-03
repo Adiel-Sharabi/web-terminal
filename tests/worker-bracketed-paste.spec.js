@@ -96,7 +96,7 @@ test.describe('pty-worker bracketed-paste re-assert on attach', () => {
     let client;
     try {
       client = await connectClient(pipe);
-      const { id } = await rpc(client, 'createSession', { name: 'bp' });
+      const { id } = await rpc(client, 'createSession', { name: 'bp', cwd: dataDir });
 
       // App enables bracketed paste at startup.
       await rpc(client, '__testInjectScrollbackBytes', { id, hex: BP_ON_HEX });
@@ -123,7 +123,7 @@ test.describe('pty-worker bracketed-paste re-assert on attach', () => {
     let client;
     try {
       client = await connectClient(pipe);
-      const { id } = await rpc(client, 'createSession', { name: 'bp-off' });
+      const { id } = await rpc(client, 'createSession', { name: 'bp-off', cwd: dataDir });
 
       // Enable then disable — final state is off.
       await rpc(client, '__testInjectScrollbackBytes', { id, hex: BP_ON_HEX });
@@ -147,7 +147,7 @@ test.describe('pty-worker bracketed-paste re-assert on attach', () => {
     let client;
     try {
       client = await connectClient(pipe);
-      const { id } = await rpc(client, 'createSession', { name: 'bp-order' });
+      const { id } = await rpc(client, 'createSession', { name: 'bp-order', cwd: dataDir });
       // One chunk containing OFF then ON — ON is later, so result is on.
       await rpc(client, '__testInjectScrollbackBytes', { id, hex: BP_OFF_HEX + BP_ON_HEX });
       await rpc(client, '__testInjectScrollback', { id, bytes: MAX_SCROLLBACK_SIZE + 64 * 1024 });

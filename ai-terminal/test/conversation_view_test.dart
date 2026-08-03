@@ -801,7 +801,7 @@ void main() {
       const text =
           '<task-notification>\n<task-id>a0d2</task-id>\n'
           '<tool-use-id>toolu_016</tool-use-id>\n'
-          '<output-file>C:\\Users\\dds\\tasks\\a0d2.output</output-file>\n'
+          '<output-file>C:\\Users\\yourname\\tasks\\a0d2.output</output-file>\n'
           '<status>completed</status>\n'
           '<summary>Agent "Review 22804 test suite" finished</summary>\n'
           '<note>A task-notification fires each time this agent stops.</note>\n'
