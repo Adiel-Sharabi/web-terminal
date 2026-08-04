@@ -129,9 +129,53 @@ test('applying the config is NON-FATAL when codex is not installed', () => {
   const ps = fs.readFileSync(COLD_RESTART, 'utf8');
   const at = ps.indexOf('function Invoke-CodexNotifyConfig');
   expect(at).toBeGreaterThan(-1);   // else the slice below is empty and asserts nothing
-  const fn = ps.slice(at, ps.indexOf('if ($nodeExe) {'));
+  // Ends at the NEXT helper, not at `if ($nodeExe) {`: sibling config functions
+  // have since been added into that range, and this rule is about the CODEX one.
+  // Its installer exits non-zero on a machine with no ~/.codex - an ordinary
+  // state, not a failure - so that verdict must be swallowed rather than read.
+  const end = ps.indexOf('function Invoke-ClaudeHooksConfig');
+  expect(end).toBeGreaterThan(at);
+  const fn = ps.slice(at, end);
   expect(fn).not.toMatch(/exit\s+1/);
   expect(fn).not.toMatch(/LASTEXITCODE/);
+});
+
+test('the status-line config helper reports a refusal but never aborts a restart', () => {
+  // The sibling rule, and deliberately NOT the codex one. install-statusline.js
+  // exits non-zero on a real refusal (a statusLine pointing at another script, an
+  // unparseable settings.json, a missing pusher), and that verdict is worth
+  // SAYING - the whole point of this feature is that a misconfigured machine is
+  // silent. What it must never do is stop the restart: config drift is a warning,
+  // an outage is not. So reading the exit code to report it is fine; exiting on
+  // it is not.
+  const ps = fs.readFileSync(COLD_RESTART, 'utf8');
+  const at = ps.indexOf('function Invoke-StatusLineConfig');
+  expect(at).toBeGreaterThan(-1);
+  const fn = ps.slice(at, ps.indexOf('if ($nodeExe) {'));
+
+  // Assert on CODE lines only. The comments in this helper discuss throwing and
+  // exit codes by name, and a scan that cannot tell prose from a statement fails
+  // on an accurate comment - which is a test problem, not a code problem.
+  // Assert on STATEMENTS, not on a substring scan. The comments here discuss
+  // throwing and exit codes by name, and the failure message itself reads
+  // "FAILED (exit $code)" - a scan that cannot tell prose or a string from a
+  // statement fails on accurate text, which is a test problem, not a code one.
+  const NL = String.fromCharCode(10);
+  const statements = fn
+    .split(NL)
+    .map((l) => l.trim())
+    .filter((l) => l && !l.startsWith('#'));
+  const code = statements.join(' ');
+
+  expect(code).toContain('LASTEXITCODE');  // the verdict reaches the log line
+  expect(code).toContain('FAILED');
+  // ...but nothing here ends the script: no statement starts with exit/throw.
+  expect(statements.filter((l) => l.startsWith('exit'))).toEqual([]);
+  expect(statements.filter((l) => l.startsWith('throw'))).toEqual([]);
+
+  // And the caller only ever logs what it returns.
+  const call = ps.slice(ps.indexOf('if ($up) {'));
+  expect(call).toContain('Note "status line config:');
 });
 
 test('a CRLF config is left alone — line endings are not a reason to rewrite', () => {
