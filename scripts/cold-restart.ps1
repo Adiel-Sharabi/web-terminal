@@ -98,6 +98,36 @@ function Invoke-CodexNotifyConfig([switch]$Check) {
   return ($out -replace '\s*\r?\n\s*', ' | ')
 }
 
+# scripts/install-statusline.js writes the two things the ctx/token badges need: the
+# push block in ~/.claude/claude-status.sh, and the settings.json `statusLine` entry
+# that makes Claude Code actually RUN it. Same reasoning as the Codex config above and
+# the same failure mode (#82): an unconfigured machine is SILENT, not noisy — no line
+# in the terminal and no badge in the sidebar looks exactly like a feature that was
+# never built, so it goes unreported until someone compares two boxes side by side.
+# That is how a machine was found in that state long after the feature shipped.
+#
+# UNLIKE the Codex config, this one must run AFTER the relaunch: the installer refuses
+# to point a machine at the raw-payload pusher until a server confirms it can read one
+# (an older server stores a raw payload as four blank numbers, emptying every badge on
+# the box), and during a restart there is no server to ask. Running it before the kill
+# would ask the OUTGOING build — the pre-pull one — which is the wrong question.
+#
+# NON-FATAL, like its sibling: the relaunch has already happened by this point, so
+# nothing here can cost an outage. Config drift is a warning.
+function Invoke-StatusLineConfig([switch]$Check) {
+  if (-not $nodeExe) { return 'skipped (no node found)' }
+  $js = Join-Path $repo 'scripts\install-statusline.js'
+  if (-not (Test-Path $js)) { return 'skipped (installer not present)' }
+  try {
+    if ($Check) { $out = (& $nodeExe $js --check 2>&1 | Out-String).Trim() }
+    else        { $out = (& $nodeExe $js       2>&1 | Out-String).Trim() }
+  } catch {
+    return "skipped (could not run: $($_.Exception.Message))"
+  }
+  if (-not $out) { $out = '(no output)' }
+  return ($out -replace '\s*\r?\n\s*', ' | ')
+}
+
 if ($nodeExe) {
   $global:LASTEXITCODE = $null
   $depOut = (& $nodeExe (Join-Path $repo 'scripts\check-deps.js') 2>&1 | Out-String).Trim()
@@ -128,9 +158,13 @@ if ($CheckOnly) {
   # Report config drift too — auditing a peer over /api/exec is the cheapest moment to
   # notice that its Codex status channel is unconfigured, and --check changes nothing.
   $cfgCheck = Invoke-CodexNotifyConfig -Check
-  Note "check-only: nothing killed; codex notify config: $cfgCheck"
+  # The peer is LIVE during an audit, so the status-line installer can complete its
+  # server-version probe here — the one moment --check gives a real verdict.
+  $slCheck = Invoke-StatusLineConfig -Check
+  Note "check-only: nothing killed; codex notify config: $cfgCheck; status line: $slCheck"
   Write-Output "preflight OK: $depOut"
   Write-Output "codex notify config: $cfgCheck"
+  Write-Output "status line: $slCheck"
   exit 0
 }
 
@@ -212,4 +246,15 @@ while (-not $up -and (Get-Date) -lt $deadline) {
   }
 }
 if (-not $up) { Note 'DID NOT COME BACK — no HTTP response on 7681' }
+
+# The status-line config is applied HERE, after the readiness probe above, rather than
+# beside the Codex config before the relaunch — the installer refuses to act until a
+# server confirms it can read a raw payload, and before the relaunch there is none to
+# ask (asking the OUTGOING build would answer for the pre-pull version). Reuses that
+# probe's verdict rather than waiting again: $up is exactly the precondition.
+if ($up) {
+  Note "status line config: $(Invoke-StatusLineConfig)"
+} else {
+  Note 'status line config SKIPPED - server did not come back, nothing to probe'
+}
 Note '=== done ==='
