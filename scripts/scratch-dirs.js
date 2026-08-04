@@ -41,6 +41,15 @@ const DIRS = Object.freeze({
   winbuild: process.env.WT_WINBUILD_DIR || path.join(PARENT, 'ai-terminal-winbuild'),
   /** Stripped Flutter tree for the input-probe build. */
   probe: process.env.WT_PROBE_DIR || path.join(PARENT, 'ai-terminal-probe'),
+  /**
+   * Isolated CODEX_HOME for the hook probe (scripts/rig/probe-codex-hooks.js).
+   *
+   * Isolation is a safety requirement, not tidiness: an installed-but-untrusted
+   * `hooks.json` blocks EVERY new Codex session at an interactive trust prompt,
+   * which is fatal for a worker-spawned PTY with nobody to answer it. The probe
+   * must never write into the real `~/.codex`.
+   */
+  codexHooks: process.env.WT_CODEX_HOOKS_DIR || path.join(PARENT, 'codex-hook-probe'),
 });
 
 /** `C:\dev\x\y` -> `/c/dev/x/y`, the form Git Bash needs. */
