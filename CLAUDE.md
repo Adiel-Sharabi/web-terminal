@@ -222,18 +222,52 @@ Tool calls are **one line each**, `function_call.arguments` is a JSON **string**
 
 **Usage metrics.** Claude *pushes* its status line to `POST /api/claude-status`; Codex *records* the same numbers in its rollout, so a provider may expose `readMetrics(tail)` and the server fills the identical `metrics` shape. Three traps: `total_token_usage.total_tokens` is the session's **cumulative** spend (millions — using it reports thousands of percent), so context occupancy is `last_token_usage.input_tokens`; `cached_input_tokens` is a **subset** of `input_tokens`, not an addition; and the 5h/7d windows are matched by **`window_minutes` (300 / 10080)**, never by `primary`/`secondary` order. `turn_context` (model/effort) is written once per **user** turn, so a long agent turn buries it above the tail — the server reads head+tail.
 
-**Hooks DO NOT RUN on codex-cli 0.144.6, even fully configured and fully trusted. Measured 2026-08-02 across four controlled PTY runs.** Do not build #78 on them without re-measuring first.
+> ### CORRECTED 2026-08-04 — hooks DO run. `SessionStart` is LAZY.
+>
+> This section previously read *"Hooks DO NOT RUN on codex-cli 0.144.6"*. **That was
+> wrong, and the error was in the probe, not in Codex.** Re-measured on the same
+> version with `scripts/rig/probe-codex-hooks.js` (isolated `CODEX_HOME`, one marker
+> file per event, written by a `.bat` before anything that could fail):
+>
+> | run | `SessionStart` | `UserPromptSubmit` |
+> |---|---|---|
+> | a prompt is submitted | **FIRED** | **FIRED** |
+> | no prompt, 40s (`NO_PROMPT=1`) | never | never |
+>
+> **`SessionStart` does not fire when the process starts — it fires when the FIRST
+> TURN BEGINS.** That is the same laziness as the rollout file, which Codex also
+> creates only on the first turn, and it is why item 4 below reached the opposite
+> conclusion: it asserted *"it needs no turn to have started"*, waited at the
+> composer, and saw nothing. **A hook that has not fired yet and a hook engine that
+> never fires look identical if you never start a turn.**
+>
+> **So #78 is buildable.** Both halves of its premise hold on this version.
+>
+> Two traps that each produced a confident WRONG answer first, kept because they
+> generalise:
+> * **A TOML bare key after a `[table]` header belongs to that table.** Writing
+>   `model = "..."` below `[features]` made Codex read `features.model`, reject the
+>   *whole* config (`invalid type: string, expected a boolean`), and therefore never
+>   enable the hooks gate — reported by the probe as "hooks don't run". A probe must
+>   **abort** on a config-load error, never fold it into a negative verdict.
+> * **Codex refuses to create its helper binaries under `%TEMP%`.** Put the probe's
+>   `CODEX_HOME` somewhere else (`scripts/scratch-dirs.js` owns the location).
+>
+> Everything in items 1–3 below was re-confirmed and still stands. Item 4 is the
+> part that was wrong.
 
 What was established, in order:
 
 1. **The feature gate is real and satisfied.** `[features] hooks = true` in `~/.codex/config.toml`, whose own comment reads *"Hook engine is gated; without this hooks silently no-op."* Present on all three machines.
 2. **The file IS parsed.** A user-level `~/.codex/hooks.json` in Claude Code's JSON shape is read and its definitions enumerated — Codex names them internally in **snake_case** (`pre_tool_use`, `permission_request`, `post_tool_use`, `pre_compact`, `post_compact`, `session_start`, `user_prompt_submit`, `subagent_start`, `subagent_stop`, `stop`), keyed `'<hooks.json path>:<event>:<group>:<index>'`.
 3. **Trust is a real interactive gate, and it is answerable and PERSISTENT.** A new/changed definition makes the next launch stop *before the composer renders* on `Hooks need review — N hooks are new or changed … 1. Review hooks  2. Trust all and continue  3. Continue without trusting`. Digit `2` + Enter answers it. The answer is recorded in `config.toml` as `[hooks.state.'<key>'] trusted_hash = "sha256:…"` and **survives across sessions**: re-creating a byte-identical `hooks.json` raised no prompt at all. Changing only the command string re-prompted, so **the hash covers the command** — and with one identical command registered across ten events the ten hashes still differed, so it folds in the event/index too.
-4. **And yet no hook process is ever spawned.** With the definitions pre-trusted at load (no prompt), the composer up, and a prompt submitted, **zero invocations**. Proven not by a silent script but by a **batch file that appends a line before doing anything else** — so "never invoked" is distinguishable from "invoked but `node` unresolvable". The marker file was never created. `SessionStart` is the load-bearing one: it needs no turn to have started, and it never fired in any run.
+4. ~~**And yet no hook process is ever spawned.**~~ **SUPERSEDED — see the correction above.** The marker-file method was right and is still the right method; the *conclusion* was wrong because the run never started a turn, and `SessionStart` is lazy. The claim inside it — *"it needs no turn to have started"* — is the specific false assumption.
 
-**So #78's premise is false in practice on this version.** The issue cites a `SessionStart` hook showing "Installed=1 / Active=1" as proof hooks execute; whatever that indicator reports, **it does not mean the command runs**. The remaining unknowns are which side is at fault (a shape Codex accepts-but-ignores, or a broken engine) and whether a newer build fixes it — Codex auto-updates mid-run, so re-measure before trusting any of this.
+**#78's premise holds.** Hooks are a real channel on this version: richer than OSC 9 (tool names, prompts, transcript paths, session id) where OSC 9 gives only a notification string.
 
-**This settles #78 item 6 in OSC 9's favour** for now: OSC 9 is not merely the zero-install fallback, it is the only channel that actually delivers. Its structural gap stands (below) and needs a different fix.
+**Item 6 (the fate of OSC 9) is now a genuine choice, not a default.** OSC 9's structural gap stands — it fires on exactly two occasions, an approval and a finished turn, so **`working` is unreachable through it by construction**. Hooks close that gap (`UserPromptSubmit` / `PreToolUse` / `PostToolUse`). Keeping OSC 9 as a zero-install fallback is still defensible; relying on it *because hooks don't work* is not.
+
+**One thing hooks do NOT fix:** a session that has been launched but has not yet taken a turn fires nothing at all, so first-turn status still has to come from somewhere else (or be treated as idle, which it is).
 
 > **Probing this is only safe if you clean up.** An installed-but-untrusted `hooks.json` **blocks every new Codex session** — the same failure class as the `Update available` nag, and fatal for a worker-spawned PTY that has nobody to answer it. Delete the file the moment the probe ends and relaunch once to confirm the composer returns. Strip the `[hooks.state]` entries too: a stale `trusted_hash` silently pre-trusts a matching definition later, with nobody reviewing it.
 

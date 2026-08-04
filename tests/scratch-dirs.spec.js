@@ -36,10 +36,15 @@ test('the rig basename stays distinctive — rig.js globs process command lines 
   expect(base.length).toBeGreaterThan(4);
 });
 
-test('WT_SCRATCH_DIR moves all three together', () => {
+test('WT_SCRATCH_DIR moves EVERY tree together, however many there are', () => {
+  // Deliberately not a hard-coded count. The invariant is "one env var relocates
+  // all of them", and pinning the number turns adding a legitimate new tree into
+  // a red build that says nothing about the invariant — which is exactly what
+  // happened when the codex-hook probe's dir was added.
   const out = run([], { WT_SCRATCH_DIR: path.join('D:', 'scratch') });
   const lines = out.split(/\r?\n/).filter(Boolean);
-  expect(lines).toHaveLength(3);
+  expect(lines.length).toBe(Object.keys(DIRS).length);
+  expect(lines.length).toBeGreaterThan(1);
   for (const l of lines) expect(l.split('\t')[1]).toContain(path.join('D:', 'scratch'));
 });
 
