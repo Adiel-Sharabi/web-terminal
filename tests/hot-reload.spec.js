@@ -489,4 +489,79 @@ test.describe('Phase 6: hot reload — PTY survives web.js restart', () => {
       rmRf(h.dataDir);
     }
   });
+
+  // #98 — the second half of "the dot went idle on a session owing an answer".
+  //
+  // A pending question is recorded in server.js's IN-MEMORY _notifyState, so a web.js
+  // restart forgets it while the worker keeps the session and its flag. The send site
+  // used to compute `!!(_notifyState.get(id) || {}).pendingQuestion`, which cannot
+  // express "I don't know" — `!!undefined` is false — so the very next hook asserted
+  // "no question is on screen" and cleared a flag the rebuilt server.js had no
+  // knowledge of, re-opening the bug the worker's own comment warned about.
+  //
+  // Needs the monitor harness rather than stale-status.spec.js: within ONE server.js
+  // process the map and the flag can never disagree, so the divergence this pins is
+  // only reachable across a real restart.
+  test('#98: a question pending across a web.js restart is not cleared by the next hook', async () => {
+    test.slow();
+    const h = await startMonitor();
+    const baseURL = `http://127.0.0.1:${h.port}`;
+
+    try {
+      await h.waitForHealthy(20000);
+      let ctx = await authCtx(baseURL);
+      const created = await (await ctx.post('/api/sessions', {
+        data: { name: 'q-hotreload', cwd: process.env.TEMP || os.tmpdir(), autoCommand: '' },
+      })).json();
+      const sid = created.id;
+      expect(sid).toBeTruthy();
+
+      // Claude asks a question: 'working', and the worker learns one is on screen.
+      const ask = await ctx.post(`/api/session/${sid}/hook`, {
+        data: {
+          event: 'PreToolUse',
+          tool_name: 'AskUserQuestion',
+          tool_input: {
+            questions: [{
+              header: 'Approach',
+              question: 'Which approach should I take?',
+              options: [{ label: 'Rewrite' }, { label: 'Patch' }],
+            }],
+          },
+        },
+      });
+      expect((await ask.json()).status).toBe('working');
+
+      // Hot reload: kill ONLY web.js. The worker — and its questionPending — survive.
+      const before = h.readStatus();
+      const webPid = before.web.pid;
+      const workerPid = before.worker.pid;
+      killPid(webPid);
+      await h.waitForStatus(s => s && s.web && s.web.pid && s.web.pid !== webPid, 15000);
+      expect(h.readStatus().worker.pid).toBe(workerPid);   // same worker, or this proves nothing
+      await h.waitForHealthy(20000);
+      await ctx.dispose();
+      ctx = await authCtx(baseURL);
+
+      // A hook the rebuilt server.js knows nothing about. It must stay SILENT on the
+      // question rather than claim there isn't one. PostToolUse for an unrelated tool
+      // is the honest case: it neither raises nor resolves a question.
+      await ctx.post(`/api/session/${sid}/hook`, {
+        data: { event: 'PostToolUse', tool_name: 'Bash' },
+      });
+
+      // The flag must have survived, so the 5-minute stale rule still must not fire.
+      for (let i = 0; i < 5; i++) {
+        await ctx.post(`/api/test/age-session/${sid}`, { data: { ageMinutes: 10 } });
+        const s = (await (await ctx.get('/api/sessions')).json()).find(x => x.id === sid);
+        expect(s.status).toBe('working');
+      }
+
+      await ctx.delete(`/api/sessions/${sid}`);
+      await ctx.dispose();
+    } finally {
+      await h.stop();
+      rmRf(h.dataDir);
+    }
+  });
 });

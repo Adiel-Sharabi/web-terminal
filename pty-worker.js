@@ -1611,6 +1611,23 @@ function handleHook(session, event, claudeSessionId, prompt, agentId, opts) {
         log(`hook: session "${session.name}" ${event} held — ${live.size} subagent(s) in flight`);
         break;
       }
+      // #98 — an idle Notification raised while a question is still on screen does
+      // not mean "the turn ended", it means "I am blocked on you". Claude fires it
+      // after ~60s of waiting for input, which is precisely the state a pending
+      // AskUserQuestion produces — so armIdle painted the calm green dot on the one
+      // session that owed an answer. correctStaleStatus's #79 exemption cannot help
+      // here: that rule only declines to CORRECT a silent session, and this sets the
+      // status outright.
+      //
+      // `Stop` is unaffected in practice rather than by a second condition: server.js
+      // classifies Stop as an event that resolves a question and sends an explicit
+      // questionPending:false with it, applied above the switch — so by the time a
+      // genuine end-of-turn arrives the flag is already clear. Self-bounding for the
+      // same reason, plus the 12h abandonment backstop.
+      if (session.questionPending) {
+        log(`hook: session "${session.name}" ${event} not idled — a question is still on screen`);
+        break;
+      }
       armIdle(session, event);
       break;
     }
