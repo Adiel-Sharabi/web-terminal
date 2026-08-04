@@ -15,6 +15,7 @@ import 'services/detach_window_service.dart';
 import 'services/notification_service.dart';
 import 'services/push_service.dart';
 import 'services/server_store.dart';
+import 'services/cluster_discovery.dart';
 import 'services/session_repository.dart';
 import 'services/session_selection.dart';
 import 'theme/app_theme.dart';
@@ -92,6 +93,12 @@ Future<void> main(List<String> args) async {
   // from the server — DashboardScreen's own migrateOnce handles the old
   // per-device list, if any.
   await ServerStore.instance.init();
+  // #97: adopt any peer the cluster advertises that this device does not have
+  // yet. Deliberately NOT awaited — it makes network calls, and a slow or
+  // unreachable server must never delay the first frame. The store emits when
+  // the list changes, so the dashboard picks up new servers as they arrive.
+  // Safe to fire and forget: a round that reaches nothing changes nothing.
+  unawaited(ClusterDiscovery(store: ServerStore.instance).refresh());
   runApp(AiTerminalApp(detached: detached));
 }
 

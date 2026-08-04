@@ -25,6 +25,8 @@ import '../api/agent_catalog.dart';
 import '../api/api_client.dart';
 import '../api/models.dart';
 import '../services/app_config.dart';
+import '../services/server_store.dart';
+import '../services/cluster_discovery.dart';
 import '../services/favorites_service.dart';
 import '../services/session_repository.dart';
 import '../theme/app_theme.dart';
@@ -321,7 +323,14 @@ class _DashboardScreenState extends State<DashboardScreen> {
         final servers = serverSnapshot.data ?? const <ServerConfig>[];
         return Scaffold(
           body: RefreshIndicator(
-            onRefresh: SessionRepository.instance.refresh,
+            // #97: a pull also re-checks the cluster, so a server added on ANY
+            // box shows up here without reinstalling or retyping it. Sessions
+            // are refreshed first and awaited — that is what the user pulled
+            // for; discovery runs alongside and updates the list when it lands.
+            onRefresh: () async {
+              unawaited(ClusterDiscovery(store: ServerStore.instance).refresh());
+              await SessionRepository.instance.refresh();
+            },
             child: StreamBuilder<List<Session>>(
               stream: SessionRepository.instance.sessions,
               builder: (context, snapshot) {

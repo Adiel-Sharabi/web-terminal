@@ -215,19 +215,91 @@ class _ServerEditorSheetState extends State<_ServerEditorSheet> {
   late final _bearerToken = TextEditingController(
     text: widget.existing?.bearerToken ?? '',
   );
+  // #96: credentials are held ONLY for the moment of the exchange. They are
+  // never put in a ServerConfig and never persisted — only the token they buy.
+  final _user = TextEditingController(text: 'admin');
+  final _password = TextEditingController();
+
+  /// Sign in with a username + password, or paste a token directly.
+  ///
+  /// Credentials are the default because a bearer token is not something a user
+  /// can obtain from the UI — it had to be read off the server's disk, which is
+  /// exactly the complaint this fixes.
+  bool _useCredentials = true;
 
   bool _testing = false;
   bool _saving = false;
+  bool _signingIn = false;
   String? _testResult;
   bool _testOk = false;
   String? _error;
+
+  @override
+  void initState() {
+    super.initState();
+    // Editing a server that already has a token: default to the token view so
+    // its presence is visible, rather than looking like it has no auth.
+    if ((widget.existing?.bearerToken ?? '').isNotEmpty) _useCredentials = false;
+  }
 
   @override
   void dispose() {
     _name.dispose();
     _baseUrl.dispose();
     _bearerToken.dispose();
+    _user.dispose();
+    _password.dispose();
     super.dispose();
+  }
+
+  /// Exchanges the typed credentials for a token and drops it into the token
+  /// field. The password is discarded the moment this returns.
+  Future<void> _signIn() async {
+    final base = _baseUrl.text.trim();
+    if (base.isEmpty) {
+      setState(() => _error = 'Enter a base URL first');
+      return;
+    }
+    if (_password.text.isEmpty) {
+      setState(() => _error = 'Enter the password');
+      return;
+    }
+    setState(() {
+      _signingIn = true;
+      _error = null;
+      _testResult = null;
+    });
+    try {
+      final token = await ApiClient.fetchToken(
+        baseUrl: base,
+        user: _user.text.trim(),
+        password: _password.text,
+        label: 'companion',
+      );
+      if (!mounted) return;
+      setState(() {
+        _bearerToken.text = token;
+        _password.clear(); // not kept a moment longer than needed
+        _testOk = true;
+        _testResult = 'Signed in — token received';
+      });
+    } on ApiException catch (e) {
+      if (mounted) {
+        setState(() {
+          _testOk = false;
+          _testResult = e.message;
+        });
+      }
+    } catch (e) {
+      if (mounted) {
+        setState(() {
+          _testOk = false;
+          _testResult = 'Could not reach server: $e';
+        });
+      }
+    } finally {
+      if (mounted) setState(() => _signingIn = false);
+    }
   }
 
   ServerConfig _draft() => ServerConfig(
@@ -342,13 +414,77 @@ class _ServerEditorSheetState extends State<_ServerEditorSheet> {
               textInputAction: TextInputAction.next,
             ),
             const SizedBox(height: 12),
-            TextField(
-              controller: _bearerToken,
-              decoration: const InputDecoration(labelText: 'Bearer token'),
-              autocorrect: false,
-              obscureText: true,
-              textInputAction: TextInputAction.done,
+            // #96: a bearer token could only be obtained by reading it off the
+            // server's disk. Signing in with the same credentials you use for
+            // the web UI exchanges them for a token via POST /api/auth/token.
+            SegmentedButton<bool>(
+              segments: const [
+                ButtonSegment(
+                  value: true,
+                  label: Text('Username + password'),
+                  icon: Icon(Icons.person_outline),
+                ),
+                ButtonSegment(
+                  value: false,
+                  label: Text('Bearer token'),
+                  icon: Icon(Icons.key_outlined),
+                ),
+              ],
+              selected: {_useCredentials},
+              onSelectionChanged: (s) =>
+                  setState(() => _useCredentials = s.first),
             ),
+            const SizedBox(height: 12),
+            if (_useCredentials) ...[
+              TextField(
+                controller: _user,
+                decoration: const InputDecoration(labelText: 'Username'),
+                autocorrect: false,
+                textInputAction: TextInputAction.next,
+              ),
+              const SizedBox(height: 12),
+              TextField(
+                controller: _password,
+                decoration: const InputDecoration(labelText: 'Password'),
+                autocorrect: false,
+                obscureText: true,
+                textInputAction: TextInputAction.done,
+                onSubmitted: (_) => _signingIn ? null : _signIn(),
+              ),
+              const SizedBox(height: 8),
+              Row(
+                children: [
+                  FilledButton.tonal(
+                    onPressed: _signingIn ? null : _signIn,
+                    child: _signingIn
+                        ? const SizedBox(
+                            width: 16,
+                            height: 16,
+                            child: CircularProgressIndicator(strokeWidth: 2),
+                          )
+                        : const Text('Sign in'),
+                  ),
+                  const SizedBox(width: 12),
+                  Expanded(
+                    child: Text(
+                      _bearerToken.text.isEmpty
+                          ? 'The password is exchanged for a token and never stored.'
+                          : 'Token received — Save to keep this server.',
+                      style: theme.textTheme.bodySmall?.copyWith(
+                        color: theme.colorScheme.onSurfaceVariant,
+                      ),
+                    ),
+                  ),
+                ],
+              ),
+            ] else
+              TextField(
+                controller: _bearerToken,
+                decoration: const InputDecoration(labelText: 'Bearer token'),
+                autocorrect: false,
+                obscureText: true,
+                textInputAction: TextInputAction.done,
+              ),
             const SizedBox(height: 12),
             Row(
               children: [

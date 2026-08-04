@@ -12,6 +12,21 @@ library;
 ///
 /// Immutable — use [copyWith] to produce a variant (e.g. once the real server
 /// name has been read from `/api/version`).
+/// Where a [ServerConfig] came from (#97).
+///
+/// This is not cosmetic: it decides who may remove the entry. A server the app
+/// DISCOVERED from the cluster is owned by the cluster, so it disappears when it
+/// leaves the cluster. A server the user typed in is theirs, and discovery never
+/// touches it — otherwise a box that is deliberately not in the cluster would be
+/// deleted out from under them on the next refresh.
+enum ServerOrigin {
+  /// Added by hand in Settings. Never auto-removed.
+  manual,
+
+  /// Learned from a peer's `GET /api/cluster/servers`. Removed when it leaves.
+  cluster,
+}
+
 class ServerConfig {
   /// Human-readable server name (from `/api/version`; a placeholder until the
   /// first successful version call resolves it).
@@ -25,19 +40,31 @@ class ServerConfig {
   /// as the `?token=` query parameter on WebSocket connections.
   final String bearerToken;
 
-  /// Creates a server configuration. All fields are required.
+  /// Where this entry came from — see [ServerOrigin]. Defaults to [manual]
+  /// because everything that predates discovery was typed in by hand, and a
+  /// stored entry with no recorded origin must never be auto-removed.
+  final ServerOrigin origin;
+
+  /// Creates a server configuration.
   const ServerConfig({
     required this.name,
     required this.baseUrl,
     required this.bearerToken,
+    this.origin = ServerOrigin.manual,
   });
 
   /// Returns a copy with the given fields replaced.
-  ServerConfig copyWith({String? name, String? baseUrl, String? bearerToken}) {
+  ServerConfig copyWith({
+    String? name,
+    String? baseUrl,
+    String? bearerToken,
+    ServerOrigin? origin,
+  }) {
     return ServerConfig(
       name: name ?? this.name,
       baseUrl: baseUrl ?? this.baseUrl,
       bearerToken: bearerToken ?? this.bearerToken,
+      origin: origin ?? this.origin,
     );
   }
 
@@ -46,13 +73,34 @@ class ServerConfig {
       other is ServerConfig &&
       other.name == name &&
       other.baseUrl == baseUrl &&
-      other.bearerToken == bearerToken;
+      other.bearerToken == bearerToken &&
+      other.origin == origin;
 
   @override
-  int get hashCode => Object.hash(name, baseUrl, bearerToken);
+  int get hashCode => Object.hash(name, baseUrl, bearerToken, origin);
 
   @override
   String toString() => 'ServerConfig($name, $baseUrl)';
+}
+
+/// One peer as advertised by `GET /api/cluster/servers` (#97).
+///
+/// [hasToken] describes the SERVER's trust in that peer, not ours. A peer the
+/// server itself cannot authenticate to is one it cannot mint us a token for, so
+/// it is listed but not yet adoptable.
+class ClusterPeer {
+  const ClusterPeer({
+    required this.name,
+    required this.url,
+    required this.hasToken,
+  });
+
+  final String name;
+  final String url;
+  final bool hasToken;
+
+  @override
+  String toString() => 'ClusterPeer($name, $url, hasToken: $hasToken)';
 }
 
 /// A single terminal session as returned by `GET /api/sessions`, tagged with the

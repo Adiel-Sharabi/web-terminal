@@ -52,6 +52,110 @@ class ApiClient {
   ApiClient(this.server, {http.Client? httpClient})
       : _http = httpClient ?? http.Client();
 
+  /// Exchanges a username + password for a bearer token (#96).
+  ///
+  /// STATIC, and takes a bare [baseUrl] rather than a [ServerConfig], because
+  /// this is what runs when there is no token yet — it is how you GET one. The
+  /// server side already exists (`POST /api/auth/token`, rate-limited, no prior
+  /// auth), so adding a server by credentials needs no server change at all.
+  ///
+  /// **The password is used once and never stored.** Only the returned token is
+  /// persisted, exactly as if it had been pasted in by hand — so a stolen
+  /// device yields a revocable token rather than the account password, and
+  /// revoking it server-side (`DELETE /api/auth/tokens/:token`) is enough.
+  ///
+  /// [label] is what the server records against the token so it can be
+  /// recognised and revoked later in the tokens list.
+  static Future<String> fetchToken({
+    required String baseUrl,
+    required String user,
+    required String password,
+    String label = 'companion',
+    http.Client? httpClient,
+  }) async {
+    final base = baseUrl.trim().replaceAll(RegExp(r'/+$'), '');
+    if (base.isEmpty) throw const ApiException(0, 'Enter a base URL first');
+    final client = httpClient ?? http.Client();
+    try {
+      final res = await client
+          .post(
+            Uri.parse('$base/api/auth/token'),
+            headers: const {'Content-Type': 'application/json'},
+            body: jsonEncode({
+              'user': user,
+              'password': password,
+              'label': label,
+            }),
+          )
+          .timeout(_timeout);
+      if (res.statusCode == 401) {
+        throw const ApiException(401, 'Wrong username or password');
+      }
+      if (res.statusCode == 429) {
+        // The server rate-limits failed logins per IP; say so rather than
+        // letting it read as bad credentials.
+        throw const ApiException(429, 'Too many attempts — wait and retry');
+      }
+      if (res.statusCode < 200 || res.statusCode >= 300) {
+        throw ApiException(res.statusCode, 'Server rejected sign-in');
+      }
+      final body = jsonDecode(res.body);
+      final token = (body is Map && body['token'] is String)
+          ? body['token'] as String
+          : '';
+      if (token.isEmpty) {
+        throw const ApiException(0, 'Server returned no token');
+      }
+      return token;
+    } on ApiException {
+      rethrow;
+    } on TimeoutException {
+      throw const ApiException(0, 'Request timed out');
+    } catch (_) {
+      throw const ApiException(0, 'Server unreachable');
+    } finally {
+      if (httpClient == null) client.close();
+    }
+  }
+
+  /// The peers this server knows about (`GET /api/cluster/servers`) — #97.
+  ///
+  /// Returns `{name, url, hasToken}` records. `hasToken` is about the SERVER's
+  /// own trust in that peer, not ours: a peer the server cannot authenticate to
+  /// is one it cannot mint us a token for either, so it is not adoptable yet.
+  Future<List<ClusterPeer>> listClusterServers() async {
+    final res = await _send('GET', '/api/cluster/servers');
+    final body = _decode(res);
+    if (body is! List) return const <ClusterPeer>[];
+    return [
+      for (final e in body)
+        if (e is Map<String, dynamic>)
+          ClusterPeer(
+            name: (e['name'] ?? '').toString(),
+            url: (e['url'] ?? '').toString(),
+            hasToken: e['hasToken'] == true,
+          ),
+    ];
+  }
+
+  /// Asks this server to obtain a token for peer [url] on our behalf (#97).
+  ///
+  /// The server spends the cluster trust it already holds for that peer to have
+  /// the peer mint a FRESH token for this device — so what we store is revocable
+  /// on its own, rather than a copy of the server-to-server credential.
+  Future<String> requestClientToken({
+    required String url,
+    String label = 'companion',
+  }) async {
+    final res = await _send('POST', '/api/cluster/client-token',
+        body: {'url': url, 'label': label});
+    final body = _decode(res);
+    final token =
+        (body is Map && body['token'] is String) ? body['token'] as String : '';
+    if (token.isEmpty) throw const ApiException(0, 'Server returned no token');
+    return token;
+  }
+
   // --- REST ---------------------------------------------------------------
 
   /// Fetches this server's sessions (`GET /api/sessions`), each tagged with

@@ -70,6 +70,11 @@ void main() {
       find.widgetWithText(TextField, 'Base URL'),
       'http://100.9.9.9:7681',
     );
+    // #96: a NEW server now defaults to username+password, because a bearer
+    // token is not something a user can obtain from the app. Pasting a token is
+    // still supported — it just lives behind the toggle now.
+    await tester.tap(find.text('Bearer token'));
+    await tester.pumpAndSettle();
     await tester.enterText(
       find.widgetWithText(TextField, 'Bearer token'),
       'secret',
@@ -81,6 +86,34 @@ void main() {
     expect(store.servers.single.name, 'New Box');
     expect(store.servers.single.baseUrl, 'http://100.9.9.9:7681');
     expect(find.text('New Box'), findsOneWidget);
+  });
+
+  // #96 — the point of the feature: a server can be added with the SAME
+  // credentials used for the web UI, with no token in sight. The credential
+  // fields are the DEFAULT for a new server.
+  testWidgets('a new server offers username + password by default', (
+    tester,
+  ) async {
+    final store = await _store();
+    await tester.pumpWidget(_wrap(SettingsScreen(store: store)));
+
+    await tester.tap(find.byIcon(Icons.add));
+    await tester.pumpAndSettle();
+
+    // Credential fields visible, token field not.
+    expect(find.widgetWithText(TextField, 'Username'), findsOneWidget);
+    expect(find.widgetWithText(TextField, 'Password'), findsOneWidget);
+    expect(find.widgetWithText(TextField, 'Bearer token'), findsNothing);
+    // 'admin' is prefilled because it is the only user this server type has.
+    expect(find.text('admin'), findsOneWidget);
+    // And it says plainly what happens to the password.
+    expect(find.textContaining('never stored'), findsOneWidget);
+
+    // The toggle reveals the token field for anyone who does have one.
+    await tester.tap(find.text('Bearer token'));
+    await tester.pumpAndSettle();
+    expect(find.widgetWithText(TextField, 'Bearer token'), findsOneWidget);
+    expect(find.widgetWithText(TextField, 'Password'), findsNothing);
   });
 
   testWidgets('removing a server asks for confirmation then deletes it', (
