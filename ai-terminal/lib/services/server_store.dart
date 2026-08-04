@@ -162,6 +162,69 @@ class ServerStore {
     await _commit(next);
   }
 
+  /// Reconciles the list against what the cluster currently advertises (#97).
+  ///
+  /// **The rule: the cluster owns what it gave us; the user owns what they
+  /// typed.** So, keyed on normalized base URL:
+  ///
+  /// * a discovered server that is new is ADDED (origin `cluster`);
+  /// * a discovered server we already hold as `cluster` is REFRESHED — its name
+  ///   follows the cluster, and its token is replaced only if a new one was
+  ///   minted (an empty token means "no new token this round", not "clear it");
+  /// * a `cluster` entry that is NO LONGER advertised is REMOVED, which is what
+  ///   makes a decommissioned box disappear from every app by itself;
+  /// * a `manual` entry is NEVER touched, even if the cluster also advertises
+  ///   it — a box you added by hand keeps working whether or not it is in the
+  ///   cluster, and a discovery blip can never delete it.
+  ///
+  /// [discovered] must contain only entries the caller actually obtained a token
+  /// for; a peer it could not authenticate to should simply be omitted rather
+  /// than passed with an empty token, or it would be stored unusable.
+  ///
+  /// Returns true when anything changed, so callers can avoid a pointless emit.
+  Future<bool> syncDiscovered(List<ServerConfig> discovered) async {
+    final advertised = <String, ServerConfig>{};
+    for (final d in discovered) {
+      final c = _normalize(d).copyWith(origin: ServerOrigin.cluster);
+      if (c.baseUrl.isEmpty || c.bearerToken.isEmpty) continue;
+      advertised.putIfAbsent(c.baseUrl, () => c);
+    }
+
+    final next = <ServerConfig>[];
+    final kept = <String>{};
+    for (final existing in _servers) {
+      if (existing.origin == ServerOrigin.manual) {
+        next.add(existing);
+        kept.add(existing.baseUrl);
+        continue;
+      }
+      final fresh = advertised[existing.baseUrl];
+      if (fresh == null) continue; // left the cluster -> drop it
+      next.add(existing.copyWith(
+        name: fresh.name.isEmpty ? existing.name : fresh.name,
+        bearerToken:
+            fresh.bearerToken.isEmpty ? existing.bearerToken : fresh.bearerToken,
+        origin: ServerOrigin.cluster,
+      ));
+      kept.add(existing.baseUrl);
+    }
+    for (final entry in advertised.entries) {
+      if (!kept.contains(entry.key)) next.add(entry.value);
+    }
+
+    if (_sameList(next, _servers)) return false;
+    await _commit(next);
+    return true;
+  }
+
+  static bool _sameList(List<ServerConfig> a, List<ServerConfig> b) {
+    if (a.length != b.length) return false;
+    for (var i = 0; i < a.length; i++) {
+      if (a[i] != b[i]) return false;
+    }
+    return true;
+  }
+
   /// Upgrades the display name of the server whose (normalized) base URL matches
   /// [baseUrl] — called after a successful `/api/version`. Updates in memory
   /// synchronously (so [servers] reflects it immediately) and persists in the
@@ -263,6 +326,10 @@ class ServerStore {
             'name': s.name,
             'baseUrl': s.baseUrl,
             'bearerToken': s.bearerToken,
+            // #97: recorded so discovery knows what it owns. Older installs have
+            // no such key and decode as `manual`, which is the safe default —
+            // an entry of unknown provenance must never be auto-removed.
+            'origin': s.origin.name,
           },
       ]);
 
@@ -282,6 +349,11 @@ class ServerStore {
             name: (e['name'] ?? '').toString(),
             baseUrl: baseUrl,
             bearerToken: (e['bearerToken'] ?? '').toString(),
+            // Absent (pre-#97 storage) or unrecognised -> manual. Never
+            // auto-removable by default.
+            origin: (e['origin'] ?? '').toString() == ServerOrigin.cluster.name
+                ? ServerOrigin.cluster
+                : ServerOrigin.manual,
           ));
         }
         return out;

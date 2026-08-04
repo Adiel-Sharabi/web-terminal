@@ -118,6 +118,44 @@ class ApiClient {
     }
   }
 
+  /// The peers this server knows about (`GET /api/cluster/servers`) — #97.
+  ///
+  /// Returns `{name, url, hasToken}` records. `hasToken` is about the SERVER's
+  /// own trust in that peer, not ours: a peer the server cannot authenticate to
+  /// is one it cannot mint us a token for either, so it is not adoptable yet.
+  Future<List<ClusterPeer>> listClusterServers() async {
+    final res = await _send('GET', '/api/cluster/servers');
+    final body = _decode(res);
+    if (body is! List) return const <ClusterPeer>[];
+    return [
+      for (final e in body)
+        if (e is Map<String, dynamic>)
+          ClusterPeer(
+            name: (e['name'] ?? '').toString(),
+            url: (e['url'] ?? '').toString(),
+            hasToken: e['hasToken'] == true,
+          ),
+    ];
+  }
+
+  /// Asks this server to obtain a token for peer [url] on our behalf (#97).
+  ///
+  /// The server spends the cluster trust it already holds for that peer to have
+  /// the peer mint a FRESH token for this device — so what we store is revocable
+  /// on its own, rather than a copy of the server-to-server credential.
+  Future<String> requestClientToken({
+    required String url,
+    String label = 'companion',
+  }) async {
+    final res = await _send('POST', '/api/cluster/client-token',
+        body: {'url': url, 'label': label});
+    final body = _decode(res);
+    final token =
+        (body is Map && body['token'] is String) ? body['token'] as String : '';
+    if (token.isEmpty) throw const ApiException(0, 'Server returned no token');
+    return token;
+  }
+
   // --- REST ---------------------------------------------------------------
 
   /// Fetches this server's sessions (`GET /api/sessions`), each tagged with
