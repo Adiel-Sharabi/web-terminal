@@ -1389,85 +1389,39 @@ Future<void> openChatLink(String? href) async {
   }
 }
 
-/// A chat markdown link. Tap opens it (browser); a long-press (touch) or a
-/// right-click (desktop) opens a small menu to **Open** or **Copy link**. Links
-/// are gesture-carrying spans, so the ancestor SelectionArea (#27) can't select
-/// them — the Copy-link menu is how you grab a URL without opening it.
-class _ChatLink extends StatelessWidget {
-  const _ChatLink({required this.text, required this.href, required this.style});
-
-  final String text;
-  final String? href;
-  final TextStyle style;
-
-  Future<void> _copy(BuildContext context) async {
-    final url = href;
-    if (url == null || url.isEmpty) return;
-    await Clipboard.setData(ClipboardData(text: url));
-    if (context.mounted) {
-      ScaffoldMessenger.of(context).showSnackBar(
-        const SnackBar(
-            content: Text('Link copied'), duration: Duration(seconds: 1)),
-      );
-    }
-  }
-
-  Future<void> _menu(BuildContext context, Offset globalPos) async {
-    if (href == null || href!.isEmpty) return;
-    final overlay =
-        Overlay.of(context).context.findRenderObject() as RenderBox?;
-    if (overlay == null) return;
-    final selected = await showMenu<String>(
-      context: context,
-      position: RelativeRect.fromRect(
-        Rect.fromPoints(globalPos, globalPos),
-        Offset.zero & overlay.size,
-      ),
-      items: [
-        if (isLaunchableHttpUrl(href))
-          const PopupMenuItem<String>(value: 'open', child: Text('Open link')),
-        const PopupMenuItem<String>(value: 'copy', child: Text('Copy link')),
-      ],
-    );
-    if (selected == 'open') {
-      await openChatLink(href);
-    } else if (selected == 'copy' && context.mounted) {
-      await _copy(context);
-    }
-  }
-
-  @override
-  Widget build(BuildContext context) {
-    // Bound the width so a long bare URL wraps inside the bubble instead of
-    // overflowing (a WidgetSpan is otherwise laid out at its intrinsic width).
-    final maxWidth = MediaQuery.sizeOf(context).width * 0.82;
-    return GestureDetector(
-      onTap: () => openChatLink(href),
-      onLongPressStart: (d) => _menu(context, d.globalPosition),
-      onSecondaryTapDown: (d) => _menu(context, d.globalPosition),
-      child: ConstrainedBox(
-        constraints: BoxConstraints(maxWidth: maxWidth),
-        child: Text(text, style: style, softWrap: true),
-      ),
-    );
-  }
-}
-
-/// Renders markdown `<a>` links as [_ChatLink] (tap-to-open + long-press/
-/// right-click Open/Copy menu) instead of the default recognizer-only span.
-class _MarkdownLinkBuilder extends MarkdownElementBuilder {
-  _MarkdownLinkBuilder(this.linkStyle);
-
-  final TextStyle linkStyle;
-
-  @override
-  Widget? visitElementAfter(md.Element element, TextStyle? preferredStyle) {
-    final href = element.attributes['href'];
-    final text =
-        element.textContent.isNotEmpty ? element.textContent : (href ?? '');
-    return _ChatLink(text: text, href: href, style: linkStyle);
-  }
-}
+// NOTE (#83): there is deliberately no custom `a` element builder here.
+//
+// A MarkdownElementBuilder can only return a Widget, and a widget cannot live
+// inside a paragraph. Measured on flutter_markdown 0.7.7+1, rendering
+// `see [example](url) tail` through a builder produces FOUR RichTexts — the
+// sentence shattered into "see " | "example" | " tail" as separate render
+// objects — where the native path produces one:
+//
+//   builder   -> ["see "]["example"][" tail"]   (3 paragraphs + the role tag)
+//   onTapLink -> ["see "]["example" <-Tap][" tail"]  all in ONE paragraph
+//
+// The ancestor SelectionArea (#27) walks a paragraph, so a shattered sentence
+// is one it cannot drag across — that is the reported "nothing highlights".
+// The builder also attached the tap recognizer to the WRONG fragment (" tail"),
+// so tapping trailing prose opened the link.
+//
+// The mechanism, for anyone tempted to register a builder anyway: in
+// flutter_markdown 0.7.7+1, `visitElementAfter` output goes into the BLOCK's
+// children list (builder.dart:564-576) and `_mergeInlineChildren` skips any
+// non-Text child (:891-897) — so the widget is laid out as a block-level child at
+// its INTRINSIC width, which is what the deleted ConstrainedBox was compensating
+// for. Worse, the `else if (tag == 'a') { _linkHandlers.removeLast(); }` at :611
+// sits behind `if (builders.containsKey(tag))` at :564, so registering ANY 'a'
+// builder makes that pop unreachable and the link handler stays on the stack for
+// the NEXT span — which is exactly why the recognizer ended up on the trailing
+// prose. Note that hazard is not specific to 'a'; it is how the else-if chain is
+// built.
+//
+// Links are rendered by the library's own onTapLink path instead (see the
+// MarkdownBody call below). If you are tempted to reintroduce a builder to add a
+// per-link affordance, it will silently reintroduce this: any affordance must be
+// reachable from a TextSpan recognizer or from the SelectionArea's context menu,
+// never from a widget in the text flow.
 
 class _TurnBubble extends StatelessWidget {
   const _TurnBubble({required this.turn, this.subFetch, this.agentId});
@@ -1516,11 +1470,6 @@ class _TurnBubble extends StatelessWidget {
       backgroundColor: theme.colorScheme.surfaceContainerHigh,
     );
     final mdStyle = _markdownStyle(theme, bodyStyle, codeSpanStyle);
-    final linkStyle = mdStyle.a ??
-        TextStyle(
-          color: theme.colorScheme.primary,
-          decoration: TextDecoration.underline,
-        );
     final epoch = _parseIsoToEpoch(turn.ts);
 
     // #54: an agent turn is tinted with ITS OWN registry colour so Claude vs
@@ -1621,13 +1570,23 @@ class _TurnBubble extends StatelessWidget {
                         // a self-selectable body would break cross-bubble drags.
                         selectable: false,
                         fitContent: true,
-                        // gitHubWeb turns bare `https://…` into links. Links are
-                        // rendered by _MarkdownLinkBuilder — tap opens, and a
-                        // long-press / right-click gives an Open/Copy-link menu
-                        // (URL spans are non-selectable in the SelectionArea, so
-                        // a menu is how you grab a URL without opening it).
+                        // gitHubWeb turns bare `https://…` into links.
+                        //
+                        // #83: links MUST stay real TextSpans in the paragraph.
+                        // A custom `a` builder returned a widget, which splits
+                        // the sentence into separate RichTexts (see the note by
+                        // openChatLink) — so a drag across a sentence CONTAINING
+                        // a link had no single paragraph to walk and produced no
+                        // highlight at all. The widget's own GestureDetector
+                        // compounded it: onLongPressStart holds the gesture arena
+                        // for exactly the button-down a selection drag begins on.
+                        //
+                        // onTapLink is the native path: flutter_markdown emits a
+                        // TextSpan carrying a TapGestureRecognizer, styled by
+                        // styleSheet.a. A tap recognizer is defeated by movement,
+                        // so a drag selects and a click still opens.
                         extensionSet: md.ExtensionSet.gitHubWeb,
-                        builders: {'a': _MarkdownLinkBuilder(linkStyle)},
+                        onTapLink: (text, href, title) => openChatLink(href),
                         styleSheet: mdStyle,
                       ),
                     ),
