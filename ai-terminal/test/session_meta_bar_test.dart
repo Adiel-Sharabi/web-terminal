@@ -266,9 +266,11 @@ void main() {
   // #77 — the chip shows the folder NAME, so the full path was nowhere on screen
   // and nowhere to be grabbed: the label is a plain Text with no gesture, which is
   // why it alone refused to select while the chat text around it selected fine.
-  // The gesture pair and the menu-then-snackbar shape are lifted from _ChatLink
-  // (conversation_view.dart) rather than invented, so the copy gesture a user
-  // already knows from a chat link is the same one that works here.
+  // The gesture pair and the menu-then-snackbar shape were lifted from the chat
+  // link's copy menu rather than invented. That menu no longer exists (#83 — a
+  // gesture-carrying link widget is what made chat text unselectable), so this is
+  // now the only place with the gesture; it stays because the cwd chip is the one
+  // label whose full value is deliberately not shown.
   group('#77 copy the full cwd path', () {
     late List<MethodCall> platformCalls;
 

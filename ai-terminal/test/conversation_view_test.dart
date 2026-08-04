@@ -4,8 +4,12 @@
 import 'dart:async';
 
 import 'package:flutter/material.dart';
-import 'package:flutter/services.dart';
+import 'package:flutter/rendering.dart';
 import 'package:flutter_test/flutter_test.dart';
+
+import 'package:plugin_platform_interface/plugin_platform_interface.dart';
+import 'package:url_launcher_platform_interface/link.dart';
+import 'package:url_launcher_platform_interface/url_launcher_platform_interface.dart';
 
 import 'package:ai_terminal/api/agent_catalog.dart';
 import 'package:ai_terminal/api/api_client.dart';
@@ -28,6 +32,26 @@ Session _session({String status = 'idle'}) => Session(
   server: _server(),
   autoCommand: '',
 );
+
+/// Records every launch that reaches the url_launcher platform, so a test can
+/// assert that an unsafe scheme reached it NOT AT ALL. Same shape as the one in
+/// chat_links_launch_test.dart.
+class _RecordingLauncher extends UrlLauncherPlatform
+    with MockPlatformInterfaceMixin {
+  final List<String> launched = <String>[];
+
+  @override
+  LinkDelegate? get linkDelegate => null;
+
+  @override
+  Future<bool> canLaunch(String url) async => true;
+
+  @override
+  Future<bool> launchUrl(String url, LaunchOptions options) async {
+    launched.add(url);
+    return true;
+  }
+}
 
 Widget _wrap(Widget child) => MaterialApp(
   theme: AppTheme.dark,
@@ -572,26 +596,138 @@ void main() {
     },
   );
 
-  // Links are non-selectable gesture spans in the SelectionArea, so a long-press
-  // (touch) / right-click (desktop) exposes an Open/Copy menu — the way to grab a
-  // URL without opening it (the "can't mark & copy a URL in chat" report).
-  testWidgets('a chat URL long-press shows an Open/Copy menu; Copy grabs the URL', (
+  // #83 — the regression gate for "dragging selects nothing".
+  //
+  // A widget test CANNOT prove selection works: synthetic pointer events are
+  // injected straight into Flutter's gesture arena and never traverse the
+  // Windows pointer path, which is why eight of them passed against the original
+  // report. What it CAN prove is the structural property that caused it — a link
+  // must be a TextSpan inside the paragraph, never a WidgetSpan. A WidgetSpan is
+  // an opaque box the ancestor SelectionArea (#27) does not walk, and the widget
+  // inside it carried a long-press recognizer that held the arena for exactly the
+  // button-down a selection drag begins with. Pin the cause; the real-input rig
+  // (scripts/rig/probe-drive-selection.ps1 -ShotDuring) pins the symptom.
+  testWidgets('a chat link is a TextSpan in the paragraph, never a WidgetSpan', (
     tester,
   ) async {
-    // Deterministic clipboard: capture what Copy writes (avoids the real channel).
-    String? clip;
-    tester.binding.defaultBinaryMessenger.setMockMethodCallHandler(
-      SystemChannels.platform,
-      (call) async {
-        if (call.method == 'Clipboard.setData') {
-          clip = (call.arguments as Map)['text'] as String?;
-        }
-        return null;
-      },
+    final page = TranscriptPage(
+      messages: const [
+        TranscriptTurn(
+          role: 'assistant',
+          text: 'see [example](https://example.com/x) and https://bare.example/y',
+          toolUses: [],
+          ts: null,
+        ),
+      ],
+      cursor: null,
+      hasMore: false,
     );
-    addTearDown(() => tester.binding.defaultBinaryMessenger
-        .setMockMethodCallHandler(SystemChannels.platform, null));
+    await tester.pumpWidget(
+      _wrap(
+        ConversationView(
+          session: _session(),
+          fetchPage: (id, {before, limit}) async => page,
+        ),
+      ),
+    );
+    await tester.pumpAndSettle();
 
+    // THE assertion: the prose AND the link occupy ONE paragraph, so a drag
+    // across the sentence has a single continuous run of text to walk.
+    //
+    // Measured difference (test/zz_span_probe style instrumentation):
+    //   old builder -> 4 RichTexts: "see " | "example" | " tail" as SEPARATE
+    //                  render objects, with the tap recognizer landing on the
+    //                  WRONG span (" tail" — tapping the trailing prose opened
+    //                  the link);
+    //   onTapLink   -> 2 RichTexts: [see ][example <-Tap][ tail] in one paragraph.
+    // A bubble whose sentence is shattered into per-fragment RichTexts is the
+    // structural signature of this bug.
+    final bodies = tester
+        .widgetList<RichText>(find.byType(RichText))
+        .where((rt) => rt.text.toPlainText().contains('example'))
+        .toList();
+    expect(bodies, hasLength(1),
+        reason: 'the sentence must be ONE paragraph, not one RichText per '
+            'fragment — a split paragraph is what SelectionArea cannot walk');
+
+    final para = bodies.single;
+    final plain = para.text.toPlainText();
+    // Prose either side of the link shares that same paragraph.
+    expect(plain, contains('see '));
+    expect(plain, contains('example'));
+    expect(plain, contains('bare.example'),
+        reason: 'a gitHubWeb autolinked bare URL must share the paragraph too');
+
+    // And no widget sits in the text flow.
+    para.text.visitChildren((span) {
+      expect(span, isNot(isA<WidgetSpan>()),
+          reason: 'a WidgetSpan in chat text breaks SelectionArea (#83)');
+      return true;
+    });
+  });
+
+  // The removed `_ChatLink` carried an explicit
+  // `ConstrainedBox(maxWidth: 0.82 * screen)` whose comment said a WidgetSpan is
+  // otherwise laid out at its INTRINSIC width, so a long bare URL would overflow
+  // the bubble. Deleting a guard obliges us to show the guard is unnecessary:
+  // a TextSpan is laid out by the paragraph, and Flutter breaks a word that
+  // cannot fit a line rather than running off the edge.
+  testWidgets('a long unbroken bare URL wraps instead of overflowing', (
+    tester,
+  ) async {
+    const width = 400.0;
+    final longUrl = 'https://example.com/${'x' * 300}';
+    final page = TranscriptPage(
+      messages: [
+        TranscriptTurn(
+          role: 'assistant',
+          text: 'see $longUrl end',
+          toolUses: const [],
+          ts: null,
+        ),
+      ],
+      cursor: null,
+      hasMore: false,
+    );
+    await tester.pumpWidget(
+      MaterialApp(
+        theme: AppTheme.dark,
+        home: Scaffold(
+          body: SizedBox(
+            width: width,
+            height: 600,
+            child: ConversationView(
+              session: _session(),
+              fetchPage: (id, {before, limit}) async => page,
+            ),
+          ),
+        ),
+      ),
+    );
+    await tester.pumpAndSettle();
+
+    final para = tester
+        .widgetList<RichText>(find.byType(RichText))
+        .where((rt) => rt.text.toPlainText().contains('example.com'))
+        .toList();
+    expect(para, hasLength(1), reason: 'still one paragraph');
+
+    final size = tester.getSize(
+      find.byWidget(para.single),
+    );
+    expect(size.width, lessThanOrEqualTo(width),
+        reason: 'a 300-char unbroken URL must wrap inside the bubble, not '
+            'overflow it — the ConstrainedBox that used to force this is gone');
+    // It wrapped, so it occupies many lines rather than one very long one.
+    expect(size.height, greaterThan(40));
+  });
+
+  // The tap-to-open path survives the WidgetSpan removal: flutter_markdown
+  // attaches a TapGestureRecognizer to the link span. A tap recognizer is
+  // defeated by movement, which is why it can coexist with a selection drag
+  // where the old long-press recognizer could not.
+  testWidgets('a chat link still carries a tap recognizer', (tester) async {
     final page = TranscriptPage(
       messages: const [
         TranscriptTurn(
@@ -614,19 +750,99 @@ void main() {
     );
     await tester.pumpAndSettle();
 
-    // The link renders as its label text (via the custom _ChatLink builder).
-    expect(find.text('example'), findsOneWidget);
+    // The recognizer must sit on the LINK's span, not merely exist somewhere.
+    // Under the old builder it attached to the trailing prose (" tail"), so
+    // tapping ordinary text opened the URL while the link itself did nothing.
+    final tapped = <String>[];
+    for (final rt in tester.widgetList<RichText>(find.byType(RichText))) {
+      rt.text.visitChildren((span) {
+        if (span is TextSpan && span.recognizer != null) {
+          tapped.add(span.text ?? '');
+        }
+        return true;
+      });
+    }
+    // Exact, not `contains`: the recognizer must be on the link and on NOTHING
+    // else. The old builder leaked it onto the trailing prose, and a `contains`
+    // assertion would have stayed green through exactly that.
+    expect(tapped, ['example'],
+        reason: 'the tap recognizer must be on the link text itself, alone');
+  });
 
-    // Long-press → the Open/Copy-link menu.
-    await tester.longPress(find.text('example'));
-    await tester.pumpAndSettle();
-    expect(find.text('Open link'), findsOneWidget);
-    expect(find.text('Copy link'), findsOneWidget);
+  // The security gate, pinned AT THE WIDGET. chat_links_launch_test.dart proves
+  // openChatLink refuses unsafe schemes, and the tests above pin the span
+  // structure — but nothing connected the two, so changing the call site to
+  // `onTapLink: (t, h, ti) => launchUrl(Uri.parse(h!))` would pass every test in
+  // the repo while making `javascript:` launchable from a chat message.
+  //
+  // THE POSITIVE CONTROL IS PART OF THE TEST, not politeness. Two earlier drafts
+  // of this "security test" passed with the gate deliberately bypassed:
+  //   * the first asserted only `takeException() == null` — never a launch signal;
+  //   * the second tapped `box.left + 20`, which lands in the leading prose
+  //     ("go "), not on the link glyphs, so NOTHING was ever tapped.
+  // Both reported "javascript: was blocked" while the gate was wide open. A
+  // negative result is worthless unless the same rig can produce a positive one,
+  // so this asserts an https link DOES launch through the identical path.
+  testWidgets('the launch gate holds at the widget: https yes, javascript no', (
+    tester,
+  ) async {
+    Future<List<String>> tapLink(String markdown) async {
+      final launcher = _RecordingLauncher();
+      UrlLauncherPlatform.instance = launcher;
+      final page = TranscriptPage(
+        messages: [
+          TranscriptTurn(
+            role: 'assistant',
+            text: markdown,
+            toolUses: const [],
+            ts: null,
+          ),
+        ],
+        cursor: null,
+        hasMore: false,
+      );
+      // A distinct key per render, and a blank pump between: without them the
+      // second call reuses the FIRST subtree, so the tap lands on the previous
+      // link and the new launcher records the OLD url — which reads as
+      // "javascript: launched" and sent me chasing a bug that wasn't there.
+      await tester.pumpWidget(const SizedBox.shrink());
+      await tester.pumpWidget(
+        _wrap(
+          ConversationView(
+            key: ValueKey(markdown),
+            session: _session(),
+            fetchPage: (id, {before, limit}) async => page,
+          ),
+        ),
+      );
+      await tester.pumpAndSettle();
 
-    // Copy → the URL (not the label) lands on the clipboard.
-    await tester.tap(find.text('Copy link'));
-    await tester.pumpAndSettle();
-    expect(clip, 'https://example.com/x');
+      // Tap the LINK's glyphs, located from the paragraph rather than guessed.
+      final finder = find
+          .byWidgetPredicate((w) =>
+              w is RichText && w.text.toPlainText().contains('click'))
+          .first;
+      final para = tester.widget<RichText>(finder);
+      final plain = para.text.toPlainText();
+      final start = plain.indexOf('click');
+      final ro = tester.renderObject(finder) as RenderParagraph;
+      final boxes = ro.getBoxesForSelection(
+        TextSelection(baseOffset: start, extentOffset: start + 'click'.length),
+      );
+      expect(boxes, isNotEmpty, reason: 'the link must be laid out to be tapped');
+      final rect =
+          boxes.first.toRect().shift(tester.getRect(finder).topLeft);
+      await tester.tapAt(rect.center);
+      await tester.pumpAndSettle();
+      return launcher.launched;
+    }
+
+    // Positive control — proves the rig can register a launch at all.
+    expect(await tapLink('go [click](https://example.com/x) now'),
+        ['https://example.com/x']);
+
+    // THE assertion: the same tap on an unsafe scheme launches nothing.
+    expect(await tapLink('go [click](javascript:alert%281%29) now'), isEmpty);
   });
 
   group('summarizeTool (rich tool cards)', () {

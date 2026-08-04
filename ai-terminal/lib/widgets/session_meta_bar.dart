@@ -192,9 +192,12 @@ class SessionMetaBar extends StatelessWidget {
 /// text around it selected fine. Long-press (touch) or right-click (desktop)
 /// takes the whole path.
 ///
-/// The gesture pair, the menu and the one-second confirmation are `_ChatLink`'s
-/// (`conversation_view.dart`), lifted deliberately: copying a path is then the
-/// same gesture as copying a chat link, not a second vocabulary to learn. Copy
+/// The gesture pair, the menu and the one-second confirmation were lifted from
+/// the chat link's copy menu. That menu is GONE (#83): links had to become real
+/// selectable text, and the gesture-carrying widget was the very thing that made
+/// the sentence around them unselectable. The gesture stays here because this
+/// chip is the one label whose full value is deliberately not on screen — a chat
+/// link's text, by contrast, can now simply be selected and copied. Copy
 /// is the only item — the chip is a readout, and opening the folder is the
 /// desktop's job, not this bar's.
 class _CwdChip extends StatelessWidget {
