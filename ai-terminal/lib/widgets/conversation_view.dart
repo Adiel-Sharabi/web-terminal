@@ -1467,7 +1467,22 @@ class _TurnBubble extends StatelessWidget {
     final bodyStyle = theme.textTheme.bodyLarge;
     final codeSpanStyle = bodyStyle?.copyWith(
       fontFamily: 'monospace',
-      backgroundColor: theme.colorScheme.surfaceContainerHigh,
+      // #83 — this alpha is load-bearing, not decoration. Flutter paints the
+      // selection highlight into the paragraph FIRST and the text (including a
+      // span's `backgroundColor`) on top, so an OPAQUE span background hides the
+      // highlight underneath it completely. With the opaque colour this used to
+      // be, dragging across a path in inline `code` selected it correctly — the
+      // clipboard and SelectionArea both agreed — while showing no highlight at
+      // all on the one span the user was aiming at, which reads as "selection is
+      // broken" and was reported as exactly that.
+      //
+      // There is no value that keeps both a fully opaque tint and a visible
+      // highlight: the span background is composited OVER the highlight, so
+      // resting contrast and selection visibility trade directly against each
+      // other. Selection wins, because an invisible selection is a bug and a
+      // slightly softer code tint is not.
+      backgroundColor:
+          theme.colorScheme.surfaceContainerHigh.withValues(alpha: 0.5),
     );
     final mdStyle = _markdownStyle(theme, bodyStyle, codeSpanStyle);
     final epoch = _parseIsoToEpoch(turn.ts);
