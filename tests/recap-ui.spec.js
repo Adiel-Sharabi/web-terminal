@@ -91,8 +91,35 @@ test.describe('Sidebar recap card', () => {
       // never synthesises a `click` at all, so the dismiss handler cannot run and
       // the card survives for a reason that has nothing to do with dismissal.
       // Measured: at (5,5) a document-level capture listener saw NO click and the
-      // card stayed 3/3; at (240,220) it saw the click and the card closed 3/3.
-      await page.locator('#terminal').click({ position: { x: 240, y: 220 }, force: true });
+      // card stayed 3/3; away from the cursor it saw the click and the card closed.
+      //
+      // The point is DERIVED, never hard-coded. A fixed (240,220) worked on a dev
+      // box and FAILED on the hosted Windows runner, whose viewport is smaller —
+      // with `force: true` the click is not clamped to the element, so it landed
+      // somewhere else entirely and no dismiss ever ran.
+      //
+      // Two things must hold at once, and both are asserted rather than assumed:
+      // the point is INSIDE the terminal (so it is a real outside-the-card click
+      // on something that exists) and OUTSIDE the card (the card is positioned
+      // against the sidebar anchor and clamped to the viewport, so on a narrow
+      // window it can cover the terminal's centre — clicking it would hit the
+      // card and dismiss nothing).
+      const termBox = await page.locator('#terminal').boundingBox();
+      const cardBox = await page.locator('#rcCard').boundingBox();
+      const outside = (p) =>
+        !cardBox ||
+        p.x < cardBox.x || p.x > cardBox.x + cardBox.width ||
+        p.y < cardBox.y || p.y > cardBox.y + cardBox.height;
+      // Candidates well clear of the top-left blinking cursor, in preference order.
+      const candidates = [
+        { x: termBox.x + termBox.width * 0.5, y: termBox.y + termBox.height * 0.5 },
+        { x: termBox.x + termBox.width * 0.25, y: termBox.y + termBox.height * 0.75 },
+        { x: termBox.x + termBox.width * 0.5, y: termBox.y + termBox.height * 0.9 },
+        { x: termBox.x + termBox.width * 0.15, y: termBox.y + termBox.height * 0.5 },
+      ];
+      const target = candidates.find(outside);
+      expect(target, 'no point inside the terminal is clear of the card').toBeTruthy();
+      await page.mouse.click(target.x, target.y);
       await expect(page.locator('#rcCard')).toHaveCount(0);
     } finally {
       await ctx.delete(`/api/sessions/${id}`);

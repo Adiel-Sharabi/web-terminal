@@ -146,6 +146,11 @@ async function findSession(client, id) {
 
 const OVERLOADED = 'API Error: 529 Overloaded. This is a server-side issue, usually temporary.\r\n';
 
+// Tolerance for comparing a timestamp read in THIS process against one stamped in
+// the worker process. Wide enough to absorb Windows' coarse timer granularity
+// (~15.6ms by default), far too small to let a stale or zeroed value pass.
+const CLOCK_SKEW_MS = 250;
+
 test.describe('#65 — unified compacting state', () => {
   test('PreCompact hook: sets compacting true + compactingSince, and broadcasts it', async () => {
     const pipe = workerPipePath();
@@ -161,7 +166,14 @@ test.describe('#65 — unified compacting state', () => {
       await rpc(client, 'hookEvent', { id, event: 'PreCompact' });
 
       const frame = await ev.waitFor(e => e.event === 'compacting' && e.params.id === id && e.params.compacting === true);
-      expect(frame.params.since).toBeGreaterThanOrEqual(before);
+      // `before` is read in THIS process; `since` is stamped by Date.now() in the
+      // WORKER process. Nothing makes two processes' clock reads agree to the
+      // millisecond, so a strict >= asserts something the platform does not
+      // promise — it failed on a hosted Windows runner by exactly 1ms
+      // (expected >= …505, received …504). What the test actually cares about is
+      // that `since` is stamped around now rather than left at 0 or a stale
+      // value, so allow a small skew. Same tolerance idea as cluster-token.spec.js:37.
+      expect(frame.params.since).toBeGreaterThanOrEqual(before - CLOCK_SKEW_MS);
 
       const found = await findSession(client, id);
       expect(found.compacting).toBe(true);
