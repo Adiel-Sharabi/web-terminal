@@ -342,6 +342,11 @@ class _QuestionOverlayState extends State<QuestionOverlay> {
   /// as [_otherController].
   final TextEditingController _noteController = TextEditingController();
 
+  /// Drives [_contextPanel]'s scroll view so a [Scrollbar] can show a thumb.
+  /// Without one, a clipped lead-up reads as a COMPLETE message — the reported
+  /// failure: the options were unjudgeable and nothing hinted at scrolling.
+  final ScrollController _ctxScroll = ScrollController();
+
   @override
   void initState() {
     super.initState();
@@ -368,6 +373,7 @@ class _QuestionOverlayState extends State<QuestionOverlay> {
   void dispose() {
     _otherController.dispose();
     _noteController.dispose();
+    _ctxScroll.dispose();
     super.dispose();
   }
 
@@ -510,36 +516,52 @@ class _QuestionOverlayState extends State<QuestionOverlay> {
                 // reliable without first requiring a tap inside the overlay.
                 child: Focus(
                   autofocus: true,
-                  child: Container(
-                    constraints:
-                        const BoxConstraints(maxWidth: 640, maxHeight: 520),
-                    margin: const EdgeInsets.all(12),
-                    decoration: BoxDecoration(
-                      color: theme.colorScheme.surfaceContainerHigh,
-                      borderRadius: BorderRadius.circular(AppShape.large),
-                      border:
-                          Border.all(color: theme.colorScheme.outlineVariant),
-                    ),
-                    child: Column(
-                      mainAxisSize: MainAxisSize.min,
-                      children: [
-                        _header(theme, questions.length),
-                        // While typing a free-text ("Other") or note answer the soft
-                        // keyboard is up and vertical space is scarce — the card would
-                        // overflow and clip the field + Send button (the reported
-                        // "can't see the input box when the keyboard is open"). The
-                        // question text has already been read by then, so drop this
-                        // panel to give the input room; it returns the moment
-                        // Other/the note is deselected.
-                        if (!_textEntryActive &&
-                            (widget.contextText ?? '').trim().isNotEmpty)
-                          _contextPanel(theme, widget.contextText!.trim()),
-                        if (questions.length > 1) _tabs(theme, questions),
-                        Flexible(child: _optionList(theme, q)),
-                        _footer(theme, q),
-                      ],
-                    ),
-                  ),
+                  child: LayoutBuilder(builder: (context, box) {
+                    // Size off the space ACTUALLY available (Positioned.fill →
+                    // SafeArea), never off MediaQuery: with a soft keyboard up
+                    // the body shrinks while the screen height does not, so a
+                    // card sized off the screen would overflow exactly when
+                    // room is scarcest. 24 = this card's own vertical margin.
+                    final cardMax = (box.maxHeight - 24).clamp(280.0, 720.0);
+                    // The lead-up carries the reasoning the options are judged
+                    // against, so it earns a real SHARE of the card. A fixed
+                    // 160px sliver clipped a 997-char explanation down to its
+                    // closing sentence, leaving the options unjudgeable — the
+                    // report this replaces.
+                    final ctxMax = (cardMax * 0.45).clamp(120.0, 360.0);
+                    return Container(
+                      constraints:
+                          BoxConstraints(maxWidth: 640, maxHeight: cardMax),
+                      margin: const EdgeInsets.all(12),
+                      decoration: BoxDecoration(
+                        color: theme.colorScheme.surfaceContainerHigh,
+                        borderRadius: BorderRadius.circular(AppShape.large),
+                        border: Border.all(
+                            color: theme.colorScheme.outlineVariant),
+                      ),
+                      child: Column(
+                        mainAxisSize: MainAxisSize.min,
+                        children: [
+                          _header(theme, questions.length),
+                          // While typing a free-text ("Other") or note answer the
+                          // soft keyboard is up and vertical space is scarce — the
+                          // card would overflow and clip the field + Send button
+                          // (the reported "can't see the input box when the
+                          // keyboard is open"). The question text has already been
+                          // read by then, so drop this panel to give the input
+                          // room; it returns the moment Other/the note is
+                          // deselected.
+                          if (!_textEntryActive &&
+                              (widget.contextText ?? '').trim().isNotEmpty)
+                            _contextPanel(
+                                theme, widget.contextText!.trim(), ctxMax),
+                          if (questions.length > 1) _tabs(theme, questions),
+                          Flexible(child: _optionList(theme, q)),
+                          _footer(theme, q),
+                        ],
+                      ),
+                    );
+                  }),
                 ),
               ),
             ),
@@ -551,11 +573,11 @@ class _QuestionOverlayState extends State<QuestionOverlay> {
 
   /// Claude's preceding message, scrollable, so the full answer is readable
   /// before answering (the question alone often carries only the tail).
-  Widget _contextPanel(ThemeData theme, String text) {
+  Widget _contextPanel(ThemeData theme, String text, double maxHeight) {
     return Container(
       margin: const EdgeInsets.fromLTRB(12, 0, 12, 6),
       padding: const EdgeInsets.all(10),
-      constraints: const BoxConstraints(maxHeight: 160),
+      constraints: BoxConstraints(maxHeight: maxHeight),
       decoration: BoxDecoration(
         color: theme.colorScheme.surfaceContainer,
         borderRadius: BorderRadius.circular(AppShape.medium),
@@ -580,11 +602,17 @@ class _QuestionOverlayState extends State<QuestionOverlay> {
           ),
           const SizedBox(height: 6),
           Flexible(
-            child: SingleChildScrollView(
-              child: Text(
-                text,
-                style: theme.textTheme.bodyMedium
-                    ?.copyWith(color: theme.colorScheme.onSurface),
+            child: Scrollbar(
+              controller: _ctxScroll,
+              thumbVisibility: true,
+              child: SingleChildScrollView(
+                controller: _ctxScroll,
+                primary: false,
+                child: Text(
+                  text,
+                  style: theme.textTheme.bodyMedium
+                      ?.copyWith(color: theme.colorScheme.onSurface),
+                ),
               ),
             ),
           ),

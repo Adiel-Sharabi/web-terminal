@@ -27,6 +27,27 @@ PendingQuestionItem _q(
 /// The keys of each frame, for terse assertions.
 List<String> _keys(List<AnswerFrame> f) => [for (final x in f) x.keys];
 
+/// A realistically long lead-up, modelled on the one that produced the report:
+/// the explanation sits at the TOP and the closing paragraph at the bottom, so
+/// a panel showing only the tail leaves the options unjudgeable.
+const String _longLeadUp = '''
+HEAD_THE_CHANGE_IS_APPLIED_AND_CORRECT — every part of it is verified. But
+testing it end to end turned up a real defect, and it decides which of the
+options below is the right one:
+
+The client asks for a retry-safe write. The server turns that into a
+conflict check, and a conflict check needs read permission — which this
+change deliberately withholds, because withholding it is the entire point.
+So the two halves are each individually right and mutually incompatible.
+
+A. neither flag        -> 201
+B. first flag only     -> 201
+C. second flag only    -> 401  permission denied
+D. both (what we send) -> 401  permission denied
+
+TAIL_SO_EVERY_WRITE would have failed, retried, and reported nothing —
+forever.''';
+
 void main() {
   group('buildAnswerFrames', () {
     test('single-select, single question: the row digit THEN a committing Enter',
@@ -625,6 +646,77 @@ void main() {
 
     expect(find.text('Claude said'), findsOneWidget);
     expect(find.textContaining('FULL_ANSWER_CONTEXT'), findsOneWidget);
+  });
+
+  testWidgets(
+      'a LONG lead-up gets a viewport scaled to the card, starts at the top, '
+      'and advertises that there is more to read', (tester) async {
+    // Reported 2026-08-05 (XPS session, Windows companion, chat lens): the
+    // options "change the app" vs "change only the database" could not be
+    // judged, because the panel showed only the closing paragraph of a
+    // 997-char lead-up. Everything that explained the choice — the defect, and
+    // the 201/401 table proving it — sat above the fold behind a fixed 160px
+    // window (a 116px viewport once the label and padding were taken) with NO
+    // scrollbar, so nothing suggested there was more to read. The text was all
+    // present; it simply was not what you saw.
+    //
+    // The short-context test above always fitted, which is exactly why this
+    // shipped: a one-line fixture cannot see a clipping bug.
+    tester.view.physicalSize = const Size(1200, 1800);
+    tester.view.devicePixelRatio = 1.0;
+    addTearDown(tester.view.reset);
+
+    await tester.pumpWidget(
+      MaterialApp(
+        theme: AppTheme.dark,
+        home: Scaffold(
+          body: Stack(
+            children: [
+              QuestionOverlay(
+                question: PendingQuestion(
+                  toolUseId: 'tlong',
+                  questions: [_q(['change the app', 'change the database'])],
+                ),
+                contextText: _longLeadUp,
+                onSend: (_) {},
+                onKey: (_) {},
+                onDismiss: () {},
+              ),
+            ],
+          ),
+        ),
+      ),
+    );
+    await tester.pumpAndSettle();
+
+    final ctxText = find.byWidgetPredicate(
+      (w) => w is Text && (w.data ?? '').startsWith('HEAD_'),
+    );
+    expect(ctxText, findsOneWidget);
+
+    // The lead-up IS the reasoning, so on a roomy window it must get a real
+    // share of the card rather than the sliver that caused the report.
+    final viewport = find.ancestor(
+      of: ctxText,
+      matching: find.byType(SingleChildScrollView),
+    );
+    expect(tester.getSize(viewport).height, greaterThanOrEqualTo(240.0));
+
+    // A clipped panel with no thumb reads as a COMPLETE message — the thumb is
+    // the only thing that says "there is more above/below".
+    expect(
+      find.ancestor(of: ctxText, matching: find.byType(Scrollbar)),
+      findsOneWidget,
+    );
+
+    // Guards the other half of the report: what you see first must be the
+    // BEGINNING of the explanation, never its tail.
+    final position = tester
+        .state<ScrollableState>(
+          find.ancestor(of: ctxText, matching: find.byType(Scrollable)).first,
+        )
+        .position;
+    expect(position.pixels, 0.0);
   });
 
   testWidgets(
