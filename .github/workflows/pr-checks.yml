@@ -57,17 +57,76 @@ jobs:
       - name: No secrets or machine-identifying data
         run: node scripts/check-no-secrets.js
 
-      - name: SERVER_VERSION bumped
+      - name: Version bumped for what changed
+        # WHY THIS IS PER-AREA. The gate protects one property: a released
+        # artifact must be identifiable, so it can be deployed and rolled back
+        # cleanly. This repo ships TWO artifacts — the server (SERVER_VERSION in
+        # server.js) and the companion app (version in ai-terminal/pubspec.yaml)
+        # — and this check used to demand a SERVER_VERSION bump from every PR,
+        # including one touching only the companion. That is wrong in both
+        # directions at once: it forces a server version whose server bytes are
+        # byte-identical to the previous one (destroying the very identity the
+        # gate exists to protect), while never checking the version of the thing
+        # the PR actually changed. First hit by #100, a companion-only fix —
+        # and it would have blocked every companion-only PR from then on.
+        #
+        # Anything outside ai-terminal/ still requires a SERVER_VERSION bump,
+        # docs and CI config included. That is deliberate: the alternative is a
+        # hand-maintained list of "paths in neither artifact", and such a list
+        # rots silently until the day it lets a real server change through
+        # unbumped.
         if: github.event_name == 'pull_request'
         run: |
-          base=$(git show origin/${{ github.base_ref }}:server.js | grep -oP "SERVER_VERSION = '\K[0-9.]+" | head -1)
-          head=$(grep -oP "SERVER_VERSION = '\K[0-9.]+" server.js | head -1)
-          echo "base=$base  head=$head"
-          if [ "$base" = "$head" ]; then
-            echo "::error::SERVER_VERSION is still $head. Bump it — patch for a fix, minor for a feature, major for a break. A PR without a bump cannot be deployed or rolled back cleanly."
-            exit 1
+          base_ref="origin/${{ github.base_ref }}"
+          changed=$(git diff --name-only "$base_ref"...HEAD)
+          echo "changed files:"; printf '%s\n' "$changed" | sed 's/^/  /'
+
+          companion=0; other=0
+          while IFS= read -r f; do
+            [ -z "$f" ] && continue
+            case "$f" in
+              ai-terminal/*) companion=1 ;;
+              *)             other=1 ;;
+            esac
+          done <<< "$changed"
+
+          fail=0
+
+          if [ "$other" = "1" ]; then
+            b=$(git show "$base_ref":server.js | grep -oP "SERVER_VERSION = '\K[0-9.]+" | head -1)
+            h=$(grep -oP "SERVER_VERSION = '\K[0-9.]+" server.js | head -1)
+            if [ -z "$b" ] || [ -z "$h" ]; then
+              # An empty capture must FAIL, never pass. If the version line's
+              # shape drifts on HEAD only, the regex stops matching there, `h`
+              # is empty, "$b" != "$h" is true — and the gate would print a
+              # cheerful "OK — 1.2.3 -> " and go green while HEAD carries no
+              # readable version at all. A gate that can pass silently is not a
+              # gate.
+              echo "::error::could not read SERVER_VERSION (base='$b' head='$h'). The version line's format changed — fix the line or this gate."
+              fail=1
+            elif [ "$b" = "$h" ]; then
+              echo "::error::SERVER_VERSION is still $h. Bump it — patch for a fix, minor for a feature, major for a break. A PR without a bump cannot be deployed or rolled back cleanly."
+              fail=1
+            else
+              echo "OK — server $b -> $h"
+            fi
           fi
-          echo "OK — $base -> $head"
+
+          if [ "$companion" = "1" ]; then
+            b=$(git show "$base_ref":ai-terminal/pubspec.yaml | grep -oP '^version:\s*\K\S+' | head -1)
+            h=$(grep -oP '^version:\s*\K\S+' ai-terminal/pubspec.yaml | head -1)
+            if [ -z "$b" ] || [ -z "$h" ]; then
+              echo "::error::could not read the companion version from ai-terminal/pubspec.yaml (base='$b' head='$h'). Fix the version line or this gate."
+              fail=1
+            elif [ "$b" = "$h" ]; then
+              echo "::error::ai-terminal/pubspec.yaml version is still $h. Bump it — the companion is a separately released artifact, and an unbumped build cannot be told apart from the one before it on a device."
+              fail=1
+            else
+              echo "OK — companion $b -> $h"
+            fi
+          fi
+
+          exit $fail
 
       - name: Companion app tests
         # The Dart suite is fast, hermetic and needs no PTY, so it belongs in the
