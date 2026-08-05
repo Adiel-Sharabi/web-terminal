@@ -340,6 +340,46 @@ test.describe('Stale session status detection', () => {
     }, { timeout: 10000 }).toBe('idle');
   });
 
+  test('#98: an idle Notification while a question is on screen does NOT idle the dot', async () => {
+    // Reported on Office-Tests 2026-08-04: "there was a question but it looks idle".
+    // Claude raises an idle Notification after ~60s of waiting for input — which is
+    // exactly what a pending AskUserQuestion produces — and the worker folds
+    // Notification into the same case as Stop, so it called armIdle and painted the
+    // calm green dot on the session that owed an answer. #79 pinned the STALE rule's
+    // exemption; this pins the explicit path, which never reaches that rule at all.
+    const ask = await ctx.post(`/api/session/${sessionId}/hook`, { data: ASK_HOOK });
+    expect((await ask.json()).status).toBe('working');
+
+    const notified = await ctx.post(`/api/session/${sessionId}/hook`, {
+      data: { event: 'Notification', message: 'Claude is waiting for your input' },
+    });
+    expect((await notified.json()).status).not.toBe('idle');
+
+    // And it must still be non-idle a beat later — armIdle is debounced, so an
+    // assertion on the immediate reply alone would pass even if the idle were merely
+    // scheduled rather than suppressed.
+    await new Promise(r => setTimeout(r, 1500));
+    const s = (await (await ctx.get('/api/sessions')).json()).find(x => x.id === sessionId);
+    expect(s.status).not.toBe('idle');
+  });
+
+  test('#98: once the question is answered, an idle Notification idles normally', async () => {
+    // The guard must not pin the session non-idle for the rest of its life — the
+    // flag is cleared by the events that genuinely resolve a question.
+    await ctx.post(`/api/session/${sessionId}/hook`, { data: ASK_HOOK });
+    await ctx.post(`/api/session/${sessionId}/hook`, {
+      data: { event: 'PostToolUse', tool_name: 'AskUserQuestion' },
+    });
+
+    await ctx.post(`/api/session/${sessionId}/hook`, {
+      data: { event: 'Notification', message: 'Claude is waiting for your input' },
+    });
+    await expect.poll(async () => {
+      const res = await ctx.get('/api/sessions');
+      return (await res.json()).find(x => x.id === sessionId).status;
+    }, { timeout: 10000 }).toBe('idle');
+  });
+
   test('#79: a pending question still self-corrects at the long abandonment backstop', async () => {
     // Self-bounding, exactly as 'waiting' is: an agent that died mid-question and
     // never fired a resolving hook must not pin the session forever — but only at
