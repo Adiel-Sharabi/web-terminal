@@ -93,6 +93,94 @@ void main() {
   });
 
   testWidgets(
+    '#83: the inline `code` background is translucent, so a selection '
+    'highlight underneath it stays visible',
+    (tester) async {
+      // The reported symptom was "I can't see the selected text, but it WAS
+      // selected" — a path in inline `code` selected correctly (the clipboard
+      // and SelectionArea agreed, measured with a real OS drag) while showing
+      // no highlight at all, which reads as "selection is broken".
+      //
+      // The mechanism is a paint order, which is why this is assertable without
+      // any input at all: Flutter paints the selection highlight into the
+      // paragraph FIRST and the text — including a span's `backgroundColor` —
+      // on top. An OPAQUE span background therefore covers the highlight
+      // completely. So the invariant worth pinning is not "a drag highlights"
+      // (a widget test cannot see that; synthetic events never traverse the OS
+      // input path — see #55/#83) but "the code span cannot paint over it".
+      final page = TranscriptPage(
+        messages: const [
+          TranscriptTurn(
+            role: 'assistant',
+            text: r'open `C:\Users\me\query-plan.sql` now.',
+            toolUses: [],
+            ts: null,
+          ),
+        ],
+        cursor: null,
+        hasMore: false,
+      );
+      await tester.pumpWidget(
+        _wrap(
+          ConversationView(
+            session: _session(),
+            fetchPage: (id, {before, limit}) async => page,
+          ),
+        ),
+      );
+      await tester.pumpAndSettle();
+
+      // Find the monospace span the markdown built for the inline code, by
+      // walking the REAL span tree rather than trusting the stylesheet object —
+      // what matters is the style that actually reaches the painter.
+      final codeStyles = <TextStyle>[];
+      for (final rt in tester.widgetList<RichText>(find.byType(RichText))) {
+        rt.text.visitChildren((span) {
+          if (span is TextSpan && span.style?.fontFamily == 'monospace') {
+            codeStyles.add(span.style!);
+          }
+          return true;
+        });
+      }
+
+      expect(
+        codeStyles,
+        isNotEmpty,
+        reason: 'expected an inline-code span rendered in monospace',
+      );
+
+      // Collect the backgrounds rather than skipping the null ones inline, so
+      // this cannot pass while asserting nothing. A null background genuinely
+      // cannot occlude a highlight, so dropping the tint WOULD also "fix" #83 —
+      // but silently, by deleting the affordance that marks a span as code. That
+      // is a UI decision, not a bug fix, and it should not be able to ride in
+      // under a green #83 test. If you are deliberately removing the inline-code
+      // background, change this expectation in the same commit and say why.
+      final backgrounds = codeStyles
+          .map((s) => s.backgroundColor)
+          .whereType<Color>()
+          .toList();
+      expect(
+        backgrounds,
+        isNotEmpty,
+        reason:
+            'no inline-code span carried a backgroundColor at all — either the '
+            'code affordance was removed, or this test is no longer looking at '
+            'the span it thinks it is',
+      );
+      for (final bg in backgrounds) {
+        expect(
+          bg.a,
+          lessThan(1.0),
+          reason:
+              'an opaque inline-code background is composited OVER the selection '
+              'highlight and hides it — that is #83',
+        );
+      }
+    },
+  );
+
+  testWidgets(
     '#54: a user turn and an agent turn are distinguished by alignment, '
     'bubble width, and a role tag naming the agent from the SERVER registry '
     '(never a hardcoded Claude/Codex palette)',
