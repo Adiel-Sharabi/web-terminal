@@ -148,9 +148,27 @@ void main() {
         isNotEmpty,
         reason: 'expected an inline-code span rendered in monospace',
       );
-      for (final s in codeStyles) {
-        final bg = s.backgroundColor;
-        if (bg == null) continue; // no background cannot hide anything
+
+      // Collect the backgrounds rather than skipping the null ones inline, so
+      // this cannot pass while asserting nothing. A null background genuinely
+      // cannot occlude a highlight, so dropping the tint WOULD also "fix" #83 —
+      // but silently, by deleting the affordance that marks a span as code. That
+      // is a UI decision, not a bug fix, and it should not be able to ride in
+      // under a green #83 test. If you are deliberately removing the inline-code
+      // background, change this expectation in the same commit and say why.
+      final backgrounds = codeStyles
+          .map((s) => s.backgroundColor)
+          .whereType<Color>()
+          .toList();
+      expect(
+        backgrounds,
+        isNotEmpty,
+        reason:
+            'no inline-code span carried a backgroundColor at all — either the '
+            'code affordance was removed, or this test is no longer looking at '
+            'the span it thinks it is',
+      );
+      for (final bg in backgrounds) {
         expect(
           bg.a,
           lessThan(1.0),
