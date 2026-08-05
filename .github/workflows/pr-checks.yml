@@ -95,7 +95,16 @@ jobs:
           if [ "$other" = "1" ]; then
             b=$(git show "$base_ref":server.js | grep -oP "SERVER_VERSION = '\K[0-9.]+" | head -1)
             h=$(grep -oP "SERVER_VERSION = '\K[0-9.]+" server.js | head -1)
-            if [ "$b" = "$h" ]; then
+            if [ -z "$b" ] || [ -z "$h" ]; then
+              # An empty capture must FAIL, never pass. If the version line's
+              # shape drifts on HEAD only, the regex stops matching there, `h`
+              # is empty, "$b" != "$h" is true — and the gate would print a
+              # cheerful "OK — 1.2.3 -> " and go green while HEAD carries no
+              # readable version at all. A gate that can pass silently is not a
+              # gate.
+              echo "::error::could not read SERVER_VERSION (base='$b' head='$h'). The version line's format changed — fix the line or this gate."
+              fail=1
+            elif [ "$b" = "$h" ]; then
               echo "::error::SERVER_VERSION is still $h. Bump it — patch for a fix, minor for a feature, major for a break. A PR without a bump cannot be deployed or rolled back cleanly."
               fail=1
             else
@@ -106,7 +115,10 @@ jobs:
           if [ "$companion" = "1" ]; then
             b=$(git show "$base_ref":ai-terminal/pubspec.yaml | grep -oP '^version:\s*\K\S+' | head -1)
             h=$(grep -oP '^version:\s*\K\S+' ai-terminal/pubspec.yaml | head -1)
-            if [ "$b" = "$h" ]; then
+            if [ -z "$b" ] || [ -z "$h" ]; then
+              echo "::error::could not read the companion version from ai-terminal/pubspec.yaml (base='$b' head='$h'). Fix the version line or this gate."
+              fail=1
+            elif [ "$b" = "$h" ]; then
               echo "::error::ai-terminal/pubspec.yaml version is still $h. Bump it — the companion is a separately released artifact, and an unbumped build cannot be told apart from the one before it on a device."
               fail=1
             else
