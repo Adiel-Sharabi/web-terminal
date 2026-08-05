@@ -29,10 +29,19 @@ node -c server.js
 ```
 
 ### 4. Bump Version
-Before every commit that will be pushed, bump `SERVER_VERSION` in `server.js` (line 10):
+Bump the version of **whichever artifact the change touches** — this repo ships two, and the PR gate checks per-area:
+
+| The change touches | Bump |
+|---|---|
+| anything outside `ai-terminal/` | `SERVER_VERSION` in `server.js` |
+| anything under `ai-terminal/` | `version:` in `ai-terminal/pubspec.yaml` |
+| both | both |
+
 - Patch bump (1.0.x) for bug fixes
 - Minor bump (1.x.0) for new features
 - Major bump (x.0.0) for breaking changes
+
+Docs- and CI-only changes still bump `SERVER_VERSION` — the gate deliberately keeps no list of "paths belonging to neither artifact", because such a list rots until it lets a real server change through unbumped. **Never bump `SERVER_VERSION` to satisfy a companion-only PR:** it publishes a server version whose server bytes are identical to the one before it, which destroys the identity the version exists to carry.
 
 ### 5. Update README.md
 If new user-facing features were added, update `README.md`:
