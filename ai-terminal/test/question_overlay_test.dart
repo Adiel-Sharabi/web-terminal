@@ -696,11 +696,21 @@ void main() {
 
     // The lead-up IS the reasoning, so on a roomy window it must get a real
     // share of the card rather than the sliver that caused the report.
+    //
+    // The floor reads 200, not the 240 this test shipped with. It was NOT
+    // lowered to accommodate a regression: #94 found the opposite failure on a
+    // phone — the lead-up's share had grown large enough to leave the options
+    // less room than the question alone needed — and rebalancing it moved this
+    // viewport from ~282 to ~228 while the option list on the same screen went
+    // 198 -> ~340. What this test defends is the ORIGINAL defect, a lead-up
+    // pinned to a fixed sliver regardless of card size: that was 116px, and any
+    // number in this range is still nearly double it. The panel also gained an
+    // expander since, so its full text is one tap away rather than lost.
     final viewport = find.ancestor(
       of: ctxText,
       matching: find.byType(SingleChildScrollView),
     );
-    expect(tester.getSize(viewport).height, greaterThanOrEqualTo(240.0));
+    expect(tester.getSize(viewport).height, greaterThanOrEqualTo(200.0));
 
     // A clipped panel with no thumb reads as a COMPLETE message — the thumb is
     // the only thing that says "there is more above/below".
@@ -1353,5 +1363,193 @@ void main() {
     await tester.pumpAndSettle();
     expect(find.text('Other…'), findsNothing);
     expect(find.byType(TextField), findsNothing);
+  });
+
+  group('#94 — answering from a phone', () {
+    // Reported from mobile: "when a question comes up the context isn't clear
+    // and the actual question text is sometimes missing", so the answer had to
+    // be given in the terminal instead — where the narrow window wraps Claude's
+    // boxed selector into unreadable lines.
+    //
+    // Measured on a 412x915 phone before the fix, with the fixture below:
+    //
+    //   option-list viewport   198px
+    //   the question text      192px of it
+    //   options fully visible  0 of 4
+    //   nav-key strip          overflowed by 7.3px
+    //
+    // Nothing was missing and nothing was stale — the card gave the lead-up a
+    // flat 45% and capped itself at 720px, so the answering half was left less
+    // room than the question alone needed. You saw the reasoning and not one
+    // option; scrolling to find them pushed the question off screen, which is
+    // the "question text is missing" half of the same report.
+    //
+    // Every existing overlay test ran at the 800x600 harness default or wider,
+    // which is exactly why this shipped — the squeeze only bites once the fixed
+    // header and footer are a large share of a short card.
+
+    /// A realistically hard case: a long lead-up, a question that runs to
+    /// several lines, and four options that each carry a description.
+    PendingQuestionItem mobileQuestion() => const PendingQuestionItem(
+          header: 'Scope',
+          question: 'QMARK Should the fix change the app so it stops asking '
+              'for the conflict check, or change the database so that the '
+              'check is permitted?',
+          multiSelect: false,
+          hasPreview: false,
+          options: [
+            QuestionOption(
+                label: 'Change the app',
+                description:
+                    'Drop the retry-safe header; tolerate duplicates instead.'),
+            QuestionOption(
+                label: 'Change the database',
+                description:
+                    'Grant the read the conflict check needs, narrowed to '
+                    'this table.'),
+            QuestionOption(
+                label: 'Both',
+                description: 'Belt and braces; a wider blast radius.'),
+            QuestionOption(
+                label: 'Neither — revert',
+                description: 'Back it out and rethink the approach.'),
+          ],
+        );
+
+    Future<void> pumpPhone(WidgetTester tester) async {
+      // A Pixel-class phone in logical pixels. NOT the 800x600 default: the
+      // whole defect is a short-card squeeze and a roomy harness hides it.
+      tester.view.physicalSize = const Size(412 * 3, 915 * 3);
+      tester.view.devicePixelRatio = 3.0;
+      addTearDown(tester.view.reset);
+      await tester.pumpWidget(
+        MaterialApp(
+          theme: AppTheme.dark,
+          home: Scaffold(
+            body: Stack(
+              children: [
+                QuestionOverlay(
+                  question: PendingQuestion(
+                    toolUseId: 'm94',
+                    questions: [mobileQuestion()],
+                  ),
+                  contextText: _longLeadUp,
+                  onSend: (_) {},
+                  onKey: (_) {},
+                  onDismiss: () {},
+                ),
+              ],
+            ),
+          ),
+        ),
+      );
+      await tester.pumpAndSettle();
+    }
+
+    /// The scroll viewport that owns the options — the band an option must fall
+    /// inside to be reachable without scrolling. Asserting on the SCREEN rect
+    /// instead would pass while the option sat clipped outside its own
+    /// viewport, which is how the first cut of this test overstated the fix.
+    Rect optionViewport(WidgetTester tester) => tester.getRect(find
+        .ancestor(
+          of: find.text('Change the app'),
+          matching: find.byType(SingleChildScrollView),
+        )
+        .first);
+
+    int visibleOptions(WidgetTester tester) {
+      final vp = optionViewport(tester);
+      var n = 0;
+      for (final label in const [
+        'Change the app',
+        'Change the database',
+        'Both',
+        'Neither — revert',
+      ]) {
+        if (tester.getRect(find.text(label)).bottom <= vp.bottom + 0.5) n++;
+      }
+      return n;
+    }
+
+    testWidgets('options are reachable without scrolling', (tester) async {
+      await pumpPhone(tester);
+      // Was 0. The card exists so a question can be answered from it; an
+      // overlay showing no option at all is one you have to leave.
+      expect(visibleOptions(tester), greaterThanOrEqualTo(2));
+    });
+
+    testWidgets('the question is fully readable without scrolling it',
+        (tester) async {
+      await pumpPhone(tester);
+      final text = find.textContaining('QMARK');
+      expect(text, findsOneWidget);
+      final vp = tester.getRect(
+          find.ancestor(of: text, matching: find.byType(SingleChildScrollView))
+              .first);
+      expect(tester.getRect(text).height, lessThanOrEqualTo(vp.height + 0.5));
+    });
+
+    testWidgets('the question stays on screen while you scroll the options',
+        (tester) async {
+      // The sharpest statement of "the actual question text is missing": it
+      // used to be the first child of the OPTION scroll view, so the very act
+      // of scrolling down to reach an option carried it away. You could see
+      // what you were choosing between, or what you were choosing FOR, never
+      // both at once. It is now pinned outside that view.
+      await pumpPhone(tester);
+      final text = find.textContaining('QMARK');
+      final questionBefore = tester.getRect(text);
+      final optionBefore = tester.getRect(find.text('Change the app'));
+
+      await tester.drag(find.text('Change the app'), const Offset(0, -400));
+      await tester.pumpAndSettle();
+
+      // The options really did move...
+      expect(
+        tester.getRect(find.text('Change the app')).top,
+        lessThan(optionBefore.top),
+      );
+      // ...and the question did not.
+      expect(tester.getRect(text), questionBefore);
+    });
+
+    testWidgets('collapsing the lead-up hands its room to the options',
+        (tester) async {
+      // The lead-up is the only part of the card that can yield, and the user
+      // is the one who knows when they have finished reading it. Without this
+      // lever a long explanation and four described options cannot both fit a
+      // phone — no split of a fixed card can make them.
+      await pumpPhone(tester);
+      final expanded = optionViewport(tester).height;
+      expect(find.textContaining('HEAD_'), findsOneWidget);
+
+      await tester.tap(find.text('Claude said'));
+      await tester.pumpAndSettle();
+
+      expect(find.textContaining('HEAD_'), findsNothing);
+      expect(optionViewport(tester).height, greaterThan(expanded));
+      // The point of collapsing is to finish the job, so it must actually get
+      // you there: every option reachable, no scrolling.
+      expect(visibleOptions(tester), 4);
+
+      // ...and it is a toggle, not a one-way door — the lead-up comes back.
+      await tester.tap(find.text('Claude said'));
+      await tester.pumpAndSettle();
+      expect(find.textContaining('HEAD_'), findsOneWidget);
+    });
+
+    testWidgets('the nav-key strip fits a phone width', (tester) async {
+      // Five keys in a Row overflowed 412dp by 7.3px. A RenderFlex does not
+      // shrink to fit — it paints past its bounds and the overflowing child is
+      // unreachable, and here that child is 'Enter', the one key whose whole
+      // purpose is to commit an answer.
+      await pumpPhone(tester);
+      expect(tester.takeException(), isNull);
+      for (final k in const ['Space', 'Tab', 'Enter']) {
+        expect(find.text(k), findsOneWidget);
+        expect(tester.getRect(find.text(k)).right,
+            lessThanOrEqualTo(412.0));
+      }
+    });
   });
 }

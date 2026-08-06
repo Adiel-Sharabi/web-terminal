@@ -285,6 +285,13 @@ String? lastAssistantText(List<TranscriptTurn> turns) {
   return null;
 }
 
+/// Vertical room the ANSWERING half of the card needs before the lead-up may
+/// claim any (#94): header (~48) + footer (~122, nav strip and buttons) + three
+/// option rows (~100 each, a label with a description). Measured off the real
+/// card at a 412dp width; it is a floor, not a layout constant — nothing is
+/// positioned from it, it only decides how much the lead-up may take.
+const double kAnswerFloor = 470;
+
 class QuestionOverlay extends StatefulWidget {
   const QuestionOverlay({
     super.key,
@@ -347,6 +354,17 @@ class _QuestionOverlayState extends State<QuestionOverlay> {
   /// failure: the options were unjudgeable and nothing hinted at scrolling.
   final ScrollController _ctxScroll = ScrollController();
 
+  /// Same job for the pinned question (#94). A question long enough to need
+  /// its own scroll is rare, but a silently clipped one is the exact defect
+  /// this issue is about, so it gets the same honest affordance.
+  final ScrollController _qScroll = ScrollController();
+
+  /// Whether the lead-up panel is expanded (#94). Starts open — the context is
+  /// why the options mean anything, and hiding it by default would re-create
+  /// "the context isn't clear". Collapsing is the user's lever to hand its
+  /// whole share to the options on a small screen.
+  bool _ctxExpanded = true;
+
   @override
   void initState() {
     super.initState();
@@ -374,6 +392,7 @@ class _QuestionOverlayState extends State<QuestionOverlay> {
     _otherController.dispose();
     _noteController.dispose();
     _ctxScroll.dispose();
+    _qScroll.dispose();
     super.dispose();
   }
 
@@ -522,13 +541,44 @@ class _QuestionOverlayState extends State<QuestionOverlay> {
                     // the body shrinks while the screen height does not, so a
                     // card sized off the screen would overflow exactly when
                     // room is scarcest. 24 = this card's own vertical margin.
-                    final cardMax = (box.maxHeight - 24).clamp(280.0, 720.0);
-                    // The lead-up carries the reasoning the options are judged
-                    // against, so it earns a real SHARE of the card. A fixed
-                    // 160px sliver clipped a 997-char explanation down to its
-                    // closing sentence, leaving the options unjudgeable — the
-                    // report this replaces.
-                    final ctxMax = (cardMax * 0.45).clamp(120.0, 360.0);
+                    //
+                    // The ceiling is 1000, not 720 (#94): a 412x915 phone offers
+                    // 891 and the old cap threw away 171 of it — one whole
+                    // option row plus change — on the very device with none to
+                    // spare. It stays capped at all because the card is only
+                    // 640 wide, and an unbounded column that narrow on a large
+                    // monitor reads as a broken layout rather than a dialog.
+                    final cardMax = (box.maxHeight - 24).clamp(280.0, 1000.0);
+                    // The question is PINNED (below), so unlike before it is
+                    // bounded rather than free to fill the option viewport.
+                    // The ceiling is generous on purpose: the pinned block
+                    // takes only what the text NEEDS (a bounded box around a
+                    // scroll view), so a roomy cap costs a normal one-line
+                    // question nothing and buys a six-line one being readable
+                    // without scrolling — which is this issue's first
+                    // requirement, and worth more than a third option row.
+                    final qMax = (cardMax * 0.30).clamp(64.0, 260.0);
+                    // The lead-up gets the SPARE room — not a fixed share.
+                    //
+                    // It used to take a flat 45%, which on a 720 card meant 324px
+                    // for the reasoning and 198 for the answering half — less
+                    // than the question text alone needed, so a phone showed the
+                    // explanation and NOT ONE option (#94). A percentage cannot
+                    // fix that, because the header and footer are FIXED costs:
+                    // the smaller the card, the larger their share, and the more
+                    // brutally any percentage split squeezes whatever is left.
+                    //
+                    // So the priority is stated directly instead. Everything but
+                    // the lead-up has a job you cannot answer without — the
+                    // question says what is being asked, the options are the
+                    // answer, the footer sends it — and [kAnswerFloor] is what
+                    // those need for three option rows to be reachable. The
+                    // lead-up takes what remains, which is honest because it is
+                    // the one panel that says so: it has a scrollbar AND an
+                    // expander advertising that there is more where this came
+                    // from.
+                    final ctxMax =
+                        (cardMax - qMax - kAnswerFloor).clamp(96.0, 300.0);
                     return Container(
                       constraints:
                           BoxConstraints(maxWidth: 640, maxHeight: cardMax),
@@ -556,6 +606,15 @@ class _QuestionOverlayState extends State<QuestionOverlay> {
                             _contextPanel(
                                 theme, widget.contextText!.trim(), ctxMax),
                           if (questions.length > 1) _tabs(theme, questions),
+                          // PINNED, outside the option scroll view (#94). It
+                          // used to be the first child of that view, so the
+                          // moment you scrolled down to reach an option the
+                          // question left the screen — you could see what you
+                          // were choosing between, or what you were choosing
+                          // FOR, never both. That is the reported "the actual
+                          // question text is sometimes missing".
+                          if (q.question.isNotEmpty)
+                            _questionText(theme, q.question, qMax),
                           Flexible(child: _optionList(theme, q)),
                           _footer(theme, q),
                         ],
@@ -566,6 +625,27 @@ class _QuestionOverlayState extends State<QuestionOverlay> {
               ),
             ),
           ),
+        ),
+      ),
+    );
+  }
+
+  /// The question, pinned above the options so it is on screen for the whole
+  /// time you are choosing (#94). Bounded by [maxHeight] and scrollable past
+  /// it — a question long enough to need that is rare, but it must clip
+  /// visibly (thumb) rather than silently, which is the lesson the lead-up
+  /// panel below already carries.
+  Widget _questionText(ThemeData theme, String text, double maxHeight) {
+    return Container(
+      constraints: BoxConstraints(maxHeight: maxHeight),
+      padding: const EdgeInsets.fromLTRB(16, 2, 16, 8),
+      alignment: Alignment.centerLeft,
+      child: Scrollbar(
+        controller: _qScroll,
+        child: SingleChildScrollView(
+          controller: _qScroll,
+          primary: false,
+          child: Text(text, style: theme.textTheme.bodyLarge),
         ),
       ),
     );
@@ -587,35 +667,50 @@ class _QuestionOverlayState extends State<QuestionOverlay> {
         crossAxisAlignment: CrossAxisAlignment.start,
         mainAxisSize: MainAxisSize.min,
         children: [
-          Row(
-            children: [
-              Icon(Icons.forum_outlined,
-                  size: 13, color: theme.colorScheme.onSurfaceVariant),
-              const SizedBox(width: 5),
-              Text(
-                'Claude said',
-                style: theme.textTheme.labelSmall?.copyWith(
+          // The whole label row is the collapse toggle (#94). On a phone the
+          // lead-up's share is the only slack worth reclaiming, and the user is
+          // the one who knows when they have finished reading it.
+          InkWell(
+            onTap: () => setState(() => _ctxExpanded = !_ctxExpanded),
+            child: Row(
+              children: [
+                Icon(Icons.forum_outlined,
+                    size: 13, color: theme.colorScheme.onSurfaceVariant),
+                const SizedBox(width: 5),
+                Expanded(
+                  child: Text(
+                    'Claude said',
+                    style: theme.textTheme.labelSmall?.copyWith(
+                      color: theme.colorScheme.onSurfaceVariant,
+                    ),
+                  ),
+                ),
+                Icon(
+                  _ctxExpanded ? Icons.expand_less : Icons.expand_more,
+                  size: 16,
                   color: theme.colorScheme.onSurfaceVariant,
                 ),
-              ),
-            ],
+              ],
+            ),
           ),
-          const SizedBox(height: 6),
-          Flexible(
-            child: Scrollbar(
-              controller: _ctxScroll,
-              thumbVisibility: true,
-              child: SingleChildScrollView(
+          if (_ctxExpanded) ...[
+            const SizedBox(height: 6),
+            Flexible(
+              child: Scrollbar(
                 controller: _ctxScroll,
-                primary: false,
-                child: Text(
-                  text,
-                  style: theme.textTheme.bodyMedium
-                      ?.copyWith(color: theme.colorScheme.onSurface),
+                thumbVisibility: true,
+                child: SingleChildScrollView(
+                  controller: _ctxScroll,
+                  primary: false,
+                  child: Text(
+                    text,
+                    style: theme.textTheme.bodyMedium
+                        ?.copyWith(color: theme.colorScheme.onSurface),
+                  ),
                 ),
               ),
             ),
-          ),
+          ],
         ],
       ),
     );
@@ -660,7 +755,14 @@ class _QuestionOverlayState extends State<QuestionOverlay> {
               : questions[i].header;
           return ChoiceChip(
             selected: selected,
-            onSelected: (_) => setState(() => _tab = i),
+            onSelected: (_) {
+              setState(() => _tab = i);
+              // The pinned question is per-TAB but its scroll position is not,
+              // so a long Q1 scrolled halfway would hand Q2 the same offset and
+              // open it mid-sentence. Only reachable since the question became
+              // a bounded box of its own (#94).
+              if (_qScroll.hasClients) _qScroll.jumpTo(0);
+            },
             label: Text(answered ? '$label ✓' : label),
           );
         },
@@ -674,11 +776,9 @@ class _QuestionOverlayState extends State<QuestionOverlay> {
       child: Column(
         crossAxisAlignment: CrossAxisAlignment.start,
         children: [
-          if (q.question.isNotEmpty)
-            Padding(
-              padding: const EdgeInsets.fromLTRB(4, 2, 4, 8),
-              child: Text(q.question, style: theme.textTheme.bodyLarge),
-            ),
+          // NOTE: the question itself is deliberately NOT here — it is pinned
+          // above this scroll view (#94). Putting it back would restore the
+          // bug where scrolling to an option hides what the options answer.
           for (var i = 0; i < q.options.length; i++)
             _optionTile(theme, q, i),
           // Note (#64 Gap 1): a small affordance to attach a note to the
@@ -928,8 +1028,13 @@ class _QuestionOverlayState extends State<QuestionOverlay> {
           // keyboard, so they're hidden in that mode (you Send with the button /
           // Enter).
           if (!_textEntryActive) ...[
-            Row(
-              mainAxisAlignment: MainAxisAlignment.center,
+            // Wrap, not Row (#94): the five keys overflowed a 412dp phone by
+            // 7.3px, and an overflowing Row does not shrink — it paints past
+            // its bounds and the last key is unreachable, which on the widest
+            // key ('Enter') is the one that matters most. A Wrap flows to a
+            // second line instead, and costs nothing on a screen with room.
+            Wrap(
+              alignment: WrapAlignment.center,
               children: [
                 _navKey(theme, Icons.keyboard_arrow_up, () => widget.onKey('\x1b[A')),
                 _navKey(theme, Icons.keyboard_arrow_down, () => widget.onKey('\x1b[B')),
@@ -963,13 +1068,18 @@ class _QuestionOverlayState extends State<QuestionOverlay> {
     );
   }
 
+  // The five keys are a FALLBACK, and on a phone they compete for the room the
+  // options need, so they are sized to fit one row at 412dp rather than to look
+  // generous. `tapTargetSize: shrinkWrap` is what actually buys it: Material's
+  // default padded button carries a 48px tap box that no visual change touches.
   Widget _navKey(ThemeData theme, IconData icon, VoidCallback onTap) => Padding(
-        padding: const EdgeInsets.symmetric(horizontal: 3),
+        padding: const EdgeInsets.symmetric(horizontal: 2),
         child: OutlinedButton(
           onPressed: onTap,
           style: OutlinedButton.styleFrom(
-            padding: const EdgeInsets.symmetric(horizontal: 8),
+            padding: const EdgeInsets.symmetric(horizontal: 6),
             minimumSize: const Size(0, 36),
+            tapTargetSize: MaterialTapTargetSize.shrinkWrap,
           ),
           child: Icon(icon, size: 18),
         ),
@@ -977,12 +1087,13 @@ class _QuestionOverlayState extends State<QuestionOverlay> {
 
   Widget _navTextKey(ThemeData theme, String label, VoidCallback onTap) =>
       Padding(
-        padding: const EdgeInsets.symmetric(horizontal: 3),
+        padding: const EdgeInsets.symmetric(horizontal: 2),
         child: OutlinedButton(
           onPressed: onTap,
           style: OutlinedButton.styleFrom(
-            padding: const EdgeInsets.symmetric(horizontal: 10),
+            padding: const EdgeInsets.symmetric(horizontal: 8),
             minimumSize: const Size(0, 36),
+            tapTargetSize: MaterialTapTargetSize.shrinkWrap,
           ),
           child: Text(label),
         ),
