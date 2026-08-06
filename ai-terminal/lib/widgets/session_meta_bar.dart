@@ -85,13 +85,17 @@ class SessionMetaBar extends StatelessWidget {
       chips.add(_chip(theme, Icons.data_usage, 'ctx ~$derivedCtx%',
           ctxColor(theme, derivedCtx!)));
     }
+    // Same SSOT treatment as ctxColor above: the thresholds live in
+    // format_utils, and the 7d window reads on its OWN scale — it stays
+    // neutral until 80% because an amber that is lit most of a normal week
+    // says nothing.
     if (m?.fiveH != null) {
       chips.add(_chip(theme, Icons.schedule, '5h ${m!.fiveH}%',
-          _loadColor(theme, m.fiveH!, 60, 85)));
+          usageColor(theme, m.fiveH!, weekly: false)));
     }
     if (m?.sevenD != null) {
       chips.add(_chip(theme, Icons.calendar_today, '7d ${m!.sevenD}%',
-          _loadColor(theme, m.sevenD!, 60, 85)));
+          usageColor(theme, m.sevenD!, weekly: true)));
     }
 
     // With neither chips nor controls there is nothing to show — collapse
@@ -152,13 +156,6 @@ class SessionMetaBar extends StatelessWidget {
     final parts =
         cwd.split(RegExp(r'[\\/]')).where((p) => p.isNotEmpty).toList();
     return parts.isEmpty ? cwd : parts.last;
-  }
-
-  // Green below [warn], amber to [danger], red at/above — quick pressure read.
-  static Color _loadColor(ThemeData theme, int pct, int warn, int danger) {
-    if (pct >= danger) return theme.colorScheme.error;
-    if (pct >= warn) return const Color(0xFFE0A030);
-    return theme.colorScheme.primary;
   }
 
   static Widget _chip(
