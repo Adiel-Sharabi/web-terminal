@@ -4,6 +4,8 @@ library;
 
 import 'package:flutter/material.dart';
 
+import 'pulse_clock.dart';
+
 /// A session's live status, parsed from the raw string the server sends
 /// (`Session.status`: `working`, `idle`, `waiting`, `api_error`, `active`, …).
 enum SessionStatus { idle, active, working, waiting, apiError }
@@ -88,23 +90,47 @@ String statusLabel(SessionStatus status) => switch (status) {
 };
 
 /// Wraps [child] in the spec's pulse animation: alpha 1.0↔0.35 over 1500ms,
-/// ease-in-out, repeating forever. Used by [SessionStatus.waiting] and
-/// [SessionStatus.apiError] dots (spec §0.2, §0.5).
+/// ease-in-out, repeating forever. Used by [SessionStatus.waiting],
+/// [SessionStatus.working] and [SessionStatus.apiError] dots (spec §0.2, §0.5),
+/// and by the chat lens's working / compacting / subagent indicators.
+///
+/// **Driven by [PulseClock], never by a ticker of its own.** A ticker asks for a
+/// frame every vsync, and a Flutter frame is whole-window work — so three 6px
+/// dots measured 13.5% GPU + 7.7% DWM on a 2576x1048 window. The shared clock
+/// advances at 10fps and moves every pulse in the app on the same tick, so the
+/// frame count does not grow with the number of dots. See [PulseClock].
+///
+/// Two properties this widget must keep (pinned by
+/// `test/status_dot_pulse_test.dart`): the animated part sits behind a
+/// [RepaintBoundary] so a frame repaints the ~10px dot rather than the card or
+/// chat list around it, and opacity is applied by [FadeTransition] compositing
+/// that cached layer — never by an [Opacity] widget, which forces a saveLayer
+/// every frame.
 class Pulse extends StatefulWidget {
-  const Pulse({super.key, required this.child, this.enabled = true});
+  const Pulse({
+    super.key,
+    required this.child,
+    this.enabled = true,
+    this.phase = 0,
+  });
 
   final Widget child;
   final bool enabled;
+
+  /// Offset into the 0..1 breath, so a group of dots pulses out of step
+  /// (0, 1/3, 2/3) while still sharing the one clock.
+  final double phase;
 
   @override
   State<Pulse> createState() => _PulseState();
 }
 
-class _PulseState extends State<Pulse>
-    with SingleTickerProviderStateMixin, WidgetsBindingObserver {
+class _PulseState extends State<Pulse> with SingleTickerProviderStateMixin {
+  /// Held only as the value [FadeTransition] reads. It is never started, so it
+  /// never schedules a frame — [PulseClock] advances it.
   late final AnimationController _controller = AnimationController(
     vsync: this,
-    duration: const Duration(milliseconds: 1500),
+    duration: PulseClock.cycle,
   );
 
   late final Animation<double> _opacity = Tween<double>(
@@ -112,13 +138,11 @@ class _PulseState extends State<Pulse>
     end: 0.35,
   ).chain(CurveTween(curve: Curves.easeInOut)).animate(_controller);
 
+  bool _subscribed = false;
+
   @override
   void initState() {
     super.initState();
-    // Observe app visibility so the pulse costs nothing when the window is
-    // unfocused/minimized — a repeating 60fps animation otherwise keeps the GPU
-    // busy even when no one is looking at it.
-    WidgetsBinding.instance.addObserver(this);
     _sync();
   }
 
@@ -128,25 +152,44 @@ class _PulseState extends State<Pulse>
     if (oldWidget.enabled != widget.enabled) _sync();
   }
 
-  @override
-  void didChangeAppLifecycleState(AppLifecycleState state) => _sync();
-
-  /// Run the repeating pulse only while enabled AND the window is visible;
-  /// otherwise stop and park at full opacity so a static dot reads as solid.
+  /// Subscribe to the shared clock only while enabled; the clock itself owns
+  /// the visibility gate, so an unsubscribed or hidden pulse parks at full
+  /// opacity and a static dot still reads as solid.
   void _sync() {
-    final lifecycle = WidgetsBinding.instance.lifecycleState;
-    final visible = lifecycle == null || lifecycle == AppLifecycleState.resumed;
-    if (widget.enabled && visible) {
-      if (!_controller.isAnimating) _controller.repeat(reverse: true);
-    } else if (_controller.isAnimating) {
-      _controller.stop();
+    if (widget.enabled == _subscribed) return;
+    final clock = PulseClock.instance;
+    if (widget.enabled) {
+      clock.addListener(_onClock);
+      clock.acquire();
+      _subscribed = true;
+      _onClock();
+    } else {
+      clock.removeListener(_onClock);
+      clock.release();
+      _subscribed = false;
       _controller.value = 0; // Tween.begin → opacity 1.0
     }
   }
 
+  /// Map the shared phase onto this dot. The controller is a plain 0..1 value
+  /// here, so the out-and-back triangle is explicit — it used to fall out of
+  /// `repeat(reverse: true)`.
+  void _onClock() {
+    final clock = PulseClock.instance;
+    if (!clock.running) {
+      _controller.value = 0; // parked → opacity 1.0
+      return;
+    }
+    final t = (clock.phase + widget.phase) % 1.0;
+    _controller.value = 1 - (2 * t - 1).abs();
+  }
+
   @override
   void dispose() {
-    WidgetsBinding.instance.removeObserver(this);
+    if (_subscribed) {
+      PulseClock.instance.removeListener(_onClock);
+      PulseClock.instance.release();
+    }
     _controller.dispose();
     super.dispose();
   }
@@ -154,10 +197,10 @@ class _PulseState extends State<Pulse>
   @override
   Widget build(BuildContext context) {
     if (!widget.enabled) return widget.child;
-    // RepaintBoundary confines the per-frame repaint to the ~10px dot instead of
+    // RepaintBoundary confines the repaint to the ~10px dot instead of
     // invalidating the whole session card; FadeTransition composites that cached
-    // layer with alpha, avoiding the per-frame saveLayer the old Opacity widget
-    // forced. Together these drop the pulse from ~1 core / 20% GPU to negligible.
+    // layer with alpha, avoiding the saveLayer the old Opacity widget forced.
+    // These make each frame cheap; PulseClock is what makes the frames rare.
     return RepaintBoundary(
       child: FadeTransition(opacity: _opacity, child: widget.child),
     );
