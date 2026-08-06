@@ -36,9 +36,12 @@ import '../api/api_client.dart';
 import '../api/models.dart';
 import '../services/session_repository.dart';
 import '../theme/app_theme.dart';
+import '../theme/pulse_clock.dart';
+import '../theme/status_colors.dart';
 import '../util/terminal_links.dart';
 import 'empty_state.dart';
 import 'format_utils.dart';
+import 'pulsing_dots.dart';
 // #54: reuses the SAME hex->Color parser SessionCard's agent chip already
 // uses for GET /api/agents' colour field — one parser, not a second copy
 // that could drift from it.
@@ -952,24 +955,8 @@ class _ConversationViewState extends State<ConversationView> {
 /// context/limit pressure from the phone.
 /// A left-aligned "Claude is working…" bubble with three pulsing dots, shown
 /// while the session status is `working`.
-class _WorkingIndicator extends StatefulWidget {
+class _WorkingIndicator extends StatelessWidget {
   const _WorkingIndicator();
-  @override
-  State<_WorkingIndicator> createState() => _WorkingIndicatorState();
-}
-
-class _WorkingIndicatorState extends State<_WorkingIndicator>
-    with SingleTickerProviderStateMixin {
-  late final AnimationController _c = AnimationController(
-    vsync: this,
-    duration: const Duration(milliseconds: 1200),
-  )..repeat();
-
-  @override
-  void dispose() {
-    _c.dispose();
-    super.dispose();
-  }
 
   @override
   Widget build(BuildContext context) {
@@ -993,33 +980,7 @@ class _WorkingIndicatorState extends State<_WorkingIndicator>
               ),
             ),
             const SizedBox(width: 8),
-            AnimatedBuilder(
-              animation: _c,
-              builder: (context, _) {
-                return Row(
-                  mainAxisSize: MainAxisSize.min,
-                  children: List.generate(3, (i) {
-                    // Stagger each dot's pulse across the 0..1 cycle.
-                    final t = (_c.value + i / 3) % 1.0;
-                    final op = 0.3 + 0.7 * (1 - (2 * t - 1).abs());
-                    return Padding(
-                      padding: const EdgeInsets.symmetric(horizontal: 2),
-                      child: Opacity(
-                        opacity: op,
-                        child: Container(
-                          width: 6,
-                          height: 6,
-                          decoration: BoxDecoration(
-                            color: theme.colorScheme.primary,
-                            shape: BoxShape.circle,
-                          ),
-                        ),
-                      ),
-                    );
-                  }),
-                );
-              },
-            ),
+            PulsingDots(color: theme.colorScheme.primary),
           ],
         ),
       ),
@@ -1034,24 +995,8 @@ class _WorkingIndicatorState extends State<_WorkingIndicator>
 /// pulsing-dots animation as [_WorkingIndicator] but with a distinct accent
 /// (tertiary, plus a small icon) so a compaction pause doesn't read as an
 /// ordinary slow turn.
-class _CompactingIndicator extends StatefulWidget {
+class _CompactingIndicator extends StatelessWidget {
   const _CompactingIndicator();
-  @override
-  State<_CompactingIndicator> createState() => _CompactingIndicatorState();
-}
-
-class _CompactingIndicatorState extends State<_CompactingIndicator>
-    with SingleTickerProviderStateMixin {
-  late final AnimationController _c = AnimationController(
-    vsync: this,
-    duration: const Duration(milliseconds: 1200),
-  )..repeat();
-
-  @override
-  void dispose() {
-    _c.dispose();
-    super.dispose();
-  }
 
   @override
   Widget build(BuildContext context) {
@@ -1081,33 +1026,7 @@ class _CompactingIndicatorState extends State<_CompactingIndicator>
               ),
             ),
             const SizedBox(width: 8),
-            AnimatedBuilder(
-              animation: _c,
-              builder: (context, _) {
-                return Row(
-                  mainAxisSize: MainAxisSize.min,
-                  children: List.generate(3, (i) {
-                    // Stagger each dot's pulse across the 0..1 cycle.
-                    final t = (_c.value + i / 3) % 1.0;
-                    final op = 0.3 + 0.7 * (1 - (2 * t - 1).abs());
-                    return Padding(
-                      padding: const EdgeInsets.symmetric(horizontal: 2),
-                      child: Opacity(
-                        opacity: op,
-                        child: Container(
-                          width: 6,
-                          height: 6,
-                          decoration: BoxDecoration(
-                            color: theme.colorScheme.tertiary,
-                            shape: BoxShape.circle,
-                          ),
-                        ),
-                      ),
-                    );
-                  }),
-                );
-              },
-            ),
+            PulsingDots(color: theme.colorScheme.tertiary),
           ],
         ),
       ),
@@ -2730,40 +2649,22 @@ class _SubagentCardState extends State<_SubagentCard> {
   }
 }
 
-/// A small pulsing dot marking a subagent that is still running.
-class _RunningDot extends StatefulWidget {
+/// A small pulsing dot marking a subagent that is still running. Reuses [Pulse]
+/// rather than a controller of its own — see [PulseClock] for why a hand-rolled
+/// ticker here is expensive out of all proportion to a 7px dot.
+class _RunningDot extends StatelessWidget {
   const _RunningDot();
-  @override
-  State<_RunningDot> createState() => _RunningDotState();
-}
-
-class _RunningDotState extends State<_RunningDot>
-    with SingleTickerProviderStateMixin {
-  late final AnimationController _c = AnimationController(
-    vsync: this,
-    duration: const Duration(milliseconds: 1000),
-  )..repeat(reverse: true);
-
-  @override
-  void dispose() {
-    _c.dispose();
-    super.dispose();
-  }
 
   @override
   Widget build(BuildContext context) {
     final theme = Theme.of(context);
-    return AnimatedBuilder(
-      animation: _c,
-      builder: (context, _) => Opacity(
-        opacity: 0.3 + 0.7 * _c.value,
-        child: Container(
-          width: 7,
-          height: 7,
-          decoration: BoxDecoration(
-            color: theme.colorScheme.primary,
-            shape: BoxShape.circle,
-          ),
+    return Pulse(
+      child: Container(
+        width: 7,
+        height: 7,
+        decoration: BoxDecoration(
+          color: theme.colorScheme.primary,
+          shape: BoxShape.circle,
         ),
       ),
     );

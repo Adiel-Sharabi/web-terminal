@@ -39,6 +39,7 @@ import '../theme/status_colors.dart';
 import '../util/terminal_links.dart';
 import '../widgets/compose_bar.dart';
 import '../widgets/conversation_view.dart';
+import '../widgets/disconnect_hairline.dart';
 import '../widgets/format_utils.dart';
 import '../widgets/question_overlay.dart';
 import '../widgets/session_meta_bar.dart';
@@ -2432,13 +2433,15 @@ class _SessionScreenState extends State<SessionScreen>
               ],
             ),
           ),
-          // No modal — a thin animated hairline (debounced ~3s so a blip that
-          // self-heals never flashes anything), optionally with a muted
+          // No modal — a thin static hairline (debounced ~3s so a blip that
+          // self-heals never flashes anything; static because a disconnect is
+          // unbounded and an animation here never stops — see
+          // [DisconnectHairline]), optionally with a muted
           // "updated Ns ago" note. A separate, precise "Opened elsewhere"
           // notice (below) fires only when the server actually said so
           // (`connection.sessionTaken`), never from prolonged failure alone.
           if (_showDisconnectBanner) ...[
-            const _DisconnectHairline(),
+            const DisconnectHairline(),
             if (_lastConnectedAt != null)
               Padding(
                 padding: const EdgeInsets.symmetric(vertical: 2),
@@ -2814,29 +2817,6 @@ class _SelectionToolbar extends StatelessWidget {
               visualDensity: VisualDensity.compact,
             ),
           ],
-        ),
-      ),
-    );
-  }
-}
-
-/// Thin (3dp) indeterminate hairline shown under the app bar while
-/// disconnected (debounced — see `_showDisconnectBanner`). Replaces the old
-/// modal "Reconnecting…" banner per the accepted v2 design: quiet, not
-/// blocking, and never shown for a blip that self-heals within ~3s.
-class _DisconnectHairline extends StatelessWidget {
-  const _DisconnectHairline();
-
-  @override
-  Widget build(BuildContext context) {
-    final theme = Theme.of(context);
-    return SizedBox(
-      height: 3,
-      child: LinearProgressIndicator(
-        minHeight: 3,
-        backgroundColor: Colors.transparent,
-        valueColor: AlwaysStoppedAnimation(
-          theme.colorScheme.error.withValues(alpha: 0.7),
         ),
       ),
     );
