@@ -1538,6 +1538,94 @@ void main() {
       expect(find.textContaining('HEAD_'), findsOneWidget);
     });
 
+    testWidgets('a SHORT question reserves only what it needs', (tester) async {
+      // Found in review of the fix itself, and it undid most of the fix's own
+      // benefit: giving the pinned block an `alignment:` wraps it in an Align,
+      // which does NOT shrink-wrap under bounded constraints — it expands to
+      // constraints.biggest. A one-line question (24px of text) therefore took
+      // the whole 260px cap, handing the options 236px of dead space in exactly
+      // the ordinary case this change exists to protect.
+      //
+      // The cap must behave as a CEILING, not a height.
+      tester.view.physicalSize = const Size(412 * 3, 915 * 3);
+      tester.view.devicePixelRatio = 3.0;
+      addTearDown(tester.view.reset);
+      await tester.pumpWidget(
+        MaterialApp(
+          theme: AppTheme.dark,
+          home: Scaffold(
+            body: Stack(
+              children: [
+                QuestionOverlay(
+                  question: PendingQuestion(
+                    toolUseId: 'short',
+                    questions: [_q(['Change the app', 'Beta', 'Gamma'])],
+                  ),
+                  contextText: 'a short lead-up',
+                  onSend: (_) {},
+                  onKey: (_) {},
+                  onDismiss: () {},
+                ),
+              ],
+            ),
+          ),
+        ),
+      );
+      await tester.pumpAndSettle();
+
+      // _q()'s question is the single word 'Pick'.
+      final text = find.text('Pick');
+      final scroller = find
+          .ancestor(of: text, matching: find.byType(SingleChildScrollView))
+          .first;
+      final block =
+          find.ancestor(of: scroller, matching: find.byType(Container)).first;
+      // Text + this block's own 10px of vertical padding, and nothing like the
+      // 260px cap. 60 leaves room for font metrics without admitting the bug.
+      expect(tester.getRect(block).height, lessThan(60.0));
+    });
+
+    testWidgets('a NEW prompt gets its lead-up back after a collapse',
+        (tester) async {
+      // Collapsing is a per-question decision — "I have read THIS one" — not a
+      // standing preference. Carried over, the next question would open with
+      // its context hidden, which is the very report this change fixes. The
+      // other per-prompt state is already reset in didUpdateWidget; this was
+      // missed because it is the one piece added by this change.
+      Widget app(String toolUseId) => MaterialApp(
+            theme: AppTheme.dark,
+            home: Scaffold(
+              body: Stack(
+                children: [
+                  QuestionOverlay(
+                    question: PendingQuestion(
+                      toolUseId: toolUseId,
+                      questions: [_q(['A', 'B'])],
+                    ),
+                    contextText: _longLeadUp,
+                    onSend: (_) {},
+                    onKey: (_) {},
+                    onDismiss: () {},
+                  ),
+                ],
+              ),
+            ),
+          );
+
+      await tester.pumpWidget(app('first'));
+      await tester.pumpAndSettle();
+      expect(find.textContaining('HEAD_'), findsOneWidget);
+
+      await tester.tap(find.text('Claude said'));
+      await tester.pumpAndSettle();
+      expect(find.textContaining('HEAD_'), findsNothing);
+
+      // A different prompt arrives into the same overlay.
+      await tester.pumpWidget(app('second'));
+      await tester.pumpAndSettle();
+      expect(find.textContaining('HEAD_'), findsOneWidget);
+    });
+
     testWidgets('the nav-key strip fits a phone width', (tester) async {
       // Five keys in a Row overflowed 412dp by 7.3px. A RenderFlex does not
       // shrink to fit — it paints past its bounds and the overflowing child is

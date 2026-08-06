@@ -384,6 +384,13 @@ class _QuestionOverlayState extends State<QuestionOverlay> {
       _otherController.clear();
       _noteText = [for (final _ in widget.question.questions) null];
       _noteController.clear();
+      // A NEW prompt gets its lead-up back (#94). Collapsing is a per-question
+      // decision — "I have read this one" — not a standing preference, and
+      // carrying it over would open the next question with its context hidden,
+      // which is precisely the "the context isn't clear" report this change
+      // exists to fix.
+      _ctxExpanded = true;
+      if (_qScroll.hasClients) _qScroll.jumpTo(0);
     }
   }
 
@@ -636,12 +643,18 @@ class _QuestionOverlayState extends State<QuestionOverlay> {
   /// visibly (thumb) rather than silently, which is the lesson the lead-up
   /// panel below already carries.
   Widget _questionText(ThemeData theme, String text, double maxHeight) {
+    // NO `alignment:` here. Setting one wraps the child in an Align, which
+    // does NOT shrink-wrap under bounded constraints — it expands to
+    // constraints.biggest. Measured: a one-line question (24px of text) took a
+    // 260px block, handing the options 236px of dead space in the ordinary
+    // case this whole change exists to protect. Without it the Container sizes
+    // to the child, so [maxHeight] is a ceiling rather than a height.
     return Container(
       constraints: BoxConstraints(maxHeight: maxHeight),
       padding: const EdgeInsets.fromLTRB(16, 2, 16, 8),
-      alignment: Alignment.centerLeft,
       child: Scrollbar(
         controller: _qScroll,
+        thumbVisibility: true,
         child: SingleChildScrollView(
           controller: _qScroll,
           primary: false,
