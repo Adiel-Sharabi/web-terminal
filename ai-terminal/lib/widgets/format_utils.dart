@@ -13,11 +13,40 @@ import 'package:flutter/material.dart';
 const int kCtxWarnPct = 50;
 const int kCtxDangerPct = 70;
 
+/// The one amber every pressure read uses. Defined once so ctx% and the usage
+/// windows can never drift to two different "warning" colours.
+const Color kWarnAmber = Color(0xFFE0A030);
+
 /// Green below [kCtxWarnPct], amber up to [kCtxDangerPct], red at/above — the
 /// quick context-pressure read shown everywhere a ctx% appears.
 Color ctxColor(ThemeData theme, int pct) {
   if (pct >= kCtxDangerPct) return theme.colorScheme.error;
-  if (pct >= kCtxWarnPct) return const Color(0xFFE0A030);
+  if (pct >= kCtxWarnPct) return kWarnAmber;
+  return theme.colorScheme.primary;
+}
+
+/// Rate-limit window pressure — the SINGLE source of truth for the 5h/7d
+/// colours. As with [ctxColor], do not copy these numbers into a call site.
+///
+/// **The two windows are deliberately NOT read on the same scale.** The 5h
+/// window refills inside a working session, so an early amber is actionable —
+/// you can pace the next few hours. The weekly window is judged over days, and
+/// warning at 60% cried wolf for most of a normal week: a colour that is amber
+/// most of the time carries no information. Weekly therefore stays neutral
+/// until 80%, and keeps a usable amber band before red at 90%.
+const int kUsageWarnPct = 60;
+const int kUsageDangerPct = 85;
+const int kWeekUsageWarnPct = 80;
+const int kWeekUsageDangerPct = 90;
+
+/// Green below the warn point, amber up to danger, red at/above. [weekly]
+/// picks the 7d scale over the 5h one — see the constants above for why they
+/// differ.
+Color usageColor(ThemeData theme, int pct, {required bool weekly}) {
+  final danger = weekly ? kWeekUsageDangerPct : kUsageDangerPct;
+  final warn = weekly ? kWeekUsageWarnPct : kUsageWarnPct;
+  if (pct >= danger) return theme.colorScheme.error;
+  if (pct >= warn) return kWarnAmber;
   return theme.colorScheme.primary;
 }
 

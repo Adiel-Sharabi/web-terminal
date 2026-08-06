@@ -19,6 +19,7 @@ import 'package:flutter_test/flutter_test.dart';
 
 import 'package:ai_terminal/api/models.dart';
 import 'package:ai_terminal/theme/app_theme.dart';
+import 'package:ai_terminal/widgets/format_utils.dart';
 import 'package:ai_terminal/widgets/session_meta_bar.dart';
 
 ServerConfig _server() =>
@@ -364,6 +365,48 @@ void main() {
     test('empty and degenerate paths do not throw', () {
       expect(SessionMetaBar.folderName(''), '');
       expect(SessionMetaBar.folderName(r'\\'), r'\\');
+    });
+  });
+
+  // The 5h and 7d chips used to share one scale (amber at 60, red at 85), which
+  // lit the weekly chip for most of a normal week — an amber that is on nearly
+  // always carries no information. The windows are read differently: 5h refills
+  // inside a working session, so an early amber is actionable; 7d is judged over
+  // days. Weekly therefore stays neutral until 80%.
+  group('usageColor thresholds', () {
+    final theme = AppTheme.dark;
+    final neutral = theme.colorScheme.primary;
+    final danger = theme.colorScheme.error;
+
+    test('the WEEKLY window stays neutral until 80%', () {
+      // Every one of these was amber before — the reported complaint.
+      for (final pct in [0, 45, 60, 61, 75, 79]) {
+        expect(usageColor(theme, pct, weekly: true), neutral,
+            reason: '7d $pct% must not be coloured');
+      }
+      expect(usageColor(theme, 80, weekly: true), kWarnAmber);
+      expect(usageColor(theme, 89, weekly: true), kWarnAmber);
+    });
+
+    test('the weekly window still escalates to red, at 90%', () {
+      expect(usageColor(theme, 89, weekly: true), isNot(danger));
+      expect(usageColor(theme, 90, weekly: true), danger);
+      expect(usageColor(theme, 100, weekly: true), danger);
+    });
+
+    test('the 5h window is UNCHANGED — it keeps its own earlier scale', () {
+      expect(usageColor(theme, 59, weekly: false), neutral);
+      expect(usageColor(theme, 60, weekly: false), kWarnAmber);
+      expect(usageColor(theme, 84, weekly: false), kWarnAmber);
+      expect(usageColor(theme, 85, weekly: false), danger);
+    });
+
+    test('the two windows genuinely disagree in the 60–79 band', () {
+      // The whole point of the change: same number, different verdict.
+      for (final pct in [60, 70, 79]) {
+        expect(usageColor(theme, pct, weekly: false), kWarnAmber);
+        expect(usageColor(theme, pct, weekly: true), neutral);
+      }
     });
   });
 }
