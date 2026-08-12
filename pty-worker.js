@@ -1567,7 +1567,26 @@ function handleHook(session, event, claudeSessionId, prompt, agentId, opts) {
     case 'PostToolUse':
     case 'SubagentStart':
       if (event === 'SubagentStart' && fromSubagent) subagentSet(session).add(agentId);
-      session.status = 'working';
+      // #112 — a session that owes an ANSWER is not working, it is waiting.
+      //
+      // An AskUserQuestion arrives as a PreToolUse, so this line used to mark the
+      // one session blocked on the user as busy: orange dot, "Working", and
+      // `waitingFor` (which requires status 'waiting') silently returning null, so
+      // the chat lens named nothing either. Every consumer reads the status; only
+      // this process knew about `questionPending`, and it kept the two apart.
+      //
+      // The concept already existed one function up — `blockedOnUser` is
+      // `status === 'waiting' || questionPending` — which is the tell: a fact that
+      // has to be OR-ed back in at each use is a fact the status should have
+      // carried. Folding it in here makes the dot, the banner and the abandonment
+      // backstop agree by construction instead of by three copies of one rule.
+      //
+      // Narrow by construction: server.js sends an explicit questionPending:false
+      // with every event that RESOLVES a question — a different tool's PreToolUse,
+      // PostToolUse of AskUserQuestion, UserPromptSubmit, Stop — so the flag is
+      // already clear by the time any of those reach this line. This is #79/#98's
+      // third and last polarity: green was fixed, idle was fixed, working was not.
+      session.status = session.questionPending ? 'waiting' : 'working';
       // Something is running, so a debounced idle flip was a false alarm.
       cancelPendingIdle(session);
       // Only the MAIN agent working again invalidates a held stop: it proves the

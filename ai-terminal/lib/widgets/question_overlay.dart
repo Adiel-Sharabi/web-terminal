@@ -12,10 +12,13 @@ library;
 import 'package:flutter/foundation.dart';
 import 'package:flutter/material.dart';
 import 'package:flutter/services.dart';
+import 'package:flutter_markdown/flutter_markdown.dart';
+import 'package:markdown/markdown.dart' as md;
 
 import '../api/models.dart';
 import '../theme/app_theme.dart';
 import 'compose_bar.dart' show composeUsesSoftKeyboard;
+import 'conversation_view.dart' show markdownStyle, openChatLink;
 
 /// Forwards a raw key sequence to the PTY (#50). Carried by the overlay's
 /// hardware Tab/arrow shortcuts so, while the question overlay is up, those keys
@@ -285,12 +288,49 @@ String? lastAssistantText(List<TranscriptTurn> turns) {
   return null;
 }
 
-/// Vertical room the ANSWERING half of the card needs before the lead-up may
-/// claim any (#94): header (~48) + footer (~122, nav strip and buttons) + three
-/// option rows (~100 each, a label with a description). Measured off the real
-/// card at a 412dp width; it is a floor, not a layout constant — nothing is
-/// positioned from it, it only decides how much the lead-up may take.
-const double kAnswerFloor = 470;
+// --- The space budget (#108) -------------------------------------------------
+//
+// THE OPTIONS ARE RESERVED FIRST. That inversion is the whole point.
+//
+// Before this, `_optionList` was the Flexible RESIDUAL: header, lead-up, tabs
+// and question each took their natural or capped size, the footer took its own,
+// and the options got whatever survived. So every other panel's appetite was
+// charged to the one region you have to interact with, and `kAnswerFloor` —
+// which only ever limited what the LEAD-UP could claim — could not stop it.
+//
+// Now the fixed chrome and an option floor are subtracted up front, and only
+// then do the question and the lead-up divide what is left. `_optionList` stays
+// Flexible, so a SHORT question still hands its surplus to the options (#94's
+// "a SHORT question reserves only what it needs"); the caps below simply can no
+// longer starve them.
+//
+// Every value MEASURED with a getRect probe at 412dp against the real card,
+// never derived from padding arithmetic — and the row height moved twice while
+// this was being written, which is the argument for measuring at all. An
+// UNCLAMPED row with a verbose description measured 126; once descriptions clamp
+// to two lines (see _optionTile) the same row measures 78. 96 is the measured 78
+// plus headroom for a label that itself wraps.
+const double kHeaderH = 68; // title + icon buttons
+const double kFooterH = 66; // the two action buttons (nav strip is behind a toggle)
+const double kTabStripH = 38; // multi-question chip strip
+const double kCtxChrome = 50; // lead-up panel margin + padding + label row
+const double kOptionRowMax = 96; // label + a two-line description at 412dp
+const double kOptionPeek = 16; // a deliberate half-row: "there is more below"
+
+/// Two whole option rows plus a peek of the third. The peek matters as much as
+/// the rows: it makes the cut land somewhere chosen, so a clipped list reads as
+/// "scroll me" instead of as the end (the report was a row sliced mid-word).
+const double kOptionFloor = 2 * kOptionRowMax + kOptionPeek; // 268
+
+/// The least the lead-up body may take and still be worth its own 50px frame.
+/// Below this the panel renders as its header row alone — collapsed, but always
+/// tappable, because it is the only route back to the context.
+const double kCtxMinUseful = 96;
+const double kCtxMax = 300;
+
+/// The question never drops below two lines, and never grows past this.
+const double kQuestionMin = 52;
+const double kQuestionMax = 260;
 
 class QuestionOverlay extends StatefulWidget {
   const QuestionOverlay({
@@ -359,11 +399,30 @@ class _QuestionOverlayState extends State<QuestionOverlay> {
   /// this issue is about, so it gets the same honest affordance.
   final ScrollController _qScroll = ScrollController();
 
-  /// Whether the lead-up panel is expanded (#94). Starts open — the context is
-  /// why the options mean anything, and hiding it by default would re-create
-  /// "the context isn't clear". Collapsing is the user's lever to hand its
-  /// whole share to the options on a small screen.
-  bool _ctxExpanded = true;
+  /// Drives the option list's own [Scrollbar] (#108) — the one scroller in the
+  /// card that had no thumb, and the region the report was about.
+  final ScrollController _optScroll = ScrollController();
+
+  /// The user's EXPLICIT choice about the lead-up panel, or null for "decide
+  /// from the room available" (#94, reworked for #108).
+  ///
+  /// It was a plain `bool = true`, which forced the panel open on a card with
+  /// no room for it. Tri-state instead, because the two facts are different: on
+  /// a roomy card the context is why the options mean anything and must be open
+  /// by default; on a cramped one it must yield, or it takes the room the
+  /// options need and you get a single clipped row. A tap still wins either way
+  /// — an explicit request outranks the budget, because the user can see what
+  /// they are trading.
+  bool? _ctxExpandedOverride;
+
+  /// Whether the raw-key fallback row is revealed (#108). Hidden by default.
+  ///
+  /// It is a FALLBACK — for a prompt whose keybindings don't match the built
+  /// sequence — but it was charging every card a permanent row for that rare
+  /// case, and the card pays for it out of the option list. Six keys at a phone
+  /// width wrap to two rows, which measured 36px straight off the options; the
+  /// answer is not to shave the buttons but to stop billing everyone.
+  bool _keysShown = false;
 
   @override
   void initState() {
@@ -389,7 +448,7 @@ class _QuestionOverlayState extends State<QuestionOverlay> {
       // carrying it over would open the next question with its context hidden,
       // which is precisely the "the context isn't clear" report this change
       // exists to fix.
-      _ctxExpanded = true;
+      _ctxExpandedOverride = null;
       if (_qScroll.hasClients) _qScroll.jumpTo(0);
     }
   }
@@ -400,6 +459,7 @@ class _QuestionOverlayState extends State<QuestionOverlay> {
     _noteController.dispose();
     _ctxScroll.dispose();
     _qScroll.dispose();
+    _optScroll.dispose();
     super.dispose();
   }
 
@@ -556,36 +616,36 @@ class _QuestionOverlayState extends State<QuestionOverlay> {
                     // 640 wide, and an unbounded column that narrow on a large
                     // monitor reads as a broken layout rather than a dialog.
                     final cardMax = (box.maxHeight - 24).clamp(280.0, 1000.0);
-                    // The question is PINNED (below), so unlike before it is
-                    // bounded rather than free to fill the option viewport.
-                    // The ceiling is generous on purpose: the pinned block
-                    // takes only what the text NEEDS (a bounded box around a
-                    // scroll view), so a roomy cap costs a normal one-line
-                    // question nothing and buys a six-line one being readable
-                    // without scrolling — which is this issue's first
-                    // requirement, and worth more than a third option row.
-                    final qMax = (cardMax * 0.30).clamp(64.0, 260.0);
-                    // The lead-up gets the SPARE room — not a fixed share.
                     //
-                    // It used to take a flat 45%, which on a 720 card meant 324px
-                    // for the reasoning and 198 for the answering half — less
-                    // than the question text alone needed, so a phone showed the
-                    // explanation and NOT ONE option (#94). A percentage cannot
-                    // fix that, because the header and footer are FIXED costs:
-                    // the smaller the card, the larger their share, and the more
-                    // brutally any percentage split squeezes whatever is left.
-                    //
-                    // So the priority is stated directly instead. Everything but
-                    // the lead-up has a job you cannot answer without — the
-                    // question says what is being asked, the options are the
-                    // answer, the footer sends it — and [kAnswerFloor] is what
-                    // those need for three option rows to be reachable. The
-                    // lead-up takes what remains, which is honest because it is
-                    // the one panel that says so: it has a scrollbar AND an
-                    // expander advertising that there is more where this came
-                    // from.
-                    final ctxMax =
-                        (cardMax - qMax - kAnswerFloor).clamp(96.0, 300.0);
+                    // *** Options are RESERVED, not residual. ***
+                    // Subtract the fixed chrome and an option floor FIRST; only
+                    // then do the question and the lead-up divide what is left.
+                    // Previously the options were the Flexible residual, so
+                    // every other panel's appetite was charged to the one region
+                    // you must interact with — measured at the real mount on a
+                    // 412x915 phone, a 206px option viewport showing ONE row
+                    // with the second sliced through its description.
+                    final fixed = kHeaderH +
+                        kFooterH +
+                        (questions.length > 1 ? kTabStripH : 0);
+                    final shared = cardMax - fixed - kOptionFloor;
+                    // The question is served next and always keeps two lines. It
+                    // is PINNED (below) and bounded rather than free to fill the
+                    // option viewport, and the pinned block takes only what the
+                    // text NEEDS, so a generous cap costs a one-line question
+                    // nothing while letting a six-line one be read without
+                    // scrolling.
+                    final qMax = shared.clamp(kQuestionMin, kQuestionMax);
+                    // The lead-up takes the remainder — and COLLAPSES rather
+                    // than showing a slit. It is the one panel that can honestly
+                    // say "there is more": it has a scrollbar AND an expander.
+                    final ctxRoom = shared - qMax - kCtxChrome;
+                    final ctxSpare =
+                        ctxRoom >= kCtxMinUseful ? ctxRoom.clamp(0.0, kCtxMax) : 0.0;
+                    // Open by default only when the panel can show enough to be
+                    // worth its frame. Null means "decide from the room".
+                    final expanded =
+                        _ctxExpandedOverride ?? (ctxSpare >= kCtxMinUseful);
                     return Container(
                       constraints:
                           BoxConstraints(maxWidth: 640, maxHeight: cardMax),
@@ -611,7 +671,19 @@ class _QuestionOverlayState extends State<QuestionOverlay> {
                           if (!_textEntryActive &&
                               (widget.contextText ?? '').trim().isNotEmpty)
                             _contextPanel(
-                                theme, widget.contextText!.trim(), ctxMax),
+                              theme,
+                              widget.contextText!.trim(),
+                              // An explicit tap gets a real share even on a
+                              // cramped card — the budget decides the DEFAULT,
+                              // never what the user is allowed to read.
+                              expanded
+                                  ? (ctxSpare >= kCtxMinUseful
+                                      ? ctxSpare
+                                      : (cardMax * 0.35).clamp(
+                                          kCtxMinUseful, 300.0))
+                                  : 0.0,
+                              expanded,
+                            ),
                           if (questions.length > 1) _tabs(theme, questions),
                           // PINNED, outside the option scroll view (#94). It
                           // used to be the first child of that view, so the
@@ -666,11 +738,16 @@ class _QuestionOverlayState extends State<QuestionOverlay> {
 
   /// Claude's preceding message, scrollable, so the full answer is readable
   /// before answering (the question alone often carries only the tail).
-  Widget _contextPanel(ThemeData theme, String text, double maxHeight) {
+  Widget _contextPanel(
+      ThemeData theme, String text, double maxHeight, bool expanded) {
+    // [maxHeight] bounds the BODY, never the panel. Constraining the whole
+    // Container collapsed the HEADER with it: at maxHeight 0 the "Claude said"
+    // row became zero-height, so the chevron could not be tapped and the toggle
+    // was one-way — and on a card that auto-collapses, the lead-up would have
+    // been unreachable entirely, which is worse than the crowding this fixes.
     return Container(
       margin: const EdgeInsets.fromLTRB(12, 0, 12, 6),
       padding: const EdgeInsets.all(10),
-      constraints: BoxConstraints(maxHeight: maxHeight),
       decoration: BoxDecoration(
         color: theme.colorScheme.surfaceContainer,
         borderRadius: BorderRadius.circular(AppShape.medium),
@@ -684,7 +761,7 @@ class _QuestionOverlayState extends State<QuestionOverlay> {
           // lead-up's share is the only slack worth reclaiming, and the user is
           // the one who knows when they have finished reading it.
           InkWell(
-            onTap: () => setState(() => _ctxExpanded = !_ctxExpanded),
+            onTap: () => setState(() => _ctxExpandedOverride = !expanded),
             child: Row(
               children: [
                 Icon(Icons.forum_outlined,
@@ -699,26 +776,51 @@ class _QuestionOverlayState extends State<QuestionOverlay> {
                   ),
                 ),
                 Icon(
-                  _ctxExpanded ? Icons.expand_less : Icons.expand_more,
+                  expanded ? Icons.expand_less : Icons.expand_more,
                   size: 16,
                   color: theme.colorScheme.onSurfaceVariant,
                 ),
               ],
             ),
           ),
-          if (_ctxExpanded) ...[
+          if (expanded) ...[
             const SizedBox(height: 6),
-            Flexible(
+            ConstrainedBox(
+              constraints: BoxConstraints(maxHeight: maxHeight),
               child: Scrollbar(
                 controller: _ctxScroll,
                 thumbVisibility: true,
                 child: SingleChildScrollView(
                   controller: _ctxScroll,
                   primary: false,
-                  child: Text(
-                    text,
-                    style: theme.textTheme.bodyMedium
-                        ?.copyWith(color: theme.colorScheme.onSurface),
+                  // #108 — RENDERED, not raw. This was a plain Text, so the
+                  // agent's own formatting arrived as literal syntax: a
+                  // screenshot showed `**6 approved and marked Committed, 1
+                  // rejected.**`, a literal `## Branch pushed`, and backticked
+                  // refs still wearing their backticks. The one block you must
+                  // read carefully to judge the options was the only place in
+                  // the app where formatting was stripped.
+                  //
+                  // Reuses the chat lens's sheet (`markdownStyle`) rather than a
+                  // second one, so bold and headings cannot drift between the
+                  // two places the same prose is shown.
+                  //
+                  // `onTapLink` is the native path and is NOT interchangeable
+                  // with a custom `a` builder: a builder returns a WIDGET, which
+                  // shatters the paragraph into separate RichTexts and breaks
+                  // selection across any sentence containing a link (#83).
+                  child: MarkdownBody(
+                    data: text,
+                    selectable: false,
+                    fitContent: true,
+                    extensionSet: md.ExtensionSet.gitHubWeb,
+                    onTapLink: (_, href, _) => openChatLink(href),
+                    styleSheet: markdownStyle(
+                      theme,
+                      theme.textTheme.bodyMedium
+                          ?.copyWith(color: theme.colorScheme.onSurface),
+                      theme.textTheme.bodySmall,
+                    ),
                   ),
                 ),
               ),
@@ -741,6 +843,14 @@ class _QuestionOverlayState extends State<QuestionOverlay> {
               count > 1 ? 'Claude is asking ($count questions)' : 'Claude is asking',
               style: theme.textTheme.titleSmall,
             ),
+          ),
+          IconButton(
+            icon: Icon(
+              _keysShown ? Icons.keyboard_hide_outlined : Icons.keyboard_outlined,
+              size: 20,
+            ),
+            tooltip: _keysShown ? 'Hide raw keys' : 'Show raw keys',
+            onPressed: () => setState(() => _keysShown = !_keysShown),
           ),
           IconButton(
             icon: const Icon(Icons.close, size: 20),
@@ -784,7 +894,21 @@ class _QuestionOverlayState extends State<QuestionOverlay> {
   }
 
   Widget _optionList(ThemeData theme, PendingQuestionItem q) {
-    return SingleChildScrollView(
+    // The option list was the ONE scroller in this card with no thumb — the
+    // question (#94) and the lead-up both got one, and this is the region the
+    // report was actually about. A row cut by the viewport with nothing
+    // advertising the scroll reads as the end of the list.
+    //
+    // Stays a SingleChildScrollView on purpose: the #94 tests resolve the
+    // option viewport with `find.ancestor(..., matching: find.byType(
+    // SingleChildScrollView))`, so a ListView would silently break the one
+    // assertion that proves the options are reachable.
+    return Scrollbar(
+      controller: _optScroll,
+      thumbVisibility: true,
+      child: SingleChildScrollView(
+      controller: _optScroll,
+      primary: false,
       padding: const EdgeInsets.symmetric(horizontal: 12),
       child: Column(
         crossAxisAlignment: CrossAxisAlignment.start,
@@ -817,6 +941,7 @@ class _QuestionOverlayState extends State<QuestionOverlay> {
           ],
           const SizedBox(height: 4),
         ],
+      ),
       ),
     );
   }
@@ -1012,6 +1137,23 @@ class _QuestionOverlayState extends State<QuestionOverlay> {
                           padding: const EdgeInsets.only(top: 2),
                           child: Text(
                             opt.description,
+                            // Two lines until chosen, then the whole thing
+                            // (#108). One verbose option could otherwise be
+                            // taller than the entire viewport and push every
+                            // other choice off screen.
+                            //
+                            // Expand ON SELECT rather than behind a per-row
+                            // chevron: selecting is exactly when you want the
+                            // detail, a second tap target inside the row would
+                            // compete with _toggle (and with the checkbox in
+                            // multi-select), and this costs nothing when space
+                            // is scarce.
+                            //
+                            // Honest limit: ellipsis breaks at a grapheme, so it
+                            // can still end mid-word — what it never does is end
+                            // SILENTLY, which is what the report was.
+                            maxLines: selected ? null : 2,
+                            overflow: selected ? null : TextOverflow.ellipsis,
                             style: theme.textTheme.bodySmall?.copyWith(
                               color: theme.colorScheme.onSurfaceVariant,
                             ),
@@ -1040,8 +1182,9 @@ class _QuestionOverlayState extends State<QuestionOverlay> {
           // where they only steal the vertical room the input needs above the
           // keyboard, so they're hidden in that mode (you Send with the button /
           // Enter).
-          if (!_textEntryActive) ...[
-            // Wrap, not Row (#94): the five keys overflowed a 412dp phone by
+          // Revealed from the header's keyboard toggle (#108), not always on.
+          if (!_textEntryActive && _keysShown) ...[
+            // Wrap, not Row (#94): the keys overflowed a 412dp phone by
             // 7.3px, and an overflowing Row does not shrink — it paints past
             // its bounds and the last key is unreachable, which on the widest
             // key ('Enter') is the one that matters most. A Wrap flows to a
@@ -1054,6 +1197,14 @@ class _QuestionOverlayState extends State<QuestionOverlay> {
                 _navTextKey(theme, 'Space', () => widget.onKey(' ')),
                 _navTextKey(theme, 'Tab', () => widget.onKey('\t')),
                 _navTextKey(theme, 'Enter', () => widget.onKey('\r')),
+                // Esc joined this row when the overlay moved to cover the whole
+                // body (#108). TerminalKeyStrip offers Esc, Ctrl, Alt, / and |;
+                // of those Esc is the one that means something AT a prompt — it
+                // rejects the tool and lets the agent carry on — so it is the
+                // only one that has to survive being covered. The rest are for
+                // typing at a shell, which is not what this card is for, and
+                // "Answer in terminal" brings the whole strip back anyway.
+                _navTextKey(theme, 'Esc', () => widget.onKey('\x1b')),
               ],
             ),
             const SizedBox(height: 8),

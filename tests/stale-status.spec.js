@@ -302,14 +302,19 @@ test.describe('Stale session status detection', () => {
   };
 
   test('#79: a session blocked on a pending question is NEVER stale-flipped to idle', async () => {
-    // An AskUserQuestion leaves the session 'working' — its PreToolUse says so —
-    // and then perfectly silent: no further hook, no PTY output, until the user
-    // answers. That is the same inversion already fixed for 'waiting', wearing a
-    // different status, so the 5-minute rule still fired here: the dot went calm
-    // GREEN on precisely the session that owed an answer. 'waiting' was never the
-    // real predicate; "blocked on the user" is.
+    // An AskUserQuestion leaves the session silent — no further hook, no PTY
+    // output — until the user answers, so the 5-minute rule used to fire and the
+    // dot went calm GREEN on precisely the session that owed an answer. 'waiting'
+    // was never the real predicate; "blocked on the user" is.
+    //
+    // This assertion read 'working' until #112. It was pinning the DEFECT: the
+    // question arrives as a PreToolUse, so the worker marked the blocked session
+    // busy, and `waitingFor` — which requires status 'waiting' — could never
+    // return 'question' in this path at all. The status now carries the fact, so
+    // the exemption below is reached the ordinary way rather than by a second
+    // predicate OR-ed in beside it.
     const hookRes = await ctx.post(`/api/session/${sessionId}/hook`, { data: ASK_HOOK });
-    expect((await hookRes.json()).status).toBe('working');
+    expect((await hookRes.json()).status).toBe('waiting');
 
     // Re-age immediately before each read rather than once. A freshly spawned
     // shell emits its prompt a beat after creation and that PTY chunk refreshes
@@ -320,7 +325,10 @@ test.describe('Stale session status detection', () => {
     for (let i = 0; i < 5; i++) {
       await ctx.post(`/api/test/age-session/${sessionId}`, { data: { ageMinutes: 10 } });
       const s = (await (await ctx.get('/api/sessions')).json()).find(x => x.id === sessionId);
-      expect(s.status).toBe('working');
+      // What this pins is unchanged and is the point of the test: the 5-minute
+      // rule must not touch it. Only the status it holds while blocked moved,
+      // 'working' -> 'waiting' (#112).
+      expect(s.status).toBe('waiting');
     }
   });
 
@@ -348,7 +356,7 @@ test.describe('Stale session status detection', () => {
     // calm green dot on the session that owed an answer. #79 pinned the STALE rule's
     // exemption; this pins the explicit path, which never reaches that rule at all.
     const ask = await ctx.post(`/api/session/${sessionId}/hook`, { data: ASK_HOOK });
-    expect((await ask.json()).status).toBe('working');
+    expect((await ask.json()).status).toBe('waiting'); // 'working' before #112
 
     const notified = await ctx.post(`/api/session/${sessionId}/hook`, {
       data: { event: 'Notification', message: 'Claude is waiting for your input' },
@@ -361,6 +369,49 @@ test.describe('Stale session status detection', () => {
     await new Promise(r => setTimeout(r, 1500));
     const s = (await (await ctx.get('/api/sessions')).json()).find(x => x.id === sessionId);
     expect(s.status).not.toBe('idle');
+  });
+
+  test('#112: a pending question reads as WAITING, and names itself as a question', async () => {
+    // Reported 2026-08-12 with a screenshot: the sidebar row showed an orange dot
+    // and "Working 43%" on a session that had a question on screen.
+    //
+    // Third polarity of one bug. #79 fixed the calm GREEN, #98 fixed the explicit
+    // idle — both are about a session wrongly looking DONE. This is the session
+    // wrongly looking BUSY, and no earlier fix touched it: the question arrives as
+    // a PreToolUse and PreToolUse means 'working'.
+    //
+    // The second assertion is the one that shows how deep it went. `waitingFor`
+    // returns 'question' only when the status is 'waiting', so with the old
+    // 'working' its QUESTION branch was UNREACHABLE in this path — the chat lens's
+    // #79 banner could never name a question, and the pure rule's unit tests
+    // passed the whole time because they supply the status directly.
+    const ask = await ctx.post(`/api/session/${sessionId}/hook`, { data: ASK_HOOK });
+    expect((await ask.json()).status).toBe('waiting');
+
+    const listed = (await (await ctx.get('/api/sessions')).json())
+      .find(x => x.id === sessionId);
+    expect(listed.status).toBe('waiting');
+    expect(listed.waitingFor).toBe('question');
+
+    // Answering releases it — the status must not stick on 'waiting' for the rest
+    // of the session's life, which would trade one wrong dot for another.
+    await ctx.post(`/api/session/${sessionId}/hook`, {
+      data: { event: 'PostToolUse', tool_name: 'AskUserQuestion' },
+    });
+    const after = (await (await ctx.get('/api/sessions')).json())
+      .find(x => x.id === sessionId);
+    expect(after.status).not.toBe('waiting');
+    expect(after.waitingFor).toBeFalsy();
+  });
+
+  test('#112: an ordinary tool call still reads as working', async () => {
+    // The guard against over-correcting: only a PENDING QUESTION may turn a
+    // PreToolUse into 'waiting'. A normal tool call is genuinely busy, and marking
+    // it 'waiting' would put a red "needs you" dot on every working session.
+    const res = await ctx.post(`/api/session/${sessionId}/hook`, {
+      data: { event: 'PreToolUse', tool_name: 'Bash' },
+    });
+    expect((await res.json()).status).toBe('working');
   });
 
   test('#98: once the question is answered, an idle Notification idles normally', async () => {
@@ -385,7 +436,7 @@ test.describe('Stale session status detection', () => {
     // never fired a resolving hook must not pin the session forever — but only at
     // a horizon no real answer delay reaches.
     const hookRes = await ctx.post(`/api/session/${sessionId}/hook`, { data: ASK_HOOK });
-    expect((await hookRes.json()).status).toBe('working');
+    expect((await hookRes.json()).status).toBe('waiting'); // 'working' before #112
 
     await expect.poll(async () => {
       await ctx.post(`/api/test/age-session/${sessionId}`, {
