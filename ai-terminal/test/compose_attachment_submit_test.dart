@@ -276,4 +276,53 @@ void main() {
       }
     });
   });
+
+  // #110 — attaching an image to a slash command sent the command alone and
+  // dropped the image. The '/'-line commit is the ONE submit whose text is
+  // already in the prompt (it streamed as the user typed), so it commits with a
+  // bare CR — and that early return skipped the attachment paste every other
+  // submit performs.
+  group('buildLiveAttachmentSubmission (#110: attachments on a slash command)',
+      () {
+    test('with no attachments it is still just the commit CR', () {
+      expect(buildLiveAttachmentSubmission(const []), '\r');
+    });
+
+    test('a staged image rides along with the slash command, not after it', () {
+      final out = buildLiveAttachmentSubmission(const ['/tmp/clip-1.png']);
+      // One bracketed paste, and the submit CR in the SAME frame (#44).
+      expect(out.startsWith(pasteOpen), isTrue);
+      expect(out.endsWith('$pasteClose\r'), isTrue);
+      expect(out, contains('/tmp/clip-1.png'));
+      // Exactly one paste — never one frame per attachment (the #90 defect).
+      expect(pasteOpen.allMatches(out).length, 1);
+      expect(pasteClose.allMatches(out).length, 1);
+    });
+
+    test('the text is NOT re-sent — it already streamed into the prompt', () {
+      final out = buildLiveAttachmentSubmission(const ['/tmp/a.png']);
+      // Nothing but the path may appear; re-sending would type the command twice.
+      expect(out, isNot(contains('/issues')));
+    });
+
+    test('the first path cannot fuse onto the command text', () {
+      final out = buildLiveAttachmentSubmission(const ['/tmp/a.png']);
+      // A separator opens the paste, so the path starts on its own line rather
+      // than running into whatever the user already typed.
+      expect(out.startsWith('$pasteOpen\r'), isTrue);
+    });
+
+    test('several attachments travel in ONE paste, newline-separated', () {
+      final out = buildLiveAttachmentSubmission(
+        const ['/tmp/a.png', '/tmp/b.png', '/tmp/c.pdf'],
+      );
+      expect(pasteOpen.allMatches(out).length, 1);
+      for (final p in ['/tmp/a.png', '/tmp/b.png', '/tmp/c.pdf']) {
+        expect(out, contains(p));
+      }
+      // Inside a paste a newline travels as \r (see _pasteInner) — one before
+      // each path, including the leading separator.
+      expect('\r'.allMatches(out).length, 4);
+    });
+  });
 }

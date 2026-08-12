@@ -21,16 +21,21 @@ import 'package:ai_terminal/widgets/conversation_view.dart';
 ServerConfig _server() =>
     const ServerConfig(name: 'Home', baseUrl: 'http://x', bearerToken: 't');
 
-Session _session({String status = 'idle'}) => Session(
+Session _session({
+  String status = 'idle',
+  bool compacting = false,
+  int? lastActivity,
+}) => Session(
   id: 'sess-1',
   name: 'proj',
   cwd: '/x',
   status: status,
   claudeSessionId: 'claude-1',
-  lastActivity: DateTime.now().millisecondsSinceEpoch,
+  lastActivity: lastActivity ?? DateTime.now().millisecondsSinceEpoch,
   notifyLevel: 'important',
   server: _server(),
   autoCommand: '',
+  compacting: compacting,
 );
 
 /// Records every launch that reaches the url_launcher platform, so a test can
@@ -548,10 +553,14 @@ void main() {
             hasMore: false),
       )));
       await tester.pumpAndSettle();
-      // The chip label is the bare agent type; the inline card is "Task — … (type)",
-      // so an EXACT match finds only the chips.
-      expect(find.text('Explore'), findsOneWidget);
-      expect(find.text('general-purpose'), findsOneWidget);
+      // UPDATED for #118, deliberately: this used to assert the chip label was
+      // the bare agent TYPE ('Explore' / 'general-purpose'), which is exactly
+      // the defect #118 reports — every instance of a type renders identically.
+      // The chip now leads with the per-instance description. The thing #62
+      // actually cares about, one chip per subagent, is unchanged and is what
+      // these two lines still pin.
+      expect(find.text('do Explore'), findsOneWidget);
+      expect(find.text('do general-purpose'), findsOneWidget);
     });
 
     testWidgets('tapping a chip opens the drill-in sheet via the SAME subFetch',
@@ -591,7 +600,7 @@ void main() {
 
       expect(find.textContaining('SUBAGENT_SHEET_MARKER'), findsNothing);
 
-      await tester.tap(find.text('Explore')); // the chip
+      await tester.tap(find.text('do Explore')); // the chip (#118: labelled by task)
       await tester.pumpAndSettle();
 
       expect(drilledId, 'tu_task1'); // reused the subagent paging path, not a new one
@@ -628,7 +637,7 @@ void main() {
       )));
       await tester.pumpAndSettle();
 
-      await tester.tap(find.text('Explore')); // chip → sheet
+      await tester.tap(find.text('do Explore')); // chip → sheet (#118 label)
       await tester.pumpAndSettle();
 
       // The sheet offers a session input — mirroring what the terminal lens allows.
@@ -2016,6 +2025,252 @@ void main() {
       await tester.pump(const Duration(milliseconds: 50));
       // No poll timer while idle, and no rebuild, so the new turn is not pulled in.
       expect(find.text('SHOULD_NOT_APPEAR'), findsNothing);
+    });
+  });
+
+  // #111. The #47 group above covers un-pinning via _loadOlder (scrolling to the
+  // very TOP). This is the other, far commoner trigger: the reader drags up a
+  // little to re-read something MID-list while the agent is still working. No
+  // history load happens, so none of #47's machinery runs — the only thing
+  // standing between the reader and a yank to the bottom is _onScroll having
+  // cleared _pinnedToBottom.
+  group('#111: a new turn must not move a reader who scrolled up', () {
+    List<TranscriptTurn> genTurns(String prefix, int count) => List.generate(
+          count,
+          (i) => TranscriptTurn(
+            role: i.isEven ? 'user' : 'assistant',
+            text: '${prefix}_$i',
+            toolUses: const [],
+            ts: null,
+          ),
+        );
+
+    testWidgets('mid-list scroll position survives an incoming turn', (
+      tester,
+    ) async {
+      var tail = genTurns('T', 40);
+      Future<TranscriptPage> fetch(
+        String id, {
+        String? before,
+        int? limit,
+      }) async =>
+          TranscriptPage(messages: tail, cursor: null, hasMore: false);
+
+      await tester.pumpWidget(_wrap(ConversationView(
+        session: _session(status: 'working'),
+        fetchPage: fetch,
+      )));
+      await tester.pumpAndSettle();
+
+      final controller =
+          tester.widget<ListView>(find.byType(ListView)).controller!;
+      expect(controller.position.maxScrollExtent, greaterThan(100),
+          reason: 'the fixture must actually be scrollable');
+
+      // Drag up to the middle — NOT to the top, so _loadOlder never fires.
+      final target = controller.position.maxScrollExtent / 2;
+      controller.jumpTo(target);
+      await tester.pumpAndSettle();
+      final before = controller.position.pixels;
+      expect(before, closeTo(target, 1.0));
+
+      // A new turn lands on the 4s poll while the reader is up here.
+      tail = [
+        ...tail,
+        const TranscriptTurn(
+          role: 'assistant',
+          text: 'BRAND_NEW_TURN',
+          toolUses: [],
+          ts: null,
+        ),
+      ];
+      await tester.pump(const Duration(seconds: 5));
+      await tester.pumpAndSettle();
+
+      // The reader must not have been moved.
+      expect(controller.position.pixels, closeTo(before, 1.0),
+          reason: 'an incoming turn yanked the reader away from what they were '
+              'reading');
+    });
+
+    // The open sequence fires FOUR jumps — two post-frame, then +150ms and
+    // +400ms — because a ListView.builder only estimates maxScrollExtent until
+    // the tail is laid out. Those late timers are the hole: they fire whatever
+    // the reader did in the meantime, so scrolling up inside that window is
+    // undone by a jump scheduled before the reader ever touched the screen.
+    testWidgets('a scroll issued on open does not yank a reader who has '
+        'since scrolled away', (tester) async {
+      final tail = genTurns('T', 40);
+      Future<TranscriptPage> fetch(
+        String id, {
+        String? before,
+        int? limit,
+      }) async =>
+          TranscriptPage(messages: tail, cursor: null, hasMore: false);
+
+      await tester.pumpWidget(_wrap(ConversationView(
+        session: _session(status: 'working'),
+        fetchPage: fetch,
+      )));
+      // Let the fetch resolve and the first post-frame jumps run, but stop
+      // BEFORE the +150ms / +400ms timers.
+      await tester.pump();
+      await tester.pump(const Duration(milliseconds: 20));
+
+      final controller =
+          tester.widget<ListView>(find.byType(ListView)).controller!;
+      expect(controller.position.maxScrollExtent, greaterThan(100));
+
+      // The reader scrolls up while those late jumps are still pending.
+      final target = controller.position.maxScrollExtent / 2;
+      controller.jumpTo(target);
+      await tester.pump();
+      final before = controller.position.pixels;
+
+      // Now let the +150ms and +400ms jumps fire.
+      await tester.pump(const Duration(milliseconds: 500));
+      await tester.pumpAndSettle();
+
+      expect(controller.position.pixels, closeTo(before, 1.0),
+          reason: 'a jump scheduled on open fired after the reader had '
+              'scrolled away and dragged them back to the bottom');
+    });
+  });
+
+  // #118. Ground truth (every conversation on the reporter's machine): `Agent`
+  // tool_uses map 1:1 to agent-*.meta.json files and no tool_use ever carries
+  // two, so the COUNT was never wrong — eight chips meant eight real subagents.
+  // The defect was that all eight said the same thing, because the label led
+  // with `agentType` (shared by every instance) and used `description` (the only
+  // per-instance field) merely as a fallback.
+  group('#118: subagent chips must be distinguishable', () {
+    ToolUse sub(String type, String desc, {String id = 'x'}) => ToolUse(
+          name: 'Agent',
+          inputPreview: '',
+          id: id,
+          subagent: SubagentTrace(
+            agentType: type,
+            description: desc,
+            running: false,
+          ),
+        );
+
+    test('the per-instance description leads, not the shared type', () {
+      final labels = subagentChipLabels([
+        sub('general-purpose', 'Build companion 1.19.4+62', id: 'a'),
+        sub('general-purpose', 'Audit the cluster tokens', id: 'b'),
+        sub('general-purpose', 'Trace the submit path', id: 'c'),
+      ]);
+      // The reported symptom was exactly this list coming back all-identical.
+      expect(labels, [
+        'Build companion 1.19.4+62',
+        'Audit the cluster tokens',
+        'Trace the submit path',
+      ]);
+      expect(labels.toSet(), hasLength(3), reason: 'chips must differ');
+    });
+
+    test('a meta with no description still falls back to its type', () {
+      expect(subagentChipLabels([sub('Explore', '')]), ['Explore']);
+      expect(subagentChipLabels([sub('', '')]), ['subagent']);
+    });
+
+    test('genuinely identical tasks are numbered so they stay tellable apart',
+        () {
+      final labels = subagentChipLabels([
+        sub('general-purpose', 'Sweep the repo', id: 'a'),
+        sub('general-purpose', 'Sweep the repo', id: 'b'),
+        sub('search', 'Find the caller', id: 'c'),
+      ]);
+      expect(labels, ['Sweep the repo 1', 'Sweep the repo 2', 'Find the caller']);
+      expect(labels.toSet(), hasLength(3));
+    });
+
+    test('only colliding labels are numbered — the common case stays clean', () {
+      final labels = subagentChipLabels([
+        sub('general-purpose', 'One', id: 'a'),
+        sub('general-purpose', 'Two', id: 'b'),
+      ]);
+      expect(labels, ['One', 'Two']);
+    });
+  });
+
+  // #115. A /compact is long (the boundary this repo's own session wrote records
+  // durationMs 122091) and the turn that ran it can END while compaction
+  // continues, dropping the status to idle. The poll gate keyed only on
+  // working/active, so the chat stopped refreshing during the ONE window where
+  // the transcript is guaranteed to change — freezing the indicator and losing
+  // the prompt that had been queued meanwhile.
+  group('#115: chat keeps refreshing across a compaction', () {
+    TranscriptTurn a(String t) =>
+        TranscriptTurn(role: 'assistant', text: t, toolUses: const [], ts: null);
+
+    testWidgets('an IDLE session that is compacting still polls', (
+      tester,
+    ) async {
+      var tail = [a('BEFORE_COMPACT')];
+      Future<TranscriptPage> fetch(
+        String id, {
+        String? before,
+        int? limit,
+      }) async =>
+          TranscriptPage(messages: tail, cursor: null, hasMore: false);
+
+      await tester.pumpWidget(_wrap(ConversationView(
+        // Idle — but compacting. Before the fix this combination polled not at all.
+        session: _session(status: 'idle', compacting: true),
+        fetchPage: fetch,
+      )));
+      await tester.pump();
+      await tester.pump(const Duration(milliseconds: 50));
+      expect(find.text('BEFORE_COMPACT'), findsOneWidget);
+
+      // The queued prompt's turn starts and is finally written.
+      tail = [a('BEFORE_COMPACT'), a('QUEUED_PROMPT_TURN')];
+      await tester.pump(const Duration(seconds: 5));
+      await tester.pump(const Duration(milliseconds: 50));
+
+      expect(find.text('QUEUED_PROMPT_TURN'), findsOneWidget,
+          reason: 'the chat stopped polling while compacting, so the turn that '
+              'ran after compaction never arrived');
+    });
+
+    testWidgets('compaction ENDING refreshes immediately, not on the next tick',
+        (tester) async {
+      var tail = [a('DURING')];
+      Future<TranscriptPage> fetch(
+        String id, {
+        String? before,
+        int? limit,
+      }) async =>
+          TranscriptPage(messages: tail, cursor: null, hasMore: false);
+
+      Widget build(bool compacting) => _wrap(ConversationView(
+            // lastActivity pinned so the ONLY thing that changes below is
+            // `compacting` — otherwise the refresh could ride that instead and
+            // the test would pass without proving anything.
+            session: _session(
+              status: 'idle',
+              compacting: compacting,
+              lastActivity: 111,
+            ),
+            fetchPage: fetch,
+          ));
+
+      await tester.pumpWidget(build(true));
+      await tester.pump();
+      await tester.pump(const Duration(milliseconds: 50));
+      expect(find.text('DURING'), findsOneWidget);
+
+      tail = [a('DURING'), a('SETTLED_AFTER_COMPACT')];
+      // Compaction ends; the session is now plain idle, so the poll timer stops.
+      await tester.pumpWidget(build(false));
+      await tester.pump();
+      await tester.pump(const Duration(milliseconds: 50));
+
+      expect(find.text('SETTLED_AFTER_COMPACT'), findsOneWidget,
+          reason: 'nothing refreshed when compaction ended, and the poll had '
+              'just been switched off — so the chat would sit stale forever');
     });
   });
 }
