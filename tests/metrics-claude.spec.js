@@ -199,6 +199,37 @@ test.describe('mergeStatus — a blank report must not destroy a good one', () =
     expect(mergeStatus(null, good).ctx).toBe(12);
     expect(mergeStatus(undefined, good).ctxWindow).toBe(1000000);
   });
+
+  // #122 — "stable" was read as "immutable". These pin the line between a report
+  // that SAYS there is no label and one that cannot say anything about it.
+  test('a live render clears an effort the newly-selected model does not have', () => {
+    const noEffort = parseStatusPayload({
+      model: { display_name: 'Haiku 4.5' },
+      context_window: { context_window_size: 200000, used_percentage: 4 },
+    });
+    expect(noEffort.effort).toBeNull();          // a raw render SAYS there is none
+    const merged = mergeStatus(good, noEffort);
+    expect(merged.model).toBe('Haiku 4.5');
+    expect(merged.effort).toBeNull();
+  });
+
+  test('a legacy push CANNOT speak about the labels, so it clears neither', () => {
+    const legacy = parseStatusPayload({ ctx: '20', five: '10', seven: '2' });
+    expect(legacy.model).toBeUndefined();        // absence of a statement, not a statement
+    expect(legacy.effort).toBeUndefined();
+    const merged = mergeStatus(good, legacy);
+    expect(merged.model).toBe('Opus 4.8');
+    expect(merged.effort).toBe('xhigh');
+  });
+
+  test('the post-/compact blank still preserves both labels', () => {
+    // It IS a raw payload, but it carries no reading — so it speaks for nothing.
+    const blank = parseStatusPayload({ context_window: { context_window_size: 1000000, used_percentage: null } });
+    expect(hasReading(blank)).toBe(false);
+    const merged = mergeStatus(good, blank);
+    expect(merged.model).toBe('Opus 4.8');
+    expect(merged.effort).toBe('xhigh');
+  });
 });
 
 // ============================================================
@@ -246,6 +277,55 @@ test.describe('POST /api/claude-status — raw payload end to end', () => {
     // #69 — Claude's reset time is real, not the null it shipped stubbed to.
     expect(s.metrics.fiveHResetAt).toBe(1784453400000);
     expect(s.metrics.model).toBe('Opus 4.8');
+
+    await ctx.delete(`/api/sessions/${id}`);
+    await ctx.dispose();
+  });
+
+  // #122 — the badge must follow a mid-session /model. Two halves, and only the
+  // second was broken: a NEW label overwrites the stored one, but a label that the
+  // new model does not HAVE could never be cleared, because model/effort are merged
+  // as "stable" fields (`next.effort || p.effort`) so absence reads as "unchanged".
+  test('a mid-session model change reaches the session list', async () => {
+    const ctx = await authCtx();
+    const uuid = '71717171-0000-0000-0000-000000000005';
+    const id = await pinnedSession(ctx, 'model-change', uuid);
+
+    await ctx.post('/api/claude-status', { data: { ...REAL_PAYLOAD, session_id: uuid } });
+    expect((await sessionById(ctx, id)).metrics.model).toBe('Opus 4.8');
+
+    await ctx.post('/api/claude-status', {
+      data: {
+        ...REAL_PAYLOAD, session_id: uuid,
+        model: { id: 'claude-sonnet-5', display_name: 'Sonnet 5' },
+        effort: { level: 'high' },
+      },
+    });
+    const s = await sessionById(ctx, id);
+    expect(s.metrics.model).toBe('Sonnet 5');
+    expect(s.metrics.effort).toBe('high');
+
+    await ctx.delete(`/api/sessions/${id}`);
+    await ctx.dispose();
+  });
+
+  test('switching to a model with NO effort clears the effort — a stale one mislabels it', async () => {
+    const ctx = await authCtx();
+    const uuid = '71717171-0000-0000-0000-000000000006';
+    const id = await pinnedSession(ctx, 'effort-drop', uuid);
+
+    await ctx.post('/api/claude-status', { data: { ...REAL_PAYLOAD, session_id: uuid } });
+    expect((await sessionById(ctx, id)).metrics.effort).toBe('xhigh');
+
+    // A live report that simply has no effort — not the post-/compact blank, which
+    // legitimately carries nothing and must still preserve what is known.
+    const noEffort = { ...REAL_PAYLOAD, session_id: uuid, model: { id: 'claude-haiku-4-5', display_name: 'Haiku 4.5' } };
+    delete noEffort.effort;
+    await ctx.post('/api/claude-status', { data: noEffort });
+
+    const s = await sessionById(ctx, id);
+    expect(s.metrics.model).toBe('Haiku 4.5');
+    expect(s.metrics.effort).toBeNull(); // NOT the carried-over 'xhigh'
 
     await ctx.delete(`/api/sessions/${id}`);
     await ctx.dispose();
