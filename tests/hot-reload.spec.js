@@ -530,7 +530,7 @@ test.describe('Phase 6: hot reload — PTY survives web.js restart', () => {
           },
         },
       });
-      expect((await ask.json()).status).toBe('working');
+      expect((await ask.json()).status).toBe('waiting'); // 'working' before #112
 
       // Hot reload: kill ONLY web.js. The worker — and its questionPending — survive.
       const before = h.readStatus();
@@ -551,10 +551,12 @@ test.describe('Phase 6: hot reload — PTY survives web.js restart', () => {
       });
 
       // The flag must have survived, so the 5-minute stale rule still must not fire.
+      // The status a blocked session holds is 'waiting' since #112; what this test
+      // pins — that the flag outlives a web.js restart — is unchanged.
       for (let i = 0; i < 5; i++) {
         await ctx.post(`/api/test/age-session/${sid}`, { data: { ageMinutes: 10 } });
         const s = (await (await ctx.get('/api/sessions')).json()).find(x => x.id === sid);
-        expect(s.status).toBe('working');
+        expect(s.status).toBe('waiting');
       }
 
       await ctx.delete(`/api/sessions/${sid}`);
