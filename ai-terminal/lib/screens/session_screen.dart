@@ -70,6 +70,21 @@ bool sessionKeepsTranscript(Session? session) =>
     session != null &&
     (session.agent != null || session.claudeSessionId != null);
 
+/// Whether a transcript 404 means this session has NO transcript — or merely none
+/// YET. Pure, for the same reason as [sessionKeepsTranscript].
+///
+/// A brand-new agent session 404s until its first turn writes a conversation, so
+/// treating that first miss as final disqualifies the Chat lens for the whole life of
+/// the screen — the same "no chat options on a new session" the create-response fix
+/// addresses, arrived at one step later (#119).
+///
+/// Once the server has published a conversation id ([Session.agentSessionId]) the
+/// conversation demonstrably exists on disk, so a 404 is a real resolution failure —
+/// #117's agent-left-its-spawn-cwd — and falling back to Terminal is right: an empty
+/// Chat lens over a live session is the worse of the two wrong answers.
+bool noTranscriptIsFinal(Session? session) =>
+    !sessionKeepsTranscript(session) || session!.agentSessionId != null;
+
 /// The compose (text input) bar is ALWAYS shown. It sends straight to the PTY in
 /// the Terminal lens and to Claude in the Chat lens, so it is the one input path
 /// that works in every state — touch (where typing into the xterm view has no
@@ -1014,6 +1029,9 @@ class _SessionScreenState extends State<SessionScreen>
   /// transcript path existed). Fall back to Terminal silently.
   void _handleNoTranscript() {
     if (!mounted) return;
+    // "Not yet" is not "never" — leave a young agent session on Chat with its empty
+    // state, which its own refresh fills in as soon as the first turn lands.
+    if (!noTranscriptIsFinal(_session)) return;
     setState(() {
       _transcriptUnavailableForSession = true;
       _activeLens = 'terminal';

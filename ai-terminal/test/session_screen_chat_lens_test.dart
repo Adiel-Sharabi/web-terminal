@@ -13,13 +13,18 @@ import 'package:ai_terminal/screens/session_screen.dart';
 ServerConfig _server() =>
     const ServerConfig(name: 'Home', baseUrl: 'http://x', bearerToken: 't');
 
-Session _session({String? claudeSessionId, String? agent}) => Session(
+Session _session({
+  String? claudeSessionId,
+  String? agent,
+  String? agentSessionId,
+}) => Session(
   id: 'sess-1',
   name: 'my-project',
   cwd: r'C:\dev\my-project',
   status: 'idle',
   claudeSessionId: claudeSessionId,
   agent: agent,
+  agentSessionId: agentSessionId,
   lastActivity: DateTime.now().millisecondsSinceEpoch,
   notifyLevel: 'important',
   server: _server(),
@@ -53,6 +58,32 @@ void main() {
 
     test('false for a null session', () {
       expect(sessionKeepsTranscript(null), isFalse);
+    });
+  });
+
+  // #119: a brand-new agent session 404s its transcript until the first turn writes
+  // one. Treating that as final hid the Chat toggle for the life of the screen — the
+  // reported "no chat options until I switch away and come back", reached one step
+  // after the create response started reporting the agent correctly.
+  group('noTranscriptIsFinal', () {
+    test('false for an agent session that has no conversation id YET', () {
+      expect(noTranscriptIsFinal(_session(agent: 'claude')), isFalse);
+      expect(noTranscriptIsFinal(_session(agent: 'codex')), isFalse);
+    });
+
+    test('true once the server has published a conversation id', () {
+      // The conversation demonstrably exists, so a 404 is a real resolution
+      // failure (#117) — an empty Chat lens over a live session is worse than
+      // falling back to Terminal.
+      expect(
+        noTranscriptIsFinal(_session(agent: 'claude', agentSessionId: 'conv-1')),
+        isTrue,
+      );
+    });
+
+    test('true for a plain shell — it never had one to wait for', () {
+      expect(noTranscriptIsFinal(_session()), isTrue);
+      expect(noTranscriptIsFinal(null), isTrue);
     });
   });
 

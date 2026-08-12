@@ -17,7 +17,9 @@ import '../theme/app_theme.dart';
 /// server of the currently-viewed context, falling back to the first
 /// configured server). On successful creation, refreshes
 /// [SessionRepository] and calls [onCreated] with the new (partially
-/// populated — the create endpoint only returns `{id, name}`) [Session].
+/// populated — the create endpoint returns only `{id, name, agent}`) [Session].
+/// `agent` is load-bearing among those three: the screen opened from this object
+/// gates its Chat lens on it (#119).
 ///
 /// [clientBuilder] is injectable for tests; production callers use the
 /// default, which just wraps the server in a real [ApiClient].
