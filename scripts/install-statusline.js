@@ -4,7 +4,7 @@
 // (scripts/wt-push-status.sh), so POST /api/claude-status receives the FULL
 // statusline payload instead of the four numbers the old inline block forwarded.
 //
-// Sibling of fix-hooks.js: the repo owns the machine-local Claude config that
+// Sibling of install-hooks.js: the repo owns the machine-local Claude config that
 // implements its contracts, because a per-machine copy of a wire format drifts.
 // See scripts/wt-push-status.sh for the history of that drift (#71, #69).
 //

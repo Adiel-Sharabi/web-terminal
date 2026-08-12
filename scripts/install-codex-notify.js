@@ -2,7 +2,7 @@
 'use strict';
 // Point this machine's Codex TUI at the in-band status channel web-terminal reads.
 //
-// Sibling of install-statusline.js and fix-hooks.js: the repo owns the machine-local
+// Sibling of install-statusline.js and install-hooks.js: the repo owns the machine-local
 // agent config that implements its contracts, because a per-machine copy of a wire
 // format drifts. Here the contract is "a Codex session reports its status as OSC 9 in
 // its own PTY output" — see lib/osc9-notify.js for why hooks cannot do this job and

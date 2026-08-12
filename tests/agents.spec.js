@@ -68,6 +68,48 @@ test('claude resolves nothing without a conversation id (a fresh session)', () =
   expect(getAdapter('claude').resolveTranscript({ cwd: '', agentSessionId: 'x' }, claudeIo)).toBe('');
 });
 
+// A session's cwd is where its SHELL started, not where the agent RUNS. Resuming another
+// project's conversation from inside the TUI (or a plain cd) puts the transcript under a
+// different project dir, and the derivation then names a file that does not exist —
+// observed on XPS: session cwd C:\dev\AM8_Core, conversation under C--dev-am8-health.
+test('claude falls back to an exact by-id lookup when the cwd derivation misses', () => {
+  const real = path.join('ROOT', 'C--dev-am8-health', 'sid-9.jsonl');
+  const io = {
+    root: 'ROOT', join: path.join, listRollouts: () => [], readFirstLine: () => '',
+    exists: (p) => p === real,
+    findByBasename: (n) => (n === 'sid-9.jsonl' ? real : ''),
+  };
+  const p = getAdapter('claude').resolveTranscript(
+    { cwd: 'C:' + BS + 'dev' + BS + 'AM8_Core', agentSessionId: 'sid-9' }, io,
+  );
+  expect(p).toBe(real);
+});
+
+// The fallback must stay OFF the common path: one path join, no directory walk.
+test('claude prefers the cwd derivation and does not search when that file exists', () => {
+  let searched = 0;
+  const io = {
+    root: 'ROOT', join: path.join, listRollouts: () => [], readFirstLine: () => '',
+    exists: () => true,
+    findByBasename: () => { searched++; return path.join('ROOT', 'elsewhere', 'sid-1.jsonl'); },
+  };
+  const p = getAdapter('claude').resolveTranscript(
+    { cwd: 'C:' + BS + 'dev' + BS + 'Acme_Core', agentSessionId: 'sid-1' }, io,
+  );
+  expect(p).toBe(path.join('ROOT', 'C--dev-Acme-Core', 'sid-1.jsonl'));
+  expect(searched).toBe(0);
+});
+
+test('claude resolves nothing when the conversation id exists nowhere', () => {
+  const io = {
+    root: 'ROOT', join: path.join, listRollouts: () => [], readFirstLine: () => '',
+    exists: () => false, findByBasename: () => '',
+  };
+  expect(getAdapter('claude').resolveTranscript(
+    { cwd: 'C:' + BS + 'dev', agentSessionId: 'ghost' }, io,
+  )).toBe('');
+});
+
 test('codex resolves by searching rollout heads for a matching cwd', () => {
   const cwd = 'C:' + BS + 'dev' + BS + 'proj';
   const head = (c) => JSON.stringify({ type: 'session_meta', payload: { id: 'u', cwd: c } });

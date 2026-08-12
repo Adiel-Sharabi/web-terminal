@@ -113,6 +113,8 @@ The legacy proxy path is always available as fallback — direct mode is purely 
 | `lib/git-safe.js` | Hardened runner for the version/update-check git calls — disables credential prompts and tree-kills on timeout, so a broken HTTPS remote cannot hang `git-credential-manager` and leak process trees |
 | `claude-hook.js` / `claude-hook.sh` | Claude Code hook scripts (Node for Windows, bash elsewhere) |
 | `scripts/install-codex-notify.js` | Writes the three `[tui]` keys that enable Codex's OSC 9 status channel. Applied by `scripts/cold-restart.ps1` on every deploy; `--check` reports without changing anything |
+| `scripts/install-hooks.js` | Owns the Claude Code hook set in `~/.claude/settings.json` — the nine events the server consumes. Adds/corrects only web-terminal's own http entry, so user hooks survive; idempotent, so the deploy path applies it every time. The set had no owner in the repo until 2026-08-12, which is how `SessionStart` came to be missing on every machine |
+| `scripts/bump-server-version.js` | Bumps `SERVER_VERSION`, which lives on a ~280KB single line that no reviewer or agent should have to read to change three digits |
 
 ### Frontend
 

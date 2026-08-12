@@ -99,15 +99,19 @@ Install these only if the user wants the corresponding feature.
 
 | Command | What it enables | Restart needed |
 |---|---|---|
-| `node fix-hooks.js` | Claude Code status dots (Working/Idle/Waiting), notifications, session browser | none |
+| `node scripts/install-hooks.js` | Claude Code status dots (Working/Idle/Waiting), notifications, session browser, chat-lens conversation identity | none |
 | `node scripts/install-statusline.js` | Claude context-window % and 5h/7d rate-limit badges | none |
 | `node scripts/install-codex-notify.js` | Codex session status (it has no usable hooks; status arrives as OSC 9 in the PTY) | **COLD** |
 
 Three traps, each of which has silently cost a working feature:
 
-- **`fix-hooks.js` REPLACES `~/.claude/settings.json`'s entire `hooks` key.** If the user
-  has their own hooks, merge rather than run it blind. It installs all eight events, and
-  the set is not à la carte: `PreToolUse`/`PostToolUse` are the heartbeat that keeps a
+- **The hook set is not à la carte — all nine events or the feature misbehaves.**
+  `install-hooks.js` adds or corrects only web-terminal's own http entry, so a user's own
+  hooks survive and it is safe to re-run. `SessionStart` is the one that looks optional
+  and is not: every other event fires only once the user is ALREADY interacting, so a
+  session that started or resumed and has not been prompted reports no conversation id at
+  all and its chat lens 404s beside a live terminal. Beyond that,
+  `PreToolUse`/`PostToolUse` are the heartbeat that keeps a
   busy session from being flipped to Idle by the 5-minute stale guard, and
   `SubagentStart` without `SubagentStop` is **worse than neither** — the in-flight count
   only grows, so the main agent's `Stop` is held forever and the session never reports
