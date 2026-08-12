@@ -288,20 +288,49 @@ String? lastAssistantText(List<TranscriptTurn> turns) {
   return null;
 }
 
-/// Vertical room the ANSWERING half of the card needs before the lead-up may
-/// claim any (#94): header (~48) + footer (~122, nav strip and buttons) + three
-/// option rows (~100 each, a label with a description). Measured off the real
-/// card at a 412dp width; it is a floor, not a layout constant — nothing is
-/// positioned from it, it only decides how much the lead-up may take.
-const double kAnswerFloor = 470;
+// --- The space budget (#108) -------------------------------------------------
+//
+// THE OPTIONS ARE RESERVED FIRST. That inversion is the whole point.
+//
+// Before this, `_optionList` was the Flexible RESIDUAL: header, lead-up, tabs
+// and question each took their natural or capped size, the footer took its own,
+// and the options got whatever survived. So every other panel's appetite was
+// charged to the one region you have to interact with, and `kAnswerFloor` —
+// which only ever limited what the LEAD-UP could claim — could not stop it.
+//
+// Now the fixed chrome and an option floor are subtracted up front, and only
+// then do the question and the lead-up divide what is left. `_optionList` stays
+// Flexible, so a SHORT question still hands its surplus to the options (#94's
+// "a SHORT question reserves only what it needs"); the caps below simply can no
+// longer starve them.
+//
+// Every value MEASURED with a getRect probe at 412dp against the real card,
+// never derived from padding arithmetic — and the row height moved twice while
+// this was being written, which is the argument for measuring at all. An
+// UNCLAMPED row with a verbose description measured 126; once descriptions clamp
+// to two lines (see _optionTile) the same row measures 78. 96 is the measured 78
+// plus headroom for a label that itself wraps.
+const double kHeaderH = 68; // title + icon buttons
+const double kFooterH = 66; // the two action buttons (nav strip is behind a toggle)
+const double kTabStripH = 38; // multi-question chip strip
+const double kCtxChrome = 50; // lead-up panel margin + padding + label row
+const double kOptionRowMax = 96; // label + a two-line description at 412dp
+const double kOptionPeek = 16; // a deliberate half-row: "there is more below"
 
-/// The least the lead-up body may be given and still be worth its own chrome
-/// (label row, padding, border) — roughly four lines (#108). Below this the
-/// panel renders as its header alone: a 96px scroll box surrounded by ~50px of
-/// frame spends more room on the frame than the text, and it spends it out of
-/// the option list, which is the Flexible residual and therefore pays for
-/// everything else in the card.
-const double kMinContextBody = 88;
+/// Two whole option rows plus a peek of the third. The peek matters as much as
+/// the rows: it makes the cut land somewhere chosen, so a clipped list reads as
+/// "scroll me" instead of as the end (the report was a row sliced mid-word).
+const double kOptionFloor = 2 * kOptionRowMax + kOptionPeek; // 268
+
+/// The least the lead-up body may take and still be worth its own 50px frame.
+/// Below this the panel renders as its header row alone — collapsed, but always
+/// tappable, because it is the only route back to the context.
+const double kCtxMinUseful = 96;
+const double kCtxMax = 300;
+
+/// The question never drops below two lines, and never grows past this.
+const double kQuestionMin = 52;
+const double kQuestionMax = 260;
 
 class QuestionOverlay extends StatefulWidget {
   const QuestionOverlay({
@@ -370,6 +399,10 @@ class _QuestionOverlayState extends State<QuestionOverlay> {
   /// this issue is about, so it gets the same honest affordance.
   final ScrollController _qScroll = ScrollController();
 
+  /// Drives the option list's own [Scrollbar] (#108) — the one scroller in the
+  /// card that had no thumb, and the region the report was about.
+  final ScrollController _optScroll = ScrollController();
+
   /// The user's EXPLICIT choice about the lead-up panel, or null for "decide
   /// from the room available" (#94, reworked for #108).
   ///
@@ -426,6 +459,7 @@ class _QuestionOverlayState extends State<QuestionOverlay> {
     _noteController.dispose();
     _ctxScroll.dispose();
     _qScroll.dispose();
+    _optScroll.dispose();
     super.dispose();
   }
 
@@ -582,54 +616,36 @@ class _QuestionOverlayState extends State<QuestionOverlay> {
                     // 640 wide, and an unbounded column that narrow on a large
                     // monitor reads as a broken layout rather than a dialog.
                     final cardMax = (box.maxHeight - 24).clamp(280.0, 1000.0);
-                    // The question is PINNED (below), so unlike before it is
-                    // bounded rather than free to fill the option viewport.
-                    // The ceiling is generous on purpose: the pinned block
-                    // takes only what the text NEEDS (a bounded box around a
-                    // scroll view), so a roomy cap costs a normal one-line
-                    // question nothing and buys a six-line one being readable
-                    // without scrolling — which is this issue's first
-                    // requirement, and worth more than a third option row.
-                    final qMax = (cardMax * 0.30).clamp(64.0, 260.0);
-                    // The lead-up gets the SPARE room — not a fixed share.
                     //
-                    // It used to take a flat 45%, which on a 720 card meant 324px
-                    // for the reasoning and 198 for the answering half — less
-                    // than the question text alone needed, so a phone showed the
-                    // explanation and NOT ONE option (#94). A percentage cannot
-                    // fix that, because the header and footer are FIXED costs:
-                    // the smaller the card, the larger their share, and the more
-                    // brutally any percentage split squeezes whatever is left.
-                    //
-                    // So the priority is stated directly instead. Everything but
-                    // the lead-up has a job you cannot answer without — the
-                    // question says what is being asked, the options are the
-                    // answer, the footer sends it — and [kAnswerFloor] is what
-                    // those need for three option rows to be reachable. The
-                    // lead-up takes what remains, which is honest because it is
-                    // the one panel that says so: it has a scrollbar AND an
-                    // expander advertising that there is more where this came
-                    // from.
-                    //
-                    // *** The clamp FLOOR used to defeat all of the above. ***
-                    // This read `.clamp(96.0, 300.0)`, so when the subtraction
-                    // went NEGATIVE — precisely when the card is too small, the
-                    // only regime kAnswerFloor exists for — the lead-up still
-                    // took 96px plus ~50 of its own chrome, and because the
-                    // option list is the Flexible RESIDUAL every pixel of the
-                    // shortfall came out of the options. Measured at the real
-                    // mount on a 412x915 phone: a 206px option viewport showing
-                    // ONE row, with the second cut through its description.
-                    //
-                    // The floor is 0 now, and "no room" collapses the panel to
-                    // its header rather than reserving a box too small to read.
+                    // *** Options are RESERVED, not residual. ***
+                    // Subtract the fixed chrome and an option floor FIRST; only
+                    // then do the question and the lead-up divide what is left.
+                    // Previously the options were the Flexible residual, so
+                    // every other panel's appetite was charged to the one region
+                    // you must interact with — measured at the real mount on a
+                    // 412x915 phone, a 206px option viewport showing ONE row
+                    // with the second sliced through its description.
+                    final fixed = kHeaderH +
+                        kFooterH +
+                        (questions.length > 1 ? kTabStripH : 0);
+                    final shared = cardMax - fixed - kOptionFloor;
+                    // The question is served next and always keeps two lines. It
+                    // is PINNED (below) and bounded rather than free to fill the
+                    // option viewport, and the pinned block takes only what the
+                    // text NEEDS, so a generous cap costs a one-line question
+                    // nothing while letting a six-line one be read without
+                    // scrolling.
+                    final qMax = shared.clamp(kQuestionMin, kQuestionMax);
+                    // The lead-up takes the remainder — and COLLAPSES rather
+                    // than showing a slit. It is the one panel that can honestly
+                    // say "there is more": it has a scrollbar AND an expander.
+                    final ctxRoom = shared - qMax - kCtxChrome;
                     final ctxSpare =
-                        (cardMax - qMax - kAnswerFloor).clamp(0.0, 300.0);
+                        ctxRoom >= kCtxMinUseful ? ctxRoom.clamp(0.0, kCtxMax) : 0.0;
                     // Open by default only when the panel can show enough to be
-                    // worth the room; otherwise it starts at its header and the
-                    // chevron says there is more. Null means "decide from room".
+                    // worth its frame. Null means "decide from the room".
                     final expanded =
-                        _ctxExpandedOverride ?? (ctxSpare >= kMinContextBody);
+                        _ctxExpandedOverride ?? (ctxSpare >= kCtxMinUseful);
                     return Container(
                       constraints:
                           BoxConstraints(maxWidth: 640, maxHeight: cardMax),
@@ -661,10 +677,10 @@ class _QuestionOverlayState extends State<QuestionOverlay> {
                               // cramped card — the budget decides the DEFAULT,
                               // never what the user is allowed to read.
                               expanded
-                                  ? (ctxSpare >= kMinContextBody
+                                  ? (ctxSpare >= kCtxMinUseful
                                       ? ctxSpare
                                       : (cardMax * 0.35).clamp(
-                                          kMinContextBody, 300.0))
+                                          kCtxMinUseful, 300.0))
                                   : 0.0,
                               expanded,
                             ),
@@ -878,7 +894,21 @@ class _QuestionOverlayState extends State<QuestionOverlay> {
   }
 
   Widget _optionList(ThemeData theme, PendingQuestionItem q) {
-    return SingleChildScrollView(
+    // The option list was the ONE scroller in this card with no thumb — the
+    // question (#94) and the lead-up both got one, and this is the region the
+    // report was actually about. A row cut by the viewport with nothing
+    // advertising the scroll reads as the end of the list.
+    //
+    // Stays a SingleChildScrollView on purpose: the #94 tests resolve the
+    // option viewport with `find.ancestor(..., matching: find.byType(
+    // SingleChildScrollView))`, so a ListView would silently break the one
+    // assertion that proves the options are reachable.
+    return Scrollbar(
+      controller: _optScroll,
+      thumbVisibility: true,
+      child: SingleChildScrollView(
+      controller: _optScroll,
+      primary: false,
       padding: const EdgeInsets.symmetric(horizontal: 12),
       child: Column(
         crossAxisAlignment: CrossAxisAlignment.start,
@@ -911,6 +941,7 @@ class _QuestionOverlayState extends State<QuestionOverlay> {
           ],
           const SizedBox(height: 4),
         ],
+      ),
       ),
     );
   }
@@ -1106,6 +1137,23 @@ class _QuestionOverlayState extends State<QuestionOverlay> {
                           padding: const EdgeInsets.only(top: 2),
                           child: Text(
                             opt.description,
+                            // Two lines until chosen, then the whole thing
+                            // (#108). One verbose option could otherwise be
+                            // taller than the entire viewport and push every
+                            // other choice off screen.
+                            //
+                            // Expand ON SELECT rather than behind a per-row
+                            // chevron: selecting is exactly when you want the
+                            // detail, a second tap target inside the row would
+                            // compete with _toggle (and with the checkbox in
+                            // multi-select), and this costs nothing when space
+                            // is scarce.
+                            //
+                            // Honest limit: ellipsis breaks at a grapheme, so it
+                            // can still end mid-word — what it never does is end
+                            // SILENTLY, which is what the report was.
+                            maxLines: selected ? null : 2,
+                            overflow: selected ? null : TextOverflow.ellipsis,
                             style: theme.textTheme.bodySmall?.copyWith(
                               color: theme.colorScheme.onSurfaceVariant,
                             ),
