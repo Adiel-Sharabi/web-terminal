@@ -253,6 +253,30 @@ String buildAttachmentSubmission(List<String> paths, String text) {
   return buildComposeSubmission(parts.join('\n'), forcePaste: paths.isNotEmpty);
 }
 
+/// The exact bytes that commit a LIVE '/'-line carrying staged attachments (#110).
+///
+/// A '/'-line is the one submit whose text is ALREADY in the agent's prompt — it
+/// streamed char by char as the user typed, so the menu could narrow. That is why
+/// its commit is normally a bare `'\r'`, and it is exactly why attachments went
+/// missing: the commit path returned at that `'\r'` and never reached the paste
+/// that [buildAttachmentSubmission] does for every other submit, so the command
+/// started a turn on its own and the images were cleared unsent.
+///
+/// So this sends the paths and NOT the text — re-sending the text would type the
+/// command twice. Shape follows the measured #90 rule: ONE bracketed paste,
+/// newline-separated, or a multi-file attach delivers only its first path. The
+/// leading empty element puts a newline before the first path so it cannot fuse
+/// onto the command text — the same fusion #90 measured when a prompt ran into a
+/// path (`…report.pdfName both files I attached.`).
+///
+/// One frame including the CR, like every other compose submit (#44): the WORKER
+/// owns the submit timing and splits that trailing CR off (#55), which is what
+/// makes it land as Enter rather than as paste content.
+String buildLiveAttachmentSubmission(List<String> paths) {
+  if (paths.isEmpty) return '\r';
+  return buildComposeSubmission(['', ...paths].join('\n'), forcePaste: true);
+}
+
 /// What a live '/'-line mirrors into the agent's TUI prompt (#55 §1).
 ///
 /// A '/'-prefixed buffer streams to the PTY as you type so the agent's own slash menu
@@ -1585,7 +1609,12 @@ class _SessionScreenState extends State<SessionScreen>
     if (conn == null) return; // no PTY — keep the buffer, don't clear (#44)
     final val = _composeController.text;
     if (_composeLive) {
-      conn.sendInput('\r');
+      // #110 — the text is already in the prompt, but any staged attachments are
+      // NOT: they only ever travelled in the paste this branch used to skip.
+      if (val.isNotEmpty) _submittedPrompts.add(val);
+      conn.sendInput(buildLiveAttachmentSubmission(
+        [for (final a in _attachments) a.path],
+      ));
       _pushComposeHistory(val);
       _clearComposeInput();
       _scrollToBottom();
