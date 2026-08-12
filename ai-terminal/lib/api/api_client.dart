@@ -314,6 +314,10 @@ class ApiClient {
     if (agent != null) params['agent'] = agent;
     final res = await _send('POST', '/api/sessions', body: params);
     final j = _asMap(_decode(res));
+    // The server resolves the agent it actually recorded — the explicit pick, else
+    // inferred from the command — and that is what [listSessions] will report. An
+    // older server echoes only an explicit pick, so fall back to the request.
+    final served = j['agent'];
     return Session(
       id: (j['id'] ?? '').toString(),
       name: (j['name'] ?? name ?? '').toString(),
@@ -324,10 +328,11 @@ class ApiClient {
       notifyLevel: 'important',
       autoCommand: autoCommand ?? '',
       server: server,
-      // Echoes only what was explicitly requested — when omitted (server
-      // infers it), the resolved id isn't known yet; [listSessions] picks it
-      // up on the next fetch.
-      agent: agent,
+      // The server's answer wins. Taking the REQUEST instead left this null for
+      // every session created with the picker on Auto, and the screen opened from
+      // this object keeps it — so the Chat lens stayed shut until a re-select
+      // replaced it with the list's copy (#119).
+      agent: served is String && served.isNotEmpty ? served : agent,
     );
   }
 

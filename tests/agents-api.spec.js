@@ -97,6 +97,31 @@ test.describe('Agent-aware sessions', () => {
     await ctx.dispose();
   });
 
+  // #119: the create RESPONSE is what the companion builds the session it opens
+  // from, and its Chat lens is gated on this field. Echoing only the explicit pick
+  // meant every Auto-created agent session opened with no chat controls until a
+  // re-select re-read it from the list — so create must answer what list answers.
+  test('create reports the INFERRED agent, matching what the list reports', async () => {
+    const ctx = await authCtx();
+    const { status, body } = await mkSession(ctx, { name: 'inferred-claude', autoCommand: 'claude --resume abc' });
+    expect(status).toBe(200);
+    expect(body.agent).toBe('claude');
+    const s = await sessionFromList(ctx, body.id);
+    expect(body.agent).toBe(s.agent);
+    await ctx.delete(`/api/sessions/${body.id}`);
+    await ctx.dispose();
+  });
+
+  test('create reports agent null for a plain shell — inference is not a coercion', async () => {
+    const ctx = await authCtx();
+    const { body } = await mkSession(ctx, { name: 'inferred-shell', autoCommand: 'pwsh -NoLogo' });
+    expect(body.agent).toBeNull();
+    const s = await sessionFromList(ctx, body.id);
+    expect(s.agent).toBeNull();
+    await ctx.delete(`/api/sessions/${body.id}`);
+    await ctx.dispose();
+  });
+
   test('a plain shell session reports agent null — not mislabelled as claude', async () => {
     const ctx = await authCtx();
     const { body } = await mkSession(ctx, { name: 'plain-shell', autoCommand: '' });

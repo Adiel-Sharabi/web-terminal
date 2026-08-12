@@ -158,6 +158,38 @@ void main() {
       expect(jsonDecode(captured.body).containsKey('agent'), isFalse);
       expect(created.agent, isNull);
     });
+
+    // #119: the created Session is what the screen opens with, and its Chat lens is
+    // gated on `agent`. Reading the field back off the REQUEST discarded the server's
+    // answer, so a session created with the picker on Auto opened with no chat
+    // controls until a re-select replaced it with the list's copy. (The two tests
+    // above pin the fallback that keeps an OLDER server, which echoes nothing, working.)
+    test('takes the agent the SERVER resolved, not the one requested', () async {
+      final client = ApiClient(
+        _server,
+        httpClient: MockClient((req) async => http.Response(
+              jsonEncode({'id': 's1', 'name': 'n', 'agent': 'claude'}),
+              200,
+            )),
+      );
+
+      final created = await client.createSession(autoCommand: 'claude --resume abc');
+      expect(created.agent, 'claude');
+    });
+
+    test('a plain shell stays agentless — an explicit null is a real answer',
+        () async {
+      final client = ApiClient(
+        _server,
+        httpClient: MockClient((req) async => http.Response(
+              jsonEncode({'id': 's1', 'name': 'n', 'agent': null}),
+              200,
+            )),
+      );
+
+      final created = await client.createSession(autoCommand: 'pwsh -NoLogo');
+      expect(created.agent, isNull);
+    });
   });
 
   group('ApiClient.reorderSessions', () {

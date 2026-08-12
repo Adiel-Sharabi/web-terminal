@@ -4,7 +4,7 @@
 const { test, expect } = require('@playwright/test');
 const path = require('path');
 const {
-  getAdapter, isKnownAgent, detectAgentFromCommand, commandLaunches,
+  getAdapter, isKnownAgent, detectAgentFromCommand, commandLaunches, resolveAgent,
   resolveTranscriptFor, listProviders, DEFAULT_AGENT, AGENT_IDS,
 } = require('../lib/agents');
 
@@ -49,6 +49,18 @@ test('commandLaunches answers "is this a claude session" without a local regex',
   expect(commandLaunches('claude', 'pwsh')).toBe(false);
   expect(commandLaunches('codex', 'npx codex')).toBe(true);
   expect(commandLaunches('nope', 'anything')).toBe(false);
+});
+
+// ---- resolveAgent: the one composition every endpoint owes (#119) -----------
+test('resolveAgent prefers the explicit pick and falls back to inference', () => {
+  expect(resolveAgent('codex', 'claude --resume abc')).toBe('codex');
+  expect(resolveAgent(null, 'claude --resume abc')).toBe('claude');
+  expect(resolveAgent('', 'npx codex')).toBe('codex');
+  expect(resolveAgent(undefined, 'pwsh')).toBeNull();
+  // An unknown id is never persisted (create rejects it) but must still degrade to
+  // inference rather than through — a session written by a NEWER server loads here.
+  expect(resolveAgent('skynet', 'claude')).toBe('claude');
+  expect(resolveAgent(null, null)).toBeNull();
 });
 
 // ---- per-provider transcript resolution -------------------------------------

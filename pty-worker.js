@@ -1237,10 +1237,10 @@ function sessionIdOf(session) {
 // The AI agent this session runs: the explicit choice made at create time, else
 // inferred from the launch command, else null for a plain shell. Never throws — an
 // unknown value degrades to inference, so a session written by a newer server loads.
+// The rule itself lives in lib/agents.js because `POST /api/sessions` owes the same
+// answer about the same session and once gave a different one (#119).
 function sessionAgent(s) {
-  const explicit = s && s.agent;
-  if (agents.isKnownAgent(explicit)) return explicit;
-  return agents.detectAgentFromCommand((s && s.autoCommand) || '');
+  return agents.resolveAgent(s && s.agent, (s && s.autoCommand) || '');
 }
 
 function sessionSummary(id, s) {
