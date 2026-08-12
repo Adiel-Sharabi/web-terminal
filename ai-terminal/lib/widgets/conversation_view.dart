@@ -1034,10 +1034,14 @@ class _CompactingIndicator extends StatelessWidget {
   }
 }
 
-/// Markdown style for a chat bubble's prose. Fenced code blocks are split out
+/// Markdown style for agent prose. Shared: the question overlay renders its
+/// lead-up with this too (#108), so the two never drift into different bold or
+/// heading treatments for the same text.
+///
+/// Originally a chat bubble. Fenced code blocks are split out
 /// to [_CodeBlock] before markdown runs, so this mainly styles headings, bold,
 /// italics, lists, links, inline code and blockquotes to match the bubble text.
-MarkdownStyleSheet _markdownStyle(
+MarkdownStyleSheet markdownStyle(
   ThemeData theme,
   TextStyle? body,
   TextStyle? codeSpan,
@@ -1294,11 +1298,15 @@ UserTurnClass classifyUserTurn(String text) {
   return UserTurnClass(kind: UserTurnKind.human, from: '', body: text);
 }
 
-/// Opens a tapped chat link in the system browser — http/https only
+/// Opens a tapped link in the system browser — http/https only
 /// ([isLaunchableHttpUrl]); other schemes are ignored. Best-effort, never
-/// throws into the widget tree. Public + [visibleForTesting] so the launch
-/// path (and the "javascript: never launches" guard) can be asserted directly.
-@visibleForTesting
+/// throws into the widget tree.
+///
+/// No longer [visibleForTesting]: it now has a second real caller, the question
+/// overlay's rendered lead-up (#108), which must route taps through THIS
+/// function rather than its own launcher — the scheme guard is the only thing
+/// stopping a `javascript:` href in agent prose from being launched, and a
+/// second copy of that guard is a second place for it to be got wrong.
 Future<void> openChatLink(String? href) async {
   if (!isLaunchableHttpUrl(href)) return;
   try {
@@ -1403,7 +1411,7 @@ class _TurnBubble extends StatelessWidget {
       backgroundColor:
           theme.colorScheme.surfaceContainerHigh.withValues(alpha: 0.5),
     );
-    final mdStyle = _markdownStyle(theme, bodyStyle, codeSpanStyle);
+    final mdStyle = markdownStyle(theme, bodyStyle, codeSpanStyle);
     final epoch = _parseIsoToEpoch(turn.ts);
 
     // #54: an agent turn is tinted with ITS OWN registry colour so Claude vs

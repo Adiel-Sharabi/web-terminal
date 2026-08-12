@@ -194,4 +194,86 @@ void main() {
       expect(buildPastedPaths(const []), '');
     });
   });
+
+  group('decodeStagedAttachments (#113 — chips survive leaving the session)', () {
+    // Reported 2026-08-12: "I attached the images in here, I swipe to a
+    // different session, go back, and those images was gone."
+    //
+    // The compose bar persisted its TEXT and nothing else, which is the worse
+    // half of the two states: the draft came back looking complete while the
+    // images it referred to were silently gone.
+
+    test('round-trips a dropped file, keeping its name', () {
+      final out = decodeStagedAttachments(
+        '[{"path":"/srv/dropped-files/17-report.pdf","name":"report.pdf"}]',
+      );
+      expect(out, [
+        {'path': '/srv/dropped-files/17-report.pdf', 'name': 'report.pdf'},
+      ]);
+    });
+
+    test('preserves order across several attachments', () {
+      final out = decodeStagedAttachments(
+        '[{"path":"/a/1.png","name":"one"},'
+        '{"path":"/a/2.png","name":"two"},'
+        '{"path":"/a/3.png","name":"three"}]',
+      );
+      expect([for (final a in out) a['name']], ['one', 'two', 'three']);
+    });
+
+    test('a nameless clipboard paste falls back to its basename', () {
+      // Only DROPPED files carry a name; a clipboard paste is staged with none.
+      // Without the fallback every restored paste would be an unlabelled chip —
+      // on screen, but naming nothing. And the restored chip has no thumbnail
+      // (bytes are never persisted), so the name is all the user gets.
+      expect(
+        decodeStagedAttachments(
+          r'[{"path":"C:\\dev\\web-terminal\\clipboard-images\\clip-178.png","name":""}]',
+        ),
+        [
+          {
+            'path': r'C:\dev\web-terminal\clipboard-images\clip-178.png',
+            'name': 'clip-178.png',
+          }
+        ],
+      );
+      expect(
+        decodeStagedAttachments('[{"path":"/srv/clipboard-images/clip-9.png"}]'),
+        [
+          {'path': '/srv/clipboard-images/clip-9.png', 'name': 'clip-9.png'}
+        ],
+      );
+    });
+
+    test('drops an entry with no path rather than restoring a broken chip', () {
+      // A chip with no path is worse than a missing one: it survives to the next
+      // send and hands the agent an empty reference — the #90 failure shape
+      // ("a path naming no file, glued to a mangled prompt").
+      expect(
+        decodeStagedAttachments('[{"name":"orphan"},{"path":"","name":"x"}]'),
+        isEmpty,
+      );
+      expect(
+        decodeStagedAttachments('[{"name":"orphan"},{"path":"/a/ok.png","name":"ok"}]'),
+        [
+          {'path': '/a/ok.png', 'name': 'ok'}
+        ],
+      );
+    });
+
+    test('nothing stored, or a corrupt/foreign cache, restores nothing', () {
+      // Must never throw: this runs inside the same prefs read that restores the
+      // draft, so an exception here would cost the user their typed text too.
+      for (final raw in <String?>[
+        null,
+        '',
+        'not json at all',
+        '{"path":"/a/b.png"}', // an object, not a list
+        '[42,"nope",null]',
+        '[',
+      ]) {
+        expect(decodeStagedAttachments(raw), isEmpty, reason: 'raw=$raw');
+      }
+    });
+  });
 }

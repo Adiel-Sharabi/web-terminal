@@ -8,6 +8,7 @@ import 'package:flutter_test/flutter_test.dart';
 
 import 'package:ai_terminal/api/models.dart';
 import 'package:ai_terminal/theme/app_theme.dart';
+import 'package:flutter_markdown/flutter_markdown.dart';
 import 'package:ai_terminal/widgets/question_overlay.dart';
 
 PendingQuestionItem _q(
@@ -620,6 +621,11 @@ void main() {
 
   testWidgets('shows Claude\'s preceding message as context when provided',
       (tester) async {
+    // A roomy card: since #108 the lead-up starts collapsed when there is no
+    // room for it, and this test is about it being SHOWN, not about the budget.
+    tester.view.physicalSize = const Size(1200, 1800);
+    tester.view.devicePixelRatio = 1.0;
+    addTearDown(tester.view.reset);
     await tester.pumpWidget(
       MaterialApp(
         theme: AppTheme.dark,
@@ -689,9 +695,10 @@ void main() {
     );
     await tester.pumpAndSettle();
 
-    final ctxText = find.byWidgetPredicate(
-      (w) => w is Text && (w.data ?? '').startsWith('HEAD_'),
-    );
+    // Anchored on the MarkdownBody since #108 made the lead-up rendered rather
+    // than a plain Text — markdown emits RichText, so a `w is Text` predicate
+    // finds nothing. What this test pins is unchanged.
+    final ctxText = find.byType(MarkdownBody);
     expect(ctxText, findsOneWidget);
 
     // The lead-up IS the reasoning, so on a roomy window it must get a real
@@ -762,6 +769,10 @@ void main() {
 
     // Numeric mode: the space-eaters are present.
     expect(find.text('Claude said'), findsOneWidget);
+    // Reveal the raw keys first (#108 hides them by default), so that their
+    // disappearance below is caused by the text field, not by the default.
+    await tester.tap(find.byTooltip('Show raw keys'));
+    await tester.pumpAndSettle();
     expect(find.widgetWithText(OutlinedButton, 'Space'), findsOneWidget);
 
     // Enter free-text mode and type an answer.
@@ -843,6 +854,9 @@ void main() {
       ),
     );
 
+    // The raw-key row is hidden until asked for (#108).
+    await tester.tap(find.byTooltip('Show raw keys'));
+    await tester.pumpAndSettle();
     await tester.tap(find.widgetWithText(OutlinedButton, 'Enter'));
     await tester.pump();
     expect(key, '\r');
@@ -1365,6 +1379,62 @@ void main() {
     expect(find.byType(TextField), findsNothing);
   });
 
+  testWidgets('#108: the lead-up is RENDERED markdown, not raw syntax',
+      (tester) async {
+    // Reported 2026-08-12 with a screenshot: the "Claude said" panel showed
+    // literal `**6 approved and marked Committed, 1 rejected.**`, a literal
+    // `## Branch pushed`, and backticked refs still wearing their backticks.
+    // The one block you must read carefully in order to judge the options was
+    // the only place in the app where the agent's formatting was stripped.
+    const raw = '## Branch pushed\n\n'
+        '**6 approved and marked Committed, 1 rejected.**\n\n'
+        'Pushed `origin/feature/journal-unified` at `10f65c80da`.';
+
+    // A roomy card, so the lead-up is open by default and there is a body to
+    // assert on: on a cramped one it now starts collapsed (#108), which is a
+    // different behaviour with its own test below.
+    tester.view.physicalSize = const Size(1200, 1800);
+    tester.view.devicePixelRatio = 1.0;
+    addTearDown(tester.view.reset);
+
+    await tester.pumpWidget(
+      MaterialApp(
+        theme: AppTheme.dark,
+        home: Scaffold(
+          body: Stack(
+            children: [
+              QuestionOverlay(
+                question: PendingQuestion(
+                  toolUseId: 'md',
+                  questions: [_q(['Keep', 'Revert'])],
+                ),
+                contextText: raw,
+                onSend: (_) {},
+                onKey: (_) {},
+                onDismiss: () {},
+              ),
+            ],
+          ),
+        ),
+      ),
+    );
+    await tester.pumpAndSettle();
+
+    // Rendered by the SHARED chat-lens renderer, not a second one.
+    expect(find.byType(MarkdownBody), findsOneWidget);
+
+    // And the syntax itself is gone from the tree. This is the assertion that
+    // is red against the old plain Text, which carried `raw` verbatim.
+    final literal = find.byWidgetPredicate(
+      (w) => w is Text && (w.data ?? '').contains('**'),
+    );
+    expect(literal, findsNothing);
+    final heading = find.byWidgetPredicate(
+      (w) => w is Text && (w.data ?? '').contains('## '),
+    );
+    expect(heading, findsNothing);
+  });
+
   group('#94 — answering from a phone', () {
     // Reported from mobile: "when a question comes up the context isn't clear
     // and the actual question text is sometimes missing", so the answer had to
@@ -1592,6 +1662,10 @@ void main() {
       // its context hidden, which is the very report this change fixes. The
       // other per-prompt state is already reset in didUpdateWidget; this was
       // missed because it is the one piece added by this change.
+      tester.view.physicalSize = const Size(412 * 3, 915 * 3);
+      tester.view.devicePixelRatio = 3.0;
+      addTearDown(tester.view.reset);
+
       Widget app(String toolUseId) => MaterialApp(
             theme: AppTheme.dark,
             home: Scaffold(
@@ -1626,6 +1700,78 @@ void main() {
       expect(find.textContaining('HEAD_'), findsOneWidget);
     });
 
+    testWidgets('the raw-key row is hidden until asked for (#108)',
+        (tester) async {
+      // It is a FALLBACK — for a prompt whose keybindings don't match the built
+      // sequence — but it charged every card a permanent row, and the card pays
+      // for that out of the option list. Six keys wrap to two rows at a phone
+      // width, measured at 36px straight off the options.
+      await pumpPhone(tester);
+      expect(find.text('Space'), findsNothing);
+      expect(find.text('Esc'), findsNothing);
+      final hidden = optionViewport(tester).height;
+
+      await tester.tap(find.byTooltip('Show raw keys'));
+      await tester.pumpAndSettle();
+      expect(find.text('Space'), findsOneWidget);
+      // Esc joined the row when the overlay began covering TerminalKeyStrip;
+      // it is the only one of that strip's keys that means anything AT a prompt.
+      expect(find.text('Esc'), findsOneWidget);
+
+      // Revealing them costs the options room — which is exactly why it is not
+      // the default.
+      expect(optionViewport(tester).height, lessThan(hidden));
+    });
+
+    testWidgets('the lead-up toggle is two-way even when it starts collapsed',
+        (tester) async {
+      // Found by instrumenting the fix, not by reading it. The collapsed panel
+      // was given `maxHeight: 0` on its CONTAINER, which took the "Claude said"
+      // header down with the body: the row still existed for `find`, but at zero
+      // height, so the chevron could not be tapped and the toggle was ONE-WAY.
+      // On a card that auto-collapses, that would have made the lead-up
+      // unreachable — strictly worse than the crowding being fixed.
+      tester.view.physicalSize = const Size(412 * 3, 620 * 3); // cramped
+      tester.view.devicePixelRatio = 3.0;
+      addTearDown(tester.view.reset);
+
+      await tester.pumpWidget(
+        MaterialApp(
+          theme: AppTheme.dark,
+          home: Scaffold(
+            body: Stack(
+              children: [
+                QuestionOverlay(
+                  question: PendingQuestion(
+                    toolUseId: 'tight',
+                    questions: [mobileQuestion()],
+                  ),
+                  contextText: _longLeadUp,
+                  onSend: (_) {},
+                  onKey: (_) {},
+                  onDismiss: () {},
+                ),
+              ],
+            ),
+          ),
+        ),
+      );
+      await tester.pumpAndSettle();
+
+      // The header is ALWAYS present — it is the only way back to the context.
+      expect(find.text('Claude said'), findsOneWidget);
+
+      // Whatever it starts as, tapping must flip it, and flip it back.
+      final startedOpen = find.byType(MarkdownBody).evaluate().isNotEmpty;
+      await tester.tap(find.text('Claude said'));
+      await tester.pumpAndSettle();
+      expect(find.byType(MarkdownBody).evaluate().isNotEmpty, !startedOpen);
+
+      await tester.tap(find.text('Claude said'));
+      await tester.pumpAndSettle();
+      expect(find.byType(MarkdownBody).evaluate().isNotEmpty, startedOpen);
+    });
+
     testWidgets('the nav-key strip fits a phone width', (tester) async {
       // Five keys in a Row overflowed 412dp by 7.3px. A RenderFlex does not
       // shrink to fit — it paints past its bounds and the overflowing child is
@@ -1633,7 +1779,10 @@ void main() {
       // purpose is to commit an answer.
       await pumpPhone(tester);
       expect(tester.takeException(), isNull);
-      for (final k in const ['Space', 'Tab', 'Enter']) {
+      // Hidden by default since #108 — reveal them before measuring.
+      await tester.tap(find.byTooltip('Show raw keys'));
+      await tester.pumpAndSettle();
+      for (final k in const ['Space', 'Tab', 'Enter', 'Esc']) {
         expect(find.text(k), findsOneWidget);
         expect(tester.getRect(find.text(k)).right,
             lessThanOrEqualTo(412.0));

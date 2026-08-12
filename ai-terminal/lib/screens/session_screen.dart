@@ -397,6 +397,41 @@ bool chatCopyShortcutTriggered({
   return hasChatSelection && !composeHasSelection;
 }
 
+/// Rebuilds the staged attachments persisted across a session switch (#113),
+/// as `{path, name}` pairs — the caller turns them into chips.
+///
+/// Thumbnail-less by construction: only the SERVER path is stored (see
+/// `_saveAttachments`), because the path is what actually gets delivered and the
+/// bytes are a preview the server already owns.
+///
+/// A blank name falls back to the path's basename. That matters rather than
+/// being tidy-up: a clipboard paste is staged with NO name at all (only dropped
+/// files carry one), so without this every restored paste would be an unlabelled
+/// chip — visible, but naming nothing.
+///
+/// Anything unusable is dropped rather than restored as a broken chip: a chip
+/// with no path would be sent to the agent as an empty reference. Pure, so the
+/// round-trip and every malformed shape are unit-testable.
+List<Map<String, String>> decodeStagedAttachments(String? raw) {
+  if (raw == null || raw.isEmpty) return const [];
+  try {
+    final decoded = jsonDecode(raw);
+    if (decoded is! List) return const [];
+    final out = <Map<String, String>>[];
+    for (final e in decoded) {
+      if (e is! Map) continue;
+      final path = (e['path'] ?? '').toString();
+      if (path.isEmpty) continue;
+      var name = (e['name'] ?? '').toString();
+      if (name.isEmpty) name = path.split(RegExp(r'[\\/]')).last;
+      out.add({'path': path, 'name': name});
+    }
+    return out;
+  } catch (_) {
+    return const []; // corrupt cache — the draft restore treats this the same way
+  }
+}
+
 /// A staged compose-bar image attachment (#29): the thumbnail [bytes] shown in
 /// the removable chip, and the server [path] delivered to Claude on submit.
 class _ComposeAttachment {
@@ -665,6 +700,9 @@ class _SessionScreenState extends State<SessionScreen>
     final prefs = await SharedPreferences.getInstance();
     if (!mounted) return;
     final draft = prefs.getString('wt_draft_${widget.sessionId}');
+    final staged = decodeStagedAttachments(
+      prefs.getString('wt_attach_${widget.sessionId}'),
+    );
     // Desktop has a real keyboard, so default to raw/terminal mode — Esc,
     // arrows, Ctrl and command history are handled natively by the terminal
     // (Claude's TUI). Mobile defaults to compose-first. A per-session toggle
@@ -699,6 +737,15 @@ class _SessionScreenState extends State<SessionScreen>
         text: draft,
         selection: TextSelection.collapsed(offset: draft.length),
       );
+    }
+    // #113 — the chips come back with the draft. Restored only when nothing is
+    // staged already: a paste can land between this async prefs read and here,
+    // and clobbering it would lose the newer attachment to restore an older one.
+    if (staged.isNotEmpty && _attachments.isEmpty) {
+      _attachments.addAll([
+        for (final s in staged)
+          _ComposeAttachment(path: s['path']!, name: s['name']!),
+      ]);
     }
     setState(() => _rawMode = rawMode);
     if (_rawMode) {
@@ -1611,6 +1658,10 @@ class _SessionScreenState extends State<SessionScreen>
     }
     _restoreLensAfterLive();
     unawaited(_saveDraft());
+    // Must follow the clear above, unconditionally: if the persisted copy
+    // outlived the send, the next visit would re-stage images the agent has
+    // already been given and quietly attach them twice (#113).
+    unawaited(_saveAttachments());
   }
 
   /// Esc from the compose bar sends ESC to the terminal (interrupt / close a
@@ -1796,6 +1847,7 @@ class _SessionScreenState extends State<SessionScreen>
     setState(
       () => _attachments.add(_ComposeAttachment(bytes: bytes, path: path)),
     );
+    unawaited(_saveAttachments()); // #113
     // Make sure the compose bar has focus so the new chip + send are right there.
     _composeFocusNode.requestFocus();
   }
@@ -1838,6 +1890,7 @@ class _SessionScreenState extends State<SessionScreen>
       }
     }
     if (!mounted) return;
+    unawaited(_saveAttachments()); // #113 — once, after the whole drop
     // Focus the compose bar once, after the loop — the chips and Send are there.
     _composeFocusNode.requestFocus();
     if (failures.isNotEmpty) {
@@ -1919,6 +1972,7 @@ class _SessionScreenState extends State<SessionScreen>
   void _removeComposeAttachment(int index) {
     if (index < 0 || index >= _attachments.length) return;
     setState(() => _attachments.removeAt(index));
+    unawaited(_saveAttachments()); // #113 — a removed chip must stay removed
   }
 
   Future<ImageSource?> _chooseImageSource() {
@@ -2186,6 +2240,40 @@ class _SessionScreenState extends State<SessionScreen>
     }
   }
 
+  /// Persists the STAGED ATTACHMENTS beside the draft text (#113).
+  ///
+  /// The draft survived a session switch and the chips did not, which is the
+  /// worst of the two states: the prompt comes back looking complete while the
+  /// images it refers to are silently gone.
+  ///
+  /// Only `path` and `name` are stored — never [_ComposeAttachment.bytes]. The
+  /// bytes are a THUMBNAIL; the upload already happened and the server owns the
+  /// file (#90 uploads precisely so a local and a peer session behave alike), so
+  /// the path is the thing that must survive. Writing image bytes into
+  /// SharedPreferences would duplicate what the server already holds and put
+  /// megabytes into a store meant for settings.
+  ///
+  /// The cost is honest and bounded: a restored image has no thumbnail and shows
+  /// as a NAMED chip — the same rendering a dropped non-image already uses (#90),
+  /// so no new widget state exists for it. Nothing can be re-fetched instead: no
+  /// endpoint serves `clipboard-images/` or `dropped-files/` back, and adding one
+  /// would mean a server release and a new file-serving surface for a thumbnail.
+  Future<void> _saveAttachments() async {
+    final prefs = await SharedPreferences.getInstance();
+    final key = 'wt_attach_${widget.sessionId}';
+    if (_attachments.isEmpty) {
+      await prefs.remove(key);
+      return;
+    }
+    await prefs.setString(
+      key,
+      jsonEncode([
+        for (final a in _attachments) {'path': a.path, 'name': a.name},
+      ]),
+    );
+  }
+
+
   Future<void> _persistHistory() async {
     final prefs = await SharedPreferences.getInstance();
     await prefs.setString(
@@ -2386,7 +2474,23 @@ class _SessionScreenState extends State<SessionScreen>
         ],
       ),
       // #90: the whole session body is a file drop target on desktop.
-      body: _withFileDrop(Column(
+      //
+      // #108 — the question overlay wraps the WHOLE body, not the lens.
+      //
+      // It used to be a child of the lens `Stack` below, so its Positioned.fill
+      // filled only the lens: the meta bar above and the compose bar + key strip
+      // below (~104px of permanent chrome) were outside its box the entire time
+      // a question was up. Measured on a 412x915 phone at the real mount, that
+      // left a 206px option viewport showing exactly ONE row with the second cut
+      // through its description — the reported screenshot.
+      //
+      // Covering that chrome is not a side effect, it is the point: while a
+      // question is up neither the compose bar nor the key strip is the way to
+      // answer it — this card is — and dismissing restores both. The one thing
+      // genuinely lost is the strip's tappable Esc, which now sits in the card's
+      // own fallback row (see _footer).
+      body: _withFileDrop(Stack(children: [
+        Column(
         children: [
           // #74: the session's meta bar — cwd + usage badges on the flexible
           // side, session controls on the right. These controls used to sit in
@@ -2624,24 +2728,6 @@ class _SessionScreenState extends State<SessionScreen>
                     // #83: lets Ctrl+C above copy what is selected here.
                     selectionSink: _chatSelection,
                   ),
-                // Native overlay for Claude's interactive question (#19), above
-                // whichever lens is showing. The key strip below stays usable as
-                // a manual fallback.
-                if (questionOverlayVisible(
-                  _pendingQuestion,
-                  _dismissedQuestionKey,
-                ))
-                  QuestionOverlay(
-                    question: _pendingQuestion!,
-                    contextText: _questionContext,
-                    onSend: _answerQuestion,
-                    onKey: _sendRawToTerminal,
-                    onDismiss: () => setState(
-                      () => _dismissedQuestionKey = questionSignature(
-                        _pendingQuestion,
-                      ),
-                    ),
-                  ),
               ],
             ),
           ),
@@ -2722,7 +2808,21 @@ class _SessionScreenState extends State<SessionScreen>
             ),
           ),
         ],
-      )),
+        ),
+        // Native overlay for Claude's interactive question (#19), above the
+        // whole body — see the note on `body:` for why it is mounted here and
+        // not inside the lens Stack.
+        if (questionOverlayVisible(_pendingQuestion, _dismissedQuestionKey))
+          QuestionOverlay(
+            question: _pendingQuestion!,
+            contextText: _questionContext,
+            onSend: _answerQuestion,
+            onKey: _sendRawToTerminal,
+            onDismiss: () => setState(
+              () => _dismissedQuestionKey = questionSignature(_pendingQuestion),
+            ),
+          ),
+      ])),
     );
   }
 }
