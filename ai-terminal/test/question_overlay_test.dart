@@ -1789,4 +1789,155 @@ void main() {
       }
     });
   });
+
+  // #108 — a desktop window is not a big phone. The single-column budget rations
+  // height between the lead-up and the options; on a roomy window that height was
+  // never scarce, so the rationing was pure loss. These pin the two-column shape
+  // AND that the phone shape is untouched — the same prompt, two viewports.
+  group('#108 — the wide (desktop) layout', () {
+    PendingQuestionItem wideQuestion() => const PendingQuestionItem(
+          header: 'Scope',
+          question: 'Should the fix change the app so it stops asking for the '
+              'conflict check, or change the database so that the check is '
+              'permitted?',
+          multiSelect: false,
+          hasPreview: false,
+          options: [
+            QuestionOption(
+                label: 'Change the app',
+                description:
+                    'Drop the retry-safe header; tolerate duplicates instead.'),
+            QuestionOption(
+                label: 'Change the database',
+                description: 'Permit the check; migrate the unique index.'),
+            QuestionOption(
+                label: 'Both', description: 'Do the app change and the migration.'),
+            QuestionOption(
+                label: 'Neither — revert', description: 'Back out the change.'),
+          ],
+        );
+
+    Future<void> pumpAt(WidgetTester tester, Size logical) async {
+      tester.view.physicalSize = Size(logical.width * 2, logical.height * 2);
+      tester.view.devicePixelRatio = 2.0;
+      addTearDown(tester.view.reset);
+      await tester.pumpWidget(
+        MaterialApp(
+          theme: AppTheme.dark,
+          home: Scaffold(
+            body: Stack(
+              children: [
+                QuestionOverlay(
+                  question: PendingQuestion(
+                      toolUseId: 'w108', questions: [wideQuestion()]),
+                  contextText: _longLeadUp,
+                  onSend: (_) {},
+                  onKey: (_) {},
+                  onDismiss: () {},
+                ),
+              ],
+            ),
+          ),
+        ),
+      );
+      await tester.pumpAndSettle();
+    }
+
+    // The band an option must fall inside to be reachable without scrolling —
+    // the SCROLL VIEWPORT, never the screen (#94: getRect returns unclipped
+    // positions, and asserting on the screen overstated that fix 3x).
+    Rect optionViewport(WidgetTester tester) => tester.getRect(find
+        .ancestor(
+          of: find.text('Change the app'),
+          matching: find.byType(SingleChildScrollView),
+        )
+        .first);
+
+    int visibleOptions(WidgetTester tester) {
+      final vp = optionViewport(tester);
+      var n = 0;
+      for (final label in const [
+        'Change the app',
+        'Change the database',
+        'Both',
+        'Neither — revert',
+      ]) {
+        if (tester.getRect(find.text(label)).bottom <= vp.bottom + 0.5) n++;
+      }
+      return n;
+    }
+
+    testWidgets('every option is reachable without scrolling on a desktop window',
+        (tester) async {
+      await pumpAt(tester, const Size(1600, 1000));
+      expect(visibleOptions(tester), 4);
+    });
+
+    // The card's own width. Its Container is the one with the 640/1040 cap, so
+    // measuring it is measuring the decision rather than a proxy for it.
+    double cardWidth(WidgetTester tester) => tester
+        .getRect(find
+            .ancestor(
+              of: find.text('Claude said'),
+              matching: find.byType(Container),
+            )
+            .last)
+        .width;
+
+    testWidgets('a desktop window gets a WIDER card — not a phone card centred in it',
+        (tester) async {
+      await pumpAt(tester, const Size(1600, 1000));
+      expect(cardWidth(tester), greaterThan(640.0));
+    });
+
+    testWidgets('the lead-up sits BESIDE the options, not above them',
+        (tester) async {
+      await pumpAt(tester, const Size(1600, 1000));
+      // Assert on the lead-up's own SCROLL VIEWPORT, not its 'Claude said'
+      // header label: the label sits at the top of a full-height column, so
+      // comparing against it would call a correct two-column layout stacked.
+      final ctxBody = tester.getRect(find
+          .ancestor(
+            of: find.textContaining('conflict check'),
+            matching: find.byType(SingleChildScrollView),
+          )
+          .first);
+      final opts = optionViewport(tester);
+      // Beside: the options are entirely to the RIGHT of the lead-up column,
+      // and the two overlap vertically — which is exactly what stacking cannot do.
+      expect(opts.left, greaterThanOrEqualTo(ctxBody.right));
+      expect(opts.top, lessThan(ctxBody.bottom));
+    });
+
+    testWidgets('the lead-up is open by default — it is borrowing from nobody',
+        (tester) async {
+      await pumpAt(tester, const Size(1600, 1000));
+      expect(find.textContaining('conflict check'), findsWidgets);
+    });
+
+    testWidgets('a NARROW desktop window keeps the phone shape — size decides, not platform',
+        (tester) async {
+      // 700 logical: a side-by-side window on a laptop. Wide enough to look like
+      // "desktop" and far too narrow for two readable columns.
+      await pumpAt(tester, const Size(700, 900));
+      final ctx = tester.getRect(find.text('Claude said'));
+      final opts = optionViewport(tester);
+      expect(opts.top, greaterThan(ctx.top)); // stacked, as on a phone
+    });
+
+    testWidgets('a wide but SHORT window keeps the phone shape too',
+        (tester) async {
+      await pumpAt(tester, const Size(1600, 480));
+      final ctx = tester.getRect(find.text('Claude said'));
+      final opts = optionViewport(tester);
+      expect(opts.top, greaterThan(ctx.top));
+    });
+
+    testWidgets('the question is still pinned above the options (#94 holds)',
+        (tester) async {
+      await pumpAt(tester, const Size(1600, 1000));
+      final qRect = tester.getRect(find.textContaining('Should the fix change'));
+      expect(qRect.bottom, lessThanOrEqualTo(optionViewport(tester).top + 0.5));
+    });
+  });
 }

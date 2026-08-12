@@ -328,6 +328,29 @@ const double kOptionFloor = 2 * kOptionRowMax + kOptionPeek; // 268
 const double kCtxMinUseful = 96;
 const double kCtxMax = 300;
 
+// --- The wide layout (#108) --------------------------------------------------
+//
+// Everything above is a rationing scheme, and rationing is the right answer only
+// where the room is actually scarce. On a desktop window the card was still
+// 640x1000 with the lead-up and the options taking turns at the same height —
+// competing for space that was sitting empty on either side of the dialog.
+//
+// So past a threshold the lead-up gets its OWN COLUMN and the competition simply
+// ends: the options keep the full height of the card, and the context is read
+// beside them instead of instead of them.
+//
+// Chosen off the AVAILABLE BOX, never off the platform. #55's warning is that
+// *keyboard* behaviour must be platform-chosen because an Android IME commits
+// Enter as text — it is not a licence to ask "is this Windows" about layout. A
+// narrow desktop window genuinely IS the phone case and gets the phone budget;
+// a tablet in landscape genuinely is not. The soft-keyboard question stays a
+// platform question (see `composeUsesSoftKeyboard`), and the two are kept apart
+// on purpose.
+const double kWideMinWidth = 900;  // room for two columns that are both readable
+const double kWideMinHeight = 560; // a wide-but-short window is still cramped
+const double kWideCardMax = 1040;  // the card's width once it goes two-column
+const double kWideCtxColumn = 392; // the lead-up's own column
+
 /// The question never drops below two lines, and never grows past this.
 const double kQuestionMin = 52;
 const double kQuestionMax = 260;
@@ -615,7 +638,14 @@ class _QuestionOverlayState extends State<QuestionOverlay> {
                     // spare. It stays capped at all because the card is only
                     // 640 wide, and an unbounded column that narrow on a large
                     // monitor reads as a broken layout rather than a dialog.
-                    final cardMax = (box.maxHeight - 24).clamp(280.0, 1000.0);
+                    // Two columns, or one? Decided by the room actually on offer
+                    // (#108) — see kWideMinWidth. Everything below still runs in
+                    // BOTH shapes; `wide` only decides whether the lead-up is
+                    // charged to the same height budget as the options.
+                    final wide = box.maxWidth >= kWideMinWidth &&
+                        box.maxHeight >= kWideMinHeight;
+                    final cardMax = (box.maxHeight - 24)
+                        .clamp(280.0, wide ? 1400.0 : 1000.0);
                     //
                     // *** Options are RESERVED, not residual. ***
                     // Subtract the fixed chrome and an option floor FIRST; only
@@ -625,6 +655,10 @@ class _QuestionOverlayState extends State<QuestionOverlay> {
                     // you must interact with — measured at the real mount on a
                     // 412x915 phone, a 206px option viewport showing ONE row
                     // with the second sliced through its description.
+                    final hasContext =
+                        (widget.contextText ?? '').trim().isNotEmpty;
+                    // In the wide shape the lead-up is beside the options, not
+                    // above them, so it is not part of this subtraction at all.
                     final fixed = kHeaderH +
                         kFooterH +
                         (questions.length > 1 ? kTabStripH : 0);
@@ -646,9 +680,22 @@ class _QuestionOverlayState extends State<QuestionOverlay> {
                     // worth its frame. Null means "decide from the room".
                     final expanded =
                         _ctxExpandedOverride ?? (ctxSpare >= kCtxMinUseful);
+                    // The lead-up's own column runs the full height between the
+                    // header and the footer, so it needs no share of `shared`.
+                    final ctxColumnH =
+                        (cardMax - kHeaderH - kFooterH - kCtxChrome)
+                            .clamp(kCtxMinUseful, 4000.0);
+                    // Dropping the lead-up while a text field has focus buys room
+                    // back from a SOFT keyboard. That is a platform fact, not a
+                    // size one — a hardware keyboard costs no height, so on
+                    // desktop the context stays put while you type "Other".
+                    final hideCtxForTyping =
+                        _textEntryActive &&
+                            composeUsesSoftKeyboard(defaultTargetPlatform);
                     return Container(
-                      constraints:
-                          BoxConstraints(maxWidth: 640, maxHeight: cardMax),
+                      constraints: BoxConstraints(
+                          maxWidth: wide ? kWideCardMax : 640,
+                          maxHeight: cardMax),
                       margin: const EdgeInsets.all(12),
                       decoration: BoxDecoration(
                         color: theme.colorScheme.surfaceContainerHigh,
@@ -668,8 +715,7 @@ class _QuestionOverlayState extends State<QuestionOverlay> {
                           // read by then, so drop this panel to give the input
                           // room; it returns the moment Other/the note is
                           // deselected.
-                          if (!_textEntryActive &&
-                              (widget.contextText ?? '').trim().isNotEmpty)
+                          if (!wide && !hideCtxForTyping && hasContext)
                             _contextPanel(
                               theme,
                               widget.contextText!.trim(),
@@ -684,17 +730,48 @@ class _QuestionOverlayState extends State<QuestionOverlay> {
                                   : 0.0,
                               expanded,
                             ),
-                          if (questions.length > 1) _tabs(theme, questions),
-                          // PINNED, outside the option scroll view (#94). It
-                          // used to be the first child of that view, so the
-                          // moment you scrolled down to reach an option the
-                          // question left the screen — you could see what you
-                          // were choosing between, or what you were choosing
-                          // FOR, never both. That is the reported "the actual
-                          // question text is sometimes missing".
-                          if (q.question.isNotEmpty)
-                            _questionText(theme, q.question, qMax),
-                          Flexible(child: _optionList(theme, q)),
+                          // The question and its options, and — only in the wide
+                          // shape — the lead-up standing beside them rather than
+                          // above them.
+                          Flexible(
+                            child: Row(
+                              crossAxisAlignment: CrossAxisAlignment.start,
+                              children: [
+                                if (wide && !hideCtxForTyping && hasContext)
+                                  SizedBox(
+                                    width: kWideCtxColumn,
+                                    // Always expanded here: it is not borrowing
+                                    // from anyone, so there is nothing to decide.
+                                    child: _contextPanel(
+                                        theme,
+                                        widget.contextText!.trim(),
+                                        ctxColumnH,
+                                        true),
+                                  ),
+                                Expanded(
+                                  child: Column(
+                                    mainAxisSize: MainAxisSize.min,
+                                    children: [
+                                      if (questions.length > 1)
+                                        _tabs(theme, questions),
+                                      // PINNED, outside the option scroll view
+                                      // (#94). It used to be the first child of
+                                      // that view, so the moment you scrolled
+                                      // down to reach an option the question left
+                                      // the screen — you could see what you were
+                                      // choosing between, or what you were
+                                      // choosing FOR, never both. That is the
+                                      // reported "the actual question text is
+                                      // sometimes missing".
+                                      if (q.question.isNotEmpty)
+                                        _questionText(theme, q.question, qMax),
+                                      Flexible(child: _optionList(theme, q)),
+                                    ],
+                                  ),
+                                ),
+                              ],
+                            ),
+                          ),
                           _footer(theme, q),
                         ],
                       ),
