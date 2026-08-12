@@ -113,20 +113,41 @@ function collectPtyOut(client, sessionId, { stopWhen, timeoutMs = 5000 } = {}) {
 }
 
 /** Count PTY_OUT frames received over a period, for any matching session in ids. */
-function countPtyOut(client, idsSet, windowMs) {
+// Count TYPE_PTY_OUT frames per session.
+//
+// `awaitId` makes this wait on the CONDITION rather than on a stopwatch: once that
+// session has produced a frame the routing question is decided, and we only keep
+// listening for `settleMs` so a wrongly-routed frame from another session still has
+// its chance to show up. `windowMs` remains the ceiling, not the plan.
+//
+// It used to be a flat 5s window, which is a bet that a cold ConPTY has spawned
+// bash and echoed within 5 seconds. That bet lost on a GitHub Windows runner
+// (`Expected: > 0, Received: 0`) while passing every time locally — a slow machine
+// read as "output was routed to the wrong session". Waiting on a timer instead of
+// on the precondition is the same mistake the #122 Codex probe made in the same
+// week; the fix is the same one — wait for the thing you are about to assert about.
+function countPtyOut(client, idsSet, windowMs, awaitId = null, settleMs = 750) {
   return new Promise((resolve) => {
     const counts = {};
     for (const id of idsSet) counts[id] = 0;
+    let settleTimer = null;
+    const finish = () => {
+      clearTimeout(ceiling);
+      clearTimeout(settleTimer);
+      client.off('frame', onFrame);
+      resolve(counts);
+    };
     function onFrame(frame) {
       if (frame.type !== ipc.TYPE_PTY_OUT) return;
       const parsed = ipc.parsePtyFrame(frame);
-      if (idsSet.has(parsed.sessionId)) counts[parsed.sessionId]++;
+      if (!idsSet.has(parsed.sessionId)) return;
+      counts[parsed.sessionId]++;
+      if (awaitId && parsed.sessionId === awaitId && settleTimer === null) {
+        settleTimer = setTimeout(finish, settleMs);
+      }
     }
     client.on('frame', onFrame);
-    setTimeout(() => {
-      client.off('frame', onFrame);
-      resolve(counts);
-    }, windowMs);
+    const ceiling = setTimeout(finish, windowMs);
   });
 }
 
@@ -217,7 +238,10 @@ test.describe('pty-worker binary data plane', () => {
       const markerB = 'ROUTING_B_' + crypto.randomUUID().slice(0, 8);
 
       // Start collector BEFORE sending.
-      const countsPromise = countPtyOut(client, new Set([idA, idB]), 5000);
+      // Resolve once A has actually spoken (with a settle for a stray B frame),
+      // and only fall back to the ceiling if it never does — a cold runner needs
+      // more than 5s to spawn two shells, and a flat window read that as misrouting.
+      const countsPromise = countPtyOut(client, new Set([idA, idB]), 20000, idA);
 
       client.send(ipc.encodePtyIn(idA, Buffer.from('echo ' + markerA + '\r')));
       client.send(ipc.encodePtyIn(idB, Buffer.from('echo ' + markerB + '\r')));
