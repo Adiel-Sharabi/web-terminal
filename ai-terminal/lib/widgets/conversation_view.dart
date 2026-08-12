@@ -307,8 +307,24 @@ class _ConversationViewState extends State<ConversationView> {
   /// assistant MESSAGE only when a turn completes, so a long tool-heavy turn still
   /// shows the previous message until it finishes — then the chat catches up within
   /// one poll instead of hanging until the next rebuild.
+  /// `compacting` is the third gate, and #115 is why. A /compact is LONG — the
+  /// boundary this session wrote records `durationMs: 122091`, over two minutes —
+  /// and the turn that ran it can end (Stop → armIdle → 'idle') while compaction
+  /// is still going. That drops the status out of both cases above and stops the
+  /// poll during the one window in which the transcript is guaranteed to change:
+  /// the summary is rewritten, and any prompt queued meanwhile starts its turn
+  /// and is finally written. A stopped poll there produces exactly the two
+  /// symptoms reported together — the "Compacting…" indicator freezes because
+  /// nothing re-renders it, and the prompt sent mid-compaction never arrives.
+  ///
+  /// Note what is NOT a bug: while the prompt is still QUEUED it is absent from
+  /// the transcript on purpose. Claude writes a user message when its turn
+  /// STARTS, so the terminal (which shows the composer/queue) legitimately has it
+  /// before the transcript does — the same "the rollout is ground truth; the
+  /// screen lies" rule the Codex work established. Chat must catch up when the
+  /// turn starts, which is precisely what keeping the poll alive guarantees.
   static bool _shouldLivePoll(Session s) =>
-      s.status == 'working' || s.status == 'active';
+      s.status == 'working' || s.status == 'active' || s.compacting;
 
   @override
   void didUpdateWidget(covariant ConversationView oldWidget) {
@@ -347,7 +363,13 @@ class _ConversationViewState extends State<ConversationView> {
     // relevant change" signal — covers /ws/notify-triggered repo refreshes
     // without this view needing its own repository subscription.
     if (oldWidget.session.lastActivity != widget.session.lastActivity ||
-        oldWidget.session.status != widget.session.status) {
+        oldWidget.session.status != widget.session.status ||
+        // #115 — compaction ENDING is the moment the transcript settles (the
+        // summary is final, and a prompt queued during it has started its turn
+        // and been written). Without this the catch-up waits on the next 4s
+        // tick, and if the status also went idle in the same rebuild the gate
+        // above has just stopped the timer — so nothing would refresh at all.
+        oldWidget.session.compacting != widget.session.compacting) {
       unawaited(_refreshLastPage());
     }
   }
@@ -378,8 +400,14 @@ class _ConversationViewState extends State<ConversationView> {
         _turns.any((x) => !x.isAssistant && _normEcho(x.text) == norm) ||
             _pendingEchoes.any((e) => _normEcho(e.text) == norm);
     if (already) return;
-    setState(() => _pendingEchoes
-        .add(_PendingEcho(t, DateTime.now().millisecondsSinceEpoch)));
+    setState(() {
+      _pendingEchoes.add(_PendingEcho(t, DateTime.now().millisecondsSinceEpoch));
+      // Submitting re-pins: you sent this, so you want to watch it land — and
+      // without it `_mayFollow` would swallow the scroll for a reader who had
+      // paged up before typing, leaving their own prompt off-screen.
+      _pinnedToBottom = true;
+      _showNewPill = false;
+    });
     _scrollToBottom();
   }
 
@@ -634,6 +662,20 @@ class _ConversationViewState extends State<ConversationView> {
     }
   }
 
+  /// #111 — every scroll here is DEFERRED (post-frame at minimum, and the open
+  /// sequence re-fires at +150ms/+400ms), so a scroll DECIDED at one moment
+  /// executes at a later one. If the reader took control in between, following
+  /// through drags them off what they were reading. `_mayFollow` is that
+  /// re-check, and it is applied inside every callback rather than once up
+  /// front — the whole defect is the gap between deciding and moving.
+  ///
+  /// It reads `_pinnedToBottom` rather than a per-call flag so the explicit
+  /// affordances stay correct BY CONSTRUCTION instead of by exception: tapping
+  /// "New" or the jump FAB means "follow the latest again", so they re-pin
+  /// first and then pass this check like any other follow.
+  bool get _mayFollow =>
+      mounted && _scrollController.hasClients && _pinnedToBottom;
+
   void _scrollToBottom({bool jump = false}) {
     if (jump) {
       // A ListView.builder only *estimates* maxScrollExtent until the tail
@@ -641,7 +683,7 @@ class _ConversationViewState extends State<ConversationView> {
       // leaves older messages showing. Jump now, again next frame, and twice
       // more after layout settles so we always end on the newest turn.
       void go() {
-        if (!mounted || !_scrollController.hasClients) return;
+        if (!_mayFollow) return;
         _scrollController.jumpTo(_scrollController.position.maxScrollExtent);
       }
 
@@ -654,7 +696,7 @@ class _ConversationViewState extends State<ConversationView> {
       return;
     }
     WidgetsBinding.instance.addPostFrameCallback((_) {
-      if (!mounted || !_scrollController.hasClients) return;
+      if (!_mayFollow) return;
       _scrollController.animateTo(
         _scrollController.position.maxScrollExtent,
         duration: const Duration(milliseconds: 200),
@@ -663,8 +705,15 @@ class _ConversationViewState extends State<ConversationView> {
     });
   }
 
+  /// The explicit "take me to the latest" action, shared by the New pill and
+  /// the jump FAB. Re-pinning is the POINT, not a side effect: it is what makes
+  /// the deferred scroll below survive `_mayFollow`, and it restores
+  /// auto-following from here on.
   void _jumpToNew() {
-    setState(() => _showNewPill = false);
+    setState(() {
+      _showNewPill = false;
+      _pinnedToBottom = true;
+    });
     _scrollToBottom();
   }
 
@@ -937,7 +986,7 @@ class _ConversationViewState extends State<ConversationView> {
               backgroundColor:
                   Theme.of(context).colorScheme.surfaceContainerHigh,
               foregroundColor: Theme.of(context).colorScheme.primary,
-              onPressed: () => _scrollToBottom(),
+              onPressed: _jumpToNew,
               child: const Icon(Icons.keyboard_double_arrow_down),
             ),
           ),
@@ -2202,10 +2251,53 @@ class _TaskRow extends StatelessWidget {
   }
 }
 
+/// #118 — the label that DISTINGUISHES one subagent chip from its siblings.
+///
+/// `agentType` is shared by every instance of a type, so leading with it renders
+/// N genuinely different subagents as N identical `general-purpose` chips — the
+/// reported defect. Ground truth said the count was right and only the labelling
+/// was wrong: across every conversation on this machine, `Agent` tool_uses map
+/// **1:1** to `agent-*.meta.json` files, and no tool_use ever carried two. So
+/// this does not change WHICH chips appear, only what they say.
+///
+/// `description` leads because it is the only PER-INSTANCE field the meta
+/// carries ("Build companion 1.19.4+62"); the type is the fallback for a meta
+/// that has none, and still travels in the tooltip.
+///
+/// Identical descriptions are then numbered, because a fan-out legitimately
+/// spawns the same task several times and "distinguishable" has to survive that
+/// too — numbering only the labels that actually collide, so the common case
+/// stays clean.
+List<String> subagentChipLabels(List<ToolUse> tools) {
+  final base = <String>[];
+  for (final t in tools) {
+    final sub = t.subagent;
+    final desc = (sub?.description ?? '').trim();
+    final type = (sub?.agentType ?? '').trim();
+    base.add(desc.isNotEmpty ? desc : (type.isNotEmpty ? type : 'subagent'));
+  }
+  final total = <String, int>{};
+  for (final b in base) {
+    total[b] = (total[b] ?? 0) + 1;
+  }
+  final seen = <String, int>{};
+  final out = <String>[];
+  for (final b in base) {
+    if ((total[b] ?? 0) > 1) {
+      final n = (seen[b] ?? 0) + 1;
+      seen[b] = n;
+      out.add('$b $n');
+    } else {
+      out.add(b);
+    }
+  }
+  return out;
+}
+
 class _SubagentStrip extends StatelessWidget {
   const _SubagentStrip({required this.tools, required this.onOpen});
 
-  /// Task tool_uses, each with `subagent != null` (see [collectSubagents]).
+  /// Agent tool_uses, each with `subagent != null` (see [collectSubagents]).
   final List<ToolUse> tools;
   final void Function(ToolUse) onOpen;
 
@@ -2221,14 +2313,22 @@ class _SubagentStrip extends StatelessWidget {
           bottom: BorderSide(color: theme.colorScheme.outlineVariant),
         ),
       ),
-      child: ListView.separated(
-        scrollDirection: Axis.horizontal,
-        padding: const EdgeInsets.symmetric(horizontal: 8, vertical: 6),
-        itemCount: tools.length,
-        separatorBuilder: (_, _) => const SizedBox(width: 6),
-        itemBuilder: (_, i) =>
-            _SubagentChip(tool: tools[i], onTap: () => onOpen(tools[i])),
-      ),
+      child: Builder(builder: (context) {
+        // Labels are computed for the WHOLE strip, not per chip, because
+        // disambiguating a collision needs to see the siblings.
+        final labels = subagentChipLabels(tools);
+        return ListView.separated(
+          scrollDirection: Axis.horizontal,
+          padding: const EdgeInsets.symmetric(horizontal: 8, vertical: 6),
+          itemCount: tools.length,
+          separatorBuilder: (_, _) => const SizedBox(width: 6),
+          itemBuilder: (_, i) => _SubagentChip(
+            tool: tools[i],
+            label: labels[i],
+            onTap: () => onOpen(tools[i]),
+          ),
+        );
+      }),
     );
   }
 }
@@ -2237,9 +2337,17 @@ class _SubagentStrip extends StatelessWidget {
 /// Running reuses [_RunningDot] behind a RepaintBoundary so the pulse repaints only
 /// the 7px dot, never the strip; finished shows a static muted dot.
 class _SubagentChip extends StatelessWidget {
-  const _SubagentChip({required this.tool, required this.onTap});
+  const _SubagentChip({
+    required this.tool,
+    required this.label,
+    required this.onTap,
+  });
 
   final ToolUse tool;
+
+  /// Computed across the whole strip by [subagentChipLabels] — a chip cannot
+  /// disambiguate itself without seeing its siblings.
+  final String label;
   final VoidCallback onTap;
 
   @override
@@ -2248,8 +2356,17 @@ class _SubagentChip extends StatelessWidget {
     final sub = tool.subagent!;
     final type = sub.agentType.trim();
     final desc = sub.description.trim();
-    final label = type.isNotEmpty ? type : (desc.isNotEmpty ? desc : 'subagent');
-    return Material(
+    // The type is what the chip USED to show. It is still worth having — it says
+    // which kind of agent this is — just not as the thing you tell chips apart
+    // by, so it moves to the tooltip alongside the full, un-truncated task.
+    final tip = [
+      if (type.isNotEmpty) type,
+      if (desc.isNotEmpty) desc,
+    ].join(' — ');
+    return Tooltip(
+      message: tip.isNotEmpty ? tip : 'subagent',
+      waitDuration: const Duration(milliseconds: 400),
+      child: Material(
       color: theme.colorScheme.surfaceContainerHigh,
       borderRadius: BorderRadius.circular(AppShape.large),
       child: InkWell(
@@ -2264,7 +2381,9 @@ class _SubagentChip extends StatelessWidget {
                   size: 13, color: theme.colorScheme.primary),
               const SizedBox(width: 5),
               ConstrainedBox(
-                constraints: const BoxConstraints(maxWidth: 130),
+                // Wider than the old type-only chip: a task description carries
+                // the meaning now, and 130px clipped most of them to noise.
+                constraints: const BoxConstraints(maxWidth: 190),
                 child: Text(
                   label,
                   maxLines: 1,
@@ -2290,6 +2409,7 @@ class _SubagentChip extends StatelessWidget {
             ],
           ),
         ),
+      ),
       ),
     );
   }
