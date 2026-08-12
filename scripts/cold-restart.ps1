@@ -98,6 +98,32 @@ function Invoke-CodexNotifyConfig([switch]$Check) {
   return ($out -replace '\s*\r?\n\s*', ' | ')
 }
 
+# scripts/install-hooks.js owns the Claude Code hook set in ~/.claude/settings.json.
+# Same lesson as the Codex block above, one layer up: the set had NO owner in this repo
+# (both siblings referenced a "fix-hooks.js" that was never a file), so every machine ran
+# whatever eight events had once been pasted in by hand and nobody noticed SessionStart
+# was missing - which left a started-or-resumed session reporting no conversation id at
+# all, and a chat lens returning 404 next to a live terminal.
+#
+# Unlike the Codex config this needs no restart (hooks are read per agent launch); it
+# rides the deploy path purely so it is APPLIED rather than remembered. Idempotent, and
+# it only ever touches web-terminal's own entry, so user hooks are safe.
+#
+# NON-FATAL: a machine without Claude Code exits 1, which must never block a restart.
+function Invoke-ClaudeHooksConfig([switch]$Check) {
+  if (-not $nodeExe) { return 'skipped (no node found)' }
+  $js = Join-Path $repo 'scripts\install-hooks.js'
+  if (-not (Test-Path $js)) { return 'skipped (installer not present)' }
+  try {
+    if ($Check) { $out = (& $nodeExe $js --check 2>&1 | Out-String).Trim() }
+    else        { $out = (& $nodeExe $js       2>&1 | Out-String).Trim() }
+  } catch {
+    return "skipped (could not run: $($_.Exception.Message))"
+  }
+  if (-not $out) { $out = '(no output)' }
+  return ($out -replace '\s*\r?\n\s*', ' | ')
+}
+
 if ($nodeExe) {
   $global:LASTEXITCODE = $null
   $depOut = (& $nodeExe (Join-Path $repo 'scripts\check-deps.js') 2>&1 | Out-String).Trim()
@@ -128,9 +154,11 @@ if ($CheckOnly) {
   # Report config drift too — auditing a peer over /api/exec is the cheapest moment to
   # notice that its Codex status channel is unconfigured, and --check changes nothing.
   $cfgCheck = Invoke-CodexNotifyConfig -Check
-  Note "check-only: nothing killed; codex notify config: $cfgCheck"
+  $hookCheck = Invoke-ClaudeHooksConfig -Check
+  Note "check-only: nothing killed; codex notify config: $cfgCheck; claude hooks: $hookCheck"
   Write-Output "preflight OK: $depOut"
   Write-Output "codex notify config: $cfgCheck"
+  Write-Output "claude hooks: $hookCheck"
   exit 0
 }
 
@@ -189,6 +217,7 @@ if ($nodeExe -and -not (Test-Path $binDir)) {
 # Apply the machine-local agent config before the relaunch, so a box that was never
 # hand-patched comes back configured instead of silently inert (see the function above).
 Note "codex notify config: $(Invoke-CodexNotifyConfig)"
+Note "claude hooks: $(Invoke-ClaudeHooksConfig)"
 
 # GUI-subsystem launcher: wscript runs node hidden, so no console window flashes.
 Note 'relaunching via start-server.vbs'

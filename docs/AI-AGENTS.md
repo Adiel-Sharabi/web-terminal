@@ -74,27 +74,40 @@ registry instead. See [CONTRIBUTING.md](../CONTRIBUTING.md#pull-request-gate).
 
 ## Claude Code hooks setup
 
-Status dots, notifications and the session browser are driven by Claude Code hooks. The
-quickest install is:
+Status dots, notifications, the session browser and the chat lens are driven by Claude
+Code hooks. Install them with:
 
 ```bash
-node fix-hooks.js
+node scripts/install-hooks.js           # patch
+node scripts/install-hooks.js --check    # report only, change nothing
 ```
 
-> ⚠️ It **replaces** the entire `hooks` key in `~/.claude/settings.json`. If you have your
-> own hooks, merge by hand instead — the manual block is below.
+It adds or corrects **only** web-terminal's own entry (matched by URL), so hooks you
+added yourself are preserved, and it is idempotent — run it after every deploy. Hooks are
+read per agent launch, so running sessions keep the old set until their next start or
+resume; no server restart is involved.
 
-All eight events are required as a set, not a menu. `PreToolUse`/`PostToolUse` are the
+All nine events are required as a set, not a menu. `PreToolUse`/`PostToolUse` are the
 heartbeat that keeps a busy session from being flipped to Idle by the 5-minute stale
 guard. `SubagentStart` **without** `SubagentStop` is worse than installing neither: the
 in-flight count only ever grows, so the main agent's `Stop` is held forever and the
 session never reports idle.
+
+`SessionStart` is the one that is easy to think optional, and it is not. Every other
+event fires only once the user is **already** interacting, so a session that has started
+— or resumed a conversation — and has not yet been prompted reports nothing at all: the
+server never learns its conversation id, and the chat lens 404s next to a perfectly live
+terminal. It also carries `transcript_path`, which is the only cwd-independent answer to
+"where is this conversation", and therefore the thing that keeps the lens working when
+the agent runs somewhere other than where its shell started. Measured on claude 2.1.x: it
+fires on a fresh start and on `--resume` (`source: "resume"`).
 
 Add to `~/.claude/settings.json`:
 
 ```json
 {
   "hooks": {
+    "SessionStart": [{"hooks": [{"type": "http", "url": "http://127.0.0.1:7681/api/hook", "headers": {"X-WT-Session-ID": "$WT_SESSION_ID", "X-WT-Hook-Token": "$WT_HOOK_TOKEN"}, "allowedEnvVars": ["WT_SESSION_ID", "WT_HOOK_TOKEN"]}]}],
     "UserPromptSubmit": [{"hooks": [{"type": "http", "url": "http://127.0.0.1:7681/api/hook", "headers": {"X-WT-Session-ID": "$WT_SESSION_ID", "X-WT-Hook-Token": "$WT_HOOK_TOKEN"}, "allowedEnvVars": ["WT_SESSION_ID", "WT_HOOK_TOKEN"]}]}],
     "SubagentStart": [{"hooks": [{"type": "http", "url": "http://127.0.0.1:7681/api/hook", "headers": {"X-WT-Session-ID": "$WT_SESSION_ID", "X-WT-Hook-Token": "$WT_HOOK_TOKEN"}, "allowedEnvVars": ["WT_SESSION_ID", "WT_HOOK_TOKEN"]}]}],
     "PreToolUse": [{"hooks": [{"type": "http", "url": "http://127.0.0.1:7681/api/hook", "headers": {"X-WT-Session-ID": "$WT_SESSION_ID", "X-WT-Hook-Token": "$WT_HOOK_TOKEN"}, "allowedEnvVars": ["WT_SESSION_ID", "WT_HOOK_TOKEN"]}]}],
