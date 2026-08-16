@@ -87,6 +87,36 @@ void main() {
     });
   });
 
+  // Reported 2026-08-16: "I still can't scroll up in the terminal view."
+  //
+  // The replay asked for `limit: 5000` with no offset. `limit` is BYTES and
+  // `offset` defaults to 0, so it fetched the OLDEST 5 KB — the start of the
+  // session — and discarded the rest. Measured on live sessions: 5 KB of a
+  // 1,950,432-byte scrollback is 99.7% thrown away, and because an agent TUI's
+  // bytes are mostly escape sequences it came to ~45 NEWLINES. That is about one
+  // desktop viewport, so there was nothing above the screen to scroll to.
+  group('scrollbackTailOffset — replay the NEWEST slice', () {
+    test('a long scrollback starts its replay near the end', () {
+      // The real number from the report: ~1.95 MB of history.
+      expect(scrollbackTailOffset(1950432, kScrollbackReplayBytes),
+          1950432 - kScrollbackReplayBytes);
+    });
+
+    test('a scrollback shorter than the budget replays from the very start', () {
+      expect(scrollbackTailOffset(1372, kScrollbackReplayBytes), 0);
+      expect(scrollbackTailOffset(0, kScrollbackReplayBytes), 0);
+    });
+
+    test('never negative — an offset below zero would be rejected as a bad range', () {
+      expect(scrollbackTailOffset(10, 500), 0);
+    });
+
+    test('the budget is far larger than the 5000 that caused this, and inside the server cap', () {
+      expect(kScrollbackReplayBytes, greaterThan(5000 * 10));
+      expect(kScrollbackReplayBytes, lessThanOrEqualTo(524288)); // SCROLLBACK_RANGE_MAX
+    });
+  });
+
   group('fork stays Claude-only', () {
     // Forking replays `claude --resume <id>`, so it genuinely needs a Claude id —
     // widening the Chat gate must not widen this one.

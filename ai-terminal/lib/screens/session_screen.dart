@@ -56,6 +56,26 @@ const int _kMaxHistory = 50;
 /// without pumping the whole screen.
 bool canForkFromMenu(Session session) => session.claudeSessionId != null;
 
+/// How much scrollback to replay into the terminal on attach, in UTF-16 code
+/// units — the unit `GET /api/sessions/:id/scrollback` slices in.
+///
+/// Sized against the terminal's own 5000-line buffer and the server's 512 KB
+/// range cap. Live sessions measure ~110 bytes per line once an agent TUI's
+/// escape sequences are counted, so this is roughly 2 400 lines: a real history
+/// to scroll through, and still well inside both limits.
+const int kScrollbackReplayBytes = 262144;
+
+/// Where the newest [budget] code units of a [total]-length scrollback begin.
+///
+/// The endpoint pages FORWARD from `offset`, so fetching the tail means asking
+/// for `total - budget`. Omitting the offset asks for the oldest bytes instead,
+/// which is the whole defect this exists to prevent. Pure, so the arithmetic is
+/// pinned without a live session.
+int scrollbackTailOffset(int total, int budget) {
+  final start = total - budget;
+  return start > 0 ? start : 0;
+}
+
 /// Whether [session] runs an AI agent that keeps a transcript, and so can have a
 /// Chat lens at all. Pure, for the same reason as [canForkFromMenu].
 ///
@@ -1171,7 +1191,23 @@ class _SessionScreenState extends State<SessionScreen>
     _terminal.buffer.clear();
     _terminal.buffer.setCursor(0, 0);
     try {
-      final chunk = await api.scrollback(session.id, limit: 5000);
+      // Ask for the NEWEST slice, not the first 5000 bytes.
+      //
+      // `limit` is BYTES and `offset` defaults to 0, so `limit: 5000` fetched the
+      // OLDEST 5 KB — the very start of the session — and threw the rest away.
+      // Measured against live sessions: 5 KB of a 1,950,432-byte scrollback is
+      // 99.7% discarded, and because an agent TUI's bytes are mostly escape
+      // sequences it amounted to ~45 NEWLINES. That is about one desktop
+      // viewport, so `maxScrollExtent` was ~0 and the terminal could not be
+      // scrolled up AT ALL (reported 2026-08-16). One cheap probe for `total`,
+      // then the tail.
+      final head = await api.scrollback(session.id, limit: 1);
+      if (!mounted) return;
+      final chunk = await api.scrollback(
+        session.id,
+        offset: scrollbackTailOffset(head.total, kScrollbackReplayBytes),
+        limit: kScrollbackReplayBytes,
+      );
       if (!mounted) return;
       if (chunk.data.isNotEmpty) {
         // #81: guarded — xterm 4.0.0 throws on a real Codex stream, and an
