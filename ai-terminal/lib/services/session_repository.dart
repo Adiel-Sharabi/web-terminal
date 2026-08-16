@@ -31,6 +31,7 @@ import 'package:shared_preferences/shared_preferences.dart';
 
 import '../api/api_client.dart';
 import '../api/models.dart';
+import 'favorites_order.dart';
 import 'notification_service.dart';
 import 'server_store.dart';
 
@@ -633,6 +634,54 @@ class SessionRepository {
     } catch (_) {
       // Next refresh reconciles from the server's authoritative order.
     }
+  }
+
+  /// Reorders the pinned favorites (#124): moves [oldIndex] to [newIndex] within
+  /// [ordered] (the group as displayed), applies the new ranks optimistically so the
+  /// drag lands instantly, then writes each changed session to the server that OWNS
+  /// it. Returns the display names of the servers that refused — empty on success.
+  ///
+  /// Every write is settled, never aborted on the first failure. These are N
+  /// independent servers with no transaction across them: rejecting early would
+  /// leave the remaining writes in flight and the cluster permanently
+  /// half-renumbered, showing an order no server holds and saying nothing. On any
+  /// failure the caller reports it and this re-reads server truth.
+  Future<List<String>> reorderFavorites(
+    List<Session> ordered,
+    int oldIndex,
+    int newIndex,
+  ) async {
+    final changes = reorderedFavoriteRanks(ordered, oldIndex, newIndex);
+    if (changes.isEmpty) return const <String>[];
+    final ranks = <String, int>{for (final c in changes) c.session.id: c.rank};
+
+    Session applied(Session s) =>
+        ranks.containsKey(s.id) ? s.withFavoriteRank(ranks[s.id]!) : s;
+    _current = <Session>[for (final s in _current) applied(s)];
+    // The per-server cache feeds the next re-group; leaving stale ranks there would
+    // let the old order reappear the moment anything else triggered a rebuild.
+    for (final base in _lastByServer.keys.toList()) {
+      _lastByServer[base] = <Session>[for (final s in _lastByServer[base]!) applied(s)];
+    }
+    _emitSessions();
+
+    final failed = await Future.wait(
+      changes.map((c) async {
+        try {
+          await _clientFor(c.session.server).setFavorite(
+            c.session.id,
+            true,
+            rank: c.rank,
+          );
+          return null;
+        } catch (_) {
+          return c.session.server.name;
+        }
+      }),
+    );
+    final refused = <String>{for (final name in failed) ?name}.toList();
+    if (refused.isNotEmpty) await refresh();
+    return refused;
   }
 
   ApiClient _clientFor(ServerConfig server) {

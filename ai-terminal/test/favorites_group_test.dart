@@ -4,6 +4,8 @@
 // in the incoming list simply isn't rendered), and the empty (no favorites)
 // case. Deliberately independent of any service singleton — the widget takes
 // its inputs as plain constructor params.
+import 'package:flutter/foundation.dart';
+import 'package:flutter/gestures.dart';
 import 'package:flutter/material.dart';
 import 'package:flutter_test/flutter_test.dart';
 
@@ -57,6 +59,7 @@ void main() {
           },
           collapsed: false,
           onToggleCollapsed: () {},
+          onReorder: (_, _, _) {},
         ),
       ),
     );
@@ -86,6 +89,7 @@ void main() {
           },
           collapsed: false,
           onToggleCollapsed: () {},
+          onReorder: (_, _, _) {},
         ),
       ),
     );
@@ -101,6 +105,7 @@ void main() {
           cardBuilder: (context, s) => Text(s.id),
           collapsed: false,
           onToggleCollapsed: () {},
+          onReorder: (_, _, _) {},
         ),
       ),
     );
@@ -116,6 +121,7 @@ void main() {
           cardBuilder: (context, s) => Text(s.id),
           collapsed: false,
           onToggleCollapsed: () {},
+          onReorder: (_, _, _) {},
         ),
       ),
     );
@@ -132,6 +138,7 @@ void main() {
           cardBuilder: (context, s) => Text(s.id),
           collapsed: false,
           onToggleCollapsed: () => toggled = true,
+          onReorder: (_, _, _) {},
         ),
       ),
     );
@@ -153,6 +160,7 @@ void main() {
           cardBuilder: (context, s) => Text(s.id),
           collapsed: true,
           onToggleCollapsed: () {},
+          onReorder: (_, _, _) {},
         ),
       ),
     );
@@ -163,5 +171,82 @@ void main() {
     expect(find.text('b'), findsNothing);
     expect(find.byIcon(Icons.chevron_right), findsOneWidget);
     expect(find.byIcon(Icons.expand_more), findsNothing);
+  });
+
+  // #124 — the group is reorderable. Before this the rows rendered with no grab
+  // gesture at all, so a drag simply did nothing.
+  group('#124 — dragging a pinned row', () {
+    List<Session> three() => [
+      _session('a', favorite: true, favoriteRank: 10),
+      _session('b', favorite: true, favoriteRank: 20),
+      _session('c', favorite: true, favoriteRank: 30),
+    ];
+
+    Future<void> pump(WidgetTester tester, void Function(List<Session>, int, int) onReorder) =>
+        tester.pumpWidget(
+          _wrap(
+            FavoritesGroup(
+              sessions: three(),
+              cardBuilder: (context, s) => SizedBox(height: 48, child: Text(s.id)),
+              collapsed: false,
+              onToggleCollapsed: () {},
+              onReorder: onReorder,
+            ),
+          ),
+        );
+
+    testWidgets('touch gets LONG-PRESS to grab, not an always-on handle', (tester) async {
+      // try/finally, not addTearDown: the framework verifies the foundation debug
+      // vars are unset at the END OF THE TEST BODY, before tearDowns run.
+      debugDefaultTargetPlatformOverride = TargetPlatform.android;
+      try {
+        await pump(tester, (_, _, _) {});
+        // A compact pinned row must not be draggable on first touch, or scrolling
+        // the dashboard would drag rows by accident.
+        expect(find.byType(ReorderableDelayedDragStartListener), findsNWidgets(3));
+      } finally {
+        debugDefaultTargetPlatformOverride = null;
+      }
+    });
+
+    testWidgets('a pointer device drags the row directly', (tester) async {
+      debugDefaultTargetPlatformOverride = TargetPlatform.windows;
+      try {
+        await pump(tester, (_, _, _) {});
+        expect(find.byType(ReorderableDragStartListener), findsNWidgets(3));
+        // No handle icon: the whole row is the target, so the layout is unchanged.
+        expect(find.byIcon(Icons.drag_handle), findsNothing);
+      } finally {
+        debugDefaultTargetPlatformOverride = null;
+      }
+    });
+
+    testWidgets('a completed drag reports the move in DISPLAY order', (tester) async {
+      debugDefaultTargetPlatformOverride = TargetPlatform.windows;
+      try {
+        List<Session>? got;
+        int? from, to;
+        await pump(tester, (ordered, o, n) {
+          got = ordered;
+          from = o;
+          to = n;
+        });
+
+        final drag = await tester.startGesture(tester.getCenter(find.text('c')));
+        await tester.pump(kLongPressTimeout + const Duration(milliseconds: 50));
+        await drag.moveBy(const Offset(0, -120));
+        await tester.pump();
+        await drag.up();
+        await tester.pumpAndSettle();
+
+        expect(from, isNotNull, reason: 'the drag must reach onReorder');
+        expect(got!.map((s) => s.id).toList(), ['a', 'b', 'c'],
+            reason: 'the callback receives the group in the order shown');
+        expect(from, 2);
+        expect(to, lessThan(2));
+      } finally {
+        debugDefaultTargetPlatformOverride = null;
+      }
+    });
   });
 }
