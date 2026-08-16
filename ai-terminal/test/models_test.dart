@@ -577,4 +577,54 @@ void main() {
       );
     });
   });
+
+  // #124 — withFavoriteRank is deliberately NOT a general copyWith, but it still
+  // hand-lists all eighteen fields, so this pins that a reorder cannot silently
+  // drop one. Every field is given a distinctive value.
+  group('Session.withFavoriteRank', () {
+    test('changes the rank and preserves every other field', () {
+      const server = ServerConfig(
+          name: 'Office', baseUrl: 'http://o:7681', bearerToken: 'tok');
+      final original = Session(
+        id: 'sess-1',
+        name: 'my-project',
+        cwd: r'C:\dev\p',
+        status: 'working',
+        claudeSessionId: 'claude-abc',
+        lastActivity: 1234567,
+        notifyLevel: 'all',
+        server: server,
+        autoCommand: 'claude --resume abc',
+        agent: 'claude',
+        agentSessionId: 'conv-9',
+        favorite: true,
+        favoriteRank: 111,
+        compacting: true,
+        compactingSince: 42,
+        backgroundTasks: const ['t1', 't2'],
+        waitingFor: 'question',
+      );
+
+      final moved = original.withFavoriteRank(999);
+
+      expect(moved.favoriteRank, 999);
+      expect(moved.id, original.id);
+      expect(moved.name, original.name);
+      expect(moved.cwd, original.cwd);
+      expect(moved.status, original.status);
+      expect(moved.claudeSessionId, original.claudeSessionId);
+      expect(moved.lastActivity, original.lastActivity);
+      expect(moved.notifyLevel, original.notifyLevel);
+      expect(moved.server, original.server);
+      expect(moved.autoCommand, original.autoCommand);
+      expect(moved.metrics, original.metrics);
+      expect(moved.agent, original.agent);
+      expect(moved.agentSessionId, original.agentSessionId);
+      expect(moved.favorite, original.favorite);
+      expect(moved.compacting, original.compacting);
+      expect(moved.compactingSince, original.compactingSince);
+      expect(moved.backgroundTasks, original.backgroundTasks);
+      expect(moved.waitingFor, original.waitingFor);
+    });
+  });
 }

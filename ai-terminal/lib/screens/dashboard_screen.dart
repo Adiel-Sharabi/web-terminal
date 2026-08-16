@@ -287,6 +287,32 @@ class _DashboardScreenState extends State<DashboardScreen> {
     }
   }
 
+  /// Persists a dragged favorites order (#124). Unlike the per-server session
+  /// reorder next door, this group spans SERVERS: the repository writes each moved
+  /// session's new rank to the server that owns it and reports any that refused, so
+  /// a partial failure names the box rather than silently leaving the cluster
+  /// half-renumbered.
+  Future<void> _onReorderFavorites(
+    List<Session> ordered,
+    int oldIndex,
+    int newIndex,
+  ) async {
+    final refused = await SessionRepository.instance.reorderFavorites(
+      ordered,
+      oldIndex,
+      newIndex,
+    );
+    if (refused.isEmpty || !mounted) return;
+    ScaffoldMessenger.of(context).showSnackBar(
+      SnackBar(
+        content: Text(
+          'Could not save the new order on ${refused.join(', ')} — '
+          'showing what the servers hold',
+        ),
+      ),
+    );
+  }
+
   /// A server group's rows as a reorderable sliver (issue #22). Rows are dragged
   /// by their handle (see [_buildCard]); [onReorder] persists the new order.
   Widget _reorderableGroup(List<Session> sessions, ServerConfig server) {
@@ -413,6 +439,7 @@ class _DashboardScreenState extends State<DashboardScreen> {
                           collapsed: _isCollapsed(kFavoritesGroupKey),
                           onToggleCollapsed: () =>
                               _toggleCollapsed(kFavoritesGroupKey),
+                          onReorder: _onReorderFavorites,
                         ),
                       ),
                       if (visible!.isEmpty)

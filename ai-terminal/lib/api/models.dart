@@ -232,6 +232,34 @@ class Session {
     this.waitingFor,
   });
 
+  /// This session with a different pinned rank (#124), for the optimistic half of
+  /// a favorites reorder — the drag has to look instant, and the authoritative
+  /// value only comes back on the next refresh.
+  ///
+  /// Deliberately NOT a general `copyWith`: a rank is the one field a client
+  /// rewrites locally, and eighteen optional parameters would be seventeen chances
+  /// to drop one silently. `models_test.dart` pins that every other field survives.
+  Session withFavoriteRank(int rank) => Session(
+    id: id,
+    name: name,
+    cwd: cwd,
+    status: status,
+    claudeSessionId: claudeSessionId,
+    lastActivity: lastActivity,
+    notifyLevel: notifyLevel,
+    server: server,
+    autoCommand: autoCommand,
+    metrics: metrics,
+    agent: agent,
+    agentSessionId: agentSessionId,
+    favorite: favorite,
+    favoriteRank: rank,
+    compacting: compacting,
+    compactingSince: compactingSince,
+    backgroundTasks: backgroundTasks,
+    waitingFor: waitingFor,
+  );
+
   /// Builds a [Session] from one element of the `GET /api/sessions` array,
   /// tagging it with the [server] it came from.
   factory Session.fromJson(ServerConfig server, Map<String, dynamic> json) {
