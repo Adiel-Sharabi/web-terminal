@@ -254,6 +254,48 @@ class IndexAwareCircularBuffer<T extends IndexedItem> {
     _length -= count;
   }
 
+  /// WEB-TERMINAL PATCH (#127): prepends [items] in O(items.length).
+  ///
+  /// Upstream can only reach the front through [insert], which shifts every
+  /// existing element one slot with `_moveChild` — so prepending N items into a
+  /// list of length L costs O(N x L). Loading older scrollback means N and L are
+  /// both thousands, i.e. tens of millions of moves, which is why the terminal
+  /// could not simply be extended backwards.
+  ///
+  /// This is O(N) because an element's index is DERIVED, never stored per item:
+  /// [IndexedItem.index] is `_absoluteIndex - _owner._absoluteStartIndex`. So
+  /// lowering [_absoluteStartIndex] shifts every existing element down by
+  /// [items].length in ONE arithmetic step, and only the new items need work.
+  ///
+  /// Capacity is taken first, deliberately: growing reallocates from index 0 and
+  /// leaves the free slots at the END of the backing array, which is what makes
+  /// walking [_startIndex] backwards land on empty slots instead of overwriting
+  /// live elements at the other end of the ring.
+  ///
+  /// The elements may come from ANOTHER buffer (they are parsed in a scratch
+  /// terminal). [_adoptChild] re-owns them, so the source buffer must be
+  /// discarded and never read again — a line reachable from two buffers is
+  /// precisely the aliasing defect behind #81 (detached lines that still paint,
+  /// selection returning null, and a hard throw out of `Terminal.write` in
+  /// release).
+  void prependAll(List<T> items) {
+    if (items.isEmpty) return;
+    final count = items.length;
+
+    if (_length + count > _array.length) {
+      maxLength = _length + count;
+    }
+
+    _startIndex = (_startIndex - count) % _array.length;
+    if (_startIndex < 0) _startIndex += _array.length;
+    _absoluteStartIndex -= count;
+    _length += count;
+
+    for (var i = 0; i < count; i++) {
+      _adoptChild(i, items[i]);
+    }
+  }
+
   /// Replaces all elements in the list with [replacement].
   void replaceWith(List<T> replacement) {
     for (var i = 0; i < _length; i++) {

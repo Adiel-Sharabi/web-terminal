@@ -61,6 +61,34 @@ going through `lines.swap`. So this is an upstream oversight, not a design decis
 A `swap`-based fix would also have worked but allocates a throwaway `BufferLine` per
 row per scroll, on the hottest path in the terminal. `move` is allocation-free.
 
+### A second, unrelated patch (#127)
+
+3. `lib/src/utils/circular_buffer.dart` — **adds**
+   `IndexAwareCircularBuffer.prependAll`. Also purely additive; no stock behaviour
+   is changed.
+
+   Upstream can only reach the front through `insert(0, …)`, which is unusable for
+   this twice over. It shifts every existing element with `_moveChild`, so prepending
+   N items into a list of length L costs O(N × L) — thousands by thousands is tens of
+   millions of moves. And on a **full** ring it returns early and silently does
+   nothing at all, which is exactly what the "grows past its original cap" test
+   catches when you swap the patch body for `insertAll(0, items)`.
+
+   `prependAll` is O(N) because an element's index is *derived*, never stored:
+   `IndexedItem.index` is `_absoluteIndex - _owner._absoluteStartIndex`, so lowering
+   `_absoluteStartIndex` shifts every existing element down in one arithmetic step.
+   Capacity is taken first via the existing `maxLength` setter, deliberately —
+   growing reallocates from index 0 and leaves the free slots at the END of the
+   array, which is what makes walking `_startIndex` backwards land on empty slots
+   instead of overwriting live elements at the other end of the ring.
+
+   **Ownership caveat, and it is the #81 defect again.** The elements prepended come
+   from a scratch terminal that parsed the older text. `_adoptChild` re-owns them,
+   so that scratch buffer must be discarded and never read again — a line reachable
+   from two buffers is precisely what produced "text visible, nothing selects" and
+   the release-mode blank terminal. `ai-terminal/test/xterm_prepend_test.dart` asserts
+   attachment, index consistency, and that `Terminal.write` still works afterwards.
+
 ## How this was verified
 
 * `ai-terminal/test/xterm_codex_stream_test.dart` — a real 13 KB Codex PTY capture is
@@ -73,7 +101,8 @@ row per scroll, on the hottest path in the terminal. `move` is allocation-free.
 * **Upstream's own suite was run against both copies.** Pristine and patched give the
   identical result — `+108 ~2 -2` — with the same two `TerminalView.textScaler`
   failures, which are pre-existing Flutter-SDK drift and unrelated. So the patch
-  causes no upstream regression.
+  causes no upstream regression. **Re-run after adding `prependAll` (#127): still
+  `+108 ~2 -2`, same two failures.**
 
 To repeat that last check (the test suite is deliberately **not** vendored — it
 cannot run in our CI and ships two known-failing tests):
