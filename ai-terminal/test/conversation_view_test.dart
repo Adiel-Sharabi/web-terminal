@@ -2045,6 +2045,53 @@ void main() {
           ),
         );
 
+
+    testWidgets('a STREAMING turn (the same turn growing) must not move the reader', (
+      tester,
+    ) async {
+      // The test below appends a NEW turn. Real output is not appended: the
+      // assistant's current turn GROWS, which changes item heights rather than
+      // item count -- a different path through ListView.builder's extent
+      // estimation, and the one that actually runs while an agent is writing.
+      var tail = [
+        ...genTurns('T', 40),
+        const TranscriptTurn(
+            role: 'assistant', text: 'streaming', toolUses: [], ts: null),
+      ];
+      Future<TranscriptPage> fetch(String id, {String? before, int? limit}) async =>
+          TranscriptPage(messages: tail, cursor: null, hasMore: false);
+
+      await tester.pumpWidget(_wrap(ConversationView(
+        session: _session(status: 'working'),
+        fetchPage: fetch,
+      )));
+      await tester.pumpAndSettle();
+
+      final controller =
+          tester.widget<ListView>(find.byType(ListView)).controller!;
+      controller.jumpTo(controller.position.maxScrollExtent / 2);
+      await tester.pumpAndSettle();
+      final before = controller.position.pixels;
+
+      // Three streaming updates, as the agent writes.
+      for (var i = 1; i <= 3; i++) {
+        tail = [
+          ...tail.sublist(0, tail.length - 1),
+          TranscriptTurn(
+            role: 'assistant',
+            text: 'streaming ${'more text ' * (i * 8)}',
+            toolUses: const [],
+            ts: null,
+          ),
+        ];
+        await tester.pump(const Duration(seconds: 5));
+        await tester.pumpAndSettle();
+      }
+
+      expect(controller.position.pixels, closeTo(before, 1.0),
+          reason: 'a growing assistant turn moved the reader');
+    });
+
     testWidgets('mid-list scroll position survives an incoming turn', (
       tester,
     ) async {
