@@ -65,6 +65,19 @@ bool canForkFromMenu(Session session) => session.claudeSessionId != null;
 /// to scroll through, and still well inside both limits.
 const int kScrollbackReplayBytes = 262144;
 
+/// How much older scrollback each background deepening step pulls in (#127).
+/// One step, one request, one prepend — small enough that parsing it never
+/// blocks the frame for long, large enough that a deep history arrives quickly.
+const int kScrollbackDeepenBytes = 262144;
+
+/// Pause between deepening steps, so this stays background work and never
+/// competes with live output for the main isolate.
+const Duration kScrollbackDeepenGap = Duration(milliseconds: 900);
+
+/// Ceiling on the terminal's line buffer once deepened. Memory is not the
+/// binding constraint here (latency is), but unbounded is not a design.
+const int kScrollbackMaxLines = 100000;
+
 /// Where the newest [budget] code units of a [total]-length scrollback begin.
 ///
 /// The endpoint pages FORWARD from `offset`, so fetching the tail means asking
@@ -667,6 +680,14 @@ class _SessionScreenState extends State<SessionScreen>
   bool _transcriptUnavailableForSession =
       false; // this session 404s despite the capability
 
+  // #127 — the background scrollback deepening. `_sbEarliest` is the byte offset
+  // where the currently-loaded window starts; 0 means the very beginning of the
+  // buffer has been reached and there is nothing older to fetch.
+  int _sbEarliest = 0;
+  bool _sbExhausted = false;
+  bool _deepening = false;
+  Timer? _deepenTimer;
+
   final ScrollController _scrollController = ScrollController();
   late final Terminal _terminal = Terminal(maxLines: 5000);
   late final TerminalController _terminalController = TerminalController();
@@ -1188,6 +1209,9 @@ class _SessionScreenState extends State<SessionScreen>
     final api = _api ?? ApiClient(session.server);
     _api = api;
 
+    // A reconnect replays from scratch, so any deepening still queued against
+    // the OLD window would prepend history that no longer lines up with it.
+    _deepenTimer?.cancel();
     _terminal.buffer.clear();
     _terminal.buffer.setCursor(0, 0);
     try {
@@ -1203,12 +1227,17 @@ class _SessionScreenState extends State<SessionScreen>
       // then the tail.
       final head = await api.scrollback(session.id, limit: 1);
       if (!mounted) return;
+      final replayFrom = scrollbackTailOffset(head.total, kScrollbackReplayBytes);
       final chunk = await api.scrollback(
         session.id,
-        offset: scrollbackTailOffset(head.total, kScrollbackReplayBytes),
+        offset: replayFrom,
         limit: kScrollbackReplayBytes,
       );
       if (!mounted) return;
+      // #127 — remember where the loaded window starts, so the background
+      // deepening below knows what "older" means.
+      _sbEarliest = chunk.offset;
+      _sbExhausted = chunk.offset <= 0;
       if (chunk.data.isNotEmpty) {
         // #81: guarded — xterm 4.0.0 throws on a real Codex stream, and an
         // unguarded throw here kills the lens outright (blank terminal).
@@ -1220,6 +1249,8 @@ class _SessionScreenState extends State<SessionScreen>
       // best effort — live output still arrives once the socket connects
     }
     if (!mounted) return;
+    // #127 — from here the history deepens on its own, behind the live view.
+    _scheduleDeepen();
 
     await _outputSub?.cancel();
     await _connectedSub?.cancel();
@@ -2269,6 +2300,97 @@ class _SessionScreenState extends State<SessionScreen>
     }
   }
 
+  /// Queues the next background deepening step (#127).
+  void _scheduleDeepen() {
+    _deepenTimer?.cancel();
+    if (_sbExhausted || !mounted) return;
+    _deepenTimer = Timer(kScrollbackDeepenGap, _deepenOnce);
+  }
+
+  /// Pulls the PREVIOUS slice of scrollback and prepends it to the live buffer.
+  ///
+  /// The point of doing it this way — rather than fetching on scroll-to-top and
+  /// rebuilding — is that nothing already on screen is re-parsed or re-rendered,
+  /// so there is no flicker, no loading affordance and nothing to wait for. The
+  /// reader is not moved: prepending only adds height ABOVE the viewport, so the
+  /// correction is exactly the growth in `maxScrollExtent`, which needs no line
+  /// height and no guesswork.
+  ///
+  /// The older text is parsed in a SCRATCH terminal at the same column width
+  /// (different width would re-wrap it), and that scratch is then dropped on the
+  /// floor: `prependAll` re-owns the lines, and a line reachable from two buffers
+  /// is #81's defect exactly.
+  Future<void> _deepenOnce() async {
+    final session = _session;
+    final api = _api;
+    if (!mounted || _deepening || _sbExhausted || session == null || api == null) {
+      return;
+    }
+    if (_sbEarliest <= 0) {
+      _sbExhausted = true;
+      return;
+    }
+    if (_terminal.buffer.lines.length >= kScrollbackMaxLines) {
+      _sbExhausted = true;
+      return;
+    }
+    _deepening = true;
+    try {
+      final start = scrollbackTailOffset(_sbEarliest, kScrollbackDeepenBytes);
+      final chunk = await api.scrollback(
+        session.id,
+        offset: start,
+        limit: _sbEarliest - start,
+      );
+      if (!mounted) return;
+      _sbEarliest = chunk.offset;
+      if (chunk.offset <= 0) _sbExhausted = true;
+      if (chunk.data.isEmpty) return;
+
+      final scratch = Terminal(maxLines: kScrollbackMaxLines);
+      scratch.resize(_lastCols > 0 ? _lastCols : 80, _lastRows > 1 ? _lastRows : 24);
+      safeTerminalWrite(scratch, chunk.data);
+
+      final harvested = <BufferLine>[];
+      for (var i = 0; i < scratch.buffer.lines.length; i++) {
+        harvested.add(scratch.buffer.lines[i]);
+      }
+      // The scratch terminal's own viewport contributes trailing blanks; they
+      // would show up as a gap between the older text and what is already here.
+      while (harvested.isNotEmpty &&
+          harvested.last.getText().trim().isEmpty) {
+        harvested.removeLast();
+      }
+      if (harvested.isEmpty) return;
+
+      final hadClients = _scrollController.hasClients;
+      final beforeExtent =
+          hadClients ? _scrollController.position.maxScrollExtent : 0.0;
+      final beforePixels = hadClients ? _scrollController.position.pixels : 0.0;
+
+      _terminal.buffer.lines.prependAll(harvested);
+      _terminal.notifyListeners(); // raw buffer surgery does not notify on its own
+
+      if (hadClients) {
+        WidgetsBinding.instance.addPostFrameCallback((_) {
+          if (!mounted || !_scrollController.hasClients) return;
+          final grew =
+              _scrollController.position.maxScrollExtent - beforeExtent;
+          if (grew <= 0) return;
+          _scrollController.jumpTo((beforePixels + grew)
+              .clamp(0.0, _scrollController.position.maxScrollExtent));
+        });
+      }
+    } catch (_) {
+      // Best effort: a failed step just means the history stays as deep as it
+      // already is. Stop rather than hammer a server that is refusing.
+      _sbExhausted = true;
+    } finally {
+      _deepening = false;
+      _scheduleDeepen();
+    }
+  }
+
   /// Jump straight to the newest line, retried across the next frames + a
   /// moment. On open/reconnect the scrollback height isn't final until the
   /// view lays out (and the controller may not be attached yet), so a single
@@ -2429,6 +2551,7 @@ class _SessionScreenState extends State<SessionScreen>
     _composeController.removeListener(_onComposeChanged);
     _composeController.dispose();
     _composeFocusNode.dispose();
+    _deepenTimer?.cancel();
     _scrollController.dispose();
     super.dispose();
   }
