@@ -2046,6 +2046,64 @@ void main() {
         );
 
 
+    // A real transcript is markdown, code blocks and tool cards whose heights
+    // differ by an order of magnitude. `ListView.builder` ESTIMATES
+    // maxScrollExtent from what it has laid out, so with uniform short turns
+    // (every other test here) the estimate is near-perfect and nothing moves.
+    // This is the case that is not covered.
+    List<TranscriptTurn> mixedTurns(int n) => List.generate(n, (i) {
+          final body = i % 3 == 0
+              ? '```dart\n${'final value = $i;\n' * 8}```'
+              : 'short_$i';
+          return TranscriptTurn(
+            role: i.isEven ? 'user' : 'assistant',
+            text: body,
+            toolUses: const [],
+            ts: null,
+          );
+        });
+
+    testWidgets('VARIABLE-height turns must not move the reader', (
+      tester,
+    ) async {
+      var tail = mixedTurns(40);
+      Future<TranscriptPage> fetch(
+        String id, {
+        String? before,
+        int? limit,
+      }) async =>
+          TranscriptPage(messages: tail, cursor: null, hasMore: false);
+
+      await tester.pumpWidget(_wrap(ConversationView(
+        session: _session(status: 'working'),
+        fetchPage: fetch,
+      )));
+      await tester.pumpAndSettle();
+
+      final controller =
+          tester.widget<ListView>(find.byType(ListView)).controller!;
+      controller.jumpTo(controller.position.maxScrollExtent / 2);
+      await tester.pumpAndSettle();
+      final before = controller.position.pixels;
+
+      for (var i = 1; i <= 3; i++) {
+        tail = [
+          ...mixedTurns(40),
+          TranscriptTurn(
+            role: 'assistant',
+            text: '```dart\n${'streaming line\n' * (i * 10)}```',
+            toolUses: const [],
+            ts: null,
+          ),
+        ];
+        await tester.pump(const Duration(seconds: 5));
+        await tester.pumpAndSettle();
+      }
+
+      expect(controller.position.pixels, closeTo(before, 1.0),
+          reason: 'variable-height turns moved the reader');
+    });
+
     testWidgets('a STREAMING turn (the same turn growing) must not move the reader', (
       tester,
     ) async {
