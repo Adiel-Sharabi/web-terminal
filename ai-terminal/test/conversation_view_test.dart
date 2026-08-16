@@ -2273,4 +2273,61 @@ void main() {
               'just been switched off — so the chat would sit stale forever');
     });
   });
+
+  // Reported 2026-08-16: "I add prompt ... I can't see it in chat - it was entered
+  // during the work." An echo is the ONLY thing showing a queued prompt, because
+  // Claude writes the user message when its turn STARTS. Expiring it on a flat
+  // timer deleted the prompt from chat on any turn longer than 90s.
+  group('echo expiry waits for the turn, not the clock', () {
+    test('a matched echo is dropped whatever the state — that is the dedupe', () {
+      expect(
+        shouldDropEcho(matchedInTranscript: true, timeoutRuns: false, ageMs: 0),
+        isTrue,
+      );
+    });
+
+    test('an old echo SURVIVES while the agent is mid-turn', () {
+      expect(
+        shouldDropEcho(
+          matchedInTranscript: false,
+          timeoutRuns: false,
+          ageMs: kEchoTimeoutMs * 10,
+        ),
+        isFalse,
+      );
+    });
+
+    test('an old unmatched echo expires once the session is done', () {
+      expect(
+        shouldDropEcho(
+          matchedInTranscript: false,
+          timeoutRuns: true,
+          ageMs: kEchoTimeoutMs + 1,
+        ),
+        isTrue,
+      );
+    });
+
+    test('a young unmatched echo is never dropped', () {
+      expect(
+        shouldDropEcho(matchedInTranscript: false, timeoutRuns: true, ageMs: 5),
+        isFalse,
+      );
+    });
+
+    test('working and compacting both hold the timeout off', () {
+      expect(echoTimeoutRuns(status: 'working', compacting: false), isFalse);
+      expect(echoTimeoutRuns(status: 'idle', compacting: true), isFalse);
+    });
+
+    test('waiting holds it off too — a blocked session has not started the turn', () {
+      // A queued prompt behind a permission prompt or an AskUserQuestion is
+      // exactly as unstarted as one behind a running tool.
+      expect(echoTimeoutRuns(status: 'waiting', compacting: false), isFalse);
+    });
+
+    test('an idle session lets it run — a prompt not seen by then never arrives', () {
+      expect(echoTimeoutRuns(status: 'idle', compacting: false), isTrue);
+    });
+  });
 }

@@ -174,6 +174,38 @@ List<TranscriptChunk> groupTranscriptTurns(List<TranscriptTurn> turns) {
   return out;
 }
 
+/// How long an unmatched optimistic echo may linger once it is eligible to
+/// expire at all — see [echoTimeoutRuns].
+const int kEchoTimeoutMs = 90000;
+
+/// Whether the echo safety timeout is allowed to run for a session in this state.
+///
+/// An echo (#31) covers the window between "you pressed send" and "the agent
+/// started that turn". While the agent is MID-TURN that window is unbounded: the
+/// prompt sits QUEUED, and Claude writes a user message only when its turn STARTS,
+/// so the echo is the only thing in the chat lens showing the prompt exists.
+///
+/// It used to expire on a flat 90s timer regardless, which silently deleted the
+/// prompt from chat on any turn longer than that — i.e. most real ones. Reported
+/// 2026-08-16: *"I add prompt … I can't see it in chat — it was entered during the
+/// work."* The terminal legitimately had it and the chat did not.
+///
+/// So the timeout runs only once the session is genuinely finished with its turn,
+/// where a prompt that has not appeared never will. `waiting` counts as busy: a
+/// session blocked on a permission prompt or a question has not started the queued
+/// turn either.
+bool echoTimeoutRuns({required String status, required bool compacting}) =>
+    !compacting && status != 'working' && status != 'waiting';
+
+/// Whether a pending echo should be dropped now. Pure, so the rule is testable
+/// without pumping the view or faking the clock.
+bool shouldDropEcho({
+  required bool matchedInTranscript,
+  required bool timeoutRuns,
+  required int ageMs,
+}) =>
+    matchedInTranscript || (timeoutRuns && ageMs > kEchoTimeoutMs);
+
 class ConversationView extends StatefulWidget {
   const ConversationView({
     super.key,
@@ -421,8 +453,16 @@ class _ConversationViewState extends State<ConversationView> {
         if (!t.isAssistant) _normEcho(t.text),
     };
     final now = DateTime.now().millisecondsSinceEpoch;
+    final idle = echoTimeoutRuns(
+      status: widget.session.status,
+      compacting: widget.session.compacting,
+    );
     _pendingEchoes.removeWhere(
-      (e) => userTexts.contains(_normEcho(e.text)) || now - e.at > 90000,
+      (e) => shouldDropEcho(
+        matchedInTranscript: userTexts.contains(_normEcho(e.text)),
+        timeoutRuns: idle,
+        ageMs: now - e.at,
+      ),
     );
   }
 
