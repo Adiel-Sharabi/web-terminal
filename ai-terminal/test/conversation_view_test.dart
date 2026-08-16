@@ -2045,6 +2045,111 @@ void main() {
           ),
         );
 
+
+    // A real transcript is markdown, code blocks and tool cards whose heights
+    // differ by an order of magnitude. `ListView.builder` ESTIMATES
+    // maxScrollExtent from what it has laid out, so with uniform short turns
+    // (every other test here) the estimate is near-perfect and nothing moves.
+    // This is the case that is not covered.
+    List<TranscriptTurn> mixedTurns(int n) => List.generate(n, (i) {
+          final body = i % 3 == 0
+              ? '```dart\n${'final value = $i;\n' * 8}```'
+              : 'short_$i';
+          return TranscriptTurn(
+            role: i.isEven ? 'user' : 'assistant',
+            text: body,
+            toolUses: const [],
+            ts: null,
+          );
+        });
+
+    testWidgets('VARIABLE-height turns must not move the reader', (
+      tester,
+    ) async {
+      var tail = mixedTurns(40);
+      Future<TranscriptPage> fetch(
+        String id, {
+        String? before,
+        int? limit,
+      }) async =>
+          TranscriptPage(messages: tail, cursor: null, hasMore: false);
+
+      await tester.pumpWidget(_wrap(ConversationView(
+        session: _session(status: 'working'),
+        fetchPage: fetch,
+      )));
+      await tester.pumpAndSettle();
+
+      final controller =
+          tester.widget<ListView>(find.byType(ListView)).controller!;
+      controller.jumpTo(controller.position.maxScrollExtent / 2);
+      await tester.pumpAndSettle();
+      final before = controller.position.pixels;
+
+      for (var i = 1; i <= 3; i++) {
+        tail = [
+          ...mixedTurns(40),
+          TranscriptTurn(
+            role: 'assistant',
+            text: '```dart\n${'streaming line\n' * (i * 10)}```',
+            toolUses: const [],
+            ts: null,
+          ),
+        ];
+        await tester.pump(const Duration(seconds: 5));
+        await tester.pumpAndSettle();
+      }
+
+      expect(controller.position.pixels, closeTo(before, 1.0),
+          reason: 'variable-height turns moved the reader');
+    });
+
+    testWidgets('a STREAMING turn (the same turn growing) must not move the reader', (
+      tester,
+    ) async {
+      // The test below appends a NEW turn. Real output is not appended: the
+      // assistant's current turn GROWS, which changes item heights rather than
+      // item count -- a different path through ListView.builder's extent
+      // estimation, and the one that actually runs while an agent is writing.
+      var tail = [
+        ...genTurns('T', 40),
+        const TranscriptTurn(
+            role: 'assistant', text: 'streaming', toolUses: [], ts: null),
+      ];
+      Future<TranscriptPage> fetch(String id, {String? before, int? limit}) async =>
+          TranscriptPage(messages: tail, cursor: null, hasMore: false);
+
+      await tester.pumpWidget(_wrap(ConversationView(
+        session: _session(status: 'working'),
+        fetchPage: fetch,
+      )));
+      await tester.pumpAndSettle();
+
+      final controller =
+          tester.widget<ListView>(find.byType(ListView)).controller!;
+      controller.jumpTo(controller.position.maxScrollExtent / 2);
+      await tester.pumpAndSettle();
+      final before = controller.position.pixels;
+
+      // Three streaming updates, as the agent writes.
+      for (var i = 1; i <= 3; i++) {
+        tail = [
+          ...tail.sublist(0, tail.length - 1),
+          TranscriptTurn(
+            role: 'assistant',
+            text: 'streaming ${'more text ' * (i * 8)}',
+            toolUses: const [],
+            ts: null,
+          ),
+        ];
+        await tester.pump(const Duration(seconds: 5));
+        await tester.pumpAndSettle();
+      }
+
+      expect(controller.position.pixels, closeTo(before, 1.0),
+          reason: 'a growing assistant turn moved the reader');
+    });
+
     testWidgets('mid-list scroll position survives an incoming turn', (
       tester,
     ) async {
@@ -2271,6 +2376,63 @@ void main() {
       expect(find.text('SETTLED_AFTER_COMPACT'), findsOneWidget,
           reason: 'nothing refreshed when compaction ended, and the poll had '
               'just been switched off — so the chat would sit stale forever');
+    });
+  });
+
+  // Reported 2026-08-16: "I add prompt ... I can't see it in chat - it was entered
+  // during the work." An echo is the ONLY thing showing a queued prompt, because
+  // Claude writes the user message when its turn STARTS. Expiring it on a flat
+  // timer deleted the prompt from chat on any turn longer than 90s.
+  group('echo expiry waits for the turn, not the clock', () {
+    test('a matched echo is dropped whatever the state — that is the dedupe', () {
+      expect(
+        shouldDropEcho(matchedInTranscript: true, timeoutRuns: false, ageMs: 0),
+        isTrue,
+      );
+    });
+
+    test('an old echo SURVIVES while the agent is mid-turn', () {
+      expect(
+        shouldDropEcho(
+          matchedInTranscript: false,
+          timeoutRuns: false,
+          ageMs: kEchoTimeoutMs * 10,
+        ),
+        isFalse,
+      );
+    });
+
+    test('an old unmatched echo expires once the session is done', () {
+      expect(
+        shouldDropEcho(
+          matchedInTranscript: false,
+          timeoutRuns: true,
+          ageMs: kEchoTimeoutMs + 1,
+        ),
+        isTrue,
+      );
+    });
+
+    test('a young unmatched echo is never dropped', () {
+      expect(
+        shouldDropEcho(matchedInTranscript: false, timeoutRuns: true, ageMs: 5),
+        isFalse,
+      );
+    });
+
+    test('working and compacting both hold the timeout off', () {
+      expect(echoTimeoutRuns(status: 'working', compacting: false), isFalse);
+      expect(echoTimeoutRuns(status: 'idle', compacting: true), isFalse);
+    });
+
+    test('waiting holds it off too — a blocked session has not started the turn', () {
+      // A queued prompt behind a permission prompt or an AskUserQuestion is
+      // exactly as unstarted as one behind a running tool.
+      expect(echoTimeoutRuns(status: 'waiting', compacting: false), isFalse);
+    });
+
+    test('an idle session lets it run — a prompt not seen by then never arrives', () {
+      expect(echoTimeoutRuns(status: 'idle', compacting: false), isTrue);
     });
   });
 }
