@@ -111,15 +111,20 @@ test.describe('#137 — the wait-period badge in the sidebar', () => {
       at.setHours(14, 32, 0, 0);
       const on = window.waitBadge({ usageLimit: { waiting: true, armed: true, enabled: true, resumeAt: at.getTime(), resetAt: at.getTime() } });
       const off = window.waitBadge({ usageLimit: { waiting: true, armed: false, enabled: false, resumeAt: at.getTime(), resetAt: at.getTime() } });
+      const unarmed = window.waitBadge({ usageLimit: { waiting: true, armed: false, enabled: true, resumeAt: null, resetAt: null } });
       const none = window.waitBadge({ usageLimit: { waiting: false, armed: false, enabled: true, resumeAt: null, resetAt: null } });
       const missing = window.waitBadge({});
       const expected = at.toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' });
-      return { on, off, none, missing, expected };
+      return { on, off, unarmed, none, missing, expected };
     });
     expect(out.on).toContain('resumes');
     expect(out.on).toContain(out.expected);       // the time it will actually fire
     expect(out.off).toContain('on hold');
     expect(out.off).not.toContain('resumes');     // nothing is scheduled — don't say it is
+    // Capped but with no reset time yet (the cap prompt seen before any resets_at):
+    // still shown as held, but it must NOT promise a resume no timer can schedule.
+    expect(out.unarmed).toContain('on hold');
+    expect(out.unarmed).not.toContain('resumes');
     expect(out.none).toBe('');                    // not capped => no chip at all
     expect(out.missing).toBe('');                 // a server too old to send the field
   });

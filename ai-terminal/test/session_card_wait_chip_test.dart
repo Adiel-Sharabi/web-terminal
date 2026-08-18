@@ -64,15 +64,17 @@ void main() {
     expect(find.textContaining('resumes'), findsNothing);
   });
 
-  testWidgets('a capped session with no known reset time still says it is held',
+  testWidgets('capped with NO known reset time says "on hold", never "resumes"',
       (tester) async {
-    // The worker can SEE the cap prompt before any reset timestamp is known. A
-    // session held with no time is still worth showing — it is why the row is quiet.
+    // Reachable: the worker can SEE the cap prompt before any resets_at has been
+    // read. The row must still show the session is held — but it must NOT promise a
+    // resume, because without a reset time no timer can be armed for it.
     await tester.pumpWidget(_wrap(SessionCard(
-      session: _session(limit: const UsageLimit(waiting: true, armed: true)),
+      session: _session(limit: const UsageLimit(waiting: true, armed: false)),
     )));
 
-    expect(find.text('resumes'), findsOneWidget);
+    expect(find.text('on hold'), findsOneWidget);
+    expect(find.textContaining('resumes'), findsNothing);
   });
 
   testWidgets('an uncapped session renders no chip at all', (tester) async {

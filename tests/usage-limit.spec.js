@@ -58,6 +58,26 @@ test.describe('#137 — usageLimitState (what the session list publishes)', () =
     expect(st.resumeAt).toBe(SOON + 60000);
   });
 
+  test('capped with NO reset time is waiting but NOT armed — no timer can exist', () => {
+    // The cap prompt can be observed before any resets_at is read. Reporting armed
+    // here would have the badge promise a resume the worker cannot schedule.
+    const st = u.usageLimitState({
+      metrics: { fiveH: 100 }, observedBlockAt: NOW - 1000,
+      enabled: true, delayMs: 60000, now: NOW,
+    });
+    expect(st.waiting).toBe(true);
+    expect(st.armed).toBe(false);
+    expect(st.resumeAt).toBeNull();
+  });
+
+  test('an observed cap prompt is blocking even with no percentage at all', () => {
+    const st = u.usageLimitState({
+      metrics: null, observedBlockAt: NOW - 1000,
+      enabled: true, delayMs: 60000, now: NOW,
+    });
+    expect(st.waiting).toBe(true);
+  });
+
   test('an opted-out session still reports waiting — hiding the block would be a lie', () => {
     const st = u.usageLimitState({
       metrics: { fiveH: 100, fiveHResetAt: SOON }, enabled: false, delayMs: 60000, now: NOW,

@@ -2909,6 +2909,12 @@
       if (!u || !u.waiting) return '';
       const at = u.resumeAt ? new Date(u.resumeAt) : null;
       const hhmm = at ? at.toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' }) : '';
+      // "resumes" is keyed on ARMED, not on waiting: a session can be known-capped
+      // before its reset time is, and saying "resumes" then would promise something
+      // no timer is scheduled to do.
+      if (u.enabled && !u.armed) {
+        return `<button class="sb-wait" title="5-hour limit reached. This session will resume on its own once the reset time is known. Click to turn auto-resume off for this session.">&#9208; on hold</button>`;
+      }
       if (!u.enabled) {
         return `<button class="sb-wait off" title="5-hour limit reached. Auto-resume is off for this session${hhmm ? ' — the window reopens at ' + esc(hhmm) : ''}. Click to turn it back on.">&#9208; on hold</button>`;
       }

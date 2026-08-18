@@ -456,7 +456,10 @@ class _WaitChip extends StatelessWidget {
     final on = limit.enabled;
     final color = on ? StatusColor.capped : theme.colorScheme.onSurfaceVariant;
     final at = clockTime(limit.resumeAt);
-    final text = on ? (at.isEmpty ? 'resumes' : 'resumes $at') : 'on hold';
+    // "resumes" is keyed on ARMED, not on waiting: the cap prompt can be seen before
+    // any reset time is known, and the worker cannot arm a timer without one — so
+    // saying "resumes" then would promise something nothing is scheduled to do.
+    final text = (on && limit.armed && at.isNotEmpty) ? 'resumes $at' : 'on hold';
     final chip = Container(
       padding: const EdgeInsets.symmetric(horizontal: 6, vertical: 1),
       decoration: BoxDecoration(
@@ -481,10 +484,11 @@ class _WaitChip extends StatelessWidget {
     );
     if (onTap == null) return Semantics(label: text, child: chip);
     return Tooltip(
-      message: on
-          ? '5-hour limit reached. This session resumes on its own'
-                '${at.isEmpty ? '' : ' at $at'}. Tap to turn auto-resume off.'
-          : '5-hour limit reached. Auto-resume is off for this session. Tap to turn it back on.',
+      message: !on
+          ? '5-hour limit reached. Auto-resume is off for this session. Tap to turn it back on.'
+          : (limit.armed && at.isNotEmpty
+              ? '5-hour limit reached. This session resumes on its own at $at. Tap to turn auto-resume off.'
+              : '5-hour limit reached. This session will resume on its own once the reset time is known. Tap to turn auto-resume off.'),
       child: InkWell(
         onTap: onTap,
         borderRadius: BorderRadius.circular(7),
