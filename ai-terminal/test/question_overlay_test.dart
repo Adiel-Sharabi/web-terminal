@@ -1940,4 +1940,381 @@ void main() {
       expect(qRect.bottom, lessThanOrEqualTo(optionViewport(tester).top + 0.5));
     });
   });
+
+  // #108 (2026-08-12b) — "I just had a question that I can select multiple
+  // answers, but I didn't get, in the chat mode, something that I can click in
+  // myself and then it submits, so I had to do it in the terminal."
+  //
+  // The delivery path (#39) was never broken and its pure tests stayed green
+  // throughout — but NOTHING drove a real multi-select through the real UI, and
+  // every viewport test used a single-select fixture. So the one shape the user
+  // could not answer was the one shape no widget test covered.
+  //
+  // Measured against real data, this is also WHY it went unnoticed: across the
+  // 127 AskUserQuestion calls in this machine's transcripts, only 2 questions
+  // were multi-select.
+  group('#108 — a multi-select question is answerable AT A PHONE SIZE', () {
+    PendingQuestionItem multiQuestion() => PendingQuestionItem(
+          question: 'Which checks should run before every deploy? '
+              'Pick all that apply.',
+          header: 'Checks',
+          multiSelect: true,
+          options: const [
+            QuestionOption(
+                label: 'Unit tests',
+                description:
+                    'The fast suite. Runs in under a minute and catches the '
+                    'regressions that matter most.'),
+            QuestionOption(
+                label: 'Integration tests',
+                description:
+                    'Slower, but the only place the wire format is actually '
+                    'exercised end to end.'),
+            QuestionOption(
+                label: 'Lint',
+                description: 'Style and dead-code checks.'),
+            QuestionOption(
+                label: 'Security scan',
+                description: 'Dependency CVEs and secret detection.'),
+          ],
+        );
+
+    Future<List<AnswerFrame>> pumpMultiPhone(WidgetTester tester) async {
+      final sent = <AnswerFrame>[];
+      tester.view.physicalSize = const Size(412 * 3, 915 * 3);
+      tester.view.devicePixelRatio = 3.0;
+      addTearDown(tester.view.reset);
+      await tester.pumpWidget(
+        MaterialApp(
+          theme: AppTheme.dark,
+          home: Scaffold(
+            body: Stack(
+              children: [
+                QuestionOverlay(
+                  question: PendingQuestion(
+                    toolUseId: 'ms1',
+                    questions: [multiQuestion()],
+                  ),
+                  contextText: _longLeadUp,
+                  onSend: sent.addAll,
+                  onKey: (_) {},
+                  onDismiss: () {},
+                ),
+              ],
+            ),
+          ),
+        ),
+      );
+      await tester.pumpAndSettle();
+      return sent;
+    }
+
+    testWidgets('tap two rows, both show CHECKED — not radio buttons',
+        (tester) async {
+      await pumpMultiPhone(tester);
+
+      // The unchecked box is what tells the user this question takes more than
+      // one answer at all. A radio here would be a lie about the shape.
+      expect(find.byIcon(Icons.check_box_outline_blank), findsWidgets);
+      expect(find.byIcon(Icons.radio_button_unchecked), findsNothing);
+
+      await tester.tap(find.text('Unit tests'));
+      await tester.pumpAndSettle();
+      await tester.tap(find.text('Lint'));
+      await tester.pumpAndSettle();
+
+      // Two ticked, and crucially the FIRST is still ticked — a single-select
+      // _toggle would have cleared it when the second was tapped.
+      expect(find.byIcon(Icons.check_box), findsNWidgets(2));
+    });
+
+    testWidgets('the Send button is INSIDE the screen, not below the fold',
+        (tester) async {
+      await pumpMultiPhone(tester);
+      await tester.tap(find.text('Unit tests'));
+      await tester.pumpAndSettle();
+
+      // The reported failure was "there was nothing I could click that
+      // submits". An affordance that exists but sits past the bottom edge is
+      // indistinguishable from one that does not exist.
+      final send = find.widgetWithText(FilledButton, 'Send answer');
+      expect(send, findsOneWidget);
+      final r = tester.getRect(send);
+      final screen = tester.view.physicalSize / tester.view.devicePixelRatio;
+      expect(r.bottom, lessThanOrEqualTo(screen.height + 0.5));
+      expect(r.top, greaterThanOrEqualTo(-0.5));
+      expect(r.height, greaterThan(0));
+    });
+
+    testWidgets('tap two rows then Send delivers the #39 multi-select frames',
+        (tester) async {
+      final sent = await pumpMultiPhone(tester);
+
+      await tester.tap(find.text('Unit tests'));
+      await tester.pumpAndSettle();
+      await tester.tap(find.text('Lint'));
+      await tester.pumpAndSettle();
+      await tester.tap(find.widgetWithText(FilledButton, 'Send answer'));
+      await tester.pumpAndSettle();
+
+      // Options 1 and 3 toggled, Right-arrow to the Submit review, "1" to
+      // finalise — the sequence #39 measured. Driven here through real taps
+      // rather than handed to buildAnswerFrames, which is the gap that let the
+      // reporter hit a dead end while every pure test passed.
+      expect(sent.map((f) => f.keys).toList(), ['1', '3', '\x1b[C', '1']);
+    });
+
+    testWidgets('Send stays disabled until at least one row is ticked',
+        (tester) async {
+      await pumpMultiPhone(tester);
+      expect(find.widgetWithText(FilledButton, 'Pick an option'), findsOneWidget);
+      final before =
+          tester.widget<FilledButton>(find.byType(FilledButton).last);
+      expect(before.onPressed, isNull);
+
+      await tester.tap(find.text('Security scan'));
+      await tester.pumpAndSettle();
+
+      final after = tester.widget<FilledButton>(
+          find.widgetWithText(FilledButton, 'Send answer'));
+      expect(after.onPressed, isNotNull);
+    });
+
+    testWidgets('untapping the last row disables Send again', (tester) async {
+      await pumpMultiPhone(tester);
+      await tester.tap(find.text('Lint'));
+      await tester.pumpAndSettle();
+      expect(find.widgetWithText(FilledButton, 'Send answer'), findsOneWidget);
+
+      await tester.tap(find.text('Lint'));
+      await tester.pumpAndSettle();
+      expect(find.widgetWithText(FilledButton, 'Pick an option'), findsOneWidget);
+    });
+  });
+
+  // #108 — the multi-QUESTION tab strip, driven through the UI. Like
+  // multi-select above, this shape was proven only at the buildAnswerFrames
+  // level; nothing tapped a tab.
+  group('#108 — the multi-question tab strip', () {
+    Future<List<AnswerFrame>> pumpTabs(WidgetTester tester) async {
+      final sent = <AnswerFrame>[];
+      tester.view.physicalSize = const Size(412 * 3, 915 * 3);
+      tester.view.devicePixelRatio = 3.0;
+      addTearDown(tester.view.reset);
+      await tester.pumpWidget(
+        MaterialApp(
+          theme: AppTheme.dark,
+          home: Scaffold(
+            body: Stack(
+              children: [
+                QuestionOverlay(
+                  question: PendingQuestion(
+                    toolUseId: 'mq1',
+                    questions: [
+                      PendingQuestionItem(
+                        question: 'Which colour?',
+                        header: 'Colour',
+                        multiSelect: false,
+                        options: const [
+                          QuestionOption(label: 'Red', description: 'Warm.'),
+                          QuestionOption(label: 'Green', description: 'Calm.'),
+                        ],
+                      ),
+                      PendingQuestionItem(
+                        question: 'Which fruit?',
+                        header: 'Fruit',
+                        multiSelect: false,
+                        options: const [
+                          QuestionOption(label: 'Apple', description: 'Crisp.'),
+                          QuestionOption(label: 'Pear', description: 'Soft.'),
+                        ],
+                      ),
+                    ],
+                  ),
+                  contextText: 'Pick one of each.',
+                  onSend: sent.addAll,
+                  onKey: (_) {},
+                  onDismiss: () {},
+                ),
+              ],
+            ),
+          ),
+        ),
+      );
+      await tester.pumpAndSettle();
+      return sent;
+    }
+
+    testWidgets('each tab shows its OWN options, not the first tab\'s',
+        (tester) async {
+      await pumpTabs(tester);
+      expect(find.text('Red'), findsOneWidget);
+      expect(find.text('Apple'), findsNothing);
+
+      await tester.tap(find.text('Fruit'));
+      await tester.pumpAndSettle();
+
+      expect(find.text('Apple'), findsOneWidget);
+      expect(find.text('Red'), findsNothing);
+    });
+
+    testWidgets('answering both tabs by tapping delivers a digit per tab + Enter',
+        (tester) async {
+      final sent = await pumpTabs(tester);
+
+      await tester.tap(find.text('Green'));
+      await tester.pumpAndSettle();
+      await tester.tap(find.text('Fruit'));
+      await tester.pumpAndSettle();
+      await tester.tap(find.text('Apple'));
+      await tester.pumpAndSettle();
+      await tester.tap(find.widgetWithText(FilledButton, 'Send answer'));
+      await tester.pumpAndSettle();
+
+      // Q1 -> Green (digit 2, auto-advances), Q2 -> Apple (digit 1), Enter
+      // submits. No preview on either question, so the compact layout applies
+      // and there is no extra per-tab Enter (#19).
+      expect(sent.map((f) => f.keys).toList(), ['2', '1', '\r']);
+    });
+
+    testWidgets('a tab left unanswered keeps Send disabled', (tester) async {
+      await pumpTabs(tester);
+      await tester.tap(find.text('Green'));
+      await tester.pumpAndSettle();
+      // Only Q1 answered.
+      expect(find.widgetWithText(FilledButton, 'Pick an option'), findsOneWidget);
+    });
+  });
+
+  // #108 — option descriptions rendered their markdown as literal syntax, the
+  // same defect the lead-up panel had. Measured first: 3.3% of the 483 real
+  // option descriptions carry markdown, and every occurrence is an inline code
+  // span — which is why this is spans-and-code, not a MarkdownBody.
+  group('inlineMarkdownSpans', () {
+    String flatten(List<InlineSpan> spans) =>
+        spans.map((s) => (s as TextSpan).text ?? '').join();
+
+    test('a code span loses its backticks and gains the code style', () {
+      final spans = inlineMarkdownSpans(
+        'Run `flutter test` first.',
+        base: const TextStyle(fontSize: 12),
+        code: const TextStyle(fontFamily: 'monospace'),
+      );
+      expect(flatten(spans), 'Run flutter test first.');
+      final code = spans
+          .whereType<TextSpan>()
+          .where((s) => s.style?.fontFamily == 'monospace')
+          .toList();
+      expect(code, hasLength(1));
+      expect(code.single.text, 'flutter test');
+    });
+
+    test('bold loses its asterisks and gains weight', () {
+      final spans = inlineMarkdownSpans('A **strong** claim.',
+          base: const TextStyle(fontSize: 12), code: null);
+      expect(flatten(spans), 'A strong claim.');
+      expect(
+        spans.whereType<TextSpan>().any(
+            (s) => s.text == 'strong' && s.style?.fontWeight == FontWeight.w700),
+        isTrue,
+      );
+    });
+
+    test('plain prose — the 96.7% case — is exactly one span, unchanged', () {
+      const plain = 'Belt and braces; a wider blast radius.';
+      final spans = inlineMarkdownSpans(plain,
+          base: const TextStyle(fontSize: 12), code: null);
+      expect(spans, hasLength(1));
+      expect(flatten(spans), plain);
+    });
+
+    test('a glob is NOT read as italics — why single-asterisk is unsupported',
+        () {
+      const glob = 'Matches *.dart and lib/*.g.dart under the package root.';
+      final spans = inlineMarkdownSpans(glob,
+          base: const TextStyle(fontSize: 12), code: null);
+      expect(flatten(spans), glob, reason: 'asterisks survive as literal text');
+    });
+
+    test('unbalanced syntax is left alone rather than guessed at', () {
+      const odd = 'A stray ` backtick and a lone ** pair.';
+      expect(
+        flatten(inlineMarkdownSpans(odd,
+            base: const TextStyle(fontSize: 12), code: null)),
+        odd,
+      );
+    });
+
+    test('an empty description does not produce an empty span list', () {
+      expect(
+          inlineMarkdownSpans('', base: null, code: null), hasLength(1));
+    });
+  });
+
+  group('#108 — the option description renders its markdown', () {
+    testWidgets('backticks do not reach the screen, and the clamp survives',
+        (tester) async {
+      tester.view.physicalSize = const Size(412 * 3, 915 * 3);
+      tester.view.devicePixelRatio = 3.0;
+      addTearDown(tester.view.reset);
+      await tester.pumpWidget(
+        MaterialApp(
+          theme: AppTheme.dark,
+          home: Scaffold(
+            body: Stack(
+              children: [
+                QuestionOverlay(
+                  question: PendingQuestion(
+                    toolUseId: 'md1',
+                    questions: [
+                      PendingQuestionItem(
+                        question: 'How should the profile be produced?',
+                        header: 'Profile',
+                        multiSelect: false,
+                        options: const [
+                          QuestionOption(
+                            label: 'Ship a flag',
+                            description:
+                                'Expose it as `ACS.Server.exe --out <path>`. '
+                                'That exe is already installed everywhere.',
+                          ),
+                          QuestionOption(
+                              label: 'Do nothing', description: 'Defer it.'),
+                        ],
+                      ),
+                    ],
+                  ),
+                  contextText: 'Pick one.',
+                  onSend: (_) {},
+                  onKey: (_) {},
+                  onDismiss: () {},
+                ),
+              ],
+            ),
+          ),
+        ),
+      );
+      await tester.pumpAndSettle();
+
+      // The literal backticks the screenshot showed must be gone...
+      expect(find.textContaining('`'), findsNothing);
+      // ...while the text itself survives, in one paragraph.
+      expect(find.textContaining('ACS.Server.exe --out <path>'), findsOneWidget);
+
+      // The clamp is load-bearing: kOptionRowMax was MEASURED against a
+      // two-line description, so losing it to a block renderer would let one
+      // verbose option push every other choice off screen.
+      final desc = tester.widget<Text>(
+          find.textContaining('ACS.Server.exe --out <path>'));
+      expect(desc.maxLines, 2);
+      expect(desc.overflow, TextOverflow.ellipsis);
+
+      // Selecting reveals the whole thing (#108's reveal-on-select).
+      await tester.tap(find.text('Ship a flag'));
+      await tester.pumpAndSettle();
+      final expanded = tester.widget<Text>(
+          find.textContaining('ACS.Server.exe --out <path>'));
+      expect(expanded.maxLines, isNull);
+    });
+  });
 }

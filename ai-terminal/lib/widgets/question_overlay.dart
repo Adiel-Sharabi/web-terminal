@@ -288,6 +288,58 @@ String? lastAssistantText(List<TranscriptTurn> turns) {
   return null;
 }
 
+/// Renders the INLINE markdown an option description actually carries, as
+/// [TextSpan]s (#108).
+///
+/// The lead-up panel got a full `MarkdownBody`; a description cannot have one,
+/// and the reason is the space budget below. `MarkdownBody` is a block widget
+/// with no `maxLines`, so it would silently drop the two-line clamp that
+/// `kOptionRowMax = 96` was MEASURED against — one 493-character description
+/// (the longest on record) would then be taller than the whole option list.
+/// Spans keep `Text.rich(maxLines:, overflow: ellipsis)` working, and they are
+/// also what #83 requires: never a widget in the text flow.
+///
+/// SCOPE IS MEASURED, not assumed. Across the 127 real `AskUserQuestion` calls
+/// in this machine's transcripts (483 options, every one of them carrying a
+/// description), 3.3% of descriptions contain markdown — and every occurrence
+/// is an inline code span, `` `like this` ``. No headings, no lists, no links.
+/// So this handles code spans and `**bold**` and deliberately stops there:
+/// block syntax has never appeared, and single-asterisk italics is ambiguous
+/// with the glob patterns these descriptions genuinely do contain (`*.dart`).
+/// Unmatched syntax is left as literal text rather than guessed at.
+List<InlineSpan> inlineMarkdownSpans(
+  String text, {
+  required TextStyle? base,
+  required TextStyle? code,
+}) {
+  final spans = <InlineSpan>[];
+  var last = 0;
+  for (final m in _inlineMd.allMatches(text)) {
+    if (m.start > last) {
+      spans.add(TextSpan(text: text.substring(last, m.start), style: base));
+    }
+    final codeBody = m.group(1);
+    spans.add(codeBody != null
+        ? TextSpan(text: codeBody, style: code)
+        : TextSpan(
+            text: m.group(2),
+            style: (base ?? const TextStyle()).copyWith(
+              fontWeight: FontWeight.w700,
+            ),
+          ));
+    last = m.end;
+  }
+  if (last < text.length) {
+    spans.add(TextSpan(text: text.substring(last), style: base));
+  }
+  // A description with no markup is still exactly one span, so the caller never
+  // has to special-case the common (96.7%) path.
+  if (spans.isEmpty) spans.add(TextSpan(text: text, style: base));
+  return spans;
+}
+
+final RegExp _inlineMd = RegExp(r'`([^`]+)`|\*\*([^*]+)\*\*');
+
 // --- The space budget (#108) -------------------------------------------------
 //
 // THE OPTIONS ARE RESERVED FIRST. That inversion is the whole point.
@@ -1212,8 +1264,26 @@ class _QuestionOverlayState extends State<QuestionOverlay> {
                       if (opt.description.isNotEmpty)
                         Padding(
                           padding: const EdgeInsets.only(top: 2),
-                          child: Text(
-                            opt.description,
+                          child: Text.rich(
+                            // #108 — RENDERED inline markdown, not raw. A
+                            // description reading `ACS.Server.exe --out <path>`
+                            // showed its backticks, the same defect the lead-up
+                            // panel had. Spans rather than a MarkdownBody so the
+                            // clamp below survives (see inlineMarkdownSpans).
+                            TextSpan(
+                              children: inlineMarkdownSpans(
+                                opt.description,
+                                base: theme.textTheme.bodySmall?.copyWith(
+                                  color: theme.colorScheme.onSurfaceVariant,
+                                ),
+                                code: theme.textTheme.bodySmall?.copyWith(
+                                  fontFamily: 'monospace',
+                                  color: theme.colorScheme.onSurfaceVariant,
+                                  backgroundColor:
+                                      theme.colorScheme.surfaceContainerHighest,
+                                ),
+                              ),
+                            ),
                             // Two lines until chosen, then the whole thing
                             // (#108). One verbose option could otherwise be
                             // taller than the entire viewport and push every
