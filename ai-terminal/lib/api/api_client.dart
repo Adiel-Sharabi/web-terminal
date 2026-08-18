@@ -208,6 +208,24 @@ class ApiClient {
     }
   }
 
+  /// Fetches the per-command lens policy (`GET /api/commands`, #131) — which
+  /// slash commands write something the chat lens can render, and which are TUI
+  /// paint only.
+  ///
+  /// Best-effort like [agents]: an older server without the endpoint yields an
+  /// empty list and the client falls back to its own built-in table, so a slash
+  /// command never depends on this call succeeding.
+  Future<List<Map<String, dynamic>>> commandPolicy() async {
+    try {
+      final res = await _send('GET', '/api/commands');
+      final list = _asMap(_decode(res))['commands'];
+      if (list is! List) return const <Map<String, dynamic>>[];
+      return list.whereType<Map<String, dynamic>>().toList(growable: false);
+    } catch (_) {
+      return const <Map<String, dynamic>>[];
+    }
+  }
+
   /// Lists the folders offered in the New Session picker
   /// (`GET /api/history/folders`).
   ///
