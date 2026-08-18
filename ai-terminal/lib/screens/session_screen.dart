@@ -147,6 +147,49 @@ bool composeBarVisible() => true;
 /// the "terminal lens is always live" invariant has one enforceable home.
 bool terminalAcceptsInput(String activeLens) => activeLens == 'terminal';
 
+/// The single answer to "which lens should be showing right now" (#130).
+///
+/// `_activeLens` used to have FOUR independent writers: the user's persisted
+/// choice, a recomputation derived from availability, and two transient
+/// overrides that pinned Terminal — a live '/' line (whose menu renders in the
+/// terminal) and raw mode (direct terminal typing). The recomputation ran on
+/// EVERY session update — every poll and every `/ws/notify` frame — and knew
+/// nothing about the overrides, so it wrote them straight back out. Start a '/'
+/// command in Chat and a few seconds later a routine refresh yanked the view
+/// back to Chat mid-keystroke, which is exactly the reported cadence.
+///
+/// Same family as #111: a decision taken at T undone by a callback at T+Δ that
+/// never learned about it. The fix is NOT another guard bolted onto the
+/// recomputation — it is making the overrides INPUTS to one resolver instead of
+/// competing writes, so there is nothing left to clobber and no write ordering
+/// to get wrong.
+///
+/// Precedence, highest first:
+///  1. Chat unavailable → Terminal. There is no other lens to show.
+///  2. Either pin → Terminal.
+///  3. The user's explicit past choice, else Chat.
+///
+/// Restoring is a CONSEQUENCE, not a step: when a pin clears, the resolver
+/// simply stops answering Terminal and lands on the same lens the old
+/// `_lensBeforeLive` snapshot held — without the staleness a snapshot carries.
+/// That is why the snapshot field is gone rather than merely guarded.
+///
+/// The pins are deliberately separate from the state that raised them: an
+/// explicit lens toggle CLEARS them (the user has spoken) while `_rawMode`
+/// itself stays on, which is what keeps "tap Chat while raw mode is on" working
+/// — a hard pin on `_rawMode` would strand the user in Terminal for the life of
+/// the session. Pure so the rule has one enforceable, testable home.
+String resolveActiveLens({
+  required bool chatAvailable,
+  required String? persistedLens,
+  required bool liveSlashPin,
+  required bool rawModePin,
+}) {
+  if (!chatAvailable) return 'terminal';
+  if (liveSlashPin || rawModePin) return 'terminal';
+  return persistedLens ?? 'chat';
+}
+
 /// True on desktop platforms (a real hardware keyboard). One definition so the
 /// raw-mode default, the '/' live-stream gate (#28), and image-paste routing
 /// all read the same rule.
@@ -714,7 +757,13 @@ class _SessionScreenState extends State<SessionScreen>
   bool _composeLive = false; // true while a '/'-prefixed line is streaming live
   String _composeLiveSent =
       ''; // chars already streamed to the terminal for the live line
-  String? _lensBeforeLive; // lens to restore to once a live '/' command is sent
+  // The two transient pins that hold the Terminal lens (#130). Inputs to
+  // resolveActiveLens — never written to _activeLens directly, or a later
+  // recomputation clobbers them. Kept separate from _composeLive/_rawMode
+  // because an explicit lens toggle clears the pin while the state itself
+  // stays on.
+  bool _lensPinLiveSlash = false;
+  bool _lensPinRawMode = false;
   bool _liveTabbed =
       false; // Tab completed the live line — the terminal owns extra chars now
   bool _historyActive =
@@ -1034,9 +1083,17 @@ class _SessionScreenState extends State<SessionScreen>
   /// Chat is the default lens when eligible (agent session + capability +
   /// hasn't already 404d) and no explicit past choice says otherwise;
   /// Terminal-only (toggle hidden) when not eligible at all.
+  /// The ONE place `_activeLens` is written (#130). Every state change that can
+  /// affect the lens — availability, an explicit choice, a pin going up or down
+  /// — mutates its own input and then calls this. Safe to call at any time,
+  /// including from the per-update path, because the pins are inputs now.
   void _recomputeActiveLens() {
-    final eligible = _chatAvailable;
-    final desired = eligible ? (_persistedLens ?? 'chat') : 'terminal';
+    final desired = resolveActiveLens(
+      chatAvailable: _chatAvailable,
+      persistedLens: _persistedLens,
+      liveSlashPin: _lensPinLiveSlash,
+      rawModePin: _lensPinRawMode,
+    );
     if (desired != _activeLens && mounted) {
       setState(() => _activeLens = desired);
     }
@@ -1045,9 +1102,18 @@ class _SessionScreenState extends State<SessionScreen>
   Future<void> _setLens(String value) async {
     if (value == _activeLens) return;
     setState(() {
-      _activeLens = value;
       _persistedLens = value;
+      // An explicit choice outranks both pins: the user is looking at the app
+      // and asked for this lens. Clearing them (rather than letting the resolver
+      // lose to a pin) is what keeps "tap Chat while raw mode is on" working.
+      _lensPinLiveSlash = false;
+      _lensPinRawMode = false;
     });
+    // Through the resolver like every other lens change, so _recomputeActiveLens
+    // stays the ONLY writer of _activeLens. With the pins cleared and the choice
+    // persisted it answers `value` — the toggle is only offered when Chat is
+    // available, which is the one input that could disagree.
+    _recomputeActiveLens();
     // The Chat lens's only input is the compose bar (the terminal is offstage),
     // so put the caret there ready to type — even in raw mode. Returning to the
     // Terminal lens while raw hands the physical keyboard back to the terminal.
@@ -1073,10 +1139,10 @@ class _SessionScreenState extends State<SessionScreen>
     // "Not yet" is not "never" — leave a young agent session on Chat with its empty
     // state, which its own refresh fills in as soon as the first turn lands.
     if (!noTranscriptIsFinal(_session)) return;
-    setState(() {
-      _transcriptUnavailableForSession = true;
-      _activeLens = 'terminal';
-    });
+    setState(() => _transcriptUnavailableForSession = true);
+    // Chat just became unavailable, which the resolver reads via _chatAvailable
+    // — no direct write, so this cannot fight the per-update recomputation.
+    _recomputeActiveLens();
   }
 
   // --- #70: read the agent's last answer aloud ------------------------------
@@ -1622,10 +1688,8 @@ class _SessionScreenState extends State<SessionScreen>
         _composeLive = true;
         _composeLiveSent = '';
         _liveTabbed = false;
-        if (_activeLens != 'terminal') {
-          _lensBeforeLive = _activeLens;
-          _activeLens = 'terminal';
-        }
+        _lensPinLiveSlash = true;
+        _recomputeActiveLens();
       }
       if (_composeLive) {
         _streamComposeLive(text);
@@ -1788,15 +1852,19 @@ class _SessionScreenState extends State<SessionScreen>
     if (_composeLive) _clearComposeInput();
   }
 
-  /// After a live '/' command ends (sent or deleted), hop back to the lens the
-  /// user was on when they started typing it — so running /compact from Chat
-  /// returns to Chat, not the terminal the menu rendered in. No-op for lines
-  /// that never went live (a normal chat send leaves _lensBeforeLive null).
+  /// After a live '/' command ends (sent, deleted to empty, or Esc), drop the
+  /// pin — so running /compact from Chat returns to Chat, not the terminal the
+  /// menu rendered in. No-op for lines that never went live: the pin was never
+  /// raised, and the resolver was already answering the un-pinned lens.
+  ///
+  /// #130: this used to restore a `_lensBeforeLive` SNAPSHOT taken when the line
+  /// went live. Dropping the pin and recomputing is the same answer without the
+  /// staleness — if the user toggled lenses during the command, the snapshot
+  /// would have overwritten their newer choice with the older one.
   void _restoreLensAfterLive() {
-    if (_lensBeforeLive != null) {
-      _activeLens = _lensBeforeLive!;
-      _lensBeforeLive = null;
-    }
+    if (!_lensPinLiveSlash) return;
+    _lensPinLiveSlash = false;
+    _recomputeActiveLens();
   }
 
   /// Walks send history: first press (from empty, or continuing a walk)
@@ -2416,10 +2484,13 @@ class _SessionScreenState extends State<SessionScreen>
     setState(() {
       _rawMode = value;
       // Raw mode is direct terminal typing — meaningless (and invisible)
-      // while the Chat lens is showing. Switch so the user can see it. This
-      // is a transient override, not persisted as a lens preference.
-      if (value) _activeLens = 'terminal';
+      // while the Chat lens is showing. Pin Terminal so the user can see it.
+      // A pin, not a write to _activeLens (#130): the write was undone by the
+      // next poll's recomputation, which put raw typing back out of sight.
+      // Not persisted as a lens preference, and an explicit toggle clears it.
+      _lensPinRawMode = value;
     });
+    _recomputeActiveLens();
     final prefs = await SharedPreferences.getInstance();
     await prefs.setBool('wt_rawmode_${widget.sessionId}', value);
     if (value) {
