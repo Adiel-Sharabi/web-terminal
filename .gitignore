@@ -56,6 +56,8 @@ notify-prefs.json
 
 # Per-session favorites/pin ranks (#60 — the server-side SSOT for the pinned group)
 favorites.json
+# Per-session 5h auto-resume opt-out (#137) — same class as notify-prefs.json above.
+auto-resume-prefs.json
 
 # FCM device registry (companion app push tokens — semi-sensitive)
 push-devices.json

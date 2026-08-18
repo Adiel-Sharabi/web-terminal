@@ -272,6 +272,21 @@ class ApiClient {
         body: {'level': level});
   }
 
+  /// Turns the 5-hour auto-resume off (or back on) for one session
+  /// (`PATCH /api/sessions/:id/auto-resume`, issue #137).
+  ///
+  /// Server-side state, like the notify level above and for the same reason: it
+  /// is a property OF THE SESSION, so every device reads one truth rather than
+  /// each keeping a local flag. The result rides back on the next session poll
+  /// as `usageLimit.enabled` — this client stores nothing.
+  ///
+  /// A server too old for the route 404s; the caller only offers the control when
+  /// the session actually carries a `usageLimit`, which such a server never sends.
+  Future<void> setAutoResume(String sessionId, bool enabled) async {
+    await _send('PATCH', '/api/sessions/$sessionId/auto-resume',
+        body: {'enabled': enabled});
+  }
+
   /// Sets or clears [sessionId]'s pin (`PATCH /api/sessions/:id/favorite`,
   /// issue #60).
   ///

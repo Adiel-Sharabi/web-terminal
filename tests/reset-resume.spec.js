@@ -132,7 +132,13 @@ function makeEventCollector(client) {
 const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
 const ESC = '\x1b';
 const typeInto = (client, id, text) => client.send(ipc.encodePtyIn(id, Buffer.from(text, 'latin1')));
-const setResetAt = (client, id, fiveHResetAt) => rpc(client, 'setFiveHResetAt', { id, fiveHResetAt });
+// #138 — the worker arms on an OBSERVED cap block, never on a bare timestamp, so the
+// RPC carries both. Defaulted to true here so the pre-existing #69 cases keep testing
+// what they were written to test (timing, one-shot, cancel) rather than the new gate;
+// the gate has its own cases below, which pass capBlocked:false.
+const inject = (client, id, data) => rpc(client, '__testInjectOutput', { id, data });
+const setResetAt = (client, id, fiveHResetAt, capBlocked = true) =>
+  rpc(client, 'setFiveHResetAt', { id, fiveHResetAt, capBlocked });
 async function findSession(client, id) {
   const { sessions } = await rpc(client, 'listSessions');
   return sessions.find((s) => s.id === id);
@@ -303,6 +309,279 @@ test.describe('#69 — 5h usage-limit auto-resume', () => {
     }
   });
 
+  // --- #138: a reset time is a SCHEDULE, not a diagnosis -------------------
+  // These are the cases #69 could not distinguish. Each must go RED against the
+  // pre-#138 worker, which armed on the timestamp alone.
+
+  test('#138 — an idle session that is NOT cap-blocked is never resumed, even past its reset', async () => {
+    const pipe = workerPipePath();
+    const dataDir = makeTempDataDir();
+    const worker = spawnWorker(pipe, dataDir, { WT_AUTO_RESUME_ON_RESET: '1' });
+    try {
+      const client = await connectClient(pipe);
+      const ev = makeEventCollector(client);
+      const { id } = await rpc(client, 'createSession', { cwd: os.tmpdir(), name: 'notblocked', autoCommand: '' });
+
+      // The exact shape #69 would have fired on: feature ON, a real reset time, an
+      // idle session — but no observed block. This is the session you finished with.
+      const resetAt = Date.now() + 150;
+      const r = await setResetAt(client, id, resetAt, false);
+      expect(r.fiveHResetAt).toBe(resetAt); // the timestamp is still RECORDED...
+      expect(r.capBlocked).toBe(false);     // ...and still not a reason to act
+      expect((await findSession(client, id)).capBlocked).toBe(false);
+
+      await sleep(400); // well past resetAt + delay
+      expect(ev.events.some((e) => e.event === 'autoResume' && e.params.id === id)).toBe(false);
+      expect(writesOf(await rpc(client, '__testGetWrites', { id }))).not.toContain('continue');
+
+      ev.stop();
+      await rpc(client, 'killSession', { id });
+      await client.close();
+    } finally {
+      await worker.stop();
+      rmRf(dataDir);
+    }
+  });
+
+  test('#138 — a block that lifts before the reset elapses cancels the pending resume', async () => {
+    const pipe = workerPipePath();
+    const dataDir = makeTempDataDir();
+    const worker = spawnWorker(pipe, dataDir, { WT_AUTO_RESUME_ON_RESET: '1' });
+    try {
+      const client = await connectClient(pipe);
+      const ev = makeEventCollector(client);
+      const { id } = await rpc(client, 'createSession', { cwd: os.tmpdir(), name: 'blocklifts', autoCommand: '' });
+
+      // Armed on a real block...
+      const resetAt = Date.now() + 250;
+      await setResetAt(client, id, resetAt, true);
+      expect((await findSession(client, id)).autoResumeArmed).toBe(true);
+
+      // ...then the quota frees up (or the user resumed by hand) BEFORE it fires.
+      // The same timestamp, a different reading: the wait is over, so the nudge is
+      // no longer wanted. This is the case a fire-time re-check exists for.
+      await setResetAt(client, id, resetAt, false);
+      expect((await findSession(client, id)).autoResumeArmed).toBe(false);
+
+      await sleep(400);
+      expect(ev.events.some((e) => e.event === 'autoResume' && e.params.id === id)).toBe(false);
+      expect(writesOf(await rpc(client, '__testGetWrites', { id }))).not.toContain('continue');
+
+      ev.stop();
+      await rpc(client, 'killSession', { id });
+      await client.close();
+    } finally {
+      await worker.stop();
+      rmRf(dataDir);
+    }
+  });
+
+  test('#137 — auto-resume is ON by default: no WT_AUTO_RESUME_ON_RESET, no config', async () => {
+    const pipe = workerPipePath();
+    const dataDir = makeTempDataDir();
+    // Deliberately NO WT_AUTO_RESUME_ON_RESET — this asserts the shipped default, which
+    // #69 had as OFF. The worker reads config.json from its own data dir (empty here),
+    // so `liveConfig('autoResumeOnReset', true)` falls through to the code default.
+    const worker = spawnWorker(pipe, dataDir);
+    try {
+      const client = await connectClient(pipe);
+      const ev = makeEventCollector(client);
+      const { id } = await rpc(client, 'createSession', { cwd: os.tmpdir(), name: 'default-on', autoCommand: '' });
+
+      const resetAt = Date.now() + 150;
+      await setResetAt(client, id, resetAt, true);
+
+      const fired = await ev.waitFor((e) => e.event === 'autoResume' && e.params.id === id, 4000);
+      expect(fired.params.resetAt).toBe(resetAt);
+
+      ev.stop();
+      await rpc(client, 'killSession', { id });
+      await client.close();
+    } finally {
+      await worker.stop();
+      rmRf(dataDir);
+    }
+  });
+
+  // --- #138: the cap PROMPT, the signal a real limit event actually produces ----
+  // Claude blocks on a selector at the cap rather than falling idle. These drive the
+  // real worker with the captured render.
+
+  const ESC_SEQ = String.fromCharCode(27);
+  const CRLF = String.fromCharCode(13) + String.fromCharCode(10);
+  // The captured render, claude-code 2.1.234 (the screenshot on #138). Assembled
+  // from parts rather than pasted as one escaped blob so the SGR codes and the box
+  // arrow stay readable — the thing under test is the sentence, and a paraphrase
+  // would test a string we invented rather than the one Claude prints.
+  const LIMIT_PROMPT = [
+    '',
+    ESC_SEQ + '[1mWhat do you want to do?' + ESC_SEQ + '[0m',
+    ESC_SEQ + '[36m\u276f 1. Stop and wait for limit to reset' + ESC_SEQ + '[0m',
+    '  2. Upgrade your plan',
+    '  3. Upgrade to Team plan',
+    '',
+    ESC_SEQ + '[2mEnter to confirm \u00b7 Esc to cancel' + ESC_SEQ + '[0m',
+    '',
+  ].join('\r\n');
+
+  test('#138 — the cap prompt is answered with "stop and wait", exactly once', async () => {
+    const pipe = workerPipePath();
+    const dataDir = makeTempDataDir();
+    const worker = spawnWorker(pipe, dataDir, { WT_AUTO_RESUME_ON_RESET: '1', WT_API_ERROR_FAST: '0' });
+    try {
+      const client = await connectClient(pipe);
+      const ev = makeEventCollector(client);
+      const { id } = await rpc(client, 'createSession', { cwd: os.tmpdir(), name: 'limit-prompt', agent: 'claude', autoCommand: '' });
+
+      await inject(client, id, LIMIT_PROMPT);
+      const answered = await ev.waitFor((e) => e.event === 'usageLimitPrompt' && e.params.id === id);
+      // Option 1 by DIGIT, never a bare Enter on whatever is highlighted — options 2
+      // and 3 are plan upgrades.
+      expect(answered.params.answered).toBe('1');
+
+      await sleep(150);
+      const sent = writesOf(await rpc(client, '__testGetWrites', { id }));
+      expect(sent.filter((w) => w === '1').length).toBe(1);
+
+      // A repaint of the same prompt must not type a second digit — once the selector
+      // closes, a stray digit lands in the composer.
+      await inject(client, id, LIMIT_PROMPT);
+      await sleep(200);
+      const after = writesOf(await rpc(client, '__testGetWrites', { id }));
+      expect(after.filter((w) => w === '1').length).toBe(1);
+
+      // And the sighting is a block signal in its own right, published for the UI.
+      const found = await findSession(client, id);
+      expect(found.limitPromptAt).toBeTruthy();
+
+      ev.stop();
+      await rpc(client, 'killSession', { id });
+      await client.close();
+    } finally {
+      await worker.stop();
+      rmRf(dataDir);
+    }
+  });
+
+  test('#138 — a PLAIN SHELL printing the same text is never typed into', async () => {
+    const pipe = workerPipePath();
+    const dataDir = makeTempDataDir();
+    const worker = spawnWorker(pipe, dataDir, { WT_AUTO_RESUME_ON_RESET: '1' });
+    try {
+      const client = await connectClient(pipe);
+      const ev = makeEventCollector(client);
+      // No agent, no hook — catting a logfile or this very test file must not make
+      // the server press keys in someone's shell.
+      const { id } = await rpc(client, 'createSession', { cwd: os.tmpdir(), name: 'plain-shell', autoCommand: '' });
+
+      await inject(client, id, LIMIT_PROMPT);
+      await sleep(300);
+
+      expect(ev.events.some((e) => e.event === 'usageLimitPrompt' && e.params.id === id)).toBe(false);
+      expect(writesOf(await rpc(client, '__testGetWrites', { id }))).not.toContain('1');
+      expect((await findSession(client, id)).limitPromptAt).toBeFalsy();
+
+      ev.stop();
+      await rpc(client, 'killSession', { id });
+      await client.close();
+    } finally {
+      await worker.stop();
+      rmRf(dataDir);
+    }
+  });
+
+  test('#138 — prose mentioning the phrase is NOT a menu, and is never answered', async () => {
+    const pipe = workerPipePath();
+    const dataDir = makeTempDataDir();
+    const worker = spawnWorker(pipe, dataDir, { WT_AUTO_RESUME_ON_RESET: '1' });
+    try {
+      const client = await connectClient(pipe);
+      const ev = makeEventCollector(client);
+      const { id } = await rpc(client, 'createSession', { cwd: os.tmpdir(), name: 'prose', agent: 'claude', autoCommand: '' });
+
+      // The agent talking ABOUT the limit, or this repo's own docs scrolling past in
+      // a Claude session. No numbered option => no menu => nothing to answer. The
+      // gate is what keeps a text match from becoming a keystroke in your terminal.
+      await inject(client, id, ['I would stop and wait for limit to reset, but...', ''].join(CRLF));
+      await sleep(300);
+
+      expect(ev.events.some((e) => e.event === 'usageLimitPrompt' && e.params.id === id)).toBe(false);
+      expect(writesOf(await rpc(client, '__testGetWrites', { id }))).not.toContain('1');
+
+      ev.stop();
+      await rpc(client, 'killSession', { id });
+      await client.close();
+    } finally {
+      await worker.stop();
+      rmRf(dataDir);
+    }
+  });
+
+  test('#138 — the option is answered by ITS OWN number, not an assumed position', async () => {
+    const pipe = workerPipePath();
+    const dataDir = makeTempDataDir();
+    const worker = spawnWorker(pipe, dataDir, { WT_AUTO_RESUME_ON_RESET: '1' });
+    try {
+      const client = await connectClient(pipe);
+      const ev = makeEventCollector(client);
+      const { id } = await rpc(client, 'createSession', { cwd: os.tmpdir(), name: 'reordered', agent: 'claude', autoCommand: '' });
+
+      // Same menu, "stop and wait" rendered third. Answering a hardcoded 1 here would
+      // buy a plan upgrade — which is exactly why the digit is read off the render.
+      await inject(client, id, [
+        '',
+        '1. Upgrade your plan',
+        '2. Upgrade to Team plan',
+        '3. Stop and wait for limit to reset',
+        '',
+      ].join(CRLF));
+
+      const answered = await ev.waitFor((e) => e.event === 'usageLimitPrompt' && e.params.id === id);
+      expect(answered.params.answered).toBe('3');
+      await sleep(150);
+      const sent = writesOf(await rpc(client, '__testGetWrites', { id }));
+      expect(sent).toContain('3');
+      expect(sent).not.toContain('1');
+
+      ev.stop();
+      await rpc(client, 'killSession', { id });
+      await client.close();
+    } finally {
+      await worker.stop();
+      rmRf(dataDir);
+    }
+  });
+
+  test('#138 — a seen cap prompt arms the resume on its own, with no metrics push', async () => {
+    const pipe = workerPipePath();
+    const dataDir = makeTempDataDir();
+    const worker = spawnWorker(pipe, dataDir, { WT_AUTO_RESUME_ON_RESET: '1' });
+    try {
+      const client = await connectClient(pipe);
+      const ev = makeEventCollector(client);
+      const { id } = await rpc(client, 'createSession', { cwd: os.tmpdir(), name: 'prompt-arms', agent: 'claude', autoCommand: '' });
+
+      await inject(client, id, LIMIT_PROMPT);
+      await ev.waitFor((e) => e.event === 'usageLimitPrompt' && e.params.id === id);
+
+      // capBlocked:false — server.js has NOT corroborated from metrics. The direct
+      // observation must be sufficient on its own, or the strongest signal we have
+      // would be the one that cannot act.
+      const resetAt = Date.now() + 150;
+      await setResetAt(client, id, resetAt, false);
+
+      const fired = await ev.waitFor((e) => e.event === 'autoResume' && e.params.id === id, 4000);
+      expect(fired.params.resetAt).toBe(resetAt);
+
+      ev.stop();
+      await rpc(client, 'killSession', { id });
+      await client.close();
+    } finally {
+      await worker.stop();
+      rmRf(dataDir);
+    }
+  });
+
   test('survives a worker cold restart — re-arms from the ABSOLUTE resetAt and catches up', async () => {
     const pipe1 = workerPipePath();
     const dataDir = makeTempDataDir();
@@ -334,6 +613,16 @@ test.describe('#69 — 5h usage-limit auto-resume', () => {
       const pipe2 = workerPipePath();
       worker = spawnWorker(pipe2, dataDir, { WT_AUTO_RESUME_ON_RESET: '1' });
       client = await connectClient(pipe2);
+
+      // #138 — the RESET TIME survives on disk; the OBSERVED BLOCK does not, on
+      // purpose (a blocked flag restored hours later would arm on a reading nobody
+      // took). server.js re-pushes it within a poll of the worker coming back —
+      // it clears its de-dup memo on the worker's disconnect precisely so it will —
+      // and this stands in for that push. The catch-up itself is still what's under
+      // test: fireAt is already in the past, so arming must fire immediately rather
+      // than wait for another window.
+      expect(cfg.fiveHResetAt).toBe(resetAt); // re-assert: the timestamp came back from disk
+      await setResetAt(client, sessionId, resetAt, true);
 
       let sent = [];
       const deadline = Date.now() + 5000;

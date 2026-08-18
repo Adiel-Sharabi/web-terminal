@@ -22,6 +22,7 @@ const { getAdapter } = agentsLib;
 const { rollUpUsage, METRICS_TTL_MS } = require('./lib/usage-rollup');
 const { waitingFor: waitingForRule } = require('./lib/waiting-for');
 const taskListLib = require('./lib/task-list');
+const usageLimit = require('./lib/usage-limit');
 const recap = require('./lib/recap');
 const { parseStatusPayload, mergeStatus, hasReading } = require('./lib/metrics-claude');
 const fcm = require('./lib/fcm');
@@ -723,6 +724,51 @@ function pruneNotifyPref(id) {
   if (prefs[id]) { delete prefs[id]; try { fs.writeFileSync(NOTIFY_PREFS_FILE, JSON.stringify(prefs, null, 2)); } catch {} }
 }
 
+// --- Per-session 5h auto-resume opt-out (#137) -----------------------------
+// Same shape and the same reasoning as notifyLevel above: server-side + a small
+// gitignored prefs file, so the control is hot-reloadable and needs NO worker
+// protocol change. It is stored as an OPT-OUT (presence == disabled) because the
+// feature is ON by default — so the file stays empty until someone actually turns
+// a session off, and a lost/rotated file fails back to the default rather than to
+// silence.
+//
+// How a disabled session reaches the worker, which is the part worth reading:
+// server.js simply pushes a NULL resetAt for it (armResetTimerFromMetrics). The
+// worker's existing setFiveHResetAt handler already treats null as "cancel", so
+// the opt-out works through a path that predates it — no new RPC, and it takes
+// effect against a worker running older code.
+const AUTO_RESUME_PREFS_FILE = path.join(__dirname, 'auto-resume-prefs.json');
+let _autoResumePrefs = null, _autoResumePrefsAt = 0;
+function loadAutoResumePrefs() {
+  if (!_autoResumePrefs || Date.now() - _autoResumePrefsAt > 5000) {
+    try { _autoResumePrefs = fs.existsSync(AUTO_RESUME_PREFS_FILE) ? JSON.parse(fs.readFileSync(AUTO_RESUME_PREFS_FILE, 'utf8')) : {}; }
+    catch { _autoResumePrefs = {}; }
+    _autoResumePrefsAt = Date.now();
+  }
+  return _autoResumePrefs;
+}
+/** Default ON (#137) — only an explicit `false` in the file disables a session. */
+function getAutoResumeEnabled(id) {
+  return loadAutoResumePrefs()[id] !== false;
+}
+function setAutoResumeEnabled(id, enabled) {
+  const on = enabled !== false;
+  const prefs = loadAutoResumePrefs();
+  if (on) delete prefs[id]; else prefs[id] = false; // store only overrides
+  try { fs.writeFileSync(AUTO_RESUME_PREFS_FILE, JSON.stringify(prefs, null, 2)); }
+  catch (e) { console.error('auto-resume-prefs write failed:', e.message); }
+  _autoResumePrefs = prefs; _autoResumePrefsAt = Date.now();
+  return on;
+}
+function pruneAutoResumePref(id) {
+  const prefs = loadAutoResumePrefs();
+  if (prefs[id] !== undefined) {
+    delete prefs[id];
+    try { fs.writeFileSync(AUTO_RESUME_PREFS_FILE, JSON.stringify(prefs, null, 2)); } catch {}
+    _autoResumePrefs = prefs; _autoResumePrefsAt = Date.now();
+  }
+}
+
 // --- Favorites (#60) -------------------------------------------------------
 // A favorite is a PROPERTY OF A SESSION, so it lives on the server that OWNS the
 // session — exactly like notifyLevel above, and for the same reason: one truth,
@@ -1150,6 +1196,7 @@ workerClient.on('sessionExited', ({ id }) => {
   if (nst) { if (nst.idleTimer) clearTimeout(nst.idleTimer); if (nst.apiErrTimer) clearTimeout(nst.apiErrTimer); _notifyState.delete(id); }
   pruneNotifyPref(id);
   pruneFavorite(id);   // #60: a dead session leaves no pin behind
+  pruneAutoResumePref(id); // #137: and no auto-resume opt-out either
   const set = sessionClients.get(id);
   if (set) {
     for (const client of set) {
@@ -2031,13 +2078,58 @@ const _metricsMiss = new Map(); // session id -> ts of the last failed resolutio
 // cluster fan-out, which both call sessionMetrics(). De-duped so the overwhelmingly
 // common case (unchanged value, polled every few seconds) costs a Map lookup, not
 // an RPC round trip; the worker independently no-ops an unchanged value too.
-const _lastPushedResetAt = new Map(); // session id -> last fiveHResetAt sent to the worker
-function armResetTimerFromMetrics(sessionId, fiveHResetAt) {
-  const val = (typeof fiveHResetAt === 'number' && Number.isFinite(fiveHResetAt)) ? fiveHResetAt : null;
-  if (_lastPushedResetAt.get(sessionId) === val) return;
-  _lastPushedResetAt.set(sessionId, val);
-  workerClient.rpc('setFiveHResetAt', { id: sessionId, fiveHResetAt: val })
+const _lastPushedResetAt = new Map(); // session id -> "<resetAt>|<capBlocked>" last sent
+function armResetTimerFromMetrics(sessionId, metrics) {
+  const raw = metrics && metrics.fiveHResetAt;
+  let val = (typeof raw === 'number' && Number.isFinite(raw)) ? raw : null;
+  // #138 — the worker arms on an OBSERVED block, never on a bare timestamp. The rule
+  // is lib/usage-limit.js so the arming decision and the `usageLimit` the session list
+  // publishes are the same computation, not two readings of the same fields.
+  let capBlocked = usageLimit.isCapBlocked({
+    fiveH: metrics ? metrics.fiveH : null,
+    fiveHResetAt: val,
+    now: Date.now(),
+  });
+  // #137 — a session the user switched off is expressed as a NULL resetAt rather than
+  // a flag, because that is the one cancel signal every worker version already
+  // understands (see the note on the prefs block above). Belt and braces: capBlocked
+  // goes false too, so a worker that reads the flag and one that reads the timestamp
+  // reach the same conclusion.
+  if (!getAutoResumeEnabled(sessionId)) { val = null; capBlocked = false; }
+  const key = `${val}|${capBlocked}`;
+  if (_lastPushedResetAt.get(sessionId) === key) return;
+  _lastPushedResetAt.set(sessionId, key);
+  workerClient.rpc('setFiveHResetAt', { id: sessionId, fiveHResetAt: val, capBlocked })
     .catch((e) => console.error('setFiveHResetAt failed:', e.message));
+}
+
+/** Forget the de-dup entry so the next poll re-pushes — used when the opt-out flips. */
+function forgetPushedResetAt(sessionId) { _lastPushedResetAt.delete(sessionId); }
+
+// #138 — capBlocked is deliberately NOT persisted by the worker (a blocked flag
+// restored from disk hours later is exactly the unfounded arming the gate exists to
+// prevent), so a restarted worker comes back knowing only the timestamp. That makes
+// this de-dup memo a liability across a reconnect: it would report "already told it"
+// about a worker that no longer knows, and auto-resume would go quietly dead until
+// the reset time itself changed. Dropping it on disconnect costs one re-push per
+// session on the next poll and restores the feature within seconds.
+workerClient.on('close', () => _lastPushedResetAt.clear());
+
+/**
+ * The `usageLimit` block the session lists carry (#137). Derived here, on the server
+ * that owns the session, so BOTH clients render one already-decided answer instead of
+ * each re-implementing "is it capped, and when does it come back" against raw metrics.
+ */
+function usageLimitFields(sessionId, metrics, session) {
+  return usageLimit.usageLimitState({
+    metrics,
+    enabled: getAutoResumeEnabled(sessionId),
+    delayMs: usageLimit.autoResumeDelayMs(process.env),
+    // The worker's own sighting of the agent's cap prompt — see pty-worker.js
+    // detectUsageLimitPromptInOutput. Absent on a session from a worker too old to
+    // report it, which simply falls back to the metrics derivation.
+    observedBlockAt: session && session.limitPromptAt,
+  });
 }
 
 // The metrics for one session, from whichever source its agent provides. Claude's
@@ -2046,7 +2138,7 @@ function armResetTimerFromMetrics(sessionId, fiveHResetAt) {
 // null → the default provider, which has no readMetrics) never triggers a file read.
 async function sessionMetrics(s) {
   const pushed = getStatusMetrics(s.claudeSessionId);
-  if (pushed) { armResetTimerFromMetrics(s.id, pushed.fiveHResetAt); return pushed; }
+  if (pushed) { armResetTimerFromMetrics(s.id, pushed); return pushed; }
   const adapter = getAdapter(s.agent);
   if (typeof adapter.readMetrics !== 'function') return null;
 
@@ -2057,7 +2149,7 @@ async function sessionMetrics(s) {
   if (!tpath) { _metricsMiss.set(s.id, Date.now()); return null; }
   _metricsMiss.delete(s.id);
   const metrics = readTranscriptMetrics(tpath, adapter);
-  armResetTimerFromMetrics(s.id, metrics && metrics.fiveHResetAt);
+  armResetTimerFromMetrics(s.id, metrics);
   return metrics;
 }
 
@@ -3012,6 +3104,11 @@ async function _computeClusterSessions(reqUser) {
         // on their own /api/sessions, so the spread above keeps them.
         ...favoriteFields(s.id),
         metrics: localMetrics[i],
+        // #137 — the 5h wait period, DERIVED here (lib/usage-limit.js) rather than in
+        // each client. Same trap as backgroundTasks below: this branch is shaped
+        // field-by-field while the remote branch spreads a peer's row whole, so a
+        // peer's capped sessions would show the badge and our own would not.
+        usageLimit: usageLimitFields(s.id, localMetrics[i], s),
         // Background commands still running. This list is shaped field-by-field,
         // unlike the remote branch below (which spreads the peer's row whole), so
         // omitting it here would show a peer's builds but never our own.
@@ -3608,6 +3705,11 @@ app.get('/api/sessions', async (req, res) => {
       // #60 — favorite (pin) + its rank. Server-side so every device sees one
       // truth; a peer's favorites ride to the cluster list on THIS array.
       ...favoriteFields(s.id),
+      // #137 — is this session sitting out its 5h window, when does it come back,
+      // and is a resume actually armed for it. One server-side derivation
+      // (lib/usage-limit.js), shared with the worker's arming gate, so the badge can
+      // never claim something the timer disagrees with.
+      usageLimit: usageLimitFields(s.id, listMetrics[i], s),
       // #65 — compaction in progress. Unlike apiError, this rides the poll (and
       // the cluster merge) so a client opening/reconnecting mid-compaction still
       // sees the indicator, and the poll-seed agrees with the live 'compacting'
@@ -3899,6 +4001,30 @@ app.patch('/api/sessions/:id/favorite', express.json({ limit: '1kb' }), (req, re
   invalidateClusterSessionsCache(); // the pinned group must re-render on the next poll
   res.json({ id, ...favoriteFields(id) });
 });
+// --- API: per-session 5h auto-resume opt-out (#137) -------------------------
+// The cancel behind the sidebar's wait-period badge. Behind the same auth as every
+// other session route, and the same UUID guard as /favorite so a bogus id can never
+// become a persisted key.
+//
+// Flipping this must take effect on the CURRENT window, not the next one: the push
+// to the worker is de-duped on its last value, so a plain PATCH would be swallowed
+// as "unchanged" until the timestamp itself moved — a cancel that appears to work
+// and then fires anyway. forgetPushedResetAt drops that memo so the next poll
+// re-pushes (null for a disabled session, which is what actually cancels the timer).
+app.get('/api/sessions/:id/auto-resume', (req, res) => {
+  res.json({ id: req.params.id, enabled: getAutoResumeEnabled(req.params.id) });
+});
+app.patch('/api/sessions/:id/auto-resume', express.json({ limit: '1kb' }), (req, res) => {
+  const id = req.params.id;
+  if (!_HOOK_UUID_RE.test(id)) return res.status(404).json({ error: 'session not found' });
+  const enabled = req.body?.enabled;
+  if (typeof enabled !== 'boolean') return res.status(400).json({ error: 'enabled must be a boolean' });
+  const on = setAutoResumeEnabled(id, enabled);
+  forgetPushedResetAt(id);
+  invalidateClusterSessionsCache(); // the badge must re-render on the next poll
+  res.json({ id, enabled: on });
+});
+
 // Structured "what needs my attention" for one session: the last recorded
 // attention event (kind/reason) plus Claude's freshly-read last message. Lets a
 // companion app or voice layer pull the real content over the private network,
