@@ -134,6 +134,28 @@ const API_ERROR_COMPACT_MIN_WAIT_MS = _apiErrFast ? 10 : 1500;       // ignore t
 const API_ERROR_COMPACT_FALLBACK_MS = _apiErrFast ? 300 : 45000;     // replay anyway if no idle hook arrives
 const API_ERROR_NEEDLE = Buffer.from('API Error');
 
+// #129 — how long a /compact can plausibly still be running before we conclude
+// the end-of-compaction signal was LOST rather than late.
+//
+// MEASURED, not guessed. Across the 51 compactions recorded in this machine's
+// own transcripts (`compact_boundary` lines, `compactMetadata.durationMs`):
+//
+//     min 94s · p50 138s · p75 143s · p90 156s · max 205s
+//
+// EVERY ONE of the 51 outran the 45s API_ERROR_COMPACT_FALLBACK_MS that this
+// backstop used to borrow — 100%, with the shortest more than double it. So the
+// timer that existed to catch a compaction which never settles was in fact
+// firing during every normal compaction, clearing the one flag that exists to
+// cover that window, mid-window, every single time. A backstop that fires on
+// the happy path is not a backstop.
+//
+// It is its own constant because it is its own FACT: "how long a compaction can
+// take" is not "how long to wait before replaying a prompt after an API error",
+// and the two were sharing a value only because the code that needed the second
+// was written first. 360s is ~1.8x the longest ever observed, so reaching it
+// means the signal genuinely never came.
+const COMPACTING_MAX_MS = _apiErrFast ? 300 : 360000;
+
 // Gap between typing text and the CR that submits it. An agent TUI reads input in raw
 // mode where Enter is CR (\r) — not LF (\n). How long the CR must trail the text is a
 // property OF THE AGENT, so it lives in the provider registry (lib/agents.js), not here.
@@ -826,7 +848,7 @@ function fireAutoResume(session, resetAt) {
 function setCompacting(session, source) {
   session.compacting = { since: Date.now(), source };
   if (session._compactingFallbackTimer) clearTimeout(session._compactingFallbackTimer);
-  session._compactingFallbackTimer = setTimeout(() => clearCompacting(session, 'timeout'), API_ERROR_COMPACT_FALLBACK_MS);
+  session._compactingFallbackTimer = setTimeout(() => clearCompacting(session, 'timeout'), COMPACTING_MAX_MS);
   if (typeof session._compactingFallbackTimer.unref === 'function') session._compactingFallbackTimer.unref();
   log(`compacting: "${session.name}" (${session.id}) started (${source})`);
   broadcastEvent('compacting', { id: session.id, compacting: true, since: session.compacting.since });
@@ -1159,9 +1181,18 @@ function applyIdle(session, event) {
   if (session._compactReplay && (Date.now() - session._compactReplay.setAt) > API_ERROR_COMPACT_MIN_WAIT_MS) {
     doCompactReplay(session, 'idle-hook');
   }
-  // #65 — idle means whatever /compact was in flight (user-triggered or ours)
-  // has settled. Idempotent no-op if nothing was compacting.
-  clearCompacting(session, 'idle');
+  // #129 — idle does NOT mean the compaction settled, and this is where the
+  // reported bug lived. `clearCompacting(session, 'idle')` used to run here on
+  // the #65 assumption that "idle means whatever /compact was in flight has
+  // settled" — but #115 had already disproved exactly that for `status`: the
+  // turn that DISPATCHED /compact ends while the compaction itself runs on for
+  // another two minutes, so its Stop hook arrives mid-compaction. Clearing here
+  // meant the one flag that exists to cover that window was cleared during it,
+  // by the very event the flag was introduced to survive.
+  //
+  // Nothing replaces it here. Compaction ends when work RESUMES (the
+  // UserPromptSubmit / PreToolUse case below clears it), with COMPACTING_MAX_MS
+  // as the genuine backstop for a compaction whose resume never comes.
   let notifyType = null, notifyMsg = null;
   if (prevStatus !== 'idle') {
     notifyType = 'idle';
@@ -1597,6 +1628,18 @@ function handleHook(session, event, claudeSessionId, prompt, agentId, opts) {
       if (!fromSubagent) session.heldStop = null;
       // Claude resumed (a retry — ours or the user's): drop the API-error mark.
       clearApiError(session);
+      // #129 — and the same signal ends a compaction. This is the honest one:
+      // a prompt being submitted or a tool running PROVES the conversation is no
+      // longer blocked in /compact, where a Stop only proves the dispatching turn
+      // ended (see applyIdle). Claude fires no PostCompact, so "work resumed" is
+      // the nearest thing to it that a hook can tell us.
+      //
+      // Deliberately NOT gated on `!fromSubagent`, unlike heldStop above: that
+      // guard exists because a subagent's tool call says nothing about whether
+      // the PARENT turn resumed. Here the question is different — nothing at all
+      // runs while the conversation is compacting, so a subagent's own event is
+      // equally good proof that it finished.
+      clearCompacting(session, 'resumed');
       // #69 — same signal: the user (or a retry) is back, so a pending 5h-reset
       // auto-resume for this session is now stale. Does not consume the window —
       // see cancelAutoResume.
@@ -1663,9 +1706,11 @@ function handleHook(session, event, claudeSessionId, prompt, agentId, opts) {
       // #65 — a /compact is starting: the user's own (this hook) or ours via
       // API-error auto-recovery (scheduleAutoContinue, source 'auto-recovery').
       // Surfaces the "Compacting conversation…" indicator; status itself is
-      // untouched — /compact doesn't end the turn. The next idle hook clears it
-      // (applyIdle); the fallback timer inside setCompacting is the stuck-guard
-      // for a /compact that never settles.
+      // untouched — /compact doesn't end the turn. Cleared when work RESUMES
+      // (the UserPromptSubmit/PreToolUse case above), NOT by the next idle hook:
+      // #129 measured that idle arrives mid-compaction every time. The
+      // COMPACTING_MAX_MS timer inside setCompacting is the stuck-guard for a
+      // compaction whose resume never comes.
       setCompacting(session, 'hook');
       break;
   }

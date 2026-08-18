@@ -51,8 +51,12 @@ function spawnWorker(pipePath, dataDir, extraEnv = {}) {
       WT_WORKER_DATA_DIR: dataDir,
       WT_WORKER_QUIET: '1',
       WT_WORKER_NO_DEFAULT: '1',
-      WT_API_ERROR_FAST: '1', // shrinks API_ERROR_COMPACT_FALLBACK_MS to 300ms — same
-                               // constant setCompacting reuses for its fallback timer
+      WT_API_ERROR_FAST: '1', // shrinks API_ERROR_COMPACT_FALLBACK_MS *and*
+                               // COMPACTING_MAX_MS to 300ms. Pass
+                               // WT_API_ERROR_FAST:'0' via extraEnv to get the real
+                               // 360s backstop — needed by any test asserting that
+                               // compacting does NOT clear, or the backstop clears
+                               // it and the test passes for the wrong reason.
       ...extraEnv,
     },
     stdio: ['ignore', 'pipe', 'pipe'],
@@ -188,10 +192,23 @@ test.describe('#65 — unified compacting state', () => {
     }
   });
 
-  test('an idle hook after PreCompact clears compacting, with a clear broadcast', async () => {
+  // #129 — THE REGRESSION GUARD. This test used to assert the exact opposite
+  // ("an idle hook after PreCompact clears compacting"), encoding the #65
+  // assumption that idle means the compaction settled.
+  //
+  // #115 had already disproved that for `status`: the turn that DISPATCHES
+  // /compact ends while the compaction runs on, so its Stop arrives
+  // mid-compaction. The same Stop was clearing `compacting` — the one flag
+  // introduced to cover precisely that window — from inside the window.
+  //
+  // Measured against the 51 compactions on disk (compact_boundary /
+  // compactMetadata.durationMs): min 94s, median 138s, max 205s.
+  test('#129: a Stop mid-compaction does NOT clear compacting', async () => {
     const pipe = workerPipePath();
     const dataDir = makeTempDataDir();
-    const worker = spawnWorker(pipe, dataDir);
+    // Real 360s backstop, not the 300ms test one — otherwise the fallback clears
+    // compacting and this test would pass without the fix.
+    const worker = spawnWorker(pipe, dataDir, { WT_API_ERROR_FAST: '0' });
     try {
       const client = await connectClient(pipe);
       const ev = makeEventCollector(client);
@@ -201,14 +218,104 @@ test.describe('#65 — unified compacting state', () => {
       await ev.waitFor(e => e.event === 'compacting' && e.params.id === id && e.params.compacting === true);
       expect((await findSession(client, id)).compacting).toBe(true);
 
-      // Claude settling (Stop) is the normal end-of-compact signal.
+      // The dispatching turn ends. Claude is still compacting.
       await rpc(client, 'hookEvent', { id, event: 'Stop' });
+      // The idle flip is debounced (HOOK_IDLE_DEBOUNCE_MS 750ms) — outwait it, or
+      // this asserts on a clear that simply had not been attempted yet.
+      await new Promise(r => setTimeout(r, 1400));
 
-      const cleared = await ev.waitFor(e => e.event === 'compacting' && e.params.id === id && e.params.compacting === false);
-      expect(cleared.params.since).toBeNull();
       const found = await findSession(client, id);
-      expect(found.compacting).toBe(false);
-      expect(found.compactingSince).toBeNull();
+      expect(found.compacting).toBe(true);
+      expect(found.compactingSince).toBeGreaterThan(0);
+      // The status legitimately IS idle — that is #115's finding, not a bug.
+      // What must not happen is the compacting flag going with it.
+      expect(found.status).toBe('idle');
+      const clears = ev.events.filter(e => e.event === 'compacting' && e.params.id === id && e.params.compacting === false);
+      expect(clears).toHaveLength(0);
+
+      ev.stop();
+      await rpc(client, 'killSession', { id });
+      await client.close();
+    } finally {
+      await worker.stop();
+      rmRf(dataDir);
+    }
+  });
+
+  // Claude fires no PostCompact, so "work resumed" is the nearest thing a hook
+  // can give us — and unlike a Stop it is honest: nothing runs while the
+  // conversation is compacting, so a prompt or a tool call proves it finished.
+  for (const resume of ['UserPromptSubmit', 'PreToolUse', 'PostToolUse']) {
+    test(`#129: work resuming (${resume}) clears compacting, with a clear broadcast`, async () => {
+      const pipe = workerPipePath();
+      const dataDir = makeTempDataDir();
+      const worker = spawnWorker(pipe, dataDir, { WT_API_ERROR_FAST: '0' });
+      try {
+        const client = await connectClient(pipe);
+        const ev = makeEventCollector(client);
+        const { id } = await rpc(client, 'createSession', { cwd: os.tmpdir(), name: 'precompact-resume', autoCommand: '' });
+        await rpc(client, 'hookEvent', { id, event: 'UserPromptSubmit' });
+        await rpc(client, 'hookEvent', { id, event: 'PreCompact' });
+        await ev.waitFor(e => e.event === 'compacting' && e.params.id === id && e.params.compacting === true);
+
+        // The dispatching turn ends first — the #115 sequence — then, ~2 minutes
+        // later in real time, the compaction finishes and work resumes.
+        await rpc(client, 'hookEvent', { id, event: 'Stop' });
+        await new Promise(r => setTimeout(r, 1400));
+        expect((await findSession(client, id)).compacting).toBe(true);
+
+        await rpc(client, 'hookEvent', { id, event: resume });
+
+        const cleared = await ev.waitFor(e => e.event === 'compacting' && e.params.id === id && e.params.compacting === false);
+        expect(cleared.params.since).toBeNull();
+        const found = await findSession(client, id);
+        expect(found.compacting).toBe(false);
+        expect(found.compactingSince).toBeNull();
+
+        ev.stop();
+        await rpc(client, 'killSession', { id });
+        await client.close();
+      } finally {
+        await worker.stop();
+        rmRf(dataDir);
+      }
+    });
+  }
+
+  // The reported scenario, end to end: the user queues a prompt DURING /compact.
+  // The client's echo-expiry (conversation_view.dart `echoTimeoutRuns`) holds the
+  // optimistic echo only while status is working/waiting OR compacting is true —
+  // and the queued prompt is not in the transcript until its turn STARTS. So a
+  // premature clear here is exactly what deletes the prompt from the chat lens.
+  test('#129: compacting spans the whole window a queued prompt waits in', async () => {
+    const pipe = workerPipePath();
+    const dataDir = makeTempDataDir();
+    const worker = spawnWorker(pipe, dataDir, { WT_API_ERROR_FAST: '0' });
+    try {
+      const client = await connectClient(pipe);
+      const ev = makeEventCollector(client);
+      const { id } = await rpc(client, 'createSession', { cwd: os.tmpdir(), name: 'queued-during-compact', autoCommand: '' });
+      await rpc(client, 'hookEvent', { id, event: 'UserPromptSubmit' });
+      await rpc(client, 'hookEvent', { id, event: 'PreCompact' });
+      await ev.waitFor(e => e.event === 'compacting' && e.params.id === id && e.params.compacting === true);
+
+      // The dispatching turn stops early (#115).
+      await rpc(client, 'hookEvent', { id, event: 'Stop' });
+      await new Promise(r => setTimeout(r, 1400));
+
+      // The user types a prompt now. It is queued: no hook, no transcript turn.
+      // Sample the flag repeatedly across the window — with the old rule it was
+      // already false by the first sample.
+      for (let i = 0; i < 4; i++) {
+        await new Promise(r => setTimeout(r, 250));
+        const s = await findSession(client, id);
+        expect(s.compacting).toBe(true);
+      }
+
+      // Compaction finishes and the queued prompt's turn finally starts.
+      await rpc(client, 'hookEvent', { id, event: 'UserPromptSubmit' });
+      await ev.waitFor(e => e.event === 'compacting' && e.params.id === id && e.params.compacting === false);
+      expect((await findSession(client, id)).compacting).toBe(false);
 
       ev.stop();
       await rpc(client, 'killSession', { id });
