@@ -26,8 +26,24 @@ test.describe('#138 — isCapBlocked', () => {
     expect(u.isCapBlocked({ fiveH: 0, fiveHResetAt: SOON, now: NOW })).toBe(false);
   });
 
-  test('NOT blocked when the reset has already passed — the reading is stale, not live', () => {
-    expect(u.isCapBlocked({ fiveH: 100, fiveHResetAt: PAST, now: NOW })).toBe(false);
+  // REVIEW FINDING (the serious one). This case previously asserted that a
+  // just-passed reset is NOT blocked — which is precisely what made the feature
+  // unreachable: the resume fires at reset+60s, so during that minute the
+  // derivation said "not blocked", the poll pushed it, and the worker cancelled the
+  // timer it was about to fire. For a metrics-only session (every Codex one) the
+  // resume could essentially never happen.
+  test('STILL blocked in the minute between the reset and the resume', () => {
+    const justPassed = NOW - 30 * 1000; // reset 30s ago; resume due in 30s
+    expect(u.isCapBlocked({ fiveH: 100, fiveHResetAt: justPassed, now: NOW, delayMs: 60000 })).toBe(true);
+  });
+
+  test('still blocked shortly after the resume was due — poll jitter must not disarm it', () => {
+    const fired = NOW - 90 * 1000; // resume was due 30s ago
+    expect(u.isCapBlocked({ fiveH: 100, fiveHResetAt: fired, now: NOW, delayMs: 60000 })).toBe(true);
+  });
+
+  test('NOT blocked once the window is long gone — a stale reading arms nothing', () => {
+    expect(u.isCapBlocked({ fiveH: 100, fiveHResetAt: NOW - 3 * 60 * 60 * 1000, now: NOW })).toBe(false);
   });
 
   test('NOT blocked when the percentage is unknown — refuse to act on silence', () => {
@@ -85,6 +101,28 @@ test.describe('#137 — usageLimitState (what the session list publishes)', () =
     expect(st.waiting).toBe(true);   // it IS capped
     expect(st.armed).toBe(false);    // nothing will fire
     expect(st.enabled).toBe(false);
+  });
+
+  test('the badge survives to the RESUME moment, not just to the reset', () => {
+    // The row said "resumes 14:32" and then reverted to a plain idle row at 14:31,
+    // with the action still pending — the badge vanished a minute before the thing
+    // it was announcing. waiting now runs to resumeAt.
+    const justPassed = NOW - 30 * 1000;
+    const st = u.usageLimitState({
+      metrics: { fiveH: 100, fiveHResetAt: justPassed }, enabled: true, delayMs: 60000, now: NOW,
+    });
+    expect(st.waiting).toBe(true);    // still shown
+    expect(st.capBlocked).toBe(true); // and still armable
+    expect(st.resumeAt).toBe(justPassed + 60000);
+  });
+
+  test('once the resume has passed the badge clears but arming keeps its grace', () => {
+    const fired = NOW - 90 * 1000; // resume was due 30s ago
+    const st = u.usageLimitState({
+      metrics: { fiveH: 100, fiveHResetAt: fired }, enabled: true, delayMs: 60000, now: NOW,
+    });
+    expect(st.waiting).toBe(false);   // nothing left to announce
+    expect(st.capBlocked).toBe(true); // but the fire must not be cancelled by a race
   });
 
   test('an ordinary working session publishes nothing to render', () => {

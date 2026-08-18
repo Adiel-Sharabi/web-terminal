@@ -733,14 +733,26 @@ function detectApiErrorInOutput(session, buf) {
 // second cap event in the same session is still answered.
 const LIMIT_PROMPT_COOLDOWN_MS = process.env.WT_API_ERROR_FAST === '1' ? 100 : 30000;
 
+// Enough tail to hold the longest option line across a read boundary. The prompt is
+// a menu, not a stream, so a few hundred bytes is generous.
+const LIMIT_PROMPT_CARRY = 512;
+
 function detectUsageLimitPromptInOutput(session, buf) {
   const cfg = agents.usageLimitPromptFor(sessionAgent(session));
   if (!cfg) return; // a plain shell / unknown agent never types on our behalf
   const now = Date.now();
   if (session._limitPromptAnsweredAt && now - session._limitPromptAnsweredAt < LIMIT_PROMPT_COOLDOWN_MS) return;
-  const text = stripAnsiForScan(buf.toString('utf8'));
+  // Carry a tail across chunks, like lib/osc9-notify.js does for its sequences. A PTY
+  // read boundary falls wherever the kernel put it, so the option line can arrive
+  // split in two; matching only within one chunk would miss it. Relying on the TUI to
+  // repaint is an assumption, not a guarantee - and a missed cap prompt is a session
+  // that hangs on a question nobody answers, which is the whole failure being fixed.
+  const chunk = stripAnsiForScan(buf.toString('utf8'));
+  const text = (session._limitPromptCarry || '') + chunk;
+  session._limitPromptCarry = text.slice(-LIMIT_PROMPT_CARRY);
   const m = cfg.pattern.exec(text);
   if (!m) return;
+  session._limitPromptCarry = ''; // consumed - never match the same bytes twice
   // Answer the option by the number IT rendered (capture group 1), falling back to
   // the declared default only if the render carried none. Requiring the "<n>. " to
   // be there at all is also what keeps this from firing on prose: an agent
@@ -858,6 +870,21 @@ function cancelAutoResume(session) {
   if (session._autoResumeTimer) { clearTimeout(session._autoResumeTimer); session._autoResumeTimer = null; }
 }
 
+// #138 - the user is demonstrably back (Esc on a turn, a new prompt submitted), so a
+// cap prompt we saw earlier is no longer evidence of anything: they have dealt with
+// it, or moved on.
+//
+// This latch MUST be cleared here and not only when a resume fires. It is a
+// STANDALONE arming reason, so leaving it set meant a later window - a NEW resetAt
+// arriving hours afterwards, with the account no longer capped - re-armed on it and
+// typed `continue` into a session the user had finished with. That is precisely the
+// harm the gate exists to prevent, reintroduced by the gate's own memory. Metrics
+// re-establish a genuine block within a poll if the session really is still capped.
+function clearObservedCapBlock(session) {
+  if (session.limitPromptAt) session.limitPromptAt = null;
+  session._limitPromptAnsweredAt = 0; // a fresh prompt must be answerable at once
+}
+
 // (Re-)arm the one-shot reset timer from session.fiveHResetAt. Safe to call any
 // time fiveHResetAt might have changed (the RPC handler, session restore) — a
 // no-op when the feature is off, resetAt is unknown, or this window is already
@@ -873,6 +900,10 @@ function armAutoResumeTimer(session) {
   // the cap PROMPT this worker saw and answered itself (definitive), or server.js's
   // metrics derivation pushed with the timestamp (lib/usage-limit.js). Neither =>
   // not blocked, which is also what an older server.js that sends no flag yields.
+  // #138 - only an agent whose capped state we have actually captured may arm.
+  // Codex loads its usage metrics and shows the wait badge, but nothing types
+  // into it until someone has seen what its own cap looks like.
+  if (!agents.armsAutoResume(sessionAgent(session))) return;
   if (session.capBlocked !== true && !session.limitPromptAt) return;
   const resetAt = session.fiveHResetAt;
   if (typeof resetAt !== 'number' || !isFinite(resetAt) || resetAt <= 0) return;
@@ -1047,6 +1078,7 @@ function noteInterrupt(session, data) {
   // #69 — the user is at the keyboard interrupting a turn; a pending 5h-reset
   // auto-resume for this session is now stale (same reasoning as clearApiError).
   cancelAutoResume(session);
+  clearObservedCapBlock(session); // #138 - and so is a cap prompt seen earlier
   log(`interrupt: "${session.name}" working → idle (Esc)`);
   // No notifyType: the user is at the keyboard — they just pressed Esc. Pushing "Claude is
   // done" to their phone for an interrupt they performed themselves would be noise.
@@ -1833,6 +1865,7 @@ function handleHook(session, event, claudeSessionId, prompt, agentId, opts) {
       // auto-resume for this session is now stale. Does not consume the window —
       // see cancelAutoResume.
       cancelAutoResume(session);
+      clearObservedCapBlock(session); // #138 - and so is a cap prompt seen earlier
       break;
     case 'SubagentStop': {
       // #61 — the last subagent finishing is what actually ends a turn whose main

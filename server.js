@@ -2079,28 +2079,56 @@ const _metricsMiss = new Map(); // session id -> ts of the last failed resolutio
 // common case (unchanged value, polled every few seconds) costs a Map lookup, not
 // an RPC round trip; the worker independently no-ops an unchanged value too.
 const _lastPushedResetAt = new Map(); // session id -> "<resetAt>|<capBlocked>" last sent
-function armResetTimerFromMetrics(sessionId, metrics) {
-  const raw = metrics && metrics.fiveHResetAt;
-  let val = (typeof raw === 'number' && Number.isFinite(raw)) ? raw : null;
-  // #138 — the worker arms on an OBSERVED block, never on a bare timestamp. The rule
-  // is lib/usage-limit.js so the arming decision and the `usageLimit` the session list
-  // publishes are the same computation, not two readings of the same fields.
-  let capBlocked = usageLimit.isCapBlocked({
-    fiveH: metrics ? metrics.fiveH : null,
-    fiveHResetAt: val,
-    now: Date.now(),
-  });
-  // #137 — a session the user switched off is expressed as a NULL resetAt rather than
-  // a flag, because that is the one cancel signal every worker version already
-  // understands (see the note on the prefs block above). Belt and braces: capBlocked
-  // goes false too, so a worker that reads the flag and one that reads the timestamp
-  // reach the same conclusion.
-  if (!getAutoResumeEnabled(sessionId)) { val = null; capBlocked = false; }
-  const key = `${val}|${capBlocked}`;
+
+/** Push the worker a decision about this session's window, de-duped. */
+function _pushResetState(sessionId, fiveHResetAt, capBlocked) {
+  const key = `${fiveHResetAt}|${capBlocked}`;
   if (_lastPushedResetAt.get(sessionId) === key) return;
   _lastPushedResetAt.set(sessionId, key);
-  workerClient.rpc('setFiveHResetAt', { id: sessionId, fiveHResetAt: val, capBlocked })
+  workerClient.rpc('setFiveHResetAt', { id: sessionId, fiveHResetAt, capBlocked })
     .catch((e) => console.error('setFiveHResetAt failed:', e.message));
+}
+
+/**
+ * Does this metrics report SAY anything about the 5h window, or is it merely silent?
+ *
+ * The distinction is load-bearing and was missed the first time. A capped Claude
+ * session stops pushing its status line — it is capped, it has nothing to run — and
+ * past METRICS_TTL_MS getStatusMetrics blanks fiveH/fiveHResetAt while still
+ * returning a truthy object. Treating that blank as "not blocked" pushed a null
+ * resetAt, which the worker takes as CANCEL: it dropped the persisted reset time and
+ * disarmed. A 5h window outlasts the 4h TTL, so the long wait this feature exists for
+ * was exactly the one that lost its timer. Unknown is not recovered.
+ */
+function _metricsSpeakAboutWindow(metrics) {
+  if (!metrics) return false;
+  return (typeof metrics.fiveH === 'number' && Number.isFinite(metrics.fiveH))
+      || (typeof metrics.fiveHResetAt === 'number' && Number.isFinite(metrics.fiveHResetAt));
+}
+
+function armResetTimerFromMetrics(sessionId, metrics) {
+  // #137 — a session the user switched off is cancelled outright, and that decision
+  // does not depend on metrics saying anything (see setAutoResumeEnabled, which also
+  // pushes directly so the cancel never waits for a poll that may not come).
+  if (!getAutoResumeEnabled(sessionId)) { _pushResetState(sessionId, null, false); return; }
+
+  // Silence is not evidence of recovery — see _metricsSpeakAboutWindow. Say nothing
+  // and leave the worker holding whatever it last learned, which for a capped session
+  // is the reset time it still needs.
+  if (!_metricsSpeakAboutWindow(metrics)) return;
+
+  const raw = metrics.fiveHResetAt;
+  const val = (typeof raw === 'number' && Number.isFinite(raw)) ? raw : null;
+  // #138 — the worker arms on an OBSERVED block, never on a bare timestamp. The rule
+  // lives in lib/usage-limit.js so the arming decision and the `usageLimit` the
+  // session list publishes are one computation, not two readings of the same fields.
+  const capBlocked = usageLimit.isCapBlocked({
+    fiveH: metrics.fiveH,
+    fiveHResetAt: val,
+    now: Date.now(),
+    delayMs: usageLimit.autoResumeDelayMs(process.env),
+  });
+  _pushResetState(sessionId, val, capBlocked);
 }
 
 /** Forget the de-dup entry so the next poll re-pushes — used when the opt-out flips. */
@@ -2129,6 +2157,10 @@ function usageLimitFields(sessionId, metrics, session) {
     // detectUsageLimitPromptInOutput. Absent on a session from a worker too old to
     // report it, which simply falls back to the metrics derivation.
     observedBlockAt: session && session.limitPromptAt,
+    // #138 - whether this agent may arm at all. Codex is `false` for now: it still
+    // reports a spent window (so the row honestly shows the session is held), but the
+    // badge must not say "resumes 14:32" when the worker's gate will refuse.
+    canArm: agentsLib.armsAutoResume(session && session.agent),
   });
 }
 
@@ -4021,6 +4053,12 @@ app.patch('/api/sessions/:id/auto-resume', express.json({ limit: '1kb' }), (req,
   if (typeof enabled !== 'boolean') return res.status(400).json({ error: 'enabled must be a boolean' });
   const on = setAutoResumeEnabled(id, enabled);
   forgetPushedResetAt(id);
+  // Act NOW, do not defer to the metrics poll. sessionMetrics returns early for a
+  // session whose transcript cannot be resolved (and for one with no metrics source
+  // at all), so armResetTimerFromMetrics may simply never run for it — in which case
+  // a deferred cancel is no cancel: the badge flips to "on hold" and the worker still
+  // fires `continue`. A user action must not depend on a poll that may not come.
+  if (!on) _pushResetState(id, null, false);
   invalidateClusterSessionsCache(); // the badge must re-render on the next poll
   res.json({ id, enabled: on });
 });

@@ -156,7 +156,7 @@ test.describe('#69 — 5h usage-limit auto-resume', () => {
     try {
       const client = await connectClient(pipe);
       const ev = makeEventCollector(client);
-      const { id } = await rpc(client, 'createSession', { cwd: os.tmpdir(), name: 'reset-fire', autoCommand: '' });
+      const { id } = await rpc(client, 'createSession', { cwd: os.tmpdir(), name: 'reset-fire', agent: 'claude', autoCommand: '' });
 
       const resetAt = Date.now() + 150;
       const armed = await setResetAt(client, id, resetAt);
@@ -235,7 +235,7 @@ test.describe('#69 — 5h usage-limit auto-resume', () => {
     try {
       const client = await connectClient(pipe);
       const ev = makeEventCollector(client);
-      const { id } = await rpc(client, 'createSession', { cwd: os.tmpdir(), name: 'reset-uprompt', autoCommand: '' });
+      const { id } = await rpc(client, 'createSession', { cwd: os.tmpdir(), name: 'reset-uprompt', agent: 'claude', autoCommand: '' });
 
       const resetAt = Date.now() + 150;
       await setResetAt(client, id, resetAt);
@@ -264,7 +264,7 @@ test.describe('#69 — 5h usage-limit auto-resume', () => {
     try {
       const client = await connectClient(pipe);
       const ev = makeEventCollector(client);
-      const { id } = await rpc(client, 'createSession', { cwd: os.tmpdir(), name: 'reset-disabled', autoCommand: '' });
+      const { id } = await rpc(client, 'createSession', { cwd: os.tmpdir(), name: 'reset-disabled', agent: 'claude', autoCommand: '' });
 
       const resetAt = Date.now() + 150;
       await setResetAt(client, id, resetAt); // still recorded — see fiveHResetAt below
@@ -291,7 +291,7 @@ test.describe('#69 — 5h usage-limit auto-resume', () => {
     try {
       const client = await connectClient(pipe);
       const ev = makeEventCollector(client);
-      const { id } = await rpc(client, 'createSession', { cwd: os.tmpdir(), name: 'reset-noresetat', autoCommand: '' });
+      const { id } = await rpc(client, 'createSession', { cwd: os.tmpdir(), name: 'reset-noresetat', agent: 'claude', autoCommand: '' });
       // Never call setFiveHResetAt — fiveHResetAt stays null.
       expect((await findSession(client, id)).fiveHResetAt).toBeNull();
 
@@ -320,7 +320,7 @@ test.describe('#69 — 5h usage-limit auto-resume', () => {
     try {
       const client = await connectClient(pipe);
       const ev = makeEventCollector(client);
-      const { id } = await rpc(client, 'createSession', { cwd: os.tmpdir(), name: 'notblocked', autoCommand: '' });
+      const { id } = await rpc(client, 'createSession', { cwd: os.tmpdir(), name: 'notblocked', agent: 'claude', autoCommand: '' });
 
       // The exact shape #69 would have fired on: feature ON, a real reset time, an
       // idle session — but no observed block. This is the session you finished with.
@@ -350,7 +350,7 @@ test.describe('#69 — 5h usage-limit auto-resume', () => {
     try {
       const client = await connectClient(pipe);
       const ev = makeEventCollector(client);
-      const { id } = await rpc(client, 'createSession', { cwd: os.tmpdir(), name: 'blocklifts', autoCommand: '' });
+      const { id } = await rpc(client, 'createSession', { cwd: os.tmpdir(), name: 'blocklifts', agent: 'claude', autoCommand: '' });
 
       // Armed on a real block...
       const resetAt = Date.now() + 250;
@@ -386,7 +386,7 @@ test.describe('#69 — 5h usage-limit auto-resume', () => {
     try {
       const client = await connectClient(pipe);
       const ev = makeEventCollector(client);
-      const { id } = await rpc(client, 'createSession', { cwd: os.tmpdir(), name: 'default-on', autoCommand: '' });
+      const { id } = await rpc(client, 'createSession', { cwd: os.tmpdir(), name: 'default-on', agent: 'claude', autoCommand: '' });
 
       const resetAt = Date.now() + 150;
       await setResetAt(client, id, resetAt, true);
@@ -582,6 +582,108 @@ test.describe('#69 — 5h usage-limit auto-resume', () => {
     }
   });
 
+  // --- review findings: the latch must not outlive the reason for it ----------
+
+  test('#138 — a cap prompt seen earlier does NOT arm a LATER, unblocked window', async () => {
+    const pipe = workerPipePath();
+    const dataDir = makeTempDataDir();
+    const worker = spawnWorker(pipe, dataDir, { WT_AUTO_RESUME_ON_RESET: '1' });
+    try {
+      const client = await connectClient(pipe);
+      const ev = makeEventCollector(client);
+      const { id } = await rpc(client, 'createSession', { cwd: os.tmpdir(), name: 'stale-latch', agent: 'claude', autoCommand: '' });
+
+      // The cap prompt is seen and answered...
+      await inject(client, id, LIMIT_PROMPT);
+      await ev.waitFor((e) => e.event === 'usageLimitPrompt' && e.params.id === id);
+
+      // ...then the user comes back and submits a prompt of their own. They have
+      // dealt with it; the sighting is no longer evidence of anything.
+      await rpc(client, 'hookEvent', { id, event: 'UserPromptSubmit', prompt: 'carry on' });
+      expect((await findSession(client, id)).limitPromptAt).toBeFalsy();
+
+      // Hours later a NEW window's reset arrives, with the account NOT capped.
+      // Arming on the stale latch here would type `continue` into a session the
+      // user had finished with - the exact harm the gate exists to prevent.
+      const resetAt = Date.now() + 150;
+      await setResetAt(client, id, resetAt, false);
+
+      await sleep(400);
+      expect(ev.events.some((e) => e.event === 'autoResume' && e.params.id === id)).toBe(false);
+      expect(writesOf(await rpc(client, '__testGetWrites', { id }))).not.toContain('continue');
+
+      ev.stop();
+      await rpc(client, 'killSession', { id });
+      await client.close();
+    } finally {
+      await worker.stop();
+      rmRf(dataDir);
+    }
+  });
+
+  test('#138 — a cap prompt SPLIT across two PTY reads is still answered', async () => {
+    const pipe = workerPipePath();
+    const dataDir = makeTempDataDir();
+    const worker = spawnWorker(pipe, dataDir, { WT_AUTO_RESUME_ON_RESET: '1' });
+    try {
+      const client = await connectClient(pipe);
+      const ev = makeEventCollector(client);
+      const { id } = await rpc(client, 'createSession', { cwd: os.tmpdir(), name: 'split-read', agent: 'claude', autoCommand: '' });
+
+      // A read boundary falls wherever the kernel put it. Cut the option line in
+      // half: without a carry across chunks neither half matches and the session
+      // hangs on a question nobody answers.
+      const cut = LIMIT_PROMPT.indexOf('wait for limit');
+      await inject(client, id, LIMIT_PROMPT.slice(0, cut));
+      await sleep(60);
+      await inject(client, id, LIMIT_PROMPT.slice(cut));
+
+      const answered = await ev.waitFor((e) => e.event === 'usageLimitPrompt' && e.params.id === id, 4000);
+      expect(answered.params.answered).toBe('1');
+
+      ev.stop();
+      await rpc(client, 'killSession', { id });
+      await client.close();
+    } finally {
+      await worker.stop();
+      rmRf(dataDir);
+    }
+  });
+
+  test('#138 — a CODEX session loads its window but is never auto-resumed (deferred)', async () => {
+    const pipe = workerPipePath();
+    const dataDir = makeTempDataDir();
+    const worker = spawnWorker(pipe, dataDir, { WT_AUTO_RESUME_ON_RESET: '1' });
+    try {
+      const client = await connectClient(pipe);
+      const ev = makeEventCollector(client);
+      const { id } = await rpc(client, 'createSession', { cwd: os.tmpdir(), name: 'codex-noarm', agent: 'codex', autoCommand: '' });
+
+      // Codex reports a real reset time from its rollout, and a real block - so the
+      // session list still shows it as held. But nothing may TYPE into it: what a
+      // capped Codex session looks like has not been captured the way Claude's has,
+      // and arming off an inferred percentage for an unseen blocked state is the
+      // guesswork the gate exists to prevent. Flip lib/agents.js autoResume.arm when
+      // that evidence exists (#142).
+      const resetAt = Date.now() + 150;
+      const r = await setResetAt(client, id, resetAt, true);
+      expect(r.fiveHResetAt).toBe(resetAt); // the window IS loaded...
+      expect(r.capBlocked).toBe(true);      // ...and the block IS recorded
+      expect((await findSession(client, id)).autoResumeArmed).toBe(false); // but nothing is armed
+
+      await sleep(400); // well past resetAt + delay
+      expect(ev.events.some((e) => e.event === 'autoResume' && e.params.id === id)).toBe(false);
+      expect(writesOf(await rpc(client, '__testGetWrites', { id }))).not.toContain('continue');
+
+      ev.stop();
+      await rpc(client, 'killSession', { id });
+      await client.close();
+    } finally {
+      await worker.stop();
+      rmRf(dataDir);
+    }
+  });
+
   test('survives a worker cold restart — re-arms from the ABSOLUTE resetAt and catches up', async () => {
     const pipe1 = workerPipePath();
     const dataDir = makeTempDataDir();
@@ -589,7 +691,7 @@ test.describe('#69 — 5h usage-limit auto-resume', () => {
     let sessionId;
     try {
       let client = await connectClient(pipe1);
-      const { id } = await rpc(client, 'createSession', { cwd: os.tmpdir(), name: 'reset-coldrestart', autoCommand: '' });
+      const { id } = await rpc(client, 'createSession', { cwd: os.tmpdir(), name: 'reset-coldrestart', agent: 'claude', autoCommand: '' });
       sessionId = id;
 
       // Arm, then kill the worker before it can fire (fast delay is 50ms — a resetAt
