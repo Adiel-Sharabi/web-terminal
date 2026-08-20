@@ -9,7 +9,8 @@ const {
   lastAssistantText, isAllowedTranscriptPath,
   parseTranscriptTurn, scanTurnsBackward, encodeCursor, decodeCursor, stripAnsi,
   extractToolResults, pendingQuestion, shapeQuestions, claudeProjectDirName,
-  parseAgentMeta, collectResolvedIds, attachSubagentStubs,
+  parseAgentMeta, collectResolvedIds, attachSubagentStubs, PQ_PREVIEW_CAP,
+  PQ_MAX_OPTIONS,
 } = require('../lib/transcript');
 
 // In-memory chunk reader for scanTurnsBackward (mirrors server.js's fs reader).
@@ -559,14 +560,104 @@ test.describe('shapeQuestions (live PreToolUse hook input)', () => {
     expect(shaped.map((q) => q.hasPreview)).toEqual([false, false, false]);
   });
 
-  test('the preview BODY never reaches the client', () => {
-    // It is free-form, can be large, and nothing renders it — only the fact
-    // that one exists is needed.
+  // #145. This test used to assert the OPPOSITE — that the body never reaches
+  // the client — which was right while nothing rendered it and wrong the moment
+  // the overlay did. The side-by-side layout is exactly the one where the
+  // preview carries the decision: a report on 2026-08-19 showed three terse
+  // labels ("Land #182", "Play closed track upload", "Leave it") whose entire
+  // technical content lived in the preview box, so the chat lens was strictly
+  // less informative than the terminal.
+  test('forwards the preview BODY so the overlay can render it', () => {
     const shaped = shapeQuestions({
-      questions: [{ header: 'A', question: 'q', options: [{ label: 'One', preview: 'SECRET-MOCKUP' }] }],
+      questions: [{ header: 'A', question: 'q', options: [
+        { label: 'One', preview: 'debug { applicationIdSuffix = ".debug" }' },
+        { label: 'Two' },
+      ] }],
     });
-    expect(JSON.stringify(shaped)).not.toContain('SECRET-MOCKUP');
-    expect(shaped[0].options[0].preview).toBeUndefined();
+    expect(shaped[0].options[0].preview).toBe('debug { applicationIdSuffix = ".debug" }');
+    // An option with no preview carries no empty string to render around.
+    expect(shaped[0].options[1].preview).toBeUndefined();
+  });
+
+  test('a preview keeps its newlines — it is a block, not a line', () => {
+    const body = 'net.hilash.rega\nnet.hilash.rega.debug\n\n  indented';
+    const shaped = shapeQuestions({
+      questions: [{ header: 'A', question: 'q', options: [{ label: 'One', preview: body }] }],
+    });
+    expect(shaped[0].options[0].preview).toBe(body);
+  });
+
+  test('a preview is capped on its OWN budget, not the 800-char string cap', () => {
+    const shaped = shapeQuestions({
+      questions: [{ header: 'A', question: 'q', options: [
+        { label: 'One', description: 'd'.repeat(5000), preview: 'p'.repeat(5000) },
+      ] }],
+    });
+    const opt = shaped[0].options[0];
+    expect(opt.description).toHaveLength(800);          // PQ_STR_CAP
+    expect(opt.preview).toHaveLength(PQ_PREVIEW_CAP);   // its own, larger budget
+    expect(PQ_PREVIEW_CAP).toBeGreaterThan(800);
+    expect(opt.preview.endsWith('…')).toBe(true);
+  });
+
+  test('ANSI in a preview is stripped like every other published string', () => {
+    const shaped = shapeQuestions({
+      questions: [{ header: 'A', question: 'q', options: [
+        { label: 'One', preview: ESC + '[31mred' + ESC + '[0m plain' },
+      ] }],
+    });
+    expect(shaped[0].options[0].preview).toBe('red plain');
+  });
+
+  test('an empty/whitespace/non-string preview publishes NO preview field', () => {
+    const shaped = shapeQuestions({
+      questions: [{ header: 'A', question: 'q', options: [
+        { label: 'One', preview: '   ' },
+        { label: 'Two', preview: '' },
+        { label: 'Three', preview: { not: 'a string' } },
+        { label: 'Four' },
+      ] }],
+    });
+    expect(shaped[0].options.map((o) => o.preview)).toEqual([
+      undefined, undefined, undefined, undefined,
+    ]);
+  });
+
+  // The trap #145 was filed with: if `hasPreview` were ever recomputed from the
+  // SHAPED options it would follow the cap and the label filter, and a question
+  // whose preview was dropped would silently flip to the compact layout — which
+  // decides what every answer key MEANS (#19/#84/#143). It must stay derived
+  // from the raw input. Here the previewed option has no label and is dropped
+  // from `options`, and the question must STILL report side-by-side.
+  test('hasPreview is derived from the RAW input, before options are dropped', () => {
+    const shaped = shapeQuestions({
+      questions: [{ header: 'A', question: 'q', options: [
+        { label: '', preview: 'a mockup' },
+        { label: 'Two' },
+      ] }],
+    });
+    expect(shaped[0].options.map((o) => o.label)).toEqual(['Two']);
+    expect(shaped[0].hasPreview).toBe(true);
+  });
+
+  // The SECOND of the three ways the shaped list loses a preview, and the one
+  // the code actually got wrong (#143): the flag was read off the already-sliced
+  // list, so a preview carried only by an option past PQ_MAX_OPTIONS reported
+  // compact. Claude lays the selector out from ALL of its options, so that
+  // question renders side-by-side and every answer key means something else —
+  // a digit navigates instead of selecting, `n` opens a note editor, and the
+  // "Type something." row the compact layout has does not exist at all.
+  test('hasPreview is derived BEFORE the PQ_MAX_OPTIONS slice', () => {
+    const options = [];
+    for (let i = 0; i < PQ_MAX_OPTIONS; i++) options.push({ label: 'Opt' + i });
+    options.push({ label: 'Past the cap', preview: 'a mockup' });
+    const shaped = shapeQuestions({
+      questions: [{ header: 'A', question: 'q', options }],
+    });
+    // The option itself is correctly dropped — only the FLAG must survive it.
+    expect(shaped[0].options).toHaveLength(PQ_MAX_OPTIONS);
+    expect(shaped[0].options.some((o) => o.label === 'Past the cap')).toBe(false);
+    expect(shaped[0].hasPreview).toBe(true);
   });
 });
 

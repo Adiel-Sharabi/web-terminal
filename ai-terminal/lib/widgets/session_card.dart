@@ -40,6 +40,7 @@ class SessionCard extends StatelessWidget {
     this.onBellTap,
     this.onRecapTap,
     this.onMoreTap,
+    this.onAutoResumeTap,
     this.selected = false,
     this.dragHandle,
   });
@@ -81,6 +82,11 @@ class SessionCard extends StatelessWidget {
   /// every card a visible, tappable way in (spec: fork/rename/kill must be
   /// reachable without relying on a hidden gesture). `null` hides the button.
   final VoidCallback? onMoreTap;
+
+  /// Tapping the 5h wait chip — turns auto-resume off (or back on) for this
+  /// session (#137). `null` renders the chip as a plain label with no tap target,
+  /// which is what a read-only surface wants.
+  final VoidCallback? onAutoResumeTap;
 
   /// True when this row is the one shown in the split view's detail pane —
   /// draws a primary-colored outline so the active session is obvious.
@@ -202,6 +208,19 @@ class SessionCard extends StatelessWidget {
                           color: StatusColor.forStatus(status),
                         ),
                       ),
+                    // #137 — sitting out the 5h usage window. Placed here, directly
+                    // after the status word and before the capacity numbers,
+                    // because it QUALIFIES what the session is doing rather than
+                    // measuring it. Renders the server's derived usageLimit and
+                    // decides nothing itself — see UsageLimit's doc comment.
+                    if (session.usageLimit?.waiting == true) ...[
+                      if (label.isNotEmpty && !hasApiError)
+                        const SizedBox(width: 8),
+                      _WaitChip(
+                        limit: session.usageLimit!,
+                        onTap: onAutoResumeTap,
+                      ),
+                    ],
                     // #38 — live Claude context-window % (never recomputed;
                     // read straight off the session payload). Color via the
                     // shared ctxColor SSOT (warn 50 / danger 70). Absent/stale
@@ -415,5 +434,66 @@ String? attentionKindForStatus(String status) {
       return 'apierror';
     default:
       return null;
+  }
+}
+
+/// #137 — "this session is waiting out its 5-hour window, and here is when it
+/// comes back". Tapping switches auto-resume off for the session (and on again).
+///
+/// Two states, and the difference is load-bearing: `resumes 14:32` promises
+/// something will happen, `on hold` says nothing will. Showing the first for a
+/// session whose resume the user switched off would be the badge lying about the
+/// timer — the exact class of disagreement #137 exists to remove.
+class _WaitChip extends StatelessWidget {
+  const _WaitChip({required this.limit, this.onTap});
+
+  final UsageLimit limit;
+  final VoidCallback? onTap;
+
+  @override
+  Widget build(BuildContext context) {
+    final theme = Theme.of(context);
+    final on = limit.enabled;
+    final color = on ? StatusColor.capped : theme.colorScheme.onSurfaceVariant;
+    final at = clockTime(limit.resumeAt);
+    // "resumes" is keyed on ARMED, not on waiting: the cap prompt can be seen before
+    // any reset time is known, and the worker cannot arm a timer without one — so
+    // saying "resumes" then would promise something nothing is scheduled to do.
+    final text = (on && limit.armed && at.isNotEmpty) ? 'resumes $at' : 'on hold';
+    final chip = Container(
+      padding: const EdgeInsets.symmetric(horizontal: 6, vertical: 1),
+      decoration: BoxDecoration(
+        borderRadius: BorderRadius.circular(7),
+        border: Border.all(color: color.withValues(alpha: 0.45)),
+      ),
+      child: Row(
+        mainAxisSize: MainAxisSize.min,
+        children: [
+          Icon(Icons.pause_circle_outline, size: 11, color: color),
+          const SizedBox(width: 3),
+          Text(
+            text,
+            style: theme.textTheme.bodySmall?.copyWith(
+              color: color,
+              fontWeight: FontWeight.w600,
+              fontFeatures: const [FontFeature.tabularFigures()],
+            ),
+          ),
+        ],
+      ),
+    );
+    if (onTap == null) return Semantics(label: text, child: chip);
+    return Tooltip(
+      message: !on
+          ? '5-hour limit reached. Auto-resume is off for this session. Tap to turn it back on.'
+          : (limit.armed && at.isNotEmpty
+              ? '5-hour limit reached. This session resumes on its own at $at. Tap to turn auto-resume off.'
+              : '5-hour limit reached. This session will resume on its own once the reset time is known. Tap to turn auto-resume off.'),
+      child: InkWell(
+        onTap: onTap,
+        borderRadius: BorderRadius.circular(7),
+        child: chip,
+      ),
+    );
   }
 }

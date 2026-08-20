@@ -122,7 +122,7 @@ class AnswerFrame {
 ///   the "Submit" review then digit "1" ("Submit answers") to finalize (#39).
 /// - multi-question: after every tab is answered a Submit review appears whose
 ///   default is "Submit answers", so a trailing `Enter` finalizes it.
-/// - free-text ("Other"), SINGLE-SELECT single question only: Claude's selector
+/// - free-text ("Other"), COMPACT SINGLE-SELECT only: the compact selector
 ///   renders an implied "Type something." row just after the real options (row
 ///   `options.length + 1`). Answering with free text is THREE separate, delayed
 ///   stdin writes: the row digit (consumed as the selector, NOT part of the
@@ -130,34 +130,51 @@ class AnswerFrame {
 ///   text+CR burst reads as a paste, not a submit). See [otherText].
 ///
 /// [otherText] is an optional per-question free-text answer (parallel to
-/// [selections]); a non-empty, non-whitespace entry routes a single-select
-/// single question through the "Other" path above instead of its numeric
-/// selection. It is consumed ONLY on that proven path. Multi-select and
-/// multi-question are deferred and never consume [otherText]:
-/// - multi-select: on-device, the "Type something." row is a checkbox that
-///   toggles rather than opening a free-text input, so digit+text+Enter would
-///   submit a checked-but-empty option and lose the text;
-/// - multi-question: the tab-advance semantics of a free-text submit are
-///   unverified on-device.
-/// The overlay correspondingly hides the Other row unless there is exactly one,
-/// non-multiSelect question.
+/// [selections]); a non-empty, non-whitespace entry routes a COMPACT
+/// SINGLE-SELECT question through the "Other" path above instead of its numeric
+/// selection. Two exclusions, each measured rather than assumed:
+///
+/// - SIDE-BY-SIDE (`hasPreview`) — THE ROW DOES NOT EXIST THERE. Measured on
+///   claude 2.1.237 with `probe-askq-layout.js --shape preview-single --keys
+///   "4,indigo actually,CR"`: the previewed selector lists only the real options
+///   ("1. Red / 2. Green / 3. Blue") and then a separator and "Chat about this"
+///   — no "Type something." row at all. The screens after the digit and after
+///   the text were BYTE-IDENTICAL to the first render, and the trailing CR
+///   committed the still-default top row. The transcript recorded
+///   `"Pick a color"="Red"`: the free text is discarded AND an option the user
+///   never picked is submitted. That is the exact mirror of the note bug this
+///   issue is about — `n` exists only side-by-side, "Type something." only
+///   compact — and it is worse, because the answer is confidently wrong rather
+///   than merely incomplete.
+/// - MULTI-SELECT — the row is a CHECKBOX. Re-measured on claude 2.1.234:
+///   checking it and submitting records "The user did not answer the
+///   questions.", so the whole answer is lost, not merely its text.
+///
+/// MULTI-QUESTION is included since #143 measured it working — but only in the
+/// compact layout, which is the only shape that was driven. The overlay hides
+/// the Other row wherever this branch will not consume it.
 ///
 /// [noteText] (issue #64 Gap 1) is an optional per-question NOTE attached to
 /// an ALREADY-chosen option — distinct from [otherText]/#36, which REPLACES
-/// the numeric answer with free text. Claude's TUI advertises "press n to add
-/// notes"; a non-empty, non-whitespace entry, paired with a non-empty [sel],
-/// routes a single-select single question through the note path below
-/// instead of the plain auto-submitting digit. If [otherText] is ALSO set for
-/// that question, Other wins (checked first) — the two are never combined.
-/// Same deferred scope as Other: multi-select and multi-question never
-/// consume [noteText].
+/// the numeric answer with free text. The two are never combined, and since
+/// #143 the LAYOUT decides which of them can apply rather than the branch
+/// order: Other exists only on a compact card, a note only on a previewed one,
+/// so a card offers one affordance or the other and never both. If both are set
+/// anyway (this is a public pure function), the eligible one wins.
 ///
-/// *** The exact `n` byte sequence below is NOT YET DEVICE-VERIFIED ***
-/// (unlike every other path here, which is). Claude decides when to raise
-/// AskUserQuestion, so this could not be forced against the live TUI while
-/// writing this: confirm on a real device before trusting it the way the
-/// digit / Other / multi-select sequences are trusted. See the note branch
-/// below for the reasoning behind the sequence chosen.
+/// NOTES ARE A SIDE-BY-SIDE-LAYOUT FEATURE ONLY (#143, measured against claude
+/// 2.1.234). The previewed selector's footer reads
+/// "Enter to select · up/down to navigate · n to add notes · Esc to cancel" and
+/// honours the key; the COMPACT selector advertises no such key and ignores it
+/// outright. So [noteText] is consumed only for a single, single-select question
+/// whose [PendingQuestionItem.hasPreview] is true, and the overlay hides the
+/// "+ Add a note" affordance everywhere else. Same lesson as the digit
+/// semantics above: THE LAYOUT DECIDES WHAT THE KEY MEANS.
+///
+/// The sequence shipped before #143 was a GUESS, and it was wrong in BOTH
+/// layouts — on a compact card it degenerated to a correct plain selection with
+/// the note silently discarded, and on a previewed one it delivered the note but
+/// lost the answer. The measured replacement is in the note branch below.
 ///
 /// Pure, so the mapping is unit-testable.
 List<AnswerFrame> buildAnswerFrames(
@@ -175,10 +192,27 @@ List<AnswerFrame> buildAnswerFrames(
     final sel = qi < selections.length ? selections[qi] : const <int>{};
     final other = qi < otherText.length ? otherText[qi]?.trim() : null;
     final note = qi < noteText.length ? noteText[qi]?.trim() : null;
-    if (!multiQuestion && !q.multiSelect && other != null && other.isNotEmpty) {
+    if (!q.multiSelect && !q.hasPreview && other != null && other.isNotEmpty) {
       // Free-text ("Other"): select the implied "Type something." row, type the
       // answer, submit. The three land in SEPARATE stdin reads (each carries
       // [gap]) so Claude treats the text as an answer, not a paste.
+      //
+      // MULTI-QUESTION IS INCLUDED (#143). It was deferred on "unverified TUI
+      // tab-advance semantics"; measured on claude 2.1.234, the digit lands on
+      // the row and opens a free-text editor (the footer gains "ctrl+g to edit
+      // in Notepad"), and the CR below commits it AND advances the tab exactly
+      // as a single-select digit does — the loop tail then contributes the one
+      // Submit-review Enter. Driving 4,<text>,CR,1,RIGHT,CR against a
+      // single-select + multi-select pair recorded BOTH answers intact.
+      //
+      // !hasPreview IS PART OF THE GATE, and it is not a precaution — it is
+      // measured (claude 2.1.237, see the function doc). The side-by-side
+      // selector has NO "Type something." row, so this digit moves nothing, the
+      // text is swallowed and the CR commits whatever row happens to be
+      // highlighted: the probe recorded "Red" for a question whose free-text
+      // answer was "indigo actually". THE LAYOUT DECIDES WHETHER THE ROW EXISTS
+      // AT ALL — exactly as it does for `n` in the note branch below.
+      //
       // SINGLE-SELECT only: in multi-select the "Type something." row is a
       // checkbox that toggles (no free-text input), so this path is gated off
       // and the multi-select branch below ignores otherText entirely.
@@ -187,26 +221,40 @@ List<AnswerFrame> buildAnswerFrames(
       frames.add(const AnswerFrame('\r', gap)); // submit
     } else if (!multiQuestion &&
         !q.multiSelect &&
+        q.hasPreview &&
         sel.isNotEmpty &&
         note != null &&
         note.isNotEmpty) {
-      // Note (#64 Gap 1) attached to the option at sel.first. A single-select
-      // digit submits outright in the compact layout (see the class doc above),
-      // so it can't be used to land on the row first — Down-arrow presses
-      // instead walk the highlight down from the TUI's assumed default top row,
-      // the same relative-nav idiom #39 already uses (Right-arrow to the Submit
-      // review) for "move without submitting". Each step is DEVICE-UNVERIFIED
-      // (see the function doc); if verification finds a different default
-      // highlight, keybinding, or that the note editor needs its own
-      // confirm before the final submit, only this branch needs correcting —
-      // buildAnswerFrames stays the one place the fix belongs.
+      // Note (#64 Gap 1) attached to the option at sel.first. Every step below
+      // is MEASURED against claude 2.1.234 (#143). What this replaced was a
+      // guess, and it silently discarded the note.
+      //
+      //   * hasPreview gates the branch because `n` is honoured ONLY in the
+      //     side-by-side layout. A compact selector ignores it, so the old
+      //     sequence degenerated to "down x idx, CR" — a CORRECT plain
+      //     selection with the note dropped in silence, which is exactly why
+      //     nothing ever looked wrong.
+      //   * The default highlight IS the top row, so down x idx lands on
+      //     sel.first.
+      //   * ESC closes the NOTE EDITOR without cancelling the question, despite
+      //     the footer reading "Esc to cancel". It is a lone 0x1b, which the
+      //     worker's isEscapeKey would read as an interrupt — but that rule is
+      //     gated on a `working` session and one owing an answer is `waiting`,
+      //     so it is not armed here (see #55's interrupt contract).
+      //   * The trailing CR then commits the highlighted option WITH the note.
+      //
+      // Verdicts read from the transcript, never the screen:
+      //   down,n,<note>,CR      -> "=(no option selected) notes: ..." answer LOST
+      //   down,CR,n,<note>,CR   -> "=Green"                           note LOST
+      //   down,n,<note>,ESC,CR  -> "=Green ... notes: ..."            both OK
       final idx = sel.first;
       for (var i = 0; i < idx; i++) {
-        frames.add(const AnswerFrame('\x1b[B', settle)); // ↓ to the chosen row
+        frames.add(const AnswerFrame('\x1b[B', settle)); // down to the chosen row
       }
       frames.add(const AnswerFrame('n', gap)); // open the note editor
       frames.add(AnswerFrame(note, gap)); // the note text
-      frames.add(const AnswerFrame('\r', gap)); // submit
+      frames.add(const AnswerFrame('\x1b', gap)); // ESC — closes the EDITOR only
+      frames.add(const AnswerFrame('\r', gap)); // commit the highlighted option
     } else if (q.multiSelect) {
       final rows = sel.toList()..sort();
       for (final i in rows) {
@@ -288,6 +336,58 @@ String? lastAssistantText(List<TranscriptTurn> turns) {
   return null;
 }
 
+/// Renders the INLINE markdown an option description actually carries, as
+/// [TextSpan]s (#108).
+///
+/// The lead-up panel got a full `MarkdownBody`; a description cannot have one,
+/// and the reason is the space budget below. `MarkdownBody` is a block widget
+/// with no `maxLines`, so it would silently drop the two-line clamp that
+/// `kOptionRowMax = 96` was MEASURED against — one 493-character description
+/// (the longest on record) would then be taller than the whole option list.
+/// Spans keep `Text.rich(maxLines:, overflow: ellipsis)` working, and they are
+/// also what #83 requires: never a widget in the text flow.
+///
+/// SCOPE IS MEASURED, not assumed. Across the 127 real `AskUserQuestion` calls
+/// in this machine's transcripts (483 options, every one of them carrying a
+/// description), 3.3% of descriptions contain markdown — and every occurrence
+/// is an inline code span, `` `like this` ``. No headings, no lists, no links.
+/// So this handles code spans and `**bold**` and deliberately stops there:
+/// block syntax has never appeared, and single-asterisk italics is ambiguous
+/// with the glob patterns these descriptions genuinely do contain (`*.dart`).
+/// Unmatched syntax is left as literal text rather than guessed at.
+List<InlineSpan> inlineMarkdownSpans(
+  String text, {
+  required TextStyle? base,
+  required TextStyle? code,
+}) {
+  final spans = <InlineSpan>[];
+  var last = 0;
+  for (final m in _inlineMd.allMatches(text)) {
+    if (m.start > last) {
+      spans.add(TextSpan(text: text.substring(last, m.start), style: base));
+    }
+    final codeBody = m.group(1);
+    spans.add(codeBody != null
+        ? TextSpan(text: codeBody, style: code)
+        : TextSpan(
+            text: m.group(2),
+            style: (base ?? const TextStyle()).copyWith(
+              fontWeight: FontWeight.w700,
+            ),
+          ));
+    last = m.end;
+  }
+  if (last < text.length) {
+    spans.add(TextSpan(text: text.substring(last), style: base));
+  }
+  // A description with no markup is still exactly one span, so the caller never
+  // has to special-case the common (96.7%) path.
+  if (spans.isEmpty) spans.add(TextSpan(text: text, style: base));
+  return spans;
+}
+
+final RegExp _inlineMd = RegExp(r'`([^`]+)`|\*\*([^*]+)\*\*');
+
 // --- The space budget (#108) -------------------------------------------------
 //
 // THE OPTIONS ARE RESERVED FIRST. That inversion is the whole point.
@@ -316,6 +416,13 @@ const double kTabStripH = 38; // multi-question chip strip
 const double kCtxChrome = 50; // lead-up panel margin + padding + label row
 const double kOptionRowMax = 96; // label + a two-line description at 412dp
 const double kOptionPeek = 16; // a deliberate half-row: "there is more below"
+
+/// Lines of an option's `preview` block shown once that option is selected
+/// (#145). The server caps a preview at 2000 characters, which is roughly 30
+/// lines — taller than a phone card — so it is clamped here too, VISIBLY: the
+/// ellipsis says "there is more of this in the terminal" where a silent cut
+/// would let the reader believe they had seen the whole snippet.
+const int kPreviewMaxLines = 14;
 
 /// Two whole option rows plus a peek of the third. The peek matters as much as
 /// the rows: it makes the cut land somewhere chosen, so a clipped list reads as
@@ -388,6 +495,16 @@ class QuestionOverlay extends StatefulWidget {
 class _QuestionOverlayState extends State<QuestionOverlay> {
   int _tab = 0;
   late List<Set<int>> _selected;
+
+  /// One stable key per (tab, option) so a revealed preview can be scrolled into
+  /// view (#145 — see [_revealPreview]). Keyed by tab as well as index because
+  /// the tabs share one scroll view and index 0 is a different row on each.
+  /// Created lazily and kept for the life of the overlay: a GlobalKey has to be
+  /// the SAME object across rebuilds or the element it names is torn down.
+  final Map<String, GlobalKey> _optionKeys = {};
+
+  GlobalKey _optionKey(int i) =>
+      _optionKeys.putIfAbsent('$_tab:$i', () => GlobalKey());
 
   /// Per-question free-text ("Other") answer, parallel to [_selected]. `null`
   /// means Other is NOT the active choice for that tab (numeric-selection mode);
@@ -508,6 +625,44 @@ class _QuestionOverlayState extends State<QuestionOverlay> {
           ..clear()
           ..add(i);
       }
+    });
+    _revealPreview(q, i);
+  }
+
+  /// Scroll a just-selected option's `preview` block into view (#145).
+  ///
+  /// Selecting is what reveals a preview, and the block is far taller than the
+  /// row that opened it. On a phone the option list gets `kOptionFloor` — about
+  /// two rows — so choosing the LAST option opens a ~300px block entirely below
+  /// the viewport: the radio fills, nothing else changes, and the preview this
+  /// feature exists to show is invisible on exactly the narrow screen it was
+  /// reported from.
+  ///
+  /// Deliberately narrow. It fires only for an option that actually HAS a
+  /// preview, so no preview-less question changes behaviour and #94's
+  /// "options are reachable without scrolling" budget is untouched.
+  ///
+  /// Deferred to the next frame because the block does not exist until the
+  /// rebuild that `setState` above schedules — and RE-CHECKED there, because
+  /// between scheduling and running, the overlay can be dismissed or the tab
+  /// switched (#111: a deferred scroll that does not re-check moves the wrong
+  /// thing, or a thing that is gone).
+  void _revealPreview(PendingQuestionItem q, int i) {
+    if (i < 0 || i >= q.options.length) return;
+    if (q.options[i].preview.isEmpty) return;
+    WidgetsBinding.instance.addPostFrameCallback((_) {
+      if (!mounted) return;
+      if (!_selected[_tab].contains(i)) return;
+      final ctx = _optionKey(i).currentContext;
+      if (ctx == null) return;
+      Scrollable.ensureVisible(
+        ctx,
+        duration: const Duration(milliseconds: 180),
+        curve: Curves.easeOut,
+        // Bring the BOTTOM of the tile up: the preview hangs below the label,
+        // so aligning the top would scroll the block itself back out of sight.
+        alignment: 1.0,
+      );
     });
   }
 
@@ -996,23 +1151,37 @@ class _QuestionOverlayState extends State<QuestionOverlay> {
           for (var i = 0; i < q.options.length; i++)
             _optionTile(theme, q, i),
           // Note (#64 Gap 1): a small affordance to attach a note to the
-          // option just picked above — NOT a replacement answer (that's
-          // Other, directly below; see buildAnswerFrames for how the two
-          // never combine). Same proven-safe gate as Other (single-select,
-          // single question) PLUS "a real option is already selected" —
-          // Other clears [_selected], so this naturally hides itself while
-          // free-texting there.
+          // option just picked above — NOT a replacement answer (that's Other,
+          // below; see buildAnswerFrames for how the two never combine). Gated
+          // on single-select + single question, PLUS "a real option is already
+          // selected".
+          //
+          // AND on hasPreview (#143): the compact selector has no notes feature
+          // at all, so offering the affordance there promised something the TUI
+          // cannot receive and the typed note was silently thrown away. Since
+          // Other is gated the OTHER way (compact only), the two never appear on
+          // one card — so the note cannot be open while free-texting in Other,
+          // and it no longer relies on Other clearing [_selected] to hide.
           if (widget.question.questions.length == 1 &&
               !q.multiSelect &&
+              q.hasPreview &&
               _selected[_tab].isNotEmpty) ...[
             _noteAffordance(theme),
             if (_noteActive) _noteField(theme),
           ],
-          // Free-text ("Other") answer. Offered ONLY for a single-select single
-          // question — the proven path. Multi-select's "Type something." row is
-          // a checkbox with no free-text input, and multi-question tab-advance
-          // is unverified; both are deferred (see buildAnswerFrames).
-          if (widget.question.questions.length == 1 && !q.multiSelect) ...[
+          // Free-text ("Other") answer. Offered for a COMPACT single-select
+          // question, multi-question included since #143 measured the
+          // tab-advance working there.
+          //
+          // Two exclusions, and they are the mirror image of the note gate
+          // above — this card offers exactly what the layout it mirrors offers.
+          // Side-by-side (hasPreview): that selector renders NO "Type
+          // something." row, so the digit moves nothing, the text is swallowed
+          // and the trailing CR commits whatever row is highlighted — measured
+          // recording "Red" for a free-text answer of "indigo actually".
+          // Multi-select: its "Type something." row is a checkbox with no
+          // free-text input. See buildAnswerFrames for both measurements.
+          if (!q.multiSelect && !q.hasPreview) ...[
             _otherTile(theme),
             if (_otherActive) _otherField(theme),
           ],
@@ -1176,6 +1345,9 @@ class _QuestionOverlayState extends State<QuestionOverlay> {
     final opt = q.options[i];
     final selected = _selected[_tab].contains(i);
     return Padding(
+      // Named so _revealPreview can scroll this exact row into view once
+      // selecting it opens a preview taller than the row itself (#145).
+      key: _optionKey(i),
       padding: const EdgeInsets.symmetric(vertical: 3),
       child: Material(
         color: selected
@@ -1212,8 +1384,26 @@ class _QuestionOverlayState extends State<QuestionOverlay> {
                       if (opt.description.isNotEmpty)
                         Padding(
                           padding: const EdgeInsets.only(top: 2),
-                          child: Text(
-                            opt.description,
+                          child: Text.rich(
+                            // #108 — RENDERED inline markdown, not raw. A
+                            // description reading `ACS.Server.exe --out <path>`
+                            // showed its backticks, the same defect the lead-up
+                            // panel had. Spans rather than a MarkdownBody so the
+                            // clamp below survives (see inlineMarkdownSpans).
+                            TextSpan(
+                              children: inlineMarkdownSpans(
+                                opt.description,
+                                base: theme.textTheme.bodySmall?.copyWith(
+                                  color: theme.colorScheme.onSurfaceVariant,
+                                ),
+                                code: theme.textTheme.bodySmall?.copyWith(
+                                  fontFamily: 'monospace',
+                                  color: theme.colorScheme.onSurfaceVariant,
+                                  backgroundColor:
+                                      theme.colorScheme.surfaceContainerHighest,
+                                ),
+                              ),
+                            ),
                             // Two lines until chosen, then the whole thing
                             // (#108). One verbose option could otherwise be
                             // taller than the entire viewport and push every
@@ -1233,6 +1423,62 @@ class _QuestionOverlayState extends State<QuestionOverlay> {
                             overflow: selected ? null : TextOverflow.ellipsis,
                             style: theme.textTheme.bodySmall?.copyWith(
                               color: theme.colorScheme.onSurfaceVariant,
+                            ),
+                          ),
+                        ),
+                      // #145 — the preview BLOCK, on the selected row only.
+                      //
+                      // This mirrors what Claude's own side-by-side layout does:
+                      // moving the highlight is what swaps the preview box, and
+                      // nothing is committed until Enter. Here a tap only moves
+                      // the selection too (Send commits), so reading a preview
+                      // stays free and reversible — you are not made to choose
+                      // an option in order to find out what it means.
+                      //
+                      // Monospace and unrendered: a preview is a snippet, a diff
+                      // or a mock-up whose ALIGNMENT is the content. Running it
+                      // through the markdown spans the description uses would
+                      // eat the backticks and asterisks that a code block is
+                      // made of.
+                      if (selected && opt.preview.isNotEmpty)
+                        Padding(
+                          padding: const EdgeInsets.only(top: 8),
+                          child: Container(
+                            width: double.infinity,
+                            padding: const EdgeInsets.symmetric(
+                              horizontal: 10,
+                              vertical: 8,
+                            ),
+                            decoration: BoxDecoration(
+                              color: theme.colorScheme.surfaceContainerHighest,
+                              borderRadius: BorderRadius.circular(
+                                AppShape.small,
+                              ),
+                              border: Border.all(
+                                color: theme.colorScheme.outlineVariant,
+                              ),
+                            ),
+                            child: Text(
+                              opt.preview,
+                              maxLines: kPreviewMaxLines,
+                              overflow: TextOverflow.ellipsis,
+                              style: theme.textTheme.bodySmall?.copyWith(
+                                // 'monospace' is an Android/fontconfig alias and
+                                // resolves to NOTHING on Windows, macOS and iOS,
+                                // where Flutter then falls back to a proportional
+                                // face — which would defeat the entire reason this
+                                // block is unparsed. The fallback list is what
+                                // makes the alignment claim true off Android.
+                                fontFamily: 'monospace',
+                                fontFamilyFallback: const [
+                                  'Consolas',
+                                  'Menlo',
+                                  'DejaVu Sans Mono',
+                                  'Courier New',
+                                ],
+                                height: 1.35,
+                                color: theme.colorScheme.onSurface,
+                              ),
                             ),
                           ),
                         ),

@@ -370,6 +370,128 @@ Claude fires **no hook** on a user interrupt (`Stop` does not run), and worker s
 ### How to verify (no production cold-restart to test a hypothesis)
 `node scripts/rig/rig.js up` runs a complete, **isolated** web-terminal (port 7999, own worker pipe, own data dir, own config) from the working tree — it cannot touch production. `node scripts/rig/verify-submit.js` proves a LONG prompt actually submits, end to end. **The PTY/rollout is ground truth; the screen lies** — Claude echoes a submitted prompt back into its transcript, so "is the text still visible" cannot distinguish *typed* from *submitted*. The only valid detector is **"did a turn start"**.
 
+### A spawned agent is NOT ready when its session is (#147)
+
+Submit has a precondition the contract above assumed: **the agent has to exist.**
+A new session drops the user into the chat lens seconds before `claude` boots, and
+until its composer is up the PTY is still sitting at the **shell** — so a prompt
+sent in that window is handed to bash, runs as a command or does nothing, and is
+gone with no error anywhere. Reported 2026-08-20 on the phone, the tablet and the
+Windows desktop *at once*, which is what located it as a missing **server** signal
+rather than three client bugs.
+
+Measured with `scripts/rig/probe-claude-ready.js` against claude 2.1.237, verdict
+taken from **"did a turn start"** (the screen cannot tell a typed line from a
+submitted one — that is why this survived):
+
+| | run 1 | run 2 |
+|---|---|---|
+| bash prompt | 3.3s | 3.3s |
+| `claude` typed | 3.7s | 3.7s |
+| **composer caret** | **5.0s** | **6.1s** |
+
+`submit before the caret -> NO turn started, bash printed "command not found"`
+`submit after  the caret -> a turn started`
+
+**That 1.1s spread on ONE machine is the whole argument for a marker over a
+timer.** A timer tuned to the fast boot eats prompts on the slow one; one tuned to
+the slow boot makes every session feel broken.
+
+The marker is a **registry field** (`lib/agents.js` → `readiness.composer`), the
+rule is pure (`lib/agent-ready.js`), and `pty-worker.js` applies it where bytes
+meet the PTY — the same shape as submit and interrupt. **Codex deliberately
+declares none**: its candidate has not been measured against a real boot, and an
+unmeasured marker is exactly what #143 shipped. Undeclared means *ready
+immediately* — today's behaviour, unchanged.
+
+**The scan does not start until the launch command has been written.** Before
+that the PTY is showing the *shell*, and `❯` is the default prompt glyph of
+starship, pure and several oh-my-posh themes — on such a box the latch would flip
+before the agent was even launched and the gate would silently no-op. A session
+with **no** `autoCommand` is never gated at all: it is a shell until you type
+something, and gating it would block the very submit that types `claude`.
+
+**It can never wedge**, because a session stuck on "starting" would be worse than
+the bug: any hook forces it ready; a **45s fallback** (`WT_READY_FALLBACK_MS`)
+forces it if no marker ever arrives, which is the only thing that covers `claude:
+command not found` or a crash on launch; a plain shell and every unknown agent are
+ready from birth; and `server.js`, `POST /api/sessions` and the companion all read
+a missing field as **ready**, so an older worker or an older server never refuses a
+submit. The fallback is a **ceiling, not a detector** — the marker is still the
+signal, and 45s sits far above the measured 5–6s boot so it cannot race a
+slow-but-working start.
+
+> **A restored session is NOT seeded from its scrollback**, and the first cut of
+> this got it backwards. Restore does not reattach anything: it spawns a **fresh
+> shell** and re-runs `claude --resume <id>`, which boots *slower* than a cold
+> start. Seeding from the old scrollback — which still holds the previous life's
+> marker — marked every restored session ready at t=0, so the gate was dead after
+> every cold restart, including the one this change itself needs to deploy.
+
+> **Two known gaps, both recorded rather than guessed at.**
+>
+> 1. The latch is one-way and does not reset when the agent **exits** back to its
+>    shell (`/exit`, Ctrl-D, a crashed TUI). That session keeps reporting ready, so
+>    a later submit reaches bash — #147 again, further along.
+> 2. `❯` is also the default PS1 of starship, pure and some oh-my-posh themes.
+>    Arming after the launch write stops the shell's *first* prompt from counting,
+>    but not one printed straight after a launch that **failed** — there the latch
+>    flips in milliseconds and never reaches the 45s fallback. **Measured
+>    2026-08-20: not live on this fleet** — Git Bash's PS1 ends in `$` and a failed
+>    launch prints `bash: …: command not found`.
+>
+> Both share one honest fix — key on the composer **frame** instead of the bare
+> caret — and one reason it is not done here: that needs a fresh rig measurement
+> of what the frame prints, and an unmeasured marker is what #143 shipped.
+
+The client gates **submit only** — typing is untouched and the text stays in the
+box. It is **not** auto-sent on ready, on purpose: firing a prompt somebody was
+still editing is its own way to lose their words.
+
+The **live `/`-line is gated too**, not just submit. That path writes bytes *as
+you type*, so a `/co` typed in the first seconds landed on bash's command line and
+the worker then typed `claude --resume …` onto the same line — running
+`/coclaude --resume …`, which starts no agent at all. Gating submit alone left a
+failure worse than the one being fixed.
+
+> **Not yet done:** `app.html` is ungated. It keeps no session-state map to hang
+> `agentReady` on, and the report was companion-only — so the web client can still
+> type a prompt into a booting agent.
+
+### A CLIENT gate does not cover a WORKER-originated write (#137/#138 × #147)
+
+The gate above lives in the client, which is right for a *prompt* — a person typed
+it. But the worker writes into a PTY on its own account too, and none of those
+sites consulted readiness. `fireAutoResume` (the 5h auto-resume, #137/#138) ends in
+`submitLine(s, 'continue')`, and `armAutoResumeTimer` runs on the **restore** path
+with `Math.max(0, fireAt - Date.now())` — **zero** for a window that turned over
+while the worker was down. So a cold restart of a capped session re-armed and fired
+while `claude --resume <id>` was still booting, which boots *slower* than a cold
+start: `continue` landed on **bash**. That is #147 again, produced by the feature
+meant to rescue the session, and the `status === 'working'` guard cannot see it —
+**a booting session is not `working`.**
+
+Neither change has this defect alone; the merge of the two creates it. **Any new
+worker-originated write must check `session._ready`** and **defer**, never skip: the
+window is real and the session still needs its nudge. Check it *before* the one-shot
+(`autoResumeFiredForResetAt`) is consumed — `armAutoResumeTimer` refuses to re-arm on
+a consumed one — and let the retry ride `session._autoResumeTimer` so a dead PTY or a
+returning user cancels it like any other armed resume. The wait needs no ceiling of
+its own: #147's 45s fallback is armed for **every** session at spawn.
+
+### A detector's phrase must not be in our own source (#138)
+
+The cap-prompt detector scans **all** agent-session PTY output and answers by
+**writing a keystroke**. Its phrase was captured verbatim into a `lib/agents.js`
+comment and assembled in `tests/reset-resume.spec.js` — so a Claude session working
+in this checkout that `cat`'d, grepped or diffed either file matched, typed a stray
+`1` into its composer and recorded a cap block that never happened. **A match that
+causes an action is not a reading; treat "our own repo prints this" as a live input.**
+The rule is now structural and pure (`lib/usage-limit.js` `matchUsageLimitPrompt`):
+the sentence must **start** its line as a numbered option and have a sibling option
+**above or below** it — above *or* below, because "stop and wait" is the last option
+in a reordered render. The registry declares only the sentence.
+
 ## AskUserQuestion — the LAYOUT decides what the keys mean (#19)
 
 Answering Claude's question overlay drives its real TUI selector by writing keys
@@ -417,8 +539,119 @@ plain-mq    2,1,3,→,\r     -> "Pick a color"="Green", "Pick fruits"="Apple, Ch
 The last line is the regression guard: it must keep passing **without** the extra
 Enter, which is why the fix is a branch on `hasPreview` and not a blanket Enter.
 
-The preview **body** is deliberately not forwarded — it is free-form, can be large
-and nothing renders it. Only the fact that one exists crosses the wire.
+### The preview BODY now crosses the wire too (#145)
+
+It used to be dropped on purpose — *"free-form, can be large, and nothing renders
+it"* — which was right for exactly as long as nothing rendered it. Reported
+2026-08-19: a three-option prompt whose labels were `Land #182 (.debug suffix)` /
+`Play closed track upload` / `Leave it` kept every package name, snippet and
+blocker **inside the preview box**, so the chat lens was strictly less
+informative than the terminal *on the questions that need the most reading* —
+and no amount of client work could fix it, because the bytes were never sent.
+
+`_shapeQuestions` now publishes `preview` per option, capped at
+**`PQ_PREVIEW_CAP = 2000`** — its own budget, not the 800 sized for a label or a
+blurb, because a preview is a multi-line **block**. The overlay renders it in
+**monospace and unparsed** (its markup *is* the content) on the **selected row
+only**, clamped to `kPreviewMaxLines` with a visible ellipsis. Revealing it on
+select mirrors the TUI, where moving the highlight swaps the box and Enter
+commits; a tap here likewise only moves the selection, so reading a preview
+never costs you a choice.
+
+**`hasPreview` is still derived from the RAW option list — never recompute it
+from the shaped one.** The shaped list can lose a preview three ways: its option
+had no label and was filtered out, it fell past `PQ_MAX_OPTIONS`, or the body was
+a non-string/whitespace and was never attached. (Capping is **not** one of them —
+`_pqCap` truncates, it cannot empty a non-empty preview.) Any of the three would
+silently flip the question to the compact layout, and the layout decides what
+every answer key MEANS.
+
+The block is revealed by **selecting** its option, and selecting also **scrolls
+that row into view**. Without it the feature is invisible in the case it was
+reported from: the option list gets `kOptionFloor` (~two rows) on a phone, so
+choosing the last option opens a ~300px block entirely below the viewport — the
+radio fills and nothing else appears to happen. Note the font too: `'monospace'`
+is an Android/fontconfig alias that resolves to **nothing** on Windows, macOS and
+iOS, so the block carries a `fontFamilyFallback` — without it the alignment this
+whole treatment exists to preserve is lost on the desktop build.
+
+### The layout also decides whether NOTES exist at all (#143)
+
+The same rule reaches further than the digit. **`n` ("add a note") is a
+side-by-side-layout feature and does not exist in the compact one.** Measured
+against claude **2.1.234**, verdicts from the transcript:
+
+| layout | footer | `n` |
+|---|---|---|
+| compact | `Enter to select · ↑/↓ to navigate · Esc to cancel` | **ignored — no-op** |
+| side-by-side | `… · `**`n to add notes`**` · Esc to cancel` | opens a note editor |
+
+#64 Gap 1 shipped a note sequence that was **never device-verified** and was
+wrong in *both* layouts. On a compact card `n` and the note text are simply
+swallowed, so `↓×idx, n, <note>, CR` degenerates to `↓×idx, CR` — **a correct
+plain selection with the note silently discarded.** Nothing looked broken, which
+is exactly why it survived to ship. That is the failure mode this repo keeps
+paying for: *confidently wrong is worse than absent.*
+
+```
+↓,n,<note>,CR       -> "=(no option selected) notes: …"   the ANSWER is lost
+↓,CR,n,<note>,CR    -> "=Green"                           the NOTE is lost
+↓,n,<note>,ESC,CR   -> "=Green … notes: …"                both  <- the rule
+```
+
+**`Esc` closes the note EDITOR without cancelling the question**, despite the
+footer reading `Esc to cancel`. The whole fix rests on that. It is a lone `0x1b`,
+which `isEscapeKey` would read as an interrupt — but that rule is gated on a
+`working` session and one owing an answer is `waiting`, so it is not armed here.
+
+### `Other` (free text) is a COMPACT feature — the exact mirror of notes (#143)
+
+**`n` exists only side-by-side; `Type something.` exists only compact.** The two
+free-text affordances are mirror images, and the overlay now offers exactly the
+one its layout has. That symmetry is the whole rule; the three bullets below are
+just what each shape measured.
+
+- **Side-by-side — NOT OFFERED, and the reason is not caution.** Measured on
+  claude **2.1.237** (`--shape preview-single --keys "4,indigo actually,CR"`):
+  the previewed selector lists only the real options and then `Chat about this`
+  — **there is no `Type something.` row at all**. The screens after the digit
+  and after the text were **byte-identical** to the first render, and the
+  trailing CR committed the still-default top row. The transcript recorded
+  `"Pick a color"="Red"`. So the un-gated sequence does not merely lose the free
+  text: **it submits an option the user never picked** — worse than the note bug
+  this issue is named for, which at least landed the right option.
+- **Compact multi-question — WORKS, deferral lifted.** The digit lands on the
+  `Type something.` row and opens a free-text editor (the footer gains
+  `ctrl+g to edit in Notepad`); Enter commits it **and** advances the tab, just
+  like a single-select digit. `4,<text>,CR,1,→,CR` recorded both answers intact.
+  The lift is **compact-only**, because compact is the only layout it was driven
+  against.
+- **Multi-select — HOLDS.** The trailing row is a **checkbox** (`5. [✔] Type
+  something`) with no free-text input; the typed text is swallowed, and
+  submitting with only it checked records **`The user did not answer the
+  questions.`** — the whole answer comes back null, not merely textless.
+
+One consequence worth stating because it reads as a bug otherwise: **a card
+offers the note affordance or the `Other…` row, never both.** Notes are
+previewed-only, Other is compact-only, so "Other wins when both are set" is no
+longer a branch-order fact — the layout decides which one is eligible at all.
+
+Claude also renders a **`Chat about this`** row at `options.length + 2` that the
+overlay does not model at all.
+
+Shapes for `scripts/rig/probe-askq-layout.js`: `preview-mq`, `plain-mq`,
+`preview-single`, plus `plain-single`, `plain-multi` and `plain-mq2` (two
+single-select tabs — the only shape that exercises `Other` on a LAST tab, since
+`plain-mq`'s Q2 is multi-select) added for the above.
+
+> **`hasPreview` was being read off the SLICED option list.** `_shapeQuestions`
+> computed it from `kept` — post-`PQ_MAX_OPTIONS` — while its own comment three
+> lines above named that slice as one of the three ways a preview goes missing.
+> A preview carried only by an option past the cap therefore reported *compact*
+> for a question Claude lays out *side-by-side*, and every answer key means
+> something else across that line. Fixed to read the raw list, with the test that
+> was red first. **The rule was written down and the code still drifted from it —
+> which is the argument for the test, not for more prose.**
 
 ## Auth System
 - Cookie-based session auth (primary, for browser users)

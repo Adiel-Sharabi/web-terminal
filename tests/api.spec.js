@@ -1010,8 +1010,13 @@ test.describe('Session attention', () => {
       // served while it is still answerable.
       expect(body.question.questions[0].hasPreview).toBe(false);
       expect(body.question.questions[1].hasPreview).toBe(true);
-      // The preview BODY stays server-side.
-      expect(JSON.stringify(body)).not.toContain('a mockup');
+      // #145 — and the preview BODY rides along, on the LIVE hook path too, so
+      // the overlay can render what the terminal shows beside the options. This
+      // assertion used to be its exact opposite; it was correct only while
+      // nothing rendered the body.
+      expect(body.question.questions[1].options[0].preview).toBe('a mockup');
+      // An option without one carries no empty string to render around.
+      expect(body.question.questions[1].options[1].preview).toBeUndefined();
 
       // PostToolUse = answered → the live question is cleared.
       await raw.post('/api/hook', {

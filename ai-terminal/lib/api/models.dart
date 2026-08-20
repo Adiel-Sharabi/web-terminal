@@ -192,6 +192,20 @@ class Session {
   /// agent; this carries the work.
   final List<String> backgroundTasks;
 
+  /// Whether this session's agent CLI is up and able to receive a prompt (#147).
+  ///
+  /// A new session drops you into the chat lens seconds before `claude` has
+  /// booted; until then the PTY is still at the shell, and a prompt sent in that
+  /// window is handed to BASH and lost with no error anywhere. Server-derived
+  /// (`pty-worker.js` watches the composer marker declared in `lib/agents.js`)
+  /// and never re-derived here — measured on the rig, the marker appeared at 5.0s
+  /// on one run and 6.1s on the next, so no client-side timer is right.
+  ///
+  /// Defaults to TRUE, which is the deliberate failure mode: an older server
+  /// sends no such field, and reading that as "starting" would refuse submit on
+  /// every session it owns.
+  final bool agentReady;
+
   /// What this session is blocked on: `'question'`, `'permission'`, or `null`
   /// when it is not blocked at all (#79).
   ///
@@ -208,6 +222,9 @@ class Session {
 
   /// True when the session is blocked on the user, whatever the kind.
   bool get isWaitingOnUser => waitingFor != null;
+
+  /// The 5h usage-limit state (#137), or `null` from a server too old to send it.
+  final UsageLimit? usageLimit;
 
   /// Creates a session value object. [autoCommand] is optional (default `''`)
   /// so existing call sites and tests that predate the field keep compiling.
@@ -230,6 +247,8 @@ class Session {
     this.compactingSince,
     this.backgroundTasks = const <String>[],
     this.waitingFor,
+    this.agentReady = true,
+    this.usageLimit,
   });
 
   /// This session with a different pinned rank (#124), for the optimistic half of
@@ -258,6 +277,8 @@ class Session {
     compactingSince: compactingSince,
     backgroundTasks: backgroundTasks,
     waitingFor: waitingFor,
+    agentReady: agentReady,
+    usageLimit: usageLimit,
   );
 
   /// Builds a [Session] from one element of the `GET /api/sessions` array,
@@ -285,6 +306,9 @@ class Session {
       // banner simply never shows, rather than the lens guessing from `status`
       // and disagreeing with a server that knows better.
       waitingFor: _waitingFor(json['waitingFor']),
+      // Absent -> ready. See the field doc: the gate must fail OPEN.
+      agentReady: json['agentReady'] != false,
+      usageLimit: UsageLimit.fromJson(json['usageLimit']),
     );
   }
 
@@ -346,6 +370,56 @@ class Session {
 /// Claude Code status-line metrics for a session: context-window usage and the
 /// 5-hour / 7-day rate-limit usage, each a whole percentage (0–100) or `null`
 /// when that number isn't currently known.
+/// The 5-hour usage-limit state of one session (#137), exactly as the SERVER
+/// derived it (`lib/usage-limit.js`).
+///
+/// Nothing here is recomputed on the client, and that is the point: the worker
+/// arms its auto-resume timer from the same derivation, so a badge built from
+/// these fields cannot promise a resume the timer disagrees with. A client that
+/// re-read `metrics.fiveH` and applied its own threshold would be a second answer
+/// to a question the server already settled — the mistake #81/#83 kept paying for
+/// in other places.
+///
+/// An older server sends no `usageLimit` at all, so this is nullable everywhere
+/// and absence renders nothing.
+class UsageLimit {
+  /// The session is sitting out its 5h window right now.
+  final bool waiting;
+
+  /// A resume is actually scheduled. Narrower than [waiting]: a capped session the
+  /// user switched off is still waiting, but nothing will fire for it.
+  final bool armed;
+
+  /// Whether auto-resume is switched on for this session (the per-session opt-out).
+  final bool enabled;
+
+  /// When the window turns over, and when the resume actually fires — a minute
+  /// apart, and only the second is when anything happens, so the UI shows that one.
+  final int? resetAt;
+  final int? resumeAt;
+
+  const UsageLimit({
+    this.waiting = false,
+    this.armed = false,
+    this.enabled = true,
+    this.resetAt,
+    this.resumeAt,
+  });
+
+  static UsageLimit? fromJson(dynamic json) {
+    if (json is! Map) return null;
+    return UsageLimit(
+      waiting: json['waiting'] == true,
+      armed: json['armed'] == true,
+      // Default ON (#137) — an absent key must not read as "switched off", or a
+      // server mid-upgrade would show every capped session as abandoned.
+      enabled: json['enabled'] != false,
+      resetAt: _asInt(json['resetAt']),
+      resumeAt: _asInt(json['resumeAt']),
+    );
+  }
+}
+
 class SessionMetrics {
   final int? ctx;
 
@@ -1155,11 +1229,29 @@ class SubagentPage {
 class QuestionOption {
   final String label;
   final String description;
-  const QuestionOption({required this.label, this.description = ''});
+
+  /// The option's `preview` block — the code snippet or mock-up Claude renders
+  /// in the box beside the option list (#145). Empty when the option carries
+  /// none, which is also what an older server (that never sent the field) is
+  /// read as. Multi-line by nature: it is a BLOCK, not a blurb, so the overlay
+  /// renders it in monospace rather than as prose.
+  ///
+  /// Do NOT re-derive [PendingQuestionItem.hasPreview] from this list — the
+  /// server computes it from the RAW options, before label-less ones are dropped
+  /// and before the option count is capped, and it decides what every answer key
+  /// MEANS.
+  final String preview;
+
+  const QuestionOption({
+    required this.label,
+    this.description = '',
+    this.preview = '',
+  });
 
   factory QuestionOption.fromJson(Map<String, dynamic> json) => QuestionOption(
     label: (json['label'] ?? '').toString(),
     description: (json['description'] ?? '').toString(),
+    preview: (json['preview'] ?? '').toString(),
   );
 }
 

@@ -19,6 +19,9 @@ const agents = require('./lib/agents');
 const { splitTrailingCr, isEscapeKey, endsBracketedPaste } = require('./lib/submit-frames');
 const { endsInAltScreen } = require('./lib/replay-sanitize');
 const { scanOsc9 } = require('./lib/osc9-notify');
+// #147 — the pure readiness latch; the marker itself is a lib/agents.js field.
+const { createReadyDetector } = require('./lib/agent-ready');
+const usageLimit = require('./lib/usage-limit');
 
 const WORKER_VERSION = '0.6.2'; // 0.6.2: a session restored from a scrollback that ends mid-alt-screen (Claude killed while in /tui fullscreen, so ?1049l never arrived) gets a corrective ?1049l appended, instead of stranding xterm in the alt buffer showing a frozen frame over a live shell. Prior 0.6.1: the submit gap is measured against the wire, not the frame.
 
@@ -134,6 +137,28 @@ const API_ERROR_COMPACT_MIN_WAIT_MS = _apiErrFast ? 10 : 1500;       // ignore t
 const API_ERROR_COMPACT_FALLBACK_MS = _apiErrFast ? 300 : 45000;     // replay anyway if no idle hook arrives
 const API_ERROR_NEEDLE = Buffer.from('API Error');
 
+// #129 — how long a /compact can plausibly still be running before we conclude
+// the end-of-compaction signal was LOST rather than late.
+//
+// MEASURED, not guessed. Across the 51 compactions recorded in this machine's
+// own transcripts (`compact_boundary` lines, `compactMetadata.durationMs`):
+//
+//     min 94s · p50 138s · p75 143s · p90 156s · max 205s
+//
+// EVERY ONE of the 51 outran the 45s API_ERROR_COMPACT_FALLBACK_MS that this
+// backstop used to borrow — 100%, with the shortest more than double it. So the
+// timer that existed to catch a compaction which never settles was in fact
+// firing during every normal compaction, clearing the one flag that exists to
+// cover that window, mid-window, every single time. A backstop that fires on
+// the happy path is not a backstop.
+//
+// It is its own constant because it is its own FACT: "how long a compaction can
+// take" is not "how long to wait before replaying a prompt after an API error",
+// and the two were sharing a value only because the code that needed the second
+// was written first. 360s is ~1.8x the longest ever observed, so reaching it
+// means the signal genuinely never came.
+const COMPACTING_MAX_MS = _apiErrFast ? 300 : 360000;
+
 // Gap between typing text and the CR that submits it. An agent TUI reads input in raw
 // mode where Enter is CR (\r) — not LF (\n). How long the CR must trail the text is a
 // property OF THE AGENT, so it lives in the provider registry (lib/agents.js), not here.
@@ -149,28 +174,51 @@ function autoContinueEnabled() {
   return liveConfig('autoContinueOnApiError', true) === true;
 }
 
-// --- 5h usage-limit auto-resume (issue #69) ---------------------------------
+// --- 5h usage-limit auto-resume (issues #69, #137, #138) ---------------------
 // A session pinned on its account's 5-hour rate-limit window can only be revived
-// once that window resets. When the reset time is KNOWN — today only for Codex,
-// which records it in its rollout (lib/metrics-codex.js: fiveHResetAt); Claude's
-// status push carries no such field yet, see the stub at POST /api/claude-status —
-// arm a ONE-SHOT timer that sends the SAME 'continue' the API-error ladder sends
-// (via submitLine, below), AUTO_RESUME_DELAY_MS after the window turns over (a
-// small buffer so the account-side counter has actually rolled before we retry).
+// once that window resets. Arm a ONE-SHOT timer that sends the SAME 'continue'
+// the API-error ladder sends (via submitLine, below), AUTO_RESUME_DELAY_MS after
+// the window turns over (a small buffer so the account-side counter has actually
+// rolled before we retry).
 //
-// OPT-IN, default OFF, unlike the API-error ladder above (which reacts to a real,
-// observed error): this fires purely off a timestamp with no proof the session is
-// actually stalled on the cap — see the status check in fireAutoResume for the one
-// cheap guard this pass has. Precise blocked-state detection (a real "hit the 5h
-// cap" signal, for both agents) is a follow-up.
-const _autoResumeFast = process.env.WT_AUTO_RESUME_FAST === '1'; // tests: shrink the post-reset delay
-const AUTO_RESUME_DELAY_MS = _autoResumeFast ? 50 : 60000; // #69: resetAt + ~1 minute
+// BOTH AGENTS REPORT THE RESET TIME (#139 corrected this comment). It was once
+// true that only Codex did, and this block said so long after it stopped being
+// true: Claude's status push carries `rate_limits.five_hour.resets_at` — the same
+// epoch-seconds field, parsed by lib/metrics-claude.js and normalised by
+// lib/metrics-common.js — so there is nothing agent-specific left here and no stub
+// at POST /api/claude-status. A reader who believed the old text concluded this
+// feature was dead for the majority of sessions.
+//
+// DEFAULT ON (#137), which is only defensible because of the gate below. #69 ran
+// this OFF because it fired purely off a timestamp: "the reset elapsed and the
+// session isn't `working`" cannot tell a capped session from one you finished
+// with, so an idle session would be sent 'continue' and quota spent restarting
+// work nobody asked for. Opt-in WAS that mitigation. Turning it on replaces it
+// with a real signal rather than removing it —
+//
+// THE GATE: session.capBlocked, pushed by server.js (setFiveHResetAt RPC) from
+// the SAME metrics both agents already publish — the 5h window's used-percentage
+// at 100 with a still-future reset. The rule itself lives in lib/usage-limit.js
+// so the worker's arming decision and the server's UI state cannot drift apart.
+// ABSENT capBlocked means NOT blocked: an older server.js that never sends the
+// field simply never arms, which is the safe direction to fail in.
+// #69: resetAt + ~1 minute. The number itself lives in lib/usage-limit.js because
+// server.js publishes the same instant to the UI as `resumeAt` — see the note there.
+const AUTO_RESUME_DELAY_MS = usageLimit.autoResumeDelayMs(process.env);
+
+// #147 x #138 — how long to wait before re-checking a booting agent, when the
+// reset moment arrives while its composer is not up yet. See fireAutoResume for
+// why that combination exists at all and why the wait is bounded.
+const AUTO_RESUME_READY_RETRY_MS = process.env.WT_AUTO_RESUME_FAST === '1' ? 50 : 2000;
 
 function autoResumeOnResetEnabled() {
-  // Ops/test override wins, then live config (default OFF — see config.default.json).
+  // Ops/test override wins, then live config (default ON — see docs/CONFIGURATION.md).
+  // Per-SESSION opt-out is server-side (auto-resume-prefs.json): server.js expresses a
+  // disabled session by pushing a null resetAt, which cancels here through the same
+  // path a cleared window does. One less thing for this process to persist.
   if (process.env.WT_AUTO_RESUME_ON_RESET === '0') return false;
   if (process.env.WT_AUTO_RESUME_ON_RESET === '1') return true;
-  return liveConfig('autoResumeOnReset', false) === true;
+  return liveConfig('autoResumeOnReset', true) === true;
 }
 
 function isClaudeSession(session) {
@@ -670,6 +718,60 @@ function detectApiErrorInOutput(session, buf) {
   markApiError(session, m[0].trim().slice(0, 200));
 }
 
+// --- The 5h cap PROMPT (#138) ----------------------------------------------
+// Claude does not fall idle at the cap — it blocks on a selector offering "Stop and
+// wait for limit to reset" / "Upgrade your plan". See lib/agents.js
+// `usageLimitPrompt` for the captured render and why the answer is a digit.
+//
+// Two jobs, and the second is the one that makes this more than cosmetic:
+//   1. It is the DEFINITIVE cap signal. A percentage lets us infer a block; this IS
+//      one. session.limitPromptAt therefore arms the auto-resume timer on its own,
+//      without waiting for server.js to agree from metrics.
+//   2. Nobody is there to answer it. An unattended session would sit on that
+//      question indefinitely — not capped-then-recovering, just stuck — so we pick
+//      the option that means "wait", which is what the user wants and the only one
+//      of the three that does not spend money.
+//
+// Cooldown, not a one-shot: the TUI repaints, so the same prompt can cross several
+// chunks, and answering it three times would send stray digits into the composer
+// once it closes. Long enough to cover a repaint storm, short enough that a genuine
+// second cap event in the same session is still answered.
+const LIMIT_PROMPT_COOLDOWN_MS = process.env.WT_API_ERROR_FAST === '1' ? 100 : 30000;
+
+// Enough tail to hold the longest option line across a read boundary. The prompt is
+// a menu, not a stream, so a few hundred bytes is generous.
+const LIMIT_PROMPT_CARRY = 512;
+
+function detectUsageLimitPromptInOutput(session, buf) {
+  const cfg = agents.usageLimitPromptFor(sessionAgent(session));
+  if (!cfg) return; // a plain shell / unknown agent never types on our behalf
+  const now = Date.now();
+  if (session._limitPromptAnsweredAt && now - session._limitPromptAnsweredAt < LIMIT_PROMPT_COOLDOWN_MS) return;
+  // Carry a tail across chunks, like lib/osc9-notify.js does for its sequences. A PTY
+  // read boundary falls wherever the kernel put it, so the option line can arrive
+  // split in two; matching only within one chunk would miss it. Relying on the TUI to
+  // repaint is an assumption, not a guarantee - and a missed cap prompt is a session
+  // that hangs on a question nobody answers, which is the whole failure being fixed.
+  const chunk = stripAnsiForScan(buf.toString('utf8'));
+  const text = (session._limitPromptCarry || '') + chunk;
+  session._limitPromptCarry = text.slice(-LIMIT_PROMPT_CARRY);
+  // The whole rule is pure and lives in lib/usage-limit.js: the sentence must be a
+  // rendered option line with a sibling option beside it, and the answer is the
+  // number that line itself carries. A bare `cfg.pattern.test` here made THIS REPO'S
+  // OWN SOURCE a trigger phrase — see matchUsageLimitPrompt for what that cost.
+  const answer = usageLimit.matchUsageLimitPrompt(text, cfg);
+  if (!answer) return;
+  session._limitPromptCarry = ''; // consumed - never match the same bytes twice
+  session._limitPromptAnsweredAt = now;
+  // The cap is now OBSERVED, not inferred — this alone is enough to arm.
+  session.limitPromptAt = now;
+  log(`usage-limit: "${session.name}" (${session.id}) hit the 5h cap prompt — answering ${JSON.stringify(answer)} (stop and wait)`);
+  try { termWrite(session, answer); }
+  catch (e) { log(`usage-limit: answer write failed: ${e.message}`); }
+  broadcastEvent('usageLimitPrompt', { id: session.id, name: session.name, answered: answer });
+  armAutoResumeTimer(session);
+}
+
 function markApiError(session, line) {
   const transient = isTransientApiError(line);
   session.apiError = true;
@@ -772,6 +874,21 @@ function cancelAutoResume(session) {
   if (session._autoResumeTimer) { clearTimeout(session._autoResumeTimer); session._autoResumeTimer = null; }
 }
 
+// #138 - the user is demonstrably back (Esc on a turn, a new prompt submitted), so a
+// cap prompt we saw earlier is no longer evidence of anything: they have dealt with
+// it, or moved on.
+//
+// This latch MUST be cleared here and not only when a resume fires. It is a
+// STANDALONE arming reason, so leaving it set meant a later window - a NEW resetAt
+// arriving hours afterwards, with the account no longer capped - re-armed on it and
+// typed `continue` into a session the user had finished with. That is precisely the
+// harm the gate exists to prevent, reintroduced by the gate's own memory. Metrics
+// re-establish a genuine block within a poll if the session really is still capped.
+function clearObservedCapBlock(session) {
+  if (session.limitPromptAt) session.limitPromptAt = null;
+  session._limitPromptAnsweredAt = 0; // a fresh prompt must be answerable at once
+}
+
 // (Re-)arm the one-shot reset timer from session.fiveHResetAt. Safe to call any
 // time fiveHResetAt might have changed (the RPC handler, session restore) — a
 // no-op when the feature is off, resetAt is unknown, or this window is already
@@ -782,6 +899,20 @@ function cancelAutoResume(session) {
 function armAutoResumeTimer(session) {
   cancelAutoResume(session);
   if (!autoResumeOnResetEnabled()) return;
+  // #138 — a reset time is a SCHEDULE, not a diagnosis. Arm only for a session
+  // observed to be blocked on the cap. TWO independent sources, either sufficient:
+  // the cap PROMPT this worker saw and answered itself (definitive), or server.js's
+  // metrics derivation pushed with the timestamp (lib/usage-limit.js). Neither =>
+  // not blocked, which is also what an older server.js that sends no flag yields.
+  // #138 - only an agent whose capped state we have actually captured may arm.
+  // Codex loads its usage metrics and shows the wait badge, but nothing types
+  // into it until someone has seen what its own cap looks like.
+  if (!agents.armsAutoResume(sessionAgent(session))) return;
+  // #137 — the per-session opt-out, pushed as its own field by setFiveHResetAt.
+  // Checked HERE rather than encoded as a null reset time: refusing to arm must not
+  // cost the schedule, or re-enabling has nothing left to arm from.
+  if (session.autoResumeEnabled === false) return;
+  if (session.capBlocked !== true && !session.limitPromptAt) return;
   const resetAt = session.fiveHResetAt;
   if (typeof resetAt !== 'number' || !isFinite(resetAt) || resetAt <= 0) return;
   if (session.autoResumeFiredForResetAt === resetAt) return; // one-shot: already handled
@@ -801,15 +932,56 @@ function fireAutoResume(session, resetAt) {
   // elapses. A superseding resetAt already re-armed via armAutoResumeTimer, so
   // this stale timer (its closure still holds the OLD resetAt) must stand down.
   if (!autoResumeOnResetEnabled() || s.fiveHResetAt !== resetAt) return;
+  // #147 — the agent has to EXIST before anything is typed at it. This is the one
+  // worker-originated write that can land on a BOOTING session: armAutoResumeTimer
+  // runs on the restore path with delay Math.max(0, fireAt - Date.now()), which is
+  // ZERO for a window that turned over while the worker was down — so a cold
+  // restart of a capped session re-arms and fires while `claude --resume <id>` is
+  // still starting, and `claude --resume` boots SLOWER than a cold start. `continue`
+  // would land on bash: #147 exactly, caused by the feature meant to rescue the
+  // session. The `status === 'working'` guard below cannot cover it — a booting
+  // session is not working.
+  //
+  // DEFER, never skip: the window is real and the session still needs its nudge, so
+  // this re-arms instead of standing down. Checked BEFORE autoResumeFiredForResetAt
+  // is consumed, because a consumed one-shot is exactly what armAutoResumeTimer
+  // refuses to re-arm on. The wait is bounded by #147's own 45s ceiling
+  // (armReadyFallback, armed for EVERY session at spawn), so this cannot spin
+  // forever; and it rides session._autoResumeTimer, so a dead PTY or a user who
+  // came back cancels it through cancelAutoResume like any other armed resume.
+  if (s._ready && !s._ready.ready) {
+    if (s._autoResumeDeferredFor !== resetAt) {
+      s._autoResumeDeferredFor = resetAt;
+      log(`auto-resume: "${s.name}" (${s.id}) reset window passed but the agent is still starting — waiting for its composer`);
+    }
+    s._autoResumeTimer = setTimeout(() => fireAutoResume(s, resetAt), AUTO_RESUME_READY_RETRY_MS);
+    if (typeof s._autoResumeTimer.unref === 'function') s._autoResumeTimer.unref();
+    return;
+  }
+  s._autoResumeDeferredFor = null;
   s.autoResumeFiredForResetAt = resetAt; // one-shot: consumed whether or not we act below
   saveSessionConfigs();
-  // Best-effort "is this session actually stalled?" guard — see the comment on
-  // autoResumeOnResetEnabled above: there is no real blocked-state signal yet, so
-  // this only avoids typing 'continue' into a session that is visibly mid-turn.
+  // #138 — re-checked at FIRE time, not only at arm time. The wait is hours long,
+  // and the block can lift on its own in that window (the user resumed the session
+  // by hand, or the quota freed up early): server.js keeps pushing, so capBlocked
+  // going false here means the reason we armed no longer holds.
+  if (s.capBlocked !== true && !s.limitPromptAt) {
+    log(`auto-resume: "${s.name}" (${s.id}) reset window passed but session is no longer cap-blocked — skipped`);
+    return;
+  }
+  // Kept alongside the cap check, not replaced by it: they refuse for different
+  // reasons. capBlocked says the quota was spent; this says the session is visibly
+  // mid-turn right now, in which case it needs no nudge whatever the quota says.
   if (s.status === 'working') {
     log(`auto-resume: "${s.name}" (${s.id}) reset window passed but session is working — skipped`);
     return;
   }
+  // Cleared only on the path that actually acts. It used to be cleared above the
+  // `working` check, which threw the observation away on a fire that then declined
+  // to type — and since the one-shot is already consumed by then, that window had
+  // nothing left to re-arm on: the sighting AND the schedule were both spent for a
+  // resume that never happened.
+  s.limitPromptAt = null; // this window's observation is spent along with the one-shot
   try { submitLine(s, 'continue'); } catch (e) { log(`auto-resume: continue write failed: ${e.message}`); return; }
   log(`auto-resume: "${s.name}" (${s.id}) sent continue after 5h reset (${new Date(resetAt).toISOString()})`);
   broadcastEvent('autoResume', { id: s.id, name: s.name, resetAt });
@@ -826,7 +998,7 @@ function fireAutoResume(session, resetAt) {
 function setCompacting(session, source) {
   session.compacting = { since: Date.now(), source };
   if (session._compactingFallbackTimer) clearTimeout(session._compactingFallbackTimer);
-  session._compactingFallbackTimer = setTimeout(() => clearCompacting(session, 'timeout'), API_ERROR_COMPACT_FALLBACK_MS);
+  session._compactingFallbackTimer = setTimeout(() => clearCompacting(session, 'timeout'), COMPACTING_MAX_MS);
   if (typeof session._compactingFallbackTimer.unref === 'function') session._compactingFallbackTimer.unref();
   log(`compacting: "${session.name}" (${session.id}) started (${source})`);
   broadcastEvent('compacting', { id: session.id, compacting: true, since: session.compacting.since });
@@ -946,6 +1118,7 @@ function noteInterrupt(session, data) {
   // #69 — the user is at the keyboard interrupting a turn; a pending 5h-reset
   // auto-resume for this session is now stale (same reasoning as clearApiError).
   cancelAutoResume(session);
+  clearObservedCapBlock(session); // #138 - and so is a cap prompt seen earlier
   log(`interrupt: "${session.name}" working → idle (Esc)`);
   // No notifyType: the user is at the keyboard — they just pressed Esc. Pushing "Claude is
   // done" to their phone for an interrupt they performed themselves would be noise.
@@ -991,9 +1164,76 @@ function processPtyOutput(session, buf) {
   session.lastActivity = Date.now();
   detectApiErrorInOutput(session, buf);
   detectStatusNotificationInOutput(session, buf);
+  detectAgentReadyInOutput(session, buf);
+  detectUsageLimitPromptInOutput(session, buf);
   if (session.clientCount > 0) {
     broadcastPtyOut(session, buf);
   }
+}
+
+// --- #147: agent readiness ---------------------------------------------------
+//
+// Only a session whose provider DECLARES a marker waits; everything else is ready
+// the moment it exists (lib/agents.js readinessMarker). The detector is a one-way
+// latch, so this costs one already-true check per chunk for the whole life of a
+// session after the first few seconds.
+function detectAgentReadyInOutput(session, buf) {
+  const d = session._ready;
+  if (!d || d.ready) return;
+  // #147 F3 — do not look at a byte until the autoCommand has actually been
+  // written. Before that the PTY is showing the SHELL, and `❯` is the default
+  // prompt glyph of starship, pure and several oh-my-posh themes — on any box
+  // whose shell prints one the latch would flip at ~3.3s, before the agent was
+  // even launched, and the gate would silently no-op with nothing to show for
+  // it. Waiting costs nothing: the marker cannot appear before the command that
+  // produces it.
+  if (!session._autoCommandSentAt) return;
+  if (!d.push(buf)) return;
+  announceAgentReady(session, 'composer marker');
+}
+
+// #147 F4 — the backstop that keeps "degrades to ready LATE, never ready NEVER"
+// true when the agent never starts at all.
+//
+// The four original escape routes all quietly assume the process came up: a
+// marker, a hook, an agentless session, a missing field. None covers `claude:
+// command not found` — which this repo has already seen, from a Session 0 task
+// with a stale PATH — nor a crash on launch, nor Codex's update nag. In those
+// the PTY sits at bash forever and the compose bar would say "starting" and
+// refuse to send for the life of the session. That is the one state #147
+// forbids.
+//
+// A CEILING, not a detector. The marker stays the signal; this only bounds how
+// wrong the gate can be, and sits far above the measured 5-6s boot so it never
+// races a slow-but-working start.
+const READY_FALLBACK_MS = Number(process.env.WT_READY_FALLBACK_MS || 45000);
+function armReadyFallback(session) {
+  const d = session._ready;
+  if (!d || d.ready) return;
+  session._readyFallback = setTimeout(() => {
+    session._readyFallback = null;
+    if (d.force()) announceAgentReady(session, 'fallback — no marker seen');
+  }, READY_FALLBACK_MS);
+  if (session._readyFallback.unref) session._readyFallback.unref();
+}
+
+// The single place readiness becomes true, so every route through it logs and
+// broadcasts identically. `why` names the route, because "the marker never came
+// but a hook did" is the case worth seeing in a log when a CLI changes its UI.
+function announceAgentReady(session, why) {
+  log(`ready: session "${session.name}" agent accepting input (${why})`);
+  session.dirty = true;
+  broadcastEvent('agentReady', { id: sessionIdOf(session), agentReady: true });
+}
+
+// The SAFETY NET. An agent that fired a hook is self-evidently up, whatever its
+// screen did — so a marker that changes in a future CLI release degrades to
+// "ready late", never to "ready never". Called from handleHook, which every hook
+// and every in-band status notification already funnels through.
+function markAgentReadyFromActivity(session) {
+  const d = session._ready;
+  if (!d || d.ready) return;
+  if (d.force()) announceAgentReady(session, 'agent activity');
 }
 
 // --- In-band status for agents without usable hooks (Codex) ----------------
@@ -1159,9 +1399,18 @@ function applyIdle(session, event) {
   if (session._compactReplay && (Date.now() - session._compactReplay.setAt) > API_ERROR_COMPACT_MIN_WAIT_MS) {
     doCompactReplay(session, 'idle-hook');
   }
-  // #65 — idle means whatever /compact was in flight (user-triggered or ours)
-  // has settled. Idempotent no-op if nothing was compacting.
-  clearCompacting(session, 'idle');
+  // #129 — idle does NOT mean the compaction settled, and this is where the
+  // reported bug lived. `clearCompacting(session, 'idle')` used to run here on
+  // the #65 assumption that "idle means whatever /compact was in flight has
+  // settled" — but #115 had already disproved exactly that for `status`: the
+  // turn that DISPATCHED /compact ends while the compaction itself runs on for
+  // another two minutes, so its Stop hook arrives mid-compaction. Clearing here
+  // meant the one flag that exists to cover that window was cleared during it,
+  // by the very event the flag was introduced to survive.
+  //
+  // Nothing replaces it here. Compaction ends when work RESUMES (the
+  // UserPromptSubmit / PreToolUse case below clears it), with COMPACTING_MAX_MS
+  // as the genuine backstop for a compaction whose resume never comes.
   let notifyType = null, notifyMsg = null;
   if (prevStatus !== 'idle') {
     notifyType = 'idle';
@@ -1272,9 +1521,24 @@ function sessionSummary(id, s) {
     apiErrorText: s.apiError ? (s.apiErrorText || '') : '',
     compacting: !!(s.compacting),
     compactingSince: s.compacting ? s.compacting.since : null,
-    // #69 — surfaced for tests and a future "resumes in Xh" UI. null unless a source
-    // (Codex's transcript today) reported a 5h reset time via setFiveHResetAt.
+    // #69 — the 5h reset time both agents report, via setFiveHResetAt. #137 renders
+    // the wait period from the server's derived `usageLimit` instead of this raw
+    // field, but it stays on the wire: it is what the WORKER actually believes, so a
+    // disagreement with the server's view is visible rather than silent.
     fiveHResetAt: s.fiveHResetAt || null,
+    // #147 — can this session receive a prompt yet? A session whose agent declares
+    // no marker (a plain shell, an unknown agent) is ready from birth, and a missing
+    // detector reads as ready too: the gate must fail OPEN, because a client that
+    // wrongly believes a live session is starting can never submit to it again.
+    agentReady: s._ready ? s._ready.ready : true,
+    // #138 — the observed cap-block this session's timer is (or is not) armed on.
+    capBlocked: s.capBlocked === true,
+    autoResumeArmed: !!s._autoResumeTimer,
+    // #138 — when this worker SAW (and answered) the cap prompt. Published because
+    // it is the stronger of the two block signals and server.js cannot observe it:
+    // the UI would otherwise show a plain idle row for a session the worker knows
+    // is capped, until the metrics caught up.
+    limitPromptAt: s.limitPromptAt || null,
   };
 }
 
@@ -1301,6 +1565,9 @@ function sendAutoCommand(session, id, cmdToRun, how) {
   setTimeout(() => {
     try {
       termWrite(session, cmdToRun + '\n');
+      // #147 — from here on, output can plausibly be the AGENT's rather than the
+      // shell's, so the readiness scan may start looking (detectAgentReadyInOutput).
+      session._autoCommandSentAt = Date.now();
       log(`session ${id} auto-command${how}: ${cmdToRun}`);
     } catch (e) {
       log(`session ${id} auto-command write failed: ${e.message}`);
@@ -1403,6 +1670,26 @@ function createSession(id, cwd, name, autoCommand, savedScrollback, claudeSessio
   };
   sessions.set(id, session);
 
+  // #147 — a freshly spawned agent cannot receive a prompt until its composer
+  // exists; until then the PTY is still sitting at the shell, and anything sent
+  // is handed to bash.
+  //
+  // This ONCE seeded the latch from restored scrollback, on the belief that a
+  // restored session's agent "has been running for hours and will not reprint
+  // the marker". That was wrong, and wrong in the most damaging direction:
+  // restore does not reattach anything — restoreSessionsOnStartup spawns a
+  // FRESH bash and re-runs `claude --resume <id>`, which boots SLOWER than a
+  // cold start. The old scrollback still holds the previous life's marker, so
+  // seeding marked every restored session ready at t=0 and left the gate open
+  // on every session after a cold restart — including the cold restart this
+  // very change needs in order to deploy. Found in review of PR #150.
+  // Gated on there BEING an autoCommand. A session with none is a plain shell
+  // until the user launches something — and gating it would block the very
+  // compose-bar submit that types `claude`, which is the opposite of the point.
+  const readyMarker = autoCommand ? agents.readinessMarker(sessionAgent(session)) : null;
+  session._ready = createReadyDetector(readyMarker);
+  armReadyFallback(session);
+
   term.onData((data) => {
     // Issue #13: normalize PTY output to Buffer once here so the rest of the
     // worker (scrollback chunks, broadcastPtyOut) operates on Buffers.
@@ -1426,6 +1713,7 @@ function createSession(id, cwd, name, autoCommand, savedScrollback, claudeSessio
     if (session._compactReplayTimer) { clearTimeout(session._compactReplayTimer); session._compactReplayTimer = null; }
     session._compactReplay = null;
     if (session._submitTimer) { clearTimeout(session._submitTimer); session._submitTimer = null; }
+    if (session._readyFallback) { clearTimeout(session._readyFallback); session._readyFallback = null; }
     cancelAutoResume(session); // #69 — same reasoning, a dead PTY has nothing to resume
     session._inputQueue = null; // a withheld CR dies with its PTY
     if (session.autoCommand && /\bclaude\b/i.test(session.autoCommand)) {
@@ -1512,6 +1800,10 @@ function createSession(id, cwd, name, autoCommand, savedScrollback, claudeSessio
 // replays the last prompt. Wrong agent, real damage.
 function handleHook(session, event, claudeSessionId, prompt, agentId, opts) {
   if (!event) throw new Error('event required');
+  // #147 — a hook arriving is proof the agent is up, and it arrives whether or not
+  // its composer ever printed the marker we watch for. This is what stops a
+  // readiness gate from ever becoming a session that cannot submit.
+  markAgentReadyFromActivity(session);
   const prevStatus = session.status;
   const fromSubagent = !!agentId;
   let notifyType = null, notifyMsg = null;
@@ -1597,10 +1889,23 @@ function handleHook(session, event, claudeSessionId, prompt, agentId, opts) {
       if (!fromSubagent) session.heldStop = null;
       // Claude resumed (a retry — ours or the user's): drop the API-error mark.
       clearApiError(session);
+      // #129 — and the same signal ends a compaction. This is the honest one:
+      // a prompt being submitted or a tool running PROVES the conversation is no
+      // longer blocked in /compact, where a Stop only proves the dispatching turn
+      // ended (see applyIdle). Claude fires no PostCompact, so "work resumed" is
+      // the nearest thing to it that a hook can tell us.
+      //
+      // Deliberately NOT gated on `!fromSubagent`, unlike heldStop above: that
+      // guard exists because a subagent's tool call says nothing about whether
+      // the PARENT turn resumed. Here the question is different — nothing at all
+      // runs while the conversation is compacting, so a subagent's own event is
+      // equally good proof that it finished.
+      clearCompacting(session, 'resumed');
       // #69 — same signal: the user (or a retry) is back, so a pending 5h-reset
       // auto-resume for this session is now stale. Does not consume the window —
       // see cancelAutoResume.
       cancelAutoResume(session);
+      clearObservedCapBlock(session); // #138 - and so is a cap prompt seen earlier
       break;
     case 'SubagentStop': {
       // #61 — the last subagent finishing is what actually ends a turn whose main
@@ -1663,9 +1968,11 @@ function handleHook(session, event, claudeSessionId, prompt, agentId, opts) {
       // #65 — a /compact is starting: the user's own (this hook) or ours via
       // API-error auto-recovery (scheduleAutoContinue, source 'auto-recovery').
       // Surfaces the "Compacting conversation…" indicator; status itself is
-      // untouched — /compact doesn't end the turn. The next idle hook clears it
-      // (applyIdle); the fallback timer inside setCompacting is the stuck-guard
-      // for a /compact that never settles.
+      // untouched — /compact doesn't end the turn. Cleared when work RESUMES
+      // (the UserPromptSubmit/PreToolUse case above), NOT by the next idle hook:
+      // #129 measured that idle arrives mid-compaction every time. The
+      // COMPACTING_MAX_MS timer inside setCompacting is the stuck-guard for a
+      // compaction whose resume never comes.
       setCompacting(session, 'hook');
       break;
   }
@@ -1732,7 +2039,15 @@ const rpcHandlers = {
     const agent = agents.isKnownAgent(params.agent) ? params.agent : null;
     createSession(id, cwd, name, autoCommand, null, null, undefined, agent);
     broadcastEvent('sessionCreated', { id, name, cwd, autoCommand, agent });
-    return { id, name, agent };
+    // #147 — readiness travels with the creation answer. The client BUILDS the
+    // session it opens from this response, so a field missing here becomes that
+    // field's default on the client, and `agentReady` defaults to true: without
+    // this the submit gate was open for the whole boot window of a brand-new
+    // session, the exact flow #147 reports. Read off the live session rather
+    // than hardcoded false — a plain shell and any agent with no declared
+    // marker really are ready the moment they exist.
+    const born = sessions.get(id);
+    return { id, name, agent, agentReady: born && born._ready ? born._ready.ready : true };
   },
 
   renameSession: async (params) => {
@@ -1785,6 +2100,7 @@ const rpcHandlers = {
     if (!session) return { ok: true }; // already gone
     if (session.idleTimer) clearTimeout(session.idleTimer);
     if (session._submitTimer) { clearTimeout(session._submitTimer); session._submitTimer = null; }
+    if (session._readyFallback) { clearTimeout(session._readyFallback); session._readyFallback = null; }
     session._inputQueue = null; // a withheld CR dies with its PTY
     cancelAutoResume(session); // #69
     try { session.term.kill(); } catch {}
@@ -1831,14 +2147,51 @@ const rpcHandlers = {
   setFiveHResetAt: async (params) => {
     const session = sessions.get(requireUuid(params.id));
     if (!session) throw new Error('session not found');
+    // EVERY field here is OPTIONAL, and an omitted one means "I am saying nothing
+    // about this", never "reset it".
+    //
+    // #137 — the per-session opt-out used to be expressed as a null fiveHResetAt,
+    // because null is the one cancel signal every worker version already understood.
+    // It cancelled by DESTROYING the schedule: setFiveHResetAt persisted the null, so
+    // a row reading "resumes 14:32" that was toggled off and straight back on came
+    // back with no reset time at all — and the re-push that would restore it is gated
+    // on the metrics still speaking, which for a capped Claude session (it stops
+    // pushing its status line) is false past the 4h TTL. The session then sat on
+    // "on hold" forever and never resumed: precisely the loss that gate exists to
+    // prevent, caused by the cancel. `enabled` says the user's choice in its own
+    // field, so refusing to arm no longer costs the timestamp.
+    const hasReset = Object.prototype.hasOwnProperty.call(params, 'fiveHResetAt');
     const raw = params.fiveHResetAt;
     const val = (typeof raw === 'number' && Number.isFinite(raw) && raw > 0) ? Math.round(raw) : null;
-    if (session.fiveHResetAt !== val) {
+    // #138 — capBlocked rides ALONGSIDE the timestamp rather than replacing it,
+    // because they answer different questions and both are needed: the timestamp
+    // says WHEN, this says WHETHER. Strict `=== true` so an older server.js that
+    // omits the field never sets it, and nothing arms. NOT persisted, on purpose:
+    // it is a live reading of the account's quota, and a stale one restored from
+    // disk hours later would be exactly the unfounded arming #138 exists to stop —
+    // server.js re-pushes within a poll of the worker coming back.
+    const hasBlocked = Object.prototype.hasOwnProperty.call(params, 'capBlocked');
+    const blocked = params.capBlocked === true;
+    // Absent => unchanged, and the default is ON: an older server.js that never sends
+    // it leaves every session armable exactly as before.
+    const hasEnabled = Object.prototype.hasOwnProperty.call(params, 'enabled');
+    const enabled = params.enabled !== false;
+    const changed = hasReset && session.fiveHResetAt !== val;
+    if (changed) {
       session.fiveHResetAt = val;
       saveSessionConfigs();
-      armAutoResumeTimer(session);
     }
-    return { ok: true, fiveHResetAt: session.fiveHResetAt };
+    const blockedChanged = hasBlocked && session.capBlocked !== blocked;
+    if (blockedChanged) session.capBlocked = blocked;
+    const enabledChanged = hasEnabled && (session.autoResumeEnabled !== false) !== enabled;
+    if (enabledChanged) session.autoResumeEnabled = enabled;
+    if (changed || blockedChanged || enabledChanged) armAutoResumeTimer(session);
+    return {
+      ok: true,
+      fiveHResetAt: session.fiveHResetAt,
+      capBlocked: session.capBlocked === true,
+      enabled: session.autoResumeEnabled !== false,
+    };
   },
 
   resizeSession: async (params) => {

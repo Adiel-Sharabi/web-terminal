@@ -152,6 +152,7 @@ class ComposeBar extends StatelessWidget {
     this.terminalActive = false,
     this.attachments = const <ComposeAttachment>[],
     this.onRemoveAttachment,
+    this.agentReady = true,
   });
 
   final TextEditingController controller;
@@ -197,8 +198,23 @@ class ComposeBar extends StatelessWidget {
   /// key reaches the socket.
   final bool terminalActive;
 
+  /// False while the session's agent CLI is still booting and its composer does
+  /// not exist yet (#147). Server-derived (`agentReady` on the session), never
+  /// timed here — measured on the rig, Claude's composer appeared at 5.0s on one
+  /// run and 6.1s on the next, so any client-side timer is wrong on some boots.
+  ///
+  /// Defaults to TRUE so every existing call site, a plain shell, and an older
+  /// server that sends no such field behave exactly as before. The gate must fail
+  /// OPEN: a bar that wrongly believes a live session is starting can never
+  /// submit to it again, which is worse than the bug it guards.
+  final bool agentReady;
+
+  /// Typing is always allowed — the text stays in the box and is sent the moment
+  /// the agent is up. Only SUBMIT waits, because a submit during boot goes to the
+  /// shell the TUI has not replaced yet and the prompt is silently lost (#147).
   bool get _canSend =>
-      controller.text.isNotEmpty || isLive || attachments.isNotEmpty;
+      agentReady &&
+      (controller.text.isNotEmpty || isLive || attachments.isNotEmpty);
 
   @override
   Widget build(BuildContext context) {
@@ -308,7 +324,13 @@ class ComposeBar extends StatelessWidget {
                       ),
                       decoration: InputDecoration(
                         isDense: true,
-                        hintText: 'Message — / for commands',
+                        // The hint is where "you may type, it just will not send
+                        // yet" gets said. Saying nothing was the bug: the bar
+                        // looked ordinary, so a prompt went to the shell behind
+                        // the not-yet-started TUI and vanished (#147).
+                        hintText: agentReady
+                            ? 'Message — / for commands'
+                            : 'Starting the agent — type now, send in a moment',
                         hintStyle: TextStyle(
                           color: theme.colorScheme.onSurfaceVariant,
                           fontSize: 14,
@@ -345,13 +367,22 @@ class ComposeBar extends StatelessWidget {
               AnimatedBuilder(
                 animation: controller,
                 builder: (context, _) {
-                  final enabled =
-                      controller.text.isNotEmpty ||
-                      isLive ||
-                      attachments.isNotEmpty;
+                  // One gate for BOTH routes. This used to restate _canSend's
+                  // condition inline, which is how a keyboard submit and a button
+                  // submit come to disagree — and #55's contract is that they are
+                  // the same act reached two ways.
                   return IconButton.filled(
-                    onPressed: enabled ? onSend : null,
-                    icon: const Icon(Icons.send),
+                    onPressed: _canSend ? onSend : null,
+                    // A spinner rather than a disabled arrow while the agent boots:
+                    // "wait" reads very differently from "broken", and this clears
+                    // itself within seconds (#147).
+                    icon: agentReady
+                        ? const Icon(Icons.send)
+                        : const SizedBox(
+                            width: 18,
+                            height: 18,
+                            child: CircularProgressIndicator(strokeWidth: 2),
+                          ),
                   );
                 },
               ),

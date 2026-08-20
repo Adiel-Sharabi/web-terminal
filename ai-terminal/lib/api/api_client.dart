@@ -208,6 +208,24 @@ class ApiClient {
     }
   }
 
+  /// Fetches the per-command lens policy (`GET /api/commands`, #131) — which
+  /// slash commands write something the chat lens can render, and which are TUI
+  /// paint only.
+  ///
+  /// Best-effort like [agents]: an older server without the endpoint yields an
+  /// empty list and the client falls back to its own built-in table, so a slash
+  /// command never depends on this call succeeding.
+  Future<List<Map<String, dynamic>>> commandPolicy() async {
+    try {
+      final res = await _send('GET', '/api/commands');
+      final list = _asMap(_decode(res))['commands'];
+      if (list is! List) return const <Map<String, dynamic>>[];
+      return list.whereType<Map<String, dynamic>>().toList(growable: false);
+    } catch (_) {
+      return const <Map<String, dynamic>>[];
+    }
+  }
+
   /// Lists the folders offered in the New Session picker
   /// (`GET /api/history/folders`).
   ///
@@ -252,6 +270,21 @@ class ApiClient {
   Future<void> setNotifyLevel(String sessionId, String level) async {
     await _send('PATCH', '/api/sessions/$sessionId/notify-level',
         body: {'level': level});
+  }
+
+  /// Turns the 5-hour auto-resume off (or back on) for one session
+  /// (`PATCH /api/sessions/:id/auto-resume`, issue #137).
+  ///
+  /// Server-side state, like the notify level above and for the same reason: it
+  /// is a property OF THE SESSION, so every device reads one truth rather than
+  /// each keeping a local flag. The result rides back on the next session poll
+  /// as `usageLimit.enabled` — this client stores nothing.
+  ///
+  /// A server too old for the route 404s; the caller only offers the control when
+  /// the session actually carries a `usageLimit`, which such a server never sends.
+  Future<void> setAutoResume(String sessionId, bool enabled) async {
+    await _send('PATCH', '/api/sessions/$sessionId/auto-resume',
+        body: {'enabled': enabled});
   }
 
   /// Sets or clears [sessionId]'s pin (`PATCH /api/sessions/:id/favorite`,
@@ -333,6 +366,13 @@ class ApiClient {
       // this object keeps it — so the Chat lens stayed shut until a re-select
       // replaced it with the list's copy (#119).
       agent: served is String && served.isNotEmpty ? served : agent,
+      // #147 — the SAME trap as `agent` one line up, found in review of #150.
+      // This object is what SessionScreen opens with, and the sessions stream is
+      // broadcast with no replay, so it stands until the next poll — a booting
+      // agent sends no notify frame to cut that short. Defaulting to `true` here
+      // left the submit gate open for the whole boot window on a freshly created
+      // session, which is precisely the flow that was reported.
+      agentReady: j['agentReady'] != false,
     );
   }
 

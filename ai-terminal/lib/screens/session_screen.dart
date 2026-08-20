@@ -28,6 +28,7 @@ import 'package:xterm/xterm.dart';
 
 import '../api/api_client.dart';
 import '../api/models.dart';
+import '../services/command_policy.dart';
 import '../services/desktop_alert_service.dart';
 import '../services/detach_window_service.dart';
 import '../services/notification_service.dart';
@@ -146,6 +147,49 @@ bool composeBarVisible() => true;
 /// offstage terminal from taking keys while Chat is showing. Pure + testable so
 /// the "terminal lens is always live" invariant has one enforceable home.
 bool terminalAcceptsInput(String activeLens) => activeLens == 'terminal';
+
+/// The single answer to "which lens should be showing right now" (#130).
+///
+/// `_activeLens` used to have FOUR independent writers: the user's persisted
+/// choice, a recomputation derived from availability, and two transient
+/// overrides that pinned Terminal — a live '/' line (whose menu renders in the
+/// terminal) and raw mode (direct terminal typing). The recomputation ran on
+/// EVERY session update — every poll and every `/ws/notify` frame — and knew
+/// nothing about the overrides, so it wrote them straight back out. Start a '/'
+/// command in Chat and a few seconds later a routine refresh yanked the view
+/// back to Chat mid-keystroke, which is exactly the reported cadence.
+///
+/// Same family as #111: a decision taken at T undone by a callback at T+Δ that
+/// never learned about it. The fix is NOT another guard bolted onto the
+/// recomputation — it is making the overrides INPUTS to one resolver instead of
+/// competing writes, so there is nothing left to clobber and no write ordering
+/// to get wrong.
+///
+/// Precedence, highest first:
+///  1. Chat unavailable → Terminal. There is no other lens to show.
+///  2. Either pin → Terminal.
+///  3. The user's explicit past choice, else Chat.
+///
+/// Restoring is a CONSEQUENCE, not a step: when a pin clears, the resolver
+/// simply stops answering Terminal and lands on the same lens the old
+/// `_lensBeforeLive` snapshot held — without the staleness a snapshot carries.
+/// That is why the snapshot field is gone rather than merely guarded.
+///
+/// The pins are deliberately separate from the state that raised them: an
+/// explicit lens toggle CLEARS them (the user has spoken) while `_rawMode`
+/// itself stays on, which is what keeps "tap Chat while raw mode is on" working
+/// — a hard pin on `_rawMode` would strand the user in Terminal for the life of
+/// the session. Pure so the rule has one enforceable, testable home.
+String resolveActiveLens({
+  required bool chatAvailable,
+  required String? persistedLens,
+  required bool liveSlashPin,
+  required bool rawModePin,
+}) {
+  if (!chatAvailable) return 'terminal';
+  if (liveSlashPin || rawModePin) return 'terminal';
+  return persistedLens ?? 'chat';
+}
 
 /// True on desktop platforms (a real hardware keyboard). One definition so the
 /// raw-mode default, the '/' live-stream gate (#28), and image-paste routing
@@ -714,7 +758,17 @@ class _SessionScreenState extends State<SessionScreen>
   bool _composeLive = false; // true while a '/'-prefixed line is streaming live
   String _composeLiveSent =
       ''; // chars already streamed to the terminal for the live line
-  String? _lensBeforeLive; // lens to restore to once a live '/' command is sent
+  // The two transient pins that hold the Terminal lens (#130). Inputs to
+  // resolveActiveLens — never written to _activeLens directly, or a later
+  // recomputation clobbers them. Kept separate from _composeLive/_rawMode
+  // because an explicit lens toggle clears the pin while the state itself
+  // stays on.
+  bool _lensPinLiveSlash = false;
+  // #131 — the live '/' line as last streamed, so the policy can be asked what
+  // THIS command will leave behind. Kept in a field because _clearComposeInput
+  // empties the controller before the pin decision is made.
+  String _liveCommandText = '';
+  bool _lensPinRawMode = false;
   bool _liveTabbed =
       false; // Tab completed the live line — the terminal owns extra chars now
   bool _historyActive =
@@ -757,6 +811,7 @@ class _SessionScreenState extends State<SessionScreen>
     _attach();
     _loadPersisted();
     _checkTranscriptCapability();
+    _loadCommandPolicy();
     // Poll for Claude's interactive question unconditionally (#19/#20): the
     // endpoint returns null/404 on a server that doesn't support it, so this
     // can't be defeated by opening the session before the server was upgraded.
@@ -834,6 +889,17 @@ class _SessionScreenState extends State<SessionScreen>
       });
     }
     _recomputeActiveLens();
+  }
+
+  /// Loads the per-command lens policy once per app run (#131). Best-effort and
+  /// deliberately un-awaited: the client's own fallback table already covers the
+  /// built-ins, so a slow or old server delays nothing and breaks nothing.
+  void _loadCommandPolicy() {
+    final session = _session;
+    if (session == null) return;
+    unawaited(
+      CommandPolicy.instance.ensureLoaded(ApiClient(session.server)),
+    );
   }
 
   /// Checks once whether this session's server advertises the `transcript`
@@ -1034,9 +1100,17 @@ class _SessionScreenState extends State<SessionScreen>
   /// Chat is the default lens when eligible (agent session + capability +
   /// hasn't already 404d) and no explicit past choice says otherwise;
   /// Terminal-only (toggle hidden) when not eligible at all.
+  /// The ONE place `_activeLens` is written (#130). Every state change that can
+  /// affect the lens — availability, an explicit choice, a pin going up or down
+  /// — mutates its own input and then calls this. Safe to call at any time,
+  /// including from the per-update path, because the pins are inputs now.
   void _recomputeActiveLens() {
-    final eligible = _chatAvailable;
-    final desired = eligible ? (_persistedLens ?? 'chat') : 'terminal';
+    final desired = resolveActiveLens(
+      chatAvailable: _chatAvailable,
+      persistedLens: _persistedLens,
+      liveSlashPin: _lensPinLiveSlash,
+      rawModePin: _lensPinRawMode,
+    );
     if (desired != _activeLens && mounted) {
       setState(() => _activeLens = desired);
     }
@@ -1045,9 +1119,18 @@ class _SessionScreenState extends State<SessionScreen>
   Future<void> _setLens(String value) async {
     if (value == _activeLens) return;
     setState(() {
-      _activeLens = value;
       _persistedLens = value;
+      // An explicit choice outranks both pins: the user is looking at the app
+      // and asked for this lens. Clearing them (rather than letting the resolver
+      // lose to a pin) is what keeps "tap Chat while raw mode is on" working.
+      _lensPinLiveSlash = false;
+      _lensPinRawMode = false;
     });
+    // Through the resolver like every other lens change, so _recomputeActiveLens
+    // stays the ONLY writer of _activeLens. With the pins cleared and the choice
+    // persisted it answers `value` — the toggle is only offered when Chat is
+    // available, which is the one input that could disagree.
+    _recomputeActiveLens();
     // The Chat lens's only input is the compose bar (the terminal is offstage),
     // so put the caret there ready to type — even in raw mode. Returning to the
     // Terminal lens while raw hands the physical keyboard back to the terminal.
@@ -1073,10 +1156,10 @@ class _SessionScreenState extends State<SessionScreen>
     // "Not yet" is not "never" — leave a young agent session on Chat with its empty
     // state, which its own refresh fills in as soon as the first turn lands.
     if (!noTranscriptIsFinal(_session)) return;
-    setState(() {
-      _transcriptUnavailableForSession = true;
-      _activeLens = 'terminal';
-    });
+    setState(() => _transcriptUnavailableForSession = true);
+    // Chat just became unavailable, which the resolver reads via _chatAvailable
+    // — no direct write, so this cannot fight the per-update recomputation.
+    _recomputeActiveLens();
   }
 
   // --- #70: read the agent's last answer aloud ------------------------------
@@ -1618,14 +1701,27 @@ class _SessionScreenState extends State<SessionScreen>
       // terminal so Claude's own slash-command menu renders and narrows as you
       // type. The menu lives in the terminal, so switch there to show it —
       // remembering the prior lens so we can hop back once the command is sent.
-      if (!_composeLive && slashStartsLiveStream(text)) {
+      // #147 — do not ENTER live mode while the agent is still booting.
+      //
+      // The first cut of this gated `_streamComposeLive` instead, and that
+      // reintroduced the exact loss #147 exists to prevent: live mode was still
+      // entered, nothing was ever streamed to the PTY, and `_sendCompose`'s live
+      // branch assumes the body already went — so pressing Send delivered a bare
+      // CR and the command silently vanished. Caught in re-review of PR #150.
+      //
+      // Refusing entry keeps the text a NORMAL draft: submit stays blocked until
+      // ready, and then Send delivers the whole line through
+      // buildComposeSubmission. The only thing lost is the live slash MENU
+      // during boot, and the next keystroke after ready re-enters live mode.
+      if (!_composeLive &&
+          (_session?.agentReady ?? true) &&
+          slashStartsLiveStream(text)) {
         _composeLive = true;
         _composeLiveSent = '';
         _liveTabbed = false;
-        if (_activeLens != 'terminal') {
-          _lensBeforeLive = _activeLens;
-          _activeLens = 'terminal';
-        }
+        _lensPinLiveSlash = true;
+        _liveCommandText = text;
+        _recomputeActiveLens();
       }
       if (_composeLive) {
         _streamComposeLive(text);
@@ -1656,6 +1752,13 @@ class _SessionScreenState extends State<SessionScreen>
   /// while both merely insert a newline everywhere else — the lens-dependent Enter that
   /// #55 §1 forbids. `_composeLiveSent` holds the same projection, so the diff stays honest.
   void _streamComposeLive(String val) {
+    // #147 — this path writes bytes AS YOU TYPE, so a `/co` typed in the first
+    // seconds would land on bash's command line and the worker would then type
+    // `claude --resume ...` onto that same line, running `/coclaude --resume ...`
+    // and starting no agent at all. It is guarded at the ONE place live mode is
+    // entered (see onChanged), not here: a second gate in a second place is how
+    // the two come to disagree, and gating here alone was measured to lose the
+    // whole command on Send.
     val = composeLiveProjection(val);
     var i = 0;
     final n = _composeLiveSent.length < val.length
@@ -1670,6 +1773,7 @@ class _SessionScreenState extends State<SessionScreen>
         : '';
     final suffix = val.substring(i);
     _composeLiveSent = val;
+    _liveCommandText = val; // #131 — '/st' becomes '/status' as it is typed
     final out = backspaces + suffix;
     if (out.isNotEmpty) {
       _connection?.sendInput(out);
@@ -1701,7 +1805,8 @@ class _SessionScreenState extends State<SessionScreen>
         [for (final a in _attachments) a.path],
       ));
       _pushComposeHistory(val);
-      _clearComposeInput();
+      // #131 — sent, so a TUI-only command keeps the Terminal lens it needs.
+      _clearComposeInput(sent: true);
       _scrollToBottom();
       return;
     }
@@ -1724,6 +1829,9 @@ class _SessionScreenState extends State<SessionScreen>
     ));
     _pushComposeHistory(val);
     _clearComposeInput();
+    // #131 — an ordinary prompt means the user is done reading whatever TUI
+    // output held them in the terminal, and its reply belongs in Chat.
+    _releaseCommandPin();
     _scrollToBottom();
   }
 
@@ -1757,7 +1865,7 @@ class _SessionScreenState extends State<SessionScreen>
     unawaited(_persistHistory());
   }
 
-  void _clearComposeInput() {
+  void _clearComposeInput({bool sent = false}) {
     _settingComposeProgrammatically = true;
     _composeLive = false;
     _composeLiveSent = '';
@@ -1770,7 +1878,7 @@ class _SessionScreenState extends State<SessionScreen>
       _attachments.clear();
       if (mounted) setState(() {});
     }
-    _restoreLensAfterLive();
+    _restoreLensAfterLive(sent: sent);
     unawaited(_saveDraft());
     // Must follow the clear above, unconditionally: if the persisted copy
     // outlived the send, the next visit would re-stage images the agent has
@@ -1788,15 +1896,89 @@ class _SessionScreenState extends State<SessionScreen>
     if (_composeLive) _clearComposeInput();
   }
 
-  /// After a live '/' command ends (sent or deleted), hop back to the lens the
-  /// user was on when they started typing it — so running /compact from Chat
-  /// returns to Chat, not the terminal the menu rendered in. No-op for lines
-  /// that never went live (a normal chat send leaves _lensBeforeLive null).
-  void _restoreLensAfterLive() {
-    if (_lensBeforeLive != null) {
-      _activeLens = _lensBeforeLive!;
-      _lensBeforeLive = null;
-    }
+  /// After a live '/' command ends (sent, deleted to empty, or Esc), drop the
+  /// pin — so running /compact from Chat returns to Chat, not the terminal the
+  /// menu rendered in. No-op for lines that never went live: the pin was never
+  /// raised, and the resolver was already answering the un-pinned lens.
+  ///
+  /// #130: this used to restore a `_lensBeforeLive` SNAPSHOT taken when the line
+  /// went live. Dropping the pin and recomputing is the same answer without the
+  /// staleness — if the user toggled lenses during the command, the snapshot
+  /// would have overwritten their newer choice with the older one.
+  /// #131 — [sent] distinguishes a command that RAN from one that was cancelled,
+  /// and only a command that ran can have a result worth staying for.
+  ///
+  /// A command whose entire result is TUI paint (`/status`, `/usage` — measured:
+  /// their transcript record is a `local_command` line reading "Settings dialog
+  /// dismissed", and nothing else) has nothing waiting in Chat, so hopping back
+  /// would land the user on an invocation with no answer. That is the reported
+  /// bug, and it is why the pin outlives the send for those. It is dropped by the
+  /// next ordinary prompt or an explicit lens toggle — both of which mean "I am
+  /// done reading this".
+  ///
+  /// Cancelling (delete-to-empty, Esc) always unpins: nothing ran, so there is
+  /// nothing to read.
+  void _restoreLensAfterLive({bool sent = false}) {
+    if (!_lensPinLiveSlash) return;
+    if (sent && CommandPolicy.instance.pinsTerminal(_liveCommandText)) return;
+    _lensPinLiveSlash = false;
+    _liveCommandText = '';
+    _recomputeActiveLens();
+  }
+
+  /// Tab has completed the command IN THE TERMINAL, so the terminal takes the
+  /// line from here (#131).
+  ///
+  /// THE DIVERGENCE THIS ENDS. The live '/' stream is one-way — compose bar to
+  /// terminal — so anything the TUI does to its own line is invisible to the
+  /// field. Tab is the case that makes that unavoidable: Claude completes `/co`
+  /// to `/compact` in the terminal while the field still holds `/co`. The old
+  /// code knew ("the terminal then holds chars the field never had") and worked
+  /// AROUND it, forwarding raw DELs on backspace and suppressing the
+  /// delete-to-empty exit. Those workarounds exist because two inputs were
+  /// showing two different lines.
+  ///
+  /// Handing the line over removes the second line instead of managing it. The
+  /// client stops tracking a buffer it can no longer predict — so nothing can go
+  /// stale — and the user types the rest where the true text already is. That is
+  /// the acceptance bullet: after Tab, what you see in the input you are typing
+  /// into IS what will be submitted.
+  ///
+  /// DESKTOP ONLY, and that is not a style choice. The terminal is only a usable
+  /// typing surface where there is a hardware keyboard: on touch, xterm has no
+  /// IME/soft-keyboard path, which is exactly why the compose bar exists and why
+  /// #43 makes "there is always a usable input" an invariant. Handing the line to
+  /// an unusable surface would strand a phone mid-command. Mobile therefore keeps
+  /// the one-way mirroring and its workarounds. #55 draws this same line: the
+  /// LAYOUT question is answered by available size, but the INPUT-SURFACE
+  /// question is genuinely a platform one.
+  ///
+  /// The lens pin deliberately survives — the command is still being typed, in
+  /// the terminal, and the user must stay there to finish it.
+  void _handOverLineToTerminal() {
+    if (!isDesktopPlatform() || !_composeLive) return;
+    setState(() {
+      _composeLive = false;
+      _composeLiveSent = '';
+      _liveTabbed = false;
+    });
+    _settingComposeProgrammatically = true;
+    _composeController.clear();
+    _composeFocusNode.unfocus();
+    WidgetsBinding.instance.addPostFrameCallback((_) {
+      _terminalViewKey.currentState?.requestKeyboard();
+    });
+    unawaited(_saveDraft());
+  }
+
+  /// The user submitted an ordinary prompt, so whatever TUI output they were kept
+  /// in the terminal to read (#131) has been read. Releases a pin that outlived
+  /// its command; a no-op otherwise.
+  void _releaseCommandPin() {
+    if (!_lensPinLiveSlash) return;
+    _lensPinLiveSlash = false;
+    _liveCommandText = '';
+    _recomputeActiveLens();
   }
 
   /// Walks send history: first press (from empty, or continuing a walk)
@@ -2416,10 +2598,13 @@ class _SessionScreenState extends State<SessionScreen>
     setState(() {
       _rawMode = value;
       // Raw mode is direct terminal typing — meaningless (and invisible)
-      // while the Chat lens is showing. Switch so the user can see it. This
-      // is a transient override, not persisted as a lens preference.
-      if (value) _activeLens = 'terminal';
+      // while the Chat lens is showing. Pin Terminal so the user can see it.
+      // A pin, not a write to _activeLens (#130): the write was undone by the
+      // next poll's recomputation, which put raw typing back out of sight.
+      // Not persisted as a lens preference, and an explicit toggle clears it.
+      _lensPinRawMode = value;
     });
+    _recomputeActiveLens();
     final prefs = await SharedPreferences.getInstance();
     await prefs.setBool('wt_rawmode_${widget.sessionId}', value);
     if (value) {
@@ -2943,6 +3128,13 @@ class _SessionScreenState extends State<SessionScreen>
               focusNode: _composeFocusNode,
               onSend: _sendCompose,
               isLive: _composeLive,
+              // #147 — a session whose agent is still booting accepts typing but
+              // refuses to SEND: the PTY is still at the shell, so a submit now
+              // is handed to bash and the prompt is lost with no error. Read
+              // straight off the server-published field; `?? true` covers the
+              // moment before the session object has loaded, where refusing
+              // would be a bar that never sends on a session that is fine.
+              agentReady: _session?.agentReady ?? true,
               // #50: when the terminal is the active input target (Terminal lens
               // or a live question overlay), hardware Tab + arrows go straight to
               // the PTY so Claude's TUI (`/status` tabs, menus, questions) is
@@ -2977,6 +3169,7 @@ class _SessionScreenState extends State<SessionScreen>
               onTab: () {
                 _sendRawToTerminal('\t');
                 _liveTabbed = true;
+                _handOverLineToTerminal();
               },
               // Backspace on an already-empty field during a live line clears
               // the leftover of a Tab-completed command (which the field never
