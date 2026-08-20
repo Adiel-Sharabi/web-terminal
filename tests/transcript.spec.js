@@ -10,6 +10,7 @@ const {
   parseTranscriptTurn, scanTurnsBackward, encodeCursor, decodeCursor, stripAnsi,
   extractToolResults, pendingQuestion, shapeQuestions, claudeProjectDirName,
   parseAgentMeta, collectResolvedIds, attachSubagentStubs, PQ_PREVIEW_CAP,
+  PQ_MAX_OPTIONS,
 } = require('../lib/transcript');
 
 // In-memory chunk reader for scanTurnsBackward (mirrors server.js's fs reader).
@@ -636,6 +637,26 @@ test.describe('shapeQuestions (live PreToolUse hook input)', () => {
       ] }],
     });
     expect(shaped[0].options.map((o) => o.label)).toEqual(['Two']);
+    expect(shaped[0].hasPreview).toBe(true);
+  });
+
+  // The SECOND of the three ways the shaped list loses a preview, and the one
+  // the code actually got wrong (#143): the flag was read off the already-sliced
+  // list, so a preview carried only by an option past PQ_MAX_OPTIONS reported
+  // compact. Claude lays the selector out from ALL of its options, so that
+  // question renders side-by-side and every answer key means something else —
+  // a digit navigates instead of selecting, `n` opens a note editor, and the
+  // "Type something." row the compact layout has does not exist at all.
+  test('hasPreview is derived BEFORE the PQ_MAX_OPTIONS slice', () => {
+    const options = [];
+    for (let i = 0; i < PQ_MAX_OPTIONS; i++) options.push({ label: 'Opt' + i });
+    options.push({ label: 'Past the cap', preview: 'a mockup' });
+    const shaped = shapeQuestions({
+      questions: [{ header: 'A', question: 'q', options }],
+    });
+    // The option itself is correctly dropped — only the FLAG must survive it.
+    expect(shaped[0].options).toHaveLength(PQ_MAX_OPTIONS);
+    expect(shaped[0].options.some((o) => o.label === 'Past the cap')).toBe(false);
     expect(shaped[0].hasPreview).toBe(true);
   });
 });

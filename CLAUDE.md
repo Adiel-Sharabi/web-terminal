@@ -541,6 +541,84 @@ is an Android/fontconfig alias that resolves to **nothing** on Windows, macOS an
 iOS, so the block carries a `fontFamilyFallback` — without it the alignment this
 whole treatment exists to preserve is lost on the desktop build.
 
+### The layout also decides whether NOTES exist at all (#143)
+
+The same rule reaches further than the digit. **`n` ("add a note") is a
+side-by-side-layout feature and does not exist in the compact one.** Measured
+against claude **2.1.234**, verdicts from the transcript:
+
+| layout | footer | `n` |
+|---|---|---|
+| compact | `Enter to select · ↑/↓ to navigate · Esc to cancel` | **ignored — no-op** |
+| side-by-side | `… · `**`n to add notes`**` · Esc to cancel` | opens a note editor |
+
+#64 Gap 1 shipped a note sequence that was **never device-verified** and was
+wrong in *both* layouts. On a compact card `n` and the note text are simply
+swallowed, so `↓×idx, n, <note>, CR` degenerates to `↓×idx, CR` — **a correct
+plain selection with the note silently discarded.** Nothing looked broken, which
+is exactly why it survived to ship. That is the failure mode this repo keeps
+paying for: *confidently wrong is worse than absent.*
+
+```
+↓,n,<note>,CR       -> "=(no option selected) notes: …"   the ANSWER is lost
+↓,CR,n,<note>,CR    -> "=Green"                           the NOTE is lost
+↓,n,<note>,ESC,CR   -> "=Green … notes: …"                both  <- the rule
+```
+
+**`Esc` closes the note EDITOR without cancelling the question**, despite the
+footer reading `Esc to cancel`. The whole fix rests on that. It is a lone `0x1b`,
+which `isEscapeKey` would read as an interrupt — but that rule is gated on a
+`working` session and one owing an answer is `waiting`, so it is not armed here.
+
+### `Other` (free text) is a COMPACT feature — the exact mirror of notes (#143)
+
+**`n` exists only side-by-side; `Type something.` exists only compact.** The two
+free-text affordances are mirror images, and the overlay now offers exactly the
+one its layout has. That symmetry is the whole rule; the three bullets below are
+just what each shape measured.
+
+- **Side-by-side — NOT OFFERED, and the reason is not caution.** Measured on
+  claude **2.1.237** (`--shape preview-single --keys "4,indigo actually,CR"`):
+  the previewed selector lists only the real options and then `Chat about this`
+  — **there is no `Type something.` row at all**. The screens after the digit
+  and after the text were **byte-identical** to the first render, and the
+  trailing CR committed the still-default top row. The transcript recorded
+  `"Pick a color"="Red"`. So the un-gated sequence does not merely lose the free
+  text: **it submits an option the user never picked** — worse than the note bug
+  this issue is named for, which at least landed the right option.
+- **Compact multi-question — WORKS, deferral lifted.** The digit lands on the
+  `Type something.` row and opens a free-text editor (the footer gains
+  `ctrl+g to edit in Notepad`); Enter commits it **and** advances the tab, just
+  like a single-select digit. `4,<text>,CR,1,→,CR` recorded both answers intact.
+  The lift is **compact-only**, because compact is the only layout it was driven
+  against.
+- **Multi-select — HOLDS.** The trailing row is a **checkbox** (`5. [✔] Type
+  something`) with no free-text input; the typed text is swallowed, and
+  submitting with only it checked records **`The user did not answer the
+  questions.`** — the whole answer comes back null, not merely textless.
+
+One consequence worth stating because it reads as a bug otherwise: **a card
+offers the note affordance or the `Other…` row, never both.** Notes are
+previewed-only, Other is compact-only, so "Other wins when both are set" is no
+longer a branch-order fact — the layout decides which one is eligible at all.
+
+Claude also renders a **`Chat about this`** row at `options.length + 2` that the
+overlay does not model at all.
+
+Shapes for `scripts/rig/probe-askq-layout.js`: `preview-mq`, `plain-mq`,
+`preview-single`, plus `plain-single`, `plain-multi` and `plain-mq2` (two
+single-select tabs — the only shape that exercises `Other` on a LAST tab, since
+`plain-mq`'s Q2 is multi-select) added for the above.
+
+> **`hasPreview` was being read off the SLICED option list.** `_shapeQuestions`
+> computed it from `kept` — post-`PQ_MAX_OPTIONS` — while its own comment three
+> lines above named that slice as one of the three ways a preview goes missing.
+> A preview carried only by an option past the cap therefore reported *compact*
+> for a question Claude lays out *side-by-side*, and every answer key means
+> something else across that line. Fixed to read the raw list, with the test that
+> was red first. **The rule was written down and the code still drifted from it —
+> which is the argument for the test, not for more prose.**
+
 ## Auth System
 - Cookie-based session auth (primary, for browser users)
 - Bearer token auth (for cluster inter-server communication)

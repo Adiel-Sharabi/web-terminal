@@ -117,11 +117,43 @@ const SHAPES = {
     'question "Pick a color", single-select, three options "Red", "Green", "Blue". ' +
     'Q2: header "Fruit", question "Pick fruits", multiSelect true, four options "Apple", ' +
     '"Banana", "Cherry", "Date". Do not run any other tool and do not say anything first.',
+  // Side-by-side single-select. It settled BOTH free-text affordances (#143):
+  // the footer advertises "n to add notes" and honours it, and the option list
+  // has NO "Type something." row — it runs the real options and then straight to
+  // "Chat about this". Driving --keys "4,indigo actually,CR" against it left the
+  // screen byte-identical after the digit AND after the text, and the CR
+  // committed the still-default top row: transcript "Pick a color"="Red". That
+  // is why 'Other' is gated on !hasPreview.
   'preview-single':
     'Call the AskUserQuestion tool RIGHT NOW, in ONE call, and do nothing else first. ' +
     'EXACTLY one question: header "Color", question "Pick a color", single-select, three ' +
     'options "Red", "Green", "Blue", and EVERY option MUST have a non-empty "preview" field ' +
     'containing a few lines of example text. Do not run any other tool or say anything first.',
+  // Compact single-select, ONE question — the layout the shipped 'Other' (#36) and
+  // 'note' (#64 Gap 1) branches are gated to. The note byte sequence has never been
+  // device-verified; this is the shape that verifies it.
+  'plain-single':
+    'Call the AskUserQuestion tool RIGHT NOW, in ONE call, and do nothing else first. ' +
+    'EXACTLY one question and NO option may have a "preview" field: header "Color", ' +
+    'question "Pick a color", single-select, three options "Red", "Green", "Blue". ' +
+    'Do not run any other tool and do not say anything first.',
+  // Single multi-select — to settle whether its trailing row is a free-text input or
+  // a plain checkbox (the recorded reason 'Other' is deferred for multi-select).
+  'plain-multi':
+    'Call the AskUserQuestion tool RIGHT NOW, in ONE call, and do nothing else first. ' +
+    'EXACTLY one question and NO option may have a "preview" field: header "Fruit", ' +
+    'question "Pick fruits", multiSelect true, four options "Apple", "Banana", ' +
+    '"Cherry", "Date". Do not run any other tool and do not say anything first.',
+  // Two SINGLE-select questions, no previews — the shape that exercises "Other"
+  // on the LAST tab of a multi-question prompt. plain-mq cannot: its Q2 is
+  // multi-select, where the free-text row is a checkbox and Other is never
+  // offered. Advancing past the final tab is what lands on the Submit review.
+  'plain-mq2':
+    'Call the AskUserQuestion tool RIGHT NOW, in ONE call, and do nothing else first. ' +
+    'EXACTLY two questions, both single-select, and NO option may have a "preview" ' +
+    'field. Q1: header "Color", question "Pick a color", three options "Red", ' +
+    '"Green", "Blue". Q2: header "Size", question "Pick a size", three options ' +
+    '"Small", "Medium", "Large". Do not run any other tool or say anything first.',
 };
 if (!SHAPES[SHAPE]) throw new Error('unknown --shape ' + SHAPE + ' (have: ' + Object.keys(SHAPES).join(', ') + ')');
 
