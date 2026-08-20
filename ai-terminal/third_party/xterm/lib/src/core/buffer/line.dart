@@ -332,10 +332,59 @@ class BufferLine with IndexedItem {
     }
 
     final builder = StringBuffer();
+
+    // WEB-TERMINAL PATCH (#151): stock dropped every cell whose codePoint is 0,
+    // and a terminal does not pad a gap with literal 0x20 — a column that was
+    // never written, or was erased (ECH/EL), holds 0. So every run of blank
+    // columns inside a selection vanished and the words on either side ran
+    // together: `alpha    beta` came off the clipboard as `alphabet`.
+    //
+    // A blank cell is emitted as one space, but only once something AFTER it in
+    // the span is emitted — so an interior gap is content while the unwritten
+    // remainder of a row is not. Without that, a multi-line selection would pad
+    // every line out to the terminal width, because the segment for a line in
+    // the middle of the range spans the WHOLE line.
+    //
+    // A literal 0x20 is deliberately NOT deferred: it is a character the
+    // program wrote, not padding, and at the last column of a WRAPPED row it is
+    // load-bearing — the next row is joined with no newline, so trimming it
+    // deletes a space from the middle of a logical line. (`This is a long line`
+    // came back as `This is along line`; upstream's own `Buffer.getText() can
+    // handle line wrap` test catches exactly that.) Interior gaps still read the
+    // same whichever way they were drawn, which is what the defect was about.
+    var pendingBlanks = 0;
+
     for (var i = from; i < to; i++) {
       final codePoint = getCodePoint(i);
       final width = getWidth(i);
-      if (codePoint != 0 && i + width <= to) {
+
+      if (codePoint == 0) {
+        // WEB-TERMINAL PATCH (#151): the second half of a wide glyph is written
+        // as `writeChar(0)` and `wcwidth(0) == 0`, so its content word is 0 —
+        // byte-identical to an erased cell. The left neighbour is the only
+        // thing that tells them apart, so peek at it (deliberately, even below
+        // [from]: a selection beginning on a continuation cell must not open
+        // with a phantom space). Not whitespace, not a character — emit
+        // nothing.
+        //
+        // INCOMPLETE ON ITS OWN, deliberately: a wide glyph on the LAST column
+        // puts its continuation at column 0 of the NEXT row, where the left
+        // neighbour is a cell this line cannot see — and a `BufferLine` cannot
+        // reach its predecessor at all (`IndexedItem._owner` is private to
+        // circular_buffer.dart). `Buffer.getText` closes that case; see the
+        // matching WEB-TERMINAL PATCH (#151) there.
+        if (i > 0 && getWidth(i - 1) == 2) {
+          continue;
+        }
+        pendingBlanks++;
+        continue;
+      }
+
+      if (i + width <= to) {
+        if (pendingBlanks > 0) {
+          builder.write(' ' * pendingBlanks);
+          pendingBlanks = 0;
+        }
         builder.writeCharCode(codePoint);
       }
     }

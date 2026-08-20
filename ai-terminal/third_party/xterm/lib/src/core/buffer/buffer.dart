@@ -582,7 +582,34 @@ class Buffer {
           line.isWrapped)) {
         builder.write("\n");
       }
-      builder.write(line.getText(segment.start, segment.end));
+      // WEB-TERMINAL PATCH (#151): a wide glyph on the LAST column puts its
+      // continuation cell at column 0 of the NEXT row. `writeChar` reaches
+      // `_cursorX >= viewWidth` on the recursive `writeChar(0)` and runs
+      // `index(); setCursorX(0)` BEFORE writing it, so the continuation is not
+      // always to the right of its glyph. `BufferLine.getText` tells a
+      // continuation from a blank by looking one cell left — which at column 0
+      // is a cell it cannot see, and a `BufferLine` provably cannot reach its
+      // predecessor (`IndexedItem._owner` is private to circular_buffer.dart).
+      // So the disambiguation has to happen HERE, where both lines are in hand;
+      // without it `abcdefghi<wide>jkl` at 10 columns copies as
+      // `abcdefghi jkl`, a phantom space in the middle of a word.
+      //
+      // Keyed on the PREDECESSOR'S WIDTH, not on `isWrapped`: measured, the
+      // continuation lands at column 0 either way, but `isWrapped` is only set
+      // when DECAWM is on (`writeChar` guards just that one line with
+      // `terminal.autoWrapMode`), so `ESC[?7l` would keep the phantom space.
+      // The cell is also checked to be blank, so a column 0 that was
+      // overwritten after the wrap can never be skipped — this may only ever
+      // drop a cell that would have produced a space, never a character.
+      var start = segment.start;
+      if (segment.line > 0 && (start ?? 0) == 0 && line.getCodePoint(0) == 0) {
+        final above = lines[segment.line - 1];
+        if (above.length > 0 && above.getWidth(above.length - 1) == 2) {
+          start = 1;
+        }
+      }
+
+      builder.write(line.getText(start, segment.end));
     }
 
     return builder.toString();
