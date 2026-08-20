@@ -90,7 +90,7 @@ row per scroll, on the hottest path in the terminal. `move` is allocation-free.
    the release-mode blank terminal. `ai-terminal/test/xterm_prepend_test.dart` asserts
    attachment, index consistency, and that `Terminal.write` still works afterwards.
 
-### A third, unrelated patch (#151)
+### A third, unrelated patch (#151) — two hunks, one rule
 
 4. `lib/src/core/buffer/line.dart` — `BufferLine.getText` emits a **space** for a
    blank cell inside the requested span, where stock emitted nothing at all.
@@ -129,10 +129,43 @@ row per scroll, on the hottest path in the terminal. `move` is allocation-free.
    below `from`, so a selection that begins on a continuation cell does not open
    with one either.
 
+5. `lib/src/core/buffer/buffer.dart` — `Buffer.getText` starts a segment at
+   column 1 when column 0 holds the continuation of a wide glyph that ended the
+   row above.
+
+   **The trap above has a second floor, and the first cut of item 4 fell through
+   it.** A wide glyph on the **last column** does not put its continuation cell
+   to its right — `writeChar` reaches `_cursorX >= viewWidth` on the recursive
+   `writeChar(0)` and runs `index(); setCursorX(0)` **before** writing it, so the
+   continuation lands at **column 0 of the next row**. The "look one cell left"
+   rule is blind exactly there, and `abcdefghi<wide>jkl` at 10 columns copied as
+   `abcdefghi jkl` — a phantom space in the middle of a word. Astral glyphs take
+   the same path.
+
+   A `BufferLine` cannot fix this itself: `IndexedItem._owner` is library-private
+   to `circular_buffer.dart`, so a line provably cannot reach its predecessor.
+   `Buffer.getText` holds both lines, which is what makes it the SSOT owner.
+
+   Keyed on the **predecessor's width, not on `isWrapped`**. Measured both ways:
+   the continuation lands at column 0 either way, but `writeChar` guards only the
+   `isWrapped = true` line with `terminal.autoWrapMode`, so with `ESC[?7l` the row
+   is left unmarked and an `isWrapped`-keyed fix would keep the phantom space.
+   Column 0 is also checked to be blank, so a cell overwritten after the wrap can
+   never be skipped — the hunk may only ever drop a cell that would have produced
+   a space, never a character.
+
+   **Residual, recorded rather than hidden:** `BufferLine.getText` called
+   *directly* on such a row still returns the phantom space, because the fix is
+   one layer up. Its direct callers are `toString()` (debug repr),
+   `session_screen.dart`'s `.trim().isEmpty` scrollback check and `contains(...)`
+   assertions — no user-visible path.
+
    Regression test: `ai-terminal/test/xterm_gettext_whitespace_test.dart` —
-   16 cases covering CUF and ECH gaps, indentation, the wrap rejoin, wide and
-   astral glyphs beside real gaps, and the real capture replayed through
-   `copyTerminalSelection`. Before the patch: `+7 -9`.
+   21 cases covering CUF and ECH gaps, indentation, the wrap rejoin, wide and
+   astral glyphs beside real gaps, the last-column wrap with DECAWM on and off,
+   and the real capture replayed through `copyTerminalSelection`. Before item 4:
+   `+7 -9`. The five last-column cases are red against item 4 alone rather than
+   against stock — they guard a defect the patch introduced.
 
 ## How this was verified
 

@@ -17,6 +17,12 @@
 // left neighbour has width 2. Emit a space for it and every CJK/emoji glyph
 // grows a phantom space. So: assert on a wide char next to a real gap, every
 // time.
+//
+// AND THE TRAP HAS A SECOND FLOOR, which the first cut of this fix fell
+// through: on the LAST column that left neighbour is on the PREVIOUS ROW, so
+// the rule above is blind exactly there. See the last-column group below — it
+// is red against the patch's first cut rather than against stock, because the
+// defect it guards is one the patch itself introduced.
 import 'dart:io';
 
 import 'package:flutter/services.dart';
@@ -172,6 +178,68 @@ void main() {
       );
 
       expect(text, 'alpha');
+    });
+  });
+
+  // A wide glyph on the LAST column puts its continuation cell at column 0 of
+  // the NEXT row: `writeChar` reaches `_cursorX >= viewWidth` on the recursive
+  // `writeChar(0)` and runs `index(); setCursorX(0)` BEFORE writing it. So the
+  // "look one cell left" rule above is blind exactly there, and the first cut
+  // of this fix injected a phantom space into the middle of a word. These cases
+  // are red against THAT cut, not against stock — they guard a defect the patch
+  // introduced, which is why they live in their own group.
+  group('#151 a wide glyph on the last column wraps its continuation cell', () {
+    String wrapped(String text, {String gap = ''}) {
+      final terminal = _term(cols: 10, rows: 6);
+      terminal.write(text);
+      if (gap.isNotEmpty) terminal.write(gap);
+      return terminal.buffer.getText(
+        BufferRangeLine(const CellOffset(0, 0), const CellOffset(9, 1)),
+      );
+    }
+
+    // (a) The reported shape. Stock drops the glyph itself (`i + width <= to`
+    // is false on the last column — pre-existing upstream, untouched here), so
+    // the correct answer is the letters joined with nothing between them.
+    test('no space is injected before the wrapped row', () {
+      expect(wrapped('abcdefghi中jkl'), 'abcdefghijkl');
+    });
+
+    // (b) An astral glyph takes the same path.
+    test('an astral glyph on the last column behaves the same', () {
+      expect(wrapped('abcdefghi\u{1f642}jkl'), 'abcdefghijkl');
+    });
+
+    // (c) The discriminating case, red against BOTH the first cut and stock:
+    // the continuation must vanish while the REAL gap after it survives.
+    test('a real gap after the continuation still copies as spaces', () {
+      expect(wrapped('abcdefghi中', gap: '\x1b[2Cx'), 'abcdefghi  x');
+    });
+
+    // (d) The skip must never eat a written character. Here the wrapped row
+    // begins on a literal 0x20, and nothing above it is wide.
+    test('a wrapped row beginning on a real space keeps it', () {
+      expect(wrapped('abcdefghij klm'), 'abcdefghij klm');
+    });
+
+    // (e) MEASURED, not assumed. The continuation lands at column 0 whether or
+    // not DECAWM is on, but `isWrapped` is set only when it is — so a fix keyed
+    // on `isWrapped` would leave the phantom space here. With DECAWM off the
+    // rows are not joined, hence the newline.
+    test('DECAWM off still places the continuation at column 0', () {
+      final terminal = _term(cols: 10, rows: 6);
+      terminal.write('\x1b[?7l');
+      terminal.write('abcdefghi中jkl');
+
+      expect(terminal.buffer.lines[1].isWrapped, isFalse,
+          reason: 'the premise: DECAWM off leaves the row unmarked');
+      expect(terminal.buffer.lines[1].getCodePoint(0), 0,
+          reason: 'the premise: the continuation is still at column 0');
+
+      final text = terminal.buffer.getText(
+        BufferRangeLine(const CellOffset(0, 0), const CellOffset(9, 1)),
+      );
+      expect(text, 'abcdefghi\njkl');
     });
   });
 

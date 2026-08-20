@@ -366,6 +366,13 @@ class BufferLine with IndexedItem {
         // [from]: a selection beginning on a continuation cell must not open
         // with a phantom space). Not whitespace, not a character — emit
         // nothing.
+        //
+        // INCOMPLETE ON ITS OWN, deliberately: a wide glyph on the LAST column
+        // puts its continuation at column 0 of the NEXT row, where the left
+        // neighbour is a cell this line cannot see — and a `BufferLine` cannot
+        // reach its predecessor at all (`IndexedItem._owner` is private to
+        // circular_buffer.dart). `Buffer.getText` closes that case; see the
+        // matching WEB-TERMINAL PATCH (#151) there.
         if (i > 0 && getWidth(i - 1) == 2) {
           continue;
         }
