@@ -448,6 +448,16 @@ class _QuestionOverlayState extends State<QuestionOverlay> {
   int _tab = 0;
   late List<Set<int>> _selected;
 
+  /// One stable key per (tab, option) so a revealed preview can be scrolled into
+  /// view (#145 — see [_revealPreview]). Keyed by tab as well as index because
+  /// the tabs share one scroll view and index 0 is a different row on each.
+  /// Created lazily and kept for the life of the overlay: a GlobalKey has to be
+  /// the SAME object across rebuilds or the element it names is torn down.
+  final Map<String, GlobalKey> _optionKeys = {};
+
+  GlobalKey _optionKey(int i) =>
+      _optionKeys.putIfAbsent('$_tab:$i', () => GlobalKey());
+
   /// Per-question free-text ("Other") answer, parallel to [_selected]. `null`
   /// means Other is NOT the active choice for that tab (numeric-selection mode);
   /// a non-null value (even `''`) means Other is active, and its trimmed text is
@@ -567,6 +577,44 @@ class _QuestionOverlayState extends State<QuestionOverlay> {
           ..clear()
           ..add(i);
       }
+    });
+    _revealPreview(q, i);
+  }
+
+  /// Scroll a just-selected option's `preview` block into view (#145).
+  ///
+  /// Selecting is what reveals a preview, and the block is far taller than the
+  /// row that opened it. On a phone the option list gets `kOptionFloor` — about
+  /// two rows — so choosing the LAST option opens a ~300px block entirely below
+  /// the viewport: the radio fills, nothing else changes, and the preview this
+  /// feature exists to show is invisible on exactly the narrow screen it was
+  /// reported from.
+  ///
+  /// Deliberately narrow. It fires only for an option that actually HAS a
+  /// preview, so no preview-less question changes behaviour and #94's
+  /// "options are reachable without scrolling" budget is untouched.
+  ///
+  /// Deferred to the next frame because the block does not exist until the
+  /// rebuild that `setState` above schedules — and RE-CHECKED there, because
+  /// between scheduling and running, the overlay can be dismissed or the tab
+  /// switched (#111: a deferred scroll that does not re-check moves the wrong
+  /// thing, or a thing that is gone).
+  void _revealPreview(PendingQuestionItem q, int i) {
+    if (i < 0 || i >= q.options.length) return;
+    if (q.options[i].preview.isEmpty) return;
+    WidgetsBinding.instance.addPostFrameCallback((_) {
+      if (!mounted) return;
+      if (!_selected[_tab].contains(i)) return;
+      final ctx = _optionKey(i).currentContext;
+      if (ctx == null) return;
+      Scrollable.ensureVisible(
+        ctx,
+        duration: const Duration(milliseconds: 180),
+        curve: Curves.easeOut,
+        // Bring the BOTTOM of the tile up: the preview hangs below the label,
+        // so aligning the top would scroll the block itself back out of sight.
+        alignment: 1.0,
+      );
     });
   }
 
@@ -1235,6 +1283,9 @@ class _QuestionOverlayState extends State<QuestionOverlay> {
     final opt = q.options[i];
     final selected = _selected[_tab].contains(i);
     return Padding(
+      // Named so _revealPreview can scroll this exact row into view once
+      // selecting it opens a preview taller than the row itself (#145).
+      key: _optionKey(i),
       padding: const EdgeInsets.symmetric(vertical: 3),
       child: Material(
         color: selected
@@ -1350,7 +1401,19 @@ class _QuestionOverlayState extends State<QuestionOverlay> {
                               maxLines: kPreviewMaxLines,
                               overflow: TextOverflow.ellipsis,
                               style: theme.textTheme.bodySmall?.copyWith(
+                                // 'monospace' is an Android/fontconfig alias and
+                                // resolves to NOTHING on Windows, macOS and iOS,
+                                // where Flutter then falls back to a proportional
+                                // face — which would defeat the entire reason this
+                                // block is unparsed. The fallback list is what
+                                // makes the alignment claim true off Android.
                                 fontFamily: 'monospace',
+                                fontFamilyFallback: const [
+                                  'Consolas',
+                                  'Menlo',
+                                  'DejaVu Sans Mono',
+                                  'Courier New',
+                                ],
                                 height: 1.35,
                                 color: theme.colorScheme.onSurface,
                               ),

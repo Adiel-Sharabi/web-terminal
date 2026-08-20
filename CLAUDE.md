@@ -436,10 +436,22 @@ select mirrors the TUI, where moving the highlight swaps the box and Enter
 commits; a tap here likewise only moves the selection, so reading a preview
 never costs you a choice.
 
-**`hasPreview` is still derived from the RAW option list, before capping and
-before label-less options are dropped — never recompute it from the shaped
-options.** A preview that vanished under the cap would flip the question to the
-compact layout, and the layout decides what every answer key MEANS.
+**`hasPreview` is still derived from the RAW option list — never recompute it
+from the shaped one.** The shaped list can lose a preview three ways: its option
+had no label and was filtered out, it fell past `PQ_MAX_OPTIONS`, or the body was
+a non-string/whitespace and was never attached. (Capping is **not** one of them —
+`_pqCap` truncates, it cannot empty a non-empty preview.) Any of the three would
+silently flip the question to the compact layout, and the layout decides what
+every answer key MEANS.
+
+The block is revealed by **selecting** its option, and selecting also **scrolls
+that row into view**. Without it the feature is invisible in the case it was
+reported from: the option list gets `kOptionFloor` (~two rows) on a phone, so
+choosing the last option opens a ~300px block entirely below the viewport — the
+radio fills and nothing else appears to happen. Note the font too: `'monospace'`
+is an Android/fontconfig alias that resolves to **nothing** on Windows, macOS and
+iOS, so the block carries a `fontFamilyFallback` — without it the alignment this
+whole treatment exists to preserve is lost on the desktop build.
 
 ## Auth System
 - Cookie-based session auth (primary, for browser users)

@@ -2453,6 +2453,95 @@ void main() {
       expect(block.data, contains('`not code`'));
     });
 
+    testWidgets(
+        'on a PHONE, selecting an option BELOW THE FOLD reveals its preview',
+        (tester) async {
+      // Found in review of #148, and invisible to every other test here because
+      // they all pump at 1200x1800. On a 412dp phone the option list gets
+      // kOptionFloor (~two rows), so an option further down is reached by
+      // scrolling — and selecting it opens a preview block BELOW the row, i.e.
+      // below the viewport. The radio fills and nothing else appears to happen:
+      // the feature is shipped and unseeable on exactly the screen it was
+      // reported from.
+      //
+      // Asserted against the SCROLL VIEWPORT, never the screen (#94: getRect
+      // returns unclipped positions, so "is it on screen" answers yes for a row
+      // scrolled well out of sight).
+      tester.view.physicalSize = const Size(412 * 3, 915 * 3);
+      tester.view.devicePixelRatio = 3.0;
+      addTearDown(tester.view.reset);
+
+      const tail = 'TAIL_PREVIEW_BODY';
+      final tallPreview =
+          [tail, for (var i = 0; i < 13; i++) 'line $i'].join('\n');
+      await tester.pumpWidget(
+        MaterialApp(
+          theme: AppTheme.dark,
+          home: Scaffold(
+            body: Stack(
+              children: [
+                QuestionOverlay(
+                  question: PendingQuestion(
+                    toolUseId: 'tphone',
+                    questions: [
+                      PendingQuestionItem(
+                        header: 'Ship',
+                        question: 'Pick one',
+                        multiSelect: false,
+                        hasPreview: true,
+                        options: [
+                          for (final label in const [
+                            'First', 'Second', 'Third', 'Fourth', 'Fifth',
+                          ])
+                            QuestionOption(
+                                label: label, preview: 'body of $label'),
+                          QuestionOption(label: 'Sixth', preview: tallPreview),
+                        ],
+                      ),
+                    ],
+                  ),
+                  contextText: _longLeadUp,
+                  onSend: (_) {},
+                  onKey: (_) {},
+                  onDismiss: () {},
+                ),
+              ],
+            ),
+          ),
+        ),
+      );
+      await tester.pumpAndSettle();
+
+      // Reach the last option the way a user does — by scrolling the list.
+      final list = find
+          .ancestor(
+            of: find.text('First'),
+            matching: find.byType(SingleChildScrollView),
+          )
+          .first;
+      await tester.scrollUntilVisible(find.text('Sixth'), 120, scrollable: find
+          .descendant(of: list, matching: find.byType(Scrollable))
+          .first);
+      await tester.pumpAndSettle();
+
+      await tester.tap(find.text('Sixth'));
+      await tester.pumpAndSettle();
+
+      final body = find.text(tallPreview);
+      expect(body, findsOneWidget);
+      final viewport = tester.getRect(list);
+      final rect = tester.getRect(body);
+      // MEASURED, not assumed. Without the reveal this preview lands at
+      // 708..932 in a 404..836 viewport: it opens, but its last ~96px are
+      // clipped with nothing saying so — you read a snippet that stops
+      // mid-thought and cannot tell that it did.
+      expect(rect.bottom, lessThanOrEqualTo(viewport.bottom + 0.5),
+          reason: 'the tail of the preview was clipped below the option '
+              'viewport and nothing scrolled to it');
+      expect(rect.top, greaterThanOrEqualTo(viewport.top - 0.5),
+          reason: 'the preview must not be scrolled off the top either');
+    });
+
     testWidgets('a long preview is clamped VISIBLY, never silently',
         (tester) async {
       final long = [for (var i = 0; i < 60; i++) 'line $i'].join('\n');

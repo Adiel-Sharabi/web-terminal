@@ -1162,9 +1162,10 @@ class QuestionOption {
   /// read as. Multi-line by nature: it is a BLOCK, not a blurb, so the overlay
   /// renders it in monospace rather than as prose.
   ///
-  /// Do NOT re-derive [PendingQuestionItem.hasPreview] from this — the server's
-  /// flag is computed before capping and before label-less options are dropped,
-  /// and it decides what every answer key MEANS.
+  /// Do NOT re-derive [PendingQuestionItem.hasPreview] from this list — the
+  /// server computes it from the RAW options, before label-less ones are dropped
+  /// and before the option count is capped, and it decides what every answer key
+  /// MEANS.
   final String preview;
 
   const QuestionOption({
