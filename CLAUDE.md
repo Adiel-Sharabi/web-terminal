@@ -417,8 +417,29 @@ plain-mq    2,1,3,→,\r     -> "Pick a color"="Green", "Pick fruits"="Apple, Ch
 The last line is the regression guard: it must keep passing **without** the extra
 Enter, which is why the fix is a branch on `hasPreview` and not a blanket Enter.
 
-The preview **body** is deliberately not forwarded — it is free-form, can be large
-and nothing renders it. Only the fact that one exists crosses the wire.
+### The preview BODY now crosses the wire too (#145)
+
+It used to be dropped on purpose — *"free-form, can be large, and nothing renders
+it"* — which was right for exactly as long as nothing rendered it. Reported
+2026-08-19: a three-option prompt whose labels were `Land #182 (.debug suffix)` /
+`Play closed track upload` / `Leave it` kept every package name, snippet and
+blocker **inside the preview box**, so the chat lens was strictly less
+informative than the terminal *on the questions that need the most reading* —
+and no amount of client work could fix it, because the bytes were never sent.
+
+`_shapeQuestions` now publishes `preview` per option, capped at
+**`PQ_PREVIEW_CAP = 2000`** — its own budget, not the 800 sized for a label or a
+blurb, because a preview is a multi-line **block**. The overlay renders it in
+**monospace and unparsed** (its markup *is* the content) on the **selected row
+only**, clamped to `kPreviewMaxLines` with a visible ellipsis. Revealing it on
+select mirrors the TUI, where moving the highlight swaps the box and Enter
+commits; a tap here likewise only moves the selection, so reading a preview
+never costs you a choice.
+
+**`hasPreview` is still derived from the RAW option list, before capping and
+before label-less options are dropped — never recompute it from the shaped
+options.** A preview that vanished under the cap would flip the question to the
+compact layout, and the layout decides what every answer key MEANS.
 
 ## Auth System
 - Cookie-based session auth (primary, for browser users)

@@ -2317,4 +2317,168 @@ void main() {
       expect(expanded.maxLines, isNull);
     });
   });
+
+  // #145 — the option `preview` BLOCK.
+  //
+  // Reported 2026-08-19: a three-option question whose labels were terse and
+  // whose entire technical content sat in Claude's side-by-side preview box
+  // showed none of it in chat, because the server dropped the body and only
+  // published `hasPreview`. The chat lens was strictly less informative than
+  // the terminal on exactly the questions that need the most reading.
+  group('#145 — the option preview block', () {
+    const kSnippet = 'debug {\n  applicationIdSuffix = ".debug"\n}';
+    const kOther = 'net.hilash.rega  <- Play, your real data';
+
+    PendingQuestion previewed() => const PendingQuestion(
+          toolUseId: 'tp',
+          questions: [
+            PendingQuestionItem(
+              header: 'Ship',
+              question: 'Pick',
+              multiSelect: false,
+              hasPreview: true,
+              options: [
+                QuestionOption(label: 'Land it', preview: kSnippet),
+                QuestionOption(label: 'Closed track', preview: kOther),
+                QuestionOption(label: 'Leave it'),
+              ],
+            ),
+          ],
+        );
+
+    Future<void> pump(WidgetTester tester, PendingQuestion q) async {
+      tester.view.physicalSize = const Size(1200, 1800);
+      tester.view.devicePixelRatio = 1.0;
+      addTearDown(tester.view.reset);
+      await tester.pumpWidget(
+        MaterialApp(
+          theme: AppTheme.dark,
+          home: Scaffold(
+            body: Stack(
+              children: [
+                QuestionOverlay(
+                  question: q,
+                  onSend: (_) {},
+                  onKey: (_) {},
+                  onDismiss: () {},
+                ),
+              ],
+            ),
+          ),
+        ),
+      );
+      await tester.pumpAndSettle();
+    }
+
+    test('QuestionOption reads `preview`; an absent one is empty, never null',
+        () {
+      expect(
+        QuestionOption.fromJson({'label': 'A', 'preview': kSnippet}).preview,
+        kSnippet,
+      );
+      // An older server never sends the field — that must read as "no preview",
+      // which is exactly today's behaviour, not a crash.
+      expect(QuestionOption.fromJson({'label': 'A'}).preview, '');
+    });
+
+    testWidgets('the preview is revealed by selecting its option',
+        (tester) async {
+      await pump(tester, previewed());
+
+      // Nothing is selected yet, so no preview competes for the room the
+      // options need (#94/#108 — the option list is the scarce region).
+      expect(find.text(kSnippet), findsNothing);
+
+      await tester.tap(find.text('Land it'));
+      await tester.pumpAndSettle();
+      expect(find.text(kSnippet), findsOneWidget);
+    });
+
+    testWidgets('only the SELECTED option shows a preview — they swap',
+        (tester) async {
+      await pump(tester, previewed());
+
+      await tester.tap(find.text('Land it'));
+      await tester.pumpAndSettle();
+      expect(find.text(kSnippet), findsOneWidget);
+      expect(find.text(kOther), findsNothing);
+
+      // Single-select: choosing another row moves the selection, so the
+      // preview follows it. This mirrors Claude's own side-by-side layout,
+      // where moving the highlight is what swaps the box and Enter commits.
+      await tester.tap(find.text('Closed track'));
+      await tester.pumpAndSettle();
+      expect(find.text(kSnippet), findsNothing);
+      expect(find.text(kOther), findsOneWidget);
+    });
+
+    testWidgets('an option carrying no preview renders no block',
+        (tester) async {
+      await pump(tester, previewed());
+      await tester.tap(find.text('Leave it'));
+      await tester.pumpAndSettle();
+      expect(find.text(kSnippet), findsNothing);
+      expect(find.text(kOther), findsNothing);
+    });
+
+    testWidgets('a preview is MONOSPACE and unparsed — its markup is content',
+        (tester) async {
+      // The description next door goes through inlineMarkdownSpans, and doing
+      // the same here would eat the asterisks and backticks a snippet is MADE
+      // of — and lose the alignment that makes it readable at all.
+      const marky = '**not bold**\n`not code`\n  aligned';
+      await pump(
+        tester,
+        const PendingQuestion(
+          toolUseId: 'tm',
+          questions: [
+            PendingQuestionItem(
+              header: 'H',
+              question: 'Pick',
+              multiSelect: false,
+              hasPreview: true,
+              options: [QuestionOption(label: 'One', preview: marky)],
+            ),
+          ],
+        ),
+      );
+      await tester.tap(find.text('One'));
+      await tester.pumpAndSettle();
+
+      final block = tester.widget<Text>(find.text(marky));
+      expect(block.style?.fontFamily, 'monospace');
+      // Rendered verbatim: the markup survives as text rather than being
+      // interpreted away.
+      expect(block.data, contains('**not bold**'));
+      expect(block.data, contains('`not code`'));
+    });
+
+    testWidgets('a long preview is clamped VISIBLY, never silently',
+        (tester) async {
+      final long = [for (var i = 0; i < 60; i++) 'line $i'].join('\n');
+      await pump(
+        tester,
+        PendingQuestion(
+          toolUseId: 'tl',
+          questions: [
+            PendingQuestionItem(
+              header: 'H',
+              question: 'Pick',
+              multiSelect: false,
+              hasPreview: true,
+              options: [QuestionOption(label: 'One', preview: long)],
+            ),
+          ],
+        ),
+      );
+      await tester.tap(find.text('One'));
+      await tester.pumpAndSettle();
+
+      final block = tester.widget<Text>(find.text(long));
+      expect(block.maxLines, kPreviewMaxLines);
+      // The ellipsis is the point: a silent cut would let the reader believe
+      // they had seen the whole snippet — the #143 failure mode.
+      expect(block.overflow, TextOverflow.ellipsis);
+    });
+  });
 }

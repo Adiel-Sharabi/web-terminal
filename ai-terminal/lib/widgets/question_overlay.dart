@@ -369,6 +369,13 @@ const double kCtxChrome = 50; // lead-up panel margin + padding + label row
 const double kOptionRowMax = 96; // label + a two-line description at 412dp
 const double kOptionPeek = 16; // a deliberate half-row: "there is more below"
 
+/// Lines of an option's `preview` block shown once that option is selected
+/// (#145). The server caps a preview at 2000 characters, which is roughly 30
+/// lines — taller than a phone card — so it is clamped here too, VISIBLY: the
+/// ellipsis says "there is more of this in the terminal" where a silent cut
+/// would let the reader believe they had seen the whole snippet.
+const int kPreviewMaxLines = 14;
+
 /// Two whole option rows plus a peek of the third. The peek matters as much as
 /// the rows: it makes the cut land somewhere chosen, so a clipped list reads as
 /// "scroll me" instead of as the end (the report was a row sliced mid-word).
@@ -1303,6 +1310,50 @@ class _QuestionOverlayState extends State<QuestionOverlay> {
                             overflow: selected ? null : TextOverflow.ellipsis,
                             style: theme.textTheme.bodySmall?.copyWith(
                               color: theme.colorScheme.onSurfaceVariant,
+                            ),
+                          ),
+                        ),
+                      // #145 — the preview BLOCK, on the selected row only.
+                      //
+                      // This mirrors what Claude's own side-by-side layout does:
+                      // moving the highlight is what swaps the preview box, and
+                      // nothing is committed until Enter. Here a tap only moves
+                      // the selection too (Send commits), so reading a preview
+                      // stays free and reversible — you are not made to choose
+                      // an option in order to find out what it means.
+                      //
+                      // Monospace and unrendered: a preview is a snippet, a diff
+                      // or a mock-up whose ALIGNMENT is the content. Running it
+                      // through the markdown spans the description uses would
+                      // eat the backticks and asterisks that a code block is
+                      // made of.
+                      if (selected && opt.preview.isNotEmpty)
+                        Padding(
+                          padding: const EdgeInsets.only(top: 8),
+                          child: Container(
+                            width: double.infinity,
+                            padding: const EdgeInsets.symmetric(
+                              horizontal: 10,
+                              vertical: 8,
+                            ),
+                            decoration: BoxDecoration(
+                              color: theme.colorScheme.surfaceContainerHighest,
+                              borderRadius: BorderRadius.circular(
+                                AppShape.small,
+                              ),
+                              border: Border.all(
+                                color: theme.colorScheme.outlineVariant,
+                              ),
+                            ),
+                            child: Text(
+                              opt.preview,
+                              maxLines: kPreviewMaxLines,
+                              overflow: TextOverflow.ellipsis,
+                              style: theme.textTheme.bodySmall?.copyWith(
+                                fontFamily: 'monospace',
+                                height: 1.35,
+                                color: theme.colorScheme.onSurface,
+                              ),
                             ),
                           ),
                         ),

@@ -1155,11 +1155,28 @@ class SubagentPage {
 class QuestionOption {
   final String label;
   final String description;
-  const QuestionOption({required this.label, this.description = ''});
+
+  /// The option's `preview` block — the code snippet or mock-up Claude renders
+  /// in the box beside the option list (#145). Empty when the option carries
+  /// none, which is also what an older server (that never sent the field) is
+  /// read as. Multi-line by nature: it is a BLOCK, not a blurb, so the overlay
+  /// renders it in monospace rather than as prose.
+  ///
+  /// Do NOT re-derive [PendingQuestionItem.hasPreview] from this — the server's
+  /// flag is computed before capping and before label-less options are dropped,
+  /// and it decides what every answer key MEANS.
+  final String preview;
+
+  const QuestionOption({
+    required this.label,
+    this.description = '',
+    this.preview = '',
+  });
 
   factory QuestionOption.fromJson(Map<String, dynamic> json) => QuestionOption(
     label: (json['label'] ?? '').toString(),
     description: (json['description'] ?? '').toString(),
+    preview: (json['preview'] ?? '').toString(),
   );
 }
 
