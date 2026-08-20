@@ -2435,4 +2435,224 @@ void main() {
       expect(echoTimeoutRuns(status: 'idle', compacting: false), isTrue);
     });
   });
+
+  // #149: "the Queued badge never clears once Claude consumes the prompt."
+  //
+  // The group above tests shouldDropEcho and SUPPLIES `matchedInTranscript` as an
+  // input — so it passed happily against the bug, which lived entirely in how
+  // that boolean was PRODUCED. The comparison was inline in two places and had no
+  // test at all; that is why it could compare the submitted prompt against the
+  // raw turn text, which a real prompt never equals.
+  group('an echo matches its real turn through the wrappers Claude staples on', () {
+    TranscriptTurn userTurn(String text, {String? typedText}) =>
+        TranscriptTurn(role: 'user', text: text, toolUses: const [], ts: null, typedText: typedText);
+
+    const reminder = '<system-reminder>\n# claudeMd\ninjected instructions\n</system-reminder>';
+
+    test('an unwrapped prompt matches — the case that always worked', () {
+      expect(
+        echoMatchesTurns('run the build', [userTurn('run the build', typedText: 'run the build')]),
+        isTrue,
+      );
+    });
+
+    test('a TRAILING <system-reminder> on the real turn still matches', () {
+      // The reported bug, in one line: raw text != submitted text, so the old
+      // equality never fired and the badge stayed up forever.
+      expect(
+        echoMatchesTurns('run the build',
+            [userTurn('run the build\n$reminder', typedText: 'run the build')]),
+        isTrue,
+      );
+    });
+
+    test('a LEADING <system-reminder> still matches', () {
+      expect(
+        echoMatchesTurns('run the build',
+            [userTurn('$reminder\nrun the build', typedText: 'run the build')]),
+        isTrue,
+      );
+    });
+
+    test('a typed slash command matches through its real tag trio', () {
+      // What a queued `/issue <text>` actually looks like in the transcript —
+      // message-first, which is the order the user-typed ones arrive in.
+      const trio = '<command-message>issue</command-message>\n'
+          '<command-name>/issue</command-name>\n'
+          '<command-args>the badge never clears</command-args>';
+      expect(
+        echoMatchesTurns('/issue the badge never clears',
+            [userTurn(trio, typedText: '/issue the badge never clears')]),
+        isTrue,
+      );
+    });
+
+    test('a whitespace-only difference matches — the send path reshapes newlines', () {
+      expect(
+        echoMatchesTurns('run   the\r\nbuild',
+            [userTurn('run the build', typedText: 'run the\nbuild')]),
+        isTrue,
+      );
+    });
+
+    test('a DIFFERENT prompt does not match', () {
+      // The half that keeps the fix honest: loosening the comparison until
+      // everything matches would clear the badge of a prompt still queued.
+      expect(
+        echoMatchesTurns('run the build', [userTurn('run the tests', typedText: 'run the tests')]),
+        isFalse,
+      );
+    });
+
+    test('a turn the human did not type never matches, even word for word', () {
+      // `typedText: ''` is the server stating positively that nobody typed this.
+      // A teammate message quoting the prompt must not clear its badge.
+      expect(
+        echoMatchesTurns('run the build',
+            [userTurn('<teammate-message teammate_id="J4b2">run the build</teammate-message>', typedText: '')]),
+        isFalse,
+      );
+      expect(turnMatchKey(userTurn('anything', typedText: '')), isNull);
+    });
+
+    test('an assistant turn is never an echo\'s counterpart', () {
+      expect(
+        echoMatchesTurns('run the build', [
+          const TranscriptTurn(role: 'assistant', text: 'run the build', toolUses: [], ts: null),
+        ]),
+        isFalse,
+      );
+    });
+
+    test('an OLDER server (no typedText at all) behaves exactly as before', () {
+      // `null` is not `''`: the field is absent, so fall back to the raw text.
+      // This is the whole backward-compatibility story — a companion released
+      // ahead of the server must not regress.
+      expect(echoMatchesTurns('run the build', [userTurn('run the build')]), isTrue);
+      expect(echoMatchesTurns('run the build', [userTurn('run the build\n$reminder')]), isFalse);
+      expect(turnMatchKey(userTurn('run the build')), 'run the build');
+    });
+
+    test('an empty echo matches nothing', () {
+      expect(echoMatchesTurns('   ', [userTurn('anything', typedText: 'anything')]), isFalse);
+    });
+  });
+
+  // The end-to-end half. The #31 widget test above lands a turn whose raw text IS
+  // the submitted prompt, which no real prompt ever is — so it passed against the
+  // bug too. This one lands the turn Claude really writes.
+  testWidgets(
+    '#149: the Queued badge clears when the wrapped real turn lands, leaving ONE bubble',
+    (tester) async {
+      final prompts = StreamController<String>.broadcast();
+      addTearDown(prompts.close);
+      var calls = 0;
+      Future<TranscriptPage> fetch(String id, {String? before, int? limit}) async {
+        calls++;
+        if (calls == 1) {
+          return const TranscriptPage(
+            messages: [TranscriptTurn(role: 'assistant', text: 'hi', toolUses: [], ts: null)],
+            cursor: null,
+            hasMore: false,
+          );
+        }
+        // Claude has consumed the queued prompt and written it to the transcript
+        // — with the injected context the harness staples onto every real one.
+        return const TranscriptPage(
+          messages: [
+            TranscriptTurn(role: 'assistant', text: 'hi', toolUses: [], ts: null),
+            TranscriptTurn(
+              role: 'user',
+              text: 'run the build\n<system-reminder>\ninjected instructions\n</system-reminder>',
+              typedText: 'run the build',
+              toolUses: [],
+              ts: null,
+            ),
+          ],
+          cursor: null,
+          hasMore: false,
+        );
+      }
+
+      // status 'idle' keeps the working indicator's infinite animation out of
+      // pumpAndSettle. It also removes the timeout as an explanation: an idle
+      // session lets the 90s timer run, but the echo here is seconds old, so the
+      // only thing that can clear it is the match.
+      Session sess(int lastActivity) => Session(
+            id: 'sess-1',
+            name: 'proj',
+            cwd: '/x',
+            status: 'idle',
+            claudeSessionId: 'claude-1',
+            lastActivity: lastActivity,
+            notifyLevel: 'important',
+            server: _server(),
+            autoCommand: '',
+          );
+      Widget build(Session s) => _wrap(
+            ConversationView(
+              key: const ValueKey('cv'),
+              session: s,
+              fetchPage: fetch,
+              submittedPrompts: prompts.stream,
+            ),
+          );
+
+      await tester.pumpWidget(build(sess(1000)));
+      await tester.pumpAndSettle();
+
+      prompts.add('run the build');
+      await tester.pumpAndSettle();
+      expect(find.text('Queued'), findsOneWidget);
+
+      await tester.pumpWidget(build(sess(2000)));
+      await tester.pumpAndSettle();
+
+      expect(find.text('Queued'), findsNothing,
+          reason: 'the real turn landed, so the optimistic echo must be gone');
+      expect(find.textContaining('run the build'), findsOneWidget,
+          reason: 'exactly one bubble — a stuck echo beside the real turn is the '
+              'duplicate #31 explicitly ruled out');
+    },
+  );
+
+  // The OTHER call site. _addEcho carried its own copy of the same comparison,
+  // so fixing only the reconcile would have traded a stuck badge for a duplicate
+  // bubble on a fast round-trip: the turn is already on screen and the echo is
+  // added on top of it.
+  testWidgets(
+    '#149: no echo is added for a prompt the transcript already shows, wrappers and all',
+    (tester) async {
+      final prompts = StreamController<String>.broadcast();
+      addTearDown(prompts.close);
+      Future<TranscriptPage> fetch(String id, {String? before, int? limit}) async =>
+          const TranscriptPage(
+            messages: [
+              TranscriptTurn(
+                role: 'user',
+                text: 'run the build\n<system-reminder>\ninjected instructions\n</system-reminder>',
+                typedText: 'run the build',
+                toolUses: [],
+                ts: null,
+              ),
+            ],
+            cursor: null,
+            hasMore: false,
+          );
+
+      await tester.pumpWidget(_wrap(ConversationView(
+        session: _session(),
+        fetchPage: fetch,
+        submittedPrompts: prompts.stream,
+      )));
+      await tester.pumpAndSettle();
+
+      prompts.add('run the build');
+      await tester.pumpAndSettle();
+
+      expect(find.text('Queued'), findsNothing,
+          reason: 'the prompt is already in the transcript — there is nothing to queue');
+      expect(find.textContaining('run the build'), findsOneWidget);
+    },
+  );
 }

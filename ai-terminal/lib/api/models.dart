@@ -1001,6 +1001,18 @@ class TranscriptTurn {
   /// ISO-8601 timestamp string, or `null` if the transcript line had none.
   final String? ts;
 
+  /// What the user actually TYPED to produce this turn, or `''` when they typed
+  /// nothing (a teammate message, a notification, hook feedback, a slash
+  /// command's local output). Published by the server for `user` turns only —
+  /// see `lib/user-turn.js`.
+  ///
+  /// **`null` means the server did not send the field, which is not the same as
+  /// `''`.** An older server omits it entirely, and the echo match must then fall
+  /// back to [text] and behave exactly as it did before (#149); `''` is a newer
+  /// server stating positively that this turn is not something the user typed, so
+  /// no optimistic echo may ever match it.
+  final String? typedText;
+
   /// Total context tokens carried into this assistant turn's request (fresh
   /// input + both cache tiers), or `null` for user turns / turns with no usage.
   /// Used to derive an approximate ctx% when the live status line isn't posting.
@@ -1012,6 +1024,7 @@ class TranscriptTurn {
     required this.text,
     required this.toolUses,
     required this.ts,
+    this.typedText,
     this.ctxTokens,
   });
 
@@ -1029,6 +1042,10 @@ class TranscriptTurn {
               .toList(growable: false)
           : const <ToolUse>[],
       ts: json['ts']?.toString(),
+      // Absent stays absent — `?.toString()` keeps `null` distinct from `''`
+      // (#149); see the field's doc comment for why that distinction is the
+      // whole backward-compatibility story.
+      typedText: json['typedText']?.toString(),
       ctxTokens: ct is num && ct > 0 ? ct.toInt() : null,
     );
   }

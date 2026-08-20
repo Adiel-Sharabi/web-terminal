@@ -257,7 +257,35 @@ test.describe('lib/transcript.parseTranscriptTurn', () => {
   });
 
   test('user turn with string content → text extracted', () => {
-    expect(parseTranscriptTurn(userLine('do the thing'))).toEqual({ role: 'user', text: 'do the thing', toolUses: [], ts: null });
+    expect(parseTranscriptTurn(userLine('do the thing'))).toEqual({ role: 'user', text: 'do the thing', typedText: 'do the thing', toolUses: [], ts: null });
+  });
+
+  // #149 — the chat lens's optimistic "Queued" echo has to recognise its own
+  // prompt coming back, and the RAW text of a real prompt is never the text that
+  // was typed: the harness staples injected context onto it, and a typed slash
+  // command arrives as a tag trio. So the turn carries what was typed alongside
+  // what is readable. `''` (not absent) is the positive statement "a human typed
+  // nothing here", which is what stops an echo matching a teammate message.
+  test('user turn publishes typedText with the injected context stripped', () => {
+    const turn = parseTranscriptTurn(userLine(
+      'fix the login bug\n<system-reminder>\nlots of injected instructions\n</system-reminder>'));
+    expect(turn.text).toContain('<system-reminder>'); // `text` is still verbatim
+    expect(turn.typedText).toBe('fix the login bug');
+  });
+
+  test('a user turn the human did not type publishes typedText as an empty string', () => {
+    const turn = parseTranscriptTurn(userLine(
+      '<task-notification><summary>Agent "search" finished</summary><result>found it</result></task-notification>'));
+    expect(turn.role).toBe('user');
+    expect(turn.typedText).toBe('');
+  });
+
+  test('an assistant turn never carries typedText', () => {
+    // Only a user turn can be something a human typed. Publishing it on an
+    // assistant turn would let an echo match the agent's own words.
+    const turn = parseTranscriptTurn(asstLine([{ type: 'text', text: 'do the thing' }]));
+    expect(turn.role).toBe('assistant');
+    expect('typedText' in turn).toBe(false);
   });
 
   test('user turn with text blocks → joined text', () => {
