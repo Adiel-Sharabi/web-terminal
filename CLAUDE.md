@@ -63,7 +63,8 @@ Three supervised Node.js processes. See `docs/ARCHITECTURE.md` for the full walk
 - `lib/transcript.js` / `lib/transcript-codex.js` — per-agent transcript parsers emitting one shared typed turn shape
 - `lib/codex-sessions.js` — resolves a Codex rollout by cwd; `lib/metrics-codex.js` — parses Codex usage from its rollout; `lib/submit-frames.js` — the pure submit-CR split rule
 - `lib/task-list.js` — the pure task-list rules (#73): status normalisation, the Claude delta fold, the Codex plan snapshot. See "The agent task list" below
-- `lib/recap.js` — the pure session-recap rules: `classifyUserTurn` (which `role:user` turns a human actually TYPED), `condense`, `toolTally`, `summariseTasks`. Serves `GET /api/sessions/:id/recap`. See "The session recap" below
+- `lib/user-turn.js` — **the one owner of what a `role:user` turn IS**: `classifyUserTurn` (which turns a human actually TYPED) and `typedTextOf` (the characters they typed, which the chat lens's Queued echo matches on, #149). Dependency-free so `lib/transcript.js` can use it without a require cycle
+- `lib/recap.js` — the pure session-recap rules: `condense`, `toolTally`, `summariseTasks`, plus a re-export of `lib/user-turn.js`'s `classifyUserTurn` for its existing importers — **change the rule in `lib/user-turn.js`, never here**. Serves `GET /api/sessions/:id/recap`. See "The session recap" below
 - `app.html` — unified single-page app (terminal + sidebar + settings). Polyfills `crypto.randomUUID` for plain-HTTP contexts. `?rtt=1` enables the per-keystroke RTT overlay
 - `terminal.html` — legacy terminal-only page (served at `/s/:id`)
 - `lobby.html` — legacy lobby page (served at `/lobby`)

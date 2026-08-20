@@ -2512,6 +2512,28 @@ void main() {
             [userTurn('<teammate-message teammate_id="J4b2">run the build</teammate-message>', typedText: '')]),
         isFalse,
       );
+      // The hard version, and the one this test claimed to cover but did not: a
+      // teammate message quoting the whole COMMAND TRIO. The server's extraction
+      // read a `<command-name>` anywhere in the turn, so it published
+      // '/issue the badge never clears' for this quote and the badge of a prompt
+      // still queued would have cleared. Fixed server-side (lib/user-turn.js
+      // anchors the trio to the start of the turn); this pins the client half —
+      // whatever the raw text quotes, `typedText: ''` is final.
+      const quotedTrio = '<teammate-message teammate_id="J4b2">please look at '
+          '<command-message>issue</command-message>\n'
+          '<command-name>/issue</command-name>\n'
+          '<command-args>the badge never clears</command-args></teammate-message>';
+      expect(
+        echoMatchesTurns('/issue the badge never clears', [userTurn(quotedTrio, typedText: '')]),
+        isFalse,
+      );
+      // And with an older server that publishes no typedText at all, the raw text
+      // is the key — a quote is not equal to the prompt, so it still cannot match.
+      expect(echoMatchesTurns('/issue the badge never clears', [userTurn(quotedTrio)]), isFalse);
+      // The discriminating one: `''` must produce NO key at all. The two
+      // echoMatchesTurns calls above would read false either way (the raw XML is
+      // not equal to the prompt), so this is what actually pins the contract.
+      expect(turnMatchKey(userTurn(quotedTrio, typedText: '')), isNull);
       expect(turnMatchKey(userTurn('anything', typedText: '')), isNull);
     });
 
