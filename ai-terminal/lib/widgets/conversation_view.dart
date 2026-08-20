@@ -206,6 +206,65 @@ bool shouldDropEcho({
 }) =>
     matchedInTranscript || (timeoutRuns && ageMs > kEchoTimeoutMs);
 
+final RegExp _wsRun = RegExp(r'\s+');
+
+/// Normalizes text for echo↔transcript matching (trim + collapse whitespace),
+/// tolerating the CR/LF and bracketed-paste reshaping the send path applies.
+///
+/// Orthogonal to [turnMatchKey]'s wrapper stripping and applied on top of it:
+/// this handles how the bytes were RESHAPED in flight, that handles what the
+/// harness ADDED around them.
+String normEcho(String s) => s.trim().replaceAll(_wsRun, ' ');
+
+/// The text an optimistic "Queued" echo (#31) is compared against for one
+/// transcript turn, or `null` when this turn can never be an echo's real
+/// counterpart.
+///
+/// **The raw turn text is not that value, and assuming it was is #149.** A
+/// genuine prompt arrives with `<system-reminder>` blocks stapled on by the
+/// harness, and a typed slash command arrives as a `<command-name>` /
+/// `<command-message>` / `<command-args>` trio — so an equality match against
+/// `text` never fires, the badge never clears, and (because the timeout is
+/// deliberately held off while the agent is mid-turn, which is exactly when a
+/// prompt gets queued) nothing else clears it either.
+///
+/// So the server publishes what the user actually TYPED and this reads it. One
+/// owner for the rule — `lib/user-turn.js` — not a second copy here; the note in
+/// `CLAUDE.md` about this file already carrying a weaker twin of the server's
+/// `classifyUserTurn` predicted precisely this drift.
+///
+/// The three states of [TranscriptTurn.typedText] are three different answers:
+/// * `null` — an older server that does not publish the field. Fall back to
+///   `text` and behave exactly as this did before, so a newer companion never
+///   regresses against a server that has not been deployed yet.
+/// * `''` — a newer server stating positively that a human typed nothing here (a
+///   teammate message, a task notification, hook feedback, a compaction summary).
+///   No echo may ever match it.
+/// * anything else — the characters the user typed.
+String? turnMatchKey(TranscriptTurn turn) {
+  if (turn.isAssistant) return null;
+  final typed = turn.typedText;
+  if (typed == null) return normEcho(turn.text);
+  if (typed.isEmpty) return null;
+  return normEcho(typed);
+}
+
+/// Whether the prompt [echoText] has already landed as a real turn in [turns].
+///
+/// The single comparison behind BOTH echo call sites — adding one (has it landed
+/// already? then never show a badge) and reconciling one (has it landed now?
+/// then drop the badge). They were two inline copies of the same broken
+/// comparison, so fixing only the reconcile would have traded a stuck badge for a
+/// duplicate bubble.
+bool echoMatchesTurns(String echoText, Iterable<TranscriptTurn> turns) {
+  final key = normEcho(echoText);
+  if (key.isEmpty) return false;
+  for (final t in turns) {
+    if (turnMatchKey(t) == key) return true;
+  }
+  return false;
+}
+
 class ConversationView extends StatefulWidget {
   const ConversationView({
     super.key,
@@ -418,19 +477,14 @@ class _ConversationViewState extends State<ConversationView> {
     super.dispose();
   }
 
-  /// Normalizes text for echo↔transcript matching (trim + collapse whitespace),
-  /// tolerating the CR/LF and bracketed-paste reshaping the send path applies.
-  static String _normEcho(String s) => s.trim().replaceAll(RegExp(r'\s+'), ' ');
-
   /// Adds an optimistic echo for a just-submitted prompt (#31), unless the
   /// transcript already shows it (a fast round-trip).
   void _addEcho(String text) {
     final t = text.trim();
     if (t.isEmpty) return;
-    final norm = _normEcho(t);
-    final already =
-        _turns.any((x) => !x.isAssistant && _normEcho(x.text) == norm) ||
-            _pendingEchoes.any((e) => _normEcho(e.text) == norm);
+    final norm = normEcho(t);
+    final already = echoMatchesTurns(t, _turns) ||
+        _pendingEchoes.any((e) => normEcho(e.text) == norm);
     if (already) return;
     setState(() {
       _pendingEchoes.add(_PendingEcho(t, DateTime.now().millisecondsSinceEpoch));
@@ -448,10 +502,6 @@ class _ConversationViewState extends State<ConversationView> {
   /// `_turns` is refreshed.
   void _reconcileEchoes() {
     if (_pendingEchoes.isEmpty) return;
-    final userTexts = <String>{
-      for (final t in _turns)
-        if (!t.isAssistant) _normEcho(t.text),
-    };
     final now = DateTime.now().millisecondsSinceEpoch;
     final idle = echoTimeoutRuns(
       status: widget.session.status,
@@ -459,7 +509,7 @@ class _ConversationViewState extends State<ConversationView> {
     );
     _pendingEchoes.removeWhere(
       (e) => shouldDropEcho(
-        matchedInTranscript: userTexts.contains(_normEcho(e.text)),
+        matchedInTranscript: echoMatchesTurns(e.text, _turns),
         timeoutRuns: idle,
         ageMs: now - e.at,
       ),
