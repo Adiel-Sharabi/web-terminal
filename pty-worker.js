@@ -206,6 +206,11 @@ function autoContinueEnabled() {
 // server.js publishes the same instant to the UI as `resumeAt` — see the note there.
 const AUTO_RESUME_DELAY_MS = usageLimit.autoResumeDelayMs(process.env);
 
+// #147 x #138 — how long to wait before re-checking a booting agent, when the
+// reset moment arrives while its composer is not up yet. See fireAutoResume for
+// why that combination exists at all and why the wait is bounded.
+const AUTO_RESUME_READY_RETRY_MS = process.env.WT_AUTO_RESUME_FAST === '1' ? 50 : 2000;
+
 function autoResumeOnResetEnabled() {
   // Ops/test override wins, then live config (default ON — see docs/CONFIGURATION.md).
   // Per-SESSION opt-out is server-side (auto-resume-prefs.json): server.js expresses a
@@ -750,14 +755,13 @@ function detectUsageLimitPromptInOutput(session, buf) {
   const chunk = stripAnsiForScan(buf.toString('utf8'));
   const text = (session._limitPromptCarry || '') + chunk;
   session._limitPromptCarry = text.slice(-LIMIT_PROMPT_CARRY);
-  const m = cfg.pattern.exec(text);
-  if (!m) return;
+  // The whole rule is pure and lives in lib/usage-limit.js: the sentence must be a
+  // rendered option line with a sibling option beside it, and the answer is the
+  // number that line itself carries. A bare `cfg.pattern.test` here made THIS REPO'S
+  // OWN SOURCE a trigger phrase — see matchUsageLimitPrompt for what that cost.
+  const answer = usageLimit.matchUsageLimitPrompt(text, cfg);
+  if (!answer) return;
   session._limitPromptCarry = ''; // consumed - never match the same bytes twice
-  // Answer the option by the number IT rendered (capture group 1), falling back to
-  // the declared default only if the render carried none. Requiring the "<n>. " to
-  // be there at all is also what keeps this from firing on prose: an agent
-  // discussing the limit, or a logfile being cat'd, does not print a numbered menu.
-  const answer = m[1] || cfg.answer;
   session._limitPromptAnsweredAt = now;
   // The cap is now OBSERVED, not inferred — this alone is enough to arm.
   session.limitPromptAt = now;
@@ -904,6 +908,10 @@ function armAutoResumeTimer(session) {
   // Codex loads its usage metrics and shows the wait badge, but nothing types
   // into it until someone has seen what its own cap looks like.
   if (!agents.armsAutoResume(sessionAgent(session))) return;
+  // #137 — the per-session opt-out, pushed as its own field by setFiveHResetAt.
+  // Checked HERE rather than encoded as a null reset time: refusing to arm must not
+  // cost the schedule, or re-enabling has nothing left to arm from.
+  if (session.autoResumeEnabled === false) return;
   if (session.capBlocked !== true && !session.limitPromptAt) return;
   const resetAt = session.fiveHResetAt;
   if (typeof resetAt !== 'number' || !isFinite(resetAt) || resetAt <= 0) return;
@@ -924,6 +932,33 @@ function fireAutoResume(session, resetAt) {
   // elapses. A superseding resetAt already re-armed via armAutoResumeTimer, so
   // this stale timer (its closure still holds the OLD resetAt) must stand down.
   if (!autoResumeOnResetEnabled() || s.fiveHResetAt !== resetAt) return;
+  // #147 — the agent has to EXIST before anything is typed at it. This is the one
+  // worker-originated write that can land on a BOOTING session: armAutoResumeTimer
+  // runs on the restore path with delay Math.max(0, fireAt - Date.now()), which is
+  // ZERO for a window that turned over while the worker was down — so a cold
+  // restart of a capped session re-arms and fires while `claude --resume <id>` is
+  // still starting, and `claude --resume` boots SLOWER than a cold start. `continue`
+  // would land on bash: #147 exactly, caused by the feature meant to rescue the
+  // session. The `status === 'working'` guard below cannot cover it — a booting
+  // session is not working.
+  //
+  // DEFER, never skip: the window is real and the session still needs its nudge, so
+  // this re-arms instead of standing down. Checked BEFORE autoResumeFiredForResetAt
+  // is consumed, because a consumed one-shot is exactly what armAutoResumeTimer
+  // refuses to re-arm on. The wait is bounded by #147's own 45s ceiling
+  // (armReadyFallback, armed for EVERY session at spawn), so this cannot spin
+  // forever; and it rides session._autoResumeTimer, so a dead PTY or a user who
+  // came back cancels it through cancelAutoResume like any other armed resume.
+  if (s._ready && !s._ready.ready) {
+    if (s._autoResumeDeferredFor !== resetAt) {
+      s._autoResumeDeferredFor = resetAt;
+      log(`auto-resume: "${s.name}" (${s.id}) reset window passed but the agent is still starting — waiting for its composer`);
+    }
+    s._autoResumeTimer = setTimeout(() => fireAutoResume(s, resetAt), AUTO_RESUME_READY_RETRY_MS);
+    if (typeof s._autoResumeTimer.unref === 'function') s._autoResumeTimer.unref();
+    return;
+  }
+  s._autoResumeDeferredFor = null;
   s.autoResumeFiredForResetAt = resetAt; // one-shot: consumed whether or not we act below
   saveSessionConfigs();
   // #138 — re-checked at FIRE time, not only at arm time. The wait is hours long,
@@ -934,7 +969,6 @@ function fireAutoResume(session, resetAt) {
     log(`auto-resume: "${s.name}" (${s.id}) reset window passed but session is no longer cap-blocked — skipped`);
     return;
   }
-  s.limitPromptAt = null; // this window's observation is spent along with the one-shot
   // Kept alongside the cap check, not replaced by it: they refuse for different
   // reasons. capBlocked says the quota was spent; this says the session is visibly
   // mid-turn right now, in which case it needs no nudge whatever the quota says.
@@ -942,6 +976,12 @@ function fireAutoResume(session, resetAt) {
     log(`auto-resume: "${s.name}" (${s.id}) reset window passed but session is working — skipped`);
     return;
   }
+  // Cleared only on the path that actually acts. It used to be cleared above the
+  // `working` check, which threw the observation away on a fire that then declined
+  // to type — and since the one-shot is already consumed by then, that window had
+  // nothing left to re-arm on: the sighting AND the schedule were both spent for a
+  // resume that never happened.
+  s.limitPromptAt = null; // this window's observation is spent along with the one-shot
   try { submitLine(s, 'continue'); } catch (e) { log(`auto-resume: continue write failed: ${e.message}`); return; }
   log(`auto-resume: "${s.name}" (${s.id}) sent continue after 5h reset (${new Date(resetAt).toISOString()})`);
   broadcastEvent('autoResume', { id: s.id, name: s.name, resetAt });
@@ -2107,26 +2147,51 @@ const rpcHandlers = {
   setFiveHResetAt: async (params) => {
     const session = sessions.get(requireUuid(params.id));
     if (!session) throw new Error('session not found');
+    // EVERY field here is OPTIONAL, and an omitted one means "I am saying nothing
+    // about this", never "reset it".
+    //
+    // #137 — the per-session opt-out used to be expressed as a null fiveHResetAt,
+    // because null is the one cancel signal every worker version already understood.
+    // It cancelled by DESTROYING the schedule: setFiveHResetAt persisted the null, so
+    // a row reading "resumes 14:32" that was toggled off and straight back on came
+    // back with no reset time at all — and the re-push that would restore it is gated
+    // on the metrics still speaking, which for a capped Claude session (it stops
+    // pushing its status line) is false past the 4h TTL. The session then sat on
+    // "on hold" forever and never resumed: precisely the loss that gate exists to
+    // prevent, caused by the cancel. `enabled` says the user's choice in its own
+    // field, so refusing to arm no longer costs the timestamp.
+    const hasReset = Object.prototype.hasOwnProperty.call(params, 'fiveHResetAt');
     const raw = params.fiveHResetAt;
     const val = (typeof raw === 'number' && Number.isFinite(raw) && raw > 0) ? Math.round(raw) : null;
     // #138 — capBlocked rides ALONGSIDE the timestamp rather than replacing it,
     // because they answer different questions and both are needed: the timestamp
     // says WHEN, this says WHETHER. Strict `=== true` so an older server.js that
-    // omits the field leaves it false and nothing arms. NOT persisted, on purpose:
+    // omits the field never sets it, and nothing arms. NOT persisted, on purpose:
     // it is a live reading of the account's quota, and a stale one restored from
     // disk hours later would be exactly the unfounded arming #138 exists to stop —
     // server.js re-pushes within a poll of the worker coming back.
+    const hasBlocked = Object.prototype.hasOwnProperty.call(params, 'capBlocked');
     const blocked = params.capBlocked === true;
-    const changed = session.fiveHResetAt !== val;
+    // Absent => unchanged, and the default is ON: an older server.js that never sends
+    // it leaves every session armable exactly as before.
+    const hasEnabled = Object.prototype.hasOwnProperty.call(params, 'enabled');
+    const enabled = params.enabled !== false;
+    const changed = hasReset && session.fiveHResetAt !== val;
     if (changed) {
       session.fiveHResetAt = val;
       saveSessionConfigs();
     }
-    if (changed || session.capBlocked !== blocked) {
-      session.capBlocked = blocked;
-      armAutoResumeTimer(session);
-    }
-    return { ok: true, fiveHResetAt: session.fiveHResetAt, capBlocked: session.capBlocked === true };
+    const blockedChanged = hasBlocked && session.capBlocked !== blocked;
+    if (blockedChanged) session.capBlocked = blocked;
+    const enabledChanged = hasEnabled && (session.autoResumeEnabled !== false) !== enabled;
+    if (enabledChanged) session.autoResumeEnabled = enabled;
+    if (changed || blockedChanged || enabledChanged) armAutoResumeTimer(session);
+    return {
+      ok: true,
+      fiveHResetAt: session.fiveHResetAt,
+      capBlocked: session.capBlocked === true,
+      enabled: session.autoResumeEnabled !== false,
+    };
   },
 
   resizeSession: async (params) => {

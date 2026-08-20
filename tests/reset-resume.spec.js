@@ -748,3 +748,240 @@ test.describe('#69 — 5h usage-limit auto-resume', () => {
     }
   });
 });
+
+// --- #147 x #138: the resume must not type into an agent that is still BOOTING ---
+//
+// This bug belongs to neither change on its own, which is why it had to be found by
+// reading them together. fireAutoResume ends in submitLine — a WORKER-originated PTY
+// write, and no other site in the worker gates a write on readiness (#147 gates the
+// CLIENT's submit). armAutoResumeTimer runs on the restore path with
+// Math.max(0, fireAt - Date.now()), which is ZERO for a window that turned over while
+// the worker was down. So a cold restart of a capped session re-arms and fires while
+// `claude --resume <id>` is still starting — and a restored session boots SLOWER than
+// a cold one — and `continue` lands on bash. #147 exactly, produced by the feature
+// meant to rescue the session. The `status === 'working'` guard cannot catch it:
+// a booting session is not working.
+test.describe('#147 — a resume waits for the agent to exist', () => {
+  const CARET = '❯'; // what Claude's composer prints; declared in lib/agents.js
+
+  /** Poll until the worker has actually written the launch command (the ready scan
+   *  is not armed until then). Asserting the precondition beats sleeping a guess. */
+  async function launched(client, id) {
+    for (let i = 0; i < 80; i++) {
+      const res = await rpc(client, '__testGetWrites', { id });
+      if ((res.writes || []).some((w) => String(w).includes('launching'))) return true;
+      await sleep(100);
+    }
+    return false;
+  }
+
+  test('a reset that comes due mid-boot DEFERS the continue, then sends it once the composer is up', async () => {
+    const pipe = workerPipePath();
+    const dataDir = makeTempDataDir();
+    // The 45s ceiling is pushed out of the way on purpose: this spec is about the
+    // MARKER releasing the deferral, and a fallback firing mid-test would prove
+    // nothing about it.
+    const worker = spawnWorker(pipe, dataDir, { WT_AUTO_RESUME_ON_RESET: '1', WT_READY_FALLBACK_MS: '60000' });
+    try {
+      const client = await connectClient(pipe);
+      const ev = makeEventCollector(client);
+      // An autoCommand is what arms the readiness gate (a session with none is a
+      // plain shell). Inert on purpose — readiness is driven through the real
+      // PTY-output path below rather than by booting an actual agent.
+      const { id } = await rpc(client, 'createSession', {
+        cwd: os.tmpdir(), name: 'resume-booting', agent: 'claude', autoCommand: 'echo launching-claude',
+      });
+      expect(await launched(client, id)).toBe(true);
+      expect((await findSession(client, id)).agentReady).toBe(false);
+
+      // The window turns over while the agent is still starting.
+      const resetAt = Date.now() + 100;
+      await setResetAt(client, id, resetAt, true);
+
+      // Well past fireAt (resetAt + 50ms fast delay) and past submitLine's gap.
+      await sleep(600);
+      const duringBoot = writesOf(await rpc(client, '__testGetWrites', { id }));
+      expect(duringBoot).not.toContain('continue');
+      expect(ev.events.some((e) => e.event === 'autoResume' && e.params.id === id)).toBe(false);
+      // DEFERRED, not abandoned: the window is real and the session still needs it.
+      expect((await findSession(client, id)).autoResumeArmed).toBe(true);
+
+      // The composer appears — the same path term.onData feeds.
+      await inject(client, id, '\r\n' + CARET + ' try "fix"\r\n');
+      const fired = await ev.waitFor((e) => e.event === 'autoResume' && e.params.id === id, 5000);
+      expect(fired.params.resetAt).toBe(resetAt);
+
+      await sleep(250); // submitLine writes the CR submitGapMs after the text
+      const sent = writesOf(await rpc(client, '__testGetWrites', { id }));
+      expect(sent).toContain('continue');
+      expect(sent).toContain('\r');
+      expect(sent.filter((w) => w === 'continue').length).toBe(1);
+
+      ev.stop();
+      await rpc(client, 'killSession', { id });
+      await client.close();
+    } finally {
+      await worker.stop();
+      rmRf(dataDir);
+    }
+  });
+
+  test('a session with no readiness gate at all is unaffected — it fires at once', async () => {
+    // The guard must be narrow. A plain shell, an unknown agent and a session with
+    // no autoCommand are ready from birth, and delaying THEM would be a new bug.
+    const pipe = workerPipePath();
+    const dataDir = makeTempDataDir();
+    const worker = spawnWorker(pipe, dataDir, { WT_AUTO_RESUME_ON_RESET: '1', WT_READY_FALLBACK_MS: '60000' });
+    try {
+      const client = await connectClient(pipe);
+      const ev = makeEventCollector(client);
+      const { id } = await rpc(client, 'createSession', { cwd: os.tmpdir(), name: 'resume-ready', agent: 'claude', autoCommand: '' });
+      expect((await findSession(client, id)).agentReady).toBe(true);
+
+      const resetAt = Date.now() + 100;
+      await setResetAt(client, id, resetAt, true);
+      await ev.waitFor((e) => e.event === 'autoResume' && e.params.id === id, 3000);
+
+      await sleep(250);
+      expect(writesOf(await rpc(client, '__testGetWrites', { id }))).toContain('continue');
+
+      ev.stop();
+      await rpc(client, 'killSession', { id });
+      await client.close();
+    } finally {
+      await worker.stop();
+      rmRf(dataDir);
+    }
+  });
+});
+
+// --- #138: a fire that declines to type must not spend the evidence ------------
+test.describe('#138 — a skipped fire keeps what it knows', () => {
+  // The captured selector, as processPtyOutput sees it after the SGR codes are
+  // stripped. Assembled here rather than shared so this spec reads on its own.
+  const MENU = ['', 'What do you want to do?', '❯ 1. Stop and wait for limit to reset',
+                '  2. Upgrade your plan', '  3. Upgrade to Team plan', ''].join('\r\n');
+
+  test('a session that is WORKING at the reset keeps its observed cap sighting', async () => {
+    const pipe = workerPipePath();
+    const dataDir = makeTempDataDir();
+    const worker = spawnWorker(pipe, dataDir, { WT_AUTO_RESUME_ON_RESET: '1', WT_API_ERROR_FAST: '1' });
+    try {
+      const client = await connectClient(pipe);
+      const ev = makeEventCollector(client);
+      const { id } = await rpc(client, 'createSession', { cwd: os.tmpdir(), name: 'skip-working', agent: 'claude', autoCommand: '' });
+
+      // The cap prompt is SEEN (limitPromptAt set), and the session is mid-turn when
+      // its window comes round — so the fire correctly declines to nudge it.
+      await inject(client, id, MENU);
+      await ev.waitFor((e) => e.event === 'usageLimitPrompt' && e.params.id === id);
+      await rpc(client, 'hookEvent', { id, event: 'UserPromptSubmit', prompt: 'carry on' });
+      expect((await findSession(client, id)).status).toBe('working');
+
+      // UserPromptSubmit clears the sighting (the user is demonstrably back), so
+      // re-establish it the way a repaint would before arming. WT_API_ERROR_FAST
+      // shrinks the answer cooldown so the second render is seen rather than ignored.
+      await sleep(150);
+      await inject(client, id, MENU);
+      await sleep(120);
+      expect((await findSession(client, id)).limitPromptAt).toBeTruthy();
+
+      const resetAt = Date.now() + 100;
+      await setResetAt(client, id, resetAt, false); // armed on the sighting alone
+      await sleep(500);
+
+      // Skipped, as it should be — but the sighting must SURVIVE. It used to be
+      // cleared above the `working` check, so a fire that then declined to type threw
+      // the observation away with the one-shot already consumed: that window had
+      // nothing left to arm on and the session never resumed.
+      expect(writesOf(await rpc(client, '__testGetWrites', { id }))).not.toContain('continue');
+      expect((await findSession(client, id)).limitPromptAt).toBeTruthy();
+
+      ev.stop();
+      await rpc(client, 'killSession', { id });
+      await client.close();
+    } finally {
+      await worker.stop();
+      rmRf(dataDir);
+    }
+  });
+});
+
+// --- #137: switching a session OFF must not destroy its schedule ---------------
+//
+// The opt-out used to travel as `fiveHResetAt: null`, the one cancel signal every
+// worker version already understood — and setFiveHResetAt PERSISTS a null. So a row
+// reading "resumes 14:32", toggled off and straight back on, came back with no reset
+// time at all; the re-push that would restore it is gated on metrics still speaking,
+// which for a capped Claude session (it stops pushing its status line) is false past
+// the 4h TTL. The row then read "on hold" forever and the session never resumed —
+// precisely the loss that gate exists to prevent.
+test.describe('#137 — the per-session opt-out is not destructive', () => {
+  test('disabling keeps the reset time, and re-enabling re-arms from it', async () => {
+    const pipe = workerPipePath();
+    const dataDir = makeTempDataDir();
+    const worker = spawnWorker(pipe, dataDir, { WT_AUTO_RESUME_ON_RESET: '1' });
+    try {
+      const client = await connectClient(pipe);
+      const ev = makeEventCollector(client);
+      const { id } = await rpc(client, 'createSession', { cwd: os.tmpdir(), name: 'optout', agent: 'claude', autoCommand: '' });
+
+      const resetAt = Date.now() + 400;
+      await rpc(client, 'setFiveHResetAt', { id, fiveHResetAt: resetAt, capBlocked: true });
+      expect((await findSession(client, id)).autoResumeArmed).toBe(true);
+
+      // The user clicks the badge off. This says NOTHING about the window.
+      const off = await rpc(client, 'setFiveHResetAt', { id, enabled: false });
+      expect(off.enabled).toBe(false);
+      expect(off.fiveHResetAt).toBe(resetAt); // the schedule survives the cancel
+      const disabled = await findSession(client, id);
+      expect(disabled.autoResumeArmed).toBe(false);
+      expect(disabled.fiveHResetAt).toBe(resetAt);
+
+      // Past the moment it would have fired: nothing was typed.
+      await sleep(600);
+      expect(writesOf(await rpc(client, '__testGetWrites', { id }))).not.toContain('continue');
+      expect(ev.events.some((e) => e.event === 'autoResume' && e.params.id === id)).toBe(false);
+
+      // Clicked back on, with no metrics push in between — the worker still knows
+      // when the window turns over, so it re-arms from that and fires the catch-up.
+      const on = await rpc(client, 'setFiveHResetAt', { id, enabled: true });
+      expect(on.fiveHResetAt).toBe(resetAt);
+      await ev.waitFor((e) => e.event === 'autoResume' && e.params.id === id, 3000);
+      await sleep(250);
+      expect(writesOf(await rpc(client, '__testGetWrites', { id }))).toContain('continue');
+
+      ev.stop();
+      await rpc(client, 'killSession', { id });
+      await client.close();
+    } finally {
+      await worker.stop();
+      rmRf(dataDir);
+    }
+  });
+
+  test('an older server.js that sends no `enabled` field arms exactly as before', async () => {
+    // Absent must mean "unchanged, and the default is ON". Reading it as OFF would
+    // silently disable the whole feature against a server mid-upgrade.
+    const pipe = workerPipePath();
+    const dataDir = makeTempDataDir();
+    const worker = spawnWorker(pipe, dataDir, { WT_AUTO_RESUME_ON_RESET: '1' });
+    try {
+      const client = await connectClient(pipe);
+      const ev = makeEventCollector(client);
+      const { id } = await rpc(client, 'createSession', { cwd: os.tmpdir(), name: 'legacy-push', agent: 'claude', autoCommand: '' });
+
+      const resetAt = Date.now() + 100;
+      const res = await rpc(client, 'setFiveHResetAt', { id, fiveHResetAt: resetAt, capBlocked: true });
+      expect(res.enabled).toBe(true);
+      await ev.waitFor((e) => e.event === 'autoResume' && e.params.id === id, 3000);
+
+      ev.stop();
+      await rpc(client, 'killSession', { id });
+      await client.close();
+    } finally {
+      await worker.stop();
+      rmRf(dataDir);
+    }
+  });
+});

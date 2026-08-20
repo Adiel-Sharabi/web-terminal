@@ -458,6 +458,40 @@ failure worse than the one being fixed.
 > `agentReady` on, and the report was companion-only — so the web client can still
 > type a prompt into a booting agent.
 
+### A CLIENT gate does not cover a WORKER-originated write (#137/#138 × #147)
+
+The gate above lives in the client, which is right for a *prompt* — a person typed
+it. But the worker writes into a PTY on its own account too, and none of those
+sites consulted readiness. `fireAutoResume` (the 5h auto-resume, #137/#138) ends in
+`submitLine(s, 'continue')`, and `armAutoResumeTimer` runs on the **restore** path
+with `Math.max(0, fireAt - Date.now())` — **zero** for a window that turned over
+while the worker was down. So a cold restart of a capped session re-armed and fired
+while `claude --resume <id>` was still booting, which boots *slower* than a cold
+start: `continue` landed on **bash**. That is #147 again, produced by the feature
+meant to rescue the session, and the `status === 'working'` guard cannot see it —
+**a booting session is not `working`.**
+
+Neither change has this defect alone; the merge of the two creates it. **Any new
+worker-originated write must check `session._ready`** and **defer**, never skip: the
+window is real and the session still needs its nudge. Check it *before* the one-shot
+(`autoResumeFiredForResetAt`) is consumed — `armAutoResumeTimer` refuses to re-arm on
+a consumed one — and let the retry ride `session._autoResumeTimer` so a dead PTY or a
+returning user cancels it like any other armed resume. The wait needs no ceiling of
+its own: #147's 45s fallback is armed for **every** session at spawn.
+
+### A detector's phrase must not be in our own source (#138)
+
+The cap-prompt detector scans **all** agent-session PTY output and answers by
+**writing a keystroke**. Its phrase was captured verbatim into a `lib/agents.js`
+comment and assembled in `tests/reset-resume.spec.js` — so a Claude session working
+in this checkout that `cat`'d, grepped or diffed either file matched, typed a stray
+`1` into its composer and recorded a cap block that never happened. **A match that
+causes an action is not a reading; treat "our own repo prints this" as a live input.**
+The rule is now structural and pure (`lib/usage-limit.js` `matchUsageLimitPrompt`):
+the sentence must **start** its line as a numbered option and have a sibling option
+**above or below** it — above *or* below, because "stop and wait" is the last option
+in a reordered render. The registry declares only the sentence.
+
 ## AskUserQuestion — the LAYOUT decides what the keys mean (#19)
 
 Answering Claude's question overlay drives its real TUI selector by writing keys

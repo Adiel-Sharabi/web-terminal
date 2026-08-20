@@ -139,6 +139,97 @@ test.describe('#137 — usageLimitState (what the session list publishes)', () =
     expect(st.waiting).toBe(false);
     expect(st.resetAt).toBeNull();
   });
+
+  // canArm is the AGENT's capability (Codex is deferred, #142); `enabled` is the
+  // user's per-session choice. They must narrow DIFFERENT things — a Codex session
+  // really is held, and reporting it as not-waiting would be the lie the badge
+  // exists to avoid. Only worker-level coverage existed for this.
+  test('canArm:false is waiting but never armed — the Codex deferral (#142)', () => {
+    const base = { metrics: { fiveH: 100, fiveHResetAt: SOON }, enabled: true, delayMs: 60000, now: NOW };
+    const codex = u.usageLimitState({ ...base, canArm: false });
+    expect(codex.capBlocked).toBe(true);
+    expect(codex.waiting).toBe(true);
+    expect(codex.armed).toBe(false);
+    expect(codex.resumeAt).toBe(SOON + 60000); // it still shows WHEN the window reopens
+    expect(codex.enabled).toBe(true);          // and it is not the user who turned it off
+    // Same session, an agent that CAN arm: the only field that moves is `armed`.
+    expect(u.usageLimitState({ ...base, canArm: true }).armed).toBe(true);
+    expect(u.usageLimitState(base).armed).toBe(true); // absent defaults to capable
+  });
+});
+
+// --- #138: the cap PROMPT rule (matchUsageLimitPrompt) -----------------------
+// A match here is not a reading, it is a KEYSTROKE written into somebody's live
+// terminal — so these cases are about what must NOT match at least as much as what
+// must.
+test.describe('#138 — matchUsageLimitPrompt', () => {
+  const cfg = require('../lib/agents').usageLimitPromptFor('claude');
+  const CRLF = '\r\n';
+  // The captured render, claude-code 2.1.234, as it looks after stripAnsiForScan.
+  const RENDER = [
+    '',
+    'What do you want to do?',
+    '❯ 1. Stop and wait for limit to reset',
+    '  2. Upgrade your plan',
+    '  3. Upgrade to Team plan',
+    '',
+    'Enter to confirm · Esc to cancel',
+    '',
+  ].join(CRLF);
+
+  test('the real selector answers with the option\'s own digit', () => {
+    expect(u.matchUsageLimitPrompt(RENDER, cfg)).toBe('1');
+  });
+
+  test('a reordered menu picks the row that says wait, not position 1', () => {
+    // Answering a hardcoded 1 here would buy a plan upgrade.
+    const reordered = ['', '1. Upgrade your plan', '2. Upgrade to Team plan', '3. Stop and wait for limit to reset', ''].join(CRLF);
+    expect(u.matchUsageLimitPrompt(reordered, cfg)).toBe('3');
+  });
+
+  test('prose about the limit is not a menu', () => {
+    expect(u.matchUsageLimitPrompt('I would stop and wait for limit to reset, but...', cfg)).toBeNull();
+  });
+
+  // THE REGRESSION THIS RULE EXISTS FOR. lib/agents.js carries the captured render
+  // verbatim in a comment and tests/reset-resume.spec.js assembles it, so with the
+  // old "match the sentence anywhere" rule a Claude session working in THIS CHECKOUT
+  // that cat'd, grepped or diffed either file typed a stray `1` into its composer and
+  // recorded a cap block that never happened.
+  test("this repo's own source is not a trigger phrase", () => {
+    const fs = require('fs');
+    const path = require('path');
+    const root = path.join(__dirname, '..');
+    for (const f of ['lib/agents.js', 'lib/usage-limit.js', 'tests/reset-resume.spec.js',
+                     'tests/usage-limit.spec.js', 'docs/FEATURES.md', 'docs/CONFIGURATION.md']) {
+      const text = fs.readFileSync(path.join(root, f), 'utf8');
+      expect(u.matchUsageLimitPrompt(text, cfg), `${f} must not look like a menu`).toBeNull();
+      // ...and the bare sentence really IS in there, so the test above is proving a
+      // rule rather than passing on an absent needle.
+      if (f.endsWith('.js')) expect(/Stop and wait for limit to reset/i.test(text)).toBe(true);
+    }
+  });
+
+  test('an option line quoted or commented is not a rendered option', () => {
+    // The two shapes that actually appear in this tree: a `//` comment and a string
+    // literal. Both carry a real numbered option; neither starts its line with one.
+    expect(u.matchUsageLimitPrompt(['    //     > 1. Stop and wait for limit to reset',
+                                    '    //       2. Upgrade your plan'].join(CRLF), cfg)).toBeNull();
+    expect(u.matchUsageLimitPrompt(["        '1. Stop and wait for limit to reset',",
+                                    "        '2. Upgrade your plan',"].join(CRLF), cfg)).toBeNull();
+  });
+
+  test('one lone numbered line is prose, not a choice', () => {
+    // A selector always offers alternatives. Without a sibling option this is a
+    // sentence that happens to start with a number.
+    expect(u.matchUsageLimitPrompt(['', '1. Stop and wait for limit to reset', ''].join(CRLF), cfg)).toBeNull();
+  });
+
+  test('an agent with no declared prompt never types', () => {
+    expect(u.matchUsageLimitPrompt(RENDER, require('../lib/agents').usageLimitPromptFor('codex'))).toBeNull();
+    expect(u.matchUsageLimitPrompt(RENDER, require('../lib/agents').usageLimitPromptFor(null))).toBeNull();
+    expect(u.matchUsageLimitPrompt(RENDER, null)).toBeNull();
+  });
 });
 
 test.describe('the resume delay is shared, not copied', () => {

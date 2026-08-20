@@ -2901,7 +2901,7 @@
     // the point: the worker arms its timer from the same computation, so the badge
     // cannot promise a resume the timer disagrees with.
     //
-    // No ticking countdown. The resume time is ABSOLUTE, so an clock time stays true
+    // No ticking countdown. The resume time is ABSOLUTE, so a clock time stays true
     // between polls where "in 2h 14m" silently rots; and a per-second timer to keep a
     // relative label honest is exactly the cost PR #107 measured and removed.
     function waitBadge(s){
@@ -2911,8 +2911,11 @@
       const hhmm = at ? at.toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' }) : '';
       // "resumes" is keyed on ARMED, not on waiting: a session can be known-capped
       // before its reset time is, and saying "resumes" then would promise something
-      // no timer is scheduled to do.
-      if (u.enabled && !u.armed) {
+      // no timer is scheduled to do. AND on there being a time to show — a bare
+      // "resumes" names no moment, which is a promise with nothing behind it. The
+      // companion's _WaitChip requires both for the same reason; this used to require
+      // only the first, so the two clients could disagree about the same row.
+      if (u.enabled && (!u.armed || !hhmm)) {
         return `<button class="sb-wait" title="5-hour limit reached. This session will resume on its own once the reset time is known. Click to turn auto-resume off for this session.">&#9208; on hold</button>`;
       }
       if (!u.enabled) {
