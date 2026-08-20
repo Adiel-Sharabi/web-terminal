@@ -2046,9 +2046,11 @@ class _SessionScreenState extends State<SessionScreen>
   }
 
   /// #26: opens a printed http/https URL when its cell is tapped. The tapped
-  /// [cell] carries an absolute buffer-line index; the line is rebuilt column-
-  /// aligned (empty cells → spaces, since `getText()` drops them) so the tapped
-  /// column maps to the right character. A tap that ends a drag-selection is
+  /// [cell] carries an absolute buffer-line index; the line is rebuilt here,
+  /// one character per CELL, so the tapped column maps to the right character.
+  /// `getText()` cannot serve this even after #151 — it emits nothing for the
+  /// second half of a wide glyph and stops at the last written column, both of
+  /// which shift every index after them. A tap that ends a drag-selection is
   /// ignored, and only http/https ever launches (see [urlAtColumn]).
   Future<void> _onTerminalTapUp(TapUpDetails details, CellOffset cell) async {
     if (_terminalController.selection != null) return;

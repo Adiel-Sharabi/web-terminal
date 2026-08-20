@@ -1,10 +1,11 @@
-# Vendored `xterm` 4.0.0 — one patch, for issue #81
+# Vendored `xterm` 4.0.0 — local patches (#81, #127, #151)
 
-This is stock **xterm 4.0.0** (`lib/` only, from the pub cache) plus **one fix**.
-It is wired in by `dependency_overrides` in `ai-terminal/pubspec.yaml`.
+This is stock **xterm 4.0.0** (`lib/` only, from the pub cache) plus the fixes
+below. It is wired in by `dependency_overrides` in `ai-terminal/pubspec.yaml`.
 
-Every patched hunk is marked `WEB-TERMINAL PATCH (#81)`. **Grep for that marker
-before re-vendoring** — a re-vendor that drops it silently reintroduces the bug.
+Every patched hunk is marked `WEB-TERMINAL PATCH (#<issue>)`. **Grep for that
+marker before re-vendoring** — a re-vendor that drops one silently reintroduces
+its bug.
 
 ```
 grep -rn "WEB-TERMINAL PATCH" lib/
@@ -89,6 +90,50 @@ row per scroll, on the hottest path in the terminal. `move` is allocation-free.
    the release-mode blank terminal. `ai-terminal/test/xterm_prepend_test.dart` asserts
    attachment, index consistency, and that `Terminal.write` still works afterwards.
 
+### A third, unrelated patch (#151)
+
+4. `lib/src/core/buffer/line.dart` — `BufferLine.getText` emits a **space** for a
+   blank cell inside the requested span, where stock emitted nothing at all.
+
+   Stock skipped every cell whose codePoint is 0. A terminal does not pad a gap
+   with literal 0x20 — a column that was never written, or that was erased
+   (ECH/EL), holds 0 — so every run of blank columns inside a selection vanished
+   and the words on either side were concatenated. `alpha    beta` came off the
+   clipboard as `alphabet`, and indented output lost its indentation. Shell text
+   typed as one string survived (its spaces really are 0x20), which is why the
+   defect read as intermittent: it is the TUI-drawn output — the boxes, the
+   margins, the aligned columns — that is built out of cursor moves and erases,
+   and that is what people copy.
+
+   **A blank is emitted only once something after it in the span is emitted.**
+   That is what keeps the unwritten remainder of a row out of the result;
+   without it every line of a multi-line selection would be padded out to the
+   terminal width, because the segment for a line in the middle of the range
+   spans the WHOLE line.
+
+   **A literal 0x20 is deliberately NOT deferred** — it is a character the
+   program wrote, not padding, and at the last column of a *wrapped* row it is
+   load-bearing: the next row is joined with no newline, so trimming it deletes
+   a space from the middle of a logical line. The first cut of this patch
+   treated the two alike and turned `This is a long line` into
+   `This is along line`; upstream's own `Buffer.getText() can handle line wrap`
+   and `can handle block range` tests both caught it, which is the argument for
+   running the parity check below rather than trusting our own suite.
+
+   **The trap: a blank cell and the second half of a wide glyph are identical.**
+   `Buffer.writeChar` follows a width-2 glyph with `writeChar(0)`, and
+   `wcwidth(0) == 0`, so the continuation cell's content word is `0` — the exact
+   value `eraseCell` writes. Nothing in the cell distinguishes them; only the
+   LEFT NEIGHBOUR does (`getWidth(i - 1) == 2`). Emit a space for it and every
+   CJK/emoji glyph grows a phantom space. The peek deliberately reaches one cell
+   below `from`, so a selection that begins on a continuation cell does not open
+   with one either.
+
+   Regression test: `ai-terminal/test/xterm_gettext_whitespace_test.dart` —
+   16 cases covering CUF and ECH gaps, indentation, the wrap rejoin, wide and
+   astral glyphs beside real gaps, and the real capture replayed through
+   `copyTerminalSelection`. Before the patch: `+7 -9`.
+
 ## How this was verified
 
 * `ai-terminal/test/xterm_codex_stream_test.dart` — a real 13 KB Codex PTY capture is
@@ -102,7 +147,9 @@ row per scroll, on the hottest path in the terminal. `move` is allocation-free.
   identical result — `+108 ~2 -2` — with the same two `TerminalView.textScaler`
   failures, which are pre-existing Flutter-SDK drift and unrelated. So the patch
   causes no upstream regression. **Re-run after adding `prependAll` (#127): still
-  `+108 ~2 -2`, same two failures.**
+  `+108 ~2 -2`, same two failures. Re-run after the `getText` change (#151):
+  still `+108 ~2 -2`, same two failures — and it earned its keep, catching the
+  first cut of that patch at `+106 ~2 -4`.**
 
 To repeat that last check (the test suite is deliberately **not** vendored — it
 cannot run in our CI and ships two known-failing tests):
