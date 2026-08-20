@@ -467,8 +467,41 @@ plain-mq    2,1,3,→,\r     -> "Pick a color"="Green", "Pick fruits"="Apple, Ch
 The last line is the regression guard: it must keep passing **without** the extra
 Enter, which is why the fix is a branch on `hasPreview` and not a blanket Enter.
 
-The preview **body** is deliberately not forwarded — it is free-form, can be large
-and nothing renders it. Only the fact that one exists crosses the wire.
+### The preview BODY now crosses the wire too (#145)
+
+It used to be dropped on purpose — *"free-form, can be large, and nothing renders
+it"* — which was right for exactly as long as nothing rendered it. Reported
+2026-08-19: a three-option prompt whose labels were `Land #182 (.debug suffix)` /
+`Play closed track upload` / `Leave it` kept every package name, snippet and
+blocker **inside the preview box**, so the chat lens was strictly less
+informative than the terminal *on the questions that need the most reading* —
+and no amount of client work could fix it, because the bytes were never sent.
+
+`_shapeQuestions` now publishes `preview` per option, capped at
+**`PQ_PREVIEW_CAP = 2000`** — its own budget, not the 800 sized for a label or a
+blurb, because a preview is a multi-line **block**. The overlay renders it in
+**monospace and unparsed** (its markup *is* the content) on the **selected row
+only**, clamped to `kPreviewMaxLines` with a visible ellipsis. Revealing it on
+select mirrors the TUI, where moving the highlight swaps the box and Enter
+commits; a tap here likewise only moves the selection, so reading a preview
+never costs you a choice.
+
+**`hasPreview` is still derived from the RAW option list — never recompute it
+from the shaped one.** The shaped list can lose a preview three ways: its option
+had no label and was filtered out, it fell past `PQ_MAX_OPTIONS`, or the body was
+a non-string/whitespace and was never attached. (Capping is **not** one of them —
+`_pqCap` truncates, it cannot empty a non-empty preview.) Any of the three would
+silently flip the question to the compact layout, and the layout decides what
+every answer key MEANS.
+
+The block is revealed by **selecting** its option, and selecting also **scrolls
+that row into view**. Without it the feature is invisible in the case it was
+reported from: the option list gets `kOptionFloor` (~two rows) on a phone, so
+choosing the last option opens a ~300px block entirely below the viewport — the
+radio fills and nothing else appears to happen. Note the font too: `'monospace'`
+is an Android/fontconfig alias that resolves to **nothing** on Windows, macOS and
+iOS, so the block carries a `fontFamilyFallback` — without it the alignment this
+whole treatment exists to preserve is lost on the desktop build.
 
 ## Auth System
 - Cookie-based session auth (primary, for browser users)

@@ -369,6 +369,13 @@ const double kCtxChrome = 50; // lead-up panel margin + padding + label row
 const double kOptionRowMax = 96; // label + a two-line description at 412dp
 const double kOptionPeek = 16; // a deliberate half-row: "there is more below"
 
+/// Lines of an option's `preview` block shown once that option is selected
+/// (#145). The server caps a preview at 2000 characters, which is roughly 30
+/// lines — taller than a phone card — so it is clamped here too, VISIBLY: the
+/// ellipsis says "there is more of this in the terminal" where a silent cut
+/// would let the reader believe they had seen the whole snippet.
+const int kPreviewMaxLines = 14;
+
 /// Two whole option rows plus a peek of the third. The peek matters as much as
 /// the rows: it makes the cut land somewhere chosen, so a clipped list reads as
 /// "scroll me" instead of as the end (the report was a row sliced mid-word).
@@ -440,6 +447,16 @@ class QuestionOverlay extends StatefulWidget {
 class _QuestionOverlayState extends State<QuestionOverlay> {
   int _tab = 0;
   late List<Set<int>> _selected;
+
+  /// One stable key per (tab, option) so a revealed preview can be scrolled into
+  /// view (#145 — see [_revealPreview]). Keyed by tab as well as index because
+  /// the tabs share one scroll view and index 0 is a different row on each.
+  /// Created lazily and kept for the life of the overlay: a GlobalKey has to be
+  /// the SAME object across rebuilds or the element it names is torn down.
+  final Map<String, GlobalKey> _optionKeys = {};
+
+  GlobalKey _optionKey(int i) =>
+      _optionKeys.putIfAbsent('$_tab:$i', () => GlobalKey());
 
   /// Per-question free-text ("Other") answer, parallel to [_selected]. `null`
   /// means Other is NOT the active choice for that tab (numeric-selection mode);
@@ -560,6 +577,44 @@ class _QuestionOverlayState extends State<QuestionOverlay> {
           ..clear()
           ..add(i);
       }
+    });
+    _revealPreview(q, i);
+  }
+
+  /// Scroll a just-selected option's `preview` block into view (#145).
+  ///
+  /// Selecting is what reveals a preview, and the block is far taller than the
+  /// row that opened it. On a phone the option list gets `kOptionFloor` — about
+  /// two rows — so choosing the LAST option opens a ~300px block entirely below
+  /// the viewport: the radio fills, nothing else changes, and the preview this
+  /// feature exists to show is invisible on exactly the narrow screen it was
+  /// reported from.
+  ///
+  /// Deliberately narrow. It fires only for an option that actually HAS a
+  /// preview, so no preview-less question changes behaviour and #94's
+  /// "options are reachable without scrolling" budget is untouched.
+  ///
+  /// Deferred to the next frame because the block does not exist until the
+  /// rebuild that `setState` above schedules — and RE-CHECKED there, because
+  /// between scheduling and running, the overlay can be dismissed or the tab
+  /// switched (#111: a deferred scroll that does not re-check moves the wrong
+  /// thing, or a thing that is gone).
+  void _revealPreview(PendingQuestionItem q, int i) {
+    if (i < 0 || i >= q.options.length) return;
+    if (q.options[i].preview.isEmpty) return;
+    WidgetsBinding.instance.addPostFrameCallback((_) {
+      if (!mounted) return;
+      if (!_selected[_tab].contains(i)) return;
+      final ctx = _optionKey(i).currentContext;
+      if (ctx == null) return;
+      Scrollable.ensureVisible(
+        ctx,
+        duration: const Duration(milliseconds: 180),
+        curve: Curves.easeOut,
+        // Bring the BOTTOM of the tile up: the preview hangs below the label,
+        // so aligning the top would scroll the block itself back out of sight.
+        alignment: 1.0,
+      );
     });
   }
 
@@ -1228,6 +1283,9 @@ class _QuestionOverlayState extends State<QuestionOverlay> {
     final opt = q.options[i];
     final selected = _selected[_tab].contains(i);
     return Padding(
+      // Named so _revealPreview can scroll this exact row into view once
+      // selecting it opens a preview taller than the row itself (#145).
+      key: _optionKey(i),
       padding: const EdgeInsets.symmetric(vertical: 3),
       child: Material(
         color: selected
@@ -1303,6 +1361,62 @@ class _QuestionOverlayState extends State<QuestionOverlay> {
                             overflow: selected ? null : TextOverflow.ellipsis,
                             style: theme.textTheme.bodySmall?.copyWith(
                               color: theme.colorScheme.onSurfaceVariant,
+                            ),
+                          ),
+                        ),
+                      // #145 — the preview BLOCK, on the selected row only.
+                      //
+                      // This mirrors what Claude's own side-by-side layout does:
+                      // moving the highlight is what swaps the preview box, and
+                      // nothing is committed until Enter. Here a tap only moves
+                      // the selection too (Send commits), so reading a preview
+                      // stays free and reversible — you are not made to choose
+                      // an option in order to find out what it means.
+                      //
+                      // Monospace and unrendered: a preview is a snippet, a diff
+                      // or a mock-up whose ALIGNMENT is the content. Running it
+                      // through the markdown spans the description uses would
+                      // eat the backticks and asterisks that a code block is
+                      // made of.
+                      if (selected && opt.preview.isNotEmpty)
+                        Padding(
+                          padding: const EdgeInsets.only(top: 8),
+                          child: Container(
+                            width: double.infinity,
+                            padding: const EdgeInsets.symmetric(
+                              horizontal: 10,
+                              vertical: 8,
+                            ),
+                            decoration: BoxDecoration(
+                              color: theme.colorScheme.surfaceContainerHighest,
+                              borderRadius: BorderRadius.circular(
+                                AppShape.small,
+                              ),
+                              border: Border.all(
+                                color: theme.colorScheme.outlineVariant,
+                              ),
+                            ),
+                            child: Text(
+                              opt.preview,
+                              maxLines: kPreviewMaxLines,
+                              overflow: TextOverflow.ellipsis,
+                              style: theme.textTheme.bodySmall?.copyWith(
+                                // 'monospace' is an Android/fontconfig alias and
+                                // resolves to NOTHING on Windows, macOS and iOS,
+                                // where Flutter then falls back to a proportional
+                                // face — which would defeat the entire reason this
+                                // block is unparsed. The fallback list is what
+                                // makes the alignment claim true off Android.
+                                fontFamily: 'monospace',
+                                fontFamilyFallback: const [
+                                  'Consolas',
+                                  'Menlo',
+                                  'DejaVu Sans Mono',
+                                  'Courier New',
+                                ],
+                                height: 1.35,
+                                color: theme.colorScheme.onSurface,
+                              ),
                             ),
                           ),
                         ),
