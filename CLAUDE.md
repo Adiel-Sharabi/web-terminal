@@ -428,11 +428,21 @@ slow-but-working start.
 > marker — marked every restored session ready at t=0, so the gate was dead after
 > every cold restart, including the one this change itself needs to deploy.
 
-> **Known limitation:** the latch is one-way and does not reset when the agent
-> **exits** back to its shell (`/exit`, Ctrl-D, a crashed TUI). That session keeps
-> reporting ready, so a later submit reaches bash — #147 again, further along.
-> Unfixed on purpose: the honest signal would be "the shell prompt is back", which
-> is precisely what this must not key on.
+> **Two known gaps, both recorded rather than guessed at.**
+>
+> 1. The latch is one-way and does not reset when the agent **exits** back to its
+>    shell (`/exit`, Ctrl-D, a crashed TUI). That session keeps reporting ready, so
+>    a later submit reaches bash — #147 again, further along.
+> 2. `❯` is also the default PS1 of starship, pure and some oh-my-posh themes.
+>    Arming after the launch write stops the shell's *first* prompt from counting,
+>    but not one printed straight after a launch that **failed** — there the latch
+>    flips in milliseconds and never reaches the 45s fallback. **Measured
+>    2026-08-20: not live on this fleet** — Git Bash's PS1 ends in `$` and a failed
+>    launch prints `bash: …: command not found`.
+>
+> Both share one honest fix — key on the composer **frame** instead of the bare
+> caret — and one reason it is not done here: that needs a fresh rig measurement
+> of what the frame prints, and an unmeasured marker is what #143 shipped.
 
 The client gates **submit only** — typing is untouched and the text stays in the
 box. It is **not** auto-sent on ready, on purpose: firing a prompt somebody was

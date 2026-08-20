@@ -1701,7 +1701,21 @@ class _SessionScreenState extends State<SessionScreen>
       // terminal so Claude's own slash-command menu renders and narrows as you
       // type. The menu lives in the terminal, so switch there to show it —
       // remembering the prior lens so we can hop back once the command is sent.
-      if (!_composeLive && slashStartsLiveStream(text)) {
+      // #147 — do not ENTER live mode while the agent is still booting.
+      //
+      // The first cut of this gated `_streamComposeLive` instead, and that
+      // reintroduced the exact loss #147 exists to prevent: live mode was still
+      // entered, nothing was ever streamed to the PTY, and `_sendCompose`'s live
+      // branch assumes the body already went — so pressing Send delivered a bare
+      // CR and the command silently vanished. Caught in re-review of PR #150.
+      //
+      // Refusing entry keeps the text a NORMAL draft: submit stays blocked until
+      // ready, and then Send delivers the whole line through
+      // buildComposeSubmission. The only thing lost is the live slash MENU
+      // during boot, and the next keystroke after ready re-enters live mode.
+      if (!_composeLive &&
+          (_session?.agentReady ?? true) &&
+          slashStartsLiveStream(text)) {
         _composeLive = true;
         _composeLiveSent = '';
         _liveTabbed = false;
@@ -1738,15 +1752,13 @@ class _SessionScreenState extends State<SessionScreen>
   /// while both merely insert a newline everywhere else — the lens-dependent Enter that
   /// #55 §1 forbids. `_composeLiveSent` holds the same projection, so the diff stays honest.
   void _streamComposeLive(String val) {
-    // #147 — nothing may reach the PTY until the agent owns it. The submit gate
-    // alone was not enough: this path writes bytes AS YOU TYPE, so a `/co` typed
-    // in the first seconds landed on bash's command line, and the worker then
-    // typed `claude --resume ...` onto that same line — producing
-    // `/coclaude --resume ...`, which starts no agent at all and strands the
-    // user in a shell. Worse than the bug #147 reported, and found in review of
-    // PR #150. The text is not lost: it stays in the compose bar and streams as
-    // soon as the agent is up.
-    if (!(_session?.agentReady ?? true)) return;
+    // #147 — this path writes bytes AS YOU TYPE, so a `/co` typed in the first
+    // seconds would land on bash's command line and the worker would then type
+    // `claude --resume ...` onto that same line, running `/coclaude --resume ...`
+    // and starting no agent at all. It is guarded at the ONE place live mode is
+    // entered (see onChanged), not here: a second gate in a second place is how
+    // the two come to disagree, and gating here alone was measured to lose the
+    // whole command on Send.
     val = composeLiveProjection(val);
     var i = 0;
     final n = _composeLiveSent.length < val.length
