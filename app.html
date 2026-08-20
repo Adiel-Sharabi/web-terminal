@@ -198,6 +198,25 @@
        percentage out of the row. */
     .sb-model { font-size: 10px; color: #6a7a8a; opacity: .9;
                 max-width: 11ch; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+    /* #137 — a session sitting out its 5-hour usage window.
+       Deliberately the SAME structural device as .sb-item.api-error above (an inset
+       left bar + a tinted row), de-escalated on every axis: ice-blue instead of red,
+       static instead of pulsing, no name recolour. Nothing is wrong with this session
+       — it is simply held until a known time — so it reuses a vocabulary the user has
+       already learned while reading as a different category. Amber was rejected: it
+       already means "something is happening" (.sb-bg, the working dot), which is the
+       opposite of what this state is. */
+    .sb-item.capped { background: rgba(90,150,205,0.10); box-shadow: inset 4px 0 0 #5a96cd; }
+    .sb-item.capped.current { background: rgba(90,150,205,0.18); }
+    /* An api-error on a capped session still reads as the error: a fault outranks a
+       wait, and two left bars cannot share one edge. */
+    .sb-item.capped.api-error { background: rgba(233,69,96,0.20); box-shadow: inset 4px 0 0 #ff2d4b; }
+    .sb-wait { font-size: 10px; font-weight: 600; color: #7ab3e8; white-space: nowrap;
+               background: transparent; border: 1px solid rgba(122,179,232,0.45); border-radius: 7px;
+               padding: 0 5px; cursor: pointer; font-family: inherit; line-height: 1.5; }
+    .sb-wait:hover { border-color: #7ab3e8; color: #a8cff5; }
+    .sb-wait.off { color: #6a7a8a; border-color: rgba(106,122,138,0.45); }
+    .sb-wait.off:hover { color: #8fa3b8; border-color: #6a7a8a; }
     .sb-kill { background: transparent; border: none; color: #555; font-size: 14px; cursor: pointer; padding: 0 4px; line-height: 1; }
     .sb-kill:hover { color: #e94560; }
     .sb-edit { background: transparent; border: none; color: #555; font-size: 11px; cursor: pointer; padding: 0 4px; }
@@ -2875,6 +2894,48 @@
     }
     // Small tinted chip naming the session's agent. Absent for a plain shell, whose
     // `agent` is null — those must not be labelled as any agent.
+    // #137 — the 5h wait period: is this session held, and when does it come back.
+    //
+    // Renders the SERVER's derived `usageLimit` (lib/usage-limit.js) and decides
+    // nothing itself — no threshold, no clock arithmetic against the metrics. That is
+    // the point: the worker arms its timer from the same computation, so the badge
+    // cannot promise a resume the timer disagrees with.
+    //
+    // No ticking countdown. The resume time is ABSOLUTE, so a clock time stays true
+    // between polls where "in 2h 14m" silently rots; and a per-second timer to keep a
+    // relative label honest is exactly the cost PR #107 measured and removed.
+    function waitBadge(s){
+      const u = s.usageLimit;
+      if (!u || !u.waiting) return '';
+      const at = u.resumeAt ? new Date(u.resumeAt) : null;
+      const hhmm = at ? at.toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' }) : '';
+      // "resumes" is keyed on ARMED, not on waiting: a session can be known-capped
+      // before its reset time is, and saying "resumes" then would promise something
+      // no timer is scheduled to do. AND on there being a time to show — a bare
+      // "resumes" names no moment, which is a promise with nothing behind it. The
+      // companion's _WaitChip requires both for the same reason; this used to require
+      // only the first, so the two clients could disagree about the same row.
+      if (u.enabled && (!u.armed || !hhmm)) {
+        return `<button class="sb-wait" title="5-hour limit reached. This session will resume on its own once the reset time is known. Click to turn auto-resume off for this session.">&#9208; on hold</button>`;
+      }
+      if (!u.enabled) {
+        return `<button class="sb-wait off" title="5-hour limit reached. Auto-resume is off for this session${hhmm ? ' — the window reopens at ' + esc(hhmm) : ''}. Click to turn it back on.">&#9208; on hold</button>`;
+      }
+      return `<button class="sb-wait" title="5-hour limit reached. This session resumes on its own${hhmm ? ' at ' + esc(hhmm) : ''}. Click to turn auto-resume off for this session.">&#9208; resumes${hhmm ? ' ' + esc(hhmm) : ''}</button>`;
+    }
+    // Flip this session's auto-resume off/on. Writes to the server that OWNS the
+    // session (apiBase), like every other per-session preference.
+    async function toggleAutoResume(s, apiBase){
+      const next = !(s.usageLimit && s.usageLimit.enabled);
+      try {
+        await fetch(`${apiBase}/sessions/${s.id}/auto-resume`, {
+          method: 'PATCH',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({ enabled: next }),
+        });
+      } catch (e) { console.error('auto-resume toggle failed', e); }
+      loadSidebar();
+    }
     function agentBadge(s){
       const a = s.agent && agents[s.agent];
       if (!a) return '';
@@ -3205,13 +3266,18 @@
           const item = document.createElement('div');
           const isCurrent = s.id === sessionId && s.serverUrl === sessionServerUrl;
           const lvl = s.notifyLevel || 'important';
-          item.className = 'sb-item' + (isCurrent ? ' current' : '') + (s.apiError ? ' api-error' : '');
+          item.className = 'sb-item' + (isCurrent ? ' current' : '')
+            + ((s.usageLimit && s.usageLimit.waiting) ? ' capped' : '')
+            + (s.apiError ? ' api-error' : '');
           if (s.apiError && s.apiErrorText) item.title = s.apiErrorText;
           item.dataset.sessionId = s.id;
           item.innerHTML =
             `<div class="sb-name"><span class="sb-dot ${s.status}"></span>${esc(s.name)}</div>` +
             `<div class="sb-meta">` +
               `<span class="sb-status ${s.status}">${statusLabels[s.status] || s.status}</span>` +
+              // Directly after the status word, before the capacity chips: this
+              // QUALIFIES what the session is doing, it does not measure it.
+              waitBadge(s) +
               bgBadge(s) +
               agentBadge(s) +
               ctxBadge(s) +
@@ -3246,6 +3312,14 @@
           item.querySelector('.sb-recap').addEventListener('click', (e) => {
             e.stopPropagation(); // never switch session — the point is to look WITHOUT leaving
             showRecapCard(e.currentTarget, s.id, apiBase, s.name);
+          });
+
+          // #137 — the cancel. stopPropagation for the same reason as recap: acting on
+          // a row must never switch you into it.
+          const waitBtn = item.querySelector('.sb-wait');
+          if (waitBtn) waitBtn.addEventListener('click', (e) => {
+            e.stopPropagation();
+            toggleAutoResume(s, apiBase);
           });
 
           item.querySelector('.sb-edit').addEventListener('click', async (e) => {
@@ -3516,7 +3590,9 @@
       for (const s of favs) {
         const isCurrent = s.id === sessionId && s.serverUrl === sessionServerUrl;
         const item = document.createElement('div');
-        item.className = 'sb-item sb-fav-item' + (isCurrent ? ' current' : '') + (s.apiError ? ' api-error' : '');
+        item.className = 'sb-item sb-fav-item' + (isCurrent ? ' current' : '')
+          + ((s.usageLimit && s.usageLimit.waiting) ? ' capped' : '')
+          + (s.apiError ? ' api-error' : '');
         item.dataset.favId = s.id;             // distinct from data-session-id to avoid query collisions
         item.dataset.serverKey = '__favorites__';
         if (s.apiError && s.apiErrorText) item.title = s.apiErrorText;
@@ -3525,6 +3601,7 @@
           `<div class="sb-name"><span class="sb-dot ${s.status}"></span>${esc(s.name)}<span class="sb-server-badge">${esc(serverLabel)}</span></div>` +
           `<div class="sb-meta">` +
             `<span class="sb-status ${s.status}">${statusLabels[s.status] || s.status}</span>` +
+            waitBadge(s) +
             bgBadge(s) +
             ctxBadge(s) +
             modelBadge(s) +
@@ -3541,6 +3618,11 @@
           e.stopPropagation();
           const favApiBase = s.serverUrl ? `/cluster/${encodeURIComponent(s.serverUrl)}/api` : '/api';
           showRecapCard(e.currentTarget, s.id, favApiBase, s.name);
+        });
+        const favWaitBtn = item.querySelector('.sb-wait');
+        if (favWaitBtn) favWaitBtn.addEventListener('click', (e) => {
+          e.stopPropagation();
+          toggleAutoResume(s, s.serverUrl ? `/cluster/${encodeURIComponent(s.serverUrl)}/api` : '/api');
         });
         item.addEventListener('click', (e) => {
           if (e.target.closest('.sb-star') || e.target.closest('.sb-recap')) return;

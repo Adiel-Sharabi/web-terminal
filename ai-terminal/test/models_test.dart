@@ -579,8 +579,16 @@ void main() {
   });
 
   // #124 — withFavoriteRank is deliberately NOT a general copyWith, but it still
-  // hand-lists all eighteen fields, so this pins that a reorder cannot silently
-  // drop one. Every field is given a distinctive value.
+  // hand-lists every field, so this pins that a reorder cannot silently drop one.
+  // Every field is given a distinctive value.
+  //
+  // "Distinctive" is the whole method, and #147 x #137 is why it is worth spelling
+  // out: `agentReady` defaults to TRUE and `usageLimit` to null, so a dropped line
+  // does not throw, does not warn, and hands back a plausible object. A test that
+  // left them at their defaults would pass against the drop. `agentReady: false`
+  // here is therefore load-bearing — it is the value that cannot be reached by
+  // accident, and the one whose loss opens the client's #147 submit gate on a
+  // session whose agent is still booting.
   group('Session.withFavoriteRank', () {
     test('changes the rank and preserves every other field', () {
       const server = ServerConfig(
@@ -603,6 +611,14 @@ void main() {
         compactingSince: 42,
         backgroundTasks: const ['t1', 't2'],
         waitingFor: 'question',
+        agentReady: false,
+        usageLimit: const UsageLimit(
+          waiting: true,
+          armed: true,
+          enabled: false,
+          resetAt: 1700000000000,
+          resumeAt: 1700000060000,
+        ),
       );
 
       final moved = original.withFavoriteRank(999);
@@ -625,6 +641,8 @@ void main() {
       expect(moved.compactingSince, original.compactingSince);
       expect(moved.backgroundTasks, original.backgroundTasks);
       expect(moved.waitingFor, original.waitingFor);
+      expect(moved.agentReady, isFalse, reason: 'a dropped agentReady silently reverts to the true default and opens the #147 submit gate');
+      expect(moved.usageLimit, same(original.usageLimit));
     });
   });
 }

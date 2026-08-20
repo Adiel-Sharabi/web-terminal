@@ -37,6 +37,11 @@ Full instructions: **[docs/INSTALL.md](docs/INSTALL.md)**.
   to your phone even with the app closed. No more discovering a blocked agent an hour later.
 - **It reads like a conversation, not a screen scrape.** The companion app renders the
   agent's transcript as chat, with proper cards for shell commands, file edits and subagents.
+- **It waits out the 5-hour cap for you.** When an agent hits its usage limit it blocks on a
+  question ("stop and wait, or upgrade?"). The worker answers *wait*, the row shows when the
+  window reopens, and the session picks itself back up a minute after it does — so a limit
+  hit overnight costs you the window, not the morning. Only sessions actually observed to be
+  capped are resumed, and any row's badge turns it off for that session.
 - **One sidebar, every machine.** Run it on several boxes and drive them all from one list.
 - **Private by construction.** It binds to localhost; you reach it over your own VPN. Push
   notifications are content-free wake-ups — the text is fetched from your server, not a relay.

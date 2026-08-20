@@ -223,6 +223,9 @@ class Session {
   /// True when the session is blocked on the user, whatever the kind.
   bool get isWaitingOnUser => waitingFor != null;
 
+  /// The 5h usage-limit state (#137), or `null` from a server too old to send it.
+  final UsageLimit? usageLimit;
+
   /// Creates a session value object. [autoCommand] is optional (default `''`)
   /// so existing call sites and tests that predate the field keep compiling.
   const Session({
@@ -245,6 +248,7 @@ class Session {
     this.backgroundTasks = const <String>[],
     this.waitingFor,
     this.agentReady = true,
+    this.usageLimit,
   });
 
   /// This session with a different pinned rank (#124), for the optimistic half of
@@ -274,6 +278,7 @@ class Session {
     backgroundTasks: backgroundTasks,
     waitingFor: waitingFor,
     agentReady: agentReady,
+    usageLimit: usageLimit,
   );
 
   /// Builds a [Session] from one element of the `GET /api/sessions` array,
@@ -303,6 +308,7 @@ class Session {
       waitingFor: _waitingFor(json['waitingFor']),
       // Absent -> ready. See the field doc: the gate must fail OPEN.
       agentReady: json['agentReady'] != false,
+      usageLimit: UsageLimit.fromJson(json['usageLimit']),
     );
   }
 
@@ -364,6 +370,56 @@ class Session {
 /// Claude Code status-line metrics for a session: context-window usage and the
 /// 5-hour / 7-day rate-limit usage, each a whole percentage (0–100) or `null`
 /// when that number isn't currently known.
+/// The 5-hour usage-limit state of one session (#137), exactly as the SERVER
+/// derived it (`lib/usage-limit.js`).
+///
+/// Nothing here is recomputed on the client, and that is the point: the worker
+/// arms its auto-resume timer from the same derivation, so a badge built from
+/// these fields cannot promise a resume the timer disagrees with. A client that
+/// re-read `metrics.fiveH` and applied its own threshold would be a second answer
+/// to a question the server already settled — the mistake #81/#83 kept paying for
+/// in other places.
+///
+/// An older server sends no `usageLimit` at all, so this is nullable everywhere
+/// and absence renders nothing.
+class UsageLimit {
+  /// The session is sitting out its 5h window right now.
+  final bool waiting;
+
+  /// A resume is actually scheduled. Narrower than [waiting]: a capped session the
+  /// user switched off is still waiting, but nothing will fire for it.
+  final bool armed;
+
+  /// Whether auto-resume is switched on for this session (the per-session opt-out).
+  final bool enabled;
+
+  /// When the window turns over, and when the resume actually fires — a minute
+  /// apart, and only the second is when anything happens, so the UI shows that one.
+  final int? resetAt;
+  final int? resumeAt;
+
+  const UsageLimit({
+    this.waiting = false,
+    this.armed = false,
+    this.enabled = true,
+    this.resetAt,
+    this.resumeAt,
+  });
+
+  static UsageLimit? fromJson(dynamic json) {
+    if (json is! Map) return null;
+    return UsageLimit(
+      waiting: json['waiting'] == true,
+      armed: json['armed'] == true,
+      // Default ON (#137) — an absent key must not read as "switched off", or a
+      // server mid-upgrade would show every capped session as abandoned.
+      enabled: json['enabled'] != false,
+      resetAt: _asInt(json['resetAt']),
+      resumeAt: _asInt(json['resumeAt']),
+    );
+  }
+}
+
 class SessionMetrics {
   final int? ctx;
 

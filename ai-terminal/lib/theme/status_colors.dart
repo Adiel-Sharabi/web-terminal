@@ -53,6 +53,12 @@ abstract final class StatusColor {
   static const waiting = Color(0xFFE94560);
   static const apiError = Color(0xFFFF2D4B);
 
+  /// #137 — a session sitting out its 5-hour usage window. Its own colour on
+  /// purpose: [working] amber already means "something is happening", which is the
+  /// opposite of a held session, and [apiError] red already means a fault. Matches
+  /// the web sidebar's `.sb-wait` so one feature does not read as two.
+  static const capped = Color(0xFF7AB3E8);
+
   static const serverOnline = Color(0xFF44AA44);
   static const serverOffline = Color(0xFFAA4444);
   static const serverNeedsAuth = Color(0xFFDDAA44);

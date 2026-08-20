@@ -72,6 +72,19 @@ String absoluteTime(int? epochMs) {
   return '${t.year}-${pad(t.month)}-${pad(t.day)} ${pad(t.hour)}:${pad(t.minute)}';
 }
 
+/// Wall-clock time only, e.g. `14:32` (#137).
+///
+/// Deliberately absolute rather than a "in 2h 14m" countdown: the resume time IS
+/// absolute, so a clock reading stays true between polls where a relative one
+/// silently rots — and keeping it honest would need a per-second ticker, which is
+/// exactly the cost PR #107 measured and removed from this app.
+String clockTime(int? epochMs) {
+  if (epochMs == null) return '';
+  final t = DateTime.fromMillisecondsSinceEpoch(epochMs);
+  String pad(int n) => n.toString().padLeft(2, '0');
+  return '${pad(t.hour)}:${pad(t.minute)}';
+}
+
 /// True when [name] looks like a path/filename (contains `/`, `~`, or `.`),
 /// in which case spec §0.3 calls for a monospace font.
 bool looksLikePath(String name) =>

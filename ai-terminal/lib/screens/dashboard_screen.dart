@@ -238,6 +238,12 @@ class _DashboardScreenState extends State<DashboardScreen> {
       )
           ? () => _toggleFavorite(context, session)
           : null,
+      // #137 — the wait chip doubles as the cancel. Offered only when this session
+      // actually carries a usageLimit: a server too old to send one has no route
+      // to PATCH, so the chip never renders and this is never reachable.
+      onAutoResumeTap: session.usageLimit == null
+          ? null
+          : () => _toggleAutoResume(context, session),
       onBellTap: () => showNotifyLevelPicker(
         context,
         session,
@@ -283,6 +289,23 @@ class _DashboardScreenState extends State<DashboardScreen> {
         ScaffoldMessenger.of(
           context,
         ).showSnackBar(SnackBar(content: Text('Favorite failed: $e')));
+      }
+    }
+  }
+
+  /// #137 — flips this session's 5-hour auto-resume. Same shape as
+  /// [_toggleFavorite]: write to the OWNING server, then refresh so the chip
+  /// re-renders from the server's answer rather than an optimistic local guess.
+  Future<void> _toggleAutoResume(BuildContext context, Session session) async {
+    final next = !(session.usageLimit?.enabled ?? true);
+    try {
+      await ApiClient(session.server).setAutoResume(session.id, next);
+      await SessionRepository.instance.refresh();
+    } catch (e) {
+      if (context.mounted) {
+        ScaffoldMessenger.of(context).showSnackBar(
+          SnackBar(content: Text('Auto-resume change failed: $e')),
+        );
       }
     }
   }
