@@ -404,17 +404,45 @@ declares none**: its candidate has not been measured against a real boot, and an
 unmeasured marker is exactly what #143 shipped. Undeclared means *ready
 immediately* — today's behaviour, unchanged.
 
-**It can never wedge, by four independent routes**, because a session stuck on
-"starting" would be worse than the bug: any hook forces it ready (an agent that
-fired one is up, whatever its screen did); a restored session is seeded from its
-scrollback (an agent running for hours will not reprint its marker); a plain shell
-and every unknown agent are ready from birth; and both `server.js` and the
-companion read a missing field as **ready**, so an older worker or an older server
-never refuses a submit.
+**The scan does not start until the launch command has been written.** Before
+that the PTY is showing the *shell*, and `❯` is the default prompt glyph of
+starship, pure and several oh-my-posh themes — on such a box the latch would flip
+before the agent was even launched and the gate would silently no-op. A session
+with **no** `autoCommand` is never gated at all: it is a shell until you type
+something, and gating it would block the very submit that types `claude`.
+
+**It can never wedge**, because a session stuck on "starting" would be worse than
+the bug: any hook forces it ready; a **45s fallback** (`WT_READY_FALLBACK_MS`)
+forces it if no marker ever arrives, which is the only thing that covers `claude:
+command not found` or a crash on launch; a plain shell and every unknown agent are
+ready from birth; and `server.js`, `POST /api/sessions` and the companion all read
+a missing field as **ready**, so an older worker or an older server never refuses a
+submit. The fallback is a **ceiling, not a detector** — the marker is still the
+signal, and 45s sits far above the measured 5–6s boot so it cannot race a
+slow-but-working start.
+
+> **A restored session is NOT seeded from its scrollback**, and the first cut of
+> this got it backwards. Restore does not reattach anything: it spawns a **fresh
+> shell** and re-runs `claude --resume <id>`, which boots *slower* than a cold
+> start. Seeding from the old scrollback — which still holds the previous life's
+> marker — marked every restored session ready at t=0, so the gate was dead after
+> every cold restart, including the one this change itself needs to deploy.
+
+> **Known limitation:** the latch is one-way and does not reset when the agent
+> **exits** back to its shell (`/exit`, Ctrl-D, a crashed TUI). That session keeps
+> reporting ready, so a later submit reaches bash — #147 again, further along.
+> Unfixed on purpose: the honest signal would be "the shell prompt is back", which
+> is precisely what this must not key on.
 
 The client gates **submit only** — typing is untouched and the text stays in the
 box. It is **not** auto-sent on ready, on purpose: firing a prompt somebody was
 still editing is its own way to lose their words.
+
+The **live `/`-line is gated too**, not just submit. That path writes bytes *as
+you type*, so a `/co` typed in the first seconds landed on bash's command line and
+the worker then typed `claude --resume …` onto the same line — running
+`/coclaude --resume …`, which starts no agent at all. Gating submit alone left a
+failure worse than the one being fixed.
 
 > **Not yet done:** `app.html` is ungated. It keeps no session-state map to hang
 > `agentReady` on, and the report was companion-only — so the web client can still

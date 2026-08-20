@@ -1738,6 +1738,15 @@ class _SessionScreenState extends State<SessionScreen>
   /// while both merely insert a newline everywhere else — the lens-dependent Enter that
   /// #55 §1 forbids. `_composeLiveSent` holds the same projection, so the diff stays honest.
   void _streamComposeLive(String val) {
+    // #147 — nothing may reach the PTY until the agent owns it. The submit gate
+    // alone was not enough: this path writes bytes AS YOU TYPE, so a `/co` typed
+    // in the first seconds landed on bash's command line, and the worker then
+    // typed `claude --resume ...` onto that same line — producing
+    // `/coclaude --resume ...`, which starts no agent at all and strands the
+    // user in a shell. Worse than the bug #147 reported, and found in review of
+    // PR #150. The text is not lost: it stays in the compose bar and streams as
+    // soon as the agent is up.
+    if (!(_session?.agentReady ?? true)) return;
     val = composeLiveProjection(val);
     var i = 0;
     final n = _composeLiveSent.length < val.length

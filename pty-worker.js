@@ -1030,8 +1030,41 @@ function processPtyOutput(session, buf) {
 function detectAgentReadyInOutput(session, buf) {
   const d = session._ready;
   if (!d || d.ready) return;
+  // #147 F3 — do not look at a byte until the autoCommand has actually been
+  // written. Before that the PTY is showing the SHELL, and `❯` is the default
+  // prompt glyph of starship, pure and several oh-my-posh themes — on any box
+  // whose shell prints one the latch would flip at ~3.3s, before the agent was
+  // even launched, and the gate would silently no-op with nothing to show for
+  // it. Waiting costs nothing: the marker cannot appear before the command that
+  // produces it.
+  if (!session._autoCommandSentAt) return;
   if (!d.push(buf)) return;
   announceAgentReady(session, 'composer marker');
+}
+
+// #147 F4 — the backstop that keeps "degrades to ready LATE, never ready NEVER"
+// true when the agent never starts at all.
+//
+// The four original escape routes all quietly assume the process came up: a
+// marker, a hook, an agentless session, a missing field. None covers `claude:
+// command not found` — which this repo has already seen, from a Session 0 task
+// with a stale PATH — nor a crash on launch, nor Codex's update nag. In those
+// the PTY sits at bash forever and the compose bar would say "starting" and
+// refuse to send for the life of the session. That is the one state #147
+// forbids.
+//
+// A CEILING, not a detector. The marker stays the signal; this only bounds how
+// wrong the gate can be, and sits far above the measured 5-6s boot so it never
+// races a slow-but-working start.
+const READY_FALLBACK_MS = Number(process.env.WT_READY_FALLBACK_MS || 45000);
+function armReadyFallback(session) {
+  const d = session._ready;
+  if (!d || d.ready) return;
+  session._readyFallback = setTimeout(() => {
+    session._readyFallback = null;
+    if (d.force()) announceAgentReady(session, 'fallback — no marker seen');
+  }, READY_FALLBACK_MS);
+  if (session._readyFallback.unref) session._readyFallback.unref();
 }
 
 // The single place readiness becomes true, so every route through it logs and
@@ -1372,6 +1405,9 @@ function sendAutoCommand(session, id, cmdToRun, how) {
   setTimeout(() => {
     try {
       termWrite(session, cmdToRun + '\n');
+      // #147 — from here on, output can plausibly be the AGENT's rather than the
+      // shell's, so the readiness scan may start looking (detectAgentReadyInOutput).
+      session._autoCommandSentAt = Date.now();
       log(`session ${id} auto-command${how}: ${cmdToRun}`);
     } catch (e) {
       log(`session ${id} auto-command write failed: ${e.message}`);
@@ -1476,12 +1512,23 @@ function createSession(id, cwd, name, autoCommand, savedScrollback, claudeSessio
 
   // #147 — a freshly spawned agent cannot receive a prompt until its composer
   // exists; until then the PTY is still sitting at the shell, and anything sent
-  // is handed to bash. SEEDED FROM RESTORED SCROLLBACK on purpose: a session
-  // coming back after a worker restart has had its agent running for hours and
-  // will not reprint the marker, so waiting for a fresh one would leave it
-  // "starting" forever — the one state #147 says must not exist.
-  session._ready = createReadyDetector(agents.readinessMarker(sessionAgent(session)));
-  if (scrollback.chunks.length > 0) session._ready.push(concatScrollback(scrollback));
+  // is handed to bash.
+  //
+  // This ONCE seeded the latch from restored scrollback, on the belief that a
+  // restored session's agent "has been running for hours and will not reprint
+  // the marker". That was wrong, and wrong in the most damaging direction:
+  // restore does not reattach anything — restoreSessionsOnStartup spawns a
+  // FRESH bash and re-runs `claude --resume <id>`, which boots SLOWER than a
+  // cold start. The old scrollback still holds the previous life's marker, so
+  // seeding marked every restored session ready at t=0 and left the gate open
+  // on every session after a cold restart — including the cold restart this
+  // very change needs in order to deploy. Found in review of PR #150.
+  // Gated on there BEING an autoCommand. A session with none is a plain shell
+  // until the user launches something — and gating it would block the very
+  // compose-bar submit that types `claude`, which is the opposite of the point.
+  const readyMarker = autoCommand ? agents.readinessMarker(sessionAgent(session)) : null;
+  session._ready = createReadyDetector(readyMarker);
+  armReadyFallback(session);
 
   term.onData((data) => {
     // Issue #13: normalize PTY output to Buffer once here so the rest of the
@@ -1506,6 +1553,7 @@ function createSession(id, cwd, name, autoCommand, savedScrollback, claudeSessio
     if (session._compactReplayTimer) { clearTimeout(session._compactReplayTimer); session._compactReplayTimer = null; }
     session._compactReplay = null;
     if (session._submitTimer) { clearTimeout(session._submitTimer); session._submitTimer = null; }
+    if (session._readyFallback) { clearTimeout(session._readyFallback); session._readyFallback = null; }
     cancelAutoResume(session); // #69 — same reasoning, a dead PTY has nothing to resume
     session._inputQueue = null; // a withheld CR dies with its PTY
     if (session.autoCommand && /\bclaude\b/i.test(session.autoCommand)) {
@@ -1830,7 +1878,15 @@ const rpcHandlers = {
     const agent = agents.isKnownAgent(params.agent) ? params.agent : null;
     createSession(id, cwd, name, autoCommand, null, null, undefined, agent);
     broadcastEvent('sessionCreated', { id, name, cwd, autoCommand, agent });
-    return { id, name, agent };
+    // #147 — readiness travels with the creation answer. The client BUILDS the
+    // session it opens from this response, so a field missing here becomes that
+    // field's default on the client, and `agentReady` defaults to true: without
+    // this the submit gate was open for the whole boot window of a brand-new
+    // session, the exact flow #147 reports. Read off the live session rather
+    // than hardcoded false — a plain shell and any agent with no declared
+    // marker really are ready the moment they exist.
+    const born = sessions.get(id);
+    return { id, name, agent, agentReady: born && born._ready ? born._ready.ready : true };
   },
 
   renameSession: async (params) => {
@@ -1883,6 +1939,7 @@ const rpcHandlers = {
     if (!session) return { ok: true }; // already gone
     if (session.idleTimer) clearTimeout(session.idleTimer);
     if (session._submitTimer) { clearTimeout(session._submitTimer); session._submitTimer = null; }
+    if (session._readyFallback) { clearTimeout(session._readyFallback); session._readyFallback = null; }
     session._inputQueue = null; // a withheld CR dies with its PTY
     cancelAutoResume(session); // #69
     try { session.term.kill(); } catch {}

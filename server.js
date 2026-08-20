@@ -3020,6 +3020,12 @@ async function _computeClusterSessions(reqUser) {
         // own /api/sessions and the remote branch spreads their row whole, so leaving
         // it out here would flag a peer's blocked session and never one of ours.
         waitingFor: sessionWaitingFor(s),
+        // #147 — and the same trap a THIRD time. The remote branch spreads a
+        // peer's row whole, so a peer's sessions carried real readiness while
+        // this server's own carried the `?? true` default — a client gating on
+        // it would refuse to trust nobody and gate nobody local. Found in review
+        // of PR #150, in a spot two comments above already warn about.
+        agentReady: s.agentReady ?? true,
       });
     });
     result.push(...localShaped);
@@ -3810,7 +3816,18 @@ app.post('/api/sessions', express.json({ limit: '16kb' }), async (req, res) => {
     // client builds the session it opens from this response, and its Chat lens is
     // gated on the field, so echoing null for an inferred agent opened every
     // Auto-created agent session with no chat controls until a re-select.
-    res.json({ id: created.id, name: created.name, agent: agentsLib.resolveAgent(created.agent, autoCommand) });
+    // #147 — and the readiness, for exactly the same reason the agent is here:
+    // the client BUILDS the session it opens from this response, so a field it
+    // omits takes its default. `agentReady` defaults to true, so omitting it
+    // left the submit gate OPEN on a brand-new session — the one flow #147 is
+    // about. Read from the worker's own summary rather than assumed false: a
+    // plain shell and an agent with no declared marker are ready at once.
+    res.json({
+      id: created.id,
+      name: created.name,
+      agent: agentsLib.resolveAgent(created.agent, autoCommand),
+      agentReady: created.agentReady ?? true,
+    });
   } catch (e) {
     console.error(`Failed to create session: ${e.message}`);
     res.status(500).json({ error: 'Failed to create session' });

@@ -121,10 +121,42 @@ test.describe('#147 agent readiness on the PTY output path', () => {
     try { fs.rmSync(dataDir, { recursive: true, force: true }); } catch {}
   });
 
-  async function newSession(agent) {
-    const { id } = await rpc(client, 'createSession', { cwd: dataDir, name: `s-${agent || 'shell'}`, agent });
-    await sleep(200); // let the PTY settle so shell banner output is out of the way
+  // An agent session is one with a command that LAUNCHES an agent — that is what
+  // arms the gate, and a session with no autoCommand is deliberately not gated
+  // (it is a plain shell until the user types something, and gating it would
+  // block the very compose-bar submit that types `claude`).
+  //
+  // The command is inert on purpose: these specs drive readiness through
+  // __testInjectOutput, so spawning a real agent would only add flakiness. The
+  // wait covers AUTO_CMD_SETTLE_MS + AUTO_CMD_PRIME_MS, because the marker scan
+  // does not start looking until the launch command has actually been written
+  // (before that, the PTY is showing the SHELL and `❯` may be its prompt).
+  async function newSession(agent, { autoCommand } = {}) {
+    const cmd = autoCommand !== undefined
+      ? autoCommand
+      : (agent ? `echo launching-${agent}` : '');
+    const { id } = await rpc(client, 'createSession', {
+      cwd: dataDir, name: `s-${agent || 'shell'}`, agent, autoCommand: cmd,
+    });
+    if (!cmd) {
+      await sleep(200);
+      return id;
+    }
+    // WAIT for the command to actually be written, do not guess a duration. The
+    // worker types it when it sees a shell prompt, and falls back at 5s if it
+    // never recognises one — a fixed sleep would be either flaky or slow, and
+    // this is the same "assert the precondition, never a timer" rule the feature
+    // itself is built on.
+    for (let i = 0; i < 80 && !(await armed(id)); i++) await sleep(100);
     return id;
+  }
+
+  /// True once the worker has written the launch command, i.e. once the marker
+  /// scan is armed. Asserted rather than assumed so a timing change here fails
+  /// loudly instead of quietly disarming every test below.
+  async function armed(id) {
+    const res = await rpc(client, '__testGetWrites', { id });
+    return (res.writes || []).some((w) => String(w).includes('launching'));
   }
 
   const inject = (id, data) => rpc(client, '__testInjectOutput', { id, data });
@@ -134,6 +166,7 @@ test.describe('#147 agent readiness on the PTY output path', () => {
 
   test('a new CLAUDE session is NOT ready until its composer marker appears', async () => {
     const id = await newSession('claude');
+    expect(await armed(id)).toBe(true); // the scan is armed; see newSession
     // The whole bug in one assertion: the session exists, the client would happily
     // render a compose bar, and the agent cannot receive anything yet.
     expect((await summaryOf(id)).agentReady).toBe(false);
@@ -177,6 +210,27 @@ test.describe('#147 agent readiness on the PTY output path', () => {
     await inject(id, `${CARET} `);
     await sleep(60);
     expect((await summaryOf(id)).agentReady).toBe(true);
+  });
+
+
+  test('a session with NO autoCommand is never gated — it is a shell', async () => {
+    // Gating one would block the compose-bar submit that types `claude` in the
+    // first place, which is the opposite of what #147 is for.
+    const id = await newSession('claude', { autoCommand: '' });
+    expect((await summaryOf(id)).agentReady).toBe(true);
+  });
+
+  test('the marker is IGNORED until the launch command has been written', async () => {
+    // `❯` is the default prompt glyph of starship, pure and several oh-my-posh
+    // themes, so on such a box the shell's own prompt would flip the latch at
+    // ~3.3s — before the agent was even launched — and the gate would silently
+    // no-op. Found in review of PR #150.
+    const { id } = await rpc(client, 'createSession', {
+      cwd: dataDir, name: 's-early', agent: 'claude', autoCommand: 'echo launching-claude',
+    });
+    await inject(id, `${CARET} not the agent, just a fancy shell prompt`);
+    await sleep(60);
+    expect((await summaryOf(id)).agentReady).toBe(false);
   });
 
   test('a PLAIN SHELL session is ready from birth', async () => {
