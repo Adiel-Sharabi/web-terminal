@@ -351,6 +351,13 @@ class ApiClient {
       // this object keeps it — so the Chat lens stayed shut until a re-select
       // replaced it with the list's copy (#119).
       agent: served is String && served.isNotEmpty ? served : agent,
+      // #147 — the SAME trap as `agent` one line up, found in review of #150.
+      // This object is what SessionScreen opens with, and the sessions stream is
+      // broadcast with no replay, so it stands until the next poll — a booting
+      // agent sends no notify frame to cut that short. Defaulting to `true` here
+      // left the submit gate open for the whole boot window on a freshly created
+      // session, which is precisely the flow that was reported.
+      agentReady: j['agentReady'] != false,
     );
   }
 

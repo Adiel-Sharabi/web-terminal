@@ -19,6 +19,8 @@ const agents = require('./lib/agents');
 const { splitTrailingCr, isEscapeKey, endsBracketedPaste } = require('./lib/submit-frames');
 const { endsInAltScreen } = require('./lib/replay-sanitize');
 const { scanOsc9 } = require('./lib/osc9-notify');
+// #147 — the pure readiness latch; the marker itself is a lib/agents.js field.
+const { createReadyDetector } = require('./lib/agent-ready');
 
 const WORKER_VERSION = '0.6.2'; // 0.6.2: a session restored from a scrollback that ends mid-alt-screen (Claude killed while in /tui fullscreen, so ?1049l never arrived) gets a corrective ?1049l appended, instead of stranding xterm in the alt buffer showing a frozen frame over a live shell. Prior 0.6.1: the submit gap is measured against the wire, not the frame.
 
@@ -1013,9 +1015,75 @@ function processPtyOutput(session, buf) {
   session.lastActivity = Date.now();
   detectApiErrorInOutput(session, buf);
   detectStatusNotificationInOutput(session, buf);
+  detectAgentReadyInOutput(session, buf);
   if (session.clientCount > 0) {
     broadcastPtyOut(session, buf);
   }
+}
+
+// --- #147: agent readiness ---------------------------------------------------
+//
+// Only a session whose provider DECLARES a marker waits; everything else is ready
+// the moment it exists (lib/agents.js readinessMarker). The detector is a one-way
+// latch, so this costs one already-true check per chunk for the whole life of a
+// session after the first few seconds.
+function detectAgentReadyInOutput(session, buf) {
+  const d = session._ready;
+  if (!d || d.ready) return;
+  // #147 F3 — do not look at a byte until the autoCommand has actually been
+  // written. Before that the PTY is showing the SHELL, and `❯` is the default
+  // prompt glyph of starship, pure and several oh-my-posh themes — on any box
+  // whose shell prints one the latch would flip at ~3.3s, before the agent was
+  // even launched, and the gate would silently no-op with nothing to show for
+  // it. Waiting costs nothing: the marker cannot appear before the command that
+  // produces it.
+  if (!session._autoCommandSentAt) return;
+  if (!d.push(buf)) return;
+  announceAgentReady(session, 'composer marker');
+}
+
+// #147 F4 — the backstop that keeps "degrades to ready LATE, never ready NEVER"
+// true when the agent never starts at all.
+//
+// The four original escape routes all quietly assume the process came up: a
+// marker, a hook, an agentless session, a missing field. None covers `claude:
+// command not found` — which this repo has already seen, from a Session 0 task
+// with a stale PATH — nor a crash on launch, nor Codex's update nag. In those
+// the PTY sits at bash forever and the compose bar would say "starting" and
+// refuse to send for the life of the session. That is the one state #147
+// forbids.
+//
+// A CEILING, not a detector. The marker stays the signal; this only bounds how
+// wrong the gate can be, and sits far above the measured 5-6s boot so it never
+// races a slow-but-working start.
+const READY_FALLBACK_MS = Number(process.env.WT_READY_FALLBACK_MS || 45000);
+function armReadyFallback(session) {
+  const d = session._ready;
+  if (!d || d.ready) return;
+  session._readyFallback = setTimeout(() => {
+    session._readyFallback = null;
+    if (d.force()) announceAgentReady(session, 'fallback — no marker seen');
+  }, READY_FALLBACK_MS);
+  if (session._readyFallback.unref) session._readyFallback.unref();
+}
+
+// The single place readiness becomes true, so every route through it logs and
+// broadcasts identically. `why` names the route, because "the marker never came
+// but a hook did" is the case worth seeing in a log when a CLI changes its UI.
+function announceAgentReady(session, why) {
+  log(`ready: session "${session.name}" agent accepting input (${why})`);
+  session.dirty = true;
+  broadcastEvent('agentReady', { id: sessionIdOf(session), agentReady: true });
+}
+
+// The SAFETY NET. An agent that fired a hook is self-evidently up, whatever its
+// screen did — so a marker that changes in a future CLI release degrades to
+// "ready late", never to "ready never". Called from handleHook, which every hook
+// and every in-band status notification already funnels through.
+function markAgentReadyFromActivity(session) {
+  const d = session._ready;
+  if (!d || d.ready) return;
+  if (d.force()) announceAgentReady(session, 'agent activity');
 }
 
 // --- In-band status for agents without usable hooks (Codex) ----------------
@@ -1306,6 +1374,11 @@ function sessionSummary(id, s) {
     // #69 — surfaced for tests and a future "resumes in Xh" UI. null unless a source
     // (Codex's transcript today) reported a 5h reset time via setFiveHResetAt.
     fiveHResetAt: s.fiveHResetAt || null,
+    // #147 — can this session receive a prompt yet? A session whose agent declares
+    // no marker (a plain shell, an unknown agent) is ready from birth, and a missing
+    // detector reads as ready too: the gate must fail OPEN, because a client that
+    // wrongly believes a live session is starting can never submit to it again.
+    agentReady: s._ready ? s._ready.ready : true,
   };
 }
 
@@ -1332,6 +1405,9 @@ function sendAutoCommand(session, id, cmdToRun, how) {
   setTimeout(() => {
     try {
       termWrite(session, cmdToRun + '\n');
+      // #147 — from here on, output can plausibly be the AGENT's rather than the
+      // shell's, so the readiness scan may start looking (detectAgentReadyInOutput).
+      session._autoCommandSentAt = Date.now();
       log(`session ${id} auto-command${how}: ${cmdToRun}`);
     } catch (e) {
       log(`session ${id} auto-command write failed: ${e.message}`);
@@ -1434,6 +1510,26 @@ function createSession(id, cwd, name, autoCommand, savedScrollback, claudeSessio
   };
   sessions.set(id, session);
 
+  // #147 — a freshly spawned agent cannot receive a prompt until its composer
+  // exists; until then the PTY is still sitting at the shell, and anything sent
+  // is handed to bash.
+  //
+  // This ONCE seeded the latch from restored scrollback, on the belief that a
+  // restored session's agent "has been running for hours and will not reprint
+  // the marker". That was wrong, and wrong in the most damaging direction:
+  // restore does not reattach anything — restoreSessionsOnStartup spawns a
+  // FRESH bash and re-runs `claude --resume <id>`, which boots SLOWER than a
+  // cold start. The old scrollback still holds the previous life's marker, so
+  // seeding marked every restored session ready at t=0 and left the gate open
+  // on every session after a cold restart — including the cold restart this
+  // very change needs in order to deploy. Found in review of PR #150.
+  // Gated on there BEING an autoCommand. A session with none is a plain shell
+  // until the user launches something — and gating it would block the very
+  // compose-bar submit that types `claude`, which is the opposite of the point.
+  const readyMarker = autoCommand ? agents.readinessMarker(sessionAgent(session)) : null;
+  session._ready = createReadyDetector(readyMarker);
+  armReadyFallback(session);
+
   term.onData((data) => {
     // Issue #13: normalize PTY output to Buffer once here so the rest of the
     // worker (scrollback chunks, broadcastPtyOut) operates on Buffers.
@@ -1457,6 +1553,7 @@ function createSession(id, cwd, name, autoCommand, savedScrollback, claudeSessio
     if (session._compactReplayTimer) { clearTimeout(session._compactReplayTimer); session._compactReplayTimer = null; }
     session._compactReplay = null;
     if (session._submitTimer) { clearTimeout(session._submitTimer); session._submitTimer = null; }
+    if (session._readyFallback) { clearTimeout(session._readyFallback); session._readyFallback = null; }
     cancelAutoResume(session); // #69 — same reasoning, a dead PTY has nothing to resume
     session._inputQueue = null; // a withheld CR dies with its PTY
     if (session.autoCommand && /\bclaude\b/i.test(session.autoCommand)) {
@@ -1543,6 +1640,10 @@ function createSession(id, cwd, name, autoCommand, savedScrollback, claudeSessio
 // replays the last prompt. Wrong agent, real damage.
 function handleHook(session, event, claudeSessionId, prompt, agentId, opts) {
   if (!event) throw new Error('event required');
+  // #147 — a hook arriving is proof the agent is up, and it arrives whether or not
+  // its composer ever printed the marker we watch for. This is what stops a
+  // readiness gate from ever becoming a session that cannot submit.
+  markAgentReadyFromActivity(session);
   const prevStatus = session.status;
   const fromSubagent = !!agentId;
   let notifyType = null, notifyMsg = null;
@@ -1777,7 +1878,15 @@ const rpcHandlers = {
     const agent = agents.isKnownAgent(params.agent) ? params.agent : null;
     createSession(id, cwd, name, autoCommand, null, null, undefined, agent);
     broadcastEvent('sessionCreated', { id, name, cwd, autoCommand, agent });
-    return { id, name, agent };
+    // #147 — readiness travels with the creation answer. The client BUILDS the
+    // session it opens from this response, so a field missing here becomes that
+    // field's default on the client, and `agentReady` defaults to true: without
+    // this the submit gate was open for the whole boot window of a brand-new
+    // session, the exact flow #147 reports. Read off the live session rather
+    // than hardcoded false — a plain shell and any agent with no declared
+    // marker really are ready the moment they exist.
+    const born = sessions.get(id);
+    return { id, name, agent, agentReady: born && born._ready ? born._ready.ready : true };
   },
 
   renameSession: async (params) => {
@@ -1830,6 +1939,7 @@ const rpcHandlers = {
     if (!session) return { ok: true }; // already gone
     if (session.idleTimer) clearTimeout(session.idleTimer);
     if (session._submitTimer) { clearTimeout(session._submitTimer); session._submitTimer = null; }
+    if (session._readyFallback) { clearTimeout(session._readyFallback); session._readyFallback = null; }
     session._inputQueue = null; // a withheld CR dies with its PTY
     cancelAutoResume(session); // #69
     try { session.term.kill(); } catch {}

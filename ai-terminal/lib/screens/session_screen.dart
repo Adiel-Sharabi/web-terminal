@@ -1701,7 +1701,21 @@ class _SessionScreenState extends State<SessionScreen>
       // terminal so Claude's own slash-command menu renders and narrows as you
       // type. The menu lives in the terminal, so switch there to show it —
       // remembering the prior lens so we can hop back once the command is sent.
-      if (!_composeLive && slashStartsLiveStream(text)) {
+      // #147 — do not ENTER live mode while the agent is still booting.
+      //
+      // The first cut of this gated `_streamComposeLive` instead, and that
+      // reintroduced the exact loss #147 exists to prevent: live mode was still
+      // entered, nothing was ever streamed to the PTY, and `_sendCompose`'s live
+      // branch assumes the body already went — so pressing Send delivered a bare
+      // CR and the command silently vanished. Caught in re-review of PR #150.
+      //
+      // Refusing entry keeps the text a NORMAL draft: submit stays blocked until
+      // ready, and then Send delivers the whole line through
+      // buildComposeSubmission. The only thing lost is the live slash MENU
+      // during boot, and the next keystroke after ready re-enters live mode.
+      if (!_composeLive &&
+          (_session?.agentReady ?? true) &&
+          slashStartsLiveStream(text)) {
         _composeLive = true;
         _composeLiveSent = '';
         _liveTabbed = false;
@@ -1738,6 +1752,13 @@ class _SessionScreenState extends State<SessionScreen>
   /// while both merely insert a newline everywhere else — the lens-dependent Enter that
   /// #55 §1 forbids. `_composeLiveSent` holds the same projection, so the diff stays honest.
   void _streamComposeLive(String val) {
+    // #147 — this path writes bytes AS YOU TYPE, so a `/co` typed in the first
+    // seconds would land on bash's command line and the worker would then type
+    // `claude --resume ...` onto that same line, running `/coclaude --resume ...`
+    // and starting no agent at all. It is guarded at the ONE place live mode is
+    // entered (see onChanged), not here: a second gate in a second place is how
+    // the two come to disagree, and gating here alone was measured to lose the
+    // whole command on Send.
     val = composeLiveProjection(val);
     var i = 0;
     final n = _composeLiveSent.length < val.length
@@ -3107,6 +3128,13 @@ class _SessionScreenState extends State<SessionScreen>
               focusNode: _composeFocusNode,
               onSend: _sendCompose,
               isLive: _composeLive,
+              // #147 — a session whose agent is still booting accepts typing but
+              // refuses to SEND: the PTY is still at the shell, so a submit now
+              // is handed to bash and the prompt is lost with no error. Read
+              // straight off the server-published field; `?? true` covers the
+              // moment before the session object has loaded, where refusing
+              // would be a bar that never sends on a session that is fine.
+              agentReady: _session?.agentReady ?? true,
               // #50: when the terminal is the active input target (Terminal lens
               // or a live question overlay), hardware Tab + arrows go straight to
               // the PTY so Claude's TUI (`/status` tabs, menus, questions) is

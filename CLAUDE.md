@@ -370,6 +370,94 @@ Claude fires **no hook** on a user interrupt (`Stop` does not run), and worker s
 ### How to verify (no production cold-restart to test a hypothesis)
 `node scripts/rig/rig.js up` runs a complete, **isolated** web-terminal (port 7999, own worker pipe, own data dir, own config) from the working tree — it cannot touch production. `node scripts/rig/verify-submit.js` proves a LONG prompt actually submits, end to end. **The PTY/rollout is ground truth; the screen lies** — Claude echoes a submitted prompt back into its transcript, so "is the text still visible" cannot distinguish *typed* from *submitted*. The only valid detector is **"did a turn start"**.
 
+### A spawned agent is NOT ready when its session is (#147)
+
+Submit has a precondition the contract above assumed: **the agent has to exist.**
+A new session drops the user into the chat lens seconds before `claude` boots, and
+until its composer is up the PTY is still sitting at the **shell** — so a prompt
+sent in that window is handed to bash, runs as a command or does nothing, and is
+gone with no error anywhere. Reported 2026-08-20 on the phone, the tablet and the
+Windows desktop *at once*, which is what located it as a missing **server** signal
+rather than three client bugs.
+
+Measured with `scripts/rig/probe-claude-ready.js` against claude 2.1.237, verdict
+taken from **"did a turn start"** (the screen cannot tell a typed line from a
+submitted one — that is why this survived):
+
+| | run 1 | run 2 |
+|---|---|---|
+| bash prompt | 3.3s | 3.3s |
+| `claude` typed | 3.7s | 3.7s |
+| **composer caret** | **5.0s** | **6.1s** |
+
+`submit before the caret -> NO turn started, bash printed "command not found"`
+`submit after  the caret -> a turn started`
+
+**That 1.1s spread on ONE machine is the whole argument for a marker over a
+timer.** A timer tuned to the fast boot eats prompts on the slow one; one tuned to
+the slow boot makes every session feel broken.
+
+The marker is a **registry field** (`lib/agents.js` → `readiness.composer`), the
+rule is pure (`lib/agent-ready.js`), and `pty-worker.js` applies it where bytes
+meet the PTY — the same shape as submit and interrupt. **Codex deliberately
+declares none**: its candidate has not been measured against a real boot, and an
+unmeasured marker is exactly what #143 shipped. Undeclared means *ready
+immediately* — today's behaviour, unchanged.
+
+**The scan does not start until the launch command has been written.** Before
+that the PTY is showing the *shell*, and `❯` is the default prompt glyph of
+starship, pure and several oh-my-posh themes — on such a box the latch would flip
+before the agent was even launched and the gate would silently no-op. A session
+with **no** `autoCommand` is never gated at all: it is a shell until you type
+something, and gating it would block the very submit that types `claude`.
+
+**It can never wedge**, because a session stuck on "starting" would be worse than
+the bug: any hook forces it ready; a **45s fallback** (`WT_READY_FALLBACK_MS`)
+forces it if no marker ever arrives, which is the only thing that covers `claude:
+command not found` or a crash on launch; a plain shell and every unknown agent are
+ready from birth; and `server.js`, `POST /api/sessions` and the companion all read
+a missing field as **ready**, so an older worker or an older server never refuses a
+submit. The fallback is a **ceiling, not a detector** — the marker is still the
+signal, and 45s sits far above the measured 5–6s boot so it cannot race a
+slow-but-working start.
+
+> **A restored session is NOT seeded from its scrollback**, and the first cut of
+> this got it backwards. Restore does not reattach anything: it spawns a **fresh
+> shell** and re-runs `claude --resume <id>`, which boots *slower* than a cold
+> start. Seeding from the old scrollback — which still holds the previous life's
+> marker — marked every restored session ready at t=0, so the gate was dead after
+> every cold restart, including the one this change itself needs to deploy.
+
+> **Two known gaps, both recorded rather than guessed at.**
+>
+> 1. The latch is one-way and does not reset when the agent **exits** back to its
+>    shell (`/exit`, Ctrl-D, a crashed TUI). That session keeps reporting ready, so
+>    a later submit reaches bash — #147 again, further along.
+> 2. `❯` is also the default PS1 of starship, pure and some oh-my-posh themes.
+>    Arming after the launch write stops the shell's *first* prompt from counting,
+>    but not one printed straight after a launch that **failed** — there the latch
+>    flips in milliseconds and never reaches the 45s fallback. **Measured
+>    2026-08-20: not live on this fleet** — Git Bash's PS1 ends in `$` and a failed
+>    launch prints `bash: …: command not found`.
+>
+> Both share one honest fix — key on the composer **frame** instead of the bare
+> caret — and one reason it is not done here: that needs a fresh rig measurement
+> of what the frame prints, and an unmeasured marker is what #143 shipped.
+
+The client gates **submit only** — typing is untouched and the text stays in the
+box. It is **not** auto-sent on ready, on purpose: firing a prompt somebody was
+still editing is its own way to lose their words.
+
+The **live `/`-line is gated too**, not just submit. That path writes bytes *as
+you type*, so a `/co` typed in the first seconds landed on bash's command line and
+the worker then typed `claude --resume …` onto the same line — running
+`/coclaude --resume …`, which starts no agent at all. Gating submit alone left a
+failure worse than the one being fixed.
+
+> **Not yet done:** `app.html` is ungated. It keeps no session-state map to hang
+> `agentReady` on, and the report was companion-only — so the web client can still
+> type a prompt into a booting agent.
+
 ## AskUserQuestion — the LAYOUT decides what the keys mean (#19)
 
 Answering Claude's question overlay drives its real TUI selector by writing keys
