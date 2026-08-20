@@ -370,6 +370,56 @@ Claude fires **no hook** on a user interrupt (`Stop` does not run), and worker s
 ### How to verify (no production cold-restart to test a hypothesis)
 `node scripts/rig/rig.js up` runs a complete, **isolated** web-terminal (port 7999, own worker pipe, own data dir, own config) from the working tree — it cannot touch production. `node scripts/rig/verify-submit.js` proves a LONG prompt actually submits, end to end. **The PTY/rollout is ground truth; the screen lies** — Claude echoes a submitted prompt back into its transcript, so "is the text still visible" cannot distinguish *typed* from *submitted*. The only valid detector is **"did a turn start"**.
 
+### A spawned agent is NOT ready when its session is (#147)
+
+Submit has a precondition the contract above assumed: **the agent has to exist.**
+A new session drops the user into the chat lens seconds before `claude` boots, and
+until its composer is up the PTY is still sitting at the **shell** — so a prompt
+sent in that window is handed to bash, runs as a command or does nothing, and is
+gone with no error anywhere. Reported 2026-08-20 on the phone, the tablet and the
+Windows desktop *at once*, which is what located it as a missing **server** signal
+rather than three client bugs.
+
+Measured with `scripts/rig/probe-claude-ready.js` against claude 2.1.237, verdict
+taken from **"did a turn start"** (the screen cannot tell a typed line from a
+submitted one — that is why this survived):
+
+| | run 1 | run 2 |
+|---|---|---|
+| bash prompt | 3.3s | 3.3s |
+| `claude` typed | 3.7s | 3.7s |
+| **composer caret** | **5.0s** | **6.1s** |
+
+`submit before the caret -> NO turn started, bash printed "command not found"`
+`submit after  the caret -> a turn started`
+
+**That 1.1s spread on ONE machine is the whole argument for a marker over a
+timer.** A timer tuned to the fast boot eats prompts on the slow one; one tuned to
+the slow boot makes every session feel broken.
+
+The marker is a **registry field** (`lib/agents.js` → `readiness.composer`), the
+rule is pure (`lib/agent-ready.js`), and `pty-worker.js` applies it where bytes
+meet the PTY — the same shape as submit and interrupt. **Codex deliberately
+declares none**: its candidate has not been measured against a real boot, and an
+unmeasured marker is exactly what #143 shipped. Undeclared means *ready
+immediately* — today's behaviour, unchanged.
+
+**It can never wedge, by four independent routes**, because a session stuck on
+"starting" would be worse than the bug: any hook forces it ready (an agent that
+fired one is up, whatever its screen did); a restored session is seeded from its
+scrollback (an agent running for hours will not reprint its marker); a plain shell
+and every unknown agent are ready from birth; and both `server.js` and the
+companion read a missing field as **ready**, so an older worker or an older server
+never refuses a submit.
+
+The client gates **submit only** — typing is untouched and the text stays in the
+box. It is **not** auto-sent on ready, on purpose: firing a prompt somebody was
+still editing is its own way to lose their words.
+
+> **Not yet done:** `app.html` is ungated. It keeps no session-state map to hang
+> `agentReady` on, and the report was companion-only — so the web client can still
+> type a prompt into a booting agent.
+
 ## AskUserQuestion — the LAYOUT decides what the keys mean (#19)
 
 Answering Claude's question overlay drives its real TUI selector by writing keys

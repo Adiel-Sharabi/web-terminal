@@ -625,4 +625,148 @@ void main() {
     final sendButton = tester.widget<IconButton>(find.byType(IconButton));
     expect(sendButton.onPressed, isNull);
   });
+
+  // #147 — the agent is not up yet, so a submit would go to the SHELL.
+  //
+  // Reported 2026-08-20 on all three companion platforms at once: opening a new
+  // session drops you into the chat lens while `claude` is still booting, so a
+  // prompt typed and sent immediately is handed to bash and lost with no error
+  // anywhere. Measured on the rig (claude 2.1.237): submitted before the
+  // composer marker, NO turn started and bash answered "command not found".
+  //
+  // The gate is SUBMIT only. Typing is untouched, and the text stays in the box
+  // to be sent by the user once the bar lights up — deliberately NOT
+  // auto-submitted on ready, because firing a prompt somebody was still editing
+  // is its own way to lose their words.
+  group('#147 agentReady gates SUBMIT, never typing', () {
+    testWidgets('desktop Enter does NOT submit while the agent is starting', (
+      tester,
+    ) async {
+      debugDefaultTargetPlatformOverride = TargetPlatform.windows;
+      try {
+        var sent = 0;
+        final controller = TextEditingController(text: 'fix the flaky test');
+        final fn = FocusNode();
+        await tester.pumpWidget(
+          _wrap(
+            ComposeBar(
+              controller: controller,
+              focusNode: fn,
+              onSend: () => sent++,
+              isLive: false,
+              agentReady: false,
+            ),
+          ),
+        );
+        fn.requestFocus();
+        await tester.pump();
+        await tester.sendKeyEvent(LogicalKeyboardKey.enter);
+        await tester.pump();
+
+        expect(sent, 0, reason: 'a submit now would be eaten by the shell');
+        expect(
+          controller.text,
+          'fix the flaky test',
+          reason: 'the words must survive — losing them IS the bug',
+        );
+      } finally {
+        debugDefaultTargetPlatformOverride = null;
+      }
+    });
+
+    testWidgets('the Send button is disabled while starting, enabled once ready', (
+      tester,
+    ) async {
+      final controller = TextEditingController(text: 'hello');
+      Widget bar(bool ready) => _wrap(
+        ComposeBar(
+          controller: controller,
+          focusNode: FocusNode(),
+          onSend: () {},
+          isLive: false,
+          agentReady: ready,
+        ),
+      );
+
+      await tester.pumpWidget(bar(false));
+      expect(
+        tester.widget<IconButton>(find.byType(IconButton)).onPressed,
+        isNull,
+      );
+      // A spinner, not a dead arrow: "wait" must not read as "broken".
+      expect(find.byType(CircularProgressIndicator), findsOneWidget);
+
+      await tester.pumpWidget(bar(true));
+      await tester.pump();
+      expect(
+        tester.widget<IconButton>(find.byType(IconButton)).onPressed,
+        isNotNull,
+      );
+      expect(find.byType(CircularProgressIndicator), findsNothing);
+    });
+
+    testWidgets('the bar SAYS why it will not send yet', (tester) async {
+      await tester.pumpWidget(
+        _wrap(
+          ComposeBar(
+            controller: TextEditingController(),
+            focusNode: FocusNode(),
+            onSend: () {},
+            isLive: false,
+            agentReady: false,
+          ),
+        ),
+      );
+      // Saying nothing was the bug: the bar looked ordinary, so the prompt went
+      // to the shell behind the not-yet-started TUI and vanished.
+      expect(find.textContaining('Starting the agent'), findsOneWidget);
+    });
+
+    testWidgets('typing is never blocked while starting', (tester) async {
+      final controller = TextEditingController();
+      await tester.pumpWidget(
+        _wrap(
+          ComposeBar(
+            controller: controller,
+            focusNode: FocusNode(),
+            onSend: () {},
+            isLive: false,
+            agentReady: false,
+          ),
+        ),
+      );
+      await tester.enterText(find.byType(TextField), 'typed while booting');
+      await tester.pump();
+      expect(controller.text, 'typed while booting');
+    });
+
+    testWidgets('agentReady defaults to TRUE — the gate fails OPEN', (
+      tester,
+    ) async {
+      // An older server sends no such field. Reading that as "starting" would
+      // refuse submit on every session it owns — worse than the bug it guards.
+      debugDefaultTargetPlatformOverride = TargetPlatform.windows;
+      try {
+        var sent = 0;
+        final fn = FocusNode();
+        await tester.pumpWidget(
+          _wrap(
+            ComposeBar(
+              controller: TextEditingController(text: 'hi'),
+              focusNode: fn,
+              onSend: () => sent++,
+              isLive: false,
+            ),
+          ),
+        );
+        fn.requestFocus();
+        await tester.pump();
+        await tester.sendKeyEvent(LogicalKeyboardKey.enter);
+        await tester.pump();
+        expect(sent, 1);
+      } finally {
+        debugDefaultTargetPlatformOverride = null;
+      }
+    });
+  });
 }

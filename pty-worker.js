@@ -19,6 +19,8 @@ const agents = require('./lib/agents');
 const { splitTrailingCr, isEscapeKey, endsBracketedPaste } = require('./lib/submit-frames');
 const { endsInAltScreen } = require('./lib/replay-sanitize');
 const { scanOsc9 } = require('./lib/osc9-notify');
+// #147 — the pure readiness latch; the marker itself is a lib/agents.js field.
+const { createReadyDetector } = require('./lib/agent-ready');
 
 const WORKER_VERSION = '0.6.2'; // 0.6.2: a session restored from a scrollback that ends mid-alt-screen (Claude killed while in /tui fullscreen, so ?1049l never arrived) gets a corrective ?1049l appended, instead of stranding xterm in the alt buffer showing a frozen frame over a live shell. Prior 0.6.1: the submit gap is measured against the wire, not the frame.
 
@@ -1013,9 +1015,42 @@ function processPtyOutput(session, buf) {
   session.lastActivity = Date.now();
   detectApiErrorInOutput(session, buf);
   detectStatusNotificationInOutput(session, buf);
+  detectAgentReadyInOutput(session, buf);
   if (session.clientCount > 0) {
     broadcastPtyOut(session, buf);
   }
+}
+
+// --- #147: agent readiness ---------------------------------------------------
+//
+// Only a session whose provider DECLARES a marker waits; everything else is ready
+// the moment it exists (lib/agents.js readinessMarker). The detector is a one-way
+// latch, so this costs one already-true check per chunk for the whole life of a
+// session after the first few seconds.
+function detectAgentReadyInOutput(session, buf) {
+  const d = session._ready;
+  if (!d || d.ready) return;
+  if (!d.push(buf)) return;
+  announceAgentReady(session, 'composer marker');
+}
+
+// The single place readiness becomes true, so every route through it logs and
+// broadcasts identically. `why` names the route, because "the marker never came
+// but a hook did" is the case worth seeing in a log when a CLI changes its UI.
+function announceAgentReady(session, why) {
+  log(`ready: session "${session.name}" agent accepting input (${why})`);
+  session.dirty = true;
+  broadcastEvent('agentReady', { id: sessionIdOf(session), agentReady: true });
+}
+
+// The SAFETY NET. An agent that fired a hook is self-evidently up, whatever its
+// screen did — so a marker that changes in a future CLI release degrades to
+// "ready late", never to "ready never". Called from handleHook, which every hook
+// and every in-band status notification already funnels through.
+function markAgentReadyFromActivity(session) {
+  const d = session._ready;
+  if (!d || d.ready) return;
+  if (d.force()) announceAgentReady(session, 'agent activity');
 }
 
 // --- In-band status for agents without usable hooks (Codex) ----------------
@@ -1306,6 +1341,11 @@ function sessionSummary(id, s) {
     // #69 — surfaced for tests and a future "resumes in Xh" UI. null unless a source
     // (Codex's transcript today) reported a 5h reset time via setFiveHResetAt.
     fiveHResetAt: s.fiveHResetAt || null,
+    // #147 — can this session receive a prompt yet? A session whose agent declares
+    // no marker (a plain shell, an unknown agent) is ready from birth, and a missing
+    // detector reads as ready too: the gate must fail OPEN, because a client that
+    // wrongly believes a live session is starting can never submit to it again.
+    agentReady: s._ready ? s._ready.ready : true,
   };
 }
 
@@ -1434,6 +1474,15 @@ function createSession(id, cwd, name, autoCommand, savedScrollback, claudeSessio
   };
   sessions.set(id, session);
 
+  // #147 — a freshly spawned agent cannot receive a prompt until its composer
+  // exists; until then the PTY is still sitting at the shell, and anything sent
+  // is handed to bash. SEEDED FROM RESTORED SCROLLBACK on purpose: a session
+  // coming back after a worker restart has had its agent running for hours and
+  // will not reprint the marker, so waiting for a fresh one would leave it
+  // "starting" forever — the one state #147 says must not exist.
+  session._ready = createReadyDetector(agents.readinessMarker(sessionAgent(session)));
+  if (scrollback.chunks.length > 0) session._ready.push(concatScrollback(scrollback));
+
   term.onData((data) => {
     // Issue #13: normalize PTY output to Buffer once here so the rest of the
     // worker (scrollback chunks, broadcastPtyOut) operates on Buffers.
@@ -1543,6 +1592,10 @@ function createSession(id, cwd, name, autoCommand, savedScrollback, claudeSessio
 // replays the last prompt. Wrong agent, real damage.
 function handleHook(session, event, claudeSessionId, prompt, agentId, opts) {
   if (!event) throw new Error('event required');
+  // #147 — a hook arriving is proof the agent is up, and it arrives whether or not
+  // its composer ever printed the marker we watch for. This is what stops a
+  // readiness gate from ever becoming a session that cannot submit.
+  markAgentReadyFromActivity(session);
   const prevStatus = session.status;
   const fromSubagent = !!agentId;
   let notifyType = null, notifyMsg = null;

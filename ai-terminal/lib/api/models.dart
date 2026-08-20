@@ -192,6 +192,20 @@ class Session {
   /// agent; this carries the work.
   final List<String> backgroundTasks;
 
+  /// Whether this session's agent CLI is up and able to receive a prompt (#147).
+  ///
+  /// A new session drops you into the chat lens seconds before `claude` has
+  /// booted; until then the PTY is still at the shell, and a prompt sent in that
+  /// window is handed to BASH and lost with no error anywhere. Server-derived
+  /// (`pty-worker.js` watches the composer marker declared in `lib/agents.js`)
+  /// and never re-derived here — measured on the rig, the marker appeared at 5.0s
+  /// on one run and 6.1s on the next, so no client-side timer is right.
+  ///
+  /// Defaults to TRUE, which is the deliberate failure mode: an older server
+  /// sends no such field, and reading that as "starting" would refuse submit on
+  /// every session it owns.
+  final bool agentReady;
+
   /// What this session is blocked on: `'question'`, `'permission'`, or `null`
   /// when it is not blocked at all (#79).
   ///
@@ -230,6 +244,7 @@ class Session {
     this.compactingSince,
     this.backgroundTasks = const <String>[],
     this.waitingFor,
+    this.agentReady = true,
   });
 
   /// This session with a different pinned rank (#124), for the optimistic half of
@@ -258,6 +273,7 @@ class Session {
     compactingSince: compactingSince,
     backgroundTasks: backgroundTasks,
     waitingFor: waitingFor,
+    agentReady: agentReady,
   );
 
   /// Builds a [Session] from one element of the `GET /api/sessions` array,
@@ -285,6 +301,8 @@ class Session {
       // banner simply never shows, rather than the lens guessing from `status`
       // and disagreeing with a server that knows better.
       waitingFor: _waitingFor(json['waitingFor']),
+      // Absent -> ready. See the field doc: the gate must fail OPEN.
+      agentReady: json['agentReady'] != false,
     );
   }
 

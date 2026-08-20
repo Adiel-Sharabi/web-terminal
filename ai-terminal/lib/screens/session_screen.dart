@@ -3107,6 +3107,13 @@ class _SessionScreenState extends State<SessionScreen>
               focusNode: _composeFocusNode,
               onSend: _sendCompose,
               isLive: _composeLive,
+              // #147 — a session whose agent is still booting accepts typing but
+              // refuses to SEND: the PTY is still at the shell, so a submit now
+              // is handed to bash and the prompt is lost with no error. Read
+              // straight off the server-published field; `?? true` covers the
+              // moment before the session object has loaded, where refusing
+              // would be a bar that never sends on a session that is fine.
+              agentReady: _session?.agentReady ?? true,
               // #50: when the terminal is the active input target (Terminal lens
               // or a live question overlay), hardware Tab + arrows go straight to
               // the PTY so Claude's TUI (`/status` tabs, menus, questions) is
