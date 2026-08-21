@@ -158,6 +158,30 @@ test.describe('Cluster API', () => {
     const local = data.servers.find(s => s.url === null);
     expect(local).toBeTruthy();
     expect(local.online).toBe(true);
+
+    // #152 — the local entry always carries a well-formed `resources` object (never
+    // omitted for the local server — only a REMOTE peer can be "unknown"), and this
+    // server advertises the capability so a client can tell "too old to report" apart
+    // from a genuine 0%.
+    expect(Array.isArray(local.capabilities)).toBe(true);
+    expect(local.capabilities).toContain('resources');
+    expect(local.resources).toBeTruthy();
+    expect(typeof local.resources.windowMs).toBe('number');
+    expect(local.resources.windowMs).toBeGreaterThan(0);
+    expect(typeof local.resources.ts).toBe('number');
+    // cpuPct is null until the warm sampler's second tick lands — either shape is valid,
+    // but it must never be a fabricated value outside [0, 100].
+    expect(local.resources.cpuPct === null ||
+      (typeof local.resources.cpuPct === 'number' && local.resources.cpuPct >= 0 && local.resources.cpuPct <= 100)
+    ).toBe(true);
+    expect(local.resources.memory).toBeTruthy();
+    expect(typeof local.resources.memory.totalBytes).toBe('number');
+    expect(local.resources.memory.totalBytes).toBeGreaterThan(0);
+    expect(typeof local.resources.memory.usedBytes).toBe('number');
+    expect(local.resources.memory.usedPct === null ||
+      (typeof local.resources.memory.usedPct === 'number' && local.resources.memory.usedPct >= 0 && local.resources.memory.usedPct <= 100)
+    ).toBe(true);
+
     await ctx.dispose();
   });
 

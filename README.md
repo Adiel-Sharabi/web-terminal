@@ -75,8 +75,9 @@ that filters out the parts nobody wants spoken.
 **Mobile & PWA** — installable, with a compose bar built for soft keyboards, a touch
 toolbar, long-press menus, and reconnect the instant you return to the app.
 
-**Cluster** — merge several servers into one sidebar; optional direct-terminal mode skips
-the proxy hop for a large latency win.
+**Cluster** — merge several servers into one sidebar, each showing its own CPU and
+memory so you can pick where to work; optional direct-terminal mode skips the proxy
+hop for a large latency win.
 
 **Companion app** — a native Android + Windows client with the chat lens and push that
 works while the app is closed.
