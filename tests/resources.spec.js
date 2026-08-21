@@ -135,3 +135,25 @@ test.describe('sanitizeResources', () => {
     expect(Object.keys(out).sort()).toEqual(['cpuPct', 'memory', 'ts', 'windowMs']);
   });
 });
+
+// --- cross-field validation of a PEER's memory reading -----------------------
+// Each field below is individually well-formed; only the RELATIONSHIP between two
+// of them is impossible. A per-field validator passes this, which is exactly why
+// the guard has to be cross-field.
+test.describe('sanitizeResources — cross-field memory sanity', () => {
+  const ok = { cpuPct: 12, windowMs: 5000, ts: 1, memory: { usedBytes: 4, totalBytes: 8, usedPct: 50 } };
+
+  test('a well-formed reading still passes', () => {
+    expect(sanitizeResources(ok)).toEqual(ok);
+  });
+
+  test('used memory greater than total is rejected wholesale', () => {
+    const bad = { ...ok, memory: { usedBytes: 1e300, totalBytes: 1, usedPct: 3 } };
+    expect(sanitizeResources(bad)).toBeNull();
+  });
+
+  test('used exactly equal to total is legitimate (a full machine)', () => {
+    const full = { ...ok, memory: { usedBytes: 8, totalBytes: 8, usedPct: 100 } };
+    expect(sanitizeResources(full)).toEqual(full);
+  });
+});
