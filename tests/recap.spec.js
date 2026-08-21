@@ -21,12 +21,13 @@ const asst = (text, toolUses = [], ts = null) => ({ role: 'assistant', text, too
 const tool = (name) => ({ name, id: 't' + name, inputPreview: '{}', input: {} });
 
 // --- real injection wrappers -------------------------------------------------
-// A slash command surfaces as two DISJOINT real shapes (measured across 519
-// transcripts / 1998 user turns) — never fused into one turn the way this file
-// used to fuse them: a trio led by <command-name> (what a bare command like
-// `/compact` itself writes) and a <local-command-caveat>-led turn carrying no
-// trio at all (what the command's own stdout produces). Mirrors the same split
-// in tests/user-turn.spec.js's TRIO_NAME_FIRST / CAVEAT_LEAD.
+// A slash command surfaces as two DISJOINT real shapes — never fused into one
+// turn the way this file used to fuse them: a trio led by <command-name> (what
+// a bare command like `/compact` itself writes) and a <local-command-caveat>-led
+// turn carrying no trio at all (what the command's own stdout produces).
+// The counts behind that live with the rule they justify, in lib/user-turn.js —
+// restating them here is how one fact becomes two that drift. Mirrors the same
+// split in tests/user-turn.spec.js's TRIO_NAME_FIRST / CAVEAT_LEAD.
 const SLASH_COMPACT = [
   '<command-name>/compact</command-name>',
   '<command-message>compact</command-message>',
