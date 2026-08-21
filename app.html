@@ -99,6 +99,14 @@
     .srv-usage .u-warn { color: #da4; }
     .srv-usage .u-hot { color: #e94560; }
     .srv-usage .u-age { margin-left: auto; opacity: .7; font-style: italic; }
+    /* #152 — per-server CPU/memory (the per-server slice only; no per-session or
+       web-terminal-footprint numbers yet — see the issue). Same layout as .srv-usage
+       above, deliberately with no warn/hot colour tier: plain factual text, the
+       badge/threshold treatment is explicitly undecided and left for later. */
+    .srv-resources { flex-basis: 100%; display: flex; align-items: center; gap: 5px; margin: 1px 0 3px 16px;
+                 font-size: 9px; font-weight: 500; letter-spacing: 0; text-transform: none; color: #55617a; }
+    .srv-resources .u-agent { font-weight: 700; opacity: .85; }
+    .srv-resources .u-sep { opacity: .4; }
     .sb-item.dragging { opacity: 0.4; }
     .sb-item.drop-above { border-top: 2px solid #00d4aa; }
     .sb-item.drop-below { border-bottom: 2px solid #00d4aa; }
@@ -2871,6 +2879,36 @@
       }
       return html;
     }
+    // #152 — machine-wide CPU%/memory for a SERVER header row (the per-server slice
+    // only — see the issue for the per-session and web-terminal-footprint slices,
+    // deliberately not built here).
+    //
+    // `server.resources` is absent for a peer too old to report (the `resources`
+    // capability check below) and for an offline row; a present-but-still-warming
+    // local sampler reports `cpuPct: null` for its first ~5s after boot. Either way
+    // this renders nothing rather than a fabricated 0% — same rule as usageHtml.
+    // Plain factual text only, no colour/threshold treatment (explicitly deferred).
+    function fmtGiB(bytes) {
+      return (bytes / (1024 * 1024 * 1024)).toFixed(1) + 'G';
+    }
+    function resourcesHtml(server) {
+      const r = server && server.resources;
+      if (!r || !server.online) return '';
+      // Peer must ADVERTISE the capability, not just carry a `resources` key — an older
+      // peer's proxy hop could echo a stale/foreign field, and a naive presence check
+      // can't tell that apart from a real report (same reasoning as favoritesSupported above).
+      if (!Array.isArray(server.capabilities) || !server.capabilities.includes('resources')) return '';
+      const cpu = r.cpuPct == null ? 'CPU —' : `CPU ${r.cpuPct}%`;
+      const mem = r.memory && r.memory.usedPct != null
+        ? `MEM ${r.memory.usedPct}% (${fmtGiB(r.memory.usedBytes)}/${fmtGiB(r.memory.totalBytes)})`
+        : 'MEM —';
+      const windowSec = Math.round((r.windowMs || 0) / 1000);
+      return `<div class="srv-resources" title="Machine-wide CPU and memory${windowSec ? ` — CPU averaged over the last ${windowSec}s` : ''}">`
+        + `<span class="u-agent">${esc(cpu)}</span>`
+        + `<span class="u-sep">&middot;</span>`
+        + `<span class="u-agent">${esc(mem)}</span>`
+        + `</div>`;
+    }
     // --- AI agents (GET /api/agents) -----------------------------------------
     // The server's provider registry is the SSOT: the picker options and the
     // per-agent tint both come from it, so adding a CLI agent server-side needs no
@@ -3239,6 +3277,7 @@
         // below the name + actions (insertAdjacentHTML, not `innerHTML +=`: the latter
         // re-parses the header and would drop the buttons' click listeners above).
         header.insertAdjacentHTML('beforeend', usageHtml(server));
+        header.insertAdjacentHTML('beforeend', resourcesHtml(server));
         // Click anywhere on the header (except action buttons) toggles collapse.
         header.addEventListener('click', (e) => {
           if (e.target.closest('.srv-auth')) return;
