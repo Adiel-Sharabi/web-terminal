@@ -10,11 +10,16 @@
 //     LNK1120: 1 unresolved external
 //
 // `__std_find_first_of_trivial_pos_1` is an INTERNAL MSVC STL helper — the
-// vectorised back end of `std::string::find_first_of`. It was added in MSVC
-// Build Tools **14.51**, which ships with the **VS 2026** toolset line. It is
-// NOT in any VS 2022 update, so "update Visual Studio 2022" does not fix this;
-// the installed 14.43.34808 `libcpmt.lib` contains zero occurrences of it
-// (verified by grep), while carrying the older `__std_find_trivial_*` family.
+// vectorised back end of `std::string::find_first_of`. Per the microsoft/STL
+// changelog it arrives in MSVC Build Tools 14.51, the VS 2026 toolset line, so
+// no VS 2022 update supplies it and "update Visual Studio 2022" is not the fix.
+// That last part is sourced, not locally verified — what IS locally verified is
+// the part the fix rests on: the installed 14.43.34808 `libcpmt.lib` contains
+// zero occurrences of the symbol (`dumpbin /symbols`), while carrying both the
+// `__std_find_first_of_trivial_*` family WITHOUT the `_pos_` infix and
+// `__std_find_last_of_trivial_pos_*` WITH it. That asymmetry is the local
+// evidence: the `_pos_` fast path reached `find_last_of` first, `find_first_of`
+// later.
 //
 // Firebase ships PREBUILT Windows libraries. From Firebase C++ SDK 12.7.0 on
 // (pinned by firebase_core >= 3.13.0; we are on 4.11.0 -> SDK 13.5.0) those
@@ -30,10 +35,19 @@
 // packages), all needing hard pins so `pub upgrade` cannot walk forward. That
 // trades a year of Android push security fixes for a Windows link error.
 //
-// And Windows NEVER USES FIREBASE AT ALL: `main.dart` gates
+// And Windows never reaches the Firebase API: `main.dart` gates
 // `Firebase.initializeApp()` behind `pushSupported`
-// (`Platform.isAndroid || Platform.isIOS`). firebase_core merely REGISTERS as
-// a Windows plugin, which is enough to drag firebase_app.lib into the link.
+// (`Platform.isAndroid || Platform.isIOS`), so no Dart call arrives.
+//
+// Be precise about how far that goes, because it is tempting to call the shim
+// dead code and stop thinking: the plugin IS still registered on every Windows
+// launch — `generated_plugin_registrant.cc` calls
+// `FirebaseCorePluginCApiRegisterWithRegistrar` unconditionally — and that
+// registration alone is what drags firebase_app.lib into the link. So this shim
+// is not PROVABLY unreachable at runtime; it is only unreachable through any
+// Firebase feature the platform exposes. It is therefore written to be correct
+// on its own terms, not written to rely on never being called.
+//
 // The defect is a native-link artifact of a feature this platform never runs,
 // so the fix belongs at the link step — not in the dependency graph.
 //
@@ -67,6 +81,15 @@
 //      computed (`lea rsi,[rdx+rbp]`) but never reaches an argument register;
 //      it feeds only the short-input scalar fallback. So the parameters are
 //      (ptr, count, ptr, count), NOT a pair of iterator ranges.
+//
+//   3. Strongest of the three, and it needs no disassembly at all: this
+//      function's already-shipping MIRROR is declared in the INSTALLED headers.
+//      `__msvc_string_view.hpp` declares
+//      `__std_find_last_of_trivial_pos_1(const void* _Haystack,
+//       size_t _Haystack_length, const void* _Needle, size_t _Needle_length)`
+//      and its caller `_Traits_find_last_of` returns the result with no
+//      adjustment — the same (ptr, count, ptr, count) -> index-or-SIZE_MAX
+//      contract, stated by Microsoft's own header rather than inferred by us.
 //
 // Return contract, from the same call site: `cmp rax,0FFFFFFFFFFFFFFFFh` then
 // `lea rcx,[r15+rax]` / `cmove rcx,rax` — the caller adds the original `pos`
