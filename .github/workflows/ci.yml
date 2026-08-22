@@ -87,3 +87,62 @@ jobs:
           name: playwright-report
           path: playwright-report/
           retention-days: 7
+
+  companion-windows:
+    name: Companion (Windows desktop link)
+    # WHY THIS JOB EXISTS
+    #
+    # The Windows desktop build broke on ~2026-08-06 and nobody noticed until
+    # 2026-08-22, because NOTHING built it. `flutter test` (in pr-checks.yml)
+    # compiles Dart and never invokes MSVC, so it cannot see a NATIVE link
+    # failure — and the failure was exactly that: firebase_core drags a prebuilt
+    # firebase_app.lib into the link, and from Firebase C++ SDK 12.7.0 on those
+    # binaries call MSVC STL helpers that older toolsets do not export (#158).
+    #
+    # A Dart-only gate is structurally blind to that whole class of fault. This
+    # job is the smallest thing that is not: it performs the real link.
+    #
+    # It deliberately does NOT run the app or build the APK. Android is covered
+    # by `flutter test` plus the fact that the Play/adb path is exercised on
+    # every release; the uncovered surface was specifically the native link, so
+    # that is what this gates.
+    #
+    # Same public-repo guard as the suite above: windows-latest bills 2x
+    # minutes, so on a private repo this skips with zero runner cost.
+    if: ${{ github.event.repository.private == false }}
+    runs-on: windows-latest
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v7
+
+      - name: Set up Flutter
+        uses: subosito/flutter-action@v2
+        with:
+          channel: stable
+          cache: true
+
+      - name: Seed the gitignored spike_config
+        # lib/spike_config.dart holds server URLs and bearer tokens, so it is
+        # gitignored — a FRESH CLONE cannot compile the companion without this.
+        # Same step as the Dart suite in pr-checks.yml; `cp` is a Copy-Item
+        # alias under the pwsh default shell on windows-latest.
+        working-directory: ai-terminal
+        run: cp lib/spike_config.example.dart lib/spike_config.dart
+
+      - name: Build the Windows desktop release
+        # The link step is the point of the whole job. A compile-only check
+        # would pass against the very defect this exists to catch.
+        working-directory: ai-terminal
+        run: flutter build windows --release
+
+      - name: Prove the executable was actually produced
+        # `flutter build` has exited 0 while producing no binary before now, so
+        # assert on the artifact rather than on the exit code.
+        working-directory: ai-terminal
+        run: |
+          if (-not (Test-Path 'build/windows/x64/runner/Release/ai_terminal.exe')) {
+            Write-Error 'ai_terminal.exe was not produced despite a zero exit code'
+            exit 1
+          }
+          Get-Item 'build/windows/x64/runner/Release/ai_terminal.exe' | Select-Object Name, Length, LastWriteTime
