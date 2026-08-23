@@ -22,6 +22,7 @@ import '../theme/app_theme.dart';
 import '../theme/status_colors.dart';
 import 'attention_chip.dart';
 import 'format_utils.dart';
+import 'resource_stats.dart';
 import 'server_badge.dart';
 import 'status_dot.dart';
 
@@ -237,6 +238,17 @@ class SessionCard extends StatelessWidget {
                         ),
                       ),
                     ],
+                    // #152 level 3 — this session's own CPU and memory, summed
+                    // over its WHOLE process tree (the agent runs several levels
+                    // below the shell pid the session reports, so the pid's own
+                    // numbers are about a megabyte and say nothing). Beside the
+                    // other capacity figures because it measures the same kind of
+                    // thing; renders nothing at all unless the resources view is
+                    // on, because the number behind it costs a process query.
+                    SessionResourceChip(
+                      baseUrl: session.server.baseUrl,
+                      sessionId: session.id,
+                    ),
                     // A background command still running. It outlives the turn
                     // that launched it, so the dot beside it is honestly idle
                     // while a build is going — green alone reads as "nothing is

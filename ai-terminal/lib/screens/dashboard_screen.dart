@@ -28,6 +28,7 @@ import '../services/app_config.dart';
 import '../services/server_store.dart';
 import '../services/cluster_discovery.dart';
 import '../services/favorites_service.dart';
+import '../services/resource_monitor.dart';
 import '../services/session_repository.dart';
 import '../theme/app_theme.dart';
 import '../theme/status_colors.dart';
@@ -39,6 +40,7 @@ import '../widgets/new_session_sheet.dart';
 import '../widgets/offline_banner.dart';
 import '../widgets/recap_sheet.dart';
 import '../widgets/session_action_sheet.dart';
+import '../widgets/resource_stats.dart';
 import '../widgets/session_card.dart';
 import '../widgets/status_dot.dart';
 import 'session_screen.dart';
@@ -80,6 +82,10 @@ class _DashboardScreenState extends State<DashboardScreen> {
     super.initState();
     _loadCollapsed();
     _loadAgentCatalog();
+    // #152 — restore the remembered resources view. With it off (the default)
+    // this starts no timer and issues no request: the readings cost a process
+    // query on every server, so nothing is asked for until someone looks.
+    unawaited(ResourceMonitor.instance.restore(AppConfig.servers));
     unawaited(_migrateFavoritesOnce());
   }
 
@@ -370,6 +376,10 @@ class _DashboardScreenState extends State<DashboardScreen> {
       initialData: AppConfig.servers,
       builder: (context, serverSnapshot) {
         final servers = serverSnapshot.data ?? const <ServerConfig>[];
+        // Keep the resources poll aimed at the CURRENT server list — cluster
+        // discovery can add a peer after the view is already running. Cheap and
+        // notifies nothing, so it is safe on the build path.
+        ResourceMonitor.instance.updateServers(servers);
         return Scaffold(
           body: RefreshIndicator(
             // #97: a pull also re-checks the cluster, so a server added on ANY
@@ -401,6 +411,26 @@ class _DashboardScreenState extends State<DashboardScreen> {
                         // The running build's version (issue #40) — muted, so
                         // the deployed build is identifiable at a glance.
                         const AppVersionBadge(),
+                        // #152 — CPU/memory per server and per session. A
+                        // toggle rather than always-on because each refresh
+                        // costs every server a whole-machine process query;
+                        // the choice is remembered per device.
+                        ListenableBuilder(
+                          listenable: ResourceMonitor.instance,
+                          builder: (context, _) {
+                            final on = ResourceMonitor.instance.enabled;
+                            return IconButton(
+                              icon: Icon(on ? Icons.memory : Icons.memory_outlined),
+                              color: on ? Theme.of(context).colorScheme.primary : null,
+                              tooltip: on
+                                  ? 'Hide CPU / memory (stops polling for it)'
+                                  : 'Show CPU / memory per server and session',
+                              onPressed: () => unawaited(
+                                ResourceMonitor.instance.setEnabled(!on),
+                              ),
+                            );
+                          },
+                        ),
                         IconButton(
                           icon: const Icon(Icons.settings_outlined),
                           tooltip: 'Settings',
@@ -480,6 +510,7 @@ class _DashboardScreenState extends State<DashboardScreen> {
                           SliverToBoxAdapter(
                             child: _ServerGroupHeader(
                               name: group.server.name,
+                              baseUrl: group.server.baseUrl,
                               count: group.sessions.length,
                               online:
                                   online[group.server.baseUrl] ?? true,
@@ -619,6 +650,7 @@ List<ServerGroup> groupSessionsByServer(
 class _ServerGroupHeader extends StatelessWidget {
   const _ServerGroupHeader({
     required this.name,
+    required this.baseUrl,
     required this.count,
     required this.online,
     required this.collapsed,
@@ -626,6 +658,10 @@ class _ServerGroupHeader extends StatelessWidget {
   });
 
   final String name;
+
+  /// Keys this server's resource reading (#152). The name is a display label
+  /// and two servers may share one; the base URL is the identity.
+  final String baseUrl;
   final int count;
   final bool online;
   final bool collapsed;
@@ -643,7 +679,10 @@ class _ServerGroupHeader extends StatelessWidget {
           AppSpacing.screenPadding,
           4,
         ),
-        child: Row(
+        child: Column(
+          crossAxisAlignment: CrossAxisAlignment.stretch,
+          children: [
+            Row(
           children: [
             ServerStatusDot(
               status: online ? ServerStatus.online : ServerStatus.offline,
@@ -669,6 +708,13 @@ class _ServerGroupHeader extends StatelessWidget {
               size: 18,
               color: theme.colorScheme.onSurfaceVariant,
             ),
+          ],
+        ),
+            // #152 levels 1 and 2 — the box's own load, and what web-terminal
+            // costs on it. Under the name rather than beside it: the answer to
+            // "start it here or there" is read while scanning servers, and it is
+            // too long to share the row. Renders nothing while the view is off.
+            ServerResourceLine(baseUrl: baseUrl),
           ],
         ),
       ),

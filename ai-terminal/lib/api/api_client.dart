@@ -178,6 +178,36 @@ class ApiClient {
     return ServerInfo.fromJson(_asMap(_decode(res)));
   }
 
+  /// Reads this server's CPU/memory detail (`GET /api/resources`, #152).
+  ///
+  /// Three levels in one answer: the machine, web-terminal's own footprint on
+  /// it, and a reading per live session. It is deliberately NOT part of the
+  /// session poll — the server has to run a whole-machine process query
+  /// (~370 ms) to answer, so it is fetched only while a resources view is
+  /// actually being looked at.
+  ///
+  /// Returns `null` rather than throwing on any failure — an unreachable
+  /// server, a malformed body, or a server too old to have the endpoint. The
+  /// caller renders `null` as "unknown", which is the honest reading in all
+  /// three cases; a thrown exception here would only turn a missing number
+  /// into a broken screen.
+  Future<ServerResources?> resources() async {
+    try {
+      // Its own, longer deadline. The server's worst case here is not the usual one:
+      // a cold cache costs a settle delay plus TWO whole-machine process queries, and
+      // on a loaded box that can pass ten seconds. Timing out under the server's own
+      // worst case would leave the view permanently unknown on exactly the busiest
+      // machine — the one it exists to identify — while the server kept paying for
+      // work nobody ever read. Overlapping polls are already dropped by
+      // ResourceMonitor, so a long wait here stacks nothing up.
+      final res = await _send('GET', '/api/resources',
+          timeout: const Duration(seconds: 25));
+      return ServerResources.fromJson(_asMap(_decode(res)));
+    } catch (_) {
+      return null;
+    }
+  }
+
   /// Reads this server's runtime defaults (`GET /api/config`).
   ///
   /// Only the [ServerRuntimeConfig] subset is surfaced; auth/cluster/tuning keys
@@ -636,7 +666,10 @@ class ApiClient {
     Object? body,
     Map<String, String>? query,
     Map<String, String>? extraHeaders,
+    Duration? timeout,
   }) async {
+    // Per-call deadline, defaulting to the shared one. Only /api/resources sets it.
+    final deadline = timeout ?? _timeout;
     var uri = Uri.parse('${server.baseUrl}$path');
     if (query != null) uri = uri.replace(queryParameters: query);
     final headers = <String, String>{
@@ -649,19 +682,19 @@ class ApiClient {
       final http.Response res;
       switch (method) {
         case 'GET':
-          res = await _http.get(uri, headers: headers).timeout(_timeout);
+          res = await _http.get(uri, headers: headers).timeout(deadline);
         case 'POST':
           res = await _http
               .post(uri, headers: headers, body: payload)
-              .timeout(_timeout);
+              .timeout(deadline);
         case 'PATCH':
           res = await _http
               .patch(uri, headers: headers, body: payload)
-              .timeout(_timeout);
+              .timeout(deadline);
         case 'DELETE':
           res = await _http
               .delete(uri, headers: headers, body: payload)
-              .timeout(_timeout);
+              .timeout(deadline);
         default:
           throw ApiException(0, 'Unsupported method $method');
       }

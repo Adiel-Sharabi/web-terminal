@@ -16,6 +16,7 @@ import 'services/notification_service.dart';
 import 'services/push_service.dart';
 import 'services/server_store.dart';
 import 'services/cluster_discovery.dart';
+import 'services/resource_monitor.dart';
 import 'services/session_repository.dart';
 import 'services/session_selection.dart';
 import 'theme/app_theme.dart';
@@ -190,9 +191,13 @@ class _AiTerminalAppState extends State<AiTerminalApp>
     switch (state) {
       case AppLifecycleState.resumed:
         SessionRepository.instance.startForeground();
+        // #152 — the load view polls a process query out of every server; a
+        // backgrounded app has no screen showing it, so it must not keep paying.
+        ResourceMonitor.instance.startForeground();
       case AppLifecycleState.paused:
       case AppLifecycleState.detached:
         SessionRepository.instance.stopForeground();
+        ResourceMonitor.instance.stopForeground();
       case AppLifecycleState.inactive:
       case AppLifecycleState.hidden:
         break;
