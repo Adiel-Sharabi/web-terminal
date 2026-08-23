@@ -116,6 +116,9 @@ module.exports = [
         // browser context the spec runs in, it is not a way to silence a typo.
         ws: 'readonly',
         clusterServers: 'readonly',
+        // #152 — the two pure render helpers the resources specs call directly.
+        esc: 'readonly',
+        resourcesHtml: 'readonly',
         switchSession: 'readonly',
         showNotification: 'readonly',
         attentionSessions: 'readonly',

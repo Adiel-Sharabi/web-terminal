@@ -50,6 +50,32 @@ Color usageColor(ThemeData theme, int pct, {required bool weekly}) {
   return theme.colorScheme.primary;
 }
 
+/// A byte count for a glance: `1.4 GB`, `683 MB`, or `—` when unknown (#152).
+///
+/// Deliberately coarse. These figures come from a sampled process tree and are
+/// used to answer "which box, which session" — three decimal places would
+/// suggest a precision the sampling does not have. `null` renders as a dash and
+/// never as `0`, because a blank reading and an idle one are different facts.
+String formatBytesShort(int? bytes) {
+  if (bytes == null || bytes < 0) return '—';
+  const gb = 1024 * 1024 * 1024;
+  const mb = 1024 * 1024;
+  if (bytes >= gb) return '${(bytes / gb).toStringAsFixed(1)} GB';
+  if (bytes >= mb) return '${(bytes / mb).round()} MB';
+  return '${(bytes / 1024).round()} KB';
+}
+
+/// A percentage for a glance: `18%`, `0.4%` below 10, or `—` when unknown.
+/// Sub-1% detail is kept because an agent sitting at 0.4% and one at 0% are
+/// different, and rounding the first to `0%` would say the session is doing
+/// nothing at all.
+String formatPctShort(num? pct) {
+  if (pct == null) return '—';
+  if (pct >= 10) return '${pct.round()}%';
+  final oneDp = (pct * 10).round() / 10;
+  return oneDp == oneDp.roundToDouble() ? '${oneDp.round()}%' : '$oneDp%';
+}
+
 /// Relative time per spec §2: `<60s "just now"; <1h "Nm ago"; <24h "Nh ago";
 /// else "Nd ago"`. [epochMs] is milliseconds since epoch (as returned by the
 /// API); `null` renders as `'—'`.

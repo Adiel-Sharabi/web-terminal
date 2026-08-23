@@ -398,7 +398,17 @@
       if (me) document.getElementById('viewers').textContent = `${me.clients} viewer${me.clients !== 1 ? 's' : ''}`;
     }
 
-    function esc(s) { const d = document.createElement('div'); d.textContent = s; return d.innerHTML; }
+    // Same rule as app.html's, and the same reason: the textContent -> innerHTML round
+    // trip is the HTML TEXT-NODE serializer, so it escapes & < > and leaves quotes intact
+    // — safe in a text node, an injection point in an attribute. This page's only call
+    // site is a text node today, so it is not exploitable here; it is fixed because a
+    // second copy of an escaping rule that DOESN'T match the hardened one is how the next
+    // attribute interpolation on this page becomes a hole nobody notices.
+    function esc(s) {
+      return (s === null ? '' : String(s))
+        .replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;')
+        .replace(/"/g, '&quot;').replace(/'/g, '&#39;');
+    }
 
     // Refresh sidebar + viewer count every 5s
     setInterval(async () => {

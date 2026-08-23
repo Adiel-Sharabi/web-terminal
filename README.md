@@ -79,6 +79,12 @@ toolbar, long-press menus, and reconnect the instant you return to the app.
 memory so you can pick where to work; optional direct-terminal mode skips the proxy
 hop for a large latency win.
 
+**Load view** — switch it on (the chart button in the web sidebar, the memory button in
+the companion) and every server reports what web-terminal itself is costing there and
+what each individual session is costing, so "which box, which session" is answered from
+the list instead of by guessing. It is off by default and polls nothing until switched
+on, because each reading costs the server a whole-machine process query.
+
 **Companion app** — a native Android + Windows client with the chat lens and push that
 works while the app is closed.
 

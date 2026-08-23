@@ -743,6 +743,181 @@ class CompactingInfo {
   String toString() => 'CompactingInfo(active=$active, since=$since)';
 }
 
+/// One process tree's cost — a session's, or web-terminal's own (`#152`
+/// levels 2 and 3, `GET /api/resources`).
+///
+/// **Every field is nullable on purpose.** A blank reading and an idle one are
+/// different facts, and the server goes to real trouble to keep them apart: a
+/// CPU figure needs two process snapshots to divide, so before the second one
+/// exists there is no honest number to report. Rendering `null` as `0%` would
+/// make the least-measurable server look like the emptiest one — which is
+/// precisely the wrong place to start new work.
+/// Caps a server-supplied image name. It reaches a tooltip and a label only, so
+/// there is nothing to inject — but nothing on the wire bounds its length, and
+/// every other externally-supplied string in this app is capped.
+String? _clampName(Object? v) {
+  if (v is! String) return null;
+  return v.length > 48 ? '${v.substring(0, 48)}…' : v;
+}
+
+class ResourceReading {
+  /// Share of the WHOLE machine (100 = every core saturated), averaged over
+  /// [ServerResources.windowMs]. Not per-core: a single-threaded agent on a
+  /// 20-core box reads ~5%, not 100%.
+  final double? cpuPct;
+
+  /// Resident memory summed across every process in the tree.
+  final int? rssBytes;
+
+  /// How many processes the tree holds — a session is `bash → bash → claude →
+  /// its children`, so this is routinely 6 and can be 50 during a build.
+  final int procCount;
+
+  /// Image name of the largest process in the tree, so "700 MB" has a culprit.
+  final String? topName;
+
+  const ResourceReading({
+    this.cpuPct,
+    this.rssBytes,
+    this.procCount = 0,
+    this.topName,
+  });
+
+  /// Parses one reading. Defensive by design — a malformed field yields `null`
+  /// (unknown) rather than a number the UI would present as fact.
+  factory ResourceReading.fromJson(Map<String, dynamic> json) {
+    return ResourceReading(
+      cpuPct: _num(json['cpuPct'])?.toDouble(),
+      rssBytes: _num(json['rssBytes'])?.toInt(),
+      procCount: _num(json['procCount'])?.toInt() ?? 0,
+      topName: _clampName(json['topName']),
+    );
+  }
+
+  @override
+  String toString() =>
+      'ResourceReading(cpu=$cpuPct, rss=$rssBytes, n=$procCount, top=$topName)';
+}
+
+/// The box itself: CPU utilisation and memory (`#152` level 1).
+///
+/// This is the cheap half — the server samples it on its own timer, so it is
+/// present even when the per-process query below could not run.
+class MachineResources {
+  /// Machine-wide utilisation over [windowMs], or `null` while the server's
+  /// sampler is still warming (it needs two ticks before it can subtract).
+  final int? cpuPct;
+  final int? memUsedBytes;
+  final int? memTotalBytes;
+  final int? memUsedPct;
+  final int windowMs;
+
+  const MachineResources({
+    this.cpuPct,
+    this.memUsedBytes,
+    this.memTotalBytes,
+    this.memUsedPct,
+    this.windowMs = 0,
+  });
+
+  factory MachineResources.fromJson(Map<String, dynamic> json) {
+    final mem = json['memory'];
+    final m = mem is Map<String, dynamic> ? mem : const <String, dynamic>{};
+    return MachineResources(
+      cpuPct: _num(json['cpuPct'])?.toInt(),
+      memUsedBytes: _num(m['usedBytes'])?.toInt(),
+      memTotalBytes: _num(m['totalBytes'])?.toInt(),
+      memUsedPct: _num(m['usedPct'])?.toInt(),
+      windowMs: _num(json['windowMs'])?.toInt() ?? 0,
+    );
+  }
+
+  @override
+  String toString() => 'MachineResources(cpu=$cpuPct%, mem=$memUsedPct%)';
+}
+
+/// One server's answer to `GET /api/resources`: the box, web-terminal's own
+/// footprint on it, and a reading per live session.
+///
+/// [samplingOk] is the field that matters most. It is the ONLY way to tell
+/// "this server cannot measure processes" apart from "this server is idle" —
+/// when it is false the per-tree numbers are absent rather than zero, and the
+/// UI must say so rather than draw an empty bar.
+class ServerResources {
+  final MachineResources? machine;
+  final bool samplingOk;
+
+  /// Why sampling failed (`timeout`, `unsupported-platform`, …). Shown in a
+  /// tooltip so an unexplained dash is never the whole story.
+  final String? samplingReason;
+
+  /// The window the per-tree CPU figures are averaged over.
+  final int windowMs;
+
+  /// monitor + worker + web + every session below them, as one tree. What is
+  /// left over between this and [machine] is something else on the box —
+  /// which is the whole point of measuring it separately.
+  final ResourceReading? webTerminal;
+
+  /// Session id → its reading. A key present with a `null` value means the
+  /// session exists but has no process tree (its shell exited); a key that is
+  /// absent was never measured.
+  final Map<String, ResourceReading?> sessions;
+
+  /// Number of logical CPUs, so a CPU share can be explained in a tooltip.
+  final int cpuCount;
+
+  const ServerResources({
+    this.machine,
+    this.samplingOk = false,
+    this.samplingReason,
+    this.windowMs = 0,
+    this.webTerminal,
+    this.sessions = const <String, ResourceReading?>{},
+    this.cpuCount = 0,
+  });
+
+  factory ServerResources.fromJson(Map<String, dynamic> json) {
+    final sampling = json['sampling'];
+    final s = sampling is Map<String, dynamic> ? sampling : const <String, dynamic>{};
+    final ok = s['ok'] == true;
+    final rawSessions = json['sessions'];
+    final sessions = <String, ResourceReading?>{};
+    if (rawSessions is Map) {
+      rawSessions.forEach((key, value) {
+        sessions[key.toString()] = value is Map<String, dynamic>
+            ? ResourceReading.fromJson(value)
+            : null;
+      });
+    }
+    final machine = json['machine'];
+    final wt = json['webTerminal'];
+    return ServerResources(
+      machine: machine is Map<String, dynamic>
+          ? MachineResources.fromJson(machine)
+          : null,
+      samplingOk: ok,
+      samplingReason: s['reason'] is String ? s['reason'] as String : null,
+      windowMs: _num(s['windowMs'])?.toInt() ?? 0,
+      webTerminal: wt is Map<String, dynamic> ? ResourceReading.fromJson(wt) : null,
+      sessions: sessions,
+      cpuCount: _num(json['cpuCount'])?.toInt() ?? 0,
+    );
+  }
+
+  /// The reading for [sessionId]: `null` when unknown OR when the session has
+  /// no tree. The caller cannot tell those apart and does not need to — both
+  /// render as "unknown", never as zero.
+  ResourceReading? forSession(String sessionId) => sessions[sessionId];
+
+  @override
+  String toString() =>
+      'ServerResources(ok=$samplingOk, wt=$webTerminal, n=${sessions.length})';
+}
+
+/// A JSON number that might arrive as `int`, `double`, or not at all.
+num? _num(Object? v) => v is num ? v : null;
+
 /// The `GET /api/version` response used for per-server feature gating and the
 /// resolved display name.
 class ServerInfo {

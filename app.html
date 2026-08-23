@@ -107,6 +107,18 @@
                  font-size: 9px; font-weight: 500; letter-spacing: 0; text-transform: none; color: #55617a; }
     .srv-resources .u-agent { font-weight: 700; opacity: .85; }
     .srv-resources .u-sep { opacity: .4; }
+    /* #152 levels 2/3 — web-terminal's own footprint, and one badge per session row.
+       Both are filled in place by applyResourceDom() and are EMPTY unless the resources
+       view is switched on, so `:empty { display: none }` is what makes the whole feature
+       cost nothing (and occupy nothing) when nobody is looking at it. */
+    .srv-resources .u-wt:empty { display: none; }
+    /* A container that exists ONLY to carry that slot (a server with no machine
+       reading) collapses with it, rather than leaving a blank line under the name. */
+    .srv-resources.wt-only:has(.u-wt:empty) { display: none; }
+    .sb-res { font-size: 10px; color: #7a8699; font-variant-numeric: tabular-nums;
+              background: rgba(122,134,153,0.12); border-radius: 3px; padding: 0 4px; }
+    .sb-res:empty { display: none; }
+    #loadBtn.on { color: #00d4aa; opacity: 1; }
     .sb-item.dragging { opacity: 0.4; }
     .sb-item.drop-above { border-top: 2px solid #00d4aa; }
     .sb-item.drop-below { border-bottom: 2px solid #00d4aa; }
@@ -500,6 +512,7 @@
       <div class="sb-section">
         <span>Sessions</span>
         <button id="pinBtn" onclick="togglePin()" title="Pin sidebar open" style="font-size:14px;opacity:0.5">&#x1F4CC;</button>
+        <button id="loadBtn" onclick="toggleResourceView()" title="Show CPU / memory per server and per session" style="font-size:14px;opacity:0.5">&#x1F4CA;</button>
         <button onclick="toggleNewForm()">+ New</button>
       </div>
       <div id="newSessionForm">
@@ -2892,23 +2905,187 @@
       return (bytes / (1024 * 1024 * 1024)).toFixed(1) + 'G';
     }
     function resourcesHtml(server) {
-      const r = server && server.resources;
-      if (!r || !server.online) return '';
+      if (!server || !server.online) return '';
+      const caps = Array.isArray(server.capabilities) ? server.capabilities : [];
       // Peer must ADVERTISE the capability, not just carry a `resources` key — an older
       // peer's proxy hop could echo a stale/foreign field, and a naive presence check
       // can't tell that apart from a real report (same reasoning as favoritesSupported above).
-      if (!Array.isArray(server.capabilities) || !server.capabilities.includes('resources')) return '';
-      const cpu = r.cpuPct == null ? 'CPU —' : `CPU ${r.cpuPct}%`;
-      const mem = r.memory && r.memory.usedPct != null
+      const r = caps.includes('resources') ? server.resources : null;
+      // The level-2 slot needs somewhere to live even when level 1 says nothing. Those are
+      // separate readings from separate places — the machine figure rides the session poll
+      // and can be absent (still warming, or rejected by sanitizeResources) on a server
+      // that answers /api/resources perfectly well. Returning '' on the strength of the
+      // machine reading alone left the footprint with no anchor, so it rendered NOWHERE on
+      // exactly those servers: silently blank, while the per-session badges on the rows
+      // below kept working. `wt-only` collapses the row again while the slot is empty.
+      if (!r && !caps.includes('session-resources')) return '';
+      const cpu = !r ? '' : (r.cpuPct == null ? 'CPU —' : `CPU ${r.cpuPct}%`);
+      const mem = !r ? '' : (r.memory && r.memory.usedPct != null
         ? `MEM ${r.memory.usedPct}% (${fmtGiB(r.memory.usedBytes)}/${fmtGiB(r.memory.totalBytes)})`
-        : 'MEM —';
-      const windowSec = Math.round((r.windowMs || 0) / 1000);
-      return `<div class="srv-resources" title="Machine-wide CPU and memory${windowSec ? ` — CPU averaged over the last ${windowSec}s` : ''}">`
-        + `<span class="u-agent">${esc(cpu)}</span>`
-        + `<span class="u-sep">&middot;</span>`
-        + `<span class="u-agent">${esc(mem)}</span>`
+        : 'MEM —');
+      const windowSec = Math.round(((r && r.windowMs) || 0) / 1000);
+      return `<div class="srv-resources${r ? '' : ' wt-only'}" title="Machine-wide CPU and memory${windowSec ? ` — CPU averaged over the last ${windowSec}s` : ''}">`
+        + (r ? `<span class="u-agent">${esc(cpu)}</span>`
+             + `<span class="u-sep">&middot;</span>`
+             + `<span class="u-agent">${esc(mem)}</span>` : '')
+        // #152 level 2 — filled in place by applyResourceDom(), empty (and hidden) while
+        // the resources view is off, because the number behind it costs a process query.
+        + `<span class="u-wt" data-server-url="${esc(server.url || '')}"></span>`
         + `</div>`;
     }
+    // --- #152 levels 2/3: the resources view ---------------------------------
+    // OFF by default and remembered per browser. While it is ON, each server is asked
+    // GET /api/resources on its own poll; while it is OFF nothing is requested at all.
+    // That is the entire cost control: the answer needs a whole-machine process query
+    // (~370 ms of PowerShell) on every server, so it must never ride the session poll,
+    // which runs continuously across the cluster whether or not anyone is looking.
+    let resourceView = false;
+    try { resourceView = localStorage.getItem('wtResourceView') === '1'; } catch (e) {}
+    const resourceData = new Map(); // serverKey -> report | { error: true }
+    let resourceTimer = null, resourceInFlight = false;
+    const RESOURCE_POLL_MS = 6000;
+
+    function serverKeyOf(url) { return url || '__local__'; }
+
+    // Deliberately coarse: this is a "which box, which session" judgement, and a byte
+    // count to three decimal places invites a precision the sampling does not have.
+    function fmtBytes(b) {
+      if (typeof b !== 'number' || !isFinite(b) || b < 0) return '\u2014';
+      const GB = 1024 * 1024 * 1024;
+      return b >= GB ? (b / GB).toFixed(1) + 'G' : Math.round(b / (1024 * 1024)) + 'M';
+    }
+    // An em dash, never "0%". A blank reading and an idle one are different facts, and
+    // rendering them alike is what would send someone to the wrong server.
+    function fmtPct(v) { return (typeof v === 'number' && isFinite(v)) ? v + '%' : '\u2014'; }
+
+    function resourceReportFor(serverUrl) { return resourceData.get(serverKeyOf(serverUrl)); }
+
+    /** The per-session badge text, and its tooltip. '' means "render nothing". */
+    function sessionResourceText(s) {
+      if (!resourceView) return ['', ''];
+      const rep = resourceReportFor(s.serverUrl);
+      if (!rep) return ['', ''];
+      if (rep.error) return ['\u2014', 'This server could not be asked for resource detail'];
+      if (!rep.sampling || !rep.sampling.ok) {
+        return ['\u2014', `This server cannot measure processes (${(rep.sampling && rep.sampling.reason) || 'unavailable'})`];
+      }
+      const r = rep.sessions && Object.prototype.hasOwnProperty.call(rep.sessions, s.id) ? rep.sessions[s.id] : undefined;
+      if (r === undefined) return ['', ''];
+      if (r === null) return ['\u2014', 'No process tree for this session (its shell has exited)'];
+      const win = Math.round((rep.sampling.windowMs || 0) / 1000) || 1;
+      const tip = `CPU ${fmtPct(r.cpuPct)} of the whole machine, averaged over ${win}s\n`
+        + `Memory ${fmtBytes(r.rssBytes)} across ${r.procCount} process${r.procCount === 1 ? '' : 'es'}`
+        + (r.topName ? `\nLargest: ${clampName(r.topName)}` : '');
+      return [`${fmtPct(r.cpuPct)} \u00b7 ${fmtBytes(r.rssBytes)}`, tip];
+    }
+
+    // A peer supplies `topName` and nothing on the wire bounds it. It only ever reaches
+    // `.title`/`textContent`, so there is no injection here — but every other peer-facing
+    // string in this codebase is capped, and a megabyte image name would still ruin the
+    // tooltip it lands in.
+    function clampName(n) {
+      const t = String(n == null ? '' : n);
+      return t.length > 48 ? t.slice(0, 48) + '…' : t;
+    }
+
+    /** web-terminal's own footprint on one server, as a trailing fragment of the header. */
+    function footprintText(serverUrl) {
+      if (!resourceView) return ['', ''];
+      const rep = resourceReportFor(serverUrl);
+      if (!rep) return ['', ''];
+      if (rep.error) return ['\u00b7 WT \u2014', 'This server could not be asked for resource detail'];
+      if (!rep.sampling || !rep.sampling.ok) {
+        return ['\u00b7 WT \u2014', `Cannot measure processes (${(rep.sampling && rep.sampling.reason) || 'unavailable'})`];
+      }
+      const wt = rep.webTerminal;
+      if (!wt) return ['\u00b7 WT \u2014', 'web-terminal\'s own tree could not be resolved'];
+      const win = Math.round((rep.sampling.windowMs || 0) / 1000) || 1;
+      return [
+        `\u00b7 WT ${fmtPct(wt.cpuPct)} \u00b7 ${fmtBytes(wt.rssBytes)}`,
+        `web-terminal itself (monitor + worker + web + every session below them):\n`
+          + `CPU ${fmtPct(wt.cpuPct)} of the machine over ${win}s, ${fmtBytes(wt.rssBytes)} across ${wt.procCount} processes\n`
+          + `The rest of this box's load is something else.`,
+      ];
+    }
+
+    /** Fill the placeholders the sidebar already rendered. No re-render, so a drag,
+        an open menu or a focused field is never interrupted by a resources refresh. */
+    function applyResourceDom() {
+      // Keyed `data-res-id`, NOT `data-session-id`: every existing lookup in this file
+      // is `.sb-item[data-session-id=...]` (an element-level match on the ROW), and a
+      // span carrying the same attribute is a collision waiting for the first selector
+      // that drops the `.sb-item` prefix.
+      document.querySelectorAll('#sidebarList .sb-res[data-res-id]').forEach((el) => {
+        const [text, tip] = sessionResourceText({ id: el.dataset.resId, serverUrl: el.dataset.serverUrl || '' });
+        el.textContent = text;
+        if (tip) el.title = tip; else el.removeAttribute('title');
+      });
+      document.querySelectorAll('#sidebarList .srv-resources .u-wt').forEach((el) => {
+        const [text, tip] = footprintText(el.dataset.serverUrl || '');
+        el.textContent = text;
+        if (tip) el.title = tip; else el.removeAttribute('title');
+      });
+    }
+
+    async function fetchResources() {
+      if (!resourceView || resourceInFlight || document.hidden) return;
+      resourceInFlight = true;
+      try {
+        await Promise.all((clusterServers || []).map(async (srv) => {
+          const key = serverKeyOf(srv.url);
+          // Gate on the ADVERTISED capability, not on trying and seeing: a peer too old
+          // to answer would 404, and a 404 that reaches the user as a blank badge is
+          // indistinguishable from a peer that is idle.
+          if (!srv.online || !Array.isArray(srv.capabilities) || !srv.capabilities.includes('session-resources')) {
+            resourceData.delete(key);
+            return;
+          }
+          // A peer is reached through the EXISTING generic cluster proxy — this view adds
+          // no fan-out of its own (#152 hint 3).
+          const base = srv.url ? `/cluster/${encodeURIComponent(srv.url)}/api` : '/api';
+          try {
+            const r = await fetch(base + '/resources');
+            if (!r.ok) throw new Error('HTTP ' + r.status);
+            resourceData.set(key, await r.json());
+          } catch (e) {
+            // A server that did not answer reports UNKNOWN. Leaving the previous reading
+            // in place would be worse: it would age silently into a confident lie.
+            resourceData.set(key, { error: true });
+          }
+        }));
+      } finally {
+        resourceInFlight = false;
+      }
+      applyResourceDom();
+    }
+
+    function updateResourceBtn() {
+      const btn = document.getElementById('loadBtn');
+      if (!btn) return;
+      btn.classList.toggle('on', resourceView);
+      btn.style.opacity = resourceView ? '1' : '0.5';
+      btn.title = resourceView
+        ? 'Hide CPU / memory (stops polling every server for it)'
+        : 'Show CPU / memory per server and per session';
+    }
+
+    function startResourceLoop() {
+      if (resourceTimer) clearInterval(resourceTimer);
+      resourceTimer = null;
+      if (!resourceView) return;
+      fetchResources();
+      resourceTimer = setInterval(fetchResources, RESOURCE_POLL_MS);
+    }
+
+    function toggleResourceView() {
+      resourceView = !resourceView;
+      try { localStorage.setItem('wtResourceView', resourceView ? '1' : '0'); } catch (e) {}
+      updateResourceBtn();
+      if (!resourceView) resourceData.clear();
+      applyResourceDom();
+      startResourceLoop();
+    }
+
     // --- AI agents (GET /api/agents) -----------------------------------------
     // The server's provider registry is the SSOT: the picker options and the
     // per-agent tint both come from it, so adding a CLI agent server-side needs no
@@ -3193,7 +3370,20 @@
       return `${Math.floor(secs/86400)}d ago`;
     };
 
-    function esc(s) { const d = document.createElement('div'); d.textContent = s; return d.innerHTML; }
+    // Escapes for BOTH text and attribute contexts. The old implementation round-tripped
+    // through `div.textContent` -> `innerHTML`, which is the HTML *text-node* serializer:
+    // it escapes & < > and nothing else, so quotes came through intact. That is safe in a
+    // text node and unsafe in an attribute, and this file interpolates esc() into eleven
+    // attributes carrying peer- and transcript-derived strings (session ids, server urls,
+    // author names, project paths) - any one of which could close the attribute and open
+    // an event handler. Fixed here rather than at the call sites so every caller, present
+    // and future, is covered: escaping quotes changes nothing for text, where the browser
+    // decodes the entity straight back.
+    function esc(s) {
+      return (s === null ? '' : String(s))
+        .replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;')
+        .replace(/"/g, '&quot;').replace(/'/g, '&#39;');
+    }
 
     // The last payload from /api/cluster/sessions. It is the render's input, so a
     // favorite/rank write can flip the field on the session object and re-render
@@ -3242,6 +3432,11 @@
       // Pinned favorites across all servers — the flag + rank come from the server
       // that owns each session (#60), so the group is identical on every device.
       renderFavoritesGroup(container, data);
+
+      // The sidebar re-renders on every poll, which wipes the placeholders; refill them
+      // from the last reading rather than leaving them blank until the next resources
+      // fetch (a badge that blinks out twice a minute reads as a bug).
+      setTimeout(applyResourceDom, 0);
 
       // Group sessions by server
       for (const server of data.servers) {
@@ -3321,6 +3516,10 @@
               agentBadge(s) +
               ctxBadge(s) +
               modelBadge(s) +
+              // #152 level 3 — this session's own CPU/memory. Placed with the other
+              // capacity chips because it measures the same kind of thing; empty unless
+              // the resources view is on.
+              `<span class="sb-res" data-res-id="${esc(s.id)}" data-server-url="${esc(s.serverUrl || '')}"></span>` +
               `<button class="sb-bell nl-${lvl}" title="Notifications: ${NOTIFY_BELL[lvl].label} — click to change">${NOTIFY_BELL[lvl].icon}</button>` +
               starHtml(s) +
               `<button class="sb-recap" title="Recap: last prompt + what it's been doing">&#128172;</button>` +
@@ -3644,6 +3843,9 @@
             bgBadge(s) +
             ctxBadge(s) +
             modelBadge(s) +
+            // #152 — the pinned group renders the same sessions a second time, so it
+            // needs the same placeholder or a favourite is the one row with no number.
+            `<span class="sb-res" data-res-id="${esc(s.id)}" data-server-url="${esc(s.serverUrl || '')}"></span>` +
             starHtml(s) +
             `<button class="sb-recap" title="Recap: last prompt + what it's been doing">&#128172;</button>` +
           `</div>`;
@@ -4769,6 +4971,10 @@
     }
 
     init();
+    // #152 — restore the remembered resources view. Deliberately after init(): with the
+    // view off this does nothing at all, which is the default.
+    updateResourceBtn();
+    startResourceLoop();
   </script>
 </body>
 </html>
