@@ -1,6 +1,7 @@
 import 'dart:async';
 
 import 'package:flutter/foundation.dart';
+import 'package:http/http.dart' as http;
 import 'package:shared_preferences/shared_preferences.dart';
 
 import '../api/api_client.dart';
@@ -47,6 +48,17 @@ class ResourceMonitor extends ChangeNotifier {
   Timer? _timer;
   bool _inFlight = false;
   List<ServerConfig> _servers = const <ServerConfig>[];
+
+  /// Bumped whenever the readings we are collecting stop being wanted — the view is
+  /// switched off, or the app goes to the background. A refresh captures it before its
+  /// first await and abandons its results if it changed, so an answer that arrives after
+  /// the map was deliberately emptied cannot quietly refill it.
+  int _generation = 0;
+
+  /// Test seam: supplies the HTTP client each poll uses, so a test can hold a request
+  /// open and drive the toggle underneath it. Null in production.
+  @visibleForTesting
+  http.Client Function()? httpClientFactory;
 
   final Map<String, ServerResources?> _byBaseUrl = <String, ServerResources?>{};
 
@@ -97,6 +109,7 @@ class ResourceMonitor extends ChangeNotifier {
       // A preference that could not be saved is not a reason to refuse the
       // toggle — the view still works for this run.
     }
+    _generation++;
     if (value) {
       _start();
     } else {
@@ -116,9 +129,17 @@ class ResourceMonitor extends ChangeNotifier {
 
   /// Stop polling while the app is backgrounded. [enabled] is untouched, so the
   /// view is still on when the user returns — it simply costs nothing meanwhile.
+  ///
+  /// The readings are dropped as well. A phone comes back out of a pocket an hour
+  /// later, and rendering the numbers from before it went in would be the same
+  /// confident lie a frozen reading always is — with nothing on screen to reveal
+  /// the age. [startForeground] refreshes immediately, so the gap is one round trip.
   void stopForeground() {
     _foreground = false;
+    _generation++;
     _stop();
+    _byBaseUrl.clear();
+    notifyListeners();
   }
 
   void _start() {
@@ -138,6 +159,9 @@ class ResourceMonitor extends ChangeNotifier {
   /// than queued — a slow server must not stack up requests behind itself.
   Future<void> refresh() async {
     if (!_enabled || _inFlight) return;
+    // Captured BEFORE the first await: everything below is answered by servers over the
+    // network, and the user can switch the view off in the middle of it.
+    final gen = _generation;
     _inFlight = true;
     try {
       await Future.wait(_servers.map((server) async {
@@ -153,10 +177,16 @@ class ResourceMonitor extends ChangeNotifier {
         // readout that goes blank because a single box is unreachable.
         ServerResources? report;
         try {
-          report = await ApiClient(server).resources();
+          report = await ApiClient(server, httpClient: httpClientFactory?.call())
+              .resources();
         } catch (_) {
           report = null;
         }
+        // Nobody is waiting for this any more — the view was switched off, or the app
+        // was backgrounded, and the map was emptied on purpose. Writing here would
+        // refill it invisibly (no notify fires while disabled), and the numbers would
+        // reappear as if current the moment the view came back on.
+        if (gen != _generation) return;
         // A null is "unknown", explicitly. Overwriting rather than keeping the
         // previous reading is deliberate: stale numbers here are worse than none.
         _byBaseUrl[server.baseUrl] = report;
@@ -164,7 +194,7 @@ class ResourceMonitor extends ChangeNotifier {
     } finally {
       _inFlight = false;
     }
-    if (_enabled) notifyListeners();
+    if (_enabled && gen == _generation) notifyListeners();
   }
 
   /// Test seam — forget everything, including the restored preference.
@@ -176,6 +206,8 @@ class ResourceMonitor extends ChangeNotifier {
     _inFlight = false;
     _servers = const <ServerConfig>[];
     _foreground = true;
+    _generation++;
+    httpClientFactory = null;
     _byBaseUrl.clear();
   }
 

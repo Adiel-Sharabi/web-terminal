@@ -1,9 +1,14 @@
+import 'dart:async';
+import 'dart:convert';
+
 import 'package:ai_terminal/api/models.dart';
 import 'package:ai_terminal/services/resource_monitor.dart';
 import 'package:ai_terminal/widgets/format_utils.dart';
 import 'package:ai_terminal/widgets/resource_stats.dart';
 import 'package:flutter/material.dart';
 import 'package:flutter_test/flutter_test.dart';
+import 'package:http/http.dart' as http;
+import 'package:http/testing.dart';
 
 /// #152 levels 1-3 in the companion: parsing `GET /api/resources`, and the two
 /// readouts built from it.
@@ -247,6 +252,62 @@ void main() {
       expect(ResourceMonitor.instance.enabled, isTrue);
       ResourceMonitor.instance.startForeground();
       expect(ResourceMonitor.instance.enabled, isTrue);
+    });
+
+    const server = ServerConfig(name: 's', baseUrl: 'http://s', bearerToken: 't');
+
+    test('a reading that arrives after the view is switched off is discarded', () async {
+      // The race: a poll is in flight (up to 25s against a slow server), the user
+      // switches the view off, the map is emptied — and then the answer lands and
+      // refills it. Nothing renders, because notify is skipped while disabled, so the
+      // numbers sit there invisibly and are painted as CURRENT the moment the view is
+      // switched back on, however many hours later. That is precisely the frozen
+      // reading the clear-on-disable exists to prevent.
+      final gate = Completer<void>();
+      final m = ResourceMonitor.instance;
+      m.httpClientFactory = () => MockClient((_) async {
+            await gate.future;
+            return http.Response(jsonEncode(okBody(sessionReading: {
+              'cpuPct': 15.0, 'rssBytes': 756273152, 'procCount': 9, 'topName': 'claude.exe',
+            })), 200);
+          });
+      m.seedForTests('http://s', null);
+      m.updateServers(const [server]);
+      final polling = m.refresh();
+      await m.setEnabled(false);
+      gate.complete();
+      await polling;
+      expect(m['http://s'], isNull);
+      expect(m.reading('http://s', 'alive'), isNull);
+    });
+
+    test('backgrounding drops the readings — an hour later they are not "current"', () {
+      final m = ResourceMonitor.instance;
+      m.seedForTests('http://s', ServerResources.fromJson(okBody()));
+      expect(m['http://s'], isNotNull);
+      m.stopForeground();
+      expect(m['http://s'], isNull);
+      // Still ON — the view returns with the app, it just holds no stale numbers.
+      expect(m.enabled, isTrue);
+    });
+
+    test('one unreachable server does not blank the rest of the fleet', () async {
+      // Future.wait fails the WHOLE wait on the first error, which would discard every
+      // other server's answer and skip the notify.
+      final m = ResourceMonitor.instance;
+      m.httpClientFactory = () => MockClient((req) async {
+            if (req.url.host == 'bad') throw Exception('unreachable');
+            return http.Response(jsonEncode(okBody()), 200);
+          });
+      m.seedForTests('http://good', null);
+      m.updateServers(const [
+        ServerConfig(name: 'good', baseUrl: 'http://good', bearerToken: 't'),
+        ServerConfig(name: 'bad', baseUrl: 'http://bad', bearerToken: 't'),
+      ]);
+      await m.refresh();
+      expect(m['http://good'], isNotNull);
+      expect(m['http://good']!.machine!.cpuPct, 18);
+      expect(m['http://bad'], isNull);
     });
 
     test('reading() yields null when sampling failed, so no caller can see a 0', () {

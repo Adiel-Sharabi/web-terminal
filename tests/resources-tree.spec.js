@@ -3,7 +3,7 @@ const { test, expect } = require('@playwright/test');
 const {
   parseSnapshotOutput, rollUpTree, resolveRuntimeRoot, shapeReport, descendantsOf,
   sessionRootNames, snapshot, snapshotPair, _setQueryForTests, _peekCacheForTests,
-  _resetForTests, MIN_PAIR_GAP_MS, RUNTIME_ROOT_KEY,
+  _resetForTests, MIN_PAIR_GAP_MS, PAIR_SETTLE_MS, RUNTIME_ROOT_KEY,
 } = require('../lib/process-tree');
 
 // #152 levels 2 and 3 — what web-terminal itself costs and what each session costs.
@@ -313,6 +313,21 @@ test.describe('#152 pid reuse cannot be mistaken for continuity', () => {
     expect(rollUpTree([], next, 100, { elapsedMs: 1000, cpuCount: 4, rootNames: names }).rssBytes).toBe(7);
     expect(names.has('bash.exe')).toBe(true);
   });
+
+  test('the configured shell is recognised through a WINDOWS path', () => {
+    // The branch that matters on the machines this runs on, and the one a forward-slash
+    // fixture cannot cover: narrow the split to `/` and this box's own configured shell
+    // stops being recognised, so every session reads unknown — forever, and silently.
+    const win = sessionRootNames('C:' + String.fromCharCode(92) + 'tools' +
+      String.fromCharCode(92) + 'bin' + String.fromCharCode(92) + 'Fish.exe');
+    expect(win.has('fish.exe')).toBe(true);
+    // And the real default this fleet actually runs.
+    const git = sessionRootNames('C:' + String.fromCharCode(92) + 'Program Files' +
+      String.fromCharCode(92) + 'Git' + String.fromCharCode(92) + 'bin' +
+      String.fromCharCode(92) + 'bash.exe');
+    expect(git.has('bash.exe')).toBe(true);
+    expect(git.has('c:')).toBe(false);
+  });
 });
 
 test.describe('#152 the snapshot cache and the pair it hands out', () => {
@@ -349,6 +364,33 @@ test.describe('#152 the snapshot cache and the pair it hands out', () => {
     _setQueryForTests(async () => rows(1));
     expect(await snapshotPair({ settleMs: 30 })).toBeNull();
     expect(30).toBeLessThan(MIN_PAIR_GAP_MS);
+  });
+
+  test('the SHIPPED settle default produces a usable pair — the cold path is not dead', async () => {
+    // The gate this exists to be. Every other test here passes `settleMs` explicitly, so
+    // lowering PAIR_SETTLE_MS below the floor would leave the whole suite green while
+    // levels 2 and 3 returned null on every freshly started server — and the API spec
+    // would SKIP rather than fail, because its guard reads `sampling.ok`, which is
+    // exactly the symptom. A feature that dies silently everywhere must cost a red test.
+    expect(PAIR_SETTLE_MS).toBeGreaterThanOrEqual(MIN_PAIR_GAP_MS);
+    _setQueryForTests(async () => rows(1));
+    const pair = await snapshotPair();               // no settleMs: the shipped path
+    expect(pair).not.toBeNull();
+    expect(pair.nextAt - pair.prevAt).toBeGreaterThanOrEqual(MIN_PAIR_GAP_MS);
+  });
+
+  test('a query landing mid-settle cannot narrow the window any more', async () => {
+    // The older half is captured BEFORE the sleep. Read back from the cache afterwards, a
+    // concurrent snapshot() — the session list takes one per session — became `prev` and
+    // the gap collapsed to one query duration, so the reading was thrown away and the user
+    // saw an intermittent dash with nothing to explain it.
+    _setQueryForTests(async () => rows(1));
+    const settling = snapshotPair({ settleMs: MIN_PAIR_GAP_MS + 250 });
+    await new Promise((r) => setTimeout(r, 120));
+    await snapshot(Date.now(), { maxAgeMs: 0 });     // a third party, mid-settle
+    const pair = await settling;
+    expect(pair).not.toBeNull();
+    expect(pair.nextAt - pair.prevAt).toBeGreaterThanOrEqual(MIN_PAIR_GAP_MS);
   });
 
   test('a settled pair wide enough to divide IS returned', async () => {

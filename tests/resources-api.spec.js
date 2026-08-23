@@ -19,6 +19,31 @@ function expectReadingShape(r) {
   expect(r.topName === null || typeof r.topName === 'string').toBe(true);
 }
 
+/**
+ * Read the endpoint until sampling settles, then INSIST on it where it must work.
+ *
+ * The trap this replaces: every test here used to open with
+ * `test.skip(!body.sampling.ok, ...)`. `sampling.ok === false` is the symptom of the
+ * feature being broken, so skipping on it means any change that disables levels 2 and 3
+ * on every server — lowering the settle window below the floor, breaking the shell-name
+ * derivation, a bad pair guard — leaves the whole suite GREEN. Skip on the PLATFORM,
+ * which is a fact about the runner, and fail on the symptom, which is a fact about us.
+ * The retry is for a genuinely cold cache, not for a persistent failure.
+ */
+async function sampledBody(ctx, tries = 6) {
+  let body;
+  for (let i = 0; i < tries; i++) {
+    body = await (await ctx.get('/api/resources')).json();
+    if (body.sampling.ok) return body;
+    await new Promise((r) => setTimeout(r, 700));
+  }
+  test.skip(process.platform !== 'win32',
+    `process sampling is Windows-only here (${body.sampling.reason})`);
+  expect(body.sampling.ok,
+    `sampling never succeeded on Windows after ${tries} tries: ${body.sampling.reason}`).toBe(true);
+  return body;
+}
+
 test.describe('GET /api/resources', () => {
   test('requires auth', async () => {
     const ctx = await noAuthCtx();
@@ -57,8 +82,7 @@ test.describe('GET /api/resources', () => {
 
   test('reports web-terminal\'s own footprint when sampling works', async () => {
     const ctx = await authCtx();
-    const body = await (await ctx.get('/api/resources')).json();
-    test.skip(!body.sampling.ok, `process sampling unavailable here: ${body.sampling.reason}`);
+    const body = await sampledBody(ctx);
 
     expectReadingShape(body.webTerminal);
     // The server answering this request is itself inside that tree, so on a box that can
@@ -75,8 +99,7 @@ test.describe('GET /api/resources', () => {
     expect(created.ok()).toBeTruthy();
     const session = await created.json();
     try {
-      const body = await (await ctx.get('/api/resources')).json();
-      test.skip(!body.sampling.ok, `process sampling unavailable here: ${body.sampling.reason}`);
+      const body = await sampledBody(ctx);
 
       // Present because it has a pid — its VALUE may still be null if the shell exited
       // between the two reads, which is exactly why null is a legal reading.
@@ -102,8 +125,7 @@ test.describe('GET /api/resources', () => {
       let reading;
       // The shell needs a moment to exist, and a first reading may have no pair yet.
       for (let i = 0; i < 6 && (reading === undefined || reading === null); i++) {
-        const body = await (await ctx.get('/api/resources')).json();
-        test.skip(!body.sampling.ok, `process sampling unavailable here: ${body.sampling.reason}`);
+        const body = await sampledBody(ctx);
         reading = body.sessions[session.id];
         if (reading == null) await new Promise((r) => setTimeout(r, 700));
       }
