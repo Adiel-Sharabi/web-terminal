@@ -16,6 +16,7 @@ import 'dart:convert';
 import 'dart:io' show Platform;
 
 import 'package:desktop_drop/desktop_drop.dart';
+import 'package:file_selector/file_selector.dart' show XFile, openFiles;
 import 'package:flutter/foundation.dart' show kIsWeb;
 import 'package:flutter/material.dart';
 import 'package:flutter/services.dart';
@@ -38,6 +39,7 @@ import '../theme/app_theme.dart';
 import '../util/terminal_write.dart';
 import '../theme/status_colors.dart';
 import '../util/terminal_links.dart';
+import '../widgets/attach_source_sheet.dart';
 import '../widgets/compose_bar.dart';
 import '../widgets/conversation_view.dart';
 import '../widgets/disconnect_hairline.dart';
@@ -483,6 +485,40 @@ bool droppedFileIsImage(String name) {
     if (lower.endsWith(ext)) return true;
   }
   return false;
+}
+
+/// One file on its way to becoming an attachment, whichever gesture produced it
+/// — a desktop drop (#90) or a mobile Files pick (#166).
+///
+/// It exists so those two gestures share ONE staging path ([_attachFiles]): the
+/// upload, the thumbnail-vs-named-chip choice, the single-paste delivery and the
+/// failure report are decided in one place, and a picked file is
+/// indistinguishable from a dropped one everywhere downstream. Adding a third
+/// gesture means adding a factory here, not another copy of that sequence.
+///
+/// [read] is a callback rather than the bytes themselves because a batch is
+/// uploaded one file at a time: reading a whole multi-file pick into memory up
+/// front would hold every byte of it at once for no gain.
+class AttachCandidate {
+  const AttachCandidate({required this.name, required this.read});
+
+  /// A file from the OS document picker (#166). Deliberately reads BYTES and
+  /// never touches `XFile.path`: on Android the pick is a `content://` URI with
+  /// no filesystem path at all, and even a real one would name a file the agent
+  /// cannot open when the session runs on another machine.
+  factory AttachCandidate.fromXFile(XFile file) =>
+      AttachCandidate(name: file.name, read: file.readAsBytes);
+
+  /// A file dropped onto the session body (#90).
+  factory AttachCandidate.fromDropItem(DropItem item) =>
+      AttachCandidate(name: item.name, read: item.readAsBytes);
+
+  /// The file's own name — what the chip shows, and what decides whether it is
+  /// drawn as a thumbnail (see [droppedFileIsImage]).
+  final String name;
+
+  /// Reads the file's contents, on demand.
+  final Future<Uint8List> Function() read;
 }
 
 /// #83 — whether Ctrl+C (Cmd+C on macOS) should copy the CHAT lens's selection.
@@ -2152,21 +2188,41 @@ class _SessionScreenState extends State<SessionScreen>
 
   /// #90 — stage every dropped file as a compose attachment.
   ///
+  /// A drop always stages, never types: the gesture lands on the session body,
+  /// not on the agent's prompt line, so there is no destination to choose.
+  Future<void> _attachDroppedFiles(List<DropItem> files) => _attachFiles(
+        [for (final f in files) AttachCandidate.fromDropItem(f)],
+        toCompose: true,
+      );
+
+  /// Uploads a batch of files and stages them — the ONE path a dropped file
+  /// (#90) and a picked file (#166) both take.
+  ///
   /// Each file's BYTES are uploaded and the SERVER's path is what gets staged;
-  /// the dropping device's own path is never sent, because for a remote cluster
-  /// session it names a file the agent cannot open — and would silently name the
-  /// wrong file if a same-named one existed there. On submit every staged path
-  /// and the prompt share ONE bracketed paste (see [buildAttachmentSubmission]),
-  /// so there is no second submit path to keep in step (#51/#87) — and no run of
-  /// consecutive pastes for the TUI to fold, which is what used to swallow all
-  /// but the first dropped file.
-  Future<void> _attachDroppedFiles(List<DropItem> files) async {
+  /// the originating device's own path is never sent, because for a remote
+  /// cluster session it names a file the agent cannot open — and would silently
+  /// name the wrong file if a same-named one existed there. On submit every
+  /// staged path and the prompt share ONE bracketed paste (see
+  /// [buildAttachmentSubmission]), so there is no second submit path to keep in
+  /// step (#51/#87) — and no run of consecutive pastes for the TUI to fold,
+  /// which is what used to swallow all but the first dropped file.
+  ///
+  /// [toCompose] is the caller's decision, and it is made ONCE before anything
+  /// is uploaded: the first staged chip steals compose focus, so re-reading the
+  /// destination per file would split a single multi-file batch between the
+  /// compose bar and the raw PTY — the same trap the image pick already hoists
+  /// out of its loop.
+  Future<void> _attachFiles(
+    List<AttachCandidate> files, {
+    required bool toCompose,
+  }) async {
     final session = _session;
     if (session == null || files.isEmpty) return;
     final failures = <String>[];
+    final rawPaths = <String>[];
     for (final file in files) {
       try {
-        final bytes = await file.readAsBytes();
+        final bytes = await file.read();
         if (bytes.isEmpty) {
           // A folder drop reads as empty rather than failing; say so plainly
           // instead of staging a chip that would deliver nothing.
@@ -2177,20 +2233,33 @@ class _SessionScreenState extends State<SessionScreen>
           session.server,
         ).uploadDroppedFile(bytes, filename: file.name);
         if (!mounted) return;
-        setState(() => _attachments.add(_ComposeAttachment(
-              path: path,
-              // Thumbnail only for an image; everything else gets a named chip.
-              bytes: droppedFileIsImage(file.name) ? bytes : null,
-              name: file.name,
-            )));
+        if (toCompose) {
+          setState(() => _attachments.add(_ComposeAttachment(
+                path: path,
+                // Thumbnail only for an image; everything else gets a named chip.
+                bytes: droppedFileIsImage(file.name) ? bytes : null,
+                name: file.name,
+              )));
+        } else {
+          rawPaths.add(path);
+        }
       } catch (_) {
         failures.add(file.name);
       }
     }
     if (!mounted) return;
-    unawaited(_saveAttachments()); // #113 — once, after the whole drop
-    // Focus the compose bar once, after the loop — the chips and Send are there.
-    _composeFocusNode.requestFocus();
+    if (toCompose) {
+      unawaited(_saveAttachments()); // #113 — once, after the whole batch
+      // Focus the compose bar once, after the loop — the chips and Send are there.
+      _composeFocusNode.requestFocus();
+    } else if (rawPaths.isNotEmpty) {
+      // ONE frame for the whole batch, not one per file: consecutive pastes land
+      // in a single PTY read and the TUI folds them, so a multi-file pick would
+      // deliver only its first path (#90). No submit CR — this is the user's own
+      // prompt line and they press Enter themselves.
+      _connection?.sendInput(buildPastedPaths(rawPaths));
+      _scrollToBottom();
+    }
     if (failures.isNotEmpty) {
       ScaffoldMessenger.of(context).showSnackBar(
         SnackBar(
@@ -2273,26 +2342,58 @@ class _SessionScreenState extends State<SessionScreen>
     unawaited(_saveAttachments()); // #113 — a removed chip must stay removed
   }
 
-  Future<ImageSource?> _chooseImageSource() {
-    return showModalBottomSheet<ImageSource>(
+  Future<AttachSource?> _chooseAttachSource() {
+    return showModalBottomSheet<AttachSource>(
       context: context,
       showDragHandle: true,
-      builder: (context) => SafeArea(
-        child: Column(
-          mainAxisSize: MainAxisSize.min,
-          children: [
-            ListTile(
-              leading: const Icon(Icons.photo_camera_outlined),
-              title: const Text('Camera'),
-              onTap: () => Navigator.pop(context, ImageSource.camera),
-            ),
-            ListTile(
-              leading: const Icon(Icons.photo_library_outlined),
-              title: const Text('Gallery'),
-              onTap: () => Navigator.pop(context, ImageSource.gallery),
-            ),
-          ],
-        ),
+      builder: (context) => AttachSourceSheet(
+        sources: attachSourcesFor(desktop: isDesktopPlatform()),
+      ),
+    );
+  }
+
+  /// The attach button: pick a source, then take that source's route (#166).
+  ///
+  /// Camera and Gallery go to `image_picker` and the image upload; Files goes to
+  /// the OS document picker and the SAME staging a desktop drop uses. The fork
+  /// is here and nowhere else, so neither route can grow its own idea of what an
+  /// attachment is.
+  Future<void> _pickAndAttach() async {
+    final source = await _chooseAttachSource();
+    if (source == null || !mounted) return;
+    if (source == AttachSource.files) return _pickAndAttachFiles();
+    await _pickAndSendImage(
+      source == AttachSource.camera ? ImageSource.camera : ImageSource.gallery,
+    );
+  }
+
+  /// #166 — the Files source: the OS document picker, staged exactly like a
+  /// dropped file.
+  ///
+  /// No file type is filtered: the point of the issue is the PDF, the log and
+  /// the archive that `image_picker` cannot see. The picked bytes are what
+  /// travels — never the picked path — because Android hands back a `content://`
+  /// URI rather than a filesystem path, and even a real path would name a file
+  /// the agent cannot open when the session lives on another machine.
+  Future<void> _pickAndAttachFiles() async {
+    List<XFile> picked;
+    try {
+      picked = await openFiles();
+    } catch (e) {
+      if (mounted) {
+        ScaffoldMessenger.of(context).showSnackBar(
+          SnackBar(content: Text('Could not open picker: $e')),
+        );
+      }
+      return;
+    }
+    if (picked.isEmpty || !mounted) return;
+    await _attachFiles(
+      [for (final f in picked) AttachCandidate.fromXFile(f)],
+      // Decided ONCE, before the first upload — see [_attachFiles].
+      toCompose: pasteImageIntoCompose(
+        activeLens: _activeLens,
+        composeFocused: _composeFocusNode.hasFocus,
       ),
     );
   }
@@ -2301,11 +2402,9 @@ class _SessionScreenState extends State<SessionScreen>
   /// returns the exact (already bracketed-paste-wrapped) string the server
   /// expects fed straight into the PTY — sent directly, bypassing
   /// [Terminal.paste] to avoid double-wrapping it.
-  Future<void> _pickAndSendImage() async {
+  Future<void> _pickAndSendImage(ImageSource source) async {
     final session = _session;
     if (session == null) return;
-    final source = await _chooseImageSource();
-    if (source == null || !mounted) return;
     // #68: the gallery can attach MANY images in one pick (pickMultiImage); the
     // camera stays a single capture. Each is uploaded + staged independently.
     List<XFile> files;
@@ -3198,7 +3297,7 @@ class _SessionScreenState extends State<SessionScreen>
               altActive: _altSticky,
               onToggleAlt: () => setState(() => _altSticky = !_altSticky),
               onPaste: _pasteFromClipboard,
-              onImage: _pickAndSendImage,
+              onImage: _pickAndAttach,
               rawMode: _rawMode,
               onToggleRawMode: () => _setRawMode(!_rawMode),
               // #30/#11: hide the raw-keyboard toggle on desktop — there it
