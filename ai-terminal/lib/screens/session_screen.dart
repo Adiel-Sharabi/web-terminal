@@ -2255,10 +2255,17 @@ class _SessionScreenState extends State<SessionScreen>
   /// Stages an image as a compose-bar attachment chip (#29): [bytes] is the
   /// thumbnail preview, [path] the server file path delivered to Claude on send.
   void _addComposeAttachment(Uint8List bytes, String path) {
-    if (!mounted) return;
-    setState(
-      () => _attachments.add(_ComposeAttachment(bytes: bytes, path: path)),
-    );
+    final staged = _ComposeAttachment(bytes: bytes, path: path);
+    _attachments.add(staged);
+    if (!mounted) {
+      // #166: staged anyway, and persisted by merge. This used to return here,
+      // which threw away an image that was already uploaded whenever the screen
+      // went away mid-pick — nothing rendered it, nothing saved it, and no
+      // message said so.
+      unawaited(_persistStagedAfterDispose([staged]));
+      return;
+    }
+    setState(() {});
     unawaited(_saveAttachments()); // #113
     // Make sure the compose bar has focus so the new chip + send are right there.
     _composeFocusNode.requestFocus();
@@ -2272,6 +2279,55 @@ class _SessionScreenState extends State<SessionScreen>
         [for (final f in files) AttachCandidate.fromDropItem(f)],
         toCompose: true,
       );
+
+  /// Puts a finished batch of uploaded paths where the user aimed them — the
+  /// agent's prompt line — or stages them as chips when there is nothing live to
+  /// deliver through. Returns how many were rerouted.
+  ///
+  /// Shared by every route behind the Attach button, because the failure it
+  /// handles is not specific to one of them: the paths are on the server by the
+  /// time we get here, so anything that just drops them is a silent loss of work
+  /// the user already waited for.
+  ///
+  /// **`mounted`, not `_connection != null`.** The two come apart exactly where
+  /// it matters: `dispose()` CLOSES the connection without nulling it (only the
+  /// lifecycle-paused path nulls), and `sendInput` opens with `if (_closed)
+  /// return`. A batch finishing just after the user backs out therefore found a
+  /// non-null, dead connection and evaporated.
+  int _deliverOrStagePaths(List<({String name, String path})> batch) {
+    if (batch.isEmpty) return 0;
+    final connection = mounted ? _connection : null;
+    if (connection != null) {
+      // ONE frame for the whole batch, not one per file: consecutive pastes land
+      // in a single PTY read and the TUI folds them, so a multi-file pick would
+      // deliver only its first path (#90). No submit CR — this is the user's own
+      // prompt line and they press Enter themselves.
+      connection.sendInput(buildPastedPaths([for (final r in batch) r.path]));
+      _scrollToBottom();
+      return 0;
+    }
+    // NOT a failure, and reporting one would be a lie — every byte is on the
+    // server. Two ways in, both ordinary: the SAF picker takes the activity to
+    // `AppLifecycleState.paused`, which closes and nulls the socket while the
+    // reattach on resume fetches scrollback over HTTP first, so a quick pick
+    // outruns it; or the screen was disposed while the upload was in flight.
+    // Stage the finished paths instead, where they sit one tap from being sent.
+    //
+    // Named chips even for an image: those bytes went out of scope with the loop
+    // iteration that uploaded them, and holding a whole batch of full-size
+    // photos in memory to draw a thumbnail on a reconnect path is the wrong
+    // trade — the same decode cost the chip's cacheWidth avoids.
+    final staged = [
+      for (final r in batch) _ComposeAttachment(path: r.path, name: r.name),
+    ];
+    _attachments.addAll(staged);
+    unawaited(mounted ? _saveAttachments() : _persistStagedAfterDispose(staged));
+    if (mounted) {
+      setState(() {});
+      _composeFocusNode.requestFocus();
+    }
+    return batch.length;
+  }
 
   /// Uploads a batch of files and stages them — the ONE path a dropped file
   /// (#90) and a picked file (#166) both take.
@@ -2375,42 +2431,7 @@ class _SessionScreenState extends State<SessionScreen>
       // pasted, never staged, no snackbar because the screen was gone. Reading
       // `mounted` sends the disposed case down the reroute branch below, which
       // stages and persists it instead.
-      final connection = mounted ? _connection : null;
-      if (connection != null) {
-        // ONE frame for the whole batch, not one per file: consecutive pastes
-        // land in a single PTY read and the TUI folds them, so a multi-file pick
-        // would deliver only its first path (#90). No submit CR — this is the
-        // user's own prompt line and they press Enter themselves.
-        connection.sendInput(buildPastedPaths([for (final r in raw) r.path]));
-        _scrollToBottom();
-      } else {
-        // NOT a failure, and reporting one would be a lie — every byte is on
-        // the server. Two ways in, both ordinary: the SAF picker takes the
-        // activity to `AppLifecycleState.paused`, which closes and nulls the
-        // socket while the reattach on resume fetches scrollback over HTTP
-        // first, so a quick pick outruns it; or the screen was disposed while
-        // the upload was in flight. Stage the finished paths instead, where
-        // they sit one tap from being sent.
-        //
-        // Named chips even for an image: those bytes went out of scope with the
-        // loop iteration that uploaded them, and holding a whole batch of
-        // full-size photos in memory to draw a thumbnail on a reconnect path is
-        // the wrong trade — the same decode cost the chip's cacheWidth avoids.
-        for (final r in raw) {
-          _attachments.add(_ComposeAttachment(path: r.path, name: r.name));
-        }
-        rerouted = raw.length;
-        unawaited(mounted
-            ? _saveAttachments()
-            : _persistStagedAfterDispose([
-                for (final r in raw)
-                  _ComposeAttachment(path: r.path, name: r.name),
-              ]));
-        if (mounted) {
-          setState(() {});
-          _composeFocusNode.requestFocus();
-        }
-      }
+      rerouted = _deliverOrStagePaths(raw);
     }
     if (!mounted) return;
     final message = attachBatchMessage(
@@ -2618,10 +2639,13 @@ class _SessionScreenState extends State<SessionScreen>
     // arrive in one PTY read and the TUI folds them, so a multi-select pick
     // delivered only its FIRST image. No submit CR: this is the user's own
     // prompt line and they press Enter themselves.
-    if (rawPaths.isNotEmpty) {
-      _connection?.sendInput(buildPastedPaths(rawPaths));
-    }
-    if (!toCompose && mounted) _scrollToBottom();
+    // #166: through the SAME deliver-or-stage rule the Files route uses. This
+    // was `_connection?.sendInput(...)`, which lost a finished pick whenever the
+    // screen had been disposed — the connection is closed but NOT nulled there,
+    // so the send silently no-ops. Same button, same failure, one function away.
+    _deliverOrStagePaths([
+      for (final p in rawPaths) (name: p.split(RegExp(r'[\\/]')).last, path: p),
+    ]);
     if (failures > 0 && mounted) {
       ScaffoldMessenger.of(context).showSnackBar(
         SnackBar(
@@ -2896,6 +2920,13 @@ class _SessionScreenState extends State<SessionScreen>
   /// may have re-entered the session, and that new screen has restored and
   /// possibly edited the same key. Only the paths this batch actually uploaded
   /// are added, so nothing removed over there comes back.
+  ///
+  /// It arbitrates WRITE order, not read order, and cannot do better without a
+  /// change notification: a new screen that restored before this write lands
+  /// does not see the merged paths, and its own next save drops them again.
+  /// Narrow (back out mid-upload, re-enter within the upload window, then edit
+  /// or send) and strictly better than the alternative, which loses the batch
+  /// every time rather than in that one ordering.
   Future<void> _persistStagedAfterDispose(
     List<_ComposeAttachment> staged,
   ) async {

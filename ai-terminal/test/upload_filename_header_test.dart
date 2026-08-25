@@ -137,6 +137,23 @@ void main() {
       expect(() => Uri.decodeComponent(out), returnsNormally);
     });
 
+    test('a long ASCII name keeps its extension too', () {
+      // The common case, not the exotic one: the server's slice takes the same
+      // bite out of a 100-character English name, and what it cuts is the
+      // `.pdf`. Nothing about it needs ENCODING — but it does need the budget.
+      final long = '${'quarterly-report-' * 8}.pdf';
+      expect(long.length, greaterThan(serverFilenameBudget));
+      final out = headerSafeFilename(long);
+      expect(out.length, lessThanOrEqualTo(serverFilenameBudget));
+      expect(out, endsWith('.pdf'));
+      // Still literal: a name that never needed encoding must not acquire it.
+      expect(out, isNot(contains('%')));
+    });
+
+    test('a short ASCII name is untouched by the budget', () {
+      expect(headerSafeFilename('my file.pdf'), 'my file.pdf');
+    });
+
     test('a name whose EXTENSION alone busts the budget still fits', () {
       // `backup.<a Hebrew sentence>` has no real extension: the text after the
       // last dot encodes past 80 on its own. Keeping it would return a value

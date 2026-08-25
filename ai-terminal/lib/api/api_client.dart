@@ -51,6 +51,9 @@ class ApiException implements Exception {
 /// names it meets come from a desktop, and #166 aims the same header at a
 /// phone's Downloads folder.
 ///
+/// Two jobs, and only the first is conditional: encode when the value cannot
+/// ride a header, and keep the result inside [serverFilenameBudget] either way.
+///
 /// Encoded ONLY when it has to be. The server slices the name through
 /// `safeDropName`, which maps anything outside `[A-Za-z0-9._-]` to `_`, so
 /// encoding unconditionally would land `my_20file.pdf` on disk where today's
@@ -63,8 +66,11 @@ class ApiException implements Exception {
 /// that later wants the real name decodes exactly when it is present. Today's
 /// server ignores the extra header, so nothing has to ship in lockstep.
 String headerSafeFilename(String name) {
-  if (!filenameNeedsEncoding(name)) return name;
-  final encoded = Uri.encodeComponent(name);
+  // The budget applies to BOTH branches. A long all-ASCII name is the common
+  // case, not the exotic one, and the server's slice takes the same bite out of
+  // it — the tail, i.e. the `.pdf`. Only the encoding is conditional.
+  final encoded =
+      filenameNeedsEncoding(name) ? Uri.encodeComponent(name) : name;
   if (encoded.length <= serverFilenameBudget) return encoded;
   // Every Hebrew letter costs SIX characters encoded, so a 14-letter name
   // overruns the server's 80-character slice and loses its `.pdf` off the end —
@@ -74,8 +80,10 @@ String headerSafeFilename(String name) {
   // Built up one whole character at a time rather than cut out of the encoded
   // string: slicing that could end mid-escape (`%D7`), which is not decodable
   // at all.
+  String enc(String part) =>
+      filenameNeedsEncoding(name) ? Uri.encodeComponent(part) : part;
   final dot = name.lastIndexOf('.');
-  var ext = dot > 0 ? Uri.encodeComponent(name.substring(dot)) : '';
+  var ext = dot > 0 ? enc(name.substring(dot)) : '';
   // An "extension" can be longer than the whole budget — `backup.<a Hebrew
   // sentence>` has no real extension at all — and keeping it would return a
   // value OVER budget, which the server then slices mid-`%D7`: precisely the
@@ -86,7 +94,7 @@ String headerSafeFilename(String name) {
   final out = StringBuffer();
   var used = ext.length;
   for (final rune in stem.runes) {
-    final piece = Uri.encodeComponent(String.fromCharCode(rune));
+    final piece = enc(String.fromCharCode(rune));
     if (used + piece.length > serverFilenameBudget) break;
     out.write(piece);
     used += piece.length;
