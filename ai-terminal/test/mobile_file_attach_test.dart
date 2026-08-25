@@ -253,7 +253,14 @@ void main() {
       // The client copy exists only to refuse a file before spending a phone's
       // data on a 413. If server.js's own limit moves, this goes red rather
       // than the app quietly refusing files the server would have taken.
-      final serverJs = File('../server.js').readAsStringSync();
+      // Relative to the package root, which is where `flutter test` runs (CI
+      // sets working-directory: ai-terminal). Said out loud, because a bare
+      // FileSystemException here reads as a broken test rather than as "this
+      // guard could not find the server it mirrors".
+      final serverFile = File('../server.js');
+      expect(serverFile.existsSync(), isTrue,
+          reason: 'run flutter test from ai-terminal/ — this guard reads server.js');
+      final serverJs = serverFile.readAsStringSync();
       // Anchored on the ROUTE, not on the words "upload-file": the first
       // occurrence of those in server.js is inside the ~280 KB single-line
       // SERVER_VERSION comment, which grows with every release and would

@@ -2612,7 +2612,9 @@ class _SessionScreenState extends State<SessionScreen>
       activeLens: _activeLens,
       composeFocused: _composeFocusNode.hasFocus,
     );
-    var failures = 0;
+    // Names, not a count: `attachBatchMessage` speaks about files, and the same
+    // message builder now serves every route behind the Attach button.
+    final failures = <String>[];
     final rawPaths = <String>[];
     for (final file in files) {
       try {
@@ -2631,7 +2633,7 @@ class _SessionScreenState extends State<SessionScreen>
           rawPaths.add(path);
         }
       } catch (_) {
-        failures++;
+        failures.add(file.name);
       }
     }
     // #90: one frame for the whole pick, NOT one per file. Sending a paste per
@@ -2643,15 +2645,21 @@ class _SessionScreenState extends State<SessionScreen>
     // was `_connection?.sendInput(...)`, which lost a finished pick whenever the
     // screen had been disposed — the connection is closed but NOT nulled there,
     // so the send silently no-ops. Same button, same failure, one function away.
-    _deliverOrStagePaths([
+    final rerouted = _deliverOrStagePaths([
       for (final p in rawPaths) (name: p.split(RegExp(r'[\\/]')).last, path: p),
     ]);
-    if (failures > 0 && mounted) {
-      ScaffoldMessenger.of(context).showSnackBar(
-        SnackBar(
-          content: Text('$failures of ${files.length} image(s) failed to upload'),
-        ),
-      );
+    if (!mounted) return;
+    // The reroute count was being DISCARDED here, so a pick that staged instead
+    // of pasting said nothing at all — the one case where the user most needs
+    // telling, because the images are not where they were aiming them.
+    final message = attachBatchMessage(
+      total: files.length,
+      failures: failures,
+      tooLarge: const [],
+      rerouted: rerouted,
+    );
+    if (message != null) {
+      ScaffoldMessenger.of(context).showSnackBar(SnackBar(content: Text(message)));
     }
   }
 
@@ -2704,8 +2712,14 @@ class _SessionScreenState extends State<SessionScreen>
         final path = reference.replaceAll(RegExp('\x1b\\[2(?:00|01)~'), '');
         _addComposeAttachment(png.bytes, path);
       } else {
-        _connection?.sendInput(reference);
-        _scrollToBottom();
+        // #166: the same deliver-or-stage rule as every other upload. This was
+        // `_connection?.sendInput(reference)` — the THIRD copy of the
+        // closed-but-not-nulled silent loss, and the last one: no uploaded path
+        // now reaches the PTY except through `_deliverOrStagePaths`.
+        final path = reference.replaceAll(RegExp('\x1b\\[2(?:00|01)~'), '');
+        _deliverOrStagePaths([
+          (name: path.split(RegExp(r'[\\/]')).last, path: path),
+        ]);
       }
     } catch (e) {
       if (mounted) {

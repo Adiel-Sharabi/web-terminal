@@ -166,7 +166,14 @@ void main() {
     });
 
     test('the budget tracks the SERVER, which owns the slice', () {
-      final serverJs = File('../server.js').readAsStringSync();
+      // Relative to the package root, which is where `flutter test` runs (CI
+      // sets working-directory: ai-terminal). Said out loud, because a bare
+      // FileSystemException here reads as a broken test rather than as "this
+      // guard could not find the server it mirrors".
+      final serverFile = File('../server.js');
+      expect(serverFile.existsSync(), isTrue,
+          reason: 'run flutter test from ai-terminal/ — this guard reads server.js');
+      final serverJs = serverFile.readAsStringSync();
       final declared = RegExp(r'function safeDropName[\s\S]{0,400}?\.slice\(0,\s*(\d+)\)')
           .firstMatch(serverJs);
       expect(declared, isNotNull,
