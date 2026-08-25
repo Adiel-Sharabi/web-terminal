@@ -38,6 +38,85 @@ class ApiException implements Exception {
   String toString() => 'ApiException($status, $message)';
 }
 
+/// A file name that can actually ride an HTTP header value.
+///
+/// **This is not tidiness — a raw name FAILS THE WHOLE ATTACH.** `dart:io`'s
+/// `HttpHeaders` accepts a value byte only when it is `> 31 && < 128`, and
+/// throws `FormatException` before a byte reaches the wire otherwise; the
+/// upload's own catch then reports `Server unreachable`, so a Hebrew, accented
+/// or emoji file name surfaces as "Could not attach `<name>`" with no hint of the
+/// cause. Reproduced against a real loopback server in
+/// `test/upload_filename_header_test.dart` — a MockClient never traverses that
+/// validation, which is why the drop path (#90) shipped with it unnoticed: the
+/// names it meets come from a desktop, and #166 aims the same header at a
+/// phone's Downloads folder.
+///
+/// Two jobs, and only the first is conditional: encode when the value cannot
+/// ride a header, and keep the result inside [serverFilenameBudget] either way.
+///
+/// Encoded ONLY when it has to be. The server slices the name through
+/// `safeDropName`, which maps anything outside `[A-Za-z0-9._-]` to `_`, so
+/// encoding unconditionally would land `my_20file.pdf` on disk where today's
+/// space gives `my_file.pdf`.
+///
+/// Which makes the value alone AMBIGUOUS — `100%-done.pdf` rides verbatim and
+/// would blow up a receiver that decoded everything (`URIError` in node,
+/// `FormatException` in Dart). So the encoding is announced rather than guessed:
+/// [encodedFilenameHeader] is sent only alongside an encoded value, and a server
+/// that later wants the real name decodes exactly when it is present. Today's
+/// server ignores the extra header, so nothing has to ship in lockstep.
+String headerSafeFilename(String name) {
+  // The budget applies to BOTH branches. A long all-ASCII name is the common
+  // case, not the exotic one, and the server's slice takes the same bite out of
+  // it — the tail, i.e. the `.pdf`. Only the encoding is conditional.
+  final encoded =
+      filenameNeedsEncoding(name) ? Uri.encodeComponent(name) : name;
+  if (encoded.length <= serverFilenameBudget) return encoded;
+  // Every Hebrew letter costs SIX characters encoded, so a 14-letter name
+  // overruns the server's 80-character slice and loses its `.pdf` off the end —
+  // handing the agent a file whose type it can no longer tell. Truncate the
+  // stem instead and keep the extension.
+  //
+  // Built up one whole character at a time rather than cut out of the encoded
+  // string: slicing that could end mid-escape (`%D7`), which is not decodable
+  // at all.
+  String enc(String part) =>
+      filenameNeedsEncoding(name) ? Uri.encodeComponent(part) : part;
+  final dot = name.lastIndexOf('.');
+  var ext = dot > 0 ? enc(name.substring(dot)) : '';
+  // An "extension" can be longer than the whole budget — `backup.<a Hebrew
+  // sentence>` has no real extension at all — and keeping it would return a
+  // value OVER budget, which the server then slices mid-`%D7`: precisely the
+  // undecodable half-escape the rune-walk below exists to avoid. Past a quarter
+  // of the budget it is not an extension worth saving.
+  if (ext.length > serverFilenameBudget ~/ 4) ext = '';
+  final stem = ext.isEmpty ? name : name.substring(0, dot);
+  final out = StringBuffer();
+  var used = ext.length;
+  for (final rune in stem.runes) {
+    final piece = enc(String.fromCharCode(rune));
+    if (used + piece.length > serverFilenameBudget) break;
+    out.write(piece);
+    used += piece.length;
+  }
+  return '$out$ext';
+}
+
+/// How much of a file name survives the server's `safeDropName`, which slices
+/// the first 80 characters. Duplicated here for the same reason
+/// [ApiClient.uploadLimitBytes] is — the client has to keep its own output
+/// inside a budget the server enforces — and guarded by the same kind of drift
+/// test, which reads server.js's own slice.
+const int serverFilenameBudget = 80;
+
+/// Whether [name] cannot ride a header value as itself — see
+/// [headerSafeFilename] for what happens when one tries.
+bool filenameNeedsEncoding(String name) =>
+    !name.codeUnits.every((c) => c > 31 && c < 128);
+
+/// Marks `X-Filename` as percent-encoded. Absent means the value is literal.
+const String encodedFilenameHeader = 'X-Filename-Encoded';
+
 /// A stateless client for one server's REST + WebSocket surface.
 class ApiClient {
   /// The server this client talks to.
@@ -46,6 +125,26 @@ class ApiClient {
   final http.Client _http;
   static const Duration _timeout = Duration(seconds: 10);
   static const Duration _uploadTimeout = Duration(seconds: 30);
+
+  /// How long an upload of [bytes] may take before it is called dead.
+  ///
+  /// A flat 30s was right while the only body on this route was a desktop drop
+  /// over a LAN. #166 aims it at a phone on cellular, where 30s cannot deliver
+  /// even a 25 MB PDF — it would need a sustained ~7 Mbps just to beat the
+  /// timer, and losing that race reports "Could not attach report.pdf" for a
+  /// file the server may well have written, leaving an orphan in DROPPED_DIR.
+  ///
+  /// So the allowance scales with the body, against a deliberately pessimistic
+  /// [_uploadFloorBytesPerSecond]: fast links never notice, and a slow one is
+  /// judged on whether it is moving rather than on a stopwatch. It is a
+  /// backstop, not a progress bar — a genuinely dead socket errors long before
+  /// this, which is why a generous ceiling costs nothing.
+  static Duration uploadTimeoutFor(int bytes) => _uploadTimeout +
+      Duration(seconds: bytes ~/ _uploadFloorBytesPerSecond);
+
+  /// ~100 KB/s — under a poor mobile connection, not over a good one. Sizing
+  /// this optimistically would put the timer back in front of the transfer.
+  static const int _uploadFloorBytesPerSecond = 100 * 1024;
 
   /// Creates a client for [server]. A custom [httpClient] may be injected for
   /// testing; otherwise a default [http.Client] is used.
@@ -589,6 +688,15 @@ class ApiClient {
     }
   }
 
+  /// The largest body `POST /api/upload-file` will accept.
+  ///
+  /// The SERVER owns this number (`express.raw({ limit: '50mb' })` in
+  /// `server.js`); this is a copy so the client can refuse a file before
+  /// spending minutes of a phone's data earning a 413. The drift guard lives in
+  /// `test/mobile_file_attach_test.dart` ("the limit tracks the SERVER") — it
+  /// reads server.js's own line and goes red if the two ever disagree.
+  static const int uploadLimitBytes = 50 * 1024 * 1024;
+
   /// Uploads an arbitrary DROPPED file (#90) and returns its path on the
   /// SERVER's disk.
   ///
@@ -610,11 +718,12 @@ class ApiClient {
               'Authorization': 'Bearer ${server.bearerToken}',
               'Content-Type': 'application/octet-stream',
               // Sanitised server-side — it is joined onto a path there.
-              'X-Filename': filename,
+              'X-Filename': headerSafeFilename(filename),
+              if (filenameNeedsEncoding(filename)) encodedFilenameHeader: '1',
             },
             body: bytes,
           )
-          .timeout(_uploadTimeout);
+          .timeout(uploadTimeoutFor(bytes.length));
       if (res.statusCode < 200 || res.statusCode >= 300) {
         throw ApiException(res.statusCode, _errorMessage(res));
       }

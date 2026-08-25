@@ -113,8 +113,11 @@ class TerminalKeyStrip extends StatelessWidget {
             onTap: onPaste,
           ),
           _KeyButton(
-            icon: Icons.image_outlined,
-            tooltip: 'Send image',
+            // #166: the sheet behind this button is no longer image-only, and
+            // it never "sent" anything — it stages. A paperclip is the
+            // recognised attach affordance; the sheet names the source.
+            icon: Icons.attach_file,
+            tooltip: 'Attach',
             onTap: onImage,
           ),
           if (showRawToggle)

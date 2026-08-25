@@ -16,7 +16,7 @@ publish_to: 'none' # Remove this line if you wish to publish to pub.dev
 # https://developer.apple.com/library/archive/documentation/General/Reference/InfoPlistKeyReference/Articles/CoreFoundationKeys.html
 # In Windows, build-name is used as the major, minor, and patch parts
 # of the product and file versions while build-number is used as the build suffix.
-version: 1.57.0+126
+version: 1.58.0+128
 
 environment:
   sdk: ^3.12.2
@@ -51,6 +51,7 @@ dependencies:
   markdown: ^7.3.1 # bare-URL autolink (ExtensionSet.gitHubWeb) for chat links
   package_info_plus: ^10.2.0 # runtime app version for the header (issue #40)
   desktop_drop: ^0.7.1
+  file_selector: ^1.1.0 # OS document picker for the mobile Files source (#166)
 
 # xterm 4.0.0 is the LATEST published release and it corrupts its own scrollback
 # buffer on a real Codex byte stream (#81), which both blanks the terminal and

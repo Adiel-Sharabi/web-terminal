@@ -16,6 +16,7 @@ import 'dart:convert';
 import 'dart:io' show Platform;
 
 import 'package:desktop_drop/desktop_drop.dart';
+import 'package:file_selector/file_selector.dart' show XFile, openFiles;
 import 'package:flutter/foundation.dart' show kIsWeb;
 import 'package:flutter/material.dart';
 import 'package:flutter/services.dart';
@@ -38,6 +39,7 @@ import '../theme/app_theme.dart';
 import '../util/terminal_write.dart';
 import '../theme/status_colors.dart';
 import '../util/terminal_links.dart';
+import '../widgets/attach_source_sheet.dart';
 import '../widgets/compose_bar.dart';
 import '../widgets/conversation_view.dart';
 import '../widgets/disconnect_hairline.dart';
@@ -483,6 +485,118 @@ bool droppedFileIsImage(String name) {
     if (lower.endsWith(ext)) return true;
   }
   return false;
+}
+
+/// What to tell the user after an attach batch (#90/#166), or null when every
+/// file landed and there is nothing to say.
+///
+/// One line rather than a snackbar per category: two stacked snackbars mean the
+/// first is unreadable, and a batch can fail both ways at once (a picked video
+/// over the limit next to a file the upload lost).
+///
+/// A reroute is named first and is NOT a failure: the files are on the server,
+/// they are simply waiting in the compose bar instead of in the prompt line.
+///
+/// Size is named separately from failure on purpose. "Could not attach
+/// holiday.mp4" sends someone hunting for a fault; "holiday.mp4 is larger than
+/// the 50 MB limit" tells them what to do instead.
+String? attachBatchMessage({
+  /// How many files were actually ATTEMPTED — the batch minus anything refused
+  /// on size, which is reported separately. The two clauses partition the pick
+  /// rather than overlapping it.
+  required int total,
+  required List<String> failures,
+  required List<String> tooLarge,
+  int rerouted = 0,
+}) {
+  final limitMb = ApiClient.uploadLimitBytes ~/ (1024 * 1024);
+  final parts = <String>[
+    if (rerouted == 1)
+      'Reconnecting — 1 file staged in the compose bar'
+    else if (rerouted > 1)
+      'Reconnecting — $rerouted files staged in the compose bar',
+    if (failures.length == 1)
+      'Could not attach ${failures.first}'
+    else if (failures.length > 1)
+      'Could not attach ${failures.length} of $total files',
+    if (tooLarge.length == 1)
+      '${tooLarge.first} is larger than the $limitMb MB limit'
+    else if (tooLarge.length > 1)
+      '${tooLarge.length} files are larger than the $limitMb MB limit',
+  ];
+  return parts.isEmpty ? null : parts.join(' — ');
+}
+
+/// Adds [staged] to the attachments already persisted in [storedRaw], returning
+/// the JSON to write back.
+///
+/// Existing entries keep their order and their names; an entry whose path is
+/// already stored is not added twice (a re-entered screen may have restored it
+/// already). Pure, so the arbitration a disposed screen depends on is testable
+/// without a screen.
+String mergeStagedAttachments(
+  String? storedRaw,
+  List<Map<String, String>> staged,
+) {
+  final out = <Map<String, String>>[...decodeStagedAttachments(storedRaw)];
+  final seen = {for (final e in out) e['path']};
+  for (final e in staged) {
+    if (e['path'] == null || e['path']!.isEmpty) continue;
+    if (seen.add(e['path'])) out.add(e);
+  }
+  return jsonEncode(out);
+}
+
+/// One file on its way to becoming an attachment, whichever gesture produced it
+/// — a desktop drop (#90) or a mobile Files pick (#166).
+///
+/// It exists so those two gestures share ONE staging path ([_attachFiles]): the
+/// upload, the thumbnail-vs-named-chip choice, the single-paste delivery and the
+/// failure report are decided in one place, and a picked file is
+/// indistinguishable from a dropped one everywhere downstream. Adding a third
+/// gesture means adding a factory here, not another copy of that sequence.
+///
+/// [read] is a callback rather than the bytes themselves so the two gestures can
+/// each keep their own way of producing them. It buys no memory on Android,
+/// and the comment here used to claim it did: `file_selector_android` returns
+/// `XFile.fromData(file.bytes, …)`, so the ENTIRE pick is already resident
+/// before this class ever sees it, and `read()` is a re-read of memory. A
+/// desktop drop is the lazy one.
+class AttachCandidate {
+  const AttachCandidate({
+    required this.name,
+    required this.read,
+    required this.length,
+  });
+
+  /// A file from the OS document picker (#166). Deliberately reads BYTES and
+  /// never touches `XFile.path`: on Android the pick is a `content://` URI with
+  /// no filesystem path at all, and even a real one would name a file the agent
+  /// cannot open when the session runs on another machine.
+  factory AttachCandidate.fromXFile(XFile file) => AttachCandidate(
+        name: file.name,
+        read: file.readAsBytes,
+        length: file.length,
+      );
+
+  /// A file dropped onto the session body (#90).
+  factory AttachCandidate.fromDropItem(DropItem item) => AttachCandidate(
+        name: item.name,
+        read: item.readAsBytes,
+        length: item.length,
+      );
+
+  /// The file's own name — what the chip shows, and what decides whether it is
+  /// drawn as a thumbnail (see [droppedFileIsImage]).
+  final String name;
+
+  /// Reads the file's contents, on demand.
+  final Future<Uint8List> Function() read;
+
+  /// The file's size WITHOUT reading it — a stat on the drop path, a value the
+  /// picker already knows on Android. Separate from [read] precisely so the
+  /// size limit can be applied to a 10 GB file that must never be read.
+  final Future<int> Function() length;
 }
 
 /// #83 — whether Ctrl+C (Cmd+C on macOS) should copy the CHAT lens's selection.
@@ -2141,10 +2255,17 @@ class _SessionScreenState extends State<SessionScreen>
   /// Stages an image as a compose-bar attachment chip (#29): [bytes] is the
   /// thumbnail preview, [path] the server file path delivered to Claude on send.
   void _addComposeAttachment(Uint8List bytes, String path) {
-    if (!mounted) return;
-    setState(
-      () => _attachments.add(_ComposeAttachment(bytes: bytes, path: path)),
-    );
+    final staged = _ComposeAttachment(bytes: bytes, path: path);
+    _attachments.add(staged);
+    if (!mounted) {
+      // #166: staged anyway, and persisted by merge. This used to return here,
+      // which threw away an image that was already uploaded whenever the screen
+      // went away mid-pick — nothing rendered it, nothing saved it, and no
+      // message said so.
+      unawaited(_persistStagedAfterDispose([staged]));
+      return;
+    }
+    setState(() {});
     unawaited(_saveAttachments()); // #113
     // Make sure the compose bar has focus so the new chip + send are right there.
     _composeFocusNode.requestFocus();
@@ -2152,55 +2273,178 @@ class _SessionScreenState extends State<SessionScreen>
 
   /// #90 — stage every dropped file as a compose attachment.
   ///
+  /// A drop always stages, never types: the gesture lands on the session body,
+  /// not on the agent's prompt line, so there is no destination to choose.
+  Future<void> _attachDroppedFiles(List<DropItem> files) => _attachFiles(
+        [for (final f in files) AttachCandidate.fromDropItem(f)],
+        toCompose: true,
+      );
+
+  /// Puts a finished batch of uploaded paths where the user aimed them — the
+  /// agent's prompt line — or stages them as chips when there is nothing live to
+  /// deliver through. Returns how many were rerouted.
+  ///
+  /// Shared by every route behind the Attach button, because the failure it
+  /// handles is not specific to one of them: the paths are on the server by the
+  /// time we get here, so anything that just drops them is a silent loss of work
+  /// the user already waited for.
+  ///
+  /// **`mounted`, not `_connection != null`.** The two come apart exactly where
+  /// it matters: `dispose()` CLOSES the connection without nulling it (only the
+  /// lifecycle-paused path nulls), and `sendInput` opens with `if (_closed)
+  /// return`. A batch finishing just after the user backs out therefore found a
+  /// non-null, dead connection and evaporated.
+  int _deliverOrStagePaths(List<({String name, String path})> batch) {
+    if (batch.isEmpty) return 0;
+    final connection = mounted ? _connection : null;
+    if (connection != null) {
+      // ONE frame for the whole batch, not one per file: consecutive pastes land
+      // in a single PTY read and the TUI folds them, so a multi-file pick would
+      // deliver only its first path (#90). No submit CR — this is the user's own
+      // prompt line and they press Enter themselves.
+      connection.sendInput(buildPastedPaths([for (final r in batch) r.path]));
+      _scrollToBottom();
+      return 0;
+    }
+    // NOT a failure, and reporting one would be a lie — every byte is on the
+    // server. Two ways in, both ordinary: the SAF picker takes the activity to
+    // `AppLifecycleState.paused`, which closes and nulls the socket while the
+    // reattach on resume fetches scrollback over HTTP first, so a quick pick
+    // outruns it; or the screen was disposed while the upload was in flight.
+    // Stage the finished paths instead, where they sit one tap from being sent.
+    //
+    // Named chips even for an image: those bytes went out of scope with the loop
+    // iteration that uploaded them, and holding a whole batch of full-size
+    // photos in memory to draw a thumbnail on a reconnect path is the wrong
+    // trade — the same decode cost the chip's cacheWidth avoids.
+    final staged = [
+      for (final r in batch) _ComposeAttachment(path: r.path, name: r.name),
+    ];
+    _attachments.addAll(staged);
+    unawaited(mounted ? _saveAttachments() : _persistStagedAfterDispose(staged));
+    if (mounted) {
+      setState(() {});
+      _composeFocusNode.requestFocus();
+    }
+    return batch.length;
+  }
+
+  /// Uploads a batch of files and stages them — the ONE path a dropped file
+  /// (#90) and a picked file (#166) both take.
+  ///
   /// Each file's BYTES are uploaded and the SERVER's path is what gets staged;
-  /// the dropping device's own path is never sent, because for a remote cluster
-  /// session it names a file the agent cannot open — and would silently name the
-  /// wrong file if a same-named one existed there. On submit every staged path
-  /// and the prompt share ONE bracketed paste (see [buildAttachmentSubmission]),
-  /// so there is no second submit path to keep in step (#51/#87) — and no run of
-  /// consecutive pastes for the TUI to fold, which is what used to swallow all
-  /// but the first dropped file.
-  Future<void> _attachDroppedFiles(List<DropItem> files) async {
+  /// the originating device's own path is never sent, because for a remote
+  /// cluster session it names a file the agent cannot open — and would silently
+  /// name the wrong file if a same-named one existed there. On submit every
+  /// staged path and the prompt share ONE bracketed paste (see
+  /// [buildAttachmentSubmission]), so there is no second submit path to keep in
+  /// step (#51/#87) — and no run of consecutive pastes for the TUI to fold,
+  /// which is what used to swallow all but the first dropped file.
+  ///
+  /// [toCompose] is the caller's decision, and it is made ONCE before anything
+  /// is uploaded: the first staged chip steals compose focus, so re-reading the
+  /// destination per file would split a single multi-file batch between the
+  /// compose bar and the raw PTY — the same trap the image pick already hoists
+  /// out of its loop.
+  Future<void> _attachFiles(
+    List<AttachCandidate> files, {
+    required bool toCompose,
+  }) async {
     final session = _session;
     if (session == null || files.isEmpty) return;
     final failures = <String>[];
+    final tooLarge = <String>[];
+    // Name AND path: the socket can vanish after the uploads succeed, and what
+    // happens next has to name exactly the files it happened to — not the whole
+    // batch, which would re-blame an already-counted failure and speak for one
+    // that was refused on size and never attempted.
+    final raw = <({String name, String path})>[];
+    final stagedNow = <_ComposeAttachment>[];
+    var rerouted = 0;
     for (final file in files) {
       try {
-        final bytes = await file.readAsBytes();
+        // The SIZE first, from a stat rather than from the bytes. Reading first
+        // and measuring after cannot guard the case that matters most: a 10 GB
+        // ISO dropped on the desktop dies inside `read()` long before any check.
+        // (On Android there is nothing left to save by then either way —
+        // `file_selector_android` has already materialised the whole pick.)
+        if (await file.length() > ApiClient.uploadLimitBytes) {
+          // Named apart from a failure because "could not attach holiday.mp4"
+          // sends someone hunting for a fault that is really a limit — and on a
+          // phone the alternative is minutes of mobile data spent to earn a 413.
+          tooLarge.add(file.name);
+          continue;
+        }
+        final bytes = await file.read();
         if (bytes.isEmpty) {
-          // A folder drop reads as empty rather than failing; say so plainly
-          // instead of staging a chip that would deliver nothing.
+          // A folder drop reads as empty rather than failing, and a pick can
+          // name a genuinely empty file (a just-rotated log). Either way the
+          // server rejects an empty body with 400, so report it here rather
+          // than staging a chip that would deliver nothing.
           failures.add(file.name);
           continue;
         }
         final path = await ApiClient(
           session.server,
         ).uploadDroppedFile(bytes, filename: file.name);
-        if (!mounted) return;
-        setState(() => _attachments.add(_ComposeAttachment(
-              path: path,
-              // Thumbnail only for an image; everything else gets a named chip.
-              bytes: droppedFileIsImage(file.name) ? bytes : null,
-              name: file.name,
-            )));
+        if (toCompose) {
+          final staged = _ComposeAttachment(
+            path: path,
+            // Thumbnail only for an image; everything else gets a named chip.
+            bytes: droppedFileIsImage(file.name) ? bytes : null,
+            name: file.name,
+          );
+          // Unmounting mid-batch must not cost the files already uploaded, so
+          // this neither returns nor skips: it stages either way and only the
+          // repaint is conditional. `_saveAttachments` below needs no widget
+          // (SharedPreferences keyed on the session id), so a batch that
+          // finishes after the screen is gone still comes back with it (#113).
+          stagedNow.add(staged);
+          if (mounted) {
+            setState(() => _attachments.add(staged));
+          } else {
+            _attachments.add(staged);
+          }
+        } else {
+          raw.add((name: file.name, path: path));
+        }
       } catch (_) {
         failures.add(file.name);
       }
     }
+    if (toCompose) {
+      // #113 — once, after the whole batch. MERGED when the screen is already
+      // gone: re-entering the session mounts a new State that has restored its
+      // own list, and a plain write from this dead one would overwrite it —
+      // resurrecting chips removed over there, or dropping ones staged there.
+      // Merging adds exactly the files this batch uploaded and arbitrates
+      // nothing else.
+      unawaited(mounted ? _saveAttachments() : _persistStagedAfterDispose(stagedNow));
+      // Focus the compose bar once, after the loop — the chips and Send are there.
+      if (mounted) _composeFocusNode.requestFocus();
+    } else if (raw.isNotEmpty) {
+      // `mounted`, not `_connection != null`. The two come apart exactly where
+      // it matters: `dispose()` CLOSES the connection without nulling it (only
+      // the lifecycle-paused path nulls), and `sendInput` opens with
+      // `if (_closed) return`. So a batch finishing just after the user backs
+      // out found a non-null, dead connection and evaporated — uploaded, never
+      // pasted, never staged, no snackbar because the screen was gone. Reading
+      // `mounted` sends the disposed case down the reroute branch below, which
+      // stages and persists it instead.
+      rerouted = _deliverOrStagePaths(raw);
+    }
     if (!mounted) return;
-    unawaited(_saveAttachments()); // #113 — once, after the whole drop
-    // Focus the compose bar once, after the loop — the chips and Send are there.
-    _composeFocusNode.requestFocus();
-    if (failures.isNotEmpty) {
-      ScaffoldMessenger.of(context).showSnackBar(
-        SnackBar(
-          content: Text(
-            failures.length == 1
-                ? 'Could not attach ${failures.first}'
-                : 'Could not attach ${failures.length} of ${files.length} files',
-          ),
-        ),
-      );
+    final message = attachBatchMessage(
+      // Attempted, not picked: a file refused on size has its own clause, and
+      // counting it here would make "2 of 4 files" read as though the other two
+      // landed.
+      total: files.length - tooLarge.length,
+      failures: failures,
+      tooLarge: tooLarge,
+      rerouted: rerouted,
+    );
+    if (message != null) {
+      ScaffoldMessenger.of(context).showSnackBar(SnackBar(content: Text(message)));
     }
   }
 
@@ -2273,26 +2517,62 @@ class _SessionScreenState extends State<SessionScreen>
     unawaited(_saveAttachments()); // #113 — a removed chip must stay removed
   }
 
-  Future<ImageSource?> _chooseImageSource() {
-    return showModalBottomSheet<ImageSource>(
+  Future<AttachSource?> _chooseAttachSource() {
+    return showModalBottomSheet<AttachSource>(
       context: context,
       showDragHandle: true,
-      builder: (context) => SafeArea(
-        child: Column(
-          mainAxisSize: MainAxisSize.min,
-          children: [
-            ListTile(
-              leading: const Icon(Icons.photo_camera_outlined),
-              title: const Text('Camera'),
-              onTap: () => Navigator.pop(context, ImageSource.camera),
-            ),
-            ListTile(
-              leading: const Icon(Icons.photo_library_outlined),
-              title: const Text('Gallery'),
-              onTap: () => Navigator.pop(context, ImageSource.gallery),
-            ),
-          ],
-        ),
+      builder: (context) => AttachSourceSheet(
+        sources: attachSourcesFor(desktop: isDesktopPlatform()),
+      ),
+    );
+  }
+
+  /// The attach button: pick a source, then take that source's route (#166).
+  ///
+  /// Camera and Gallery go to `image_picker` and the image upload; Files goes to
+  /// the OS document picker and the SAME staging a desktop drop uses. The fork
+  /// is here and nowhere else, so neither route can grow its own idea of what an
+  /// attachment is.
+  Future<void> _pickAndAttach() async {
+    // Before the sheet, not after the picker: with no session there is nowhere
+    // to put an attachment, and letting someone browse their files first and
+    // then dropping the whole pick in silence is the worse of the two.
+    if (_session == null) return;
+    final source = await _chooseAttachSource();
+    if (source == null || !mounted) return;
+    if (source == AttachSource.files) return _pickAndAttachFiles();
+    await _pickAndSendImage(
+      source == AttachSource.camera ? ImageSource.camera : ImageSource.gallery,
+    );
+  }
+
+  /// #166 — the Files source: the OS document picker, staged exactly like a
+  /// dropped file.
+  ///
+  /// No file type is filtered: the point of the issue is the PDF, the log and
+  /// the archive that `image_picker` cannot see. The picked bytes are what
+  /// travels — never the picked path — because Android hands back a `content://`
+  /// URI rather than a filesystem path, and even a real path would name a file
+  /// the agent cannot open when the session lives on another machine.
+  Future<void> _pickAndAttachFiles() async {
+    List<XFile> picked;
+    try {
+      picked = await openFiles();
+    } catch (e) {
+      if (mounted) {
+        ScaffoldMessenger.of(context).showSnackBar(
+          SnackBar(content: Text('Could not open picker: $e')),
+        );
+      }
+      return;
+    }
+    if (picked.isEmpty || !mounted) return;
+    await _attachFiles(
+      [for (final f in picked) AttachCandidate.fromXFile(f)],
+      // Decided ONCE, before the first upload — see [_attachFiles].
+      toCompose: pasteImageIntoCompose(
+        activeLens: _activeLens,
+        composeFocused: _composeFocusNode.hasFocus,
       ),
     );
   }
@@ -2301,11 +2581,9 @@ class _SessionScreenState extends State<SessionScreen>
   /// returns the exact (already bracketed-paste-wrapped) string the server
   /// expects fed straight into the PTY — sent directly, bypassing
   /// [Terminal.paste] to avoid double-wrapping it.
-  Future<void> _pickAndSendImage() async {
+  Future<void> _pickAndSendImage(ImageSource source) async {
     final session = _session;
     if (session == null) return;
-    final source = await _chooseImageSource();
-    if (source == null || !mounted) return;
     // #68: the gallery can attach MANY images in one pick (pickMultiImage); the
     // camera stays a single capture. Each is uploaded + staged independently.
     List<XFile> files;
@@ -2334,7 +2612,9 @@ class _SessionScreenState extends State<SessionScreen>
       activeLens: _activeLens,
       composeFocused: _composeFocusNode.hasFocus,
     );
-    var failures = 0;
+    // Names, not a count: `attachBatchMessage` speaks about files, and the same
+    // message builder now serves every route behind the Attach button.
+    final failures = <String>[];
     final rawPaths = <String>[];
     for (final file in files) {
       try {
@@ -2353,7 +2633,7 @@ class _SessionScreenState extends State<SessionScreen>
           rawPaths.add(path);
         }
       } catch (_) {
-        failures++;
+        failures.add(file.name);
       }
     }
     // #90: one frame for the whole pick, NOT one per file. Sending a paste per
@@ -2361,16 +2641,25 @@ class _SessionScreenState extends State<SessionScreen>
     // arrive in one PTY read and the TUI folds them, so a multi-select pick
     // delivered only its FIRST image. No submit CR: this is the user's own
     // prompt line and they press Enter themselves.
-    if (rawPaths.isNotEmpty) {
-      _connection?.sendInput(buildPastedPaths(rawPaths));
-    }
-    if (!toCompose && mounted) _scrollToBottom();
-    if (failures > 0 && mounted) {
-      ScaffoldMessenger.of(context).showSnackBar(
-        SnackBar(
-          content: Text('$failures of ${files.length} image(s) failed to upload'),
-        ),
-      );
+    // #166: through the SAME deliver-or-stage rule the Files route uses. This
+    // was `_connection?.sendInput(...)`, which lost a finished pick whenever the
+    // screen had been disposed — the connection is closed but NOT nulled there,
+    // so the send silently no-ops. Same button, same failure, one function away.
+    final rerouted = _deliverOrStagePaths([
+      for (final p in rawPaths) (name: p.split(RegExp(r'[\\/]')).last, path: p),
+    ]);
+    if (!mounted) return;
+    // The reroute count was being DISCARDED here, so a pick that staged instead
+    // of pasting said nothing at all — the one case where the user most needs
+    // telling, because the images are not where they were aiming them.
+    final message = attachBatchMessage(
+      total: files.length,
+      failures: failures,
+      tooLarge: const [],
+      rerouted: rerouted,
+    );
+    if (message != null) {
+      ScaffoldMessenger.of(context).showSnackBar(SnackBar(content: Text(message)));
     }
   }
 
@@ -2423,8 +2712,14 @@ class _SessionScreenState extends State<SessionScreen>
         final path = reference.replaceAll(RegExp('\x1b\\[2(?:00|01)~'), '');
         _addComposeAttachment(png.bytes, path);
       } else {
-        _connection?.sendInput(reference);
-        _scrollToBottom();
+        // #166: the same deliver-or-stage rule as every other upload. This was
+        // `_connection?.sendInput(reference)` — the THIRD copy of the
+        // closed-but-not-nulled silent loss, and the last one: no uploaded path
+        // now reaches the PTY except through `_deliverOrStagePaths`.
+        final path = reference.replaceAll(RegExp('\x1b\\[2(?:00|01)~'), '');
+        _deliverOrStagePaths([
+          (name: path.split(RegExp(r'[\\/]')).last, path: path),
+        ]);
       }
     } catch (e) {
       if (mounted) {
@@ -2630,6 +2925,33 @@ class _SessionScreenState extends State<SessionScreen>
     } else {
       await prefs.setString('wt_draft_${widget.sessionId}', text);
     }
+  }
+
+  /// Persists [staged] when this screen is already disposed, by MERGING into
+  /// whatever is stored now rather than overwriting it.
+  ///
+  /// The disposed State's own `_attachments` is not the truth any more: the user
+  /// may have re-entered the session, and that new screen has restored and
+  /// possibly edited the same key. Only the paths this batch actually uploaded
+  /// are added, so nothing removed over there comes back.
+  ///
+  /// It arbitrates WRITE order, not read order, and cannot do better without a
+  /// change notification: a new screen that restored before this write lands
+  /// does not see the merged paths, and its own next save drops them again.
+  /// Narrow (back out mid-upload, re-enter within the upload window, then edit
+  /// or send) and strictly better than the alternative, which loses the batch
+  /// every time rather than in that one ordering.
+  Future<void> _persistStagedAfterDispose(
+    List<_ComposeAttachment> staged,
+  ) async {
+    if (staged.isEmpty) return;
+    final prefs = await SharedPreferences.getInstance();
+    final key = 'wt_attach_${widget.sessionId}';
+    final merged = mergeStagedAttachments(
+      prefs.getString(key),
+      [for (final a in staged) {'path': a.path, 'name': a.name}],
+    );
+    await prefs.setString(key, merged);
   }
 
   /// Persists the STAGED ATTACHMENTS beside the draft text (#113).
@@ -3198,7 +3520,7 @@ class _SessionScreenState extends State<SessionScreen>
               altActive: _altSticky,
               onToggleAlt: () => setState(() => _altSticky = !_altSticky),
               onPaste: _pasteFromClipboard,
-              onImage: _pickAndSendImage,
+              onImage: _pickAndAttach,
               rawMode: _rawMode,
               onToggleRawMode: () => _setRawMode(!_rawMode),
               // #30/#11: hide the raw-keyboard toggle on desktop — there it
