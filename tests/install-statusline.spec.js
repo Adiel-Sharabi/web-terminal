@@ -329,4 +329,94 @@ test.describe('install-statusline', () => {
     expect(rendered).not.toContain('%');
     expect(rendered.length).toBeGreaterThan(0);
   });
+
+  // --- The command is PARSED, and every interpreter shape is ordinary ----------
+  // Four review rounds each found a different status-line command that this tool
+  // read wrongly and then ACTED on. The worst of them returned the whole command
+  // as if it were a path, created `C:\usr\bin\env bash ~\.claude\statusline.sh`
+  // on the drive root, never touched the real status line, and exited 0 reporting
+  // success. These pin the shapes; the two structural guards below pin what
+  // happens when a shape defeats the parse anyway.
+  for (const [label, commandFor] of [
+    ['an env-shebang interpreter', (p) => `/usr/bin/env bash ${p}`],
+    ['a quoted Windows bash.exe', (p) => `"C:/Program Files/Git/bin/bash.exe" ${p}`],
+    ['an interpreter flag', (p) => `bash -l ${p}`],
+    ['a bare path with no interpreter', (p) => p],
+  ]) {
+    test(`${label} still names the script we must patch`, () => {
+      const home = makeHome();
+      const own = foreignScript(home, 'other-line.sh');
+      const command = commandFor(own.posix);
+      fs.writeFileSync(path.join(home, '.claude', 'settings.json'), JSON.stringify({
+        statusLine: { type: 'command', command },
+      }));
+
+      const out = runInstaller(home);
+
+      // The real script is the one that got the push block...
+      expect(fs.readFileSync(own.native, 'utf8')).toContain('wt-push-status.sh');
+      // ...their command is untouched, and no decoy was left at our default path.
+      expect(readSettings(home).statusLine.command).toBe(command);
+      expect(fs.existsSync(scriptPath(home))).toBe(false);
+      expect(out).toContain('left alone');
+
+      // And nothing was created anywhere else under the home we gave it. This is
+      // the assertion that fails loudest on a misparse: the junk path is derived
+      // from the command, so it is not something a spec can name in advance.
+      const stray = fs.readdirSync(path.join(home, '.claude'))
+        .filter((f) => f !== 'other-line.sh' && f !== 'settings.json' && !f.endsWith('.bak'));
+      expect(stray).toEqual([]);
+    });
+  }
+
+  test('a path we did not choose gets a FILE, never a directory tree', () => {
+    // The structural guard behind the parse. A misread command yields a path
+    // whose parent does not exist; a genuine one that is merely absent sits in a
+    // directory that does. So the tool creates its own default path freely and
+    // will populate a configured-but-empty script, but it never calls mkdir on a
+    // location it inferred - which is what turned a parsing bug into a real file
+    // on a real disk. Holds even if some future shape defeats scriptInCommand.
+    const home = makeHome();
+    const deep = foreignScript(home, 'nope/deeper/line.sh');
+    fs.writeFileSync(path.join(home, '.claude', 'settings.json'), JSON.stringify({
+      statusLine: { type: 'command', command: `bash ${deep.posix}` },
+    }));
+
+    let threw = false;
+    let out;
+    try { out = runInstaller(home); } catch (e) { threw = true; out = String(e.stdout) + String(e.stderr); }
+
+    expect(threw).toBe(true);                                    // refused, not "Created"
+    expect(fs.existsSync(path.join(home, '.claude', 'nope'))).toBe(false);
+    expect(fs.existsSync(scriptPath(home))).toBe(false);         // and no decoy either
+    expect(out).toMatch(/does not exist/i);
+  });
+
+  test('a refusal about the script is preceded by the verdict on the setting', () => {
+    // Finding 3 of round four: the push half used to be planned at module load,
+    // before settings had been read - so a machine whose statusLine we could not
+    // identify was told to hand-patch ~/.claude/claude-status.sh, a file its
+    // settings never mention. Which script to patch is DECIDED by the settings
+    // half, so the settings half has to be reported first.
+    const home = makeHome();
+    const own = foreignScript(home, 'weird.sh');
+    // Present, but nothing we can inject into: no $INPUT, no push block.
+    fs.writeFileSync(own.native, '#!/bin/bash\necho hi\n');
+    fs.writeFileSync(path.join(home, '.claude', 'settings.json'), JSON.stringify({
+      statusLine: { type: 'command', command: `bash ${own.posix}` },
+    }));
+
+    let out = '';
+    try { out = runInstaller(home); } catch (e) { out = String(e.stdout) + String(e.stderr); }
+
+    // Both halves are spoken for, and the setting comes first.
+    const setting = out.indexOf('status line setting:');
+    const refusal = out.indexOf('defines no $INPUT');
+    expect(setting).toBeGreaterThan(-1);
+    expect(refusal).toBeGreaterThan(-1);
+    expect(setting).toBeLessThan(refusal);
+    // The refusal names THEIR script, never our default.
+    expect(out).toContain('weird.sh');
+    expect(out).not.toContain('claude-status.sh defines no');
+  });
 });

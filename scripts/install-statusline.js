@@ -136,6 +136,13 @@ set -u
 
 INPUT=$(cat)
 
+# node absent is not the same as a payload that would not parse, and 2>/dev/null
+# cannot tell you which you have: both render a healthy-looking "folder|branch"
+# with every metric missing. Checked separately so the line can SAY so - the
+# pusher needs node too, so this is the whole feature being dead, not one field.
+NONODE=""
+command -v node >/dev/null 2>&1 || NONODE=1
+
 FIELDS=$(printf '%s' "$INPUT" | node -e "
 let d='';
 process.stdin.on('data',c=>d+=c);
@@ -176,6 +183,7 @@ OUT="$DIR"
 [ -n "$CTX" ] && OUT="$OUT · ctx \${CTX}%"
 [ -n "$FIVE" ] && OUT="$OUT · 5h \${FIVE}%"
 [ -n "$SEVEN" ] && OUT="$OUT · 7d \${SEVEN}%"
+[ -n "$NONODE" ] && OUT="$OUT · no node"
 
 printf '%s' "$OUT"
 `;
@@ -200,33 +208,59 @@ function fail(msg) {
 // half-install this tool exists to detect. A foreign command is now resolved to the
 // script it names and only passes if THAT file already forwards the payload;
 // otherwise it fails with the one line to add and where to add it.
-// The path a status-line command actually runs, or null when the command is
-// something we cannot identify (a one-liner, a node script, an alias).
 // The script a status-line command runs, or null when the command names none we
 // can patch (npx, a .py/.js renderer, a shell one-liner).
 //
-// Not a single regex over the whole command, because both of the shapes that
-// broke it are ordinary: a QUOTED path is authoritative and may contain spaces,
-// and an unquoted one still may - `bash /c/Users/John Doe/.claude/x.sh` fed to a
-// first-non-space-run match returns "Doe/.claude/x.sh", which then matches
-// nothing and gets treated as a foreign script.
+// Not a single regex over the whole command, because the shapes that break it are
+// all ordinary. A QUOTED path is authoritative and may contain spaces; an unquoted
+// one still may (`bash /c/Users/John Doe/x.sh` fed to a first-non-space-run match
+// returns "Doe/x.sh"); and an interpreter this list does not know
+// (`/usr/bin/env bash ~/x.sh`, a quoted `bash.exe`) leaves a whole COMMAND that
+// itself ends in .sh.
+//
+// That last one is the one that bit: returning the command whole made the caller
+// treat "/usr/bin/env bash ~/.claude/statusline.sh" as a path, create
+// `C:\usr\bin\env bash ~\.claude\statusline.sh` on the drive root, never touch the
+// real status line, and exit 0 reporting success. So a bare trailing ".sh" is only
+// ever trusted when we know what precedes it: nothing, or a lead we stripped
+// ourselves. Everything else falls through to the token scan, and an unrecognised
+// command returns null and is REPORTED rather than guessed at.
 function scriptInCommand(cmd) {
   const t = cmd.trim();
+  const isSh = (x) => x.toLowerCase().endsWith('.sh');
+  // Distinguishes a path from a flag or an interpreter's bare name, so `bash -l
+  // ~/x.sh` cannot yield "-l ~/x.sh".
+  const looksLikePath = (x) => x.startsWith('/') || x.startsWith('~') ||
+    x.startsWith('.') || (x.length > 2 && x.charAt(1) === ':');
+
+  // 1. Any quoted run, not merely the first: a Windows command opens with a
+  //    quoted INTERPRETER (`"C:/Program Files/Git/bin/bash.exe" ~/x.sh`), so
+  //    stopping at the first pair reads bash.exe as the status line.
   for (const quote of ['"', "'"]) {
-    const a = t.indexOf(quote);
-    const b = a === -1 ? -1 : t.indexOf(quote, a + 1);
-    if (b > a) {
-      const inner = t.slice(a + 1, b);
-      if (inner.toLowerCase().endsWith('.sh')) return inner;
+    let i = t.indexOf(quote);
+    while (i !== -1) {
+      const end = t.indexOf(quote, i + 1);
+      if (end === -1) break;
+      const inner = t.slice(i + 1, end);
+      if (isSh(inner)) return inner;
+      i = t.indexOf(quote, end + 1);
     }
   }
-  let rest = t;
+
+  // 2. A lead we recognise and actually stripped is the ONLY case where an
+  //    unquoted path may still contain spaces.
   for (const lead of ['/bin/bash ', '/bin/sh ', 'bash ', 'sh ']) {
-    if (rest.toLowerCase().startsWith(lead)) { rest = rest.slice(lead.length).trim(); break; }
+    if (t.toLowerCase().startsWith(lead)) {
+      const rest = t.slice(lead.length).trim();
+      if (isSh(rest) && looksLikePath(rest)) return rest;
+      break;
+    }
   }
-  if (rest.toLowerCase().endsWith('.sh')) return rest;
-  const hit = rest.split(' ').find((x) => x.toLowerCase().endsWith('.sh'));
-  return hit || null;
+
+  // 3. Otherwise only a single bare path may be taken whole; anything with a
+  //    space is scanned token by token.
+  if (isSh(t) && t.indexOf(' ') === -1) return t;
+  return t.split(' ').find(isSh) || null;
 }
 
 // `bash ~/.claude/claude-status.sh` is the form Claude Code's own docs use, and
@@ -353,41 +387,76 @@ function ensureStatusLineSetting(apply) {
 
 if (!fs.existsSync(PUSHER_NATIVE)) fail(`pusher missing at ${PUSHER_NATIVE} — is the repo checked out fully?`);
 
-const seeding = !fs.existsSync(SCRIPT);
-const src = seeding ? null : fs.readFileSync(SCRIPT, 'utf8');
-const alreadyPushing = !seeding && src.includes(MARKER);
+// What to write into the status-line script, or the reason we will not. This
+// RETURNS its refusals instead of calling fail(), because every one of them names
+// SCRIPT — and when the settings half could not identify SCRIPT, that name is a
+// guess. The caller reports the settings half first, so an operator is never told
+// to hand-patch a file that nothing on the machine runs.
+function planPushBlock() {
+  const seeding = !fs.existsSync(SCRIPT);
 
-let out = null;
-if (seeding) {
-  out = SEED;
-} else if (!alreadyPushing) {
+  // A configured script that is not on disk is usually a machine whose statusLine
+  // was pointed at a renderer before that renderer existed — and seeding it there
+  // is the fix, not a hazard. What must never happen is inventing the DIRECTORY
+  // TREE as well: `/usr/bin/env bash ~/.claude/statusline.sh`, which this script
+  // once misread whole as a path, has no existing parent, and creating one is how
+  // a misparse became a real file on a real disk while the run exited 0 saying
+  // "Created".
+  //
+  // So the rule is structural rather than another special case: at a path we did
+  // not choose we may create a FILE, never a DIRECTORY. It holds even if some
+  // future command shape defeats scriptInCommand again, which the last four
+  // rounds of this review suggest is the way to bet. Our own default path is
+  // exempt — that one we chose, and a fresh machine may have no ~/.claude yet.
+  if (seeding && CONFIGURED.script && !samePath(SCRIPT, DEFAULT_SCRIPT) &&
+      !fs.existsSync(path.dirname(SCRIPT))) {
+    return {
+      error: `${CONFIGURED.where} runs ${CONFIGURED.command}, but ${SCRIPT} does not exist\n` +
+        `  and neither does the directory that would hold it.\n` +
+        `  Nothing was changed and NO file was created there — that path looks misread\n` +
+        `  rather than merely empty. Fix that setting, or add this line to the script it\n` +
+        `  should name, after that script reads stdin:\n` +
+        `    echo "$INPUT" | bash "${PUSHER}" "$SID" &`,
+    };
+  }
+  if (seeding) return { seeding, out: SEED };
+
+  const src = fs.readFileSync(SCRIPT, 'utf8');
+  if (src.includes(MARKER)) return { seeding, out: null };
+
   // The script must expose the two variables the injected line uses. If it does not,
   // this is not the script we think it is: report and stop rather than write a block
   // that would silently push nothing.
   for (const v of ['INPUT', 'SID']) {
     if (!new RegExp(`^\\s*${v}=`, 'm').test(src)) {
-      fail(`${SCRIPT} defines no $${v}, so the injected push would be empty.\n` +
-        `  Nothing was changed. Add this line yourself, after the script reads stdin:\n` +
-        `    echo "$INPUT" | bash "${PUSHER}" "$SID" &`);
+      return {
+        error: `${SCRIPT} defines no $${v}, so the injected push would be empty.\n` +
+          `  Nothing was changed. Add this line yourself, after the script reads stdin:\n` +
+          `    echo "$INPUT" | bash "${PUSHER}" "$SID" &`,
+      };
     }
   }
 
   const start = src.indexOf(BLOCK_START);
   if (start === -1) {
-    fail(`could not find the existing push block in ${SCRIPT}.\n` +
-      `  Nothing was changed — the file was NOT guessed at. Add this line yourself,\n` +
-      `  anywhere after the script reads stdin into $INPUT:\n` +
-      `    echo "$INPUT" | bash "${PUSHER}" "$SID" &`);
+    return {
+      error: `could not find the existing push block in ${SCRIPT}.\n` +
+        `  Nothing was changed — the file was NOT guessed at. Add this line yourself,\n` +
+        `  anywhere after the script reads stdin into $INPUT:\n` +
+        `    echo "$INPUT" | bash "${PUSHER}" "$SID" &`,
+    };
   }
   // The block runs to the next top-level `# --- ` section header. Bounded that way
   // rather than by counting `fi`s, which nested conditionals would break.
   const rest = src.slice(start);
   const nextHeader = rest.indexOf('\n# --- ', 1);
   if (nextHeader === -1) {
-    fail(`the push block in ${SCRIPT} has no following section header, so its end\n` +
-      `  cannot be determined safely. Nothing was changed — patch it by hand.`);
+    return {
+      error: `the push block in ${SCRIPT} has no following section header, so its end\n` +
+        `  cannot be determined safely. Nothing was changed — patch it by hand.`,
+    };
   }
-  out = src.slice(0, start) + NEW_BLOCK + rest.slice(nextHeader + 1);
+  return { seeding, out: src.slice(0, start) + NEW_BLOCK + rest.slice(nextHeader + 1) };
 }
 
 (async () => {
@@ -402,6 +471,18 @@ if (seeding) {
   //    unparseable settings.json left behind a script that nothing runs, which
   //    is the same half-installed shape from the other direction.
   const settingsPlan = ensureStatusLineSetting(false);
+
+  // ...and only THEN decide what to do with the script, because which script that
+  // is comes out of the settings half. A refusal here used to be raised at module
+  // load, before any of the above had been read, so a machine whose statusLine we
+  // could not identify was told to hand-patch ~/.claude/claude-status.sh — a file
+  // its settings never mentioned.
+  const plan = planPushBlock();
+  if (plan.error) {
+    console.error('install-statusline: status line setting: ' + settingsPlan.msg);
+    fail(plan.error);
+  }
+  const { out, seeding } = plan;
 
   // The server gate guards only the PUSH half. It is asked for whenever we would
   // write a push block; the settings half is unaffected by server version.
@@ -428,6 +509,8 @@ if (seeding) {
     else if (seeding) console.log(`Push block: would CREATE ${SCRIPT} (no status line on this machine).`);
     else console.log(`Push block: would patch ${SCRIPT} (push block -> ${PUSHER}).`);
     console.log('Status line setting: ' + settingsPlan.msg);
+    // Covers BOTH halves: a broken push half has already exited 1 above, having
+    // reported this one first. Reaching here means the only verdict left is this.
     process.exit(settingsPlan.ok ? 0 : 1);
   }
 
@@ -437,16 +520,20 @@ if (seeding) {
   if (out === null) {
     console.log('Push block: already installed — status line forwards the raw payload. No change.');
   } else {
+    // Announced AFTER the write lands. A failing writeFileSync throws, and the
+    // "Patched"/"Created" line had already been printed by then — leaving a run
+    // that says it patched a file it did not, which is the exact false-green this
+    // whole script exists to remove.
+    let backup = null;
     if (!seeding) {
-      const backup = SCRIPT + '.bak';
+      backup = SCRIPT + '.bak';
       fs.copyFileSync(SCRIPT, backup);
-      console.log(`Patched ${SCRIPT}`);
-      console.log(`  backup: ${backup}`);
     } else {
       fs.mkdirSync(path.dirname(SCRIPT), { recursive: true });
-      console.log(`Created ${SCRIPT}`);
     }
     fs.writeFileSync(SCRIPT, out);
+    console.log(`${seeding ? 'Created' : 'Patched'} ${SCRIPT}`);
+    if (backup) console.log(`  backup: ${backup}`);
     console.log(`  pusher: ${PUSHER}`);
   }
 
