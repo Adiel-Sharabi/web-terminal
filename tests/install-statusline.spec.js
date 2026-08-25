@@ -489,8 +489,9 @@ test.describe('install-statusline', () => {
 
   test('a status-line path that really does contain a space is still patched', () => {
     // The other half of the same ambiguity, and the round-3 failure mode: a false
-    // REFUSAL on a healthy machine is as bad as a false green. "C:\Users\John Doe"
-    // is an ordinary Windows home directory.
+    // REFUSAL on a healthy machine is as bad as a false green. A home directory
+    // whose name contains a space is ordinary on Windows, and so is a status line
+    // kept in a folder with one.
     const home = makeHome();
     fs.mkdirSync(path.join(home, '.claude', 'my tools'), { recursive: true });
     const spaced = foreignScript(home, path.join('my tools', 'line.sh'));
