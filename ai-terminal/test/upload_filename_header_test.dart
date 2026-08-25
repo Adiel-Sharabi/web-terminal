@@ -137,6 +137,17 @@ void main() {
       expect(() => Uri.decodeComponent(out), returnsNormally);
     });
 
+    test('a name whose EXTENSION alone busts the budget still fits', () {
+      // `backup.<a Hebrew sentence>` has no real extension: the text after the
+      // last dot encodes past 80 on its own. Keeping it would return a value
+      // over budget for the server to slice mid-escape — the exact undecodable
+      // half-`%D7` the rune-walk exists to avoid.
+      final out = headerSafeFilename('backup.${'\u05D3' * 20}');
+      expect(out.length, lessThanOrEqualTo(serverFilenameBudget));
+      expect(() => Uri.decodeComponent(out), returnsNormally);
+      expect(Uri.decodeComponent(out), startsWith('backup.'));
+    });
+
     test('the budget tracks the SERVER, which owns the slice', () {
       final serverJs = File('../server.js').readAsStringSync();
       final declared = RegExp(r'function safeDropName[\s\S]{0,400}?\.slice\(0,\s*(\d+)\)')

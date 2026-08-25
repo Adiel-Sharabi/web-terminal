@@ -501,6 +501,9 @@ bool droppedFileIsImage(String name) {
 /// holiday.mp4" sends someone hunting for a fault; "holiday.mp4 is larger than
 /// the 50 MB limit" tells them what to do instead.
 String? attachBatchMessage({
+  /// How many files were actually ATTEMPTED — the batch minus anything refused
+  /// on size, which is reported separately. The two clauses partition the pick
+  /// rather than overlapping it.
   required int total,
   required List<String> failures,
   required List<String> tooLarge,
@@ -2364,23 +2367,30 @@ class _SessionScreenState extends State<SessionScreen>
       // Focus the compose bar once, after the loop — the chips and Send are there.
       if (mounted) _composeFocusNode.requestFocus();
     } else if (raw.isNotEmpty) {
-      final connection = _connection;
+      // `mounted`, not `_connection != null`. The two come apart exactly where
+      // it matters: `dispose()` CLOSES the connection without nulling it (only
+      // the lifecycle-paused path nulls), and `sendInput` opens with
+      // `if (_closed) return`. So a batch finishing just after the user backs
+      // out found a non-null, dead connection and evaporated — uploaded, never
+      // pasted, never staged, no snackbar because the screen was gone. Reading
+      // `mounted` sends the disposed case down the reroute branch below, which
+      // stages and persists it instead.
+      final connection = mounted ? _connection : null;
       if (connection != null) {
         // ONE frame for the whole batch, not one per file: consecutive pastes
         // land in a single PTY read and the TUI folds them, so a multi-file pick
         // would deliver only its first path (#90). No submit CR — this is the
-        // user's own prompt line and they press Enter themselves. Sent even if
-        // the screen is gone: the bytes were asked for and the PTY still wants
-        // them; only the UI needs a live widget.
+        // user's own prompt line and they press Enter themselves.
         connection.sendInput(buildPastedPaths([for (final r in raw) r.path]));
-        if (mounted) _scrollToBottom();
+        _scrollToBottom();
       } else {
-        // NOT a failure, and reporting one would be a lie — every byte is on the
-        // server. This branch fires ROUTINELY on the gesture #166 adds: the SAF
-        // picker takes the activity to `AppLifecycleState.paused`, which closes
-        // the socket, and the reattach on resume fetches scrollback over HTTP
-        // before the socket is back, so a quick pick outruns it. Stage the
-        // finished paths instead, where they sit one tap from being sent.
+        // NOT a failure, and reporting one would be a lie — every byte is on
+        // the server. Two ways in, both ordinary: the SAF picker takes the
+        // activity to `AppLifecycleState.paused`, which closes and nulls the
+        // socket while the reattach on resume fetches scrollback over HTTP
+        // first, so a quick pick outruns it; or the screen was disposed while
+        // the upload was in flight. Stage the finished paths instead, where
+        // they sit one tap from being sent.
         //
         // Named chips even for an image: those bytes went out of scope with the
         // loop iteration that uploaded them, and holding a whole batch of
@@ -2404,7 +2414,10 @@ class _SessionScreenState extends State<SessionScreen>
     }
     if (!mounted) return;
     final message = attachBatchMessage(
-      total: files.length,
+      // Attempted, not picked: a file refused on size has its own clause, and
+      // counting it here would make "2 of 4 files" read as though the other two
+      // landed.
+      total: files.length - tooLarge.length,
       failures: failures,
       tooLarge: tooLarge,
       rerouted: rerouted,
@@ -2876,24 +2889,6 @@ class _SessionScreenState extends State<SessionScreen>
     }
   }
 
-  /// Persists the STAGED ATTACHMENTS beside the draft text (#113).
-  ///
-  /// The draft survived a session switch and the chips did not, which is the
-  /// worst of the two states: the prompt comes back looking complete while the
-  /// images it refers to are silently gone.
-  ///
-  /// Only `path` and `name` are stored — never [_ComposeAttachment.bytes]. The
-  /// bytes are a THUMBNAIL; the upload already happened and the server owns the
-  /// file (#90 uploads precisely so a local and a peer session behave alike), so
-  /// the path is the thing that must survive. Writing image bytes into
-  /// SharedPreferences would duplicate what the server already holds and put
-  /// megabytes into a store meant for settings.
-  ///
-  /// The cost is honest and bounded: a restored image has no thumbnail and shows
-  /// as a NAMED chip — the same rendering a dropped non-image already uses (#90),
-  /// so no new widget state exists for it. Nothing can be re-fetched instead: no
-  /// endpoint serves `clipboard-images/` or `dropped-files/` back, and adding one
-  /// would mean a server release and a new file-serving surface for a thumbnail.
   /// Persists [staged] when this screen is already disposed, by MERGING into
   /// whatever is stored now rather than overwriting it.
   ///
@@ -2914,6 +2909,24 @@ class _SessionScreenState extends State<SessionScreen>
     await prefs.setString(key, merged);
   }
 
+  /// Persists the STAGED ATTACHMENTS beside the draft text (#113).
+  ///
+  /// The draft survived a session switch and the chips did not, which is the
+  /// worst of the two states: the prompt comes back looking complete while the
+  /// images it refers to are silently gone.
+  ///
+  /// Only `path` and `name` are stored — never [_ComposeAttachment.bytes]. The
+  /// bytes are a THUMBNAIL; the upload already happened and the server owns the
+  /// file (#90 uploads precisely so a local and a peer session behave alike), so
+  /// the path is the thing that must survive. Writing image bytes into
+  /// SharedPreferences would duplicate what the server already holds and put
+  /// megabytes into a store meant for settings.
+  ///
+  /// The cost is honest and bounded: a restored image has no thumbnail and shows
+  /// as a NAMED chip — the same rendering a dropped non-image already uses (#90),
+  /// so no new widget state exists for it. Nothing can be re-fetched instead: no
+  /// endpoint serves `clipboard-images/` or `dropped-files/` back, and adding one
+  /// would mean a server release and a new file-serving surface for a thumbnail.
   Future<void> _saveAttachments() async {
     final prefs = await SharedPreferences.getInstance();
     final key = 'wt_attach_${widget.sessionId}';

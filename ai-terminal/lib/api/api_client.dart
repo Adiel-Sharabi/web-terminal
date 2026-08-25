@@ -75,8 +75,14 @@ String headerSafeFilename(String name) {
   // string: slicing that could end mid-escape (`%D7`), which is not decodable
   // at all.
   final dot = name.lastIndexOf('.');
-  final ext = dot > 0 ? Uri.encodeComponent(name.substring(dot)) : '';
-  final stem = dot > 0 ? name.substring(0, dot) : name;
+  var ext = dot > 0 ? Uri.encodeComponent(name.substring(dot)) : '';
+  // An "extension" can be longer than the whole budget — `backup.<a Hebrew
+  // sentence>` has no real extension at all — and keeping it would return a
+  // value OVER budget, which the server then slices mid-`%D7`: precisely the
+  // undecodable half-escape the rune-walk below exists to avoid. Past a quarter
+  // of the budget it is not an extension worth saving.
+  if (ext.length > serverFilenameBudget ~/ 4) ext = '';
+  final stem = ext.isEmpty ? name : name.substring(0, dot);
   final out = StringBuffer();
   var used = ext.length;
   for (final rune in stem.runes) {

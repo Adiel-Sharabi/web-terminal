@@ -236,12 +236,15 @@ void main() {
     });
 
     test('a batch that failed BOTH ways reports both, in one line', () {
+      // `total` is what was ATTEMPTED — the two over-limit files are reported
+      // by their own clause, so counting them in the denominator would make
+      // "2 of 4" read as though the other two landed. Nothing landed here.
       final msg = attachBatchMessage(
-        total: 4,
+        total: 2,
         failures: const ['a.pdf', 'b.zip'],
         tooLarge: const ['c.mp4', 'd.mov'],
       );
-      expect(msg, contains('Could not attach 2 of 4 files'));
+      expect(msg, contains('Could not attach 2 of 2 files'));
       expect(msg, contains('2 files are larger than the 50 MB limit'));
       expect('\n'.allMatches(msg!), isEmpty); // one snackbar, one line
     });
