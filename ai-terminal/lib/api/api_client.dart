@@ -39,6 +39,30 @@ class ApiException implements Exception {
 }
 
 /// A stateless client for one server's REST + WebSocket surface.
+/// A file name that can actually ride an HTTP header value.
+///
+/// **This is not tidiness — a raw name FAILS THE WHOLE ATTACH.** `dart:io`'s
+/// `HttpHeaders` accepts a value byte only when it is `> 31 && < 128`, and
+/// throws `FormatException` before a byte reaches the wire otherwise; the
+/// upload's own catch then reports `Server unreachable`, so a Hebrew, accented
+/// or emoji file name surfaces as "Could not attach `<name>`" with no hint of the
+/// cause. Reproduced against a real loopback server in
+/// `test/upload_filename_header_test.dart` — a MockClient never traverses that
+/// validation, which is why the drop path (#90) shipped with it unnoticed: the
+/// names it meets come from a desktop, and #166 aims the same header at a
+/// phone's Downloads folder.
+///
+/// Encoded ONLY when it has to be. The server slices the name through
+/// `safeDropName`, which maps anything outside `[A-Za-z0-9._-]` to `_`, so
+/// encoding unconditionally would land `my_20file.pdf` on disk where today's
+/// space gives `my_file.pdf`. The encoding is recoverable
+/// (`Uri.decodeComponent`), so a server that later wants the real name can have
+/// it without a second client release.
+String headerSafeFilename(String name) =>
+    name.codeUnits.every((c) => c > 31 && c < 128)
+        ? name
+        : Uri.encodeComponent(name);
+
 class ApiClient {
   /// The server this client talks to.
   final ServerConfig server;
@@ -593,8 +617,9 @@ class ApiClient {
   ///
   /// The SERVER owns this number (`express.raw({ limit: '50mb' })` in
   /// `server.js`); this is a copy so the client can refuse a file before
-  /// spending minutes of a phone's data earning a 413. `test/upload_limit_test`
-  /// reads the server's own line and fails if the two ever drift.
+  /// spending minutes of a phone's data earning a 413. The drift guard lives in
+  /// `test/mobile_file_attach_test.dart` ("the limit tracks the SERVER") — it
+  /// reads server.js's own line and goes red if the two ever disagree.
   static const int uploadLimitBytes = 50 * 1024 * 1024;
 
   /// Uploads an arbitrary DROPPED file (#90) and returns its path on the
@@ -618,7 +643,7 @@ class ApiClient {
               'Authorization': 'Bearer ${server.bearerToken}',
               'Content-Type': 'application/octet-stream',
               // Sanitised server-side — it is joined onto a path there.
-              'X-Filename': filename,
+              'X-Filename': headerSafeFilename(filename),
             },
             body: bytes,
           )

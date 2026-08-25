@@ -2252,7 +2252,11 @@ class _SessionScreenState extends State<SessionScreen>
     if (session == null || files.isEmpty) return;
     final failures = <String>[];
     final tooLarge = <String>[];
-    final rawPaths = <String>[];
+    // Name AND path: the socket can vanish after the uploads succeed, and the
+    // report then has to name exactly the files that went nowhere — not the
+    // whole batch, which would re-blame an already-counted failure and claim
+    // failure for one that was refused on size and never attempted.
+    final raw = <({String name, String path})>[];
     for (final file in files) {
       try {
         final bytes = await file.read();
@@ -2269,14 +2273,22 @@ class _SessionScreenState extends State<SessionScreen>
           // of mobile data spent to earn a 413, and a picked video clears the
           // limit easily. Named separately because "could not attach" would
           // send someone hunting for a fault that is really a size.
+          //
+          // It buys BANDWIDTH, not memory, and cannot save the app from a huge
+          // pick: `file_selector_android` has already read the whole file into
+          // memory and copied it to the cache before `openFiles()` returns, so
+          // a 1.5 GB video dies in the plugin long before this line runs.
           tooLarge.add(file.name);
           continue;
         }
         final path = await ApiClient(
           session.server,
         ).uploadDroppedFile(bytes, filename: file.name);
-        if (!mounted) return;
         if (toCompose) {
+          // Guards the setState, and NOT the loop: an early return here would
+          // discard paths that are already uploaded — the same silent loss the
+          // null-connection branch below exists to stop.
+          if (!mounted) return;
           setState(() => _attachments.add(_ComposeAttachment(
                 path: path,
                 // Thumbnail only for an image; everything else gets a named chip.
@@ -2284,34 +2296,37 @@ class _SessionScreenState extends State<SessionScreen>
                 name: file.name,
               )));
         } else {
-          rawPaths.add(path);
+          raw.add((name: file.name, path: path));
         }
       } catch (_) {
         failures.add(file.name);
       }
     }
-    if (!mounted) return;
     if (toCompose) {
+      if (!mounted) return;
       unawaited(_saveAttachments()); // #113 — once, after the whole batch
       // Focus the compose bar once, after the loop — the chips and Send are there.
       _composeFocusNode.requestFocus();
-    } else if (rawPaths.isNotEmpty) {
+    } else if (raw.isNotEmpty) {
       final connection = _connection;
       if (connection == null) {
-        // The upload succeeded and there is nowhere to put the result. Saying so
-        // is the whole fix: this branch used to be `_connection?.sendInput(...)`,
+        // The uploads succeeded and there is nowhere to put them. Saying so is
+        // the whole fix: this branch used to be `_connection?.sendInput(...)`,
         // which discarded a finished multi-file pick in complete silence — no
         // chip, no paste, no error — while the app was reconnecting.
-        failures.addAll(files.map((f) => f.name));
+        failures.addAll(raw.map((r) => r.name));
       } else {
         // ONE frame for the whole batch, not one per file: consecutive pastes
         // land in a single PTY read and the TUI folds them, so a multi-file pick
         // would deliver only its first path (#90). No submit CR — this is the
-        // user's own prompt line and they press Enter themselves.
-        connection.sendInput(buildPastedPaths(rawPaths));
-        _scrollToBottom();
+        // user's own prompt line and they press Enter themselves. Sent even if
+        // the screen is gone: the bytes were asked for and the PTY still wants
+        // them; only the UI below needs a live widget.
+        connection.sendInput(buildPastedPaths([for (final r in raw) r.path]));
+        if (mounted) _scrollToBottom();
       }
     }
+    if (!mounted) return;
     final message = attachBatchMessage(
       total: files.length,
       failures: failures,

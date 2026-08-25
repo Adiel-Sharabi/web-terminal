@@ -38,7 +38,9 @@ void main() {
 
     test('desktop does NOT: it already has the drop (#90)', () {
       // Two doors to one capability is the thing the issue explicitly rules
-      // out, and a desktop `openFiles()` has no endorsed implementation here.
+      // out. It is a product decision, not a capability limit —
+      // file_selector_windows IS endorsed and in our lock, so opening this row
+      // on the desktop would work if the drop ever proves not to be enough.
       expect(
         attachSourcesFor(desktop: true),
         isNot(contains(AttachSource.files)),
@@ -214,8 +216,12 @@ void main() {
       // data on a 413. If server.js's own limit moves, this goes red rather
       // than the app quietly refusing files the server would have taken.
       final serverJs = File('../server.js').readAsStringSync();
+      // Anchored on the ROUTE, not on the words "upload-file": the first
+      // occurrence of those in server.js is inside the ~280 KB single-line
+      // SERVER_VERSION comment, which grows with every release and would
+      // eventually swallow the match.
       final declared = RegExp(
-              r"upload-file[\s\S]{0,200}?limit:\s*'(\d+)mb'")
+              r"app\.post\('/api/upload-file'[\s\S]{0,200}?limit:\s*'(\d+)mb'")
           .firstMatch(serverJs);
       expect(declared, isNotNull,
           reason: "could not find /api/upload-file's raw-body limit in server.js");
@@ -249,7 +255,10 @@ void main() {
       // cacheWidth is what wraps the provider; a bare MemoryImage here means
       // the chip is decoding the whole photo.
       expect(provider, isA<ResizeImage>());
-      expect((provider as ResizeImage).width, 104);
+      // Off the real device pixel ratio — a hardcoded 2x decodes a 3x phone's
+      // thumbnail at a third of the resolution it draws.
+      expect((provider as ResizeImage).width,
+          (52 * tester.view.devicePixelRatio).round());
       expect(provider.height, isNull, reason: 'pinning both squashes the aspect');
     });
   });
