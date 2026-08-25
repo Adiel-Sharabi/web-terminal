@@ -487,6 +487,35 @@ bool droppedFileIsImage(String name) {
   return false;
 }
 
+/// What to tell the user after an attach batch (#90/#166), or null when every
+/// file landed and there is nothing to say.
+///
+/// One line rather than a snackbar per category: two stacked snackbars mean the
+/// first is unreadable, and a batch can fail both ways at once (a picked video
+/// over the limit next to a file the upload lost).
+///
+/// Size is named separately from failure on purpose. "Could not attach
+/// holiday.mp4" sends someone hunting for a fault; "holiday.mp4 is larger than
+/// the 50 MB limit" tells them what to do instead.
+String? attachBatchMessage({
+  required int total,
+  required List<String> failures,
+  required List<String> tooLarge,
+}) {
+  final limitMb = ApiClient.uploadLimitBytes ~/ (1024 * 1024);
+  final parts = <String>[
+    if (failures.length == 1)
+      'Could not attach ${failures.first}'
+    else if (failures.length > 1)
+      'Could not attach ${failures.length} of $total files',
+    if (tooLarge.length == 1)
+      '${tooLarge.first} is larger than the $limitMb MB limit'
+    else if (tooLarge.length > 1)
+      '${tooLarge.length} files are larger than the $limitMb MB limit',
+  ];
+  return parts.isEmpty ? null : parts.join(' — ');
+}
+
 /// One file on its way to becoming an attachment, whichever gesture produced it
 /// — a desktop drop (#90) or a mobile Files pick (#166).
 ///
@@ -496,9 +525,12 @@ bool droppedFileIsImage(String name) {
 /// indistinguishable from a dropped one everywhere downstream. Adding a third
 /// gesture means adding a factory here, not another copy of that sequence.
 ///
-/// [read] is a callback rather than the bytes themselves because a batch is
-/// uploaded one file at a time: reading a whole multi-file pick into memory up
-/// front would hold every byte of it at once for no gain.
+/// [read] is a callback rather than the bytes themselves so the two gestures can
+/// each keep their own way of producing them. It buys no memory on Android,
+/// and the comment here used to claim it did: `file_selector_android` returns
+/// `XFile.fromData(file.bytes, …)`, so the ENTIRE pick is already resident
+/// before this class ever sees it, and `read()` is a re-read of memory. A
+/// desktop drop is the lazy one.
 class AttachCandidate {
   const AttachCandidate({required this.name, required this.read});
 
@@ -2219,14 +2251,25 @@ class _SessionScreenState extends State<SessionScreen>
     final session = _session;
     if (session == null || files.isEmpty) return;
     final failures = <String>[];
+    final tooLarge = <String>[];
     final rawPaths = <String>[];
     for (final file in files) {
       try {
         final bytes = await file.read();
         if (bytes.isEmpty) {
-          // A folder drop reads as empty rather than failing; say so plainly
-          // instead of staging a chip that would deliver nothing.
+          // A folder drop reads as empty rather than failing, and a pick can
+          // name a genuinely empty file (a just-rotated log). Either way the
+          // server rejects an empty body with 400, so report it here rather
+          // than staging a chip that would deliver nothing.
           failures.add(file.name);
+          continue;
+        }
+        if (bytes.length > ApiClient.uploadLimitBytes) {
+          // Caught before the upload, not after it: on a phone this is minutes
+          // of mobile data spent to earn a 413, and a picked video clears the
+          // limit easily. Named separately because "could not attach" would
+          // send someone hunting for a fault that is really a size.
+          tooLarge.add(file.name);
           continue;
         }
         final path = await ApiClient(
@@ -2253,23 +2296,29 @@ class _SessionScreenState extends State<SessionScreen>
       // Focus the compose bar once, after the loop — the chips and Send are there.
       _composeFocusNode.requestFocus();
     } else if (rawPaths.isNotEmpty) {
-      // ONE frame for the whole batch, not one per file: consecutive pastes land
-      // in a single PTY read and the TUI folds them, so a multi-file pick would
-      // deliver only its first path (#90). No submit CR — this is the user's own
-      // prompt line and they press Enter themselves.
-      _connection?.sendInput(buildPastedPaths(rawPaths));
-      _scrollToBottom();
+      final connection = _connection;
+      if (connection == null) {
+        // The upload succeeded and there is nowhere to put the result. Saying so
+        // is the whole fix: this branch used to be `_connection?.sendInput(...)`,
+        // which discarded a finished multi-file pick in complete silence — no
+        // chip, no paste, no error — while the app was reconnecting.
+        failures.addAll(files.map((f) => f.name));
+      } else {
+        // ONE frame for the whole batch, not one per file: consecutive pastes
+        // land in a single PTY read and the TUI folds them, so a multi-file pick
+        // would deliver only its first path (#90). No submit CR — this is the
+        // user's own prompt line and they press Enter themselves.
+        connection.sendInput(buildPastedPaths(rawPaths));
+        _scrollToBottom();
+      }
     }
-    if (failures.isNotEmpty) {
-      ScaffoldMessenger.of(context).showSnackBar(
-        SnackBar(
-          content: Text(
-            failures.length == 1
-                ? 'Could not attach ${failures.first}'
-                : 'Could not attach ${failures.length} of ${files.length} files',
-          ),
-        ),
-      );
+    final message = attachBatchMessage(
+      total: files.length,
+      failures: failures,
+      tooLarge: tooLarge,
+    );
+    if (message != null) {
+      ScaffoldMessenger.of(context).showSnackBar(SnackBar(content: Text(message)));
     }
   }
 
@@ -2359,6 +2408,10 @@ class _SessionScreenState extends State<SessionScreen>
   /// is here and nowhere else, so neither route can grow its own idea of what an
   /// attachment is.
   Future<void> _pickAndAttach() async {
+    // Before the sheet, not after the picker: with no session there is nowhere
+    // to put an attachment, and letting someone browse their files first and
+    // then dropping the whole pick in silence is the worse of the two.
+    if (_session == null) return;
     final source = await _chooseAttachSource();
     if (source == null || !mounted) return;
     if (source == AttachSource.files) return _pickAndAttachFiles();

@@ -11,10 +11,14 @@ enum AttachSource { camera, gallery, files }
 ///
 /// `files` is **mobile-only, and that is the whole of #166**: the desktop
 /// already reaches every file through the drag-and-drop added by #90, so a
-/// second door to one capability is exactly what that issue ruled out — and
-/// `file_selector` endorses no Windows implementation here, so the row would
-/// throw rather than open anything. The phone had no door at all: its picker is
-/// `image_picker`, which cannot see a PDF or a log.
+/// second door to one capability is exactly what that issue ruled out. The
+/// phone had no door at all: its picker is `image_picker`, which cannot see a
+/// PDF or a log.
+///
+/// It is a product decision, NOT a capability limit — `file_selector` endorses
+/// `file_selector_windows` (and linux/macos), so `openFiles()` would work on
+/// the desktop build. Opening that row there is a one-line change if the drop
+/// ever proves not to be enough; nothing here has to be fixed first.
 ///
 /// Camera and Gallery keep their positions. They are muscle memory, and the
 /// cost of reshuffling a two-item list people already know is larger than the

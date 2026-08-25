@@ -537,6 +537,13 @@ class _AttachmentThumb extends StatelessWidget {
               height: 52,
               fit: BoxFit.cover,
               gaplessPlayback: true,
+              // Decode to roughly the size actually drawn (52dp at a phone's
+              // ~2x). Without it a 12 MP photo attached through Files (#166) —
+              // which, unlike the camera-roll route, is NOT re-encoded at
+              // imageQuality 90 — inflates to tens of MB of ARGB for a 52px
+              // chip. cacheWidth alone keeps the aspect ratio; pinning both
+              // would squash it at decode time.
+              cacheWidth: 104,
               // A decode failure shouldn't crash the compose bar — show a generic
               // image glyph instead.
               errorBuilder: (_, _, _) => Container(

@@ -7,15 +7,28 @@
 // sheet offers on which platform, what a tapped row pops, and the mapping that
 // makes a picked file take the *dropped* file's staging path rather than growing
 // a third one.
+import 'dart:io';
 import 'dart:typed_data';
 
 import 'package:flutter/material.dart';
 import 'package:flutter_test/flutter_test.dart';
 
+import 'package:ai_terminal/api/api_client.dart';
 import 'package:ai_terminal/screens/session_screen.dart';
 import 'package:ai_terminal/theme/app_theme.dart';
 import 'package:ai_terminal/widgets/attach_source_sheet.dart';
+import 'package:ai_terminal/widgets/compose_bar.dart';
 import 'package:file_selector/file_selector.dart' show XFile;
+
+/// Smallest valid PNG, so the thumbnail path decodes for real.
+Uint8List _png1x1() => Uint8List.fromList(const [
+      0x89, 0x50, 0x4E, 0x47, 0x0D, 0x0A, 0x1A, 0x0A, 0x00, 0x00, 0x00, 0x0D,
+      0x49, 0x48, 0x44, 0x52, 0x00, 0x00, 0x00, 0x01, 0x00, 0x00, 0x00, 0x01,
+      0x08, 0x06, 0x00, 0x00, 0x00, 0x1F, 0x15, 0xC4, 0x89, 0x00, 0x00, 0x00,
+      0x0A, 0x49, 0x44, 0x41, 0x54, 0x78, 0x9C, 0x63, 0x00, 0x01, 0x00, 0x00,
+      0x05, 0x00, 0x01, 0x0D, 0x0A, 0x2D, 0xB4, 0x00, 0x00, 0x00, 0x00, 0x49,
+      0x45, 0x4E, 0x44, 0xAE, 0x42, 0x60, 0x82,
+    ]);
 
 void main() {
   group('attachSourcesFor', () {
@@ -152,6 +165,92 @@ void main() {
         droppedFileIsImage(AttachCandidate.fromXFile(picked('build.log', [])).name),
         isFalse,
       );
+    });
+  });
+
+  group('attachBatchMessage', () {
+    test('says nothing when the whole batch landed', () {
+      expect(
+        attachBatchMessage(total: 3, failures: const [], tooLarge: const []),
+        isNull,
+      );
+    });
+
+    test('a failure keeps the wording the drop path already had', () {
+      expect(
+        attachBatchMessage(total: 1, failures: const ['a.pdf'], tooLarge: const []),
+        'Could not attach a.pdf',
+      );
+      expect(
+        attachBatchMessage(
+            total: 3, failures: const ['a.pdf', 'b.zip'], tooLarge: const []),
+        'Could not attach 2 of 3 files',
+      );
+    });
+
+    test('a size is named as a size, never as a failure', () {
+      // "Could not attach holiday.mp4" sends someone hunting for a fault that
+      // is really a limit — the distinction is the point of the separate list.
+      final msg = attachBatchMessage(
+          total: 1, failures: const [], tooLarge: const ['holiday.mp4']);
+      expect(msg, contains('holiday.mp4'));
+      expect(msg, contains('50 MB'));
+      expect(msg, isNot(contains('Could not attach')));
+    });
+
+    test('a batch that failed BOTH ways reports both, in one line', () {
+      final msg = attachBatchMessage(
+        total: 4,
+        failures: const ['a.pdf', 'b.zip'],
+        tooLarge: const ['c.mp4', 'd.mov'],
+      );
+      expect(msg, contains('Could not attach 2 of 4 files'));
+      expect(msg, contains('2 files are larger than the 50 MB limit'));
+      expect('\n'.allMatches(msg!), isEmpty); // one snackbar, one line
+    });
+
+    test('the limit tracks the SERVER, which owns it', () {
+      // The client copy exists only to refuse a file before spending a phone's
+      // data on a 413. If server.js's own limit moves, this goes red rather
+      // than the app quietly refusing files the server would have taken.
+      final serverJs = File('../server.js').readAsStringSync();
+      final declared = RegExp(
+              r"upload-file[\s\S]{0,200}?limit:\s*'(\d+)mb'")
+          .firstMatch(serverJs);
+      expect(declared, isNotNull,
+          reason: "could not find /api/upload-file's raw-body limit in server.js");
+      expect(
+        ApiClient.uploadLimitBytes,
+        int.parse(declared!.group(1)!) * 1024 * 1024,
+      );
+    });
+  });
+
+  group('attachment thumbnails', () {
+    testWidgets('a chip decodes at chip size, not at photo size', (tester) async {
+      // A Files-picked image is NOT re-encoded the way the camera-roll route's
+      // `imageQuality: 90` re-encodes one, so its full-resolution bytes reach
+      // the chip. Decoding a 12 MP photo for a 52px square is tens of MB of
+      // ARGB on a phone — cacheWidth is what stops it.
+      await tester.pumpWidget(MaterialApp(
+        theme: AppTheme.dark,
+        home: Scaffold(
+          body: ComposeBar(
+            controller: TextEditingController(),
+            focusNode: FocusNode(),
+            onSend: () {},
+            isLive: false,
+            attachments: [ComposeAttachment(name: 'shot.png', bytes: _png1x1())],
+          ),
+        ),
+      ));
+      await tester.pump();
+      final provider = tester.widget<Image>(find.byType(Image)).image;
+      // cacheWidth is what wraps the provider; a bare MemoryImage here means
+      // the chip is decoding the whole photo.
+      expect(provider, isA<ResizeImage>());
+      expect((provider as ResizeImage).width, 104);
+      expect(provider.height, isNull, reason: 'pinning both squashes the aspect');
     });
   });
 }

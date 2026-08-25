@@ -589,6 +589,14 @@ class ApiClient {
     }
   }
 
+  /// The largest body `POST /api/upload-file` will accept.
+  ///
+  /// The SERVER owns this number (`express.raw({ limit: '50mb' })` in
+  /// `server.js`); this is a copy so the client can refuse a file before
+  /// spending minutes of a phone's data earning a 413. `test/upload_limit_test`
+  /// reads the server's own line and fails if the two ever drift.
+  static const int uploadLimitBytes = 50 * 1024 * 1024;
+
   /// Uploads an arbitrary DROPPED file (#90) and returns its path on the
   /// SERVER's disk.
   ///
