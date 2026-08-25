@@ -35,9 +35,16 @@ function foreignScript(home, name) {
   };
 }
 
-function runInstaller(home, args = []) {
+// `cwd` matters for one spec only, but it defaults to a throwaway directory for
+// ALL of them: a relative status-line command used to be resolved against the
+// installer's working directory, so a spec that got that wrong wrote a decoy into
+// the REPO ROOT and the next run inherited it. Asserting against process.cwd()
+// made the suite order-dependent in both directions - it could pollute, and it
+// could be polluted. Nothing here should ever depend on where it was launched.
+function runInstaller(home, args = [], cwd = null) {
   return execFileSync(process.execPath, [INSTALLER, '--force', ...args], {
     env: { ...process.env, HOME: home, USERPROFILE: home },
+    cwd: cwd || fs.mkdtempSync(path.join(os.tmpdir(), 'wt-statusline-cwd-')),
     encoding: 'utf8',
     windowsHide: true,
   });
@@ -368,6 +375,159 @@ test.describe('install-statusline', () => {
       expect(stray).toEqual([]);
     });
   }
+
+  // A script the installer can actually PATCH: it defines the two variables the
+  // injected line uses, carries an older push block, and has a following section
+  // header to bound it. A script that merely exists with no block is refused, on
+  // purpose - so a fixture without one tests the refusal, not the parse.
+  const PATCHABLE = [
+    '#!/bin/bash',
+    'INPUT=$(cat)',
+    'SID=""',
+    '# --- Push metrics to the local web-terminal server (old) ---',
+    'curl -s localhost:7681/api/claude-status >/dev/null &',
+    '# --- Render -----------------------------------------------',
+    'echo hi',
+    '',
+  ].join('\n');
+
+  test('a flag ARGUMENT that ends in .sh is never mistaken for the script', () => {
+    // `bash --rcfile ~/.claude/rc.sh ~/.claude/claude-status.sh` is an ordinary
+    // invocation. Taking the first .sh token patched bash's RCFILE argument,
+    // seeded a decoy at rc.sh, left the real status line untouched and exited 0
+    // saying "Created" - the same invented-path/junk-file/green-verdict shape as
+    // the round-4 defect, reproduced against the commit that was supposed to have
+    // made it structurally impossible. The "never create a directory" guard could
+    // not help: ~/.claude always exists, and that is where status lines live.
+    const home = makeHome();
+    const real = foreignScript(home, 'claude-status-real.sh');
+    const rc = foreignScript(home, 'rc.sh');
+    fs.writeFileSync(real.native, PATCHABLE);
+
+    fs.writeFileSync(path.join(home, '.claude', 'settings.json'), JSON.stringify({
+      statusLine: { type: 'command', command: `bash --rcfile ${rc.posix} ${real.posix}` },
+    }));
+
+    const out = runInstaller(home);
+
+    expect(fs.readFileSync(real.native, 'utf8')).toContain('wt-push-status.sh');
+    expect(fs.existsSync(rc.native)).toBe(false);        // no decoy at the rcfile
+    expect(fs.existsSync(scriptPath(home))).toBe(false); // nor at our default
+    expect(out).toContain('left alone');
+  });
+
+  test('a relative status-line command is reported, not resolved against our cwd', () => {
+    // Claude Code resolves `bash ./statusline.sh` against the PROJECT directory,
+    // so there is no one file on this machine to patch. Treating it as a path
+    // wrote the seed into whatever directory the INSTALLER was launched from -
+    // the repo root, when run the documented way. It is unidentifiable, and
+    // saying so is the honest answer.
+    const home = makeHome();
+    fs.writeFileSync(path.join(home, '.claude', 'settings.json'), JSON.stringify({
+      statusLine: { type: 'command', command: 'bash ./statusline.sh' },
+    }));
+    // A cwd of our own, so "did it write into the working directory" is asked of
+    // somewhere nothing else can touch. Pointing this at the repo root is how a
+    // failing run left a decoy behind that the NEXT run then tripped over.
+    const cwd = fs.mkdtempSync(path.join(os.tmpdir(), 'wt-statusline-launch-'));
+
+    let out = '';
+    let threw = false;
+    try { out = runInstaller(home, [], cwd); } catch (e) { threw = true; out = String(e.stdout) + String(e.stderr); }
+
+    expect(threw).toBe(true);
+    expect(out).toMatch(/names no \.sh script we can patch/i);
+    expect(fs.existsSync(scriptPath(home))).toBe(false);
+    expect(fs.readdirSync(cwd)).toEqual([]);   // nothing landed where it was launched
+  });
+
+  test('a quoted shell one-liner is not read as a path', () => {
+    // `sh -c "exec ~/.claude/claude-status.sh"` names a COMMAND, not a file. The
+    // quoted-run branch returned it whole, so a correctly installed machine was
+    // told its status line "does not exist" - a red verdict on a healthy box,
+    // which costs as much trust as a false green.
+    const home = makeHome();
+    const own = foreignScript(home, 'claude-status.sh');
+    fs.writeFileSync(own.native, PATCHABLE);
+    fs.writeFileSync(path.join(home, '.claude', 'settings.json'), JSON.stringify({
+      statusLine: { type: 'command', command: `sh -c "exec ${own.posix}"` },
+    }));
+
+    let out = '';
+    try { out = runInstaller(home); } catch (e) { out = String(e.stdout) + String(e.stderr); }
+
+    expect(out).toMatch(/names no \.sh script we can patch/i);
+    expect(out).not.toMatch(/does not exist/i);
+  });
+
+  test('an ambiguous command is settled by the disk, not by a guess', () => {
+    // `bash <path with a space>.sh` and `bash <script>.sh <arg>.sh` are THE SAME
+    // STRING to a parser, and whichever rule you pick blindly gets the other one
+    // wrong - either patching a file called "wrapper.sh inner.sh" that cannot
+    // exist, or refusing a machine whose home directory contains a space. Four
+    // rounds of reasoning about command shapes is enough evidence that guessing
+    // does not scale here: the disk is asked instead, and the reading that EXISTS
+    // wins.
+    const home = makeHome();
+    const wrapper = foreignScript(home, 'wrapper.sh');
+    const inner = foreignScript(home, 'inner.sh');
+    fs.writeFileSync(wrapper.native, PATCHABLE);
+    fs.writeFileSync(inner.native, '#!/bin/bash\necho inner\n');
+    fs.writeFileSync(path.join(home, '.claude', 'settings.json'), JSON.stringify({
+      statusLine: { type: 'command', command: `bash ${wrapper.posix} ${inner.posix}` },
+    }));
+
+    let out = '';
+    try { out = runInstaller(home); } catch (e) { out = String(e.stdout) + String(e.stderr); }
+
+    // The script it RUNS got the block; its argument was left alone.
+    expect(fs.readFileSync(wrapper.native, 'utf8')).toContain('wt-push-status.sh');
+    expect(fs.readFileSync(inner.native, 'utf8')).not.toContain('wt-push-status.sh');
+    expect(fs.existsSync(scriptPath(home))).toBe(false);
+    expect(out).not.toMatch(/does not exist/i);
+  });
+
+  test('a status-line path that really does contain a space is still patched', () => {
+    // The other half of the same ambiguity, and the round-3 failure mode: a false
+    // REFUSAL on a healthy machine is as bad as a false green. "C:\Users\John Doe"
+    // is an ordinary Windows home directory.
+    const home = makeHome();
+    fs.mkdirSync(path.join(home, '.claude', 'my tools'), { recursive: true });
+    const spaced = foreignScript(home, path.join('my tools', 'line.sh'));
+    fs.writeFileSync(spaced.native, PATCHABLE);
+    fs.writeFileSync(path.join(home, '.claude', 'settings.json'), JSON.stringify({
+      statusLine: { type: 'command', command: `bash ${spaced.posix}` },
+    }));
+
+    let out = '';
+    try { out = runInstaller(home); } catch (e) { out = String(e.stdout) + String(e.stderr); }
+
+    expect(fs.readFileSync(spaced.native, 'utf8')).toContain('wt-push-status.sh');
+    expect(out).toContain('left alone');
+  });
+
+  test('a trailing .sh ARGUMENT is excluded even when nothing exists to compare', () => {
+    // The disk can only vote on files that are THERE - so it abstains in the one
+    // case where the installer actually creates something. Every other ambiguity
+    // spec here uses fixtures that exist, so none of them reaches this branch:
+    // the rule has to be right without the disk's help, or the seeding path is
+    // unguarded. `bash <script>.sh theme.sh` with the script absent used to
+    // create a file literally named "statusline.sh theme.sh".
+    const home = makeHome();
+    const target = foreignScript(home, 'statusline.sh');
+    fs.writeFileSync(path.join(home, '.claude', 'settings.json'), JSON.stringify({
+      statusLine: { type: 'command', command: `bash ${target.posix} theme.sh` },
+    }));
+
+    const out = runInstaller(home);
+
+    // Seeded at the script, not at "statusline.sh theme.sh".
+    expect(fs.readFileSync(target.native, 'utf8')).toContain('wt-push-status.sh');
+    const stray = fs.readdirSync(path.join(home, '.claude'))
+      .filter((f) => f !== 'statusline.sh' && f !== 'settings.json' && !f.endsWith('.bak'));
+    expect(stray).toEqual([]);
+    expect(out).toContain('left alone');
+  });
 
   test('a path we did not choose gets a FILE, never a directory tree', () => {
     // The structural guard behind the parse. A misread command yields a path

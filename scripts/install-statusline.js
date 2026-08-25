@@ -228,10 +228,40 @@ function fail(msg) {
 function scriptInCommand(cmd) {
   const t = cmd.trim();
   const isSh = (x) => x.toLowerCase().endsWith('.sh');
-  // Distinguishes a path from a flag or an interpreter's bare name, so `bash -l
-  // ~/x.sh` cannot yield "-l ~/x.sh".
+  // A token that could name a file on THIS machine. Distinguishes a path from a
+  // flag or an interpreter's bare name, so `bash -l ~/x.sh` cannot yield
+  // "-l ~/x.sh".
+  //
+  // Deliberately NOT './x.sh' or 'x.sh': Claude Code resolves a relative command
+  // against the PROJECT directory, so there is no single file here to patch, and
+  // treating one as a path wrote a decoy into whatever directory the installer
+  // happened to be launched from — the repo root, if run the documented way.
+  // Nor '%USERPROFILE%\...', which we do not expand. Those return null and take
+  // the `opaque` branch, which reports honestly and writes nothing.
   const looksLikePath = (x) => x.startsWith('/') || x.startsWith('~') ||
-    x.startsWith('.') || (x.length > 2 && x.charAt(1) === ':');
+    x.startsWith('$HOME/') || x.startsWith('${HOME}/') ||
+    (x.length > 2 && x.charAt(1) === ':' && x.charAt(2) === '/');
+
+  // Choose among the .sh tokens of a command that has more than one.
+  //
+  // `bash --rcfile ~/.claude/rc.sh ~/.claude/claude-status.sh` is an ordinary
+  // invocation, and taking the FIRST .sh token patched bash's RCFILE ARGUMENT,
+  // left the real status line alone, and exited 0 saying "Created". But
+  // `bash A.sh B.sh` genuinely does run A.sh with B.sh as its argument. The two
+  // are told apart by whether a FLAG is present: with none, shell semantics are
+  // unambiguous and the first candidate is the script; with one, we cannot know
+  // which .sh is a flag's VALUE, so only the disk can say — and when the disk
+  // cannot say either, we return null and REPORT rather than pick. Confidently
+  // wrong is worse than absent, and every previous round of this bug was a
+  // confident pick.
+  const pick = (tokens) => {
+    const toks = tokens.filter(Boolean);
+    const cands = toks.filter((x) => isSh(x) && looksLikePath(x));
+    if (cands.length <= 1) return cands[0] || null;
+    if (!toks.some((x) => x.startsWith('-'))) return cands[0];
+    const live = cands.filter(onDisk);
+    return live.length === 1 ? live[0] : null;
+  };
 
   // 1. Any quoted run, not merely the first: a Windows command opens with a
   //    quoted INTERPRETER (`"C:/Program Files/Git/bin/bash.exe" ~/x.sh`), so
@@ -242,7 +272,9 @@ function scriptInCommand(cmd) {
       const end = t.indexOf(quote, i + 1);
       if (end === -1) break;
       const inner = t.slice(i + 1, end);
-      if (isSh(inner)) return inner;
+      // looksLikePath applies here too. Without it, `sh -c "exec ~/x.sh"`
+      // returned the quoted COMMAND as a path and hard-failed a healthy machine.
+      if (isSh(inner) && looksLikePath(inner)) return inner;
       i = t.indexOf(quote, end + 1);
     }
   }
@@ -252,15 +284,19 @@ function scriptInCommand(cmd) {
   for (const lead of ['/bin/bash ', '/bin/sh ', 'bash ', 'sh ']) {
     if (t.toLowerCase().startsWith(lead)) {
       const rest = t.slice(lead.length).trim();
-      if (isSh(rest) && looksLikePath(rest)) return rest;
-      break;
+      // The whole remainder is the script only when it cannot be anything else:
+      // no spaces at all, or a spaced path that DOES exist. `bash /c/tools/a
+      // b/x.sh` and `bash ~/wrapper.sh ~/inner.sh` are otherwise the same shape,
+      // and no rule distinguishes them — the disk does.
+      if (isSh(rest) && looksLikePath(rest) && (rest.indexOf(' ') === -1 || onDisk(rest))) return rest;
+      return pick(rest.split(' '));
     }
   }
 
-  // 3. Otherwise only a single bare path may be taken whole; anything with a
-  //    space is scanned token by token.
-  if (isSh(t) && t.indexOf(' ') === -1) return t;
-  return t.split(' ').find(isSh) || null;
+  // 3. No lead we recognise: a bare path may be taken whole, otherwise the same
+  //    candidate rules apply. `/usr/bin/env bash ~/x.sh` lands here.
+  if (isSh(t) && looksLikePath(t) && t.indexOf(' ') === -1) return t;
+  return pick(t.split(' '));
 }
 
 // `bash ~/.claude/claude-status.sh` is the form Claude Code's own docs use, and
@@ -278,6 +314,16 @@ const expandHome = (q) => {
 
 const samePath = (a, b) => toPosix(a).toLowerCase() === toPosix(b).toLowerCase();
 // The inverse of toPosix, so a POSIX path read out of a command can be stat'd.
+// Does this fragment name a file that is actually there? Used only to settle a
+// genuinely ambiguous command (see scriptInCommand step 2) — the disk is the one
+// authority that can, and four rounds of reasoning about command shapes is enough
+// evidence that guessing does not scale. Defined below its caller, which is safe
+// because nothing calls scriptInCommand until resolveConfigured() runs.
+// isFile, not existsSync: a DIRECTORY named something.sh would otherwise win the
+// vote and be "resolved" to as the status line. Only a real file can be one.
+const onDisk = (q) => {
+  try { return fs.statSync(fromPosix(expandHome(q))).isFile(); } catch { return false; }
+};
 const fromPosix = (q) => /^\/[A-Za-z]\//.test(q)
   ? q.charAt(1).toUpperCase() + ':' + q.slice(2).replace(/\//g, path.sep)
   : q;
@@ -397,27 +443,41 @@ function planPushBlock() {
 
   // A configured script that is not on disk is usually a machine whose statusLine
   // was pointed at a renderer before that renderer existed — and seeding it there
-  // is the fix, not a hazard. What must never happen is inventing the DIRECTORY
-  // TREE as well: `/usr/bin/env bash ~/.claude/statusline.sh`, which this script
-  // once misread whole as a path, has no existing parent, and creating one is how
-  // a misparse became a real file on a real disk while the run exited 0 saying
-  // "Created".
+  // is the fix, not a hazard. What must never happen is creating one at a path we
+  // did not really understand.
   //
-  // So the rule is structural rather than another special case: at a path we did
-  // not choose we may create a FILE, never a DIRECTORY. It holds even if some
-  // future command shape defeats scriptInCommand again, which the last four
-  // rounds of this review suggest is the way to bet. Our own default path is
-  // exempt — that one we chose, and a fresh machine may have no ~/.claude yet.
-  if (seeding && CONFIGURED.script && !samePath(SCRIPT, DEFAULT_SCRIPT) &&
-      !fs.existsSync(path.dirname(SCRIPT))) {
-    return {
-      error: `${CONFIGURED.where} runs ${CONFIGURED.command}, but ${SCRIPT} does not exist\n` +
-        `  and neither does the directory that would hold it.\n` +
-        `  Nothing was changed and NO file was created there — that path looks misread\n` +
-        `  rather than merely empty. Fix that setting, or add this line to the script it\n` +
-        `  should name, after that script reads stdin:\n` +
-        `    echo "$INPUT" | bash "${PUSHER}" "$SID" &`,
-    };
+  // The guard that used to stand here tested "does the parent directory exist",
+  // and its premise was FALSE: CONFIGURED.script is only ever set because we read
+  // ~/.claude/settings.json, so ~/.claude always exists by the time we ask — and
+  // that is the one directory status lines actually live in. A guard that cannot
+  // fire where the tool operates is worse than none, because it is quoted in the
+  // commit message as the reason the class of bug is closed. The parse is what
+  // closes it; these two are a floor under a future misparse, and both are things
+  // that can genuinely be false:
+  //
+  //   * the path must be ABSOLUTE, so a relative command can never resolve
+  //     against whatever directory the installer was launched from;
+  //   * the directory must already exist, so we create a FILE at a path we did
+  //     not choose, never a DIRECTORY.
+  //
+  // Our own default path is exempt from the second — that one we chose, and a
+  // fresh machine may legitimately have no ~/.claude yet.
+  if (seeding && CONFIGURED.script && !samePath(SCRIPT, DEFAULT_SCRIPT)) {
+    const why = !path.isAbsolute(SCRIPT)
+      ? 'that path is relative, so it names no one file on this machine'
+      : !fs.existsSync(path.dirname(SCRIPT))
+        ? 'and neither does the directory that would hold it'
+        : null;
+    if (why) {
+      return {
+        error: `${CONFIGURED.where} runs ${CONFIGURED.command}, but ${SCRIPT} does not exist —\n` +
+          `  ${why}.\n` +
+          `  Nothing was changed and NO file was created there; that path looks misread\n` +
+          `  rather than merely empty. Fix that setting, or add this line to the script it\n` +
+          `  should name, after that script reads stdin:\n` +
+          `    echo "$INPUT" | bash "${PUSHER}" "$SID" &`,
+      };
+    }
   }
   if (seeding) return { seeding, out: SEED };
 
@@ -505,9 +565,22 @@ function planPushBlock() {
   }
 
   if (CHECK) {
-    if (out === null) console.log('Push block: already installed — status line forwards the raw payload.');
-    else if (seeding) console.log(`Push block: would CREATE ${SCRIPT} (no status line on this machine).`);
-    else console.log(`Push block: would patch ${SCRIPT} (push block -> ${PUSHER}).`);
+    if (out === null) {
+      console.log('Push block: already installed — status line forwards the raw payload.');
+    } else if (!settingsPlan.ok) {
+      // The apply path refuses at `if (!settingsPlan.ok)` before writing anything,
+      // so announcing a plan here would describe work that will never happen.
+      console.log('Push block: nothing planned — the status line setting has to be resolved first.');
+    } else if (seeding) {
+      // "no status line on this machine" is only true when nothing is configured.
+      // With a statusLine that names a script we simply have not created yet, the
+      // very next line says one IS configured, and the report contradicted itself.
+      console.log(CONFIGURED.script
+        ? `Push block: would CREATE ${SCRIPT} (configured, but that file is not there yet).`
+        : `Push block: would CREATE ${SCRIPT} (no status line on this machine).`);
+    } else {
+      console.log(`Push block: would patch ${SCRIPT} (push block -> ${PUSHER}).`);
+    }
     console.log('Status line setting: ' + settingsPlan.msg);
     // Covers BOTH halves: a broken push half has already exited 1 above, having
     // reported this one first. Reaching here means the only verdict left is this.
