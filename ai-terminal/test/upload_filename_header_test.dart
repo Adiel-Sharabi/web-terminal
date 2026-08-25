@@ -17,12 +17,15 @@ import 'package:flutter_test/flutter_test.dart';
 void main() {
   late HttpServer server;
   late List<String?> seenFilenames;
+  late List<String?> seenEncodedFlags;
 
   setUp(() async {
     seenFilenames = <String?>[];
+    seenEncodedFlags = <String?>[];
     server = await HttpServer.bind(InternetAddress.loopbackIPv4, 0);
     server.listen((req) async {
       seenFilenames.add(req.headers.value('x-filename'));
+      seenEncodedFlags.add(req.headers.value(encodedFilenameHeader));
       await req.drain<void>();
       req.response
         ..statusCode = 200
@@ -71,6 +74,25 @@ void main() {
       seenFilenames.clear();
       await clientForServer().uploadDroppedFile(<int>[1], filename: name);
       expect(seenFilenames.single, name, reason: name);
+    }
+  });
+
+  test('an encoded name is ANNOUNCED, so the receiver need not guess', () async {
+    // The value alone is ambiguous: `100%-done.pdf` rides verbatim and would
+    // throw in a receiver that decoded everything. The marker is what lets a
+    // future server-side decode run on exactly the right values.
+    await clientForServer()
+        .uploadDroppedFile(<int>[1], filename: '\u05D3.pdf');
+    expect(seenEncodedFlags.single, '1');
+  });
+
+  test('a literal name carries no marker', () async {
+    for (final name in ['report.pdf', '100%-done.pdf', 'a b.txt']) {
+      seenFilenames.clear();
+      seenEncodedFlags.clear();
+      await clientForServer().uploadDroppedFile(<int>[1], filename: name);
+      expect(seenFilenames.single, name, reason: name);
+      expect(seenEncodedFlags.single, isNull, reason: name);
     }
   });
 

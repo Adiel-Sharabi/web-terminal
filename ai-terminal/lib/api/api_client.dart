@@ -38,7 +38,6 @@ class ApiException implements Exception {
   String toString() => 'ApiException($status, $message)';
 }
 
-/// A stateless client for one server's REST + WebSocket surface.
 /// A file name that can actually ride an HTTP header value.
 ///
 /// **This is not tidiness — a raw name FAILS THE WHOLE ATTACH.** `dart:io`'s
@@ -55,14 +54,26 @@ class ApiException implements Exception {
 /// Encoded ONLY when it has to be. The server slices the name through
 /// `safeDropName`, which maps anything outside `[A-Za-z0-9._-]` to `_`, so
 /// encoding unconditionally would land `my_20file.pdf` on disk where today's
-/// space gives `my_file.pdf`. The encoding is recoverable
-/// (`Uri.decodeComponent`), so a server that later wants the real name can have
-/// it without a second client release.
+/// space gives `my_file.pdf`.
+///
+/// Which makes the value alone AMBIGUOUS — `100%-done.pdf` rides verbatim and
+/// would blow up a receiver that decoded everything (`URIError` in node,
+/// `FormatException` in Dart). So the encoding is announced rather than guessed:
+/// [encodedFilenameHeader] is sent only alongside an encoded value, and a server
+/// that later wants the real name decodes exactly when it is present. Today's
+/// server ignores the extra header, so nothing has to ship in lockstep.
 String headerSafeFilename(String name) =>
-    name.codeUnits.every((c) => c > 31 && c < 128)
-        ? name
-        : Uri.encodeComponent(name);
+    filenameNeedsEncoding(name) ? Uri.encodeComponent(name) : name;
 
+/// Whether [name] cannot ride a header value as itself — see
+/// [headerSafeFilename] for what happens when one tries.
+bool filenameNeedsEncoding(String name) =>
+    !name.codeUnits.every((c) => c > 31 && c < 128);
+
+/// Marks `X-Filename` as percent-encoded. Absent means the value is literal.
+const String encodedFilenameHeader = 'X-Filename-Encoded';
+
+/// A stateless client for one server's REST + WebSocket surface.
 class ApiClient {
   /// The server this client talks to.
   final ServerConfig server;
@@ -644,6 +655,7 @@ class ApiClient {
               'Content-Type': 'application/octet-stream',
               // Sanitised server-side — it is joined onto a path there.
               'X-Filename': headerSafeFilename(filename),
+              if (filenameNeedsEncoding(filename)) encodedFilenameHeader: '1',
             },
             body: bytes,
           )

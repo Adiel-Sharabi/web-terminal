@@ -494,6 +494,9 @@ bool droppedFileIsImage(String name) {
 /// first is unreadable, and a batch can fail both ways at once (a picked video
 /// over the limit next to a file the upload lost).
 ///
+/// A reroute is named first and is NOT a failure: the files are on the server,
+/// they are simply waiting in the compose bar instead of in the prompt line.
+///
 /// Size is named separately from failure on purpose. "Could not attach
 /// holiday.mp4" sends someone hunting for a fault; "holiday.mp4 is larger than
 /// the 50 MB limit" tells them what to do instead.
@@ -501,9 +504,14 @@ String? attachBatchMessage({
   required int total,
   required List<String> failures,
   required List<String> tooLarge,
+  int rerouted = 0,
 }) {
   final limitMb = ApiClient.uploadLimitBytes ~/ (1024 * 1024);
   final parts = <String>[
+    if (rerouted == 1)
+      'Reconnecting — 1 file staged in the compose bar'
+    else if (rerouted > 1)
+      'Reconnecting — $rerouted files staged in the compose bar',
     if (failures.length == 1)
       'Could not attach ${failures.first}'
     else if (failures.length > 1)
@@ -532,18 +540,28 @@ String? attachBatchMessage({
 /// before this class ever sees it, and `read()` is a re-read of memory. A
 /// desktop drop is the lazy one.
 class AttachCandidate {
-  const AttachCandidate({required this.name, required this.read});
+  const AttachCandidate({
+    required this.name,
+    required this.read,
+    required this.length,
+  });
 
   /// A file from the OS document picker (#166). Deliberately reads BYTES and
   /// never touches `XFile.path`: on Android the pick is a `content://` URI with
   /// no filesystem path at all, and even a real one would name a file the agent
   /// cannot open when the session runs on another machine.
-  factory AttachCandidate.fromXFile(XFile file) =>
-      AttachCandidate(name: file.name, read: file.readAsBytes);
+  factory AttachCandidate.fromXFile(XFile file) => AttachCandidate(
+        name: file.name,
+        read: file.readAsBytes,
+        length: file.length,
+      );
 
   /// A file dropped onto the session body (#90).
-  factory AttachCandidate.fromDropItem(DropItem item) =>
-      AttachCandidate(name: item.name, read: item.readAsBytes);
+  factory AttachCandidate.fromDropItem(DropItem item) => AttachCandidate(
+        name: item.name,
+        read: item.readAsBytes,
+        length: item.length,
+      );
 
   /// The file's own name — what the chip shows, and what decides whether it is
   /// drawn as a thumbnail (see [droppedFileIsImage]).
@@ -551,6 +569,11 @@ class AttachCandidate {
 
   /// Reads the file's contents, on demand.
   final Future<Uint8List> Function() read;
+
+  /// The file's size WITHOUT reading it — a stat on the drop path, a value the
+  /// picker already knows on Android. Separate from [read] precisely so the
+  /// size limit can be applied to a 10 GB file that must never be read.
+  final Future<int> Function() length;
 }
 
 /// #83 — whether Ctrl+C (Cmd+C on macOS) should copy the CHAT lens's selection.
@@ -2252,13 +2275,26 @@ class _SessionScreenState extends State<SessionScreen>
     if (session == null || files.isEmpty) return;
     final failures = <String>[];
     final tooLarge = <String>[];
-    // Name AND path: the socket can vanish after the uploads succeed, and the
-    // report then has to name exactly the files that went nowhere — not the
-    // whole batch, which would re-blame an already-counted failure and claim
-    // failure for one that was refused on size and never attempted.
+    // Name AND path: the socket can vanish after the uploads succeed, and what
+    // happens next has to name exactly the files it happened to — not the whole
+    // batch, which would re-blame an already-counted failure and speak for one
+    // that was refused on size and never attempted.
     final raw = <({String name, String path})>[];
+    var rerouted = 0;
     for (final file in files) {
       try {
+        // The SIZE first, from a stat rather than from the bytes. Reading first
+        // and measuring after cannot guard the case that matters most: a 10 GB
+        // ISO dropped on the desktop dies inside `read()` long before any check.
+        // (On Android there is nothing left to save by then either way —
+        // `file_selector_android` has already materialised the whole pick.)
+        if (await file.length() > ApiClient.uploadLimitBytes) {
+          // Named apart from a failure because "could not attach holiday.mp4"
+          // sends someone hunting for a fault that is really a limit — and on a
+          // phone the alternative is minutes of mobile data spent to earn a 413.
+          tooLarge.add(file.name);
+          continue;
+        }
         final bytes = await file.read();
         if (bytes.isEmpty) {
           // A folder drop reads as empty rather than failing, and a pick can
@@ -2268,33 +2304,26 @@ class _SessionScreenState extends State<SessionScreen>
           failures.add(file.name);
           continue;
         }
-        if (bytes.length > ApiClient.uploadLimitBytes) {
-          // Caught before the upload, not after it: on a phone this is minutes
-          // of mobile data spent to earn a 413, and a picked video clears the
-          // limit easily. Named separately because "could not attach" would
-          // send someone hunting for a fault that is really a size.
-          //
-          // It buys BANDWIDTH, not memory, and cannot save the app from a huge
-          // pick: `file_selector_android` has already read the whole file into
-          // memory and copied it to the cache before `openFiles()` returns, so
-          // a 1.5 GB video dies in the plugin long before this line runs.
-          tooLarge.add(file.name);
-          continue;
-        }
         final path = await ApiClient(
           session.server,
         ).uploadDroppedFile(bytes, filename: file.name);
         if (toCompose) {
-          // Guards the setState, and NOT the loop: an early return here would
-          // discard paths that are already uploaded — the same silent loss the
-          // null-connection branch below exists to stop.
-          if (!mounted) return;
-          setState(() => _attachments.add(_ComposeAttachment(
-                path: path,
-                // Thumbnail only for an image; everything else gets a named chip.
-                bytes: droppedFileIsImage(file.name) ? bytes : null,
-                name: file.name,
-              )));
+          final staged = _ComposeAttachment(
+            path: path,
+            // Thumbnail only for an image; everything else gets a named chip.
+            bytes: droppedFileIsImage(file.name) ? bytes : null,
+            name: file.name,
+          );
+          // Unmounting mid-batch must not cost the files already uploaded, so
+          // this neither returns nor skips: it stages either way and only the
+          // repaint is conditional. `_saveAttachments` below needs no widget
+          // (SharedPreferences keyed on the session id), so a batch that
+          // finishes after the screen is gone still comes back with it (#113).
+          if (mounted) {
+            setState(() => _attachments.add(staged));
+          } else {
+            _attachments.add(staged);
+          }
         } else {
           raw.add((name: file.name, path: path));
         }
@@ -2303,27 +2332,41 @@ class _SessionScreenState extends State<SessionScreen>
       }
     }
     if (toCompose) {
-      if (!mounted) return;
       unawaited(_saveAttachments()); // #113 — once, after the whole batch
       // Focus the compose bar once, after the loop — the chips and Send are there.
-      _composeFocusNode.requestFocus();
+      if (mounted) _composeFocusNode.requestFocus();
     } else if (raw.isNotEmpty) {
       final connection = _connection;
-      if (connection == null) {
-        // The uploads succeeded and there is nowhere to put them. Saying so is
-        // the whole fix: this branch used to be `_connection?.sendInput(...)`,
-        // which discarded a finished multi-file pick in complete silence — no
-        // chip, no paste, no error — while the app was reconnecting.
-        failures.addAll(raw.map((r) => r.name));
-      } else {
+      if (connection != null) {
         // ONE frame for the whole batch, not one per file: consecutive pastes
         // land in a single PTY read and the TUI folds them, so a multi-file pick
         // would deliver only its first path (#90). No submit CR — this is the
         // user's own prompt line and they press Enter themselves. Sent even if
         // the screen is gone: the bytes were asked for and the PTY still wants
-        // them; only the UI below needs a live widget.
+        // them; only the UI needs a live widget.
         connection.sendInput(buildPastedPaths([for (final r in raw) r.path]));
         if (mounted) _scrollToBottom();
+      } else {
+        // NOT a failure, and reporting one would be a lie — every byte is on the
+        // server. This branch fires ROUTINELY on the gesture #166 adds: the SAF
+        // picker takes the activity to `AppLifecycleState.paused`, which closes
+        // the socket, and the reattach on resume fetches scrollback over HTTP
+        // before the socket is back, so a quick pick outruns it. Stage the
+        // finished paths instead, where they sit one tap from being sent.
+        //
+        // Named chips even for an image: those bytes went out of scope with the
+        // loop iteration that uploaded them, and holding a whole batch of
+        // full-size photos in memory to draw a thumbnail on a reconnect path is
+        // the wrong trade — the same decode cost the chip's cacheWidth avoids.
+        for (final r in raw) {
+          _attachments.add(_ComposeAttachment(path: r.path, name: r.name));
+        }
+        rerouted = raw.length;
+        unawaited(_saveAttachments());
+        if (mounted) {
+          setState(() {});
+          _composeFocusNode.requestFocus();
+        }
       }
     }
     if (!mounted) return;
@@ -2331,6 +2374,7 @@ class _SessionScreenState extends State<SessionScreen>
       total: files.length,
       failures: failures,
       tooLarge: tooLarge,
+      rerouted: rerouted,
     );
     if (message != null) {
       ScaffoldMessenger.of(context).showSnackBar(SnackBar(content: Text(message)));

@@ -140,6 +140,13 @@ void main() {
     XFile picked(String name, List<int> bytes) =>
         XFile.fromData(Uint8List.fromList(bytes), path: name);
 
+    test('the size is readable WITHOUT reading the file', () async {
+      // The guard has to run before `read()`, or a 10 GB drop dies in the read
+      // it was meant to prevent.
+      final c = AttachCandidate.fromXFile(picked('big.iso', [1, 2, 3, 4]));
+      expect(await c.length(), 4);
+    });
+
     test('an XFile keeps its name and yields its bytes', () async {
       final c = AttachCandidate.fromXFile(picked('notes.txt', [1, 2, 3]));
       expect(c.name, 'notes.txt');
@@ -198,6 +205,33 @@ void main() {
       expect(msg, contains('holiday.mp4'));
       expect(msg, contains('50 MB'));
       expect(msg, isNot(contains('Could not attach')));
+    });
+
+    test('a reroute is reported as a reroute, never as a failure', () {
+      // The SAF picker pauses the app, which closes the socket, so a terminal
+      // pick routinely finishes with nowhere to paste. The files ARE on the
+      // server — calling that "could not attach" would be a lie, and would send
+      // someone hunting for a fault that never happened.
+      final one = attachBatchMessage(
+          total: 1, failures: const [], tooLarge: const [], rerouted: 1);
+      expect(one, 'Reconnecting — 1 file staged in the compose bar');
+      expect(one, isNot(contains('Could not')));
+      expect(
+        attachBatchMessage(
+            total: 3, failures: const [], tooLarge: const [], rerouted: 3),
+        'Reconnecting — 3 files staged in the compose bar',
+      );
+    });
+
+    test('a reroute leads, and coexists with a real failure', () {
+      final msg = attachBatchMessage(
+        total: 3,
+        failures: const ['gone.pdf'],
+        tooLarge: const [],
+        rerouted: 2,
+      );
+      expect(msg, startsWith('Reconnecting — 2 files'));
+      expect(msg, contains('Could not attach gone.pdf'));
     });
 
     test('a batch that failed BOTH ways reports both, in one line', () {
