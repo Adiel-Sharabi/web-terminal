@@ -34,6 +34,7 @@ import '../services/desktop_alert_service.dart';
 import '../services/detach_window_service.dart';
 import '../services/notification_service.dart';
 import '../services/session_repository.dart';
+import '../services/session_selection.dart';
 import '../services/speech_service.dart';
 import '../theme/app_theme.dart';
 import '../util/terminal_write.dart';
@@ -753,6 +754,42 @@ bool shouldResurfaceAfterAnswer({
   required String? dismissedKey,
 }) => stillPending && dismissedKey == answeredKey;
 
+/// How a [SessionScreen] LEAVES when the session it shows is gone from the list.
+///
+/// There are three shapes of this screen and only one of them sits on a route
+/// of its own, which is the whole bug: the "session no longer active" branch
+/// announced itself and called `Navigator.maybePop()` unconditionally, and on
+/// the desktop split — where the screen is a CHILD of `AdaptiveHome`, not a
+/// pushed route — `maybePop` on the root route is a silent no-op. Nothing left,
+/// nothing was cleared, so the next sessions emission (a 30s poll, or any
+/// `/ws/notify` frame) ran the same branch again: a snackbar that re-animated
+/// itself forever over a dead pane.
+///
+/// Pure so the rule is enforceable — the three shapes are a fact about how the
+/// screen was constructed, never a guess made at the call site.
+enum SessionExit {
+  /// Pushed as its own route (phone / narrow window) — pop it.
+  popRoute,
+
+  /// The detail pane of the wide split — clear [SessionSelection], the SSOT for
+  /// what that pane shows (#76). The pane unmounts, which also cancels this
+  /// screen's subscription, so a repeat is impossible by construction.
+  clearSelection,
+
+  /// A detached single-session window (#14) — it IS the app root. There is
+  /// nothing to leave; the screen stays and reports.
+  stay,
+}
+
+SessionExit sessionExitFor({
+  required bool embedded,
+  required bool standalone,
+}) => standalone
+    ? SessionExit.stay
+    : embedded
+        ? SessionExit.clearSelection
+        : SessionExit.popRoute;
+
 class SessionScreen extends StatefulWidget {
   const SessionScreen({
     super.key,
@@ -1348,12 +1385,7 @@ class _SessionScreenState extends State<SessionScreen>
       }
     }
     if (match == null) {
-      if (_session != null && mounted) {
-        ScaffoldMessenger.of(context).showSnackBar(
-          const SnackBar(content: Text('Session no longer active.')),
-        );
-        Navigator.of(context).maybePop();
-      }
+      if (_session != null && mounted) _onSessionGone();
       return;
     }
     final previousStatus = _session?.status;
@@ -1365,6 +1397,12 @@ class _SessionScreenState extends State<SessionScreen>
     });
     if (firstLoad) {
       _attach();
+      // Symmetric with _attach(), and required because _onSessionGone cancels
+      // the poll: a session can come BACK (a server restart or worker-restore
+      // window emits one list without it). Without this the terminal
+      // reattaches and everything looks healthy while the AskUserQuestion
+      // overlay never appears on this screen again.
+      _startQuestionPolling();
       _checkTranscriptCapability();
       // Opening a session dismisses any pending OS notification for it on THIS
       // device immediately (#2) — cheap, local, covers every kind incl. an
@@ -1383,6 +1421,110 @@ class _SessionScreenState extends State<SessionScreen>
       _apiErrorReason = null;
     }
     _recomputeActiveLens();
+  }
+
+  /// The session this screen shows has left the list. Announce it once and go.
+  ///
+  /// Dropping [_session] is what makes it ONCE: it is the guard the caller
+  /// tests, so a poll/notify storm arriving before the exit takes effect can no
+  /// longer re-announce anything — and it paints the "no longer active" state
+  /// meanwhile, which is the only thing a detached window can do.
+  void _onSessionGone() {
+    // Whether this screen is the route on top. ONLY the pop consults it: a
+    // pushed SessionScreen stays mounted under a fork, and popping there takes
+    // away the route in front of the user.
+    //
+    // The announcement and the selection-clear deliberately do NOT, and that
+    // is the whole reason this is a named local rather than a test inlined at
+    // all three sites. `isCurrent` is false for ANY route above — including
+    // this screen's own modals (Kill confirm, Rename, the actions sheet, the
+    // font-size dialog). Gating them on it meant a session dying while a
+    // dialog was open produced no toast and never cleared the selection, and
+    // because `_session` is already null by then nothing retried when the
+    // dialog closed: a dead session left selected indefinitely. A persistent
+    // wrong state is worse than a toast that arrives over a fork.
+    final visible = ModalRoute.of(context)?.isCurrent ?? true;
+    final exit = sessionExitFor(
+      embedded: widget.embedded,
+      standalone: widget.standalone,
+    );
+    // Only the shapes that STAY need the gone card. On the pushed-route path —
+    // a phone killing the session it is looking at — painting it here swaps the
+    // terminal for "That session is no longer active." for the whole pop
+    // transition and then slides the route away: a flash on the commonest kill
+    // flow. A pop that is SUPPRESSED below still needs the card, hence
+    // `visible` rather than the shape alone.
+    final willPop = exit == SessionExit.popRoute && visible;
+
+    setState(() {
+      _session = null;
+      _notFound = !willPop;
+    });
+
+    // Stop the work this screen was doing FOR a session that no longer exists.
+    // Not merely tidy: SessionExit.stay never unmounts, and popRoute now
+    // deliberately stays mounted under a fork, so without this the 4s
+    // pending-question poll keeps asking the server about a dead id for the
+    // life of the window — invisibly, because _pollPendingQuestion swallows
+    // its own errors.
+    _questionPoll?.cancel();
+    _questionPoll = null;
+    _deepenTimer?.cancel();
+    _deepenTimer = null;
+    // Armed by a disconnect just before the session vanished; it would fire
+    // setState(_showDisconnectBanner) 3s later on a stay-window that never
+    // unmounts, over state built for a session that is gone.
+    _disconnectDebounce?.cancel();
+    // The socket is attached to a session that no longer exists. Closed HERE
+    // rather than left to dispose(), which is what SessionExit.stay needs: a
+    // detached window never unmounts, so its connection would otherwise keep
+    // reconnecting to a dead session for the lifetime of the window. close() is
+    // idempotent, so the dispose() call behind this one is a no-op.
+    _connection?.close();
+    ScaffoldMessenger.of(context).showSnackBar(
+      const SnackBar(content: Text('Session no longer active.')),
+    );
+    _leave(visible: visible);
+  }
+
+  /// Leaves this screen the way its shape allows — see [sessionExitFor].
+  void _leave({bool visible = true}) {
+    switch (sessionExitFor(
+      embedded: widget.embedded,
+      standalone: widget.standalone,
+    )) {
+      case SessionExit.popRoute:
+        // A pushed SessionScreen stays mounted underneath anything pushed
+        // over it — notably a fork, which pushes a child SessionScreen for the
+        // forked session, and killing the parent is a common reason to have
+        // forked. maybePop() pops the navigator's NEWEST route, not this one,
+        // so unguarded it throws the user out of the fork they are actively
+        // using. Staying costs nothing — _session is already null, so this
+        // screen paints the gone state whenever they come back to it.
+        if (visible) {
+          Navigator.of(context).maybePop();
+        }
+      case SessionExit.clearSelection:
+        // Only when the selection is still OURS — and NOT gated on
+        // visibility, deliberately; see _onSessionGone. The rail sets
+        // selectedId synchronously (adaptive_home.dart) while this pane is
+        // disposed — and its subscription cancelled — a build later, so an
+        // emission in that gap reaches a still-mounted dead pane; clearing
+        // there wipes the row the user just clicked, and this session leaving
+        // the list is exactly the moment they click another.
+        //
+        // Known cost, accepted: forking from the split pushes a route over it,
+        // so a parent that dies while you are in the fork clears the pane
+        // behind, and popping the fork lands on "Pick a session". That is a
+        // transient annoyance; gating it on isCurrent instead left a DEAD
+        // session selected indefinitely whenever a dialog was open, which is
+        // persistent. Do not "restore" that guard without reading this.
+        if (SessionSelection.instance.selectedId.value == widget.sessionId) {
+          SessionSelection.instance.selectedId.value = null;
+        }
+      case SessionExit.stay:
+        break;
+    }
   }
 
   Future<void> _loadAttentionReason() async {
@@ -3002,7 +3144,16 @@ class _SessionScreenState extends State<SessionScreen>
       case AppLifecycleState.resumed:
         SessionRepository.instance.refresh();
         _attach();
-        _startQuestionPolling();
+        // `_attach()` early-returns on a null _session; the poll does not, and
+        // Windows emits `resumed` on every window focus — so without this,
+        // clicking into a detached window whose session died restarts the 4s
+        // poll against a dead id, undoing _onSessionGone's cancel.
+        //
+        // A still-RESOLVING screen (deep link, _session not loaded yet) is not
+        // stranded by this: the refresh() above drives _onSessionsUpdate with
+        // firstLoad == true, which starts the poll. That call site is what
+        // makes this gate safe — the two go together.
+        if (_session != null) _startQuestionPolling();
         if (_rawMode) {
           WidgetsBinding.instance.addPostFrameCallback((_) {
             _terminalViewKey.currentState?.requestKeyboard();
@@ -3091,11 +3242,19 @@ class _SessionScreenState extends State<SessionScreen>
                       'That session is no longer active.',
                       style: theme.textTheme.bodyLarge,
                     ),
-                    const SizedBox(height: 16),
-                    FilledButton(
-                      onPressed: () => Navigator.of(context).maybePop(),
-                      child: const Text('Back to sessions'),
-                    ),
+                    // Hidden in a detached window, where there is nowhere to
+                    // go back TO — a button that does nothing reads as broken.
+                    if (sessionExitFor(
+                          embedded: widget.embedded,
+                          standalone: widget.standalone,
+                        ) !=
+                        SessionExit.stay) ...[
+                      const SizedBox(height: 16),
+                      FilledButton(
+                        onPressed: _leave,
+                        child: const Text('Back to sessions'),
+                      ),
+                    ],
                   ],
                 )
               : const CircularProgressIndicator(),
