@@ -7,6 +7,7 @@
 // sheet offers on which platform, what a tapped row pops, and the mapping that
 // makes a picked file take the *dropped* file's staging path rather than growing
 // a third one.
+import 'dart:convert';
 import 'dart:io';
 import 'dart:typed_data';
 
@@ -263,6 +264,50 @@ void main() {
         ApiClient.uploadLimitBytes,
         int.parse(declared!.group(1)!) * 1024 * 1024,
       );
+    });
+  });
+
+  group('mergeStagedAttachments', () {
+    // A batch can finish after its screen is disposed (back out mid-upload).
+    // Re-entering mounts a NEW screen that has already restored the same key,
+    // so the dead one must add to what is there, never replace it.
+    test('adds to what is stored instead of replacing it', () {
+      final stored = jsonEncode([
+        {'path': 'C:/d/1-a.pdf', 'name': 'a.pdf'},
+      ]);
+      final out = jsonDecode(mergeStagedAttachments(stored, [
+        {'path': 'C:/d/2-b.zip', 'name': 'b.zip'},
+      ])) as List;
+      expect(out.map((e) => e['name']), ['a.pdf', 'b.zip']);
+    });
+
+    test('never adds the same path twice', () {
+      // The new screen may already have restored the very file this batch
+      // staged; a second chip would deliver it to the agent twice.
+      final stored = jsonEncode([
+        {'path': 'C:/d/1-a.pdf', 'name': 'a.pdf'},
+      ]);
+      final out = jsonDecode(mergeStagedAttachments(stored, [
+        {'path': 'C:/d/1-a.pdf', 'name': 'a.pdf'},
+      ])) as List;
+      expect(out, hasLength(1));
+    });
+
+    test('an empty or corrupt store still yields just the new files', () {
+      for (final stored in [null, '', 'not json', '{}']) {
+        final out = jsonDecode(mergeStagedAttachments(stored, [
+          {'path': 'C:/d/2-b.zip', 'name': 'b.zip'},
+        ])) as List;
+        expect(out, hasLength(1), reason: '$stored');
+        expect(out.single['name'], 'b.zip');
+      }
+    });
+
+    test('a pathless entry is dropped, not stored as a broken chip', () {
+      final out = jsonDecode(mergeStagedAttachments(null, [
+        {'path': '', 'name': 'ghost.pdf'},
+      ])) as List;
+      expect(out, isEmpty);
     });
   });
 

@@ -43,6 +43,21 @@ void main() {
         bearerToken: 'tok',
       ));
 
+  test('the upload allowance scales with the body', () async {
+    // A flat 30s cannot deliver the 50 MB this route advertises: a 25 MB PDF on
+    // cellular would need a sustained ~7 Mbps just to beat the timer, and
+    // losing that race reports a failure for a file the server may have
+    // written.
+    expect(ApiClient.uploadTimeoutFor(0), const Duration(seconds: 30));
+    expect(
+      ApiClient.uploadTimeoutFor(ApiClient.uploadLimitBytes),
+      greaterThan(const Duration(minutes: 5)),
+    );
+    // Monotonic, so a bigger body never gets a shorter allowance.
+    expect(ApiClient.uploadTimeoutFor(20 * 1024 * 1024),
+        greaterThan(ApiClient.uploadTimeoutFor(5 * 1024 * 1024)));
+  });
+
   test('a Hebrew file name uploads instead of failing the attach', () async {
     // Raw, this header value throws FormatException inside dart:io before a
     // byte reaches the wire, and `uploadDroppedFile`'s catch turns that into
@@ -97,6 +112,40 @@ void main() {
   });
 
   group('headerSafeFilename', () {
+    test('a long non-ASCII name keeps its extension', () {
+      // Each Hebrew letter costs six characters encoded, so a 14-letter name
+      // overruns the server's 80-character slice — and what the slice cuts off
+      // is the END, i.e. the `.pdf`. An extension-less file is one the agent
+      // can no longer tell the type of.
+      final long = '${'\u05D3' * 20}.pdf';
+      final out = headerSafeFilename(long);
+      expect(out.length, lessThanOrEqualTo(serverFilenameBudget));
+      expect(out, endsWith('.pdf'));
+    });
+
+    test('a truncated name is still decodable — never a half escape', () {
+      // Cutting the ENCODED string could end on `%D7`, which decodes to
+      // nothing at all; the truncation walks whole characters instead.
+      final out = headerSafeFilename('${'\u05D3' * 40}.pdf');
+      expect(() => Uri.decodeComponent(out), returnsNormally);
+      expect(Uri.decodeComponent(out), endsWith('.pdf'));
+    });
+
+    test('an extension-less long name is still capped', () {
+      final out = headerSafeFilename('\u05D3' * 40);
+      expect(out.length, lessThanOrEqualTo(serverFilenameBudget));
+      expect(() => Uri.decodeComponent(out), returnsNormally);
+    });
+
+    test('the budget tracks the SERVER, which owns the slice', () {
+      final serverJs = File('../server.js').readAsStringSync();
+      final declared = RegExp(r'function safeDropName[\s\S]{0,400}?\.slice\(0,\s*(\d+)\)')
+          .firstMatch(serverJs);
+      expect(declared, isNotNull,
+          reason: "could not find safeDropName's slice in server.js");
+      expect(serverFilenameBudget, int.parse(declared!.group(1)!));
+    });
+
     test('leaves every printable ASCII name untouched', () {
       for (final n in ['a.txt', 'my file.pdf', "quote'.txt", 'a%b.txt']) {
         expect(headerSafeFilename(n), n, reason: n);

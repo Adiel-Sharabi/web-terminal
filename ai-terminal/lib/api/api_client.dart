@@ -62,8 +62,38 @@ class ApiException implements Exception {
 /// [encodedFilenameHeader] is sent only alongside an encoded value, and a server
 /// that later wants the real name decodes exactly when it is present. Today's
 /// server ignores the extra header, so nothing has to ship in lockstep.
-String headerSafeFilename(String name) =>
-    filenameNeedsEncoding(name) ? Uri.encodeComponent(name) : name;
+String headerSafeFilename(String name) {
+  if (!filenameNeedsEncoding(name)) return name;
+  final encoded = Uri.encodeComponent(name);
+  if (encoded.length <= serverFilenameBudget) return encoded;
+  // Every Hebrew letter costs SIX characters encoded, so a 14-letter name
+  // overruns the server's 80-character slice and loses its `.pdf` off the end —
+  // handing the agent a file whose type it can no longer tell. Truncate the
+  // stem instead and keep the extension.
+  //
+  // Built up one whole character at a time rather than cut out of the encoded
+  // string: slicing that could end mid-escape (`%D7`), which is not decodable
+  // at all.
+  final dot = name.lastIndexOf('.');
+  final ext = dot > 0 ? Uri.encodeComponent(name.substring(dot)) : '';
+  final stem = dot > 0 ? name.substring(0, dot) : name;
+  final out = StringBuffer();
+  var used = ext.length;
+  for (final rune in stem.runes) {
+    final piece = Uri.encodeComponent(String.fromCharCode(rune));
+    if (used + piece.length > serverFilenameBudget) break;
+    out.write(piece);
+    used += piece.length;
+  }
+  return '$out$ext';
+}
+
+/// How much of a file name survives the server's `safeDropName`, which slices
+/// the first 80 characters. Duplicated here for the same reason
+/// [ApiClient.uploadLimitBytes] is — the client has to keep its own output
+/// inside a budget the server enforces — and guarded by the same kind of drift
+/// test, which reads server.js's own slice.
+const int serverFilenameBudget = 80;
 
 /// Whether [name] cannot ride a header value as itself — see
 /// [headerSafeFilename] for what happens when one tries.
@@ -81,6 +111,26 @@ class ApiClient {
   final http.Client _http;
   static const Duration _timeout = Duration(seconds: 10);
   static const Duration _uploadTimeout = Duration(seconds: 30);
+
+  /// How long an upload of [bytes] may take before it is called dead.
+  ///
+  /// A flat 30s was right while the only body on this route was a desktop drop
+  /// over a LAN. #166 aims it at a phone on cellular, where 30s cannot deliver
+  /// even a 25 MB PDF — it would need a sustained ~7 Mbps just to beat the
+  /// timer, and losing that race reports "Could not attach report.pdf" for a
+  /// file the server may well have written, leaving an orphan in DROPPED_DIR.
+  ///
+  /// So the allowance scales with the body, against a deliberately pessimistic
+  /// [_uploadFloorBytesPerSecond]: fast links never notice, and a slow one is
+  /// judged on whether it is moving rather than on a stopwatch. It is a
+  /// backstop, not a progress bar — a genuinely dead socket errors long before
+  /// this, which is why a generous ceiling costs nothing.
+  static Duration uploadTimeoutFor(int bytes) => _uploadTimeout +
+      Duration(seconds: bytes ~/ _uploadFloorBytesPerSecond);
+
+  /// ~100 KB/s — under a poor mobile connection, not over a good one. Sizing
+  /// this optimistically would put the timer back in front of the transfer.
+  static const int _uploadFloorBytesPerSecond = 100 * 1024;
 
   /// Creates a client for [server]. A custom [httpClient] may be injected for
   /// testing; otherwise a default [http.Client] is used.
@@ -659,7 +709,7 @@ class ApiClient {
             },
             body: bytes,
           )
-          .timeout(_uploadTimeout);
+          .timeout(uploadTimeoutFor(bytes.length));
       if (res.statusCode < 200 || res.statusCode >= 300) {
         throw ApiException(res.statusCode, _errorMessage(res));
       }

@@ -524,6 +524,26 @@ String? attachBatchMessage({
   return parts.isEmpty ? null : parts.join(' — ');
 }
 
+/// Adds [staged] to the attachments already persisted in [storedRaw], returning
+/// the JSON to write back.
+///
+/// Existing entries keep their order and their names; an entry whose path is
+/// already stored is not added twice (a re-entered screen may have restored it
+/// already). Pure, so the arbitration a disposed screen depends on is testable
+/// without a screen.
+String mergeStagedAttachments(
+  String? storedRaw,
+  List<Map<String, String>> staged,
+) {
+  final out = <Map<String, String>>[...decodeStagedAttachments(storedRaw)];
+  final seen = {for (final e in out) e['path']};
+  for (final e in staged) {
+    if (e['path'] == null || e['path']!.isEmpty) continue;
+    if (seen.add(e['path'])) out.add(e);
+  }
+  return jsonEncode(out);
+}
+
 /// One file on its way to becoming an attachment, whichever gesture produced it
 /// — a desktop drop (#90) or a mobile Files pick (#166).
 ///
@@ -2280,6 +2300,7 @@ class _SessionScreenState extends State<SessionScreen>
     // batch, which would re-blame an already-counted failure and speak for one
     // that was refused on size and never attempted.
     final raw = <({String name, String path})>[];
+    final stagedNow = <_ComposeAttachment>[];
     var rerouted = 0;
     for (final file in files) {
       try {
@@ -2319,6 +2340,7 @@ class _SessionScreenState extends State<SessionScreen>
           // repaint is conditional. `_saveAttachments` below needs no widget
           // (SharedPreferences keyed on the session id), so a batch that
           // finishes after the screen is gone still comes back with it (#113).
+          stagedNow.add(staged);
           if (mounted) {
             setState(() => _attachments.add(staged));
           } else {
@@ -2332,7 +2354,13 @@ class _SessionScreenState extends State<SessionScreen>
       }
     }
     if (toCompose) {
-      unawaited(_saveAttachments()); // #113 — once, after the whole batch
+      // #113 — once, after the whole batch. MERGED when the screen is already
+      // gone: re-entering the session mounts a new State that has restored its
+      // own list, and a plain write from this dead one would overwrite it —
+      // resurrecting chips removed over there, or dropping ones staged there.
+      // Merging adds exactly the files this batch uploaded and arbitrates
+      // nothing else.
+      unawaited(mounted ? _saveAttachments() : _persistStagedAfterDispose(stagedNow));
       // Focus the compose bar once, after the loop — the chips and Send are there.
       if (mounted) _composeFocusNode.requestFocus();
     } else if (raw.isNotEmpty) {
@@ -2362,7 +2390,12 @@ class _SessionScreenState extends State<SessionScreen>
           _attachments.add(_ComposeAttachment(path: r.path, name: r.name));
         }
         rerouted = raw.length;
-        unawaited(_saveAttachments());
+        unawaited(mounted
+            ? _saveAttachments()
+            : _persistStagedAfterDispose([
+                for (final r in raw)
+                  _ComposeAttachment(path: r.path, name: r.name),
+              ]));
         if (mounted) {
           setState(() {});
           _composeFocusNode.requestFocus();
@@ -2861,6 +2894,26 @@ class _SessionScreenState extends State<SessionScreen>
   /// so no new widget state exists for it. Nothing can be re-fetched instead: no
   /// endpoint serves `clipboard-images/` or `dropped-files/` back, and adding one
   /// would mean a server release and a new file-serving surface for a thumbnail.
+  /// Persists [staged] when this screen is already disposed, by MERGING into
+  /// whatever is stored now rather than overwriting it.
+  ///
+  /// The disposed State's own `_attachments` is not the truth any more: the user
+  /// may have re-entered the session, and that new screen has restored and
+  /// possibly edited the same key. Only the paths this batch actually uploaded
+  /// are added, so nothing removed over there comes back.
+  Future<void> _persistStagedAfterDispose(
+    List<_ComposeAttachment> staged,
+  ) async {
+    if (staged.isEmpty) return;
+    final prefs = await SharedPreferences.getInstance();
+    final key = 'wt_attach_${widget.sessionId}';
+    final merged = mergeStagedAttachments(
+      prefs.getString(key),
+      [for (final a in staged) {'path': a.path, 'name': a.name}],
+    );
+    await prefs.setString(key, merged);
+  }
+
   Future<void> _saveAttachments() async {
     final prefs = await SharedPreferences.getInstance();
     final key = 'wt_attach_${widget.sessionId}';
