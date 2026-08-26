@@ -4,7 +4,7 @@ const {
   parseSnapshotOutput, rollUpTree, resolveRuntimeRoot, shapeReport, descendantsOf,
   sessionRootNames, snapshot, snapshotPair, _setQueryForTests, _peekCacheForTests,
   _resetForTests, MIN_PAIR_GAP_MS, PAIR_SETTLE_MS, RUNTIME_ROOT_KEY,
-  parseMemoryCounters, pageReadsPerSecFromSamples,
+  parseMemoryCounters, pageReadsPerSecFromSamples, _setPerfClassForTests,
 } = require('../lib/process-tree');
 
 // #152 levels 2 and 3 — what web-terminal itself costs and what each session costs.
@@ -544,14 +544,42 @@ test.describe('#165 the snapshot pair carries the memory counter', () => {
     expect(pageReadsPerSecFromSamples(pair.prevPerf, pair.nextPerf)).toBe(1000);
   });
 
-  test('a query that reports no counter still yields a usable process pair', async () => {
-    // Non-Windows, or a box whose perf counters are broken. Levels 2 and 3 must not go
-    // down with the pressure figure — they never depended on it.
+  test('a snapshot carrying no counter still yields a usable process pair', async () => {
+    // NARROW on purpose, and the comment says what it does NOT cover. This proves the
+    // ARITHMETIC half: given a snapshot with no `perf`, the pair still forms and the rate
+    // is null rather than 0. It says nothing about whether a box with broken counters
+    // produces such a snapshot in the first place — `_setQueryForTests` replaces the very
+    // spawn where that is decided. The test below drives the real one.
     _setQueryForTests(async () => rows());
     const pair = await snapshotPair({ settleMs: MIN_PAIR_GAP_MS + 250 });
     expect(pair).not.toBeNull();
     expect(pair.next).toHaveLength(1);
     expect(pair.prevPerf == null && pair.nextPerf == null).toBe(true);
+  });
+
+  test('an UNREADABLE counter on the REAL query keeps every process row', async () => {
+    // The containment claim, tested where it actually lives. `powershell.exe -Command`
+    // takes its exit code from `$?` at the END of the script, so a failed counter query
+    // as the last statement exits 1 — and `_queryWindows`'s `if (err) return null` then
+    // discards the complete, valid process list that was already on stdout. Measured:
+    //
+    //   -ErrorAction SilentlyContinue + `if ($m)`  -> err=code 1  (rows DISCARDED)
+    //   try { -ErrorAction Stop } catch            -> err=none    (rows kept)
+    //
+    // Blast radius of that discard, all silent: #152 levels 2 and 3 gone, agent start
+    // times null (Codex falls back to newest-in-cwd), the background-work badge dark —
+    // and a failed query is deliberately not cached, so every poll re-spawns PowerShell.
+    //
+    // `_setQueryForTests` cannot reach any of this: it replaces the spawn. Pointing the
+    // real query at a class that does not exist is the cheapest honest way in.
+    test.skip(process.platform !== 'win32', 'the counter query is Windows-only');
+    _resetForTests();
+    _setPerfClassForTests('Win32_PerfRawData_PerfOS_MemoryDoesNotExist');
+    const procs = await snapshot(Date.now());
+    expect(Array.isArray(procs)).toBe(true);
+    expect(procs.length).toBeGreaterThan(0);
+    // Unknown, never fabricated — the process rows survive, the pressure figure does not.
+    expect(_peekCacheForTests().perf).toBeNull();
   });
 });
 

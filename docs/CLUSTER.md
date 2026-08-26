@@ -34,6 +34,19 @@ query that view already runs (marginal cost ~35 ms, against ~2.4 s for the same 
 queried on its own). A rate that could not be measured renders as nothing at all, never
 `0/s` — zero is what a healthy box reads.
 
+**Where headroom is actually visible, per client.** The server reports it either way — it
+rides the always-on 5s sampler and costs nothing — but only the **web sidebar** shows it
+with the load view off. The **companion** does not yet: `ServerResourceLine` renders
+`SizedBox.shrink()` while the view is off, and it is the only place the companion draws
+machine memory, so on the phone and the Windows client both figures sit behind the switch.
+
+That is a **known gap, not an oversight**, and it is a bigger change than deleting one
+early return: the always-on figure would have to come from the `resources` block already
+carried on the cluster envelope the dashboard fetches anyway, rather than from
+`GET /api/resources`, which is the on-demand endpoint the load view drives and the thing
+that costs a whole-machine process query. Wiring the readout to the envelope is a separate
+change with its own tests.
+
 CPU is a rolling average over a 5-second window, computed from the delta between two
 `os.cpus()` tick samples (a single instantaneous read would be noise, and Windows'
 `os.loadavg()` always reports `0` so it isn't used). A peer that is too old to report

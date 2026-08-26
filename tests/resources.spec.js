@@ -237,4 +237,66 @@ test.describe('sanitizeResources — cross-field memory sanity', () => {
     const full = { ...ok, memory: { usedBytes: 8, totalBytes: 8, availBytes: 0, usedPct: 100 } };
     expect(sanitizeResources(full)).toEqual(full);
   });
+
+  // --- the TRIPLE, not two pairs (#165) ------------------------------------------
+  // `used <= total` and `avail <= total` can BOTH hold while the three numbers still
+  // describe no machine that exists. This is the gap that mattered most, because
+  // headroom is the figure the readout leads with and the one a box is chosen on.
+  const GiB = 1024 * 1024 * 1024;
+
+  test('a consistent triple passes', () => {
+    const r = {
+      cpuPct: 12, windowMs: 5000, ts: 1,
+      memory: { usedBytes: 16 * GiB, totalBytes: 32 * GiB, availBytes: 16 * GiB, usedPct: 50 },
+    };
+    expect(sanitizeResources(r)).toEqual(r);
+  });
+
+  test('a half-idle box claiming ZERO headroom is rejected wholesale', () => {
+    // Every pairwise check passes: 16 <= 32, and 0 <= 32. Only used + avail === total
+    // catches it — and without that the sidebar renders
+    // `MEM 0.0G free of 32.0G (50%) cls=u-hot`: a box with 16 GB spare, shown in red,
+    // the precise inversion this feature exists to prevent.
+    const bad = {
+      cpuPct: 12, windowMs: 5000, ts: 1,
+      memory: { usedBytes: 16 * GiB, totalBytes: 32 * GiB, availBytes: 0, usedPct: 50 },
+    };
+    expect(sanitizeResources(bad)).toBeNull();
+  });
+
+  test('the mirror case — headroom claiming the box is empty — is rejected too', () => {
+    const bad = {
+      cpuPct: 12, windowMs: 5000, ts: 1,
+      memory: { usedBytes: 30 * GiB, totalBytes: 32 * GiB, availBytes: 32 * GiB, usedPct: 94 },
+    };
+    expect(sanitizeResources(bad)).toBeNull();
+  });
+
+  test('a sampling-instant skew inside the tolerance is still accepted', () => {
+    // The tolerance is 1% of total. A peer that read its two halves a moment apart can
+    // legitimately disagree by whatever the box allocated in between; rejecting that
+    // would blank a healthy server's row for no reason the user can see.
+    const r = {
+      cpuPct: 12, windowMs: 5000, ts: 1,
+      memory: { usedBytes: 16 * GiB, totalBytes: 32 * GiB, availBytes: 16 * GiB - 64 * 1024 * 1024, usedPct: 50 },
+    };
+    expect(sanitizeResources(r)).not.toBeNull();
+  });
+
+  test('a skew past the tolerance is not a rounding difference', () => {
+    const bad = {
+      cpuPct: 12, windowMs: 5000, ts: 1,
+      memory: { usedBytes: 16 * GiB, totalBytes: 32 * GiB, availBytes: 15 * GiB, usedPct: 50 },
+    };
+    expect(sanitizeResources(bad)).toBeNull();
+  });
+
+  test('an ABSENT headroom is not held to the triple — it is unknown, not wrong', () => {
+    // A peer predating the field reports no availBytes at all. That is `null`, and a
+    // null cannot contradict anything; failing it here would blank every older server.
+    const older = { cpuPct: 12, windowMs: 5000, ts: 1, memory: { usedBytes: 30 * GiB, totalBytes: 32 * GiB, usedPct: 94 } };
+    const out = sanitizeResources(older);
+    expect(out).not.toBeNull();
+    expect(out.memory.availBytes).toBeNull();
+  });
 });

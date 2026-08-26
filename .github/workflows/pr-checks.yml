@@ -57,6 +57,14 @@ jobs:
       - name: No secrets or machine-identifying data
         run: node scripts/check-no-secrets.js
 
+      - name: Shared constants agree across both clients
+        # app.html and the companion cannot import from one another, so a handful
+        # of values are genuinely defined twice. This is what stops one copy from
+        # being re-tuned alone — the #165 headroom thresholds are marked
+        # PROVISIONAL in both files and openly invite a re-tune, which is exactly
+        # the edit that would otherwise drift silently.
+        run: node scripts/check-shared-constants.js
+
       - name: Version bumped for what changed
         # WHY THIS IS PER-AREA. The gate protects one property: a released
         # artifact must be identifiable, so it can be deployed and rolled back

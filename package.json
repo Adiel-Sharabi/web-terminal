@@ -35,7 +35,8 @@
     "syntax-check": "node -c server.js && node -c monitor.js && node -c pty-worker.js",
     "check:links": "node scripts/check-links.js",
     "check:secrets": "node scripts/check-no-secrets.js",
-    "check": "npm run syntax-check && npm run lint && npm run check:links && npm run check:secrets"
+    "check:constants": "node scripts/check-shared-constants.js",
+    "check": "npm run syntax-check && npm run lint && npm run check:links && npm run check:secrets && npm run check:constants"
   },
   "dependencies": {
     "express": "^4.22.2",

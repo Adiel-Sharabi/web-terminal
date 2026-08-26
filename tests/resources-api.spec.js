@@ -171,9 +171,17 @@ test.describe('GET /api/resources', () => {
     await ctx.dispose();
   });
 
-  test('headroom rides the ALWAYS-ON sampler — it survives a failed process query', async () => {
-    // availBytes is os.freemem(): pure JS, free, on the warm sampler. A box that cannot
-    // run the process query is exactly the box someone needs the headroom figure for.
+  test('headroom comes off the ALWAYS-ON sampler, not the process query', async () => {
+    // availBytes is os.freemem(): pure JS, free, on the warm sampler — so it is present
+    // on the live endpoint whatever the process query did, and the rate is null whenever
+    // sampling did not succeed.
+    //
+    // What this does NOT prove, said out loud because the title used to claim it: it
+    // cannot FORCE a failed process query, so on a healthy box the `sampling.ok` branch
+    // never runs. The guarantee "a failed query keeps the headroom and nulls the rate" is
+    // pinned in tests/resources-tree.spec.js against shapeReport directly, and "a broken
+    // perf counter does not fail the query in the first place" by the real-spawn test
+    // beside it. This one only checks the endpoint agrees.
     const ctx = await authCtx();
     const body = await (await ctx.get('/api/resources')).json();
     expect(body.machine.memory.availBytes).toBeGreaterThan(0);

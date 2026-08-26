@@ -42,6 +42,20 @@ class ServerResourceLine extends StatelessWidget {
       listenable: ResourceMonitor.instance,
       builder: (context, _) {
         final monitor = ResourceMonitor.instance;
+        // KNOWN GAP (#165), recorded so it is not mistaken for an oversight: this
+        // early return takes the HEADROOM figure down with the load view, and this
+        // widget is the only place the companion draws machine memory. The server
+        // reports headroom either way — it rides the always-on 5s sampler and costs
+        // nothing — and the web sidebar shows it with the view off, so the two
+        // clients differ here.
+        //
+        // Deleting this line would NOT fix it: everything below reads
+        // `ResourceMonitor`, which polls GET /api/resources — the on-demand endpoint
+        // the switch exists to gate, costing the server a whole-machine process query
+        // per poll. Surfacing headroom unconditionally means reading it from the
+        // `resources` block already carried on the cluster envelope the dashboard
+        // fetches anyway. That is a separate change with its own tests; see
+        // docs/CLUSTER.md, "Server Load".
         if (!monitor.enabled) return const SizedBox.shrink();
 
         final report = monitor[baseUrl];
