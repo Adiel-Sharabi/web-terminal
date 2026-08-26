@@ -57,8 +57,22 @@ const SHARED = [
 function evalNumeric(expr) {
   const cleaned = String(expr).trim().replace(/_/g, '');
   if (!/^[\d\s*+\-()]+$/.test(cleaned)) return null;
-  const v = Function('"use strict"; return (' + cleaned + ');')();
+  let v;
+  try {
+    v = Function('"use strict"; return (' + cleaned + ');')();
+  } catch {
+    // Character-legal but not parseable — `2 * (1024;`. Report it through the
+    // caller's "cannot read as a number" path rather than dying with a stack
+    // trace, so the failure names the constant instead of the checker.
+    return null;
+  }
   return Number.isFinite(v) ? v : null;
+}
+
+/// The site regexes are authored without `g` (they are read as single patterns);
+/// `matchAll` requires it, so add it without disturbing their other flags.
+function flagsWithGlobal(re) {
+  return re.flags.includes('g') ? re.flags : re.flags + 'g';
 }
 
 const problems = [];
@@ -72,12 +86,26 @@ for (const entry of SHARED) {
       problems.push(`${entry.what}: ${site.file} does not exist`);
       continue;
     }
-    const m = fs.readFileSync(abs, 'utf8').match(site.re);
-    if (!m) {
+    // EVERY occurrence, not the first. A non-global `.match()` returns match #1,
+    // and the commonest way a person records a re-tune is to leave the old value
+    // in a comment directly above the new one — which would make this gate read
+    // the stale line, report agreement, and pass while the two clients genuinely
+    // disagree. That is the single scenario this gate exists for, so more than
+    // one hit is a failure rather than a first-wins guess.
+    const all = [...fs.readFileSync(abs, 'utf8').matchAll(new RegExp(site.re, flagsWithGlobal(site.re)))];
+    if (all.length === 0) {
       problems.push(`${entry.what}: not found in ${site.file}`
         + ' (renamed or removed? update scripts/check-shared-constants.js in the same change)');
       continue;
     }
+    if (all.length > 1) {
+      problems.push(`${entry.what}: ${all.length} definitions in ${site.file}`
+        + ` (\`${all.map((x) => x[1].trim()).join('\`, \`')}\`)`
+        + ' — a gate that reads only the first would pass while the clients disagree;'
+        + ' delete the stale one (a commented-out old value counts)');
+      continue;
+    }
+    const m = all[0];
     const value = evalNumeric(m[1]);
     if (value === null) {
       problems.push(`${entry.what}: ${site.file} defines it as \`${m[1].trim()}\`, which this gate cannot read as a number`);

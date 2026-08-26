@@ -264,6 +264,20 @@ test.describe('sanitizeResources — cross-field memory sanity', () => {
     expect(sanitizeResources(bad)).toBeNull();
   });
 
+  test('a peer reporting a machine with no memory at all is rejected', () => {
+    // {0, 0, 0} satisfies every pairwise check AND the triple (0 + 0 === 0), so it
+    // reaches the sidebar on its arithmetic. #165 made the consequence worse than the
+    // admission: it used to render neutrally, but headroom colours on the ABSOLUTE
+    // figure, so zero free now paints RED — a peer that is broken would be shown as
+    // the most alarming box on the board. `os.totalmem()` is never 0, so this can only
+    // arrive from a peer, and broken must read as unknown.
+    const bad = {
+      cpuPct: 0, windowMs: 5000, ts: 1,
+      memory: { usedBytes: 0, totalBytes: 0, availBytes: 0, usedPct: 0 },
+    };
+    expect(sanitizeResources(bad)).toBeNull();
+  });
+
   test('the mirror case — headroom claiming the box is empty — is rejected too', () => {
     const bad = {
       cpuPct: 12, windowMs: 5000, ts: 1,
