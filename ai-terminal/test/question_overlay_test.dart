@@ -3138,5 +3138,62 @@ void main() {
       await tester.pumpAndSettle();
       expect(fieldText(tester), isEmpty);
     });
+
+    // The GATE for the question-count half of the reset condition. The test
+    // above swaps the toolUseId too, so the FIRST clause fires there and the
+    // count clause is never what saves it — delete the clause and that test
+    // still passes. This one holds the toolUseId FIXED, so the count is the
+    // only thing that can trigger the reset: without it `_selected` and the
+    // controller lists keep their old length while `_tab` still points at a
+    // question the new prompt does not have, and the first per-index read
+    // throws. A guard with no test that fails without it is the shape this
+    // repo has been bitten by before.
+    testWidgets(
+        'the SAME toolUseId with fewer questions still resets — the count '
+        'clause is what catches it', (tester) async {
+      tester.view.physicalSize = const Size(412 * 3, 915 * 3);
+      tester.view.devicePixelRatio = 3.0;
+      addTearDown(tester.view.reset);
+      Future<void> pump(List<PendingQuestionItem> qs) => tester.pumpWidget(
+            MaterialApp(
+              theme: AppTheme.dark,
+              home: Scaffold(
+                body: Stack(
+                  children: [
+                    QuestionOverlay(
+                      // SAME id on purpose — a prompt edited in place.
+                      question: PendingQuestion(toolUseId: 'same-id', questions: qs),
+                      onSend: (_) {},
+                      onKey: (_) {},
+                      onDismiss: () {},
+                    ),
+                  ],
+                ),
+              ),
+            ),
+          );
+
+      await pump([
+        _q(['Red', 'Green'], header: 'Colour'),
+        _q(['Apple', 'Pear'], header: 'Fruit'),
+      ]);
+      await tester.pumpAndSettle();
+      // Park on the LAST tab: the index that stops existing when the prompt
+      // shrinks, and therefore the one that proves the reset ran.
+      await tapTab(tester, 1);
+      await chooseOther(tester, 'fruit text');
+
+      await pump([_q(['Yes', 'No'], header: 'Ship')]);
+      await tester.pumpAndSettle();
+
+      // Rendered at all => no RangeError escaped the build.
+      expect(tester.takeException(), isNull);
+      expect(find.text('Yes'), findsOneWidget);
+      // And the stale free text went with the old prompt.
+      expect(find.byType(TextField), findsNothing);
+      await tester.tap(find.text('Other…'));
+      await tester.pumpAndSettle();
+      expect(fieldText(tester), isEmpty);
+    });
   });
 }
