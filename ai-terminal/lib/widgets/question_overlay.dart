@@ -509,25 +509,39 @@ class _QuestionOverlayState extends State<QuestionOverlay> {
   /// Per-question free-text ("Other") answer, parallel to [_selected]. `null`
   /// means Other is NOT the active choice for that tab (numeric-selection mode);
   /// a non-null value (even `''`) means Other is active, and its trimmed text is
-  /// the answer. Only ever populated for single-question prompts.
+  /// the answer. Populated per QUESTION: #143 opened the Other row on every
+  /// COMPACT tab, so a multi-question prompt can carry an independent
+  /// free-text answer on each of them.
   late List<String?> _otherText;
 
-  /// Backs the single free-text field. One controller suffices because the
-  /// Other row is only shown for single-question prompts (one tab).
-  final TextEditingController _otherController = TextEditingController();
+  /// Backs the free-text field — ONE CONTROLLER PER QUESTION, parallel to
+  /// [_otherText] (#164).
+  ///
+  /// A single shared controller was right only while Other was
+  /// single-question-only. Once #143 offered the row on every compact tab, the
+  /// second tab opened already holding the first tab's characters and
+  /// [_chooseOther] copied them into that tab's answer — so two questions
+  /// could not take two different free-text answers at all, and the prompt had
+  /// to be answered in the terminal instead. A controller owns the text AND
+  /// the caret, so per-tab controllers are also what makes leaving a tab and
+  /// returning restore exactly what was typed there.
+  late List<TextEditingController> _otherControllers;
 
   /// Per-question NOTE attached to the tab's ALREADY-chosen option (#64
   /// Gap 1) — parallel to [_otherText] but NEVER conflated with it: Other
   /// (#36) REPLACES the numeric answer with free text, a note AUGMENTS it.
   /// `null` means the note field is not revealed for that tab; a non-null
   /// value (even `''`) means it is, and its trimmed text is the note. Only
-  /// ever populated for single-select single-question prompts, same scope as
-  /// Other.
+  /// ever populated for single-select single-question PREVIEWED prompts — the
+  /// only layout whose selector has a notes feature at all (#143). That is a
+  /// narrower scope than Other's, not the same one.
   late List<String?> _noteText;
 
-  /// Backs the single note field. One controller suffices — same reasoning
-  /// as [_otherController].
-  final TextEditingController _noteController = TextEditingController();
+  /// Backs the note field — one controller per question, for the same reason
+  /// as [_otherControllers] (#164). Notes are still gated to single-question
+  /// prompts, so the shared controller was not reachable here yet; it is
+  /// corrected in the same pass rather than left as the next report.
+  late List<TextEditingController> _noteControllers;
 
   /// Drives [_contextPanel]'s scroll view so a [Scrollbar] can show a thumb.
   /// Without one, a clipped lead-up reads as a COMPLETE message — the reported
@@ -564,25 +578,49 @@ class _QuestionOverlayState extends State<QuestionOverlay> {
   /// answer is not to shave the buttons but to stop billing everyone.
   bool _keysShown = false;
 
+  /// One empty [TextEditingController] per question in the CURRENT prompt.
+  List<TextEditingController> _freshControllers() =>
+      [for (final _ in widget.question.questions) TextEditingController()];
+
+  static void _disposeAll(Iterable<TextEditingController> cs) {
+    for (final c in cs) {
+      c.dispose();
+    }
+  }
+
   @override
   void initState() {
     super.initState();
     _selected = [for (final _ in widget.question.questions) <int>{}];
     _otherText = [for (final _ in widget.question.questions) null];
     _noteText = [for (final _ in widget.question.questions) null];
+    _otherControllers = _freshControllers();
+    _noteControllers = _freshControllers();
   }
 
   @override
   void didUpdateWidget(covariant QuestionOverlay old) {
     super.didUpdateWidget(old);
     // A different prompt arrived → reset selection, free text + active tab.
-    if (old.question.toolUseId != widget.question.toolUseId) {
+    //
+    // The question COUNT is checked as well (#164): every per-question list
+    // here is indexed by tab, so one that did not grow with the prompt would
+    // index past its end.
+    if (old.question.toolUseId != widget.question.toolUseId ||
+        widget.question.questions.length != _selected.length) {
       _tab = 0;
       _selected = [for (final _ in widget.question.questions) <int>{}];
       _otherText = [for (final _ in widget.question.questions) null];
-      _otherController.clear();
       _noteText = [for (final _ in widget.question.questions) null];
-      _noteController.clear();
+      // Swap the lists now, drop the old controllers at the END of this frame:
+      // the fields they back are still mounted until the rebuild this update
+      // schedules tears them down, and a controller disposed out from under a
+      // live EditableText is a crash, not a leak.
+      final stale = [..._otherControllers, ..._noteControllers];
+      _otherControllers = _freshControllers();
+      _noteControllers = _freshControllers();
+      WidgetsBinding.instance
+          .addPostFrameCallback((_) => _disposeAll(stale));
       // A NEW prompt gets its lead-up back (#94). Collapsing is a per-question
       // decision — "I have read this one" — not a standing preference, and
       // carrying it over would open the next question with its context hidden,
@@ -595,8 +633,8 @@ class _QuestionOverlayState extends State<QuestionOverlay> {
 
   @override
   void dispose() {
-    _otherController.dispose();
-    _noteController.dispose();
+    _disposeAll(_otherControllers);
+    _disposeAll(_noteControllers);
     _ctxScroll.dispose();
     _qScroll.dispose();
     _optScroll.dispose();
@@ -668,10 +706,14 @@ class _QuestionOverlayState extends State<QuestionOverlay> {
 
   /// Activates the free-text ("Other") answer for the current tab: clears any
   /// numeric picks (Other is mutually exclusive) and reveals the text field.
+  ///
+  /// The seed is THIS tab's own controller (#164) — empty on a tab that has
+  /// never been free-texted, and whatever was typed here before on one that
+  /// was. It is never another tab's text.
   void _chooseOther() {
     setState(() {
       _selected[_tab].clear();
-      _otherText[_tab] = _otherController.text;
+      _otherText[_tab] = _otherControllers[_tab].text;
     });
   }
 
@@ -684,19 +726,25 @@ class _QuestionOverlayState extends State<QuestionOverlay> {
     setState(() {
       if (_noteActive) {
         _noteText[_tab] = null;
-        _noteController.clear();
+        _noteControllers[_tab].clear();
       } else {
-        _noteText[_tab] = _noteController.text;
+        _noteText[_tab] = _noteControllers[_tab].text;
       }
     });
   }
 
-  bool get _everyQuestionAnswered => List.generate(
-        _selected.length,
-        (i) =>
-            _selected[i].isNotEmpty ||
-            (_otherText[i]?.trim().isNotEmpty ?? false),
-      ).every((answered) => answered);
+  /// Whether question [i] has an answer — the ONE definition of "answered",
+  /// read by the Send gate below AND by the tab chip's tick (#164).
+  ///
+  /// The chip read [_selected] alone, so a tab answered by free text reported
+  /// itself unanswered while Send said the prompt was ready. Two readouts of
+  /// one fact is the drift this repo keeps paying for; there is now one.
+  bool _isAnswered(int i) =>
+      _selected[i].isNotEmpty || (_otherText[i]?.trim().isNotEmpty ?? false);
+
+  bool get _everyQuestionAnswered =>
+      List.generate(_selected.length, _isAnswered)
+          .every((answered) => answered);
 
   void _send() {
     widget.onSend(buildAnswerFrames(
@@ -1104,13 +1152,19 @@ class _QuestionOverlayState extends State<QuestionOverlay> {
         separatorBuilder: (_, _) => const SizedBox(width: 6),
         itemBuilder: (context, i) {
           final selected = i == _tab;
-          final answered = _selected[i].isNotEmpty;
+          final answered = _isAnswered(i);
           final label = questions[i].header.isEmpty
               ? 'Q${i + 1}'
               : questions[i].header;
           return ChoiceChip(
             selected: selected,
             onSelected: (_) {
+              // Switching tabs saves and loads nothing: since #164 the free
+              // text lives in that tab's OWN controller, so the field simply
+              // rebinds and shows this question's text — or none. Focus
+              // follows only when the destination tab already has Other open,
+              // which is what the field's `autofocus` already does; a tab you
+              // are merely browsing never raises the keyboard.
               setState(() => _tab = i);
               // The pinned question is per-TAB but its scroll position is not,
               // so a long Q1 scrolled halfway would hand Q2 the same offset and
@@ -1234,7 +1288,7 @@ class _QuestionOverlayState extends State<QuestionOverlay> {
     return Padding(
       padding: const EdgeInsets.fromLTRB(0, 3, 0, 3),
       child: TextField(
-        controller: _otherController,
+        controller: _otherControllers[_tab],
         autofocus: true,
         minLines: 1,
         maxLines: 4,
@@ -1305,13 +1359,13 @@ class _QuestionOverlayState extends State<QuestionOverlay> {
 
   /// The revealed note field — same shell as [_otherField] (#64 Gap 1 reuses
   /// #36's proven layout), backed by its OWN state ([_noteText]/
-  /// [_noteController]) so it is never conflated with the Other free-text
+  /// [_noteControllers]) so it is never conflated with the Other free-text
   /// answer.
   Widget _noteField(ThemeData theme) {
     return Padding(
       padding: const EdgeInsets.fromLTRB(0, 3, 0, 3),
       child: TextField(
-        controller: _noteController,
+        controller: _noteControllers[_tab],
         autofocus: true,
         minLines: 1,
         maxLines: 4,
