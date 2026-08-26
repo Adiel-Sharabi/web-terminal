@@ -9,6 +9,9 @@ import 'package:flutter_test/flutter_test.dart';
 
 import 'package:ai_terminal/api/models.dart';
 import 'package:ai_terminal/screens/session_screen.dart';
+// scrollbackTailOffset moved here with the rest of the backward-walk rules
+// (#167); kScrollbackReplayBytes stays a screen-level policy knob.
+import 'package:ai_terminal/util/scrollback_window.dart';
 
 ServerConfig _server() =>
     const ServerConfig(name: 'Home', baseUrl: 'http://x', bearerToken: 't');
