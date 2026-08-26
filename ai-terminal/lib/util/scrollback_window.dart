@@ -62,6 +62,71 @@
 /// occurrence at all) but costs a bounded scan; it is left narrow deliberately,
 /// and the residual is recorded here rather than assumed away.
 ///
+/// ## "Periodic" is a property of the ANCHOR LENGTH, not of the content
+///
+/// Stopping on a periodic region is right only when the boundary is genuinely
+/// unknowable — and at ONE fixed anchor length it very often is not. A region
+/// whose period is shorter than the anchor but which is itself SHORTER than
+/// some longer anchor would be is perfectly decidable; the walk was throwing
+/// away the whole rest of that session's history for it. Worse, `_exhausted`
+/// is set for the LIFE of the walk, and a later `_attach` restarts from the
+/// tail and meets the same region again — a permanent floor on that session's
+/// history depth, with no error and no UI signal.
+///
+/// So before giving up, [ScrollbackWindow.consume] re-asks the SAME step with a
+/// longer anchor, climbing [kScrollbackAnchorLadder] (4 KB → 16 KB → 64 KB) and
+/// stopping only when the largest still self-matches. **A longer anchor can
+/// only be MORE specific** — it matches nowhere the shorter one did not — so
+/// escalation cannot manufacture a wrong cut; it can only turn a false stop
+/// into the cut that was always correct.
+///
+/// Measured at production parameters (anchor 4096, step 262144, 2 MB cap, 4 KB
+/// drift per gap) against a rebuilt server model, walks of 7 available steps:
+///
+/// | fixture | fixed anchor | with the ladder |
+/// |---|---|---|
+/// | prose, phrase repeats every 4096 u | 7/7 | 7/7 |
+/// | repeated shell prompt (~230 u period) | 7/7 | 7/7 |
+/// | `for` loop x 500 identical lines (6 KB run) | 7/7 | 7/7 |
+/// | `for` loop x 2000 identical lines (25 KB run) | **3/7** | 7/7 |
+/// | `for` loop x 20000 identical lines (254 KB run) | **3/7** | **3/7** |
+/// | panel redrawn 30x, 733 u frame | **3/7** | 7/7 |
+/// | panel redrawn 30x, 2923 u frame (88 KB region) | **3/7** | **3/7** |
+/// | panel redrawn 30x, 14603 u frame | 7/7 | 7/7 |
+/// | mixed agent stream, 20 randomised runs | **17/20 stopped**, avg 3.1/7 | **6/20**, avg 6.7/7 |
+///
+/// On the mixed stream that is 781 KB of history recovered on average, out of
+/// 1792 KB available — the ladder pays for itself several times over, at a cost
+/// of at most two extra round trips on the steps that need it and none at all
+/// on the steps that do not.
+///
+/// **What it does NOT fix, and honestly cannot:** a periodic region LONGER than
+/// the largest rung. A 254 KB run of one identical line, or an 88 KB block of
+/// one redrawn frame, is genuinely undecidable from a 64 KB anchor — every
+/// candidate boundary inside it looks exactly like every other — and stopping
+/// there is the honest answer, not a gap to be closed by a bigger number. Both
+/// remaining stops in the table are that shape.
+///
+/// ## What this module does NOT fix: the ATTACH path double-renders the tail
+///
+/// Recorded here so a future reader does not conclude the deepen walk is still
+/// broken. `_attach` (`session_screen.dart`) clears the buffer, writes the
+/// 256 KB HTTP replay, and only then opens the socket — and the server sends up
+/// to `scrollbackReplayLimit` (32768) of sanitised scrollback on connect,
+/// unconditionally. The client's `reconnected` handler, which clears the buffer
+/// for exactly this reason, fires only on RE-connects and never on the first
+/// one. Measured through the real vendored xterm at 52x38: **1129 duplicated
+/// lines per attach**, at the tail, every attach — and on Windows
+/// `AppLifecycleState.resumed` fires on every window focus.
+///
+/// That is a **different mechanism at a different layer**, pre-existing and
+/// unrelated to the backward walk: it is the newest bytes arriving twice from
+/// two sources, not older bytes being re-harvested. Nothing in this file can
+/// see it. Fixing it means making the first connect suppress or clear the
+/// socket's opening replay — the client cannot simply skip the HTTP replay, it
+/// is eight times larger — which is its own change with its own risk of
+/// deleting the tail instead of de-duplicating it.
+///
 /// Nothing here touches a terminal, a widget or the network — it is the rule
 /// only, so the whole walk is testable without pumping a screen or a server.
 library;
@@ -82,8 +147,10 @@ int scrollbackTailOffset(int total, int budget) {
 /// blocks the frame for long, large enough that a deep history arrives quickly.
 const int kScrollbackDeepenBytes = 262144;
 
-/// How much of the previously-consumed slice is kept as the content anchor, and
-/// therefore also how far past the known window each request over-fetches.
+/// The FIRST anchor length tried at each step — how much of the
+/// previously-consumed slice is matched, and therefore also how far past the
+/// known window that request over-fetches. A step that finds this length
+/// ambiguous climbs [kScrollbackAnchorLadder] rather than giving up.
 ///
 /// **4 KB, chosen against both failure modes.** Too short and the anchor
 /// false-matches: agent-TUI scrollback is *made* of near-identical repaints, so
@@ -96,10 +163,35 @@ const int kScrollbackDeepenBytes = 262144;
 /// roughly 35 lines *including* their escape sequences — cursor addresses,
 /// colour changes and the numbers a repaint carries. For that to repeat byte
 /// for byte the terminal would have to print two consecutive frames with
-/// nothing whatsoever differing between them. It is 1.5% of [kScrollbackDeepenBytes],
-/// so the over-fetch it costs is noise, and one 4 KB string per screen is not
-/// memory worth counting.
+/// nothing whatsoever differing between them. It is 1.5% of
+/// [kScrollbackDeepenBytes], so the over-fetch it costs is noise.
+///
+/// What IS retained is the top rung's worth — 64 KB of the head of the screen,
+/// because an escalation can only match characters that were kept. One 64 KB
+/// string per open session view, against the 2 MB of scrollback it is walking
+/// and the terminal buffer holding the result, is still not memory worth
+/// counting; the over-fetch stays at 4 KB unless a step actually needs more.
 const int kScrollbackAnchorBytes = 4096;
+
+/// The anchor lengths ONE step is allowed to try, as multiples of
+/// [kScrollbackAnchorBytes] — 4 KB, 16 KB, 64 KB.
+///
+/// **The top rung is bounded by the server, not by taste.** `server.js` clamps
+/// a `limit` above `SCROLLBACK_RANGE_MAX` (524288) silently, and the clamp
+/// would cut off exactly the over-fetch the anchor lives in — escalation would
+/// then fail as "anchor not found" for a reason that has nothing to do with the
+/// content. The largest request this ladder can produce is
+/// `kScrollbackDeepenBytes + 16 * kScrollbackAnchorBytes` = 327680, which
+/// leaves room to spare; the test suite asserts it rather than trusting this
+/// comment.
+///
+/// Three rungs, x4 apart, because each one costs a whole extra round trip
+/// (`kScrollbackDeepenGap` apart) on a step that has already failed once. The
+/// measurement behind the choice is in the library doc above: the ladder turns
+/// 17-in-20 stopped walks into 6-in-20, and a fourth rung could not help — past
+/// 64 KB the remaining stops are periodic regions hundreds of KB wide, which no
+/// anchor short enough to fetch can disambiguate.
+const List<int> kScrollbackAnchorLadder = <int>[1, 4, 16];
 
 /// One backward step: the byte range to ask the server for, stamped with the
 /// walk [generation] it belongs to.
@@ -175,13 +267,45 @@ class ScrollbackWindow {
   /// How far back each step reaches.
   final int stepBytes;
 
-  /// Anchor length, and the over-fetch each request adds past [earliest].
+  /// The BASE anchor length: what a step matches on its first attempt, and the
+  /// over-fetch that request adds past [earliest]. A step that finds this
+  /// length ambiguous climbs [kScrollbackAnchorLadder] from here.
   final int anchorBytes;
 
   int _earliest = 0;
   bool _exhausted = true;
-  String _anchor = '';
+  String _anchorMaterial = '';
+  int _rung = 0;
   int _generation = 0;
+
+  /// The longest anchor the ladder can reach — and therefore how much of the
+  /// head of the current screen is kept, since an escalation cannot ask for
+  /// characters that were never retained.
+  int get _maxAnchorBytes => anchorBytes * kScrollbackAnchorLadder.last;
+
+  /// How long the anchor is on THIS attempt at the current step.
+  int get _rungBytes => anchorBytes * kScrollbackAnchorLadder[_rung];
+
+  /// The anchor actually matched on this attempt: the head of the screen,
+  /// clipped to the current rung.
+  String get _activeAnchor => _anchorMaterial.length <= _rungBytes
+      ? _anchorMaterial
+      : _anchorMaterial.substring(0, _rungBytes);
+
+  /// Moves to the next rung, or reports that there is nothing longer to try.
+  ///
+  /// Refusing to climb when the screen's own head is already shorter than the
+  /// rung asked for matters: every rung costs a whole extra round trip
+  /// (`kScrollbackDeepenGap` apart), and a rung that yields a byte-identical
+  /// anchor is guaranteed to reach the byte-identical verdict.
+  bool _escalateAnchor() {
+    if (_rung >= kScrollbackAnchorLadder.length - 1) return false;
+    final before = _activeAnchor.length;
+    _rung++;
+    if (_activeAnchor.length > before) return true;
+    _rung = kScrollbackAnchorLadder.length - 1;
+    return false;
+  }
 
   /// The offset the last fetch started at — the *request* coordinate, which is
   /// all it is good for. Where the loaded history really begins is answered by
@@ -192,8 +316,9 @@ class ScrollbackWindow {
   /// failed, or the anchor could not be found (see [consume]).
   bool get exhausted => _exhausted;
 
-  /// The head anchor of everything currently on screen. Exposed for tests.
-  String get anchor => _anchor;
+  /// The head anchor of everything currently on screen, at the length this
+  /// attempt is using. Exposed for tests.
+  String get anchor => _activeAnchor;
 
   /// The current walk. Bumped by [reset] and [noteReplay].
   int get generation => _generation;
@@ -205,7 +330,8 @@ class ScrollbackWindow {
     _generation++;
     _earliest = 0;
     _exhausted = true;
-    _anchor = '';
+    _anchorMaterial = '';
+    _rung = 0;
   }
 
   /// Stops the walk where it is, keeping the history already loaded.
@@ -222,15 +348,18 @@ class ScrollbackWindow {
     _generation++;
     _earliest = offset;
     _exhausted = offset <= 0;
-    _anchor = _headAnchor(data);
+    _anchorMaterial = _headMaterial(data);
+    _rung = 0;
   }
 
   /// The next range to fetch, or null when there is nothing older to ask for.
   ///
-  /// The range runs from one [stepBytes] back to [anchorBytes] PAST the window
-  /// already held. That over-fetch is the whole trick: with no drift the anchor
-  /// begins exactly at [earliest], so without it the anchor would sit one byte
-  /// past the end of the slice and could never be matched.
+  /// The range runs from one [stepBytes] back to the current rung's anchor
+  /// length PAST the window already held. That over-fetch is the whole trick:
+  /// with no drift the anchor begins exactly at [earliest], so without it the
+  /// anchor would sit one byte past the end of the slice and could never be
+  /// matched. After an escalation the same step is asked for again, reaching
+  /// further forward so the LONGER anchor is inside the slice too.
   ScrollbackRequest? nextRequest() {
     if (_exhausted) return null;
     if (_earliest <= 0) {
@@ -238,7 +367,7 @@ class ScrollbackWindow {
       return null;
     }
     final start = scrollbackTailOffset(_earliest, stepBytes);
-    final end = _earliest + anchorBytes;
+    final end = _earliest + _rungBytes;
     return ScrollbackRequest(
       offset: start,
       limit: end - start,
@@ -257,10 +386,15 @@ class ScrollbackWindow {
   /// hole in history and restarts the walk from the wrong place.
   ///
   /// **When the boundary cannot be established the walk STOPS**, for all four
-  /// reasons it can fail: the slice is empty; there is no anchor to cut on; the
-  /// anchor is nowhere in the slice (the buffer moved further than a whole step,
-  /// 256 KB inside one 900 ms gap); or the anchor repeats, so the match found is
-  /// as likely to be a later self-repeat as the boundary. In every case the
+  /// reasons it can fail: the slice is empty, **at any offset** — a shrinking
+  /// buffer answers a request that fell off its front with nothing, and a walk
+  /// that stayed armed there re-issued the identical request every 900 ms for
+  /// ever; there is no anchor to cut on; the anchor is nowhere in the slice (the
+  /// buffer moved further than a whole step, 256 KB inside one 900 ms gap); or
+  /// the anchor repeats **at every length the ladder can reach** — a repeat at
+  /// the current length only re-asks the same step with a longer anchor (see
+  /// [kScrollbackAnchorLadder]), and gives up only at the top rung. In each
+  /// terminal case the
   /// position of the boundary is unknown, and both ways of guessing are worse
   /// than stopping: keeping the slice duplicates whatever part of it is already
   /// on screen (the reported bug), and skipping it while still advancing leaves
@@ -274,9 +408,20 @@ class ScrollbackWindow {
   }) {
     if (generation != _generation) return ScrollbackHarvest._none;
     if (offset <= 0) _exhausted = true;
-    if (data.isEmpty) return ScrollbackHarvest._none;
+    // An empty slice stops the walk AT ANY OFFSET, and the `offset <= 0` line
+    // above is not enough on its own. `start = min(offset, total)` means the
+    // server answers a request that has fallen off the front of a SHRINKING
+    // buffer with nothing, at a positive offset — and nothing about the walk
+    // changes: `earliest` does not move, so `nextRequest` returns the identical
+    // range, `commit` of an empty harvest is a no-op, and `_deepenOnce`'s
+    // `finally` re-arms the timer. That is the same request every 900 ms for
+    // the life of the view, for ever.
+    if (data.isEmpty) {
+      _exhausted = true;
+      return ScrollbackHarvest._none;
+    }
 
-    final previous = _anchor;
+    final previous = _activeAnchor;
     // No anchor means nothing to cut on. The old reading here was "nothing is on
     // screen yet (an attach that replayed no bytes), so there is nothing this
     // slice could duplicate" — which is unsound: an attach whose HTTP replay
@@ -333,17 +478,24 @@ class ScrollbackWindow {
     // period, and the bound's own drift slack is what lets a later one win. Scan
     // forward from one anchor-length below the match: a hit before it proves the
     // region is periodic and the cut cannot be trusted. Forward, not backward,
-    // so the scan is bounded by [anchorBytes] instead of the whole slice.
-    final from = cut > anchorBytes ? cut - anchorBytes : 0;
+    // so the scan is bounded by the anchor length instead of the whole slice.
+    final from = cut > previous.length ? cut - previous.length : 0;
     if (from < cut && data.indexOf(previous, from) < cut) {
-      _exhausted = true;
+      // Periodic AT THIS ANCHOR LENGTH — which is a much weaker statement than
+      // "unknowable", and treating the two as the same was measurably wrong.
+      // Retry the SAME step with a longer anchor first: a period shorter than
+      // the anchor is what makes the region ambiguous, so an anchor that
+      // outreaches the region ends in text that occurs nowhere else and the
+      // boundary becomes decidable again. Only when the longest rung still
+      // self-matches is the region genuinely undecidable, and stopping honest.
+      if (!_escalateAnchor()) _exhausted = true;
       return ScrollbackHarvest._none;
     }
 
     return ScrollbackHarvest._(
       data.substring(0, cut),
       offset,
-      _headAnchor(data),
+      _headMaterial(data),
       generation,
     );
   }
@@ -356,12 +508,20 @@ class ScrollbackWindow {
   void commit(ScrollbackHarvest harvest) {
     if (harvest._generation != _generation) return;
     _earliest = harvest._earliest;
-    _anchor = harvest._anchor;
+    _anchorMaterial = harvest._anchor;
+    // Back to the cheap rung. Escalation is a property of the STEP that needed
+    // it, not of the walk: the periodic region is now behind the boundary, and
+    // carrying its rung forward would buy nothing while over-fetching 64 KB on
+    // every remaining step.
+    _rung = 0;
     if (_earliest <= 0) _exhausted = true;
   }
 
-  String _headAnchor(String data) =>
-      data.length <= anchorBytes ? data : data.substring(0, anchorBytes);
+  /// The head of the screen, kept at the longest length any rung could ask for
+  /// — an escalation can only match characters that were retained here.
+  String _headMaterial(String data) => data.length <= _maxAnchorBytes
+      ? data
+      : data.substring(0, _maxAnchorBytes);
 }
 
 /// How many of a scratch terminal's [bufferLines] are worth prepending: all of

@@ -1529,6 +1529,31 @@ class _SessionScreenState extends State<SessionScreen>
   /// first attach and every time the app resumes from the background — the
   /// server owns replay, this just re-syncs the view (spec: "reopening
   /// resumes seamlessly").
+  ///
+  /// ## KNOWN, PRE-EXISTING: this path double-renders the tail (not #167)
+  ///
+  /// Recorded because the symptom — repeated output in the terminal — is the
+  /// one #167 is named for, and a future reader will otherwise conclude the
+  /// backward deepening walk is still broken. It is not: this is a **different
+  /// mechanism at a different layer**, and it predates that fix.
+  ///
+  /// Below, the buffer is cleared, the 256 KB HTTP replay is written, and only
+  /// THEN the socket is opened — and the server sends up to
+  /// `scrollbackReplayLimit` (32768) of sanitised scrollback on connect,
+  /// unconditionally. `_reconnectedSub` clears the buffer for exactly this
+  /// reason, but `reconnected` fires only on RE-connects, never on the first
+  /// one. Measured through the real vendored xterm at 52x38: **1129 duplicated
+  /// lines per attach**, at the tail, on every attach — and on Windows
+  /// `AppLifecycleState.resumed` fires on every window focus, so "every attach"
+  /// means every time the window is clicked.
+  ///
+  /// It is deliberately NOT fixed here. The two candidate fixes both need their
+  /// own change and their own evidence: suppress the socket's opening replay on
+  /// a FIRST connect (a server-side signal, so both clients agree on what a
+  /// first connect is), or drop the HTTP replay and let the socket supply the
+  /// tail (it is eight times smaller, so this trades duplication for a much
+  /// shallower opening view). Skipping bytes on the wrong one of the two paths
+  /// deletes the tail instead of de-duplicating it, which is strictly worse.
   Future<void> _attach() async {
     final session = _session;
     if (session == null) return;

@@ -492,6 +492,128 @@ void main() {
     });
   });
 
+  group('a periodic region is RETRIED with a LONGER anchor before giving up',
+      () {
+    // Stopping on a periodic region is right only when the boundary is
+    // genuinely unknowable, and at a FIXED anchor length it very often is not:
+    // a region shorter than a longer anchor would be is perfectly decidable,
+    // and the walk was throwing that history away. Measured at production
+    // parameters (anchor 4096, step 262144, 2 MB cap, 4 KB drift) over 20
+    // randomised agent-shaped streams, the fixed anchor stopped 17 of 20 walks
+    // — and `_exhausted` is set for the LIFE of the walk, so a later `_attach`
+    // restarts from the tail and hits the same region again: a permanent floor
+    // on that session's history depth, with no error and no UI signal.
+    //
+    // So before giving up, re-ask the SAME step with a longer anchor. A longer
+    // anchor can only be MORE specific — it matches nowhere the shorter one did
+    // not — so escalation cannot manufacture a wrong cut; it can only turn a
+    // false stop into the cut that was always correct.
+
+    test('a region shorter than an escalated anchor is resolved, not abandoned',
+        () {
+      // A static 20000-unit buffer: unique output, then 1600 units of a
+      // repainting panel straddling the SECOND step boundary (12000), then
+      // unique output again. A 400-unit anchor taken at 12000 lands wholly
+      // inside the panel and matches again one period earlier; a 1600-unit one
+      // reaches past the panel into text that occurs nowhere else.
+      final server = _SlidingScrollback(20000);
+      server.emit(_bodyOfLength(0, 11200));
+      server.emit(_panelRow * 80);
+      server.emit(_bodyOfLength(9000, 20000 - 12800));
+
+      final walk = _walk(
+        server,
+        replayBytes: 4000,
+        stepBytes: 4000,
+        anchorBytes: 400,
+      );
+
+      expect(walk.window.earliest, 0,
+          reason: 'the boundary IS knowable here, just not at 400 units — '
+              'stopping costs the whole rest of the history for a region 1600 '
+              'units wide');
+      expect(walk.joined, server.emitted,
+          reason: 'and the escalated cut must still be the RIGHT one: every '
+              'byte once, in order');
+    });
+
+    test('each escalation re-asks the SAME step, only reaching further', () {
+      // A positive offset throughout: at offset 0 the walk ends because it has
+      // reached the start of the buffer, which would hide what the ladder does.
+      final window = ScrollbackWindow(stepBytes: 1000, anchorBytes: 40);
+      window.noteReplay(data: _panelRow * 50, offset: 5000);
+
+      final offsets = <int>[];
+      final limits = <int>[];
+      for (var round = 0; round < 6; round++) {
+        final request = window.nextRequest();
+        if (request == null) break;
+        offsets.add(request.offset);
+        limits.add(request.limit);
+        window.commit(window.consume(
+          data: _panelRow * 200,
+          offset: 4000,
+          generation: request.generation,
+        ));
+      }
+
+      expect(offsets, everyElement(4000),
+          reason: 'escalation retries the step it failed on — it does not '
+              'advance past history it has not read');
+      expect(limits, [1040, 1160, 1640],
+          reason: 'step 1000 plus 40 x each rung of $kScrollbackAnchorLadder');
+      expect(window.exhausted, isTrue,
+          reason: 'the ladder is finite: an endlessly periodic region is '
+              'genuinely undecidable and stopping there is honest');
+    });
+
+    test('the largest escalated request stays inside the server range cap', () {
+      // `server.js` SCROLLBACK_RANGE_MAX. The route silently CLAMPS a bigger
+      // `limit`, which would cut the over-fetch the anchor lives in off the end
+      // of the slice — escalation would then fail as "anchor not found" for a
+      // reason that has nothing to do with the content.
+      const int serverRangeMax = 524288;
+      final largest = kScrollbackDeepenBytes +
+          kScrollbackAnchorBytes * kScrollbackAnchorLadder.last;
+      expect(largest, 327680);
+      expect(largest, lessThan(serverRangeMax));
+    });
+  });
+
+  group('an EMPTY slice stops the walk, whatever offset it came back at', () {
+    test('does not re-issue the identical request round after round', () {
+      // `offset <= 0` was the only thing setting `_exhausted` before the
+      // empty-slice early return, so an empty slice at a POSITIVE offset left
+      // the walk armed with `earliest` unmoved. `nextRequest` then produced the
+      // identical range for ever — and `_deepenOnce`'s `finally` re-arms
+      // `_scheduleDeepen`, so that is one request every 900 ms for the life of
+      // the view. Reachable whenever the server's buffer shrinks past the
+      // offset being asked for between two steps, without the socket
+      // reconnecting to reset the walk.
+      final window = ScrollbackWindow(stepBytes: 4000, anchorBytes: 400);
+      window.noteReplay(data: _body(0, 200), offset: 9000);
+
+      final issued = <String>[];
+      for (var round = 0; round < 5; round++) {
+        final request = window.nextRequest();
+        if (request == null) break;
+        issued.add('${request.offset}+${request.limit}');
+        // The buffer collapsed to 5000 units, so `start = min(offset, total)`
+        // clamps to 5000 and the server serves nothing — at a POSITIVE offset.
+        window.commit(window.consume(
+          data: '',
+          offset: 5000,
+          generation: request.generation,
+        ));
+      }
+
+      expect(issued, hasLength(1),
+          reason: 'an empty slice says nothing about where the boundary is, and '
+              're-asking cannot make the answer appear: $issued');
+      expect(window.exhausted, isTrue);
+    });
+  });
+
   group('a slice SHORTER than the walk expected (#167)', () {
     test('does not throw out of the pure rule', () {
       // Reachable in production: `persistScrollback` defaults OFF, so a worker
