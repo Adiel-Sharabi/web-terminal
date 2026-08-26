@@ -1619,6 +1619,24 @@ class _SessionScreenState extends State<SessionScreen>
     _reconnectedSub = connection.reconnected.listen((_) {
       _terminal.buffer.clear();
       _terminal.buffer.setCursor(0, 0);
+      // ...and abandon the backward walk with it (#167). The socket replay is
+      // the server's own tail slice (`scrollbackReplayLimit`, 32 KB by default)
+      // and it is much SHORTER than the 256 KB the HTTP attach replayed, so from
+      // here the anchor describes text that is no longer on screen and
+      // `earliest` names a position far above where the screen now starts.
+      // Deepening from there prepends genuinely older text over a gap of
+      // everything in between — a silent hole, and the one failure this module
+      // refuses to produce anywhere else.
+      //
+      // Re-ANCHORING on the socket replay instead (which would keep deepening
+      // alive) is deliberately not attempted: the replay's offset is not on the
+      // wire, and deriving it from `total` would need the two sanitiser passes
+      // — whole-buffer for HTTP, tail-slice for the socket — to agree byte for
+      // byte across the tail cut, which is exactly the kind of unmeasured
+      // assumption this repo has been burned by. Until it is measured against a
+      // real reconnect, history stops deepening after a reconnect and resumes
+      // on the next attach. Less history, never history that lies.
+      _sbWindow.reset();
     });
     _connectedSub = connection.connected.listen(_onConnectedChanged);
   }
@@ -2963,30 +2981,43 @@ class _SessionScreenState extends State<SessionScreen>
       if (!mounted) return;
       // Empty when this slice adds nothing — including when an attach re-armed
       // the walk while this request was in flight, in which case the response
-      // belongs to a history that is no longer on screen.
-      final older = _sbWindow.consume(
+      // belongs to a history that is no longer on screen. The walk stays where
+      // it is until `commit` below: an early return here must cost a re-fetch,
+      // never a hole (#167).
+      final harvest = _sbWindow.consume(
         data: chunk.data,
         offset: chunk.offset,
         generation: request.generation,
       );
-      if (older.isEmpty) return;
+      if (harvest.text.isEmpty) {
+        _sbWindow.commit(harvest);
+        return;
+      }
 
       final scratch = Terminal(maxLines: kScrollbackMaxLines);
       scratch.resize(_lastCols > 0 ? _lastCols : 80, _lastRows > 1 ? _lastRows : 24);
-      safeTerminalWrite(scratch, older);
+      safeTerminalWrite(scratch, harvest.text);
 
-      // Everything except the scratch terminal's own VIEWPORT. That viewport is
-      // the screen as of the byte this slice stops at, and the text already
-      // loaded below it is the continuation repainting over it — harvesting it
-      // stamps a stale copy of an agent's TUI panel into the scrollback at every
-      // seam, which is #167's screenshot. Trimming only trailing BLANK lines, as
-      // this did, cannot help: a panel is not blank.
-      final keep = olderLineLimit(scratch.buffer.lines.length, scratch.viewHeight);
-      if (keep <= 0) return;
+      // Everything except the trailing BLANK lines the scratch terminal's own
+      // viewport contributes; they would show up as a gap between the older text
+      // and what is already here. The viewport itself is KEPT — dropping it
+      // deletes real history at every non-repainting seam, which is a far worse
+      // trade than the repainted frame it would have saved. See
+      // [olderLineLimit] for the measurement.
+      final lines = scratch.buffer.lines;
+      final keep = olderLineLimit(
+          lines.length, (i) => lines[i].getText().trim().isEmpty);
+      if (keep <= 0) {
+        // Nothing but blanks: committing loses no history and lets the walk
+        // step past it instead of asking for the same range forever.
+        _sbWindow.commit(harvest);
+        return;
+      }
       final harvested = <BufferLine>[];
       for (var i = 0; i < keep; i++) {
-        harvested.add(scratch.buffer.lines[i]);
+        harvested.add(lines[i]);
       }
+      _sbWindow.commit(harvest);
 
       final hadClients = _scrollController.hasClients;
       final beforeExtent =
