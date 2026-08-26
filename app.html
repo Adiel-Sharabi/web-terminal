@@ -99,14 +99,16 @@
     .srv-usage .u-warn { color: #da4; }
     .srv-usage .u-hot { color: #e94560; }
     .srv-usage .u-age { margin-left: auto; opacity: .7; font-style: italic; }
-    /* #152 — per-server CPU/memory (the per-server slice only; no per-session or
-       web-terminal-footprint numbers yet — see the issue). Same layout as .srv-usage
-       above, deliberately with no warn/hot colour tier: plain factual text, the
-       badge/threshold treatment is explicitly undecided and left for later. */
+    /* #152 — per-server CPU/memory. Same layout as .srv-usage above.
+       #165 gives it the warn/hot tier .srv-usage already had, on ONE reading only: the
+       absolute memory headroom. Nothing else here is coloured, because a line where
+       several things can turn amber is a line you stop reading. */
     .srv-resources { flex-basis: 100%; display: flex; align-items: center; gap: 5px; margin: 1px 0 3px 16px;
                  font-size: 9px; font-weight: 500; letter-spacing: 0; text-transform: none; color: #55617a; }
     .srv-resources .u-agent { font-weight: 700; opacity: .85; }
     .srv-resources .u-sep { opacity: .4; }
+    .srv-resources .u-warn { color: #da4; }
+    .srv-resources .u-hot { color: #e94560; }
     /* #152 levels 2/3 — web-terminal's own footprint, and one badge per session row.
        Both are filled in place by applyResourceDom() and are EMPTY unless the resources
        view is switched on, so `:empty { display: none }` is what makes the whole feature
@@ -2904,6 +2906,46 @@
     function fmtGiB(bytes) {
       return (bytes / (1024 * 1024 * 1024)).toFixed(1) + 'G';
     }
+    // #165 — the memory readout LEADS with headroom, because that is the number the
+    // choice is actually made on. A percentage saturates exactly where the decision
+    // matters: 92% -> 98% is six points while the room underneath goes 2.5G -> 0.65G,
+    // the difference between a box that copes and one that is unusable. The percentage
+    // stays as context — it is still the right reading below ~90%, where it has range —
+    // but it no longer leads, and the old used/total pair is gone: two byte figures plus
+    // a percentage is three numbers competing for one glance on a 9px line.
+    //
+    // PROVISIONAL THRESHOLDS. The only data behind them is 0.65G (a box that was
+    // effectively unusable) and 12.7G+ (boxes that were fine), with NOTHING in between —
+    // so these are a guess, and are recorded as one rather than dressed up as measured.
+    // 2G is picked because it is roughly "can a build even start here" (a Gradle daemon
+    // defaults to -Xmx2048m). Revisit against a box observed in the middle of the range;
+    // do not quietly re-tune them on a hunch.
+    const MEM_HEADROOM_RED_BYTES = 2 * 1024 * 1024 * 1024;
+    const MEM_HEADROOM_AMBER_BYTES = 4 * 1024 * 1024 * 1024;
+    /** The colour tier for an ABSOLUTE headroom figure. '' means "no colour". */
+    function memHeadroomClass(availBytes) {
+      if (typeof availBytes !== 'number' || !isFinite(availBytes) || availBytes < 0) return '';
+      if (availBytes < MEM_HEADROOM_RED_BYTES) return 'u-hot';
+      if (availBytes < MEM_HEADROOM_AMBER_BYTES) return 'u-warn';
+      return '';
+    }
+    /** The memory segment of a server header: `{ text, cls }`. */
+    function memReadout(m) {
+      if (!m) return { text: 'MEM —', cls: '' };
+      const avail = m.availBytes;
+      if (typeof avail === 'number' && isFinite(avail) && avail >= 0 && typeof m.totalBytes === 'number') {
+        return {
+          text: `MEM ${fmtGiB(avail)} free of ${fmtGiB(m.totalBytes)}`
+            + (m.usedPct != null ? ` (${m.usedPct}%)` : ''),
+          cls: memHeadroomClass(avail),
+        };
+      }
+      // A peer too old to report headroom. It says what it DID send rather than blanking
+      // the row — and never "0.0G free", which would condemn a server for being old.
+      return m.usedPct != null
+        ? { text: `MEM ${m.usedPct}% (${fmtGiB(m.usedBytes)}/${fmtGiB(m.totalBytes)})`, cls: '' }
+        : { text: 'MEM —', cls: '' };
+    }
     function resourcesHtml(server) {
       if (!server || !server.online) return '';
       const caps = Array.isArray(server.capabilities) ? server.capabilities : [];
@@ -2920,14 +2962,12 @@
       // below kept working. `wt-only` collapses the row again while the slot is empty.
       if (!r && !caps.includes('session-resources')) return '';
       const cpu = !r ? '' : (r.cpuPct == null ? 'CPU —' : `CPU ${r.cpuPct}%`);
-      const mem = !r ? '' : (r.memory && r.memory.usedPct != null
-        ? `MEM ${r.memory.usedPct}% (${fmtGiB(r.memory.usedBytes)}/${fmtGiB(r.memory.totalBytes)})`
-        : 'MEM —');
+      const mem = !r ? { text: '', cls: '' } : memReadout(r.memory);
       const windowSec = Math.round(((r && r.windowMs) || 0) / 1000);
-      return `<div class="srv-resources${r ? '' : ' wt-only'}" title="Machine-wide CPU and memory${windowSec ? ` — CPU averaged over the last ${windowSec}s` : ''}">`
+      return `<div class="srv-resources${r ? '' : ' wt-only'}" title="Machine-wide CPU and free memory${windowSec ? ` — CPU averaged over the last ${windowSec}s` : ''}">`
         + (r ? `<span class="u-agent">${esc(cpu)}</span>`
              + `<span class="u-sep">&middot;</span>`
-             + `<span class="u-agent">${esc(mem)}</span>` : '')
+             + `<span class="u-agent ${mem.cls}">${esc(mem.text)}</span>` : '')
         // #152 level 2 — filled in place by applyResourceDom(), empty (and hidden) while
         // the resources view is off, because the number behind it costs a process query.
         + `<span class="u-wt" data-server-url="${esc(server.url || '')}"></span>`
@@ -2997,12 +3037,31 @@
       if (!rep.sampling || !rep.sampling.ok) {
         return ['\u00b7 WT \u2014', `Cannot measure processes (${(rep.sampling && rep.sampling.reason) || 'unavailable'})`];
       }
+      // #165 \u2014 the pressure figure. It is machine-wide, not web-terminal's, but it rides
+      // this slot because it comes from the same on-demand reading: the counter needs a
+      // CIM query, and the header's memory half is rendered from the cluster poll, which
+      // must never pay for one. It sits directly after MEM, where it belongs.
+      //
+      // Rendered only when it was actually measured. A null must NOT borrow the look of a
+      // calm box \u2014 0/s is what a healthy machine reads, so printing it for one we could
+      // not measure is a claim, not a reading. No colour tier: the only data behind a
+      // threshold here would be 951 (bad) against 2.6 and 34 (fine), which is the same
+      // guess #165 refused to make for the headroom without saying so.
+      const pr = rep.machine && rep.machine.memory ? rep.machine.memory.pageReadsPerSec : null;
+      const measured = typeof pr === 'number' && isFinite(pr) && pr >= 0;
+      const paging = measured ? `\u00b7 paging ${pr}/s ` : '';
+      const pagingTip = measured
+        ? `Paging: ${pr} page reads/sec off disk. A high rate means this box is short of `
+          + `memory and is re-reading pages it had to evict.\n\n`
+        : '';
+
       const wt = rep.webTerminal;
-      if (!wt) return ['\u00b7 WT \u2014', 'web-terminal\'s own tree could not be resolved'];
+      if (!wt) return [paging + '\u00b7 WT \u2014', pagingTip + 'web-terminal\'s own tree could not be resolved'];
       const win = Math.round((rep.sampling.windowMs || 0) / 1000) || 1;
       return [
-        `\u00b7 WT ${fmtPct(wt.cpuPct)} \u00b7 ${fmtBytes(wt.rssBytes)}`,
-        `web-terminal itself (monitor + worker + web + every session below them):\n`
+        `${paging}\u00b7 WT ${fmtPct(wt.cpuPct)} \u00b7 ${fmtBytes(wt.rssBytes)}`,
+        pagingTip
+          + `web-terminal itself (monitor + worker + web + every session below them):\n`
           + `CPU ${fmtPct(wt.cpuPct)} of the machine over ${win}s, ${fmtBytes(wt.rssBytes)} across ${wt.procCount} processes\n`
           + `The rest of this box's load is something else.`,
       ];

@@ -4,6 +4,7 @@ const {
   parseSnapshotOutput, rollUpTree, resolveRuntimeRoot, shapeReport, descendantsOf,
   sessionRootNames, snapshot, snapshotPair, _setQueryForTests, _peekCacheForTests,
   _resetForTests, MIN_PAIR_GAP_MS, PAIR_SETTLE_MS, RUNTIME_ROOT_KEY,
+  parseMemoryCounters, pageReadsPerSecFromSamples, _setPerfClassForTests,
 } = require('../lib/process-tree');
 
 // #152 levels 2 and 3 — what web-terminal itself costs and what each session costs.
@@ -253,7 +254,12 @@ test.describe('shapeReport — the API contract', () => {
     // The degraded shape only ever appears on a box that cannot run the query, so this
     // test is the only place it is ever exercised before a user sees it.
     const out = shapeReport({ machine, reading: { ok: false, reason: 'timeout' }, sessions, ts: 99, cpuCount: 20 });
-    expect(out.machine).toBe(machine);
+    // Carried through field for field. Not by IDENTITY: #165 folds the on-demand paging
+    // rate into this same memory block, so the report builds its own object rather than
+    // mutating the warm sampler's — which every other caller of read() shares.
+    expect(out.machine.cpuPct).toBe(machine.cpuPct);
+    expect(out.machine.memory.usedBytes).toBe(machine.memory.usedBytes);
+    expect(out.machine.memory.totalBytes).toBe(machine.memory.totalBytes);
     expect(out.sampling).toEqual({ ok: false, reason: 'timeout' });
     expect(out.webTerminal).toBeNull();
     expect(out.sessions).toEqual({});
@@ -409,5 +415,224 @@ test.describe('#152 the snapshot cache and the pair it hands out', () => {
     await snapshot(Date.now(), { maxAgeMs: 0 });
     const { at } = _peekCacheForTests();
     expect(at - t0).toBeLessThan(150);
+  });
+});
+
+// --- #165: memory PRESSURE, folded into the pair this module already takes ----------
+//
+// Everything here is PURE, mirroring the cpuPercentFromSamples specs in resources.spec.js
+// for the same reason: a raw performance counter is CUMULATIVE, so a single read reports
+// the machine's average since boot and calls it "now" — and the arithmetic that turns two
+// of them into a rate must be pinnable without a running Windows box.
+
+test.describe('pageReadsPerSecFromSamples', () => {
+  // Perf-counter time is measured in its OWN ticks, not wall clock: `perfTime` counts at
+  // `perfFreq` Hz. 10 MHz is what Windows reports on this fleet.
+  const HZ = 10000000;
+  const at = (pageReads, seconds) => ({ pageReads, perfTime: seconds * HZ, perfFreq: HZ });
+
+  test('a real rate: the delta divided by the elapsed time the counter itself reports', () => {
+    // 1902 reads over 2 s = 951/s — the measured figure from the report in #165.
+    expect(pageReadsPerSecFromSamples(at(1000, 10), at(2902, 12))).toBe(951);
+  });
+
+  test('a healthy box reads a small NON-ZERO rate, kept to one decimal', () => {
+    // 2.6/s and 2.89/s are the figures that must stay distinguishable from 951 without
+    // any ratio arithmetic in the client. Rounding them to an integer would be tolerable;
+    // rounding them AWAY would not, so the precision is pinned.
+    expect(pageReadsPerSecFromSamples(at(0, 0), at(26, 10))).toBe(2.6);
+  });
+
+  test('no previous sample -> null (never 0 reads/sec)', () => {
+    // 0 reads/sec is the reading of a perfectly healthy box. Fabricating it for a box we
+    // could not measure says "no memory pressure here" about the one server nobody knows
+    // anything about.
+    expect(pageReadsPerSecFromSamples(null, at(1, 1))).toBeNull();
+    expect(pageReadsPerSecFromSamples(undefined, at(1, 1))).toBeNull();
+    expect(pageReadsPerSecFromSamples(at(1, 1), null)).toBeNull();
+  });
+
+  test('zero elapsed counter time -> null, not Infinity and not NaN', () => {
+    expect(pageReadsPerSecFromSamples(at(100, 5), at(200, 5))).toBeNull();
+  });
+
+  test('a counter that went BACKWARDS is a reset, not a negative rate', () => {
+    // PageReadsPersec is a uint32 in Win32_PerfRawData_PerfOS_Memory, so it wraps; a
+    // reboot between two samples does the same thing. Either way the delta is a lie, and
+    // the honest answer is "unknown" until the next pair.
+    expect(pageReadsPerSecFromSamples(at(5000, 1), at(10, 3))).toBeNull();
+  });
+
+  test('rewound counter TIME (a bogus pair) -> null', () => {
+    expect(pageReadsPerSecFromSamples(at(10, 9), at(20, 1))).toBeNull();
+  });
+
+  test('missing or non-finite fields -> null', () => {
+    expect(pageReadsPerSecFromSamples({}, at(1, 1))).toBeNull();
+    expect(pageReadsPerSecFromSamples(at(1, 1), {})).toBeNull();
+    expect(pageReadsPerSecFromSamples({ pageReads: NaN, perfTime: 0, perfFreq: HZ }, at(1, 1))).toBeNull();
+    expect(pageReadsPerSecFromSamples(at(1, 1), { pageReads: 2, perfTime: Infinity, perfFreq: HZ })).toBeNull();
+  });
+
+  test('a zero or missing frequency -> null, never a division by nothing', () => {
+    // Frequency is what converts ticks to seconds. Without it the "rate" would silently
+    // be a per-tick figure ten million times too small — a wrong number, not a missing one.
+    expect(pageReadsPerSecFromSamples(
+      { pageReads: 0, perfTime: 0, perfFreq: 0 },
+      { pageReads: 1000, perfTime: HZ, perfFreq: 0 })).toBeNull();
+    expect(pageReadsPerSecFromSamples(
+      { pageReads: 0, perfTime: 0 },
+      { pageReads: 1000, perfTime: HZ })).toBeNull();
+  });
+
+  test('an unchanged counter over real elapsed time IS 0 — a measured calm box', () => {
+    // The one case that must NOT be null: we measured it, and the answer is zero.
+    expect(pageReadsPerSecFromSamples(at(4200, 1), at(4200, 3))).toBe(0);
+  });
+});
+
+test.describe('parseMemoryCounters — the counter rides the SAME query', () => {
+  const rows = '123|4|claude.exe|1700000000000|1048576|500000\r\n9|8|bash.exe|42|1|2\r\n';
+
+  test('reads the counter line out of the process output', () => {
+    const c = parseMemoryCounters(rows + 'PERFMEM|9182|123456789|10000000\r\n');
+    expect(c).toEqual({ pageReads: 9182, perfTime: 123456789, perfFreq: 10000000 });
+  });
+
+  test('the counter line is NOT parsed as a process — agent matching must not see it', () => {
+    // parseSnapshotOutput is the wire format every agent match depends on. A tagged line
+    // appended to the same stdout must be invisible to it, or every session gains a
+    // phantom process and the rollup charges it to somebody.
+    const procs = parseSnapshotOutput(rows + 'PERFMEM|9182|123456789|10000000\r\n');
+    expect(procs).toHaveLength(2);
+    expect(procs.map((p) => p.name)).toEqual(['claude.exe', 'bash.exe']);
+  });
+
+  test('no counter line (an older query, or one the OS refused) -> null', () => {
+    expect(parseMemoryCounters(rows)).toBeNull();
+    expect(parseMemoryCounters('')).toBeNull();
+    expect(parseMemoryCounters(null)).toBeNull();
+  });
+
+  test('a malformed counter line -> null, never a half-read sample', () => {
+    expect(parseMemoryCounters('PERFMEM|||')).toBeNull();
+    expect(parseMemoryCounters('PERFMEM|nope|123|10000000')).toBeNull();
+    expect(parseMemoryCounters('PERFMEM|1|2')).toBeNull();
+  });
+});
+
+test.describe('#165 the snapshot pair carries the memory counter', () => {
+  test.beforeEach(() => _resetForTests());
+  test.afterEach(() => _resetForTests());
+
+  const rows = () => [{ pid: 1, ppid: 0, name: 'bash.exe', startMs: 1, rssBytes: 1, cpu100ns: 1 }];
+  const HZ = 10000000;
+
+  test('a pair hands back both counter samples, so the rate needs no second query', async () => {
+    // The design constraint, made testable: folding the counter into the existing
+    // snapshotPair costs ~35 ms (measured), a standalone CIM query costs ~2436 ms.
+    // Nothing here may spawn a query of its own.
+    let n = 0;
+    _setQueryForTests(async () => {
+      n += 1;
+      return { procs: rows(), perf: { pageReads: n * 1000, perfTime: n * HZ, perfFreq: HZ } };
+    });
+    const pair = await snapshotPair({ settleMs: MIN_PAIR_GAP_MS + 250 });
+    expect(pair).not.toBeNull();
+    expect(pair.prevPerf).toEqual({ pageReads: 1000, perfTime: HZ, perfFreq: HZ });
+    expect(pair.nextPerf).toEqual({ pageReads: 2000, perfTime: 2 * HZ, perfFreq: HZ });
+    expect(pageReadsPerSecFromSamples(pair.prevPerf, pair.nextPerf)).toBe(1000);
+  });
+
+  test('a snapshot carrying no counter still yields a usable process pair', async () => {
+    // NARROW on purpose, and the comment says what it does NOT cover. This proves the
+    // ARITHMETIC half: given a snapshot with no `perf`, the pair still forms and the rate
+    // is null rather than 0. It says nothing about whether a box with broken counters
+    // produces such a snapshot in the first place — `_setQueryForTests` replaces the very
+    // spawn where that is decided. The test below drives the real one.
+    _setQueryForTests(async () => rows());
+    const pair = await snapshotPair({ settleMs: MIN_PAIR_GAP_MS + 250 });
+    expect(pair).not.toBeNull();
+    expect(pair.next).toHaveLength(1);
+    expect(pair.prevPerf == null && pair.nextPerf == null).toBe(true);
+  });
+
+  test('an UNREADABLE counter on the REAL query keeps every process row', async () => {
+    // The containment claim, tested where it actually lives. `powershell.exe -Command`
+    // takes its exit code from `$?` at the END of the script, so a failed counter query
+    // as the last statement exits 1 — and `_queryWindows`'s `if (err) return null` then
+    // discards the complete, valid process list that was already on stdout. Measured:
+    //
+    //   -ErrorAction SilentlyContinue + `if ($m)`  -> err=code 1  (rows DISCARDED)
+    //   try { -ErrorAction Stop } catch            -> err=none    (rows kept)
+    //
+    // Blast radius of that discard, all silent: #152 levels 2 and 3 gone, agent start
+    // times null (Codex falls back to newest-in-cwd), the background-work badge dark —
+    // and a failed query is deliberately not cached, so every poll re-spawns PowerShell.
+    //
+    // `_setQueryForTests` cannot reach any of this: it replaces the spawn. Pointing the
+    // real query at a class that does not exist is the cheapest honest way in.
+    test.skip(process.platform !== 'win32', 'the counter query is Windows-only');
+    _resetForTests();
+    _setPerfClassForTests('Win32_PerfRawData_PerfOS_MemoryDoesNotExist');
+    const procs = await snapshot(Date.now());
+    expect(Array.isArray(procs)).toBe(true);
+    expect(procs.length).toBeGreaterThan(0);
+    // Unknown, never fabricated — the process rows survive, the pressure figure does not.
+    expect(_peekCacheForTests().perf).toBeNull();
+  });
+});
+
+test.describe('#165 shapeReport publishes pressure inside the memory block', () => {
+  const machine = {
+    cpuPct: 18, windowMs: 5000,
+    memory: { usedBytes: 1, totalBytes: 2, availBytes: 1, usedPct: 50 },
+  };
+  const groups = { [RUNTIME_ROOT_KEY]: { cpuPct: 1.2, rssBytes: 128, procCount: 3, topName: 'node.exe' } };
+
+  test('the rate lands on machine.memory, beside the headroom it explains', () => {
+    // One memory block on the wire, so no client has to join two readings to say
+    // "12.7 GB free and not paging" or "0.65 GB free and reading 951 pages a second".
+    const out = shapeReport({
+      machine,
+      reading: { ok: true, windowMs: 1400, ts: 1234, groups, pageReadsPerSec: 951 },
+      sessions: [], ts: 99, cpuCount: 20,
+    });
+    expect(out.machine.memory.pageReadsPerSec).toBe(951);
+    // The always-on half is untouched by the on-demand half.
+    expect(out.machine.memory.availBytes).toBe(1);
+    expect(out.machine.cpuPct).toBe(18);
+  });
+
+  test('a failed process query reports pressure as UNKNOWN and keeps the headroom', () => {
+    // The degraded shape. `availBytes` is free and rides the always-on sampler, so it
+    // must survive a process query that could not run; the rate could not be measured and
+    // must be null — a 0 there reads as "this box is not paging", which is a claim.
+    const out = shapeReport({
+      machine, reading: { ok: false, reason: 'timeout' }, sessions: [], ts: 99, cpuCount: 20,
+    });
+    expect(out.machine.memory.availBytes).toBe(1);
+    expect(out.machine.memory.pageReadsPerSec).toBeNull();
+  });
+
+  test('a successful query that could not read the counter still reports null, not 0', () => {
+    const out = shapeReport({
+      machine, reading: { ok: true, windowMs: 1400, ts: 1234, groups, pageReadsPerSec: null },
+      sessions: [], ts: 99, cpuCount: 20,
+    });
+    expect(out.machine.memory.pageReadsPerSec).toBeNull();
+    expect(out.webTerminal.rssBytes).toBe(128);
+  });
+
+  test('the field is ALWAYS present, so a client never has to guess', () => {
+    // Absent and null would both render as a dash, but only one of them lets a client
+    // distinguish "this server is too old to answer" from "it answered, and does not know".
+    const out = shapeReport({ machine, reading: null, sessions: [], ts: 99, cpuCount: 20 });
+    expect('pageReadsPerSec' in out.machine.memory).toBe(true);
+  });
+
+  test('a report with no machine reading at all does not throw', () => {
+    const out = shapeReport({ machine: null, reading: null, sessions: [], ts: 99, cpuCount: 20 });
+    expect(out.machine).toBeNull();
   });
 });

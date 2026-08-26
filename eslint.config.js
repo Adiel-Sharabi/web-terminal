@@ -119,6 +119,11 @@ module.exports = [
         // #152 — the two pure render helpers the resources specs call directly.
         esc: 'readonly',
         resourcesHtml: 'readonly',
+        // #165 — the on-demand half of the same readout. `footprintText` reads the
+        // report map, so a spec has to seed the map and switch the view on to reach it.
+        footprintText: 'readonly',
+        resourceData: 'readonly',
+        resourceView: 'writable',
         switchSession: 'readonly',
         showNotification: 'readonly',
         attentionSessions: 'readonly',

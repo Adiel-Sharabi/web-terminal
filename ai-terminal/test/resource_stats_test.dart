@@ -26,7 +26,13 @@ Map<String, dynamic> okBody({Object? sessionReading}) => <String, dynamic>{
       'machine': {
         'cpuPct': 18,
         'windowMs': 5000,
-        'memory': {'usedBytes': 30064771072, 'totalBytes': 68501942272, 'usedPct': 44},
+        'memory': {
+          'usedBytes': 30064771072,
+          'totalBytes': 68501942272,
+          'availBytes': 38437171200,
+          'usedPct': 44,
+          'pageReadsPerSec': null,
+        },
       },
       'sampling': {'ok': true, 'windowMs': 6000, 'ts': 2},
       'webTerminal': {'cpuPct': 1.2, 'rssBytes': 1503238553, 'procCount': 27, 'topName': 'claude.exe'},
@@ -121,6 +127,73 @@ void main() {
       expect(r.samplingOk, isFalse);
       expect(r.machine, isNull);
     });
+
+    // --- #165 ---------------------------------------------------------------
+    test('reads headroom and the paging rate', () {
+      final r = ServerResources.fromJson(okBody());
+      expect(r.machine!.memAvailBytes, 38437171200);
+      expect(r.machine!.memPageReadsPerSec, isNull);
+    });
+
+    test('a server too old to report either reads null, never 0', () {
+      // A 0 says "no memory left" and "not paging" about a box that simply predates
+      // the fields. Both are claims, and both are wrong in the dangerous direction.
+      final r = ServerResources.fromJson(<String, dynamic>{
+        'machine': {
+          'cpuPct': 7,
+          'memory': {'usedBytes': 1, 'totalBytes': 2, 'usedPct': 50},
+        },
+        'sampling': {'ok': true},
+        'sessions': <String, dynamic>{},
+      });
+      expect(r.machine!.memAvailBytes, isNull);
+      expect(r.machine!.memPageReadsPerSec, isNull);
+      expect(r.machine!.memUsedPct, 50);
+    });
+
+    test('a malformed headroom or rate becomes null rather than a trusted number', () {
+      final r = ServerResources.fromJson(<String, dynamic>{
+        'machine': {
+          'memory': {'availBytes': 'lots', 'pageReadsPerSec': 'many'},
+        },
+        'sampling': {'ok': true},
+        'sessions': <String, dynamic>{},
+      });
+      expect(r.machine!.memAvailBytes, isNull);
+      expect(r.machine!.memPageReadsPerSec, isNull);
+    });
+  });
+
+  // The colour is the glanceable judgement, and #165's whole argument is that it
+  // cannot be keyed on the percentage: 98% on a 32 GB box is unusable and 98% on a
+  // 640 GB box has 12.7 GB of room. Only the absolute figure separates them.
+  group('headroomColor (#165)', () {
+    final theme = ThemeData.dark();
+    const gb = 1024 * 1024 * 1024;
+
+    test('below the red floor is an error colour', () {
+      expect(headroomColor(theme, (0.65 * gb).round()), theme.colorScheme.error);
+    });
+
+    test('between red and amber warns', () {
+      expect(headroomColor(theme, 3 * gb), kWarnAmber);
+    });
+
+    test('above the amber floor is neutral — no colour noise on a healthy box', () {
+      expect(headroomColor(theme, 12 * gb), isNull);
+      expect(headroomColor(theme, kHeadroomAmberBytes), isNull);
+    });
+
+    test('unknown headroom is never coloured — a dash is not a warning', () {
+      expect(headroomColor(theme, null), isNull);
+    });
+
+    test('the thresholds are absolute byte counts, not percentages', () {
+      // 98% used on a very large box still has room, and must not go red.
+      expect(headroomColor(theme, 12 * gb), isNull);
+      // The same percentage on a small box is the reported failure.
+      expect(headroomColor(theme, (0.65 * gb).round()), theme.colorScheme.error);
+    });
   });
 
   group('formatting', () {
@@ -212,8 +285,57 @@ void main() {
       // Separating the two is the point: "this box is loaded" and "MY sessions
       // are loading it" are different answers.
       expect(find.textContaining('CPU 18%'), findsOneWidget);
-      expect(find.textContaining('RAM 44%'), findsOneWidget);
+      // #165 — headroom leads, the percentage follows it as context.
+      expect(find.textContaining('RAM 35.8 GB free of 63.8 GB (44%)'), findsOneWidget);
       expect(find.textContaining('WT 1.2% · 1.4 GB'), findsOneWidget);
+    });
+
+    // --- #165: headroom leads, pressure appears, colour keys on the absolute ------
+    testWidgets('a server too old to report headroom falls back to the percentage',
+        (tester) async {
+      // It must never read "0 B free" for a server that simply predates the field —
+      // that inverts the readout on the box the user is most likely to reach for.
+      ResourceMonitor.instance.seedForTests(
+        'http://s',
+        ServerResources.fromJson(<String, dynamic>{
+          'machine': {
+            'cpuPct': 18,
+            'windowMs': 5000,
+            'memory': {'usedBytes': 30064771072, 'totalBytes': 68501942272, 'usedPct': 44},
+          },
+          'sampling': {'ok': true, 'windowMs': 6000, 'ts': 2},
+          'sessions': <String, dynamic>{},
+        }),
+      );
+      await pump(tester);
+      expect(find.textContaining('RAM 44%'), findsOneWidget);
+      expect(find.textContaining('free'), findsNothing);
+      expect(find.textContaining('0 B'), findsNothing);
+    });
+
+    testWidgets('a measured paging rate is shown; an unmeasured one is not',
+        (tester) async {
+      // 0/s is what a healthy box reads, so a null rate must render as nothing at all
+      // rather than borrow the appearance of a calm machine.
+      ResourceMonitor.instance.seedForTests(
+        'http://s',
+        ServerResources.fromJson(okBody()),
+      );
+      await pump(tester);
+      expect(find.textContaining('paging'), findsNothing);
+
+      ResourceMonitor.instance.resetForTests();
+      final body = okBody();
+      (body['machine']! as Map<String, dynamic>)['memory'] = {
+        'usedBytes': 30064771072,
+        'totalBytes': 68501942272,
+        'availBytes': 697932185,
+        'usedPct': 98,
+        'pageReadsPerSec': 951.0,
+      };
+      ResourceMonitor.instance.seedForTests('http://s', ServerResources.fromJson(body));
+      await pump(tester);
+      expect(find.textContaining('paging 951/s'), findsOneWidget);
     });
 
     testWidgets('a failed process query still shows the machine', (tester) async {

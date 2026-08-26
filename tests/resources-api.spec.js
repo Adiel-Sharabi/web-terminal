@@ -155,6 +155,65 @@ test.describe('GET /api/resources', () => {
     await ctx.dispose();
   });
 
+  // --- #165: headroom and pressure ------------------------------------------------
+  test('reports absolute HEADROOM, not just a percentage that saturates', async () => {
+    // The defect: 92% and 98% are six points apart while the headroom under them goes
+    // 2.5 GB -> 0.65 GB. The absolute figure cannot be recovered from a rounded percent,
+    // so it has to be on the wire.
+    const ctx = await authCtx();
+    const body = await (await ctx.get('/api/resources')).json();
+    const m = body.machine.memory;
+    expect(typeof m.availBytes).toBe('number');
+    expect(m.availBytes).toBeGreaterThan(0);
+    expect(m.availBytes).toBeLessThanOrEqual(m.totalBytes);
+    // Derived from the same reading, so they agree exactly rather than approximately.
+    expect(m.usedBytes + m.availBytes).toBe(m.totalBytes);
+    await ctx.dispose();
+  });
+
+  test('headroom comes off the ALWAYS-ON sampler, not the process query', async () => {
+    // availBytes is os.freemem(): pure JS, free, on the warm sampler — so it is present
+    // on the live endpoint whatever the process query did, and the rate is null whenever
+    // sampling did not succeed.
+    //
+    // What this does NOT prove, said out loud because the title used to claim it: it
+    // cannot FORCE a failed process query, so on a healthy box the `sampling.ok` branch
+    // never runs. The guarantee "a failed query keeps the headroom and nulls the rate" is
+    // pinned in tests/resources-tree.spec.js against shapeReport directly, and "a broken
+    // perf counter does not fail the query in the first place" by the real-spawn test
+    // beside it. This one only checks the endpoint agrees.
+    const ctx = await authCtx();
+    const body = await (await ctx.get('/api/resources')).json();
+    expect(body.machine.memory.availBytes).toBeGreaterThan(0);
+    if (!body.sampling.ok) expect(body.machine.memory.pageReadsPerSec).toBeNull();
+    await ctx.dispose();
+  });
+
+  test('the paging rate is either honest or explicitly unknown — never a fabricated 0', async () => {
+    // 0 reads/sec is what a healthy box reads, so inventing it for a box we could not
+    // measure claims "no memory pressure here" about the least-known server in the fleet.
+    // The field is always PRESENT, so a client can tell a server too old to answer from
+    // one that answered and does not know.
+    const ctx = await authCtx();
+    const body = await (await ctx.get('/api/resources')).json();
+    const m = body.machine.memory;
+    expect('pageReadsPerSec' in m).toBe(true);
+    expect(m.pageReadsPerSec === null
+      || (typeof m.pageReadsPerSec === 'number' && isFinite(m.pageReadsPerSec) && m.pageReadsPerSec >= 0)).toBe(true);
+    await ctx.dispose();
+  });
+
+  test('the cluster reading a PEER would send carries headroom too', async () => {
+    // /api/version is what a peer answers on the cluster fan-out, and the sidebar leads
+    // with headroom on every row. A peer whose /api/version omitted it would render a
+    // dash beside servers that show a real figure — for no reason the user can see.
+    const ctx = await authCtx();
+    const body = await (await ctx.get('/api/version')).json();
+    expect(typeof body.resources.memory.availBytes).toBe('number');
+    expect(body.resources.memory.availBytes).toBeGreaterThan(0);
+    await ctx.dispose();
+  });
+
   test('advertises the capability so a client can gate on it', async () => {
     // A client that cannot see this must render "unknown", not call an endpoint that
     // 404s and looks like a broken button.

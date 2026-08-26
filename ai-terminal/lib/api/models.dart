@@ -810,6 +810,23 @@ class MachineResources {
   final int? memUsedBytes;
   final int? memTotalBytes;
   final int? memUsedPct;
+
+  /// Free memory in bytes — the HEADROOM, and the figure the readout leads with
+  /// (#165). A percentage saturates exactly where the decision matters: 92% to
+  /// 98% is six points while the room underneath goes 2.5 GB to 0.65 GB, the
+  /// difference between a box that copes and one that is unusable.
+  ///
+  /// `null` on a server too old to report it — never 0, which would say "no
+  /// memory left" about a box that merely has an older build.
+  final int? memAvailBytes;
+
+  /// Hard page reads per second: the pressure signal that tells
+  /// 92%-and-coping apart from 92%-and-reading-950-pages-a-second (#165).
+  ///
+  /// `null` when it could not be measured, which is NOT the same as `0` — zero
+  /// is what a healthy box reads.
+  final double? memPageReadsPerSec;
+
   final int windowMs;
 
   const MachineResources({
@@ -817,6 +834,8 @@ class MachineResources {
     this.memUsedBytes,
     this.memTotalBytes,
     this.memUsedPct,
+    this.memAvailBytes,
+    this.memPageReadsPerSec,
     this.windowMs = 0,
   });
 
@@ -828,6 +847,8 @@ class MachineResources {
       memUsedBytes: _num(m['usedBytes'])?.toInt(),
       memTotalBytes: _num(m['totalBytes'])?.toInt(),
       memUsedPct: _num(m['usedPct'])?.toInt(),
+      memAvailBytes: _num(m['availBytes'])?.toInt(),
+      memPageReadsPerSec: _num(m['pageReadsPerSec'])?.toDouble(),
       windowMs: _num(json['windowMs'])?.toInt() ?? 0,
     );
   }

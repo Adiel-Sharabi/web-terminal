@@ -76,14 +76,28 @@ that filters out the parts nobody wants spoken.
 toolbar, long-press menus, and reconnect the instant you return to the app.
 
 **Cluster** — merge several servers into one sidebar, each showing its own CPU and
-memory so you can pick where to work; optional direct-terminal mode skips the proxy
-hop for a large latency win.
+**free memory** so you can pick where to work; optional direct-terminal mode skips the
+proxy hop for a large latency win.
+
+**Headroom, not percentages** — the memory readout leads with the room actually left
+(*"12.7G free of 31.7G"*), keeping the percentage as context, and colours on the
+absolute figure. A percentage saturates exactly where the choice matters: 92% and 98%
+are six points apart while the room underneath goes 2.5 GB to 0.65 GB — the difference
+between a box that copes and one that is unusable. A server too old to report it falls
+back to the percentage rather than showing a fabricated zero.
 
 **Load view** — switch it on (the chart button in the web sidebar, the memory button in
-the companion) and every server reports what web-terminal itself is costing there and
-what each individual session is costing, so "which box, which session" is answered from
-the list instead of by guessing. It is off by default and polls nothing until switched
-on, because each reading costs the server a whole-machine process query.
+the companion) and every server reports its **paging rate** (hard page reads per second,
+the signal that tells 92%-and-coping apart from 92%-and-thrashing), what web-terminal
+itself is costing there, and what each individual session is costing — so "which box,
+which session" is answered from the list instead of by guessing. It is off by default
+and polls nothing until switched on, because each reading costs the server a
+whole-machine process query. The free-memory figure above costs the server nothing and is
+always *reported*, and the **web sidebar** shows it whether or not the load view is on. In
+the companion it is not yet separated: its resource line renders nothing at all while the
+view is off, so both figures sit behind the switch there — see
+[docs/CLUSTER.md](docs/CLUSTER.md#server-load-152) for why that is a known gap rather than
+an oversight.
 
 **Companion app** — a native Android + Windows client with the chat lens and push that
 works while the app is closed.
