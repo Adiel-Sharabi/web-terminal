@@ -1,10 +1,12 @@
 // Widget test for SessionCard across the statuses that drive its tint and
 // attention chip (spec §2).
+import 'package:flutter/gestures.dart';
 import 'package:flutter/material.dart';
 import 'package:flutter_test/flutter_test.dart';
 
 import 'package:ai_terminal/api/agent_catalog.dart';
 import 'package:ai_terminal/api/models.dart';
+import 'package:ai_terminal/screens/dashboard_screen.dart';
 import 'package:ai_terminal/theme/app_theme.dart';
 import 'package:ai_terminal/widgets/attention_chip.dart';
 import 'package:ai_terminal/widgets/session_card.dart';
@@ -399,6 +401,99 @@ void main() {
         _wrap(SessionCard(session: _session(status: 'idle'))),
       );
       expect(find.byIcon(Icons.sync), findsNothing);
+    });
+  });
+
+  // #169 — the whole point of a handle is that it is NOT the card's long-press.
+  // The first cut of #169 put the handle inside `InkWell(onLongPress:)`, so the
+  // card's long-press still owned the handle's own pixels: pressing the handle
+  // and HOLDING (which is what #124's idiom trained, and what anyone does when
+  // a drag doesn't seem to take) opened the actions sheet and started no drag.
+  //
+  // These are card-level and behavioural on purpose — no list, no reorder — so
+  // they name the defect at its owner. `dragHandle` is built by
+  // [buildReorderDragHandle], the app's only handle, so what is exercised here
+  // is the shipped widget rather than a stand-in.
+  group('#169 — the drag handle is not the card long-press', () {
+    Widget cardWithHandle(void Function() onLongPress) => _wrap(
+      Builder(
+        builder: (context) => SessionCard(
+          session: _session(status: 'idle'),
+          onTap: () {},
+          onLongPress: onLongPress,
+          onMoreTap: () {},
+          dragHandle: buildReorderDragHandle(context, 0),
+        ),
+      ),
+    );
+
+    testWidgets('holding the handle does NOT open the actions sheet', (
+      tester,
+    ) async {
+      var longPressed = false;
+      await tester.pumpWidget(cardWithHandle(() => longPressed = true));
+
+      final press = await tester.startGesture(
+        tester.getCenter(find.byIcon(Icons.drag_handle)),
+      );
+      await tester.pump(kLongPressTimeout + const Duration(milliseconds: 50));
+      await press.up();
+      await tester.pumpAndSettle();
+
+      expect(
+        longPressed,
+        isFalse,
+        reason: 'the handle must have no long-press armed on its pixels — '
+            'holding it is how a drag begins for anyone taught #124 idiom',
+      );
+    });
+
+    testWidgets('holding the card BODY still opens the actions sheet', (
+      tester,
+    ) async {
+      var longPressed = false;
+      await tester.pumpWidget(cardWithHandle(() => longPressed = true));
+
+      await tester.longPress(find.text('my-project'));
+      await tester.pumpAndSettle();
+
+      expect(
+        longPressed,
+        isTrue,
+        reason: 'lifting the handle out of the InkWell must not cost the row '
+            'its sheet — that trade is what #169 explicitly rules out',
+      );
+    });
+
+    testWidgets('the handle stays level with the ⋮ button, and the card '
+        'keeps its height', (tester) async {
+      await tester.pumpWidget(
+        _wrap(SessionCard(session: _session(status: 'idle'), onMoreTap: () {})),
+      );
+      final plainHeight = tester.getRect(find.byType(SessionCard)).height;
+
+      await tester.pumpWidget(cardWithHandle(() {}));
+      final withHandle = tester.getRect(find.byType(SessionCard));
+
+      expect(
+        tester.getCenter(find.byIcon(Icons.drag_handle)).dy,
+        tester.getCenter(find.byIcon(Icons.more_vert)).dy,
+        reason: 'the handle hangs outside the title Row now, so its inset is '
+            'what keeps it on the same line — see SessionCard.dragHandleInset',
+      );
+      expect(
+        withHandle.height,
+        plainHeight,
+        reason: 'a 48dp touch target must not make the row taller',
+      );
+    });
+
+    testWidgets('the handle target is 48dp tall', (tester) async {
+      await tester.pumpWidget(cardWithHandle(() {}));
+      final target = tester.getRect(
+        find.byType(ReorderableDragStartListener),
+      );
+      expect(target.height, 48);
     });
   });
 }

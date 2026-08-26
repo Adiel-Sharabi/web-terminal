@@ -61,12 +61,19 @@ class FavoritesGroup extends StatelessWidget {
 
   /// Called when a pinned row is dragged to a new slot (#124). `newIndex` is the
   /// FINAL index (`onReorderItem` semantics — already adjusted for the removed
-  /// item), which is what `reorderedFavoriteRanks` expects. The caller persists the
-  /// new ranks; this widget owns only the gesture.
+  /// item), which is what `reorderedFavoriteRanks` expects. The caller persists
+  /// the new ranks.
+  ///
+  /// This widget owns the LIST and decides where the grab target lives; on
+  /// touch it owns only half the gesture, because the affordance itself is the
+  /// caller's to render — a [cardBuilder] that ignores its `reorderIndex`
+  /// silently yields a group that cannot be reordered on a phone at all. That
+  /// join is covered by `dashboard_favorites_handle_test.dart`, which drives
+  /// the real dashboard rather than a stand-in card.
   final void Function(List<Session> ordered, int oldIndex, int newIndex) onReorder;
 
-  /// Whether a pinned row is grabbed by a HANDLE inside the card (touch) or by
-  /// the WHOLE ROW (pointer devices).
+  /// Whether a pinned row is grabbed by a HANDLE the card renders at its
+  /// trailing edge (touch) or by the WHOLE ROW (pointer devices).
   ///
   /// **#169 — this overturns #124's choice on touch, so the reason lives here.**
   ///
@@ -82,13 +89,22 @@ class FavoritesGroup extends StatelessWidget {
   /// and accepting rejects the drag. Long-press opened the actions sheet; no
   /// drag ever began.
   ///
-  /// **No ordering trick leaves both gestures alive.** Neither recognizer needs
-  /// the pointer to move — each commits at its own deadline — so whichever
-  /// accepts first takes the pointer outright, and shortening the drag's delay
-  /// only swaps which gesture is dead. Keeping long-press-to-drag therefore
-  /// means giving up the row's actions sheet, which #169 rules out: the sheet
-  /// must still open on a pinned row, and one gesture must not be traded for the
-  /// other.
+  /// **No ordering trick leaves both gestures alive ON THE SAME PIXELS.**
+  /// Neither recognizer needs the pointer to move — each commits at its own
+  /// deadline — so whichever accepts first takes the pointer outright, and
+  /// shortening the drag's delay only swaps which gesture is dead. That is a
+  /// statement about one region of the screen, not a proof that no alternative
+  /// exists: a listener nested DEEPER, over a sub-region of the row, does win
+  /// there — but a sub-region with nothing drawn in it is an invisible handle,
+  /// which is strictly worse than a visible one for the reporter, who did not
+  /// know a pinned row could be reordered at all.
+  ///
+  /// Nor is keeping long-press-to-drag blocked by "the sheet becomes
+  /// unreachable" — `dashboard_screen.dart` binds the same `openActions` to
+  /// `onMoreTap`, so the visible ⋮ already carries it. It is rejected because
+  /// it would leave the app with two reorder idioms and leave the row's own
+  /// long-press meaning something different in the pinned group than
+  /// everywhere else.
   ///
   /// So touch gets the affordance the main list has used since #22 — the same
   /// handle, in the same trailing slot of the same card, doing the same thing
@@ -99,8 +115,17 @@ class FavoritesGroup extends StatelessWidget {
   /// invisible gesture was never going to tell them. #124's accidental-grab
   /// worry is answered by the main list itself, which has shipped this handle
   /// on a far longer, denser list since #22 without one such report — and the
-  /// handle is an 18px icon that has to be hit deliberately, where #124's
-  /// alternative was the entire row.
+  /// handle is an 18px glyph in a 48dp-tall, 22dp-wide strip at the row's very
+  /// edge, where #124's alternative was the entire row.
+  ///
+  /// **A handle is not enough on its own, and this is where the first cut of
+  /// #169 went wrong.** [SessionCard] used to render it INSIDE the same
+  /// `InkWell`, so the arena race above simply moved onto the handle's own
+  /// pixels: press it and hold — the idiom #124 taught — and the sheet opened
+  /// and no drag began. The handle now hangs outside that `InkWell`
+  /// ([SessionCard.dragHandle]), which is what makes both idioms work: an
+  /// immediate drag recognizer has no deadline of its own, so it takes the
+  /// first movement whenever it comes.
   ///
   /// A pointer device has no collision to resolve — a mouse starts a drag by
   /// MOVING, and holding still is exactly what fires the long-press — so it
@@ -184,8 +209,18 @@ class FavoritesGroup extends StatelessWidget {
               // drag, and put NO listener around the row — a wrapper here is what
               // raced the card's long-press (#169). Pointer: the whole row is the
               // target and the card renders no handle.
+              //
+              // A LONE favorite gets neither: the handle costs a pinned name
+              // ~18% of its width, and with nowhere to drag to it would buy a
+              // control that can never do anything. Withholding the index (not
+              // the row) keeps the plumbing identical — the list still has one
+              // item at index 0, it simply has no grab target.
               child: _grabByHandle
-                  ? cardBuilder(context, favorites[i], i)
+                  ? cardBuilder(
+                      context,
+                      favorites[i],
+                      favorites.length > 1 ? i : null,
+                    )
                   : ReorderableDragStartListener(
                       index: i,
                       child: cardBuilder(context, favorites[i], null),

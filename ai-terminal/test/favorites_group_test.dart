@@ -10,8 +10,10 @@ import 'package:flutter/material.dart';
 import 'package:flutter_test/flutter_test.dart';
 
 import 'package:ai_terminal/api/models.dart';
+import 'package:ai_terminal/screens/dashboard_screen.dart';
 import 'package:ai_terminal/theme/app_theme.dart';
 import 'package:ai_terminal/widgets/favorites_group.dart';
+import 'package:ai_terminal/widgets/session_card.dart';
 
 ServerConfig _server() =>
     const ServerConfig(name: 'Home', baseUrl: 'http://x', bearerToken: 't');
@@ -190,9 +192,13 @@ void main() {
   // synthetic pointers would not be enough: the arena and its timers are pure
   // Dart, and `FakeAsync` fires same-deadline timers in creation order, which
   // is hit-test order. What #124's test lacked was not real input — it was a
-  // card that competes. So every test in this group builds a row that carries
-  // the card's own long-press, and asserts on OUTCOMES (which callback fired),
-  // never on which widgets exist.
+  // card that competes.
+  //
+  // So these build the REAL [SessionCard] with the REAL
+  // [buildReorderDragHandle], and assert on OUTCOMES (which callback fired),
+  // never on which widgets exist. A stand-in card that merely mirrors today's
+  // structure cannot fail when that structure is wrong — which is how the first
+  // cut of #169 read green here while the phone still read #124.
   group('#124/#169 — grabbing a pinned row', () {
     List<Session> three() => [
       _session('a', favorite: true, favoriteRank: 10),
@@ -200,30 +206,18 @@ void main() {
       _session('c', favorite: true, favoriteRank: 30),
     ];
 
-    /// A row that behaves like the real one, in the two ways that decide this:
-    ///
-    /// * it binds the actions sheet to `InkWell.onLongPress`, exactly as
-    ///   `SessionCard` does — a fake card with no recognizer of its own cannot
-    ///   lose an arena, and so cannot see #169;
-    /// * it renders the drag handle only when the group hands it an index,
-    ///   mirroring `dashboard_screen._buildCard`'s `dragHandle` — the one place
-    ///   the app builds that handle.
+    /// The shipped row, wired exactly as `dashboard_screen._buildCard` wires it:
+    /// the actions sheet on `SessionCard.onLongPress`, and the app's one drag
+    /// handle from [buildReorderDragHandle] whenever the group hands it an index.
     Widget card(Session s, int? reorderIndex, List<String> longPressed) =>
-        InkWell(
-          onTap: () {},
-          onLongPress: () => longPressed.add(s.id),
-          child: SizedBox(
-            height: 48,
-            child: Row(
-              children: [
-                Expanded(child: Text(s.id)),
-                if (reorderIndex != null)
-                  ReorderableDragStartListener(
-                    index: reorderIndex,
-                    child: const Icon(Icons.drag_handle, size: 18),
-                  ),
-              ],
-            ),
+        Builder(
+          builder: (context) => SessionCard(
+            session: s,
+            isFavorite: true,
+            onTap: () {},
+            onLongPress: () => longPressed.add(s.id),
+            onMoreTap: () {},
+            dragHandle: buildReorderDragHandle(context, reorderIndex),
           ),
         );
 
@@ -231,10 +225,11 @@ void main() {
       WidgetTester tester, {
       required List<String> longPressed,
       void Function(List<Session>, int, int)? onReorder,
+      List<Session>? sessions,
     }) => tester.pumpWidget(
       _wrap(
         FavoritesGroup(
-          sessions: three(),
+          sessions: sessions ?? three(),
           cardBuilder: (context, s, reorderIndex) =>
               card(s, reorderIndex, longPressed),
           collapsed: false,
@@ -249,51 +244,72 @@ void main() {
       matching: find.byIcon(Icons.drag_handle),
     );
 
-    testWidgets('touch: the row long-press stays the actions sheet (#169)', (
-      tester,
-    ) async {
+    testWidgets('touch: holding a pinned ROW opens its sheet — holding its '
+        'HANDLE drags it (#169)', (tester) async {
       // try/finally, not addTearDown: the framework verifies the foundation debug
       // vars are unset at the END OF THE TEST BODY, before tearDowns run.
       debugDefaultTargetPlatformOverride = TargetPlatform.android;
       try {
         final longPressed = <String>[];
-        var reordered = false;
+        int? from, to;
+        List<Session>? got;
         await pump(
           tester,
           longPressed: longPressed,
-          onReorder: (_, _, _) => reordered = true,
+          onReorder: (ordered, o, n) {
+            got = ordered;
+            from = o;
+            to = n;
+          },
         );
 
-        // Nothing on a touch row may arm a second long-press deadline. This is
-        // the structural half of the fix and it is deliberately kept alongside
-        // the behavioural assertions below, not instead of them.
-        expect(find.byType(ReorderableDelayedDragStartListener), findsNothing);
-
-        final drag = await tester.startGesture(tester.getCenter(find.text('c')));
+        // Half one — the sheet. #169 refuses to trade it away for the drag.
+        final onRow = await tester.startGesture(
+          tester.getCenter(find.text('c')),
+        );
         await tester.pump(kLongPressTimeout + const Duration(milliseconds: 50));
-        await drag.moveBy(const Offset(0, -120));
+        await onRow.moveBy(const Offset(0, -120));
         await tester.pump();
-        await drag.up();
+        await onRow.up();
+        await tester.pumpAndSettle();
+
+        expect(longPressed, ['c'], reason: 'a pinned row keeps its actions sheet');
+        expect(from, isNull, reason: 'the row BODY is not a grab target on touch');
+
+        // Half two — the acceptance criterion of #169, and the one the first cut
+        // failed: press the handle, HOLD past the long-press deadline (which is
+        // the idiom #124 taught, and what anyone does when a drag seems not to
+        // take), and only then move. An immediate drag recognizer has no deadline
+        // of its own, so this must still drag — provided nothing else is armed on
+        // the handle's own pixels.
+        longPressed.clear();
+        final onHandle = await tester.startGesture(
+          tester.getCenter(handleOf('c')),
+        );
+        await tester.pump(kLongPressTimeout + const Duration(milliseconds: 50));
+        await onHandle.moveBy(const Offset(0, -20));
+        await tester.pump();
+        await onHandle.moveBy(const Offset(0, -140));
+        await tester.pump();
+        await onHandle.up();
         await tester.pumpAndSettle();
 
         expect(
           longPressed,
-          ['c'],
-          reason: 'a pinned row must still open its actions sheet',
+          isEmpty,
+          reason: 'holding the HANDLE must not open the sheet — that is the '
+              'reported symptom relocated onto the new affordance',
         );
-        expect(
-          reordered,
-          isFalse,
-          reason: 'the row BODY is not a grab target on touch — the handle is',
-        );
+        expect(from, 2, reason: 'hold-then-drag must move the row');
+        expect(to, lessThan(2));
+        expect(got!.map((s) => s.id).toList(), ['a', 'b', 'c']);
       } finally {
         debugDefaultTargetPlatformOverride = null;
       }
     });
 
-    testWidgets('touch: dragging the row handle reorders the group (#169)', (
-      tester,
-    ) async {
+    testWidgets('touch: dragging the row handle straight away reorders the '
+        'group (#169)', (tester) async {
       debugDefaultTargetPlatformOverride = TargetPlatform.android;
       try {
         final longPressed = <String>[];
@@ -315,13 +331,10 @@ void main() {
           reason: 'a touch row is handed its index so it renders the handle',
         );
 
-        // No long-press first: the handle's recognizer is immediate, so the
-        // drag is expressed by MOVING — which is also what keeps it clear of
-        // the card's long-press deadline.
         final drag = await tester.startGesture(tester.getCenter(handleOf('c')));
         await drag.moveBy(const Offset(0, -20));
         await tester.pump();
-        await drag.moveBy(const Offset(0, -100));
+        await drag.moveBy(const Offset(0, -140));
         await tester.pump();
         await drag.up();
         await tester.pumpAndSettle();
@@ -335,6 +348,45 @@ void main() {
         expect(from, 2);
         expect(to, lessThan(2));
         expect(longPressed, isEmpty, reason: 'a drag is not a long-press');
+      } finally {
+        debugDefaultTargetPlatformOverride = null;
+      }
+    });
+
+    testWidgets('touch: a lone favorite gets no handle — there is nowhere to '
+        'drag it', (tester) async {
+      debugDefaultTargetPlatformOverride = TargetPlatform.android;
+      try {
+        final longPressed = <String>[];
+        await pump(
+          tester,
+          longPressed: longPressed,
+          sessions: [_session('a', favorite: true, favoriteRank: 10)],
+        );
+
+        // A handle here costs a pinned name ~18% of its width for a control that
+        // could never reorder anything.
+        expect(find.byIcon(Icons.drag_handle), findsNothing);
+
+        // ...and the row it cannot reorder still opens its sheet.
+        await tester.longPress(find.text('a'));
+        await tester.pumpAndSettle();
+        expect(longPressed, ['a']);
+      } finally {
+        debugDefaultTargetPlatformOverride = null;
+      }
+    });
+
+    testWidgets('GUARD (structural): nothing arms a second long-press deadline '
+        'on a touch row', (tester) async {
+      // Explicitly a structural guard, not a behavioural assertion — it is the
+      // shape of #124's own test, which is exactly why it is not trusted alone.
+      // The tests above are what prove the gesture; this one only refuses the
+      // wrapper a future edit might reach for.
+      debugDefaultTargetPlatformOverride = TargetPlatform.android;
+      try {
+        await pump(tester, longPressed: <String>[]);
+        expect(find.byType(ReorderableDelayedDragStartListener), findsNothing);
       } finally {
         debugDefaultTargetPlatformOverride = null;
       }
@@ -374,7 +426,7 @@ void main() {
         final drag = await tester.startGesture(tester.getCenter(find.text('c')));
         await drag.moveBy(const Offset(0, -20));
         await tester.pump();
-        await drag.moveBy(const Offset(0, -100));
+        await drag.moveBy(const Offset(0, -140));
         await tester.pump();
         await drag.up();
         await tester.pumpAndSettle();

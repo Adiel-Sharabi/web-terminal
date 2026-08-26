@@ -93,11 +93,32 @@ class SessionCard extends StatelessWidget {
   /// draws a primary-colored outline so the active session is obvious.
   final bool selected;
 
-  /// Optional drag handle (issue #22). The main list wraps a handle icon in a
-  /// `ReorderableDragStartListener` so the row can be drag-reordered by the
-  /// handle only — the whole-card long-press stays bound to the actions sheet.
-  /// `null` (favorites, split view) shows no handle.
+  /// Optional drag handle (issue #22; `buildReorderDragHandle` is the one place
+  /// it is built). The row is drag-reordered by the handle only — the
+  /// whole-card long-press stays bound to the actions sheet. `null` (split
+  /// view, an unreorderable row) shows no handle.
+  ///
+  /// **It is rendered as a SIBLING of the card's `InkWell`, never a descendant
+  /// — and that is the whole feature, not a layout preference (#169).** Inside
+  /// the `InkWell` the card's `onLongPress` owns the handle's own pixels, and
+  /// both recognizers commit at the same `kLongPressTimeout` with no movement
+  /// required, so a press-and-HOLD on the handle opened the actions sheet and
+  /// started no drag. Only press-and-move worked — which is why the main list
+  /// got away with it from #22 until #169 put the same handle on a group whose
+  /// users had been taught to press and hold. Keep the handle out of the
+  /// `InkWell`'s subtree and both idioms work.
   final Widget? dragHandle;
+
+  /// Vertical inset that keeps a trailing [dragHandle]'s 18dp glyph level with
+  /// the title row's icons now that it hangs outside the card's `InkWell` (and
+  /// so no longer rides that `Row`'s centre alignment):
+  /// `listRowVertical (12) + (titleRowHeight (24) − glyph (18)) / 2 = 15`.
+  ///
+  /// Doubling as the handle's own padding is what gives it a **48dp-tall touch
+  /// target** — Material's minimum — for free: the strip is shorter than the
+  /// card, so the row does not grow, and the glyph does not move. Pinned by
+  /// `session_card_test.dart` ("the handle stays level with the ⋮ button").
+  static const double dragHandleInset = 15;
 
   @override
   Widget build(BuildContext context) {
@@ -151,13 +172,18 @@ class SessionCard extends StatelessWidget {
         border: border,
       ),
       clipBehavior: Clip.antiAlias,
-      child: InkWell(
+      child: _withDragHandle(InkWell(
         onTap: onTap,
         onLongPress: onLongPress,
         child: Padding(
-          padding: const EdgeInsets.symmetric(
-            horizontal: AppSpacing.listRowHorizontal,
-            vertical: AppSpacing.listRowVertical,
+          // With a handle, the card's RIGHT padding moves onto the handle strip
+          // (see [_withDragHandle]) so the row's contents keep the exact
+          // geometry they had while the handle still lived inside this Row.
+          padding: EdgeInsets.only(
+            left: AppSpacing.listRowHorizontal,
+            right: dragHandle == null ? AppSpacing.listRowHorizontal : 0,
+            top: AppSpacing.listRowVertical,
+            bottom: AppSpacing.listRowVertical,
           ),
           child: Column(
             crossAxisAlignment: CrossAxisAlignment.start,
@@ -194,7 +220,6 @@ class SessionCard extends StatelessWidget {
                       tooltip: 'More actions',
                       onTap: onMoreTap,
                     ),
-                  ?dragHandle,
                 ],
               ),
               const SizedBox(height: 4),
@@ -336,7 +361,32 @@ class SessionCard extends StatelessWidget {
             ],
           ),
         ),
-      ),
+      )),
+    );
+  }
+
+  /// Hangs [dragHandle] in a trailing strip BESIDE the card's `InkWell` rather
+  /// than inside it (#169 — see [dragHandle] for why that placement is the
+  /// feature). Geometry is unchanged: the body gives up its right padding to
+  /// this strip, so the glyph lands where it did when it was the title Row's
+  /// last child, level with the ⋮ (via [dragHandleInset]) and in the same slot.
+  ///
+  /// `CrossAxisAlignment.start`, never `.stretch`: a card is laid out with an
+  /// unbounded height, and `stretch` resolves against `constraints.maxHeight` —
+  /// infinity here. Making the strip full-height instead needs an
+  /// `IntrinsicHeight`, a second layout pass per card on every list.
+  Widget _withDragHandle(Widget body) {
+    final handle = dragHandle;
+    if (handle == null) return body;
+    return Row(
+      crossAxisAlignment: CrossAxisAlignment.start,
+      children: [
+        Expanded(child: body),
+        Padding(
+          padding: const EdgeInsets.only(right: AppSpacing.listRowHorizontal),
+          child: handle,
+        ),
+      ],
     );
   }
 }
