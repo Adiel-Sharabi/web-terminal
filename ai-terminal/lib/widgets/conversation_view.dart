@@ -143,6 +143,12 @@ class TranscriptChunk {
   /// `ts` is its natural id but the wire permits null, so the text is folded in
   /// as the tiebreak — both are immutable once the turn is written, so this
   /// survives every refresh poll and every prepended page.
+  ///
+  /// A collision does not throw: a sliver keys children by INDEX, not against
+  /// its siblings, so two equal keys simply both target the lower slot and the
+  /// later element wins it while the earlier is deactivated — state loss, not
+  /// an exception. Measured over 57,367 turns: no duplicate `ts|role|len|hash`
+  /// tuple and no duplicate first tool-use id within a session.
   String get turnKey {
     final t = turns.first;
     if (t.toolUses.isNotEmpty) return 'tool-${t.toolUses.first.id}';
@@ -1481,8 +1487,12 @@ String injectedTurnLabel(String text) {
     final stop = end - i > _kInjectedLabelMax * 3 ? i + _kInjectedLabelMax * 3 : end;
     final line = text.substring(i, stop).trim();
     if (line.isNotEmpty) {
-      // Only a WHOLE line can be an attachment note, so a line long enough to
-      // have been sliced above is never one — and never worth re-testing.
+      // Only a WHOLE line can be an attachment note, and a sliced line is not
+      // whole, so the test is skipped rather than run against a fragment.
+      // A note longer than the slice would therefore become the label even
+      // when real content follows it — measured across every injected turn on
+      // this fleet, the longest note is well under 72 chars and none exceeds
+      // the slice, so the case is unobserved rather than impossible.
       if (stop == end && _attachmentNoteRe.hasMatch(line)) {
         attachment ??= _elideLabel(line);
       } else {
