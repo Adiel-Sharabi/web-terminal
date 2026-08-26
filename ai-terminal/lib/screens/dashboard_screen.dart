@@ -255,10 +255,13 @@ class _DashboardScreenState extends State<DashboardScreen> {
         session,
         onChanged: SessionRepository.instance.refresh,
       ),
-      // Issue #22: drag handle only in the main per-server list. The handle
-      // (not the whole card) starts a reorder, so the card's long-press stays
-      // bound to the actions sheet. ReorderableDragStartListener works for both
-      // a desktop mouse-drag and a mobile touch-drag on the handle.
+      // Issue #22: the handle (not the whole card) starts a reorder, so the
+      // card's long-press stays bound to the actions sheet.
+      // ReorderableDragStartListener works for both a desktop mouse-drag and a
+      // mobile touch-drag on the handle. #169: the pinned favorites group asks
+      // for this same handle on touch, having learnt on a device what a
+      // whole-row long-press does to that sheet — so `reorderIndex` now arrives
+      // from BOTH lists, and this stays the only place the handle is built.
       dragHandle: reorderIndex == null
           ? null
           : ReorderableDragStartListener(
@@ -487,8 +490,16 @@ class _DashboardScreenState extends State<DashboardScreen> {
                       SliverToBoxAdapter(
                         child: FavoritesGroup(
                           sessions: visibleFavoriteSessions(sessions, online),
-                          cardBuilder: (context, s) =>
-                              _buildCard(context, s, favoriteRow: true),
+                          // #169: the group decides whether a pinned row carries
+                          // its own handle (touch) or is grabbed whole (pointer)
+                          // and says so with the index — the handle itself is
+                          // still built in exactly one place, [_buildCard].
+                          cardBuilder: (context, s, reorderIndex) => _buildCard(
+                            context,
+                            s,
+                            favoriteRow: true,
+                            reorderIndex: reorderIndex,
+                          ),
                           collapsed: _isCollapsed(kFavoritesGroupKey),
                           onToggleCollapsed: () =>
                               _toggleCollapsed(kFavoritesGroupKey),

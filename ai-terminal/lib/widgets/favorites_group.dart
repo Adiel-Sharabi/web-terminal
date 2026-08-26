@@ -41,7 +41,16 @@ class FavoritesGroup extends StatelessWidget {
   /// Builds the row for one favorited [Session] — the caller supplies this
   /// so favorites render with the exact same status/api-error treatment as
   /// the main list (typically a `SessionCard` with `isFavorite: true`).
-  final Widget Function(BuildContext context, Session session) cardBuilder;
+  ///
+  /// `reorderIndex` is this row's position in the group when the row itself
+  /// must carry the grab affordance, and `null` when this widget wraps the
+  /// row instead — see [_grabByHandle] for which platform gets which, and
+  /// why. A non-null index means "render your drag handle for this index",
+  /// which is the SAME `ReorderableDragStartListener` handle the caller
+  /// already builds for a main-list row (#22) — the handle widget stays
+  /// defined in exactly one place.
+  final Widget Function(BuildContext context, Session session, int? reorderIndex)
+  cardBuilder;
 
   /// Whether the group is currently collapsed (cards hidden, only the header
   /// shown). The caller owns and persists this.
@@ -56,20 +65,51 @@ class FavoritesGroup extends StatelessWidget {
   /// new ranks; this widget owns only the gesture.
   final void Function(List<Session> ordered, int oldIndex, int newIndex) onReorder;
 
-  /// Wraps one row in the grab gesture. Touch gets LONG-PRESS-then-drag rather
-  /// than an always-on handle: a pinned row is compact, and a handle sitting in a
-  /// dense group is easy to catch by accident while scrolling the dashboard. A
-  /// pointer device has no such problem, so there the row drags directly. This is
-  /// the same split the web sidebar uses (`app.html`, `attachFavReorder`).
-  Widget _grabbable({required int index, required Widget child}) {
-    switch (defaultTargetPlatform) {
-      case TargetPlatform.android:
-      case TargetPlatform.iOS:
-        return ReorderableDelayedDragStartListener(index: index, child: child);
-      default:
-        return ReorderableDragStartListener(index: index, child: child);
-    }
-  }
+  /// Whether a pinned row is grabbed by a HANDLE inside the card (touch) or by
+  /// the WHOLE ROW (pointer devices).
+  ///
+  /// **#169 — this overturns #124's choice on touch, so the reason lives here.**
+  ///
+  /// #124 wrapped the whole row in a [ReorderableDelayedDragStartListener] on
+  /// touch, deliberately preferring long-press-to-grab over a handle, on the
+  /// grounds that a handle in a compact group is easy to catch by accident while
+  /// scrolling. On a real device that gesture never fired once: `SessionCard`
+  /// binds the actions sheet to an `InkWell.onLongPress`, so pressing a pinned
+  /// row arms TWO recognizers on the same pointer with the SAME
+  /// `kLongPressTimeout` deadline — `LongPressGestureRecognizer` inside the card
+  /// and `DelayedMultiDragGestureRecognizer` above it. The card's is deeper, so
+  /// it enters the arena first, its timer is created first, it accepts first,
+  /// and accepting rejects the drag. Long-press opened the actions sheet; no
+  /// drag ever began.
+  ///
+  /// **No ordering trick leaves both gestures alive.** Neither recognizer needs
+  /// the pointer to move — each commits at its own deadline — so whichever
+  /// accepts first takes the pointer outright, and shortening the drag's delay
+  /// only swaps which gesture is dead. Keeping long-press-to-drag therefore
+  /// means giving up the row's actions sheet, which #169 rules out: the sheet
+  /// must still open on a pinned row, and one gesture must not be traded for the
+  /// other.
+  ///
+  /// So touch gets the affordance the main list has used since #22 — the same
+  /// handle, in the same trailing slot of the same card, doing the same thing
+  /// ("The handle (not the whole card) starts a reorder, so the card's
+  /// long-press stays bound to the actions sheet", `dashboard_screen.dart`).
+  /// One reorder idiom in the app instead of two, and a VISIBLE one: the
+  /// reporter did not know a pinned row could be reordered at all, which an
+  /// invisible gesture was never going to tell them. #124's accidental-grab
+  /// worry is answered by the main list itself, which has shipped this handle
+  /// on a far longer, denser list since #22 without one such report — and the
+  /// handle is an 18px icon that has to be hit deliberately, where #124's
+  /// alternative was the entire row.
+  ///
+  /// A pointer device has no collision to resolve — a mouse starts a drag by
+  /// MOVING, and holding still is exactly what fires the long-press — so it
+  /// keeps the whole row as the grab target and shows no handle at all. The
+  /// desktop path is untouched by #169.
+  bool get _grabByHandle => switch (defaultTargetPlatform) {
+    TargetPlatform.android || TargetPlatform.iOS => true,
+    _ => false,
+  };
 
   @override
   Widget build(BuildContext context) {
@@ -122,9 +162,10 @@ class FavoritesGroup extends StatelessWidget {
         if (!collapsed) ...[
           // shrinkWrap + never-scrollable: this list lives inside the dashboard's
           // own scroll view, so it must size to its children and let the page do
-          // the scrolling. buildDefaultDragHandles is off because Flutter's default
-          // would add its own handle icon on desktop and change the row's layout —
-          // the whole row is the grab target instead (see [_grabbable]).
+          // the scrolling. buildDefaultDragHandles is off because Flutter's own
+          // default is the very bug #169 is about: a handle on desktop, and on
+          // touch the whole row wrapped in a long-press drag listener that any
+          // long-press inside the row beats (see [_grabByHandle]).
           ReorderableListView.builder(
             shrinkWrap: true,
             physics: const NeverScrollableScrollPhysics(),
@@ -139,10 +180,16 @@ class FavoritesGroup extends StatelessWidget {
               // ReorderableListView needs a stable key per row, and the card's own
               // key is the caller's business — so key the wrapper by session id.
               key: ValueKey('fav-reorder-${favorites[i].id}'),
-              child: _grabbable(
-                index: i,
-                child: cardBuilder(context, favorites[i]),
-              ),
+              // Touch: hand the index to the card so its own handle starts the
+              // drag, and put NO listener around the row — a wrapper here is what
+              // raced the card's long-press (#169). Pointer: the whole row is the
+              // target and the card renders no handle.
+              child: _grabByHandle
+                  ? cardBuilder(context, favorites[i], i)
+                  : ReorderableDragStartListener(
+                      index: i,
+                      child: cardBuilder(context, favorites[i], null),
+                    ),
             ),
           ),
           const Divider(height: 16),
