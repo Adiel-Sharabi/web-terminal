@@ -132,6 +132,23 @@ class TranscriptChunk {
     return first.ts ?? '${turns.length}';
   }
 
+  /// Stable identity for a CONVERSATIONAL row, for the same reason [foldKey]
+  /// exists one method up: a row carries expandable state (#32/#163's collapsed
+  /// chip) and older pages are PREPENDED, which shifts every index. Matching by
+  /// index then hands an expanded chip's State to whatever turn arrives at that
+  /// position, so a chip the reader opened appears on an unrelated turn.
+  ///
+  /// Not [foldKey] itself: that one is allowed to collide (`'${turns.length}'`
+  /// for a ts-less run), and a colliding key relocates the WRONG row. A turn's
+  /// `ts` is its natural id but the wire permits null, so the text is folded in
+  /// as the tiebreak — both are immutable once the turn is written, so this
+  /// survives every refresh poll and every prepended page.
+  String get turnKey {
+    final t = turns.first;
+    if (t.toolUses.isNotEmpty) return 'tool-${t.toolUses.first.id}';
+    return '${t.ts ?? ''}|${t.role}|${t.text.length}|${t.text.hashCode}';
+  }
+
   /// Distinct tool names across the run, in first-use order — the marker's
   /// subtitle, so a fold says WHAT was done, not merely how much.
   List<String> get toolNames {
@@ -932,6 +949,31 @@ class _ConversationViewState extends State<ConversationView> {
     // fold. Recomputed per build (pure + cheap); the transcript is already fully
     // in memory, so there is nothing to cache and nothing to invalidate.
     final chunks = groupTranscriptTurns(_turns);
+    // #163 — where each keyed turn row MOVED to. A sliver does not reconcile its
+    // children by key on its own: it matches by index and, finding a different
+    // key there, throws the old element away. So a bare ValueKey turns "the
+    // expanded chip migrates to an unrelated turn" (measured) into "the
+    // expansion is silently lost" — better, but still wrong, and older pages are
+    // PREPENDED on every scroll to the top, which shifts every index.
+    //
+    // Built lazily and once per build: the delegate asks only for the handful of
+    // realized rows, and most builds never ask at all. Backwards so the FIRST
+    // row wins if two turns are genuinely indistinguishable (see [turnKey]) —
+    // an ambiguous answer is the one case where some state loss is honest.
+    //
+    // Fold rows are deliberately not listed: `_MechanicalFold`'s own key is
+    // allowed to collide, so relocating one could move the wrong row. They keep
+    // exactly today's behaviour.
+    Map<String, int>? rowIndexByKey;
+    int? findRowIndex(Key key) {
+      if (key is! ValueKey<String>) return null;
+      rowIndexByKey ??= {
+        for (var i = chunks.length - 1; i >= 0; i--)
+          if (!chunks[i].mechanical) 'turn-${chunks[i].turnKey}': i,
+      };
+      final row = rowIndexByKey![key.value];
+      return row == null ? null : row + leadingLoader;
+    }
     final subagents = collectSubagents(_turns);
     // #74: the badges live in the session's meta bar now (so a terminal-lens
     // session gets them too); publish the estimate only this lens can compute.
@@ -974,6 +1016,7 @@ class _ConversationViewState extends State<ConversationView> {
           child: ListView.builder(
           controller: _scrollController,
           padding: const EdgeInsets.symmetric(vertical: 8),
+          findChildIndexCallback: findRowIndex,
           itemCount: chunks.length +
               leadingLoader +
               ((working || compacting) ? 1 : 0) +
@@ -1003,6 +1046,7 @@ class _ConversationViewState extends State<ConversationView> {
                 );
               }
               return _TurnBubble(
+                key: ValueKey('turn-${chunk.turnKey}'),
                 turn: chunk.turns.single,
                 subFetch: _subFetch,
                 agentId: widget.session.agent,
@@ -1300,7 +1344,6 @@ class CommandInvocation {
     required this.name,
     required this.args,
     required this.body,
-    this.invocations = const <String>[],
   });
 
   /// The command name without its leading slash (e.g. `task`).
@@ -1313,20 +1356,6 @@ class CommandInvocation {
   /// default, shown only if the user expands it. Empty when there's nothing
   /// beyond the wrapper.
   final String body;
-
-  /// Every `/name args` invocation in the turn, in order — normally exactly one.
-  ///
-  /// A transcript record can carry TWO commands fused into one turn (`/clear` +
-  /// `/issue …`, `/compact` + `/compact`): 8 of them in an 803-file corpus. Since
-  /// [name] and [args] describe only the FIRST, a chip built from that pair alone
-  /// showed the first command wearing the SECOND command's arguments, and hid the
-  /// second command entirely inside the collapsed body.
-  final List<String> invocations;
-
-  /// The chip's one-line label — every invocation in the turn.
-  String get label => invocations.isEmpty
-      ? (args.isEmpty ? '/$name' : '/$name $args')
-      : invocations.join('  ·  ');
 }
 
 final RegExp _cmdNameRe =
@@ -1342,53 +1371,13 @@ final RegExp _cmdWrapperRe =
 /// and the (collapsible) body, or null when the turn isn't a command. Pure, so
 /// the parsing is unit-testable.
 CommandInvocation? parseCommandInvocation(String text) {
-  final names = _cmdNameRe.allMatches(text).toList(growable: false);
-  if (names.isEmpty) return null;
-  final name = names.first.group(1)!.trim();
+  final nameM = _cmdNameRe.firstMatch(text);
+  if (nameM == null) return null;
+  final name = nameM.group(1)!.trim();
   if (name.isEmpty) return null;
+  final args = (_cmdArgsRe.firstMatch(text)?.group(1) ?? '').trim();
   final body = text.replaceAll(_cmdWrapperRe, '').trim();
-
-  // The overwhelmingly common shape: one command. Kept on the ORIGINAL
-  // `firstMatch` path so its behaviour is byte-identical — the args tag can sit
-  // either side of the name tag in the wild, and only the fused case below needs
-  // to reason about position at all.
-  if (names.length == 1) {
-    final args = (_cmdArgsRe.firstMatch(text)?.group(1) ?? '').trim();
-    return CommandInvocation(
-      name: name,
-      args: args,
-      body: body,
-      invocations: [args.isEmpty ? '/$name' : '/$name $args'],
-    );
-  }
-
-  // Two commands fused into one transcript record. Pair each name with the
-  // `<command-args>` that falls BETWEEN it and the next name — `firstMatch`
-  // handed every name the first args tag in the turn, which is how `/clear` came
-  // to be chipped carrying `/issue`'s arguments while `/issue` itself vanished
-  // into the collapsed body.
-  final argMatches = _cmdArgsRe.allMatches(text).toList(growable: false);
-  final invocations = <String>[];
-  for (var i = 0; i < names.length; i++) {
-    final n = names[i].group(1)!.trim();
-    if (n.isEmpty) continue;
-    final from = names[i].end;
-    final to = i + 1 < names.length ? names[i + 1].start : text.length;
-    var a = '';
-    for (final m in argMatches) {
-      if (m.start >= from && m.start < to) {
-        a = (m.group(1) ?? '').trim();
-        break;
-      }
-    }
-    invocations.add(a.isEmpty ? '/$n' : '/$n $a');
-  }
-  return CommandInvocation(
-    name: name,
-    args: (_cmdArgsRe.firstMatch(text)?.group(1) ?? '').trim(),
-    body: body,
-    invocations: invocations,
-  );
+  return CommandInvocation(name: name, args: args, body: body);
 }
 
 /// How a `role:user` transcript turn was actually authored. Claude Code stores
@@ -1440,19 +1429,51 @@ UserTurnKind? userTurnKindFromWire(String? kind) => switch (kind) {
 /// How much of an injected turn's first line the chip shows before eliding.
 const int _kInjectedLabelMax = 72;
 
-/// A one-line label for an injected turn that arrived with no wrapper to name it
-/// (#163): its own first non-empty line, elided.
+/// The harness's `<system-reminder>` blocks — context stapled onto a turn, never
+/// part of what the turn SAYS. `lib/user-turn.js` is the authority for the rule
+/// and strips exactly these for its own `body`; the wire carries the turn's RAW
+/// `text` (only `typedText` arrives stripped), so a client that renders an
+/// injected turn has to strip them itself.
+final RegExp _systemReminderRe =
+    RegExp(r'<system-reminder>[\s\S]*?</system-reminder>');
+
+/// An attachment note standing in for content that is not text — the
+/// `[Image: original 1080x2340, displayed at …]` line the harness writes ahead of
+/// a body. It is real content (so it stays in the body) but it names nothing, so
+/// it is skipped when picking a LABEL and only used as one if the turn holds
+/// nothing else.
+final RegExp _attachmentNoteRe = RegExp(r'^\[[Ii]mage\b[^\]]*\]$');
+
+/// The readable content of an injected turn: [text] with the harness's
+/// `<system-reminder>` blocks removed.
 ///
-/// The turn's first line is the only honest name available — the measured ones
+/// Empty when the turn was nothing but reminders — the same answer
+/// `lib/user-turn.js` gives (it reports such a turn `system` with an empty body,
+/// which is why a `meta` turn from a current server always has something left).
+String injectedTurnBody(String text) =>
+    text.replaceAll(_systemReminderRe, '').trim();
+
+/// A one-line label for an injected turn that arrived with no wrapper to name it
+/// (#163): the first non-empty line of its [injectedTurnBody], elided.
+///
+/// **Give it the STRIPPED body, not the raw turn text.** The label is the only
+/// visible content until the chip is tapped, so a raw-text label is the whole
+/// rendering — and measured over a local corpus's `meta` turns, the raw first
+/// line is a dead one twice over: a turn that opens with a reminder block
+/// rendered the literal `<system-reminder>` tag, and 70 that open with an
+/// attachment note rendered image coordinates.
+///
+/// The body's first line is the only honest name available — the measured ones
 /// read `Base directory for this skill: …`, `# Frontend Design`,
 /// `## Context Usage`, `Continue from where you left off.` — and every one of
 /// them tells the user what they are looking at. Inventing a name ("Skill") would
-/// be wrong for the `## Context Usage` and `[Image: …]` members of the same
-/// class, and this repo pays more for confidently wrong than for plain.
+/// be wrong for the `## Context Usage` members of the same class, and this repo
+/// pays more for confidently wrong than for plain.
 ///
 /// Scans rather than `split('\n')`, and slices before trimming, because the body
 /// this runs on can be a single 140 KB line.
 String injectedTurnLabel(String text) {
+  String? attachment;
   var i = 0;
   while (i < text.length) {
     final nl = text.indexOf('\n', i);
@@ -1460,15 +1481,25 @@ String injectedTurnLabel(String text) {
     final stop = end - i > _kInjectedLabelMax * 3 ? i + _kInjectedLabelMax * 3 : end;
     final line = text.substring(i, stop).trim();
     if (line.isNotEmpty) {
-      return line.length <= _kInjectedLabelMax
-          ? line
-          : '${line.substring(0, _kInjectedLabelMax - 1).trimRight()}…';
+      // Only a WHOLE line can be an attachment note, so a line long enough to
+      // have been sliced above is never one — and never worth re-testing.
+      if (stop == end && _attachmentNoteRe.hasMatch(line)) {
+        attachment ??= _elideLabel(line);
+      } else {
+        return _elideLabel(line);
+      }
     }
     if (nl < 0) break;
     i = nl + 1;
   }
-  return 'Injected context';
+  // An attachment note is a poor label but an honest one, and for a turn that
+  // holds nothing else it is the only thing there is to say.
+  return attachment ?? 'Injected context';
 }
+
+String _elideLabel(String line) => line.length <= _kInjectedLabelMax
+    ? line
+    : '${line.substring(0, _kInjectedLabelMax - 1).trimRight()}…';
 
 /// The classification of one `role:user` turn: its [kind], the [from] label
 /// (the teammate's id, or a short system source), and the display [body] with
@@ -1606,7 +1637,7 @@ Future<void> openChatLink(String? href) async {
 // never from a widget in the text flow.
 
 class _TurnBubble extends StatelessWidget {
-  const _TurnBubble({required this.turn, this.subFetch, this.agentId});
+  const _TurnBubble({super.key, required this.turn, this.subFetch, this.agentId});
 
   final TranscriptTurn turn;
 
@@ -1649,9 +1680,18 @@ class _TurnBubble extends StatelessWidget {
     // content as a wrapped one — an expanded SKILL.md — so it gets exactly the
     // same collapsed chip. Anything else would make one body read two different
     // ways depending on how the harness happened to deliver it.
-    final chipLabel = command?.label ??
-        (kind == UserTurnKind.meta ? injectedTurnLabel(turn.text) : null);
-    final chipBody = command?.body ?? turn.text;
+    //
+    // Both halves come off the STRIPPED body. The chip's label is the only thing
+    // visible until it is tapped, so labelling from the raw text put a literal
+    // `<system-reminder>` tag (or an image note) where the turn's own name should
+    // be, and the expanded body then kept reminder XML that every other injected
+    // treatment strips.
+    final injectedBody =
+        kind == UserTurnKind.meta ? injectedTurnBody(turn.text) : null;
+    final chipLabel = command != null
+        ? (command.args.isEmpty ? '/${command.name}' : '/${command.name} ${command.args}')
+        : (injectedBody == null ? null : injectedTurnLabel(injectedBody));
+    final chipBody = command?.body ?? injectedBody ?? '';
     // Injected turns display their stripped inner body; human/assistant use the
     // turn text verbatim.
     final displayText = (kind != null && !fromHuman) ? uclass!.body : turn.text;
