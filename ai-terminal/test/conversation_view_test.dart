@@ -2677,4 +2677,406 @@ void main() {
       expect(find.textContaining('run the build'), findsOneWidget);
     },
   );
+
+  // --- #163: a skill body arrives as a `role:user` turn with NO wrapper -------
+  // Claude Code expands a skill into a user turn carrying the whole SKILL.md and
+  // wraps it in nothing at all, so `parseCommandInvocation` returns null and this
+  // file's `classifyUserTurn` matches no signature: the turn rendered
+  // right-aligned, in the primary accent, labelled "You" — 142 KB of skill
+  // instructions in the user's own bubble, burying whatever they actually typed.
+  //
+  // It is NOT fixable here, and that is the point of the fix: the only evidence
+  // is the transcript record's `isMeta` flag, which this client never sees. The
+  // server (lib/user-turn.js, the authority) reads it and publishes the verdict
+  // as `userKind`; this copy defers to it and keeps its own signatures only as
+  // the fallback for an older server. A fourth content signature here would be
+  // the third copy of a rule that already exists twice.
+  const kSkillBody =
+      'Base directory for this skill: /skills/example-skill\n\n'
+      '# Example skill\n\nSKILL_BODY_MARKER do the thing, then report.';
+  // The two measured openings that a `Base directory` sniff would MISS — kept so
+  // the fix can never regress into a content check.
+  const kSkillBodyHeading =
+      '# Frontend Design\n\nSKILL_HEADING_MARKER approach this as the design lead.';
+  const kSkillBodyProse =
+      'Review the current diff for correctness bugs and reuse cleanups. '
+      'SKILL_PROSE_MARKER at the given effort level.';
+
+  TranscriptPage pageOf(List<TranscriptTurn> turns) =>
+      TranscriptPage(messages: turns, cursor: null, hasMore: false);
+
+  Future<void> pumpTurns(WidgetTester tester, List<TranscriptTurn> turns) async {
+    await tester.pumpWidget(
+      _wrap(
+        ConversationView(
+          session: _session(),
+          fetchPage: (id, {before, limit}) async => pageOf(turns),
+        ),
+      ),
+    );
+    await tester.pumpAndSettle();
+  }
+
+  /// Every `Align` between [of] and the root. The turn card picks
+  /// `centerRight` for the human's own bubble and `centerLeft` for everything
+  /// incoming, so this is the honest read of "was it rendered as mine?".
+  Iterable<Alignment> alignmentsAround(WidgetTester tester, Finder of) => tester
+      .widgetList<Align>(find.ancestor(of: of, matching: find.byType(Align)))
+      .map((a) => a.alignment)
+      .whereType<Alignment>();
+
+  group('#163 userTurnKindFromWire', () {
+    test('every kind the server publishes maps to a render treatment', () {
+      expect(userTurnKindFromWire('human'), UserTurnKind.human);
+      expect(userTurnKindFromWire('teammate'), UserTurnKind.teammate);
+      expect(userTurnKindFromWire('system'), UserTurnKind.system);
+      expect(userTurnKindFromWire('meta'), UserTurnKind.meta);
+    });
+
+    test('`command` is the human\'s OWN turn — #32\'s chip lives on that branch', () {
+      // The server's classifier is strictly stronger than this one and names a
+      // slash command as its own kind. Mapping it anywhere but `human` would
+      // silently delete the #32 chip, which renders on the human branch.
+      expect(userTurnKindFromWire('command'), UserTurnKind.human);
+    });
+
+    test('absent or unknown falls back to the local classifier', () {
+      // null = an older server, or a Codex turn (its adapter publishes no
+      // verdict). Both must behave exactly as this file did before.
+      expect(userTurnKindFromWire(null), isNull);
+      expect(userTurnKindFromWire(''), isNull);
+      expect(userTurnKindFromWire('some-future-kind'), isNull);
+    });
+  });
+
+  group('#163 injectedTurnLabel', () {
+    test('names the turn by its own first line', () {
+      expect(injectedTurnLabel(kSkillBodyHeading), '# Frontend Design');
+    });
+
+    test('skips leading blank lines', () {
+      expect(injectedTurnLabel('\n\n  hello\nworld'), 'hello');
+    });
+
+    test('a 140 KB single line still yields a one-line label', () {
+      final huge = 'Base directory for this skill: ${'x' * 142619}';
+      final label = injectedTurnLabel(huge);
+      expect(label.length, lessThan(90));
+      expect(label, contains('…'));
+      expect(label, isNot(contains('\n')));
+    });
+
+    test('text with nothing to quote still gets a label', () {
+      expect(injectedTurnLabel('   \n\n'), isNotEmpty);
+    });
+  });
+
+  testWidgets(
+    '#163: an injected skill body is never "You" — collapsed, quiet, left',
+    (tester) async {
+      await pumpTurns(tester, const [
+        TranscriptTurn(
+          role: 'user',
+          text: kSkillBody,
+          toolUses: [],
+          ts: null,
+          typedText: '',
+          userKind: 'meta',
+        ),
+      ]);
+
+      // Not the human's bubble: not the label, not the lane.
+      expect(find.text('You'), findsNothing);
+      expect(find.text('Injected'), findsOneWidget);
+      final aligns = alignmentsAround(tester, find.text('Injected'));
+      expect(aligns, contains(Alignment.centerLeft));
+      expect(aligns, isNot(contains(Alignment.centerRight)));
+
+      // Not the primary accent either — that colour is the user's own.
+      final tagStyle = tester.widget<Text>(find.text('Injected')).style;
+      final scheme = AppTheme.dark.colorScheme;
+      expect(tagStyle?.color, isNot(scheme.primary));
+      expect(tagStyle?.color, scheme.onSurfaceVariant);
+
+      // The body is collapsed behind the same chip #32 gives a wrapped skill.
+      expect(find.textContaining('SKILL_BODY_MARKER'), findsNothing);
+      expect(find.text('Base directory for this skill: /skills/example-skill'),
+          findsOneWidget);
+
+      // And it is still reachable — hidden, never lost.
+      await tester.tap(find.text('Base directory for this skill: /skills/example-skill'));
+      await tester.pumpAndSettle();
+      expect(find.textContaining('SKILL_BODY_MARKER'), findsOneWidget);
+    },
+  );
+
+  testWidgets(
+    '#163: the openings a content sniff would miss are handled identically',
+    (tester) async {
+      // The whole argument for a structural flag over a fourth signature: these
+      // two skill bodies open with ordinary markdown and ordinary prose.
+      await pumpTurns(tester, const [
+        TranscriptTurn(
+          role: 'user',
+          text: kSkillBodyHeading,
+          toolUses: [],
+          ts: null,
+          typedText: '',
+          userKind: 'meta',
+        ),
+        TranscriptTurn(
+          role: 'user',
+          text: kSkillBodyProse,
+          toolUses: [],
+          ts: null,
+          typedText: '',
+          userKind: 'meta',
+        ),
+      ]);
+
+      expect(find.text('You'), findsNothing);
+      expect(find.text('Injected'), findsNWidgets(2));
+      expect(find.textContaining('SKILL_HEADING_MARKER'), findsNothing);
+      expect(find.textContaining('SKILL_PROSE_MARKER'), findsNothing);
+    },
+  );
+
+  testWidgets(
+    '#163: a 140 KB body renders collapsed, at real scale',
+    (tester) async {
+      // The reported size. Collapsed is the whole point: the bug was this text
+      // laid out verbatim inside the user's own bubble.
+      final huge = '$kSkillBody\n${'lorem ipsum dolor sit amet ' * 5300}';
+      expect(huge.length, greaterThan(140000));
+      await pumpTurns(tester, [
+        TranscriptTurn(
+          role: 'user',
+          text: huge,
+          toolUses: const [],
+          ts: null,
+          typedText: '',
+          userKind: 'meta',
+        ),
+      ]);
+
+      expect(tester.takeException(), isNull);
+      expect(find.text('You'), findsNothing);
+      expect(find.text('Injected'), findsOneWidget);
+      expect(find.textContaining('SKILL_BODY_MARKER'), findsNothing);
+      expect(find.textContaining('lorem ipsum'), findsNothing);
+    },
+  );
+
+  testWidgets(
+    '#163: the user\'s real prompt is still "You" beside a skill body',
+    (tester) async {
+      // The guard. 2363 of the 3153 measured user turns are genuine prompts and
+      // none of them may change — a fix that quietens real prompts is worse than
+      // the bug. This is also the second half of the report: the sentence the
+      // user typed has to stay findable next to the injection.
+      await pumpTurns(tester, const [
+        TranscriptTurn(
+          role: 'user',
+          text: 'MY_REAL_PROMPT_MARKER rewrite the deploy script',
+          toolUses: [],
+          ts: null,
+          typedText: 'MY_REAL_PROMPT_MARKER rewrite the deploy script',
+          userKind: 'human',
+        ),
+        TranscriptTurn(
+          role: 'user',
+          text: kSkillBody,
+          toolUses: [],
+          ts: null,
+          typedText: '',
+          userKind: 'meta',
+        ),
+      ]);
+
+      expect(find.text('You'), findsOneWidget);
+      expect(find.textContaining('MY_REAL_PROMPT_MARKER'), findsOneWidget);
+      final aligns = alignmentsAround(tester, find.text('You'));
+      expect(aligns, contains(Alignment.centerRight));
+    },
+  );
+
+  testWidgets(
+    '#163: a server that publishes nothing leaves this client unchanged',
+    (tester) async {
+      // An older server sends no `userKind`. The local classifier then decides,
+      // exactly as before — including the pre-existing (unfixable here) reading
+      // of a bare skill body as a prompt.
+      await pumpTurns(tester, const [
+        TranscriptTurn(role: 'user', text: 'plain prompt', toolUses: [], ts: null),
+      ]);
+      expect(find.text('You'), findsOneWidget);
+      expect(find.textContaining('plain prompt'), findsOneWidget);
+    },
+  );
+
+  // --- #163 follow-up: the chip must label itself from the STRIPPED body -----
+  // The chip label is the ONLY visible content until the turn is tapped, so a
+  // label taken from the RAW text is not merely untidy — for the two shapes
+  // below it is the whole rendering. Measured over the meta turns of a local
+  // transcript corpus: one opens with a `<system-reminder>` block (the label
+  // rendered the literal opening tag) and 70 open with an `[Image: …]`
+  // attachment note (the label rendered image coordinates). Both name nothing.
+  const kReminderThenSkill =
+      '<system-reminder>\nBackground note the harness stapled on.\n</system-reminder>\n\n'
+      '# Frontend Design\n\nSKILL_HEADING_MARKER approach this as the design lead.';
+  const kImageThenSkill =
+      '[Image: original 1080x2340, displayed at 923x2000. Multiply coordinates by 1.17]\n\n'
+      '# Frontend Design\n\nSKILL_HEADING_MARKER approach this as the design lead.';
+
+  group('#163 injectedTurnBody', () {
+    test('strips the harness reminder blocks the wire still carries', () {
+      expect(injectedTurnBody(kReminderThenSkill), startsWith('# Frontend Design'));
+      expect(injectedTurnBody(kReminderThenSkill),
+          isNot(contains('system-reminder')));
+    });
+
+    test('an attachment note is content, not wrapper — it stays in the body', () {
+      expect(injectedTurnBody(kImageThenSkill), startsWith('[Image:'));
+    });
+
+    test('a body with nothing to strip is returned unchanged', () {
+      expect(injectedTurnBody(kSkillBodyProse), kSkillBodyProse);
+    });
+
+    test('reminder-only text strips to nothing rather than showing XML', () {
+      expect(injectedTurnBody('<system-reminder>only this</system-reminder>'),
+          isEmpty);
+    });
+  });
+
+  group('#163 injectedTurnLabel skips what names nothing', () {
+    test('an attachment note is skipped when real content follows', () {
+      expect(injectedTurnLabel(kImageThenSkill), '# Frontend Design');
+    });
+
+    test('an attachment note IS the label when it is all there is', () {
+      // Honest: it says an image was attached. Falling back to the generic
+      // label here would throw away the only thing the turn contains.
+      const only = '[Image: original 800x600, displayed at 800x600]';
+      expect(injectedTurnLabel(only), only);
+    });
+
+    test('nothing to quote falls back to the generic label, never to XML', () {
+      expect(injectedTurnLabel(''), 'Injected context');
+    });
+  });
+
+  testWidgets(
+    '#163: a reminder-wrapped skill body is labelled by the SKILL, not the tag',
+    (tester) async {
+      await pumpTurns(tester, const [
+        TranscriptTurn(
+          role: 'user',
+          text: kReminderThenSkill,
+          toolUses: [],
+          ts: null,
+          typedText: '',
+          userKind: 'meta',
+        ),
+      ]);
+
+      expect(find.text('# Frontend Design'), findsOneWidget);
+      expect(find.textContaining('system-reminder'), findsNothing);
+
+      // The reminder must not come back on expand either — every other injected
+      // treatment strips it, and `lib/user-turn.js` (the authority) drops it too.
+      await tester.tap(find.text('# Frontend Design'));
+      await tester.pumpAndSettle();
+      expect(find.textContaining('SKILL_HEADING_MARKER'), findsOneWidget);
+      expect(find.textContaining('system-reminder'), findsNothing);
+    },
+  );
+
+  testWidgets(
+    '#163: an attachment note ahead of the body does not become the label',
+    (tester) async {
+      await pumpTurns(tester, const [
+        TranscriptTurn(
+          role: 'user',
+          text: kImageThenSkill,
+          toolUses: [],
+          ts: null,
+          typedText: '',
+          userKind: 'meta',
+        ),
+      ]);
+
+      expect(find.text('# Frontend Design'), findsOneWidget);
+      // The coordinates are still reachable inside the body — skipped for the
+      // LABEL, never deleted from the turn.
+      expect(find.textContaining('Multiply coordinates'), findsNothing);
+      await tester.tap(find.text('# Frontend Design'));
+      await tester.pumpAndSettle();
+      expect(find.textContaining('Multiply coordinates'), findsOneWidget);
+    },
+  );
+
+  // --- #163 follow-up: an expanded chip must not migrate to another turn -----
+  // `_TurnBubble` is built unkeyed while older pages are PREPENDED, which shifts
+  // every index — so Flutter's index matching hands the expanded chip's State to
+  // whatever turn lands on that index. `_MechanicalFold` three lines away is
+  // already keyed for exactly this reason.
+  testWidgets(
+    '#163: an expanded chip stays on ITS turn when older history prepends',
+    (tester) async {
+      List<TranscriptTurn> metaTurns(String prefix, int count) => List.generate(
+            count,
+            (i) => TranscriptTurn(
+              role: 'user',
+              text: '${prefix}_LABEL_$i\n\n${prefix}_BODY_$i marker text',
+              toolUses: const [],
+              ts: '2026-08-26T10:0$i:00.000Z',
+              typedText: '',
+              userKind: 'meta',
+            ),
+          );
+      final newest = metaTurns('NEWEST', 2);
+      final older = metaTurns('OLDER', 2);
+
+      Future<TranscriptPage> fetch(String id, {String? before, int? limit}) async {
+        if (before == 'cur1') {
+          return TranscriptPage(messages: older, cursor: null, hasMore: false);
+        }
+        return TranscriptPage(messages: newest, cursor: 'cur1', hasMore: true);
+      }
+
+      await tester.pumpWidget(
+        _wrap(ConversationView(session: _session(), fetchPage: fetch)),
+      );
+      await tester.pumpAndSettle();
+
+      // Expand the FIRST of the two turns on screen.
+      await tester.tap(find.text('NEWEST_LABEL_0'));
+      await tester.pumpAndSettle();
+      expect(find.textContaining('NEWEST_BODY_0'), findsOneWidget);
+
+      // Page in older history. Two short turns fit the 600px viewport, so
+      // maxScrollExtent is 0 and a small overscroll is what drives _onScroll —
+      // the same mechanism the #47 short-transcript test documents.
+      final controller =
+          tester.widget<ListView>(find.byType(ListView)).controller!;
+      controller.jumpTo(50);
+      await tester.pumpAndSettle();
+      controller.jumpTo(controller.position.minScrollExtent);
+      await tester.pumpAndSettle();
+
+      // Non-vacuity: all four rows are realized, so a `findsNothing` below is a
+      // real absence and not an unbuilt row.
+      expect(find.text('OLDER_LABEL_0'), findsOneWidget);
+      expect(find.text('OLDER_LABEL_1'), findsOneWidget);
+      expect(find.text('NEWEST_LABEL_0'), findsOneWidget);
+      expect(find.text('NEWEST_LABEL_1'), findsOneWidget);
+
+      // The expansion belongs to the turn that was tapped — and to no other.
+      expect(find.textContaining('NEWEST_BODY_1'), findsNothing);
+      expect(find.textContaining('OLDER_BODY_0'), findsNothing);
+      expect(find.textContaining('OLDER_BODY_1'), findsNothing);
+      expect(find.textContaining('NEWEST_BODY_0'), findsOneWidget);
+    },
+  );
 }

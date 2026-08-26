@@ -541,6 +541,29 @@ void main() {
     });
   });
 
+  group('TranscriptTurn.userKind (#163)', () {
+    test('the server\'s verdict is carried across the wire verbatim', () {
+      // Not re-derived, not normalised: the mapping onto a render treatment
+      // belongs to conversation_view.dart, so an unrecognised future kind can
+      // still reach it and fall back cleanly.
+      expect(
+          TranscriptTurn.fromJson(
+              {'role': 'user', 'text': '# Example skill', 'userKind': 'meta'}).userKind,
+          'meta');
+      expect(
+          TranscriptTurn.fromJson(
+              {'role': 'user', 'text': 'fix it', 'userKind': 'human'}).userKind,
+          'human');
+    });
+
+    test('absent stays null — an older server sent no verdict at all', () {
+      // The whole backward-compatibility story, same rule as typedText: null
+      // means "nobody said", never "not a human".
+      expect(TranscriptTurn.fromJson({'role': 'user', 'text': 'fix it'}).userKind,
+          isNull);
+    });
+  });
+
   group('AgentInfo.fromJson', () {
     test('parses id, label and color', () {
       final a = AgentInfo.fromJson({

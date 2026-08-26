@@ -132,6 +132,29 @@ class TranscriptChunk {
     return first.ts ?? '${turns.length}';
   }
 
+  /// Stable identity for a CONVERSATIONAL row, for the same reason [foldKey]
+  /// exists one method up: a row carries expandable state (#32/#163's collapsed
+  /// chip) and older pages are PREPENDED, which shifts every index. Matching by
+  /// index then hands an expanded chip's State to whatever turn arrives at that
+  /// position, so a chip the reader opened appears on an unrelated turn.
+  ///
+  /// Not [foldKey] itself: that one is allowed to collide (`'${turns.length}'`
+  /// for a ts-less run), and a colliding key relocates the WRONG row. A turn's
+  /// `ts` is its natural id but the wire permits null, so the text is folded in
+  /// as the tiebreak — both are immutable once the turn is written, so this
+  /// survives every refresh poll and every prepended page.
+  ///
+  /// A collision does not throw: a sliver keys children by INDEX, not against
+  /// its siblings, so two equal keys simply both target the lower slot and the
+  /// later element wins it while the earlier is deactivated — state loss, not
+  /// an exception. Measured over 57,367 turns: no duplicate `ts|role|len|hash`
+  /// tuple and no duplicate first tool-use id within a session.
+  String get turnKey {
+    final t = turns.first;
+    if (t.toolUses.isNotEmpty) return 'tool-${t.toolUses.first.id}';
+    return '${t.ts ?? ''}|${t.role}|${t.text.length}|${t.text.hashCode}';
+  }
+
   /// Distinct tool names across the run, in first-use order — the marker's
   /// subtitle, so a fold says WHAT was done, not merely how much.
   List<String> get toolNames {
@@ -932,6 +955,31 @@ class _ConversationViewState extends State<ConversationView> {
     // fold. Recomputed per build (pure + cheap); the transcript is already fully
     // in memory, so there is nothing to cache and nothing to invalidate.
     final chunks = groupTranscriptTurns(_turns);
+    // #163 — where each keyed turn row MOVED to. A sliver does not reconcile its
+    // children by key on its own: it matches by index and, finding a different
+    // key there, throws the old element away. So a bare ValueKey turns "the
+    // expanded chip migrates to an unrelated turn" (measured) into "the
+    // expansion is silently lost" — better, but still wrong, and older pages are
+    // PREPENDED on every scroll to the top, which shifts every index.
+    //
+    // Built lazily and once per build: the delegate asks only for the handful of
+    // realized rows, and most builds never ask at all. Backwards so the FIRST
+    // row wins if two turns are genuinely indistinguishable (see [turnKey]) —
+    // an ambiguous answer is the one case where some state loss is honest.
+    //
+    // Fold rows are deliberately not listed: `_MechanicalFold`'s own key is
+    // allowed to collide, so relocating one could move the wrong row. They keep
+    // exactly today's behaviour.
+    Map<String, int>? rowIndexByKey;
+    int? findRowIndex(Key key) {
+      if (key is! ValueKey<String>) return null;
+      rowIndexByKey ??= {
+        for (var i = chunks.length - 1; i >= 0; i--)
+          if (!chunks[i].mechanical) 'turn-${chunks[i].turnKey}': i,
+      };
+      final row = rowIndexByKey![key.value];
+      return row == null ? null : row + leadingLoader;
+    }
     final subagents = collectSubagents(_turns);
     // #74: the badges live in the session's meta bar now (so a terminal-lens
     // session gets them too); publish the estimate only this lens can compute.
@@ -974,6 +1022,7 @@ class _ConversationViewState extends State<ConversationView> {
           child: ListView.builder(
           controller: _scrollController,
           padding: const EdgeInsets.symmetric(vertical: 8),
+          findChildIndexCallback: findRowIndex,
           itemCount: chunks.length +
               leadingLoader +
               ((working || compacting) ? 1 : 0) +
@@ -1003,6 +1052,7 @@ class _ConversationViewState extends State<ConversationView> {
                 );
               }
               return _TurnBubble(
+                key: ValueKey('turn-${chunk.turnKey}'),
                 turn: chunk.turns.single,
                 subFetch: _subFetch,
                 agentId: widget.session.agent,
@@ -1352,7 +1402,114 @@ enum UserTurnKind {
   /// Harness-injected, not typed by the human: a `<task-notification>`, Stop-hook
   /// feedback, or a post-compaction summary.
   system,
+
+  /// Harness-injected with NOTHING to sniff (#163) — above all, a skill expanded
+  /// into a `role:user` turn carrying the whole SKILL.md and no wrapper at all.
+  ///
+  /// **Unreachable from [classifyUserTurn], on purpose.** There is no signature
+  /// to match: measured skill bodies open with `Base directory for this skill:`,
+  /// with a bare markdown heading, or with ordinary prose. The evidence is
+  /// structural — the transcript record's `isMeta` flag — and only the server
+  /// sees the record, so this kind arrives on the wire as `TranscriptTurn.userKind`
+  /// and nowhere else.
+  meta,
 }
+
+/// The server's own verdict for a `role:user` turn, mapped onto the render
+/// treatments this file knows about, or `null` when there is no verdict to read
+/// — an older server, or a Codex turn — in which case [classifyUserTurn] decides
+/// exactly as it always did.
+///
+/// `command` maps to [UserTurnKind.human] deliberately: the server's classifier
+/// is stronger than this one and names a slash command as its own kind, but a
+/// slash command IS the user's own turn, and #32's collapsed chip renders on the
+/// human branch. Mapping it anywhere else would silently delete that chip.
+UserTurnKind? userTurnKindFromWire(String? kind) => switch (kind) {
+      'human' || 'command' => UserTurnKind.human,
+      'teammate' => UserTurnKind.teammate,
+      'system' => UserTurnKind.system,
+      'meta' => UserTurnKind.meta,
+      _ => null,
+    };
+
+/// How much of an injected turn's first line the chip shows before eliding.
+const int _kInjectedLabelMax = 72;
+
+/// The harness's `<system-reminder>` blocks — context stapled onto a turn, never
+/// part of what the turn SAYS. `lib/user-turn.js` is the authority for the rule
+/// and strips exactly these for its own `body`; the wire carries the turn's RAW
+/// `text` (only `typedText` arrives stripped), so a client that renders an
+/// injected turn has to strip them itself.
+final RegExp _systemReminderRe =
+    RegExp(r'<system-reminder>[\s\S]*?</system-reminder>');
+
+/// An attachment note standing in for content that is not text — the
+/// `[Image: original 1080x2340, displayed at …]` line the harness writes ahead of
+/// a body. It is real content (so it stays in the body) but it names nothing, so
+/// it is skipped when picking a LABEL and only used as one if the turn holds
+/// nothing else.
+final RegExp _attachmentNoteRe = RegExp(r'^\[[Ii]mage\b[^\]]*\]$');
+
+/// The readable content of an injected turn: [text] with the harness's
+/// `<system-reminder>` blocks removed.
+///
+/// Empty when the turn was nothing but reminders — the same answer
+/// `lib/user-turn.js` gives (it reports such a turn `system` with an empty body,
+/// which is why a `meta` turn from a current server always has something left).
+String injectedTurnBody(String text) =>
+    text.replaceAll(_systemReminderRe, '').trim();
+
+/// A one-line label for an injected turn that arrived with no wrapper to name it
+/// (#163): the first non-empty line of its [injectedTurnBody], elided.
+///
+/// **Give it the STRIPPED body, not the raw turn text.** The label is the only
+/// visible content until the chip is tapped, so a raw-text label is the whole
+/// rendering — and measured over a local corpus's `meta` turns, the raw first
+/// line is a dead one twice over: a turn that opens with a reminder block
+/// rendered the literal `<system-reminder>` tag, and 70 that open with an
+/// attachment note rendered image coordinates.
+///
+/// The body's first line is the only honest name available — the measured ones
+/// read `Base directory for this skill: …`, `# Frontend Design`,
+/// `## Context Usage`, `Continue from where you left off.` — and every one of
+/// them tells the user what they are looking at. Inventing a name ("Skill") would
+/// be wrong for the `## Context Usage` members of the same class, and this repo
+/// pays more for confidently wrong than for plain.
+///
+/// Scans rather than `split('\n')`, and slices before trimming, because the body
+/// this runs on can be a single 140 KB line.
+String injectedTurnLabel(String text) {
+  String? attachment;
+  var i = 0;
+  while (i < text.length) {
+    final nl = text.indexOf('\n', i);
+    final end = nl < 0 ? text.length : nl;
+    final stop = end - i > _kInjectedLabelMax * 3 ? i + _kInjectedLabelMax * 3 : end;
+    final line = text.substring(i, stop).trim();
+    if (line.isNotEmpty) {
+      // Only a WHOLE line can be an attachment note, and a sliced line is not
+      // whole, so the test is skipped rather than run against a fragment.
+      // A note longer than the slice would therefore become the label even
+      // when real content follows it — measured across every injected turn on
+      // this fleet, the longest note is well under 72 chars and none exceeds
+      // the slice, so the case is unobserved rather than impossible.
+      if (stop == end && _attachmentNoteRe.hasMatch(line)) {
+        attachment ??= _elideLabel(line);
+      } else {
+        return _elideLabel(line);
+      }
+    }
+    if (nl < 0) break;
+    i = nl + 1;
+  }
+  // An attachment note is a poor label but an honest one, and for a turn that
+  // holds nothing else it is the only thing there is to say.
+  return attachment ?? 'Injected context';
+}
+
+String _elideLabel(String line) => line.length <= _kInjectedLabelMax
+    ? line
+    : '${line.substring(0, _kInjectedLabelMax - 1).trimRight()}…';
 
 /// The classification of one `role:user` turn: its [kind], the [from] label
 /// (the teammate's id, or a short system source), and the display [body] with
@@ -1490,7 +1647,7 @@ Future<void> openChatLink(String? href) async {
 // never from a widget in the text flow.
 
 class _TurnBubble extends StatelessWidget {
-  const _TurnBubble({required this.turn, this.subFetch, this.agentId});
+  const _TurnBubble({super.key, required this.turn, this.subFetch, this.agentId});
 
   final TranscriptTurn turn;
 
@@ -1513,18 +1670,45 @@ class _TurnBubble extends StatelessWidget {
     // (another session's message, a task-notification, hook feedback, compaction
     // summary). null for an assistant turn.
     final uclass = isAssistant ? null : classifyUserTurn(turn.text);
-    final fromHuman = uclass != null && uclass.kind == UserTurnKind.human;
+    // #163 — the SERVER's verdict wins whenever it sent one. `lib/user-turn.js`
+    // is the authority for this rule and it has seen something this copy never
+    // can: the transcript record's `isMeta` flag, the only thing separating an
+    // injected skill body (the whole SKILL.md, no wrapper) from a prompt. A null
+    // means no verdict was sent — an older server, or a Codex turn — and the
+    // local classifier then decides exactly as it did before.
+    final kind = isAssistant
+        ? null
+        : (userTurnKindFromWire(turn.userKind) ?? uclass!.kind);
+    final fromHuman = kind == UserTurnKind.human;
     // "Incoming" (left, quiet) treatment for everything that isn't the human's
     // own turn — assistant AND injected non-human user turns.
     final incoming = !fromHuman;
     // #32: a slash-command/skill turn renders as a compact chip, not the whole
     // injected SKILL.md body. Only a human's own turn can be a slash command.
     final command = fromHuman ? parseCommandInvocation(turn.text) : null;
+    // #163: an injection that arrived with NO wrapper carries exactly the same
+    // content as a wrapped one — an expanded SKILL.md — so it gets exactly the
+    // same collapsed chip. Anything else would make one body read two different
+    // ways depending on how the harness happened to deliver it.
+    //
+    // Both halves come off the STRIPPED body. The chip's label is the only thing
+    // visible until it is tapped, so labelling from the raw text put a literal
+    // `<system-reminder>` tag (or an image note) where the turn's own name should
+    // be, and the expanded body then kept reminder XML that every other injected
+    // treatment strips.
+    final injectedBody =
+        kind == UserTurnKind.meta ? injectedTurnBody(turn.text) : null;
+    final chipLabel = command != null
+        ? (command.args.isEmpty ? '/${command.name}' : '/${command.name} ${command.args}')
+        : (injectedBody == null ? null : injectedTurnLabel(injectedBody));
+    final chipBody = command?.body ?? injectedBody ?? '';
     // Injected turns display their stripped inner body; human/assistant use the
     // turn text verbatim.
-    final displayText =
-        (uclass != null && !fromHuman) ? uclass.body : turn.text;
-    final segments = _splitCodeBlocks(displayText);
+    final displayText = (kind != null && !fromHuman) ? uclass!.body : turn.text;
+    // Never split a body that is about to be collapsed anyway — the whole point
+    // of the chip is that a 140 KB skill body costs nothing until it is asked for.
+    final segments =
+        chipLabel == null ? _splitCodeBlocks(displayText) : const <_Segment>[];
     // #54: user text is full-strength on BOTH sides now — the old "muted on
     // the right" treatment read as *lower* priority, exactly backwards: the
     // user's own turns are the rarer, higher-signal landmark, so they must
@@ -1563,22 +1747,31 @@ class _TurnBubble extends StatelessWidget {
             AgentCatalog.instance[agentId]?.color,
             theme.colorScheme.onSurfaceVariant,
           )
-        : switch (uclass!.kind) {
+        : switch (kind!) {
             UserTurnKind.human => theme.colorScheme.primary,
             // A teammate agent gets its own distinct tint so it can never be
             // read as your own turn (or as the session's assistant).
             UserTurnKind.teammate => theme.colorScheme.tertiary,
             // Harness/system injections stay muted — present but low-signal.
             UserTurnKind.system => theme.colorScheme.onSurfaceVariant,
+            // #163: an injection with no source to name is the quietest thing in
+            // the lens. Anything warmer here re-creates the reported bug, whose
+            // real sting was the ACCENT: it read as the user's own words.
+            UserTurnKind.meta => theme.colorScheme.onSurfaceVariant,
           };
     final roleLabel = isAssistant
         ? (AgentCatalog.instance[agentId]?.label ?? 'Assistant')
-        : switch (uclass!.kind) {
+        : switch (kind!) {
             UserTurnKind.human => 'You',
             UserTurnKind.teammate =>
-              uclass.from.isEmpty ? '◆ Teammate' : '◆ ${uclass.from}',
+              uclass!.from.isEmpty ? '◆ Teammate' : '◆ ${uclass.from}',
             UserTurnKind.system =>
-              uclass.from.isEmpty ? 'System' : uclass.from,
+              uclass!.from.isEmpty ? 'System' : uclass.from,
+            // Deliberately generic. This class covers skill bodies, `## Context
+            // Usage`, `[Image: …]` notes and effort-level notes alike, and the
+            // flag that identifies them says only "the harness wrote this" —
+            // calling them all "Skill" would be confidently wrong for most.
+            UserTurnKind.meta => 'Injected',
           };
 
     // An incoming turn (agent or injected) runs near full width — it carries
@@ -1633,8 +1826,12 @@ class _TurnBubble extends StatelessWidget {
             children: [
               _RoleTag(label: roleLabel, color: roleColor),
               const SizedBox(height: 6),
-              if (command != null)
-                _CommandInvocationChip(command: command)
+              if (chipLabel != null)
+                _CollapsedBodyChip(
+                  label: chipLabel,
+                  body: chipBody,
+                  incoming: incoming,
+                )
               else
                 for (final seg in segments)
                   if (seg.kind == _SegmentKind.code)
@@ -1895,30 +2092,54 @@ class _CodeBlock extends StatelessWidget {
 
 /// #32: a slash-command/skill invocation rendered compactly as `/name args`.
 /// The injected skill body (if any) is collapsed behind a tap-to-expand.
-class _CommandInvocationChip extends StatefulWidget {
-  const _CommandInvocationChip({required this.command});
+/// A one-line label with a collapsible body — the treatment for a `role:user`
+/// turn whose real content is an expanded SKILL.md rather than a sentence.
+///
+/// #32 introduced it for a slash command (the `<command-name>` trio plus the
+/// injected body); #163 hands the SAME chip to an injection that arrives with no
+/// wrapper at all, because it is the same content and a reader should not have to
+/// know which way the harness happened to deliver it. [incoming] carries the lane
+/// — the human's own commands stay on the accent, an injection stays quiet.
+class _CollapsedBodyChip extends StatefulWidget {
+  const _CollapsedBodyChip({
+    required this.label,
+    required this.body,
+    required this.incoming,
+  });
 
-  final CommandInvocation command;
+  /// The one line shown collapsed.
+  final String label;
+
+  /// The hidden remainder; empty when there is nothing to expand.
+  final String body;
+
+  /// True for a turn the human did not write (left lane, quiet surface).
+  final bool incoming;
 
   @override
-  State<_CommandInvocationChip> createState() => _CommandInvocationChipState();
+  State<_CollapsedBodyChip> createState() => _CollapsedBodyChipState();
 }
 
-class _CommandInvocationChipState extends State<_CommandInvocationChip> {
+class _CollapsedBodyChipState extends State<_CollapsedBodyChip> {
   bool _expanded = false;
 
   @override
   Widget build(BuildContext context) {
     final theme = Theme.of(context);
-    final c = widget.command;
-    final hasBody = c.body.isNotEmpty;
-    final label = c.args.isEmpty ? '/${c.name}' : '/${c.name} ${c.args}';
+    final incoming = widget.incoming;
+    final hasBody = widget.body.isNotEmpty;
+    final label = widget.label;
+    final accent =
+        incoming ? theme.colorScheme.onSurfaceVariant : theme.colorScheme.primary;
     return Column(
-      crossAxisAlignment: CrossAxisAlignment.end,
+      crossAxisAlignment:
+          incoming ? CrossAxisAlignment.start : CrossAxisAlignment.end,
       mainAxisSize: MainAxisSize.min,
       children: [
         Material(
-          color: theme.colorScheme.primaryContainer.withValues(alpha: 0.5),
+          color: incoming
+              ? theme.colorScheme.surfaceContainerHigh.withValues(alpha: 0.6)
+              : theme.colorScheme.primaryContainer.withValues(alpha: 0.5),
           borderRadius: BorderRadius.circular(AppShape.small),
           child: InkWell(
             borderRadius: BorderRadius.circular(AppShape.small),
@@ -1928,8 +2149,12 @@ class _CommandInvocationChipState extends State<_CommandInvocationChip> {
               child: Row(
                 mainAxisSize: MainAxisSize.min,
                 children: [
-                  Icon(Icons.terminal_rounded,
-                      size: 15, color: theme.colorScheme.primary),
+                  Icon(
+                      incoming
+                          ? Icons.notes_rounded
+                          : Icons.terminal_rounded,
+                      size: 15,
+                      color: accent),
                   const SizedBox(width: 6),
                   Flexible(
                     child: Text(
@@ -1961,7 +2186,7 @@ class _CommandInvocationChipState extends State<_CommandInvocationChip> {
                 border: Border.all(color: theme.colorScheme.outlineVariant),
               ),
               child: Text(
-                c.body,
+                widget.body,
                 style: theme.textTheme.bodySmall?.copyWith(
                   fontFamily: 'monospace',
                   color: theme.colorScheme.onSurfaceVariant,

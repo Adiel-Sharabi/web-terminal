@@ -168,3 +168,124 @@ test.describe('the extraction kept lib/recap.js a valid owner for its importers'
     expect(typeof require('../lib/speech').extractSummary).toBe('function');
   });
 });
+
+// --- #163: a skill body is injected with NO wrapper to sniff ------------------
+// The one injection with no content signature. Claude Code expands a skill into
+// a `role:user` turn carrying the whole SKILL.md, and — unlike a slash command —
+// wraps it in NOTHING. Every signature above misses it, so it classified as
+// `human`: the chat lens labelled 142 KB of skill instructions "You" and the
+// recap reported it as the user's last prompt.
+//
+// The transcript record answers it structurally: the harness sets `isMeta: true`.
+// Re-measured 2026-08-26 over 803 transcripts / 3153 `role:user` turns —
+// 648 `isMeta:true` (51 bare skill bodies, 222 reminder-only, 375 other
+// injections) and 2505 `isMeta:false`, of which 2363 are genuine prompts and
+// **not one** genuine prompt carries the flag. Two facts drive the design:
+//   * ALL 142 `<command-name>` trios in that corpus are `isMeta:FALSE`, so the
+//     flag COMPLEMENTS the command signature and must never replace it.
+//   * Two of the skill bodies do not open with `Base directory for this skill:`
+//     at all, which is exactly why this is a structural flag and not a fourth
+//     content signature.
+const SKILL_BODY_BASEDIR = [
+  'Base directory for this skill: /skills/example-skill',
+  '',
+  '# Example skill',
+  '',
+  'Do the thing, then report what you saw.',
+].join('\n');
+// The two measured openings that a `Base directory` sniff would MISS. If the fix
+// ever regresses into a content check, these two go red first.
+const SKILL_BODY_HEADING = [
+  '# Frontend Design',
+  '',
+  'Approach this as the design lead at a small studio.',
+].join('\n');
+const SKILL_BODY_PROSE =
+  'Review the current diff for correctness bugs and reuse cleanups at the given effort level.';
+const SKILL_BODIES = [SKILL_BODY_BASEDIR, SKILL_BODY_HEADING, SKILL_BODY_PROSE];
+
+test.describe('#163 — an injected skill body is not a prompt', () => {
+  test('WITHOUT the flag every one of them still reads as human (the bug)', () => {
+    // Pinned deliberately: it is the proof that no content signature can catch
+    // these, and therefore that the structural flag is doing the work.
+    for (const body of SKILL_BODIES) {
+      expect(classifyUserTurn(body).kind).toBe(USER_KINDS.HUMAN);
+    }
+  });
+
+  test('isMeta:true makes a signature-less turn `meta`, never human', () => {
+    for (const body of SKILL_BODIES) {
+      const c = classifyUserTurn(body, { isMeta: true });
+      expect(c.kind).toBe(USER_KINDS.META);
+      expect(c.kind).not.toBe(USER_KINDS.HUMAN);
+      // The text survives — a skill body is not nothing, it is just not YOURS.
+      expect(c.body).toBe(body);
+    }
+  });
+
+  test('typedTextOf returns "" for one, so #149\'s Queued echo cannot match it', () => {
+    for (const body of SKILL_BODIES) {
+      expect(typedTextOf(body, { isMeta: true })).toBe('');
+    }
+  });
+
+  // The correction to the issue's own numbers: command trios are isMeta:FALSE in
+  // the corpus, so the flag ADDS to the signatures rather than replacing them.
+  test('a genuine prompt is untouched — isMeta absent or false stays human', () => {
+    expect(classifyUserTurn('fix the login bug').kind).toBe(USER_KINDS.HUMAN);
+    expect(classifyUserTurn('fix the login bug', {}).kind).toBe(USER_KINDS.HUMAN);
+    expect(classifyUserTurn('fix the login bug', { isMeta: false }).kind).toBe(USER_KINDS.HUMAN);
+    expect(typedTextOf('fix the login bug', { isMeta: false })).toBe('fix the login bug');
+    // And a prompt carrying injected context is still the sentence, not 'meta'.
+    expect(typedTextOf(`fix the login bug\n${REMINDER}`, { isMeta: false })).toBe('fix the login bug');
+  });
+
+  test('a content signature still WINS over the flag — the label is better', () => {
+    // A signature names its source ('Hook', the teammate id, the command); 'meta'
+    // can only say "the harness put this here". Never trade a name for a shrug.
+    expect(classifyUserTurn(TEAMMATE, { isMeta: true }).kind).toBe(USER_KINDS.TEAMMATE);
+    expect(classifyUserTurn(TASK_NOTIFICATION, { isMeta: true }).kind).toBe(USER_KINDS.SYSTEM);
+    expect(classifyUserTurn(TRIO_NAME_FIRST, { isMeta: true }).kind).toBe(USER_KINDS.COMMAND);
+    // A slash command the user typed is STILL typed, flag or no flag.
+    expect(typedTextOf(TRIO_MESSAGE_FIRST, { isMeta: true })).toBe(
+      '/issue the queued badge never clears once the prompt is consumed',
+    );
+  });
+
+  test('an oversized body costs nothing to classify', () => {
+    const huge = `${SKILL_BODY_BASEDIR}\n${'x'.repeat(142619)}`;
+    expect(classifyUserTurn(huge, { isMeta: true }).kind).toBe(USER_KINDS.META);
+    expect(typedTextOf(huge, { isMeta: true })).toBe('');
+  });
+});
+
+// --- the flag has to REACH the rule, and the clients have to see the verdict --
+test.describe('#163 — lib/transcript.js reads isMeta and publishes the verdict', () => {
+  const { parseTranscriptTurn } = require('../lib/transcript');
+  const line = (text, extra = {}) =>
+    JSON.stringify({ type: 'user', message: { role: 'user', content: text }, ...extra });
+
+  test('a bare skill body on an isMeta record is published as `meta`', () => {
+    const t = parseTranscriptTurn(line(SKILL_BODY_HEADING, { isMeta: true }));
+    expect(t.role).toBe('user');
+    expect(t.userKind).toBe(USER_KINDS.META);
+    expect(t.typedText).toBe('');
+  });
+
+  test('the same text WITHOUT the flag is still a human prompt', () => {
+    const t = parseTranscriptTurn(line(SKILL_BODY_HEADING));
+    expect(t.userKind).toBe(USER_KINDS.HUMAN);
+    expect(t.typedText).toBe(SKILL_BODY_HEADING);
+  });
+
+  test('an ordinary prompt is published as human — the guard', () => {
+    const t = parseTranscriptTurn(line('fix the login bug'));
+    expect(t.userKind).toBe(USER_KINDS.HUMAN);
+    expect(t.typedText).toBe('fix the login bug');
+  });
+
+  test('a command trio still publishes `command`, not `meta`', () => {
+    const t = parseTranscriptTurn(line(TRIO_NAME_FIRST));
+    expect(t.userKind).toBe(USER_KINDS.COMMAND);
+  });
+});
