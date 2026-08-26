@@ -39,6 +39,7 @@ import '../services/speech_service.dart';
 import '../theme/app_theme.dart';
 import '../util/terminal_write.dart';
 import '../theme/status_colors.dart';
+import '../util/scrollback_window.dart';
 import '../util/terminal_links.dart';
 import '../widgets/attach_source_sheet.dart';
 import '../widgets/compose_bar.dart';
@@ -69,11 +70,6 @@ bool canForkFromMenu(Session session) => session.claudeSessionId != null;
 /// to scroll through, and still well inside both limits.
 const int kScrollbackReplayBytes = 262144;
 
-/// How much older scrollback each background deepening step pulls in (#127).
-/// One step, one request, one prepend — small enough that parsing it never
-/// blocks the frame for long, large enough that a deep history arrives quickly.
-const int kScrollbackDeepenBytes = 262144;
-
 /// Pause between deepening steps, so this stays background work and never
 /// competes with live output for the main isolate.
 const Duration kScrollbackDeepenGap = Duration(milliseconds: 900);
@@ -81,17 +77,6 @@ const Duration kScrollbackDeepenGap = Duration(milliseconds: 900);
 /// Ceiling on the terminal's line buffer once deepened. Memory is not the
 /// binding constraint here (latency is), but unbounded is not a design.
 const int kScrollbackMaxLines = 100000;
-
-/// Where the newest [budget] code units of a [total]-length scrollback begin.
-///
-/// The endpoint pages FORWARD from `offset`, so fetching the tail means asking
-/// for `total - budget`. Omitting the offset asks for the oldest bytes instead,
-/// which is the whole defect this exists to prevent. Pure, so the arithmetic is
-/// pinned without a live session.
-int scrollbackTailOffset(int total, int budget) {
-  final start = total - budget;
-  return start > 0 ? start : 0;
-}
 
 /// Whether [session] runs an AI agent that keeps a transcript, and so can have a
 /// Chat lens at all. Pure, for the same reason as [canForkFromMenu].
@@ -875,11 +860,13 @@ class _SessionScreenState extends State<SessionScreen>
   bool _transcriptUnavailableForSession =
       false; // this session 404s despite the capability
 
-  // #127 — the background scrollback deepening. `_sbEarliest` is the byte offset
-  // where the currently-loaded window starts; 0 means the very beginning of the
-  // buffer has been reached and there is nothing older to fetch.
-  int _sbEarliest = 0;
-  bool _sbExhausted = false;
+  // #127 — the background scrollback deepening. The walk itself (which range to
+  // ask for next, and which part of the answer is genuinely older than what is
+  // already on screen) is a pure rule in `util/scrollback_window.dart`; this
+  // screen only turns it into requests and prepended lines. #167: it does NOT
+  // carry an absolute byte offset from one request to the next, because the
+  // server's buffer trims its head underneath the walk.
+  final ScrollbackWindow _sbWindow = ScrollbackWindow();
   bool _deepening = false;
   Timer? _deepenTimer;
 
@@ -1542,6 +1529,31 @@ class _SessionScreenState extends State<SessionScreen>
   /// first attach and every time the app resumes from the background — the
   /// server owns replay, this just re-syncs the view (spec: "reopening
   /// resumes seamlessly").
+  ///
+  /// ## KNOWN, PRE-EXISTING: this path double-renders the tail (not #167)
+  ///
+  /// Recorded because the symptom — repeated output in the terminal — is the
+  /// one #167 is named for, and a future reader will otherwise conclude the
+  /// backward deepening walk is still broken. It is not: this is a **different
+  /// mechanism at a different layer**, and it predates that fix.
+  ///
+  /// Below, the buffer is cleared, the 256 KB HTTP replay is written, and only
+  /// THEN the socket is opened — and the server sends up to
+  /// `scrollbackReplayLimit` (32768) of sanitised scrollback on connect,
+  /// unconditionally. `_reconnectedSub` clears the buffer for exactly this
+  /// reason, but `reconnected` fires only on RE-connects, never on the first
+  /// one. Measured through the real vendored xterm at 52x38: **1129 duplicated
+  /// lines per attach**, at the tail, on every attach — and on Windows
+  /// `AppLifecycleState.resumed` fires on every window focus, so "every attach"
+  /// means every time the window is clicked.
+  ///
+  /// It is deliberately NOT fixed here. The two candidate fixes both need their
+  /// own change and their own evidence: suppress the socket's opening replay on
+  /// a FIRST connect (a server-side signal, so both clients agree on what a
+  /// first connect is), or drop the HTTP replay and let the socket supply the
+  /// tail (it is eight times smaller, so this trades duplication for a much
+  /// shallower opening view). Skipping bytes on the wrong one of the two paths
+  /// deletes the tail instead of de-duplicating it, which is strictly worse.
   Future<void> _attach() async {
     final session = _session;
     if (session == null) return;
@@ -1550,7 +1562,15 @@ class _SessionScreenState extends State<SessionScreen>
 
     // A reconnect replays from scratch, so any deepening still queued against
     // the OLD window would prepend history that no longer lines up with it.
+    //
+    // Cancelling the TIMER is not enough, and that gap fired on every app
+    // resume — constantly, on a phone. A `_deepenOnce` already awaiting its
+    // response cannot be cancelled: it came back and wrote its own offset over
+    // the freshly-reset one, leaving a hole in history and restarting the walk
+    // from the wrong place. `reset()` starts a new generation, and the stale
+    // response is discarded when it names the old one (#167).
     _deepenTimer?.cancel();
+    _sbWindow.reset();
     _terminal.buffer.clear();
     _terminal.buffer.setCursor(0, 0);
     try {
@@ -1574,9 +1594,9 @@ class _SessionScreenState extends State<SessionScreen>
       );
       if (!mounted) return;
       // #127 — remember where the loaded window starts, so the background
-      // deepening below knows what "older" means.
-      _sbEarliest = chunk.offset;
-      _sbExhausted = chunk.offset <= 0;
+      // deepening below knows what "older" means. The text matters as much as
+      // the offset: it is the anchor the next step cuts its slice at (#167).
+      _sbWindow.noteReplay(data: chunk.data, offset: chunk.offset);
       if (chunk.data.isNotEmpty) {
         // #81: guarded — xterm 4.0.0 throws on a real Codex stream, and an
         // unguarded throw here kills the lens outright (blank terminal).
@@ -1624,6 +1644,24 @@ class _SessionScreenState extends State<SessionScreen>
     _reconnectedSub = connection.reconnected.listen((_) {
       _terminal.buffer.clear();
       _terminal.buffer.setCursor(0, 0);
+      // ...and abandon the backward walk with it (#167). The socket replay is
+      // the server's own tail slice (`scrollbackReplayLimit`, 32 KB by default)
+      // and it is much SHORTER than the 256 KB the HTTP attach replayed, so from
+      // here the anchor describes text that is no longer on screen and
+      // `earliest` names a position far above where the screen now starts.
+      // Deepening from there prepends genuinely older text over a gap of
+      // everything in between — a silent hole, and the one failure this module
+      // refuses to produce anywhere else.
+      //
+      // Re-ANCHORING on the socket replay instead (which would keep deepening
+      // alive) is deliberately not attempted: the replay's offset is not on the
+      // wire, and deriving it from `total` would need the two sanitiser passes
+      // — whole-buffer for HTTP, tail-slice for the socket — to agree byte for
+      // byte across the tail cut, which is exactly the kind of unmeasured
+      // assumption this repo has been burned by. Until it is measured against a
+      // real reconnect, history stops deepening after a reconnect and resumes
+      // on the next attach. Less history, never history that lies.
+      _sbWindow.reset();
     });
     _connectedSub = connection.connected.listen(_onConnectedChanged);
   }
@@ -2924,7 +2962,7 @@ class _SessionScreenState extends State<SessionScreen>
   /// Queues the next background deepening step (#127).
   void _scheduleDeepen() {
     _deepenTimer?.cancel();
-    if (_sbExhausted || !mounted) return;
+    if (_sbWindow.exhausted || !mounted) return;
     _deepenTimer = Timer(kScrollbackDeepenGap, _deepenOnce);
   }
 
@@ -2941,48 +2979,70 @@ class _SessionScreenState extends State<SessionScreen>
   /// (different width would re-wrap it), and that scratch is then dropped on the
   /// floor: `prependAll` re-owns the lines, and a line reachable from two buffers
   /// is #81's defect exactly.
+  ///
+  /// WHICH bytes are older is decided by [ScrollbackWindow], not here — the
+  /// server's buffer trims its head between requests, so the answer is a content
+  /// question rather than an arithmetic one (#167). Everything below is
+  /// plumbing.
   Future<void> _deepenOnce() async {
     final session = _session;
     final api = _api;
-    if (!mounted || _deepening || _sbExhausted || session == null || api == null) {
-      return;
-    }
-    if (_sbEarliest <= 0) {
-      _sbExhausted = true;
+    if (!mounted || _deepening || session == null || api == null) {
       return;
     }
     if (_terminal.buffer.lines.length >= kScrollbackMaxLines) {
-      _sbExhausted = true;
+      _sbWindow.stop();
       return;
     }
+    final request = _sbWindow.nextRequest();
+    if (request == null) return;
     _deepening = true;
     try {
-      final start = scrollbackTailOffset(_sbEarliest, kScrollbackDeepenBytes);
       final chunk = await api.scrollback(
         session.id,
-        offset: start,
-        limit: _sbEarliest - start,
+        offset: request.offset,
+        limit: request.limit,
       );
       if (!mounted) return;
-      _sbEarliest = chunk.offset;
-      if (chunk.offset <= 0) _sbExhausted = true;
-      if (chunk.data.isEmpty) return;
+      // Empty when this slice adds nothing — including when an attach re-armed
+      // the walk while this request was in flight, in which case the response
+      // belongs to a history that is no longer on screen. The walk stays where
+      // it is until `commit` below: an early return here must cost a re-fetch,
+      // never a hole (#167).
+      final harvest = _sbWindow.consume(
+        data: chunk.data,
+        offset: chunk.offset,
+        generation: request.generation,
+      );
+      if (harvest.text.isEmpty) {
+        _sbWindow.commit(harvest);
+        return;
+      }
 
       final scratch = Terminal(maxLines: kScrollbackMaxLines);
       scratch.resize(_lastCols > 0 ? _lastCols : 80, _lastRows > 1 ? _lastRows : 24);
-      safeTerminalWrite(scratch, chunk.data);
+      safeTerminalWrite(scratch, harvest.text);
 
+      // Everything except the trailing BLANK lines the scratch terminal's own
+      // viewport contributes; they would show up as a gap between the older text
+      // and what is already here. The viewport itself is KEPT — dropping it
+      // deletes real history at every non-repainting seam, which is a far worse
+      // trade than the repainted frame it would have saved. See
+      // [olderLineLimit] for the measurement.
+      final lines = scratch.buffer.lines;
+      final keep = olderLineLimit(
+          lines.length, (i) => lines[i].getText().trim().isEmpty);
+      if (keep <= 0) {
+        // Nothing but blanks: committing loses no history and lets the walk
+        // step past it instead of asking for the same range forever.
+        _sbWindow.commit(harvest);
+        return;
+      }
       final harvested = <BufferLine>[];
-      for (var i = 0; i < scratch.buffer.lines.length; i++) {
-        harvested.add(scratch.buffer.lines[i]);
+      for (var i = 0; i < keep; i++) {
+        harvested.add(lines[i]);
       }
-      // The scratch terminal's own viewport contributes trailing blanks; they
-      // would show up as a gap between the older text and what is already here.
-      while (harvested.isNotEmpty &&
-          harvested.last.getText().trim().isEmpty) {
-        harvested.removeLast();
-      }
-      if (harvested.isEmpty) return;
+      _sbWindow.commit(harvest);
 
       final hadClients = _scrollController.hasClients;
       final beforeExtent =
@@ -3004,8 +3064,10 @@ class _SessionScreenState extends State<SessionScreen>
       }
     } catch (_) {
       // Best effort: a failed step just means the history stays as deep as it
-      // already is. Stop rather than hammer a server that is refusing.
-      _sbExhausted = true;
+      // already is. Stop rather than hammer a server that is refusing — but only
+      // the walk this request belongs to: a failure arriving after an attach
+      // re-armed the walk must not silently kill the new one.
+      if (request.generation == _sbWindow.generation) _sbWindow.stop();
     } finally {
       _deepening = false;
       _scheduleDeepen();
