@@ -50,6 +50,37 @@ Color usageColor(ThemeData theme, int pct, {required bool weekly}) {
   return theme.colorScheme.primary;
 }
 
+/// Memory headroom pressure (#165) — the SINGLE source of truth for the free-RAM
+/// colour, keyed on the ABSOLUTE byte count and never on the percentage.
+///
+/// The percentage cannot carry this judgement: 98% used on a 32 GB box leaves
+/// 0.65 GB and is unusable, while 98% on a very large box still leaves room to
+/// work. Above roughly 90% the percentage has almost no dynamic range left, and
+/// picking a box is the entire purpose of the readout.
+///
+/// **PROVISIONAL.** The only observations behind these numbers are 0.65 GB (a
+/// box that was effectively unusable) and 12.7 GB and up (boxes that were fine),
+/// with NOTHING in between — so they are a guess, recorded as one rather than
+/// dressed up as measured. 2 GB is picked because it is roughly "can a build
+/// even start here" (a Gradle daemon defaults to `-Xmx2048m`). Revisit against a
+/// box observed in the middle of the range; do not quietly re-tune on a hunch.
+const int kHeadroomRedBytes = 2 * 1024 * 1024 * 1024;
+const int kHeadroomAmberBytes = 4 * 1024 * 1024 * 1024;
+
+/// Error below [kHeadroomRedBytes], amber below [kHeadroomAmberBytes], and
+/// `null` — meaning "inherit, no colour" — above it or when unknown.
+///
+/// Neutral rather than green on a healthy box, deliberately: this readout sits
+/// on one dense line beside CPU and web-terminal's own footprint, and a line
+/// where several things are always coloured is a line nobody reads. A dash is
+/// not a warning either, so unknown is never tinted.
+Color? headroomColor(ThemeData theme, int? availBytes) {
+  if (availBytes == null || availBytes < 0) return null;
+  if (availBytes < kHeadroomRedBytes) return theme.colorScheme.error;
+  if (availBytes < kHeadroomAmberBytes) return kWarnAmber;
+  return null;
+}
+
 /// A byte count for a glance: `1.4 GB`, `683 MB`, or `—` when unknown (#152).
 ///
 /// Deliberately coarse. These figures come from a sampled process tree and are

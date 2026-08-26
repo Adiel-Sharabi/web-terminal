@@ -19,6 +19,15 @@ import 'format_utils.dart';
 /// throw that away — making the least-measurable server look like the emptiest,
 /// which is the wrong place to start work.
 
+/// A paging rate for a glance — `951`, `2.6` — with no unit, so the same number
+/// can carry `/s` in the readout and `page reads/sec` in the tooltip. Kept to
+/// one decimal so a healthy box's 2.6 stays distinguishable from a calm 0;
+/// rounding it away would erase the low end of the only pressure signal here.
+String _rateShort(double v) {
+  final r = (v * 10).round() / 10;
+  return r == r.roundToDouble() ? '${r.round()}' : '$r';
+}
+
 /// The machine's CPU/memory plus web-terminal's own footprint, under a server
 /// group header. Renders nothing at all while the view is off.
 class ServerResourceLine extends StatelessWidget {
@@ -40,30 +49,68 @@ class ServerResourceLine extends StatelessWidget {
           color: theme.colorScheme.onSurfaceVariant,
           fontFeatures: const [FontFeature.tabularFigures()],
         );
-        final parts = <String>[];
+        // Spans rather than one string, because #165 colours exactly ONE segment —
+        // the absolute headroom — and leaves everything around it neutral. A line
+        // where several readings can turn amber is a line nobody reads.
+        final parts = <InlineSpan>[];
+        void add(String text, {Color? color}) {
+          if (parts.isNotEmpty) parts.add(const TextSpan(text: '  ·  '));
+          parts.add(TextSpan(
+            text: text,
+            style: color == null ? null : TextStyle(color: color),
+          ));
+        }
+
         String tip;
 
         if (report == null) {
-          parts.add('CPU —  RAM —');
+          add('CPU —  RAM —');
           tip = 'This server has not answered with resource detail';
         } else {
           final m = report.machine;
-          parts.add('CPU ${formatPctShort(m?.cpuPct)}');
-          if (m?.memUsedPct != null) {
-            parts.add('RAM ${m!.memUsedPct}% '
+          add('CPU ${formatPctShort(m?.cpuPct)}');
+          // #165 — headroom LEADS. The percentage stays as context (it is still the
+          // right reading below ~90%, where it has range), but it no longer carries
+          // the judgement, and the old used/total pair is gone: two byte figures plus
+          // a percentage is three numbers competing for one glance.
+          final avail = m?.memAvailBytes;
+          if (avail != null && m?.memTotalBytes != null) {
+            add(
+              'RAM ${formatBytesShort(avail)} free of ${formatBytesShort(m!.memTotalBytes)}'
+              '${m.memUsedPct == null ? '' : ' (${m.memUsedPct}%)'}',
+              color: headroomColor(theme, avail),
+            );
+          } else if (m?.memUsedPct != null) {
+            // A server too old to report headroom says what it DID send, rather than
+            // blanking the row — and never "0 B free", which would condemn a box for
+            // running an older build.
+            add('RAM ${m!.memUsedPct}% '
                 '(${formatBytesShort(m.memUsedBytes)} / ${formatBytesShort(m.memTotalBytes)})');
           } else {
-            parts.add('RAM —');
+            add('RAM —');
           }
+          // The pressure figure, rendered only when it was actually measured: 0/s is
+          // what a healthy box reads, so printing it for one we could not measure is a
+          // claim, not a reading. No colour tier — the only data behind a threshold
+          // would be one bad box against two good ones, which is the guess #165
+          // refused to make silently.
+          final reads = m?.memPageReadsPerSec;
+          final pagingTip = reads == null || reads < 0
+              ? ''
+              : 'Paging: ${_rateShort(reads)} page reads/sec off disk. A high rate means '
+                  'this box is short of memory and is re-reading pages it had to '
+                  'evict.\n\n';
+          if (reads != null && reads >= 0) add('paging ${_rateShort(reads)}/s');
+
           final win = (report.windowMs / 1000).round();
           if (!report.samplingOk) {
-            parts.add('WT —');
-            tip = 'This server cannot measure processes'
+            add('WT —');
+            tip = '${pagingTip}This server cannot measure processes'
                 '${report.samplingReason == null ? '' : ' (${report.samplingReason})'}';
           } else {
             final wt = report.webTerminal;
-            parts.add('WT ${formatPctShort(wt?.cpuPct)} · ${formatBytesShort(wt?.rssBytes)}');
-            tip = 'web-terminal itself — monitor, worker, web and every session below them:\n'
+            add('WT ${formatPctShort(wt?.cpuPct)} · ${formatBytesShort(wt?.rssBytes)}');
+            tip = '${pagingTip}web-terminal itself — monitor, worker, web and every session below them:\n'
                 '${formatPctShort(wt?.cpuPct)} of the machine over ${win < 1 ? 1 : win}s, '
                 '${formatBytesShort(wt?.rssBytes)} across ${wt?.procCount ?? 0} processes.\n'
                 'Whatever is left between that and the machine figure is something else on this box.';
@@ -74,7 +121,7 @@ class ServerResourceLine extends StatelessWidget {
           padding: const EdgeInsets.only(left: 20, bottom: 2),
           child: Tooltip(
             message: tip,
-            child: Text(parts.join('  ·  '), style: style),
+            child: Text.rich(TextSpan(children: parts), style: style),
           ),
         );
       },

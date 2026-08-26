@@ -66,6 +66,26 @@ test.describe('memoryReading', () => {
     expect(m.usedPct).toBeGreaterThanOrEqual(0);
     expect(m.usedPct).toBeLessThanOrEqual(100);
   });
+
+  // --- #165: headroom is the number the decision is actually made on ---------------
+  test('reports availBytes — the number a percentage saturates away from', () => {
+    // The defect #165 exists for: 92% -> 98% is six points while the headroom under it
+    // goes 2.5 GB -> 0.65 GB, the difference between "fine" and "unusable". The absolute
+    // figure has to be on the wire; it cannot be recovered from a rounded percentage.
+    const m = memoryReading();
+    expect(typeof m.availBytes).toBe('number');
+    expect(m.availBytes).toBeGreaterThan(0);
+    expect(m.availBytes).toBeLessThanOrEqual(m.totalBytes);
+  });
+
+  test('availBytes is the complement of usedBytes, to the byte', () => {
+    // Not a second measurement with its own drift: `usedBytes` is DERIVED as
+    // total - free on this very reading, so the two must agree exactly. If they ever
+    // stop agreeing, one of them was sampled at a different instant than the other and
+    // the readout would show a box with memory that is neither used nor free.
+    const m = memoryReading();
+    expect(m.usedBytes + m.availBytes).toBe(m.totalBytes);
+  });
 });
 
 test.describe('Sampler', () => {
@@ -76,6 +96,16 @@ test.describe('Sampler', () => {
     expect(r.memory.totalBytes).toBeGreaterThan(0);
     expect(r.windowMs).toBe(SAMPLE_INTERVAL_MS);
     expect(typeof r.ts).toBe('number');
+  });
+
+  test('#165 — headroom rides the ALWAYS-ON sampler, not the on-demand snapshot', () => {
+    // The whole point: availBytes is os.freemem(), pure JS and free, so it is present on
+    // the reading that /api/version and the cluster merge already carry. Putting it behind
+    // GET /api/resources would make the primary readout unavailable on exactly the servers
+    // nobody has opened the per-session panel for — which is every server, most of the time.
+    const r = new Sampler().read();
+    expect(typeof r.memory.availBytes).toBe('number');
+    expect(r.memory.availBytes).toBeGreaterThan(0);
   });
 
   test('one tick() seeds the sample but still cannot produce a delta -> cpuPct stays null', () => {
@@ -99,12 +129,12 @@ test.describe('Sampler', () => {
 
 test.describe('sanitizeResources', () => {
   test('accepts a well-formed reading verbatim', () => {
-    const good = { cpuPct: 42, windowMs: 5000, ts: Date.now(), memory: { usedBytes: 100, totalBytes: 200, usedPct: 50 } };
+    const good = { cpuPct: 42, windowMs: 5000, ts: Date.now(), memory: { usedBytes: 100, totalBytes: 200, availBytes: 100, usedPct: 50 } };
     expect(sanitizeResources(good)).toEqual(good);
   });
 
   test('accepts a null cpuPct (the honest "not yet known" reading)', () => {
-    const r = { cpuPct: null, windowMs: 5000, ts: Date.now(), memory: { usedBytes: 100, totalBytes: 200, usedPct: null } };
+    const r = { cpuPct: null, windowMs: 5000, ts: Date.now(), memory: { usedBytes: 100, totalBytes: 200, availBytes: 100, usedPct: null } };
     expect(sanitizeResources(r)).toEqual(r);
   });
 
@@ -136,12 +166,63 @@ test.describe('sanitizeResources', () => {
   });
 });
 
+// --- #165: a PEER's headroom -------------------------------------------------------
+// Same rule as every other field here, applied to the one the readout now LEADS with:
+// an unearned number is worse than a dash, because this is the figure someone picks a
+// box on.
+test.describe('sanitizeResources — availBytes (#165)', () => {
+  const base = { cpuPct: 12, windowMs: 5000, ts: 1 };
+  const withMem = (memory) => ({ ...base, memory });
+
+  test('a peer too old to report headroom reads null, never a fabricated 0', () => {
+    // A 0 here says "this box has no memory left" about a box that simply predates the
+    // field — the exact inversion the whole feature exists to prevent, on the server the
+    // user is most likely to reach for.
+    const out = sanitizeResources(withMem({ usedBytes: 100, totalBytes: 200, usedPct: 50 }));
+    expect(out).not.toBeNull();
+    expect(out.memory.availBytes).toBeNull();
+  });
+
+  test('an explicit null passes through as null', () => {
+    const out = sanitizeResources(withMem({ usedBytes: 100, totalBytes: 200, availBytes: null, usedPct: 50 }));
+    expect(out.memory.availBytes).toBeNull();
+  });
+
+  test('a valid headroom is carried through untouched', () => {
+    const out = sanitizeResources(withMem({ usedBytes: 100, totalBytes: 200, availBytes: 100, usedPct: 50 }));
+    expect(out.memory.availBytes).toBe(100);
+  });
+
+  test('rejects a negative headroom', () => {
+    expect(sanitizeResources(withMem({ usedBytes: 100, totalBytes: 200, availBytes: -1, usedPct: 50 }))).toBeNull();
+  });
+
+  test('rejects a non-finite or wrong-typed headroom', () => {
+    expect(sanitizeResources(withMem({ usedBytes: 1, totalBytes: 2, availBytes: NaN, usedPct: 50 }))).toBeNull();
+    expect(sanitizeResources(withMem({ usedBytes: 1, totalBytes: 2, availBytes: Infinity, usedPct: 50 }))).toBeNull();
+    expect(sanitizeResources(withMem({ usedBytes: 1, totalBytes: 2, availBytes: '100', usedPct: 50 }))).toBeNull();
+  });
+
+  test('rejects headroom larger than the machine — cross-field, not per-field', () => {
+    // 1e300 is a perfectly well-formed non-negative finite number. Only its RELATIONSHIP
+    // to totalBytes is impossible, so a per-field validator would hand the sidebar
+    // "1e291 GB free" and it would render it as fact.
+    expect(sanitizeResources(withMem({ usedBytes: 1, totalBytes: 200, availBytes: 1e300, usedPct: 50 }))).toBeNull();
+    expect(sanitizeResources(withMem({ usedBytes: 1, totalBytes: 200, availBytes: 201, usedPct: 50 }))).toBeNull();
+  });
+
+  test('headroom exactly equal to total is legitimate (an empty machine)', () => {
+    const out = sanitizeResources(withMem({ usedBytes: 0, totalBytes: 200, availBytes: 200, usedPct: 0 }));
+    expect(out.memory.availBytes).toBe(200);
+  });
+});
+
 // --- cross-field validation of a PEER's memory reading -----------------------
 // Each field below is individually well-formed; only the RELATIONSHIP between two
 // of them is impossible. A per-field validator passes this, which is exactly why
 // the guard has to be cross-field.
 test.describe('sanitizeResources — cross-field memory sanity', () => {
-  const ok = { cpuPct: 12, windowMs: 5000, ts: 1, memory: { usedBytes: 4, totalBytes: 8, usedPct: 50 } };
+  const ok = { cpuPct: 12, windowMs: 5000, ts: 1, memory: { usedBytes: 4, totalBytes: 8, availBytes: 4, usedPct: 50 } };
 
   test('a well-formed reading still passes', () => {
     expect(sanitizeResources(ok)).toEqual(ok);
@@ -153,7 +234,7 @@ test.describe('sanitizeResources — cross-field memory sanity', () => {
   });
 
   test('used exactly equal to total is legitimate (a full machine)', () => {
-    const full = { ...ok, memory: { usedBytes: 8, totalBytes: 8, usedPct: 100 } };
+    const full = { ...ok, memory: { usedBytes: 8, totalBytes: 8, availBytes: 0, usedPct: 100 } };
     expect(sanitizeResources(full)).toEqual(full);
   });
 });

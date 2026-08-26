@@ -136,3 +136,104 @@ test.describe('Sidebar UI: resources view', () => {
     expect(out.offline).toBe('');
   });
 });
+
+// --- #165: the readout leads with HEADROOM ------------------------------------------
+// "92%" said nothing while the box was unusable at 0.65 GB free. The number the choice
+// is actually made on is how much room is left, so that is the number that leads; the
+// percentage stays as context, and the colour is keyed on the absolute figure because a
+// percentage has almost no dynamic range left above ~90%.
+test.describe('Sidebar UI: headroom and pressure (#165)', () => {
+  test('leads with free bytes, keeps the percentage secondary', async ({ page }) => {
+    await loginPage(page);
+    await page.goto(BASE + '/');
+    const html = await page.evaluate(([m]) => resourcesHtml({
+      online: true, url: 'http://a', capabilities: ['resources', 'session-resources'],
+      resources: { cpuPct: 12, memory: m, windowMs: 5000 },
+    }), [{ usedBytes: 20401094656, totalBytes: 34047594496, availBytes: 13646499840, usedPct: 60 }]);
+    expect(html).toContain('12.7G free of 31.7G');
+    // The percentage is still there — demoted, not deleted. It is the right reading below
+    // ~90%, where it still has range.
+    expect(html).toContain('60%');
+    // And the old used/total pair is gone: two byte figures plus a percentage on a 9px
+    // line is three numbers competing for one glance.
+    expect(html).not.toContain('19.0G/31.7G');
+  });
+
+  test('a peer too old to report headroom falls back — it never shows "0.0G free"', async ({ page }) => {
+    await loginPage(page);
+    await page.goto(BASE + '/');
+    const html = await page.evaluate(() => resourcesHtml({
+      online: true, url: 'http://a', capabilities: ['resources', 'session-resources'],
+      resources: { cpuPct: 12, memory: { usedBytes: 20401094656, totalBytes: 34047594496, availBytes: null, usedPct: 60 }, windowMs: 5000 },
+    }));
+    // No headroom READING is invented (the container tooltip may still name the field).
+    expect(html).not.toContain('free of');
+    expect(html).not.toContain('0.0G');
+    // It still says what it DOES know, rather than blanking the whole row.
+    expect(html).toContain('60%');
+  });
+
+  test('colour is keyed on the ABSOLUTE headroom, never on the percentage', async ({ page }) => {
+    await loginPage(page);
+    await page.goto(BASE + '/');
+    const out = await page.evaluate(() => {
+      const GB = 1024 * 1024 * 1024;
+      const mk = (availGB, totalGB, pct) => resourcesHtml({
+        online: true, url: 'http://a', capabilities: ['resources', 'session-resources'],
+        resources: {
+          cpuPct: 12, windowMs: 5000,
+          memory: {
+            usedBytes: (totalGB - availGB) * GB, totalBytes: totalGB * GB,
+            availBytes: availGB * GB, usedPct: pct,
+          },
+        },
+      });
+      return {
+        // The reported box: 98% used, 0.65 GB left. Unusable.
+        dying: mk(0.65, 32, 98),
+        // A big box at the SAME percentage with real room left. The percentage cannot
+        // tell these apart; the headroom can.
+        bigBoxSamePct: mk(12.7, 640, 98),
+        amber: mk(3, 32, 91),
+        fine: mk(12.7, 32, 60),
+      };
+    });
+    expect(out.dying).toContain('u-hot');
+    expect(out.bigBoxSamePct).not.toContain('u-hot');
+    expect(out.bigBoxSamePct).not.toContain('u-warn');
+    expect(out.amber).toContain('u-warn');
+    expect(out.amber).not.toContain('u-hot');
+    expect(out.fine).not.toContain('u-warn');
+    expect(out.fine).not.toContain('u-hot');
+  });
+
+  test('the paging rate renders beside memory, and a null one renders nothing', async ({ page }) => {
+    await loginPage(page);
+    await page.goto(BASE + '/');
+    const out = await page.evaluate(() => {
+      const report = (pageReadsPerSec) => ({
+        sampling: { ok: true, windowMs: 1400, ts: 1 },
+        machine: { cpuPct: 12, memory: { usedBytes: 1, totalBytes: 2, availBytes: 1, usedPct: 50, pageReadsPerSec } },
+        webTerminal: { cpuPct: 1.2, rssBytes: 1503238553, procCount: 27, topName: 'node.exe' },
+        sessions: {},
+      });
+      resourceView = true;
+      resourceData.set('http://a', report(951));
+      const busy = footprintText('http://a');
+      resourceData.set('http://a', report(null));
+      const unknown = footprintText('http://a');
+      resourceData.set('http://a', report(0));
+      const calm = footprintText('http://a');
+      resourceView = false;
+      resourceData.clear();
+      return { busy: busy[0], busyTip: busy[1], unknown: unknown[0], calm: calm[0] };
+    });
+    expect(out.busy).toContain('paging 951/s');
+    // A measured zero is a real answer and says so.
+    expect(out.calm).toContain('paging 0/s');
+    // An unmeasurable one says nothing at all rather than claiming the box is calm.
+    expect(out.unknown).not.toContain('paging');
+    // The label is the glance; the tooltip carries what it means.
+    expect(out.busyTip).toContain('page reads');
+  });
+});
