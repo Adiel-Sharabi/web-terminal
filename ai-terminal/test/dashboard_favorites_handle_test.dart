@@ -12,13 +12,15 @@
 // (`SessionRepository.primeFromCache`), so there is no network, no fake client,
 // and no reimplementation of anything under test.
 //
-// **One test, deliberately.** [SessionRepository] and [ServerStore] are
-// singletons, and their init futures are created inside the FakeAsync zone of
-// whichever test touches them first. Awaiting such a future from a SECOND
-// `testWidgets` hangs outright — its completion callback is scheduled on a zone
-// that no longer runs — so a second test here would not fail, it would sit
-// until the runner gave up. Keep this file to one test, or give the next one
-// its own file.
+// **ONE TEST PER FILE, and it is enforced below — see [_refuseASecondTest].**
+// [SessionRepository] and [ServerStore] are singletons, and their init futures
+// are created inside the FakeAsync zone of whichever test touches them first.
+// Awaiting such a future from a SECOND `testWidgets` hangs outright — its
+// completion callback is scheduled on a zone that no longer runs — so a second
+// test here would not fail, it would sit until the runner gave up. That is the
+// worst failure shape there is: a ten-minute timeout with no message, nothing
+// named, and no hint that the test itself is fine and the FILE is the problem.
+// A comment does not stop it, so `setUp` does. Give the next test its own file.
 import 'dart:convert';
 
 import 'package:flutter/foundation.dart';
@@ -69,7 +71,28 @@ Future<void> _settleSheet(WidgetTester tester) async {
   await tester.pump(const Duration(milliseconds: 400));
 }
 
+/// Fails the SECOND test in this file immediately, with the reason, instead of
+/// letting it hang to the runner's timeout (see the header). Deliberately a
+/// `setUp` rather than a lint or a comment: it runs before the offending test's
+/// body, so the singleton futures it would await are never reached.
+void _refuseASecondTest() {
+  var started = 0;
+  setUp(() {
+    if (++started > 1) {
+      fail(
+        'dashboard_favorites_handle_test.dart must hold exactly ONE test: '
+        'SessionRepository/ServerStore are singletons whose init futures are '
+        'bound to the FakeAsync zone of the first test, so a second one here '
+        'HANGS to the runner timeout rather than failing. Put the new test in '
+        'its own file.',
+      );
+    }
+  });
+}
+
 void main() {
+  _refuseASecondTest();
+
   testWidgets('touch: the dashboard gives a pinned row the app drag handle, '
       'and holding it opens no actions sheet', (tester) async {
     SharedPreferences.setMockInitialValues({

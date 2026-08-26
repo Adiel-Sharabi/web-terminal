@@ -551,7 +551,8 @@ class _DashboardScreenState extends State<DashboardScreen> {
 /// drift between the two.
 ///
 /// [SessionCard] renders it in a trailing strip that is a SIBLING of the card's
-/// `InkWell`, never a descendant — see [SessionCard.dragHandle]. That is what
+/// `InkWell` — painted OVER it, never inserted beside it — see
+/// [SessionCard.dragHandle] and `SessionCard._withDragHandle`. That is what
 /// makes an IMMEDIATE drag recognizer safe here: with no long-press armed on the
 /// handle's own pixels, press-and-move drags AND press-hold-then-move drags,
 /// because [ImmediateMultiDragGestureRecognizer] has no deadline of its own — it
@@ -563,6 +564,12 @@ class _DashboardScreenState extends State<DashboardScreen> {
 /// transparent [ColoredBox] is what makes that padded box hit-testable at all
 /// (it is `HitTestBehavior.opaque` and paints nothing) — together they give the
 /// glyph a 48dp-tall touch target without moving it or growing the row.
+///
+/// Built to [SessionCard.dragHandleGap] + [SessionCard.dragHandleGlyph] rather
+/// than to two literals, because the card's title row reserves exactly that sum
+/// ([SessionCard.dragHandleWidth]) for the strip this is painted into. The
+/// inset is `EdgeInsetsDirectional`: the strip follows text direction, so the
+/// gap has to sit between the glyph and the ⋮ in RTL as well as LTR.
 Widget? buildReorderDragHandle(BuildContext context, int? index) {
   if (index == null) return null;
   return ReorderableDragStartListener(
@@ -570,14 +577,14 @@ Widget? buildReorderDragHandle(BuildContext context, int? index) {
     child: ColoredBox(
       color: Colors.transparent,
       child: Padding(
-        padding: const EdgeInsets.only(
-          left: 4,
+        padding: const EdgeInsetsDirectional.only(
+          start: SessionCard.dragHandleGap,
           top: SessionCard.dragHandleInset,
           bottom: SessionCard.dragHandleInset,
         ),
         child: Icon(
           Icons.drag_handle,
-          size: 18,
+          size: SessionCard.dragHandleGlyph,
           color: Theme.of(context).colorScheme.onSurfaceVariant,
         ),
       ),
