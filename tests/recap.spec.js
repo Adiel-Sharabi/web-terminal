@@ -10,6 +10,8 @@ const { test, expect } = require('@playwright/test');
 const {
   buildRecap,
   classifyUserTurn,
+  isHumanPrompt,
+  findHumanPromptIndex,
   condense,
   toolTally,
   summariseTasks,
@@ -256,5 +258,60 @@ test.describe('buildRecap', () => {
     const r = buildRecap([user('word '.repeat(300))]);
     expect(r.prompt.truncated).toBe(true);
     expect(r.prompt.text.length).toBeLessThan(420);
+  });
+});
+
+// --- #163: a skill body must never be reported as "your last prompt" ----------
+// The failure this module exists to prevent, arriving through the one shape it
+// could not see. A skill is expanded into a `role:user` turn carrying the whole
+// SKILL.md and NO wrapper, so every content signature misses it and the recap
+// card confidently announced 142 KB of skill instructions as the user's sentence.
+// The transcript record says otherwise structurally (`isMeta: true`), and
+// lib/transcript.js now publishes that verdict on the turn as `userKind`.
+const SKILL_BODY =
+  'Base directory for this skill: /skills/example-skill\n\n# Example skill\n\nDo the thing.';
+// The measured opening that a `Base directory` sniff would miss — kept here too
+// so a regression into content-sniffing fails the recap as well as the rule.
+const SKILL_BODY_HEADING = '# Frontend Design\n\nApproach this as the design lead.';
+const meta = (text, ts = null) =>
+  ({ role: 'user', text, toolUses: [], ts, userKind: USER_KINDS.META });
+
+test.describe('#163 — skill injections and the last prompt', () => {
+  test('the real typed prompt survives underneath a pile of skill bodies', () => {
+    const r = buildRecap([
+      user('rewrite the deploy script', '2026-08-26T09:00:00Z'),
+      asst('on it'),
+      meta(SKILL_BODY, '2026-08-26T09:01:00Z'),
+      meta(SKILL_BODY_HEADING, '2026-08-26T09:02:00Z'),
+    ]);
+    expect(r.prompt.text).toBe('rewrite the deploy script');
+    expect(r.prompt.at).toBe('2026-08-26T09:00:00Z');
+  });
+
+  test('with nothing but skill bodies the recap reports NO prompt', () => {
+    // Absent beats wrong. A null prompt is a normal, honest answer here.
+    const r = buildRecap([meta(SKILL_BODY), asst('done'), meta(SKILL_BODY_HEADING)]);
+    expect(r.prompt).toBeNull();
+  });
+
+  test('the scan stop-condition agrees with the build — no false stop', () => {
+    // findHumanPromptIndex is what the /recap route pages against; if it stops on
+    // a turn buildRecap then rejects, the route pages forever and reports nothing.
+    const turns = [user('the real one'), meta(SKILL_BODY), meta(SKILL_BODY_HEADING)];
+    expect(findHumanPromptIndex(turns)).toBe(0);
+    expect(isHumanPrompt(turns[1])).toBe(false);
+  });
+
+  test('a turn with no userKind falls back to the text rule (Codex, old pages)', () => {
+    // Only the Claude adapter reads isMeta; a Codex rollout turn carries no field
+    // at all and must behave exactly as it did before.
+    expect(isHumanPrompt(user('fix the login bug'))).toBe(true);
+    expect(isHumanPrompt(user(SLASH_COMPACT))).toBe(false);
+    expect(isHumanPrompt({ ...user('fix it'), userKind: 'not-a-kind' })).toBe(true);
+  });
+
+  test('an ordinary prompt is still reported — the guard', () => {
+    const r = buildRecap([user('add a recap icon to the sidebar', '2026-08-26T10:00:00Z')]);
+    expect(r.prompt.text).toBe('add a recap icon to the sidebar');
   });
 });

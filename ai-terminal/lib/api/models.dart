@@ -1188,6 +1188,24 @@ class TranscriptTurn {
   /// no optimistic echo may ever match it.
   final String? typedText;
 
+  /// How the server classified this `role:user` turn — `human`, `command`,
+  /// `teammate`, `system` or `meta` (`lib/user-turn.js`, the authority for the
+  /// rule). `null` for an assistant turn, for a Codex turn (whose adapter
+  /// publishes no verdict), and for any server older than #163.
+  ///
+  /// **It exists because one class of turn is undecidable from the text.** A
+  /// skill is expanded into a `role:user` turn carrying the whole SKILL.md and no
+  /// wrapper at all, so every content signature — here and on the server — misses
+  /// it and it reads as a prompt. Only the transcript record's `isMeta` flag
+  /// separates it from one, and only the server sees the record. Rather than
+  /// grow a fourth signature in this file's [classifyUserTurn] (already a weaker
+  /// twin of the server's, and the drift CLAUDE.md tracks), the server publishes
+  /// its verdict and this client reads it.
+  ///
+  /// `null` is NOT a kind: it means "no verdict was sent", and the local
+  /// classifier decides exactly as it did before.
+  final String? userKind;
+
   /// Total context tokens carried into this assistant turn's request (fresh
   /// input + both cache tiers), or `null` for user turns / turns with no usage.
   /// Used to derive an approximate ctx% when the live status line isn't posting.
@@ -1200,6 +1218,7 @@ class TranscriptTurn {
     required this.toolUses,
     required this.ts,
     this.typedText,
+    this.userKind,
     this.ctxTokens,
   });
 
@@ -1221,6 +1240,9 @@ class TranscriptTurn {
       // (#149); see the field's doc comment for why that distinction is the
       // whole backward-compatibility story.
       typedText: json['typedText']?.toString(),
+      // Same absent-stays-absent rule as typedText: a missing verdict must stay
+      // distinguishable from any verdict (#163).
+      userKind: json['userKind']?.toString(),
       ctxTokens: ct is num && ct > 0 ? ct.toInt() : null,
     );
   }

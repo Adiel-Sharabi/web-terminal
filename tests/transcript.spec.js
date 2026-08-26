@@ -257,7 +257,11 @@ test.describe('lib/transcript.parseTranscriptTurn', () => {
   });
 
   test('user turn with string content → text extracted', () => {
-    expect(parseTranscriptTurn(userLine('do the thing'))).toEqual({ role: 'user', text: 'do the thing', typedText: 'do the thing', toolUses: [], ts: null });
+    // `userKind` rides on every user turn (#163): the record's `isMeta` flag is
+    // visible only here, and both clients read the verdict rather than
+    // re-deriving it. 'human' is the whole-object guard that an ordinary prompt
+    // is untouched by that.
+    expect(parseTranscriptTurn(userLine('do the thing'))).toEqual({ role: 'user', text: 'do the thing', typedText: 'do the thing', userKind: 'human', toolUses: [], ts: null });
   });
 
   // #149 — the chat lens's optimistic "Queued" echo has to recognise its own

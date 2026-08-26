@@ -2677,4 +2677,291 @@ void main() {
       expect(find.textContaining('run the build'), findsOneWidget);
     },
   );
+
+  // --- #163: a skill body arrives as a `role:user` turn with NO wrapper -------
+  // Claude Code expands a skill into a user turn carrying the whole SKILL.md and
+  // wraps it in nothing at all, so `parseCommandInvocation` returns null and this
+  // file's `classifyUserTurn` matches no signature: the turn rendered
+  // right-aligned, in the primary accent, labelled "You" — 142 KB of skill
+  // instructions in the user's own bubble, burying whatever they actually typed.
+  //
+  // It is NOT fixable here, and that is the point of the fix: the only evidence
+  // is the transcript record's `isMeta` flag, which this client never sees. The
+  // server (lib/user-turn.js, the authority) reads it and publishes the verdict
+  // as `userKind`; this copy defers to it and keeps its own signatures only as
+  // the fallback for an older server. A fourth content signature here would be
+  // the third copy of a rule that already exists twice.
+  const kSkillBody =
+      'Base directory for this skill: /skills/example-skill\n\n'
+      '# Example skill\n\nSKILL_BODY_MARKER do the thing, then report.';
+  // The two measured openings that a `Base directory` sniff would MISS — kept so
+  // the fix can never regress into a content check.
+  const kSkillBodyHeading =
+      '# Frontend Design\n\nSKILL_HEADING_MARKER approach this as the design lead.';
+  const kSkillBodyProse =
+      'Review the current diff for correctness bugs and reuse cleanups. '
+      'SKILL_PROSE_MARKER at the given effort level.';
+
+  TranscriptPage pageOf(List<TranscriptTurn> turns) =>
+      TranscriptPage(messages: turns, cursor: null, hasMore: false);
+
+  Future<void> pumpTurns(WidgetTester tester, List<TranscriptTurn> turns) async {
+    await tester.pumpWidget(
+      _wrap(
+        ConversationView(
+          session: _session(),
+          fetchPage: (id, {before, limit}) async => pageOf(turns),
+        ),
+      ),
+    );
+    await tester.pumpAndSettle();
+  }
+
+  /// Every `Align` between [of] and the root. The turn card picks
+  /// `centerRight` for the human's own bubble and `centerLeft` for everything
+  /// incoming, so this is the honest read of "was it rendered as mine?".
+  Iterable<Alignment> alignmentsAround(WidgetTester tester, Finder of) => tester
+      .widgetList<Align>(find.ancestor(of: of, matching: find.byType(Align)))
+      .map((a) => a.alignment)
+      .whereType<Alignment>();
+
+  group('#163 userTurnKindFromWire', () {
+    test('every kind the server publishes maps to a render treatment', () {
+      expect(userTurnKindFromWire('human'), UserTurnKind.human);
+      expect(userTurnKindFromWire('teammate'), UserTurnKind.teammate);
+      expect(userTurnKindFromWire('system'), UserTurnKind.system);
+      expect(userTurnKindFromWire('meta'), UserTurnKind.meta);
+    });
+
+    test('`command` is the human\'s OWN turn — #32\'s chip lives on that branch', () {
+      // The server's classifier is strictly stronger than this one and names a
+      // slash command as its own kind. Mapping it anywhere but `human` would
+      // silently delete the #32 chip, which renders on the human branch.
+      expect(userTurnKindFromWire('command'), UserTurnKind.human);
+    });
+
+    test('absent or unknown falls back to the local classifier', () {
+      // null = an older server, or a Codex turn (its adapter publishes no
+      // verdict). Both must behave exactly as this file did before.
+      expect(userTurnKindFromWire(null), isNull);
+      expect(userTurnKindFromWire(''), isNull);
+      expect(userTurnKindFromWire('some-future-kind'), isNull);
+    });
+  });
+
+  group('#163 injectedTurnLabel', () {
+    test('names the turn by its own first line', () {
+      expect(injectedTurnLabel(kSkillBodyHeading), '# Frontend Design');
+    });
+
+    test('skips leading blank lines', () {
+      expect(injectedTurnLabel('\n\n  hello\nworld'), 'hello');
+    });
+
+    test('a 140 KB single line still yields a one-line label', () {
+      final huge = 'Base directory for this skill: ${'x' * 142619}';
+      final label = injectedTurnLabel(huge);
+      expect(label.length, lessThan(90));
+      expect(label, contains('…'));
+      expect(label, isNot(contains('\n')));
+    });
+
+    test('text with nothing to quote still gets a label', () {
+      expect(injectedTurnLabel('   \n\n'), isNotEmpty);
+    });
+  });
+
+  testWidgets(
+    '#163: an injected skill body is never "You" — collapsed, quiet, left',
+    (tester) async {
+      await pumpTurns(tester, const [
+        TranscriptTurn(
+          role: 'user',
+          text: kSkillBody,
+          toolUses: [],
+          ts: null,
+          typedText: '',
+          userKind: 'meta',
+        ),
+      ]);
+
+      // Not the human's bubble: not the label, not the lane.
+      expect(find.text('You'), findsNothing);
+      expect(find.text('Injected'), findsOneWidget);
+      final aligns = alignmentsAround(tester, find.text('Injected'));
+      expect(aligns, contains(Alignment.centerLeft));
+      expect(aligns, isNot(contains(Alignment.centerRight)));
+
+      // Not the primary accent either — that colour is the user's own.
+      final tagStyle = tester.widget<Text>(find.text('Injected')).style;
+      final scheme = AppTheme.dark.colorScheme;
+      expect(tagStyle?.color, isNot(scheme.primary));
+      expect(tagStyle?.color, scheme.onSurfaceVariant);
+
+      // The body is collapsed behind the same chip #32 gives a wrapped skill.
+      expect(find.textContaining('SKILL_BODY_MARKER'), findsNothing);
+      expect(find.text('Base directory for this skill: /skills/example-skill'),
+          findsOneWidget);
+
+      // And it is still reachable — hidden, never lost.
+      await tester.tap(find.text('Base directory for this skill: /skills/example-skill'));
+      await tester.pumpAndSettle();
+      expect(find.textContaining('SKILL_BODY_MARKER'), findsOneWidget);
+    },
+  );
+
+  testWidgets(
+    '#163: the openings a content sniff would miss are handled identically',
+    (tester) async {
+      // The whole argument for a structural flag over a fourth signature: these
+      // two skill bodies open with ordinary markdown and ordinary prose.
+      await pumpTurns(tester, const [
+        TranscriptTurn(
+          role: 'user',
+          text: kSkillBodyHeading,
+          toolUses: [],
+          ts: null,
+          typedText: '',
+          userKind: 'meta',
+        ),
+        TranscriptTurn(
+          role: 'user',
+          text: kSkillBodyProse,
+          toolUses: [],
+          ts: null,
+          typedText: '',
+          userKind: 'meta',
+        ),
+      ]);
+
+      expect(find.text('You'), findsNothing);
+      expect(find.text('Injected'), findsNWidgets(2));
+      expect(find.textContaining('SKILL_HEADING_MARKER'), findsNothing);
+      expect(find.textContaining('SKILL_PROSE_MARKER'), findsNothing);
+    },
+  );
+
+  testWidgets(
+    '#163: a 140 KB body renders collapsed, at real scale',
+    (tester) async {
+      // The reported size. Collapsed is the whole point: the bug was this text
+      // laid out verbatim inside the user's own bubble.
+      final huge = '$kSkillBody\n${'lorem ipsum dolor sit amet ' * 5300}';
+      expect(huge.length, greaterThan(140000));
+      await pumpTurns(tester, [
+        TranscriptTurn(
+          role: 'user',
+          text: huge,
+          toolUses: const [],
+          ts: null,
+          typedText: '',
+          userKind: 'meta',
+        ),
+      ]);
+
+      expect(tester.takeException(), isNull);
+      expect(find.text('You'), findsNothing);
+      expect(find.text('Injected'), findsOneWidget);
+      expect(find.textContaining('SKILL_BODY_MARKER'), findsNothing);
+      expect(find.textContaining('lorem ipsum'), findsNothing);
+    },
+  );
+
+  testWidgets(
+    '#163: the user\'s real prompt is still "You" beside a skill body',
+    (tester) async {
+      // The guard. 2363 of the 3153 measured user turns are genuine prompts and
+      // none of them may change — a fix that quietens real prompts is worse than
+      // the bug. This is also the second half of the report: the sentence the
+      // user typed has to stay findable next to the injection.
+      await pumpTurns(tester, const [
+        TranscriptTurn(
+          role: 'user',
+          text: 'MY_REAL_PROMPT_MARKER rewrite the deploy script',
+          toolUses: [],
+          ts: null,
+          typedText: 'MY_REAL_PROMPT_MARKER rewrite the deploy script',
+          userKind: 'human',
+        ),
+        TranscriptTurn(
+          role: 'user',
+          text: kSkillBody,
+          toolUses: [],
+          ts: null,
+          typedText: '',
+          userKind: 'meta',
+        ),
+      ]);
+
+      expect(find.text('You'), findsOneWidget);
+      expect(find.textContaining('MY_REAL_PROMPT_MARKER'), findsOneWidget);
+      final aligns = alignmentsAround(tester, find.text('You'));
+      expect(aligns, contains(Alignment.centerRight));
+    },
+  );
+
+  testWidgets(
+    '#163: a server that publishes nothing leaves this client unchanged',
+    (tester) async {
+      // An older server sends no `userKind`. The local classifier then decides,
+      // exactly as before — including the pre-existing (unfixable here) reading
+      // of a bare skill body as a prompt.
+      await pumpTurns(tester, const [
+        TranscriptTurn(role: 'user', text: 'plain prompt', toolUses: [], ts: null),
+      ]);
+      expect(find.text('You'), findsOneWidget);
+      expect(find.textContaining('plain prompt'), findsOneWidget);
+    },
+  );
+
+  group('#163 secondary: two commands fused into one turn', () {
+    // 8 turns in the 803-file corpus carry TWO `<command-name>` tags. `firstMatch`
+    // for both name and args chipped such a turn as the FIRST command wearing the
+    // SECOND command's arguments, and hid the second command in the body.
+    const fused =
+        '<command-name>/clear</command-name>\n<command-message>clear</command-message>\n'
+        '<command-args></command-args>\n'
+        '<command-name>/issue</command-name>\n<command-message>issue</command-message>\n'
+        '<command-args>163 skill body renders as my prompt</command-args>';
+
+    test('every invocation is recovered, each with its OWN arguments', () {
+      final c = parseCommandInvocation(fused)!;
+      expect(c.invocations, [
+        '/clear',
+        '/issue 163 skill body renders as my prompt',
+      ]);
+      // The first command's own contract is unchanged for existing callers.
+      expect(c.name, 'clear');
+      expect(c.args, isEmpty);
+    });
+
+    test('a single command is byte-for-byte what it always was', () {
+      const one =
+          '<command-name>/task</command-name>\n<command-message>task</command-message>\n'
+          '<command-args>build the thing</command-args>\n\nBODY';
+      final c = parseCommandInvocation(one)!;
+      expect(c.name, 'task');
+      expect(c.args, 'build the thing');
+      expect(c.invocations, ['/task build the thing']);
+      expect(c.label, '/task build the thing');
+    });
+
+    testWidgets('the chip names both, not one wearing the other\'s args',
+        (tester) async {
+      await pumpTurns(tester, const [
+        TranscriptTurn(
+          role: 'user',
+          text: fused,
+          toolUses: [],
+          ts: null,
+          userKind: 'command',
+        ),
+      ]);
+      expect(find.text('You'), findsOneWidget);
+      expect(
+        find.textContaining('/issue 163 skill body renders as my prompt'),
+        findsOneWidget,
+      );
+    });
+  });
 }

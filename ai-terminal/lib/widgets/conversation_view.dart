@@ -1300,6 +1300,7 @@ class CommandInvocation {
     required this.name,
     required this.args,
     required this.body,
+    this.invocations = const <String>[],
   });
 
   /// The command name without its leading slash (e.g. `task`).
@@ -1312,6 +1313,20 @@ class CommandInvocation {
   /// default, shown only if the user expands it. Empty when there's nothing
   /// beyond the wrapper.
   final String body;
+
+  /// Every `/name args` invocation in the turn, in order — normally exactly one.
+  ///
+  /// A transcript record can carry TWO commands fused into one turn (`/clear` +
+  /// `/issue …`, `/compact` + `/compact`): 8 of them in an 803-file corpus. Since
+  /// [name] and [args] describe only the FIRST, a chip built from that pair alone
+  /// showed the first command wearing the SECOND command's arguments, and hid the
+  /// second command entirely inside the collapsed body.
+  final List<String> invocations;
+
+  /// The chip's one-line label — every invocation in the turn.
+  String get label => invocations.isEmpty
+      ? (args.isEmpty ? '/$name' : '/$name $args')
+      : invocations.join('  ·  ');
 }
 
 final RegExp _cmdNameRe =
@@ -1327,13 +1342,53 @@ final RegExp _cmdWrapperRe =
 /// and the (collapsible) body, or null when the turn isn't a command. Pure, so
 /// the parsing is unit-testable.
 CommandInvocation? parseCommandInvocation(String text) {
-  final nameM = _cmdNameRe.firstMatch(text);
-  if (nameM == null) return null;
-  final name = nameM.group(1)!.trim();
+  final names = _cmdNameRe.allMatches(text).toList(growable: false);
+  if (names.isEmpty) return null;
+  final name = names.first.group(1)!.trim();
   if (name.isEmpty) return null;
-  final args = (_cmdArgsRe.firstMatch(text)?.group(1) ?? '').trim();
   final body = text.replaceAll(_cmdWrapperRe, '').trim();
-  return CommandInvocation(name: name, args: args, body: body);
+
+  // The overwhelmingly common shape: one command. Kept on the ORIGINAL
+  // `firstMatch` path so its behaviour is byte-identical — the args tag can sit
+  // either side of the name tag in the wild, and only the fused case below needs
+  // to reason about position at all.
+  if (names.length == 1) {
+    final args = (_cmdArgsRe.firstMatch(text)?.group(1) ?? '').trim();
+    return CommandInvocation(
+      name: name,
+      args: args,
+      body: body,
+      invocations: [args.isEmpty ? '/$name' : '/$name $args'],
+    );
+  }
+
+  // Two commands fused into one transcript record. Pair each name with the
+  // `<command-args>` that falls BETWEEN it and the next name — `firstMatch`
+  // handed every name the first args tag in the turn, which is how `/clear` came
+  // to be chipped carrying `/issue`'s arguments while `/issue` itself vanished
+  // into the collapsed body.
+  final argMatches = _cmdArgsRe.allMatches(text).toList(growable: false);
+  final invocations = <String>[];
+  for (var i = 0; i < names.length; i++) {
+    final n = names[i].group(1)!.trim();
+    if (n.isEmpty) continue;
+    final from = names[i].end;
+    final to = i + 1 < names.length ? names[i + 1].start : text.length;
+    var a = '';
+    for (final m in argMatches) {
+      if (m.start >= from && m.start < to) {
+        a = (m.group(1) ?? '').trim();
+        break;
+      }
+    }
+    invocations.add(a.isEmpty ? '/$n' : '/$n $a');
+  }
+  return CommandInvocation(
+    name: name,
+    args: (_cmdArgsRe.firstMatch(text)?.group(1) ?? '').trim(),
+    body: body,
+    invocations: invocations,
+  );
 }
 
 /// How a `role:user` transcript turn was actually authored. Claude Code stores
@@ -1352,6 +1407,67 @@ enum UserTurnKind {
   /// Harness-injected, not typed by the human: a `<task-notification>`, Stop-hook
   /// feedback, or a post-compaction summary.
   system,
+
+  /// Harness-injected with NOTHING to sniff (#163) — above all, a skill expanded
+  /// into a `role:user` turn carrying the whole SKILL.md and no wrapper at all.
+  ///
+  /// **Unreachable from [classifyUserTurn], on purpose.** There is no signature
+  /// to match: measured skill bodies open with `Base directory for this skill:`,
+  /// with a bare markdown heading, or with ordinary prose. The evidence is
+  /// structural — the transcript record's `isMeta` flag — and only the server
+  /// sees the record, so this kind arrives on the wire as `TranscriptTurn.userKind`
+  /// and nowhere else.
+  meta,
+}
+
+/// The server's own verdict for a `role:user` turn, mapped onto the render
+/// treatments this file knows about, or `null` when there is no verdict to read
+/// — an older server, or a Codex turn — in which case [classifyUserTurn] decides
+/// exactly as it always did.
+///
+/// `command` maps to [UserTurnKind.human] deliberately: the server's classifier
+/// is stronger than this one and names a slash command as its own kind, but a
+/// slash command IS the user's own turn, and #32's collapsed chip renders on the
+/// human branch. Mapping it anywhere else would silently delete that chip.
+UserTurnKind? userTurnKindFromWire(String? kind) => switch (kind) {
+      'human' || 'command' => UserTurnKind.human,
+      'teammate' => UserTurnKind.teammate,
+      'system' => UserTurnKind.system,
+      'meta' => UserTurnKind.meta,
+      _ => null,
+    };
+
+/// How much of an injected turn's first line the chip shows before eliding.
+const int _kInjectedLabelMax = 72;
+
+/// A one-line label for an injected turn that arrived with no wrapper to name it
+/// (#163): its own first non-empty line, elided.
+///
+/// The turn's first line is the only honest name available — the measured ones
+/// read `Base directory for this skill: …`, `# Frontend Design`,
+/// `## Context Usage`, `Continue from where you left off.` — and every one of
+/// them tells the user what they are looking at. Inventing a name ("Skill") would
+/// be wrong for the `## Context Usage` and `[Image: …]` members of the same
+/// class, and this repo pays more for confidently wrong than for plain.
+///
+/// Scans rather than `split('\n')`, and slices before trimming, because the body
+/// this runs on can be a single 140 KB line.
+String injectedTurnLabel(String text) {
+  var i = 0;
+  while (i < text.length) {
+    final nl = text.indexOf('\n', i);
+    final end = nl < 0 ? text.length : nl;
+    final stop = end - i > _kInjectedLabelMax * 3 ? i + _kInjectedLabelMax * 3 : end;
+    final line = text.substring(i, stop).trim();
+    if (line.isNotEmpty) {
+      return line.length <= _kInjectedLabelMax
+          ? line
+          : '${line.substring(0, _kInjectedLabelMax - 1).trimRight()}…';
+    }
+    if (nl < 0) break;
+    i = nl + 1;
+  }
+  return 'Injected context';
 }
 
 /// The classification of one `role:user` turn: its [kind], the [from] label
@@ -1513,18 +1629,36 @@ class _TurnBubble extends StatelessWidget {
     // (another session's message, a task-notification, hook feedback, compaction
     // summary). null for an assistant turn.
     final uclass = isAssistant ? null : classifyUserTurn(turn.text);
-    final fromHuman = uclass != null && uclass.kind == UserTurnKind.human;
+    // #163 — the SERVER's verdict wins whenever it sent one. `lib/user-turn.js`
+    // is the authority for this rule and it has seen something this copy never
+    // can: the transcript record's `isMeta` flag, the only thing separating an
+    // injected skill body (the whole SKILL.md, no wrapper) from a prompt. A null
+    // means no verdict was sent — an older server, or a Codex turn — and the
+    // local classifier then decides exactly as it did before.
+    final kind = isAssistant
+        ? null
+        : (userTurnKindFromWire(turn.userKind) ?? uclass!.kind);
+    final fromHuman = kind == UserTurnKind.human;
     // "Incoming" (left, quiet) treatment for everything that isn't the human's
     // own turn — assistant AND injected non-human user turns.
     final incoming = !fromHuman;
     // #32: a slash-command/skill turn renders as a compact chip, not the whole
     // injected SKILL.md body. Only a human's own turn can be a slash command.
     final command = fromHuman ? parseCommandInvocation(turn.text) : null;
+    // #163: an injection that arrived with NO wrapper carries exactly the same
+    // content as a wrapped one — an expanded SKILL.md — so it gets exactly the
+    // same collapsed chip. Anything else would make one body read two different
+    // ways depending on how the harness happened to deliver it.
+    final chipLabel = command?.label ??
+        (kind == UserTurnKind.meta ? injectedTurnLabel(turn.text) : null);
+    final chipBody = command?.body ?? turn.text;
     // Injected turns display their stripped inner body; human/assistant use the
     // turn text verbatim.
-    final displayText =
-        (uclass != null && !fromHuman) ? uclass.body : turn.text;
-    final segments = _splitCodeBlocks(displayText);
+    final displayText = (kind != null && !fromHuman) ? uclass!.body : turn.text;
+    // Never split a body that is about to be collapsed anyway — the whole point
+    // of the chip is that a 140 KB skill body costs nothing until it is asked for.
+    final segments =
+        chipLabel == null ? _splitCodeBlocks(displayText) : const <_Segment>[];
     // #54: user text is full-strength on BOTH sides now — the old "muted on
     // the right" treatment read as *lower* priority, exactly backwards: the
     // user's own turns are the rarer, higher-signal landmark, so they must
@@ -1563,22 +1697,31 @@ class _TurnBubble extends StatelessWidget {
             AgentCatalog.instance[agentId]?.color,
             theme.colorScheme.onSurfaceVariant,
           )
-        : switch (uclass!.kind) {
+        : switch (kind!) {
             UserTurnKind.human => theme.colorScheme.primary,
             // A teammate agent gets its own distinct tint so it can never be
             // read as your own turn (or as the session's assistant).
             UserTurnKind.teammate => theme.colorScheme.tertiary,
             // Harness/system injections stay muted — present but low-signal.
             UserTurnKind.system => theme.colorScheme.onSurfaceVariant,
+            // #163: an injection with no source to name is the quietest thing in
+            // the lens. Anything warmer here re-creates the reported bug, whose
+            // real sting was the ACCENT: it read as the user's own words.
+            UserTurnKind.meta => theme.colorScheme.onSurfaceVariant,
           };
     final roleLabel = isAssistant
         ? (AgentCatalog.instance[agentId]?.label ?? 'Assistant')
-        : switch (uclass!.kind) {
+        : switch (kind!) {
             UserTurnKind.human => 'You',
             UserTurnKind.teammate =>
-              uclass.from.isEmpty ? '◆ Teammate' : '◆ ${uclass.from}',
+              uclass!.from.isEmpty ? '◆ Teammate' : '◆ ${uclass.from}',
             UserTurnKind.system =>
-              uclass.from.isEmpty ? 'System' : uclass.from,
+              uclass!.from.isEmpty ? 'System' : uclass.from,
+            // Deliberately generic. This class covers skill bodies, `## Context
+            // Usage`, `[Image: …]` notes and effort-level notes alike, and the
+            // flag that identifies them says only "the harness wrote this" —
+            // calling them all "Skill" would be confidently wrong for most.
+            UserTurnKind.meta => 'Injected',
           };
 
     // An incoming turn (agent or injected) runs near full width — it carries
@@ -1633,8 +1776,12 @@ class _TurnBubble extends StatelessWidget {
             children: [
               _RoleTag(label: roleLabel, color: roleColor),
               const SizedBox(height: 6),
-              if (command != null)
-                _CommandInvocationChip(command: command)
+              if (chipLabel != null)
+                _CollapsedBodyChip(
+                  label: chipLabel,
+                  body: chipBody,
+                  incoming: incoming,
+                )
               else
                 for (final seg in segments)
                   if (seg.kind == _SegmentKind.code)
@@ -1895,30 +2042,54 @@ class _CodeBlock extends StatelessWidget {
 
 /// #32: a slash-command/skill invocation rendered compactly as `/name args`.
 /// The injected skill body (if any) is collapsed behind a tap-to-expand.
-class _CommandInvocationChip extends StatefulWidget {
-  const _CommandInvocationChip({required this.command});
+/// A one-line label with a collapsible body — the treatment for a `role:user`
+/// turn whose real content is an expanded SKILL.md rather than a sentence.
+///
+/// #32 introduced it for a slash command (the `<command-name>` trio plus the
+/// injected body); #163 hands the SAME chip to an injection that arrives with no
+/// wrapper at all, because it is the same content and a reader should not have to
+/// know which way the harness happened to deliver it. [incoming] carries the lane
+/// — the human's own commands stay on the accent, an injection stays quiet.
+class _CollapsedBodyChip extends StatefulWidget {
+  const _CollapsedBodyChip({
+    required this.label,
+    required this.body,
+    required this.incoming,
+  });
 
-  final CommandInvocation command;
+  /// The one line shown collapsed.
+  final String label;
+
+  /// The hidden remainder; empty when there is nothing to expand.
+  final String body;
+
+  /// True for a turn the human did not write (left lane, quiet surface).
+  final bool incoming;
 
   @override
-  State<_CommandInvocationChip> createState() => _CommandInvocationChipState();
+  State<_CollapsedBodyChip> createState() => _CollapsedBodyChipState();
 }
 
-class _CommandInvocationChipState extends State<_CommandInvocationChip> {
+class _CollapsedBodyChipState extends State<_CollapsedBodyChip> {
   bool _expanded = false;
 
   @override
   Widget build(BuildContext context) {
     final theme = Theme.of(context);
-    final c = widget.command;
-    final hasBody = c.body.isNotEmpty;
-    final label = c.args.isEmpty ? '/${c.name}' : '/${c.name} ${c.args}';
+    final incoming = widget.incoming;
+    final hasBody = widget.body.isNotEmpty;
+    final label = widget.label;
+    final accent =
+        incoming ? theme.colorScheme.onSurfaceVariant : theme.colorScheme.primary;
     return Column(
-      crossAxisAlignment: CrossAxisAlignment.end,
+      crossAxisAlignment:
+          incoming ? CrossAxisAlignment.start : CrossAxisAlignment.end,
       mainAxisSize: MainAxisSize.min,
       children: [
         Material(
-          color: theme.colorScheme.primaryContainer.withValues(alpha: 0.5),
+          color: incoming
+              ? theme.colorScheme.surfaceContainerHigh.withValues(alpha: 0.6)
+              : theme.colorScheme.primaryContainer.withValues(alpha: 0.5),
           borderRadius: BorderRadius.circular(AppShape.small),
           child: InkWell(
             borderRadius: BorderRadius.circular(AppShape.small),
@@ -1928,8 +2099,12 @@ class _CommandInvocationChipState extends State<_CommandInvocationChip> {
               child: Row(
                 mainAxisSize: MainAxisSize.min,
                 children: [
-                  Icon(Icons.terminal_rounded,
-                      size: 15, color: theme.colorScheme.primary),
+                  Icon(
+                      incoming
+                          ? Icons.notes_rounded
+                          : Icons.terminal_rounded,
+                      size: 15,
+                      color: accent),
                   const SizedBox(width: 6),
                   Flexible(
                     child: Text(
@@ -1961,7 +2136,7 @@ class _CommandInvocationChipState extends State<_CommandInvocationChip> {
                 border: Border.all(color: theme.colorScheme.outlineVariant),
               ),
               child: Text(
-                c.body,
+                widget.body,
                 style: theme.textTheme.bodySmall?.copyWith(
                   fontFamily: 'monospace',
                   color: theme.colorScheme.onSurfaceVariant,
