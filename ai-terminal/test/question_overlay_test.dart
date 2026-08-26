@@ -2950,4 +2950,193 @@ void main() {
       expect(block.overflow, TextOverflow.ellipsis);
     });
   });
+
+  // ---------------------------------------------------------------------
+  // #164 — free text is per TAB. Other became a per-question affordance in
+  // #143 (every compact tab offers it), but the widget kept ONE controller and
+  // one save step: tab 2 opened already holding tab 1's characters, and
+  // _chooseOther copied them into tab 2's answer. The pure layer had taken a
+  // per-question `otherText` list since #143 (see the multi-question cases
+  // above), so the capability was on the wire and unreachable from the UI.
+  group('per-tab Other free text (#164)', () {
+    Future<List<AnswerFrame>> pumpTwoCompactTabs(WidgetTester tester) async {
+      final sent = <AnswerFrame>[];
+      tester.view.physicalSize = const Size(412 * 3, 915 * 3);
+      tester.view.devicePixelRatio = 3.0;
+      addTearDown(tester.view.reset);
+      await tester.pumpWidget(
+        MaterialApp(
+          theme: AppTheme.dark,
+          home: Scaffold(
+            body: Stack(
+              children: [
+                QuestionOverlay(
+                  question: PendingQuestion(
+                    toolUseId: 'other-mq',
+                    questions: [
+                      _q(['Red', 'Green'], header: 'Colour'),
+                      _q(['Apple', 'Pear'], header: 'Fruit'),
+                    ],
+                  ),
+                  onSend: sent.addAll,
+                  onKey: (_) {},
+                  onDismiss: () {},
+                ),
+              ],
+            ),
+          ),
+        ),
+      );
+      await tester.pumpAndSettle();
+      return sent;
+    }
+
+    /// Tap a tab by INDEX, never by its label: the label gains a tick the
+    /// moment the tab is answered, so a text finder would stop matching
+    /// exactly where these tests need it most.
+    Future<void> tapTab(WidgetTester tester, int i) async {
+      await tester.tap(find.byType(ChoiceChip).at(i));
+      await tester.pumpAndSettle();
+    }
+
+    String fieldText(WidgetTester tester) =>
+        tester.widget<TextField>(find.byType(TextField)).controller!.text;
+
+    String chipLabel(WidgetTester tester, int i) => tester
+        .widget<Text>(find
+            .descendant(
+              of: find.byType(ChoiceChip).at(i),
+              matching: find.byType(Text),
+            )
+            .first)
+        .data!;
+
+    Future<void> chooseOther(WidgetTester tester, String text) async {
+      await tester.tap(find.text('Other…'));
+      await tester.pumpAndSettle();
+      await tester.enterText(find.byType(TextField), text);
+      await tester.pumpAndSettle();
+    }
+
+    testWidgets(
+        "a second tab's Other opens EMPTY — the first tab's characters never "
+        'carry across', (tester) async {
+      await pumpTwoCompactTabs(tester);
+      await chooseOther(tester, 'alpha answer');
+
+      await tapTab(tester, 1);
+      // Q2 is untouched, so it shows no field at all yet.
+      expect(find.byType(TextField), findsNothing);
+
+      await tester.tap(find.text('Other…'));
+      await tester.pumpAndSettle();
+      expect(fieldText(tester), isEmpty);
+    });
+
+    testWidgets("leaving a tab and returning restores THAT tab's own text",
+        (tester) async {
+      await pumpTwoCompactTabs(tester);
+      await chooseOther(tester, 'alpha answer');
+
+      await tapTab(tester, 1);
+      await chooseOther(tester, 'beta answer');
+
+      await tapTab(tester, 0);
+      expect(fieldText(tester), 'alpha answer');
+
+      await tapTab(tester, 1);
+      expect(fieldText(tester), 'beta answer');
+    });
+
+    testWidgets(
+        'opening Other on a tab is not an ANSWER, and both texts reach '
+        'buildAnswerFrames as distinct entries', (tester) async {
+      final sent = await pumpTwoCompactTabs(tester);
+      await chooseOther(tester, 'alpha answer');
+
+      await tapTab(tester, 1);
+      await tester.tap(find.text('Other…'));
+      await tester.pumpAndSettle();
+
+      // Q2's field is open and EMPTY, so the prompt is not answered yet. With
+      // one shared controller it inherited 'alpha answer' the instant Other
+      // was tapped, and Send went live carrying a Q2 answer nobody typed.
+      expect(
+          find.widgetWithText(FilledButton, 'Pick an option'), findsOneWidget);
+
+      await tester.enterText(find.byType(TextField), 'beta answer');
+      await tester.pumpAndSettle();
+      await tester.tap(find.widgetWithText(FilledButton, 'Send answer'));
+      await tester.pumpAndSettle();
+
+      // Two options per question -> "Type something." is row 3 on both tabs;
+      // each branch CR commits its text and advances, and the tail Enter
+      // finalises the Submit review.
+      expect(_keys(sent),
+          ['3', 'alpha answer', '\r', '3', 'beta answer', '\r', '\r']);
+    });
+
+    testWidgets('a tab answered only via Other shows its chip tick',
+        (tester) async {
+      await pumpTwoCompactTabs(tester);
+      expect(chipLabel(tester, 0), 'Colour');
+
+      await chooseOther(tester, 'alpha answer');
+
+      // The chip is the only per-question state readout on the card, and it
+      // read _selected alone — so a tab answered by free text reported
+      // "unanswered" while Send said the prompt was ready.
+      expect(chipLabel(tester, 0), 'Colour ✓');
+
+      // ...and it must agree with the SAME trim rule the Send gate uses:
+      // whitespace is discarded by buildAnswerFrames, so it is not an answer.
+      await tester.enterText(find.byType(TextField), '   ');
+      await tester.pumpAndSettle();
+      expect(chipLabel(tester, 0), 'Colour');
+    });
+
+    testWidgets(
+        'a NEW prompt rebuilds the per-tab fields — no stale text, and a '
+        'different question count is safe', (tester) async {
+      tester.view.physicalSize = const Size(412 * 3, 915 * 3);
+      tester.view.devicePixelRatio = 3.0;
+      addTearDown(tester.view.reset);
+      Future<void> pump(PendingQuestion pq) => tester.pumpWidget(
+            MaterialApp(
+              theme: AppTheme.dark,
+              home: Scaffold(
+                body: Stack(
+                  children: [
+                    QuestionOverlay(
+                      question: pq,
+                      onSend: (_) {},
+                      onKey: (_) {},
+                      onDismiss: () {},
+                    ),
+                  ],
+                ),
+              ),
+            ),
+          );
+
+      await pump(PendingQuestion(toolUseId: 'p1', questions: [
+        _q(['Red', 'Green'], header: 'Colour'),
+        _q(['Apple', 'Pear'], header: 'Fruit'),
+      ]));
+      await tester.pumpAndSettle();
+      await chooseOther(tester, 'stale');
+
+      // One question this time: the per-tab controller list must shrink with
+      // the prompt rather than index past its end.
+      await pump(PendingQuestion(toolUseId: 'p2', questions: [
+        _q(['Yes', 'No'], header: 'Ship'),
+      ]));
+      await tester.pumpAndSettle();
+      expect(find.byType(TextField), findsNothing);
+
+      await tester.tap(find.text('Other…'));
+      await tester.pumpAndSettle();
+      expect(fieldText(tester), isEmpty);
+    });
+  });
 }
