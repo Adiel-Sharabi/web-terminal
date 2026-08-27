@@ -83,7 +83,7 @@ test.describe('#178 web scroll-up backfill', () => {
     // THE point of serving it: the browser runs the same bytes the unit spec
     // runs, so the rule cannot drift into a second copy.
     expect(served).toBe(onDisk);
-    expect(served).toContain('self.WTScrollback');           // reaches the page as a global
+    expect(served).toContain('globalThis.WTScrollback');     // reaches the page as a global
     await ctx.dispose();
   });
 
