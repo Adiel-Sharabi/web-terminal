@@ -39,6 +39,7 @@ import '../services/speech_service.dart';
 import '../theme/app_theme.dart';
 import '../util/terminal_write.dart';
 import '../theme/status_colors.dart';
+import '../util/attach_overlap.dart';
 import '../util/scrollback_window.dart';
 import '../util/terminal_links.dart';
 import '../widgets/attach_source_sheet.dart';
@@ -813,6 +814,17 @@ class _SessionScreenState extends State<SessionScreen>
   StreamSubscription<String>? _outputSub;
   StreamSubscription<bool>? _connectedSub;
   StreamSubscription<void>? _reconnectedSub;
+
+  /// The tail of what the HTTP replay put on screen, and the latch that arms the
+  /// attach-time overlap cut for the socket's OPENING frame only (#176).
+  ///
+  /// The server replays up to `scrollbackReplayLimit` on every connect,
+  /// unconditionally, so that frame re-renders the newest ~32 KB the HTTP replay
+  /// just wrote. `cutAttachOverlap` finds the boundary by content; these two hold
+  /// the only state it needs. Cleared on a reconnect, where the buffer is wiped
+  /// first and there is therefore nothing to overlap.
+  String _renderedTail = '';
+  bool _cutNextFrame = false;
   StreamSubscription<List<Session>>? _repoSub;
   Timer? _notFoundTimer;
   Timer? _draftDebounce;
@@ -1530,12 +1542,7 @@ class _SessionScreenState extends State<SessionScreen>
   /// server owns replay, this just re-syncs the view (spec: "reopening
   /// resumes seamlessly").
   ///
-  /// ## KNOWN, PRE-EXISTING: this path double-renders the tail (not #167)
-  ///
-  /// Recorded because the symptom — repeated output in the terminal — is the
-  /// one #167 is named for, and a future reader will otherwise conclude the
-  /// backward deepening walk is still broken. It is not: this is a **different
-  /// mechanism at a different layer**, and it predates that fix.
+  /// ## The tail used to render TWICE here — fixed by a content cut (#176)
   ///
   /// Below, the buffer is cleared, the 256 KB HTTP replay is written, and only
   /// THEN the socket is opened — and the server sends up to
@@ -1545,15 +1552,22 @@ class _SessionScreenState extends State<SessionScreen>
   /// one. Measured through the real vendored xterm at 52x38: **1129 duplicated
   /// lines per attach**, at the tail, on every attach — and on Windows
   /// `AppLifecycleState.resumed` fires on every window focus, so "every attach"
-  /// means every time the window is clicked.
+  /// meant every time the window was clicked.
   ///
-  /// It is deliberately NOT fixed here. The two candidate fixes both need their
-  /// own change and their own evidence: suppress the socket's opening replay on
-  /// a FIRST connect (a server-side signal, so both clients agree on what a
-  /// first connect is), or drop the HTTP replay and let the socket supply the
-  /// tail (it is eight times smaller, so this trades duplication for a much
-  /// shallower opening view). Skipping bytes on the wrong one of the two paths
-  /// deletes the tail instead of de-duplicating it, which is strictly worse.
+  /// Neither of the two obvious fixes is safe. Suppressing the socket's opening
+  /// replay loses whatever was emitted between the HTTP fetch and the connect —
+  /// a silent HOLE, worse than a visible duplicate. Deriving the replay's byte
+  /// range from `total` needs the two sanitiser passes to agree, and this doc
+  /// used to refuse that as unmeasured. **It has now been measured** (see
+  /// `util/attach_overlap.dart` for the numbers): they agree byte-for-byte over
+  /// the replay's TAIL and diverge near its HEAD, because the socket's copy is
+  /// truncated before it is sanitised and so mis-tracks alt-screen.
+  ///
+  /// So the cut anchors on the END of what this method just wrote, finds it
+  /// inside the socket's opening frame, and writes only what follows —
+  /// `_renderedTail` / `_cutNextFrame` below, applied in the `output` listener.
+  /// When the anchor is not found it writes the whole frame, which is exactly
+  /// the old behaviour: the fallback can duplicate, never delete.
   Future<void> _attach() async {
     final session = _session;
     if (session == null) return;
@@ -1601,6 +1615,14 @@ class _SessionScreenState extends State<SessionScreen>
         // #81: guarded — xterm 4.0.0 throws on a real Codex stream, and an
         // unguarded throw here kills the lens outright (blank terminal).
         safeTerminalWrite(_terminal, chunk.data);
+        // #176 — the socket is about to replay its own tail over the top of this.
+        // Keep the END of what was just written: it is the anchor the cut finds
+        // inside that frame. Only the last kAttachAnchorBytes can ever be used, so
+        // hold no more than that.
+        _renderedTail = chunk.data.length <= kAttachAnchorBytes
+            ? chunk.data
+            : chunk.data.substring(chunk.data.length - kAttachAnchorBytes);
+        _cutNextFrame = true;
         // Land on the newest line, not the top of the replayed scrollback.
         _jumpToBottomSoon();
       }
@@ -1637,8 +1659,19 @@ class _SessionScreenState extends State<SessionScreen>
     // #81: guarded. This is the LIVE path and the one that actually broke — a throw
     // inside a stream listener takes the widget subtree down, so a single bad frame
     // blanked the terminal for the rest of the session.
-    _outputSub =
-        connection.output.listen((data) => safeTerminalWrite(_terminal, data));
+    _outputSub = connection.output.listen((data) {
+      var out = data;
+      if (_cutNextFrame) {
+        // #176 — ONE frame only. The server's opening replay is a single send, and
+        // everything after it is live output that overlaps nothing. Latch it down
+        // BEFORE the cut, not after, so a throw could never leave it armed.
+        _cutNextFrame = false;
+        out = cutAttachOverlap(_renderedTail, out);
+        _renderedTail = '';
+        if (out.isEmpty) return;
+      }
+      safeTerminalWrite(_terminal, out);
+    });
     // Fires on every successful RE-connect, before the server's scrollback
     // replay reaches `output` — clear here or history duplicates.
     _reconnectedSub = connection.reconnected.listen((_) {
@@ -1662,6 +1695,12 @@ class _SessionScreenState extends State<SessionScreen>
       // real reconnect, history stops deepening after a reconnect and resumes
       // on the next attach. Less history, never history that lies.
       _sbWindow.reset();
+      // #176: disarm the attach-time overlap cut too. The buffer has just been
+      // wiped, so the socket's replay overlaps NOTHING — cutting against a stale
+      // anchor here would delete the tail instead of de-duplicating it, which is
+      // the one outcome worse than the duplicate.
+      _cutNextFrame = false;
+      _renderedTail = '';
     });
     _connectedSub = connection.connected.listen(_onConnectedChanged);
   }
