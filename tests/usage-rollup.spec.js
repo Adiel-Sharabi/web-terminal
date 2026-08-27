@@ -14,7 +14,7 @@ const { test, expect } = require('@playwright/test');
 const fs = require('fs');
 const os = require('os');
 const path = require('path');
-const { BASE, authCtx, noAuthCtx, loginPage } = require('./test-helpers');
+const { BASE, authCtx, noAuthCtx, loginPage, codexSessionsRoot } = require('./test-helpers');
 const { rollUpUsage, METRICS_TTL_MS, CLOCK_SKEW_TOLERANCE_MS } = require('../lib/usage-rollup');
 
 // ============================================================
@@ -137,15 +137,6 @@ test.describe('usage roll-up (pure)', () => {
 
 // A Codex rollout fixture: Codex RECORDS its usage (Claude pushes it), so the file's own
 // mtime is the freshness signal — which is what lets the stale case be driven for real.
-function codexSessionsRoot() {
-  let home = '';
-  try {
-    const cfg = JSON.parse(fs.readFileSync(path.join(__dirname, '..', 'config.json'), 'utf8'));
-    if (cfg && cfg.claudeHome) home = String(cfg.claudeHome);
-  } catch {}
-  if (!home) home = process.env.USERPROFILE || os.homedir();
-  return path.join(home, '.codex', 'sessions');
-}
 const FIXTURE_DIR = path.join(codexSessionsRoot(), '2098', '01', '02');
 const created = [];
 const line = (type, payload) => JSON.stringify({ timestamp: '2098-01-02T00:00:00.000Z', type, payload });

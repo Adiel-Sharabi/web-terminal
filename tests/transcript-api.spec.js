@@ -8,22 +8,13 @@ const fs = require('fs');
 const os = require('os');
 const path = require('path');
 const { randomUUID } = require('crypto');
-const { BASE, authCtx, noAuthCtx, readHookToken } = require('./test-helpers');
+const { BASE, authCtx, noAuthCtx, readHookToken, claudeProjectsRoot, emptyCwd } = require('./test-helpers');
 const { claudeProjectDirName } = require('../lib/transcript');
 
 // safeTranscriptPath() only trusts a .jsonl strictly under the realpath'd Claude
 // projects root (<claudeHome>/.claude/projects). Mirror server.js detectClaudeHome()
 // so fixtures land under that ONE trusted root (same approach as api.spec.js's
 // "Session attention" describe).
-function claudeProjectsRoot() {
-  let home = '';
-  try {
-    const cfg = JSON.parse(fs.readFileSync(path.join(__dirname, '..', 'config.json'), 'utf8'));
-    if (cfg && cfg.claudeHome) home = String(cfg.claudeHome);
-  } catch {}
-  if (!home) home = process.env.USERPROFILE || os.homedir();
-  return path.join(home, '.claude', 'projects');
-}
 const FIXTURE_DIR = path.join(claudeProjectsRoot(), '__wt-transcript-fixture__');
 let _n = 0;
 
@@ -83,7 +74,14 @@ test.describe('Session transcript (G5)', () => {
 
   test('404 when the session has no stashed/derivable transcript', async () => {
     const ctx = await authCtx();
-    const id = (await (await ctx.post('/api/sessions', { data: { name: 'Tr None' } })).json()).id;
+    // #177: an EMPTY cwd of its own, never the default (%TEMP%). "No transcript"
+    // has to be a property of this session, and %TEMP% is a directory the suite's
+    // own Codex fixtures legitimately declare — resolution matches a rollout to a
+    // session by cwd, so one left behind by an interrupted run answers here and
+    // this 404 becomes a 200.
+    const id = (await (await ctx.post('/api/sessions', {
+      data: { name: 'Tr None', cwd: emptyCwd('tr-none') },
+    })).json()).id;
     try {
       const res = await ctx.get(`/api/sessions/${id}/transcript`);
       expect(res.status()).toBe(404);

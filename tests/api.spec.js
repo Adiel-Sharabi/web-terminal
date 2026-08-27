@@ -3,7 +3,7 @@ const { test, expect, request: pwRequest } = require('@playwright/test');
 const fs = require('fs');
 const os = require('os');
 const path = require('path');
-const { BASE, AUTH, authCtx, noAuthCtx, loginPage, readHookToken } = require('./test-helpers');
+const { BASE, AUTH, authCtx, noAuthCtx, loginPage, readHookToken, claudeProjectsRoot } = require('./test-helpers');
 const { claudeProjectDirName } = require('../lib/transcript');
 
 const CLAUDE_NAMES_FILE = path.join(__dirname, '..', 'claude-session-names.json');
@@ -881,15 +881,6 @@ test.describe('Session attention', () => {
   // Claude projects root (<claudeHome>/.claude/projects). Mirror server.js
   // detectClaudeHome() so "accepted" fixtures land under that ONE trusted root;
   // "rejected" fixtures go to os.tmpdir() (outside it) or carry a wrong extension.
-  function claudeProjectsRoot() {
-    let home = '';
-    try {
-      const cfg = JSON.parse(fs.readFileSync(path.join(__dirname, '..', 'config.json'), 'utf8'));
-      if (cfg && cfg.claudeHome) home = String(cfg.claudeHome);
-    } catch {}
-    if (!home) home = process.env.USERPROFILE || os.homedir();
-    return path.join(home, '.claude', 'projects');
-  }
   // Our own scratch subdir under the trusted root — created lazily, removed whole
   // in afterAll (we only ever delete this subtree, never the projects root).
   const FIXTURE_DIR = path.join(claudeProjectsRoot(), '__wt-test-fixture__');

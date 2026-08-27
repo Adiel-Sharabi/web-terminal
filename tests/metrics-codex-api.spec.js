@@ -7,17 +7,8 @@ const { test, expect } = require('@playwright/test');
 const fs = require('fs');
 const os = require('os');
 const path = require('path');
-const { authCtx } = require('./test-helpers');
+const { authCtx, codexSessionsRoot } = require('./test-helpers');
 
-function codexSessionsRoot() {
-  let home = '';
-  try {
-    const cfg = JSON.parse(fs.readFileSync(path.join(__dirname, '..', 'config.json'), 'utf8'));
-    if (cfg && cfg.claudeHome) home = String(cfg.claudeHome);
-  } catch {}
-  if (!home) home = process.env.USERPROFILE || os.homedir();
-  return path.join(home, '.codex', 'sessions');
-}
 
 const FIXTURE_DIR = path.join(codexSessionsRoot(), '2098', '01', '01');
 const created = [];

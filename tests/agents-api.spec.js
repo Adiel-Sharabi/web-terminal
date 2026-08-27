@@ -6,20 +6,11 @@ const { test, expect } = require('@playwright/test');
 const fs = require('fs');
 const os = require('os');
 const path = require('path');
-const { authCtx, noAuthCtx } = require('./test-helpers');
+const { authCtx, noAuthCtx, codexSessionsRoot } = require('./test-helpers');
 const { AGENT_IDS, DEFAULT_AGENT } = require('../lib/agents');
 
 // Codex rollouts live under <home>/.codex/sessions/YYYY/MM/DD/. Mirror server.js's
 // home detection so a fixture lands inside the ONE trusted root.
-function codexSessionsRoot() {
-  let home = '';
-  try {
-    const cfg = JSON.parse(fs.readFileSync(path.join(__dirname, '..', 'config.json'), 'utf8'));
-    if (cfg && cfg.claudeHome) home = String(cfg.claudeHome);
-  } catch {}
-  if (!home) home = process.env.USERPROFILE || os.homedir();
-  return path.join(home, '.codex', 'sessions');
-}
 
 const FIXTURE_DIR = path.join(codexSessionsRoot(), '2099', '01', '01');
 const created = [];
