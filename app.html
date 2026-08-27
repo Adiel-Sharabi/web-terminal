@@ -684,6 +684,10 @@
   <script src="https://cdn.jsdelivr.net/npm/@xterm/xterm@5.5.0/lib/xterm.min.js" integrity="sha384-J4qzUjBl1FxyLsl/kQPQIOeINsmp17OHYXDOMpMxlKX53ZfYsL+aWHpgArvOuof9" crossorigin="anonymous"></script>
   <script src="https://cdn.jsdelivr.net/npm/@xterm/addon-fit@0.10.0/lib/addon-fit.min.js" integrity="sha384-XGqKrV8Jrukp1NITJbOEHwg01tNkuXr6uB6YEj69ebpYU3v7FvoGgEg23C1Gcehk" crossorigin="anonymous"></script>
   <script src="https://cdn.jsdelivr.net/npm/@xterm/addon-web-links@0.11.0/lib/addon-web-links.min.js" integrity="sha384-S1biLeI8L/bFduIVvCxbn/l4EtaG4nTqQjGF7qCYTbsGXGFe8KgIKXtw4+UWxprv" crossorigin="anonymous"></script>
+  <!-- #178: the content-anchored scrollback walk. Same-origin and behind the same
+       auth as this page; served from lib/ so the browser runs the SAME bytes
+       tests/scrollback-window.spec.js pins, rather than a pasted second copy. -->
+  <script src="/lib/scrollback-window.js"></script>
   <script>
     // Polyfill crypto.randomUUID for non-secure contexts (plain HTTP over LAN/tailscale IP).
     // window.crypto.getRandomValues is available in HTTP; randomUUID is gated to secure contexts.
@@ -848,20 +852,59 @@
     // --- Scroll-up history backfill state (per active session) -------------
     // Initial attach replays only ~32 KB; older bytes are fetched on demand
     // when the user scrolls xterm's viewport to the top. See triggerBackfill().
-    let historyTotal = 0;            // server-reported total available bytes (string units)
-    let historyOffset = 0;           // bytes already prepended into the displayBuffer beyond the initial replay
+    //
+    // #178 — THE WALK IS ANCHORED ON CONTENT, NOT ON A BYTE OFFSET, and the old
+    // `historyTotal`/`historyOffset` arithmetic is gone because all three of its
+    // parts were unsound:
+    //   * the window was TAIL-relative (`total - historyOffset - CHUNK`) with
+    //     `total` re-read every fetch while `historyOffset` only accumulated
+    //     prepended lengths, so every byte the session emitted between two
+    //     backfills re-appeared in the next one;
+    //   * `historyOffset` started at 0 and was never seeded with the replay's
+    //     size, so the FIRST fetch asked for [total-32768, total) while
+    //     `scrollbackReplayLimit` defaults to exactly 32768 — it prepended the
+    //     whole visible screen above itself;
+    //   * and the two byte spaces cannot line up by construction (below).
+    // The rule now lives in lib/scrollback-window.js (shared, unit-tested).
     let historyLoadPending = false;  // true while we're rewriting xterm; gates live WS data
     const historyQueue = [];         // live WS messages buffered during a rewrite
     let isFetchingHistory = false;   // prevents concurrent backfill requests
     let displayBuffer = '';          // mirror of what's currently written into xterm (live + backfilled)
     const DISPLAY_BUFFER_CAP = 4 * 1024 * 1024;
+
+    // ONE BYTE SPACE, chosen deliberately: the /scrollback endpoint's.
+    //
+    // The socket replay and the endpoint are NOT the same bytes and cannot be
+    // made to line up by arithmetic. `server.js` builds the attach replay by
+    // truncating the raw buffer and THEN sanitising it, and answers /scrollback
+    // by sanitising the WHOLE buffer and THEN slicing it. sanitizeReplay is both
+    // length-changing and stateful (it tracks alt-screen from the start of
+    // whatever string it is given), so truncate-then-sanitise and
+    // sanitise-then-slice differ over the same tail — an offset computed against
+    // one does not address the other. On top of that the worker trims the
+    // buffer's HEAD on every PTY write (2 MB cap), so offset 0 means a different
+    // byte on every request while `total` sits pinned at the cap.
+    //
+    // So on the first backfill the terminal is RE-SEATED onto the endpoint's
+    // space: we fetch the tail, make it the display buffer, and walk backward
+    // from there. Everything the walk compares is then endpoint bytes against
+    // endpoint bytes. It costs one rewrite that the user already sees on every
+    // backfill anyway (term.reset() + one contiguous write).
+    let sbWalk = null;               // ScrollbackWindow — null until first use
+    let sbSeeded = false;            // has the display been re-seated onto /scrollback's space?
+    // The seed must never be SMALLER than what is already on screen, or
+    // re-seating would silently drop visible lines. Clamped to the server's own
+    // per-request ceiling (SCROLLBACK_RANGE_MAX).
+    const SB_SEED_MIN = 65536;
+    const SB_SEED_MAX = 524288;
+
     function resetHistoryState() {
-      historyTotal = 0;
-      historyOffset = 0;
       historyLoadPending = false;
       historyQueue.length = 0;
       isFetchingHistory = false;
       displayBuffer = '';
+      sbSeeded = false;
+      if (sbWalk) sbWalk.reset();    // bump the generation: replies in flight belong to the old screen
     }
     // Issue #20 — direct terminal mode: map of sessionId -> directUrl (fully qualified ws(s)://…/ws/:id?dt=…)
     // Populated by loadSidebar() from /api/cluster/sessions when a peer has `directConnect: true`.
@@ -2514,42 +2557,76 @@
       }, { passive: true });
     })();
 
+    /** GET one slice of the session's scrollback, or null. */
+    async function fetchScrollback(offset, limit) {
+      const url = '/api/sessions/' + encodeURIComponent(sessionId)
+        + '/scrollback?offset=' + offset + '&limit=' + limit;
+      const resp = await fetch(url, { credentials: 'include' });
+      if (!resp.ok) return null;
+      return await resp.json();
+    }
+
     async function triggerBackfill() {
       if (!sessionId) return;
       if (isFetchingHistory || historyLoadPending) return;
-      if (historyTotal > 0 && historyOffset >= historyTotal) return;
+      if (sbSeeded && sbWalk && sbWalk.exhausted) return;
+      if (!window.WTScrollback) return;   // the rule failed to load; do nothing rather than guess
       isFetchingHistory = true;
       try {
-        // Compute the byte window. We always fetch the chunk immediately older
-        // than what we've already prepended: total - historyOffset - 32768 ..
-        // total - historyOffset. For the first fetch we don't know total yet,
-        // so request offset=0 and the server returns the leading chunk; that's
-        // wrong shape (we want the chunk just before the visible tail), so the
-        // first fetch is treated as a "probe" — we discover total, then issue
-        // the real fetch.
-        const CHUNK = 32768;
-        let url;
-        if (historyTotal === 0) {
-          // Probe: request the very first byte to learn total cheaply.
-          url = '/api/sessions/' + encodeURIComponent(sessionId) + '/scrollback?offset=0&limit=1';
+        const { ScrollbackWindow, scrollbackTailOffset } = window.WTScrollback;
+        let newText = '';   // what to PREPEND, or '' to re-seat wholesale
+        let reseat = '';    // non-empty on the seeding pass: replaces the buffer
+
+        if (!sbSeeded) {
+          // --- Seeding pass: re-seat the display onto /scrollback's byte space.
+          // One probe to learn `total` (the endpoint reports it on any slice),
+          // then take the tail. The tail must cover at least what is on screen,
+          // or re-seating would drop visible lines.
+          //
+          // `historyLoadPending` is NOT set yet — it gates the rewrite, not the
+          // fetch — so live output keeps appending to displayBuffer while these
+          // two requests are in flight. Remember how long it was, because those
+          // bytes are NEWER than anything the tail slice can contain and a
+          // wholesale replace would silently swallow them.
+          const liveLenBefore = displayBuffer.length;
+          const probe = await fetchScrollback(0, 1);
+          if (!probe) { isFetchingHistory = false; return; }
+          const total = probe.total || 0;
+          if (total <= 0) { isFetchingHistory = false; return; }
+          const budget = Math.min(SB_SEED_MAX, Math.max(SB_SEED_MIN, liveLenBefore));
+          const start = scrollbackTailOffset(total, budget);
+          const tail = await fetchScrollback(start, total - start);
+          if (!tail || !tail.data) { isFetchingHistory = false; return; }
+          sbWalk = sbWalk || new ScrollbackWindow();
+          // `offset` comes from the RESPONSE, not from our request: the server
+          // clamps `start` to the buffer it actually held, and seeding the walk
+          // with a coordinate the server did not use is how a walk ends up
+          // hunting for an anchor that was never in its slice.
+          // Number.isFinite, not `typeof === 'number'` — NaN passes that test, and a
+          // NaN seed propagates silently into every subsequent request's offset.
+          sbWalk.noteReplay(tail.data, Number.isFinite(tail.offset) ? tail.offset : start);
+          // Carry those in-flight live bytes over. The length guard is for the
+          // one case that would make the index meaningless — DISPLAY_BUFFER_CAP
+          // trimming the head mid-fetch; dropping them there is still correct,
+          // because the tail slice is then the newer of the two.
+          const liveSince = displayBuffer.length >= liveLenBefore
+            ? displayBuffer.slice(liveLenBefore)
+            : '';
+          reseat = tail.data + liveSince;
         } else {
-          const start = Math.max(0, historyTotal - historyOffset - CHUNK);
-          const len = Math.max(0, (historyTotal - historyOffset) - start);
-          if (len <= 0) { isFetchingHistory = false; return; }
-          url = '/api/sessions/' + encodeURIComponent(sessionId) + '/scrollback?offset=' + start + '&limit=' + len;
+          // --- Deepening pass: one content-anchored step backwards.
+          const req = sbWalk.nextRequest();
+          if (!req) { isFetchingHistory = false; return; }
+          const slice = await fetchScrollback(req.offset, req.limit);
+          if (!slice) { isFetchingHistory = false; return; }
+          const harvest = sbWalk.consume(slice.data || '', req.offset, req.generation);
+          sbWalk.commit(harvest);
+          // A refused step is not an error: the walk stops (or escalates its
+          // anchor and will re-ask the SAME step on the next scroll) rather than
+          // prepend text that is already on screen.
+          if (!harvest.text) { isFetchingHistory = false; return; }
+          newText = harvest.text;
         }
-        const resp = await fetch(url, { credentials: 'include' });
-        if (!resp.ok) { isFetchingHistory = false; return; }
-        const json = await resp.json();
-        const prevTotal = historyTotal;
-        historyTotal = json.total || 0;
-        if (prevTotal === 0) {
-          // Probe complete — total now known. Fetch the real chunk.
-          isFetchingHistory = false;
-          return triggerBackfill();
-        }
-        const olderChunk = json.data || '';
-        if (!olderChunk) { isFetchingHistory = false; return; }
 
         // Pause the live stream and prepare the rewrite.
         historyLoadPending = true;
@@ -2557,8 +2634,12 @@
         const vp = document.querySelector('#terminal .xterm-viewport');
         const oldScrollTop = vp ? vp.scrollTop : 0;
 
-        // Prepend older content into the mirror buffer, then rewrite xterm.
-        displayBuffer = olderChunk + displayBuffer;
+        if (reseat) {
+          displayBuffer = reseat;
+          sbSeeded = true;
+        } else {
+          displayBuffer = newText + displayBuffer;
+        }
         if (displayBuffer.length > DISPLAY_BUFFER_CAP) {
           // Keep the most recent bytes; drop oldest. Note: this also caps how
           // far back we can keep displaying after many backfills.
@@ -2593,7 +2674,10 @@
             }
             try { term.write(msg); } catch (e) {}
           }
-          historyOffset += olderChunk.length;
+          // No counter to advance: the walk's position moved in `commit()`
+          // BEFORE the rewrite, and it is a content anchor rather than a byte
+          // total. Live data drained just above appends to the TAIL, which the
+          // walk never anchors on — it only ever matches the HEAD of the screen.
           isFetchingHistory = false;
         });
       } catch (e) {
