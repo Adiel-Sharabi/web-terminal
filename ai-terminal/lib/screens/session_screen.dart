@@ -33,6 +33,7 @@ import '../services/command_policy.dart';
 import '../services/desktop_alert_service.dart';
 import '../services/detach_window_service.dart';
 import '../services/notification_service.dart';
+import '../services/favorite_toggle.dart';
 import '../services/session_repository.dart';
 import '../services/session_selection.dart';
 import '../services/speech_service.dart';
@@ -3497,6 +3498,37 @@ class _SessionScreenState extends State<SessionScreen>
                         ? 'Stop reading'
                         : 'Read the last answer aloud',
                     onPressed: () => _toggleSpeak(session),
+                  ),
+                // #180 — pin THIS session without going back to the list to
+                // find its row, which on a phone is a whole separate screen.
+                //
+                // It belongs on the meta bar, not the app bar: #74 moved every
+                // session-level control down here precisely because `actions` are
+                // laid out at their intrinsic width first and the title takes the
+                // leftover, so a star up there would silently shorten the name at
+                // exactly the width this control exists to serve. It also sits
+                // among the other session-scoped controls (lens, speak, detach)
+                // rather than the app-scoped ones, which is what it is.
+                //
+                // Hidden — not disabled — when the owning server can't take the
+                // write (#60/#66): `canToggleFavorite` is the SAME gate the list
+                // row uses, so the two can never disagree about whether a session
+                // is pinnable. Reads `session.favorite` directly, which is the
+                // server's answer arriving through the repository subscription, so
+                // starring from the list lights this up with no second copy of the
+                // state.
+                if (canToggleFavorite(session))
+                  IconButton(
+                    visualDensity: VisualDensity.compact,
+                    constraints: const BoxConstraints(minWidth: 36, minHeight: 32),
+                    padding: EdgeInsets.zero,
+                    icon: Icon(
+                      favoriteStarIcon(session.favorite),
+                      size: 20,
+                      color: session.favorite ? AppColors.favorite : null,
+                    ),
+                    tooltip: favoriteStarTooltip(session.favorite),
+                    onPressed: () => toggleSessionFavorite(context, session),
                   ),
                 if (DetachWindow.supported && !widget.standalone)
                   IconButton(

@@ -142,7 +142,7 @@ class FavoritesGroup extends StatelessWidget {
     if (favorites.isEmpty) return const SizedBox.shrink();
 
     final theme = Theme.of(context);
-    const goldColor = Color(0xFFF2C14E);
+    const goldColor = AppColors.favorite;
 
     return Column(
       crossAxisAlignment: CrossAxisAlignment.start,

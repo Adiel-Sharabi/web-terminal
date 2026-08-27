@@ -22,6 +22,10 @@ abstract final class AppColors {
   static const onPrimary = Color(0xFF1A1A2E);
   static const primaryContainer = Color(0xFF0D2E29);
   static const onPrimaryContainer = Color(0xFF00D4AA);
+  /// The pinned-favourite gold. Not a status and not an M3 slot, but it is a
+  /// palette token: it was written as a literal in `session_card.dart` and again
+  /// in `favorites_group.dart`, and #180 would have made it three.
+  static const favorite = Color(0xFFF2C14E);
   static const error = Color(0xFFFF2D4B);
   static const errorContainer = Color(0xFF2B0F16);
 }

@@ -27,6 +27,7 @@ import '../api/models.dart';
 import '../services/app_config.dart';
 import '../services/server_store.dart';
 import '../services/cluster_discovery.dart';
+import '../services/favorite_toggle.dart';
 import '../services/favorites_service.dart';
 import '../services/resource_monitor.dart';
 import '../services/session_repository.dart';
@@ -45,6 +46,13 @@ import '../widgets/session_card.dart';
 import '../widgets/status_dot.dart';
 import 'session_screen.dart';
 import 'settings_screen.dart';
+
+// #180 — `favoriteToggleAllowed` and the toggle itself moved to
+// `services/favorite_toggle.dart` when the session's own meta bar became a SECOND
+// place to star a session. Re-exported here so existing importers — and the tests
+// that pin the gate — keep resolving it from where it has always lived.
+export '../services/favorite_toggle.dart'
+    show favoriteToggleAllowed, canToggleFavorite, toggleSessionFavorite;
 
 const String _kAllServers = 'All';
 
@@ -237,12 +245,8 @@ class _DashboardScreenState extends State<DashboardScreen> {
       // now, never receives a PATCH it can't handle (`onToggleFavorite: null`
       // hides the star entirely, same treatment SessionCard already gives a
       // caller that omits it).
-      onToggleFavorite: favoriteToggleAllowed(
-        supportsFavorites:
-            SessionRepository.instance.supportsFavorites(session.server.baseUrl),
-        serverOnline: SessionRepository.instance.serverOnline[session.server.baseUrl],
-      )
-          ? () => _toggleFavorite(context, session)
+      onToggleFavorite: canToggleFavorite(session)
+          ? () => toggleSessionFavorite(context, session)
           : null,
       // #137 — the wait chip doubles as the cancel. Offered only when this session
       // actually carries a usageLimit: a server too old to send one has no route
@@ -259,32 +263,8 @@ class _DashboardScreenState extends State<DashboardScreen> {
     );
   }
 
-  /// Toggles [session]'s pin (#60): PATCHes the server that OWNS it
-  /// (`ApiClient.setFavorite`) then re-reads via a full repository refresh —
-  /// the star never renders a local guess, only the server's confirmed
-  /// answer. No `rank` is sent: the OWNING server assigns a monotonic
-  /// wall-clock rank itself when pinning (see `Session.pinnedOrder`'s doc) —
-  /// this client never invents a position from the partial set of peers it
-  /// can currently see. On failure (e.g. the owning server just went
-  /// offline), nothing is mutated locally — there is no optimistic flip to
-  /// revert — and the failure is surfaced via a SnackBar, matching every
-  /// other session mutation in this screen (rename/kill/notify-level, see
-  /// session_action_sheet.dart).
-  Future<void> _toggleFavorite(BuildContext context, Session session) async {
-    try {
-      await ApiClient(session.server).setFavorite(session.id, !session.favorite);
-      await SessionRepository.instance.refresh();
-    } catch (e) {
-      if (context.mounted) {
-        ScaffoldMessenger.of(
-          context,
-        ).showSnackBar(SnackBar(content: Text('Favorite failed: $e')));
-      }
-    }
-  }
-
   /// #137 — flips this session's 5-hour auto-resume. Same shape as
-  /// [_toggleFavorite]: write to the OWNING server, then refresh so the chip
+  /// [toggleSessionFavorite]: write to the OWNING server, then refresh so the chip
   /// re-renders from the server's answer rather than an optimistic local guess.
   Future<void> _toggleAutoResume(BuildContext context, Session session) async {
     final next = !(session.usageLimit?.enabled ?? true);
@@ -609,20 +589,6 @@ List<Session> visibleFavoriteSessions(
     sessions
         .where((s) => serverOnline[s.server.baseUrl] != false)
         .toList(growable: false);
-
-/// Whether the pin/unpin star should be offered for a session on its owning
-/// server (#60 + #66): the server must both advertise `favorites-sync` AND
-/// be currently reachable. An offline server would only ever fail the PATCH,
-/// so the star is hidden (`onToggleFavorite: null`, the same convention
-/// [SessionCard] already gives a caller that omits it) rather than wired to
-/// a guaranteed failure. Pulled out so the gate is unit-testable without
-/// pumping the dashboard.
-@visibleForTesting
-bool favoriteToggleAllowed({
-  required bool supportsFavorites,
-  required bool? serverOnline,
-}) =>
-    supportsFavorites && serverOnline != false;
 
 /// Orders a server group's sessions by the server's persisted (drag) order
 /// (issue #22) instead of the flat attention/recency sort, so a user-set order
