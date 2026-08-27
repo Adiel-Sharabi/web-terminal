@@ -4,9 +4,9 @@
 // its pushed status line. Shapes captured from real codex-cli 0.134.0 rollouts.
 const { test, expect } = require('@playwright/test');
 const fs = require('fs');
-const os = require('os');
 const path = require('path');
 const { parseMetricsFromTail } = require('../lib/metrics-codex');
+const { codexSessionsRoot, isFixtureRollout } = require('./test-helpers');
 
 const line = (type, payload, timestamp = '2026-07-10T00:00:00.000Z') =>
   JSON.stringify({ timestamp, type, payload });
@@ -212,8 +212,16 @@ test('fiveHResetAt against a REAL validated rollout sample (2026-07-10, codex 0.
 });
 
 // ---- against a REAL rollout on this machine ---------------------------------
+// "Real" is load-bearing and was not enforced (#177). This picks the NEWEST
+// rollout by mtime, and the suite's own generated fixtures — written into this
+// same real tree by recap-api / agents-api / usage-rollup / metrics-codex-api /
+// transcript-refresh — are always newer than anything Codex actually wrote. They
+// carry no `token_count`, so `parseMetricsFromTail` returns null and this test
+// failed with "a real rollout yields metrics" on every machine that had ever
+// been interrupted mid-suite. Skipping the reserved fixture years keeps the
+// assertion about Codex's format rather than about the last run's tidiness.
 function newestRollout() {
-  const root = path.join(os.homedir(), '.codex', 'sessions');
+  const root = codexSessionsRoot();
   const found = [];
   const walk = (dir) => {
     let entries = [];
@@ -221,7 +229,9 @@ function newestRollout() {
     for (const e of entries) {
       const p = path.join(dir, e.name);
       if (e.isDirectory()) walk(p);
-      else if (e.name.startsWith('rollout-') && e.name.endsWith('.jsonl')) found.push(p);
+      else if (e.name.startsWith('rollout-') && e.name.endsWith('.jsonl') && !isFixtureRollout(p)) {
+        found.push(p);
+      }
     }
   };
   walk(root);
@@ -231,7 +241,11 @@ function newestRollout() {
 
 test('parses plausible metrics out of a real Codex rollout', () => {
   const file = newestRollout();
-  test.skip(!file, 'no Codex rollouts on this machine');
+  // An explicit, stated skip: this asserts against whatever Codex last wrote on
+  // this machine, so a box that has never run Codex has nothing to check. It is
+  // a corroboration of the format, not a gate — the parser's own rules are
+  // pinned by the fixture-driven tests above.
+  test.skip(!file, 'no real (non-fixture) Codex rollouts on this machine');
   const m = parseMetricsFromTail(fs.readFileSync(file, 'utf8'));
   expect(m, 'a real rollout yields metrics').not.toBeNull();
   if (m.ctx !== null) {

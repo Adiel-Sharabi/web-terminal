@@ -50,6 +50,18 @@ const DIRS = Object.freeze({
    * must never write into the real `~/.codex`.
    */
   codexHooks: process.env.WT_CODEX_HOOKS_DIR || path.join(PARENT, 'codex-hook-probe'),
+  /**
+   * Throwaway working directories for the Playwright suite (#177).
+   *
+   * A spec that asserts "this session has NO transcript" needs a cwd no agent
+   * has ever run in. The default is `WT_CWD` = `%TEMP%` (playwright.config.js),
+   * which is emphatically not that: several specs write Codex rollout fixtures
+   * declaring `cwd: %TEMP%`, and transcript resolution matches a rollout to a
+   * session BY CWD — so those fixtures answer for every "no transcript"
+   * session in the suite. An empty directory nothing else names is what makes
+   * the assertion a property of the test instead of of the machine.
+   */
+  tests: process.env.WT_TESTS_DIR || path.join(PARENT, 'wt-tests'),
 });
 
 /** `C:\dev\x\y` -> `/c/dev/x/y`, the form Git Bash needs. */

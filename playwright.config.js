@@ -21,6 +21,10 @@ module.exports = defineConfig({
   retries: 0,
   workers: 1,
   testIgnore: ['**/diagnostic*', '**/mobile-debug*', '**/paste-diag*'],
+  // #177: sweep Codex rollout fixtures an interrupted earlier run left in the
+  // real ~/.codex/sessions tree. They match on cwd and are the newest rollouts
+  // on disk, so they answer for specs asserting "no transcript" until removed.
+  globalSetup: path.join(__dirname, 'tests', 'global-setup.js'),
   globalTeardown: path.join(__dirname, 'tests', 'global-teardown.js'),
   use: {
     baseURL: 'http://127.0.0.1:17681',

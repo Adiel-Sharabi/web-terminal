@@ -14,10 +14,10 @@
 // (`completed`, `killed`) are all as Claude Code actually writes them.
 const { test, expect, request: pwRequest } = require('@playwright/test');
 const fs = require('fs');
-const os = require('os');
 const path = require('path');
 const { scanBackgroundTasks } = require('../lib/background-tasks');
 const agents = require('../lib/agents');
+const { claudeProjectsRoot } = require('./test-helpers');
 
 const BASE = 'http://127.0.0.1:17681';
 const AUTH = { user: 'testuser', password: 'testpass:colon' };
@@ -301,15 +301,6 @@ test.describe('GET /api/sessions carries backgroundTasks', () => {
 
 // safeTranscriptPath() only trusts a .jsonl strictly under the realpath'd Claude
 // projects root, so a fixture must live there. Mirrors transcript-api.spec.js.
-function claudeProjectsRoot() {
-  let home = '';
-  try {
-    const cfg = JSON.parse(fs.readFileSync(path.join(__dirname, '..', 'config.json'), 'utf8'));
-    if (cfg && cfg.claudeHome) home = String(cfg.claudeHome);
-  } catch {}
-  if (!home) home = process.env.USERPROFILE || os.homedir();
-  return path.join(home, '.claude', 'projects');
-}
 
 // A launch whose finish never arrives must still stop being badged.
 //

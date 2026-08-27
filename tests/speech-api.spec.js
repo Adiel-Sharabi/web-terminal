@@ -9,22 +9,12 @@
 // EMPTY string rather than falling back to reading the code aloud.
 const { test, expect } = require('@playwright/test');
 const fs = require('fs');
-const os = require('os');
 const path = require('path');
-const { authCtx, noAuthCtx } = require('./test-helpers');
+const { authCtx, noAuthCtx, emptyCwd, claudeProjectsRoot } = require('./test-helpers');
 
 // Mirror server.js detectClaudeHome() so fixtures land under the ONE trusted
 // projects root that safeTranscriptPath() will accept (same approach as
 // transcript-api.spec.js).
-function claudeProjectsRoot() {
-  let home = '';
-  try {
-    const cfg = JSON.parse(fs.readFileSync(path.join(__dirname, '..', 'config.json'), 'utf8'));
-    if (cfg && cfg.claudeHome) home = String(cfg.claudeHome);
-  } catch {}
-  if (!home) home = process.env.USERPROFILE || os.homedir();
-  return path.join(home, '.claude', 'projects');
-}
 const FIXTURE_DIR = path.join(claudeProjectsRoot(), '__wt-speech-fixture__');
 let _n = 0;
 
@@ -66,7 +56,11 @@ test.describe('Session speech (#70)', () => {
 
   test('404 when the session has no stashed/derivable transcript', async () => {
     const ctx = await authCtx();
-    const id = (await (await ctx.post('/api/sessions', { data: { name: 'Sp None' } })).json()).id;
+    // #177: an EMPTY cwd of its own — see the same note in transcript-api.spec.js.
+    // The default (%TEMP%) is a directory the suite's own Codex fixtures declare.
+    const id = (await (await ctx.post('/api/sessions', {
+      data: { name: 'Sp None', cwd: emptyCwd('sp-none') },
+    })).json()).id;
     try {
       const res = await ctx.get(`/api/sessions/${id}/speech`);
       expect(res.status()).toBe(404);

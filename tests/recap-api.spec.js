@@ -15,17 +15,7 @@ const { test, expect } = require('@playwright/test');
 const fs = require('fs');
 const os = require('os');
 const path = require('path');
-const { authCtx, noAuthCtx } = require('./test-helpers');
-
-function codexSessionsRoot() {
-  let home = '';
-  try {
-    const cfg = JSON.parse(fs.readFileSync(path.join(__dirname, '..', 'config.json'), 'utf8'));
-    if (cfg && cfg.claudeHome) home = String(cfg.claudeHome);
-  } catch {}
-  if (!home) home = process.env.USERPROFILE || os.homedir();
-  return path.join(home, '.codex', 'sessions');
-}
+const { authCtx, noAuthCtx, codexSessionsRoot, emptyCwd } = require('./test-helpers');
 
 const FIXTURE_DIR = path.join(codexSessionsRoot(), '2098', '01', '01');
 const created = [];
@@ -97,7 +87,14 @@ test.describe('GET /api/sessions/:id/recap', () => {
     // The degrade contract. A plain shell has nothing to parse, but name/cwd/status
     // are exactly what tells you which window this is.
     const ctx = await authCtx();
-    const s = await mkSession(ctx, { name: 'recap-plain', autoCommand: '' });
+    // #177: an EMPTY cwd of its own. This file writes Codex fixtures declaring
+    // `cwd: %TEMP%`, which is also the default cwd of every session the suite
+    // creates — so on a run that inherited a leaked fixture, THIS session (a
+    // plain shell, asserting it has no conversation) was served that fixture's
+    // prompt. The degrade contract can only be tested from a cwd no rollout names.
+    const s = await mkSession(ctx, {
+      name: 'recap-plain', autoCommand: '', cwd: emptyCwd('recap-plain'),
+    });
     const res = await ctx.get(`/api/sessions/${s.id}/recap`);
     expect(res.status()).toBe(200);
     const card = await res.json();
