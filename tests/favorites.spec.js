@@ -514,12 +514,23 @@ test.describe('Sidebar UI: favorites', () => {
     }
   });
 
-  test('#180: with no session open the header shows no star to press', async ({ page }) => {
-    // A pin is a property of a session. With none open there is nothing to pin, and
-    // an inert star would just be a control that does nothing.
+  test('#180: no star for a session the list does not hold', async ({ page }) => {
+    // A pin is a property of a session, so when the open session is not in the list
+    // — killed on its owning server, or that peer offline — there is nothing to pin
+    // and the header shows no control rather than an inert one.
+    //
+    // Driven through renderHeaderFavorite directly rather than by loading "/" and
+    // hoping no session is open: whether "/" auto-opens one depends on what other
+    // specs left behind, which passed here and failed on CI. The branch under test
+    // is "current session not found in this data", and handing it data that does
+    // not contain it is the deterministic way to reach it.
     await loginPage(page);
     await page.goto(BASE + '/');
     await expect(page.locator('#favSlot')).toHaveCount(1);
-    await expect(page.locator('#favSlot .sb-star')).toHaveCount(0);
+    const html = await page.evaluate(() => {
+      window.renderHeaderFavorite({ sessions: [], servers: [] });
+      return document.getElementById('favSlot').innerHTML;
+    });
+    expect(html).toBe('');
   });
 });
