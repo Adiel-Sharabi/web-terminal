@@ -93,11 +93,45 @@ class SessionCard extends StatelessWidget {
   /// draws a primary-colored outline so the active session is obvious.
   final bool selected;
 
-  /// Optional drag handle (issue #22). The main list wraps a handle icon in a
-  /// `ReorderableDragStartListener` so the row can be drag-reordered by the
-  /// handle only — the whole-card long-press stays bound to the actions sheet.
-  /// `null` (favorites, split view) shows no handle.
+  /// Optional drag handle (issue #22; `buildReorderDragHandle` is the one place
+  /// it is built). The row is drag-reordered by the handle only — the
+  /// whole-card long-press stays bound to the actions sheet. `null` (split
+  /// view, an unreorderable row) shows no handle.
+  ///
+  /// **It is rendered as a SIBLING of the card's `InkWell`, never a descendant
+  /// — and that is the whole feature, not a layout preference (#169).** Inside
+  /// the `InkWell` the card's `onLongPress` owns the handle's own pixels, and
+  /// both recognizers commit at the same `kLongPressTimeout` with no movement
+  /// required, so a press-and-HOLD on the handle opened the actions sheet and
+  /// started no drag. Only press-and-move worked — which is why the main list
+  /// got away with it from #22 until #169 put the same handle on a group whose
+  /// users had been taught to press and hold. Keep the handle out of the
+  /// `InkWell`'s subtree and both idioms work.
+  ///
+  /// Sibling, but **overlaid, never inserted** — see [_withDragHandle] for why
+  /// laying the two out side by side costs the card both its second row's width
+  /// and its right-hand tap target.
   final Widget? dragHandle;
+
+  /// Vertical inset that keeps a trailing [dragHandle]'s 18dp glyph level with
+  /// the title row's icons now that it hangs outside the card's `InkWell` (and
+  /// so no longer rides that `Row`'s centre alignment):
+  /// `listRowVertical (12) + (titleRowHeight (24) − glyph (18)) / 2 = 15`.
+  ///
+  /// Doubling as the handle's own padding is what gives it a **48dp-tall touch
+  /// target** — Material's minimum — for free: the strip is shorter than the
+  /// card, so the row does not grow, and the glyph does not move. Pinned by
+  /// `session_card_test.dart` ("the handle stays level with the ⋮ button").
+  static const double dragHandleInset = 15;
+
+  /// How much horizontal room a trailing [dragHandle] needs, expressed once so
+  /// the title row's reservation and `buildReorderDragHandle`'s own build can
+  /// never disagree: the 18dp glyph plus the 4dp gap that separates it from the
+  /// ⋮ button. Pinned by `session_card_test.dart` ("the reserved strip is
+  /// exactly as wide as the handle").
+  static const double dragHandleGlyph = 18;
+  static const double dragHandleGap = 4;
+  static const double dragHandleWidth = dragHandleGap + dragHandleGlyph;
 
   @override
   Widget build(BuildContext context) {
@@ -151,10 +185,13 @@ class SessionCard extends StatelessWidget {
         border: border,
       ),
       clipBehavior: Clip.antiAlias,
-      child: InkWell(
+      child: _withDragHandle(InkWell(
         onTap: onTap,
         onLongPress: onLongPress,
         child: Padding(
+          // Unconditional, and direction-neutral: a handle is painted OVER this
+          // padding by [_withDragHandle], never inserted beside it, so the body
+          // keeps the full width of the card whether or not the row has one.
           padding: const EdgeInsets.symmetric(
             horizontal: AppSpacing.listRowHorizontal,
             vertical: AppSpacing.listRowVertical,
@@ -194,7 +231,15 @@ class SessionCard extends StatelessWidget {
                       tooltip: 'More actions',
                       onTap: onMoreTap,
                     ),
-                  ?dragHandle,
+                  // The strip [_withDragHandle] paints the handle into. The
+                  // TITLE row reserves it and no other row does — the handle
+                  // sits on this line, and the ones below it never contained
+                  // it. Reserving it card-wide (which is what giving up the
+                  // body's right padding amounted to) silently narrowed the
+                  // status/star/timestamp row by this much on every handled
+                  // row of the MAIN list too, and made it overflow.
+                  if (dragHandle != null)
+                    const SizedBox(width: dragHandleWidth),
                 ],
               ),
               const SizedBox(height: 4),
@@ -336,7 +381,45 @@ class SessionCard extends StatelessWidget {
             ],
           ),
         ),
-      ),
+      )),
+    );
+  }
+
+  /// Paints [dragHandle] OVER the card's `InkWell` rather than beside it —
+  /// outside its subtree (which is the feature, see [dragHandle]) but not
+  /// outside its box.
+  ///
+  /// **A `Row[ Expanded(body), handle ]` is the obvious shape and is wrong
+  /// twice.** It takes the strip out of the body, so every row of the card
+  /// narrows — but only the TITLE row ever held the handle, so the status /
+  /// star / timestamp row below simply loses [dragHandleWidth] and starts
+  /// overflowing. And it makes the 16dp gutter a SIBLING of the `InkWell`
+  /// instead of part of it, so roughly a tenth of the card's width stops
+  /// opening the session and the ink ripple stops short of the edge. Both
+  /// costs land on the main per-server list as well, because the card is
+  /// shared. The `Stack` has neither: the body keeps the card's full width and
+  /// the whole of its own padding, the title row alone reserves the strip
+  /// ([dragHandleWidth], above), and only the handle's own 22x48 box is
+  /// subtracted from the `InkWell` — which is exactly the pixels that must not
+  /// carry a long-press.
+  ///
+  /// `top: 0` is what puts the glyph on the title line: [dragHandleInset] is
+  /// sized from the card's own top, so the handle's centre lands on the ⋮.
+  /// The `Stack` sizes itself to [body] (the only non-positioned child), so a
+  /// handle can never make a row taller. `PositionedDirectional` so the strip
+  /// follows text direction, like the padding it overlays.
+  Widget _withDragHandle(Widget body) {
+    final handle = dragHandle;
+    if (handle == null) return body;
+    return Stack(
+      children: [
+        body,
+        PositionedDirectional(
+          top: 0,
+          end: AppSpacing.listRowHorizontal,
+          child: handle,
+        ),
+      ],
     );
   }
 }

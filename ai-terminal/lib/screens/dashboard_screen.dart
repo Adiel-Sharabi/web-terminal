@@ -255,23 +255,7 @@ class _DashboardScreenState extends State<DashboardScreen> {
         session,
         onChanged: SessionRepository.instance.refresh,
       ),
-      // Issue #22: drag handle only in the main per-server list. The handle
-      // (not the whole card) starts a reorder, so the card's long-press stays
-      // bound to the actions sheet. ReorderableDragStartListener works for both
-      // a desktop mouse-drag and a mobile touch-drag on the handle.
-      dragHandle: reorderIndex == null
-          ? null
-          : ReorderableDragStartListener(
-              index: reorderIndex,
-              child: Padding(
-                padding: const EdgeInsets.only(left: 4),
-                child: Icon(
-                  Icons.drag_handle,
-                  size: 18,
-                  color: Theme.of(context).colorScheme.onSurfaceVariant,
-                ),
-              ),
-            ),
+      dragHandle: buildReorderDragHandle(context, reorderIndex),
     );
   }
 
@@ -487,8 +471,20 @@ class _DashboardScreenState extends State<DashboardScreen> {
                       SliverToBoxAdapter(
                         child: FavoritesGroup(
                           sessions: visibleFavoriteSessions(sessions, online),
-                          cardBuilder: (context, s) =>
-                              _buildCard(context, s, favoriteRow: true),
+                          // #169: the group decides whether a pinned row carries
+                          // its own handle (touch) or is grabbed whole (pointer)
+                          // and says so with the index — the handle itself is
+                          // still built in exactly one place,
+                          // [buildReorderDragHandle]. Dropping `reorderIndex`
+                          // here silently un-reorders the whole group on a
+                          // phone: `dashboard_favorites_handle_test.dart` is the
+                          // only test that goes red for it.
+                          cardBuilder: (context, s, reorderIndex) => _buildCard(
+                            context,
+                            s,
+                            favoriteRow: true,
+                            reorderIndex: reorderIndex,
+                          ),
                           collapsed: _isCollapsed(kFavoritesGroupKey),
                           onToggleCollapsed: () =>
                               _toggleCollapsed(kFavoritesGroupKey),
@@ -546,6 +542,54 @@ class _DashboardScreenState extends State<DashboardScreen> {
       },
     );
   }
+}
+
+/// The reorder grab affordance for a row at [index], or `null` when the row is
+/// not reorderable (`index == null`) — **the one and only place this app builds
+/// a drag handle** (#22, #169). Both the per-server main list and, on touch, the
+/// pinned Favorites group hand their index here, so the affordance can never
+/// drift between the two.
+///
+/// [SessionCard] renders it in a trailing strip that is a SIBLING of the card's
+/// `InkWell` — painted OVER it, never inserted beside it — see
+/// [SessionCard.dragHandle] and `SessionCard._withDragHandle`. That is what
+/// makes an IMMEDIATE drag recognizer safe here: with no long-press armed on the
+/// handle's own pixels, press-and-move drags AND press-hold-then-move drags,
+/// because [ImmediateMultiDragGestureRecognizer] has no deadline of its own — it
+/// simply waits for the first movement, whenever it comes.
+///
+/// The [SessionCard.dragHandleInset] padding lives INSIDE the listener on
+/// purpose: `Listener` defers hit-testing to its child, so padding placed
+/// outside would look like a bigger target and behave like an 18dp one. The
+/// transparent [ColoredBox] is what makes that padded box hit-testable at all
+/// (it is `HitTestBehavior.opaque` and paints nothing) — together they give the
+/// glyph a 48dp-tall touch target without moving it or growing the row.
+///
+/// Built to [SessionCard.dragHandleGap] + [SessionCard.dragHandleGlyph] rather
+/// than to two literals, because the card's title row reserves exactly that sum
+/// ([SessionCard.dragHandleWidth]) for the strip this is painted into. The
+/// inset is `EdgeInsetsDirectional`: the strip follows text direction, so the
+/// gap has to sit between the glyph and the ⋮ in RTL as well as LTR.
+Widget? buildReorderDragHandle(BuildContext context, int? index) {
+  if (index == null) return null;
+  return ReorderableDragStartListener(
+    index: index,
+    child: ColoredBox(
+      color: Colors.transparent,
+      child: Padding(
+        padding: const EdgeInsetsDirectional.only(
+          start: SessionCard.dragHandleGap,
+          top: SessionCard.dragHandleInset,
+          bottom: SessionCard.dragHandleInset,
+        ),
+        child: Icon(
+          Icons.drag_handle,
+          size: SessionCard.dragHandleGlyph,
+          color: Theme.of(context).colorScheme.onSurfaceVariant,
+        ),
+      ),
+    ),
+  );
 }
 
 /// The pinned Favorites group's session list with any session whose owning
