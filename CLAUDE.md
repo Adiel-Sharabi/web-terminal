@@ -119,6 +119,53 @@ most likely to be clicked. The client always receives the full shape.
 > onto a server-published field is a separate additive change, **not** a "keep them in
 > sync" instruction.
 
+## Scrollback has TWO byte spaces, and they diverge at the HEAD (#167/#176/#178)
+
+**A byte offset into a session's scrollback is not a position.** `pty-worker.js`
+trims the buffer's HEAD on every PTY write (2 MB cap), so `offset 0` names a
+different byte on every request while `total` sits pinned at the cap — and
+nothing on the wire says so. Every paging bug in this area (#167 on the
+companion, #178 on `app.html`) is that one fact, met from a different direction.
+The rule everywhere is now: **anchor on CONTENT, over-fetch so the anchor is
+inside the slice, cut where it reappears, and STOP rather than guess** — the
+failure mode is less history, never history that repeats and never a silent hole.
+
+**And the server builds two DIFFERENT strings from that one buffer:**
+
+| | how it is built |
+|---|---|
+| the WS attach replay (`server.js` ~:5204) | **truncate** the raw buffer to `scrollbackReplayLimit`, **then** `sanitizeReplay` |
+| `GET /api/sessions/:id/scrollback` (~:4729) | `sanitizeReplay` the **whole** buffer, **then** slice by `offset`/`limit` |
+
+`sanitizeReplay` is length-changing **and stateful** — it tracks alt-screen from
+the start of whatever string it is given — so those two orders are **not**
+equivalent. Measured 2026-08-27 against a live server, comparing the two over the
+same buffer:
+
+| content | replay is an exact substring of `/scrollback` | common **suffix** run |
+|---|---|---|
+| plain text | **yes**, at exactly `httpLen - replayLen` | 32768 / 32768 |
+| escape-heavy (DA/DSR/ED + alt-screen) | **no** | **30947 / 31517** |
+
+The escape-heavy divergence is at the **head**, and its mechanism is exact: the
+truncated copy begins mid-stream, never sees the earlier `ESC[?1049h`, believes it
+is outside alt-screen, and strips an `ESC[2J` the whole-buffer pass keeps.
+
+**So: they agree over the TAIL and disagree near the HEAD.** Any rule that has to
+line the two up must take its anchor from the **end of what is on screen**, never
+from the head of an incoming replay — which is exactly what
+`ai-terminal/lib/util/attach_overlap.dart` does (#176), and why
+`tests/attach-replay-overlap.spec.js` pins the invariant **on the server**, with a
+2x margin over the companion's 4096-unit anchor. That gate is server-side on
+purpose: reordering either sanitise pass is a server change, and it would
+otherwise surface only as #176 coming back on a client nobody was testing.
+
+The attach replay also carries an `ESC[?2004h` prefix when the session is in
+bracketed-paste mode (`pty-worker.js`). That is terminal **state**, not content —
+it is not in the scrollback and can never match an anchor, so a cut must preserve
+it rather than treat it as duplicate bytes. It is why the measured replay was
+32776 and not 32768.
+
 ## The companion vendors `xterm` — do not undo it (#81)
 
 `ai-terminal/third_party/xterm` is stock xterm 4.0.0 **plus one patch**, wired in by
