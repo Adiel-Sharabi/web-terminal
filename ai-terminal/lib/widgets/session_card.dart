@@ -18,6 +18,7 @@ import 'package:flutter/material.dart';
 
 import '../api/models.dart';
 import '../api/agent_catalog.dart';
+import '../services/favorite_toggle.dart';
 import '../theme/app_theme.dart';
 import '../theme/status_colors.dart';
 import 'attention_chip.dart';
@@ -332,13 +333,11 @@ class SessionCard extends StatelessWidget {
                       ),
                     if (onToggleFavorite != null)
                       _IconTapTarget(
-                        icon: isFavorite ? Icons.star : Icons.star_border,
+                        icon: favoriteStarIcon(isFavorite),
                         iconColor: isFavorite
-                            ? const Color(0xFFF2C14E)
+                            ? AppColors.favorite
                             : theme.colorScheme.onSurfaceVariant,
-                        tooltip: isFavorite
-                            ? 'Remove from favorites'
-                            : 'Add to favorites',
+                        tooltip: favoriteStarTooltip(isFavorite),
                         onTap: onToggleFavorite,
                       ),
                     const SizedBox(width: 4),

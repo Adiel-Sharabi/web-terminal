@@ -65,8 +65,9 @@ Any other CLI runs fine as a plain shell — it just gets no agent-specific feat
 ## Highlights
 
 **Sessions** — multiple terminals, instant switching, persistence across restarts, lazy
-scrollback, drag-to-reorder, server-side favourites shared by every client, and a one-click
-recap answering *"where was I in this one?"*
+scrollback, drag-to-reorder, server-side favourites shared by every client (starred from
+the session list or from the open session itself), and a one-click recap answering
+*"where was I in this one?"*
 
 **Agent integration** — live status dots, task-list panel, rich tool cards, subagent
 drill-in, context-window and rate-limit badges, background-work indicator, and read-aloud

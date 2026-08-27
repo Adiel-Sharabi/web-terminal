@@ -449,4 +449,88 @@ test.describe('Sidebar UI: favorites', () => {
       await ctx.dispose();
     }
   });
+
+  // --- #180: the same pin, from the session's own header ---------------------
+  // The point of the feature is that you can star the session you are LOOKING at,
+  // without going back to the list to find its row — which on a phone is a whole
+  // separate screen. The point of these tests is that doing so drives the SAME
+  // state: there must not be a second "is this a favourite" anywhere.
+
+  test('#180: the header star pins the open session, and the sidebar row follows', async ({ page }) => {
+    await loginPage(page);
+    const ctx = await authCtx();
+    const created = (await (await ctx.post('/api/sessions', { data: { name: 'Hdr Fav' } })).json()).id;
+    page.on('dialog', d => d.dismiss().catch(() => {}));
+    try {
+      await page.goto(BASE + '/app/' + created);
+      const headerStar = page.locator('#favSlot .sb-star');
+      await expect(headerStar).toBeVisible({ timeout: 10000 });
+      await expect(headerStar).not.toHaveClass(/(^|\s)on(\s|$)/);
+      expect((await favOf(ctx, created)).favorite).toBe(false);
+
+      await headerStar.click();
+
+      // The SERVER holds the pin — the same write the row makes.
+      await expect.poll(async () => (await favOf(ctx, created)).favorite, { timeout: 5000 }).toBe(true);
+      await expect(headerStar).toHaveClass(/(^|\s)on(\s|$)/);
+
+      // ...and the row and the pinned group agree, without a reload. This is the
+      // assertion that would fail if the header kept its own copy of the state.
+      await expect(page.locator(`.sb-item[data-session-id="${created}"] .sb-star`))
+        .toHaveClass(/(^|\s)on(\s|$)/, { timeout: 5000 });
+      await expect(page.locator(`.sb-fav-item[data-fav-id="${created}"]`)).toBeVisible();
+
+      // Unstarring from the header removes the pin rather than stranding it (#66).
+      await headerStar.click();
+      await expect.poll(async () => (await favOf(ctx, created)).favorite, { timeout: 5000 }).toBe(false);
+      await expect(headerStar).not.toHaveClass(/(^|\s)on(\s|$)/);
+      await expect(page.locator(`.sb-fav-item[data-fav-id="${created}"]`)).toHaveCount(0);
+    } finally {
+      try { await ctx.delete(`/api/sessions/${created}`); } catch {}
+      await ctx.dispose();
+    }
+  });
+
+  test('#180: starring from the sidebar row lights the header star too', async ({ page }) => {
+    // The other direction. Both are driven by renderSidebar(), so this is really
+    // asserting that the header is a VIEW of the session list rather than a copy.
+    await loginPage(page);
+    const ctx = await authCtx();
+    const created = (await (await ctx.post('/api/sessions', { data: { name: 'Hdr Fav 2' } })).json()).id;
+    page.on('dialog', d => d.dismiss().catch(() => {}));
+    try {
+      await page.goto(BASE + '/app/' + created);
+      const headerStar = page.locator('#favSlot .sb-star');
+      await expect(headerStar).toBeVisible({ timeout: 10000 });
+      await expect(headerStar).not.toHaveClass(/(^|\s)on(\s|$)/);
+
+      await page.locator(`.sb-item[data-session-id="${created}"] .sb-star`).click();
+
+      await expect(headerStar).toHaveClass(/(^|\s)on(\s|$)/, { timeout: 5000 });
+      await expect.poll(async () => (await favOf(ctx, created)).favorite, { timeout: 5000 }).toBe(true);
+    } finally {
+      try { await ctx.delete(`/api/sessions/${created}`); } catch {}
+      await ctx.dispose();
+    }
+  });
+
+  test('#180: no star for a session the list does not hold', async ({ page }) => {
+    // A pin is a property of a session, so when the open session is not in the list
+    // — killed on its owning server, or that peer offline — there is nothing to pin
+    // and the header shows no control rather than an inert one.
+    //
+    // Driven through renderHeaderFavorite directly rather than by loading "/" and
+    // hoping no session is open: whether "/" auto-opens one depends on what other
+    // specs left behind, which passed here and failed on CI. The branch under test
+    // is "current session not found in this data", and handing it data that does
+    // not contain it is the deterministic way to reach it.
+    await loginPage(page);
+    await page.goto(BASE + '/');
+    await expect(page.locator('#favSlot')).toHaveCount(1);
+    const html = await page.evaluate(() => {
+      window.renderHeaderFavorite({ sessions: [], servers: [] });
+      return document.getElementById('favSlot').innerHTML;
+    });
+    expect(html).toBe('');
+  });
 });

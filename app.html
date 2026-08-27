@@ -473,6 +473,16 @@
     <button class="tb-btn" onclick="toggleSidebar()" title="Sessions panel">&#9776;</button>
     <span id="sessionName" class="session-name" onclick="renameCurrentSession()" title="Click to rename">(no session)</span>
     <span id="hostName" style="color:#00d4aa; font-weight:500; margin-left:8px;"></span>
+    <!-- #180: favorite THIS session without going back to the sidebar to find its row.
+         It sits with the identity rather than in the right-hand cluster on purpose:
+         that cluster is app-scoped (mute / speak / refresh / logout) while a pin is a
+         property of the session, like its name. Fixed width and placed AFTER the title,
+         so the title's existing truncation (#74) absorbs the pressure at phone width and
+         the star never disappears at exactly the size where the sidebar is hardest to
+         reach. Markup is filled by starHtml() — the SAME owner the sidebar rows use, so
+         glyph, colour, tooltip and the disabled "server can't sync" state can never
+         drift between the two places a session can be starred. -->
+    <span id="favSlot" style="margin-left:6px; display:inline-flex; align-items:center;"></span>
 
     <button id="muteBtn" class="tb-btn" onclick="toggleMute()" title="Mute notifications" style="font-size:14px">&#x1F514;</button>
     <!-- #70 Phase 1: read the agent's last answer aloud. Hidden entirely when the
@@ -1359,6 +1369,10 @@
 
       sessionId = id;
       sessionServerUrl = serverUrl || null;
+      // #180 — repaint the header star for the session we just moved to. renderSidebar()
+      // does this too, but it only runs here when the sidebar happens to be OPEN, which on
+      // a phone it never is — and the phone is the case this control was asked for.
+      renderHeaderFavorite(_sidebarData);
       history.pushState({ id, serverUrl: sessionServerUrl }, '', '/app/' + id);
       term.clear();
       term.reset();
@@ -3555,6 +3569,7 @@
 
     function renderSidebar(data) {
       clusterServers = data.servers;
+      renderHeaderFavorite(data);   // #180 — same data, same rules, same starHtml()
 
       // Issue #20: refresh the direct-URL cache from the fresh session list.
       // Tokens are only valid for 60s, so rebuilding on every sidebar load
@@ -3872,6 +3887,29 @@
     // write. The rank comes back FROM the server (it owns that decision), so a pin is
     // ordered by when it was made — no client ever invents a rank out of the peers it
     // happens to be able to see. A failed write re-reads the truth and says so.
+    // #180 — the header's star. NOT a second copy of "is this a favourite": it reads the
+    // same session object the sidebar renders from, paints it with the same starHtml(),
+    // and toggles through the same toggleFavorite(). Because toggleFavorite() re-renders
+    // the sidebar on every state change (optimistic, then again with the server's answer,
+    // and once more on a rollback), hooking this into renderSidebar() is what keeps the
+    // header and the row honest with each other in BOTH directions for free.
+    function renderHeaderFavorite(data) {
+      const slot = document.getElementById('favSlot');
+      if (!slot) return;
+      const list = (data && data.sessions) || [];
+      // Match on server too: the sidebar merges every peer's sessions, so an id alone is
+      // not an identity across the cluster.
+      const cur = sessionId
+        ? list.find(x => x.id === sessionId && (x.serverUrl || '') === (sessionServerUrl || ''))
+        : null;
+      if (!cur) { slot.textContent = ''; return; }   // no session, or not in the list yet
+      slot.innerHTML = starHtml(cur);
+      const btn = slot.querySelector('.sb-star');
+      if (btn && !btn.disabled) {
+        btn.addEventListener('click', (e) => { e.stopPropagation(); toggleFavorite(cur); });
+      }
+    }
+
     async function toggleFavorite(s) {
       if (!favoritesSupported(s)) return;   // no route on that server — never PATCH into a 404
       const on = !isFavorite(s);
