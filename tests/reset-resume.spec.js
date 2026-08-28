@@ -650,7 +650,7 @@ test.describe('#69 — 5h usage-limit auto-resume', () => {
     }
   });
 
-  test('#138 — a CODEX session loads its window but is never auto-resumed (deferred)', async () => {
+  test('#142 — a CODEX session loads its window but is never auto-resumed (permanent decision)', async () => {
     const pipe = workerPipePath();
     const dataDir = makeTempDataDir();
     const worker = spawnWorker(pipe, dataDir, { WT_AUTO_RESUME_ON_RESET: '1' });
@@ -660,11 +660,13 @@ test.describe('#69 — 5h usage-limit auto-resume', () => {
       const { id } = await rpc(client, 'createSession', { cwd: os.tmpdir(), name: 'codex-noarm', agent: 'codex', autoCommand: '' });
 
       // Codex reports a real reset time from its rollout, and a real block - so the
-      // session list still shows it as held. But nothing may TYPE into it: what a
-      // capped Codex session looks like has not been captured the way Claude's has,
-      // and arming off an inferred percentage for an unseen blocked state is the
-      // guesswork the gate exists to prevent. Flip lib/agents.js autoResume.arm when
-      // that evidence exists (#142).
+      // session list still shows it as held. But nothing may TYPE into it, and this
+      // is now a DECIDED outcome rather than a gap awaiting evidence: #142 captured a
+      // real Codex cap event (Office, 2026-08-02T20:26:58.735Z) and it does not block
+      // on anything answerable — the turn ends and the composer returns on its own,
+      // so there is nothing stuck for an auto-resume to rescue. lib/agents.js's Codex
+      // `autoResume: { arm: false }` records that reasoning; this test pins the
+      // consequence — arming off an inferred percentage alone still writes nothing.
       const resetAt = Date.now() + 150;
       const r = await setResetAt(client, id, resetAt, true);
       expect(r.fiveHResetAt).toBe(resetAt); // the window IS loaded...

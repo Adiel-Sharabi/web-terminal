@@ -553,7 +553,7 @@ class AttentionInfo {
 /// A single event pushed over the `/ws/notify` WebSocket. Flattened from the
 /// server's `{notification: {...}}` envelope.
 ///
-/// The server emits four shapes over this socket:
+/// The server emits five shapes over this socket:
 /// * a bare status frame — `{type:'status', sessionId, status}` (no api-error
 ///   keys);
 /// * a status/approval/idle notification — same shape plus a `message`;
@@ -562,6 +562,12 @@ class AttentionInfo {
 /// * a **compacting** frame (#65) — `{type:'compacting', id, compacting,
 ///   since}`. Note the session id key is `id`, not `sessionId` — [sessionId]
 ///   falls back to `id` so this frame reads like every other one downstream.
+/// * a **submitUnconfirmed** frame (#179) — `{type:'submitUnconfirmed', id,
+///   at}`, also keyed on `id`. Fired once when a CLIENT submit produced no
+///   agent hook within the provider's confirm window (`lib/submit-confirm.js`
+///   on the server — read its header before touching this). It carries no
+///   text on purpose: recovering the words is the compose bar's job, from its
+///   own copy of what it last sent (see `SessionScreen._lastSubmittedPrompt`).
 ///
 /// Only api-error frames carry the `apiError` key, so [hasApiErrorSignal]
 /// distinguishes them from ordinary status frames. This matters because the
@@ -633,6 +639,18 @@ class NotifyEvent {
   /// mistaken for an explicit "compaction ended" signal.
   final bool hasCompactingSignal;
 
+  /// True on a `type:'submitUnconfirmed'` frame (#179). Unlike [apiError] /
+  /// [compacting] there is no boolean level to track — the worker never sends
+  /// a "confirmed" frame back (silence IS success, by design; see
+  /// `lib/submit-confirm.js`) — so this is a one-shot edge, not a state.
+  final bool submitUnconfirmed;
+
+  /// Epoch ms the worker recorded the timeout at (`at` on the frame), or
+  /// `null` if absent. [SessionRepository] keys its per-session record on
+  /// this so a later, unrelated `sessions` emission can't be mistaken for a
+  /// fresh event.
+  final int? submitUnconfirmedAt;
+
   /// Creates a notify event value object.
   const NotifyEvent({
     required this.type,
@@ -650,6 +668,8 @@ class NotifyEvent {
     this.compacting = false,
     this.compactingSince,
     this.hasCompactingSignal = false,
+    this.submitUnconfirmed = false,
+    this.submitUnconfirmedAt,
   });
 
   /// Parses one `/ws/notify` frame. Accepts either the full
@@ -677,6 +697,8 @@ class NotifyEvent {
       compacting: n['compacting'] == true,
       compactingSince: _asInt(n['since']),
       hasCompactingSignal: n.containsKey('compacting'),
+      submitUnconfirmed: (n['type'] ?? '') == 'submitUnconfirmed',
+      submitUnconfirmedAt: _asInt(n['at']),
     );
   }
 
@@ -952,22 +974,34 @@ class ServerInfo {
   /// `fcm`) advertised by this server.
   final List<String> capabilities;
 
+  /// Machine-wide CPU/memory (#152 level 1, #165), riding this SAME
+  /// `/api/version` answer for free — server-side it is
+  /// `resources: _resourceSampler.read()`, the always-on warm sampler, not
+  /// the per-process query behind `GET /api/resources`. `null` on a server
+  /// too old for the field, or a malformed one; never a fabricated zero,
+  /// same rule as every other reading [MachineResources] carries.
+  final MachineResources? resources;
+
   /// Creates a server info value object.
   const ServerInfo({
     required this.version,
     required this.serverName,
     required this.capabilities,
+    this.resources,
   });
 
   /// Parses the `/api/version` response body.
   factory ServerInfo.fromJson(Map<String, dynamic> json) {
     final caps = json['capabilities'];
+    final res = json['resources'];
     return ServerInfo(
       version: (json['version'] ?? '').toString(),
       serverName: (json['serverName'] ?? '').toString(),
       capabilities: caps is List
           ? caps.map((e) => e.toString()).toList(growable: false)
           : const <String>[],
+      resources:
+          res is Map<String, dynamic> ? MachineResources.fromJson(res) : null,
     );
   }
 

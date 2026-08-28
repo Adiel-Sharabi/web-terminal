@@ -1,14 +1,18 @@
 import 'dart:async';
 import 'dart:convert';
 
+import 'package:ai_terminal/api/api_client.dart';
 import 'package:ai_terminal/api/models.dart';
 import 'package:ai_terminal/services/resource_monitor.dart';
+import 'package:ai_terminal/services/server_store.dart';
+import 'package:ai_terminal/services/session_repository.dart';
 import 'package:ai_terminal/widgets/format_utils.dart';
 import 'package:ai_terminal/widgets/resource_stats.dart';
 import 'package:flutter/material.dart';
 import 'package:flutter_test/flutter_test.dart';
 import 'package:http/http.dart' as http;
 import 'package:http/testing.dart';
+import 'package:shared_preferences/shared_preferences.dart';
 
 /// #152 levels 1-3 in the companion: parsing `GET /api/resources`, and the two
 /// readouts built from it.
@@ -357,6 +361,66 @@ void main() {
     });
   });
 
+  // #152/#165 — the machine reading (level 1) is FREE and renders whenever
+  // known, independent of the resources-view toggle. `ResourceMonitor.
+  // publishMachine` is the free channel's write path (normally driven by
+  // SessionRepository's `/api/version` poll — see the wiring group further
+  // below for the end-to-end path); these tests drive it directly to pin the
+  // widget's own toggle-independence.
+  group('ServerResourceLine reads the FREE machine channel (#165)', () {
+    setUp(() => ResourceMonitor.instance.resetForTests());
+    tearDown(() => ResourceMonitor.instance.resetForTests());
+
+    Future<void> pump(WidgetTester tester) => tester.pumpWidget(const MaterialApp(
+          home: Scaffold(body: ServerResourceLine(baseUrl: 'http://s')),
+        ));
+
+    testWidgets(
+        'the machine line renders with the resources toggle OFF, from the '
+        'free channel alone', (tester) async {
+      expect(ResourceMonitor.instance.enabled, isFalse,
+          reason: 'the toggle must genuinely be off for this test to mean anything');
+      ResourceMonitor.instance.publishMachine(
+        'http://s',
+        MachineResources.fromJson({
+          'cpuPct': 33,
+          'windowMs': 5000,
+          'memory': {
+            'usedBytes': 30064771072,
+            'totalBytes': 68501942272,
+            'availBytes': 38437171200,
+            'usedPct': 44,
+          },
+        }),
+      );
+      await pump(tester);
+      expect(ResourceMonitor.instance.enabled, isFalse);
+      expect(find.textContaining('CPU 33%'), findsOneWidget);
+      expect(find.textContaining('RAM 35.8 GB free of 63.8 GB (44%)'), findsOneWidget);
+      // Levels 2/3 stay behind the toggle — nothing WT-shaped renders.
+      expect(find.textContaining('WT'), findsNothing);
+    });
+
+    testWidgets('a null free reading still renders em-dashes, never 0%',
+        (tester) async {
+      // Present-but-null (a server too old for the field, or offline) is
+      // NOT the same as never having asked — see ResourceMonitor.hasMachine.
+      // publishMachine(..., null) is exactly that "asked, got nothing" case.
+      ResourceMonitor.instance.publishMachine('http://s', null);
+      await pump(tester);
+      expect(find.textContaining('CPU —'), findsOneWidget);
+      expect(find.textContaining('RAM —'), findsOneWidget);
+      expect(find.textContaining('0%'), findsNothing);
+    });
+
+    testWidgets('never asked at all still renders nothing', (tester) async {
+      // No publishMachine call ever happened for this baseUrl — distinct
+      // from the "asked, got null" case right above.
+      await pump(tester);
+      expect(find.textContaining('CPU'), findsNothing);
+    });
+  });
+
   group('ResourceMonitor', () {
     setUp(() => ResourceMonitor.instance.resetForTests());
     tearDown(() => ResourceMonitor.instance.resetForTests());
@@ -441,6 +505,135 @@ void main() {
         }),
       );
       expect(ResourceMonitor.instance.reading('http://s', 'alive'), isNull);
+    });
+  });
+
+  // #152/#165 — end-to-end wiring: proves SessionRepository actually publishes
+  // the free `/api/version` reading into ResourceMonitor for ServerResourceLine
+  // to read, with the resources-view toggle genuinely off throughout and no
+  // server-side change. RED before the fix: ServerInfo.fromJson did not parse
+  // `resources`, SessionRepository never called ResourceMonitor at all, and
+  // ServerResourceLine returned SizedBox.shrink() whenever the toggle was off
+  // — so the first test below found nothing to render, full stop.
+  group('SessionRepository wires the free machine reading end-to-end (#152/#165)',
+      () {
+    setUp(() => ResourceMonitor.instance.resetForTests());
+    tearDown(() => ResourceMonitor.instance.resetForTests());
+
+    const server =
+        ServerConfig(name: 's', baseUrl: 'http://s', bearerToken: 't');
+
+    Future<ServerStore> store() async {
+      SharedPreferences.setMockInitialValues({
+        ServerStore.storageKey: jsonEncode([
+          {
+            'name': server.name,
+            'baseUrl': server.baseUrl,
+            'bearerToken': server.bearerToken,
+          },
+        ]),
+      });
+      final s = ServerStore.forTest();
+      await s.init();
+      return s;
+    }
+
+    testWidgets(
+        'the machine line renders with the resources toggle OFF, given a '
+        'server whose /api/version carried resources', (tester) async {
+      final repo = SessionRepository.forTest(
+        store: await store(),
+        clientFactory: (s) => ApiClient(
+          s,
+          httpClient: MockClient((req) async {
+            if (req.url.path == '/api/version') {
+              return http.Response(
+                jsonEncode({
+                  'serverName': s.name,
+                  'version': '1',
+                  'capabilities': <String>[],
+                  'resources': {
+                    'cpuPct': 33,
+                    'windowMs': 5000,
+                    'memory': {
+                      'usedBytes': 30064771072,
+                      'totalBytes': 68501942272,
+                      'availBytes': 38437171200,
+                      'usedPct': 44,
+                    },
+                    'ts': 1,
+                  },
+                }),
+                200,
+              );
+            }
+            return http.Response('[]', 200);
+          }),
+        ),
+      );
+
+      await repo.refresh();
+      expect(ResourceMonitor.instance.enabled, isFalse,
+          reason: 'the resources view was never turned on in this test');
+
+      await tester.pumpWidget(const MaterialApp(
+        home: Scaffold(body: ServerResourceLine(baseUrl: 'http://s')),
+      ));
+
+      expect(find.textContaining('CPU 33%'), findsOneWidget);
+      expect(find.textContaining('RAM 35.8 GB free of 63.8 GB (44%)'),
+          findsOneWidget);
+    });
+
+    testWidgets(
+        'a server too old for the resources field renders em-dashes, never 0%',
+        (tester) async {
+      final repo = SessionRepository.forTest(
+        store: await store(),
+        clientFactory: (s) => ApiClient(
+          s,
+          httpClient: MockClient((req) async {
+            if (req.url.path == '/api/version') {
+              return http.Response(
+                jsonEncode({
+                  'serverName': s.name,
+                  'version': '1',
+                  'capabilities': <String>[],
+                  // No `resources` key at all — same as a pre-#165 server.
+                }),
+                200,
+              );
+            }
+            return http.Response('[]', 200);
+          }),
+        ),
+      );
+
+      await repo.refresh();
+      expect(ResourceMonitor.instance.enabled, isFalse);
+
+      await tester.pumpWidget(const MaterialApp(
+        home: Scaffold(body: ServerResourceLine(baseUrl: 'http://s')),
+      ));
+
+      expect(find.textContaining('CPU —'), findsOneWidget);
+      expect(find.textContaining('RAM —'), findsOneWidget);
+      expect(find.textContaining('0%'), findsNothing);
+    });
+
+    testWidgets('an unreachable server publishes null, not a stale reading',
+        (tester) async {
+      final repo = SessionRepository.forTest(
+        store: await store(),
+        clientFactory: (s) => ApiClient(
+          s,
+          httpClient: MockClient((req) async => http.Response('', 503)),
+        ),
+      );
+
+      await repo.refresh();
+      expect(ResourceMonitor.instance.hasMachine('http://s'), isTrue);
+      expect(ResourceMonitor.instance.machineFor('http://s'), isNull);
     });
   });
 }

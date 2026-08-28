@@ -28,8 +28,21 @@ String _rateShort(double v) {
   return r == r.roundToDouble() ? '${r.round()}' : '$r';
 }
 
-/// The machine's CPU/memory plus web-terminal's own footprint, under a server
-/// group header. Renders nothing at all while the view is off.
+/// The machine's CPU/memory (level 1) plus web-terminal's own footprint
+/// (levels 2/3), under a server group header.
+///
+/// **Level 1 is unconditional; levels 2/3 need the resources view.** #165
+/// shipped level 1 gated behind the same toggle as 2/3 as a KNOWN GAP: the
+/// widget had only one source (`ResourceMonitor`'s `GET /api/resources` poll)
+/// to read from, and that poll is the expensive one on purpose. The fix
+/// (still #165) is not "ignore the toggle" — it is that level 1 now has a
+/// SECOND, free source: `SessionRepository` publishes it into `ResourceMonitor`
+/// from the `/api/version` poll it already runs continuously (see
+/// `ResourceMonitor.publishMachine`), because the server attaches it there at
+/// no extra cost (`resources: _resourceSampler.read()`). So this widget reads
+/// whichever of the two sources has an answer — the expensive report's own
+/// `machine` field when the view is on, the free channel otherwise — and only
+/// the WT/paging segment below stays behind `monitor.enabled`.
 class ServerResourceLine extends StatelessWidget {
   const ServerResourceLine({super.key, required this.baseUrl});
 
@@ -42,23 +55,19 @@ class ServerResourceLine extends StatelessWidget {
       listenable: ResourceMonitor.instance,
       builder: (context, _) {
         final monitor = ResourceMonitor.instance;
-        // KNOWN GAP (#165), recorded so it is not mistaken for an oversight: this
-        // early return takes the HEADROOM figure down with the load view, and this
-        // widget is the only place the companion draws machine memory. The server
-        // reports headroom either way — it rides the always-on 5s sampler and costs
-        // nothing — and the web sidebar shows it with the view off, so the two
-        // clients differ here.
-        //
-        // Deleting this line would NOT fix it: everything below reads
-        // `ResourceMonitor`, which polls GET /api/resources — the on-demand endpoint
-        // the switch exists to gate, costing the server a whole-machine process query
-        // per poll. Surfacing headroom unconditionally means reading it from the
-        // `resources` block already carried on the cluster envelope the dashboard
-        // fetches anyway. That is a separate change with its own tests; see
-        // docs/CLUSTER.md, "Server Load".
-        if (!monitor.enabled) return const SizedBox.shrink();
-
         final report = monitor[baseUrl];
+        // Prefer the expensive report's own reading when it exists (no reason
+        // to read a second source when one is already in hand — both are the
+        // SAME server-side warm sampler either way), falling back to the free
+        // channel when the view is off or hasn't answered yet.
+        final machine = report?.machine ?? monitor.machineFor(baseUrl);
+        if (report == null && !monitor.hasMachine(baseUrl)) {
+          // Neither channel has ever answered for this server — render
+          // nothing rather than a permanent dash row, mirroring
+          // SessionResourceChip's "first seconds" rule below.
+          return const SizedBox.shrink();
+        }
+
         final style = theme.textTheme.labelSmall?.copyWith(
           color: theme.colorScheme.onSurfaceVariant,
           fontFeatures: const [FontFeature.tabularFigures()],
@@ -75,40 +84,50 @@ class ServerResourceLine extends StatelessWidget {
           ));
         }
 
-        String tip;
-
-        if (report == null) {
-          add('CPU —  RAM —');
-          tip = 'This server has not answered with resource detail';
+        // Level 1 — unconditional. `machine` may be `null` (asked, nothing
+        // usable back) even though we know NOT to render `SizedBox.shrink()`
+        // above; every field stays `?.`-guarded so that renders as `—`, not `0`.
+        add('CPU ${formatPctShort(machine?.cpuPct)}');
+        // #165 — headroom LEADS. The percentage stays as context (it is still the
+        // right reading below ~90%, where it has range), but it no longer carries
+        // the judgement, and the old used/total pair is gone: two byte figures plus
+        // a percentage is three numbers competing for one glance.
+        final avail = machine?.memAvailBytes;
+        if (avail != null && machine?.memTotalBytes != null) {
+          add(
+            'RAM ${formatBytesShort(avail)} free of ${formatBytesShort(machine!.memTotalBytes)}'
+            '${machine.memUsedPct == null ? '' : ' (${machine.memUsedPct}%)'}',
+            color: headroomColor(theme, avail),
+          );
+        } else if (machine?.memUsedPct != null) {
+          // A server too old to report headroom says what it DID send, rather than
+          // blanking the row — and never "0 B free", which would condemn a box for
+          // running an older build.
+          add('RAM ${machine!.memUsedPct}% '
+              '(${formatBytesShort(machine.memUsedBytes)} / ${formatBytesShort(machine.memTotalBytes)})');
         } else {
-          final m = report.machine;
-          add('CPU ${formatPctShort(m?.cpuPct)}');
-          // #165 — headroom LEADS. The percentage stays as context (it is still the
-          // right reading below ~90%, where it has range), but it no longer carries
-          // the judgement, and the old used/total pair is gone: two byte figures plus
-          // a percentage is three numbers competing for one glance.
-          final avail = m?.memAvailBytes;
-          if (avail != null && m?.memTotalBytes != null) {
-            add(
-              'RAM ${formatBytesShort(avail)} free of ${formatBytesShort(m!.memTotalBytes)}'
-              '${m.memUsedPct == null ? '' : ' (${m.memUsedPct}%)'}',
-              color: headroomColor(theme, avail),
-            );
-          } else if (m?.memUsedPct != null) {
-            // A server too old to report headroom says what it DID send, rather than
-            // blanking the row — and never "0 B free", which would condemn a box for
-            // running an older build.
-            add('RAM ${m!.memUsedPct}% '
-                '(${formatBytesShort(m.memUsedBytes)} / ${formatBytesShort(m.memTotalBytes)})');
-          } else {
-            add('RAM —');
-          }
+          add('RAM —');
+        }
+
+        String tip;
+        if (report == null) {
+          // Only the free channel is on screen — no WT/paging figures below,
+          // because those live exclusively behind the expensive poll.
+          tip = machine == null
+              ? 'This server has not answered with resource detail'
+              : 'Machine-wide CPU and memory. Turn on "CPU / memory" above for '
+                  'per-session and web-terminal figures.';
+        } else {
           // The pressure figure, rendered only when it was actually measured: 0/s is
           // what a healthy box reads, so printing it for one we could not measure is a
           // claim, not a reading. No colour tier — the only data behind a threshold
           // would be one bad box against two good ones, which is the guess #165
-          // refused to make silently.
-          final reads = m?.memPageReadsPerSec;
+          // refused to make silently. Read off `report.machine` specifically, never
+          // the unified `machine` above — the free channel never carries this field
+          // (server-side it needs a CIM counter the warm sampler behind
+          // `/api/version` never touches), so falling back to it here would just
+          // relabel "unmeasured" as "measured, zero".
+          final reads = report.machine?.memPageReadsPerSec;
           final pagingTip = reads == null || reads < 0
               ? ''
               : 'Paging: ${_rateShort(reads)} page reads/sec off disk. A high rate means '

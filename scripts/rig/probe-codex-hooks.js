@@ -23,6 +23,18 @@
 // SessionStart fires when the FIRST TURN BEGINS, not when the process starts —
 // the same laziness as the rollout file, which Codex also creates only on the
 // first turn. Run this with NO_PROMPT=1 to reproduce the control.
+//
+// #78 STEP 0 FOLLOW-UP (2026-08-28): this file stays the POSITIVE CONTROL --
+// "do SessionStart/UserPromptSubmit fire at all" -- and is deliberately left
+// otherwise unchanged. The full payload capture for all ten lifecycle events
+// (PreToolUse, PostToolUse, PermissionRequest, Stop, SubagentStart,
+// SubagentStop measured with real JSON; PreCompact/PostCompact attempted and
+// found environment-blocked in this harness, not codex-blocked) now lives in
+// `probe-codex-hook-payloads.js`, `codex-mock-provider.js`,
+// `codex-hook-capture.js` and `codex-pty-drive.js` alongside this file. Read
+// this script's own result as the sanity check that the newer one's harder
+// scenarios should be measured against: if THIS script's SessionStart ever
+// stops firing, nothing downstream can be trusted either.
 'use strict';
 
 const fs = require('fs');

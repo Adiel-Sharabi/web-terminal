@@ -335,6 +335,39 @@ void main() {
       expect(e.hasCompactingSignal, isFalse);
       expect(e.compactingSince, isNull);
     });
+
+    // #179 — the server's report that a client submit produced no agent
+    // activity within the timeout (`lib/submit-confirm.js`). Also keyed on
+    // `id`, mirroring the compacting frame above.
+    test('parses a submitUnconfirmed frame, keyed on "id" not "sessionId"',
+        () {
+      final e = NotifyEvent.fromJson({
+        'notification': {
+          'type': 'submitUnconfirmed',
+          'id': 's9',
+          'at': 1720000000000,
+        }
+      });
+      expect(e.type, 'submitUnconfirmed');
+      expect(e.sessionId, 's9');
+      expect(e.submitUnconfirmed, isTrue);
+      expect(e.submitUnconfirmedAt, 1720000000000);
+      // Independent of the other two signals.
+      expect(e.hasApiErrorSignal, isFalse);
+      expect(e.hasCompactingSignal, isFalse);
+    });
+
+    test('an ordinary status frame carries NO submitUnconfirmed signal', () {
+      final e = NotifyEvent.fromJson({
+        'notification': {
+          'type': 'status',
+          'sessionId': 's9',
+          'status': 'working',
+        }
+      });
+      expect(e.submitUnconfirmed, isFalse);
+      expect(e.submitUnconfirmedAt, isNull);
+    });
   });
 
   group('ApiErrorInfo', () {
@@ -399,6 +432,44 @@ void main() {
     test('missing capabilities → empty list', () {
       final v = ServerInfo.fromJson({'version': '1', 'serverName': 'x'});
       expect(v.capabilities, isEmpty);
+    });
+
+    // #152/#165 — the free machine reading rides this SAME `/api/version`
+    // answer (server-side: `resources: _resourceSampler.read()`), so it must
+    // be parsed here, using the existing MachineResources shape rather than a
+    // second one.
+    test('parses the free machine reading (#152/#165)', () {
+      final v = ServerInfo.fromJson({
+        'version': '1',
+        'serverName': 'x',
+        'resources': {
+          'cpuPct': 33,
+          'windowMs': 5000,
+          'memory': {
+            'usedBytes': 30064771072,
+            'totalBytes': 68501942272,
+            'availBytes': 38437171200,
+            'usedPct': 44,
+          },
+          'ts': 1,
+        },
+      });
+      expect(v.resources!.cpuPct, 33);
+      expect(v.resources!.memAvailBytes, 38437171200);
+      expect(v.resources!.memUsedPct, 44);
+    });
+
+    test('a server too old for the field, or a malformed one, reads null — '
+        'never a fabricated zero', () {
+      expect(ServerInfo.fromJson({'version': '1', 'serverName': 'x'}).resources,
+          isNull);
+      expect(
+          ServerInfo.fromJson({
+            'version': '1',
+            'serverName': 'x',
+            'resources': 'not-an-object',
+          }).resources,
+          isNull);
     });
   });
 

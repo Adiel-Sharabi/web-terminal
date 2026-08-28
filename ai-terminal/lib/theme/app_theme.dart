@@ -28,6 +28,12 @@ abstract final class AppColors {
   static const favorite = Color(0xFFF2C14E);
   static const error = Color(0xFFFF2D4B);
   static const errorContainer = Color(0xFF2B0F16);
+  /// Amber "the session is fine, just paused/needs a look" accent — deliberately
+  /// NOT [error] red, which reads as broken. Was a literal private to
+  /// `waiting_banner.dart` (#79); promoted here for #179's own caution banner so
+  /// the two don't drift into two different ambers the way [favorite] almost did.
+  static const caution = Color(0xFFFFB020);
+  static const cautionContainer = Color(0xFF2A2113);
 }
 
 /// 4dp-grid spacing tokens — spec §0.4.

@@ -74,7 +74,21 @@ drill-in, context-window and rate-limit badges, background-work indicator, and r
 that filters out the parts nobody wants spoken.
 
 **Mobile & PWA** — installable, with a compose bar built for soft keyboards, a touch
-toolbar, long-press menus, and reconnect the instant you return to the app.
+toolbar, long-press menus, and reconnect the instant you return to the app. When a phone
+and a desktop watch the same session, the shared terminal is sized to fit the **smaller**
+of them, so a full-width agent screen never arrives on the phone already wrapped — and
+backgrounding the phone hands the columns straight back.
+
+**A swallowed prompt says so, and gives the words back** — submit while the agent's TUI
+is somewhere other than its composer (a full-screen `/usage` view, an open slash menu, a
+crashed CLI back at the shell) and the keystrokes are eaten as navigation; until now your
+words simply vanished with no error anywhere. The server does not guess at that state
+(measured: none of those views emits a distinguishing byte). It **verifies the outcome
+instead** — a compose-bar submit that produces no sign of life from the agent is
+reported, and the client puts your text back, but only into a compose bar you have not
+already started retyping into. Claude sessions on a server whose hooks are installed;
+every gate errs toward saying nothing, because a false alarm on a prompt that did land
+would be worse than the silence it replaces.
 
 **Cluster** — merge several servers into one sidebar, each showing its own CPU and
 **free memory** so you can pick where to work; optional direct-terminal mode skips the
@@ -93,12 +107,10 @@ the signal that tells 92%-and-coping apart from 92%-and-thrashing), what web-ter
 itself is costing there, and what each individual session is costing — so "which box,
 which session" is answered from the list instead of by guessing. It is off by default
 and polls nothing until switched on, because each reading costs the server a
-whole-machine process query. The free-memory figure above costs the server nothing and is
-always *reported*, and the **web sidebar** shows it whether or not the load view is on. In
-the companion it is not yet separated: its resource line renders nothing at all while the
-view is off, so both figures sit behind the switch there — see
-[docs/CLUSTER.md](docs/CLUSTER.md#server-load-152) for why that is a known gap rather than
-an oversight.
+whole-machine process query. The CPU/free-memory figure above costs the server nothing
+and is always *reported*, and **both clients** show it whether or not the load view is
+on — see [docs/CLUSTER.md](docs/CLUSTER.md#server-load-152) for how the companion gets it
+for free too.
 
 **Companion app** — a native Android + Windows client with the chat lens and push that
 works while the app is closed.

@@ -21,9 +21,11 @@ const { endsInAltScreen } = require('./lib/replay-sanitize');
 const { scanOsc9 } = require('./lib/osc9-notify');
 // #147 — the pure readiness latch; the marker itself is a lib/agents.js field.
 const { createReadyDetector } = require('./lib/agent-ready');
+// #179 — the pure rules for verifying that a submit actually reached the agent.
+const submitConfirm = require('./lib/submit-confirm');
 const usageLimit = require('./lib/usage-limit');
 
-const WORKER_VERSION = '0.6.2'; // 0.6.2: a session restored from a scrollback that ends mid-alt-screen (Claude killed while in /tui fullscreen, so ?1049l never arrived) gets a corrective ?1049l appended, instead of stranding xterm in the alt buffer showing a frozen frame over a live shell. Prior 0.6.1: the submit gap is measured against the wire, not the frame.
+const WORKER_VERSION = '0.7.0'; // 0.7.0: #179 — a client submit that produces no agent activity within the provider's submitConfirm window is reported as `submitUnconfirmed`, so a prompt swallowed by a TUI that was not at its composer stops vanishing silently. Prior 0.6.2: a session restored from a scrollback that ends mid-alt-screen (Claude killed while in /tui fullscreen, so ?1049l never arrived) gets a corrective ?1049l appended, instead of stranding xterm in the alt buffer showing a frozen frame over a live shell. Prior 0.6.1: the submit gap is measured against the wire, not the frame.
 
 // --- Optional latency instrumentation (opt-in via WT_LATENCY_DEBUG=1) -----
 const _LATENCY_DEBUG = process.env.WT_LATENCY_DEBUG === '1';
@@ -1023,6 +1025,11 @@ function termWrite(session, data) {
   // than in deliver() because the TUI does not care WHO wrote the close — a worker-side
   // paste (a replayed prompt) shades a client's next CR exactly as a client paste does.
   session._pasteClosedAt = endsBracketedPaste(data) ? Date.now() : null;
+  // #179 — and the one place that can accumulate the LINE the TUI is holding, which
+  // decides whether a submit is a prompt or a slash command. Fed here rather than at
+  // deliver() because a live `/`-line is streamed as you type and its submit frame can
+  // be a bare CR: the frame alone cannot tell the two apart, the accumulated line can.
+  if (session._submitLine) session._submitLine.push(data);
   session.term.write(data);
 }
 
@@ -1105,9 +1112,16 @@ function deliver(session, data) {
 // ('waiting') REJECTS the tool and Claude carries on, and its next hook reports the truth.
 // Which agents interrupt on Esc is the registry's call, never a branch in here.
 function noteInterrupt(session, data) {
-  if (session.status !== 'working') return;
   if (!isEscapeKey(data)) return;
   if (!agents.interruptsOnEscape(sessionAgent(session))) return;
+  // #179 — Esc ABANDONS whatever was just submitted, so any watch on it is moot.
+  // Cancelled BEFORE the `working` gate below on purpose: the window that matters is
+  // the second or so between a submit and the agent's first hook, and the session is
+  // still `idle` throughout it — so the gate would skip exactly the case this covers.
+  // Claude fires NO hook on an interrupt (#55 §6), so without this the watch runs to
+  // its timeout and reports a prompt the user themselves cancelled. Found in review.
+  cancelSubmitWatch(session);
+  if (session.status !== 'working') return;
   session.status = 'idle';
   // Esc cancels the whole turn — subagents included. Their SubagentStop may never
   // arrive, so drop the tracking with the turn (#61). Cancel any armed idle flip
@@ -1136,7 +1150,20 @@ function _writeFrame(session, data) {
   if (split.head.length) deliver(session, split.head);
   session._submitTimer = setTimeout(() => {
     session._submitTimer = null;
-    try { termWrite(session, split.cr); } catch (e) { log(`submit CR failed: ${e.message}`); }
+    // Read the line BEFORE the CR is written — the CR is what resets the tracker.
+    const isCommand = session._submitLine ? session._submitLine.isCommand : false;
+    let wrote = false;
+    try { termWrite(session, split.cr); wrote = true; } catch (e) { log(`submit CR failed: ${e.message}`); }
+    // #179 — the submit is on the wire now; from here it either produces a turn or it
+    // was swallowed. Armed HERE, at delivery, for the same reason status is read here:
+    // arming at arrival would start the clock while the CR was still being withheld.
+    //
+    // Only on a CR that actually went out: a write that threw is a submit that
+    // definitely did not land, and reporting it as "no agent activity" would blame the
+    // agent for a dead PTY. And the drain runs EITHER WAY — found in review, an early
+    // return here stranded `_inputQueue` with `_submitTimer` already null, so the next
+    // frame was written ahead of the queued one and input order was silently lost.
+    if (wrote) armSubmitWatch(session, isCommand);
     _drainInputQueue(session);
   }, submitGapMs(session));
   if (typeof session._submitTimer.unref === 'function') session._submitTimer.unref();
@@ -1150,6 +1177,61 @@ function _drainInputQueue(session) {
     const next = q.shift();
     try { _writeFrame(session, next); } catch (e) { log(`queued input write failed: ${e.message}`); }
   }
+}
+
+// --- #179: did that submit actually reach the agent? ------------------------
+//
+// The rules, the gates and the reason this is a VERIFIER rather than a detector all
+// live in lib/submit-confirm.js. Here is only where they meet the PTY.
+//
+// The failure being reported is silence: a prompt written into a TUI that was not at
+// its composer. So the worker starts a clock when the submit CR goes out and stops it
+// on the first hook — any hook — because a session doing anything at all keeps firing
+// them while one parked on `/usage` fires none. If the clock runs out the client is
+// told, and the client is what gives the user their words back.
+//
+// WT_SUBMIT_CONFIRM_MS is test-only shortening, the same shape as WT_READY_FALLBACK_MS:
+// the registry stays the SSOT of the real window, and a spec must not have to wait it
+// out to prove the timeout fires.
+const SUBMIT_CONFIRM_OVERRIDE_MS = Number(process.env.WT_SUBMIT_CONFIRM_MS || 0);
+
+function armSubmitWatch(session, isCommand) {
+  const policy = agents.submitConfirmPolicy(sessionAgent(session));
+  if (!submitConfirm.shouldWatchSubmit(policy, {
+    hookStatus: !!session.hookStatus,
+    status: session.status,
+    compacting: !!session.compacting,
+    // _writeFrame is reached only from writeUserInput / _drainInputQueue, both of
+    // which carry CLIENT frames. The worker's own submits (auto-resume's `continue`,
+    // the API-error ladder's /compact, /rename) go through submitLine → termWrite and
+    // never land here, which is the point: they have no draft to give back.
+    fromClient: true,
+    isCommand,
+  })) return;
+  cancelSubmitWatch(session);
+  const at = Date.now();
+  const timer = setTimeout(() => {
+    session._submitWatch = null;
+    log(`submit: "${session.name}" produced no agent activity in ${policy.timeoutMs}ms — reporting unconfirmed`);
+    broadcastEvent('submitUnconfirmed', { id: sessionIdOf(session), at });
+  }, SUBMIT_CONFIRM_OVERRIDE_MS > 0 ? SUBMIT_CONFIRM_OVERRIDE_MS : policy.timeoutMs);
+  if (typeof timer.unref === 'function') timer.unref();
+  session._submitWatch = { at, timer };
+}
+
+/** Evidence that the agent took the prompt. Called from handleHook, for every event. */
+function confirmSubmitWatch(session) {
+  const w = session._submitWatch;
+  if (!w) return;
+  if (!submitConfirm.confirmsSubmit(w.at, Date.now())) return;
+  clearTimeout(w.timer);
+  session._submitWatch = null;
+}
+
+function cancelSubmitWatch(session) {
+  if (!session._submitWatch) return;
+  clearTimeout(session._submitWatch.timer);
+  session._submitWatch = null;
 }
 
 // Per-chunk PTY output processing — shared by the real term.onData handler and
@@ -1689,6 +1771,11 @@ function createSession(id, cwd, name, autoCommand, savedScrollback, claudeSessio
   const readyMarker = autoCommand ? agents.readinessMarker(sessionAgent(session)) : null;
   session._ready = createReadyDetector(readyMarker);
   armReadyFallback(session);
+  // #179 — what the TUI's input line currently holds, so a submit can be told apart
+  // from a slash command. Created for EVERY session, agent or shell: the tracker is fed
+  // from termWrite, and one that started half-populated would answer wrongly the first
+  // time a plain shell did acquire an agent.
+  session._submitLine = submitConfirm.createSubmitLineTracker();
 
   term.onData((data) => {
     // Issue #13: normalize PTY output to Buffer once here so the rest of the
@@ -1714,6 +1801,7 @@ function createSession(id, cwd, name, autoCommand, savedScrollback, claudeSessio
     session._compactReplay = null;
     if (session._submitTimer) { clearTimeout(session._submitTimer); session._submitTimer = null; }
     if (session._readyFallback) { clearTimeout(session._readyFallback); session._readyFallback = null; }
+    cancelSubmitWatch(session); // #179 — a dead PTY cannot confirm anything
     cancelAutoResume(session); // #69 — same reasoning, a dead PTY has nothing to resume
     session._inputQueue = null; // a withheld CR dies with its PTY
     if (session.autoCommand && /\bclaude\b/i.test(session.autoCommand)) {
@@ -1804,6 +1892,10 @@ function handleHook(session, event, claudeSessionId, prompt, agentId, opts) {
   // its composer ever printed the marker we watch for. This is what stops a
   // readiness gate from ever becoming a session that cannot submit.
   markAgentReadyFromActivity(session);
+  // #179 — and proof that the prompt written a moment ago was actually taken. Any
+  // event will do: what is being distinguished is "the agent is doing something" from
+  // "the TUI swallowed the keystrokes", and a blocked TUI fires nothing at all.
+  confirmSubmitWatch(session);
   const prevStatus = session.status;
   const fromSubagent = !!agentId;
   let notifyType = null, notifyMsg = null;
@@ -2102,6 +2194,7 @@ const rpcHandlers = {
     if (session._submitTimer) { clearTimeout(session._submitTimer); session._submitTimer = null; }
     if (session._readyFallback) { clearTimeout(session._readyFallback); session._readyFallback = null; }
     session._inputQueue = null; // a withheld CR dies with its PTY
+    cancelSubmitWatch(session); // #179
     cancelAutoResume(session); // #69
     try { session.term.kill(); } catch {}
     // Eagerly remove from the map so immediate follow-up RPCs see it as gone

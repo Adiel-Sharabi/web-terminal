@@ -34,18 +34,25 @@ query that view already runs (marginal cost ~35 ms, against ~2.4 s for the same 
 queried on its own). A rate that could not be measured renders as nothing at all, never
 `0/s` — zero is what a healthy box reads.
 
-**Where headroom is actually visible, per client.** The server reports it either way — it
-rides the always-on 5s sampler and costs nothing — but only the **web sidebar** shows it
-with the load view off. The **companion** does not yet: `ServerResourceLine` renders
-`SizedBox.shrink()` while the view is off, and it is the only place the companion draws
-machine memory, so on the phone and the Windows client both figures sit behind the switch.
+**Headroom is visible with the load view off, on both clients (#165).** The server reports
+it either way — it rides the always-on 5s sampler and costs nothing — and both the web
+sidebar and the companion show it regardless of the switch. That used to be a companion-only
+gap: `ServerResourceLine` read exclusively from `ResourceMonitor`'s `GET /api/resources`
+poll, which only runs while the load view is on, so the machine line went blank with it.
 
-That is a **known gap, not an oversight**, and it is a bigger change than deleting one
-early return: the always-on figure would have to come from the `resources` block already
-carried on the cluster envelope the dashboard fetches anyway, rather than from
-`GET /api/resources`, which is the on-demand endpoint the load view drives and the thing
-that costs a whole-machine process query. Wiring the readout to the envelope is a separate
-change with its own tests.
+**The fix is a second, free source, not a change to what the switch gates.** The
+companion talks to every server directly rather than through a merged cluster envelope
+(`SessionRepository` calls each server's own `/api/sessions` and `/api/version`, never
+`GET /api/cluster/sessions`), and `GET /api/version` already carries the same
+`resources: _resourceSampler.read()` block the cluster merge does — for free, off the
+warm sampler, at no extra endpoint. `SessionRepository` now publishes that reading into
+`ResourceMonitor` (throttled to at most one `/api/version` per server every 10s, never
+the process-tree query — `refresh()` is NOT a 30s thing, it is also debounced at 300ms
+off every notify frame, so an unthrottled re-fetch would cost N round trips per burst and
+queue the session list behind the slowest peer), and
+`ServerResourceLine` reads it whenever the load view's own `GET /api/resources` report
+is absent. The switch still gates exactly what it always did: paging and web-terminal's
+own footprint, both of which need the per-process query below.
 
 CPU is a rolling average over a 5-second window, computed from the delta between two
 `os.cpus()` tick samples (a single instantaneous read would be noise, and Windows'

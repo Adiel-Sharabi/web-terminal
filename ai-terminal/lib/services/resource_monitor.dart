@@ -10,14 +10,21 @@ import '../api/models.dart';
 /// Per-server CPU/memory for the dashboard (#152) — the box, web-terminal's own
 /// footprint on it, and a reading per session.
 ///
-/// **Off by default, and polling only while it is on.** That is not a
-/// preference, it is the cost control the whole feature rests on. Each answer
-/// costs the server a whole-machine process query (~370 ms of PowerShell), and
-/// the dashboard talks to every configured server — so a monitor that polled
-/// whether or not anyone was looking would put a permanent process query on
-/// every box in the fleet, forever, for numbers nobody had asked to see. The
-/// session list is polled continuously and deliberately does NOT carry these
-/// figures for the same reason.
+/// **[enabled] gates levels 2/3 only — the box's own CPU/memory (level 1) is
+/// free and is NOT behind it.** That was a known gap (#165): the machine
+/// reading needs no per-process query, so gating it behind the same toggle as
+/// the expensive levels was an accident of one widget reading one map, not a
+/// cost decision. [_byBaseUrl]/[refresh] below is that expensive toggle —
+/// **off by default, and polling only while it is on**, because each answer
+/// costs the server a whole-machine process query (~370 ms of PowerShell) and
+/// the dashboard talks to every configured server, so a monitor that polled
+/// regardless would put a permanent process query on every box in the fleet
+/// forever, for numbers nobody had asked to see. The session list is polled
+/// continuously and deliberately does NOT carry these figures, for the same
+/// reason. The free level-1 reading lives in a separate map
+/// ([_machineByBaseUrl]/[machineFor]), published by [SessionRepository] from
+/// the `/api/version` poll it already runs continuously — see
+/// [publishMachine].
 ///
 /// A server that fails or answers 404 (too old for the endpoint) is recorded as
 /// unknown — never as zero. "Cannot measure" and "idle" must not look alike:
@@ -62,10 +69,46 @@ class ResourceMonitor extends ChangeNotifier {
 
   final Map<String, ServerResources?> _byBaseUrl = <String, ServerResources?>{};
 
+  /// The FREE per-server machine reading (#152 level 1, #165) — kept apart
+  /// from [_byBaseUrl], which only the expensive `/api/resources` poll
+  /// writes. [SessionRepository] publishes here from every `/api/version`
+  /// poll it already makes (see `_ensureServerNames`), independent of
+  /// [enabled]: unlike [refresh] below, this never starts a whole-machine
+  /// process query, so there is nothing for the toggle to gate. A baseUrl
+  /// absent from this map has never been asked; one present with a `null`
+  /// value was asked and got nothing usable (offline, or too old for the
+  /// field) — [ServerResourceLine] renders those two states differently, the
+  /// same "absent vs. null" idiom [ServerResources.sessions] already uses.
+  final Map<String, MachineResources?> _machineByBaseUrl =
+      <String, MachineResources?>{};
+
   bool get enabled => _enabled;
 
   /// The last reading for [baseUrl], or `null` when unknown.
   ServerResources? operator [](String baseUrl) => _byBaseUrl[baseUrl];
+
+  /// The free machine reading for [baseUrl], or `null` if none has arrived
+  /// (never asked, or asked and got nothing usable).
+  MachineResources? machineFor(String baseUrl) => _machineByBaseUrl[baseUrl];
+
+  /// Whether [baseUrl] has ever answered on the free channel — the "never
+  /// asked" / "asked, got null" distinction [machineFor] alone cannot make.
+  bool hasMachine(String baseUrl) => _machineByBaseUrl.containsKey(baseUrl);
+
+  /// Publishes a fresh free-channel machine reading for [baseUrl]. Called by
+  /// [SessionRepository] after each `/api/version` poll, success or
+  /// failure (`null` on failure) — never gated on [enabled], and never
+  /// mixed into [_byBaseUrl], which stays the expensive poll's alone.
+  void publishMachine(String baseUrl, MachineResources? machine) {
+    // Only on a real change. Found in review: notifying unconditionally rebuilt every
+    // server line and every session chip once per server per refresh — and refresh is
+    // debounced at 300ms off the notify stream, so during agent activity that is a
+    // steady rebuild storm for numbers that mostly did not move.
+    final had = _machineByBaseUrl.containsKey(baseUrl);
+    if (had && _machineByBaseUrl[baseUrl] == machine) return;
+    _machineByBaseUrl[baseUrl] = machine;
+    notifyListeners();
+  }
 
   /// The reading for one session, or `null` when unknown. Callers must render
   /// `null` as a dash, never as `0`.
@@ -134,6 +177,14 @@ class ResourceMonitor extends ChangeNotifier {
   /// later, and rendering the numbers from before it went in would be the same
   /// confident lie a frozen reading always is — with nothing on screen to reveal
   /// the age. [startForeground] refreshes immediately, so the gap is one round trip.
+  ///
+  /// [_machineByBaseUrl] is deliberately left alone. It is not this class's poll
+  /// that fills it — [SessionRepository] does, on its own foreground/background
+  /// lifecycle — and that repo already treats a stale session LIST as fine to
+  /// paint instantly from cache while a live refresh catches up behind it
+  /// (`primeFromCache`). The machine reading is the same kind of number: cheap,
+  /// low-stakes, refreshed within moments of resume. Blanking it here would just
+  /// flash "—" for one frame before the real value reappears.
   void stopForeground() {
     _foreground = false;
     _generation++;
@@ -209,6 +260,7 @@ class ResourceMonitor extends ChangeNotifier {
     _generation++;
     httpClientFactory = null;
     _byBaseUrl.clear();
+    _machineByBaseUrl.clear();
   }
 
   /// Test seam — install a reading without going near the network.
