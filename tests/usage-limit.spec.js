@@ -94,6 +94,37 @@ test.describe('#137 — usageLimitState (what the session list publishes)', () =
     expect(st.waiting).toBe(true);
   });
 
+  // #142 — the rollout-recorded Codex cap error is the SAME class of direct
+  // observation as observedBlockAt, just carried on `metrics` instead of a separate
+  // param (it comes from lib/metrics-codex.js's findUsageCapAt, which already lives
+  // inside the metrics object server.js reads off the transcript). No fiveH percentage
+  // and no reset time — exactly the shape a Codex cap error arrives in when the
+  // preceding token_count is outside whatever tail window was read — and the session
+  // must still report held, with nothing armed (canArm:false is the Codex registry
+  // declaration; see lib/agents.js).
+  test('an observed Codex rollout cap error is waiting but NEVER armed, even with no percentage', () => {
+    const st = u.usageLimitState({
+      metrics: { capObservedAt: NOW - 1000 }, canArm: false,
+      enabled: true, delayMs: 60000, now: NOW,
+    });
+    expect(st.waiting).toBe(true);
+    expect(st.armed).toBe(false);
+    expect(st.capBlocked).toBe(true);
+    expect(st.resetAt).toBeNull();
+    expect(st.resumeAt).toBeNull();
+  });
+
+  test('a Codex rollout cap error that has been superseded (capObservedAt null) reports nothing', () => {
+    // findUsageCapAt already returns null once a later turn ran — this just confirms
+    // usageLimitState does not independently resurrect it from a stale reading.
+    const st = u.usageLimitState({
+      metrics: { capObservedAt: null, fiveH: 12 }, canArm: false,
+      enabled: true, delayMs: 60000, now: NOW,
+    });
+    expect(st.waiting).toBe(false);
+    expect(st.capBlocked).toBe(false);
+  });
+
   test('an opted-out session still reports waiting — hiding the block would be a lie', () => {
     const st = u.usageLimitState({
       metrics: { fiveH: 100, fiveHResetAt: SOON }, enabled: false, delayMs: 60000, now: NOW,

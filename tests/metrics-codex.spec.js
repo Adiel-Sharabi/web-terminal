@@ -5,7 +5,7 @@
 const { test, expect } = require('@playwright/test');
 const fs = require('fs');
 const path = require('path');
-const { parseMetricsFromTail } = require('../lib/metrics-codex');
+const { parseMetricsFromTail, findUsageCapAt } = require('../lib/metrics-codex');
 const { codexSessionsRoot, isFixtureRollout } = require('./test-helpers');
 
 const line = (type, payload, timestamp = '2026-07-10T00:00:00.000Z') =>
@@ -166,7 +166,10 @@ test('a truncated leading line does not abort the scan', () => {
 
 test('a turn_context with no token_count still reports the model', () => {
   const m = parseMetricsFromTail(turnContext('gpt-5.5', 'high'));
-  expect(m).toEqual({ ctx: null, fiveH: null, sevenD: null, fiveHResetAt: null, model: 'gpt-5.5', effort: 'high' });
+  expect(m).toEqual({
+    ctx: null, fiveH: null, sevenD: null, fiveHResetAt: null, model: 'gpt-5.5', effort: 'high',
+    capObservedAt: null,
+  });
 });
 
 // ---- fiveHResetAt (issue #69 — the 5h auto-resume timer's clock) ------------
@@ -209,6 +212,99 @@ test('fiveHResetAt against a REAL validated rollout sample (2026-07-10, codex 0.
   };
   const m = parseMetricsFromTail(tokenCount(usage(1000), rl));
   expect(new Date(m.fiveHResetAt).toISOString()).toBe('2026-07-10T00:58:51.000Z');
+});
+
+// ---- #142: findUsageCapAt (the usage-cap error, and its staleness rule) -----
+// The captured shape, Office, 2026-08-02T20:26:58.735Z (issue #142) — `error` sits
+// directly on the task_complete payload, next to a null last_agent_message.
+const CAP_TS = '2026-08-02T20:26:58.735Z';
+const CAP_MS = Date.parse(CAP_TS);
+const taskComplete = (extra, timestamp = CAP_TS) =>
+  line('event_msg', { type: 'task_complete', last_agent_message: null, ...extra }, timestamp);
+const capError = (timestamp = CAP_TS) => taskComplete({
+  error: { message: "You've hit your usage limit. Upgrade to Pro (…) or try again at Aug 9th, 2026 3:02 PM.",
+           codex_error_info: 'usage_limit_exceeded' },
+}, timestamp);
+const userMessage = (text, timestamp) =>
+  line('response_item', { type: 'message', id: 'msg_1', role: 'user', content: [{ type: 'input_text', text }] }, timestamp);
+
+test.describe('#142 — findUsageCapAt', () => {
+  test('a tail whose newest terminal event is the cap error reports it', () => {
+    const text = [tokenCount(usage(1000), limits(100, 100), '2026-08-02T20:26:50.000Z'), capError()].join('\n');
+    expect(findUsageCapAt(text)).toBe(CAP_MS);
+  });
+
+  test('a later turn_context retires it — the window turned over and a new turn ran', () => {
+    const text = [capError(), turnContext('gpt-5.5', 'high')].join('\n');
+    expect(findUsageCapAt(text)).toBeNull();
+  });
+
+  test('a later user response_item retires it', () => {
+    const text = [capError(), userMessage('try again', '2026-08-09T15:05:00.000Z')].join('\n');
+    expect(findUsageCapAt(text)).toBeNull();
+  });
+
+  test('a later token_count retires it', () => {
+    const text = [capError(), tokenCount(usage(500), limits(2, 3), '2026-08-09T15:05:01.000Z')].join('\n');
+    expect(findUsageCapAt(text)).toBeNull();
+  });
+
+  test('a tail with no error reports nothing', () => {
+    const text = [turnContext('gpt-5.5', 'high'), tokenCount(usage(1000), limits(1, 1))].join('\n');
+    expect(findUsageCapAt(text)).toBeNull();
+  });
+
+  test('a normal (non-cap) task_complete is not mistaken for one', () => {
+    const text = [taskComplete({ last_agent_message: 'done' })].join('\n');
+    expect(findUsageCapAt(text)).toBeNull();
+  });
+
+  test('same-turn context BEFORE the error does not falsely retire it', () => {
+    // Order here is POSITIONAL — lines earlier in the file are older, exactly as a
+    // real rollout is append-only — not driven by the `timestamp` field values.
+    // The rate-limits reading that proves the window is spent is read from the
+    // token_count immediately preceding the error, in the SAME failed turn — it
+    // must not count as "a later turn ran".
+    const text = [
+      turnContext('gpt-5.5', 'high'),
+      tokenCount(usage(1000), limits(100, 100), '2026-08-02T20:26:55.000Z'),
+      capError(),
+    ].join('\n');
+    expect(findUsageCapAt(text)).toBe(CAP_MS);
+  });
+
+  test('the OLDEST of two cap errors is correctly superseded by the newest', () => {
+    const older = capError('2026-07-26T10:00:00.000Z');
+    const evidence = turnContext('gpt-5.5', 'high');
+    const newer = capError('2026-08-02T20:26:58.735Z');
+    expect(findUsageCapAt([older, evidence, newer].join('\n'))).toBe(Date.parse('2026-08-02T20:26:58.735Z'));
+  });
+
+  test('empty, malformed and metric-free input yield null', () => {
+    expect(findUsageCapAt('')).toBeNull();
+    expect(findUsageCapAt(null)).toBeNull();
+    expect(findUsageCapAt('{not json')).toBeNull();
+  });
+
+  test('parseMetricsFromTail exposes capObservedAt end-to-end, live and cleared', () => {
+    const live = parseMetricsFromTail([
+      tokenCount(usage(1000), limits(100, 100), '2026-08-02T20:26:50.000Z'), capError(),
+    ].join('\n'));
+    expect(live.capObservedAt).toBe(CAP_MS);
+
+    const cleared = parseMetricsFromTail([capError(), turnContext('gpt-5.5', 'high')].join('\n'));
+    expect(cleared.capObservedAt).toBeNull();
+  });
+
+  test('a live cap error alone (no usable token_count/turn_context) still yields metrics, not null', () => {
+    // The same philosophy as usage-limit.js's observedBlockAt: a direct observation
+    // needs no percentage to corroborate it.
+    const m = parseMetricsFromTail(capError());
+    expect(m).not.toBeNull();
+    expect(m.capObservedAt).toBe(CAP_MS);
+    expect(m.fiveH).toBeNull();
+    expect(m.model).toBeNull();
+  });
 });
 
 // ---- against a REAL rollout on this machine ---------------------------------
