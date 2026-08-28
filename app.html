@@ -1332,11 +1332,13 @@
     }
 
     function switchSession(id, serverUrl) {
+      if (id === sessionId && serverUrl === sessionServerUrl) return;
       // #179 - the notice belongs to the session it was raised on, and so does the
       // draft it offered back. Leaving either behind would attach one session's lost
-      // prompt to another session's compose bar.
+      // prompt to another session's compose bar. AFTER the same-session early return,
+      // found in review: clicking the row of the session already open is not a switch,
+      // and it was silently dismissing a live notice.
       if (typeof hideSubmitUnconfirmed === 'function') hideSubmitUnconfirmed();
-      if (id === sessionId && serverUrl === sessionServerUrl) return;
       // Stash the outgoing session's uncommitted compose buffer (a live
       // '/'-line is mid-stream against the old terminal — discard it).
       if (composeMode && sessionId && !composeLive) composeDrafts.set(sessionId, composeInput.value);
@@ -1847,7 +1849,10 @@
       const box = document.getElementById('composeNotice');
       const txt = document.getElementById('composeNoticeText');
       if (!box || !txt) return;
-      const restored = lastSubmission && composeInput.value === '';
+      // Restored only into a compose bar that is EMPTY and actually on screen. Found in
+      // review: with the bar hidden (raw mode), the text went into an invisible textarea
+      // while the notice said "your text is back" - pointing at something not there.
+      const restored = !!lastSubmission && composeMode && composeInput.value === '';
       if (restored) {
         composeInput.value = lastSubmission.text;
         autosizeCompose();
@@ -1870,13 +1875,35 @@
     // confirms it or reports that nothing came of it. The TEXT never crosses the wire in
     // that report (the worker says only "that submit produced no agent activity"), so the
     // client that typed it is the only place it can be recovered from.
+    //
+    // IT EXPIRES, and that is what stops a stale report restoring a prompt that landed.
+    // The worker reports a failure inside its confirm window (8s) or never reports at
+    // all, so a submit still pending well past that provably succeeded — and holding
+    // it longer only leaves something for a later, unrelated report to hand back by
+    // mistake. Found in review. The event's `at` is stamped when the submit CR went out,
+    // so it is also compared against ours: a report older than our own last submit is
+    // about somebody else's.
+    //
+    // KNOWN SCOPE, deliberate: this is only ever set by the compose bar, so on a wide
+    // desktop window — where the bar is hidden and typing goes straight to xterm — no
+    // report is claimed. Raw char-by-char typing sends a LONE CR, which the worker never
+    // splits and therefore never watches, so there is nothing to claim for it either.
+    const SUBMIT_PENDING_GRACE_MS = 20000;
     let lastSubmission = null;
+    let lastSubmissionTimer = null;
+    function rememberSubmission(v) {
+      clearTimeout(lastSubmissionTimer);
+      lastSubmission = v;
+      if (v) lastSubmissionTimer = setTimeout(() => { lastSubmission = null; }, SUBMIT_PENDING_GRACE_MS);
+    }
 
     // #179 - exposed so a test can drive the notice without waiting out a live worker
-    // timeout, and so the dismiss button's inline onclick can reach it.
-    window.showSubmitUnconfirmed = () => showSubmitUnconfirmed();
-    window.hideSubmitUnconfirmed = () => hideSubmitUnconfirmed();
-    window.__wtSetLastSubmission = (v) => { lastSubmission = v; };
+    // timeout. NOT as `window.f = () => f()`: this is a CLASSIC script, so a top-level
+    // `function f(){}` is ALREADY `window.f`, and that wrapper overwrites the global it
+    // then calls — infinite recursion, "Maximum call stack size exceeded" on the very
+    // first switchSession, and a dead app. Caught by loading the page in a real browser
+    // after CI failed 73 UI specs that a local suite run had reported green.
+    window.__wtSetLastSubmission = (v) => { rememberSubmission(v); };
     function composeSend() {
       if (!ws || ws.readyState !== WebSocket.OPEN) return; // WS down — keep the buffer
       const val = composeInput.value;
@@ -1889,7 +1916,7 @@
       }
       if (val === '') { sendInput('\r', true); return; } // bare Enter on an empty buffer
       hideSubmitUnconfirmed();
-      lastSubmission = { id: sessionId, text: val, at: Date.now() };
+      rememberSubmission({ id: sessionId, text: val, at: Date.now() });
       sendInput(buildComposeSubmission(val), true);
       pushComposeHistory(val);
       clearComposeInput();
@@ -4816,7 +4843,12 @@
           // sent produced no agent activity. Only the session on screen can act on it,
           // and only if this browser is the one that typed it.
           if (msg && msg.type === 'submitUnconfirmed') {
-            if (msg.id === sessionId && lastSubmission && lastSubmission.id === msg.id) {
+            // Ours only: this session, a submit we still hold, and one this report can
+            // actually be about. `at` is stamped when the submit CR went out, so a report
+            // older than our own submit belongs to somebody else's (another tab, another
+            // device) — and restoring our text on it would hand back words that landed.
+            if (msg.id === sessionId && lastSubmission && lastSubmission.id === msg.id
+                && (typeof msg.at !== 'number' || msg.at >= lastSubmission.at)) {
               showSubmitUnconfirmed();
             }
             return;
