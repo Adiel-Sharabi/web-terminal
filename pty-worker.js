@@ -1112,9 +1112,16 @@ function deliver(session, data) {
 // ('waiting') REJECTS the tool and Claude carries on, and its next hook reports the truth.
 // Which agents interrupt on Esc is the registry's call, never a branch in here.
 function noteInterrupt(session, data) {
-  if (session.status !== 'working') return;
   if (!isEscapeKey(data)) return;
   if (!agents.interruptsOnEscape(sessionAgent(session))) return;
+  // #179 — Esc ABANDONS whatever was just submitted, so any watch on it is moot.
+  // Cancelled BEFORE the `working` gate below on purpose: the window that matters is
+  // the second or so between a submit and the agent's first hook, and the session is
+  // still `idle` throughout it — so the gate would skip exactly the case this covers.
+  // Claude fires NO hook on an interrupt (#55 §6), so without this the watch runs to
+  // its timeout and reports a prompt the user themselves cancelled. Found in review.
+  cancelSubmitWatch(session);
+  if (session.status !== 'working') return;
   session.status = 'idle';
   // Esc cancels the whole turn — subagents included. Their SubagentStop may never
   // arrive, so drop the tracking with the turn (#61). Cancel any armed idle flip
@@ -1145,11 +1152,18 @@ function _writeFrame(session, data) {
     session._submitTimer = null;
     // Read the line BEFORE the CR is written — the CR is what resets the tracker.
     const isCommand = session._submitLine ? session._submitLine.isCommand : false;
-    try { termWrite(session, split.cr); } catch (e) { log(`submit CR failed: ${e.message}`); return; }
+    let wrote = false;
+    try { termWrite(session, split.cr); wrote = true; } catch (e) { log(`submit CR failed: ${e.message}`); }
     // #179 — the submit is on the wire now; from here it either produces a turn or it
     // was swallowed. Armed HERE, at delivery, for the same reason status is read here:
     // arming at arrival would start the clock while the CR was still being withheld.
-    armSubmitWatch(session, isCommand);
+    //
+    // Only on a CR that actually went out: a write that threw is a submit that
+    // definitely did not land, and reporting it as "no agent activity" would blame the
+    // agent for a dead PTY. And the drain runs EITHER WAY — found in review, an early
+    // return here stranded `_inputQueue` with `_submitTimer` already null, so the next
+    // frame was written ahead of the queued one and input order was silently lost.
+    if (wrote) armSubmitWatch(session, isCommand);
     _drainInputQueue(session);
   }, submitGapMs(session));
   if (typeof session._submitTimer.unref === 'function') session._submitTimer.unref();
@@ -1186,6 +1200,7 @@ function armSubmitWatch(session, isCommand) {
   if (!submitConfirm.shouldWatchSubmit(policy, {
     hookStatus: !!session.hookStatus,
     status: session.status,
+    compacting: !!session.compacting,
     // _writeFrame is reached only from writeUserInput / _drainInputQueue, both of
     // which carry CLIENT frames. The worker's own submits (auto-resume's `continue`,
     // the API-error ladder's /compact, /rename) go through submitLine → termWrite and

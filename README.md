@@ -79,13 +79,16 @@ and a desktop watch the same session, the shared terminal is sized to fit the **
 of them, so a full-width agent screen never arrives on the phone already wrapped — and
 backgrounding the phone hands the columns straight back.
 
-**A prompt is never swallowed silently** — if you submit while the agent's TUI is
-somewhere other than its composer — a full-screen `/usage` view, an open slash menu, a
-crashed CLI back at the shell — the keystrokes are eaten as navigation and, until now,
-your words simply vanished with no error anywhere. The server does not guess at that
-state (measured: none of those views emits a distinguishing byte). It **verifies the
-outcome instead**: a submit that produces no sign of life from the agent is reported, and
-the client hands your text straight back into the compose bar.
+**A swallowed prompt says so, and gives the words back** — submit while the agent's TUI
+is somewhere other than its composer (a full-screen `/usage` view, an open slash menu, a
+crashed CLI back at the shell) and the keystrokes are eaten as navigation; until now your
+words simply vanished with no error anywhere. The server does not guess at that state
+(measured: none of those views emits a distinguishing byte). It **verifies the outcome
+instead** — a compose-bar submit that produces no sign of life from the agent is
+reported, and the client puts your text back, but only into a compose bar you have not
+already started retyping into. Claude sessions on a server whose hooks are installed;
+every gate errs toward saying nothing, because a false alarm on a prompt that did land
+would be worse than the silence it replaces.
 
 **Cluster** — merge several servers into one sidebar, each showing its own CPU and
 **free memory** so you can pick where to work; optional direct-terminal mode skips the

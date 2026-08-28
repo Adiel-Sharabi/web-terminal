@@ -26,6 +26,15 @@ async function openSession(page, id, name) {
 }
 
 test.describe('#179 submit-unconfirmed notice (web client)', () => {
+  // A PHONE-WIDTH VIEWPORT, and it is load-bearing rather than cosmetic. `composeMode`
+  // is `isMobile && ...`, and `isMobile` ORs in `innerWidth < 600` (#55: visibility is
+  // not the same question as platform). The restore is gated on the compose bar being
+  // ON SCREEN — putting text into a hidden textarea while announcing "your text is
+  // back" points the user at something they cannot see — so at a desktop width every
+  // assertion below about restoring would pass vacuously, including the
+  // non-destructive one, which is the whole point of the feature.
+  test.use({ viewport: { width: 390, height: 844 } });
+
   test('the notice is hidden on load', async ({ page }) => {
     await loginPage(page);
     const ctx = await authCtx();
@@ -34,6 +43,11 @@ test.describe('#179 submit-unconfirmed notice (web client)', () => {
       await openSession(page, id, 'SU Hidden');
       // A notice that defaulted to visible would sit on top of every fresh session,
       // not just one that actually had a submit go unconfirmed.
+      //
+      // ATTACHED first, then hidden. Found in review: `toBeHidden()` is also satisfied
+      // by an element that does not exist, so this assertion alone was green against the
+      // pre-fix app.html that had no #composeNotice at all.
+      await expect(page.locator('#composeNotice')).toBeAttached();
       await expect(page.locator('#composeNotice')).toBeHidden();
     } finally {
       try { await ctx.delete(`/api/sessions/${id}`); } catch {}

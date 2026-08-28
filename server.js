@@ -651,7 +651,7 @@ const _ptySize = new Map();
  * worker if it moved. The rule — smallest ACTIVE viewer wins — and the reasoning
  * behind it live in lib/terminal-size.js; this is only where it meets the socket list.
  */
-function applyNegotiatedSize(id) {
+function applyNegotiatedSize(id, { nudge = false } = {}) {
   const set = sessionClients.get(id);
   if (!set || set.size === 0) { _ptySize.delete(id); return; }
   const next = terminalSize.negotiateSize(
@@ -659,9 +659,30 @@ function applyNegotiatedSize(id) {
   );
   // null means nobody attached has an opinion (a REST client, a socket that never sent a
   // resize). Leave the PTY as it is rather than impose a default on a live agent.
-  if (!terminalSize.sizeChanged(_ptySize.get(id), next)) return;
-  _ptySize.set(id, next);
-  workerClient.rpc('resizeSession', { id, cols: next.cols, rows: next.rows }).catch(() => {});
+  if (!next) return;
+  if (!terminalSize.sizeChanged(_ptySize.get(id), next)) {
+    // #146 — the size did not move, so a viewer that just arrived gets no SIGWINCH
+    // and the TUI never repaints for it. That is what app.html's own nudgeRedraw()
+    // exists to force, by flicking rows by 1 — and negotiation DEFEATS it, because a
+    // viewer that is not the minimum cannot move the answer, so both halves of its
+    // flick collapse to the same value. Found in review. So the nudge is delivered
+    // HERE instead, at the negotiated size, where it still works.
+    if (nudge && next.rows > 1) {
+      workerClient.rpc('resizeSession', { id, cols: next.cols, rows: next.rows - 1 })
+        .then(() => workerClient.rpc('resizeSession', { id, cols: next.cols, rows: next.rows }))
+        .catch(() => { _ptySize.delete(id); });
+    }
+    return;
+  }
+  // Recorded only once the worker has ACCEPTED it, and forgotten if it has not. Found
+  // in review: writing the cache optimistically meant a rejected resize (a blocked
+  // worker event loop is a condition this fleet has actually hit) left us believing a
+  // size the PTY never took — and every later identical relayout was then swallowed
+  // by the dedupe, so the viewer stayed wrapped for the rest of the session. That is
+  // #146's own symptom, reintroduced by #146's fix.
+  workerClient.rpc('resizeSession', { id, cols: next.cols, rows: next.rows })
+    .then(() => { _ptySize.set(id, next); })
+    .catch(() => { _ptySize.delete(id); });
 }
 
 // Map<sessionId, () => void> — active PTY_OUT dispose handles (one per session,
@@ -1240,10 +1261,15 @@ workerClient.on('agentReady', ({ id }) => {
 // having taken it. The worker owns that judgement (it is the only component that knows
 // when the submit CR actually went out); this is only the relay.
 //
-// Pushed and NOT persisted onto the session shape on purpose. It is a one-shot fact
-// about a keystroke, addressed to whoever just typed — a client that connects later
-// has no draft to restore and would only be shown an alarm about somebody else's lost
-// prompt. Like 'agentReady' and 'compacting', it never wakes a backgrounded phone.
+// Pushed and NOT persisted onto the session shape on purpose: it is a one-shot fact
+// about a keystroke, and a client that connects later has no draft to restore.
+//
+// It is BROADCAST, though — the worker never learns which connection sent a PTY_IN
+// frame, so the event names no originator and every attached device is told. What keeps
+// that invisible is entirely client-side: each client answers only for a submit whose
+// text and timestamp it still holds. Found in review; stated here so the next reader
+// does not mistake the broadcast for an addressed message. Like 'agentReady' and
+// 'compacting', it never wakes a backgrounded phone.
 workerClient.on('submitUnconfirmed', ({ id, at }) => {
   const payload = JSON.stringify({ type: 'submitUnconfirmed', id, at: at ?? null });
   for (const client of notifyClients) { try { client.send(payload); } catch {} }
@@ -2193,9 +2219,18 @@ function armResetTimerFromMetrics(sessionId, metrics) {
   // #138 — the worker arms on an OBSERVED block, never on a bare timestamp. The rule
   // lives in lib/usage-limit.js so the arming decision and the `usageLimit` the
   // session list publishes are one computation, not two readings of the same fields.
-  const capBlocked = usageLimit.isCapBlocked({
-    fiveH: metrics.fiveH,
-    fiveHResetAt: val,
+  //
+  // Which is why this goes through usageLimitState rather than isCapBlocked directly:
+  // #142 added a THIRD cap source (a Codex rollout's own usage_limit_exceeded error)
+  // that the badge reads and this did not, so the list could publish `capBlocked: true`
+  // while the worker was told `false`. Harmless only while Codex declines to arm — and
+  // the comment above promises one computation, not two. Found in review.
+  const { capBlocked } = usageLimit.usageLimitState({
+    // The WHOLE metrics object, with only fiveHResetAt overridden by the sanitised
+    // value above: observedCapReset needs the weekly window too, or an observed cap
+    // here expires on the 7-day backstop while the badge expires it on the real reset.
+    metrics: { ...metrics, fiveHResetAt: val },
+    enabled: true,     // the opt-out is passed separately below; this is the QUOTA reading
     now: Date.now(),
     delayMs: usageLimit.autoResumeDelayMs(process.env),
   });
@@ -5177,8 +5212,9 @@ app.ws('/ws/:id', (ws, req) => {
 
             if (parsed.mode === 'active') {
               ws._wtBackground = false;
-              // #146 — a viewer that just became active gets a vote in the size.
-              applyNegotiatedSize(id);
+              // #146 — a viewer that just became active gets a vote in the size, and
+              // needs a repaint whether or not its vote changed the answer.
+              applyNegotiatedSize(id, { nudge: true });
               // #21: by default, multiple devices share one PTY (shared I/O) —
               // opening a session on a second device no longer force-disconnects
               // the first. There is a single PTY that echoes once and broadcasts

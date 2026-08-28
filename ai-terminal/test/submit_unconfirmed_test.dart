@@ -67,6 +67,52 @@ void main() {
       expect(r.text, 'fix the failing test');
     });
 
+    test('THE STALE-EVENT RULE: a report older than our own submit is not ours', () {
+      // Found in review, and it produced a false alarm on a prompt that LANDED. The
+      // repository holds a `submitUnconfirmed` entry until some screen consumes it, and
+      // there is no "confirmed" frame to clear it on — so an event raised while no
+      // screen was open survives. Open that session, send a prompt that works, and the
+      // next emission would replay the old event against the new prompt: banner up,
+      // words back in the box, and the user's natural next move is to send them twice.
+      //
+      // The event's `at` is stamped when the submit CR went out, so an `at` that
+      // predates this client's own last submit is reporting on something else.
+      final r = resolveSubmitUnconfirmedReaction(
+        eventAt: 1000, lastHandledAt: null, pendingText: 'a prompt that landed',
+        composeIsEmpty: true, lastSubmitAt: 5000,
+      );
+      expect(r.outcome, SubmitUnconfirmedOutcome.notMine);
+    });
+
+    test('a report from AFTER our submit is ours', () {
+      final r = resolveSubmitUnconfirmedReaction(
+        eventAt: 5001, lastHandledAt: null, pendingText: 'mine',
+        composeIsEmpty: true, lastSubmitAt: 5000,
+      );
+      expect(r.outcome, SubmitUnconfirmedOutcome.mine);
+      expect(r.text, 'mine');
+    });
+
+    test('a report stamped at the same instant as our submit is ours', () {
+      // The worker stamps `at` when the CR goes out, which is `submit.gapMs` after the
+      // client sent the frame — so equal, or a hair later, is the ordinary case.
+      final r = resolveSubmitUnconfirmedReaction(
+        eventAt: 5000, lastHandledAt: null, pendingText: 'mine',
+        composeIsEmpty: true, lastSubmitAt: 5000,
+      );
+      expect(r.outcome, SubmitUnconfirmedOutcome.mine);
+    });
+
+    test('with no submit of our own recorded, the guard does not fire', () {
+      // A client that has never submitted has no pendingText either, so this is belt
+      // and braces — but the guard must not invent a rejection from a missing input.
+      final r = resolveSubmitUnconfirmedReaction(
+        eventAt: 1000, lastHandledAt: null, pendingText: 'somehow set',
+        composeIsEmpty: true, lastSubmitAt: null,
+      );
+      expect(r.outcome, SubmitUnconfirmedOutcome.mine);
+    });
+
     test('THE NON-DESTRUCTIVE RULE: a draft already being typed is never clobbered', () {
       // The one that must stay red if someone "simplifies" this into an unconditional
       // assignment. A late notice about the previous prompt must not overwrite the new
@@ -169,14 +215,23 @@ void main() {
       expect(viewed, 1);
     });
 
-    testWidgets('it takes a layout slot rather than covering the terminal', (tester) async {
-      // #179 asks for a notice that is visible and non-blocking. An overlay could
-      // swallow a tap meant for the terminal underneath it, so the banner is a plain
-      // Column child — assert it renders inside normal flow with a finite height.
+    testWidgets('it announces itself to a screen reader without stealing focus', (tester) async {
+      // The original assertion here claimed to prove the banner "takes a layout slot
+      // rather than covering the terminal" by checking its height was finite — which
+      // is true of any widget, including one inside a Stack. A widget test pumped in
+      // isolation cannot see where SessionScreen places it, so it does not pretend to;
+      // what it CAN pin is the contract that makes a non-blocking notice usable, which
+      // is that it is a live region carrying its whole message. Found in review.
       await pump(tester, restored: true);
-      final box = tester.getSize(find.byKey(const Key('submit-unconfirmed-banner')));
-      expect(box.height, greaterThan(0));
-      expect(box.height.isFinite, isTrue);
+      final semantics = tester.widget<Semantics>(
+        find.ancestor(
+          of: find.byKey(const Key('submit-unconfirmed-banner')),
+          matching: find.byType(Semantics),
+        ).first,
+      );
+      expect(semantics.properties.liveRegion, isTrue);
+      expect(semantics.properties.label, contains('reached the agent'));
+      expect(semantics.properties.label, contains('compose bar'));
     });
   });
 }

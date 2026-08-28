@@ -589,11 +589,29 @@ the session has never delivered a hook (`hookStatus`, the same proof `isClaudeSe
 uses — so a box without hooks installed is untouched); the write came from the worker
 itself (auto-resume's `continue`, the API-error ladder — no draft to give back); the
 session is **already `working`** (the composer QUEUES behind a running turn and need not
-report it for minutes); or the line **starts with `/`** — `/usage` legitimately starts no
-turn, and flagging it would fire on exactly the views the user opened on purpose. That
-last one is why the line is accumulated from the bytes written rather than read off the
-submit frame: a live `/`-line is streamed as you type (#55), so its submit frame is a
-**bare CR** carrying no text at all.
+report it for minutes); the session is **mid-compaction** (#129 measured that Claude
+reports *idle* part-way through a `/compact`, so the status gate cannot see it and no
+hook fires until it finishes); **Esc arrives inside the window** (Claude fires no hook on
+an interrupt, and the session is still `idle` there, so the interrupt gate could not see
+it either); or the line **starts with `/`** — `/usage` legitimately starts no turn, and
+flagging it would fire on exactly the views the user opened on purpose.
+
+That last one is why the line is accumulated from the bytes written rather than read off
+the submit frame: a live `/`-line is streamed as you type (#55), so its submit frame is a
+**bare CR** carrying no text at all. Two details of that accumulation are load-bearing,
+and both were review findings: **the cap keeps the HEAD** (slicing the tail threw the
+leading `/` away, so a long slash command read as a prompt and got watched), and **a
+paste is not typing** — its body is dropped, because the images-only submit (#87) pastes
+a file PATH, and a POSIX `/home/...` was reading as a slash command while a Windows
+`C:\\Users\\...` was not. The same action, two answers, decided by the platform.
+
+**The clients hold the words, and they EXPIRE.** The event carries no text, so recovery is
+each client's own copy — restored only into an empty compose bar, only for a report
+stamped at or after that client's own last submit, and only inside a grace window,
+because **silence is success**: the worker reports inside 8s or never, so a prompt still
+pending long after that provably landed. Without those last two, a report stranded from
+before a screen was open replayed against a fresh, successful prompt — banner up, words
+back in the box, and the obvious next move is to send them a second time.
 
 ### Agent View (`←`) is NOT alt-screen, and it REDIRECTS your next prompt (#146)
 
@@ -639,13 +657,45 @@ ACTIVE viewer wins** (`lib/terminal-size.js`, applied in `server.js`): a termina
 than its viewer only wastes space, while one larger is unreadable, and only the second
 loses information. A background socket has no vote, so a phone in a pocket cannot hold a
 desktop at phone width — and that is what makes it self-healing. **Server-side only, so it
-hot-reloads**; the worker's `resizeSession` is unchanged. `tests/terminal-size.spec.js`
+hot-reloads**; the worker's `resizeSession` is unchanged.
+
+Two review findings worth carrying. The negotiated size is cached **only once the worker
+has accepted it**: writing it optimistically left the server believing a size a rejected
+resize never applied, and every identical relayout afterwards was then swallowed by the
+dedupe — #146's own symptom, reintroduced by #146's fix. And a viewer that arrives
+without changing the answer still gets a **nudge** (`rows-1`, then `rows`), because
+`app.html`'s own `nudgeRedraw` cannot work through a `min()` that collapses both halves of
+its flick to the same value. `tests/terminal-size.spec.js`
 asks the PTY itself with `stty size` rather than trusting the message it sent.
 
 **Chat lens: nothing to render, and that is a structural answer, not a deferral.** Agent
 View is TUI paint and writes nothing to the transcript — the same finding as #131. The
 only honest route is `claude agents --json`, which is a separate feature, not a rendering
 fix.
+
+### `app.html` is ONE CLASSIC SCRIPT: `window.f = () => f()` is infinite recursion
+
+A top-level `function f(){}` in a classic script **is already `window.f`**. So the
+innocent-looking line that exposes it for a test:
+
+```js
+window.showSubmitUnconfirmed = () => showSubmitUnconfirmed();   // NO
+```
+
+overwrites the global binding with the arrow, and the arrow's body then resolves to
+**itself**. The first call blows the stack, the script dies where it stands, and the
+whole app is inert — empty sidebar, `(no session)`, every click timing out. Write
+`window.f = f;`, or just rely on the declaration already being global. (A wrapper is
+only safe when it names something ELSE: `window.__setAutoScroll = (v) => { autoScroll = v; }`
+is fine.)
+
+**The methodology lesson is the bigger one.** This shipped past a LOCAL full-suite run
+that reported *1346 passed, 0 failed*, and was caught by CI failing **73** UI specs —
+then reproduced in ten seconds by loading the page in a real browser and reading
+`pageerror`. A green suite is evidence, not proof: when a change touches `app.html`,
+**load the page and check the console** before believing the run. The rig makes that
+cheap and safe — `node scripts/rig/rig.js up`, then drive `http://127.0.0.1:7999`
+with a standalone Playwright script on a port the suite is not using.
 
 ## AskUserQuestion — the LAYOUT decides what the keys mean (#19)
 

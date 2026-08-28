@@ -79,6 +79,11 @@ class SessionRepository {
   final Map<String, List<Session>> _lastByServer = <String, List<Session>>{};
   final Map<String, bool> _serverOnline = <String, bool>{};
   final Set<String> _namesResolved = <String>{};
+  // When each server's `/api/version` was last answered, so an already-resolved
+  // server is re-asked only when its free machine reading (#152/#165) has gone
+  // stale rather than on every 300ms-debounced [refresh].
+  final Map<String, DateTime> _versionFetchedAt = <String, DateTime>{};
+  static const Duration _machineReadingMaxAge = Duration(seconds: 10);
 
   /// Per-server `favorites-sync` capability (#60), keyed by base URL. Filled
   /// from the SAME `/api/version` call [_ensureServerNames] already makes —
@@ -400,6 +405,7 @@ class SessionRepository {
     _lastByServer.remove(baseUrl);
     _serverOnline.remove(baseUrl);
     _namesResolved.remove(baseUrl);
+    _versionFetchedAt.remove(baseUrl);
     _favoritesSyncSupported.remove(baseUrl);
   }
 
@@ -767,23 +773,48 @@ class SessionRepository {
   /// way to do that without a second endpoint is to keep asking. Re-checking
   /// name/capabilities on every call is not a correctness cost:
   /// `updateServerName` no-ops when the name is unchanged, and re-assigning
-  /// an unchanged capability flag is a no-op too. The only real cost is one
-  /// more `/api/version` per server per [refresh] for a server that was
-  /// already confirmed — the same ~30s cadence the session poll already
-  /// runs at, never the expensive per-process `/api/resources` the
-  /// resources-view toggle exists to gate.
+  /// an unchanged capability flag is a no-op too.
+  ///
+  /// THROTTLED, though, and that is not an optimisation. [refresh] is NOT a 30s
+  /// thing: [_scheduleRefresh] fires it on a 300ms debounce after every
+  /// `/ws/notify` event, so while an agent is working an untimed re-fetch would
+  /// cost N extra round trips per notify burst — and [refresh] awaits this
+  /// before the session list, so the list would queue behind the slowest peer.
+  /// Found in review. A server already resolved is re-asked at most every
+  /// [_machineReadingMaxAge]; one not yet resolved is asked every time, because
+  /// its name and `favorites-sync` capability are still unknown.
   /// Updates the server store in place so the fallback `Shadow` name upgrades
   /// to the real one.
   Future<void> _ensureServerNames() async {
+    final now = DateTime.now();
     await Future.wait(_store.servers.map((server) async {
+      // Throttled only once a server is FULLY settled — which is the old `confirmed`
+      // condition, unchanged: name resolved AND `favorites-sync` confirmed true. A
+      // server that does not (yet) support it is still asked on every refresh, because
+      // #60 exists to pick the capability up the moment the server is upgraded, with no
+      // app restart. Caught by that very test when the throttle was first written
+      // without this clause.
+      final settled = _namesResolved.contains(server.baseUrl) &&
+          (_favoritesSyncSupported[server.baseUrl] ?? false);
+      if (settled) {
+        final last = _versionFetchedAt[server.baseUrl];
+        if (last != null && now.difference(last) < _machineReadingMaxAge) return;
+      }
       ServerInfo? info;
       try {
         info = await _clientFor(server).version();
+        // A 2xx that is not actually a web-terminal — a squatted `tailscale serve`
+        // mount, a captive portal — parses to an EMPTY ServerInfo. Treating that as
+        // an authoritative answer would silently drop `favorites-sync` for a server
+        // that supports it, and publish a bogus (absent) load reading. Every real
+        // server reports a version, so that is the sanity gate. Found in review.
+        if (info.version.isEmpty) { info = null; throw StateError('not a web-terminal'); }
         if (info.serverName.isNotEmpty) {
           _store.updateServerName(server.baseUrl, info.serverName);
         }
         _favoritesSyncSupported[server.baseUrl] = info.has('favorites-sync');
         _namesResolved.add(server.baseUrl);
+        _versionFetchedAt[server.baseUrl] = now;
       } catch (_) {
         // #66: NOT cleared here on purpose, even though this catch is now
         // reached on every refresh (the old `confirmed` short-circuit that

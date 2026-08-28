@@ -173,10 +173,13 @@ test('#146: a desktop relayout cannot steal the columns back from a phone', asyn
     await phone.background();
     expect(await ptySize(ctx, desktop, id)).toEqual({ cols: 120, rows: 40 });
 
-    // --- and coming back to the phone gives it its fit again.
+    // --- and coming back to the phone gives it its fit again, WITHOUT it having to
+    //     re-state its size. This is what pins the mode-change recompute: a viewer that
+    //     re-activates already has a size on file, and its vote must count again the
+    //     moment it does. (Re-sending a resize here would have re-pushed the size all by
+    //     itself, so the assertion would have passed with that recompute deleted.)
     phone.ws.send(JSON.stringify({ mode: 'active', browserId: 'phone-again' }));
-    await sleep(400);
-    await phone.setSize(52, 30);
+    await sleep(1200);
     expect(await ptySize(ctx, phone, id)).toEqual({ cols: 52, rows: 30 });
 
     // --- the phone leaves entirely: the desktop gets its columns back with no action.

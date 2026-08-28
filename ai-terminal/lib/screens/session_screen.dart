@@ -182,6 +182,13 @@ String resolveActiveLens({
   return persistedLens ?? 'chat';
 }
 
+/// How long a submitted prompt stays restorable (#179). The worker reports a
+/// failure inside its `submitConfirm.timeoutMs` (8s, `lib/agents.js`) or never
+/// reports at all, so a prompt still pending well past that window provably
+/// LANDED — and holding it any longer only leaves something for a later,
+/// unrelated event to restore by mistake. Silence is success.
+const Duration kSubmitPendingGrace = Duration(seconds: 20);
+
 /// The outcomes [resolveSubmitUnconfirmedReaction] can return.
 enum SubmitUnconfirmedOutcome {
   /// No event newer than the last one this screen already handled — nothing
@@ -243,11 +250,21 @@ SubmitUnconfirmedReaction resolveSubmitUnconfirmedReaction({
   required int? lastHandledAt,
   required String? pendingText,
   required bool composeIsEmpty,
+  int? lastSubmitAt,
 }) {
   if (eventAt == null || eventAt == lastHandledAt) {
     return const SubmitUnconfirmedReaction.unchanged();
   }
   if (pendingText == null) return const SubmitUnconfirmedReaction.notMine();
+  // The event is stamped when the submit CR went out, so an `at` that PREDATES
+  // this client's own last submit is reporting on something else entirely —
+  // typically an entry the repository has been holding since before this screen
+  // existed (it has no "confirmed" frame to clear itself on). Restoring on that
+  // would put a prompt that landed perfectly back into the box seconds after a
+  // successful send, and invite the user to run it twice. Found in review.
+  if (lastSubmitAt != null && eventAt < lastSubmitAt) {
+    return const SubmitUnconfirmedReaction.notMine();
+  }
   return SubmitUnconfirmedReaction.mine(text: pendingText, restore: composeIsEmpty);
 }
 
@@ -1012,6 +1029,15 @@ class _SessionScreenState extends State<SessionScreen>
   // unconfirmed submit (the frame carries no client identity to check
   // instead).
   String? _lastSubmittedPrompt;
+  // When that prompt was submitted, so an event stamped EARLIER than it can be
+  // recognised as reporting on somebody else's submit (see the rule above).
+  int? _lastSubmitAt;
+  // #179 — SILENCE IS SUCCESS, so a pending prompt expires. The worker reports a
+  // failure inside `submitConfirm.timeoutMs` (8s) or never reports at all, so a
+  // prompt still pending well past that window provably LANDED, and holding it
+  // any longer only creates something for a later, unrelated event to restore by
+  // mistake. Generous against a slow link; still far short of "forever".
+  Timer? _lastSubmittedPromptExpiry;
   // The highest `SessionRepository.submitUnconfirmedAt` already reacted to,
   // so a later, unrelated `sessions` emission (any poll, any other session's
   // event) can't replay an event this screen already handled — the repo
@@ -1364,6 +1390,8 @@ class _SessionScreenState extends State<SessionScreen>
 
   Future<void> _setLens(String value) async {
     if (value == _activeLens) return;
+    // #179 — the notice says "check the terminal", so going there answers it.
+    _dismissSubmitUnconfirmedNotice();
     setState(() {
       _persistedLens = value;
       // An explicit choice outranks both pins: the user is looking at the app
@@ -1530,6 +1558,7 @@ class _SessionScreenState extends State<SessionScreen>
       lastHandledAt: _handledSubmitUnconfirmedAt,
       pendingText: _lastSubmittedPrompt,
       composeIsEmpty: _composeController.text.isEmpty,
+      lastSubmitAt: _lastSubmitAt,
     );
     if (reaction.outcome == SubmitUnconfirmedOutcome.unchanged) return;
     // Marked handled for BOTH remaining outcomes, so THIS instance never
@@ -1543,6 +1572,7 @@ class _SessionScreenState extends State<SessionScreen>
     // possibly wiping it before that instance's own (same-microtask) reaction
     // runs. Only the instance that actually consumes it (this branch) clears it.
     SessionRepository.instance.clearSubmitUnconfirmed(widget.sessionId);
+    _lastSubmittedPromptExpiry?.cancel();
     _lastSubmittedPrompt = null; // consumed once; a later report needs a fresh submit
     if (reaction.restore) _setComposeText(reaction.text!);
     if (!mounted) return;
@@ -1552,6 +1582,22 @@ class _SessionScreenState extends State<SessionScreen>
     });
   }
 
+  /// Records (or clears) the prompt a later `submitUnconfirmed` could restore,
+  /// and stamps when this client last wrote a submit to the PTY. Passing null is
+  /// how a submit with nothing restorable behind it still moves the marker.
+  void _rememberSubmittedPrompt(String? text) {
+    _lastSubmittedPromptExpiry?.cancel();
+    _lastSubmittedPrompt = text;
+    _lastSubmitAt = DateTime.now().millisecondsSinceEpoch;
+    if (text == null) return;
+    _lastSubmittedPromptExpiry = Timer(kSubmitPendingGrace, () {
+      _lastSubmittedPrompt = null;
+    });
+  }
+
+  /// #179 — the notice names the terminal, so switching to it answers the notice.
+  /// Leaving it up would sit an amber card above the thing it just told you to
+  /// look at, with its own action button gone. Found in review.
   void _dismissSubmitUnconfirmedNotice() {
     if (!_showSubmitUnconfirmedNotice) return;
     setState(() => _showSubmitUnconfirmedNotice = false);
@@ -2296,7 +2342,7 @@ class _SessionScreenState extends State<SessionScreen>
       // #179 — this client's own copy of what it just sent, kept for a
       // possible restore; overwrites whatever was pending before, so it
       // always names the LAST real prompt this compose bar submitted.
-      _lastSubmittedPrompt = val;
+      _rememberSubmittedPrompt(val);
     }
     // #29/#90: every staged path AND the prompt travel in ONE bracketed paste.
     // The byte rule lives in buildAttachmentSubmission — see its doc for the two
@@ -2324,11 +2370,14 @@ class _SessionScreenState extends State<SessionScreen>
     if (conn == null) return; // no PTY — nothing to submit to
     final val = text.replaceFirst(RegExp(r'[\r\n]+$'), '');
     if (val.trim().isEmpty) return;
-    // #179 — a fresh submit to the SAME PTY makes any notice about an older
-    // one stale. This path has its own text box (the subagent sheet), not
-    // the compose bar, so it does not set [_lastSubmittedPrompt] — there is
-    // nothing here to restore INTO.
+    // #179 — a fresh submit to the SAME PTY makes any notice about an older one
+    // stale. This path has its own text box (the subagent sheet), not the compose
+    // bar, so there is nothing to restore INTO — but it IS a client write the
+    // server watches, so it must still CLEAR the pending prompt. Leaving the
+    // compose bar's older (and successful) prompt pending here would make the
+    // next report restore the wrong words. Found in review.
     _dismissSubmitUnconfirmedNotice();
+    _rememberSubmittedPrompt(null);
     _submittedPrompts.add(val); // optimistic "Queued" echo (#31)
     conn.sendInput(buildComposeSubmission(val));
     _pushComposeHistory(val);
@@ -3436,6 +3485,7 @@ class _SessionScreenState extends State<SessionScreen>
   @override
   void dispose() {
     WidgetsBinding.instance.removeObserver(this);
+    _lastSubmittedPromptExpiry?.cancel(); // #179
     _derivedCtx.dispose();
     _chatSelection.dispose();
     // #70: leaving the screen must not leave a voice talking.

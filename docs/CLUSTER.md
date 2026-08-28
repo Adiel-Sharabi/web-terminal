@@ -46,8 +46,10 @@ companion talks to every server directly rather than through a merged cluster en
 `GET /api/cluster/sessions`), and `GET /api/version` already carries the same
 `resources: _resourceSampler.read()` block the cluster merge does — for free, off the
 warm sampler, at no extra endpoint. `SessionRepository` now publishes that reading into
-`ResourceMonitor` on every refresh (the same ~30s cadence its session poll already runs
-at — one extra cheap request per server, never the process-tree query), and
+`ResourceMonitor` (throttled to at most one `/api/version` per server every 10s, never
+the process-tree query — `refresh()` is NOT a 30s thing, it is also debounced at 300ms
+off every notify frame, so an unthrottled re-fetch would cost N round trips per burst and
+queue the session list behind the slowest peer), and
 `ServerResourceLine` reads it whenever the load view's own `GET /api/resources` report
 is absent. The switch still gates exactly what it always did: paging and web-terminal's
 own footprint, both of which need the per-process query below.

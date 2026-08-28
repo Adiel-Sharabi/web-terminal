@@ -228,6 +228,48 @@ test.describe('#179 — the worker reports a submit that produced no agent activ
     expect(events.unconfirmed(id)).toHaveLength(0);
   });
 
+  test('a session mid-COMPACTION is never watched', async () => {
+    // Found in review, and invisible to the `working` gate: #129 measured that Claude
+    // reports IDLE part-way through a /compact, so the session looks perfectly ordinary
+    // while no hook can arrive for as long as compaction runs — far beyond this
+    // window. The prompt is queued and answered when it finishes.
+    const id = await hookedClaudeSession('compacting');
+    await rpc(client, 'hookEvent', { id, event: 'PreCompact' });
+
+    typeInto(client, id, 'a prompt sent while it is compacting\r');
+    await sleep(CLAUDE_GAP + CONFIRM_MS + 500);
+    expect(events.unconfirmed(id)).toHaveLength(0);
+  });
+
+  test('Esc inside the window cancels the watch — the user abandoned that prompt', async () => {
+    // Claude fires NO hook on a user interrupt (#55 §6), so without an explicit cancel
+    // the watch runs to its timeout and reports a prompt the user themselves called
+    // off. Note the session is still `idle` here, not `working`: the window that matters
+    // is the second between a submit and the agent's first hook, which is exactly where
+    // the interrupt gate could not see it. Found in review.
+    const id = await hookedClaudeSession('escaped');
+
+    typeInto(client, id, 'a prompt the user thinks better of\r');
+    await sleep(CLAUDE_GAP + 100);
+    typeInto(client, id, '\x1b');            // a LONE Esc — never an arrow (isEscapeKey)
+
+    await sleep(CONFIRM_MS + 500);
+    expect(events.unconfirmed(id)).toHaveLength(0);
+  });
+
+  test('an ARROW key is not an interrupt and does not cancel the watch', async () => {
+    // The mirror of the test above, and the reason isEscapeKey exists: `ESC [ D` is a
+    // cursor key, not an abandonment, so it must leave the report intact.
+    const id = await hookedClaudeSession('arrowed');
+
+    typeInto(client, id, 'a prompt that goes nowhere\r');
+    await sleep(CLAUDE_GAP + 100);
+    typeInto(client, id, '\x1b[D');
+
+    await sleep(CONFIRM_MS + 500);
+    expect(events.unconfirmed(id)).toHaveLength(1);
+  });
+
   test('a session already WORKING is never watched — the composer queues it', async () => {
     const id = await hookedClaudeSession('queued');
     await rpc(client, 'hookEvent', { id, event: 'UserPromptSubmit', prompt: 'the running turn' });

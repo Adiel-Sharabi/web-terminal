@@ -66,6 +66,14 @@ test.describe('shouldWatchSubmit — the gates', () => {
   test('an idle agent session is watched — that is the whole point', () => {
     expect(shouldWatchSubmit(POLICY, { ...OK, status: 'idle' })).toBe(true);
   });
+
+  test('a session mid-COMPACTION is never watched', () => {
+    // The `working` gate's twin, and invisible to it: #129 measured that Claude reports
+    // IDLE part-way through a /compact, and no hook fires between PreCompact and the
+    // resumption. The prompt is queued and answered when compaction ends, so reporting
+    // it lost would hand back words that are about to be used. Found in review.
+    expect(shouldWatchSubmit(POLICY, { ...OK, status: 'idle', compacting: true })).toBe(false);
+  });
 });
 
 test.describe('confirmsSubmit', () => {
@@ -125,15 +133,36 @@ test.describe('createSubmitLineTracker — prompt or slash command?', () => {
     expect(t.isCommand).toBe(false);
   });
 
-  test('bracketed-paste markers are not part of the line', () => {
-    // A multi-line prompt is wrapped in ESC[200~ ... ESC[201~ before its CR.
+  test('A PASTE IS NOT TYPING: its body never becomes the line', () => {
+    // Found in review, and it made the gate PLATFORM-DEPENDENT. The images-only submit
+    // (#87) pastes the staged image's PATH, so a POSIX '/home/...' read as a slash
+    // command while a Windows 'C:\\Users\\...' read as ordinary text — the same action,
+    // two answers. A multi-line prompt travels as one paste too, and must read as a
+    // prompt rather than as whatever its first character happens to be.
+    const posix = createSubmitLineTracker();
+    posix.push('\x1b[200~/home/u/shot.png\x1b[201~');
+    expect(posix.isCommand).toBe(false);
+
+    const win = createSubmitLineTracker();
+    win.push('\x1b[200~C:\\Users\\u\\shot.png\x1b[201~');
+    expect(win.isCommand).toBe(false);
+    expect(win.isCommand).toBe(posix.isCommand);   // the platform must not decide this
+
+    const multiline = createSubmitLineTracker();
+    multiline.push('\x1b[200~/etc is where it lives\rand a second line\x1b[201~');
+    expect(multiline.isCommand).toBe(false);
+  });
+
+  test('an unterminated paste does not leak its body into the next line', () => {
     const t = createSubmitLineTracker();
-    t.push('\x1b[200~/not a command, just text starting with a slash\x1b[201~');
-    expect(t.line.startsWith('/')).toBe(true);
-    // ...and it IS reported as a command. Documented consequence, not an oversight:
-    // the rule is textual, and a pasted line that opens with `/` is indistinguishable
-    // from a typed one. It errs toward NOT watching, which is the silent direction.
-    expect(t.isCommand).toBe(true);
+    t.push('\x1b[200~/some/path/that/never/closes');
+    expect(t.isCommand).toBe(false);
+  });
+
+  test('typing AROUND a paste is still tracked', () => {
+    const t = createSubmitLineTracker();
+    t.push('/read \x1b[200~/home/u/notes.txt\x1b[201~ please');
+    expect(t.isCommand).toBe(true);   // the `/read` the user typed, not the pasted path
   });
 
   test('cursor keys and other escapes are not part of the line', () => {
@@ -157,16 +186,28 @@ test.describe('createSubmitLineTracker — prompt or slash command?', () => {
     expect(t.isCommand).toBe(true);
   });
 
-  test('a runaway line is bounded', () => {
+  test('THE CAP KEEPS THE HEAD: a long slash command is still a command', () => {
+    // Found in review. The first cut kept the last 4096 characters, which threw the
+    // leading `/` away — so `/compact <5000 chars>` reported as a PROMPT and got
+    // watched, firing the notice on a view the user opened deliberately. Only the first
+    // character decides the answer.
     const t = createSubmitLineTracker();
-    t.push('x'.repeat(20000));
+    t.push('/compact ' + 'x'.repeat(5000));
+    expect(t.isCommand).toBe(true);
     expect(t.line.length).toBeLessThanOrEqual(4096);
   });
 
-  test('reset clears the pending line', () => {
+  test('...and the mirror: a long PROMPT is not turned into a command by its tail', () => {
     const t = createSubmitLineTracker();
-    t.push('/usage');
-    t.reset();
+    t.push('x'.repeat(5000) + '/tail');
     expect(t.isCommand).toBe(false);
+  });
+
+  test('the cap holds across many small pushes, as a live line arrives', () => {
+    const t = createSubmitLineTracker();
+    t.push('/');
+    for (let i = 0; i < 500; i++) t.push('abcdefghij');
+    expect(t.isCommand).toBe(true);
+    expect(t.line.length).toBeLessThanOrEqual(4096);
   });
 });

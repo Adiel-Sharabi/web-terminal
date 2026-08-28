@@ -100,6 +100,12 @@ class ResourceMonitor extends ChangeNotifier {
   /// failure (`null` on failure) — never gated on [enabled], and never
   /// mixed into [_byBaseUrl], which stays the expensive poll's alone.
   void publishMachine(String baseUrl, MachineResources? machine) {
+    // Only on a real change. Found in review: notifying unconditionally rebuilt every
+    // server line and every session chip once per server per refresh — and refresh is
+    // debounced at 300ms off the notify stream, so during agent activity that is a
+    // steady rebuild storm for numbers that mostly did not move.
+    final had = _machineByBaseUrl.containsKey(baseUrl);
+    if (had && _machineByBaseUrl[baseUrl] == machine) return;
     _machineByBaseUrl[baseUrl] = machine;
     notifyListeners();
   }

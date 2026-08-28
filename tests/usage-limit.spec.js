@@ -277,3 +277,62 @@ test.describe('the resume delay is shared, not copied', () => {
     expect(u.resumeAtFrom(0, 60000)).toBeNull();
   });
 });
+
+// A rollout line is immutable, so re-reading it forever reported a cap long after it
+// lifted — 26 days, in the review's own reproduction. The worker's sighting of Claude's
+// prompt does not have this problem because the worker clears it; this channel has to
+// expire on its own. Found in review.
+test.describe('#142 — an observed cap EXPIRES, and names the right window', () => {
+  const NOW = Date.parse('2026-08-28T12:00:00.000Z');
+  const CAP_AT = Date.parse('2026-08-02T20:26:58.735Z');
+  const state = (metrics, now = NOW) =>
+    u.usageLimitState({ metrics, enabled: true, now, canArm: false });
+
+  test('THE REVIEW REPRODUCTION: 26 days after the cap, the row is not still held', () => {
+    const r = state({ capObservedAt: CAP_AT, fiveH: 34, fiveHResetAt: NOW + 3600e3 });
+    expect(r.waiting).toBe(false);
+    expect(r.capBlocked).toBe(false);
+  });
+
+  test('a LIVE cap, an hour before the window it is under resets, is held', () => {
+    const weeklyReset = NOW + 3600e3;
+    const r = state({
+      capObservedAt: NOW - 60e3,
+      sevenD: 100, sevenDResetAt: weeklyReset,
+      fiveH: 34, fiveHResetAt: NOW + 30 * 60e3,
+    });
+    expect(r.waiting).toBe(true);
+    // ...and the resume it announces comes from the WEEKLY window, not the 5h one.
+    // Announcing the 5h reset for a weekly cap named a time unrelated to the block.
+    expect(r.resumeAt).toBeGreaterThan(weeklyReset);
+  });
+
+  test('observedCapReset picks the window that is actually spent', () => {
+    const weekly = NOW + 5 * 24 * 3600e3;
+    const fiveH = NOW + 3600e3;
+    expect(u.observedCapReset({ sevenD: 100, sevenDResetAt: weekly, fiveH: 34, fiveHResetAt: fiveH }))
+      .toBe(weekly);
+    expect(u.observedCapReset({ sevenD: 40, sevenDResetAt: weekly, fiveH: 100, fiveHResetAt: fiveH }))
+      .toBe(fiveH);
+    expect(u.observedCapReset({ sevenD: 40, fiveH: 34, fiveHResetAt: fiveH })).toBeNull();
+  });
+
+  test('with NO reset known at all, the observation still expires', () => {
+    // The backstop: Codex's longest window is 7 days, so an error older than that
+    // cannot describe a live block whatever else is true.
+    const justInside = NOW - (u.CAP_OBSERVATION_MAX_AGE_MS - 60e3);
+    const justOutside = NOW - (u.CAP_OBSERVATION_MAX_AGE_MS + 60e3);
+    expect(state({ capObservedAt: justInside }).waiting).toBe(true);
+    expect(state({ capObservedAt: justOutside }).waiting).toBe(false);
+  });
+
+  test('CLAUDE IS UNTOUCHED: it never supplies capObservedAt', () => {
+    // The blast-radius check. usageLimitState is shared, so the new channel must be
+    // invisible to a pushed Claude status line, which carries no such field.
+    expect(state({ fiveH: 34, fiveHResetAt: NOW + 3600e3 }).waiting).toBe(false);
+    expect(state({ fiveH: 100, fiveHResetAt: NOW + 3600e3 }).waiting).toBe(true);
+    expect(u.usageLimitState({
+      metrics: {}, enabled: true, now: NOW, observedBlockAt: NOW - 1000,
+    }).waiting).toBe(true);
+  });
+});
