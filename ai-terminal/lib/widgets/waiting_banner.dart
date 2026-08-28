@@ -28,9 +28,10 @@ class WaitingBanner extends StatelessWidget {
 
   /// Amber rather than the error red: the session is healthy and deliberately
   /// paused, not broken. Reusing `error` would make every ordinary permission
-  /// prompt look like a failure.
-  static const Color _accent = Color(0xFFFFB020);
-  static const Color _container = Color(0xFF2A2113);
+  /// prompt look like a failure. Shared token (#179 promoted this out of a
+  /// private literal here — see `AppColors.caution`'s doc).
+  static const Color _accent = AppColors.caution;
+  static const Color _container = AppColors.cautionContainer;
 
   @override
   Widget build(BuildContext context) {

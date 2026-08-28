@@ -33,6 +33,7 @@ import '../api/api_client.dart';
 import '../api/models.dart';
 import 'favorites_order.dart';
 import 'notification_service.dart';
+import 'resource_monitor.dart';
 import 'server_store.dart';
 
 /// Builds an [ApiClient] for a server. Injectable so tests can supply a
@@ -107,6 +108,16 @@ class SessionRepository {
   // ahead of the next poll. Pruned in [refresh] when a session leaves the list.
   final Map<String, CompactingInfo> _compacting = <String, CompactingInfo>{};
 
+  // Live per-session "your last submit produced no agent activity" event
+  // (#179), keyed to the `at` the worker stamped it with. Unlike [_apiErrors]
+  // / [_compacting] there is no REST-polled level to seed from and no
+  // "cleared" frame to remove it — the worker reports the timeout once and
+  // otherwise stays silent (silence IS success; see `lib/submit-confirm.js`).
+  // So this map only ever grows here; [clearSubmitUnconfirmed] is the sole
+  // remover, called by the screen that has already reacted to an entry.
+  // Pruned in [refresh] like the other two when a session leaves the list.
+  final Map<String, int> _submitUnconfirmedAt = <String, int>{};
+
   // Session ids whose attention has been acknowledged (opened/viewed/dismissed)
   // — the chip is hidden for these (#24). Synced cross-device: seeded by a
   // 'clear' notify frame from any device, and re-armed (removed) by a genuine
@@ -139,6 +150,21 @@ class SessionRepository {
   /// `SessionStatus.working`.
   CompactingInfo? compactingFor(String id) => _compacting[id];
 
+  /// The epoch-ms `at` of the latest unhandled `submitUnconfirmed` event for
+  /// [id] (#179), or `null` when there isn't one. A screen watching this
+  /// session compares it against the last value it already acted on (never
+  /// stored here — see `SessionScreen._handledSubmitUnconfirmedAt`) so a
+  /// later, unrelated `sessions` emission doesn't replay an old event.
+  int? submitUnconfirmedAt(String id) => _submitUnconfirmedAt[id];
+
+  /// Forgets the pending `submitUnconfirmed` entry for [id] (#179). Called by
+  /// the screen once it has restored the draft and shown its notice, so
+  /// neither a later poll nor a fresh `sessions` emission re-delivers the
+  /// same event. Re-emits only if there was something to forget.
+  void clearSubmitUnconfirmed(String id) {
+    if (_submitUnconfirmedAt.remove(id) != null) _emitSessions();
+  }
+
   /// Test-only: seeds/clears [_compacting] directly for [id], bypassing the
   /// notify-frame/poll producers ([_applyNotify] / [_seedCompacting]). Lets a
   /// widget test drive [compactingFor] — which [ConversationView] reads off
@@ -153,6 +179,14 @@ class SessionRepository {
     }
     _emitSessions();
   }
+
+  /// Test-only: feeds a raw `/ws/notify` event through the exact path a live
+  /// subscription uses ([_applyNotify]), so a test can drive
+  /// [submitUnconfirmedAt] / [apiErrorFor] / [compactingFor] without standing
+  /// up a fake WebSocket (the way [debugSetCompacting] bypasses the notify
+  /// plumbing entirely, this instead exercises it for real).
+  @visibleForTesting
+  void debugApplyNotify(NotifyEvent evt) => _applyNotify(evt);
 
   /// Broadcast stream of per-server reachability (`baseUrl → online`).
   Stream<Map<String, bool>> get serverOnlineStream => _online.stream;
@@ -181,6 +215,7 @@ class SessionRepository {
     _pruneApiErrors(merged);
     _seedCompacting(merged);
     _pruneCompacting(merged);
+    _pruneSubmitUnconfirmed(merged);
     if (!_sessions.isClosed) _sessions.add(merged);
     if (!_online.isClosed) _online.add(serverOnline);
     await _cacheNames(merged);
@@ -368,9 +403,10 @@ class SessionRepository {
     _favoritesSyncSupported.remove(baseUrl);
   }
 
-  /// Updates [_apiErrors] and [_compacting] from a notify frame. The two
-  /// signals are independent (a frame carries at most one, but nothing stops
-  /// either check from also handling the other in one pass).
+  /// Updates [_apiErrors], [_compacting] and [_submitUnconfirmedAt] from a
+  /// notify frame. The three signals are independent (a frame carries at most
+  /// one, but nothing stops any check from also handling the others in one
+  /// pass).
   ///
   /// **Api-error:** only a frame that actually carries api-error state
   /// ([NotifyEvent.hasApiErrorSignal]) touches [_apiErrors] — an ordinary
@@ -385,7 +421,11 @@ class SessionRepository {
   /// leaves [_compacting] untouched. `compacting == true` sets the entry;
   /// `false` (compaction ended) removes it.
   ///
-  /// Either branch re-emits the session list on change so the dashboard/chat
+  /// **submitUnconfirmed (#179):** [NotifyEvent.submitUnconfirmed] gates it —
+  /// there is no boolean level and no "false" to un-set, so unlike the two
+  /// above this branch only ever writes; see [clearSubmitUnconfirmed].
+  ///
+  /// Every branch re-emits the session list on change so the dashboard/chat
   /// lens rebuilds immediately, ahead of the debounced [refresh].
   void _applyNotify(NotifyEvent evt) {
     if (evt.sessionId.isEmpty) return;
@@ -411,6 +451,16 @@ class SessionRepository {
       } else if (_compacting.remove(id) != null) {
         _emitSessions();
       }
+    }
+    // #179 — an edge, not a level: always record the newest `at` (falling
+    // back to "now" on a malformed frame missing it, so the event is still
+    // distinguishable from whatever the watching screen last handled) and
+    // re-emit. Nothing here ever removes an entry; only [clearSubmitUnconfirmed]
+    // does, once a screen has actually reacted to it.
+    if (evt.submitUnconfirmed) {
+      _submitUnconfirmedAt[id] =
+          evt.submitUnconfirmedAt ?? DateTime.now().millisecondsSinceEpoch;
+      _emitSessions();
     }
   }
 
@@ -442,6 +492,15 @@ class SessionRepository {
     if (_compacting.isEmpty) return;
     final live = <String>{for (final s in sessions) s.id};
     _compacting.removeWhere((id, _) => !live.contains(id));
+  }
+
+  /// Drops submitUnconfirmed entries for sessions no longer in [sessions]
+  /// (#179) — a killed session's screen is gone too, so nothing will ever
+  /// call [clearSubmitUnconfirmed] for it.
+  void _pruneSubmitUnconfirmed(List<Session> sessions) {
+    if (_submitUnconfirmedAt.isEmpty) return;
+    final live = <String>{for (final s in sessions) s.id};
+    _submitUnconfirmedAt.removeWhere((id, _) => !live.contains(id));
   }
 
   /// Re-emits the current session list (unchanged contents) so listeners rebuild
@@ -696,43 +755,51 @@ class SessionRepository {
   }
 
   /// Resolves each server's display name AND capability set from
-  /// `/api/version` once (best-effort; retried on a later refresh if the
-  /// server is unreachable) — one request answers both, so gating the
-  /// `favorites-sync` star (#60) on [supportsFavorites] costs nothing extra.
+  /// `/api/version`, AND keeps the free machine CPU/memory reading (#152
+  /// level 1, #165) current for [ServerResourceLine] via
+  /// [ResourceMonitor.publishMachine] — one request answers all three, so
+  /// none of it costs anything extra per call.
+  ///
+  /// Runs on EVERY [refresh] now, not just until "confirmed". Name and
+  /// capability resolution used to stop re-fetching once settled (see the
+  /// #66 note in the catch below) — that was fine while nothing else needed
+  /// this call, but #165 needs the machine reading kept live, and the only
+  /// way to do that without a second endpoint is to keep asking. Re-checking
+  /// name/capabilities on every call is not a correctness cost:
+  /// `updateServerName` no-ops when the name is unchanged, and re-assigning
+  /// an unchanged capability flag is a no-op too. The only real cost is one
+  /// more `/api/version` per server per [refresh] for a server that was
+  /// already confirmed — the same ~30s cadence the session poll already
+  /// runs at, never the expensive per-process `/api/resources` the
+  /// resources-view toggle exists to gate.
   /// Updates the server store in place so the fallback `Shadow` name upgrades
   /// to the real one.
   Future<void> _ensureServerNames() async {
     await Future.wait(_store.servers.map((server) async {
-      // Names are stable, but `favorites-sync` is not: a server that gains the
-      // capability on upgrade (server cold-restarted while the app was already
-      // running) must be picked up without an app restart. So keep re-fetching
-      // until support is CONFIRMED true, then stop — a supporting server's name
-      // and capability are both settled (#60). A server that never supports it
-      // costs one cheap /api/version per refresh, which is fine.
-      final confirmed = _namesResolved.contains(server.baseUrl) &&
-          (_favoritesSyncSupported[server.baseUrl] ?? false);
-      if (confirmed) return;
+      ServerInfo? info;
       try {
-        final info = await _clientFor(server).version();
+        info = await _clientFor(server).version();
         if (info.serverName.isNotEmpty) {
           _store.updateServerName(server.baseUrl, info.serverName);
         }
         _favoritesSyncSupported[server.baseUrl] = info.has('favorites-sync');
         _namesResolved.add(server.baseUrl);
       } catch (_) {
-        // #66: NOT cleared here on purpose. Once a server is `confirmed`
-        // (both lines above have run at least once), the `if (confirmed)
-        // return;` above means this try block never runs again for it — so
-        // this catch is unreachable for the "was supported, now offline"
-        // case, and clearing a flag that's already false/absent for every
-        // OTHER case (not-yet-confirmed) would be a no-op. Dropping the
-        // `confirmed` short-circuit to force re-verification every refresh
-        // would fix that, but costs a network call/refresh forever and is
-        // out of scope here. The actual "star stays enabled while its
-        // server is down" bug is closed at the decision point instead —
-        // see `favoriteToggleAllowed` in dashboard_screen.dart, which gates
-        // on live `serverOnline` (not this cache) directly.
+        // #66: NOT cleared here on purpose, even though this catch is now
+        // reached on every refresh (the old `confirmed` short-circuit that
+        // used to skip it entirely is gone — see the doc comment above). A
+        // server that once supported favorites-sync and has since gone
+        // offline keeps reporting supported here; the actual "star stays
+        // enabled while its server is down" case is closed at the decision
+        // point instead — see `favoriteToggleAllowed` in
+        // dashboard_screen.dart, which gates on live `serverOnline` directly.
       }
+      // #152/#165 — published every refresh, success or failure: an
+      // unreachable server must go blank (null), never keep showing a load
+      // reading from however long ago it was last seen. Mirrors
+      // ResourceMonitor.refresh()'s own "overwrite, never keep stale" rule
+      // for the expensive per-process poll.
+      ResourceMonitor.instance.publishMachine(server.baseUrl, info?.resources);
     }));
   }
 
