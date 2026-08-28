@@ -125,23 +125,51 @@ async function viewer(cookie, id, cols, rows) {
   };
 }
 
+/** Every `WTSZ:` answer the shell has given so far, oldest first. */
+async function sizeMarkers(ctx, id) {
+  const j = await (await ctx.get(`/api/sessions/${id}/scrollback?offset=0&limit=200000`)).json();
+  return [...String(j.data || '').matchAll(/WTSZ:(\d+)\s+(\d+)/g)]
+    .map((m) => ({ rows: Number(m[1]), cols: Number(m[2]) }));
+}
+
 /**
- * What the PTY itself believes it is. Asks the shell and reads the answer back out of
- * the scrollback — the command's own echo contains the literal `$(stty size)`, so the
- * digits can only come from the shell's reply.
+ * What the PTY itself believes it is, asked FRESH.
+ *
+ * The count is taken before the `echo` and the answer is only accepted once a NEW
+ * marker appears. Scanning for "the newest WTSZ: in the scrollback" is not enough:
+ * every earlier call leaves one behind, so a shell that has not answered yet hands
+ * back the PREVIOUS call's size. That passed locally and failed on a slower CI box,
+ * which is the whole signature of a stale read.
  */
 async function ptySize(ctx, v, id) {
+  const before = (await sizeMarkers(ctx, id)).length;
   v.type('echo "WTSZ:$(stty size)"\r');
-  for (let i = 0; i < 30; i++) {
+  for (let i = 0; i < 40; i++) {
     await sleep(300);
-    const j = await (await ctx.get(`/api/sessions/${id}/scrollback?offset=0&limit=200000`)).json();
-    const all = [...String(j.data || '').matchAll(/WTSZ:(\d+)\s+(\d+)/g)];
-    if (all.length) {
-      const m = all[all.length - 1];
-      return { rows: Number(m[1]), cols: Number(m[2]) };
-    }
+    const all = await sizeMarkers(ctx, id);
+    if (all.length > before) return all[all.length - 1];
   }
   throw new Error('the shell never answered with its size');
+}
+
+/**
+ * Poll until the PTY reports [want], and return the last reading either way so the
+ * caller's `expect` names the real mismatch.
+ *
+ * "Eventually" is the honest semantics, not a papered-over race: a viewer's vote
+ * reaches the PTY through an async RPC to the worker, so the size is correct SOON
+ * after the socket message, never synchronously with it. A rule that had regressed to
+ * last-writer-wins would settle on the other size and never match, so this still fails
+ * for the reason the test exists.
+ */
+async function expectPtySize(ctx, v, id, want, tries = 6) {
+  let last = null;
+  for (let i = 0; i < tries; i++) {
+    last = await ptySize(ctx, v, id);
+    if (last.cols === want.cols && last.rows === want.rows) return last;
+    await sleep(500);
+  }
+  return last;
 }
 
 test('#146: a desktop relayout cannot steal the columns back from a phone', async () => {
@@ -156,22 +184,23 @@ test('#146: a desktop relayout cannot steal the columns back from a phone', asyn
 
     // --- one viewer: it simply owns the size, exactly as before this change.
     desktop = await viewer(cookie, id, 120, 40);
-    expect(await ptySize(ctx, desktop, id)).toEqual({ cols: 120, rows: 40 });
+    expect(await expectPtySize(ctx, desktop, id, { cols: 120, rows: 40 })).toEqual({ cols: 120, rows: 40 });
 
     // --- a phone attaches. The PTY must come down to fit it, or every full-width TUI
     //     frame Claude draws will wrap into the phone's 52 columns (#146).
     phone = await viewer(cookie, id, 52, 30);
-    expect(await ptySize(ctx, phone, id)).toEqual({ cols: 52, rows: 30 });
+    expect(await expectPtySize(ctx, phone, id, { cols: 52, rows: 30 })).toEqual({ cols: 52, rows: 30 });
 
     // --- THE REGRESSION. The desktop relays out and re-states its size, which is what
     //     it does constantly (window resize, sidebar toggle, compose bar growing).
     //     Before this fix that was last-writer-wins and the phone lost its columns here.
     await desktop.setSize(120, 40);
+    await sleep(1000);   // give a last-writer-wins regression every chance to show itself
     expect(await ptySize(ctx, phone, id)).toEqual({ cols: 52, rows: 30 });
 
     // --- the phone backgrounds: it is no longer looking, so it stops voting.
     await phone.background();
-    expect(await ptySize(ctx, desktop, id)).toEqual({ cols: 120, rows: 40 });
+    expect(await expectPtySize(ctx, desktop, id, { cols: 120, rows: 40 })).toEqual({ cols: 120, rows: 40 });
 
     // --- and coming back to the phone gives it its fit again, WITHOUT it having to
     //     re-state its size. This is what pins the mode-change recompute: a viewer that
@@ -180,13 +209,13 @@ test('#146: a desktop relayout cannot steal the columns back from a phone', asyn
     //     itself, so the assertion would have passed with that recompute deleted.)
     phone.ws.send(JSON.stringify({ mode: 'active', browserId: 'phone-again' }));
     await sleep(1200);
-    expect(await ptySize(ctx, phone, id)).toEqual({ cols: 52, rows: 30 });
+    expect(await expectPtySize(ctx, phone, id, { cols: 52, rows: 30 })).toEqual({ cols: 52, rows: 30 });
 
     // --- the phone leaves entirely: the desktop gets its columns back with no action.
     await phone.close();
     phone = null;
     await sleep(600);
-    expect(await ptySize(ctx, desktop, id)).toEqual({ cols: 120, rows: 40 });
+    expect(await expectPtySize(ctx, desktop, id, { cols: 120, rows: 40 })).toEqual({ cols: 120, rows: 40 });
   } finally {
     if (phone) await phone.close().catch(() => {});
     if (desktop) await desktop.close().catch(() => {});
