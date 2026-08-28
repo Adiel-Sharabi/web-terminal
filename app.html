@@ -413,6 +413,20 @@
     }
     #composeAttachBtn { background: #16213e; color: #aaa; font-size: 18px; }
     #composeAttachBtn:active { background: #0f3460; }
+    /* #179 - caution, not alarm: the prompt is recoverable and it is already back in
+       the box. Amber rather than red, and it never covers the terminal. */
+    #composeNotice {
+      flex-shrink: 0;
+      display: flex; align-items: flex-start; gap: 8px;
+      padding: 8px 12px; font-size: 13px; line-height: 1.35;
+      background: #2e2617; color: #f0d69a; border-top: 1px solid #6b5520;
+    }
+    #composeNotice[hidden] { display: none; }
+    #composeNotice span { flex: 1; }
+    #composeNoticeDismiss {
+      background: none; border: 0; color: #f0d69a; font-size: 18px;
+      line-height: 1; padding: 0 4px; cursor: pointer;
+    }
     #composeSendBtn { background: #00d4aa; color: #1a1a2e; font-size: 18px; font-weight: bold; }
     #composeSendBtn:active { opacity: 0.8; }
     #composeSendBtn:disabled { background: #2a3a4a; color: #667; }
@@ -576,6 +590,13 @@
         <div style="font-size:13px;margin-top:8px;color:#444">Open the sidebar and create a new session</div>
       </div>
     </div>
+  </div>
+  <!-- #179 — a submit the agent never acknowledged. Sits ABOVE the bar rather than
+       replacing it, because the words it announces are back in the box below and that is
+       where the user should be looking, not at a dialog. -->
+  <div id="composeNotice" role="status" hidden>
+    <span id="composeNoticeText"></span>
+    <button type="button" id="composeNoticeDismiss" onclick="hideSubmitUnconfirmed()" title="Dismiss">&times;</button>
   </div>
   <!-- Mobile compose input bar — type into a buffer, Send to flush. A line
        starting with "/" streams live so Claude's own slash menu narrows. -->
@@ -1311,6 +1332,10 @@
     }
 
     function switchSession(id, serverUrl) {
+      // #179 - the notice belongs to the session it was raised on, and so does the
+      // draft it offered back. Leaving either behind would attach one session's lost
+      // prompt to another session's compose bar.
+      if (typeof hideSubmitUnconfirmed === 'function') hideSubmitUnconfirmed();
       if (id === sessionId && serverUrl === sessionServerUrl) return;
       // Stash the outgoing session's uncommitted compose buffer (a live
       // '/'-line is mid-stream against the old terminal — discard it).
@@ -1815,6 +1840,43 @@
       }
       return val + '\r';
     }
+    // #179 — show what happened and give the words back. Non-destructive by design:
+    // the text is only restored into an EMPTY box, so a prompt the user has already
+    // started retyping is never overwritten by a late notice about the previous one.
+    function showSubmitUnconfirmed() {
+      const box = document.getElementById('composeNotice');
+      const txt = document.getElementById('composeNoticeText');
+      if (!box || !txt) return;
+      const restored = lastSubmission && composeInput.value === '';
+      if (restored) {
+        composeInput.value = lastSubmission.text;
+        autosizeCompose();
+        updateComposeSendBtn();
+      }
+      txt.textContent = restored
+        ? 'That prompt never reached the agent. Your text is back — check the terminal: it may be showing a menu or a full-screen view.'
+        : 'That prompt never reached the agent. Check the terminal — it may be showing a menu or a full-screen view.';
+      box.hidden = false;
+      doResize();
+    }
+    function hideSubmitUnconfirmed() {
+      const box = document.getElementById('composeNotice');
+      if (!box || box.hidden) return;
+      box.hidden = true;
+      doResize();
+    }
+
+    // #179 — the last thing this browser submitted, kept only until the worker either
+    // confirms it or reports that nothing came of it. The TEXT never crosses the wire in
+    // that report (the worker says only "that submit produced no agent activity"), so the
+    // client that typed it is the only place it can be recovered from.
+    let lastSubmission = null;
+
+    // #179 - exposed so a test can drive the notice without waiting out a live worker
+    // timeout, and so the dismiss button's inline onclick can reach it.
+    window.showSubmitUnconfirmed = () => showSubmitUnconfirmed();
+    window.hideSubmitUnconfirmed = () => hideSubmitUnconfirmed();
+    window.__wtSetLastSubmission = (v) => { lastSubmission = v; };
     function composeSend() {
       if (!ws || ws.readyState !== WebSocket.OPEN) return; // WS down — keep the buffer
       const val = composeInput.value;
@@ -1826,6 +1888,8 @@
         return;
       }
       if (val === '') { sendInput('\r', true); return; } // bare Enter on an empty buffer
+      hideSubmitUnconfirmed();
+      lastSubmission = { id: sessionId, text: val, at: Date.now() };
       sendInput(buildComposeSubmission(val), true);
       pushComposeHistory(val);
       clearComposeInput();
@@ -4747,7 +4811,17 @@
       }, 25000);
       nws.onmessage = e => {
         try {
-          const { notification } = JSON.parse(e.data);
+          const msg = JSON.parse(e.data);
+          // #179 — not a notification: a one-shot report that a prompt this browser
+          // sent produced no agent activity. Only the session on screen can act on it,
+          // and only if this browser is the one that typed it.
+          if (msg && msg.type === 'submitUnconfirmed') {
+            if (msg.id === sessionId && lastSubmission && lastSubmission.id === msg.id) {
+              showSubmitUnconfirmed();
+            }
+            return;
+          }
+          const { notification } = msg;
           // A 'clear' frame (a device opened/dismissed the session) acknowledges
           // the alert — drop it, don't render a notification (#24).
           if (notification && notification.type === 'clear') {
