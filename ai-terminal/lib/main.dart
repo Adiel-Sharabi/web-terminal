@@ -85,8 +85,38 @@ Future<void> main(List<String> args) async {
   // (issue #14); a normal launch shows the dashboard.
   final detached = DetachWindow.parseArgs(args);
   if (pushSupported) {
-    await Firebase.initializeApp();
-    await PushService.init();
+    // PUSH IS AN ENHANCEMENT, NEVER A STARTUP DEPENDENCY — and this block is
+    // the only reason the app can fail to start at all.
+    //
+    // Both of these awaits sit BEFORE runApp(), so anything they throw aborts
+    // main() and the process comes up with no widget tree: the activity is
+    // resumed, the process is alive and drawing nothing. There is no crash
+    // dialog and no error on screen, which is the worst shape a failure can
+    // take — indistinguishable from a hang.
+    //
+    // Measured on the tablet (SM-X306B) 2026-08-30 running 1.65.0+138:
+    //   Unhandled Exception: [firebase_messaging/unknown]
+    //   java.io.IOException: FCM Registration failed!
+    //     #3 MethodChannelFirebaseMessaging.getToken
+    //     #4 PushService.init (push_service.dart:56)
+    //     #5 main (main.dart:89)
+    // -> black screen. The S25 on the identical build was unaffected, because
+    // FCM registration happened to succeed there. That asymmetry is the point:
+    // getToken() depends on Play Services state and the network at launch, so
+    // it can fail on any device at any time, with no code change. This was
+    // never a regression — the await has been here since the app entered the
+    // repo — it was a latent trap waiting for a device to trip it.
+    //
+    // So: degrade to "no notifications", never to "no app".
+    try {
+      await Firebase.initializeApp();
+      await PushService.init();
+    } catch (e, st) {
+      // Deliberately swallowed. Nothing here is recoverable at startup and
+      // nothing here is worth a blank screen; the terminal client itself does
+      // not need FCM to work.
+      debugPrint('push init failed — continuing without notifications: $e\n$st');
+    }
   }
   // Pre-warm the server store so the dashboard's server list is already
   // loaded on the first frame. The pinned Favorites group needs no local
