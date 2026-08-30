@@ -17,6 +17,8 @@ import 'package:ai_terminal/services/command_policy.dart';
 void main() {
   setUp(() => CommandPolicy.instance.debugReset());
 
+  _quickTests();   // #188 — the offered button row
+
   group('CommandPolicy.nameOf', () {
     test('strips the slash and the arguments', () {
       expect(CommandPolicy.nameOf('/issue fix the thing'), 'issue');
@@ -88,6 +90,118 @@ void main() {
         'older server', () {
       CommandPolicy.instance.debugReset({'compact': 'chat'});
       expect(CommandPolicy.instance.pinsTerminal('/usage'), isTrue);
+    });
+  });
+}
+
+// ---------------------------------------------------------------------------
+// #188 — the offered button row.
+//
+// These tests defend ONE property: the client holds no list of its own. Every
+// name, label, order and confirmation comes off the wire, so a command added to
+// `lib/commands.js` reaches this client with no release. The regression they
+// guard is somebody "tidying" the sheet into a hard-coded list here, which then
+// silently disagrees with the server and with app.html.
+// ---------------------------------------------------------------------------
+void _quickTests() {
+  group('#188 QuickCommand.fromJson', () {
+    test('reads a full row', () {
+      final c = QuickCommand.fromJson({
+        'name': 'Compact',
+        'label': 'Compact',
+        'lens': 'chat',
+      })!;
+      expect(c.name, 'compact'); // lower-cased, like nameOf
+      expect(c.label, 'Compact');
+      expect(c.lens, 'chat');
+      expect(c.confirm, isNull);
+      expect(c.isDestructive, isFalse);
+      expect(c.text, '/compact');
+    });
+
+    test('a row carrying `confirm` is destructive, and keeps the SERVER wording', () {
+      final c = QuickCommand.fromJson({
+        'name': 'clear',
+        'label': 'Clear',
+        'lens': 'terminal',
+        'confirm': 'Clear the conversation?',
+      })!;
+      expect(c.isDestructive, isTrue);
+      // Server-owned so both clients say the same thing — never re-worded here.
+      expect(c.confirm, 'Clear the conversation?');
+    });
+
+    test('a missing label falls back to the name rather than dropping the row', () {
+      // A server that adds a command but forgets its label should still give the
+      // user the button; silently losing it would be the harder bug to notice.
+      final c = QuickCommand.fromJson({'name': 'context', 'lens': 'terminal'})!;
+      expect(c.label, 'context');
+    });
+
+    test('a nameless row is dropped', () {
+      expect(QuickCommand.fromJson({'label': 'Nope'}), isNull);
+      expect(QuickCommand.fromJson({'name': ''}), isNull);
+    });
+
+    test('a blank confirm is NOT destructive — only a real question asks', () {
+      final c = QuickCommand.fromJson({'name': 'x', 'lens': 'chat', 'confirm': '  '});
+      expect(c!.isDestructive, isFalse);
+    });
+  });
+
+  group('#188 CommandPolicy.quickCommands', () {
+    test('is empty until the server publishes a row — an old server gets no buttons', () {
+      CommandPolicy.instance.debugReset();
+      expect(CommandPolicy.instance.quickCommands, isEmpty);
+    });
+
+    test('preserves the SERVER order — the destructive row must stay last', () {
+      // On a phone the first button is the one a thumb reaches by accident. The
+      // order is lib/commands.js's decision; re-sorting it here would be a second
+      // opinion on a published fact.
+      CommandPolicy.instance.debugReset(const {}, const [
+        QuickCommand(name: 'compact', label: 'Compact', lens: 'chat'),
+        QuickCommand(name: 'context', label: 'Context', lens: 'terminal'),
+        QuickCommand(name: 'usage', label: 'Usage', lens: 'terminal'),
+        QuickCommand(name: 'clear', label: 'Clear', lens: 'terminal', confirm: 'sure?'),
+      ]);
+      expect(
+        CommandPolicy.instance.quickCommands.map((c) => c.name).toList(),
+        ['compact', 'context', 'usage', 'clear'],
+      );
+      expect(CommandPolicy.instance.quickCommands.last.isDestructive, isTrue);
+    });
+
+    test('a button obeys the SAME lens policy a typed line does', () {
+      // The whole reason the buttons hang off this table: a button-run command
+      // must land where a typed one does. If these diverge, the client has grown
+      // a second notion of where the user should stand.
+      CommandPolicy.instance.debugReset(const {
+        'compact': 'chat',
+        'clear': 'terminal',
+      }, const [
+        QuickCommand(name: 'compact', label: 'Compact', lens: 'chat'),
+        QuickCommand(name: 'clear', label: 'Clear', lens: 'terminal', confirm: 'sure?'),
+      ]);
+      for (final c in CommandPolicy.instance.quickCommands) {
+        expect(
+          CommandPolicy.instance.pinsTerminal(c.text),
+          c.lens == 'terminal',
+          reason: '${c.name}: button lens must equal typed lens',
+        );
+      }
+    });
+
+    test('the returned list cannot be mutated by a caller', () {
+      CommandPolicy.instance.debugReset(const {}, const [
+        QuickCommand(name: 'compact', label: 'Compact', lens: 'chat'),
+      ]);
+      expect(
+        () => CommandPolicy.instance.quickCommands.add(
+          const QuickCommand(name: 'x', label: 'x', lens: 'chat'),
+        ),
+        throwsUnsupportedError,
+      );
     });
   });
 }

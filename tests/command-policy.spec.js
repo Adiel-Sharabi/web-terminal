@@ -104,3 +104,94 @@ test.describe('#131 — GET /api/commands', () => {
     expect(body.capabilities).toContain('command-policy');
   });
 });
+
+// ---------------------------------------------------------------------------
+// #188 — the table also decides which commands are OFFERED as buttons.
+//
+// Every assertion here exists to stop a client from growing its own list. The
+// failure this guards against is not a crash: it is `app.html` and the companion
+// each hard-coding "compact, clear, context, usage", and then disagreeing with
+// this file — and with each other — the first time a command is added.
+// ---------------------------------------------------------------------------
+test.describe('#188 — the quick-command button set', () => {
+  test('exactly the measured four are buttons, and nothing else is', () => {
+    const quick = commands.quickCommands();
+    expect(quick.map(c => c.name)).toEqual(['compact', 'context', 'usage', 'clear']);
+  });
+
+  test('order is the table\'s, not alphabetical — the destructive row sorts LAST', () => {
+    // On a phone the first button is the one a thumb reaches by accident, so
+    // /clear must never lead. Alphabetical order would put it first.
+    const names = commands.quickCommands().map(c => c.name);
+    expect(names[0]).toBe('compact');
+    expect(names[names.length - 1]).toBe('clear');
+    expect(names).not.toEqual([...names].sort());
+  });
+
+  test('every button carries a label; only the destructive one asks first', () => {
+    for (const c of commands.quickCommands()) {
+      expect(typeof c.label, c.name).toBe('string');
+      expect(c.label.length, c.name).toBeGreaterThan(0);
+    }
+    const confirming = commands.quickCommands().filter(c => c.confirm);
+    expect(confirming.map(c => c.name)).toEqual(['clear']);
+    // The wording is server-owned so both clients say the same thing.
+    expect(confirming[0].confirm).toMatch(/resume/i);
+  });
+
+  test('a button keeps the lens policy it already had — no second opinion', () => {
+    // The whole point of hanging the buttons off THIS table: a button-run
+    // command lands where a typed one does. If these ever diverge, the client
+    // has grown its own notion of where to stand.
+    for (const c of commands.quickCommands()) {
+      expect(c.lens, c.name).toBe(commands.lensFor('/' + c.name));
+    }
+    expect(commands.lensFor('/compact')).toBe('chat');
+    expect(commands.pinsTerminal('/clear')).toBe(true);
+  });
+
+  test('/cost is classified but NOT a button — one panel, one button', () => {
+    // /usage and /cost are the same TUI panel; two buttons for it would be the
+    // duplication this file exists to prevent.
+    expect(commands.COMMANDS.cost.lens).toBe('terminal');
+    expect(commands.quickCommands().map(c => c.name)).not.toContain('cost');
+  });
+
+  test('the catalogue omits the presentation fields on non-button rows', () => {
+    // A client must be able to read `quick == null` as "not a button" without
+    // knowing the table.
+    const byName = Object.fromEntries(commands.listCommands().map(r => [r.name, r]));
+    expect(byName.status.quick).toBeUndefined();
+    expect(byName.status.label).toBeUndefined();
+    expect(byName.compact.quick).toBe(1);
+  });
+
+  test('quickCommands() is stable across calls', () => {
+    expect(commands.quickCommands()).toEqual(commands.quickCommands());
+  });
+});
+
+test.describe('#188 — GET /api/commands publishes the button row', () => {
+  test('serves `quick`, ordered, so adding a button needs no client release', async ({ request }) => {
+    await request.post('/login', {
+      form: { user: 'testuser', password: 'testpass:colon' },
+      maxRedirects: 0,
+    });
+    const res = await request.get('/api/commands');
+    expect(res.ok()).toBeTruthy();
+    const body = await res.json();
+
+    expect(Array.isArray(body.quick)).toBeTruthy();
+    expect(body.quick.map(c => c.name)).toEqual(['compact', 'context', 'usage', 'clear']);
+    for (const c of body.quick) {
+      expect(typeof c.label).toBe('string');
+      expect(['chat', 'terminal']).toContain(c.lens);
+    }
+    const clear = body.quick.find(c => c.name === 'clear');
+    expect(typeof clear.confirm).toBe('string');
+    expect(body.quick.find(c => c.name === 'compact').confirm).toBeUndefined();
+
+    // The full catalogue is still served — nothing that already read it breaks.
+    expect(body.commands.length).toBeGreaterThan(body.quick.length);
+  });
+});

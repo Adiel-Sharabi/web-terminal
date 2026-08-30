@@ -406,11 +406,37 @@
     }
     #composeInput:focus { border-color: #00d4aa; outline: none; }
     #composeInput.live { border-color: #da4; background: #241f12; }
-    #composeAttachBtn, #composeSendBtn {
+    #composeAttachBtn, #composeSendBtn, #composeCmdBtn {
       flex-shrink: 0; width: 44px; height: 44px; border-radius: 6px;
       border: 1px solid #0f3460; cursor: pointer; -webkit-tap-highlight-color: transparent;
       display: flex; align-items: center; justify-content: center;
     }
+    /* #188 — the slash-command button. Hidden by default: a plain shell has no
+       slash commands, so the button only appears once the session is known to
+       run an agent (renderComposeCommands). */
+    #composeCmdBtn {
+      display: none; background: #16213e; color: #aaa;
+      font-size: 19px; font-weight: bold; font-family: monospace;
+    }
+    #composeCmdBtn:active { background: #0f3460; }
+    #composeCmdBtn:disabled { background: #2a3a4a; color: #667; cursor: default; }
+    #composeCmdBtn.cmd-open { background: #0f3460; color: #00d4aa; }
+    /* The popup sits ABOVE the bar, anchored to it. `position:fixed` rather than
+       absolute so it is never clipped by the compose bar's own overflow. */
+    #cmdMenu {
+      display: none; position: fixed; z-index: 60;
+      background: #16213e; border: 1px solid #0f3460; border-radius: 8px;
+      padding: 4px; min-width: 190px; box-shadow: 0 6px 24px rgba(0,0,0,.5);
+    }
+    #cmdMenu.cmd-open { display: block; }
+    #cmdMenu button {
+      display: flex; align-items: center; gap: 10px; width: 100%;
+      background: none; border: 0; color: #e6e6e6; cursor: pointer;
+      padding: 10px 12px; border-radius: 6px; font-size: 14px; text-align: left;
+    }
+    #cmdMenu button:hover, #cmdMenu button:focus { background: #0f3460; outline: none; }
+    #cmdMenu button .cmd-name { color: #7f8fa6; font-family: monospace; font-size: 12px; margin-left: auto; }
+    #cmdMenu button.cmd-danger { color: #ff8080; }
     #composeAttachBtn { background: #16213e; color: #aaa; font-size: 18px; }
     #composeAttachBtn:active { background: #0f3460; }
     /* #179 - caution, not alarm: the prompt is recoverable and it is already back in
@@ -603,9 +629,13 @@
   <div id="composeBar">
     <textarea id="composeInput" rows="1" enterkeyhint="send" autocapitalize="off"
       autocomplete="off" spellcheck="false" placeholder="Type a message — / for commands"></textarea>
+    <button id="composeCmdBtn" onclick="toggleCmdMenu()" title="Slash commands">/</button>
     <button id="composeAttachBtn" onclick="mobileImagePaste()" title="Attach image">&#128247;</button>
     <button id="composeSendBtn" onclick="composeSend()" title="Send">&#9658;</button>
   </div>
+  <!-- #188 — the quick-command popup. Built entirely from GET /api/commands, so
+       adding or reordering a button needs no change to this file. -->
+  <div id="cmdMenu" role="menu" aria-label="Slash commands"></div>
   <button id="scrollBtn" onclick="scrollToBottom()" title="Scroll to bottom">&#8595;</button>
 
   <!-- Reconnect overlay -->
@@ -3334,6 +3364,117 @@
       startResourceLoop();
     }
 
+    // --- Slash commands (GET /api/commands) ----------------------------------
+    // #188 — the FIRST use of the command registry in this file. `lib/commands.js`
+    // owns which commands get a button, what they are called, their order and
+    // whether they must be confirmed; this file renders whatever it is handed and
+    // decides NOTHING. A hard-coded ['compact','clear',...] here would be the
+    // third copy of a fact the server already publishes, and it would drift from
+    // the companion's copy the first time a command is added.
+    //
+    // Failure is non-fatal and SILENT: an older server has no `quick` array, so
+    // the button simply never appears and every other path is untouched.
+    let quickCommands = [];
+    async function loadCommands() {
+      try {
+        const data = await (await fetch('/api/commands')).json();
+        quickCommands = Array.isArray(data.quick) ? data.quick : [];
+      } catch { quickCommands = []; }
+      buildCmdMenu();
+    }
+
+    // Build the popup once from the registry. Rebuilt only when the catalogue is
+    // (re)loaded — not per render — because its contents depend on the server's
+    // table, never on which session is selected.
+    function buildCmdMenu() {
+      const menu = document.getElementById('cmdMenu');
+      if (!menu) return;
+      menu.innerHTML = '';
+      for (const c of quickCommands) {
+        const b = document.createElement('button');
+        b.type = 'button';
+        b.setAttribute('role', 'menuitem');
+        // textContent, never innerHTML: the label and name come off the wire, and
+        // a rogue/compromised peer must not be able to inject markup here.
+        const label = document.createElement('span');
+        label.textContent = c.label || c.name;
+        const name = document.createElement('span');
+        name.className = 'cmd-name';
+        name.textContent = '/' + c.name;
+        b.appendChild(label);
+        b.appendChild(name);
+        if (c.confirm) b.classList.add('cmd-danger');
+        b.addEventListener('click', () => runQuickCommand(c));
+        menu.appendChild(b);
+      }
+    }
+
+    // Show the button only for a session that actually runs an agent, and only
+    // once that agent is up (#147 — a prompt sent into a booting agent lands on
+    // bash and is gone with no error). `agentReady` defaults to true server-side,
+    // so an older server never disables the button.
+    function renderComposeCommands(data) {
+      const btn = document.getElementById('composeCmdBtn');
+      if (!btn) return;
+      const list = (data && data.sessions) || [];
+      // Match on server as well as id — the sidebar merges every peer's sessions,
+      // so an id alone is not an identity across the cluster (same rule as #180).
+      const cur = sessionId
+        ? list.find(x => x.id === sessionId && (x.serverUrl || '') === (sessionServerUrl || ''))
+        : null;
+      const eligible = !!(cur && cur.agent && quickCommands.length);
+      btn.style.display = eligible ? 'flex' : 'none';
+      if (!eligible) { closeCmdMenu(); return; }
+      const ready = cur.agentReady !== false;
+      btn.disabled = !ready;
+      btn.title = ready ? 'Slash commands' : 'Waiting for the agent to start…';
+      if (!ready) closeCmdMenu();
+    }
+
+    function closeCmdMenu() {
+      const menu = document.getElementById('cmdMenu');
+      const btn = document.getElementById('composeCmdBtn');
+      if (menu) menu.classList.remove('cmd-open');
+      if (btn) btn.classList.remove('cmd-open');
+    }
+
+    function toggleCmdMenu() {
+      const menu = document.getElementById('cmdMenu');
+      const btn = document.getElementById('composeCmdBtn');
+      if (!menu || !btn || btn.disabled) return;
+      if (menu.classList.contains('cmd-open')) { closeCmdMenu(); return; }
+      menu.classList.add('cmd-open');
+      btn.classList.add('cmd-open');
+      // Anchor above the button. Measured after showing, because a hidden element
+      // has no height to position against.
+      const r = btn.getBoundingClientRect();
+      const mh = menu.offsetHeight, mw = menu.offsetWidth;
+      menu.style.top = Math.max(8, r.top - mh - 8) + 'px';
+      menu.style.left = Math.max(8, Math.min(r.right - mw, window.innerWidth - mw - 8)) + 'px';
+    }
+
+    // Run one. This is an ORDINARY compose submission — measured (probe-slash-submit.js)
+    // to run the command exactly as a typed `/`-line does, so it reuses
+    // buildComposeSubmission() and adds no byte rule of its own. The worker still
+    // owns submit timing (it splits the trailing CR, #55), and #179's slash gate
+    // already exempts a `/`-line from submit-confirmation.
+    function runQuickCommand(c) {
+      closeCmdMenu();
+      if (!ws || ws.readyState !== WebSocket.OPEN) return;   // WS down — do nothing
+      if (c.confirm && !confirm(c.confirm)) return;
+      sendInput(buildComposeSubmission('/' + c.name), true);
+    }
+
+    // A click anywhere else closes the popup. Registered once, at capture time, so
+    // it fires before a handler that might stop propagation.
+    document.addEventListener('click', (e) => {
+      const menu = document.getElementById('cmdMenu');
+      const btn = document.getElementById('composeCmdBtn');
+      if (!menu || !menu.classList.contains('cmd-open')) return;
+      if (menu.contains(e.target) || (btn && btn.contains(e.target))) return;
+      closeCmdMenu();
+    }, true);
+
     // --- AI agents (GET /api/agents) -----------------------------------------
     // The server's provider registry is the SSOT: the picker options and the
     // per-agent tint both come from it, so adding a CLI agent server-side needs no
@@ -3661,6 +3802,7 @@
     function renderSidebar(data) {
       clusterServers = data.servers;
       renderHeaderFavorite(data);   // #180 — same data, same rules, same starHtml()
+      renderComposeCommands(data);  // #188 — same data, same current-session rule
 
       // Issue #20: refresh the direct-URL cache from the fresh session list.
       // Tokens are only valid for 60s, so rebuilding on every sidebar load
@@ -5181,7 +5323,10 @@
         fetch('/api/config').then(r => r.json()),
         // Agent catalogue: fills the new-session picker + the sidebar tint. Failure is
         // non-fatal (no chips, "Auto" only) — never block the app on it.
-        loadAgents()
+        loadAgents(),
+        // #188 — the slash-command button row. Same contract: failure is silent,
+        // the button just never appears.
+        loadCommands()
       ]);
 
       hostname = hostData.hostname;

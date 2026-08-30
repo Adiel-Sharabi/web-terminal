@@ -26,10 +26,74 @@ library;
 
 import '../api/api_client.dart';
 
+/// One offered slash command (#188) — a button in the compose bar.
+///
+/// Every field is server-published. The client holds NO list of which commands
+/// deserve a button, what they are called, or in what order they appear: that
+/// table is `lib/commands.js`, and a copy here would be the third one (after the
+/// server and `app.html`) and would drift the first time a command is added.
+class QuickCommand {
+  const QuickCommand({
+    required this.name,
+    required this.label,
+    required this.lens,
+    this.confirm,
+  });
+
+  /// The command without its slash, e.g. `compact`.
+  final String name;
+
+  /// What the button says, e.g. `Compact`.
+  final String label;
+
+  /// Where the user should stand while it runs — `chat` or `terminal`.
+  final String lens;
+
+  /// The question to ask BEFORE running it, or null for "just run it". Only the
+  /// destructive command carries one, and the wording is server-owned so both
+  /// clients say the same thing.
+  final String? confirm;
+
+  /// True when running this costs something that cannot be undone.
+  bool get isDestructive => confirm != null;
+
+  /// The text actually submitted. Kept here so the slash is added in ONE place.
+  String get text => '/$name';
+
+  static QuickCommand? fromJson(Map<String, dynamic> r) {
+    final name = r['name'];
+    if (name is! String || name.isEmpty) return null;
+    final label = r['label'];
+    final lens = r['lens'];
+    final confirm = r['confirm'];
+    return QuickCommand(
+      name: name.toLowerCase(),
+      // Fall back to the name rather than dropping the row: a server that adds a
+      // command but forgets its label should still give the user the button.
+      label: label is String && label.isNotEmpty ? label : name,
+      lens: lens is String ? lens : 'chat',
+      // `.trim()` matters: a whitespace-only string is NOT empty, so without it
+      // a blank `confirm` would mark the command destructive and pop a dialog
+      // with no question in it. Caught by its own unit test.
+      confirm: confirm is String && confirm.trim().isNotEmpty ? confirm : null,
+    );
+  }
+}
+
 class CommandPolicy {
   CommandPolicy._();
 
   static final CommandPolicy instance = CommandPolicy._();
+
+  /// The ordered button row, exactly as the server sent it (#188). Empty against
+  /// a server older than #188 — which renders no buttons and changes nothing else.
+  ///
+  /// Deliberately NOT sorted here: the order is a decision `lib/commands.js`
+  /// owns (the destructive row sorts last, away from a thumb), and re-sorting it
+  /// client-side would be a second opinion on a published fact.
+  final List<QuickCommand> _quick = [];
+
+  List<QuickCommand> get quickCommands => List.unmodifiable(_quick);
 
   /// Server-published policy, keyed by command name without its leading slash.
   /// Empty until a fetch succeeds — [_fallback] covers that window and any
@@ -69,18 +133,28 @@ class CommandPolicy {
   Future<void> ensureLoaded(ApiClient api) async {
     if (_loaded) return;
     _loaded = true;
-    final rows = await api.commandPolicy();
-    for (final r in rows) {
+    final body = await api.commandPolicy();
+    for (final r in body['commands'] ?? const <Map<String, dynamic>>[]) {
       final name = r['name'], lens = r['lens'];
       if (name is String && lens is String) _lensByName[name.toLowerCase()] = lens;
     }
+    _quick
+      ..clear()
+      ..addAll(
+        (body['quick'] ?? const <Map<String, dynamic>>[])
+            .map(QuickCommand.fromJson)
+            .whereType<QuickCommand>(),
+      );
   }
 
   /// Test seam — resets the cache so a spec can drive a specific policy.
-  void debugReset([Map<String, String>? seed]) {
+  void debugReset([Map<String, String>? seed, List<QuickCommand>? quick]) {
     _lensByName
       ..clear()
       ..addAll(seed ?? const {});
+    _quick
+      ..clear()
+      ..addAll(quick ?? const []);
     _loaded = seed != null;
   }
 }

@@ -153,6 +153,7 @@ class ComposeBar extends StatelessWidget {
     this.attachments = const <ComposeAttachment>[],
     this.onRemoveAttachment,
     this.agentReady = true,
+    this.onCommand,
   });
 
   final TextEditingController controller;
@@ -209,6 +210,15 @@ class ComposeBar extends StatelessWidget {
   /// submit to it again, which is worse than the bug it guards.
   final bool agentReady;
 
+  /// Opens the slash-command menu (#188). `null` hides the button entirely —
+  /// which is what a plain shell and a server with no published button row get,
+  /// since neither has any command to offer.
+  ///
+  /// Gated on [agentReady] by the same rule as submit: running a command IS a
+  /// submit, so firing one into a booting agent loses it to the shell exactly
+  /// as a prompt would (#147).
+  final VoidCallback? onCommand;
+
   /// Typing is always allowed — the text stays in the box and is sent the moment
   /// the agent is up. Only SUBMIT waits, because a submit during boot goes to the
   /// shell the TUI has not replaced yet and the prompt is silently lost (#147).
@@ -234,6 +244,23 @@ class ComposeBar extends StatelessWidget {
           Row(
             crossAxisAlignment: CrossAxisAlignment.end,
             children: [
+              // #188 — the slash-command button, LEFT of the field so it can
+              // never be mistaken for Send. Absent (not disabled) when there is
+              // nothing to offer: a plain shell has no slash commands, and an
+              // older server publishes no button row.
+              if (onCommand != null) ...[
+                IconButton(
+                  // Same gate as submit: running a command IS a submit, so it
+                  // must not fire into a booting agent (#147).
+                  onPressed: agentReady ? onCommand : null,
+                  icon: const Icon(Icons.bolt_outlined),
+                  tooltip: agentReady
+                      ? 'Slash commands'
+                      : 'Waiting for the agent to start…',
+                  visualDensity: VisualDensity.compact,
+                ),
+                const SizedBox(width: 4),
+              ],
               Expanded(
                 child: Shortcuts(
                   shortcuts: <ShortcutActivator, Intent>{

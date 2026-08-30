@@ -131,6 +131,13 @@ module.exports = [
         maybeClearAttention: 'readonly',
         handleAttentionCleared: 'readonly',
         pendingAlerts: 'readonly',
+        // #188 — the slash-command button row. All four exist in app.html:
+        // three are top-level function declarations, sessionId is the top-level
+        // 'let' the eligibility rule matches the current session against.
+        sessionId: 'readonly',
+        renderComposeCommands: 'readonly',
+        toggleCmdMenu: 'readonly',
+        runQuickCommand: 'readonly',
         // Written, not just read: a spec sets it to force a long backoff.
         reconnectAttempts: 'writable',
       },
