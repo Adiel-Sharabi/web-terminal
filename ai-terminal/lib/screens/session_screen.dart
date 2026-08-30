@@ -1169,8 +1169,16 @@ class _SessionScreenState extends State<SessionScreen>
   void _loadCommandPolicy() {
     final session = _session;
     if (session == null) return;
+    // #188 — this fetch now decides whether the slash-command button EXISTS, not
+    // just where a typed command lands. Left un-awaited with no setState, the
+    // first session screen after launch built before the response arrived and the
+    // button stayed absent until some unrelated rebuild happened to run.
     unawaited(
-      CommandPolicy.instance.ensureLoaded(ApiClient(session.server)),
+      CommandPolicy.instance.ensureLoaded(ApiClient(session.server)).then((
+        changed,
+      ) {
+        if (changed && mounted) setState(() {});
+      }),
     );
   }
 
@@ -2450,6 +2458,121 @@ class _SessionScreenState extends State<SessionScreen>
   ///
   /// Cancelling (delete-to-empty, Esc) always unpins: nothing ran, so there is
   /// nothing to read.
+  /// #188 — the slash-command sheet. Its rows ARE the server's table: this
+  /// screen chooses nothing about which commands appear, what they are called,
+  /// their order, or which one asks first.
+  Future<void> _showQuickCommands() async {
+    final rows = CommandPolicy.instance.quickCommands;
+    if (rows.isEmpty) return;
+    final picked = await showModalBottomSheet<QuickCommand>(
+      context: context,
+      showDragHandle: true,
+      builder: (sheetContext) {
+        final theme = Theme.of(sheetContext);
+        return SafeArea(
+          child: Column(
+            mainAxisSize: MainAxisSize.min,
+            children: [
+              for (final c in rows)
+                ListTile(
+                  leading: Icon(
+                    c.isDestructive
+                        ? Icons.delete_sweep_outlined
+                        : Icons.bolt_outlined,
+                    color: c.isDestructive ? theme.colorScheme.error : null,
+                  ),
+                  title: Text(
+                    c.label,
+                    style: c.isDestructive
+                        ? TextStyle(color: theme.colorScheme.error)
+                        : null,
+                  ),
+                  subtitle: Text(
+                    c.text,
+                    style: theme.textTheme.bodySmall?.copyWith(
+                      fontFamily: 'monospace',
+                      // 'monospace' is an Android/fontconfig alias that resolves
+                      // to NOTHING on Windows, macOS and iOS (#145).
+                      fontFamilyFallback: const [
+                        'Consolas',
+                        'Menlo',
+                        'Courier New',
+                      ],
+                    ),
+                  ),
+                  onTap: () => Navigator.of(sheetContext).pop(c),
+                ),
+            ],
+          ),
+        );
+      },
+    );
+    if (picked != null) await _runQuickCommand(picked);
+  }
+
+  /// Run one. Two rules, both inherited rather than reinvented:
+  ///
+  /// 1. It is an ORDINARY compose submission. Measured on a real Claude TUI
+  ///    (`scripts/rig/probe-slash-submit.js`): an atomic `/cmd` + CR runs the
+  ///    command exactly as a typed live-`/` line does, so this adds no byte rule
+  ///    of its own and the worker still owns submit timing (#55).
+  /// 2. It lands where a TYPED one would. The lens pin is the same field the
+  ///    live-`/` path sets, so `/clear` and the TUI-paint panels hold the
+  ///    Terminal lens while `/compact` stays in Chat with its indicator (#65) —
+  ///    one notion of "where should the user stand", not a second one for buttons.
+  Future<void> _runQuickCommand(QuickCommand c) async {
+    // BEFORE the dialog, not after: `_showQuickCommands` awaited a bottom sheet to
+    // get here, and the screen can be popped while that sheet is still settling.
+    // Using `context` after that gap is `use_build_context_synchronously`.
+    if (!mounted) return;
+    if (c.isDestructive) {
+      final ok = await showDialog<bool>(
+        context: context,
+        builder: (dialogContext) => AlertDialog(
+          title: Text(c.label),
+          content: Text(c.confirm!),
+          actions: [
+            TextButton(
+              onPressed: () => Navigator.of(dialogContext).pop(false),
+              child: const Text('Cancel'),
+            ),
+            FilledButton(
+              onPressed: () => Navigator.of(dialogContext).pop(true),
+              child: Text(c.label),
+            ),
+          ],
+        ),
+      );
+      if (ok != true) return;
+    }
+    if (!mounted) return;
+    // A half-typed live '/' line is ALREADY IN THE PTY — `_streamComposeLive`
+    // writes it as you type (#55). Sending `/compact\r` on top of `/co` submits
+    // `/co/compact` into Claude's OPEN FUZZY MENU: the wrong command runs, or
+    // none does. Erase it through its own owner first — `_streamComposeLive('')`
+    // emits exactly the backspaces it knows it wrote — then drop live mode, or
+    // `_composeLiveSent` keeps describing a line that no longer exists and every
+    // later keystroke diffs against a stale projection.
+    //
+    // AFTER the confirm, never before: a cancelled `/clear` must not cost the
+    // user the line they were typing.
+    if (_composeLive) {
+      _streamComposeLive('');
+      _composeLive = false;
+      _composeLiveSent = '';
+      _liveTabbed = false;
+      _composeController.clear();
+    }
+    // Pin BEFORE sending, so a session update arriving between the send and the
+    // pin cannot bounce the lens back mid-command — that is #130 exactly.
+    if (CommandPolicy.instance.pinsTerminal(c.text)) {
+      _lensPinLiveSlash = true;
+      _liveCommandText = c.text;
+      _recomputeActiveLens();
+    }
+    sendSessionPrompt(c.text);
+  }
+
   void _restoreLensAfterLive({bool sent = false}) {
     if (!_lensPinLiveSlash) return;
     if (sent && CommandPolicy.instance.pinsTerminal(_liveCommandText)) return;
@@ -3965,6 +4088,14 @@ class _SessionScreenState extends State<SessionScreen>
               // moment before the session object has loaded, where refusing
               // would be a bar that never sends on a session that is fine.
               agentReady: _session?.agentReady ?? true,
+              // #188 — the slash-command button. Null (so the button is absent,
+              // not disabled) for a plain shell, which has no slash commands, and
+              // against a server too old to publish a button row.
+              onCommand:
+                  (_session?.agent != null &&
+                      CommandPolicy.instance.quickCommands.isNotEmpty)
+                  ? _showQuickCommands
+                  : null,
               // #50: when the terminal is the active input target (Terminal lens
               // or a live question overlay), hardware Tab + arrows go straight to
               // the PTY so Claude's TUI (`/status` tabs, menus, questions) is

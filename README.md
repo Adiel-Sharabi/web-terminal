@@ -79,6 +79,16 @@ and a desktop watch the same session, the shared terminal is sized to fit the **
 of them, so a full-width agent screen never arrives on the phone already wrapped — and
 backgrounding the phone hands the columns straight back.
 
+**Slash commands from a button** — `/compact`, `/context`, `/usage` and `/clear` are one
+tap in either client, instead of a command typed in full into an agent's TUI on a phone.
+The button row is **published by the server**, so which commands appear, what they are
+called and in what order is one table (`lib/commands.js`) rather than a copy in each
+client. Running one lands you where its result actually is: `/compact` stays in the chat
+lens with its progress indicator, while `/clear` and the TUI-only panels hold the terminal
+lens until you have read them. `/clear` asks first and sorts last — on a phone the first
+button is the one a thumb reaches by accident — and no button can fire into an agent that
+is still starting.
+
 **A swallowed prompt says so, and gives the words back** — submit while the agent's TUI
 is somewhere other than its composer (a full-screen `/usage` view, an open slash menu, a
 crashed CLI back at the shell) and the keystrokes are eaten as navigation; until now your

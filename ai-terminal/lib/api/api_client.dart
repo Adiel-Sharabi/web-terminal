@@ -344,14 +344,24 @@ class ApiClient {
   /// Best-effort like [agents]: an older server without the endpoint yields an
   /// empty list and the client falls back to its own built-in table, so a slash
   /// command never depends on this call succeeding.
-  Future<List<Map<String, dynamic>>> commandPolicy() async {
+  /// Returns `{commands: [...], quick: [...]}` — the whole catalogue plus the
+  /// ordered button row (#188). Both come from one request because they are one
+  /// table; fetching them separately would let the two drift within a session.
+  ///
+  /// `quick` is absent on a server older than #188, and an empty list there is
+  /// exactly right: no buttons, everything else unchanged.
+  Future<Map<String, List<Map<String, dynamic>>>> commandPolicy() async {
+    List<Map<String, dynamic>> rows(Object? v) => v is List
+        ? v.whereType<Map<String, dynamic>>().toList(growable: false)
+        : const <Map<String, dynamic>>[];
     try {
-      final res = await _send('GET', '/api/commands');
-      final list = _asMap(_decode(res))['commands'];
-      if (list is! List) return const <Map<String, dynamic>>[];
-      return list.whereType<Map<String, dynamic>>().toList(growable: false);
+      final body = _asMap(_decode(await _send('GET', '/api/commands')));
+      return {'commands': rows(body['commands']), 'quick': rows(body['quick'])};
     } catch (_) {
-      return const <Map<String, dynamic>>[];
+      return const {
+        'commands': <Map<String, dynamic>>[],
+        'quick': <Map<String, dynamic>>[],
+      };
     }
   }
 
