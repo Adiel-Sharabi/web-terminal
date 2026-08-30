@@ -1169,8 +1169,16 @@ class _SessionScreenState extends State<SessionScreen>
   void _loadCommandPolicy() {
     final session = _session;
     if (session == null) return;
+    // #188 — this fetch now decides whether the slash-command button EXISTS, not
+    // just where a typed command lands. Left un-awaited with no setState, the
+    // first session screen after launch built before the response arrived and the
+    // button stayed absent until some unrelated rebuild happened to run.
     unawaited(
-      CommandPolicy.instance.ensureLoaded(ApiClient(session.server)),
+      CommandPolicy.instance.ensureLoaded(ApiClient(session.server)).then((
+        changed,
+      ) {
+        if (changed && mounted) setState(() {});
+      }),
     );
   }
 
@@ -2513,6 +2521,10 @@ class _SessionScreenState extends State<SessionScreen>
   ///    Terminal lens while `/compact` stays in Chat with its indicator (#65) —
   ///    one notion of "where should the user stand", not a second one for buttons.
   Future<void> _runQuickCommand(QuickCommand c) async {
+    // BEFORE the dialog, not after: `_showQuickCommands` awaited a bottom sheet to
+    // get here, and the screen can be popped while that sheet is still settling.
+    // Using `context` after that gap is `use_build_context_synchronously`.
+    if (!mounted) return;
     if (c.isDestructive) {
       final ok = await showDialog<bool>(
         context: context,
@@ -2534,6 +2546,23 @@ class _SessionScreenState extends State<SessionScreen>
       if (ok != true) return;
     }
     if (!mounted) return;
+    // A half-typed live '/' line is ALREADY IN THE PTY — `_streamComposeLive`
+    // writes it as you type (#55). Sending `/compact\r` on top of `/co` submits
+    // `/co/compact` into Claude's OPEN FUZZY MENU: the wrong command runs, or
+    // none does. Erase it through its own owner first — `_streamComposeLive('')`
+    // emits exactly the backspaces it knows it wrote — then drop live mode, or
+    // `_composeLiveSent` keeps describing a line that no longer exists and every
+    // later keystroke diffs against a stale projection.
+    //
+    // AFTER the confirm, never before: a cancelled `/clear` must not cost the
+    // user the line they were typing.
+    if (_composeLive) {
+      _streamComposeLive('');
+      _composeLive = false;
+      _composeLiveSent = '';
+      _liveTabbed = false;
+      _composeController.clear();
+    }
     // Pin BEFORE sending, so a session update arriving between the send and the
     // pin cannot bounce the lens back mid-command — that is #130 exactly.
     if (CommandPolicy.instance.pinsTerminal(c.text)) {

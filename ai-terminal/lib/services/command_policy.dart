@@ -100,6 +100,9 @@ class CommandPolicy {
   /// server without the `command-policy` capability.
   final Map<String, String> _lensByName = {};
   bool _loaded = false;
+  // A load is in progress. Separate from [_loaded] so a FAILED load does not
+  // permanently disable the catalogue (see ensureLoaded).
+  bool _inFlight = false;
 
   /// Claude's own built-ins whose whole result is TUI paint. Mirrors the server
   /// table, and exists ONLY so an older server (or a failed fetch) still gets
@@ -130,21 +133,38 @@ class CommandPolicy {
   /// Loads the policy once per app run. Best-effort by design: a failure leaves
   /// [_fallback] in charge rather than throwing, because a slash command must
   /// keep working against any server.
-  Future<void> ensureLoaded(ApiClient api) async {
-    if (_loaded) return;
-    _loaded = true;
+  /// Returns true when the catalogue actually CHANGED, so a caller that renders
+  /// from it knows to rebuild (#188).
+  Future<bool> ensureLoaded(ApiClient api) async {
+    if (_loaded || _inFlight) return false;
+    // NOT `_loaded = true` here. `commandPolicy()` swallows every failure into
+    // empty lists, so marking it loaded before the await meant ONE transient
+    // network error left the client with no buttons and no lens policy for the
+    // whole app run, with nothing to trigger a retry. `_inFlight` gives the same
+    // protection against a concurrent second call without making failure sticky.
+    _inFlight = true;
     final body = await api.commandPolicy();
-    for (final r in body['commands'] ?? const <Map<String, dynamic>>[]) {
+    _inFlight = false;
+    // An empty catalogue is what a failure looks like AND what a server older
+    // than #131 legitimately returns. Treat it as "not loaded" either way: the
+    // fallback table already covers the old server, and leaving the door open
+    // costs one retry on the next session screen.
+    final rows = body['commands'] ?? const <Map<String, dynamic>>[];
+    final quick = body['quick'] ?? const <Map<String, dynamic>>[];
+    if (rows.isEmpty && quick.isEmpty) return false;
+    _loaded = true;
+    for (final r in rows) {
       final name = r['name'], lens = r['lens'];
       if (name is String && lens is String) _lensByName[name.toLowerCase()] = lens;
     }
     _quick
       ..clear()
       ..addAll(
-        (body['quick'] ?? const <Map<String, dynamic>>[])
+        quick
             .map(QuickCommand.fromJson)
             .whereType<QuickCommand>(),
       );
+    return true;
   }
 
   /// Test seam — resets the cache so a spec can drive a specific policy.

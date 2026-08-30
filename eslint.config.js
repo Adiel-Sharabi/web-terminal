@@ -114,7 +114,13 @@ module.exports = [
         // callbacks (defined in app.html, not visible to the Node linter).
         // Each one must actually exist in app.html — this list documents the
         // browser context the spec runs in, it is not a way to silence a typo.
-        ws: 'readonly',
+        ws: 'writable',
+        // `var` in app.html, so it IS on window; the spec pins it alongside sessionId.
+        sessionServerUrl: 'writable',
+        // #188 — the live-'/' state the collision test drives directly.
+        composeInput: 'readonly',
+        composeLive: 'writable',
+        composeLiveSent: 'writable',
         clusterServers: 'readonly',
         // #152 — the two pure render helpers the resources specs call directly.
         esc: 'readonly',
@@ -134,7 +140,10 @@ module.exports = [
         // #188 — the slash-command button row. All four exist in app.html:
         // three are top-level function declarations, sessionId is the top-level
         // 'let' the eligibility rule matches the current session against.
-        sessionId: 'readonly',
+        // #188 — the spec ASSIGNS these to pin the identity its rules match on.
+        // Both are top-level `let` in app.html, so they are not on window and a
+        // window.* stub would be a different, unread property (app.html:881).
+        sessionId: 'writable',
         renderComposeCommands: 'readonly',
         toggleCmdMenu: 'readonly',
         runQuickCommand: 'readonly',

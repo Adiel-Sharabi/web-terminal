@@ -12,12 +12,18 @@
 // The last row is the reported bug: Chat showed the invocation and no answer.
 import 'package:flutter_test/flutter_test.dart';
 
+import 'package:ai_terminal/api/api_client.dart';
+import 'package:ai_terminal/api/models.dart';
+import 'package:http/http.dart' as http;
+import 'package:http/testing.dart';
+
 import 'package:ai_terminal/services/command_policy.dart';
 
 void main() {
   setUp(() => CommandPolicy.instance.debugReset());
 
   _quickTests();   // #188 — the offered button row
+  _loadRetryTests();
 
   group('CommandPolicy.nameOf', () {
     test('strips the slash and the arguments', () {
@@ -202,6 +208,66 @@ void _quickTests() {
         ),
         throwsUnsupportedError,
       );
+    });
+  });
+}
+
+// ---------------------------------------------------------------------------
+// #188 — a FAILED catalogue fetch must not be permanent.
+//
+// Found in review. `ensureLoaded` set `_loaded = true` BEFORE its await, and
+// `ApiClient.commandPolicy()` swallows every failure into empty lists — so one
+// transient network error on the first session screen left the app with no
+// buttons and no server lens policy for the WHOLE RUN, with nothing to trigger a
+// retry. That was survivable while this was only consulted at typing time (the
+// fallback table covered it); it is not, now that it decides whether the button
+// exists at all.
+// ---------------------------------------------------------------------------
+void _loadRetryTests() {
+  ApiClient clientReturning(String body, {int status = 200}) => ApiClient(
+    const ServerConfig(name: 't', baseUrl: 'http://127.0.0.1:1', bearerToken: 'x'),
+    httpClient: MockClient((_) async => http.Response(body, status)),
+  );
+
+  group('#188 ensureLoaded retry', () {
+    test('a FAILED fetch does not latch — the next call tries again', () async {
+      CommandPolicy.instance.debugReset();
+
+      // First attempt fails (a 500 becomes empty lists inside commandPolicy()).
+      final changed1 = await CommandPolicy.instance.ensureLoaded(
+        clientReturning('nope', status: 500),
+      );
+      expect(changed1, isFalse);
+      expect(CommandPolicy.instance.quickCommands, isEmpty);
+
+      // The retry must actually reach the network, not short-circuit on _loaded.
+      final changed2 = await CommandPolicy.instance.ensureLoaded(
+        clientReturning(
+          '{"commands":[{"name":"compact","lens":"chat"}],'
+          '"quick":[{"name":"compact","label":"Compact","lens":"chat"}]}',
+        ),
+      );
+      expect(changed2, isTrue, reason: 'a failed load must not be sticky');
+      expect(CommandPolicy.instance.quickCommands.map((c) => c.name), ['compact']);
+    });
+
+    test('a SUCCESSFUL load latches — no repeat fetch per session screen', () async {
+      CommandPolicy.instance.debugReset();
+      const ok = '{"commands":[{"name":"compact","lens":"chat"}],'
+          '"quick":[{"name":"compact","label":"Compact","lens":"chat"}]}';
+      expect(await CommandPolicy.instance.ensureLoaded(clientReturning(ok)), isTrue);
+      // Second call is a no-op: `changed` false means the caller does no setState.
+      expect(await CommandPolicy.instance.ensureLoaded(clientReturning(ok)), isFalse);
+    });
+
+    test('returns changed=true only when there is something to render', () async {
+      // An empty-but-successful catalogue (a server older than #131) must not
+      // report a change, or every session screen would setState for nothing.
+      CommandPolicy.instance.debugReset();
+      final changed = await CommandPolicy.instance.ensureLoaded(
+        clientReturning('{"commands":[],"quick":[]}'),
+      );
+      expect(changed, isFalse);
     });
   });
 }

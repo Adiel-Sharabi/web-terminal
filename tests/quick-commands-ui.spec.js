@@ -14,7 +14,7 @@
 // only by CI failing 73 specs). So: assert no pageerror BEFORE asserting anything
 // about the feature.
 const { test, expect } = require('@playwright/test');
-const { BASE, authCtx, loginPage } = require('./test-helpers');
+const { BASE, loginPage } = require('./test-helpers');
 const commands = require('../lib/commands');
 
 /** Collect every uncaught page error while `fn` runs. */
@@ -71,6 +71,10 @@ test.describe('#188 — the quick-command button in app.html', () => {
     // honest unit under test — the RULE — and it avoids depending on a live agent
     // boot, which would make the assertion about timing instead of about policy.
     const out = await page.evaluate(() => {
+      // Pin the identity these rules match against, so the assertions are about
+      // the RULE and not about whichever session init() happened to auto-select.
+      sessionId = 'test-sess-188';
+      sessionServerUrl = null;
       const btn = () => {
         const b = document.getElementById('composeCmdBtn');
         return { display: b.style.display, disabled: b.disabled };
@@ -112,6 +116,10 @@ test.describe('#188 — the quick-command button in app.html', () => {
     await page.goto(BASE + '/');
     await page.waitForLoadState('networkidle');
     const open = await page.evaluate(() => {
+      // Pin the identity these rules match against, so the assertions are about
+      // the RULE and not about whichever session init() happened to auto-select.
+      sessionId = 'test-sess-188';
+      sessionServerUrl = null;
       // @ts-ignore
       renderComposeCommands({ sessions: [{ id: sessionId, serverUrl: '', agent: 'claude', agentReady: false }] });
       // @ts-ignore
@@ -137,8 +145,9 @@ test.describe('#188 — the quick-command button in app.html', () => {
       const realSend = window.sendInput;
       // @ts-ignore
       window.sendInput = (d) => calls.push(d);
-      // @ts-ignore — a live socket is required by runQuickCommand's guard.
-      window.ws = { readyState: 1 };
+      // @ts-ignore — bare assignment: `ws` is a top-level `let`, so it is NOT on
+      // window and window.ws would be a different, unread property (app.html:881).
+      ws = { readyState: 1 };
       // @ts-ignore
       runQuickCommand({ name: 'compact', label: 'Compact' });
       // @ts-ignore
@@ -162,8 +171,8 @@ test.describe('#188 — the quick-command button in app.html', () => {
       const calls = [];
       // @ts-ignore
       const real = window.sendInput; window.sendInput = (d) => calls.push(d);
-      // @ts-ignore
-      window.ws = { readyState: 1 };
+      // @ts-ignore — see above: bare assignment, not window.ws.
+      ws = { readyState: 1 };
       // @ts-ignore
       runQuickCommand(row);
       // @ts-ignore
@@ -178,8 +187,8 @@ test.describe('#188 — the quick-command button in app.html', () => {
       const calls = [];
       // @ts-ignore
       const real = window.sendInput; window.sendInput = (d) => calls.push(d);
-      // @ts-ignore
-      window.ws = { readyState: 1 };
+      // @ts-ignore — see above: bare assignment, not window.ws.
+      ws = { readyState: 1 };
       // @ts-ignore
       runQuickCommand(row);
       // @ts-ignore
@@ -187,5 +196,105 @@ test.describe('#188 — the quick-command button in app.html', () => {
       return calls;
     }, clear);
     expect(accepted).toEqual(['/clear\r']);
+  });
+});
+
+// ---------------------------------------------------------------------------
+// The collision the first cut of this feature shipped, found in review.
+//
+// The live `/` line is ALREADY IN THE PTY: composeStreamLive writes it character
+// by character as you type (#55), so with `/co` in the box the terminal holds
+// `/co` too. Firing a button then sent `/compact\r` on top of it — submitting
+// `/co/compact` into Claude's OPEN FUZZY MENU, which commits the HIGHLIGHTED row.
+// So the wrong command runs, or none does, and composeLiveSent is left describing
+// a line that no longer exists, desyncing every keystroke after it.
+//
+// Both assertions matter: the BYTES that go out, and the STATE left behind.
+// ---------------------------------------------------------------------------
+test.describe('#188 — a button must not append to a half-typed live / line', () => {
+  test('the live line is erased first, and live state is dropped', async ({ page }) => {
+    await loginPage(page);
+    await page.goto(BASE + '/');
+    await page.waitForLoadState('networkidle');
+
+    const out = await page.evaluate(() => {
+      const calls = [];
+      // @ts-ignore
+      const realSend = window.sendInput;
+      // @ts-ignore
+      window.sendInput = (d) => calls.push(d);
+      // @ts-ignore
+      ws = { readyState: 1 };
+
+      // Simulate a user mid-`/co`: the field holds it and the PTY has had it
+      // streamed, which is exactly what composeLiveSent records.
+      // @ts-ignore
+      composeInput.value = '/co';
+      // @ts-ignore
+      composeLive = true;
+      // @ts-ignore
+      composeLiveSent = '/co';
+
+      // @ts-ignore
+      runQuickCommand({ name: 'compact', label: 'Compact' });
+
+      // @ts-ignore
+      window.sendInput = realSend;
+      return {
+        calls,
+        // @ts-ignore
+        stillLive: composeLive,
+        // @ts-ignore
+        liveSent: composeLiveSent,
+        // @ts-ignore
+        field: composeInput.value,
+      };
+    });
+
+    // Three backspaces erase `/co` from the PTY, THEN the command goes out alone.
+    // The DEL is 0x7f — the same byte composeStreamLive uses for its own diff.
+    expect(out.calls).toEqual(['\x7f\x7f\x7f', '/compact\r']);
+    // Nothing may still claim a live line: composeLiveSent describing bytes that
+    // are no longer in the PTY is what desyncs every later keystroke.
+    expect(out.stillLive).toBe(false);
+    expect(out.liveSent).toBe('');
+    expect(out.field).toBe('');
+  });
+
+  test('a REFUSED destructive command leaves the live line untouched', async ({ page }) => {
+    await loginPage(page);
+    await page.goto(BASE + '/');
+    await page.waitForLoadState('networkidle');
+
+    const clear = commands.quickCommands().find((c) => c.name === 'clear');
+    page.once('dialog', (d) => d.dismiss());
+
+    const out = await page.evaluate((row) => {
+      const calls = [];
+      // @ts-ignore
+      const realSend = window.sendInput;
+      // @ts-ignore
+      window.sendInput = (d) => calls.push(d);
+      // @ts-ignore
+      ws = { readyState: 1 };
+      // @ts-ignore
+      composeInput.value = '/co';
+      // @ts-ignore
+      composeLive = true;
+      // @ts-ignore
+      composeLiveSent = '/co';
+      // @ts-ignore
+      runQuickCommand(row);
+      // @ts-ignore
+      window.sendInput = realSend;
+      // @ts-ignore
+      return { calls, stillLive: composeLive, liveSent: composeLiveSent, field: composeInput.value };
+    }, clear);
+
+    // Cancelling must cost nothing: no bytes, and the half-typed line survives.
+    expect(out.calls).toEqual([]);
+    expect(out.stillLive).toBe(true);
+    expect(out.liveSent).toBe('/co');
+    expect(out.field).toBe('/co');
   });
 });

@@ -1357,6 +1357,9 @@
       document.getElementById('terminal').style.display = 'none';
       document.getElementById('noSession').style.display = 'flex';
       document.getElementById('sessionName').textContent = '(no session)';
+      // #188 - the session is gone; the command button must go with it. renderSidebar
+      // would do this, but it only runs below when the sidebar is OPEN.
+      renderComposeCommands(null);
       status.style.opacity = '0';
       if (document.getElementById('sidebar').classList.contains('open')) loadSidebar();
     }
@@ -1430,6 +1433,7 @@
       // does this too, but it only runs here when the sidebar happens to be OPEN, which on
       // a phone it never is — and the phone is the case this control was asked for.
       renderHeaderFavorite(_sidebarData);
+      renderComposeCommands(_sidebarData);   // #188 - same exposure, same fix
       history.pushState({ id, serverUrl: sessionServerUrl }, '', '/app/' + id);
       term.clear();
       term.reset();
@@ -3462,6 +3466,17 @@
       closeCmdMenu();
       if (!ws || ws.readyState !== WebSocket.OPEN) return;   // WS down — do nothing
       if (c.confirm && !confirm(c.confirm)) return;
+      // A half-typed live '/' line is ALREADY IN THE PTY — composeStreamLive writes it
+      // as you type (#55), so the terminal holds `/co` while the field does too. Sending
+      // `/compact\r` on top of that submits `/co/compact` into Claude's OPEN FUZZY MENU:
+      // the wrong command runs, or none does, and composeLiveSent is left describing a
+      // line that no longer exists, so every later keystroke diffs against a stale
+      // projection. Erase it through its own owner first — composeStreamLive('') emits
+      // exactly the backspaces it knows it wrote — and only then submit.
+      //
+      // AFTER the confirm, never before: a cancelled `/clear` must not cost the user the
+      // line they were typing.
+      if (composeLive) { composeStreamLive(''); clearComposeInput(); }
       sendInput(buildComposeSubmission('/' + c.name), true);
     }
 
