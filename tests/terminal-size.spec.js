@@ -143,13 +143,38 @@ async function sizeMarkers(ctx, id) {
  */
 async function ptySize(ctx, v, id) {
   const before = (await sizeMarkers(ctx, id)).length;
-  v.type('echo "WTSZ:$(stty size)"\r');
-  for (let i = 0; i < 40; i++) {
-    await sleep(300);
-    const all = await sizeMarkers(ctx, id);
-    if (all.length > before) return all[all.length - 1];
+  // ASK AGAIN, don't just wait harder. The question is asked by typing a line into a
+  // shell that is being resized around it — and a keystroke swallowed by readline's
+  // SIGWINCH redraw is gone, so no amount of extra polling can recover it. The old
+  // helper typed exactly once and then polled for 12s, which meant one lost keystroke
+  // was an unconditional 12s failure. That is the shape CI kept failing in
+  // (`terminal-size.spec.js` red on 5ca146e and f2ed601, green on f7b3550 between
+  // them) and it never reproduced locally in 6 consecutive runs, because losing the
+  // race needs a box slower than this one.
+  //
+  // Re-asking cannot weaken the test: the assertion is on the size the PTY REPORTS,
+  // and asking twice cannot change that answer. A rule regressed to last-writer-wins
+  // still reports the wrong size and still fails, with the real mismatch named.
+  for (let attempt = 0; attempt < 4; attempt++) {
+    v.type('echo "WTSZ:$(stty size)"\r');
+    for (let i = 0; i < 10; i++) {
+      await sleep(300);
+      const all = await sizeMarkers(ctx, id);
+      if (all.length > before) return all[all.length - 1];
+    }
   }
-  throw new Error('the shell never answered with its size');
+  // Carry the evidence in the throw. A bare "never answered" cannot distinguish the
+  // three things that produce it — the shell never ran the command, it ran it and the
+  // answer was reflowed by a SIGWINCH redraw into something the marker regex no longer
+  // matches, or the whole PTY is wedged — and this assertion runs on a CI box nobody
+  // can attach a debugger to. Same principle as the WS input drop in server.js: a
+  // failure that leaves no trace is unprovable after the fact.
+  const j = await (await ctx.get(`/api/sessions/${id}/scrollback?offset=0&limit=200000`)).json();
+  const tail = String(j.data || '').slice(-400).replace(/\x1b/g, '<ESC>');
+  throw new Error(
+    `the shell never answered with its size (markers before=${before}, `
+    + `asked 4x over 12s). Scrollback tail:\n${tail}`,
+  );
 }
 
 /**
