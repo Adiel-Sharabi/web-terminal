@@ -164,6 +164,20 @@ test.describe('#201 the WS input caps', () => {
     try {
       s = await attach(ctx, 'ws-cap-maxpayload');
 
+      // BOTH edges, because only pinning the upper one would let a later "tidy-up"
+      // pull maxPayload down towards the app cap and still pass. That is the change
+      // the comment in server.js argues against: below ~786,432 bytes it would start
+      // CLOSING sockets over frames the app can still report honestly, turning a
+      // recoverable refusal into a dropped session.
+      s.ws.send('y'.repeat(WS_MAX_PAYLOAD));
+      await sleep(3000);
+      const at = s.notices();
+      expect(at.length, `notices: ${JSON.stringify(at)}`).toBe(1);
+      expect(at[0].bytes).toBe(WS_MAX_PAYLOAD);
+      expect(s.ws.readyState, 'a frame AT maxPayload is the app\'s to refuse, not the transport\'s')
+        .toBe(WebSocket.OPEN);
+
+      s.clear();
       const closed = new Promise((resolve) => s.ws.once('close', (code) => resolve(code)));
       s.ws.send('y'.repeat(WS_MAX_PAYLOAD + 1));
 
