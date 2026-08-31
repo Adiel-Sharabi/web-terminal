@@ -656,6 +656,29 @@ test.describe('/api/version', () => {
     await ctx.dispose();
   });
 
+  // A hot reload restarts server.js and leaves the WORKER running, so `version` and
+  // `worker` move independently — a worker-side feature can be merged, pulled, and
+  // reported shipped while the old worker runs on inertly. #185 hit exactly that
+  // (WORKER_VERSION 0.6.2 -> 0.7.0 carrying #179's submit confirmation), and because
+  // nothing published the LIVE worker's version, answering "is it actually running?"
+  // needed process start times cross-checked against the git reflog on four machines.
+  // The worker has always sent its version in the ping reply; worker-client discarded it.
+  //
+  // The test server runs a worker from this same checkout, so live and on-disk must
+  // agree exactly — an inequality here is the real deployment bug this field exists
+  // to expose, not a test artifact.
+  test('reports the version of the LIVE worker, matching pty-worker.js on disk', async () => {
+    const src = fs.readFileSync(path.join(__dirname, '..', 'pty-worker.js'), 'utf8');
+    const m = src.match(/WORKER_VERSION\s*=\s*'([^']+)'/);
+    expect(m, 'pty-worker.js must declare WORKER_VERSION').toBeTruthy();
+
+    const ctx = await authCtx();
+    const data = await (await ctx.get('/api/version')).json();
+    expect(typeof data.worker, 'worker version must be published').toBe('string');
+    expect(data.worker).toBe(m[1]);
+    await ctx.dispose();
+  });
+
   // Regression: /api/version used to call execSync('git rev-parse'), execSync
   // ('git log -1'), execSync('git fetch --dry-run', timeout=5s), execSync
   // ('git rev-list'), and execSync('git status') on the request path. With
