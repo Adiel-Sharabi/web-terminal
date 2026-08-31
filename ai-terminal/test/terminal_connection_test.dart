@@ -218,6 +218,82 @@ void main() {
       conn.close();
     });
 
+    // #193 — the old guard was `_inputWrites.length > 1`: it evicted whole writes
+    // from the front until exactly one remained, with no regard for WHICH one that
+    // left behind. A paste queued while offline is a single whole write already over
+    // the cap on its own; any later write — even one character typed next — pushed
+    // the total back over budget and evicted the paste (the oldest entry) whole to
+    // make room for it. Reported as "a 20KB paste followed by any later write is
+    // dropped entirely." The cap must keep bounding ordinary accumulation (many small
+    // writes), but a write that already exceeds the cap alone is never the one to
+    // evict — it survives, and the buffer is allowed to sit over cap rather than
+    // silently lose it.
+    test('a big paste survives a later, smaller write queued behind it (#193)',
+        () async {
+      final s1 = _FakeSocket();
+      final s2 = _FakeSocket();
+      var i = 0;
+      final conn = TerminalConnection(_server, 's',
+          socketFactory: (_) => i++ == 0 ? s1 : s2,
+          reconnectBackoff: _slowBackoff);
+      await pump();
+      s1.serverDrop();
+      await pump(15); // offline window
+      final paste = 'P' * 20000; // a single write already over the 8KB cap alone
+      conn.sendInput(paste);
+      conn.sendInput('x'); // a later, smaller write queued in the same outage
+      await pump(120);
+
+      final flushed =
+          s2.sentStrings.firstWhere((s) => s.contains('P'), orElse: () => '');
+      expect(flushed, paste,
+          reason: 'a write already over the cap on its own must never be evicted '
+              'just because something small queued up behind it');
+      conn.close();
+    });
+
+    // #193 review — exempting an oversized write from the ORDINARY cap must not mean
+    // NO bound at all. Fifteen 20KB pastes queued in one outage (300,000 bytes, every
+    // one over the 8KB per-write cap, and over the 256KB hard ceiling too) would sit in
+    // memory forever under a rule that simply never evicts an oversized write. The HARD
+    // ceiling bounds the buffer even when nothing in it fits under the ordinary cap:
+    // past it, eviction is plain oldest-first with no exemption, and each write lost
+    // that way is reported on [inputDropped] — the same channel the server's 64KB WS
+    // cap uses — so this loss is visible too, never silent.
+    test('a hard ceiling bounds MANY large pastes in one outage; oldest lost, and reported (#193)',
+        () async {
+      final s1 = _FakeSocket();
+      final s2 = _FakeSocket();
+      var i = 0;
+      final conn = TerminalConnection(_server, 's',
+          socketFactory: (_) => i++ == 0 ? s1 : s2,
+          reconnectBackoff: _slowBackoff);
+      final dropped = <int>[];
+      conn.inputDropped.listen(dropped.add);
+      await pump();
+      s1.serverDrop();
+      await pump(15); // offline window
+
+      // 15 distinct 20KB pastes — 300,000 bytes total, comfortably past the 256KB hard
+      // ceiling. Distinct letters so "which ones survived" is checkable.
+      final pastes = List.generate(15, (n) => String.fromCharCode(65 + n) * 20000);
+      for (final p in pastes) {
+        conn.sendInput(p);
+      }
+      await pump(120);
+
+      final flushed = s2.sentStrings.join();
+      expect(flushed.length, lessThan(pastes.join().length),
+          reason: 'the buffer must not grow to hold all fifteen — some must be evicted');
+      expect(flushed, contains(pastes.last),
+          reason: 'the newest write always survives');
+      expect(flushed.contains(pastes.first), isFalse,
+          reason: 'oldest-first: the earliest pastes are the ones sacrificed');
+      expect(dropped, isNotEmpty,
+          reason: 'a write lost to the hard ceiling must be reported, not silent');
+      conn.close();
+    });
+
     // Buffering the prompt is only half the promise — the flush has to actually land.
     // _flushInput used to empty the buffer and THEN write inside a bare `catch (_) {}`,
     // so a write onto a socket that had just gone away threw, was swallowed, and took
@@ -403,6 +479,28 @@ void main() {
       expect(connected, [true, false]);
       expect(conn.sessionTaken, isTrue);
       expect(calls, 1, reason: 'must not reconnect to a taken session');
+      conn.close();
+    });
+
+    // #193 — the server's 64KB WS input cap used to refuse an oversized write with a
+    // server-side log only; nothing told the client. It now echoes a bare
+    // `{"inputDropped":true,"bytes":N}` frame back on this same socket, and the byte
+    // count must reach a listener rather than being written to the terminal as text.
+    test('inputDropped is parsed off the wire, forwarded on its own stream, '
+        'and never reaches output', () async {
+      final s1 = _FakeSocket();
+      final conn = TerminalConnection(_server, 's', socketFactory: (_) => s1);
+      final out = <String>[];
+      final dropped = <int>[];
+      conn.output.listen(out.add);
+      conn.inputDropped.listen(dropped.add);
+      await pump();
+
+      s1.serverSend('{"inputDropped":true,"bytes":70123}');
+      await pump();
+
+      expect(dropped, [70123]);
+      expect(out, isEmpty, reason: 'the control frame must not be typed as PTY output');
       conn.close();
     });
   });
