@@ -495,9 +495,29 @@ slow-but-working start.
 >    2026-08-20: not live on this fleet** — Git Bash's PS1 ends in `$` and a failed
 >    launch prints `bash: …: command not found`.
 >
-> Gap 2 is **closed by #190** — see below. Gap 1 stands.
+> Gap 2 is **narrowed by #190** — those themes print `❯` + an ordinary U+0020,
+> which the new marker rejects. **Inferred, NOT measured:** no such theme was run,
+> because none is installed on this fleet. By this repo's own standard that is a
+> reasoned expectation, not a captured fact. Gap 1 stands unchanged.
 
 ### The marker is `❯` + U+00A0, and the bare caret was a real bug (#190)
+
+> **It is a dialog FAMILY, not one dialog.** Review of PR #202 measured a THIRD
+> sibling while checking the marker: opening a fresh cwd under a checkout that has
+> a `CLAUDE.md` parks on **"Allow external CLAUDE.md file imports?"** — the same
+> shape exactly (unnumbered, `❯` then CHA, no spaces anywhere, `Enter to confirm`,
+> and a **refusing default row**: "No, disable external imports"). The new marker
+> correctly does not match it; **the old bare caret did**, so #202 fixes this one
+> too, un-asked.
+>
+> **This breaks the "trust is inherited" reassurance.** Folder trust really is
+> inherited — nothing under a trusted `C:/dev` raises the TRUST prompt — but that
+> is trust-specific. A descendant of a trusted directory can still park on the
+> imports selector. So "the tree is trusted" is **not** the same as "no selector
+> will block a new session", and any test that relies on the first to mean the
+> second is wrong. When #194 Part 1 builds the surfacing, target the family by
+> shape (`❯` + CHA, no spaces, `Enter to confirm`), not the trust prompt alone.
+
 
 The measurement the block above deferred is done (`scripts/rig/probe-trust-prompt.js`,
 claude **2.1.251**). **The composer writes the caret followed by U+00A0 NO-BREAK SPACE.**

@@ -193,7 +193,7 @@ test.describe('#147 agent readiness on the PTY output path', () => {
     const id = await newSession('claude');
     await inject(id, CARET);
     await inject(id, `${CARET}${NBSP}and again\r\n`);
-    await inject(id, 'ordinary output');
+    await inject(id, `${CARET}${NBSP}ordinary output`); // the marker AGAIN - the edge under test
     await sleep(60);
 
     expect((await summaryOf(id)).agentReady).toBe(true);
@@ -238,7 +238,9 @@ test.describe('#147 agent readiness on the PTY output path', () => {
     const { id } = await rpc(client, 'createSession', {
       cwd: dataDir, name: 's-early', agent: 'claude', autoCommand: 'echo launching-claude',
     });
-    await inject(id, `${CARET} not the agent, just a fancy shell prompt`);
+    // The REAL marker, before the launch command has been written. Only the arming
+    // gate can hold this not-ready, so deleting the gate turns this test red.
+    await inject(id, `${CARET}${NBSP}`);
     await sleep(60);
     expect((await summaryOf(id)).agentReady).toBe(false);
   });

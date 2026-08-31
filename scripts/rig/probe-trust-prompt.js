@@ -156,7 +156,14 @@ function clean() {
   // `projects` entry for every directory it opens — trusted or not. The default names
   // happen to share a prefix, so a single-prefix sweep appeared to cover both; it does
   // not once WT_TRUST_PROBE_PARENT is set, which is exactly when the dialog cases run.
-  const prefixes = [PROBE_PARENT, TRUSTED_PARENT].map((d) => d.replace(/\\/g, '/').toLowerCase());
+  const BS = String.fromCharCode(92); // a literal backslash, without writing one
+  // Anchored with a trailing '/': a bare startsWith makes `.../wt-trust-probe` also
+  // match a SIBLING `.../wt-trust-probe-other` that is not ours. #202 review.
+  const prefixes = [PROBE_PARENT, TRUSTED_PARENT].map((d) => {
+    let n = d.split(BS).join('/').toLowerCase();
+    while (n.endsWith('/')) n = n.slice(0, -1);
+    return n + '/';
+  });
   const doomed = Object.keys(j.projects || {})
     .filter((k) => prefixes.some((pfx) => k.replace(/\\/g, '/').toLowerCase().startsWith(pfx)));
   if (!doomed.length) {
@@ -168,8 +175,26 @@ function clean() {
     fs.writeFileSync(CLAUDE_JSON, JSON.stringify(j, null, 2));
     console.log(`removed ${doomed.length} entr${doomed.length === 1 ? 'y' : 'ies'} (backup: ${backup})`);
   }
+  // NEVER remove the PARENT itself. WT_TRUST_PROBE_PARENT is caller-supplied, and the
+  // docs REQUIRE pointing it at a real directory with no trusted ancestor - so a
+  // recursive delete of it would destroy whatever else lives there. Remove only the
+  // children this probe created; freshDir names them `<tag>-<base36>`. #202 review.
+  const MINE = /^[a-z0-9-]+-[0-9a-z]{5,}$/i;
+  const RAW = /^raw-.+[.]txt$/i;
   for (const d of [PROBE_PARENT, TRUSTED_PARENT]) {
-    if (fs.existsSync(d)) { fs.rmSync(d, { recursive: true, force: true }); console.log(`removed ${d}`); }
+    if (!fs.existsSync(d)) continue;
+    for (const name of fs.readdirSync(d)) {
+      if (!MINE.test(name) && !RAW.test(name)) {
+        console.log(`  keeping ${name} - not created by this probe`);
+        continue;
+      }
+      fs.rmSync(path.join(d, name), { recursive: true, force: true });
+      console.log(`  removed ${path.join(d, name)}`);
+    }
+    // Only remove the parent if WE created it and it is now empty.
+    if (!process.env.WT_TRUST_PROBE_PARENT && fs.readdirSync(d).length === 0) {
+      fs.rmdirSync(d); console.log(`removed ${d}`);
+    }
   }
 }
 
@@ -417,9 +442,9 @@ async function step(cookie) {
 
 const CANDIDATES = [
   ['caret ❯ (today)', /❯/],
-  // The composer writes `❯` then a LITERAL SPACE before the input line; the trust
+  // The composer writes `❯` then U+00A0 NO-BREAK SPACE before the input line; the trust
   // dialog writes `❯` then CHA (`\e[4G`) to reach its option label, because that
-  // dialog emits no spaces anywhere. 4 bytes, so it fits inside CARRY_BYTES.
+  // dialog emits no spaces anywhere. 5 bytes (E2 9D AF C2 A0), inside CARRY_BYTES=16.
   // Written as an ESCAPE, never a literal NBSP: a literal is invisible in a diff and
   // an editor or a lint autofix can normalise it to U+0020, silently killing the rule.
   [CARET + ' + NBSP', new RegExp(CARET + NBSP)],
