@@ -22,6 +22,8 @@ const {
   redactNotificationMessage,
   redactMatcher,
   noteShape,
+  newDropState,
+  noteDrop,
   shouldLogDrop,
 } = require('../lib/notification-shape');
 
@@ -121,10 +123,40 @@ test.describe('redactNotificationMessage — the wording survives, the specifics
     expect(redactNotificationMessage('edit ~/.ssh/id_rsa now')).toBe('edit <path> now');
     expect(redactNotificationMessage('edit ./src/secret.env now')).toBe('edit <path> now');
     expect(redactNotificationMessage('edit ../../etc/shadow now')).toBe('edit <path> now');
-    // A quoted or bracketed path is still a path.
-    expect(redactNotificationMessage('edit "/etc/passwd" now')).toBe('edit <path> now');
+    // A quoted path is still a path — and the quotes are WORDING, so they stay.
+    expect(redactNotificationMessage('edit "/etc/passwd" now')).toBe('edit "<path>" now');
     // A UNC share.
     expect(redactNotificationMessage('\\\\server\\share\\x changed')).toBe('<path> changed');
+  });
+
+  test('punctuation around a path SURVIVES — the sentence must not be mangled', () => {
+    // Raised in review. Replacing the whole token turned
+    // `Bash(cat /home/a/.ssh/id_rsa)` into `Bash(cat <path>` — the closing paren
+    // eaten. That is the same defect as the earlier `htt<path>`: a rule
+    // swallowing the punctuation the wording is made of.
+    expect(redactNotificationMessage('Bash(cat /home/a/.ssh/id_rsa)'))
+      .toBe('Bash(cat <path>)');
+    expect(redactNotificationMessage('edit "/etc/passwd", then stop'))
+      .toBe('edit "<path>", then stop');
+    // A label is wording too, and must not collapse into the marker.
+    expect(redactNotificationMessage('path=/home/a/b.txt')).toBe('path=<path>');
+    expect(redactNotificationMessage('file:/home/a/b.txt')).toBe('file:<path>');
+    // ...but a drive letter is NOT a label, or `C:` would leak beside the path.
+    expect(redactNotificationMessage('edit C:\\Users\\someone\\secret.txt'))
+      .toBe('edit <path>');
+  });
+
+  test('quantities collapse, so one wording cannot mint unlimited shape keys', () => {
+    // Raised in review, and it is what makes the capped table survivable: a
+    // varying byte count or duration in one wording would otherwise fill the
+    // table on its own, and a full table blinds the instrument permanently.
+    expect(redactNotificationMessage('wrote 1024 bytes in 3.5s'))
+      .toBe('wrote <n> bytes in <n>');
+    expect(redactNotificationMessage('processed 1,048,576 items at 12:30'))
+      .toBe('processed <n> items at <n>');
+    // Two different runs of the same wording now share ONE key.
+    expect(redactNotificationMessage('wrote 12 bytes'))
+      .toBe(redactNotificationMessage('wrote 98765 bytes'));
   });
 
   test('prose with a single slash is still prose', () => {
@@ -218,6 +250,64 @@ test.describe('noteShape — the cap must not become the flood', () => {
     noteShape(m, 'other', 2);
     expect(noteShape(m, 'fresh', 2)).toBe(0);
     expect(noteShape(m, 'known', 2)).toBe(2);
+  });
+});
+
+test.describe('noteDrop — the whole decision, and therefore testable', () => {
+  const MAX = 3;
+
+  test('an ordinary shape logs on 1 and 100, and is silent between', () => {
+    const st = newDropState();
+    expect(noteDrop(st, 'a', MAX).action).toBe('log');
+    for (let i = 2; i < 100; i++) expect(noteDrop(st, 'a', MAX).action).toBe('silent');
+    const hundredth = noteDrop(st, 'a', MAX);
+    expect(hundredth.action).toBe('log');
+    expect(hundredth.n).toBe(100);
+  });
+
+  test('the table filling is announced exactly ONCE', () => {
+    // The map never evicts, so it stays full for the process's life; re-arming
+    // would repeat a line carrying no new information.
+    const st = newDropState();
+    for (let i = 0; i < MAX; i++) noteDrop(st, `k${i}`, MAX);
+    expect(noteDrop(st, 'new1', MAX).action).toBe('full');
+    expect(noteDrop(st, 'new2', MAX).action).toBe('silent');
+    expect(noteDrop(st, 'new3', MAX).action).toBe('silent');
+  });
+
+  test('uncountable volume is TALLIED, not silently thrown away', () => {
+    // Raised in review: failing closed traded a flood for a blind spot, and the
+    // module's own comment still claimed "the count rides along so volume is
+    // never lost" while these were discarded with no record at all.
+    const st = newDropState();
+    for (let i = 0; i < MAX; i++) noteDrop(st, `k${i}`, MAX);
+    expect(noteDrop(st, 'x0', MAX).action).toBe('full');       // uncountable = 1
+    let tallies = 0;
+    for (let i = 1; i < 200; i++) {
+      const d = noteDrop(st, `x${i}`, MAX);
+      if (d.action === 'tally') { tallies++; expect(d.uncountable % 100).toBe(0); }
+    }
+    // The 100th and the 200th — bounded, but never silent.
+    expect(tallies).toBe(2);
+    expect(st.uncountable).toBe(200);
+  });
+
+  test('a shape already counted keeps logging after the table fills', () => {
+    // The cap bounds DISTINCT keys. A known shape must not go quiet precisely
+    // when it becomes frequent.
+    const st = newDropState();
+    for (let i = 0; i < MAX; i++) noteDrop(st, `k${i}`, MAX);
+    noteDrop(st, 'overflow', MAX);
+    for (let i = 2; i < 100; i++) noteDrop(st, 'k0', MAX);
+    expect(noteDrop(st, 'k0', MAX)).toMatchObject({ action: 'log', n: 100 });
+  });
+
+  test('a fresh state bag shares nothing with another', () => {
+    const a = newDropState();
+    const b = newDropState();
+    noteDrop(a, 'k', MAX);
+    expect(b.counts.size).toBe(0);
+    expect(b.full).toBe(false);
   });
 });
 
