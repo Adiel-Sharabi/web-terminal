@@ -19,6 +19,7 @@ const {
   NOTIFICATION_MSG_CAP,
   classifyNotification,
   redactNotificationMessage,
+  noteShape,
   shouldLogDrop,
 } = require('../lib/notification-shape');
 
@@ -116,6 +117,42 @@ test.describe('redactNotificationMessage — the wording survives, the specifics
     for (const v of [undefined, null, 42, {}, []]) {
       expect(redactNotificationMessage(/** @type {any} */(v))).toBe('');
     }
+  });
+});
+
+test.describe('noteShape — the cap must not become the flood', () => {
+  test('repeat sightings of one shape count up', () => {
+    const m = new Map();
+    expect(noteShape(m, 'a', 10)).toBe(1);
+    expect(noteShape(m, 'a', 10)).toBe(2);
+    expect(noteShape(m, 'b', 10)).toBe(1);
+    expect(m.size).toBe(2);
+  });
+
+  test('a NEW shape at a FULL table returns 0 — and 0 never logs', () => {
+    // THE regression. The first cut left an over-cap key out of the map and then
+    // recomputed `n` from the missing entry, so it was 1 EVERY time — and
+    // `shouldLogDrop(1)` is true, so the bound that exists to prevent a flood
+    // produced one: every single occurrence of every shape past the cap.
+    const m = new Map();
+    for (let i = 0; i < 3; i++) noteShape(m, `k${i}`, 3);
+    expect(m.size).toBe(3);
+    for (let i = 0; i < 5; i++) {
+      expect(noteShape(m, 'overflow', 3)).toBe(0);
+      expect(shouldLogDrop(noteShape(m, 'overflow', 3))).toBe(false);
+    }
+    // The table did not grow either — that was the other half of the cap's job.
+    expect(m.size).toBe(3);
+  });
+
+  test('a shape ALREADY counted keeps counting after the table fills', () => {
+    // The cap bounds distinct keys, never the count of a key already known —
+    // otherwise a shape would go silent precisely when it became frequent.
+    const m = new Map();
+    noteShape(m, 'known', 2);
+    noteShape(m, 'other', 2);
+    expect(noteShape(m, 'fresh', 2)).toBe(0);
+    expect(noteShape(m, 'known', 2)).toBe(2);
   });
 });
 
