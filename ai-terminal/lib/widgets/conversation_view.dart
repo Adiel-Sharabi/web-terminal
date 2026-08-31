@@ -1523,7 +1523,7 @@ class UserTurnClass {
 
   /// For [UserTurnKind.teammate], the sending agent's id (e.g. `J4b2`); for
   /// [UserTurnKind.system], a short source label (`Hook`, `Task update`,
-  /// `Session continued`); '' for a human turn.
+  /// `Session continued`, `Command output`); '' for a human turn.
   final String from;
 
   /// The readable inner text with the injection wrapper removed. Equal to the
@@ -1535,6 +1535,16 @@ final RegExp _teammateIdRe = RegExp('teammate_id="([^"]*)"');
 final RegExp _teammateTagRe = RegExp(r'</?teammate-message[^>]*>');
 final RegExp _taskTagRe = RegExp(r'</?task-[a-z-]+>');
 final RegExp _taskAgentRe = RegExp(r'Agent "([^"]+)"');
+final RegExp _commandTagRe = RegExp(
+    r'</?(command-name|command-message|command-args|local-command-stdout'
+    r'|local-command-caveat)>');
+
+/// Terminal rendering instructions (SGR/CSI/OSC). A local command's output is
+/// captured off a terminal, so it arrives carrying them — measured, 47 of the 61
+/// such turns in a 1066-transcript corpus hold `ESC[2m` dim markers. A chat lens
+/// is not a terminal, and these are never content.
+final RegExp _ansiRe = RegExp(
+    r'\x1b\[[0-9;?]*[ -/]*[@-~]|\x1b\][^\x07\x1b]*(?:\x07|\x1b\\)|\x1b[@-Z\\-_]');
 
 /// Inner text of the first `<tag>…</tag>` in [s], trimmed, or '' if absent.
 /// Non-greedy so a C++ `<uint32_t>` inside the body can't swallow the close tag.
@@ -1590,6 +1600,30 @@ UserTurnClass classifyUserTurn(String text) {
   if (t.startsWith('This session is being continued')) {
     return UserTurnClass(
         kind: UserTurnKind.system, from: 'Session continued', body: t);
+  }
+  // #192 — a local command's OUTPUT, which the user did not type. `/compact`'s
+  // stdout lands as a `role:user` turn and read as human, so it rendered in a
+  // "You" bubble carrying the command's own text back as the user's words.
+  //
+  // BOTH copies of the rule need this branch, for different reasons, which is
+  // why it is not "server-only" as the report assumed. The server's verdict
+  // fixes the LABEL (`system` renders muted and left-aligned; `command` would
+  // not, since it is mapped onto [UserTurnKind.human] just above). But the
+  // rendered BODY comes from this classifier even when the server's kind wins —
+  // see `displayText`, which reads `uclass.body` for any non-human turn — so
+  // without this branch the bubble would show the raw tags and escapes.
+  //
+  // Anchored on `startsWith`, never `contains`: in a 1066-transcript corpus 61
+  // turns lead with the tag and exactly one merely mentions it — a genuine
+  // prompt, asking how this very label is decided.
+  if (t.startsWith('<local-command-stdout')) {
+    final body = t
+        .replaceAll(_commandTagRe, ' ')
+        .replaceAll(_ansiRe, '')
+        .replaceAll(RegExp(r'\s+'), ' ')
+        .trim();
+    return UserTurnClass(
+        kind: UserTurnKind.system, from: 'Command output', body: body);
   }
   return UserTurnClass(kind: UserTurnKind.human, from: '', body: text);
 }

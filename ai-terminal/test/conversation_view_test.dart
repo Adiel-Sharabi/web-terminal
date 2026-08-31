@@ -1161,6 +1161,36 @@ void main() {
       expect(c.from, 'Session continued');
       expect(c.body, text);
     });
+
+    // --- #192: a command's OUTPUT is not the user's prompt --------------------
+    // Reported with a screenshot of `/compact`'s stdout in a "You" bubble. The
+    // server's `lib/user-turn.js` is the authority and now answers `system`; this
+    // copy still needs the branch, because the rendered BODY is taken from HERE
+    // even when the server's kind wins (`displayText` reads `uclass.body` for any
+    // non-human turn).
+    test('command output is system, not the user\'s own turn', () {
+      const text =
+          '<local-command-stdout>\x1b[2mCompacted (ctrl+o to see full summary)'
+          '\x1b[22m\n\x1b[2mPreCompact completed: {"ok":true}\x1b[22m'
+          '</local-command-stdout>';
+      final c = classifyUserTurn(text);
+      expect(c.kind, UserTurnKind.system);
+      expect(c.from, 'Command output');
+      // Readable: the tags and the terminal escapes are both gone.
+      expect(c.body, contains('Compacted (ctrl+o to see full summary)'));
+      expect(c.body, isNot(contains('\x1b')));
+      expect(c.body, isNot(contains('local-command-stdout')));
+    });
+
+    test('a prompt that merely NAMES the tag is still human', () {
+      // The corpus's single non-leading occurrence is a real question about this
+      // very label. `contains` would reclassify the question as its own answer.
+      const text =
+          'what decides the author label for a <local-command-stdout> turn?';
+      final c = classifyUserTurn(text);
+      expect(c.kind, UserTurnKind.human);
+      expect(c.body, text);
+    });
   });
 
   testWidgets(

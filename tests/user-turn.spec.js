@@ -289,3 +289,95 @@ test.describe('#163 — lib/transcript.js reads isMeta and publishes the verdict
     expect(t.userKind).toBe(USER_KINDS.COMMAND);
   });
 });
+
+// --- #192: a command's OUTPUT is not the user's prompt ------------------------
+// Reported 2026-08-31 with a screenshot: a "You" bubble containing `/compact`'s
+// own stdout plus our hook's JSON, presented as the user's words.
+//
+// Measured 2026-08-31 over 1066 transcripts / 3902 `role:user` turns:
+//   * 61 turns LEAD with `<local-command-stdout>`, and all 61 classified `human`;
+//   * not one carries `isMeta` (so #163's structural backstop cannot catch it)
+//     and not one carries a `<command-name>` (so the trio anchor cannot either);
+//   * 47 of the 61 carry SGR escapes, because the text was captured off a terminal;
+//   * exactly ONE turn in the whole corpus contains the tag WITHOUT leading — and
+//     it is a genuine prompt, asking how this very label is decided. An
+//     unanchored `includes` would have swallowed it. That is #138's lesson
+//     (this repo's own text is a live input) reproduced in the corpus, and it is
+//     why the anchor is `startsWith`.
+//
+// SYSTEM, NOT COMMAND — and that is forced by the CONSUMER, not by taste.
+// `conversation_view.dart:1428` maps the wire's `command` onto
+// `UserTurnKind.human` deliberately (a slash command IS your own turn, and #32's
+// collapsed chip renders on the human branch). So publishing `command` here
+// would leave the reported "You" bubble exactly as it is. A NEW kind is worse
+// still: `userTurnKindFromWire` returns null for an unrecognised string, the
+// client falls back to its weaker Dart classifier, and the turn reads as human
+// again — so an invented kind would ship the bug to every client that has not
+// been rebuilt. `system` is the one verdict that renders muted, left-aligned and
+// unlabelled-as-you on the CURRENT companion, with no client release at all.
+const STDOUT_LEAD = [
+  '<local-command-stdout>\x1b[2mCompacted (ctrl+o to see full summary)\x1b[22m',
+  '\x1b[2mPreCompact [http://127.0.0.1:7681/api/hook] completed successfully: '
+    + '{"ok":true,"status":"idle"}\x1b[22m</local-command-stdout>',
+].join('\n');
+// The corpus's single non-leading occurrence, in shape: a real prompt that names
+// the tag while asking about it. This one must stay `human`.
+const STDOUT_QUOTED = [
+  'In ai-terminal/lib, work out what decides the author label on a chat bubble',
+  'for a <local-command-stdout> turn. Answer with file:line.',
+].join('\n');
+
+test.describe('#192 — command output is never the user\'s prompt', () => {
+  test('a <local-command-stdout>-leading turn is NOT human', () => {
+    // Red before the fix: all 61 corpus turns of this shape reached the final
+    // `return { kind: HUMAN }`.
+    expect(classifyUserTurn(STDOUT_LEAD).kind).not.toBe(USER_KINDS.HUMAN);
+  });
+
+  test('it is SYSTEM specifically — `command` would still render as "You"', () => {
+    // Pinned on the exact value, not merely "not human": `command` maps to
+    // UserTurnKind.human on the companion, so it would not fix the report.
+    const c = classifyUserTurn(STDOUT_LEAD);
+    expect(c.kind).toBe(USER_KINDS.SYSTEM);
+    expect(c.from).toBe('Command output');
+  });
+
+  test('the body is readable — tags and terminal escapes both gone', () => {
+    const { body } = classifyUserTurn(STDOUT_LEAD);
+    expect(body).not.toContain('\x1b');
+    expect(body).not.toContain('local-command-stdout');
+    expect(body).toContain('Compacted (ctrl+o to see full summary)');
+  });
+
+  test('typedTextOf is empty, so #149\'s Queued echo can never match it', () => {
+    expect(typedTextOf(STDOUT_LEAD)).toBe('');
+  });
+
+  test('a genuine prompt that merely NAMES the tag stays human', () => {
+    // The corpus's one non-leading occurrence. An `includes` sniff loses it.
+    const c = classifyUserTurn(STDOUT_QUOTED);
+    expect(c.kind).toBe(USER_KINDS.HUMAN);
+    expect(typedTextOf(STDOUT_QUOTED)).toContain('author label');
+  });
+
+  test('the trio a human TYPED is untouched — still `command`, still their turn', () => {
+    // The guard on the blast radius: this fix must not reclassify the command
+    // the user actually typed, which is a different turn from its output.
+    expect(classifyUserTurn(TRIO_NAME_FIRST).kind).toBe(USER_KINDS.COMMAND);
+    expect(classifyUserTurn(CAVEAT_LEAD).kind).toBe(USER_KINDS.COMMAND);
+  });
+
+  test('the recap stops reporting it as the last prompt', () => {
+    // The second consumer #192 names, fixed by the same one-owner change.
+    expect(recap.isHumanPrompt({ role: 'user', text: STDOUT_LEAD })).toBe(false);
+  });
+
+  test('published end-to-end on the wire as `system`', () => {
+    const { parseTranscriptTurn } = require('../lib/transcript');
+    const t = parseTranscriptTurn(JSON.stringify({
+      type: 'user', message: { role: 'user', content: STDOUT_LEAD },
+    }));
+    expect(t.userKind).toBe(USER_KINDS.SYSTEM);
+    expect(t.typedText).toBe('');
+  });
+});
