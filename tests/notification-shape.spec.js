@@ -162,6 +162,60 @@ test.describe('redactNotificationMessage — the wording survives, the specifics
       .toBe('edit <path>');
   });
 
+  test('a path with a SPACE in it leaks nothing — the ordinary Windows case', () => {
+    // Raised in review. A whitespace-delimited token rule cannot see across a
+    // space, so `C:\Program Files\secret.txt` had its drive half redacted and
+    // its FILENAME written to the log verbatim as the next token. `Program
+    // Files` / `My Documents` / OneDrive is the normal case, not a corner.
+    for (const s of [
+      'edit C:\\Program Files\\secret.txt now',
+      'edit /opt/My Apps/secret.key now',
+      'edit "C:\\a b\\c.txt" now',
+      'edit src/secret.env now',
+    ]) {
+      const out = redactNotificationMessage(s);
+      for (const leak of ['secret.txt', 'secret.key', 'c.txt', 'secret.env']) {
+        expect(out, `leaked from: ${s}`).not.toContain(leak);
+      }
+    }
+  });
+
+  test('one slash with no extension is prose, with an extension is a path', () => {
+    // The line the space fix walks: `src/secret.env` must redact while every one
+    // of these must not. The extension is what separates them.
+    for (const prose of ['and/or', '24/7', 'TODO/FIXME', 'either/or',
+      'input/output', 'read/write', 'n/a', '9/10', 'a/b', 'ratio/x']) {
+      expect(redactNotificationMessage(prose), prose).toBe(prose);
+    }
+    expect(redactNotificationMessage('config/prod.key')).toBe('<path>');
+  });
+
+  test('URL punctuation survives, and the test is not stateful', () => {
+    // Two findings in one. The URL pass used to run over the whole string before
+    // tokenising, and its `\\S*` swallowed the punctuation after it — the THIRD
+    // time this module produced that defect. And the regex was `/g` while being
+    // used with `.test()`, which advances lastIndex between calls, so the answer
+    // depended on how many URLs had been seen before.
+    expect(redactNotificationMessage('see (http://x.io/a) now')).toBe('see (<url>) now');
+    expect(redactNotificationMessage('see http://x.io/a. Next')).toBe('see <url>. Next');
+    const many = 'see http://a.io/x and http://b.io/y and http://c.io/z';
+    const results = new Set();
+    for (let i = 0; i < 10; i++) results.add(redactNotificationMessage(many));
+    expect(results.size).toBe(1);
+    expect([...results][0]).toBe('see <url> and <url> and <url>');
+  });
+
+  test('an email address never reaches the log', () => {
+    expect(redactNotificationMessage('mail someone@example.com now'))
+      .toBe('mail <email> now');
+  });
+
+  test('`~` marks a path only when it IS one', () => {
+    // `about ~50 files` was reading as a path because a bare `~` prefix counted.
+    expect(redactNotificationMessage('about ~50 files')).toBe('about ~50 files');
+    expect(redactNotificationMessage('edit ~/x/y now')).toBe('edit <path> now');
+  });
+
   test('quantities collapse, so one wording cannot mint unlimited shape keys', () => {
     // Raised in review, and it is what makes the capped table survivable: a
     // varying byte count or duration in one wording would otherwise fill the
@@ -170,6 +224,8 @@ test.describe('redactNotificationMessage — the wording survives, the specifics
       .toBe('wrote <n> bytes in <n>');
     expect(redactNotificationMessage('processed 1,048,576 items at 12:30'))
       .toBe('processed <n> items at <n>');
+    // Version strings and percentages are quantities too, and were minting keys.
+    expect(redactNotificationMessage('progress 87% on v1.72.3')).toBe('progress <n> on <n>');
     // Two different runs of the same wording now share ONE key.
     expect(redactNotificationMessage('wrote 12 bytes'))
       .toBe(redactNotificationMessage('wrote 98765 bytes'));
