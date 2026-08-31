@@ -125,31 +125,87 @@ async function viewer(cookie, id, cols, rows) {
   };
 }
 
-/** Every `WTSZ:` answer the shell has given so far, oldest first. */
-async function sizeMarkers(ctx, id) {
-  const j = await (await ctx.get(`/api/sessions/${id}/scrollback?offset=0&limit=200000`)).json();
-  return [...String(j.data || '').matchAll(/WTSZ:(\d+)\s+(\d+)/g)]
-    .map((m) => ({ rows: Number(m[1]), cols: Number(m[2]) }));
+const ASK_ATTEMPTS = 4;
+const ASK_POLLS = 10;
+const ASK_POLL_MS = 300;
+const SCROLLBACK_WINDOW = 200000;
+
+/**
+ * The END of the session's scrollback.
+ *
+ * `offset` slices FORWARD from the head (server.js: `full.slice(start, start + limit)`),
+ * so the obvious `offset=0&limit=N` is the OLDEST N characters, not the newest. Once a
+ * session's sanitized scrollback passes N nothing new is ever visible again, and a
+ * helper reading it would fail permanently while reporting "the shell never answered".
+ * `total` comes back on every response, so the window is anchored on it.
+ */
+async function scrollbackTail(ctx, id) {
+  const head = await (await ctx.get(`/api/sessions/${id}/scrollback?offset=0&limit=1`)).json();
+  const total = Number(head.total) || 0;
+  const offset = Math.max(0, total - SCROLLBACK_WINDOW);
+  const j = await (await ctx.get(
+    `/api/sessions/${id}/scrollback?offset=${offset}&limit=${SCROLLBACK_WINDOW}`,
+  )).json();
+  return String(j.data || '');
 }
 
 /**
  * What the PTY itself believes it is, asked FRESH.
  *
- * The count is taken before the `echo` and the answer is only accepted once a NEW
- * marker appears. Scanning for "the newest WTSZ: in the scrollback" is not enough:
- * every earlier call leaves one behind, so a shell that has not answered yet hands
- * back the PREVIOUS call's size. That passed locally and failed on a slower CI box,
- * which is the whole signature of a stale read.
+ * Each call stamps its question with a NONCE and accepts only its own answer. Counting
+ * markers instead ("more than there were before") cannot attribute one: an echo from a
+ * previous call still in flight lands during this one and is read as this one's answer,
+ * which is a size sampled before whatever the caller just did. That is harmless where a
+ * size must CHANGE — a stale read just costs a retry — but this file's actual regression
+ * guard asserts a size did NOT change, and there a stale read is a silent PASS while a
+ * last-writer-wins regression is live.
+ *
+ * ASK AGAIN, don't wait harder. The question is typed into a shell being resized around
+ * it, and a keystroke swallowed by readline's SIGWINCH redraw is gone — polling longer
+ * can never recover it. Typing once and polling 12s made one lost keystroke an
+ * unconditional 12s failure, which is the shape CI kept failing in (red on 5ca146e and
+ * f2ed601, green on f7b3550 between them) and which never reproduced locally in 6
+ * consecutive runs, because losing that race needs a slower box.
+ *
+ * Every retry sends ^C FIRST. A swallowed keystroke leaves a PARTIAL line in readline,
+ * and appending a second command to it yields `…$(stty sizecho "WTSZ…` — unbalanced
+ * quotes, so bash drops to its `>` continuation prompt and every later attempt feeds it
+ * more text it can never close. That would wedge the shell for the rest of the test:
+ * a retry that assumes a clean line is worse than no retry at all.
  */
 async function ptySize(ctx, v, id) {
-  const before = (await sizeMarkers(ctx, id)).length;
-  v.type('echo "WTSZ:$(stty size)"\r');
-  for (let i = 0; i < 40; i++) {
-    await sleep(300);
-    const all = await sizeMarkers(ctx, id);
-    if (all.length > before) return all[all.length - 1];
+  const nonce = Math.random().toString(36).slice(2, 8);
+  const answer = new RegExp(`WTSZ${nonce}:(\\d+)\\s+(\\d+)`);
+  for (let attempt = 0; attempt < ASK_ATTEMPTS; attempt++) {
+    if (attempt > 0) { v.type('\x03'); await sleep(ASK_POLL_MS); }
+    v.type(`echo "WTSZ${nonce}:$(stty size)"\r`);
+    for (let i = 0; i < ASK_POLLS; i++) {
+      await sleep(ASK_POLL_MS);
+      const m = answer.exec(await scrollbackTail(ctx, id));
+      if (m) return { rows: Number(m[1]), cols: Number(m[2]) };
+    }
   }
-  throw new Error('the shell never answered with its size');
+  // Carry the evidence in the throw. A bare "never answered" cannot distinguish the
+  // things that produce it — the shell never ran the command, it ran it and the answer
+  // was reflowed into something the regex no longer matches, or the PTY is wedged — and
+  // this assertion runs on a CI box nobody can attach a debugger to. Same principle as
+  // the WS input drop in server.js: a failure that leaves no trace is unprovable after
+  // the fact.
+  //
+  // Guarded: an expired session, a 500 or a login redirect would make `.json()` reject
+  // and replace this message with a JSON parse error — destroying the diagnostic in
+  // exactly the cases it exists for.
+  let tail = '<scrollback unavailable>';
+  try {
+    // Escape the whole C0 range, not just ESC: a redraw tail is dense in CR, which
+    // would overwrite this message in a CI console and hide the evidence.
+    tail = (await scrollbackTail(ctx, id)).slice(-400)
+      .replace(/[\x00-\x1f\x7f]/g, (c) => `<${c.charCodeAt(0).toString(16)}>`);
+  } catch { /* keep the placeholder — the message matters more than the tail */ }
+  throw new Error(
+    `the shell never answered with its size (nonce ${nonce}, asked ${ASK_ATTEMPTS}x over `
+    + `${(ASK_ATTEMPTS * ASK_POLLS * ASK_POLL_MS) / 1000}s). Scrollback tail:\n${tail}`,
+  );
 }
 
 /**
