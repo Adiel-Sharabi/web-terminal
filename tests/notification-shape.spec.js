@@ -18,6 +18,7 @@ const {
   NOTIFICATION_KINDS,
   NOTIFICATION_MSG_CAP,
   NOTIFICATION_MATCHER_CAP,
+  matcherOf,
   classifyNotification,
   redactNotificationMessage,
   redactMatcher,
@@ -63,6 +64,21 @@ test.describe('classifyNotification — behaviour is UNCHANGED', () => {
       .toBe(NOTIFICATION_KINDS.UNKNOWN);
     expect(classifyNotification({})).toBe(NOTIFICATION_KINDS.UNKNOWN);
     expect(classifyNotification(null)).toBe(NOTIFICATION_KINDS.UNKNOWN);
+  });
+
+  test('the matcher FIELD LIST has one owner', () => {
+    // Raised in review, and the sharpest finding in an SSOT-motivated change:
+    // the logging path re-derived `notification_type || matcher` verbatim, so
+    // adding a third source (or dropping the legacy alias) would have left the
+    // log key silently disagreeing with the classification about one event.
+    expect(matcherOf({ notification_type: 'Permission_Prompt' })).toBe('permission_prompt');
+    expect(matcherOf({ matcher: 'IDLE_PROMPT' })).toBe('idle_prompt');  // legacy alias
+    expect(matcherOf({ notification_type: 'a', matcher: 'b' })).toBe('a'); // newer wins
+    expect(matcherOf({})).toBe('');
+    expect(matcherOf(null)).toBe('');
+    // And the classifier reads the same accessor, so the legacy field still
+    // classifies — which is what stops the two from drifting.
+    expect(classifyNotification({ matcher: 'auth_success' })).toBe(NOTIFICATION_KINDS.BENIGN);
   });
 
   test('BENIGN and UNKNOWN are distinct values, so the caller can tell them apart', () => {
@@ -183,6 +199,23 @@ test.describe('redactNotificationMessage — the wording survives, the specifics
     const out = redactNotificationMessage('x'.repeat(500));
     expect(out.length).toBe(NOTIFICATION_MSG_CAP + 3);
     expect(out.endsWith('...')).toBe(true);
+  });
+
+  test('the cap is applied AFTER redaction, and this test can tell', () => {
+    // Raised in review: `'x'.repeat(500)` passes identically whether the slice
+    // happens before or after redacting, so it pinned nothing and a future edit
+    // could reorder with the suite still green.
+    //
+    // This one discriminates. Redaction SHORTENS the text — a 300-char path
+    // becomes six characters — so redact-then-cap keeps the whole sentence and
+    // the trailing word survives. Cap-then-redact would slice mid-path, leaving
+    // a truncated path fragment in the log and losing the tail entirely.
+    const longPath = '/home/someone/' + 'deep/'.repeat(60) + 'secret.json';
+    expect(longPath.length).toBeGreaterThan(NOTIFICATION_MSG_CAP);
+    const out = redactNotificationMessage(`edit ${longPath} then stop`);
+    expect(out).toBe('edit <path> then stop');
+    expect(out).not.toContain('secret.json');
+    expect(out).not.toContain('deep');
   });
 
   test('a non-string never throws and yields nothing', () => {

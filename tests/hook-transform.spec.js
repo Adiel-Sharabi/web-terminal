@@ -120,7 +120,12 @@ test.describe('Hook transform: Notification demux', () => {
     }
   });
 
-  test('unknown notification → dropped (status unchanged)', async () => {
+  // NAMED FOR THE WRONG BRANCH until #194. `auth_success` is the BENIGN matcher —
+  // recognised and deliberately ignored — so this test never touched the
+  // unrecognised path it claimed to cover, and the branch that can flood, block
+  // and leak was exercised by nothing. Raised in review. The sibling below is the
+  // one that actually drives UNKNOWN.
+  test('BENIGN notification (auth_success) → dropped (status unchanged)', async () => {
     const ctx = await authCtx();
     const raw = await rawCtx();
     const id = await createSession(ctx, 'HookXform-Unknown');
@@ -139,6 +144,42 @@ test.describe('Hook transform: Notification demux', () => {
 
       // After full debounce window + slack the status MUST still be working —
       // the notification should not have flipped it to idle.
+      await new Promise(r => setTimeout(r, DEBOUNCE_MS + SLACK_MS));
+      expect(await getStatus(ctx, id)).toBe('working');
+    } finally {
+      await ctx.delete(`/api/sessions/${id}`);
+      await ctx.dispose();
+      await raw.dispose();
+    }
+  });
+
+  test('UNRECOGNISED notification → dropped, status unchanged, response identical', async () => {
+    // #194's actual new branch, which had NO coverage: the test above is named
+    // for it but sends `auth_success`, the BENIGN matcher. This one sends a
+    // matcher the classifier has never heard of, which is the path that logs.
+    //
+    // The response must be byte-identical to the benign one — the whole claim of
+    // that change is that it alters reporting and not behaviour.
+    const ctx = await authCtx();
+    const raw = await rawCtx();
+    const id = await createSession(ctx, 'HookXform-Unrecognised');
+    try {
+      await sendHook(raw, id, { event: 'UserPromptSubmit' });
+      await pollUntil(() => getStatus(ctx, id), s => s === 'working', 2000);
+
+      const res = await sendHook(raw, id, {
+        event: 'Notification',
+        notification_type: 'furniture_rearranged',
+        message: 'Claude has finished rearranging the furniture',
+      });
+      const body = await res.json();
+      expect(res.status()).toBe(200);
+      expect(body.ok).toBe(true);
+      expect(body.skipped).toBe('notification-other');
+
+      // An unrecognised notification must not move the status in EITHER
+      // direction: promoting it to a permission ask would park the session on a
+      // false "waiting" for the 12 hours correctStaleStatus allows one.
       await new Promise(r => setTimeout(r, DEBOUNCE_MS + SLACK_MS));
       expect(await getStatus(ctx, id)).toBe('working');
     } finally {
