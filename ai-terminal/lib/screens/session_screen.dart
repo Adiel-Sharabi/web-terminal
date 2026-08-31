@@ -337,6 +337,16 @@ StickyModifierReaction resolveStickyModifierInput({
   while (i < prevText.length && text.codeUnitAt(i) == prevText.codeUnitAt(i)) {
     i++;
   }
+  // #200 Finding 5 — a length delta of +1 alone is not proof of a single
+  // inserted character: selecting "cd" out of "abcd" and pasting "xyz" also
+  // nets +1 (4 -> 5). Without this check the loop above reads the
+  // replacement's first new character as THE typed key and restores the
+  // field to "abcd", discarding "yz" along with the fact that two characters
+  // were removed. A genuine single-character insertion at `i` leaves
+  // everything after it unchanged; a replacement does not.
+  if (text.substring(i + 1) != prevText.substring(i)) {
+    return const StickyModifierReaction.passthrough();
+  }
   final ch = text[i];
   return StickyModifierReaction.consumed(
     controlByte:

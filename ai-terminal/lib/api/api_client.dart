@@ -967,7 +967,18 @@ class TerminalConnection {
   // those evictable writes — see [_bufferInput] for why exempting it is not the same as
   // leaving the buffer unbounded.
   final List<String> _inputWrites = <String>[];
-  int _inputBufferLen = 0;
+  int _inputBufferLen = 0; // TOTAL bytes across every buffered write, oversized included
+  // #193 review — a SEPARATE running sum, deliberately not reused from `_inputBufferLen`.
+  // Once one write over `_inputBufferCap` is exempt and sitting in the buffer, TOTAL
+  // length can never fall back under the ordinary cap on its own — so comparing stage
+  // 1's eviction against `_inputBufferLen` made it run on EVERY call while an oversized
+  // write was present, evicting every ordinary write the instant it arrived, silently.
+  // (Reported in review, reproduced: paste, then a follow-up prompt, then `ls\r` —
+  // buffer ends up holding only the paste, everything typed after it gone with nothing
+  // to show for it.) This tracks only the writes that fit within `_inputBufferCap` on
+  // their own, so the ordinary bound and the hard-ceiling bound are independent
+  // quantities, and a paste can coexist with ordinary keystrokes typed around it.
+  int _ordinaryBufferLen = 0;
 
   // #193 review — a real ceiling, chosen and stated rather than removed. Exempting an
   // oversized write from `_inputBufferCap` above must not mean the buffer can grow
@@ -1117,13 +1128,17 @@ class TerminalConnection {
 
   void _bufferInput(String data) {
     if (data.isEmpty) return;
+    final ordinary = data.length <= _inputBufferCap;
     _inputWrites.add(data); // buffer the write WHOLE — never split (#63)
     _inputBufferLen += data.length;
-    // STAGE 1 — the ORDINARY cap. Stay bounded by dropping whole OLDEST writes that fit
-    // within `_inputBufferCap` on their own — but never a write that already exceeds the
-    // cap BY ITSELF. The old guard was `_inputWrites.length > 1`: it protected only
-    // whichever write happened to be left once evicted down to one, which is NOT the
-    // same as protecting the important one. A paste is a single whole write already over
+    if (ordinary) _ordinaryBufferLen += data.length;
+    // STAGE 1 — the ORDINARY cap, bounded against `_ordinaryBufferLen` (NOT
+    // `_inputBufferLen` — see that field's doc for the regression comparing against
+    // total caused). Stay bounded by dropping whole OLDEST writes that fit within
+    // `_inputBufferCap` on their own — but never a write that already exceeds the cap BY
+    // ITSELF. The old guard was `_inputWrites.length > 1`: it protected only whichever
+    // write happened to be left once evicted down to one, which is NOT the same as
+    // protecting the important one. A paste is a single whole write already over
     // `_inputBufferCap`; any later write, however small, pushed the total back over
     // budget and evicted the paste — the oldest entry — WHOLE to make room, because
     // eviction never looked at what it was about to throw away (#193: "a 20KB paste
@@ -1134,22 +1149,25 @@ class TerminalConnection {
     // keystrokes typed during an outage) and is silent, exactly as it always was — losing
     // one buffered character is inconsequential in a way losing a paste is not.
     var i = 0;
-    while (_inputBufferLen > _inputBufferCap && i < _inputWrites.length) {
+    while (_ordinaryBufferLen > _inputBufferCap && i < _inputWrites.length) {
       if (_inputWrites[i].length > _inputBufferCap) {
         i++; // not evictable at this stage — leave it and look at the next one
         continue;
       }
-      _inputBufferLen -= _inputWrites.removeAt(i).length; // shifts the next one into i
+      final removed = _inputWrites.removeAt(i); // shifts the next one into i
+      _inputBufferLen -= removed.length;
+      _ordinaryBufferLen -= removed.length;
     }
-    // STAGE 2 — the HARD ceiling (`_inputBufferHardCap`, see its doc). Reached only when
-    // the buffer is nothing BUT writes stage 1 could not touch (several large pastes
-    // queued in one outage). No exemption this time — plain oldest-first, the same shape
-    // stage 1 uses for ordinary writes — and every eviction here IS reported: unlike a
-    // stray keystroke, this is a paste-sized loss, the exact class of "input vanished
-    // with nothing to show for it" #193 is about.
+    // STAGE 2 — the HARD ceiling (`_inputBufferHardCap`, see its doc), bounded against
+    // TOTAL bytes. Reached only when the buffer is nothing BUT writes stage 1 could not
+    // touch (several large pastes queued in one outage). No exemption this time — plain
+    // oldest-first, the same shape stage 1 uses for ordinary writes — and every eviction
+    // here IS reported: unlike a stray keystroke, this is a paste-sized loss, the exact
+    // class of "input vanished with nothing to show for it" #193 is about.
     while (_inputBufferLen > _inputBufferHardCap && _inputWrites.length > 1) {
       final evicted = _inputWrites.removeAt(0);
       _inputBufferLen -= evicted.length;
+      if (evicted.length <= _inputBufferCap) _ordinaryBufferLen -= evicted.length;
       if (!_inputDropped.isClosed) _inputDropped.add(evicted.length);
     }
   }
@@ -1168,14 +1186,27 @@ class TerminalConnection {
     // buffer until the write succeeds means a failed flush is retried by the next
     // one instead of costing the user their prompt.
     if (socket == null) return;
-    final pending = _inputWrites.join();
-    try {
-      socket.add(pending);
-    } catch (_) {
-      return; // still buffered — the next flush retries it
+    // #193 review, Finding 2 — ONE write at a time, never `_inputWrites.join()`ed into
+    // a single string first. Each buffered entry is already a whole frame (the entire
+    // point of never splitting/merging one — #63), and joining erased that boundary
+    // right before the wire: two pastes that individually fit under the server's real
+    // 64KB-per-frame cap (server.js `handleMessage`) could join into a string that does
+    // NOT — and the server refuses the WHOLE joined frame, losing BOTH pastes to a
+    // limit neither hit alone. Sending one write per `add()` call makes each write's
+    // fate independent at the wire, exactly like a live (non-buffered) sendInput
+    // already is. A throw still keeps the remainder buffered for the next flush,
+    // same retry semantics as before.
+    while (_inputWrites.isNotEmpty) {
+      final next = _inputWrites.first;
+      try {
+        socket.add(next);
+      } catch (_) {
+        return; // this write, and everything behind it, stay buffered for the retry
+      }
+      _inputWrites.removeAt(0);
+      _inputBufferLen -= next.length;
+      if (next.length <= _inputBufferCap) _ordinaryBufferLen -= next.length;
     }
-    _inputWrites.clear();
-    _inputBufferLen = 0;
   }
 
   Future<void> _connect() async {
