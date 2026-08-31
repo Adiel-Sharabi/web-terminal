@@ -764,7 +764,8 @@ test.describe('#69 — 5h usage-limit auto-resume', () => {
 // meant to rescue the session. The `status === 'working'` guard cannot catch it:
 // a booting session is not working.
 test.describe('#147 — a resume waits for the agent to exist', () => {
-  const CARET = '❯'; // what Claude's composer prints; declared in lib/agents.js
+  const CARET = String.fromCodePoint(0x276f); // #190: the composer writes this,
+  const NBSP = String.fromCodePoint(0x00a0);  // then U+00A0. A bare caret is a shell prompt.
 
   /** Poll until the worker has actually written the launch command (the ready scan
    *  is not armed until then). Asserting the precondition beats sleeping a guess. */
@@ -809,7 +810,7 @@ test.describe('#147 — a resume waits for the agent to exist', () => {
       expect((await findSession(client, id)).autoResumeArmed).toBe(true);
 
       // The composer appears — the same path term.onData feeds.
-      await inject(client, id, '\r\n' + CARET + ' try "fix"\r\n');
+      await inject(client, id, '\r\n' + CARET + NBSP + 'try "fix"\r\n');
       const fired = await ev.waitFor((e) => e.event === 'autoResume' && e.params.id === id, 5000);
       expect(fired.params.resetAt).toBe(resetAt);
 

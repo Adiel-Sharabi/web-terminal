@@ -495,9 +495,110 @@ slow-but-working start.
 >    2026-08-20: not live on this fleet** — Git Bash's PS1 ends in `$` and a failed
 >    launch prints `bash: …: command not found`.
 >
-> Both share one honest fix — key on the composer **frame** instead of the bare
-> caret — and one reason it is not done here: that needs a fresh rig measurement
-> of what the frame prints, and an unmeasured marker is what #143 shipped.
+> Gap 2 is **narrowed by #190** — those themes print `❯` + an ordinary U+0020,
+> which the new marker rejects. **Inferred, NOT measured:** no such theme was run,
+> because none is installed on this fleet. By this repo's own standard that is a
+> reasoned expectation, not a captured fact. Gap 1 stands unchanged.
+
+### The marker is `❯` + U+00A0, and the bare caret was a real bug (#190)
+
+> **It is a dialog FAMILY, not one dialog.** Review of PR #202 measured a THIRD
+> sibling while checking the marker: opening a fresh cwd under a checkout that has
+> a `CLAUDE.md` parks on **"Allow external CLAUDE.md file imports?"** — the same
+> shape exactly (unnumbered, `❯` then CHA, no spaces anywhere, `Enter to confirm`,
+> and a **refusing default row**: "No, disable external imports"). The new marker
+> correctly does not match it; **the old bare caret did**, so #202 fixes this one
+> too, un-asked.
+>
+> **This breaks the "trust is inherited" reassurance.** Folder trust really is
+> inherited — nothing under a trusted `C:/dev` raises the TRUST prompt — but that
+> is trust-specific. A descendant of a trusted directory can still park on the
+> imports selector. So "the tree is trusted" is **not** the same as "no selector
+> will block a new session", and any test that relies on the first to mean the
+> second is wrong. When #194 Part 1 builds the surfacing, target the family by
+> shape (`❯` + CHA, no spaces, `Enter to confirm`), not the trust prompt alone.
+
+
+The measurement the block above deferred is done (`scripts/rig/probe-trust-prompt.js`,
+claude **2.1.251**). **The composer writes the caret followed by U+00A0 NO-BREAK SPACE.**
+That is a 5-byte marker, well inside `lib/agent-ready.js`'s `CARRY_BYTES`, so nothing
+there changes.
+
+It was not a tidy-up. **Claude's folder-trust dialog draws the same `❯` as its selection
+cursor**, so the latch flipped on a session parked at a *selector*, published it ready,
+and cleared the client to submit into it.
+
+| case | `❯` | `❯`+NBSP | `⏵⏵` | `───` | `Try` | `agents` |
+|---|---|---|---|---|---|---|
+| composer, 120 cols | yes | **YES** | yes | yes | yes | yes |
+| composer, 52 cols | yes | **YES** | yes | yes | yes | **no** |
+| composer, `--permission-mode default` / `plan` | yes | **YES** | **no** | yes | yes | yes |
+| trust dialog, 120 / 52 | yes | **no** | no | yes | no | no |
+| bare shell | no | **no** | no | no | no | no |
+
+Every alternative died in that table, which is why none is declared: `⏵⏵` is
+**mode-dependent** (absent in default mode; plan mode prints `⏸`), the `───` rule is
+drawn by the trust dialog too, `Try` is the rotating empty-composer placeholder, and
+`agents` is **truncated away at 52 columns** — a phone-only regression of exactly the
+#146 shape. `effort` matched only via this fleet's own statusLine script.
+
+**A restored session still latches**, measured rather than assumed, because the opposite
+answer would have been worse than the bug: `claude --resume <id>` prints the marker
+~1.1s after the launch write at both widths, confirmed through a real cold restart. A
+resume against a **missing** conversation prints `No conversation found with session ID:
+…` and returns to the shell with **no caret at all**, so the 45s fallback still owns
+that case — unchanged in width, since the bare caret did not match there either.
+
+> **Write it as escapes; keep the source ASCII-only.** A literal U+00A0 is invisible in
+> a diff and is normalised to an ordinary space in transit — four attempts to write the
+> escape form into the probe silently came back as a literal, and the marker line itself
+> landed as a literal on the first edit. Nothing non-ASCII means nothing to normalise.
+>
+> **And the NEGATIVE test is the load-bearing one.** If normalisation hits the rule and
+> a literal in the test together, the positive assertion still passes — both sides became
+> ordinary spaces. Only *"must NOT match `❯` + U+0020"* goes red. Demonstrated, not
+> reasoned: `tests/composer-marker.spec.js` builds both characters with
+> `String.fromCodePoint` for exactly this reason. **Version drift is uncatchable by any
+> unit test** — a claude release that changes the glyph or the spacing needs a rig
+> re-probe.
+
+### Claude's folder-trust dialog is a THIRD layout, and a submit there KILLS the agent (#190)
+
+Neither #19's compact (digits) nor its side-by-side (a preview box). It is an
+**unnumbered, arrow-driven list**, and **the default row is the destructive one**:
+
+```
+ Quick safety check: Is this a project you created or one you trust? …
+ ❯ No, exit
+   Yes, I trust this folder
+ Enter to confirm · Esc to cancel
+```
+
+So `↓` then Enter answers it — verdict from `hasTrustDialogAccepted` on disk plus "did a
+turn start", never the screen. Driven, every other candidate **exited to bash**: a digit
+(there are none to press), a bare Enter, and — the reported case — **a real prompt
+followed by its submit CR**. That last one is why this is worse than #190's own premise:
+the words are not merely eaten, the trailing CR confirms `No, exit` and **the agent is
+gone**, so the *next* prompt goes to the shell. `--dangerously-skip-permissions` does not
+suppress it.
+
+**The dialog emits NO SPACES.** Every word is positioned with CHA — the bytes are
+`\e[2GQuick\e[8Gsafety\e[15Gcheck:\e[22GIs\e[25Gthis…` — so an ANSI-stripped stream reads
+`Quicksafetycheck:Isthis…` and **any matcher must reconstruct columns first**. The
+longest contiguous literal in the whole dialog is one word. No alt-screen and no
+distinguishing DEC mode accompany it, so #179's finding holds: there is nothing to key on
+but the text.
+
+> **Trust is INHERITED by descendants**, which is a hard constraint on ever testing this:
+> an ancestor of the scratch parent is already trusted, so **nothing `scripts/scratch-dirs.js`
+> creates can ever show the prompt** — the rig's own cwd included. A reproduction needs a
+> cwd with no trusted ancestor. And `hasTrustDialogAccepted: false` does **not** mean
+> untrusted: 18 of 87 entries were false, including directories in daily use.
+
+**Deliberately NOT fixed here:** detecting the dialog, withholding the 45s fallback,
+surfacing it in the chat lens, auto-answering. #190 and #194 Part 1 both want the
+surfacing built once. The right design is **refuse-and-explain** rather than delay — a
+false refusal costs a message, a false permit costs the agent.
 
 The client gates **submit only** — typing is untouched and the text stays in the
 box. It is **not** auto-sent on ready, on purpose: firing a prompt somebody was
