@@ -1913,10 +1913,12 @@
       doResize();
     }
 
-    // #193 — the server's 64KB-per-frame WS input cap (server.js `handleMessage`) used
-    // to refuse an oversized write with a server-side console.error only: the client got
-    // nothing back, so a dropped paste or long typed line looked exactly like the agent
-    // silently ignoring the user. The server now echoes a bare `{"inputDropped":...}`
+    // #193 — the server's per-frame WS input cap (server.js `WS_INPUT_MAX`; 64KB when
+    // this was written, 256KB since #201 paired it with the companion's offline buffer
+    // ceiling) used to refuse an oversized write with a server-side console.error only:
+    // the client got nothing back, so a dropped paste or long typed line looked exactly
+    // like the agent silently ignoring the user. The server now echoes a bare
+    // `{"inputDropped":...}`
     // frame back on THIS socket (the same `sessionTaken` convention — no session id
     // needed, since only the socket that produced the oversized write is attached to
     // it). Reuses the #composeNotice bar — same "something you sent didn't land" family

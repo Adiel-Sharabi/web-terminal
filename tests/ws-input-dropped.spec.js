@@ -1,5 +1,5 @@
 // @ts-check
-// #193 defect 3 — the server's 64KB WS input cap (server.js `handleMessage`) refused
+// #193 defect 3 — the server's per-frame WS input cap (server.js `handleMessage`) refused
 // oversized input with a server-side console.error only; the client got nothing back,
 // so a dropped paste or long typed line looked exactly like the agent silently ignoring
 // the user — undiagnosable from the chair, and the one failure class this repo has
@@ -26,7 +26,12 @@ async function rawCookie() {
   return (res.headers.get('set-cookie') || '').split(';')[0];
 }
 
-test.describe('#193 the 64KB WS input cap is visible to the client', () => {
+// #201 re-pointed the payload. This spec used to send 70,000 chars, which was over the
+// old 64KB cap; that size is now LEGAL and is asserted to reach the PTY by
+// `ws-input-cap.spec.js`. The echo itself is unchanged — it must still fire above
+// whatever the cap is, which is the whole point of #193 — so the assertion is kept and
+// only the size moved. The exact boundary is pinned next door; this pins the notice.
+test.describe('#193 the WS input cap is visible to the client', () => {
   test('an oversized frame gets an inputDropped notice back on the SAME socket', async () => {
     const ctx = await authCtx();
     const cookie = await rawCookie();
@@ -43,7 +48,7 @@ test.describe('#193 the 64KB WS input cap is visible to the client', () => {
       const frames = [];
       ws.on('message', (data) => frames.push(data.toString('utf8')));
 
-      const oversized = 'x'.repeat(70000); // > the 65536-byte cap
+      const oversized = 'x'.repeat(300000); // > the 262144-code-unit cap (#201), < maxPayload
       ws.send(oversized);
       await sleep(500);
 

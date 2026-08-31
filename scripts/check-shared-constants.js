@@ -16,6 +16,12 @@
 // the same server amber on the phone and neutral in the browser. Nothing would have
 // failed. Now this does.
 //
+// The list is not limited to the two clients. #201 added a SERVER constant paired with a
+// CLIENT one: `server.js`'s per-frame WS input cap and the companion's offline-buffer
+// ceiling are one invariant held as two equal numbers, and JS and Dart cannot import
+// from one another there either. Anything that must stay equal across a language
+// boundary belongs here.
+//
 // It is deliberately NOT a general duplication detector: it checks a hand-written list,
 // because the value of the gate is that every entry was a considered decision to
 // duplicate. Adding a shared constant means adding a line here in the same change.
@@ -45,6 +51,20 @@ const SHARED = [
     sites: [
       { file: 'app.html', re: /const\s+MEM_HEADROOM_AMBER_BYTES\s*=\s*([^;]+);/ },
       { file: 'ai-terminal/lib/widgets/format_utils.dart', re: /const\s+int\s+kHeadroomAmberBytes\s*=\s*([^;]+);/ },
+    ],
+  },
+  {
+    // #201 — not two clients this time but a SERVER cap and a CLIENT one, which is
+    // the same problem in a different direction: they are one invariant ("nothing
+    // the offline buffer can hold within its ceiling may be refused at the wire"),
+    // they are equal by construction, and neither file can import the other. The
+    // seam this closes existed for months precisely because the two numbers looked
+    // independent — 64KB on the wire, 256KB in the buffer, nothing tying them. Both
+    // count UTF-16 code units, so the comparison is meaningful.
+    what: 'WS input cap == companion offline-buffer ceiling (#201)',
+    sites: [
+      { file: 'server.js', re: /const\s+WS_INPUT_MAX\s*=\s*([^;]+);/ },
+      { file: 'ai-terminal/lib/api/api_client.dart', re: /static\s+const\s+int\s+_inputBufferHardCap\s*=\s*([^;]+);/ },
     ],
   },
 ];
