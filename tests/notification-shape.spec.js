@@ -158,7 +158,10 @@ test.describe('redactNotificationMessage — the wording survives, the specifics
     expect(redactNotificationMessage('path=/home/a/b.txt')).toBe('path=<path>');
     expect(redactNotificationMessage('file:/home/a/b.txt')).toBe('file:<path>');
     // ...but a drive letter is NOT a label, or `C:` would leak beside the path.
-    expect(redactNotificationMessage('edit C:\\Users\\someone\\secret.txt'))
+    // Deliberately NOT a `C:\Users\…` fixture: scripts/check-no-secrets.js treats
+    // that shape as machine-identifying and failed CI on it. The right answer to
+    // a security gate is a different fixture, never a new entry in its ALLOW list.
+    expect(redactNotificationMessage('edit C:\\Data\\proj\\secret.txt'))
       .toBe('edit <path>');
   });
 
