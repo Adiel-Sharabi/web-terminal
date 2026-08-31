@@ -128,16 +128,16 @@ jobs:
             # legitimately get SHORTER. A PR once deleted 88 accumulated entries
             # (346,209 -> 1,123 chars) while still bumping the version string, and
             # the check above — which only compares the version VALUE — went green.
-            b_len=$(git show "$base_ref":server.js | awk 'NR==34{print length($0)}')
-            h_len=$(awk 'NR==34{print length($0)}' server.js)
+            b_len=$(git show "$base_ref":server.js | awk '/^const SERVER_VERSION = /{print length($0); exit}')
+            h_len=$(awk '/^const SERVER_VERSION = /{print length($0); exit}' server.js)
             if [ -z "$b_len" ] || [ -z "$h_len" ]; then
-              echo "::error::could not measure server.js line 34's length (base=$b_len head=$h_len chars)."
+              echo "::error::could not find or measure server.js's SERVER_VERSION line (base=$b_len head=$h_len chars)."
               fail=1
             elif [ "$h_len" -lt "$b_len" ]; then
-              echo "::error::server.js line 34 SHRANK from $b_len to $h_len characters. The SERVER_VERSION changelog lives in that line's trailing comment, not the version string literal — the line is append-only and must never get shorter. Restore the prior history (git show $base_ref:server.js) and PREPEND your new note, keeping the rest in the established 'Prior <oldver>: <old comment>' form."
+              echo "::error::server.js's SERVER_VERSION line SHRANK from $b_len to $h_len characters. The SERVER_VERSION changelog lives in that line's trailing comment, not the version string literal — the line is append-only and must never get shorter. Restore the prior history (git show $base_ref:server.js) and PREPEND your new note, keeping the rest in the established 'Prior <oldver>: <old comment>' form."
               fail=1
             elif [ "$h_len" = "$b_len" ] && [ "$b" != "$h" ]; then
-              echo "::error::SERVER_VERSION changed ($b -> $h) but line 34's length didn't move ($h_len chars). A real bump adds a dated note to the trailing comment, which makes the line strictly longer — an unchanged length here means the changelog wasn't actually extended."
+              echo "::error::SERVER_VERSION changed ($b -> $h) but its line length didn't move ($h_len chars). A real bump adds a dated note to the trailing comment, which makes the line strictly longer — an unchanged length here means the changelog wasn't actually extended."
               fail=1
             fi
           fi
