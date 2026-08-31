@@ -669,7 +669,11 @@ test.describe('/api/version', () => {
   // to expose, not a test artifact.
   test('reports the version of the LIVE worker, matching pty-worker.js on disk', async () => {
     const src = fs.readFileSync(path.join(__dirname, '..', 'pty-worker.js'), 'utf8');
-    const m = src.match(/WORKER_VERSION\s*=\s*'([^']+)'/);
+    // Anchored to the DECLARATION. Unanchored, this takes the first occurrence in the
+    // file — and line 28 carries a long changelog comment where version literals are
+    // routinely quoted, so a future entry mentioning an older WORKER_VERSION above the
+    // declaration would silently pin the wrong value and keep passing.
+    const m = src.match(/^\s*const WORKER_VERSION\s*=\s*'([^']+)'/m);
     expect(m, 'pty-worker.js must declare WORKER_VERSION').toBeTruthy();
 
     const ctx = await authCtx();
