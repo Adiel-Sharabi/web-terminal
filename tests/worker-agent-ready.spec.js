@@ -28,7 +28,17 @@ const ipc = require('../lib/ipc');
 
 // What Claude's composer prints once it can accept a prompt. Registry-declared in
 // lib/agents.js; restated here as the literal bytes a PTY would carry.
-const CARET = '❯';
+// #190 - the caret ALONE is not the marker and never was a faithful fixture.
+// The real composer writes the caret then U+00A0 NO-BREAK SPACE; the folder-trust
+// selector writes the same caret then CHA and no space at all. These fixtures passed
+// against the old bare-caret marker only because it was loose enough to accept an
+// approximation. Measured off a real PTY, claude 2.1.251.
+//
+// Built from code points on purpose: a literal NBSP is invisible in a diff and any
+// editor or lint autofix that normalises whitespace turns it into U+0020, which would
+// make these fixtures stop representing a composer with nothing going red.
+const CARET = String.fromCodePoint(0x276f);
+const NBSP = String.fromCodePoint(0x00a0);
 
 function workerPipePath() {
   return process.platform === 'win32'
@@ -171,7 +181,7 @@ test.describe('#147 agent readiness on the PTY output path', () => {
     // render a compose bar, and the agent cannot receive anything yet.
     expect((await summaryOf(id)).agentReady).toBe(false);
 
-    await inject(id, `\r\n╭──────╮\r\n│ ${CARET} try "fix" │\r\n`);
+    await inject(id, `\r\n╭──────╮\r\n│ ${CARET}${NBSP}try "fix" │\r\n`);
     await sleep(60);
 
     expect((await summaryOf(id)).agentReady).toBe(true);
@@ -182,7 +192,7 @@ test.describe('#147 agent readiness on the PTY output path', () => {
   test('the readiness edge is broadcast exactly ONCE', async () => {
     const id = await newSession('claude');
     await inject(id, CARET);
-    await inject(id, `${CARET} and again\r\n`);
+    await inject(id, `${CARET}${NBSP}and again\r\n`);
     await inject(id, 'ordinary output');
     await sleep(60);
 
@@ -207,7 +217,7 @@ test.describe('#147 agent readiness on the PTY output path', () => {
     await sleep(40);
     expect((await summaryOf(id)).agentReady).toBe(false);
 
-    await inject(id, `${CARET} `);
+    await inject(id, `${CARET}${NBSP}`);
     await sleep(60);
     expect((await summaryOf(id)).agentReady).toBe(true);
   });
