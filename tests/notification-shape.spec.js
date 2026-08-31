@@ -17,8 +17,10 @@ const { test, expect } = require('@playwright/test');
 const {
   NOTIFICATION_KINDS,
   NOTIFICATION_MSG_CAP,
+  NOTIFICATION_MATCHER_CAP,
   classifyNotification,
   redactNotificationMessage,
+  redactMatcher,
   noteShape,
   shouldLogDrop,
 } = require('../lib/notification-shape');
@@ -96,6 +98,44 @@ test.describe('redactNotificationMessage — the wording survives, the specifics
       .toBe('post to <url>');
   });
 
+  test('a path CONTAINING a uuid is redacted WHOLE — the tail must not leak', () => {
+    // Found in review, and the worst defect in this change. The uuid pass ran
+    // FIRST and inserted `<id>`; every path rule excluded `<` and `>` from its
+    // body, so each stopped dead at that marker and the filename after it
+    // survived verbatim — as `<path><id>/secret.json`. Not a contrived shape:
+    // `~/.claude/projects/<uuid>/…` IS the Claude layout, so a notification
+    // naming a transcript is the likeliest payload there is.
+    const out = redactNotificationMessage(
+      'edit /home/someone/.claude/projects/9f46cb60-8df6-4748-85db-5aa254e2ac97/secret.json now');
+    expect(out).toBe('edit <path> now');
+    expect(out).not.toContain('secret.json');
+    const url = redactNotificationMessage(
+      'see https://h.io/s/9f46cb60-8df6-4748-85db-5aa254e2ac97/secret.json now');
+    expect(url).toBe('see <url> now');
+    expect(url).not.toContain('secret.json');
+  });
+
+  test('the path shapes a blocklist forgot are redacted too', () => {
+    // Home-relative and dot-relative paths passed through COMPLETELY before the
+    // rule became a token test rather than a list of shapes.
+    expect(redactNotificationMessage('edit ~/.ssh/id_rsa now')).toBe('edit <path> now');
+    expect(redactNotificationMessage('edit ./src/secret.env now')).toBe('edit <path> now');
+    expect(redactNotificationMessage('edit ../../etc/shadow now')).toBe('edit <path> now');
+    // A quoted or bracketed path is still a path.
+    expect(redactNotificationMessage('edit "/etc/passwd" now')).toBe('edit <path> now');
+    // A UNC share.
+    expect(redactNotificationMessage('\\\\server\\share\\x changed')).toBe('<path> changed');
+  });
+
+  test('prose with a single slash is still prose', () => {
+    // The exemption that keeps the feature worth having: the wording is the
+    // entire product, so `and/or` must survive the rule that catches `a/b/c`.
+    expect(redactNotificationMessage('approve and/or deny 24/7 TODO/FIXME'))
+      .toBe('approve and/or deny 24/7 TODO/FIXME');
+    expect(redactNotificationMessage('Claude needs your permission to run a command'))
+      .toBe('Claude needs your permission to run a command');
+  });
+
   test('a session uuid and a long hex token are replaced', () => {
     expect(redactNotificationMessage('session 9f46cb60-8df6-4748-85db-5aa254e2ac97 stalled'))
       .toBe('session <id> stalled');
@@ -116,6 +156,31 @@ test.describe('redactNotificationMessage — the wording survives, the specifics
   test('a non-string never throws and yields nothing', () => {
     for (const v of [undefined, null, 42, {}, []]) {
       expect(redactNotificationMessage(/** @type {any} */(v))).toBe('');
+    }
+  });
+});
+
+test.describe('redactMatcher — the other external field, bounded too', () => {
+  test('an ordinary matcher passes through, lowercased', () => {
+    expect(redactMatcher('Permission_Prompt')).toBe('permission_prompt');
+  });
+
+  test('a huge matcher is capped — /api/hook accepts a 256 kB body', () => {
+    // Found in review: the message was redacted and capped and the matcher was
+    // interpolated RAW, into both the log line and the map key. That is an
+    // unbounded write per occurrence and an unbounded key.
+    const out = redactMatcher('m'.repeat(50000));
+    expect(out.length).toBe(NOTIFICATION_MATCHER_CAP + 3);
+    expect(out.endsWith('...')).toBe(true);
+  });
+
+  test('a matcher carrying a path is redacted like any other external text', () => {
+    expect(redactMatcher('/home/someone/secret.json')).toBe('<path>');
+  });
+
+  test('an absent matcher is named, not blank', () => {
+    for (const v of [undefined, null, '']) {
+      expect(redactMatcher(/** @type {any} */(v))).toBe('(none)');
     }
   });
 });
