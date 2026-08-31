@@ -1150,6 +1150,10 @@
             ws.send(JSON.stringify({ resize: { cols: term.cols, rows: term.rows } }));
             return;
           }
+          if (e.data.startsWith('{"inputDropped"')) {
+            try { showInputDropped(JSON.parse(e.data).bytes); } catch (ex) {}
+            return;
+          }
           if (e.data.startsWith('{"heartbeat":')) return;
         }
         if (historyLoadPending) { historyQueue.push(e.data); return; }
@@ -1289,7 +1293,7 @@
       bgWs.onmessage = e => {
         if (typeof e.data === 'string') {
           // Ignore control messages in background
-          if (e.data.startsWith('{"sessionTaken"') || e.data.startsWith('{"requestResize"') || e.data.startsWith('{"heartbeat":')) return;
+          if (e.data.startsWith('{"sessionTaken"') || e.data.startsWith('{"requestResize"') || e.data.startsWith('{"inputDropped"') || e.data.startsWith('{"heartbeat":')) return;
           entry.scrollback += e.data;
           if (entry.scrollback.length > 1048576) {
             entry.scrollback = entry.scrollback.slice(-1048576);
@@ -1398,7 +1402,7 @@
         // Rewire the old WS to accumulate into cache instead of writing to term
         oldWs.onmessage = (e) => {
           if (typeof e.data === 'string') {
-            if (e.data.startsWith('{"sessionTaken"') || e.data.startsWith('{"requestResize"') || e.data.startsWith('{"heartbeat":')) return;
+            if (e.data.startsWith('{"sessionTaken"') || e.data.startsWith('{"requestResize"') || e.data.startsWith('{"inputDropped"') || e.data.startsWith('{"heartbeat":')) return;
             entry.scrollback += e.data;
             if (entry.scrollback.length > 1048576) {
               entry.scrollback = entry.scrollback.slice(-1048576);
@@ -1479,6 +1483,10 @@
             if (e.data.startsWith('{"requestResize"')) {
               fitAddon.fit();
               ws.send(JSON.stringify({ resize: { cols: term.cols, rows: term.rows } }));
+              return;
+            }
+            if (e.data.startsWith('{"inputDropped"')) {
+              try { showInputDropped(JSON.parse(e.data).bytes); } catch (ex) {}
               return;
             }
             if (e.data.startsWith('{"heartbeat":')) return;
@@ -1902,6 +1910,25 @@
       const box = document.getElementById('composeNotice');
       if (!box || box.hidden) return;
       box.hidden = true;
+      doResize();
+    }
+
+    // #193 — the server's 64KB-per-frame WS input cap (server.js `handleMessage`) used
+    // to refuse an oversized write with a server-side console.error only: the client got
+    // nothing back, so a dropped paste or long typed line looked exactly like the agent
+    // silently ignoring the user. The server now echoes a bare `{"inputDropped":...}`
+    // frame back on THIS socket (the same `sessionTaken` convention — no session id
+    // needed, since only the socket that produced the oversized write is attached to
+    // it). Reuses the #composeNotice bar — same "something you sent didn't land" family
+    // as #179's submitUnconfirmed — with its own wording; hideSubmitUnconfirmed()
+    // already hides it generically, so the dismiss button needs no change.
+    function showInputDropped(bytes) {
+      const box = document.getElementById('composeNotice');
+      const txt = document.getElementById('composeNoticeText');
+      if (!box || !txt) return;
+      txt.textContent = `That input was too large to send (${bytes} bytes) and was dropped. `
+        + 'Try sending it in smaller pieces.';
+      box.hidden = false;
       doResize();
     }
 

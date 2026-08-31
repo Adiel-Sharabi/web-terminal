@@ -156,6 +156,7 @@
             return;
           }
           if (e.data.startsWith('{"heartbeat":')) return;
+          if (e.data.startsWith('{"inputDropped"')) return; // #200: was printed as raw JSON
         }
         term.write(e.data);
         if (autoScroll) term.scrollToBottom();

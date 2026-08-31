@@ -268,6 +268,94 @@ SubmitUnconfirmedReaction resolveSubmitUnconfirmedReaction({
   return SubmitUnconfirmedReaction.mine(text: pendingText, restore: composeIsEmpty);
 }
 
+/// The result of [resolveStickyModifierInput]: what a compose-field text
+/// change should do while a sticky Ctrl or Alt key is armed.
+class StickyModifierReaction {
+  const StickyModifierReaction.consumed({
+    required this.controlByte,
+    required this.restoredText,
+    required this.restoredOffset,
+  }) : consumed = true;
+
+  const StickyModifierReaction.passthrough()
+      : consumed = false,
+        controlByte = null,
+        restoredText = null,
+        restoredOffset = null;
+
+  /// `true` when exactly one new character was consumed as a control byte —
+  /// the caller must send [controlByte] and put the field back to
+  /// [restoredText] with the caret at [restoredOffset]. `false` means "do
+  /// nothing here", i.e. leave the compose field exactly as the user changed it.
+  final bool consumed;
+  final String? controlByte;
+  final String? restoredText;
+  final int? restoredOffset;
+}
+
+/// Decides what a compose-field text change should do while sticky Ctrl or Alt
+/// is armed (the key strip's on-screen modifier toggle: hold it, tap a letter,
+/// get one control byte — the same job a physical keyboard chord does). Pulled
+/// out of `_onComposeChanged` as a pure function for the same reason
+/// [resolveSubmitUnconfirmedReaction] was: testable without a live
+/// `SessionScreen`.
+///
+/// **Only ever consumes a SINGLE new character (#193).** The caller already
+/// gates this on [text] being longer than [prevText]; for ordinary typing that
+/// difference is exactly one character, and the old inline version assumed it
+/// always was — it found the first differing character, read it as THE typed
+/// key, and restored the field to [prevText]. But a PASTE (including the key
+/// strip's own Paste button, which sets the compose value directly and fires
+/// this same listener) inserts many characters in one change, and treating
+/// only the first of them as a control code silently discarded the rest —
+/// there was no sign anything had been lost. So a multi-character insertion
+/// gets [StickyModifierReaction.passthrough]: nothing is sent as a control
+/// byte, and the caller lets the whole insertion stand as ordinary compose
+/// text. Sticky should still be disarmed either way — "the next keystroke"
+/// has now happened one way or another, and leaving it armed would swallow a
+/// later, unrelated character instead — but that decision belongs to the
+/// caller, which owns the `setState`.
+///
+/// **A ONE-character paste is consumed as a control byte too — deliberately,
+/// not an oversight.** A length-difference of exactly 1 is what this function
+/// (and the caller's gate) uses to recognise "a keystroke" at all, and a
+/// single pasted character produces the identical delta a real keypress
+/// would — there is no signal anywhere in a [TextEditingValue] that
+/// distinguishes "the user typed X" from "the user pasted the one-character
+/// string X". Getting this wrong occasionally (a one-char paste while sticky
+/// happens to be armed) is the accepted cost of getting the common case (a
+/// real multi-character paste) right; there is no way to have both.
+StickyModifierReaction resolveStickyModifierInput({
+  required String prevText,
+  required String text,
+  required bool ctrlSticky,
+}) {
+  if (text.length != prevText.length + 1) {
+    return const StickyModifierReaction.passthrough();
+  }
+  var i = 0;
+  while (i < prevText.length && text.codeUnitAt(i) == prevText.codeUnitAt(i)) {
+    i++;
+  }
+  // #200 Finding 5 — a length delta of +1 alone is not proof of a single
+  // inserted character: selecting "cd" out of "abcd" and pasting "xyz" also
+  // nets +1 (4 -> 5). Without this check the loop above reads the
+  // replacement's first new character as THE typed key and restores the
+  // field to "abcd", discarding "yz" along with the fact that two characters
+  // were removed. A genuine single-character insertion at `i` leaves
+  // everything after it unchanged; a replacement does not.
+  if (text.substring(i + 1) != prevText.substring(i)) {
+    return const StickyModifierReaction.passthrough();
+  }
+  final ch = text[i];
+  return StickyModifierReaction.consumed(
+    controlByte:
+        ctrlSticky ? String.fromCharCode(ch.codeUnitAt(0) & 0x1f) : '\x1b$ch',
+    restoredText: prevText,
+    restoredOffset: i,
+  );
+}
+
 /// True on desktop platforms (a real hardware keyboard). One definition so the
 /// raw-mode default, the '/' live-stream gate (#28), and image-paste routing
 /// all read the same rule.
@@ -902,6 +990,7 @@ class _SessionScreenState extends State<SessionScreen>
   StreamSubscription<String>? _outputSub;
   StreamSubscription<bool>? _connectedSub;
   StreamSubscription<void>? _reconnectedSub;
+  StreamSubscription<int>? _inputDroppedSub; // #193
 
   /// The tail of what the HTTP replay put on screen, and the latch that arms the
   /// attach-time overlap cut for the socket's OPENING frame only (#176).
@@ -1825,6 +1914,7 @@ class _SessionScreenState extends State<SessionScreen>
     await _outputSub?.cancel();
     await _connectedSub?.cancel();
     await _reconnectedSub?.cancel();
+    await _inputDroppedSub?.cancel();
     _connection?.close();
     _disconnectDebounce?.cancel();
 
@@ -1892,6 +1982,28 @@ class _SessionScreenState extends State<SessionScreen>
       _renderedTail = '';
     });
     _connectedSub = connection.connected.listen(_onConnectedChanged);
+    // #193 — a write that never reached the agent (the server's 64KB WS cap refusing
+    // it, or the offline buffer's own hard ceiling giving up on it during a sustained
+    // outage) used to vanish with nothing but a server-side log. Now visible: see
+    // [_onInputDropped] and [TerminalConnection.inputDropped].
+    _inputDroppedSub = connection.inputDropped.listen(_onInputDropped);
+  }
+
+  /// A SnackBar for the same reason `_copySelection`/`_forkFromMenu` already use one
+  /// here: a one-shot fact the user just needs to see once, not a persistent banner
+  /// (unlike #179's [SubmitUnconfirmedBanner], there is no saved text to offer back —
+  /// [connection.inputDropped] carries only a byte count, never the dropped content,
+  /// whichever of its two origins fired it).
+  void _onInputDropped(int bytes) {
+    if (!mounted) return;
+    ScaffoldMessenger.of(context).showSnackBar(
+      SnackBar(
+        content: Text(
+          'Some input was too large to send ($bytes bytes) and was dropped.',
+        ),
+        duration: const Duration(seconds: 6),
+      ),
+    );
   }
 
   /// `connected` only emits `false` after a failed reconnect *attempt* (brief
@@ -2195,28 +2307,34 @@ class _SessionScreenState extends State<SessionScreen>
       // via onOutput, so intercept it here — send the control code, restore
       // the field, disarm. (Ctrl+C while composing must interrupt Claude.)
       if ((_ctrlSticky || _altSticky) && text.length > prevComposeText.length) {
-        var i = 0;
-        while (i < prevComposeText.length &&
-            text.codeUnitAt(i) == prevComposeText.codeUnitAt(i)) {
-          i++;
+        final reaction = resolveStickyModifierInput(
+          prevText: prevComposeText,
+          text: text,
+          ctrlSticky: _ctrlSticky,
+        );
+        if (reaction.consumed) {
+          _connection?.sendInput(reaction.controlByte!);
+          _settingComposeProgrammatically = true;
+          _composeController.value = TextEditingValue(
+            text: reaction.restoredText!,
+            selection: TextSelection.collapsed(offset: reaction.restoredOffset!),
+          );
+          _lastComposeText = reaction.restoredText!;
+          setState(() {
+            _ctrlSticky = false;
+            _altSticky = false;
+          });
+          return;
         }
-        final ch = text[i];
-        _connection?.sendInput(
-          _ctrlSticky
-              ? String.fromCharCode(ch.codeUnitAt(0) & 0x1f)
-              : '\x1b$ch',
-        );
-        _settingComposeProgrammatically = true;
-        _composeController.value = TextEditingValue(
-          text: prevComposeText,
-          selection: TextSelection.collapsed(offset: i),
-        );
-        _lastComposeText = prevComposeText;
+        // A multi-character insertion (a paste — including the key strip's own
+        // Paste button, which sets the compose value directly) is not a single
+        // keystroke; see resolveStickyModifierInput's doc for why the old
+        // single-char behaviour silently dropped the rest of it (#193). Disarm
+        // and fall through: the whole insertion stands as ordinary compose text.
         setState(() {
           _ctrlSticky = false;
           _altSticky = false;
         });
-        return;
       }
       _historyActive = false;
       // A buffer starting with '/' goes live (every platform): stream it to the
@@ -3587,6 +3705,7 @@ class _SessionScreenState extends State<SessionScreen>
         _outputSub?.cancel();
         _connectedSub?.cancel();
         _reconnectedSub?.cancel();
+        _inputDroppedSub?.cancel();
         _connection?.close();
         _connection = null;
         _disconnectDebounce?.cancel();
@@ -3629,6 +3748,7 @@ class _SessionScreenState extends State<SessionScreen>
     _outputSub?.cancel();
     _connectedSub?.cancel();
     _reconnectedSub?.cancel();
+    _inputDroppedSub?.cancel();
     _connection?.close();
     _terminalController.removeListener(_onSelectionChanged);
     _terminalController.dispose();

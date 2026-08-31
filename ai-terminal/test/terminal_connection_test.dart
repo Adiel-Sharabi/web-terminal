@@ -9,12 +9,22 @@ const _server =
 
 /// A controllable fake transport standing in for the real WebSocket.
 class _FakeSocket implements TerminalSocket {
-  _FakeSocket({this.failReady = false, this.failAdd = false});
+  _FakeSocket({this.failReady = false, this.failAdd = false, this.maxFrameBytes});
 
   final bool failReady;
 
   /// Writes throw — a socket that connected but died before the flush reached it.
   final bool failAdd;
+
+  /// #193 review, Finding 2 — mirrors the server's REAL per-frame cap (server.js:
+  /// 65536). A real TCP write never throws just because a frame is "too big" — the
+  /// server accepts the bytes and only its OWN application logic then refuses the
+  /// frame — so this records an oversized `add()` in [oversizedFrames] rather than
+  /// throwing, letting a test assert "no single frame this client ever sent would
+  /// have been refused by the real cap" without having to fake the server's response.
+  final int? maxFrameBytes;
+  final List<String> oversizedFrames = <String>[];
+
   final StreamController<dynamic> _incoming = StreamController<dynamic>();
 
   /// Frames the client sent to us (keystrokes + JSON control frames).
@@ -34,6 +44,10 @@ class _FakeSocket implements TerminalSocket {
   void add(Object data) {
     if (failAdd) throw StateError('socket is closing');
     sent.add(data);
+    final cap = maxFrameBytes;
+    if (cap != null && data is String && data.length > cap) {
+      oversizedFrames.add(data);
+    }
   }
 
   @override
@@ -215,6 +229,136 @@ void main() {
       expect(flushed, 'B' * 5000,
           reason: 'oldest whole write evicted; newest submit kept intact, never split');
       expect(flushed.contains('A'), isFalse);
+      conn.close();
+    });
+
+    // #193 — the old guard was `_inputWrites.length > 1`: it evicted whole writes
+    // from the front until exactly one remained, with no regard for WHICH one that
+    // left behind. A paste queued while offline is a single whole write already over
+    // the cap on its own; any later write — even one character typed next — pushed
+    // the total back over budget and evicted the paste (the oldest entry) whole to
+    // make room for it. Reported as "a 20KB paste followed by any later write is
+    // dropped entirely." The cap must keep bounding ordinary accumulation (many small
+    // writes), but a write that already exceeds the cap alone is never the one to
+    // evict — it survives, and the buffer is allowed to sit over cap rather than
+    // silently lose it.
+    //
+    // #193 review, Finding 1 — the assertion below used to read `expect(flushed,
+    // paste)`, i.e. ONLY the paste, nothing else. That passed for the WRONG reason: the
+    // first cut of stage 1 compared the ORDINARY cap against TOTAL buffer length
+    // (oversized writes included), so once the paste was in the buffer, total could
+    // never fall back under 8KB — meaning stage 1 evicted every ordinary write that
+    // arrived afterward, silently, forever. The old bug lost the paste; that one lost
+    // everything typed AFTER it. Both are wrong. The correct behaviour, now asserted, is
+    // that the paste AND the later keystroke both survive — a paste in the buffer must
+    // not poison ordinary accumulation around it.
+    test('a big paste COEXISTS with a later, smaller write in the same outage (#193)',
+        () async {
+      final s1 = _FakeSocket();
+      final s2 = _FakeSocket();
+      var i = 0;
+      final conn = TerminalConnection(_server, 's',
+          socketFactory: (_) => i++ == 0 ? s1 : s2,
+          reconnectBackoff: _slowBackoff);
+      await pump();
+      s1.serverDrop();
+      await pump(15); // offline window
+      final paste = 'P' * 20000; // a single write already over the 8KB cap alone
+      conn.sendInput(paste);
+      conn.sendInput('x'); // a later, smaller write queued in the same outage
+      await pump(120);
+
+      // Filtered to just the DATA frames (excludes the mode/resize control JSON the
+      // reconnect handshake also sends on this socket), joined in send order.
+      final flushed =
+          s2.sentStrings.where((s) => s.contains('P') || s == 'x').join();
+      expect(flushed, paste + 'x',
+          reason: 'both the paste AND the ordinary write typed after it must survive, '
+              'in order — a paste in the buffer must not evict it, nor silently evict '
+              'everything typed after it either');
+      conn.close();
+    });
+
+    // #193 review — exempting an oversized write from the ORDINARY cap must not mean
+    // NO bound at all. Fifteen 20KB pastes queued in one outage (300,000 bytes, every
+    // one over the 8KB per-write cap, and over the 256KB hard ceiling too) would sit in
+    // memory forever under a rule that simply never evicts an oversized write. The HARD
+    // ceiling bounds the buffer even when nothing in it fits under the ordinary cap:
+    // past it, eviction is plain oldest-first with no exemption, and each write lost
+    // that way is reported on [inputDropped] — the same channel the server's 64KB WS
+    // cap uses — so this loss is visible too, never silent.
+    test('a hard ceiling bounds MANY large pastes in one outage; oldest lost, and reported (#193)',
+        () async {
+      final s1 = _FakeSocket();
+      final s2 = _FakeSocket();
+      var i = 0;
+      final conn = TerminalConnection(_server, 's',
+          socketFactory: (_) => i++ == 0 ? s1 : s2,
+          reconnectBackoff: _slowBackoff);
+      final dropped = <int>[];
+      conn.inputDropped.listen(dropped.add);
+      await pump();
+      s1.serverDrop();
+      await pump(15); // offline window
+
+      // 15 distinct 20KB pastes — 300,000 bytes total, comfortably past the 256KB hard
+      // ceiling. Distinct letters so "which ones survived" is checkable.
+      final pastes = List.generate(15, (n) => String.fromCharCode(65 + n) * 20000);
+      for (final p in pastes) {
+        conn.sendInput(p);
+      }
+      await pump(120);
+
+      final flushed = s2.sentStrings.join();
+      expect(flushed.length, lessThan(pastes.join().length),
+          reason: 'the buffer must not grow to hold all fifteen — some must be evicted');
+      expect(flushed, contains(pastes.last),
+          reason: 'the newest write always survives');
+      expect(flushed.contains(pastes.first), isFalse,
+          reason: 'oldest-first: the earliest pastes are the ones sacrificed');
+      expect(dropped, isNotEmpty,
+          reason: 'a write lost to the hard ceiling must be reported, not silent');
+      conn.close();
+    });
+
+    // #193 review, Finding 2 — `_flushInput` used to `_inputWrites.join()` every
+    // buffered write into ONE STRING before sending. Each buffered write is already a
+    // whole frame (that is the entire point of never splitting/merging one — #63), and
+    // joining them erased that boundary right before the wire: two pastes that
+    // INDIVIDUALLY fit under the server's real 64KB-per-frame cap (server.js: 65536)
+    // could join into a string that does NOT — and the server refuses the WHOLE joined
+    // frame, losing BOTH pastes to a limit neither hit alone. The 256KB hard ceiling
+    // (well above 64KB) made this reachable: raising how much the buffer can hold
+    // without also flushing write-by-write meant raising exactly how much could be lost
+    // to one over-the-wire rejection.
+    test('MULTIPLE large offline writes are flushed as SEPARATE frames, never joined into one (#193)',
+        () async {
+      final s1 = _FakeSocket();
+      final s2 = _FakeSocket(maxFrameBytes: 65536); // the server's real per-frame cap
+      var i = 0;
+      final conn = TerminalConnection(_server, 's',
+          socketFactory: (_) => i++ == 0 ? s1 : s2,
+          reconnectBackoff: _slowBackoff);
+      await pump();
+      s1.serverDrop();
+      await pump(15); // offline window
+      // The issue's own probe measured a real paste at 41,899 chars. Two of them joined
+      // (83,798) exceed the 65536 cap even though NEITHER alone does.
+      final pasteA = 'A' * 41899;
+      final pasteB = 'B' * 41899;
+      conn.sendInput(pasteA);
+      conn.sendInput(pasteB);
+      await pump(120);
+
+      final dataFrames =
+          s2.sentStrings.where((s) => s.startsWith('A') || s.startsWith('B')).toList();
+      expect(dataFrames, [pasteA, pasteB],
+          reason: 'each paste must reach the wire as its OWN frame, in order — never '
+              'merged into one string that could exceed a per-frame cap neither paste '
+              'alone would hit');
+      expect(s2.oversizedFrames, isEmpty,
+          reason: 'no single frame this client ever sent should exceed the real 64KB '
+              'per-frame cap, given neither buffered write does on its own');
       conn.close();
     });
 
@@ -403,6 +547,28 @@ void main() {
       expect(connected, [true, false]);
       expect(conn.sessionTaken, isTrue);
       expect(calls, 1, reason: 'must not reconnect to a taken session');
+      conn.close();
+    });
+
+    // #193 — the server's 64KB WS input cap used to refuse an oversized write with a
+    // server-side log only; nothing told the client. It now echoes a bare
+    // `{"inputDropped":true,"bytes":N}` frame back on this same socket, and the byte
+    // count must reach a listener rather than being written to the terminal as text.
+    test('inputDropped is parsed off the wire, forwarded on its own stream, '
+        'and never reaches output', () async {
+      final s1 = _FakeSocket();
+      final conn = TerminalConnection(_server, 's', socketFactory: (_) => s1);
+      final out = <String>[];
+      final dropped = <int>[];
+      conn.output.listen(out.add);
+      conn.inputDropped.listen(dropped.add);
+      await pump();
+
+      s1.serverSend('{"inputDropped":true,"bytes":70123}');
+      await pump();
+
+      expect(dropped, [70123]);
+      expect(out, isEmpty, reason: 'the control frame must not be typed as PTY output');
       conn.close();
     });
   });
