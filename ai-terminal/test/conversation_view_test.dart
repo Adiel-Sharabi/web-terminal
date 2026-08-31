@@ -1182,6 +1182,16 @@ void main() {
       expect(c.body, isNot(contains('local-command-stdout')));
     });
 
+    test('a colon-form SGR is stripped too — the parameter range is ECMA-48\'s', () {
+      // Found in review: the first draft used `[0-9;?]` for CSI parameters,
+      // which misses `:` `<` `=` `>`, so `ESC[38:5:196m` survived a strip that
+      // claimed to remove it. `lib/ansi.js` on the server is the owner; this
+      // mirrors it.
+      const text =
+          '<local-command-stdout>\x1b[38:5:196mred\x1b[0m</local-command-stdout>';
+      expect(classifyUserTurn(text).body, 'red');
+    });
+
     test('a prompt that merely NAMES the tag is still human', () {
       // The corpus's single non-leading occurrence is a real question about this
       // very label. `contains` would reclassify the question as its own answer.

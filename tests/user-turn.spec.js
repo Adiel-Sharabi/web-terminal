@@ -367,6 +367,19 @@ test.describe('#192 — command output is never the user\'s prompt', () => {
     expect(classifyUserTurn(CAVEAT_LEAD).kind).toBe(USER_KINDS.COMMAND);
   });
 
+  test('the ANSI rule has ONE owner — there is no second copy to drift', () => {
+    // Found in review. The first draft of this fix carried its own regex, and it
+    // had ALREADY drifted from the one next door: its CSI parameter class was
+    // `[0-9;?]`, missing ECMA-48's `:` `<` `=` `>`, so a colon-form SGR survived
+    // a strip that claimed to remove it. Two copies of one rule diverging inside
+    // a single commit is the argument for the shared module, not for more prose.
+    const ansi = require('../lib/ansi');
+    expect(require('../lib/transcript').stripAnsi).toBe(ansi.stripAnsi);
+    const colonSgr =
+      '<local-command-stdout>\x1b[38:5:196mred\x1b[0m</local-command-stdout>';
+    expect(classifyUserTurn(colonSgr).body).toBe('red');
+  });
+
   test('the recap stops reporting it as the last prompt', () => {
     // The second consumer #192 names, fixed by the same one-owner change.
     expect(recap.isHumanPrompt({ role: 'user', text: STDOUT_LEAD })).toBe(false);

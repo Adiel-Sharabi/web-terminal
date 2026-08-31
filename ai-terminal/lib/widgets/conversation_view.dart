@@ -1541,10 +1541,17 @@ final RegExp _commandTagRe = RegExp(
 
 /// Terminal rendering instructions (SGR/CSI/OSC). A local command's output is
 /// captured off a terminal, so it arrives carrying them — measured, 47 of the 61
-/// such turns in a 1066-transcript corpus hold `ESC[2m` dim markers. A chat lens
-/// is not a terminal, and these are never content.
+/// such turns in a 1066-transcript corpus hold `ESC[2m` dim markers **in the raw
+/// JSONL**. A chat lens is not a terminal, and these are never content.
+///
+/// Defensive here rather than load-bearing: the server strips escapes from every
+/// turn's text before it reaches the wire (`lib/transcript.js` `_capTurnText`),
+/// so this normally finds nothing. It mirrors `lib/ansi.js`, which is the single
+/// owner on the server side — including the parameter range `[0-?]`, which is
+/// ECMA-48's real one. A first draft wrote `[0-9;?]` here and let a colon-form
+/// `ESC[38:5:196m` through.
 final RegExp _ansiRe = RegExp(
-    r'\x1b\[[0-9;?]*[ -/]*[@-~]|\x1b\][^\x07\x1b]*(?:\x07|\x1b\\)|\x1b[@-Z\\-_]');
+    r'\x1b\[[0-?]*[ -/]*[@-~]|\x1b\][^\x07\x1b]*(?:\x07|\x1b\\)|\x1b[@-_]');
 
 /// Inner text of the first `<tag>…</tag>` in [s], trimmed, or '' if absent.
 /// Non-greedy so a C++ `<uint32_t>` inside the body can't swallow the close tag.
@@ -1608,10 +1615,12 @@ UserTurnClass classifyUserTurn(String text) {
   // BOTH copies of the rule need this branch, for different reasons, which is
   // why it is not "server-only" as the report assumed. The server's verdict
   // fixes the LABEL (`system` renders muted and left-aligned; `command` would
-  // not, since it is mapped onto [UserTurnKind.human] just above). But the
-  // rendered BODY comes from this classifier even when the server's kind wins —
-  // see `displayText`, which reads `uclass.body` for any non-human turn — so
-  // without this branch the bubble would show the raw tags and escapes.
+  // not, since [userTurnKindFromWire] maps it onto [UserTurnKind.human]). But
+  // the rendered BODY comes from this classifier even when the server's kind
+  // wins — see `displayText`, which reads `uclass.body` for any non-human turn —
+  // so without this branch the bubble would show the raw wrapper TAGS. (Not the
+  // escapes: the server already strips those from every turn's text before the
+  // wire. The strip below is defensive, not the reason this branch exists.)
   //
   // Anchored on `startsWith`, never `contains`: in a 1066-transcript corpus 61
   // turns lead with the tag and exactly one merely mentions it — a genuine
