@@ -24,6 +24,7 @@ const resourcesLib = require('./lib/resources');
 const { waitingFor: waitingForRule } = require('./lib/waiting-for');
 const taskListLib = require('./lib/task-list');
 const usageLimit = require('./lib/usage-limit');
+const notificationShape = require('./lib/notification-shape');
 // #146 — the pure smallest-active-viewer-wins rule for one PTY with many viewers.
 const terminalSize = require('./lib/terminal-size');
 const recap = require('./lib/recap');
@@ -1718,16 +1719,33 @@ let _hookSeqCounter = 0;
 // would never accept anyway.
 const _HOOK_UUID_RE = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
 
-function _classifyNotification(body) {
-  // Claude payload shape varies by version; check the common fields. The
-  // matcher value comes through as `notification_type` in newer versions and
-  // as part of `message` in older ones — match both.
-  const matcher = String(body?.notification_type || body?.matcher || '').toLowerCase();
-  const msg = String(body?.message || '').toLowerCase();
-  if (matcher === 'permission_prompt' || /\bpermission\b|\bapprov/.test(msg)) return 'permission';
-  if (matcher === 'idle_prompt' || /waiting for your input|idle/.test(msg)) return 'idle';
-  if (matcher === 'auth_success' || matcher === 'elicitation_dialog') return 'drop';
-  return 'drop';
+// #194 Gap 1 — the notifications nobody has ever seen.
+//
+// An unrecognised `Notification` is discarded, and until now discarded in
+// SILENCE, so the set of messages Claude actually sends could not be known from
+// this fleet's logs in either direction. The rule and the redaction live in
+// `lib/notification-shape.js`; this map is the only state, and it is what keeps
+// the log bounded: one line per distinct shape, then one per hundred repeats.
+//
+// Capped, because the keys come from an external payload. An unbounded map keyed
+// on someone else's string is a slow leak, and the whole point of this counter
+// is to survive being wrong about how often the path fires.
+const _NOTIFICATION_SHAPE_MAX = 200;
+const _droppedNotificationShapes = new Map();
+
+function _logDroppedNotification(body) {
+  const matcher = String(body?.notification_type || body?.matcher || '').toLowerCase() || '(none)';
+  const msg = notificationShape.redactNotificationMessage(body?.message);
+  const key = `${matcher}|${msg}`;
+  const n = (_droppedNotificationShapes.get(key) || 0) + 1;
+  if (_droppedNotificationShapes.has(key) || _droppedNotificationShapes.size < _NOTIFICATION_SHAPE_MAX) {
+    _droppedNotificationShapes.set(key, n);
+  }
+  if (!notificationShape.shouldLogDrop(n)) return;
+  console.error(
+    `[${new Date().toISOString()}] hook Notification UNRECOGNISED (seen ${n}): `
+    + `matcher=${matcher} msg=${JSON.stringify(msg)}`,
+  );
 }
 
 // Returns { status } like the worker RPC. Resolves immediately for a dropped
@@ -1814,10 +1832,17 @@ async function processHookEvent(id, rawEvent, claudeSessionId, body) {
   let event = rawEvent;
 
   if (event === 'Notification') {
-    const kind = _classifyNotification(body);
-    if (kind === 'permission') { event = 'PermissionRequest'; }
-    else if (kind === 'idle')  { event = 'Notification'; }
-    else                       { return { status: 'unchanged', skipped: 'notification-other' }; }
+    const kind = notificationShape.classifyNotification(body);
+    if (kind === notificationShape.NOTIFICATION_KINDS.PERMISSION) { event = 'PermissionRequest'; }
+    else if (kind === notificationShape.NOTIFICATION_KINDS.IDLE)  { event = 'Notification'; }
+    else {
+      // Behaviour is UNCHANGED for both remaining kinds — they were dropped
+      // before and are dropped now, and the response body still says exactly
+      // what it always said. The only new thing is that an UNKNOWN one leaves a
+      // trace. Deciding what to do with it comes after the data, not before.
+      if (kind === notificationShape.NOTIFICATION_KINDS.UNKNOWN) _logDroppedNotification(body);
+      return { status: 'unchanged', skipped: 'notification-other' };
+    }
   }
 
   // #61 — `agent_id` is present iff Claude raised this event INSIDE a subagent
