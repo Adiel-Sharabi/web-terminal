@@ -395,6 +395,110 @@ void main() {
     });
   });
 
+  // #204 — a write bigger than the app cap used to be handed to the socket anyway.
+  //
+  // Below `WS_MAX_PAYLOAD` (4 MiB of UTF-8) that was merely a wasted round trip: the
+  // server refused the frame at `WS_INPUT_MAX` and echoed `inputDropped` back, so the
+  // user did learn. ABOVE it there is nothing to learn from — `ws` answers an oversize
+  // frame by closing the socket (1009) before any server handler runs, so no notice can
+  // be sent, and everything already dequeued behind that write in the same flush goes
+  // with it. The user sees a reconnect blip and no explanation.
+  //
+  // The cap is one number shared with the server (`scripts/check-shared-constants.js`
+  // gates it), so refusing locally costs nothing that would otherwise have been
+  // delivered. These tests are written against that constant's VALUE rather than
+  // importing it — it is private, and a test that read it from the code under test
+  // would agree with any value the code happened to hold, including a broken one.
+  group('#204 a write over the app cap is refused locally, not handed to the wire', () {
+    const cap = 256 * 1024; // server.js WS_INPUT_MAX / _inputBufferHardCap
+
+    test('a LIVE oversized write is reported and never reaches the socket', () async {
+      final s1 = _FakeSocket();
+      final conn = TerminalConnection(_server, 's', socketFactory: (_) => s1);
+      final dropped = <int>[];
+      conn.inputDropped.listen(dropped.add);
+      await pump();
+      final sentBefore = s1.sentStrings.length; // the connect handshake
+
+      conn.sendInput('z' * (cap + 1));
+      await pump();
+
+      expect(dropped, [cap + 1],
+          reason: 'the refusal must be reported with the length, on the #193 channel');
+      expect(s1.sentStrings.length, sentBefore,
+          reason: 'nothing may reach the socket — past 4 MiB the wire answers by '
+              'hanging up, taking anything already queued behind it');
+      conn.close();
+    });
+
+    test('an OFFLINE oversized write is refused too, not left in the buffer', () async {
+      // The check sits in sendInput BEFORE the live/buffered branch, which is what
+      // makes this true. `_bufferInput`'s stage-2 eviction stops at
+      // `_inputWrites.length > 1`, so a lone write past the whole ceiling used to
+      // survive eviction and sit in the buffer until a flush handed it to a wire that
+      // would refuse it. Asserting on what the RECONNECT flushes is the only way to
+      // see that from outside: a buffered write is invisible until then.
+      final s1 = _FakeSocket();
+      final s2 = _FakeSocket();
+      var i = 0;
+      final conn = TerminalConnection(_server, 's',
+          socketFactory: (_) => i++ == 0 ? s1 : s2,
+          reconnectBackoff: _slowBackoff);
+      final dropped = <int>[];
+      conn.inputDropped.listen(dropped.add);
+      await pump();
+      s1.serverDrop();
+      await pump(15); // offline window
+
+      conn.sendInput('z' * (cap + 1));
+      await pump(120); // reconnect + flush
+
+      expect(dropped, [cap + 1]);
+      expect(s2.sentStrings.any((f) => f.startsWith('zzz')), isFalse,
+          reason: 'it must never have been buffered, so the flush has nothing to send');
+      conn.close();
+    });
+
+    test('a write AT the cap still goes — live and buffered', () async {
+      // The guard against the fix becoming an over-refusal. The server compares
+      // `msg.length > WS_INPUT_MAX`, so a write of exactly the cap is legal there;
+      // refusing it here would be the same silent loss in the other direction, and it
+      // is a size a real paste can land on.
+      final atCap = 'y' * cap;
+
+      final live = _FakeSocket();
+      final connLive =
+          TerminalConnection(_server, 's', socketFactory: (_) => live);
+      final droppedLive = <int>[];
+      connLive.inputDropped.listen(droppedLive.add);
+      await pump();
+      connLive.sendInput(atCap);
+      await pump();
+      expect(live.sentStrings, contains(atCap),
+          reason: 'exactly at the cap is accepted by the server, so it must be sent');
+      expect(droppedLive, isEmpty);
+      connLive.close();
+
+      final s1 = _FakeSocket();
+      final s2 = _FakeSocket();
+      var i = 0;
+      final connBuf = TerminalConnection(_server, 's',
+          socketFactory: (_) => i++ == 0 ? s1 : s2,
+          reconnectBackoff: _slowBackoff);
+      final droppedBuf = <int>[];
+      connBuf.inputDropped.listen(droppedBuf.add);
+      await pump();
+      s1.serverDrop();
+      await pump(15);
+      connBuf.sendInput(atCap);
+      await pump(120);
+      expect(s2.sentStrings, contains(atCap),
+          reason: 'and it must survive the offline buffer and its flush intact');
+      expect(droppedBuf, isEmpty);
+      connBuf.close();
+    });
+  });
+
   // #59 — a PTY has ONE size, shared by every viewer. A connection that never states
   // its own inherits whatever the last viewer set, so a phone attaching to a session a
   // desktop is watching renders desktop-width output, torn, until some unrelated

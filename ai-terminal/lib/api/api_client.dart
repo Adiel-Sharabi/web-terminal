@@ -1014,14 +1014,25 @@ class TerminalConnection {
   // code unit can take. MOVING ONE OF THE THREE ALONE BREAKS THE INVARIANT - the
   // arithmetic lives in the `server.js` block that defines them.
   //
-  // (A single write LARGER than this ceiling is a different case, and is not closed:
-  // stage 2 below stops evicting at one entry, so an oversized lone write is still
-  // buffered and still refused at the wire. Up to 4 MiB that refusal still arrives as
-  // an [inputDropped] report, as before. PAST 4 MiB it does not: the transport closes
-  // the socket before the server can answer, so that write - and anything already
-  // dequeued behind it in the same flush - is lost with only a reconnect to show for
-  // it. Reachable only by pasting megabytes; it is the trade #201 made to get a real
-  // memory bound, and it is stated here rather than discovered later.)
+  // #204 - THIS CEILING IS ALSO THE PER-WRITE ONE, applied in [sendInput] before
+  // either branch. It reads as two quantities (a per-frame wire cap and a
+  // whole-buffer total) but it is ONE NUMBER by the invariant above, so giving the
+  // per-write check a named constant of its own would be a third copy of a value
+  // whose entire problem was that its copies looked independent. See [sendInput]
+  // for why the check belongs there and why the comparison is `>`.
+  //
+  // That closes what this block used to record as an accepted trade: a single write
+  // LARGER than this ceiling was not refused here at all - stage 2 below stops
+  // evicting at one entry, so an oversized lone write was buffered anyway and
+  // refused at the wire, reported on [inputDropped] up to 4 MiB and, past 4 MiB,
+  // not reported at all, because the transport closes the socket before the server
+  // can answer and takes anything already dequeued behind it in the same flush.
+  // Such a write now reaches neither the buffer nor the socket.
+  //
+  // (`app.html` has no single send path and is NOT gated this way, so that band is
+  // still reachable from the browser. The `server.js` cap block says so in the same
+  // words - the fact belongs to the server, which cannot know which client is
+  // talking to it.)
   static const int _inputBufferHardCap = 256 * 1024;
 
   TerminalSocket? _socket;
@@ -1085,11 +1096,20 @@ class TerminalConnection {
   /// replayed scrollback reaches [output]. Clear the terminal buffer on this.
   Stream<void> get reconnected => _reconnected.stream;
 
-  /// Fires with the byte count whenever a write THIS connection made failed to
-  /// reach the agent — either the server refused it (its 64KB WS cap) or
-  /// [_bufferInput]'s own hard ceiling had to give it up during a sustained
-  /// outage (#193). Not terminal output, so it is its own stream rather than
-  /// folded into [output].
+  /// Fires with the length (UTF-16 code units) whenever a write THIS connection
+  /// made failed to reach the agent. THREE origins, all of them #193's principle
+  /// — input that is dropped must be visible:
+  ///
+  /// 1. the server refused it at its per-frame WS cap (`WS_INPUT_MAX`, 256 KB —
+  ///    64 KB when this stream was written, raised by #201);
+  /// 2. [_bufferInput]'s hard ceiling had to give up an older buffered write
+  ///    during a sustained outage (#193);
+  /// 3. [sendInput] refused it locally for exceeding that same ceiling (#204),
+  ///    which is the only one of the three that can report a write the wire
+  ///    would have answered by hanging up.
+  ///
+  /// Not terminal output, so it is its own stream rather than folded into
+  /// [output].
   Stream<int> get inputDropped => _inputDropped.stream;
 
   /// Whether the server reported this session was opened elsewhere.
@@ -1104,8 +1124,40 @@ class TerminalConnection {
 
   /// Sends raw keystrokes/input to the PTY (client → server). While
   /// disconnected, input is buffered (up to 8KB) and flushed on reconnect.
+  ///
+  /// A write LARGER than [_inputBufferHardCap] is refused HERE and reported on
+  /// [inputDropped] (#204). Three things make that the right place for it:
+  ///
+  /// **The server would refuse it anyway.** That constant is the same number as
+  /// `server.js`'s per-frame `WS_INPUT_MAX`, by the #201 invariant stated at both
+  /// sites and gated by `scripts/check-shared-constants.js`. So nothing is lost by
+  /// answering locally — the user just learns immediately, while the text is still
+  /// in front of them, instead of after a round trip.
+  ///
+  /// **Past the TRANSPORT cap the round trip does not answer at all.** `ws` closes
+  /// the socket (1009) on an oversize frame before any server handler runs, so
+  /// nothing can send the notice back: that write is lost, and so is anything
+  /// already dequeued behind it in the same flush — the user sees a reconnect blip
+  /// and no explanation. Refusing at the app cap makes `WS_MAX_PAYLOAD` (4 MiB,
+  /// 16x this cap) unreachable from this client, which is strictly better than
+  /// defending against it.
+  ///
+  /// **Before the live/buffered branch, so ONE check covers both paths.** It also
+  /// closes an oddity in [_bufferInput]: its stage-2 eviction stops at
+  /// `_inputWrites.length > 1`, so a LONE write bigger than the whole ceiling used
+  /// to survive eviction and sit in the buffer until a flush handed it to a wire
+  /// that would refuse it. Such a write can no longer reach the buffer.
+  ///
+  /// The comparison is `>`, matching `server.js`'s `msg.length > WS_INPUT_MAX`
+  /// exactly. A write AT the ceiling is legal on both sides and must still go —
+  /// over-refusing here would be the same class of silent loss in the other
+  /// direction.
   void sendInput(String data) {
     if (_closed) return;
+    if (data.length > _inputBufferHardCap) {
+      if (!_inputDropped.isClosed) _inputDropped.add(data.length);
+      return;
+    }
     if (_live && _socket != null) {
       _socket!.add(data);
     } else {
