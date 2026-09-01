@@ -1009,14 +1009,19 @@ class TerminalConnection {
   //
   // Both caps count UTF-16 code units (`data.length` here, `msg.length` there), which
   // is why they are directly comparable; the server's separate transport bound
-  // (`WS_MAX_PAYLOAD`) counts real UTF-8 bytes and is sized 3x above this, since one
-  // code unit can be three UTF-8 bytes. MOVING ONE OF THE THREE ALONE BREAKS THE
-  // INVARIANT — the arithmetic lives in the `server.js` block that defines them.
+  // (`WS_MAX_PAYLOAD`, 4 MiB) counts real UTF-8 bytes and is 16x this cap - about 5.3x
+  // its worst-case byte width of 256 KB x 3, three being the most UTF-8 bytes one BMP
+  // code unit can take. MOVING ONE OF THE THREE ALONE BREAKS THE INVARIANT - the
+  // arithmetic lives in the `server.js` block that defines them.
   //
   // (A single write LARGER than this ceiling is a different case, and is not closed:
   // stage 2 below stops evicting at one entry, so an oversized lone write is still
-  // buffered and still refused at the wire — with an [inputDropped] report, as before.)
-  static const int _inputBufferHardCap = 256 * 1024;
+  // buffered and still refused at the wire. Up to 4 MiB that refusal still arrives as
+  // an [inputDropped] report, as before. PAST 4 MiB it does not: the transport closes
+  // the socket before the server can answer, so that write - and anything already
+  // dequeued behind it in the same flush - is lost with only a reconnect to show for
+  // it. Reachable only by pasting megabytes; it is the trade #201 made to get a real
+  // memory bound, and it is stated here rather than discovered later.)
 
   TerminalSocket? _socket;
   StreamSubscription? _sub;

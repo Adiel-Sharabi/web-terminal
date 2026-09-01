@@ -143,9 +143,17 @@ test.describe('#201 the WS input caps', () => {
       // CRLF; the 874 line terminators are consumed as terminators either way.
       s.ws.send('\x04');
       await sleep(600);
-      s.ws.send("stty echo; echo \"WT201:$(tr -d '\\r\\n' < cap.txt | wc -c | tr -d ' '):END\"\r");
+      s.ws.send("stty echo; echo \"WT201:$(tr -d '\\r\\n' < cap.txt | wc -c | tr -d ' '):$(tr '\\r' '\\n' < cap.txt | wc -l | tr -d ' '):END\"\r");
 
-      const want = `WT201:${(PAD / 80) * 79}:END`;
+      // 69046 payload characters AND all 874 line terminators. The second number is
+      // not decoration: `tr -d` strips CRs, so an arrival missing ONLY its trailing CR
+      // would report 69046 and pass — and "arrived minus its submit CR" is this
+      // codebase's signature typed-but-not-submitted bug (#55), made reachable here
+      // because `splitTrailingCr` writes that CR separately. Measured off a real
+      // ConPTY: Z=69046 BYTES=69920 NL=874, i.e. one byte per terminator, so the frame
+      // length is accounted for exactly. A line discipline that expanded CR to CRLF
+      // would report 1748 and go red - loudly and diagnosably, which is the point.
+      const want = `WT201:${(PAD / 80) * 79}:874:END`;
       const deadline = Date.now() + 60000;
       while (Date.now() < deadline && !s.output().includes(want)) await sleep(250);
       expect(s.output().length, 'no output at all - the PTY never ran the line').toBeGreaterThan(0);
@@ -166,11 +174,15 @@ test.describe('#201 the WS input caps', () => {
       s = await attach(ctx, 'ws-cap-boundary');
 
       // Park the PTY on a reader that neither executes nor re-draws a quarter of a
-      // megabyte. If this does not take, the frames land in the shell's line editor
-      // instead and the assertions below are unaffected — they are about what the
-      // SERVER did with the frame, before any PTY write.
-      s.ws.send('cat > /dev/null\r');
-      await sleep(1000);
+      // megabyte, with the terminal's own echo off (see the header: ~120ms/KB). The
+      // reader writes to a FILE rather than /dev/null so the frames' fate is
+      // observable - a notice alone cannot tell "refused" from "refused and also
+      // forwarded anyway", and that regression would pass every other assertion here.
+      s.ws.send('stty -echo; echo WT201:CAP"ON"; cat > cap2.txt\r');
+      const capBy = Date.now() + 30000;
+      while (Date.now() < capBy && !s.output().includes('WT201:CAPON')) await sleep(100);
+      expect(s.output(), 'the reader never started').toContain('WT201:CAPON');
+      await sleep(500);
       s.clear();
 
       const atCap = padTo(WS_INPUT_MAX);
@@ -187,6 +199,27 @@ test.describe('#201 the WS input caps', () => {
       expect(n.length, `notices: ${JSON.stringify(n)}`).toBe(1);
       expect(n[0].bytes).toBe(WS_INPUT_MAX + 1);
       expect(s.ws.readyState, 'a refusal must not kill the socket').toBe(WebSocket.OPEN);
+
+      // AND THE REFUSED FRAME REACHED NO PTY. `cat` has seen only the at-cap frame, so
+      // the file holds exactly its payload characters: 3276 complete 80-char lines plus
+      // a 64-character remainder = 258,868. Had the over-cap frame been forwarded as
+      // well it would read 517,737.
+      // A LONE ^D here only FLUSHES: in canonical mode end-of-file is delivered on an
+      // EMPTY line, and 262,144 is not a multiple of 80, so the at-cap frame leaves a
+      // 64-character remainder pending. Without the CR first, `cat` never closes and
+      // the verdict command below is written INTO cap2.txt instead of being run - which
+      // is exactly how this test failed the first time it was written, and it failed
+      // RED rather than green, which is the property that matters. The CR adds a line
+      // terminator, never a payload character, so the expected count is unchanged.
+      s.ws.send('\r');
+      await sleep(400);
+      s.ws.send('\x04');
+      await sleep(600);
+      s.ws.send("stty echo; echo \"WT201B:$(tr -d '\\r\\n' < cap2.txt | wc -c | tr -d ' '):END\"\r");
+      const want2 = 'WT201B:258868:END';
+      const by2 = Date.now() + 60000;
+      while (Date.now() < by2 && !s.output().includes(want2)) await sleep(250);
+      expect(s.output(), `last bytes seen: ${JSON.stringify(s.output().slice(-300))}`).toContain(want2);
     } finally {
       try { s?.ws.close(); } catch {}
       if (s?.id) { try { await ctx.delete(`/api/sessions/${s.id}`); } catch {} }

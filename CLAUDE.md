@@ -408,10 +408,12 @@ construction: **nothing the offline buffer can hold within its ceiling may be re
 the wire.** The `65536` that stood there until #201 was an inherited default (commit
 `a96e7ba`, 2026-03-23) which also bounded no memory — `ws` assembles a whole message
 before `handleMessage` runs, so the bound that bounds is **`WS_MAX_PAYLOAD` (4 MiB), now
-set in `wsOptions`**, sized 3x above the app cap because one code unit can be three UTF-8
-bytes and because `ws` answers an oversize frame by **closing the socket**, not by letting
-the app send its `inputDropped` notice. `scripts/check-shared-constants.js` fails the
-build if the pair drifts.
+set in `wsOptions`**. It is **16x the app cap** — about 5.3x the app cap's worst-case
+byte width (256 KB x 3 = 786,432; three is the most UTF-8 bytes one BMP code unit can
+take). The gap is wide rather than snug because `ws` answers an oversize frame by
+**closing the socket**, not by letting the app send its `inputDropped` notice, so the
+zone between the two caps is where an accidental oversend is still reported honestly.
+`scripts/check-shared-constants.js` fails the build if the pair drifts.
 
 ### Server-side delivery — the SSOT, and where the real bug lived
 **Every agent TUI folds one read into a paste and swallows a trailing CR.** Codex does it at any length (`paste_burst.rs`); **Claude does it too** — it just needs a bigger read to trip it. Measured against the real Claude TUI, atomic `text\r` in ONE write:
