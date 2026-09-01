@@ -946,8 +946,9 @@ class TerminalConnection {
   final StreamController<bool> _connected = StreamController<bool>.broadcast();
   final StreamController<void> _reconnected =
       StreamController<void>.broadcast();
-  // #193 — TWO origins report on this stream. (1) The server's 64KB-per-frame WS input
-  // cap (server.js `handleMessage`) used to refuse an oversized write with a server-side
+  // #193 — TWO origins report on this stream. (1) The server's per-frame WS input cap
+  // (server.js `WS_INPUT_MAX`, 256KB since #201 — it was 64KB when this was written)
+  // used to refuse an oversized write with a server-side
   // log only; nothing told the client, so a dropped paste or long typed line looked
   // exactly like the agent silently ignoring the user. The server now echoes a bare
   // `{"inputDropped":true,"bytes":N}` frame back on THIS socket (the same `sessionTaken`
@@ -991,6 +992,36 @@ class TerminalConnection {
   // oldest-first eviction with NO size exemption, and reports each loss on
   // [inputDropped] so it is visible rather than silent — the whole buffer can still lose
   // data under sustained abuse, but never without a trace.
+  //
+  // #201 — THIS NUMBER IS HALF OF A PAIR. Its other half is `WS_INPUT_MAX` in
+  // `server.js`, and together they encode one invariant:
+  //
+  //   NOTHING THIS BUFFER CAN HOLD WITHIN ITS CEILING MAY BE REFUSED AT THE WIRE.
+  //
+  // The server's per-frame cap used to be 65536 — an inherited default from commit
+  // a96e7ba (2026-03-23), never measured, and the tightest limit on the whole path.
+  // That left a seam: a 90KB paste typed while the socket was down was ACCEPTED here,
+  // spent eviction pressure on the other queued writes, survived to reconnect, and was
+  // then refused whole at the wire. #201 raised the server cap to this exact number
+  // instead, and since #200 made [_flushInput] send ONE FRAME PER BUFFERED WRITE, no
+  // write this buffer holds within its ceiling can exceed it. The seam is closed by
+  // construction rather than by a check.
+  //
+  // Both caps count UTF-16 code units (`data.length` here, `msg.length` there), which
+  // is why they are directly comparable; the server's separate transport bound
+  // (`WS_MAX_PAYLOAD`, 4 MiB) counts real UTF-8 bytes and is 16x this cap - about 5.3x
+  // its worst-case byte width of 256 KB x 3, three being the most UTF-8 bytes one BMP
+  // code unit can take. MOVING ONE OF THE THREE ALONE BREAKS THE INVARIANT - the
+  // arithmetic lives in the `server.js` block that defines them.
+  //
+  // (A single write LARGER than this ceiling is a different case, and is not closed:
+  // stage 2 below stops evicting at one entry, so an oversized lone write is still
+  // buffered and still refused at the wire. Up to 4 MiB that refusal still arrives as
+  // an [inputDropped] report, as before. PAST 4 MiB it does not: the transport closes
+  // the socket before the server can answer, so that write - and anything already
+  // dequeued behind it in the same flush - is lost with only a reconnect to show for
+  // it. Reachable only by pasting megabytes; it is the trade #201 made to get a real
+  // memory bound, and it is stated here rather than discovered later.)
   static const int _inputBufferHardCap = 256 * 1024;
 
   TerminalSocket? _socket;

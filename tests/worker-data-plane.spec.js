@@ -163,18 +163,29 @@ test.describe('pty-worker binary data plane', () => {
       });
       await rpc(client, 'attachSession', { id, scrollbackLimit: 1024 * 1024 });
 
-      // Wait for some PTY_OUT binary frames to arrive from the shell prompt.
-      const collectPromise = collectPtyOut(client, id, { timeoutMs: 6000 });
+      // ONE collector, armed BEFORE the write so it still captures the prompt frames,
+      // and ended by the MARKER rather than by a clock.
+      //
+      // This was a `Promise.race` between this collector and a second, bare 6s one. A
+      // race is won by whichever settles FIRST, and a collector with no `stopWhen`
+      // always settles at its ceiling - so the bare 6s window CAPPED the race and the
+      // 10s marker budget below was unreachable. On a loaded GitHub Windows runner a
+      // cold Git Bash login shell had not printed even its PROMPT inside 6s, so
+      // `joined` came back "" and a slow machine read as "output was never routed".
+      //
+      // That is the identical mistake `countPtyOut` below already carries a paragraph
+      // about: wait for the precondition, not for a stopwatch. The lesson had been
+      // applied to the helper and not to this caller.
+      const collected = collectPtyOut(client, id, {
+        stopWhen: (s) => s.includes('PHASE4_MARK'),
+        timeoutMs: 30000,
+      });
 
       // Send keystrokes as TYPE_PTY_IN so the shell echoes something back.
       const frame = ipc.encodePtyIn(id, Buffer.from('echo PHASE4_MARK\r'));
       client.send(frame);
 
-      // Collect until we see the marker echoed back.
-      const chunks = await Promise.race([
-        collectPtyOut(client, id, { stopWhen: (s) => s.includes('PHASE4_MARK'), timeoutMs: 10000 }),
-        collectPromise,
-      ]);
+      const chunks = await collected;
       const joined = Buffer.concat(chunks).toString('utf8');
       expect(chunks.length).toBeGreaterThan(0);
       expect(joined).toContain('PHASE4_MARK');
