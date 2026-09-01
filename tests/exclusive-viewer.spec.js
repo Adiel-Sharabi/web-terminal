@@ -89,9 +89,23 @@ test.describe('Session viewers (#21: shared by default)', () => {
       await loginPage(page2);
 
       await connectWs(page1, sessionId, 'device-A');
-      await page1.waitForTimeout(400);
+      // Wait for the SERVER to have registered viewer 1 before viewer 2 arrives.
+      // `connectWs` resolves on `onopen`, and this file's own helper says why that
+      // is not enough: "attachSession is async, so the count lags the WS handshake
+      // by a beat". A fixed 400ms bet on that lag is not merely flaky HERE - it can
+      // make this test pass while proving NOTHING, because "viewer 1 was not kicked"
+      // and "viewer 2 arrived before there was anyone to kick" look identical from
+      // the assertions below.
+      expect(await waitForClientCount(request, sessionId, c => c >= 1, 15000))
+          .toBeGreaterThanOrEqual(1);
       await connectWs(page2, sessionId, 'device-B');
-      await page2.waitForTimeout(600);
+      // And wait until the server has BOTH, so the negative assertion is about the
+      // shared-viewer rule rather than about timing.
+      expect(await waitForClientCount(request, sessionId, c => c >= 2, 15000))
+          .toBeGreaterThanOrEqual(2);
+      // The takeover decision is made during attach, so if a kick were coming it
+      // has already been sent; this is only the socket's own travel time.
+      await page1.waitForTimeout(300);
 
       // First viewer was NOT kicked: no sessionTaken, socket still open.
       const messages1 = await page1.evaluate(() => window._testMessages);
@@ -124,9 +138,23 @@ test.describe('Session viewers (#21: shared by default)', () => {
       await loginPage(page2);
 
       await connectWs(page1, sessionId, 'device-A');
-      await page1.waitForTimeout(400);
+      // Same registration race as the shared test above, and THIS is the side of it
+      // that went red on a loaded CI runner (2026-09-01): viewer 2 connected before
+      // the server had registered viewer 1, so there was nobody to kick, no
+      // `sessionTaken` was ever sent, and the assertions below read a slow machine
+      // as a broken feature.
+      expect(await waitForClientCount(request, sessionId, c => c >= 1, 15000))
+          .toBeGreaterThanOrEqual(1);
       await connectWs(page2, sessionId, 'device-B');
-      await page2.waitForTimeout(600);
+
+      // Wait for the takeover to REACH viewer 1, rather than for a stopwatch.
+      await expect.poll(
+        () => page1.evaluate(() => ({
+          taken: window._testMessages.some(m => m.includes('"sessionTaken"')),
+          closed: window._testMessages.some(m => m === '__CLOSE__:4001'),
+        })),
+        { timeout: 15000, message: 'viewer 1 was never told the session was taken' },
+      ).toEqual({ taken: true, closed: true });
 
       // First viewer IS kicked (old behavior), second is sole viewer.
       const messages1 = await page1.evaluate(() => window._testMessages);
