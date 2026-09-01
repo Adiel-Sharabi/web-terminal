@@ -117,6 +117,56 @@ void main() {
     });
   });
 
+  group('terminalTailWindow - the ONE indexing rule, and the #81 clamp', () {
+    test('a long buffer names the visible window, not the top of scrollback', () {
+      // The case every long-lived session is in. A base-less read
+      // (`buffer.lines[i]`) would name rows 0..7 -- ancient scrollback.
+      final w = terminalTailWindow(lineCount: 5000, viewHeight: 24);
+      expect(w.base, 4976);
+      expect(w.rows, 24);
+    });
+
+    test('exactly viewHeight lines: base 0, the whole screen', () {
+      final w = terminalTailWindow(lineCount: 24, viewHeight: 24);
+      expect(w.base, 0);
+      expect(w.rows, 24);
+    });
+
+    test('a SHORT buffer clamps smaller, never wrong', () {
+      // The documented invariant says this cannot happen. It is clamped anyway
+      // because the caller runs inside `Terminal.write`, where a throw kills
+      // the widget subtree in release (#81) -- and this asserts the clamp
+      // answers with the whole screen rather than with garbage.
+      final w = terminalTailWindow(lineCount: 3, viewHeight: 24);
+      expect(w.base, 0);
+      expect(w.rows, 3);
+    });
+
+    test('degenerate inputs produce an empty window, never a throw', () {
+      for (final w in [
+        terminalTailWindow(lineCount: 0, viewHeight: 24),
+        terminalTailWindow(lineCount: 24, viewHeight: 0),
+        terminalTailWindow(lineCount: 0, viewHeight: 0),
+      ]) {
+        expect(w.base, 0);
+        expect(w.rows, 0);
+      }
+    });
+
+    test('every index it names is in bounds, across a wide sweep', () {
+      for (var lineCount = 0; lineCount <= 60; lineCount++) {
+        for (var viewHeight = 0; viewHeight <= 30; viewHeight++) {
+          final w = terminalTailWindow(
+              lineCount: lineCount, viewHeight: viewHeight);
+          expect(w.base, greaterThanOrEqualTo(0));
+          expect(w.rows, greaterThanOrEqualTo(0));
+          expect(w.base + w.rows, lessThanOrEqualTo(lineCount),
+              reason: 'lineCount=$lineCount viewHeight=$viewHeight');
+        }
+      }
+    });
+  });
+
   group('terminalTailLines - the trust dialog through a REAL Terminal (#190)', () {
     // The question, CHA-positioned exactly as documented
     // (scripts/rig/probe-trust-prompt.js:104) - a real fragment of the real
@@ -140,17 +190,57 @@ void main() {
       expect(dialog.contains(' '), isFalse);
     });
 
-    test('reconstructs readable, SPACED words from a byte stream with none', () {
-      final terminal = Terminal(maxLines: 200);
+    // A session that has been running for a while, which is every real one.
+    // WITHOUT this filler the buffer holds exactly viewHeight lines, scrollBack
+    // is 0, and an implementation reading `buffer.lines[i]` (the TOP of
+    // scrollback) passes every assertion below while showing ancient content on
+    // any real session. Review caught exactly that. The filler is what makes the
+    // indexing load-bearing.
+    Terminal dialogTerminal() {
+      final terminal = Terminal(maxLines: 500);
       terminal.resize(48, 8);
+      for (var i = 0; i < 50; i++) {
+        terminal.write('scrollback filler row $i\r\n');
+      }
       terminal.write(dialog);
+      return terminal;
+    }
 
+    List<String> tailOf(Terminal terminal) {
       final buffer = terminal.buffer;
-      final tail = terminalTailLines(
-        rowCount: buffer.viewHeight,
-        rowText: (i) => buffer.lines[buffer.scrollBack + i].getText(),
+      // The SAME rule the screen uses - not a second copy of `scrollBack + i`,
+      // which is how a test comes to agree with a bug instead of catching it.
+      final w = terminalTailWindow(
+        lineCount: buffer.lines.length,
+        viewHeight: buffer.viewHeight,
       );
-      final screen = tail.join('\n');
+      return terminalTailLines(
+        rowCount: w.rows,
+        rowText: (i) => buffer.lines[w.base + i].getText(),
+      );
+    }
+
+    test('the fixture really does push the dialog past scrollBack', () {
+      final buffer = dialogTerminal().buffer;
+      expect(buffer.viewHeight, 8);
+      expect(buffer.lines.length, greaterThan(buffer.viewHeight));
+    });
+
+    test('RED case: a BASE-LESS read returns ancient scrollback, not the dialog', () {
+      // What `buffer.lines[i]` (no base) sees. If this ever matched the dialog,
+      // the assertion below would be proving nothing about the indexing - which
+      // was true of this file before the filler existed.
+      final buffer = dialogTerminal().buffer;
+      final wrong = terminalTailLines(
+        rowCount: buffer.viewHeight,
+        rowText: (i) => buffer.lines[i].getText(),
+      ).join('\n');
+      expect(wrong, contains('scrollback filler'));
+      expect(wrong, isNot(contains('trust')));
+    });
+
+    test('reconstructs readable, SPACED words from a byte stream with none', () {
+      final screen = tailOf(dialogTerminal()).join('\n');
 
       // THE LOAD-BEARING ASSERTION. Red against any implementation that reads
       // raw bytes (scrollback, or an ANSI-stripped stream) instead of buffer

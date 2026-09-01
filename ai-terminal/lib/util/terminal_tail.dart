@@ -39,6 +39,42 @@ library;
 /// earns a tap through to the terminal lens, not a second terminal.
 const int kTerminalTailLines = 4;
 
+/// Which slice of a buffer's `lines` is the VISIBLE SCREEN: `base` is the index
+/// of the top visible row, `rows` is how many there are.
+///
+/// This exists as a rule rather than as two expressions at the call site for
+/// two reasons, and review found both the hard way.
+///
+/// **It is the one indexing rule, so it must have one owner.** A test that
+/// hand-copies `buffer.scrollBack + i` is a second copy of it, and then cannot
+/// catch a bug in the first — which is exactly what happened: the trust-dialog
+/// fixture left `scrollBack == 0`, so an implementation reading
+/// `buffer.lines[i]` (the TOP of scrollback — ancient content on any
+/// long-lived session) passed every test in the change that introduced it.
+///
+/// **And it is CLAMPED.** `lines.length >= viewHeight` is a documented
+/// invariant of the vendored Buffer, but the caller runs from
+/// `notifyListeners()` INSIDE `Terminal.write`, and #81 is this repo's
+/// recorded case of a throw on that path escaping into a WebSocket listener
+/// and killing the widget subtree in release — the blank-terminal symptom. We
+/// vendor and PATCH that library, and #81 was the library contradicting its
+/// own assumptions.
+///
+/// The clamp never answers *wrongly*, only *smaller*: with `lineCount >=
+/// viewHeight` it names exactly `(scrollBack, viewHeight)`; with a short
+/// buffer it names `(0, lineCount)`, which IS the whole screen; with nothing
+/// at all it names `(0, 0)` and the walk above returns empty.
+({int base, int rows}) terminalTailWindow({
+  required int lineCount,
+  required int viewHeight,
+}) {
+  if (lineCount <= 0 || viewHeight <= 0) return (base: 0, rows: 0);
+  final scrollBack = lineCount - viewHeight;
+  final base = scrollBack < 0 ? 0 : scrollBack;
+  final available = lineCount - base;
+  return (base: base, rows: viewHeight < available ? viewHeight : available);
+}
+
 /// The last [maxLines] non-blank rows of the terminal's CURRENT SCREEN, in
 /// their original top-to-bottom order.
 ///

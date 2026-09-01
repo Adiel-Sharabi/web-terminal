@@ -299,6 +299,7 @@ class ConversationView extends StatefulWidget {
     this.onSubmitToSession,
     this.derivedCtxSink,
     this.selectionSink,
+    this.bottomInset = 0,
   });
 
   /// #83 — where to publish the lens's CURRENT selected text ('' when none).
@@ -309,6 +310,23 @@ class ConversationView extends StatefulWidget {
   /// Publishing the text — rather than exposing the region — keeps the copy path
   /// a plain clipboard write with nothing to keep in sync.
   final ValueNotifier<String>? selectionSink;
+
+  /// #194 Part 1 — how much of this view's BOTTOM is covered by something the
+  /// parent floats over it (today: the terminal-tail strip). Everything this
+  /// widget pins to its own bottom edge must clear that band.
+  ///
+  /// This is a parameter rather than the parent's problem because BOTH halves
+  /// of the problem live in here. The list's own padding decides whether the
+  /// newest message can be scrolled clear of the cover: pinned-to-bottom sits
+  /// at `maxScrollExtent`, which aligns the list's END with the viewport's,
+  /// so with only the default 8px of bottom padding the last ~70px of the
+  /// newest answer is unreachable — not merely shifted, the way a Column slot
+  /// would shift it. And the "New" pill and the jump-to-bottom FAB sit at
+  /// `bottom: 12` inside this widget's own Stack, so an overlay painted by an
+  /// ANCESTOR Stack covers them AND hit-tests first: the tap that should jump
+  /// to the new message goes to the overlay instead. A mis-tap that navigates
+  /// somewhere the user did not ask for is a defect, not a cosmetic overlap.
+  final double bottomInset;
 
   /// Where to publish the transcript-derived ctx% (#74).
   ///
@@ -1021,7 +1039,7 @@ class _ConversationViewState extends State<ConversationView> {
               widget.selectionSink?.value = content?.plainText ?? '',
           child: ListView.builder(
           controller: _scrollController,
-          padding: const EdgeInsets.symmetric(vertical: 8),
+          padding: EdgeInsets.fromLTRB(0, 8, 0, 8 + widget.bottomInset),
           findChildIndexCallback: findRowIndex,
           itemCount: chunks.length +
               leadingLoader +
@@ -1077,7 +1095,7 @@ class _ConversationViewState extends State<ConversationView> {
         ),
         if (_showNewPill)
           Positioned(
-            bottom: 12,
+            bottom: 12 + widget.bottomInset,
             left: 0,
             right: 0,
             child: Center(
@@ -1120,7 +1138,7 @@ class _ConversationViewState extends State<ConversationView> {
         if (!_pinnedToBottom && !_showNewPill)
           Positioned(
             right: 12,
-            bottom: 12,
+            bottom: 12 + widget.bottomInset,
             child: FloatingActionButton.small(
               heroTag: 'chat-jump-bottom',
               backgroundColor:

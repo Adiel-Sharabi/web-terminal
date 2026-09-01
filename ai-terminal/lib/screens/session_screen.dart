@@ -57,6 +57,11 @@ import '../widgets/submit_unconfirmed_banner.dart';
 import '../widgets/terminal_tail_strip.dart';
 import '../widgets/terminal_key_strip.dart';
 
+/// #194 Part 1 -- how often the chat lens's terminal-tail strip may recompute.
+/// A ceiling on a hot path, not a delay anyone can perceive: the strip exists
+/// for a terminal that has STOPPED, so only the last state matters.
+const Duration _kTerminalTailThrottle = Duration(milliseconds: 250);
+
 /// Max send-history entries kept per session (matches the web compose bar).
 const int _kMaxHistory = 50;
 
@@ -1084,6 +1089,8 @@ class _SessionScreenState extends State<SessionScreen>
   // true while the chat lens is showing AND `terminalTailGateOpen` is true;
   // see `_updateTerminalTailSubscription`.
   bool _listeningToTerminalTail = false;
+  // Trailing throttle for the tail recompute -- see `_onTerminalTailChanged`.
+  Timer? _terminalTailThrottle;
 
   // #127 — the background scrollback deepening. The walk itself (which range to
   // ask for next, and which part of the answer is genuinely older than what is
@@ -1748,6 +1755,10 @@ class _SessionScreenState extends State<SessionScreen>
   /// longer re-announce anything — and it paints the "no longer active" state
   /// meanwhile, which is the only thing a detached window can do.
   void _onSessionGone() {
+    // #194 Part 1 — this drops `_session`, which is one of the tail strip's
+    // gate inputs, and it does NOT go through `_recomputeActiveLens`. Detach
+    // here so the claim made there ("one call site covers both inputs") holds.
+    scheduleMicrotask(_updateTerminalTailSubscription);
     // Whether this screen is the route on top. ONLY the pop consults it: a
     // pushed SessionScreen stays mounted under a fork, and popping there takes
     // away the route in front of the user.
@@ -2196,16 +2207,28 @@ class _SessionScreenState extends State<SessionScreen>
   /// only acts when the desired subscription state actually differs from
   /// [_listeningToTerminalTail].
   void _updateTerminalTailSubscription() {
-    final shouldListen =
-        _activeLens == 'chat' && terminalTailGateOpen(_session?.status);
+    // `_session != null` is not redundant with the status gate: a GONE session
+    // (`_onSessionGone` drops `_session` without routing through
+    // `_recomputeActiveLens`) has a null status, and `terminalTailGateOpen`
+    // deliberately reads null as OPEN — that is for a session whose first
+    // status has not arrived yet, which is a live session, not a departed one.
+    // Without this clause the listener would stay attached to a terminal that
+    // will never speak again. Review found this as the one path where a gate
+    // input changes without the updater running; this closes it rather than
+    // leaving the comment below slightly untrue.
+    final shouldListen = _session != null &&
+        _activeLens == 'chat' &&
+        terminalTailGateOpen(_session?.status);
     if (shouldListen == _listeningToTerminalTail) return;
     if (shouldListen) {
       _terminal.addListener(_onTerminalTailChanged);
       _listeningToTerminalTail = true;
-      _onTerminalTailChanged(); // pick up whatever is already on screen
+      _recomputeTerminalTail(); // pick up whatever is already on screen, now
     } else {
       _terminal.removeListener(_onTerminalTailChanged);
       _listeningToTerminalTail = false;
+      _terminalTailThrottle?.cancel();
+      _terminalTailThrottle = null;
       if (_terminalTail.isNotEmpty && mounted) {
         setState(() => _terminalTail = const []);
       }
@@ -2218,25 +2241,48 @@ class _SessionScreenState extends State<SessionScreen>
   /// every PTY chunk, and most chunks (a spinner frame, a cursor blink)
   /// change nothing about the last few non-blank rows; `listEquals` is the
   /// cost gate that keeps those from costing a frame.
+  /// `Terminal.write` notifies on EVERY PTY chunk, so this is the hot path.
+  /// It only schedules; [_recomputeTerminalTail] does the work, at most once
+  /// per [_kTerminalTailThrottle].
+  ///
+  /// WHY A THROTTLE AND NOT JUST `listEquals`. `listEquals` dedups an
+  /// UNCHANGED tail, which covers a quiet terminal — but not a streaming one,
+  /// where the tail genuinely differs every chunk. And the status gate does
+  /// not close during output as often as it looks: Codex can never report
+  /// `working` at all (OSC 9 fires only on an approval and a turn end, so
+  /// turn-start is unreachable by construction), `active` is every session's
+  /// birth status and the steady state of any hook-less session, and
+  /// compaction is deliberately left open because #129 measured Claude
+  /// reporting *idle* partway through it. In all three, a whole turn streams
+  /// with the gate open — and an unthrottled rebuild there is precisely PR
+  /// #107's cost class: a full-window present every vsync, on a phone, for the
+  /// length of the turn. The throttle also swallows the ~1s burst at the start
+  /// of every Claude turn, while the status change is still in flight through
+  /// the repository's debounce and refresh.
+  ///
+  /// Trailing, not leading: what this strip is FOR is a terminal that has
+  /// stopped and is waiting, so the last state is the only one that matters
+  /// and arriving a quarter second later costs nothing.
   void _onTerminalTailChanged() {
+    if (_terminalTailThrottle?.isActive ?? false) return;
+    _terminalTailThrottle = Timer(_kTerminalTailThrottle, () {
+      _terminalTailThrottle = null;
+      if (_listeningToTerminalTail) _recomputeTerminalTail();
+    });
+  }
+
+  void _recomputeTerminalTail() {
     final buffer = _terminal.buffer;
-    // `lines.length >= viewHeight` (and so `scrollBack >= 0`) is a documented
-    // invariant of the vendored xterm's Buffer. It is still clamped here,
-    // because this listener runs from `notifyListeners()` INSIDE
-    // `Terminal.write` — and #81 is this repo's recorded case of a throw on
-    // exactly that path escaping into a WebSocket listener and killing the
-    // whole widget subtree in release (the "blank terminal" symptom). We
-    // vendor and PATCH that library, and #81 was itself the library
-    // contradicting its own assumptions, so "the doc comment says it cannot
-    // happen" is not the same as it not happening. Two comparisons buy an
-    // empty strip instead of a blank app.
-    final base = buffer.scrollBack < 0 ? 0 : buffer.scrollBack;
-    final rows = buffer.viewHeight < buffer.lines.length - base
-        ? buffer.viewHeight
-        : buffer.lines.length - base;
+    // ONE owner for the indexing rule (`util/terminal_tail.dart`) — the screen
+    // and the tests call the same function, so a test cannot pass against an
+    // indexing bug the screen has. It is also where the #81 clamp lives.
+    final w = terminalTailWindow(
+      lineCount: buffer.lines.length,
+      viewHeight: buffer.viewHeight,
+    );
     final next = terminalTailLines(
-      rowCount: rows,
-      rowText: (i) => buffer.lines[base + i].getText(),
+      rowCount: w.rows,
+      rowText: (i) => buffer.lines[w.base + i].getText(),
     );
     if (listEquals(next, _terminalTail)) return;
     if (mounted) setState(() => _terminalTail = next);
@@ -3854,6 +3900,7 @@ class _SessionScreenState extends State<SessionScreen>
     if (_listeningToTerminalTail) {
       _terminal.removeListener(_onTerminalTailChanged);
     }
+    _terminalTailThrottle?.cancel();
     _terminalController.removeListener(_onSelectionChanged);
     _terminalController.dispose();
     _composeController.removeListener(_onComposeChanged);
@@ -4295,6 +4342,19 @@ class _SessionScreenState extends State<SessionScreen>
                     derivedCtxSink: _derivedCtx,
                     // #83: lets Ctrl+C above copy what is selected here.
                     selectionSink: _chatSelection,
+                    // #194 Part 1 — the strip floats over this view's bottom
+                    // edge, so tell it how much of that edge is covered. It
+                    // pads its list by this much (otherwise the newest answer
+                    // is unreachable, not merely shifted: pinned-to-bottom
+                    // aligns the list END with the viewport bottom, so
+                    // scrolling can never bring the covered text clear) and
+                    // lifts its "New" pill and jump-to-bottom FAB above the
+                    // band (otherwise the strip, a LATER sibling of this one
+                    // in the ancestor Stack, hit-tests first and swallows the
+                    // tap that was meant to jump to the new message).
+                    bottomInset: _activeLens == 'chat'
+                        ? TerminalTailStrip.heightFor(_terminalTail.length)
+                        : 0,
                   ),
                 // #194 Part 1 — floats above the chat lens rather than taking
                 // a Column slot (same reasoning as the terminal's own

@@ -25,6 +25,31 @@ class TerminalTailStrip extends StatelessWidget {
   /// Switches to the Terminal lens (`SessionScreen._setLens`).
   final VoidCallback onTap;
 
+  // The type scale this strip renders at. Named so [heightFor] and [build]
+  // cannot drift apart: the parent insets the conversation by exactly what
+  // this widget occupies, and a stale number there means either a covered
+  // message or a visible gap.
+  static const double _fontSize = 12;
+  static const double _lineHeight = 1.3;
+  static const double _verticalPadding = AppSpacing.grid * 2;
+  static const double _bottomMargin = AppSpacing.grid * 2;
+  static const double _border = 1;
+
+  /// The height this strip occupies when rendering [lineCount] lines.
+  ///
+  /// The parent needs this to inset whatever it floats the strip OVER (see
+  /// `ConversationView.bottomInset`), and it lives here — beside the styling
+  /// that produces it — rather than being re-derived at the call site, which
+  /// is how the two would drift. Returns 0 for an empty strip, because the
+  /// caller does not mount one.
+  static double heightFor(int lineCount) {
+    if (lineCount <= 0) return 0;
+    return lineCount * _fontSize * _lineHeight +
+        _verticalPadding * 2 +
+        _border * 2 +
+        _bottomMargin;
+  }
+
   @override
   Widget build(BuildContext context) {
     return Semantics(
@@ -43,11 +68,11 @@ class TerminalTailStrip extends StatelessWidget {
               AppSpacing.screenPadding,
               0,
               AppSpacing.screenPadding,
-              AppSpacing.grid * 2,
+              _bottomMargin,
             ),
             padding: const EdgeInsets.symmetric(
               horizontal: AppSpacing.cardPadding * 0.75,
-              vertical: AppSpacing.grid * 2,
+              vertical: _verticalPadding,
             ),
             decoration: BoxDecoration(
               color: AppColors.surfaceContainerHigh,
@@ -85,8 +110,8 @@ class TerminalTailStrip extends StatelessWidget {
                               'Menlo',
                               'Courier New',
                             ],
-                            fontSize: 12,
-                            height: 1.3,
+                            fontSize: _fontSize,
+                            height: _lineHeight,
                             color: AppColors.onSurfaceVariant,
                           ),
                         ),

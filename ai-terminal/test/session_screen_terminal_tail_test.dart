@@ -11,6 +11,7 @@ import 'package:flutter/material.dart';
 import 'package:flutter_test/flutter_test.dart';
 
 import 'package:ai_terminal/screens/session_screen.dart';
+import 'package:ai_terminal/util/terminal_tail.dart';
 import 'package:ai_terminal/widgets/terminal_tail_strip.dart';
 
 void main() {
@@ -97,6 +98,38 @@ void main() {
       expect(find.text('\$ npm run build'), findsOneWidget);
       expect(find.text('Build succeeded'), findsOneWidget);
       expect(find.text('No, exit'), findsNothing);
+    });
+  });
+
+  group('TerminalTailStrip.heightFor - the number the inset depends on', () {
+    // ConversationView is inset by exactly this, so that the strip neither
+    // hides the newest message (the list pins to maxScrollExtent, so covered
+    // text is UNREACHABLE, not merely shifted) nor swallows the taps meant
+    // for its 'New' pill and jump-to-bottom FAB - the strip is a later
+    // sibling in the ancestor Stack, so it hit-tests first. A wrong number
+    // here is a covered message or a visible gap, so it is pinned.
+    test('an empty strip occupies nothing - the caller does not mount one', () {
+      expect(TerminalTailStrip.heightFor(0), 0);
+      expect(TerminalTailStrip.heightFor(-1), 0);
+    });
+
+    test('height grows with the line count, and clears the 12px controls', () {
+      double? prev;
+      for (var n = 1; n <= kTerminalTailLines; n++) {
+        final h = TerminalTailStrip.heightFor(n);
+        // Both the pill and the FAB sit at bottom:12 inside ConversationView.
+        // An inset at or below that would leave them inside the strip's band.
+        expect(h, greaterThan(12));
+        if (prev != null) expect(h, greaterThan(prev));
+        prev = h;
+      }
+    });
+
+    test('the full four-line strip stays a PEEK, not a second terminal', () {
+      // A phone viewport is ~600-800 logical px tall. If the strip ever grew
+      // past a small fraction of that it would stop being a peek that earns a
+      // tap and start being a competing pane.
+      expect(TerminalTailStrip.heightFor(kTerminalTailLines), lessThan(120));
     });
   });
 }
