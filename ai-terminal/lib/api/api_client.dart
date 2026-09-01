@@ -1022,6 +1022,7 @@ class TerminalConnection {
   // dequeued behind it in the same flush - is lost with only a reconnect to show for
   // it. Reachable only by pasting megabytes; it is the trade #201 made to get a real
   // memory bound, and it is stated here rather than discovered later.)
+  static const int _inputBufferHardCap = 256 * 1024;
 
   TerminalSocket? _socket;
   StreamSubscription? _sub;
