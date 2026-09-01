@@ -160,7 +160,11 @@ class TerminalTailStrip extends StatelessWidget {
                 const SizedBox(width: AppSpacing.grid),
                 const Icon(
                   Icons.chevron_right,
-                  size: 18,
+                  // `_chevron`, not a literal 18: this icon is the FLOOR in
+                  // `heightFor` at one line, and review named the literal/constant
+                  // pair as the one place the number could still drift. True by
+                  // construction now, rather than only caught by the pinning test.
+                  size: _chevron,
                   color: AppColors.onSurfaceVariant,
                 ),
               ],
