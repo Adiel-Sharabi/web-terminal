@@ -21,10 +21,15 @@
 //      later "tidy-up" that pulls maxPayload down onto the app cap has to argue with a
 //      red test first.
 //
-// The verdict for delivery is taken from the SHELL, never from the echo: a terminal
-// echoes what it was sent as it is typed, so "the text is on screen" cannot distinguish
-// a frame that arrived whole from one that arrived truncated. `${#WT}` makes the shell
-// itself report the length of what it received.
+// The verdict for delivery is taken from a FILE the shell wrote, never from the echo: a
+// terminal echoes what it was sent as it is typed, so "the text is on screen" cannot
+// distinguish a frame that arrived whole from one that arrived truncated.
+//
+// And the delivery test deliberately turns the terminal's echo OFF and reads with `cat`
+// rather than typing at the shell's own line editor. That is a measured cost, not a
+// style choice: echo through ConPTY runs at ~120ms/KB and readline re-renders the whole
+// line as it grows, so a 70KB frame took ~8s on a fast desktop and blew a 90s deadline
+// on the CI runner. Off, and read by `cat`, the same 256KB is verified in 1.7s.
 const { test, expect } = require('@playwright/test');
 const WebSocket = require('ws');
 const { BASE, AUTH, authCtx, emptyCwd } = require('./test-helpers');
@@ -93,26 +98,58 @@ test.describe('#201 the WS input caps', () => {
     try {
       s = await attach(ctx, 'ws-cap-delivers');
 
-      // The shell reports the length of what it received, so a truncated arrival is
-      // distinguishable from a whole one. `${#WT}` is expanded by the shell, so the
-      // expected string cannot be matched by the terminal's echo of the command.
-      const PAD = 69960;
-      const payload = 'WT=' + 'z'.repeat(PAD) + '; echo "WT201:${#WT}:END"\r';
+      // Park the PTY on a plain reader with the terminal's own echo OFF. Both halves are
+      // measured, not stylistic. With echo ON, ConPTY costs ~120ms per KB, and the
+      // shell's own line editor RE-RENDERS the growing line on top of that: a 70KB frame
+      // took ~8s on a fast desktop and blew a 90s deadline on the CI runner, where the
+      // bytes were arriving correctly and simply too slowly to assert on. Off, and read
+      // by `cat`, the same delivery is verified in under two seconds.
+      //
+      // The `echo` in front of `cat` is the readiness signal. A fixed sleep here raced a
+      // still-booting login shell and the payload landed on the PROMPT instead
+      // (`bash: zzzz...: command not found`) — a green cap test that proved nothing.
+      //
+      // CAT"ON" is split by a pair of quotes so the marker cannot appear in the ECHO of the
+      // command being typed, only in its OUTPUT. Spelled contiguously, the guard passes the
+      // instant the line is keyed — before `cat` is running — which is this file's own
+      // "never take the verdict from the echo" rule violated by its own scaffolding.
+      s.ws.send('stty -echo; echo WT201:CAT"ON"; cat > cap.txt\r');
+      const catBy = Date.now() + 30000;
+      while (Date.now() < catBy && !s.output().includes('WT201:CATON')) await sleep(100);
+      expect(s.output(), 'the reader never started, so nothing below is about the cap').toContain('WT201:CATON');
+      await sleep(500);
+      s.clear();
+
+      // 874 CR-terminated 80-character lines, exactly. Over the old cap, inside the new
+      // one, and no single line longer than a canonical-mode reader's own buffer.
+      const PAD = 69920;
+      const payload = padTo(PAD);
+      expect(payload.length).toBe(PAD);
       expect(payload.length).toBeGreaterThan(OLD_CAP);
       expect(payload.length).toBeLessThanOrEqual(WS_INPUT_MAX);
 
       s.ws.send(payload);
 
-      // It must not be refused. This is the assertion that is red before the fix:
-      // the old cap answers this frame with `{inputDropped:true,bytes:69989}`.
+      // Red before the fix: the old cap answers this one frame with
+      // {inputDropped:true,bytes:69920} and never writes a byte to the PTY.
       await sleep(1500);
       expect(s.notices(), 'a legal frame must not be refused').toEqual([]);
 
-      const want = `WT201:${PAD}:END`;
-      const deadline = Date.now() + 90000;
+      // EOF closes the reader; then the shell counts what actually landed ON DISK. The
+      // verdict is never taken from the echo — a terminal echoes what it was sent as it
+      // is typed, so "the text is on screen" cannot tell a frame that arrived whole from
+      // one that arrived truncated. Counting only the payload characters makes the
+      // expected number independent of whether the line discipline delivered CR, LF or
+      // CRLF; the 874 line terminators are consumed as terminators either way.
+      s.ws.send('\x04');
+      await sleep(600);
+      s.ws.send("stty echo; echo \"WT201:$(tr -d '\\r\\n' < cap.txt | wc -c | tr -d ' '):END\"\r");
+
+      const want = `WT201:${(PAD / 80) * 79}:END`;
+      const deadline = Date.now() + 60000;
       while (Date.now() < deadline && !s.output().includes(want)) await sleep(250);
-      expect(s.output().length, 'no output at all — the PTY never ran the line').toBeGreaterThan(0);
-      expect(s.output()).toContain(want);
+      expect(s.output().length, 'no output at all - the PTY never ran the line').toBeGreaterThan(0);
+      expect(s.output(), `last bytes seen: ${JSON.stringify(s.output().slice(-300))}`).toContain(want);
       expect(s.ws.readyState).toBe(WebSocket.OPEN);
     } finally {
       try { s?.ws.close(); } catch {}

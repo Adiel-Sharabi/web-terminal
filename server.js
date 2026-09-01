@@ -632,6 +632,16 @@ if (PASS && !DEFAULT_PASSWORDS.includes(PASS) && !PASS.startsWith('$scrypt$')) {
 // input was refused, here is its size" into "your session dropped". The gap is the
 // zone where an accidental oversend is still reported honestly; past 4 MiB it is
 // abuse, not a paste.
+//
+// AND A 1009 CANNOT BECOME A RECONNECT LOOP, which is the failure that would make
+// this worse than the silent drop it replaces. Two independent reasons, both read
+// off the companion rather than assumed: its offline buffer has its own ceiling
+// (`_inputBufferHardCap`, api_client.dart) of 256 KB - EQUAL to the app cap and 16x
+// below this one - so no BUFFERED write can reach the transport limit and then be
+// re-flushed on every reconnect; and a live write is `_socket!.add(data)`,
+// fire-and-forget in `sendInput` and never re-queued, so a closed socket loses that
+// one oversend once instead of replaying it. A loop needs a write that is both over
+// 4 MiB and retried, and no first-party client can produce one.
 const WS_INPUT_MAX = 256 * 1024;         // per frame, UTF-16 code units (app cap)
 const WS_MAX_PAYLOAD = 4 * 1024 * 1024;  // per message, UTF-8 bytes (transport cap)
 
