@@ -17,7 +17,7 @@ import 'dart:io' show Platform;
 
 import 'package:desktop_drop/desktop_drop.dart';
 import 'package:file_selector/file_selector.dart' show XFile, openFiles;
-import 'package:flutter/foundation.dart' show immutable, kIsWeb;
+import 'package:flutter/foundation.dart' show immutable, kIsWeb, listEquals;
 import 'package:flutter/material.dart';
 import 'package:flutter/services.dart';
 import 'package:image/image.dart' as img;
@@ -43,6 +43,7 @@ import '../theme/status_colors.dart';
 import '../util/attach_overlap.dart';
 import '../util/scrollback_window.dart';
 import '../util/terminal_links.dart';
+import '../util/terminal_tail.dart';
 import '../widgets/attach_source_sheet.dart';
 import '../widgets/compose_bar.dart';
 import '../widgets/conversation_view.dart';
@@ -53,6 +54,7 @@ import '../widgets/session_meta_bar.dart';
 import '../widgets/session_action_sheet.dart';
 import '../widgets/status_dot.dart';
 import '../widgets/submit_unconfirmed_banner.dart';
+import '../widgets/terminal_tail_strip.dart';
 import '../widgets/terminal_key_strip.dart';
 
 /// Max send-history entries kept per session (matches the web compose bar).
@@ -870,6 +872,27 @@ bool questionOverlayVisible(PendingQuestion? pending, String? dismissedKey) =>
 bool pendingQuestionChipVisible(PendingQuestion? pending, String? dismissedKey) =>
     pending != null && !questionOverlayVisible(pending, dismissedKey);
 
+/// #194 Part 1 — whether the chat lens's terminal-tail strip is allowed to be
+/// LIVE right now, given [status]. Pure + top-level for the same reason as
+/// [terminalAcceptsInput]: a test can assert this directly instead of
+/// mounting the whole SessionScreen.
+///
+/// The gate is `status != 'working'`, and nothing more.
+///
+/// Deliberately NOT `ConversationView._shouldLivePoll` (which ALSO counts
+/// 'active' and mid-compaction as busy) and NOT `echoTimeoutRuns` (which
+/// additionally counts 'waiting'). Both exist to protect something else — a
+/// poll timer, an echo's lifetime — and borrowing either here would hide
+/// exactly the case this strip exists for: a brand-new session parked on
+/// Claude's folder-trust selector (#190) reports 'active', not 'working',
+/// because no hook has fired yet, and `_shouldLivePoll` would read that as
+/// busy and keep the strip dark on the one session that most needs it.
+/// Compaction stays visible for the mirror-image reason: #129 measured Claude
+/// reports 'idle' partway through a `/compact`, so 'working' cannot be
+/// trusted to cover that window either — a possibly-stale tail is still
+/// strictly more honest than showing nothing.
+bool terminalTailGateOpen(String? status) => status != 'working';
+
 /// A STABLE identity for a pending question, derived from its CONTENT (headers,
 /// question text, multiSelect, option labels) instead of the volatile
 /// `toolUseId`.
@@ -1048,6 +1071,19 @@ class _SessionScreenState extends State<SessionScreen>
   bool? _serverHasTranscript; // null = capability not yet checked
   bool _transcriptUnavailableForSession =
       false; // this session 404s despite the capability
+
+  // #194 Part 1 — the chat lens's terminal-tail strip. The extraction rule is
+  // pure (`util/terminal_tail.dart`); this screen only owns the subscription
+  // lifecycle, because `_terminal` lives here and outlives the chat lens
+  // (ConversationView, including any state of its own, is torn down on every
+  // lens flip — session_screen.dart's own Offstage/`if` doc above says so).
+  List<String> _terminalTail = const [];
+  // Whether `_onTerminalTailChanged` is currently subscribed to `_terminal`.
+  // `Terminal.write` calls `notifyListeners()` on EVERY PTY chunk, and any
+  // per-frame work here is a FULL-WINDOW present every vsync — so this is only
+  // true while the chat lens is showing AND `terminalTailGateOpen` is true;
+  // see `_updateTerminalTailSubscription`.
+  bool _listeningToTerminalTail = false;
 
   // #127 — the background scrollback deepening. The walk itself (which range to
   // ask for next, and which part of the answer is genuinely older than what is
@@ -1483,6 +1519,11 @@ class _SessionScreenState extends State<SessionScreen>
     if (desired != _activeLens && mounted) {
       setState(() => _activeLens = desired);
     }
+    // #194 Part 1 — this is the one place both of the strip's gate inputs
+    // (the lens, and — via `_onSessionsUpdate` calling this on every status
+    // update — `_session?.status`) are guaranteed to have just changed, so a
+    // single call site here keeps the subscription honest either way.
+    _updateTerminalTailSubscription();
   }
 
   Future<void> _setLens(String value) async {
@@ -2139,6 +2180,66 @@ class _SessionScreenState extends State<SessionScreen>
     // Only the toolbar's visibility depends on this — a plain rebuild is
     // enough, no other state to sync.
     if (mounted) setState(() {});
+  }
+
+  /// #194 Part 1 — adds or removes `_onTerminalTailChanged` as a listener on
+  /// `_terminal`, matching whether the strip is allowed to be live right now.
+  ///
+  /// Call this any time something the gate depends on changes. In practice
+  /// that is `_recomputeActiveLens`, the ONE place `_activeLens` is written
+  /// (#130) and also the method `_onSessionsUpdate` already calls after every
+  /// status update — so a single call site there covers both a lens flip and
+  /// a status change into or out of 'working', with no second wiring path to
+  /// keep in sync.
+  ///
+  /// Idempotent: safe to call from anywhere, any number of times, since it
+  /// only acts when the desired subscription state actually differs from
+  /// [_listeningToTerminalTail].
+  void _updateTerminalTailSubscription() {
+    final shouldListen =
+        _activeLens == 'chat' && terminalTailGateOpen(_session?.status);
+    if (shouldListen == _listeningToTerminalTail) return;
+    if (shouldListen) {
+      _terminal.addListener(_onTerminalTailChanged);
+      _listeningToTerminalTail = true;
+      _onTerminalTailChanged(); // pick up whatever is already on screen
+    } else {
+      _terminal.removeListener(_onTerminalTailChanged);
+      _listeningToTerminalTail = false;
+      if (_terminalTail.isNotEmpty && mounted) {
+        setState(() => _terminalTail = const []);
+      }
+    }
+  }
+
+  /// Recomputes the strip's tail from the terminal's CURRENT SCREEN — never
+  /// the whole scrollback, see `terminalTailLines`'s own doc — and rebuilds
+  /// only when it actually changed. `_terminal.notifyListeners()` fires on
+  /// every PTY chunk, and most chunks (a spinner frame, a cursor blink)
+  /// change nothing about the last few non-blank rows; `listEquals` is the
+  /// cost gate that keeps those from costing a frame.
+  void _onTerminalTailChanged() {
+    final buffer = _terminal.buffer;
+    // `lines.length >= viewHeight` (and so `scrollBack >= 0`) is a documented
+    // invariant of the vendored xterm's Buffer. It is still clamped here,
+    // because this listener runs from `notifyListeners()` INSIDE
+    // `Terminal.write` — and #81 is this repo's recorded case of a throw on
+    // exactly that path escaping into a WebSocket listener and killing the
+    // whole widget subtree in release (the "blank terminal" symptom). We
+    // vendor and PATCH that library, and #81 was itself the library
+    // contradicting its own assumptions, so "the doc comment says it cannot
+    // happen" is not the same as it not happening. Two comparisons buy an
+    // empty strip instead of a blank app.
+    final base = buffer.scrollBack < 0 ? 0 : buffer.scrollBack;
+    final rows = buffer.viewHeight < buffer.lines.length - base
+        ? buffer.viewHeight
+        : buffer.lines.length - base;
+    final next = terminalTailLines(
+      rowCount: rows,
+      rowText: (i) => buffer.lines[base + i].getText(),
+    );
+    if (listEquals(next, _terminalTail)) return;
+    if (mounted) setState(() => _terminalTail = next);
   }
 
   /// Copies the current selection to the clipboard (owner priority: fix
@@ -3750,6 +3851,9 @@ class _SessionScreenState extends State<SessionScreen>
     _reconnectedSub?.cancel();
     _inputDroppedSub?.cancel();
     _connection?.close();
+    if (_listeningToTerminalTail) {
+      _terminal.removeListener(_onTerminalTailChanged);
+    }
     _terminalController.removeListener(_onSelectionChanged);
     _terminalController.dispose();
     _composeController.removeListener(_onComposeChanged);
@@ -4191,6 +4295,24 @@ class _SessionScreenState extends State<SessionScreen>
                     derivedCtxSink: _derivedCtx,
                     // #83: lets Ctrl+C above copy what is selected here.
                     selectionSink: _chatSelection,
+                  ),
+                // #194 Part 1 — floats above the chat lens rather than taking
+                // a Column slot (same reasoning as the terminal's own
+                // selection toolbar / jump-to-bottom FAB above): showing or
+                // hiding it must never resize, and so never rescroll, the
+                // conversation underneath. `_terminalTail` is already empty
+                // whenever the gate is shut (see
+                // `_updateTerminalTailSubscription`), so this condition is
+                // never true in the Terminal lens or while `working`.
+                if (_activeLens == 'chat' && _terminalTail.isNotEmpty)
+                  Positioned(
+                    left: 0,
+                    right: 0,
+                    bottom: 0,
+                    child: TerminalTailStrip(
+                      lines: _terminalTail,
+                      onTap: () => _setLens('terminal'),
+                    ),
                   ),
               ],
             ),
