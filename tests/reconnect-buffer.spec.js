@@ -15,7 +15,7 @@
 // red before the latch; every other test here passed either way and is a guard, not a
 // demonstration.
 const { test, expect } = require('@playwright/test');
-const { admits } = require('../lib/reconnect-buffer');
+const { admits, decide } = require('../lib/reconnect-buffer');
 
 const LIMITS = { maxEntries: 100, maxBytes: 4 * 1024 * 1024 };
 const open = (count, bytes) => ({ count, bytes, latched: false });
@@ -74,5 +74,53 @@ test.describe('#201 the cluster reconnect buffer admission rule', () => {
     admits(state, 10, LIMITS);
     admits(state, LIMITS.maxBytes, LIMITS);
     expect(JSON.stringify(state)).toBe(before);
+  });
+});
+
+// #204 — the refusal above was SILENT to the browser, which is the one thing #193 says
+// it must not be. `localWs` is open throughout (the REMOTE link is what is down), so
+// the notice always had somewhere to go.
+//
+// The interesting half is not "report it" but "report it ONCE". A latched buffer refuses
+// every subsequent keystroke, so reporting each one would answer an outage the user
+// types through with a banner per character — noise that teaches them to ignore the one
+// notice that mattered. The latch is what makes one the right number, which is why the
+// reporting rule is derived from it here rather than written as an `if` at the call site.
+test.describe('#204 how many refusals the browser is told about', () => {
+  test('an admitted write reports nothing', () => {
+    expect(decide(open(0, 0), 12, LIMITS)).toEqual({ admit: true, notify: false });
+  });
+
+  test('the FIRST refusal of an outage is reported', () => {
+    expect(decide(open(LIMITS.maxEntries, 0), 1, LIMITS)).toEqual({ admit: false, notify: true });
+    // ...whichever bound it hit. Both are refusals for the same reason from the user's
+    // side: what you typed while the link was down did not fit.
+    expect(decide(open(0, LIMITS.maxBytes), 1, LIMITS)).toEqual({ admit: false, notify: true });
+  });
+
+  test('every LATER refusal in the same outage is silent', () => {
+    // This is the whole point. Without the `!latched` guard a sustained outage answers
+    // every keystroke with its own notice.
+    const latched = { count: LIMITS.maxEntries, bytes: 0, latched: true };
+    expect(decide(latched, 1, LIMITS)).toEqual({ admit: false, notify: false });
+    expect(decide(latched, 999999, LIMITS)).toEqual({ admit: false, notify: false });
+  });
+
+  test('after a flush clears the latch, the next outage reports again', () => {
+    // The flush resets count/bytes/latched together (server.js, the remote `open`
+    // handler). A cleared latch must not be a permanently silenced one — the next
+    // outage is a new fact and deserves its own notice.
+    const afterFlush = open(0, 0);
+    expect(decide(afterFlush, 12, LIMITS).notify).toBe(false); // fits, nothing to say
+    expect(decide(open(LIMITS.maxEntries, 0), 1, LIMITS).notify).toBe(true);
+  });
+
+  test('deciding is PURE too — no counter hidden in the module', () => {
+    // A "report once" rule implemented with module state would report once per PROCESS,
+    // not once per outage, and would be shared by every proxied session on the server.
+    const state = open(LIMITS.maxEntries, 0);
+    expect(decide(state, 1, LIMITS).notify).toBe(true);
+    expect(decide(state, 1, LIMITS).notify).toBe(true);
+    expect(JSON.stringify(state)).toBe(JSON.stringify(open(LIMITS.maxEntries, 0)));
   });
 });

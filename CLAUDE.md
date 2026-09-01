@@ -415,6 +415,37 @@ take). The gap is wide rather than snug because `ws` answers an oversize frame b
 zone between the two caps is where an accidental oversend is still reported honestly.
 `scripts/check-shared-constants.js` fails the build if the pair drifts.
 
+**#204 — and every refusal now SAYS SO, which is the rule that was actually being
+broken.** #193's principle is that dropped input must be visible; two paths never
+honoured it, and #201 made one of them reachable.
+
+- **The companion refuses at the APP cap itself** (`sendInput`, before the
+  live/buffered branch), reporting on the same `inputDropped` stream. That makes
+  `WS_MAX_PAYLOAD` **unreachable from that client** — strictly better than defending
+  against it, because *a refusal by the APP keeps the socket and the session; a refusal
+  by the TRANSPORT costs the connection.* The comparison is `>`, matching the server's
+  `msg.length > WS_INPUT_MAX` exactly: a write **at** the cap is legal on both sides,
+  and over-refusing would be the same silent loss in the other direction. One number
+  serves both roles (per-frame wire cap, whole-buffer total) because the #201 invariant
+  makes them one number; a second Dart constant would be a third copy of the value whose
+  whole problem was that its copies looked independent.
+- **`app.html` is NOT gated and still can reach that band.** It has a dozen scattered
+  `ws.send(...)` sites and no single input path, so there is nowhere to put the check
+  without first building one. Recorded at the `server.js` cap block, because the server
+  cannot tell which client is talking to it.
+- **The cluster proxy tells the browser when its reconnect buffer refuses a write** —
+  the remote link is what is down, `localWs` is open throughout. **Once per outage, not
+  once per keystroke:** the buffer LATCHES (#201), so everything after the first refusal
+  is refused for the same reason, and a banner per character is noise that teaches you to
+  ignore the one that mattered. The reporting rule therefore lives with the latch in
+  `lib/reconnect-buffer.js` (`decide`) rather than as an `if` beside it.
+
+**`WT_CLUSTER_TOKENS_FILE`** exists so that regression test can write a cluster entry
+pointing at a dead port. `cluster-tokens.json` holds a live bearer token for **every peer
+in the cluster**, and a backup/restore around the test is not enough — a suite run that is
+SIGTERM'd part-way (what happens when the full suite outlives a 10-minute tool ceiling)
+never reaches its restore. Redirect the path and the real file is never opened.
+
 ### Server-side delivery — the SSOT, and where the real bug lived
 **Every agent TUI folds one read into a paste and swallows a trailing CR.** Codex does it at any length (`paste_burst.rs`); **Claude does it too** — it just needs a bigger read to trip it. Measured against the real Claude TUI, atomic `text\r` in ONE write:
 

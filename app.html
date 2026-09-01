@@ -1151,7 +1151,7 @@
             return;
           }
           if (e.data.startsWith('{"inputDropped"')) {
-            try { showInputDropped(JSON.parse(e.data).bytes); } catch (ex) {}
+            try { const d = JSON.parse(e.data); showInputDropped(d.bytes, d.reason); } catch (ex) {}
             return;
           }
           if (e.data.startsWith('{"heartbeat":')) return;
@@ -1486,7 +1486,7 @@
               return;
             }
             if (e.data.startsWith('{"inputDropped"')) {
-              try { showInputDropped(JSON.parse(e.data).bytes); } catch (ex) {}
+              try { const d = JSON.parse(e.data); showInputDropped(d.bytes, d.reason); } catch (ex) {}
               return;
             }
             if (e.data.startsWith('{"heartbeat":')) return;
@@ -1924,12 +1924,20 @@
     // it). Reuses the #composeNotice bar — same "something you sent didn't land" family
     // as #179's submitUnconfirmed — with its own wording; hideSubmitUnconfirmed()
     // already hides it generically, so the dismiss button needs no change.
-    function showInputDropped(bytes) {
+    // #204 — TWO refusals arrive on this one channel and they do not mean the same
+    // thing. The direct path's is "that write was too large" (the server's per-frame
+    // cap). The cluster proxy's is "the link to that peer is down and the buffer that
+    // holds what you type meanwhile is full" — which can land on a single keystroke, so
+    // the size-based wording would read "too large to send (16 bytes)" and be
+    // confidently wrong. `reason` is sent only by the proxy, so its ABSENCE keeps the
+    // original meaning and an older server needs no special case here.
+    function showInputDropped(bytes, reason) {
       const box = document.getElementById('composeNotice');
       const txt = document.getElementById('composeNoticeText');
       if (!box || !txt) return;
-      txt.textContent = `That input was too large to send (${bytes} bytes) and was dropped. `
-        + 'Try sending it in smaller pieces.';
+      txt.textContent = reason === 'buffer-full'
+        ? `The connection to that server is down and there was no room left to hold what you typed (${bytes} bytes), so it was dropped. Send it again once it reconnects.`
+        : `That input was too large to send (${bytes} bytes) and was dropped. Try sending it in smaller pieces.`;
       box.hidden = false;
       doResize();
     }

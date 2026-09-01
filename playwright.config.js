@@ -15,6 +15,16 @@ const TEST_IPC_TOKEN = crypto.randomBytes(32).toString('base64');
 process.env.WT_CLAUDE_METRICS_FILE = path.join(__dirname, 'claude-metrics.test.json');
 process.env.WT_CLAUDE_METRICS_DEBOUNCE_MS = '250';
 
+// #204 — the same protection, for a file that matters more. `cluster-tokens.json`
+// holds a live bearer token for every peer in the real cluster, and
+// tests/cluster-proxy-drop.spec.js has to PUT AN ENTRY IN IT (one pointing at a dead
+// port, so the proxy's remote link is down and the reconnect buffer is the path under
+// test). Backing the real file up around the test would not be enough: a suite run
+// that is SIGTERM'd part-way — which is exactly what happens when the full suite
+// outlives a 10-minute tool ceiling — never reaches its restore. Redirecting the path
+// means the real file is not merely restored, it is never opened.
+process.env.WT_CLUSTER_TOKENS_FILE = path.join(__dirname, 'cluster-tokens.test.json');
+
 module.exports = defineConfig({
   testDir: './tests',
   timeout: 30000,
