@@ -2044,8 +2044,18 @@ class _SessionScreenState extends State<SessionScreen>
   /// A SnackBar for the same reason `_copySelection`/`_forkFromMenu` already use one
   /// here: a one-shot fact the user just needs to see once, not a persistent banner
   /// (unlike #179's [SubmitUnconfirmedBanner], there is no saved text to offer back —
-  /// [connection.inputDropped] carries only a byte count, never the dropped content,
-  /// whichever of its two origins fired it).
+  /// [connection.inputDropped] carries only a length, never the dropped content,
+  /// whichever of its THREE origins fired it: the server's per-frame cap, this
+  /// client's own offline-buffer eviction, and — since #204 — its local refusal of a
+  /// write past that same cap).
+  ///
+  /// KNOWN WRONG FOR ONE OF THE THREE, and recorded rather than quietly left. An
+  /// offline-buffer eviction gives up a write of perfectly LEGAL size because the
+  /// outage overflowed the buffer, and "too large to send" is not what happened to
+  /// it. That is the identical confidently-wrong-wording defect #204 fixed on the
+  /// proxy path, where the fix was a `reason` on the wire; here it needs one on this
+  /// stream, which is a type change rather than a field — filed as #208 rather than
+  /// smuggled into #204's diff.
   void _onInputDropped(int bytes) {
     if (!mounted) return;
     ScaffoldMessenger.of(context).showSnackBar(

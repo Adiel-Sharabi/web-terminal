@@ -198,4 +198,62 @@ test.describe('#204 the cluster proxy reports a buffer refusal to the browser', 
     ).toBe(1);
     expect(JSON.parse(droppedFrames(frames)[0]).bytes).toBe(Buffer.byteLength(OVER));
   });
+
+  // The latch that makes "once per outage" right is also the thing that could silence
+  // the notice FOREVER. `bufferLatched` is cleared in one place — the remote `open`
+  // handler, beside `buffered.length = 0` — and if that line were ever lost, the first
+  // outage on a socket would be the last one ever reported on it, and every write after
+  // it would be REFUSED for the lifetime of that proxy connection. Both halves silent,
+  // and every other test in this file still green.
+  //
+  // So this drives a real recovery: the peer comes UP, the buffer flushes, the peer goes
+  // down again, and a second outage must report again. The recovery is observed rather
+  // than waited for — the proxy sends `{"requestResize":true}` on remote open and
+  // nothing else does, so its arrival IS proof the flush ran.
+  test('a flush clears the latch, so the NEXT outage reports again', async () => {
+    test.setTimeout(60000); // two real reconnect cycles, each on the proxy's own backoff
+    const { ws, frames } = await openProxyWs(cookie, 'wt204b-' + Date.now());
+    const resizeAsks = () => frames.filter((f) => f.startsWith('{"requestResize"')).length;
+
+    /** A peer that accepts anything, so the proxy's next reconnect attempt succeeds. */
+    const stub = new WebSocket.Server({ port: 17699 });
+    stub.on('connection', (peer) => { peer.on('message', () => {}); });
+    let stubOpen = true;
+    const stopStub = () => new Promise((resolve) => {
+      if (!stubOpen) return resolve();
+      stubOpen = false;
+      for (const c of stub.clients) { try { c.terminate(); } catch { /* already gone */ } }
+      stub.close(() => resolve());
+    });
+
+    try {
+      // OUTAGE 1 — the peer only starts listening once this notice has landed, so the
+      // buffer genuinely filled while the link was down.
+      for (let i = 0; i < MAX_BUFFER_SIZE; i++) ws.send(`a${i}\r`);
+      ws.send('first-overflow\r');
+      await expect.poll(() => droppedFrames(frames).length, { timeout: 15000 }).toBe(1);
+
+      // RECOVERY — the proxy reconnects on its own backoff and flushes.
+      await expect.poll(() => resizeAsks(), { timeout: 25000 }).toBeGreaterThan(0);
+
+      // OUTAGE 2 — same socket, same proxy, fresh outage.
+      await stopStub();
+      for (let i = 0; i < MAX_BUFFER_SIZE; i++) ws.send(`b${i}\r`);
+      ws.send('second-overflow\r');
+      await expect
+        .poll(() => droppedFrames(frames).length, { timeout: 20000 })
+        .toBe(2);
+    } finally {
+      await stopStub();
+      await closeAndDrain(ws);
+    }
+
+    // Drained: exactly two, and the second is the second overflow rather than a repeat
+    // of the first — which is what distinguishes "the latch cleared" from "a stray
+    // duplicate of outage 1".
+    const notices = droppedFrames(frames).map((f) => JSON.parse(f));
+    expect(notices.length).toBe(2);
+    expect(notices[1].bytes).toBe(Buffer.byteLength('second-overflow\r'));
+    expect(notices[1].reason).toBe('buffer-full');
+  });
 });

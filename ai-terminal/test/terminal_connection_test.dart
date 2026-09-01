@@ -16,8 +16,10 @@ class _FakeSocket implements TerminalSocket {
   /// Writes throw — a socket that connected but died before the flush reached it.
   final bool failAdd;
 
-  /// #193 review, Finding 2 — mirrors the server's REAL per-frame cap (server.js:
-  /// 65536). A real TCP write never throws just because a frame is "too big" — the
+  /// #193 review, Finding 2 — stands in for the server's per-frame cap (65536 when
+  /// this was written; `WS_INPUT_MAX` is 256KB since #201, and the one test that uses
+  /// this keeps the older, TIGHTER number on purpose — see it for why).
+  /// A real TCP write never throws just because a frame is "too big" — the
   /// server accepts the bytes and only its OWN application logic then refuses the
   /// frame — so this records an oversized `add()` in [oversizedFrames] rather than
   /// throwing, letting a test assert "no single frame this client ever sent would
@@ -325,16 +327,20 @@ void main() {
     // buffered write into ONE STRING before sending. Each buffered write is already a
     // whole frame (that is the entire point of never splitting/merging one — #63), and
     // joining them erased that boundary right before the wire: two pastes that
-    // INDIVIDUALLY fit under the server's real 64KB-per-frame cap (server.js: 65536)
-    // could join into a string that does NOT — and the server refuses the WHOLE joined
-    // frame, losing BOTH pastes to a limit neither hit alone. The 256KB hard ceiling
-    // (well above 64KB) made this reachable: raising how much the buffer can hold
-    // without also flushing write-by-write meant raising exactly how much could be lost
-    // to one over-the-wire rejection.
+    // INDIVIDUALLY fit under the server's per-frame cap could join into a string that
+    // does NOT — and the server refuses the WHOLE joined frame, losing BOTH pastes to a
+    // limit neither hit alone. The 256KB hard ceiling made this reachable: raising how
+    // much the buffer can hold without also flushing write-by-write meant raising
+    // exactly how much could be lost to one over-the-wire rejection.
+    //
+    // The cap was 65536 then and is 256KB now (#201). This test keeps 65536: it asserts
+    // that NO frame is ever a join of two, and the tighter the stand-in cap the sooner
+    // a reintroduced join trips it. Matching the real number would make the same
+    // regression need four times the input to show up.
     test('MULTIPLE large offline writes are flushed as SEPARATE frames, never joined into one (#193)',
         () async {
       final s1 = _FakeSocket();
-      final s2 = _FakeSocket(maxFrameBytes: 65536); // the server's real per-frame cap
+      final s2 = _FakeSocket(maxFrameBytes: 65536); // deliberately the OLD, tighter cap
       var i = 0;
       final conn = TerminalConnection(_server, 's',
           socketFactory: (_) => i++ == 0 ? s1 : s2,
@@ -450,9 +456,20 @@ void main() {
       s1.serverDrop();
       await pump(15); // offline window
 
+      // A SENTINEL, typed in the same offline window. Its arrival on s2 is what makes
+      // the negative below mean anything: without it, "the oversized write is not in
+      // the flush" and "the reconnect never happened on this runner" are the same
+      // observation, and the test would pass while proving nothing. That is this
+      // repo's own recorded defect shape, and this assertion is the one that uniquely
+      // guards the regression of moving the check AFTER `_bufferInput` — where the
+      // write is reported AND still buffered.
+      conn.sendInput('sentinel\r');
       conn.sendInput('z' * (cap + 1));
       await pump(120); // reconnect + flush
 
+      expect(s2.sentStrings, contains('sentinel\r'),
+          reason: 'the reconnect and flush must have actually run, or the negative '
+              'assertion below is vacuous');
       expect(dropped, [cap + 1]);
       expect(s2.sentStrings.any((f) => f.startsWith('zzz')), isFalse,
           reason: 'it must never have been buffered, so the flush has nothing to send');

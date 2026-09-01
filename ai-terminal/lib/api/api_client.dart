@@ -1272,8 +1272,9 @@ class TerminalConnection {
     // #193 review, Finding 2 — ONE write at a time, never `_inputWrites.join()`ed into
     // a single string first. Each buffered entry is already a whole frame (the entire
     // point of never splitting/merging one — #63), and joining erased that boundary
-    // right before the wire: two pastes that individually fit under the server's real
-    // 64KB-per-frame cap (server.js `handleMessage`) could join into a string that does
+    // right before the wire: two pastes that individually fit under the server's
+    // per-frame cap (server.js `handleMessage`; 64KB when this was written, 256KB since
+    // #201 raised it to match this client's ceiling) could join into a string that does
     // NOT — and the server refuses the WHOLE joined frame, losing BOTH pastes to a
     // limit neither hit alone. Sending one write per `add()` call makes each write's
     // fate independent at the wire, exactly like a live (non-buffered) sendInput
