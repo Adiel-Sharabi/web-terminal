@@ -132,4 +132,49 @@ void main() {
       expect(TerminalTailStrip.heightFor(kTerminalTailLines), lessThan(120));
     });
   });
+
+  group('heightFor is MEASURED against the real layout, not derived', () {
+    // Review derived this number from the widget's constants and it was wrong at
+    // EVERY line count (41.6 vs 44.0, 57.2 vs 58.0, 72.8 vs 74.0, 88.4 vs 90.0):
+    // a paragraph rounds its line box up to whole pixels, and at one line the
+    // 18px chevron is taller than the line. An under-report is not cosmetic -- it
+    // is precisely the occlusion and tap-shadowing the inset exists to prevent,
+    // just small enough to look fine. So the number is pinned to the LAYOUT.
+    Future<double> render(WidgetTester tester, int n, {TextScaler? scaler}) async {
+      final strip = TerminalTailStrip(
+        lines: List.generate(n, (i) => 'row $i'),
+        onTap: () {},
+      );
+      await tester.pumpWidget(MaterialApp(
+        home: MediaQuery(
+          data: MediaQueryData(textScaler: scaler ?? TextScaler.noScaling),
+          child: Scaffold(
+            body: Align(alignment: Alignment.bottomCenter, child: strip),
+          ),
+        ),
+      ));
+      return tester.getSize(find.byType(TerminalTailStrip)).height;
+    }
+
+    for (var n = 1; n <= kTerminalTailLines; n++) {
+      testWidgets('heightFor($n) equals what $n lines actually lay out to',
+          (tester) async {
+        expect(await render(tester, n), TerminalTailStrip.heightFor(n));
+      });
+    }
+
+    testWidgets('the system text scale cannot move it -- measured at 1.3x',
+        (tester) async {
+      // Unpinned, the strip grew to 106px against an 88.4px inset at this
+      // scale, putting the pill and FAB back inside its tap band for exactly
+      // the users least able to absorb it. The strip pins TextScaler.noScaling
+      // because terminal content does not follow the system scale and the
+      // terminal lens it previews does not either.
+      for (var n = 1; n <= kTerminalTailLines; n++) {
+        expect(await render(tester, n, scaler: const TextScaler.linear(1.3)),
+            TerminalTailStrip.heightFor(n),
+            reason: 'line count $n moved under a 1.3x system text scale');
+      }
+    });
+  });
 }

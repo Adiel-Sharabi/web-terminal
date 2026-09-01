@@ -461,6 +461,24 @@ class _ConversationViewState extends State<ConversationView> {
   @override
   void didUpdateWidget(covariant ConversationView oldWidget) {
     super.didUpdateWidget(oldWidget);
+    // #194 Part 1 — [bottomInset] growing means something (the terminal-tail
+    // strip) just appeared over this view's bottom edge. The list's padding
+    // grows with it, but `pixels` stays at the OLD maxScrollExtent, so a reader
+    // who was pinned to the bottom is now scrolled UP by the strip's height and
+    // the tail of the newest answer sits behind it — at the exact moment they
+    // want to read it, since the strip appears when the turn ENDS. Nothing
+    // guarantees a later event to correct it: polling stops on idle, and a
+    // refresh with no new content scrolls nothing.
+    //
+    // Only when already pinned, so this can never drag a reader off something
+    // they scrolled back to read — pinned-to-bottom already means "follow the
+    // latest". It also removes a subtler hazard by construction: the strip is
+    // ~90px, over `_kEdgeThreshold`, so a scroll notification coinciding with
+    // the padding jump would have computed `atBottom` false and silently
+    // unpinned at every turn end.
+    if (widget.bottomInset != oldWidget.bottomInset && _pinnedToBottom) {
+      _scrollToBottom(jump: true);
+    }
     // A different PTY session id — or the SAME PTY session re-pinned to a
     // different Claude conversation — means everything we hold is stale, so
     // reload from scratch. /clear (and a /compact that starts a fresh session)

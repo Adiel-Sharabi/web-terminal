@@ -35,6 +35,10 @@ class TerminalTailStrip extends StatelessWidget {
   static const double _bottomMargin = AppSpacing.grid * 2;
   static const double _border = 1;
 
+  /// The trailing chevron's box. It is the FLOOR on the content height: at one
+  /// line the icon is taller than the line, so the Row takes the icon's height.
+  static const double _chevron = 18;
+
   /// The height this strip occupies when rendering [lineCount] lines.
   ///
   /// The parent needs this to inset whatever it floats the strip OVER (see
@@ -42,9 +46,27 @@ class TerminalTailStrip extends StatelessWidget {
   /// that produces it — rather than being re-derived at the call site, which
   /// is how the two would drift. Returns 0 for an empty strip, because the
   /// caller does not mount one.
+  ///
+  /// TWO PARTS OF THIS WERE WRONG WHEN DERIVED FROM THE CONSTANTS ALONE, and
+  /// review caught them by MEASURING the mounted widget rather than by reading
+  /// the arithmetic. Both are now in the formula, and
+  /// `session_screen_terminal_tail_test.dart` asserts this function against
+  /// `tester.getSize` at every line count, so the next style change cannot
+  /// silently reintroduce the gap:
+  ///
+  ///   * a text line lays out at 16.0px, not 12 x 1.3 = 15.6 — a paragraph
+  ///     rounds its line box UP to whole pixels;
+  ///   * at one line the 18px chevron is taller than the line, so the Row's
+  ///     height is the icon's, not the text's.
+  ///
+  /// An under-report is not cosmetic: it is exactly the occlusion and
+  /// tap-shadowing this number exists to prevent, just small enough to look
+  /// fine.
   static double heightFor(int lineCount) {
     if (lineCount <= 0) return 0;
-    return lineCount * _fontSize * _lineHeight +
+    final lineBox = (_fontSize * _lineHeight).ceilToDouble();
+    final content = lineCount * lineBox;
+    return (content < _chevron ? _chevron : content) +
         _verticalPadding * 2 +
         _border * 2 +
         _bottomMargin;
@@ -98,6 +120,23 @@ class TerminalTailStrip extends StatelessWidget {
                           line,
                           maxLines: 1,
                           overflow: TextOverflow.ellipsis,
+                          // TERMINAL CONTENT DOES NOT FOLLOW THE SYSTEM TEXT
+                          // SCALE, and this strip is a peek at terminal
+                          // content. Measured at TextScaler.linear(1.3) the
+                          // strip grew to 106px against a 88.4px inset — so
+                          // the occlusion and the tap-shadowing came back for
+                          // exactly the users least able to absorb them.
+                          //
+                          // Pinning is the accessible answer here, not the
+                          // lazy one. The terminal lens itself renders at the
+                          // app's own font setting and ignores the system
+                          // scaler, so a scaled strip would show LARGER text
+                          // than the terminal it previews while fitting FEWER
+                          // characters before the ellipsis — strictly less
+                          // information, for the reader who most needs it. The
+                          // strip is a tap away from that lens, which is where
+                          // font size is actually configurable.
+                          textScaler: TextScaler.noScaling,
                           style: const TextStyle(
                             fontFamily: 'monospace',
                             // 'monospace' is an Android/fontconfig alias that

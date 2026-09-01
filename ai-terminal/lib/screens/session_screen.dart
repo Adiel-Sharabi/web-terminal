@@ -4352,9 +4352,8 @@ class _SessionScreenState extends State<SessionScreen>
                     // band (otherwise the strip, a LATER sibling of this one
                     // in the ancestor Stack, hit-tests first and swallows the
                     // tap that was meant to jump to the new message).
-                    bottomInset: _activeLens == 'chat'
-                        ? TerminalTailStrip.heightFor(_terminalTail.length)
-                        : 0,
+                    bottomInset:
+                        TerminalTailStrip.heightFor(_terminalTail.length),
                   ),
                 // #194 Part 1 — floats above the chat lens rather than taking
                 // a Column slot (same reasoning as the terminal's own
