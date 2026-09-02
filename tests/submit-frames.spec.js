@@ -271,7 +271,10 @@ test.describe('bracketLongBody', () => {
   });
 
   // The threshold is BYTES, for a string caller as much as a Buffer one — PR #214 review.
-  // The cliff is a 1024-BYTE read boundary in the TUI, and `writePromptToTerm` (the
+  // Which unit the 1024 cliff is counted in is INFERRED (the sweep was ASCII, where the
+  // two numbers are equal); bytes is simply the reading that is safe under both, since
+  // bytes >= units. What is NOT inferred is that the callers must agree, and they did not:
+  // `writePromptToTerm` (the
   // api-error replay) passes a STRING, whose `.length` is UTF-16 code units. Comparing
   // units there wraps LATER, not sooner: 400 CJK characters are 400 units but 1200 bytes
   // — under the limit, past the cliff, and silently unwrapped on the one path that fires

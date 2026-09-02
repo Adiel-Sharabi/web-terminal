@@ -499,7 +499,8 @@ measurement, not by argument** — and that is why #193's fleet-wide hunt found 
 measured a *pasted paragraph*, which has newlines.
 
 **The fix is `submit.bracketAbove` in the registry, applied in the worker** — one owner,
-every client fixed with no client release, `app.html` included. Claude declares **512**:
+every client fixed with no client release, `app.html` included. Claude declares **512 BYTES** (not characters — dictated
+Hebrew is two bytes a character, so 512 of them land on the cliff exactly):
 under the 1024 cliff *and* under 588, where the submit was lost on one run of two, so the
 threshold sits below the flakiness rather than below the cliff. Codex and plain shells
 declare **none**, and undeclared means never — today's bytes exactly. That asymmetry is
