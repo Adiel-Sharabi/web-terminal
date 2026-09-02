@@ -206,6 +206,36 @@ test.describe('#179 — the worker reports a submit that produced no agent activ
     expect(events.unconfirmed(id)).toHaveLength(0);
   });
 
+  // PR #214 review, finding 2. #213 wraps a long plain-text submit in bracketed paste,
+  // and the line tracker DROPS paste bodies (a paste is normally a file PATH). Without
+  // `trackAs` a long `/`-line arriving as ONE frame would read as an EMPTY line, flipping
+  // isCommand true -> false and arming the watch on a slash command — the false alarm the
+  // two tests above exist to forbid, reachable again by a different route. Not vacuous:
+  // the positive control is in this same file (a plain prompt over the same threshold IS
+  // reported), so the pair distinguishes 'correctly skipped' from 'nothing armed at all'.
+  test('a LONG slash command, wrapped as a paste, is still never reported (#213)', async () => {
+    const id = await hookedClaudeSession('slash-long');
+    const limit = agents.submitPolicy('claude').bracketAbove;
+    const slash = '/context ' + 'y'.repeat(limit + 200);
+    expect(slash.length).toBeGreaterThan(limit);
+
+    typeInto(client, id, slash + '\r');
+    await sleep(CLAUDE_GAP + CONFIRM_MS + 500);
+    expect(events.unconfirmed(id)).toHaveLength(0);
+  });
+
+  // The positive control for the test above: same length, same wrapping, NOT a command.
+  test('a LONG plain prompt, wrapped as a paste, IS still reported (#213 control)', async () => {
+    const id = await hookedClaudeSession('prompt-long');
+    const limit = agents.submitPolicy('claude').bracketAbove;
+    const prompt = 'so first we want to reflect the user if there is a problem '.repeat(20);
+    expect(prompt.length).toBeGreaterThan(limit);
+
+    typeInto(client, id, prompt + '\r');
+    await sleep(CLAUDE_GAP + CONFIRM_MS + 500);
+    expect(events.unconfirmed(id)).toHaveLength(1);
+  });
+
   test('a plain shell is never watched — no provider, no claim', async () => {
     const { id } = await rpc(client, 'createSession', { cwd: dataDir, name: 'shell' });
     await sleep(150);

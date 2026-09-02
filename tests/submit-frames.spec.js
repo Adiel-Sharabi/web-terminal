@@ -7,7 +7,7 @@
 // (measured: atomic submitted at 20/40/60 chars, NOT at 80/120), which is why it looked
 // exempt for so long. Both split.
 const { test, expect } = require('@playwright/test');
-const { splitTrailingCr, isEscapeKey, endsBracketedPaste, CR_FRAME } = require('../lib/submit-frames');
+const { splitTrailingCr, bracketLongBody, isEscapeKey, endsBracketedPaste, CR_FRAME } = require('../lib/submit-frames');
 const agents = require('../lib/agents');
 
 const ESC = String.fromCharCode(0x1b);
@@ -176,5 +176,153 @@ test.describe('submit policy lives in the registry', () => {
       expect(typeof p.gapMs, `${id}.submit.gapMs`).toBe('number');
       expect(typeof p.crBurstsAsPaste, `${id}.submit.crBurstsAsPaste`).toBe('boolean');
     }
+  });
+});
+
+// --- bracketLongBody: the OTHER half of the submit rule ----------------------
+//
+// #213 — a ~1500-character DICTATED prompt (reported 2026-09-02) looked complete in the compose
+// box and arrived at the terminal as its tail alone. `buildComposeSubmission` brackets on
+// one predicate — does the buffer contain a newline — and dictation emits none, so a
+// dictated paragraph is the one long prompt still delivered to the TUI raw.
+//
+// Measured on the rig against claude 2.1.251 (scripts/rig/probe-paste-single-line.js,
+// verdict from the transcript): unbracketed is whole at 288/488/988, NOT SUBMITTED once
+// at 588, starts no turn at 1088, and at 1588 loses its first 1024 characters exactly,
+// twice. Bracketed is whole at 588/1588/2588.
+test.describe('bracketLongBody', () => {
+  const LIMIT = agents.submitPolicy('claude').bracketAbove;
+  const OPEN = ESC + '[200~';
+  const CLOSE = ESC + '[201~';
+  const long = (n) => 'x'.repeat(n);
+
+  test('claude declares a threshold, under the measured 1024 cliff', () => {
+    expect(typeof LIMIT).toBe('number');
+    expect(LIMIT).toBeGreaterThan(0);
+    // Strictly under the reproducible head-cut boundary, with room to spare — and under
+    // 588, where the submit was lost on one run of two.
+    expect(LIMIT).toBeLessThan(588);
+  });
+
+  test('wraps a long plain-text body in bracketed paste', () => {
+    const out = bracketLongBody(Buffer.from(long(LIMIT + 1)), LIMIT);
+    expect(out).not.toBeNull();
+    const s = out.toString();
+    expect(s.startsWith(OPEN)).toBe(true);
+    expect(s.endsWith(CLOSE)).toBe(true);
+    // The body itself must survive byte-for-byte — the whole point is losing nothing.
+    expect(s.slice(OPEN.length, s.length - CLOSE.length)).toBe(long(LIMIT + 1));
+  });
+
+  // The regression guard for the report itself: a dictated paragraph has no newline, so
+  // the client leaves it unbracketed and only this rule can save it.
+  test('a newline-free 1500-char prompt — the reported case — is wrapped', () => {
+    const dictated = 'so first we want to reflect the user if there is any problem '.repeat(25);
+    expect(dictated).not.toContain('\n');
+    expect(dictated.length).toBeGreaterThan(1024);
+    const out = bracketLongBody(Buffer.from(dictated), LIMIT);
+    expect(out).not.toBeNull();
+    expect(out.toString()).toBe(OPEN + dictated + CLOSE);
+  });
+
+  test('leaves a body AT the threshold alone', () => {
+    expect(bracketLongBody(Buffer.from(long(LIMIT)), LIMIT)).toBeNull();
+  });
+
+  test('leaves ordinary short input byte-identical — y, 1, continue', () => {
+    for (const s of ['y', '1', 'continue', 'do it please']) {
+      expect(bracketLongBody(Buffer.from(s), LIMIT)).toBeNull();
+    }
+  });
+
+  // Undeclared means "never", which is exactly the behaviour every agent had before the
+  // field existed. Codex and a plain shell both rely on it.
+  test('no threshold declared = never wrapped, at any length', () => {
+    expect(bracketLongBody(Buffer.from(long(99999)), undefined)).toBeNull();
+    expect(bracketLongBody(Buffer.from(long(99999)), agents.submitPolicy('codex').bracketAbove)).toBeNull();
+    expect(bracketLongBody(Buffer.from(long(99999)), agents.submitPolicy(null).bracketAbove)).toBeNull();
+  });
+
+  // REFUSED, never sanitised. A body carrying ESC is not plain text — it may already be a
+  // bracketed paste, or an arrow key, or a live '/'-line's backspaces — and _pasteInner's
+  // lesson is that stripping markers out of a body is no defence, since deleting the inner
+  // open from `a ESC[2 ESC[200~ 01~ b` reconstitutes a close.
+  test('refuses a body that already contains ESC — including one already bracketed', () => {
+    expect(bracketLongBody(Buffer.from(OPEN + long(LIMIT + 1) + CLOSE), LIMIT)).toBeNull();
+    expect(bracketLongBody(Buffer.from(long(LIMIT + 1) + ESC + '[A'), LIMIT)).toBeNull();
+  });
+
+  // SECURITY: the wrapper must not be escapable. A body carrying the paste CLOSE would
+  // end the paste early, and everything after it would be TYPED at the prompt — with a
+  // CR in that remainder, SUBMITTED. Refusing every ESC-bearing body is what makes that
+  // unreachable, and it is why the gate refuses rather than STRIPS: _pasteInner shows
+  // that deleting markers from a body can RECONSTITUTE one — removing the inner open
+  // from `a ESC[2 ESC[200~ 01~ b` leaves `ESC[2` and `01~` adjacent, which IS a close.
+  test('a body carrying the paste CLOSE cannot break out of the wrapper', () => {
+    const attack = long(LIMIT + 1) + CLOSE + 'rm -rf /';
+    expect(bracketLongBody(Buffer.from(attack), LIMIT)).toBeNull();
+    // and the split-marker form the Dart comment warns about
+    const split = long(LIMIT + 1) + ESC + '[2' + ESC + '[200~' + '01~';
+    expect(bracketLongBody(Buffer.from(split), LIMIT)).toBeNull();
+  });
+  test('refuses a body containing CR or LF — the client already brackets multi-line', () => {
+    expect(bracketLongBody(Buffer.from(long(LIMIT + 1) + '\n' + long(10)), LIMIT)).toBeNull();
+    expect(bracketLongBody(Buffer.from(long(LIMIT + 1) + '\r' + long(10)), LIMIT)).toBeNull();
+  });
+
+  // The threshold is BYTES, for a string caller as much as a Buffer one — PR #214 review.
+  // Which unit the 1024 cliff is counted in is INFERRED (the sweep was ASCII, where the
+  // two numbers are equal); bytes is simply the reading that is safe under both, since
+  // bytes >= units. What is NOT inferred is that the callers must agree, and they did not:
+  // `writePromptToTerm` (the
+  // api-error replay) passes a STRING, whose `.length` is UTF-16 code units. Comparing
+  // units there wraps LATER, not sooner: 400 CJK characters are 400 units but 1200 bytes
+  // — under the limit, past the cliff, and silently unwrapped on the one path that fires
+  // with nobody watching. An ASCII-only sweep can never see this, because there the two
+  // numbers are identical.
+  test('the threshold is BYTES, so multi-byte text wraps on its byte length', () => {
+    const cjk = '中'.repeat(400);      // 400 code units, 1200 bytes — past the 1024 cliff
+    expect(cjk.length).toBeLessThan(LIMIT);
+    expect(Buffer.byteLength(cjk, 'utf8')).toBeGreaterThan(1024);
+    expect(bracketLongBody(cjk, LIMIT)).not.toBeNull();
+
+    // Hebrew is 2 bytes/char, so LIMIT code units is exactly 1024 bytes — on the cliff.
+    const hebrew = 'ש'.repeat(LIMIT);
+    expect(hebrew.length).toBe(LIMIT);
+    expect(Buffer.byteLength(hebrew, 'utf8')).toBe(LIMIT * 2);
+    expect(bracketLongBody(hebrew, LIMIT)).not.toBeNull();
+
+    // A string and the Buffer of the same text must never disagree.
+    for (const s of [cjk, hebrew, 'x'.repeat(LIMIT), 'x'.repeat(LIMIT + 1)]) {
+      const viaString = bracketLongBody(s, LIMIT);
+      const viaBuffer = bracketLongBody(Buffer.from(s, 'utf8'), LIMIT);
+      expect(viaString === null).toBe(viaBuffer === null);
+      if (viaString) expect(viaString.equals(viaBuffer)).toBe(true);
+    }
+  });
+
+  // ASCII is where the sweep was run, so its boundary must stay exactly where it was.
+  test('ASCII behaviour is unchanged by the byte comparison', () => {
+    expect(bracketLongBody('x'.repeat(LIMIT), LIMIT)).toBeNull();
+    expect(bracketLongBody('x'.repeat(LIMIT + 1), LIMIT)).not.toBeNull();
+  });
+
+  test('a limit of 0 means never, not "wrap everything"', () => {
+    expect(bracketLongBody('x'.repeat(5000), 0)).toBeNull();
+  });
+
+  test('an empty or absent body is never wrapped', () => {
+    expect(bracketLongBody(Buffer.alloc(0), LIMIT)).toBeNull();
+    expect(bracketLongBody('', LIMIT)).toBeNull();
+    expect(bracketLongBody(undefined, LIMIT)).toBeNull();
+    expect(bracketLongBody(null, LIMIT)).toBeNull();
+  });
+
+  test('accepts a string as well as a Buffer, and preserves multi-byte text', () => {
+    const hebrew = 'שלום עולם '.repeat(80); // > LIMIT in code units, 2 bytes per char in UTF-8
+    expect(hebrew.length).toBeGreaterThan(LIMIT);
+    const out = bracketLongBody(hebrew, LIMIT);
+    expect(out).not.toBeNull();
+    expect(out.toString('utf8')).toBe(OPEN + hebrew + CLOSE);
   });
 });
