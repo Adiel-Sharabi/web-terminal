@@ -41,7 +41,20 @@ test('getAdapter falls back to the default for unknown ids rather than throwing'
 test('listProviders is the catalogue the picker and tinting render', () => {
   const list = listProviders();
   expect(list.map((p) => p.id).sort()).toEqual([...AGENT_IDS].sort());
-  for (const p of list) expect(Object.keys(p).sort()).toEqual(['color', 'id', 'label']);
+  // An EXACT key set, deliberately. This endpoint is the public shape of a private
+  // registry, and every provider entry carries fields that must never reach a client
+  // (regexes the worker scans PTY bytes with, transcript resolvers, submit timings). An
+  // exact assertion is what stops one being added to the published projection by
+  // accident; a subset check would wave it through.
+  //
+  // #210 added `composerMarker` on purpose: the companion needs to recognise the agent's
+  // composer on screen, and publishing the marker is what stops it keeping a second copy
+  // of a rule #190 measured. Widening this list is therefore a decision, not a fix - if
+  // you are here because a NEW key appeared, establish that publishing it is intended
+  // before adding it.
+  for (const p of list) {
+    expect(Object.keys(p).sort()).toEqual(['color', 'composerMarker', 'id', 'label']);
+  }
 });
 
 test('commandLaunches answers "is this a claude session" without a local regex', () => {

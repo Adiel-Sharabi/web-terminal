@@ -1077,15 +1077,69 @@ class AgentInfo {
   /// Accent color as `#rrggbb`; '' if the server omitted it.
   final String color;
 
+  /// This agent's composer marker as a regular-expression SOURCE string, or `''` when
+  /// the provider declares none (#210).
+  ///
+  /// It answers one question: is the terminal merely sitting at the agent's prompt?
+  /// The server's registry (`lib/agents.js`) owns the marker and uses the SAME one to
+  /// gate submits worker-side (#147), so it travels on `GET /api/agents` beside the
+  /// label and the colour rather than being retyped here — a provider that gains a
+  /// marker has to reach this app with no release, and two copies of a rule measured
+  /// as hard as this one (#190) would drift.
+  ///
+  /// `''` is a real answer meaning *this provider declares none*, and every caller
+  /// owes it a FAIL-OPEN reading. See [composerPattern].
+  final String composerMarker;
+
   /// Creates an agent-info value object.
-  const AgentInfo({required this.id, required this.label, required this.color});
+  const AgentInfo({
+    required this.id,
+    required this.label,
+    required this.color,
+    this.composerMarker = '',
+  });
 
   /// Parses one element of the `agents` array.
   factory AgentInfo.fromJson(Map<String, dynamic> json) => AgentInfo(
         id: (json['id'] ?? '').toString(),
         label: (json['label'] ?? '').toString(),
         color: (json['color'] ?? '').toString(),
+        // A provider declaring no marker publishes JSON null, and it has to arrive as
+        // '' rather than as the STRING "null" — which would compile to a regex
+        // matching that literal word, and so would fire on ordinary agent output.
+        composerMarker: (json['composerMarker'] ?? '').toString(),
       );
+
+  /// Compiled [composerMarker], or `null` when there is none or it will not compile.
+  ///
+  /// **Null is the FAIL-OPEN answer**, and every caller owes it that reading: a client
+  /// that cannot recognise the composer must behave exactly as it did before #210
+  /// rather than guess. Codex arrives here as null today, on purpose — it declares
+  /// no readiness marker (#147: an unmeasured marker is what #143 shipped) and its
+  /// composer line varies with model and effort.
+  ///
+  /// The compile is GUARDED because this source crossed a wire. Server and client are
+  /// different regex dialects on different release cycles, so a pattern that is valid
+  /// JavaScript and invalid Dart is a version skew away rather than a hypothetical —
+  /// and an uncaught throw here would land inside `Terminal.write`'s listener, which
+  /// is #81's recorded route from a small bug to a blank terminal in release.
+  ///
+  /// Memoised by source, so a marker compiles once per process instead of on every
+  /// recompute. Keyed by the source rather than by agent id: two providers sharing a
+  /// marker share the compile, and the map cannot go stale against a re-fetched
+  /// catalogue.
+  RegExp? get composerPattern {
+    if (composerMarker.isEmpty) return null;
+    return _compiledMarkers.putIfAbsent(composerMarker, () {
+      try {
+        return RegExp(composerMarker);
+      } on FormatException {
+        return null;
+      }
+    });
+  }
+
+  static final Map<String, RegExp?> _compiledMarkers = <String, RegExp?>{};
 
   @override
   String toString() => 'AgentInfo($id, $label, $color)';

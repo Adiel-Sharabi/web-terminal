@@ -7,7 +7,7 @@ const fs = require('fs');
 const os = require('os');
 const path = require('path');
 const { authCtx, noAuthCtx, codexSessionsRoot } = require('./test-helpers');
-const { AGENT_IDS, DEFAULT_AGENT } = require('../lib/agents');
+const { AGENT_IDS, DEFAULT_AGENT, readinessMarker } = require('../lib/agents');
 
 // Codex rollouts live under <home>/.codex/sessions/YYYY/MM/DD/. Mirror server.js's
 // home detection so a fixture lands inside the ONE trusted root.
@@ -64,6 +64,40 @@ test.describe('Agent catalogue', () => {
       expect(a.label.length).toBeGreaterThan(0);
       expect(a.color).toMatch(/^#[0-9a-f]{6}$/i);
     }
+    await ctx.dispose();
+  });
+
+  // #210 - the companion decides whether its chat-lens tail strip has anything worth
+  // showing by testing the RENDERED SCREEN against this marker. It must not carry a
+  // copy of it: the registry owns the marker, has measured it (#190), and already uses
+  // it for a second job.
+  test('#210 the composer marker is published, and is the one that gates submits', async () => {
+    const ctx = await authCtx();
+    const body = await (await ctx.get('/api/agents')).json();
+    const claude = body.agents.find((a) => a.id === 'claude');
+
+    // #190's measured pair, not a bare caret: U+276F then U+00A0 NO-BREAK SPACE.
+    // Asserted as CODE POINTS because a literal here would be normalised to an
+    // ordinary space in transit and take the negative below down with it, silently.
+    expect([...claude.composerMarker].map((c) => c.codePointAt(0))).toEqual([0x276f, 0x00a0]);
+
+    // THE LOAD-BEARING NEGATIVE. The trust dialog draws the same caret WITHOUT the
+    // NO-BREAK SPACE, and answering a submit into that dialog confirms `No, exit` and
+    // kills the agent (#190). If this ever passes, the marker has been normalised and
+    // the positive above is proving nothing.
+    const re = new RegExp(claude.composerMarker);
+    expect(re.test('\u276f\u00a0')).toBe(true);
+    expect(re.test('\u276f\u0020')).toBe(false);
+
+    // THE SSOT GATE. What a client uses to recognise the composer on screen must BE
+    // what the worker uses to let a submit out (#147) - one fact, one definition. Two
+    // copies of a rule measured this hard would drift, invisibly.
+    expect(claude.composerMarker).toBe(readinessMarker('claude').source);
+
+    // A provider declaring none publishes null, which every client must read as FAIL
+    // OPEN - show the terminal. Codex declares none on purpose (#147).
+    expect(readinessMarker('codex')).toBeNull();
+    expect(body.agents.find((a) => a.id === 'codex').composerMarker).toBeNull();
     await ctx.dispose();
   });
 });

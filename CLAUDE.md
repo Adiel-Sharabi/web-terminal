@@ -846,6 +846,104 @@ then reproduced in ten seconds by loading the page in a real browser and reading
 cheap and safe — `node scripts/rig/rig.js up`, then drive `http://127.0.0.1:7999`
 with a standalone Playwright script on a port the suite is not using.
 
+## The chat lens's tail strip: "the last N rows" is the FURNITURE, not the screen (#194/#210)
+
+The strip (#194 Part 1) shows the terminal's last few non-blank rows inside the chat
+lens, so a session parked on something chat has no bubble for is still visible. #179 is
+why it shows the screen rather than naming the state: **not one blocked state emits a
+distinguishing byte**, so a classifier for "blocked" is permanently incomplete.
+
+**That thesis is right, and the first implementation read it too literally.** Claude ends
+every composer screen with a FIXED FOOTER — the composer box's bottom border, the mode
+hint, the status line, any update notice. "The last 4 non-blank rows" and "that footer"
+are therefore **the same thing by construction**, whatever happened above them. So the
+strip rendered four identical rows on every idle session, held ~90px of the chat view
+open to do it, and was least informative in exactly the state its own gate
+(`status != 'working'`) selects for. Reported from the phone as *"it always shows the
+status bar… not sure how effective it is"*.
+
+**The fix inverts what is recognised.** Recognise exactly ONE thing — the ordinary
+composer — and recognise it in order to **stay quiet**. A screen without that marker near
+its foot falls through to the tail as before, whether or not anyone has measured it, and
+an agent declaring no marker is never gated at all. **The failure direction is showing the
+terminal, never hiding it**, which is the opposite of a classifier's, so #179's argument
+does not apply to it. The strip appearing now MEANS something is on screen, instead of
+meaning nothing.
+
+**Say "a screen without the marker", not "every dialog".** The set that falls through is
+defined by the marker's absence, and only the screens in the table below were actually
+measured for it. **The tool-approval / AskUserQuestion selector was NOT** — no capture of
+one exists anywhere in this repo, and #190 established NBSP-absence for the trust dialog
+only. If that selector draws the composer within the window, the strip hides on a blocked
+screen. It is the least costly place for this gap to sit — a hook-driven wait already has
+#79's banner and the #19/#143 question overlay, so unlike the trust dialog the session is
+not invisible — but it is a gap, not a proof, and it needs a rig case before anyone claims
+otherwise.
+
+The marker is the one `lib/agents.js` already owns and #190 already measured (U+276F +
+U+00A0, and the folder-trust dialog draws the same caret WITHOUT it). It is **published
+on `GET /api/agents`** rather than retyped in Dart — the same arrangement the label and
+the colour use, and the same rule that keeps the companion holding no agent table. One
+definition now serves two jobs: the worker gates submits with it (#147), the companion
+tests the rendered screen with it. **That it survives rendering was measured, not
+assumed** — writing caret+NBSP into the vendored xterm and reading the row back through
+`getText()` returns code units `[10095, 160]`, so caret+U+0020 still fails to match.
+
+**MEASURED** (`scripts/rig/probe-tail-strip.js` drives the real TUI;
+`tool/tail_strip_report.dart` renders each capture through the app's own xterm):
+
+| screen | caret's distance above the last non-blank row |
+|---|---|
+| idle, 120 cols | **3** |
+| idle, 52 cols | **4** — a phone footer is a row taller |
+| slash menu, `/usa` | **9** — the BINDING case |
+| slash menu, `/usage` | 14 |
+| slash menu, bare `/` | 16 |
+| Agent View | 20 |
+| `/usage` panel | **no caret on screen at all** |
+| slash menu, `/zzzq` | 2 — nothing matches, so there is NO MENU |
+
+**The narrowed menu is what sets the ceiling, and measuring only the bare `/` would have
+missed it.** Bare `/` is the menu at its TALLEST — its ~16 entries are the only reason the
+caret sits far up the screen. Type a few characters, the list filters, and the caret comes
+back to 9. A first cut of the constant sat at 8 and cleared that by ONE row; review caught
+it, and the extra probe case is what turned an argument into a number.
+
+So the measured bound is **[5, 8]** — at least the widest idle footer (4, plus a row for
+an update notice), strictly under the narrowed menu's 9 — and `kComposerScanRows = 7` is
+the balanced point inside it: three rows of headroom above, two of clearance below. The
+`/zzzq` row is not a counter-example: with nothing matching, Claude draws no menu at all
+and the screen IS an ordinary composer, where Enter submits normally.
+
+**The captures are deliberately NOT checked in** — #146's rule: an Agent View frame names
+every Claude session on the machine and this repo is public, and the idle frame carries a
+status line naming a project and a user. Keep the numbers, drop the bytes.
+
+**Two findings that each cost a wrong answer first, both kept because they generalise.**
+
+1. **The rig falsified the first cut on its first run.** The scan counted rows up from the
+   **bottom of the viewport**; a real idle screen puts its content in rows 0–12 of a
+   30-row viewport, so the caret sat at row 9 with **seventeen blank rows beneath the
+   footer** and no window size could reach it. It was a silent no-op that changed no
+   behaviour at all — and **every synthetic fixture passed against it**, because none of
+   them had trailing blanks. The anchor is now the last row WITH CONTENT: *a screen is not
+   the same shape as a window.* Same anchor-on-content lesson as #167/#178, arriving from
+   a third direction.
+2. **The issue's own reasoning about the slash menu was wrong — and then the first
+   measurement of it was still not enough.** The filed table predicted the menu would keep
+   the composer on screen and hide the strip; measured, bare `/` pushes the caret 16 rows
+   up, so the strip correctly SHOWS. All three "unmeasured" rows came back better than
+   inferred. But **one sample of a variable screen is not a measurement of it**: review
+   pointed out that a menu NARROWED by typing shrinks back toward the composer, and the
+   follow-up probe found 9 — one row from the bound as first set. **Measure the family,
+   not the specimen**, and prefer the tightest member.
+
+**Codex is deliberately unchanged.** It declares no readiness marker (#147: an unmeasured
+marker is what #143 shipped) and its composer line varies with model and effort, so it
+publishes null and the strip behaves exactly as before #210 there. A screen marker for
+Codex is its own separately-measured change — note it would NOT be safe to reuse
+`readiness.composer` for it, because that field also gates submits.
+
 ## AskUserQuestion — the LAYOUT decides what the keys mean (#19)
 
 Answering Claude's question overlay drives its real TUI selector by writing keys
