@@ -270,6 +270,51 @@ test.describe('bracketLongBody', () => {
     expect(bracketLongBody(Buffer.from(long(LIMIT + 1) + '\r' + long(10)), LIMIT)).toBeNull();
   });
 
+  // The threshold is BYTES, for a string caller as much as a Buffer one — PR #214 review.
+  // The cliff is a 1024-BYTE read boundary in the TUI, and `writePromptToTerm` (the
+  // api-error replay) passes a STRING, whose `.length` is UTF-16 code units. Comparing
+  // units there wraps LATER, not sooner: 400 CJK characters are 400 units but 1200 bytes
+  // — under the limit, past the cliff, and silently unwrapped on the one path that fires
+  // with nobody watching. An ASCII-only sweep can never see this, because there the two
+  // numbers are identical.
+  test('the threshold is BYTES, so multi-byte text wraps on its byte length', () => {
+    const cjk = '中'.repeat(400);      // 400 code units, 1200 bytes — past the 1024 cliff
+    expect(cjk.length).toBeLessThan(LIMIT);
+    expect(Buffer.byteLength(cjk, 'utf8')).toBeGreaterThan(1024);
+    expect(bracketLongBody(cjk, LIMIT)).not.toBeNull();
+
+    // Hebrew is 2 bytes/char, so LIMIT code units is exactly 1024 bytes — on the cliff.
+    const hebrew = 'ש'.repeat(LIMIT);
+    expect(hebrew.length).toBe(LIMIT);
+    expect(Buffer.byteLength(hebrew, 'utf8')).toBe(LIMIT * 2);
+    expect(bracketLongBody(hebrew, LIMIT)).not.toBeNull();
+
+    // A string and the Buffer of the same text must never disagree.
+    for (const s of [cjk, hebrew, 'x'.repeat(LIMIT), 'x'.repeat(LIMIT + 1)]) {
+      const viaString = bracketLongBody(s, LIMIT);
+      const viaBuffer = bracketLongBody(Buffer.from(s, 'utf8'), LIMIT);
+      expect(viaString === null).toBe(viaBuffer === null);
+      if (viaString) expect(viaString.equals(viaBuffer)).toBe(true);
+    }
+  });
+
+  // ASCII is where the sweep was run, so its boundary must stay exactly where it was.
+  test('ASCII behaviour is unchanged by the byte comparison', () => {
+    expect(bracketLongBody('x'.repeat(LIMIT), LIMIT)).toBeNull();
+    expect(bracketLongBody('x'.repeat(LIMIT + 1), LIMIT)).not.toBeNull();
+  });
+
+  test('a limit of 0 means never, not "wrap everything"', () => {
+    expect(bracketLongBody('x'.repeat(5000), 0)).toBeNull();
+  });
+
+  test('an empty or absent body is never wrapped', () => {
+    expect(bracketLongBody(Buffer.alloc(0), LIMIT)).toBeNull();
+    expect(bracketLongBody('', LIMIT)).toBeNull();
+    expect(bracketLongBody(undefined, LIMIT)).toBeNull();
+    expect(bracketLongBody(null, LIMIT)).toBeNull();
+  });
+
   test('accepts a string as well as a Buffer, and preserves multi-byte text', () => {
     const hebrew = 'שלום עולם '.repeat(80); // > LIMIT in code units, 2 bytes per char in UTF-8
     expect(hebrew.length).toBeGreaterThan(LIMIT);

@@ -1018,7 +1018,17 @@ function clearCompacting(session, reason) {
 // Low-level write to a session's PTY. Mirrors the write into a per-session
 // buffer under WT_TEST so specs can assert the exact bytes we send to the agent
 // (CR-vs-LF is the difference between "submitted" and "stuck in the box").
-function termWrite(session, data) {
+//
+// `trackAs` overrides ONLY what the #179 line tracker is fed, never what is written.
+// #213 wraps a long plain-text submit in bracketed paste, and the tracker DROPS paste
+// bodies on purpose (a paste is normally a file PATH — the images-only submit). Here the
+// paste IS the typing, so feeding it the raw text is the more accurate answer, not merely
+// the backward-compatible one: without it a >512-char `/`-line arriving as one frame reads
+// as an empty line, `isCommand` flips true -> false, and the submit watch ARMS on a slash
+// command — the false-alarm direction shouldWatchSubmit's own gate exists to forbid.
+// `_pasteClosedAt` deliberately still reads the REAL wire bytes: the TUI's burst detector
+// sees what we actually wrote, so tracked state must match the wire, not the intent.
+function termWrite(session, data, trackAs) {
   if (process.env.WT_TEST) (session._testWrites || (session._testWrites = [])).push(data);
   // The one place every byte destined for this PTY passes through, so the one place that
   // can know whether a paste is still open to a CR arriving behind it. Stamped here rather
@@ -1029,7 +1039,7 @@ function termWrite(session, data) {
   // decides whether a submit is a prompt or a slash command. Fed here rather than at
   // deliver() because a live `/`-line is streamed as you type and its submit frame can
   // be a bare CR: the frame alone cannot tell the two apart, the accumulated line can.
-  if (session._submitLine) session._submitLine.push(data);
+  if (session._submitLine) session._submitLine.push(trackAs === undefined ? data : trackAs);
   session.term.write(data);
 }
 
@@ -1103,9 +1113,9 @@ function writeUserInput(session, data) {
 // reporting an interrupt the PTY has not been given yet would show idle for up to gapMs
 // while the withheld CR was still about to submit. The worker's own writes (auto-command,
 // api-error replay) go through termWrite directly and are never mistaken for a keypress.
-function deliver(session, data) {
-  noteInterrupt(session, data);
-  termWrite(session, data);
+function deliver(session, data, trackAs) {
+  noteInterrupt(session, data);   // the REAL bytes — an interrupt is a byte on the wire
+  termWrite(session, data, trackAs);
 }
 
 // #55 §6 — Esc ends the turn, and the worker is the only component that can know.
@@ -1165,7 +1175,7 @@ function _writeFrame(session, data) {
   // Returns null for everything the measurement does not cover, which leaves the frame
   // byte-identical to what it was before this rule existed.
   const head = bracketLongBody(split.head, agents.submitPolicy(sessionAgent(session)).bracketAbove) || split.head;
-  if (head.length) deliver(session, head);
+  if (head.length) deliver(session, head, split.head);
   session._submitTimer = setTimeout(() => {
     session._submitTimer = null;
     // Read the line BEFORE the CR is written — the CR is what resets the tracker.
