@@ -27,6 +27,7 @@ import 'package:shared_preferences/shared_preferences.dart';
 import 'package:url_launcher/url_launcher.dart';
 import 'package:xterm/xterm.dart';
 
+import '../api/agent_catalog.dart';
 import '../api/api_client.dart';
 import '../api/models.dart';
 import '../services/command_policy.dart';
@@ -2290,9 +2291,30 @@ class _SessionScreenState extends State<SessionScreen>
       lineCount: buffer.lines.length,
       viewHeight: buffer.viewHeight,
     );
-    final next = terminalTailLines(
+    String rowText(int i) => buffer.lines[w.base + i].getText();
+    // #210 — a screen that merely ENDS in the agent's composer has nothing this strip
+    // can usefully say. Its last rows are the composer's own footer, identical on every
+    // idle session, and what sits ABOVE the composer is transcript that the chat lens
+    // behind this strip is already rendering. Staying empty here is what makes the strip
+    // MEAN something on the occasions it does appear.
+    //
+    // The marker comes from the server's registry through AgentCatalog, never from a
+    // constant here. A null marker falls through to the tail — the pre-#210 behaviour
+    // exactly — which covers Codex, a plain shell, and an unreachable server.
+    //
+    // It also covers a NARROW STARTUP RACE, stated rather than engineered around:
+    // DashboardScreen seeds the catalogue on load (so session rows can chip their
+    // agent), and you reach this screen through it, so by the time a session opens the
+    // fetch has all but always landed. Open one inside that window and the strip shows
+    // the footer until the NEXT recompute — and recomputes are driven by PTY output, so
+    // on a truly silent session it would persist. In practice Claude's composer repaints
+    // (a rotating placeholder, a ticking status line) within seconds. The cost of losing
+    // that race is one stale strip, i.e. the behaviour this change replaces; the cost of
+    // wiring a listener for it would be new cross-screen state to keep coherent.
+    final next = terminalStripLines(
       rowCount: w.rows,
-      rowText: (i) => buffer.lines[w.base + i].getText(),
+      rowText: rowText,
+      composer: AgentCatalog.instance[_session?.agent]?.composerPattern,
     );
     if (listEquals(next, _terminalTail)) return;
     if (mounted) setState(() => _terminalTail = next);

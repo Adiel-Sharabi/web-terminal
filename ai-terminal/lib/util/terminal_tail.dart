@@ -35,6 +35,121 @@
 /// its own.
 library;
 
+/// How many rows to examine, counting back from the LAST NON-BLANK ROW, when asking
+/// whether the screen ends in the composer (#210). Inclusive of that row: 8 means the
+/// caret may sit up to 7 rows above the last row that has content.
+///
+/// A bound is needed at all because Claude's TUI renders INLINE, not on the alternate
+/// screen — #146 measured that twice, against the documentation's own claim. So a
+/// previous frame's composer can still be visible ABOVE whatever is drawn now, and an
+/// unbounded search would find it and call the screen idle while a dialog sits at the
+/// bottom.
+///
+/// MEASURED, not chosen. `scripts/rig/probe-tail-strip.js` drove the real TUI and
+/// `tool/tail_strip_report.dart` rendered each capture through this app's own xterm:
+///
+///   screen                     caret is N rows above the last non-blank row
+///   -------------------------  ------------------------------------------
+///   idle, 120 cols              3
+///   idle, 52 cols               4     <- a phone; the footer gains a row here
+///   slash menu, `/usa`          9     <- THE BINDING CASE (see below)
+///   slash menu, `/usage`       14
+///   slash menu, bare `/`       16
+///   Agent View                 20
+///   /usage panel                    no caret on screen at all
+///   slash menu, `/zzzq`         2     <- no matches, so NO MENU: an ordinary composer
+///
+/// **The narrowed menu is what sets the ceiling, and measuring only the bare `/` menu
+/// would have missed it** — review caught that, and it was right to. Bare `/` is the
+/// menu at its TALLEST: its ~16 entries are the only reason the caret sits outside any
+/// sane window. Type a few characters, the list filters, and the caret comes back down
+/// to 9. A first cut of this constant sat at 8 and cleared that case by a single row.
+///
+/// So the measured bound is **[5, 8]**: at least the widest idle footer seen (4, plus a
+/// row for an update notice, which the rig captures did not all carry), and strictly
+/// under the narrowed menu's 9. 7 is the balanced choice inside it — three rows of
+/// headroom above the idle footer, two rows of clearance below the menu.
+///
+/// The `/zzzq` row is not a counter-example: with nothing matching, Claude draws no menu
+/// at all and the screen IS an ordinary composer with text in it, where Enter submits
+/// normally. Hiding the strip there is correct, not a miss.
+///
+/// GETTING IT WRONG IS NOT SYMMETRIC, and the two costs are not equal:
+///   * too SMALL — the composer is missed and the strip shows the footer, which is
+///     exactly the complaint #210 fixed: no worse than the behaviour before it.
+///   * too LARGE — the strip hides on a narrowed slash menu, or on a stale composer
+///     above a live dialog. Bounded (the draft is in the compose bar and the person is
+///     mid-composition; #179's verifier deliberately does not watch `/`-lines either),
+///     but it is a real regression against the old behaviour rather than a no-op.
+const int kComposerScanRows = 7;
+
+/// Does the visible screen END in the agent's ordinary composer — i.e. is the terminal
+/// merely sitting at its prompt, showing nothing the chat lens is not already showing?
+///
+/// This is the whole of #210. [terminalTailLines] answers *what are the last few rows*,
+/// and while a composer is up that answer is **always the same footer**: Claude ends
+/// every such screen with the composer box's bottom border, the mode hint, the status
+/// line and any update notice. So the strip rendered four rows of unchanging furniture
+/// on every idle session — least informative in precisely the state its own gate
+/// selects for.
+///
+/// ## This is not the classifier #179 ruled out
+///
+/// #179 measured that a detector for *blocked* is permanently incomplete: `/usage`, an
+/// open slash menu and Agent View each swallow a submitted prompt and NOT ONE of them
+/// emits a distinguishing byte. That argument is about recognising an open-ended set.
+/// This recognises exactly ONE thing, the composer, and it recognises it in order to
+/// stay QUIET. Everything else — every dialog, every unmeasured future state, every
+/// agent that declares no marker — falls through to the tail exactly as before. **The
+/// failure direction is showing the terminal, never hiding it**, which is the opposite
+/// of a classifier's.
+///
+/// [composer] is the marker from `GET /api/agents` (`AgentInfo.composerPattern`), never
+/// a constant of this app's own: the server's registry owns it, gates submits with the
+/// same one (#147), and measured it (#190) across widths and permission modes —
+/// including the finding that Claude's folder-trust dialog draws the same caret WITHOUT
+/// the NO-BREAK SPACE, which is the whole reason a bare caret cannot serve. Null means
+/// no marker, and null answers **false**: show the tail.
+///
+/// [rowText] must be the RENDERED row, exactly as for [terminalTailLines]. That the
+/// marker survives rendering is measured rather than assumed — writing caret+NBSP
+/// into the vendored xterm and reading the row back through `getText()` returns code
+/// units [10095, 160], so caret+U+0020 still fails to match after a round trip through
+/// a terminal buffer.
+bool terminalEndsInComposer({
+  required int rowCount,
+  required String Function(int index) rowText,
+  required RegExp? composer,
+  int scanRows = kComposerScanRows,
+}) {
+  if (composer == null || rowCount <= 0 || scanRows <= 0) return false;
+
+  // ANCHOR ON THE LAST ROW WITH CONTENT, never on the bottom of the viewport. The first
+  // cut of this counted up from `rowCount - 1` and the rig falsified it on its first run:
+  // a real idle screen put its content in rows 0..12 of a 30-row viewport, so the caret
+  // sat at row 9 with SEVENTEEN blank rows below the footer. Counting from the viewport
+  // floor never reached it at any window size, and the whole rule was a silent no-op.
+  //
+  // The screen's height is a property of the WINDOW; where the content ends is a property
+  // of the SCREEN. Only the second one this question is about. It is the same
+  // anchor-on-content lesson #167/#178 recorded for scrollback paging, arriving from a
+  // different direction.
+  var last = -1;
+  for (var i = rowCount - 1; i >= 0; i--) {
+    if (rowText(i).trim().isNotEmpty) {
+      last = i;
+      break;
+    }
+  }
+  if (last < 0) return false; // a blank screen ends in nothing at all
+
+  final stop = last - scanRows + 1;
+  for (var i = last; i >= 0 && i >= stop; i--) {
+    if (composer.hasMatch(rowText(i))) return true;
+  }
+  return false;
+}
+
 /// How many lines the strip shows. Small on purpose — this is a peek that
 /// earns a tap through to the terminal lens, not a second terminal.
 const int kTerminalTailLines = 4;
@@ -112,4 +227,36 @@ List<String> terminalTailLines({
     out.add(text.trimRight());
   }
   return out.reversed.toList(growable: false);
+}
+
+/// What the chat lens's tail strip should render for this screen: the tail, or nothing.
+///
+/// **The screen calls THIS, not the two rules it composes**, and the reason is the one
+/// this file already states for `terminalTailWindow`: a call site that re-derives the
+/// composition is a second copy of it, and a test written against that copy passes while
+/// the screen carries the bug. Here the composition is small enough to look harmless,
+/// which is exactly when it gets retyped.
+///
+/// Empty means *render no strip at all* — and the caller must reserve no space for
+/// one either. `TerminalTailStrip.heightFor(0)` is 0 for that reason.
+List<String> terminalStripLines({
+  required int rowCount,
+  required String Function(int index) rowText,
+  required RegExp? composer,
+  int maxLines = kTerminalTailLines,
+  int scanRows = kComposerScanRows,
+}) {
+  if (terminalEndsInComposer(
+    rowCount: rowCount,
+    rowText: rowText,
+    composer: composer,
+    scanRows: scanRows,
+  )) {
+    return const <String>[];
+  }
+  return terminalTailLines(
+    rowCount: rowCount,
+    rowText: rowText,
+    maxLines: maxLines,
+  );
 }

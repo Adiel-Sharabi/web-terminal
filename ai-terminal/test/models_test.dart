@@ -635,6 +635,55 @@ void main() {
     });
   });
 
+  group('AgentInfo.composerMarker (#210)', () {
+    // Built from code points, never typed - a literal U+00A0 is invisible in a diff
+    // and normalises to an ordinary space, which would make the negative case below
+    // pass for the wrong reason.
+    final caret = String.fromCharCode(0x276F);
+    final nbsp = String.fromCharCode(0x00A0);
+
+    test('the marker survives the wire and compiles to the measured pair', () {
+      final a = AgentInfo.fromJson({
+        'id': 'claude',
+        'label': 'Claude Code',
+        'color': '#d97757',
+        'composerMarker': '$caret$nbsp',
+      });
+      expect(a.composerPattern, isNotNull);
+      expect(a.composerPattern!.hasMatch('| $caret$nbsp   |'), isTrue);
+      // THE LOAD-BEARING NEGATIVE, mirroring tests/agents-api.spec.js's. An ordinary
+      // space is Claude's TRUST DIALOG, where hiding the strip loses the one screen it
+      // exists for.
+      expect(a.composerPattern!.hasMatch('$caret regular space'), isFalse);
+    });
+
+    test('a provider declaring none FAILS OPEN, and never matches the word "null"', () {
+      // JSON null must land as '', not as the STRING "null" - which would compile to a
+      // regex matching that literal word and fire on ordinary agent output.
+      final a = AgentInfo.fromJson({'id': 'codex', 'composerMarker': null});
+      expect(a.composerMarker, '');
+      expect(a.composerPattern, isNull);
+    });
+
+    test('an absent field is the same fail-open answer', () {
+      expect(AgentInfo.fromJson({'id': 'x'}).composerPattern, isNull);
+    });
+
+    test('a marker this Dart cannot compile fails OPEN rather than throwing', () {
+      // Server and client are different regex dialects on different release cycles.
+      // An uncaught throw here would land inside Terminal.write's listener, which is
+      // #81's recorded route from a small bug to a blank terminal in release.
+      final a = AgentInfo.fromJson({'id': 'x', 'composerMarker': '('});
+      expect(a.composerPattern, isNull);
+    });
+
+    test('compiles once per source, however often it is asked', () {
+      final a = AgentInfo.fromJson({'id': 'claude', 'composerMarker': '$caret$nbsp'});
+      final b = AgentInfo.fromJson({'id': 'other', 'composerMarker': '$caret$nbsp'});
+      expect(identical(a.composerPattern, b.composerPattern), isTrue);
+    });
+  });
+
   group('AgentInfo.fromJson', () {
     test('parses id, label and color', () {
       final a = AgentInfo.fromJson({
