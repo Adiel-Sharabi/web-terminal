@@ -351,3 +351,104 @@ test.describe('agent-aware submit CR on the PTY input path', () => {
     expect(after.join('')).not.toContain('\n');
   });
 });
+
+// --- the long DICTATED prompt (#213), driven through the real input path ------
+//
+// Reported 2026-09-02: a ~1500-character dictated prompt looked complete in the compose
+// box and reached the terminal as its tail alone. Dictation emits no line breaks, and
+// `buildComposeSubmission` brackets on exactly one predicate — does the buffer contain a
+// newline — so a dictated paragraph is the one long prompt still handed to the TUI raw.
+// Measured on the rig (probe-paste-single-line.js, claude 2.1.251, verdict from the
+// transcript): unbracketed is whole at 988 and loses its first 1024 characters EXACTLY at
+// 1588, twice; bracketed is whole at 588/1588/2588.
+//
+// The client is unchanged and unaware — this is the worker correcting the bytes where they
+// meet the PTY, the same place and the same reason as the CR split above.
+test.describe('a long single-line submit is declared a paste (#213)', () => {
+  let worker, client, dataDir, pipePath;
+
+  test.beforeEach(async () => {
+    pipePath = workerPipePath();
+    dataDir = makeTempDataDir();
+    worker = spawnWorker(pipePath, dataDir);
+    client = await connectClient(pipePath);
+  });
+
+  test.afterEach(async () => {
+    try { client.close(); } catch {}
+    await worker.stop();
+    try { fs.rmSync(dataDir, { recursive: true, force: true }); } catch {}
+  });
+
+  async function newSession(agent) {
+    const { id } = await rpc(client, 'createSession', { cwd: dataDir, name: `s-${agent || 'shell'}`, agent });
+    await sleep(150);
+    await rpc(client, '__testGetWrites', { id });
+    return id;
+  }
+
+  const ESC = String.fromCharCode(0x1b);
+  const OPEN = ESC + '[200~';
+  const CLOSE = ESC + '[201~';
+  const CLAUDE_GAP = agents.submitPolicy('claude').gapMs;
+  const LIMIT = agents.submitPolicy('claude').bracketAbove;
+
+  test('claude: a newline-free prompt over the threshold is wrapped, CR still split', async () => {
+    const id = await newSession('claude');
+    // The reported shape: one long line, no newline anywhere, so the client sends it raw.
+    const dictated = 'so first we want to reflect the user if there is a problem '.repeat(26);
+    expect(dictated).not.toContain('\n');
+    expect(dictated.length).toBeGreaterThan(1024);
+
+    typeInto(client, id, dictated + '\r');
+
+    // The body goes out NOW, wrapped — and the CR is still withheld, because wrapping a
+    // body must not cost it the split that makes its Enter an Enter.
+    await sleep(Math.max(20, CLAUDE_GAP / 4));
+    expect(writesOf(await rpc(client, '__testGetWrites', { id })))
+      .toEqual([OPEN + dictated + CLOSE]);
+
+    await sleep(CLAUDE_GAP * 2);
+    expect(writesOf(await rpc(client, '__testGetWrites', { id })))
+      .toEqual([OPEN + dictated + CLOSE, '\r']);
+  });
+
+  test('claude: a prompt UNDER the threshold is byte-identical to before', async () => {
+    const id = await newSession('claude');
+    const short = 'x'.repeat(LIMIT - 1);
+
+    typeInto(client, id, short + '\r');
+
+    await sleep(CLAUDE_GAP * 2);
+    // No markers anywhere: ordinary prompts must keep the exact bytes they had.
+    expect(writesOf(await rpc(client, '__testGetWrites', { id }))).toEqual([short, '\r']);
+  });
+
+  // Undeclared means never — the behaviour every agent had before the field existed. A
+  // shell whose readline has bracketed paste off would take the markers as literal text.
+  test('plain shell: a long prompt is NOT wrapped — it declares no threshold', async () => {
+    const id = await newSession(null);
+    const gap = agents.submitPolicy(null).gapMs;
+    const long = 'y'.repeat(2000);
+
+    typeInto(client, id, long + '\r');
+
+    await sleep(gap * 2);
+    expect(writesOf(await rpc(client, '__testGetWrites', { id }))).toEqual([long, '\r']);
+  });
+
+  test('claude: an already-bracketed multi-line paste is passed through untouched', async () => {
+    const id = await newSession('claude');
+    // What the client sends for a multi-line buffer today. It must not be double-wrapped:
+    // the body carries ESC, so the rule refuses it rather than trying to sanitise it.
+    const body = OPEN + 'line one\rline two\r'.repeat(80) + CLOSE;
+    expect(body.length).toBeGreaterThan(LIMIT);
+
+    typeInto(client, id, body + '\r');
+
+    await sleep(CLAUDE_GAP * 2);
+    const writes = writesOf(await rpc(client, '__testGetWrites', { id }));
+    expect(writes).toEqual([body, '\r']);
+    expect(writes[0].startsWith(OPEN + OPEN)).toBe(false);
+  });
+});

@@ -399,6 +399,54 @@ test.describe('API-error detection + auto-continue', () => {
     }
   });
 
+  // #213 — the replay path had the same newline-only predicate as the compose bar, so a
+  // long DICTATED prompt (no newline anywhere) was written raw and Claude lost its first
+  // 1024 characters. This fires automatically during api-error recovery, so nobody is
+  // watching it happen — which is why it gets its own guard rather than riding on the
+  // compose-bar tests.
+  test('compact-replay DECLARES a long single-line prompt as a paste (#213)', async () => {
+    const pipe = workerPipePath();
+    const dataDir = makeTempDataDir();
+    const worker = spawnWorker(pipe, dataDir, { WT_AUTO_CONTINUE_API_ERROR: '1' });
+    try {
+      const client = await connectClient(pipe);
+      const ev = makeEventCollector(client);
+      const { id } = await rpc(client, 'createSession', {
+        cwd: os.tmpdir(), name: 'replaylong', autoCommand: '', agent: 'claude',
+      });
+      // The reported shape: one long line, dictated, no newline anywhere.
+      const dictated = 'so first we want to reflect the user if there is a problem '.repeat(26);
+      expect(dictated).not.toContain('\n');
+      await rpc(client, 'hookEvent', { id, event: 'UserPromptSubmit', prompt: dictated });
+
+      await inject(client, id, OVERLOADED);
+      await ev.waitFor(e => e.event === 'apiError' && e.params.autoContinue === 1);
+      await rpc(client, 'hookEvent', { id, event: 'UserPromptSubmit' });
+      await inject(client, id, OVERLOADED);
+      await ev.waitFor(e => e.event === 'apiError' && e.params.autoContinue === 2);
+      await rpc(client, 'hookEvent', { id, event: 'UserPromptSubmit' });
+      await inject(client, id, OVERLOADED);
+      await ev.waitFor(e => e.event === 'apiError' && e.params.autoContinue === 3 && e.params.action === 'compact');
+      await rpc(client, 'hookEvent', { id, event: 'Stop' });
+      await ev.waitFor(e => e.event === 'apiError' && e.params.action === 'replay-prompt');
+      await sleep(120); // let the deferred CR land
+
+      const { writes } = await rpc(client, '__testGetWrites', { id });
+      const flat = writes.map(w => (typeof w === 'string' ? w : Buffer.from(w.data || w).toString('utf8')));
+      // The body must be WRAPPED — and the raw form must not appear at all.
+      expect(flat).toContain('\x1b[200~' + dictated + '\x1b[201~');
+      expect(flat).not.toContain(dictated);
+      expect(flat).toContain('\r');
+
+      ev.stop();
+      await rpc(client, 'killSession', { id });
+      await client.close();
+    } finally {
+      await worker.stop();
+      rmRf(dataDir);
+    }
+  });
+
   test('replay falls back to "continue" when no prompt was captured', async () => {
     const pipe = workerPipePath();
     const dataDir = makeTempDataDir();

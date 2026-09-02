@@ -16,7 +16,7 @@ const ipc = require('./lib/ipc');
 const { resolveRestoreRunCommand } = require('./lib/restore-command');
 const { claudeProjectDirName } = require('./lib/transcript');
 const agents = require('./lib/agents');
-const { splitTrailingCr, isEscapeKey, endsBracketedPaste } = require('./lib/submit-frames');
+const { splitTrailingCr, bracketLongBody, isEscapeKey, endsBracketedPaste } = require('./lib/submit-frames');
 const { endsInAltScreen } = require('./lib/replay-sanitize');
 const { scanOsc9 } = require('./lib/osc9-notify');
 // #147 — the pure readiness latch; the marker itself is a lib/agents.js field.
@@ -1056,10 +1056,20 @@ function submitLine(session, text) {
 // Submit text to an agent's TUI. Multi-line prompts go through bracketed paste so
 // embedded newlines don't submit early; a trailing CR then sends it. Single
 // lines go through submitLine (text + CR).
+//
+// #213 — the SECOND home of the predicate that broke the compose bar, found by reading
+// rather than by a report. `text.includes('\n')` was the whole test here too, so an
+// api-error replay of a long DICTATED prompt (no newline) was written raw and lost its
+// first 1024 characters exactly as a typed one did. Worse here, in fact: this fires
+// automatically, with nobody watching, and the text it replays is the user's own last
+// prompt. bracketLongBody is the one owner of "is this body long enough to declare" —
+// it returns null for a multi-line body (which carries LF), so the branch below still
+// owns that case and nothing is double-wrapped.
 function writePromptToTerm(session, text) {
   try {
-    if (text.includes('\n')) {
-      termWrite(session, '\x1b[200~' + text + '\x1b[201~');
+    const declared = bracketLongBody(text, agents.submitPolicy(sessionAgent(session)).bracketAbove);
+    if (declared || text.includes('\n')) {
+      termWrite(session, declared || ('\x1b[200~' + text + '\x1b[201~'));
       const t = setTimeout(() => { try { termWrite(session, '\r'); } catch {} }, submitGapMs(session));
       if (typeof t.unref === 'function') t.unref();
     } else {
@@ -1147,7 +1157,15 @@ function noteInterrupt(session, data) {
 function _writeFrame(session, data) {
   const split = splitTrailingCr(data, { afterPasteClose: pasteStillOpenToCr(session) });
   if (!split) { deliver(session, data); return; }
-  if (split.head.length) deliver(session, split.head);
+  // A long plain-text body is DECLARED a paste rather than left to the TUI to infer —
+  // the other half of the split above, and the same measurement. Applied here, between
+  // the split and the write, because it must see the body WITHOUT its submit CR: with
+  // the CR still attached the body is not plain text and bracketLongBody would refuse
+  // it, and wrapping the CR inside the paste would make it content instead of Enter.
+  // Returns null for everything the measurement does not cover, which leaves the frame
+  // byte-identical to what it was before this rule existed.
+  const head = bracketLongBody(split.head, agents.submitPolicy(sessionAgent(session)).bracketAbove) || split.head;
+  if (head.length) deliver(session, head);
   session._submitTimer = setTimeout(() => {
     session._submitTimer = null;
     // Read the line BEFORE the CR is written — the CR is what resets the tracker.

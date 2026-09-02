@@ -462,6 +462,70 @@ That single fact explains the whole "sometimes Enter works, sometimes it doesn't
 - **The gap is measured against the wire, not against the frame.** A bare `\r` written within `submit.gapMs` of a frame that **closed a bracketed paste** IS withheld, and goes out alone after the gap. The burst detector reads bytes; our frame boundaries are invisible to it, so two frames microseconds apart are one read and fold together. This is not a hypothetical — it is the images-only submit: the compose bar sends each staged image as its own `ESC[200~<path>ESC[201~` frame, and with no prompt text the submit behind it is a bare CR. With text it was always fine (`text\r` splits), which is exactly why "attach an image and press Send" typed the image and sent no Enter while every other prompt worked. Keep it **narrow — only a paste close shades a CR**; widening it to "any recent write" would delay every shell Enter, and short non-paste reads are measured to submit fine.
 - Bracketed paste does **not** exempt the CR. Measured: ≤30 ms is still absorbed, ≥60 ms submits. **Only a real temporal gap works — never "fix" a submit problem by changing the bytes.**
 
+
+### A DICTATED prompt has no newline, so nothing ever bracketed it (#213)
+
+The rule above rescues the **CR**. It leaves the **BODY** to the TUI's own paste inference,
+and for one shape of prompt that inference loses the text. `buildComposeSubmission` picks
+its byte shape on exactly one predicate — **does the buffer contain a newline** — so a
+pasted paragraph goes bracketed and **a dictated one does not**. Dictation emits no line
+breaks at all. That is the whole mechanism, and it is why the long prompts that break are
+always the spoken ones.
+
+**Measured** (`scripts/rig/probe-paste-single-line.js`, claude 2.1.251, verdict from the
+**transcript** — a composer scrolls, so its screen shows a tail whether or not the head
+arrived, which is exactly why this survived so long):
+
+| chars | unbracketed (what a dictated prompt sends) | bracketed |
+|---|---|---|
+| 288 / 488 / 988 | whole | — |
+| 588 | whole once, **NOT SUBMITTED** once | whole |
+| 1088 | **no turn** — nothing survived to start one | — |
+| 1588 | **HEAD CUT of exactly 1024**, twice | whole |
+| 2588 | — | whole |
+
+**1024 is a buffer boundary, not a timing artifact**: at 1588 the survivor is the last 564
+characters and begins **mid-token at offset 1024**, reproducibly. And it is the **HEAD**
+that goes — the shape of #89 (1582 sent, the last 666 received), whose root cause was
+never pinned and now is.
+
+**Three probes existed and each covered a different cell.** `verify-long-prompt.js`:
+unbracketed 1582 → a plain **shell**, intact. `probe-paste-truncation.js`: bracketed → a
+shell, intact to 32 KB. `probe-paste-claude.js`: bracketed → **real Claude**, intact to
+41,899. Nobody had put **unbracketed into a real agent**. The first of those matters
+twice: it already carries this exact shape at this exact size through the whole
+HTTP → WS → server → worker → PTY path intact, so **the transport is exonerated by
+measurement, not by argument** — and that is why #193's fleet-wide hunt found nothing. It
+measured a *pasted paragraph*, which has newlines.
+
+**The fix is `submit.bracketAbove` in the registry, applied in the worker** — one owner,
+every client fixed with no client release, `app.html` included. Claude declares **512**:
+under the 1024 cliff *and* under 588, where the submit was lost on one run of two, so the
+threshold sits below the flakiness rather than below the cliff. Codex and plain shells
+declare **none**, and undeclared means never — today's bytes exactly. That asymmetry is
+deliberate: splitting a CR is invisible to a reader that does not need it, while
+`ESC[200~` is only correct for one that understands the sequence, and a shell with
+bracketed paste off would take the markers as literal text.
+
+> **This does NOT contradict "never fix a submit problem by changing the bytes."** That
+> rule is about the **CR** — about making Enter be Enter, where only a temporal gap works,
+> and the gap is kept here untouched. This changes the **BODY**, and it does not disguise
+> it as something else: a compose submit *is* a block insert, so the frame is being
+> labelled as what it already was. `contains('\n')` was a proxy for "is this a paste", and
+> the proxy is what was wrong.
+
+**Refused, never sanitised.** A body carrying ESC, CR or LF is left exactly as it is —
+it may already be a bracketed paste, an arrow key, or a live `/`-line's backspaces.
+`_pasteInner`'s lesson is that stripping markers out of a body is no defence (deleting the
+inner `ESC[200~` from `a ESC[2 ESC[200~ 01~ b` reconstitutes a close), and refusing costs
+nothing because every such body already has a working shape.
+
+**Codex is deliberately unmeasured**, the same convention `readiness` follows: its
+paste-burst handling is its own (`paste_burst.rs`), so Claude's cliff is not evidence
+about it in either direction. And the threshold is measured against **one claude version**
+— a release that changes its paste inference needs a rig re-probe, which no unit test can
+catch.
+
 ### Interrupt (Esc) — status must go idle promptly
 Claude fires **no hook** on a user interrupt (`Stop` does not run), and worker status is otherwise hook-driven — so an interrupted session sat on "Claude is working" until `correctStaleStatus` rescued it **5 minutes** later. But the **worker writes the Esc byte itself**, so it is the one component that can know: a **lone `0x1b`** (`isEscapeKey` — length 1, so an arrow's `ESC [ A` never counts) sent to a **`working`** session flips it to idle at once. Gated on `working` on purpose: Esc at a permission prompt (`waiting`) *rejects the tool* and Claude carries on. No push fires — the user is the one who pressed Esc.
 
