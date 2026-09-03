@@ -298,12 +298,17 @@ test.describe('#204 the cluster proxy reports a buffer refusal to the browser', 
     const typedSeen = watch(typed.ws, typed.frames);
     const silentSeen = watch(silent.ws, silent.frames);
     const overSeen = watch(over.ws, over.frames);
+    // The server closes all three itself, so the happy path needs no teardown — but an
+    // assertion failing early would leave three live proxy connections (and their
+    // reconnect loops) inside the test server for the rest of the run. Found in review.
+    const closeAll = async () => {
+      await Promise.all([typed.ws, silent.ws, over.ws].map((w) => closeAndDrain(w)));
+    };
 
     // Well under MAX_BUFFER_SIZE, so every one of these FITS: `decide` admits it and
     // #204's notice must never fire. That is what makes the reason below the new one.
     const WRITES = ['make me a plan for\r', 'the migration\r', 'y\r'];
     const TOTAL = WRITES.reduce((n, w) => n + Buffer.byteLength(w), 0);
-    for (const w of WRITES) typed.ws.send(w);
 
     // THE THIRD SOCKET TYPES PAST THE BUFFER, which is where "what was lost" stops
     // being "what was held". Once `decide` refuses, the buffer is pinned at
@@ -314,12 +319,18 @@ test.describe('#204 the cluster proxy reports a buffer refusal to the browser', 
     const EXTRA = ['first-refused\r', 'e1\r', 'e2\r', 'e3\r', 'e4\r'];
     const OVER_ALL = [...FILL, ...EXTRA];
     const OVER_TOTAL = OVER_ALL.reduce((n, w) => n + Buffer.byteLength(w), 0);
-    for (const w of OVER_ALL) over.ws.send(w);
-    // Observed, not assumed: the 'buffer-full' notice has to have fired BEFORE the
-    // give-up, or the two-notice assertion below would be about the wrong pair.
-    await expect.poll(() => droppedFrames(over.frames).length, { timeout: 15000 }).toBe(1);
 
-    await Promise.all([typedSeen.closed, silentSeen.closed, overSeen.closed]);
+    try {
+      for (const w of WRITES) typed.ws.send(w);
+      for (const w of OVER_ALL) over.ws.send(w);
+      // Observed, not assumed: the 'buffer-full' notice has to have fired BEFORE the
+      // give-up, or the two-notice assertion below would be about the wrong pair.
+      await expect.poll(() => droppedFrames(over.frames).length, { timeout: 15000 }).toBe(1);
+
+      await Promise.all([typedSeen.closed, silentSeen.closed, overSeen.closed]);
+    } finally {
+      await closeAll();
+    }
 
     // The socket that typed: told, once, with the whole loss named, before the close.
     const notices = droppedFrames(typedSeen.framesAtClose).map((f) => JSON.parse(f));

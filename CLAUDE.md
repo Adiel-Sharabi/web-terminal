@@ -447,9 +447,10 @@ honoured it, and #201 made one of them reachable.
   `attemptReconnect` now sends one notice naming the total before the close, under a
   third `reason` — **`'peer-unreachable'`, not `'buffer-full'`**, which means *there was
   no room left* and is exactly what did not happen. The buffer is cleared **before** the
-  close so a remote close arriving in that gap cannot report the same loss twice, and
-  the send-then-close ordering is asserted from inside the close handler rather than
-  assumed of `ws`.
+  close, which makes a second report impossible by construction — defensively: nothing
+  re-enters that branch today, and saying otherwise would be a comment claiming a
+  measured path. The send-then-close ordering, by contrast, IS asserted, from inside the
+  close handler rather than assumed of `ws`.
 - **Three things review caught in that fix, each a rule rather than a patch — and all
   three of the give-up's decisions ended up in `lib/reconnect-buffer.js` as `giveUp`,
   beside `decide`, for the reason stated one bullet up.** Left at the call site they had

@@ -1382,6 +1382,12 @@
     // waits on that session's cache entry and is rendered when you come back to it.
     // One-shot: it is a fact about one outage, not a state to keep re-announcing.
     //
+    // LAST ONE WINS, deliberately. A background session can be told twice — a
+    // 'buffer-full' refusal during the outage and then 'peer-unreachable' when the proxy
+    // gives up — and only the second is kept. That matches what the foreground already
+    // does: both render into the same element, so a second notice REPLACES the first
+    // there too, and the give-up's total covers the earlier refusal anyway.
+    //
     // With `keepSessionsOpen` off there is no background socket at all (the old one is
     // closed on switch, which tears the proxy down before it ever gives up), so there
     // is nothing to stash and nothing this could have shown.
