@@ -74,9 +74,12 @@
 // of a composer. So `.credentials.json` is COPIED in. The Codex rule ("never copy
 // auth.json into a second CODEX_HOME") exists because a refresh rotates the token and
 // reuse-detection can revoke the family, so this probe refuses to run unless the access
-// token has `--min-token-life` minutes left (default 30), which is what makes a refresh
-// impossible inside a run; it re-checks the original file's hash afterwards and SHOUTS
-// if it moved; and every copy is deleted on the way out, including on --keep.
+// token has `--min-token-life` minutes left (default 30). THAT REFUSAL is what makes a
+// refresh impossible inside a run — no after-the-fact check can. It also hashes each
+// COPY just before shredding it and SHOUTS if the child moved one; the original cannot
+// show that, because the child runs with CLAUDE_CONFIG_DIR elsewhere and never opens it,
+// so it is checked separately and only for what it does show (the HOST refreshing).
+// Every copy is deleted on the way out, including on --keep.
 //
 // Usage:
 //   node scripts/rig/probe-exit-flush.js                 # 2 runs of each arm
@@ -145,7 +148,9 @@ const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
 // ---------------------------------------------------------------- small helpers
 
 const sha1 = (buf) => crypto.createHash('sha1').update(buf).digest('hex');
-const sha1File = (p) => { try { return sha1(fs.readFileSync(p)); } catch { return '<unreadable>'; } };
+/** Named because a comparison against it is NOT evidence of a change. */
+const UNREADABLE = '<unreadable>';
+const sha1File = (p) => { try { return sha1(fs.readFileSync(p)); } catch { return UNREADABLE; } };
 
 /**
  * The screen with EVERY space removed.
@@ -414,12 +419,17 @@ async function runArm(arm, run, opts) {
 
   const bats = writeHookBats(markerDir);
   const credsCopy = seedConfigDir(cfgDir, cwd, bats);
+  // Hashed AT CREATION rather than reused from preflight: the HOST's own claude may
+  // refresh between the two, and that would otherwise read as the child rotating it.
+  const credsCopyHash = sha1File(credsCopy);
 
   const R = {
     arm, run, tag, cfgDir, cwd, markerDir,
     events: [],
     hooks: {},
     trustDialog: false,
+    // null = never checked (the copy was gone, or finish() never ran). See finish().
+    credsRotated: null,
     readyMs: null,
     turnMs: null,
     exitCode: null,
@@ -495,6 +505,18 @@ async function runArm(arm, run, opts) {
       R.survivors.push({ pid: p.ProcessId, name: p.Name, cmd: String(p.CommandLine || '').slice(0, 200) });
       try { process.kill(p.ProcessId); } catch { /* already gone */ }
     }
+    // THE COPY IS THE ONLY FILE A REFRESH BY THE CHILD CAN MOVE, and it has to be read
+    // HERE because the next line destroys it. The child runs with CLAUDE_CONFIG_DIR
+    // pointed at cfgDir and never opens the original, which is therefore unchanged by
+    // construction whatever it does — so the run-level check on the original can only
+    // ever print "unchanged", including in exactly the scenario it exists to catch.
+    // null means the copy was gone before it could be hashed: not evidence either way.
+    const copyNow = fs.existsSync(credsCopy) ? sha1File(credsCopy) : null;
+    // An unreadable hash on EITHER side is not a rotation, and must not be reported as
+    // one: a false alarm on a credential warning is how you learn to ignore the real one.
+    R.credsRotated = (copyNow === null || copyNow === UNREADABLE || credsCopyHash === UNREADABLE)
+      ? null
+      : copyNow !== credsCopyHash;
     shred(credsCopy);
     return R;
   };
@@ -901,11 +923,36 @@ function parseArgs(argv) {
     for (const r of results) reportArm(r);
     if (results.length) reportCompare(results);
 
+    // The hazard is a refresh, which ROTATES the token and can get the whole family
+    // revoked by reuse-detection. Two DIFFERENT files can show one, and only one of
+    // them is the child's:
+    //
+    //   the COPY     -> the child refreshed. This is the hazard. Checked per arm in
+    //                   finish(), because the copy is shredded there.
+    //   the ORIGINAL -> the HOST's own claude refreshed while the probe ran. A different
+    //                   event, and not the child's doing — but worth printing, because
+    //                   the copies then carried a token the host has superseded.
+    //
+    // Hashing the original and calling it a refresh check was this file's own bug: the
+    // child cannot reach that file, so it reads "unchanged" however badly the run went.
+    // What actually makes a refresh impossible is the --min-token-life refusal above.
+    const rotated = results.filter((r) => r.credsRotated === true);
+    const uncheckable = results.filter((r) => r.credsRotated == null);
+    const copyVerdict = rotated.length ? rotated.map((r) => r.tag).join(', ') : 'no';
+    const unsure = uncheckable.length ? `  (${uncheckable.length} could not be checked)` : '';
+    console.log(`\ncredential COPY moved during a run: ${copyVerdict}${unsure}`);
+    if (rotated.length) {
+      console.log('*** THE CHILD REFRESHED THE COPIED TOKEN. A refresh ROTATES it, so the ***');
+      console.log('*** original may now be stale and reuse-detection can revoke the family. ***');
+      console.log('*** Check that claude still works; re-login if it does not. This should  ***');
+      console.log('*** be unreachable with --min-token-life honoured — raise the margin.    ***');
+    }
+
     const credsHashAfter = sha1File(REAL_CREDS);
-    console.log(`\ncredentials file unchanged: ${credsHashBefore === credsHashAfter}`);
+    console.log(`the real ~/.claude/.credentials.json moved during this run: ${credsHashBefore !== credsHashAfter}`);
     if (credsHashBefore !== credsHashAfter) {
-      console.log('*** THE REAL ~/.claude/.credentials.json MOVED DURING THIS RUN. ***');
-      console.log('*** A token refresh may have happened. Check that claude still works. ***');
+      console.log('*** The HOST refreshed its own token mid-run (the child cannot write ***');
+      console.log('*** this file). Harmless to the host; the copies held a stale token. ***');
     }
 
     // Isolation audit: did anything reach the REAL config after all?

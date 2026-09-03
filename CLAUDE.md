@@ -433,6 +433,21 @@ every arm killed an idle session after a completed turn.
 > `CLAUDECODE=1` and `CLAUDE_CODE_MESSAGING_SOCKET` (a named pipe into the PARENT) — **a
 > nested child session persists nothing**, so the measurement reads as "unmeasurable" when
 > it is really "not isolated". Sibling of the `CODEX_HOME` rule under Codex above.
+>
+> **A guard must hash the file the ACTOR CAN WRITE.** Copying `.credentials.json` into the
+> isolated `CLAUDE_CONFIG_DIR` is the probe's one break in isolation, and the safety net
+> described for it — *"re-checks the original file's hash afterwards and SHOUTS if it
+> moved"* — hashed `~/.claude/.credentials.json`. **The child runs with
+> `CLAUDE_CONFIG_DIR` pointed elsewhere and never opens that file**, so it is unchanged by
+> construction and the check printed `unchanged: true` in precisely the scenario it existed
+> to catch. The file that shows a rotation is the **copy** — which was being shredded a few
+> lines earlier, destroying the evidence unread on every normal run. What actually makes a
+> refresh impossible is the `--min-token-life` refusal; the hash check was a second line of
+> defence that was never in the line of fire. It now hashes each copy at creation and
+> compares just before the shred, and the original is checked separately for the different
+> thing it does show (the HOST refreshing mid-run). **Generalises past credentials: name
+> the writer before choosing what to watch** — the same error as asserting on the screen
+> when the rollout is ground truth.
 
 ## Input & Submit Contract (issue #55) — this is law, not guidance
 
