@@ -19,10 +19,38 @@ const { BASE, authCtx, loginPage } = require('./test-helpers');
 
 /** Navigate straight to a session and wait for the header to confirm we're attached
  *  to IT — `sessionId` is set synchronously inside switchSession() before #sessionName
- *  is painted, so this is a safe proxy for "the module-local sessionId now equals id". */
+ *  is painted, so this is a safe proxy for "the module-local sessionId now equals id".
+ *
+ *  #221 — AND THE DRAWER MUST BE CLOSED FIRST, or a click here is a coin toss. At this
+ *  file's phone width `#sidebar.open` is `width: 100vw` with `transition: width .2s`,
+ *  and `init()` opens it on load whenever `sessionStorage.sidebarOpen !== '0'` — which
+ *  is ALWAYS, because every Playwright context starts with an empty sessionStorage.
+ *  Navigating straight to `/app/:id` never closes it again (`closeSidebarIfUnpinned`
+ *  runs on the session-TAP path, not on URL resolution), so the settled state is a
+ *  full-screen drawer over the notice this spec clicks.
+ *
+ *  Measured: the sidebar is 225px wide at the anchor and 390px from ~100ms on, and
+ *  `elementFromPoint` over #composeNoticeDismiss returns the button during the
+ *  transition and `#sidebarBody` after it. So the dismiss test PASSED ONLY BY WINNING
+ *  A 200ms ANIMATION RACE — green on an idle box, and a 30s
+ *  `#sidebarBody … intercepts pointer events` timeout right after a full suite.
+ *
+ *  Fixed the way `mobile-new-session-dialog.spec.js` already does it: seed the flag
+ *  BEFORE the page loads so `init()` never opens the drawer at all. Forcing it shut
+ *  afterwards would race that same toggle. The closed drawer is also the state a user
+ *  looking at a session is actually in.
+ *
+ *  It is asserted, not assumed — a silently-ignored seed would put the coin toss back
+ *  with nothing to notice it. */
 async function openSession(page, id, name) {
+  await page.addInitScript(() => {
+    try { sessionStorage.setItem('sidebarOpen', '0'); } catch { /* private mode */ }
+  });
   await page.goto(BASE + '/app/' + id);
   await expect(page.locator('#sessionName')).toContainText(name, { timeout: 10000 });
+  await expect(page.locator('#sidebar'),
+    'the phone-width drawer is 100vw and covers everything this spec clicks (#221)')
+    .not.toHaveClass(/open/);
 }
 
 test.describe('#179 submit-unconfirmed notice (web client)', () => {
