@@ -61,10 +61,18 @@ const SHARED = [
     // seam this closes existed for months precisely because the two numbers looked
     // independent — 64KB on the wire, 256KB in the buffer, nothing tying them. Both
     // count UTF-16 code units, so the comparison is meaningful.
-    what: 'WS input cap == companion offline-buffer ceiling (#201)',
+    // #206 — and now app.html too, which makes this the first entry with all THREE
+    // sites. It was two for as long as `app.html` had no single place to compare
+    // against: input reached the wire from a dozen scattered `ws.send(...)` calls, so
+    // there was no constant to keep in step. Giving it `sendPtyInput` gave it one, and
+    // an ungated copy of this number would be worse than none — it decides whether the
+    // browser refuses a write itself or lets the TRANSPORT refuse it, and the transport
+    // refuses by closing the socket.
+    what: 'WS input cap == companion offline-buffer ceiling == app.html local refusal (#201/#206)',
     sites: [
       { file: 'server.js', re: /const\s+WS_INPUT_MAX\s*=\s*([^;]+);/ },
       { file: 'ai-terminal/lib/api/api_client.dart', re: /static\s+const\s+int\s+_inputBufferHardCap\s*=\s*([^;]+);/ },
+      { file: 'app.html', re: /const\s+WS_INPUT_MAX\s*=\s*([^;]+);/ },
     ],
   },
 ];

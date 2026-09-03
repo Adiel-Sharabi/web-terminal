@@ -1670,8 +1670,10 @@
     // Windows clipboard entirely and works for remote cluster sessions, since
     // the path is on the same machine where Claude Code is running.
     function sendImagePath(p) {
-      if (!p || !ws || ws.readyState !== WebSocket.OPEN) return;
-      ws.send('\x1b[200~' + p + '\x1b[201~');
+      if (!p) return;
+      // Its own frame, exactly as before (#87: the bare CR behind it must stay a
+      // separate write) — only the cap check is new.
+      sendPtyInput('\x1b[200~' + p + '\x1b[201~');
     }
     async function uploadClipboardImage() {
       try {
@@ -1735,6 +1737,63 @@
     // userInitiated: true for explicit user actions (compose send button, which
     // fires no keydown). onData callers omit it and rely on the _lastTypedAt
     // heuristic so xterm's auto-replies don't trigger the scroll-follow.
+    // #206 — THE ONE PLACE user input reaches a session socket.
+    //
+    // `ws` answers an oversize frame by CLOSING the socket (1009) before any
+    // application handler runs, so the server cannot send its `inputDropped` notice
+    // for it: the write is lost, anything already dequeued behind it goes with it,
+    // and the user sees a reconnect blip with no explanation. #204 closed that band
+    // for the companion by refusing at the APP cap instead — a refusal by the app
+    // keeps the socket and the session, a refusal by the transport costs the
+    // connection — and left this client open because the check had nowhere to live.
+    //
+    // IT HAD SOMEWHERE AFTER ALL, and the issue's premise was the stale part. This
+    // file was described as having no single input path; in fact `sendInput` below
+    // has been the coalescing path for typing and for the compose bar all along, and
+    // exactly FOUR sites wrote past it straight to `ws.send` — the image-path paste,
+    // the mobile toolbar key, the long-press Paste action and the tap-to-move arrow
+    // repeat. So this is a funnel, not a new mechanism.
+    //
+    // Control frames (`resize`, `mode`, `heartbeat`, the notification socket's ping)
+    // are NOT input and deliberately stay as they are.
+    //
+    // THE FRAMING OF EVERY CALLER IS LEFT EXACTLY AS IT WAS. #55/#44 make a submit one
+    // frame on purpose, and the images-only submit (#87) depends on its paste close
+    // and its bare CR reaching the wire as separate writes a measured gap apart. So
+    // this wraps `ws.send`; it re-coalesces nobody.
+    //
+    // The cap is tested BEFORE the socket state on purpose: the refusal is a fact
+    // about the data, and a notice that appeared only when a socket happened to be
+    // open would be the flakiest possible affordance.
+    //
+    // ONLY THE CAP REFUSAL IS REPORTED. A write to a closed or missing socket still
+    // returns false silently, and every caller ignores the boolean — the same behaviour
+    // all five sites had before this funnel existed, kept rather than changed because a
+    // notice there would fire on every keystroke typed during an ordinary reconnect,
+    // which is #204's "a banner per character teaches you to ignore the one that
+    // mattered". Said plainly because this block calls itself the ONE place input
+    // reaches a socket, and a reader would otherwise assume it reports every loss.
+    //
+    // NO `try/catch` AROUND THE SEND, deliberately. `send()` throws only when
+    // `readyState` is CONNECTING (WHATWG), which the line above has already excluded in
+    // the immediately preceding synchronous statement — so a catch here could absorb
+    // nothing but "`ws` is not a WebSocket", i.e. a bug, and swallowing it would hide it
+    // from the `pageerror` assertions the specs make. Found in review.
+    //
+    // ONE SOCKET, NEVER A PARAMETER. `nudgeRedraw(sock)` next door takes an explicit
+    // socket because a CONTROL frame genuinely has two candidates (a fresh `ws` on open,
+    // a cached `entry.ws` on the switch path). Input has exactly one by definition:
+    // writing a keystroke to a backgrounded socket would be a bug, and `server.js`
+    // refuses even `resize` from one. So the `sock` parameter this started with was not
+    // merely unused, it was unusable.
+    const WS_INPUT_MAX = 256 * 1024;  // == server.js `WS_INPUT_MAX`; UTF-16 code units
+    function sendPtyInput(data) {
+      if (data.length > WS_INPUT_MAX) { showInputDropped(data.length); return false; }
+      if (!ws || ws.readyState !== WebSocket.OPEN) return false;
+      ws.send(data);
+      return true;
+    }
+
     let _inputBuf = '', _inputTimer = null;
     function sendInput(data, userInitiated) {
       // Follow output to the bottom only for genuine user input — they want to
@@ -1753,9 +1812,7 @@
           const buf = _inputBuf;
           _inputBuf = '';
           _inputTimer = null;
-          if (buf && ws && ws.readyState === WebSocket.OPEN) {
-            ws.send(buf);
-          }
+          if (buf) sendPtyInput(buf);
         }, 5);
       }
     }
@@ -2342,7 +2399,7 @@
         seq = '\x1b' + seq;
       }
 
-      if (ws && ws.readyState === WebSocket.OPEN) ws.send(seq);
+      sendPtyInput(seq);
 
       // Clear sticky after use
       if (stickyState.ctrl || stickyState.alt || stickyState.shift) {
@@ -2538,7 +2595,7 @@
           const sel = term.getSelection();
           const actions = [];
           if (sel) actions.push({ label: 'Copy', action: () => { copyToClipboard(sel); term.clearSelection(); } });
-          actions.push({ label: 'Paste', action: () => { navigator.clipboard.readText().then(t => { if (t && ws && ws.readyState === WebSocket.OPEN) ws.send(t); }); } });
+          actions.push({ label: 'Paste', action: () => { navigator.clipboard.readText().then(t => { if (t) sendPtyInput(t); }); } });
           actions.push({ label: 'Paste Image', action: () => mobileImagePaste() });
           actions.push({ label: 'Select', action: () => enterSelectMode() });
           actions.push({ label: 'Select All', action: () => term.selectAll() });
@@ -2582,7 +2639,7 @@
               const diff = tapped.col - cursorCol;
               if (diff !== 0) {
                 const arrow = diff > 0 ? '\x1b[C' : '\x1b[D';
-                ws.send(arrow.repeat(Math.abs(diff)));
+                sendPtyInput(arrow.repeat(Math.abs(diff)));
               }
             }
           }

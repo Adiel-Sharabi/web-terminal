@@ -429,10 +429,38 @@ honoured it, and #201 made one of them reachable.
   serves both roles (per-frame wire cap, whole-buffer total) because the #201 invariant
   makes them one number; a second Dart constant would be a third copy of the value whose
   whole problem was that its copies looked independent.
-- **`app.html` is NOT gated and still can reach that band.** It has a dozen scattered
-  `ws.send(...)` sites and no single input path, so there is nowhere to put the check
-  without first building one. Recorded at the `server.js` cap block, because the server
-  cannot tell which client is talking to it.
+- **`app.html` is gated too now (#206)** — and the reason it was not is worth keeping,
+  because **half the premise was stale.**
+  - **But "both clients" is wrong, and briefly stood in this file as a claim.** There is
+    a THIRD page, and it is the worst off of the three: **`terminal.html`**, the legacy
+    terminal-only view still served at `/s/:id` and still linked from `lobby.html`. Four
+    ungated input sends (a Ctrl+V paste among them) **and** it discards the server's own
+    `inputDropped` frame — there is no notice UI in that file to render one in. So there:
+    a >256 KB paste is refused by the server and reported to nobody, and a >4 MiB paste
+    closes the socket with nobody told why. Gating it means building it a notice first,
+    so it is **named, not fixed** (#218) — the value of a record like this one is that it
+    is accurate, and the previous sentence here was the second comment in two PRs to claim
+    a convenient thing nobody had checked.
+  This bullet used to say the file had "no single input path"; in fact `sendInput` had
+  been the coalescing path for typing and for the compose bar all along, and exactly
+  **four** sites wrote past it to `ws.send` — the image-path paste, the mobile toolbar
+  key, the long-press Paste action, the tap-to-move arrow repeat. So the fix is a
+  **funnel** (`sendPtyInput` wrapping `ws.send`), not the new mechanism the issue
+  budgeted for. *Check the claim before you cost the work.*
+  - The cap is tested **before** the socket state: the refusal is a fact about the data,
+    and a notice that appeared only when a socket happened to be open would be the
+    flakiest possible affordance.
+  - **Every caller's FRAMING is untouched.** #55/#44 make a submit one frame on purpose,
+    and #87's images-only submit needs its paste close and its bare CR to reach the wire
+    as separate writes a measured gap apart. This wraps a send; it re-coalesces nobody.
+  - **A funnel's whole value is that nothing goes round it**, and no behavioural test can
+    see that — a `ws.send` added next year would leave every other test in the repo
+    green. `tests/app-input-path.spec.js` therefore asserts it against the **source**,
+    with an allowlist of the frames that are not input (`resize`, `mode`, `heartbeat`,
+    the notify ping), as well as driving the cap end to end.
+  - `WS_INPUT_MAX` is now a **third** site in `scripts/check-shared-constants.js`. An
+    ungated copy would decide whether the browser refuses a write itself or lets the
+    **transport** refuse it — and the transport refuses by closing the socket.
 - **The cluster proxy tells the browser when its reconnect buffer refuses a write** —
   the remote link is what is down, `localWs` is open throughout. **Once per outage, not
   once per keystroke:** the buffer LATCHES (#201), so everything after the first refusal
