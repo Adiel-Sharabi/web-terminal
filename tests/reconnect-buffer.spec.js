@@ -15,7 +15,7 @@
 // red before the latch; every other test here passed either way and is a guard, not a
 // demonstration.
 const { test, expect } = require('@playwright/test');
-const { admits, decide } = require('../lib/reconnect-buffer');
+const { admits, decide, giveUp } = require('../lib/reconnect-buffer');
 
 const LIMITS = { maxEntries: 100, maxBytes: 4 * 1024 * 1024 };
 const open = (count, bytes) => ({ count, bytes, latched: false });
@@ -113,6 +113,66 @@ test.describe('#204 how many refusals the browser is told about', () => {
     const afterFlush = open(0, 0);
     expect(decide(afterFlush, 12, LIMITS).notify).toBe(false); // fits, nothing to say
     expect(decide(open(LIMITS.maxEntries, 0), 1, LIMITS).notify).toBe(true);
+  });
+
+  // #209 — the proxy STOPS reconnecting, and everything it was holding goes with the
+  // socket. `decide` covers the refusal; this covers the abandonment, which is the
+  // opposite case and until now the silent one.
+  //
+  // WHY THESE LIVE HERE AND NOT ONLY IN THE INTEGRATION TEST. Two of the three facts
+  // below are otherwise reachable only through a 37-second cluster-proxy run against a
+  // dead peer, and the third — the unconditional latch — is not reachable from outside
+  // AT ALL: it guards a window inside a closing socket, where by construction no notice
+  // could ever be sent to observe. The rule is testable even where the race is not.
+  test('the give-up reports what was LOST, which is not what was HELD', () => {
+    // Once the buffer latched, `count` is pinned at maxEntries and every later write in
+    // that outage was refused into no array. Reporting `count` alone would tell somebody
+    // who typed 105 things that it lost 100 — with a precise figure, which is the shape
+    // this whole family of notices exists to avoid.
+    const loss = giveUp({
+      count: LIMITS.maxEntries, bytes: 4000, latched: true,
+      refusedCount: 5, refusedBytes: 60,
+    });
+    expect(loss.writes).toBe(105);
+    expect(loss.bytes).toBe(4060);
+  });
+
+  test('a buffer that never refused anything reports exactly what it held', () => {
+    const loss = giveUp(open(3, 35));
+    expect(loss.writes).toBe(3);
+    expect(loss.bytes).toBe(35);
+  });
+
+  test('an EMPTY buffer is not a loss — zero, so the caller says nothing', () => {
+    expect(giveUp(open(0, 0)).writes).toBe(0);
+  });
+
+  test('the state a give-up leaves behind is LATCHED, even when nothing was lost', () => {
+    // The half no integration test can see. `close()` moves a socket to CLOSING and the
+    // transport keeps delivering messages until the peer's close frame arrives; anything
+    // admitted in that window lands in a buffer nothing will ever flush. An empty buffer
+    // has the identical window, so the latch cannot hang off "something was lost" — and
+    // a conditional latch would pass every other test in this file.
+    expect(giveUp(open(0, 0)).next.latched).toBe(true);
+    expect(giveUp(open(7, 70)).next.latched).toBe(true);
+  });
+
+  test('and that state REFUSES the next write, which is what the latch is for', () => {
+    // Stated as the invariant rather than as a field: what matters is not that a boolean
+    // is true but that a write arriving in the closing window cannot be admitted.
+    const after = giveUp(open(0, 0)).next;
+    expect(decide(after, 5, LIMITS).admit).toBe(false);
+    // And silently — `decide` answers a latched buffer with notify:false, so a socket
+    // that is going away never grows a second banner.
+    expect(decide(after, 5, LIMITS).notify).toBe(false);
+  });
+
+  test('giving up is PURE — the caller adopts `next`, the module keeps nothing', () => {
+    const state = { count: 4, bytes: 40, latched: false, refusedCount: 1, refusedBytes: 9 };
+    const before = JSON.stringify(state);
+    expect(giveUp(state).writes).toBe(5);
+    expect(giveUp(state).writes).toBe(5);
+    expect(JSON.stringify(state)).toBe(before);
   });
 
   test('deciding is PURE too — no counter hidden in the module', () => {

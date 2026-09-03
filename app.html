@@ -908,7 +908,7 @@
       sessionStorage.setItem('wt_browserId', id);
       return id;
     })();
-    const sessionCache = new Map(); // sessionId -> { ws, scrollback, serverUrl, connected, heartbeatTimer, reconnectTimer }
+    const sessionCache = new Map(); // sessionId -> { ws, scrollback, serverUrl, connected, heartbeatTimer, reconnectTimer, inputDropped }
 
     // --- Scroll-up history backfill state (per active session) -------------
     // Initial attach replays only ~32 KB; older bytes are fetched on demand
@@ -1278,7 +1278,7 @@
       const existing = sessionCache.get(id);
       if (existing && existing.connected) return; // already connected
 
-      const entry = existing || { ws: null, scrollback: '', serverUrl: serverUrl || null, connected: false, heartbeatTimer: null, reconnectTimer: null };
+      const entry = existing || { ws: null, scrollback: '', serverUrl: serverUrl || null, connected: false, heartbeatTimer: null, reconnectTimer: null, inputDropped: null };
       sessionCache.set(id, entry);
 
       const bgWs = new WebSocket(getWsUrl(id, serverUrl));
@@ -1421,7 +1421,7 @@
         const oldWs = ws;
         const oldServerUrl = sessionServerUrl;
         // Move to cache as background
-        const entry = sessionCache.get(oldId) || { scrollback: '', serverUrl: oldServerUrl, connected: true, heartbeatTimer: null, reconnectTimer: null };
+        const entry = sessionCache.get(oldId) || { scrollback: '', serverUrl: oldServerUrl, connected: true, heartbeatTimer: null, reconnectTimer: null, inputDropped: null };
         entry.ws = oldWs;
         entry.connected = true;
         sessionCache.set(oldId, entry);
@@ -1974,8 +1974,10 @@
       const txt = document.getElementById('composeNoticeText');
       if (!box || !txt) return;
       if (reason === 'peer-unreachable') {
-        // `writes` is additive (#209); a server that predates it sends only the bytes,
-        // and the sentence still has to read correctly without the count.
+        // Defensive, not a compatibility path: a server old enough to omit `writes` is
+        // also old enough never to send `peer-unreachable`, so this branch is
+        // unreachable in practice. It costs one expression and keeps the sentence from
+        // reading "undefined writes" if the field is ever dropped or renamed.
         const n = Number(writes) > 0 ? `${writes} write${writes === 1 ? '' : 's'}, ${bytes} bytes` : `${bytes} bytes`;
         txt.textContent = `That server never came back, so everything you typed while it was down (${n}) was dropped. Reopen the session and send it again.`;
       } else if (reason === 'buffer-full') {

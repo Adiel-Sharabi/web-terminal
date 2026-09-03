@@ -450,16 +450,24 @@ honoured it, and #201 made one of them reachable.
   close so a remote close arriving in that gap cannot report the same loss twice, and
   the send-then-close ordering is asserted from inside the close handler rather than
   assumed of `ws`.
-- **Three things review caught in that fix, each a rule rather than a patch.**
-  (1) **"What was lost" is not "what was held."** Once the buffer latches, `buffered` is
+- **Three things review caught in that fix, each a rule rather than a patch — and all
+  three of the give-up's decisions ended up in `lib/reconnect-buffer.js` as `giveUp`,
+  beside `decide`, for the reason stated one bullet up.** Left at the call site they had
+  already become two loose counters and an assignment: exactly the `if` this module was
+  extracted to prevent. `giveUp` also makes them testable with no socket and no 37
+  seconds.
+  (1) **"What was lost" is not "what was held."** Once the buffer latches, `count` is
   pinned at 100 and every later refusal lands in no array — so the give-up must add a
   tally kept beside the latch, or it tells someone who typed 105 things that it lost
   100, *with a precise figure*. The earlier `buffer-full` notice does **not** cover the
   remainder: both render into the same element, so the second **replaces** the first.
-  (2) **The latch is set unconditionally at give-up**, because `close()` leaves
-  `readyState` at CLOSING and `ws` keeps delivering `message` — otherwise a write in
-  that gap is admitted to a buffer that can never be flushed. An empty buffer has the
-  same gap, so the latch cannot hang off "something was lost".
+  (2) **`next.latched` is true unconditionally**, because `close()` leaves `readyState`
+  at CLOSING and `ws` keeps delivering `message` — otherwise a write in that gap is
+  admitted to a buffer that can never be flushed. An empty buffer has the same window,
+  so the latch cannot hang off "something was lost". **This is the half no integration
+  test can reach** — it guards a window inside a closing socket, where by construction
+  no notice could be sent to observe it — which is the argument for the rule living in
+  a pure module at all: *the rule is testable even where the race is not.*
   (3) **A BACKGROUND SOCKET IS STILL A SOCKET THE SERVER REPORTS ON.** `app.html`'s two
   background `onmessage` handlers listed `inputDropped` in their *ignore* set. That was
   survivable while every refusal fired *as you typed* — you are still on that session
