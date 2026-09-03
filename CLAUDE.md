@@ -433,7 +433,8 @@ honoured it, and #201 made one of them reachable.
   because **half the premise was stale.**
   - **But "both clients" was wrong, and briefly stood in this file as a claim.** There
     was a THIRD page, and it was the worst off of the three: **`terminal.html`**, the
-    legacy terminal-only view served at `/s/:id` and linked from `lobby.html`. Four
+    legacy terminal-only view served at `/s/:id` and linked from `lobby.html`. (That link
+    still exists and still points at `/s/`; it simply lands on the redirect now.) Four
     ungated input sends (a Ctrl+V paste among them) **and** it discarded the server's own
     `inputDropped` frame — there is no notice UI in that file to render one in. So there:
     a >256 KB paste was refused by the server and reported to nobody, and a >4 MiB paste
