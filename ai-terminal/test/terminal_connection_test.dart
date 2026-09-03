@@ -219,6 +219,20 @@ void main() {
       final conn = TerminalConnection(_server, 's',
           socketFactory: (_) => i++ == 0 ? s1 : s2,
           reconnectBackoff: _slowBackoff);
+      // #208 — subscribed to pin the SILENCE, and pinned HERE because this is the one
+      // test that actually makes stage 1 evict (5000 + 5000 > 8192). Stage 1 dropping
+      // ordinary writes without reporting is a stated #193 decision — losing one
+      // buffered keystroke is not worth a banner, and reporting it would cost a
+      // 6-second SnackBar per arrow key evicted during an outage — and it was a
+      // decision nothing enforced: making stage 1 report passed every test in this
+      // file. Found in review by mutation.
+      //
+      // The first attempt at this assertion went in the COEXISTS test next door, where
+      // the only ordinary write is one byte and stage 1 therefore never runs. It passed
+      // the mutation too — vacuously. A negative needs the thing it denies to actually
+      // have happened, which is what `flushed` below establishes.
+      final dropped = <InputDrop>[];
+      conn.inputDropped.listen(dropped.add);
       await pump();
       s1.serverDrop();
       await pump(15); // offline window
@@ -231,6 +245,11 @@ void main() {
       expect(flushed, 'B' * 5000,
           reason: 'oldest whole write evicted; newest submit kept intact, never split');
       expect(flushed.contains('A'), isFalse);
+      // ...and that eviction, which the two assertions above prove happened, said
+      // nothing. This is the assertion that is NOT vacuous: 'A' is demonstrably gone.
+      expect(dropped, isEmpty,
+          reason: 'stage 1 bounds ordinary accumulation SILENTLY — a banner per '
+              'evicted keystroke is the noise #204 warns about');
       conn.close();
     });
 
@@ -297,7 +316,7 @@ void main() {
       final conn = TerminalConnection(_server, 's',
           socketFactory: (_) => i++ == 0 ? s1 : s2,
           reconnectBackoff: _slowBackoff);
-      final dropped = <int>[];
+      final dropped = <InputDrop>[];
       conn.inputDropped.listen(dropped.add);
       await pump();
       s1.serverDrop();
@@ -320,6 +339,21 @@ void main() {
           reason: 'oldest-first: the earliest pastes are the ones sacrificed');
       expect(dropped, isNotEmpty,
           reason: 'a write lost to the hard ceiling must be reported, not silent');
+      // #208 - AND NOT AS "too large". Every one of these pastes was a legal size;
+      // they were given up because the outage overflowed the buffer holding them.
+      // Reporting them the way a cap refusal is reported is the confidently-wrong
+      // wording this reason field exists to prevent, and it is the assertion that
+      // goes red if the eviction site ever names the wrong origin.
+      expect(dropped.map((d) => d.reason).toSet(), {InputDropReason.bufferFull},
+          reason: 'an eviction is NOT about size - the write was perfectly legal');
+      // ...and it must report the size of what was ACTUALLY lost. Found in review by
+      // mutation: with only the reason asserted, the emit site could pass `length: 0`
+      // and every test here stayed green, shipping "there was no room left to hold
+      // what you typed (0 characters)". The two tooLarge sites both pin their length
+      // already; this was the only origin that did not. Each paste is 20000 chars, so
+      // every eviction on this path has exactly one right answer.
+      expect(dropped.map((d) => d.length).toSet(), {20000},
+          reason: 'the reported length must be the evicted write, not a placeholder');
       conn.close();
     });
 
@@ -421,7 +455,7 @@ void main() {
     test('a LIVE oversized write is reported and never reaches the socket', () async {
       final s1 = _FakeSocket();
       final conn = TerminalConnection(_server, 's', socketFactory: (_) => s1);
-      final dropped = <int>[];
+      final dropped = <InputDrop>[];
       conn.inputDropped.listen(dropped.add);
       await pump();
       final sentBefore = s1.sentStrings.length; // the connect handshake
@@ -429,8 +463,11 @@ void main() {
       conn.sendInput('z' * (cap + 1));
       await pump();
 
-      expect(dropped, [cap + 1],
+      expect(dropped.map((d) => d.length), [cap + 1],
           reason: 'the refusal must be reported with the length, on the #193 channel');
+      expect(dropped.single.reason, InputDropReason.tooLarge,
+          reason: 'a cap refusal IS about size - the one origin the old single '
+              'wording was right about');
       expect(s1.sentStrings.length, sentBefore,
           reason: 'nothing may reach the socket — past 4 MiB the wire answers by '
               'hanging up, taking anything already queued behind it');
@@ -450,7 +487,7 @@ void main() {
       final conn = TerminalConnection(_server, 's',
           socketFactory: (_) => i++ == 0 ? s1 : s2,
           reconnectBackoff: _slowBackoff);
-      final dropped = <int>[];
+      final dropped = <InputDrop>[];
       conn.inputDropped.listen(dropped.add);
       await pump();
       s1.serverDrop();
@@ -470,7 +507,8 @@ void main() {
       expect(s2.sentStrings, contains('sentinel\r'),
           reason: 'the reconnect and flush must have actually run, or the negative '
               'assertion below is vacuous');
-      expect(dropped, [cap + 1]);
+      expect(dropped.map((d) => d.length), [cap + 1]);
+      expect(dropped.single.reason, InputDropReason.tooLarge);
       expect(s2.sentStrings.any((f) => f.startsWith('zzz')), isFalse,
           reason: 'it must never have been buffered, so the flush has nothing to send');
       conn.close();
@@ -486,7 +524,7 @@ void main() {
       final live = _FakeSocket();
       final connLive =
           TerminalConnection(_server, 's', socketFactory: (_) => live);
-      final droppedLive = <int>[];
+      final droppedLive = <InputDrop>[];
       connLive.inputDropped.listen(droppedLive.add);
       await pump();
       connLive.sendInput(atCap);
@@ -502,7 +540,7 @@ void main() {
       final connBuf = TerminalConnection(_server, 's',
           socketFactory: (_) => i++ == 0 ? s1 : s2,
           reconnectBackoff: _slowBackoff);
-      final droppedBuf = <int>[];
+      final droppedBuf = <InputDrop>[];
       connBuf.inputDropped.listen(droppedBuf.add);
       await pump();
       s1.serverDrop();
@@ -680,7 +718,7 @@ void main() {
       final s1 = _FakeSocket();
       final conn = TerminalConnection(_server, 's', socketFactory: (_) => s1);
       final out = <String>[];
-      final dropped = <int>[];
+      final dropped = <InputDrop>[];
       conn.output.listen(out.add);
       conn.inputDropped.listen(dropped.add);
       await pump();
@@ -688,7 +726,10 @@ void main() {
       s1.serverSend('{"inputDropped":true,"bytes":70123}');
       await pump();
 
-      expect(dropped, [70123]);
+      expect(dropped.map((d) => d.length), [70123]);
+      expect(dropped.single.reason, InputDropReason.tooLarge,
+          reason: 'the DIRECT path only ever refuses on size; the cluster proxy '
+              'reasons cannot reach this client, which never proxies');
       expect(out, isEmpty, reason: 'the control frame must not be typed as PTY output');
       conn.close();
     });

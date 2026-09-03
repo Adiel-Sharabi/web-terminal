@@ -910,6 +910,31 @@ class _WebSocketTerminalSocket implements TerminalSocket {
   }
 }
 
+/// Why a write was dropped — see [TerminalConnection.inputDropped].
+///
+/// TWO values, not three, because two of the three origins mean the same thing to
+/// the person who typed: their write was over the app cap, and whether the server
+/// said so (#193) or this client said it first (#204) changes nothing they can act
+/// on. What must not be folded in is the third.
+enum InputDropReason {
+  /// Over the app cap (`WS_INPUT_MAX` / [TerminalConnection._inputBufferHardCap]).
+  /// Actionable: send it in smaller pieces.
+  tooLarge,
+
+  /// A perfectly LEGAL write, given up because a sustained outage overflowed the
+  /// buffer holding it. Nothing about its size was wrong, so "too large" is not
+  /// merely imprecise here — it is untrue, and a notice that is confidently wrong
+  /// costs you the occasions when it was telling the truth.
+  bufferFull,
+}
+
+/// One drop: how much was lost, and why.
+///
+/// A record rather than a class because it is a value with no behaviour, and
+/// because the alternative — keeping `Stream<int>` and inferring the reason at the
+/// listener — is exactly the guessing this type exists to remove.
+typedef InputDrop = ({int length, InputDropReason reason});
+
 /// A live, self-healing connection to one session's `/ws/:id` terminal socket.
 ///
 /// Server text/binary frames are surfaced as UTF-8 strings on [output].
@@ -956,7 +981,8 @@ class TerminalConnection {
   // no session id is needed on the wire). (2) [_bufferInput]'s own hard ceiling below,
   // for the same reason: a write this client itself had to give up on must never vanish
   // without a trace either.
-  final StreamController<int> _inputDropped = StreamController<int>.broadcast();
+  final StreamController<InputDrop> _inputDropped =
+      StreamController<InputDrop>.broadcast();
 
   static const int _inputBufferCap = 8192; // bound on ORDINARY accumulated offline input (bytes)
   // Offline input is buffered as WHOLE writes, never split. A single sendInput — e.g. a
@@ -1096,9 +1122,9 @@ class TerminalConnection {
   /// replayed scrollback reaches [output]. Clear the terminal buffer on this.
   Stream<void> get reconnected => _reconnected.stream;
 
-  /// Fires with the length (UTF-16 code units) whenever a write THIS connection
-  /// made failed to reach the agent. THREE origins, all of them #193's principle
-  /// — input that is dropped must be visible:
+  /// Fires whenever a write THIS connection made failed to reach the agent,
+  /// carrying its length (UTF-16 code units) and WHY. All of it is #193's
+  /// principle — input that is dropped must be visible. THREE origins:
   ///
   /// 1. the server refused it at its per-frame WS cap (`WS_INPUT_MAX`, 256 KB —
   ///    64 KB when this stream was written, raised by #201);
@@ -1108,9 +1134,23 @@ class TerminalConnection {
   ///    which is the only one of the three that can report a write the wire
   ///    would have answered by hanging up.
   ///
+  /// #208 — THE REASON IS ON THE STREAM BECAUSE ORIGIN 2 IS NOT ABOUT SIZE.
+  /// This used to be a `Stream<int>`, so the consumer could not tell the three
+  /// apart and said "too large to send" for all of them. For an eviction that is
+  /// simply false: the write was a perfectly LEGAL size and was given up because
+  /// the outage overflowed the buffer holding it — a 40-byte line reported as too
+  /// large. That is the same confidently-wrong wording #204 fixed on the cluster
+  /// proxy path with a `reason` field on the wire; here both ends are in one
+  /// process, so it costs a type rather than a protocol change.
+  ///
+  /// `length`, not `bytes`: origins 1 and 3 count UTF-16 code units, and the
+  /// wire's field name is wrong about that (recorded at `server.js`'s
+  /// `WS_INPUT_MAX` block). The mistake is kept on the wire for compatibility and
+  /// deliberately not carried inward.
+  ///
   /// Not terminal output, so it is its own stream rather than folded into
   /// [output].
-  Stream<int> get inputDropped => _inputDropped.stream;
+  Stream<InputDrop> get inputDropped => _inputDropped.stream;
 
   /// Whether the server reported this session was opened elsewhere.
   ///
@@ -1155,7 +1195,12 @@ class TerminalConnection {
   void sendInput(String data) {
     if (_closed) return;
     if (data.length > _inputBufferHardCap) {
-      if (!_inputDropped.isClosed) _inputDropped.add(data.length);
+      if (!_inputDropped.isClosed) {
+        _inputDropped.add((
+          length: data.length,
+          reason: InputDropReason.tooLarge,
+        ));
+      }
       return;
     }
     if (_live && _socket != null) {
@@ -1251,7 +1296,18 @@ class TerminalConnection {
       final evicted = _inputWrites.removeAt(0);
       _inputBufferLen -= evicted.length;
       if (evicted.length <= _inputBufferCap) _ordinaryBufferLen -= evicted.length;
-      if (!_inputDropped.isClosed) _inputDropped.add(evicted.length);
+      // #208 — THE ONE ORIGIN THAT IS NOT ABOUT SIZE. This write was a perfectly
+      // legal length; it is being given up because a sustained outage overflowed the
+      // buffer holding it. Reporting it as "too large" — which is what a stream
+      // carrying only an int forced the consumer to say — is the confidently-wrong
+      // wording #204 fixed on the proxy path, and both ends of this one are in the
+      // same process, so it costs nothing to be honest.
+      if (!_inputDropped.isClosed) {
+        _inputDropped.add((
+          length: evicted.length,
+          reason: InputDropReason.bufferFull,
+        ));
+      }
     }
   }
 
@@ -1358,7 +1414,16 @@ class TerminalConnection {
         try {
           final bytes = jsonDecode(data)['bytes'];
           if (!_inputDropped.isClosed) {
-            _inputDropped.add(bytes is int ? bytes : 0);
+            // Always [InputDropReason.tooLarge]: the only refusal the DIRECT path
+            // sends is the server's per-frame cap. The cluster proxy sends other
+            // `reason` values (#204 'buffer-full', #209 'peer-unreachable'), but this
+            // client addresses each server directly and never proxies through a peer,
+            // so those frames cannot arrive here. Mapping them would be a branch for
+            // a case that cannot happen.
+            _inputDropped.add((
+              length: bytes is int ? bytes : 0,
+              reason: InputDropReason.tooLarge,
+            ));
           }
         } catch (_) {/* malformed frame — nothing to report */}
         return;
