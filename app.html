@@ -1766,11 +1766,10 @@
     // about the data, and a notice that appeared only when a socket happened to be
     // open would be the flakiest possible affordance.
     const WS_INPUT_MAX = 256 * 1024;  // == server.js `WS_INPUT_MAX`; UTF-16 code units
-    function sendPtyInput(data, sock) {
+    function sendPtyInput(data) {
       if (data.length > WS_INPUT_MAX) { showInputDropped(data.length); return false; }
-      const s = sock || ws;
-      if (!s || s.readyState !== WebSocket.OPEN) return false;
-      try { s.send(data); } catch (e) { return false; }
+      if (!ws || ws.readyState !== WebSocket.OPEN) return false;
+      try { ws.send(data); } catch (e) { return false; }
       return true;
     }
 

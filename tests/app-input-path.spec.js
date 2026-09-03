@@ -35,16 +35,23 @@ test.describe('#206 app.html routes every user input through one gated path', ()
     const lines = src.split(/\r?\n/);
     const offenders = [];
 
+    // STRIP THE PERMITTED CALLS, THEN ASSERT NOTHING IS LEFT — rather than asking whether
+    // the line "looks allowed". This file is written in dense one-liners, so a
+    // line-scoped allowlist passes anything sharing a line with something permitted:
+    //   `if (cached) sendPtyInput(a); else entry.ws.send(b);`
+    // would have been green. Found in review of this change.
+    //
+    // The control-frame permission names the frames — `resize` and `mode` — instead of
+    // permitting `JSON.stringify` generally, because `ws.send(JSON.stringify({paste:
+    // text}))` is user input wearing a control frame's clothes and would otherwise pass.
     lines.forEach((line, i) => {
       if (!/\.send\(/.test(line)) return;
-      // The funnel itself, and the four kinds of frame that are NOT user input.
-      const allowed =
-        /\bs\.send\(data\)/.test(line) ||                       // sendPtyInput's own write
-        /sendPtyInput\(/.test(line) ||                          // a caller, not a bypass
-        /\.send\(JSON\.stringify\(/.test(line) ||               // resize / mode control frames
-        /\.send\('\{"heartbeat":1\}'\)/.test(line) ||           // liveness, not input
-        /nws\.send\('ping'\)/.test(line);                       // the /ws/notify socket
-      if (!allowed) offenders.push(`app.html:${i + 1}  ${line.trim()}`);
+      const residue = line
+        .replace(/\bws\.send\(data\)/g, '')                                   // the funnel's own write
+        .replace(/\w+\.send\(JSON\.stringify\(\{\s*(?:resize|mode)\b/g, '')   // control frames, named
+        .replace(/\w+\.send\('\{"heartbeat":1\}'\)/g, '')                     // liveness, not input
+        .replace(/\bnws\.send\('ping'\)/g, '');                               // the /ws/notify socket
+      if (/\.send\(/.test(residue)) offenders.push(`app.html:${i + 1}  ${line.trim()}`);
     });
 
     expect(
@@ -57,10 +64,18 @@ test.describe('#206 app.html routes every user input through one gated path', ()
 
     // The funnel must also still EXIST — an empty offender list is equally true of a file
     // with no sends at all, which is the vacuous way this assertion could pass.
-    expect(src).toContain('function sendPtyInput(data, sock)');
+    //
+    // Matched WITHOUT its parameter list: pinning the signature would make deleting an
+    // unused parameter a two-file change that fails here first, which is a test dictating
+    // a shape rather than guarding a behaviour.
+    expect(src).toMatch(/function sendPtyInput\(/);
+    // Six is derived, not picked: the definition, plus the five call sites — the four
+    // that used to write straight to `ws.send` (image path, mobile toolbar key,
+    // long-press Paste, arrow repeat) and `sendInput`'s coalescing flush. A legitimate
+    // new caller only pushes it up; losing one is what this catches.
     expect(src.match(/sendPtyInput\(/g).length,
-      'the funnel plus its callers — a count of one would mean nothing routes through it')
-      .toBeGreaterThan(4);
+      'the definition plus its five call sites — fewer means something stopped routing through it')
+      .toBeGreaterThanOrEqual(6);
   });
 
   test('a write over the cap is refused locally, reported, and never reaches the wire', async ({ page }) => {

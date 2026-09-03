@@ -429,8 +429,18 @@ honoured it, and #201 made one of them reachable.
   serves both roles (per-frame wire cap, whole-buffer total) because the #201 invariant
   makes them one number; a second Dart constant would be a third copy of the value whose
   whole problem was that its copies looked independent.
-- **`app.html` is gated too now (#206), so the band is unreachable from BOTH clients** —
-  and the reason it was not is worth keeping, because **half the premise was stale.**
+- **`app.html` is gated too now (#206)** — and the reason it was not is worth keeping,
+  because **half the premise was stale.**
+  - **But "both clients" is wrong, and briefly stood in this file as a claim.** There is
+    a THIRD page, and it is the worst off of the three: **`terminal.html`**, the legacy
+    terminal-only view still served at `/s/:id` and still linked from `lobby.html`. Four
+    ungated input sends (a Ctrl+V paste among them) **and** it discards the server's own
+    `inputDropped` frame — there is no notice UI in that file to render one in. So there:
+    a >256 KB paste is refused by the server and reported to nobody, and a >4 MiB paste
+    closes the socket with nobody told why. Gating it means building it a notice first,
+    so it is **named, not fixed** (#218) — the value of a record like this one is that it
+    is accurate, and the previous sentence here was the second comment in two PRs to claim
+    a convenient thing nobody had checked.
   This bullet used to say the file had "no single input path"; in fact `sendInput` had
   been the coalescing path for typing and for the compose bar all along, and exactly
   **four** sites wrote past it to `ws.send` — the image-path paste, the mobile toolbar
