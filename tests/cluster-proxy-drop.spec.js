@@ -256,4 +256,111 @@ test.describe('#204 the cluster proxy reports a buffer refusal to the browser', 
     expect(notices[1].bytes).toBe(Buffer.byteLength('second-overflow\r'));
     expect(notices[1].reason).toBe('buffer-full');
   });
+
+  // #209 — THE OPPOSITE CASE, and until now the silent one. Above, the buffer is full
+  // and says no; here every write is ACCEPTED and then the whole buffer is discarded
+  // because the peer never came back. From the user's side that is worse: nothing was
+  // ever refused, so there was no signal at all — just `1001 Remote unreachable` ~37s
+  // after they typed into a session that looked merely laggy.
+  //
+  // BOTH HALVES ON ONE CLOCK. Two proxy sockets are opened and left to exhaust their
+  // attempts in parallel: one that typed, which must be told, and one that typed
+  // nothing, which must not be. Running them together is not only ~37s cheaper than two
+  // tests — it makes the negative half mean something, because both sockets reach their
+  // give-up from the same run rather than the silent one merely being observed for a
+  // shorter time.
+  test('when the peer never comes back, the discarded buffer is reported BEFORE the close', async () => {
+    // The proxy gives up after MAX_RECONNECT_ATTEMPTS (10) on a 500ms/1s/2s/4s/5s-capped
+    // backoff — 37.5s of waiting plus ten immediate ECONNREFUSEDs. Everything below is
+    // polled on a condition, so this ceiling only has to be comfortably above that.
+    test.setTimeout(150000);
+
+    /** Watch a proxy socket, recording what it was told and what it had been told BY the close. */
+    function watch(ws, frames) {
+      const seen = { frames, closeCode: null, framesAtClose: null, closed: null };
+      seen.closed = new Promise((resolve) => {
+        ws.on('close', (code) => {
+          seen.closeCode = code;
+          // Frames arrive on the same ordered stream as the close that follows them, and
+          // this client emits every earlier `message` before it sees that reply. So a
+          // notice present in THIS snapshot provably crossed the wire ahead of the close
+          // — which is the ordering claim, asserted rather than assumed.
+          seen.framesAtClose = frames.slice();
+          resolve();
+        });
+      });
+      return seen;
+    }
+
+    const typed = await openProxyWs(cookie, 'wt209a-' + Date.now());
+    const silent = await openProxyWs(cookie, 'wt209b-' + Date.now());
+    const over = await openProxyWs(cookie, 'wt209c-' + Date.now());
+    const typedSeen = watch(typed.ws, typed.frames);
+    const silentSeen = watch(silent.ws, silent.frames);
+    const overSeen = watch(over.ws, over.frames);
+    // The server closes all three itself, so the happy path needs no teardown — but an
+    // assertion failing early would leave three live proxy connections (and their
+    // reconnect loops) inside the test server for the rest of the run. Found in review.
+    const closeAll = async () => {
+      await Promise.all([typed.ws, silent.ws, over.ws].map((w) => closeAndDrain(w)));
+    };
+
+    // Well under MAX_BUFFER_SIZE, so every one of these FITS: `decide` admits it and
+    // #204's notice must never fire. That is what makes the reason below the new one.
+    const WRITES = ['make me a plan for\r', 'the migration\r', 'y\r'];
+    const TOTAL = WRITES.reduce((n, w) => n + Buffer.byteLength(w), 0);
+
+    // THE THIRD SOCKET TYPES PAST THE BUFFER, which is where "what was lost" stops
+    // being "what was held". Once `decide` refuses, the buffer is pinned at
+    // MAX_BUFFER_SIZE and every later write lands in no array at all — so a give-up
+    // that reported `buffered.length` would tell somebody who typed 105 things that it
+    // lost 100, with a precise figure. Found in review.
+    const FILL = Array.from({ length: MAX_BUFFER_SIZE }, (_, i) => `c${i}\r`);
+    const EXTRA = ['first-refused\r', 'e1\r', 'e2\r', 'e3\r', 'e4\r'];
+    const OVER_ALL = [...FILL, ...EXTRA];
+    const OVER_TOTAL = OVER_ALL.reduce((n, w) => n + Buffer.byteLength(w), 0);
+
+    try {
+      for (const w of WRITES) typed.ws.send(w);
+      for (const w of OVER_ALL) over.ws.send(w);
+      // Observed, not assumed: the 'buffer-full' notice has to have fired BEFORE the
+      // give-up, or the two-notice assertion below would be about the wrong pair.
+      await expect.poll(() => droppedFrames(over.frames).length, { timeout: 15000 }).toBe(1);
+
+      await Promise.all([typedSeen.closed, silentSeen.closed, overSeen.closed]);
+    } finally {
+      await closeAll();
+    }
+
+    // The socket that typed: told, once, with the whole loss named, before the close.
+    const notices = droppedFrames(typedSeen.framesAtClose).map((f) => JSON.parse(f));
+    expect(notices.length, 'one notice for the whole discarded buffer, sent before the close').toBe(1);
+    expect(notices[0].reason, "not 'buffer-full' — there was room the entire time")
+      .toBe('peer-unreachable');
+    expect(notices[0].bytes, 'the total actually lost, not the last write').toBe(TOTAL);
+    expect(notices[0].writes, 'how many separate things that was').toBe(WRITES.length);
+    expect(typedSeen.closeCode).toBe(1001);
+    // Nothing more after the close snapshot either — the clear-before-close is what
+    // stops a remote close arriving in the gap from reporting the same loss twice.
+    expect(droppedFrames(typedSeen.frames).length).toBe(1);
+
+    // The socket that typed nothing: an empty buffer is not a loss, and a notice for it
+    // would be the confidently-wrong kind this whole family of messages exists to avoid.
+    expect(droppedFrames(silentSeen.frames).length, 'an empty buffer is not a loss').toBe(0);
+    expect(silentSeen.closeCode).toBe(1001);
+
+    // The socket that overflowed: TWO notices, and the second names everything — the
+    // 100 the buffer held AND the 5 it refused after latching. The natural defence for
+    // reporting only 100 ("the earlier notice covered the rest") does not hold: both
+    // render into the same element, so the second REPLACES the first and the only
+    // sentence left on screen is this one.
+    const overNotices = droppedFrames(overSeen.framesAtClose).map((f) => JSON.parse(f));
+    expect(overNotices.length, 'one per outage from `decide`, plus the give-up').toBe(2);
+    expect(overNotices[0].reason).toBe('buffer-full');
+    expect(overNotices[1].reason).toBe('peer-unreachable');
+    expect(overNotices[1].writes, 'everything lost, not everything held')
+      .toBe(OVER_ALL.length);
+    expect(overNotices[1].bytes).toBe(OVER_TOTAL);
+    expect(overSeen.closeCode).toBe(1001);
+  });
 });

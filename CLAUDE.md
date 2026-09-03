@@ -439,6 +439,44 @@ honoured it, and #201 made one of them reachable.
   is refused for the same reason, and a banner per character is noise that teaches you to
   ignore the one that mattered. The reporting rule therefore lives with the latch in
   `lib/reconnect-buffer.js` (`decide`) rather than as an `if` beside it.
+- **And #209 is the OPPOSITE case on that same path, which was silent for longer.**
+  There the buffer is full and says no; here every write is *accepted* and the whole
+  buffer is then discarded because the peer never came back — so nothing was ever
+  refused and there was no signal at all, just `1001 Remote unreachable` about **37s**
+  (500ms/1s/2s/4s/5s-capped x 10) after typing into a session that looked merely laggy.
+  `attemptReconnect` now sends one notice naming the total before the close, under a
+  third `reason` — **`'peer-unreachable'`, not `'buffer-full'`**, which means *there was
+  no room left* and is exactly what did not happen. The buffer is cleared **before** the
+  close, which makes a second report impossible by construction — defensively: nothing
+  re-enters that branch today, and saying otherwise would be a comment claiming a
+  measured path. The send-then-close ordering, by contrast, IS asserted, from inside the
+  close handler rather than assumed of `ws`.
+- **Three things review caught in that fix, each a rule rather than a patch — and all
+  three of the give-up's decisions ended up in `lib/reconnect-buffer.js` as `giveUp`,
+  beside `decide`, for the reason stated one bullet up.** Left at the call site they had
+  already become two loose counters and an assignment: exactly the `if` this module was
+  extracted to prevent. `giveUp` also makes them testable with no socket and no 37
+  seconds.
+  (1) **"What was lost" is not "what was held."** Once the buffer latches, `count` is
+  pinned at 100 and every later refusal lands in no array — so the give-up must add a
+  tally kept beside the latch, or it tells someone who typed 105 things that it lost
+  100, *with a precise figure*. The earlier `buffer-full` notice does **not** cover the
+  remainder: both render into the same element, so the second **replaces** the first.
+  (2) **`next.latched` is true unconditionally**, because `close()` leaves `readyState`
+  at CLOSING and `ws` keeps delivering `message` — otherwise a write in that gap is
+  admitted to a buffer that can never be flushed. An empty buffer has the same window,
+  so the latch cannot hang off "something was lost". **This is the half no integration
+  test can reach** — it guards a window inside a closing socket, where by construction
+  no notice could be sent to observe it — which is the argument for the rule living in
+  a pure module at all: *the rule is testable even where the race is not.*
+  (3) **A BACKGROUND SOCKET IS STILL A SOCKET THE SERVER REPORTS ON.** `app.html`'s two
+  background `onmessage` handlers listed `inputDropped` in their *ignore* set. That was
+  survivable while every refusal fired *as you typed* — you are still on that session
+  when it lands — and is not survivable for a notice that arrives **37s later**, by
+  which time you have very likely switched away. They now stash it on the session's
+  cache entry, drained once on return (a notice belongs to the session it was raised on,
+  #179's rule). With `keepSessionsOpen` off there is no background socket at all, so
+  there is nothing to stash.
 
 **`WT_CLUSTER_TOKENS_FILE`** exists so that regression test can write a cluster entry
 pointing at a dead port. `cluster-tokens.json` holds a live bearer token for **every peer

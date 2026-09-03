@@ -908,7 +908,7 @@
       sessionStorage.setItem('wt_browserId', id);
       return id;
     })();
-    const sessionCache = new Map(); // sessionId -> { ws, scrollback, serverUrl, connected, heartbeatTimer, reconnectTimer }
+    const sessionCache = new Map(); // sessionId -> { ws, scrollback, serverUrl, connected, heartbeatTimer, reconnectTimer, inputDropped }
 
     // --- Scroll-up history backfill state (per active session) -------------
     // Initial attach replays only ~32 KB; older bytes are fetched on demand
@@ -1151,7 +1151,7 @@
             return;
           }
           if (e.data.startsWith('{"inputDropped"')) {
-            try { const d = JSON.parse(e.data); showInputDropped(d.bytes, d.reason); } catch (ex) {}
+            try { const d = JSON.parse(e.data); showInputDropped(d.bytes, d.reason, d.writes); } catch (ex) {}
             return;
           }
           if (e.data.startsWith('{"heartbeat":')) return;
@@ -1278,7 +1278,7 @@
       const existing = sessionCache.get(id);
       if (existing && existing.connected) return; // already connected
 
-      const entry = existing || { ws: null, scrollback: '', serverUrl: serverUrl || null, connected: false, heartbeatTimer: null, reconnectTimer: null };
+      const entry = existing || { ws: null, scrollback: '', serverUrl: serverUrl || null, connected: false, heartbeatTimer: null, reconnectTimer: null, inputDropped: null };
       sessionCache.set(id, entry);
 
       const bgWs = new WebSocket(getWsUrl(id, serverUrl));
@@ -1292,8 +1292,9 @@
 
       bgWs.onmessage = e => {
         if (typeof e.data === 'string') {
+          if (e.data.startsWith('{"inputDropped"')) { stashInputDropped(entry, e.data); return; }
           // Ignore control messages in background
-          if (e.data.startsWith('{"sessionTaken"') || e.data.startsWith('{"requestResize"') || e.data.startsWith('{"inputDropped"') || e.data.startsWith('{"heartbeat":')) return;
+          if (e.data.startsWith('{"sessionTaken"') || e.data.startsWith('{"requestResize"') || e.data.startsWith('{"heartbeat":')) return;
           entry.scrollback += e.data;
           if (entry.scrollback.length > 1048576) {
             entry.scrollback = entry.scrollback.slice(-1048576);
@@ -1368,6 +1369,39 @@
       if (document.getElementById('sidebar').classList.contains('open')) loadSidebar();
     }
 
+    // #209 — A BACKGROUND SOCKET IS STILL A SOCKET THE SERVER REPORTS ON. Both
+    // background message handlers used to list `inputDropped` in their IGNORE set, so
+    // the notice was dropped on the floor. That was survivable while the only refusal
+    // fired AS YOU TYPED (#193/#204 — you are still looking at that session when it
+    // arrives). It is not survivable for the give-up notice, which lands ~37s after the
+    // fact: ample time to have switched away, and that 37s is the whole reason the loss
+    // is worth reporting. Found in review of #209.
+    //
+    // STASHED, NOT SHOWN. A notice belongs to the session it was raised on — that is
+    // #179's rule and the reason switchSession dismisses one on the way out — so it
+    // waits on that session's cache entry and is rendered when you come back to it.
+    // One-shot: it is a fact about one outage, not a state to keep re-announcing.
+    //
+    // LAST ONE WINS, deliberately. A background session can be told twice — a
+    // 'buffer-full' refusal during the outage and then 'peer-unreachable' when the proxy
+    // gives up — and only the second is kept. That matches what the foreground already
+    // does: both render into the same element, so a second notice REPLACES the first
+    // there too, and the give-up's total covers the earlier refusal anyway.
+    //
+    // With `keepSessionsOpen` off there is no background socket at all (the old one is
+    // closed on switch, which tears the proxy down before it ever gives up), so there
+    // is nothing to stash and nothing this could have shown.
+    function stashInputDropped(entry, data) {
+      try { entry.inputDropped = JSON.parse(data); } catch (ex) {}
+    }
+    function drainInputDropped(id) {
+      const entry = sessionCache.get(id);
+      if (!entry || !entry.inputDropped) return;
+      const d = entry.inputDropped;
+      entry.inputDropped = null;
+      showInputDropped(d.bytes, d.reason, d.writes);
+    }
+
     function switchSession(id, serverUrl) {
       if (id === sessionId && serverUrl === sessionServerUrl) return;
       // #179 - the notice belongs to the session it was raised on, and so does the
@@ -1393,7 +1427,7 @@
         const oldWs = ws;
         const oldServerUrl = sessionServerUrl;
         // Move to cache as background
-        const entry = sessionCache.get(oldId) || { scrollback: '', serverUrl: oldServerUrl, connected: true, heartbeatTimer: null, reconnectTimer: null };
+        const entry = sessionCache.get(oldId) || { scrollback: '', serverUrl: oldServerUrl, connected: true, heartbeatTimer: null, reconnectTimer: null, inputDropped: null };
         entry.ws = oldWs;
         entry.connected = true;
         sessionCache.set(oldId, entry);
@@ -1402,7 +1436,8 @@
         // Rewire the old WS to accumulate into cache instead of writing to term
         oldWs.onmessage = (e) => {
           if (typeof e.data === 'string') {
-            if (e.data.startsWith('{"sessionTaken"') || e.data.startsWith('{"requestResize"') || e.data.startsWith('{"inputDropped"') || e.data.startsWith('{"heartbeat":')) return;
+            if (e.data.startsWith('{"inputDropped"')) { stashInputDropped(entry, e.data); return; }
+            if (e.data.startsWith('{"sessionTaken"') || e.data.startsWith('{"requestResize"') || e.data.startsWith('{"heartbeat":')) return;
             entry.scrollback += e.data;
             if (entry.scrollback.length > 1048576) {
               entry.scrollback = entry.scrollback.slice(-1048576);
@@ -1448,6 +1483,10 @@
       document.getElementById('noSession').style.display = 'none';
       switching = false;
       doResize(); // fit terminal to visible container before connecting
+      // #209 — anything this session was told while it sat in the background. AFTER the
+      // hideSubmitUnconfirmed() at the top of this function, which clears the OUTGOING
+      // session's notice; this one belongs to the session being opened.
+      drainInputDropped(id);
 
       // Try to use cached background connection
       const cached = keepSessionsOpen ? sessionCache.get(id) : null;
@@ -1486,7 +1525,7 @@
               return;
             }
             if (e.data.startsWith('{"inputDropped"')) {
-              try { const d = JSON.parse(e.data); showInputDropped(d.bytes, d.reason); } catch (ex) {}
+              try { const d = JSON.parse(e.data); showInputDropped(d.bytes, d.reason, d.writes); } catch (ex) {}
               return;
             }
             if (e.data.startsWith('{"heartbeat":')) return;
@@ -1931,13 +1970,27 @@
     // the size-based wording would read "too large to send (16 bytes)" and be
     // confidently wrong. `reason` is sent only by the proxy, so its ABSENCE keeps the
     // original meaning and an older server needs no special case here.
-    function showInputDropped(bytes, reason) {
+    // #209 — and a THIRD, on that same proxy path: the buffer never overflowed, the peer
+    // simply never came back, and the whole buffer went with the socket. Neither of the
+    // other two sentences is true of it — nothing was too large and there was room the
+    // entire time — so it gets its own, and it is the only one that can name a COUNT,
+    // because it is the only one reporting more than a single write.
+    function showInputDropped(bytes, reason, writes) {
       const box = document.getElementById('composeNotice');
       const txt = document.getElementById('composeNoticeText');
       if (!box || !txt) return;
-      txt.textContent = reason === 'buffer-full'
-        ? `The connection to that server is down and there was no room left to hold what you typed (${bytes} bytes), so it was dropped. Send it again once it reconnects.`
-        : `That input was too large to send (${bytes} bytes) and was dropped. Try sending it in smaller pieces.`;
+      if (reason === 'peer-unreachable') {
+        // Defensive, not a compatibility path: a server old enough to omit `writes` is
+        // also old enough never to send `peer-unreachable`, so this branch is
+        // unreachable in practice. It costs one expression and keeps the sentence from
+        // reading "undefined writes" if the field is ever dropped or renamed.
+        const n = Number(writes) > 0 ? `${writes} write${writes === 1 ? '' : 's'}, ${bytes} bytes` : `${bytes} bytes`;
+        txt.textContent = `That server never came back, so everything you typed while it was down (${n}) was dropped. Reopen the session and send it again.`;
+      } else if (reason === 'buffer-full') {
+        txt.textContent = `The connection to that server is down and there was no room left to hold what you typed (${bytes} bytes), so it was dropped. Send it again once it reconnects.`;
+      } else {
+        txt.textContent = `That input was too large to send (${bytes} bytes) and was dropped. Try sending it in smaller pieces.`;
+      }
       box.hidden = false;
       doResize();
     }
