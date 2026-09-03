@@ -193,6 +193,13 @@ function shred(p) {
  *
  * The trees themselves are deliberately LEFT: they are inert, and `--clean` refuses to
  * remove anything it did not create. Only the secret is urgent.
+ *
+ * AND SO ARE THE PROCESSES, which is worth saying because it is not obvious. This handler
+ * shreds and exits; it tears down no PTY. A console Ctrl-C propagates to the process group,
+ * so the shell and the agent go too - but a PROGRAMMATIC SIGTERM does not, and that leaves a
+ * live agent with no owner. No second registry for it on purpose: this fleet's rule is to
+ * kill only what you spawned and recorded, and a handler that starts killing under signal
+ * pressure is how that rule gets broken.
  */
 for (const sig of ['SIGINT', 'SIGTERM']) {
   process.on(sig, () => {
@@ -379,8 +386,14 @@ function seedConfigDir(cfgDir, cwd, bats) {
     projects,
   }, null, 2));
 
-  fs.copyFileSync(REAL_CREDS, path.join(cfgDir, '.credentials.json'));
-  return path.join(cfgDir, '.credentials.json');
+  const credsCopy = path.join(cfgDir, '.credentials.json');
+  fs.copyFileSync(REAL_CREDS, credsCopy);
+  // REGISTERED HERE, not at the call site. The signal handler's whole claim is that it
+  // destroys exactly what is still on disk, and registering two statements later left that
+  // claim depending on every future caller remembering to do it. Inseparable from the copy
+  // is the only version that stays true without anyone maintaining it.
+  liveCredCopies.add(credsCopy);
+  return credsCopy;
 }
 
 // ---------------------------------------------------------------- process hygiene
@@ -446,7 +459,6 @@ async function runArm(arm, run, opts) {
   // Hashed AT CREATION rather than reused from preflight: the HOST's own claude may
   // refresh between the two, and that would otherwise read as the child rotating it.
   const credsCopyHash = sha1File(credsCopy);
-  liveCredCopies.add(credsCopy);
 
   const R = {
     arm, run, tag, cfgDir, cwd, markerDir,
