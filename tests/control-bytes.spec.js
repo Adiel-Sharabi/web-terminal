@@ -22,13 +22,28 @@
 // reason: this app's ANSI handling genuinely matches ESC. The rule is unavailable by design,
 // so the enforceable form is an explicit inventory.
 //
-// THE ALLOWLIST IS AN INVENTORY, NOT A SUPPRESSION. Each entry names the codepoints AND how
-// many, so adding a control byte to an already-listed file still turns this red. Updating it
-// is meant to cost a moment's thought — that is the whole mechanism.
+// THE ALLOWLIST IS AN INVENTORY, NOT A SUPPRESSION. Each entry names the FILE, the
+// CODEPOINTS and how many, so a new byte, a different byte, or one more of the same byte all
+// turn this red. Updating it is meant to cost a moment's thought — that is the whole
+// mechanism.
 //
-// This file is deliberately ASCII-only. It builds every control character it names with
-// `String.fromCharCode`, because a gate that contained the thing it forbids would flag
-// itself — and a gate that exempted itself would be no gate at all.
+// ONE RESIDUAL BLIND SPOT, recorded rather than closed (review). Same file, same codepoint,
+// same count, DIFFERENT LINE: delete the legitimate ESC from an ANSI stripper and put an ESC
+// somewhere harmful in that same file, and the map is unchanged. Keying entries on line
+// numbers would close it, and was rejected deliberately — line numbers drift with every
+// edit above them, so the gate would go red for changes that touched no control byte at all,
+// and a gate that cries wolf is one people learn to silence. That is the exact failure this
+// whole exercise is about, so a known-narrow hole beats a check nobody trusts.
+//
+// This file is deliberately ASCII-only: it never writes a control character at all, only
+// NUMERIC CODEPOINTS (`0x1b`, `TAB = 0x09`). A gate that contained the thing it forbids
+// would flag itself, and one that exempted itself would be no gate at all.
+//
+// (An earlier draft of this comment said the file builds each character with
+// `String.fromCharCode`. It does not — that identifier appears nowhere in the code, and
+// comparing numbers is better than constructing characters. Caught in review, and worth
+// keeping visible: a comment asserting a mechanism the code does not use is the exact
+// defect this gate exists to catch, reappearing in the gate's own description.)
 const { test, expect } = require('@playwright/test');
 const fs = require('fs');
 const path = require('path');
@@ -141,5 +156,19 @@ test.describe('#221 no stray control bytes in source', () => {
         + 'injection payload), add it to ALLOWED above with a reason. Offending lines:\n'
         + lines.join('\n'),
     ).toEqual(norm(expected));
+
+    // AN INVENTORY GATE DEGRADES BY GROWING, and the comparison above cannot see it: add a
+    // control byte AND an allowlist entry for it in the same change, and both sides move
+    // together with nothing to complain. So the SIZE is pinned separately — raising it is a
+    // second, deliberate edit, and it is the first number a reviewer should look at.
+    const totalAllowed = Object.values(ALLOWED)
+      .reduce((n, spec) => n + Object.values(spec.counts).reduce((a, b) => a + b, 0), 0);
+    expect(Object.keys(ALLOWED).length,
+      'a FILE was added to the control-byte allowlist. That is allowed, and it is meant to '
+        + 'be noticed: say in the entry why the raw byte is the subject there, then update '
+        + 'this number.').toBe(3);
+    expect(totalAllowed,
+      'the number of allowed control bytes changed. Every one is a hole; confirm each is '
+        + 'still deliberate, then update this number.').toBe(6);
   });
 });
