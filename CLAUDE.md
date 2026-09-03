@@ -375,6 +375,53 @@ What was established, in order:
 ### Deployment consequence
 Anything touching `pty-worker.js` (including `lib/agents.js` fields the worker reads) needs a **COLD restart** — a hot `server.js`-only reload leaves the old worker running with the old behaviour. See "Deployment & Operations".
 
+## A ConPTY `term.kill()` is ALREADY graceful — `/exit` buys nothing (#191)
+
+**`session.term.kill()` in `pty-worker.js` is not a SIGKILL.** With
+`useConptyDll: true` — production's default, and `config.json` does not override it —
+node-pty's Windows path is `this._inSocket.destroy(); this._ptyNative.kill(pty, true)`,
+which **closes the pseudoconsole**. Terminating the console process list is the *other*
+branch (`!useConptyDll`). So the agent sees its console close and runs its **ordinary
+shutdown**, and today's "hard kill" already ends with `lastGracefulShutdown: true`.
+
+**MEASURED** (`scripts/rig/probe-exit-flush.js`, claude 2.1.251, 2026-08-31). Three arms,
+each a real PTY spawned production-shaped, gated on the #190 composer marker, one
+completed turn, 20s dwell, then ended:
+
+| | A `term.kill()` (today) | B `/exit` awaited | C `process.kill` (control) |
+|---|---|---|---|
+| transcript lines at teardown | +4 | +5 | **0** |
+| `lastGracefulShutdown` | false -> **true** | false -> **true** | stays **false** |
+| `SessionEnd` hook | **fired** | **fired** | not fired |
+| `.claude.json` | 29 project keys | the same 29 | **byte-identical** |
+| time for the agent to go | ~870 ms | ~1030 ms | ~15 ms |
+
+**Arm C is the control that proves the mechanism** — a real `TerminateProcess` writes none
+of it, so A's flush is a property of the ConPTY close and not of the teardown ceremony.
+A and B differ by exactly two lines, and **both are caused BY typing `/exit`, not preserved
+by it**: a `file-history-snapshot` with `trackedFileBackups:{}` (an empty message boundary
+for the `/exit` input) and a `history.jsonl` entry reading `{"display":"/exit"}` — your own
+keystroke. The `cost-state` roll-up and the whole `last*` block in `.claude.json`
+(`lastSessionId`, `lastCost`, `lastModelUsage`) — the state the graceful path was expected
+to own — are written **identically by the hard kill**.
+
+**So #191's `/exit` half is refuted.** A ceremony that buys nothing makes Kill feel broken,
+and a submit is not reliably one keystroke (one run needed a second CR after 8s). The
+*rename* half is untouched by this and belongs at **naming** time, not at kill time, so
+Kill stays instant.
+
+**Two limits, stated rather than glossed.** It is a property of the ConPTY-close path, not
+of Windows: a deployment on node-pty's other branch behaves like arm C and loses all four
+lines — not on this fleet, and unmeasured. And killing **mid-turn** was never measured;
+every arm killed an idle session after a completed turn.
+
+> **A probe that spawns `claude` from inside a Claude Code session must scrub `CLAUDE*`
+> from the child env.** The first four runs wrote **no transcript at all**, in both arms,
+> because the probe inherited `CLAUDE_CODE_CHILD_SESSION=1`, `CLAUDE_CODE_SESSION_ID`,
+> `CLAUDECODE=1` and `CLAUDE_CODE_MESSAGING_SOCKET` (a named pipe into the PARENT) — **a
+> nested child session persists nothing**, so the measurement reads as "unmeasurable" when
+> it is really "not isolated". Sibling of the `CODEX_HOME` rule under Codex above.
+
 ## Input & Submit Contract (issue #55) — this is law, not guidance
 
 The sentence *"Enter doesn't run it"* has described at least four **different** bugs in different layers. A change to input or submit is correct only if it satisfies the rules below, and each rule has a test that fails without it. Full spec: issue #55.
