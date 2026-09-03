@@ -544,6 +544,32 @@ async function runArm(arm, run, opts) {
     R.claudePid = claudeProc ? claudeProc.ProcessId : null;
     note(`agent pid=${R.claudePid === null ? 'NOT FOUND' : R.claudePid}`);
 
+    // ABORT RATHER THAN FOLD A SETUP FAILURE INTO A VERDICT. This is the same lesson
+    // CLAUDE.md already records for the Codex TOML probe, and here it is worse than a
+    // wrong answer — it is a CONFIDENT one, in both arms at once.
+    //
+    // The pid is matched on the process NAME, so an install that runs the agent under a
+    // shim (an npm wrapper is `node.exe`) leaves it null. `alive(null)` is false, so
+    // every liveness loop below exits on its first test:
+    //
+    //   arm A — the wait that exists to PROVE the hard kill reaches the agent returns
+    //           immediately, reports "agent died 0ms after it", and has checked nothing.
+    //   arm B — the await that makes it a graceful exit returns immediately and
+    //           `term.kill()` fires straight after: B silently DEGENERATES INTO A while
+    //           reporting an exit time of ~0. That is precisely the #191 trap this probe
+    //           was written to avoid, reproduced by the probe itself.
+    //
+    // Both would be invisible in the output — two plausible tables and no error. Found in
+    // review. A run that cannot see the agent has measured nothing, so it must say so.
+    if (!R.claudePid) {
+      throw new Error(
+        'agent process not found under the shell — every liveness check below would '
+        + 'pass vacuously and arm B would degenerate into arm A. The pid is matched by '
+        + 'name, so a shim install (an npm wrapper runs as node.exe) lands here; widen '
+        + 'the matcher rather than letting the run continue.',
+      );
+    }
+
     // --- identical real work -------------------------------------------------
     // Registry submit discipline: text, then the CR ALONE after submit.gapMs. An
     // atomic `text\r` at this length is measured NOT to submit (#55).

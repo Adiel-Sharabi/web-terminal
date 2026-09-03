@@ -415,6 +415,18 @@ of Windows: a deployment on node-pty's other branch behaves like arm C and loses
 lines — not on this fleet, and unmeasured. And killing **mid-turn** was never measured;
 every arm killed an idle session after a completed turn.
 
+> **A liveness check on a pid you failed to find PASSES.** The probe locates the agent
+> process by NAME under the shell it spawned, so an install running it under a shim (an
+> npm wrapper is `node.exe`) leaves the pid null — and `alive(null)` is false, so every
+> wait loop exits on its first test. Arm A's wait, which exists to prove the hard kill
+> reaches the agent, would report *"agent died 0ms after it"* having checked nothing; arm
+> B's await would return instantly and let `term.kill()` fire straight after, so **B
+> silently degenerates into A** — the exact #191 trap the probe was written to avoid,
+> reproduced by the probe. Both failures print a plausible table and no error. It now
+> aborts instead. Same lesson as the Codex TOML probe below: **a setup failure must abort,
+> never be folded into a verdict.** (The recorded runs above were not affected — a null
+> pid yields ~0ms in both arms, and they measured ~870ms and ~1030ms.)
+>
 > **A probe that spawns `claude` from inside a Claude Code session must scrub `CLAUDE*`
 > from the child env.** The first four runs wrote **no transcript at all**, in both arms,
 > because the probe inherited `CLAUDE_CODE_CHILD_SESSION=1`, `CLAUDE_CODE_SESSION_ID`,
