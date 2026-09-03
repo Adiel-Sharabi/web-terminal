@@ -297,7 +297,7 @@ void main() {
       final conn = TerminalConnection(_server, 's',
           socketFactory: (_) => i++ == 0 ? s1 : s2,
           reconnectBackoff: _slowBackoff);
-      final dropped = <int>[];
+      final dropped = <InputDrop>[];
       conn.inputDropped.listen(dropped.add);
       await pump();
       s1.serverDrop();
@@ -320,6 +320,13 @@ void main() {
           reason: 'oldest-first: the earliest pastes are the ones sacrificed');
       expect(dropped, isNotEmpty,
           reason: 'a write lost to the hard ceiling must be reported, not silent');
+      // #208 - AND NOT AS "too large". Every one of these pastes was a legal size;
+      // they were given up because the outage overflowed the buffer holding them.
+      // Reporting them the way a cap refusal is reported is the confidently-wrong
+      // wording this reason field exists to prevent, and it is the assertion that
+      // goes red if the eviction site ever names the wrong origin.
+      expect(dropped.map((d) => d.reason).toSet(), {InputDropReason.bufferFull},
+          reason: 'an eviction is NOT about size - the write was perfectly legal');
       conn.close();
     });
 
@@ -421,7 +428,7 @@ void main() {
     test('a LIVE oversized write is reported and never reaches the socket', () async {
       final s1 = _FakeSocket();
       final conn = TerminalConnection(_server, 's', socketFactory: (_) => s1);
-      final dropped = <int>[];
+      final dropped = <InputDrop>[];
       conn.inputDropped.listen(dropped.add);
       await pump();
       final sentBefore = s1.sentStrings.length; // the connect handshake
@@ -429,8 +436,11 @@ void main() {
       conn.sendInput('z' * (cap + 1));
       await pump();
 
-      expect(dropped, [cap + 1],
+      expect(dropped.map((d) => d.length), [cap + 1],
           reason: 'the refusal must be reported with the length, on the #193 channel');
+      expect(dropped.single.reason, InputDropReason.tooLarge,
+          reason: 'a cap refusal IS about size - the one origin the old single '
+              'wording was right about');
       expect(s1.sentStrings.length, sentBefore,
           reason: 'nothing may reach the socket — past 4 MiB the wire answers by '
               'hanging up, taking anything already queued behind it');
@@ -450,7 +460,7 @@ void main() {
       final conn = TerminalConnection(_server, 's',
           socketFactory: (_) => i++ == 0 ? s1 : s2,
           reconnectBackoff: _slowBackoff);
-      final dropped = <int>[];
+      final dropped = <InputDrop>[];
       conn.inputDropped.listen(dropped.add);
       await pump();
       s1.serverDrop();
@@ -470,7 +480,8 @@ void main() {
       expect(s2.sentStrings, contains('sentinel\r'),
           reason: 'the reconnect and flush must have actually run, or the negative '
               'assertion below is vacuous');
-      expect(dropped, [cap + 1]);
+      expect(dropped.map((d) => d.length), [cap + 1]);
+      expect(dropped.single.reason, InputDropReason.tooLarge);
       expect(s2.sentStrings.any((f) => f.startsWith('zzz')), isFalse,
           reason: 'it must never have been buffered, so the flush has nothing to send');
       conn.close();
@@ -486,7 +497,7 @@ void main() {
       final live = _FakeSocket();
       final connLive =
           TerminalConnection(_server, 's', socketFactory: (_) => live);
-      final droppedLive = <int>[];
+      final droppedLive = <InputDrop>[];
       connLive.inputDropped.listen(droppedLive.add);
       await pump();
       connLive.sendInput(atCap);
@@ -502,7 +513,7 @@ void main() {
       final connBuf = TerminalConnection(_server, 's',
           socketFactory: (_) => i++ == 0 ? s1 : s2,
           reconnectBackoff: _slowBackoff);
-      final droppedBuf = <int>[];
+      final droppedBuf = <InputDrop>[];
       connBuf.inputDropped.listen(droppedBuf.add);
       await pump();
       s1.serverDrop();
@@ -680,7 +691,7 @@ void main() {
       final s1 = _FakeSocket();
       final conn = TerminalConnection(_server, 's', socketFactory: (_) => s1);
       final out = <String>[];
-      final dropped = <int>[];
+      final dropped = <InputDrop>[];
       conn.output.listen(out.add);
       conn.inputDropped.listen(dropped.add);
       await pump();
@@ -688,7 +699,10 @@ void main() {
       s1.serverSend('{"inputDropped":true,"bytes":70123}');
       await pump();
 
-      expect(dropped, [70123]);
+      expect(dropped.map((d) => d.length), [70123]);
+      expect(dropped.single.reason, InputDropReason.tooLarge,
+          reason: 'the DIRECT path only ever refuses on size; the cluster proxy '
+              'reasons cannot reach this client, which never proxies');
       expect(out, isEmpty, reason: 'the control frame must not be typed as PTY output');
       conn.close();
     });

@@ -1019,7 +1019,7 @@ class _SessionScreenState extends State<SessionScreen>
   StreamSubscription<String>? _outputSub;
   StreamSubscription<bool>? _connectedSub;
   StreamSubscription<void>? _reconnectedSub;
-  StreamSubscription<int>? _inputDroppedSub; // #193
+  StreamSubscription<InputDrop>? _inputDroppedSub; // #193, typed by #208
 
   /// The tail of what the HTTP replay put on screen, and the latch that arms the
   /// attach-time overlap cut for the socket's OPENING frame only (#176).
@@ -2045,25 +2045,34 @@ class _SessionScreenState extends State<SessionScreen>
   /// A SnackBar for the same reason `_copySelection`/`_forkFromMenu` already use one
   /// here: a one-shot fact the user just needs to see once, not a persistent banner
   /// (unlike #179's [SubmitUnconfirmedBanner], there is no saved text to offer back —
-  /// [connection.inputDropped] carries only a length, never the dropped content,
-  /// whichever of its THREE origins fired it: the server's per-frame cap, this
-  /// client's own offline-buffer eviction, and — since #204 — its local refusal of a
-  /// write past that same cap).
+  /// [connection.inputDropped] carries a length and a reason, never the dropped
+  /// content, whichever of its THREE origins fired it: the server's per-frame cap,
+  /// this client's own offline-buffer eviction, and — since #204 — its local refusal
+  /// of a write past that same cap).
   ///
-  /// KNOWN WRONG FOR ONE OF THE THREE, and recorded rather than quietly left. An
-  /// offline-buffer eviction gives up a write of perfectly LEGAL size because the
-  /// outage overflowed the buffer, and "too large to send" is not what happened to
-  /// it. That is the identical confidently-wrong-wording defect #204 fixed on the
-  /// proxy path, where the fix was a `reason` on the wire; here it needs one on this
-  /// stream, which is a type change rather than a field — filed as #208 rather than
-  /// smuggled into #204's diff.
-  void _onInputDropped(int bytes) {
+  /// #208 — IT USED TO SAY THE SAME THING FOR ALL THREE, AND IT WAS WRONG FOR ONE.
+  /// An offline-buffer eviction gives up a write of perfectly LEGAL size because the
+  /// outage overflowed the buffer; "too large to send" is not what happened to it, and
+  /// a 40-byte line reported that way is the confidently-wrong wording #204 fixed on
+  /// the proxy path with a `reason` on the wire. The stream now carries one, so the
+  /// sentence is chosen rather than assumed.
+  ///
+  /// The two size origins share a sentence deliberately: whether the server refused
+  /// the write or this client refused it first changes nothing the user can act on,
+  /// and inventing a distinction they cannot use is its own kind of noise.
+  void _onInputDropped(InputDrop drop) {
     if (!mounted) return;
+    final text = switch (drop.reason) {
+      InputDropReason.tooLarge =>
+        'Some input was too large to send (${drop.length} characters) and was '
+            'dropped. Try sending it in smaller pieces.',
+      InputDropReason.bufferFull =>
+        'The connection was down and there was no room left to hold what you '
+            'typed (${drop.length} characters), so it was dropped. Send it again.',
+    };
     ScaffoldMessenger.of(context).showSnackBar(
       SnackBar(
-        content: Text(
-          'Some input was too large to send ($bytes bytes) and was dropped.',
-        ),
+        content: Text(text),
         duration: const Duration(seconds: 6),
       ),
     );
