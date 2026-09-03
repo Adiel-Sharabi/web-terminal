@@ -377,12 +377,41 @@ Anything touching `pty-worker.js` (including `lib/agents.js` fields the worker r
 
 ## A ConPTY `term.kill()` is ALREADY graceful — `/exit` buys nothing (#191)
 
-**`session.term.kill()` in `pty-worker.js` is not a SIGKILL.** With
+**`session.term.kill()` in `pty-worker.js` does not hard-kill THE AGENT.** With
 `useConptyDll: true` — production's default, and `config.json` does not override it —
-node-pty's Windows path is `this._inSocket.destroy(); this._ptyNative.kill(pty, true)`,
-which **closes the pseudoconsole**. Terminating the console process list is the *other*
-branch (`!useConptyDll`). So the agent sees its console close and runs its **ordinary
-shutdown**, and today's "hard kill" already ends with `lastGracefulShutdown: true`.
+node-pty's JS path is `this._inSocket.destroy(); this._ptyNative.kill(pty, true)`
+(`windowsPtyAgent.js:133-161`), and the console-process-list walk that `process.kill`s
+every pid really is the *other* JS branch (`!useConptyDll`, `:162-179`) — and that walk
+*includes the agent*, which is why a deployment there is expected to behave like arm C.
+So **the kill leaves the agent alive — only the shell is terminated** — and it runs its
+**ordinary shutdown**, which is why today's "hard kill" already ends with
+`lastGracefulShutdown: true`.
+
+The wording is deliberate: *"the agent sees its console close and…"* names **one of two
+indistinguishable causes** and stood here until review. The console close and the shell's
+death happen microseconds apart inside one native call, so the agent loses its console and
+its parent at the same instant and nothing measured says which triggered the exit.
+
+> **But "it only closes the pseudoconsole" is WRONG, and this file said so until a review
+> read one layer further down.** `PtyKill` in node-pty's own
+> `src/win/conpty.cc:534-568` calls `ConptyClosePseudoConsole(handle->hpc)` and **then**,
+> *only* in the `useConptyDll` branch, `TerminateProcess(handle->hShell, 1)`. `hShell` is
+> the process node-pty `CreateProcess`'d (`:442`) — **the shell**. So production's path
+> closes the pseudoconsole *and* hard-terminates bash, which is the exact inverse of the
+> impression the sentence above gave on its own.
+>
+> **The conclusion survives and is better explained for it.** The agent is a *child* of
+> that shell, and Windows `TerminateProcess` does not touch descendants — so the agent is
+> never terminated. It is orphaned by a closing pseudoconsole and exits on its own, which
+> is a more specific account of the ~870 ms than "the console closed" and also explains
+> why no shell lingers. **What is graceful is the agent's exit, not the teardown**: the
+> shell is killed outright with exit code 1 and gets no shutdown at all. Nothing here
+> needs it to.
+>
+> **The methodological lesson is the one this repo keeps re-learning.** The original claim
+> was read off `windowsPtyAgent.js` — where the branch names really do say what it said —
+> and stopped there. The JS layer's vocabulary was mistaken for the behaviour. *Read to
+> the layer that acts*, the same rule as "the rollout is ground truth; the screen lies".
 
 **MEASURED** (`scripts/rig/probe-exit-flush.js`, claude 2.1.251, 2026-08-31). Three arms,
 each a real PTY spawned production-shaped, gated on the #190 composer marker, one
@@ -396,12 +425,22 @@ completed turn, 20s dwell, then ended:
 | `.claude.json` | 29 project keys | the same 29 | **byte-identical** |
 | time for the agent to go | ~870 ms | ~1030 ms | ~15 ms |
 
-**Arm C is the control that proves the mechanism** — a real `TerminateProcess` writes none
-of it, so A's flush is a property of the ConPTY close and not of the teardown ceremony.
-A and B differ by exactly two lines, and **both are caused BY typing `/exit`, not preserved
-by it**: a `file-history-snapshot` with `trackedFileBackups:{}` (an empty message boundary
-for the `/exit` input) and a `history.jsonl` entry reading `{"display":"/exit"}` — your own
-keystroke. The `cost-state` roll-up and the whole `last*` block in `.claude.json`
+**Arm C is the control that proves the mechanism — and what separates it from A is WHICH
+PROCESS is terminated, not whether one is.** Both arms hard-terminate something: A
+terminates the *shell* (see the correction above), C terminates the ***agent itself***
+(`process.kill(R.claudePid)`, on a pid the probe discovered by walking down from one it
+spawned). A `TerminateProcess`d agent writes none of the four lines, fires no `SessionEnd`
+and leaves `.claude.json` byte-identical — so **the writing is done by the agent's own
+shutdown, not by the teardown ceremony around it**, and that shutdown is reachable
+precisely because A leaves the agent alive to notice its console closing. Stated as
+"terminate versus no terminate" — as this section did at first — the control would prove
+nothing, because A terminates too.
+A and B differ by **two artifacts in two different files** — which is one transcript line
+(the table's +4 against +5) plus one `history.jsonl` entry, not "two lines" as this said
+until review noticed it contradicted the table one paragraph above. **Both are caused BY
+typing `/exit`, not preserved by it**: a `file-history-snapshot` with
+`trackedFileBackups:{}` (an empty message boundary for the `/exit` input) and a
+`history.jsonl` entry reading `{"display":"/exit"}` — your own keystroke. The `cost-state` roll-up and the whole `last*` block in `.claude.json`
 (`lastSessionId`, `lastCost`, `lastModelUsage`) — the state the graceful path was expected
 to own — are written **identically by the hard kill**.
 
@@ -411,9 +450,34 @@ and a submit is not reliably one keystroke (one run needed a second CR after 8s)
 Kill stays instant.
 
 **Two limits, stated rather than glossed.** It is a property of the ConPTY-close path, not
-of Windows: a deployment on node-pty's other branch behaves like arm C and loses all four
-lines — not on this fleet, and unmeasured. And killing **mid-turn** was never measured;
-every arm killed an idle session after a completed turn.
+of Windows: node-pty's other branch `process.kill`s the whole **console process list**,
+which contains the agent, so such a deployment behaves like arm C and loses all four lines
+— not on this fleet, and unmeasured. And killing **mid-turn** was never measured; every arm
+killed an idle session after a completed turn.
+
+**A third limit, added when the mechanism was corrected.** *Which* event makes the agent
+exit is **not** measured. Two candidates arrive microseconds apart inside one native call —
+its console closes, and its parent dies — so "orphaned by the closing pseudoconsole" is
+inference from arm C plus the process tree (`TerminateProcess` spares descendants), not a
+captured sequence. What IS earned is the weaker and sufficient claim: **the agent is left
+alive and runs its ordinary shutdown.**
+
+Two readings are closed rather than left open. The flush cannot pre-date the kill: the
+BEFORE snapshot is taken *after* the dwell and *before* the end-action, so anything written
+earlier is already in the baseline and the +4 is measured strictly across the teardown. And
+it cannot be the terminate itself, on two independent grounds — the terminate targets bash,
+and arm C shows that terminating the agent writes nothing.
+
+> **The isolating experiment is CHEAP, and this limit first claimed the opposite.** It said
+> a fourth arm "would need … the native call directly, which node-pty's API does not
+> expose". Wrong, and review answered it in one line: `process.kill(shellPid)` alone, with
+> no `term.kill()` — the same shape as arm C — kills the parent without closing the
+> console and separates the two causes. So the arm is **unrun, not impossible**. Recorded
+> because it is the same error as the one being corrected on the line above: *a claim about
+> what cannot be done, made without checking.*
+
+Nothing in this repo depends on telling the two apart — either way the agent flushes and
+`/exit` adds nothing — which is why the arm is named here rather than run.
 
 > **A liveness check on a pid you failed to find PASSES.** The probe locates the agent
 > process by NAME under the shell it spawned, so an install running it under a shim (an
