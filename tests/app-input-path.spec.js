@@ -69,11 +69,25 @@ test.describe('#206 app.html routes every user input through one gated path', ()
 
     lines.forEach((line, i) => {
       if (!/\.send\(/.test(line)) return;
-      if (i > declIdx && i < endIdx) return;   // inside the funnel: this IS the one write
-      const residue = line
+      const inFunnel = declIdx >= 0 && i > declIdx && i < endIdx;
+      let residue = line
         .replace(/\w+\.send\(JSON\.stringify\(\{\s*(?:resize|mode)\b/g, '')   // control frames, named
         .replace(/\w+\.send\('\{"heartbeat":1\}'\)/g, '')                     // liveness, not input
         .replace(/\bnws\.send\('ping'\)/g, '');                               // the /ws/notify socket
+      // The funnel's own write: permitted only INSIDE its own body, and only as that
+      // exact whole line. Both halves are load-bearing, and each was measured.
+      //
+      // Scope, because the text alone cannot identify it: `ws.send(data)` is precisely
+      // what xterm's own handler would say (`term.onData(data => …)` binds that
+      // identifier), and with the `try/catch` gone the funnel's write is a bare
+      // `ws.send(data);` — BYTE-IDENTICAL, indentation included, to unhooking the
+      // highest-traffic input path in the file.
+      //
+      // Whole line, because a substring permission leaks: `\bws\.send\(data\)` also
+      // matches inside `entry.ws.send(data)` — the `.` before `ws` is a word boundary —
+      // so a foreign socket written into the funnel's own body was stripped and passed.
+      // Caught by injecting it.
+      if (inFunnel && /^\s*ws\.send\(data\);\s*$/.test(line)) return;
       if (/\.send\(/.test(residue)) offenders.push(`app.html:${i + 1}  ${line.trim()}`);
     });
 
