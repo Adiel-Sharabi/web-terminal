@@ -219,6 +219,20 @@ void main() {
       final conn = TerminalConnection(_server, 's',
           socketFactory: (_) => i++ == 0 ? s1 : s2,
           reconnectBackoff: _slowBackoff);
+      // #208 — subscribed to pin the SILENCE, and pinned HERE because this is the one
+      // test that actually makes stage 1 evict (5000 + 5000 > 8192). Stage 1 dropping
+      // ordinary writes without reporting is a stated #193 decision — losing one
+      // buffered keystroke is not worth a banner, and reporting it would cost a
+      // 6-second SnackBar per arrow key evicted during an outage — and it was a
+      // decision nothing enforced: making stage 1 report passed every test in this
+      // file. Found in review by mutation.
+      //
+      // The first attempt at this assertion went in the COEXISTS test next door, where
+      // the only ordinary write is one byte and stage 1 therefore never runs. It passed
+      // the mutation too — vacuously. A negative needs the thing it denies to actually
+      // have happened, which is what `flushed` below establishes.
+      final dropped = <InputDrop>[];
+      conn.inputDropped.listen(dropped.add);
       await pump();
       s1.serverDrop();
       await pump(15); // offline window
@@ -231,6 +245,11 @@ void main() {
       expect(flushed, 'B' * 5000,
           reason: 'oldest whole write evicted; newest submit kept intact, never split');
       expect(flushed.contains('A'), isFalse);
+      // ...and that eviction, which the two assertions above prove happened, said
+      // nothing. This is the assertion that is NOT vacuous: 'A' is demonstrably gone.
+      expect(dropped, isEmpty,
+          reason: 'stage 1 bounds ordinary accumulation SILENTLY — a banner per '
+              'evicted keystroke is the noise #204 warns about');
       conn.close();
     });
 
@@ -327,6 +346,14 @@ void main() {
       // goes red if the eviction site ever names the wrong origin.
       expect(dropped.map((d) => d.reason).toSet(), {InputDropReason.bufferFull},
           reason: 'an eviction is NOT about size - the write was perfectly legal');
+      // ...and it must report the size of what was ACTUALLY lost. Found in review by
+      // mutation: with only the reason asserted, the emit site could pass `length: 0`
+      // and every test here stayed green, shipping "there was no room left to hold
+      // what you typed (0 characters)". The two tooLarge sites both pin their length
+      // already; this was the only origin that did not. Each paste is 20000 chars, so
+      // every eviction on this path has exactly one right answer.
+      expect(dropped.map((d) => d.length).toSet(), {20000},
+          reason: 'the reported length must be the evicted write, not a placeholder');
       conn.close();
     });
 
