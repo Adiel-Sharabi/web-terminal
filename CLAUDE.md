@@ -429,10 +429,28 @@ honoured it, and #201 made one of them reachable.
   serves both roles (per-frame wire cap, whole-buffer total) because the #201 invariant
   makes them one number; a second Dart constant would be a third copy of the value whose
   whole problem was that its copies looked independent.
-- **`app.html` is NOT gated and still can reach that band.** It has a dozen scattered
-  `ws.send(...)` sites and no single input path, so there is nowhere to put the check
-  without first building one. Recorded at the `server.js` cap block, because the server
-  cannot tell which client is talking to it.
+- **`app.html` is gated too now (#206), so the band is unreachable from BOTH clients** —
+  and the reason it was not is worth keeping, because **half the premise was stale.**
+  This bullet used to say the file had "no single input path"; in fact `sendInput` had
+  been the coalescing path for typing and for the compose bar all along, and exactly
+  **four** sites wrote past it to `ws.send` — the image-path paste, the mobile toolbar
+  key, the long-press Paste action, the tap-to-move arrow repeat. So the fix is a
+  **funnel** (`sendPtyInput` wrapping `ws.send`), not the new mechanism the issue
+  budgeted for. *Check the claim before you cost the work.*
+  - The cap is tested **before** the socket state: the refusal is a fact about the data,
+    and a notice that appeared only when a socket happened to be open would be the
+    flakiest possible affordance.
+  - **Every caller's FRAMING is untouched.** #55/#44 make a submit one frame on purpose,
+    and #87's images-only submit needs its paste close and its bare CR to reach the wire
+    as separate writes a measured gap apart. This wraps a send; it re-coalesces nobody.
+  - **A funnel's whole value is that nothing goes round it**, and no behavioural test can
+    see that — a `ws.send` added next year would leave every other test in the repo
+    green. `tests/app-input-path.spec.js` therefore asserts it against the **source**,
+    with an allowlist of the frames that are not input (`resize`, `mode`, `heartbeat`,
+    the notify ping), as well as driving the cap end to end.
+  - `WS_INPUT_MAX` is now a **third** site in `scripts/check-shared-constants.js`. An
+    ungated copy would decide whether the browser refuses a write itself or lets the
+    **transport** refuse it — and the transport refuses by closing the socket.
 - **The cluster proxy tells the browser when its reconnect buffer refuses a write** —
   the remote link is what is down, `localWs` is open throughout. **Once per outage, not
   once per keystroke:** the buffer LATCHES (#201), so everything after the first refusal

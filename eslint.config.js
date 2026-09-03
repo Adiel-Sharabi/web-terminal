@@ -131,6 +131,10 @@ module.exports = [
         resourceData: 'readonly',
         resourceView: 'writable',
         switchSession: 'readonly',
+        // #206 — the ONE path user input takes to a session socket. The spec drives it
+        // directly because the sizes it has to send (a quarter of a megabyte, and one
+        // byte more) cannot be typed through the UI in a test.
+        sendPtyInput: 'readonly',
         // #209 — the backgrounded-session notice test drives a REAL in-page switch and
         // reads the stash off the cache entry. Both are top-level `let`/`const` in a
         // classic script, so they are global bindings but NOT properties of `window`,
