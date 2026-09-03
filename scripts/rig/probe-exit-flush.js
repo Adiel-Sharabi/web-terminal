@@ -147,6 +147,9 @@ const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
 
 // ---------------------------------------------------------------- small helpers
 
+const NLC = String.fromCharCode(10);
+/** Credential copies on disk right now — see the signal handler below. */
+const liveCredCopies = new Set();
 const sha1 = (buf) => crypto.createHash('sha1').update(buf).digest('hex');
 /** Named because a comparison against it is NOT evidence of a change. */
 const UNREADABLE = '<unreadable>';
@@ -176,6 +179,27 @@ function shred(p) {
     fs.writeFileSync(p, Buffer.alloc(n, 0x30));
     fs.rmSync(p, { force: true });
   } catch { /* best effort */ }
+  liveCredCopies.delete(p);
+}
+
+/**
+ * Every credential copy currently on disk.
+ *
+ * A SIGNAL RUNS NO `finally`. Node unwinds nothing on SIGINT, so Ctrl-C skipped both
+ * shred paths in this file and stranded a PLAINTEXT token copy under the probe parent
+ * until somebody remembered `--clean` — the one review finding here with a consequence
+ * outside the write-up. Registered when a copy is made and cleared when it is shredded,
+ * so this handler destroys exactly what is still there and nothing else.
+ *
+ * The trees themselves are deliberately LEFT: they are inert, and `--clean` refuses to
+ * remove anything it did not create. Only the secret is urgent.
+ */
+for (const sig of ['SIGINT', 'SIGTERM']) {
+  process.on(sig, () => {
+    for (const p of [...liveCredCopies]) shred(p);
+    console.error(`${NLC}${sig} - credential copies shredded. Probe trees left; run --clean.`);
+    process.exit(130);
+  });
 }
 
 // ---------------------------------------------------------------- tree snapshots
@@ -422,6 +446,7 @@ async function runArm(arm, run, opts) {
   // Hashed AT CREATION rather than reused from preflight: the HOST's own claude may
   // refresh between the two, and that would otherwise read as the child rotating it.
   const credsCopyHash = sha1File(credsCopy);
+  liveCredCopies.add(credsCopy);
 
   const R = {
     arm, run, tag, cfgDir, cwd, markerDir,
