@@ -71,7 +71,7 @@ Three supervised Node.js processes. See `docs/ARCHITECTURE.md` for the full walk
 - `lib/recap.js` — the pure session-recap rules: `condense`, `toolTally`, `summariseTasks`, plus a re-export of `lib/user-turn.js`'s `classifyUserTurn` for its existing importers — **change the rule in `lib/user-turn.js`, never here**. Serves `GET /api/sessions/:id/recap`. See "The session recap" below
 - `lib/notification-shape.js` — the pure rules for a Claude `Notification` hook (#194 Gap 1): `classifyNotification` (permission / idle / **benign** / **unknown** — the last two were one silent `drop`), plus the redaction and rate rule for logging an unknown one. **Instrumentation only — it deliberately changes no behaviour**: `correctStaleStatus` gives a `waiting` session 12h against 5m for a `working` one, so promoting an unrecognised notification to a permission ask on a guess would park a session on a false "waiting" for half a day
 - `app.html` — unified single-page app (terminal + sidebar + settings). Polyfills `crypto.randomUUID` for plain-HTTP contexts. `?rtt=1` enables the per-keystroke RTT overlay
-- `terminal.html` — legacy terminal-only page (served at `/s/:id`)
+- `terminal.html` — legacy terminal-only page. **No longer served** (#218): `/s/:id` redirects to `/app/:id`, because this page neither gated input at `WS_INPUT_MAX` nor could render an `inputDropped` notice
 - `lobby.html` — legacy lobby page (served at `/lobby`)
 - `sw.js` — service worker for PWA caching
 - `tests/security.spec.js` — auth, session CRUD, XSS, config security
@@ -431,16 +431,31 @@ honoured it, and #201 made one of them reachable.
   whole problem was that its copies looked independent.
 - **`app.html` is gated too now (#206)** — and the reason it was not is worth keeping,
   because **half the premise was stale.**
-  - **But "both clients" is wrong, and briefly stood in this file as a claim.** There is
-    a THIRD page, and it is the worst off of the three: **`terminal.html`**, the legacy
-    terminal-only view still served at `/s/:id` and still linked from `lobby.html`. Four
-    ungated input sends (a Ctrl+V paste among them) **and** it discards the server's own
+  - **But "both clients" was wrong, and briefly stood in this file as a claim.** There
+    was a THIRD page, and it was the worst off of the three: **`terminal.html`**, the
+    legacy terminal-only view served at `/s/:id` and linked from `lobby.html`. Four
+    ungated input sends (a Ctrl+V paste among them) **and** it discarded the server's own
     `inputDropped` frame — there is no notice UI in that file to render one in. So there:
-    a >256 KB paste is refused by the server and reported to nobody, and a >4 MiB paste
-    closes the socket with nobody told why. Gating it means building it a notice first,
-    so it is **named, not fixed** (#218) — the value of a record like this one is that it
+    a >256 KB paste was refused by the server and reported to nobody, and a >4 MiB paste
+    closed the socket with nobody told why. The value of a record like this one is that it
     is accurate, and the previous sentence here was the second comment in two PRs to claim
     a convenient thing nobody had checked.
+  - **#218 closed it by UNSERVING the page, not by gating it.** `/s/:id` now redirects to
+    `/app/:id` (302 — a 301 is cached indefinitely and would make a revert a support
+    problem). The page keeps its four ungated sends; what makes that safe is that nothing
+    routes to it, which is why `check-shared-constants.js` still gates **three** copies of
+    `WS_INPUT_MAX` and not four, and why `tests/legacy-route-redirect.spec.js` asserts
+    **against the source** that no route serves the file — a route added next year would
+    leave every behavioural test in the repo green.
+  - **And the issue's own caveat was BACKWARDS, which is why it was worth checking rather
+    than believing.** #218 warned that a redirect might drop the CLUSTER case, since
+    `terminal.html` "builds its own WebSocket URL". It has **no cluster code at all** —
+    its socket is always `location.host` + `/ws/<id>` — and the old route gated on a
+    `getSession` RPC answered by the **local** worker only, so a peer-hosted id threw and
+    bounced the user to `/`. `app.html` resolves the same bare `/app/:id` against
+    `/api/cluster/sessions` and opens the peer through the `/cluster/:serverUrl/ws/:id`
+    proxy. So the redirect **adds** capability: an `/s/` link reaches a peer session for
+    the first time. *A caveat is a hypothesis; this one cost one grep to falsify.*
   This bullet used to say the file had "no single input path"; in fact `sendInput` had
   been the coalescing path for typing and for the compose bar all along, and exactly
   **four** sites wrote past it to `ws.send` — the image-path paste, the mobile toolbar

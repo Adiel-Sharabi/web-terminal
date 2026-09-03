@@ -125,7 +125,7 @@ The legacy proxy path is always available as fallback — direct mode is purely 
 | File | What |
 |------|------|
 | `app.html` | The entire unified frontend — terminal UI, sidebar, settings, all in one file |
-| `terminal.html` | Legacy standalone terminal page (served at `/s/:id`) |
+| `terminal.html` | Legacy standalone terminal page. **No longer served** — `/s/:id` redirects to `/app/:id` (#218), because this page neither gated input at `WS_INPUT_MAX` nor rendered the server's `inputDropped` notice |
 | `lobby.html` | Legacy session list page (served at `/lobby`) |
 | `sw.js` | Service worker for PWA caching |
 | `manifest.json` | PWA manifest — app name, icon, standalone mode |
