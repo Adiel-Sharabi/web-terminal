@@ -1292,8 +1292,9 @@
 
       bgWs.onmessage = e => {
         if (typeof e.data === 'string') {
+          if (e.data.startsWith('{"inputDropped"')) { stashInputDropped(entry, e.data); return; }
           // Ignore control messages in background
-          if (e.data.startsWith('{"sessionTaken"') || e.data.startsWith('{"requestResize"') || e.data.startsWith('{"inputDropped"') || e.data.startsWith('{"heartbeat":')) return;
+          if (e.data.startsWith('{"sessionTaken"') || e.data.startsWith('{"requestResize"') || e.data.startsWith('{"heartbeat":')) return;
           entry.scrollback += e.data;
           if (entry.scrollback.length > 1048576) {
             entry.scrollback = entry.scrollback.slice(-1048576);
@@ -1368,6 +1369,33 @@
       if (document.getElementById('sidebar').classList.contains('open')) loadSidebar();
     }
 
+    // #209 — A BACKGROUND SOCKET IS STILL A SOCKET THE SERVER REPORTS ON. Both
+    // background message handlers used to list `inputDropped` in their IGNORE set, so
+    // the notice was dropped on the floor. That was survivable while the only refusal
+    // fired AS YOU TYPED (#193/#204 — you are still looking at that session when it
+    // arrives). It is not survivable for the give-up notice, which lands ~37s after the
+    // fact: ample time to have switched away, and that 37s is the whole reason the loss
+    // is worth reporting. Found in review of #209.
+    //
+    // STASHED, NOT SHOWN. A notice belongs to the session it was raised on — that is
+    // #179's rule and the reason switchSession dismisses one on the way out — so it
+    // waits on that session's cache entry and is rendered when you come back to it.
+    // One-shot: it is a fact about one outage, not a state to keep re-announcing.
+    //
+    // With `keepSessionsOpen` off there is no background socket at all (the old one is
+    // closed on switch, which tears the proxy down before it ever gives up), so there
+    // is nothing to stash and nothing this could have shown.
+    function stashInputDropped(entry, data) {
+      try { entry.inputDropped = JSON.parse(data); } catch (ex) {}
+    }
+    function drainInputDropped(id) {
+      const entry = sessionCache.get(id);
+      if (!entry || !entry.inputDropped) return;
+      const d = entry.inputDropped;
+      entry.inputDropped = null;
+      showInputDropped(d.bytes, d.reason, d.writes);
+    }
+
     function switchSession(id, serverUrl) {
       if (id === sessionId && serverUrl === sessionServerUrl) return;
       // #179 - the notice belongs to the session it was raised on, and so does the
@@ -1402,7 +1430,8 @@
         // Rewire the old WS to accumulate into cache instead of writing to term
         oldWs.onmessage = (e) => {
           if (typeof e.data === 'string') {
-            if (e.data.startsWith('{"sessionTaken"') || e.data.startsWith('{"requestResize"') || e.data.startsWith('{"inputDropped"') || e.data.startsWith('{"heartbeat":')) return;
+            if (e.data.startsWith('{"inputDropped"')) { stashInputDropped(entry, e.data); return; }
+            if (e.data.startsWith('{"sessionTaken"') || e.data.startsWith('{"requestResize"') || e.data.startsWith('{"heartbeat":')) return;
             entry.scrollback += e.data;
             if (entry.scrollback.length > 1048576) {
               entry.scrollback = entry.scrollback.slice(-1048576);
@@ -1448,6 +1477,10 @@
       document.getElementById('noSession').style.display = 'none';
       switching = false;
       doResize(); // fit terminal to visible container before connecting
+      // #209 — anything this session was told while it sat in the background. AFTER the
+      // hideSubmitUnconfirmed() at the top of this function, which clears the OUTGOING
+      // session's notice; this one belongs to the session being opened.
+      drainInputDropped(id);
 
       // Try to use cached background connection
       const cached = keepSessionsOpen ? sessionCache.get(id) : null;

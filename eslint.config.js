@@ -131,6 +131,12 @@ module.exports = [
         resourceData: 'readonly',
         resourceView: 'writable',
         switchSession: 'readonly',
+        // #209 — the backgrounded-session notice test drives a REAL in-page switch and
+        // reads the stash off the cache entry. Both are top-level `let`/`const` in a
+        // classic script, so they are global bindings but NOT properties of `window`,
+        // and a `window.sessionCache` workaround would read undefined instead.
+        keepSessionsOpen: 'writable',
+        sessionCache: 'readonly',
         showNotification: 'readonly',
         attentionSessions: 'readonly',
         sessionHasAlert: 'readonly',

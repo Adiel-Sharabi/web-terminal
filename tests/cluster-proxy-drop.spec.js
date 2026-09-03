@@ -294,8 +294,10 @@ test.describe('#204 the cluster proxy reports a buffer refusal to the browser', 
 
     const typed = await openProxyWs(cookie, 'wt209a-' + Date.now());
     const silent = await openProxyWs(cookie, 'wt209b-' + Date.now());
+    const over = await openProxyWs(cookie, 'wt209c-' + Date.now());
     const typedSeen = watch(typed.ws, typed.frames);
     const silentSeen = watch(silent.ws, silent.frames);
+    const overSeen = watch(over.ws, over.frames);
 
     // Well under MAX_BUFFER_SIZE, so every one of these FITS: `decide` admits it and
     // #204's notice must never fire. That is what makes the reason below the new one.
@@ -303,7 +305,21 @@ test.describe('#204 the cluster proxy reports a buffer refusal to the browser', 
     const TOTAL = WRITES.reduce((n, w) => n + Buffer.byteLength(w), 0);
     for (const w of WRITES) typed.ws.send(w);
 
-    await Promise.all([typedSeen.closed, silentSeen.closed]);
+    // THE THIRD SOCKET TYPES PAST THE BUFFER, which is where "what was lost" stops
+    // being "what was held". Once `decide` refuses, the buffer is pinned at
+    // MAX_BUFFER_SIZE and every later write lands in no array at all — so a give-up
+    // that reported `buffered.length` would tell somebody who typed 105 things that it
+    // lost 100, with a precise figure. Found in review.
+    const FILL = Array.from({ length: MAX_BUFFER_SIZE }, (_, i) => `c${i}\r`);
+    const EXTRA = ['first-refused\r', 'e1\r', 'e2\r', 'e3\r', 'e4\r'];
+    const OVER_ALL = [...FILL, ...EXTRA];
+    const OVER_TOTAL = OVER_ALL.reduce((n, w) => n + Buffer.byteLength(w), 0);
+    for (const w of OVER_ALL) over.ws.send(w);
+    // Observed, not assumed: the 'buffer-full' notice has to have fired BEFORE the
+    // give-up, or the two-notice assertion below would be about the wrong pair.
+    await expect.poll(() => droppedFrames(over.frames).length, { timeout: 15000 }).toBe(1);
+
+    await Promise.all([typedSeen.closed, silentSeen.closed, overSeen.closed]);
 
     // The socket that typed: told, once, with the whole loss named, before the close.
     const notices = droppedFrames(typedSeen.framesAtClose).map((f) => JSON.parse(f));
@@ -321,5 +337,19 @@ test.describe('#204 the cluster proxy reports a buffer refusal to the browser', 
     // would be the confidently-wrong kind this whole family of messages exists to avoid.
     expect(droppedFrames(silentSeen.frames).length, 'an empty buffer is not a loss').toBe(0);
     expect(silentSeen.closeCode).toBe(1001);
+
+    // The socket that overflowed: TWO notices, and the second names everything — the
+    // 100 the buffer held AND the 5 it refused after latching. The natural defence for
+    // reporting only 100 ("the earlier notice covered the rest") does not hold: both
+    // render into the same element, so the second REPLACES the first and the only
+    // sentence left on screen is this one.
+    const overNotices = droppedFrames(overSeen.framesAtClose).map((f) => JSON.parse(f));
+    expect(overNotices.length, 'one per outage from `decide`, plus the give-up').toBe(2);
+    expect(overNotices[0].reason).toBe('buffer-full');
+    expect(overNotices[1].reason).toBe('peer-unreachable');
+    expect(overNotices[1].writes, 'everything lost, not everything held')
+      .toBe(OVER_ALL.length);
+    expect(overNotices[1].bytes).toBe(OVER_TOTAL);
+    expect(overSeen.closeCode).toBe(1001);
   });
 });
