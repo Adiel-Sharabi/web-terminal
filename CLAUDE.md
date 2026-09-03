@@ -439,6 +439,17 @@ honoured it, and #201 made one of them reachable.
   is refused for the same reason, and a banner per character is noise that teaches you to
   ignore the one that mattered. The reporting rule therefore lives with the latch in
   `lib/reconnect-buffer.js` (`decide`) rather than as an `if` beside it.
+- **And #209 is the OPPOSITE case on that same path, which was silent for longer.**
+  There the buffer is full and says no; here every write is *accepted* and the whole
+  buffer is then discarded because the peer never came back — so nothing was ever
+  refused and there was no signal at all, just `1001 Remote unreachable` about **37s**
+  (500ms/1s/2s/4s/5s-capped x 10) after typing into a session that looked merely laggy.
+  `attemptReconnect` now sends one notice naming the total before the close, under a
+  third `reason` — **`'peer-unreachable'`, not `'buffer-full'`**, which means *there was
+  no room left* and is exactly what did not happen. The buffer is cleared **before** the
+  close so a remote close arriving in that gap cannot report the same loss twice, and
+  the send-then-close ordering is asserted from inside the close handler rather than
+  assumed of `ws`.
 
 **`WT_CLUSTER_TOKENS_FILE`** exists so that regression test can write a cluster entry
 pointing at a dead port. `cluster-tokens.json` holds a live bearer token for **every peer

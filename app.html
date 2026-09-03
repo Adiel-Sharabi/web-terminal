@@ -1151,7 +1151,7 @@
             return;
           }
           if (e.data.startsWith('{"inputDropped"')) {
-            try { const d = JSON.parse(e.data); showInputDropped(d.bytes, d.reason); } catch (ex) {}
+            try { const d = JSON.parse(e.data); showInputDropped(d.bytes, d.reason, d.writes); } catch (ex) {}
             return;
           }
           if (e.data.startsWith('{"heartbeat":')) return;
@@ -1486,7 +1486,7 @@
               return;
             }
             if (e.data.startsWith('{"inputDropped"')) {
-              try { const d = JSON.parse(e.data); showInputDropped(d.bytes, d.reason); } catch (ex) {}
+              try { const d = JSON.parse(e.data); showInputDropped(d.bytes, d.reason, d.writes); } catch (ex) {}
               return;
             }
             if (e.data.startsWith('{"heartbeat":')) return;
@@ -1931,13 +1931,25 @@
     // the size-based wording would read "too large to send (16 bytes)" and be
     // confidently wrong. `reason` is sent only by the proxy, so its ABSENCE keeps the
     // original meaning and an older server needs no special case here.
-    function showInputDropped(bytes, reason) {
+    // #209 — and a THIRD, on that same proxy path: the buffer never overflowed, the peer
+    // simply never came back, and the whole buffer went with the socket. Neither of the
+    // other two sentences is true of it — nothing was too large and there was room the
+    // entire time — so it gets its own, and it is the only one that can name a COUNT,
+    // because it is the only one reporting more than a single write.
+    function showInputDropped(bytes, reason, writes) {
       const box = document.getElementById('composeNotice');
       const txt = document.getElementById('composeNoticeText');
       if (!box || !txt) return;
-      txt.textContent = reason === 'buffer-full'
-        ? `The connection to that server is down and there was no room left to hold what you typed (${bytes} bytes), so it was dropped. Send it again once it reconnects.`
-        : `That input was too large to send (${bytes} bytes) and was dropped. Try sending it in smaller pieces.`;
+      if (reason === 'peer-unreachable') {
+        // `writes` is additive (#209); a server that predates it sends only the bytes,
+        // and the sentence still has to read correctly without the count.
+        const n = Number(writes) > 0 ? `${writes} write${writes === 1 ? '' : 's'}, ${bytes} bytes` : `${bytes} bytes`;
+        txt.textContent = `That server never came back, so everything you typed while it was down (${n}) was dropped. Reopen the session and send it again.`;
+      } else if (reason === 'buffer-full') {
+        txt.textContent = `The connection to that server is down and there was no room left to hold what you typed (${bytes} bytes), so it was dropped. Send it again once it reconnects.`;
+      } else {
+        txt.textContent = `That input was too large to send (${bytes} bytes) and was dropped. Try sending it in smaller pieces.`;
+      }
       box.hidden = false;
       doResize();
     }
