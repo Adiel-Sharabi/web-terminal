@@ -197,6 +197,37 @@ String resolveActiveLens({
 /// unrelated event to restore by mistake. Silence is success.
 const Duration kSubmitPendingGrace = Duration(seconds: 20);
 
+/// The sentence to show for one dropped write (#208).
+///
+/// PURE, AND TOP-LEVEL, FOR THE REASON [resolveSubmitUnconfirmedReaction] IS. The
+/// exhaustive `switch` over [InputDropReason] makes ADDING an origin a compile
+/// error, which is a real gate — but it says nothing about whether each origin is
+/// mapped to the RIGHT sentence. Swap the two arms and #208's defect returns exactly
+/// inverted: an eviction reads "too large", a cap refusal reads "no room left", and
+/// every test still passes. Buried in a State method that needed a pumped widget to
+/// reach, nothing would have caught that. Out here it is three lines to assert.
+///
+/// The two SIZE origins share a sentence deliberately. Whether the server refused
+/// the write (#193) or this client refused it first (#204) changes nothing the user
+/// can act on, and inventing a distinction they cannot use is its own kind of noise.
+///
+/// **"characters" is approximate, and chosen as the least wrong option.**
+/// [InputDrop.length] is `String.length`, i.e. UTF-16 code units, so a non-BMP glyph
+/// (an emoji, a CJK extension character) counts two. "bytes" — which `app.html` still
+/// says for the same event, and which the wire field is misnamed after — is not
+/// approximate but flatly wrong, since these are not bytes in any encoding. Aligning
+/// `app.html` is a SERVER-side change and is deliberately not smuggled into a
+/// companion-only diff; the divergence is recorded here rather than left to be
+/// discovered.
+String inputDropMessage(InputDrop drop) => switch (drop.reason) {
+      InputDropReason.tooLarge =>
+        'Some input was too large to send (${drop.length} characters) and was '
+            'dropped. Try sending it in smaller pieces.',
+      InputDropReason.bufferFull =>
+        'The connection was down and there was no room left to hold what you '
+            'typed (${drop.length} characters), so it was dropped. Send it again.',
+    };
+
 /// The outcomes [resolveSubmitUnconfirmedReaction] can return.
 enum SubmitUnconfirmedOutcome {
   /// No event newer than the last one this screen already handled — nothing
@@ -2062,17 +2093,9 @@ class _SessionScreenState extends State<SessionScreen>
   /// and inventing a distinction they cannot use is its own kind of noise.
   void _onInputDropped(InputDrop drop) {
     if (!mounted) return;
-    final text = switch (drop.reason) {
-      InputDropReason.tooLarge =>
-        'Some input was too large to send (${drop.length} characters) and was '
-            'dropped. Try sending it in smaller pieces.',
-      InputDropReason.bufferFull =>
-        'The connection was down and there was no room left to hold what you '
-            'typed (${drop.length} characters), so it was dropped. Send it again.',
-    };
     ScaffoldMessenger.of(context).showSnackBar(
       SnackBar(
-        content: Text(text),
+        content: Text(inputDropMessage(drop)),
         duration: const Duration(seconds: 6),
       ),
     );

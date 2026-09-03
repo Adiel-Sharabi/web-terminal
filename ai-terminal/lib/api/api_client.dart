@@ -910,30 +910,6 @@ class _WebSocketTerminalSocket implements TerminalSocket {
   }
 }
 
-/// A live, self-healing connection to one session's `/ws/:id` terminal socket.
-///
-/// Server text/binary frames are surfaced as UTF-8 strings on [output].
-/// The connection maintains itself: it heartbeats every 25s, and on an
-/// unexpected drop it auto-reconnects with 0.5s→1s→2s→4s backoff (reset on
-/// success), replaying the last `mode`/`resize` and flushing any input typed
-/// while offline.
-///
-/// **[connected] semantics (important for the UI):** `true` is emitted on a
-/// successful (re)connect; `false` is emitted only after a reconnect *attempt*
-/// has failed — a brief blip that reconnects immediately never emits `false`,
-/// so the UI won't flicker. The UI should *still* debounce ~3–4s before showing
-/// any "reconnecting" banner.
-///
-/// **[reconnected]** fires once per successful reconnect (never on the first
-/// connect), emitted *before* the replayed scrollback lands on [output]. The UI
-/// must clear its terminal buffer on this event, otherwise the server's
-/// on-attach scrollback replay duplicates history.
-///
-/// **[sessionTaken]** becomes `true` if the server reports the session was
-/// opened elsewhere. That is a terminal state: `connected == false` is emitted
-/// immediately, the heartbeat stops and auto-reconnect is disabled (so the app
-/// isn't kicked in a loop). The UI shows an "opened elsewhere — Retake" prompt
-/// and, to retake, [close]s and re-opens the connection.
 /// Why a write was dropped — see [TerminalConnection.inputDropped].
 ///
 /// TWO values, not three, because two of the three origins mean the same thing to
@@ -959,6 +935,30 @@ enum InputDropReason {
 /// listener — is exactly the guessing this type exists to remove.
 typedef InputDrop = ({int length, InputDropReason reason});
 
+/// A live, self-healing connection to one session's `/ws/:id` terminal socket.
+///
+/// Server text/binary frames are surfaced as UTF-8 strings on [output].
+/// The connection maintains itself: it heartbeats every 25s, and on an
+/// unexpected drop it auto-reconnects with 0.5s→1s→2s→4s backoff (reset on
+/// success), replaying the last `mode`/`resize` and flushing any input typed
+/// while offline.
+///
+/// **[connected] semantics (important for the UI):** `true` is emitted on a
+/// successful (re)connect; `false` is emitted only after a reconnect *attempt*
+/// has failed — a brief blip that reconnects immediately never emits `false`,
+/// so the UI won't flicker. The UI should *still* debounce ~3–4s before showing
+/// any "reconnecting" banner.
+///
+/// **[reconnected]** fires once per successful reconnect (never on the first
+/// connect), emitted *before* the replayed scrollback lands on [output]. The UI
+/// must clear its terminal buffer on this event, otherwise the server's
+/// on-attach scrollback replay duplicates history.
+///
+/// **[sessionTaken]** becomes `true` if the server reports the session was
+/// opened elsewhere. That is a terminal state: `connected == false` is emitted
+/// immediately, the heartbeat stops and auto-reconnect is disabled (so the app
+/// isn't kicked in a loop). The UI shows an "opened elsewhere — Retake" prompt
+/// and, to retake, [close]s and re-opens the connection.
 class TerminalConnection {
   final ServerConfig _server;
   final String _sessionId;
