@@ -35,19 +35,42 @@ test.describe('#206 app.html routes every user input through one gated path', ()
     const lines = src.split(/\r?\n/);
     const offenders = [];
 
-    // STRIP THE PERMITTED CALLS, THEN ASSERT NOTHING IS LEFT — rather than asking whether
-    // the line "looks allowed". This file is written in dense one-liners, so a
-    // line-scoped allowlist passes anything sharing a line with something permitted:
-    //   `if (cached) sendPtyInput(a); else entry.ws.send(b);`
-    // would have been green. Found in review of this change.
+    // PERMIT A LOCATION, NOT A SHAPE — twice over, because the first two versions of this
+    // gate each permitted a shape and each had a hole. Found in review, both times.
     //
-    // The control-frame permission names the frames — `resize` and `mode` — instead of
-    // permitting `JSON.stringify` generally, because `ws.send(JSON.stringify({paste:
-    // text}))` is user input wearing a control frame's clothes and would otherwise pass.
+    // (a) A line-scoped allowlist passed anything SHARING a line with something
+    //     permitted, and this file is written in dense one-liners:
+    //       `if (cached) sendPtyInput(a); else entry.ws.send(b);`
+    //     So the permitted calls are STRIPPED and the residue must contain no `.send(`.
+    //
+    // (b) Allowing the funnel's own write by its TEXT was worse, and in the highest-
+    //     traffic place in the file. `ws.send(data)` is exactly what xterm's own handler
+    //     would say — `term.onData(data => …)` binds that identifier — so replacing
+    //     `sendInput(data)` with `ws.send(data)` in that handler read as "the funnel"
+    //     and the gate stayed green. Removing the `try/catch` made it worse still: the
+    //     funnel's write is now a bare `ws.send(data);`, textually IDENTICAL to that
+    //     bypass, so no pattern over the line can tell them apart. The funnel is
+    //     therefore excluded by WHERE IT IS — the span of `sendPtyInput`'s own body.
+    //
+    // The control-frame permission likewise names the frames — `resize` and `mode` —
+    // instead of permitting `JSON.stringify` generally, because
+    // `ws.send(JSON.stringify({paste: text}))` is user input wearing a control frame's
+    // clothes and would otherwise pass.
+    // Located, but NOT asserted yet — the assertions live below the scan on purpose. A
+    // file with no funnel at all (master, before this change) must fail by naming its
+    // ungated send sites, which is the informative red; failing first on "the funnel is
+    // missing" would hide them. Both bounds degrade safely to "exclude nothing" when the
+    // funnel is absent, so the scan is correct either way.
+    const declIdx = lines.findIndex((l) => /^\s*function sendPtyInput\(/.test(l));
+    const closer = declIdx < 0 ? null : lines[declIdx].match(/^\s*/)[0] + '}';
+    const endIdx = closer === null
+      ? -1
+      : lines.findIndex((l, i) => i > declIdx && l.trimEnd() === closer);
+
     lines.forEach((line, i) => {
       if (!/\.send\(/.test(line)) return;
+      if (i > declIdx && i < endIdx) return;   // inside the funnel: this IS the one write
       const residue = line
-        .replace(/\bws\.send\(data\)/g, '')                                   // the funnel's own write
         .replace(/\w+\.send\(JSON\.stringify\(\{\s*(?:resize|mode)\b/g, '')   // control frames, named
         .replace(/\w+\.send\('\{"heartbeat":1\}'\)/g, '')                     // liveness, not input
         .replace(/\bnws\.send\('ping'\)/g, '');                               // the /ws/notify socket
@@ -68,7 +91,10 @@ test.describe('#206 app.html routes every user input through one gated path', ()
     // Matched WITHOUT its parameter list: pinning the signature would make deleting an
     // unused parameter a two-file change that fails here first, which is a test dictating
     // a shape rather than guarding a behaviour.
-    expect(src).toMatch(/function sendPtyInput\(/);
+    expect(declIdx, 'the funnel must exist for its body to be excluded by location')
+      .toBeGreaterThan(-1);
+    expect(endIdx, "the funnel's body must be delimitable, or the exclusion is unbounded")
+      .toBeGreaterThan(declIdx);
     // Six is derived, not picked: the definition, plus the five call sites — the four
     // that used to write straight to `ws.send` (image path, mobile toolbar key,
     // long-press Paste, arrow repeat) and `sendInput`'s coalescing flush. A legitimate
