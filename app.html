@@ -1765,11 +1765,32 @@
     // The cap is tested BEFORE the socket state on purpose: the refusal is a fact
     // about the data, and a notice that appeared only when a socket happened to be
     // open would be the flakiest possible affordance.
+    //
+    // ONLY THE CAP REFUSAL IS REPORTED. A write to a closed or missing socket still
+    // returns false silently, and every caller ignores the boolean — the same behaviour
+    // all five sites had before this funnel existed, kept rather than changed because a
+    // notice there would fire on every keystroke typed during an ordinary reconnect,
+    // which is #204's "a banner per character teaches you to ignore the one that
+    // mattered". Said plainly because this block calls itself the ONE place input
+    // reaches a socket, and a reader would otherwise assume it reports every loss.
+    //
+    // NO `try/catch` AROUND THE SEND, deliberately. `send()` throws only when
+    // `readyState` is CONNECTING (WHATWG), which the line above has already excluded in
+    // the immediately preceding synchronous statement — so a catch here could absorb
+    // nothing but "`ws` is not a WebSocket", i.e. a bug, and swallowing it would hide it
+    // from the `pageerror` assertions the specs make. Found in review.
+    //
+    // ONE SOCKET, NEVER A PARAMETER. `nudgeRedraw(sock)` next door takes an explicit
+    // socket because a CONTROL frame genuinely has two candidates (a fresh `ws` on open,
+    // a cached `entry.ws` on the switch path). Input has exactly one by definition:
+    // writing a keystroke to a backgrounded socket would be a bug, and `server.js`
+    // refuses even `resize` from one. So the `sock` parameter this started with was not
+    // merely unused, it was unusable.
     const WS_INPUT_MAX = 256 * 1024;  // == server.js `WS_INPUT_MAX`; UTF-16 code units
     function sendPtyInput(data) {
       if (data.length > WS_INPUT_MAX) { showInputDropped(data.length); return false; }
       if (!ws || ws.readyState !== WebSocket.OPEN) return false;
-      try { ws.send(data); } catch (e) { return false; }
+      ws.send(data);
       return true;
     }
 
