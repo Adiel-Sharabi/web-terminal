@@ -228,25 +228,120 @@ test.describe('#69 — 5h usage-limit auto-resume', () => {
     }
   });
 
-  test('a new UserPromptSubmit before the reset fires cancels the pending continue', async () => {
+  // #227 — THE FIELD FAILURE. This test used to assert the opposite, and the helper
+  // above defaults capBlocked to true, so it pinned the cancel winning FOR A SESSION
+  // THAT WAS STILL CAPPED — which is exactly what reached a user: armed 19:17, one
+  // retry 19:27, and the 21:51 fire produced no log line of any kind. The same three
+  // sessions had resumed correctly three days earlier, and the only variable that
+  // differed across the two windows was the retry.
+  //
+  // A submitted prompt proves the user is PRESENT, not that the quota returned. While
+  // the account is capped that prompt cannot run — so cancelling on it defeats the
+  // feature with the most natural human response to the thing it exists to fix.
+  test('#227 — a retry while STILL CAPPED keeps the resume, and it still fires', async () => {
+    const pipe = workerPipePath();
+    const dataDir = makeTempDataDir();
+    // The stop debounce is shrunk so the session can get back to idle inside the test,
+    // which is what really happens: the retry is accepted, the cap refuses it, and the
+    // session falls straight back to idle (in production, one minute later).
+    const worker = spawnWorker(pipe, dataDir, { WT_AUTO_RESUME_ON_RESET: '1', WT_HOOK_STOP_DEBOUNCE_MS: '20' });
+    try {
+      const client = await connectClient(pipe);
+      const ev = makeEventCollector(client);
+      const { id } = await rpc(client, 'createSession', { cwd: os.tmpdir(), name: 'reset-uprompt', agent: 'claude', autoCommand: '' });
+
+      const resetAt = Date.now() + 250;
+      await setResetAt(client, id, resetAt); // capBlocked: true — genuinely capped
+      expect((await findSession(client, id)).autoResumeArmed).toBe(true);
+
+      // The user reacts to the cap the way anyone does: they try again.
+      await rpc(client, 'hookEvent', { id, event: 'UserPromptSubmit', prompt: 'still here' });
+      // THE ASSERTION THAT WAS MISSING. Asserting only on the write below would have
+      // stayed green through a cancel that merely re-armed by luck somewhere else;
+      // this names the timer itself, which is the thing that was destroyed.
+      expect((await findSession(client, id)).autoResumeArmed).toBe(true);
+
+      // ...and the prompt goes nowhere, because the cap is still in force.
+      await rpc(client, 'hookEvent', { id, event: 'Stop' });
+      await sleep(120);
+      expect((await findSession(client, id)).status).toBe('idle');
+
+      await sleep(400); // well past resetAt + delay
+      expect(ev.events.some((e) => e.event === 'autoResume' && e.params.id === id)).toBe(true);
+      expect(writesOf(await rpc(client, '__testGetWrites', { id }))).toContain('continue');
+
+      ev.stop();
+      await rpc(client, 'killSession', { id });
+      await client.close();
+    } finally {
+      await worker.stop();
+      rmRf(dataDir);
+    }
+  });
+
+  // #227 — AND IT CANNOT LOOP, which the re-arm makes a load-bearing property rather
+  // than an idle one. The resume's own `continue` is a real submit, so Claude answers it
+  // with a UserPromptSubmit hook (seen in production 300ms after every successful
+  // resume) — which now lands on the re-arm path. The one-shot is what closes it:
+  // fireAutoResume consumes autoResumeFiredForResetAt BEFORE it writes, so the hook that
+  // its own write provokes finds the window already spent and arms nothing. Worth a test
+  // because the guard is an ordering three functions away from the line that relies on it.
+  test('#227 — a resume cannot re-arm on its OWN continue: one continue, not a loop', async () => {
     const pipe = workerPipePath();
     const dataDir = makeTempDataDir();
     const worker = spawnWorker(pipe, dataDir, { WT_AUTO_RESUME_ON_RESET: '1' });
     try {
       const client = await connectClient(pipe);
       const ev = makeEventCollector(client);
-      const { id } = await rpc(client, 'createSession', { cwd: os.tmpdir(), name: 'reset-uprompt', agent: 'claude', autoCommand: '' });
+      const { id } = await rpc(client, 'createSession', { cwd: os.tmpdir(), name: 'reset-noloop', agent: 'claude', autoCommand: '' });
 
       const resetAt = Date.now() + 150;
       await setResetAt(client, id, resetAt);
+      await sleep(400);
+      expect(ev.events.filter((e) => e.event === 'autoResume' && e.params.id === id).length).toBe(1);
 
-      // The user (or a retry) is back before the window even reset.
-      await rpc(client, 'hookEvent', { id, event: 'UserPromptSubmit', prompt: 'still here' });
+      // Claude's answer to the continue we just sent.
+      await rpc(client, 'hookEvent', { id, event: 'UserPromptSubmit', prompt: 'continue' });
+      expect((await findSession(client, id)).autoResumeArmed).toBe(false);
 
-      await sleep(400); // well past resetAt + delay
-      expect(ev.events.some((e) => e.event === 'autoResume' && e.params.id === id)).toBe(false);
+      await sleep(400);
+      expect(ev.events.filter((e) => e.event === 'autoResume' && e.params.id === id).length).toBe(1);
       const sent = writesOf(await rpc(client, '__testGetWrites', { id }));
-      expect(sent).not.toContain('continue');
+      expect(sent.filter((w) => w === 'continue').length).toBe(1);
+
+      ev.stop();
+      await rpc(client, 'killSession', { id });
+      await client.close();
+    } finally {
+      await worker.stop();
+      rmRf(dataDir);
+    }
+  });
+
+  // ...and the fix is exactly one event wide. The signal is not "is the user back" but
+  // WHAT THEY ASKED FOR: Esc says stop (above), a prompt says go (the test above), and
+  // a TOOL RUNNING is the one that genuinely proves the cap is not in force — an agent
+  // that is executing is not an agent the quota is refusing. Non-vacuous: the timer is
+  // asserted present first, so this cannot pass by never arming.
+  test('#227 — a TOOL running still cancels it: work is proof the cap is not in force', async () => {
+    const pipe = workerPipePath();
+    const dataDir = makeTempDataDir();
+    const worker = spawnWorker(pipe, dataDir, { WT_AUTO_RESUME_ON_RESET: '1' });
+    try {
+      const client = await connectClient(pipe);
+      const ev = makeEventCollector(client);
+      const { id } = await rpc(client, 'createSession', { cwd: os.tmpdir(), name: 'reset-pretool', agent: 'claude', autoCommand: '' });
+
+      const resetAt = Date.now() + 150;
+      await setResetAt(client, id, resetAt);
+      expect((await findSession(client, id)).autoResumeArmed).toBe(true);
+
+      await rpc(client, 'hookEvent', { id, event: 'PreToolUse', tool: 'Bash' });
+      expect((await findSession(client, id)).autoResumeArmed).toBe(false);
+
+      await sleep(400);
+      expect(ev.events.some((e) => e.event === 'autoResume' && e.params.id === id)).toBe(false);
+      expect(writesOf(await rpc(client, '__testGetWrites', { id }))).not.toContain('continue');
 
       ev.stop();
       await rpc(client, 'killSession', { id });
