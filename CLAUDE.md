@@ -375,6 +375,177 @@ What was established, in order:
 ### Deployment consequence
 Anything touching `pty-worker.js` (including `lib/agents.js` fields the worker reads) needs a **COLD restart** — a hot `server.js`-only reload leaves the old worker running with the old behaviour. See "Deployment & Operations".
 
+## A ConPTY `term.kill()` is ALREADY graceful — `/exit` buys nothing (#191)
+
+**`session.term.kill()` in `pty-worker.js` does not hard-kill THE AGENT.** With
+`useConptyDll: true` — production's default, and `config.json` does not override it —
+node-pty's JS path is `this._inSocket.destroy(); this._ptyNative.kill(pty, true)`
+(`windowsPtyAgent.js:133-161`), and the console-process-list walk that `process.kill`s
+every pid really is the *other* JS branch (`!useConptyDll`, `:162-179`) — and that walk
+*includes the agent*, which is why a deployment there is expected to behave like arm C.
+So **the kill leaves the agent alive — only the shell is terminated** — and it runs its
+**ordinary shutdown**, which is why today's "hard kill" already ends with
+`lastGracefulShutdown: true`.
+
+The wording is deliberate: *"the agent sees its console close and…"* names **one of two
+indistinguishable causes** and stood here until review. The console close and the shell's
+death happen microseconds apart inside one native call, so the agent loses its console and
+its parent at the same instant and nothing measured says which triggered the exit.
+
+> **But "it only closes the pseudoconsole" is WRONG, and this file said so until a review
+> read one layer further down.** `PtyKill` in node-pty's own
+> `src/win/conpty.cc:534-568` calls `ConptyClosePseudoConsole(handle->hpc)` and **then**,
+> *only* in the `useConptyDll` branch, `TerminateProcess(handle->hShell, 1)`. `hShell` is
+> the process node-pty `CreateProcess`'d (`:442`) — **the shell**. So production's path
+> closes the pseudoconsole *and* hard-terminates bash, which is the exact inverse of the
+> impression the sentence above gave on its own.
+>
+> **The conclusion survives and is better explained for it.** The agent is a *child* of
+> that shell, and Windows `TerminateProcess` does not touch descendants — so the agent is
+> never terminated. It is orphaned rather than killed, and exits on its own, which
+> is a more specific account of the ~870 ms than "the console closed" and also explains
+> why no shell lingers. **What is graceful is the agent's exit, not the teardown**: the
+> shell is killed outright with exit code 1 and gets no shutdown at all. Nothing here
+> needs it to.
+>
+> **The methodological lesson is the one this repo keeps re-learning.** The original claim
+> was read off `windowsPtyAgent.js` — where the branch names really do say what it said —
+> and stopped there. The JS layer's vocabulary was mistaken for the behaviour. *Read to
+> the layer that acts*, the same rule as "the rollout is ground truth; the screen lies".
+
+**MEASURED** (`scripts/rig/probe-exit-flush.js`, claude 2.1.251, 2026-08-31), invoked
+`--arms ABC --dwell 20000` — **neither is the default** (`--arms AB`, `--dwell 0`), so the
+control arm is off unless you ask for it and a rerun that omits these does not reproduce
+the table. Three arms, each a real PTY spawned production-shaped, gated on the #190
+composer marker, one completed turn, 20s dwell, then ended:
+
+| | A `term.kill()` (today) | B `/exit` awaited | C `process.kill` (control) |
+|---|---|---|---|
+| transcript lines at teardown | +4 | +5 | **0** |
+| `lastGracefulShutdown` | false -> **true** | false -> **true** | stays **false** |
+| `SessionEnd` hook | **fired** | **fired** | not fired |
+| `.claude.json` | 29 project keys | the same 29 | **byte-identical** |
+| time for the agent to go | ~870 ms | ~1030 ms | ~15 ms |
+
+*Two rows are weaker than they look, and knowing which matters if you rerun this.* The
+`29` is a hand tally of key-diff rows — no code path emits a count. And **`byte-identical`
+is printed off an empty KEY diff, not a byte comparison**; the claim happens to be true
+because the tree sha1 corroborates it independently, but the line asserting it could not
+establish it. Likewise `{"display":"/exit"}` was read out of `history.jsonl` directly —
+`diffTrees` prints paths and sizes, with content previews for the transcript alone.
+
+**Arm C is the control that proves the mechanism — and what separates it from A is WHICH
+PROCESS is terminated, not whether one is.** Both arms hard-terminate something: A
+terminates the *shell* (see the correction above), C terminates the ***agent itself***
+(`process.kill(R.claudePid)`, on a pid the probe discovered by walking down from one it
+spawned). A `TerminateProcess`d agent writes none of the four lines, fires no `SessionEnd`
+and leaves `.claude.json` byte-identical — so **the writing is done by the agent's own
+shutdown, not by the teardown ceremony around it**, and that shutdown is reachable
+precisely because A leaves the agent alive to run it. Stated as
+"terminate versus no terminate" — as this section did at first — the control would prove
+nothing, because A terminates too.
+A and B differ by **two artifacts in two different files** — which is one transcript line
+(the table's +4 against +5) plus one `history.jsonl` entry, not "two lines" as this said
+until review noticed it contradicted the table one paragraph above. **Both are caused BY
+typing `/exit`, not preserved by it**: a `file-history-snapshot` with
+`trackedFileBackups:{}` (an empty message boundary for the `/exit` input) and a
+`history.jsonl` entry reading `{"display":"/exit"}` — your own keystroke. The `cost-state` roll-up and the whole `last*` block in `.claude.json`
+(`lastSessionId`, `lastCost`, `lastModelUsage`) — the state the graceful path was expected
+to own — have **the same keys written by the hard kill**. *Keys, not values*: two different
+sessions cannot have equal `lastSessionId` or `lastCost`, so "written identically" — which
+stood here at first — invites a comparison the measurement never made and could not make.
+
+**So #191's `/exit` half is refuted for the session shape measured.** A ceremony that buys
+nothing makes Kill feel broken, and a submit is not reliably one keystroke (one run needed
+a second CR after 8s). The *rename* half is untouched by this and belongs at **naming**
+time, not at kill time, so Kill stays instant. Read limit 4 below before treating the
+refutation as reaching a fully-loaded session — it does not.
+
+**Limits, stated rather than glossed — and the last one is the one that could reopen this.**
+
+1. **It is a property of the ConPTY-close path, not of Windows.** node-pty's other branch
+   `process.kill`s the whole **console process list**, which contains the agent, so such a
+   deployment behaves like arm C and loses all four lines — not on this fleet, and
+   unmeasured.
+2. **Killing MID-TURN was never measured.** Every arm killed an idle session after a
+   completed turn.
+3. **The evidence is Claude-only; the decision is fleet-wide.** Kill stays instant for
+   Codex sessions and plain shells too, and neither was measured. Same convention as
+   `readiness` and `submit.bracketAbove`: Claude's behaviour is not evidence about Codex
+   in either direction.
+4. **THE MEASURED SESSION WAS MINIMAL, AND THAT IS THE GAP THAT MATTERS.** No MCP servers,
+   no plugins, no statusLine, `autoCompactEnabled: false`. A real session on this fleet
+   runs several MCP servers — and **MCP teardown is the most plausible concrete form of
+   the report's "work Claude is doing" at exit**, which is the thing `/exit` was proposed
+   to protect. *This probe could not have seen it.* So the refutation is sound for the
+   session shape it measured and does **not** reach a fully-loaded one. Anyone reopening
+   #191 should start here: add MCP servers to the isolated config and rerun the same three
+   arms, rather than re-arguing the ConPTY mechanism, which is now settled.
+
+**A fifth limit, added when the mechanism was corrected.** *Which* event makes the agent
+exit is **not** measured. Two candidates arrive microseconds apart inside one native call —
+its console closes, and its parent dies — so "orphaned by the closing pseudoconsole" is
+inference from arm C plus the process tree (`TerminateProcess` spares descendants), not a
+captured sequence. What IS earned is the weaker and sufficient claim: **the agent is left
+alive and runs its ordinary shutdown.**
+
+Two readings are closed rather than left open. The flush cannot pre-date the kill: the
+BEFORE snapshot is taken *after* the dwell and *before* the end-action, so anything written
+earlier is already in the baseline and the +4 is measured strictly across the teardown. And
+it cannot be the terminate itself, on two independent grounds — the terminate targets bash,
+and arm C shows that terminating the agent writes nothing.
+
+> **The isolating experiment is CHEAP, and this limit first claimed the opposite.** It said
+> a fourth arm "would need … the native call directly, which node-pty's API does not
+> expose". Wrong, and review answered it in one line: `process.kill(shellPid)` alone, with
+> no `term.kill()` — the same shape as arm C — kills the parent without closing the
+> console and separates the two causes. So the arm is **unrun, not impossible**. Recorded
+> because it is the same error as the one being corrected on the line above: *a claim about
+> what cannot be done, made without checking.*
+
+Nothing in this repo depends on telling the two apart — either way the agent flushes and
+`/exit` adds nothing — which is why the arm is named here rather than run.
+
+> **A liveness check on a pid you failed to find PASSES.** The probe locates the agent
+> process by NAME under the shell it spawned, so an install running it under a shim (an
+> npm wrapper is `node.exe`) leaves the pid null — and `alive(null)` is false, so every
+> wait loop exits on its first test. Arm A's wait, which exists to prove the hard kill
+> reaches the agent, would report *"agent died 0ms after it"* having checked nothing; arm
+> B's await would return instantly and let `term.kill()` fire straight after, so **B
+> silently degenerates into A** — the exact #191 trap the probe was written to avoid,
+> reproduced by the probe. Both failures print a plausible table and no error. It now
+> aborts instead. Same lesson as the Codex TOML probe below: **a setup failure must abort,
+> never be folded into a verdict.** (The recorded runs above were not affected — a null
+> pid yields ~0ms in both arms, and they measured ~870ms and ~1030ms.)
+>
+> **A probe that spawns `claude` from inside a Claude Code session must scrub `CLAUDE*`
+> from the child env.** The first four runs wrote **no transcript at all**, in both arms,
+> because the probe inherited `CLAUDE_CODE_CHILD_SESSION=1`, `CLAUDE_CODE_SESSION_ID`,
+> `CLAUDECODE=1` and `CLAUDE_CODE_MESSAGING_SOCKET` (a named pipe into the PARENT) — **a
+> nested child session persists nothing**, so the measurement reads as "unmeasurable" when
+> it is really "not isolated". Sibling of the `CODEX_HOME` rule under Codex above.
+>
+> *The inventory is measured; the CAUSE is inferred.* All four names were confirmed present
+> in a real session's environment, and scrubbing them fixed it — but the probe scrubs three
+> whole prefixes unconditionally with no flag to disable, so it can say neither **which**
+> variable mattered nor that "a nested child session persists nothing" is the mechanism.
+> Scrub all of them anyway; just do not cite this as evidence for the mechanism.
+>
+> **A guard must hash the file the ACTOR CAN WRITE.** Copying `.credentials.json` into the
+> isolated `CLAUDE_CONFIG_DIR` is the probe's one break in isolation, and the safety net
+> described for it — *"re-checks the original file's hash afterwards and SHOUTS if it
+> moved"* — hashed `~/.claude/.credentials.json`. **The child runs with
+> `CLAUDE_CONFIG_DIR` pointed elsewhere and never opens that file**, so it is unchanged by
+> construction and the check printed `unchanged: true` in precisely the scenario it existed
+> to catch. The file that shows a rotation is the **copy** — which was being shredded a few
+> lines earlier, destroying the evidence unread on every normal run. What actually makes a
+> refresh impossible is the `--min-token-life` refusal; the hash check was a second line of
+> defence that was never in the line of fire. It now hashes each copy at creation and
+> compares just before the shred, and the original is checked separately for the different
+> thing it does show (the HOST refreshing mid-run). **Generalises past credentials: name
+> the writer before choosing what to watch** — the same error as asserting on the screen
+> when the rollout is ground truth.
+
 ## Input & Submit Contract (issue #55) — this is law, not guidance
 
 The sentence *"Enter doesn't run it"* has described at least four **different** bugs in different layers. A change to input or submit is correct only if it satisfies the rules below, and each rule has a test that fails without it. Full spec: issue #55.
