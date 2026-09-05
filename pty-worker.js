@@ -2036,7 +2036,10 @@ function handleHook(session, event, claudeSessionId, prompt, agentId, opts) {
       // same build, both armed for the SAME reset instant 08:51:00 (2026-09-04): the
       // session that was prompted after arming produced no log line of any kind at
       // 08:51; the session that was not fired at 08:51:00.020 and started a turn 236 ms
-      // later. One variable.
+      // later. Not the ONLY difference between them - A also saw a held Notification and
+      // a stale correction in that window - but the only one that can REACH the timer:
+      // correctStaleStatus never cancels a resume, and the 08-31 control carried both
+      // after arming and fired anyway.
       //
       // The signal is not "is the user back" but WHAT THEY ASKED FOR, which is why
       // this is one event and not the whole block. Esc says STOP (noteInterrupt, and

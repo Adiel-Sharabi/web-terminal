@@ -233,7 +233,8 @@ test.describe('#69 — 5h usage-limit auto-resume', () => {
   // THAT WAS STILL CAPPED — which is exactly what reached a user. Measured as a pair
   // inside ONE worker process, both armed for the SAME reset instant: the session
   // prompted after arming produced no log line at all when that instant came; the
-  // session that was not fired 20 ms into it. One variable.
+  // session that was not fired 20 ms into it. Not their only difference, but the only one
+  // that can reach the timer.
   //
   // A submitted prompt proves the user is PRESENT, not that the quota returned. While
   // the account is capped that prompt cannot run — so cancelling on it defeats the

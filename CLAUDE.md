@@ -1271,7 +1271,7 @@ turn, so nothing about readiness, the selector or the byte shape is implicated.
 > restored. The claim was contradicted by a fact already in hand: the worker PID's
 > start time *was* that restart, read as "the worker is fresh" and then forgotten one
 > paragraph later. Found in review. **The replacement is stronger, not a retreat** —
-> same process, same build, same reset instant, one variable — which is the lesson:
+> same process, same build, same reset instant, one difference that can reach the timer — which is the lesson:
 > when a controlled comparison turns out to be confounded, look for the better
 > comparison in the same data before defending the first one.
 
@@ -1362,8 +1362,8 @@ vacuously — the same trap as #221's dead assertion, reached from the other sid
 
 **Noted, unfixed:** `usage-limit:` appears **zero** times in the whole worker log across
 three real cap events, so #138's PTY detector that answers the cap selector with *stop
-and wait* has never matched in production. Not blocking — the session-B control (and the
-three 2026-08-31 fires) shows the session recovers at the reset without it — so it is a separate measurement question, not
+and wait* has never matched in production. Not blocking — the session-B control (and
+the three 2026-08-31 fires) shows the session recovers at the reset without it — so it is a separate measurement question, not
 a guess to fold in here.
 
 ## AskUserQuestion — the LAYOUT decides what the keys mean (#19)
