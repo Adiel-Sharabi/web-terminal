@@ -2032,9 +2032,11 @@ function handleHook(session, event, claudeSessionId, prompt, agentId, opts) {
       // the cancel above threw away the rescue for a session that still needed it,
       // and nothing re-armed: armAutoResumeTimer is re-entered only on a CHANGED
       // setFiveHResetAt push, and server.js de-dupes on exactly the three fields that
-      // did not change. Measured on a live cap: armed 19:17, one retry 19:27, and the
-      // 21:51 fire produced no log line of any kind - the same three sessions had
-      // resumed correctly three days earlier with no retry in the window.
+      // did not change. Measured against a controlled pair inside ONE worker process,
+      // same build, both armed for the SAME reset instant 08:51:00 (2026-09-04): the
+      // session that was prompted after arming produced no log line of any kind at
+      // 08:51; the session that was not fired at 08:51:00.020 and started a turn 236 ms
+      // later. One variable.
       //
       // The signal is not "is the user back" but WHAT THEY ASKED FOR, which is why
       // this is one event and not the whole block. Esc says STOP (noteInterrupt, and

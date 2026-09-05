@@ -230,10 +230,10 @@ test.describe('#69 — 5h usage-limit auto-resume', () => {
 
   // #227 — THE FIELD FAILURE. This test used to assert the opposite, and the helper
   // above defaults capBlocked to true, so it pinned the cancel winning FOR A SESSION
-  // THAT WAS STILL CAPPED — which is exactly what reached a user: armed 19:17, one
-  // retry 19:27, and the 21:51 fire produced no log line of any kind. The same three
-  // sessions had resumed correctly three days earlier, and the only variable that
-  // differed across the two windows was the retry.
+  // THAT WAS STILL CAPPED — which is exactly what reached a user. Measured as a pair
+  // inside ONE worker process, both armed for the SAME reset instant: the session
+  // prompted after arming produced no log line at all when that instant came; the
+  // session that was not fired 20 ms into it. One variable.
   //
   // A submitted prompt proves the user is PRESENT, not that the quota returned. While
   // the account is capped that prompt cannot run — so cancelling on it defeats the

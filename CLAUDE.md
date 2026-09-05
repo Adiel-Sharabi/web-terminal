@@ -1280,8 +1280,9 @@ turn, so nothing about readiness, the selector or the byte shape is implicated.
 rather than declined. Two returns in `fireAutoResume` are nevertheless SILENT
 (`if (!s) return` and the `autoResumeOnResetEnabled() || fiveHResetAt !== resetAt`
 re-check), so the inference needs them excluded rather than ignored: the session was
-alive and hooking hours later, and the feature fired for session B under the same
-config minutes afterwards. **Push-time cancels are silent too** (`armAutoResumeTimer`
+alive and hooking hours later, and session B fired **at the same instant** — both
+timers were armed for 08:51:00.000 and B went out 20 ms into it, a window no config flip
+fits inside. **Push-time cancels are silent too** (`armAutoResumeTimer`
 returns early without logging, and `setFiveHResetAt` pushes are not logged at all), so
 "the only variable was the retry" rests on the log **plus** the reported badge still
 reading `resumes` — a `capBlocked:false` or `enabled:false` push would have changed it
@@ -1361,8 +1362,8 @@ vacuously — the same trap as #221's dead assertion, reached from the other sid
 
 **Noted, unfixed:** `usage-limit:` appears **zero** times in the whole worker log across
 three real cap events, so #138's PTY detector that answers the cap selector with *stop
-and wait* has never matched in production. Not blocking — the Aug-31 control shows the
-session recovers at the reset without it — so it is a separate measurement question, not
+and wait* has never matched in production. Not blocking — the session-B control (and the
+three 2026-08-31 fires) shows the session recovers at the reset without it — so it is a separate measurement question, not
 a guess to fold in here.
 
 ## AskUserQuestion — the LAYOUT decides what the keys mean (#19)
