@@ -1252,8 +1252,8 @@ Two defects, one event, and the second is why the first ran unnoticed for a nigh
 Reported as *"I saw a few with auto resume label but they didn't resume."*
 
 **The evidence is a controlled pair inside ONE worker process** — two sessions, the same
-build, and the **same reset minute**, differing only in whether a prompt was submitted
-after the timer armed:
+build, and the **same reset minute**, differing — in the only way that can reach the
+timer — in whether a prompt was submitted after it armed:
 
 | 2026-09-04, reset 08:51:00 | armed | retry after arming | at the reset |
 |---|---|---|---|
