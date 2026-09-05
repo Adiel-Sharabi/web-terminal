@@ -1246,6 +1246,126 @@ publishes null and the strip behaves exactly as before #210 there. A screen mark
 Codex is its own separately-measured change — note it would NOT be safe to reuse
 `readiness.composer` for it, because that field also gates submits.
 
+## A resume is REPORTED, never predicted — and a retry is not a rescue (#227)
+
+Two defects, one event, and the second is why the first ran unnoticed for a night.
+Reported as *"I saw a few with auto resume label but they didn't resume."*
+
+**The evidence is a controlled pair inside ONE worker process** — two sessions, the same
+build, and the **same reset minute**, differing — in the only way that can reach the
+timer — in whether a prompt was submitted after it armed:
+
+| 2026-09-04, reset 08:51:00 | armed | retry after arming | at the reset |
+|---|---|---|---|
+| session A | 07:35:07 | **yes**, 07:46:13 | **no log line of any kind** |
+| session B | 08:20:05 | **no** | **fired 08:51:00.020**, `idle -> working` 236 ms later |
+
+Session B is the control: it proves the write reaches the composer and starts a real
+turn, so nothing about readiness, the selector or the byte shape is implicated.
+
+> **The first version of this section used a WEAKER pair and asserted something false
+> about it** — 2026-08-31 against 2026-09-03, described as "same worker process, no
+> restart across either window". There *was* a restart between them (07:39:17 on
+> 09-03, the #213 deploy, which touched `pty-worker.js`), so those two windows ran
+> different builds, and one of the "same three sessions" had exited and was not
+> restored. The claim was contradicted by a fact already in hand: the worker PID's
+> start time *was* that restart, read as "the worker is fresh" and then forgotten one
+> paragraph later. Found in review. **The replacement is stronger, not a retreat** —
+> same process, same build, same reset instant, one difference that can reach the timer — which is the lesson:
+> when a controlled comparison turns out to be confounded, look for the better
+> comparison in the same data before defending the first one.
+
+**Fire-time refusals log a reason** — `no longer cap-blocked`, `is working`,
+`still starting` — which is what makes total silence mean the timer was **destroyed**
+rather than declined. Two returns in `fireAutoResume` are nevertheless SILENT
+(`if (!s) return` and the `autoResumeOnResetEnabled() || fiveHResetAt !== resetAt`
+re-check), so the inference needs them excluded rather than ignored: the session was
+alive and hooking hours later, and session B fired **at the same instant** — both
+timers were armed for 08:51:00.000 and B went out 20 ms into it, a window no config flip
+fits inside. **Push-time cancels are silent too** (`armAutoResumeTimer`
+returns early without logging, and `setFiveHResetAt` pushes are not logged at all), so
+"the only variable was the retry" rests on the log **plus** the reported badge still
+reading `resumes` — a `capBlocked:false` or `enabled:false` push would have changed it
+to nothing or to `on hold`.
+
+**Defect 1 — "the user is back" is not "the block is over."** `UserPromptSubmit`
+cancelled the armed resume. A submitted prompt proves the user is PRESENT; it proves
+nothing about the quota, and while capped that prompt cannot run. Nothing re-armed:
+`armAutoResumeTimer` is re-entered only on a **changed** `setFiveHResetAt` (or on
+restore, or on the PTY cap detector — neither of which was going to happen here), and
+`_pushResetState` de-dupes on exactly the three fields that had not changed. **So the
+feature was defeated by the most natural human response to the thing it exists to fix.**
+
+The signal is not *is the user back* but **what they asked for**, which is why the fix
+is one event wide and the rest of the block is untouched: **Esc says STOP** (and only
+fires from `working`, so a turn really was running), **a tool event says WORK IS
+RUNNING** (which genuinely proves the cap is not in force), **only a prompt says GO**.
+The re-arm sits deliberately *after* `clearObservedCapBlock` and rides
+`session.capBlocked` alone — the server's live, self-expiring metrics reading — so
+#138's rule that a sighting must not outlive its window is untouched, and it never
+resurrects an observation the user has just answered.
+
+**Defect 2 — `armed` was a PREDICTION of the worker's decision, evaluated against a
+subset of the worker's gates.** It could not see the one-shot, the worker's own
+`capBlocked`/`limitPromptAt`, or a hook having cancelled the timer — so both clients
+went on rendering `resumes 21:51` from the 19:27 cancel until that moment passed, with
+nothing scheduled for any of it. (That interval is derived from the cancel and the
+promised time; what is *measured* is that no timer existed.) The worker had
+published the truth since #138 (`autoResumeArmed: !!s._autoResumeTimer`) and **no
+production code read it** — `server.js` had zero hits. (The worker's own tests did read
+it, six times; an earlier draft of this section said "one grep hit repo-wide", which was
+a scoped grep over the production files reported as if it had covered the repo.) It is now the answer whenever the worker gives
+one, with **ABSENT kept apart from FALSE** so a cluster peer merely behind falls back to
+the derivation rather than going dark.
+
+> **Sharing a MODULE is not sharing an ANSWER.** The comment above the call site read
+> *"one server-side derivation, shared with the worker's arming gate, so the badge can
+> never claim something the timer disagrees with"* — and it was false the whole time.
+> Both sides imported `lib/usage-limit.js` and then evaluated it against **different
+> state**. SSOT is satisfied by one *owner of the fact*, not by one *copy of the rule*:
+> where a fact is a live decision some process already made, the honest wire field is
+> that process's report, and re-deriving it beside the authority is how the two came
+> apart silently. Same shape as #179 — *do not predict whether the PTY accepted a
+> submit; write it and check that it landed.*
+
+**A test pinned the broken behaviour** rather than catching it — the spec's helper
+defaults `capBlocked = true`, so *"a new UserPromptSubmit cancels the pending continue"*
+asserted the cancel winning for a session that was still capped, i.e. the field failure
+exactly. Corrected, not deleted. (Its Esc sibling reads the same way at a glance and is
+**not** the same case: Esc's cancel is still right, so exactly one test changed.) **And the correction must not be made by flipping
+`capBlocked` to false**: nothing arms at all in that case, so the test would pass
+vacuously — the same trap as #221's dead assertion, reached from the other side.
+
+> **What the re-arm TRADES AWAY, found in review and named rather than discovered
+> later.** `clampPct` **rounds**, so a window at a real 99.5% arrives as exactly 100 and
+> `isCapBlocked` is true while the account is still answering. Before this change, any
+> prompt after arming disarmed the timer for good — so a prompt that actually RAN could
+> never be followed by an unwanted `continue`. Now a question-and-answer turn with no
+> tool call re-arms on its `UserPromptSubmit`, `Stop` does not cancel, and if the status
+> line still rounds to 100 at reset+60s, `continue` is typed into a session whose last
+> prompt was already answered — the exact harm #138's header exists to prevent. The only
+> remaining guard is the `status === 'working'` check at fire time.
+>
+> The log offers a discriminator for a follow-up, and it is worth writing down because
+> it is not obvious: **a cap-REFUSED prompt ends in a Notification-only idle with no
+> `Stop`; a prompt that RAN ends in `Stop`.** Three samples, unmeasured beyond that — so
+> it is a lead, not a rule, and gating the re-arm on it needs its own measurement.
+
+> **One gap the fix does not close, named rather than glossed.** A retry leaves the
+> session `working`, and `fireAutoResume` consumes the one-shot *before* its
+> `status === 'working'` check — so a session still marked working at the reset burns
+> the window and skips. Pre-existing (#138 chose "consumed whether or not we act"), and
+> narrow in practice: the measured session fell back to idle 62 s after the retry
+> against a 2.5-hour wait, and `correctStaleStatus` rescues a stale `working` after five
+> minutes. It is a real edge, not a hypothetical, and it belongs to the
+> one-shot's ordering rather than to this fix.
+
+**Noted, unfixed:** `usage-limit:` appears **zero** times in the whole worker log across
+three real cap events, so #138's PTY detector that answers the cap selector with *stop
+and wait* has never matched in production. Not blocking — the session-B control (and
+the three 2026-08-31 fires) shows the session recovers at the reset without it — so it is a separate measurement question, not
+a guess to fold in here.
+
 ## AskUserQuestion — the LAYOUT decides what the keys mean (#19)
 
 Answering Claude's question overlay drives its real TUI selector by writing keys
