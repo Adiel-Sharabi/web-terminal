@@ -83,6 +83,7 @@ test.describe('#227 — the badge REPORTS the timer, it does not predict it', ()
     } finally {
       await ctx.delete(`/api/sessions/${id}`);
       await ctx.dispose();
+      try { fs.rmSync(cwd, { recursive: true, force: true }); } catch { /* best effort */ }
     }
   });
 });

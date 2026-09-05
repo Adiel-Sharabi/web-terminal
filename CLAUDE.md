@@ -1251,23 +1251,47 @@ Codex is its own separately-measured change — note it would NOT be safe to reu
 Two defects, one event, and the second is why the first ran unnoticed for a night.
 Reported as *"I saw a few with auto resume label but they didn't resume."*
 
-**The evidence is a controlled pair, not an inference.** Same box, same worker build,
-same three sessions, no restart across either window:
+**The evidence is a controlled pair inside ONE worker process** — two sessions, the same
+build, and the **same reset minute**, differing only in whether a prompt was submitted
+after the timer armed:
 
-| | armed | retries in the window | at the reset |
+| 2026-09-04, reset 08:51:00 | armed | retry after arming | at the reset |
 |---|---|---|---|
-| **2026-08-31** | 3 sessions | **0** | all 3 `sent continue`, each followed within 300 ms by `idle -> working` |
-| **2026-09-03** | 1 session, for 21:51 | **1**, at 19:27 | **no log line of any kind** |
+| session A | 07:35:07 | **yes**, 07:46:13 | **no log line of any kind** |
+| session B | 08:20:05 | **no** | **fired 08:51:00.020**, `idle -> working` 236 ms later |
 
-The Aug-31 row is the control: it proves the write reaches the composer and starts a
-real turn, so nothing about readiness, the selector or the byte shape is implicated.
-And **every fire-time refusal logs its reason** (`no longer cap-blocked`, `is working`,
-`still starting`) — so silence means the timer was **destroyed**, not declined.
+Session B is the control: it proves the write reaches the composer and starts a real
+turn, so nothing about readiness, the selector or the byte shape is implicated.
+
+> **The first version of this section used a WEAKER pair and asserted something false
+> about it** — 2026-08-31 against 2026-09-03, described as "same worker process, no
+> restart across either window". There *was* a restart between them (07:39:17 on
+> 09-03, the #213 deploy, which touched `pty-worker.js`), so those two windows ran
+> different builds, and one of the "same three sessions" had exited and was not
+> restored. The claim was contradicted by a fact already in hand: the worker PID's
+> start time *was* that restart, read as "the worker is fresh" and then forgotten one
+> paragraph later. Found in review. **The replacement is stronger, not a retreat** —
+> same process, same build, same reset instant, one variable — which is the lesson:
+> when a controlled comparison turns out to be confounded, look for the better
+> comparison in the same data before defending the first one.
+
+**Fire-time refusals log a reason** — `no longer cap-blocked`, `is working`,
+`still starting` — which is what makes total silence mean the timer was **destroyed**
+rather than declined. Two returns in `fireAutoResume` are nevertheless SILENT
+(`if (!s) return` and the `autoResumeOnResetEnabled() || fiveHResetAt !== resetAt`
+re-check), so the inference needs them excluded rather than ignored: the session was
+alive and hooking hours later, and the feature fired for session B under the same
+config minutes afterwards. **Push-time cancels are silent too** (`armAutoResumeTimer`
+returns early without logging, and `setFiveHResetAt` pushes are not logged at all), so
+"the only variable was the retry" rests on the log **plus** the reported badge still
+reading `resumes` — a `capBlocked:false` or `enabled:false` push would have changed it
+to nothing or to `on hold`.
 
 **Defect 1 — "the user is back" is not "the block is over."** `UserPromptSubmit`
 cancelled the armed resume. A submitted prompt proves the user is PRESENT; it proves
 nothing about the quota, and while capped that prompt cannot run. Nothing re-armed:
-`armAutoResumeTimer` is re-entered only on a **changed** `setFiveHResetAt`, and
+`armAutoResumeTimer` is re-entered only on a **changed** `setFiveHResetAt` (or on
+restore, or on the PTY cap detector — neither of which was going to happen here), and
 `_pushResetState` de-dupes on exactly the three fields that had not changed. **So the
 feature was defeated by the most natural human response to the thing it exists to fix.**
 
@@ -1286,8 +1310,10 @@ subset of the worker's gates.** It could not see the one-shot, the worker's own
 went on rendering `resumes 21:51` from the 19:27 cancel until that moment passed, with
 nothing scheduled for any of it. (That interval is derived from the cancel and the
 promised time; what is *measured* is that no timer existed.) The worker had
-published the truth since #138 (`autoResumeArmed: !!s._autoResumeTimer`) and **one grep
-hit repo-wide was its own definition.** It is now the answer whenever the worker gives
+published the truth since #138 (`autoResumeArmed: !!s._autoResumeTimer`) and **no
+production code read it** — `server.js` had zero hits. (The worker's own tests did read
+it, six times; an earlier draft of this section said "one grep hit repo-wide", which was
+a scoped grep over the production files reported as if it had covered the repo.) It is now the answer whenever the worker gives
 one, with **ABSENT kept apart from FALSE** so a cluster peer merely behind falls back to
 the derivation rather than going dark.
 
@@ -1309,13 +1335,28 @@ exactly. Corrected, not deleted. (Its Esc sibling reads the same way at a glance
 `capBlocked` to false**: nothing arms at all in that case, so the test would pass
 vacuously — the same trap as #221's dead assertion, reached from the other side.
 
+> **What the re-arm TRADES AWAY, found in review and named rather than discovered
+> later.** `clampPct` **rounds**, so a window at a real 99.5% arrives as exactly 100 and
+> `isCapBlocked` is true while the account is still answering. Before this change, any
+> prompt after arming disarmed the timer for good — so a prompt that actually RAN could
+> never be followed by an unwanted `continue`. Now a question-and-answer turn with no
+> tool call re-arms on its `UserPromptSubmit`, `Stop` does not cancel, and if the status
+> line still rounds to 100 at reset+60s, `continue` is typed into a session whose last
+> prompt was already answered — the exact harm #138's header exists to prevent. The only
+> remaining guard is the `status === 'working'` check at fire time.
+>
+> The log offers a discriminator for a follow-up, and it is worth writing down because
+> it is not obvious: **a cap-REFUSED prompt ends in a Notification-only idle with no
+> `Stop`; a prompt that RAN ends in `Stop`.** Three samples, unmeasured beyond that — so
+> it is a lead, not a rule, and gating the re-arm on it needs its own measurement.
+
 > **One gap the fix does not close, named rather than glossed.** A retry leaves the
 > session `working`, and `fireAutoResume` consumes the one-shot *before* its
 > `status === 'working'` check — so a session still marked working at the reset burns
 > the window and skips. Pre-existing (#138 chose "consumed whether or not we act"), and
-> narrow in practice: the measured session fell back to idle within a minute of the
-> retry against a 2.5-hour wait, and `correctStaleStatus` rescues a stale `working`
-> after five minutes. It is a real edge, not a hypothetical, and it belongs to the
+> narrow in practice: the measured session fell back to idle 62 s after the retry
+> against a 2.5-hour wait, and `correctStaleStatus` rescues a stale `working` after five
+> minutes. It is a real edge, not a hypothetical, and it belongs to the
 > one-shot's ordering rather than to this fix.
 
 **Noted, unfixed:** `usage-limit:` appears **zero** times in the whole worker log across

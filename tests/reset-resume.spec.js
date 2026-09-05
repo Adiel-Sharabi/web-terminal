@@ -284,8 +284,14 @@ test.describe('#69 — 5h usage-limit auto-resume', () => {
   // with a UserPromptSubmit hook (seen in production 300ms after every successful
   // resume) — which now lands on the re-arm path. The one-shot is what closes it:
   // fireAutoResume consumes autoResumeFiredForResetAt BEFORE it writes, so the hook that
-  // its own write provokes finds the window already spent and arms nothing. Worth a test
-  // because the guard is an ordering three functions away from the line that relies on it.
+  // its own write provokes finds the window already spent and arms nothing.
+  //
+  // WHAT THIS TEST DOES AND DOES NOT PIN, because the distinction was a review finding:
+  // it is a behavioural guard against a loop, NOT a pin on the one-shot ordering. Delete
+  // the one-shot line and this still passes — the re-arm fires on the next tick while
+  // that same hook has just set the session `working`, so the fire-time `working` guard
+  // refuses it instead. The loop is closed twice over, which is why no ordering claim
+  // belongs here.
   test('#227 — a resume cannot re-arm on its OWN continue: one continue, not a loop', async () => {
     const pipe = workerPipePath();
     const dataDir = makeTempDataDir();

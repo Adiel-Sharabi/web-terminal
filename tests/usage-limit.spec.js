@@ -76,8 +76,8 @@ test.describe('#137 — usageLimitState (what the session list publishes)', () =
 
   // #227 — `armed` is the WORKER's answer whenever the worker gave one. The badge
   // used to re-derive it from a subset of the worker's gates, so a timer cancelled by
-  // a hook left both clients rendering "resumes 21:51" for four hours with nothing
-  // scheduled. These four cases are the whole contract: the boolean wins in BOTH
+  // a hook left both clients rendering "resumes 21:51" for the 2h23m to that moment,
+  // with nothing scheduled. These cases are the whole contract: the boolean wins in BOTH
   // directions, and absent is not false.
   test('#227 — the worker saying NOT armed beats a derivation that says armed', () => {
     const args = {
