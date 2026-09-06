@@ -19,10 +19,50 @@ const { BASE, authCtx, loginPage } = require('./test-helpers');
 
 /** Navigate straight to a session and wait for the header to confirm we're attached
  *  to IT — `sessionId` is set synchronously inside switchSession() before #sessionName
- *  is painted, so this is a safe proxy for "the module-local sessionId now equals id". */
+ *  is painted, so this is a safe proxy for "the module-local sessionId now equals id".
+ *
+ *  #221 — AND THE DRAWER MUST BE CLOSED FIRST, or a click here is a coin toss. At this
+ *  file's phone width `#sidebar.open` is `width: 100vw` with `transition: width .2s`,
+ *  and `init()` opens it on load whenever `sessionStorage.sidebarOpen !== '0'` — which
+ *  is ALWAYS, because every Playwright context starts with an empty sessionStorage.
+ *  Navigating straight to `/app/:id` never closes it again (`closeSidebarIfUnpinned`
+ *  runs on the session-TAP path, not on URL resolution), so the settled state is a
+ *  full-screen drawer over the notice this spec clicks.
+ *
+ *  Measured: the sidebar is 225px wide at the anchor and 390px from ~100ms on, and
+ *  `elementFromPoint` over #composeNoticeDismiss returns the button during the
+ *  transition and `#sidebarBody` after it. So the dismiss test PASSED ONLY BY WINNING
+ *  A 200ms ANIMATION RACE — green on an idle box, and a 30s
+ *  `#sidebarBody … intercepts pointer events` timeout right after a full suite.
+ *
+ *  Fixed the way `mobile-new-session-dialog.spec.js` already does it: seed the flag
+ *  BEFORE the page loads so `init()` never opens the drawer at all. Forcing it shut
+ *  afterwards would race that same toggle. The closed drawer is also the state a user
+ *  looking at a session is actually in.
+ *
+ *  It is asserted, not assumed — a silently-ignored seed would put the coin toss back
+ *  with nothing to notice it.
+ *
+ *  THE GUARD IS A SELECTOR, NOT A REGEX, and that is a scar. It was first written as
+ *  `.not.toHaveClass(/\bopen\b/)` and committed carrying two RAW U+0008 BACKSPACE
+ *  bytes where the escape belonged, so the compiled regex was /<BS>open<BS>/ — which
+ *  matches no class attribute that can exist. The negated assertion therefore passed
+ *  unconditionally, against a fully-open drawer, while these very lines claimed it
+ *  could not. It survived a diff (which rendered it `/open/`), an editor (which
+ *  rendered it correctly), a green suite, green CI and two readers.
+ *
+ *  `#sidebar.open` + `toHaveCount(0)` says the same thing with nothing to normalise:
+ *  ASCII-only, still a retrying web-first assertion, and it cannot be silently
+ *  corrupted. `tests/control-bytes.spec.js` is the gate that stops the next one. */
 async function openSession(page, id, name) {
+  await page.addInitScript(() => {
+    try { sessionStorage.setItem('sidebarOpen', '0'); } catch { /* private mode */ }
+  });
   await page.goto(BASE + '/app/' + id);
   await expect(page.locator('#sessionName')).toContainText(name, { timeout: 10000 });
+  await expect(page.locator('#sidebar.open'),
+    'the phone-width drawer is 100vw and covers everything this spec clicks (#221)')
+    .toHaveCount(0);
 }
 
 test.describe('#179 submit-unconfirmed notice (web client)', () => {
