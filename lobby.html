@@ -220,7 +220,10 @@
     let openInNewTab = true;
 
     function navigateToSession(id) {
-      const url = '/s/' + id;
+      // #218 review: /s/:id is retired and only 302s here now. This was the one
+      // live link still going through it - point it at the real client directly
+      // rather than paying a redirect hop on every session open.
+      const url = '/app/' + id;
       if (openInNewTab) {
         window.open(url, '_blank');
       } else {
