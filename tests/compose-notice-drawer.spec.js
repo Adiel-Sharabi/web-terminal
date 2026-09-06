@@ -124,7 +124,12 @@ test.describe('#222 a notice buried by the phone drawer is signalled on the hamb
         await reveal(page, id);
         await expect(page.locator('#sidebarToggleBtn.has-notice')).toHaveCount(1);
 
-        await page.evaluate(() => toggleSidebar());
+        // `window.` prefixed on purpose: `toggleSidebar` is a top-level function
+        // declaration in app.html's classic script, so it IS `window.toggleSidebar` —
+        // but eslint lints this file as Node and a bare reference is `no-undef`, which
+        // is an ERROR in both CI workflows. (Reading it off `window` is safe; it is
+        // ASSIGNING `window.f = () => f()` that is the infinite-recursion trap.)
+        await page.evaluate(() => window.toggleSidebar());
         await expect(page.locator('#sidebar.open')).toHaveCount(0);
         await settleSidebar(page);
         await expect(page.locator('#sidebarToggleBtn.has-notice')).toHaveCount(0);
@@ -150,14 +155,14 @@ test.describe('#222 a notice buried by the phone drawer is signalled on the hamb
       try {
         await openSessionSettled(page, id, name, true);
         await reveal(page, id);
-        await page.evaluate(() => toggleSidebar());          // close: notice revealed
+        await page.evaluate(() => window.toggleSidebar());          // close: notice revealed
         await settleSidebar(page);
         await page.locator('#composeNoticeDismiss').click(); // and answered
         await expect(page.locator('#composeNotice')).toBeHidden();
 
         // Reopening must NOT re-raise a signal for something already dealt with — a dot
         // that outlives its notice teaches the user to ignore the dot.
-        await page.evaluate(() => toggleSidebar());
+        await page.evaluate(() => window.toggleSidebar());
         await expect(page.locator('#sidebar.open')).toHaveCount(1);
         await settleSidebar(page);
         await expect(page.locator('#sidebarToggleBtn.has-notice')).toHaveCount(0);
