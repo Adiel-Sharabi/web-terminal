@@ -541,13 +541,36 @@ String buildPastedPaths(List<String> paths) {
 /// One paste with newline separators fixes both, keeps the single-frame
 /// guarantee (#44), and needs no client-side timing — the worker still owns the
 /// submit CR.
-String buildAttachmentSubmission(List<String> paths, String text) {
-  final parts = <String>[
-    ...paths,
-    if (text.isNotEmpty) text,
-  ];
-  return buildComposeSubmission(parts.join('\n'), forcePaste: paths.isNotEmpty);
-}
+String buildAttachmentSubmission(List<String> paths, String text) =>
+    buildComposeSubmission(attachmentSubmissionText(paths, text),
+        forcePaste: paths.isNotEmpty);
+
+/// #216 — THE SAME SUBMIT, AS TYPED TEXT: what the agent receives and what the
+/// server republishes as a turn's `typedText`, without the bracketed-paste wrapper
+/// or the submit CR.
+///
+/// It exists so the optimistic "Queued" echo (#31) and the bytes on the wire cannot
+/// disagree about what was sent. They did: `_sendCompose` registered the echo with
+/// the COMPOSE TEXT ALONE while this builder puts `paths + text` on the wire, so
+/// `echoMatchesTurns` compared "Attach the official guide…" against
+/// "…08UE230_JET_OSDP_Description_1.docx Attach the official guide…", never matched,
+/// and left a muted `Queued` bubble beside the real turn — permanently, because #149
+/// deliberately holds the echo timeout off while the agent is mid-turn, which is
+/// exactly when a queued prompt is visible. Reported 2026-09-03: two `You` bubbles
+/// for one send.
+///
+/// ONE OWNER, not a smarter matcher. A `startsWith`/suffix rule in
+/// `echoMatchesTurns` would be a second copy of this composition rule living in
+/// another file, and it would drift — which is #149's own lesson arriving one layer
+/// further out. `normEcho` collapses whitespace runs, so the `\n` separators here
+/// and in the agent's turn normalise to the same string.
+///
+/// The ORDER is the wire order and belongs to THIS shape only — paths first, then
+/// the prompt. The live '/'-line's order is the other way round and has its own
+/// function ([liveAttachmentSubmissionText]) for that reason, rather than a flag on
+/// this one.
+String attachmentSubmissionText(List<String> paths, String text) =>
+    <String>[...paths, if (text.isNotEmpty) text].join('\n');
 
 /// The exact bytes that commit a LIVE '/'-line carrying staged attachments (#110).
 ///
@@ -572,6 +595,20 @@ String buildLiveAttachmentSubmission(List<String> paths) {
   if (paths.isEmpty) return '\r';
   return buildComposeSubmission(['', ...paths].join('\n'), forcePaste: true);
 }
+
+/// #216 — what a live '/'-line submit leaves in the agent's prompt, as typed text.
+///
+/// The mirror of [attachmentSubmissionText] for the one submit whose body is
+/// already in the prompt: [command] streamed there character by character as the
+/// user typed, and [buildLiveAttachmentSubmission] then appends the paths — so the
+/// agent's turn reads `/cmd` THEN the paths, the opposite order to every other
+/// compose submit. Registering the echo as the command alone left the same orphaned
+/// `Queued` bubble whenever a '/'-line carried an attachment.
+///
+/// With no attachments this is just the command, which is what the echo has always
+/// been — so the no-attachment case is byte-for-byte unchanged.
+String liveAttachmentSubmissionText(String command, List<String> paths) =>
+    <String>[command, ...paths].join('\n');
 
 /// What a live '/'-line mirrors into the agent's TUI prompt (#55 §1).
 ///
@@ -2655,10 +2692,14 @@ class _SessionScreenState extends State<SessionScreen>
     if (_composeLive) {
       // #110 — the text is already in the prompt, but any staged attachments are
       // NOT: they only ever travelled in the paste this branch used to skip.
-      if (val.isNotEmpty) _submittedPrompts.add(val);
-      conn.sendInput(buildLiveAttachmentSubmission(
-        [for (final a in _attachments) a.path],
-      ));
+      final livePaths = [for (final a in _attachments) a.path];
+      // #216 — the echo is registered with the SAME string this submit leaves in
+      // the agent's prompt, not with the compose text alone. With attachments the
+      // two differ, and the mismatch left a permanent orphaned `Queued` bubble.
+      if (val.isNotEmpty) {
+        _submittedPrompts.add(liveAttachmentSubmissionText(val, livePaths));
+      }
+      conn.sendInput(buildLiveAttachmentSubmission(livePaths));
       _pushComposeHistory(val);
       // #131 — sent, so a TUI-only command keeps the Terminal lens it needs.
       _clearComposeInput(sent: true);
@@ -2674,20 +2715,27 @@ class _SessionScreenState extends State<SessionScreen>
     // Optimistic Chat echo (#31): show the prompt immediately, before Claude's
     // transcript reflects it. Reconciled/deduped in ConversationView. Skipped for
     // an image-only send (empty text) — the echo path ignores empty strings.
+    final paths = [for (final a in _attachments) a.path];
     if (val.isNotEmpty) {
-      _submittedPrompts.add(val);
+      // #216 — registered with what the submit actually puts on the wire as typed
+      // text, which with attachments is `paths + val`, not `val`. Registering `val`
+      // meant the echo could never match the real turn and the muted `Queued`
+      // bubble stayed beside it for good.
+      _submittedPrompts.add(attachmentSubmissionText(paths, val));
       // #179 — this client's own copy of what it just sent, kept for a
       // possible restore; overwrites whatever was pending before, so it
       // always names the LAST real prompt this compose bar submitted.
+      //
+      // DELIBERATELY THE TYPED TEXT ONLY, unlike the echo above: this one is
+      // restored INTO THE COMPOSE BOX if the submit goes unconfirmed, and the
+      // attachments are staged separately. Handing back a box pre-filled with
+      // file paths the user never typed would be a worse recovery than none.
       _rememberSubmittedPrompt(val);
     }
     // #29/#90: every staged path AND the prompt travel in ONE bracketed paste.
     // The byte rule lives in buildAttachmentSubmission — see its doc for the two
     // measured defects that one-frame-per-attachment produced.
-    conn.sendInput(buildAttachmentSubmission(
-      [for (final a in _attachments) a.path],
-      val,
-    ));
+    conn.sendInput(buildAttachmentSubmission(paths, val));
     _pushComposeHistory(val);
     _clearComposeInput();
     // #131 — an ordinary prompt means the user is done reading whatever TUI
