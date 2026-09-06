@@ -448,6 +448,36 @@
       background: #2e2617; color: #f0d69a; border-top: 1px solid #6b5520;
     }
     #composeNotice[hidden] { display: none; }
+    /* #222 - AND AT PHONE WIDTH THE DRAWER PAINTS OVER IT. `#sidebar.open` is
+       `position:fixed; z-index:50; width:100vw` while #composeNotice is a body-level
+       flex child in normal flow with no z-index, so an open drawer covers the notice
+       AND the compose bar below it. Measured at 390x844: `elementFromPoint` over
+       #composeNoticeDismiss returns `sidebarBody`, and a real click times out.
+       The notice is NOT lost - it is never auto-hidden, and closing the drawer reveals
+       it intact and makes the dismiss clickable (measured, same run). So the defect is
+       silent DELIVERY, not invisibility, and the fix only has to supply the signal.
+       This dot is that signal. The toolbar is already `z-index:100`, above the drawer,
+       so it needs no new stacking and moves nothing.
+       Why not float the notice above the drawer instead: its own sentence says the
+       words are "back" in the compose box and to "check the terminal" - both of which
+       the drawer also hides. Raising the bar alone would point the user at things that
+       are not on screen, and its dismiss would delete the only trace of the event
+       before they could act on it. Notice and box are seen together or not at all;
+       while the drawer hides both, point at the way back. */
+    #sidebarToggleBtn { position: relative; }
+    #sidebarToggleBtn.has-notice::after {
+      /* -1px, not the -3px this first had. The button is 28px inside a 32px toolbar
+         pinned to `top: 0`, so a dot hung 3px proud of it starts at y=-1.5 and the
+         VIEWPORT clips its top edge - the toolbar itself is `overflow: visible`, so
+         nothing in the CSS says so and it is invisible in a unit test. Measured on a
+         390x844 viewport; at -1px the dot spans y 0.5-10.5 and is wholly on screen,
+         still overlapping the corner enough to read as a badge rather than a bullet. */
+      content: ''; position: absolute; top: -1px; right: -1px;
+      width: 8px; height: 8px; border-radius: 50%;
+      /* The notice's own amber, so the dot and the bar read as one thing. Caution,
+         not alarm - the same call #179 made for the bar itself. */
+      background: #f0d69a; border: 1px solid #1a1a2e;
+    }
     #composeNotice span { flex: 1; }
     #composeNoticeDismiss {
       background: none; border: 0; color: #f0d69a; font-size: 18px;
@@ -510,7 +540,7 @@
     <div style="color:#888; font-size:10px;">samples: <span id="rttN">0</span></div>
   </div>
   <div id="toolbar">
-    <button class="tb-btn" onclick="toggleSidebar()" title="Sessions panel">&#9776;</button>
+    <button id="sidebarToggleBtn" class="tb-btn" onclick="toggleSidebar()" title="Sessions panel">&#9776;</button>
     <span id="sessionName" class="session-name" onclick="renameCurrentSession()" title="Click to rename">(no session)</span>
     <span id="hostName" style="color:#00d4aa; font-weight:500; margin-left:8px;"></span>
     <!-- #180: favorite THIS session without going back to the sidebar to find its row.
@@ -2001,13 +2031,46 @@
         : 'That prompt never reached the agent. Check the terminal — it may be showing a menu or a full-screen view.';
       box.hidden = false;
       doResize();
+      updateComposeNoticeBadge();
     }
     function hideSubmitUnconfirmed() {
       const box = document.getElementById('composeNotice');
       if (!box || box.hidden) return;
       box.hidden = true;
       doResize();
+      updateComposeNoticeBadge();
     }
+
+    // #222 — the one owner of "is a notice currently buried under the drawer, and does
+    // the user need telling". Every path that can change either half calls this; nobody
+    // sets `has-notice` directly.
+    //
+    // THE OVERLAY TEST IS ASKED OF THE ELEMENT, NOT RE-DERIVED. `#sidebar` is only
+    // `position: fixed` inside the `@media (max-width: 600px)` block — above that
+    // breakpoint it is a column in normal flow that covers nothing, so there is nothing
+    // to signal. Reading the computed style means the breakpoint stays defined once, in
+    // the CSS. A JS copy of `600` would be a second definition of the same fact, and
+    // `isMobile` is the wrong question anyway: it ORs in a UA check, so a phone-UA
+    // browser at desktop width would badge a notice nothing is covering (#55's rule —
+    // visibility is not the same question as platform).
+    function updateComposeNoticeBadge() {
+      const btn = document.getElementById('sidebarToggleBtn');
+      const box = document.getElementById('composeNotice');
+      const sb = document.getElementById('sidebar');
+      if (!btn || !box || !sb) return;
+      const buried = !box.hidden
+        && sb.classList.contains('open')
+        && getComputedStyle(sb).position === 'fixed';
+      btn.classList.toggle('has-notice', buried);
+      // One job: say why the dot is there and what to do about it. The panel is a
+      // toggle, so the instruction is what closing it gets you, not what the dot is.
+      btn.title = buried
+        ? 'Sessions panel — close it to read a message about your last send'
+        : 'Sessions panel';
+    }
+    // A rotation or a window resize can move the drawer between overlay and column
+    // without anything else on the page changing, so the badge has to follow it.
+    window.addEventListener('resize', updateComposeNoticeBadge);
 
     // #193 — the server's per-frame WS input cap (server.js `WS_INPUT_MAX`; 64KB when
     // this was written, 256KB since #201 paired it with the companion's offline buffer
@@ -2050,6 +2113,7 @@
       }
       box.hidden = false;
       doResize();
+      updateComposeNoticeBadge();
     }
 
     // #179 — the last thing this browser submitted, kept only until the worker either
@@ -3121,12 +3185,17 @@
 
     function toggleSidebar() {
       const sb = document.getElementById('sidebar');
-      const btn = document.querySelector('.tb-btn');
+      // #222: by id, not "the first .tb-btn on the page" - the badge rule below
+      // targets this same button, and two ways of naming one element is the drift
+      // this repo keeps paying for.
+      const btn = document.getElementById('sidebarToggleBtn');
       sb.classList.toggle('open');
       btn.classList.toggle('active');
       const isOpen = sb.classList.contains('open');
       if (isOpen) loadSidebar();
       sessionStorage.setItem('sidebarOpen', isOpen ? '1' : '0');
+      // #222 - opening the drawer can bury a notice, closing it can reveal one.
+      updateComposeNoticeBadge();
       // Resize terminal after sidebar transition (skip on mobile — sidebar overlays)
       if (!isMobile) {
         sb.addEventListener('transitionend', function onEnd() {
