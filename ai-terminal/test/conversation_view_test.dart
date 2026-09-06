@@ -14,6 +14,8 @@ import 'package:url_launcher_platform_interface/url_launcher_platform_interface.
 import 'package:ai_terminal/api/agent_catalog.dart';
 import 'package:ai_terminal/api/api_client.dart';
 import 'package:ai_terminal/api/models.dart';
+import 'package:ai_terminal/screens/session_screen.dart'
+    show attachmentSubmissionText, liveAttachmentSubmissionText;
 import 'package:ai_terminal/services/session_repository.dart';
 import 'package:ai_terminal/theme/app_theme.dart';
 import 'package:ai_terminal/widgets/conversation_view.dart';
@@ -534,8 +536,8 @@ void main() {
         messages: [
           TranscriptTurn(role: 'assistant', text: 'Delegating.', ts: null,
               toolUses: [
-                makeTask('t1', 'Explore', running: false),
-                makeTask('t2', 'general-purpose', running: false),
+                makeTask('t1', 'Explore', running: true),
+                makeTask('t2', 'general-purpose', running: true),
               ]),
         ],
         cursor: null,
@@ -569,7 +571,7 @@ void main() {
       final page = TranscriptPage(
         messages: [
           TranscriptTurn(role: 'assistant', text: 'Delegating.', ts: null,
-              toolUses: [makeTask('tu_task1', 'Explore', running: false)]),
+              toolUses: [makeTask('tu_task1', 'Explore', running: true)]),
         ],
         cursor: null,
         hasMore: false,
@@ -616,7 +618,7 @@ void main() {
       final page = TranscriptPage(
         messages: [
           TranscriptTurn(role: 'assistant', text: 'Delegating.', ts: null,
-              toolUses: [makeTask('tu_task1', 'Explore', running: false)]),
+              toolUses: [makeTask('tu_task1', 'Explore', running: true)]),
         ],
         cursor: null,
         hasMore: false,
@@ -648,6 +650,107 @@ void main() {
 
       expect(sent, 'run the tests again'); // routed to the session, not a fake channel
       expect(find.byType(TextField), findsNothing); // sheet closed after sending
+    });
+
+    // #212 — the pin was unconditional, so every subagent a session ever spawned
+    // stayed in a 42px full-width header for the rest of that session. Reported with
+    // six chips pinned, every one already complete. The strip now pins what is
+    // RUNNING; a finished subagent keeps its inline card in the transcript, which is
+    // the same drill-in at the place the work happened.
+    group('#212: the strip pins RUNNING subagents, not every one ever spawned', () {
+      test('pinnedSubagents keeps only the running ones, in order', () {
+        final all = [
+          makeTask('t1', 'Explore', running: false),
+          makeTask('t2', 'general-purpose', running: true),
+          makeTask('t3', 'search', running: false),
+          makeTask('t4', 'build', running: true),
+        ];
+        expect(pinnedSubagents(all).map((t) => t.id).toList(), ['t2', 't4']);
+        // The reported case: nothing running, so nothing to pin.
+        expect(pinnedSubagents([makeTask('t1', 'Explore', running: false)]), isEmpty);
+        // And the guard against the opposite error — a strip that hides live work.
+        expect(pinnedSubagents([makeTask('t1', 'Explore', running: true)]).length, 1);
+      });
+
+      testWidgets('a session whose subagents have ALL finished holds no strip',
+          (tester) async {
+        final page = TranscriptPage(
+          messages: [
+            TranscriptTurn(role: 'assistant', text: 'Delegated, and done.', ts: null,
+                toolUses: [
+                  makeTask('t1', 'Explore', running: false),
+                  makeTask('t2', 'general-purpose', running: false),
+                ]),
+          ],
+          cursor: null,
+          hasMore: false,
+        );
+        await tester.pumpWidget(_wrap(ConversationView(
+          session: _session(),
+          fetchPage: (id, {before, limit}) async => page,
+          fetchSubagent: (toolUseId, {before, limit}) async => const SubagentPage(
+              agentType: '', description: '', running: false,
+              messages: [], cursor: null, hasMore: false),
+        )));
+        await tester.pumpAndSettle();
+
+        // No CHIPS. Asserted on the chip label rather than on the icon, because the
+        // inline cards below carry that icon too — and they are supposed to.
+        expect(find.text('do Explore'), findsNothing);
+        expect(find.text('do general-purpose'), findsNothing);
+        // ...and no 42px header row, which is the cost the report was about.
+        expect(
+          find.byWidgetPredicate((w) => w is Container && w.constraints?.maxHeight == 42),
+          findsNothing,
+        );
+        // THE REACHABILITY HALF, and the reason this is a filter and not a delete:
+        // both finished subagents still render their inline card in the transcript,
+        // so the drill-in #62 protected is preserved, one scroll away.
+        expect(find.byIcon(Icons.account_tree_outlined), findsWidgets);
+      });
+
+      testWidgets('a mix pins only the running one', (tester) async {
+        final page = TranscriptPage(
+          messages: [
+            TranscriptTurn(role: 'assistant', text: 'Delegating.', ts: null,
+                toolUses: [
+                  makeTask('t1', 'Explore', running: false),
+                  makeTask('t2', 'general-purpose', running: true),
+                ]),
+          ],
+          cursor: null,
+          hasMore: false,
+        );
+        await tester.pumpWidget(_wrap(ConversationView(
+          session: _session(),
+          fetchPage: (id, {before, limit}) async => page,
+          fetchSubagent: (toolUseId, {before, limit}) async => const SubagentPage(
+              agentType: '', description: '', running: false,
+              messages: [], cursor: null, hasMore: false),
+        )));
+        await tester.pumpAndSettle();
+        expect(find.text('do general-purpose'), findsOneWidget); // running: pinned
+        expect(find.text('do Explore'), findsNothing);           // finished: not
+      });
+
+      test('collision numbering counts the RENDERED set, not the full one', () {
+        // The trap named in #212: filtering changes the sibling set a label is
+        // disambiguated against. Three same-named subagents of which one still runs
+        // must produce a bare label, not "do Explore 2" numbered against ghosts.
+        final all = [
+          makeTask('t1', 'Explore', running: false),
+          makeTask('t2', 'Explore', running: true),
+          makeTask('t3', 'Explore', running: false),
+        ];
+        expect(subagentChipLabels(pinnedSubagents(all)), ['do Explore']);
+        // Two running siblings still collide, and are still numbered.
+        final two = [
+          makeTask('t1', 'Explore', running: true),
+          makeTask('t2', 'Explore', running: false),
+          makeTask('t3', 'Explore', running: true),
+        ];
+        expect(subagentChipLabels(pinnedSubagents(two)), ['do Explore 1', 'do Explore 2']);
+      });
     });
   });
 
@@ -3119,4 +3222,116 @@ void main() {
       expect(find.textContaining('NEWEST_BODY_0'), findsOneWidget);
     },
   );
+
+  // #216 — the SAME failure as #149, one layer further out: there it was the TURN's
+  // text that was not the value to compare against, here it is the ECHO's.
+  //
+  // Reported 2026-09-03 from the Windows desktop build: a file was dropped onto a
+  // session and a prompt typed, and chat showed TWO `You` bubbles for one send — the
+  // real turn carrying `<path> <prompt>`, and a muted `Queued` one carrying only the
+  // prompt. The echo was registered with the compose text while the wire carried
+  // `paths + text`, so the keys never matched; and #149's timeout is deliberately
+  // held off while the agent is mid-turn, which is exactly when a queued prompt is
+  // on screen, so nothing else cleared it either.
+  //
+  // Fixed at the SEND, not in the matcher: `attachmentSubmissionText` is now the one
+  // owner of "what did this submit put on the wire as typed text", and the compose
+  // bar registers the echo with it. A startsWith/suffix rule here would be a second
+  // copy of that composition rule in another file.
+  testWidgets(
+    '#216: an attachment submit leaves ONE bubble — the echo carries the path too',
+    (tester) async {
+      final prompts = StreamController<String>.broadcast();
+      addTearDown(prompts.close);
+      const path = r'C:\drop\guide.docx';
+      const typed = 'Attach the official guide how to use OVSP.';
+      var calls = 0;
+      Future<TranscriptPage> fetch(String id, {String? before, int? limit}) async {
+        calls++;
+        if (calls == 1) {
+          return const TranscriptPage(
+            messages: [TranscriptTurn(role: 'assistant', text: 'hi', toolUses: [], ts: null)],
+            cursor: null,
+            hasMore: false,
+          );
+        }
+        // What the agent really writes for an attachment submit: the pasted path,
+        // a newline, the prompt — plus the harness's stapled-on reminder block.
+        return const TranscriptPage(
+          messages: [
+            TranscriptTurn(role: 'assistant', text: 'hi', toolUses: [], ts: null),
+            TranscriptTurn(
+              role: 'user',
+              text: '$path\n$typed\n<system-reminder>\ninjected\n</system-reminder>',
+              typedText: '$path\n$typed',
+              toolUses: [],
+              ts: null,
+            ),
+          ],
+          cursor: null,
+          hasMore: false,
+        );
+      }
+
+      Session sess(int lastActivity) => Session(
+            id: 'sess-1',
+            name: 'proj',
+            cwd: '/x',
+            status: 'idle',
+            claudeSessionId: 'claude-1',
+            lastActivity: lastActivity,
+            notifyLevel: 'important',
+            server: _server(),
+            autoCommand: '',
+          );
+      Widget build(Session s) => _wrap(
+            ConversationView(
+              key: const ValueKey('cv'),
+              session: s,
+              fetchPage: fetch,
+              submittedPrompts: prompts.stream,
+            ),
+          );
+
+      await tester.pumpWidget(build(sess(1000)));
+      await tester.pumpAndSettle();
+
+      // Exactly what `_sendCompose` now pushes onto the stream. Registering `typed`
+      // alone here is the pre-fix behaviour and leaves the second bubble below.
+      prompts.add(attachmentSubmissionText(const [path], typed));
+      await tester.pumpAndSettle();
+      expect(find.text('Queued'), findsOneWidget);
+
+      await tester.pumpWidget(build(sess(2000)));
+      await tester.pumpAndSettle();
+
+      expect(find.text('Queued'), findsNothing,
+          reason: 'the real turn landed, so the optimistic echo must be gone');
+      expect(find.textContaining(typed), findsOneWidget,
+          reason: 'ONE bubble — the reported defect was two, the real turn plus a '
+              'permanently stuck Queued echo');
+    },
+  );
+
+  // The matcher half, stated directly so the reason the widget test above passes is
+  // pinned rather than incidental. This is also the assertion that is RED against the
+  // old echo shape, which is what makes it a regression test rather than a
+  // description of current behaviour.
+  test('#216: the compose text ALONE never matches an attachment turn', () {
+    TranscriptTurn userTurn(String text, {String? typedText}) => TranscriptTurn(
+        role: 'user', text: text, typedText: typedText, toolUses: const [], ts: null);
+    const path = '/tmp/a.docx';
+    const typed = 'describe it';
+    final turn = userTurn('$path\n$typed\n<system-reminder>x</system-reminder>',
+        typedText: '$path\n$typed');
+    // What the echo used to be — no match, hence the orphaned bubble.
+    expect(echoMatchesTurns(typed, [turn]), isFalse);
+    // What it is now.
+    expect(echoMatchesTurns(attachmentSubmissionText(const [path], typed), [turn]), isTrue);
+    // And a live '/'-line's other order matches its own turn shape.
+    final liveTurn = userTurn('/issues\n$path', typedText: '/issues\n$path');
+    expect(echoMatchesTurns('/issues', [liveTurn]), isFalse);
+    expect(echoMatchesTurns(liveAttachmentSubmissionText('/issues', const [path]), [liveTurn]),
+        isTrue);
+  });
 }

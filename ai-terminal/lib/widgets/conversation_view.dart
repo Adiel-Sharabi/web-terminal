@@ -90,6 +90,46 @@ List<ToolUse> collectSubagents(List<TranscriptTurn> turns) {
   return out;
 }
 
+/// #212 — which of [collectSubagents]'s list the strip actually PINS: the ones
+/// still running, and nothing else.
+///
+/// #62 pinned subagents so they stay reachable however far the conversation has
+/// scrolled, and the pin was unconditional — so every subagent a session ever
+/// spawned stayed in a 42px full-width header for the rest of that session, and a
+/// busy session's strip ends up 100% finished work. Reported from real use with six
+/// chips pinned, every one of them already complete: *"a session that opened
+/// subagents and already finished with them — they still on top."* A 7px dot was the
+/// only thing separating "three agents are working right now" from "nine finished an
+/// hour ago", while the row cost phone-height chat space permanently.
+///
+/// Same shape as #210's tail strip, which showed the FURNITURE: a strip that is
+/// always on is least informative in exactly the state it spends most of its time in.
+/// The strip appearing now MEANS something is running.
+///
+/// A FINISHED SUBAGENT IS NOT DELETED FROM THE UI — it keeps its inline
+/// [_SubagentCard] in the transcript, which is the same drill-in, at the place the
+/// work actually happened. What it loses is the shortcut, and the shortcut is what
+/// #62 was for: you want to check on an agent that is working NOW; one that finished
+/// is something you go looking for deliberately, and scrolling to it is fine.
+///
+/// LABELS FOLLOW THE RENDERED SET, not the full one, because filtering changes the
+/// sibling set a collision is disambiguated against — [subagentChipLabels] is applied
+/// by the strip to whatever it is handed, so passing the filtered list is what keeps
+/// "Explore 1 / Explore 2" numbering honest instead of numbering against ghosts.
+///
+/// KNOWN, AND DELIBERATELY THE SAFE DIRECTION. `running` is server-derived as "no
+/// tool_result in this page AND not in the resolved-id set", and that set is built
+/// from the transcript's **last 256KB** (`resolvedIdsTail` in server.js). So a
+/// subagent whose tool_use sits at the end of a loaded history page, whose
+/// tool_result fell on the next page, and which finished more than 256KB from the end
+/// can still report `running: true`. That leaves ONE stale chip pinned — today's
+/// behaviour for that one subagent, which is strictly better than today's behaviour
+/// for all of them. The dangerous direction, a live subagent reading finished and
+/// vanishing, would need a spurious result and cannot arise from a tail that is too
+/// SHORT. PURE.
+List<ToolUse> pinnedSubagents(List<ToolUse> all) =>
+    all.where((t) => t.subagent?.running == true).toList();
+
 /// #88 — whether a turn is MECHANICAL: the agent's step-by-step work rather than
 /// anything it said. True only for an assistant turn that carries no prose at
 /// all, just tool calls.
@@ -1016,7 +1056,9 @@ class _ConversationViewState extends State<ConversationView> {
       final row = rowIndexByKey![key.value];
       return row == null ? null : row + leadingLoader;
     }
-    final subagents = collectSubagents(_turns);
+    // #212: the strip pins what is RUNNING. `collectSubagents` stays the complete
+    // list — a finished subagent still renders its inline card in the transcript.
+    final subagents = pinnedSubagents(collectSubagents(_turns));
     // #74: the badges live in the session's meta bar now (so a terminal-lens
     // session gets them too); publish the estimate only this lens can compute.
     _publishDerivedCtx();
@@ -1030,7 +1072,10 @@ class _ConversationViewState extends State<ConversationView> {
         if (widget.session.isWaitingOnUser)
           WaitingBanner(kind: widget.session.waitingFor!),
         // #62: the session's subagents pinned above the transcript so they stay
-        // reachable no matter how far it scrolls. Hidden when there are none.
+        // reachable no matter how far it scrolls. Hidden when there are none —
+        // and, since #212, when none of them is still RUNNING: an always-on strip
+        // is least informative in the state it spends most of its time in, and a
+        // finished subagent is still one scroll away on its own tool card.
         if (subagents.isNotEmpty)
           _SubagentStrip(tools: subagents, onOpen: _openSubagentSheet),
         // #73: the agent's task list, pinned above the transcript for the same
@@ -2691,7 +2736,10 @@ List<String> subagentChipLabels(List<ToolUse> tools) {
 class _SubagentStrip extends StatelessWidget {
   const _SubagentStrip({required this.tools, required this.onOpen});
 
-  /// Agent tool_uses, each with `subagent != null` (see [collectSubagents]).
+  /// Agent tool_uses, each with `subagent != null` — and, since #212, each still
+  /// RUNNING (see [pinnedSubagents], which the caller applies). The filtering is the
+  /// caller's on purpose: [subagentChipLabels] below disambiguates a chip against its
+  /// SIBLINGS, so it has to see exactly the set being rendered and no more.
   final List<ToolUse> tools;
   final void Function(ToolUse) onOpen;
 
