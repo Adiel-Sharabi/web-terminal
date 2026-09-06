@@ -74,6 +74,50 @@ test.describe('#137 — usageLimitState (what the session list publishes)', () =
     expect(st.resumeAt).toBe(SOON + 60000);
   });
 
+  // #227 — `armed` is the WORKER's answer whenever the worker gave one. The badge
+  // used to re-derive it from a subset of the worker's gates, so a timer cancelled by
+  // a hook left both clients rendering "resumes 21:51" for the 2h23m to that moment,
+  // with nothing scheduled. These cases are the whole contract: the boolean wins in BOTH
+  // directions, and absent is not false.
+  test('#227 — the worker saying NOT armed beats a derivation that says armed', () => {
+    const args = {
+      metrics: { fiveH: 100, fiveHResetAt: SOON }, enabled: true, delayMs: 60000, now: NOW,
+    };
+    // The exact shape of the field failure: everything the server can see says a
+    // resume is scheduled, and the process holding the timer says it is not.
+    expect(u.usageLimitState(args).armed).toBe(true); // the derivation, unaided
+    const st = u.usageLimitState({ ...args, armedByWorker: false });
+    expect(st.armed).toBe(false);
+    // ...and the session is still HELD. Reporting the timer honestly must not erase
+    // the block itself, or the row would go blank on a session that is still capped.
+    expect(st.waiting).toBe(true);
+    expect(st.resumeAt).toBe(SOON + 60000);
+  });
+
+  test('#227 — the worker saying ARMED beats a derivation that says not armed', () => {
+    // The worker checks `enabled` and the agent's capability itself, so its answer is
+    // taken whole rather than re-ANDed with this file's copies of the same gates —
+    // re-deriving beside the authority is how the two came apart to begin with.
+    const st = u.usageLimitState({
+      metrics: { fiveH: 100, fiveHResetAt: SOON }, enabled: true, delayMs: 60000, now: NOW,
+      canArm: false, armedByWorker: true,
+    });
+    expect(st.armed).toBe(true);
+  });
+
+  test('#227 — ABSENT is not false: an older worker falls back to the derivation', () => {
+    // A cluster peer merely behind must not have its badge switched off. Both spellings
+    // of "said nothing" are tested, because `undefined` is what a missing field yields
+    // and `null` is what a JSON round-trip of an absent value can become.
+    for (const v of [undefined, null]) {
+      const st = u.usageLimitState({
+        metrics: { fiveH: 100, fiveHResetAt: SOON }, enabled: true, delayMs: 60000, now: NOW,
+        armedByWorker: /** @type {any} */ (v),
+      });
+      expect(st.armed).toBe(true);
+    }
+  });
+
   test('capped with NO reset time is waiting but NOT armed — no timer can exist', () => {
     // The cap prompt can be observed before any resets_at is read. Reporting armed
     // here would have the badge promise a resume the worker cannot schedule.

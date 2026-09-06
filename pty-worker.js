@@ -2023,9 +2023,40 @@ function handleHook(session, event, claudeSessionId, prompt, agentId, opts) {
       clearCompacting(session, 'resumed');
       // #69 — same signal: the user (or a retry) is back, so a pending 5h-reset
       // auto-resume for this session is now stale. Does not consume the window —
-      // see cancelAutoResume.
+      // see cancelAutoResume. (#227 narrowed what "stale" means here; read on.)
       cancelAutoResume(session);
       clearObservedCapBlock(session); // #138 - and so is a cap prompt seen earlier
+      // #227 - ...BUT BEING BACK IS NOT BEING UNBLOCKED, and that distinction is the
+      // whole bug. A submitted prompt proves the user is PRESENT; it proves nothing
+      // about the quota, and while the account is capped that prompt cannot run. So
+      // the cancel above threw away the rescue for a session that still needed it,
+      // and nothing re-armed: armAutoResumeTimer is re-entered only on a CHANGED
+      // setFiveHResetAt push, and server.js de-dupes on exactly the three fields that
+      // did not change. Measured against a controlled pair inside ONE worker process,
+      // same build, both armed for the SAME reset instant 08:51:00 (2026-09-04): the
+      // session that was prompted after arming produced no log line of any kind at
+      // 08:51; the session that was not fired at 08:51:00.020 and started a turn 236 ms
+      // later. Not the ONLY difference between them - A also saw a held Notification and
+      // a stale correction in that window - but the only one that can REACH the timer:
+      // correctStaleStatus never cancels a resume, and the 08-31 control carried both
+      // after arming and fired anyway.
+      //
+      // The signal is not "is the user back" but WHAT THEY ASKED FOR, which is why
+      // this is one event and not the whole block. Esc says STOP (noteInterrupt, and
+      // it only fires from `working`, so a turn really was running). A tool event says
+      // WORK IS RUNNING, which genuinely proves the cap is not in force. Only a
+      // prompt says GO - a request the cap is still refusing.
+      //
+      // Deliberately AFTER clearObservedCapBlock, not before: this re-arms on
+      // session.capBlocked alone - the server's live metrics reading, which expires on
+      // its own (lib/usage-limit.js CAP_BLOCK_GRACE_MS) - and never resurrects the
+      // sighting the user has just responded to. #138's rule stands untouched. That is
+      // also exactly what the measured failure needed: `usage-limit:` has never been
+      // logged in production, so the block was known from metrics, not from a sighting.
+      //
+      // A no-op when the block is gone (armAutoResumeTimer returns early on every one
+      // of its gates), so this adds no rule - it stops one being silently discarded.
+      if (event === 'UserPromptSubmit') armAutoResumeTimer(session);
       break;
     case 'SubagentStop': {
       // #61 — the last subagent finishing is what actually ends a turn whose main
