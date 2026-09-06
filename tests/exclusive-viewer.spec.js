@@ -168,10 +168,20 @@ test.describe('Session viewers (#21: shared by default)', () => {
   });
 
   test.afterEach(async ({ request }) => {
-    // Restore the shared default FIRST — an exclusiveViewer left true would kick
-    // viewers in every spec that runs after this file.
-    try { await setExclusiveViewer(request, false); } catch {}
+    // Delete the session first, so a failed restore below cannot leak it.
     try { await request.delete(`${BASE}/api/sessions/${sessionId}`); } catch {}
+    // Restore the shared default — an `exclusiveViewer` left true kicks viewers in
+    // every spec that runs after this file, and those failures land nowhere near the
+    // cause.
+    //
+    // DELIBERATELY NOT SWALLOWED. This used to be `try { ... } catch {}`, which caught
+    // the read-back assertion inside `setExclusiveViewer` as well as any transport
+    // error — so a restore that silently did not take left the flag ON for the rest of
+    // the run with nothing recorded anywhere. That is the same class of defect as the
+    // gate this file's PR is fixing: the failure surfaces somewhere else, wearing
+    // someone else's name. Caught in review. If the restore cannot be made, this file
+    // fails loudly and the run stops here rather than poisoning what follows.
+    await setExclusiveViewer(request, false);
   });
 
   test('default: a second viewer does NOT kick the first (shared PTY)', async ({ browser, request }) => {

@@ -164,7 +164,20 @@ jobs:
             # both sides, so git conflicts. Measured on the same scratch clone,
             # merging the stale branch: "CONFLICT (content): Merge conflict in
             # server.js". GitHub blocks it; nothing is silently overwritten.
-            merge_base=$(git merge-base "$base_ref" HEAD)
+            #
+            # AND IT IS RESOLVED AGAINST head.sha, NOT HEAD — the first cut of this fix
+            # was a COMPLETE NO-OP because of it, and nothing about it looked wrong.
+            # Under `pull_request`, actions/checkout checks out GitHub's MERGE REF, so
+            # HEAD is a merge commit whose FIRST PARENT IS THE BASE TIP (this repo's own
+            # run log: "HEAD is now at 77a1cfe Merge 0b01380 into 743a336"). The base tip
+            # is therefore an ancestor of HEAD, and `git merge-base "$base_ref" HEAD`
+            # returns... the base tip. Measured on a scratch clone with a genuinely stale
+            # branch: via HEAD the baseline was 377891 — byte for byte what the code this
+            # replaced computed — while the true fork point was 377754.
+            # `github.event.pull_request.head.sha` is the branch's own tip, so the merge
+            # base against it is the real fork point. Caught in review, after the change
+            # had shipped a green CI run that proved nothing.
+            merge_base=$(git merge-base "$base_ref" "${{ github.event.pull_request.head.sha }}")
             b_len=$(git show "$merge_base":server.js | awk '/^const SERVER_VERSION = /{print length($0); exit}')
             h_len=$(awk '/^const SERVER_VERSION = /{print length($0); exit}' server.js)
             if [ -z "$merge_base" ]; then

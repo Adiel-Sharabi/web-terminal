@@ -54,23 +54,8 @@ test.describe('#227 — the badge REPORTS the timer, it does not predict it', ()
 
       // Reading the list is what pushes capBlocked to the worker, and the worker arms
       // on its own clock afterwards — so poll rather than assert on the first read.
-      //
-      // #232 — AND THE CEILING IS 15s, NOT 8s. This predicate spans a chain with
-      // several delays the test does not control: the status POST is debounced before
-      // the metrics file is written, reading the list is what pushes `capBlocked` to
-      // the worker, the worker then arms on its own clock over IPC, and `expect.poll`
-      // re-reads only on its own interval. Alone that finishes in well under a second;
-      // inside a 1586-test suite on a box twelve minutes into running Chromium it does
-      // not reliably finish in eight, and the run then fails claiming the CHAIN never
-      // completed — which is not what happened. Observed exactly once in a full suite
-      // (1583 passed / 1 failed) and passing in 4.1s alone immediately afterwards.
-      //
-      // 15s is what the rest of the repo uses for a cross-process wait of this shape
-      // (`exclusive-viewer.spec.js`, for "the count lags the WS handshake by a beat").
-      // The timeout is a CEILING, not a detector: the assertion means the same thing,
-      // and a genuinely broken chain still fails, just later.
       await expect.poll(async () => (await sessionRow(ctx, id)).usageLimit.armed,
-        { timeout: 15000, message: 'the metrics -> push -> worker-arms chain never completed' })
+        { timeout: 8000, message: 'the metrics -> push -> worker-arms chain never completed' })
         .toBe(true);
       expect((await sessionRow(ctx, id)).usageLimit.waiting).toBe(true);
 
@@ -81,9 +66,7 @@ test.describe('#227 — the badge REPORTS the timer, it does not predict it', ()
       await ctx.post(`/api/session/${id}/hook`, { data: { event: 'PreToolUse', session_id: uuid, tool: 'Bash' } });
 
       await expect.poll(async () => (await sessionRow(ctx, id)).usageLimit.armed,
-        // Same ceiling, same reason (#232). This one never fired only because the run
-        // never got past the poll above — it is the identical bet on the identical chain.
-        { timeout: 15000, message: 'the row kept claiming a resume the worker had cancelled' })
+        { timeout: 8000, message: 'the row kept claiming a resume the worker had cancelled' })
         .toBe(false);
       const after = await sessionRow(ctx, id);
       // NB: the row does not republish the worker's raw `autoResumeArmed` — the list is
