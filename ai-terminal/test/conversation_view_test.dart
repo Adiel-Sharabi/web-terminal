@@ -751,6 +751,98 @@ void main() {
         ];
         expect(subagentChipLabels(pinnedSubagents(two)), ['do Explore 1', 'do Explore 2']);
       });
+
+      // THE REVIEW FINDING THAT MATTERED, and it is driven through the REFRESH PATH
+      // rather than asserted on the rule — because the rule was already right and the
+      // refresh was what skipped it. `_refreshLastPage` short-circuits on
+      // `_turnListEquals`, which compared role/text/ts and each tool's
+      // name/inputPreview: none of those move when a subagent finishes. So on a live
+      // session the strip would have gone on pinning finished subagents while every
+      // other test in this group passed. RED without the `subagent?.running`
+      // comparison, because the second page is never adopted.
+      testWidgets('a subagent finishing is picked up by the poll, and unpins it',
+          (tester) async {
+        var calls = 0;
+        Future<TranscriptPage> fetch(String id, {String? before, int? limit}) async {
+          calls++;
+          // Identical in every field the old comparison looked at — same role, text,
+          // ts, tool name and inputPreview. ONLY `running` moves.
+          return TranscriptPage(
+            messages: [
+              TranscriptTurn(role: 'assistant', text: 'Delegating.', ts: null,
+                  toolUses: [makeTask('t1', 'Explore', running: calls < 2)]),
+            ],
+            cursor: null,
+            hasMore: false,
+          );
+        }
+        Session sess(int lastActivity) => Session(
+              id: 'sess-1', name: 'proj', cwd: '/x', status: 'idle',
+              claudeSessionId: 'claude-1', lastActivity: lastActivity,
+              notifyLevel: 'important', server: _server(), autoCommand: '');
+        Widget build(Session s) => _wrap(ConversationView(
+              key: const ValueKey('cv'),
+              session: s,
+              fetchPage: fetch,
+              fetchSubagent: (toolUseId, {before, limit}) async => const SubagentPage(
+                  agentType: '', description: '', running: false,
+                  messages: [], cursor: null, hasMore: false),
+            ));
+
+        await tester.pumpWidget(build(sess(1000)));
+        await tester.pumpAndSettle();
+        expect(find.text('do Explore'), findsOneWidget,
+            reason: 'it is running, so it is pinned');
+
+        // A refresh, exactly as the live poll does one.
+        await tester.pumpWidget(build(sess(2000)));
+        await tester.pumpAndSettle();
+        expect(find.text('do Explore'), findsNothing,
+            reason: 'it finished, so the refresh must adopt that and unpin it');
+      });
+
+      testWidgets(
+          'a finished subagent in a PROSE-LESS turn sits behind the collapsed fold',
+          (tester) async {
+        // The reachability claim's true cost. `isMechanicalTurn` is an assistant turn
+        // with empty text and only tool calls — exactly the common Task-spawn shape —
+        // and `_MechanicalFold` collapses it by default. The other #212 widget tests
+        // use a turn WITH prose, which stays conversational and renders the card
+        // inline, so they cannot see this. Both shapes are covered now.
+        final page = TranscriptPage(
+          messages: [
+            const TranscriptTurn(
+                role: 'user', text: 'go', ts: null, toolUses: []),
+            TranscriptTurn(role: 'assistant', text: '', ts: null, toolUses: [
+              makeTask('t1', 'Explore', running: false),
+            ]),
+          ],
+          cursor: null,
+          hasMore: false,
+        );
+        await tester.pumpWidget(_wrap(ConversationView(
+          session: _session(),
+          fetchPage: (id, {before, limit}) async => page,
+          fetchSubagent: (toolUseId, {before, limit}) async => const SubagentPage(
+              agentType: '', description: '', running: false,
+              messages: [], cursor: null, hasMore: false),
+        )));
+        await tester.pumpAndSettle();
+
+        // No strip: nothing is running.
+        expect(find.text('do Explore'), findsNothing);
+        // And the card is NOT inline — it is behind the fold marker, collapsed.
+        expect(find.byIcon(Icons.account_tree_outlined), findsNothing);
+        final marker = find.textContaining('step');
+        expect(marker, findsWidgets,
+            reason: 'a prose-less tool-only turn folds behind a step marker');
+
+        // Expanding the fold is what reveals it — the real, honest route.
+        await tester.tap(marker.first);
+        await tester.pumpAndSettle();
+        expect(find.byIcon(Icons.account_tree_outlined), findsWidgets,
+            reason: 'the finished subagent is reachable, at the cost of scroll + expand');
+      });
     });
   });
 

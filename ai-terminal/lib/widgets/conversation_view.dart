@@ -106,11 +106,29 @@ List<ToolUse> collectSubagents(List<TranscriptTurn> turns) {
 /// always on is least informative in exactly the state it spends most of its time in.
 /// The strip appearing now MEANS something is running.
 ///
-/// A FINISHED SUBAGENT IS NOT DELETED FROM THE UI — it keeps its inline
-/// [_SubagentCard] in the transcript, which is the same drill-in, at the place the
-/// work actually happened. What it loses is the shortcut, and the shortcut is what
-/// #62 was for: you want to check on an agent that is working NOW; one that finished
-/// is something you go looking for deliberately, and scrolling to it is fine.
+/// A FINISHED SUBAGENT IS NOT DELETED FROM THE UI - it keeps its inline
+/// [_SubagentCard] in the transcript, which is the same drill-in sheet, at the place
+/// the work actually happened. What it loses is the shortcut, and the shortcut is
+/// what #62 was for: you want to check on an agent that is working NOW; one that
+/// finished is something you go looking for deliberately.
+///
+/// BUT "one scroll away" OVERSTATES IT, and the first version of this comment said
+/// exactly that while citing the wrong line for it. The `_SubagentCard` in
+/// `_nestedRows` is the SUBAGENT SHEET's own nested rendering, not the transcript.
+/// The transcript has two shapes and only one of them is inline:
+///
+/// * a turn with prose AND tool calls stays conversational, and the card is inline;
+/// * a turn with NO prose and only tool calls is [isMechanicalTurn], which
+///   `_MechanicalFold` folds behind a "N steps" marker that is COLLAPSED BY DEFAULT
+///   (`_MechanicalFoldState._expanded = false`).
+///
+/// The second shape is the common one for a Task spawn, so for most finished
+/// subagents the real cost is scroll AND EXPAND THE FOLD, not scroll alone. That is
+/// still a route and it is still where the work happened, but it is a bigger price
+/// than the first version of this claimed - and pinning six dead chips forever was
+/// not the way to avoid paying it. Stated at its true cost so a future reader can
+/// weigh it, and the widget tests now cover BOTH shapes rather than only the
+/// flattering one. Caught in review, by checking the claim against the line it cited.
 ///
 /// LABELS FOLLOW THE RENDERED SET, not the full one, because filtering changes the
 /// sibling set a collision is disambiguated against — [subagentChipLabels] is applied
@@ -813,8 +831,27 @@ class _ConversationViewState extends State<ConversationView> {
   }
 
   /// `TranscriptTurn`/`ToolUse` have no `==` override, so the "did the tail
-  /// actually change" check compares the fields that matter (role, text, ts,
-  /// and each tool use's name/inputPreview) by hand.
+  /// actually change" check compares the fields that matter (role, text, ts, and each
+  /// tool use's name/inputPreview and subagent running flag) by hand.
+  ///
+  /// #212 - `subagent?.running` IS one of the fields that matter, and it was not
+  /// compared. That was survivable while `running` only tinted a 7px dot: the dot went
+  /// stale and nobody could tell. It stopped being survivable the moment
+  /// [pinnedSubagents] made `running` decide whether the strip RENDERS AT ALL.
+  ///
+  /// The failure it produced is precise. An assistant turn spawns three `Task`
+  /// tool_uses; as each subagent finishes the server flips `running` false, but the
+  /// turn's role, text, ts and every tool's name and inputPreview are unchanged - so
+  /// this returned true, `_refreshLastPage` early-returned, `_turns` was never
+  /// replaced, and the strip went on pinning subagents that had finished. It would
+  /// self-heal only when the agent happened to emit a NEW turn; if the session went
+  /// idle first, `_shouldLivePoll` stops the poll and the reported symptom persists
+  /// exactly as before the fix. In other words the whole of #212 would have been
+  /// invisible on a live session while passing every widget test. Caught in review.
+  ///
+  /// A tool's RESULT arriving is a comparable gap on this same list - a result landing
+  /// with nothing else changing leaves the card's output stale. That predates #212 and
+  /// is not what the strip reads, so it is named here rather than folded in.
   bool _turnListEquals(List<TranscriptTurn> a, List<TranscriptTurn> b) {
     if (a.length != b.length) return false;
     for (var i = 0; i < a.length; i++) {
@@ -826,7 +863,9 @@ class _ConversationViewState extends State<ConversationView> {
       if (ta.toolUses.length != tb.toolUses.length) return false;
       for (var j = 0; j < ta.toolUses.length; j++) {
         if (ta.toolUses[j].name != tb.toolUses[j].name ||
-            ta.toolUses[j].inputPreview != tb.toolUses[j].inputPreview) {
+            ta.toolUses[j].inputPreview != tb.toolUses[j].inputPreview ||
+            ta.toolUses[j].subagent?.running !=
+                tb.toolUses[j].subagent?.running) {
           return false;
         }
       }
