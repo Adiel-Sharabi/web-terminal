@@ -325,4 +325,75 @@ void main() {
       expect('\r'.allMatches(out).length, 4);
     });
   });
+
+  // #216 — the optimistic "Queued" echo (#31) is registered with the TYPED TEXT of
+  // the submit, and with attachments that is NOT the compose text. Registering the
+  // compose text alone meant `echoMatchesTurns` compared
+  //   "Attach the official guide..."
+  // against the real turn's
+  //   "...OSDP_Description_1.docx Attach the official guide..."
+  // which never matches, so a muted second `You` bubble sat beside the real one for
+  // good — #149 deliberately holds the echo timeout off while the agent is mid-turn,
+  // which is exactly when a queued prompt is on screen.
+  //
+  // These pin the SHAPE the echo is registered with. The reconciliation itself is
+  // pinned in conversation_view_test.dart against a turn carrying that typedText.
+  group('#216 attachmentSubmissionText — the echo and the wire agree', () {
+    test('paths lead, then the prompt — the order the wire uses', () {
+      // ONE literal, used on both sides. Writing the expectation out by hand means
+      // hand-mirroring the escaping, and the first cut of this test got it wrong in
+      // the direction that still compiles: a non-raw '\d' is just 'd' in Dart, so the
+      // expected string was 'C:dropa.docx' and the assertion failed for a reason that
+      // had nothing to do with the code under test. Same family as the raw-control-byte
+      // scar in tests/control-bytes.spec.js - do not retype what you can reference.
+      const p = r'C:\drop\a.docx';
+      expect(attachmentSubmissionText(const [p], 'Attach the guide.'),
+          '$p\nAttach the guide.');
+    });
+
+    test('several attachments all appear, in order', () {
+      expect(
+        attachmentSubmissionText(const ['/tmp/a.png', '/tmp/b.pdf'], 'both please'),
+        '/tmp/a.png\n/tmp/b.pdf\nboth please',
+      );
+    });
+
+    test('no attachments is exactly the typed text — the common case is unchanged', () {
+      expect(attachmentSubmissionText(const [], 'just a prompt'), 'just a prompt');
+    });
+
+    test('an images-only send is the paths alone, with no trailing separator', () {
+      // The compose bar registers NO echo in this case (it gates on non-empty text),
+      // so this only pins that the builder emits no dangling separator that would
+      // make the wire text differ from the turn's.
+      expect(attachmentSubmissionText(const ['/tmp/a.png'], ''), '/tmp/a.png');
+    });
+
+    test('IT IS THE STRING INSIDE THE PASTE — builder and echo cannot drift', () {
+      // The point of the extraction: one owner. If the builder ever composes
+      // differently, this fails rather than silently re-opening #216.
+      const paths = ['/tmp/a.png', '/tmp/b.pdf'];
+      const text = 'describe both';
+      final wire = buildAttachmentSubmission(paths, text);
+      final typed = attachmentSubmissionText(paths, text);
+      // Inside a bracketed paste a newline travels as CR (see _pasteInner).
+      expect(wire, '$pasteOpen${typed.replaceAll('\n', '\r')}$pasteClose\r');
+    });
+  });
+
+  group('#216 liveAttachmentSubmissionText — the OTHER order', () {
+    test('the command leads, because it was already typed into the prompt', () {
+      // A live '/'-line streams char by char as you type and the paths are appended
+      // AFTER it — the opposite order to every other compose submit, which is why
+      // this is its own function rather than a flag on the one above.
+      expect(
+        liveAttachmentSubmissionText('/issues', const ['/tmp/a.png']),
+        '/issues\n/tmp/a.png',
+      );
+    });
+
+    test('no attachments is the bare command — unchanged from before #216', () {
+      expect(liveAttachmentSubmissionText('/issues', const []), '/issues');
+    });
+  });
 }
