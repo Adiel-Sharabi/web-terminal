@@ -60,6 +60,15 @@ async function openSession(page, id, name) {
   });
   await page.goto(BASE + '/app/' + id);
   await expect(page.locator('#sessionName')).toContainText(name, { timeout: 10000 });
+  // THE DRAWER MUST EXIST BEFORE ITS ABSENCE MEANS ANYTHING. `toHaveCount(0)` on
+  // `#sidebar.open` is also satisfied by there being no `#sidebar` at all, so a rename
+  // or a markup change would turn the guard below into a green no-op — the same
+  // vacuity family this spec was fixed for, and the sibling trap this file already
+  // records above (`toBeHidden()` is satisfied by an element that does not exist).
+  // Caught in review of the fix itself.
+  await expect(page.locator('#sidebar'),
+    'no #sidebar at all — the closed-drawer guard below would pass vacuously')
+    .toHaveCount(1);
   await expect(page.locator('#sidebar.open'),
     'the phone-width drawer is 100vw and covers everything this spec clicks (#221)')
     .toHaveCount(0);

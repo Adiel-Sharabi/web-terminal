@@ -111,6 +111,21 @@ test.describe('#221 no stray control bytes in source', () => {
     for (const d of DIRS) walk(path.join(ROOT, d), targets);
     for (const f of FILES) targets.push(path.join(ROOT, f));
 
+    // EVERY NAMED FILE MUST EXIST, asserted rather than assumed. The scan below
+    // swallows a read failure with `catch { continue; }`, which is right for a file
+    // that vanishes mid-walk but wrong for this hand-written list: a renamed or
+    // mistyped entry would simply stop being scanned, and — unlike a DIRS entry, whose
+    // loss shows up as an allowlist entry going stale in the whole-map comparison —
+    // there is nothing left behind to notice. An inventory gate that silently covers
+    // less is the failure this whole file exists to prevent, so it must not have that
+    // shape itself. Caught in review.
+    for (const f of FILES) {
+      expect(fs.existsSync(path.join(ROOT, f)),
+        `control-bytes FILES names "${f}", which does not exist — the scan would skip `
+          + 'it silently. Fix the name, or drop it if the file is genuinely gone.')
+        .toBe(true);
+    }
+
     /** file -> { codepoint -> count } */
     const found = {};
     const lines = [];
