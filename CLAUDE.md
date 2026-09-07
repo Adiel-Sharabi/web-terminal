@@ -1543,6 +1543,85 @@ single-select tabs — the only shape that exercises `Other` on a LAST tab, sinc
 > was red first. **The rule was written down and the code still drifted from it —
 > which is the argument for the test, not for more prose.**
 
+### A live question was erased by the NEXT tool — a SUBAGENT's counted (#236)
+
+The clearing rule beside `pendingQuestion` in `server.js` read *"a different tool
+started → prior question resolved"*. True of a strictly **sequential** single agent;
+false the moment anything runs concurrently beside it — which is the ordinary shape of a
+session that has dispatched a subagent.
+
+**MEASURED** on adiel-Home 2026-09-07 from this repo's own session, reading the main
+transcript and the subagent's (`<session>/subagents/agent-*.jsonl`, `isSidechain`) beside
+`logs/worker.log`:
+
+| | |
+|---|---|
+| 09:48:12.687 | the main agent dispatches a subagent (`Agent`) |
+| 09:48:20.539 | the main agent asks **AskUserQuestion** → `working -> waiting` |
+| **09:48:25.527** | **the SUBAGENT runs `Bash`** → `waiting -> working`, 19 ms later |
+| 09:49:02.107 | the user answers — 37 s of a question nothing was showing |
+
+**Nothing ran in the main transcript in that window**, so the clearing `PreToolUse` was
+provably the subagent's — and a subagent's hooks carry `agent_id` (#61). The log alone
+could not have said that: it names the event, not whose it was.
+
+**The REPORTED incident, on adiel-0ffice twelve minutes earlier, has the same log shape and
+is not proven to be the same cause** — its hook body was never captured, and the question
+sat unanswered there for ten further minutes. What bounds the alternative is measured, on
+adiel-Home: of 923 transcripts, **93 of the 94** assistant messages that issue an
+`AskUserQuestion` issue it **alone**. The one exception is a `[Bash, AskUserQuestion]`
+batch whose `Bash` was emitted at 11:31:41.142 and had **returned** by 11:31:41.334 —
+2.1 s before the question block existed at 11:31:43.453 — so it ran serially and no
+`PreToolUse` of its could follow the question. Office's own `subagents/` directory would
+settle Office outright, and is cheaper than closing the gap below.
+
+> **The first cut of that measurement said "never batched", and it was an artifact of the
+> transcript format.** Claude Code writes **each content block on its own JSONL line**, so
+> grouping by line reports zero batching *everywhere* — and the positive control gives it
+> away at once: grouped by `message.id`, **4,755 of 40,024** tool-using messages are
+> batched. The same case also disproves the reason that was offered with it: a turn is
+> **not** suspended while a tool call is outstanding, since that `Bash` ran while its
+> message was still streaming. What remains unmeasured is a question-FIRST batch
+> (`[AskUserQuestion, X]`, **0 of 94** observed): whether the executor starts `X` before
+> the question resolves is **inferred** from Claude Code's serial handling of tools that
+> are not concurrency-safe, not measured. *Count what the format actually groups, and run
+> the positive control* — the same lesson as the negative-sweep rule.
+
+**Both of the chat lens's signals die together, which is why NOTHING showed.**
+`waitingFor` (#79) needs status `waiting` **and** a captured question, and the overlay's
+`/pending-question` falls back to a transcript that **by design cannot hold an unanswered
+question** (#19). The lone survivor was #194's terminal tail strip — the *backstop* —
+reported as *"no indication, instead a last line small window"*.
+
+**The rule now: only the MAIN agent's next tool resolves a question** — `!agentId` is the
+whole fix, and the discriminator was already free: `agent_id` is read in that same function
+for #61, twenty lines below the branch that needed it. `UserPromptSubmit`, `Stop` and the
+question's own `PostToolUse` stay ungated.
+
+**Gated on the EVENT's agent, not on the question's**, which is the narrower of the two
+rules on offer. *"Only the agent that ASKED it may resolve it"* is more general and would
+generalise a case that has never occurred: **0 of 775** subagent transcripts here contain an
+AskUserQuestion. If one ever does, the only thing that stops resolving it is its **own
+sibling tool calls** — its `PostToolUse` still answers it, and so do the main agent's next
+tool, `UserPromptSubmit` and `Stop`. Only a *lost* `PostToolUse` (a hot reload in the
+window) leaves it standing until the turn's `Stop`: one event later, in the direction that
+SHOWS a question rather than hides one.
+
+**On THIS path the worker needs no matching guard, and that is a decision rather than an
+omission.** Its status is `questionPending ? 'waiting' : 'working'`, so #98's tri-state leaves the
+flag alone, the session stays `waiting`, and it is handed `correctStaleStatus`'s **12h**
+clock instead of the **5-minute** one that had been demoting it to idle while the prompt
+was still on screen.
+
+**A held idle `Notification` is a SECOND path to the same symptom, and it is NOT fixed
+here (#239).** When subagents are live it is parked as `heldStop` *before* that question
+check, and the `SubagentStop` that releases it lands in `applyIdle`, which has no question
+check at all. Found reviewing the fix above, unmeasured in the wild, and worker-side — so
+it needs a cold restart where this one hot-reloads.
+
+**Not #230**, whose *correctly*-set `waiting` is retracted by that same 12h clock — same
+symptom, opposite end of the timescale: this one lasted 6.1 s on Office, 5.0 s on Home.
+
 ## Auth System
 - Cookie-based session auth (primary, for browser users)
 - Bearer token auth (for cluster inter-server communication)

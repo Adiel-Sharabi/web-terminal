@@ -1051,6 +1051,97 @@ test.describe('Session attention', () => {
     }
   });
 
+  // #236 — a SUBAGENT's tool call must not erase the MAIN agent's live question.
+  //
+  // MEASURED on adiel-Home, 2026-09-07, in this repo's own session: the main agent
+  // dispatched a subagent at 09:48:12.687 and asked an AskUserQuestion at
+  // 09:48:20.539, answered 09:49:02.107. Nothing else ran in the main transcript in
+  // that window — but the subagent's (isSidechain, so its hooks carry `agent_id`)
+  // ran Bash at 09:48:25.527, and the worker logged `waiting -> working (PreToolUse)`
+  // 19ms later. So the clearing event was provably a subagent's, and every downstream
+  // signal went dark at once: `waitingFor` null (no banner), pending-question
+  // `{pending:false}` (no overlay), and a `working` status handed to
+  // correctStaleStatus's 5-minute rule, which demoted it to idle while the question
+  // was still on screen. Only the terminal tail strip survived.
+  test('a subagent PreToolUse leaves the main agent live question standing (#236)', async () => {
+    const ctx = await authCtx();
+    const raw = await hookCtx();
+    const created = (await (await ctx.post('/api/sessions', { data: { name: 'AskQ Subagent' } })).json()).id;
+    const toolInput = {
+      questions: [{
+        header: 'Pick', question: 'Which?', multiSelect: false,
+        options: [{ label: 'Alpha', description: 'a' }, { label: 'Beta' }],
+      }],
+    };
+    try {
+      const asked = await raw.post('/api/hook', {
+        headers: { 'X-WT-Session-ID': created },
+        data: { hook_event_name: 'PreToolUse', tool_name: 'AskUserQuestion', tool_input: toolInput },
+      });
+      expect((await asked.json()).status).toBe('waiting');
+
+      // The subagent's own tool call. `agent_id` is present iff Claude raised the
+      // event INSIDE a subagent (#61) — the discriminator this route already
+      // computes for the worker, twenty lines below the branch that needed it.
+      const sub = await raw.post('/api/hook', {
+        headers: { 'X-WT-Session-ID': created },
+        data: {
+          hook_event_name: 'PreToolUse', tool_name: 'Bash',
+          tool_input: { command: 'ls' }, agent_id: 'agent-aaed58e5acc92331d',
+        },
+      });
+      // The status is the half correctStaleStatus reads: `waiting` buys the session
+      // 12h (WAITING_ABANDONED_TIMEOUT_MS), `working` buys it five minutes.
+      expect((await sub.json()).status).toBe('waiting');
+
+      const still = await (await ctx.get(`/api/sessions/${created}/pending-question`)).json();
+      expect(still.pending).toBe(true);
+      expect(still.question.questions[0].options.map((o) => o.label)).toEqual(['Alpha', 'Beta']);
+
+      // ...and the chat lens's banner, which needs BOTH halves (#79): status
+      // 'waiting' AND a captured question. Asserted on the list route because that
+      // is what the lens actually reads — the reported symptom was "no indication".
+      const list = await (await ctx.get('/api/sessions')).json();
+      expect(list.find((s) => s.id === created).waitingFor).toBe('question');
+
+      // The rest of the sequence the worker logged on BOTH machines, all of it the
+      // same subagent's: its Bash needed approval, then its tool finished. Neither
+      // event may touch the record either — a permission ask is a second reason to
+      // be blocked, and a PostToolUse for a tool that is not AskUserQuestion was
+      // never in the clearing set. Pinned because the reported shape was a status
+      // that went back to 'working', not a question that vanished on a PostToolUse.
+      const perm = await raw.post('/api/hook', {
+        headers: { 'X-WT-Session-ID': created },
+        data: { hook_event_name: 'Notification', message: 'Claude needs your permission to use Bash' },
+      });
+      expect((await perm.json()).status).toBe('waiting');
+      const done = await raw.post('/api/hook', {
+        headers: { 'X-WT-Session-ID': created },
+        data: {
+          hook_event_name: 'PostToolUse', tool_name: 'Bash',
+          tool_input: { command: 'ls' }, agent_id: 'agent-aaed58e5acc92331d',
+        },
+      });
+      expect((await done.json()).status).toBe('waiting');
+      expect((await (await ctx.get(`/api/sessions/${created}/pending-question`)).json()).pending).toBe(true);
+
+      // The MAIN agent's own next tool still resolves it. The heuristic is right for
+      // the sequential single-agent case it was written for; only the concurrent one
+      // is being taken away from it, so this assertion must stay green.
+      const main = await raw.post('/api/hook', {
+        headers: { 'X-WT-Session-ID': created },
+        data: { hook_event_name: 'PreToolUse', tool_name: 'Bash', tool_input: { command: 'ls' } },
+      });
+      expect((await main.json()).status).toBe('working');
+      const after = await ctx.get(`/api/sessions/${created}/pending-question`);
+      expect(after.status()).toBe(404);
+    } finally {
+      await ctx.delete(`/api/sessions/${created}`);
+      await ctx.dispose();
+      await raw.dispose();
+    }
+  });
+
   // M1 rejection (a): a transcript_path OUTSIDE the trusted root is silently
   // ignored — the hook still succeeds, but /attention exposes no message. Proves
   // safeTranscriptPath can't be steered at an arbitrary file elsewhere on disk.
