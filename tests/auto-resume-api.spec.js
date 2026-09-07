@@ -200,3 +200,82 @@ test.describe('#137 — the wait-period badge in the sidebar', () => {
     expect(out.missing).toBe('');                 // a server too old to send the field
   });
 });
+
+// #240 — THE SERVED DEFAULT IS A WRITE, NOT MERELY A READING.
+//
+// `GET /api/config` fills in a value for every key the file omits, and a settings client
+// edits one field and sends the WHOLE object back (`PUT /api/config` replaces rather than
+// merges). So the default the API *serves* is the value an honest read-modify-write
+// PERSISTS — which makes a disagreement between it and the process that ACTS on the key a
+// way to switch a feature off with nobody having chosen to.
+//
+// That is what happened. `server.js` served `autoResumeOnReset: false` — #69's opt-in
+// default, which #137 flipped and this line never followed — while `pty-worker.js`, the
+// process that arms the timer, defaults it to `true`. Under the suite the file being
+// written is the GITIGNORED `config.test.json`, which no checkout can restore, so one
+// interrupted run disabled arming *permanently* on that machine while CI, which has no
+// such file, stayed green. Both round-tripping specs (`exclusive-viewer`,
+// `keep-sessions-open`) were writing the opt-out on every run.
+test.describe('#240 — a config round-trip must not silently opt out of auto-resume', () => {
+  test('the served default is the one the worker acts on, so GET -> PUT changes nothing', async () => {
+    const ctx = await authCtx();
+    try {
+      // Asserted BEFORE the round-trip: this is the value any client is about to write
+      // back, so the served default is the defect itself, not a symptom of it.
+      const served = await (await ctx.get('/api/config')).json();
+      expect(served.autoResumeOnReset).toBe(true);
+
+      // The round-trip, verbatim — the shape every settings client uses.
+      const put = await ctx.put('/api/config', { data: served });
+      expect(put.status()).toBe(200);
+
+      // Read back from disk (this route re-reads the file, so there is no cache between
+      // the write and this assertion): the round-trip must be a no-op.
+      const after = await (await ctx.get('/api/config')).json();
+      expect(after.autoResumeOnReset).toBe(true);
+    } finally {
+      await ctx.dispose();
+    }
+  });
+
+  // The consequence, driven end to end. This is the issue's own "corrupt the flag, then
+  // the #227 chain still works" check, and it is the half that would survive somebody
+  // "fixing" the drift by changing the WORKER's default instead of the server's.
+  //
+  // It waits out the worker's live-config TTL first, on purpose. `liveConfig` re-reads
+  // the file every 5s (LIVE_CONFIG_TTL, pty-worker.js), so a chain driven immediately
+  // after the PUT arms off the PRE-write cache and passes whatever is on disk — which is
+  // exactly how the first draft of this test went green against the unfixed server. The
+  // wait is a documented constant, not a latency bet.
+  test('and the worker still arms once it has re-read the file', async () => {
+    const ctx = await authCtx();
+    const uuid = '240ca9ed-0000-0000-0000-0000000000c1';
+    const cwd = path.join(process.env.TEMP || os.tmpdir(), `wt-ar240-${process.pid}`);
+    fs.mkdirSync(cwd, { recursive: true });
+
+    const served = await (await ctx.get('/api/config')).json();
+    expect((await ctx.put('/api/config', { data: served })).status()).toBe(200);
+    await new Promise((r) => setTimeout(r, 5500)); // > LIVE_CONFIG_TTL, so the worker re-reads
+
+    const id = (await (await ctx.post('/api/sessions', { data: { name: 'AR 240', cwd, agent: 'claude' } })).json()).id;
+    try {
+      await ctx.post(`/api/session/${id}/hook`, { data: { event: 'UserPromptSubmit', session_id: uuid } });
+      const resetAtSec = Math.floor(Date.now() / 1000) + 3600;
+      await ctx.post('/api/claude-status', {
+        data: {
+          session_id: uuid,
+          model: { id: 'claude-opus-4-8', display_name: 'Opus 4.8' },
+          rate_limits: { five_hour: { used_percentage: 100, resets_at: resetAtSec } },
+        },
+      });
+
+      await expect.poll(async () => (await sessionRow(ctx, id)).usageLimit.armed,
+        { timeout: 8000, message: 'the worker never armed — a config round-trip wrote an autoResumeOnReset opt-out nobody chose (#240)' })
+        .toBe(true);
+    } finally {
+      await ctx.delete(`/api/sessions/${id}`);
+      await ctx.dispose();
+      try { fs.rmSync(cwd, { recursive: true, force: true }); } catch { /* best effort */ }
+    }
+  });
+});

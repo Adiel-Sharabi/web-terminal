@@ -25,6 +25,35 @@ process.env.WT_CLAUDE_METRICS_DEBOUNCE_MS = '250';
 // means the real file is not merely restored, it is never opened.
 process.env.WT_CLUSTER_TOKENS_FILE = path.join(__dirname, 'cluster-tokens.test.json');
 
+// #240 — and the same problem for the file the suite writes ON PURPOSE. Redirecting
+// the path is what saves the two files above; `config.test.json` IS the redirect, so
+// nothing protects it from the run before. It is gitignored, so no checkout restores
+// it, and `global-teardown.js` restores only `config.json`/`sessions.json` — which an
+// interrupted run never reaches anyway. So whatever the last run left is what the next
+// one starts from, permanently, on that machine alone: reproducible for one person and
+// invisible in CI, which has no such file. Measured on adiel-Home 2026-09-07, a leaked
+// `autoResumeOnReset: false` failed the #227 arming chain on every later local run
+// while CI stayed green.
+//
+// Deleting it puts the run in exactly the state a fresh CI checkout is in — the state
+// every run is already proven green from — rather than inventing a template that would
+// become its own thing to keep in step. The specs that need config recreate it through
+// `PUT /api/config` as they always have.
+//
+// It has to happen HERE and not in `global-setup.js`, which is otherwise exactly the
+// right home for a start-of-run sweep (#177): Playwright runs plugin setup — where the
+// `webServer` lives — BEFORE globalSetup, so by then `server.js` has already read the
+// poisoned file, and `_refreshLiveConfig` skips a file that no longer exists, pinning
+// the stale values in cache for the whole run.
+try {
+  require('fs').unlinkSync(path.join(__dirname, 'config.test.json'));
+  console.log('[config] removed config.test.json left by an earlier run (#240)');
+} catch (e) {
+  // ENOENT is the normal case (CI, or a run that cleaned up). Anything else is worth
+  // seeing rather than swallowing — a locked file would silently reinstate the leak.
+  if (e.code !== 'ENOENT') console.warn('[config] could not remove config.test.json:', e.message);
+}
+
 module.exports = defineConfig({
   testDir: './tests',
   timeout: 30000,
