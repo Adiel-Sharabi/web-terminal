@@ -1994,9 +1994,12 @@ function handleHook(session, event, claudeSessionId, prompt, agentId, opts) {
       // backstop agree by construction instead of by three copies of one rule.
       //
       // Narrow by construction: server.js sends an explicit questionPending:false
-      // with every event that RESOLVES a question — a different tool's PreToolUse,
+      // with every event that RESOLVES a question — the MAIN agent's next PreToolUse,
       // PostToolUse of AskUserQuestion, UserPromptSubmit, Stop — so the flag is
-      // already clear by the time any of those reach this line. This is #79/#98's
+      // already clear by the time any of those reach this line. A SUBAGENT's PreToolUse
+      // is deliberately NOT one of them (#236): it runs BESIDE the question rather than
+      // after it, so it arrives with no opinion at all, the flag survives, and this line
+      // then reads 'waiting' — which is the whole point of the ternary. This is #79/#98's
       // third and last polarity: green was fixed, idle was fixed, working was not.
       session.status = session.questionPending ? 'waiting' : 'working';
       // Something is running, so a debounced idle flip was a false alarm.
