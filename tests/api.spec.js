@@ -1104,6 +1104,27 @@ test.describe('Session attention', () => {
       const list = await (await ctx.get('/api/sessions')).json();
       expect(list.find((s) => s.id === created).waitingFor).toBe('question');
 
+      // The rest of the sequence the worker logged on BOTH machines, all of it the
+      // same subagent's: its Bash needed approval, then its tool finished. Neither
+      // event may touch the record either — a permission ask is a second reason to
+      // be blocked, and a PostToolUse for a tool that is not AskUserQuestion was
+      // never in the clearing set. Pinned because the reported shape was a status
+      // that went back to 'working', not a question that vanished on a PostToolUse.
+      const perm = await raw.post('/api/hook', {
+        headers: { 'X-WT-Session-ID': created },
+        data: { hook_event_name: 'Notification', message: 'Claude needs your permission to use Bash' },
+      });
+      expect((await perm.json()).status).toBe('waiting');
+      const done = await raw.post('/api/hook', {
+        headers: { 'X-WT-Session-ID': created },
+        data: {
+          hook_event_name: 'PostToolUse', tool_name: 'Bash',
+          tool_input: { command: 'ls' }, agent_id: 'agent-aaed58e5acc92331d',
+        },
+      });
+      expect((await done.json()).status).toBe('waiting');
+      expect((await (await ctx.get(`/api/sessions/${created}/pending-question`)).json()).pending).toBe(true);
+
       // The MAIN agent's own next tool still resolves it. The heuristic is right for
       // the sequential single-agent case it was written for; only the concurrent one
       // is being taken away from it, so this assertion must stay green.

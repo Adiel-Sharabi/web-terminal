@@ -1546,9 +1546,16 @@ transcript and the subagent's (`<session>/subagents/agent-*.jsonl`, `isSidechain
 | 09:49:02.107 | the user answers — 37 s of a question nothing was showing |
 
 **Nothing ran in the main transcript in that window**, so the clearing `PreToolUse` was
-provably the subagent's — and a subagent's hooks carry `agent_id` (#61). The same trace
-on adiel-0ffice twelve minutes earlier is the one that was reported, and there the
-question sat unanswered for ten further minutes.
+provably the subagent's — and a subagent's hooks carry `agent_id` (#61). The log alone
+could not have said that: it names the event, not whose it was.
+
+**The REPORTED incident, on adiel-0ffice twelve minutes earlier, has the same log shape and
+is not proven to be the same cause** — its hook body was never captured, and the question
+sat unanswered there for ten further minutes. What bounds the alternative is measured:
+across 922 transcripts on this fleet, **all 94** assistant messages issuing AskUserQuestion
+issue it **alone**, never batched with another tool, and a turn is suspended while a tool
+call is outstanding — so a main agent has no way to raise a concurrent `PreToolUse`.
+Office's own `subagents/` directory would settle it.
 
 **Both of the chat lens's signals die together, which is why NOTHING showed.**
 `waitingFor` (#79) needs status `waiting` **and** a captured question, and the overlay's
@@ -1556,16 +1563,29 @@ question sat unanswered for ten further minutes.
 question** (#19). The lone survivor was #194's terminal tail strip — the *backstop* —
 reported as *"no indication, instead a last line small window"*.
 
-**The rule now: a tool event resolves a question only when it comes from the agent that
-ASKED it**, so the question records whose it is. The discriminator was already free —
-`agent_id` is read in that same function for #61, twenty lines below the branch that
-needed it. `UserPromptSubmit` and `Stop` stay ungated: neither can come from a subagent.
+**The rule now: only the MAIN agent's next tool resolves a question** — `!agentId` is the
+whole fix, and the discriminator was already free: `agent_id` is read in that same function
+for #61, twenty lines below the branch that needed it. `UserPromptSubmit`, `Stop` and the
+question's own `PostToolUse` stay ungated.
 
-**The worker needs no matching guard, and that is a decision rather than an omission.**
-Its status is `questionPending ? 'waiting' : 'working'`, so #98's tri-state leaves the
+**Gated on the EVENT's agent, not on the question's**, which is the narrower of the two
+rules on offer. *"Only the agent that ASKED it may resolve it"* is more general and would
+generalise a case that has never occurred: **0 of 775** subagent transcripts here contain an
+AskUserQuestion. If one ever does, its own next tool stops resolving it and the question
+waits for the turn's `Stop` — one event later, in the direction that SHOWS a question
+rather than hides one.
+
+**On THIS path the worker needs no matching guard, and that is a decision rather than an
+omission.** Its status is `questionPending ? 'waiting' : 'working'`, so #98's tri-state leaves the
 flag alone, the session stays `waiting`, and it is handed `correctStaleStatus`'s **12h**
 clock instead of the **5-minute** one that had been demoting it to idle while the prompt
 was still on screen.
+
+**A held idle `Notification` is a SECOND path to the same symptom, and it is NOT fixed
+here (#239).** When subagents are live it is parked as `heldStop` *before* that question
+check, and the `SubagentStop` that releases it lands in `applyIdle`, which has no question
+check at all. Found reviewing the fix above, unmeasured in the wild, and worker-side — so
+it needs a cold restart where this one hot-reloads.
 
 **Not #230**, whose *correctly*-set `waiting` is retracted by that same 12h clock — same
 symptom, opposite end of the timescale: this one lasted 6.1 s on Office, 5.0 s on Home.
