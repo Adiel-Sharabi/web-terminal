@@ -1488,6 +1488,39 @@ function cancelPendingIdle(session) {
 // ("Claude stopped") or an idle Notification ("done, waiting for input") — so a
 // held Stop is delivered with its own wording, not the other one's.
 function armIdle(session, event) {
+  // #98/#239 - A SESSION THAT OWES THE USER AN ANSWER IS NOT DONE, whichever route the
+  // idle event took to get here. Claude raises an idle Notification after ~60s of
+  // waiting for input, which is precisely the state a pending AskUserQuestion produces,
+  // so honouring it paints the calm green dot on the one session that owed an answer.
+  // correctStaleStatus's #79 exemption cannot help: that rule only declines to CORRECT a
+  // silent session, and this sets the status outright.
+  //
+  // The refusal lives HERE, at the funnel, rather than beside the Notification/Stop case
+  // that used to hold it - because that case is only ONE of two callers. The other is
+  // #61's held-stop release: with subagents in flight the idle event is parked as
+  // session.heldStop and `break`s BEFORE the case's own check, then handed straight back
+  // here by the last SubagentStop. So the guard was bypassed by the ordinary shape of a
+  // session that had dispatched a subagent, and the SUBAGENT finishing idled a session
+  // blocked on the MAIN agent's question (#239) - the same symptom #236 fixed one layer
+  // up in server.js, reached by a second, independent path.
+  //
+  // Exactly one of the two events that can be held is dangerous, and it is the more
+  // frequent kind of block. `Stop` never reaches this refusal in practice: server.js
+  // classifies it as an event that RESOLVES a question and sends questionPending:false
+  // with it, so the flag is already clear by the time a genuine end-of-turn arrives. A
+  // `Notification` carries no opinion at all (#98's tri-state leaves the flag alone), so
+  // it is still true when the hold is released.
+  //
+  // KNOWN GAP, named rather than papered over: a question arriving INSIDE the debounce
+  // window (idle armed first, the AskUserQuestion landing 750ms behind it) is still not
+  // seen, because this checks at ARM time, not at fire time. Putting it in applyIdle
+  // would cover that ordering but would also skip the #129 compact replay that runs
+  // above the status flip, and the ordering is unmeasured: in every case observed the
+  // Notification arrives ~60s AFTER the question, which is what raises it at all.
+  if (session.questionPending) {
+    log(`hook: session "${session.name}" ${event} not idled - a question is still on screen`);
+    return;
+  }
   cancelPendingIdle(session);
   session.idleTimer = setTimeout(() => {
     session.idleTimer = null;
@@ -2089,23 +2122,10 @@ function handleHook(session, event, claudeSessionId, prompt, agentId, opts) {
         log(`hook: session "${session.name}" ${event} held — ${live.size} subagent(s) in flight`);
         break;
       }
-      // #98 — an idle Notification raised while a question is still on screen does
-      // not mean "the turn ended", it means "I am blocked on you". Claude fires it
-      // after ~60s of waiting for input, which is precisely the state a pending
-      // AskUserQuestion produces — so armIdle painted the calm green dot on the one
-      // session that owed an answer. correctStaleStatus's #79 exemption cannot help
-      // here: that rule only declines to CORRECT a silent session, and this sets the
-      // status outright.
-      //
-      // `Stop` is unaffected in practice rather than by a second condition: server.js
-      // classifies Stop as an event that resolves a question and sends an explicit
-      // questionPending:false with it, applied above the switch — so by the time a
-      // genuine end-of-turn arrives the flag is already clear. Self-bounding for the
-      // same reason, plus the 12h abandonment backstop.
-      if (session.questionPending) {
-        log(`hook: session "${session.name}" ${event} not idled — a question is still on screen`);
-        break;
-      }
+      // #98/#239 - an idle event raised while a question is still on screen does not
+      // mean "the turn ended", it means "I am blocked on you". The refusal itself now
+      // lives in armIdle, the funnel BOTH idle routes pass through: it used to sit
+      // here, and the held-stop release above went round it. See the note there.
       armIdle(session, event);
       break;
     }

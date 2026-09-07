@@ -264,4 +264,82 @@ test.describe('#61 — Stop while subagents are in flight', () => {
 
     expect(await getStatus(ctx, id)).toBe('idle');
   });
+
+  // #239 — THE SECOND PATH TO "THE LENS SHOWED NOTHING", one layer below #236.
+  //
+  // #236 fixed a subagent's PreToolUse erasing the MAIN agent's live question in
+  // server.js. This is the same symptom reached in the WORKER, and #236's fix
+  // deliberately does not touch it: an idle Notification arriving while subagents are
+  // in flight is parked as `session.heldStop` and `break`s BEFORE the #98 question
+  // check, then the last SubagentStop hands it to armIdle — which had no such check
+  // anywhere on its path. So the SUBAGENT finishing idled a session blocked on the
+  // main agent's question: `waitingFor` goes null (no #79 banner), the dot goes calm,
+  // and only #194's terminal tail strip is left.
+  //
+  // The precondition is routine rather than exotic: `Notification held` appears 365
+  // times in this machine's worker log since #61's hold shipped. What was unobserved
+  // is only the coincidence with a live question — which is exactly what this drives.
+  //
+  // The polarity check that makes it worth pinning: a held `Stop` is safe BY ACCIDENT,
+  // because server.js classifies Stop as an event that resolves a question and sends
+  // questionPending:false with it. A `Notification` sends nothing (#98's tri-state), so
+  // the flag survives the hold. Of the two events that can be held, exactly one is
+  // dangerous — and it is the more frequent kind of block.
+  test('#239: a held idle Notification released by SubagentStop does NOT idle a session owing an answer', async () => {
+    await sendHook(raw, id, 'UserPromptSubmit');
+    await sendHook(raw, id, 'SubagentStart', sub('a1'));
+
+    // The main agent asks a question while its subagent runs — #236's shape exactly.
+    await sendHook(raw, id, 'PreToolUse', {
+      tool_name: 'AskUserQuestion',
+      tool_input: { questions: [{ header: 'Approach', question: 'Which approach?', options: [{ label: 'A' }, { label: 'B' }] }] },
+    });
+    expect(await getStatus(ctx, id), 'a pending question reads as waiting (#112)').toBe('waiting');
+
+    // Claude raises its idle Notification ~60s into an unanswered question. With a
+    // subagent in flight it is HELD, so the case's own question check never runs.
+    await sendHook(raw, id, 'Notification', { message: 'Claude is waiting for your input' });
+    await new Promise((r) => setTimeout(r, DEBOUNCE_MS + SLACK_MS));
+    expect(await getStatus(ctx, id)).toBe('waiting');
+
+    // The subagent finishes. THIS is the line that was red: the held Notification was
+    // released into armIdle -> applyIdle with the question still on screen.
+    await sendHook(raw, id, 'SubagentStop', sub('a1'));
+    await new Promise((r) => setTimeout(r, DEBOUNCE_MS + SLACK_MS));
+    expect(await getStatus(ctx, id), 'a subagent finishing does not answer the main agent\'s question').toBe('waiting');
+    expect(idleFrames(id), 'no "Claude is done" push for a session that owes an answer').toHaveLength(0);
+
+    // The chat lens's own signal, not just the dot: #79's banner is `waitingFor`, and
+    // it is derived from status AND a captured question, so an idle here silences the
+    // banner and the #19 overlay together — which is why the report was "no indication".
+    const row = (await (await ctx.get('/api/sessions')).json()).find((x) => x.id === id);
+    expect(row.waitingFor, 'the chat lens must still name what it is waiting for').toBe('question');
+  });
+
+  // The guard must not pin a session non-idle for the rest of its life - the same
+  // sibling check #98 carries one layer up. Note the ORDER here is deliberate and the
+  // first draft of this test got it wrong: answering BEFORE the SubagentStop makes the
+  // session end up `working`, and correctly so, because a main-agent PostToolUse drops
+  // the held event outright (a parent that picked its turn back up must not be handed a
+  // stale 'done' when the subagent exits). That is #61 working, not #239 - so the honest
+  // shape is to let the release be REFUSED first, then answer, then send a fresh idle.
+  test('#239: once the question is answered, the session idles normally again', async () => {
+    await sendHook(raw, id, 'UserPromptSubmit');
+    await sendHook(raw, id, 'SubagentStart', sub('a1'));
+    await sendHook(raw, id, 'PreToolUse', {
+      tool_name: 'AskUserQuestion',
+      tool_input: { questions: [{ header: 'Approach', question: 'Which approach?', options: [{ label: 'A' }, { label: 'B' }] }] },
+    });
+    await sendHook(raw, id, 'Notification', { message: 'Claude is waiting for your input' });
+    await sendHook(raw, id, 'SubagentStop', sub('a1'));   // released, and refused
+    await new Promise((r) => setTimeout(r, DEBOUNCE_MS + SLACK_MS));
+    expect(await getStatus(ctx, id)).toBe('waiting');
+
+    // Answered - the flag clears, and the NEXT idle event is an ordinary end of turn.
+    await sendHook(raw, id, 'PostToolUse', { tool_name: 'AskUserQuestion' });
+    await sendHook(raw, id, 'Stop');
+    await new Promise((r) => setTimeout(r, DEBOUNCE_MS + SLACK_MS));
+    expect(await getStatus(ctx, id), 'an answered question must not pin the session').toBe('idle');
+  });
+
 });
