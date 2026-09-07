@@ -1613,11 +1613,36 @@ flag alone, the session stays `waiting`, and it is handed `correctStaleStatus`'s
 clock instead of the **5-minute** one that had been demoting it to idle while the prompt
 was still on screen.
 
-**A held idle `Notification` is a SECOND path to the same symptom, and it is NOT fixed
-here (#239).** When subagents are live it is parked as `heldStop` *before* that question
-check, and the `SubagentStop` that releases it lands in `applyIdle`, which has no question
-check at all. Found reviewing the fix above, unmeasured in the wild, and worker-side — so
-it needs a cold restart where this one hot-reloads.
+**A held idle `Notification` is a SECOND path to the same symptom, and #238 deliberately
+did not touch it — FIXED SEPARATELY IN #239.** When subagents are live the idle event is
+parked as `heldStop` *before* that question check, and the `SubagentStop` that releases it
+hands it to `armIdle`, which had no question check on any path. So the guard was bypassed
+by the ordinary shape of a session that had dispatched a subagent, and the SUBAGENT
+finishing idled a session blocked on the MAIN agent's question. The refusal now lives in
+`armIdle` — the funnel BOTH idle routes pass through — rather than being copied to the
+release site.
+
+**Exactly one of the two holdable events is dangerous, and it is the more frequent kind of
+block.** A held `Stop` is safe BY ACCIDENT: `server.js` classifies it as an event that
+RESOLVES a question and sends `questionPending:false` with it, so the flag is already clear
+on release. A `Notification` carries no opinion at all (#98's tri-state), so the flag
+survives the hold. The precondition is routine rather than exotic — `Notification held`
+appears **365** times in adiel-Home's worker log since #61's hold shipped, `Stop held`
+another 771; what was unobserved is only the coincidence with a live question.
+
+> **A KNOWN GAP, named rather than papered over.** The check is at ARM time, not at fire
+> time, so a question arriving INSIDE the 750 ms debounce window (idle armed first, the
+> `AskUserQuestion` landing behind it) is still not seen. Putting it in `applyIdle` would
+> cover that ordering but would also skip the #129 compact replay that runs above the
+> status flip — and the ordering is unmeasured: in every observed case the Notification
+> arrives ~60 s AFTER the question, which is what raises it at all.
+
+> **The second regression test's first draft asserted the WRONG thing**, which is worth
+> keeping because it is a fact about #61 rather than about #239. Answering the question
+> BEFORE the `SubagentStop` leaves the session `working`, and correctly so: a main-agent
+> `PostToolUse` drops the held event outright, because a parent that picked its turn back
+> up must not be handed a stale "done" when its subagent exits. The honest shape is to let
+> the release be REFUSED first, then answer, then send a fresh idle.
 
 **Not #230**, whose *correctly*-set `waiting` is retracted by that same 12h clock — same
 symptom, opposite end of the timescale: this one lasted 6.1 s on Office, 5.0 s on Home.
