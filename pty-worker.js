@@ -46,12 +46,6 @@ function _slowOpLog(name, dur) {
   if (dur > 30) console.log(`[slow-op] ${new Date().toISOString()} ${name} dur=${dur.toFixed(0)}ms`);
 }
 const STALE_STATUS_TIMEOUT_MS = 5 * 60 * 1000;
-// Abandonment backstop for a session BLOCKED ON THE USER — 'waiting', or 'working'
-// with a question on screen (#79); see correctStaleStatus. Deliberately far beyond
-// any plausible answer delay — a question asked in the evening must still be red in
-// the morning — so this catches only an agent that died mid-question without firing
-// a resolving hook, never a user who simply has not answered yet.
-const WAITING_ABANDONED_TIMEOUT_MS = 12 * 60 * 60 * 1000;
 const MAX_SCROLLBACK_SIZE = 2 * 1024 * 1024;
 
 // Bracketed-paste mode (DECSET/DECRST 2004). Apps like Claude Code enable it
@@ -1565,23 +1559,60 @@ function correctStaleStatus(session) {
   // under the visible one the chat lens fixed. The real predicate is "blocked on the
   // user", of which the status is only one signal; the other is questionPending,
   // handed down by server.js in handleHook.
+  // #230 - A SESSION BLOCKED ON THE USER IS NOT TIMED OUT AT ALL. The paragraph above
+  // states that principle, and the 12h backstop that used to sit here broke it at a
+  // longer horizon. Measurement settled which one was right.
+  //
+  // MEASURED over every `waiting -> idle` stale correction in this machine's worker log,
+  // asking of each whether a later hook arrived on that same session (which proves the
+  // agent was alive to receive one): 72 corrections, and the agent was provably STILL
+  // ALIVE afterwards in 71 of them. One was consistent with real abandonment. Median
+  // wipe -> next hook was 0.5h; 59 were answered within six hours of being wiped. The
+  // guard fired on a live agent 71 times out of 72.
+  //
+  // Those 71 were genuinely still blocked at wipe time BY CONSTRUCTION: this only ran on
+  // a session whose status was STILL `waiting` and whose hook AND output clocks had both
+  // been silent for the whole window. Had the question been answered first, the answering
+  // hook would have moved the status and the corrector would never have run.
+  //
+  // NO HORIZON FIXES IT. The longest measured wipe -> next-hook gap is 99 hours, so 24h or
+  // 48h only moves the cliff somewhere less often crossed - and keeps it precisely for the
+  // longest, most-forgotten questions, which are the ones the alarm exists for. "Asked in
+  // the evening, answered in the morning" was the wrong model of the working pattern: a
+  // 26-hour answer delay is ordinary here.
+  //
+  // AND THE RETRACTION IS NOT MERELY A DULL DOT - it is the same three effects the
+  // paragraph above names: the red pulsing dot goes calm green, statusClearsApproval()
+  // flips the attention record to cleared, and an FCM 'clear' auto-dismisses the
+  // notification ALREADY DELIVERED to the phone. A user correctly alerted has the alert
+  // taken away.
+  //
+  // WHAT THIS TRADES, named rather than discovered later: the 1-in-72 case - an agent that
+  // died mid-question without ever firing a resolving hook - now leaves a row flagged until
+  // someone looks at it. That is the CHEAP error. A stuck red row is noticed and dismissed
+  // in seconds; a cancelled alarm on a live question is invisible by construction and cost
+  // 14 hours in the report that opened this. The state still ends the way it reliably does
+  // (the hook that fires when the user answers - 71 of 72 did exactly that), ANY hook at
+  // all clears it, and a genuinely dead agent has its own path: term.onExit DELETES the
+  // session, so a dead PTY leaves no row to be stuck on.
+  //
+  // `questionPending` is consequently cleared only by the hooks that RESOLVE a question,
+  // never here. The old branch cleared it alongside the status so a later turn would not
+  // inherit the 12h limit; with no such limit left, that assignment is unreachable anyway
+  // - this returns above it on every session that carries the flag.
+  if (session.status === 'waiting' || session.questionPending) return session.status;
+
   const now = Date.now();
-  const blockedOnUser = session.status === 'waiting' || !!session.questionPending;
-  const limit = blockedOnUser ? WAITING_ABANDONED_TIMEOUT_MS : STALE_STATUS_TIMEOUT_MS;
-  if ((session.status === 'working' || session.status === 'waiting') &&
-      session.lastHookActivity && (now - session.lastHookActivity) > limit &&
-      (now - (session.lastActivity || 0)) > limit) {
+  if (session.status === 'working' &&
+      session.lastHookActivity && (now - session.lastHookActivity) > STALE_STATUS_TIMEOUT_MS &&
+      (now - (session.lastActivity || 0)) > STALE_STATUS_TIMEOUT_MS) {
     const prev = session.status;
     session.status = 'idle';
-    // The safety net for #61 too: a subagent that crashed without firing
-    // SubagentStop leaves the count above zero, which would otherwise pin this
-    // session non-idle forever. Both clocks are stale — nothing is running.
+    // The safety net for #61 too: a subagent that crashed without firing SubagentStop
+    // leaves the count above zero, which would otherwise pin this session non-idle
+    // forever. Both clocks are stale - nothing is running.
     resetSubagentTracking(session);
-    // Same reasoning for the question: reaching the abandonment horizon means the
-    // agent died mid-question without ever firing a resolving hook. Drop the flag
-    // with the status, or every later turn of this session inherits the 12h limit.
-    session.questionPending = false;
-    log(`stale correction: "${session.name}" ${prev} → idle`);
+    log(`stale correction: "${session.name}" ${prev} -> idle`);
     broadcastEvent('statusChanged', { id: sessionIdOf(session), status: session.status });
   }
   return session.status;

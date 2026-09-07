@@ -259,28 +259,26 @@ test.describe('Stale session status detection', () => {
     expect(s.status).toBe('waiting');
   });
 
-  test('a waiting session still self-corrects at the long abandonment backstop', async () => {
-    // The one case excluding 'waiting' would otherwise pin forever: the agent
-    // died mid-question without ever firing a resolving hook. A backstop far
-    // beyond any plausible answer delay catches that without touching a wait the
-    // user simply has not got to yet.
+  test('#230: a waiting session is NEVER timed out, however long the silence', async () => {
+    // INVERTED BY #230, deliberately - this test used to pin the 12h backstop, and the
+    // backstop was measured wrong 71 times out of 72. Every `waiting -> idle` stale
+    // correction in the worker log was checked for whether a later hook arrived on that
+    // same session (proving the agent was alive to receive one): 72 corrections, 71 with
+    // the agent provably still alive, median 0.5h from wipe to next hook. And the wipe is
+    // not just a dull dot - it clears the attention record and auto-dismisses the phone
+    // notification already delivered, so a correct alert is taken away.
+    //
+    // 'waiting' going silent is the state's DEFINITION, not evidence against it. The
+    // ageing here is 100 HOURS - past the longest gap ever measured (99h) - so this fails
+    // if any horizon is reintroduced rather than merely if 12h is.
     const hookRes = await ctx.post(`/api/session/${sessionId}/hook`, {
       data: { event: 'PermissionRequest' },
     });
     expect((await hookRes.json()).status).toBe('waiting');
 
-    // Re-age on every poll rather than once. A freshly spawned shell emits its
-    // prompt a beat after creation, and that PTY chunk legitimately refreshes
-    // lastActivity — which correctStaleStatus reads as "not silent" and declines
-    // to correct, exactly as #37 intends. Ageing once therefore races the prompt:
-    // it passed alone and failed under full-suite load. Re-stale, then read.
-    await expect.poll(async () => {
-      await ctx.post(`/api/test/age-session/${sessionId}`, {
-        data: { ageMinutes: 13 * 60 }, // past WAITING_ABANDONED_TIMEOUT_MS (12h)
-      });
-      const res = await ctx.get('/api/sessions');
-      return (await res.json()).find(s => s.id === sessionId).status;
-    }, { timeout: 10000 }).toBe('idle');
+    await ctx.post(`/api/test/age-session/${sessionId}`, { data: { ageMinutes: 100 * 60 } });
+    const res = await ctx.get('/api/sessions');
+    expect((await res.json()).find(s => s.id === sessionId).status).toBe('waiting');
   });
 
   // ============================================================
@@ -431,20 +429,23 @@ test.describe('Stale session status detection', () => {
     }, { timeout: 10000 }).toBe('idle');
   });
 
-  test('#79: a pending question still self-corrects at the long abandonment backstop', async () => {
-    // Self-bounding, exactly as 'waiting' is: an agent that died mid-question and
-    // never fired a resolving hook must not pin the session forever — but only at
-    // a horizon no real answer delay reaches.
+  test('#230: a pending question is NEVER timed out either — the flag is as blocked as the status', async () => {
+    // The sibling of the test above, for the half of "blocked on the user" that does not
+    // wear the 'waiting' status. Same inversion, same reason: a question the user has not
+    // got to yet is the commonest case by two orders of magnitude, and retracting its
+    // alarm is invisible precisely because the session is silent by design.
+    //
+    // The second assertion is the one that matters for the chat lens: #79's banner is
+    // `waitingFor`, derived from the status AND a captured question, so a correction here
+    // silenced the banner and the #19 overlay together — the reported "the question is on
+    // screen but nothing says one is waiting".
     const hookRes = await ctx.post(`/api/session/${sessionId}/hook`, { data: ASK_HOOK });
     expect((await hookRes.json()).status).toBe('waiting'); // 'working' before #112
 
-    await expect.poll(async () => {
-      await ctx.post(`/api/test/age-session/${sessionId}`, {
-        data: { ageMinutes: 13 * 60 }, // past WAITING_ABANDONED_TIMEOUT_MS (12h)
-      });
-      const res = await ctx.get('/api/sessions');
-      return (await res.json()).find(s => s.id === sessionId).status;
-    }, { timeout: 10000 }).toBe('idle');
+    await ctx.post(`/api/test/age-session/${sessionId}`, { data: { ageMinutes: 100 * 60 } });
+    const row = (await (await ctx.get('/api/sessions')).json()).find(s => s.id === sessionId);
+    expect(row.status).toBe('waiting');
+    expect(row.waitingFor, 'the chat lens must still name what it is waiting for').toBe('question');
   });
 
   test('cluster/sessions also reflects stale correction for local sessions', async () => {
