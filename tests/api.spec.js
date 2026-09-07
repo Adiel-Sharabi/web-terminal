@@ -1090,8 +1090,8 @@ test.describe('Session attention', () => {
           tool_input: { command: 'ls' }, agent_id: 'agent-aaed58e5acc92331d',
         },
       });
-      // The status is the half correctStaleStatus reads: `waiting` buys the session
-      // 12h (WAITING_ABANDONED_TIMEOUT_MS), `working` buys it five minutes.
+      // The status is the half correctStaleStatus reads: since #230 a `waiting` session
+      // is never timed out at all, while `working` still buys it only five minutes.
       expect((await sub.json()).status).toBe('waiting');
 
       const still = await (await ctx.get(`/api/sessions/${created}/pending-question`)).json();

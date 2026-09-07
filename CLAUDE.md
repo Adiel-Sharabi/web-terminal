@@ -69,7 +69,7 @@ Three supervised Node.js processes. See `docs/ARCHITECTURE.md` for the full walk
 - `lib/user-turn.js` — **the one owner of what a `role:user` turn IS**: `classifyUserTurn` (which turns a human actually TYPED) and `typedTextOf` (the characters they typed, which the chat lens's Queued echo matches on, #149). Its only import is the leaf `lib/ansi.js`, so `lib/transcript.js` can still use it without a require cycle
 - `lib/ansi.js` — **the one owner of the escape-stripping rule** (`ANSI_RE`, `stripAnsi`), imported by `lib/transcript.js` (which re-exports it for `lib/speech.js` and `lib/transcript-codex.js`) and by `lib/user-turn.js`. A leaf: it requires nothing, so it cannot reintroduce a cycle. It exists because #192 briefly added a THIRD copy that had already drifted — `[0-9;?]` params instead of ECMA-48's `[0-?]`, letting a colon-form `ESC[38:5:196m` through a strip that claimed to remove it
 - `lib/recap.js` — the pure session-recap rules: `condense`, `toolTally`, `summariseTasks`, plus a re-export of `lib/user-turn.js`'s `classifyUserTurn` for its existing importers — **change the rule in `lib/user-turn.js`, never here**. Serves `GET /api/sessions/:id/recap`. See "The session recap" below
-- `lib/notification-shape.js` — the pure rules for a Claude `Notification` hook (#194 Gap 1): `classifyNotification` (permission / idle / **benign** / **unknown** — the last two were one silent `drop`), plus the redaction and rate rule for logging an unknown one. **Instrumentation only — it deliberately changes no behaviour**: `correctStaleStatus` gives a `waiting` session 12h against 5m for a `working` one, so promoting an unrecognised notification to a permission ask on a guess would park a session on a false "waiting" for half a day
+- `lib/notification-shape.js` — the pure rules for a Claude `Notification` hook (#194 Gap 1): `classifyNotification` (permission / idle / **benign** / **unknown** — the last two were one silent `drop`), plus the redaction and rate rule for logging an unknown one. **Instrumentation only — it deliberately changes no behaviour**: `correctStaleStatus` never times out a `waiting` session at all since #230, against 5m for a `working` one, so promoting an unrecognised notification to a permission ask on a guess would park a session on a false "waiting" INDEFINITELY - the cost of that mistake went UP when the backstop went away, which is the one place #230 makes another rule stricter rather than looser
 - `app.html` — unified single-page app (terminal + sidebar + settings). Polyfills `crypto.randomUUID` for plain-HTTP contexts. `?rtt=1` enables the per-keystroke RTT overlay
 - `terminal.html` — legacy terminal-only page. **No longer served** (#218): `/s/:id` redirects to `/app/:id`, because this page neither gated input at `WS_INPUT_MAX` nor could render an `inputDropped` notice
 - `lobby.html` — legacy lobby page (served at `/lobby`)
@@ -1609,9 +1609,9 @@ SHOWS a question rather than hides one.
 
 **On THIS path the worker needs no matching guard, and that is a decision rather than an
 omission.** Its status is `questionPending ? 'waiting' : 'working'`, so #98's tri-state leaves the
-flag alone, the session stays `waiting`, and it is handed `correctStaleStatus`'s **12h**
-clock instead of the **5-minute** one that had been demoting it to idle while the prompt
-was still on screen.
+flag alone, the session stays `waiting`, and it is spared the **5-minute** clock that had
+been demoting it to idle while the prompt was still on screen. Since #230 a blocked-on-user
+session is not timed out at ALL, so there is no longer a second, longer clock behind it.
 
 **A held idle `Notification` is a SECOND path to the same symptom, and #238 deliberately
 did not touch it — FIXED SEPARATELY IN #239.** When subagents are live the idle event is
@@ -1644,8 +1644,9 @@ another 771; what was unobserved is only the coincidence with a live question.
 > up must not be handed a stale "done" when its subagent exits. The honest shape is to let
 > the release be REFUSED first, then answer, then send a fresh idle.
 
-**Not #230**, whose *correctly*-set `waiting` is retracted by that same 12h clock — same
-symptom, opposite end of the timescale: this one lasted 6.1 s on Office, 5.0 s on Home.
+**Not #230**, whose *correctly*-set `waiting` was retracted by that same corrector at 12h -
+same symptom, opposite end of the timescale: this one lasted 6.1 s on Office, 5.0 s on Home.
+#230 has since removed that horizon entirely (measured wrong 71 times out of 72).
 
 ## Auth System
 - Cookie-based session auth (primary, for browser users)
