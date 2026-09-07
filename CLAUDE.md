@@ -1643,6 +1643,14 @@ symptom, opposite end of the timescale: this one lasted 6.1 s on Office, 5.0 s o
 - Uses Playwright for both API and browser tests
 - Test config in `playwright.config.js`
 - Tests backup/restore config.json but overwrite the password hash — re-apply the correct password after running tests
+- **`config.test.json` is DELETED at the start of every run** (`playwright.config.js`, #240).
+  It is gitignored, so it is per-machine state no checkout restores and `global-teardown.js`
+  does not cover it — whatever the last run left was what the next one started from, forever,
+  on that machine alone. Deleting puts each run in the state a fresh CI checkout is already
+  proven green from. It cannot live in `global-setup.js`: Playwright runs plugin setup, where
+  `webServer` lives, BEFORE globalSetup, so `server.js` would already have read the poisoned
+  file — and `_refreshLiveConfig` skips a file that is missing, which would pin the stale
+  values in cache for the whole run instead of clearing them.
 
 ## Deployment & Operations
 - Server auto-starts on boot via scheduled task or Startup shortcut — both use `wscript.exe` + `start-server.vbs` to run hidden (no console window flashing)

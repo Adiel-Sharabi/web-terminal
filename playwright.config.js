@@ -46,6 +46,10 @@ process.env.WT_CLUSTER_TOKENS_FILE = path.join(__dirname, 'cluster-tokens.test.j
 // poisoned file, and `_refreshLiveConfig` skips a file that no longer exists, pinning
 // the stale values in cache for the whole run.
 try {
+// KNOWN, and low-cost: this is module scope, so it also fires on `--list`, `--ui` and the
+// VS Code extension - a mere listing mutates state. Left as is because `reuseExistingServer:
+// false` already refuses a concurrent run, and the worst case is that a listing during a run
+// leaves the caches pinned rather than reset, with the next PUT recreating the file.
   require('fs').unlinkSync(path.join(__dirname, 'config.test.json'));
   console.log('[config] removed config.test.json left by an earlier run (#240)');
 } catch (e) {

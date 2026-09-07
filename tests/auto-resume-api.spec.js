@@ -201,21 +201,27 @@ test.describe('#137 — the wait-period badge in the sidebar', () => {
   });
 });
 
-// #240 — THE SERVED DEFAULT IS A WRITE, NOT MERELY A READING.
+// #240 — THE API WAS MISREPORTING ITS OWN SERVER, AND A REPLACE-NOT-MERGE PUT MADE THAT
+// MISREPORT STICK.
 //
-// `GET /api/config` fills in a value for every key the file omits, and a settings client
-// edits one field and sends the WHOLE object back (`PUT /api/config` replaces rather than
-// merges). So the default the API *serves* is the value an honest read-modify-write
-// PERSISTS — which makes a disagreement between it and the process that ACTS on the key a
-// way to switch a feature off with nobody having chosen to.
+// `GET /api/config` fills in a value for every key the file omits, and it answered
+// `autoResumeOnReset: false` — #69's opt-in default, which #137 flipped and that line
+// never followed — for a feature `pty-worker.js` was running as `true` and
+// docs/CONFIGURATION.md documents as `true`. An endpoint reporting a setting the server
+// does not have is a defect on its own, whoever reads it.
 //
-// That is what happened. `server.js` served `autoResumeOnReset: false` — #69's opt-in
-// default, which #137 flipped and this line never followed — while `pty-worker.js`, the
-// process that arms the timer, defaults it to `true`. Under the suite the file being
-// written is the GITIGNORED `config.test.json`, which no checkout can restore, so one
-// interrupted run disabled arming *permanently* on that machine while CI, which has no
-// such file, stayed green. Both round-tripping specs (`exclusive-viewer`,
-// `keep-sessions-open`) were writing the opt-out on every run.
+// `PUT /api/config` then REPLACES rather than merges, so anything echoing the served
+// object back writes that misreport to disk. In this repo exactly two things do:
+// `exclusive-viewer.spec.js` and `keep-sessions-open.spec.js`, which round-trip the whole
+// config deliberately — so EVERY RUN was writing the opt-out into the GITIGNORED
+// `config.test.json`. No checkout restores that file, so one interrupted run disabled
+// arming permanently on that machine while CI, having no such file, stayed green.
+//
+// Deliberately NOT a claim about the shipped clients — the first draft of this comment
+// said "a settings client edits one field and PUTs the whole object back" and no client
+// does that. `app.html` and `lobby.html` build a FRESH object from their form fields and
+// never mention this key; the companion only GETs. Their bug is the opposite one, dropping
+// keys they do not render (#242). Checking cost one grep and the claim was wrong.
 test.describe('#240 — a config round-trip must not silently opt out of auto-resume', () => {
   test('the served default is the one the worker acts on, so GET -> PUT changes nothing', async () => {
     const ctx = await authCtx();
@@ -248,17 +254,30 @@ test.describe('#240 — a config round-trip must not silently opt out of auto-re
   // exactly how the first draft of this test went green against the unfixed server. The
   // wait is a documented constant, not a latency bet.
   test('and the worker still arms once it has re-read the file', async () => {
+    // 5.5s of deliberate waiting plus a session spawn plus an 8s poll sits close enough to
+    // the 30s default that a loaded machine would report a TIMEOUT rather than the failure
+    // this test exists to show. Raised explicitly rather than by trimming the TTL wait,
+    // which is the one thing here that must not be shortened.
+    test.setTimeout(60000);
+    // The whole body is inside the try: the round-trip, the TTL wait and the mkdirSync all
+    // happen before the session exists, and a throw in any of them would otherwise leak the
+    // request context and the temp cwd. `ctx` is created first so `finally` can always
+    // dispose it.
     const ctx = await authCtx();
-    const uuid = '240ca9ed-0000-0000-0000-0000000000c1';
-    const cwd = path.join(process.env.TEMP || os.tmpdir(), `wt-ar240-${process.pid}`);
-    fs.mkdirSync(cwd, { recursive: true });
-
-    const served = await (await ctx.get('/api/config')).json();
-    expect((await ctx.put('/api/config', { data: served })).status()).toBe(200);
-    await new Promise((r) => setTimeout(r, 5500)); // > LIVE_CONFIG_TTL, so the worker re-reads
-
-    const id = (await (await ctx.post('/api/sessions', { data: { name: 'AR 240', cwd, agent: 'claude' } })).json()).id;
+    // `id` and `cwd` are declared out here because the `finally` reads them — moving the
+    // setup inside the try is what makes them assignable-but-possibly-unset.
+    let id = null;
+    let cwd = null;
     try {
+      const uuid = '240ca9ed-0000-0000-0000-0000000000c1';
+      cwd = path.join(process.env.TEMP || os.tmpdir(), `wt-ar240-${process.pid}`);
+      fs.mkdirSync(cwd, { recursive: true });
+
+      const served = await (await ctx.get('/api/config')).json();
+      expect((await ctx.put('/api/config', { data: served })).status()).toBe(200);
+      await new Promise((r) => setTimeout(r, 5500)); // > LIVE_CONFIG_TTL, so the worker re-reads
+
+      id = (await (await ctx.post('/api/sessions', { data: { name: 'AR 240', cwd, agent: 'claude' } })).json()).id;
       await ctx.post(`/api/session/${id}/hook`, { data: { event: 'UserPromptSubmit', session_id: uuid } });
       const resetAtSec = Math.floor(Date.now() / 1000) + 3600;
       await ctx.post('/api/claude-status', {
@@ -273,9 +292,9 @@ test.describe('#240 — a config round-trip must not silently opt out of auto-re
         { timeout: 8000, message: 'the worker never armed — a config round-trip wrote an autoResumeOnReset opt-out nobody chose (#240)' })
         .toBe(true);
     } finally {
-      await ctx.delete(`/api/sessions/${id}`);
+      if (id) await ctx.delete(`/api/sessions/${id}`);
       await ctx.dispose();
-      try { fs.rmSync(cwd, { recursive: true, force: true }); } catch { /* best effort */ }
+      if (cwd) { try { fs.rmSync(cwd, { recursive: true, force: true }); } catch { /* best effort */ } }
     }
   });
 });
