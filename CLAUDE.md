@@ -1551,11 +1551,25 @@ could not have said that: it names the event, not whose it was.
 
 **The REPORTED incident, on adiel-0ffice twelve minutes earlier, has the same log shape and
 is not proven to be the same cause** — its hook body was never captured, and the question
-sat unanswered there for ten further minutes. What bounds the alternative is measured:
-across 922 transcripts on this fleet, **all 94** assistant messages issuing AskUserQuestion
-issue it **alone**, never batched with another tool, and a turn is suspended while a tool
-call is outstanding — so a main agent has no way to raise a concurrent `PreToolUse`.
-Office's own `subagents/` directory would settle it.
+sat unanswered there for ten further minutes. What bounds the alternative is measured, on
+adiel-Home: of 923 transcripts, **93 of the 94** assistant messages that issue an
+`AskUserQuestion` issue it **alone**. The one exception is a `[Bash, AskUserQuestion]`
+batch whose `Bash` was emitted at 11:31:41.142 and had **returned** by 11:31:41.334 —
+2.1 s before the question block existed at 11:31:43.453 — so it ran serially and no
+`PreToolUse` of its could follow the question. Office's own `subagents/` directory would
+settle Office outright, and is cheaper than closing the gap below.
+
+> **The first cut of that measurement said "never batched", and it was an artifact of the
+> transcript format.** Claude Code writes **each content block on its own JSONL line**, so
+> grouping by line reports zero batching *everywhere* — and the positive control gives it
+> away at once: grouped by `message.id`, **4,755 of 40,024** tool-using messages are
+> batched. The same case also disproves the reason that was offered with it: a turn is
+> **not** suspended while a tool call is outstanding, since that `Bash` ran while its
+> message was still streaming. What remains unmeasured is a question-FIRST batch
+> (`[AskUserQuestion, X]`, **0 of 94** observed): whether the executor starts `X` before
+> the question resolves is **inferred** from Claude Code's serial handling of tools that
+> are not concurrency-safe, not measured. *Count what the format actually groups, and run
+> the positive control* — the same lesson as the negative-sweep rule.
 
 **Both of the chat lens's signals die together, which is why NOTHING showed.**
 `waitingFor` (#79) needs status `waiting` **and** a captured question, and the overlay's
@@ -1571,9 +1585,11 @@ question's own `PostToolUse` stay ungated.
 **Gated on the EVENT's agent, not on the question's**, which is the narrower of the two
 rules on offer. *"Only the agent that ASKED it may resolve it"* is more general and would
 generalise a case that has never occurred: **0 of 775** subagent transcripts here contain an
-AskUserQuestion. If one ever does, its own next tool stops resolving it and the question
-waits for the turn's `Stop` — one event later, in the direction that SHOWS a question
-rather than hides one.
+AskUserQuestion. If one ever does, the only thing that stops resolving it is its **own
+sibling tool calls** — its `PostToolUse` still answers it, and so do the main agent's next
+tool, `UserPromptSubmit` and `Stop`. Only a *lost* `PostToolUse` (a hot reload in the
+window) leaves it standing until the turn's `Stop`: one event later, in the direction that
+SHOWS a question rather than hides one.
 
 **On THIS path the worker needs no matching guard, and that is a decision rather than an
 omission.** Its status is `questionPending ? 'waiting' : 'working'`, so #98's tri-state leaves the
