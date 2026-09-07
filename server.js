@@ -2484,6 +2484,13 @@ function usageLimitFields(sessionId, metrics, session) {
     // reports a spent window (so the row honestly shows the session is held), but the
     // badge must not say "resumes 14:32" when the worker's gate will refuse.
     canArm: agentsLib.armsAutoResume(session && session.agent),
+    // #227 - and the WORKER's own answer to "is a resume actually scheduled", which
+    // outranks the derivation whenever it is present. The worker holds the timer; every
+    // other field here is an input to a guess about what it decided. It is passed
+    // straight through (undefined when the session came from a worker too old to
+    // publish it, which falls back to the guess) rather than being folded in here,
+    // because the whole defect was two places computing one fact.
+    armedByWorker: session ? session.autoResumeArmed : undefined,
   });
 }
 
@@ -4304,8 +4311,12 @@ app.get('/api/sessions', async (req, res) => {
       ...favoriteFields(s.id),
       // #137 — is this session sitting out its 5h window, when does it come back,
       // and is a resume actually armed for it. One server-side derivation
-      // (lib/usage-limit.js), shared with the worker's arming gate, so the badge can
-      // never claim something the timer disagrees with.
+      // (lib/usage-limit.js), shared with the worker's arming gate.
+      //
+      // #227 — this used to end "so the badge can never claim something the timer
+      // disagrees with". IT COULD, AND IT DID, all night: sharing a MODULE is not
+      // sharing an ANSWER, and the derivation here saw only a subset of the worker's
+      // gates. `armed` now carries the worker's own autoResumeArmed instead.
       usageLimit: usageLimitFields(s.id, listMetrics[i], s),
       // #65 — compaction in progress. Unlike apiError, this rides the poll (and
       // the cluster merge) so a client opening/reconnecting mid-compaction still
