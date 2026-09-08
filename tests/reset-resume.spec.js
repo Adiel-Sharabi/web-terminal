@@ -483,7 +483,8 @@ test.describe('#69 — 5h usage-limit auto-resume', () => {
     const dataDir = makeTempDataDir();
     // Deliberately NO WT_AUTO_RESUME_ON_RESET — this asserts the shipped default, which
     // #69 had as OFF. The worker reads config.json from its own data dir (empty here),
-    // so `liveConfig('autoResumeOnReset', true)` falls through to the code default.
+    // so `liveConfig('autoResumeOnReset', usageLimit.AUTO_RESUME_ON_RESET_DEFAULT)` falls
+    // through to that shared default, which is ON (#240 moved it out of pty-worker.js).
     const worker = spawnWorker(pipe, dataDir);
     try {
       const client = await connectClient(pipe);
