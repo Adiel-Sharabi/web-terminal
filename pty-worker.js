@@ -1505,12 +1505,14 @@ function armIdle(session, event) {
   // `Notification` carries no opinion at all (#98's tri-state leaves the flag alone), so
   // it is still true when the hold is released.
   //
-  // KNOWN GAP, named rather than papered over: a question arriving INSIDE the debounce
-  // window (idle armed first, the AskUserQuestion landing 750ms behind it) is still not
-  // seen, because this checks at ARM time, not at fire time. Putting it in applyIdle
-  // would cover that ordering but would also skip the #129 compact replay that runs
-  // above the status flip, and the ordering is unmeasured: in every case observed the
-  // Notification arrives ~60s AFTER the question, which is what raises it at all.
+  // WHY AT ARM TIME rather than in applyIdle, where it would also catch a question that
+  // arrived during the 750ms debounce: applyIdle runs the #129 compact replay ABOVE the
+  // status flip, so returning early there would skip it. That ordering turns out to be
+  // unreachable anyway - `questionPending: true` is only ever sent for PreToolUse +
+  // AskUserQuestion (server.js), and the worker's PreToolUse case calls cancelPendingIdle,
+  // so the very hook that raises the flag destroys any armed idle. An earlier draft of this
+  // comment offered that window as a KNOWN GAP; review traced it and it cannot happen. The
+  // reason to sit here is #129, not a gap.
   if (session.questionPending) {
     log(`hook: session "${session.name}" ${event} not idled - a question is still on screen`);
     return;
@@ -1579,10 +1581,10 @@ function correctStaleStatus(session) {
   // effects: the red pulsing dot went calm green, statusClearsApproval() flipped the
   // attention record to cleared, and an FCM 'clear' auto-dismissed the notification
   // already delivered to the phone. The system retracted its own alarm for a question
-  // still open. A 'waiting' session ends the way it reliably already does — the hook
-  // that fires when the user answers. Only true ABANDONMENT (agent died mid-question,
-  // no resolving hook ever) needs a backstop, at a horizon no real answer delay
-  // reaches, so an overnight question is still red in the morning.
+  // still open. A 'waiting' session ends the way it reliably already does - the hook that
+  // fires when the user answers. (That used to be followed by a carve-out for true
+  // ABANDONMENT at a longer horizon; #230 below removed it, so the principle now runs
+  // unqualified.)
   //
   // #79 — 'waiting' was only ever the half of that inversion this process could
   // SEE. A session blocked on an AskUserQuestion is just as silent, and for exactly
@@ -1626,8 +1628,13 @@ function correctStaleStatus(session) {
   // in seconds; a cancelled alarm on a live question is invisible by construction and cost
   // 14 hours in the report that opened this. The state still ends the way it reliably does
   // (the hook that fires when the user answers - 71 of 72 did exactly that), ANY hook at
-  // all clears it, and a genuinely dead agent has its own path: term.onExit DELETES the
-  // session, so a dead PTY leaves no row to be stuck on.
+  // all clears it, and a dead SHELL has its own path: term.onExit DELETES the session, so
+  // a dead PTY leaves no row at all. NOT a dead AGENT, though, and review caught this
+  // being claimed: term.onExit fires when the SHELL exits, and a session with an
+  // autoCommand whose agent died drops back to a bash prompt with the PTY alive (#147
+  // Gap 1). That is precisely the 1-in-72 case, and it is NOT rescued here - the row stays
+  // flagged until someone looks at it or types into it. Still the cheap error, but the
+  // escape hatch is narrower than first written.
   //
   // `questionPending` is consequently cleared only by the hooks that RESOLVE a question,
   // never here. The old branch cleared it alongside the status so a later turn would not

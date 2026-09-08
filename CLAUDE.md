@@ -1630,12 +1630,14 @@ survives the hold. The precondition is routine rather than exotic — `Notificat
 appears **365** times in adiel-Home's worker log since #61's hold shipped, `Stop held`
 another 771; what was unobserved is only the coincidence with a live question.
 
-> **A KNOWN GAP, named rather than papered over.** The check is at ARM time, not at fire
-> time, so a question arriving INSIDE the 750 ms debounce window (idle armed first, the
-> `AskUserQuestion` landing behind it) is still not seen. Putting it in `applyIdle` would
-> cover that ordering but would also skip the #129 compact replay that runs above the
-> status flip — and the ordering is unmeasured: in every observed case the Notification
-> arrives ~60 s AFTER the question, which is what raises it at all.
+> **WHY THE CHECK SITS AT ARM TIME, and a gap that turned out not to exist.** Putting it in
+> `applyIdle` would also catch a question arriving during the 750 ms debounce, but `applyIdle`
+> runs the #129 compact replay ABOVE the status flip, so returning early there would skip it.
+> The first draft of this note offered that debounce window as a **known gap**; review traced
+> it and it **cannot happen** — `questionPending: true` is only ever sent for `PreToolUse` +
+> `AskUserQuestion`, and the worker's `PreToolUse` case calls `cancelPendingIdle`, so the very
+> hook that raises the flag destroys any armed idle. *Naming a gap is only worth doing if the
+> gap is real; an invented one is the same defect as an unmeasured claim, wearing humility.*
 
 > **The second regression test's first draft asserted the WRONG thing**, which is worth
 > keeping because it is a fact about #61 rather than about #239. Answering the question

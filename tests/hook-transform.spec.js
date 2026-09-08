@@ -179,7 +179,8 @@ test.describe('Hook transform: Notification demux', () => {
 
       // An unrecognised notification must not move the status in EITHER
       // direction: promoting it to a permission ask would park the session on a
-      // false "waiting" for the 12 hours correctStaleStatus allows one.
+      // false "waiting" indefinitely — since #230 correctStaleStatus does not time a
+      // blocked-on-user session out at all, so there is no backstop to catch the mistake.
       await new Promise(r => setTimeout(r, DEBOUNCE_MS + SLACK_MS));
       expect(await getStatus(ctx, id)).toBe('working');
     } finally {
