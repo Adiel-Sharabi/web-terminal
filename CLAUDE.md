@@ -69,7 +69,7 @@ Three supervised Node.js processes. See `docs/ARCHITECTURE.md` for the full walk
 - `lib/user-turn.js` — **the one owner of what a `role:user` turn IS**: `classifyUserTurn` (which turns a human actually TYPED) and `typedTextOf` (the characters they typed, which the chat lens's Queued echo matches on, #149). Its only import is the leaf `lib/ansi.js`, so `lib/transcript.js` can still use it without a require cycle
 - `lib/ansi.js` — **the one owner of the escape-stripping rule** (`ANSI_RE`, `stripAnsi`), imported by `lib/transcript.js` (which re-exports it for `lib/speech.js` and `lib/transcript-codex.js`) and by `lib/user-turn.js`. A leaf: it requires nothing, so it cannot reintroduce a cycle. It exists because #192 briefly added a THIRD copy that had already drifted — `[0-9;?]` params instead of ECMA-48's `[0-?]`, letting a colon-form `ESC[38:5:196m` through a strip that claimed to remove it
 - `lib/recap.js` — the pure session-recap rules: `condense`, `toolTally`, `summariseTasks`, plus a re-export of `lib/user-turn.js`'s `classifyUserTurn` for its existing importers — **change the rule in `lib/user-turn.js`, never here**. Serves `GET /api/sessions/:id/recap`. See "The session recap" below
-- `lib/notification-shape.js` — the pure rules for a Claude `Notification` hook (#194 Gap 1): `classifyNotification` (permission / idle / **benign** / **unknown** — the last two were one silent `drop`), plus the redaction and rate rule for logging an unknown one. **Instrumentation only — it deliberately changes no behaviour**: `correctStaleStatus` gives a `waiting` session 12h against 5m for a `working` one, so promoting an unrecognised notification to a permission ask on a guess would park a session on a false "waiting" for half a day
+- `lib/notification-shape.js` — the pure rules for a Claude `Notification` hook (#194 Gap 1): `classifyNotification` (permission / idle / **benign** / **unknown** — the last two were one silent `drop`), plus the redaction and rate rule for logging an unknown one. **Instrumentation only — it deliberately changes no behaviour**: `correctStaleStatus` never times out a `waiting` session at all since #230, against 5m for a `working` one, so promoting an unrecognised notification to a permission ask on a guess would park a session on a false "waiting" INDEFINITELY - the cost of that mistake went UP when the backstop went away, which is the one place #230 makes another rule stricter rather than looser
 - `app.html` — unified single-page app (terminal + sidebar + settings). Polyfills `crypto.randomUUID` for plain-HTTP contexts. `?rtt=1` enables the per-keystroke RTT overlay
 - `terminal.html` — legacy terminal-only page. **No longer served** (#218): `/s/:id` redirects to `/app/:id`, because this page neither gated input at `WS_INPUT_MAX` nor could render an `inputDropped` notice
 - `lobby.html` — legacy lobby page (served at `/lobby`)
@@ -1609,18 +1609,46 @@ SHOWS a question rather than hides one.
 
 **On THIS path the worker needs no matching guard, and that is a decision rather than an
 omission.** Its status is `questionPending ? 'waiting' : 'working'`, so #98's tri-state leaves the
-flag alone, the session stays `waiting`, and it is handed `correctStaleStatus`'s **12h**
-clock instead of the **5-minute** one that had been demoting it to idle while the prompt
-was still on screen.
+flag alone, the session stays `waiting`, and it is spared the **5-minute** clock that had
+been demoting it to idle while the prompt was still on screen. Since #230 a blocked-on-user
+session is not timed out at ALL, so there is no longer a second, longer clock behind it.
 
-**A held idle `Notification` is a SECOND path to the same symptom, and it is NOT fixed
-here (#239).** When subagents are live it is parked as `heldStop` *before* that question
-check, and the `SubagentStop` that releases it lands in `applyIdle`, which has no question
-check at all. Found reviewing the fix above, unmeasured in the wild, and worker-side — so
-it needs a cold restart where this one hot-reloads.
+**A held idle `Notification` is a SECOND path to the same symptom, and #238 deliberately
+did not touch it — FIXED SEPARATELY IN #239.** When subagents are live the idle event is
+parked as `heldStop` *before* that question check, and the `SubagentStop` that releases it
+hands it to `armIdle`, which had no question check on any path. So the guard was bypassed
+by the ordinary shape of a session that had dispatched a subagent, and the SUBAGENT
+finishing idled a session blocked on the MAIN agent's question. The refusal now lives in
+`armIdle` — the funnel BOTH idle routes pass through — rather than being copied to the
+release site.
 
-**Not #230**, whose *correctly*-set `waiting` is retracted by that same 12h clock — same
-symptom, opposite end of the timescale: this one lasted 6.1 s on Office, 5.0 s on Home.
+**Exactly one of the two holdable events is dangerous, and it is the more frequent kind of
+block.** A held `Stop` is safe BY ACCIDENT: `server.js` classifies it as an event that
+RESOLVES a question and sends `questionPending:false` with it, so the flag is already clear
+on release. A `Notification` carries no opinion at all (#98's tri-state), so the flag
+survives the hold. The precondition is routine rather than exotic — `Notification held`
+appears **365** times in adiel-Home's worker log since #61's hold shipped, `Stop held`
+another 771; what was unobserved is only the coincidence with a live question.
+
+> **WHY THE CHECK SITS AT ARM TIME, and a gap that turned out not to exist.** Putting it in
+> `applyIdle` would also catch a question arriving during the 750 ms debounce, but `applyIdle`
+> runs the #129 compact replay ABOVE the status flip, so returning early there would skip it.
+> The first draft of this note offered that debounce window as a **known gap**; review traced
+> it and it **cannot happen** — `questionPending: true` is only ever sent for `PreToolUse` +
+> `AskUserQuestion`, and the worker's `PreToolUse` case calls `cancelPendingIdle`, so the very
+> hook that raises the flag destroys any armed idle. *Naming a gap is only worth doing if the
+> gap is real; an invented one is the same defect as an unmeasured claim, wearing humility.*
+
+> **The second regression test's first draft asserted the WRONG thing**, which is worth
+> keeping because it is a fact about #61 rather than about #239. Answering the question
+> BEFORE the `SubagentStop` leaves the session `working`, and correctly so: a main-agent
+> `PostToolUse` drops the held event outright, because a parent that picked its turn back
+> up must not be handed a stale "done" when its subagent exits. The honest shape is to let
+> the release be REFUSED first, then answer, then send a fresh idle.
+
+**Not #230**, whose *correctly*-set `waiting` was retracted by that same corrector at 12h -
+same symptom, opposite end of the timescale: this one lasted 6.1 s on Office, 5.0 s on Home.
+#230 has since removed that horizon entirely (measured wrong 71 times out of 72).
 
 ## Auth System
 - Cookie-based session auth (primary, for browser users)

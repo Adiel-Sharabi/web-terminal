@@ -9,10 +9,10 @@
 //
 // This spec's job is to pin the CLASSIFICATION as unchanged while the reporting
 // changes. Flipping the fallthrough to `permission` is the tempting fix and it
-// is not safe on current evidence — `correctStaleStatus` gives a `waiting`
-// session 12 hours against 5 minutes for a `working` one, so a benign message
-// misread as an approval ask parks a session on a false "waiting" for half a
-// day. Measure, then decide.
+// is not safe on current evidence — since #230 `correctStaleStatus` does not time a
+// `waiting` session out AT ALL, against 5 minutes for a `working` one, so a benign
+// message misread as an approval ask parks a session on a false "waiting"
+// indefinitely. Measure, then decide.
 const { test, expect } = require('@playwright/test');
 const {
   NOTIFICATION_KINDS,
