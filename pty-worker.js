@@ -214,7 +214,7 @@ function autoResumeOnResetEnabled() {
   // path a cleared window does. One less thing for this process to persist.
   if (process.env.WT_AUTO_RESUME_ON_RESET === '0') return false;
   if (process.env.WT_AUTO_RESUME_ON_RESET === '1') return true;
-  return liveConfig('autoResumeOnReset', true) === true;
+  return liveConfig('autoResumeOnReset', usageLimit.AUTO_RESUME_ON_RESET_DEFAULT) === true;
 }
 
 function isClaudeSession(session) {
