@@ -1,4 +1,4 @@
-# Vendored `xterm` 4.0.0 — local patches (#81, #127, #151)
+# Vendored `xterm` 4.0.0 - local patches (#81, #127, #151, #237)
 
 This is stock **xterm 4.0.0** (`lib/` only, from the pub cache) plus the fixes
 below. It is wired in by `dependency_overrides` in `ai-terminal/pubspec.yaml`.
@@ -182,7 +182,10 @@ row per scroll, on the hottest path in the terminal. `move` is allocation-free.
   causes no upstream regression. **Re-run after adding `prependAll` (#127): still
   `+108 ~2 -2`, same two failures. Re-run after the `getText` change (#151):
   still `+108 ~2 -2`, same two failures — and it earned its keep, catching the
-  first cut of that patch at `+106 ~2 -4`.**
+  first cut of that patch at `+106 ~2 -4`. Re-run after the SGR prefix guard (#237),
+  Flutter 3.44.4 / Dart 3.12.2: patched `+108 ~2 -2`, pristine `+108 ~2 -2`, the same two
+  failures both times (`TerminalView.textScaler works`, `TerminalView.textScaler can
+  obtain textScaler from parent`).**
 
 To repeat that last check (the test suite is deliberately **not** vendored — it
 cannot run in our CI and ships two known-failing tests):
@@ -200,3 +203,91 @@ rm -rf test .dart_tool pubspec.lock          # leave the vendored copy clean
 
 Worth reporting to https://github.com/TerminalStudio/xterm.dart. Until a release
 carries the fix, this vendored copy stays.
+
+## #237 - a private-prefixed CSI was dispatched as an SGR
+
+`lib/src/core/escape/parser.dart`, `_csiHandleSgr`.
+
+`_csiHandlers` is keyed on the CSI **final byte alone**. `_consumeCsi` *does* store the
+private-parameter prefix in `_csi.prefix` - the patch itself reads it back - but the
+**dispatch** ignores it, so every `CSI <prefix> ... m` reached the SGR handler as if the
+prefix were not there. (The distinction matters: the prefix was never *lost*, which is
+why the fix is one line at the handler and not a parser change.)
+
+Claude Code emits **`CSI > 4 m`** at startup - XTMODKEYS, xterm's `modifyOtherKeys`,
+which enables enhanced key reporting. Stock read it as bare parameter `4` and ran
+`case 4: setCursorUnderline()`.
+
+MEASURED with `scripts/rig/probe-underline-sgr.js` against a real claude TUI:
+
+| | |
+|---|---|
+| `ESC[>4m` | **once**, near the head of the session |
+| `SGR 24` (underline off) anywhere in the stream | **0** |
+| `SGR 0` (full reset) after that point | **0** |
+
+So underline latched on near startup and **never** turned off: every cell drawn for the
+rest of the session carried `CellFlags.underline`. That is the reported "every line and
+every word is underlined", identically on Windows, phone and tablet - it is the shared
+path. `xterm.js` parses the same bytes correctly, which is why `app.html` never showed
+it and why the web client was the right discriminator.
+
+> **The original capture's exact figures are deliberately not quoted any more.** The first
+> write-up of this section said "at byte **325** of a 7215-byte session (4.5% in)", and the
+> probe **printed neither byte offsets nor a claude version** - so that number could not be
+> re-derived from its own output, and a later capture could not be compared with it. The
+> probe now prints both, plus the first clear after each underline-setting sequence, which
+> is what turns "it latches" from a reading into a measurement. Re-capture before quoting a
+> number; the TUI's byte stream is version-specific.
+
+### The guard is `>= Ascii.lessThan`, never `!= null`
+
+`_consumeCsi` takes **anything in 0x3A..0x3F** (`Ascii.colon` through
+`Ascii.questionMark`) as the prefix. That range is wider than ECMA-48's private markers,
+which are only **0x3C-0x3F** (`<` `=` `>` `?`) - it also swallows a leading `:` and a
+leading `;`.
+
+So `ESC[;4m` is the ordinary SGR `0;4` and `ESC[;7m` is `0;7`, and both arrive here
+carrying a "prefix". **Measured: stock applies both (underline, inverse); a
+`prefix != null` guard drops both.** That is a silent rendering regression traded for the
+one being fixed, so the test is on the marker range and
+`ai-terminal/test/xterm_private_csi_sgr_test.dart` pins it - red against `!= null`, green
+against stock and green against the guard as shipped.
+
+### What is NOT fixed, and one claim that was simply wrong
+
+**`CSI > c` was never broken.** An earlier version of this section, of the patch comment
+and of the PR body all said the final-byte-only dispatch would "answer a **secondary**
+device-attributes query as though it were primary". It would not:
+`_csiHandleSendDeviceAttributes` **already switches on `_csi.prefix`** (`>` secondary,
+`=` tertiary, otherwise primary) in stock code. Check the handler before naming it.
+
+Exactly **three** places in this file read `_csi.prefix`: that one, `_csiHandleMode`
+(`h`/`l`, `?` selects the DEC modes) and this patch. Everything else in `_csiHandlers`
+ignores it, and these are the reachable consequences - **left unfixed, and unmeasured**,
+because no capture from claude or codex in this repo contains any of them:
+
+| sequence | what it should be | what this parser does |
+|---|---|---|
+| `CSI ? 1;2 S` | XTSMGRAPHICS | falls into `scrollUp(1)` |
+| `CSI ? 6 n` | DECXCPR | answers as a plain CPR |
+| `CSI ? Ps J` | DECSED | ordinary erase-in-display |
+| `CSI ? Ps K` | DECSEL | ordinary erase-in-line |
+
+The other private sequences claude emits (`CSI > 0 q`, `CSI < u`) have no handler at all
+and fall through to `unknownCSI`. Measure one of the four above before guarding it - this
+patch fixes the one that was measured to misfire, and names the rest rather than widening
+blind.
+
+### Tests
+
+`ai-terminal/test/xterm_private_csi_sgr_test.dart`. Three cases are red against stock
+(the first cell, the latch, all four private markers); three are regression guards, so the
+fix cannot be "achieved" by disabling underline outright - and one of those guards, the
+empty-first-parameter case, is red against the `!= null` first cut of this very patch.
+
+**The first two are not interchangeable.** `ESC[>4mhello` is what catches a parser that
+sets underline and clears it on the next attribute change, because the cell is written
+before any later attribute arrives. The **latch** case would *pass* against such a parser
+- its first cell follows an `ESC[38;2;...m` - and is instead what matches the REPORT: text
+long after the sequence, past unrelated colour changes, still underlined.
