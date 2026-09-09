@@ -185,6 +185,20 @@ const ESC = String.fromCharCode(0x1b); // keep raw ESC bytes out of this source
 const jl = (o) => JSON.stringify(o);
 const asstLine = (blocks, extra = {}) => jl({ type: 'assistant', message: { role: 'assistant', content: blocks }, ...extra });
 const userLine = (content, extra = {}) => jl({ type: 'user', message: { role: 'user', content }, ...extra });
+// #249 — how Claude Code records a prompt sent while the agent is mid-turn: an
+// `attachment`, never a `role:user` message. Shape taken from a real transcript.
+const queuedLine = (prompt, extra = {}, over = {}) => jl({
+  type: 'attachment',
+  attachment: {
+    type: 'queued_command',
+    prompt,
+    source_uuid: '11111111-2222-3333-4444-555555555555',
+    commandMode: 'prompt',
+    origin: { kind: 'human' },
+    ...over,
+  },
+  ...extra,
+});
 
 test.describe('lib/transcript.parseTranscriptTurn', () => {
   test('assistant text-only turn → role/text, empty toolUses, null ts', () => {
@@ -331,6 +345,100 @@ test.describe('lib/transcript.parseTranscriptTurn', () => {
     expect(turn.text.length).toBe(65536);
     expect(turn.text.endsWith('…')).toBe(true);
   });
+
+  // --- #249: a prompt sent while the agent is WORKING -----------------------
+  // Claude Code does not write such a prompt as a `role:user` message — it
+  // records it as an attachment, so the chat lens never saw it and the only
+  // thing showing it was the client's optimistic echo, rendered BELOW every
+  // transcript turn. See the block above `_queuedPromptText` in lib/transcript.js.
+  test('a queued human prompt becomes a user turn (#249)', () => {
+    const turn = parseTranscriptTurn(queuedLine('check the health module too', {
+      timestamp: '2026-09-09T06:40:23.224Z',
+    }));
+    expect(turn).toEqual({
+      role: 'user',
+      text: 'check the health module too',
+      typedText: 'check the health module too',
+      userKind: 'human',
+      toolUses: [],
+      ts: '2026-09-09T06:40:23.224Z',
+    });
+  });
+
+  // The `rendered` block restates the prompt inside a `<system-reminder>` telling
+  // the AGENT how the message was delivered. That wrapper is not what the user
+  // typed, and an echo compared against it could never match — the same #149 trap
+  // one layer out. The turn is built from `attachment.prompt` alone.
+  test('the queued turn is built from the prompt, never from the rendered reminder', () => {
+    const turn = parseTranscriptTurn(queuedLine('ship it', {
+      rendered: [{ content: '<system-reminder>\nThe user sent a new message while you were working:\nship it\n</system-reminder>' }],
+    }));
+    expect(turn.text).toBe('ship it');
+    expect(turn.typedText).toBe('ship it');
+  });
+
+  // A queued prompt carrying a pasted image: the text blocks are the prompt, and
+  // the base64 image bytes must never be shipped to a client.
+  test('a block-shaped queued prompt keeps its text and drops the image bytes', () => {
+    const turn = parseTranscriptTurn(queuedLine([
+      { type: 'text', text: 'what is wrong here' },
+      { type: 'image', source: { type: 'base64', media_type: 'image/png', data: 'AAAABBBBCCCC' } },
+    ]));
+    expect(turn.text).toBe('what is wrong here');
+    expect(turn.text).not.toContain('AAAABBBBCCCC');
+  });
+
+  // Measured over 972 transcripts: 520 `task-notification` records — harness
+  // plumbing, 34 of which restate a notification that already arrives as a real
+  // user turn (matched on the shared `<task-id>`).
+  //
+  // TWO FIXTURES, and the second one is the load-bearing one. The first is
+  // faithful to the corpus — all 520 carry NO `origin` — and that is exactly why
+  // it cannot pin this gate: the origin gate rejects it too, so deleting
+  // `commandMode !== 'prompt'` leaves it green. The second is a shape that does
+  // not occur, built for the one job of failing when THAT line is deleted.
+  test('a queued task-notification is NOT a turn', () => {
+    expect(parseTranscriptTurn(jl({
+      type: 'attachment',
+      attachment: {
+        type: 'queued_command',
+        prompt: '<task-notification><summary>Agent "search" finished</summary></task-notification>',
+        commandMode: 'task-notification',
+      },
+    }))).toBeNull();
+  });
+
+  test('the commandMode gate alone rejects a task-notification', () => {
+    // Synthetic: a human `origin` on a task-notification, so ONLY the
+    // commandMode gate can turn this away.
+    expect(parseTranscriptTurn(queuedLine(
+      '<task-notification><summary>Agent "search" finished</summary></task-notification>',
+      {},
+      { commandMode: 'task-notification' },
+    ))).toBeNull();
+  });
+
+  // A peer's queued message is wrapped in `<agent-message from="…">`, a signature
+  // `classifyUserTurn` does not recognise — it reads as `human`, so emitting one
+  // would put another agent's words in a "You" bubble. Zero of the 34 measured
+  // appear as `role:user` turns, so this leaves them exactly as they are today.
+  test('a queued PEER message is NOT a turn — it would render as "You"', () => {
+    expect(parseTranscriptTurn(queuedLine('<agent-message from="fixer">done</agent-message>', {}, {
+      origin: { kind: 'peer', from: 'fixer' },
+    }))).toBeNull();
+  });
+
+  test('other attachment types stay non-conversational', () => {
+    expect(parseTranscriptTurn(jl({ type: 'attachment', attachment: { type: 'hook_success', hookName: 'PreToolUse:Bash' } }))).toBeNull();
+    expect(parseTranscriptTurn(jl({ type: 'attachment', attachment: { type: 'total_tokens_reminder', text: 'x' } }))).toBeNull();
+    expect(parseTranscriptTurn(jl({ type: 'attachment' }))).toBeNull();
+  });
+
+  test('a queued prompt with no text is not a turn', () => {
+    expect(parseTranscriptTurn(queuedLine('   '))).toBeNull();
+    expect(parseTranscriptTurn(queuedLine([{ type: 'image', source: { data: 'AAAA' } }]))).toBeNull();
+    expect(parseTranscriptTurn(queuedLine(undefined))).toBeNull();
+  });
 });
 
 test.describe('lib/transcript.stripAnsi', () => {
@@ -469,6 +577,33 @@ test.describe('lib/transcript.scanTurnsBackward', () => {
     // Concatenated, p2 then p1 are contiguous in the original order.
     const merged = p2.turns.concat(p1.turns).map(t => t.text);
     expect(new Set(merged).size).toBe(merged.length); // no duplicates
+  });
+
+  // --- #249: THE REPORTED SYMPTOM ------------------------------------------
+  // "I enter a prompt, send it, it's queued … the terminal took it and responded
+  // for it, but in the chat lens it looks in a wrong order." The queued prompt
+  // was in no page at all, so the client's optimistic echo — which renders after
+  // every transcript turn AND after the working indicator — was the only thing
+  // showing it, below the answer to it. A page has to carry the prompt, at its
+  // own position, ABOVE the reply.
+  test('a queued prompt lands in the page ABOVE the answer to it (#249)', () => {
+    const lines = [
+      userLine('start the build'),
+      asstLine([{ type: 'tool_use', name: 'Bash', input: { command: 'build' } }]),
+      queuedLine('check the health module too'),   // sent mid-turn
+      asstLine([{ type: 'text', text: 'Checking immediately.' }]),
+    ];
+    const buf = Buffer.from(lines.join('\n') + '\n', 'utf8');
+    const r = scanTurnsBackward((off, len) => buf.slice(off, off + len), buf.length, { limit: 50 });
+    const texts = r.turns.map(t => t.role + ':' + t.text);
+    expect(texts).toEqual([
+      'user:start the build',
+      'assistant:',
+      'user:check the health module too',
+      'assistant:Checking immediately.',
+    ]);
+    // And it carries the typed text the "Queued" echo reconciles against (#149).
+    expect(r.turns[2].typedText).toBe('check the health module too');
   });
 });
 
