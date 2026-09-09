@@ -123,6 +123,115 @@ most likely to be clicked. The client always receives the full shape.
 > onto a server-published field is a separate additive change, **not** a "keep them in
 > sync" instruction.
 
+## A prompt sent WHILE THE AGENT WORKS is not a `role:user` turn (#249)
+
+Claude Code records a prompt submitted mid-turn as an **attachment**, never as a
+user message:
+
+```json
+{"type":"attachment","timestamp":"…",
+ "attachment":{"type":"queued_command","prompt":"…",
+               "commandMode":"prompt","origin":{"kind":"human"},"source_uuid":"…"}}
+```
+
+`parseTranscriptTurn` read only `user`/`assistant` lines, so **the chat lens never
+received the prompt at all**. The only thing showing it was the client's optimistic
+`Queued` echo (#31) — and `conversation_view.dart` renders echoes after every
+transcript turn *and* after the working indicator, so everything the agent produced
+in reply appeared **above** it. Reported 2026-09-09 as *"the terminal took it and
+responded for it, but in the chat lens it looks in a wrong order."*
+
+**The same gap has a worse second half.** The echo reconciles by matching a turn's
+`typedText` (#149); against a turn that does not exist it can never match, so once
+the session leaves `working`/`waiting` the 90 s safety timeout **deletes** it and the
+prompt leaves chat entirely. That is the 2026-08-16 report (*"I add prompt … I can't
+see it in chat"*) arriving through a different door — #149 fixed the comparison, and
+the thing being compared against was missing all along.
+
+**MEASURED** over 972 transcripts / 641 `queued_command` records (a live corpus — it
+was 973 files an hour later in review and every derived count below reproduced
+exactly):
+
+| `commandMode` / `origin.kind` | count |
+|---|---|
+| `task-notification` / (no origin) | 520 |
+| `prompt` / `human` | 87 |
+| `prompt` / `peer` | 34 |
+
+**80 of the 87 human ones have no `role:user` turn anywhere in their session** whose
+`typedText` matches. The 7 that do are coincidences (short words like `continue`,
+typed again later); exactly **one** matches within six records, and reading that
+session shows a genuine second send — the turn was interrupted
+(`[Request interrupted by user]`) and the sentence re-typed 28 s later. Re-run over
+all 54 real sessions with the fix in place: 87 turns emitted, **0 adjacent duplicate
+user bubbles**.
+
+**The fix is one branch in `lib/transcript.js`, server-side only** — the chat lens is
+fixed with **no client release**, the same arrangement `typedText` itself uses, and it
+**hot-reloads**. The turn is emitted at the attachment's own byte position, which is
+what puts it above the reply.
+
+*Say "the chat lens", not "both clients".* Only the companion has one — `app.html`
+carries no reference to `/transcript`, `typedText` or `userKind` at all — and a first
+draft of this section said "both clients" anyway. That exact phrase is already
+recorded as wrong once in this file, for a different reason (#206, where the second
+client was `terminal.html` and nobody had checked). **An older companion is covered
+too, and by construction:** `turnMatchKey` falls back to `normEcho(turn.text)` when
+`typedText` is absent, and here `text === typedText`, so the echo reconciles even on a
+build predating #149.
+
+**TWO GATES, and both are narrowings rather than sniffs.** `commandMode === 'prompt'`
+excludes `task-notification`: 520 rows of plumbing (`classifyUserTurn` reads one as
+`system`, so the cost is noise, not a mislabelled bubble), **34 of which restate a
+notification that already arrives as a real `role:user` turn** — matched on the
+shared `<task-id>`, the only sound comparison, since **not one of the 520 is
+textually identical** to a user turn and a prefix match therefore answers whatever
+length you pick. `origin.kind === 'human'` excludes `peer`: another agent's queued message is
+wrapped in `<agent-message from="…">`, **a signature `classifyUserTurn` does not
+recognise** — it classifies as `human`, so admitting one would put another agent's
+words in a **"You"** bubble, which is the teammate-bubble bug this repo has already
+paid for once. None of the 34 appears as a `role:user` turn either, so a queued
+teammate message stays invisible in chat; that is #250, and its fix is a
+signature in `lib/user-turn.js`, not a wider gate here.
+
+**Build the turn from `attachment.prompt`, never from `rendered`.** The `rendered`
+array restates the prompt inside a `<system-reminder>` telling the *agent* how the
+message was delivered — wrapper text, not what the user typed, and an echo compared
+against it could never match. Same trap as #149, one layer out. A queued prompt
+carrying a pasted image arrives as content blocks: keep the text, drop the base64.
+
+**Unmeasured, deliberately.** A queued **slash command** — 0 of the 87 start with
+`/`, so which `commandMode` one carries is unknown; if it is not `'prompt'` it stays
+as it is today. And Codex, whose rollout has no equivalent record and was not looked
+at, per the standing convention that Claude's behaviour is not evidence about it.
+
+> **The screenshot said "one bubble in the wrong place"; the transcript said "no
+> bubble at all".** Both readings fit the crop, and they have different fixes — a
+> client ordering change versus a server parser gap. What settled it was reading the
+> actual transcript: `queue-operation enqueue`, then the attachment, then the reply,
+> with no user message anywhere between. *The rollout is ground truth; the screen
+> lies* — the same rule the Codex work established, applied to a screenshot.
+
+> **MUTATE ONE GATE AT A TIME, and a negative fixture faithful to the corpus is the
+> one most likely to be vacuous.** Both gate tests were confirmed red by removing
+> BOTH gates together, and that proved nothing about either. The `task-notification`
+> fixture is drawn from real data, where all 520 carry **no `origin`** — so the
+> ORIGIN gate turns it away, and `commandMode !== 'prompt'` could be deleted with the
+> whole suite still green. The fix is a second, deliberately **synthetic** fixture (a
+> human `origin` on a task-notification, a shape that does not occur) whose only job
+> is to fail when that one line goes. Caught in review, and it is this repo's
+> "audit the negatives first" rule arriving from a new direction: the usual vacuous
+> negative passes because the feature is absent, this one passes because a
+> *different* guard fires first.
+
+> **And one number in the first draft was an artifact of its own threshold.** It
+> claimed 9 of the 520 task-notifications already arrive as real user turns; that 9
+> came from testing whether a user turn contained the prompt's first 120 characters.
+> A 60-char prefix gives 15, exact equality gives **0**, and the sound comparison —
+> the `<task-id>` they share — gives **34**. A measurement whose answer moves with a
+> parameter nobody chose deliberately is not a measurement. State the predicate, not
+> just the count.
+
 ## Scrollback has TWO byte spaces, and they diverge at the HEAD (#167/#176/#178)
 
 **A byte offset into a session's scrollback is not a position.** `pty-worker.js`
