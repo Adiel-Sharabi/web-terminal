@@ -160,12 +160,20 @@ test.describe('#228 - lib/cap-sample.js, the pure rules', () => {
       'C:' + BS + 'Users' + BS + 'adiel' + BS + 'secrets' + BS + 'id_rsa',
       '~/.ssh/config',
       './src/secret.env',
-      // ASSEMBLED, NOT WRITTEN. `scripts/check-no-secrets.js` scans SOURCE for
-      // /sk-ant-[A-Za-z0-9_-]{20,}/ and /[a-z0-9-]+\.ts\.net/, and a fixture
-      // that must PROVE those shapes get redacted would otherwise trip the repo's own
-      // scanner. Splitting the literal keeps the runtime value byte-identical - the
-      // thing under test is unchanged - while leaving no match in the file. Weakening
-      // the fixture instead would have quietly stopped testing the shape that matters.
+      // ASSEMBLED, NOT WRITTEN. scripts/check-no-secrets.js scans SOURCE for an
+      // Anthropic-key shape and a MagicDNS hostname shape, and a fixture that must
+      // PROVE those get redacted would otherwise trip the repo's own scanner.
+      // Splitting the literal keeps the runtime value byte-identical - the thing
+      // under test is unchanged - while leaving no match in the file. Weakening the
+      // fixture instead would have quietly stopped testing the shape that matters.
+      //
+      // The patterns are described in WORDS on purpose. The first draft of this
+      // comment quoted them as regexes, and the word-boundary escape in them was
+      // read as an escape by the editing channel and written as a literal U+0008 -
+      // three of them, in a comment about a safety gate, caught by a DIFFERENT
+      // safety gate (tests/control-bytes.spec.js). That is the recorded hazard
+      // exactly: an escape written through a channel that interprets it arrives as
+      // the control character, and no renderer shows you.
       'sk-ant-' + 'api03-abcdefabcdefabcdefabcdef',
       'someone@example.com',
       'https://a-host.example.ts' + '.net/s/abc',
