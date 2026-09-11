@@ -75,8 +75,22 @@ test.describe('Keep Sessions Open', () => {
   });
 
   test.afterAll(async () => {
-    // Restore keepSessionsOpen to false
-    try { await setKeepSessionsOpen(ctx, false); } catch (e) {}
+    // Restore the SERVER DEFAULT, which is `true` - not the `false` this used to write.
+    //
+    // `false` was never the default: `liveConfig('keepSessionsOpen', true)` and the
+    // fill-in in `GET /api/config` both say true, and every spec that runs before the
+    // first config write of a run already runs under true. Writing `false` here was
+    // harmless only because `PUT /api/config` REPLACED the file, so a later partial PUT
+    // (`security.spec.js` sends four keys) wiped the key back to absent, i.e. back to
+    // true, for the rest of the run.
+    //
+    // #242 made the PUT merge instead, which is the whole point of that fix - so what
+    // this line writes is now what every LATER spec runs under. With `false` sticky the
+    // server answers `{"mode":"background"}` by closing the socket (4002,
+    // `keepSessionsOpen disabled`, server.js), and `terminal-size.spec.js` - which
+    // sorts after `security.spec.js` - backgrounds a viewer on purpose to prove a
+    // background socket has no vote in the PTY size (#146).
+    try { await setKeepSessionsOpen(ctx, true); } catch (e) {}
     await ctx.dispose();
   });
 

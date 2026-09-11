@@ -67,6 +67,39 @@ function writeBuriedPromptRollout(cwd, toolPairs) {
   return p;
 }
 
+// #246: a rollout laid out to order — [prompt, N tool pairs, prompt, N tool pairs,
+// ...] oldest-first — so a test can place a prompt a KNOWN number of turns back.
+// Codex writes one TURN per call/output pair (`function_call_output` parses to
+// null and is folded into its call), so a pair count IS a turn count here.
+// [day] keeps each fixture's filename newer than the last, because a Codex
+// transcript is resolved as "the newest rollout matching this cwd".
+function writeSpacedPromptsRollout(cwd, day, blocks) {
+  fs.mkdirSync(FIXTURE_DIR, { recursive: true });
+  const p = path.join(FIXTURE_DIR, `rollout-2098-01-${day}T00-00-00-${process.pid}-${created.length}.jsonl`);
+  let n = 0;
+  const line = (type, payload) => JSON.stringify({
+    // A distinct stamp per line: the trail's whole job is showing that time
+    // passed between your sends, which one shared timestamp could not.
+    timestamp: `2098-01-${day}T${String(n++ % 24).padStart(2, '0')}:00:00.000Z`,
+    type, payload,
+  });
+  const lines = [line('session_meta', { id: `spaced-${day}-uuid`, cwd, cli_version: '0.144.0' })];
+  for (const b of blocks) {
+    if (b.prompt) {
+      lines.push(line('response_item', { type: 'message', role: 'user', content: [{ type: 'input_text', text: b.prompt }] }));
+    }
+    for (let i = 0; i < (b.pairs || 0); i++) {
+      const id = `${lines.length}-${i}`;
+      lines.push(line('response_item', { type: 'function_call', name: 'shell_command', arguments: `{"command":"step ${i}"}`, call_id: id }));
+      lines.push(line('response_item', { type: 'function_call_output', call_id: id, output: `done ${i}` }));
+    }
+  }
+  lines.push(line('response_item', { type: 'message', role: 'assistant', content: [{ type: 'output_text', text: 'finished' }] }));
+  fs.writeFileSync(p, lines.join('\n') + '\n', 'utf8');
+  created.push(p);
+  return p;
+}
+
 test.describe('GET /api/sessions/:id/recap', () => {
   test('is behind auth', async () => {
     // A recap quotes the conversation verbatim. Same trust boundary as /transcript.
@@ -145,6 +178,83 @@ test.describe('GET /api/sessions/:id/recap', () => {
     expect(card.prompt.text).toBe('the prompt buried behind a long run');
     // And the work done since is counted across every page it walked.
     expect(card.since.turns).toBeGreaterThan(100);
+    await ctx.delete(`/api/sessions/${s.id}`);
+    await ctx.dispose();
+  });
+
+  // --- #246: the trail, and the ceilings that keep it cheap ------------------
+  // These three run LAST and in this order on purpose: each writes a rollout
+  // whose filename is newer than the one before it, into the one cwd every
+  // fixture here declares, and "newest rollout for this cwd" is how a Codex
+  // transcript is resolved.
+
+  test('lists the recent prompts, paging past the first page to reach them', async () => {
+    // The newest prompt sits ~102 turns back and the oldest ~184, so page one
+    // (150) holds only two of the three. A walk that still stopped on the first
+    // page containing a prompt would return one entry; this returns three.
+    const cwd = process.env.TEMP || os.tmpdir();
+    writeSpacedPromptsRollout(cwd, '03', [
+      { prompt: 'the oldest prompt', pairs: 40 },
+      { prompt: 'the middle prompt', pairs: 40 },
+      { prompt: 'the newest prompt', pairs: 100 },
+    ]);
+    const ctx = await authCtx();
+    const s = await mkSession(ctx, { name: 'recap-trail', cwd, agent: 'codex' });
+    const res = await ctx.get(`/api/sessions/${s.id}/recap`);
+    expect(res.status()).toBe(200);
+    const card = await res.json();
+    expect(card.prompts.map((p) => p.text)).toEqual([
+      'the newest prompt', 'the middle prompt', 'the oldest prompt',
+    ]);
+    // Additive: the single-prompt field a client that has not been rebuilt reads
+    // is still there, and still the newest one.
+    expect(card.prompt.text).toBe('the newest prompt');
+    // Each entry carries its OWN stamp — the thing that makes a 13h gap legible.
+    expect(new Set(card.prompts.map((p) => p.at)).size).toBe(3);
+    expect(card.scan.turns).toBeGreaterThan(150); // it really did page again
+    await ctx.delete(`/api/sessions/${s.id}`);
+    await ctx.dispose();
+  });
+
+  test('returns FEWER prompts rather than reading more of the file', async () => {
+    // THE budget guard. The second prompt sits ~413 turns back, well inside the
+    // 750-turn hard budget — and the walk still stops at ~300, because once the
+    // newest prompt is in hand it may spend only one more page looking for older
+    // ones. K prompts must not cost K x the scan.
+    const cwd = process.env.TEMP || os.tmpdir();
+    writeSpacedPromptsRollout(cwd, '04', [
+      { prompt: 'the far older prompt', pairs: 400 },
+      { prompt: 'the newest prompt', pairs: 10 },
+    ]);
+    const ctx = await authCtx();
+    const s = await mkSession(ctx, { name: 'recap-budget', cwd, agent: 'codex' });
+    const res = await ctx.get(`/api/sessions/${s.id}/recap`);
+    expect(res.status()).toBe(200);
+    const card = await res.json();
+    expect(card.prompts.map((p) => p.text)).toEqual(['the newest prompt']);
+    expect(card.scan.turns).toBeLessThan(400); // never reached the older prompt
+    expect(card.scan.exhausted).toBe(true);    // and says there is more behind it
+    await ctx.delete(`/api/sessions/${s.id}`);
+    await ctx.dispose();
+  });
+
+  test('a prompt past the budget is reported as STOPPED LOOKING, not as absent', async () => {
+    // The decision #246 asked for. 800 tool turns and no typed prompt at all
+    // exhausts the 750-turn budget, and the honest answer is not the same as a
+    // plain shell's: "this session has no prompt" would be confidently wrong on
+    // exactly the drifted sessions this card exists for. `scan.exhausted` is the
+    // one fact a client cannot derive, so the server publishes it.
+    const cwd = process.env.TEMP || os.tmpdir();
+    writeSpacedPromptsRollout(cwd, '05', [{ pairs: 800 }]);
+    const ctx = await authCtx();
+    const s = await mkSession(ctx, { name: 'recap-exhausted', cwd, agent: 'codex' });
+    const res = await ctx.get(`/api/sessions/${s.id}/recap`);
+    expect(res.status()).toBe(200);
+    const card = await res.json();
+    expect(card.prompt).toBeNull();
+    expect(card.prompts).toEqual([]);
+    expect(card.scan.exhausted).toBe(true);
+    expect(card.scan.turns).toBeGreaterThanOrEqual(750);
     await ctx.delete(`/api/sessions/${s.id}`);
     await ctx.dispose();
   });

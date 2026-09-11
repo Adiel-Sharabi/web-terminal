@@ -210,8 +210,12 @@ test.describe('#137 — the wait-period badge in the sidebar', () => {
 // docs/CONFIGURATION.md documents as `true`. An endpoint reporting a setting the server
 // does not have is a defect on its own, whoever reads it.
 //
-// `PUT /api/config` then REPLACES rather than merges, so anything echoing the served
-// object back writes that misreport to disk. In this repo exactly two things do:
+// `PUT /api/config` then REPLACED rather than merged, so anything echoing the served
+// object back wrote that misreport to disk. (#242 has since made the PUT merge. That
+// does NOT make this test redundant: a merge still WRITES every key the body carries, so
+// a served value that disagrees with the worker is still persisted by a round-trip. The
+// served default being right is the fix; the merge only stops the OTHER half, which is
+// keys the body omits.) In this repo exactly two things echo it back:
 // `exclusive-viewer.spec.js` and `keep-sessions-open.spec.js`, which round-trip the whole
 // config deliberately — so EVERY RUN was writing the opt-out into the GITIGNORED
 // `config.test.json`. No checkout restores that file, so one interrupted run disabled

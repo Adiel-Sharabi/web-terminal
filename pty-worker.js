@@ -24,6 +24,12 @@ const { createReadyDetector } = require('./lib/agent-ready');
 // #179 — the pure rules for verifying that a submit actually reached the agent.
 const submitConfirm = require('./lib/submit-confirm');
 const usageLimit = require('./lib/usage-limit');
+// #190 — the pure rules for Claude's startup selector family; the strings it
+// matches on are lib/agents.js fields.
+const blockingPrompt = require('./lib/blocking-prompt');
+// #228 — INSTRUMENTATION ONLY: what the PTY was showing when a session went
+// cap-blocked by metrics with the detector below having never seen a thing.
+const capSample = require('./lib/cap-sample');
 
 const WORKER_VERSION = '0.7.0'; // 0.7.0: #179 — a client submit that produces no agent activity within the provider's submitConfirm window is reported as `submitUnconfirmed`, so a prompt swallowed by a TUI that was not at its composer stops vanishing silently. Prior 0.6.2: a session restored from a scrollback that ends mid-alt-screen (Claude killed while in /tui fullscreen, so ?1049l never arrived) gets a corrective ?1049l appended, instead of stranding xterm in the alt buffer showing a frozen frame over a live shell. Prior 0.6.1: the submit gap is measured against the wire, not the frame.
 
@@ -768,6 +774,52 @@ function detectUsageLimitPromptInOutput(session, buf) {
   armAutoResumeTimer(session);
 }
 
+// #228 — the detector above has NEVER matched in production. `usage-limit:` appears
+// zero times in this fleet's worker log, which spans 2026-04-19 to 2026-09-11 and
+// contains all three real 5h cap events; every arming came from the metrics route.
+// Nobody knows whether the selector stopped being rendered, stopped surviving
+// stripAnsiForScan, stopped satisfying MENU_OPTION_LINE's sibling rule, or was
+// simply never drawn - and an absence cannot tell them apart.
+//
+// So write down what the terminal was showing at the one moment that state is
+// entered. INSTRUMENTATION: no timer, no status, no broadcast, no keystroke; the
+// rules and the reasoning are in lib/cap-sample.js and the matcher it runs is read
+// and discarded. `matchUsageLimitPrompt` and `MENU_OPTION_LINE` are untouched -
+// loosening them is the one fix #228 rules out, because a loosened matcher makes
+// this repo's own source type a digit into a live composer.
+//
+// Gated on the agent DECLARING a cap selector, exactly as the detector is: an agent
+// with no captured render has no absence to explain, and sampling a plain shell
+// would be log volume and leak surface bought for nothing.
+function logCapTailSample(session) {
+  const cfg = agents.usageLimitPromptFor(sessionAgent(session));
+  if (!cfg) return;
+  const now = Date.now();
+  if (!capSample.shouldSampleCapTail(session._capSampleAt, now)) return;
+  session._capSampleAt = now;
+  try {
+    const raw = concatScrollback(session.scrollback).slice(-capSample.CAP_RAW_CHARS);
+    const d = capSample.describeCapTail(raw, stripAnsiForScan(raw), cfg);
+    log(`cap-sample: "${session.name}" (${session.id}) cap-blocked by metrics, no prompt sighting`
+      + ` - scrollback=${session.scrollback.totalLen}b raw=${d.rawChars}c stripped=${d.strippedChars}c`
+      + ` sentence(raw=${d.sentenceInRaw} stripped=${d.sentenceInStripped})`
+      + ` optionLines=${d.optionLines} matcher=${JSON.stringify(d.matcherAnswer)}`
+      + ` window=${d.anchored ? 'sentence' : 'tail'} lines=${d.lines.length}`);
+    // One log call per line, each carrying the same prefix AND the session's id, so
+    // a later grep for `cap-sample` returns the summary AND the sample rather than a
+    // header whose body was split off by whatever the monitor does with embedded
+    // newlines. The id is not decoration: an account's sessions all cap at the same
+    // instant (three did on 2026-08-28), so bodies interleave, and an unattributable
+    // body is a sample nobody can read. Short form, as _slowOpLog uses.
+    // `opt` is MENU_OPTION_LINE's own verdict on that line, measured before the
+    // redaction erased the caret and the box rules it would have been read from.
+    const tag = session.id.slice(0, 8);
+    for (const ln of d.lines) log(`cap-sample| ${tag} ${ln.opt ? 'OPT' : '   '} ${String(ln.len).padStart(4)} ${ln.text}`);
+  } catch (e) {
+    log(`cap-sample: "${session.name}" (${session.id}) failed: ${e.message}`);
+  }
+}
+
 function markApiError(session, line) {
   const transient = isTransientApiError(line);
   session.apiError = true;
@@ -1268,11 +1320,167 @@ function processPtyOutput(session, buf) {
   session.lastActivity = Date.now();
   detectApiErrorInOutput(session, buf);
   detectStatusNotificationInOutput(session, buf);
+  detectBlockingPromptInOutput(session, buf);
   detectAgentReadyInOutput(session, buf);
   detectUsageLimitPromptInOutput(session, buf);
   if (session.clientCount > 0) {
     broadcastPtyOut(session, buf);
   }
+}
+
+// --- #190: the startup selector family ---------------------------------------
+//
+// A dialog that parks a session BEFORE its composer exists and eats the first
+// prompt sent to it - and whose default row is `No, exit`, so the submit's
+// trailing CR does not merely get swallowed, it kills the agent.
+//
+// The rule is pure and lives in lib/blocking-prompt.js (the capture, the CHA
+// problem, and why the shape cannot be produced by this repo's own source). Here
+// is only where it meets a real PTY.
+//
+// SCANNED ONLY BEFORE READINESS LATCHES, which is three things at once:
+//   * cost - one already-true boolean per chunk for the whole life of a session
+//     after its first few seconds;
+//   * scope - every measured member of this family is a STARTUP dialog, and the
+//     one-way latch is exactly "we have not seen the composer yet";
+//   * the clear rule, for free - answering the dialog draws the composer, the
+//     latch flips, and announceAgentReady drops everything below. Nothing has to
+//     guess when a static dialog stopped being on screen.
+// The cost of that scoping is stated with the field below: a member of this family
+// appearing MID-session is not covered. That is #147's recorded Gap 1, unchanged.
+
+// Enough to hold a cursor row through its footer across a read boundary, with room
+// for the SGR runs Claude wraps every word in. RAW bytes, never stripped: the
+// escapes ARE the signal here, which is the opposite of the api-error sniff.
+const BLOCK_PROMPT_CARRY = 4096;
+
+function autoAnswerBlockingPromptEnabled() {
+  // Ops/test override wins, then live config. DEFAULT OFF, and deliberately so:
+  // trusting a folder is what gates the agent executing what is in it, so the
+  // decision to automate that belongs to the owner of the folder and is recorded
+  // in config rather than assumed here. See docs/CONFIGURATION.md.
+  if (process.env.WT_AUTO_ANSWER_BLOCKING_PROMPT === '0') return false;
+  if (process.env.WT_AUTO_ANSWER_BLOCKING_PROMPT === '1') return true;
+  return liveConfig('autoAnswerBlockingPrompt',
+    blockingPrompt.AUTO_ANSWER_BLOCKING_PROMPT_DEFAULT) === true;
+}
+
+// The caret's UTF-8 bytes (E2 9D AF). The hot-path gate: the overwhelming majority
+// of chunks do not contain it, and one Buffer.includes is cheaper than a decode.
+const BLOCK_CARET_BYTES = Buffer.from(blockingPrompt.CARET, 'utf8');
+
+function detectBlockingPromptInOutput(session, buf) {
+  const d = session._ready;
+  if (!d || d.ready) return;                    // past the composer: out of scope
+  // NOTE it does NOT also wait for `_autoCommandSentAt`, the way
+  // detectAgentReadyInOutput next door does. #147 has to wait because its marker is a
+  // CARET, which is the default prompt glyph of starship, pure and several oh-my-posh
+  // themes, so the shell would flip its latch before the agent existed. Nothing a
+  // shell prompt prints can satisfy THESE gates (a caret with CHA hard against it, a
+  // sibling row positioned to the same column, and a commit affordance below both), so
+  // the reason for that wait does not apply and the check would only be ceremony.
+  //
+  // IT BUYS NOTHING EITHER, and the first draft of this comment claimed it did - that
+  // dropping the wait would cover a session opened as a plain shell and launched into
+  // `claude` by hand. IT DOES NOT: createSession gives a session with no autoCommand a
+  // NULL readiness marker on purpose (#147 - gating it would block the very submit that
+  // types `claude`), so such a session is ready from birth and the `d.ready` line above
+  // has already returned. That case is out of scope here for the same reason it is out
+  // of scope there, and saying otherwise was a comment asserting a mechanism the code
+  // does not have.
+  const cfg = agents.blockingPromptsFor(sessionAgent(session));
+  if (!cfg) return;                             // Codex, a plain shell, anything unknown
+  const carry = session._blockCarry;
+  const carried = !!(carry && carry.length);
+  if (!carried && !buf.includes(BLOCK_CARET_BYTES)) return;
+
+  // Carried as BYTES and concatenated, like lib/agent-ready.js: the caret is three
+  // bytes and a PTY read can split it, and a decode of a chunk ending mid-character
+  // yields a replacement character that no pattern can match. COPIED rather than
+  // sliced, for the same reason that file gives - a subarray keeps its whole parent
+  // alive.
+  const hay = carried ? Buffer.concat([carry, buf]) : buf;
+  session._blockCarry = hay.length > BLOCK_PROMPT_CARRY
+    ? Buffer.from(hay.subarray(hay.length - BLOCK_PROMPT_CARRY))
+    : Buffer.from(hay);
+
+  const hit = blockingPrompt.matchBlockingPrompt(hay.toString('utf8'), cfg);
+  if (!hit) return;
+  applyBlockingPrompt(session, hit, cfg);
+}
+
+/**
+ * Record the block, tell everyone, and - only if the owner asked for it and only
+ * for a member whose answer is declared - press the keys.
+ *
+ * Re-entered on every repaint, so it is idempotent on the RECORD (same member, same
+ * options: nothing broadcast twice) and cooldown-guarded on the WRITE.
+ */
+function applyBlockingPrompt(session, hit, cfg) {
+  const now = Date.now();
+  const sig = `${hit.id || ''}|${hit.options.join('|')}`;
+  const first = !session.blockedPrompt || session.blockedPrompt.signature !== sig;
+  session.blockedPrompt = {
+    id: hit.id || null,
+    options: hit.options,
+    at: session.blockedPrompt && !first ? session.blockedPrompt.at : now,
+    signature: sig,
+  };
+  if (first) {
+    session.dirty = true;
+    log(`blocking-prompt: "${session.name}" (${session.id}) is parked on a selector`
+      + ` (${hit.id || 'unknown member'}) - options ${JSON.stringify(hit.options)}`);
+    broadcastEvent('blockedPrompt', {
+      id: sessionIdOf(session),
+      blockedPrompt: publicBlockedPrompt(session),
+    });
+  }
+  if (!hit.keys || !autoAnswerBlockingPromptEnabled()) return;
+  // Same cooldown reasoning as the 5h cap prompt: the TUI repaints, so one dialog
+  // crosses several chunks, and answering three times would send stray arrows into
+  // the composer once it opens.
+  if (session._blockAnsweredAt && now - session._blockAnsweredAt < LIMIT_PROMPT_COOLDOWN_MS) return;
+  session._blockAnsweredAt = now;
+  log(`blocking-prompt: "${session.name}" (${session.id}) auto-answering ${hit.id}`
+    + ` - selecting ${JSON.stringify(hit.options[hit.target])} (row ${hit.cursor} -> ${hit.target})`);
+  writeBlockingPromptKeys(session, hit.keys, cfg);
+}
+
+/**
+ * Write the answer one key at a time, with a real gap between them.
+ *
+ * NEVER as one write. #55 is law here: every agent TUI folds one read into a paste
+ * and swallows a trailing CR, and only a temporal gap fixes it. The failure mode on
+ * a selector is worse than on a composer - an absorbed CR leaves the arrow applied
+ * and the dialog unanswered, and the NEXT CR to arrive (a user's submit) confirms
+ * whatever row the arrow left highlighted.
+ */
+function writeBlockingPromptKeys(session, keys, cfg) {
+  const gap = (cfg && cfg.answerGapMs > 0) ? cfg.answerGapMs : 600;
+  keys.forEach((k, i) => {
+    const t = setTimeout(() => {
+      if (!sessions.has(sessionIdOf(session))) return; // session went away mid-answer
+      try { termWrite(session, k); }
+      catch (e) { log(`blocking-prompt: answer write failed: ${e.message}`); }
+    }, i * gap);
+    if (t.unref) t.unref();
+  });
+}
+
+/** The wire shape - the internal `signature` is ours, not the client's. */
+function publicBlockedPrompt(session) {
+  const b = session.blockedPrompt;
+  if (!b) return null;
+  return { id: b.id, options: b.options, at: b.at };
+}
+
+/** Answered, or gone: the session is at its composer and nothing is blocking it. */
+function clearBlockingPrompt(session) {
+  if (!session.blockedPrompt) return;
+  session.blockedPrompt = null;
+  session._blockCarry = null;
+  session.dirty = true;
+  broadcastEvent('blockedPrompt', { id: sessionIdOf(session), blockedPrompt: null });
 }
 
 // --- #147: agent readiness ---------------------------------------------------
@@ -1316,6 +1524,44 @@ function armReadyFallback(session) {
   if (!d || d.ready) return;
   session._readyFallback = setTimeout(() => {
     session._readyFallback = null;
+    // #190 — THE CEILING IS FOR AN ABSENCE OF EVIDENCE, NOT AGAINST EVIDENCE.
+    //
+    // Everything the paragraph above lists — `command not found`, a crash on
+    // launch, Codex's update nag — is "no marker ever arrived and we cannot say
+    // why". Opening the gate there is right, because a session stuck on "starting"
+    // with nothing on screen to act on is worse than the bug.
+    //
+    // A recognised startup selector is the opposite case: we know exactly what the
+    // PTY is showing, and it is a screen whose default row is `No, exit`. Forcing
+    // ready there publishes "this session can take a prompt" about a session where
+    // the submit's trailing CR KILLS THE AGENT — so the gate stays shut and says
+    // why. CLAUDE.md's own note on this dialog reaches the same place from the
+    // design side: refuse-and-explain, not delay; a false refusal costs a message,
+    // a false permit costs the agent.
+    //
+    // It cannot wedge, and each escape is a POSITIVE event rather than a timer:
+    //   * the composer marker still arms (this session never latched), so the
+    //     moment the dialog is answered the latch flips and clearBlockingPrompt
+    //     runs from announceAgentReady;
+    //   * any hook forces ready through markAgentReadyFromActivity;
+    //   * the compose bar refuses SUBMIT only — typing is untouched, the words stay
+    //     in the box, and the terminal lens is not gated at all, so the user can
+    //     always answer the thing being reported.
+    //
+    // ONE CASE WHERE THE REPORT GOES STALE, recorded rather than engineered around:
+    // answer the dialog with `No, exit` and the agent quits to its shell. The SHELL
+    // survives, so the session does, and neither a composer marker nor a hook will
+    // ever arrive — the block stays published and the bar keeps quoting options that
+    // are no longer on screen. The GATE is still right there (a submit would reach
+    // bash, which is #147's own Gap 1), only the wording is out of date, and the fix
+    // for that is the same one #147 named for its gap: a marker for "the shell prompt
+    // is back", which is exactly what neither file is willing to guess at.
+    if (session.blockedPrompt) {
+      log(`ready: session "${session.name}" held at NOT ready — a startup selector`
+        + ` (${session.blockedPrompt.id || 'unknown member'}) is on screen`);
+      session.dirty = true;
+      return;
+    }
     if (d.force()) announceAgentReady(session, 'fallback — no marker seen');
   }, READY_FALLBACK_MS);
   if (session._readyFallback.unref) session._readyFallback.unref();
@@ -1327,6 +1573,10 @@ function armReadyFallback(session) {
 function announceAgentReady(session, why) {
   log(`ready: session "${session.name}" agent accepting input (${why})`);
   session.dirty = true;
+  // #190 — the composer is up, so nothing is parked in front of it. This is the one
+  // funnel every route to ready passes through, which is why the clear lives here
+  // rather than being copied to each of them (the #239 lesson, in miniature).
+  clearBlockingPrompt(session);
   broadcastEvent('agentReady', { id: sessionIdOf(session), agentReady: true });
 }
 
@@ -1712,6 +1962,17 @@ function sessionSummary(id, s) {
     // detector reads as ready too: the gate must fail OPEN, because a client that
     // wrongly believes a live session is starting can never submit to it again.
     agentReady: s._ready ? s._ready.ready : true,
+    // #190 — WHY it is not ready, when we can say. A recognised startup selector is
+    // on screen: the session is blocked on a question, not booting. Null is the
+    // normal answer and means "nothing recognised", never "nothing is wrong" — the
+    // shape gate covers a family, not every possible screen, so an unrecognised
+    // block still reads as a plain boot and still ends at the 45s ceiling.
+    //
+    // SCOPED TO PRE-READINESS: the scan stops once the composer has been seen, so a
+    // member of this family appearing MID-session is not reported. That is #147's
+    // recorded Gap 1 (the latch is one-way and does not reset when the agent exits
+    // back to its shell), unchanged here rather than quietly widened.
+    blockedPrompt: publicBlockedPrompt(s),
     // #138 — the observed cap-block this session's timer is (or is not) armed on.
     capBlocked: s.capBlocked === true,
     autoResumeArmed: !!s._autoResumeTimer,
@@ -2396,6 +2657,15 @@ const rpcHandlers = {
     }
     const blockedChanged = hasBlocked && session.capBlocked !== blocked;
     if (blockedChanged) session.capBlocked = blocked;
+    // #228 — THIS IS THE MOMENT. A transition INTO blocked means the metrics route
+    // has just decided the 5h window is spent; `!session.limitPromptAt` means the
+    // PTY detector has not seen the selector that would have said so definitively,
+    // which is the state that has now occurred at all three real cap events. It is
+    // a transition rather than a push because server.js de-dupes unchanged pushes
+    // (_pushResetState) and this handler no-ops an unchanged value, so `blocked`
+    // alone would fire on every re-push after a reconnect. Reading only; the line
+    // below is unchanged and decides everything that actually happens.
+    if (blockedChanged && blocked === true && !session.limitPromptAt) logCapTailSample(session);
     const enabledChanged = hasEnabled && (session.autoResumeEnabled !== false) !== enabled;
     if (enabledChanged) session.autoResumeEnabled = enabled;
     if (changed || blockedChanged || enabledChanged) armAutoResumeTimer(session);

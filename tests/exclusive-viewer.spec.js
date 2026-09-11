@@ -35,8 +35,14 @@ async function waitForClientCount(request, sessionId, predicate, timeoutMs = 400
   return last;
 }
 
-// #21: toggle the opt-in single-owner takeover. PUT /api/config replaces the
-// whole file (only password is preserved), so round-trip the full config.
+// #21: toggle the opt-in single-owner takeover.
+//
+// This used to read "PUT /api/config replaces the whole file (only password is
+// preserved), so round-trip the full config." Since #242 the PUT MERGES over what is on
+// disk, so the round-trip is no longer what keeps this from erasing `cluster` and the
+// rest - the server is. It is kept because it is still the honest shape for "change one
+// setting", and because it is what a settings client does; it is now belt-and-braces
+// rather than load-bearing.
 //
 // #224: READ IT BACK. `liveConfig()` re-reads config.json from disk on a 5s TTL, so
 // anything else writing that file in this checkout can flip server behaviour under a

@@ -153,6 +153,7 @@ class ComposeBar extends StatelessWidget {
     this.attachments = const <ComposeAttachment>[],
     this.onRemoveAttachment,
     this.agentReady = true,
+    this.blockedReason,
     this.onCommand,
   });
 
@@ -209,6 +210,20 @@ class ComposeBar extends StatelessWidget {
   /// OPEN: a bar that wrongly believes a live session is starting can never
   /// submit to it again, which is worse than the bug it guards.
   final bool agentReady;
+
+  /// WHY [agentReady] is false, in the user's own words, or null for an ordinary
+  /// boot (#190).
+  ///
+  /// Without this the bar says "Starting the agent - type now, send in a moment" and
+  /// spins, which is true of a boot and FALSE of a session parked on Claude's
+  /// folder-trust selector: that one never clears itself, and the reassurance is
+  /// worst on the session where pressing Send would confirm `No, exit` and kill the
+  /// agent. "Wait" and "go and answer something" are different instructions and the
+  /// bar must not give the first when it means the second.
+  ///
+  /// Typing stays allowed either way - only SUBMIT waits, and the draft stays in the
+  /// box, which is the half of #190 that stops the words being lost at all.
+  final String? blockedReason;
 
   /// Opens the slash-command menu (#188). `null` hides the button entirely —
   /// which is what a plain shell and a server with no published button row get,
@@ -355,9 +370,14 @@ class ComposeBar extends StatelessWidget {
                         // yet" gets said. Saying nothing was the bug: the bar
                         // looked ordinary, so a prompt went to the shell behind
                         // the not-yet-started TUI and vanished (#147).
+                        // The hint is where "you may type, it just will not send
+                        // yet" gets said, and since #190 also where WHY gets said:
+                        // "starting" is a promise that it clears itself, which a
+                        // recognised selector never does.
                         hintText: agentReady
                             ? 'Message — / for commands'
-                            : 'Starting the agent — type now, send in a moment',
+                            : (blockedReason ??
+                                  'Starting the agent — type now, send in a moment'),
                         hintStyle: TextStyle(
                           color: theme.colorScheme.onSurfaceVariant,
                           fontSize: 14,
@@ -403,13 +423,21 @@ class ComposeBar extends StatelessWidget {
                     // A spinner rather than a disabled arrow while the agent boots:
                     // "wait" reads very differently from "broken", and this clears
                     // itself within seconds (#147).
+                    //
+                    // #190 — but ONLY while that is true. A spinner on a session
+                    // parked on a selector promises a wait that never ends, so a
+                    // recognised block gets a question mark instead: not "wait", but
+                    // "there is something to answer in the Terminal".
                     icon: agentReady
                         ? const Icon(Icons.send)
-                        : const SizedBox(
-                            width: 18,
-                            height: 18,
-                            child: CircularProgressIndicator(strokeWidth: 2),
-                          ),
+                        : (blockedReason != null
+                              ? const Icon(Icons.help_outline)
+                              : const SizedBox(
+                                  width: 18,
+                                  height: 18,
+                                  child: CircularProgressIndicator(strokeWidth: 2),
+                                )),
+                    tooltip: agentReady ? 'Send' : (blockedReason ?? 'Starting the agent'),
                   );
                 },
               ),

@@ -55,9 +55,19 @@ const scriptMain = JSON.parse(fs.readFileSync(SCRIPT_MAIN_PATH, 'utf8'));
 const scriptSub = JSON.parse(fs.readFileSync(SCRIPT_SUB_PATH, 'utf8'));
 
 /**
- * Each scripted turn is `{ output: [item, ...] }`. An item is one of:
+ * Each scripted turn is `{ output: [item, ...], usage? }`. An item is one of:
  *   { type: 'message', role?, text }                          -- assistant text
  *   { type: 'function_call', name, namespace?, call_id?, arguments }
+ *
+ * The OPTIONAL per-turn `usage` overrides the token counts reported on
+ * `response.completed`. It exists for probe-codex-compact-hooks.js, which
+ * reaches PreCompact/PostCompact by making codex's OWN auto-compaction fire:
+ * codex compares reported usage against `model_auto_compact_token_limit`, so a
+ * turn that claims a huge `input_tokens` crosses the limit and triggers a real
+ * compaction inside a plain non-interactive `codex exec` -- no TUI, no PTY, and
+ * so none of the node-pty AttachConsole hazard that blocked the first attempt.
+ * Omit it and the default below is used, which is what every pre-existing
+ * script does.
  * `arguments` may be a plain object (this module JSON.stringifies it) or
  * already a string. Any string value anywhere in an item may contain the
  * literal token `{{SPAWNED_AGENT_ID}}`, substituted at send time with the
@@ -142,7 +152,13 @@ const server = http.createServer((req, res) => {
     items.forEach((item, idx) => send('response.output_item.done', { type: 'response.output_item.done', output_index: idx, item }));
     send('response.completed', {
       type: 'response.completed',
-      response: { id: respId, object: 'response', status: 'completed', output: items, usage: { input_tokens: 10, output_tokens: 5, total_tokens: 15 } },
+      response: {
+        id: respId,
+        object: 'response',
+        status: 'completed',
+        output: items,
+        usage: turn.usage || { input_tokens: 10, output_tokens: 5, total_tokens: 15 },
+      },
     });
     res.end();
   });

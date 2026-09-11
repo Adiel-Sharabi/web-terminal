@@ -728,10 +728,21 @@ test.describe('/api/history/folders', () => {
     expect(Array.isArray(data)).toBe(true);
     // Should contain at least one folder (scanned from config)
     expect(data.length).toBeGreaterThan(0);
-    // Each entry should be a string
-    for (const f of data) {
-      expect(typeof f).toBe('string');
-    }
+    // Each entry should be a string.
+    //
+    // ONE assertion, not one PER FOLDER. This scans `scanFolders`, which under test is
+    // `%TEMP%` - a directory whose size is a property of the MACHINE, not of the code.
+    // On this fleet it holds 14,309 directories, so the old `for (const f of data)
+    // expect(...)` ran ~14k Playwright assertions, each of which records a step; at a
+    // couple of ms apiece that is the whole 30s test budget. It passed in CI forever
+    // because a fresh runner's %TEMP% is nearly empty, and failed only on a real
+    // machine - the worst way round, since CI is what gates the merge.
+    //
+    // Same class as #253: a FIXED timeout meeting work that is not fixed. The fix is to
+    // stop the work growing, not to raise the budget. `.every` reports the first
+    // offender via the failure message below rather than losing it in 14k green steps.
+    const offender = data.find((f) => typeof f !== 'string');
+    expect(offender, `every entry must be a string; got ${typeof offender}`).toBeUndefined();
     await ctx.dispose();
   });
 
