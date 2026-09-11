@@ -388,15 +388,19 @@ test.describe('lib/transcript.parseTranscriptTurn', () => {
     expect(turn.text).not.toContain('AAAABBBBCCCC');
   });
 
-  // Measured over 972 transcripts: 520 `task-notification` records — harness
-  // plumbing, 34 of which restate a notification that already arrives as a real
-  // user turn (matched on the shared `<task-id>`).
+  // Measured 2026-09-11 over 1012 transcripts: 545 `task-notification` records —
+  // harness plumbing, 34 of which restate a notification that already arrives as a
+  // real user turn (matched on the shared `<task-id>`).
   //
-  // TWO FIXTURES, and the second one is the load-bearing one. The first is
-  // faithful to the corpus — all 520 carry NO `origin` — and that is exactly why
-  // it cannot pin this gate: the origin gate rejects it too, so deleting
-  // `commandMode !== 'prompt'` leaves it green. The second is a shape that does
-  // not occur, built for the one job of failing when THAT line is deleted.
+  // THREE FIXTURES, and which of them is load-bearing CHANGED WITH #250. While the
+  // origin gate existed, the corpus-faithful fixture below pinned nothing — all 545
+  // carry NO `origin`, so the origin gate turned it away and `commandMode !==
+  // 'prompt'` could be deleted with the suite still green. That is why the second,
+  // deliberately synthetic fixture (a human `origin` on a task-notification) was
+  // added. #250 removed the origin gate, so `commandMode` is now the ONLY gate and
+  // all three are independently red without it — verified by deleting that line and
+  // watching all three fail. The synthetic one is kept regardless: it is the fixture
+  // that stays honest if an origin gate ever comes back.
   test('a queued task-notification is NOT a turn', () => {
     expect(parseTranscriptTurn(jl({
       type: 'attachment',
@@ -418,14 +422,86 @@ test.describe('lib/transcript.parseTranscriptTurn', () => {
     ))).toBeNull();
   });
 
-  // A peer's queued message is wrapped in `<agent-message from="…">`, a signature
-  // `classifyUserTurn` does not recognise — it reads as `human`, so emitting one
-  // would put another agent's words in a "You" bubble. Zero of the 34 measured
-  // appear as `role:user` turns, so this leaves them exactly as they are today.
-  test('a queued PEER message is NOT a turn — it would render as "You"', () => {
-    expect(parseTranscriptTurn(queuedLine('<agent-message from="fixer">done</agent-message>', {}, {
-      origin: { kind: 'peer', from: 'fixer' },
-    }))).toBeNull();
+  test('a task-notification is refused whatever its origin says', () => {
+    // The combination the corpus does not contain (all 545 have no origin) and
+    // that #250 made worth pinning: with the origin gate gone, `commandMode` is
+    // the only thing standing between 545 rows of plumbing and the chat lens.
+    expect(parseTranscriptTurn(queuedLine(
+      '<task-notification><summary>Agent "search" finished</summary></task-notification>',
+      {},
+      { commandMode: 'task-notification', origin: { kind: 'peer', from: 'fixer' } },
+    ))).toBeNull();
+  });
+
+  // --- #250: the peer half of #249 ------------------------------------------
+  // These four REPLACE a test that pinned the opposite ("a queued PEER message is
+  // NOT a turn"). That refusal was correct only while `classifyUserTurn` could not
+  // tell a peer's message from yours: emitting one then meant a "You" bubble for
+  // another agent's words. The classifier knows both wrappers now, so the gate
+  // widened to `commandMode === 'prompt'` alone and the CLASSIFIER decides the
+  // bubble. Measured: 35 peer records, all `commandMode: 'prompt'`, all publishing
+  // `teammate` with an empty `typedText`. Emitting them duplicates nothing — under
+  // TWO predicates, stated rather than asserted as a bare count: no `role:user`
+  // turn in the same session is textually identical to the queued prompt (0/35),
+  // and none CONTAINS the record's own `origin.body` verbatim at >= 40 chars
+  // (0/35), a floor chosen so a short "ack" cannot match by luck.
+  const PEER_AGENT_MSG = '<agent-message from="fixer-22845">rebased onto master</agent-message>';
+  const PEER_CROSS_MSG = '<cross-session-message from="uds:\\\\.\\pipe\\LOCAL\\cc-msg-904625c0"'
+    + ' from-name="am8-core-e0" from-mode="bypass">closing out the journal items</cross-session-message>';
+
+  test('a queued PEER message IS a turn, published as teammate (#250)', () => {
+    // Corpus-faithful: every one of the 35 carries `attachment.isMeta: true`.
+    const turn = parseTranscriptTurn(queuedLine(PEER_AGENT_MSG, {
+      timestamp: '2026-08-21T20:34:38.465Z',
+    }, {
+      origin: { kind: 'peer', from: 'fixer-22845', name: 'fixer-22845' },
+      isMeta: true,
+    }));
+    expect(turn).toEqual({
+      role: 'user',
+      text: PEER_AGENT_MSG,
+      typedText: '',
+      userKind: 'teammate',
+      toolUses: [],
+      ts: '2026-08-21T20:34:38.465Z',
+    });
+  });
+
+  // THE VACUITY TRAP, AND WHY THE ASSERTION ABOVE IS ON THE EXACT VALUE.
+  // The corpus-faithful fixture carries `isMeta`, so with the wrapper signature
+  // deleted it classifies `meta` — which means an assertion of `not 'human'`, or
+  // of `typedText === ''`, PASSES with the fix removed and pins nothing at all.
+  // Demonstrated by deleting the signature and re-running: `userKind !== 'human'`
+  // stayed green, `userKind === 'teammate'` went red. Same shape as #249's own
+  // finding, one layer along: the fixture most faithful to the data is the one
+  // most likely to be turned away by a DIFFERENT guard than the one under test.
+  test('a peer message with NO isMeta backstop is still teammate, never "You"', () => {
+    // So the signature is pinned on its own, with #163's flag out of the way.
+    const turn = parseTranscriptTurn(queuedLine(PEER_AGENT_MSG, {}, {
+      origin: { kind: 'peer', from: 'fixer-22845' },
+    }));
+    expect(turn.userKind).toBe('teammate');
+    expect(turn.userKind).not.toBe('human');
+    expect(turn.typedText).toBe('');
+  });
+
+  test('the second peer wrapper is a turn too (#250)', () => {
+    // 6 of the 35, a shape the issue does not mention.
+    const turn = parseTranscriptTurn(queuedLine(PEER_CROSS_MSG, {}, {
+      origin: { kind: 'peer', from: 'uds:\\\\.\\pipe\\LOCAL\\cc-msg-904625c0', name: 'am8-core-e0' },
+      isMeta: true,
+    }));
+    expect(turn.userKind).toBe('teammate');
+    expect(turn.typedText).toBe('');
+  });
+
+  test('a HUMAN queued prompt is unchanged by the widened gate (#249)', () => {
+    // The regression guard on the other side: widening must not reclassify the
+    // case #249 shipped. `origin` is now read by nobody, so a human record has to
+    // keep working on its text alone.
+    const turn = parseTranscriptTurn(queuedLine('check the health module too'));
+    expect(turn.userKind).toBe('human');
+    expect(turn.typedText).toBe('check the health module too');
   });
 
   test('other attachment types stay non-conversational', () => {

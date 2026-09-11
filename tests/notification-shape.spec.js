@@ -150,8 +150,18 @@ test.describe('redactNotificationMessage — the wording survives, the specifics
     // `Bash(cat /home/a/.ssh/id_rsa)` into `Bash(cat <path>` — the closing paren
     // eaten. That is the same defect as the earlier `htt<path>`: a rule
     // swallowing the punctuation the wording is made of.
+    //
+    // #199: `Bash(cat` itself now redacts too. The `(` sits GLUED to `cat`, not
+    // at the token's own start, so `_LEAD_PUNCT` (which only strips punctuation
+    // at the very front of a token) never removes it — the whitespace tokeniser
+    // never split `Bash(` from `cat` in the first place. Under the OLD blocklist
+    // that unrecognised token just fell through unchanged; under default-deny a
+    // token carrying a character outside `_WORD_RE`'s class is a specific by
+    // definition, so it redacts too. Over-redacting a shell-syntax fragment is
+    // the documented, intended trade (#199 Limit 3) — no leak either way, and
+    // the path half is still cleanly `<path>` with its own trailing paren kept.
     expect(redactNotificationMessage('Bash(cat /home/a/.ssh/id_rsa)'))
-      .toBe('Bash(cat <path>)');
+      .toBe('<x> <path>)');
     expect(redactNotificationMessage('edit "/etc/passwd", then stop'))
       .toBe('edit "<path>", then stop');
     // A label is wording too, and must not collapse into the marker.
@@ -186,11 +196,23 @@ test.describe('redactNotificationMessage — the wording survives, the specifics
   test('one slash with no extension is prose, with an extension is a path', () => {
     // The line the space fix walks: `src/secret.env` must redact while every one
     // of these must not. The extension is what separates them.
-    for (const prose of ['and/or', '24/7', 'TODO/FIXME', 'either/or',
-      'input/output', 'read/write', 'n/a', '9/10', 'a/b', 'ratio/x']) {
+    for (const prose of ['and/or', 'TODO/FIXME', 'either/or',
+      'input/output', 'read/write', 'n/a', 'a/b', 'ratio/x']) {
       expect(redactNotificationMessage(prose), prose).toBe(prose);
     }
     expect(redactNotificationMessage('config/prod.key')).toBe('<path>');
+  });
+
+  test('#199: a digit-bearing slashed token now redacts, on purpose', () => {
+    // `24/7` and `9/10` used to be in the byte-identical list above. Under
+    // default-deny that changed: `_WORD_RE` admits letters only, so a digit
+    // anywhere in a token is "a specific, not a wording" (#199 Limit 3) even
+    // when the token also carries the slash that exempts pure-word prose like
+    // `and/or`. This is the intended over-redaction trade, not a regression —
+    // pinned as its own test so the reason a value moved is visible beside it,
+    // rather than silently edited into the byte-identical list above.
+    expect(redactNotificationMessage('24/7')).toBe('<x>');
+    expect(redactNotificationMessage('9/10')).toBe('<x>');
   });
 
   test('URL punctuation survives, and the test is not stateful', () => {
@@ -215,7 +237,13 @@ test.describe('redactNotificationMessage — the wording survives, the specifics
 
   test('`~` marks a path only when it IS one', () => {
     // `about ~50 files` was reading as a path because a bare `~` prefix counted.
-    expect(redactNotificationMessage('about ~50 files')).toBe('about ~50 files');
+    // #199: `~50` now redacts anyway, via the default-deny fallback rather than
+    // the path rule — it carries a digit, and `_WORD_RE` requires letters only,
+    // so it is `<x>` rather than surviving as bare prose. Still not `<path>`:
+    // this test's own point (a bare `~` prefix is not a path) still holds, and
+    // is asserted separately in `_looksLikePath`'s own behaviour via `<path>`
+    // never appearing here.
+    expect(redactNotificationMessage('about ~50 files')).toBe('about <x> files');
     expect(redactNotificationMessage('edit ~/x/y now')).toBe('edit <path> now');
   });
 
@@ -237,8 +265,11 @@ test.describe('redactNotificationMessage — the wording survives, the specifics
   test('prose with a single slash is still prose', () => {
     // The exemption that keeps the feature worth having: the wording is the
     // entire product, so `and/or` must survive the rule that catches `a/b/c`.
+    // #199: `24/7` in the same sentence now redacts to `<x>` (see the dedicated
+    // digit-bearing-slash test above) — everything else in the sentence, all of
+    // it pure words, is untouched.
     expect(redactNotificationMessage('approve and/or deny 24/7 TODO/FIXME'))
-      .toBe('approve and/or deny 24/7 TODO/FIXME');
+      .toBe('approve and/or deny <x> TODO/FIXME');
     expect(redactNotificationMessage('Claude needs your permission to run a command'))
       .toBe('Claude needs your permission to run a command');
   });
@@ -281,6 +312,102 @@ test.describe('redactNotificationMessage — the wording survives, the specifics
     for (const v of [undefined, null, 42, {}, []]) {
       expect(redactNotificationMessage(/** @type {any} */(v))).toBe('');
     }
+  });
+});
+
+test.describe('#199 - default-deny fallthrough: unnamed specifics no longer leak', () => {
+  test('shapes no existing classifier recognised now redact to <x>', () => {
+    // Measured LEAKING VERBATIM against the pre-#199 module (the one-line
+    // change not yet applied), one shape per line, via `node -e` against
+    // `lib/notification-shape.js` before this edit:
+    //   JWT           -> "token eyJhbGciOiJIUzI1NiJ9.eyJzdWIiOiIxMjM0NTY3ODkwIn0.dQw4w9WgXcQ rejected"
+    //   api-key shape -> "key sk-ant-fake12345 leaked"    (shortened: check-no-secrets.js
+    //   token shape   -> "token ghp_fake123456 found"      flags the real 20+ char prefixes)
+    //   base64 blob   -> "payload QUJDREVGR0hJSktMTU5PUFFSU1RVVldYWVo= sent"
+    //   short git sha -> "commit a1b2c3d applied"
+    //   FQDN          -> "connect to api.example.com now"
+    //   bare filename -> "edit server.js now"
+    //   dotted host   -> "host db01.internal.example failed"
+    // None of the eight is a URL, email, drive/POSIX/UNC path, or a number by
+    // ANY existing rule, so the old blocklist kept every one verbatim. This is
+    // the whole point of the polarity flip: a shape nobody enumerated is caught
+    // by construction, not by growing the list to nine, ten, eleven entries.
+    expect(redactNotificationMessage(
+      'token eyJhbGciOiJIUzI1NiJ9.eyJzdWIiOiIxMjM0NTY3ODkwIn0.dQw4w9WgXcQ rejected'))
+      .toBe('token <x> rejected');
+    expect(redactNotificationMessage('key sk-ant-fake12345 leaked'))
+      .toBe('key <x> leaked');
+    expect(redactNotificationMessage('token ghp_fake123456 found'))
+      .toBe('token <x> found');
+    expect(redactNotificationMessage('payload QUJDREVGR0hJSktMTU5PUFFSU1RVVldYWVo= sent'))
+      .toBe('payload <x> sent');
+    expect(redactNotificationMessage('commit a1b2c3d applied')).toBe('commit <x> applied');
+    expect(redactNotificationMessage('connect to api.example.com now'))
+      .toBe('connect to <x> now');
+    expect(redactNotificationMessage('edit server.js now')).toBe('edit <x> now');
+    expect(redactNotificationMessage('host db01.internal.example failed'))
+      .toBe('host <x> failed');
+  });
+
+  test('#198\'s three original leak mechanisms stay caught, via a second net', () => {
+    // The generic fallback is now an INDEPENDENT second line of defence behind
+    // the specific classifiers #198 already fixed for these exact symptoms,
+    // so all three stay fixed even if a future edit narrowed one of the
+    // specific rules by mistake. Not testing the exact marker here (that is
+    // the earlier, unchanged tests' job); only that nothing verbatim survives.
+    expect(redactNotificationMessage(
+      'edit /home/someone/.claude/projects/9f46cb60-8df6-4748-85db-5aa254e2ac97/secret.json now'))
+      .not.toContain('secret.json');
+    expect(redactNotificationMessage('edit ~/.ssh/id_rsa now')).not.toContain('id_rsa');
+    expect(redactNotificationMessage('edit C:\\Program Files\\secret.txt now'))
+      .not.toContain('secret.txt');
+  });
+
+  test('<id> and <hex> are STILL their own markers, not swallowed by <x>', () => {
+    // The literal one-line change from the issue, with nothing else added,
+    // regresses this: a standalone uuid or hex token (no slash, so the path
+    // rule never sees it) is caught by the new default-deny fallback BEFORE
+    // the whole-string `_UUID_RE`/`_LONG_HEX_RE` passes in
+    // [redactNotificationMessage] ever run on it, collapsing two of the six
+    // markers into the generic `<x>`. Confirmed red against that literal
+    // change: both lines below produced `<x>` instead of `<id>`/`<hex>`. Fixed
+    // by giving `_redactToken` its own anchored, per-token copies of the same
+    // two shapes (`_UUID_TOKEN_RE`, `_HEX_TOKEN_RE`), tested ahead of the
+    // default-deny fallback: see the comment on `_redactToken`.
+    expect(redactNotificationMessage('session 9f46cb60-8df6-4748-85db-5aa254e2ac97 stalled'))
+      .toBe('session <id> stalled');
+    expect(redactNotificationMessage('token deadbeefcafebabe1234 rejected'))
+      .toBe('token <hex> rejected');
+  });
+
+  test('the allowlist keeps hyphens, both apostrophes, underscores and slashed prose', () => {
+    const curly = String.fromCodePoint(0x2019); // built numerically, never as a literal byte
+    // Underscores are LOAD-BEARING: these are the literal matcher values
+    // `matcherOf`/`classifyNotification` exist to read (see the top of this
+    // file). Losing them to `<x>` would blind the instrument to its own signal.
+    expect(redactNotificationMessage(
+      'matcher auth_success permission_prompt notification_type seen'))
+      .toBe('matcher auth_success permission_prompt notification_type seen');
+    // Hyphens: the price of keeping `read-only` / `web-terminal` unredacted.
+    expect(redactNotificationMessage('set read-only and up-to-date on web-terminal'))
+      .toBe('set read-only and up-to-date on web-terminal');
+    // Both apostrophes: ASCII and curly.
+    expect(redactNotificationMessage("don't stop")).toBe("don't stop");
+    expect(redactNotificationMessage(`it${curly}s fine`)).toBe(`it${curly}s fine`);
+    // Single letters and capitalised proper nouns are unavoidably wording too.
+    expect(redactNotificationMessage('a I x')).toBe('a I x');
+    expect(redactNotificationMessage('Claude Bash Windows')).toBe('Claude Bash Windows');
+  });
+
+  test('Limit 1: a bare undotted identifier is indistinguishable from English, by design', () => {
+    // No digit, no dot, nothing outside the allowed class -> survives, exactly
+    // like an ordinary word would; there is no syntactic rule that tells
+    // `webserver` apart from `approve`. The mitigation named in the issue is
+    // that a DOTTED hostname does not get the same pass: the dot is outside
+    // `_WORD_RE`'s class, so it still redacts.
+    expect(redactNotificationMessage('host webserver failed')).toBe('host webserver failed');
+    expect(redactNotificationMessage('host db01.internal.example failed'))
+      .toBe('host <x> failed');
   });
 });
 
