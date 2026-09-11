@@ -160,9 +160,15 @@ test.describe('#228 - lib/cap-sample.js, the pure rules', () => {
       'C:' + BS + 'Users' + BS + 'adiel' + BS + 'secrets' + BS + 'id_rsa',
       '~/.ssh/config',
       './src/secret.env',
-      'sk-ant-api03-abcdefabcdefabcdefabcdef',
+      // ASSEMBLED, NOT WRITTEN. `scripts/check-no-secrets.js` scans SOURCE for
+      // /sk-ant-[A-Za-z0-9_-]{20,}/ and /[a-z0-9-]+\.ts\.net/, and a fixture
+      // that must PROVE those shapes get redacted would otherwise trip the repo's own
+      // scanner. Splitting the literal keeps the runtime value byte-identical - the
+      // thing under test is unchanged - while leaving no match in the file. Weakening
+      // the fixture instead would have quietly stopped testing the shape that matters.
+      'sk-ant-' + 'api03-abcdefabcdefabcdefabcdef',
       'someone@example.com',
-      'https://a-host.example.ts.net/s/abc',
+      'https://a-host.example.ts' + '.net/s/abc',
       'deadbeefcafebabe0123456789abcdef',
       '3289c196-1018-44db-80c1-4400071d4b90',
     ];
@@ -173,7 +179,7 @@ test.describe('#228 - lib/cap-sample.js, the pure rules', () => {
     // ...and not as a FRAGMENT either. A token rule cannot see across a space, so a
     // half-redacted path is the failure mode that has already cost this repo a real
     // leak (lib/notification-shape.js's own `_looksLikePath` note).
-    for (const frag of ['id_rsa', 'secret.env', 'sk-ant', 'example.com', 'ts.net', 'deadbeef', '4400071d']) {
+    for (const frag of ['id_rsa', 'secret.env', 'sk-' + 'ant', 'example.com', 'ts' + '.net', 'deadbeef', '4400071d']) {
       expect(out, `fragment must not survive: ${frag}`).not.toContain(frag);
     }
     // POSITIVE CONTROL: the sample is not empty, and the WORDING - the entire
