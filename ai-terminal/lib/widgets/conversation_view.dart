@@ -1516,7 +1516,10 @@ enum UserTurnKind {
   human,
 
   /// A message from ANOTHER Claude session (multi-agent / workflow run), injected
-  /// as `Another Claude session sent a message:\n<teammate-message …>`.
+  /// as `Another Claude session sent a message:\n<teammate-message …>`, or as one
+  /// of the two further wrappers `lib/user-turn.js` recognises for a message
+  /// QUEUED mid-turn (#250): `<agent-message from="…">` and
+  /// `<cross-session-message from="…" from-name="…">`.
   teammate,
 
   /// Harness-injected, not typed by the human: a `<task-notification>`, Stop-hook
@@ -1652,7 +1655,23 @@ class UserTurnClass {
 }
 
 final RegExp _teammateIdRe = RegExp('teammate_id="([^"]*)"');
-final RegExp _teammateTagRe = RegExp(r'</?teammate-message[^>]*>');
+// --- #250: a peer's message has THREE wrappers, not one ----------------------
+// Mirrors `lib/user-turn.js`, the OWNER of this rule (that file is the
+// authority; keep this a faithful copy rather than a second, independently
+// evolving one). Measured there over 1012 transcripts / 676 `queued_command`
+// records: 35 carry `origin.kind: 'peer'` — 29 open with
+// `<agent-message from="NAME">`, 6 with `<cross-session-message
+// from="uds:\\.\pipe\LOCAL\cc-msg-…" from-name="NAME" from-mode="bypass">`.
+// The second matters because of WHERE the readable name lives: its `from` is
+// an opaque named-pipe path and the human name is `from-name` — hence the
+// priority order below (from-name, then from, then the original
+// teammate_id) and hence one tag list rather than a second branch.
+final RegExp _teammateOpenRe = RegExp(
+    r'<(?:teammate-message|agent-message|cross-session-message)\b[^>]*>');
+final RegExp _teammateFromNameRe = RegExp(r'\sfrom-name="([^"]*)"');
+final RegExp _teammateFromRe = RegExp(r'\sfrom="([^"]*)"');
+final RegExp _teammateTagRe = RegExp(
+    r'</?(?:teammate-message|agent-message|cross-session-message)\b[^>]*>');
 final RegExp _taskTagRe = RegExp(r'</?task-[a-z-]+>');
 final RegExp _taskAgentRe = RegExp(r'Agent "([^"]+)"');
 final RegExp _commandTagRe = RegExp(
@@ -1687,12 +1706,22 @@ String _innerTag(String s, String tag) {
 /// signature is [UserTurnKind.human] with `body == text` — the unchanged "You".
 UserTurnClass classifyUserTurn(String text) {
   final t = text.trimLeft();
-  // Another Claude session's message (multi-agent / workflow). Both the prose
-  // preamble and the raw `<teammate-message>` block are matched — the preamble
-  // is dropped and the inner content kept.
+  // Another Claude session's message (multi-agent / workflow). The prose
+  // preamble, the original `<teammate-message>` block, and #250's two
+  // queued-message wrappers (`<agent-message>`, `<cross-session-message>`) are
+  // all matched — the preamble is dropped and the inner content kept.
+  //
+  // The name is read off the OPENING TAG ONLY, never off the whole turn: a
+  // teammate message carries someone else's prose, which can quote anything.
   if (t.startsWith('Another Claude session sent a message') ||
-      t.startsWith('<teammate-message')) {
-    final id = _teammateIdRe.firstMatch(t)?.group(1)?.trim() ?? '';
+      t.startsWith('<teammate-message') ||
+      t.startsWith('<agent-message') ||
+      t.startsWith('<cross-session-message')) {
+    final tag = _teammateOpenRe.firstMatch(t)?.group(0) ?? '';
+    final id = _teammateFromNameRe.firstMatch(tag)?.group(1)?.trim() ??
+        _teammateFromRe.firstMatch(tag)?.group(1)?.trim() ??
+        _teammateIdRe.firstMatch(tag)?.group(1)?.trim() ??
+        '';
     final body = t
         .replaceFirst('Another Claude session sent a message:', '')
         .replaceAll(_teammateTagRe, '')

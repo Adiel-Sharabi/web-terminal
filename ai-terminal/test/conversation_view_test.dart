@@ -1305,6 +1305,70 @@ void main() {
       expect(c.body, 'hi');
     });
 
+    // --- #250: a peer's QUEUED message has two further wrappers ---------------
+    // `lib/user-turn.js` is the OWNER of this rule; these mirror its own fixtures
+    // so the two copies cannot silently diverge on the shape that matters.
+
+    test('agent-message (queued peer message): labeled by from=, wrapper stripped', () {
+      const text =
+          '<agent-message from="J4b2">\nplease review PR #251\n</agent-message>';
+      final c = classifyUserTurn(text);
+      expect(c.kind, UserTurnKind.teammate);
+      expect(c.from, 'J4b2');
+      expect(c.body, 'please review PR #251');
+      expect(c.body, isNot(contains('<agent-message')));
+      expect(c.body, isNot(contains('</agent-message>')));
+    });
+
+    test(
+        'cross-session-message: labeled by from-name, NOT the opaque pipe path in from=',
+        () {
+      // The backslashes in the named-pipe path are built with fromCharCode,
+      // never typed as a literal `\` in the source: this repo has a recorded
+      // hazard (reference_escape_normalised_to_literal.md) of a literal
+      // backslash/escape surviving an editing channel as something other than
+      // what was written, so anything relying on the exact byte is assembled
+      // in code instead of trusted to paste through verbatim.
+      final bs = String.fromCharCode(92);
+      final pipePath = 'uds:$bs$bs.${bs}pipe${bs}LOCAL${bs}cc-msg-9f21';
+      final text = '<cross-session-message from="$pipePath" '
+          'from-name="J4b2" from-mode="bypass">\n'
+          'run the build\n'
+          '</cross-session-message>';
+      final c = classifyUserTurn(text);
+      expect(c.kind, UserTurnKind.teammate);
+      // The readable name, not the IPC path — this is the case a naive
+      // `from=` read would get wrong.
+      expect(c.from, 'J4b2');
+      expect(c.from, isNot(contains(pipePath)));
+      expect(c.body, 'run the build');
+      expect(c.body, isNot(contains('cross-session-message')));
+      expect(c.body, isNot(contains(pipePath)));
+    });
+
+    test('teammate name priority: from-name wins over from, which wins over teammate_id', () {
+      const text = '<agent-message from-name="Explicit" from="fallback" '
+          'teammate_id="ignored">hi</agent-message>';
+      expect(classifyUserTurn(text).from, 'Explicit');
+
+      const fromOnly = '<cross-session-message from="fallback" '
+          'teammate_id="ignored">hi</cross-session-message>';
+      expect(classifyUserTurn(fromOnly).from, 'fallback');
+
+      const idOnly = '<teammate-message teammate_id="ignored-no-more">hi</teammate-message>';
+      expect(classifyUserTurn(idOnly).from, 'ignored-no-more');
+    });
+
+    test('a turn that only QUOTES a teammate tag mid-text is still human (startsWith, not contains)', () {
+      const text = 'I saw a queued message like '
+          '<agent-message from="X">hi</agent-message> and want to know how '
+          'it renders';
+      final c = classifyUserTurn(text);
+      expect(c.kind, UserTurnKind.human);
+      expect(c.from, isEmpty);
+      expect(c.body, text);
+    });
+
     test('task-notification shows only <result>, labeled by agent, no envelope', () {
       const text =
           '<task-notification>\n<task-id>a0d2</task-id>\n'

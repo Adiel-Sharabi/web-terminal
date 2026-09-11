@@ -102,6 +102,44 @@ function rpc(client, method, params = {}, timeoutMs = 5000) {
   });
 }
 
+// #253 - killSession under this spec's default 5000ms rpc() budget was a false
+// red at the tail of a full-suite run (13 minutes, 1600 tests in), while the
+// SAME spec passes in 701ms run alone. Root cause is load, not logic: both
+// tests here tear down their sessions with one `await rpc(..., 'killSession')`
+// per id in a sequential for-loop, so a single slow teardown under system
+// contention doesn't just cost itself time - it's the Nth of N sequential
+// round-trips, each paying that same contention again. What the RPC actually
+// waits on is the worker's handler, which is fully SYNCHRONOUS (pty-worker.js
+// killSession: clear timers, fire-and-forget term.kill(), delete from the
+// Map, then a synchronous writeFileSync) - so it blocks the worker's single
+// JS thread, and every later kill in a sequential loop re-pays the box's
+// current contention window from scratch.
+//
+// STATE THE PREDICATE, because the obvious anchor measures something else:
+// #191's ~870ms (CLAUDE.md, "A ConPTY `term.kill()` is ALREADY graceful") is
+// how long THE AGENT takes to exit AFTER the kill, and this RPC never waits
+// on that - these sessions are plain shells with no agent at all. It is cited
+// as the only real Windows ConPTY-teardown figure this repo has measured, NOT
+// as a budget for this call, so the 10x below is deliberate headroom over a
+// RELATED quantity rather than a fitted bound.
+//
+// killAllSessions fixes both halves of the compounding at once: firing every
+// kill CONCURRENTLY (Promise.all, one round-trip in flight for all of them,
+// not N serialized ones) so the whole batch shares ONE timeout window instead
+// of stacking N of rpc()'s own; and giving that one window headroom to absorb
+// load-driven scheduling delays this repo has already recorded as its
+// recurring class of CI-only failure (see memory:
+// project_suite_fixed_timeout_bets). It is still a bounded, positive
+// assertion: a killSession that is genuinely stuck (not merely slow) still
+// fails the test, because the worker is single-threaded - a truly hung
+// native kill call blocks every frame queued behind it, so every kill in the
+// batch times out at KILL_TIMEOUT_MS rather than the hang going unnoticed.
+const KILL_TIMEOUT_MS = 8700; // 10x #191's ~870ms agent-exit figure - headroom, not a fitted bound
+
+function killAllSessions(client, ids) {
+  return Promise.all(ids.map(id => rpc(client, 'killSession', { id }, KILL_TIMEOUT_MS)));
+}
+
 /**
  * Collect the next statusChanged event matching `predicate`. Resolves with the
  * event's params. Rejects on timeout.
@@ -166,9 +204,7 @@ test.describe('pty-worker sessionIdOf correctness (#9)', () => {
       }
 
       // Clean up
-      for (const id of ids) {
-        await rpc(client, 'killSession', { id });
-      }
+      await killAllSessions(client, ids);
       await client.close();
     } finally {
       await worker.stop();
@@ -207,9 +243,7 @@ test.describe('pty-worker sessionIdOf correctness (#9)', () => {
       const unique = new Set(listedIds);
       expect(unique.size).toBe(listedIds.length);
 
-      for (const { id } of created) {
-        await rpc(client, 'killSession', { id });
-      }
+      await killAllSessions(client, created.map(c => c.id));
       await client.close();
     } finally {
       await worker.stop();

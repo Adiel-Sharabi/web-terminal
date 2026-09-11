@@ -394,3 +394,95 @@ test.describe('#192 — command output is never the user\'s prompt', () => {
     expect(t.typedText).toBe('');
   });
 });
+
+// --- #250: a peer's message has THREE wrappers, and only one was known --------
+// Re-measured 2026-09-11 over 1012 transcripts / 676 `queued_command` records
+// (a LIVE corpus — #249 measured 972 files and 641 records on the same machine,
+// so these numbers grow between runs and only the shape is stable):
+//
+//   * 35 records carry `origin.kind: 'peer'`, every one of them
+//     `commandMode: 'prompt'` and every one `attachment.isMeta: true`;
+//   * 29 of the 35 open with `<agent-message from="NAME">` — the shape #250 names;
+//   * the other 6 open with `<cross-session-message from="uds:\\.\pipe\LOCAL\…"
+//     from-name="NAME" from-mode="bypass">`, WHICH THE ISSUE DOES NOT MENTION;
+//   * PREDICATE `text.trimStart().startsWith('<agent-message')` over 4396
+//     `role:user` turns: 0. The 32 turns that CONTAIN the tag all open with the
+//     `Another Claude session sent a message` preamble, so they already reached
+//     the teammate branch and are untouched by this change.
+//
+// The second wrapper is the reason `from` is not simply the `from` attribute:
+// there, `from` is an opaque named-pipe path and the readable name is `from-name`.
+// Reading `from` alone would label the bubble `uds:\\.\pipe\LOCAL\cc-msg-904625c0`.
+const AGENT_MSG =
+  '<agent-message from="fixer-22845">\nAcknowledged, rebased onto master.\n</agent-message>';
+const CROSS_MSG = [
+  '<cross-session-message from="uds:\\\\.\\pipe\\LOCAL\\cc-msg-904625c0"'
+    + ' from-name="am8-core-e0" from-mode="bypass">',
+  'Heads-up: I am about to close out the journal work items.',
+  '</cross-session-message>',
+].join('\n');
+
+test.describe('#250 — a peer\'s queued message is a teammate turn, never yours', () => {
+  test('<agent-message> is teammate, named by its `from` attribute', () => {
+    // Red before the fix: all 35 peer prompts in the corpus classified `human`.
+    const c = classifyUserTurn(AGENT_MSG);
+    expect(c.kind).toBe(USER_KINDS.TEAMMATE);
+    expect(c.kind).not.toBe(USER_KINDS.HUMAN);
+    expect(c.from).toBe('fixer-22845');
+    expect(c.body).toBe('Acknowledged, rebased onto master.');
+  });
+
+  test('<cross-session-message> is named by `from-name`, NOT by the pipe path', () => {
+    // The 6 records the issue does not describe. `from` here is an IPC endpoint;
+    // using it would put a named-pipe path where the sender's name belongs.
+    const c = classifyUserTurn(CROSS_MSG);
+    expect(c.kind).toBe(USER_KINDS.TEAMMATE);
+    expect(c.from).toBe('am8-core-e0');
+    expect(c.from).not.toContain('pipe');
+    expect(c.body).toBe('Heads-up: I am about to close out the journal work items.');
+  });
+
+  test('typedTextOf is "" for both, so #149\'s Queued echo can never match one', () => {
+    // The invariant that lets the transcript gate widen at all: your own echo
+    // reconciles on `typedText`, and a peer's message must never be a candidate.
+    expect(typedTextOf(AGENT_MSG)).toBe('');
+    expect(typedTextOf(CROSS_MSG)).toBe('');
+  });
+
+  test('the signature beats the isMeta flag — a name, never a shrug', () => {
+    // Every one of the 35 carries `isMeta`, so without a signature they would all
+    // land on #163's structural backstop and render as the unlabelled "Injected".
+    // Same rule as the existing teammate/task-notification/command cases: a
+    // content signature that can NAME its source wins over the flag.
+    expect(classifyUserTurn(AGENT_MSG, { isMeta: true }).kind).toBe(USER_KINDS.TEAMMATE);
+    expect(classifyUserTurn(AGENT_MSG, { isMeta: true }).from).toBe('fixer-22845');
+    expect(classifyUserTurn(CROSS_MSG, { isMeta: true }).kind).toBe(USER_KINDS.TEAMMATE);
+  });
+
+  test('the existing teammate_id form is untouched', () => {
+    // The blast-radius guard. `from` is now read off the OPENING TAG with
+    // `from-name` preferred, then `from`, then `teammate_id` — the original shape
+    // has only the last of those and must still resolve to it.
+    const c = classifyUserTurn(TEAMMATE);
+    expect(c.kind).toBe(USER_KINDS.TEAMMATE);
+    expect(c.from).toBe('J4b2');
+    expect(c.body).toBe('please rebase');
+  });
+
+  test('a prompt that merely QUOTES the tag is still yours', () => {
+    // #192's anchoring rule, which this repo has already paid for twice: an
+    // `includes` sniff would reclassify a question ABOUT the wrapper as an
+    // instance of it, and the turns that quote one are the ones you typed.
+    const asking = 'what does <agent-message from="x"> mean in the transcript?';
+    expect(classifyUserTurn(asking).kind).toBe(USER_KINDS.HUMAN);
+    expect(typedTextOf(asking)).toBe(asking);
+  });
+
+  test('the attribute is read off the OPENING TAG, not the whole turn', () => {
+    // A teammate message carries somebody else's prose, and prose can quote
+    // anything. Reading `from="…"` across the whole text lets the QUOTED name win.
+    const quoting = '<agent-message from="real-sender">\n'
+      + 'The log line reads: <agent-message from="impostor">\n</agent-message>';
+    expect(classifyUserTurn(quoting).from).toBe('real-sender');
+  });
+});
