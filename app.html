@@ -448,6 +448,14 @@
       background: #2e2617; color: #f0d69a; border-top: 1px solid #6b5520;
     }
     #composeNotice[hidden] { display: none; }
+    /* #252 - the new-session form's own notice. It lives in the FORM, not the compose
+       bar: a notice belongs to the thing it is about, and the compose bar's notice is
+       about a session's prompt. */
+    #newFormNotice {
+      margin: 0 0 8px; padding: 6px 8px; font-size: 12px; line-height: 1.35;
+      background: #2e2617; color: #f0d69a; border: 1px solid #6b5520; border-radius: 4px;
+    }
+    #newFormNotice[hidden] { display: none; }
     /* #222 - AND AT PHONE WIDTH THE DRAWER PAINTS OVER IT. `#sidebar.open` is
        `position:fixed; z-index:50; width:100vw` while #composeNotice is a body-level
        flex child in normal flow with no z-index, so an open drawer covers the notice
@@ -599,6 +607,7 @@
       </div>
       <div id="newSessionForm">
         <form onsubmit="event.preventDefault(); createSession()">
+        <div id="newFormNotice" hidden></div>
         <label>Server</label>
         <select id="newServer" onchange="loadFolderHistory()">
           <option value="">Local</option>
@@ -5547,23 +5556,90 @@
     }, 5000);
 
     // --- Init ---
+    // #252 - THE DEFAULTS ARE FETCHED, AND A FETCH CAN FAIL. Nothing may render a
+    // failure as an answer: an empty command box and no folder suggestions is exactly
+    // what "this server lost its defaults" was, on BOTH clients, and neither said a
+    // word nor tried again. GET /api/config fills every default in server-side, so a
+    // blank here never means the server has none - it means we never heard back.
+    function applyServerConfig(cfg) {
+      defaultCwd = cfg.defaultCwd || 'C:\\dev';
+      defaultCommand = cfg.defaultCommand || '';
+      keepSessionsOpen = cfg.keepSessionsOpen !== undefined ? !!cfg.keepSessionsOpen : true;
+    }
+
+    // The notice lives in the new-session form, because that is where the loss shows.
+    // Passing no message CLEARS it: a later success must take the warning down, or it
+    // becomes the thing you learn to ignore.
+    function showNewFormNotice(msg) {
+      const el = document.getElementById('newFormNotice');
+      if (!el) return;
+      if (!msg) { el.hidden = true; return; }
+      el.textContent = msg;
+      el.hidden = false;
+    }
+
+    // res.json() rejects on a NON-JSON body as well as on a bad status - an HTML error
+    // page, a 502 from the tailnet proxy, a server mid hot-reload. That is the shape
+    // this actually arrives in, so checking the status alone would not catch it.
+    async function fetchJson(url, opts) {
+      const res = await fetch(url, opts);
+      if (!res.ok) throw new Error(url + ' -> ' + res.status);
+      return res.json();
+    }
+
+    // Retries in the background, backing off to a minute. The defaults are one cheap
+    // idempotent GET, and the client this was reported from CANNOT be reloaded the way
+    // a browser tab can - so recovering without the user's help is the whole point.
+    // NEVER REJECTS: callers put it in the load set beside the others.
+    let _cfgRetryMs = 0;
+    let _cfgRetryPending = false;
+    async function loadServerConfig() {
+      try {
+        applyServerConfig(await fetchJson('/api/config'));
+        showNewFormNotice('');
+        _cfgRetryMs = 0;
+        return true;
+      } catch (e) {
+        showNewFormNotice("Could not reach this server for its defaults. The fields below are fallbacks, not its settings. Retrying...");
+        if (!_cfgRetryPending) {
+          _cfgRetryPending = true;
+          _cfgRetryMs = Math.min(_cfgRetryMs ? _cfgRetryMs * 2 : 2000, 60000);
+          setTimeout(() => { _cfgRetryPending = false; loadServerConfig(); }, _cfgRetryMs);
+        }
+        return false;
+      }
+    }
+
     async function init() {
-      const [hostData, list, cfg] = await Promise.all([
-        fetch('/api/hostname').then(r => r.json()),
-        fetch('/api/sessions').then(r => r.json()),
-        fetch('/api/config').then(r => r.json()),
+      // allSettled, NOT all: one hiccup must not cost the other answers. Until #252 a
+      // single rejection here skipped every statement below it, so the defaults, the
+      // folder list, session selection, the notify socket and the service worker were
+      // all gone for the life of the page - silently, and on a PWA whose shell still
+      // renders from cache, so the page still looked fine.
+      const [hostRes, listRes] = await Promise.allSettled([
+        fetchJson('/api/hostname'),
+        fetchJson('/api/sessions'),
+        // Owns its own failure and its own retry.
+        loadServerConfig(),
         // Agent catalogue: fills the new-session picker + the sidebar tint. Failure is
-        // non-fatal (no chips, "Auto" only) — never block the app on it.
+        // non-fatal (no chips, "Auto" only) - never block the app on it.
         loadAgents(),
-        // #188 — the slash-command button row. Same contract: failure is silent,
+        // #188 - the slash-command button row. Same contract: failure is silent,
         // the button just never appears.
         loadCommands()
       ]);
 
+      // SETTLING A REJECTION MUST NOT SILENCE IT. Found in review of #256: mapping a
+      // failure to {} / [] is the right thing for the PAGE - neither is fatal, and the
+      // whole point of #252 is that one of them must not cost the others - but a failure
+      // nobody can see is how #252 itself stayed hidden. The sessions list recovers on
+      // the 5s poll; the hostname NEVER retries, so that one is logged for good reason
+      // rather than for symmetry.
+      if (hostRes.status === 'rejected') console.warn('init: /api/hostname failed, header will be unnamed', hostRes.reason);
+      if (listRes.status === 'rejected') console.warn('init: /api/sessions failed, sidebar starts empty until the poll', listRes.reason);
+      const hostData = hostRes.status === 'fulfilled' ? hostRes.value : {};
+      const list = listRes.status === 'fulfilled' && Array.isArray(listRes.value) ? listRes.value : [];
       hostname = hostData.hostname;
-      defaultCwd = cfg.defaultCwd || 'C:\\dev';
-      defaultCommand = cfg.defaultCommand || '';
-      keepSessionsOpen = cfg.keepSessionsOpen !== undefined ? !!cfg.keepSessionsOpen : true;
       if (hostname) {
         document.getElementById('hostName').textContent = `[${hostname}]`;
         document.getElementById('hostLabel').textContent = hostname;
@@ -5633,7 +5709,11 @@
       location.reload();
     }
 
-    init();
+    // A dead init() used to be an unhandled rejection: nothing retried, nothing said.
+    init().catch((e) => {
+      console.error('init failed', e);
+      showNewFormNotice('This page did not finish loading. Reload to recover.');
+    });
     // #152 — restore the remembered resources view. Deliberately after init(): with the
     // view off this does nothing at all, which is the default.
     updateResourceBtn();

@@ -100,6 +100,22 @@ already started retyping into. Claude sessions on a server whose hooks are insta
 every gate errs toward saying nothing, because a false alarm on a prompt that did land
 would be worse than the silence it replaces.
 
+**And a session that is stuck behind a question says which question** — open a session
+in a folder Claude has not been trusted with and it parks on a selector before its
+composer ever exists. Nothing about that session looks unusual, so you type a prompt and
+send it: the keystrokes are taken as navigation and the trailing Enter confirms the
+highlighted row, which is **`No, exit`** — the agent is not merely deaf, it is gone, and
+your next prompt lands in the shell. The server now recognises that screen by its
+*shape* rather than its wording (an unnumbered list with a cursor, a sibling option and
+`Enter to confirm`), so siblings like the external-`CLAUDE.md` imports prompt are covered
+too. Such a session is never published as able to take a prompt, and the compose bar
+stops claiming it is "starting": it quotes the dialog's own options back to you and
+points at the Terminal lens. Your draft stays in the box, because nothing was ever sent.
+Answering it — or any hook from the agent — clears the block on its own.
+Typing the answer *for* you is a separate, opt-in setting
+(`autoAnswerBlockingPrompt`, **off** by default: trusting a folder is what decides
+whether an agent may execute what is in it).
+
 **Cluster** — merge several servers into one sidebar, each showing its own CPU and
 **free memory** so you can pick where to work; optional direct-terminal mode skips the
 proxy hop for a large latency win.

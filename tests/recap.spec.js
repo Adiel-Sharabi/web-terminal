@@ -12,10 +12,14 @@ const {
   classifyUserTurn,
   isHumanPrompt,
   findHumanPromptIndex,
+  findHumanPromptIndexes,
   condense,
   toolTally,
   summariseTasks,
   USER_KINDS,
+  MAX_PROMPTS,
+  PROMPT_CHARS,
+  PROMPT_TRAIL_CHARS,
 } = require('../lib/recap');
 
 const user = (text, ts = null) => ({ role: 'user', text, toolUses: [], ts });
@@ -295,9 +299,11 @@ test.describe('#163 — skill injections and the last prompt', () => {
   });
 
   test('the scan stop-condition agrees with the build — no false stop', () => {
-    // findHumanPromptIndex is what the /recap route pages against; if it stops on
-    // a turn buildRecap then rejects, the route pages forever and reports nothing.
+    // findHumanPromptIndexes is what the /recap route pages against (#246 — it
+    // counts, because the stop condition is now K prompts); if it stops on a turn
+    // buildRecap then rejects, the route pages forever and reports nothing.
     const turns = [user('the real one'), meta(SKILL_BODY), meta(SKILL_BODY_HEADING)];
+    expect(findHumanPromptIndexes(turns)).toEqual([0]);
     expect(findHumanPromptIndex(turns)).toBe(0);
     expect(isHumanPrompt(turns[1])).toBe(false);
   });
@@ -313,5 +319,108 @@ test.describe('#163 — skill injections and the last prompt', () => {
   test('an ordinary prompt is still reported — the guard', () => {
     const r = buildRecap([user('add a recap icon to the sidebar', '2026-08-26T10:00:00Z')]);
     expect(r.prompt.text).toBe('add a recap icon to the sidebar');
+  });
+});
+
+// --- #246: one prompt is not enough state to re-orient on --------------------
+// Reported from the phone as "that was not my last prompt". The SELECTION was
+// correct — a 13h-old prompt with 598 turns and ~40 injected user turns behind
+// it, every one of them classified right — and the card was still useless,
+// because a single entry cannot show that half a day passed. The fix is a TRAIL:
+// the same newest prompt, plus the ones before it, each with its own stamp.
+//
+// The padding temptation is the thing to guard against. Filling the list out of
+// task-notifications or slash-command echoes would make it LONGER and strictly
+// less true, which is the failure #163/#192 already paid for once.
+test.describe('#246 — the recent-prompt trail', () => {
+  const THREE = [
+    user('the oldest thing I typed', '2026-09-07T10:00:00Z'),
+    asst('working on it', [tool('Read')]),
+    user('the middle thing I typed', '2026-09-07T15:21:14Z'),
+    asst('still going', [tool('Bash')]),
+    user('the newest thing I typed', '2026-09-08T04:41:06Z'),
+    asst('done', [tool('Edit')]),
+  ];
+
+  test('lists the recent prompts newest FIRST, each with its own stamp', () => {
+    const r = buildRecap(THREE);
+    expect(r.prompts.map((p) => p.text)).toEqual([
+      'the newest thing I typed',
+      'the middle thing I typed',
+      'the oldest thing I typed',
+    ]);
+    // The stamps are what make a 13h gap legible; a shared one would not.
+    expect(r.prompts.map((p) => p.at)).toEqual([
+      '2026-09-08T04:41:06Z', '2026-09-07T15:21:14Z', '2026-09-07T10:00:00Z',
+    ]);
+  });
+
+  test('`prompt` IS `prompts[0]` — the wire change is additive', () => {
+    // The whole reason a client that has not been rebuilt renders exactly as it
+    // does today. Identity, not equality: two derivations of "the newest prompt"
+    // is the drift this repo keeps paying for.
+    const r = buildRecap(THREE);
+    expect(r.prompt).toBe(r.prompts[0]);
+    expect(r.prompt.text).toBe('the newest thing I typed');
+  });
+
+  test('the trail is capped, and the cap is the module\'s own number', () => {
+    const many = [];
+    for (let i = 0; i < 10; i++) many.push(user(`prompt ${i}`, `2026-09-0${i % 9}T00:00:00Z`));
+    expect(buildRecap(many).prompts).toHaveLength(MAX_PROMPTS);
+  });
+
+  test('only HUMAN turns qualify — the list is never PADDED to fill it', () => {
+    // Fewer, true entries beat three entries of which two are plumbing.
+    const r = buildRecap([
+      user('the one real prompt', '2026-09-08T01:00:00Z'),
+      user(TASK_NOTIFICATION, '2026-09-08T02:00:00Z'),
+      user(SLASH_COMPACT, '2026-09-08T03:00:00Z'),
+      user(TEAMMATE, '2026-09-08T04:00:00Z'),
+      meta(SKILL_BODY, '2026-09-08T05:00:00Z'),
+    ]);
+    expect(r.prompts).toHaveLength(1);
+    expect(r.prompts[0].text).toBe('the one real prompt');
+  });
+
+  test('a session with ONE prompt in the window is unchanged', () => {
+    // The common case must not regress: same single entry, same fields.
+    const r = buildRecap([user('only one', '2026-09-08T04:00:00Z'), asst('ok')]);
+    expect(r.prompt).toEqual({ text: 'only one', at: '2026-09-08T04:00:00Z', truncated: false });
+    expect(r.prompts).toEqual([r.prompt]);
+  });
+
+  test('no prompt at all yields an EMPTY list, never a null one', () => {
+    // The client iterates it; a null would be a null-check in two clients for a
+    // case the server can answer once.
+    const r = buildRecap([asst('Booting up.')]);
+    expect(r.prompt).toBeNull();
+    expect(r.prompts).toEqual([]);
+  });
+
+  test('the trail gets its own SMALLER budget — K prompts are not K × the bytes', () => {
+    const long = 'word '.repeat(300);
+    const r = buildRecap([user(long, 'a'), user(long, 'b')]);
+    expect(r.prompts[0].text.length).toBeGreaterThan(PROMPT_TRAIL_CHARS);
+    expect(r.prompts[0].text.length).toBeLessThanOrEqual(PROMPT_CHARS + 1);
+    expect(r.prompts[1].text.length).toBeLessThanOrEqual(PROMPT_TRAIL_CHARS + 1);
+    expect(r.prompts[1].truncated).toBe(true);
+  });
+
+  test('`since` still counts from the NEWEST prompt — the guard', () => {
+    // The trail must not move where "what has it done since" starts measuring.
+    const r = buildRecap(THREE);
+    expect(r.since.turns).toBe(1);
+    expect(r.since.tools).toEqual(['Edit']);
+  });
+
+  test('findHumanPromptIndexes returns newest-first indexes, capped', () => {
+    // The route pages against this, so its order and cap are contract, not detail.
+    expect(findHumanPromptIndexes(THREE)).toEqual([4, 2, 0]);
+    expect(findHumanPromptIndexes(THREE, 2)).toEqual([4, 2]);
+    expect(findHumanPromptIndexes([asst('nothing typed')])).toEqual([]);
+    // And the single-index form still answers exactly what it used to.
+    expect(findHumanPromptIndex(THREE)).toBe(4);
+    expect(findHumanPromptIndex([asst('nothing typed')])).toBe(-1);
   });
 });

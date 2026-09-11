@@ -33,6 +33,7 @@
 //   node scripts/rig/rig.js up
 //   node scripts/rig/probe-trust-prompt.js capture     # Q1, Q2, Q4, Q5
 //   node scripts/rig/probe-trust-prompt.js drive       # Q3
+//   node scripts/rig/probe-trust-prompt.js family      # #190's matcher, off a real PTY
 //   node scripts/rig/probe-trust-prompt.js clean       # remove this probe's trust state
 //
 // Runs entirely against the rig (port 7999, own worker, own data dir). It cannot touch
@@ -45,6 +46,9 @@ const path = require('path');
 const { login, api } = require('./rig-http');
 const { openTerminal } = require('./rig-ws');
 const { PARENT } = require('../scratch-dirs');
+// The REAL rules this probe validates — never a copy of them. See `screen()` below.
+const { renderColumns, matchBlockingPrompt } = require('../../lib/blocking-prompt');
+const { blockingPromptsFor } = require('../../lib/agents');
 
 const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
 
@@ -105,26 +109,16 @@ function escapeRaw(s) {
  * renders `Quicksafetycheck:Isthis…`, and any matcher that greps the stripped stream for
  * the sentence as a human reads it can never match. So CHA is honoured as padding before
  * the escapes are stripped.
+ *
+ * THE RULE ITSELF IS NOT HERE ANY MORE. This probe found the CHA problem and then
+ * `lib/blocking-prompt.js` was built on it, so the render is now that module's — and
+ * this probe calls it. A probe that reimplements the rule it is validating can only
+ * ever prove the reimplementation right; "drive the real path, not a reimplementation"
+ * is this repo's own standing instruction and it applies to the render as much as to
+ * the worker.
  */
 function screen(s) {
-  return s
-    .split(/\r?\n/)
-    .map((line) => {
-      let out = '';
-      let i = 0;
-      const re = /\x1b\[(\d+)G/g;
-      let m;
-      while ((m = re.exec(line))) {
-        out += stripAnsi(line.slice(i, m.index));
-        const col = parseInt(m[1], 10) - 1;          // CHA is 1-based
-        if (out.length < col) out += ' '.repeat(col - out.length);
-        i = m.index + m[0].length;
-      }
-      out += stripAnsi(line.slice(i));
-      return out.replace(/\r/g, '').replace(/\s+$/, '');
-    })
-    .join('\n')
-    .replace(/\n{3,}/g, '\n\n');
+  return renderColumns(s).replace(/\n{3,}/g, '\n\n');
 }
 
 // ---------------------------------------------------------------- trust state
@@ -419,6 +413,131 @@ async function step(cookie) {
   }
 }
 
+// ---------------------------------------------------------------- the FAMILY (#190)
+
+/**
+ * The whole startup chain of one session, with the SHIPPED matcher asked about every
+ * screen it passes through.
+ *
+ * `capture` above answers "what does the trust dialog look like". This answers the
+ * question the fix actually depends on: does `lib/blocking-prompt.js` recognise it off
+ * a real PTY, does it recognise the OTHER members of the family (the external
+ * CLAUDE.md imports selector appears only AFTER trust is answered, which is why no
+ * capture of it existed), and does it stay silent on the composer that follows.
+ *
+ * Verdicts are never the screen. The matcher's own answer is the artifact; "did a turn
+ * start" is what proves the selector is really gone at the end.
+ */
+/** What `GET /api/sessions` says about this session's submit gate, as one line. */
+async function readGate(cookie, id) {
+  const rows = await api(cookie, 'GET', '/api/sessions');
+  const s = (Array.isArray(rows) ? rows : []).find((r) => r.id === id);
+  if (!s) return '(session not listed)';
+  return `agentReady=${s.agentReady} blockedPrompt=${JSON.stringify(s.blockedPrompt)}`;
+}
+
+async function family(cookie) {
+  const cfg = blockingPromptsFor('claude');
+  const cwd = freshDir('family');
+  // THE SECOND MEMBER HAS TO BE PROVOKED. `Allow external CLAUDE.md file imports?`
+  // needs a project CLAUDE.md that imports a file OUTSIDE the project - the trust
+  // dialog alone is what a bare fresh directory produces, which is why a capture of
+  // this sibling did not exist. A one-line CLAUDE.md with an `@` pointing at an
+  // absolute path outside the tree is the whole trigger.
+  fs.writeFileSync(path.join(cwd, 'CLAUDE.md'),
+    '# trust probe\n\n@C:/dev/claude-memory/GLOBAL-CLAUDE.md\n');
+  console.log(`cwd: ${cwd}\nblockingPrompts declared: ${!!cfg}`);
+  const { id, term } = await openSession(cookie, { name: 'trust-family', cwd, autoCommand: 'claude' });
+  const seen = [];
+  // Only bytes arriving since the last answer count. THE PROBE'S OWN BUG, kept as a
+  // comment because it is instructive: `term.text()` accumulates the whole stream, so
+  // the dialog answered at step 0 was still in it at step 1 and was re-reported and
+  // re-answered - typing stray arrows and CRs into the composer that had replaced it.
+  // The WORKER cannot do this (its carry is 4 KB and is dropped the moment readiness
+  // latches), so it is an artifact of reading a transcript as if it were a screen -
+  // the same class of mistake as trusting the screen over the rollout.
+  let mark = 0;
+  try {
+    // Walk the chain: wait for the matcher to see SOMETHING, report it, answer it,
+    // repeat. Bounded by the number of members plus one, so a dialog that re-renders
+    // itself cannot loop forever.
+    for (let step = 0; step < 4; step++) {
+      const t0 = Date.now();
+      let hit = null;
+      while (Date.now() - t0 < 60000) {
+        const fresh = term.text().slice(mark);
+        // The composer is checked FIRST: once it is up the walk is over, and a stale
+        // dialog still sitting in the window must not win a race against it.
+        if (COMPOSER_FOOTER.test(screen(fresh))) break;
+        hit = matchBlockingPrompt(fresh, cfg);
+        if (hit) break;
+        await sleep(250);
+      }
+      if (!hit) {
+        // A NEGATIVE THAT EXPLAINS ITSELF. "The matcher saw nothing" has two very
+        // different causes - the rule is wrong, or the dialog was never on screen -
+        // and a bare `false` cannot tell them apart. This repo has already paid for
+        // a negative sweep that confirmed whatever was hoped for.
+        const raw = term.text();
+        console.log(`\n---- step ${step}: the matcher sees NOTHING after ${Date.now() - t0}ms`);
+        console.log(`     bytes captured   : ${raw.length}`);
+        console.log(`     caret present    : ${raw.includes(CARET)}`);
+        console.log(`     dialog on screen : ${DIALOG.test(screen(raw))}`);
+        console.log(`     composer footer  : ${COMPOSER_FOOTER.test(screen(raw))}`);
+        console.log(`---- SCREEN ----\n${screen(raw).split('\n').slice(-20).join('\n')}`);
+        break;
+      }
+      seen.push(hit);
+      console.log(`\n---- step ${step}: MATCHED after ${Date.now() - t0}ms`);
+      console.log(`     id      : ${hit.id === null ? 'null (family by shape only)' : hit.id}`);
+      console.log(`     options : ${JSON.stringify(hit.options)}`);
+      console.log(`     cursor  : ${hit.cursor}   target: ${hit.target}`);
+      console.log(`     keys    : ${JSON.stringify(hit.keys)}`);
+      console.log(`---- SCREEN ----\n${screen(term.text()).split('\n').slice(-16).join('\n')}`);
+
+      // END TO END, not just the rule: what does the SERVER say about this session?
+      // The whole fix is that #147's 45s ceiling must not silently open the submit
+      // gate on a screen we have recognised, so the interesting sample is taken
+      // AFTER that ceiling would have fired.
+      if (step === 0) {
+        console.log(`     server now      : ${await readGate(cookie, id)}`);
+        const wait = Number(process.env.WT_READY_FALLBACK_MS || 45000) + 5000;
+        console.log(`     waiting ${wait}ms for the #147 readiness ceiling to pass...`);
+        await sleep(wait);
+        console.log(`     server after it : ${await readGate(cookie, id)}`);
+        console.log(`     matcher still   : ${matchBlockingPrompt(term.text(), cfg) ? 'MATCHING' : 'no'}`);
+      }
+      // Answer it exactly as the worker would: one key at a time, with a real gap.
+      // A lumped write is the #55 trap and it is worse here than on a composer.
+      const keys = hit.keys || [DOWN, '\r'];
+      const before = term.text().length;
+      for (const k of keys) { term.send(k); await sleep(cfg.answerGapMs); }
+      // Wait for the screen to move on before asking again, then advance the mark so
+      // the dialog just answered can never be seen again.
+      const t1 = Date.now();
+      while (Date.now() - t1 < 20000 && term.text().length === before) await sleep(200);
+      await sleep(3000);
+      mark = term.text().length;
+    }
+
+    const composer = await waitForScreen(term, COMPOSER_FOOTER, 60000);
+    console.log(`\ncomposer up after answering: ${composer !== null ? `${composer}ms` : 'NEVER'}`);
+    console.log(`matcher on the COMPOSER screen: ${JSON.stringify(matchBlockingPrompt(term.text().slice(mark), cfg))}`);
+    console.log(`server on the composer: ${await readGate(cookie, id)}`);
+    console.log(`trust on disk: ${JSON.stringify(readTrust(cwd))}`);
+
+    const beforeSubmit = term.text().length;
+    term.send('reply with exactly the single word OK and nothing else');
+    await sleep(300);
+    term.send('\r');
+    const started = await waitFor(term, STARTED, 30000, beforeSubmit) !== null;
+    console.log(`\n==== a prompt STARTED A TURN: ${started}`);
+    console.log(`==== members seen: ${seen.map((h) => h.id || 'unknown').join(', ') || '(none)'}`);
+  } finally {
+    await kill(cookie, id, term);
+  }
+}
+
 // ---------------------------------------------------------------- the composer FRAME
 
 // `lib/agents.js:190` declares `readiness: { composer: /❯/ }`, and the comment above it
@@ -655,6 +774,7 @@ async function resume(cookie) {
   else if (verb === 'step') await step(cookie);
   else if (verb === 'frame') await frame(cookie);
   else if (verb === 'resume') await resume(cookie);
-  else { console.error(`unknown verb '${verb}' — capture | drive | step | frame | resume | clean`); process.exit(1); }
+  else if (verb === 'family') await family(cookie);
+  else { console.error(`unknown verb '${verb}' — capture | drive | step | frame | family | resume | clean`); process.exit(1); }
   process.exit(0);
 })().catch((e) => { console.error(e); process.exit(1); });

@@ -81,11 +81,36 @@
 // so it is checked separately and only for what it does show (the HOST refreshing).
 // Every copy is deleted on the way out, including on --keep.
 //
+// `--mcp` — THE ONE GAP THE FIRST RUN COULD NOT SEE (CLAUDE.md limit 4)
+//
+// The measured session was minimal: no MCP servers, no plugins, no statusLine. A real
+// session on this fleet runs several MCP servers, and MCP teardown is the most plausible
+// concrete form of the report's "work Claude is doing" at exit. `--mcp` loads three stdio
+// servers into the isolated config's LOCAL scope (`projects[<cwd>].mcpServers`, which
+// raises no approval prompt, unlike a project `.mcp.json`) and makes the turn use all
+// three, so the session has live MCP state and live MCP child processes at teardown:
+//
+//   filesystem      — @modelcontextprotocol/server-filesystem, scoped to the probe cwd
+//   memory          — @modelcontextprotocol/server-memory, its knowledge graph pointed
+//                     INSIDE the config tree so any write lands in the snapshot diff
+//   teardown-probe  — generated here, because the other two have NO shutdown handler at
+//                     all and can therefore only say whether MCP *starts*. This one
+//                     writes a marker from every path a stdio MCP child can leave by,
+//                     including `process.on('exit')`, which runs only if the process is
+//                     allowed an ordinary exit. It is the instrument, not the subject:
+//                     it measures what claude's teardown DOES TO an MCP child, not what
+//                     any particular real server happens to write.
+//
+// The fleet's own MCP server (azure-devops) is deliberately NOT used: it authenticates
+// with a personal access token, and copying a credential into an isolated config is the
+// one thing this probe already treats as a hazard.
+//
 // Usage:
 //   node scripts/rig/probe-exit-flush.js                 # 2 runs of each arm
 //   node scripts/rig/probe-exit-flush.js --runs 1        # one of each
 //   node scripts/rig/probe-exit-flush.js --arms ABC      # add the TerminateProcess control
 //   node scripts/rig/probe-exit-flush.js --dwell 20000   # keep the session alive longer first
+//   node scripts/rig/probe-exit-flush.js --mcp           # load real MCP servers (limit 4)
 //   node scripts/rig/probe-exit-flush.js --dump          # print the final screen too
 //   node scripts/rig/probe-exit-flush.js --clean         # remove the probe tree, run nothing
 //
@@ -124,6 +149,31 @@ const LAUNCH = process.env.WT_EXIT_FLUSH_LAUNCH || 'claude --dangerously-skip-pe
 // through a path production does not use. It also makes the agent run a real tool, so
 // the session has state worth flushing rather than one bare assistant sentence.
 const PROMPT = 'Write a file called note.txt in the current directory containing only the word BANANA, then reply with just the word DONE.';
+
+/**
+ * The `--mcp` turn. Each server is named explicitly so the turn EXERCISES MCP rather
+ * than merely loading it: a session that connected three servers and then did all its
+ * work through Bash has no more MCP state at teardown than the minimal one, and would
+ * answer limit 4 with a measurement of the wrong thing.
+ */
+const MCP_PROMPT = 'Use the record_probe_note MCP tool to record the note BANANA, then use the memory MCP tool create_entities to add an entity named ExitFlushProbe of type probe with the observation BANANA, then use the filesystem MCP tool write_file to write note.txt in the current directory containing only the word BANANA, then reply with just the word DONE.';
+
+/** Where `--mcp` installs the two real servers and generates the instrumented one. */
+const MCP_DEPS = path.join(PROBE_PARENT, 'mcp-deps');
+/**
+ * Pinned nowhere on purpose: the point is the servers a real user would install today.
+ * `zod` and the SDK are named explicitly because the GENERATED server requires them
+ * directly — inheriting them as transitive dependencies of the memory server would make
+ * this probe break on a dependency change that has nothing to do with it.
+ */
+const MCP_PKGS = [
+  '@modelcontextprotocol/server-filesystem',
+  '@modelcontextprotocol/server-memory',
+  '@modelcontextprotocol/sdk',
+  'zod',
+];
+/** npm reached through node, never through `npm.cmd`: PATHEXT is empty in some shells here. */
+const NPM_CLI = path.join(path.dirname(process.execPath), 'node_modules', 'npm', 'bin', 'npm-cli.js');
 
 /** The composer marker — taken from the registry, never restated (it is 5 bytes, #190). */
 const COMPOSER = readinessMarker('claude');
@@ -307,6 +357,135 @@ function readTranscript(p) {
 
 // ---------------------------------------------------------------- seeding
 
+/**
+ * The instrumented MCP server, written out rather than checked in so `--mcp` is
+ * self-contained and the file cannot drift from the probe that interprets its markers.
+ *
+ * Every marker is appended, never overwritten, so "fired twice" stays distinguishable
+ * from "fired once" — the discipline the hook .bat files already use.
+ *
+ * The generated source builds its newline with `String.fromCharCode(10)` rather than an
+ * escape, for the same reason this file is ASCII-only: an escape that has to survive
+ * being a string inside a string is the exact shape #221 gates against.
+ */
+function writeMcpTeardownServer(depsDir) {
+  const src = [
+    "#!/usr/bin/env node",
+    "'use strict';",
+    '// GENERATED by scripts/rig/probe-exit-flush.js (#191). Do not edit here.',
+    '//',
+    '// An MCP server whose only product is a LEDGER OF ITS OWN LIFECYCLE. The two real',
+    '// servers loaded beside it have no shutdown handler at all, so they can say whether',
+    '// MCP starts, never whether an MCP child is given a chance to finish.',
+    "const fs = require('fs');",
+    "const path = require('path');",
+    "const { McpServer } = require('@modelcontextprotocol/sdk/server/mcp.js');",
+    "const { StdioServerTransport } = require('@modelcontextprotocol/sdk/server/stdio.js');",
+    "const { z } = require('zod');",
+    '',
+    'const LF = String.fromCharCode(10);',
+    'const MARKER_DIR = process.argv[2];',
+    "const NAME = process.argv[3] || 'teardown-probe';",
+    '',
+    'function mark(ev, extra) {',
+    '  try {',
+    '    fs.appendFileSync(',
+    "      path.join(MARKER_DIR, 'MCP-' + ev + '.txt'),",
+    "      new Date().toISOString() + ' pid=' + process.pid + ' ' + (extra || '') + LF,",
+    '    );',
+    '  } catch (e) { /* an exit path has nowhere to report to */ }',
+    '}',
+    '',
+    "mark('STARTED', NAME);",
+    '',
+    '// THE MEASUREMENT. Written SYNCHRONOUSLY from the exit path, so it lands only if this',
+    '// process is allowed to run one - a TerminateProcess writes nothing here.',
+    "process.on('exit', (code) => mark('EXIT', 'code=' + code));",
+    "process.on('SIGTERM', () => { mark('SIGTERM'); process.exit(0); });",
+    "process.on('SIGINT', () => { mark('SIGINT'); process.exit(0); });",
+    '// The ordinary stdio-MCP shutdown: the client closes our stdin and we are expected to go.',
+    "process.stdin.on('end', () => { mark('STDIN-END'); process.exit(0); });",
+    '',
+    "const server = new McpServer({ name: NAME, version: '1.0.0' });",
+    '',
+    "server.registerTool('record_probe_note', {",
+    "  description: 'Record a note in the exit-flush probe ledger and return it.',",
+    "  inputSchema: { note: z.string().describe('the note to record') },",
+    '}, async ({ note }) => {',
+    "  mark('TOOL', 'note=' + String(note).slice(0, 80));",
+    "  return { content: [{ type: 'text', text: 'recorded: ' + String(note).slice(0, 80) }] };",
+    '});',
+    '',
+    '(async () => {',
+    '  await server.connect(new StdioServerTransport());',
+    "  mark('CONNECTED');",
+    "})().catch((e) => { mark('ERROR', String((e && e.message) || e)); process.exit(1); });",
+    '',
+  ].join('\n');
+  const p = path.join(depsDir, 'mcp-teardown-probe.js');
+  fs.writeFileSync(p, src);
+  return p;
+}
+
+/**
+ * Install the MCP servers `--mcp` loads, once, into the probe's own tree.
+ *
+ * ABORTS rather than degrading. A run whose servers failed to install would measure the
+ * minimal session again and report it as the loaded one — the same class of failure as
+ * the null-pid vacuous liveness check below, and just as invisible in the output.
+ */
+function ensureMcpDeps() {
+  fs.mkdirSync(MCP_DEPS, { recursive: true });
+  const pkgJson = path.join(MCP_DEPS, 'package.json');
+  if (!fs.existsSync(pkgJson)) {
+    fs.writeFileSync(pkgJson, JSON.stringify({ name: 'wt-exit-flush-mcp-deps', version: '1.0.0', private: true }, null, 2));
+  }
+  const installed = MCP_PKGS.every((n) => fs.existsSync(path.join(MCP_DEPS, 'node_modules', ...n.split('/'))));
+  if (!installed) {
+    console.log(`installing MCP servers into ${MCP_DEPS} (first --mcp run) ...`);
+    execFileSync(process.execPath, [NPM_CLI, 'install', '--no-audit', '--no-fund', '--loglevel=error', ...MCP_PKGS], {
+      cwd: MCP_DEPS, encoding: 'utf8', windowsHide: true, timeout: 300000, stdio: 'inherit',
+    });
+  }
+  for (const n of MCP_PKGS) {
+    const p = path.join(MCP_DEPS, 'node_modules', ...n.split('/'));
+    if (!fs.existsSync(p)) throw new Error(`MCP dependency ${n} did not install at ${p} — refusing to measure a session that is not actually loaded`);
+  }
+  const versions = {};
+  for (const n of MCP_PKGS) {
+    try { versions[n] = JSON.parse(fs.readFileSync(path.join(MCP_DEPS, 'node_modules', ...n.split('/'), 'package.json'), 'utf8')).version; } catch { versions[n] = '?'; }
+  }
+  writeMcpTeardownServer(MCP_DEPS);
+  return versions;
+}
+
+/** The three servers, as claude's own `mcpServers` config shape. */
+function mcpServerConfig(cfgDir, cwd, markerDir) {
+  const dep = (...p) => path.join(MCP_DEPS, 'node_modules', ...p);
+  return {
+    'teardown-probe': {
+      type: 'stdio',
+      command: process.execPath,
+      args: [path.join(MCP_DEPS, 'mcp-teardown-probe.js'), markerDir, 'teardown-probe'],
+      env: {},
+    },
+    filesystem: {
+      type: 'stdio',
+      command: process.execPath,
+      args: [dep('@modelcontextprotocol', 'server-filesystem', 'dist', 'index.js'), cwd],
+      env: {},
+    },
+    memory: {
+      type: 'stdio',
+      command: process.execPath,
+      args: [dep('@modelcontextprotocol', 'server-memory', 'dist', 'index.js')],
+      // INSIDE the config tree on purpose: the tree snapshot is what would notice a
+      // knowledge-graph write landing at teardown rather than at call time.
+      env: { MEMORY_FILE_PATH: path.join(cfgDir, 'mcp-memory.jsonl') },
+    },
+  };
+}
+
 function writeHookBats(markerDir) {
   fs.mkdirSync(markerDir, { recursive: true });
   const bats = {};
@@ -328,7 +507,7 @@ function writeHookBats(markerDir) {
   return bats;
 }
 
-function seedConfigDir(cfgDir, cwd, bats) {
+function seedConfigDir(cfgDir, cwd, bats, mcpServers) {
   fs.mkdirSync(cfgDir, { recursive: true });
 
   const hooks = {};
@@ -357,7 +536,10 @@ function seedConfigDir(cfgDir, cwd, bats) {
     hasClaudeMdExternalIncludesApproved: true,
     hasClaudeMdExternalIncludesWarningShown: true,
     history: [],
-    mcpServers: {},
+    // LOCAL scope. A project `.mcp.json` would be the other place to put these, and it
+    // raises an approval prompt on first launch that nobody is there to answer — the
+    // same hazard as the folder-trust selector two lines below.
+    mcpServers: mcpServers || {},
     enabledMcpjsonServers: [],
     disabledMcpjsonServers: [],
     mcpContextUris: [],
@@ -455,7 +637,8 @@ async function runArm(arm, run, opts) {
   fs.writeFileSync(path.join(cwd, 'README.md'), '# exit-flush probe\n\nGenerated by scripts/rig/probe-exit-flush.js (#191).\n');
 
   const bats = writeHookBats(markerDir);
-  const credsCopy = seedConfigDir(cfgDir, cwd, bats);
+  const mcpServers = opts.mcp ? mcpServerConfig(cfgDir, cwd, markerDir) : null;
+  const credsCopy = seedConfigDir(cfgDir, cwd, bats, mcpServers);
   // Hashed AT CREATION rather than reused from preflight: the HOST's own claude may
   // refresh between the two, and that would otherwise read as the child rotating it.
   const credsCopyHash = sha1File(credsCopy);
@@ -473,6 +656,10 @@ async function runArm(arm, run, opts) {
     exitAwaitedMs: null,
     extraCrNeeded: false,
     survivors: [],
+    mcp: !!opts.mcp,
+    /** MCP child processes of the AGENT, recorded at the BEFORE checkpoint. */
+    mcpChildren: [],
+    mcpAliveAfter: [],
     error: null,
   };
   const t0 = Date.now();
@@ -486,6 +673,20 @@ async function runArm(arm, run, opts) {
       if (!fs.existsSync(f)) continue;
       const txt = fs.readFileSync(f, 'utf8').trim().split('\n').filter(Boolean);
       out[ev] = { count: txt.length, mtimeMs: fs.statSync(f).mtimeMs };
+    }
+    return out;
+  };
+
+  /** The generated MCP server's lifecycle ledger: event -> {count, mtimeMs}. */
+  const readMcpMarkers = () => {
+    const out = {};
+    let names = [];
+    try { names = fs.readdirSync(markerDir).filter((f) => /^MCP-.+\.txt$/.test(f)); } catch { return out; }
+    for (const f of names) {
+      const p = path.join(markerDir, f);
+      const ev = f.slice(4, -4);
+      const txt = fs.readFileSync(p, 'utf8').trim().split('\n').filter(Boolean);
+      out[ev] = { count: txt.length, mtimeMs: fs.statSync(p).mtimeMs };
     }
     return out;
   };
@@ -541,6 +742,17 @@ async function runArm(arm, run, opts) {
       console.log(`  [${arm}${run}] SURVIVOR pid=${p.ProcessId} ${p.Name} :: ${String(p.CommandLine || '').slice(0, 160)}`);
       R.survivors.push({ pid: p.ProcessId, name: p.Name, cmd: String(p.CommandLine || '').slice(0, 200) });
       try { process.kill(p.ProcessId); } catch { /* already gone */ }
+    }
+    // AND THE ORPHANS THE WALK ABOVE CANNOT REACH. An MCP child whose claude is already
+    // gone has a ParentProcessId pointing at a dead pid, so descending from the shell
+    // never finds it. These pids were recorded by this function at the BEFORE
+    // checkpoint, by walking DOWN from a pid it spawned — the same provenance rule,
+    // just remembered rather than re-derived. Printed in full before anything is done.
+    for (const c of R.mcpChildren) {
+      if (!alive(c.pid)) continue;
+      console.log(`  [${arm}${run}] LEAKED MCP CHILD pid=${c.pid} ${c.name} :: ${c.cmd.slice(0, 160)}`);
+      R.survivors.push({ ...c, leakedMcp: true });
+      try { process.kill(c.pid); } catch { /* already gone */ }
     }
     // THE COPY IS THE ONLY FILE A REFRESH BY THE CHILD CAN MOVE, and it has to be read
     // HERE because the next line destroys it. The child runs with CLAUDE_CONFIG_DIR
@@ -632,11 +844,17 @@ async function runArm(arm, run, opts) {
     // --- identical real work -------------------------------------------------
     // Registry submit discipline: text, then the CR ALONE after submit.gapMs. An
     // atomic `text\r` at this length is measured NOT to submit (#55).
+    //
+    // The `--mcp` prompt is longer (~340 chars). It is written UNBRACKETED, exactly as
+    // this probe has always written the short one, and #213 measured a single-line
+    // unbracketed body of 288 and 488 chars arriving whole — the head-cut cliff is at
+    // 1024. Nothing here needs `submit.bracketAbove`, which is a WORKER rule anyway.
     await sleep(600);
-    term.write(PROMPT);
+    const prompt = opts.mcp ? MCP_PROMPT : PROMPT;
+    term.write(prompt);
     await sleep(GAP_MS);
     term.write('\r');
-    note(`prompt submitted (${PROMPT.length} chars, CR split by ${GAP_MS}ms)`);
+    note(`prompt submitted (${prompt.length} chars, CR split by ${GAP_MS}ms)`);
 
     // Turn complete = the Stop hook fired. Not the screen: it cannot tell a typed
     // line from a submitted one, which is the whole reason this class of bug survives.
@@ -666,6 +884,37 @@ async function runArm(arm, run, opts) {
         await sleep(1000);
       }
     }
+    // --- MCP census, taken from the process table BEFORE the end-action ------
+    // These pids are the only way to answer "was an MCP child LEAKED", because the
+    // survivor sweep in finish() walks down from the SHELL: once an intermediate
+    // process is gone the walk cannot reach its orphans, so an MCP server outliving a
+    // dead claude would be invisible there. Recorded here, checked after teardown.
+    if (opts.mcp) {
+      const kids = descendantsOf(R.claudePid);
+      R.mcpChildren = kids
+        .filter((p) => String(p.CommandLine || '').includes(MCP_DEPS))
+        .map((p) => ({ pid: p.ProcessId, name: p.Name, cmd: String(p.CommandLine || '').slice(0, 200) }));
+      R.mcpMarkersBefore = readMcpMarkers();
+      const cmdlines = R.mcpChildren.map((c) => c.cmd).join(' | ');
+      const missing = ['mcp-teardown-probe.js', 'server-filesystem', 'server-memory']
+        .filter((w) => !cmdlines.includes(w));
+      note(`MCP children of the agent: ${R.mcpChildren.length} (${R.mcpChildren.map((c) => c.pid).join(',')})`);
+      // ABORT RATHER THAN FOLD A SETUP FAILURE INTO A VERDICT — the same rule as the
+      // null-pid check above. A --mcp run whose servers never connected measures the
+      // MINIMAL session and would be reported as the loaded one, which is precisely the
+      // gap this flag exists to close.
+      if (missing.length) {
+        throw new Error(`--mcp run is not actually loaded: no live child for ${missing.join(', ')}. `
+          + 'Measuring it would report the minimal session as the loaded one.');
+      }
+      if (!(R.mcpMarkersBefore.STARTED && R.mcpMarkersBefore.CONNECTED)) {
+        throw new Error('the instrumented MCP server left no STARTED/CONNECTED marker — its ledger cannot be trusted for the teardown question');
+      }
+      R.mcpToolUsed = !!R.mcpMarkersBefore.TOOL;
+      R.mcpMemoryFile = fs.existsSync(path.join(cfgDir, 'mcp-memory.jsonl'));
+      note(`MCP exercised by the turn: record_probe_note=${R.mcpToolUsed} memory graph on disk=${R.mcpMemoryFile}`);
+    }
+
     R.hooksBefore = readHooks();
     R.treeBefore = snapshotTree(cfgDir);
     const tBefore = findTranscripts(cfgDir);
@@ -746,6 +995,12 @@ async function runArm(arm, run, opts) {
     // --- settle, then snapshot AFTER -----------------------------------------
     await sleep(opts.settleMs);
     R.hooksAfter = readHooks();
+    if (opts.mcp) {
+      R.mcpMarkersAfter = readMcpMarkers();
+      // Liveness on pids RECORDED AT SPAWN-DISCOVERY TIME, never a name match.
+      R.mcpAliveAfter = R.mcpChildren.filter((c) => alive(c.pid)).map((c) => c.pid);
+      note(`MCP children still alive ${opts.settleMs}ms after teardown: ${R.mcpAliveAfter.length ? R.mcpAliveAfter.join(',') : 'none'}`);
+    }
     R.treeAfter = snapshotTree(cfgDir);
     // A transcript created only at teardown would not be in tBefore at all — so the
     // AFTER list is re-derived rather than re-stat'ing the BEFORE path. "It appeared
@@ -792,6 +1047,20 @@ function reportArm(R) {
     console.log(`  ${how}  agent gone=${!R.agentSurvivedKill} after ${R.agentGoneMs}ms  (agent pid ${R.claudePid})`);
   }
   console.log(`  survivors    ${R.survivors.length ? JSON.stringify(R.survivors) : 'none'}`);
+  if (R.mcp) {
+    console.log(`  MCP loaded   ${R.mcpChildren.length} child processes: ${R.mcpChildren.map((c) => c.pid).join(',') || '(none)'}`);
+    console.log(`  MCP exercised by the turn: record_probe_note=${!!R.mcpToolUsed}  memory graph on disk=${!!R.mcpMemoryFile}`);
+    console.log(`  MCP children still alive after teardown: ${R.mcpAliveAfter.length ? R.mcpAliveAfter.join(',') : 'none'}`);
+    const mb = R.mcpMarkersBefore || {};
+    const ma = R.mcpMarkersAfter || {};
+    const evs = [...new Set([...Object.keys(mb), ...Object.keys(ma)])];
+    console.log(`  MCP ledger   ${evs.length ? evs.map((e) => `${e}x${(ma[e] || mb[e]).count}`).join(' ') : '(empty)'}`);
+    for (const e of evs) {
+      const b = mb[e] ? mb[e].count : 0;
+      const a = ma[e] ? ma[e].count : 0;
+      if (a > b) console.log(`    MCP ${e}: ${a - b} MORE after the end-action (at ${hhmmss(ma[e].mtimeMs)})`);
+    }
+  }
   console.log(`  project dir  derived=${R.derivedProject} actual=${R.actualProject} ${R.derivedProject === R.actualProject ? '(match)' : '(MISMATCH)'}`);
 
   const tb = R.transcriptBefore; const ta = R.transcriptAfter;
@@ -870,6 +1139,18 @@ function reportCompare(results) {
   row('ms for the agent to go', (r) => String(r.arm === 'B' ? r.exitAwaitedMs : r.agentGoneMs));
   row('jsonl first seen (ms)', (r) => String(r.transcriptFirstSeenMs == null ? 'never' : r.transcriptFirstSeenMs));
   row('survivors after teardown', (r) => String(r.survivors.length));
+  if (results.some((r) => r.mcp)) {
+    const gainedMarker = (ev) => (r) => {
+      const b = (r.mcpMarkersBefore || {})[ev];
+      const a = (r.mcpMarkersAfter || {})[ev];
+      return String((a ? a.count : 0) - (b ? b.count : 0));
+    };
+    row('MCP children at teardown', (r) => String(r.mcpChildren.length));
+    row('MCP children LEAKED', (r) => String(r.mcpAliveAfter.length));
+    row('MCP STDIN-END gained', gainedMarker('STDIN-END'));
+    row('MCP SIGTERM gained', gainedMarker('SIGTERM'));
+    row('MCP clean EXIT gained', gainedMarker('EXIT'));
+  }
   console.log('==========================================================================');
 }
 
@@ -886,6 +1167,7 @@ function parseArgs(argv) {
     keep: argv.includes('--keep'),
     clean: argv.includes('--clean'),
     dump: argv.includes('--dump'),
+    mcp: argv.includes('--mcp'),
     settleMs: parseInt(get('--settle', '8000'), 10),
     presettleMs: parseInt(get('--presettle', '6000'), 10),
     dwellMs: parseInt(get('--dwell', '0'), 10),
@@ -901,7 +1183,7 @@ function parseArgs(argv) {
     // Only ever the probe's OWN parent, and only the children it names. The default
     // parent is created by this script; a caller-supplied one may hold other things.
     if (!fs.existsSync(PROBE_PARENT)) { console.log(`nothing to clean — ${PROBE_PARENT} does not exist`); return; }
-    const MINE = /^(cfg|work|markers)-[ABC]\d+-[0-9a-z]+$/;
+    const MINE = /^((cfg|work|markers)-[ABC]\d+-[0-9a-z]+|mcp-deps)$/;
     for (const name of fs.readdirSync(PROBE_PARENT)) {
       if (!MINE.test(name)) { console.log(`  keeping ${name} — not created by this probe`); continue; }
       shred(path.join(PROBE_PARENT, name, '.credentials.json'));
@@ -945,8 +1227,20 @@ function parseArgs(argv) {
   console.log(`shell                 : ${SHELL}`);
   console.log(`launch                : ${LAUNCH}`);
   console.log(`composer marker       : ${COMPOSER}  (submit gap ${GAP_MS}ms)`);
-  console.log(`arms                  : ${opts.arms.join(',')} x ${opts.runs} run(s)\n`);
+  console.log(`arms                  : ${opts.arms.join(',')} x ${opts.runs} run(s)`);
   fs.mkdirSync(PROBE_PARENT, { recursive: true });
+  if (opts.mcp) {
+    // Fails LOUDLY and before a single session is spawned: a --mcp run that quietly
+    // loaded nothing would answer limit 4 with a second measurement of the minimal
+    // session, which is worse than not running at all.
+    let versions;
+    try { versions = ensureMcpDeps(); } catch (e) { console.error(`--mcp setup failed: ${e.message}`); process.exit(2); }
+    console.log(`MCP servers           : ${Object.entries(versions).map(([k, v]) => `${k}@${v}`).join(', ')}`);
+    console.log('MCP config scope      : projects[<cwd>].mcpServers (local — no approval prompt)');
+  } else {
+    console.log('MCP servers           : none (pass --mcp for the loaded-session measurement)');
+  }
+  console.log('');
 
   const results = [];
   try {

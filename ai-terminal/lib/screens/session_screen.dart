@@ -967,6 +967,30 @@ bool pendingQuestionChipVisible(PendingQuestion? pending, String? dismissedKey) 
 /// strictly more honest than showing nothing.
 bool terminalTailGateOpen(String? status) => status != 'working';
 
+/// What the compose bar says instead of "Starting the agent" when the server has
+/// recognised a startup selector standing in front of this session (#190). Null for
+/// an ordinary boot, for an older server, and for a shape nobody recognised.
+///
+/// PURE and top-level so the wording is testable without pumping a widget tree — the
+/// same shape as `terminalTailGateOpen` above.
+///
+/// It quotes the dialog's OWN option labels rather than naming the dialog, which is
+/// #190's "enough of the terminal's own text to say what is being asked". Naming it
+/// would only work for members somebody has measured, and the recognition is
+/// deliberately wider than that; the labels are on screen whatever the member is.
+/// They are already readable text: the server rebuilt the columns the dialog draws
+/// with CHA, because the raw stream has no spaces in it at all.
+String? blockedPromptMessage(BlockedPrompt? b) {
+  if (b == null) return null;
+  final opts = b.options.where((o) => o.trim().isNotEmpty).toList(growable: false);
+  if (opts.isEmpty) return 'Answer the prompt in the Terminal lens to continue';
+  // Capped so a long-labelled dialog cannot push the hint out of a phone's bar. Two
+  // is enough to convey the CHOICE, which is the thing a spinner fails to convey.
+  final shown = opts.take(2).join(' / ');
+  final more = opts.length > 2 ? ', ...' : '';
+  return 'Answer in the Terminal lens: $shown$more';
+}
+
 /// A STABLE identity for a pending question, derived from its CONTENT (headers,
 /// question text, multiSelect, option labels) instead of the volatile
 /// `toolUseId`.
@@ -4501,6 +4525,10 @@ class _SessionScreenState extends State<SessionScreen>
               // moment before the session object has loaded, where refusing
               // would be a bar that never sends on a session that is fine.
               agentReady: _session?.agentReady ?? true,
+              // #190 — and WHY, when the server recognised the screen. Null keeps
+              // the #147 wording exactly as it was, which is what an ordinary boot
+              // and an older server both get.
+              blockedReason: blockedPromptMessage(_session?.blockedPrompt),
               // #188 — the slash-command button. Null (so the button is absent,
               // not disabled) for a plain shell, which has no slash commands, and
               // against a server too old to publish a button row.

@@ -206,6 +206,22 @@ class Session {
   /// every session it owns.
   final bool agentReady;
 
+  /// WHY the agent is not ready, when the server recognised the screen (#190), or
+  /// `null` — which is the normal answer and means "nothing recognised", never
+  /// "nothing is wrong".
+  ///
+  /// Server-derived (`lib/blocking-prompt.js`, applied in `pty-worker.js`) and never
+  /// re-derived here: recognising it means reconstructing terminal COLUMNS out of an
+  /// escape stream, because the dialog it recognises emits no spaces at all.
+  ///
+  /// It exists because [agentReady] alone is ambiguous in the one case that costs a
+  /// prompt. A booting agent and a session parked on Claude's folder-trust selector
+  /// are both "not ready", but the first clears itself in seconds and the second never
+  /// does — so a bar that says "Starting the agent" and shows a spinner is telling the
+  /// truth about one and lying about the other, and the lie is on the session where
+  /// pressing Send confirms `No, exit` and kills the agent.
+  final BlockedPrompt? blockedPrompt;
+
   /// What this session is blocked on: `'question'`, `'permission'`, or `null`
   /// when it is not blocked at all (#79).
   ///
@@ -248,6 +264,7 @@ class Session {
     this.backgroundTasks = const <String>[],
     this.waitingFor,
     this.agentReady = true,
+    this.blockedPrompt,
     this.usageLimit,
   });
 
@@ -278,6 +295,7 @@ class Session {
     backgroundTasks: backgroundTasks,
     waitingFor: waitingFor,
     agentReady: agentReady,
+    blockedPrompt: blockedPrompt,
     usageLimit: usageLimit,
   );
 
@@ -308,6 +326,9 @@ class Session {
       waitingFor: _waitingFor(json['waitingFor']),
       // Absent -> ready. See the field doc: the gate must fail OPEN.
       agentReady: json['agentReady'] != false,
+      // Absent (an older server, or nothing recognised) -> null, which renders as an
+      // ordinary boot. Failing this one open would be claiming a block nobody saw.
+      blockedPrompt: BlockedPrompt.fromJson(json['blockedPrompt']),
       usageLimit: UsageLimit.fromJson(json['usageLimit']),
     );
   }
@@ -382,6 +403,47 @@ class Session {
 ///
 /// An older server sends no `usageLimit` at all, so this is nullable everywhere
 /// and absence renders nothing.
+/// A recognised startup selector standing between a new session and its composer
+/// (#190) — Claude's folder-trust dialog and its siblings.
+///
+/// The server owns the recognition; this is only what it reported. See
+/// [Session.blockedPrompt] for why "not ready" was not enough on its own.
+class BlockedPrompt {
+  /// The member, when it is one the server knows how to answer (`'folder-trust'`),
+  /// or `null` for one recognised only by SHAPE.
+  ///
+  /// Null is the expected case for anything unmeasured and is not a degraded read:
+  /// the family is deliberately recognised more widely than it can be answered,
+  /// because reporting costs a refused submit and answering wrongly costs the agent.
+  final String? id;
+
+  /// The dialog's own option labels, in the order they are on screen, already
+  /// rendered back into readable text by the server (the dialog positions every word
+  /// with CHA and emits no spaces, so there is nothing readable in the raw stream).
+  ///
+  /// These are shown verbatim: #190 asks for "enough of the terminal's own text to
+  /// say what is being asked", and paraphrasing a question whose options include
+  /// `No, exit` would be the client inventing reassurance it cannot back.
+  final List<String> options;
+
+  /// When it was first seen.
+  final int? at;
+
+  const BlockedPrompt({this.id, this.options = const <String>[], this.at});
+
+  static BlockedPrompt? fromJson(dynamic json) {
+    if (json is! Map) return null;
+    final raw = json['options'];
+    return BlockedPrompt(
+      id: json['id']?.toString(),
+      options: raw is List
+          ? raw.map((o) => o.toString()).where((o) => o.isNotEmpty).toList(growable: false)
+          : const <String>[],
+      at: _asInt(json['at']),
+    );
+  }
+}
+
 class UsageLimit {
   /// The session is sitting out its 5h window right now.
   final bool waiting;
@@ -1690,10 +1752,13 @@ class SessionRecap {
     this.lastActivity,
     this.waitingFor,
     this.prompt,
+    this.prompts = const [],
     this.reply,
     this.sinceTurns = 0,
     this.tools = const [],
     this.tasks,
+    this.scanTurns = 0,
+    this.scanExhausted = false,
   });
 
   final String name;
@@ -1713,6 +1778,14 @@ class SessionRecap {
   /// window, which is normal for an autoCommand-started agent — not an error.
   final RecapEntry? prompt;
 
+  /// That turn and up to two older ones, NEWEST FIRST (#246). `prompts.first` IS
+  /// [prompt]; one prompt is not enough state to re-orient on, because a single
+  /// entry cannot show that half a day passed between your last two sends.
+  ///
+  /// A server predating the field yields `[prompt]`, so the trail is simply empty
+  /// and the card renders exactly as it did.
+  final List<RecapEntry> prompts;
+
   /// The agent's newest prose since that prompt.
   final RecapEntry? reply;
 
@@ -1725,10 +1798,24 @@ class SessionRecap {
   /// Task-list progress, or null when the agent has no list.
   final RecapTasks? tasks;
 
+  /// How many turns the server's backward walk read, and whether it stopped on a
+  /// ceiling rather than at the start of the file.
+  ///
+  /// With no prompt found those two say different things — *this session has none*
+  /// versus *we stopped looking* — and reporting the second as the first would be
+  /// confidently wrong on exactly the drifted sessions this card exists for. The
+  /// client cannot derive it, so the server publishes it.
+  final int scanTurns;
+  final bool scanExhausted;
+
   static SessionRecap fromJson(Map<String, dynamic> j) {
     final since = j['since'];
     final sinceMap = since is Map ? since.cast<String, dynamic>() : const {};
     final toolsRaw = sinceMap['tools'];
+    final scan = j['scan'];
+    final scanMap = scan is Map ? scan.cast<String, dynamic>() : const {};
+    final prompt = RecapEntry.fromJson(j['prompt']);
+    final promptsRaw = j['prompts'];
     return SessionRecap(
       name: (j['name'] ?? '').toString(),
       cwd: (j['cwd'] ?? '').toString(),
@@ -1736,13 +1823,23 @@ class SessionRecap {
       agent: j['agent']?.toString(),
       lastActivity: _asInt(j['lastActivity']),
       waitingFor: j['waitingFor']?.toString(),
-      prompt: RecapEntry.fromJson(j['prompt']),
+      prompt: prompt,
+      // An older server sends no list at all; fall back to the single prompt so
+      // `prompts.first` is the headline either way and the trail is just empty.
+      prompts: promptsRaw is List
+          ? promptsRaw
+              .map(RecapEntry.fromJson)
+              .whereType<RecapEntry>()
+              .toList(growable: false)
+          : (prompt == null ? const <RecapEntry>[] : <RecapEntry>[prompt]),
       reply: RecapEntry.fromJson(j['reply']),
       sinceTurns: _asInt(sinceMap['turns']) ?? 0,
       tools: toolsRaw is List
           ? toolsRaw.map((e) => e.toString()).toList(growable: false)
           : const [],
       tasks: RecapTasks.fromJson(j['tasks']),
+      scanTurns: _asInt(scanMap['turns']) ?? 0,
+      scanExhausted: scanMap['exhausted'] == true,
     );
   }
 }

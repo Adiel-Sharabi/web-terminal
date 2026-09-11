@@ -4,6 +4,8 @@
 /// prefilled from the target server's own defaults.
 library;
 
+import 'dart:async';
+
 import 'package:flutter/material.dart';
 import 'package:flutter/services.dart';
 
@@ -154,6 +156,14 @@ class _NewSessionSheetState extends State<_NewSessionSheet> {
   bool _commandEdited = false;
   bool _settingProgrammatically = false;
 
+  // #252 - a failed defaults fetch is NOT "this server has no defaults". The two were
+  // indistinguishable here: the catch below left the fields blank and said nothing, and
+  // the web did the same, which is why one server blip cost the defaults on BOTH
+  // clients. This client cannot be reloaded the way a browser tab can, so it retries.
+  bool _defaultsUnavailable = false;
+  Timer? _cfgRetry;
+  Duration _cfgRetryDelay = Duration.zero;
+
   List<String> _folders = const [];
   bool _showSuggestions = false;
   bool _creating = false;
@@ -196,12 +206,19 @@ class _NewSessionSheetState extends State<_NewSessionSheet> {
     _name.dispose();
     _cwd.dispose();
     _command.dispose();
+    _cfgRetry?.cancel();
     _cwdFocus.dispose();
     _suggestScroll.dispose();
     super.dispose();
   }
 
-  Future<void> _loadForServer(ServerConfig server) async {
+  /// Fetches this server's defaults and prefills the untouched fields.
+  ///
+  /// NEVER THROWS. On failure it says so and schedules a retry, because a blank field
+  /// cannot distinguish "the server has no default" from "we never heard back", and
+  /// `GET /api/config` fills every default in server-side - so a blank is always the
+  /// second one. See #252.
+  Future<void> _loadConfig(ServerConfig server) async {
     final api = widget.clientBuilder(server);
     try {
       final config = await api.serverConfig();
@@ -214,9 +231,35 @@ class _NewSessionSheetState extends State<_NewSessionSheet> {
         _command.text = config.defaultCommand;
       }
       _settingProgrammatically = false;
+      _cfgRetry?.cancel();
+      _cfgRetryDelay = Duration.zero;
+      // A later success must take the warning down, or it becomes the thing you learn
+      // to ignore.
+      if (_defaultsUnavailable) setState(() => _defaultsUnavailable = false);
     } catch (_) {
-      // best effort — leave fields as-is, matching the web's silent failure.
+      if (!mounted || _server != server) return;
+      if (!_defaultsUnavailable) setState(() => _defaultsUnavailable = true);
+      _scheduleConfigRetry(server);
     }
+  }
+
+  /// Backs off 2s, 4s, 8s ... to a minute. Only the config is retried - re-running the
+  /// whole load would re-fetch folders and agents, which have their own handling.
+  void _scheduleConfigRetry(ServerConfig server) {
+    _cfgRetry?.cancel();
+    final next = _cfgRetryDelay == Duration.zero
+        ? const Duration(seconds: 2)
+        : Duration(seconds: (_cfgRetryDelay.inSeconds * 2).clamp(2, 60));
+    _cfgRetryDelay = next;
+    _cfgRetry = Timer(next, () {
+      if (mounted && _server == server) _loadConfig(server);
+    });
+  }
+
+  Future<void> _loadForServer(ServerConfig server) async {
+    final api = widget.clientBuilder(server);
+    await _loadConfig(server);
+
     try {
       final folders = await api.folders();
       if (!mounted || _server != server) return;
@@ -352,6 +395,26 @@ class _NewSessionSheetState extends State<_NewSessionSheet> {
           children: [
             Text('New session', style: theme.textTheme.titleMedium),
             const SizedBox(height: 16),
+            // #252 - say it, rather than showing fallbacks that look like settings.
+            if (_defaultsUnavailable) ...[
+              Container(
+                width: double.infinity,
+                padding: const EdgeInsets.symmetric(horizontal: 8, vertical: 6),
+                decoration: BoxDecoration(
+                  color: const Color(0xFF2E2617),
+                  border: Border.all(color: const Color(0xFF6B5520)),
+                  borderRadius: BorderRadius.circular(4),
+                ),
+                child: Text(
+                  'Could not reach this server for its defaults. The fields below are '
+                  'fallbacks, not its settings. Retrying...',
+                  style: theme.textTheme.bodySmall?.copyWith(
+                    color: const Color(0xFFF0D69A),
+                  ),
+                ),
+              ),
+              const SizedBox(height: 12),
+            ],
             // Always shown — even with a single configured server — so the
             // server this session will run on is never a mystery (owner:
             // "there is no server selection"). Settings is where more

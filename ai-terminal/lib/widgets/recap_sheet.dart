@@ -169,10 +169,17 @@ class _RecapSheetState extends State<RecapSheet> {
         theme,
         'You asked',
         r.prompt?.text,
-        emptyNote: 'no prompt found in the recent transcript',
+        // Two different absences, said differently. "We stopped looking after N
+        // turns" is not "this session has no prompt", and on a session that has
+        // drifted far enough to exhaust the walk, the second would be confidently
+        // wrong — which is the one thing this card must never be.
+        emptyNote: r.scanExhausted
+            ? 'nothing you typed in the last ${r.scanTurns} turns'
+            : 'no prompt found in the recent transcript',
         when: r.prompt?.at,
         accent: theme.colorScheme.primary,
       ),
+      RecapPromptTrail(prompts: r.prompts),
 
       if (r.reply != null)
         _section(
@@ -255,9 +262,7 @@ class _RecapSheetState extends State<RecapSheet> {
         if (when != null && when.isNotEmpty)
           Padding(
             padding: const EdgeInsets.only(top: 3),
-            child: Text(_ago(when),
-                style: theme.textTheme.labelSmall
-                    ?.copyWith(color: theme.colorScheme.onSurfaceVariant)),
+            child: recapAge(theme, when),
           ),
       ],
     );
@@ -295,11 +300,99 @@ class _RecapSheetState extends State<RecapSheet> {
     );
   }
 
-  /// An ISO stamp from the transcript rendered as "12m ago". Returns '' for
-  /// anything unparseable, so an odd stamp simply omits the line.
-  String _ago(String iso) {
-    final t = DateTime.tryParse(iso);
-    if (t == null) return '';
-    return relativeTime(t.millisecondsSinceEpoch);
+}
+
+/// An ISO stamp from the transcript rendered as "12m ago", with the absolute time
+/// one long-press away.
+///
+/// Relative is the primary reading: the question this card answers is *how stale
+/// is this*, not *what o'clock was it*. The absolute form is still worth having —
+/// "that was not my last prompt" is settled by a clock reading — and a [Tooltip]
+/// is an overlay, so it costs no layout at all.
+///
+/// Renders an empty string for anything unparseable, so an odd stamp simply
+/// leaves the line blank rather than showing a broken date.
+Widget recapAge(ThemeData theme, String? iso, {TextAlign? align}) {
+  final style = theme.textTheme.labelSmall
+      ?.copyWith(color: theme.colorScheme.onSurfaceVariant);
+  final t = iso == null ? null : DateTime.tryParse(iso);
+  if (t == null) return Text('', style: style, textAlign: align);
+  final ms = t.millisecondsSinceEpoch;
+  return Tooltip(
+    message: absoluteTime(ms),
+    child: Text(relativeTime(ms),
+        style: style,
+        textAlign: align,
+        maxLines: 1,
+        overflow: TextOverflow.ellipsis),
+  );
+}
+
+/// The prompts BEFORE the newest one, one compact line each (#246).
+///
+/// ONE PROMPT IS NOT ENOUGH STATE TO RE-ORIENT ON. The reported card led with a
+/// 13h-old prompt that read exactly like a fresh one; the selection was right and
+/// the user still lost the thread. These rows carry the age FIRST, right-aligned
+/// in a fixed column, so the ages line up as a small table and "1m / 13h" is read
+/// in one downward glance — where a trailing stamp would make you read each
+/// sentence to its end before reaching the number that matters.
+///
+/// They are deliberately SUBORDINATE to the block above:
+///  * no label of their own — proximity and the shared left inset bind them to
+///    "You asked", and a second caption would cost a line to say nothing;
+///  * no accent rule — `outlineVariant` is the REPLY's rule, and borrowing it
+///    here would conflate something you asked with something it said;
+///  * plain [Text], not [SelectableText] — a one-line preview that is already cut
+///    is not worth dragging selection handles across; the full newest prompt above
+///    stays selectable, which is where copying actually starts.
+///
+/// Empty (and renders nothing at all) when there is one prompt or none, so the
+/// common case is byte-for-byte the card that shipped before this.
+class RecapPromptTrail extends StatelessWidget {
+  const RecapPromptTrail({super.key, required this.prompts});
+
+  /// The full newest-first list. The first entry is the headline shown above and
+  /// is skipped here.
+  final List<RecapEntry> prompts;
+
+  /// Wide enough for the longest thing [relativeTime] produces ("just now").
+  static const double _ageColumn = 60;
+
+  @override
+  Widget build(BuildContext context) {
+    final theme = Theme.of(context);
+    final older = prompts.skip(1).toList(growable: false);
+    if (older.isEmpty) return const SizedBox.shrink();
+    return Column(
+      crossAxisAlignment: CrossAxisAlignment.start,
+      children: [
+        const SizedBox(height: 6),
+        for (final p in older)
+          Padding(
+            padding: const EdgeInsets.only(left: 10, top: 4),
+            child: Row(
+              children: [
+                SizedBox(
+                  width: _ageColumn,
+                  child: recapAge(theme, p.at, align: TextAlign.right),
+                ),
+                const SizedBox(width: 8),
+                // One line, cut by the renderer. The server's own cut marker can
+                // only show on a row short enough not to overflow, so the two
+                // truncations can never both appear.
+                Expanded(
+                  child: Text(
+                    p.text,
+                    maxLines: 1,
+                    overflow: TextOverflow.ellipsis,
+                    style: theme.textTheme.bodySmall
+                        ?.copyWith(color: theme.colorScheme.onSurfaceVariant),
+                  ),
+                ),
+              ],
+            ),
+          ),
+      ],
+    );
   }
 }
