@@ -5629,6 +5629,14 @@
         loadCommands()
       ]);
 
+      // SETTLING A REJECTION MUST NOT SILENCE IT. Found in review of #256: mapping a
+      // failure to {} / [] is the right thing for the PAGE - neither is fatal, and the
+      // whole point of #252 is that one of them must not cost the others - but a failure
+      // nobody can see is how #252 itself stayed hidden. The sessions list recovers on
+      // the 5s poll; the hostname NEVER retries, so that one is logged for good reason
+      // rather than for symmetry.
+      if (hostRes.status === 'rejected') console.warn('init: /api/hostname failed, header will be unnamed', hostRes.reason);
+      if (listRes.status === 'rejected') console.warn('init: /api/sessions failed, sidebar starts empty until the poll', listRes.reason);
       const hostData = hostRes.status === 'fulfilled' ? hostRes.value : {};
       const list = listRes.status === 'fulfilled' && Array.isArray(listRes.value) ? listRes.value : [];
       hostname = hostData.hostname;

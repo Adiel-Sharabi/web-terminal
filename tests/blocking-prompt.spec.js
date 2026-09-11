@@ -270,3 +270,22 @@ test.describe('#190 arrows are not an interrupt', () => {
     expect(isEscapeKey(Buffer.from(ESC, 'utf8'))).toBe(true);
   });
 });
+
+test.describe('#190 the auto-answer DEFAULT is pinned, not merely exercised', () => {
+  test('AUTO_ANSWER_BLOCKING_PROMPT_DEFAULT is false', () => {
+    // FOUND IN REVIEW OF PR #256, and it is the vacuous-negative trap in a new place.
+    // `tests/worker-blocking-prompt.spec.js` has a case named "auto-answer OFF (the
+    // default)" - but it FORCES `WT_AUTO_ANSWER_BLOCKING_PROMPT: '0'`, so it proves the
+    // env override works and says nothing about the constant. Flip the constant to
+    // `true` and the whole suite stays green.
+    //
+    // That is worth one line because of WHAT the default authorises: turning it on
+    // presses "Yes, I trust this folder" for a directory chosen by whatever created the
+    // session, and folder trust is the gate on the agent reading, editing and EXECUTING
+    // what is in it - inherited by every descendant, recorded in ~/.claude.json, and
+    // persisting after the session ends. A security-relevant default that no test pins
+    // is a default that can move in a refactor nobody reads twice.
+    const { AUTO_ANSWER_BLOCKING_PROMPT_DEFAULT } = require('../lib/blocking-prompt');
+    expect(AUTO_ANSWER_BLOCKING_PROMPT_DEFAULT).toBe(false);
+  });
+});
