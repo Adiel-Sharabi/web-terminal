@@ -408,6 +408,46 @@ class EscapeParser {
   ///
   /// https://terminalguide.namepad.de/seq/csi_sm/
   void _csiHandleSgr() {
+    // WEB-TERMINAL PATCH (#237): a CSI carrying a PRIVATE PARAMETER PREFIX is not an
+    // SGR, and stock dispatched it here anyway. `_csiHandlers` is keyed on the FINAL
+    // BYTE alone (see the table above); `_consumeCsi` does STORE the prefix in
+    // `_csi.prefix` -- the line below reads it -- but the DISPATCH ignores it. So
+    // `CSI > 4 m` (XTMODKEYS / xterm's modifyOtherKeys, which claude code emits at
+    // startup to enable enhanced key reporting) arrived here as plain parameter 4 and
+    // ran `case 4: setCursorUnderline()`.
+    //
+    // MEASURED off a real claude TUI (scripts/rig/probe-underline-sgr.js): `ESC[>4m`
+    // once near the head of the session, then NO `SGR 24` and NO further `SGR 0` in
+    // the whole rest of the stream. So underline latched on and every cell drawn
+    // afterwards carried CellFlags.underline -- the reported "every line and every
+    // word is underlined", on Windows, phone and tablet alike, because this is the
+    // shared path. xterm.js reads the same bytes correctly, which is why the web
+    // client never showed it.
+    //
+    // THE TEST IS `>= Ascii.lessThan`, NOT `!= null`, and the difference is a real
+    // regression rather than pedantry. `_consumeCsi` accepts `Ascii.colon`(0x3A)
+    // through `Ascii.questionMark`(0x3F) as a prefix, so a LEADING ';' is swallowed as
+    // one: `ESC[;4m` is the ordinary SGR `0;4` and `ESC[;7m` is `0;7`. Stock applies
+    // both; a `prefix != null` guard drops both. ECMA-48's private markers are only
+    // 0x3C-0x3F (`<` `=` `>` `?`), which is exactly `>= Ascii.lessThan` here.
+    // Pinned by `ai-terminal/test/xterm_private_csi_sgr_test.dart`.
+    //
+    // ONLY SGR IS GUARDED, because only SGR was measured to misfire. Exactly three
+    // places in this file read `_csi.prefix`: `_csiHandleSendDeviceAttributes` (`c`,
+    // `>` secondary / `=` tertiary), `_csiHandleMode` (`h`/`l`, `?` for DEC modes),
+    // and this line. The other private sequences claude emits (`CSI > 0 q`, `CSI < u`)
+    // have no handler at all and fall through to `unknownCSI`.
+    //
+    // So the final-byte-only dispatch remains the general shape, and these handlers
+    // DO ignore a private prefix that reaches them -- UNFIXED AND UNMEASURED, listed
+    // rather than patched blind because no capture from claude or codex contains any
+    // of them: `CSI ? Ps S` (XTSMGRAPHICS) falls into `scrollUp`; `CSI ? 6 n`
+    // (DECXCPR) answers as a plain CPR; `CSI ? Ps J` / `CSI ? Ps K` (DECSED / DECSEL)
+    // fall into the ordinary erase. Measure one before guarding it.
+    if (_csi.prefix != null && _csi.prefix! >= Ascii.lessThan) {
+      return;
+    }
+
     final params = _csi.params;
 
     if (params.isEmpty) {
