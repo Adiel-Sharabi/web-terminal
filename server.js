@@ -85,8 +85,13 @@ const DEFAULT_CONFIG_FILE = path.join(__dirname, 'config.default.json');
 // so no caller could tell.
 //
 // This is the one owner of "what does config.json say". `readConfig()` keeps its
-// signature for the ~30 callers that only want the object; a caller whose CORRECTNESS
+// signature for the callers that only want the object; a caller whose CORRECTNESS
 // depends on the difference asks for the result instead.
+//
+// THE SPLIT IS STRICTLY ADDITIVE, and the count is measured rather than guessed: there
+// are exactly THREE `readConfig()` callers (:623, :3152, :3373), and `config` is `{}` in
+// both non-success branches below - so all three see byte-identical behaviour to the
+// single-expression version this replaces. Only the PUT (:3227) asks for the result.
 function readConfigResult() {
   if (!fs.existsSync(CONFIG_FILE)) return { ok: true, absent: true, config: {} };
   try {
