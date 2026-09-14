@@ -115,6 +115,7 @@ if (arg !== -1 && process.argv[arg + 1]) {
   let read = 0;
   let binary = 0;
   let vanished = 0;
+  let notAFile = 0; // gitlinks/submodules: listed by git, not a file to read
   const unreadable = [];
   for (const f of tracked.concat(untracked)) {
     let t;
@@ -127,6 +128,20 @@ if (arg !== -1 && process.argv[arg + 1]) {
       // than skipped. That is the whole lesson of #260 applied to the read as well as
       // to the listing.
       if (e.code === 'ENOENT') { vanished++; continue; }
+      // EISDIR IS NOT A FAILURE EITHER, and this one is a landmine rather than a
+      // nicety. A SUBMODULE is listed by `git ls-files` as a gitlink - the DIRECTORY
+      // path, mode 160000 - and `readFileSync` on a directory throws EISDIR. Treating
+      // that as fatal would redden this gate on every single run the moment anyone adds
+      // a submodule, for a reason that has nothing to do with secrets. A gate that
+      // reddens for non-security reasons is one people learn to bypass, which is worse
+      // than the hole it was guarding. There is nothing to scan in either case: a
+      // gitlink's contents live in another repository.
+      //
+      // MEASURED, not assumed: this checkout has no .gitmodules and no mode-160000
+      // entry today, and `readFileSync` on a directory was confirmed to give EISDIR
+      // while a missing path gives ENOENT. So this is a latent case, named before it
+      // bites rather than after.
+      if (e.code === 'EISDIR') { notAFile++; continue; }
       unreadable.push(`${f} (${e.code || e.message})`);
       continue;
     }
@@ -159,7 +174,8 @@ if (arg !== -1 && process.argv[arg + 1]) {
   scope = `${payload.length} lines READ from ${read} of ${tracked.length} tracked `
     + `+ ${untracked.length} untracked files`
     + (binary ? `, ${binary} binary skipped` : '')
-    + (vanished ? `, ${vanished} vanished mid-scan` : '');
+    + (vanished ? `, ${vanished} vanished mid-scan` : '')
+    + (notAFile ? `, ${notAFile} gitlink(s) skipped` : '');
 }
 
 const hits = [];

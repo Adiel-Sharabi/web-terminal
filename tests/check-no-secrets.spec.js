@@ -37,6 +37,7 @@ const { test, expect } = require('@playwright/test');
 const { spawnSync } = require('child_process');
 const fs = require('fs');
 const path = require('path');
+const os = require('os');
 
 const ROOT = path.join(__dirname, '..');
 const GATE = path.join(ROOT, 'scripts', 'check-no-secrets.js');
@@ -179,6 +180,63 @@ test.describe('#260 the secrets gate covers the working tree, not just the index
     expect(r.out).toContain('Anthropic API key');
     // The name must survive into the report too - a hit nobody can locate is half a gate.
     expect(r.out).toContain(NONASCII_PROBE);
+  });
+
+  test('a SUBMODULE gitlink is skipped, not treated as an unreadable file', () => {
+    // A gate that reddens for a NON-SECURITY reason is one people learn to bypass, which
+    // is worse than the hole it guards. `git ls-files` lists a submodule as a gitlink -
+    // the DIRECTORY path, mode 160000 - and `readFileSync` on a directory throws EISDIR.
+    // Since #261 made an unreadable file FATAL, that would hard-fail this gate on every
+    // run the moment anyone adds a submodule. Measured: without the EISDIR branch this
+    // exact scenario exits 1 with `.tmp-wt260-fake-sub (EISDIR)`.
+    //
+    // LATENT, NOT LIVE: this repo has no .gitmodules and no mode-160000 entry today, so
+    // the case is constructed rather than observed - which is the whole reason to pin it
+    // now, because the day it appears the symptom is a red gate nobody can explain.
+    //
+    // THE REAL INDEX IS NEVER TOUCHED. `GIT_INDEX_FILE` points git at a COPY, so the
+    // gitlink exists only for the duration of this test. Anything else would be a test
+    // that can corrupt the checkout it runs in - and other sessions share this tree.
+    const dir = '.tmp-wt260-fake-sub';
+    const tmpIndex = path.join(os.tmpdir(), `wt260-index-${process.pid}-${Date.now()}`);
+    const abs = path.join(ROOT, dir);
+    try {
+      fs.mkdirSync(abs, { recursive: true });
+      fs.copyFileSync(path.join(ROOT, '.git', 'index'), tmpIndex);
+
+      const head = spawnSync('git', ['rev-parse', 'HEAD'],
+        { cwd: ROOT, encoding: 'utf8', windowsHide: true }).stdout.trim();
+      const staged = spawnSync('git',
+        ['update-index', '--add', '--cacheinfo', `160000,${head},${dir}`],
+        { cwd: ROOT, encoding: 'utf8', windowsHide: true,
+          env: { ...process.env, GIT_INDEX_FILE: tmpIndex } });
+      expect(staged.status, `could not stage the gitlink: ${staged.stderr}`).toBe(0);
+
+      // The precondition, asserted rather than assumed: git really does list it.
+      const listed = spawnSync('git', ['ls-files', '--stage'],
+        { cwd: ROOT, encoding: 'utf8', windowsHide: true,
+          env: { ...process.env, GIT_INDEX_FILE: tmpIndex } }).stdout;
+      // Split and compare rather than build a regex: the first cut of this asserted
+      // `^160000 .* <dir>$` and went red on its own fixture, because `git ls-files --stage`
+      // separates the stage number from the path with a TAB, not a space. The precondition
+      // caught it, which is the argument for having one - but a string compare cannot have
+      // that class of bug at all.
+      const gitlinkRow = listed.split('\n')
+        .some((l) => l.startsWith('160000') && l.trim().endsWith(dir));
+      expect(gitlinkRow, `the fixture must actually be a mode-160000 gitlink.\n${listed.slice(0, 200)}`)
+        .toBe(true);
+
+      const r = spawnSync(process.execPath, [GATE], {
+        cwd: ROOT, encoding: 'utf8', windowsHide: true,
+        env: { ...process.env, GIT_INDEX_FILE: tmpIndex },
+      });
+      const out = (r.stdout || '') + (r.stderr || '');
+      expect(r.status, `a gitlink must not fail the gate.\n${out}`).toBe(0);
+      expect(out, 'and it must be REPORTED, never silently dropped').toContain('gitlink');
+    } finally {
+      try { fs.rmSync(abs, { recursive: true, force: true }); } catch (e) {}
+      try { fs.unlinkSync(tmpIndex); } catch (e) {}
+    }
   });
 
   test('--diff mode still reports a scope of its own', () => {
