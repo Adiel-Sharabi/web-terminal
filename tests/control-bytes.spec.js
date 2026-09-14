@@ -50,12 +50,36 @@ const path = require('path');
 
 const ROOT = path.join(__dirname, '..');
 
-/** Directories walked in full, plus the top-level files that are served or supervise. */
-const DIRS = ['tests', 'lib', 'scripts'];
+/**
+ * Directories walked in full, plus the top-level files that are served or supervise.
+ *
+ * `docs/` AND THE COMPANION WERE OUT OF SCOPE UNTIL #259, and the omission had the shape
+ * this gate exists to catch: it covered the trees somebody thought of, silently, with
+ * nothing saying so. Both are written through exactly the same editing channels as the
+ * server - and `ai-terminal/` has its own recorded instance of this defect, a literal
+ * U+0008 shipped inside a comment warning about literal control bytes.
+ *
+ * MEASURED before widening, not after: 233 files -> 389, and ZERO new hits. So the
+ * allowlist and both pinned numbers below are unchanged by the widening, which is what
+ * makes it a coverage change rather than a triage exercise.
+ *
+ * `ai-terminal/third_party/` is deliberately absent: it is vendored xterm (#81), not
+ * written here, and `walk` skips the directory name as a second line of defence.
+ */
+const DIRS = ['tests', 'lib', 'scripts', 'docs', 'ai-terminal/lib', 'ai-terminal/test'];
 const FILES = [
   'server.js', 'pty-worker.js', 'monitor.js',
   'app.html', 'terminal.html', 'lobby.html', 'sw.js', 'eslint.config.js',
+  // The two root documents agents rewrite most often, and the place this repo records
+  // the escape-normalisation trap in the first place.
+  'README.md', 'CLAUDE.md',
 ];
+
+/**
+ * Extensions walked. `.md` and `.dart` join `.js` with #259's widening: a control byte
+ * hides just as well in prose as in code, and the companion is Dart.
+ */
+const EXTS = ['.js', '.md', '.dart'];
 
 const TAB = 0x09;
 const LF = 0x0a;
@@ -89,16 +113,22 @@ const ALLOWED = {
   },
 };
 
-/** Recursive `.js` walk, skipping anything installed rather than written here. */
+/** Recursive source walk, skipping anything installed rather than written here. */
+const SKIP_DIRS = new Set([
+  'node_modules', '.git', 'test-results',
+  // Vendored xterm (#81) and Flutter build output - neither is written in this repo.
+  'third_party', 'build', '.dart_tool',
+]);
+
 function walk(dir, out) {
   let entries;
   try { entries = fs.readdirSync(dir, { withFileTypes: true }); } catch { return out; }
   for (const e of entries) {
     const full = path.join(dir, e.name);
     if (e.isDirectory()) {
-      if (e.name === 'node_modules' || e.name === '.git' || e.name === 'test-results') continue;
+      if (SKIP_DIRS.has(e.name)) continue;
       walk(full, out);
-    } else if (e.name.endsWith('.js')) {
+    } else if (EXTS.some((x) => e.name.endsWith(x))) {
       out.push(full);
     }
   }
@@ -125,6 +155,27 @@ test.describe('#221 no stray control bytes in source', () => {
           + 'it silently. Fix the name, or drop it if the file is genuinely gone.')
         .toBe(true);
     }
+
+    // EVERY NAMED DIRECTORY TOO (#259). The comment above argues a lost DIRS entry shows
+    // up as an allowlist entry going stale — true of `tests`, `lib` and `scripts`, which
+    // each own one, and FALSE of `docs` and the two companion trees, which own none. A
+    // rename there would quietly reduce the gate to its old scope with every test still
+    // green, which is precisely the defect #259 filed. `walk` swallows a failed
+    // readdirSync by design, so nothing downstream can notice.
+    for (const d of DIRS) {
+      expect(fs.existsSync(path.join(ROOT, d)),
+        `control-bytes DIRS names "${d}", which does not exist — the walk would cover `
+          + 'nothing there and say nothing about it.').toBe(true);
+    }
+
+    // A FLOOR ON COVERAGE, because the two loops above only catch a name that is wrong.
+    // An EXTS entry dropped, or a skip rule widened, keeps every path valid and simply
+    // scans less. 389 was the measured count when #259 widened the scope; the floor sits
+    // well below it so ordinary file churn never trips it, and well above the 233 the
+    // gate covered before, so the widening cannot be silently undone.
+    expect(targets.length,
+      'the control-byte scan covers far fewer files than #259 measured — an extension or '
+        + 'a directory has stopped being walked.').toBeGreaterThan(300);
 
     /** file -> { codepoint -> count } */
     const found = {};

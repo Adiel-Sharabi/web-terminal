@@ -2,7 +2,7 @@
 'use strict';
 // Gate a change on "no credentials and no machine-identifying data".
 //
-//   node scripts/check-no-secrets.js            # scan tracked + staged files
+//   node scripts/check-no-secrets.js            # scan the whole working tree (#260)
 //   node scripts/check-no-secrets.js --diff BASE # scan only what a PR adds
 //
 // WHY THIS IS A GATE AND NOT A CHECKLIST ITEM. This repo shipped a working
@@ -57,22 +57,56 @@ const ALLOW = [
 
 const arg = process.argv.indexOf('--diff');
 let payload;
+// What the summary line claims coverage of. It is built where the scan is built, so it
+// can never describe a scope the scan did not have — see #260 below.
+let scope;
 if (arg !== -1 && process.argv[arg + 1]) {
   const base = process.argv[arg + 1];
   // Added lines only — '+' but not the '+++' file header.
   payload = execSync(`git diff ${base}...HEAD --unified=0`, { encoding: 'utf8', maxBuffer: 256 * 1024 * 1024 })
     .split('\n').filter((l) => l.startsWith('+') && !l.startsWith('+++'));
+  scope = `${payload.length} added lines vs ${base}`;
 } else {
-  const files = execSync('git ls-files', { encoding: 'utf8' }).split('\n').filter(Boolean)
+  // TRACKED **AND** UNTRACKED-BUT-NOT-IGNORED (#260).
+  //
+  // `git ls-files` on its own lists only TRACKED files, so a brand-new file was invisible
+  // to this gate — and a brand-new file is exactly the one most likely to carry a token
+  // somebody pasted in to see something work. It failed OPEN, silently, and printed a
+  // reassuring `OK` with a six-figure line count that made it look thorough. PR #256
+  // reproduced it exactly: green locally (`OK — scanned 132759 lines`) and red in CI on
+  // two hits in a file the local run never opened, because on the branch everything was
+  // tracked. It also left any commit made without `git add` — plumbing against a
+  // throwaway index, the documented way to commit while another agent owns the working
+  // tree — with no local coverage at all.
+  //
+  // `--exclude-standard` IS THE LOAD-BEARING FLAG, not tidiness. `config.json`,
+  // `cluster-tokens.json` and `api-tokens.json` are gitignored and hold REAL credentials
+  // on every box in this fleet; all three sit in the root of a normal checkout. A
+  // widening that scanned them would print their contents into a public CI log — this
+  // gate causing the leak it exists to prevent. Verified on this checkout (present on
+  // disk, listed by neither invocation) and pinned by `tests/check-no-secrets.spec.js`,
+  // which asserts a gitignored file carrying a placeholder secret is NOT reported.
+  const list = (args) => execSync(`git ls-files ${args}`, { encoding: 'utf8' })
+    .split('\n').filter(Boolean)
     .filter((f) => !f.startsWith('ai-terminal/third_party/'));
+  // `--cached` can list one path several times (one row per stage during a merge
+  // conflict), so tracked is de-duplicated and untracked is filtered against it: reading
+  // a file twice would double its lines inside the very count the summary prints.
+  const tracked = [...new Set(list('--cached'))];
+  const trackedSet = new Set(tracked);
+  const untracked = list('--others --exclude-standard').filter((f) => !trackedSet.has(f));
   const fs = require('fs');
   payload = [];
-  for (const f of files) {
+  for (const f of tracked.concat(untracked)) {
     let t;
     try { t = fs.readFileSync(f, 'utf8'); } catch { continue; }
     if (t.includes('\u0000')) continue; // binary
     t.split('\n').forEach((line, i) => payload.push(`${f}:${i + 1}: ${line}`));
   }
+  // SAY WHAT WAS COVERED, not merely how much was read. "scanned N lines" is what kept
+  // the blind spot invisible: a large number implies thoroughness and names no scope, so
+  // nobody thought to ask which files it meant.
+  scope = `${payload.length} lines across ${tracked.length} tracked + ${untracked.length} untracked files`;
 }
 
 const hits = [];
@@ -91,4 +125,4 @@ if (hits.length) {
   console.error('If it is real: rotate the credential first — removing the line is not enough once pushed.\n');
   process.exit(1);
 }
-console.log(`OK — scanned ${payload.length} lines, no secrets or machine-identifying data.`);
+console.log(`OK — scanned ${scope}, no secrets or machine-identifying data.`);
