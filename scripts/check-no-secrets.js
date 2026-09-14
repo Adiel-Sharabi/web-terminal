@@ -116,6 +116,11 @@ if (arg !== -1 && process.argv[arg + 1]) {
       if (i > start) paths.push(out.subarray(start, i));
       start = i + 1;
     }
+    // An UNTERMINATED final entry would otherwise be dropped in silence, which is this
+    // gate's whole failure mode in one line. `git ls-files -z` NUL-terminates every entry
+    // (measured: the last byte is 0), so git cannot trigger it - and depending on that is
+    // the kind of assumption the C-quoting bug was made of.
+    if (start < out.length) paths.push(out.subarray(start));
     return paths.filter((b) => !b.toString('utf8').startsWith('ai-terminal/third_party/'));
   };
   // Byte identity, not display identity: latin1 maps every byte to one code unit and

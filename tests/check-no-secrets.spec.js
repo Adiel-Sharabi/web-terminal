@@ -207,7 +207,20 @@ test.describe('#260 the secrets gate covers the working tree, not just the index
     const abs = path.join(ROOT, dir);
     try {
       fs.mkdirSync(abs, { recursive: true });
-      fs.copyFileSync(path.join(ROOT, '.git', 'index'), tmpIndex);
+      // ASK GIT WHERE THE INDEX IS; never assume `.git/index`. In a LINKED WORKTREE `.git`
+      // is a FILE containing a gitdir pointer, and the index lives under the main repo at
+      // `.git/worktrees/<name>/index` - so the hardcoded path throws ENOENT and this test
+      // reddens for a reason that has nothing to do with secrets, which is precisely the
+      // failure its own header warns about. Not hypothetical: this repo runs suites from
+      // `.claude/worktrees/`, and one existed while this was being written. Same resolution
+      // `git-freshness.spec.js` already uses for FETCH_HEAD. (Found in review of #261.)
+      const gitPath = spawnSync('git', ['rev-parse', '--git-path', 'index'],
+        { cwd: ROOT, encoding: 'utf8', windowsHide: true });
+      expect(gitPath.status, `could not resolve the index path: ${gitPath.stderr}`).toBe(0);
+      const realIndex = path.resolve(ROOT, gitPath.stdout.trim());
+      expect(fs.existsSync(realIndex), `git named an index that is not there: ${realIndex}`)
+        .toBe(true);
+      fs.copyFileSync(realIndex, tmpIndex);
 
       const head = spawnSync('git', ['rev-parse', 'HEAD'],
         { cwd: ROOT, encoding: 'utf8', windowsHide: true }).stdout.trim();

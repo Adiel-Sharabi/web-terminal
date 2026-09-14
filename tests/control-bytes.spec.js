@@ -132,7 +132,18 @@ const skipped = [];
 
 function walk(dir, out) {
   let entries;
-  try { entries = fs.readdirSync(dir, { withFileTypes: true }); } catch { return out; }
+  try {
+    entries = fs.readdirSync(dir, { withFileTypes: true });
+  } catch (e) {
+    // A DIRECTORY THAT COULD NOT BE OPENED IS ALSO A DIRECTORY THAT WAS NOT SCANNED, and
+    // this `catch` used to return in silence - so an EACCES on a subtree would have
+    // narrowed the walk straight past the skip assertion below, which was added to stop
+    // exactly that. Recorded, so the two ways of covering less are reported the same way.
+    // (Review of #261; the reason this file swallows the error at all is that a directory
+    // vanishing mid-walk is benign.)
+    skipped.push(`${dir} (${e.code || e.message})`);
+    return out;
+  }
   for (const e of entries) {
     const full = path.join(dir, e.name);
     if (e.isDirectory()) {
@@ -215,9 +226,15 @@ test.describe('#221 no stray control bytes in source', () => {
     // A COPY IS TOLERABLE ONLY WITH A GATE, and without this pair these two lists rot in
     // one direction: DELETING from DIRS/EXTS goes red (that is the point), but ADDING to
     // them without mirroring leaves the new tree or extension unguarded forever, silently
-    // — the same shape as the omission #259 was filed for. Set equality keeps the two
-    // declarations independent, which is what makes the checks above mean anything, while
-    // forcing an edit to either to be a conscious edit to both.
+    // — the same shape as the omission #259 was filed for. Set equality forces an edit to
+    // either list to be a conscious edit to both.
+    //
+    // WHAT THE MIRROR ACTUALLY BUYS, stated honestly because the first draft overclaimed:
+    // once equality passes, the per-entry loops would give identical results iterating
+    // DIRS/EXTS directly, so independence is NOT "what makes the checks above mean
+    // anything". It buys the drift gate and nothing else. That is still worth having — a
+    // tautology compares a list with itself, while this is a two-key gate where both drift
+    // directions go red — but it is a smaller claim than the one that stood here.
     expect(new Set(REQUIRED_DIRS),
       'DIRS and REQUIRED_DIRS have drifted — a directory added to the scan with nothing '
         + 'asserting it contributes, or removed from one list only.').toEqual(new Set(DIRS));
@@ -257,6 +274,10 @@ test.describe('#221 no stray control bytes in source', () => {
     // Not a number. `walk` now records what it declined to enter, and today that list is
     // EMPTY beneath these roots (none of the six SKIP_DIRS names occurs under them), so
     // the honest assertion is exactly that.
+    // THE FILTER DISTINGUISHES NOTHING TODAY, said plainly so nobody reads it as doing
+    // work: every `walk` starts at a DIRS root, so every recorded skip is under one and
+    // this is effectively `skipped` itself. It is kept only so the assertion stays correct
+    // if anything ever walks outside those roots — not because it currently narrows.
     const skippedUnderRoots = skipped.filter(
       (s) => DIRS.some((d) => s.startsWith(path.join(ROOT, d) + path.sep)),
     );

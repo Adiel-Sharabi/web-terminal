@@ -96,9 +96,11 @@ const DEFAULT_CONFIG_FILE = path.join(__dirname, 'config.default.json');
 // flat would be wrong in exactly the case this function exists for. It falls back when
 // CONFIG_FILE is ABSENT. When it is UNREADABLE the parse throws inside the first `if`, the
 // `else if` is never evaluated, `config` stays `{}`, and every value becomes the code
-// literal - `PASS` included, which is how a corrupt file drops a running server to the
-// default password and opens the unauthenticated /api/setup route. That is #264, filed
-// separately; it is named here because this is the comment a reader lands on first.
+// literal - `PASS` included, which is how a corrupt file drops the server to the default
+// password AT ITS NEXT START and opens the unauthenticated /api/setup route. Not "a
+// running server": `PASS` is assigned once here and reassigned only by the auto-hash and
+// the setup route, so nothing re-reads it from disk while the process lives. That is #264,
+// filed separately; it is named here because this is the comment a reader lands on first.
 //
 // `readConfig()` keeps its signature for the callers that only want the object; a caller
 // whose CORRECTNESS depends on the difference asks for the result instead.
