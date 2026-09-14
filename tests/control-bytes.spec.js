@@ -152,6 +152,13 @@ test.describe('#221 no stray control bytes in source', () => {
     // unconditionally, so a `.md` check over the combined list passes even when the walk
     // covers no markdown at all — measured, not guessed: that is exactly what the first
     // version of this did.
+    // `skipped` is module-level because `walk` is, so it ACCUMULATES across calls. Across
+    // the six roots below that is exactly right - the union is what the assertion wants -
+    // but a Playwright retry, or a second test added to this file later, would append to a
+    // list that already held the previous run's entries. It could never produce a false
+    // RED (duplicates of an empty set are still empty), only a confusing report on the day
+    // it legitimately fires. Cleared here so the array means "this run", not "every run".
+    skipped.length = 0;
     const walked = [];
     for (const d of DIRS) walk(path.join(ROOT, d), walked);
     const targets = walked.concat(FILES.map((f) => path.join(ROOT, f)));
