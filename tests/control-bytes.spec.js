@@ -50,12 +50,36 @@ const path = require('path');
 
 const ROOT = path.join(__dirname, '..');
 
-/** Directories walked in full, plus the top-level files that are served or supervise. */
-const DIRS = ['tests', 'lib', 'scripts'];
+/**
+ * Directories walked in full, plus the top-level files that are served or supervise.
+ *
+ * `docs/` AND THE COMPANION WERE OUT OF SCOPE UNTIL #259, and the omission had the shape
+ * this gate exists to catch: it covered the trees somebody thought of, silently, with
+ * nothing saying so. Both are written through exactly the same editing channels as the
+ * server - and `ai-terminal/` has its own recorded instance of this defect, a literal
+ * U+0008 shipped inside a comment warning about literal control bytes.
+ *
+ * MEASURED before widening, not after: 233 files -> 389, and ZERO new hits. So the
+ * allowlist and both pinned numbers below are unchanged by the widening, which is what
+ * makes it a coverage change rather than a triage exercise.
+ *
+ * `ai-terminal/third_party/` is deliberately absent: it is vendored xterm (#81), not
+ * written here, and `walk` skips the directory name as a second line of defence.
+ */
+const DIRS = ['tests', 'lib', 'scripts', 'docs', 'ai-terminal/lib', 'ai-terminal/test'];
 const FILES = [
   'server.js', 'pty-worker.js', 'monitor.js',
   'app.html', 'terminal.html', 'lobby.html', 'sw.js', 'eslint.config.js',
+  // The two root documents agents rewrite most often, and the place this repo records
+  // the escape-normalisation trap in the first place.
+  'README.md', 'CLAUDE.md',
 ];
+
+/**
+ * Extensions walked. `.md` and `.dart` join `.js` with #259's widening: a control byte
+ * hides just as well in prose as in code, and the companion is Dart.
+ */
+const EXTS = ['.js', '.md', '.dart'];
 
 const TAB = 0x09;
 const LF = 0x0a;
@@ -89,16 +113,43 @@ const ALLOWED = {
   },
 };
 
-/** Recursive `.js` walk, skipping anything installed rather than written here. */
+/** Recursive source walk, skipping anything installed rather than written here. */
+const SKIP_DIRS = new Set([
+  'node_modules', '.git', 'test-results',
+  // Vendored xterm (#81) and Flutter build output - neither is written in this repo.
+  'third_party', 'build', '.dart_tool',
+]);
+
+/**
+ * Every directory the walk declined to enter, recorded so the decision is auditable.
+ *
+ * A SKIP is a silent narrowing by construction: `continue` leaves nothing behind for any
+ * later assertion to notice. `SKIP_DIRS.add('rig')` would drop `scripts/rig` - 28 files,
+ * and the most escape-sequence-heavy tree in the repo - with every other check in this
+ * file still green.
+ */
+const skipped = [];
+
 function walk(dir, out) {
   let entries;
-  try { entries = fs.readdirSync(dir, { withFileTypes: true }); } catch { return out; }
+  try {
+    entries = fs.readdirSync(dir, { withFileTypes: true });
+  } catch (e) {
+    // A DIRECTORY THAT COULD NOT BE OPENED IS ALSO A DIRECTORY THAT WAS NOT SCANNED, and
+    // this `catch` used to return in silence - so an EACCES on a subtree would have
+    // narrowed the walk straight past the skip assertion below, which was added to stop
+    // exactly that. Recorded, so the two ways of covering less are reported the same way.
+    // (Review of #261; the reason this file swallows the error at all is that a directory
+    // vanishing mid-walk is benign.)
+    skipped.push(`${dir} (${e.code || e.message})`);
+    return out;
+  }
   for (const e of entries) {
     const full = path.join(dir, e.name);
     if (e.isDirectory()) {
-      if (e.name === 'node_modules' || e.name === '.git' || e.name === 'test-results') continue;
+      if (SKIP_DIRS.has(e.name)) { skipped.push(full); continue; }
       walk(full, out);
-    } else if (e.name.endsWith('.js')) {
+    } else if (EXTS.some((x) => e.name.endsWith(x))) {
       out.push(full);
     }
   }
@@ -107,9 +158,21 @@ function walk(dir, out) {
 
 test.describe('#221 no stray control bytes in source', () => {
   test('every raw C0/DEL byte is one the inventory expects', () => {
-    const targets = [];
-    for (const d of DIRS) walk(path.join(ROOT, d), targets);
-    for (const f of FILES) targets.push(path.join(ROOT, f));
+    // The WALK's own output is kept apart from the hand-listed FILES, because the coverage
+    // assertions below must be about the walk. `FILES` carries `README.md` and `CLAUDE.md`
+    // unconditionally, so a `.md` check over the combined list passes even when the walk
+    // covers no markdown at all — measured, not guessed: that is exactly what the first
+    // version of this did.
+    // `skipped` is module-level because `walk` is, so it ACCUMULATES across calls. Across
+    // the six roots below that is exactly right - the union is what the assertion wants -
+    // but a Playwright retry, or a second test added to this file later, would append to a
+    // list that already held the previous run's entries. It could never produce a false
+    // RED (duplicates of an empty set are still empty), only a confusing report on the day
+    // it legitimately fires. Cleared here so the array means "this run", not "every run".
+    skipped.length = 0;
+    const walked = [];
+    for (const d of DIRS) walk(path.join(ROOT, d), walked);
+    const targets = walked.concat(FILES.map((f) => path.join(ROOT, f)));
 
     // EVERY NAMED FILE MUST EXIST, asserted rather than assumed. The scan below
     // swallows a read failure with `catch { continue; }`, which is right for a file
@@ -125,6 +188,111 @@ test.describe('#221 no stray control bytes in source', () => {
           + 'it silently. Fix the name, or drop it if the file is genuinely gone.')
         .toBe(true);
     }
+
+    // EVERY NAMED DIRECTORY TOO (#259). The comment above argues a lost DIRS entry shows
+    // up as an allowlist entry going stale — true of `tests`, `lib` and `scripts`, which
+    // each own one, and FALSE of `docs` and the two companion trees, which own none. A
+    // rename there would quietly reduce the gate to its old scope with every test still
+    // green, which is precisely the defect #259 filed. `walk` swallows a failed
+    // readdirSync by design, so nothing downstream can notice.
+    for (const d of DIRS) {
+      expect(fs.existsSync(path.join(ROOT, d)),
+        `control-bytes DIRS names "${d}", which does not exist — the walk would cover `
+          + 'nothing there and say nothing about it.').toBe(true);
+    }
+
+    // EVERY NAMED THING MUST ACTUALLY CONTRIBUTE, which a single aggregate floor does not
+    // check. Found in review of #261: with one floor at 300, deleting `.md` from EXTS
+    // leaves 367 targets and deleting `'docs'` from DIRS leaves 367 — both comfortably
+    // green. The floor only ever guarded the companion, because the Dart tree is the one
+    // big enough to cross it alone. So it protected ONE of the two trees #259 widened to,
+    // and the docs half — the half with 16 files — could have been reverted in silence.
+    //
+    // A bigger number is not the fix; it would be the fixed bet this repo keeps paying
+    // for. The predicate is per-entry: every tree and every file type #259 widened to must
+    // actually contribute at least one scanned file.
+    //
+    // THE REQUIRED SCOPE IS DECLARED SEPARATELY FROM `EXTS`/`DIRS`, and that is the whole
+    // point rather than a duplication slip. The first cut of this looped over `EXTS`
+    // itself — which cannot catch a DELETED entry, because the loop shrinks with the thing
+    // it is checking. Deleting `.md` left the new check green and was caught only
+    // incidentally, by `docs` (all-markdown) then walking to zero. Had anyone ever added a
+    // `.js` file to `docs/`, that accident would evaporate and both halves would pass.
+    // A check derived from its own subject asserts nothing; these two lists are the
+    // independent statement of what #259 bought.
+    const REQUIRED_EXTS = ['.js', '.md', '.dart'];
+    const REQUIRED_DIRS = ['tests', 'lib', 'scripts', 'docs', 'ai-terminal/lib', 'ai-terminal/test'];
+
+    // A COPY IS TOLERABLE ONLY WITH A GATE, and without this pair these two lists rot in
+    // one direction: DELETING from DIRS/EXTS goes red (that is the point), but ADDING to
+    // them without mirroring leaves the new tree or extension unguarded forever, silently
+    // — the same shape as the omission #259 was filed for. Set equality forces an edit to
+    // either list to be a conscious edit to both.
+    //
+    // WHAT THE MIRROR ACTUALLY BUYS, stated honestly because the first draft overclaimed:
+    // once equality passes, the per-entry loops would give identical results iterating
+    // DIRS/EXTS directly, so independence is NOT "what makes the checks above mean
+    // anything". It buys the drift gate and nothing else. That is still worth having — a
+    // tautology compares a list with itself, while this is a two-key gate where both drift
+    // directions go red — but it is a smaller claim than the one that stood here.
+    expect(new Set(REQUIRED_DIRS),
+      'DIRS and REQUIRED_DIRS have drifted — a directory added to the scan with nothing '
+        + 'asserting it contributes, or removed from one list only.').toEqual(new Set(DIRS));
+    expect(new Set(REQUIRED_EXTS),
+      'EXTS and REQUIRED_EXTS have drifted — an extension added to the scan with nothing '
+        + 'asserting it matches anything, or removed from one list only.').toEqual(new Set(EXTS));
+
+    for (const x of REQUIRED_EXTS) {
+      expect(walked.filter((f) => f.endsWith(x)).length,
+        `#259 widened the control-byte scan to "${x}" files and the WALK found NONE — the `
+          + 'extension has been dropped from EXTS or skipped out of the walk. (Counted over '
+          + 'the walk alone: FILES lists two .md files by hand and would mask this.)')
+        .toBeGreaterThan(0);
+    }
+    for (const d of REQUIRED_DIRS) {
+      // ASK WHAT THE SCAN ACTUALLY COLLECTED, never re-walk the directory here. A fresh
+      // `walk(ROOT/d)` answers "does this tree contain files", which stays true after the
+      // entry is deleted from DIRS — so the check would pass through the exact regression
+      // it names. Measured: dropping `'docs'` left a re-walking version green.
+      const prefix = path.join(ROOT, d) + path.sep;
+      expect(walked.filter((f) => f.startsWith(prefix)).length,
+        `#259 widened the control-byte scan to "${d}" and the scan collected NOTHING from `
+          + 'it — the entry has been dropped from DIRS, renamed, or skipped out of the walk.')
+        .toBeGreaterThan(0);
+    }
+
+    // NOTHING UNDER A NAMED ROOT MAY BE SKIPPED. This is the assertion that covers
+    // SKIP_DIRS, and the floor below provably does NOT — measured in review of #261: the
+    // floor trips only once 93 of the 393 targets are gone, while the entire universe of
+    // subdirectory names that could be added to SKIP_DIRS is worth 83 files. Adding EVERY
+    // one of them at once leaves it green, and `SKIP_DIRS.add('rig')` alone drops 28 files
+    // from the most escape-sequence-heavy tree in the repo with every check passing. The
+    // comment here used to call the floor "a coarse backstop" for exactly this case; it
+    // could not do that job, which is this PR's own defect — a claim of coverage nothing
+    // delivers — sitting inside its fix.
+    //
+    // Not a number. `walk` now records what it declined to enter, and today that list is
+    // EMPTY beneath these roots (none of the six SKIP_DIRS names occurs under them), so
+    // the honest assertion is exactly that.
+    // THE FILTER DISTINGUISHES NOTHING TODAY, said plainly so nobody reads it as doing
+    // work: every `walk` starts at a DIRS root, so every recorded skip is under one and
+    // this is effectively `skipped` itself. It is kept only so the assertion stays correct
+    // if anything ever walks outside those roots — not because it currently narrows.
+    const skippedUnderRoots = skipped.filter(
+      (s) => DIRS.some((d) => s.startsWith(path.join(ROOT, d) + path.sep)),
+    );
+    expect(skippedUnderRoots,
+      'the control-byte walk skipped a directory INSIDE one of its own roots, so the scan '
+        + 'silently covers less than DIRS claims. Either the skip is wrong, or this gate '
+        + 'needs to say so out loud.').toEqual([]);
+
+    // The floor is kept only as a crude tripwire for gross shrinkage — a root emptied, a
+    // walk that stops walking. It is NOT the SKIP_DIRS guard; the assertion above is.
+    // 393 targets today: 383 from the walk (229 .js + 138 .dart + 16 .md) plus the 10
+    // hand-listed FILES.
+    expect(targets.length,
+      'the control-byte scan covers far fewer files than #259 measured — an extension or '
+        + 'a directory has stopped being walked.').toBeGreaterThan(300);
 
     /** file -> { codepoint -> count } */
     const found = {};

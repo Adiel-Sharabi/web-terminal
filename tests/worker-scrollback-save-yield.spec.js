@@ -18,6 +18,17 @@ const fs = require('fs');
 const os = require('os');
 const crypto = require('crypto');
 const ipc = require('../lib/ipc');
+const { killAllSessions } = require('./worker-kill');
+
+// #254 - the teardown rule itself lives in `tests/worker-kill.js`. These kills used to
+// run one at a time in a `for` loop wrapped in `try {} catch {}`, so a timeout was
+// SWALLOWED and the spec stayed green with the sessions still alive - the next spec in
+// the run inherited them. They now go out as ONE batch under ONE window sized for N
+// SERIALIZED handlers: `killSession` has no yield point, so concurrency removes the
+// round-trips and parallelises none of the work. `rpc` and the spawned `worker` are
+// handed over - the first because each spec still owns its IPC harness, the second so a
+// failure can say whether the process is alive rather than only that it went quiet.
+const killSessions = (client, ids, worker) => killAllSessions(rpc, client, ids, { worker });
 
 function workerPipePath() {
   return process.platform === 'win32'
@@ -133,9 +144,7 @@ test.describe('pty-worker scrollback save yields between sessions', () => {
         expect(total).toBeGreaterThanOrEqual(INJECT_BYTES);
       }
 
-      for (const id of ids) {
-        try { await rpc(client, 'killSession', { id }); } catch {}
-      }
+      await killSessions(client, ids, worker);
       await client.close();
     } finally {
       await worker.stop();
@@ -200,9 +209,7 @@ test.describe('pty-worker scrollback save yields between sessions', () => {
         expect(maxGap).toBeLessThan(duration * 0.7);
       }
 
-      for (const id of ids) {
-        try { await rpc(client, 'killSession', { id }); } catch {}
-      }
+      await killSessions(client, ids, worker);
       await client.close();
     } finally {
       await worker.stop();

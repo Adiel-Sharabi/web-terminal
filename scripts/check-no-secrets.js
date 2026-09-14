@@ -2,7 +2,7 @@
 'use strict';
 // Gate a change on "no credentials and no machine-identifying data".
 //
-//   node scripts/check-no-secrets.js            # scan tracked + staged files
+//   node scripts/check-no-secrets.js            # scan the whole working tree (#260)
 //   node scripts/check-no-secrets.js --diff BASE # scan only what a PR adds
 //
 // WHY THIS IS A GATE AND NOT A CHECKLIST ITEM. This repo shipped a working
@@ -57,22 +57,167 @@ const ALLOW = [
 
 const arg = process.argv.indexOf('--diff');
 let payload;
+// What the summary line claims coverage of. It is built where the scan is built, so it
+// can never describe a scope the scan did not have — see #260 below.
+let scope;
 if (arg !== -1 && process.argv[arg + 1]) {
   const base = process.argv[arg + 1];
   // Added lines only — '+' but not the '+++' file header.
   payload = execSync(`git diff ${base}...HEAD --unified=0`, { encoding: 'utf8', maxBuffer: 256 * 1024 * 1024 })
     .split('\n').filter((l) => l.startsWith('+') && !l.startsWith('+++'));
+  scope = `${payload.length} added lines vs ${base}`;
 } else {
-  const files = execSync('git ls-files', { encoding: 'utf8' }).split('\n').filter(Boolean)
-    .filter((f) => !f.startsWith('ai-terminal/third_party/'));
+  // TRACKED **AND** UNTRACKED-BUT-NOT-IGNORED (#260).
+  //
+  // `git ls-files` on its own lists only TRACKED files, so a brand-new file was invisible
+  // to this gate — and a brand-new file is exactly the one most likely to carry a token
+  // somebody pasted in to see something work. It failed OPEN, silently, and printed a
+  // reassuring `OK` with a six-figure line count that made it look thorough. PR #256
+  // reproduced it exactly: green locally (`OK — scanned 132759 lines`) and red in CI on
+  // two hits in a file the local run never opened, because on the branch everything was
+  // tracked. It also left any commit made without `git add` — plumbing against a
+  // throwaway index, the documented way to commit while another agent owns the working
+  // tree — with no local coverage at all.
+  //
+  // `--exclude-standard` IS THE LOAD-BEARING FLAG, not tidiness. `config.json`,
+  // `cluster-tokens.json` and `api-tokens.json` are gitignored and hold REAL credentials
+  // on every box in this fleet; all three sit in the root of a normal checkout. A
+  // widening that scanned them would print their contents into a public CI log — this
+  // gate causing the leak it exists to prevent. Verified on this checkout (present on
+  // disk, listed by neither invocation) and pinned by `tests/check-no-secrets.spec.js`,
+  // which asserts a gitignored file carrying a placeholder secret is NOT reported.
+  //
+  // `-z` IS THE SECOND LOAD-BEARING FLAG, for the same reason `--exclude-standard` is the
+  // first. Without it `git ls-files` C-QUOTES any path with a non-ASCII byte - a Hebrew
+  // filename comes back as the 39-character string
+  // `"wt261-\327\251\327\234\327\225\327\235-probe.txt"`, quotes included - and
+  // `readFileSync` on that string throws ENOENT, so the file is skipped while STILL BEING
+  // COUNTED as scanned. That is #260's own defect reproduced inside #260's fix, on a fleet
+  // that works in Hebrew every day: a pasted token in such a file passed the gate under
+  // `OK - scanned ... + 1 untracked files`. `-z` emits raw bytes NUL-separated, so no
+  // quoting happens and no decoding is needed.
+  // PATHS ARE CARRIED AS BUFFERS, NOT STRINGS - the same lesson as `-z`, one layer down.
+  // With `encoding: 'utf8'` a filename whose bytes are not valid UTF-8 decodes to U+FFFD,
+  // `readFileSync` then throws ENOENT, and the file is tallied "vanished mid-scan" - the
+  // one label that says BENIGN without checking. Git on Windows writes UTF-8 names, so it
+  // takes a name committed from Linux and there are zero today. Fixed rather than noted
+  // because it is the C-quoting bug wearing a different label, and that one also had zero
+  // instances until it had one.
+  //
+  // `readFileSync` accepts a Buffer path (verified on this box), so the bytes never have
+  // to become a string in order to be READ. They become one only to be DISPLAYED.
+  const list = (args) => {
+    const out = execSync(`git ls-files -z ${args}`,
+      { encoding: 'buffer', maxBuffer: 64 * 1024 * 1024 });
+    const paths = [];
+    let start = 0;
+    for (let i = 0; i < out.length; i++) {
+      if (out[i] !== 0) continue;
+      if (i > start) paths.push(out.subarray(start, i));
+      start = i + 1;
+    }
+    // An UNTERMINATED final entry would otherwise be dropped in silence, which is this
+    // gate's whole failure mode in one line. `git ls-files -z` NUL-terminates every entry
+    // (measured: the last byte is 0), so git cannot trigger it - and depending on that is
+    // the kind of assumption the C-quoting bug was made of.
+    if (start < out.length) paths.push(out.subarray(start));
+    return paths.filter((b) => !b.toString('utf8').startsWith('ai-terminal/third_party/'));
+  };
+  // Byte identity, not display identity: latin1 maps every byte to one code unit and
+  // back, so two genuinely different names can never collide on one key.
+  const key = (b) => b.toString('latin1');
+  // `--cached` can list one path several times (one row per stage during a merge
+  // conflict), so tracked is de-duplicated and untracked is filtered against it: reading
+  // a file twice would double its lines inside the very count the summary prints.
+  const seen = new Set();
+  const tracked = [];
+  for (const b of list('--cached')) {
+    const k = key(b);
+    if (seen.has(k)) continue; // a merge conflict lists one path once per stage
+    seen.add(k);
+    tracked.push(b);
+  }
+  const untracked = list('--others --exclude-standard').filter((b) => !seen.has(key(b)));
   const fs = require('fs');
   payload = [];
-  for (const f of files) {
+  // COUNT WHAT WAS READ, NEVER WHAT WAS LISTED. The listed total is what made the
+  // quoting bug above invisible, and the same arithmetic hides a binary skip: the
+  // tracked PNGs were reported as "scanned" while never being examined. Four outcomes,
+  // counted separately, so no number can imply coverage that another one lacks.
+  let read = 0;
+  let binary = 0;
+  let vanished = 0;
+  let notAFile = 0; // gitlinks/submodules: listed by git, not a file to read
+  const unreadable = [];
+  for (const f of tracked.concat(untracked)) {
+    const name = f.toString('utf8'); // for DISPLAY only - reads use the bytes
     let t;
-    try { t = fs.readFileSync(f, 'utf8'); } catch { continue; }
-    if (t.includes('\u0000')) continue; // binary
-    t.split('\n').forEach((line, i) => payload.push(`${f}:${i + 1}: ${line}`));
+    try {
+      t = fs.readFileSync(f, 'utf8');
+    } catch (e) {
+      // A path listed a moment ago and gone now is benign - a concurrent checkout, a
+      // build cleaning up after itself. ANY OTHER failure is a file this gate could not
+      // examine, and "I could not open it" is not "it is clean", so it is fatal rather
+      // than skipped. The whole lesson of #260, applied to the read as well as the list.
+      if (e.code === 'ENOENT') { vanished++; continue; }
+      // A DIRECTORY WHERE A FILE WAS LISTED - a landmine rather than a nicety. A
+      // SUBMODULE is listed by `git ls-files` as a gitlink (the DIRECTORY path, mode
+      // 160000) and `readFileSync` on a directory throws EISDIR. Treating that as fatal
+      // would redden this gate on every run the moment anyone adds a submodule, for a
+      // reason with nothing to do with secrets - and a gate that reddens for
+      // non-security reasons is one people learn to bypass, which is worse than the hole
+      // it guarded. Nothing to scan either way: a gitlink's contents live in another
+      // repository, and a directory has no line content at all.
+      //
+      // THE LABEL SAYS "DIRECTORY", NOT "GITLINK", because EISDIR is what was OBSERVED
+      // and a gitlink is only its likeliest cause. An untracked nested clone, and a
+      // tracked file replaced on disk by a directory, both land here too - calling
+      // either a submodule would be this gate reporting an inference as a measurement,
+      // which is the exact defect it exists to catch (review of #261).
+      //
+      // MEASURED, not assumed: this checkout has no .gitmodules and no mode-160000 entry
+      // today, and `readFileSync` on a directory was confirmed to give EISDIR while a
+      // missing path gives ENOENT. A latent case, named before it bites.
+      if (e.code === 'EISDIR') { notAFile++; continue; }
+      unreadable.push(`${name} (${e.code || e.message})`);
+      continue;
+    }
+    if (t.includes('\u0000')) { binary++; continue; } // binary
+    read++;
+    t.split('\n').forEach((line, i) => payload.push(`${name}:${i + 1}: ${line}`));
   }
+  // A GATE THAT SCANNED NOTHING PASSES EVERYTHING, and this is not hypothetical: while
+  // fixing the quoting bug above, a half-applied edit left `-z` off while the split still
+  // used NUL. The whole listing became ONE impossible filename, every read failed, and the
+  // gate exited 0 over a tree it had not opened - the #260 failure in its purest form,
+  // introduced by #260's own fix. A repo always has tracked files, so reading none of them
+  // is a broken gate rather than a clean tree. No threshold, no tuning: only zero is
+  // impossible, and any number picked above it would be the fixed bet this repo keeps
+  // paying for.
+  if (tracked.length && !read) {
+    console.error(`\n${tracked.length} tracked file(s) were listed and NONE could be read as text.`);
+    console.error('That is a broken scan, not a clean tree - the gate refuses rather than pass.\n');
+    process.exit(1);
+  }
+  if (unreadable.length) {
+    console.error(`\n${unreadable.length} file(s) could not be read, so they were NOT scanned:\n`);
+    for (const u of unreadable.slice(0, 20)) console.error('  ' + u);
+    console.error('\nAn unexamined file is not a clean file. Fix the access error and re-run.\n');
+    process.exit(1);
+  }
+  // SAY WHAT WAS COVERED, not merely how much was read. "scanned N lines" is what kept
+  // the blind spot invisible: a large number implies thoroughness and names no scope, so
+  // nobody thought to ask which files it meant.
+  // LISTED AND READ ARE NEVER MIXED IN ONE PHRASE. This previously read "READ from 480 of
+  // 496 tracked + 0 untracked files", where 496 and 0 are LISTED counts - so the sentence
+  // whose whole point is "count what was read" still quoted a listing total, which review
+  // of #261 called out. The listed total is now parenthesised and labelled as such.
+  const listed = tracked.length + untracked.length;
+  scope = `${payload.length} lines READ from ${read} of ${listed} listed files `
+    + `(${tracked.length} tracked, ${untracked.length} untracked)`
+    + (binary ? `, ${binary} binary skipped` : '')
+    + (vanished ? `, ${vanished} vanished mid-scan` : '')
+    + (notAFile ? `, ${notAFile} directory entr${notAFile === 1 ? 'y' : 'ies'} skipped` : '');
 }
 
 const hits = [];
@@ -91,4 +236,4 @@ if (hits.length) {
   console.error('If it is real: rotate the credential first — removing the line is not enough once pushed.\n');
   process.exit(1);
 }
-console.log(`OK — scanned ${payload.length} lines, no secrets or machine-identifying data.`);
+console.log(`OK — scanned ${scope}, no secrets or machine-identifying data.`);

@@ -16,11 +16,34 @@
 // expression turns the first one red. The API block underneath pins the wire shape and
 // drives the real code path, and its own possible vacuity is dealt with explicitly there.
 const { test, expect } = require('@playwright/test');
+const { spawnSync } = require('child_process');
 const fs = require('fs');
 const os = require('os');
 const path = require('path');
 const { authCtx } = require('./test-helpers');
 const gitFreshness = require('../lib/git-freshness');
+
+const ROOT = path.join(__dirname, '..');
+
+/**
+ * Where THIS checkout's FETCH_HEAD is, resolved through git rather than assembled from
+ * `.git/` - a worktree's git dir is a file, not a directory, and the server resolves it
+ * the same way. Returns null when git cannot answer at all.
+ */
+function fetchHeadPath() {
+  const r = spawnSync('git', ['rev-parse', '--git-path', 'FETCH_HEAD'],
+    { cwd: ROOT, encoding: 'utf8', windowsHide: true });
+  if (r.status !== 0) return null;
+  const p = (r.stdout || '').trim();
+  return p ? path.resolve(ROOT, p) : null;
+}
+
+/** The file's mtime in ms, or null when it does not exist (a fresh clone writes none). */
+function fetchHeadMtime() {
+  const p = fetchHeadPath();
+  if (!p) return null;
+  try { return fs.statSync(p).mtimeMs; } catch (e) { return null; }
+}
 
 const { FETCH_FRESH_MS, parseBehindCount, readFetchedAt, publishedBehind } = gitFreshness;
 
@@ -112,6 +135,12 @@ test.describe('#248: the wire, and the real code path', () => {
       expect(Number.isInteger(v.behind)).toBe(true);
       expect(v.behind).toBeGreaterThanOrEqual(-1);
       // The new field is always PRESENT - null is the answer, not the absence of one.
+      //
+      // This test pins the SHAPE only, and null is a legitimate shape here: it is also
+      // what the cold-start fallback publishes before the async refresh has landed, so
+      // demanding a number would be a race rather than a gate. The NORMAL case - a real
+      // mtime - is asserted in the next test, after the poll proves the refresh ran
+      // (#259).
       expect('fetchedAt' in v, 'fetchedAt must be published, null included').toBe(true);
       expect(v.fetchedAt === null || Number.isFinite(v.fetchedAt)).toBe(true);
     } finally {
@@ -132,6 +161,8 @@ test.describe('#248: the wire, and the real code path', () => {
     test.setTimeout(60000);
     const ctx = await authCtx();
     try {
+      // Read before the poll, read again after the assertion - see the #259 block below.
+      const mtimeBefore = fetchHeadMtime();
       let v = null;
       const deadline = Date.now() + 30000;
       while (Date.now() < deadline) {
@@ -140,6 +171,49 @@ test.describe('#248: the wire, and the real code path', () => {
         await new Promise((r) => setTimeout(r, 500));
       }
       expect(v && v.date, 'the background git refresh never completed').toBeTruthy();
+
+      // #259 - THE NORMAL CASE IS ASSERTED, NOT MERELY TOLERATED.
+      //
+      // `fetchedAt === null` used to be accepted unconditionally, so if
+      // `git rev-parse --git-path FETCH_HEAD` ever stopped resolving through `execGit`,
+      // `fetchedAt` would be permanently null, every peer's `behind` would degrade to a
+      // permanent -1, and this suite would stay green. Nothing else would report it
+      // either: `behind` has no client consumer, so the field would simply go quiet.
+      //
+      // The discriminator comes from GIT, not from the server, so the thing under test
+      // cannot choose its own pass condition. The two cases are separate on purpose -
+      // a fresh clone writes no FETCH_HEAD and legitimately answers null.
+      const mtimeAfter = fetchHeadMtime();
+      if (mtimeBefore === null && mtimeAfter === null) {
+        // NO FETCH_HEAD AT ALL. Corrected in review of #261: this said "CI checks out
+        // without fetching, so this is the ordinary CI path". It is NOT the CI path.
+        // `actions/checkout` runs `git -c protocol.version=2 fetch --no-tags --prune ...`,
+        // which writes FETCH_HEAD - read off this PR's own Fast-checks log, and the
+        // comment ~30 lines below in this same file already said as much ("a CI checkout
+        // that fetched seconds ago"). So CI takes the ELSE branch, which is the strong one;
+        // nothing here is vacuous, but a comment naming the wrong environment sends the
+        // next reader to the wrong place. This branch is reachable on a literal `git clone`
+        // nobody has fetched in. `-1` everywhere is still the correct answer for it.
+        expect(v.fetchedAt, 'no FETCH_HEAD exists, so null is the only honest answer')
+          .toBe(null);
+        expect(v.behind, 'a fetchedAt of null may never yield a behind of 0').not.toBe(0);
+      } else {
+        // A REAL mtime, bracketed rather than compared for equality. A `git fetch` by a
+        // human or another session during this test rewrites FETCH_HEAD, and an
+        // equality assertion would go red for that - a latency bet of exactly the kind
+        // this repo keeps paying for. Bracketing between the two readings cannot be
+        // beaten by a concurrent fetch and is still not vacuous: null, 0, a clock
+        // reading and any invented constant all fall outside it.
+        const lo = Math.min(...[mtimeBefore, mtimeAfter].filter((n) => n !== null)) - 2000;
+        const hi = Math.max(...[mtimeBefore, mtimeAfter].filter((n) => n !== null)) + 2000;
+        expect(Number.isFinite(v.fetchedAt),
+          `FETCH_HEAD exists but the server published fetchedAt=${v.fetchedAt}. `
+            + 'That is the permanent -1 this case exists to catch.').toBe(true);
+        expect(v.fetchedAt,
+          `fetchedAt must be FETCH_HEAD's mtime; expected within [${lo}, ${hi}]`)
+          .toBeGreaterThanOrEqual(lo);
+        expect(v.fetchedAt).toBeLessThanOrEqual(hi);
+      }
 
       // THE GATE. Environment-independent: it holds on a CI checkout that fetched
       // seconds ago (fresh -> a 0 is allowed) and on a dev box that has not fetched for
