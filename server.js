@@ -86,11 +86,19 @@ const DEFAULT_CONFIG_FILE = path.join(__dirname, 'config.default.json');
 //
 // This is the one owner of "ABSENT or UNREADABLE?" - not, as this comment claimed until
 // review of #261, the one owner of "what does config.json say". THREE other sites parse
-// CONFIG_FILE directly and each swallows a parse error on purpose: the startup load
-// (which falls back to config.default.json), `_refreshLiveConfig` (which keeps the last
-// good cache) and GET /api/config (which serves defaults). Those are read paths where
-// degrading is right. The distinction below matters to a path that WRITES, and routing
-// the readers through here is a separate change with its own blast radius.
+// CONFIG_FILE directly and each swallows a parse error on purpose: the startup load,
+// `_refreshLiveConfig` (which keeps the last good cache) and GET /api/config (which serves
+// defaults). Those are read paths where degrading is right. The distinction below matters
+// to a path that WRITES, and routing the readers through here is a separate change with
+// its own blast radius.
+//
+// THE STARTUP LOAD IS NOT SYMMETRIC, and saying "it falls back to config.default.json"
+// flat would be wrong in exactly the case this function exists for. It falls back when
+// CONFIG_FILE is ABSENT. When it is UNREADABLE the parse throws inside the first `if`, the
+// `else if` is never evaluated, `config` stays `{}`, and every value becomes the code
+// literal - `PASS` included, which is how a corrupt file drops a running server to the
+// default password and opens the unauthenticated /api/setup route. That is #264, filed
+// separately; it is named here because this is the comment a reader lands on first.
 //
 // `readConfig()` keeps its signature for the callers that only want the object; a caller
 // whose CORRECTNESS depends on the difference asks for the result instead.

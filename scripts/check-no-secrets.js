@@ -96,16 +96,43 @@ if (arg !== -1 && process.argv[arg + 1]) {
   // that works in Hebrew every day: a pasted token in such a file passed the gate under
   // `OK - scanned ... + 1 untracked files`. `-z` emits raw bytes NUL-separated, so no
   // quoting happens and no decoding is needed.
-  const list = (args) => execSync(`git ls-files -z ${args}`,
-    { encoding: 'utf8', maxBuffer: 64 * 1024 * 1024 })
-    .split('\0').filter(Boolean)
-    .filter((f) => !f.startsWith('ai-terminal/third_party/'));
+  // PATHS ARE CARRIED AS BUFFERS, NOT STRINGS - the same lesson as `-z`, one layer down.
+  // With `encoding: 'utf8'` a filename whose bytes are not valid UTF-8 decodes to U+FFFD,
+  // `readFileSync` then throws ENOENT, and the file is tallied "vanished mid-scan" - the
+  // one label that says BENIGN without checking. Git on Windows writes UTF-8 names, so it
+  // takes a name committed from Linux and there are zero today. Fixed rather than noted
+  // because it is the C-quoting bug wearing a different label, and that one also had zero
+  // instances until it had one.
+  //
+  // `readFileSync` accepts a Buffer path (verified on this box), so the bytes never have
+  // to become a string in order to be READ. They become one only to be DISPLAYED.
+  const list = (args) => {
+    const out = execSync(`git ls-files -z ${args}`,
+      { encoding: 'buffer', maxBuffer: 64 * 1024 * 1024 });
+    const paths = [];
+    let start = 0;
+    for (let i = 0; i < out.length; i++) {
+      if (out[i] !== 0) continue;
+      if (i > start) paths.push(out.subarray(start, i));
+      start = i + 1;
+    }
+    return paths.filter((b) => !b.toString('utf8').startsWith('ai-terminal/third_party/'));
+  };
+  // Byte identity, not display identity: latin1 maps every byte to one code unit and
+  // back, so two genuinely different names can never collide on one key.
+  const key = (b) => b.toString('latin1');
   // `--cached` can list one path several times (one row per stage during a merge
   // conflict), so tracked is de-duplicated and untracked is filtered against it: reading
   // a file twice would double its lines inside the very count the summary prints.
-  const tracked = [...new Set(list('--cached'))];
-  const trackedSet = new Set(tracked);
-  const untracked = list('--others --exclude-standard').filter((f) => !trackedSet.has(f));
+  const seen = new Set();
+  const tracked = [];
+  for (const b of list('--cached')) {
+    const k = key(b);
+    if (seen.has(k)) continue; // a merge conflict lists one path once per stage
+    seen.add(k);
+    tracked.push(b);
+  }
+  const untracked = list('--others --exclude-standard').filter((b) => !seen.has(key(b)));
   const fs = require('fs');
   payload = [];
   // COUNT WHAT WAS READ, NEVER WHAT WAS LISTED. The listed total is what made the
@@ -118,6 +145,7 @@ if (arg !== -1 && process.argv[arg + 1]) {
   let notAFile = 0; // gitlinks/submodules: listed by git, not a file to read
   const unreadable = [];
   for (const f of tracked.concat(untracked)) {
+    const name = f.toString('utf8'); // for DISPLAY only - reads use the bytes
     let t;
     try {
       t = fs.readFileSync(f, 'utf8');
@@ -125,29 +153,33 @@ if (arg !== -1 && process.argv[arg + 1]) {
       // A path listed a moment ago and gone now is benign - a concurrent checkout, a
       // build cleaning up after itself. ANY OTHER failure is a file this gate could not
       // examine, and "I could not open it" is not "it is clean", so it is fatal rather
-      // than skipped. That is the whole lesson of #260 applied to the read as well as
-      // to the listing.
+      // than skipped. The whole lesson of #260, applied to the read as well as the list.
       if (e.code === 'ENOENT') { vanished++; continue; }
-      // EISDIR IS NOT A FAILURE EITHER, and this one is a landmine rather than a
-      // nicety. A SUBMODULE is listed by `git ls-files` as a gitlink - the DIRECTORY
-      // path, mode 160000 - and `readFileSync` on a directory throws EISDIR. Treating
-      // that as fatal would redden this gate on every single run the moment anyone adds
-      // a submodule, for a reason that has nothing to do with secrets. A gate that
-      // reddens for non-security reasons is one people learn to bypass, which is worse
-      // than the hole it was guarding. There is nothing to scan in either case: a
-      // gitlink's contents live in another repository.
+      // A DIRECTORY WHERE A FILE WAS LISTED - a landmine rather than a nicety. A
+      // SUBMODULE is listed by `git ls-files` as a gitlink (the DIRECTORY path, mode
+      // 160000) and `readFileSync` on a directory throws EISDIR. Treating that as fatal
+      // would redden this gate on every run the moment anyone adds a submodule, for a
+      // reason with nothing to do with secrets - and a gate that reddens for
+      // non-security reasons is one people learn to bypass, which is worse than the hole
+      // it guarded. Nothing to scan either way: a gitlink's contents live in another
+      // repository, and a directory has no line content at all.
       //
-      // MEASURED, not assumed: this checkout has no .gitmodules and no mode-160000
-      // entry today, and `readFileSync` on a directory was confirmed to give EISDIR
-      // while a missing path gives ENOENT. So this is a latent case, named before it
-      // bites rather than after.
+      // THE LABEL SAYS "DIRECTORY", NOT "GITLINK", because EISDIR is what was OBSERVED
+      // and a gitlink is only its likeliest cause. An untracked nested clone, and a
+      // tracked file replaced on disk by a directory, both land here too - calling
+      // either a submodule would be this gate reporting an inference as a measurement,
+      // which is the exact defect it exists to catch (review of #261).
+      //
+      // MEASURED, not assumed: this checkout has no .gitmodules and no mode-160000 entry
+      // today, and `readFileSync` on a directory was confirmed to give EISDIR while a
+      // missing path gives ENOENT. A latent case, named before it bites.
       if (e.code === 'EISDIR') { notAFile++; continue; }
-      unreadable.push(`${f} (${e.code || e.message})`);
+      unreadable.push(`${name} (${e.code || e.message})`);
       continue;
     }
     if (t.includes('\u0000')) { binary++; continue; } // binary
     read++;
-    t.split('\n').forEach((line, i) => payload.push(`${f}:${i + 1}: ${line}`));
+    t.split('\n').forEach((line, i) => payload.push(`${name}:${i + 1}: ${line}`));
   }
   // A GATE THAT SCANNED NOTHING PASSES EVERYTHING, and this is not hypothetical: while
   // fixing the quoting bug above, a half-applied edit left `-z` off while the split still
@@ -171,11 +203,16 @@ if (arg !== -1 && process.argv[arg + 1]) {
   // SAY WHAT WAS COVERED, not merely how much was read. "scanned N lines" is what kept
   // the blind spot invisible: a large number implies thoroughness and names no scope, so
   // nobody thought to ask which files it meant.
-  scope = `${payload.length} lines READ from ${read} of ${tracked.length} tracked `
-    + `+ ${untracked.length} untracked files`
+  // LISTED AND READ ARE NEVER MIXED IN ONE PHRASE. This previously read "READ from 480 of
+  // 496 tracked + 0 untracked files", where 496 and 0 are LISTED counts - so the sentence
+  // whose whole point is "count what was read" still quoted a listing total, which review
+  // of #261 called out. The listed total is now parenthesised and labelled as such.
+  const listed = tracked.length + untracked.length;
+  scope = `${payload.length} lines READ from ${read} of ${listed} listed files `
+    + `(${tracked.length} tracked, ${untracked.length} untracked)`
     + (binary ? `, ${binary} binary skipped` : '')
     + (vanished ? `, ${vanished} vanished mid-scan` : '')
-    + (notAFile ? `, ${notAFile} gitlink(s) skipped` : '');
+    + (notAFile ? `, ${notAFile} directory entr${notAFile === 1 ? 'y' : 'ies'} skipped` : '');
 }
 
 const hits = [];

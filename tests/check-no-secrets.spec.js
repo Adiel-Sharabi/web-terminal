@@ -77,7 +77,12 @@ function rm(name) {
  * a fact about somebody's working tree rather than about the gate.
  */
 function untrackedCount(out) {
-  const m = out.match(/\+ (\d+) untracked files/);
+  // Matches the summary's parenthesised LISTED counts: "(496 tracked, 0 untracked)". The
+  // wording changed in review of #261, when the line stopped mixing "read" and "listed" in
+  // one phrase — and this helper returns null rather than 0 on a miss precisely so a
+  // reworded summary shows up as a failed assertion instead of a silent zero that every
+  // delta comparison would still satisfy.
+  const m = out.match(/(\d+) untracked\)/);
   return m ? Number(m[1]) : null;
 }
 
@@ -232,7 +237,13 @@ test.describe('#260 the secrets gate covers the working tree, not just the index
       });
       const out = (r.stdout || '') + (r.stderr || '');
       expect(r.status, `a gitlink must not fail the gate.\n${out}`).toBe(0);
-      expect(out, 'and it must be REPORTED, never silently dropped').toContain('gitlink');
+      // The summary says "directory entr(y|ies) skipped", NOT "gitlink": EISDIR is what the
+      // read observed, while "submodule" is an inference about its cause, and an untracked
+      // nested clone or a tracked file replaced by a directory lands there too (review of
+      // #261). Asserting the observed label keeps the test honest about the same thing the
+      // gate is honest about.
+      expect(out, 'the skip must be REPORTED, never silently dropped')
+        .toContain('directory entr');
     } finally {
       try { fs.rmSync(abs, { recursive: true, force: true }); } catch (e) {}
       try { fs.unlinkSync(tmpIndex); } catch (e) {}
