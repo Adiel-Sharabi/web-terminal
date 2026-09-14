@@ -81,6 +81,26 @@ test.describe('#257: PUT /api/config never replaces a merge base it could not re
     expect(after, 'a refused PUT must not write the file at all').toBe(CORRUPT);
     expect(after).toContain('wt257-peer');
     expect(after).toContain('publicUrl');
+
+    // THE REFUSAL MUST NOT TELL THE BROWSER WHERE THE FILE LIVES. The server log names
+    // the absolute path on purpose - that is an operator reading their own console. The
+    // RESPONSE goes to any authenticated browser, and `${CONFIG_FILE} could not be read`
+    // is the most natural sentence for a future edit to write, which is exactly why the
+    // property needs a gate rather than a good intention. Asserted structurally (no
+    // drive letter, no separator run, no filename) instead of against one machine's path,
+    // so it holds on a CI runner whose layout is nothing like this one.
+    // ORDER MATTERS HERE, and getting it wrong once is why it is called out. The
+    // security assertions come FIRST. A wording check like `toContain('config.json')`
+    // fires ahead of them on a leaked path - `config.test.json` does not contain the
+    // substring `config.json` - so the run goes red for the cosmetic reason and the
+    // leak assertion is never evaluated at all. A test that fails for the wrong reason
+    // still passes CI as "red", and nobody reads which line.
+    const body = await res.json();
+    expect(body.error, 'a client-facing error must not carry a server filesystem path')
+      .not.toMatch(/[A-Za-z]:[\\/]|[\\/](?:home|Users|var|opt)[\\/]/);
+    expect(body.error, 'and must not echo the parse error, which quotes file CONTENT')
+      .not.toContain('JSON at position');
+    expect(body.error, 'the refusal must still say what to do').toMatch(/config(\.test)?\.json/);
   });
 
   test('an ABSENT config.json still accepts a write — the trap in the obvious fix', async () => {
