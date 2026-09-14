@@ -30,7 +30,7 @@ const path = require('path');
 const fs = require('fs');
 const os = require('os');
 const crypto = require('crypto');
-const ipc = require('../lib/ipc');
+const { connectClient, rpc } = require('./worker-ipc');   // #262 - one owner for the budget
 const agents = require('../lib/agents');
 
 const ESC = String.fromCodePoint(0x001b);
@@ -98,33 +98,6 @@ function spawnWorker(pipePath, dataDir, extraEnv) {
       setTimeout(() => { if (!exited) { try { proc.kill('SIGKILL'); } catch {} resolve(); } }, 3000);
     }),
   };
-}
-
-async function connectClient(pipePath, timeoutMs = 5000) {
-  const client = ipc.createClient(pipePath, { retry: true, retryDelayMs: 100 });
-  await Promise.race([
-    client.connected(),
-    new Promise((_, rej) => setTimeout(() => rej(new Error('worker never ready')), timeoutMs)),
-  ]);
-  return client;
-}
-
-function rpc(client, method, params = {}, timeoutMs = 8000) {
-  const id = Math.floor(Math.random() * 1e9);
-  return new Promise((resolve, reject) => {
-    const timer = setTimeout(() => { client.off('frame', onFrame); reject(new Error(`RPC ${method} timed out`)); }, timeoutMs);
-    function onFrame(frame) {
-      if (frame.type !== ipc.TYPE_JSON) return;
-      let msg;
-      try { msg = JSON.parse(frame.payload.toString('utf8')); } catch { return; }
-      if (msg.id !== id) return;
-      clearTimeout(timer);
-      client.off('frame', onFrame);
-      if (msg.error) reject(new Error(msg.error)); else resolve(msg.result);
-    }
-    client.on('frame', onFrame);
-    client.send(ipc.encodeJson({ id, method, params }));
-  });
 }
 
 const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
