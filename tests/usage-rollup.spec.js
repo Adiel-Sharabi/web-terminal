@@ -335,7 +335,14 @@ test.describe('Sidebar UI: server-row usage', () => {
       await loginPage(page);
       await page.goto(BASE + '/');
       const usage = page.locator('.sb-server .srv-usage');
-      await expect(usage).toHaveCount(1, { timeout: 5000 });   // ONCE on the server row…
+      // #262 — the explicit `{ timeout: 5000 }` that used to sit here is GONE, and this is
+      // a deletion rather than a raise. It restated Playwright's own default (this config
+      // sets no `expect.timeout`, so the default is 5000) while READING like a deliberate,
+      // measured bound for this assertion — and nothing ever measured it. One number, owned
+      // in `playwright.config.js`: raise the project default and this follows instead of
+      // silently staying behind, which is the failure mode that made 23 copies of an RPC
+      // budget drift apart. The behaviour today is byte-for-byte identical.
+      await expect(usage).toHaveCount(1);   // ONCE on the server row…
       await expect(usage).toContainText('Claude Code');        // …attributed to its agent…
       await expect(usage).toContainText('5h 42%');
       await expect(usage).toContainText('7d 18%');

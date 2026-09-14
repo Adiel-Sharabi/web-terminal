@@ -22,6 +22,7 @@ const fs = require('fs');
 const os = require('os');
 const crypto = require('crypto');
 const ipc = require('../lib/ipc');
+const { connectClient, rpc } = require('./worker-ipc');   // #262 - one owner for the budget
 const { killAllSessions } = require('./worker-kill');
 
 function workerPipePath() {
@@ -72,46 +73,18 @@ function spawnWorker(pipePath, dataDir, extraEnv = {}) {
   };
 }
 
-async function connectClient(pipePath, timeoutMs = 5000) {
-  const client = ipc.createClient(pipePath, { retry: true, retryDelayMs: 100 });
-  await Promise.race([
-    client.connected(),
-    new Promise((_, rej) => setTimeout(() => rej(new Error('worker never ready')), timeoutMs)),
-  ]);
-  return client;
-}
-
-function rpc(client, method, params = {}, timeoutMs = 5000) {
-  const id = Math.floor(Math.random() * 1e9);
-  return new Promise((resolve, reject) => {
-    const timer = setTimeout(() => {
-      client.off('frame', onFrame);
-      reject(new Error(`RPC ${method} timed out`));
-    }, timeoutMs);
-    function onFrame(frame) {
-      if (frame.type !== ipc.TYPE_JSON) return;
-      let msg;
-      try { msg = JSON.parse(frame.payload.toString('utf8')); } catch { return; }
-      if (msg.id !== id) return;
-      clearTimeout(timer);
-      client.off('frame', onFrame);
-      if (msg.error) reject(new Error(msg.error));
-      else resolve(msg.result);
-    }
-    client.on('frame', onFrame);
-    client.send(ipc.encodeJson({ id, method, params }));
-  });
-}
-
 // #254 - the teardown rule itself lives in `tests/worker-kill.js`. These kills used to
 // run one at a time in a `for` loop wrapped in `try {} catch {}`, so a timeout was
 // SWALLOWED and the spec stayed green with the sessions still alive - the next spec in
 // the run inherited them. They now go out as ONE batch under ONE window sized for N
 // SERIALIZED handlers: `killSession` has no yield point, so concurrency removes the
-// round-trips and parallelises none of the work. `rpc` and the spawned `worker` are
-// handed over - the first because each spec still owns its IPC harness, the second so a
-// failure can say whether the process is alive rather than only that it went quiet.
-const killSessions = (client, ids, worker) => killAllSessions(rpc, client, ids, { worker });
+// round-trips and parallelises none of the work. The spawned `worker` is handed over so
+// a failure can say whether the process is alive rather than only that it went quiet.
+// `rpc` is NOT handed over any more - #262 made `tests/worker-ipc.js` its one owner.
+// This sentence was one of THREE copies of that fact, and all three still claimed "each
+// spec still owns its IPC harness" directly above the line that had stopped handing it
+// over. Caught in review: a change whose whole thesis is "copies drift" drifted its own.
+const killSessions = (client, ids, worker) => killAllSessions(client, ids, { worker });
 
 /**
  * Collect the next statusChanged event matching `predicate`. Resolves with the

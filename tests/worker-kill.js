@@ -63,6 +63,8 @@
 // measured. STATE WHAT IT ACTUALLY MEASURES: it is how long THE AGENT takes to exit AFTER
 // the kill, and this RPC never waits on that - these are plain shells with no agent at
 // all. It is a RELATED quantity used for headroom, not a fitted bound.
+const { rpc } = require('./worker-ipc');   // #262 - the harness this file's header promised
+
 const KILL_BASE_MS = 8700;        // 10x #191's ~870ms - the window the batch gets for free
 const KILL_PER_SESSION_MS = 2500; // ...plus this for every session after the first
 
@@ -93,22 +95,23 @@ function killBudgetMs(n) {
  * Kill every session in ONE concurrent batch: one round-trip in flight for all of them,
  * under a single window sized for N serialized handlers.
  *
- * `rpc` is passed in rather than imported because each worker spec still owns its copy of
- * the IPC harness. Unifying that is a separate, much wider change; what MUST NOT be
- * duplicated is this rule - the budget and the dispatch - which is what drifts.
+ * `rpc` IS NOW IMPORTED, not passed in. This used to read "passed in rather than imported
+ * because each worker spec still owns its copy of the IPC harness. Unifying that is a
+ * separate, much wider change" - #262 IS that change, and `tests/worker-ipc.js` is the one
+ * owner it promised. What MUST NOT be duplicated is still this rule - the budget and the
+ * dispatch - which is what drifts.
  *
  * `allSettled`, not `all`: `all` rejects on the FIRST failure and abandons the rest, so
  * the error names one id and cannot say whether the worker answered anybody. The whole
  * point of un-swallowing this is that the report is worth reading.
  *
- * @param {(client:any, method:string, params?:any, timeoutMs?:number)=>Promise<any>} rpc
  * @param {any} client
  * @param {string[]} ids
  * @param {{worker?:any, label?:string}} [opts] optional `worker` (from `spawnWorker`) so a
  *   failure can say whether the process is still alive and what it printed - the one
  *   question "RPC killSession timed out" cannot answer on its own.
  */
-async function killAllSessions(rpc, client, ids, opts = {}) {
+async function killAllSessions(client, ids, opts = {}) {
   const budget = killBudgetMs(ids.length);
   const t0 = Date.now();
   const settled = await Promise.allSettled(
