@@ -74,12 +74,20 @@ function killBudgetMs(n) {
 // WHAT IS DELIBERATELY NOT CONVERTED, counted rather than glossed. Eleven more
 // `try { await rpc(client, 'killSession', ...) } catch {}` sites remain, in
 // `ipc-backpressure.spec.js` (1), `worker-binary-pty.spec.js` (5) and
-// `worker-scrollback-chunks.spec.js` (5). Every one of them is a SINGLE kill - measured,
-// not assumed: none has a `for` above it - so none has the compounding shape above, where
-// N serialized handlers share one deadline. They share only the swallow. Converting them
-// is mechanical and this module is ready for it; it is left out because it would turn
-// eleven green specs into eleven specs failing for a reason nobody has measured, which is
-// the opposite of what #254 asks for.
+// `worker-scrollback-chunks.spec.js` (5). Every one of them is a SINGLE kill, so none has
+// the compounding shape above where N serialized handlers share one deadline. They share
+// only the swallow.
+//
+// STATE THE PREDICATE, because the obvious one is wrong. It is NOT "no `for` appears above
+// the call" - three of the eleven do have one (`worker-binary-pty.spec.js:253`,
+// `worker-scrollback-chunks.spec.js:187` and `:235`). Those loops are CLOSED before the
+// kill: they build or assert chunks, and the kill is a single statement after the brace.
+// The property that matters is that no loop is still OPEN at the call site, which is why
+// it was checked by reading each of the eleven rather than by grepping for `for`.
+//
+// Converting them is mechanical and this module is ready for it; it is left out because it
+// would turn eleven passing tests into eleven failing for a reason nobody has measured,
+// which is the opposite of what #254 asks for.
 
 /**
  * Kill every session in ONE concurrent batch: one round-trip in flight for all of them,
