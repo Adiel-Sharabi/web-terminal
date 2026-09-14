@@ -251,9 +251,19 @@ test.describe('Sidebar UI: favorites', () => {
 
       // Not 0 — which is what "next index in the union I can see" hands out whenever the
       // union happens to be empty, and which collides head-on with an offline peer's pins.
+      //
+      // #266 — SYMMETRIC, and that is the whole change. `t0` is read in THIS process while
+      // `favoriteRank` is stamped in the SERVER's, so a one-sided `>= t0` asserts that two
+      // processes' wall-clock reads are monotonic with respect to each other — which no OS
+      // promises, and which `usage-rollup.spec.js` failed on in CI by two milliseconds
+      // BACKWARDS. The window is unchanged in width from the bound that was already here:
+      // what this has to separate is "a stamp from about now" from "0, a small index, or a
+      // rank inherited from an offline peer", and every one of those is minutes or years
+      // away, not milliseconds. Widening the wrong side is not a tolerance, it is a
+      // one-sided bet on the clock.
       const rank = (await favOf(ctx, created)).favoriteRank;
-      expect(rank).toBeGreaterThanOrEqual(t0);
-      expect(rank).toBeLessThan(t0 + 60000);
+      expect(Math.abs(rank - t0),
+        'favoriteRank must be a wall-clock stamp from about now').toBeLessThan(60000);
     } finally {
       try { await ctx.delete(`/api/sessions/${created}`); } catch {}
       await ctx.dispose();

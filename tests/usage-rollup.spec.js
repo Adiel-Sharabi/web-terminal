@@ -204,7 +204,35 @@ test.describe('per-server usage on /api/cluster/sessions', () => {
     const uuid = '56565656-0000-0000-0000-000000000001';
     await ctx.post(`/api/session/${id}/hook`, { data: { event: 'UserPromptSubmit', session_id: uuid } });
     await new Promise((res) => setTimeout(res, 200)); // let the worker persist the uuid
-    const before = Date.now();
+
+    // #266 — TWO PUSHES, AND THE COMPARISON IS BETWEEN THEM. DO NOT "SIMPLIFY" THIS BACK.
+    //
+    // This used to read `const before = Date.now()` in the TEST process and assert
+    // `ts >= before` against a stamp written by `server.js`, a DIFFERENT process. That is
+    // the claim "two processes' readings of the wall clock are monotonic with respect to
+    // each other", which no OS promises — and it failed in CI on 2026-09-14 by two
+    // milliseconds BACKWARDS (run 34818156672, `>= 1789371789935`, received
+    // 1789371789933), the signature of a clock adjustment landing between the two reads.
+    //
+    // Subtracting a tolerance would be the same fixed bet in a new place: a number nobody
+    // measured, back the day the skew is 60ms, having taught everyone to widen it. Both
+    // stamps below are written by the SAME process, so there is no cross-process clock
+    // arithmetic left to be wrong — and asserting that the stamp MOVED is a stricter test
+    // of what the assertion was always for (this push's timestamp, not a stale one) than
+    // comparing it to a clock reading ever was. The numbers differ between the pushes for
+    // the same reason: a roll-up serving the first report would keep 41/17.
+    const first = await ctx.post('/api/claude-status', { data: { session_id: uuid, ctx: 30, five: 41, seven: 17 } });
+    expect(first.ok()).toBeTruthy();
+    const firstPayload = await (await ctx.get('/api/cluster/sessions')).json();
+    const firstMe = localServer(firstPayload);
+    expect(firstMe.usage, 'the first push must produce a roll-up to compare against').toBeTruthy();
+    const firstTs = firstMe.usage.claude.ts;
+    const firstSessionTs = firstPayload.sessions.find((x) => x.id === id).metrics.ts;
+    expect(typeof firstTs, 'the roll-up must carry a numeric stamp').toBe('number');
+
+    // The payload is coalesced for CLUSTER_SESSIONS_TTL_MS, so the second read needs the
+    // window to pass or it answers with the first push's bytes.
+    await new Promise((res) => setTimeout(res, CLUSTER_TTL_MS));
     const push = await ctx.post('/api/claude-status', { data: { session_id: uuid, ctx: 30, five: 42, seven: 18 } });
     expect(push.ok()).toBeTruthy();
 
@@ -213,14 +241,15 @@ test.describe('per-server usage on /api/cluster/sessions', () => {
     expect(me.usage).toBeTruthy();
     expect(me.usage.claude.fiveH).toBe(42);
     expect(me.usage.claude.sevenD).toBe(18);
-    expect(me.usage.claude.ts).toBeGreaterThanOrEqual(before);
+    expect(me.usage.claude.ts,
+      'the roll-up must carry THIS push\'s stamp, not the previous one').toBeGreaterThan(firstTs);
 
     // The per-session metrics now carry the two facts the roll-up is built from: WHOSE
     // quota (source, not the session's declared agent) and WHEN it landed. getStatusMetrics
     // used to drop `ts` entirely.
     const s = payload.sessions.find((x) => x.id === id);
     expect(s.metrics.agent).toBe('claude');
-    expect(s.metrics.ts).toBeGreaterThanOrEqual(before);
+    expect(s.metrics.ts, 'and the per-session stamp moves with it').toBeGreaterThan(firstSessionTs);
     expect(s.metrics.ctx).toBe(30); // ctx stays per-session
 
     await ctx.delete(`/api/sessions/${id}`);

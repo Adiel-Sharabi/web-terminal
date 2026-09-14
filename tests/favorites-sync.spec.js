@@ -215,8 +215,13 @@ test.describe('#60 favorites: server-side store', () => {
       const rankB = (await (await ctx.patch(`/api/sessions/${b}/favorite`, { data: { favorite: true } })).json()).favoriteRank;
 
       // A timestamp — not 0, not "one past the biggest rank I happen to be able to see".
-      expect(rankA).toBeGreaterThanOrEqual(t0);
-      expect(rankA).toBeLessThan(t0 + 60000);
+      //
+      // #266 — bracketed SYMMETRICALLY around this process's clock, not anchored to it.
+      // `t0` is read here and `favoriteRank` is stamped in the server process; a one-sided
+      // `>= t0` would assert cross-process wall-clock monotonicity, which is what failed in
+      // CI by 2ms in `usage-rollup.spec.js`. Same width as the bound that was already here.
+      expect(Math.abs(rankA - t0),
+        'favoriteRank must be a wall-clock stamp from about now').toBeLessThan(60000);
       // Strictly increasing even inside the same millisecond, so an append is an append.
       expect(rankB).toBeGreaterThan(rankA);
     } finally {

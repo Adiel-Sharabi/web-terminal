@@ -19,6 +19,18 @@ on:
     branches: [master]
   workflow_dispatch:
 
+# #265 — same rule as ci.yml, and it belongs here for a DIFFERENT reason. This workflow is
+# cheap (ubuntu, ~1 minute, 1x), so the money argument is ci.yml's alone. What this fixes is
+# the reading: `gh pr checks` reports the newest run while superseded ones keep occupying
+# slots, so a branch pushed to three times queues behind itself and its status is ambiguous
+# for as long as that lasts.
+#
+# `cancel-in-progress` is TRUE for a PR and FALSE for master, for the reason written out in
+# ci.yml: a cancelled master run loses the record of whether a merged commit was green.
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: ${{ github.ref != 'refs/heads/master' }}
+
 permissions:
   contents: read
 
