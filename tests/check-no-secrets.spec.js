@@ -50,6 +50,12 @@ const UNTRACKED_PROBE = 'wt260-untracked-scan-probe.txt';
 // Ignored by `.tmp-*` — also asserted below.
 const IGNORED_PROBE = '.tmp-wt260-ignored-scan-probe.txt';
 
+// A NON-ASCII FILENAME, and the reason this spec exists twice over. Built from escapes
+// so this source stays ASCII-only: a literal is invisible in a diff and is normalised in
+// transit, which is the trap #190/#202 already paid for. Hebrew, because that is what
+// this fleet actually types.
+const NONASCII_PROBE = 'wt260-\u05e9\u05dc\u05d5\u05dd-scan-probe.txt';
+
 /** Run the gate exactly as CI and the pre-commit flow do. */
 function runGate(args = []) {
   const r = spawnSync(process.execPath, [GATE, ...args], {
@@ -87,8 +93,8 @@ function isTracked(name) {
 }
 
 test.describe('#260 the secrets gate covers the working tree, not just the index', () => {
-  test.beforeEach(() => { rm(UNTRACKED_PROBE); rm(IGNORED_PROBE); });
-  test.afterEach(() => { rm(UNTRACKED_PROBE); rm(IGNORED_PROBE); });
+  test.beforeEach(() => { rm(UNTRACKED_PROBE); rm(IGNORED_PROBE); rm(NONASCII_PROBE); });
+  test.afterEach(() => { rm(UNTRACKED_PROBE); rm(IGNORED_PROBE); rm(NONASCII_PROBE); });
 
   test('an untracked, unignored file is scanned — and the summary says how many', () => {
     // The tree as it stands, before the probe exists. Everything below is measured
@@ -148,6 +154,31 @@ test.describe('#260 the secrets gate covers the working tree, not just the index
     expect(r.code, `a gitignored file must not be scanned.\n${r.out}`).toBe(0);
     expect(untrackedCount(r.out), `an ignored file must not be counted: ${r.out}`)
       .toBe(baseline);
+  });
+
+  test('a file whose NAME is not ASCII is scanned - a quoted path is not a path', () => {
+    // FOUND IN REVIEW OF THE #260 FIX, which had the defect it was written to remove.
+    // `git ls-files` WITHOUT `-z` C-quotes any path carrying a non-ASCII byte, so this
+    // name arrives as the 39-character string `"wt260-\\327\\251..."` - the quotes
+    // are part of it - and `readFileSync` on that throws ENOENT. The catch swallowed it
+    // and the file was STILL COUNTED in the untracked total, so the gate printed
+    // `OK - scanned ... + 1 untracked files` over a file it had never opened.
+    //
+    // This is the load-bearing test for `-z`: remove that one flag and it goes red,
+    // while every other test in this file stays green.
+    fs.writeFileSync(path.join(ROOT, NONASCII_PROBE), `key: ${FAKE_KEY}\n`, 'utf8');
+
+    expect(isIgnored(NONASCII_PROBE), 'the probe must not be gitignored or this proves nothing')
+      .toBe(false);
+    expect(isTracked(NONASCII_PROBE), 'the probe must be untracked or this proves nothing')
+      .toBe(false);
+
+    const r = runGate();
+    expect(r.code, `a non-ASCII-named file carrying a key must FAIL the gate.\n${r.out}`)
+      .toBe(1);
+    expect(r.out).toContain('Anthropic API key');
+    // The name must survive into the report too - a hit nobody can locate is half a gate.
+    expect(r.out).toContain(NONASCII_PROBE);
   });
 
   test('--diff mode still reports a scope of its own', () => {

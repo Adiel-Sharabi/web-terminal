@@ -86,8 +86,19 @@ if (arg !== -1 && process.argv[arg + 1]) {
   // gate causing the leak it exists to prevent. Verified on this checkout (present on
   // disk, listed by neither invocation) and pinned by `tests/check-no-secrets.spec.js`,
   // which asserts a gitignored file carrying a placeholder secret is NOT reported.
-  const list = (args) => execSync(`git ls-files ${args}`, { encoding: 'utf8' })
-    .split('\n').filter(Boolean)
+  //
+  // `-z` IS THE SECOND LOAD-BEARING FLAG, for the same reason `--exclude-standard` is the
+  // first. Without it `git ls-files` C-QUOTES any path with a non-ASCII byte - a Hebrew
+  // filename comes back as the 39-character string
+  // `"wt261-\327\251\327\234\327\225\327\235-probe.txt"`, quotes included - and
+  // `readFileSync` on that string throws ENOENT, so the file is skipped while STILL BEING
+  // COUNTED as scanned. That is #260's own defect reproduced inside #260's fix, on a fleet
+  // that works in Hebrew every day: a pasted token in such a file passed the gate under
+  // `OK - scanned ... + 1 untracked files`. `-z` emits raw bytes NUL-separated, so no
+  // quoting happens and no decoding is needed.
+  const list = (args) => execSync(`git ls-files -z ${args}`,
+    { encoding: 'utf8', maxBuffer: 64 * 1024 * 1024 })
+    .split('\0').filter(Boolean)
     .filter((f) => !f.startsWith('ai-terminal/third_party/'));
   // `--cached` can list one path several times (one row per stage during a merge
   // conflict), so tracked is de-duplicated and untracked is filtered against it: reading
@@ -97,16 +108,58 @@ if (arg !== -1 && process.argv[arg + 1]) {
   const untracked = list('--others --exclude-standard').filter((f) => !trackedSet.has(f));
   const fs = require('fs');
   payload = [];
+  // COUNT WHAT WAS READ, NEVER WHAT WAS LISTED. The listed total is what made the
+  // quoting bug above invisible, and the same arithmetic hides a binary skip: the
+  // tracked PNGs were reported as "scanned" while never being examined. Four outcomes,
+  // counted separately, so no number can imply coverage that another one lacks.
+  let read = 0;
+  let binary = 0;
+  let vanished = 0;
+  const unreadable = [];
   for (const f of tracked.concat(untracked)) {
     let t;
-    try { t = fs.readFileSync(f, 'utf8'); } catch { continue; }
-    if (t.includes('\u0000')) continue; // binary
+    try {
+      t = fs.readFileSync(f, 'utf8');
+    } catch (e) {
+      // A path listed a moment ago and gone now is benign - a concurrent checkout, a
+      // build cleaning up after itself. ANY OTHER failure is a file this gate could not
+      // examine, and "I could not open it" is not "it is clean", so it is fatal rather
+      // than skipped. That is the whole lesson of #260 applied to the read as well as
+      // to the listing.
+      if (e.code === 'ENOENT') { vanished++; continue; }
+      unreadable.push(`${f} (${e.code || e.message})`);
+      continue;
+    }
+    if (t.includes('\u0000')) { binary++; continue; } // binary
+    read++;
     t.split('\n').forEach((line, i) => payload.push(`${f}:${i + 1}: ${line}`));
+  }
+  // A GATE THAT SCANNED NOTHING PASSES EVERYTHING, and this is not hypothetical: while
+  // fixing the quoting bug above, a half-applied edit left `-z` off while the split still
+  // used NUL. The whole listing became ONE impossible filename, every read failed, and the
+  // gate exited 0 over a tree it had not opened - the #260 failure in its purest form,
+  // introduced by #260's own fix. A repo always has tracked files, so reading none of them
+  // is a broken gate rather than a clean tree. No threshold, no tuning: only zero is
+  // impossible, and any number picked above it would be the fixed bet this repo keeps
+  // paying for.
+  if (tracked.length && !read) {
+    console.error(`\n${tracked.length} tracked file(s) were listed and NONE could be read as text.`);
+    console.error('That is a broken scan, not a clean tree - the gate refuses rather than pass.\n');
+    process.exit(1);
+  }
+  if (unreadable.length) {
+    console.error(`\n${unreadable.length} file(s) could not be read, so they were NOT scanned:\n`);
+    for (const u of unreadable.slice(0, 20)) console.error('  ' + u);
+    console.error('\nAn unexamined file is not a clean file. Fix the access error and re-run.\n');
+    process.exit(1);
   }
   // SAY WHAT WAS COVERED, not merely how much was read. "scanned N lines" is what kept
   // the blind spot invisible: a large number implies thoroughness and names no scope, so
   // nobody thought to ask which files it meant.
-  scope = `${payload.length} lines across ${tracked.length} tracked + ${untracked.length} untracked files`;
+  scope = `${payload.length} lines READ from ${read} of ${tracked.length} tracked `
+    + `+ ${untracked.length} untracked files`
+    + (binary ? `, ${binary} binary skipped` : '')
+    + (vanished ? `, ${vanished} vanished mid-scan` : '');
 }
 
 const hits = [];

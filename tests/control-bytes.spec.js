@@ -137,9 +137,14 @@ function walk(dir, out) {
 
 test.describe('#221 no stray control bytes in source', () => {
   test('every raw C0/DEL byte is one the inventory expects', () => {
-    const targets = [];
-    for (const d of DIRS) walk(path.join(ROOT, d), targets);
-    for (const f of FILES) targets.push(path.join(ROOT, f));
+    // The WALK's own output is kept apart from the hand-listed FILES, because the coverage
+    // assertions below must be about the walk. `FILES` carries `README.md` and `CLAUDE.md`
+    // unconditionally, so a `.md` check over the combined list passes even when the walk
+    // covers no markdown at all — measured, not guessed: that is exactly what the first
+    // version of this did.
+    const walked = [];
+    for (const d of DIRS) walk(path.join(ROOT, d), walked);
+    const targets = walked.concat(FILES.map((f) => path.join(ROOT, f)));
 
     // EVERY NAMED FILE MUST EXIST, asserted rather than assumed. The scan below
     // swallows a read failure with `catch { continue; }`, which is right for a file
@@ -168,11 +173,52 @@ test.describe('#221 no stray control bytes in source', () => {
           + 'nothing there and say nothing about it.').toBe(true);
     }
 
-    // A FLOOR ON COVERAGE, because the two loops above only catch a name that is wrong.
-    // An EXTS entry dropped, or a skip rule widened, keeps every path valid and simply
-    // scans less. 389 was the measured count when #259 widened the scope; the floor sits
-    // well below it so ordinary file churn never trips it, and well above the 233 the
-    // gate covered before, so the widening cannot be silently undone.
+    // EVERY NAMED THING MUST ACTUALLY CONTRIBUTE, which a single aggregate floor does not
+    // check. Found in review of #261: with one floor at 300, deleting `.md` from EXTS
+    // leaves 367 targets and deleting `'docs'` from DIRS leaves 367 — both comfortably
+    // green. The floor only ever guarded the companion, because the Dart tree is the one
+    // big enough to cross it alone. So it protected ONE of the two trees #259 widened to,
+    // and the docs half — the half with 16 files — could have been reverted in silence.
+    //
+    // A bigger number is not the fix; it would be the fixed bet this repo keeps paying
+    // for. The predicate is per-entry: every tree and every file type #259 widened to must
+    // actually contribute at least one scanned file.
+    //
+    // THE REQUIRED SCOPE IS DECLARED SEPARATELY FROM `EXTS`/`DIRS`, and that is the whole
+    // point rather than a duplication slip. The first cut of this looped over `EXTS`
+    // itself — which cannot catch a DELETED entry, because the loop shrinks with the thing
+    // it is checking. Deleting `.md` left the new check green and was caught only
+    // incidentally, by `docs` (all-markdown) then walking to zero. Had anyone ever added a
+    // `.js` file to `docs/`, that accident would evaporate and both halves would pass.
+    // A check derived from its own subject asserts nothing; these two lists are the
+    // independent statement of what #259 bought.
+    const REQUIRED_EXTS = ['.js', '.md', '.dart'];
+    const REQUIRED_DIRS = ['tests', 'lib', 'scripts', 'docs', 'ai-terminal/lib', 'ai-terminal/test'];
+
+    for (const x of REQUIRED_EXTS) {
+      expect(walked.filter((f) => f.endsWith(x)).length,
+        `#259 widened the control-byte scan to "${x}" files and the WALK found NONE — the `
+          + 'extension has been dropped from EXTS or skipped out of the walk. (Counted over '
+          + 'the walk alone: FILES lists two .md files by hand and would mask this.)')
+        .toBeGreaterThan(0);
+    }
+    for (const d of REQUIRED_DIRS) {
+      // ASK WHAT THE SCAN ACTUALLY COLLECTED, never re-walk the directory here. A fresh
+      // `walk(ROOT/d)` answers "does this tree contain files", which stays true after the
+      // entry is deleted from DIRS — so the check would pass through the exact regression
+      // it names. Measured: dropping `'docs'` left a re-walking version green.
+      const prefix = path.join(ROOT, d) + path.sep;
+      expect(walked.filter((f) => f.startsWith(prefix)).length,
+        `#259 widened the control-byte scan to "${d}" and the scan collected NOTHING from `
+          + 'it — the entry has been dropped from DIRS, renamed, or skipped out of the walk.')
+        .toBeGreaterThan(0);
+    }
+
+    // The aggregate floor stays as a coarse backstop for a case the per-entry checks
+    // cannot see: a SKIP_DIRS rule widened so far that every tree loses most of its files
+    // while each still keeps one. 383 measured now (229 .js + 138 .dart + 16 .md, plus
+    // the FILES list); the floor sits well below that and well above the 233 the gate
+    // covered before #259, so the widening cannot be silently undone.
     expect(targets.length,
       'the control-byte scan covers far fewer files than #259 measured — an extension or '
         + 'a directory has stopped being walked.').toBeGreaterThan(300);

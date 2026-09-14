@@ -84,14 +84,27 @@ const DEFAULT_CONFIG_FILE = path.join(__dirname, 'config.default.json');
 // one moment `cluster` and `publicUrl` most needed preserving. Both paths returned 200,
 // so no caller could tell.
 //
-// This is the one owner of "what does config.json say". `readConfig()` keeps its
-// signature for the callers that only want the object; a caller whose CORRECTNESS
-// depends on the difference asks for the result instead.
+// This is the one owner of "ABSENT or UNREADABLE?" - not, as this comment claimed until
+// review of #261, the one owner of "what does config.json say". THREE other sites parse
+// CONFIG_FILE directly and each swallows a parse error on purpose: the startup load
+// (which falls back to config.default.json), `_refreshLiveConfig` (which keeps the last
+// good cache) and GET /api/config (which serves defaults). Those are read paths where
+// degrading is right. The distinction below matters to a path that WRITES, and routing
+// the readers through here is a separate change with its own blast radius.
+//
+// `readConfig()` keeps its signature for the callers that only want the object; a caller
+// whose CORRECTNESS depends on the difference asks for the result instead.
 //
 // THE SPLIT IS STRICTLY ADDITIVE, and the count is measured rather than guessed: there
-// are exactly THREE `readConfig()` callers (:623, :3152, :3373), and `config` is `{}` in
-// both non-success branches below - so all three see byte-identical behaviour to the
-// single-expression version this replaces. Only the PUT (:3227) asks for the result.
+// are exactly THREE `readConfig()` callers - the startup password auto-hash,
+// `POST /api/setup` and `POST /api/cluster/register` - and `config` is `{}` in both
+// non-success branches below, so all three see byte-identical behaviour to the
+// single-expression version this replaces. Only `PUT /api/config` asks for the result.
+//
+// CITED BY NAME, NOT BY LINE, on purpose: the first draft of this comment gave line
+// numbers, and every subsequent edit above it - including the one that corrected the
+// sentence above - moved them. A citation that rots faster than the claim it supports is
+// worse than none, because it reads as precision.
 function readConfigResult() {
   if (!fs.existsSync(CONFIG_FILE)) return { ok: true, absent: true, config: {} };
   try {

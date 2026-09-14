@@ -185,8 +185,15 @@ test.describe('#248: the wire, and the real code path', () => {
       // a fresh clone writes no FETCH_HEAD and legitimately answers null.
       const mtimeAfter = fetchHeadMtime();
       if (mtimeBefore === null && mtimeAfter === null) {
-        // A FRESH CLONE - CI checks out without fetching, so this is the ordinary CI
-        // path and not a defensive branch. `-1` everywhere is the correct answer here.
+        // NO FETCH_HEAD AT ALL. Corrected in review of #261: this said "CI checks out
+        // without fetching, so this is the ordinary CI path". It is NOT the CI path.
+        // `actions/checkout` runs `git -c protocol.version=2 fetch --no-tags --prune ...`,
+        // which writes FETCH_HEAD - read off this PR's own Fast-checks log, and the
+        // comment ~30 lines below in this same file already said as much ("a CI checkout
+        // that fetched seconds ago"). So CI takes the ELSE branch, which is the strong one;
+        // nothing here is vacuous, but a comment naming the wrong environment sends the
+        // next reader to the wrong place. This branch is reachable on a literal `git clone`
+        // nobody has fetched in. `-1` everywhere is still the correct answer for it.
         expect(v.fetchedAt, 'no FETCH_HEAD exists, so null is the only honest answer')
           .toBe(null);
         expect(v.behind, 'a fetchedAt of null may never yield a behind of 0').not.toBe(0);
