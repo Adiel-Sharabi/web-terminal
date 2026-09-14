@@ -33,6 +33,29 @@ on:
   # commit rather than pushing a no-op to provoke a fresh run.
   workflow_dispatch:
 
+# #265 — one run per ref, and the ASYMMETRY IS THE POINT.
+#
+# Pushing three commits to a branch in quick succession left three of these executing at
+# once, two of them for commits nobody will ever look at again. This is the expensive
+# workflow by design (windows-latest, ~8 minutes, billed at 2x), so a superseded run is
+# that cost spent on a commit that is already not the head.
+#
+# `cancel-in-progress` is TRUE for a PR and FALSE for master, and it reads as an
+# inconsistency unless the reason is written down: cancelling a master run would lose the
+# record of whether a MERGED commit was green. That is the run that matters most, and the
+# only one that can catch the intermittent terminal-size failure this repo already tracks.
+# The group is keyed on the ref, so master's runs never share a group with a PR's: a
+# `pull_request` event carries `refs/pull/<n>/merge`, a push to master `refs/heads/master`.
+#
+# ONE CONSEQUENCE, STATED RATHER THAN DISCOVERED LATER: a `workflow_dispatch` re-run on
+# master now QUEUES behind an in-progress master run instead of running beside it, because
+# they share a group and neither may cancel the other. That is the right trade for the
+# reason the dispatch exists at all (re-running the SAME commit to tell an environment
+# flake from a code fault) — it still runs, just after.
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: ${{ github.ref != 'refs/heads/master' }}
+
 jobs:
   test:
     name: Test (Node ${{ matrix.node-version }}, Windows)

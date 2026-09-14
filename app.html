@@ -1945,7 +1945,74 @@
     try { composeHistory = JSON.parse(sessionStorage.getItem('wt_composeHistory')) || []; } catch (e) { composeHistory = []; }
     composeHistoryIdx = composeHistory.length;
 
+    // ===== #263 / #147 — IS THIS SESSION'S AGENT UP YET? ONE OWNER, AND IT FAILS OPEN =====
+    //
+    // A new session drops you into the compose bar SECONDS before `claude` boots, and until
+    // its composer is up the PTY is still sitting at the shell — so a prompt sent in that
+    // window is handed to bash, runs as a command or does nothing, and is gone with no
+    // error anywhere. #147 fixed that on the companion and left this client ungated; the
+    // field, the state and the lookup were all already here, and only `renderComposeCommands`
+    // consulted them, to grey out the quick-commands button.
+    //
+    // TWO SOURCES, AND THE LIVE ONE IS A LATCH. The sidebar payload carries `agentReady`
+    // per row, but it is EVENT-DRIVEN, not polled — nothing refreshes it on a timer — so on
+    // its own it is a stale answer waiting to wedge a compose bar shut. The server also
+    // PUSHES `{type:'agentReady', id}` on the notify socket the moment the worker latches
+    // (server.js ~:1449), and that push exists precisely because "a poll interval here is a
+    // submit that stays refused for no reason". Readiness only ever goes false -> true, so
+    // remembering the push in a Set is the whole of the live half.
+    //
+    // The push only reaches LOCAL sessions: `connectNotify` opens one socket, to this host,
+    // and a peer's worker events never cross the cluster proxy. So a peer session falls back
+    // to the sidebar row, and the refusal below is what re-reads it — see showAgentNotReady.
+    //
+    // ABSENT IS READY, in all three directions: no session, no row for it, or a server old
+    // enough not to publish the field. That is the same default `server.js` serves
+    // (`agentReady: s.agentReady ?? true`) and the same one the companion applies, and it is
+    // what makes this safe to ship against any server.
+    const agentReadyLatch = new Set();
+    function noteAgentReady(id) {
+      if (!id) return;
+      agentReadyLatch.add(id);
+      if (id !== sessionId) return;
+      // Take the refusal down the moment it stops being true — but ONLY ours. #179's
+      // notice shares this bar and means something else entirely.
+      if (_agentNotReadyNotice) hideSubmitUnconfirmed();
+      updateComposeSendBtn();
+    }
+    // The current session's row in the merged sidebar payload. Matched on SERVER as well as
+    // id, because the sidebar merges every peer's sessions and an id alone is not an
+    // identity across the cluster (#180). One definition, two readers — this and
+    // renderComposeCommands, which is where the lookup was written first.
+    function currentSessionRow(data) {
+      const list = (data && data.sessions) || [];
+      if (!sessionId) return null;
+      return list.find(x => x.id === sessionId && (x.serverUrl || '') === (sessionServerUrl || '')) || null;
+    }
+    // THE ANSWER TAKES THE ROW; IT DOES NOT GO AND FIND ONE. Found by the #188 spec, which
+    // drives `renderComposeCommands` with SYNTHETIC rows: an earlier cut had the render
+    // path consult `_sidebarData` instead of the payload it was handed, so the button's
+    // ELIGIBILITY came from `data` while its READINESS came from a different object. That
+    // is precisely the split answer this consolidation exists to prevent, reintroduced by
+    // the consolidation itself. Today's two real call sites happen to pass `_sidebarData`,
+    // so it would have been invisible in production and wrong the moment anyone rendered
+    // from anything else.
+    function readyFromRow(id, row) {
+      if (!id) return true;
+      if (agentReadyLatch.has(id)) return true;
+      return !row || row.agentReady !== false;
+    }
+    function agentIsReady() {
+      return readyFromRow(sessionId, currentSessionRow(_sidebarData));
+    }
     function updateComposeSendBtn() {
+      // #263 — THE SEND BUTTON IS DELIBERATELY NOT DISABLED WHILE THE AGENT BOOTS, which is
+      // where this parts company with the companion's `_canSend`. The companion holds a live
+      // per-session state stream; here the negative can come from a sidebar payload with
+      // nothing scheduled to refresh it, and a DISABLED BUTTON CANNOT ASK FOR FRESH DATA —
+      // the press is what triggers the re-read. Disabling it would turn a stale `false` into
+      // a compose bar that is permanently dead with no way out, which is worse than the bug
+      // being fixed. The refusal explains itself instead.
       composeSendBtn.disabled = composeInput.value === '' && !composeLive;
     }
     function autosizeCompose() {
@@ -2042,12 +2109,39 @@
       doResize();
       updateComposeNoticeBadge();
     }
+    let _agentNotReadyNotice = false;
     function hideSubmitUnconfirmed() {
       const box = document.getElementById('composeNotice');
+      _agentNotReadyNotice = false;   // #263 — this is the one hide funnel; see noteAgentReady
       if (!box || box.hidden) return;
       box.hidden = true;
       doResize();
       updateComposeNoticeBadge();
+    }
+
+    // #263 — the refusal, and it SAYS SO. A silent no-op on Enter is its own bug: it is
+    // indistinguishable from the failure being fixed, where the words vanish into bash.
+    //
+    // The wording promises nothing this code does not do. It does NOT say "it will go
+    // through when the agent is up", because the prompt is deliberately not auto-sent on
+    // ready — firing a sentence somebody was still editing is its own way to lose their
+    // words (#147's stated rule, and the companion's).
+    //
+    // AND IT VERIFIES RATHER THAN WAITS. A refusal re-reads the sidebar, so a `false` that
+    // is merely STALE — the peer-session case, where no push can reach us — is corrected by
+    // the very press it refused, and the next one goes through. That is this repo's own
+    // rule arriving from the client side: do not sit on a prediction, go and check.
+    function showAgentNotReady() {
+      const box = document.getElementById('composeNotice');
+      const txt = document.getElementById('composeNoticeText');
+      if (!box || !txt) return;
+      txt.textContent = 'The agent is still starting, so nothing was sent — your text is still here. '
+        + 'Send it again in a moment.';
+      box.hidden = false;
+      _agentNotReadyNotice = true;
+      doResize();
+      updateComposeNoticeBadge();
+      try { loadSidebar(); } catch (e) {}
     }
 
     // #222 — the one owner of "is a notice currently buried under the drawer, and does
@@ -2160,6 +2254,12 @@
     window.__wtSetLastSubmission = (v) => { rememberSubmission(v); };
     function composeSend() {
       if (!ws || ws.readyState !== WebSocket.OPEN) return; // WS down — keep the buffer
+      // #263 — and the agent has to EXIST. Second, not first: a socket that is down is a
+      // different fact with a different remedy, and showing "the agent is still starting"
+      // over a dead connection would be confidently wrong about which of the two is
+      // wrong. Typing is never blocked and the buffer is never cleared — only the SUBMIT
+      // waits, which is the companion's rule (compose_bar.dart) and #147's.
+      if (!agentIsReady()) { showAgentNotReady(); return; }
       const val = composeInput.value;
       if (composeLive) {
         // Body already streamed char-by-char; just commit with CR.
@@ -2202,7 +2302,20 @@
       const val = composeInput.value;
       // A buffer starting with '/' goes live: stream to the terminal so
       // Claude's own slash menu renders. Stays live until Enter or empty.
-      if (!composeLive && val.charAt(0) === '/') { composeLive = true; composeLiveSent = ''; }
+      //
+      // #263 — NOT WHILE THE AGENT IS STILL BOOTING, and gating the submit alone would
+      // have left a failure WORSE than the one being fixed. This path writes bytes to the
+      // PTY as you TYPE, so a `/co` typed in the first seconds lands on bash's command
+      // line, and the worker then types `claude --resume …` onto that same line — running
+      // `/coclaude --resume …`, which starts no agent at all. That is recorded in
+      // CLAUDE.md as what happened on the companion when only submit was gated.
+      //
+      // The gate is HERE, at the one place live mode is entered, rather than inside
+      // composeStreamLive: one owner, and it is self-healing. Readiness only goes
+      // false -> true, so the next keystroke after the agent comes up finds the buffer
+      // still starting with '/', flips it live, and streams the whole thing from an empty
+      // composeLiveSent — which is exactly what the diff below is built to do.
+      if (!composeLive && val.charAt(0) === '/' && agentIsReady()) { composeLive = true; composeLiveSent = ''; }
       if (composeLive) {
         composeStreamLive(val);
         if (val === '') { composeLive = false; composeLiveSent = ''; }
@@ -3645,16 +3758,18 @@
     function renderComposeCommands(data) {
       const btn = document.getElementById('composeCmdBtn');
       if (!btn) return;
-      const list = (data && data.sessions) || [];
-      // Match on server as well as id — the sidebar merges every peer's sessions,
-      // so an id alone is not an identity across the cluster (same rule as #180).
-      const cur = sessionId
-        ? list.find(x => x.id === sessionId && (x.serverUrl || '') === (sessionServerUrl || ''))
-        : null;
+      // #263 — the lookup itself now lives in currentSessionRow(), because the submit gate
+      // needs the same row and the same cluster rule. Two copies of "which row is the
+      // session on screen" is the drift this codebase keeps paying for.
+      const cur = currentSessionRow(data);
       const eligible = !!(cur && cur.agent && quickCommands.length);
       btn.style.display = eligible ? 'flex' : 'none';
       if (!eligible) { closeCmdMenu(); return; }
-      const ready = cur.agentReady !== false;
+      // #263 — one owner of the RULE, and the row comes from the payload this render was
+      // given. `readyFromRow` also honours the live notify latch, so the button and the
+      // submit gate can never disagree about a session: greying this out while a submit
+      // sails through (or the reverse) is exactly the split answer a second copy produces.
+      const ready = readyFromRow(sessionId, cur);
       btn.disabled = !ready;
       btn.title = ready ? 'Slash commands' : 'Waiting for the agent to start…';
       if (!ready) closeCmdMenu();
@@ -5224,6 +5339,13 @@
           // #179 — not a notification: a one-shot report that a prompt this browser
           // sent produced no agent activity. Only the session on screen can act on it,
           // and only if this browser is the one that typed it.
+          // #263 — the worker has latched this session's agent as up. Pushed rather than
+          // polled on purpose (server.js ~:1449): the whole point is to UNBLOCK a compose
+          // bar somebody is already typing into, and nothing else in this client refreshes
+          // readiness on a timer. Local sessions only — a peer's worker events never cross
+          // the cluster proxy — which is why the refusal re-reads the sidebar instead of
+          // trusting this to arrive.
+          if (msg && msg.type === 'agentReady') { noteAgentReady(msg.id); return; }
           if (msg && msg.type === 'submitUnconfirmed') {
             // Ours only: this session, a submit we still hold, and one this report can
             // actually be about. `at` is stamped when the submit CR went out, so a report

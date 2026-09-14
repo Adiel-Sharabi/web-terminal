@@ -1083,9 +1083,38 @@ the worker then typed `claude --resume …` onto the same line — running
 `/coclaude --resume …`, which starts no agent at all. Gating submit alone left a
 failure worse than the one being fixed.
 
-> **Not yet done:** `app.html` is ungated. It keeps no session-state map to hang
-> `agentReady` on, and the report was companion-only — so the web client can still
-> type a prompt into a booting agent.
+> **DONE (#263) — and the deferral's stated reason was false by the time it was
+> written.** This read *"`app.html` is ungated. It keeps no session-state map to hang
+> `agentReady` on"*; `renderComposeCommands` had been doing exactly that lookup since
+> #188, cluster-safe (matching on server as well as id, #180), to grey out the quick-
+> commands button. So the web client correctly refused to fire a *slash command* into a
+> booting agent and cheerfully submitted a *prompt* into one. **Check the claim before
+> you cost the work** — the same lesson as #206's "no single input path", which was also
+> a budget written from a premise nobody had re-read.
+>
+> **Two sources, because the sidebar payload alone would WEDGE.** Nothing refreshes it
+> on a timer — it is event-driven — so `agentReady:false` could outlive the boot it
+> describes. The server already PUSHES `{type:'agentReady', id}` on the notify socket
+> (that push exists because "a poll interval here is a submit that stays refused for no
+> reason"), and readiness only ever goes false → true, so the live half is a Set. The
+> push reaches **local sessions only** — `connectNotify` opens one socket, to this host,
+> and a peer's worker events never cross the cluster proxy — so a peer falls back to the
+> row, and **the refusal re-reads the sidebar**: the press that was refused is what
+> corrects a stale answer, which is this repo's *verify, don't predict* rule (#179)
+> arriving on the client.
+>
+> **The Send button is deliberately NOT disabled**, which is where this parts company
+> with the companion's `_canSend`. The companion holds a live per-session state stream;
+> here the negative can come from a payload with nothing scheduled to refresh it, and a
+> **disabled button cannot ask for fresh data** — the press is what triggers the re-read.
+> Disabling it would turn a stale `false` into a compose bar that is permanently dead,
+> which is worse than the bug being fixed.
+>
+> **The client's latch inherits gap 1 above and cannot be worse than it.** The worker's
+> latch is one-way and does not reset when an agent exits back to its shell, so a client
+> Set that mirrors it is wrong in exactly the same cases and no others — an agent that
+> `/exit`s leaves both believing it is up. Fixing that belongs in the worker, which is the
+> only component that sees the bytes; nothing here should try to guess it independently.
 
 ### A CLIENT gate does not cover a WORKER-originated write (#137/#138 × #147)
 
@@ -1774,12 +1803,43 @@ same symptom, opposite end of the timescale: this one lasted 6.1 s on Office, 5.
 - WebSocket auth supports both cookie and query-string token
 - Cluster proxy MUST validate stored token exists before forwarding
 - Never pass unsanitized user input to `term.write()`, `execFile()`, or HTML
+- **A route that WRITES config must first prove it could READ it** (#257, #264). A
+  `config.json` that exists but will not parse throws inside the *first* branch of the
+  startup load, so the `config.default.json` fallback is never reached, `config` stays `{}`
+  and `PASS` lands on the `'admin'` literal — which makes `needsPasswordChange()` true on an
+  **established** server and opens `POST /api/setup`. Read-mutate-write over that `{}` then
+  *replaces* the file: `/api/setup` leaves `{user, password}` and the cluster is gone,
+  `/api/cluster/register` leaves `{cluster:[…]}` and the **credentials** are gone, so the
+  next restart boots on the default password. `readConfigResult()` separates ABSENT from
+  UNREADABLE; absent still writes (a real first run, and every CI checkout), unreadable is
+  refused with the file byte-identical on disk. The refusal names no server path — the log
+  does, the response does not. Gated against the SOURCE, not just per route, because #264 IS
+  #257 found again four weeks later on two routes no behavioural test could have covered:
+  `tests/issue264-config-write-paths.spec.js` fails on any `writeConfig()` inside a route
+  handler that has no `readConfigResult()` guard above it.
+  - **Still open, and it is the more serious half:** whether a corrupt `config.json` should
+    be allowed to drop a running server to the default password *at all*. That is a startup
+    question, not a write-path one. Note `/api/setup` is **not** literally unauthenticated —
+    the middleware exempts it only after a session cookie verifies, or a valid API token
+    passes the `Bearer` / `?token=` branches beside it — but the corruption is what hands
+    out the credentials to get in: `PASS` **and** `_USER` both fall back to `admin`, and the
+    startup banner prints `Auth: admin:***`.
 
 ## Test Config
 - Tests run on port 17681 with credentials: testuser / testpass:colon
 - Uses Playwright for both API and browser tests
 - Test config in `playwright.config.js`
 - Tests backup/restore config.json but overwrite the password hash — re-apply the correct password after running tests
+- **`WT_CONFIG_FILE` redirects the config path outright**, for all three supervised
+  processes — `server.js`, `pty-worker.js` and `monitor.js` derive that path independently,
+  so an override honoured by only some of them would not isolate a test, it would split one
+  live setting across the tree. Same shape and same reason as `WT_CLUSTER_TOKENS_FILE` and
+  `WT_CLAUDE_METRICS_FILE`: a test that has to
+  drive a *destructive* config path needs a file of its own, and redirecting is stronger
+  than backing the real one up, because an interrupted run never reaches its restore.
+  `tests/issue264-config-write-paths.spec.js` needs it — `POST /api/setup` opens only on a
+  server whose PASS is the default, which the suite's own server is not and must not become,
+  so that half spawns an isolated `server.js` with its own config, port, pipe and data dir.
 - **`config.test.json` is DELETED at the start of every run** (`playwright.config.js`, #240).
   It is gitignored, so it is per-machine state no checkout restores and `global-teardown.js`
   does not cover it — whatever the last run left was what the next one started from, forever,

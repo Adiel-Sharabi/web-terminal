@@ -88,9 +88,15 @@ const SESSIONS_FILE = process.env.WT_TEST && !process.env.WT_WORKER_DATA_DIR
   : path.join(DATA_DIR, 'sessions.json');
 const SCROLLBACK_DIR = path.join(DATA_DIR, 'scrollback');
 const CLAUDE_SESSION_NAMES_FILE = path.join(DATA_DIR, 'claude-session-names.json');
-const CONFIG_FILE = process.env.WT_TEST && !process.env.WT_WORKER_DATA_DIR
-  ? path.join(__dirname, 'config.test.json')
-  : path.join(__dirname, 'config.json');
+// `WT_CONFIG_FILE` — the SAME override `server.js` reads (~:72, where the rationale is
+// written out), and `monitor.js` with it. It is honoured here so none of the three
+// supervised processes can disagree about which file holds the live settings: an override
+// one of them ignored would not isolate a test, it would split a live setting across the
+// tree, which is worse than having no override.
+const CONFIG_FILE = process.env.WT_CONFIG_FILE
+  || (process.env.WT_TEST && !process.env.WT_WORKER_DATA_DIR
+    ? path.join(__dirname, 'config.test.json')
+    : path.join(__dirname, 'config.json'));
 const DEFAULT_CONFIG_FILE = path.join(__dirname, 'config.default.json');
 
 try { if (!fs.existsSync(SCROLLBACK_DIR)) fs.mkdirSync(SCROLLBACK_DIR, { recursive: true }); } catch {}

@@ -89,6 +89,16 @@ lens until you have read them. `/clear` asks first and sorts last — on a phone
 button is the one a thumb reaches by accident — and no button can fire into an agent that
 is still starting.
 
+**Nor can a prompt, in either client.** A new session hands you a compose bar seconds
+before its agent has booted, and anything sent in that window reaches the *shell* instead:
+it runs as a command, or does nothing, and is gone with no error anywhere. Both the submit
+and the live `/`-line now wait for the agent to actually be up — the second matters as much
+as the first, because that path streams to the terminal *as you type*, so half a slash
+command can end up on bash's command line with the launch command typed onto the same line
+after it. Typing is never blocked and your draft is never cleared; the bar says why nothing
+was sent, and you press Send again once the agent is up. It is deliberately **not** sent
+for you — firing a sentence somebody was still editing is its own way to lose their words.
+
 **A swallowed prompt says so, and gives the words back** — submit while the agent's TUI
 is somewhere other than its composer (a full-screen `/usage` view, an open slash menu, a
 crashed CLI back at the shell) and the keystrokes are eaten as navigation; until now your

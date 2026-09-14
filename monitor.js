@@ -437,7 +437,15 @@ function startHealthCheck() {
     if (!web.proc || stopping) return;
     let port = 7681;
     try {
-      const cfgFile = process.env.WT_TEST ? path.join(__dirname, 'config.test.json') : path.join(__dirname, 'config.json');
+      // `WT_CONFIG_FILE` — the same override `server.js` (~:72, where the rationale is
+      // written out) and `pty-worker.js` read. All THREE supervised processes derive this
+      // path independently, and an override honoured by only some of them would not
+      // isolate anything: it would split one live setting across the tree. This site is
+      // the least consequential of the three (it reads `port` for a health check, and
+      // `WT_PORT` already wins over it) and is included precisely because leaving it out
+      // would make the rule stated in the other two files false.
+      const cfgFile = process.env.WT_CONFIG_FILE
+        || (process.env.WT_TEST ? path.join(__dirname, 'config.test.json') : path.join(__dirname, 'config.json'));
       const cfg = JSON.parse(fs.readFileSync(cfgFile, 'utf8'));
       port = parseInt(process.env.WT_PORT) || cfg.port || 7681;
     } catch {}
