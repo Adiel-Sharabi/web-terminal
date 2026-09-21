@@ -39,7 +39,7 @@
     "check": "npm run syntax-check && npm run lint && npm run check:links && npm run check:secrets && npm run check:constants"
   },
   "dependencies": {
-    "express": "^4.22.2",
+    "express": "^4.22.3",
     "express-ws": "^5.0.2",
     "node-pty": "^1.0.0"
   },
