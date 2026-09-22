@@ -116,6 +116,42 @@ void main() {
       expect(repo.serverOfflineConfirmed[_serverA.baseUrl], isTrue);
     });
 
+    test('serverUsable is FALSE for a 401, which no amount of hysteresis '
+        'would ever report', () async {
+      // The gate both the dashboard and `canToggleFavorite` read. A 401 server
+      // is REACHABLE - it answered - so it fails the round without being an
+      // outage, and smoothing alone would call it usable forever while every
+      // PATCH behind its star failed.
+      //
+      // Load-bearing in the sense that matters: drop the `_serverNeedsAuth`
+      // half of `serverUsable` and this is the only assertion that goes red,
+      // because ONE 401 round never reaches the failure streak at all.
+      final repo = _repoWithStatus(await _store(), () => 401);
+      await repo.refresh();
+      expect(repo.serverNeedsAuth[_serverA.baseUrl], isTrue);
+      expect(repo.serverOfflineConfirmed[_serverA.baseUrl], isNot(isTrue),
+          reason: 'one round can never be a confirmed outage');
+      expect(repo.serverUsable[_serverA.baseUrl], isFalse,
+          reason: 'a refused server is reachable AND unusable');
+    });
+
+    test('serverUsable is FALSE once a server is CONFIRMED offline', () async {
+      final repo = _repoWithStatus(await _store(), () => 503);
+      await repo.refresh();
+      expect(repo.serverUsable[_serverA.baseUrl], isTrue,
+          reason: 'one missed poll is not yet an outage');
+      await repo.refresh();
+      expect(repo.serverUsable[_serverA.baseUrl], isFalse);
+    });
+
+    test('serverUsable omits a server nobody has failed to reach', () async {
+      // A missing key reads as usable at every call site, so a server on its
+      // very first paint keeps its star rather than flickering it in.
+      final repo = _repoWithStatus(await _store(), () => 200);
+      await repo.refresh();
+      expect(repo.serverUsable[_serverA.baseUrl], isTrue);
+    });
+
     test('a success between failures resets the streak', () async {
       // Without the reset the streak only ever climbs, so a server that blips
       // once an hour is eventually reported permanently down.

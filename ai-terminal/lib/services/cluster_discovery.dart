@@ -105,6 +105,26 @@ class ClusterDiscovery {
       if (!reachedAny) return false;
 
       final discovered = <ServerConfig>[];
+
+      // ONE owner for "we could not get this entry a token, so keep the one we
+      // already have". `syncDiscovered` reads an absent cluster entry as "left
+      // the cluster" and DELETES it, token and all, so every no-token exit in
+      // the loop below has to come through here.
+      //
+      // It is a helper rather than two copies because the second copy is what
+      // went missing: until a REFUSED entry could reach these lines, `existing`
+      // was always null there and `continue` was harmless, so the rescue was
+      // written at one exit and not the other and the omission looked like
+      // nothing. Keeping the rule in one place is the only version of this that
+      // stays true when a third exit is added.
+      void keepExisting(ServerConfig? existing, ClusterPeer peer) {
+        if (existing == null) return;
+        discovered.add(existing.copyWith(
+          name: peer.name.isEmpty ? existing.name : peer.name,
+          origin: ServerOrigin.cluster,
+        ));
+      }
+
       for (final entry in advertised.entries) {
         final url = entry.key;
         final peer = entry.value;
@@ -142,19 +162,22 @@ class ClusterDiscovery {
 
         // Either new to us, or holding a token that server has refused. Both
         // need a token before the entry is of any use.
-        if (!peer.hasToken) continue; // the advertiser cannot vouch for it yet
+        // The advertiser cannot vouch for it yet. For a REFUSED entry that is
+        // not "this server is gone" - it is one peer's view of a gitignored,
+        // per-machine cluster-tokens.json, and `advertised.putIfAbsent` above
+        // keeps the FIRST advertiser's answer, so one peer missing a token is
+        // enough even when others have it.
+        if (!peer.hasToken) {
+          keepExisting(existing, peer);
+          continue;
+        }
         final token = await _mintVia(known, url);
         // Nobody could get us one. For a REFUSED entry, keep what we have
         // rather than dropping it: `syncDiscovered` treats an absent entry as
         // "left the cluster" and would delete the server outright, turning a
         // recoverable auth failure into a vanished row.
         if (token == null) {
-          if (existing != null) {
-            discovered.add(existing.copyWith(
-              name: peer.name.isEmpty ? existing.name : peer.name,
-              origin: ServerOrigin.cluster,
-            ));
-          }
+          keepExisting(existing, peer);
           continue;
         }
         discovered.add(ServerConfig(

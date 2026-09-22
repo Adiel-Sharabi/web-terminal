@@ -283,6 +283,7 @@ void main() {
       required bool refused,
       String? mintResult = 'fresh-tok',
       String peerName = 'Office',
+      bool hasToken = true,
     }) =>
         ClusterDiscovery(
           store: st,
@@ -292,7 +293,9 @@ void main() {
             {
               'http://home:7681': [
                 ClusterPeer(
-                    name: peerName, url: 'http://office:7681', hasToken: true),
+                    name: peerName,
+                    url: 'http://office:7681',
+                    hasToken: hasToken),
               ],
             },
             {'http://office:7681': mintResult},
@@ -338,6 +341,35 @@ void main() {
       expect(kept, hasLength(1));
       expect(kept.single.bearerToken, 'expired-tok');
       expect(kept.single.name, 'Office');
+    });
+
+    test('a refused server the advertiser cannot vouch for is KEPT, not deleted',
+        () async {
+      // The sibling of the test above, and the one that was missing.
+      //
+      // `hasToken` is ONE ADVERTISER's view of its own gitignored, per-machine
+      // cluster-tokens.json - it is not a statement that the server left the
+      // cluster. And `advertised.putIfAbsent` keeps the FIRST advertiser's
+      // answer, so a single peer missing a token for Office decides this even
+      // when three others have one.
+      //
+      // Why it was unguarded: until a REFUSED entry could fall past the
+      // keep-branch, `existing` was always null at that exit, so the bare
+      // `continue` was harmless. The refused path made it reachable for a
+      // server the user already had, and a `continue` there means the entry is
+      // absent from `discovered`, which `syncDiscovered` reads as "left the
+      // cluster -> drop it" - deleting the server AND its token, silently.
+      final st = await _store([_home, staleOffice]);
+      final calls = <String>[];
+      await build(st, calls, refused: true, hasToken: false).refresh();
+      final kept =
+          st.servers.where((s) => s.baseUrl == 'http://office:7681').toList();
+      expect(kept, hasLength(1),
+          reason: 'the refused server was deleted outright, token and all');
+      expect(kept.single.bearerToken, 'expired-tok');
+      expect(kept.single.name, 'Office');
+      // Nothing to mint THROUGH, so nothing should have been attempted.
+      expect(calls.any((c) => c.startsWith('mint:')), isFalse);
     });
 
     test('a re-mint never renames the server to its own URL', () async {

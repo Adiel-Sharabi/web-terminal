@@ -361,16 +361,18 @@ class _DashboardScreenState extends State<DashboardScreen> {
                 final needsAuth = SessionRepository.instance.serverNeedsAuth;
                 final offlineConfirmed =
                     SessionRepository.instance.serverOfflineConfirmed;
-                // What the UI should TREAT as online. #66 hides a favorite whose
-                // server is down (its star is wired to a PATCH that would fail),
-                // but keying that on a single missed poll made pinned rows
-                // vanish and come back on a merely slow link. Same smoothing as
-                // the banner, same source; `visibleFavoriteSessions` keeps its
-                // plain "is this server online" contract and its own tests.
-                final displayOnline = <String, bool>{
-                  for (final s in servers)
-                    s.baseUrl: offlineConfirmed[s.baseUrl] != true,
-                };
+                // What the UI should TREAT as usable. #66 hides a favorite
+                // whose server is down (its star is wired to a PATCH that would
+                // fail), but keying that on a single missed poll made pinned
+                // rows vanish and come back on a merely slow link.
+                //
+                // Read from the repository rather than re-derived here: this
+                // same question is asked by `canToggleFavorite`, and while the
+                // two were computed separately they disagreed by one round -
+                // the row stayed SHOWN while its star went away.
+                // `visibleFavoriteSessions` keeps its plain boolean contract
+                // and its own tests.
+                final usable = SessionRepository.instance.serverUsable;
                 // A 401 server is in BOTH maps (it is not reachable for our
                 // purposes), so the offline list excludes it to stop one server
                 // being counted twice in the banner's "N servers" wording.
@@ -483,8 +485,7 @@ class _DashboardScreenState extends State<DashboardScreen> {
                       // stranded (see [visibleFavoriteSessions]).
                       SliverToBoxAdapter(
                         child: FavoritesGroup(
-                          sessions:
-                              visibleFavoriteSessions(sessions, displayOnline),
+                          sessions: visibleFavoriteSessions(sessions, usable),
                           // #169: the group decides whether a pinned row carries
                           // its own handle (touch) or is grabbed whole (pointer)
                           // and says so with the index — the handle itself is
@@ -522,12 +523,19 @@ class _DashboardScreenState extends State<DashboardScreen> {
                               name: group.server.name,
                               baseUrl: group.server.baseUrl,
                               count: group.sessions.length,
-                              // Smoothed like the banner: everything the UI
-                              // SAYS about reachability reads the confirmed
-                              // value, while the repository keeps the raw
-                              // per-round truth for its own decisions.
-                              online:
-                                  displayOnline[group.server.baseUrl] ?? true,
+                              // Three states, not two. A server that answered
+                              // 401 is REACHABLE and unusable, and drawing it
+                              // green next to a banner saying its token expired
+                              // was the one combination guaranteed to be wrong.
+                              // `needsAuth` is deliberately NOT smoothed: a 401
+                              // arrives instantly and never accumulates a
+                              // failure streak, so hysteresis would never
+                              // report it at all.
+                              status: needsAuth[group.server.baseUrl] == true
+                                  ? ServerStatus.needsAuth
+                                  : (offlineConfirmed[group.server.baseUrl] == true
+                                      ? ServerStatus.offline
+                                      : ServerStatus.online),
                               collapsed: _isCollapsed(group.server.baseUrl),
                               onToggle: () =>
                                   _toggleCollapsed(group.server.baseUrl),
@@ -700,7 +708,7 @@ class _ServerGroupHeader extends StatelessWidget {
     required this.name,
     required this.baseUrl,
     required this.count,
-    required this.online,
+    required this.status,
     required this.collapsed,
     required this.onToggle,
   });
@@ -711,7 +719,11 @@ class _ServerGroupHeader extends StatelessWidget {
   /// and two servers may share one; the base URL is the identity.
   final String baseUrl;
   final int count;
-  final bool online;
+
+  /// Three-valued on purpose - see the call site. `online` as a bool could not
+  /// say "reachable but refusing our token", which is the state a 401 leaves a
+  /// server in and the one the dot was getting wrong.
+  final ServerStatus status;
   final bool collapsed;
   final VoidCallback onToggle;
 
@@ -732,9 +744,7 @@ class _ServerGroupHeader extends StatelessWidget {
           children: [
             Row(
           children: [
-            ServerStatusDot(
-              status: online ? ServerStatus.online : ServerStatus.offline,
-            ),
+            ServerStatusDot(status: status),
             const SizedBox(width: 8),
             Text(
               name.toUpperCase(),

@@ -54,32 +54,48 @@ void main() {
     // ever moved again, this is the test that says where it is supposed to live.
     test('offered when the server syncs favourites and is reachable', () {
       expect(
-        favoriteToggleAllowed(supportsFavorites: true, serverOnline: true),
+        favoriteToggleAllowed(supportsFavorites: true, serverUsable: true),
         isTrue,
       );
     });
 
-    test('withheld when the owning server is known to be offline', () {
+    test('withheld when the owning server is known to be unusable', () {
       // It would only ever fail the PATCH, so the control is hidden rather than
       // wired to a guaranteed failure (#66).
       expect(
-        favoriteToggleAllowed(supportsFavorites: true, serverOnline: false),
+        favoriteToggleAllowed(supportsFavorites: true, serverUsable: false),
+        isFalse,
+      );
+    });
+
+    test('UNUSABLE covers a 401, not just an unreachable server', () {
+      // The parameter is `serverUsable`, not `serverOnline`, and the rename is
+      // the point: a server that answered 401 is perfectly REACHABLE and its
+      // PATCH is guaranteed to fail just the same. While this gate read raw
+      // reachability, a refused server kept a live-looking star.
+      //
+      // The caller supplies that distinction - `SessionRepository.serverUsable`
+      // is false for a confirmed-offline server AND for one refusing our token,
+      // so this function never has to know which it was.
+      expect(
+        favoriteToggleAllowed(supportsFavorites: true, serverUsable: false),
         isFalse,
       );
     });
 
     test('withheld when the server is too old to have the route', () {
       expect(
-        favoriteToggleAllowed(supportsFavorites: false, serverOnline: true),
+        favoriteToggleAllowed(supportsFavorites: false, serverUsable: true),
         isFalse,
       );
     });
 
-    test('an UNKNOWN reachability still offers it — null is not "down"', () {
+    test('an UNKNOWN state still offers it — null is not "down"', () {
       // A server we have not heard from yet is not the same as one we know is
-      // down; hiding the star on first paint would make it flicker in.
+      // down; hiding the star on first paint would make it flicker in. This is
+      // also why `serverUsable` omits a server nobody has failed to reach.
       expect(
-        favoriteToggleAllowed(supportsFavorites: true, serverOnline: null),
+        favoriteToggleAllowed(supportsFavorites: true, serverUsable: null),
         isTrue,
       );
     });

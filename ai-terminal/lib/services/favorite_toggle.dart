@@ -42,9 +42,9 @@ String favoriteStarTooltip(bool isFavorite) =>
 /// without pumping a screen.
 bool favoriteToggleAllowed({
   required bool supportsFavorites,
-  required bool? serverOnline,
+  required bool? serverUsable,
 }) =>
-    supportsFavorites && serverOnline != false;
+    supportsFavorites && serverUsable != false;
 
 /// [favoriteToggleAllowed] answered from the live repository for [session] —
 /// the form both call sites actually want, so neither has to remember which two
@@ -53,7 +53,11 @@ bool canToggleFavorite(Session session) {
   final repo = SessionRepository.instance;
   return favoriteToggleAllowed(
     supportsFavorites: repo.supportsFavorites(session.server.baseUrl),
-    serverOnline: repo.serverOnline[session.server.baseUrl],
+    // `serverUsable`, never the raw per-round `serverOnline`: the dashboard
+    // decides what to SHOW from the smoothed answer, and a gate reading the
+    // unsmoothed one made a single missed poll leave the pinned row visible
+    // with its star gone. One owner, one answer.
+    serverUsable: repo.serverUsable[session.server.baseUrl],
   );
 }
 

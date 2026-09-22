@@ -227,6 +227,29 @@ class SessionRepository {
   Map<String, bool> get serverNeedsAuth =>
       Map<String, bool>.unmodifiable(_serverNeedsAuth);
 
+  /// Whether each configured server is USABLE RIGHT NOW - the one owner of
+  /// that question, read by the dashboard (which favorites to show, which dot
+  /// to draw) and by `canToggleFavorite`.
+  ///
+  /// A server is usable when it is neither CONFIRMED offline nor refusing our
+  /// token. Both halves matter and they are not interchangeable: hysteresis
+  /// alone would call a 401 server usable, because a 401 answers instantly and
+  /// never accumulates a failure streak - so the row would stay live, its star
+  /// tappable, and every PATCH behind it would fail.
+  ///
+  /// It exists because this question had two answers that disagreed by one
+  /// round: the dashboard read the smoothed value while `canToggleFavorite`
+  /// read the raw per-round one, so a single missed poll left the pinned row
+  /// SHOWN with its star GONE. A missing key reads as usable - a server nobody
+  /// has failed to reach yet is not a server in trouble.
+  Map<String, bool> get serverUsable {
+    final offline = serverOfflineConfirmed;
+    return Map<String, bool>.unmodifiable(<String, bool>{
+      for (final url in <String>{..._serverOnline.keys, ..._serverNeedsAuth.keys})
+        url: offline[url] != true && _serverNeedsAuth[url] != true,
+    });
+  }
+
   /// Snapshot of per-server CONFIRMED-offline state (`baseUrl → has failed
   /// [offlineAfterFailures] rounds in a row`). This is what the banner reports;
   /// [serverOnline] stays the unsmoothed per-round truth, so nothing that
