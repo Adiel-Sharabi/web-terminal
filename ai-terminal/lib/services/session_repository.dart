@@ -78,6 +78,24 @@ class SessionRepository {
   final Map<String, ApiClient> _clients = <String, ApiClient>{};
   final Map<String, List<Session>> _lastByServer = <String, List<Session>>{};
   final Map<String, bool> _serverOnline = <String, bool>{};
+  // Servers that answered 401 on their last [refresh] — reachable, but refusing
+  // our bearer. Kept APART from `_serverOnline` because the two need opposite
+  // advice: an unreachable server may fix itself, while an expired token never
+  // does until someone re-authenticates. Collapsing them told the user the one
+  // thing that was false ("unreachable") and hid the only thing that was true.
+  final Map<String, bool> _serverNeedsAuth = <String, bool>{};
+  // Consecutive failed rounds per server. A single slow or dropped poll is not
+  // an outage, but the rule used to report one as "unreachable" the instant it
+  // happened — so a link that stalls for a few seconds flipped the banner on
+  // and off with nothing actually down. Reset by any success.
+  final Map<String, int> _serverFailStreak = <String, int>{};
+
+  /// How many CONSECUTIVE failed rounds a server must miss before it is
+  /// reported offline TO THE USER. [serverOnline] still flips on the very
+  /// first failure — it is the truth of the last round, and the stale-session
+  /// fallback and [_anyServerReachable] depend on that staying unsmoothed.
+  /// This gates only what the UI *says*, which is the half that was flapping.
+  static const int offlineAfterFailures = 2;
   final Set<String> _namesResolved = <String>{};
   // When each server's `/api/version` was last answered, so an already-resolved
   // server is re-asked only when its free machine reading (#152/#165) has gone
@@ -200,6 +218,25 @@ class SessionRepository {
   /// [refresh].
   Map<String, bool> get serverOnline => Map<String, bool>.unmodifiable(_serverOnline);
 
+  /// Snapshot of per-server AUTH state (`baseUrl → the last fetch got a 401`),
+  /// updated on every [refresh]. A server listed here is reachable and did
+  /// answer — it rejected our token, which is what an expired app token looks
+  /// like (tokens carry a 90-day expiry and are pruned server-side once past
+  /// it). The fix is to re-authenticate that server, so the UI must say so
+  /// rather than report it unreachable.
+  Map<String, bool> get serverNeedsAuth =>
+      Map<String, bool>.unmodifiable(_serverNeedsAuth);
+
+  /// Snapshot of per-server CONFIRMED-offline state (`baseUrl → has failed
+  /// [offlineAfterFailures] rounds in a row`). This is what the banner reports;
+  /// [serverOnline] stays the unsmoothed per-round truth, so nothing that
+  /// depends on "did this round reach anyone" changes meaning.
+  Map<String, bool> get serverOfflineConfirmed =>
+      Map<String, bool>.unmodifiable(<String, bool>{
+        for (final e in _serverFailStreak.entries)
+          e.key: e.value >= offlineAfterFailures,
+      });
+
   /// Whether the server at [baseUrl] advertises `favorites-sync` (#60) — i.e.
   /// has the `/api/sessions/:id/favorite` route. `false` (never offer the
   /// star) until a successful `/api/version` call actually confirms it, so a
@@ -213,7 +250,19 @@ class SessionRepository {
   Future<void> refresh() async {
     await _ensureServerNames();
     final servers = _store.servers;
-    final results = await Future.wait(servers.map(_fetchServer));
+    // Emit as each server answers, not once they ALL have. `Future.wait` alone
+    // let the SLOWEST server gate the whole list: with four configured and two
+    // of them across a link that stalls for seconds at a time, every round —
+    // and so every favorite toggle, which triggers one — froze the dashboard
+    // for as long as the worst server took, up to [ApiClient]'s 10s deadline.
+    // The final emit below is unchanged and still does the bookkeeping.
+    var answered = 0;
+    final results = await Future.wait(servers.map((s) async {
+      final list = await _fetchServer(s);
+      answered++;
+      if (answered < servers.length) _emitPartial(servers);
+      return list;
+    }));
     final merged = <Session>[for (final r in results) ...r]..sort(compareSessions);
 
     _current = merged;
@@ -228,6 +277,25 @@ class SessionRepository {
     // one server actually responded this round, so a total outage can't blank
     // the cache the instant-paint path relies on.
     if (_anyServerReachable()) await _writeCache(merged);
+  }
+
+  /// Paints what has arrived so far, part-way through a [refresh].
+  ///
+  /// Built from the per-server last-known buckets — the same source a FAILED
+  /// fetch falls back to — so a server still in flight contributes its previous
+  /// list rather than a hole, and the list only ever gains rows mid-round.
+  ///
+  /// Deliberately does the emit and nothing else: pruning, name caching and the
+  /// disk cache stay on [refresh]'s final pass, so a partial round has no side
+  /// effect beyond what the user sees. It is also why this does not touch
+  /// `_anyServerReachable`-driven state — a round is not "reached" until it ends.
+  void _emitPartial(List<ServerConfig> servers) {
+    final merged = <Session>[
+      for (final s in servers) ...?_lastByServer[s.baseUrl],
+    ]..sort(compareSessions);
+    _current = merged;
+    if (!_sessions.isClosed) _sessions.add(merged);
+    if (!_online.isClosed) _online.add(serverOnline);
   }
 
   /// Begins foreground live-updates: subscribes to every server's `/ws/notify`
@@ -404,6 +472,8 @@ class SessionRepository {
     _clients.remove(baseUrl)?.close();
     _lastByServer.remove(baseUrl);
     _serverOnline.remove(baseUrl);
+    _serverNeedsAuth.remove(baseUrl);
+    _serverFailStreak.remove(baseUrl);
     _namesResolved.remove(baseUrl);
     _versionFetchedAt.remove(baseUrl);
     _favoritesSyncSupported.remove(baseUrl);
@@ -519,10 +589,21 @@ class SessionRepository {
     try {
       final list = await _clientFor(server).listSessions();
       _serverOnline[server.baseUrl] = true;
+      _serverNeedsAuth[server.baseUrl] = false;
+      _serverFailStreak[server.baseUrl] = 0;
       _lastByServer[server.baseUrl] = list;
       return list;
-    } catch (_) {
+    } catch (e) {
+      // A 401 is NOT unreachability — the server answered, and refused us. It
+      // is the one failure here that cannot clear on its own, so it must be
+      // distinguishable; everything else (DNS, timeout, TLS, a malformed body)
+      // stays a plain offline. `_serverOnline` is still false either way, so
+      // the stale-session fallback and `_anyServerReachable` are untouched —
+      // only the advice the UI can give changes.
       _serverOnline[server.baseUrl] = false;
+      _serverNeedsAuth[server.baseUrl] = e is ApiException && e.status == 401;
+      _serverFailStreak[server.baseUrl] =
+          (_serverFailStreak[server.baseUrl] ?? 0) + 1;
       return _lastByServer[server.baseUrl] ?? const <Session>[];
     }
   }

@@ -358,13 +358,43 @@ class _DashboardScreenState extends State<DashboardScreen> {
               stream: SessionRepository.instance.sessions,
               builder: (context, snapshot) {
                 final sessions = snapshot.data;
-                final online = SessionRepository.instance.serverOnline;
-                final offlineNames = servers
-                    .where((s) => online[s.baseUrl] == false)
+                final needsAuth = SessionRepository.instance.serverNeedsAuth;
+                final offlineConfirmed =
+                    SessionRepository.instance.serverOfflineConfirmed;
+                // What the UI should TREAT as online. #66 hides a favorite whose
+                // server is down (its star is wired to a PATCH that would fail),
+                // but keying that on a single missed poll made pinned rows
+                // vanish and come back on a merely slow link. Same smoothing as
+                // the banner, same source; `visibleFavoriteSessions` keeps its
+                // plain "is this server online" contract and its own tests.
+                final displayOnline = <String, bool>{
+                  for (final s in servers)
+                    s.baseUrl: offlineConfirmed[s.baseUrl] != true,
+                };
+                // A 401 server is in BOTH maps (it is not reachable for our
+                // purposes), so the offline list excludes it to stop one server
+                // being counted twice in the banner's "N servers" wording.
+                final needsAuthNames = servers
+                    .where((s) => needsAuth[s.baseUrl] == true)
                     .map((s) => s.name)
                     .toList(growable: false);
-                final allOffline =
-                    servers.isNotEmpty && offlineNames.length == servers.length;
+                // CONFIRMED offline, not "failed once". A server that misses a
+                // single poll is usually a slow link, not an outage, and
+                // reporting it immediately is what made the banner flip on and
+                // off while nothing was down. `online` stays the per-round
+                // truth and still drives the filter below.
+                final offlineNames = servers
+                    .where((s) =>
+                        offlineConfirmed[s.baseUrl] == true &&
+                        needsAuth[s.baseUrl] != true)
+                    .map((s) => s.name)
+                    .toList(growable: false);
+                // Both kinds count here: a 401 server hands us no data either,
+                // so "nothing is answering" must stay true when every server is
+                // merely refusing us. Splitting the lists above must not turn
+                // the all-down state off.
+                final downCount = offlineNames.length + needsAuthNames.length;
+                final allOffline = servers.isNotEmpty && downCount == servers.length;
                 final visible = sessions == null ? null : _filtered(sessions);
 
                 return CustomScrollView(
@@ -400,12 +430,12 @@ class _DashboardScreenState extends State<DashboardScreen> {
                           tooltip: 'Settings',
                           onPressed: _openSettings,
                         ),
-                        if (offlineNames.isNotEmpty)
+                        if (downCount > 0)
                           Padding(
                             padding: const EdgeInsets.only(right: 12),
                             child: Center(
                               child: Badge(
-                                label: Text('${offlineNames.length}'),
+                                label: Text('$downCount'),
                                 backgroundColor: StatusColor.serverOffline,
                                 child: const Icon(Icons.cloud_off),
                               ),
@@ -421,9 +451,12 @@ class _DashboardScreenState extends State<DashboardScreen> {
                           onChanged: (v) => setState(() => _filter = v),
                         ),
                       ),
-                    if (offlineNames.isNotEmpty && !allOffline)
+                    if (downCount > 0 && !allOffline)
                       SliverToBoxAdapter(
-                        child: OfflineBanner(offlineServerNames: offlineNames),
+                        child: OfflineBanner(
+                          offlineServerNames: offlineNames,
+                          needsAuthServerNames: needsAuthNames,
+                        ),
                       ),
                     if (sessions == null)
                       const SliverFillRemaining(
@@ -450,7 +483,8 @@ class _DashboardScreenState extends State<DashboardScreen> {
                       // stranded (see [visibleFavoriteSessions]).
                       SliverToBoxAdapter(
                         child: FavoritesGroup(
-                          sessions: visibleFavoriteSessions(sessions, online),
+                          sessions:
+                              visibleFavoriteSessions(sessions, displayOnline),
                           // #169: the group decides whether a pinned row carries
                           // its own handle (touch) or is grabbed whole (pointer)
                           // and says so with the index — the handle itself is
@@ -488,8 +522,12 @@ class _DashboardScreenState extends State<DashboardScreen> {
                               name: group.server.name,
                               baseUrl: group.server.baseUrl,
                               count: group.sessions.length,
+                              // Smoothed like the banner: everything the UI
+                              // SAYS about reachability reads the confirmed
+                              // value, while the repository keeps the raw
+                              // per-round truth for its own decisions.
                               online:
-                                  online[group.server.baseUrl] ?? true,
+                                  displayOnline[group.server.baseUrl] ?? true,
                               collapsed: _isCollapsed(group.server.baseUrl),
                               onToggle: () =>
                                   _toggleCollapsed(group.server.baseUrl),
