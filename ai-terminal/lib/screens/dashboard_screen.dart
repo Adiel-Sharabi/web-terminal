@@ -466,13 +466,26 @@ class _DashboardScreenState extends State<DashboardScreen> {
                         child: Center(child: CircularProgressIndicator()),
                       )
                     else if (allOffline)
-                      const SliverFillRemaining(
+                      // The banner above is suppressed in this state, so this
+                      // is the ONLY thing the user is told - which made it the
+                      // one place the advice had to be right. When every server
+                      // is refusing our token (the single-server case reaches
+                      // this on the first 401) "pull down to retry" is advice
+                      // that cannot work: a pull re-runs the same rejected
+                      // credential forever.
+                      SliverFillRemaining(
                         hasScrollBody: false,
-                        child: EmptyState(
-                          icon: Icons.cloud_off,
-                          title: 'No servers reachable',
-                          subtitle: 'Pull down to retry',
-                        ),
+                        child: needsAuthNames.length == servers.length
+                            ? const EmptyState(
+                                icon: Icons.lock_outline,
+                                title: 'Sign in again',
+                                subtitle: 'Your saved access has expired',
+                              )
+                            : const EmptyState(
+                                icon: Icons.cloud_off,
+                                title: 'No servers reachable',
+                                subtitle: 'Pull down to retry',
+                              ),
                       )
                     else ...[
                       // Pinned favorites — cross-server, unaffected by the
@@ -625,15 +638,21 @@ Widget? buildReorderDragHandle(BuildContext context, int? index) {
 /// peer owns would otherwise render pinned with a star wired to an
 /// always-failing PATCH. Mirrors the web sidebar, which excludes an offline
 /// peer's contribution from the favorites union entirely. Pulled out (and
-/// taking [serverOnline] explicitly) so it's unit-testable without pumping
+/// taking [serverUsable] explicitly) so it's unit-testable without pumping
 /// the dashboard, matching [groupSessionsByServer].
+///
+/// Named [serverUsable], not `serverOnline`: the caller passes
+/// [SessionRepository.serverUsable], which is false for a CONFIRMED-offline
+/// server and for one refusing our token. The parameter name is the only thing
+/// stopping a future caller handing back the raw per-round map, which is the
+/// divergence this pair already had once.
 @visibleForTesting
 List<Session> visibleFavoriteSessions(
   List<Session> sessions,
-  Map<String, bool> serverOnline,
+  Map<String, bool> serverUsable,
 ) =>
     sessions
-        .where((s) => serverOnline[s.server.baseUrl] != false)
+        .where((s) => serverUsable[s.server.baseUrl] != false)
         .toList(growable: false);
 
 /// Orders a server group's sessions by the server's persisted (drag) order

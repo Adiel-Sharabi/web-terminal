@@ -72,8 +72,6 @@ class SessionRepository {
 
   final StreamController<List<Session>> _sessions =
       StreamController<List<Session>>.broadcast();
-  final StreamController<Map<String, bool>> _online =
-      StreamController<Map<String, bool>>.broadcast();
 
   final Map<String, ApiClient> _clients = <String, ApiClient>{};
   final Map<String, List<Session>> _lastByServer = <String, List<Session>>{};
@@ -212,7 +210,6 @@ class SessionRepository {
   void debugApplyNotify(NotifyEvent evt) => _applyNotify(evt);
 
   /// Broadcast stream of per-server reachability (`baseUrl → online`).
-  Stream<Map<String, bool>> get serverOnlineStream => _online.stream;
 
   /// Snapshot of per-server reachability (`baseUrl → online`), updated on every
   /// [refresh].
@@ -278,15 +275,19 @@ class SessionRepository {
     // of them across a link that stalls for seconds at a time, every round —
     // and so every favorite toggle, which triggers one — froze the dashboard
     // for as long as the worst server took, up to [ApiClient]'s 10s deadline.
-    // The final emit below is unchanged and still does the bookkeeping.
     var answered = 0;
-    final results = await Future.wait(servers.map((s) async {
-      final list = await _fetchServer(s);
+    await Future.wait(servers.map((s) async {
+      await _fetchServer(s);
       answered++;
       if (answered < servers.length) _emitPartial(servers);
-      return list;
     }));
-    final merged = <Session>[for (final r in results) ...r]..sort(compareSessions);
+    // Built by [_mergedFor], the SAME function the partial paints use. Walking
+    // the `Future.wait` results here instead would disagree with them for a
+    // server dropped mid-round: `_dropServer` clears its bucket, so the partial
+    // list loses those rows while a frozen `results` still carries them — the
+    // rows would vanish, come back on the final emit, and be persisted to the
+    // cold-launch cache. One source, one answer.
+    final merged = _mergedFor(servers);
 
     _current = merged;
     _pruneApiErrors(merged);
@@ -294,7 +295,6 @@ class SessionRepository {
     _pruneCompacting(merged);
     _pruneSubmitUnconfirmed(merged);
     if (!_sessions.isClosed) _sessions.add(merged);
-    if (!_online.isClosed) _online.add(serverOnline);
     await _cacheNames(merged);
     // Persist the merged list for the next cold launch — but only when at least
     // one server actually responded this round, so a total outage can't blank
@@ -302,23 +302,26 @@ class SessionRepository {
     if (_anyServerReachable()) await _writeCache(merged);
   }
 
-  /// Paints what has arrived so far, part-way through a [refresh].
+  /// The merged, sorted list for [servers], from the per-server last-known
+  /// buckets — the same source a FAILED fetch falls back to, so a server still
+  /// in flight contributes its previous list rather than a hole.
   ///
-  /// Built from the per-server last-known buckets — the same source a FAILED
-  /// fetch falls back to — so a server still in flight contributes its previous
-  /// list rather than a hole, and the list only ever gains rows mid-round.
+  /// The one owner of "what is the list right now": a partial paint and the
+  /// final emit of the same round must not be able to disagree about it.
+  List<Session> _mergedFor(List<ServerConfig> servers) => <Session>[
+        for (final s in servers) ...?_lastByServer[s.baseUrl],
+      ]..sort(compareSessions);
+
+  /// Paints what has arrived so far, part-way through a [refresh].
   ///
   /// Deliberately does the emit and nothing else: pruning, name caching and the
   /// disk cache stay on [refresh]'s final pass, so a partial round has no side
   /// effect beyond what the user sees. It is also why this does not touch
   /// `_anyServerReachable`-driven state — a round is not "reached" until it ends.
   void _emitPartial(List<ServerConfig> servers) {
-    final merged = <Session>[
-      for (final s in servers) ...?_lastByServer[s.baseUrl],
-    ]..sort(compareSessions);
+    final merged = _mergedFor(servers);
     _current = merged;
     if (!_sessions.isClosed) _sessions.add(merged);
-    if (!_online.isClosed) _online.add(serverOnline);
   }
 
   /// Begins foreground live-updates: subscribes to every server's `/ws/notify`

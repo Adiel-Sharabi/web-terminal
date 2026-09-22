@@ -33,6 +33,7 @@ import 'dart:convert';
 import 'package:ai_terminal/api/api_client.dart';
 import 'package:ai_terminal/api/models.dart';
 import 'package:ai_terminal/services/server_store.dart';
+import 'package:ai_terminal/services/favorite_toggle.dart';
 import 'package:ai_terminal/services/session_repository.dart';
 import 'package:flutter_test/flutter_test.dart';
 import 'package:http/http.dart' as http;
@@ -98,7 +99,9 @@ void main() {
       // a single missed poll is reported as an outage — which is the flap.
       final repo = _repoWithStatus(await _store(), () => 503);
       await repo.refresh();
-      expect(repo.serverOfflineConfirmed[_serverA.baseUrl], isNot(isTrue));
+      // `isFalse`, not `isNot(isTrue)` - the latter also passes on a MISSING
+      // key, so it would stay green if the streak stopped being recorded at all.
+      expect(repo.serverOfflineConfirmed[_serverA.baseUrl], isFalse);
     });
 
     test('the RAW per-round state still flips on the first failure', () async {
@@ -129,7 +132,7 @@ void main() {
       final repo = _repoWithStatus(await _store(), () => 401);
       await repo.refresh();
       expect(repo.serverNeedsAuth[_serverA.baseUrl], isTrue);
-      expect(repo.serverOfflineConfirmed[_serverA.baseUrl], isNot(isTrue),
+      expect(repo.serverOfflineConfirmed[_serverA.baseUrl], isFalse,
           reason: 'one round can never be a confirmed outage');
       expect(repo.serverUsable[_serverA.baseUrl], isFalse,
           reason: 'a refused server is reachable AND unusable');
@@ -144,9 +147,26 @@ void main() {
       expect(repo.serverUsable[_serverA.baseUrl], isFalse);
     });
 
-    test('serverUsable omits a server nobody has failed to reach', () async {
-      // A missing key reads as usable at every call site, so a server on its
-      // very first paint keeps its star rather than flickering it in.
+    test('serverUsable OMITS a server nobody has fetched yet', () async {
+      // The missing-key rule, tested as an actual absence. An earlier version
+      // of this spec refreshed first and asserted `isTrue` - but a successful
+      // round WRITES the key, so it proved only that a healthy server is
+      // usable and said nothing about omission at all.
+      final repo = _repoWithStatus(await _store(), () => 200);
+      expect(repo.serverUsable, isEmpty,
+          reason: 'nothing has been fetched, so nothing can be known');
+      expect(repo.serverUsable[_serverA.baseUrl], isNull);
+      // And a missing key reads as usable at the call site, which is what keeps
+      // a star from flickering in on first paint.
+      expect(
+        favoriteToggleAllowed(
+            supportsFavorites: true,
+            serverUsable: repo.serverUsable[_serverA.baseUrl]),
+        isTrue,
+      );
+    });
+
+    test('a healthy server is usable once it HAS been fetched', () async {
       final repo = _repoWithStatus(await _store(), () => 200);
       await repo.refresh();
       expect(repo.serverUsable[_serverA.baseUrl], isTrue);
@@ -162,7 +182,7 @@ void main() {
       await repo.refresh();
       code = 503;
       await repo.refresh();
-      expect(repo.serverOfflineConfirmed[_serverA.baseUrl], isNot(isTrue));
+      expect(repo.serverOfflineConfirmed[_serverA.baseUrl], isFalse);
     });
 
     test('a recovered server is no longer reported offline', () async {
