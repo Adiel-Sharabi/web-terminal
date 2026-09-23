@@ -126,15 +126,36 @@ void main() {
       expect(msg, isNot(contains('unreachable')));
     });
 
-    test('auth wins when a server is down AND another needs sign-in', () {
-      // Auth is the only half that is actionable; reporting the other half is
-      // what made an expired token read as a network fault.
+    test('auth LEADS when a server is down AND another needs sign-in', () {
+      // Auth is the only half that is actionable, so it comes first; reporting
+      // the refused server as unreachable is what made an expired token read
+      // as a network fault.
       final msg = OfflineBanner.messageFor(
         offline: const ['XPS'],
         needsAuth: const ['Office'],
       );
-      expect(msg, contains('needs sign-in'));
-      expect(msg, isNot(contains('unreachable')));
+      expect(msg, startsWith('Office needs sign-in'));
+      expect(msg, isNot(contains('Office is unreachable')));
+    });
+
+    test('...but the DOWN server is still named, not hidden behind the 401',
+        () {
+      // Found in review: auth used to REPLACE the message, so a genuinely
+      // unreachable server went unreported for as long as any token was stale.
+      expect(
+        OfflineBanner.messageFor(
+          offline: const ['XPS'],
+          needsAuth: const ['Office'],
+        ),
+        contains('XPS is unreachable'),
+      );
+      expect(
+        OfflineBanner.messageFor(
+          offline: const ['XPS', 'Home'],
+          needsAuth: const ['Office'],
+        ),
+        contains('2 servers are unreachable'),
+      );
     });
 
     test('plural needs-auth does not name one server', () {

@@ -34,13 +34,20 @@ class OfflineBanner extends StatelessWidget {
     required List<String> offline,
     required List<String> needsAuth,
   }) {
-    // Auth wins when both are present: it is the only half the user can act on,
-    // and a banner that reports the un-actionable half is what made an expired
-    // token read as a network fault.
+    // Auth LEADS when both are present: it is the only half the user can act
+    // on, and a banner that reported a refused server as unreachable is what
+    // made an expired token read as a network fault. But it no longer HIDES the
+    // other half - a server that is genuinely down is still down, and a banner
+    // naming only the 401 left it unreported until the token was fixed.
     if (needsAuth.isNotEmpty) {
-      return needsAuth.length == 1
+      final auth = needsAuth.length == 1
           ? '${needsAuth.first} needs sign-in — its token expired. Settings › Servers › ${needsAuth.first}'
           : '${needsAuth.length} servers need sign-in — their tokens expired. Settings › Servers';
+      if (offline.isEmpty) return auth;
+      final down = offline.length == 1
+          ? '${offline.first} is unreachable'
+          : '${offline.length} servers are unreachable';
+      return '$auth. $down';
     }
     return offline.length == 1
         ? '${offline.first} is unreachable — sessions from this server may be stale'
