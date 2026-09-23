@@ -72,12 +72,28 @@ class SessionRepository {
 
   final StreamController<List<Session>> _sessions =
       StreamController<List<Session>>.broadcast();
-  final StreamController<Map<String, bool>> _online =
-      StreamController<Map<String, bool>>.broadcast();
 
   final Map<String, ApiClient> _clients = <String, ApiClient>{};
   final Map<String, List<Session>> _lastByServer = <String, List<Session>>{};
   final Map<String, bool> _serverOnline = <String, bool>{};
+  // Servers that answered 401 on their last [refresh] — reachable, but refusing
+  // our bearer. Kept APART from `_serverOnline` because the two need opposite
+  // advice: an unreachable server may fix itself, while an expired token never
+  // does until someone re-authenticates. Collapsing them told the user the one
+  // thing that was false ("unreachable") and hid the only thing that was true.
+  final Map<String, bool> _serverNeedsAuth = <String, bool>{};
+  // Consecutive failed rounds per server. A single slow or dropped poll is not
+  // an outage, but the rule used to report one as "unreachable" the instant it
+  // happened — so a link that stalls for a few seconds flipped the banner on
+  // and off with nothing actually down. Reset by any success.
+  final Map<String, int> _serverFailStreak = <String, int>{};
+
+  /// How many CONSECUTIVE failed rounds a server must miss before it is
+  /// reported offline TO THE USER. [serverOnline] still flips on the very
+  /// first failure — it is the truth of the last round, and the stale-session
+  /// fallback and [_anyServerReachable] depend on that staying unsmoothed.
+  /// This gates only what the UI *says*, which is the half that was flapping.
+  static const int offlineAfterFailures = 2;
   final Set<String> _namesResolved = <String>{};
   // When each server's `/api/version` was last answered, so an already-resolved
   // server is re-asked only when its free machine reading (#152/#165) has gone
@@ -85,8 +101,25 @@ class SessionRepository {
   final Map<String, DateTime> _versionFetchedAt = <String, DateTime>{};
   static const Duration _machineReadingMaxAge = Duration(seconds: 10);
 
+  // ONE request per server in flight, ever (PR #276 review). [refresh] has
+  // three callers that overlap freely - the 30s poll, the 300ms notify
+  // debounce, a favourite toggle - and while each round sent its own request,
+  // two rounds overlapping ONE stall failed twice on it: the streak reached
+  // [offlineAfterFailures] from a single outage, which is the #274 flap. Two
+  // requests in flight also meant an older one's failure could land after a
+  // newer one's success and overwrite it. Serialising per server removes both
+  // at once: every counted failure is a separate attempt, and a later request
+  // always finishes later.
+  //
+  // A round arriving while one is in flight does NOT just join it - that
+  // request may predate what the caller needs to see (a favourite PATCH that
+  // just landed). It queues exactly one trailing re-run instead, shared by
+  // every caller that arrives before it starts.
+  final Map<String, Future<void>> _serverInFlight = <String, Future<void>>{};
+  final Map<String, Future<void>> _serverQueued = <String, Future<void>>{};
+
   /// Per-server `favorites-sync` capability (#60), keyed by base URL. Filled
-  /// from the SAME `/api/version` call [_ensureServerNames] already makes —
+  /// from the SAME `/api/version` call [_ensureServerName] already makes —
   /// no extra request. Absent (not yet resolved, or the server is too old)
   /// reads as unsupported via [supportsFavorites], so the star is never
   /// offered — and no PATCH ever fired — until a server actually confirms it.
@@ -194,11 +227,52 @@ class SessionRepository {
   void debugApplyNotify(NotifyEvent evt) => _applyNotify(evt);
 
   /// Broadcast stream of per-server reachability (`baseUrl → online`).
-  Stream<Map<String, bool>> get serverOnlineStream => _online.stream;
 
   /// Snapshot of per-server reachability (`baseUrl → online`), updated on every
   /// [refresh].
   Map<String, bool> get serverOnline => Map<String, bool>.unmodifiable(_serverOnline);
+
+  /// Snapshot of per-server AUTH state (`baseUrl → the last fetch got a 401`),
+  /// updated on every [refresh]. A server listed here is reachable and did
+  /// answer — it rejected our token, which is what an expired app token looks
+  /// like (tokens carry a 90-day expiry and are pruned server-side once past
+  /// it). The fix is to re-authenticate that server, so the UI must say so
+  /// rather than report it unreachable.
+  Map<String, bool> get serverNeedsAuth =>
+      Map<String, bool>.unmodifiable(_serverNeedsAuth);
+
+  /// Whether each configured server is USABLE RIGHT NOW - the one owner of
+  /// that question, read by the dashboard (which favorites to show, which dot
+  /// to draw) and by `canToggleFavorite`.
+  ///
+  /// A server is usable when it is neither CONFIRMED offline nor refusing our
+  /// token. Both halves matter and they are not interchangeable: hysteresis
+  /// alone would call a 401 server usable, because a 401 answers instantly and
+  /// never accumulates a failure streak - so the row would stay live, its star
+  /// tappable, and every PATCH behind it would fail.
+  ///
+  /// It exists because this question had two answers that disagreed by one
+  /// round: the dashboard read the smoothed value while `canToggleFavorite`
+  /// read the raw per-round one, so a single missed poll left the pinned row
+  /// SHOWN with its star GONE. A missing key reads as usable - a server nobody
+  /// has failed to reach yet is not a server in trouble.
+  Map<String, bool> get serverUsable {
+    final offline = serverOfflineConfirmed;
+    return Map<String, bool>.unmodifiable(<String, bool>{
+      for (final url in <String>{..._serverOnline.keys, ..._serverNeedsAuth.keys})
+        url: offline[url] != true && _serverNeedsAuth[url] != true,
+    });
+  }
+
+  /// Snapshot of per-server CONFIRMED-offline state (`baseUrl → has failed
+  /// [offlineAfterFailures] rounds in a row`). This is what the banner reports;
+  /// [serverOnline] stays the unsmoothed per-round truth, so nothing that
+  /// depends on "did this round reach anyone" changes meaning.
+  Map<String, bool> get serverOfflineConfirmed =>
+      Map<String, bool>.unmodifiable(<String, bool>{
+        for (final e in _serverFailStreak.entries)
+          e.key: e.value >= offlineAfterFailures,
+      });
 
   /// Whether the server at [baseUrl] advertises `favorites-sync` (#60) — i.e.
   /// has the `/api/sessions/:id/favorite` route. `false` (never offer the
@@ -211,10 +285,33 @@ class SessionRepository {
   /// list. A server that fails is marked offline and contributes its last-known
   /// (stale) sessions instead of dropping out entirely.
   Future<void> refresh() async {
-    await _ensureServerNames();
     final servers = _store.servers;
-    final results = await Future.wait(servers.map(_fetchServer));
-    final merged = <Session>[for (final r in results) ...r]..sort(compareSessions);
+    // Emit as each server answers, not once they ALL have. `Future.wait` alone
+    // let the SLOWEST server gate the whole list: with four configured and two
+    // of them across a link that stalls for seconds at a time, every round —
+    // and so every favorite toggle, which triggers one — froze the dashboard
+    // for as long as the worst server took, up to [ApiClient]'s 10s deadline.
+    //
+    // Each server's `/api/version` runs inside ITS OWN task, ahead of only its
+    // own `/api/sessions`. It used to be one `Future.wait` over every server
+    // before the fan-out began, so a peer whose connect hangs held every other
+    // server's rows - and the round after a favourite toggle - for the full
+    // client deadline, before a single partial paint.
+    var answered = 0;
+    await Future.wait(servers.map((s) async {
+      await _refreshServer(s.baseUrl);
+      answered++;
+      if (answered < servers.length) _emitPartial();
+    }));
+    // Built by [_mergedFor], the SAME function the partial paints use. Walking
+    // the `Future.wait` results here instead would disagree with them for a
+    // server dropped mid-round: `_dropServer` clears its bucket, so the partial
+    // list loses those rows while a frozen `results` still carries them — the
+    // rows would vanish, come back on the final emit, and be persisted to the
+    // cold-launch cache. One source, one answer.
+    // The servers configured NOW, not at round start: one removed mid-round
+    // must not come back for this emit, nor be written to the cold-launch cache.
+    final merged = _mergedFor(_store.servers);
 
     _current = merged;
     _pruneApiErrors(merged);
@@ -222,12 +319,33 @@ class SessionRepository {
     _pruneCompacting(merged);
     _pruneSubmitUnconfirmed(merged);
     if (!_sessions.isClosed) _sessions.add(merged);
-    if (!_online.isClosed) _online.add(serverOnline);
     await _cacheNames(merged);
     // Persist the merged list for the next cold launch — but only when at least
     // one server actually responded this round, so a total outage can't blank
     // the cache the instant-paint path relies on.
     if (_anyServerReachable()) await _writeCache(merged);
+  }
+
+  /// The merged, sorted list for [servers], from the per-server last-known
+  /// buckets — the same source a FAILED fetch falls back to, so a server still
+  /// in flight contributes its previous list rather than a hole.
+  ///
+  /// The one owner of "what is the list right now": a partial paint and the
+  /// final emit of the same round must not be able to disagree about it.
+  List<Session> _mergedFor(List<ServerConfig> servers) => <Session>[
+        for (final s in servers) ...?_lastByServer[s.baseUrl],
+      ]..sort(compareSessions);
+
+  /// Paints what has arrived so far, part-way through a [refresh].
+  ///
+  /// Deliberately does the emit and nothing else: pruning, name caching and the
+  /// disk cache stay on [refresh]'s final pass, so a partial round has no side
+  /// effect beyond what the user sees. It is also why this does not touch
+  /// `_anyServerReachable`-driven state — a round is not "reached" until it ends.
+  void _emitPartial() {
+    final merged = _mergedFor(_store.servers);
+    _current = merged;
+    if (!_sessions.isClosed) _sessions.add(merged);
   }
 
   /// Begins foreground live-updates: subscribes to every server's `/ws/notify`
@@ -404,6 +522,8 @@ class SessionRepository {
     _clients.remove(baseUrl)?.close();
     _lastByServer.remove(baseUrl);
     _serverOnline.remove(baseUrl);
+    _serverNeedsAuth.remove(baseUrl);
+    _serverFailStreak.remove(baseUrl);
     _namesResolved.remove(baseUrl);
     _versionFetchedAt.remove(baseUrl);
     _favoritesSyncSupported.remove(baseUrl);
@@ -515,15 +635,77 @@ class SessionRepository {
     if (!_sessions.isClosed) _sessions.add(_current);
   }
 
-  Future<List<Session>> _fetchServer(ServerConfig server) async {
+  /// This round's work for the server at [baseUrl], serialised per server -
+  /// see [_serverInFlight] for why a second request is never sent alongside.
+  Future<void> _refreshServer(String baseUrl) {
+    final running = _serverInFlight[baseUrl];
+    if (running == null) return _startServerRound(baseUrl);
+    // `catchError` so a round that ever threw could not strand the queue: the
+    // re-run must start however the one ahead of it ended.
+    return _serverQueued[baseUrl] ??= running.catchError((_) {}).then((_) {
+      _serverQueued.remove(baseUrl);
+      return _startServerRound(baseUrl);
+    });
+  }
+
+  Future<void> _startServerRound(String baseUrl) {
+    late final Future<void> round;
+    round = _runServerRound(baseUrl).whenComplete(() {
+      if (identical(_serverInFlight[baseUrl], round)) {
+        _serverInFlight.remove(baseUrl);
+      }
+    });
+    _serverInFlight[baseUrl] = round;
+    return round;
+  }
+
+  /// Name/capability resolution, then the session list - for ONE server, so
+  /// its version call can only ever delay its own rows. The config is re-read
+  /// after resolution so the sessions carry the name it just learned, exactly
+  /// as they did when resolution ran for every server up front.
+  Future<void> _runServerRound(String baseUrl) async {
+    final before = _configFor(baseUrl);
+    if (before == null) return;
+    await _ensureServerName(before);
+    final server = _configFor(baseUrl);
+    if (server == null) return;
+    await _fetchServer(server);
+  }
+
+  /// The currently-configured [ServerConfig] for [baseUrl], or `null` once it
+  /// has been removed. Every write that lands after an `await` checks this, so
+  /// a server removed mid-request cannot resurrect its rows or its state.
+  ServerConfig? _configFor(String baseUrl) {
+    for (final s in _store.servers) {
+      if (s.baseUrl == baseUrl) return s;
+    }
+    return null;
+  }
+
+  Future<void> _fetchServer(ServerConfig server) async {
     try {
       final list = await _clientFor(server).listSessions();
+      if (_configFor(server.baseUrl) == null) return;
       _serverOnline[server.baseUrl] = true;
+      _serverNeedsAuth[server.baseUrl] = false;
+      _serverFailStreak[server.baseUrl] = 0;
       _lastByServer[server.baseUrl] = list;
-      return list;
-    } catch (_) {
+    } catch (e) {
+      if (_configFor(server.baseUrl) == null) return;
+      // A 401 is NOT unreachability — the server answered, and refused us. It
+      // is the one failure here that cannot clear on its own, so it must be
+      // distinguishable; everything else (DNS, timeout, TLS, a malformed body)
+      // stays a plain offline. `_serverOnline` is still false either way, so
+      // the stale-session fallback and `_anyServerReachable` are untouched —
+      // only the advice the UI can give changes.
+      final needsAuth = e is ApiException && e.status == 401;
       _serverOnline[server.baseUrl] = false;
-      return _lastByServer[server.baseUrl] ?? const <Session>[];
+      _serverNeedsAuth[server.baseUrl] = needsAuth;
+      // The streak counts rounds the server did not ANSWER. A 401 answered, so
+      // it resets rather than advances - counting it confirmed a server offline
+      // on its first real miss after a token refusal.
+      _serverFailStreak[server.baseUrl] =
+          needsAuth ? 0 : (_serverFailStreak[server.baseUrl] ?? 0) + 1;
     }
   }
 
@@ -778,60 +960,63 @@ class SessionRepository {
   /// THROTTLED, though, and that is not an optimisation. [refresh] is NOT a 30s
   /// thing: [_scheduleRefresh] fires it on a 300ms debounce after every
   /// `/ws/notify` event, so while an agent is working an untimed re-fetch would
-  /// cost N extra round trips per notify burst — and [refresh] awaits this
-  /// before the session list, so the list would queue behind the slowest peer.
+  /// cost N extra round trips per notify burst — and each server's round awaits
+  /// this before its own session list, so that list would queue behind it.
   /// Found in review. A server already resolved is re-asked at most every
   /// [_machineReadingMaxAge]; one not yet resolved is asked every time, because
   /// its name and `favorites-sync` capability are still unknown.
   /// Updates the server store in place so the fallback `Shadow` name upgrades
   /// to the real one.
-  Future<void> _ensureServerNames() async {
+  ///
+  /// Per SERVER, called from that server's own round ([_runServerRound]) -
+  /// never as one wait over all of them, which let the slowest peer's version
+  /// call hold every server's session list.
+  Future<void> _ensureServerName(ServerConfig server) async {
     final now = DateTime.now();
-    await Future.wait(_store.servers.map((server) async {
-      // Throttled only once a server is FULLY settled — which is the old `confirmed`
-      // condition, unchanged: name resolved AND `favorites-sync` confirmed true. A
-      // server that does not (yet) support it is still asked on every refresh, because
-      // #60 exists to pick the capability up the moment the server is upgraded, with no
-      // app restart. Caught by that very test when the throttle was first written
-      // without this clause.
-      final settled = _namesResolved.contains(server.baseUrl) &&
-          (_favoritesSyncSupported[server.baseUrl] ?? false);
-      if (settled) {
-        final last = _versionFetchedAt[server.baseUrl];
-        if (last != null && now.difference(last) < _machineReadingMaxAge) return;
+    // Throttled only once a server is FULLY settled — which is the old `confirmed`
+    // condition, unchanged: name resolved AND `favorites-sync` confirmed true. A
+    // server that does not (yet) support it is still asked on every refresh, because
+    // #60 exists to pick the capability up the moment the server is upgraded, with no
+    // app restart. Caught by that very test when the throttle was first written
+    // without this clause.
+    final settled = _namesResolved.contains(server.baseUrl) &&
+        (_favoritesSyncSupported[server.baseUrl] ?? false);
+    if (settled) {
+      final last = _versionFetchedAt[server.baseUrl];
+      if (last != null && now.difference(last) < _machineReadingMaxAge) return;
+    }
+    ServerInfo? info;
+    try {
+      info = await _clientFor(server).version();
+      if (_configFor(server.baseUrl) == null) return;
+      // A 2xx that is not actually a web-terminal — a squatted `tailscale serve`
+      // mount, a captive portal — parses to an EMPTY ServerInfo. Treating that as
+      // an authoritative answer would silently drop `favorites-sync` for a server
+      // that supports it, and publish a bogus (absent) load reading. Every real
+      // server reports a version, so that is the sanity gate. Found in review.
+      if (info.version.isEmpty) { info = null; throw StateError('not a web-terminal'); }
+      if (info.serverName.isNotEmpty) {
+        _store.updateServerName(server.baseUrl, info.serverName);
       }
-      ServerInfo? info;
-      try {
-        info = await _clientFor(server).version();
-        // A 2xx that is not actually a web-terminal — a squatted `tailscale serve`
-        // mount, a captive portal — parses to an EMPTY ServerInfo. Treating that as
-        // an authoritative answer would silently drop `favorites-sync` for a server
-        // that supports it, and publish a bogus (absent) load reading. Every real
-        // server reports a version, so that is the sanity gate. Found in review.
-        if (info.version.isEmpty) { info = null; throw StateError('not a web-terminal'); }
-        if (info.serverName.isNotEmpty) {
-          _store.updateServerName(server.baseUrl, info.serverName);
-        }
-        _favoritesSyncSupported[server.baseUrl] = info.has('favorites-sync');
-        _namesResolved.add(server.baseUrl);
-        _versionFetchedAt[server.baseUrl] = now;
-      } catch (_) {
-        // #66: NOT cleared here on purpose, even though this catch is now
-        // reached on every refresh (the old `confirmed` short-circuit that
-        // used to skip it entirely is gone — see the doc comment above). A
-        // server that once supported favorites-sync and has since gone
-        // offline keeps reporting supported here; the actual "star stays
-        // enabled while its server is down" case is closed at the decision
-        // point instead — see `favoriteToggleAllowed` in
-        // dashboard_screen.dart, which gates on live `serverOnline` directly.
-      }
-      // #152/#165 — published every refresh, success or failure: an
-      // unreachable server must go blank (null), never keep showing a load
-      // reading from however long ago it was last seen. Mirrors
-      // ResourceMonitor.refresh()'s own "overwrite, never keep stale" rule
-      // for the expensive per-process poll.
-      ResourceMonitor.instance.publishMachine(server.baseUrl, info?.resources);
-    }));
+      _favoritesSyncSupported[server.baseUrl] = info.has('favorites-sync');
+      _namesResolved.add(server.baseUrl);
+      _versionFetchedAt[server.baseUrl] = now;
+    } catch (_) {
+      // #66: NOT cleared here on purpose, even though this catch is now
+      // reached on every refresh (the old `confirmed` short-circuit that
+      // used to skip it entirely is gone — see the doc comment above). A
+      // server that once supported favorites-sync and has since gone
+      // offline keeps reporting supported here; the actual "star stays
+      // enabled while its server is down" case is closed at the decision
+      // point instead — see `favoriteToggleAllowed` in
+      // dashboard_screen.dart, which gates on live `serverOnline` directly.
+    }
+    // #152/#165 — published every refresh, success or failure: an
+    // unreachable server must go blank (null), never keep showing a load
+    // reading from however long ago it was last seen. Mirrors
+    // ResourceMonitor.refresh()'s own "overwrite, never keep stale" rule
+    // for the expensive per-process poll.
+    ResourceMonitor.instance.publishMachine(server.baseUrl, info?.resources);
   }
 
   void _scheduleRefresh() {

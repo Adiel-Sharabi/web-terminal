@@ -259,4 +259,149 @@ void main() {
       expect(await disco.refresh(), isFalse);
     });
   });
+
+  // A held token dies on a TIMER, not on anything this device does: app tokens
+  // carry a 90-day expiry and are pruned server-side once past it. Discovery
+  // used to call a token "usable" because the STRING was non-empty — a fact
+  // about our storage, not about the server — so it sat on a dead credential
+  // while this very re-mint path was available and unused.
+  //
+  // Measured 2026-09-21: office's companion token expired and was pruned at
+  // 00:17; the phone reported "Office is unreachable" while office was healthy,
+  // 37ms away, and serving every other caller.
+  group('ClusterDiscovery re-mints a REFUSED token (#272)', () {
+    const staleOffice = ServerConfig(
+      name: 'Office',
+      baseUrl: 'http://office:7681',
+      bearerToken: 'expired-tok',
+      origin: ServerOrigin.cluster,
+    );
+
+    ClusterDiscovery build(
+      ServerStore st,
+      List<String> calls, {
+      required bool refused,
+      String? mintResult = 'fresh-tok',
+      String peerName = 'Office',
+      bool hasToken = true,
+    }) =>
+        ClusterDiscovery(
+          store: st,
+          staleToken: (baseUrl) => refused && baseUrl == 'http://office:7681',
+          clientBuilder: (s) => _FakeClient(
+            s,
+            {
+              'http://home:7681': [
+                ClusterPeer(
+                    name: peerName,
+                    url: 'http://office:7681',
+                    hasToken: hasToken),
+              ],
+            },
+            {'http://office:7681': mintResult},
+            calls,
+          ),
+        );
+
+    test('a refused token is replaced with a freshly minted one', () async {
+      final st = await _store([_home, staleOffice]);
+      final calls = <String>[];
+      expect(await build(st, calls, refused: true).refresh(), isTrue);
+      expect(
+        st.servers.firstWhere((s) => s.baseUrl == 'http://office:7681').bearerToken,
+        'fresh-tok',
+      );
+      expect(calls, contains('mint:http://office:7681 via http://home:7681'));
+    });
+
+    test('a token that was NOT refused is never re-minted', () async {
+      // The load-bearing negative. Without the probe gating it, every refresh
+      // would mint a new token for every server forever — which is both the
+      // token-store flood this repo already has and a silent rotation of
+      // credentials nobody asked to rotate.
+      final st = await _store([_home, staleOffice]);
+      final calls = <String>[];
+      expect(await build(st, calls, refused: false).refresh(), isFalse);
+      expect(
+        st.servers.firstWhere((s) => s.baseUrl == 'http://office:7681').bearerToken,
+        'expired-tok',
+      );
+      expect(calls.any((c) => c.startsWith('mint:')), isFalse);
+    });
+
+    test('a refused server whose re-mint FAILS is kept, not deleted', () async {
+      // `syncDiscovered` reads an absent entry as "left the cluster" and drops
+      // it, so returning nothing for a failed re-mint would turn a recoverable
+      // auth failure into a server that vanished from the user's list.
+      final st = await _store([_home, staleOffice]);
+      final calls = <String>[];
+      await build(st, calls, refused: true, mintResult: null).refresh();
+      final kept =
+          st.servers.where((s) => s.baseUrl == 'http://office:7681').toList();
+      expect(kept, hasLength(1));
+      expect(kept.single.bearerToken, 'expired-tok');
+      expect(kept.single.name, 'Office');
+    });
+
+    test('a refused server the advertiser cannot vouch for is KEPT, not deleted',
+        () async {
+      // The sibling of the test above, and the one that was missing.
+      //
+      // `hasToken` is ONE ADVERTISER's view of its own gitignored, per-machine
+      // cluster-tokens.json - it is not a statement that the server left the
+      // cluster. And `advertised.putIfAbsent` keeps the FIRST advertiser's
+      // answer, so a single peer missing a token for Office decides this even
+      // when three others have one.
+      //
+      // Why it was unguarded: until a REFUSED entry could fall past the
+      // keep-branch, `existing` was always null at that exit, so the bare
+      // `continue` was harmless. The refused path made it reachable for a
+      // server the user already had, and a `continue` there means the entry is
+      // absent from `discovered`, which `syncDiscovered` reads as "left the
+      // cluster -> drop it" - deleting the server AND its token, silently.
+      final st = await _store([_home, staleOffice]);
+      final calls = <String>[];
+      await build(st, calls, refused: true, hasToken: false).refresh();
+      final kept =
+          st.servers.where((s) => s.baseUrl == 'http://office:7681').toList();
+      expect(kept, hasLength(1),
+          reason: 'the refused server was deleted outright, token and all');
+      expect(kept.single.bearerToken, 'expired-tok');
+      expect(kept.single.name, 'Office');
+      // Nothing to mint THROUGH, so nothing should have been attempted.
+      expect(calls.any((c) => c.startsWith('mint:')), isFalse);
+    });
+
+    test('a re-mint never renames the server to its own URL', () async {
+      // The add path names a brand-new peer after its URL when the advertiser
+      // offers no name; on a RE-mint that would rewrite "Office" to
+      // "http://office:7681" in the user's list.
+      final st = await _store([_home, staleOffice]);
+      final calls = <String>[];
+      await build(st, calls, refused: true, peerName: '').refresh();
+      expect(
+        st.servers.firstWhere((s) => s.baseUrl == 'http://office:7681').name,
+        'Office',
+      );
+    });
+
+    test('a refused MANUAL entry is left alone (known, deliberate gap)',
+        () async {
+      // Pins the documented limitation so removing it is a decision rather
+      // than an accident: overwriting a credential the user typed by hand is
+      // not a repair, and `syncDiscovered` refuses to touch a manual entry
+      // anyway. Deleting it and letting discovery re-add it heals it for good.
+      final st = await _store([
+        _home,
+        staleOffice.copyWith(origin: ServerOrigin.manual),
+      ]);
+      final calls = <String>[];
+      await build(st, calls, refused: true).refresh();
+      expect(
+        st.servers.firstWhere((s) => s.baseUrl == 'http://office:7681').bearerToken,
+        'expired-tok',
+      );
+      expect(calls.any((c) => c.startsWith('mint:')), isFalse);
+    });
+  });
 }

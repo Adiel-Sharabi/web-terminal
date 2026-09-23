@@ -147,17 +147,17 @@ void main() {
   });
 
   group('favoriteToggleAllowed (#60 + #66)', () {
-    test('allowed when the server supports favorites-sync and is online', () {
+    test('allowed when the server supports favorites-sync and is usable', () {
       expect(
-        favoriteToggleAllowed(supportsFavorites: true, serverOnline: true),
+        favoriteToggleAllowed(supportsFavorites: true, serverUsable: true),
         isTrue,
       );
     });
 
-    test('hidden when the owning server is offline, even if it supports '
+    test('hidden when the owning server is unusable, even if it supports '
         'favorites-sync', () {
       expect(
-        favoriteToggleAllowed(supportsFavorites: true, serverOnline: false),
+        favoriteToggleAllowed(supportsFavorites: true, serverUsable: false),
         isFalse,
         reason: '#66: an offline-owned favorite must not offer a star wired '
             'to an always-failing PATCH',
@@ -167,7 +167,7 @@ void main() {
     test('hidden when the server does not support favorites-sync, even if '
         'online', () {
       expect(
-        favoriteToggleAllowed(supportsFavorites: false, serverOnline: true),
+        favoriteToggleAllowed(supportsFavorites: false, serverUsable: true),
         isFalse,
       );
     });
@@ -175,7 +175,7 @@ void main() {
     test('allowed when online-ness is unknown yet (no online entry = not '
         'confirmed offline)', () {
       expect(
-        favoriteToggleAllowed(supportsFavorites: true, serverOnline: null),
+        favoriteToggleAllowed(supportsFavorites: true, serverUsable: null),
         isTrue,
       );
     });

@@ -1,0 +1,427 @@
+// A server that misses ONE poll is not an outage, and a slow server must not
+// hold the whole list hostage. Both halves were reported as one complaint.
+//
+// Reported 2026-09-22: a peer's "<name> is unreachable" banner appearing and
+// clearing repeatedly, and "marking favorites makes everything slow". The
+// banner was not lying about that round - `GET /api/sessions` really did take
+// 10-25s on that peer, because it is the only session route that goes through
+// the worker RPC and the worker's event loop stalls for seconds at a time.
+// What was wrong is what the client DID with a single such round.
+//
+// Do not read these specs as "the server was fine". The server fault is real
+// and is tracked separately; it is also cluster-wide rather than one sick
+// machine, which is precisely why the client has to survive it.
+//
+// Two defects, one shape - a per-round failure treated as a verdict:
+//
+//  1. `_serverOnline` flipping false on the FIRST failure is correct; it is
+//     the truth of the last round, and the stale-session fallback and
+//     `_anyServerReachable` both depend on it staying unsmoothed. What was
+//     wrong is that the UI reported it verbatim, so one slow poll painted
+//     "unreachable" and the next cleared it - and because #66 gates pinned
+//     rows on the same flag, that server's favorites vanished with it.
+//  2. `refresh` awaited `Future.wait` over every server, so the SLOWEST one
+//     gated the merged list - and a favorite toggle triggers a refresh, which
+//     is why a UI action felt as slow as the worst server configured.
+//
+// These pin the split in BOTH directions. A test that only asserted "two
+// failures -> offline" would still pass with the smoothing deleted and every
+// failure reported at once, so the one-failure case is the load-bearing one.
+import 'dart:async';
+import 'dart:convert';
+
+import 'package:ai_terminal/api/api_client.dart';
+import 'package:ai_terminal/api/models.dart';
+import 'package:ai_terminal/services/server_store.dart';
+import 'package:ai_terminal/services/favorite_toggle.dart';
+import 'package:ai_terminal/services/session_repository.dart';
+import 'package:flutter_test/flutter_test.dart';
+import 'package:http/http.dart' as http;
+import 'package:http/testing.dart';
+import 'package:shared_preferences/shared_preferences.dart';
+
+const _serverA =
+    ServerConfig(name: 'Office', baseUrl: 'http://a:7785', bearerToken: 'ta');
+const _fast =
+    ServerConfig(name: 'Fast', baseUrl: 'http://fast:7785', bearerToken: 'tf');
+const _slow =
+    ServerConfig(name: 'Slow', baseUrl: 'http://slow:7785', bearerToken: 'ts');
+
+String _encodeServers(List<ServerConfig> servers) => jsonEncode([
+      for (final s in servers)
+        {'name': s.name, 'baseUrl': s.baseUrl, 'bearerToken': s.bearerToken},
+    ]);
+
+String _oneSession(ServerConfig s) => jsonEncode([
+      {
+        'id': '${s.name}1',
+        'name': 'proj',
+        'status': 'idle',
+        'lastActivity': 1000,
+      },
+    ]);
+
+Future<ServerStore> _store() async {
+  final store = ServerStore.forTest();
+  await store.init();
+  return store;
+}
+
+/// A repo over [_serverA] whose `/api/sessions` status is read from [status]
+/// at call time, so a test can flip it between rounds.
+SessionRepository _repoWithStatus(ServerStore store, int Function() status) =>
+    SessionRepository.forTest(
+      store: store,
+      clientFactory: (s) => ApiClient(
+        s,
+        httpClient: MockClient((req) async {
+          if (req.url.path == '/api/sessions') {
+            final code = status();
+            return http.Response(code == 200 ? _oneSession(s) : '', code);
+          }
+          return http.Response('', 503);
+        }),
+      ),
+    );
+
+void main() {
+  TestWidgetsFlutterBinding.ensureInitialized();
+
+  group('SessionRepository.serverOfflineConfirmed (offline hysteresis)', () {
+    setUp(() {
+      SharedPreferences.setMockInitialValues({
+        ServerStore.storageKey: _encodeServers([_serverA]),
+      });
+    });
+
+    test('ONE failed round does not report the server offline', () async {
+      // The load-bearing case: delete the smoothing and this goes red, because
+      // a single missed poll is reported as an outage — which is the flap.
+      final repo = _repoWithStatus(await _store(), () => 503);
+      await repo.refresh();
+      // `isFalse`, not `isNot(isTrue)` - the latter also passes on a MISSING
+      // key, so it would stay green if the streak stopped being recorded at all.
+      expect(repo.serverOfflineConfirmed[_serverA.baseUrl], isFalse);
+    });
+
+    test('the RAW per-round state still flips on the first failure', () async {
+      // The opposite guard: smoothing `_serverOnline` itself would strand the
+      // stale-session fallback and `_anyServerReachable` on a lie.
+      final repo = _repoWithStatus(await _store(), () => 503);
+      await repo.refresh();
+      expect(repo.serverOnline[_serverA.baseUrl], isFalse);
+    });
+
+    test('two consecutive failed rounds do report it offline', () async {
+      final repo = _repoWithStatus(await _store(), () => 503);
+      await repo.refresh();
+      await repo.refresh();
+      expect(repo.serverOfflineConfirmed[_serverA.baseUrl], isTrue);
+    });
+
+    test('serverUsable is FALSE for a 401, which no amount of hysteresis '
+        'would ever report', () async {
+      // The gate both the dashboard and `canToggleFavorite` read. A 401 server
+      // is REACHABLE - it answered - so it fails the round without being an
+      // outage, and smoothing alone would call it usable forever while every
+      // PATCH behind its star failed.
+      //
+      // Load-bearing in the sense that matters: drop the `_serverNeedsAuth`
+      // half of `serverUsable` and this is the only assertion that goes red,
+      // because ONE 401 round never reaches the failure streak at all.
+      final repo = _repoWithStatus(await _store(), () => 401);
+      await repo.refresh();
+      expect(repo.serverNeedsAuth[_serverA.baseUrl], isTrue);
+      expect(repo.serverOfflineConfirmed[_serverA.baseUrl], isFalse,
+          reason: 'one round can never be a confirmed outage');
+      expect(repo.serverUsable[_serverA.baseUrl], isFalse,
+          reason: 'a refused server is reachable AND unusable');
+    });
+
+    test('serverUsable is FALSE once a server is CONFIRMED offline', () async {
+      final repo = _repoWithStatus(await _store(), () => 503);
+      await repo.refresh();
+      expect(repo.serverUsable[_serverA.baseUrl], isTrue,
+          reason: 'one missed poll is not yet an outage');
+      await repo.refresh();
+      expect(repo.serverUsable[_serverA.baseUrl], isFalse);
+    });
+
+    test('serverUsable OMITS a server nobody has fetched yet', () async {
+      // The missing-key rule, tested as an actual absence. An earlier version
+      // of this spec refreshed first and asserted `isTrue` - but a successful
+      // round WRITES the key, so it proved only that a healthy server is
+      // usable and said nothing about omission at all.
+      final repo = _repoWithStatus(await _store(), () => 200);
+      expect(repo.serverUsable, isEmpty,
+          reason: 'nothing has been fetched, so nothing can be known');
+      expect(repo.serverUsable[_serverA.baseUrl], isNull);
+      // And a missing key reads as usable at the call site, which is what keeps
+      // a star from flickering in on first paint.
+      expect(
+        favoriteToggleAllowed(
+            supportsFavorites: true,
+            serverUsable: repo.serverUsable[_serverA.baseUrl]),
+        isTrue,
+      );
+    });
+
+    test('a healthy server is usable once it HAS been fetched', () async {
+      final repo = _repoWithStatus(await _store(), () => 200);
+      await repo.refresh();
+      expect(repo.serverUsable[_serverA.baseUrl], isTrue);
+    });
+
+    test('a success between failures resets the streak', () async {
+      // Without the reset the streak only ever climbs, so a server that blips
+      // once an hour is eventually reported permanently down.
+      var code = 503;
+      final repo = _repoWithStatus(await _store(), () => code);
+      await repo.refresh();
+      code = 200;
+      await repo.refresh();
+      code = 503;
+      await repo.refresh();
+      expect(repo.serverOfflineConfirmed[_serverA.baseUrl], isFalse);
+    });
+
+    test('a recovered server is no longer reported offline', () async {
+      var code = 503;
+      final repo = _repoWithStatus(await _store(), () => code);
+      await repo.refresh();
+      await repo.refresh();
+      expect(repo.serverOfflineConfirmed[_serverA.baseUrl], isTrue);
+      code = 200;
+      await repo.refresh();
+      expect(repo.serverOfflineConfirmed[_serverA.baseUrl], isFalse);
+    });
+  });
+
+  group('SessionRepository.refresh partial emit', () {
+    test('a slow server does not gate what the others already returned',
+        () async {
+      SharedPreferences.setMockInitialValues({
+        ServerStore.storageKey: _encodeServers([_fast, _slow]),
+      });
+      // Gates only `/api/sessions` for the slow server. A hanging
+      // `/api/version` is its own case, in the group below.
+      final gate = Completer<void>();
+      final repo = SessionRepository.forTest(
+        store: await _store(),
+        clientFactory: (s) => ApiClient(
+          s,
+          httpClient: MockClient((req) async {
+            if (req.url.path == '/api/sessions') {
+              if (s.baseUrl == _slow.baseUrl) await gate.future;
+              return http.Response(_oneSession(s), 200);
+            }
+            return http.Response('', 503);
+          }),
+        ),
+      );
+
+      // Subscribe BEFORE refreshing: the emission under test is the partial
+      // one, which is gone by the time `refresh` returns.
+      final firstPaint = repo.sessions.first;
+      final round = repo.refresh();
+
+      final painted = await firstPaint.timeout(const Duration(seconds: 5));
+      expect(painted.map((s) => s.id), contains('Fast1'));
+      expect(
+        gate.isCompleted,
+        isFalse,
+        reason: 'the list must paint while the slow server is still in flight',
+      );
+
+      gate.complete();
+      await round;
+      expect(repo.current.map((s) => s.id), containsAll(['Fast1', 'Slow1']));
+    });
+  });
+
+  // Review of PR #276: the streak counted REQUESTS, not rounds. `refresh` has
+  // three callers that overlap freely - the 30s poll, the 300ms notify
+  // debounce and a favourite toggle - so two rounds in flight against one
+  // stalled server both failed on the SAME stall and the streak reached 2:
+  // "confirmed offline" from one outage, which is the #274 flap again. And an
+  // older round's failure landing after a newer round's success flipped
+  // `serverOnline` back to false. One cause for both: two requests to one
+  // server in flight at once.
+  group('SessionRepository.refresh overlapping rounds', () {
+    setUp(() {
+      SharedPreferences.setMockInitialValues({
+        ServerStore.storageKey: _encodeServers([_serverA]),
+      });
+    });
+
+    /// A repo whose every `/api/sessions` request parks on its own completer,
+    /// answered by the test with the status it chooses.
+    Future<(SessionRepository, List<Completer<int>>)> gatedRepo() async {
+      final pending = <Completer<int>>[];
+      final repo = SessionRepository.forTest(
+        store: await _store(),
+        clientFactory: (s) => ApiClient(
+          s,
+          httpClient: MockClient((req) async {
+            if (req.url.path == '/api/sessions') {
+              final c = Completer<int>();
+              pending.add(c);
+              final code = await c.future;
+              return http.Response(code == 200 ? _oneSession(s) : '', code);
+            }
+            return http.Response('', 503);
+          }),
+        ),
+      );
+      return (repo, pending);
+    }
+
+    Future<void> settle() async {
+      for (var i = 0; i < 20; i++) {
+        await Future<void>.delayed(Duration.zero);
+      }
+    }
+
+    test('two rounds overlapping ONE stall are not a confirmed outage',
+        () async {
+      final (repo, pending) = await gatedRepo();
+      final r1 = repo.refresh();
+      final r2 = repo.refresh();
+      await settle();
+
+      // Every request in flight right now fails - that is the one stall.
+      for (final c in pending.where((c) => !c.isCompleted).toList()) {
+        c.complete(503);
+      }
+      await settle();
+      expect(repo.serverOnline[_serverA.baseUrl], isFalse,
+          reason: 'the stall did fail this round');
+      expect(repo.serverOfflineConfirmed[_serverA.baseUrl], isFalse,
+          reason: 'one stall seen by two overlapping rounds is ONE failure');
+
+      // Let whatever is still owed answer, so both rounds finish.
+      while (pending.any((c) => !c.isCompleted)) {
+        for (final c in pending.where((c) => !c.isCompleted).toList()) {
+          c.complete(200);
+        }
+        await settle();
+      }
+      await Future.wait([r1, r2]);
+    });
+
+    test("an older round's failure never overwrites a newer round's success",
+        () async {
+      final (repo, pending) = await gatedRepo();
+      final r1 = repo.refresh();
+      final r2 = repo.refresh();
+      await settle();
+
+      // The NEWEST request answers first and succeeds; anything older then
+      // fails. Repeated until nothing is owed, so the rule is the same however
+      // many requests the implementation chooses to make.
+      while (pending.any((c) => !c.isCompleted)) {
+        final open = pending.where((c) => !c.isCompleted).toList();
+        open.last.complete(200);
+        await settle();
+        for (final c in open.sublist(0, open.length - 1)) {
+          c.complete(503);
+        }
+        await settle();
+      }
+      await Future.wait([r1, r2]);
+
+      expect(repo.serverOnline[_serverA.baseUrl], isTrue,
+          reason: 'the last request ISSUED succeeded; that is the truth');
+      expect(repo.current.map((s) => s.id), contains('Office1'));
+    });
+  });
+
+  group('SessionRepository.refresh vs a hanging /api/version', () {
+    test("one server's hung version call does not gate another's rows",
+        () async {
+      SharedPreferences.setMockInitialValues({
+        ServerStore.storageKey: _encodeServers([_fast, _slow]),
+      });
+      // HANGS, rather than failing fast: a 503 answers instantly and hides the
+      // wait. A peer whose TCP connect hangs holds its version call for the
+      // whole client deadline, and it used to hold every server's rows too.
+      final hang = Completer<void>();
+      final repo = SessionRepository.forTest(
+        store: await _store(),
+        clientFactory: (s) => ApiClient(
+          s,
+          httpClient: MockClient((req) async {
+            if (req.url.path == '/api/version') {
+              if (s.baseUrl == _slow.baseUrl) await hang.future;
+              return http.Response('', 503);
+            }
+            return http.Response(_oneSession(s), 200);
+          }),
+        ),
+      );
+
+      final firstPaint = repo.sessions.first;
+      final round = repo.refresh();
+      final painted = await firstPaint.timeout(const Duration(seconds: 3));
+      expect(painted.map((s) => s.id), contains('Fast1'));
+      expect(hang.isCompleted, isFalse);
+
+      hang.complete();
+      await round;
+      expect(repo.current.map((s) => s.id), containsAll(['Fast1', 'Slow1']));
+    });
+  });
+
+  group('SessionRepository.refresh vs a server removed mid-round', () {
+    test('its in-flight answer does not bring its rows back', () async {
+      SharedPreferences.setMockInitialValues({
+        ServerStore.storageKey: _encodeServers([_fast, _slow]),
+      });
+      final store = await _store();
+      final gate = Completer<void>();
+      final repo = SessionRepository.forTest(
+        store: store,
+        clientFactory: (s) => ApiClient(
+          s,
+          httpClient: MockClient((req) async {
+            if (req.url.path == '/api/sessions') {
+              if (s.baseUrl == _slow.baseUrl) await gate.future;
+              return http.Response(_oneSession(s), 200);
+            }
+            return http.Response('', 503);
+          }),
+        ),
+      );
+
+      final round = repo.refresh();
+      await repo.sessions.first.timeout(const Duration(seconds: 3));
+      await store.removeAt(
+          store.servers.indexWhere((s) => s.baseUrl == _slow.baseUrl));
+      gate.complete();
+      await round;
+
+      expect(repo.current.map((s) => s.id), isNot(contains('Slow1')));
+      expect(repo.serverOnline.containsKey(_slow.baseUrl), isFalse);
+    });
+  });
+
+  group('SessionRepository fail streak vs 401', () {
+    setUp(() {
+      SharedPreferences.setMockInitialValues({
+        ServerStore.storageKey: _encodeServers([_serverA]),
+      });
+    });
+
+    test('a 401 round is not a step toward "unreachable"', () async {
+      // A 401 ANSWERED. Counting it made 401 -> one timeout read as two
+      // consecutive outages and confirmed the server offline on its first
+      // real miss.
+      var code = 401;
+      final repo = _repoWithStatus(await _store(), () => code);
+      await repo.refresh();
+      code = 503;
+      await repo.refresh();
+      expect(repo.serverOfflineConfirmed[_serverA.baseUrl], isFalse);
+    });
+  });
+}
