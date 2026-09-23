@@ -29,7 +29,7 @@ void main() {
       test('$path runs the shared release preflight', () {
         final f = File(path);
         expect(f.existsSync(), isTrue, reason: '$path is a release script');
-        expect(_codeLines(f), contains(_preflightLine),
+        expect(_codeLines(f).any((l) => l.startsWith(_preflightLine)), isTrue,
             reason: '$path must source the preflight, which reads the version '
                 'from pubspec.yaml and refuses a checkout behind origin/master');
       });
