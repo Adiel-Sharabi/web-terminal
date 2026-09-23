@@ -11,11 +11,19 @@ These are not in git; they must exist in your working tree to build:
 
 If you clone fresh, recreate these two before building. For `spike_config.dart` there is a committed template with empty values — `cp lib/spike_config.example.dart lib/spike_config.dart` — which is enough to compile and to run `flutter test`; the Android build additionally needs a real `google-services.json`.
 
+## The version label (#278)
+Both release scripts source `scripts/release-preflight.sh`. It reads the version from
+`pubspec.yaml` (there is no version argument - bump `pubspec.yaml` to ship a new
+build), **refuses a checkout that does not contain `origin/master`**, and warns on
+uncommitted changes. `1.66.12+152` was built from a stale 1.66.9 tree with
+`--build-name=1.66.12`, so its label lied and #237's fix never reached a device.
+Pass `--allow-stale` only for a deliberate test build of an old branch.
+
 ## Android (FCM / Firebase)
 Builds straight from this directory — Firebase is Android-only:
 ```bash
 export PATH="/c/src/flutter/bin:$PATH"
-flutter build apk --release --build-name=<X.Y.Z> --build-number=<N>
+bash scripts/build-apk.sh
 # -> build/app/outputs/flutter-apk/app-release.apk
 adb -s <device> install -r build/app/outputs/flutter-apk/app-release.apk
 ```
@@ -30,7 +38,7 @@ anyway (`pushSupported` in `lib/main.dart`), so Firebase is dead weight there.
 isolated) Firebase bits, and builds — the canonical tree is never modified:
 ```bash
 export PATH="/c/src/flutter/bin:$PATH"
-bash scripts/build-windows.sh <X.Y.Z> <N>
+bash scripts/build-windows.sh
 # -> <scratch>/ai-terminal-winbuild/build/windows/x64/runner/Release/
 ```
 The scratch location is **not hard-coded here**: the script asks

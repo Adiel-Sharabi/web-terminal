@@ -29,12 +29,14 @@ Full instructions, including the two gitignored local files a fresh clone must r
 
 ```bash
 # Android (Firebase/FCM is Android-only)
-flutter build apk --release --build-name=<X.Y.Z> --build-number=<N>
+# The version comes from pubspec.yaml ONLY - bump it there. Both scripts refuse a
+# checkout behind origin/master (#278); --allow-stale is for deliberate test builds.
+bash ai-terminal/scripts/build-apk.sh
 
 # Windows — a helper script builds from a scratch copy with the
 # Firebase bits stripped (firebase_core has no working Windows build),
 # leaving the canonical tree untouched
-bash ai-terminal/scripts/build-windows.sh <X.Y.Z> <N>
+bash ai-terminal/scripts/build-windows.sh
 ```
 
 Windows builds additionally need **Developer Mode ON** (Flutter's plugin symlinks require it) and Visual Studio 2022 with "Desktop development with C++". The Dart tests run via `flutter test`, separately from the Playwright suite.

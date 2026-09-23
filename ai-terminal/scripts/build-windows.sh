@@ -8,17 +8,16 @@
 # strips the (fully isolated) firebase bits, and builds there — leaving the
 # canonical tree untouched. Android builds directly from the canonical tree.
 #
-# Usage:  scripts/build-windows.sh <version-name> <version-code>
-#   e.g.  scripts/build-windows.sh 1.0.9 10
+# Usage:  scripts/build-windows.sh [--allow-stale]
+#   The version is read from pubspec.yaml and is NOT an argument (#278) - see
+#   scripts/release-preflight.sh, which also refuses a checkout behind origin/master.
 #
 # Output: <scratch>/build/windows/x64/runner/Release/  (path printed at the end)
 # Requires flutter on PATH (Git Bash:  export PATH="/c/src/flutter/bin:$PATH").
 set -euo pipefail
 
-NAME="${1:?usage: build-windows.sh <version-name> <version-code>}"
-CODE="${2:?usage: build-windows.sh <version-name> <version-code>}"
-
 SRC="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"   # ai-terminal/
+source "$SRC/scripts/release-preflight.sh" "$@"   # sets RELEASE_VERSION, or exits
 # Scratch stripped tree. Asked for rather than hard-coded, so this and the rig and the
 # probe all move together when the location changes (#80): scripts/scratch-dirs.js.
 OUT="$(node "$SRC/../scripts/scratch-dirs.js" winbuild --posix)"
@@ -44,10 +43,10 @@ sed -i \
   "$OUT/lib/main.dart"
 sed -i -e '/^  firebase_core:/d' -e '/^  firebase_messaging:/d' "$OUT/pubspec.yaml"
 
-echo "== firebase stripped; building Windows $NAME+$CODE"
+echo "== firebase stripped; building Windows $RELEASE_VERSION"
 cd "$OUT"
 flutter pub get
-flutter build windows --release --build-name="$NAME" --build-number="$CODE"
+flutter build windows --release   # version from the copied pubspec.yaml, never overridden (#278)
 
 echo ""
 echo "== DONE. Release output:"
