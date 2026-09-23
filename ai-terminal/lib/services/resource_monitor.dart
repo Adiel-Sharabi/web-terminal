@@ -72,7 +72,7 @@ class ResourceMonitor extends ChangeNotifier {
   /// The FREE per-server machine reading (#152 level 1, #165) — kept apart
   /// from [_byBaseUrl], which only the expensive `/api/resources` poll
   /// writes. [SessionRepository] publishes here from every `/api/version`
-  /// poll it already makes (see `_ensureServerNames`), independent of
+  /// poll it already makes (see `_ensureServerName`), independent of
   /// [enabled]: unlike [refresh] below, this never starts a whole-machine
   /// process query, so there is nothing for the toggle to gate. A baseUrl
   /// absent from this map has never been asked; one present with a `null`

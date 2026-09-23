@@ -26,25 +26,42 @@ import 'package:flutter/foundation.dart';
 import '../api/api_client.dart';
 import '../api/models.dart';
 import 'server_store.dart';
+import 'session_repository.dart';
 
 /// Builds a client for a server — injectable so tests never touch the network.
 typedef ApiClientBuilder = ApiClient Function(ServerConfig server);
+
+/// Whether the token we hold for [baseUrl] was REFUSED by that server (a 401 on
+/// the last refresh), keyed by the server's own `baseUrl` exactly as
+/// [SessionRepository.serverNeedsAuth] keys it — never a normalised copy, so
+/// the two can never disagree about which server is meant.
+typedef StaleTokenProbe = bool Function(String baseUrl);
 
 class ClusterDiscovery {
   ClusterDiscovery({
     required ServerStore store,
     ApiClientBuilder? clientBuilder,
     String deviceLabel = 'companion',
+    StaleTokenProbe? staleToken,
     // `this._store` is what the lint would prefer, but Dart forbids a PRIVATE
     // named parameter, so the field has to be assigned in the initializer list.
   })  : _build = clientBuilder ?? ApiClient.new,
         _label = deviceLabel,
+        _stale = staleToken ?? _refusedByRepository,
         // ignore: prefer_initializing_formals
         _store = store;
 
   final ServerStore _store;
   final ApiClientBuilder _build;
   final String _label;
+  final StaleTokenProbe _stale;
+
+  /// The production probe. Defaulted here rather than required at each call
+  /// site on purpose: there are two (`main.dart` and the dashboard's pull), and
+  /// a call site that forgot to pass it would silently lose the healing while
+  /// looking correct.
+  static bool _refusedByRepository(String baseUrl) =>
+      SessionRepository.instance.serverNeedsAuth[baseUrl] == true;
 
   bool _running = false;
 
@@ -88,6 +105,26 @@ class ClusterDiscovery {
       if (!reachedAny) return false;
 
       final discovered = <ServerConfig>[];
+
+      // ONE owner for "we could not get this entry a token, so keep the one we
+      // already have". `syncDiscovered` reads an absent cluster entry as "left
+      // the cluster" and DELETES it, token and all, so every no-token exit in
+      // the loop below has to come through here.
+      //
+      // It is a helper rather than two copies because the second copy is what
+      // went missing: until a REFUSED entry could reach these lines, `existing`
+      // was always null there and `continue` was harmless, so the rescue was
+      // written at one exit and not the other and the omission looked like
+      // nothing. Keeping the rule in one place is the only version of this that
+      // stays true when a third exit is added.
+      void keepExisting(ServerConfig? existing, ClusterPeer peer) {
+        if (existing == null) return;
+        discovered.add(existing.copyWith(
+          name: peer.name.isEmpty ? existing.name : peer.name,
+          origin: ServerOrigin.cluster,
+        ));
+      }
+
       for (final entry in advertised.entries) {
         final url = entry.key;
         final peer = entry.value;
@@ -95,9 +132,26 @@ class ClusterDiscovery {
 
         // Already ours by hand: leave it entirely alone (the store enforces this
         // too, but not asking for a token avoids pointless work and log noise).
+        //
+        // KNOWN GAP, deliberate: this means a MANUALLY-added server whose token
+        // has expired is not healed by the re-mint below either. Widening it
+        // would also mean changing `syncDiscovered`, which refuses to touch a
+        // manual entry at all — a bigger blast radius than this fix wants, and
+        // overwriting a credential the user typed is a decision, not a repair.
+        // Deleting the entry and letting discovery re-add it converts it to a
+        // cluster entry, after which it self-heals for good.
         if (existing != null && existing.origin == ServerOrigin.manual) continue;
 
-        if (existing != null && existing.bearerToken.isNotEmpty) {
+        // "Usable" USED TO MEAN "the string is not empty", which is a fact about
+        // our storage and not about the server. An app token carries a 90-day
+        // expiry and is pruned server-side once past it, so a held token goes
+        // dead on a timer with nothing on this device changing — and the peer
+        // then answers 401 forever while we sit on the corpse. Measured
+        // 2026-09-21: office's companion token expired, was pruned at 00:17,
+        // and the phone showed "Office is unreachable" with office healthy and
+        // this very re-mint path available and unused.
+        final refused = existing != null && _stale(existing.baseUrl);
+        if (existing != null && existing.bearerToken.isNotEmpty && !refused) {
           // Known and usable — refresh the name, keep the token.
           discovered.add(existing.copyWith(
             name: peer.name.isEmpty ? existing.name : peer.name,
@@ -106,12 +160,30 @@ class ClusterDiscovery {
           continue;
         }
 
-        // New to us: we need a token before it is of any use.
-        if (!peer.hasToken) continue; // the advertiser cannot vouch for it yet
+        // Either new to us, or holding a token that server has refused. Both
+        // need a token before the entry is of any use.
+        // The advertiser cannot vouch for it yet. For a REFUSED entry that is
+        // not "this server is gone" - it is one peer's view of a gitignored,
+        // per-machine cluster-tokens.json, and `advertised.putIfAbsent` above
+        // keeps the FIRST advertiser's answer, so one peer missing a token is
+        // enough even when others have it.
+        if (!peer.hasToken) {
+          keepExisting(existing, peer);
+          continue;
+        }
         final token = await _mintVia(known, url);
-        if (token == null) continue; // nobody could get us one; try again later
+        // Nobody could get us one. For a REFUSED entry, keep what we have
+        // rather than dropping it: `syncDiscovered` treats an absent entry as
+        // "left the cluster" and would delete the server outright, turning a
+        // recoverable auth failure into a vanished row.
+        if (token == null) {
+          keepExisting(existing, peer);
+          continue;
+        }
         discovered.add(ServerConfig(
-          name: peer.name.isEmpty ? url : peer.name,
+          // Keep the name we already had when the advertiser offers none, so a
+          // re-mint never renames a server to its own URL.
+          name: peer.name.isEmpty ? (existing?.name ?? url) : peer.name,
           baseUrl: url,
           bearerToken: token,
           origin: ServerOrigin.cluster,
