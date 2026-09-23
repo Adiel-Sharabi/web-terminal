@@ -34,11 +34,13 @@ Two **gitignored** local files must exist in your working tree before a build â€
 
 ```bash
 # Android
-flutter build apk --release --build-name=<X.Y.Z> --build-number=<N>
+# The version comes from pubspec.yaml ONLY - bump it there. Both scripts refuse a
+# checkout behind origin/master (#278); --allow-stale is for deliberate test builds.
+bash scripts/build-apk.sh
 
 # Windows â€” builds from a scratch copy with the Firebase bits stripped
 # (firebase_core has no working Windows build); the canonical tree is untouched
-bash scripts/build-windows.sh <X.Y.Z> <N>
+bash scripts/build-windows.sh
 ```
 
 Windows additionally needs **Developer Mode ON** (Flutter's plugin symlinks require it) and Visual Studio 2022 with "Desktop development with C++".
