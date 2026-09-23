@@ -435,17 +435,23 @@ function claimedConversationsExcept(id) {
 // Soft by construction: no pid, no declared process name, a snapshot that could not be
 // taken, or an agent that has already exited all yield null, and null means "fall back
 // to the previous behaviour" rather than an error or an empty lens.
-async function agentProcessStartMs(s) {
+//
+// #280: never awaited, because this runs inside GET /api/sessions and the snapshot is a
+// PowerShell spawn that can hang. Returns { startMs, provisional }. `provisional` means
+// "no snapshot fresh enough to trust": the caller still falls back to newest-in-cwd, as a
+// failed query always did, but must NOT cache that answer — a guess cached for the
+// discovered-path TTL is how two Codex sessions in one folder would share a rollout after
+// every restart. Only the TTL-fresh snapshot counts here: a stale one can still list an
+// agent that was quit and restarted, and matching THAT is worse than not matching.
+function agentProcessStartMs(s) {
   try {
     const exeName = agentsLib.processNameFor(s && s.agent);
-    if (!exeName || !s.pid) return null;
-    // Never awaited: this runs inside GET /api/sessions (#280). A just-started agent
-    // missing from the last snapshot falls back exactly as a failed query always did.
-    const procs = processTree.snapshotNoWait();
-    if (!procs) return null;
+    if (!exeName || !s.pid) return { startMs: null, provisional: false };
+    const procs = processTree.snapshotNoWait(Date.now(), { maxAgeMs: processTree.SNAPSHOT_TTL_MS });
+    if (!procs) return { startMs: null, provisional: true };
     const proc = processTree.newestDescendantNamed(procs, s.pid, exeName);
-    return proc && Number.isFinite(proc.startMs) ? proc.startMs : null;
-  } catch { return null; }
+    return { startMs: proc && Number.isFinite(proc.startMs) ? proc.startMs : null, provisional: false };
+  } catch { return { startMs: null, provisional: false }; }
 }
 
 async function deriveTranscript(id) {
@@ -457,6 +463,7 @@ async function deriveTranscript(id) {
     // session's OWN agent process start time is what separates two Codex sessions
     // sharing a folder (lib/codex-match.js). Null when it cannot be determined, which
     // simply falls back to the historical newest-in-cwd rule.
+    const started = agentProcessStartMs(s);
     const session = {
       cwd: s.cwd,
       agentSessionId: s.claudeSessionId || null,
@@ -466,14 +473,15 @@ async function deriveTranscript(id) {
       // Conversations owned by OTHER sessions, so a session without its own reported id
       // is never handed a neighbour's by mtime.
       claimedIds: claimedConversationsExcept(id),
-      processStartMs: await agentProcessStartMs(s),
+      processStartMs: started.startMs,
     };
     // An agent recorded on the session is an explicit user choice — honour it and do
     // NOT fall through to another provider. Only a session with no recorded agent
     // (plain shell) gets cross-provider discovery.
     const explicit = agentsLib.isKnownAgent(s.agent);
     const preferred = explicit ? s.agent : agentsLib.DEFAULT_AGENT;
-    return agentsLib.resolveTranscriptFor(session, preferred, transcriptIoFor, safeTranscriptPath, { discover: !explicit });
+    const resolved = await agentsLib.resolveTranscriptFor(session, preferred, transcriptIoFor, safeTranscriptPath, { discover: !explicit });
+    return { ...resolved, provisional: started.provisional };
   } catch { return { path: '', agent: agentsLib.DEFAULT_AGENT }; }
 }
 
@@ -566,7 +574,8 @@ async function resolveSessionTranscriptPath(id) {
   if (!tpath) {
     const derived = await deriveTranscript(id);
     tpath = derived.path;
-    if (tpath) {
+    // #280: a provisional answer is served but not remembered - see agentProcessStartMs.
+    if (tpath && !derived.provisional) {
       const s = _nstate(id);
       s.transcriptPath = tpath;
       s.transcriptAgent = derived.agent;

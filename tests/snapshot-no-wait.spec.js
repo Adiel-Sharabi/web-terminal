@@ -63,6 +63,58 @@ test.describe('#280 snapshotNoWait — a hung query never blocks a caller', () =
     expect(pt.snapshotNoWait(at + pt.SNAPSHOT_SERVE_MAX_MS)).toBeNull();
   });
 
+  test('maxAgeMs asks for FRESHER than the badge default (the Codex matcher)', async () => {
+    // A stale tree can still list an agent that was quit and restarted; matching a rollout
+    // against THAT is worse than not matching, so the Codex path asks for the TTL only.
+    pt._setQueryForTests(async () => PROCS);
+    await pt.snapshot();
+    const at = pt._peekCacheForTests().at;
+    pt._setQueryForTests(HUNG);
+    const opts = { maxAgeMs: pt.SNAPSHOT_TTL_MS };
+    expect(pt.snapshotNoWait(at + pt.SNAPSHOT_TTL_MS - 1, opts)).toBe(PROCS);
+    expect(pt.snapshotNoWait(at + pt.SNAPSHOT_TTL_MS, opts)).toBeNull();
+    expect(pt.snapshotNoWait(at + pt.SNAPSHOT_TTL_MS)).toBe(PROCS);   // the badge still gets it
+  });
+
+  test('a query that NEVER calls back is abandoned after INFLIGHT_MAX_MS, not held forever', () => {
+    const realNow = Date.now;
+    let clock = realNow();
+    Date.now = () => clock;
+    try {
+      let calls = 0;
+      pt._setQueryForTests(() => { calls++; return HUNG(); });
+      pt.snapshotNoWait(clock);
+      expect(calls).toBe(1);
+      clock += pt.INFLIGHT_MAX_MS - 1;
+      pt.snapshotNoWait(clock);
+      expect(calls).toBe(1);            // inside the deadline: joined, not re-spawned
+      clock += 1;
+      pt.snapshotNoWait(clock);
+      expect(calls).toBe(2);            // past it: a new attempt, so the badge can recover
+    } finally { Date.now = realNow; }
+  });
+
+  test('a LATE answer from an abandoned query cannot overwrite the one that replaced it', async () => {
+    const OLD = [{ pid: 20, ppid: 1, name: 'bash.exe', startMs: 1 }];
+    const NEW = [{ pid: 21, ppid: 1, name: 'bash.exe', startMs: 2 }];
+    const realNow = Date.now;
+    let clock = realNow();
+    Date.now = () => clock;
+    try {
+      const releases = [];
+      pt._setQueryForTests(() => new Promise((r) => releases.push(r)));
+      pt.snapshotNoWait(clock);                     // query #1 starts, then hangs
+      clock += pt.INFLIGHT_MAX_MS;
+      pt.snapshotNoWait(clock);                     // query #2 replaces it
+      expect(releases).toHaveLength(2);
+      releases[1](NEW);
+      await new Promise((r) => setImmediate(r));
+      releases[0](OLD);                             // #1 finally answers, with older data
+      await new Promise((r) => setImmediate(r));
+      expect(pt.snapshotNoWait(clock)).toBe(NEW);
+    } finally { Date.now = realNow; }
+  });
+
   test('the refresh it started lands, and the next call serves it', async () => {
     const NEWER = [{ pid: 11, ppid: 1, name: 'bash.exe', startMs: 2 }];
     pt._setQueryForTests(async () => PROCS);
@@ -83,11 +135,26 @@ test.describe('#280 source gate — no request-path helper awaits a fresh snapsh
   // is only slow on a box whose PowerShell hangs, which CI is not. So read the source.
   // `/api/resources` is the one deliberate exception — its whole job is a fresh CPU
   // reading, it goes through `readTrees`/`snapshotPair`, and it is its own request.
-  test('server.js never awaits processTree.snapshot()', () => {
-    const src = fs.readFileSync(path.join(__dirname, '..', 'server.js'), 'utf8');
-    const hits = src.split('\n')
-      .map((l, i) => ({ l, n: i + 1 }))
-      .filter(({ l }) => /await\s+processTree\.snapshot\s*\(/.test(l) && !/^\s*\/\//.test(l));
-    expect(hits.map(({ n, l }) => `server.js:${n}: ${l.trim()}`)).toEqual([]);
+  // Comments are dropped first: the ones explaining this rule name the call, and so does
+  // the SERVER_VERSION changelog. A trailing comment needs whitespace before `//`, which
+  // leaves a `http://` inside a string alone.
+  const code = () => fs.readFileSync(path.join(__dirname, '..', 'server.js'), 'utf8')
+    .split(/\r?\n/).filter((l) => !/^\s*\/\//.test(l))
+    .map((l) => l.replace(/\s\/\/.*$/, '')).join('\n');
+
+  test('server.js never calls processTree.snapshot() at all', () => {
+    // Whole-source, so a call split across lines or chained with .then() is caught too;
+    // \b keeps snapshotNoWait and snapshotPair out of it.
+    expect(code().match(/processTree\s*\.\s*snapshot\b\s*\(/g)).toBeNull();
+  });
+
+  test('server.js never pulls snapshot out of processTree by destructuring', () => {
+    expect(code().match(/\{[^}]*\bsnapshot\b[^}]*\}\s*=\s*(processTree|require\(['"]\.\/lib\/process-tree['"]\))/g)).toBeNull();
+  });
+
+  test('a PROVISIONAL Codex resolution is served but never cached', () => {
+    // Behaviourally this needs two Codex sessions in one folder and a server restart; the
+    // rule rests on one condition, so pin the condition.
+    expect(code()).toMatch(/if\s*\(\s*tpath\s*&&\s*!derived\.provisional\s*\)/);
   });
 });
