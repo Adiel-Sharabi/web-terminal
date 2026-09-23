@@ -437,20 +437,13 @@ function claimedConversationsExcept(id) {
 // to the previous behaviour" rather than an error or an empty lens.
 //
 // #280: never awaited, because this runs inside GET /api/sessions and the snapshot is a
-// PowerShell spawn that can hang. Returns { startMs, provisional }. `provisional` means
-// "no snapshot fresh enough to trust": the caller still falls back to newest-in-cwd, as a
-// failed query always did, but must NOT cache that answer — a guess cached for the
-// discovered-path TTL is how two Codex sessions in one folder would share a rollout after
-// every restart. Only the TTL-fresh snapshot counts here: a stale one can still list an
-// agent that was quit and restarted, and matching THAT is worse than not matching.
+// PowerShell spawn that can hang. Returns { startMs, provisional } - the rule, including
+// when an answer is only provisional, lives in processTree.agentStartFromSnapshot.
 function agentProcessStartMs(s) {
   try {
     const exeName = agentsLib.processNameFor(s && s.agent);
     if (!exeName || !s.pid) return { startMs: null, provisional: false };
-    const procs = processTree.snapshotNoWait(Date.now(), { maxAgeMs: processTree.SNAPSHOT_TTL_MS });
-    if (!procs) return { startMs: null, provisional: true };
-    const proc = processTree.newestDescendantNamed(procs, s.pid, exeName);
-    return { startMs: proc && Number.isFinite(proc.startMs) ? proc.startMs : null, provisional: false };
+    return processTree.agentStartFromSnapshot(s.pid, exeName);
   } catch { return { startMs: null, provisional: false }; }
 }
 
@@ -552,6 +545,10 @@ function transcriptIoFor(provider) {
 // rollouts and reads a head from each, so this must not be zero — but it must not be
 // forever either, which is exactly the bug it fixes.
 const DISCOVERED_TRANSCRIPT_TTL_MS = 10000;
+// #280: a path resolved against no process snapshot, or one past its TTL, is held this
+// long instead. Not zero: re-deriving walks the whole rollout folder, and on a box whose
+// snapshot is failing that would run on every poll.
+const PROVISIONAL_TRANSCRIPT_TTL_MS = 2000;
 
 async function resolveSessionTranscriptPath(id) {
   const st = _notifyState.get(id) || {};
@@ -568,18 +565,18 @@ async function resolveSessionTranscriptPath(id) {
   // Claude never showed this because its path is a derivation AND its hook re-stashes
   // it on every event; Codex has neither.
   if (tpath && !agentsLib.transcriptPathIsStable(st.transcriptAgent) &&
-      Date.now() - (st.transcriptAt || 0) > DISCOVERED_TRANSCRIPT_TTL_MS) {
+      Date.now() - (st.transcriptAt || 0) > (st.transcriptTtlMs || DISCOVERED_TRANSCRIPT_TTL_MS)) {
     tpath = '';
   }
   if (!tpath) {
     const derived = await deriveTranscript(id);
     tpath = derived.path;
-    // #280: a provisional answer is served but not remembered - see agentProcessStartMs.
-    if (tpath && !derived.provisional) {
+    if (tpath) {
       const s = _nstate(id);
       s.transcriptPath = tpath;
       s.transcriptAgent = derived.agent;
       s.transcriptAt = Date.now();
+      s.transcriptTtlMs = derived.provisional ? PROVISIONAL_TRANSCRIPT_TTL_MS : DISCOVERED_TRANSCRIPT_TTL_MS;
     }
   }
   return tpath;

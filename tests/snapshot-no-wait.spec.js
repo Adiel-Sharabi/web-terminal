@@ -63,17 +63,34 @@ test.describe('#280 snapshotNoWait — a hung query never blocks a caller', () =
     expect(pt.snapshotNoWait(at + pt.SNAPSHOT_SERVE_MAX_MS)).toBeNull();
   });
 
-  test('maxAgeMs asks for FRESHER than the badge default (the Codex matcher)', async () => {
-    // A stale tree can still list an agent that was quit and restarted; matching a rollout
-    // against THAT is worse than not matching, so the Codex path asks for the TTL only.
-    pt._setQueryForTests(async () => PROCS);
+  // The Codex matcher: two sessions in one folder are told apart by their agent's start.
+  const CODEX_TREE = [
+    { pid: 100, ppid: 1, name: 'bash.exe', startMs: 1 },
+    { pid: 101, ppid: 100, name: 'codex.exe', startMs: 5000 },
+  ];
+
+  test('agentStartFromSnapshot: a fresh tree matches and is NOT provisional', async () => {
+    pt._setQueryForTests(async () => CODEX_TREE);
+    await pt.snapshot();
+    const at = pt._peekCacheForTests().at;
+    expect(pt.agentStartFromSnapshot(100, 'codex.exe', at + 1)).toEqual({ startMs: 5000, provisional: false });
+  });
+
+  test('agentStartFromSnapshot: a tree past the TTL STILL matches, flagged provisional', async () => {
+    // The review's scenario. Refusing a 20s-old tree answered null, fell back to the newest
+    // rollout in the folder, and flipped a session to its NEIGHBOUR's conversation every
+    // ~23s on a perfectly healthy box. A slightly old tree is still right for an agent that
+    // has not been restarted, so it is used - and only held briefly.
+    pt._setQueryForTests(async () => CODEX_TREE);
     await pt.snapshot();
     const at = pt._peekCacheForTests().at;
     pt._setQueryForTests(HUNG);
-    const opts = { maxAgeMs: pt.SNAPSHOT_TTL_MS };
-    expect(pt.snapshotNoWait(at + pt.SNAPSHOT_TTL_MS - 1, opts)).toBe(PROCS);
-    expect(pt.snapshotNoWait(at + pt.SNAPSHOT_TTL_MS, opts)).toBeNull();
-    expect(pt.snapshotNoWait(at + pt.SNAPSHOT_TTL_MS)).toBe(PROCS);   // the badge still gets it
+    expect(pt.agentStartFromSnapshot(100, 'codex.exe', at + 20000)).toEqual({ startMs: 5000, provisional: true });
+  });
+
+  test('agentStartFromSnapshot: no tree yet is null AND provisional, and never waits', () => {
+    pt._setQueryForTests(HUNG);
+    expect(pt.agentStartFromSnapshot(100, 'codex.exe')).toEqual({ startMs: null, provisional: true });
   });
 
   test('a query that NEVER calls back is abandoned after INFLIGHT_MAX_MS, not held forever', () => {
@@ -152,9 +169,11 @@ test.describe('#280 source gate — no request-path helper awaits a fresh snapsh
     expect(code().match(/\{[^}]*\bsnapshot\b[^}]*\}\s*=\s*(processTree|require\(['"]\.\/lib\/process-tree['"]\))/g)).toBeNull();
   });
 
-  test('a PROVISIONAL Codex resolution is served but never cached', () => {
-    // Behaviourally this needs two Codex sessions in one folder and a server restart; the
-    // rule rests on one condition, so pin the condition.
-    expect(code()).toMatch(/if\s*\(\s*tpath\s*&&\s*!derived\.provisional\s*\)/);
+  test('a PROVISIONAL Codex resolution is held for the short TTL, not the full one', () => {
+    // The behaviour behind \`provisional\` is pinned above; this pins that server.js acts on
+    // it. Held briefly rather than not at all, because re-deriving walks the whole rollout
+    // folder and a box with a failing snapshot would otherwise do that on every poll.
+    expect(code()).toMatch(/transcriptTtlMs\s*=\s*derived\.provisional\s*\?\s*PROVISIONAL_TRANSCRIPT_TTL_MS/);
+    expect(code()).toMatch(/>\s*\(\s*st\.transcriptTtlMs\s*\|\|\s*DISCOVERED_TRANSCRIPT_TTL_MS\s*\)/);
   });
 });
