@@ -42,6 +42,8 @@ if ! GIT_TERMINAL_PROMPT=0 timeout 60 git -C "$SRC" fetch --quiet origin master 
   echo "== WARNING: could not fetch origin/master; checking against the local copy" >&2
 fi
 
+git -C "$SRC" rev-parse --verify -q origin/master >/dev/null \
+  || _rp_fail "no origin/master ref here, so nothing can say whether this checkout is current. Fetch it first."
 _rp_head="$(git -C "$SRC" rev-parse --short HEAD)"
 _rp_branch="$(git -C "$SRC" rev-parse --abbrev-ref HEAD)"
 if ! git -C "$SRC" merge-base --is-ancestor origin/master HEAD; then
@@ -57,4 +59,5 @@ if [ -n "$(git -C "$SRC" status --porcelain -- . 2>/dev/null)" ]; then
   echo "== WARNING: uncommitted changes under $SRC — this build is $_rp_head PLUS edits no commit records" >&2
 fi
 
-echo "== release $RELEASE_VERSION from $_rp_branch@$_rp_head"
+# The check is only as current as what origin points at, so name it.
+echo "== release $RELEASE_VERSION from $_rp_branch@$_rp_head (checked against origin = $(git -C "$SRC" remote get-url origin))"
