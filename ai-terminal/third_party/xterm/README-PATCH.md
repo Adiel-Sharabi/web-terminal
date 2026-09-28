@@ -316,12 +316,44 @@ typing, a suggestion tap, autocorrect on commit (`teh` -> `the ` sends `teh`, tw
 DELs, `he `) and a dictation rewrite. When the region collapses the remainder is
 mirrored and the buffer is reset as before. The overlay is never set any more.
 
-- **Counted in grapheme clusters**, the unit a line editor erases per backspace - a
-  Hebrew letter with a combining point is one DEL, not two.
+- **Counted in grapheme clusters** - one DEL per visible character. That is what
+  Claude's TUI erases, and never MORE than a readline rubout erases (a Hebrew letter
+  with a combining point is one DEL for both). A ZWJ emoji can take readline several
+  DELs, so replacing one there leaves fragments - the error only ever deletes too
+  little, never earlier text.
+- **`_sent` is recorded before anything is emitted.** A consumer may write from inside
+  the output callback (the app's sticky Ctrl/Alt does) and call `finishComposing`
+  there; that reset must survive `_mirror` returning.
 - **`_sent` resets when a new input connection opens.** A word left composing when the
   keyboard closed stays typed in the terminal (it was already shown there); without
   the reset, the next connection's first update would backspace over it.
 - The hardware-keyboard path (`CustomKeyboardListener`, desktop) is untouched.
+
+### `finishComposing` - the mirror's one precondition
+
+`_mirror` assumes the characters just before the terminal cursor are exactly `_sent`.
+Anything written to the PTY **around** the keyboard breaks that - a key-strip arrow
+moves the cursor into the word, a key-strip Enter submits it, a sticky Ctrl turns the
+mirrored letter into a control byte, a paste lands after it. The next rewrite of the
+composing word (autocorrect on Space) would then backspace over text that word never
+typed. Stock could not do this, because it never sent a DEL for composing text.
+
+`CustomTextEditState.finishComposing()` (exposed as
+`TerminalViewState.finishComposing()`) leaves the word as typed - it is already in the
+terminal - clears `_sent`, and resets the IME to its empty buffer. **The consumer must
+call it before every write that does not come from this view's own input.** In the
+companion that is `_finishTerminalComposing()` in `session_screen.dart`: the key strip,
+both terminal pastes, both sticky modifiers and the question-answer frames, pinned
+against the source by the test below.
+
+### The trade-off: a romaji/pinyin keyboard now types its READING first
+
+A CJK input method composes the reading (`nihao`) and commits the conversion (`你好`).
+The mirror types the reading into the PTY and then erases it with DELs before sending
+the conversion. A line editor ends up with the right text; a program that reads each
+letter as a COMMAND (a TUI selector, vim normal mode, `less`) does not, since a DEL does
+not undo a command. Stock sent only the conversion. Accepted: the reported keyboards
+compose Latin and Hebrew words, where the reading IS the text.
 
 ### Tests
 

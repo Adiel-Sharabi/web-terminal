@@ -222,8 +222,13 @@ class CustomTextEditState extends State<CustomTextEdit> with TextInputClient {
   // WEB-TERMINAL PATCH (#283): make the terminal hold [target] where it now
   // holds [_sent] — backspace over whatever follows their common prefix, then
   // type the rest. One rule covers typing, a suggestion tap, autocorrect on
-  // commit and a dictation rewrite. Counted in grapheme clusters, the unit a
-  // terminal line editor erases per backspace.
+  // commit and a dictation rewrite. Counted in grapheme clusters: one DEL per
+  // visible character, which is what Claude's TUI erases and never more than a
+  // readline rubout does (a ZWJ emoji can take readline several).
+  //
+  // `_sent` is recorded BEFORE anything is emitted: a consumer that writes to
+  // the terminal from inside the callback (a sticky modifier) calls
+  // [finishComposing], and that reset must survive this call returning.
   void _mirror(String target) {
     final sent = _sent.characters.toList();
     final next = target.characters.toList();
@@ -233,13 +238,29 @@ class CustomTextEditState extends State<CustomTextEdit> with TextInputClient {
         sent[common] == next[common]) {
       common++;
     }
+    _sent = target;
     for (var i = common; i < sent.length; i++) {
       widget.onDelete();
     }
     if (common < next.length) {
       widget.onInsert(next.sublist(common).join());
     }
-    _sent = target;
+  }
+
+  /// WEB-TERMINAL PATCH (#283): the terminal is about to receive input that
+  /// did not come from the IME (a key-strip key, a paste, a sticky modifier).
+  /// [_mirror] assumes the characters before the cursor are exactly [_sent];
+  /// after such a write they are not, and the next rewrite of the composing
+  /// word would backspace over text that word never typed. So the word is
+  /// left as typed — it is already in the terminal — and the IME starts over.
+  void finishComposing() {
+    _sent = '';
+    final init = _initEditingState;
+    if (_currentEditingState.text == init.text &&
+        _currentEditingState.composing.isCollapsed) {
+      return;
+    }
+    setEditingState(init);
   }
 
   @override

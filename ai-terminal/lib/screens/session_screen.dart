@@ -1501,6 +1501,7 @@ class _SessionScreenState extends State<SessionScreen>
       _pendingQuestion = null;
       _dismissedQuestionKey = answeredKey;
     });
+    _finishTerminalComposing();
     for (var i = 0; i < frames.length; i++) {
       if (!mounted) return;
       _connection?.sendInput(frames[i].keys);
@@ -2279,12 +2280,15 @@ class _SessionScreenState extends State<SessionScreen>
     if (_ctrlSticky && data.length == 1) {
       final code = data.codeUnitAt(0) & 0x1f;
       _connection?.sendInput(String.fromCharCode(code));
+      // #283: the PTY got a control byte, not the letter the IME holds.
+      _finishTerminalComposing();
       setState(() => _ctrlSticky = false);
       return;
     }
     if (_altSticky && data.length == 1) {
       // Alt/Meta = ESC prefix before the character.
       _connection?.sendInput('\x1b$data');
+      _finishTerminalComposing();
       setState(() => _altSticky = false);
       return;
     }
@@ -2460,6 +2464,7 @@ class _SessionScreenState extends State<SessionScreen>
     final data = await Clipboard.getData(Clipboard.kTextPlain);
     final text = data?.text;
     if (text == null || text.isEmpty) return;
+    _finishTerminalComposing();
     _terminal.paste(text);
     _scrollToBottom();
   }
@@ -3096,7 +3101,16 @@ class _SessionScreenState extends State<SessionScreen>
     _sendRawToTerminal(sequence);
   }
 
+  /// #283: the terminal view mirrors the soft keyboard's composing word to the
+  /// PTY as it is typed, assuming the characters before the cursor are that
+  /// word. Anything written around the keyboard (a key-strip key, a paste, a
+  /// question answer) breaks that, so the word is finished first - otherwise a
+  /// later autocorrect would backspace over text the word never typed.
+  void _finishTerminalComposing() =>
+      _terminalViewKey.currentState?.finishComposing();
+
   void _sendRawToTerminal(String sequence) {
+    _finishTerminalComposing();
     _handleTerminalOutput(sequence);
     _scrollToBottom();
   }
@@ -3174,6 +3188,7 @@ class _SessionScreenState extends State<SessionScreen>
     final text = data?.text;
     if (text == null || text.isEmpty) return;
     if (_rawMode) {
+      _finishTerminalComposing();
       _terminal.paste(text);
       _scrollToBottom();
     } else {
