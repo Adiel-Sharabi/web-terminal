@@ -253,6 +253,11 @@ class CustomTextEditState extends State<CustomTextEdit> with TextInputClient {
   /// after such a write they are not, and the next rewrite of the composing
   /// word would backspace over text that word never typed. So the word is
   /// left as typed — it is already in the terminal — and the IME starts over.
+  ///
+  /// Only an ATTACHED connection is told. `closeKeyboard` closes one without
+  /// nulling it, and a detached `TextInputConnection.setEditingState` asserts
+  /// in debug and in release reaches whichever client is attached NOW - the
+  /// compose bar, whose draft it would silently empty.
   void finishComposing() {
     _sent = '';
     final init = _initEditingState;
@@ -260,7 +265,10 @@ class CustomTextEditState extends State<CustomTextEdit> with TextInputClient {
         _currentEditingState.composing.isCollapsed) {
       return;
     }
-    setEditingState(init);
+    _currentEditingState = init.copyWith();
+    if (hasInputConnection) {
+      _connection!.setEditingState(init);
+    }
   }
 
   @override

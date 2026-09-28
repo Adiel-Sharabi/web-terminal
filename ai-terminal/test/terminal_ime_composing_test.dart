@@ -275,5 +275,83 @@ void main() {
           '_finishTerminalComposing();'.allMatches(body.substring(0, end)),
           hasLength(2));
     });
+
+    // Every other PTY write: a compose-bar send, an answer, an upload's paths.
+    // The ONE exemption is the terminal's own output funnel, which is where
+    // the mirror's bytes arrive - finishing there would end every word after
+    // its first letter.
+    test('every sendInput( outside the terminal output funnel', () {
+      const funnel = 'sendInput(terminalOutputToPty(data))';
+      final lines = src.split('\n');
+      final methodStart = RegExp(r'^  [A-Za-z].*\(.*$');
+      var checked = 0;
+      for (var i = 0; i < lines.length; i++) {
+        final line = lines[i];
+        if (!line.contains('sendInput(') ||
+            line.trimLeft().startsWith('//') ||
+            line.contains(funnel)) {
+          continue;
+        }
+        var start = i;
+        while (start > 0 && !methodStart.hasMatch(lines[start])) {
+          start--;
+        }
+        final upToCall = lines.sublist(start, i).join('\n');
+        expect(upToCall.contains('_finishTerminalComposing();'), isTrue,
+            reason: 'line ${i + 1} (${line.trim()}) writes to the PTY in '
+                '`${lines[start].trim()}` without finishing the composing '
+                'word first');
+        checked++;
+      }
+      expect(checked, greaterThanOrEqualTo(8),
+          reason: 'the scan must actually be finding the writes');
+    });
+  });
+
+  testWidgets('finishComposing never writes to a connection it gave up',
+      (tester) async {
+    // closeKeyboard() closes the connection without nulling it. A detached
+    // setEditingState asserts in debug and, in release, reaches whichever
+    // client is attached NOW - here the compose bar, whose draft it empties.
+    final viewKey = GlobalKey<TerminalViewState>();
+    final draft = TextEditingController();
+    final fieldFocus = FocusNode();
+    final terminal = Terminal();
+    final out = StringBuffer();
+    terminal.onOutput = out.write;
+    await tester.pumpWidget(MaterialApp(
+      home: Scaffold(
+        body: Column(children: [
+          Expanded(
+            child: TerminalView(terminal,
+                key: viewKey,
+                focusNode: focusNode,
+                textStyle: const TerminalStyle(fontSize: 12),
+                readOnly: false),
+          ),
+          TextField(controller: draft, focusNode: fieldFocus),
+        ]),
+      ),
+    ));
+    await tester.tap(find.byType(TerminalView));
+    await tester.pump(const Duration(seconds: 1));
+    await ime(tester, committed('ab '));
+    viewKey.currentState!.closeKeyboard();
+    fieldFocus.requestFocus();
+    await tester.pump();
+    await tester.enterText(find.byType(TextField), 'my draft');
+    await tester.pump();
+
+    tester.testTextInput.log.clear();
+    viewKey.currentState!.finishComposing();
+    await tester.pump();
+
+    expect(tester.takeException(), isNull);
+    expect(
+        tester.testTextInput.log
+            .where((c) => c.method == 'TextInput.setEditingState'),
+        isEmpty,
+        reason: 'the compose bar owns the IME now; its buffer is not ours');
+    expect(draft.text, 'my draft');
   });
 }

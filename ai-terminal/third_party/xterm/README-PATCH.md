@@ -342,9 +342,16 @@ typed. Stock could not do this, because it never sent a DEL for composing text.
 `TerminalViewState.finishComposing()`) leaves the word as typed - it is already in the
 terminal - clears `_sent`, and resets the IME to its empty buffer. **The consumer must
 call it before every write that does not come from this view's own input.** In the
-companion that is `_finishTerminalComposing()` in `session_screen.dart`: the key strip,
-both terminal pastes, both sticky modifiers and the question-answer frames, pinned
-against the source by the test below.
+companion that is `_finishTerminalComposing()` in `session_screen.dart`, called before
+**every** `sendInput(` in that file and before both `_terminal.paste(` calls. The one
+exemption is the terminal's own output funnel (`_handleTerminalOutput`'s last line),
+where the mirror's bytes arrive. The test below enforces this against the source, so a
+write added later fails the suite rather than reintroducing the bug.
+
+**Only an attached connection is told.** `closeKeyboard()` closes the connection without
+nulling `_connection`, and a detached `TextInputConnection.setEditingState` asserts in
+debug and, in release, is delivered to whichever client is attached *now* - the compose
+bar, whose draft it would silently empty. Otherwise only the local state is reset.
 
 ### The trade-off: a romaji/pinyin keyboard now types its READING first
 
