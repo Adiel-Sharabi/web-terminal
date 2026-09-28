@@ -1501,6 +1501,7 @@ class _SessionScreenState extends State<SessionScreen>
       _pendingQuestion = null;
       _dismissedQuestionKey = answeredKey;
     });
+    _finishTerminalComposing();
     for (var i = 0; i < frames.length; i++) {
       if (!mounted) return;
       _connection?.sendInput(frames[i].keys);
@@ -1572,6 +1573,7 @@ class _SessionScreenState extends State<SessionScreen>
       stillPending = q;
       if (resendEnter && !resentEnter) {
         resentEnter = true;
+        _finishTerminalComposing();
         _connection?.sendInput('\r'); // dropped confirm → resend exactly once
       }
     }
@@ -2278,12 +2280,15 @@ class _SessionScreenState extends State<SessionScreen>
   void _handleTerminalOutput(String data) {
     if (_ctrlSticky && data.length == 1) {
       final code = data.codeUnitAt(0) & 0x1f;
+      // #283: the PTY gets a control byte, not the letter the IME holds.
+      _finishTerminalComposing();
       _connection?.sendInput(String.fromCharCode(code));
       setState(() => _ctrlSticky = false);
       return;
     }
     if (_altSticky && data.length == 1) {
       // Alt/Meta = ESC prefix before the character.
+      _finishTerminalComposing();
       _connection?.sendInput('\x1b$data');
       setState(() => _altSticky = false);
       return;
@@ -2460,6 +2465,7 @@ class _SessionScreenState extends State<SessionScreen>
     final data = await Clipboard.getData(Clipboard.kTextPlain);
     final text = data?.text;
     if (text == null || text.isEmpty) return;
+    _finishTerminalComposing();
     _terminal.paste(text);
     _scrollToBottom();
   }
@@ -2585,6 +2591,7 @@ class _SessionScreenState extends State<SessionScreen>
           ctrlSticky: _ctrlSticky,
         );
         if (reaction.consumed) {
+          _finishTerminalComposing();
           _connection?.sendInput(reaction.controlByte!);
           _settingComposeProgrammatically = true;
           _composeController.value = TextEditingValue(
@@ -2688,6 +2695,7 @@ class _SessionScreenState extends State<SessionScreen>
     _liveCommandText = val; // #131 — '/st' becomes '/status' as it is typed
     final out = backspaces + suffix;
     if (out.isNotEmpty) {
+      _finishTerminalComposing();
       _connection?.sendInput(out);
       _scrollToBottom();
     }
@@ -2708,6 +2716,7 @@ class _SessionScreenState extends State<SessionScreen>
   void _sendCompose() {
     final conn = _connection;
     if (conn == null) return; // no PTY — keep the buffer, don't clear (#44)
+    _finishTerminalComposing(); // #283 - every branch below writes to the PTY
     final val = _composeController.text;
     // #179 — ANY submit answers "did the last one land": whatever was showing
     // is now stale, and a fresh watch (if this one gets one) will report on
@@ -2788,6 +2797,7 @@ class _SessionScreenState extends State<SessionScreen>
     _dismissSubmitUnconfirmedNotice();
     _rememberSubmittedPrompt(null);
     _submittedPrompts.add(val); // optimistic "Queued" echo (#31)
+    _finishTerminalComposing();
     conn.sendInput(buildComposeSubmission(val));
     _pushComposeHistory(val);
     _scrollToBottom();
@@ -3096,7 +3106,18 @@ class _SessionScreenState extends State<SessionScreen>
     _sendRawToTerminal(sequence);
   }
 
+  /// #283: the terminal view mirrors the soft keyboard's composing word to the
+  /// PTY as it is typed, assuming the characters before the cursor are that
+  /// word. Anything written around the keyboard (a key-strip key, a paste, a
+  /// question answer, a compose-bar send) breaks that, so the word is finished
+  /// first - otherwise a later autocorrect would backspace over text the word
+  /// never typed. EVERY PTY write in this file calls it except the terminal's
+  /// own output funnel; `terminal_ime_composing_test.dart` enforces that.
+  void _finishTerminalComposing() =>
+      _terminalViewKey.currentState?.finishComposing();
+
   void _sendRawToTerminal(String sequence) {
+    _finishTerminalComposing();
     _handleTerminalOutput(sequence);
     _scrollToBottom();
   }
@@ -3174,6 +3195,7 @@ class _SessionScreenState extends State<SessionScreen>
     final text = data?.text;
     if (text == null || text.isEmpty) return;
     if (_rawMode) {
+      _finishTerminalComposing();
       _terminal.paste(text);
       _scrollToBottom();
     } else {
@@ -3244,6 +3266,7 @@ class _SessionScreenState extends State<SessionScreen>
       // in a single PTY read and the TUI folds them, so a multi-file pick would
       // deliver only its first path (#90). No submit CR — this is the user's own
       // prompt line and they press Enter themselves.
+      _finishTerminalComposing();
       connection.sendInput(buildPastedPaths([for (final r in batch) r.path]));
       _scrollToBottom();
       return 0;

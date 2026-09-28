@@ -331,6 +331,13 @@ class TerminalViewState extends State<TerminalView> {
     _customTextEditKey.currentState?.closeKeyboard();
   }
 
+  /// WEB-TERMINAL PATCH (#283): call before writing to the terminal from
+  /// anywhere other than this view's own input — see
+  /// [CustomTextEditState.finishComposing].
+  void finishComposing() {
+    _customTextEditKey.currentState?.finishComposing();
+  }
+
   Rect get cursorRect {
     return renderTerminal.cursorOffset & renderTerminal.cellSize;
   }

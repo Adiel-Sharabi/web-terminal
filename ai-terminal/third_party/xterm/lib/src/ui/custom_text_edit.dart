@@ -174,6 +174,11 @@ class CustomTextEditState extends State<CustomTextEdit> with TextInputClient {
 
       // setEditableRect(Rect.zero, Rect.zero);
 
+      // WEB-TERMINAL PATCH (#283): a fresh connection starts from an empty
+      // buffer, so nothing of it has been sent. A word left composing when the
+      // last one closed stays typed in the terminal, as it was already shown.
+      _sent = '';
+      _currentEditingState = _initEditingState.copyWith();
       _connection!.setEditingState(_initEditingState);
     }
   }
@@ -207,29 +212,90 @@ class CustomTextEditState extends State<CustomTextEdit> with TextInputClient {
     return null;
   }
 
+  // WEB-TERMINAL PATCH (#283): what of the IME buffer (the text past
+  // [_initEditingState]) has already been forwarded to the terminal. Stock sent
+  // nothing until the composing region collapsed, so on a soft keyboard with
+  // suggestions the word being typed never reached the PTY: it was painted as an
+  // overlay at a cursor that did not move until Space committed it.
+  String _sent = '';
+
+  // WEB-TERMINAL PATCH (#283): make the terminal hold [target] where it now
+  // holds [_sent] — backspace over whatever follows their common prefix, then
+  // type the rest. One rule covers typing, a suggestion tap, autocorrect on
+  // commit and a dictation rewrite. Counted in grapheme clusters: one DEL per
+  // visible character, which is what Claude's TUI erases and never more than a
+  // readline rubout does (a ZWJ emoji can take readline several).
+  //
+  // `_sent` is recorded BEFORE anything is emitted: a consumer that writes to
+  // the terminal from inside the callback (a sticky modifier) calls
+  // [finishComposing], and that reset must survive this call returning.
+  void _mirror(String target) {
+    final sent = _sent.characters.toList();
+    final next = target.characters.toList();
+    var common = 0;
+    while (common < sent.length &&
+        common < next.length &&
+        sent[common] == next[common]) {
+      common++;
+    }
+    _sent = target;
+    for (var i = common; i < sent.length; i++) {
+      widget.onDelete();
+    }
+    if (common < next.length) {
+      widget.onInsert(next.sublist(common).join());
+    }
+  }
+
+  /// WEB-TERMINAL PATCH (#283): the terminal is about to receive input that
+  /// did not come from the IME (a key-strip key, a paste, a sticky modifier).
+  /// [_mirror] assumes the characters before the cursor are exactly [_sent];
+  /// after such a write they are not, and the next rewrite of the composing
+  /// word would backspace over text that word never typed. So the word is
+  /// left as typed — it is already in the terminal — and the IME starts over.
+  ///
+  /// Only an ATTACHED connection is told. `closeKeyboard` closes one without
+  /// nulling it, and a detached `TextInputConnection.setEditingState` asserts
+  /// in debug and in release reaches whichever client is attached NOW - the
+  /// compose bar, whose draft it would silently empty.
+  void finishComposing() {
+    _sent = '';
+    final init = _initEditingState;
+    if (_currentEditingState.text == init.text &&
+        _currentEditingState.composing.isCollapsed) {
+      return;
+    }
+    _currentEditingState = init.copyWith();
+    if (hasInputConnection) {
+      _connection!.setEditingState(init);
+    }
+  }
+
   @override
   void updateEditingValue(TextEditingValue value) {
     _currentEditingState = value;
 
-    // Get input after composing is done
+    // WEB-TERMINAL PATCH (#283): the composing word is forwarded as it changes
+    // (see [_mirror]) instead of being painted as an overlay, so no overlay is
+    // ever shown. The IME keeps its buffer until it commits.
+    widget.onComposing(null);
+
+    final text = _currentEditingState.text;
+    final init = _initEditingState.text;
     if (!_currentEditingState.composing.isCollapsed) {
-      final text = _currentEditingState.text;
-      final composingText = _currentEditingState.composing.textInside(text);
-      widget.onComposing(composingText);
+      if (text.startsWith(init)) {
+        _mirror(text.substring(init.length));
+      }
       return;
     }
 
-    widget.onComposing(null);
-
-    if (_currentEditingState.text.length < _initEditingState.text.length) {
+    if (text.length < init.length) {
+      _mirror('');
       widget.onDelete();
     } else {
-      final textDelta = _currentEditingState.text.substring(
-        _initEditingState.text.length,
-      );
-
-      widget.onInsert(textDelta);
+      _mirror(text.substring(init.length));
     }
+    _sent = '';
 
     // Reset editing state if composing is done
     if (_currentEditingState.composing.isCollapsed &&
