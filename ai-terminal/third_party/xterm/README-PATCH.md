@@ -1,4 +1,4 @@
-# Vendored `xterm` 4.0.0 - local patches (#81, #127, #151, #237)
+# Vendored `xterm` 4.0.0 - local patches (#81, #127, #151, #237, #283)
 
 This is stock **xterm 4.0.0** (`lib/` only, from the pub cache) plus the fixes
 below. It is wired in by `dependency_overrides` in `ai-terminal/pubspec.yaml`.
@@ -291,3 +291,40 @@ sets underline and clears it on the next attribute change, because the cell is w
 before any later attribute arrives. The **latch** case would *pass* against such a parser
 - its first cell follows an `ESC[38;2;...m` - and is instead what matches the REPORT: text
 long after the sequence, past unrelated colour changes, still underlined.
+
+## #283 - a composing word never reached the PTY until Space
+
+`lib/src/ui/custom_text_edit.dart`, `updateEditingValue` / `_mirror`.
+
+An Android soft keyboard with suggestions (Samsung Keyboard, Gboard) keeps the word
+being typed in a **composing region** until it commits it - Space, a suggestion tap,
+punctuation. It does this even though `CustomTextEdit` asks for `autocorrect: false`
+and `enableSuggestions: false`; those are hints the keyboards are free to ignore.
+
+Stock forwarded IME text **only when the composing region collapsed**. While a word was
+open it sent nothing and handed the word to `onComposing`, which `RenderTerminal`
+paints as an underlined overlay **at the terminal cursor**. The cursor belongs to the
+PTY and nothing had been sent, so it did not move: `/resume health` read
+`/resume ▮ealth…` with the word printed over whatever the TUI had drawn after the
+cursor, and Claude's slash menu did not narrow until Space.
+
+**The patch mirrors the IME buffer to the terminal on every update.** `_sent` records
+what of the buffer (the text past `_initEditingState`) has already been forwarded;
+`_mirror(target)` backspaces over everything after the common prefix of `_sent` and
+`target` and types the rest. One rule covers each way a keyboard edits a word:
+typing, a suggestion tap, autocorrect on commit (`teh` -> `the ` sends `teh`, two
+DELs, `he `) and a dictation rewrite. When the region collapses the remainder is
+mirrored and the buffer is reset as before. The overlay is never set any more.
+
+- **Counted in grapheme clusters**, the unit a line editor erases per backspace - a
+  Hebrew letter with a combining point is one DEL, not two.
+- **`_sent` resets when a new input connection opens.** A word left composing when the
+  keyboard closed stays typed in the terminal (it was already shown there); without
+  the reset, the next connection's first update would backspace over it.
+- The hardware-keyboard path (`CustomKeyboardListener`, desktop) is untouched.
+
+### Tests
+
+`ai-terminal/test/terminal_ime_composing_test.dart` drives the real `CustomTextEdit`
+through the test text-input channel and asserts on the bytes the terminal emits.
+
