@@ -114,7 +114,10 @@ test.describe('#240/#272 the start-of-run reset is wired, guarded and refuses pr
   /** A scratch tree OUTSIDE the checkout — the refusal is never driven against ROOT. */
   function scratch() {
     const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'wt-reset-'));
-    expect(path.resolve(dir).toLowerCase()).not.toBe(path.resolve(ROOT).toLowerCase());
+    // Not merely "not the root": not anywhere INSIDE the repo either.
+    const rel = path.relative(path.resolve(ROOT), path.resolve(dir));
+    expect(rel === '' || !(rel.startsWith('..') || path.isAbsolute(rel)),
+      `scratch dir ${dir} must be outside the checkout`).toBe(false);
     return dir;
   }
 
@@ -135,6 +138,23 @@ test.describe('#240/#272 the start-of-run reset is wired, guarded and refuses pr
       .toMatch(/^node scripts[/\\]reset-test-run-files\.js && node server\.js$/);
     expect(cfg.webServer.env.WT_TEST, 'the script refuses to run without WT_TEST=1').toBe('1');
     expect(cfg.webServer.env.WT_API_TOKENS_FILE).toBe(process.env.WT_API_TOKENS_FILE);
+  });
+
+  test('a WT_RESET_ROOT left in the shell does NOT reach the real run', () => {
+    // Re-load the config with the variable set, as a developer's shell would have it.
+    // `...process.env` would carry it into the webServer, the reset would look for
+    // config.test.json under that directory, and #240 would reopen with a green suite.
+    const cfgPath = require.resolve('../playwright.config.js');
+    const saved = process.env.WT_RESET_ROOT;
+    process.env.WT_RESET_ROOT = path.join(os.tmpdir(), 'wt-reset-stray');
+    delete require.cache[cfgPath];
+    try {
+      const cfg = require(cfgPath);
+      expect(cfg.webServer.env.WT_RESET_ROOT, 'the webServer env must clear WT_RESET_ROOT').toBeUndefined();
+    } finally {
+      if (saved === undefined) delete process.env.WT_RESET_ROOT; else process.env.WT_RESET_ROOT = saved;
+      delete require.cache[cfgPath];
+    }
   });
 
   test('positive control: allowed, it removes both per-run files', () => {
@@ -174,6 +194,33 @@ test.describe('#240/#272 the start-of-run reset is wired, guarded and refuses pr
       const fake = path.join(dir, 'api-tokens.json');   // a FAKE store, in scratch
       fs.writeFileSync(fake, '{"fake":true}');
       const r = runReset({ WT_TEST: '1', WT_RESET_ROOT: dir, WT_API_TOKENS_FILE: fake });
+      expect(r.status, r.stderr).not.toBe(0);
+      expect(r.stderr).toContain('REFUSED');
+      expect(fs.readFileSync(fake, 'utf8')).toBe('{"fake":true}');
+    } finally {
+      fs.rmSync(dir, { recursive: true, force: true });
+    }
+  });
+
+  test('WT_RESET_ROOT never NARROWS the refusal: the checkout store stays refused', () => {
+    // A COPY of the script in <scratch>/co/scripts/, so <scratch>/co plays the checkout
+    // and its api-tokens.json is a fake. The real checkout is never involved.
+    const dir = scratch();
+    try {
+      const co = path.join(dir, 'co');
+      const other = path.join(dir, 'other');
+      fs.mkdirSync(path.join(co, 'scripts'), { recursive: true });
+      fs.mkdirSync(other);
+      const copy = path.join(co, 'scripts', 'reset-test-run-files.js');
+      fs.copyFileSync(SCRIPT, copy);
+      const fake = path.join(co, 'api-tokens.json');
+      fs.writeFileSync(fake, '{"fake":true}');
+      const base = { ...process.env };
+      delete base.WT_TEST; delete base.WT_API_TOKENS_FILE; delete base.WT_RESET_ROOT;
+      const r = spawnSync(process.execPath, [copy], {
+        env: { ...base, WT_TEST: '1', WT_RESET_ROOT: other, WT_API_TOKENS_FILE: fake },
+        encoding: 'utf8', windowsHide: true,
+      });
       expect(r.status, r.stderr).not.toBe(0);
       expect(r.stderr).toContain('REFUSED');
       expect(fs.readFileSync(fake, 'utf8')).toBe('{"fake":true}');

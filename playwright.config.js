@@ -87,6 +87,11 @@ module.exports = defineConfig({
     env: {
       ...process.env,
       WT_TEST: '1',
+      // Test-only override of the reset script's root (scripts/reset-test-run-files.js).
+      // A value left in a developer's shell would otherwise reach a REAL run, so the
+      // real config.test.json would never be reset (#240 reopening, green) and one
+      // under that directory would be deleted instead. `undefined` is dropped by spawn.
+      WT_RESET_ROOT: undefined,
       WT_PORT: '17681',
       WT_USER: 'testuser',
       WT_PASS: 'testpass:colon',
