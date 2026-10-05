@@ -68,6 +68,11 @@ void main() {
       expect(m.render().text, 'fix a bug');
     });
 
+    test('a selection survives until a word is HEARD (a blank partial is not one)', () {
+      final m = DictationMerge('fix the bug', 4, 7)..onPartial('   ');
+      expect(m.render().text, 'fix the bug');
+    });
+
     test('a caret past the end is clamped rather than throwing', () {
       final m = DictationMerge('abc', 99)..onPartial('d');
       expect(m.render().text, 'abc d');
@@ -180,6 +185,24 @@ void main() {
       expect(svc.isListeningTo(field), isFalse);
       expect(svc.errorFor(field), 'English dictation is not available on this device');
       expect(svc.errorFor(TextEditingController()), isNull);
+    });
+
+    test('leaving an errored field clears its error AND tells the bar', () async {
+      await svc.start(field);
+      await send({'type': 'error', 'code': 'permission', 'session': 1});
+      var notified = 0;
+      svc.addListener(() => notified++);
+      await svc.cancelFor(field);
+      expect(svc.errorFor(field), isNull);
+      expect(notified, greaterThan(0),
+          reason: 'without a notify the error row stays drawn and Dismiss is dead');
+    });
+
+    test('a heard word marks the mic ready even without a ready event', () async {
+      await svc.start(field);
+      expect(svc.ready, isFalse);
+      await send({'type': 'partial', 'text': 'hello', 'session': 1});
+      expect(svc.ready, isTrue);
     });
 
     test('switching language persists it and restarts listening in it', () async {

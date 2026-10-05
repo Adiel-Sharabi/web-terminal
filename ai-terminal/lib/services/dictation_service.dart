@@ -51,16 +51,17 @@ const List<DictationLanguage> kDictationLanguages = [
 /// of every finished utterance this session; [partial] is the utterance still
 /// being heard, which the recognizer revises until it ends.
 class DictationMerge {
-  DictationMerge(String text, int start, [int? end])
-    : prefix = text.substring(0, _clampTo(start, text)),
-      suffix = text.substring(
-        _clampTo(end ?? start, text) < _clampTo(start, text)
-            ? _clampTo(start, text)
-            : _clampTo(end ?? start, text),
-      );
+  factory DictationMerge(String text, int start, [int? end]) {
+    final s = start.clamp(0, text.length);
+    final e = (end ?? s).clamp(s, text.length);
+    return DictationMerge._(text, text.substring(0, s), text.substring(e));
+  }
 
-  static int _clampTo(int i, String text) => i.clamp(0, text.length);
+  DictationMerge._(this.original, this.prefix, this.suffix);
 
+  /// The field as it was. Shown until a word is actually heard, so a selection
+  /// is only replaced by speech, never by silence (or a blank first partial).
+  final String original;
   final String prefix;
   final String suffix;
   String committed = '';
@@ -87,8 +88,10 @@ class DictationMerge {
     final spoken = _join(committed, partial);
     if (spoken.isEmpty) {
       return TextEditingValue(
-        text: prefix + suffix,
-        selection: TextSelection.collapsed(offset: prefix.length),
+        text: original,
+        selection: TextSelection.collapsed(
+          offset: original.length - suffix.length,
+        ),
       );
     }
     final lead = prefix.isNotEmpty && !_endsWithSpace(prefix) ? ' ' : '';
@@ -262,6 +265,9 @@ class DictationService extends ChangeNotifier {
     if (identical(_errorTarget, controller)) {
       _error = null;
       _errorTarget = null;
+      // Without this the error row stays drawn, and its Dismiss then does
+      // nothing because there is no error left to clear (#292 re-review).
+      if (!isListeningTo(controller)) notifyListeners();
     }
     if (isListeningTo(controller)) await cancel();
   }
@@ -304,6 +310,12 @@ class DictationService extends ChangeNotifier {
           return;
         }
         final text = (raw['text'] as String?) ?? '';
+        // A heard word proves the mic is open, even from a service that never
+        // reported ready.
+        if (!_ready && text.trim().isNotEmpty) {
+          _ready = true;
+          notifyListeners();
+        }
         if (type == 'partial') {
           merge.onPartial(text);
         } else {

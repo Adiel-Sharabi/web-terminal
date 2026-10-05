@@ -199,7 +199,9 @@ class Dictation(private val activity: Activity) : EventChannel.StreamHandler {
 
         override fun onPartialResults(partialResults: Bundle?) {
             if (!current) return
-            val text = firstResult(partialResults) ?: return
+            // Some services send a blank partial at speech onset; it is not words.
+            val text = firstResult(partialResults)
+            if (text.isNullOrBlank()) return
             heardSomething = true
             failures = 0
             emit(mapOf("type" to "partial", "text" to text))
@@ -246,7 +248,14 @@ class Dictation(private val activity: Activity) : EventChannel.StreamHandler {
 
     private fun retryOrFail(error: Int) {
         failures += 1
-        if (failures > MAX_RETRIES) fail(error) else relisten(delayMs = 300L * failures, recreate = true)
+        if (failures > MAX_RETRIES) {
+            fail(error)
+        } else {
+            // Silence the failing run first, so a second callback from it inside
+            // the delay cannot post another recreate over the fresh recognizer.
+            supersede()
+            relisten(delayMs = 300L * failures, recreate = true)
+        }
     }
 
     private fun fail(error: Int) {
