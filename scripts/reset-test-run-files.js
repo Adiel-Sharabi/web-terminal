@@ -31,9 +31,16 @@
 const fs = require('fs');
 const path = require('path');
 
-const ROOT = path.join(__dirname, '..');
-const PRODUCTION = new Set(['api-tokens.json', 'config.json', 'cluster-tokens.json']
-  .map((f) => path.resolve(ROOT, f).toLowerCase()));
+// `WT_RESET_ROOT` exists ONLY so tests/api-tokens-isolation.spec.js can drive the refusal
+// against a scratch tree holding a FAKE api-tokens.json. A refusal test pointed at the
+// real checkout would delete the real store the day the refusal broke.
+const CHECKOUT = path.join(__dirname, '..');
+const ROOT = process.env.WT_RESET_ROOT ? path.resolve(process.env.WT_RESET_ROOT) : CHECKOUT;
+// The production files of BOTH trees are refused, so the override can widen what is
+// protected but never narrow it: setting WT_RESET_ROOT elsewhere does not make the real
+// checkout's store deletable.
+const PRODUCTION = new Set([CHECKOUT, ROOT].flatMap((dir) =>
+  ['api-tokens.json', 'config.json', 'cluster-tokens.json'].map((f) => path.resolve(dir, f).toLowerCase())));
 
 function reset(file, issue) {
   const abs = path.resolve(ROOT, file);
@@ -44,7 +51,8 @@ function reset(file, issue) {
   }
   try {
     fs.unlinkSync(abs);
-    console.log(`[test-reset] removed ${path.basename(abs)} left by an earlier run (${issue})`);
+    // stderr, not stdout: Playwright discards a webServer's stdout and forwards its stderr.
+    console.error(`[test-reset] removed ${path.basename(abs)} left by an earlier run (${issue})`);
   } catch (e) {
     // ENOENT is the normal case (CI, or a run that cleaned up). Anything else is worth
     // seeing rather than swallowing - a locked file would silently reinstate the leak.

@@ -15,8 +15,9 @@
 // The production file is compared by STAT ONLY (existence, size, mtime) and is never
 // opened: it holds real credentials, and nothing in a test log should ever carry one.
 const { test, expect } = require('@playwright/test');
-const { execFileSync } = require('child_process');
+const { execFileSync, spawnSync } = require('child_process');
 const fs = require('fs');
+const os = require('os');
 const path = require('path');
 const { authCtx } = require('./test-helpers');
 
@@ -33,9 +34,10 @@ function statOf(file) {
   }
 }
 
-test.describe.configure({ mode: 'serial' });
-
 test.describe('#272 the test server mints into its OWN token store', () => {
+  // Serial WITHIN this describe only: the redirect check gates the mint below.
+  test.describe.configure({ mode: 'serial' });
+
   test('the store is redirected, away from production, to a gitignored file', () => {
     const store = process.env.WT_API_TOKENS_FILE;
     expect(store, 'playwright.config.js must set WT_API_TOKENS_FILE').toBeTruthy();
@@ -98,6 +100,85 @@ test.describe('#272 the test server mints into its OWN token store', () => {
     } finally {
       if (token) await ctx.delete(`/api/auth/tokens/${encodeURIComponent(token)}`).catch(() => {});
       await ctx.dispose();
+    }
+  });
+});
+
+// The reset that makes #240 and #272 hold lives in the webServer COMMAND
+// (scripts/reset-test-run-files.js). Without these, reverting the command to
+// `node server.js` or deleting the script's guards leaves the whole suite green
+// while both leaks silently reopen.
+test.describe('#240/#272 the start-of-run reset is wired, guarded and refuses production', () => {
+  const SCRIPT = path.join(ROOT, 'scripts', 'reset-test-run-files.js');
+
+  /** A scratch tree OUTSIDE the checkout — the refusal is never driven against ROOT. */
+  function scratch() {
+    const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'wt-reset-'));
+    expect(path.resolve(dir).toLowerCase()).not.toBe(path.resolve(ROOT).toLowerCase());
+    return dir;
+  }
+
+  /** Run the script with `env` layered over a copy WITHOUT any inherited WT_TEST. */
+  function runReset(env) {
+    const base = { ...process.env };
+    delete base.WT_TEST;
+    delete base.WT_API_TOKENS_FILE;
+    delete base.WT_RESET_ROOT;
+    return spawnSync(process.execPath, [SCRIPT], { env: { ...base, ...env }, encoding: 'utf8', windowsHide: true });
+  }
+
+  test('the webServer command runs the reset BEFORE server.js, with WT_TEST=1', () => {
+    // The loaded config, not a regex over its source: this is what Playwright runs.
+    const cfg = require('../playwright.config.js');
+    const cmd = String(cfg.webServer && cfg.webServer.command);
+    expect(cmd, 'the reset must run first and gate server.js with &&')
+      .toMatch(/^node scripts[/\\]reset-test-run-files\.js && node server\.js$/);
+    expect(cfg.webServer.env.WT_TEST, 'the script refuses to run without WT_TEST=1').toBe('1');
+    expect(cfg.webServer.env.WT_API_TOKENS_FILE).toBe(process.env.WT_API_TOKENS_FILE);
+  });
+
+  test('positive control: allowed, it removes both per-run files', () => {
+    // Without this, the two refusals below would also pass against a script that
+    // deletes nothing at all.
+    const dir = scratch();
+    try {
+      fs.writeFileSync(path.join(dir, 'config.test.json'), '{}');
+      fs.writeFileSync(path.join(dir, 'tokens.test.json'), '{}');
+      const r = runReset({ WT_TEST: '1', WT_RESET_ROOT: dir, WT_API_TOKENS_FILE: path.join(dir, 'tokens.test.json') });
+      expect(r.status, r.stderr).toBe(0);
+      expect(fs.existsSync(path.join(dir, 'config.test.json'))).toBe(false);
+      expect(fs.existsSync(path.join(dir, 'tokens.test.json'))).toBe(false);
+      expect(r.stderr).toContain('[test-reset] removed'); // stderr: what Playwright forwards
+    } finally {
+      fs.rmSync(dir, { recursive: true, force: true });
+    }
+  });
+
+  test('without WT_TEST it exits non-zero and deletes nothing', () => {
+    const dir = scratch();
+    try {
+      fs.writeFileSync(path.join(dir, 'config.test.json'), '{}');
+      fs.writeFileSync(path.join(dir, 'tokens.test.json'), '{}');
+      const r = runReset({ WT_RESET_ROOT: dir, WT_API_TOKENS_FILE: path.join(dir, 'tokens.test.json') });
+      expect(r.status, r.stderr).not.toBe(0);
+      expect(fs.existsSync(path.join(dir, 'config.test.json'))).toBe(true);
+      expect(fs.existsSync(path.join(dir, 'tokens.test.json'))).toBe(true);
+    } finally {
+      fs.rmSync(dir, { recursive: true, force: true });
+    }
+  });
+
+  test('pointed at a production store it REFUSES: non-zero exit, file intact', () => {
+    const dir = scratch();
+    try {
+      const fake = path.join(dir, 'api-tokens.json');   // a FAKE store, in scratch
+      fs.writeFileSync(fake, '{"fake":true}');
+      const r = runReset({ WT_TEST: '1', WT_RESET_ROOT: dir, WT_API_TOKENS_FILE: fake });
+      expect(r.status, r.stderr).not.toBe(0);
+      expect(r.stderr).toContain('REFUSED');
+      expect(fs.readFileSync(fake, 'utf8')).toBe('{"fake":true}');
+    } finally {
+      fs.rmSync(dir, { recursive: true, force: true });
     }
   });
 });
