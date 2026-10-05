@@ -61,18 +61,16 @@ class AttachSourceSheet extends StatelessWidget {
 
   @override
   Widget build(BuildContext context) {
-    return SafeArea(
-      child: Column(
-        mainAxisSize: MainAxisSize.min,
-        children: [
-          for (final source in sources)
-            ListTile(
-              leading: Icon(attachSourceIcon(source)),
-              title: Text(attachSourceLabel(source)),
-              onTap: () => Navigator.pop(context, source),
-            ),
-        ],
-      ),
+    return Column(
+      mainAxisSize: MainAxisSize.min,
+      children: [
+        for (final source in sources)
+          ListTile(
+            leading: Icon(attachSourceIcon(source)),
+            title: Text(attachSourceLabel(source)),
+            onTap: () => Navigator.pop(context, source),
+          ),
+      ],
     );
   }
 }
