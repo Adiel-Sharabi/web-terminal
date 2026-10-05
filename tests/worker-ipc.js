@@ -164,6 +164,7 @@
 // glossed" was not. Same defect as the call-site claim corrected above: a completeness
 // claim is only worth making if someone checked it.
 const ipc = require('../lib/ipc');
+const { test } = require('@playwright/test');
 
 /** The shared ceiling. See THE BUDGET RULE above before changing it. */
 const RPC_BUDGET_MS = 15000;
@@ -179,6 +180,7 @@ const CONNECT_BUDGET_MS = 5000;
  * Byte-identical to the copy all 22 specs carried.
  */
 async function connectClient(pipePath, timeoutMs = CONNECT_BUDGET_MS) {
+  assertBudgetCanFire(timeoutMs, 'connectClient');
   const client = ipc.createClient(pipePath, { retry: true, retryDelayMs: 100 });
   await Promise.race([
     client.connected(),
@@ -211,6 +213,7 @@ async function connectClient(pipePath, timeoutMs = CONNECT_BUDGET_MS) {
  *      own subject reports a reassuring zero for the same reason a broken one does.
  */
 function rpc(client, method, params = {}, timeoutMs = RPC_BUDGET_MS) {
+  assertBudgetCanFire(timeoutMs, `RPC ${method}`);
   const id = Math.floor(Math.random() * 1e9);
   const t0 = Date.now();
   return new Promise((resolve, reject) => {
@@ -249,4 +252,34 @@ function rpc(client, method, params = {}, timeoutMs = RPC_BUDGET_MS) {
   });
 }
 
-module.exports = { RPC_BUDGET_MS, CONNECT_BUDGET_MS, connectClient, rpc };
+/**
+ * #269 - A BUDGET THE TEST TIMEOUT KILLS FIRST CAN NEVER FIRE. Its message - the one that
+ * names the RPC, the budget and the elapsed time - is replaced by `Test timeout of 30000ms
+ * exceeded`, which names none of them: precisely the ambiguity #253/#254/#262 each had to
+ * re-derive the answer to. `worker-scrollback-save-yield.spec.js` carried two such
+ * budgets (`killBudgetMs(10)` = 31200ms, an explicit 60000ms) inside the default 30000ms
+ * for as long as they existed, and nothing could see it.
+ *
+ * So every budget is checked, at the moment it is armed, against the timeout of the test
+ * that is running it, and one that cannot fire is a hard failure naming both numbers. The
+ * fix is the enclosing test's `test.setTimeout`, sized from the budgets it has to leave
+ * room for - never a budget quietly lowered to fit.
+ *
+ * WHAT IT DOES NOT CHECK: time already spent. A budget of 25s armed 10s into a 30s test is
+ * also unreachable; Playwright publishes no test start time to subtract. This catches the
+ * class #269 found - a budget above the ceiling by construction - not every late arming.
+ * Outside a test (`test.info()` throws) and under `timeout: 0` there is no ceiling to
+ * check against.
+ */
+function assertBudgetCanFire(budgetMs, what) {
+  let info;
+  try { info = test.info(); } catch { return; }
+  if (!info.timeout || budgetMs < info.timeout) return;
+  throw new Error(
+    `${what}: its ${budgetMs}ms budget is not below this test's ${info.timeout}ms timeout, `
+    + 'so it can never fire - the test would die first with a message naming neither (#269). '
+    + 'Raise the enclosing test.setTimeout, sized from the budgets it must leave room for.',
+  );
+}
+
+module.exports = { RPC_BUDGET_MS, CONNECT_BUDGET_MS, connectClient, rpc, assertBudgetCanFire };

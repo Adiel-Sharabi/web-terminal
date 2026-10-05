@@ -10,6 +10,25 @@
 // for real. Timers are shrunk via WT_AUTO_RESUME_FAST=1 (mirrors WT_API_ERROR_FAST)
 // and the opt-in gate is forced via WT_AUTO_RESUME_ON_RESET so tests are deterministic
 // and independent of the on-disk config.json (default OFF).
+//
+// #268 - NO WALL-CLOCK WINDOWS. This file used to arm `resetAt = Date.now() + 150` and
+// then bet that two IPC round-trips would land before the worker's timer fired (19 such
+// windows), with `resetAt` read off the TEST process's clock and evaluated against the
+// WORKER's (#266's family). It failed at the tail of a loaded run: `autoResumeArmed` was
+// legitimately false because the window had already elapsed. And its negatives were only
+// as good as the window - "no autoResume after sleep(400)" means something only if a
+// failed cancel would have fired inside those 400ms.
+//
+// Every reset is now one of two kinds, neither of which any clock skew can move:
+//   farReset()  - an hour out. It CANNOT come due during a test, so "armed" is a fact,
+//                 not a race. To make it fire, `dueNow` (the worker's test-only
+//                 `__testAutoResumeDue`) runs the armed timer's own function at once.
+//                 After a cancel, that same call is what makes the negative bite: if the
+//                 cancel under test were removed, the timer it should have destroyed
+//                 fires right there, inside the call, and the test goes red.
+//   pastReset() - an hour ago. The REAL setTimeout path, which fires on its next tick
+//                 (`Math.max(0, fireAt - now)` is 0) - kept for the specs about the real
+//                 timer, the catch-up and the boot deferral, where it is what is under test.
 
 const { test, expect } = require('@playwright/test');
 const { spawn } = require('child_process');
@@ -109,6 +128,27 @@ const typeInto = (client, id, text) => client.send(ipc.encodePtyIn(id, Buffer.fr
 const inject = (client, id, data) => rpc(client, '__testInjectOutput', { id, data });
 const setResetAt = (client, id, fiveHResetAt, capBlocked = true) =>
   rpc(client, 'setFiveHResetAt', { id, fiveHResetAt, capBlocked });
+// #268 - see the header. Neither can be moved across the line by clock skew between the
+// test process and the worker (milliseconds against an hour).
+const HOUR_MS = 60 * 60 * 1000;
+const farReset = () => Date.now() + HOUR_MS;
+const pastReset = () => Date.now() - HOUR_MS;
+/** Bring the armed timer due NOW, in the worker, and run it. `{ armed:false }` if none. */
+const dueNow = (client, id) => rpc(client, '__testAutoResumeDue', { id });
+/** The armed timer's due time, by the worker's own arithmetic, WITHOUT firing it. */
+const peekDue = (client, id) => rpc(client, '__testAutoResumeDue', { id, peek: true });
+/** The fast post-reset settle the worker adds under WT_AUTO_RESUME_FAST (lib/usage-limit.js). */
+const { AUTO_RESUME_DELAY_FAST_MS } = require('../lib/usage-limit');
+/** submitLine writes the text now and its CR `submit.gapMs` later (#55), on a real timer
+ *  WT_AUTO_RESUME_FAST does not shrink - so the CR is AWAITED as a signal, not slept for. */
+async function waitForWrites(client, id, pred, what, timeoutMs = 5000) {
+  let sent = [];
+  await expect.poll(async () => {
+    sent = writesOf(await rpc(client, '__testGetWrites', { id }));
+    return pred(sent);
+  }, { timeout: timeoutMs, message: `never wrote ${what}` }).toBe(true);
+  return sent;
+}
 async function findSession(client, id) {
   const { sessions } = await rpc(client, 'listSessions');
   return sessions.find((s) => s.id === id);
@@ -128,28 +168,29 @@ test.describe('#69 — 5h usage-limit auto-resume', () => {
       const ev = makeEventCollector(client);
       const { id } = await rpc(client, 'createSession', { cwd: os.tmpdir(), name: 'reset-fire', agent: 'claude', autoCommand: '' });
 
-      const resetAt = Date.now() + 150;
+      const resetAt = farReset();
       const armed = await setResetAt(client, id, resetAt);
       expect(armed.fiveHResetAt).toBe(resetAt);
       expect((await findSession(client, id)).fiveHResetAt).toBe(resetAt);
 
-      // Fires at resetAt + AUTO_RESUME_DELAY_MS (fast: 50ms).
+      // Scheduled for resetAt + AUTO_RESUME_DELAY_MS (fast: 50ms) - read off the worker's
+      // own arithmetic rather than inferred from when an event happened to arrive, which
+      // compared the test's clock with the worker's (#268/#266). An hour out, it has not
+      // fired: "never before the reset itself" is the armed timer, not a stopwatch.
+      expect(await peekDue(client, id)).toEqual({ armed: true, fireAt: resetAt + AUTO_RESUME_DELAY_FAST_MS });
+      expect(ev.events.some((e) => e.event === 'autoResume')).toBe(false);
+
+      await dueNow(client, id);
       const fired = await ev.waitFor((e) => e.event === 'autoResume' && e.params.id === id);
       expect(fired.params.resetAt).toBe(resetAt);
-      expect(Date.now()).toBeGreaterThanOrEqual(resetAt); // never fires before the reset itself
 
-      // submitLine writes the text now and the submit CR submitGapMs later (#55) — the
-      // gap isn't shrunk by WT_AUTO_RESUME_FAST (that's WT_API_ERROR_FAST's job), so
-      // wait past the real default gap (150ms) before asserting the CR landed.
-      await sleep(250);
-      const { writes } = await rpc(client, '__testGetWrites', { id });
-      const sent = writesOf({ writes });
+      const sent = await waitForWrites(client, id, (w) => w.includes('\r'), 'the submit CR');
       expect(sent).toContain('continue');
-      expect(sent).toContain('\r');
       expect(sent.filter((w) => w === 'continue').length).toBe(1);
 
-      // One-shot: waiting longer must not produce a second continue or a loop.
-      await sleep(300);
+      // One-shot: the timer is gone, and bringing "it" due again finds nothing to run.
+      expect((await findSession(client, id)).autoResumeArmed).toBe(false);
+      expect(await dueNow(client, id)).toEqual({ armed: false });
       const after = writesOf(await rpc(client, '__testGetWrites', { id }));
       expect(after.filter((w) => w === 'continue').length).toBe(1);
       expect(ev.events.filter((e) => e.event === 'autoResume').length).toBe(1);
@@ -176,15 +217,19 @@ test.describe('#69 — 5h usage-limit auto-resume', () => {
       await rpc(client, 'hookEvent', { id, event: 'UserPromptSubmit', prompt: 'do a thing' });
       expect((await findSession(client, id)).status).toBe('working');
 
-      const resetAt = Date.now() + 150;
-      await setResetAt(client, id, resetAt);
+      await setResetAt(client, id, farReset());
+      // The anchor that makes the cancel mean something: there IS a timer to cancel.
+      expect((await findSession(client, id)).autoResumeArmed).toBe(true);
 
       typeInto(client, id, ESC); // interrupts the turn -> noteInterrupt -> cancelAutoResume
-      await sleep(80);
-      expect((await findSession(client, id)).status).toBe('idle');
+      // The input frame gets no reply, so wait for its EFFECT rather than a guess.
+      await expect.poll(async () => (await findSession(client, id)).status,
+        { timeout: 5000, message: 'Esc never interrupted the turn' }).toBe('idle');
+      expect((await findSession(client, id)).autoResumeArmed).toBe(false);
 
-      // Wait well past resetAt + delay: no continue, no autoResume event.
-      await sleep(400);
+      // Bring the reset due NOW: had Esc left the timer in place, it fires inside this
+      // call. No continue, no autoResume event.
+      expect(await dueNow(client, id)).toEqual({ armed: false });
       expect(ev.events.some((e) => e.event === 'autoResume' && e.params.id === id)).toBe(false);
       const sent = writesOf(await rpc(client, '__testGetWrites', { id }));
       expect(sent).not.toContain('continue');
@@ -221,7 +266,7 @@ test.describe('#69 — 5h usage-limit auto-resume', () => {
       const ev = makeEventCollector(client);
       const { id } = await rpc(client, 'createSession', { cwd: os.tmpdir(), name: 'reset-uprompt', agent: 'claude', autoCommand: '' });
 
-      const resetAt = Date.now() + 250;
+      const resetAt = farReset();
       await setResetAt(client, id, resetAt); // capBlocked: true — genuinely capped
       expect((await findSession(client, id)).autoResumeArmed).toBe(true);
 
@@ -234,10 +279,11 @@ test.describe('#69 — 5h usage-limit auto-resume', () => {
 
       // ...and the prompt goes nowhere, because the cap is still in force.
       await rpc(client, 'hookEvent', { id, event: 'Stop' });
-      await sleep(120);
-      expect((await findSession(client, id)).status).toBe('idle');
+      await expect.poll(async () => (await findSession(client, id)).status,
+        { timeout: 5000, message: 'the refused retry never fell back to idle' }).toBe('idle');
 
-      await sleep(400); // well past resetAt + delay
+      // The reset comes due: the resume the retry kept still fires.
+      expect(await dueNow(client, id)).toEqual({ armed: true, fireAt: resetAt + AUTO_RESUME_DELAY_FAST_MS });
       expect(ev.events.some((e) => e.event === 'autoResume' && e.params.id === id)).toBe(true);
       expect(writesOf(await rpc(client, '__testGetWrites', { id }))).toContain('continue');
 
@@ -272,16 +318,16 @@ test.describe('#69 — 5h usage-limit auto-resume', () => {
       const ev = makeEventCollector(client);
       const { id } = await rpc(client, 'createSession', { cwd: os.tmpdir(), name: 'reset-noloop', agent: 'claude', autoCommand: '' });
 
-      const resetAt = Date.now() + 150;
-      await setResetAt(client, id, resetAt);
-      await sleep(400);
+      await setResetAt(client, id, farReset());
+      await dueNow(client, id);
       expect(ev.events.filter((e) => e.event === 'autoResume' && e.params.id === id).length).toBe(1);
 
       // Claude's answer to the continue we just sent.
       await rpc(client, 'hookEvent', { id, event: 'UserPromptSubmit', prompt: 'continue' });
       expect((await findSession(client, id)).autoResumeArmed).toBe(false);
 
-      await sleep(400);
+      // Had that hook re-armed, this would fire it a second time, right here.
+      expect(await dueNow(client, id)).toEqual({ armed: false });
       expect(ev.events.filter((e) => e.event === 'autoResume' && e.params.id === id).length).toBe(1);
       const sent = writesOf(await rpc(client, '__testGetWrites', { id }));
       expect(sent.filter((w) => w === 'continue').length).toBe(1);
@@ -309,14 +355,24 @@ test.describe('#69 — 5h usage-limit auto-resume', () => {
       const ev = makeEventCollector(client);
       const { id } = await rpc(client, 'createSession', { cwd: os.tmpdir(), name: 'reset-pretool', agent: 'claude', autoCommand: '' });
 
-      const resetAt = Date.now() + 150;
-      await setResetAt(client, id, resetAt);
+      await setResetAt(client, id, farReset());
       expect((await findSession(client, id)).autoResumeArmed).toBe(true);
 
       await rpc(client, 'hookEvent', { id, event: 'PreToolUse', tool: 'Bash' });
       expect((await findSession(client, id)).autoResumeArmed).toBe(false);
 
-      await sleep(400);
+      // The turn ends before the reset comes due. Not decoration: while the session is
+      // still WORKING, the fire-time `working` guard would refuse a surviving timer on
+      // its own, so the negative below could not tell a cancel from that guard. Idle,
+      // only the cancel stands between a surviving timer and a typed `continue` -
+      // measured (#268) by deleting the cancel: with the session left working, the
+      // negative stayed green.
+      await rpc(client, 'hookEvent', { id, event: 'Stop' });
+      await expect.poll(async () => (await findSession(client, id)).status,
+        { timeout: 5000, message: 'the turn never went idle' }).toBe('idle');
+
+      // Had the tool event left the timer in place, it fires inside this call.
+      expect(await dueNow(client, id)).toEqual({ armed: false });
       expect(ev.events.some((e) => e.event === 'autoResume' && e.params.id === id)).toBe(false);
       expect(writesOf(await rpc(client, '__testGetWrites', { id }))).not.toContain('continue');
 
@@ -338,11 +394,13 @@ test.describe('#69 — 5h usage-limit auto-resume', () => {
       const ev = makeEventCollector(client);
       const { id } = await rpc(client, 'createSession', { cwd: os.tmpdir(), name: 'reset-disabled', agent: 'claude', autoCommand: '' });
 
-      const resetAt = Date.now() + 150;
+      const resetAt = farReset();
       await setResetAt(client, id, resetAt); // still recorded — see fiveHResetAt below
       expect((await findSession(client, id)).fiveHResetAt).toBe(resetAt);
 
-      await sleep(400); // well past resetAt + delay
+      // Nothing armed, so nothing can come due - asked of the worker, not waited out.
+      expect((await findSession(client, id)).autoResumeArmed).toBe(false);
+      expect(await dueNow(client, id)).toEqual({ armed: false });
       expect(ev.events.some((e) => e.event === 'autoResume' && e.params.id === id)).toBe(false);
       const sent = writesOf(await rpc(client, '__testGetWrites', { id }));
       expect(sent).not.toContain('continue');
@@ -367,7 +425,8 @@ test.describe('#69 — 5h usage-limit auto-resume', () => {
       // Never call setFiveHResetAt — fiveHResetAt stays null.
       expect((await findSession(client, id)).fiveHResetAt).toBeNull();
 
-      await sleep(300);
+      expect((await findSession(client, id)).autoResumeArmed).toBe(false);
+      expect(await dueNow(client, id)).toEqual({ armed: false });
       expect(ev.events.some((e) => e.event === 'autoResume' && e.params.id === id)).toBe(false);
       const sent = writesOf(await rpc(client, '__testGetWrites', { id }));
       expect(sent).not.toContain('continue');
@@ -396,13 +455,14 @@ test.describe('#69 — 5h usage-limit auto-resume', () => {
 
       // The exact shape #69 would have fired on: feature ON, a real reset time, an
       // idle session — but no observed block. This is the session you finished with.
-      const resetAt = Date.now() + 150;
+      const resetAt = farReset();
       const r = await setResetAt(client, id, resetAt, false);
       expect(r.fiveHResetAt).toBe(resetAt); // the timestamp is still RECORDED...
       expect(r.capBlocked).toBe(false);     // ...and still not a reason to act
       expect((await findSession(client, id)).capBlocked).toBe(false);
 
-      await sleep(400); // well past resetAt + delay
+      expect((await findSession(client, id)).autoResumeArmed).toBe(false);
+      expect(await dueNow(client, id)).toEqual({ armed: false });
       expect(ev.events.some((e) => e.event === 'autoResume' && e.params.id === id)).toBe(false);
       expect(writesOf(await rpc(client, '__testGetWrites', { id }))).not.toContain('continue');
 
@@ -425,7 +485,7 @@ test.describe('#69 — 5h usage-limit auto-resume', () => {
       const { id } = await rpc(client, 'createSession', { cwd: os.tmpdir(), name: 'blocklifts', agent: 'claude', autoCommand: '' });
 
       // Armed on a real block...
-      const resetAt = Date.now() + 250;
+      const resetAt = farReset();
       await setResetAt(client, id, resetAt, true);
       expect((await findSession(client, id)).autoResumeArmed).toBe(true);
 
@@ -435,7 +495,13 @@ test.describe('#69 — 5h usage-limit auto-resume', () => {
       await setResetAt(client, id, resetAt, false);
       expect((await findSession(client, id)).autoResumeArmed).toBe(false);
 
-      await sleep(400);
+      // Had the lifted block left the timer in place, it fires inside this call. TWO
+      // guards hold this line, measured (#268) by deleting the cancel: `armed` above
+      // goes red, while the event negative below stays green - the fire-time capBlocked
+      // re-check refuses the surviving timer on its own. So the cancel is pinned by the
+      // worker's `autoResumeArmed` (an hour from due, it cannot be a window that
+      // elapsed), and the outcome by both.
+      expect(await dueNow(client, id)).toEqual({ armed: false });
       expect(ev.events.some((e) => e.event === 'autoResume' && e.params.id === id)).toBe(false);
       expect(writesOf(await rpc(client, '__testGetWrites', { id }))).not.toContain('continue');
 
@@ -461,7 +527,8 @@ test.describe('#69 — 5h usage-limit auto-resume', () => {
       const ev = makeEventCollector(client);
       const { id } = await rpc(client, 'createSession', { cwd: os.tmpdir(), name: 'default-on', agent: 'claude', autoCommand: '' });
 
-      const resetAt = Date.now() + 150;
+      // The REAL timer: a reset already passed fires on its next tick.
+      const resetAt = pastReset();
       await setResetAt(client, id, resetAt, true);
 
       const fired = await ev.waitFor((e) => e.event === 'autoResume' && e.params.id === id, 4000);
@@ -640,9 +707,11 @@ test.describe('#69 — 5h usage-limit auto-resume', () => {
       // capBlocked:false — server.js has NOT corroborated from metrics. The direct
       // observation must be sufficient on its own, or the strongest signal we have
       // would be the one that cannot act.
-      const resetAt = Date.now() + 150;
+      const resetAt = farReset();
       await setResetAt(client, id, resetAt, false);
+      expect((await findSession(client, id)).autoResumeArmed).toBe(true);
 
+      await dueNow(client, id);
       const fired = await ev.waitFor((e) => e.event === 'autoResume' && e.params.id === id, 4000);
       expect(fired.params.resetAt).toBe(resetAt);
 
@@ -678,10 +747,10 @@ test.describe('#69 — 5h usage-limit auto-resume', () => {
       // Hours later a NEW window's reset arrives, with the account NOT capped.
       // Arming on the stale latch here would type `continue` into a session the
       // user had finished with - the exact harm the gate exists to prevent.
-      const resetAt = Date.now() + 150;
-      await setResetAt(client, id, resetAt, false);
+      await setResetAt(client, id, farReset(), false);
 
-      await sleep(400);
+      expect((await findSession(client, id)).autoResumeArmed).toBe(false);
+      expect(await dueNow(client, id)).toEqual({ armed: false });
       expect(ev.events.some((e) => e.event === 'autoResume' && e.params.id === id)).toBe(false);
       expect(writesOf(await rpc(client, '__testGetWrites', { id }))).not.toContain('continue');
 
@@ -740,13 +809,13 @@ test.describe('#69 — 5h usage-limit auto-resume', () => {
       // so there is nothing stuck for an auto-resume to rescue. lib/agents.js's Codex
       // `autoResume: { arm: false }` records that reasoning; this test pins the
       // consequence — arming off an inferred percentage alone still writes nothing.
-      const resetAt = Date.now() + 150;
+      const resetAt = farReset();
       const r = await setResetAt(client, id, resetAt, true);
       expect(r.fiveHResetAt).toBe(resetAt); // the window IS loaded...
       expect(r.capBlocked).toBe(true);      // ...and the block IS recorded
       expect((await findSession(client, id)).autoResumeArmed).toBe(false); // but nothing is armed
 
-      await sleep(400); // well past resetAt + delay
+      expect(await dueNow(client, id)).toEqual({ armed: false });
       expect(ev.events.some((e) => e.event === 'autoResume' && e.params.id === id)).toBe(false);
       expect(writesOf(await rpc(client, '__testGetWrites', { id }))).not.toContain('continue');
 
@@ -769,10 +838,16 @@ test.describe('#69 — 5h usage-limit auto-resume', () => {
       const { id } = await rpc(client, 'createSession', { cwd: os.tmpdir(), name: 'reset-coldrestart', agent: 'claude', autoCommand: '' });
       sessionId = id;
 
-      // Arm, then kill the worker before it can fire (fast delay is 50ms — a resetAt
-      // 150ms out gives us room to persist + shut down cleanly before fireAt).
-      const resetAt = Date.now() + 150;
-      await setResetAt(client, id, resetAt);
+      // The window has ALREADY turned over by the time the worker goes down, and this
+      // worker is told NOTHING about a block (capBlocked:false), so it records and
+      // persists the reset time but cannot arm on it. That is what makes "the worker died
+      // before it fired" a fact rather than a race: it used to arm a reset 150ms out and
+      // bet that persist + shutdown would beat fireAt (#268), sleeping 400ms afterwards
+      // for the window to elapse while the worker was down. capBlocked is never persisted
+      // either way (#138), so the restored state is identical.
+      const resetAt = pastReset();
+      await setResetAt(client, id, resetAt, false);
+      expect((await findSession(client, id)).autoResumeArmed).toBe(false);
       await rpc(client, 'flushState'); // belt-and-suspenders: setFiveHResetAt already fsync'd
       await client.close();
       await worker.stop();
@@ -781,9 +856,6 @@ test.describe('#69 — 5h usage-limit auto-resume', () => {
       const cfg = saved.find((s) => s.id === id);
       expect(cfg.fiveHResetAt).toBe(resetAt);
       expect(cfg.autoResumeFiredForResetAt).toBeFalsy(); // not yet handled — worker died first
-
-      // Let wall-clock time pass resetAt + delay WHILE THE WORKER IS DOWN.
-      await sleep(400);
 
       // Second worker, same dataDir: restoreSessionsOnStartup re-arms from the
       // persisted absolute resetAt, sees it already elapsed, and fires almost at once.
@@ -801,19 +873,11 @@ test.describe('#69 — 5h usage-limit auto-resume', () => {
       expect(cfg.fiveHResetAt).toBe(resetAt); // re-assert: the timestamp came back from disk
       await setResetAt(client, sessionId, resetAt, true);
 
-      let sent = [];
-      const deadline = Date.now() + 5000;
-      while (Date.now() < deadline) {
-        sent = writesOf(await rpc(client, '__testGetWrites', { id }));
-        if (sent.includes('continue')) break;
-        await sleep(150);
-      }
-      expect(sent).toContain('continue');
+      // The REAL timer, and the catch-up: fireAt is already behind the worker's clock.
+      await waitForWrites(client, id, (w) => w.includes('continue'), 'the catch-up continue');
       // submitLine's CR lands submitGapMs after the text (real default gap: 150ms —
       // WT_AUTO_RESUME_FAST only shrinks the post-reset wait, not the submit gap).
-      await sleep(250);
-      sent = writesOf(await rpc(client, '__testGetWrites', { id }));
-      expect(sent).toContain('\r');
+      await waitForWrites(client, id, (w) => w.includes('\r'), 'the submit CR');
 
       await rpc(client, 'killSession', { id });
       await client.close();
@@ -870,12 +934,14 @@ test.describe('#147 — a resume waits for the agent to exist', () => {
       expect(await launched(client, id)).toBe(true);
       expect((await findSession(client, id)).agentReady).toBe(false);
 
-      // The window turns over while the agent is still starting.
-      const resetAt = Date.now() + 100;
+      // The window turns over while the agent is still starting. Brought due by the
+      // worker itself, so the fire logic below ran - it did not merely not happen yet.
+      const resetAt = farReset();
       await setResetAt(client, id, resetAt, true);
+      expect(await dueNow(client, id)).toEqual({ armed: true, fireAt: resetAt + AUTO_RESUME_DELAY_FAST_MS });
 
-      // Well past fireAt (resetAt + 50ms fast delay) and past submitLine's gap.
-      await sleep(600);
+      // A fire that typed would have written `continue` INSIDE that call; the CR follows
+      // on its own gap, but the text cannot, so this read is already decisive.
       const duringBoot = writesOf(await rpc(client, '__testGetWrites', { id }));
       expect(duringBoot).not.toContain('continue');
       expect(ev.events.some((e) => e.event === 'autoResume' && e.params.id === id)).toBe(false);
@@ -884,13 +950,13 @@ test.describe('#147 — a resume waits for the agent to exist', () => {
 
       // The composer appears — the same path term.onData feeds.
       await inject(client, id, '\r\n' + CARET + NBSP + 'try "fix"\r\n');
+      // The deferral's own retry timer (50ms under WT_AUTO_RESUME_FAST) picks it up.
       const fired = await ev.waitFor((e) => e.event === 'autoResume' && e.params.id === id, 5000);
       expect(fired.params.resetAt).toBe(resetAt);
 
-      await sleep(250); // submitLine writes the CR submitGapMs after the text
-      const sent = writesOf(await rpc(client, '__testGetWrites', { id }));
+      // submitLine writes the CR submitGapMs after the text
+      const sent = await waitForWrites(client, id, (w) => w.includes('\r'), 'the submit CR');
       expect(sent).toContain('continue');
-      expect(sent).toContain('\r');
       expect(sent.filter((w) => w === 'continue').length).toBe(1);
 
       ev.stop();
@@ -914,11 +980,10 @@ test.describe('#147 — a resume waits for the agent to exist', () => {
       const { id } = await rpc(client, 'createSession', { cwd: os.tmpdir(), name: 'resume-ready', agent: 'claude', autoCommand: '' });
       expect((await findSession(client, id)).agentReady).toBe(true);
 
-      const resetAt = Date.now() + 100;
-      await setResetAt(client, id, resetAt, true);
+      // The REAL timer, on a reset already passed: it fires on its next tick.
+      await setResetAt(client, id, pastReset(), true);
       await ev.waitFor((e) => e.event === 'autoResume' && e.params.id === id, 3000);
 
-      await sleep(250);
       expect(writesOf(await rpc(client, '__testGetWrites', { id }))).toContain('continue');
 
       ev.stop();
@@ -956,15 +1021,19 @@ test.describe('#138 — a skipped fire keeps what it knows', () => {
 
       // UserPromptSubmit clears the sighting (the user is demonstrably back), so
       // re-establish it the way a repaint would before arming. WT_API_ERROR_FAST
-      // shrinks the answer cooldown so the second render is seen rather than ignored.
-      await sleep(150);
-      await inject(client, id, MENU);
-      await sleep(120);
-      expect((await findSession(client, id)).limitPromptAt).toBeTruthy();
+      // shrinks the answer cooldown so the second render is seen rather than ignored -
+      // and a render inside that cooldown IS ignored, so repaint until it lands rather
+      // than betting a sleep against the worker's own clock. The inject is answered
+      // synchronously inside its RPC, so each read below is that render's verdict.
+      await expect.poll(async () => {
+        await inject(client, id, MENU);
+        return !!(await findSession(client, id)).limitPromptAt;
+      }, { timeout: 5000, message: 'the repainted cap prompt was never seen' }).toBe(true);
 
-      const resetAt = Date.now() + 100;
-      await setResetAt(client, id, resetAt, false); // armed on the sighting alone
-      await sleep(500);
+      await setResetAt(client, id, farReset(), false); // armed on the sighting alone
+      expect((await findSession(client, id)).autoResumeArmed).toBe(true);
+      // The reset comes due while the session is mid-turn - the fire runs, and declines.
+      await dueNow(client, id);
 
       // Skipped, as it should be — but the sighting must SURVIVE. It used to be
       // cleared above the `working` check, so a fire that then declined to type threw
@@ -1002,7 +1071,7 @@ test.describe('#137 — the per-session opt-out is not destructive', () => {
       const ev = makeEventCollector(client);
       const { id } = await rpc(client, 'createSession', { cwd: os.tmpdir(), name: 'optout', agent: 'claude', autoCommand: '' });
 
-      const resetAt = Date.now() + 400;
+      const resetAt = farReset();
       await rpc(client, 'setFiveHResetAt', { id, fiveHResetAt: resetAt, capBlocked: true });
       expect((await findSession(client, id)).autoResumeArmed).toBe(true);
 
@@ -1014,17 +1083,18 @@ test.describe('#137 — the per-session opt-out is not destructive', () => {
       expect(disabled.autoResumeArmed).toBe(false);
       expect(disabled.fiveHResetAt).toBe(resetAt);
 
-      // Past the moment it would have fired: nothing was typed.
-      await sleep(600);
+      // The moment it would have fired comes due: nothing was typed. Had disabling left
+      // the timer in place, it fires inside this call.
+      expect(await dueNow(client, id)).toEqual({ armed: false });
       expect(writesOf(await rpc(client, '__testGetWrites', { id }))).not.toContain('continue');
       expect(ev.events.some((e) => e.event === 'autoResume' && e.params.id === id)).toBe(false);
 
       // Clicked back on, with no metrics push in between — the worker still knows
-      // when the window turns over, so it re-arms from that and fires the catch-up.
+      // when the window turns over, so it re-arms from that and fires when it comes due.
       const on = await rpc(client, 'setFiveHResetAt', { id, enabled: true });
       expect(on.fiveHResetAt).toBe(resetAt);
+      expect(await dueNow(client, id)).toEqual({ armed: true, fireAt: resetAt + AUTO_RESUME_DELAY_FAST_MS });
       await ev.waitFor((e) => e.event === 'autoResume' && e.params.id === id, 3000);
-      await sleep(250);
       expect(writesOf(await rpc(client, '__testGetWrites', { id }))).toContain('continue');
 
       ev.stop();
@@ -1047,7 +1117,8 @@ test.describe('#137 — the per-session opt-out is not destructive', () => {
       const ev = makeEventCollector(client);
       const { id } = await rpc(client, 'createSession', { cwd: os.tmpdir(), name: 'legacy-push', agent: 'claude', autoCommand: '' });
 
-      const resetAt = Date.now() + 100;
+      // The REAL timer, on a reset already passed: it fires on its next tick.
+      const resetAt = pastReset();
       const res = await rpc(client, 'setFiveHResetAt', { id, fiveHResetAt: resetAt, capBlocked: true });
       expect(res.enabled).toBe(true);
       await ev.waitFor((e) => e.event === 'autoResume' && e.params.id === id, 3000);

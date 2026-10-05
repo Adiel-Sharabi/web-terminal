@@ -16,7 +16,7 @@
 // an editing channel that collapses "\\" to "\" silently turns these fixtures into
 // control characters, which is a recorded trap in this repo.
 const { test, expect } = require('@playwright/test');
-const { BASE, loginPage } = require('./test-helpers');
+const { BASE, loginPage, SIGNAL_TIMEOUT_MS } = require('./test-helpers');
 
 // Routes are installed AFTER loginPage() on purpose. It ends on '/', which serves the
 // app, so a route installed before it is consumed by the LOGIN navigation's page load and
@@ -86,6 +86,9 @@ test.describe('#252: a failed defaults fetch must not read as "no defaults"', ()
     await loginPage(page);
     await page.route(isConfig, (r) => r.abort('failed'));
     await page.route(isFolders, (r) => r.fulfill(okJson([`C:${BS}aaa`, `C:${BS}bbb`])));
+    const configFailed = page.waitForEvent('requestfailed', {
+      predicate: (req) => isConfig(new URL(req.url())), timeout: SIGNAL_TIMEOUT_MS,
+    });
     await page.goto(BASE + '/app');
 
     // The folder list does not depend on the config fetch.
@@ -103,6 +106,14 @@ test.describe('#252: a failed defaults fetch must not read as "no defaults"', ()
       .toBe(2);
 
     // And the failure is VISIBLE rather than silently-empty fields.
+    //
+    // #282 - BUT ONLY ONCE THERE HAS BEEN A FAILURE. The CI failure read
+    // `<div hidden="" id="newFormNotice"></div>`: hidden AND EMPTY, which is the page's
+    // initial markup - not a notice that was shown and lost, but a /api/config request
+    // whose abort the page had not yet seen. The folder poll above is no proxy for it:
+    // the form fetches its folders on a request of its own. So wait for the page to
+    // observe the failure, then ask the question this test is about.
+    await configFailed;
     await expect(page.locator('#newFormNotice')).toBeVisible();
   });
 });

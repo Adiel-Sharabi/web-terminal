@@ -8,7 +8,7 @@
 // contract). These tests therefore assert the SERVER's state after a UI action,
 // and seed state through the API, not through localStorage.
 const { test, expect } = require('@playwright/test');
-const { BASE, authCtx, loginPage } = require('./test-helpers');
+const { BASE, authCtx, loginPage, SIGNAL_TIMEOUT_MS } = require('./test-helpers');
 
 /** The server's view of one session's pin. */
 async function favOf(ctx, id) {
@@ -436,8 +436,18 @@ test.describe('Sidebar UI: favorites', () => {
         (route) => { peerPatches++; return route.fulfill({ status: 404, contentType: 'application/json', body: '{"error":"not found"}' }); });
 
       await page.goto(BASE + '/');
+      // #282 - THE PRECONDITION FIRST: the sidebar has rendered the routed payload.
+      // `_sidebarData` is assigned on the line before renderSidebar(data), so once it holds
+      // the injected peer the row is in the DOM. That takes two trips through the real
+      // /api/cluster/sessions (init's, then the drawer's) behind init's /api/sessions,
+      // and a 5s ceiling on the star covered all of it - which under full-suite load,
+      // with the worker slow, was "element not found" before the sidebar ever rendered.
+      await expect.poll(() => page.evaluate((oldId) =>
+        !!(_sidebarData && (_sidebarData.sessions || []).some((s) => s.id === oldId)), OLD_ID),
+      { timeout: SIGNAL_TIMEOUT_MS, message: 'the sidebar never rendered the routed /api/cluster/sessions payload' })
+        .toBe(true);
       const oldStar = page.locator(`.sb-item[data-session-id="${OLD_ID}"] .sb-star`);
-      await expect(oldStar).toBeVisible({ timeout: 5000 });
+      await expect(oldStar).toBeVisible();
       await expect(oldStar).toBeDisabled();
       expect(await oldStar.getAttribute('title')).toMatch(/upgrade/i);
 

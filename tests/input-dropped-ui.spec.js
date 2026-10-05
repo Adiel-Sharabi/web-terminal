@@ -20,12 +20,13 @@
 // technique `submit-unconfirmed-ui.spec.js` uses for `/ws/notify`), since a real notice
 // is server-initiated with no other deterministic trigger.
 const { test, expect } = require('@playwright/test');
-const { BASE, authCtx, loginPage } = require('./test-helpers');
-
-async function openSession(page, id, name) {
-  await page.goto(BASE + '/app/' + id);
-  await expect(page.locator('#sessionName')).toContainText(name, { timeout: 10000 });
-}
+//
+// #277 — every test opens through test-helpers' `openSession`, which returns only once the
+// socket is ATTACHED, and pushes frames through `routeSocket`, which targets the page's
+// newest socket. The pasted copy here returned on `#sessionName` alone, which can paint
+// while the socket is still CONNECTING; under full-suite load that let a frame go into a
+// socket the page had not finished opening, or had already replaced.
+const { authCtx, loginPage, openSession, routeSocket } = require('./test-helpers');
 
 test.describe('#193 inputDropped notice (web client)', () => {
   test('an inputDropped frame reveals the notice with the byte count', async ({ page }) => {
@@ -35,16 +36,10 @@ test.describe('#193 inputDropped notice (web client)', () => {
     const ctx = await authCtx();
     const id = (await (await ctx.post('/api/sessions', { data: { name: 'ID Notice' } })).json()).id;
 
-    let resolveRoute;
-    const routeReady = new Promise((resolve) => { resolveRoute = resolve; });
-    await page.routeWebSocket((url) => url.pathname === `/ws/${id}`, (wsRoute) => {
-      wsRoute.connectToServer();
-      resolveRoute(wsRoute);
-    });
+    const wsRoute = await routeSocket(page, `/ws/${id}`);
 
     try {
       await openSession(page, id, 'ID Notice');
-      const wsRoute = await routeReady;
 
       await expect(page.locator('#composeNotice')).toBeHidden();
 
@@ -81,16 +76,10 @@ test.describe('#193 inputDropped notice (web client)', () => {
     const ctx = await authCtx();
     const id = (await (await ctx.post('/api/sessions', { data: { name: 'ID Buffer' } })).json()).id;
 
-    let resolveRoute;
-    const routeReady = new Promise((resolve) => { resolveRoute = resolve; });
-    await page.routeWebSocket((url) => url.pathname === `/ws/${id}`, (wsRoute) => {
-      wsRoute.connectToServer();
-      resolveRoute(wsRoute);
-    });
+    const wsRoute = await routeSocket(page, `/ws/${id}`);
 
     try {
       await openSession(page, id, 'ID Buffer');
-      const wsRoute = await routeReady;
 
       await expect(page.locator('#composeNotice')).toBeHidden();
 
@@ -129,16 +118,10 @@ test.describe('#193 inputDropped notice (web client)', () => {
     const ctx = await authCtx();
     const id = (await (await ctx.post('/api/sessions', { data: { name: 'ID Peer' } })).json()).id;
 
-    let resolveRoute;
-    const routeReady = new Promise((resolve) => { resolveRoute = resolve; });
-    await page.routeWebSocket((url) => url.pathname === `/ws/${id}`, (wsRoute) => {
-      wsRoute.connectToServer();
-      resolveRoute(wsRoute);
-    });
+    const wsRoute = await routeSocket(page, `/ws/${id}`);
 
     try {
       await openSession(page, id, 'ID Peer');
-      const wsRoute = await routeReady;
       const text = page.locator('#composeNoticeText');
 
       wsRoute.send(JSON.stringify({
@@ -195,16 +178,10 @@ test.describe('#193 inputDropped notice (web client)', () => {
     const a = (await (await ctx.post('/api/sessions', { data: { name: 'ID Bg A' } })).json()).id;
     const b = (await (await ctx.post('/api/sessions', { data: { name: 'ID Bg B' } })).json()).id;
 
-    let resolveRoute;
-    const routeReady = new Promise((resolve) => { resolveRoute = resolve; });
-    await page.routeWebSocket((url) => url.pathname === `/ws/${a}`, (wsRoute) => {
-      wsRoute.connectToServer();
-      resolveRoute(wsRoute);
-    });
+    const wsRoute = await routeSocket(page, `/ws/${a}`);
 
     try {
       await openSession(page, a, 'ID Bg A');
-      const wsRoute = await routeReady;
       // Set explicitly rather than trusting the config the suite happens to run with:
       // demoting a socket instead of closing it is the precondition of this whole path.
       await page.evaluate(() => { keepSessionsOpen = true; });
