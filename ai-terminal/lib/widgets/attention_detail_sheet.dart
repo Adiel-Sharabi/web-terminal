@@ -14,6 +14,7 @@ import '../theme/app_theme.dart';
 import '../theme/status_colors.dart';
 import 'format_utils.dart';
 import 'server_badge.dart';
+import 'app_bottom_sheet.dart';
 
 const int _kMaxMessageChars = 2000;
 
@@ -25,7 +26,7 @@ Future<void> showAttentionDetailSheet(
   Session session, {
   required VoidCallback onOpenTerminal,
 }) {
-  return showModalBottomSheet<void>(
+  return showAppBottomSheet<void>(
     context: context,
     isScrollControlled: true,
     showDragHandle: true,
@@ -110,65 +111,63 @@ class _AttentionDetailSheetState extends State<_AttentionDetailSheet> {
         ? 'Session ${session.shortId}'
         : session.name;
 
-    return SafeArea(
-      child: SingleChildScrollView(
-        padding: const EdgeInsets.fromLTRB(
-          AppSpacing.screenPadding,
-          0,
-          AppSpacing.screenPadding,
-          AppSpacing.screenPadding,
-        ),
-        child: Column(
-          crossAxisAlignment: CrossAxisAlignment.start,
-          mainAxisSize: MainAxisSize.min,
-          children: [
-            Row(
-              children: [
-                ServerBadge(name: session.server.name),
-                const SizedBox(width: 8),
-                Expanded(
-                  child: Text(
-                    displayName,
-                    style: theme.textTheme.titleLarge,
-                    overflow: TextOverflow.ellipsis,
-                  ),
-                ),
-              ],
-            ),
-            if (_info?.at != null) ...[
-              const SizedBox(height: 4),
-              Text(
-                absoluteTime(_info!.at),
-                style: theme.textTheme.bodySmall?.copyWith(
-                  color: theme.colorScheme.onSurfaceVariant,
+    return SingleChildScrollView(
+      padding: const EdgeInsets.fromLTRB(
+        AppSpacing.screenPadding,
+        0,
+        AppSpacing.screenPadding,
+        AppSpacing.screenPadding,
+      ),
+      child: Column(
+        crossAxisAlignment: CrossAxisAlignment.start,
+        mainAxisSize: MainAxisSize.min,
+        children: [
+          Row(
+            children: [
+              ServerBadge(name: session.server.name),
+              const SizedBox(width: 8),
+              Expanded(
+                child: Text(
+                  displayName,
+                  style: theme.textTheme.titleLarge,
+                  overflow: TextOverflow.ellipsis,
                 ),
               ),
             ],
-            const SizedBox(height: 16),
-            if (_loading)
-              const Center(
-                child: Padding(
-                  padding: EdgeInsets.all(24),
-                  child: CircularProgressIndicator(),
-                ),
-              ),
-            if (!_loading && _error != null)
-              _ErrorBanner(error: _error!, onRetry: _load),
-            if (!_loading && _error == null && _info != null)
-              ..._buildContent(theme),
-            const SizedBox(height: 16),
-            FilledButton.tonalIcon(
-              onPressed: _openTerminal,
-              icon: const Icon(Icons.terminal),
-              label: const Text('Open in terminal'),
-            ),
+          ),
+          if (_info?.at != null) ...[
             const SizedBox(height: 4),
-            TextButton(
-              onPressed: () => Navigator.pop(context),
-              child: const Text('Dismiss notification'),
+            Text(
+              absoluteTime(_info!.at),
+              style: theme.textTheme.bodySmall?.copyWith(
+                color: theme.colorScheme.onSurfaceVariant,
+              ),
             ),
           ],
-        ),
+          const SizedBox(height: 16),
+          if (_loading)
+            const Center(
+              child: Padding(
+                padding: EdgeInsets.all(24),
+                child: CircularProgressIndicator(),
+              ),
+            ),
+          if (!_loading && _error != null)
+            _ErrorBanner(error: _error!, onRetry: _load),
+          if (!_loading && _error == null && _info != null)
+            ..._buildContent(theme),
+          const SizedBox(height: 16),
+          FilledButton.tonalIcon(
+            onPressed: _openTerminal,
+            icon: const Icon(Icons.terminal),
+            label: const Text('Open in terminal'),
+          ),
+          const SizedBox(height: 4),
+          TextButton(
+            onPressed: () => Navigator.pop(context),
+            child: const Text('Dismiss notification'),
+          ),
+        ],
       ),
     );
   }

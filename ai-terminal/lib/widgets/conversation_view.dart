@@ -47,6 +47,7 @@ import 'pulsing_dots.dart';
 // that could drift from it.
 import 'session_card.dart' show parseAgentColor;
 import 'waiting_banner.dart';
+import 'app_bottom_sheet.dart';
 
 /// Turns per page — matches the server's default.
 const int _kPageSize = 50;
@@ -952,7 +953,7 @@ class _ConversationViewState extends State<ConversationView> {
   /// from here exactly as the terminal lens lets you — routed to the session via
   /// [onSubmitToSession], not a fictional per-subagent channel.
   void _openSubagentSheet(ToolUse tool) {
-    showModalBottomSheet<void>(
+    showAppBottomSheet<void>(
       context: context,
       isScrollControlled: true,
       showDragHandle: true,
@@ -2969,63 +2970,61 @@ class _SubagentSheetState extends State<_SubagentSheet> {
     final theme = Theme.of(context);
     final maxH = MediaQuery.of(context).size.height * 0.5;
     final canSend = widget.onSubmit != null;
-    return SafeArea(
-      child: Padding(
-        padding: EdgeInsets.only(
-          left: 12,
-          right: 12,
-          bottom: MediaQuery.of(context).viewInsets.bottom + 12,
-        ),
-        child: Column(
-          mainAxisSize: MainAxisSize.min,
-          crossAxisAlignment: CrossAxisAlignment.start,
-          children: [
-            _SubagentCard(
-              tool: widget.tool,
-              subFetch: widget.subFetch,
-              initiallyExpanded: true,
-              expandedMaxHeight: maxH,
-            ),
+    return Padding(
+      padding: EdgeInsets.only(
+        left: 12,
+        right: 12,
+        bottom: MediaQuery.of(context).viewInsets.bottom + 12,
+      ),
+      child: Column(
+        mainAxisSize: MainAxisSize.min,
+        crossAxisAlignment: CrossAxisAlignment.start,
+        children: [
+          _SubagentCard(
+            tool: widget.tool,
+            subFetch: widget.subFetch,
+            initiallyExpanded: true,
+            expandedMaxHeight: maxH,
+          ),
+          const SizedBox(height: 8),
+          Text(
+            canSend
+                ? 'Read-only — subagents run on their own. A message here goes to '
+                    'the session (the main agent), the same as typing in the terminal.'
+                : 'Read-only — subagents run on their own.',
+            style: theme.textTheme.bodySmall
+                ?.copyWith(color: theme.colorScheme.onSurfaceVariant),
+          ),
+          if (canSend) ...[
             const SizedBox(height: 8),
-            Text(
-              canSend
-                  ? 'Read-only — subagents run on their own. A message here goes to '
-                      'the session (the main agent), the same as typing in the terminal.'
-                  : 'Read-only — subagents run on their own.',
-              style: theme.textTheme.bodySmall
-                  ?.copyWith(color: theme.colorScheme.onSurfaceVariant),
-            ),
-            if (canSend) ...[
-              const SizedBox(height: 8),
-              Row(
-                children: [
-                  Expanded(
-                    child: TextField(
-                      controller: _controller,
-                      textInputAction: TextInputAction.send,
-                      onSubmitted: (_) => _send(),
-                      decoration: InputDecoration(
-                        hintText: 'Message session…',
-                        isDense: true,
-                        border: OutlineInputBorder(
-                          borderRadius: BorderRadius.circular(AppShape.small),
-                        ),
-                        contentPadding: const EdgeInsets.symmetric(
-                            horizontal: 12, vertical: 10),
+            Row(
+              children: [
+                Expanded(
+                  child: TextField(
+                    controller: _controller,
+                    textInputAction: TextInputAction.send,
+                    onSubmitted: (_) => _send(),
+                    decoration: InputDecoration(
+                      hintText: 'Message session…',
+                      isDense: true,
+                      border: OutlineInputBorder(
+                        borderRadius: BorderRadius.circular(AppShape.small),
                       ),
+                      contentPadding: const EdgeInsets.symmetric(
+                          horizontal: 12, vertical: 10),
                     ),
                   ),
-                  const SizedBox(width: 6),
-                  IconButton.filled(
-                    onPressed: _send,
-                    icon: const Icon(Icons.send, size: 18),
-                    tooltip: 'Send to session',
-                  ),
-                ],
-              ),
-            ],
+                ),
+                const SizedBox(width: 6),
+                IconButton.filled(
+                  onPressed: _send,
+                  icon: const Icon(Icons.send, size: 18),
+                  tooltip: 'Send to session',
+                ),
+              ],
+            ),
           ],
-        ),
+        ],
       ),
     );
   }
