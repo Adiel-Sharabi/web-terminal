@@ -45,18 +45,42 @@ process.env.WT_CLUSTER_TOKENS_FILE = path.join(__dirname, 'cluster-tokens.test.j
 // `webServer` lives — BEFORE globalSetup, so by then `server.js` has already read the
 // poisoned file, and `_refreshLiveConfig` skips a file that no longer exists, pinning
 // the stale values in cache for the whole run.
-try {
+//
 // KNOWN, and low-cost: this is module scope, so it also fires on `--list`, `--ui` and the
 // VS Code extension - a mere listing mutates state. Left as is because `reuseExistingServer:
 // false` already refuses a concurrent run, and the worst case is that a listing during a run
 // leaves the caches pinned rather than reset, with the next PUT recreating the file.
-  require('fs').unlinkSync(path.join(__dirname, 'config.test.json'));
-  console.log('[config] removed config.test.json left by an earlier run (#240)');
-} catch (e) {
-  // ENOENT is the normal case (CI, or a run that cleaned up). Anything else is worth
-  // seeing rather than swallowing — a locked file would silently reinstate the leak.
-  if (e.code !== 'ENOENT') console.warn('[config] could not remove config.test.json:', e.message);
+//
+// RUNNER ONLY - NOT IN A WORKER. Playwright's worker processes re-`require` this file
+// when they start, and with `workers: 1` a fresh worker is started after every failing
+// test, so an ungated delete also fired MID-RUN. For `config.test.json` that was mostly
+// harmless (the server keeps its cache and the next PUT recreates the file); for the token
+// store below it would silently revoke, mid-run, every token minted so far. A worker has
+// `TEST_WORKER_INDEX` set before it loads the config; the runner never does.
+function removeRunFile(name, issue) {
+  if (process.env.TEST_WORKER_INDEX !== undefined) return;
+  try {
+    require('fs').unlinkSync(path.join(__dirname, name));
+    console.log(`[config] removed ${name} left by an earlier run (${issue})`);
+  } catch (e) {
+    // ENOENT is the normal case (CI, or a run that cleaned up). Anything else is worth
+    // seeing rather than swallowing — a locked file would silently reinstate the leak.
+    if (e.code !== 'ENOENT') console.warn(`[config] could not remove ${name}:`, e.message);
+  }
 }
+removeRunFile('config.test.json', '#240');
+
+// #272 follow-up — the API TOKEN store, which had no redirect at all. `server.js`
+// resolved `api-tokens.json` beside itself unconditionally, so every run minted live,
+// 90-day, full-access bearer tokens into the PRODUCTION store of whatever checkout it ran
+// in (hundreds of `exec-test` / `client:companion:test-device` / `client:evilscript`
+// entries, none ever revoked). Same treatment as `cluster-tokens.test.json` above, plus
+// the #240 reset: a token minted by one run must not still authenticate in the next, and
+// a fresh store is the state CI starts from. `tests/api-tokens-isolation.spec.js` is the
+// gate - it fails if this path is the production store, or if minting a token through the
+// suite's server changes the production file.
+process.env.WT_API_TOKENS_FILE = path.join(__dirname, 'api-tokens.test.json');
+removeRunFile('api-tokens.test.json', '#272');
 
 module.exports = defineConfig({
   testDir: './tests',

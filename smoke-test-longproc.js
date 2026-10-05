@@ -11,7 +11,9 @@ const WebSocket = require('ws');
 
 const BASE = process.env.WT_BASE || 'http://127.0.0.1:7681';
 const WS_BASE = BASE.replace(/^http/, 'ws');
-const TOKENS_FILE = path.join(__dirname, 'api-tokens.json');
+// Same override as server.js's API_TOKENS_FILE: this writes into the store of the
+// server it drives, so it must resolve that store the way the server does.
+const TOKENS_FILE = process.env.WT_API_TOKENS_FILE || path.join(__dirname, 'api-tokens.json');
 const STATUS_FILE = path.join(__dirname, 'monitor-status.json');
 
 const sleep = (ms) => new Promise(r => setTimeout(r, ms));

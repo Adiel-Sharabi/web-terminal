@@ -57,6 +57,25 @@ test.describe('classifyNotification — behaviour is UNCHANGED', () => {
     }
   });
 
+  test('push_notification is BENIGN — the one shape the #194 drop log ever recorded', () => {
+    // Field data: six UNRECOGNISED notifications across the fleet, every one of
+    // them this matcher. Now that it is understood it must not keep occupying the
+    // log that exists to surface shapes nobody has seen. Both spellings of the
+    // field, as for the others.
+    expect(classifyNotification({ notification_type: 'push_notification' }))
+      .toBe(NOTIFICATION_KINDS.BENIGN);
+    expect(classifyNotification({ matcher: 'push_notification' }))
+      .toBe(NOTIFICATION_KINDS.BENIGN);
+    // Not a default flip: the precedence above it is untouched, so a push whose
+    // prose IS a permission ask still classifies as one, and the fallthrough for
+    // a genuinely new matcher is still UNKNOWN.
+    expect(classifyNotification({ notification_type: 'push_notification',
+      message: 'Claude needs your permission to use Bash' }))
+      .toBe(NOTIFICATION_KINDS.PERMISSION);
+    expect(classifyNotification({ notification_type: 'push_notification_v2' }))
+      .toBe(NOTIFICATION_KINDS.UNKNOWN);
+  });
+
   test('anything else is UNKNOWN — the case that used to vanish', () => {
     expect(classifyNotification({ notification_type: 'something_new' }))
       .toBe(NOTIFICATION_KINDS.UNKNOWN);
