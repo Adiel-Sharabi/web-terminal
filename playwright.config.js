@@ -40,47 +40,31 @@ process.env.WT_CLUSTER_TOKENS_FILE = path.join(__dirname, 'cluster-tokens.test.j
 // become its own thing to keep in step. The specs that need config recreate it through
 // `PUT /api/config` as they always have.
 //
-// It has to happen HERE and not in `global-setup.js`, which is otherwise exactly the
-// right home for a start-of-run sweep (#177): Playwright runs plugin setup — where the
-// `webServer` lives — BEFORE globalSetup, so by then `server.js` has already read the
-// poisoned file, and `_refreshLiveConfig` skips a file that no longer exists, pinning
-// the stale values in cache for the whole run.
-//
-// KNOWN, and low-cost: this is module scope, so it also fires on `--list`, `--ui` and the
-// VS Code extension - a mere listing mutates state. Left as is because `reuseExistingServer:
-// false` already refuses a concurrent run, and the worst case is that a listing during a run
-// leaves the caches pinned rather than reset, with the next PUT recreating the file.
-//
-// RUNNER ONLY - NOT IN A WORKER. Playwright's worker processes re-`require` this file
-// when they start, and with `workers: 1` a fresh worker is started after every failing
-// test, so an ungated delete also fired MID-RUN. For `config.test.json` that was mostly
-// harmless (the server keeps its cache and the next PUT recreates the file); for the token
-// store below it would silently revoke, mid-run, every token minted so far. A worker has
-// `TEST_WORKER_INDEX` set before it loads the config; the runner never does.
-function removeRunFile(name, issue) {
-  if (process.env.TEST_WORKER_INDEX !== undefined) return;
-  try {
-    require('fs').unlinkSync(path.join(__dirname, name));
-    console.log(`[config] removed ${name} left by an earlier run (${issue})`);
-  } catch (e) {
-    // ENOENT is the normal case (CI, or a run that cleaned up). Anything else is worth
-    // seeing rather than swallowing — a locked file would silently reinstate the leak.
-    if (e.code !== 'ENOENT') console.warn(`[config] could not remove ${name}:`, e.message);
-  }
-}
-removeRunFile('config.test.json', '#240');
+// THE DELETE LIVES IN THE webServer COMMAND (`scripts/reset-test-run-files.js`), not
+// here and not in `global-setup.js`:
+//  * not `global-setup.js` (#177's home for start-of-run sweeps): Playwright runs plugin
+//    setup - where the `webServer` lives - BEFORE globalSetup, so by then `server.js` has
+//    already read the poisoned file, and `_refreshLiveConfig` skips a file that no longer
+//    exists, pinning the stale values in cache for the whole run;
+//  * not here, at module scope, where it used to be: this file is also loaded by every
+//    WORKER (re-required on start, and a fresh worker follows every failing test) and by
+//    every LISTING (`--list`, `--ui`, the VS Code extension re-listing on save). Either
+//    one fired the delete in the middle of a live run - harmless-ish for the config, but
+//    for the token store below it revoked every token the run had minted so far.
+// Only a real run executes the webServer command, and `&&` puts the reset strictly
+// before `server.js` reads either file.
 
 // #272 follow-up — the API TOKEN store, which had no redirect at all. `server.js`
 // resolved `api-tokens.json` beside itself unconditionally, so every run minted live,
 // 90-day, full-access bearer tokens into the PRODUCTION store of whatever checkout it ran
 // in (hundreds of `exec-test` / `client:companion:test-device` / `client:evilscript`
 // entries, none ever revoked). Same treatment as `cluster-tokens.test.json` above, plus
-// the #240 reset: a token minted by one run must not still authenticate in the next, and
-// a fresh store is the state CI starts from. `tests/api-tokens-isolation.spec.js` is the
-// gate - it fails if this path is the production store, or if minting a token through the
-// suite's server changes the production file.
+// the #240 reset (in the webServer command, see above): a token minted by one run must
+// not still authenticate in the next. `tests/api-tokens-isolation.spec.js` is the gate -
+// it fails if this path is the production store, or if minting a token through the
+// suite's server changes the production file. Set on process.env so the webServer env
+// below, the specs, and any server a spec spawns all inherit the same path.
 process.env.WT_API_TOKENS_FILE = path.join(__dirname, 'api-tokens.test.json');
-removeRunFile('api-tokens.test.json', '#272');
 
 module.exports = defineConfig({
   testDir: './tests',
@@ -97,7 +81,8 @@ module.exports = defineConfig({
     baseURL: 'http://127.0.0.1:17681',
   },
   webServer: {
-    command: 'node server.js',
+    // The reset runs first, and only in a real run - see the #240/#272 note above.
+    command: 'node scripts/reset-test-run-files.js && node server.js',
     url: 'http://127.0.0.1:17681/login',
     env: {
       ...process.env,

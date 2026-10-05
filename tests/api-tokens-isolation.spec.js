@@ -80,13 +80,21 @@ test.describe('#272 the test server mints into its OWN token store', () => {
       expect(Object.prototype.hasOwnProperty.call(testStore, token),
         'the minted token must be in the redirected store').toBe(true);
 
-      // The point. Absent stays absent (CI, a fresh checkout); present stays
-      // byte-for-byte the same size with the same mtime. The real server on this
-      // box can legitimately write its own store, but only on a mint or an expiry
-      // prune, so a change inside this sub-second window is not expected noise.
+      // The point. Absent stays absent (CI, a fresh checkout); present stays the
+      // same size with the same mtime — with ONE tolerated exception. A production
+      // server sharing this checkout rewrites its own store when an EXPIRED token
+      // is presented to it (`verifyApiToken` prunes it), which SHRINKS the file. The
+      // leak under test is a MINT, which can only GROW it, so a strictly smaller
+      // file is someone else's prune, never this suite — and a leaked mint still
+      // fails. (Production MINTING in the same sub-second window would false-fail;
+      // that is rare enough to accept rather than open the file to tell them apart.)
       const after = statOf(PROD_STORE);
-      expect(after, 'the production api-tokens.json must not be written by the suite')
-        .toEqual(before);
+      expect(after.exists, 'the suite must not CREATE a production api-tokens.json')
+        .toBe(before.exists);
+      if (after.exists && (after.size !== before.size || after.mtimeMs !== before.mtimeMs)) {
+        expect(after.size, 'the production api-tokens.json GREW while the suite minted a token')
+          .toBeLessThan(before.size);
+      }
     } finally {
       if (token) await ctx.delete(`/api/auth/tokens/${encodeURIComponent(token)}`).catch(() => {});
       await ctx.dispose();
