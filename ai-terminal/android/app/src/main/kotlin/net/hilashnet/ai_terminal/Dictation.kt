@@ -25,7 +25,7 @@ import io.flutter.plugin.common.EventChannel
 //
 // CONTINUOUS until the user stops it: SpeechRecognizer ends a session at the
 // first pause, so every end-of-utterance (a result, or a no-match / silence
-// timeout) starts the next session while [active] is set. Text is reported as
+// timeout) starts the next RUN while [active] is set. Text is reported as
 // events; what to DO with it (where it lands in the field) is decided in Dart
 // (lib/services/dictation_service.dart), which is unit-testable off-device.
 class Dictation(private val activity: Activity) : EventChannel.StreamHandler {
@@ -39,17 +39,25 @@ class Dictation(private val activity: Activity) : EventChannel.StreamHandler {
     private var awaitingPermission = false
 
     /**
-     * Chosen by Dart per start and echoed on every event, so a late report from
-     * a session the user already ended (stop, then a quick restart) can never
-     * act on the new one.
+     * Chosen by Dart per start and echoed on every event, so Dart can tell which
+     * of ITS sessions a report belongs to.
      */
     private var session = 0
+
+    /**
+     * Numbers every startListening. Each run gets its own listener that knows its
+     * number and goes silent once a newer run exists. Stamping events with
+     * [session] at emit time was not enough: a result the binder had already
+     * queued for a cancelled run (a stop, a language switch, a quick restart)
+     * would be emitted under the NEW session and append words twice (#292 review).
+     */
+    private var run = 0
 
     /** Consecutive restarts that produced nothing; bounds a recognizer that keeps failing. */
     private var failures = 0
 
-    /** Punctuation/capitalisation request (API 33+). Dropped if the service rejects it. */
-    private var formatting = Build.VERSION.SDK_INT >= 33
+    /** Punctuation/capitalisation request (API 33+). Dropped for one start if the service rejects it. */
+    private var formatting = FORMATTING_SUPPORTED
     private var heardSomething = false
 
     override fun onListen(arguments: Any?, events: EventChannel.EventSink?) { sink = events }
@@ -59,8 +67,7 @@ class Dictation(private val activity: Activity) : EventChannel.StreamHandler {
 
     fun start(lang: String, sessionId: Int) {
         // A new session supersedes whatever was running.
-        handler.removeCallbacksAndMessages(null)
-        recognizer?.cancel()
+        supersede()
         session = sessionId
         language = lang
         if (!available()) {
@@ -77,27 +84,35 @@ class Dictation(private val activity: Activity) : EventChannel.StreamHandler {
         active = true
         failures = 0
         heardSomething = false
-        emitState(true)
+        // One offline attempt must not cost punctuation for the rest of the day.
+        formatting = FORMATTING_SUPPORTED
         listen()
     }
 
     /**
-     * Switch language mid-dictation. The utterance in flight is abandoned (Dart
-     * keeps what it already showed as partial text) and listening resumes in the
-     * new language.
+     * Switch language mid-dictation. The run in flight is abandoned (Dart keeps
+     * what it already showed as partial text) and listening resumes in the new
+     * language.
      */
     fun setLanguage(lang: String) {
         language = lang
         if (active) {
-            handler.removeCallbacksAndMessages(null)
-            recognizer?.cancel()
+            supersede()
             relisten()
         }
     }
 
-    /** Stop and FLUSH: the utterance in flight still delivers its final text. */
+    /** Stop and FLUSH: the run in flight still delivers its final text. */
     fun stop() {
-        if (!active) return
+        if (!active) {
+            // Stopped while the permission prompt is up: nothing is listening,
+            // but Dart is still waiting to hear that.
+            if (awaitingPermission) {
+                awaitingPermission = false
+                emitState(false)
+            }
+            return
+        }
         active = false
         handler.removeCallbacksAndMessages(null)
         recognizer?.stopListening()
@@ -112,8 +127,7 @@ class Dictation(private val activity: Activity) : EventChannel.StreamHandler {
     fun cancel() {
         active = false
         awaitingPermission = false
-        handler.removeCallbacksAndMessages(null)
-        recognizer?.cancel()
+        supersede()
     }
 
     fun destroy() {
@@ -131,11 +145,19 @@ class Dictation(private val activity: Activity) : EventChannel.StreamHandler {
         return true
     }
 
+    /** End the current run so nothing it still has queued can speak. */
+    private fun supersede() {
+        handler.removeCallbacksAndMessages(null)
+        run += 1
+        recognizer?.cancel()
+    }
+
     private fun listen() {
         val r = recognizer ?: SpeechRecognizer.createSpeechRecognizer(activity).also {
-            it.setRecognitionListener(listener)
             recognizer = it
         }
+        run += 1
+        r.setRecognitionListener(RunListener(run))
         val intent = Intent(RecognizerIntent.ACTION_RECOGNIZE_SPEECH).apply {
             putExtra(RecognizerIntent.EXTRA_LANGUAGE_MODEL, RecognizerIntent.LANGUAGE_MODEL_FREE_FORM)
             putExtra(RecognizerIntent.EXTRA_LANGUAGE, language)
@@ -148,7 +170,7 @@ class Dictation(private val activity: Activity) : EventChannel.StreamHandler {
         r.startListening(intent)
     }
 
-    /** Next session after a pause. The delay avoids ERROR_RECOGNIZER_BUSY on a back-to-back start. */
+    /** Next run after a pause. The delay avoids ERROR_RECOGNIZER_BUSY on a back-to-back start. */
     private fun relisten(delayMs: Long = RESTART_DELAY_MS, recreate: Boolean = false) {
         handler.postDelayed({
             if (!active) return@postDelayed
@@ -160,8 +182,15 @@ class Dictation(private val activity: Activity) : EventChannel.StreamHandler {
         }, delayMs)
     }
 
-    private val listener = object : RecognitionListener {
-        override fun onReadyForSpeech(params: Bundle?) {}
+    /** One run's callbacks. Silent the moment a newer run (or a cancel) exists. */
+    private inner class RunListener(private val id: Int) : RecognitionListener {
+        private val current get() = id == run
+
+        override fun onReadyForSpeech(params: Bundle?) {
+            // The mic is actually open now. Dart shows "Listening" from here, not
+            // from the tap: words spoken before this are not heard.
+            if (current && active) emit(mapOf("type" to "ready"))
+        }
         override fun onBeginningOfSpeech() {}
         override fun onRmsChanged(rmsdB: Float) {}
         override fun onBufferReceived(buffer: ByteArray?) {}
@@ -169,6 +198,7 @@ class Dictation(private val activity: Activity) : EventChannel.StreamHandler {
         override fun onEvent(eventType: Int, params: Bundle?) {}
 
         override fun onPartialResults(partialResults: Bundle?) {
+            if (!current) return
             val text = firstResult(partialResults) ?: return
             heardSomething = true
             failures = 0
@@ -176,6 +206,7 @@ class Dictation(private val activity: Activity) : EventChannel.StreamHandler {
         }
 
         override fun onResults(results: Bundle?) {
+            if (!current) return
             val text = firstResult(results)
             if (!text.isNullOrBlank()) {
                 heardSomething = true
@@ -186,6 +217,7 @@ class Dictation(private val activity: Activity) : EventChannel.StreamHandler {
         }
 
         override fun onError(error: Int) {
+            if (!current) return
             if (!active) {
                 // stop() flushed and the service had nothing more to say.
                 emitState(false)
@@ -193,7 +225,7 @@ class Dictation(private val activity: Activity) : EventChannel.StreamHandler {
             }
             when (error) {
                 // A pause with no words, or a silence timeout: the normal end of a
-                // session in continuous dictation, not a failure.
+                // run in continuous dictation, not a failure.
                 SpeechRecognizer.ERROR_NO_MATCH,
                 SpeechRecognizer.ERROR_SPEECH_TIMEOUT -> relisten()
                 SpeechRecognizer.ERROR_RECOGNIZER_BUSY,
@@ -219,7 +251,7 @@ class Dictation(private val activity: Activity) : EventChannel.StreamHandler {
 
     private fun fail(error: Int) {
         active = false
-        handler.removeCallbacksAndMessages(null)
+        supersede()
         emitError(error.toString())
     }
 
@@ -244,5 +276,6 @@ class Dictation(private val activity: Activity) : EventChannel.StreamHandler {
         const val PERMISSION_REQUEST = 2910
         private const val RESTART_DELAY_MS = 150L
         private const val MAX_RETRIES = 3
+        private val FORMATTING_SUPPORTED = Build.VERSION.SDK_INT >= 33
     }
 }

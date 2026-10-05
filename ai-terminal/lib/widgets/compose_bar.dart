@@ -536,7 +536,9 @@ class ComposeBar extends StatelessWidget {
               const SizedBox(width: 6),
               Expanded(
                 child: Text(
-                  'Listening · ${d.language.name}',
+                  d.ready
+                      ? 'Listening · ${d.language.name}'
+                      : 'Starting the mic · ${d.language.name}',
                   style: small?.copyWith(
                     color: theme.colorScheme.onSurfaceVariant,
                   ),

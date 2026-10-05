@@ -63,6 +63,11 @@ void main() {
       expect(m.render().text, 'hello there שלום');
     });
 
+    test('a selection is REPLACED by the dictated words', () {
+      final m = DictationMerge('fix the bug', 4, 7)..onPartial('a');
+      expect(m.render().text, 'fix a bug');
+    });
+
     test('a caret past the end is clamped rather than throwing', () {
       final m = DictationMerge('abc', 99)..onPartial('d');
       expect(m.render().text, 'abc d');
@@ -134,6 +139,15 @@ void main() {
       expect(field.text, 'hello, edited by hand');
       expect(svc.isListeningTo(field), isFalse);
       expect(calls.map((c) => c.method), contains('cancel'));
+    });
+
+    test('a selection-only change (focus loss) is NOT an edit', () async {
+      await svc.start(field);
+      await send({'type': 'partial', 'text': 'hello', 'session': 1});
+      field.selection = const TextSelection.collapsed(offset: 0);
+      await send({'type': 'partial', 'text': 'hello world', 'session': 1});
+      expect(field.text, 'hello world');
+      expect(svc.isListeningTo(field), isTrue);
     });
 
     test('cancel stops at once; nothing heard afterwards lands', () async {
@@ -251,6 +265,13 @@ void main() {
       await t.pumpWidget(bar(c, d: svc, onDictate: () {}));
       expect(find.byKey(const ValueKey('compose-dictation-status')), findsNothing);
       await t.runAsync(() => svc.start(c));
+      await t.pump();
+      // Not "Listening" until the mic is really open: words before that are lost.
+      expect(find.text('Starting the mic · English'), findsOneWidget);
+      await t.runAsync(() async {
+        events.add({'type': 'ready', 'session': 1});
+        await Future<void>.delayed(const Duration(milliseconds: 10));
+      });
       await t.pump();
       expect(find.text('Listening · English'), findsOneWidget);
       expect(find.byTooltip('Stop dictation'), findsOneWidget);

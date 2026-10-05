@@ -43,15 +43,23 @@ const List<DictationLanguage> kDictationLanguages = [
 ];
 
 /// Where dictated words land in a field: at the caret it had when dictation
-/// started, with a space either side where the neighbouring text needs one.
+/// started, or in place of the selection if there was one (as every other
+/// dictation UI does), with a space either side where the neighbouring text
+/// needs one.
 ///
 /// Pure, so the merge rule is tested without a device. [committed] is the text
 /// of every finished utterance this session; [partial] is the utterance still
 /// being heard, which the recognizer revises until it ends.
 class DictationMerge {
-  DictationMerge(String text, int caret)
-    : prefix = text.substring(0, caret.clamp(0, text.length)),
-      suffix = text.substring(caret.clamp(0, text.length));
+  DictationMerge(String text, int start, [int? end])
+    : prefix = text.substring(0, _clampTo(start, text)),
+      suffix = text.substring(
+        _clampTo(end ?? start, text) < _clampTo(start, text)
+            ? _clampTo(start, text)
+            : _clampTo(end ?? start, text),
+      );
+
+  static int _clampTo(int i, String text) => i.clamp(0, text.length);
 
   final String prefix;
   final String suffix;
@@ -155,9 +163,14 @@ class DictationService extends ChangeNotifier {
   /// "stopped" can never end the session that replaced it.
   int _session = 0;
 
-  /// The value this service last wrote into [_target]. Anything else in the
+  /// The text this service last wrote into [_target]. Any other text in the
   /// field means the user edited it, and a late report must not overwrite that.
-  TextEditingValue? _written;
+  String? _written;
+
+  /// The mic is actually open (native `onReadyForSpeech`). Until then the bar
+  /// says it is starting: words spoken before this are not heard.
+  bool _ready = false;
+  bool get ready => _ready;
 
   DictationLanguage _language = kDictationLanguages.first;
   bool _languageLoaded = false;
@@ -204,11 +217,14 @@ class DictationService extends ChangeNotifier {
     _error = null;
     _errorTarget = null;
     final sel = controller.selection;
-    final caret = sel.isValid ? sel.end : controller.text.length;
+    final len = controller.text.length;
+    final from = sel.isValid ? sel.start : len;
+    final to = sel.isValid ? sel.end : len;
     _session += 1;
     _target = controller;
-    _merge = DictationMerge(controller.text, caret);
-    _written = controller.value;
+    _merge = DictationMerge(controller.text, from, to);
+    _written = controller.text;
+    _ready = false;
     notifyListeners();
     try {
       await _channel.invokeMethod<bool>('start', {
@@ -242,6 +258,11 @@ class DictationService extends ChangeNotifier {
 
   /// [cancel], but only when dictation is running into [controller].
   Future<void> cancelFor(TextEditingController controller) async {
+    // A failure reported on a field that is going away must not keep it alive.
+    if (identical(_errorTarget, controller)) {
+      _error = null;
+      _errorTarget = null;
+    }
     if (isListeningTo(controller)) await cancel();
   }
 
@@ -276,7 +297,9 @@ class DictationService extends ChangeNotifier {
         if (merge == null || target == null) return;
         // The user typed, or something else rewrote the field: their edit wins,
         // and a report about words they have already changed is dropped.
-        if (target.value != _written) {
+        // TEXT only: selection and composing are whatever focus loss left
+        // behind, and comparing them cancelled on device-specific noise.
+        if (target.text != _written) {
           cancel();
           return;
         }
@@ -287,8 +310,13 @@ class DictationService extends ChangeNotifier {
           merge.onFinal(text);
         }
         final next = merge.render();
-        _written = next;
+        _written = next.text;
         target.value = next;
+      case 'ready':
+        if (!_ready) {
+          _ready = true;
+          notifyListeners();
+        }
       case 'state':
         if (raw['listening'] == false && _target != null) {
           _close();
