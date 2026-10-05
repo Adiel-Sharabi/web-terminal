@@ -26,7 +26,7 @@
 // beating this same drawer's `transition: width 0.2s`; a spec about the drawer covering
 // something must never be able to pass by racing it.
 const { test, expect } = require('@playwright/test');
-const { BASE, authCtx, loginPage } = require('./test-helpers');
+const { BASE, authCtx, loginPage, openSession } = require('./test-helpers');
 
 /** Wait until the drawer's `transition: width 0.2s` has FINISHED.
  *
@@ -44,10 +44,9 @@ async function settleSidebar(page) {
   }, { timeout: 5000, message: 'the sidebar never stopped animating' }).toBe(true);
 }
 
-/** Open a session and let the drawer settle. */
+/** Open a session (attached - test-helpers' `openSession`, #277) and let the drawer settle. */
 async function openSessionSettled(page, id, name, expectOpen) {
-  await page.goto(BASE + '/app/' + id);
-  await expect(page.locator('#sessionName')).toContainText(name, { timeout: 10000 });
+  await openSession(page, id, name);
   if (expectOpen) await expect(page.locator('#sidebar.open')).toHaveCount(1);
   await settleSidebar(page);
 }

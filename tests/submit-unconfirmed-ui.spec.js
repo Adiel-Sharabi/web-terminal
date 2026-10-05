@@ -15,11 +15,11 @@
 // test hooks app.html exposes for exactly this purpose (real notices are one-shot and
 // server-initiated, so there is no other deterministic way to reach this UI).
 const { test, expect } = require('@playwright/test');
-const { BASE, authCtx, loginPage } = require('./test-helpers');
+const { authCtx, loginPage, openSession: openSessionShared, routeSocket } = require('./test-helpers');
 
-/** Navigate straight to a session and wait for the header to confirm we're attached
- *  to IT — `sessionId` is set synchronously inside switchSession() before #sessionName
- *  is painted, so this is a safe proxy for "the module-local sessionId now equals id".
+/** Navigate straight to a session through test-helpers' `openSession` (#277), which
+ *  returns only once the session's socket is ATTACHED — `#sessionName` alone was the
+ *  old proxy here, and it can paint while the socket is still CONNECTING.
  *
  *  #221 — AND THE DRAWER MUST BE CLOSED FIRST, or a click here is a coin toss. At this
  *  file's phone width `#sidebar.open` is `width: 100vw` with `transition: width .2s`,
@@ -53,26 +53,11 @@ const { BASE, authCtx, loginPage } = require('./test-helpers');
  *
  *  `#sidebar.open` + `toHaveCount(0)` says the same thing with nothing to normalise:
  *  ASCII-only, still a retrying web-first assertion, and it cannot be silently
- *  corrupted. `tests/control-bytes.spec.js` is the gate that stops the next one. */
-async function openSession(page, id, name) {
-  await page.addInitScript(() => {
-    try { sessionStorage.setItem('sidebarOpen', '0'); } catch { /* private mode */ }
-  });
-  await page.goto(BASE + '/app/' + id);
-  await expect(page.locator('#sessionName')).toContainText(name, { timeout: 10000 });
-  // THE DRAWER MUST EXIST BEFORE ITS ABSENCE MEANS ANYTHING. `toHaveCount(0)` on
-  // `#sidebar.open` is also satisfied by there being no `#sidebar` at all, so a rename
-  // or a markup change would turn the guard below into a green no-op — the same
-  // vacuity family this spec was fixed for, and the sibling trap this file already
-  // records above (`toBeHidden()` is satisfied by an element that does not exist).
-  // Caught in review of the fix itself.
-  await expect(page.locator('#sidebar'),
-    'no #sidebar at all — the closed-drawer guard below would pass vacuously')
-    .toHaveCount(1);
-  await expect(page.locator('#sidebar.open'),
-    'the phone-width drawer is 100vw and covers everything this spec clicks (#221)')
-    .toHaveCount(0);
-}
+ *  corrupted. `tests/control-bytes.spec.js` is the gate that stops the next one.
+ *
+ *  The seed and both guards (including "the drawer must EXIST before its absence means
+ *  anything", caught in review of the #221 fix) now live in the shared helper. */
+const openSession = (page, id, name) => openSessionShared(page, id, name, { drawerClosed: true });
 
 test.describe('#179 submit-unconfirmed notice (web client)', () => {
   // A PHONE-WIDTH VIEWPORT, and it is load-bearing rather than cosmetic. `composeMode`
@@ -219,16 +204,11 @@ test.describe('#179 submit-unconfirmed notice (web client)', () => {
     // as if the server had broadcast it. page.routeWebSocket (Playwright >=1.48) does
     // this while still passing real traffic through via connectToServer(), so the
     // socket's ping heartbeat and any genuine notify frames keep working too.
-    let resolveRoute;
-    const routeReady = new Promise((resolve) => { resolveRoute = resolve; });
-    await page.routeWebSocket((url) => url.pathname === '/ws/notify', (wsRoute) => {
-      wsRoute.connectToServer();
-      resolveRoute(wsRoute);
-    });
+    const notifyRoute = await routeSocket(page, '/ws/notify');
 
     try {
       await openSession(page, id, 'SU Routing');
-      const notifyRoute = await routeReady;
+      await notifyRoute.opened();
 
       await page.evaluate(({ id }) => {
         document.getElementById('composeInput').value = '';

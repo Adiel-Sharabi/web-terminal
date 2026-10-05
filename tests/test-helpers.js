@@ -1,5 +1,5 @@
 // @ts-check
-const { request: pwRequest } = require('@playwright/test');
+const { request: pwRequest, expect } = require('@playwright/test');
 const fs = require('fs');
 const os = require('os');
 const path = require('path');
@@ -136,8 +136,101 @@ function emptyCwd(label = 'cwd') {
   return dir;
 }
 
+// ---- opening a session in app.html (#277) -------------------------------------
+//
+// `#sessionName` filling in is NOT the session being open. It is painted from a
+// `/api/sessions` fetch that races the `/ws/<id>` upgrade, so it can settle while
+// the page's socket is still CONNECTING. Four specs each carried a pasted copy of
+// "goto, wait for the name" and then acted as if attached: pushed a synthetic frame
+// into the socket, or switched away expecting `switchSession` to DEMOTE a socket it
+// only demotes when it is OPEN (otherwise it closes it, and every later frame sent
+// into that route is silently discarded by Playwright). Fast when idle, so it only
+// failed under full-suite load, and a different test each time.
+
+/** Ceiling for a wait on a PRECONDITION SIGNAL (#277/#282) - the socket attached, the
+ *  sidebar rendered a payload, the page saw a routed request fail. Generous ON PURPOSE, and that
+ *  is not a "longer timer": a signal wait passes the instant the thing is true, so an
+ *  idle run does not wait at all and a loaded one waits as long as the server needs.
+ *  What it replaces is a 5s default spent on the ASSERTION while the server work in
+ *  front of it - every route here that reaches the pty-worker - was still in flight. */
+const SIGNAL_TIMEOUT_MS = 20000;
+
+/**
+ * Open `/app/<id>` and return only once the session is ATTACHED end to end: the
+ * header names it, the page's current socket is for it and OPEN, and the PTY's own
+ * bytes have arrived over that socket and been painted into the terminal. The last
+ * one is the real signal - the server adds a socket to the session's client set
+ * only after `attachSession` returns, so no PTY byte can reach a socket that is not
+ * attached. A fresh session always produces some (ConPTY paints, the shell prompts).
+ *
+ * `drawerClosed: true` seeds the phone drawer shut BEFORE load and asserts it stayed
+ * shut (#221: at phone width `#sidebar.open` is 100vw and covers the compose bar).
+ */
+async function openSession(page, id, name, { drawerClosed = false } = {}) {
+  if (drawerClosed) {
+    await page.addInitScript(() => {
+      try { sessionStorage.setItem('sidebarOpen', '0'); } catch { /* private mode */ }
+    });
+  }
+  await page.goto(BASE + '/app/' + id);
+  await expect(page.locator('#sessionName')).toContainText(name, { timeout: 10000 });
+  try {
+    await page.waitForFunction((sid) => {
+      // `ws`, `sessionId` and `term` are top-level bindings of app.html's classic script.
+      if (sessionId !== sid || !ws || ws.readyState !== 1) return false;
+      const buf = term.buffer.active;
+      for (let i = 0; i < buf.length; i++) {
+        const line = buf.getLine(i);
+        if (line && line.translateToString(true).trim()) return true;
+      }
+      return false;
+    }, id, { timeout: SIGNAL_TIMEOUT_MS });
+  } catch (e) {
+    const state = await page.evaluate(() => ({
+      sessionId, readyState: ws ? ws.readyState : null,
+    })).catch(() => null);
+    throw new Error(`openSession: session ${id} never attached (page state ${JSON.stringify(state)}): ${e.message}`);
+  }
+  if (drawerClosed) {
+    // THE DRAWER MUST EXIST BEFORE ITS ABSENCE MEANS ANYTHING: `toHaveCount(0)` on
+    // `#sidebar.open` is also satisfied by there being no `#sidebar` at all.
+    await expect(page.locator('#sidebar'),
+      'no #sidebar at all - the closed-drawer guard below would pass vacuously').toHaveCount(1);
+    await expect(page.locator('#sidebar.open'),
+      'the phone-width drawer is 100vw and covers everything a spec clicks (#221)').toHaveCount(0);
+  }
+}
+
+/**
+ * Route every socket the page opens on `pathname` through Playwright with real
+ * traffic passed both ways, and push synthetic server frames into it.
+ *
+ * `send` always targets the NEWEST socket on that path. Holding on to the first
+ * route - what the pasted copies did - keeps sending into a socket the page has
+ * already closed and replaced, and Playwright discards such a send without an error.
+ */
+async function routeSocket(page, pathname) {
+  const routes = [];
+  let opened;
+  const firstOpen = new Promise((resolve) => { opened = resolve; });
+  await page.routeWebSocket((url) => url.pathname === pathname, (wsRoute) => {
+    wsRoute.connectToServer();
+    routes.push(wsRoute);
+    opened();
+  });
+  return {
+    /** Resolves once the page has opened at least one socket on the path. */
+    opened: () => firstOpen,
+    send(msg) {
+      if (!routes.length) throw new Error(`routeSocket: the page never opened ${pathname}`);
+      routes[routes.length - 1].send(msg);
+    },
+  };
+}
+
 module.exports = {
   BASE, AUTH, authCtx, noAuthCtx, loginPage, readHookToken,
   FIXTURE_YEARS, codexSessionsRoot, claudeProjectsRoot, isFixtureRollout,
   sweepCodexFixtures, emptyCwd,
+  SIGNAL_TIMEOUT_MS, openSession, routeSocket,
 };

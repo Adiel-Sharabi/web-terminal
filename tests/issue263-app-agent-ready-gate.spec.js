@@ -29,7 +29,7 @@ const { test, expect } = require('@playwright/test');
 const fs = require('fs');
 const os = require('os');
 const path = require('path');
-const { BASE, authCtx, loginPage } = require('./test-helpers');
+const { authCtx, loginPage, openSession: openSessionShared } = require('./test-helpers');
 
 // A PHONE-WIDTH VIEWPORT, load-bearing rather than cosmetic: `composeMode` is
 // `isMobile && ...` and `isMobile` ORs in `innerWidth < 600`, so at a desktop width there
@@ -59,17 +59,10 @@ const sentBy = (page) => page.evaluate(() => window.__wt263sent.slice());
 const drain = (page) => page.evaluate(() => { window.__wt263sent.length = 0; });
 
 /** #221's rule: seed the drawer shut BEFORE load, or a click here is a coin toss - at this
- *  width `#sidebar.open` is 100vw and covers the compose bar. Asserted, not assumed. */
+ *  width `#sidebar.open` is 100vw and covers the compose bar. Asserted, not assumed - by
+ *  the shared helper, which also waits for the socket to ATTACH (#277). */
 async function openSession(page, id, name) {
-  await page.addInitScript(() => {
-    try { sessionStorage.setItem('sidebarOpen', '0'); } catch { /* private mode */ }
-  });
-  await page.goto(BASE + '/app/' + id);
-  await expect(page.locator('#sessionName')).toContainText(name, { timeout: 10000 });
-  await expect(page.locator('#sidebar'),
-    'no #sidebar at all - the closed-drawer guard below would pass vacuously').toHaveCount(1);
-  await expect(page.locator('#sidebar.open'),
-    'the phone-width drawer covers everything this spec clicks (#221)').toHaveCount(0);
+  await openSessionShared(page, id, name, { drawerClosed: true });
   await expect(page.locator('#composeInput')).toBeVisible();
 }
 

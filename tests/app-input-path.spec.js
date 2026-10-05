@@ -19,7 +19,7 @@
 const { test, expect } = require('@playwright/test');
 const fs = require('fs');
 const path = require('path');
-const { BASE, authCtx, loginPage } = require('./test-helpers');
+const { authCtx, loginPage, openSession } = require('./test-helpers');
 
 const APP_HTML = path.join(__dirname, '..', 'app.html');
 
@@ -136,8 +136,9 @@ test.describe('#206 app.html routes every user input through one gated path', ()
     });
 
     try {
-      await page.goto(BASE + '/app/' + id);
-      await expect(page.locator('#sessionName')).toContainText('IP Cap', { timeout: 10000 });
+      // #277 - ATTACHED, not merely named: `sendPtyInput` below returns false on a socket
+      // that is still CONNECTING, which the at-cap assertion would read as a refusal.
+      await openSession(page, id, 'IP Cap');
       await expect(page.locator('#composeNotice')).toBeHidden();
 
       // AT the cap first, as the positive anchor. The server compares

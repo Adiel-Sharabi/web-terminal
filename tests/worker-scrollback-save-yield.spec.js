@@ -18,7 +18,7 @@ const fs = require('fs');
 const os = require('os');
 const crypto = require('crypto');
 const { connectClient, rpc } = require('./worker-ipc');   // #262 - one owner for the budget
-const { killAllSessions } = require('./worker-kill');
+const { killAllSessions, killBudgetMs } = require('./worker-kill');
 
 // #254 - the teardown rule itself lives in `tests/worker-kill.js`. These kills used to
 // run one at a time in a `for` loop wrapped in `try {} catch {}`, so a timeout was
@@ -124,7 +124,27 @@ test.describe('pty-worker scrollback save yields between sessions', () => {
     }
   });
 
+  // #269 - THIS TEST'S BUDGETS MUST BE ABLE TO FIRE. Two of them sat above the default
+  // 30000ms test timeout - `killBudgetMs(10)` = 31200ms and the 60000ms on
+  // `__testMeasureSaveBlock` - so a hang in either surfaced as "Test timeout of 30000ms
+  // exceeded", naming no RPC, no budget and no session count. Neither budget is lowered to
+  // fit: `killBudgetMs` carries #254's sizing argument, and the measure budget bounds a
+  // call that measured 38ms idle - so its size costs seconds only on a failure that is
+  // already fatal. The TEST's ceiling is raised instead, derived from the budgets so the
+  // two cannot drift apart again: setup, then whichever budgeted wait is longer, then
+  // teardown. `tests/worker-ipc.js` now refuses to arm any budget at or above the running
+  // test's timeout, which is what keeps the next one from going unnoticed.
+  const NUM_SESSIONS = 10;
+  const MEASURE_BUDGET_MS = 60000;
+  // Room for the twenty setup RPCs (well under 1s idle; ~seconds at a loaded suite's tail)
+  // to complete normally before a budgeted wait starts, and for worker.stop()'s 3s kill.
+  const SETUP_ALLOWANCE_MS = 20000;
+  const TEARDOWN_ALLOWANCE_MS = 5000;
+  const YIELD_TEST_TIMEOUT_MS = SETUP_ALLOWANCE_MS
+    + Math.max(MEASURE_BUDGET_MS, killBudgetMs(NUM_SESSIONS)) + TEARDOWN_ALLOWANCE_MS;
+
   test('event loop is not blocked for the full save duration', async () => {
+    test.setTimeout(YIELD_TEST_TIMEOUT_MS);
     // Measure the worker's own event-loop block time during saveAllScrollback.
     // The worker runs a setImmediate probe loop in parallel with the save and
     // reports the longest gap between probe ticks.
@@ -140,9 +160,8 @@ test.describe('pty-worker scrollback save yields between sessions', () => {
     try {
       const client = await connectClient(pipe);
 
-      // 10 sessions, each with ~1.5 MB of injected scrollback. Roughly the
-      // workload that issue #17 describes.
-      const NUM_SESSIONS = 10;
+      // 10 sessions (NUM_SESSIONS, above), each with ~1.5 MB of injected scrollback.
+      // Roughly the workload that issue #17 describes.
       const INJECT_BYTES = 1.5 * 1024 * 1024;
       const ids = [];
       for (let i = 0; i < NUM_SESSIONS; i++) {
@@ -158,7 +177,7 @@ test.describe('pty-worker scrollback save yields between sessions', () => {
       // from JSON.stringify, not from disk I/O. This isolates the behavior
       // of interest: whether the loop yields between sessions.
       const { duration, maxGap, ticks } = await rpc(
-        client, '__testMeasureSaveBlock', { sync: false }, 60000
+        client, '__testMeasureSaveBlock', { sync: false }, MEASURE_BUDGET_MS
       );
       // eslint-disable-next-line no-console
       console.log(`[yield-test] duration=${duration}ms maxGap=${maxGap}ms ticks=${ticks}`);

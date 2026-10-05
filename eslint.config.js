@@ -154,6 +154,12 @@ module.exports = [
         // Both are top-level `let` in app.html, so they are not on window and a
         // window.* stub would be a different, unread property (app.html:881).
         sessionId: 'writable',
+        // #277 — test-helpers.js `openSession` reads the terminal's own buffer as its
+        // attach signal: the PTY's bytes painted into xterm. Top-level `const` in app.html.
+        term: 'readonly',
+        // #282 — favorites.spec.js waits for the sidebar to have RENDERED its routed
+        // payload; app.html assigns this top-level `let` on the line before renderSidebar.
+        _sidebarData: 'readonly',
         renderComposeCommands: 'readonly',
         toggleCmdMenu: 'readonly',
         runQuickCommand: 'readonly',

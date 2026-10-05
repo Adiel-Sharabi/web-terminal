@@ -972,9 +972,23 @@ function armAutoResumeTimer(session) {
   if (session.autoResumeFiredForResetAt === resetAt) return; // one-shot: already handled
   const fireAt = resetAt + AUTO_RESUME_DELAY_MS;
   const delay = Math.max(0, fireAt - Date.now());
-  session._autoResumeTimer = setTimeout(() => fireAutoResume(session, resetAt), delay);
-  if (typeof session._autoResumeTimer.unref === 'function') session._autoResumeTimer.unref();
+  scheduleAutoResume(session, resetAt, fireAt, delay);
   log(`auto-resume: "${session.name}" (${session.id}) armed for ${new Date(fireAt).toISOString()} (in ${Math.round(delay / 1000)}s)`);
+}
+
+// The ONE place an auto-resume timer is created - the arm above and the boot deferral
+// below both go through it. It hangs the fire function and its due time on the timer
+// object itself, so they live and die with `session._autoResumeTimer` and need no
+// cancel of their own: that is what lets the test-only `__testAutoResumeDue` RPC bring
+// an armed timer due NOW (#268), instead of a spec betting a wall-clock window across
+// two processes that the timer has, or has not yet, fired.
+function scheduleAutoResume(session, resetAt, fireAt, delay) {
+  const fire = () => fireAutoResume(session, resetAt);
+  const timer = setTimeout(fire, delay);
+  timer._wtFire = fire;
+  timer._wtFireAt = fireAt;
+  if (typeof timer.unref === 'function') timer.unref();
+  session._autoResumeTimer = timer;
 }
 
 function fireAutoResume(session, resetAt) {
@@ -1008,8 +1022,7 @@ function fireAutoResume(session, resetAt) {
       s._autoResumeDeferredFor = resetAt;
       log(`auto-resume: "${s.name}" (${s.id}) reset window passed but the agent is still starting — waiting for its composer`);
     }
-    s._autoResumeTimer = setTimeout(() => fireAutoResume(s, resetAt), AUTO_RESUME_READY_RETRY_MS);
-    if (typeof s._autoResumeTimer.unref === 'function') s._autoResumeTimer.unref();
+    scheduleAutoResume(s, resetAt, Date.now() + AUTO_RESUME_READY_RETRY_MS, AUTO_RESUME_READY_RETRY_MS);
     return;
   }
   s._autoResumeDeferredFor = null;
@@ -2760,6 +2773,26 @@ const rpcHandlers = {
     if (!session) throw new Error('session not found');
     processPtyOutput(session, Buffer.from(String(params.data || ''), 'utf8'));
     return { ok: true, apiError: !!session.apiError };
+  },
+
+  // #268 - bring this session's armed auto-resume timer due NOW and run it, exactly as
+  // its setTimeout would have: same function, same captured resetAt, synchronously
+  // inside this call. `{ armed: false }` when nothing is armed, which is the answer a
+  // cancel test needs - and if a cancel under test were removed, the timer it should
+  // have destroyed would fire right here, so "nothing fired" is a decision rather than
+  // a window that had not elapsed yet. `peek: true` reports the due time (the worker's
+  // own resetAt + delay arithmetic) without firing.
+  __testAutoResumeDue: async (params) => {
+    if (!process.env.WT_TEST) throw new Error('test-only RPC');
+    const session = sessions.get(requireUuid(params.id));
+    if (!session) throw new Error('session not found');
+    const timer = session._autoResumeTimer;
+    if (!timer) return { armed: false };
+    const fireAt = timer._wtFireAt;
+    if (params.peek) return { armed: true, fireAt };
+    clearTimeout(timer);
+    timer._wtFire();
+    return { armed: true, fireAt };
   },
 
   // Returns the exact byte-strings written to the PTY via termWrite (the
