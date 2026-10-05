@@ -1,6 +1,8 @@
 <manifest xmlns:android="http://schemas.android.com/apk/res/android">
     <uses-permission android:name="android.permission.INTERNET"/>
     <uses-permission android:name="android.permission.POST_NOTIFICATIONS"/>
+    <!-- #291: dictation into the compose bar. Requested on the first mic tap, never at launch. -->
+    <uses-permission android:name="android.permission.RECORD_AUDIO"/>
     <!-- usesCleartextTraffic: spike/dev only — the shadow server is plain HTTP
          on the LAN (10.0.2.2:7785 from the emulator). Production servers use
          HTTPS tailnet certs; drop this before any release build. -->
@@ -43,6 +45,11 @@
 
          In particular, this is used by the Flutter engine in io.flutter.plugin.text.ProcessTextPlugin. -->
     <queries>
+        <!-- #291: without this, Android 11+ hides the speech service from the app
+             and SpeechRecognizer.isRecognitionAvailable() is false on every device. -->
+        <intent>
+            <action android:name="android.speech.RecognitionService"/>
+        </intent>
         <intent>
             <action android:name="android.intent.action.PROCESS_TEXT"/>
             <data android:mimeType="text/plain"/>

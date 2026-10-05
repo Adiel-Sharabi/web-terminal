@@ -32,6 +32,7 @@ import '../api/api_client.dart';
 import '../api/models.dart';
 import '../services/command_policy.dart';
 import '../services/desktop_alert_service.dart';
+import '../services/dictation_service.dart';
 import '../services/detach_window_service.dart';
 import '../services/notification_service.dart';
 import '../services/favorite_toggle.dart';
@@ -1289,6 +1290,7 @@ class _SessionScreenState extends State<SessionScreen>
     };
     _terminalController.addListener(_onSelectionChanged);
     _composeController.addListener(_onComposeChanged);
+    _composeFocusNode.addListener(_onComposeFocusForDictation);
     // Alt+V pastes a clipboard image in BOTH modes. A global handler is the
     // only way to catch it in raw mode, where the terminal (not the compose
     // bar) owns the keyboard.
@@ -1651,7 +1653,7 @@ class _SessionScreenState extends State<SessionScreen>
     // Terminal lens while raw hands the physical keyboard back to the terminal.
     if (value == 'chat') {
       WidgetsBinding.instance.addPostFrameCallback((_) {
-        if (mounted) _composeFocusNode.requestFocus();
+        if (mounted) _focusCompose();
       });
     } else if (value == 'terminal' && _rawMode) {
       WidgetsBinding.instance.addPostFrameCallback((_) {
@@ -2580,6 +2582,14 @@ class _SessionScreenState extends State<SessionScreen>
       // never reset history-walking or (re-)trigger live streaming — mirrors
       // the web bar, where only a real DOM `input` event does either.
       _settingComposeProgrammatically = false;
+    } else if (_dictation?.isListeningTo(_composeController) ?? false) {
+      // #291 — words from the mic are not keystrokes. Taking the typed branch
+      // let an armed sticky Ctrl turn a dictated "I" into a control byte (Ctrl+C
+      // interrupts the agent), and a dictated "slash …" enter live mode and
+      // stream every revision to the PTY. The field is unfocused while
+      // dictating, so no real keystroke can arrive in this state. The draft
+      // save below still runs, which is wanted.
+      _historyActive = false;
     } else {
       // Sticky Ctrl applies to the NEXT typed character no matter where it's
       // typed: with the compose field focused the char never reaches the PTY
@@ -2714,9 +2724,50 @@ class _SessionScreenState extends State<SessionScreen>
   /// Guards on a live connection first: if there's no PTY to submit to, the
   /// buffer is kept (not cleared into the void) so the user's text survives to
   /// retry — mirroring the web client's `if (WS not open) return`.
+  // --- Dictation (#291): the mic in the compose bar --------------------------
+
+  /// Android only; null hides the mic.
+  DictationService? get _dictation =>
+      DictationService.supported ? DictationService.instance : null;
+
+  /// The mic. Starting closes the keyboard first - winning that screen space
+  /// back is the whole feature - and dictates at the caret.
+  void _toggleDictation() {
+    final d = _dictation;
+    if (d == null) return;
+    if (d.isListeningTo(_composeController)) {
+      d.stop();
+    } else {
+      _composeFocusNode.unfocus();
+      d.start(_composeController);
+    }
+  }
+
+  /// Puts the caret in the compose field — unless the mic is listening there.
+  /// Every programmatic focus (switching to Chat, staging an attachment, leaving
+  /// raw mode) used to end dictation and raise the very keyboard it exists to
+  /// keep closed; only the user tapping the field should do that.
+  void _focusCompose() {
+    if (_dictation?.isListeningTo(_composeController) ?? false) return;
+    _composeFocusNode.requestFocus();
+  }
+
+  /// Tapping the field means "I want to type": the keyboard opens as it always
+  /// has, and dictation ends rather than writing into text being edited.
+  void _onComposeFocusForDictation() {
+    if (!_composeFocusNode.hasFocus) return;
+    final d = _dictation;
+    if (d == null) return;
+    d.cancelFor(_composeController);
+    if (d.errorFor(_composeController) != null) d.clearError();
+  }
+
   void _sendCompose() {
     final conn = _connection;
     if (conn == null) return; // no PTY — keep the buffer, don't clear (#44)
+    // #291 — what is in the box is what gets sent. A word still being heard
+    // must not land in the field after it was cleared for the next prompt.
+    _dictation?.cancelFor(_composeController);
     _finishTerminalComposing(); // #283 - every branch below writes to the PTY
     final val = _composeController.text;
     // #179 — ANY submit answers "did the last one land": whatever was showing
@@ -3231,7 +3282,7 @@ class _SessionScreenState extends State<SessionScreen>
     setState(() {});
     unawaited(_saveAttachments()); // #113
     // Make sure the compose bar has focus so the new chip + send are right there.
-    _composeFocusNode.requestFocus();
+    _focusCompose();
   }
 
   /// #90 — stage every dropped file as a compose attachment.
@@ -3288,7 +3339,7 @@ class _SessionScreenState extends State<SessionScreen>
     unawaited(mounted ? _saveAttachments() : _persistStagedAfterDispose(staged));
     if (mounted) {
       setState(() {});
-      _composeFocusNode.requestFocus();
+      _focusCompose();
     }
     return batch.length;
   }
@@ -3385,7 +3436,7 @@ class _SessionScreenState extends State<SessionScreen>
       // nothing else.
       unawaited(mounted ? _saveAttachments() : _persistStagedAfterDispose(stagedNow));
       // Focus the compose bar once, after the loop — the chips and Send are there.
-      if (mounted) _composeFocusNode.requestFocus();
+      if (mounted) _focusCompose();
     } else if (raw.isNotEmpty) {
       // `mounted`, not `_connection != null`. The two come apart exactly where
       // it matters: `dispose()` CLOSES the connection without nulling it (only
@@ -3900,7 +3951,7 @@ class _SessionScreenState extends State<SessionScreen>
     } else {
       _terminalViewKey.currentState?.closeKeyboard();
       WidgetsBinding.instance.addPostFrameCallback((_) {
-        if (mounted) _composeFocusNode.requestFocus();
+        if (mounted) _focusCompose();
       });
     }
   }
@@ -4007,6 +4058,8 @@ class _SessionScreenState extends State<SessionScreen>
         }
       case AppLifecycleState.paused:
       case AppLifecycleState.detached:
+        // #291 — the mic must not stay open behind another app.
+        _dictation?.cancelFor(_composeController);
         _outputSub?.cancel();
         _connectedSub?.cancel();
         _reconnectedSub?.cancel();
@@ -4062,6 +4115,9 @@ class _SessionScreenState extends State<SessionScreen>
     _terminalController.removeListener(_onSelectionChanged);
     _terminalController.dispose();
     _composeController.removeListener(_onComposeChanged);
+    // #291 — nor after its screen is gone.
+    _dictation?.cancelFor(_composeController);
+    _composeFocusNode.removeListener(_onComposeFocusForDictation);
     _composeController.dispose();
     _composeFocusNode.dispose();
     _deepenTimer?.cancel();
@@ -4599,6 +4655,9 @@ class _SessionScreenState extends State<SessionScreen>
               // the leftover of a Tab-completed command (which the field never
               // tracked) straight from Claude's input line.
               onBackspace: () => _sendRawToTerminal('\x7f'),
+              // #291 — the mic. Null on desktop, which hides it.
+              dictation: _dictation,
+              onDictate: _dictation == null ? null : _toggleDictation,
             ),
           // No viewInsets padding here: Scaffold's resizeToAvoidBottomInset
           // already shrinks the body for the keyboard — padding again doubles
