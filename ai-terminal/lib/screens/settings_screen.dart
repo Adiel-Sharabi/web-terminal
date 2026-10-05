@@ -32,6 +32,7 @@ import '../api/models.dart';
 import '../services/server_store.dart';
 import '../services/speech_service.dart';
 import '../theme/app_theme.dart';
+import '../widgets/app_bottom_sheet.dart';
 
 /// The SharedPreferences key holding the global terminal font size, shared
 /// with `session_screen.dart`'s font-size dialog.
@@ -170,7 +171,7 @@ class SettingsScreen extends StatelessWidget {
     int? index,
     ServerConfig? existing,
   }) {
-    return showModalBottomSheet<void>(
+    return showAppBottomSheet<void>(
       context: context,
       isScrollControlled: true,
       showDragHandle: true,

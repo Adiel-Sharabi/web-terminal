@@ -53,6 +53,17 @@ class _AdaptiveHomeState extends State<AdaptiveHome> {
   /// overwritten by any persisted value, then by drags.
   double _railWidth = AdaptiveHome.railWidth;
 
+  /// Keeps ONE [DashboardScreen] State across the breakpoint (#286).
+  ///
+  /// Narrow mounts the dashboard as the whole body and wide mounts it inside
+  /// the rail, which are different tree positions, so without a key crossing
+  /// the breakpoint disposes the State and builds a new one. A tablet crosses
+  /// it on EVERY rotation (landscape is wide, portrait is not), and the new
+  /// State lost the server filter, the scroll position and the collapse state,
+  /// and showed a loading spinner until the repository next emitted - the list
+  /// "reloaded from scratch". A GlobalKey moves the existing State instead.
+  final GlobalKey _dashboardKey = GlobalKey(debugLabel: 'dashboard');
+
   @override
   void initState() {
     super.initState();
@@ -108,7 +119,7 @@ class _AdaptiveHomeState extends State<AdaptiveHome> {
         _selection.splitMounted = wide;
         if (!wide) {
           // Phone / narrow: the dashboard pushes routes itself.
-          return const DashboardScreen();
+          return DashboardScreen(key: _dashboardKey);
         }
         final selectedId = _selection.selectedId.value;
         return Row(
@@ -116,6 +127,7 @@ class _AdaptiveHomeState extends State<AdaptiveHome> {
             SizedBox(
               width: _railWidth,
               child: DashboardScreen(
+                key: _dashboardKey,
                 selectedId: selectedId,
                 onSelectSession: (s) {
                   _hint = s;

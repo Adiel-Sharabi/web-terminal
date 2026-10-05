@@ -8,6 +8,7 @@ import 'package:flutter/material.dart';
 import '../api/api_client.dart';
 import '../api/models.dart';
 import '../theme/app_theme.dart';
+import 'app_bottom_sheet.dart';
 
 /// Opens the actions sheet for [session]. Calls [onChanged] after any action
 /// that mutated server state, so the caller can trigger a repository refresh.
@@ -21,7 +22,7 @@ Future<void> showSessionActionsSheet(
   ValueChanged<Session>? onForked,
 }) {
   final api = ApiClient(session.server);
-  return showModalBottomSheet<void>(
+  return showAppBottomSheet<void>(
     context: context,
     showDragHandle: true,
     // Let the sheet grow past the default ~half-height and, on a short window,
@@ -46,7 +47,7 @@ Future<void> showNotifyLevelPicker(
   required VoidCallback onChanged,
 }) {
   final api = ApiClient(session.server);
-  return showModalBottomSheet<void>(
+  return showAppBottomSheet<void>(
     context: context,
     showDragHandle: true,
     isScrollControlled: true,
@@ -91,7 +92,7 @@ Future<void> showNotifyLevelPicker(
 /// Wraps a bottom-sheet body so it never overflows a short viewport: caps the
 /// height at 85% of the screen and scrolls its content past that, keeping the
 /// bottom rows (e.g. the Notify Level radios) reachable (issue #13). Used with
-/// `isScrollControlled: true` on the `showModalBottomSheet` call.
+/// `isScrollControlled: true` on the `showAppBottomSheet` call.
 class _ScrollableSheet extends StatelessWidget {
   const _ScrollableSheet({required this.child});
 
@@ -99,13 +100,11 @@ class _ScrollableSheet extends StatelessWidget {
 
   @override
   Widget build(BuildContext context) {
-    return SafeArea(
-      child: ConstrainedBox(
-        constraints: BoxConstraints(
-          maxHeight: MediaQuery.sizeOf(context).height * 0.85,
-        ),
-        child: SingleChildScrollView(child: child),
+    return ConstrainedBox(
+      constraints: BoxConstraints(
+        maxHeight: MediaQuery.sizeOf(context).height * 0.85,
       ),
+      child: SingleChildScrollView(child: child),
     );
   }
 }

@@ -14,6 +14,7 @@ import '../api/api_client.dart';
 import '../api/models.dart';
 import '../services/session_repository.dart';
 import '../theme/app_theme.dart';
+import 'app_bottom_sheet.dart';
 
 /// Opens the new-session sheet for [initialServer] (pre-selected; usually the
 /// server of the currently-viewed context, falling back to the first
@@ -32,7 +33,7 @@ Future<void> showNewSessionSheet(
   required ValueChanged<Session> onCreated,
   ApiClient Function(ServerConfig server)? clientBuilder,
 }) {
-  return showModalBottomSheet<void>(
+  return showAppBottomSheet<void>(
     context: context,
     isScrollControlled: true,
     showDragHandle: true,
