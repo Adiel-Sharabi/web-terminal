@@ -72,3 +72,5 @@ claude-metrics.json
 claude-metrics.test.json
 codex-sessions.json
 cluster-tokens.test.json
+# The API token store the test run mints into (#272) - redirected away from api-tokens.json
+api-tokens.test.json
