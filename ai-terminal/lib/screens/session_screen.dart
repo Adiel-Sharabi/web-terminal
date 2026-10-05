@@ -57,6 +57,7 @@ import '../widgets/status_dot.dart';
 import '../widgets/submit_unconfirmed_banner.dart';
 import '../widgets/terminal_tail_strip.dart';
 import '../widgets/terminal_key_strip.dart';
+import '../widgets/app_bottom_sheet.dart';
 
 /// #194 Part 1 -- how often the chat lens's terminal-tail strip may recompute.
 /// A ceiling on a hot path, not a delay anyone can perceive: the strip exists
@@ -2875,46 +2876,44 @@ class _SessionScreenState extends State<SessionScreen>
   Future<void> _showQuickCommands() async {
     final rows = CommandPolicy.instance.quickCommands;
     if (rows.isEmpty) return;
-    final picked = await showModalBottomSheet<QuickCommand>(
+    final picked = await showAppBottomSheet<QuickCommand>(
       context: context,
       showDragHandle: true,
       builder: (sheetContext) {
         final theme = Theme.of(sheetContext);
-        return SafeArea(
-          child: Column(
-            mainAxisSize: MainAxisSize.min,
-            children: [
-              for (final c in rows)
-                ListTile(
-                  leading: Icon(
-                    c.isDestructive
-                        ? Icons.delete_sweep_outlined
-                        : Icons.bolt_outlined,
-                    color: c.isDestructive ? theme.colorScheme.error : null,
-                  ),
-                  title: Text(
-                    c.label,
-                    style: c.isDestructive
-                        ? TextStyle(color: theme.colorScheme.error)
-                        : null,
-                  ),
-                  subtitle: Text(
-                    c.text,
-                    style: theme.textTheme.bodySmall?.copyWith(
-                      fontFamily: 'monospace',
-                      // 'monospace' is an Android/fontconfig alias that resolves
-                      // to NOTHING on Windows, macOS and iOS (#145).
-                      fontFamilyFallback: const [
-                        'Consolas',
-                        'Menlo',
-                        'Courier New',
-                      ],
-                    ),
-                  ),
-                  onTap: () => Navigator.of(sheetContext).pop(c),
+        return Column(
+          mainAxisSize: MainAxisSize.min,
+          children: [
+            for (final c in rows)
+              ListTile(
+                leading: Icon(
+                  c.isDestructive
+                      ? Icons.delete_sweep_outlined
+                      : Icons.bolt_outlined,
+                  color: c.isDestructive ? theme.colorScheme.error : null,
                 ),
-            ],
-          ),
+                title: Text(
+                  c.label,
+                  style: c.isDestructive
+                      ? TextStyle(color: theme.colorScheme.error)
+                      : null,
+                ),
+                subtitle: Text(
+                  c.text,
+                  style: theme.textTheme.bodySmall?.copyWith(
+                    fontFamily: 'monospace',
+                    // 'monospace' is an Android/fontconfig alias that resolves
+                    // to NOTHING on Windows, macOS and iOS (#145).
+                    fontFamilyFallback: const [
+                      'Consolas',
+                      'Menlo',
+                      'Courier New',
+                    ],
+                  ),
+                ),
+                onTap: () => Navigator.of(sheetContext).pop(c),
+              ),
+          ],
         );
       },
     );
@@ -3483,7 +3482,7 @@ class _SessionScreenState extends State<SessionScreen>
   }
 
   Future<AttachSource?> _chooseAttachSource() {
-    return showModalBottomSheet<AttachSource>(
+    return showAppBottomSheet<AttachSource>(
       context: context,
       showDragHandle: true,
       builder: (context) => AttachSourceSheet(
