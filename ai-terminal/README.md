@@ -10,6 +10,7 @@ The browser app needs nothing installed and remains the primary client. Install 
 - **Push while the app is closed** — a browser can only notify while a tab is alive. The app registers an FCM device token with the server and receives **data-only, content-free** wake-ups; the message text is fetched from your server over your own private network afterwards. Google sees a device token and a timestamp, never the conversation. Android only — push is guarded off on the Windows build (`pushSupported` in `lib/main.dart`).
 - **Terminal lens** — the live PTY, on every platform, drivable (not read-only) including on a phone.
 - **Read-aloud** through Android's own offline `TextToSpeech`, via a hand-rolled `wt/speech` MethodChannel in `MainActivity.kt`. Deliberately not the `flutter_tts` package: its Windows build needs `nuget.exe`, and this project still ships a Windows desktop build.
+- **Dictation without the keyboard** (#291) — a mic in the compose bar dictates straight into the message box with the soft keyboard closed, keeping the ~40% of the screen a keyboard takes for the conversation. It keeps listening through pauses until you tap it again, switches English ⇄ Hebrew from its status line, and tapping the box opens the keyboard as usual. It is the phone's own speech service (Android `SpeechRecognizer`, the one the keyboard's mic uses) through a hand-rolled `wt/dictation` channel pair (`Dictation.kt`), for the same Windows-build reason as read-aloud. Android only.
 
 ## Layout
 

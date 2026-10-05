@@ -10,6 +10,7 @@ import 'package:flutter/foundation.dart';
 import 'package:flutter/material.dart';
 import 'package:flutter/services.dart';
 
+import '../services/dictation_service.dart';
 import '../theme/app_theme.dart';
 import '../theme/status_colors.dart';
 
@@ -155,6 +156,8 @@ class ComposeBar extends StatelessWidget {
     this.agentReady = true,
     this.blockedReason,
     this.onCommand,
+    this.dictation,
+    this.onDictate,
   });
 
   final TextEditingController controller;
@@ -234,6 +237,13 @@ class ComposeBar extends StatelessWidget {
   /// as a prompt would (#147).
   final VoidCallback? onCommand;
 
+  /// Dictation into this bar without the keyboard (#291). Both null (desktop, and
+  /// every existing call site) means no mic button at all. The bar only DRAWS the
+  /// state; starting and stopping, and closing the keyboard first, belong to the
+  /// screen that owns the field's focus ([onDictate]).
+  final DictationService? dictation;
+  final VoidCallback? onDictate;
+
   /// Typing is always allowed — the text stays in the box and is sent the moment
   /// the agent is up. Only SUBMIT waits, because a submit during boot goes to the
   /// shell the TUI has not replaced yet and the prompt is silently lost (#147).
@@ -256,6 +266,7 @@ class ComposeBar extends StatelessWidget {
         crossAxisAlignment: CrossAxisAlignment.stretch,
         children: [
           if (attachments.isNotEmpty) _attachmentStrip(theme),
+          if (dictation != null) _dictationStatus(theme, dictation!),
           Row(
             crossAxisAlignment: CrossAxisAlignment.end,
             children: [
@@ -410,6 +421,10 @@ class ComposeBar extends StatelessWidget {
                   ),
                 ),
               ),
+              if (dictation != null && onDictate != null) ...[
+                const SizedBox(width: 4),
+                _micButton(theme, dictation!),
+              ],
               const SizedBox(width: 8),
               AnimatedBuilder(
                 animation: controller,
@@ -445,6 +460,101 @@ class ComposeBar extends StatelessWidget {
           ),
         ],
       ),
+    );
+  }
+
+  /// The mic (#291): an outlined mic to start, a filled one to stop.
+  Widget _micButton(ThemeData theme, DictationService d) {
+    return AnimatedBuilder(
+      animation: d,
+      builder: (context, _) {
+        final on = d.isListeningTo(controller);
+        return on
+            ? IconButton.filled(
+                key: const ValueKey('compose-mic'),
+                onPressed: onDictate,
+                style: IconButton.styleFrom(
+                  backgroundColor: theme.colorScheme.error,
+                  foregroundColor: theme.colorScheme.onError,
+                ),
+                icon: const Icon(Icons.mic),
+                tooltip: 'Stop dictation',
+              )
+            : IconButton(
+                key: const ValueKey('compose-mic'),
+                onPressed: onDictate,
+                icon: const Icon(Icons.mic_none),
+                tooltip: 'Dictate (${d.language.name})',
+              );
+      },
+    );
+  }
+
+  /// One line above the field while dictating ("Listening · English", with the
+  /// language switch), or after a failure (what went wrong). Nothing otherwise.
+  Widget _dictationStatus(ThemeData theme, DictationService d) {
+    return AnimatedBuilder(
+      animation: d,
+      builder: (context, _) {
+        final listening = d.isListeningTo(controller);
+        final error = d.errorFor(controller);
+        if (!listening && error == null) return const SizedBox.shrink();
+        final small = theme.textTheme.bodySmall;
+        if (!listening) {
+          return Padding(
+            padding: const EdgeInsets.only(bottom: 6),
+            child: Row(
+              key: const ValueKey('compose-dictation-error'),
+              children: [
+                Icon(Icons.mic_off, size: 16, color: theme.colorScheme.error),
+                const SizedBox(width: 6),
+                Expanded(
+                  child: Text(
+                    error!,
+                    style: small?.copyWith(color: theme.colorScheme.error),
+                  ),
+                ),
+                IconButton(
+                  onPressed: d.clearError,
+                  icon: const Icon(Icons.close, size: 16),
+                  tooltip: 'Dismiss',
+                  visualDensity: VisualDensity.compact,
+                ),
+              ],
+            ),
+          );
+        }
+        final next = kDictationLanguages[
+            (kDictationLanguages.indexOf(d.language) + 1) %
+                kDictationLanguages.length];
+        return Padding(
+          padding: const EdgeInsets.only(bottom: 4),
+          child: Row(
+            key: const ValueKey('compose-dictation-status'),
+            children: [
+              Icon(Icons.circle, size: 9, color: theme.colorScheme.error),
+              const SizedBox(width: 6),
+              Expanded(
+                child: Text(
+                  'Listening · ${d.language.name}',
+                  style: small?.copyWith(
+                    color: theme.colorScheme.onSurfaceVariant,
+                  ),
+                ),
+              ),
+              TextButton(
+                key: const ValueKey('compose-dictation-language'),
+                onPressed: d.nextLanguage,
+                style: TextButton.styleFrom(
+                  visualDensity: VisualDensity.compact,
+                  padding: const EdgeInsets.symmetric(horizontal: 10),
+                ),
+                child: Text('Switch to ${next.label}'),
+              ),
+            ],
+          ),
+        );
+      },
     );
   }
 

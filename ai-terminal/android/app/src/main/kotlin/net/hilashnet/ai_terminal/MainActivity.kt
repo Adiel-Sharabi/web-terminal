@@ -1,8 +1,10 @@
 package net.hilashnet.ai_terminal
 
+import android.content.pm.PackageManager
 import android.speech.tts.TextToSpeech
 import io.flutter.embedding.android.FlutterActivity
 import io.flutter.embedding.engine.FlutterEngine
+import io.flutter.plugin.common.EventChannel
 import io.flutter.plugin.common.MethodChannel
 import java.util.Locale
 
@@ -19,6 +21,7 @@ import java.util.Locale
 class MainActivity : FlutterActivity() {
     private var tts: TextToSpeech? = null
     private var ready = false
+    private var dictation: Dictation? = null
 
     override fun configureFlutterEngine(flutterEngine: FlutterEngine) {
         super.configureFlutterEngine(flutterEngine)
@@ -61,6 +64,39 @@ class MainActivity : FlutterActivity() {
                     else -> result.notImplemented()
                 }
             }
+
+        // #291 - dictation. Its own channel pair rather than more methods on
+        // `wt/speech`: read-aloud and dictation share nothing but the word
+        // "speech", and the event stream is dictation's alone.
+        val d = Dictation(this)
+        dictation = d
+        EventChannel(flutterEngine.dartExecutor.binaryMessenger, DICTATION_EVENTS).setStreamHandler(d)
+        MethodChannel(flutterEngine.dartExecutor.binaryMessenger, DICTATION_CHANNEL)
+            .setMethodCallHandler { call, result ->
+                val lang = call.argument<String>("language") ?: "en-US"
+                when (call.method) {
+                    "available" -> result.success(d.available())
+                    "start" -> {
+                        d.start(lang, call.argument<Int>("session") ?: 0)
+                        result.success(true)
+                    }
+                    "language" -> { d.setLanguage(lang); result.success(true) }
+                    "stop" -> { d.stop(); result.success(true) }
+                    "cancel" -> { d.cancel(); result.success(true) }
+                    else -> result.notImplemented()
+                }
+            }
+    }
+
+    override fun onRequestPermissionsResult(
+        requestCode: Int,
+        permissions: Array<String>,
+        grantResults: IntArray,
+    ) {
+        super.onRequestPermissionsResult(requestCode, permissions, grantResults)
+        val granted = grantResults.isNotEmpty() &&
+            grantResults[0] == PackageManager.PERMISSION_GRANTED
+        dictation?.onPermissionResult(requestCode, granted)
     }
 
     override fun onDestroy() {
@@ -68,11 +104,16 @@ class MainActivity : FlutterActivity() {
         tts?.stop()
         tts?.shutdown()
         tts = null
+        // ...and without this the mic stays open.
+        dictation?.destroy()
+        dictation = null
         super.onDestroy()
     }
 
     companion object {
         private const val CHANNEL = "wt/speech"
         private const val UTTERANCE_ID = "wt-read-aloud"
+        private const val DICTATION_CHANNEL = "wt/dictation"
+        private const val DICTATION_EVENTS = "wt/dictation/events"
     }
 }
