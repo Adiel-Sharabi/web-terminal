@@ -195,7 +195,13 @@ class Dictation(private val activity: Activity) : EventChannel.StreamHandler {
         override fun onReadyForSpeech(params: Bundle?) {
             // The mic is actually open now. Dart shows "Listening" from here, not
             // from the tap: words spoken before this are not heard.
-            if (current && active) emit(mapOf("type" to "ready"))
+            if (!current || !active) return
+            // A run that opened proves the connection is healthy, so the retry bound
+            // counts only CONSECUTIVE failures to connect. Resetting on heard words
+            // alone let silent pauses accumulate disconnect retries until a long,
+            // healthy dictation died with "disconnected" (#304 review).
+            failures = 0
+            emit(mapOf("type" to "ready"))
         }
         override fun onBeginningOfSpeech() {}
         override fun onRmsChanged(rmsdB: Float) {}
@@ -237,8 +243,10 @@ class Dictation(private val activity: Activity) : EventChannel.StreamHandler {
                 SpeechRecognizer.ERROR_NO_MATCH,
                 SpeechRecognizer.ERROR_SPEECH_TIMEOUT -> relisten()
                 // #302 - SERVER_DISCONNECTED is the speech service dropping its
-                // connection (Google's does after a session); a fresh recognizer
-                // rebinds, so it is retried like a busy or client-side failure.
+                // connection: the service changed or restarted under us, or (seen on
+                // the S25 with FILE-fed sessions, not with the mic) it closes between
+                // sessions. A fresh recognizer rebinds, so it is retried like a busy
+                // or client-side failure.
                 SpeechRecognizer.ERROR_RECOGNIZER_BUSY,
                 SpeechRecognizer.ERROR_SERVER_DISCONNECTED,
                 SpeechRecognizer.ERROR_CLIENT -> retryOrFail(error)
