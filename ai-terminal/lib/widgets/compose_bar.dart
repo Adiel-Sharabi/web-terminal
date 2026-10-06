@@ -356,64 +356,69 @@ class ComposeBar extends StatelessWidget {
                       ),
                       _NewlineIntent: _NewlineAction(controller),
                     },
-                    child: TextField(
+                    child: _FollowDictation(
                       controller: controller,
                       focusNode: focusNode,
-                      // Grows 1→5 lines so a long prompt SOFT-WRAPS and the box
-                      // gets taller instead of running off as one endless line.
-                      // DESKTOP: the Enter shortcut submits (Ctrl+Enter inserts a
-                      // newline), so a typed prompt goes out as `text\r`. MOBILE:
-                      // the soft keyboard's Enter inserts a newline (action below
-                      // is `newline`), and the Send button submits — a multi-line
-                      // field there can't rely on the send *action*, so it doesn't.
-                      minLines: 1,
-                      maxLines: 5,
-                      keyboardType: TextInputType.multiline,
-                      textInputAction: TextInputAction.newline,
-                      style: const TextStyle(
-                        fontFamily: 'monospace',
-                        fontSize: 14,
-                        color: AppColors.onSurface,
-                      ),
-                      decoration: InputDecoration(
-                        isDense: true,
-                        // The hint is where "you may type, it just will not send
-                        // yet" gets said. Saying nothing was the bug: the bar
-                        // looked ordinary, so a prompt went to the shell behind
-                        // the not-yet-started TUI and vanished (#147).
-                        // The hint is where "you may type, it just will not send
-                        // yet" gets said, and since #190 also where WHY gets said:
-                        // "starting" is a promise that it clears itself, which a
-                        // recognised selector never does.
-                        hintText: agentReady
-                            ? 'Message — / for commands'
-                            : (blockedReason ??
-                                  'Starting the agent — type now, send in a moment'),
-                        hintStyle: TextStyle(
-                          color: theme.colorScheme.onSurfaceVariant,
+                      dictation: dictation,
+                      child: TextField(
+                        controller: controller,
+                        focusNode: focusNode,
+                        // Grows 1→5 lines so a long prompt SOFT-WRAPS and the box
+                        // gets taller instead of running off as one endless line.
+                        // DESKTOP: the Enter shortcut submits (Ctrl+Enter inserts a
+                        // newline), so a typed prompt goes out as `text\r`. MOBILE:
+                        // the soft keyboard's Enter inserts a newline (action below
+                        // is `newline`), and the Send button submits — a multi-line
+                        // field there can't rely on the send *action*, so it doesn't.
+                        minLines: 1,
+                        maxLines: 5,
+                        keyboardType: TextInputType.multiline,
+                        textInputAction: TextInputAction.newline,
+                        style: const TextStyle(
+                          fontFamily: 'monospace',
                           fontSize: 14,
+                          color: AppColors.onSurface,
                         ),
-                        filled: true,
-                        fillColor: theme.colorScheme.surface,
-                        contentPadding: const EdgeInsets.symmetric(
-                          horizontal: 12,
-                          vertical: 10,
-                        ),
-                        border: OutlineInputBorder(
-                          borderRadius: BorderRadius.circular(AppShape.medium),
-                          borderSide: BorderSide(color: borderColor),
-                        ),
-                        enabledBorder: OutlineInputBorder(
-                          borderRadius: BorderRadius.circular(AppShape.medium),
-                          borderSide: BorderSide(color: borderColor),
-                        ),
-                        focusedBorder: OutlineInputBorder(
-                          borderRadius: BorderRadius.circular(AppShape.medium),
-                          borderSide: BorderSide(
-                            color: isLive
-                                ? liveColor
-                                : theme.colorScheme.primary,
-                            width: isLive ? 2 : 1,
+                        decoration: InputDecoration(
+                          isDense: true,
+                          // The hint is where "you may type, it just will not send
+                          // yet" gets said. Saying nothing was the bug: the bar
+                          // looked ordinary, so a prompt went to the shell behind
+                          // the not-yet-started TUI and vanished (#147).
+                          // The hint is where "you may type, it just will not send
+                          // yet" gets said, and since #190 also where WHY gets said:
+                          // "starting" is a promise that it clears itself, which a
+                          // recognised selector never does.
+                          hintText: agentReady
+                              ? 'Message — / for commands'
+                              : (blockedReason ??
+                                    'Starting the agent — type now, send in a moment'),
+                          hintStyle: TextStyle(
+                            color: theme.colorScheme.onSurfaceVariant,
+                            fontSize: 14,
+                          ),
+                          filled: true,
+                          fillColor: theme.colorScheme.surface,
+                          contentPadding: const EdgeInsets.symmetric(
+                            horizontal: 12,
+                            vertical: 10,
+                          ),
+                          border: OutlineInputBorder(
+                            borderRadius: BorderRadius.circular(AppShape.medium),
+                            borderSide: BorderSide(color: borderColor),
+                          ),
+                          enabledBorder: OutlineInputBorder(
+                            borderRadius: BorderRadius.circular(AppShape.medium),
+                            borderSide: BorderSide(color: borderColor),
+                          ),
+                          focusedBorder: OutlineInputBorder(
+                            borderRadius: BorderRadius.circular(AppShape.medium),
+                            borderSide: BorderSide(
+                              color: isLive
+                                  ? liveColor
+                                  : theme.colorScheme.primary,
+                              width: isLive ? 2 : 1,
+                            ),
                           ),
                         ),
                       ),
@@ -751,4 +756,73 @@ class _AttachmentThumb extends StatelessWidget {
       ),
     );
   }
+}
+
+/// Keeps the dictation point on screen while the mic writes into the field
+/// (#294). Flutter scrolls a text field to its caret for user edits and focus
+/// changes, never for a change made in code - and dictation writes the field in
+/// code, unfocused on purpose (the keyboard stays shut). So once a prompt grew
+/// past [TextField.maxLines], the words being heard landed below the box and
+/// there was no way to see them — or to tell whether it was still listening.
+///
+/// It reveals the CARET, not the end: dictation inserts at the caret, so the
+/// point being written may have text after it (`DictationMerge.render` puts the
+/// caret right after the spoken words).
+class _FollowDictation extends StatefulWidget {
+  const _FollowDictation({
+    required this.controller,
+    required this.focusNode,
+    required this.dictation,
+    required this.child,
+  });
+
+  final TextEditingController controller;
+  final FocusNode focusNode;
+  final DictationService? dictation;
+  final Widget child;
+
+  @override
+  State<_FollowDictation> createState() => _FollowDictationState();
+}
+
+class _FollowDictationState extends State<_FollowDictation> {
+  @override
+  void initState() {
+    super.initState();
+    widget.controller.addListener(_onChanged);
+  }
+
+  @override
+  void didUpdateWidget(_FollowDictation old) {
+    super.didUpdateWidget(old);
+    if (!identical(old.controller, widget.controller)) {
+      old.controller.removeListener(_onChanged);
+      widget.controller.addListener(_onChanged);
+    }
+  }
+
+  @override
+  void dispose() {
+    widget.controller.removeListener(_onChanged);
+    super.dispose();
+  }
+
+  void _onChanged() {
+    if (!(widget.dictation?.isListeningTo(widget.controller) ?? false)) return;
+    // The new text is laid out in the coming frame; the caret's rect is only
+    // known after it.
+    WidgetsBinding.instance.addPostFrameCallback((_) {
+      if (!mounted) return;
+      final caret = widget.controller.selection;
+      if (!caret.isValid) return;
+      // The field's FocusNode is attached inside EditableText's own build, so
+      // its context is below the EditableTextState that owns the scroll.
+      widget.focusNode.context
+          ?.findAncestorStateOfType<EditableTextState>()
+          ?.bringIntoView(caret.extent);
+    });
+  }
+
+  @override
+  Widget build(BuildContext context) => widget.child;
 }

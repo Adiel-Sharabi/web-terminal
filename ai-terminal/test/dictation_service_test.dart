@@ -318,5 +318,70 @@ void main() {
       await t.pump();
       expect(find.text('Microphone permission was denied'), findsNothing);
     });
+
+    // #294 — the field is UNFOCUSED while dictating, and Flutter reveals the
+    // caret only for a focused field, so past maxLines the words went below the
+    // box. Each case reads the field's own scroll position.
+    group('keeps the words being heard on screen', () {
+      final long = List.filled(60, 'and then the next part of the sentence').join(' ');
+      double scrolled(WidgetTester t) => t
+          .state<ScrollableState>(find.descendant(
+            of: find.byType(TextField),
+            matching: find.byType(Scrollable),
+          ))
+          .position
+          .pixels;
+      double maxScroll(WidgetTester t) => t
+          .state<ScrollableState>(find.descendant(
+            of: find.byType(TextField),
+            matching: find.byType(Scrollable),
+          ))
+          .position
+          .maxScrollExtent;
+
+      Future<void> hear(WidgetTester t, String words) async {
+        await t.runAsync(() async {
+          events.add({'type': 'partial', 'text': words, 'session': 1});
+          await Future<void>.delayed(const Duration(milliseconds: 10));
+        });
+        await t.pump();
+        await t.pump();
+      }
+
+      testWidgets('dictating at the end follows the newest words', (t) async {
+        final c = TextEditingController();
+        await t.pumpWidget(bar(c, d: svc, onDictate: () {}));
+        await t.runAsync(() => svc.start(c));
+        await hear(t, long);
+        expect(maxScroll(t), greaterThan(0), reason: 'the text must overflow 5 lines');
+        expect(scrolled(t), maxScroll(t));
+      });
+
+      testWidgets('dictating MID-text reveals the caret, not the end', (t) async {
+        final c = TextEditingController(text: long)
+          ..selection = TextSelection.collapsed(offset: long.length ~/ 2);
+        await t.pumpWidget(bar(c, d: svc, onDictate: () {}));
+        await t.runAsync(() => svc.start(c));
+        await hear(t, 'mid');
+        expect(c.text, contains(' mid '));
+        expect(maxScroll(t), greaterThan(0));
+        // Not left at the top (no reveal) and not at the end (end-jump).
+        expect(scrolled(t), greaterThan(0));
+        expect(scrolled(t), lessThan(maxScroll(t)));
+      });
+
+      testWidgets('text set while NOT dictating does not move the field', (t) async {
+        final c = TextEditingController();
+        await t.pumpWidget(bar(c, d: svc, onDictate: () {}));
+        c.value = TextEditingValue(
+          text: long,
+          selection: TextSelection.collapsed(offset: long.length),
+        );
+        await t.pump();
+        await t.pump();
+        expect(maxScroll(t), greaterThan(0));
+        expect(scrolled(t), 0);
+      });
+    });
   });
 }
