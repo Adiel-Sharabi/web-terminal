@@ -79,3 +79,5 @@ session-briefs.json
 session-briefs.json.tmp
 session-briefs.test.json
 session-briefs.test.json.tmp
+session-briefs.json.corrupt-*
+session-briefs.test.json.corrupt-*

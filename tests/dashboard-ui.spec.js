@@ -104,6 +104,20 @@ test.describe('#298 sessions dashboard (app.html)', () => {
     await expect.poll(() => page.evaluate(() => location.pathname)).toBe(`/app/${id}`);
   });
 
+  test('a session switch WHILE the dashboard is open keeps one history entry: Back still closes it', async ({ page }) => {
+    // The race the timing of the test above can hide: init's first switchSession landing
+    // after the dashboard opened. Driven deterministically here.
+    const other = await newSession(`race-${Date.now()}`);
+    await loginPage(page);
+    await page.goto(`${BASE}/app`);
+    await page.click('#dashBtn');
+    await expect(page.locator('#dashboard')).toBeVisible();
+    await page.evaluate((id) => switchSession(id, null), other); // eslint-disable-line no-undef
+    expect(await page.evaluate(() => location.hash)).toBe('#dashboard');
+    await page.goBack();
+    await expect(page.locator('#dashboard')).toBeHidden();
+  });
+
   test('nothing a session or an agent wrote becomes markup', async ({ page }) => {
     const evil = '<img src=x onerror="window.__pwned=1">';
     const id = await newSession(`x${evil}`);

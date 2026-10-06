@@ -509,6 +509,7 @@
     #dashboard { position: fixed; left: 0; right: 0; bottom: 0; top: var(--db-top, 36px); z-index: 90;
       background: #12161f; color: #e0e4ea; overflow-y: auto; font: 13px 'Segoe UI', sans-serif; }
     #dashboard[hidden] { display: none; }
+    #dashboard:focus { outline: none; } /* focus is parked here on open, not shown */
     .db-head { display: flex; flex-wrap: wrap; align-items: center; gap: 10px; padding: 12px 20px;
       border-bottom: 1px solid #262d3b; background: #161b26; position: sticky; top: 0; z-index: 1; }
     .db-head h2 { margin: 0; font-size: 16px; font-weight: 600; color: #e8ebf0; }
@@ -742,7 +743,7 @@
       </div>
     </div>
   </div>
-  <div id="dashboard" hidden role="region" aria-label="Sessions dashboard">
+  <div id="dashboard" hidden role="region" aria-label="Sessions dashboard" tabindex="-1">
     <div class="db-head">
       <h2>Sessions</h2>
       <div id="dbChips" style="display:flex;flex-wrap:wrap;gap:6px"></div>
@@ -1612,11 +1613,12 @@
       // a phone it never is — and the phone is the case this control was asked for.
       renderHeaderFavorite(_sidebarData);
       renderComposeCommands(_sidebarData);   // #188 - same exposure, same fix
-      // #298 - a switch made while the dashboard is open (init's first selection, when the
-      // page was opened at /app#dashboard) must not drop it from the URL: Back would then
-      // skip over the dashboard instead of closing it.
-      history.pushState({ id, serverUrl: sessionServerUrl, ...(dbOpen ? { dashboard: true } : {}) }, '',
-        '/app/' + id + (dbOpen ? '#dashboard' : ''));
+      // #298 - a switch made while the dashboard is open (init's first selection still
+      // running when the dashboard button was pressed) REPLACES the dashboard's history
+      // entry, keeping #dashboard: dropping the hash would make Back skip the dashboard,
+      // and pushing a second #dashboard entry would make Back land on the dashboard again.
+      if (dbOpen) history.replaceState({ id, serverUrl: sessionServerUrl, dashboard: true }, '', '/app/' + id + '#dashboard');
+      else history.pushState({ id, serverUrl: sessionServerUrl }, '', '/app/' + id);
       term.clear();
       term.reset();
       resetHistoryState();
@@ -5785,6 +5787,7 @@
     let dbFetchedAt = 0;
     let dbError = '';
     let dbEditing = null;            // key of the card whose pin form is open - no re-render under it
+    let dbPrevFocus = null;          // what had the keyboard before the dashboard took it
     let dbClosed = new Map();        // server key -> { at, list }
     const dbSessions = new Map();    // card key -> session row, for the action handlers
 
@@ -5799,6 +5802,10 @@
       el.style.setProperty('--db-top', `${Math.max(0, Math.round(tb.getBoundingClientRect().bottom))}px`);
       el.hidden = false;
       dbOpen = true;
+      // Take focus OFF the terminal underneath: left on xterm's textarea, an Enter meant
+      // for a card would be a CR into the hidden PTY - in a Claude composer, a submit.
+      if (!fromHistory || !dbPrevFocus) dbPrevFocus = document.activeElement;
+      el.focus({ preventScroll: true });
       document.getElementById('dashBtn').classList.add('active');
       // Back closes it - the gesture a phone user reaches for first.
       if (!fromHistory && location.hash !== '#dashboard') {
@@ -5818,6 +5825,16 @@
       dbTimer = null;
       document.getElementById('dashboard').hidden = true;
       document.getElementById('dashBtn').classList.remove('active');
+      // Give the keyboard back to whatever had it - but not on a phone, where focusing
+      // xterm would pop the soft keyboard over the screen just revealed.
+      const prev = dbPrevFocus;
+      dbPrevFocus = null;
+      // A mouse click on the toolbar button leaves IT focused, so "what had the keyboard"
+      // is the button on the commonest path - hand that case back to the terminal.
+      if (!isMobile) {
+        if (prev && prev !== document.body && document.contains(prev) && !prev.closest('#toolbar')) { try { prev.focus(); } catch (e) {} }
+        else if (sessionId) { try { term.focus(); } catch (e) {} }
+      }
       if (!fromHistory && location.hash === '#dashboard') {
         const st = { ...(history.state || {}) };
         delete st.dashboard;
@@ -5848,6 +5865,7 @@
     }
 
     async function refreshClosed() {
+      if (!dbOpen) return;
       const servers = (dbData && dbData.servers) || [];
       const due = servers.filter((sv) => {
         if (!sv.online || sv.needsAuth) return false;
@@ -6006,7 +6024,15 @@
             (items ? `<span>${esc(items)}</span>` : '') + (last ? `<span class="d">${esc(last)}</span>` : '') + dbAge(c.at) + '</div>';
         }).join('')}</div></section>`;
       }
+      // A re-render replaces every card; put keyboard focus back on the one that had it,
+      // or the 5s poll would drop a keyboard user to <body> mid-navigation.
+      const focusedCard = document.activeElement && document.activeElement.closest
+        && document.activeElement.closest('#dbBody .db-card') ? document.activeElement.dataset.card : null;
       root.innerHTML = html;
+      if (focusedCard) {
+        const again = [...root.querySelectorAll('.db-card')].find((c) => c.dataset.card === focusedCard);
+        if (again) again.focus({ preventScroll: true });
+      }
     }
 
     async function dbPatchBrief(s, body) {
@@ -6069,9 +6095,16 @@
     });
 
     document.addEventListener('keydown', (e) => {
-      // Enter on a focused card opens it, like a click. Scoped to a card target so the
-      // terminal's own keys are never touched.
+      // Enter on a focused card opens it, like a click; Enter in the pin form saves it.
+      // Scoped to the dashboard's own targets so the terminal's keys are never touched.
       if (!dbOpen || e.key !== 'Enter') return;
+      const form = e.target && e.target.closest && e.target.closest('#dashboard .db-pinform');
+      if (form && e.target.tagName === 'INPUT') {
+        e.preventDefault();
+        const save = form.querySelector('[data-action=pin-save]');
+        if (save) save.click();
+        return;
+      }
       const card = e.target && e.target.closest && e.target.closest('#dashboard .db-card');
       if (!card || e.target !== card) return;
       e.preventDefault();

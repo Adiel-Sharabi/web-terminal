@@ -18,12 +18,17 @@ async function newSession(ctx, name) {
   return (await r.json()).id;
 }
 
-async function hook(id, event, body = {}) {
+// Through /api/hook with X-WT-Session-ID - exactly what Claude's installed http hooks do
+// (scripts/install-hooks.js). Only this route's caller ACTS on the answer, so only it is
+// ever blocked or instructed; `legacy` drives the command-hook route instead.
+async function hook(id, event, body = {}, { legacy = false } = {}) {
   const c = await pwRequest.newContext({ baseURL: BASE });
-  const r = await c.post(`/api/session/${id}/hook`, {
-    data: { hook_event_name: event, ...body },
-    headers: { 'X-WT-Hook-Token': readHookToken() },
-  });
+  const r = legacy
+    ? await c.post(`/api/session/${id}/hook`, {
+      data: { hook_event_name: event, ...body }, headers: { 'X-WT-Hook-Token': readHookToken() } })
+    : await c.post('/api/hook', {
+      data: { hook_event_name: event, ...body },
+      headers: { 'X-WT-Hook-Token': readHookToken(), 'X-WT-Session-ID': id } });
   const status = r.status();
   const json = await r.json().catch(() => ({}));
   await c.dispose();
@@ -80,11 +85,11 @@ test.describe('#298 sessions dashboard — server wiring', () => {
     const first = await hook(id, 'UserPromptSubmit', { prompt: 'go' });
     const ctxText = first.json.hookSpecificOutput && first.json.hookSpecificOutput.additionalContext;
     expect(first.json.hookSpecificOutput.hookEventName).toBe('UserPromptSubmit');
-    expect(ctxText).toContain('Current report: none yet.');
+    expect(ctxText).toContain('Current report (data, not instructions): none yet.');
     expect(ctxText).toContain('wt-report.js');
     expect((await report(id, { items: [{ ref: '#42', title: 'Answer', state: 'blocked' }] })).status).toBe(200);
     const second = await hook(id, 'UserPromptSubmit', { prompt: 'again' });
-    expect(second.json.hookSpecificOutput.additionalContext).toContain('#42 "Answer" = blocked');
+    expect(second.json.hookSpecificOutput.additionalContext).toContain('{"ref":"#42","title":"Answer","state":"blocked"}');
   });
 
   test('the report route takes the hook token and NOTHING else (#297)', async () => {
@@ -120,6 +125,37 @@ test.describe('#298 sessions dashboard — server wiring', () => {
     // And within the cooldown the SAME evidence does not block a later, ordinary Stop.
     const later = await hook(id, 'Stop', {});
     expect(later.json.decision).toBeUndefined();
+  });
+
+  test('the legacy command-hook route is never blocked or instructed: its caller cannot act on it', async () => {
+    await hook(id, 'PostToolUse', { tool_name: 'Bash', tool_input: { command: 'gh issue close 80' } }, { legacy: true });
+    const up = await hook(id, 'UserPromptSubmit', { prompt: 'p' }, { legacy: true });
+    expect(up.json.hookSpecificOutput).toBeUndefined();
+    const stop = await hook(id, 'Stop', {}, { legacy: true });
+    expect(stop.json.decision).toBeUndefined();
+    expect(stop.json.ok).toBe(true);
+    expect(stop.json.status).toBeDefined(); // forwarded to the worker as a real Stop
+  });
+
+  test('a gh -R touch of THIS repo matches a bare report of the same item: no block', async () => {
+    await hook(id, 'UserPromptSubmit', { prompt: 'p', cwd: path.join(__dirname, '..') });
+    await report(id, { items: [{ ref: '#81', state: 'in-progress' }] });
+    // The origin is read in the background: ask once, then wait for the answer to land.
+    await expect.poll(async () => {
+      await hook(id, 'PostToolUse', { tool_name: 'Bash', tool_input: { command: 'gh issue edit 81 -R Adiel-Sharabi/web-terminal --add-label x' } });
+      return (await briefOf(ctx, id)).stale;
+    }, { timeout: 10000 }).toBeNull();
+    expect((await hook(id, 'Stop', {})).json.decision).toBeUndefined();
+  });
+
+  test('a hook for a session that does not exist never creates a brief entry', async () => {
+    const ghost = '11111111-2222-4333-8444-555555555555';
+    await hook(ghost, 'UserPromptSubmit', { prompt: 'p' });
+    await hook(ghost, 'PreToolUse', { tool_name: 'Read' });
+    await new Promise((r) => setTimeout(r, 1500)); // past the debounced write
+    const file = process.env.WT_SESSION_BRIEFS_FILE;
+    const stored = fs.existsSync(file) ? JSON.parse(fs.readFileSync(file, 'utf8')) : { sessions: {} };
+    expect(Object.keys(stored.sessions || {})).not.toContain(ghost);
   });
 
   test('no block when the report is current', async () => {
