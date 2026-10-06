@@ -65,6 +65,9 @@ process.env.WT_CLUSTER_TOKENS_FILE = path.join(__dirname, 'cluster-tokens.test.j
 // suite's server changes the production file. Set on process.env so the webServer env
 // below, the specs, and any server a spec spawns all inherit the same path.
 process.env.WT_API_TOKENS_FILE = path.join(__dirname, 'api-tokens.test.json');
+// #298 - the sessions dashboard's brief store. A spec that reports, pins or opts out
+// must never write into production's session-briefs.json; reset per run like the above.
+process.env.WT_SESSION_BRIEFS_FILE = path.join(__dirname, 'session-briefs.test.json');
 
 module.exports = defineConfig({
   testDir: './tests',

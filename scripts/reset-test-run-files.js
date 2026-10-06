@@ -67,6 +67,7 @@ if (process.env.WT_TEST !== '1') {
 }
 reset('config.test.json', '#240');
 if (process.env.WT_API_TOKENS_FILE) reset(process.env.WT_API_TOKENS_FILE, '#272');
+if (process.env.WT_SESSION_BRIEFS_FILE) reset(process.env.WT_SESSION_BRIEFS_FILE, '#298');
 else {
   console.error('[test-reset] WT_API_TOKENS_FILE is not set - the server would mint into production');
   process.exitCode = 1;
