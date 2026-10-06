@@ -759,9 +759,9 @@ class _AttachmentThumb extends StatelessWidget {
 }
 
 /// Keeps the dictation point on screen while the mic writes into the field
-/// (#294). Flutter scrolls a text field to its caret only when the field has
-/// FOCUS or the IME edits it, and dictation writes programmatically into an
-/// unfocused field on purpose (the keyboard stays shut). So once a prompt grew
+/// (#294). Flutter scrolls a text field to its caret for user edits and focus
+/// changes, never for a change made in code - and dictation writes the field in
+/// code, unfocused on purpose (the keyboard stays shut). So once a prompt grew
 /// past [TextField.maxLines], the words being heard landed below the box and
 /// there was no way to see them — or to tell whether it was still listening.
 ///

@@ -357,14 +357,16 @@ void main() {
         expect(scrolled(t), maxScroll(t));
       });
 
-      testWidgets('dictating at the START reveals the caret, not the end', (t) async {
+      testWidgets('dictating MID-text reveals the caret, not the end', (t) async {
         final c = TextEditingController(text: long)
-          ..selection = const TextSelection.collapsed(offset: 0);
+          ..selection = TextSelection.collapsed(offset: long.length ~/ 2);
         await t.pumpWidget(bar(c, d: svc, onDictate: () {}));
         await t.runAsync(() => svc.start(c));
-        await hear(t, 'first');
-        expect(c.text, startsWith('first '));
+        await hear(t, 'mid');
+        expect(c.text, contains(' mid '));
         expect(maxScroll(t), greaterThan(0));
+        // Not left at the top (no reveal) and not at the end (end-jump).
+        expect(scrolled(t), greaterThan(0));
         expect(scrolled(t), lessThan(maxScroll(t)));
       });
 
