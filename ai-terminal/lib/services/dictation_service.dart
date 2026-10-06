@@ -119,6 +119,13 @@ String dictationErrorMessage(String code, DictationLanguage lang) {
       return 'Dictation needs a network connection';
     case '3': // ERROR_AUDIO
       return 'The microphone could not be opened';
+    case '9': // ERROR_INSUFFICIENT_PERMISSIONS (#301)
+      // The usual cause is a third-party voice-input service: Android only lets it
+      // record while it is on screen, so it is refused the mic when called from here.
+      return 'The voice-input service was refused the microphone — '
+          'choose Google as the voice input service, or use its own on-screen button';
+    case '11': // ERROR_SERVER_DISCONNECTED (#302), after the retries ran out
+      return 'The voice-input service disconnected — tap the mic to try again';
     case '12': // ERROR_LANGUAGE_NOT_SUPPORTED
     case '13': // ERROR_LANGUAGE_UNAVAILABLE
       return '${lang.name} dictation is not available on this device';
