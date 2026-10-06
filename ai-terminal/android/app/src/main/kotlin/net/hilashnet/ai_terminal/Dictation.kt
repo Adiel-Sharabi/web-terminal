@@ -68,6 +68,12 @@ class Dictation(private val activity: Activity) : EventChannel.StreamHandler {
     fun start(lang: String, sessionId: Int) {
         // A new session supersedes whatever was running.
         supersede()
+        // #302 - and starts from a FRESH recognizer. A SpeechRecognizer stays bound to
+        // whichever service was the system default when it was created; reusing one
+        // across sessions stranded the mic on ERROR_SERVER_DISCONNECTED (11) after the
+        // voice-input service was changed, until the app was force-stopped.
+        recognizer?.destroy()
+        recognizer = null
         session = sessionId
         language = lang
         if (!available()) {
@@ -230,8 +236,16 @@ class Dictation(private val activity: Activity) : EventChannel.StreamHandler {
                 // run in continuous dictation, not a failure.
                 SpeechRecognizer.ERROR_NO_MATCH,
                 SpeechRecognizer.ERROR_SPEECH_TIMEOUT -> relisten()
+                // #302 - SERVER_DISCONNECTED is the speech service dropping its
+                // connection (Google's does after a session); a fresh recognizer
+                // rebinds, so it is retried like a busy or client-side failure.
                 SpeechRecognizer.ERROR_RECOGNIZER_BUSY,
+                SpeechRecognizer.ERROR_SERVER_DISCONNECTED,
                 SpeechRecognizer.ERROR_CLIENT -> retryOrFail(error)
+                // #301 - a refusal of the microphone is final and must be reported as
+                // what it is. Retrying it as a formatting failure is what turned it
+                // into an unexplained "error 11".
+                SpeechRecognizer.ERROR_INSUFFICIENT_PERMISSIONS -> fail(error)
                 else -> {
                     // A service that rejects the formatting request fails before it
                     // has produced anything. Retry once without it before giving up.
