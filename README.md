@@ -126,6 +126,16 @@ Typing the answer *for* you is a separate, opt-in setting
 (`autoAnswerBlockingPrompt`, **off** by default: trusting a folder is what decides
 whether an agent may execute what is in it).
 
+**Sessions dashboard** — the ▦ button opens every session on every server at once: the
+work item(s) each one is on and their state, what it is doing right now, what it just
+finished, and what you last asked it, with a **Needs you** strip on top. It is built to
+be **true**, not merely filled in: what the hooks prove (the current tool, the last
+turn's summary, a commit or a `gh issue close` that touched an item) is shown as fact,
+the agent reports only what only it knows (which item, which state), every Claude
+session is told how on every prompt, and a turn that changed an item without reporting
+it is held for one short report before it ends. A report that has fallen behind says
+so on its card. Pin a work item yourself, or switch reporting off for one session.
+
 **Cluster** — merge several servers into one sidebar, each showing its own CPU and
 **free memory** so you can pick where to work; optional direct-terminal mode skips the
 proxy hop for a large latency win.

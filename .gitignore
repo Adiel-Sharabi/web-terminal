@@ -74,3 +74,8 @@ codex-sessions.json
 cluster-tokens.test.json
 # The API token store the test run mints into (#272) - redirected away from api-tokens.json
 api-tokens.test.json
+# The sessions dashboard's per-session briefs (#298): live work-item state, per machine.
+session-briefs.json
+session-briefs.json.tmp
+session-briefs.test.json
+session-briefs.test.json.tmp

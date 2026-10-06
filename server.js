@@ -25,6 +25,7 @@ const { rollUpUsage, METRICS_TTL_MS } = require('./lib/usage-rollup');
 const resourcesLib = require('./lib/resources');
 const { waitingFor: waitingForRule } = require('./lib/waiting-for');
 const taskListLib = require('./lib/task-list');
+const briefLib = require('./lib/session-brief');
 const usageLimit = require('./lib/usage-limit');
 // #190 — imported for ONE thing: the default of `autoAnswerBlockingPrompt`, so this
 // endpoint cannot report a setting the worker does not have (#240's exact defect).
@@ -1556,6 +1557,7 @@ workerClient.on('sessionExited', ({ id }) => {
   pruneNotifyPref(id);
   pruneFavorite(id);   // #60: a dead session leaves no pin behind
   pruneAutoResumePref(id); // #137: and no auto-resume opt-out either
+  closeBrief(id);          // #298: the dashboard keeps a one-line record for a day
   const set = sessionClients.get(id);
   if (set) {
     for (const client of set) {
@@ -2246,6 +2248,176 @@ async function processHookEvent(id, rawEvent, claudeSessionId, body) {
     { id, event, claudeSessionId, prompt, agentId, questionPending: questionSignal });
 }
 
+// --- #298 sessions dashboard: one BRIEF per session -----------------------------
+// lib/session-brief.js owns every rule (what a report may hold, what counts as a work
+// item having moved, when the report is stale, when a Stop is blocked); this block owns
+// the store, the hook wiring and the routes. Same file-backed shape as favorites.json.
+//
+// Server-side, not in the worker, for the reason #73's task fold is: the brief is
+// DERIVED, REPAIRABLE state that drives no status dot and fires no push, so it costs no
+// worker protocol change and no cold restart, and it hot-reloads.
+const SESSION_BRIEFS_FILE = process.env.WT_SESSION_BRIEFS_FILE || path.join(__dirname, 'session-briefs.json');
+const REPORT_COMMAND = briefLib.reportCommand(path.join(__dirname, 'scripts', 'wt-report.js'));
+let _briefs = null;
+let _briefSaveTimer = null;
+function briefStore() {
+  if (!_briefs) {
+    try {
+      const j = JSON.parse(fs.readFileSync(SESSION_BRIEFS_FILE, 'utf8'));
+      const sessions = (j && typeof j.sessions === 'object' && j.sessions) || {};
+      // "Doing now" is a live fact; after a restart it would be a stale claim.
+      for (const e of Object.values(sessions)) if (e) e.now = null;
+      _briefs = { sessions, closed: Array.isArray(j && j.closed) ? j.closed : [] };
+    } catch { _briefs = { sessions: {}, closed: [] }; }
+  }
+  return _briefs;
+}
+function saveBriefsSoon() {
+  if (_briefSaveTimer) return;
+  _briefSaveTimer = setTimeout(() => {
+    _briefSaveTimer = null;
+    try {
+      const tmp = `${SESSION_BRIEFS_FILE}.tmp`;
+      fs.writeFileSync(tmp, JSON.stringify(_briefs));
+      fs.renameSync(tmp, SESSION_BRIEFS_FILE);
+    } catch (e) { console.error('session-briefs write failed:', e.message); }
+  }, 1000);
+  if (_briefSaveTimer.unref) _briefSaveTimer.unref();
+}
+function getBriefEntry(id) { return briefStore().sessions[id] || null; }
+function setBriefEntry(id, entry) {
+  briefStore().sessions[id] = entry;
+  saveBriefsSoon();
+  invalidateClusterSessionsCache();
+}
+function dashboardConfig() {
+  const c = liveConfig('dashboard', null);
+  return c && typeof c === 'object' ? c : {};
+}
+
+// Where a session's work items live, from its repo's `origin` - so an item can be a
+// link. Cached per cwd and refreshed in the background: a session row must never
+// wait on git (#280's lesson about anything that spawns on the poll path).
+const _originCache = new Map(); // cwd -> { at, origin }
+const ORIGIN_TTL_MS = 10 * 60 * 1000;
+function originForCwd(cwd) {
+  if (typeof cwd !== 'string' || !cwd) return null;
+  const hit = _originCache.get(cwd);
+  if (!hit || Date.now() - hit.at > ORIGIN_TTL_MS) {
+    _originCache.set(cwd, { at: Date.now(), origin: hit ? hit.origin : null });
+    if (fs.existsSync(cwd)) {
+      execGit(['-C', cwd, 'remote', 'get-url', 'origin'], { timeoutMs: 3000 })
+        .then((url) => { _originCache.set(cwd, { at: Date.now(), origin: briefLib.parseOrigin(url) }); })
+        .catch(() => {});
+    }
+  }
+  return (_originCache.get(cwd) || {}).origin || null;
+}
+
+/** The `brief` field on a session row. ONE helper for BOTH shapers (/api/sessions and
+ *  the local branch of the cluster merge) — four fields have already been forgotten in
+ *  one of the two; tests/session-brief-routes.spec.js pins that both call this. */
+function sessionBriefField(s) {
+  const e = getBriefEntry(s.id);
+  if (!e) return null;
+  if (s.name && e.name !== s.name) e.name = s.name; // for the closed list; not worth a write
+  return briefLib.buildBrief(e, {
+    reporting: briefLib.reportingEnabled(e, dashboardConfig()), origin: originForCwd(e.cwd),
+  });
+}
+
+/** A session ended: keep a one-line record for the dashboard's "closed" strip and drop
+ *  its live entry. Runs from sessionExited, which every way a session ends goes through. */
+function closeBrief(id) {
+  const store = briefStore();
+  const e = store.sessions[id];
+  if (!e) return;
+  const b = briefLib.buildBrief(e, { reporting: false, origin: originForCwd(e.cwd) });
+  store.closed = briefLib.closeSession(store.closed, {
+    id, name: e.name || null, items: b.items, headline: b.headline, did: b.did,
+  }, Date.now());
+  delete store.sessions[id];
+  saveBriefsSoon();
+}
+
+/** Fold a hook into the session's brief. Called only AFTER the worker accepted the
+ *  event, so a hook for a session that does not exist never creates an entry. */
+function foldBriefHook(id, event, body) {
+  const prev = getBriefEntry(id);
+  const next = briefLib.foldHook(prev, event, body, Date.now());
+  if (next !== prev) setBriefEntry(id, next);
+  if (event === 'Stop') refreshBriefDid(id);
+}
+
+/** After a turn ends, its TL;DR becomes the "did" line. Read once per Stop, never on
+ *  the poll; a short delay lets the final message land in the transcript first. */
+function refreshBriefDid(id) {
+  setTimeout(async () => {
+    try {
+      const tpath = (_notifyState.get(id) || {}).transcriptPath || await resolveSessionTranscriptPath(id);
+      if (!tpath) return;
+      const { text } = speechFromTranscriptPath(tpath);
+      const did = briefLib.clip(text, briefLib.LIMITS.did);
+      const e = getBriefEntry(id);
+      if (e && did && (!e.did || e.did.text !== did)) setBriefEntry(id, { ...e, did: { text: did, at: Date.now() } });
+    } catch { /* a missing or unreadable transcript leaves the last "did" in place */ }
+  }, 1500);
+}
+
+/** What the dashboard asks of THIS hook: a context note on UserPromptSubmit, or a block
+ *  on a Stop whose report the hooks have proved wrong. */
+function dashboardHookAnswer(id, event, body) {
+  if (event !== 'UserPromptSubmit' && event !== 'Stop') return {};
+  const e = getBriefEntry(id);
+  if (!e || !briefLib.reportingEnabled(e, dashboardConfig())) return {};
+  if (event === 'Stop') {
+    const now = Date.now();
+    const reason = briefLib.stopBlockReason(e, body, now, REPORT_COMMAND);
+    if (!reason) return {};
+    const missed = briefLib.unreportedTouches(e);
+    const evidence = missed.length ? Math.max(...missed.map((t) => t.at || 0)) : 0;
+    setBriefEntry(id, { ...e, lastBlockAt: now, lastBlockEvidence: evidence });
+    return { block: reason };
+  }
+  return { context: briefLib.instructionText(e, REPORT_COMMAND) };
+}
+
+/** The JSON a hook route answers with. Claude reads `hookSpecificOutput` and `decision`
+ *  from an http hook's body exactly as from a command hook's stdout (measured:
+ *  scripts/rig/probe-http-hook-output.js); the `ok`/`status` keys beside them void nothing. */
+async function answerHook(id, event, claudeSessionId, body) {
+  if (!_HOOK_UUID_RE.test(String(id))) throw new Error('session not found');
+  // A blocked Stop is NOT a stop: Claude carries on, so the worker must not see it — it
+  // would flip the dot to idle and fire an idle push mid-turn. The Stop that follows
+  // (stop_hook_active) is never blocked, and is forwarded as usual.
+  const pre = event === 'Stop' ? dashboardHookAnswer(id, event, body) : {};
+  if (pre.block) return { ok: true, decision: 'block', reason: pre.block };
+  const result = await processHookEvent(id, event, claudeSessionId, body);
+  try { foldBriefHook(id, event, body); } catch (e) { console.error(`brief fold failed: ${e.message}`); }
+  const post = event === 'UserPromptSubmit' ? dashboardHookAnswer(id, event, body) : {};
+  return {
+    ok: true, status: result.status,
+    ...(result.skipped ? { skipped: result.skipped } : {}),
+    ...(result.deferred ? { deferred: result.deferred } : {}),
+    ...(post.context ? { hookSpecificOutput: { hookEventName: 'UserPromptSubmit', additionalContext: post.context } } : {}),
+  };
+}
+
+// The AGENT reports its work items (scripts/wt-report.js). Hook token ONLY: "it came
+// from localhost" proves nothing behind tailscale serve (#297), and this route writes.
+app.post('/api/session/:id/report', express.json({ limit: '32kb' }), async (req, res) => {
+  if (!verifyHookToken(req.headers['x-wt-hook-token'])) return res.status(401).json({ error: 'Unauthorized' });
+  const id = req.params.id;
+  if (!_HOOK_UUID_RE.test(id)) return res.status(404).json({ error: 'session not found' });
+  try { await workerClient.rpc('getSession', { id }); } catch { return res.status(404).json({ error: 'session not found' }); }
+  const v = briefLib.validateReport(req.body);
+  if (v.error) return res.status(400).json({ error: v.error });
+  const entry = briefLib.applyReport(getBriefEntry(id), v.report, Date.now());
+  setBriefEntry(id, entry);
+  res.json({ ok: true, brief: briefLib.buildBrief(entry, {
+    reporting: briefLib.reportingEnabled(entry, dashboardConfig()), origin: originForCwd(entry.cwd) }) });
+});
+
 app.post('/api/hook', express.json({ limit: '256kb' }), async (req, res) => {
   if (!isLocalhostReq(req) && !verifyHookToken(req.headers['x-wt-hook-token'])) {
     return res.status(401).json({ error: 'Unauthorized' });
@@ -2255,8 +2427,7 @@ app.post('/api/hook', express.json({ limit: '256kb' }), async (req, res) => {
   const event = req.body?.hook_event_name || req.body?.event;
   const claudeSessionId = req.body?.session_id;
   try {
-    const result = await processHookEvent(id, event, claudeSessionId, req.body);
-    res.json({ ok: true, status: result.status, ...(result.skipped ? { skipped: result.skipped } : {}), ...(result.deferred ? { deferred: result.deferred } : {}) });
+    res.json(await answerHook(id, event, claudeSessionId, req.body));
   } catch (e) {
     if (/not found/i.test(e.message)) return res.json({ ok: true, skipped: 'session not found' });
     res.status(500).json({ error: e.message });
@@ -2270,8 +2441,7 @@ app.post('/api/session/:id/hook', express.json({ limit: '256kb' }), async (req, 
   if (!event) return res.status(400).json({ error: 'event required' });
   const claudeSessionId = req.body?.session_id;
   try {
-    const result = await processHookEvent(req.params.id, event, claudeSessionId, req.body);
-    res.json({ ok: true, status: result.status, ...(result.skipped ? { skipped: result.skipped } : {}), ...(result.deferred ? { deferred: result.deferred } : {}) });
+    res.json(await answerHook(req.params.id, event, claudeSessionId, req.body));
   } catch (e) {
     if (/not found/i.test(e.message)) return res.status(404).json({ error: 'session not found' });
     if (/event required/i.test(e.message)) return res.status(400).json({ error: 'event required' });
@@ -3804,6 +3974,9 @@ async function _computeClusterSessions(reqUser) {
         // session is not ready. A peer's blocked session would explain itself and
         // one of ours would show a bare spinner.
         blockedPrompt: s.blockedPrompt ?? null,
+        // #298 — the dashboard brief. Same helper as /api/sessions, so this branch cannot
+        // be the fifth field forgotten here (the trap the four comments above record).
+        brief: sessionBriefField(s),
       });
     });
     result.push(...localShaped);
@@ -4485,7 +4658,11 @@ function serverCapabilities() {
     // box and what each session costs. A client gates its resources view on this so a
     // peer too old to answer shows "unknown" instead of a 404 the user reads as a broken
     // button - the same reason every other capability here exists.
-    'session-resources'];
+    'session-resources',
+    // #298 - session rows carry `brief` (the sessions dashboard), PATCH
+    // /api/sessions/:id/brief pins a work item or opts a session out, and
+    // GET /api/dashboard/closed lists sessions that ended in the last day.
+    'session-brief'];
   if (fcmConfigured()) caps.push('fcm');
   return caps;
 }
@@ -4703,6 +4880,10 @@ app.get('/api/sessions', async (req, res) => {
       // Derived server-side (lib/waiting-for.js) precisely so both clients and the
       // cluster merge agree with the status dot rather than each re-deriving it.
       waitingFor: sessionWaitingFor(s),
+      // #298 — what this session is working on, for the sessions dashboard: work items
+      // and their states, what it is doing now, what it just did. One helper for both
+      // shapers (sessionBriefField); null for a session no hook has spoken for.
+      brief: sessionBriefField(s),
     }));
     // Log when a remote server fetches our sessions (Bearer = cluster call).
     // Throttled to avoid hammering the disk: only logs on change or after
@@ -5016,6 +5197,36 @@ app.patch('/api/sessions/:id/auto-resume', express.json({ limit: '1kb' }), (req,
 // companion app or voice layer pull the real content over the private network,
 // so the push relay can stay content-free (ntfy.includeContent=false). Behind
 // the same auth as the other session routes; never cached.
+// #298 — a person pins the work item(s) a session is on, or opts it out of reporting.
+// Behind the auth middleware like every other session PATCH. A pin's state is optional:
+// it asserts WHICH item; the agent's own report says how far along it is.
+app.patch('/api/sessions/:id/brief', express.json({ limit: '16kb' }), async (req, res) => {
+  const id = req.params.id;
+  try { await workerClient.rpc('getSession', { id }); } catch { return res.status(404).json({ error: 'session not found' }); }
+  const body = req.body || {};
+  let entry = { ...(getBriefEntry(id) || briefLib.emptyEntry()) };
+  if (body.pinned !== undefined) {
+    const v = briefLib.validatePinned(body.pinned);
+    if (v.error) return res.status(400).json({ error: v.error });
+    entry.pinned = v.pinned;
+  }
+  if (body.optOut !== undefined) {
+    if (typeof body.optOut !== 'boolean') return res.status(400).json({ error: 'optOut must be a boolean' });
+    entry.optOut = body.optOut;
+  }
+  setBriefEntry(id, entry);
+  res.json({ ok: true, brief: briefLib.buildBrief(entry, {
+    reporting: briefLib.reportingEnabled(entry, dashboardConfig()), origin: originForCwd(entry.cwd) }) });
+});
+
+// #298 — sessions that ended in the last day, newest first: name, work items, last word.
+// Local only; the dashboard asks each server through the cluster proxy, so one slow
+// peer delays only its own strip.
+app.get('/api/dashboard/closed', (req, res) => {
+  res.set('Cache-Control', 'no-store');
+  res.json({ closed: briefLib.liveClosed(briefStore().closed, Date.now()) });
+});
+
 app.get('/api/sessions/:id/attention', (req, res) => {
   res.set('Cache-Control', 'no-store');
   const st = _notifyState.get(req.params.id) || {};
@@ -5144,13 +5355,11 @@ app.get('/api/sessions/:id/transcript', async (req, res) => {
 // Only a small tail is scanned — one prose turn is all that can be spoken, and a
 // deep page would be read and then thrown away.
 const SPEECH_SCAN_TURNS = 12; // enough to step back over a run of tool-only turns
-app.get('/api/sessions/:id/speech', async (req, res) => {
-  res.set('Cache-Control', 'no-store');
-  const id = req.params.id;
-
-  const tpath = await resolveSessionTranscriptPath(id);
-  if (!tpath) return res.status(404).json({ error: 'no transcript for session' });
-
+// The agent's latest WORD on a transcript (lib/speech.js) - its TL;DR when it wrote one.
+// Shared by GET /speech and the sessions dashboard's "did" line (#298), so the two can
+// never disagree about what the agent last said. Returns { text, ts, agent }; throws on
+// an unreadable file.
+function speechFromTranscriptPath(tpath) {
   let fd;
   try {
     const size = fs.statSync(tpath).size;
@@ -5170,16 +5379,28 @@ app.get('/api/sessions/:id/speech', async (req, res) => {
     const { turns } = transcript.scanTurnsBackward(readChunk, size, {
       limit: SPEECH_SCAN_TURNS, parseLine: adapter.parseLine, extractResults: adapter.extractResults,
     });
+    const { text, ts } = speech.speechFromTurns(turns);
+    return { text, ts, agent };
+  } finally {
+    if (fd !== undefined) { try { fs.closeSync(fd); } catch {} }
+  }
+}
+
+app.get('/api/sessions/:id/speech', async (req, res) => {
+  res.set('Cache-Control', 'no-store');
+  const id = req.params.id;
+
+  const tpath = await resolveSessionTranscriptPath(id);
+  if (!tpath) return res.status(404).json({ error: 'no transcript for session' });
+
+  try {
     // An empty `text` is a normal answer meaning "nothing worth saying" (the last
     // turns were all tool calls, or were pure code). The client must stay silent
     // on it — it is NOT an error and NOT a reason to fall back to raw text.
-    const { text, ts } = speech.speechFromTurns(turns);
-    res.json({ text, ts, agent });
+    res.json(speechFromTranscriptPath(tpath));
   } catch (e) {
     console.error(`GET /api/sessions/${id}/speech failed: ${e.message}`);
     res.status(500).json({ error: 'Failed to read transcript' });
-  } finally {
-    if (fd !== undefined) { try { fs.closeSync(fd); } catch {} }
   }
 });
 
