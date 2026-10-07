@@ -192,6 +192,12 @@ void main() {
       expect(reasonSectionOf(_session('n')), ReasonSection.notReported);
     });
 
+    test('a session stuck in a menu needs you (#316)', () {
+      final s = Session.fromJson(_server, _row('m', 'menu one', reason: {'kind': 'menu', 'source': 'screen'}));
+      expect(boardNeedsYou(s), isTrue);
+      expect(reasonSectionOf(s), ReasonSection.needsYou);
+    });
+
     test('noItemReason distinguishes never-reported, off and empty', () {
       expect(noItemReason(_session('a')), 'Not reporting');
       expect(noItemReason(_session('a', brief: const SessionBrief(reportingOn: false))), 'Reporting is off for this session');

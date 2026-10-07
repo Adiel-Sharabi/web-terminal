@@ -153,6 +153,7 @@
     .rs-chip { display: inline-flex; align-items: center; gap: 3px; max-width: 190px; overflow: hidden; text-overflow: ellipsis;
       white-space: nowrap; font-size: 10px; font-weight: 600; border-radius: 4px; padding: 0 5px; line-height: 16px; flex: none; }
     .rs-chip.you { background: #e94560; color: #fff; }
+    .rs-chip.menu { color: #ff9aac; border: 1px solid #e94560; }
     .rs-chip.self { color: #7ab3e8; background: rgba(122,179,232,0.14); }
     .rs-chip.external { color: #a0aec8; border: 1px solid #a0aec8; }
     .rs-chip.done { color: #7c879e; }
@@ -3613,12 +3614,14 @@
     // (lib/session-reason.js) and published it as `reason`; this only draws it. No
     // reason, or a running turn, renders exactly what the row showed before.
     const REASON_LOOK = {
-      you: { icon: '&#9995;', cls: 'you' }, self: { icon: '&#9203;', cls: 'self' },
+      you: { icon: '&#9995;', cls: 'you' }, menu: { icon: '&#9776;', cls: 'menu' }, self: { icon: '&#9203;', cls: 'self' },
       external: { icon: '&#9208;', cls: 'external' }, done: { icon: '&#10003;', cls: 'done' },
     };
     function reasonLabel(r) {
       if (!r) return '';
       if (r.kind === 'you') return r.text ? `You: ${r.text}` : 'Your move';
+      // #316: a panel covers the composer; a prompt sent now goes nowhere.
+      if (r.kind === 'menu') return 'In menu · Esc';
       if (r.kind === 'self') {
         if (r.source === 'usage-limit') {
           return r.until ? `Cap resets · ${new Date(r.until).toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' })}` : 'Usage cap';
@@ -6071,7 +6074,8 @@
       return !!(sv && Array.isArray(sv.capabilities) && sv.capabilities.includes(cap));
     }
     const dbIsHidden = (s) => !!(s.brief && s.brief.hidden);
-    const dbNeedsYou = (s) => s.status === 'waiting' || !!(s.reason && s.reason.kind === 'you');
+    // A panel over the composer (#316) owes the person an Esc as much as a prompt owes an answer.
+    const dbNeedsYou = (s) => s.status === 'waiting' || !!(s.reason && (s.reason.kind === 'you' || s.reason.kind === 'menu'));
 
     function dbMatchesFilter(s) {
       if (dbServerFilter.size && !dbServerFilter.has(s.serverUrl || '')) return false;
@@ -6248,7 +6252,7 @@
         html += `<section class="db-needs" aria-label="Needs you"><strong>Needs you</strong>${strip.map((s) =>
           `<button data-action="open" data-card="${esc(dbKey(s))}"${srvStyle(s.serverUrl)}><span class="sb-dot waiting"></span><b>${esc(s.name)}</b>` +
           `${dbIsHidden(s) ? '<span class="db-hid" title="Hidden from the dashboard">hidden</span>' : ''}<span>${esc(s.server || '')}</span>` +
-          `<span>${esc(s.reason && s.reason.kind === 'you' && s.reason.text ? s.reason.text : (s.waitingFor === 'question' ? 'a question' : 'a permission'))}</span></button>`).join('')}</section>`;
+          `<span>${esc(s.reason && s.reason.kind === 'menu' ? 'stuck in a menu (Esc)' : s.reason && s.reason.kind === 'you' && s.reason.text ? s.reason.text : (s.waitingFor === 'question' ? 'a question' : 'a permission'))}</span></button>`).join('')}</section>`;
         for (const s of strip) dbSessions.set(dbKey(s), s);
       }
 

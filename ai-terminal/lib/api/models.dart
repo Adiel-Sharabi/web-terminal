@@ -694,7 +694,8 @@ String? validHexColor(dynamic v) {
 /// it (`lib/session-reason.js`): a mechanical signal first (a running turn, a live
 /// prompt, a usage cap, live background work), then what the agent reported.
 class SessionReason {
-  /// `working`, `you`, `self`, `external` or `done`.
+  /// `working`, `you`, `menu` (#316: a panel covers the composer), `self`, `external`
+  /// or `done`.
   final String kind;
 
   /// A few words: what it waits on, or what is running.
@@ -711,7 +712,7 @@ class SessionReason {
 
   const SessionReason({required this.kind, this.text = '', this.since, this.until, this.source = ''});
 
-  static const kinds = <String>['working', 'you', 'self', 'external', 'done'];
+  static const kinds = <String>['working', 'you', 'menu', 'self', 'external', 'done'];
 
   static SessionReason? fromJson(dynamic json) {
     if (json is! Map) return null;

@@ -21,6 +21,7 @@ const { endsInAltScreen } = require('./lib/replay-sanitize');
 const { scanOsc9 } = require('./lib/osc9-notify');
 // #147 — the pure readiness latch; the marker itself is a lib/agents.js field.
 const { createReadyDetector } = require('./lib/agent-ready');
+const { createMenuDetector } = require('./lib/menu-state');
 // #179 — the pure rules for verifying that a submit actually reached the agent.
 const submitConfirm = require('./lib/submit-confirm');
 const usageLimit = require('./lib/usage-limit');
@@ -31,7 +32,7 @@ const blockingPrompt = require('./lib/blocking-prompt');
 // cap-blocked by metrics with the detector below having never seen a thing.
 const capSample = require('./lib/cap-sample');
 
-const WORKER_VERSION = '0.7.0'; // 0.7.0: #179 — a client submit that produces no agent activity within the provider's submitConfirm window is reported as `submitUnconfirmed`, so a prompt swallowed by a TUI that was not at its composer stops vanishing silently. Prior 0.6.2: a session restored from a scrollback that ends mid-alt-screen (Claude killed while in /tui fullscreen, so ?1049l never arrived) gets a corrective ?1049l appended, instead of stranding xterm in the alt buffer showing a frozen frame over a live shell. Prior 0.6.1: the submit gap is measured against the wire, not the frame.
+const WORKER_VERSION = '0.8.0'; // 0.8.0: #316 - a Claude session whose composer is covered by a panel or menu (/status, /usage, /model, /config, Agent View) publishes `inMenu` (lib/menu-state.js, by the ORDER of the composer marker and a panel footer in the PTY stream). 0.7.0: #179 — a client submit that produces no agent activity within the provider's submitConfirm window is reported as `submitUnconfirmed`, so a prompt swallowed by a TUI that was not at its composer stops vanishing silently. Prior 0.6.2: a session restored from a scrollback that ends mid-alt-screen (Claude killed while in /tui fullscreen, so ?1049l never arrived) gets a corrective ?1049l appended, instead of stranding xterm in the alt buffer showing a frozen frame over a live shell. Prior 0.6.1: the submit gap is measured against the wire, not the frame.
 
 // --- Optional latency instrumentation (opt-in via WT_LATENCY_DEBUG=1) -----
 const _LATENCY_DEBUG = process.env.WT_LATENCY_DEBUG === '1';
@@ -1341,6 +1342,7 @@ function processPtyOutput(session, buf) {
   detectStatusNotificationInOutput(session, buf);
   detectBlockingPromptInOutput(session, buf);
   detectAgentReadyInOutput(session, buf);
+  detectMenuStateInOutput(session, buf);
   detectUsageLimitPromptInOutput(session, buf);
   if (session.clientCount > 0) {
     broadcastPtyOut(session, buf);
@@ -1508,6 +1510,18 @@ function clearBlockingPrompt(session) {
 // the moment it exists (lib/agents.js readinessMarker). The detector is a one-way
 // latch, so this costs one already-true check per chunk for the whole life of a
 // session after the first few seconds.
+// #316 - a panel or menu over the composer. Read only AFTER the composer has latched:
+// before that the screen is the shell or a startup dialog (#190), whose own footer says
+// "Esc to cancel" and is #190's to report. Display only - it never writes to the PTY.
+function detectMenuStateInOutput(session, buf) {
+  const d = session._menu;
+  if (!d || !session._ready || !session._ready.ready) return;
+  if (d.push(buf)) {
+    session.inMenu = d.inMenu;
+    session.inMenuSince = d.since;
+  }
+}
+
 function detectAgentReadyInOutput(session, buf) {
   const d = session._ready;
   if (!d || d.ready) return;
@@ -1992,6 +2006,9 @@ function sessionSummary(id, s) {
     // recorded Gap 1 (the latch is one-way and does not reset when the agent exits
     // back to its shell), unchanged here rather than quietly widened.
     blockedPrompt: publicBlockedPrompt(s),
+    // #316 - a panel or menu is covering the composer (a prompt sent now goes nowhere).
+    inMenu: s.inMenu === true,
+    inMenuSince: s.inMenu === true ? (s.inMenuSince || null) : null,
     // #138 — the observed cap-block this session's timer is (or is not) armed on.
     capBlocked: s.capBlocked === true,
     autoResumeArmed: !!s._autoResumeTimer,
@@ -2150,6 +2167,9 @@ function createSession(id, cwd, name, autoCommand, savedScrollback, claudeSessio
   const readyMarker = autoCommand ? agents.readinessMarker(sessionAgent(session)) : null;
   session._ready = createReadyDetector(readyMarker);
   armReadyFallback(session);
+  // #316 - is a panel or menu covering the composer right now? Only for an agent that
+  // declares both markers (Claude); fed only once the composer has latched, below.
+  session._menu = readyMarker ? createMenuDetector(readyMarker, agents.panelFooterMarker(sessionAgent(session))) : null;
   // #179 — what the TUI's input line currently holds, so a submit can be told apart
   // from a slash command. Created for EVERY session, agent or shell: the tracker is fed
   // from termWrite, and one that started half-populated would answer wrongly the first

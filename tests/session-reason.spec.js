@@ -52,7 +52,7 @@ test.describe('sessionReason (#313)', () => {
     for (const on of ['you', 'self', 'external', 'done']) {
       expect(sessionReason({ status: 'idle', ...reported(on, 'w') })).toMatchObject({ kind: on, text: 'w', since: T });
     }
-    expect(REASON_KINDS).toEqual(['working', 'you', 'self', 'external', 'done']);
+    expect(REASON_KINDS).toEqual(['working', 'you', 'menu', 'self', 'external', 'done']);
   });
 
   test('an unknown reported kind is ignored, not invented', () => {

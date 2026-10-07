@@ -127,7 +127,10 @@ String noItemReason(Session s) {
 }
 
 /// Owes the person something: a live prompt, or the agent said it is their move.
-bool boardNeedsYou(Session s) => s.status == 'waiting' || s.reason?.kind == 'you';
+/// A panel over the composer (#316) owes the person an Esc as much as a prompt owes an
+/// answer, so it is "needs you" too.
+bool boardNeedsYou(Session s) =>
+    s.status == 'waiting' || s.reason?.kind == 'you' || s.reason?.kind == 'menu';
 
 /// Hidden from the dashboard (#314).
 bool boardIsHidden(Session s) => s.brief?.hidden == true;
@@ -813,7 +816,7 @@ class _NeedsYou extends StatelessWidget {
             ActionChip(
               avatar: const StatusDot(status: SessionStatus.waiting, size: 8),
               label: Text('${s.name} · ${s.server.name} · '
-                  '${s.reason?.kind == 'you' && s.reason!.text.isNotEmpty ? s.reason!.text : s.waitingFor == 'question' ? 'a question' : 'a permission'}'
+                  '${s.reason?.kind == 'menu' ? 'stuck in a menu (Esc)' : s.reason?.kind == 'you' && s.reason!.text.isNotEmpty ? s.reason!.text : s.waitingFor == 'question' ? 'a question' : 'a permission'}'
                   '${boardIsHidden(s) ? ' · hidden' : ''}'),
               onPressed: () => onOpen(s),
             ),

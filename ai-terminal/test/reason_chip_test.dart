@@ -30,7 +30,8 @@ void main() {
   group('parsing', () {
     test('reason: known kinds parse, an unknown kind is no reason at all', () {
       expect(_s({'reason': {'kind': 'you', 'text': 'reconnect the rig', 'source': 'reported'}}).reason!.text, 'reconnect the rig');
-      expect(_s({'reason': {'kind': 'menu'}}).reason, isNull);
+      expect(_s({'reason': {'kind': 'menu', 'source': 'screen'}}).reason!.kind, 'menu', reason: '#316');
+      expect(_s({'reason': {'kind': 'parked'}}).reason, isNull);
       expect(_s({'reason': 'you'}).reason, isNull);
       expect(_s({}).reason, isNull);
     });
@@ -70,6 +71,7 @@ void main() {
       expect(reasonLabel(const SessionReason(kind: 'external', text: 'reviewer')), 'Blocked: reviewer');
       expect(reasonLabel(const SessionReason(kind: 'done', text: 'pushed')), 'Done');
       expect(hasReasonChip(const SessionReason(kind: 'working')), isFalse);
+      expect(reasonLabel(const SessionReason(kind: 'menu')), 'In menu · Esc');
     });
   });
 
