@@ -4044,6 +4044,7 @@ async function _computeClusterSessions(reqUser) {
         blockedPrompt: s.blockedPrompt ?? null,
         // #316 — a panel or menu over the composer (worker-derived), for sessionReason.
         inMenu: s.inMenu === true,
+        inMenuSince: s.inMenuSince ?? null,
         // #298 — the dashboard brief. Same helper as /api/sessions, so this branch cannot
         // be the fifth field forgotten here (the trap the four comments above record).
         brief: sessionBriefField(s),
@@ -4961,6 +4962,7 @@ app.get('/api/sessions', async (req, res) => {
       blockedPrompt: s.blockedPrompt ?? null,
       // #316 — a panel or menu over the composer (worker-derived), for sessionReason.
       inMenu: s.inMenu === true,
+      inMenuSince: s.inMenuSince ?? null,
       metrics: listMetrics[i],
       // Background commands still running (`run_in_background`). Rides the poll and
       // the cluster merge like `compacting`, so a peer's builds are visible too. The

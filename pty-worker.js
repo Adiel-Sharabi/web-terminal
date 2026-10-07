@@ -1515,10 +1515,28 @@ function clearBlockingPrompt(session) {
 // "Esc to cancel" and is #190's to report. Display only - it never writes to the PTY.
 function detectMenuStateInOutput(session, buf) {
   const d = session._menu;
-  if (!d || !session._ready || !session._ready.ready) return;
+  if (!d || session._menuSuspended || !session._ready || !session._ready.ready) return;
   if (d.push(buf)) {
     session.inMenu = d.inMenu;
     session.inMenuSince = d.since;
+  }
+}
+
+// #316 review - once the agent has EXITED, the PTY is a shell again and nothing will
+// redraw the composer, so a footer phrase that shell prints (a `cat` of our own source)
+// would stick as "in a menu" until the session is killed. The readiness latch cannot
+// say so (it is one-way, #147 Gap 1), so SessionEnd suspends the detector and the next
+// hook - the agent is back - re-arms it with a clean slate.
+function noteMenuHook(session, event) {
+  if (!session._menu) return;
+  if (event === 'SessionEnd') {
+    session._menuSuspended = true;
+    session._menu.reset();
+    session.inMenu = false;
+    session.inMenuSince = null;
+  } else if (session._menuSuspended) {
+    session._menuSuspended = false;
+    session._menu.reset();
   }
 }
 
@@ -2291,6 +2309,7 @@ function handleHook(session, event, claudeSessionId, prompt, agentId, opts) {
   // its composer ever printed the marker we watch for. This is what stops a
   // readiness gate from ever becoming a session that cannot submit.
   markAgentReadyFromActivity(session);
+  noteMenuHook(session, event);
   // #179 — and proof that the prompt written a moment ago was actually taken. Any
   // event will do: what is being distinguished is "the agent is doing something" from
   // "the TUI swallowed the keystrokes", and a blocked TUI fires nothing at all.

@@ -72,6 +72,31 @@ test.describe('#316 the rule: panel footer vs composer, by order', () => {
     expect(d.inMenu).toBe(false);
   });
 
+  test('a composer marker split INSIDE its UTF-8 bytes across two reads is still seen', () => {
+    const d = createMenuDetector(composer, footer);
+    d.push(STATUS_PANEL, 1);
+    const bytes = Buffer.from(COMPOSER, 'utf8');
+    const caretAt = bytes.indexOf(Buffer.from(CARET, 'utf8'));
+    d.push(bytes.subarray(0, caretAt + 2), 2);  // two of the caret's three bytes
+    d.push(bytes.subarray(caretAt + 2), 3);
+    expect(d.inMenu).toBe(false);
+  });
+
+  test('reset forgets the verdict', () => {
+    const d = createMenuDetector(composer, footer);
+    d.push(STATUS_PANEL, 1);
+    d.reset();
+    expect(d).toMatchObject({ inMenu: false, since: null });
+  });
+
+  test('both server shapers pass inMenu on (the field forgotten in one of two shapers, again)', () => {
+    const src = fs.readFileSync(path.join(__dirname, '..', 'server.js'), 'utf8');
+    const merge = src.slice(src.indexOf('async function _computeClusterSessions'));
+    expect(merge.slice(0, merge.indexOf('result.push(...localShaped)'))).toContain('inMenu: s.inMenu === true');
+    const list = src.slice(src.indexOf("app.get('/api/sessions'"));
+    expect(list.slice(0, list.indexOf('res.json(shaped)'))).toContain('inMenu: s.inMenu === true');
+  });
+
   test('a footer split across two PTY reads is still seen', () => {
     const d = createMenuDetector(composer, footer);
     d.push(COMPOSER, 1);
@@ -82,9 +107,12 @@ test.describe('#316 the rule: panel footer vs composer, by order', () => {
     expect(d.inMenu).toBe(true);
   });
 
-  test('the reason: a menu outranks a stale report, but never a running turn or a live prompt', () => {
-    expect(sessionReason({ status: 'idle', inMenu: true, brief: { wait: { on: 'done', what: 'x' } } }))
-      .toMatchObject({ kind: 'menu', source: 'screen' });
+  test('the reason: a menu outranks a stale report, but never a running turn, a live prompt or a cap', () => {
+    expect(sessionReason({ status: 'idle', inMenu: true, inMenuSince: 7, brief: { wait: { on: 'done', what: 'x' } } }))
+      .toMatchObject({ kind: 'menu', source: 'screen', since: 7 });
+    // Claude's cap selector prints the same "Esc to cancel": a capped session is capped.
+    expect(sessionReason({ status: 'idle', inMenu: true, usageLimit: { waiting: true, armed: true, resetAt: 9 } }).kind).toBe('self');
+    expect(sessionReason({ status: 'idle', inMenu: true, usageLimit: { waiting: true, armed: false } })).toBeNull();
     expect(sessionReason({ status: 'working', inMenu: true }).kind).toBe('working');
     expect(sessionReason({ status: 'waiting', waitingFor: 'question', inMenu: true }).kind).toBe('you');
     expect(sessionReason({ status: 'idle', brief: { wait: { on: 'menu' } } })).toBeNull();
@@ -149,6 +177,24 @@ test.describe('#316 the worker publishes inMenu', () => {
     const out = await summary(id);
     expect(out.inMenu).toBe(false);
     expect(out.inMenuSince).toBeNull();
+  });
+
+  test('after the agent EXITS, a shell printing the phrase is not a menu; the agent coming back re-arms it', async () => {
+    const { id } = await rpc(client, 'createSession', { cwd: dataDir, name: 'exit', agent: 'claude', autoCommand: 'echo probe' });
+    await sleep(150);
+    await expect.poll(async () => { await inject(id, COMPOSER); return (await summary(id)).agentReady; },
+      { timeout: 10_000 }).toBe(true);
+    await inject(id, STATUS_PANEL);
+    expect((await summary(id)).inMenu).toBe(true);
+
+    await rpc(client, 'hookEvent', { id, event: 'SessionEnd' });
+    expect((await summary(id)).inMenu).toBe(false);
+    await inject(id, `$ cat lib/agents.js\r\n${STATUS_PANEL}`);
+    expect((await summary(id)).inMenu).toBe(false);
+
+    await rpc(client, 'hookEvent', { id, event: 'UserPromptSubmit' });
+    await inject(id, STATUS_PANEL);
+    expect((await summary(id)).inMenu).toBe(true);
   });
 
   test('a footer BEFORE the composer has latched is the startup dialog, not a menu', async () => {

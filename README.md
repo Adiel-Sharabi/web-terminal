@@ -138,8 +138,8 @@ it is held for one short report before it ends. A report that has fallen behind 
 so on its card. Pin a work item yourself, or switch reporting off for one session.
 
 It is a place to work FROM: your **Favorites** lead it; sessions group by **why they are not
-working** (needs you, stuck in a menu, working, running on its own, blocked on others, idle,
-done), by server or
+working** (needs you, including a session stuck in a menu, working, running on its own,
+blocked on others, idle, done), by server or
 by work item; filter by text or machine and choose the order; and **hide** a session that is
 not relevant (with an undo) into a Hidden tab, stored on its server so every device agrees.
 
