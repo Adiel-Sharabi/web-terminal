@@ -70,7 +70,8 @@ async function main() {
         try { j = JSON.parse(s); } catch { /* not JSON */ }
         if (res.statusCode === 200) {
           const n = (j.brief && j.brief.items && j.brief.items.length) || 0;
-          console.log(`dashboard updated: ${n} work item${n === 1 ? '' : 's'}`);
+          const w = j.brief && j.brief.wait;
+          console.log(`dashboard updated: ${n} work item${n === 1 ? '' : 's'}${w ? `; waiting on ${w.on}${w.what ? `: ${w.what}` : ''}` : ''}`);
           resolve(0);
         } else {
           console.error(`wt-report: the dashboard refused the report (HTTP ${res.statusCode}): ${j.error || s.slice(0, 200)}`);

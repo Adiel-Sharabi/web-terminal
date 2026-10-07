@@ -36,6 +36,14 @@ abstract final class AppColors {
   static const cautionContainer = Color(0xFF2A2113);
 }
 
+/// A server-declared `#rrggbb` as a [Color], or null (#315). The value was already
+/// validated when it was parsed (`validHexColor`); this only converts it.
+Color? colorFromHex(String? hex) {
+  if (hex == null || hex.length != 7 || !hex.startsWith('#')) return null;
+  final v = int.tryParse(hex.substring(1), radix: 16);
+  return v == null ? null : Color(0xFF000000 | v);
+}
+
 /// 4dp-grid spacing tokens — spec §0.4.
 abstract final class AppSpacing {
   static const grid = 4.0;

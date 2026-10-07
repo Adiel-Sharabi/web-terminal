@@ -42,6 +42,7 @@ import '../widgets/offline_banner.dart';
 import '../widgets/recap_sheet.dart';
 import '../widgets/session_action_sheet.dart';
 import '../widgets/resource_stats.dart';
+import '../widgets/server_badge.dart';
 import '../widgets/session_card.dart';
 import '../widgets/status_dot.dart';
 import 'session_screen.dart';
@@ -788,6 +789,8 @@ class _ServerGroupHeader extends StatelessWidget {
           children: [
             ServerStatusDot(status: status),
             const SizedBox(width: 8),
+            // #315: the machine's colour as a square; the round dot is reachability.
+            ServerSwatch(color: colorFromHex(SessionRepository.instance.serverColor(baseUrl))),
             Text(
               name.toUpperCase(),
               style: theme.textTheme.labelSmall?.copyWith(
@@ -849,7 +852,11 @@ class _FilterChips extends StatelessWidget {
           separatorBuilder: (_, _) => const SizedBox(width: 8),
           itemBuilder: (context, i) {
             final label = labels[i];
+            final sv = i == 0 ? null : servers[i - 1];
             return ChoiceChip(
+              avatar: sv == null
+                  ? null
+                  : ServerSwatch(color: colorFromHex(SessionRepository.instance.serverColor(sv.baseUrl))),
               label: Text(label),
               selected: value == label,
               onSelected: (_) => onChanged(label),

@@ -137,6 +137,19 @@ session is told how on every prompt, and a turn that changed an item without rep
 it is held for one short report before it ends. A report that has fallen behind says
 so on its card. Pin a work item yourself, or switch reporting off for one session.
 
+It is a place to work FROM: your **Favorites** lead it; sessions group by **why they are not
+working** (needs you, working, running on its own, blocked on others, idle, done), by server or
+by work item; filter by text or machine and choose the order; and **hide** a session that is
+not relevant (with an undo) into a Hidden tab, stored on its server so every device agrees.
+
+**Why a session is idle** — the session list and the dashboard say why a session that is not
+working is not working: it is waiting on you, it will carry on by itself (a CI run, a build, a
+usage cap, with how long), it is blocked on someone else, or it is done. Hard signals come
+first; what the agent reports at the end of its turn fills in the rest.
+
+**A colour per machine** — set `serverColor` on each server and its sessions carry that colour
+in the session list and on the dashboard of every client.
+
 **Cluster** — merge several servers into one sidebar, each showing its own CPU and
 **free memory** so you can pick where to work; optional direct-terminal mode skips the
 proxy hop for a large latency win.

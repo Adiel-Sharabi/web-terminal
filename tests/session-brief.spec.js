@@ -365,3 +365,61 @@ test.describe('closed sessions', () => {
     expect(B.liveClosed(c, T0 + 100 + B.CLOSED_TTL_MS)).toEqual([]);
   });
 });
+
+test.describe('wait and hidden (#313, #314)', () => {
+  const T1 = 1_700_000_100_000;
+  test('a report can carry a wait; aliases normalise; a bad one is refused for the agent', () => {
+    const r = B.validateReport({ items: [{ ref: '#1', state: 'in-progress' }], wait: { on: 'me', what: 'reconnect the rig' } });
+    expect(r.report.wait).toEqual({ on: 'you', what: 'reconnect the rig' });
+    expect(B.validateReport({ headline: 'h', wait: { on: 'soon' } }).error).toContain('wait.on');
+    expect(B.validateReport({ headline: 'h', wait: 'you' }).error).toContain('"wait" must be an object');
+    expect(B.WAIT_ON).toEqual(['you', 'self', 'external', 'done']);
+  });
+
+  test('a wait-ONLY report keeps the items, and does not reset staleness', () => {
+    let e = B.applyReport(B.emptyEntry(), B.validateReport({ items: [{ ref: '#9', state: 'blocked' }], headline: 'hl' }).report, T1);
+    e = B.foldHook(e, 'UserPromptSubmit', { prompt: 'go on' }, T1 + 1);
+    const partial = B.validateReport({ wait: { on: 'external', what: 'licence from vendor' } }, e);
+    expect(partial.report.partial).toBe(true);
+    e = B.applyReport(e, partial.report, T1 + 2);
+    expect(e.reported.items.map((i) => i.ref)).toEqual(['#9']);
+    expect(e.reported.headline).toBe('hl');
+    expect(e.reported.at).toBe(T1);
+    expect(e.promptsSinceReport).toBe(1);
+    expect(B.buildBrief(e, { reporting: true }).wait).toEqual({ on: 'external', what: 'licence from vendor', at: T1 + 2 });
+  });
+
+  test('a wait alone is refused until the session has reported its work', () => {
+    const body = { wait: { on: 'done' } };
+    expect(B.validateReport(body, null).error).toContain('first');
+    expect(B.validateReport(body, B.emptyEntry()).error).toContain('first');
+    const e = B.applyReport(B.emptyEntry(), B.validateReport({ headline: 'h' }).report, T1);
+    expect(B.validateReport(body, e).report.partial).toBe(true);
+  });
+
+  test('a "self" wait ends on ANY prompt, the harness waking it included', () => {
+    let e = B.applyReport(B.emptyEntry(), B.validateReport({ headline: 'h', wait: { on: 'self', what: 'CI checks' } }).report, T1);
+    e = B.foldHook(e, 'UserPromptSubmit', { prompt: '<task-notification><task-id>x</task-id></task-notification>' }, T1 + 1);
+    expect(e.reported.wait).toBeNull();
+  });
+
+  test('a typed prompt clears the wait; an injected turn does not', () => {
+    let e = B.applyReport(B.emptyEntry(), B.validateReport({ headline: 'h', wait: { on: 'you', what: 'say done 1' } }).report, T1);
+    e = B.foldHook(e, 'UserPromptSubmit', { prompt: '<task-notification><task-id>x</task-id></task-notification>' }, T1 + 1);
+    expect(e.reported.wait.on).toBe('you');
+    e = B.foldHook(e, 'UserPromptSubmit', { prompt: 'done 1' }, T1 + 2);
+    expect(e.reported.wait).toBeNull();
+    expect(e.reported.headline).toBe('h');
+  });
+
+  test('the brief publishes hidden, and no wait while reporting is off', () => {
+    const e = { ...B.applyReport(B.emptyEntry(), B.validateReport({ headline: 'h', wait: { on: 'done' } }).report, T1), hidden: true };
+    expect(B.buildBrief(e, { reporting: true })).toMatchObject({ hidden: true, wait: { on: 'done' } });
+    expect(B.buildBrief(e, { reporting: false }).wait).toBeNull();
+    expect(B.buildBrief(B.emptyEntry(), { reporting: true }).hidden).toBe(false);
+  });
+
+  test('the per-prompt note tells the agent how to report a wait', () => {
+    expect(B.instructionText(null, 'CMD')).toContain('"wait": {"on": "you"|"self"|"external"|"done"');
+  });
+});

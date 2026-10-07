@@ -246,6 +246,19 @@ class Session {
   /// `null` — no hook has spoken for it yet, or the server is too old to know.
   final SessionBrief? brief;
 
+  /// WHY this session is not working, when the server knows (#313), or `null` —
+  /// which renders exactly what the row showed before. Decided server-side
+  /// (`lib/session-reason.js`); never re-derived here.
+  final SessionReason? reason;
+
+  /// When the oldest LIVE background command started (epoch ms), for an age on its
+  /// chip, or `null` when none is running or the server did not say (#313).
+  final int? backgroundSince;
+
+  /// Every background command the server reported is a stale leftover (a shell that
+  /// outlived any turn by hours), not a live build (#313). False when none run.
+  final bool backgroundStale;
+
   /// Creates a session value object. [autoCommand] is optional (default `''`)
   /// so existing call sites and tests that predate the field keep compiling.
   const Session({
@@ -271,6 +284,9 @@ class Session {
     this.blockedPrompt,
     this.usageLimit,
     this.brief,
+    this.reason,
+    this.backgroundSince,
+    this.backgroundStale = false,
   });
 
   /// This session with a different pinned rank (#124), for the optimistic half of
@@ -303,6 +319,9 @@ class Session {
     blockedPrompt: blockedPrompt,
     usageLimit: usageLimit,
     brief: brief,
+    reason: reason,
+    backgroundSince: backgroundSince,
+    backgroundStale: backgroundStale,
   );
 
   /// Builds a [Session] from one element of the `GET /api/sessions` array,
@@ -337,6 +356,9 @@ class Session {
       blockedPrompt: BlockedPrompt.fromJson(json['blockedPrompt']),
       usageLimit: UsageLimit.fromJson(json['usageLimit']),
       brief: SessionBrief.fromJson(json['brief']),
+      reason: SessionReason.fromJson(json['reason']),
+      backgroundSince: _backgroundSince(json['backgroundTasks']),
+      backgroundStale: _backgroundStale(json['backgroundTasks']),
     );
   }
 
@@ -366,6 +388,20 @@ class Session {
     }
     return List.unmodifiable(out);
   }
+
+  static int? _backgroundSince(dynamic raw) {
+    if (raw is! List) return null;
+    int? oldest;
+    for (final e in raw) {
+      if (e is! Map || e['stale'] == true) continue;
+      final at = _asInt(e['startedAt']);
+      if (at != null && (oldest == null || at < oldest)) oldest = at;
+    }
+    return oldest;
+  }
+
+  static bool _backgroundStale(dynamic raw) =>
+      raw is List && raw.isNotEmpty && raw.every((e) => e is Map && e['stale'] == true);
 
   /// A short 8-char id fragment, handy for `Session {shortId}` fallback names.
   String get shortId => id.length <= 8 ? id : id.substring(0, 8);
@@ -608,6 +644,9 @@ class SessionBrief {
   /// Why the report may be out of date, or null when it is current.
   final String? staleReason;
 
+  /// Hidden from the dashboard by a person (#314). The session list never hides it.
+  final bool hidden;
+
   const SessionBrief({
     this.reportingOn = true,
     this.items = const <BriefItem>[],
@@ -617,6 +656,7 @@ class SessionBrief {
     this.did,
     this.prompt,
     this.staleReason,
+    this.hidden = false,
   });
 
   static SessionBrief? fromJson(dynamic json) {
@@ -633,6 +673,7 @@ class SessionBrief {
       did: BriefLine.fromJson(json['did']),
       prompt: BriefLine.fromJson(json['prompt']),
       staleReason: (reason == null || reason.isEmpty) ? null : reason,
+      hidden: json['hidden'] == true,
     );
   }
 
@@ -640,6 +681,51 @@ class SessionBrief {
   /// the list to edit when pinning or unpinning one (the PATCH replaces it whole).
   List<Map<String, dynamic>> get pinnedForPatch =>
       items.where((i) => i.pinned).map((i) => i.toPinJson()).toList(growable: false);
+}
+
+/// `#rrggbb` or null. Anything a server hands us that becomes a colour is checked
+/// first, so a malformed value can only ever mean "no colour".
+String? validHexColor(dynamic v) {
+  final s = v?.toString();
+  return (s != null && RegExp(r'^#[0-9a-fA-F]{6}$').hasMatch(s)) ? s : null;
+}
+
+/// WHY a session that is not working is not working (#313), as the server decided
+/// it (`lib/session-reason.js`): a mechanical signal first (a running turn, a live
+/// prompt, a usage cap, live background work), then what the agent reported.
+class SessionReason {
+  /// `working`, `you`, `self`, `external` or `done`.
+  final String kind;
+
+  /// A few words: what it waits on, or what is running.
+  final String text;
+
+  /// When the wait or the work began (epoch ms), or null.
+  final int? since;
+
+  /// When it ends, for a usage cap (epoch ms), or null.
+  final int? until;
+
+  /// `status`, `usage-limit`, `background` or `reported`.
+  final String source;
+
+  const SessionReason({required this.kind, this.text = '', this.since, this.until, this.source = ''});
+
+  static const kinds = <String>['working', 'you', 'self', 'external', 'done'];
+
+  static SessionReason? fromJson(dynamic json) {
+    if (json is! Map) return null;
+    final kind = json['kind']?.toString();
+    // An unknown kind from a newer server renders as no reason, never as a guess.
+    if (kind == null || !kinds.contains(kind)) return null;
+    return SessionReason(
+      kind: kind,
+      text: (json['text'] ?? '').toString(),
+      since: _asInt(json['since']),
+      until: _asInt(json['until']),
+      source: (json['source'] ?? '').toString(),
+    );
+  }
 }
 
 /// A session that ended in the last day (`GET /api/dashboard/closed`), kept so the
@@ -1243,12 +1329,17 @@ class ServerInfo {
   /// same rule as every other reading [MachineResources] carries.
   final MachineResources? resources;
 
+  /// This machine's colour as the server declares it (#315), `#rrggbb`, or `null`
+  /// from a server too old to send one or a value that is not a colour.
+  final String? serverColor;
+
   /// Creates a server info value object.
   const ServerInfo({
     required this.version,
     required this.serverName,
     required this.capabilities,
     this.resources,
+    this.serverColor,
   });
 
   /// Parses the `/api/version` response body.
@@ -1263,6 +1354,7 @@ class ServerInfo {
           : const <String>[],
       resources:
           res is Map<String, dynamic> ? MachineResources.fromJson(res) : null,
+      serverColor: validHexColor(json['serverColor']),
     );
   }
 

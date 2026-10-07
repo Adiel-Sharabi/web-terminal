@@ -237,3 +237,68 @@ test.describe('#298 one helper for both session shapers', () => {
     expect(merge.slice(0, merge.indexOf('result.push(...localShaped)'))).toContain('brief: sessionBriefField(s)');
   });
 });
+
+test.describe('#313 / #314 / #315 — reason, hidden, server colour', () => {
+  /** @type {import('@playwright/test').APIRequestContext} */
+  let ctx;
+  /** @type {string} */
+  let id;
+  test.beforeEach(async () => { ctx = await authCtx(); id = await newSession(ctx, `r2-${Date.now()}`); });
+  test.afterEach(async () => { await ctx.delete(`/api/sessions/${id}`).catch(() => {}); await ctx.dispose(); });
+
+  const rowOf = async (url) => (await (await ctx.get(url)).json()).find((s) => s.id === id);
+  const clusterRow = async () => (await (await ctx.get('/api/cluster/sessions')).json()).sessions.find((s) => s.id === id);
+
+  test('a reported wait becomes the row\'s reason on BOTH lists; a typed prompt clears it', async () => {
+    await hook(id, 'UserPromptSubmit', { prompt: 'go' });
+    expect((await report(id, { headline: 'rig test', wait: { on: 'you', what: 'power-cycle the rig' } })).status).toBe(200);
+    // While the turn runs, the turn wins: a mechanical signal beats any report.
+    expect((await rowOf('/api/sessions')).reason).toMatchObject({ kind: 'working' });
+    await hook(id, 'Stop', {});
+    await expect.poll(async () => (await rowOf('/api/sessions')).status, { timeout: 10_000 }).toBe('idle');
+    expect((await rowOf('/api/sessions')).reason).toMatchObject({ kind: 'you', text: 'power-cycle the rig', source: 'reported' });
+    expect((await clusterRow()).reason).toMatchObject({ kind: 'you', source: 'reported' });
+    await hook(id, 'UserPromptSubmit', { prompt: 'done, it is back' });
+    await hook(id, 'Stop', {});
+    await expect.poll(async () => (await rowOf('/api/sessions')).status, { timeout: 10_000 }).toBe('idle');
+    expect((await rowOf('/api/sessions')).reason).toBeNull();
+  });
+
+  test('a wait-only report from a session that never reported is refused, saying why', async () => {
+    await hook(id, 'UserPromptSubmit', { prompt: 'go' });
+    const r = await report(id, { wait: { on: 'done' } });
+    expect(r.status).toBe(400);
+    expect(r.json.error).toContain('first');
+  });
+
+  test('a wait-only report keeps the work items', async () => {
+    await hook(id, 'UserPromptSubmit', { prompt: 'go' });
+    await report(id, { items: [{ ref: '#41', title: 'T', state: 'in-progress' }] });
+    expect((await report(id, { wait: { on: 'self', what: 'CI checks' } })).status).toBe(200);
+    const b = (await rowOf('/api/sessions')).brief;
+    expect(b.items.map((i) => i.ref)).toEqual(['#41']);
+    expect(b.wait).toMatchObject({ on: 'self', what: 'CI checks' });
+  });
+
+  test('hidden round-trips through PATCH and is refused when not a boolean', async () => {
+    expect((await ctx.patch(`/api/sessions/${id}/brief`, { data: { hidden: true } })).status()).toBe(200);
+    expect((await rowOf('/api/sessions')).brief.hidden).toBe(true);
+    expect((await clusterRow()).brief.hidden).toBe(true);
+    expect((await ctx.patch(`/api/sessions/${id}/brief`, { data: { hidden: 'yes' } })).status()).toBe(400);
+    expect((await ctx.patch(`/api/sessions/${id}/brief`, { data: { hidden: false } })).status()).toBe(200);
+    expect((await rowOf('/api/sessions')).brief.hidden).toBe(false);
+  });
+
+  test('the server declares a colour and the capabilities, in /api/version and the cluster servers', async () => {
+    const v = await (await ctx.get('/api/version')).json();
+    expect(v.serverColor).toMatch(/^#[0-9a-fA-F]{6}$/);
+    for (const cap of ['server-color', 'session-hide', 'session-reason']) expect(v.capabilities).toContain(cap);
+    const c = await (await ctx.get('/api/cluster/sessions')).json();
+    expect(c.servers[0].color).toBe(v.serverColor);
+  });
+
+  test('a peer\'s colour is validated before it reaches a client', async () => {
+    const merge = SERVER_SRC.slice(SERVER_SRC.indexOf('async function _computeClusterSessions'));
+    expect(merge).toContain('color = validServerColor(v.serverColor)');
+  });
+});
