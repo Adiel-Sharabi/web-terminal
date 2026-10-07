@@ -68,6 +68,9 @@ process.env.WT_API_TOKENS_FILE = path.join(__dirname, 'api-tokens.test.json');
 // #298 - the sessions dashboard's brief store. A spec that reports, pins or opts out
 // must never write into production's session-briefs.json; reset per run like the above.
 process.env.WT_SESSION_BRIEFS_FILE = path.join(__dirname, 'session-briefs.test.json');
+// #311 - the device-ops log. The suite's submits must never land in production's
+// logs/device-ops.jsonl, where they would be counted as real use; reset per run like the above.
+process.env.WT_DEVICE_OPS_FILE = path.join(__dirname, 'device-ops.test.jsonl');
 
 module.exports = defineConfig({
   testDir: './tests',

@@ -159,6 +159,11 @@ and is always *reported*, and **both clients** show it whether or not the load v
 on — see [docs/CLUSTER.md](docs/CLUSTER.md#server-load-152) for how the companion gets it
 for free too.
 
+**Which device did the work** — every prompt is logged with the device that sent it
+(phone, tablet or a desktop, told apart by its tailnet address; never the prompt text),
+and `scripts/device-ops-report.js` turns a week of it into operations and active hours
+per device, in and out of office hours.
+
 **Companion app** — a native Android + Windows client with the chat lens and push that
 works while the app is closed.
 
