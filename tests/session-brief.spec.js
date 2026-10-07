@@ -421,5 +421,9 @@ test.describe('wait and hidden (#313, #314)', () => {
 
   test('the per-prompt note tells the agent how to report a wait', () => {
     expect(B.instructionText(null, 'CMD')).toContain('"wait": {"on": "you"|"self"|"external"|"done"');
+    // #320: "you" is a question the FINAL reply asks, never an offer.
+    expect(B.instructionText(null, 'CMD')).toContain('FINAL reply asks the user');
+    expect(B.instructionText(null, 'CMD')).toContain('never an offer');
+    expect(B.instructionText(null, 'CMD')).toContain('must match what your final reply says');
   });
 });
