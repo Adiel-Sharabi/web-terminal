@@ -26,6 +26,7 @@ const resourcesLib = require('./lib/resources');
 const { waitingFor: waitingForRule } = require('./lib/waiting-for');
 const taskListLib = require('./lib/task-list');
 const briefLib = require('./lib/session-brief');
+const sessionReasonLib = require('./lib/session-reason');
 const usageLimit = require('./lib/usage-limit');
 // #190 — imported for ONE thing: the default of `autoAnswerBlockingPrompt`, so this
 // endpoint cannot report a setting the worker does not have (#240's exact defect).
@@ -239,6 +240,17 @@ const SHELL = process.env.WT_SHELL || config.shell || DEFAULT_SHELL;
 // session started after the change reads as unknown until the server is restarted.
 function spawnShellName() { return process.env.WT_SHELL || liveConfig('shell', DEFAULT_SHELL); }
 function getServerName() { return liveConfig('serverName', os.hostname()); }
+
+// #315 - this machine's colour, so every client can tell at a glance which machine a
+// session lives on. DECLARED BY THE SERVER, never assigned by a client from its own
+// list order (that gives one machine two colours on two devices). Config `serverColor`
+// (#rrggbb); unset means a neutral slate - an honest "no colour chosen" rather than a
+// hash that would collide with a status or work-item colour.
+const SERVER_COLOR_DEFAULT = '#8E9AB4';
+const HEX_COLOR_RE = /^#[0-9a-fA-F]{6}$/;
+function validServerColor(c) { return typeof c === 'string' && HEX_COLOR_RE.test(c) ? c : null; }
+function getServerColor() { return validServerColor(liveConfig('serverColor', null)) || SERVER_COLOR_DEFAULT; }
+const _peerColorCache = new Map(); // peer url -> last colour it declared
 
 // Live-reloadable settings (cached, refreshed every 5s to avoid sync I/O stalls)
 let _liveConfigCache = null;
@@ -2345,6 +2357,14 @@ function originForCwd(cwd) {
 /** The `brief` field on a session row. ONE helper for BOTH shapers (/api/sessions and
  *  the local branch of the cluster merge) — four fields have already been forgotten in
  *  one of the two; tests/session-brief-routes.spec.js pins that both call this. */
+/** #313 - stamp `reason` on shaped session rows. Both shapers call this AFTER the row
+ *  is built, so the rule reads exactly the published fields (status, waitingFor,
+ *  usageLimit, backgroundTasks, brief) and nothing a peer's row would lack. */
+function addSessionReasons(rows) {
+  for (const r of rows) r.reason = sessionReasonLib.sessionReason(r);
+  return rows;
+}
+
 function sessionBriefField(s) {
   const e = getBriefEntry(s.id);
   if (!e) return null;
@@ -3029,11 +3049,19 @@ async function sessionRunningWork(s) {
   // The transcript entry is the better one (it carries the real description), so
   // the tree only contributes when the transcript found nothing.
   if (tasks.length) return tasks;
-  return shells.map((sh) => ({
-    id: 'proc-' + sh.pid,
-    description: 'shell command',
-    startedAt: null,
-  }));
+  // #313: the shell's own start time, so the chip can show an age, and a shell that
+  // has outlived any turn by hours is MARKED stale rather than read as a live build.
+  // Marked, not dropped: it is still a real process, and the user may want to kill it.
+  const now = Date.now();
+  return shells.map((sh) => {
+    const startedAt = Number.isFinite(sh.startMs) ? sh.startMs : null;
+    return {
+      id: 'proc-' + sh.pid,
+      description: 'shell command',
+      startedAt,
+      ...(startedAt && now - startedAt > BG_TASKS_MAX_AGE_MS ? { stale: true } : {}),
+    };
+  });
 }
 
 // WHICH conversation a session is currently showing, as an id both clients can compare.
@@ -3564,6 +3592,7 @@ app.get('/api/config', (req, res) => {
   current.defaultCommand = current.defaultCommand || getDefaultCommand();
   current.openInNewTab = current.openInNewTab !== undefined ? current.openInNewTab : liveConfig('openInNewTab', true);
   current.serverName = current.serverName || getServerName();
+  current.serverColor = current.serverColor || '';
   current.scrollbackReplayLimit = current.scrollbackReplayLimit || getScrollbackReplayLimit();
   current.cluster = current.cluster || [];
   current.publicUrl = current.publicUrl || '';
@@ -3589,7 +3618,7 @@ app.get('/api/config', (req, res) => {
   res.json(current);
 });
 
-const ALLOWED_CONFIG_KEYS = ['port', 'host', 'user', 'password', 'shell', 'defaultCwd', 'scanFolders', 'defaultCommand', 'openInNewTab', 'serverName', 'scrollbackReplayLimit', 'cluster', 'publicUrl', 'claudeHome', 'keepSessionsOpen', 'autoContinueOnApiError', 'autoResumeOnReset', 'autoAnswerBlockingPrompt', 'exclusiveViewer'];
+const ALLOWED_CONFIG_KEYS = ['port', 'host', 'user', 'password', 'shell', 'defaultCwd', 'scanFolders', 'defaultCommand', 'openInNewTab', 'serverName', 'serverColor', 'scrollbackReplayLimit', 'cluster', 'publicUrl', 'claudeHome', 'keepSessionsOpen', 'autoContinueOnApiError', 'autoResumeOnReset', 'autoAnswerBlockingPrompt', 'exclusiveViewer'];
 
 app.put('/api/config', express.json({ limit: '16kb' }), (req, res) => {
   try {
@@ -3628,6 +3657,9 @@ app.put('/api/config', express.json({ limit: '16kb' }), (req, res) => {
     }
     // Basic type validation
     if (sanitized.port !== undefined) sanitized.port = parseInt(sanitized.port) || 7681;
+    if (sanitized.serverColor !== undefined && sanitized.serverColor !== '' && !validServerColor(sanitized.serverColor)) {
+      return res.status(400).json({ error: 'serverColor must be a #rrggbb colour' });
+    }
     if (sanitized.scanFolders && !Array.isArray(sanitized.scanFolders)) sanitized.scanFolders = [String(sanitized.scanFolders)];
     if (sanitized.openInNewTab !== undefined) sanitized.openInNewTab = !!sanitized.openInNewTab;
     if (sanitized.keepSessionsOpen !== undefined) sanitized.keepSessionsOpen = !!sanitized.keepSessionsOpen;
@@ -4015,6 +4047,9 @@ async function _computeClusterSessions(reqUser) {
         brief: sessionBriefField(s),
       });
     });
+    // #313 - and the reason, derived from the SHAPED row by the same helper as
+    // /api/sessions, so it can only ever read the fields both shapers publish.
+    addSessionReasons(localShaped);
     result.push(...localShaped);
   } catch (e) {
     console.error('worker listSessions failed:', e.message);
@@ -4044,7 +4079,7 @@ async function _computeClusterSessions(reqUser) {
       // sees the action flash on and snap off with no explanation. A peer too old to
       // answer (or one whose probe fails) reports none — the client then offers
       // nothing, which is the honest thing to do.
-      let version = '', capabilities = [], resources = null;
+      let version = '', capabilities = [], resources = null, color = null;
       try {
         const vr = await clusterFetch(server.url + '/api/version', {
           headers: { 'Authorization': 'Bearer ' + tokenEntry.token }, timeout: 2000
@@ -4058,6 +4093,9 @@ async function _computeClusterSessions(reqUser) {
           // old to send it, or one whose shape fails the check, reports null — the client
           // renders "unknown", never a fabricated 0%.
           resources = resourcesLib.sanitizeResources(v.resources);
+          // #315 - the peer's own colour, validated like everything else it hands us.
+          color = validServerColor(v.serverColor);
+          if (color) _peerColorCache.set(server.url, color);
         }
       } catch (e) {}
       // Issue #20: if this peer opts into direct-mode, mint a short-lived
@@ -4082,7 +4120,7 @@ async function _computeClusterSessions(reqUser) {
       });
       return {
         server: server.name, url: server.url, online: true, needsAuth: false, version, capabilities, resources,
-        directConnect, sessions: mapped,
+        color, directConnect, sessions: mapped,
         // #56 — the peer's OWN account usage. It reports the raw facts (each session's
         // metrics, now carrying `agent` + `ts`) on its /api/sessions, which is a bare array
         // and cannot carry a server-level block; the SAME roll-up rule is applied to them
@@ -4133,6 +4171,7 @@ async function _computeClusterSessions(reqUser) {
     servers: [
       {
         name: getServerName(), url: null, online: true, needsAuth: false, version: localVersion, capabilities: serverCapabilities(),
+        color: getServerColor(),
         // #152 — machine-wide CPU%/memory, sampled independently of this request (see
         // the warm sampler above). Always present locally; a peer carries its own the
         // same way `usage` does below.
@@ -4142,6 +4181,9 @@ async function _computeClusterSessions(reqUser) {
       ...remotes.map(r => ({
         name: r.server, url: r.url, online: r.online, needsAuth: r.needsAuth,
         version: r.version || '', capabilities: r.capabilities || [], directConnect: r.directConnect === true,
+        // An offline peer keeps the colour it last declared, so its rows do not change
+        // colour just because it stopped answering.
+        color: r.color || _peerColorCache.get(r.url) || null,
         ...(r.resources ? { resources: r.resources } : {}),
         ...(r.usage ? { usage: r.usage } : {}),
       }))
@@ -4698,7 +4740,14 @@ function serverCapabilities() {
     // #298 - session rows carry `brief` (the sessions dashboard), PATCH
     // /api/sessions/:id/brief pins a work item or opts a session out, and
     // GET /api/dashboard/closed lists sessions that ended in the last day.
-    'session-brief'];
+    'session-brief',
+    // #315 - /api/version and the cluster's servers[] carry this machine's `serverColor`.
+    'server-color',
+    // #314 - PATCH /api/sessions/:id/brief takes `hidden`; the brief publishes it.
+    'session-hide',
+    // #313 - every session row carries `reason` (lib/session-reason.js) and a brief
+    // carries the agent's reported `wait`.
+    'session-reason'];
   if (fcmConfigured()) caps.push('fcm');
   return caps;
 }
@@ -4726,6 +4775,7 @@ app.get('/api/version', (req, res) => {
     fetchedAt: info.fetchedAt !== undefined ? info.fetchedAt : null,
     dirty: info.dirty,
     serverName: getServerName(),
+    serverColor: getServerColor(),
     // The version of the WORKER actually attached right now — not the one on disk.
     // A hot reload restarts only server.js, so `version` and `worker` move
     // independently, and a worker-side feature can be merged, pulled and reported
@@ -4922,6 +4972,8 @@ app.get('/api/sessions', async (req, res) => {
       // shapers (sessionBriefField); null for a session no hook has spoken for.
       brief: sessionBriefField(s),
     }));
+    // #313 - WHY a non-working session is not working (lib/session-reason.js).
+    addSessionReasons(shaped);
     // Log when a remote server fetches our sessions (Bearer = cluster call).
     // Throttled to avoid hammering the disk: only logs on change or after
     // CLUSTER_LOG_MIN_GAP_MS. Without this, peer polling produces multiple
@@ -5253,6 +5305,12 @@ app.patch('/api/sessions/:id/brief', express.json({ limit: '16kb' }), async (req
   if (body.optOut !== undefined) {
     if (typeof body.optOut !== 'boolean') return res.status(400).json({ error: 'optOut must be a boolean' });
     entry.optOut = body.optOut;
+  }
+  // #314 - hide from the dashboard (never from the session list). Stored with the
+  // session on the server that owns it, so every device shows the same Hidden tab.
+  if (body.hidden !== undefined) {
+    if (typeof body.hidden !== 'boolean') return res.status(400).json({ error: 'hidden must be a boolean' });
+    entry.hidden = body.hidden;
   }
   setBriefEntry(id, entry);
   res.json({ ok: true, brief: briefLib.buildBrief(entry, {
