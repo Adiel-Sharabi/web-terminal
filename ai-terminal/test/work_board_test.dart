@@ -514,6 +514,28 @@ void main() {
       await tester.pumpWidget(const SizedBox());
     });
 
+    testWidgets('"Not waiting" clears a reported wait; a mechanical reason offers no such item (#320)', (tester) async {
+      rows = [
+        _row('r', 'Reported one', brief: _briefJson(), reason: {'kind': 'you', 'text': 'say go', 'source': 'reported'}),
+        _row('m', 'Mechanical one', status: 'waiting', waitingFor: 'permission', brief: _briefJson(),
+            reason: {'kind': 'you', 'text': 'approve a tool', 'source': 'status'}),
+      ];
+      final r = await repo();
+      await pump(tester, r: r);
+      await tester.tap(find.byKey(ValueKey('board-more-${_server.baseUrl}-m')));
+      await tester.pumpAndSettle();
+      expect(find.text('Not waiting'), findsNothing);
+      await tester.tapAt(const Offset(5, 5));
+      await tester.pumpAndSettle();
+      await tester.tap(find.byKey(ValueKey('board-more-${_server.baseUrl}-r')));
+      await tester.pumpAndSettle();
+      await tester.tap(find.text('Not waiting'));
+      await tester.pumpAndSettle();
+      await tester.runAsync(() => Future<void>.delayed(const Duration(milliseconds: 50)));
+      expect('${patches.last.url.path} ${patches.last.body}', '/api/sessions/r/brief {"clearWait":true}');
+      await tester.pumpWidget(const SizedBox());
+    });
+
     testWidgets('a summary chip filters to its sessions; tapping it again shows all (#318)', (tester) async {
       rows = [
         _row('w', 'Waiting one', status: 'waiting', waitingFor: 'permission'),

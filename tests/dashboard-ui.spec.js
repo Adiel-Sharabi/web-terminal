@@ -226,6 +226,23 @@ test.describe('#298 sessions dashboard (app.html)', () => {
     await expect(page.locator('.db-row.done', { hasText: `${tag}-done` })).toBeVisible();
   });
 
+  test('"Not waiting" clears a wrong reported wait from the card menu (#320)', async ({ page }) => {
+    const tag = `nw-${Date.now()}`;
+    const id = await newSession(tag);
+    await hook(id, 'UserPromptSubmit', { prompt: 'go' });
+    await report(id, { headline: 'h', wait: { on: 'you', what: 'say go when free' } });
+    await hook(id, 'Stop', {});
+    await expect.poll(async () => (await (await api.get('/api/sessions')).json()).find((s) => s.id === id).reason?.kind).toBe('you');
+    await loginPage(page);
+    await page.goto(`${BASE}/app#dashboard`);
+    const card = page.locator('#dbBody [data-action=open]', { hasText: tag }).first();
+    await expect(card.locator('.rs-chip.you')).toBeVisible();
+    await card.locator('[data-action=menu]').click();
+    await page.click('#dbBody .db-menu [data-action=clear-wait]');
+    await expect.poll(async () => (await (await api.get('/api/sessions')).json()).find((s) => s.id === id).reason).toBeNull();
+    await expect(page.locator('#dbBody [data-action=open]', { hasText: tag }).first().locator('.rs-chip.you')).toHaveCount(0);
+  });
+
   test('a summary chip is a filter: tap to show only those, tap again for all (#318)', async ({ page }) => {
     const tag = `chip-${Date.now()}`;
     const needy = await newSession(`${tag}-needy`);

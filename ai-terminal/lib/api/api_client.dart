@@ -428,15 +428,17 @@ class ApiClient {
 
   /// Edits [sessionId]'s dashboard brief (`PATCH /api/sessions/:id/brief`, #298):
   /// [pinned] replaces the WHOLE list of person-pinned work items, [optOut] stops
-  /// or resumes reporting, [hidden] hides it from the dashboard (#314). A null
+  /// or resumes reporting, [hidden] hides it from the dashboard (#314), [clearWait]
+  /// clears a wrong reported wait (#320). A null
   /// argument is left out of the request, so it is left unchanged. Returns the
   /// brief the server rebuilt.
   Future<SessionBrief?> patchBrief(String sessionId,
-      {List<Map<String, dynamic>>? pinned, bool? optOut, bool? hidden}) async {
+      {List<Map<String, dynamic>>? pinned, bool? optOut, bool? hidden, bool clearWait = false}) async {
     final res = await _send('PATCH', '/api/sessions/$sessionId/brief', body: {
       'pinned': ?pinned,
       'optOut': ?optOut,
       'hidden': ?hidden,
+      if (clearWait) 'clearWait': true,
     });
     return SessionBrief.fromJson(_asMap(_decode(res))['brief']);
   }

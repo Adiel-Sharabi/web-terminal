@@ -264,6 +264,18 @@ test.describe('#313 / #314 / #315 — reason, hidden, server colour', () => {
     expect((await rowOf('/api/sessions')).reason).toBeNull();
   });
 
+  test('a person can clear a wrong REPORTED wait (#320); a bad value is refused', async () => {
+    await hook(id, 'UserPromptSubmit', { prompt: 'go' });
+    await report(id, { headline: 'h', wait: { on: 'you', what: 'say go' } });
+    await hook(id, 'Stop', {});
+    await expect.poll(async () => (await rowOf('/api/sessions')).reason?.kind, { timeout: 10_000 }).toBe('you');
+    expect((await ctx.patch(`/api/sessions/${id}/brief`, { data: { clearWait: 'yes' } })).status()).toBe(400);
+    expect((await ctx.patch(`/api/sessions/${id}/brief`, { data: { clearWait: true } })).status()).toBe(200);
+    const row = await rowOf('/api/sessions');
+    expect(row.reason).toBeNull();
+    expect(row.brief.headline).toBe('h');
+  });
+
   test('a wait-only report from a session that never reported is refused, saying why', async () => {
     await hook(id, 'UserPromptSubmit', { prompt: 'go' });
     const r = await report(id, { wait: { on: 'done' } });

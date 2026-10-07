@@ -360,10 +360,11 @@ class _WorkBoardScreenState extends State<WorkBoardScreen> {
     m?.showSnackBar(SnackBar(content: Text(text), action: action, duration: const Duration(seconds: 5)));
   }
 
-  Future<bool> _patch(Session s, {List<Map<String, dynamic>>? pinned, bool? optOut, bool? hidden}) async {
+  Future<bool> _patch(Session s,
+      {List<Map<String, dynamic>>? pinned, bool? optOut, bool? hidden, bool clearWait = false}) async {
     var ok = true;
     try {
-      await _client(s.server).patchBrief(s.id, pinned: pinned, optOut: optOut, hidden: hidden);
+      await _client(s.server).patchBrief(s.id, pinned: pinned, optOut: optOut, hidden: hidden, clearWait: clearWait);
     } catch (e) {
       // A snackbar rather than a banner: it says what failed and then goes away,
       // instead of sitting on the board until some later save happens to succeed.
@@ -433,6 +434,8 @@ class _WorkBoardScreenState extends State<WorkBoardScreen> {
       // nothing to switch, and the item would mean nothing.
       onToggleReporting: (brief && s.brief != null) ? () => _toggleReporting(s) : null,
       onHide: _repo.supportsHide(base) ? () => _setHidden(s, !boardIsHidden(s)) : null,
+      // #320 - only a REPORTED reason is the person's to clear.
+      onClearWait: (brief && s.reason?.source == 'reported') ? () => _patch(s, clearWait: true) : null,
       onStar: _repo.supportsFavorites(base) ? () => _toggleStar(s) : null,
     );
   }
@@ -703,6 +706,7 @@ class BoardActions {
   final VoidCallback? onToggleReporting;
   final VoidCallback? onHide;
   final VoidCallback? onStar;
+  final VoidCallback? onClearWait;
   const BoardActions({
     required this.onOpen,
     this.onPin,
@@ -710,6 +714,7 @@ class BoardActions {
     this.onToggleReporting,
     this.onHide,
     this.onStar,
+    this.onClearWait,
   });
 }
 
@@ -989,6 +994,7 @@ Widget? _moreMenu(Session s, BoardActions a, {bool includePin = false}) {
         child: Text(boardIsHidden(s) ? 'Unhide' : (s.favorite ? 'Unstar & hide' : 'Hide from dashboard')),
       ),
     if (a.onStar != null) PopupMenuItem(value: 'star', child: Text(s.favorite ? 'Unstar' : 'Star')),
+    if (a.onClearWait != null) const PopupMenuItem(value: 'clear-wait', child: Text('Not waiting')),
     if (a.onToggleReporting != null)
       PopupMenuItem(value: 'report', child: Text(s.brief?.reportingOn == false ? 'Resume reporting' : 'Stop reporting')),
   ];
@@ -1004,6 +1010,7 @@ Widget? _moreMenu(Session s, BoardActions a, {bool includePin = false}) {
       'hide' => a.onHide?.call(),
       'star' => a.onStar?.call(),
       'report' => a.onToggleReporting?.call(),
+      'clear-wait' => a.onClearWait?.call(),
       _ => null,
     },
   );

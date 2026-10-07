@@ -6135,6 +6135,11 @@
       if (dbServerHas(s, 'favorites-sync')) {
         items.push(`<button data-action="star" data-card="${esc(key)}">${s.favorite ? 'Unstar' : 'Star'}</button>`);
       }
+      // #320 - an agent's reported wait can be wrong (an offer filed as "waiting on you").
+      // Only a REPORTED reason is the person's to clear; mechanical ones are facts.
+      if (s.reason && s.reason.source === 'reported') {
+        items.push(`<button data-action="clear-wait" data-card="${esc(key)}">Not waiting</button>`);
+      }
       if (s.brief) {
         items.push(`<button data-action="optout" data-card="${esc(key)}">${s.brief.reporting === 'off' ? 'Resume reporting' : 'Stop reporting'}</button>`);
       }
@@ -6493,6 +6498,9 @@
         dbPatchBrief(s, { pinned: [...dbPinnedOf(s).filter((p) => p.ref !== ref), pin] });
       } else if (action === 'unpin') {
         dbPatchBrief(s, { pinned: dbPinnedOf(s).filter((p) => p.ref !== el.dataset.ref) });
+      } else if (action === 'clear-wait') {
+        dbMenu = null;
+        dbPatchBrief(s, { clearWait: true });
       } else if (action === 'optout') {
         dbMenu = null;
         dbPatchBrief(s, { optOut: !(s.brief && s.brief.reporting === 'off') });
