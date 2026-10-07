@@ -762,6 +762,7 @@ void main() {
           resetAt: 1700000000000,
           resumeAt: 1700000060000,
         ),
+        brief: const SessionBrief(headline: 'h'),
       );
 
       final moved = original.withFavoriteRank(999);
@@ -786,6 +787,7 @@ void main() {
       expect(moved.waitingFor, original.waitingFor);
       expect(moved.agentReady, isFalse, reason: 'a dropped agentReady silently reverts to the true default and opens the #147 submit gate');
       expect(moved.usageLimit, same(original.usageLimit));
+      expect(moved.brief, same(original.brief), reason: 'a dropped brief blanks the card on the sessions dashboard until the next poll');
     });
   });
 }

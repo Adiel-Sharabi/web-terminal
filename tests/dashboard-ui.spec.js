@@ -89,6 +89,28 @@ test.describe('#298 sessions dashboard (app.html)', () => {
     await expect(card.locator('.db-items')).toHaveCount(0);
   });
 
+  test('pinning another item does not freeze the agent\'s state into an existing pin', async ({ page }) => {
+    // #306 review: the client used to send back the card's MERGED values, so an
+    // existing pin captured the agent's state and kept it after the agent moved on.
+    const tag = `repin-${Date.now()}`;
+    const id = await newSession(tag);
+    await hook(id, 'UserPromptSubmit', { prompt: 'go' });
+    await report(id, { items: [{ ref: '#5', title: 'Five', state: 'in-progress' }] });
+    expect((await api.patch(`/api/sessions/${id}/brief`, { data: { pinned: [{ ref: '#5', title: '' }] } })).status()).toBe(200);
+    await loginPage(page);
+    await page.goto(`${BASE}/app#dashboard`);
+    const card = page.locator('.db-card', { hasText: tag });
+    await card.locator('[data-action=pin-open]').click();
+    await page.fill('.db-pinform input.ref', '#6');
+    await page.click('.db-pinform [data-action=pin-save]');
+    await expect(card.locator('.db-items li')).toHaveCount(2);
+    await report(id, { items: [{ ref: '#5', title: 'Five', state: 'done' }] });
+    await expect.poll(async () => {
+      const s = (await (await api.get('/api/sessions')).json()).find((x) => x.id === id);
+      return s.brief.items.find((i) => i.ref === '#5').state;
+    }).toBe('done');
+  });
+
   test('Back closes the dashboard; a card opens its session', async ({ page }) => {
     const tag = `nav-${Date.now()}`;
     const id = await newSession(tag);

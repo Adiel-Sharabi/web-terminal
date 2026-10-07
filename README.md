@@ -126,7 +126,8 @@ Typing the answer *for* you is a separate, opt-in setting
 (`autoAnswerBlockingPrompt`, **off** by default: trusting a folder is what decides
 whether an agent may execute what is in it).
 
-**Sessions dashboard** — the ▦ button opens every session on every server at once: the
+**Sessions dashboard** — the ▦ button (in the companion app, the dashboard icon on the
+Sessions screen) opens every session on every server at once: the
 work item(s) each one is on and their state, what it is doing right now, what it just
 finished, and what you last asked it, with a **Needs you** strip on top. It is built to
 be **true**, not merely filled in: what the hooks prove (the current tool, the last

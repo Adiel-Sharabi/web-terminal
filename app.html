@@ -6049,8 +6049,14 @@
     }
 
     function dbPinnedOf(s) {
-      return ((s.brief && s.brief.items) || []).filter((it) => it.source === 'pinned')
-        .map((it) => ({ ref: it.ref, title: it.title || '', ...(it.state ? { state: it.state } : {}) }));
+      // Send back what was PINNED (`it.pin`), not the card's merged values: the merged
+      // state is the agent's, and a pin's own state wins, so re-sending it would freeze
+      // that state after the agent moves on. A peer too old to send `pin` gets the old
+      // merged answer, which is the best it can be given.
+      return ((s.brief && s.brief.items) || []).filter((it) => it.source === 'pinned').map((it) => {
+        const p = it.pin || it;
+        return { ref: it.ref, title: p.title || '', ...(p.state ? { state: p.state } : {}) };
+      });
     }
 
     document.addEventListener('click', (e) => {

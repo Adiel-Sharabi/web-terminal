@@ -300,6 +300,10 @@ test.describe('buildBrief', () => {
     const b = B.buildBrief(e, { reporting: true, origin: { kind: 'github', owner: 'o', repo: 'r' } });
     expect(b.items.map((i) => [i.ref, i.source, i.state])).toEqual([['gh#2', 'pinned', 'ready-for-test'], ['#3', 'agent', 'done']]);
     expect(b.items[0].title).toBe('agent title');
+    // ...but the pin's OWN values travel apart, so editing the pinned list cannot
+    // freeze the borrowed state into the pin.
+    expect(b.items[0].pin).toEqual({ title: '', state: null });
+    expect(b.items[1].pin).toBeUndefined();
     expect(b.items[1].url).toBe('https://github.com/o/r/issues/3');
     expect(b.headline).toBe('hl');
     expect(b.reportAt).toBe(T0);
