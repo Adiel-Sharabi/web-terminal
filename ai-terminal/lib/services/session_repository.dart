@@ -134,6 +134,13 @@ class SessionRepository {
   /// headers. Absent until a version call has succeeded.
   final Map<String, String> _serverVersion = <String, String>{};
 
+  /// Per-server colour (#315), `#rrggbb`, from the same call. Kept while a server is
+  /// unreachable, so its sessions do not change colour because it stopped answering.
+  final Map<String, String> _serverColor = <String, String>{};
+
+  /// Per-server `session-hide` capability (#314), from the same call.
+  final Map<String, bool> _hideSupported = <String, bool>{};
+
   // Live `/ws/notify` subscriptions, keyed by server base URL, alongside the
   // exact [ServerConfig] each was opened with (to detect a token change).
   // Re-synced from [AppConfig.serversStream] as servers are added/removed.
@@ -302,6 +309,13 @@ class SessionRepository {
 
   /// The server's `SERVER_VERSION`, or null before a version call has succeeded.
   String? serverVersion(String baseUrl) => _serverVersion[baseUrl];
+
+  /// The colour the server at [baseUrl] declared for itself (#315), or null before
+  /// one has been heard. One answer per machine, the same on every device.
+  String? serverColor(String baseUrl) => _serverColor[baseUrl];
+
+  /// Whether the server at [baseUrl] can hide a session from the dashboard (#314).
+  bool supportsHide(String baseUrl) => _hideSupported[baseUrl] ?? false;
 
   /// Fetches all configured servers in parallel and emits the merged, sorted
   /// list. A server that fails is marked offline and contributes its last-known
@@ -551,6 +565,8 @@ class SessionRepository {
     _favoritesSyncSupported.remove(baseUrl);
     _briefSupported.remove(baseUrl);
     _serverVersion.remove(baseUrl);
+    _serverColor.remove(baseUrl);
+    _hideSupported.remove(baseUrl);
   }
 
   /// Updates [_apiErrors], [_compacting] and [_submitUnconfirmedAt] from a
@@ -1025,6 +1041,9 @@ class SessionRepository {
       _favoritesSyncSupported[server.baseUrl] = info.has('favorites-sync');
       _briefSupported[server.baseUrl] = info.has('session-brief');
       _serverVersion[server.baseUrl] = info.version;
+      _hideSupported[server.baseUrl] = info.has('session-hide');
+      final color = info.serverColor;
+      if (color != null) _serverColor[server.baseUrl] = color;
       _namesResolved.add(server.baseUrl);
       _versionFetchedAt[server.baseUrl] = now;
     } catch (_) {

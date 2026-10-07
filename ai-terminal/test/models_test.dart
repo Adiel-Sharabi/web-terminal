@@ -763,6 +763,9 @@ void main() {
           resumeAt: 1700000060000,
         ),
         brief: const SessionBrief(headline: 'h'),
+        reason: const SessionReason(kind: 'you', text: 'x'),
+        backgroundSince: 77,
+        backgroundStale: true,
       );
 
       final moved = original.withFavoriteRank(999);
@@ -788,6 +791,9 @@ void main() {
       expect(moved.agentReady, isFalse, reason: 'a dropped agentReady silently reverts to the true default and opens the #147 submit gate');
       expect(moved.usageLimit, same(original.usageLimit));
       expect(moved.brief, same(original.brief), reason: 'a dropped brief blanks the card on the sessions dashboard until the next poll');
+      expect(moved.reason, same(original.reason), reason: 'a dropped reason flips the row back to a bare status word');
+      expect(moved.backgroundSince, 77);
+      expect(moved.backgroundStale, isTrue);
     });
   });
 }
