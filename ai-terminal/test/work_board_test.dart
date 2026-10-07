@@ -192,6 +192,12 @@ void main() {
       expect(reasonSectionOf(_session('n')), ReasonSection.notReported);
     });
 
+    test('a session stuck in a menu needs you (#316)', () {
+      final s = Session.fromJson(_server, _row('m', 'menu one', reason: {'kind': 'menu', 'source': 'screen'}));
+      expect(boardNeedsYou(s), isTrue);
+      expect(reasonSectionOf(s), ReasonSection.needsYou);
+    });
+
     test('noItemReason distinguishes never-reported, off and empty', () {
       expect(noItemReason(_session('a')), 'Not reporting');
       expect(noItemReason(_session('a', brief: const SessionBrief(reportingOn: false))), 'Reporting is off for this session');
@@ -505,6 +511,30 @@ void main() {
       final name = tester.getSize(find.text('Dictation work in progress'));
       expect(name.width, greaterThan(120), reason: 'three equal flexes left it a third of the row');
       expect(tester.takeException(), isNull);
+      await tester.pumpWidget(const SizedBox());
+    });
+
+    testWidgets('a summary chip filters to its sessions; tapping it again shows all (#318)', (tester) async {
+      rows = [
+        _row('w', 'Waiting one', status: 'waiting', waitingFor: 'permission'),
+        _row('k', 'Working one', status: 'working', brief: _briefJson()),
+        _row('q', 'Quiet one', brief: _briefJson()),
+      ];
+      final r = await repo();
+      await pump(tester, r: r);
+      expect(find.text('1 needs you'), findsOneWidget);
+      await tester.tap(find.byKey(const ValueKey('board-chip-you')));
+      await tester.pump();
+      expect(find.text('Waiting one'), findsWidgets);
+      expect(find.text('Working one'), findsNothing);
+      expect(find.text('Quiet one'), findsNothing);
+      await tester.tap(find.byKey(const ValueKey('board-chip-working')));
+      await tester.pump();
+      expect(find.text('Working one'), findsOneWidget);
+      expect(find.text('Quiet one'), findsNothing);
+      await tester.tap(find.byKey(const ValueKey('board-chip-working')));
+      await tester.pump();
+      expect(find.text('Quiet one'), findsOneWidget);
       await tester.pumpWidget(const SizedBox());
     });
 

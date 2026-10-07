@@ -29,6 +29,9 @@ String reasonLabel(SessionReason? r, {DateTime? now}) {
   switch (r.kind) {
     case 'you':
       return r.text.isEmpty ? 'Your move' : 'You: ${r.text}';
+    case 'menu':
+      // #316: a panel covers the composer; a prompt sent now goes nowhere.
+      return 'In menu · Esc';
     case 'self':
       if (r.source == 'usage-limit') {
         final until = r.until;
@@ -64,6 +67,8 @@ class ReasonChip extends StatelessWidget {
     if (label.isEmpty) return const SizedBox.shrink();
     final (IconData icon, Color fg, Color? bg, Color? border) = switch (reason.kind) {
       'you' => (Icons.back_hand_outlined, Colors.white, StatusColor.waiting, null),
+      // Outlined, not filled: "it is stuck - open it and press Esc", not "answer it".
+      'menu' => (Icons.menu_open, StatusColor.waiting, null, StatusColor.waiting),
       'self' => (Icons.hourglass_top, _self, _self.withValues(alpha: 0.14), null),
       'external' => (Icons.group_outlined, _external, null, _external),
       _ => (Icons.check, _done, null, null),

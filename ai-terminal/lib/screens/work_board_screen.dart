@@ -127,10 +127,35 @@ String noItemReason(Session s) {
 }
 
 /// Owes the person something: a live prompt, or the agent said it is their move.
-bool boardNeedsYou(Session s) => s.status == 'waiting' || s.reason?.kind == 'you';
+/// A panel over the composer (#316) owes the person an Esc as much as a prompt owes an
+/// answer, so it is "needs you" too.
+bool boardNeedsYou(Session s) =>
+    s.status == 'waiting' || s.reason?.kind == 'you' || s.reason?.kind == 'menu';
 
 /// Hidden from the dashboard (#314).
 bool boardIsHidden(Session s) => s.brief?.hidden == true;
+
+/// The summary chips (#318). Each one is a COUNT and a FILTER over the same test, so
+/// the number on a chip and the sessions it shows can never disagree.
+enum BoardChip {
+  you('need you', StatusColor.waiting),
+  working('working', StatusColor.working),
+  self('on its own', StatusColor.capped),
+  capped('capped', StatusColor.capped);
+
+  const BoardChip(this.word, this.color);
+  final String word;
+  final Color color;
+
+  bool test(Session s) => switch (this) {
+        BoardChip.you => boardNeedsYou(s),
+        BoardChip.working => s.status == 'working',
+        BoardChip.self => s.reason?.kind == 'self' && s.reason?.source != 'usage-limit',
+        BoardChip.capped => s.usageLimit?.waiting == true,
+      };
+
+  String label(int n) => this == BoardChip.you ? '$n need${n == 1 ? 's' : ''} you' : '$n $word';
+}
 
 /// The reason-grouping sections, in display order.
 enum ReasonSection { needsYou, working, self, external, idle, notReported, done }
@@ -242,6 +267,7 @@ class _WorkBoardScreenState extends State<WorkBoardScreen> {
   bool _showHidden = false;
   String _query = '';
   final Set<String> _serverFilter = {};
+  BoardChip? _chipFilter;
   bool _doneOpen = false;
 
   List<ServerConfig> get _servers => (widget.servers ?? () => AppConfig.servers)();
@@ -417,10 +443,10 @@ class _WorkBoardScreenState extends State<WorkBoardScreen> {
     final servers = _servers;
     final hidden = all.where(boardIsHidden).toList();
     final shown = all.where((s) => !boardIsHidden(s)).toList();
-    final pool = (_showHidden ? hidden : shown).where((s) => boardMatches(s, _query, _serverFilter)).toList();
+    final pool = (_showHidden ? hidden : shown)
+        .where((s) => boardMatches(s, _query, _serverFilter) && (_chipFilter?.test(s) ?? true))
+        .toList();
     final needs = all.where(boardNeedsYou).toList();
-    final working = all.where((s) => s.status == 'working').length;
-    final capped = all.where((s) => s.usageLimit?.waiting == true).length;
     final serverOrder = [for (final sv in servers) sv.baseUrl];
     final closed = _closed.values.expand((v) => v.list).toList()
       ..sort((a, b) => (b.at ?? 0).compareTo(a.at ?? 0));
@@ -443,9 +469,9 @@ class _WorkBoardScreenState extends State<WorkBoardScreen> {
       _SummaryRow(
         sessions: all.length,
         servers: servers.length,
-        needs: needs.length,
-        working: working,
-        capped: capped,
+        counts: {for (final c in BoardChip.values) c: all.where(c.test).length},
+        selected: _chipFilter,
+        onTap: (c) => setState(() => _chipFilter = _chipFilter == c ? null : c),
         updatedAt: _updatedAt,
       ),
       if (!_showHidden && strip.isNotEmpty) _NeedsYou(sessions: strip, onOpen: widget.onOpenSession),
@@ -748,24 +774,32 @@ class _SummaryRow extends StatelessWidget {
   const _SummaryRow({
     required this.sessions,
     required this.servers,
-    required this.needs,
-    required this.working,
-    required this.capped,
+    required this.counts,
+    required this.selected,
+    required this.onTap,
     required this.updatedAt,
   });
-  final int sessions, servers, needs, working, capped;
+  final int sessions, servers;
+  final Map<BoardChip, int> counts;
+  final BoardChip? selected;
+  final ValueChanged<BoardChip> onTap;
   final DateTime? updatedAt;
 
   @override
   Widget build(BuildContext context) {
-    Widget chip(String text, Color fg) => Container(
-          padding: const EdgeInsets.symmetric(horizontal: 8, vertical: 2),
-          decoration: BoxDecoration(
-            color: fg.withValues(alpha: 0.12),
-            borderRadius: BorderRadius.circular(999),
-          ),
-          child: Text(text, style: TextStyle(color: fg, fontSize: 12)),
-        );
+    Widget chip(String text, Color fg, {bool on = false, VoidCallback? tap, Key? key}) {
+      final body = Container(
+        key: key,
+        padding: const EdgeInsets.symmetric(horizontal: 8, vertical: 2),
+        decoration: BoxDecoration(
+          color: fg.withValues(alpha: 0.12),
+          borderRadius: BorderRadius.circular(999),
+          border: Border.all(color: on ? fg : Colors.transparent),
+        ),
+        child: Text(on ? '$text  ✕' : text, style: TextStyle(color: fg, fontSize: 12)),
+      );
+      return tap == null ? body : InkWell(borderRadius: BorderRadius.circular(999), onTap: tap, child: body);
+    }
     return Padding(
       padding: const EdgeInsets.fromLTRB(16, 8, 16, 4),
       child: Wrap(
@@ -775,9 +809,12 @@ class _SummaryRow extends StatelessWidget {
         children: [
           chip('$sessions session${sessions == 1 ? '' : 's'} · $servers server${servers == 1 ? '' : 's'}',
               AppColors.onSurfaceVariant),
-          if (needs > 0) chip('$needs need${needs == 1 ? 's' : ''} you', StatusColor.waiting),
-          if (working > 0) chip('$working working', StatusColor.working),
-          if (capped > 0) chip('$capped capped', StatusColor.capped),
+          // #318: each count filters to those sessions; tap again for all. The selected
+          // chip stays even at 0, so the way out of the filter never disappears.
+          for (final c in BoardChip.values)
+            if ((counts[c] ?? 0) > 0 || selected == c)
+              chip(c.label(counts[c] ?? 0), c.color,
+                  on: selected == c, tap: () => onTap(c), key: ValueKey('board-chip-${c.name}')),
           if (updatedAt != null)
             Text('updated ${relativeTime(updatedAt!.millisecondsSinceEpoch)}',
                 style: const TextStyle(color: AppColors.onSurfaceVariant, fontSize: 11)),
@@ -813,7 +850,7 @@ class _NeedsYou extends StatelessWidget {
             ActionChip(
               avatar: const StatusDot(status: SessionStatus.waiting, size: 8),
               label: Text('${s.name} · ${s.server.name} · '
-                  '${s.reason?.kind == 'you' && s.reason!.text.isNotEmpty ? s.reason!.text : s.waitingFor == 'question' ? 'a question' : 'a permission'}'
+                  '${s.reason?.kind == 'menu' ? 'stuck in a menu (Esc)' : s.reason?.kind == 'you' && s.reason!.text.isNotEmpty ? s.reason!.text : s.waitingFor == 'question' ? 'a question' : 'a permission'}'
                   '${boardIsHidden(s) ? ' · hidden' : ''}'),
               onPressed: () => onOpen(s),
             ),

@@ -226,6 +226,25 @@ test.describe('#298 sessions dashboard (app.html)', () => {
     await expect(page.locator('.db-row.done', { hasText: `${tag}-done` })).toBeVisible();
   });
 
+  test('a summary chip is a filter: tap to show only those, tap again for all (#318)', async ({ page }) => {
+    const tag = `chip-${Date.now()}`;
+    const needy = await newSession(`${tag}-needy`);
+    await newSession(`${tag}-quiet`);
+    await hook(needy, 'UserPromptSubmit', { prompt: 'go' });
+    await hook(needy, 'Notification', { notification_type: 'permission_prompt', message: 'Claude needs your permission to use Bash' });
+    await expect.poll(async () => (await (await api.get('/api/sessions')).json()).find((s) => s.id === needy).status).toBe('waiting');
+    await loginPage(page);
+    await page.goto(`${BASE}/app#dashboard`);
+    const entry = (name) => page.locator('#dbBody [data-action=open]', { hasText: name });
+    await expect(entry(`${tag}-quiet`)).toHaveCount(1);
+    await page.click('#dbChips [data-filter=you]');
+    await expect(page.locator('#dbChips [data-filter=you]')).toHaveAttribute('aria-pressed', 'true');
+    await expect(entry(`${tag}-quiet`)).toHaveCount(0);
+    await expect(entry(`${tag}-needy`).first()).toBeVisible();
+    await page.click('#dbChips [data-filter=you]');
+    await expect(entry(`${tag}-quiet`)).toHaveCount(1);
+  });
+
   test('nothing a session or an agent wrote becomes markup', async ({ page }) => {
     const evil = '<img src=x onerror="window.__pwned=1">';
     const id = await newSession(`x${evil}`);
