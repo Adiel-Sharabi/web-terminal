@@ -128,3 +128,4 @@ The complete feature reference. For a short overview see the [README](../README.
 - **IPC backpressure** — the worker drops PTY output frames to a slow connection instead of OOMing; a hard-cap (`WT_IPC_MAX_INFLIGHT`) closes the socket if the queue blows past the limit
 - **Live config** — most settings apply immediately without restart
 - **Tailscale ready** — HTTPS with real TLS certificates over your private mesh VPN
+- **Which device did the work** (#311) — every submit is logged to `logs/device-ops.jsonl` with the sending device's tailnet address and the server that took it, never the text. `node scripts/device-ops-report.js [file ...] [--since YYYY-MM-DD]` names each device from `tailscale status` and reports operations, active hours and the office-hours split per device and per class (mobile / tablet / desktop). Pass one file per server to report the whole cluster

@@ -67,8 +67,11 @@ if (process.env.WT_TEST !== '1') {
 }
 reset('config.test.json', '#240');
 if (process.env.WT_API_TOKENS_FILE) reset(process.env.WT_API_TOKENS_FILE, '#272');
-if (process.env.WT_SESSION_BRIEFS_FILE) reset(process.env.WT_SESSION_BRIEFS_FILE, '#298');
 else {
   console.error('[test-reset] WT_API_TOKENS_FILE is not set - the server would mint into production');
   process.exitCode = 1;
 }
+// Below the guard, not between it and its `if`: #298 once landed there, which hung the
+// #272 refusal off the briefs file instead of the token store.
+if (process.env.WT_SESSION_BRIEFS_FILE) reset(process.env.WT_SESSION_BRIEFS_FILE, '#298');
+if (process.env.WT_DEVICE_OPS_FILE) reset(process.env.WT_DEVICE_OPS_FILE, '#311');
