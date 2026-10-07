@@ -60,7 +60,7 @@ test.describe('#298 sessions dashboard (app.html)', () => {
     expect(errors).toEqual([]);
   });
 
-  test('a session owing a permission is in the Needs-you strip', async ({ page }) => {
+  test('a session owing a permission leads the reason view, and is in the strip by server', async ({ page }) => {
     const tag = `needs-${Date.now()}`;
     const id = await newSession(tag);
     await hook(id, 'UserPromptSubmit', { prompt: 'go' });
@@ -68,8 +68,11 @@ test.describe('#298 sessions dashboard (app.html)', () => {
     await expect.poll(async () => (await (await api.get('/api/sessions')).json()).find((s) => s.id === id).status).toBe('waiting');
     await loginPage(page);
     await page.goto(`${BASE}/app#dashboard`);
+    // #313: the reason replaces the status word, and "Needs you" is the first section.
+    const sec = page.locator('.db-sec-you');
+    await expect(sec.locator('[data-card]', { hasText: tag }).locator('.rs-chip.you')).toHaveText(/You: approve a tool/);
+    await page.click('#dbSeg [data-group=server]');
     await expect(page.locator('.db-needs')).toContainText(tag);
-    await expect(page.locator('.db-card', { hasText: tag }).locator('.db-status')).toHaveText('Needs you');
   });
 
   test('pin a work item, then unpin it', async ({ page }) => {
@@ -77,8 +80,9 @@ test.describe('#298 sessions dashboard (app.html)', () => {
     await newSession(tag);
     await loginPage(page);
     await page.goto(`${BASE}/app#dashboard`);
+    // A never-reported session is a one-line row; its Pin opens it into a full card.
+    await page.locator('.db-row', { hasText: tag }).locator('[data-action=pin-open]').click();
     const card = page.locator('.db-card', { hasText: tag });
-    await card.locator('[data-action=pin-open]').click();
     await page.fill('.db-pinform input.ref', '#777');
     await page.fill('.db-pinform input.title', 'Pinned item');
     await page.selectOption('.db-pinform select', 'blocked');
@@ -86,7 +90,7 @@ test.describe('#298 sessions dashboard (app.html)', () => {
     await expect(card.locator('.db-items li')).toContainText('Pinned item');
     await expect(card.locator('.db-state')).toHaveText('blocked');
     await card.locator('.db-unpin').click();
-    await expect(card.locator('.db-items')).toHaveCount(0);
+    await expect(page.locator('.db-row', { hasText: tag })).toBeVisible();
   });
 
   test('pinning another item does not freeze the agent\'s state into an existing pin', async ({ page }) => {
@@ -121,7 +125,7 @@ test.describe('#298 sessions dashboard (app.html)', () => {
     await page.goBack();
     await expect(page.locator('#dashboard')).toBeHidden();
     await page.click('#dashBtn');
-    await page.locator('.db-card', { hasText: tag }).click();
+    await page.locator('#dbBody [data-action=open]', { hasText: tag }).first().click();
     await expect(page.locator('#dashboard')).toBeHidden();
     await expect.poll(() => page.evaluate(() => location.pathname)).toBe(`/app/${id}`);
   });
@@ -138,6 +142,88 @@ test.describe('#298 sessions dashboard (app.html)', () => {
     expect(await page.evaluate(() => location.hash)).toBe('#dashboard');
     await page.goBack();
     await expect(page.locator('#dashboard')).toBeHidden();
+  });
+
+  test('favourites lead the dashboard and are not repeated below', async ({ page }) => {
+    const tag = `fav-${Date.now()}`;
+    const id = await newSession(tag);
+    expect((await api.patch(`/api/sessions/${id}/favorite`, { data: { favorite: true } })).status()).toBe(200);
+    await loginPage(page);
+    await page.goto(`${BASE}/app#dashboard`);
+    await expect(page.locator('.db-favs [data-card]', { hasText: tag })).toHaveCount(1);
+    await expect(page.locator('#dbBody [data-action=open]', { hasText: tag })).toHaveCount(1);
+    await api.patch(`/api/sessions/${id}/favorite`, { data: { favorite: false } });
+  });
+
+  test('hide from the menu, undo, hide again, then unhide from the Hidden tab', async ({ page }) => {
+    const tag = `hide-${Date.now()}`;
+    const id = await newSession(tag);
+    await loginPage(page);
+    await page.goto(`${BASE}/app#dashboard`);
+    const entry = () => page.locator('#dbBody [data-action=open]', { hasText: tag });
+    await entry().locator('[data-action=menu]').click();
+    await page.click('#dbBody .db-menu [data-action=hide]');
+    await expect(entry()).toHaveCount(0);
+    await expect(page.locator('#dbToast')).toContainText(`Hidden "${tag}"`);
+    await page.click('#dbToast button');
+    await expect(entry()).toHaveCount(1);
+    await expect.poll(async () => (await (await api.get('/api/sessions')).json()).find((s) => s.id === id).brief.hidden).toBe(false);
+    await entry().locator('[data-action=menu]').click();
+    await page.click('#dbBody .db-menu [data-action=hide]');
+    await expect(entry()).toHaveCount(0);
+    await page.click('#dbTabs [data-tab=hidden]');
+    await page.locator('.db-row', { hasText: tag }).locator('[data-action=unhide]').click();
+    await expect(page.locator('.db-row', { hasText: tag })).toHaveCount(0);
+    await page.click('#dbTabs [data-tab=active]');
+    await expect(entry()).toHaveCount(1);
+  });
+
+  test('the filter narrows the cards; the grouping is remembered across a reload', async ({ page }) => {
+    const tag = `flt-${Date.now()}`;
+    await newSession(`${tag}-alpha`);
+    await newSession(`${tag}-beta`);
+    await loginPage(page);
+    await page.goto(`${BASE}/app#dashboard`);
+    await page.fill('#dbSearch', `${tag}-alp`);
+    await expect(page.locator('#dbBody [data-action=open]', { hasText: `${tag}-alpha` })).toHaveCount(1);
+    await expect(page.locator('#dbBody [data-action=open]', { hasText: `${tag}-beta` })).toHaveCount(0);
+    await page.click('#dbSeg [data-group=server]');
+    await page.selectOption('#dbSort', 'name');
+    await page.reload();
+    await expect(page.locator('#dbSeg [data-group=server]')).toHaveClass(/on/);
+    await expect(page.locator('#dbSort')).toHaveValue('name');
+  });
+
+  test('every card carries its machine colour, declared by the server', async ({ page }) => {
+    const tag = `clr-${Date.now()}`;
+    await newSession(tag);
+    const color = (await (await api.get('/api/version')).json()).serverColor;
+    await loginPage(page);
+    await page.goto(`${BASE}/app#dashboard`);
+    const entry = page.locator('#dbBody [data-action=open]', { hasText: tag });
+    expect(await entry.getAttribute('style')).toContain(`--srv:${color}`);
+    await expect(entry.locator('.sb-server-badge')).toHaveAttribute('style', new RegExp(`--srv:${color}`));
+  });
+
+  test('a reported wait shows as the reason and groups the card; done collapses', async ({ page }) => {
+    const tag = `rsn-${Date.now()}`;
+    const a = await newSession(`${tag}-ext`);
+    const b = await newSession(`${tag}-done`);
+    for (const [id, wait] of [[a, { on: 'external', what: 'vendor licence' }], [b, { on: 'done', what: 'pushed' }]]) {
+      await hook(id, 'UserPromptSubmit', { prompt: 'go' });
+      await report(id, { headline: 'h', wait });
+      await hook(id, 'Stop', {});
+    }
+    await expect.poll(async () => (await (await api.get('/api/sessions')).json())
+      .filter((s) => [a, b].includes(s.id)).map((s) => s.reason && s.reason.kind).sort().join(','), { timeout: 10_000 })
+      .toBe('done,external');
+    await loginPage(page);
+    await page.goto(`${BASE}/app#dashboard`);
+    await expect(page.locator('.db-card', { hasText: `${tag}-ext` }).locator('.rs-chip.external')).toHaveText(/Blocked: vendor licence/);
+    // Done is collapsed by default: the section header shows, the session does not.
+    await expect(page.locator('#dbBody [data-action=open]', { hasText: `${tag}-done` })).toHaveCount(0);
+    await page.click('#dbBody [data-action=section][data-section=done]');
+    await expect(page.locator('.db-row.done', { hasText: `${tag}-done` })).toBeVisible();
   });
 
   test('nothing a session or an agent wrote becomes markup', async ({ page }) => {
