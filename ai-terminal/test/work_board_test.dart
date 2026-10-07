@@ -514,6 +514,30 @@ void main() {
       await tester.pumpWidget(const SizedBox());
     });
 
+    testWidgets('a summary chip filters to its sessions; tapping it again shows all (#318)', (tester) async {
+      rows = [
+        _row('w', 'Waiting one', status: 'waiting', waitingFor: 'permission'),
+        _row('k', 'Working one', status: 'working', brief: _briefJson()),
+        _row('q', 'Quiet one', brief: _briefJson()),
+      ];
+      final r = await repo();
+      await pump(tester, r: r);
+      expect(find.text('1 needs you'), findsOneWidget);
+      await tester.tap(find.byKey(const ValueKey('board-chip-you')));
+      await tester.pump();
+      expect(find.text('Waiting one'), findsWidgets);
+      expect(find.text('Working one'), findsNothing);
+      expect(find.text('Quiet one'), findsNothing);
+      await tester.tap(find.byKey(const ValueKey('board-chip-working')));
+      await tester.pump();
+      expect(find.text('Working one'), findsOneWidget);
+      expect(find.text('Quiet one'), findsNothing);
+      await tester.tap(find.byKey(const ValueKey('board-chip-working')));
+      await tester.pump();
+      expect(find.text('Quiet one'), findsOneWidget);
+      await tester.pumpWidget(const SizedBox());
+    });
+
     testWidgets('by work item groups sessions under the item', (tester) async {
       final r = await repo();
       await pump(tester, r: r);

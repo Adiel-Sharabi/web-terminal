@@ -528,6 +528,10 @@
     .db-chip.needs { background: #3a1d26; color: #ff9aac; font-weight: 600; }
     .db-chip.working { background: #3a2a12; color: #ffb454; }
     .db-chip.capped { background: #1b2b3d; color: #9cc6f0; }
+    .db-chip.self { background: rgba(122,179,232,0.14); color: #7ab3e8; }
+    button.db-chip { border: 1px solid transparent; cursor: pointer; font: inherit; font-size: 12px; }
+    button.db-chip:hover { border-color: currentColor; }
+    button.db-chip.on { border-color: currentColor; box-shadow: 0 0 0 1px currentColor inset; }
     .db-spacer { flex: 1 1 auto; }
     .db-seg { display: flex; border: 1px solid #2f3644; border-radius: 6px; overflow: hidden; }
     .db-seg button { background: transparent; border: 0; color: #c3c9d4; padding: 5px 11px; cursor: pointer; font: inherit; }
@@ -5926,6 +5930,7 @@
     let dbSort = 'list';               // 'list' | 'recent' | 'name' | 'machine'
     let dbTab = 'active';              // 'active' | 'hidden'
     let dbQuery = '';
+    let dbStatusFilter = null;         // #318: a tapped summary chip ('you'|'working'|'self'|'capped')
     const dbServerFilter = new Set();  // server keys ('' = local); empty = every server
     const dbOpenSections = new Set();  // collapsible sections the viewer opened (Done)
     let dbMenu = null;                 // key of the card whose ... menu is open
@@ -6077,8 +6082,22 @@
     // A panel over the composer (#316) owes the person an Esc as much as a prompt owes an answer.
     const dbNeedsYou = (s) => s.status === 'waiting' || !!(s.reason && (s.reason.kind === 'you' || s.reason.kind === 'menu'));
 
+    // #318 - what each summary chip counts, and so what tapping it filters to. One
+    // table, so a chip's number and the sessions it shows can never disagree.
+    const DB_STATUS_CHIPS = [
+      { key: 'you', cls: 'needs', label: (n) => `${n} need${n === 1 ? 's' : ''} you`, test: (s) => dbNeedsYou(s) },
+      { key: 'working', cls: 'working', label: (n) => `${n} working`, test: (s) => s.status === 'working' },
+      { key: 'self', cls: 'self', label: (n) => `${n} on its own`,
+        test: (s) => !!(s.reason && s.reason.kind === 'self' && s.reason.source !== 'usage-limit') },
+      { key: 'capped', cls: 'capped', label: (n) => `${n} capped`, test: (s) => !!(s.usageLimit && s.usageLimit.waiting) },
+    ];
+
     function dbMatchesFilter(s) {
       if (dbServerFilter.size && !dbServerFilter.has(s.serverUrl || '')) return false;
+      if (dbStatusFilter) {
+        const chip = DB_STATUS_CHIPS.find((c) => c.key === dbStatusFilter);
+        if (chip && !chip.test(s)) return false;
+      }
       const q = dbQuery.trim().toLowerCase();
       if (!q) return true;
       const b = s.brief || {};
@@ -6216,14 +6235,18 @@
       const shown = all.filter((s) => !dbIsHidden(s));
       const pool = (dbTab === 'hidden' ? hidden : shown).filter(dbMatchesFilter);
       const needs = all.filter(dbNeedsYou);
-      const working = all.filter((s) => s.status === 'working').length;
-      const capped = all.filter((s) => s.usageLimit && s.usageLimit.waiting).length;
 
+      // #318 - each count is a filter: tap to show only those sessions, tap again to clear.
+      // A chip stays while it is the active filter even if its count drops to 0, so the
+      // way out of the filter never disappears.
       document.getElementById('dbChips').innerHTML =
         `<span class="db-chip">${all.length} session${all.length === 1 ? '' : 's'} · ${servers.length} server${servers.length === 1 ? '' : 's'}</span>` +
-        (needs.length ? `<span class="db-chip needs">${needs.length} need${needs.length === 1 ? 's' : ''} you</span>` : '') +
-        (working ? `<span class="db-chip working">${working} working</span>` : '') +
-        (capped ? `<span class="db-chip capped">${capped} capped</span>` : '');
+        DB_STATUS_CHIPS.map((c) => {
+          const n = all.filter(c.test).length;
+          const on = dbStatusFilter === c.key;
+          if (!n && !on) return '';
+          return `<button type="button" class="db-chip ${c.cls}${on ? ' on' : ''}" data-action="status-filter" data-filter="${c.key}" aria-pressed="${on}" title="${on ? 'Show all again' : 'Show only these'}">${esc(c.label(n))}${on ? ' &times;' : ''}</button>`;
+        }).join('');
       document.getElementById('dbUpdated').textContent = dbFetchedAt ? `updated ${timeAgo(dbFetchedAt)}` : '';
       for (const b of document.querySelectorAll('#dbSeg button')) b.classList.toggle('on', b.dataset.group === dbGroup);
       for (const b of document.querySelectorAll('#dbTabs button')) {
@@ -6425,6 +6448,11 @@
       if (action === 'section') {
         const k = el.dataset.section;
         if (dbOpenSections.has(k)) dbOpenSections.delete(k); else dbOpenSections.add(k);
+        renderDashboard();
+        return;
+      }
+      if (action === 'status-filter') {
+        dbStatusFilter = dbStatusFilter === el.dataset.filter ? null : el.dataset.filter;
         renderDashboard();
         return;
       }
