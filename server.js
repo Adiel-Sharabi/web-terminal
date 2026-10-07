@@ -4750,7 +4750,11 @@ function serverCapabilities() {
     'session-hide',
     // #313 - every session row carries `reason` (lib/session-reason.js) and a brief
     // carries the agent's reported `wait`.
-    'session-reason'];
+    'session-reason',
+    // #320 - PATCH /api/sessions/:id/brief takes {clearWait: true}. Clients offer
+    // "Not waiting" only where this is advertised: an older server would accept the
+    // PATCH, ignore the key and answer 200, so the click would silently do nothing.
+    'session-clear-wait'];
   if (fcmConfigured()) caps.push('fcm');
   return caps;
 }

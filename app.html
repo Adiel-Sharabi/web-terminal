@@ -6137,7 +6137,7 @@
       }
       // #320 - an agent's reported wait can be wrong (an offer filed as "waiting on you").
       // Only a REPORTED reason is the person's to clear; mechanical ones are facts.
-      if (s.reason && s.reason.source === 'reported') {
+      if (s.reason && s.reason.kind === 'you' && s.reason.source === 'reported' && dbServerHas(s, 'session-clear-wait')) {
         items.push(`<button data-action="clear-wait" data-card="${esc(key)}">Not waiting</button>`);
       }
       if (s.brief) {

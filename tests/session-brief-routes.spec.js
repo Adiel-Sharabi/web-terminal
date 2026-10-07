@@ -304,7 +304,7 @@ test.describe('#313 / #314 / #315 — reason, hidden, server colour', () => {
   test('the server declares a colour and the capabilities, in /api/version and the cluster servers', async () => {
     const v = await (await ctx.get('/api/version')).json();
     expect(v.serverColor).toMatch(/^#[0-9a-fA-F]{6}$/);
-    for (const cap of ['server-color', 'session-hide', 'session-reason']) expect(v.capabilities).toContain(cap);
+    for (const cap of ['server-color', 'session-hide', 'session-reason', 'session-clear-wait']) expect(v.capabilities).toContain(cap);
     const c = await (await ctx.get('/api/cluster/sessions')).json();
     expect(c.servers[0].color).toBe(v.serverColor);
   });

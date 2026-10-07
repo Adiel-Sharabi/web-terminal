@@ -240,6 +240,15 @@ test.describe('#298 sessions dashboard (app.html)', () => {
     await card.locator('[data-action=menu]').click();
     await page.click('#dbBody .db-menu [data-action=clear-wait]');
     await expect.poll(async () => (await (await api.get('/api/sessions')).json()).find((s) => s.id === id).reason).toBeNull();
+    // ...and never on a MECHANICAL reason: a running turn is a fact, not a report.
+    const busy = await newSession(`${tag}-busy`);
+    await hook(busy, 'UserPromptSubmit', { prompt: 'go' });
+    await hook(busy, 'PreToolUse', { tool_name: 'Read', tool_input: {} });
+    const busyCard = page.locator('#dbBody [data-action=open]', { hasText: `${tag}-busy` }).first();
+    await expect(busyCard).toBeVisible();
+    await busyCard.locator('[data-action=menu]').click();
+    await expect(page.locator('#dbBody .db-menu')).toBeVisible();
+    await expect(page.locator('#dbBody .db-menu [data-action=clear-wait]')).toHaveCount(0);
     await expect(page.locator('#dbBody [data-action=open]', { hasText: tag }).first().locator('.rs-chip.you')).toHaveCount(0);
   });
 

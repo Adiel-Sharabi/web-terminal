@@ -435,7 +435,9 @@ class _WorkBoardScreenState extends State<WorkBoardScreen> {
       onToggleReporting: (brief && s.brief != null) ? () => _toggleReporting(s) : null,
       onHide: _repo.supportsHide(base) ? () => _setHidden(s, !boardIsHidden(s)) : null,
       // #320 - only a REPORTED reason is the person's to clear.
-      onClearWait: (brief && s.reason?.source == 'reported') ? () => _patch(s, clearWait: true) : null,
+      onClearWait: (_repo.supportsClearWait(base) && s.reason?.kind == 'you' && s.reason?.source == 'reported')
+          ? () => _patch(s, clearWait: true)
+          : null,
       onStar: _repo.supportsFavorites(base) ? () => _toggleStar(s) : null,
     );
   }

@@ -247,7 +247,7 @@ void main() {
     setUp(() {
       patches = [];
       paths = [];
-      capabilities = ['session-brief', 'session-hide', 'favorites-sync'];
+      capabilities = ['session-brief', 'session-hide', 'favorites-sync', 'session-clear-wait'];
       rows = [
         _row('s1', 'Dictation work', status: 'working', brief: _briefJson(
           items: [

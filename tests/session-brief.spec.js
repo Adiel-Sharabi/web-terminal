@@ -424,5 +424,6 @@ test.describe('wait and hidden (#313, #314)', () => {
     // #320: "you" is a question the FINAL reply asks, never an offer.
     expect(B.instructionText(null, 'CMD')).toContain('FINAL reply asks the user');
     expect(B.instructionText(null, 'CMD')).toContain('never an offer');
+    expect(B.instructionText(null, 'CMD')).toContain('must match what your final reply says');
   });
 });
