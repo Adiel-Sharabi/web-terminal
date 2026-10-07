@@ -264,6 +264,13 @@ test.describe('#313 / #314 / #315 — reason, hidden, server colour', () => {
     expect((await rowOf('/api/sessions')).reason).toBeNull();
   });
 
+  test('a wait-only report from a session that never reported is refused, saying why', async () => {
+    await hook(id, 'UserPromptSubmit', { prompt: 'go' });
+    const r = await report(id, { wait: { on: 'done' } });
+    expect(r.status).toBe(400);
+    expect(r.json.error).toContain('first');
+  });
+
   test('a wait-only report keeps the work items', async () => {
     await hook(id, 'UserPromptSubmit', { prompt: 'go' });
     await report(id, { items: [{ ref: '#41', title: 'T', state: 'in-progress' }] });

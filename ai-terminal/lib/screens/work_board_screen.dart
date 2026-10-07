@@ -148,6 +148,9 @@ ReasonSection reasonSectionOf(Session s) {
     case 'done':
       return ReasonSection.done;
   }
+  // A peer too old to send `reason` still has a status: a turn it is running is
+  // "Working", never "Idle" (#313 review).
+  if (s.reason == null && s.status == 'working') return ReasonSection.working;
   final b = s.brief;
   final reported = b != null && (b.items.isNotEmpty || b.headline != null);
   return reported ? ReasonSection.idle : ReasonSection.notReported;
@@ -323,6 +326,9 @@ class _WorkBoardScreenState extends State<WorkBoardScreen> {
   }
 
   void _say(String text, {SnackBarAction? action}) {
+    // An Undo outlives the screen (the snackbar is the root messenger's), so its
+    // failure can land here after the board was closed.
+    if (!mounted) return;
     final m = ScaffoldMessenger.maybeOf(context);
     m?.hideCurrentSnackBar();
     m?.showSnackBar(SnackBar(content: Text(text), action: action, duration: const Duration(seconds: 5)));
@@ -1180,7 +1186,10 @@ class BoardRow extends StatelessWidget {
               child: Row(children: [
                 StatusDot(status: st.dot, size: 8),
                 const SizedBox(width: 8),
-                Flexible(
+                // The name takes ALL the free room; the chip is capped and ellipsises
+                // (#313 review: flexed siblings each kept a share, leaving the name a
+                // third of a phone row even when the chip was one short word).
+                Expanded(
                   child: Text(s.name,
                       maxLines: 1,
                       overflow: TextOverflow.ellipsis,
@@ -1188,8 +1197,8 @@ class BoardRow extends StatelessWidget {
                 ),
                 const SizedBox(width: 8),
                 ServerBadge(name: s.server.name, color: color),
-                const Spacer(),
-                Flexible(child: Align(alignment: Alignment.centerRight, child: _statusOrReason(s))),
+                const SizedBox(width: 8),
+                ConstrainedBox(constraints: const BoxConstraints(maxWidth: 150), child: _statusOrReason(s)),
                 if (unhide && actions.onHide != null)
                   TextButton(onPressed: actions.onHide, child: const Text('Unhide'))
                 else if (more != null)

@@ -186,6 +186,12 @@ void main() {
       expect(boardStatusOf(_session('c', status: 'working')).label, 'Working');
     });
 
+    test('reasonSectionOf: a peer without `reason` that is working is Working, not Idle', () {
+      expect(reasonSectionOf(_session('w', status: 'working', brief: const SessionBrief(headline: 'h'))), ReasonSection.working);
+      expect(reasonSectionOf(_session('i', brief: const SessionBrief(headline: 'h'))), ReasonSection.idle);
+      expect(reasonSectionOf(_session('n')), ReasonSection.notReported);
+    });
+
     test('noItemReason distinguishes never-reported, off and empty', () {
       expect(noItemReason(_session('a')), 'Not reporting');
       expect(noItemReason(_session('a', brief: const SessionBrief(reportingOn: false))), 'Reporting is off for this session');
@@ -489,6 +495,16 @@ void main() {
         matching: find.byWidgetPredicate((w) => w is ColoredBox && w.color == const Color(0xFFE27BF5)),
       );
       expect(stripe, findsOneWidget, reason: 'the server declared #E27BF5');
+      await tester.pumpWidget(const SizedBox());
+    });
+
+    testWidgets('a phone-width row keeps most of its width for the session name', (tester) async {
+      rows = [_row('q', 'Dictation work in progress')];
+      final r = await repo();
+      await pump(tester, r: r, width: 360);
+      final name = tester.getSize(find.text('Dictation work in progress'));
+      expect(name.width, greaterThan(120), reason: 'three equal flexes left it a third of the row');
+      expect(tester.takeException(), isNull);
       await tester.pumpWidget(const SizedBox());
     });
 

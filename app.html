@@ -5965,6 +5965,7 @@
       if (!dbOpen) return;
       dbOpen = false;
       dbEditing = null;
+      dbMenu = null;
       clearInterval(dbTimer);
       dbTimer = null;
       document.getElementById('dashboard').hidden = true;
@@ -6267,7 +6268,9 @@
         html += dbSection('&#9733; Favorites', favs, { cls: 'db-favs' });
         if (dbGroup === 'reason') {
           const of = (pred) => dbSorted(rest.filter(pred));
-          const kind = (s) => (s.reason ? s.reason.kind : null);
+          // A peer too old to send `reason` still has a status: a turn it is running
+          // is "Working", never "Idle" (#313 review).
+          const kind = (s) => (s.reason ? s.reason.kind : (s.status === 'working' ? 'working' : null));
           const reported = (s) => !!(s.brief && (((s.brief.items || []).length) || s.brief.headline));
           html += dbSection('Needs you', of((s) => dbNeedsYou(s)), { cls: 'db-sec-you' });
           html += dbSection('Working', of((s) => !dbNeedsYou(s) && kind(s) === 'working'));
@@ -6367,11 +6370,14 @@
     // favourite is unstarred first: "starred" and "hidden" would contradict each other.
     async function dbSetHidden(s, hidden) {
       const wasFav = !!s.favorite;
-      if (hidden && wasFav && !(await dbPatchFavorite(s, false))) { refreshDashboard(); return; }
+      if (hidden && wasFav) {
+        if (!(await dbPatchFavorite(s, false))) { refreshDashboard(); return; }
+        loadSidebar();
+      }
       if (!(await dbPatchBrief(s, { hidden }))) return;
       dbToast(`${hidden ? 'Hidden' : 'Unhid'} "${s.name}"`, async () => {
         await dbPatchBrief(s, { hidden: !hidden });
-        if (hidden && wasFav) { await dbPatchFavorite(s, true); refreshDashboard(); }
+        if (hidden && wasFav) { await dbPatchFavorite(s, true); refreshDashboard(); loadSidebar(); }
       });
     }
 
@@ -6478,6 +6484,7 @@
     document.addEventListener('keydown', (e) => {
       // Enter on a focused card opens it, like a click; Enter in the pin form saves it.
       // Scoped to the dashboard's own targets so the terminal's keys are never touched.
+      if (dbOpen && e.key === 'Escape' && dbMenu) { e.preventDefault(); dbMenu = null; renderDashboard(); return; }
       if (!dbOpen || e.key !== 'Enter') return;
       const form = e.target && e.target.closest && e.target.closest('#dashboard .db-pinform');
       if (form && e.target.tagName === 'INPUT') {

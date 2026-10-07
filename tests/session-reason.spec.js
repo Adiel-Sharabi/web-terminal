@@ -27,9 +27,13 @@ test.describe('sessionReason (#313)', () => {
     expect(sessionReason({ status: 'waiting', waitingFor: 'permission' }).text).toBe('approve a tool');
   });
 
-  test('a usage cap is self-resuming, with the time it resumes', () => {
-    const r = sessionReason({ status: 'idle', usageLimit: { waiting: true, resumeAt: T + 60_000 }, ...reported('you') });
-    expect(r).toMatchObject({ kind: 'self', source: 'usage-limit', until: T + 60_000 });
+  test('an ARMED usage cap is self-resuming, labelled with the reset', () => {
+    const r = sessionReason({ status: 'idle', usageLimit: { waiting: true, armed: true, resetAt: T, resumeAt: T + 60_000 }, ...reported('you') });
+    expect(r).toMatchObject({ kind: 'self', source: 'usage-limit', until: T });
+  });
+
+  test('a cap nothing will resume is NOT "running on its own": it keeps its Capped status', () => {
+    expect(sessionReason({ status: 'idle', usageLimit: { waiting: true, armed: false, resetAt: T }, ...reported('done') })).toBeNull();
   });
 
   test('live background work is self-resuming, named and aged', () => {

@@ -379,7 +379,7 @@ test.describe('wait and hidden (#313, #314)', () => {
   test('a wait-ONLY report keeps the items, and does not reset staleness', () => {
     let e = B.applyReport(B.emptyEntry(), B.validateReport({ items: [{ ref: '#9', state: 'blocked' }], headline: 'hl' }).report, T1);
     e = B.foldHook(e, 'UserPromptSubmit', { prompt: 'go on' }, T1 + 1);
-    const partial = B.validateReport({ wait: { on: 'external', what: 'licence from vendor' } });
+    const partial = B.validateReport({ wait: { on: 'external', what: 'licence from vendor' } }, e);
     expect(partial.report.partial).toBe(true);
     e = B.applyReport(e, partial.report, T1 + 2);
     expect(e.reported.items.map((i) => i.ref)).toEqual(['#9']);
@@ -387,6 +387,20 @@ test.describe('wait and hidden (#313, #314)', () => {
     expect(e.reported.at).toBe(T1);
     expect(e.promptsSinceReport).toBe(1);
     expect(B.buildBrief(e, { reporting: true }).wait).toEqual({ on: 'external', what: 'licence from vendor', at: T1 + 2 });
+  });
+
+  test('a wait alone is refused until the session has reported its work', () => {
+    const body = { wait: { on: 'done' } };
+    expect(B.validateReport(body, null).error).toContain('first');
+    expect(B.validateReport(body, B.emptyEntry()).error).toContain('first');
+    const e = B.applyReport(B.emptyEntry(), B.validateReport({ headline: 'h' }).report, T1);
+    expect(B.validateReport(body, e).report.partial).toBe(true);
+  });
+
+  test('a "self" wait ends on ANY prompt, the harness waking it included', () => {
+    let e = B.applyReport(B.emptyEntry(), B.validateReport({ headline: 'h', wait: { on: 'self', what: 'CI checks' } }).report, T1);
+    e = B.foldHook(e, 'UserPromptSubmit', { prompt: '<task-notification><task-id>x</task-id></task-notification>' }, T1 + 1);
+    expect(e.reported.wait).toBeNull();
   });
 
   test('a typed prompt clears the wait; an injected turn does not', () => {

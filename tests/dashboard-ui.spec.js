@@ -230,7 +230,8 @@ test.describe('#298 sessions dashboard (app.html)', () => {
     const evil = '<img src=x onerror="window.__pwned=1">';
     const id = await newSession(`x${evil}`);
     await hook(id, 'UserPromptSubmit', { prompt: evil });
-    await report(id, { items: [{ ref: `#1${evil}`.slice(0, 60), title: evil, state: 'done', note: evil }], headline: evil });
+    await report(id, { items: [{ ref: `#1${evil}`.slice(0, 60), title: evil, state: 'done', note: evil }], headline: evil, wait: { on: 'external', what: evil } });
+    await hook(id, 'Stop', {});
     await loginPage(page);
     await page.goto(`${BASE}/app#dashboard`);
     await expect(page.locator('.db-card', { hasText: 'onerror' }).first()).toBeVisible();
