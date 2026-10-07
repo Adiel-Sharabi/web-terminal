@@ -182,6 +182,25 @@ test.describe('foldHook / applyReport / staleness', () => {
     expect(e.cwd).toBe('/r');
   });
 
+  test('a harness-injected turn is not the last prompt and does not count (#307)', () => {
+    let e = fold(null, 'UserPromptSubmit', { prompt: 'ship it' });
+    const note = ['<task-notification>', '<task-id>b1</task-id>', '<status>completed</status>', '</task-notification>'].join('\n');
+    e = fold(e, 'UserPromptSubmit', { prompt: note }, T0 + 1);
+    e = fold(e, 'UserPromptSubmit', { prompt: '<system-reminder>only a reminder</system-reminder>' }, T0 + 2);
+    expect(e.prompt).toEqual({ text: 'ship it', at: T0 });
+    expect(e.promptsSinceReport).toBe(1);
+    // A typed prompt carrying a stapled reminder keeps only what was typed.
+    e = fold(e, 'UserPromptSubmit', { prompt: ['and test it', '<system-reminder>x</system-reminder>'].join('\n') }, T0 + 3);
+    expect(e.prompt.text).toBe('and test it');
+    expect(e.promptsSinceReport).toBe(2);
+    // A slash command is typed, in either delivery shape, and reads as /name args.
+    e = fold(e, 'UserPromptSubmit', { prompt: '/compact keep the plan' }, T0 + 4);
+    expect(e.prompt.text).toBe('/compact keep the plan');
+    e = fold(e, 'UserPromptSubmit', { prompt: '<command-name>/compact</command-name><command-args>focus</command-args>' }, T0 + 5);
+    expect(e.prompt.text).toBe('/compact focus');
+    expect(e.promptsSinceReport).toBe(4);
+  });
+
   test('stale: an unreported touch, nothing reported yet, or too many prompts', () => {
     let e = fold(null, 'PreToolUse', { tool_name: 'Bash', tool_input: {} });
     expect(B.staleness(e).reason).toBe('nothing reported yet');
