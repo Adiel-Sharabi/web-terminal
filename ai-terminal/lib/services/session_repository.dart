@@ -125,6 +125,15 @@ class SessionRepository {
   /// offered — and no PATCH ever fired — until a server actually confirms it.
   final Map<String, bool> _favoritesSyncSupported = <String, bool>{};
 
+  /// Per-server `session-brief` capability (#298/#306), from the same call: the
+  /// sessions dashboard offers pin / stop-reporting and asks for the closed list
+  /// only where the server has the routes. Same fail-closed reading as above.
+  final Map<String, bool> _briefSupported = <String, bool>{};
+
+  /// Per-server `SERVER_VERSION`, from the same call, for the dashboard's server
+  /// headers. Absent until a version call has succeeded.
+  final Map<String, String> _serverVersion = <String, String>{};
+
   // Live `/ws/notify` subscriptions, keyed by server base URL, alongside the
   // exact [ServerConfig] each was opened with (to detect a token change).
   // Re-synced from [AppConfig.serversStream] as servers are added/removed.
@@ -280,6 +289,14 @@ class SessionRepository {
   /// server too old for the route — or one not yet reached — never receives a
   /// PATCH it can't handle.
   bool supportsFavorites(String baseUrl) => _favoritesSyncSupported[baseUrl] ?? false;
+
+  /// Whether the server at [baseUrl] advertises `session-brief` (#298) — i.e. has
+  /// `PATCH /api/sessions/:id/brief` and `GET /api/dashboard/closed`. False until a
+  /// successful `/api/version` confirms it.
+  bool supportsBrief(String baseUrl) => _briefSupported[baseUrl] ?? false;
+
+  /// The server's `SERVER_VERSION`, or null before a version call has succeeded.
+  String? serverVersion(String baseUrl) => _serverVersion[baseUrl];
 
   /// Fetches all configured servers in parallel and emits the merged, sorted
   /// list. A server that fails is marked offline and contributes its last-known
@@ -527,6 +544,8 @@ class SessionRepository {
     _namesResolved.remove(baseUrl);
     _versionFetchedAt.remove(baseUrl);
     _favoritesSyncSupported.remove(baseUrl);
+    _briefSupported.remove(baseUrl);
+    _serverVersion.remove(baseUrl);
   }
 
   /// Updates [_apiErrors], [_compacting] and [_submitUnconfirmedAt] from a
@@ -999,6 +1018,8 @@ class SessionRepository {
         _store.updateServerName(server.baseUrl, info.serverName);
       }
       _favoritesSyncSupported[server.baseUrl] = info.has('favorites-sync');
+      _briefSupported[server.baseUrl] = info.has('session-brief');
+      _serverVersion[server.baseUrl] = info.version;
       _namesResolved.add(server.baseUrl);
       _versionFetchedAt[server.baseUrl] = now;
     } catch (_) {

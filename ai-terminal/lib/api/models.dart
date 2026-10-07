@@ -242,6 +242,10 @@ class Session {
   /// The 5h usage-limit state (#137), or `null` from a server too old to send it.
   final UsageLimit? usageLimit;
 
+  /// What this session has told the sessions dashboard about its work (#298), or
+  /// `null` — no hook has spoken for it yet, or the server is too old to know.
+  final SessionBrief? brief;
+
   /// Creates a session value object. [autoCommand] is optional (default `''`)
   /// so existing call sites and tests that predate the field keep compiling.
   const Session({
@@ -266,6 +270,7 @@ class Session {
     this.agentReady = true,
     this.blockedPrompt,
     this.usageLimit,
+    this.brief,
   });
 
   /// This session with a different pinned rank (#124), for the optimistic half of
@@ -297,6 +302,7 @@ class Session {
     agentReady: agentReady,
     blockedPrompt: blockedPrompt,
     usageLimit: usageLimit,
+    brief: brief,
   );
 
   /// Builds a [Session] from one element of the `GET /api/sessions` array,
@@ -330,6 +336,7 @@ class Session {
       // ordinary boot. Failing this one open would be claiming a block nobody saw.
       blockedPrompt: BlockedPrompt.fromJson(json['blockedPrompt']),
       usageLimit: UsageLimit.fromJson(json['usageLimit']),
+      brief: SessionBrief.fromJson(json['brief']),
     );
   }
 
@@ -478,6 +485,185 @@ class UsageLimit {
       enabled: json['enabled'] != false,
       resetAt: _asInt(json['resetAt']),
       resumeAt: _asInt(json['resumeAt']),
+    );
+  }
+}
+
+/// The work-item states a session can report (#298), in workflow order. The server
+/// (`lib/session-brief.js` ITEM_STATES) owns the list and normalises aliases before
+/// anything reaches the wire; this copy exists only to offer a picker when PINNING
+/// an item, and an unknown state from a newer server still renders, as plain text.
+const List<String> kBriefItemStates = <String>[
+  'planning', 'in-progress', 'blocked', 'ready-for-test', 'committed', 'done',
+];
+
+/// One work item on a session's brief (#298/#306).
+class BriefItem {
+  /// As written: `#123`, `owner/repo#123`, `ado:12345`.
+  final String ref;
+
+  /// The server's cross-session identity for this item (`globalKey` in
+  /// `lib/session-brief.js`). "By work item" groups on it rather than on [ref],
+  /// because `#297` in one repo and `owner/repo#297` elsewhere can be one item.
+  final String key;
+  final String title;
+
+  /// One of [kBriefItemStates], or null when nobody said.
+  final String? state;
+  final String note;
+
+  /// Pinned by a person from a dashboard, rather than reported by the agent. Only
+  /// a pinned item can be unpinned.
+  final bool pinned;
+
+  /// A browsable link to the item, when the server could build one.
+  final String? url;
+
+  const BriefItem({
+    required this.ref,
+    required this.key,
+    this.title = '',
+    this.state,
+    this.note = '',
+    this.pinned = false,
+    this.url,
+  });
+
+  static BriefItem? fromJson(dynamic json) {
+    if (json is! Map) return null;
+    final ref = (json['ref'] ?? '').toString();
+    if (ref.isEmpty) return null;
+    final key = (json['key'] ?? '').toString();
+    final state = json['state']?.toString();
+    final url = json['url']?.toString();
+    return BriefItem(
+      ref: ref,
+      key: key.isEmpty ? ref : key,
+      title: (json['title'] ?? '').toString(),
+      state: (state == null || state.isEmpty) ? null : state,
+      note: (json['note'] ?? '').toString(),
+      pinned: json['source'] == 'pinned',
+      // Only an https link is ever opened — the value came over the wire.
+      url: (url != null && url.startsWith('https://')) ? url : null,
+    );
+  }
+
+  /// The shape `PATCH /api/sessions/:id/brief` takes for a pinned item.
+  Map<String, dynamic> toPinJson() => {
+        'ref': ref,
+        'title': title,
+        if (state != null) 'state': state,
+      };
+
+  static List<BriefItem> listFromJson(dynamic raw) => raw is List
+      ? raw.map(BriefItem.fromJson).whereType<BriefItem>().toList(growable: false)
+      : const <BriefItem>[];
+}
+
+/// A timestamped line on a brief: what the agent is doing now, what it last said
+/// it did, the last prompt.
+class BriefLine {
+  final String text;
+
+  /// Epoch milliseconds, or null.
+  final int? at;
+  const BriefLine(this.text, this.at);
+
+  static BriefLine? fromJson(dynamic json) {
+    if (json is! Map) return null;
+    final text = (json['text'] ?? '').toString().trim();
+    return text.isEmpty ? null : BriefLine(text, _asInt(json['at']));
+  }
+}
+
+/// What a session has told the sessions dashboard about its work (#298), as the
+/// server builds it (`buildBrief` in `lib/session-brief.js`). Every rule — which
+/// items show, pinned-over-reported precedence, when a report is stale — is made
+/// there; this class only carries the answer, so the companion and `app.html` can
+/// never disagree about a card.
+class SessionBrief {
+  /// False when reporting is switched off for this session (opted out, or excluded
+  /// by the server's config).
+  final bool reportingOn;
+  final List<BriefItem> items;
+  final String? headline;
+  final int? reportAt;
+  final BriefLine? now;
+  final BriefLine? did;
+  final BriefLine? prompt;
+
+  /// Why the report may be out of date, or null when it is current.
+  final String? staleReason;
+
+  const SessionBrief({
+    this.reportingOn = true,
+    this.items = const <BriefItem>[],
+    this.headline,
+    this.reportAt,
+    this.now,
+    this.did,
+    this.prompt,
+    this.staleReason,
+  });
+
+  static SessionBrief? fromJson(dynamic json) {
+    if (json is! Map) return null;
+    final headline = json['headline']?.toString().trim();
+    final stale = json['stale'];
+    final reason = stale is Map ? stale['reason']?.toString().trim() : null;
+    return SessionBrief(
+      reportingOn: json['reporting'] != 'off',
+      items: BriefItem.listFromJson(json['items']),
+      headline: (headline == null || headline.isEmpty) ? null : headline,
+      reportAt: _asInt(json['reportAt']),
+      now: BriefLine.fromJson(json['now']),
+      did: BriefLine.fromJson(json['did']),
+      prompt: BriefLine.fromJson(json['prompt']),
+      staleReason: (reason == null || reason.isEmpty) ? null : reason,
+    );
+  }
+
+  /// The items a person pinned, in the shape the PATCH takes — the list to edit
+  /// when pinning or unpinning one.
+  List<Map<String, dynamic>> get pinnedForPatch =>
+      items.where((i) => i.pinned).map((i) => i.toPinJson()).toList(growable: false);
+}
+
+/// A session that ended in the last day (`GET /api/dashboard/closed`), kept so the
+/// dashboard can say what it was doing when it went.
+class ClosedSession {
+  final String id;
+  final String name;
+  final List<BriefItem> items;
+  final String? headline;
+  final BriefLine? did;
+  final int? at;
+  final ServerConfig server;
+
+  const ClosedSession({
+    required this.id,
+    required this.name,
+    required this.server,
+    this.items = const <BriefItem>[],
+    this.headline,
+    this.did,
+    this.at,
+  });
+
+  static ClosedSession? fromJson(ServerConfig server, dynamic json) {
+    if (json is! Map) return null;
+    final id = (json['id'] ?? '').toString();
+    if (id.isEmpty) return null;
+    final name = (json['name'] ?? '').toString();
+    final headline = json['headline']?.toString().trim();
+    return ClosedSession(
+      id: id,
+      name: name.isEmpty ? id : name,
+      server: server,
+      items: BriefItem.listFromJson(json['items']),
+      headline: (headline == null || headline.isEmpty) ? null : headline,
+      did: BriefLine.fromJson(json['did']),
+      at: _asInt(json['at']),
     );
   }
 }

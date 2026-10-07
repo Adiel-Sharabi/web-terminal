@@ -426,6 +426,33 @@ class ApiClient {
         body: {'enabled': enabled});
   }
 
+  /// Edits [sessionId]'s dashboard brief (`PATCH /api/sessions/:id/brief`, #298):
+  /// [pinned] replaces the WHOLE list of person-pinned work items, [optOut] stops
+  /// or resumes reporting. A null argument is left out of the request, so it is
+  /// left unchanged. Returns the brief the server rebuilt.
+  Future<SessionBrief?> patchBrief(String sessionId,
+      {List<Map<String, dynamic>>? pinned, bool? optOut}) async {
+    final res = await _send('PATCH', '/api/sessions/$sessionId/brief', body: {
+      'pinned': ?pinned,
+      'optOut': ?optOut,
+    });
+    return SessionBrief.fromJson(_asMap(_decode(res))['brief']);
+  }
+
+  /// Sessions on THIS server that ended in the last day, newest first
+  /// (`GET /api/dashboard/closed`, #298). A server too old for the route 404s,
+  /// which throws like any other failure; the caller treats that as "none".
+  Future<List<ClosedSession>> dashboardClosed() async {
+    final res = await _send('GET', '/api/dashboard/closed');
+    final list = _asMap(_decode(res))['closed'];
+    return list is List
+        ? list
+            .map((j) => ClosedSession.fromJson(server, j))
+            .whereType<ClosedSession>()
+            .toList(growable: false)
+        : const <ClosedSession>[];
+  }
+
   /// Sets or clears [sessionId]'s pin (`PATCH /api/sessions/:id/favorite`,
   /// issue #60).
   ///
