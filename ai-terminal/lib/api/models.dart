@@ -519,6 +519,10 @@ class BriefItem {
   /// A browsable link to the item, when the server could build one.
   final String? url;
 
+  /// For a pinned item, what the person actually pinned — apart from the title and
+  /// state the agent's report lends the card. Null from a server too old to send it.
+  final ({String title, String? state})? pin;
+
   const BriefItem({
     required this.ref,
     required this.key,
@@ -527,6 +531,7 @@ class BriefItem {
     this.note = '',
     this.pinned = false,
     this.url,
+    this.pin,
   });
 
   static BriefItem? fromJson(dynamic json) {
@@ -536,6 +541,8 @@ class BriefItem {
     final key = (json['key'] ?? '').toString();
     final state = json['state']?.toString();
     final url = json['url']?.toString();
+    final pin = json['pin'];
+    final pinState = pin is Map ? pin['state']?.toString() : null;
     return BriefItem(
       ref: ref,
       key: key.isEmpty ? ref : key,
@@ -545,15 +552,21 @@ class BriefItem {
       pinned: json['source'] == 'pinned',
       // Only an https link is ever opened — the value came over the wire.
       url: (url != null && url.startsWith('https://')) ? url : null,
+      pin: pin is Map
+          ? (title: (pin['title'] ?? '').toString(), state: (pinState == null || pinState.isEmpty) ? null : pinState)
+          : null,
     );
   }
 
-  /// The shape `PATCH /api/sessions/:id/brief` takes for a pinned item.
-  Map<String, dynamic> toPinJson() => {
-        'ref': ref,
-        'title': title,
-        if (state != null) 'state': state,
-      };
+  /// The shape `PATCH /api/sessions/:id/brief` takes for a pinned item: what was
+  /// PINNED, never the card's merged values. The merged state is the agent's, and a
+  /// pin's own state wins, so sending it back would freeze it after the agent moved
+  /// on. A server too old to send [pin] gets the merged values — all it can be given.
+  Map<String, dynamic> toPinJson() {
+    final t = pin?.title ?? title;
+    final st = pin == null ? state : pin!.state;
+    return {'ref': ref, 'title': t, 'state': ?st};
+  }
 
   static List<BriefItem> listFromJson(dynamic raw) => raw is List
       ? raw.map(BriefItem.fromJson).whereType<BriefItem>().toList(growable: false)
@@ -623,8 +636,8 @@ class SessionBrief {
     );
   }
 
-  /// The items a person pinned, in the shape the PATCH takes — the list to edit
-  /// when pinning or unpinning one.
+  /// The items a person pinned, as they were pinned, in the shape the PATCH takes —
+  /// the list to edit when pinning or unpinning one (the PATCH replaces it whole).
   List<Map<String, dynamic>> get pinnedForPatch =>
       items.where((i) => i.pinned).map((i) => i.toPinJson()).toList(growable: false);
 }

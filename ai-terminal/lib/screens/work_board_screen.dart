@@ -148,7 +148,6 @@ class _WorkBoardScreenState extends State<WorkBoardScreen> {
   final Map<String, ({DateTime at, List<ClosedSession> list})> _closed = {};
   DateTime? _updatedAt;
   BoardGrouping _grouping = BoardGrouping.server;
-  String? _error;
 
   List<ServerConfig> get _servers => (widget.servers ?? () => AppConfig.servers)();
   ApiClient _client(ServerConfig s) => (widget.clientFactory ?? ApiClient.new)(s);
@@ -165,7 +164,11 @@ class _WorkBoardScreenState extends State<WorkBoardScreen> {
       });
       unawaited(_refreshClosed());
     });
-    _poll = Timer.periodic(widget.pollInterval, (_) => unawaited(_repo.refresh()));
+    // Only while the app is in the foreground: `main.dart` stops the repository's own
+    // polling when the app is backgrounded, and this faster tick must not undo that.
+    _poll = Timer.periodic(widget.pollInterval, (_) {
+      if (_repo.isForeground) unawaited(_repo.refresh());
+    });
     unawaited(_repo.refresh());
   }
 
@@ -177,8 +180,13 @@ class _WorkBoardScreenState extends State<WorkBoardScreen> {
   }
 
   Future<void> _refreshClosed() async {
-    final due = _servers.where((sv) {
+    final servers = _servers;
+    // A server removed from the list takes its history with it.
+    _closed.removeWhere((url, _) => !servers.any((sv) => sv.baseUrl == url));
+    final due = servers.where((sv) {
       if (!_repo.supportsBrief(sv.baseUrl)) return false;
+      // Not worth a request that cannot succeed; its last list stays until it is back.
+      if (_repo.serverUsable[sv.baseUrl] != true) return false;
       final hit = _closed[sv.baseUrl];
       return hit == null || DateTime.now().difference(hit.at) > _closedEvery;
     }).toList();
@@ -199,12 +207,14 @@ class _WorkBoardScreenState extends State<WorkBoardScreen> {
   }
 
   Future<void> _patch(Session s, {List<Map<String, dynamic>>? pinned, bool? optOut}) async {
+    final messenger = ScaffoldMessenger.of(context);
     try {
       await _client(s.server).patchBrief(s.id, pinned: pinned, optOut: optOut);
-      if (mounted) setState(() => _error = null);
     } catch (e) {
+      // A snackbar rather than a banner: it says what failed and then goes away,
+      // instead of sitting on the board until some later save happens to succeed.
       final msg = e is ApiException ? e.message : '$e';
-      if (mounted) setState(() => _error = 'Could not save: $msg');
+      messenger.showSnackBar(SnackBar(content: Text('Could not save: $msg')));
     }
     await _repo.refresh();
   }
@@ -225,7 +235,6 @@ class _WorkBoardScreenState extends State<WorkBoardScreen> {
 
   @override
   Widget build(BuildContext context) {
-    final theme = Theme.of(context);
     final sessions = _sessions;
     final needs = sessions.where((s) => s.status == 'waiting').toList();
     final working = sessions.where((s) => s.status == 'working').length;
@@ -243,11 +252,6 @@ class _WorkBoardScreenState extends State<WorkBoardScreen> {
         capped: capped,
         updatedAt: _updatedAt,
       ),
-      if (_error != null)
-        Padding(
-          padding: const EdgeInsets.fromLTRB(16, 4, 16, 4),
-          child: Text(_error!, style: TextStyle(color: theme.colorScheme.error)),
-        ),
       if (needs.isNotEmpty) _NeedsYou(sessions: needs, onOpen: widget.onOpenSession),
       if (sessions.isEmpty)
         const Padding(
@@ -633,6 +637,8 @@ class BoardCard extends StatelessWidget {
   Widget _itemRow(BuildContext context, BriefItem it) {
     final theme = Theme.of(context);
     final ref = Text(it.ref,
+        maxLines: 1,
+        overflow: TextOverflow.ellipsis,
         style: TextStyle(
           color: theme.colorScheme.primary,
           fontFamily: 'monospace',
@@ -640,18 +646,22 @@ class BoardCard extends StatelessWidget {
           fontSize: 12,
           decoration: it.url != null ? TextDecoration.underline : null,
         ));
+    final uri = it.url == null ? null : Uri.tryParse(it.url!);
     return Tooltip(
-      message: it.note.isEmpty ? '' : it.note,
+      message: it.note,
       child: Padding(
         padding: const EdgeInsets.symmetric(vertical: 2),
         child: Row(children: [
-          if (it.url != null)
-            InkWell(
-              onTap: () => launchUrl(Uri.parse(it.url!), mode: LaunchMode.externalApplication),
-              child: ref,
-            )
-          else
-            ref,
+          // Flexible: a qualified ref (`owner/repo#306`) beside a state pill and an
+          // unpin button is wider than a phone card. The ref gives way, not the pill.
+          Flexible(
+            child: uri != null
+                ? InkWell(
+                    onTap: () => launchUrl(uri, mode: LaunchMode.externalApplication),
+                    child: ref,
+                  )
+                : ref,
+          ),
           const SizedBox(width: 8),
           Expanded(
             child: Text(it.title, maxLines: 1, overflow: TextOverflow.ellipsis, style: theme.textTheme.bodySmall),
@@ -741,6 +751,8 @@ class _PinDialogState extends State<_PinDialog> {
   @override
   Widget build(BuildContext context) {
     return AlertDialog(
+      // Scrollable: with a phone keyboard up there is not room for all three fields.
+      scrollable: true,
       title: const Text('Pin a work item'),
       content: Column(
         mainAxisSize: MainAxisSize.min,
@@ -763,6 +775,8 @@ class _PinDialogState extends State<_PinDialog> {
           DropdownButtonFormField<String?>(
             key: const ValueKey('pin-state'),
             initialValue: _state,
+            // Expanded: a long state label ellipsises inside a narrow dialog.
+            isExpanded: true,
             decoration: const InputDecoration(labelText: 'State'),
             items: [
               const DropdownMenuItem<String?>(value: null, child: Text('—')),

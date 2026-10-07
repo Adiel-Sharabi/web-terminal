@@ -290,6 +290,11 @@ class SessionRepository {
   /// PATCH it can't handle.
   bool supportsFavorites(String baseUrl) => _favoritesSyncSupported[baseUrl] ?? false;
 
+  /// Whether the app is in the foreground, as `main.dart`'s lifecycle handling last
+  /// decided ([startForeground] / [stopForeground]). A screen that polls faster than
+  /// the repository's own timer asks this, so a backgrounded app stops paying.
+  bool get isForeground => _foreground;
+
   /// Whether the server at [baseUrl] advertises `session-brief` (#298) — i.e. has
   /// `PATCH /api/sessions/:id/brief` and `GET /api/dashboard/closed`. False until a
   /// successful `/api/version` confirms it.
