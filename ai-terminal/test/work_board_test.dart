@@ -463,6 +463,23 @@ void main() {
       await tester.pumpWidget(const SizedBox());
     });
 
+    testWidgets('the "Hidden" toast with Undo goes away by itself (#322)', (tester) async {
+      rows = [_row('v', 'Visible one', brief: _briefJson())];
+      final r = await repo();
+      await pump(tester, r: r);
+      await tester.tap(find.byKey(ValueKey('board-more-${_server.baseUrl}-v')));
+      await tester.pumpAndSettle();
+      await tester.tap(find.text('Hide from dashboard'));
+      await tester.pump();
+      await tester.runAsync(() => Future<void>.delayed(const Duration(milliseconds: 50)));
+      await tester.pumpAndSettle();
+      expect(find.text('Hidden "Visible one"'), findsOneWidget);
+      await tester.pump(const Duration(seconds: 6));
+      await tester.pumpAndSettle();
+      expect(find.text('Hidden "Visible one"'), findsNothing, reason: 'an action must not make the toast permanent');
+      await tester.pumpWidget(const SizedBox());
+    });
+
     testWidgets('the filter narrows the cards by name, work item and machine', (tester) async {
       rows = [
         _row('a', 'Alpha', brief: _briefJson()),
