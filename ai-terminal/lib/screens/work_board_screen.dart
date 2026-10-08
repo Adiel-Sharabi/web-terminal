@@ -357,10 +357,15 @@ class _WorkBoardScreenState extends State<WorkBoardScreen> {
     if (!mounted) return;
     final m = ScaffoldMessenger.maybeOf(context);
     m?.hideCurrentSnackBar();
-    // #322 - `persist: false` is load-bearing: the SDK defaults a snackbar WITH an action
-    // (our Undo) to persist, ignoring `duration`, so the toast never left the screen.
-    m?.showSnackBar(
-        SnackBar(content: Text(text), action: action, duration: const Duration(seconds: 5), persist: false));
+    // #322 - `persist` is load-bearing: the SDK defaults a snackbar WITH an action (our
+    // Undo) to persist, ignoring `duration`, so the toast never left the screen. It must
+    // still persist under TalkBack/VoiceOver, where the user needs time to reach Undo -
+    // the protection that default exists for.
+    m?.showSnackBar(SnackBar(
+        content: Text(text),
+        action: action,
+        duration: const Duration(seconds: 5),
+        persist: MediaQuery.accessibleNavigationOf(context)));
   }
 
   Future<bool> _patch(Session s,
