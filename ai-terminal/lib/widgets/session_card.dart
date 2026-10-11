@@ -19,11 +19,13 @@ import 'package:flutter/material.dart';
 import '../api/models.dart';
 import '../api/agent_catalog.dart';
 import '../services/favorite_toggle.dart';
+import '../services/session_repository.dart';
 import '../theme/app_theme.dart';
 import '../theme/status_colors.dart';
 import 'attention_chip.dart';
 import 'format_utils.dart';
 import 'resource_stats.dart';
+import 'reason_chip.dart';
 import 'server_badge.dart';
 import 'status_dot.dart';
 
@@ -147,6 +149,7 @@ class SessionCard extends StatelessWidget {
     final effectiveAttentionKind = hasApiError ? null : attentionKind;
     final dotStatus = hasApiError ? SessionStatus.apiError : status;
     final label = statusLabel(status);
+    final showReason = !hasApiError && hasReasonChip(session.reason);
 
     Color tint;
     Border border;
@@ -225,7 +228,11 @@ class SessionCard extends StatelessWidget {
                     _AgentChip(agentId: session.agent!),
                     const SizedBox(width: 8),
                   ],
-                  ServerBadge(name: session.server.name),
+                  ServerBadge(
+                    name: session.server.name,
+                    // #315: the machine's own colour, as its server declared it.
+                    color: colorFromHex(SessionRepository.instance.serverColor(session.server.baseUrl)),
+                  ),
                   if (onMoreTap != null)
                     _IconTapTarget(
                       icon: Icons.more_vert,
@@ -248,7 +255,11 @@ class SessionCard extends StatelessWidget {
                 padding: const EdgeInsets.only(left: 20),
                 child: Row(
                   children: [
-                    if (label.isNotEmpty && !hasApiError)
+                    // #313: WHY a non-working session is not working replaces the
+                    // bare status word; no reason keeps the word exactly as before.
+                    if (showReason)
+                      Flexible(child: ReasonChip(reason: session.reason!))
+                    else if (label.isNotEmpty && !hasApiError)
                       Text(
                         label,
                         style: theme.textTheme.bodySmall?.copyWith(
@@ -300,19 +311,26 @@ class SessionCard extends StatelessWidget {
                     // while a build is going — green alone reads as "nothing is
                     // happening". Amber matches the working dot so the two agree,
                     // without this pretending to BE a status.
-                    if (session.backgroundTasks.isNotEmpty) ...[
+                    //
+                    // #313: when the reason chip already says "running on its own"
+                    // because of THIS work, it is that chip - one fact, shown once.
+                    // Otherwise it carries an age, and a leftover shell that has
+                    // outlived any turn by hours is marked stale, not shown as a build.
+                    if (session.backgroundTasks.isNotEmpty && session.reason?.source != 'background') ...[
                       const SizedBox(width: 8),
-                      Icon(Icons.sync, size: 12, color: StatusColor.working),
+                      Icon(session.backgroundStale ? Icons.link_off : Icons.sync, size: 12,
+                          color: session.backgroundStale ? AppColors.onSurfaceVariant : StatusColor.working),
                       const SizedBox(width: 3),
                       Flexible(
                         child: Text(
-                          session.backgroundTasks.length > 1
-                              ? '${session.backgroundTasks.length} running'
-                              : session.backgroundTasks.first,
+                          session.backgroundStale
+                              ? 'stale shell'
+                              : '${session.backgroundTasks.length > 1 ? '${session.backgroundTasks.length} running' : session.backgroundTasks.first}'
+                                  '${session.backgroundSince == null ? '' : ' · ${durShort(DateTime.now().millisecondsSinceEpoch - session.backgroundSince!)}'}',
                           maxLines: 1,
                           overflow: TextOverflow.ellipsis,
                           style: theme.textTheme.bodySmall?.copyWith(
-                            color: StatusColor.working,
+                            color: session.backgroundStale ? AppColors.onSurfaceVariant : StatusColor.working,
                             fontWeight: FontWeight.w600,
                           ),
                         ),

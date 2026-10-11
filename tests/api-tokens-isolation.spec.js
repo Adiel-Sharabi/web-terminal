@@ -157,6 +157,24 @@ test.describe('#240/#272 the start-of-run reset is wired, guarded and refuses pr
     }
   });
 
+  test('#311: with no token store it refuses, whatever other per-run file is set', () => {
+    // The refusal is an `else` on the #272 line. #298 once inserted its own reset
+    // between the two, which hung the refusal off the BRIEFS file: with briefs set and
+    // no token store, the script exited 0 and the server minted into production.
+    const dir = scratch();
+    try {
+      const r = runReset({
+        WT_TEST: '1', WT_RESET_ROOT: dir,
+        WT_SESSION_BRIEFS_FILE: path.join(dir, 'briefs.test.json'),
+        WT_DEVICE_OPS_FILE: path.join(dir, 'ops.test.jsonl'),
+      });
+      expect(r.status, r.stderr).toBe(1);
+      expect(r.stderr).toContain('WT_API_TOKENS_FILE is not set');
+    } finally {
+      fs.rmSync(dir, { recursive: true, force: true });
+    }
+  });
+
   test('positive control: allowed, it removes both per-run files', () => {
     // Without this, the two refusals below would also pass against a script that
     // deletes nothing at all.

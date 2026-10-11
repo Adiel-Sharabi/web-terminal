@@ -42,10 +42,12 @@ import '../widgets/offline_banner.dart';
 import '../widgets/recap_sheet.dart';
 import '../widgets/session_action_sheet.dart';
 import '../widgets/resource_stats.dart';
+import '../widgets/server_badge.dart';
 import '../widgets/session_card.dart';
 import '../widgets/status_dot.dart';
 import 'session_screen.dart';
 import 'settings_screen.dart';
+import 'work_board_screen.dart';
 
 // #180 — `favoriteToggleAllowed` and the toggle itself moved to
 // `services/favorite_toggle.dart` when the session's own meta bar became a SECOND
@@ -165,6 +167,21 @@ class _DashboardScreenState extends State<DashboardScreen> {
       MaterialPageRoute(
         builder: (_) =>
             SessionScreen(sessionId: session.id, initialSession: session),
+      ),
+    );
+  }
+
+  void _openWorkBoard() {
+    Navigator.of(context).push(
+      MaterialPageRoute(
+        builder: (ctx) => WorkBoardScreen(
+          // Close the board, then open the session exactly as a tap on its row
+          // here would: selected in the split, or pushed on a phone.
+          onOpenSession: (s) {
+            Navigator.of(ctx).pop();
+            _openSession(s);
+          },
+        ),
       ),
     );
   }
@@ -426,6 +443,13 @@ class _DashboardScreenState extends State<DashboardScreen> {
                               ),
                             );
                           },
+                        ),
+                        // #306 — what every session is working on.
+                        IconButton(
+                          key: const ValueKey('open-work-board'),
+                          icon: const Icon(Icons.dashboard_outlined),
+                          tooltip: 'Dashboard: what every session is working on',
+                          onPressed: _openWorkBoard,
                         ),
                         IconButton(
                           icon: const Icon(Icons.settings_outlined),
@@ -765,6 +789,8 @@ class _ServerGroupHeader extends StatelessWidget {
           children: [
             ServerStatusDot(status: status),
             const SizedBox(width: 8),
+            // #315: the machine's colour as a square; the round dot is reachability.
+            ServerSwatch(color: colorFromHex(SessionRepository.instance.serverColor(baseUrl))),
             Text(
               name.toUpperCase(),
               style: theme.textTheme.labelSmall?.copyWith(
@@ -826,7 +852,11 @@ class _FilterChips extends StatelessWidget {
           separatorBuilder: (_, _) => const SizedBox(width: 8),
           itemBuilder: (context, i) {
             final label = labels[i];
+            final sv = i == 0 ? null : servers[i - 1];
             return ChoiceChip(
+              avatar: sv == null
+                  ? null
+                  : ServerSwatch(color: colorFromHex(SessionRepository.instance.serverColor(sv.baseUrl))),
               label: Text(label),
               selected: value == label,
               onSelected: (_) => onChanged(label),

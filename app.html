@@ -146,7 +146,18 @@
     .sb-fav-header.collapsed .srv-chev { transform: rotate(-90deg); }
     .sb-fav-header .fav-count { margin-left: auto; color: #7a8aa0; font-weight: 600; }
     .sb-fav-empty { padding: 6px 14px; color: #556; font-size: 11px; border-bottom: 1px solid #0a1a30; }
-    .sb-server-badge { font-size: 9px; color: #00d4aa; background: rgba(0,212,170,0.12); border-radius: 3px; padding: 1px 5px; margin-left: 6px; font-weight: 600; white-space: nowrap; flex: none; }
+    .sb-server-badge { font-size: 9px; color: var(--srv, #00d4aa); background: color-mix(in srgb, var(--srv, #00d4aa) 14%, transparent); border-radius: 3px; padding: 1px 5px; margin-left: 6px; font-weight: 600; white-space: nowrap; flex: none; }
+    /* #315 - a machine is a SQUARE (or a stripe); a status is a circle. */
+    .srv-swatch { display: inline-block; width: 8px; height: 8px; border-radius: 2px; margin: 0 5px 0 4px; flex: none; }
+    /* #313 - the reason a non-working session is not working. */
+    .rs-chip { display: inline-flex; align-items: center; gap: 3px; max-width: 190px; overflow: hidden; text-overflow: ellipsis;
+      white-space: nowrap; font-size: 10px; font-weight: 600; border-radius: 4px; padding: 0 5px; line-height: 16px; flex: none; }
+    .rs-chip.you { background: #e94560; color: #fff; }
+    .rs-chip.menu { color: #ff9aac; border: 1px solid #e94560; }
+    .rs-chip.self { color: #7ab3e8; background: rgba(122,179,232,0.14); }
+    .rs-chip.external { color: #a0aec8; border: 1px solid #a0aec8; }
+    .rs-chip.done { color: #7c879e; }
+    .sb-bg.stale { color: #8b94a5; animation: none; }
     .sb-star { background: transparent; border: none; color: #55617a; font-size: 14px; cursor: pointer; padding: 0 4px; line-height: 1; }
     .sb-star:hover { color: #f2c14e; }
     .sb-star.on { color: #f2c14e; }
@@ -503,6 +514,137 @@
        (max-width 600px) and short-height landscape phones (max-height 500px)
        — the latter fixes issue #27 where the top touchKeys row disappeared
        when a phone rotated to landscape. */
+    /* #298 - sessions dashboard. An OVERLAY above #main rather than a replacement for
+       #terminal: the open session's socket, size and scrollback are never touched, and
+       closing it returns exactly where you were. */
+    #dashboard { position: fixed; left: 0; right: 0; bottom: 0; top: var(--db-top, 36px); z-index: 90;
+      background: #12161f; color: #e0e4ea; overflow-y: auto; font: 13px 'Segoe UI', sans-serif; }
+    #dashboard[hidden] { display: none; }
+    #dashboard:focus { outline: none; } /* focus is parked here on open, not shown */
+    .db-head { display: flex; flex-wrap: wrap; align-items: center; gap: 10px; padding: 12px 20px;
+      border-bottom: 1px solid #262d3b; background: #161b26; position: sticky; top: 0; z-index: 1; }
+    .db-head h2 { margin: 0; font-size: 16px; font-weight: 600; color: #e8ebf0; }
+    .db-chip { padding: 2px 9px; border-radius: 999px; background: #232937; color: #c3c9d4; font-size: 12px; }
+    .db-chip.needs { background: #3a1d26; color: #ff9aac; font-weight: 600; }
+    .db-chip.working { background: #3a2a12; color: #ffb454; }
+    .db-chip.capped { background: #1b2b3d; color: #9cc6f0; }
+    .db-chip.self { background: rgba(122,179,232,0.14); color: #7ab3e8; }
+    button.db-chip { border: 1px solid transparent; cursor: pointer; font: inherit; font-size: 12px; }
+    button.db-chip:hover { border-color: currentColor; }
+    button.db-chip.on { border-color: currentColor; box-shadow: 0 0 0 1px currentColor inset; }
+    .db-spacer { flex: 1 1 auto; }
+    .db-seg { display: flex; border: 1px solid #2f3644; border-radius: 6px; overflow: hidden; }
+    .db-seg button { background: transparent; border: 0; color: #c3c9d4; padding: 5px 11px; cursor: pointer; font: inherit; }
+    .db-seg button.on { background: #00d4aa; color: #062a22; font-weight: 600; }
+    .db-updated { color: #8b94a5; font-size: 11px; font-family: Consolas, monospace; }
+    .db-close { background: transparent; border: 1px solid #333; color: #aab; border-radius: 4px; width: 28px; height: 28px; cursor: pointer; font-size: 16px; }
+    .db-close:hover { border-color: #00d4aa; color: #00d4aa; }
+    .db-error { margin: 12px 20px 0; padding: 8px 12px; border-radius: 6px; background: #3a1d26; color: #ffb3c0; }
+    .db-needs { margin: 14px 20px 0; padding: 10px 12px; border-radius: 10px; background: #2a1820; border: 1px solid #5a2433;
+      display: flex; flex-wrap: wrap; gap: 8px; align-items: center; }
+    .db-needs strong { color: #ff9aac; font-size: 11px; text-transform: uppercase; letter-spacing: .06em; }
+    .db-needs button { display: flex; gap: 8px; align-items: center; padding: 6px 10px; border-radius: 6px; border: 0;
+      background: #1d1218; color: #f2d7dd; cursor: pointer; font: inherit; }
+    .db-group { margin: 20px 20px 0; }
+    .db-group-h { display: flex; align-items: baseline; gap: 10px; margin-bottom: 10px; }
+    .db-group-h h3 { margin: 0; font-size: 14px; font-weight: 600; color: #e8ebf0; }
+    .db-group-h .db-health { font-size: 11px; font-family: Consolas, monospace; }
+    .db-health.online { color: #8fd59a; } .db-health.offline { color: #ff9aac; } .db-health.needsauth { color: #e6c06a; }
+    .db-group-h .db-count { font-size: 11px; color: #8b94a5; }
+    .db-grid { display: grid; grid-template-columns: repeat(auto-fill, minmax(min(100%, 380px), 1fr)); gap: 12px; }
+    .db-card { display: flex; flex-direction: column; gap: 8px; padding: 12px 14px; border-radius: 10px; background: #1b202a;
+      border: 1px solid #2a303c; cursor: pointer; min-width: 0; }
+    .db-card:hover { border-color: #3d4658; }
+    .db-card.waiting { border-color: #5a2433; }
+    .db-card.off { opacity: .6; }
+    .db-row1 { display: flex; align-items: center; gap: 8px; min-width: 0; }
+    .db-name { font-weight: 600; font-size: 14px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; min-width: 0; }
+    .db-status { margin-left: auto; font-size: 11px; font-weight: 600; white-space: nowrap; }
+    .db-status.working { color: #ffb454; } .db-status.waiting { color: #ff9aac; } .db-status.idle, .db-status.active { color: #8fd59a; }
+    .db-status.capped { color: #9cc6f0; }
+    .db-items { list-style: none; margin: 0; padding: 0; display: flex; flex-direction: column; gap: 4px; }
+    .db-items li { display: flex; align-items: center; gap: 7px; min-width: 0; }
+    .db-ref { font-family: Consolas, monospace; font-size: 12px; color: #a9bbff; flex: none; text-decoration: none; }
+    a.db-ref:hover { text-decoration: underline; }
+    .db-title { flex: 1 1 auto; min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; color: #dfe3ea; }
+    .db-state { flex: none; font-size: 10px; padding: 1px 7px; border-radius: 999px; font-weight: 600; background: #2a303c; color: #c3c9d4; }
+    .db-state.s-planning { background: #2a2540; color: #c9bcff; }
+    .db-state.s-in-progress { background: #3a2a12; color: #ffb454; }
+    .db-state.s-blocked { background: #3a1d26; color: #ff9aac; }
+    .db-state.s-ready-for-test { background: #123a33; color: #5fe8c9; }
+    .db-state.s-committed { background: #1b2b3d; color: #9cc6f0; }
+    .db-state.s-done { background: #1d3320; color: #8fd59a; }
+    .db-pin { flex: none; font-size: 10px; color: #8b94a5; }
+    .db-unpin { flex: none; background: transparent; border: 0; color: #8b94a5; cursor: pointer; font-size: 13px; padding: 0 2px; }
+    .db-unpin:hover { color: #ff9aac; }
+    .db-noitem { display: flex; align-items: center; gap: 8px; padding: 5px 9px; border-radius: 6px; border: 1px dashed #3a4252;
+      color: #9aa3b2; font-size: 12px; }
+    .db-headline { color: #c3c9d4; font-size: 12px; }
+    .db-lines { display: grid; grid-template-columns: 34px 1fr; gap: 3px 8px; font-size: 12px; margin: 0; }
+    .db-lines dt { color: #7f8899; } .db-lines dd { margin: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; color: #d4d8e0; }
+    .db-lines dd .db-age { color: #7f8899; margin-left: 6px; font-family: Consolas, monospace; font-size: 11px; }
+    .db-stale { font-size: 11px; color: #e6c06a; }
+    .db-foot { display: flex; align-items: center; gap: 8px; font-size: 11px; color: #8b94a5; }
+    .db-foot .db-act { background: transparent; border: 1px solid #3a4252; color: #c3c9d4; border-radius: 5px; padding: 3px 8px;
+      cursor: pointer; font: inherit; font-size: 11px; }
+    .db-foot .db-act:hover { border-color: #00d4aa; color: #00d4aa; }
+    .db-pinform { display: flex; flex-wrap: wrap; gap: 6px; align-items: center; }
+    .db-pinform input, .db-pinform select { background: #12161f; border: 1px solid #3a4252; color: #e0e4ea; border-radius: 5px;
+      padding: 4px 6px; font: inherit; font-size: 12px; }
+    .db-pinform input.ref { width: 90px; } .db-pinform input.title { flex: 1 1 140px; min-width: 0; }
+    .db-closed { margin: 22px 20px 24px; }
+    .db-closed h3 { margin: 0 0 8px; font-size: 11px; font-weight: 600; color: #8b94a5; text-transform: uppercase; letter-spacing: .06em; }
+    .db-closed-list { display: flex; flex-wrap: wrap; gap: 8px; }
+    .db-closed-item { display: flex; gap: 8px; align-items: center; padding: 6px 10px; border-radius: 6px; background: #161b26;
+      border: 1px solid #262c37; color: #9aa3b2; font-size: 12px; max-width: 100%; }
+    .db-closed-item .n { text-decoration: line-through; color: #c3c9d4; }
+    .db-closed-item .d { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; min-width: 0; }
+    .db-empty { padding: 30px 20px; color: #7f8899; text-align: center; }
+    /* #314 - tabs, filter, sort, hide; #315 - a machine is a stripe; #313 - reasons. */
+    .db-tabs button .n { font-size: 11px; opacity: .75; margin-left: 2px; }
+    .db-tabs button.alert::after { content: ''; display: inline-block; width: 6px; height: 6px; border-radius: 50%; background: #e94560; margin-left: 5px; vertical-align: middle; }
+    .db-search { background: #12161f; border: 1px solid #2f3644; color: #e0e4ea; border-radius: 6px; padding: 5px 9px; font: inherit; width: 200px; min-width: 0; }
+    .db-sort { background: #12161f; border: 1px solid #2f3644; color: #c3c9d4; border-radius: 6px; padding: 5px 6px; font: inherit; }
+    .db-head-row2 { flex-basis: 100%; display: flex; flex-wrap: wrap; gap: 8px 14px; align-items: center; }
+    .db-fchips { display: flex; flex-wrap: wrap; gap: 6px; }
+    .db-fchip { display: inline-flex; align-items: center; background: transparent; border: 1px solid #2f3644; color: #c3c9d4; border-radius: 999px; padding: 2px 10px 2px 6px; font: inherit; font-size: 12px; cursor: pointer; }
+    .db-fchip.on { border-color: #00d4aa; color: #e8ebf0; background: rgba(0,212,170,0.10); }
+    .db-card { box-shadow: inset 3px 0 0 var(--srv, transparent); position: relative; }
+    .db-card.done, .db-row.done { opacity: .55; }
+    .db-rstat { margin-left: auto; display: flex; align-items: center; }
+    .db-rstat .db-status { margin-left: 0; }
+    .db-foot .db-more { padding: 0 7px; font-size: 13px; line-height: 18px; }
+    .db-menu { position: absolute; right: 12px; bottom: 38px; z-index: 5; display: flex; flex-direction: column; min-width: 170px;
+      background: #232937; border: 1px solid #3a4252; border-radius: 8px; padding: 4px; box-shadow: 0 6px 18px rgba(0,0,0,.45); }
+    .db-menu button { background: transparent; border: 0; color: #e0e4ea; text-align: left; padding: 7px 10px; border-radius: 5px; font: inherit; cursor: pointer; }
+    .db-menu button:hover, .db-menu button:focus { background: #2f3644; outline: none; }
+    .db-rows { display: flex; flex-direction: column; gap: 4px; }
+    .db-row { display: flex; align-items: center; gap: 8px; padding: 6px 10px; border-radius: 6px; background: #181d27; border: 1px solid #262c37;
+      box-shadow: inset 3px 0 0 var(--srv, transparent); cursor: pointer; min-width: 0; font-size: 12px; }
+    .db-row:hover { border-color: #3d4658; }
+    .db-row { position: relative; }
+    .db-row .db-menu { top: 100%; bottom: auto; margin-top: 2px; }
+    .db-row .db-act, .db-groupless .db-act { background: transparent; border: 1px solid #3a4252; color: #c3c9d4; border-radius: 5px; padding: 1px 7px;
+      cursor: pointer; font: inherit; font-size: 11px; }
+    .db-row .db-act:hover { border-color: #00d4aa; color: #00d4aa; }
+    .db-row .db-name { font-size: 13px; }
+    .db-row .db-age { color: #7f8899; font-family: Consolas, monospace; font-size: 11px; }
+    .db-row .sb-server-badge, .db-foot .sb-server-badge { margin-left: 0; }
+    .db-chev { background: transparent; border: 0; color: #8b94a5; cursor: pointer; font-size: 12px; padding: 0 2px; }
+    .db-refs { display: flex; flex-wrap: wrap; gap: 6px; margin-top: 8px; }
+    .db-seeref { background: #161b26; border: 1px solid #262c37; box-shadow: inset 3px 0 0 var(--srv, transparent); color: #c3c9d4;
+      border-radius: 6px; padding: 4px 10px; font: inherit; font-size: 12px; cursor: pointer; }
+    .db-seeref span { color: #8b94a5; }
+    .db-needs button { box-shadow: inset 3px 0 0 var(--srv, transparent); }
+    .db-hid { font-size: 10px; color: #8b94a5; border: 1px solid #3a4252; border-radius: 4px; padding: 0 4px; }
+    .db-toast { position: fixed; left: 50%; bottom: 24px; transform: translateX(-50%); z-index: 95; display: flex; gap: 14px; align-items: center;
+      background: #232937; border: 1px solid #3a4252; color: #e0e4ea; border-radius: 8px; padding: 9px 14px; box-shadow: 0 6px 18px rgba(0,0,0,.45); }
+    .db-toast[hidden] { display: none; }
+    .db-toast button { background: transparent; border: 0; color: #00d4aa; font: inherit; font-weight: 600; cursor: pointer; }
+    @media (max-width: 600px) {
+      .db-head { padding: 10px 12px; } .db-group, .db-needs, .db-closed { margin-left: 12px; margin-right: 12px; }
+      .db-search { flex: 1 1 100%; width: auto; order: 5; } .db-head h2 { display: none; }
+    }
     @media (max-width: 600px), (max-height: 500px) {
       #toolbar { font-size: 12px; height: 32px; padding: 0 8px; position: fixed; top: 0; left: 0; right: 0; z-index: 100; will-change: transform; }
       #toolbar .session-name { max-width: 30vw; font-size: 12px; }
@@ -549,6 +691,8 @@
   </div>
   <div id="toolbar">
     <button id="sidebarToggleBtn" class="tb-btn" onclick="toggleSidebar()" title="Sessions panel">&#9776;</button>
+    <!-- #298: every session across the cluster at once - work items, now, did. -->
+    <button id="dashBtn" class="tb-btn" onclick="toggleDashboard()" title="Sessions dashboard" aria-label="Sessions dashboard" style="font-size:14px">&#9638;</button>
     <span id="sessionName" class="session-name" onclick="renameCurrentSession()" title="Click to rename">(no session)</span>
     <span id="hostName" style="color:#00d4aa; font-weight:500; margin-left:8px;"></span>
     <!-- #180: favorite THIS session without going back to the sidebar to find its row.
@@ -655,6 +799,32 @@
         <div style="font-size:13px;margin-top:8px;color:#444">Open the sidebar and create a new session</div>
       </div>
     </div>
+  </div>
+  <div id="dashboard" hidden role="region" aria-label="Sessions dashboard" tabindex="-1">
+    <div class="db-head">
+      <h2>Sessions</h2>
+      <div id="dbTabs" class="db-seg db-tabs" role="tablist" aria-label="Show">
+        <button type="button" role="tab" data-action="tab" data-tab="active">Active <span class="n"></span></button>
+        <button type="button" role="tab" data-action="tab" data-tab="hidden">Hidden <span class="n"></span></button>
+      </div>
+      <div id="dbSeg" class="db-seg" role="group" aria-label="Group by">
+        <button type="button" data-action="group" data-group="reason">By reason</button>
+        <button type="button" data-action="group" data-group="server">By server</button>
+        <button type="button" data-action="group" data-group="item">By work item</button>
+      </div>
+      <span class="db-spacer"></span>
+      <input id="dbSearch" class="db-search" type="search" placeholder="Filter sessions" aria-label="Filter sessions" autocomplete="off">
+      <select id="dbSort" class="db-sort" aria-label="Order">
+        <option value="list">List order</option><option value="recent">Recently active</option>
+        <option value="name">Name A-Z</option><option value="machine">Machine</option>
+      </select>
+      <span id="dbUpdated" class="db-updated"></span>
+      <button type="button" class="db-close" data-action="close" title="Close dashboard" aria-label="Close dashboard">&times;</button>
+      <div class="db-head-row2"><div id="dbServers" class="db-fchips" role="group" aria-label="Machines"></div>
+        <div id="dbChips" style="display:flex;flex-wrap:wrap;gap:6px"></div></div>
+    </div>
+    <div id="dbBody"></div>
+    <div id="dbToast" class="db-toast" role="status" hidden></div>
   </div>
   <!-- #179 — a submit the agent never acknowledged. Sits ABOVE the bar rather than
        replacing it, because the words it announces are back in the box below and that is
@@ -1512,7 +1682,12 @@
       // a phone it never is — and the phone is the case this control was asked for.
       renderHeaderFavorite(_sidebarData);
       renderComposeCommands(_sidebarData);   // #188 - same exposure, same fix
-      history.pushState({ id, serverUrl: sessionServerUrl }, '', '/app/' + id);
+      // #298 - a switch made while the dashboard is open (init's first selection still
+      // running when the dashboard button was pressed) REPLACES the dashboard's history
+      // entry, keeping #dashboard: dropping the hash would make Back skip the dashboard,
+      // and pushing a second #dashboard entry would make Back land on the dashboard again.
+      if (dbOpen) history.replaceState({ id, serverUrl: sessionServerUrl, dashboard: true }, '', '/app/' + id + '#dashboard');
+      else history.pushState({ id, serverUrl: sessionServerUrl }, '', '/app/' + id);
       term.clear();
       term.reset();
       resetHistoryState();
@@ -3395,9 +3570,82 @@
     function bgBadge(s){
       const n = (s.backgroundTasks && s.backgroundTasks.length) || 0;
       if (!n) return '';
+      // #313: when the reason chip already says "running on its own" because of THIS
+      // work, it is the chip - one fact, shown once.
+      if (s.reason && s.reason.source === 'background') return '';
       const names = s.backgroundTasks.map(t => t.description || t.id).filter(Boolean).join(', ');
-      const label = n > 1 ? `${n} running` : 'running';
-      return `<span class="sb-bg" title="${esc(names || 'Background command running')}">⟳ ${esc(label)}</span>`;
+      const live = s.backgroundTasks.filter(t => !t.stale);
+      // #313 F2: a shell that outlived any turn by hours is a leftover, not a build.
+      if (!live.length) {
+        const oldest = Math.min(...s.backgroundTasks.map(t => t.startedAt || Date.now()));
+        return `<span class="sb-bg stale" title="${esc(`Leftover process, not a live build: ${names}`)}">&#9888; stale shell &middot; ${esc(durShort(Date.now() - oldest))}</span>`;
+      }
+      const since = live.map(t => t.startedAt).filter(Number.isFinite);
+      const age = since.length ? ` &middot; ${esc(durShort(Date.now() - Math.min(...since)))}` : '';
+      const label = live.length > 1 ? `${live.length} running` : 'running';
+      return `<span class="sb-bg" title="${esc(names || 'Background command running')}">⟳ ${esc(label)}${age}</span>`;
+    }
+
+    // A duration as a short age: 45s, 12m, 3h, 14d.
+    function durShort(ms) {
+      const s = Math.max(0, Math.floor(ms / 1000));
+      if (s < 60) return `${s}s`;
+      if (s < 3600) return `${Math.floor(s / 60)}m`;
+      if (s < 86400) return `${Math.floor(s / 3600)}h`;
+      return `${Math.floor(s / 86400)}d`;
+    }
+
+    // #315 - the colour the SERVER that owns a session declared for itself. Looked up,
+    // never assigned here, so one machine has one colour on every device. safeColor()
+    // keeps a peer-supplied value from ever reaching CSS unvalidated.
+    function serverColorOf(serverUrl) {
+      const lists = [dbData && dbData.servers, _sidebarData && _sidebarData.servers, clusterServers];
+      for (const l of lists) {
+        const sv = Array.isArray(l) ? l.find(x => (x.url || null) === (serverUrl || null)) : null;
+        if (sv && safeColor(sv.color)) return sv.color;
+      }
+      return '';
+    }
+    function srvStyle(serverUrl) {
+      const c = serverColorOf(serverUrl);
+      return c ? ` style="--srv:${c}"` : '';
+    }
+    function serverChipHtml(s) {
+      return `<span class="sb-server-badge"${srvStyle(s.serverUrl)}>${esc(s.server || 'Local')}</span>`;
+    }
+
+    // #313 - WHY a non-working session is not working. The server decided
+    // (lib/session-reason.js) and published it as `reason`; this only draws it. No
+    // reason, or a running turn, renders exactly what the row showed before.
+    const REASON_LOOK = {
+      you: { icon: '&#9995;', cls: 'you' }, menu: { icon: '&#9776;', cls: 'menu' }, self: { icon: '&#9203;', cls: 'self' },
+      external: { icon: '&#9208;', cls: 'external' }, done: { icon: '&#10003;', cls: 'done' },
+    };
+    function reasonLabel(r) {
+      if (!r) return '';
+      if (r.kind === 'you') return r.text ? `You: ${r.text}` : 'Your move';
+      // #316: a panel covers the composer; a prompt sent now goes nowhere.
+      if (r.kind === 'menu') return 'In menu · Esc';
+      if (r.kind === 'self') {
+        if (r.source === 'usage-limit') {
+          return r.until ? `Cap resets · ${new Date(r.until).toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' })}` : 'Usage cap';
+        }
+        return `${r.text || 'On its own'}${Number.isFinite(r.since) ? ` · ${durShort(Date.now() - r.since)}` : ''}`;
+      }
+      if (r.kind === 'external') return r.text ? `Blocked: ${r.text}` : 'Blocked on others';
+      if (r.kind === 'done') return 'Done';
+      return '';
+    }
+    function reasonChipHtml(s) {
+      const r = s.reason;
+      if (!r || !REASON_LOOK[r.kind]) return '';
+      const look = REASON_LOOK[r.kind];
+      const full = r.kind === 'done' && r.text ? `Done: ${r.text}` : reasonLabel(r);
+      return `<span class="rs-chip ${look.cls}" title="${esc(full)}">${look.icon} ${esc(reasonLabel(r))}</span>`;
+    }
+    // The status word, or the reason that explains it.
+    function statusOrReasonHtml(s) {
+      return reasonChipHtml(s) || `<span class="sb-status ${s.status}">${statusLabels[s.status] || s.status}</span>`;
     }
     function ctxBadge(s){
       const c = s.metrics && s.metrics.ctx;
@@ -4195,7 +4443,9 @@
         if (isCollapsed) header.classList.add('collapsed');
         const statusCls = !server.online ? 'offline' : server.needsAuth ? 'needsauth' : 'online';
         const versionTag = server.version ? `<span style="color:#555;font-size:9px;margin-left:6px">${esc(server.version)}</span>` : '';
-        header.innerHTML = `<span class="srv-chev">&#9662;</span><span class="srv-dot ${statusCls}"></span>${esc(server.name || 'Local')}${versionTag}`;
+        // #315: a square in the machine's colour; the round dot stays reachability.
+        const swatch = safeColor(server.color) ? `<span class="srv-swatch" style="background:${server.color}"></span>` : '';
+        header.innerHTML = `<span class="srv-chev">&#9662;</span><span class="srv-dot ${statusCls}"></span>${swatch}${esc(server.name || 'Local')}${versionTag}`;
         if (server.online && !server.needsAuth) {
           const addBtn = document.createElement('span');
           addBtn.className = 'srv-auth';
@@ -4254,7 +4504,7 @@
           item.innerHTML =
             `<div class="sb-name"><span class="sb-dot ${s.status}"></span>${esc(s.name)}</div>` +
             `<div class="sb-meta">` +
-              `<span class="sb-status ${s.status}">${statusLabels[s.status] || s.status}</span>` +
+              statusOrReasonHtml(s) +
               // Directly after the status word, before the capacity chips: this
               // QUALIFIES what the session is doing, it does not measure it.
               waitBadge(s) +
@@ -4605,9 +4855,9 @@
         if (s.apiError && s.apiErrorText) item.title = s.apiErrorText;
         const serverLabel = s.server || hostname || 'Local';
         item.innerHTML =
-          `<div class="sb-name"><span class="sb-dot ${s.status}"></span>${esc(s.name)}<span class="sb-server-badge">${esc(serverLabel)}</span></div>` +
+          `<div class="sb-name"><span class="sb-dot ${s.status}"></span>${esc(s.name)}<span class="sb-server-badge"${srvStyle(s.serverUrl)}>${esc(serverLabel)}</span></div>` +
           `<div class="sb-meta">` +
-            `<span class="sb-status ${s.status}">${statusLabels[s.status] || s.status}</span>` +
+            statusOrReasonHtml(s) +
             waitBadge(s) +
             bgBadge(s) +
             ctxBadge(s) +
@@ -5663,6 +5913,632 @@
       if (!muted && (!document.hasFocus() || isUrgent)) startFlashing();
     }
 
+    // --- #298 Sessions dashboard ---------------------------------------------------
+    // Every session across the cluster in one place: its work items and their states,
+    // what it is doing now, what it just did. The DATA is the `brief` field each server
+    // puts on its own session rows (lib/session-brief.js decides everything it says);
+    // this only draws it. Polls /api/cluster/sessions while open - the merge already
+    // reports each server's online flag, so one slow peer marks its own group and never
+    // freezes the page (#274). An overlay, not a view swap: the open terminal keeps its
+    // socket, size and scrollback, and closing returns exactly where you were.
+    const DB_POLL_MS = 5000;
+    const DB_CLOSED_POLL_MS = 30000;
+    const DB_STATUS = new Set(['working', 'waiting', 'idle', 'active']);
+    let dbOpen = false;
+    let dbTimer = null;
+    let dbGroup = 'reason';            // 'reason' | 'server' | 'item' (#313/#314)
+    let dbSort = 'list';               // 'list' | 'recent' | 'name' | 'machine'
+    let dbTab = 'active';              // 'active' | 'hidden'
+    let dbQuery = '';
+    let dbStatusFilter = null;         // #318: a tapped summary chip ('you'|'working'|'self'|'capped')
+    const dbServerFilter = new Set();  // server keys ('' = local); empty = every server
+    const dbOpenSections = new Set();  // collapsible sections the viewer opened (Done)
+    let dbMenu = null;                 // key of the card whose ... menu is open
+    let dbToastTimer = null;
+    let dbData = null;
+    let dbFetchedAt = 0;
+    let dbError = '';
+    let dbEditing = null;            // key of the card whose pin form is open - no re-render under it
+    let dbPrevFocus = null;          // what had the keyboard before the dashboard took it
+    let dbClosed = new Map();        // server key -> { at, list }
+    const dbSessions = new Map();    // card key -> session row, for the action handlers
+
+    function dbKey(s) { return `${s.serverUrl || ''}|${s.id}`; }
+    function dbApiBase(serverUrl) { return serverUrl ? `/cluster/${encodeURIComponent(serverUrl)}/api` : '/api'; }
+
+    function toggleDashboard() { if (dbOpen) closeDashboard(); else openDashboard(); }
+
+    function openDashboard(fromHistory) {
+      const el = document.getElementById('dashboard');
+      const tb = document.getElementById('toolbar');
+      el.style.setProperty('--db-top', `${Math.max(0, Math.round(tb.getBoundingClientRect().bottom))}px`);
+      el.hidden = false;
+      dbOpen = true;
+      // Take focus OFF the terminal underneath: left on xterm's textarea, an Enter meant
+      // for a card would be a CR into the hidden PTY - in a Claude composer, a submit.
+      if (!fromHistory || !dbPrevFocus) dbPrevFocus = document.activeElement;
+      el.focus({ preventScroll: true });
+      document.getElementById('dashBtn').classList.add('active');
+      // Back closes it - the gesture a phone user reaches for first.
+      if (!fromHistory && location.hash !== '#dashboard') {
+        history.pushState({ ...(history.state || {}), dashboard: true }, '', location.pathname + '#dashboard');
+      }
+      if (dbData) renderDashboard();
+      refreshDashboard();
+      clearInterval(dbTimer);
+      dbTimer = setInterval(refreshDashboard, DB_POLL_MS);
+    }
+
+    function closeDashboard(fromHistory) {
+      if (!dbOpen) return;
+      dbOpen = false;
+      dbEditing = null;
+      dbMenu = null;
+      clearInterval(dbTimer);
+      dbTimer = null;
+      document.getElementById('dashboard').hidden = true;
+      document.getElementById('dashBtn').classList.remove('active');
+      // Give the keyboard back to whatever had it - but not on a phone, where focusing
+      // xterm would pop the soft keyboard over the screen just revealed.
+      const prev = dbPrevFocus;
+      dbPrevFocus = null;
+      // A mouse click on the toolbar button leaves IT focused, so "what had the keyboard"
+      // is the button on the commonest path - hand that case back to the terminal.
+      if (!isMobile) {
+        if (prev && prev !== document.body && document.contains(prev) && !prev.closest('#toolbar')) { try { prev.focus(); } catch (e) {} }
+        else if (sessionId) { try { term.focus(); } catch (e) {} }
+      }
+      if (!fromHistory && location.hash === '#dashboard') {
+        const st = { ...(history.state || {}) };
+        delete st.dashboard;
+        history.replaceState(st, '', location.pathname);
+      }
+    }
+
+    window.addEventListener('popstate', () => {
+      if (location.hash === '#dashboard') { if (!dbOpen) openDashboard(true); }
+      else if (dbOpen) closeDashboard(true);
+    });
+
+    async function refreshDashboard() {
+      if (!dbOpen) return;
+      try {
+        const r = await fetch('/api/cluster/sessions');
+        if (!r.ok) throw new Error(`HTTP ${r.status}`);
+        dbData = await r.json();
+        dbFetchedAt = Date.now();
+        dbError = '';
+      } catch (e) {
+        // Keep the last answer on screen and SAY it is old, rather than blanking a page
+        // full of state the user was reading.
+        dbError = `Could not refresh (${e.message}). Showing what was last seen.`;
+      }
+      if (dbOpen && !dbEditing) renderDashboard();
+      refreshClosed();
+    }
+
+    async function refreshClosed() {
+      if (!dbOpen) return;
+      const servers = (dbData && dbData.servers) || [];
+      const due = servers.filter((sv) => {
+        if (!sv.online || sv.needsAuth) return false;
+        // Local always has it; a peer only once it advertises the capability.
+        if (sv.url && !(Array.isArray(sv.capabilities) && sv.capabilities.includes('session-brief'))) return false;
+        const hit = dbClosed.get(sv.url || '');
+        return !hit || Date.now() - hit.at > DB_CLOSED_POLL_MS;
+      });
+      await Promise.allSettled(due.map(async (sv) => {
+        const r = await fetch(`${dbApiBase(sv.url)}/dashboard/closed`);
+        if (!r.ok) return;
+        const j = await r.json();
+        dbClosed.set(sv.url || '', { at: Date.now(), list: (Array.isArray(j.closed) ? j.closed : []).map((c) => ({ ...c, server: sv.name })) });
+      }));
+      if (due.length && dbOpen && !dbEditing) renderDashboard();
+    }
+
+    function dbStatusOf(s) {
+      if (s.usageLimit && s.usageLimit.waiting) {
+        const at = s.usageLimit.resumeAt ? new Date(s.usageLimit.resumeAt).toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' }) : '';
+        return { cls: 'capped', label: at && s.usageLimit.armed ? `Capped · resumes ${at}` : 'Capped' };
+      }
+      const st = DB_STATUS.has(s.status) ? s.status : 'idle';
+      if (st === 'waiting') return { cls: 'waiting', label: s.waitingFor === 'question' ? 'Question for you' : 'Needs you' };
+      return { cls: st, label: st === 'working' ? 'Working' : st === 'active' ? 'Active' : 'Idle' };
+    }
+
+    function dbAge(ts) { return typeof ts === 'number' && ts > 0 ? `<span class="db-age">${esc(timeAgo(ts))}</span>` : ''; }
+
+    function dbItemHtml(it, cardKey) {
+      const ref = /^https:\/\//.test(it.url || '')
+        ? `<a class="db-ref" href="${esc(it.url)}" target="_blank" rel="noopener noreferrer" data-stop="1">${esc(it.ref)}</a>`
+        : `<span class="db-ref">${esc(it.ref)}</span>`;
+      const state = it.state ? `<span class="db-state s-${esc(it.state)}">${esc(it.state.replace(/-/g, ' '))}</span>` : '';
+      const pin = it.source === 'pinned'
+        ? `<button class="db-unpin" data-action="unpin" data-card="${esc(cardKey)}" data-ref="${esc(it.ref)}" title="Unpin this work item" aria-label="Unpin ${esc(it.ref)}">&times;</button>`
+        : '';
+      const note = it.note ? ` title="${esc(it.note)}"` : '';
+      return `<li${note}>${ref}<span class="db-title">${esc(it.title || '')}</span>${state}${pin}</li>`;
+    }
+
+    // --- #314 per-viewer view state: which tab, grouping, order and filter ------------
+    // Per device on purpose (a phone and a desk can want different views), so it lives
+    // in localStorage; what a SESSION is (hidden, favourite) lives on its server.
+    const DB_PREFS_KEY = 'wt.dashboard.view';
+    function dbLoadPrefs() {
+      try {
+        const p = JSON.parse(localStorage.getItem(DB_PREFS_KEY) || '{}');
+        if (['reason', 'server', 'item'].includes(p.group)) dbGroup = p.group;
+        if (['list', 'recent', 'name', 'machine'].includes(p.sort)) dbSort = p.sort;
+      } catch (e) { /* storage blocked: defaults */ }
+    }
+    function dbSavePrefs() {
+      try { localStorage.setItem(DB_PREFS_KEY, JSON.stringify({ group: dbGroup, sort: dbSort })); } catch (e) {}
+    }
+    function dbServerHas(s, cap) {
+      const sv = ((dbData && dbData.servers) || []).find((x) => (x.url || null) === (s.serverUrl || null));
+      return !!(sv && Array.isArray(sv.capabilities) && sv.capabilities.includes(cap));
+    }
+    const dbIsHidden = (s) => !!(s.brief && s.brief.hidden);
+    // A panel over the composer (#316) owes the person an Esc as much as a prompt owes an answer.
+    const dbNeedsYou = (s) => s.status === 'waiting' || !!(s.reason && (s.reason.kind === 'you' || s.reason.kind === 'menu'));
+
+    // #318 - what each summary chip counts, and so what tapping it filters to. One
+    // table, so a chip's number and the sessions it shows can never disagree.
+    const DB_STATUS_CHIPS = [
+      { key: 'you', cls: 'needs', label: (n) => `${n} need${n === 1 ? 's' : ''} you`, test: (s) => dbNeedsYou(s) },
+      { key: 'working', cls: 'working', label: (n) => `${n} working`, test: (s) => s.status === 'working' },
+      { key: 'self', cls: 'self', label: (n) => `${n} on its own`,
+        test: (s) => !!(s.reason && s.reason.kind === 'self' && s.reason.source !== 'usage-limit') },
+      { key: 'capped', cls: 'capped', label: (n) => `${n} capped`, test: (s) => !!(s.usageLimit && s.usageLimit.waiting) },
+    ];
+
+    function dbMatchesFilter(s) {
+      if (dbServerFilter.size && !dbServerFilter.has(s.serverUrl || '')) return false;
+      if (dbStatusFilter) {
+        const chip = DB_STATUS_CHIPS.find((c) => c.key === dbStatusFilter);
+        if (chip && !chip.test(s)) return false;
+      }
+      const q = dbQuery.trim().toLowerCase();
+      if (!q) return true;
+      const b = s.brief || {};
+      const hay = [s.name, s.server, b.headline, s.reason && s.reason.text,
+        ...((b.items || []).flatMap((it) => [it.ref, it.title]))].filter(Boolean).join(' ').toLowerCase();
+      return hay.includes(q);
+    }
+    // The order inside a section. "list" is the order the server sent, which is the
+    // session list's own order (including a manual reorder).
+    function dbSorted(list) {
+      const order = new Map(((dbData && dbData.sessions) || []).map((s, i) => [dbKey(s), i]));
+      const servers = (dbData && dbData.servers) || [];
+      const srvIdx = (s) => servers.findIndex((x) => (x.url || null) === (s.serverUrl || null));
+      const byList = (a, b) => (order.get(dbKey(a)) ?? 0) - (order.get(dbKey(b)) ?? 0);
+      const out = [...list];
+      if (dbSort === 'recent') out.sort((a, b) => (b.lastActivity || 0) - (a.lastActivity || 0));
+      else if (dbSort === 'name') out.sort((a, b) => String(a.name).localeCompare(String(b.name)));
+      else if (dbSort === 'machine') out.sort((a, b) => (srvIdx(a) - srvIdx(b)) || byList(a, b));
+      else out.sort(byList);
+      return out;
+    }
+    // Favourites keep the session list's pinned order whatever the sort: that order is
+    // the owner's own curation.
+    function dbFavouriteOrder(list) {
+      return [...list].sort((a, b) => ((a.favoriteRank ?? 0) - (b.favoriteRank ?? 0)) || String(a.id).localeCompare(String(b.id)));
+    }
+
+    function dbMenuHtml(s, key) {
+      const items = [];
+      if (dbServerHas(s, 'session-hide')) {
+        items.push(dbIsHidden(s)
+          ? `<button data-action="unhide" data-card="${esc(key)}">Unhide</button>`
+          : `<button data-action="hide" data-card="${esc(key)}">${s.favorite ? 'Unstar &amp; hide' : 'Hide from dashboard'}</button>`);
+      }
+      if (dbServerHas(s, 'favorites-sync')) {
+        items.push(`<button data-action="star" data-card="${esc(key)}">${s.favorite ? 'Unstar' : 'Star'}</button>`);
+      }
+      // #320 - an agent's reported wait can be wrong (an offer filed as "waiting on you").
+      // Only a REPORTED reason is the person's to clear; mechanical ones are facts.
+      if (s.reason && s.reason.kind === 'you' && s.reason.source === 'reported' && dbServerHas(s, 'session-clear-wait')) {
+        items.push(`<button data-action="clear-wait" data-card="${esc(key)}">Not waiting</button>`);
+      }
+      if (s.brief) {
+        items.push(`<button data-action="optout" data-card="${esc(key)}">${s.brief.reporting === 'off' ? 'Resume reporting' : 'Stop reporting'}</button>`);
+      }
+      return items.length ? `<div class="db-menu" role="menu">${items.join('')}</div>` : '';
+    }
+
+    function dbCardHtml(s) {
+      const key = dbKey(s);
+      dbSessions.set(key, s);
+      const b = s.brief;
+      const st = dbStatusOf(s);
+      const off = !b || b.reporting === 'off';
+      const items = (b && b.items) || [];
+      let body = '';
+      if (items.length) {
+        body += `<ul class="db-items">${items.map((it) => dbItemHtml(it, key)).join('')}</ul>`;
+      } else {
+        const why = !b ? (s.agent === 'claude' ? 'Nothing reported yet' : 'Not reporting')
+          : b.reporting === 'off' ? 'Reporting is off for this session' : 'No work item';
+        body += `<div class="db-noitem">${esc(why)}</div>`;
+      }
+      if (b && b.headline) body += `<div class="db-headline">${esc(b.headline)}</div>`;
+      if (b) {
+        const lines = [];
+        if (b.now && s.status === 'working') lines.push(`<dt>Now</dt><dd title="${esc(b.now.text)}">${esc(b.now.text)}${dbAge(b.now.at)}</dd>`);
+        if (b.did) lines.push(`<dt>Did</dt><dd title="${esc(b.did.text)}">${esc(b.did.text)}${dbAge(b.did.at)}</dd>`);
+        if (b.prompt) lines.push(`<dt>You</dt><dd title="${esc(b.prompt.text)}">${esc(b.prompt.text)}${dbAge(b.prompt.at)}</dd>`);
+        if (lines.length) body += `<dl class="db-lines">${lines.join('')}</dl>`;
+        if (b.stale) body += `<div class="db-stale">&#9888; Report may be out of date: ${esc(b.stale.reason)}</div>`;
+      }
+      if (dbEditing === key) {
+        body += `<form class="db-pinform" data-card="${esc(key)}" onsubmit="event.preventDefault()">
+          <input class="ref" name="ref" placeholder="#123 or ado:123" aria-label="Work item reference" maxlength="60">
+          <input class="title" name="title" placeholder="Title" aria-label="Work item title" maxlength="140">
+          <select name="state" aria-label="State"><option value="">state&hellip;</option>
+            <option>planning</option><option>in-progress</option><option>blocked</option>
+            <option>ready-for-test</option><option>committed</option><option>done</option></select>
+          <button type="button" class="db-act" data-action="pin-save" data-card="${esc(key)}">Pin</button>
+          <button type="button" class="db-act" data-action="pin-cancel">Cancel</button></form>`;
+      }
+      const canEdit = s.brief !== undefined; // a peer too old to know briefs gets no buttons
+      const actions = canEdit && dbEditing !== key
+        ? `<button class="db-act" data-action="pin-open" data-card="${esc(key)}">Pin work item</button>` +
+          `<button class="db-act db-more" data-action="menu" data-card="${esc(key)}" title="More" aria-label="More actions for ${esc(s.name)}" aria-haspopup="menu">&#8943;</button>`
+        : '';
+      const menu = dbMenu === key ? dbMenuHtml(s, key) : '';
+      // The reason replaces the status word (#313); a session with none shows it as before.
+      const statusHtml = reasonChipHtml(s) || `<span class="db-status ${st.cls}">${esc(st.label)}</span>`;
+      const cls = `db-card ${st.cls}${off && items.length === 0 ? ' off' : ''}${s.reason && s.reason.kind === 'done' ? ' done' : ''}`;
+      return `<article class="${cls}"${srvStyle(s.serverUrl)} data-action="open" data-card="${esc(key)}" tabindex="0" aria-label="Open session ${esc(s.name)}">
+        <div class="db-row1"><span class="sb-dot ${st.cls === 'capped' ? 'idle' : st.cls}"></span>
+          <span class="db-name" title="${esc(s.name)}">${esc(s.name)}</span>${agentBadge(s)}
+          <span class="db-rstat">${statusHtml}</span></div>
+        ${body}
+        <div class="db-foot">${serverChipHtml(s)}<span>${dbAge(s.lastActivity)}</span><span class="db-spacer"></span>${actions}</div>
+        ${menu}
+      </article>`;
+    }
+
+    // One line for a session that has nothing to read: not reported, done, or hidden.
+    // A row keeps every action a card has: pinning a work item opens the row into its
+    // full card (the form needs the room), and the ... menu hides, stars or opts out.
+    function dbRowHtml(s, { unhide = false } = {}) {
+      const key = dbKey(s);
+      if (dbEditing === key) return dbCardHtml(s);
+      dbSessions.set(key, s);
+      const st = dbStatusOf(s);
+      const status = reasonChipHtml(s) || `<span class="db-status ${st.cls}">${esc(st.label)}</span>`;
+      const canEdit = s.brief !== undefined;
+      const act = (unhide ? `<button class="db-act" data-action="unhide" data-card="${esc(key)}">Unhide</button>` : '') +
+        (canEdit && !unhide ? `<button class="db-act" data-action="pin-open" data-card="${esc(key)}" title="Pin work item" aria-label="Pin a work item to ${esc(s.name)}">Pin</button>` +
+          `<button class="db-act db-more" data-action="menu" data-card="${esc(key)}" title="More" aria-label="More actions for ${esc(s.name)}" aria-haspopup="menu">&#8943;</button>` : '');
+      const menu = dbMenu === key ? dbMenuHtml(s, key) : '';
+      return `<div class="db-row${s.reason && s.reason.kind === 'done' ? ' done' : ''}"${srvStyle(s.serverUrl)} data-action="open" data-card="${esc(key)}" tabindex="0" aria-label="Open session ${esc(s.name)}">
+        <span class="sb-dot ${st.cls === 'capped' ? 'idle' : st.cls}"></span><span class="db-name" title="${esc(s.name)}">${esc(s.name)}</span>
+        ${serverChipHtml(s)}<span class="db-spacer"></span>${status}${dbAge(s.lastActivity)}${act}${menu}</div>`;
+    }
+
+    function dbSection(title, list, { cls = '', rows = false, collapsible = '' } = {}) {
+      if (!list.length) return '';
+      const closed = collapsible && !dbOpenSections.has(collapsible);
+      const chev = collapsible ? `<button class="db-chev" data-action="section" data-section="${esc(collapsible)}" aria-expanded="${!closed}">${closed ? '&#9656;' : '&#9662;'}</button>` : '';
+      const n = `<span class="db-count">${list.length} session${list.length === 1 ? '' : 's'}</span>`;
+      const inner = closed ? '' : rows
+        ? `<div class="db-rows">${list.map((s) => dbRowHtml(s)).join('')}</div>`
+        : `<div class="db-grid">${list.map(dbCardHtml).join('')}</div>`;
+      return `<section class="db-group ${cls}"><div class="db-group-h">${chev}<h3>${title}</h3>${n}</div>${inner}</section>`;
+    }
+
+    function renderDashboard() {
+      const root = document.getElementById('dbBody');
+      if (!root) return;
+      dbSessions.clear();
+      const data = dbData || { sessions: [], servers: [] };
+      const all = data.sessions || [];
+      const servers = data.servers || [];
+      const hidden = all.filter(dbIsHidden);
+      const shown = all.filter((s) => !dbIsHidden(s));
+      const pool = (dbTab === 'hidden' ? hidden : shown).filter(dbMatchesFilter);
+      const needs = all.filter(dbNeedsYou);
+
+      // #318 - each count is a filter: tap to show only those sessions, tap again to clear.
+      // A chip stays while it is the active filter even if its count drops to 0, so the
+      // way out of the filter never disappears.
+      document.getElementById('dbChips').innerHTML =
+        `<span class="db-chip">${all.length} session${all.length === 1 ? '' : 's'} · ${servers.length} server${servers.length === 1 ? '' : 's'}</span>` +
+        DB_STATUS_CHIPS.map((c) => {
+          const n = all.filter(c.test).length;
+          const on = dbStatusFilter === c.key;
+          if (!n && !on) return '';
+          return `<button type="button" class="db-chip ${c.cls}${on ? ' on' : ''}" data-action="status-filter" data-filter="${c.key}" aria-pressed="${on}" title="${on ? 'Show all again' : 'Show only these'}">${esc(c.label(n))}${on ? ' &times;' : ''}</button>`;
+        }).join('');
+      document.getElementById('dbUpdated').textContent = dbFetchedAt ? `updated ${timeAgo(dbFetchedAt)}` : '';
+      for (const b of document.querySelectorAll('#dbSeg button')) b.classList.toggle('on', b.dataset.group === dbGroup);
+      for (const b of document.querySelectorAll('#dbTabs button')) {
+        b.classList.toggle('on', b.dataset.tab === dbTab);
+        b.setAttribute('aria-selected', String(b.dataset.tab === dbTab));
+        const n = b.querySelector('.n');
+        if (n) n.textContent = String(b.dataset.tab === 'hidden' ? hidden.length : shown.length);
+      }
+      // A hidden session that owes an answer flags its tab, so hiding never buries one.
+      const htab = document.querySelector('#dbTabs [data-tab=hidden]');
+      if (htab) htab.classList.toggle('alert', hidden.some(dbNeedsYou));
+      const sortEl = document.getElementById('dbSort');
+      if (sortEl && sortEl.value !== dbSort) sortEl.value = dbSort;
+      document.getElementById('dbServers').innerHTML = servers.length > 1 ? servers.map((sv) => {
+        const k = sv.url || '';
+        const sw = safeColor(sv.color) ? `<span class="srv-swatch" style="background:${sv.color}"></span>` : '';
+        return `<button type="button" class="db-fchip${dbServerFilter.has(k) ? ' on' : ''}" data-action="srv-filter" data-srv="${esc(k)}" aria-pressed="${dbServerFilter.has(k)}">${sw}${esc(sv.name || 'Local')}</button>`;
+      }).join('') : '';
+
+      let html = dbError ? `<div class="db-error" role="status">${esc(dbError)}</div>` : '';
+      // Needs you: always complete, including a hidden session that owes an answer. In
+      // the reason grouping the visible ones ARE the first section, so only hidden ones
+      // ride the strip there.
+      const strip = dbGroup === 'reason' ? needs.filter(dbIsHidden) : needs;
+      if (dbTab === 'active' && strip.length) {
+        html += `<section class="db-needs" aria-label="Needs you"><strong>Needs you</strong>${strip.map((s) =>
+          `<button data-action="open" data-card="${esc(dbKey(s))}"${srvStyle(s.serverUrl)}><span class="sb-dot waiting"></span><b>${esc(s.name)}</b>` +
+          `${dbIsHidden(s) ? '<span class="db-hid" title="Hidden from the dashboard">hidden</span>' : ''}<span>${esc(s.server || '')}</span>` +
+          `<span>${esc(s.reason && s.reason.kind === 'menu' ? 'stuck in a menu (Esc)' : s.reason && s.reason.kind === 'you' && s.reason.text ? s.reason.text : (s.waitingFor === 'question' ? 'a question' : 'a permission'))}</span></button>`).join('')}</section>`;
+        for (const s of strip) dbSessions.set(dbKey(s), s);
+      }
+
+      if (dbTab === 'hidden') {
+        html += pool.length
+          ? `<section class="db-group"><div class="db-rows">${dbSorted(pool).map((s) => dbRowHtml(s, { unhide: true })).join('')}</div></section>`
+          : `<div class="db-empty">${hidden.length ? 'No hidden session matches the filter.' : 'Nothing is hidden. Hide a session from its &#8943; menu.'}</div>`;
+      } else if (!all.length) {
+        html += '<div class="db-empty">No sessions on any server.</div>';
+      } else if (!pool.length) {
+        html += '<div class="db-empty">No session matches the filter.</div>';
+      } else {
+        // Favourites first, and MOVED there rather than repeated below: a card is tall,
+        // and a duplicate doubles the scroll and makes every count ambiguous.
+        const favs = dbFavouriteOrder(pool.filter((s) => s.favorite));
+        const rest = pool.filter((s) => !s.favorite);
+        html += dbSection('&#9733; Favorites', favs, { cls: 'db-favs' });
+        if (dbGroup === 'reason') {
+          const of = (pred) => dbSorted(rest.filter(pred));
+          // A peer too old to send `reason` still has a status: a turn it is running
+          // is "Working", never "Idle" (#313 review).
+          const kind = (s) => (s.reason ? s.reason.kind : (s.status === 'working' ? 'working' : null));
+          const reported = (s) => !!(s.brief && (((s.brief.items || []).length) || s.brief.headline));
+          html += dbSection('Needs you', of((s) => dbNeedsYou(s)), { cls: 'db-sec-you' });
+          html += dbSection('Working', of((s) => !dbNeedsYou(s) && kind(s) === 'working'));
+          html += dbSection('Running on its own', of((s) => !dbNeedsYou(s) && kind(s) === 'self'));
+          html += dbSection('Blocked on others', of((s) => !dbNeedsYou(s) && kind(s) === 'external'));
+          html += dbSection('Idle', of((s) => !dbNeedsYou(s) && !kind(s) && reported(s)));
+          html += dbSection('Not reported', of((s) => !dbNeedsYou(s) && !kind(s) && !reported(s)), { rows: true });
+          html += dbSection('Done', of((s) => !dbNeedsYou(s) && kind(s) === 'done'), { rows: true, collapsible: 'done' });
+        } else if (dbGroup === 'item') {
+          // Each session's card appears ONCE, under its first work item; its other items
+          // list it as a one-line reference instead of a second copy of the card.
+          const groups = new Map();
+          const none = [];
+          for (const s of dbSorted(rest)) {
+            const items = (s.brief && s.brief.items) || [];
+            if (!items.length) { none.push(s); continue; }
+            items.forEach((it, i) => {
+              const k = it.key || it.ref;
+              if (!groups.has(k)) groups.set(k, { it, cards: [], refs: [] });
+              (i === 0 ? groups.get(k).cards : groups.get(k).refs).push({ s, first: items[0] });
+            });
+          }
+          for (const [, g] of groups) {
+            const n = g.cards.length + g.refs.length;
+            const refs = g.refs.map(({ s, first }) => {
+              dbSessions.set(dbKey(s), s);
+              return `<button class="db-seeref" data-action="open" data-card="${esc(dbKey(s))}"${srvStyle(s.serverUrl)}>${esc(s.name)} <span>(${esc(s.server || '')})</span> &middot; see ${esc(first.ref)}</button>`;
+            }).join('');
+            html += `<section class="db-group"><div class="db-group-h"><h3>${esc(g.it.ref)} ${esc(g.it.title || '')}</h3>` +
+              (g.it.state ? `<span class="db-state s-${esc(g.it.state)}">${esc(g.it.state.replace(/-/g, ' '))}</span>` : '') +
+              `<span class="db-count">${n} session${n === 1 ? '' : 's'}</span></div>` +
+              (g.cards.length ? `<div class="db-grid">${g.cards.map(({ s }) => dbCardHtml(s)).join('')}</div>` : '') +
+              (refs ? `<div class="db-refs">${refs}</div>` : '') + '</section>';
+          }
+          html += dbSection('No work item', none, { rows: true });
+        } else {
+          for (const sv of servers) {
+            const mine = dbSorted(rest.filter((s) => (s.serverUrl || null) === (sv.url || null)));
+            if (dbServerFilter.size && !dbServerFilter.has(sv.url || '')) continue;
+            const health = !sv.online ? 'offline' : sv.needsAuth ? 'needsauth' : 'online';
+            const label = health === 'online' ? `online${sv.version ? ` · ${sv.version}` : ''}` : health === 'offline' ? 'offline · last seen rows may be missing' : 'needs login';
+            const sw = safeColor(sv.color) ? `<span class="srv-swatch" style="background:${sv.color}"></span>` : '';
+            html += `<section class="db-group"><div class="db-group-h"><h3>${sw}${esc(sv.name || 'Local')}</h3>` +
+              `<span class="db-health ${health}">&#9679; ${esc(label)}</span><span class="db-count">${mine.length} session${mine.length === 1 ? '' : 's'}</span></div>` +
+              (mine.length ? `<div class="db-grid">${mine.map(dbCardHtml).join('')}</div>` : '') + '</section>';
+          }
+        }
+      }
+      const closed = [...dbClosed.values()].flatMap((v) => v.list).sort((a, b) => (b.at || 0) - (a.at || 0));
+      if (dbTab === 'active' && closed.length) {
+        html += `<section class="db-closed" aria-label="Closed in the last day"><h3>Closed in the last 24h</h3><div class="db-closed-list">${closed.map((c) => {
+          const items = (c.items || []).map((it) => `${it.ref}${it.state ? ` ${it.state.replace(/-/g, ' ')}` : ''}`).join(', ');
+          const last = (c.did && c.did.text) || c.headline || '';
+          return `<div class="db-closed-item" title="${esc(last)}"><span class="n">${esc(c.name || c.id)}</span><span>${esc(c.server || '')}</span>` +
+            (items ? `<span>${esc(items)}</span>` : '') + (last ? `<span class="d">${esc(last)}</span>` : '') + dbAge(c.at) + '</div>';
+        }).join('')}</div></section>`;
+      }
+      // A re-render replaces every card; put keyboard focus back on the element that had
+      // it, or the 5s poll would drop a keyboard user to <body> mid-navigation.
+      const active = document.activeElement;
+      const inBody = active && active.closest && active.closest('#dbBody');
+      const focusedCard = inBody && active.dataset ? active.dataset.card : null;
+      const focusedAction = focusedCard ? active.dataset.action : null;
+      root.innerHTML = html;
+      if (focusedCard) {
+        const again = [...root.querySelectorAll('[data-card]')].find((c) => c.dataset.card === focusedCard && c.dataset.action === focusedAction);
+        if (again) again.focus({ preventScroll: true });
+      }
+    }
+
+    async function dbPatchBrief(s, body) {
+      try {
+        const r = await fetch(`${dbApiBase(s.serverUrl)}/sessions/${encodeURIComponent(s.id)}/brief`, {
+          method: 'PATCH', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(body),
+        });
+        if (!r.ok) {
+          const j = await r.json().catch(() => ({}));
+          dbError = `Could not save: ${j.error || `HTTP ${r.status}`}`;
+          return false;
+        }
+        return true;
+      } catch (e) { dbError = `Could not save: ${e.message}`; return false; }
+      finally { refreshDashboard(); }
+    }
+
+    async function dbPatchFavorite(s, favorite) {
+      try {
+        const r = await fetch(`${dbApiBase(s.serverUrl)}/sessions/${encodeURIComponent(s.id)}/favorite`, {
+          method: 'PATCH', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ favorite }),
+        });
+        if (!r.ok) { dbError = `Could not save: HTTP ${r.status}`; return false; }
+        return true;
+      } catch (e) { dbError = `Could not save: ${e.message}`; return false; }
+    }
+
+    // Hiding is cheap and fully reversible, so it asks nothing and offers an undo. A
+    // favourite is unstarred first: "starred" and "hidden" would contradict each other.
+    async function dbSetHidden(s, hidden) {
+      const wasFav = !!s.favorite;
+      if (hidden && wasFav) {
+        if (!(await dbPatchFavorite(s, false))) { refreshDashboard(); return; }
+        loadSidebar();
+      }
+      if (!(await dbPatchBrief(s, { hidden }))) return;
+      dbToast(`${hidden ? 'Hidden' : 'Unhid'} "${s.name}"`, async () => {
+        await dbPatchBrief(s, { hidden: !hidden });
+        if (hidden && wasFav) { await dbPatchFavorite(s, true); refreshDashboard(); loadSidebar(); }
+      });
+    }
+
+    function dbToast(text, undo) {
+      const el = document.getElementById('dbToast');
+      if (!el) return;
+      clearTimeout(dbToastTimer);
+      el.innerHTML = `<span>${esc(text)}</span><button type="button">Undo</button>`;
+      el.hidden = false;
+      el.querySelector('button').onclick = () => { el.hidden = true; undo(); };
+      dbToastTimer = setTimeout(() => { el.hidden = true; }, 5000);
+    }
+
+    function dbPinnedOf(s) {
+      // Send back what was PINNED (`it.pin`), not the card's merged values: the merged
+      // state is the agent's, and a pin's own state wins, so re-sending it would freeze
+      // that state after the agent moves on. A peer too old to send `pin` gets the old
+      // merged answer, which is the best it can be given.
+      return ((s.brief && s.brief.items) || []).filter((it) => it.source === 'pinned').map((it) => {
+        const p = it.pin || it;
+        return { ref: it.ref, title: p.title || '', ...(p.state ? { state: p.state } : {}) };
+      });
+    }
+
+    document.addEventListener('click', (e) => {
+      if (!dbOpen) return;
+      const host = document.getElementById('dashboard');
+      if (!host.contains(e.target)) return;
+      if (e.target.closest('[data-stop]')) return;            // a work-item link opens itself
+      const el = e.target.closest('[data-action]');
+      // A click anywhere outside an open card menu closes it.
+      if (dbMenu && !e.target.closest('.db-menu') && !(el && el.dataset.action === 'menu')) {
+        dbMenu = null;
+        if (!el || el.dataset.action === 'open') { renderDashboard(); return; }
+      }
+      if (!el) return;
+      const action = el.dataset.action;
+      const s = dbSessions.get(el.dataset.card || '');
+      if (action === 'group') { dbGroup = el.dataset.group; dbSavePrefs(); renderDashboard(); return; }
+      if (action === 'tab') { dbTab = el.dataset.tab === 'hidden' ? 'hidden' : 'active'; renderDashboard(); return; }
+      if (action === 'section') {
+        const k = el.dataset.section;
+        if (dbOpenSections.has(k)) dbOpenSections.delete(k); else dbOpenSections.add(k);
+        renderDashboard();
+        return;
+      }
+      if (action === 'status-filter') {
+        dbStatusFilter = dbStatusFilter === el.dataset.filter ? null : el.dataset.filter;
+        renderDashboard();
+        return;
+      }
+      if (action === 'srv-filter') {
+        const k = el.dataset.srv || '';
+        if (dbServerFilter.has(k)) dbServerFilter.delete(k); else dbServerFilter.add(k);
+        renderDashboard();
+        return;
+      }
+      if (action === 'close') { closeDashboard(); return; }
+      if (action === 'pin-cancel') { e.stopPropagation(); dbEditing = null; renderDashboard(); return; }
+      if (!s) return;
+      if (action === 'open') {
+        if (e.target.closest('.db-pinform') || e.target.closest('.db-menu')) return;
+        closeDashboard();
+        switchSession(s.id, s.serverUrl);
+        return;
+      }
+      e.stopPropagation();
+      if (action === 'menu') {
+        dbMenu = dbMenu === el.dataset.card ? null : el.dataset.card;
+        renderDashboard();
+        const first = document.querySelector('#dbBody .db-menu button');
+        if (first) first.focus();
+      } else if (action === 'pin-open') {
+        dbEditing = el.dataset.card;
+        renderDashboard();
+        const f = document.querySelector('.db-pinform input.ref');
+        if (f) f.focus();
+      } else if (action === 'pin-save') {
+        const form = el.closest('.db-pinform');
+        const ref = form.querySelector('[name=ref]').value.trim();
+        if (!ref) { form.querySelector('[name=ref]').focus(); return; }
+        const pin = { ref, title: form.querySelector('[name=title]').value.trim() };
+        const state = form.querySelector('[name=state]').value;
+        if (state) pin.state = state;
+        dbEditing = null;
+        dbPatchBrief(s, { pinned: [...dbPinnedOf(s).filter((p) => p.ref !== ref), pin] });
+      } else if (action === 'unpin') {
+        dbPatchBrief(s, { pinned: dbPinnedOf(s).filter((p) => p.ref !== el.dataset.ref) });
+      } else if (action === 'clear-wait') {
+        dbMenu = null;
+        dbPatchBrief(s, { clearWait: true });
+      } else if (action === 'optout') {
+        dbMenu = null;
+        dbPatchBrief(s, { optOut: !(s.brief && s.brief.reporting === 'off') });
+      } else if (action === 'hide' || action === 'unhide') {
+        dbMenu = null;
+        dbSetHidden(s, action === 'hide');
+      } else if (action === 'star') {
+        dbMenu = null;
+        dbPatchFavorite(s, !s.favorite).then(() => { refreshDashboard(); loadSidebar(); });
+      }
+    });
+
+    (function wireDashboardInputs() {
+      const q = document.getElementById('dbSearch');
+      if (q) q.addEventListener('input', () => { dbQuery = q.value; renderDashboard(); });
+      const so = document.getElementById('dbSort');
+      if (so) so.addEventListener('change', () => { dbSort = so.value; dbSavePrefs(); renderDashboard(); });
+      dbLoadPrefs();
+    })();
+
+    document.addEventListener('keydown', (e) => {
+      // Enter on a focused card opens it, like a click; Enter in the pin form saves it.
+      // Scoped to the dashboard's own targets so the terminal's keys are never touched.
+      if (dbOpen && e.key === 'Escape' && dbMenu) { e.preventDefault(); dbMenu = null; renderDashboard(); return; }
+      if (!dbOpen || e.key !== 'Enter') return;
+      const form = e.target && e.target.closest && e.target.closest('#dashboard .db-pinform');
+      if (form && e.target.tagName === 'INPUT') {
+        e.preventDefault();
+        const save = form.querySelector('[data-action=pin-save]');
+        if (save) save.click();
+        return;
+      }
+      const card = e.target && e.target.closest && e.target.closest('#dashboard .db-card, #dashboard .db-row');
+      if (!card || e.target !== card) return;
+      e.preventDefault();
+      card.click();
+    });
+
     // --- Browser back/forward ---
     window.addEventListener('popstate', (e) => {
       const parts = location.pathname.split('/');
@@ -5733,6 +6609,8 @@
     }
 
     async function init() {
+      // #298 - read BEFORE switchSession below, whose pushState drops the hash.
+      const wantDashboard = location.hash === '#dashboard';
       // allSettled, NOT all: one hiccup must not cost the other answers. Until #252 a
       // single rejection here skipped every statement below it, so the defaults, the
       // folder list, session selection, the notify socket and the service worker were
@@ -5804,6 +6682,7 @@
       }
 
       connectNotify();
+      if (wantDashboard) openDashboard();
 
       // Register service worker for PWA
       if ('serviceWorker' in navigator) {
