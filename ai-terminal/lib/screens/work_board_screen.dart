@@ -1301,7 +1301,10 @@ class ArtifactLinks extends StatelessWidget {
           child: InkWell(
             key: ValueKey('board-artifact-${a.url}'),
             borderRadius: BorderRadius.circular(999),
-            onTap: () => launchUrl(Uri.parse(a.url), mode: LaunchMode.externalApplication),
+            onTap: () {
+              final uri = Uri.tryParse(a.url);
+              if (uri != null) launchUrl(uri, mode: LaunchMode.externalApplication);
+            },
             child: Container(
               constraints: const BoxConstraints(maxWidth: 260),
               padding: const EdgeInsets.symmetric(horizontal: 8, vertical: 2),

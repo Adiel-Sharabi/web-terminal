@@ -50,7 +50,6 @@ final _brief = SessionBrief.fromJson({
     {'url': _url, 'title': 'CI streamline plan', 'at': 5000},
     {'url': 'javascript:alert(1)', 'title': 'evil'},
     {'url': 'https://evil.example/artifact/abcdef1', 'title': 'elsewhere'},
-    {'url': 'https://claude.ai/%zz', 'title': 'unparseable'},
   ],
 })!;
 

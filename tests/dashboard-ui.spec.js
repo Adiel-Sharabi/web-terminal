@@ -368,6 +368,9 @@ test.describe('#298 sessions dashboard (app.html)', () => {
     await expect(card).toBeVisible();
     // a closed session keeps its link on the closed strip
     await api.delete(`/api/sessions/${a}`);
+    // the closed record is written as the session exits, a moment after the DELETE returns
+    await expect.poll(async () => ((await (await api.get('/api/dashboard/closed')).json()).closed || [])
+      .some((c) => c.id === a), { timeout: 10000 }).toBe(true);
     await page.reload();
     await expect(page.locator('.db-closed-item', { hasText: `${tag}-a` }).locator('a.db-art')).toHaveAttribute('href', url);
   });
