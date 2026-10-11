@@ -136,6 +136,11 @@ the agent reports only what only it knows (which item, which state), every Claud
 session is told how on every prompt, and a turn that changed an item without reporting
 it is held for one short report before it ends. A report that has fallen behind says
 so on its card. Pin a work item yourself, or switch reporting off for one session.
+Every **claude.ai artifact** a session published (an overview page, a plan, a report) is
+a link on its card, newest first, and on the closed-sessions strip for a day after it ends. It is read
+from the publish itself rather than reported, artifacts published before this shipped are
+picked up from the session's transcript, and the filter finds a session by an artifact's
+title.
 
 It is a place to work FROM: your **Favorites** lead it; sessions group by **why they are not
 working** (needs you, including a session stuck in a menu, working, running on its own,

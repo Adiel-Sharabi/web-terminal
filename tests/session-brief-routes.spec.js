@@ -8,7 +8,7 @@
 const fs = require('fs');
 const path = require('path');
 const { test, expect, request: pwRequest } = require('@playwright/test');
-const { BASE, authCtx, readHookToken } = require('./test-helpers');
+const { BASE, authCtx, readHookToken, claudeProjectsRoot } = require('./test-helpers');
 
 const SERVER_SRC = fs.readFileSync(path.join(__dirname, '..', 'server.js'), 'utf8');
 
@@ -184,6 +184,53 @@ test.describe('#298 sessions dashboard — server wiring', () => {
     expect((await anon.patch(`/api/sessions/${id}/brief`, { data: { optOut: true } })).status()).toBe(401);
     expect((await anon.get('/api/dashboard/closed')).status()).toBe(401);
     await anon.dispose();
+  });
+
+  test('#329: an Artifact publish folds into the brief, and a closed session keeps it', async () => {
+    const url = 'https://claude.ai/artifact/RouteTest329abc';
+    await hook(id, 'PostToolUse', { tool_name: 'Artifact', tool_input: { file_path: 'x.html' },
+      tool_response: { url, title: 'Route overview', version: '1-2', updated: false } });
+    await hook(id, 'PostToolUse', { tool_name: 'Artifact', tool_input: { action: 'read', url: 'https://claude.ai/artifact/NotAPublish1' },
+      tool_response: { url: 'https://claude.ai/artifact/NotAPublish1', title: 'x', version: '1' } });
+    const b = await briefOf(ctx, id);
+    expect(b.artifacts).toEqual([expect.objectContaining({ url, title: 'Route overview' })]);
+    await ctx.delete(`/api/sessions/${id}`);
+    await expect.poll(async () => {
+      const j = await (await ctx.get('/api/dashboard/closed')).json();
+      const c = j.closed.find((x) => x.id === id);
+      return c ? c.artifacts.map((a) => a.url) : null;
+    }, { timeout: 10000 }).toEqual([url]);
+  });
+
+  test('#329: artifacts published before the hooks watched are read ONCE from the transcript', async () => {
+    const dir = path.join(claudeProjectsRoot(), '__wt-test-fixture__');
+    fs.mkdirSync(dir, { recursive: true });
+    const fixture = path.join(dir, `wt_art_${process.pid}_${Date.now()}.jsonl`);
+    const url = 'https://claude.ai/artifact/Backfill329xyz';
+    fs.writeFileSync(fixture, [
+      { type: 'user', timestamp: '2026-10-01T09:00:00.000Z', message: { role: 'user', content: [{ type: 'text', text: 'make an overview' }] } },
+      { type: 'user', timestamp: '2026-10-01T09:05:00.000Z', toolUseResult: { url, title: 'Backfilled overview', version: '1-2', updated: false },
+        message: { role: 'user', content: [{ type: 'tool_result', tool_use_id: 't1', content: 'Published' }] } },
+    ].map((l) => JSON.stringify(l)).join('\n') + '\n', 'utf8');
+    try {
+      await hook(id, 'UserPromptSubmit', { prompt: 'p', transcript_path: fixture });
+      await expect.poll(async () => ((await briefOf(ctx, id)).artifacts || []).map((a) => a.title), { timeout: 10000 })
+        .toEqual(['Backfilled overview']);
+      expect((await briefOf(ctx, id)).artifacts[0].at).toBe(Date.parse('2026-10-01T09:05:00.000Z'));
+      // ONCE: a publish written to the transcript afterwards is never picked up by a poll
+      // (a hook would bring it). Without the scanned flag every list read re-reads every
+      // transcript, and this second line appears within a poll or two.
+      fs.appendFileSync(fixture, JSON.stringify({ type: 'user', timestamp: '2026-10-01T09:06:00.000Z',
+        toolUseResult: { url: 'https://claude.ai/artifact/Backfill329second', title: 'Second', version: '1' },
+        message: { role: 'user', content: [] } }) + '\n', 'utf8');
+      for (let i = 0; i < 6; i++) {
+        await new Promise((r) => setTimeout(r, 250));
+        expect((await briefOf(ctx, id)).artifacts.map((a) => a.title)).toEqual(['Backfilled overview']);
+      }
+    } finally {
+      try { fs.unlinkSync(fixture); } catch {}
+      try { fs.rmdirSync(dir); } catch {}
+    }
   });
 
   test('a session that ends is listed as closed, with its work items', async () => {

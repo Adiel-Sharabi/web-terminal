@@ -609,6 +609,30 @@ class BriefItem {
       : const <BriefItem>[];
 }
 
+/// A claude.ai artifact a session published (#329). The server folds it from the
+/// `Artifact` tool's own result, so it is a fact, not something the agent reported.
+class BriefArtifact {
+  final String url;
+  final String title;
+
+  /// Epoch milliseconds it was published, or null.
+  final int? at;
+  const BriefArtifact({required this.url, required this.title, this.at});
+
+  static BriefArtifact? fromJson(dynamic json) {
+    if (json is! Map) return null;
+    final url = (json['url'] ?? '').toString();
+    // Only a claude.ai link is ever opened — the value came over the wire.
+    if (!url.startsWith('https://claude.ai/')) return null;
+    final title = (json['title'] ?? '').toString().trim();
+    return BriefArtifact(url: url, title: title.isEmpty ? 'Artifact' : title, at: _asInt(json['at']));
+  }
+
+  static List<BriefArtifact> listFromJson(dynamic raw) => raw is List
+      ? raw.map(BriefArtifact.fromJson).whereType<BriefArtifact>().toList(growable: false)
+      : const <BriefArtifact>[];
+}
+
 /// A timestamped line on a brief: what the agent is doing now, what it last said
 /// it did, the last prompt.
 class BriefLine {
@@ -647,6 +671,9 @@ class SessionBrief {
   /// Hidden from the dashboard by a person (#314). The session list never hides it.
   final bool hidden;
 
+  /// The claude.ai artifacts it published, newest first (#329).
+  final List<BriefArtifact> artifacts;
+
   const SessionBrief({
     this.reportingOn = true,
     this.items = const <BriefItem>[],
@@ -657,6 +684,7 @@ class SessionBrief {
     this.prompt,
     this.staleReason,
     this.hidden = false,
+    this.artifacts = const <BriefArtifact>[],
   });
 
   static SessionBrief? fromJson(dynamic json) {
@@ -674,6 +702,7 @@ class SessionBrief {
       prompt: BriefLine.fromJson(json['prompt']),
       staleReason: (reason == null || reason.isEmpty) ? null : reason,
       hidden: json['hidden'] == true,
+      artifacts: BriefArtifact.listFromJson(json['artifacts']),
     );
   }
 
@@ -740,6 +769,9 @@ class ClosedSession {
   final int? at;
   final ServerConfig server;
 
+  /// What it published (#329), so a closed session's artifacts stay one tap away.
+  final List<BriefArtifact> artifacts;
+
   const ClosedSession({
     required this.id,
     required this.name,
@@ -748,6 +780,7 @@ class ClosedSession {
     this.headline,
     this.did,
     this.at,
+    this.artifacts = const <BriefArtifact>[],
   });
 
   static ClosedSession? fromJson(ServerConfig server, dynamic json) {
@@ -764,6 +797,7 @@ class ClosedSession {
       headline: (headline == null || headline.isEmpty) ? null : headline,
       did: BriefLine.fromJson(json['did']),
       at: _asInt(json['at']),
+      artifacts: BriefArtifact.listFromJson(json['artifacts']),
     );
   }
 }

@@ -343,11 +343,45 @@ test.describe('#298 sessions dashboard (app.html)', () => {
     await expect(entry(`${tag}-quiet`)).toHaveCount(1);
   });
 
+  test('a published artifact is a link on the card that opens itself, not the session (#329)', async ({ page }) => {
+    const tag = `art-${Date.now()}`;
+    const a = await newSession(`${tag}-a`);
+    const url = 'https://claude.ai/artifact/UiTest329abcdef';
+    await hook(a, 'PostToolUse', { tool_name: 'Artifact', tool_input: { file_path: 'o.html' },
+      tool_response: { url, title: `Overview ${tag}`, version: '1-2', updated: false } });
+    await loginPage(page);
+    await page.goto(`${BASE}/app#dashboard`);
+    const card = page.locator('.db-card, .db-row', { hasText: `${tag}-a` }).first();
+    const link = card.locator('a.db-art');
+    await expect(link).toHaveText(new RegExp(`Overview ${tag}`));
+    await expect(link).toHaveAttribute('href', url);
+    await expect(link).toHaveAttribute('target', '_blank');
+    await expect(link).toHaveAttribute('rel', /noopener/);
+    // clicking it does not open the session: the dashboard stays up
+    await page.context().route('https://claude.ai/**', (r) => r.fulfill({ status: 200, body: 'ok' }));
+    const popup = page.waitForEvent('popup');
+    await link.click();
+    await (await popup).close();
+    expect(await page.evaluate(() => location.hash)).toBe('#dashboard');
+    // and the dashboard's text filter finds a session by what it published
+    await page.fill('#dbSearch', `overview ${tag}`);
+    await expect(card).toBeVisible();
+    // a closed session keeps its link on the closed strip
+    await api.delete(`/api/sessions/${a}`);
+    // the closed record is written as the session exits, a moment after the DELETE returns
+    await expect.poll(async () => ((await (await api.get('/api/dashboard/closed')).json()).closed || [])
+      .some((c) => c.id === a), { timeout: 10000 }).toBe(true);
+    await page.reload();
+    await expect(page.locator('.db-closed-item', { hasText: `${tag}-a` }).locator('a.db-art')).toHaveAttribute('href', url);
+  });
+
   test('nothing a session or an agent wrote becomes markup', async ({ page }) => {
     const evil = '<img src=x onerror="window.__pwned=1">';
     const id = await newSession(`x${evil}`);
     await hook(id, 'UserPromptSubmit', { prompt: evil });
     await report(id, { items: [{ ref: `#1${evil}`.slice(0, 60), title: evil, state: 'done', note: evil }], headline: evil, wait: { on: 'external', what: evil } });
+    await hook(id, 'PostToolUse', { tool_name: 'Artifact', tool_input: {},
+      tool_response: { url: 'https://claude.ai/artifact/EvilTitle329x', title: evil, version: '1' } });
     await hook(id, 'Stop', {});
     await loginPage(page);
     await page.goto(`${BASE}/app#dashboard`);
