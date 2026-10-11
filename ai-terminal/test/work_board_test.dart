@@ -586,10 +586,10 @@ void main() {
       final mechanical = find.byKey(ValueKey('board-needs-${_server.baseUrl}-m'));
       expect(reported, findsOneWidget);
       expect(mechanical, findsOneWidget);
-      expect(find.descendant(of: mechanical, matching: find.byTooltip('Not waiting')), findsNothing);
+      expect(find.descendant(of: mechanical, matching: find.byTooltip('Not waiting: Mechanical one')), findsNothing);
       // "hidden" sits before the long reason, so a phone's ellipsis cannot hide it.
       expect(find.descendant(of: reported, matching: find.textContaining('Reported one · hidden ·')), findsOneWidget);
-      await tester.tap(find.descendant(of: reported, matching: find.byTooltip('Not waiting')));
+      await tester.tap(find.descendant(of: reported, matching: find.byTooltip('Not waiting: Reported one')));
       await tester.pump();
       await tester.runAsync(() => Future<void>.delayed(const Duration(milliseconds: 50)));
       expect('${patches.last.url.path} ${patches.last.body}', '/api/sessions/r/brief {"clearWait":true}');

@@ -267,6 +267,15 @@ test.describe('#298 sessions dashboard (app.html)', () => {
     await page.locator(`#dbBody .db-needs [data-action=clear-wait][aria-label="Not waiting: ${tag}"]`).click();
     await expect.poll(async () => (await (await api.get('/api/sessions')).json()).find((s) => s.id === id).reason).toBeNull();
     await expect(entry).toHaveCount(0);
+    // ...never for a LIVE prompt: a hidden session owing a permission is a fact, not a report.
+    const live = await newSession(`${tag}-live`);
+    await hook(live, 'UserPromptSubmit', { prompt: 'go' });
+    await hook(live, 'PermissionRequest', { tool_name: 'Bash', tool_input: { command: 'ls' } });
+    expect((await api.patch(`/api/sessions/${live}/brief`, { data: { hidden: true } })).status()).toBe(200);
+    await expect.poll(async () => (await (await api.get('/api/sessions')).json()).find((s) => s.id === live).reason?.source).toBe('status');
+    const liveEntry = page.locator('#dbBody .db-needs-pair', { hasText: `${tag}-live` });
+    await expect(liveEntry).toBeVisible({ timeout: 15_000 });
+    await expect(liveEntry.locator('[data-action=clear-wait]')).toHaveCount(0);
   });
 
   test('a summary chip is a filter: tap to show only those, tap again for all (#318)', async ({ page }) => {

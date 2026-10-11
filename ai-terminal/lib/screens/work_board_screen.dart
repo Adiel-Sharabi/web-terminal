@@ -875,7 +875,7 @@ class _NeedsYou extends StatelessWidget {
                   '${s.reason?.kind == 'menu' ? 'stuck in a menu (Esc)' : s.reason?.kind == 'you' && s.reason!.text.isNotEmpty ? s.reason!.text : s.waitingFor == 'question' ? 'a question' : 'a permission'}'),
               onPressed: () => onOpen(s),
               onDeleted: onClearWaitOf(s),
-              deleteButtonTooltipMessage: 'Not waiting',
+              deleteButtonTooltipMessage: 'Not waiting: ${s.name}',
             ),
         ],
       ),

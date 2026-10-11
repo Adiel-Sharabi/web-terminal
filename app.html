@@ -545,7 +545,8 @@
     .db-needs strong { color: #ff9aac; font-size: 11px; text-transform: uppercase; letter-spacing: .06em; }
     .db-needs button { display: flex; gap: 8px; align-items: center; padding: 6px 10px; border-radius: 6px; border: 0;
       background: #1d1218; color: #f2d7dd; cursor: pointer; font: inherit; }
-    .db-needs button.db-needs-clear { margin-left: -4px; padding: 4px 8px; font-size: 11px; color: #c9a3ad; background: transparent;
+    .db-needs-pair { display: inline-flex; flex-wrap: nowrap; align-items: center; gap: 4px; max-width: 100%; min-width: 0; }
+    .db-needs button.db-needs-clear { flex: none; padding: 4px 8px; font-size: 11px; color: #c9a3ad; background: transparent;
       border: 1px solid #5a2433; box-shadow: none; }
     .db-needs button.db-needs-clear:hover { color: #f2d7dd; border-color: #8a3a4d; }
     .db-group { margin: 20px 20px 0; }
@@ -6285,12 +6286,13 @@
       const strip = dbGroup === 'reason' ? needs.filter(dbIsHidden) : needs;
       if (dbTab === 'active' && strip.length) {
         html += `<section class="db-needs" aria-label="Needs you"><strong>Needs you</strong>${strip.map((s) =>
-          `<button data-action="open" data-card="${esc(dbKey(s))}"${srvStyle(s.serverUrl)}><span class="sb-dot waiting"></span><b>${esc(s.name)}</b>` +
+          `<span class="db-needs-pair"><button data-action="open" data-card="${esc(dbKey(s))}"${srvStyle(s.serverUrl)}><span class="sb-dot waiting"></span><b>${esc(s.name)}</b>` +
           `${dbIsHidden(s) ? '<span class="db-hid" title="Hidden from the dashboard">hidden</span>' : ''}<span>${esc(s.server || '')}</span>` +
           `<span>${esc(s.reason && s.reason.kind === 'menu' ? 'stuck in a menu (Esc)' : s.reason && s.reason.kind === 'you' && s.reason.text ? s.reason.text : (s.waitingFor === 'question' ? 'a question' : 'a permission'))}</span></button>` +
           // #324 - a hidden session has no card on this tab, so its menu's "Not waiting" is
           // out of reach; offer it here, under the same rule as the menu item.
-          (dbCanClearWait(s) ? `<button class="db-needs-clear" data-action="clear-wait" data-card="${esc(dbKey(s))}" title="Not waiting" aria-label="Not waiting: ${esc(s.name)}">Not waiting</button>` : '')).join('')}</section>`;
+          (dbCanClearWait(s) ? `<button class="db-needs-clear" data-action="clear-wait" data-card="${esc(dbKey(s))}" aria-label="Not waiting: ${esc(s.name)}">Not waiting</button>` : '') +
+          '</span>').join('')}</section>`;
         for (const s of strip) dbSessions.set(dbKey(s), s);
       }
 
