@@ -245,7 +245,9 @@ test.describe('#298 sessions dashboard (app.html)', () => {
     await hook(busy, 'UserPromptSubmit', { prompt: 'go' });
     await hook(busy, 'PreToolUse', { tool_name: 'Read', tool_input: {} });
     const busyCard = page.locator('#dbBody [data-action=open]', { hasText: `${tag}-busy` }).first();
-    await expect(busyCard).toBeVisible();
+    // Made AFTER the dashboard opened, so it arrives on the next 5s poll (DB_POLL_MS): a
+    // 5s wait raced that poll and lost now and then.
+    await expect(busyCard).toBeVisible({ timeout: 12000 });
     await busyCard.locator('[data-action=menu]').click();
     await expect(page.locator('#dbBody .db-menu')).toBeVisible();
     await expect(page.locator('#dbBody .db-menu [data-action=clear-wait]')).toHaveCount(0);
