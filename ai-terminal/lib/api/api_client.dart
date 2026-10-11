@@ -307,6 +307,19 @@ class ApiClient {
     }
   }
 
+  /// This server's machine profile (`GET /api/machine`, #331): free disk, memory and
+  /// virtual memory, load and session count, for the dashboard's Machines section.
+  /// The server runs a CIM query to answer, so it is asked only while that section is
+  /// open. `null` on any failure, which the section renders as unknown.
+  Future<MachineProfile?> machine() async {
+    try {
+      final res = await _send('GET', '/api/machine', timeout: const Duration(seconds: 15));
+      return MachineProfile.fromJson(_decode(res));
+    } catch (_) {
+      return null;
+    }
+  }
+
   /// Reads this server's runtime defaults (`GET /api/config`).
   ///
   /// Only the [ServerRuntimeConfig] subset is surfaced; auth/cluster/tuning keys

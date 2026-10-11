@@ -223,6 +223,18 @@ void main() {
               return http.Response(jsonEncode({'version': '1.74.0', 'serverName': 'Home', 'serverColor': '#E27BF5', 'capabilities': capabilities}), 200);
             case '/api/sessions':
               return http.Response(jsonEncode(rows), 200);
+            case '/api/machine':
+              return http.Response(jsonEncode({
+                'name': 'Home',
+                'cpu': {'pct': 12, 'cores': 16, 'level': 'ok'},
+                'memory': {'availBytes': 3 * 1073741824, 'totalBytes': 64 * 1073741824, 'level': 'warn'},
+                'commit': {'availBytes': 19 * 1073741824, 'totalBytes': 68 * 1073741824, 'level': 'ok'},
+                'disks': [
+                  {'root': 'C:', 'freeBytes': 5 * 1073741824, 'totalBytes': 931 * 1073741824, 'level': 'hot'},
+                ],
+                'sessions': {'count': 2, 'working': 1, 'waiting': 1, 'max': 10, 'level': 'ok'},
+                'uptimeSec': 90000,
+              }), 200);
             case '/api/dashboard/closed':
               return http.Response(jsonEncode({'closed': [{'id': 'gone', 'name': 'Finished session', 'items': [], 'did': {'text': 'wrapped up'}, 'at': DateTime.now().millisecondsSinceEpoch}]}), 200);
           }
@@ -284,6 +296,43 @@ void main() {
       await tester.pump();
       return opened;
     }
+
+    testWidgets('Machines (#331): collapsed it asks nothing; opened it reads each server', (tester) async {
+      capabilities = [...capabilities, 'machine-profile'];
+      final r = await repo();
+      await pump(tester, r: r);
+      expect(find.byKey(const ValueKey('board-machines')), findsOneWidget);
+      expect(paths, isNot(contains('/api/machine')), reason: 'collapsed costs the server nothing');
+      expect(find.byKey(ValueKey('board-machine-${_server.baseUrl}')), findsNothing);
+
+      await tester.tap(find.text('Machines'));
+      await tester.pump();
+      await tester.runAsync(() => Future<void>.delayed(const Duration(milliseconds: 50)));
+      await tester.pump();
+      expect(paths, contains('/api/machine'));
+      final card = find.byKey(ValueKey('board-machine-${_server.baseUrl}'));
+      expect(find.descendant(of: card, matching: find.text('2 of 10 · 1 working · 1 waiting')), findsOneWidget);
+      expect(find.descendant(of: card, matching: find.text('3.0 GB free of 64 GB')), findsOneWidget);
+      expect(find.descendant(of: card, matching: find.text('19 GB free of 68 GB')), findsOneWidget);
+      expect(find.descendant(of: card, matching: find.text('C: 5.0 GB free of 931 GB')), findsOneWidget);
+      expect(find.descendant(of: card, matching: find.text('up 1d 1h')), findsOneWidget);
+      // the server's level colours it: a nearly full drive is the error colour
+      final disk = tester.widget<Text>(find.descendant(of: card, matching: find.text('C: 5.0 GB free of 931 GB')));
+      expect(disk.style?.color, AppTheme.dark.colorScheme.error);
+      // remembered on this device
+      final saved = jsonDecode((await SharedPreferences.getInstance()).getString('wt.dashboard.view')!) as Map;
+      expect(saved['machines'], isTrue);
+    });
+
+    testWidgets('Machines: a server too old for it says so and is never asked', (tester) async {
+      SharedPreferences.setMockInitialValues({});
+      final r = await repo();
+      await pump(tester, r: r);
+      await tester.tap(find.text('Machines'));
+      await tester.pump();
+      expect(find.text('this server is too old to report its machine'), findsOneWidget);
+      expect(paths, isNot(contains('/api/machine')));
+    });
 
     testWidgets('cards, needs-you, stale warning, closed strip; a tap opens the session', (tester) async {
       final r = await repo();

@@ -609,6 +609,17 @@
     .db-pinform input, .db-pinform select { background: #12161f; border: 1px solid #3a4252; color: #e0e4ea; border-radius: 5px;
       padding: 4px 6px; font: inherit; font-size: 12px; }
     .db-pinform input.ref { width: 90px; } .db-pinform input.title { flex: 1 1 140px; min-width: 0; }
+    /* #331 - the Machines section: one card per server, coloured by the server's own `level`. */
+    .db-mach-toggle { display: flex; align-items: baseline; gap: 6px; background: transparent; border: 0; padding: 0; cursor: pointer; color: inherit; font: inherit; }
+    .db-mach-toggle h3 { margin: 0; }
+    .db-mach { background: #161b26; border: 1px solid #262d3b; border-radius: 8px; padding: 10px 12px; font-size: 12px; color: #c3c9d4; min-width: 0; }
+    .db-mach-h { display: flex; align-items: center; gap: 6px; margin-bottom: 6px; font-size: 13px; color: #e8ebf0; }
+    .db-mach-h .up { margin-left: auto; font-size: 11px; color: #8b94a5; }
+    .db-mach-r { display: flex; gap: 8px; padding: 1px 0; min-width: 0; }
+    .db-mach-r .k { flex: 0 0 104px; color: #8b94a5; }
+    .db-mach-r .v { min-width: 0; overflow-wrap: anywhere; }
+    .db-mach-note { color: #8b94a5; }
+    .db-mach .u-warn { color: #da4; } .db-mach .u-hot { color: #e94560; }
     .db-closed { margin: 22px 20px 24px; }
     .db-closed h3 { margin: 0 0 8px; font-size: 11px; font-weight: 600; color: #8b94a5; text-transform: uppercase; letter-spacing: .06em; }
     .db-closed-list { display: flex; flex-wrap: wrap; gap: 8px; }
@@ -6042,6 +6053,11 @@
     let dbEditing = null;            // key of the card whose pin form is open - no re-render under it
     let dbPrevFocus = null;          // what had the keyboard before the dashboard took it
     let dbClosed = new Map();        // server key -> { at, list }
+    // #331 - the Machines section. Each server's GET /api/machine is asked only while the
+    // section is OPEN, because it costs that server a CIM query; collapsed, nothing is sent.
+    const DB_MACHINE_POLL_MS = 30000;
+    let dbMachinesOpen = false;
+    const dbMachines = new Map();    // server key -> { at, data } | { at, error: true }
     const dbSessions = new Map();    // card key -> session row, for the action handlers
 
     function dbKey(s) { return `${s.serverUrl || ''}|${s.id}`; }
@@ -6116,6 +6132,72 @@
       }
       if (dbOpen && !dbEditing) renderDashboard();
       refreshClosed();
+      refreshMachines();
+    }
+
+    function dbHasMachine(sv) { return !!(sv && Array.isArray(sv.capabilities) && sv.capabilities.includes('machine-profile')); }
+
+    async function refreshMachines(force) {
+      if (!dbOpen || !dbMachinesOpen) return;
+      const servers = (dbData && dbData.servers) || [];
+      const due = servers.filter((sv) => {
+        if (!sv.online || sv.needsAuth || !dbHasMachine(sv)) return false;
+        const hit = dbMachines.get(sv.url || '');
+        return force || !hit || Date.now() - hit.at > DB_MACHINE_POLL_MS;
+      });
+      // Stamped first, so the next 5s poll does not ask a slow server again.
+      for (const sv of due) dbMachines.set(sv.url || '', { ...(dbMachines.get(sv.url || '') || {}), at: Date.now() });
+      await Promise.allSettled(due.map(async (sv) => {
+        const k = sv.url || '';
+        try {
+          const r = await fetch(`${dbApiBase(sv.url)}/machine`);
+          if (!r.ok) throw new Error(`HTTP ${r.status}`);
+          dbMachines.set(k, { at: Date.now(), data: await r.json() });
+        } catch (e) {
+          // Unknown, not the previous reading: an old number would age into a confident lie.
+          dbMachines.set(k, { at: Date.now(), error: true });
+        }
+      }));
+      if (due.length && dbOpen && !dbEditing) renderDashboard();
+    }
+
+    function dbSize(b) {
+      if (typeof b !== 'number' || !isFinite(b) || b < 0) return '\u2014';
+      const GB = 1024 * 1024 * 1024;
+      if (b >= 1024 * GB) return (b / (1024 * GB)).toFixed(1) + ' TB';
+      return b >= 10 * GB ? Math.round(b / GB) + ' GB' : (b / GB).toFixed(1) + ' GB';
+    }
+    const dbLevelCls = (l) => (l === 'hot' ? 'u-hot' : l === 'warn' ? 'u-warn' : '');
+    function dbUptime(sec) {
+      if (typeof sec !== 'number' || !isFinite(sec) || sec < 0) return '';
+      const d = Math.floor(sec / 86400), h = Math.floor((sec % 86400) / 3600);
+      return d ? `up ${d}d ${h}h` : `up ${h}h ${Math.floor((sec % 3600) / 60)}m`;
+    }
+    function dbMachineHtml(sv) {
+      const k = sv.url || '';
+      const sw = safeColor(sv.color) ? `<span class="srv-swatch" style="background:${sv.color}"></span>` : '';
+      const hit = dbMachines.get(k);
+      const m = hit && hit.data;
+      const row = (label, value, level) => `<div class="db-mach-r"><span class="k">${label}</span><span class="v ${dbLevelCls(level)}">${value}</span></div>`;
+      let body;
+      if (!sv.online) body = '<div class="db-mach-note">offline</div>';
+      else if (sv.needsAuth) body = '<div class="db-mach-note">needs login</div>';
+      else if (!dbHasMachine(sv)) body = '<div class="db-mach-note">this server is too old to report its machine</div>';
+      else if (!m) body = `<div class="db-mach-note">${hit && hit.error ? 'could not read it' : 'reading&hellip;'}</div>`;
+      else {
+        const se = m.sessions;
+        const cpu = m.cpu || {};
+        body =
+          (se ? row('Sessions', esc(`${se.count} of ${se.max} \u00b7 ${se.working} working \u00b7 ${se.waiting} waiting`), se.level) : row('Sessions', '\u2014'))
+          + row('CPU', esc(`${typeof cpu.pct === 'number' ? cpu.pct + '%' : '\u2014'}${cpu.cores ? ` of ${cpu.cores} cores` : ''}`), cpu.level)
+          + row('Memory', m.memory ? esc(`${dbSize(m.memory.availBytes)} free of ${dbSize(m.memory.totalBytes)}`) : '\u2014', m.memory && m.memory.level)
+          + row('Virtual memory', m.commit ? esc(`${dbSize(m.commit.availBytes)} free of ${dbSize(m.commit.totalBytes)}`) : '\u2014', m.commit && m.commit.level)
+          + (Array.isArray(m.disks) && m.disks.length
+            ? m.disks.map((d, i) => row(i ? '' : 'Disk', esc(`${d.root} ${dbSize(d.freeBytes)} free of ${dbSize(d.totalBytes)}`), d.level)).join('')
+            : row('Disk', '\u2014'));
+      }
+      const up = m ? dbUptime(m.uptimeSec) : '';
+      return `<div class="db-mach" data-machine="${esc(k)}"><div class="db-mach-h">${sw}<b>${esc(sv.name || 'Local')}</b>${up ? `<span class="up">${esc(up)}</span>` : ''}</div>${body}</div>`;
     }
 
     async function refreshClosed() {
@@ -6181,10 +6263,11 @@
         const p = JSON.parse(localStorage.getItem(DB_PREFS_KEY) || '{}');
         if (['reason', 'server', 'item'].includes(p.group)) dbGroup = p.group;
         if (['list', 'recent', 'name', 'machine'].includes(p.sort)) dbSort = p.sort;
+        if (typeof p.machines === 'boolean') dbMachinesOpen = p.machines;
       } catch (e) { /* storage blocked: defaults */ }
     }
     function dbSavePrefs() {
-      try { localStorage.setItem(DB_PREFS_KEY, JSON.stringify({ group: dbGroup, sort: dbSort })); } catch (e) {}
+      try { localStorage.setItem(DB_PREFS_KEY, JSON.stringify({ group: dbGroup, sort: dbSort, machines: dbMachinesOpen })); } catch (e) {}
     }
     function serverHasCap(servers, s, cap) {
       const sv = (servers || []).find((x) => (x.url || null) === (s.serverUrl || null));
@@ -6408,6 +6491,15 @@
         for (const s of strip) dbSessions.set(dbKey(s), s);
       }
 
+      if (dbTab === 'active' && servers.length) {
+        const list = servers.filter((sv) => !dbServerFilter.size || dbServerFilter.has(sv.url || ''));
+        html += `<section class="db-group db-machines" aria-label="Machines"><div class="db-group-h">` +
+          `<button type="button" class="db-mach-toggle" data-action="machines" aria-expanded="${dbMachinesOpen}">` +
+          `<span class="db-chev">${dbMachinesOpen ? '&#9662;' : '&#9656;'}</span><h3>Machines</h3></button>` +
+          `<span class="db-count">disk, memory and load: where to open a new session</span></div>` +
+          (dbMachinesOpen ? `<div class="db-grid">${list.map(dbMachineHtml).join('')}</div>` : '') + '</section>';
+      }
+
       if (dbTab === 'hidden') {
         html += pool.length
           ? `<section class="db-group"><div class="db-rows">${dbSorted(pool).map((s) => dbRowHtml(s, { unhide: true })).join('')}</div></section>`
@@ -6574,6 +6666,13 @@
       const s = dbSessions.get(el.dataset.card || '');
       if (action === 'group') { dbGroup = el.dataset.group; dbSavePrefs(); renderDashboard(); return; }
       if (action === 'tab') { dbTab = el.dataset.tab === 'hidden' ? 'hidden' : 'active'; renderDashboard(); return; }
+      if (action === 'machines') {
+        dbMachinesOpen = !dbMachinesOpen;
+        dbSavePrefs();
+        renderDashboard();
+        refreshMachines(true);
+        return;
+      }
       if (action === 'section') {
         const k = el.dataset.section;
         if (dbOpenSections.has(k)) dbOpenSections.delete(k); else dbOpenSections.add(k);

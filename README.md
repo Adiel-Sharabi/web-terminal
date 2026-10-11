@@ -142,6 +142,15 @@ from the publish itself rather than reported, artifacts published before this sh
 picked up from the session's transcript, and the filter finds a session by an artifact's
 title.
 
+A collapsible **Machines** section answers *which machine should I open a new session on?*
+For each server it shows its sessions against the session limit (and how many are working
+or waiting), CPU load and cores, free memory, free **virtual memory** (commit, which can run
+out before memory does), free space on each fixed drive, and uptime. A reading that is low
+is amber or red, decided by the server (`lib/machine-profile.js`) so both clients agree. The
+drive and virtual-memory figures cost the server a CIM query, so they are read only while
+the section is open (`GET /api/machine`, cached for a minute); whether it is open is
+remembered per device.
+
 It is a place to work FROM: your **Favorites** lead it; sessions group by **why they are not
 working** (needs you, including a session stuck in a menu, working, running on its own,
 blocked on others, idle, done), by server or
