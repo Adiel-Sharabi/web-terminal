@@ -622,8 +622,9 @@ class BriefArtifact {
   static BriefArtifact? fromJson(dynamic json) {
     if (json is! Map) return null;
     final url = (json['url'] ?? '').toString();
-    // Only a claude.ai link is ever opened — the value came over the wire.
-    if (!url.startsWith('https://claude.ai/')) return null;
+    // Only a claude.ai link is ever opened — the value came over the wire, and one that
+    // will not parse (`https://claude.ai/%zz`) is dropped here rather than thrown on tap.
+    if (!url.startsWith('https://claude.ai/') || Uri.tryParse(url) == null) return null;
     final title = (json['title'] ?? '').toString().trim();
     return BriefArtifact(url: url, title: title.isEmpty ? 'Artifact' : title, at: _asInt(json['at']));
   }

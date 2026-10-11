@@ -217,6 +217,16 @@ test.describe('#298 sessions dashboard — server wiring', () => {
       await expect.poll(async () => ((await briefOf(ctx, id)).artifacts || []).map((a) => a.title), { timeout: 10000 })
         .toEqual(['Backfilled overview']);
       expect((await briefOf(ctx, id)).artifacts[0].at).toBe(Date.parse('2026-10-01T09:05:00.000Z'));
+      // ONCE: a publish written to the transcript afterwards is never picked up by a poll
+      // (a hook would bring it). Without the scanned flag every list read re-reads every
+      // transcript, and this second line appears within a poll or two.
+      fs.appendFileSync(fixture, JSON.stringify({ type: 'user', timestamp: '2026-10-01T09:06:00.000Z',
+        toolUseResult: { url: 'https://claude.ai/artifact/Backfill329second', title: 'Second', version: '1' },
+        message: { role: 'user', content: [] } }) + '\n', 'utf8');
+      for (let i = 0; i < 6; i++) {
+        await new Promise((r) => setTimeout(r, 250));
+        expect((await briefOf(ctx, id)).artifacts.map((a) => a.title)).toEqual(['Backfilled overview']);
+      }
     } finally {
       try { fs.unlinkSync(fixture); } catch {}
       try { fs.rmdirSync(dir); } catch {}

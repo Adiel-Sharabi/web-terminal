@@ -366,6 +366,10 @@ test.describe('#298 sessions dashboard (app.html)', () => {
     // and the dashboard's text filter finds a session by what it published
     await page.fill('#dbSearch', `overview ${tag}`);
     await expect(card).toBeVisible();
+    // a closed session keeps its link on the closed strip
+    await api.delete(`/api/sessions/${a}`);
+    await page.reload();
+    await expect(page.locator('.db-closed-item', { hasText: `${tag}-a` }).locator('a.db-art')).toHaveAttribute('href', url);
   });
 
   test('nothing a session or an agent wrote becomes markup', async ({ page }) => {

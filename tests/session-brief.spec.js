@@ -454,6 +454,8 @@ test.describe('artifacts (#329)', () => {
   test('the text form of a publish result is read too, titled by its file', () => {
     expect(B.publishedArtifact(`Published C:\\tmp\\ci-plan.html at ${URL1} (Version 1, version id 1-2) Icon: "x".`))
       .toEqual({ url: URL1, title: 'ci-plan' });
+    expect(B.publishedArtifact(`Updated the Artifact at ${URL1} (Version 3, version id 1-2).`)).toEqual({ url: URL1, title: 'Artifact' });
+    expect(B.publishedArtifact(`Created a new Artifact at ${URL2} (version 1-2) from the Artifact type x.`)).toEqual({ url: URL2, title: 'Artifact' });
     expect(B.publishedArtifact('Published C:\\tmp\\a.html at https://evil.example/artifact/abcdef1 (Version 1)')).toBeNull();
   });
 

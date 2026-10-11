@@ -601,8 +601,6 @@
     .db-art { font-size: 11px; color: #a9bbff; background: #1b2233; border: 1px solid #2a3550; border-radius: 999px; padding: 1px 8px;
       max-width: 100%; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; text-decoration: none; }
     .db-art:hover { text-decoration: underline; border-color: #3d4c70; }
-    .db-row { flex-wrap: wrap; }
-    .db-row .db-arts { flex-basis: 100%; padding: 0 0 2px 16px; }
     .db-foot { display: flex; align-items: center; gap: 8px; font-size: 11px; color: #8b94a5; }
     .db-foot .db-act { background: transparent; border: 1px solid #3a4252; color: #c3c9d4; border-radius: 5px; padding: 3px 8px;
       cursor: pointer; font: inherit; font-size: 11px; }
@@ -649,6 +647,11 @@
     .db-row .db-name { font-size: 13px; }
     .db-row .db-age { color: #7f8899; font-family: Consolas, monospace; font-size: 11px; }
     .db-row .sb-server-badge, .db-foot .sb-server-badge { margin-left: 0; }
+    /* #329: the row's own line never wraps (a long name ellipsises, as before); the
+       artifacts a session published sit on a second line below it. */
+    .db-row { flex-direction: column; align-items: stretch; gap: 2px; }
+    .db-row-line { display: flex; align-items: center; gap: 8px; min-width: 0; }
+    .db-row .db-arts { padding: 0 0 2px 16px; }
     .db-chev { background: transparent; border: 0; color: #8b94a5; cursor: pointer; font-size: 12px; padding: 0 2px; }
     .db-refs { display: flex; flex-wrap: wrap; gap: 6px; margin-top: 8px; }
     .db-seeref { background: #161b26; border: 1px solid #262c37; box-shadow: inset 3px 0 0 var(--srv, transparent); color: #c3c9d4;
@@ -6331,8 +6334,8 @@
           `<button class="db-act db-more" data-action="menu" data-card="${esc(key)}" title="More" aria-label="More actions for ${esc(s.name)}" aria-haspopup="menu">&#8943;</button>` : '');
       const menu = dbMenu === key ? dbMenuHtml(s, key) : '';
       return `<div class="db-row${s.reason && s.reason.kind === 'done' ? ' done' : ''}"${srvStyle(s.serverUrl)} data-action="open" data-card="${esc(key)}" tabindex="0" aria-label="Open session ${esc(s.name)}">
-        <span class="sb-dot ${st.cls === 'capped' ? 'idle' : st.cls}"></span><span class="db-name" title="${esc(s.name)}">${esc(s.name)}</span>
-        ${serverChipHtml(s)}<span class="db-spacer"></span>${status}${dbAge(s.lastActivity)}${act}${menu}${dbArtifactsHtml(s.brief && s.brief.artifacts)}</div>`;
+        <div class="db-row-line"><span class="sb-dot ${st.cls === 'capped' ? 'idle' : st.cls}"></span><span class="db-name" title="${esc(s.name)}">${esc(s.name)}</span>
+        ${serverChipHtml(s)}<span class="db-spacer"></span>${status}${dbAge(s.lastActivity)}${act}</div>${menu}${dbArtifactsHtml(s.brief && s.brief.artifacts)}</div>`;
     }
 
     function dbSection(title, list, { cls = '', rows = false, collapsible = '' } = {}) {
