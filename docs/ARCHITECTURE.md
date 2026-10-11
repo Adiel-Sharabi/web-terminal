@@ -114,6 +114,7 @@ The legacy proxy path is always available as fallback — direct mode is purely 
 | `lib/osc9-notify.js` | Pure extraction of OSC 9 notification bodies from a PTY stream, buffered across chunk boundaries — how a Codex session reports status without usable hooks. What a body *means* is a registry field, not here |
 | `lib/usage-rollup.js` | Pure rule turning per-session metric reports into the per-server usage block: 5h/7d windows are account-wide, so they roll up once per agent and are never merged across agents |
 | `lib/resources.js` | #152 (per-server slice) — pure `cpuPercentFromSamples` turns two `os.cpus()` tick snapshots into a utilisation %, since a single read gives average-since-boot, not current load; `Sampler` keeps one warm snapshot on its own timer so a request never pays for the sampling. `sanitizeResources` validates a peer's reading before it is served on |
+| `lib/machine-profile.js` | #331 - the dashboard's Machines section (`GET /api/machine`): free disk per local fixed drive, free virtual memory (commit) from one on-demand CIM query cached for a minute, plus CPU, memory, sessions against the limit and uptime. Owns the ok/warn/hot `level` on every reading, so both clients only colour |
 | `lib/git-safe.js` | Hardened runner for the version/update-check git calls — disables credential prompts and tree-kills on timeout, so a broken HTTPS remote cannot hang `git-credential-manager` and leak process trees |
 | `claude-hook.js` / `claude-hook.sh` | Claude Code hook scripts (Node for Windows, bash elsewhere) |
 | `scripts/install-codex-notify.js` | Writes the three `[tui]` keys that enable Codex's OSC 9 status channel. Applied by `scripts/cold-restart.ps1` on every deploy; `--check` reports without changing anything |
@@ -160,6 +161,7 @@ The legacy proxy path is always available as fallback — direct mode is purely 
 | `tests/cluster-direct-mode.spec.js` | End-to-end direct terminal mode + token signing |
 | `tests/cluster-token.spec.js` | Unit tests for `lib/cluster-token.js` |
 | `tests/resources.spec.js` | Unit tests for `lib/resources.js` — the tick-delta CPU maths and `sanitizeResources` |
+| `tests/machine-profile.spec.js` | `lib/machine-profile.js` parsing, levels, the on-demand cache and its hung-query guard, and `GET /api/machine` against a real server |
 | `tests/ipc.spec.js` / `tests/ipc-*.spec.js` | IPC framing, auth handshake, backpressure, chunked decoder |
 | `tests/worker-*.spec.js` | Worker behaviour (sessions, binary PTY, dirty-flag saves, scrollback chunks, session-id lookup) |
 | `tests/hot-reload.spec.js` | End-to-end hot-reload — kill `server.js`, expect sessions to survive |

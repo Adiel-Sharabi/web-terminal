@@ -2287,6 +2287,8 @@ class MachineProfile {
     final s = json['sessions'];
     final count = s is Map ? _asInt(s['count']) : null;
     final max = s is Map ? _asInt(s['max']) : null;
+    final working = s is Map ? _asInt(s['working']) : null;
+    final waiting = s is Map ? _asInt(s['waiting']) : null;
     final disks = json['disks'];
     return MachineProfile(
       cpuPct: _asInt(cpu['pct']),
@@ -2301,11 +2303,12 @@ class MachineProfile {
               .where((d) => d.root != null)
               .toList(growable: false)
           : null,
-      sessions: (s is Map && count != null && max != null)
+      // All four or none: a missing count is unknown, never 0.
+      sessions: (count != null && max != null && working != null && waiting != null)
           ? (
               count: count,
-              working: _asInt(s['working']) ?? 0,
-              waiting: _asInt(s['waiting']) ?? 0,
+              working: working,
+              waiting: waiting,
               max: max,
               level: machineLevel(s['level']),
             )

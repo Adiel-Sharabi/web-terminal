@@ -13,11 +13,12 @@ test.describe('machine profile rules (#331)', () => {
   test('parses commit (KILOBYTES) and fixed drives (bytes); a bad line is dropped, not zeroed', () => {
     const out = [
       'OS|71595604|20440268',
-      `DISK|E:|${2000 * GB}|${1300 * GB}`,
-      `DISK|C:|${931 * GB}|${169 * GB}`,
-      'DISK|C:||',                       // unread size: dropped
-      `DISK|\\\\srv\\share|${GB}|${GB}`,  // not a drive letter: never reaches a client
-      `DISK|D:|${GB}|${2 * GB}`,          // more free than the drive holds: impossible
+      `DISK|E:|${2000 * GB}|${1300 * GB}|NTFS`,
+      `DISK|C:|${931 * GB}|${169 * GB}|NTFS`,
+      'DISK|C:|||NTFS',                         // unread size: dropped
+      `DISK|\\\\srv\\share|${GB}|${GB}|NTFS`,   // not a drive letter: never reaches a client
+      `DISK|D:|${GB}|${2 * GB}|NTFS`,           // more free than the drive holds: impossible
+      `DISK|G:|${931 * GB}|${160 * GB}|FAT32`,  // a cloud mount (Google Drive): not a disk
       'garbage',
     ].join('\r\n');
     const p = M.parseProfileOutput(out);
@@ -30,6 +31,12 @@ test.describe('machine profile rules (#331)', () => {
     expect(M.parseProfileOutput('').commit).toBeNull();
     expect(M.parseProfileOutput('OS||').commit).toBeNull();
     expect(M.parseProfileOutput('OS|100|200').commit).toBeNull();
+  });
+
+  test('no drive line at all is UNKNOWN (null), not "no drives"', () => {
+    expect(M.parseProfileOutput('OS|100|50').disks).toBeNull();
+    // a drive line that was read but filtered out still means the list WAS read
+    expect(M.parseProfileOutput(`DISK|G:|${GB}|${GB}|FAT32`).disks).toEqual([]);
   });
 
   test('levels: low free space is hot/warn; unknown is null; a full session limit is hot', () => {
@@ -45,6 +52,7 @@ test.describe('machine profile rules (#331)', () => {
     expect(M.sessionsLevel(10, 10)).toBe('hot');
     expect(M.sessionsLevel(9, 10)).toBe('warn');
     expect(M.sessionsLevel(3, 10)).toBe('ok');
+    expect(M.sessionsLevel(0, 1)).toBe('ok');   // a limit of one: an empty box is not a warning
   });
 
   test('shapeProfile: what could not be read is null, and every reading carries its level', () => {
@@ -87,6 +95,32 @@ test.describe('machine profile rules (#331)', () => {
       M._setQueryForTests(async () => { calls++; throw new Error('hung'); });
       expect(await M.readOsPart()).toBeNull();
       expect(await M.readOsPart(Date.now() + 1000)).toBeNull();
+      expect(calls).toBe(2);
+    } finally {
+      M._setQueryForTests(null);
+    }
+  });
+
+  test('a HUNG query gives up the slot after INFLIGHT_MAX_MS, and its late answer overwrites nothing', async () => {
+    let release;
+    let calls = 0;
+    const hung = new Promise((r) => { release = r; });
+    M._setQueryForTests(() => { calls++; return calls === 1 ? hung : Promise.resolve({ commit: null, disks: [{ root: 'C:', totalBytes: 2, freeBytes: 2 }] }); });
+    try {
+      const t0 = Date.now();
+      const first = M.readOsPart(t0);
+      // still inside the window: the hung query is shared, not duplicated
+      M.readOsPart(t0 + 1000);
+      await new Promise((r) => setImmediate(r));
+      expect(calls).toBe(1);
+      // past it: a second query starts and its answer is served
+      const second = await M.readOsPart(t0 + M.INFLIGHT_MAX_MS + 1);
+      expect(calls).toBe(2);
+      expect(second.disks[0].freeBytes).toBe(2);
+      // the first one answering LATE must not replace the newer reading
+      release({ commit: null, disks: [{ root: 'C:', totalBytes: 2, freeBytes: 1 }] });
+      await first;
+      expect((await M.readOsPart()).disks[0].freeBytes).toBe(2);
       expect(calls).toBe(2);
     } finally {
       M._setQueryForTests(null);

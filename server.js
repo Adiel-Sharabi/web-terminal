@@ -4901,15 +4901,17 @@ app.get('/api/resources', async (req, res) => {
 const MACHINE_QUERY_WAIT_MS = 8000;
 app.get('/api/machine', async (req, res) => {
   try {
-    let sessions = null;
-    try {
-      const r = await workerClient.rpc('listSessions');
-      sessions = (r && r.sessions) || [];
-    } catch (e) { /* the worker being unreachable costs the session count, not the answer */ }
+    // Both slow halves run TOGETHER and share one bound: the worker's RPC is capped at
+    // the same wait as the query, so a stalled worker event loop (seconds, fleet-wide)
+    // costs the session count and never holds the whole answer for the default 30s.
     let timer;
-    const osPart = await Promise.race([
-      machineProfile.readOsPart(),
-      new Promise((resolve) => { timer = setTimeout(() => resolve(null), MACHINE_QUERY_WAIT_MS); }),
+    const [sessions, osPart] = await Promise.all([
+      workerClient.rpc('listSessions', {}, MACHINE_QUERY_WAIT_MS)
+        .then((r) => (r && r.sessions) || [], () => null),
+      Promise.race([
+        machineProfile.readOsPart(),
+        new Promise((resolve) => { timer = setTimeout(() => resolve(null), MACHINE_QUERY_WAIT_MS); }),
+      ]),
     ]);
     clearTimeout(timer);
     const host = machineProfile.hostFacts();

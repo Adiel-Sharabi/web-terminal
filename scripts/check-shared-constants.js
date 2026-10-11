@@ -44,6 +44,8 @@ const SHARED = [
     sites: [
       { file: 'app.html', re: /const\s+MEM_HEADROOM_RED_BYTES\s*=\s*([^;]+);/ },
       { file: 'ai-terminal/lib/widgets/format_utils.dart', re: /const\s+int\s+kHeadroomRedBytes\s*=\s*([^;]+);/ },
+      // #331 - the server colours the Machines section's memory by the same rule.
+      { file: 'lib/machine-profile.js', re: /const\s+MEM_HEADROOM_RED_BYTES\s*=\s*([^;]+);/ },
     ],
   },
   {
@@ -51,6 +53,7 @@ const SHARED = [
     sites: [
       { file: 'app.html', re: /const\s+MEM_HEADROOM_AMBER_BYTES\s*=\s*([^;]+);/ },
       { file: 'ai-terminal/lib/widgets/format_utils.dart', re: /const\s+int\s+kHeadroomAmberBytes\s*=\s*([^;]+);/ },
+      { file: 'lib/machine-profile.js', re: /const\s+MEM_HEADROOM_AMBER_BYTES\s*=\s*([^;]+);/ },
     ],
   },
   {
