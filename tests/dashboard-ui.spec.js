@@ -252,6 +252,23 @@ test.describe('#298 sessions dashboard (app.html)', () => {
     await expect(page.locator('#dbBody [data-action=open]', { hasText: tag }).first().locator('.rs-chip.you')).toHaveCount(0);
   });
 
+  test('a HIDDEN session in the Needs-you strip can be cleared right there (#324)', async ({ page }) => {
+    const tag = `nwh-${Date.now()}`;
+    const id = await newSession(tag);
+    await hook(id, 'UserPromptSubmit', { prompt: 'go' });
+    await report(id, { headline: 'h', wait: { on: 'you', what: 'say go when free' } });
+    await hook(id, 'Stop', {});
+    expect((await api.patch(`/api/sessions/${id}/brief`, { data: { hidden: true } })).status()).toBe(200);
+    await expect.poll(async () => (await (await api.get('/api/sessions')).json()).find((s) => s.id === id).reason?.kind).toBe('you');
+    await loginPage(page);
+    await page.goto(`${BASE}/app#dashboard`);
+    const entry = page.locator('#dbBody .db-needs button[data-action=open]', { hasText: tag });
+    await expect(entry).toBeVisible();
+    await page.locator(`#dbBody .db-needs [data-action=clear-wait][aria-label="Not waiting: ${tag}"]`).click();
+    await expect.poll(async () => (await (await api.get('/api/sessions')).json()).find((s) => s.id === id).reason).toBeNull();
+    await expect(entry).toHaveCount(0);
+  });
+
   test('a summary chip is a filter: tap to show only those, tap again for all (#318)', async ({ page }) => {
     const tag = `chip-${Date.now()}`;
     const needy = await newSession(`${tag}-needy`);
