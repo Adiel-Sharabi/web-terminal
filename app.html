@@ -202,6 +202,14 @@
     .rc-task-bar { height: 4px; background: #0f2138; border-radius: 2px; overflow: hidden; margin-top: 4px; }
     .rc-task-fill { height: 100%; background: #00d4aa; }
     .sb-recap { background: transparent; border: none; color: #555; font-size: 12px; cursor: pointer; padding: 0 4px; line-height: 1; }
+    #sbFilter { display: block; width: calc(100% - 16px); margin: 6px 8px; padding: 5px 8px; box-sizing: border-box; background: #0b1424;
+      color: #ddd; border: 1px solid #1d2b44; border-radius: 6px; font: inherit; font-size: 12px; }
+    #sbFilter:focus { outline: none; border-color: #00d4aa; }
+    #sbNoMatch { padding: 10px 12px; color: #667; font-size: 12px; }
+    #sidebarList .sb-filtered { display: none !important; }
+    .sb-clearwait { background: transparent; border: 1px solid #5a2433; color: #c9a3ad; border-radius: 4px; font-size: 10px;
+      cursor: pointer; padding: 0 5px; line-height: 15px; }
+    .sb-clearwait:hover { color: #f2d7dd; border-color: #8a3a4d; }
     .sb-recap:hover { color: #00d4aa; }
     .sb-fav-item.fav-reordering { background: rgba(0,212,170,0.10); }
     .sb-status { font-size: 10px; }
@@ -780,6 +788,8 @@
         </form>
       </div>
       <div id="sidebarBody">
+      <input id="sbFilter" type="search" placeholder="Filter by title" autocomplete="off" aria-label="Filter sessions by title">
+      <div id="sbNoMatch" hidden>No session matches</div>
       <div id="sidebarList"></div>
       <div id="claudeSection">
         <div class="sb-section">
@@ -4406,6 +4416,52 @@
       migrateLocalFavorites(data);
     }
 
+    // #327 - "Not waiting" on a session-list row: the agent said it is waiting on you and
+    // it is not. Same rule as the dashboard (canClearWait), against this list's servers.
+    function clearWaitHtml(s) {
+      return canClearWait(s, _sidebarData && _sidebarData.servers)
+        ? `<button class="sb-clearwait" title="The agent says it is waiting on you - clear it" aria-label="Not waiting: ${esc(s.name)}">not waiting</button>`
+        : '';
+    }
+    function wireClearWait(item, s) {
+      const b = item.querySelector('.sb-clearwait');
+      if (!b) return;
+      b.addEventListener('click', async (e) => {
+        e.stopPropagation();   // acting on a row never switches you into it
+        b.disabled = true;
+        const base = s.serverUrl ? `/cluster/${encodeURIComponent(s.serverUrl)}/api` : '/api';
+        try {
+          await fetch(`${base}/sessions/${encodeURIComponent(s.id)}/brief`, {
+            method: 'PATCH', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ clearWait: true }),
+          });
+        } catch (err) { /* the next poll shows the truth either way */ }
+        loadSidebar();
+      });
+    }
+
+    // #327 - narrow the session list by title. Rows are hidden, not dropped, so the
+    // favorites drag order (read from the DOM) still sees every row.
+    function applySidebarFilter() {
+      const box = document.getElementById('sbFilter');
+      const q = (box ? box.value : '').trim().toLowerCase();
+      const list = document.getElementById('sidebarList');
+      let shown = 0;
+      list.querySelectorAll('.sb-item').forEach((el) => {
+        const hit = !q || (el.dataset.name || '').toLowerCase().includes(q);
+        el.classList.toggle('sb-filtered', !hit);
+        if (hit) shown++;
+      });
+      list.querySelectorAll('.sb-empty').forEach((el) => el.classList.toggle('sb-filtered', !!q));
+      document.getElementById('sbNoMatch').hidden = !(q && shown === 0);
+    }
+    {
+      const box = document.getElementById('sbFilter');
+      if (box) {
+        box.addEventListener('input', applySidebarFilter);
+        box.addEventListener('keydown', (e) => { if (e.key === 'Escape') { box.value = ''; applySidebarFilter(); } });
+      }
+    }
+
     function renderSidebar(data) {
       clusterServers = data.servers;
       renderHeaderFavorite(data);   // #180 — same data, same rules, same starHtml()
@@ -4421,6 +4477,7 @@
       }
       const container = document.getElementById('sidebarList');
       container.textContent = '';
+      setTimeout(applySidebarFilter, 0);
 
       if (data.sessions.length === 0 && data.servers.length <= 1) {
         container.innerHTML = '<div style="padding:20px;color:#555;text-align:center;font-size:12px">No sessions. Create one above.</div>';
@@ -4505,10 +4562,12 @@
             + (s.apiError ? ' api-error' : '');
           if (s.apiError && s.apiErrorText) item.title = s.apiErrorText;
           item.dataset.sessionId = s.id;
+          item.dataset.name = s.name || '';
           item.innerHTML =
             `<div class="sb-name"><span class="sb-dot ${s.status}"></span>${esc(s.name)}</div>` +
             `<div class="sb-meta">` +
               statusOrReasonHtml(s) +
+              clearWaitHtml(s) +
               // Directly after the status word, before the capacity chips: this
               // QUALIFIES what the session is doing, it does not measure it.
               waitBadge(s) +
@@ -4551,6 +4610,7 @@
             e.stopPropagation(); // never switch session — the point is to look WITHOUT leaving
             showRecapCard(e.currentTarget, s.id, apiBase, s.name);
           });
+          wireClearWait(item, s);
 
           // #137 — the cancel. stopPropagation for the same reason as recap: acting on
           // a row must never switch you into it.
@@ -4855,6 +4915,7 @@
           + ((s.usageLimit && s.usageLimit.waiting) ? ' capped' : '')
           + (s.apiError ? ' api-error' : '');
         item.dataset.favId = s.id;             // distinct from data-session-id to avoid query collisions
+        item.dataset.name = s.name || '';
         item.dataset.serverKey = '__favorites__';
         if (s.apiError && s.apiErrorText) item.title = s.apiErrorText;
         const serverLabel = s.server || hostname || 'Local';
@@ -4862,6 +4923,7 @@
           `<div class="sb-name"><span class="sb-dot ${s.status}"></span>${esc(s.name)}<span class="sb-server-badge"${srvStyle(s.serverUrl)}>${esc(serverLabel)}</span></div>` +
           `<div class="sb-meta">` +
             statusOrReasonHtml(s) +
+            clearWaitHtml(s) +
             waitBadge(s) +
             bgBadge(s) +
             ctxBadge(s) +
@@ -4876,6 +4938,7 @@
           e.stopPropagation();
           toggleFavorite(s);
         });
+        wireClearWait(item, s);
         // Favorites are by definition the sessions you switch between most, so this
         // is the row where "which one was this?" gets asked hardest.
         item.querySelector('.sb-recap').addEventListener('click', (e) => {
@@ -6078,14 +6141,17 @@
     function dbSavePrefs() {
       try { localStorage.setItem(DB_PREFS_KEY, JSON.stringify({ group: dbGroup, sort: dbSort })); } catch (e) {}
     }
-    function dbServerHas(s, cap) {
-      const sv = ((dbData && dbData.servers) || []).find((x) => (x.url || null) === (s.serverUrl || null));
+    function serverHasCap(servers, s, cap) {
+      const sv = (servers || []).find((x) => (x.url || null) === (s.serverUrl || null));
       return !!(sv && Array.isArray(sv.capabilities) && sv.capabilities.includes(cap));
     }
+    function dbServerHas(s, cap) { return serverHasCap(dbData && dbData.servers, s, cap); }
     // #320/#324 - the one rule for offering "Not waiting": only an agent-REPORTED `you`
     // is the person's to clear (a live prompt, a turn, a cap or a menu are facts), and only
     // where the server advertises the PATCH key (an older one would ignore it and say 200).
-    const dbCanClearWait = (s) => !!(s.reason && s.reason.kind === 'you' && s.reason.source === 'reported' && dbServerHas(s, 'session-clear-wait'));
+    // #327 - the session list (sidebar) uses the same rule against its own server list.
+    const canClearWait = (s, servers) => !!(s.reason && s.reason.kind === 'you' && s.reason.source === 'reported' && serverHasCap(servers, s, 'session-clear-wait'));
+    const dbCanClearWait = (s) => canClearWait(s, dbData && dbData.servers);
     const dbIsHidden = (s) => !!(s.brief && s.brief.hidden);
     // A panel over the composer (#316) owes the person an Esc as much as a prompt owes an answer.
     const dbNeedsYou = (s) => s.status === 'waiting' || !!(s.reason && (s.reason.kind === 'you' || s.reason.kind === 'menu'));

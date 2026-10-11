@@ -7,6 +7,7 @@ import 'package:flutter/material.dart';
 
 import '../api/api_client.dart';
 import '../api/models.dart';
+import '../services/session_repository.dart';
 import '../theme/app_theme.dart';
 import 'app_bottom_sheet.dart';
 
@@ -15,13 +16,19 @@ import 'app_bottom_sheet.dart';
 /// [onForked], when given, is called with the newly created fork session
 /// after a successful "Fork session" action (only offered when
 /// [Session.claudeSessionId] is non-null) — the caller owns navigating to it.
+///
+/// "Not waiting" (#327) is offered when [canClearWait] says so - by default the
+/// repository's one rule ([SessionRepository.canClearWait]); a test passes it directly.
 Future<void> showSessionActionsSheet(
   BuildContext context,
   Session session, {
   required VoidCallback onChanged,
   ValueChanged<Session>? onForked,
+  bool? canClearWait,
+  ApiClient? api,
 }) {
-  final api = ApiClient(session.server);
+  final client = api ?? ApiClient(session.server);
+  final clearable = canClearWait ?? SessionRepository.instance.canClearWait(session);
   return showAppBottomSheet<void>(
     context: context,
     showDragHandle: true,
@@ -30,9 +37,10 @@ Future<void> showSessionActionsSheet(
     isScrollControlled: true,
     builder: (context) => _SessionActionsSheet(
       session: session,
-      api: api,
+      api: client,
       onChanged: onChanged,
       onForked: onForked,
+      canClearWait: clearable,
     ),
   );
 }
@@ -129,12 +137,14 @@ class _SessionActionsSheet extends StatelessWidget {
     required this.api,
     required this.onChanged,
     this.onForked,
+    this.canClearWait = false,
   });
 
   final Session session;
   final ApiClient api;
   final VoidCallback onChanged;
   final ValueChanged<Session>? onForked;
+  final bool canClearWait;
 
   Future<void> _run(
     BuildContext context,
@@ -202,6 +212,11 @@ class _SessionActionsSheet extends StatelessWidget {
     if (context.mounted) Navigator.pop(context);
   }
 
+  Future<void> _clearWait(BuildContext context) async {
+    await _run(context, () => api.patchBrief(session.id, clearWait: true));
+    if (context.mounted) Navigator.pop(context);
+  }
+
   Future<void> _setNotifyLevel(BuildContext context, String level) async {
     await _run(context, () => api.setNotifyLevel(session.id, level));
     if (context.mounted) Navigator.pop(context);
@@ -247,6 +262,17 @@ class _SessionActionsSheet extends StatelessWidget {
             ),
           ),
           const SizedBox(height: 8),
+          // #327 - the agent said it is waiting on you and it is not.
+          if (canClearWait)
+            ListTile(
+              key: const ValueKey('session-action-clear-wait'),
+              leading: const Icon(Icons.hourglass_disabled_outlined),
+              title: const Text('Not waiting'),
+              subtitle: (session.reason?.text ?? '').isEmpty
+                  ? null
+                  : Text('Agent says: ${session.reason!.text}', maxLines: 2, overflow: TextOverflow.ellipsis),
+              onTap: () => _clearWait(context),
+            ),
           ListTile(
             leading: const Icon(Icons.edit_outlined),
             title: const Text('Rename'),

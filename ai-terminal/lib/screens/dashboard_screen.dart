@@ -83,6 +83,11 @@ class DashboardScreen extends StatefulWidget {
 class _DashboardScreenState extends State<DashboardScreen> {
   String _filter = _kAllServers;
 
+  /// #327 - the title filter. While it holds text the list is one flat, unordered set
+  /// of matches: favorites and server groups are reorderable, and a drag inside a
+  /// filtered subset would rewrite ranks against rows the user cannot see.
+  String _query = '';
+
   /// Per-group collapse state, keyed by [kFavoritesGroupKey] or a server's
   /// base URL. Loaded from (and persisted to) [SharedPreferences].
   Map<String, bool> _collapsed = const <String, bool>{};
@@ -415,6 +420,9 @@ class _DashboardScreenState extends State<DashboardScreen> {
                 final downCount = offlineNames.length + needsAuthNames.length;
                 final allOffline = servers.isNotEmpty && downCount == servers.length;
                 final visible = sessions == null ? null : _filtered(sessions);
+                final matches = visible == null || _query.trim().isEmpty
+                    ? null
+                    : sessionsMatchingTitle(visible, _query);
 
                 return CustomScrollView(
                   slivers: [
@@ -469,6 +477,12 @@ class _DashboardScreenState extends State<DashboardScreen> {
                           ),
                       ],
                     ),
+                    SliverToBoxAdapter(
+                      child: _TitleFilter(
+                        value: _query,
+                        onChanged: (v) => setState(() => _query = v),
+                      ),
+                    ),
                     if (servers.length > 1)
                       SliverToBoxAdapter(
                         child: _FilterChips(
@@ -511,6 +525,22 @@ class _DashboardScreenState extends State<DashboardScreen> {
                                 subtitle: 'Pull down to retry',
                               ),
                       )
+                    else if (matches != null) ...[
+                      if (matches.isEmpty)
+                        const SliverFillRemaining(
+                          hasScrollBody: false,
+                          child: EmptyState(
+                            icon: Icons.search_off,
+                            title: 'No session matches',
+                            subtitle: 'Try another part of its title',
+                          ),
+                        )
+                      else
+                        SliverList.list(children: [
+                          for (final s in matches) _buildCard(context, s, favoriteRow: false),
+                          const SizedBox(height: 96),
+                        ]),
+                    ]
                     else ...[
                       // Pinned favorites — cross-server, unaffected by the
                       // server filter chips above (mirrors the web sidebar,
@@ -819,6 +849,62 @@ class _ServerGroupHeader extends StatelessWidget {
             // too long to share the row. Renders nothing while the view is off.
             ServerResourceLine(baseUrl: baseUrl),
           ],
+        ),
+      ),
+    );
+  }
+}
+
+/// #327 - the sessions whose title contains [query], ignoring case and surrounding
+/// spaces, in the order given. A blank query matches everything.
+List<Session> sessionsMatchingTitle(List<Session> sessions, String query) {
+  final q = query.trim().toLowerCase();
+  if (q.isEmpty) return sessions;
+  return sessions.where((s) => s.name.toLowerCase().contains(q)).toList(growable: false);
+}
+
+class _TitleFilter extends StatefulWidget {
+  const _TitleFilter({required this.value, required this.onChanged});
+  final String value;
+  final ValueChanged<String> onChanged;
+
+  @override
+  State<_TitleFilter> createState() => _TitleFilterState();
+}
+
+class _TitleFilterState extends State<_TitleFilter> {
+  late final TextEditingController _c = TextEditingController(text: widget.value);
+
+  @override
+  void dispose() {
+    _c.dispose();
+    super.dispose();
+  }
+
+  @override
+  Widget build(BuildContext context) {
+    return Padding(
+      padding: const EdgeInsets.fromLTRB(AppSpacing.screenPadding, 4, AppSpacing.screenPadding, 4),
+      child: TextField(
+        key: const ValueKey('session-title-filter'),
+        controller: _c,
+        onChanged: widget.onChanged,
+        textInputAction: TextInputAction.search,
+        decoration: InputDecoration(
+          isDense: true,
+          prefixIcon: const Icon(Icons.search),
+          hintText: 'Filter by title',
+          border: const OutlineInputBorder(),
+          suffixIcon: widget.value.isEmpty
+              ? null
+              : IconButton(
+                  tooltip: 'Clear filter',
+                  icon: const Icon(Icons.clear),
+                  onPressed: () {
+                    _c.clear();
+                    widget.onChanged('');
+                  },
+                ),
         ),
       ),
     );

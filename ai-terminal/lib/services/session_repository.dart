@@ -324,6 +324,13 @@ class SessionRepository {
   /// would accept the PATCH and silently ignore it.
   bool supportsClearWait(String baseUrl) => _clearWaitSupported[baseUrl] ?? false;
 
+  /// THE rule for offering "Not waiting" (#320/#324/#327), used by the session menu and
+  /// the dashboard alike: only a wait the AGENT reported is the person's to clear (a live
+  /// prompt, a running turn, a cap or a menu are facts), and only on a server that
+  /// advertises the PATCH key.
+  bool canClearWait(Session s) =>
+      supportsClearWait(s.server.baseUrl) && s.reason?.kind == 'you' && s.reason?.source == 'reported';
+
   /// Fetches all configured servers in parallel and emits the merged, sorted
   /// list. A server that fails is marked offline and contributes its last-known
   /// (stale) sessions instead of dropping out entirely.

@@ -278,6 +278,41 @@ test.describe('#298 sessions dashboard (app.html)', () => {
     await expect(liveEntry.locator('[data-action=clear-wait]')).toHaveCount(0);
   });
 
+  test('session list: the title filter narrows the rows; "not waiting" clears only a reported wait (#327)', async ({ page }) => {
+    const errors = [];
+    page.on('pageerror', (e) => errors.push(e.message));
+    const tag = `sl-${Date.now()}`;
+    const rep = await newSession(`${tag}-alpha reported`);
+    const live = await newSession(`${tag}-beta live`);
+    await hook(rep, 'UserPromptSubmit', { prompt: 'go' });
+    await report(rep, { headline: 'h', wait: { on: 'you', what: 'say go when free' } });
+    await hook(rep, 'Stop', {});
+    await hook(live, 'UserPromptSubmit', { prompt: 'go' });
+    await hook(live, 'PermissionRequest', { tool_name: 'Bash', tool_input: { command: 'ls' } });
+    await expect.poll(async () => (await (await api.get('/api/sessions')).json()).find((s) => s.id === rep).reason?.kind).toBe('you');
+    await loginPage(page);
+    await page.goto(BASE + '/');
+    const repRow = page.locator(`.sb-item[data-session-id="${rep}"]`);
+    const liveRow = page.locator(`.sb-item[data-session-id="${live}"]`);
+    await expect(repRow).toBeVisible({ timeout: 10_000 });
+    await expect(liveRow).toBeVisible();
+    await expect(liveRow.locator('.sb-clearwait')).toHaveCount(0);
+
+    await page.fill('#sbFilter', `${tag}-BETA`);
+    await expect(repRow).toBeHidden();
+    await expect(liveRow).toBeVisible();
+    await page.fill('#sbFilter', `${tag}-nothing-like-it`);
+    await expect(page.locator('#sbNoMatch')).toBeVisible();
+    await page.fill('#sbFilter', '');
+    await expect(repRow).toBeVisible();
+    await expect(page.locator('#sbNoMatch')).toBeHidden();
+
+    await repRow.locator('.sb-clearwait').click();
+    await expect.poll(async () => (await (await api.get('/api/sessions')).json()).find((s) => s.id === rep).reason).toBeNull();
+    await expect(page.locator(`.sb-item[data-session-id="${rep}"] .sb-clearwait`)).toHaveCount(0, { timeout: 10_000 });
+    expect(errors).toEqual([]);
+  });
+
   test('a summary chip is a filter: tap to show only those, tap again for all (#318)', async ({ page }) => {
     const tag = `chip-${Date.now()}`;
     const needy = await newSession(`${tag}-needy`);
