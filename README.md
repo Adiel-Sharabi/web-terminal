@@ -147,8 +147,9 @@ not relevant (with an undo) into a Hidden tab, stored on its server so every dev
 working is not working: it is waiting on you, it will carry on by itself (a CI run, a build, a
 usage cap, with how long), it is blocked on someone else, or it is done. Hard signals come
 first; what the agent reports at the end of its turn fills in the rest. When an agent
-reports it is waiting on you and it is not, **Not waiting** (in the card's menu, or beside its
-entry in the Needs you strip, where a hidden session shows) clears it.
+reports it is waiting on you and it is not, **Not waiting** (in the card's menu, beside its
+entry in the Needs you strip, where a hidden session shows, or on its row in the session list)
+clears it. The session list also has a **filter by title** box.
 
 **A colour per machine** — set `serverColor` on each server and its sessions carry that colour
 in the session list and on the dashboard of every client.

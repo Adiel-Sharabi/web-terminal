@@ -47,6 +47,8 @@ void main() {
                   context,
                   _session(),
                   onChanged: () {},
+                  // the tallest sheet: every optional row present
+                  canClearWait: true,
                 ),
                 child: const Text('open'),
               ),
