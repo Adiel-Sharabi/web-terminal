@@ -4217,6 +4217,7 @@ class _SessionScreenState extends State<SessionScreen>
               showSessionActionsSheet(
                 context,
                 session,
+                canClearWait: SessionRepository.instance.canClearWait(session),
                 onChanged: SessionRepository.instance.refresh,
                 onForked: (forked) => Navigator.of(context).push(
                   MaterialPageRoute(

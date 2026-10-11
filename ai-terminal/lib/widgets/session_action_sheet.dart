@@ -7,7 +7,6 @@ import 'package:flutter/material.dart';
 
 import '../api/api_client.dart';
 import '../api/models.dart';
-import '../services/session_repository.dart';
 import '../theme/app_theme.dart';
 import 'app_bottom_sheet.dart';
 
@@ -17,18 +16,18 @@ import 'app_bottom_sheet.dart';
 /// after a successful "Fork session" action (only offered when
 /// [Session.claudeSessionId] is non-null) — the caller owns navigating to it.
 ///
-/// "Not waiting" (#327) is offered when [canClearWait] says so - by default the
-/// repository's one rule ([SessionRepository.canClearWait]); a test passes it directly.
+/// "Not waiting" (#327) is offered when [canClearWait] is true. It is REQUIRED, not
+/// defaulted: every caller answers it with [SessionRepository.canClearWait] (the one
+/// rule), and a silent default is what would let that wiring break with every test green.
 Future<void> showSessionActionsSheet(
   BuildContext context,
   Session session, {
   required VoidCallback onChanged,
   ValueChanged<Session>? onForked,
-  bool? canClearWait,
+  required bool canClearWait,
   ApiClient? api,
 }) {
   final client = api ?? ApiClient(session.server);
-  final clearable = canClearWait ?? SessionRepository.instance.canClearWait(session);
   return showAppBottomSheet<void>(
     context: context,
     showDragHandle: true,
@@ -40,7 +39,7 @@ Future<void> showSessionActionsSheet(
       api: client,
       onChanged: onChanged,
       onForked: onForked,
-      canClearWait: clearable,
+      canClearWait: canClearWait,
     ),
   );
 }

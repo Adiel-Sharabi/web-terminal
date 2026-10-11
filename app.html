@@ -202,10 +202,11 @@
     .rc-task-bar { height: 4px; background: #0f2138; border-radius: 2px; overflow: hidden; margin-top: 4px; }
     .rc-task-fill { height: 100%; background: #00d4aa; }
     .sb-recap { background: transparent; border: none; color: #555; font-size: 12px; cursor: pointer; padding: 0 4px; line-height: 1; }
-    #sbFilter { display: block; width: calc(100% - 16px); margin: 6px 8px; padding: 5px 8px; box-sizing: border-box; background: #0b1424;
+    #sbFilter { display: block; position: sticky; top: 0; z-index: 2; width: calc(100% - 16px); margin: 6px 8px; padding: 5px 8px; box-sizing: border-box; background: #0b1424;
       color: #ddd; border: 1px solid #1d2b44; border-radius: 6px; font: inherit; font-size: 12px; }
     #sbFilter:focus { outline: none; border-color: #00d4aa; }
     #sbNoMatch { padding: 10px 12px; color: #667; font-size: 12px; }
+    #sbNotice { margin: 0 8px 6px; padding: 6px 8px; border-radius: 6px; background: #3a1620; color: #ffb3c0; font-size: 12px; }
     #sidebarList .sb-filtered { display: none !important; }
     .sb-clearwait { background: transparent; border: 1px solid #5a2433; color: #c9a3ad; border-radius: 4px; font-size: 10px;
       cursor: pointer; padding: 0 5px; line-height: 15px; }
@@ -789,7 +790,8 @@
       </div>
       <div id="sidebarBody">
       <input id="sbFilter" type="search" placeholder="Filter by title" autocomplete="off" aria-label="Filter sessions by title">
-      <div id="sbNoMatch" hidden>No session matches</div>
+      <div id="sbNoMatch" role="status" hidden>No session matches</div>
+      <div id="sbNotice" role="status" hidden></div>
       <div id="sidebarList"></div>
       <div id="claudeSection">
         <div class="sb-section">
@@ -4420,7 +4422,7 @@
     // it is not. Same rule as the dashboard (canClearWait), against this list's servers.
     function clearWaitHtml(s) {
       return canClearWait(s, _sidebarData && _sidebarData.servers)
-        ? `<button class="sb-clearwait" title="The agent says it is waiting on you - clear it" aria-label="Not waiting: ${esc(s.name)}">not waiting</button>`
+        ? `<button class="sb-clearwait" title="The agent says it is waiting on you - clear it" aria-label="Not waiting: ${esc(s.name)}">Not waiting</button>`
         : '';
     }
     function wireClearWait(item, s) {
@@ -4429,40 +4431,64 @@
       b.addEventListener('click', async (e) => {
         e.stopPropagation();   // acting on a row never switches you into it
         b.disabled = true;
-        const base = s.serverUrl ? `/cluster/${encodeURIComponent(s.serverUrl)}/api` : '/api';
+        let failed = null;
         try {
-          await fetch(`${base}/sessions/${encodeURIComponent(s.id)}/brief`, {
+          const r = await fetch(`${dbApiBase(s.serverUrl)}/sessions/${encodeURIComponent(s.id)}/brief`, {
             method: 'PATCH', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ clearWait: true }),
           });
-        } catch (err) { /* the next poll shows the truth either way */ }
+          if (!r.ok) failed = `HTTP ${r.status}`;
+        } catch (err) { failed = err.message || 'network error'; }
+        if (failed) sbNotice(`Could not clear "${s.name}": ${failed}`);
         loadSidebar();
       });
     }
 
+    let sbNoticeTimer = null;
+    function sbNotice(text) {
+      const el = document.getElementById('sbNotice');
+      el.textContent = text;
+      el.hidden = false;
+      clearTimeout(sbNoticeTimer);
+      sbNoticeTimer = setTimeout(() => { el.hidden = true; }, 6000);
+    }
+
     // #327 - narrow the session list by title. Rows are hidden, not dropped, so the
-    // favorites drag order (read from the DOM) still sees every row.
+    // favorites drag order (read from the DOM) still sees every row. A query looks
+    // inside collapsed groups too - a match you cannot see is not a match; clearing the
+    // query repaints, which puts the collapse back.
+    const sbQuery = () => ((document.getElementById('sbFilter') || {}).value || '').trim().toLowerCase();
     function applySidebarFilter() {
-      const box = document.getElementById('sbFilter');
-      const q = (box ? box.value : '').trim().toLowerCase();
+      const q = sbQuery();
       const list = document.getElementById('sidebarList');
+      const rows = list.querySelectorAll('.sb-item');
       let shown = 0;
-      list.querySelectorAll('.sb-item').forEach((el) => {
+      rows.forEach((el) => {
         const hit = !q || (el.dataset.name || '').toLowerCase().includes(q);
         el.classList.toggle('sb-filtered', !hit);
+        if (hit && q) el.style.display = '';
         if (hit) shown++;
       });
-      list.querySelectorAll('.sb-empty').forEach((el) => el.classList.toggle('sb-filtered', !!q));
-      document.getElementById('sbNoMatch').hidden = !(q && shown === 0);
+      list.querySelectorAll('.sb-empty, .sb-fav-empty').forEach((el) => el.classList.toggle('sb-filtered', !!q));
+      document.getElementById('sbNoMatch').hidden = !(q && rows.length && shown === 0);
     }
     {
       const box = document.getElementById('sbFilter');
+      const onQuery = () => {
+        if (!sbQuery() && _sidebarData) renderSidebar(_sidebarData);
+        else applySidebarFilter();
+      };
       if (box) {
-        box.addEventListener('input', applySidebarFilter);
-        box.addEventListener('keydown', (e) => { if (e.key === 'Escape') { box.value = ''; applySidebarFilter(); } });
+        box.addEventListener('input', onQuery);
+        box.addEventListener('keydown', (e) => { if (e.key === 'Escape') { box.value = ''; onQuery(); } });
       }
     }
 
     function renderSidebar(data) {
+      renderSidebarRows(data);
+      applySidebarFilter();   // in the same task: no frame ever paints the unfiltered list
+    }
+
+    function renderSidebarRows(data) {
       clusterServers = data.servers;
       renderHeaderFavorite(data);   // #180 — same data, same rules, same starHtml()
       renderComposeCommands(data);  // #188 — same data, same current-session rule
@@ -4477,7 +4503,6 @@
       }
       const container = document.getElementById('sidebarList');
       container.textContent = '';
-      setTimeout(applySidebarFilter, 0);
 
       if (data.sessions.length === 0 && data.servers.length <= 1) {
         container.innerHTML = '<div style="padding:20px;color:#555;text-align:center;font-size:12px">No sessions. Create one above.</div>';

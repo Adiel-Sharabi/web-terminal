@@ -307,6 +307,17 @@ test.describe('#298 sessions dashboard (app.html)', () => {
     await expect(repRow).toBeVisible();
     await expect(page.locator('#sbNoMatch')).toBeHidden();
 
+    // A match inside a COLLAPSED group still shows: the query looks inside it.
+    await page.locator('.sb-server[data-server-key="__local__"]').click();
+    await expect(repRow).toBeHidden();
+    await page.fill('#sbFilter', `${tag}-alpha`);
+    await expect(repRow).toBeVisible();
+    await expect(page.locator('#sbNoMatch')).toBeHidden();
+    await page.fill('#sbFilter', '');
+    await expect(repRow).toBeHidden();
+    await page.locator('.sb-server[data-server-key="__local__"]').click();
+    await expect(repRow).toBeVisible();
+
     await repRow.locator('.sb-clearwait').click();
     await expect.poll(async () => (await (await api.get('/api/sessions')).json()).find((s) => s.id === rep).reason).toBeNull();
     await expect(page.locator(`.sb-item[data-session-id="${rep}"] .sb-clearwait`)).toHaveCount(0, { timeout: 10_000 });

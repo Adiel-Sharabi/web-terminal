@@ -232,6 +232,7 @@ class _DashboardScreenState extends State<DashboardScreen> {
       session,
       onChanged: SessionRepository.instance.refresh,
       onForked: _openSession,
+      canClearWait: SessionRepository.instance.canClearWait(session),
     );
     return SessionCard(
       key: ValueKey('${favoriteRow ? 'fav' : 'main'}-${session.id}'),

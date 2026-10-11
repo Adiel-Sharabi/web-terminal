@@ -72,6 +72,7 @@ void main() {
       expect(find.text('Agent says: say go'), findsOneWidget);
       await tester.tap(find.text('Not waiting'));
       await tester.pumpAndSettle();
+      expect(find.textContaining('Failed'), findsNothing, reason: 'the PATCH must have succeeded');
       expect(sent.map((r) => '${r.method} ${r.url.path} ${r.body}'), ['PATCH /api/sessions/r/brief {"clearWait":true}']);
       expect(find.text('Not waiting'), findsNothing, reason: 'the sheet closes');
     });
