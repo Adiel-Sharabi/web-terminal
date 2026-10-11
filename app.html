@@ -545,6 +545,10 @@
     .db-needs strong { color: #ff9aac; font-size: 11px; text-transform: uppercase; letter-spacing: .06em; }
     .db-needs button { display: flex; gap: 8px; align-items: center; padding: 6px 10px; border-radius: 6px; border: 0;
       background: #1d1218; color: #f2d7dd; cursor: pointer; font: inherit; }
+    .db-needs-pair { display: inline-flex; flex-wrap: nowrap; align-items: center; gap: 4px; max-width: 100%; min-width: 0; }
+    .db-needs button.db-needs-clear { flex: none; padding: 4px 8px; font-size: 11px; color: #c9a3ad; background: transparent;
+      border: 1px solid #5a2433; box-shadow: none; }
+    .db-needs button.db-needs-clear:hover { color: #f2d7dd; border-color: #8a3a4d; }
     .db-group { margin: 20px 20px 0; }
     .db-group-h { display: flex; align-items: baseline; gap: 10px; margin-bottom: 10px; }
     .db-group-h h3 { margin: 0; font-size: 14px; font-weight: 600; color: #e8ebf0; }
@@ -6078,6 +6082,10 @@
       const sv = ((dbData && dbData.servers) || []).find((x) => (x.url || null) === (s.serverUrl || null));
       return !!(sv && Array.isArray(sv.capabilities) && sv.capabilities.includes(cap));
     }
+    // #320/#324 - the one rule for offering "Not waiting": only an agent-REPORTED `you`
+    // is the person's to clear (a live prompt, a turn, a cap or a menu are facts), and only
+    // where the server advertises the PATCH key (an older one would ignore it and say 200).
+    const dbCanClearWait = (s) => !!(s.reason && s.reason.kind === 'you' && s.reason.source === 'reported' && dbServerHas(s, 'session-clear-wait'));
     const dbIsHidden = (s) => !!(s.brief && s.brief.hidden);
     // A panel over the composer (#316) owes the person an Esc as much as a prompt owes an answer.
     const dbNeedsYou = (s) => s.status === 'waiting' || !!(s.reason && (s.reason.kind === 'you' || s.reason.kind === 'menu'));
@@ -6137,7 +6145,7 @@
       }
       // #320 - an agent's reported wait can be wrong (an offer filed as "waiting on you").
       // Only a REPORTED reason is the person's to clear; mechanical ones are facts.
-      if (s.reason && s.reason.kind === 'you' && s.reason.source === 'reported' && dbServerHas(s, 'session-clear-wait')) {
+      if (dbCanClearWait(s)) {
         items.push(`<button data-action="clear-wait" data-card="${esc(key)}">Not waiting</button>`);
       }
       if (s.brief) {
@@ -6278,9 +6286,13 @@
       const strip = dbGroup === 'reason' ? needs.filter(dbIsHidden) : needs;
       if (dbTab === 'active' && strip.length) {
         html += `<section class="db-needs" aria-label="Needs you"><strong>Needs you</strong>${strip.map((s) =>
-          `<button data-action="open" data-card="${esc(dbKey(s))}"${srvStyle(s.serverUrl)}><span class="sb-dot waiting"></span><b>${esc(s.name)}</b>` +
+          `<span class="db-needs-pair"><button data-action="open" data-card="${esc(dbKey(s))}"${srvStyle(s.serverUrl)}><span class="sb-dot waiting"></span><b>${esc(s.name)}</b>` +
           `${dbIsHidden(s) ? '<span class="db-hid" title="Hidden from the dashboard">hidden</span>' : ''}<span>${esc(s.server || '')}</span>` +
-          `<span>${esc(s.reason && s.reason.kind === 'menu' ? 'stuck in a menu (Esc)' : s.reason && s.reason.kind === 'you' && s.reason.text ? s.reason.text : (s.waitingFor === 'question' ? 'a question' : 'a permission'))}</span></button>`).join('')}</section>`;
+          `<span>${esc(s.reason && s.reason.kind === 'menu' ? 'stuck in a menu (Esc)' : s.reason && s.reason.kind === 'you' && s.reason.text ? s.reason.text : (s.waitingFor === 'question' ? 'a question' : 'a permission'))}</span></button>` +
+          // #324 - a hidden session has no card on this tab, so its menu's "Not waiting" is
+          // out of reach; offer it here, under the same rule as the menu item.
+          (dbCanClearWait(s) ? `<button class="db-needs-clear" data-action="clear-wait" data-card="${esc(dbKey(s))}" aria-label="Not waiting: ${esc(s.name)}">Not waiting</button>` : '') +
+          '</span>').join('')}</section>`;
         for (const s of strip) dbSessions.set(dbKey(s), s);
       }
 

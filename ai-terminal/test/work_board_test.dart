@@ -572,6 +572,30 @@ void main() {
       await tester.pumpWidget(const SizedBox());
     });
 
+    testWidgets('a hidden session in the Needs-you strip offers Not waiting there - only for a reported wait (#324)',
+        (tester) async {
+      rows = [
+        _row('r', 'Reported one', brief: {..._briefJson(), 'hidden': true},
+            reason: {'kind': 'you', 'text': 'say go', 'source': 'reported'}),
+        _row('m', 'Mechanical one', status: 'waiting', waitingFor: 'permission', brief: {..._briefJson(), 'hidden': true},
+            reason: {'kind': 'you', 'text': 'approve a tool', 'source': 'status'}),
+      ];
+      final r = await repo();
+      await pump(tester, r: r);
+      final reported = find.byKey(ValueKey('board-needs-${_server.baseUrl}-r'));
+      final mechanical = find.byKey(ValueKey('board-needs-${_server.baseUrl}-m'));
+      expect(reported, findsOneWidget);
+      expect(mechanical, findsOneWidget);
+      expect(find.descendant(of: mechanical, matching: find.byTooltip('Not waiting: Mechanical one')), findsNothing);
+      // "hidden" sits before the long reason, so a phone's ellipsis cannot hide it.
+      expect(find.descendant(of: reported, matching: find.textContaining('Reported one · hidden ·')), findsOneWidget);
+      await tester.tap(find.descendant(of: reported, matching: find.byTooltip('Not waiting: Reported one')));
+      await tester.pump();
+      await tester.runAsync(() => Future<void>.delayed(const Duration(milliseconds: 50)));
+      expect('${patches.last.url.path} ${patches.last.body}', '/api/sessions/r/brief {"clearWait":true}');
+      await tester.pumpWidget(const SizedBox());
+    });
+
     testWidgets('a summary chip filters to its sessions; tapping it again shows all (#318)', (tester) async {
       rows = [
         _row('w', 'Waiting one', status: 'waiting', waitingFor: 'permission'),

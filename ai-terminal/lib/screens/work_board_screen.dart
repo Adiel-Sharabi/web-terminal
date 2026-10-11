@@ -487,7 +487,8 @@ class _WorkBoardScreenState extends State<WorkBoardScreen> {
         onTap: (c) => setState(() => _chipFilter = _chipFilter == c ? null : c),
         updatedAt: _updatedAt,
       ),
-      if (!_showHidden && strip.isNotEmpty) _NeedsYou(sessions: strip, onOpen: widget.onOpenSession),
+      if (!_showHidden && strip.isNotEmpty)
+        _NeedsYou(sessions: strip, onOpen: widget.onOpenSession, onClearWaitOf: (s) => _actionsFor(s).onClearWait),
     ];
 
     if (_showHidden) {
@@ -840,9 +841,13 @@ class _SummaryRow extends StatelessWidget {
 }
 
 class _NeedsYou extends StatelessWidget {
-  const _NeedsYou({required this.sessions, required this.onOpen});
+  const _NeedsYou({required this.sessions, required this.onOpen, required this.onClearWaitOf});
   final List<Session> sessions;
   final void Function(Session) onOpen;
+
+  /// #324 - the same rule as the card menu's "Not waiting" (`_actionsFor`): a hidden
+  /// session has no card on this tab, so the strip is the only place to clear it.
+  final VoidCallback? Function(Session) onClearWaitOf;
 
   @override
   Widget build(BuildContext context) {
@@ -862,12 +867,15 @@ class _NeedsYou extends StatelessWidget {
         children: [
           const Text('Needs you', style: TextStyle(fontWeight: FontWeight.w700, color: StatusColor.waiting)),
           for (final s in sessions)
-            ActionChip(
+            InputChip(
+              key: ValueKey('board-needs-${s.server.baseUrl}-${s.id}'),
               avatar: const StatusDot(status: SessionStatus.waiting, size: 8),
-              label: Text('${s.name} · ${s.server.name} · '
-                  '${s.reason?.kind == 'menu' ? 'stuck in a menu (Esc)' : s.reason?.kind == 'you' && s.reason!.text.isNotEmpty ? s.reason!.text : s.waitingFor == 'question' ? 'a question' : 'a permission'}'
-                  '${boardIsHidden(s) ? ' · hidden' : ''}'),
+              // "hidden" before the long reason, so a phone's truncation cannot eat it.
+              label: Text('${s.name}${boardIsHidden(s) ? ' · hidden' : ''} · ${s.server.name} · '
+                  '${s.reason?.kind == 'menu' ? 'stuck in a menu (Esc)' : s.reason?.kind == 'you' && s.reason!.text.isNotEmpty ? s.reason!.text : s.waitingFor == 'question' ? 'a question' : 'a permission'}'),
               onPressed: () => onOpen(s),
+              onDeleted: onClearWaitOf(s),
+              deleteButtonTooltipMessage: 'Not waiting: ${s.name}',
             ),
         ],
       ),
