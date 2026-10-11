@@ -40,4 +40,52 @@ void main() {
     expect(dictation, lessThan(sticky));
     expect(dictation, lessThan(live));
   });
+
+  // #301 / #302 — the native half (Dictation.kt) has no Kotlin test harness in
+  // this project, so the rules that keep the mic from stranding on "error 11"
+  // are pinned against its SOURCE. Each of these was a real failure on the S25:
+  // a recognizer reused across sessions stayed bound to a service that was no
+  // longer the default; a disconnect was not retried; a refused mic was retried
+  // as a formatting failure until it read as error 11; and a retry bound that
+  // reset only on heard words could end a long dictation with silent pauses.
+  group('Dictation.kt keeps the mic from stranding (#301, #302)', () {
+    // Normalised: a Windows checkout (core.autocrlf) has CRLF endings, and the
+    // method-body cut below looks for LF-delimited closing braces.
+    final kt = File(
+      'android/app/src/main/kotlin/net/hilashnet/ai_terminal/Dictation.kt',
+    ).readAsStringSync().replaceAll('\r\n', '\n');
+
+    String body(String signature) {
+      final at = kt.indexOf(signature);
+      expect(at, greaterThanOrEqualTo(0), reason: 'missing: $signature');
+      return kt.substring(at, kt.indexOf('\n    }\n', at));
+    }
+
+    test('every dictation starts from a fresh recognizer', () {
+      final start = body('fun start(lang: String, sessionId: Int)');
+      expect(start, contains('recognizer?.destroy()'));
+      expect(start, contains('recognizer = null'));
+    });
+
+    test('a disconnected service is retried with a rebuilt recognizer', () {
+      // The `when` arm that leads to retryOrFail must list SERVER_DISCONNECTED.
+      final arm = RegExp(r'SpeechRecognizer\.ERROR_RECOGNIZER_BUSY,([^>]*)-> retryOrFail\(error\)')
+          .firstMatch(kt);
+      expect(arm, isNotNull, reason: 'the retry arm of onError is missing');
+      expect(arm!.group(1), contains('ERROR_SERVER_DISCONNECTED'));
+      expect(body('private fun retryOrFail(error: Int)'),
+          contains('relisten(delayMs = 300L * failures, recreate = true)'));
+    });
+
+    test('a refused microphone is final and reported, never retried', () {
+      expect(kt, contains('SpeechRecognizer.ERROR_INSUFFICIENT_PERMISSIONS -> fail(error)'));
+    });
+
+    test('the retry bound resets whenever a session actually opens', () {
+      final at = kt.indexOf('override fun onReadyForSpeech(params: Bundle?)');
+      expect(at, greaterThanOrEqualTo(0));
+      final ready = kt.substring(at, kt.indexOf('override fun onBeginningOfSpeech', at));
+      expect(ready, contains('failures = 0'));
+    });
+  });
 }

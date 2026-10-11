@@ -68,6 +68,12 @@ class Dictation(private val activity: Activity) : EventChannel.StreamHandler {
     fun start(lang: String, sessionId: Int) {
         // A new session supersedes whatever was running.
         supersede()
+        // #302 - and starts from a FRESH recognizer. A SpeechRecognizer stays bound to
+        // whichever service was the system default when it was created; reusing one
+        // across sessions stranded the mic on ERROR_SERVER_DISCONNECTED (11) after the
+        // voice-input service was changed, until the app was force-stopped.
+        recognizer?.destroy()
+        recognizer = null
         session = sessionId
         language = lang
         if (!available()) {
@@ -189,7 +195,13 @@ class Dictation(private val activity: Activity) : EventChannel.StreamHandler {
         override fun onReadyForSpeech(params: Bundle?) {
             // The mic is actually open now. Dart shows "Listening" from here, not
             // from the tap: words spoken before this are not heard.
-            if (current && active) emit(mapOf("type" to "ready"))
+            if (!current || !active) return
+            // A run that opened proves the connection is healthy, so the retry bound
+            // counts only CONSECUTIVE failures to connect. Resetting on heard words
+            // alone let silent pauses accumulate disconnect retries until a long,
+            // healthy dictation died with "disconnected" (#304 review).
+            failures = 0
+            emit(mapOf("type" to "ready"))
         }
         override fun onBeginningOfSpeech() {}
         override fun onRmsChanged(rmsdB: Float) {}
@@ -230,8 +242,18 @@ class Dictation(private val activity: Activity) : EventChannel.StreamHandler {
                 // run in continuous dictation, not a failure.
                 SpeechRecognizer.ERROR_NO_MATCH,
                 SpeechRecognizer.ERROR_SPEECH_TIMEOUT -> relisten()
+                // #302 - SERVER_DISCONNECTED is the speech service dropping its
+                // connection: the service changed or restarted under us, or (seen on
+                // the S25 with FILE-fed sessions, not with the mic) it closes between
+                // sessions. A fresh recognizer rebinds, so it is retried like a busy
+                // or client-side failure.
                 SpeechRecognizer.ERROR_RECOGNIZER_BUSY,
+                SpeechRecognizer.ERROR_SERVER_DISCONNECTED,
                 SpeechRecognizer.ERROR_CLIENT -> retryOrFail(error)
+                // #301 - a refusal of the microphone is final and must be reported as
+                // what it is. Retrying it as a formatting failure is what turned it
+                // into an unexplained "error 11".
+                SpeechRecognizer.ERROR_INSUFFICIENT_PERMISSIONS -> fail(error)
                 else -> {
                     // A service that rejects the formatting request fails before it
                     // has produced anything. Retry once without it before giving up.

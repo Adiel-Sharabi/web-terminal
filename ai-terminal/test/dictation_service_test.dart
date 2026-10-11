@@ -236,6 +236,21 @@ void main() {
       expect(dictationErrorMessage('permission', he), contains('permission'));
       expect(dictationErrorMessage('2', he), contains('network'));
     });
+
+    // #301 — a refused microphone was reported as "Dictation stopped (error 11)",
+    // which named neither the cause nor the fix.
+    test('a service refused the microphone (9) says so and names the way out', () {
+      final m = dictationErrorMessage('9', he);
+      expect(m, contains('refused the microphone'));
+      expect(m, contains('Google'));
+      expect(m, isNot(contains('error 9')));
+    });
+
+    test('a disconnected service (11) says so instead of a bare code', () {
+      final m = dictationErrorMessage('11', he);
+      expect(m, contains('disconnected'));
+      expect(m, isNot(contains('error 11')));
+    });
   });
 
   group('ComposeBar mic', () {
