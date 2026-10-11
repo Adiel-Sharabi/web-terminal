@@ -597,6 +597,12 @@
     .db-lines dt { color: #7f8899; } .db-lines dd { margin: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; color: #d4d8e0; }
     .db-lines dd .db-age { color: #7f8899; margin-left: 6px; font-family: Consolas, monospace; font-size: 11px; }
     .db-stale { font-size: 11px; color: #e6c06a; }
+    .db-arts { display: flex; flex-wrap: wrap; gap: 4px 6px; min-width: 0; }
+    .db-art { font-size: 11px; color: #a9bbff; background: #1b2233; border: 1px solid #2a3550; border-radius: 999px; padding: 1px 8px;
+      max-width: 100%; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; text-decoration: none; }
+    .db-art:hover { text-decoration: underline; border-color: #3d4c70; }
+    .db-row { flex-wrap: wrap; }
+    .db-row .db-arts { flex-basis: 100%; padding: 0 0 2px 16px; }
     .db-foot { display: flex; align-items: center; gap: 8px; font-size: 11px; color: #8b94a5; }
     .db-foot .db-act { background: transparent; border: 1px solid #3a4252; color: #c3c9d4; border-radius: 5px; padding: 3px 8px;
       cursor: pointer; font: inherit; font-size: 11px; }
@@ -6140,6 +6146,17 @@
 
     function dbAge(ts) { return typeof ts === 'number' && ts > 0 ? `<span class="db-age">${esc(timeAgo(ts))}</span>` : ''; }
 
+    // #329 - an artifact the session published: a link that opens itself (data-stop),
+    // never the session. The server only ever sends a claude.ai artifact URL.
+    function dbArtifactHtml(a) {
+      if (!/^https:\/\/claude\.ai\//.test(a.url || '')) return '';
+      return `<a class="db-art" href="${esc(a.url)}" target="_blank" rel="noopener noreferrer" data-stop="1" title="${esc(a.title)}">${esc(a.title)} &#8599;</a>`;
+    }
+    function dbArtifactsHtml(list) {
+      const html = (list || []).map(dbArtifactHtml).join('');
+      return html ? `<div class="db-arts" aria-label="Artifacts">${html}</div>` : '';
+    }
+
     function dbItemHtml(it, cardKey) {
       const ref = /^https:\/\//.test(it.url || '')
         ? `<a class="db-ref" href="${esc(it.url)}" target="_blank" rel="noopener noreferrer" data-stop="1">${esc(it.ref)}</a>`
@@ -6201,7 +6218,7 @@
       if (!q) return true;
       const b = s.brief || {};
       const hay = [s.name, s.server, b.headline, s.reason && s.reason.text,
-        ...((b.items || []).flatMap((it) => [it.ref, it.title]))].filter(Boolean).join(' ').toLowerCase();
+        ...((b.items || []).flatMap((it) => [it.ref, it.title])), ...((b.artifacts || []).map((a) => a.title))].filter(Boolean).join(' ').toLowerCase();
       return hay.includes(q);
     }
     // The order inside a section. "list" is the order the server sent, which is the
@@ -6267,6 +6284,7 @@
         if (b.did) lines.push(`<dt>Did</dt><dd title="${esc(b.did.text)}">${esc(b.did.text)}${dbAge(b.did.at)}</dd>`);
         if (b.prompt) lines.push(`<dt>You</dt><dd title="${esc(b.prompt.text)}">${esc(b.prompt.text)}${dbAge(b.prompt.at)}</dd>`);
         if (lines.length) body += `<dl class="db-lines">${lines.join('')}</dl>`;
+        body += dbArtifactsHtml(b.artifacts);
         if (b.stale) body += `<div class="db-stale">&#9888; Report may be out of date: ${esc(b.stale.reason)}</div>`;
       }
       if (dbEditing === key) {
@@ -6314,7 +6332,7 @@
       const menu = dbMenu === key ? dbMenuHtml(s, key) : '';
       return `<div class="db-row${s.reason && s.reason.kind === 'done' ? ' done' : ''}"${srvStyle(s.serverUrl)} data-action="open" data-card="${esc(key)}" tabindex="0" aria-label="Open session ${esc(s.name)}">
         <span class="sb-dot ${st.cls === 'capped' ? 'idle' : st.cls}"></span><span class="db-name" title="${esc(s.name)}">${esc(s.name)}</span>
-        ${serverChipHtml(s)}<span class="db-spacer"></span>${status}${dbAge(s.lastActivity)}${act}${menu}</div>`;
+        ${serverChipHtml(s)}<span class="db-spacer"></span>${status}${dbAge(s.lastActivity)}${act}${menu}${dbArtifactsHtml(s.brief && s.brief.artifacts)}</div>`;
     }
 
     function dbSection(title, list, { cls = '', rows = false, collapsible = '' } = {}) {
@@ -6460,7 +6478,7 @@
           const items = (c.items || []).map((it) => `${it.ref}${it.state ? ` ${it.state.replace(/-/g, ' ')}` : ''}`).join(', ');
           const last = (c.did && c.did.text) || c.headline || '';
           return `<div class="db-closed-item" title="${esc(last)}"><span class="n">${esc(c.name || c.id)}</span><span>${esc(c.server || '')}</span>` +
-            (items ? `<span>${esc(items)}</span>` : '') + (last ? `<span class="d">${esc(last)}</span>` : '') + dbAge(c.at) + '</div>';
+            (items ? `<span>${esc(items)}</span>` : '') + (last ? `<span class="d">${esc(last)}</span>` : '') + dbArtifactsHtml(c.artifacts) + dbAge(c.at) + '</div>';
         }).join('')}</div></section>`;
       }
       // A re-render replaces every card; put keyboard focus back on the element that had

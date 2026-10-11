@@ -427,3 +427,76 @@ test.describe('wait and hidden (#313, #314)', () => {
     expect(B.instructionText(null, 'CMD')).toContain('must match what your final reply says');
   });
 });
+
+// #329 - the claude.ai artifacts a session published. The shapes are the measured ones:
+// a publish result carries url + title + version; a read, a list, an asset upload and a
+// failed publish do not.
+test.describe('artifacts (#329)', () => {
+  const URL1 = 'https://claude.ai/artifact/VyNWRcRV5M7GVnLmdjCQYG';
+  const URL2 = 'https://claude.ai/code/artifact/0b1c2d3e-4f50-6172-8394-a5b6c7d8e9f0';
+  const pub = (url, title) => ({ url, title, version: '1791469043-18ad', updated: false, path: 'C:\\x\\plan.html' });
+  const post = (input, response) => ({ tool_name: 'Artifact', tool_input: input, tool_response: response });
+
+  test('a publish result is an artifact; anything that is not a claude.ai artifact link is not', () => {
+    expect(B.publishedArtifact(pub(URL1, 'CI plan'))).toEqual({ url: URL1, title: 'CI plan' });
+    expect(B.publishedArtifact(pub(URL2, ''))).toEqual({ url: URL2, title: 'Artifact' });
+    for (const url of ['javascript:alert(1)', 'https://claude.ai.evil.com/artifact/abcdef1', 'http://claude.ai/artifact/abcdef1',
+      'https://claude.ai/artifact/abc def', 'https://claude.ai/artifact/abcdef1"><b>', 'https://claude.ai/chat/abcdef1']) {
+      expect(B.publishedArtifact(pub(url, 'x')), url).toBeNull();
+    }
+    // no version: not a publish (a read or a list result)
+    expect(B.publishedArtifact({ url: URL1, title: 'x' })).toBeNull();
+    expect(B.publishedArtifact({ asset_uploads: [], written: 1 })).toBeNull();
+    expect(B.publishedArtifact('Error: Nothing was done.')).toBeNull();
+    expect(B.publishedArtifact(null)).toBeNull();
+  });
+
+  test('the text form of a publish result is read too, titled by its file', () => {
+    expect(B.publishedArtifact(`Published C:\\tmp\\ci-plan.html at ${URL1} (Version 1, version id 1-2) Icon: "x".`))
+      .toEqual({ url: URL1, title: 'ci-plan' });
+    expect(B.publishedArtifact('Published C:\\tmp\\a.html at https://evil.example/artifact/abcdef1 (Version 1)')).toBeNull();
+  });
+
+  test('a PostToolUse of an Artifact PUBLISH folds in; a read, a list or an asset upload does not', () => {
+    let e = B.foldHook(null, 'PostToolUse', post({ file_path: 'x.html' }, pub(URL1, 'CI plan')), T0);
+    expect(e.artifacts).toEqual([{ url: URL1, title: 'CI plan', at: T0 }]);
+    const same = e;
+    for (const input of [{ action: 'read', url: URL2 }, { action: 'list' }, { url: URL2, asset: true, file_path: 'a.png' }]) {
+      e = B.foldHook(e, 'PostToolUse', post(input, pub(URL2, 'x')), T0 + 1);
+    }
+    expect(e).toBe(same);
+    // another tool returning the same shape is not an artifact either
+    expect(B.foldHook(same, 'PostToolUse', { tool_name: 'WebFetch', tool_input: {}, tool_response: pub(URL2, 'x') }, T0 + 2)).toBe(same);
+  });
+
+  test('a republish keeps ONE row with the newer title; newest first; capped', () => {
+    let e = B.foldHook(null, 'PostToolUse', post({}, pub(URL1, 'v1')), T0);
+    e = B.foldHook(e, 'PostToolUse', post({}, pub(URL2, 'other')), T0 + 1);
+    e = B.foldHook(e, 'PostToolUse', post({ action: 'publish', url: URL1 }, pub(URL1, 'v2')), T0 + 2);
+    expect(B.buildBrief(e).artifacts).toEqual([{ url: URL1, title: 'v2', at: T0 + 2 }, { url: URL2, title: 'other', at: T0 + 1 }]);
+    for (let i = 0; i < 15; i++) e = B.foldHook(e, 'PostToolUse', post({}, pub(`https://claude.ai/artifact/cap${i}xyz`, `n${i}`)), T0 + 10 + i);
+    const arts = B.buildBrief(e).artifacts;
+    expect(arts.length).toBe(B.LIMITS.artifacts);
+    expect(arts[0].title).toBe('n14');
+  });
+
+  test('artifacts survive a report and are published with reporting off', () => {
+    let e = B.foldHook(null, 'PostToolUse', post({}, pub(URL1, 'CI plan')), T0);
+    e = B.applyReport(e, { items: [{ ref: '#1', title: 'x', state: 'done' }], headline: null, wait: null }, T0 + 1);
+    expect(B.buildBrief(e, { reporting: false }).artifacts.map((a) => a.url)).toEqual([URL1]);
+    expect(B.lastSeen({ artifacts: [{ url: URL1, title: 'x', at: T0 + 5 }] })).toBe(T0 + 5);
+  });
+
+  test('the transcript backfill reads a publish line, timestamped, and skips everything else', () => {
+    const line = (tur, ts = '2026-10-11T10:00:00.000Z') => JSON.stringify({ type: 'user', timestamp: ts, toolUseResult: tur,
+      message: { role: 'user', content: [{ type: 'tool_result', tool_use_id: 't', content: 'Published …' }] } });
+    expect(B.artifactFromTranscriptLine(line(pub(URL1, 'CI plan')))).toEqual({ url: URL1, title: 'CI plan', at: Date.parse('2026-10-11T10:00:00.000Z') });
+    expect(B.artifactFromTranscriptLine(line({ url: URL1, title: 'read' }))).toBeNull();
+    expect(B.artifactFromTranscriptLine(line(pub('https://evil.example/artifact/abcdef1', 'x')))).toBeNull();
+    expect(B.artifactFromTranscriptLine('{"toolUseResult": "claude.ai/ not json')).toBeNull();
+    expect(B.artifactFromTranscriptLine(JSON.stringify({ type: 'assistant', message: { content: 'https://claude.ai/artifact/abcdef1' } }))).toBeNull();
+    // merged with what the hooks already folded: one row per URL, the later one wins
+    const merged = B.mergeArtifacts([{ url: URL1, title: 'hook', at: T0 }], [{ url: URL1, title: 'old', at: T0 - 5 }, { url: URL2, title: 'b', at: T0 - 9 }]);
+    expect(merged).toEqual([{ url: URL2, title: 'b', at: T0 - 9 }, { url: URL1, title: 'hook', at: T0 }]);
+  });
+});

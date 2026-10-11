@@ -191,6 +191,7 @@ bool boardMatches(Session s, String query, Set<String> servers) {
   final hay = [
     s.name, s.server.name, b?.headline ?? '', s.reason?.text ?? '',
     for (final it in b?.items ?? const <BriefItem>[]) ...[it.ref, it.title],
+    for (final a in b?.artifacts ?? const <BriefArtifact>[]) a.title,
   ].join(' ').toLowerCase();
   return hay.contains(q);
 }
@@ -1124,6 +1125,8 @@ class BoardCard extends StatelessWidget {
                         ],
                       ]),
                     ),
+                  if (b != null && b.artifacts.isNotEmpty)
+                    Padding(padding: const EdgeInsets.only(top: 6), child: ArtifactLinks(b.artifacts)),
                   if (b?.staleReason != null)
                     Padding(
                       padding: const EdgeInsets.only(top: 6),
@@ -1228,6 +1231,7 @@ class BoardRow extends StatelessWidget {
     final s = session;
     final st = boardStatusOf(s);
     final more = unhide ? null : _moreMenu(s, actions, includePin: true);
+    final artifacts = s.brief?.artifacts ?? const <BriefArtifact>[];
     return Opacity(
       opacity: s.reason?.kind == 'done' ? 0.55 : 1,
       child: Material(
@@ -1243,34 +1247,77 @@ class BoardRow extends StatelessWidget {
             onTap: actions.onOpen,
             child: Padding(
               padding: const EdgeInsets.fromLTRB(12, 4, 4, 4),
-              child: Row(children: [
-                StatusDot(status: st.dot, size: 8),
-                const SizedBox(width: 8),
-                // The name takes ALL the free room; the chip is capped and ellipsises
-                // (#313 review: flexed siblings each kept a share, leaving the name a
-                // third of a phone row even when the chip was one short word).
-                Expanded(
-                  child: Text(s.name,
-                      maxLines: 1,
-                      overflow: TextOverflow.ellipsis,
-                      style: theme.textTheme.bodyMedium?.copyWith(fontWeight: FontWeight.w600)),
-                ),
-                const SizedBox(width: 8),
-                ServerBadge(name: s.server.name, color: color),
-                const SizedBox(width: 8),
-                ConstrainedBox(constraints: const BoxConstraints(maxWidth: 150), child: _statusOrReason(s)),
-                if (unhide && actions.onHide != null)
-                  TextButton(onPressed: actions.onHide, child: const Text('Unhide'))
-                else if (more != null)
-                  more
-                else
-                  const SizedBox(height: 40),
+              child: Column(crossAxisAlignment: CrossAxisAlignment.start, children: [
+                Row(children: [
+                  StatusDot(status: st.dot, size: 8),
+                  const SizedBox(width: 8),
+                  // The name takes ALL the free room; the chip is capped and ellipsises
+                  // (#313 review: flexed siblings each kept a share, leaving the name a
+                  // third of a phone row even when the chip was one short word).
+                  Expanded(
+                    child: Text(s.name,
+                        maxLines: 1,
+                        overflow: TextOverflow.ellipsis,
+                        style: theme.textTheme.bodyMedium?.copyWith(fontWeight: FontWeight.w600)),
+                  ),
+                  const SizedBox(width: 8),
+                  ServerBadge(name: s.server.name, color: color),
+                  const SizedBox(width: 8),
+                  ConstrainedBox(constraints: const BoxConstraints(maxWidth: 150), child: _statusOrReason(s)),
+                  if (unhide && actions.onHide != null)
+                    TextButton(onPressed: actions.onHide, child: const Text('Unhide'))
+                  else if (more != null)
+                    more
+                  else
+                    const SizedBox(height: 40),
+                ]),
+                // A done session is a row, and a finished one is exactly where its
+                // overview artifact is worth finding again (#329).
+                if (artifacts.isNotEmpty)
+                  Padding(padding: const EdgeInsets.fromLTRB(16, 0, 8, 6), child: ArtifactLinks(artifacts)),
               ]),
             ),
           ),
         ),
       ),
     );
+  }
+}
+
+/// #329 - the claude.ai artifacts a session published, newest first. Each is a link
+/// that opens in the browser; tapping one never opens the session behind it.
+class ArtifactLinks extends StatelessWidget {
+  const ArtifactLinks(this.artifacts, {super.key});
+  final List<BriefArtifact> artifacts;
+
+  @override
+  Widget build(BuildContext context) {
+    final theme = Theme.of(context);
+    final style = theme.textTheme.bodySmall?.copyWith(color: theme.colorScheme.primary);
+    return Wrap(spacing: 6, runSpacing: 4, children: [
+      for (final a in artifacts)
+        Tooltip(
+          message: a.title,
+          child: InkWell(
+            key: ValueKey('board-artifact-${a.url}'),
+            borderRadius: BorderRadius.circular(999),
+            onTap: () => launchUrl(Uri.parse(a.url), mode: LaunchMode.externalApplication),
+            child: Container(
+              constraints: const BoxConstraints(maxWidth: 260),
+              padding: const EdgeInsets.symmetric(horizontal: 8, vertical: 2),
+              decoration: BoxDecoration(
+                border: Border.all(color: AppColors.outlineVariant),
+                borderRadius: BorderRadius.circular(999),
+              ),
+              child: Row(mainAxisSize: MainAxisSize.min, children: [
+                Icon(Icons.open_in_new, size: 12, color: theme.colorScheme.primary),
+                const SizedBox(width: 4),
+                Flexible(child: Text(a.title, maxLines: 1, overflow: TextOverflow.ellipsis, style: style)),
+              ]),
+            ),
+          ),
+        ),
+    ]);
   }
 }
 
@@ -1324,6 +1371,7 @@ class _ClosedStrip extends StatelessWidget {
                         style: theme.textTheme.bodySmall),
                   if ((c.did?.text ?? c.headline) != null)
                     Text(c.did?.text ?? c.headline!, maxLines: 1, overflow: TextOverflow.ellipsis, style: muted),
+                  if (c.artifacts.isNotEmpty) ArtifactLinks(c.artifacts),
                   if (c.at != null) Text(relativeTime(c.at), style: muted),
                 ],
               ),
