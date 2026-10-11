@@ -2226,3 +2226,91 @@ class RecapTasks {
     );
   }
 }
+
+/// One "how much is free" reading in a machine profile (#331): memory, virtual memory
+/// (commit) or a fixed drive. [level] is the SERVER's verdict (`ok` / `warn` / `hot`,
+/// lib/machine-profile.js), so every client colours the same box the same way and none
+/// carries a copy of the thresholds. `null` anywhere means unknown, never 0.
+class MachineFree {
+  final int? freeBytes;
+  final int? totalBytes;
+  final String? level;
+
+  /// The drive letter (`C:`) for a disk; null for memory.
+  final String? root;
+
+  const MachineFree({this.freeBytes, this.totalBytes, this.level, this.root});
+
+  static MachineFree? fromJson(dynamic json, {String freeKey = 'availBytes'}) {
+    if (json is! Map) return null;
+    final root = json['root']?.toString();
+    return MachineFree(
+      freeBytes: _asInt(json[freeKey]),
+      totalBytes: _asInt(json['totalBytes']),
+      level: machineLevel(json['level']),
+      root: (root != null && RegExp(r'^[A-Z]:$').hasMatch(root)) ? root : null,
+    );
+  }
+}
+
+/// `ok` / `warn` / `hot`, or null for anything else (an unknown reading).
+String? machineLevel(dynamic v) => const {'ok', 'warn', 'hot'}.contains(v) ? v as String : null;
+
+/// A server's answer to `GET /api/machine` (#331): what choosing where to open a new
+/// session needs. Read only while the dashboard's Machines section is open.
+class MachineProfile {
+  final int? cpuPct;
+  final int? cores;
+  final String? cpuLevel;
+  final MachineFree? memory;
+  final MachineFree? commit;
+
+  /// Null when the drive list could not be read, which is not "no drives".
+  final List<MachineFree>? disks;
+  final ({int count, int working, int waiting, int max, String? level})? sessions;
+  final int? uptimeSec;
+
+  const MachineProfile({
+    this.cpuPct,
+    this.cores,
+    this.cpuLevel,
+    this.memory,
+    this.commit,
+    this.disks,
+    this.sessions,
+    this.uptimeSec,
+  });
+
+  static MachineProfile? fromJson(dynamic json) {
+    if (json is! Map) return null;
+    final cpu = json['cpu'] is Map ? json['cpu'] as Map : const {};
+    final s = json['sessions'];
+    final count = s is Map ? _asInt(s['count']) : null;
+    final max = s is Map ? _asInt(s['max']) : null;
+    final disks = json['disks'];
+    return MachineProfile(
+      cpuPct: _asInt(cpu['pct']),
+      cores: _asInt(cpu['cores']),
+      cpuLevel: machineLevel(cpu['level']),
+      memory: MachineFree.fromJson(json['memory']),
+      commit: MachineFree.fromJson(json['commit']),
+      disks: disks is List
+          ? disks
+              .map((d) => MachineFree.fromJson(d, freeKey: 'freeBytes'))
+              .whereType<MachineFree>()
+              .where((d) => d.root != null)
+              .toList(growable: false)
+          : null,
+      sessions: (s is Map && count != null && max != null)
+          ? (
+              count: count,
+              working: _asInt(s['working']) ?? 0,
+              waiting: _asInt(s['waiting']) ?? 0,
+              max: max,
+              level: machineLevel(s['level']),
+            )
+          : null,
+      uptimeSec: _asInt(json['uptimeSec']),
+    );
+  }
+}

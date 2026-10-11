@@ -375,6 +375,43 @@ test.describe('#298 sessions dashboard (app.html)', () => {
     await expect(page.locator('.db-closed-item', { hasText: `${tag}-a` }).locator('a.db-art')).toHaveAttribute('href', url);
   });
 
+  test('Machines: collapsed it asks nothing; opened it shows this machine, and stays open (#331)', async ({ page }) => {
+    const errors = [];
+    page.on('pageerror', (e) => errors.push(e.message));
+    let asked = 0;
+    page.on('request', (r) => { if (/\/api\/machine$/.test(new URL(r.url()).pathname)) asked++; });
+    await loginPage(page);
+    await page.goto(`${BASE}/app`);
+    await page.evaluate(() => { try { localStorage.removeItem('wt.dashboard.view'); } catch (e) {} });
+    await page.click('#dashBtn');
+    const toggle = page.locator('.db-machines [data-action=machines]');
+    await expect(toggle).toHaveAttribute('aria-expanded', 'false');
+    await page.waitForTimeout(1500);
+    // Collapsed costs the servers nothing: the endpoint runs a CIM query.
+    expect(asked).toBe(0);
+    await expect(page.locator('.db-mach')).toHaveCount(0);
+
+    await toggle.click();
+    await expect(toggle).toHaveAttribute('aria-expanded', 'true');
+    const card = page.locator('.db-mach').first();
+    const rowOf = (k) => card.locator('.db-mach-r').filter({ has: page.locator('.k').getByText(k, { exact: true }) });
+    await expect(rowOf('Memory')).toContainText('free of', { timeout: 15000 });
+    await expect(rowOf('Sessions')).toContainText(/\d+ of \d+/);
+    await expect(rowOf('CPU')).toContainText('cores');
+    if (process.platform === 'win32') {
+      await expect(rowOf('Virtual memory')).toContainText('free of');
+      await expect(rowOf('Disk').first()).toContainText(/[A-Z]: .* free of/);
+    }
+    expect(asked).toBeGreaterThan(0);
+
+    // Remembered on this device: still open after a reload.
+    await page.reload();
+    if (!(await page.locator('#dashboard').isVisible())) await page.click('#dashBtn');
+    await expect(page.locator('.db-machines [data-action=machines]')).toHaveAttribute('aria-expanded', 'true');
+    await expect(page.locator('.db-mach').first()).toBeVisible();
+    expect(errors).toEqual([]);
+  });
+
   test('nothing a session or an agent wrote becomes markup', async ({ page }) => {
     const evil = '<img src=x onerror="window.__pwned=1">';
     const id = await newSession(`x${evil}`);

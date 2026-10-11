@@ -144,6 +144,9 @@ class SessionRepository {
   /// Per-server `session-clear-wait` capability (#320), from the same call.
   final Map<String, bool> _clearWaitSupported = <String, bool>{};
 
+  /// Per-server `machine-profile` capability (#331), from the same call.
+  final Map<String, bool> _machineSupported = <String, bool>{};
+
   // Live `/ws/notify` subscriptions, keyed by server base URL, alongside the
   // exact [ServerConfig] each was opened with (to detect a token change).
   // Re-synced from [AppConfig.serversStream] as servers are added/removed.
@@ -323,6 +326,9 @@ class SessionRepository {
   /// Whether the server at [baseUrl] can clear a reported wait (#320). An older one
   /// would accept the PATCH and silently ignore it.
   bool supportsClearWait(String baseUrl) => _clearWaitSupported[baseUrl] ?? false;
+
+  /// Whether the server at [baseUrl] answers `GET /api/machine` (#331).
+  bool supportsMachine(String baseUrl) => _machineSupported[baseUrl] ?? false;
 
   /// THE rule for offering "Not waiting" (#320/#324/#327), used by the session menu and
   /// the dashboard alike: only a wait the AGENT reported is the person's to clear (a live
@@ -582,6 +588,7 @@ class SessionRepository {
     _serverColor.remove(baseUrl);
     _hideSupported.remove(baseUrl);
     _clearWaitSupported.remove(baseUrl);
+    _machineSupported.remove(baseUrl);
   }
 
   /// Updates [_apiErrors], [_compacting] and [_submitUnconfirmedAt] from a
@@ -1058,6 +1065,7 @@ class SessionRepository {
       _serverVersion[server.baseUrl] = info.version;
       _hideSupported[server.baseUrl] = info.has('session-hide');
       _clearWaitSupported[server.baseUrl] = info.has('session-clear-wait');
+      _machineSupported[server.baseUrl] = info.has('machine-profile');
       final color = info.serverColor;
       if (color != null) _serverColor[server.baseUrl] = color;
       _namesResolved.add(server.baseUrl);

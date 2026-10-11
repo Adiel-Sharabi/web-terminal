@@ -255,6 +255,7 @@ class WorkBoardScreen extends StatefulWidget {
 
 class _WorkBoardScreenState extends State<WorkBoardScreen> {
   static const _closedEvery = Duration(seconds: 30);
+  static const _machineEvery = Duration(seconds: 30);
   static const _prefsKey = 'wt.dashboard.view';
 
   late final SessionRepository _repo = widget.repository ?? SessionRepository.instance;
@@ -270,6 +271,11 @@ class _WorkBoardScreenState extends State<WorkBoardScreen> {
   final Set<String> _serverFilter = {};
   BoardChip? _chipFilter;
   bool _doneOpen = false;
+
+  // #331 - the Machines section. Asked only while it is OPEN: each answer costs its
+  // server a CIM query. `failed` keeps "could not read" apart from "not asked yet".
+  bool _machinesOpen = false;
+  final Map<String, ({DateTime at, MachineProfile? data, bool failed})> _machines = {};
 
   List<ServerConfig> get _servers => (widget.servers ?? () => AppConfig.servers)();
   ApiClient _client(ServerConfig s) => (widget.clientFactory ?? ApiClient.new)(s);
@@ -287,6 +293,7 @@ class _WorkBoardScreenState extends State<WorkBoardScreen> {
         _updatedAt = DateTime.now();
       });
       unawaited(_refreshClosed());
+      unawaited(_refreshMachines());
     });
     // Only while the app is in the foreground: `main.dart` stops the repository's own
     // polling when the app is backgrounded, and this faster tick must not undo that.
@@ -314,14 +321,16 @@ class _WorkBoardScreenState extends State<WorkBoardScreen> {
       setState(() {
         _grouping = BoardGrouping.values.firstWhere((g) => g.name == m['group'], orElse: () => _grouping);
         _sort = BoardSort.values.firstWhere((s) => s.name == m['sort'], orElse: () => _sort);
+        if (m['machines'] is bool) _machinesOpen = m['machines'] as bool;
       });
+      unawaited(_refreshMachines());
     } catch (_) {/* defaults */}
   }
 
   Future<void> _savePrefs() async {
     try {
       await (await SharedPreferences.getInstance())
-          .setString(_prefsKey, jsonEncode({'group': _grouping.name, 'sort': _sort.name}));
+          .setString(_prefsKey, jsonEncode({'group': _grouping.name, 'sort': _sort.name, 'machines': _machinesOpen}));
     } catch (_) {/* a preference that cannot be saved is not a reason to refuse the change */}
   }
 
@@ -350,6 +359,47 @@ class _WorkBoardScreenState extends State<WorkBoardScreen> {
       }
     }));
     if (mounted) setState(() {});
+  }
+
+  Future<void> _refreshMachines({bool force = false}) async {
+    if (!_machinesOpen) return;
+    final servers = _servers;
+    _machines.removeWhere((url, _) => !servers.any((sv) => sv.baseUrl == url));
+    final due = servers.where((sv) {
+      if (!_repo.supportsMachine(sv.baseUrl) || _repo.serverUsable[sv.baseUrl] != true) return false;
+      final hit = _machines[sv.baseUrl];
+      return force || hit == null || DateTime.now().difference(hit.at) > _machineEvery;
+    }).toList();
+    if (due.isEmpty) return;
+    // Stamp first, so a slow server is not asked again by the next emit.
+    for (final sv in due) {
+      final hit = _machines[sv.baseUrl];
+      _machines[sv.baseUrl] = (at: DateTime.now(), data: hit?.data, failed: hit?.failed ?? false);
+    }
+    await Future.wait(due.map((sv) async {
+      final p = await _client(sv).machine();
+      // Unknown, not the previous reading: an old number would age into a confident lie.
+      _machines[sv.baseUrl] = (at: DateTime.now(), data: p, failed: p == null);
+    }));
+    if (mounted) setState(() {});
+  }
+
+  void _toggleMachines() {
+    setState(() => _machinesOpen = !_machinesOpen);
+    unawaited(_savePrefs());
+    unawaited(_refreshMachines(force: true));
+  }
+
+  /// What a machine card says instead of readings, or null when it has some.
+  String? _machineNote(ServerConfig sv) {
+    if (_repo.serverNeedsAuth[sv.baseUrl] == true) return 'needs login';
+    if (_repo.serverOfflineConfirmed[sv.baseUrl] == true) return 'offline';
+    // Its capabilities are not known until a version call has answered.
+    if (_repo.serverVersion(sv.baseUrl) == null) return 'reading…';
+    if (!_repo.supportsMachine(sv.baseUrl)) return 'this server is too old to report its machine';
+    final hit = _machines[sv.baseUrl];
+    if (hit?.data != null) return null;
+    return hit?.failed == true ? 'could not read it' : 'reading…';
   }
 
   void _say(String text, {SnackBarAction? action}) {
@@ -488,6 +538,28 @@ class _WorkBoardScreenState extends State<WorkBoardScreen> {
       ),
       if (!_showHidden && strip.isNotEmpty)
         _NeedsYou(sessions: strip, onOpen: widget.onOpenSession, onClearWaitOf: (s) => _actionsFor(s).onClearWait),
+      if (!_showHidden && servers.isNotEmpty)
+        _Section(
+          key: const ValueKey('board-machines'),
+          title: 'Machines',
+          collapsed: !_machinesOpen,
+          onToggle: _toggleMachines,
+          trailing: [
+            Text('disk, memory and load: where to open a new session',
+                style: Theme.of(context).textTheme.bodySmall?.copyWith(color: AppColors.onSurfaceVariant)),
+          ],
+          children: [
+            for (final sv in servers)
+              if (_serverFilter.isEmpty || _serverFilter.contains(sv.baseUrl))
+                MachineCard(
+                  key: ValueKey('board-machine-${sv.baseUrl}'),
+                  name: sv.name,
+                  color: _colorOf(sv.baseUrl),
+                  note: _machineNote(sv),
+                  profile: _machines[sv.baseUrl]?.data,
+                ),
+          ],
+        ),
     ];
 
     if (_showHidden) {
@@ -1337,6 +1409,87 @@ class _SeeRef extends StatelessWidget {
       avatar: ServerSwatch(color: color),
       label: Text('${session.name} (${session.server.name}) · see $firstRef'),
       onPressed: onOpen,
+    );
+  }
+}
+
+/// A size for a glance at a whole machine: `1.3 TB`, `169 GB`, `3.2 GB`, `—` unknown.
+String machineSize(int? bytes) {
+  if (bytes == null || bytes < 0) return '—';
+  const gb = 1024 * 1024 * 1024;
+  if (bytes >= 1024 * gb) return '${(bytes / (1024 * gb)).toStringAsFixed(1)} TB';
+  return bytes >= 10 * gb ? '${(bytes / gb).round()} GB' : '${(bytes / gb).toStringAsFixed(1)} GB';
+}
+
+String _machineUptime(int? sec) {
+  if (sec == null || sec < 0) return '';
+  final d = sec ~/ 86400, h = (sec % 86400) ~/ 3600;
+  return d > 0 ? 'up ${d}d ${h}h' : 'up ${h}h ${(sec % 3600) ~/ 60}m';
+}
+
+/// One machine in the dashboard's Machines section (#331). Colours follow the SERVER's
+/// `level` on each reading; this widget holds no thresholds.
+class MachineCard extends StatelessWidget {
+  const MachineCard({super.key, required this.name, this.color, this.note, this.profile});
+  final String name;
+  final Color? color;
+
+  /// Shown instead of readings (offline, too old, reading…), or null.
+  final String? note;
+  final MachineProfile? profile;
+
+  @override
+  Widget build(BuildContext context) {
+    final theme = Theme.of(context);
+    final small = theme.textTheme.bodySmall;
+    final muted = small?.copyWith(color: AppColors.onSurfaceVariant);
+    Color? tint(String? level) => switch (level) {
+          'hot' => theme.colorScheme.error,
+          'warn' => kWarnAmber,
+          _ => null,
+        };
+    Widget row(String label, String value, [String? level]) => Padding(
+          padding: const EdgeInsets.symmetric(vertical: 1),
+          child: Row(crossAxisAlignment: CrossAxisAlignment.start, children: [
+            SizedBox(width: 104, child: Text(label, style: muted)),
+            Expanded(child: Text(value, style: small?.copyWith(color: tint(level)))),
+          ]),
+        );
+    String free(MachineFree? f) =>
+        f == null ? '—' : '${machineSize(f.freeBytes)} free of ${machineSize(f.totalBytes)}';
+    final p = profile;
+    final up = _machineUptime(p?.uptimeSec);
+    final s = p?.sessions;
+    return Card(
+      margin: EdgeInsets.zero,
+      child: Padding(
+        padding: const EdgeInsets.all(12),
+        child: Column(
+          crossAxisAlignment: CrossAxisAlignment.start,
+          children: [
+            Row(children: [
+              ServerSwatch(color: color),
+              Expanded(child: Text(name, style: theme.textTheme.titleSmall?.copyWith(fontWeight: FontWeight.w700))),
+              if (up.isNotEmpty) Text(up, style: muted),
+            ]),
+            const SizedBox(height: 6),
+            if (note != null || p == null)
+              Text(note ?? 'reading…', style: muted)
+            else ...[
+              row('Sessions', s == null ? '—' : '${s.count} of ${s.max} · ${s.working} working · ${s.waiting} waiting',
+                  s?.level),
+              row('CPU', '${p.cpuPct == null ? '—' : '${p.cpuPct}%'}${p.cores == null ? '' : ' of ${p.cores} cores'}',
+                  p.cpuLevel),
+              row('Memory', free(p.memory), p.memory?.level),
+              row('Virtual memory', free(p.commit), p.commit?.level),
+              if (p.disks == null || p.disks!.isEmpty)
+                row('Disk', '—')
+              else
+                for (final (i, d) in p.disks!.indexed) row(i == 0 ? 'Disk' : '', '${d.root} ${free(d)}', d.level),
+            ],
+          ],
+        ),
+      ),
     );
   }
 }
