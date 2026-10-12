@@ -422,9 +422,27 @@ test.describe('wait and hidden (#313, #314)', () => {
   test('the per-prompt note tells the agent how to report a wait', () => {
     expect(B.instructionText(null, 'CMD')).toContain('"wait": {"on": "you"|"self"|"external"|"done"');
     // #320: "you" is a question the FINAL reply asks, never an offer.
-    expect(B.instructionText(null, 'CMD')).toContain('FINAL reply asks the user');
+    expect(B.instructionText(null, 'CMD')).toContain('final reply asks for something');
     expect(B.instructionText(null, 'CMD')).toContain('never an offer');
-    expect(B.instructionText(null, 'CMD')).toContain('must match what your final reply says');
+    expect(B.instructionText(null, 'CMD')).toContain('must match your final reply');
+  });
+
+  // #335: a report sent on its own is a whole extra request over the context. The wait
+  // rides on the turn's LAST tool calls; it is never asked for after them.
+  test('the note never asks for a report on its own', () => {
+    const t = B.instructionText(null, 'CMD');
+    expect(t).toContain('Never as a call of its own');
+    expect(t).toContain('LAST tool calls');
+    expect(t).toContain('Nothing to ride on: no report');
+    expect(t).not.toContain('END a turn');
+  });
+  // #335: the note rides on EVERY prompt and every task notification, so its length is
+  // paid again and again. A budget, not a snapshot: rewording is free, growth is not.
+  test('the note stays inside its length budget', () => {
+    const e = B.applyReport(B.emptyEntry(), { items: [{ ref: '#5', title: 'Thing', state: 'blocked' }], headline: 'h' }, T0);
+    // The REAL command, not a placeholder: it is in the note every time, so it counts.
+    const cmd = B.reportCommand('C:/dev/web-terminal/scripts/wt-report.js');
+    expect(B.instructionText(e, cmd).length).toBeLessThanOrEqual(1320);
   });
 });
 
