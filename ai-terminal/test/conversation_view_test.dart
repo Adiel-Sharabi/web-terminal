@@ -3110,6 +3110,52 @@ void main() {
   );
 
   testWidgets(
+    '#333: a compaction summary is folded to one line, never "You"',
+    (tester) async {
+      // The preamble form: it does not open with `This session is being
+      // continued`, so the local classifier reads it as human. The server's
+      // flag is what folds it.
+      const summary = '<artifact-content-authored-by-others/>\n'
+          'The summarized conversation included Artifact content.\n'
+          'This session is being continued from a previous conversation.\n\n'
+          'Summary:\nCOMPACT_SUMMARY_MARKER';
+      await pumpTurns(tester, const [
+        TranscriptTurn(
+          role: 'user',
+          text: summary,
+          toolUses: [],
+          ts: null,
+          typedText: '',
+          userKind: 'system',
+          compactSummary: true,
+        ),
+      ]);
+
+      expect(find.text('You'), findsNothing);
+      expect(find.text('Session continued'), findsOneWidget);
+      final aligns = alignmentsAround(tester, find.text('Session continued'));
+      expect(aligns, contains(Alignment.centerLeft));
+      expect(aligns, isNot(contains(Alignment.centerRight)));
+
+      // Folded: one line, the body hidden until asked for.
+      expect(find.textContaining('COMPACT_SUMMARY_MARKER'), findsNothing);
+      expect(find.text(kCompactionChipLabel), findsOneWidget);
+
+      await tester.tap(find.text(kCompactionChipLabel));
+      await tester.pumpAndSettle();
+      expect(find.textContaining('COMPACT_SUMMARY_MARKER'), findsOneWidget);
+    },
+  );
+
+  test('#333: compactSummary is read off the wire; absent means false', () {
+    final flagged = TranscriptTurn.fromJson(
+        {'role': 'user', 'text': 'x', 'userKind': 'system', 'compactSummary': true});
+    expect(flagged.compactSummary, isTrue);
+    final plain = TranscriptTurn.fromJson({'role': 'user', 'text': 'x'});
+    expect(plain.compactSummary, isFalse);
+  });
+
+  testWidgets(
     '#163: the openings a content sniff would miss are handled identically',
     (tester) async {
       // The whole argument for a structural flag over a fourth signature: these

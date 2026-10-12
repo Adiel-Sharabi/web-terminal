@@ -1556,6 +1556,9 @@ UserTurnKind? userTurnKindFromWire(String? kind) => switch (kind) {
       _ => null,
     };
 
+/// The one line a folded compaction summary shows (#333); tap to read it all.
+const String kCompactionChipLabel = 'Earlier conversation summarised';
+
 /// How much of an injected turn's first line the chip shows before eliding.
 const int _kInjectedLabelMax = 72;
 
@@ -1889,11 +1892,20 @@ class _TurnBubble extends StatelessWidget {
     // `<system-reminder>` tag (or an image note) where the turn's own name should
     // be, and the expanded body then kept reminder XML that every other injected
     // treatment strips.
-    final injectedBody =
-        kind == UserTurnKind.meta ? injectedTurnBody(turn.text) : null;
+    // #333: the summary Claude writes after compacting is folded the same way.
+    // It runs to pages, nobody typed it, and shown in full it buried the real
+    // prompts around it. Keyed on the server's flag, never on the text: a newer
+    // Claude Code writes a preamble in front of the sentence a text match would
+    // anchor on, which is how it came to read as "You" in the first place.
+    final compaction = !isAssistant && turn.compactSummary;
+    final injectedBody = (kind == UserTurnKind.meta || compaction)
+        ? injectedTurnBody(turn.text)
+        : null;
     final chipLabel = command != null
         ? (command.args.isEmpty ? '/${command.name}' : '/${command.name} ${command.args}')
-        : (injectedBody == null ? null : injectedTurnLabel(injectedBody));
+        : compaction
+            ? kCompactionChipLabel
+            : (injectedBody == null ? null : injectedTurnLabel(injectedBody));
     final chipBody = command?.body ?? injectedBody ?? '';
     // Injected turns display their stripped inner body; human/assistant use the
     // turn text verbatim.
@@ -1958,8 +1970,9 @@ class _TurnBubble extends StatelessWidget {
             UserTurnKind.human => 'You',
             UserTurnKind.teammate =>
               uclass!.from.isEmpty ? '◆ Teammate' : '◆ ${uclass.from}',
-            UserTurnKind.system =>
-              uclass!.from.isEmpty ? 'System' : uclass.from,
+            UserTurnKind.system => compaction
+                ? 'Session continued'
+                : (uclass!.from.isEmpty ? 'System' : uclass.from),
             // Deliberately generic. This class covers skill bodies, `## Context
             // Usage`, `[Image: …]` notes and effort-level notes alike, and the
             // flag that identifies them says only "the harness wrote this" —
