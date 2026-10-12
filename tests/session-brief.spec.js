@@ -420,7 +420,7 @@ test.describe('wait and hidden (#313, #314)', () => {
   });
 
   test('the per-prompt note tells the agent how to report a wait', () => {
-    expect(B.instructionText(null, 'CMD')).toContain('"wait": {"on": "self"|"external"|"done"');
+    expect(B.instructionText(null, 'CMD')).toContain('"wait": {"on": "you"|"self"|"external"|"done"');
     // #320: "you" is a question the FINAL reply asks, never an offer.
     expect(B.instructionText(null, 'CMD')).toContain('final reply asks the user for something');
     expect(B.instructionText(null, 'CMD')).toContain('never an offer');
@@ -436,7 +436,10 @@ test.describe('wait and hidden (#313, #314)', () => {
     // ...except "waiting on you", which feeds the Needs-you strip: it shipped without
     // this, and a session asking for a power cycle sat as plain idle for 50 minutes.
     expect(t).toContain('One exception, below');
-    expect(t).toContain('ALWAYS report "wait": {"on": "you"');
+    expect(t).toContain('ALWAYS report a "you" wait, alone if not sent yet');
+    // The wait is chosen BEFORE the last results; one that they changed must be correctable,
+    // or a card sticks on "done" - or, worse, on a "you" nobody owes any more.
+    expect(t).toContain('send one correcting report, alone if need be');
     expect(t).toContain('nothing to ride on: no report');
     expect(t).not.toContain('END a turn');
   });
@@ -446,7 +449,7 @@ test.describe('wait and hidden (#313, #314)', () => {
     const e = B.applyReport(B.emptyEntry(), { items: [{ ref: '#5', title: 'Thing', state: 'blocked' }], headline: 'h' }, T0);
     // The REAL command, not a placeholder: it is in the note every time, so it counts.
     const cmd = B.reportCommand('C:/dev/web-terminal/scripts/wt-report.js');
-    expect(B.instructionText(e, cmd).length).toBeLessThanOrEqual(1320);
+    expect(B.instructionText(e, cmd).length).toBeLessThanOrEqual(1420);
   });
 });
 
