@@ -420,9 +420,9 @@ test.describe('wait and hidden (#313, #314)', () => {
   });
 
   test('the per-prompt note tells the agent how to report a wait', () => {
-    expect(B.instructionText(null, 'CMD')).toContain('"wait": {"on": "you"|"self"|"external"|"done"');
+    expect(B.instructionText(null, 'CMD')).toContain('"wait": {"on": "self"|"external"|"done"');
     // #320: "you" is a question the FINAL reply asks, never an offer.
-    expect(B.instructionText(null, 'CMD')).toContain('final reply asks for something');
+    expect(B.instructionText(null, 'CMD')).toContain('final reply asks the user for something');
     expect(B.instructionText(null, 'CMD')).toContain('never an offer');
     expect(B.instructionText(null, 'CMD')).toContain('must match your final reply');
   });
@@ -433,7 +433,11 @@ test.describe('wait and hidden (#313, #314)', () => {
     const t = B.instructionText(null, 'CMD');
     expect(t).toContain('Never as a call of its own');
     expect(t).toContain('LAST tool calls');
-    expect(t).toContain('Nothing to ride on: no report');
+    // ...except "waiting on you", which feeds the Needs-you strip: it shipped without
+    // this, and a session asking for a power cycle sat as plain idle for 50 minutes.
+    expect(t).toContain('One exception, below');
+    expect(t).toContain('ALWAYS report "wait": {"on": "you"');
+    expect(t).toContain('nothing to ride on: no report');
     expect(t).not.toContain('END a turn');
   });
   // #335: the note rides on EVERY prompt and every task notification, so its length is
