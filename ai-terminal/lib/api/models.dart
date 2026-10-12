@@ -1703,6 +1703,12 @@ class TranscriptTurn {
   /// classifier decides exactly as it did before.
   final String? userKind;
 
+  /// True when the server marked this `role:user` turn as the summary Claude
+  /// writes after compacting (#333, the record's `isCompactSummary` flag). The
+  /// chat lens folds it into one line: it is long, nobody typed it, and shown in
+  /// full it pushes the real prompts out of view. Absent on the wire means false.
+  final bool compactSummary;
+
   /// Total context tokens carried into this assistant turn's request (fresh
   /// input + both cache tiers), or `null` for user turns / turns with no usage.
   /// Used to derive an approximate ctx% when the live status line isn't posting.
@@ -1716,6 +1722,7 @@ class TranscriptTurn {
     required this.ts,
     this.typedText,
     this.userKind,
+    this.compactSummary = false,
     this.ctxTokens,
   });
 
@@ -1740,6 +1747,7 @@ class TranscriptTurn {
       // Same absent-stays-absent rule as typedText: a missing verdict must stay
       // distinguishable from any verdict (#163).
       userKind: json['userKind']?.toString(),
+      compactSummary: json['compactSummary'] == true,
       ctxTokens: ct is num && ct > 0 ? ct.toInt() : null,
     );
   }
