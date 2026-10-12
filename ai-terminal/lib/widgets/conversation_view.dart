@@ -861,6 +861,12 @@ class _ConversationViewState extends State<ConversationView> {
       if (ta.role != tb.role || ta.text != tb.text || ta.ts != tb.ts) {
         return false;
       }
+      // The server's verdict can change for the same text (#333: a server
+      // updated under an open lens starts flagging a summary it did not before).
+      if (ta.userKind != tb.userKind ||
+          ta.compactSummary != tb.compactSummary) {
+        return false;
+      }
       if (ta.toolUses.length != tb.toolUses.length) return false;
       for (var j = 0; j < ta.toolUses.length; j++) {
         if (ta.toolUses[j].name != tb.toolUses[j].name ||
