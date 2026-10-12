@@ -440,7 +440,9 @@ test.describe('wait and hidden (#313, #314)', () => {
   // paid again and again. A budget, not a snapshot: rewording is free, growth is not.
   test('the note stays inside its length budget', () => {
     const e = B.applyReport(B.emptyEntry(), { items: [{ ref: '#5', title: 'Thing', state: 'blocked' }], headline: 'h' }, T0);
-    expect(B.instructionText(e, 'CMD').length).toBeLessThanOrEqual(1150);
+    // The REAL command, not a placeholder: it is in the note every time, so it counts.
+    const cmd = B.reportCommand('C:/dev/web-terminal/scripts/wt-report.js');
+    expect(B.instructionText(e, cmd).length).toBeLessThanOrEqual(1320);
   });
 });
 
