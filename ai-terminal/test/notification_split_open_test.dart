@@ -120,7 +120,7 @@ void main() {
       // Exactly what _openSession does on a wide window: set the shared id.
       // A notification carries only an id — never a Session object — which is
       // why the selection is an id and initialSession is merely a hint.
-      SessionSelection.instance.selectedId.value = 'sess-from-notification';
+      SessionSelection.instance.select('sess-from-notification');
       await tester.pump();
 
       expect(find.text('Pick a session'), findsNothing);

@@ -88,7 +88,7 @@ void main() {
     tester.view.physicalSize = const Size(1400, 900);
     tester.view.devicePixelRatio = 1.0;
     addTearDown(tester.view.resetPhysicalSize);
-    SessionSelection.instance.selectedId.value = 'sess-1';
+    SessionSelection.instance.select('sess-1');
 
     await tester.pumpWidget(_screen(embedded: true));
     await tester.pump();
@@ -99,7 +99,7 @@ void main() {
     await tester.pump();
     expect(find.text(_gone), findsOneWidget);
     expect(
-      SessionSelection.instance.selectedId.value,
+      SessionSelection.instance.selectedId,
       isNull,
       reason: 'the pane it lives in is told to close',
     );
@@ -162,7 +162,7 @@ void main() {
     // in that gap reaches a still-mounted pane whose session is gone — while
     // the selection already belongs to the row the user just clicked. This
     // session vanishing is exactly the moment they click another row.
-    SessionSelection.instance.selectedId.value = 'sess-2';
+    SessionSelection.instance.select('sess-2');
 
     await tester.pumpWidget(_screen(embedded: true));
     await tester.pump();
@@ -171,7 +171,7 @@ void main() {
     await tester.pump();
 
     expect(
-      SessionSelection.instance.selectedId.value,
+      SessionSelection.instance.selectedId,
       'sess-2',
       reason: 'clearing a selection that is not ours drops the user on the empty state',
     );

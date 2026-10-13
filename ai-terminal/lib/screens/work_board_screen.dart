@@ -10,9 +10,13 @@
 // day" list.
 //
 // #314 adds what makes it something to work FROM: Favorites first (moved, not
-// repeated), an Active / Hidden split (hidden is stored on the session's server, so
-// every device agrees), a reason / server / work-item grouping, a text and machine
-// filter, and an order. #315 gives every card its machine's colour as a stripe.
+// repeated) and an Active / Hidden split (hidden is stored on the session's server,
+// so every device agrees). #315 gives every card its machine's colour as a stripe.
+//
+// #337 kept only what is used: the board is always grouped by reason, in the
+// session list's own order. The grouping switch, the order menu, the text and
+// machine filters and the summary chips are gone. On a wide window the board is
+// shown beside the session list ([WorkBoardScreen.embedded]), not over it.
 
 import 'dart:async';
 import 'dart:convert';
@@ -31,12 +35,6 @@ import '../widgets/format_utils.dart';
 import '../widgets/reason_chip.dart';
 import '../widgets/server_badge.dart';
 import '../widgets/status_dot.dart';
-
-/// How the board is grouped.
-enum BoardGrouping { reason, server, item }
-
-/// The order inside a section. `list` is the session list's own order.
-enum BoardSort { list, recent, name, machine }
 
 /// A session's status as the board shows it: a label and a colour.
 class BoardStatus {
@@ -86,39 +84,6 @@ String briefStateLabel(String state) => state.replaceAll('-', ' ');
       _ => (bg: const Color(0xFF2A303C), fg: const Color(0xFFC3C9D4)),
     };
 
-/// One "by work item" section: the item, the sessions whose card shows under it (it
-/// is their FIRST item), and the ones that only reference it (a later item of theirs).
-class WorkItemGroup {
-  final BriefItem item;
-  final List<Session> sessions;
-  final List<Session> refs;
-  const WorkItemGroup(this.item, this.sessions, [this.refs = const []]);
-}
-
-/// Groups [sessions] by work item, on the server's cross-session [BriefItem.key]. Each
-/// session's CARD appears once, under its first item; its other items list it in
-/// [WorkItemGroup.refs] instead of repeating the card. Sessions with no item come back
-/// separately. Order is first appearance.
-({List<WorkItemGroup> groups, List<Session> none}) groupByWorkItem(List<Session> sessions) {
-  final byKey = <String, ({BriefItem item, List<Session> cards, List<Session> refs})>{};
-  final none = <Session>[];
-  for (final s in sessions) {
-    final items = s.brief?.items ?? const <BriefItem>[];
-    if (items.isEmpty) {
-      none.add(s);
-      continue;
-    }
-    for (var i = 0; i < items.length; i++) {
-      final g = byKey.putIfAbsent(items[i].key, () => (item: items[i], cards: <Session>[], refs: <Session>[]));
-      (i == 0 ? g.cards : g.refs).add(s);
-    }
-  }
-  return (
-    groups: [for (final g in byKey.values) WorkItemGroup(g.item, g.cards, g.refs)],
-    none: none,
-  );
-}
-
 /// Why a card shows no work item.
 String noItemReason(Session s) {
   final b = s.brief;
@@ -134,28 +99,6 @@ bool boardNeedsYou(Session s) =>
 
 /// Hidden from the dashboard (#314).
 bool boardIsHidden(Session s) => s.brief?.hidden == true;
-
-/// The summary chips (#318). Each one is a COUNT and a FILTER over the same test, so
-/// the number on a chip and the sessions it shows can never disagree.
-enum BoardChip {
-  you('need you', StatusColor.waiting),
-  working('working', StatusColor.working),
-  self('on its own', StatusColor.capped),
-  capped('capped', StatusColor.capped);
-
-  const BoardChip(this.word, this.color);
-  final String word;
-  final Color color;
-
-  bool test(Session s) => switch (this) {
-        BoardChip.you => boardNeedsYou(s),
-        BoardChip.working => s.status == 'working',
-        BoardChip.self => s.reason?.kind == 'self' && s.reason?.source != 'usage-limit',
-        BoardChip.capped => s.usageLimit?.waiting == true,
-      };
-
-  String label(int n) => this == BoardChip.you ? '$n need${n == 1 ? 's' : ''} you' : '$n $word';
-}
 
 /// The reason-grouping sections, in display order.
 enum ReasonSection { needsYou, working, self, external, idle, notReported, done }
@@ -181,53 +124,13 @@ ReasonSection reasonSectionOf(Session s) {
   return reported ? ReasonSection.idle : ReasonSection.notReported;
 }
 
-/// Whether [s] passes the text filter [query] and the machine filter [servers]
-/// (base URLs; empty = every machine).
-bool boardMatches(Session s, String query, Set<String> servers) {
-  if (servers.isNotEmpty && !servers.contains(s.server.baseUrl)) return false;
-  final q = query.trim().toLowerCase();
-  if (q.isEmpty) return true;
-  final b = s.brief;
-  final hay = [
-    s.name, s.server.name, b?.headline ?? '', s.reason?.text ?? '',
-    for (final it in b?.items ?? const <BriefItem>[]) ...[it.ref, it.title],
-    for (final a in b?.artifacts ?? const <BriefArtifact>[]) a.title,
-  ].join(' ').toLowerCase();
-  return hay.contains(q);
-}
-
-/// [list] in [sort] order. `list` keeps the order given (the session list's own);
-/// `machine` orders by [serverOrder] (base URLs) and keeps list order within each.
-List<Session> boardSorted(List<Session> list, BoardSort sort, List<String> serverOrder) {
-  final index = {for (var i = 0; i < list.length; i++) list[i]: i};
-  final out = [...list];
-  int byList(Session a, Session b) => index[a]!.compareTo(index[b]!);
-  switch (sort) {
-    case BoardSort.list:
-      break;
-    case BoardSort.recent:
-      out.sort((a, b) => (b.lastActivity ?? 0).compareTo(a.lastActivity ?? 0));
-    case BoardSort.name:
-      out.sort((a, b) => a.name.toLowerCase().compareTo(b.name.toLowerCase()));
-    case BoardSort.machine:
-      int srv(Session s) {
-        final i = serverOrder.indexOf(s.server.baseUrl);
-        return i < 0 ? serverOrder.length : i;
-      }
-      out.sort((a, b) {
-        final c = srv(a).compareTo(srv(b));
-        return c != 0 ? c : byList(a, b);
-      });
-  }
-  return out;
-}
-
 /// The sessions dashboard. [onOpenSession] is called when a card is tapped; the
 /// caller decides how to show it (split pane or a pushed route).
 class WorkBoardScreen extends StatefulWidget {
   const WorkBoardScreen({
     super.key,
     required this.onOpenSession,
+    this.embedded = false,
     this.repository,
     this.servers,
     this.clientFactory,
@@ -235,6 +138,11 @@ class WorkBoardScreen extends StatefulWidget {
   });
 
   final void Function(Session session) onOpenSession;
+
+  /// True when shown inline as the detail pane of the wide split view (#337), not
+  /// pushed as its own route. Suppresses the AppBar back button, as
+  /// `SessionScreen.embedded` does.
+  final bool embedded;
 
   /// Injectable for tests; defaults to [SessionRepository.instance].
   final SessionRepository? repository;
@@ -263,13 +171,7 @@ class _WorkBoardScreenState extends State<WorkBoardScreen> {
   Timer? _poll;
   List<Session> _sessions = const [];
   final Map<String, ({DateTime at, List<ClosedSession> list})> _closed = {};
-  DateTime? _updatedAt;
-  BoardGrouping _grouping = BoardGrouping.reason;
-  BoardSort _sort = BoardSort.list;
   bool _showHidden = false;
-  String _query = '';
-  final Set<String> _serverFilter = {};
-  BoardChip? _chipFilter;
   bool _doneOpen = false;
 
   // #331 - the Machines section. Asked only while it is OPEN: each answer costs its
@@ -288,10 +190,7 @@ class _WorkBoardScreenState extends State<WorkBoardScreen> {
     unawaited(_loadPrefs());
     _sub = _repo.sessions.listen((list) {
       if (!mounted) return;
-      setState(() {
-        _sessions = list;
-        _updatedAt = DateTime.now();
-      });
+      setState(() => _sessions = list);
       unawaited(_refreshClosed());
       unawaited(_refreshMachines());
     });
@@ -310,27 +209,23 @@ class _WorkBoardScreenState extends State<WorkBoardScreen> {
     super.dispose();
   }
 
-  // Grouping and order are per DEVICE (a phone and a desk can want different views);
-  // what a session IS (hidden, favourite) lives on its server.
+  // Whether Machines is open is per DEVICE (a phone and a desk can want different
+  // views); what a session IS (hidden, favourite) lives on its server. A grouping or
+  // order an older build saved under the same key is simply ignored (#337).
   Future<void> _loadPrefs() async {
     try {
       final raw = (await SharedPreferences.getInstance()).getString(_prefsKey);
       if (raw == null) return;
       final m = jsonDecode(raw);
       if (m is! Map || !mounted) return;
-      setState(() {
-        _grouping = BoardGrouping.values.firstWhere((g) => g.name == m['group'], orElse: () => _grouping);
-        _sort = BoardSort.values.firstWhere((s) => s.name == m['sort'], orElse: () => _sort);
-        if (m['machines'] is bool) _machinesOpen = m['machines'] as bool;
-      });
+      if (m['machines'] is bool) setState(() => _machinesOpen = m['machines'] as bool);
       unawaited(_refreshMachines());
     } catch (_) {/* defaults */}
   }
 
   Future<void> _savePrefs() async {
     try {
-      await (await SharedPreferences.getInstance())
-          .setString(_prefsKey, jsonEncode({'group': _grouping.name, 'sort': _sort.name, 'machines': _machinesOpen}));
+      await (await SharedPreferences.getInstance()).setString(_prefsKey, jsonEncode({'machines': _machinesOpen}));
     } catch (_) {/* a preference that cannot be saved is not a reason to refuse the change */}
   }
 
@@ -505,37 +400,14 @@ class _WorkBoardScreenState extends State<WorkBoardScreen> {
     final servers = _servers;
     final hidden = all.where(boardIsHidden).toList();
     final shown = all.where((s) => !boardIsHidden(s)).toList();
-    final pool = (_showHidden ? hidden : shown)
-        .where((s) => boardMatches(s, _query, _serverFilter) && (_chipFilter?.test(s) ?? true))
-        .toList();
-    final needs = all.where(boardNeedsYou).toList();
-    final serverOrder = [for (final sv in servers) sv.baseUrl];
     final closed = _closed.values.expand((v) => v.list).toList()
       ..sort((a, b) => (b.at ?? 0).compareTo(a.at ?? 0));
 
-    // Needs you is always complete, a hidden session included. In the reason grouping
-    // the visible ones ARE the first section, so only hidden ones ride the strip.
-    final strip = _grouping == BoardGrouping.reason ? needs.where(boardIsHidden).toList() : needs;
+    // Needs you is always complete, a hidden session included. The visible ones ARE
+    // the board's first section, so only hidden ones ride the strip.
+    final strip = hidden.where(boardNeedsYou).toList();
 
     final children = <Widget>[
-      _Controls(
-        query: _query,
-        onQuery: (v) => setState(() => _query = v),
-        servers: servers,
-        serverFilter: _serverFilter,
-        colorOf: _colorOf,
-        onToggleServer: (url) => setState(() {
-          if (!_serverFilter.remove(url)) _serverFilter.add(url);
-        }),
-      ),
-      _SummaryRow(
-        sessions: all.length,
-        servers: servers.length,
-        counts: {for (final c in BoardChip.values) c: all.where(c.test).length},
-        selected: _chipFilter,
-        onTap: (c) => setState(() => _chipFilter = _chipFilter == c ? null : c),
-        updatedAt: _updatedAt,
-      ),
       if (!_showHidden && strip.isNotEmpty)
         _NeedsYou(sessions: strip, onOpen: widget.onOpenSession, onClearWaitOf: (s) => _actionsFor(s).onClearWait),
       if (!_showHidden && servers.isNotEmpty)
@@ -550,35 +422,34 @@ class _WorkBoardScreenState extends State<WorkBoardScreen> {
           ],
           children: [
             for (final sv in servers)
-              if (_serverFilter.isEmpty || _serverFilter.contains(sv.baseUrl))
-                MachineCard(
-                  key: ValueKey('board-machine-${sv.baseUrl}'),
-                  name: sv.name,
-                  color: _colorOf(sv.baseUrl),
-                  note: _machineNote(sv),
-                  profile: _machines[sv.baseUrl]?.data,
-                ),
+              MachineCard(
+                key: ValueKey('board-machine-${sv.baseUrl}'),
+                name: sv.name,
+                color: _colorOf(sv.baseUrl),
+                note: _machineNote(sv),
+                profile: _machines[sv.baseUrl]?.data,
+              ),
           ],
         ),
     ];
 
     if (_showHidden) {
-      children.add(pool.isEmpty
-          ? _Empty(hidden.isEmpty ? 'Nothing is hidden. Hide a session from its ⋮ menu.' : 'No hidden session matches the filter.')
+      children.add(hidden.isEmpty
+          ? const _Empty('Nothing is hidden. Hide a session from its ⋮ menu.')
           : _Section(title: 'Hidden', rows: true, children: [
-              for (final s in boardSorted(pool, _sort, serverOrder))
+              for (final s in hidden)
                 BoardRow(key: _key(s), session: s, color: _colorOf(s.server.baseUrl), actions: _actionsFor(s), unhide: true),
             ]));
     } else if (all.isEmpty) {
       children.add(const _Empty('No sessions on any server.'));
-    } else if (pool.isEmpty) {
-      children.add(const _Empty('No session matches the filter.'));
+    } else if (shown.isEmpty) {
+      children.add(const _Empty('Every session is hidden. They are on the Hidden tab.'));
     } else {
       // Favourites first, and MOVED there rather than repeated below: a card is tall,
       // and a duplicate doubles the scroll and makes every count ambiguous. They keep
-      // the session list's pinned order whatever the sort: that order is the owner's.
-      final favs = Session.pinnedOrder(pool);
-      final rest = pool.where((s) => !s.favorite).toList();
+      // the session list's pinned order: that order is the owner's.
+      final favs = Session.pinnedOrder(shown);
+      final rest = shown.where((s) => !s.favorite).toList();
       if (favs.isNotEmpty) {
         children.add(_Section(
           key: const ValueKey('board-favorites'),
@@ -587,84 +458,46 @@ class _WorkBoardScreenState extends State<WorkBoardScreen> {
           children: [for (final s in favs) _card(s)],
         ));
       }
-      children.addAll(switch (_grouping) {
-        BoardGrouping.reason => _reasonSections(boardSorted(rest, _sort, serverOrder)),
-        BoardGrouping.server => [for (final sv in servers) ?_serverSection(sv, boardSorted(rest, _sort, serverOrder))],
-        BoardGrouping.item => _itemSections(boardSorted(rest, _sort, serverOrder)),
-      });
+      children.addAll(_reasonSections(rest));
     }
     if (!_showHidden && closed.isNotEmpty) children.add(_ClosedStrip(closed: closed, colorOf: _colorOf));
     children.add(const SizedBox(height: 24));
 
     return Scaffold(
       appBar: AppBar(
+        // Beside the session list there is nothing to go back to (#337).
+        automaticallyImplyLeading: !widget.embedded,
         title: const Text('Dashboard'),
-        actions: [
-          PopupMenuButton<BoardSort>(
-            key: const ValueKey('board-sort'),
-            tooltip: 'Order',
-            icon: const Icon(Icons.sort),
-            initialValue: _sort,
-            onSelected: (v) {
-              setState(() => _sort = v);
-              unawaited(_savePrefs());
-            },
-            itemBuilder: (_) => const [
-              PopupMenuItem(value: BoardSort.list, child: Text('List order')),
-              PopupMenuItem(value: BoardSort.recent, child: Text('Recently active')),
-              PopupMenuItem(value: BoardSort.name, child: Text('Name A–Z')),
-              PopupMenuItem(value: BoardSort.machine, child: Text('Machine')),
-            ],
-          ),
-        ],
-        // Below the title rather than in `actions`: a phone has no room for both.
         bottom: PreferredSize(
           preferredSize: const Size.fromHeight(48),
           child: Padding(
             padding: const EdgeInsets.fromLTRB(12, 0, 12, 8),
-            child: SingleChildScrollView(
-              scrollDirection: Axis.horizontal,
-              child: Row(children: [
-                SegmentedButton<bool>(
-                  key: const ValueKey('board-tabs'),
-                  showSelectedIcon: false,
-                  segments: [
-                    ButtonSegment(value: false, label: Text('Active ${shown.length}')),
-                    ButtonSegment(
-                      value: true,
-                      label: Row(mainAxisSize: MainAxisSize.min, children: [
-                        Text('Hidden ${hidden.length}'),
-                        // A hidden session that owes an answer flags its tab, so hiding
-                        // never buries one.
-                        if (hidden.any(boardNeedsYou))
-                          Container(
-                            margin: const EdgeInsets.only(left: 5),
-                            width: 6,
-                            height: 6,
-                            decoration: const BoxDecoration(color: StatusColor.waiting, shape: BoxShape.circle),
-                          ),
-                      ]),
-                    ),
-                  ],
-                  selected: {_showHidden},
-                  onSelectionChanged: (v) => setState(() => _showHidden = v.first),
-                ),
-                const SizedBox(width: 10),
-                SegmentedButton<BoardGrouping>(
-                  key: const ValueKey('board-grouping'),
-                  showSelectedIcon: false,
-                  segments: const [
-                    ButtonSegment(value: BoardGrouping.reason, label: Text('By reason')),
-                    ButtonSegment(value: BoardGrouping.server, label: Text('By server')),
-                    ButtonSegment(value: BoardGrouping.item, label: Text('By work item')),
-                  ],
-                  selected: {_grouping},
-                  onSelectionChanged: (v) {
-                    setState(() => _grouping = v.first);
-                    unawaited(_savePrefs());
-                  },
-                ),
-              ]),
+            child: Align(
+              alignment: Alignment.centerLeft,
+              child: SegmentedButton<bool>(
+                key: const ValueKey('board-tabs'),
+                showSelectedIcon: false,
+                segments: [
+                  ButtonSegment(value: false, label: Text('Active ${shown.length}')),
+                  ButtonSegment(
+                    value: true,
+                    label: Row(mainAxisSize: MainAxisSize.min, children: [
+                      Text('Hidden ${hidden.length}'),
+                      // A hidden session that owes an answer flags its tab, so hiding
+                      // never buries one.
+                      if (hidden.any(boardNeedsYou))
+                        Container(
+                          margin: const EdgeInsets.only(left: 5),
+                          width: 6,
+                          height: 6,
+                          decoration: const BoxDecoration(color: StatusColor.waiting, shape: BoxShape.circle),
+                        ),
+                    ]),
+                  ),
+                ],
+                selected: {_showHidden},
+                onSelectionChanged: (v) => setState(() => _showHidden = v.first),
+              ),
             ),
           ),
         ),
@@ -723,58 +556,6 @@ class _WorkBoardScreenState extends State<WorkBoardScreen> {
     ];
   }
 
-  Widget? _serverSection(ServerConfig sv, List<Session> rest) {
-    if (_serverFilter.isNotEmpty && !_serverFilter.contains(sv.baseUrl)) return null;
-    final mine = rest.where((s) => s.server.baseUrl == sv.baseUrl).toList();
-    final needsAuth = _repo.serverNeedsAuth[sv.baseUrl] == true;
-    final offline = _repo.serverOfflineConfirmed[sv.baseUrl] == true;
-    final version = _repo.serverVersion(sv.baseUrl);
-    final (label, color) = needsAuth
-        ? ('needs login', StatusColor.serverNeedsAuth)
-        : offline
-            ? ('offline', StatusColor.serverOffline)
-            : ('online${version == null ? '' : ' · $version'}', StatusColor.serverOnline);
-    return _Section(
-      title: sv.name,
-      swatch: _colorOf(sv.baseUrl),
-      trailing: [
-        Text('● $label', style: TextStyle(color: color, fontSize: 12)),
-        _countText(mine.length),
-      ],
-      children: [for (final s in mine) _card(s)],
-    );
-  }
-
-  List<Widget> _itemSections(List<Session> rest) {
-    final g = groupByWorkItem(rest);
-    return [
-      for (final grp in g.groups)
-        _Section(
-          title: '${grp.item.ref} ${grp.item.title}'.trim(),
-          trailing: [
-            if (grp.item.state != null) _StatePill(grp.item.state!),
-            _countText(grp.sessions.length + grp.refs.length),
-          ],
-          footer: grp.refs.isEmpty
-              ? null
-              : Wrap(spacing: 6, runSpacing: 6, children: [
-                  for (final s in grp.refs)
-                    _SeeRef(
-                      session: s,
-                      color: _colorOf(s.server.baseUrl),
-                      firstRef: s.brief!.items.first.ref,
-                      onOpen: () => widget.onOpenSession(s),
-                    ),
-                ]),
-          children: [for (final s in grp.sessions) _card(s)],
-        ),
-      if (g.none.isNotEmpty)
-        _Section(title: 'No work item', rows: true, trailing: [_countText(g.none.length)], children: [
-          for (final s in g.none) _row(s),
-        ]),
-    ];
-  }
-
   Widget _countText(int n) => Text('$n session${n == 1 ? '' : 's'}',
       style: const TextStyle(color: AppColors.onSurfaceVariant, fontSize: 12));
 }
@@ -798,117 +579,6 @@ class BoardActions {
     this.onStar,
     this.onClearWait,
   });
-}
-
-class _Controls extends StatelessWidget {
-  const _Controls({
-    required this.query,
-    required this.onQuery,
-    required this.servers,
-    required this.serverFilter,
-    required this.colorOf,
-    required this.onToggleServer,
-  });
-  final String query;
-  final ValueChanged<String> onQuery;
-  final List<ServerConfig> servers;
-  final Set<String> serverFilter;
-  final Color? Function(String baseUrl) colorOf;
-  final ValueChanged<String> onToggleServer;
-
-  @override
-  Widget build(BuildContext context) {
-    return Padding(
-      padding: const EdgeInsets.fromLTRB(12, 10, 12, 0),
-      child: Column(crossAxisAlignment: CrossAxisAlignment.stretch, children: [
-        TextField(
-          key: const ValueKey('board-search'),
-          onChanged: onQuery,
-          decoration: const InputDecoration(
-            isDense: true,
-            prefixIcon: Icon(Icons.search, size: 18),
-            hintText: 'Filter sessions',
-            border: OutlineInputBorder(),
-          ),
-        ),
-        if (servers.length > 1)
-          Padding(
-            padding: const EdgeInsets.only(top: 8),
-            child: SingleChildScrollView(
-              scrollDirection: Axis.horizontal,
-              child: Row(children: [
-                for (final sv in servers)
-                  Padding(
-                    padding: const EdgeInsets.only(right: 6),
-                    child: FilterChip(
-                      key: ValueKey('board-srv-${sv.baseUrl}'),
-                      avatar: ServerSwatch(color: colorOf(sv.baseUrl)),
-                      label: Text(sv.name),
-                      selected: serverFilter.contains(sv.baseUrl),
-                      showCheckmark: false,
-                      onSelected: (_) => onToggleServer(sv.baseUrl),
-                    ),
-                  ),
-              ]),
-            ),
-          ),
-      ]),
-    );
-  }
-}
-
-class _SummaryRow extends StatelessWidget {
-  const _SummaryRow({
-    required this.sessions,
-    required this.servers,
-    required this.counts,
-    required this.selected,
-    required this.onTap,
-    required this.updatedAt,
-  });
-  final int sessions, servers;
-  final Map<BoardChip, int> counts;
-  final BoardChip? selected;
-  final ValueChanged<BoardChip> onTap;
-  final DateTime? updatedAt;
-
-  @override
-  Widget build(BuildContext context) {
-    Widget chip(String text, Color fg, {bool on = false, VoidCallback? tap, Key? key}) {
-      final body = Container(
-        key: key,
-        padding: const EdgeInsets.symmetric(horizontal: 8, vertical: 2),
-        decoration: BoxDecoration(
-          color: fg.withValues(alpha: 0.12),
-          borderRadius: BorderRadius.circular(999),
-          border: Border.all(color: on ? fg : Colors.transparent),
-        ),
-        child: Text(on ? '$text  ✕' : text, style: TextStyle(color: fg, fontSize: 12)),
-      );
-      return tap == null ? body : InkWell(borderRadius: BorderRadius.circular(999), onTap: tap, child: body);
-    }
-    return Padding(
-      padding: const EdgeInsets.fromLTRB(16, 8, 16, 4),
-      child: Wrap(
-        spacing: 8,
-        runSpacing: 6,
-        crossAxisAlignment: WrapCrossAlignment.center,
-        children: [
-          chip('$sessions session${sessions == 1 ? '' : 's'} · $servers server${servers == 1 ? '' : 's'}',
-              AppColors.onSurfaceVariant),
-          // #318: each count filters to those sessions; tap again for all. The selected
-          // chip stays even at 0, so the way out of the filter never disappears.
-          for (final c in BoardChip.values)
-            if ((counts[c] ?? 0) > 0 || selected == c)
-              chip(c.label(counts[c] ?? 0), c.color,
-                  on: selected == c, tap: () => onTap(c), key: ValueKey('board-chip-${c.name}')),
-          if (updatedAt != null)
-            Text('updated ${relativeTime(updatedAt!.millisecondsSinceEpoch)}',
-                style: const TextStyle(color: AppColors.onSurfaceVariant, fontSize: 11)),
-        ],
-      ),
-    );
-  }
 }
 
 class _NeedsYou extends StatelessWidget {
@@ -969,10 +639,8 @@ class _Section extends StatelessWidget {
     required this.children,
     this.trailing = const [],
     this.rows = false,
-    this.swatch,
     this.collapsed = false,
     this.onToggle,
-    this.footer,
   });
   final String title;
   final List<Widget> trailing;
@@ -980,10 +648,8 @@ class _Section extends StatelessWidget {
 
   /// One-line rows in a column rather than cards in a grid.
   final bool rows;
-  final Color? swatch;
   final bool collapsed;
   final VoidCallback? onToggle;
-  final Widget? footer;
 
   @override
   Widget build(BuildContext context) {
@@ -995,7 +661,6 @@ class _Section extends StatelessWidget {
       children: [
         Row(mainAxisSize: MainAxisSize.min, children: [
           if (onToggle != null) Icon(collapsed ? Icons.chevron_right : Icons.expand_more, size: 18),
-          ServerSwatch(color: swatch),
           Text(title, style: theme.textTheme.titleSmall?.copyWith(fontWeight: FontWeight.w700)),
         ]),
         ...trailing,
@@ -1027,7 +692,6 @@ class _Section extends StatelessWidget {
                   children: [for (final card in children) SizedBox(width: w, child: card)],
                 );
               }),
-          if (!collapsed && footer != null) Padding(padding: const EdgeInsets.only(top: 8), child: footer),
         ],
       ),
     );
@@ -1393,23 +1057,6 @@ class ArtifactLinks extends StatelessWidget {
           ),
         ),
     ]);
-  }
-}
-
-/// Under a work item that is NOT a session's first: a one-line link to its card.
-class _SeeRef extends StatelessWidget {
-  const _SeeRef({required this.session, required this.color, required this.firstRef, required this.onOpen});
-  final Session session;
-  final Color? color;
-  final String firstRef;
-  final VoidCallback onOpen;
-  @override
-  Widget build(BuildContext context) {
-    return ActionChip(
-      avatar: ServerSwatch(color: color),
-      label: Text('${session.name} (${session.server.name}) · see $firstRef'),
-      onPressed: onOpen,
-    );
   }
 }
 
