@@ -175,6 +175,16 @@ test.describe('foldHook / applyReport / staleness', () => {
     expect(fold(e, 'PostToolUse', { tool_name: 'Read', tool_input: {} })).toBe(e);
   });
 
+  // #313 follow-up: the reason rule needs to know when the latest turn began and whether
+  // the AGENT's turn has ended (a helper can keep the status working after it).
+  test('every prompt starts a turn; the first Stop after it ends it, once', () => {
+    let e = fold(null, 'UserPromptSubmit', { prompt: '<task-notification>x</task-notification>' }, T0);
+    expect(e.turnAt).toBe(T0);
+    e = fold(e, 'Stop', {}, T0 + 5);
+    expect(e.stoppedAt).toBe(T0 + 5);
+    expect(fold(e, 'Stop', {}, T0 + 9)).toBe(e);
+  });
+
   test('the prompt is recorded and counted', () => {
     const e = fold(null, 'UserPromptSubmit', { prompt: '  fix   the bug  ', cwd: '/r' });
     expect(e.prompt).toEqual({ text: 'fix the bug', at: T0 });

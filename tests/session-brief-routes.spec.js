@@ -339,6 +339,9 @@ test.describe('#313 / #314 / #315 — reason, hidden, server colour', () => {
     await report(id, { headline: 'h', wait: { on: 'you', what: 'say go' } });
     await hook(id, 'Stop', {});
     await expect.poll(async () => (await rowOf('/api/sessions')).reason?.kind, { timeout: 10_000 }).toBe('you');
+    // Since #313's follow-up the ask shows the moment the turn ends, before the idle debounce;
+    // wait for idle so the cleared row has no mechanical reason left either.
+    await expect.poll(async () => (await rowOf('/api/sessions')).status, { timeout: 10_000 }).toBe('idle');
     expect((await ctx.patch(`/api/sessions/${id}/brief`, { data: { clearWait: 'yes' } })).status()).toBe(400);
     expect((await ctx.patch(`/api/sessions/${id}/brief`, { data: { clearWait: true } })).status()).toBe(200);
     const row = await rowOf('/api/sessions');
