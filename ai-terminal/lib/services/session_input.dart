@@ -12,6 +12,14 @@
 //  * It never states a size. The PTY's size is negotiated across every ACTIVE viewer,
 //    smallest wins (#146, `lib/terminal-size.js`); a socket that never sends `resize`
 //    has no opinion and cannot shrink a session someone is reading elsewhere.
+//  * Nothing is written until the server has ATTACHED it to the session, which it
+//    proves by replaying the scrollback. A socket can connect and then be closed 4000
+//    because the session ended between the poll and the press; input queued on it is
+//    dropped server-side with no answer, so connected is not delivered (#337 review).
+//    A session with an empty scrollback never proves it and is refused - the safe
+//    direction: the words stay with the person.
+//  * With `exclusiveViewer: true` in the server's config, going active here would KICK
+//    the person's real viewer of that session (`sessionTaken`). The default is false.
 //
 // WHAT is written is never decided here: the caller passes bytes built by the owners
 // (`buildAnswerFrames`, `buildComposeSubmission`, a lone Esc), and the server and worker
@@ -25,8 +33,8 @@ import '../api/api_client.dart';
 import '../api/models.dart';
 
 /// Runs [body] with a `send` that writes keys into [session]'s PTY. Completes with
-/// false when no connection came up in time (nothing was written), true once [body]
-/// has finished.
+/// false when the session could not be reached and attached in time (nothing was
+/// written), true once [body] has written to an attached session.
 typedef SessionInputRunner = Future<bool> Function(
   Session session,
   Future<void> Function(void Function(String keys) send) body,
@@ -34,23 +42,25 @@ typedef SessionInputRunner = Future<bool> Function(
 
 /// The production [SessionInputRunner]: a short-lived, size-less, active socket.
 ///
-/// [linger] keeps the socket open briefly after [body], so the last write is on the
-/// wire before the close.
+/// [socketFactory] is the test seam (the same one [TerminalConnection] has). [linger]
+/// keeps the socket open briefly after [body], so the last write is on the wire
+/// before the close.
 Future<bool> runWithSessionInput(
   Session session,
   Future<void> Function(void Function(String keys) send) body, {
-  ApiClient Function(ServerConfig server)? clientFactory,
-  Duration connectTimeout = const Duration(seconds: 8),
+  TerminalSocketFactory? socketFactory,
+  Duration attachTimeout = const Duration(seconds: 8),
   Duration linger = const Duration(milliseconds: 600),
 }) async {
-  final api = (clientFactory ?? ApiClient.new)(session.server);
   // No cols/rows: this socket never votes on the PTY's size (#146).
-  final conn = api.openTerminal(session.id);
+  final conn = TerminalConnection(session.server, session.id, socketFactory: socketFactory);
   try {
-    // Subscribe before anything can emit: the first connect is asynchronous.
-    final up = conn.connected.firstWhere((c) => c).timeout(connectTimeout, onTimeout: () => false);
+    // Subscribe before anything can arrive: the first connect is asynchronous. The
+    // first output IS the scrollback replay, sent only after the worker attach.
+    final attached = conn.output.first.then((_) => true).timeout(attachTimeout, onTimeout: () => false);
+    // Before any write: the server drops input from a background socket.
     conn.setMode('active');
-    if (!await up) return false;
+    if (!await attached) return false;
     await body(conn.sendInput);
     await Future<void>.delayed(linger);
     return true;
@@ -58,6 +68,5 @@ Future<bool> runWithSessionInput(
     return false;
   } finally {
     conn.close();
-    api.close();
   }
 }

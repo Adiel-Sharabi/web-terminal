@@ -638,6 +638,84 @@ void main() {
       await tester.pumpWidget(const SizedBox());
     });
 
+    testWidgets('#337 review: a single MULTI-select question offers no one-press buttons either', (tester) async {
+      questions = {
+        'q': {
+          'toolUseId': 't',
+          'questions': [
+            {
+              'header': 'Pick',
+              'question': 'Which ones?',
+              'multiSelect': true,
+              'options': [
+                {'label': 'A'},
+                {'label': 'B'},
+              ],
+            },
+          ],
+        },
+      };
+      rows = [_row('q', 'Multi', status: 'waiting', waitingFor: 'question')];
+      final r = await repo();
+      await pump(tester, r: r);
+      await settle(tester);
+      expect(find.textContaining('Question: Which ones?'), findsOneWidget);
+      expect(find.byKey(ValueKey('board-answer-${_server.baseUrl}-q-0')), findsNothing,
+          reason: 'one press would toggle a row, not answer');
+      expect(find.text('Several answers are needed - Open to answer.'), findsOneWidget);
+      await tester.pumpWidget(const SizedBox());
+    });
+
+    testWidgets('#337 review: a reply the agent did not take (#179) is put back in its box, with a notice',
+        (tester) async {
+      rows = [
+        _row('r', 'OSDP SC', brief: _briefJson(), reason: {'kind': 'you', 'text': 'say which', 'source': 'reported'}),
+      ];
+      final r = await repo();
+      await pump(tester, r: r);
+      // A report the repository was already holding from BEFORE this send is not about it.
+      r.debugApplyNotify(NotifyEvent.fromJson(
+          {'type': 'submitUnconfirmed', 'id': 'r', 'at': DateTime.now().millisecondsSinceEpoch - 60000}));
+      await tester.pump();
+      final field = find.byKey(const ValueKey('board-reply-field'));
+      TextEditingController box() => tester.widget<TextField>(field).controller!;
+
+      await tester.enterText(field, 'positions 6 and 8');
+      await tester.tap(find.byKey(const ValueKey('board-reply-send')));
+      await tester.pump();
+      await settle(tester);
+      expect(sent.single.$2, 'positions 6 and 8\r');
+      expect(box().text, isEmpty, reason: 'delivered to an attached session');
+      expect(find.textContaining('did not take your reply'), findsNothing, reason: 'the old report is not this send');
+
+      // Now the server reports THIS submit was swallowed.
+      r.debugApplyNotify(NotifyEvent.fromJson(
+          {'type': 'submitUnconfirmed', 'id': 'r', 'at': DateTime.now().millisecondsSinceEpoch + 1000}));
+      await tester.pump();
+      await tester.pump();
+      expect(box().text, 'positions 6 and 8', reason: 'the words come back');
+      expect(find.textContaining('"OSDP SC" did not take your reply - it is back in the box'), findsOneWidget);
+      expect(r.submitUnconfirmedAt('r'), isNull, reason: 'consumed once');
+      ScaffoldMessenger.of(tester.element(find.byType(ListView))).clearSnackBars();
+      await tester.pumpWidget(const SizedBox());
+    });
+
+    testWidgets('#337 review: Stop re-reads the status and sends nothing to a session that has stopped', (tester) async {
+      rows = [_row('w', 'Running one', status: 'working', brief: _briefJson())];
+      final r = await repo();
+      await pump(tester, r: r);
+      // It finishes between the last poll and the press.
+      rows = [_row('w', 'Running one', status: 'idle', brief: _briefJson())];
+      await tester.tap(find.byKey(ValueKey('board-stop-${_server.baseUrl}-w')));
+      await tester.pump();
+      await settle(tester);
+      await settle(tester);
+      expect(sent, isEmpty, reason: 'an Esc to a session that is not working is some other key (#55)');
+      expect(find.text('"Running one" is no longer working - Stop was not sent'), findsOneWidget);
+      ScaffoldMessenger.of(tester.element(find.byType(ListView))).clearSnackBars();
+      await tester.pumpWidget(const SizedBox());
+    });
+
     testWidgets('#337: Stop sends exactly one Esc, and only a WORKING session offers it', (tester) async {
       rows = [
         _row('w', 'Running one', status: 'working', brief: _briefJson()),

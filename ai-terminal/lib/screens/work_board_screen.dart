@@ -45,7 +45,9 @@ import '../widgets/question_overlay.dart'
 import '../widgets/reason_chip.dart';
 import '../widgets/server_badge.dart';
 import '../widgets/status_dot.dart';
-import 'session_screen.dart' show buildComposeSubmission, questionSignature;
+import 'session_screen.dart'
+    show SubmitUnconfirmedOutcome, buildComposeSubmission, kSubmitPendingGrace, questionSignature,
+        resolveSubmitUnconfirmedReaction;
 
 /// A session's status as the board shows it: a label and a colour.
 class BoardStatus {
@@ -260,11 +262,24 @@ class _WorkBoardScreenState extends State<WorkBoardScreen> {
   /// Closed records reopened from here, so a second press cannot start a second copy.
   final Set<String> _reopened = {};
 
+  // #337 review - a reply is the person's words, so it follows the session screen's
+  // rule (#179): kept until delivered, and put back if the agent never took it.
+  /// Each reply box's text, by [_bkey]: owned here so a reply can be put back into it.
+  final Map<String, TextEditingController> _replyBoxes = {};
+
+  /// The last reply sent from here per session, and when, for a #179 restore.
+  final Map<String, ({String text, int at})> _pendingReply = {};
+
+  /// The `submitUnconfirmed` stamp already reacted to, per session.
+  final Map<String, int?> _handledUnconfirmed = {};
+
+  TextEditingController _replyBox(Session s) => _replyBoxes.putIfAbsent(_bkey(s), TextEditingController.new);
+
   List<ServerConfig> get _servers => (widget.servers ?? () => AppConfig.servers)();
   ApiClient _client(ServerConfig s) => (widget.clientFactory ?? ApiClient.new)(s);
   Color? _colorOf(String baseUrl) => colorFromHex(_repo.serverColor(baseUrl));
   SessionInputRunner get _input =>
-      widget.sessionInput ?? (s, body) => runWithSessionInput(s, body, clientFactory: widget.clientFactory);
+      widget.sessionInput ?? runWithSessionInput;
 
   static String _bkey(Session s) => '${s.server.baseUrl}|${s.id}';
 
@@ -276,6 +291,7 @@ class _WorkBoardScreenState extends State<WorkBoardScreen> {
     _sub = _repo.sessions.listen((list) {
       if (!mounted) return;
       setState(() => _sessions = list);
+      _checkUnconfirmedReplies();
       unawaited(_refreshClosed());
       unawaited(_refreshMachines());
       unawaited(_refreshQuestions());
@@ -293,6 +309,9 @@ class _WorkBoardScreenState extends State<WorkBoardScreen> {
   void dispose() {
     _poll?.cancel();
     _sub?.cancel();
+    for (final c in _replyBoxes.values) {
+      c.dispose();
+    }
     super.dispose();
   }
 
@@ -539,14 +558,67 @@ class _WorkBoardScreenState extends State<WorkBoardScreen> {
       _say('"${s.name}" is still starting - nothing was sent');
       return false;
     }
+    final sentAt = DateTime.now().millisecondsSinceEpoch;
     final ok = await _write(s, (send) async => send(buildComposeSubmission(val)));
-    if (ok) unawaited(_repo.refresh());
+    if (ok) {
+      // Delivered to an ATTACHED session (see services/session_input.dart). Whether
+      // the agent then took it is #179's verdict, watched in [_checkUnconfirmedReplies].
+      _pendingReply[_bkey(s)] = (text: val, at: sentAt);
+      unawaited(_repo.refresh());
+    }
     return ok;
+  }
+
+  /// #179 for the board: a reply the agent's TUI swallowed is reported by the server
+  /// as `submitUnconfirmed`. The decision is the session screen's own
+  /// ([resolveSubmitUnconfirmedReaction]: only a report stamped at or after this send,
+  /// only inside [kSubmitPendingGrace], only into an empty box); this is the glue.
+  void _checkUnconfirmedReplies() {
+    if (_pendingReply.isEmpty) return;
+    final now = DateTime.now().millisecondsSinceEpoch;
+    for (final s in _sessions) {
+      final k = _bkey(s);
+      final pending = _pendingReply[k];
+      if (pending == null) continue;
+      final at = _repo.submitUnconfirmedAt(s.id);
+      final fresh = now - pending.at < kSubmitPendingGrace.inMilliseconds;
+      final reaction = resolveSubmitUnconfirmedReaction(
+        eventAt: at,
+        lastHandledAt: _handledUnconfirmed[k],
+        pendingText: fresh ? pending.text : null,
+        composeIsEmpty: (_replyBoxes[k]?.text ?? '').isEmpty,
+        lastSubmitAt: pending.at,
+      );
+      if (!fresh) _pendingReply.remove(k);
+      if (reaction.outcome == SubmitUnconfirmedOutcome.unchanged) continue;
+      _handledUnconfirmed[k] = at;
+      if (reaction.outcome == SubmitUnconfirmedOutcome.notMine) continue;
+      _repo.clearSubmitUnconfirmed(s.id);
+      _pendingReply.remove(k);
+      if (reaction.restore) _replyBox(s).text = reaction.text!;
+      _say('"${s.name}" did not take your reply'
+          '${reaction.restore ? ' - it is back in the box' : ''}. Open it to see what is on its screen.');
+    }
   }
 
   /// A lone Esc: interrupts a working turn, closes a menu over the composer.
   Future<void> _esc(Session s) async {
     if (await _write(s, (send) async => send('\x1b'))) unawaited(_repo.refresh());
+  }
+
+  /// Stop = Esc to a session that is STILL working. The card may be up to a poll old,
+  /// and an Esc that reaches a session which has since stopped is some other key
+  /// (#55), so the status is re-read first.
+  Future<void> _stop(Session s) async {
+    await _repo.refresh();
+    if (!mounted) return;
+    final k = _bkey(s);
+    final fresh = _repo.current.where((x) => _bkey(x) == k).firstOrNull;
+    if (fresh == null || fresh.status != 'working') {
+      _say('"${s.name}" is no longer working - Stop was not sent');
+      return;
+    }
+    await _esc(fresh);
   }
 
   /// The live session that has [c]'s conversation open again, if any: then the record
@@ -600,9 +672,10 @@ class _WorkBoardScreenState extends State<WorkBoardScreen> {
       busy: _busy.contains(k),
       onAnswer: (kind == NeedKind.question && q != null) ? (i) => _answer(s, q, i) : null,
       onReply: kind == NeedKind.reported ? (text) => _reply(s, text) : null,
+      replyBox: kind == NeedKind.reported ? _replyBox(s) : null,
       // A lone Esc reads as an interrupt only to a WORKING session; anywhere else it
       // would be some other key (#55), so Stop is offered only there.
-      onStop: s.status == 'working' ? () => _esc(s) : null,
+      onStop: s.status == 'working' ? () => _stop(s) : null,
       onEsc: kind == NeedKind.menu ? () => _esc(s) : null,
     );
   }
@@ -776,6 +849,9 @@ class BoardActions {
   final bool busy;
   final void Function(int option)? onAnswer;
   final Future<bool> Function(String text)? onReply;
+
+  /// The reply box's text, owned by the board so an undelivered reply can be put back.
+  final TextEditingController? replyBox;
   final VoidCallback? onStop;
   final VoidCallback? onEsc;
 
@@ -792,6 +868,7 @@ class BoardActions {
     this.busy = false,
     this.onAnswer,
     this.onReply,
+    this.replyBox,
     this.onStop,
     this.onEsc,
   });
@@ -1151,10 +1228,11 @@ class BoardCard extends StatelessWidget {
           ),
         ];
       case NeedKind.reported:
-        if (actions.onReply == null) return const [];
+        if (actions.onReply == null || actions.replyBox == null) return const [];
         return [
           _ReplyBox(
             key: ValueKey('board-reply-$idk'),
+            controller: actions.replyBox!,
             name: s.name,
             ready: s.agentReady,
             busy: actions.busy,
@@ -1213,7 +1291,15 @@ class BoardCard extends StatelessWidget {
 /// The one-line reply under a "waiting on you" card (#337). Sends through
 /// [BoardActions.onReply], which submits exactly as the compose bar does.
 class _ReplyBox extends StatefulWidget {
-  const _ReplyBox({super.key, required this.name, required this.ready, required this.busy, required this.onSend});
+  const _ReplyBox({
+    super.key,
+    required this.controller,
+    required this.name,
+    required this.ready,
+    required this.busy,
+    required this.onSend,
+  });
+  final TextEditingController controller;
   final String name;
   final bool ready;
   final bool busy;
@@ -1224,19 +1310,14 @@ class _ReplyBox extends StatefulWidget {
 }
 
 class _ReplyBoxState extends State<_ReplyBox> {
-  final _text = TextEditingController();
-
-  @override
-  void dispose() {
-    _text.dispose();
-    super.dispose();
-  }
+  TextEditingController get _text => widget.controller;
 
   Future<void> _send() async {
     final t = _text.text;
     if (t.trim().isEmpty || widget.busy || !widget.ready) return;
-    // The words stay in the box until they are known to be on their way.
-    if (await widget.onSend(t) && mounted) _text.clear();
+    // The words stay in the box until they are DELIVERED to an attached session; if
+    // the agent then does not take them, the board puts them back (#179).
+    if (await widget.onSend(t) && mounted && _text.text == t) _text.clear();
   }
 
   @override
