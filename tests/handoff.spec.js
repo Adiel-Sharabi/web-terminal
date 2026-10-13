@@ -218,3 +218,82 @@ test.describe('verdict and run (#340)', () => {
     expect(H.isActive(H.startRun(T, 'x'))).toBe(true);
   });
 });
+
+test.describe('automatic hand-off (#345)', () => {
+  const entry = (over = {}) => ({ handoff: null, prompt: { text: 'work', at: T - 40 * MIN }, ...over });
+
+  test('on by default, off by config; `enabled: false` turns it off too', () => {
+    expect(H.handoffConfig(null).auto).toBe(true);
+    expect(H.autoBlock(entry(), H.handoffConfig(null))).toBeNull();
+    expect(H.autoBlock(entry(), H.handoffConfig({ auto: false }))).toBe('auto-off');
+    expect(H.autoBlock(entry(), H.handoffConfig({ enabled: false }))).toBe('auto-off');
+    expect(H.autoBlock(null, cfg)).toBeNull();
+  });
+
+  test('never over a run in flight', () => {
+    expect(H.autoBlock(entry({ handoff: { state: 'closing', at: T } }), cfg)).toBe('in-progress');
+  });
+
+  test('a Cancel or Dismiss stands until a person TYPES into the session again', () => {
+    expect(H.autoBlock(entry({ handoffDeclinedAt: T - 5 * MIN }), cfg)).toBe('declined');
+    // A typed prompt after it lifts it; one before it does not.
+    expect(H.autoBlock(entry({ handoffDeclinedAt: T - 5 * MIN, prompt: { text: 'x', at: T - 4 * MIN } }), cfg)).toBeNull();
+    expect(H.autoBlock(entry({ handoffDeclinedAt: T - 5 * MIN, prompt: { text: 'x', at: T - 5 * MIN } }), cfg)).toBe('declined');
+  });
+
+  test('a run that ended kept or failed is not retried until a person types again', () => {
+    for (const state of H.TERMINAL_STATES) {
+      expect(H.autoBlock(entry({ handoff: { state, at: T - 5 * MIN } }), cfg)).toBe('tried');
+      expect(H.autoBlock(entry({ handoff: { state, at: T - 5 * MIN }, prompt: { text: 'x', at: T - MIN } }), cfg)).toBeNull();
+    }
+  });
+
+  test('a run records who started it, and the wire says so', () => {
+    expect(H.startRun(T, 'b.md', 'auto').trigger).toBe('auto');
+    expect(H.startRun(T, 'b.md', 'forced').trigger).toBe('forced');
+    expect(H.startRun(T, 'b.md').trigger).toBe('manual');
+    expect(H.startRun(T, 'b.md', 'bogus').trigger).toBe('manual');
+    expect(H.publicRun(H.startRun(T, 'b.md', 'auto')).trigger).toBe('auto');
+  });
+
+  test('a log line carries what judging a hand-off needs', () => {
+    const run = { ...H.startRun(T - 2 * MIN, 'b.md', 'auto'), state: 'kept', reason: 'unsaved-work',
+      verdict: { canClose: false, why: 'unpushed' }, successorId: 's', successorName: 'x (2)' };
+    expect(H.logRecord('kept', 'id1', run, T, { name: 'x' })).toEqual({
+      at: new Date(T).toISOString(), event: 'kept', id: 'id1', trigger: 'auto', name: 'x',
+      state: 'kept', reason: 'unsaved-work', verdict: { canClose: false, why: 'unpushed' },
+      successorId: 's', successorName: 'x (2)', briefFile: 'b.md', tookMs: 2 * MIN,
+    });
+  });
+});
+
+test.describe('review fixes (#345)', () => {
+  test('never while someone is typing: a keystroke within the idle window blocks it', () => {
+    const e = { handoff: null, prompt: { text: 'w', at: T - 40 * MIN } };
+    expect(H.autoBlock(e, cfg, { now: T, inputAt: T - 2 * MIN })).toBe('typing');
+    expect(H.autoBlock(e, cfg, { now: T, inputAt: T - 11 * MIN })).toBeNull();
+    // Unknown (after a reload) is not a block: the hook gates still hold.
+    expect(H.autoBlock(e, cfg, { now: T })).toBeNull();
+  });
+
+  test('the prompts web-terminal types itself are not a person typing', () => {
+    const { classifyUserTurn, typedTextOf, USER_KINDS } = require('../lib/user-turn');
+    for (const p of [H.wrapUpPrompt({ briefFile: 'b.md', scriptPath: 's.js' }), H.successorPrompt({ briefFile: 'b.md', oldName: 'x' })]) {
+      expect(classifyUserTurn(p).kind).toBe(USER_KINDS.SYSTEM);
+      expect(typedTextOf(p)).toBe('');
+    }
+    // So the wrap-up's own UserPromptSubmit cannot lift a Cancel (lib/session-brief.js).
+    const B = require('../lib/session-brief');
+    const e = B.foldHook({ ...B.emptyEntry(), prompt: { text: 'w', at: T - MIN } }, 'UserPromptSubmit',
+      { prompt: H.wrapUpPrompt({ briefFile: 'b.md', scriptPath: 's.js' }) }, T);
+    expect(e.prompt).toEqual({ text: 'w', at: T - MIN });
+  });
+
+  test('server.js records every client keystroke, and never its own prompt', () => {
+    const src = require('fs').readFileSync(require('path').join(__dirname, '..', 'server.js'), 'utf8');
+    const ws = src.slice(src.indexOf('Send keystrokes as a TYPE_PTY_IN binary frame'));
+    expect(ws.slice(0, 400)).toContain('_lastInputAt.set(id, Date.now())');
+    const tp = src.slice(src.indexOf('function typePrompt'));
+    expect(tp.slice(0, tp.indexOf('\n}'))).not.toContain('_lastInputAt');
+  });
+});

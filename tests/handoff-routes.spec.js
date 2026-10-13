@@ -197,7 +197,49 @@ test.describe('#340 hand-off — server', () => {
     expect(await rowOf(ctx, id)).toBeTruthy();
   });
 
-  test('a plain shell has no hand-off at all', async () => {
+  test('#345 the server starts a hand-off ON ITS OWN, and a Cancel stands until a person types again', async () => {
+    // The rule is the board's; only the idle gate is shortened here, through the live
+    // config the server re-reads (LIVE_CONFIG_TTL), and restored at the end.
+    const cfgFile = process.env.WT_CONFIG_FILE || path.join(__dirname, '..', 'config.test.json');
+    const before = fs.existsSync(cfgFile) ? fs.readFileSync(cfgFile, 'utf8') : null;
+    const base = before ? JSON.parse(before) : {};
+    fs.writeFileSync(cfgFile, JSON.stringify({ ...base, handoff: { idleMin: 0.001, autoEveryMs: 300 } }, null, 2));
+    const logFile = path.join(HANDOFF_DIR, 'handoff-log.jsonl');
+    const logOf = (id) => (fs.existsSync(logFile) ? fs.readFileSync(logFile, 'utf8') : '').split('\n')
+      .filter(Boolean).map((l) => JSON.parse(l)).filter((l) => l.id === id);
+    const name = `handoff-auto-${Date.now()}`; made.push(name);
+    try {
+      const id = await bigIdleSession(ctx, name);
+      const run = await until(async () => (await rowOf(ctx, id))?.handoff?.run, 'an automatic start', 20000);
+      expect(run).toMatchObject({ state: 'wrapping', trigger: 'auto' });
+      expect(logOf(id).find((l) => l.event === 'started')).toMatchObject({ trigger: 'auto', name, ctxTokens: 600000 });
+
+      expect((await ctx.delete(`/api/sessions/${id}/handoff`)).status()).toBe(200);
+      expect(logOf(id).find((l) => l.event === 'cancelled')).toBeTruthy();
+      // Several scans later it has not started again...
+      await new Promise((r) => setTimeout(r, 8000));
+      expect((await rowOf(ctx, id)).handoff).toMatchObject({ suggest: true, run: null });
+      // ...and a person typing into the session is what lifts that (a new turn that ends
+      // back at a boundary). Same session, same config: only the prompt differs.
+      const conv = crypto.randomUUID();
+      expect(await hook(id, 'UserPromptSubmit', { session_id: conv, prompt: 'carry on' })).toBe(200);
+      expect(await hook(id, 'Stop', { session_id: conv })).toBe(200);
+      expect((await ctx.post('/api/claude-status', { data: { session_id: conv, context_window: { context_window_size: 1_000_000, used_percentage: 60 } } })).status()).toBe(200);
+      expect((await agentPost(id, 'report', { items: [{ ref: '#1', title: 'x', state: 'in-progress' }], wait: { on: 'external', what: 'PR review' } })).status).toBe(200);
+      let last;
+      const again = await until(async () => { last = await rowOf(ctx, id); return last?.handoff?.run; }, 'a second automatic start', 20000)
+        .catch((e) => { throw new Error(`${e.message}: ${JSON.stringify({ status: last?.status, handoff: last?.handoff, reason: last?.reason })}`); });
+      expect(again).toMatchObject({ state: 'wrapping', trigger: 'auto' });
+      expect(again.startedAt).toBeGreaterThan(run.startedAt);
+      expect((await ctx.delete(`/api/sessions/${id}/handoff`)).status()).toBe(200);
+    } finally {
+      // Never delete it: a missing file is skipped by _refreshLiveConfig, which would pin
+      // the short idle gate in the server's cache for the rest of the run.
+      fs.writeFileSync(cfgFile, before === null ? '{}' : before);
+      // ...and let the cache (LIVE_CONFIG_TTL, 5s) expire before the next test.
+      await new Promise((r) => setTimeout(r, 6000));
+    }
+  });  test('a plain shell has no hand-off at all', async () => {
     const name = `handoff-shell-${Date.now()}`; made.push(name);
     const r = await ctx.post('/api/sessions', { data: { name } });
     const id = (await r.json()).id;
