@@ -17,7 +17,7 @@ test.describe('sessionReason (#313)', () => {
     expect(sessionReason(null)).toBeNull();
   });
 
-  test('a running turn is working, whatever was reported', () => {
+  test('a running turn is working, whatever else was reported', () => {
     expect(sessionReason({ status: 'working', ...reported('done') }).kind).toBe('working');
     expect(sessionReason({ status: 'working', ...reported('self') }).kind).toBe('working');
     expect(sessionReason({ status: 'working', ...reported('external') }).kind).toBe('working');
@@ -27,12 +27,22 @@ test.describe('sessionReason (#313)', () => {
   // the status stays `working` (the subagent idle-gate), yet the person owes an answer.
   // Measured 2026-10-13 on "OSDP SC 23651 - B": three asks sat under Working, invisible.
   // A typed prompt clears a reported wait, so a "you" that exists is the agent's latest word.
-  test('a reported "you" beats working - the asks must reach Needs you', () => {
-    const r = sessionReason({ status: 'working', ...reported('you', 'bench approval + key choice') });
+  const turn = (turnAt, on, at, stoppedAt) => ({ brief: { turnAt, stoppedAt, wait: { on, what: 'bench approval + key choice', at } } });
+  test('a "you" from a turn that ENDED beats working (a helper still runs) - the asks must reach Needs you', () => {
+    const r = sessionReason({ status: 'working', ...turn(T, 'you', T + 5_000, T + 6_000) });
     expect(r.kind).toBe('you');
     expect(r.text).toBe('bench approval + key choice');
-    expect(r.alsoWorking).toBe(true);
     expect(r.source).toBe('reported');
+  });
+  // A task notification starts a turn but clears only a "self" wait (lib/session-brief.js),
+  // so a "you" from an EARLIER turn survives into it. It must not outrank the running turn.
+  test('a "you" from an earlier turn does not beat a running turn', () => {
+    expect(sessionReason({ status: 'working', ...turn(T + 60_000, 'you', T, T + 1_000) }).kind).toBe('working');
+    // While the agent's own turn still runs, the turn wins - even over this turn's "you".
+    expect(sessionReason({ status: 'working', ...turn(T, 'you', T + 5_000, null) }).kind).toBe('working');
+    expect(sessionReason({ status: 'working', ...turn(T, 'you', T + 5_000, T - 1) }).kind).toBe('working');
+    // No turn start known (an older server's row): never let a report outrank the status.
+    expect(sessionReason({ status: 'working', brief: { wait: { on: 'you', what: 'x', at: T } } }).kind).toBe('working');
   });
 
   test('a live prompt beats a stale "done": mechanical wins', () => {
