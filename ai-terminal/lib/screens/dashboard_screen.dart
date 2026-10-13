@@ -171,6 +171,19 @@ class _DashboardScreenState extends State<DashboardScreen> {
         .toList(growable: false);
   }
 
+  /// #347 - leave the list with nothing focused. A route remembers its focused field and
+  /// Flutter refocuses it when the route above it pops; on a phone a tap on a row does not
+  /// unfocus the title filter (touch never does), so every return from a session put the
+  /// cursor back in the filter and opened the keyboard. Unfocusing the field itself (not
+  /// the scope) clears the scope's memory of it, so the pop has nothing to restore.
+  void _dropFocus() => FocusManager.instance.primaryFocus?.unfocus();
+
+  /// Every full-screen route the phone list opens goes through here.
+  void _pushFromList(Route<void> route) {
+    _dropFocus();
+    Navigator.of(context).push(route);
+  }
+
   void _openSession(Session session) {
     // Split view: select into the detail pane. Phone: push a full-screen route.
     final onSelect = widget.onSelectSession;
@@ -178,7 +191,7 @@ class _DashboardScreenState extends State<DashboardScreen> {
       onSelect(session);
       return;
     }
-    Navigator.of(context).push(
+    _pushFromList(
       MaterialPageRoute(
         builder: (_) =>
             SessionScreen(sessionId: session.id, initialSession: session),
@@ -193,7 +206,7 @@ class _DashboardScreenState extends State<DashboardScreen> {
       onShow();
       return;
     }
-    Navigator.of(context).push(
+    _pushFromList(
       MaterialPageRoute(
         builder: (ctx) => WorkBoardScreen(
           // Close the board, then open the session exactly as a tap on its row
@@ -208,9 +221,7 @@ class _DashboardScreenState extends State<DashboardScreen> {
   }
 
   void _openSettings() {
-    Navigator.of(context).push(
-      MaterialPageRoute(builder: (_) => SettingsScreen()),
-    );
+    _pushFromList(MaterialPageRoute(builder: (_) => SettingsScreen()));
   }
 
   Future<void> _createSession(List<ServerConfig> servers) async {
@@ -219,6 +230,7 @@ class _DashboardScreenState extends State<DashboardScreen> {
       (s) => s.name == _filter,
       orElse: () => servers.first,
     );
+    _dropFocus(); // the sheet is a route too (#347)
     await showNewSessionSheet(
       context,
       servers: servers,
