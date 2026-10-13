@@ -61,5 +61,16 @@ void main() {
     expect(filterFocused(), isFalse, reason: 'the pop must not hand focus back to the filter');
     expect(tester.testTextInput.isVisible, isFalse, reason: 'no keyboard on return');
     expect(find.text('GP10 version'), findsOneWidget, reason: 'the filter text itself is kept');
+
+    // A sheet opened from a row is a route too: dismissing it must not refocus either.
+    await tester.showKeyboard(filter);
+    await tester.pump();
+    expect(filterFocused(), isTrue, reason: 'precondition: the filter is focused again');
+    await tester.longPress(find.text('GP10 version'));
+    await tester.pumpAndSettle();
+    await tester.tapAt(const Offset(10, 10)); // the sheet's barrier
+    await tester.pumpAndSettle();
+    expect(filterFocused(), isFalse, reason: 'closing a row sheet must not refocus the filter');
+    expect(tester.testTextInput.isVisible, isFalse);
   });
 }
