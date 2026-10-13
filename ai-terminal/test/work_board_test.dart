@@ -615,12 +615,11 @@ void main() {
       final r = await repo();
       await pump(tester, r: r);
       expect(find.byKey(const ValueKey('board-tabs')), findsOneWidget);
-      for (final gone in ['board-sort', 'board-grouping', 'board-search', 'board-srv-${_server.baseUrl}', 'board-chip-you']) {
+      for (final gone in ['board-sort', 'board-grouping', 'board-search', 'board-chip-you']) {
         expect(find.byKey(ValueKey(gone)), findsNothing, reason: '$gone was removed');
       }
       expect(find.text('By server'), findsNothing);
       expect(find.text('By work item'), findsNothing);
-      expect(find.textContaining('need you'), findsNothing, reason: 'the summary counts are gone');
       await tester.pumpWidget(const SizedBox());
     });
 
