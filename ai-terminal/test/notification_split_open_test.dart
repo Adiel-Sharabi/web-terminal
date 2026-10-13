@@ -18,6 +18,7 @@ import 'package:shared_preferences/shared_preferences.dart';
 
 import 'package:ai_terminal/main.dart';
 import 'package:ai_terminal/screens/adaptive_home.dart';
+import 'package:ai_terminal/screens/work_board_screen.dart';
 import 'package:ai_terminal/services/session_selection.dart';
 import 'package:ai_terminal/theme/app_theme.dart';
 
@@ -104,18 +105,18 @@ void main() {
   });
 
   group('the split view follows the shared selection', () {
-    testWidgets('with nothing selected it shows the placeholder', (
+    testWidgets('with nothing selected it shows the board (#337)', (
       tester,
     ) async {
       await _pumpAt(tester, const Size(1400, 900));
-      expect(find.text('Pick a session'), findsOneWidget);
+      expect(find.byType(WorkBoardScreen), findsOneWidget);
     });
 
-    testWidgets('selecting an id replaces the placeholder — no route pushed', (
+    testWidgets('selecting an id replaces the board — no route pushed', (
       tester,
     ) async {
       await _pumpAt(tester, const Size(1400, 900));
-      expect(find.text('Pick a session'), findsOneWidget);
+      expect(find.byType(WorkBoardScreen), findsOneWidget);
 
       // Exactly what _openSession does on a wide window: set the shared id.
       // A notification carries only an id — never a Session object — which is
@@ -123,7 +124,7 @@ void main() {
       SessionSelection.instance.select('sess-from-notification');
       await tester.pump();
 
-      expect(find.text('Pick a session'), findsNothing);
+      expect(find.byType(WorkBoardScreen), findsNothing);
       // The rail is still there: that is the whole point of #76.
       expect(find.byKey(const Key('rail-resize-handle')), findsOneWidget);
     });

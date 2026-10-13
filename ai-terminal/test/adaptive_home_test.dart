@@ -1,5 +1,5 @@
 // Verifies the responsive split: wide windows show the master-detail layout
-// (list rail + "Pick a session" detail placeholder) with a draggable resize
+// (list rail + the sessions board in the detail pane, #337) with a draggable resize
 // handle between the panes; narrow windows do not. Also pins the rail-resize
 // behavior: dragging the handle changes the rail width (clamped) and persists it.
 import 'package:flutter/material.dart';
@@ -7,6 +7,7 @@ import 'package:flutter_test/flutter_test.dart';
 import 'package:shared_preferences/shared_preferences.dart';
 
 import 'package:ai_terminal/screens/adaptive_home.dart';
+import 'package:ai_terminal/screens/work_board_screen.dart';
 import 'package:ai_terminal/theme/app_theme.dart';
 
 Widget _wrap() => MaterialApp(theme: AppTheme.dark, home: const AdaptiveHome());
@@ -16,7 +17,7 @@ const _handle = Key('rail-resize-handle');
 void main() {
   setUp(() => SharedPreferences.setMockInitialValues({}));
 
-  testWidgets('wide window shows the split detail placeholder + resize handle', (
+  testWidgets('wide window shows the board in the detail pane + resize handle', (
     tester,
   ) async {
     tester.view.physicalSize = const Size(1400, 900);
@@ -26,8 +27,10 @@ void main() {
     await tester.pumpWidget(_wrap());
     await tester.pump();
 
-    expect(find.text('Pick a session'), findsOneWidget);
+    // #337 - no session open: the pane IS the board, from launch.
+    expect(find.byType(WorkBoardScreen), findsOneWidget);
     expect(find.byKey(_handle), findsOneWidget);
+    await tester.pumpWidget(const SizedBox()); // dispose -> cancel the board's poll
   });
 
   testWidgets('narrow window has no split (single pane, no handle)', (
@@ -40,7 +43,7 @@ void main() {
     await tester.pumpWidget(_wrap());
     await tester.pump();
 
-    expect(find.text('Pick a session'), findsNothing);
+    expect(find.byType(WorkBoardScreen), findsNothing, reason: 'a phone pushes the board from its button');
     expect(find.byKey(_handle), findsNothing);
   });
 
@@ -56,7 +59,7 @@ void main() {
 
     // Default rail width before any drag.
     final rail = find
-        .ancestor(of: find.text('Pick a session'), matching: find.byType(Row))
+        .ancestor(of: find.byKey(_handle), matching: find.byType(Row))
         .first;
     final SizedBox railBox = tester.widget<SizedBox>(
       find
@@ -81,6 +84,7 @@ void main() {
     // The dragged width was persisted under the SSOT key.
     final prefs = await SharedPreferences.getInstance();
     expect(prefs.getDouble('wt_rail_width'), AdaptiveHome.railWidth + 80);
+    await tester.pumpWidget(const SizedBox());
   });
 
   testWidgets('a persisted width is restored on next open (clamped)', (
@@ -96,7 +100,7 @@ void main() {
     await tester.pump(const Duration(milliseconds: 50)); // async _loadRailWidth → setState
 
     final rail = find
-        .ancestor(of: find.text('Pick a session'), matching: find.byType(Row))
+        .ancestor(of: find.byKey(_handle), matching: find.byType(Row))
         .first;
     final SizedBox railBox = tester.widget<SizedBox>(
       find
@@ -104,5 +108,6 @@ void main() {
           .first,
     );
     expect(railBox.width, 500.0);
+    await tester.pumpWidget(const SizedBox());
   });
 }

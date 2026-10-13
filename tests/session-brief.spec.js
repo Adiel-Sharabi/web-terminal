@@ -362,7 +362,41 @@ test.describe('closed sessions', () => {
     expect(c[0].id).toBe(`s${B.LIMITS.closed + 2}`);
     c = B.closeSession(c, { id: 's22', name: 'again' }, T0 + 100);
     expect(c.filter((x) => x.id === 's22')).toHaveLength(1);
-    expect(B.liveClosed(c, T0 + 100 + B.CLOSED_TTL_MS)).toEqual([]);
+    // past the TTL of the NEWEST record (closed at T0 + LIMITS.closed + 2), nothing is left
+    expect(B.liveClosed(c, T0 + B.LIMITS.closed + 100 + B.CLOSED_TTL_MS)).toEqual([]);
+  });
+
+  test('#337: a closed session is kept for a WEEK, so it can still be reopened days later', () => {
+    const DAY = 24 * 60 * 60 * 1000;
+    expect(B.CLOSED_TTL_MS).toBe(7 * DAY);
+    const c = B.closeSession([], { id: 'x' }, T0);
+    expect(B.liveClosed(c, T0 + 6 * DAY).map((r) => r.id)).toEqual(['x']);
+    expect(B.liveClosed(c, T0 + 7 * DAY)).toEqual([]);
+    // a week of sessions must not be cut to a day's worth by the count cap
+    expect(B.LIMITS.closed).toBeGreaterThanOrEqual(100);
+  });
+
+  test('#337: resumeOf derives the resume by the restart rule, and only when it names the conversation', () => {
+    const conv = '0b7e2c1a-1111-2222-3333-444455556666';
+    // the hook cwd (where the conversation is filed) wins over the spawn cwd
+    expect(B.resumeOf({ autoCommand: 'claude --dangerously-skip-permissions', agent: 'claude', claudeSessionId: conv, cwd: 'C:/spawn' },
+      { hookCwd: 'C:/agent' })).toEqual({
+      cwd: 'C:/agent', agent: 'claude', claudeSessionId: conv,
+      resumeCommand: `claude --dangerously-skip-permissions --resume ${conv}`,
+    });
+    // the worker's answer at exit wins over the listed id; a fork is reopened as itself
+    expect(B.resumeOf({ autoCommand: 'claude --resume aaaaaaaa-0000 --fork-session', claudeSessionId: 'aaaaaaaa-0000', cwd: 'C:/w' },
+      { conversationId: conv }).resumeCommand).toBe(`claude --resume ${conv}`);
+    // no conversation, a plain shell, or an agent the rule does not cover: no resume
+    expect(B.resumeOf({ autoCommand: 'claude', cwd: 'C:/w' }).resumeCommand).toBeNull();
+    expect(B.resumeOf({ autoCommand: '', claudeSessionId: conv, cwd: 'C:/w' }).resumeCommand).toBeNull();
+    expect(B.resumeOf({ autoCommand: 'codex', agent: 'codex', claudeSessionId: conv, cwd: 'C:/w' }).resumeCommand).toBeNull();
+    // ...nor without a cwd to run it in
+    expect(B.resumeOf({ autoCommand: 'claude', claudeSessionId: conv }).resumeCommand).toBeNull();
+    // the id lands in a SHELL command: anything but the id shape is refused
+    const evil = B.resumeOf({ autoCommand: 'claude', claudeSessionId: 'abcdefgh; rm -rf /', cwd: 'C:/w' });
+    expect(evil).toMatchObject({ claudeSessionId: null, resumeCommand: null });
+    expect(B.resumeOf(undefined)).toEqual({ cwd: null, agent: null, claudeSessionId: null, resumeCommand: null });
   });
 });
 

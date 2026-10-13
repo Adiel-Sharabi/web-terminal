@@ -28,6 +28,7 @@ import 'package:shared_preferences/shared_preferences.dart';
 import 'package:ai_terminal/api/models.dart';
 import 'package:ai_terminal/screens/adaptive_home.dart';
 import 'package:ai_terminal/screens/dashboard_screen.dart';
+import 'package:ai_terminal/screens/work_board_screen.dart';
 import 'package:ai_terminal/services/server_store.dart';
 import 'package:ai_terminal/services/session_repository.dart';
 import 'package:ai_terminal/theme/app_theme.dart';
@@ -64,6 +65,11 @@ const _widePortrait = Size(1000, 1400);
 const _phonePortrait = Size(400, 800);
 const _phoneLandscape = Size(800, 400);
 
+/// A row of the session LIST. On a wide window the board beside it (#337) shows the
+/// same sessions, so an unscoped finder would count both.
+Finder _inList(String text) =>
+    find.descendant(of: find.byType(DashboardScreen), matching: find.text(text));
+
 void main() {
   testWidgets('a rotation keeps the dashboard State, its server filter and its '
       'rows - with or without crossing the split breakpoint', (tester) async {
@@ -83,8 +89,25 @@ void main() {
     addTearDown(tester.view.resetDevicePixelRatio);
 
     await ServerStore.instance.init();
+    // #337 - on a wide window the pane IS the board, and a board refreshes the
+    // repository it reads. Against the shared singleton that is a real network call
+    // (answered 400 under flutter_test), which empties the very list this test
+    // watches - nothing to do with rotation. The board gets a repository of its own.
+    final boardStore = ServerStore.forTest();
+    final boardRepo = SessionRepository.forTest(store: boardStore);
     await tester.pumpWidget(
-      MaterialApp(theme: AppTheme.dark, home: const AdaptiveHome()),
+      MaterialApp(
+        theme: AppTheme.dark,
+        home: AdaptiveHome(
+          boardBuilder: (open) => WorkBoardScreen(
+            embedded: true,
+            onOpenSession: open,
+            repository: boardRepo,
+            servers: () => const [],
+            pollInterval: const Duration(hours: 1),
+          ),
+        ),
+      ),
     );
     await tester.pump();
     // The stream is a broadcast with no replay, so the dashboard has to already
@@ -92,22 +115,22 @@ void main() {
     await SessionRepository.instance.primeFromCache();
     await tester.pump();
 
-    expect(find.text('Pick a session'), findsOneWidget,
+    expect(find.byType(WorkBoardScreen), findsOneWidget,
         reason: 'the tablet starts in the split view');
-    expect(find.text('office-one'), findsOneWidget,
+    expect(_inList('office-one'), findsOneWidget,
         reason: 'the primed cache must actually reach the list');
 
     // Narrow the list to one server, the way a user would.
     await tester.tap(find.widgetWithText(ChoiceChip, 'Office'));
     await tester.pump();
-    expect(find.text('home-one'), findsNothing);
+    expect(_inList('home-one'), findsNothing);
 
     final original = tester.state(find.byType(DashboardScreen));
 
     Future<void> rotateTo(Size size, {required bool wide}) async {
       tester.view.physicalSize = size;
       await tester.pump();
-      expect(find.text('Pick a session'), wide ? findsOneWidget : findsNothing,
+      expect(find.byType(WorkBoardScreen), wide ? findsOneWidget : findsNothing,
           reason: 'the layout must actually be the one this phase is about');
       expect(
         identical(tester.state(find.byType(DashboardScreen)), original),
@@ -117,14 +140,14 @@ void main() {
       );
       expect(find.byType(CircularProgressIndicator), findsNothing,
           reason: 'the list must not empty out into a loading spinner');
-      expect(find.text('office-one'), findsOneWidget);
+      expect(_inList('office-one'), findsOneWidget);
       expect(
         tester.widget<ChoiceChip>(find.widgetWithText(ChoiceChip, 'Office'))
             .selected,
         isTrue,
         reason: 'the selected server chip must survive the rotation',
       );
-      expect(find.text('home-one'), findsNothing,
+      expect(_inList('home-one'), findsNothing,
           reason: 'the filter it selects must still be applied');
     }
 

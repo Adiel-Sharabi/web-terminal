@@ -1,11 +1,13 @@
-// #337 - the sessions dashboard opens BESIDE the session list on a wide window.
+// #337 - the sessions board lives BESIDE the session list on a wide window, and it is
+// what the detail pane shows whenever no session is open: the default on launch,
+// replacing the old "Pick a session" placeholder.
 //
 // It used to be pushed as a root route from the list's app bar, so on a desktop it
 // covered the whole window, the list rail included, and getting to a session meant
-// leaving the board. Now the board is one of the things the split's detail pane can
-// show ([SessionSelection.pane]): the rail stays, a card tap selects its session in
-// the pane (which is also what replaces the board), and a rail tap replaces it too.
-// A phone is unchanged: the board is still pushed as a full screen.
+// leaving the board. Now the pane shows either one session or the board
+// ([SessionSelection.pane]): the rail stays, a card's Open selects its session in the
+// pane (which is also what replaces the board), and the dashboard button brings the
+// board back. A phone is unchanged: the board is still pushed as a full screen.
 import 'dart:convert';
 
 import 'package:ai_terminal/api/api_client.dart';
@@ -80,18 +82,19 @@ void main() {
   });
   tearDown(() => SessionSelection.instance.reset());
 
-  testWidgets('wide: the dashboard button shows the board in the pane, beside the rail - no route pushed',
+  testWidgets('wide: the board IS the pane on launch, beside the rail - no route pushed, no placeholder',
       (tester) async {
     final pushes = await _pumpHome(tester, const Size(1400, 900));
     expect(pushes.routes, hasLength(1), reason: 'just the home route');
-    expect(find.text('Pick a session'), findsOneWidget);
+    expect(SessionSelection.instance.pane.value, DetailPane.board, reason: 'the default');
+    expect(find.byType(WorkBoardScreen), findsOneWidget);
+    expect(find.text('Pick a session'), findsNothing, reason: 'the placeholder is gone (#337)');
 
     await _tapDashboardButton(tester);
 
     expect(pushes.routes, hasLength(1), reason: 'the board must not be pushed over the split');
     expect(SessionSelection.instance.pane.value, DetailPane.board);
     expect(find.byType(WorkBoardScreen), findsOneWidget);
-    expect(find.text('Pick a session'), findsNothing, reason: 'the board took the pane');
     // The rail is still there and usable: that is the whole point.
     expect(find.byType(DashboardScreen), findsOneWidget);
     expect(find.byKey(const Key('rail-resize-handle')), findsOneWidget);
@@ -109,10 +112,24 @@ void main() {
     expect(find.byType(WorkBoardScreen), findsNothing);
     expect(tester.widget<SessionScreen>(find.byType(SessionScreen)).sessionId, 'from-the-rail');
 
+    // ...and the dashboard button returns to it.
+    await _tapDashboardButton(tester);
+    expect(SessionSelection.instance.pane.value, DetailPane.board);
+    expect(find.byType(WorkBoardScreen), findsOneWidget);
+    expect(find.byType(SessionScreen), findsNothing);
+    expect(pushes.routes, hasLength(1));
+
+    // A session that ends clears the selection: back to the board, never a blank pane.
+    SessionSelection.instance.select('ends');
+    await tester.pump();
+    SessionSelection.instance.clear();
+    await tester.pump();
+    expect(find.byType(WorkBoardScreen), findsOneWidget);
+
     await tester.pumpWidget(const SizedBox()); // dispose -> cancel the board's poll
   });
 
-  testWidgets('wide: tapping a card on the embedded board selects that session in the pane', (tester) async {
+  testWidgets('wide: Open on a board row selects that session in the pane', (tester) async {
     SharedPreferences.setMockInitialValues({
       ServerStore.storageKey: jsonEncode([
         {'name': _server.name, 'baseUrl': _server.baseUrl, 'bearerToken': _server.bearerToken},
@@ -136,13 +153,12 @@ void main() {
         ),
       ),
     );
-    await _tapDashboardButton(tester);
     await tester.runAsync(() => repo.refresh());
     await tester.pump();
 
     final card = find.byKey(ValueKey('board-${_server.baseUrl}-s1'));
     expect(card, findsOneWidget);
-    await tester.tap(find.descendant(of: card, matching: find.text('Dictation work')));
+    await tester.tap(find.byKey(ValueKey('board-open-${_server.baseUrl}-s1')));
     await tester.pump();
 
     expect(SessionSelection.instance.pane.value, const DetailPane.session('s1'));
@@ -165,7 +181,7 @@ void main() {
     expect(pushes.routes, hasLength(2), reason: 'a phone has no pane to show it in');
     expect(find.byType(WorkBoardScreen), findsOneWidget);
     expect(find.byType(BackButton), findsOneWidget);
-    expect(SessionSelection.instance.pane.value, DetailPane.empty, reason: 'nothing to select into');
+    expect(SessionSelection.instance.pane.value, DetailPane.board, reason: 'untouched: a phone has no pane');
 
     await tester.pumpWidget(const SizedBox());
   });

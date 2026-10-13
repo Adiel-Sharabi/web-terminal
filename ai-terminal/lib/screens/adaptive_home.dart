@@ -3,7 +3,6 @@ import 'package:shared_preferences/shared_preferences.dart';
 
 import '../api/models.dart';
 import '../services/session_selection.dart';
-import '../widgets/empty_state.dart';
 import 'dashboard_screen.dart';
 import 'session_screen.dart';
 import 'work_board_screen.dart';
@@ -12,8 +11,9 @@ import 'work_board_screen.dart';
 /// [DashboardScreen] and tapping a session pushes a full-screen route. On a wide
 /// window (desktop, tablet landscape) it becomes a master-detail split: the
 /// session list as a left rail, the selected session live in the right pane.
-/// The sessions dashboard opens in that pane too (#337), beside the list rather
-/// than over it; what the pane shows is [SessionSelection.pane].
+/// Whenever no session is open, that pane IS the sessions board (#337), beside the
+/// list rather than over it, and it is what the app opens on; what the pane shows
+/// is [SessionSelection.pane].
 ///
 /// In split mode the rail is user-resizable by dragging the divider; the chosen
 /// width is the single source of truth (`_railWidth`), clamped to
@@ -156,17 +156,11 @@ class _AdaptiveHomeState extends State<AdaptiveHome> {
               onDragEnd: _persistRailWidth,
             ),
             Expanded(
-              child: _selection.boardShown
-                  // A board card opens its session the way a rail tap does,
-                  // which is also what replaces the board.
+              child: selectedId == null
+                  // No session open: the board (#337). A board card opens its
+                  // session the way a rail tap does, which is also what replaces
+                  // the board.
                   ? (widget.boardBuilder ?? _defaultBoard)(_select)
-                  : selectedId == null
-                  ? const EmptyState(
-                      icon: Icons.dashboard_customize_outlined,
-                      title: 'Pick a session',
-                      subtitle:
-                          'Choose a session on the left to open it here. It stays live while you switch.',
-                    )
                   // A fresh key per id rebuilds the pane (new connection) when
                   // the selection changes.
                   : SessionScreen(

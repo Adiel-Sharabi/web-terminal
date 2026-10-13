@@ -1,17 +1,21 @@
-// #306 — the sessions dashboard in the companion. Pins the wire parsing of a
-// session's `brief` (built server-side by lib/session-brief.js), the two API calls,
-// the pure status/section rules, and the screen end to end against a faked server:
-// a card shows its work items, a session owing an answer is in "Needs you", a pin
-// sends the whole pinned list, and a tap opens the session.
+// #306 — the sessions dashboard in the companion, redesigned by #337 into a board of
+// three columns with controls. Pins the wire parsing of a session's `brief` (built
+// server-side by lib/session-brief.js), the API calls, the pure status/section rules,
+// and the screen end to end against a faked server: which column a session sits in,
+// and that every control writes the bytes its OWNER builds - a question's answer
+// through buildAnswerFrames, a reply through buildComposeSubmission, Stop as a lone
+// Esc - plus Not waiting, hide, pin, and Reopen of a closed session.
 import 'dart:convert';
 
 import 'package:ai_terminal/api/api_client.dart';
 import 'package:ai_terminal/api/models.dart';
+import 'package:ai_terminal/screens/session_screen.dart' show buildComposeSubmission;
 import 'package:ai_terminal/screens/work_board_screen.dart';
 import 'package:ai_terminal/services/server_store.dart';
 import 'package:ai_terminal/services/session_repository.dart';
 import 'package:ai_terminal/theme/app_theme.dart';
 import 'package:ai_terminal/theme/status_colors.dart';
+import 'package:ai_terminal/widgets/question_overlay.dart' show buildAnswerFrames;
 import 'package:flutter/material.dart';
 import 'package:flutter_test/flutter_test.dart';
 import 'package:http/http.dart' as http;
@@ -142,6 +146,22 @@ void main() {
       expect(b!.reportingOn, isFalse);
     });
 
+    test('#337: a closed record carries what a Reopen needs; without a resume command it cannot reopen', () {
+      final c = ClosedSession.fromJson(_server, {
+        'id': 'x',
+        'cwd': 'C:/w',
+        'agent': 'claude',
+        'claudeSessionId': 'abc-123',
+        'resumeCommand': 'claude --resume abc-123',
+      })!;
+      expect((c.cwd, c.agent, c.claudeSessionId, c.resumeCommand), ('C:/w', 'claude', 'abc-123', 'claude --resume abc-123'));
+      expect(c.canReopen, isTrue);
+      // An older server sends none of it; a record the server could not resume says null.
+      expect(ClosedSession.fromJson(_server, {'id': 'y'})!.canReopen, isFalse);
+      expect(ClosedSession.fromJson(_server, {'id': 'z', 'cwd': 'C:/w', 'resumeCommand': null})!.canReopen, isFalse);
+      expect(ClosedSession.fromJson(_server, {'id': 'w', 'cwd': '  ', 'resumeCommand': 'claude --resume q'})!.canReopen, isFalse);
+    });
+
     test('dashboardClosed parses the list and tags the server', () async {
       final client = ApiClient(_server, httpClient: MockClient((req) async {
         expect(req.url.path, '/api/dashboard/closed');
@@ -199,15 +219,45 @@ void main() {
 
   group('WorkBoardScreen', () {
     late List<http.Request> patches;
+    late List<http.Request> posts;
     late List<String> paths;
     late List<Map<String, dynamic>> rows;
     late List<String> capabilities;
+    late List<Map<String, dynamic>> closed;
+
+    /// The pending question per session id, as `GET /pending-question` answers it.
+    late Map<String, Map<String, dynamic>> questions;
+
+    /// Every key the board wrote, as (session id, keys) - through the injected
+    /// [SessionInputRunner], i.e. exactly what would go down the session's socket.
+    late List<(String, String)> sent;
+    late bool inputReachable;
+
+    Future<bool> fakeInput(Session s, Future<void> Function(void Function(String keys) send) body) async {
+      if (!inputReachable) return false;
+      await body((keys) {
+        sent.add((s.id, keys));
+        // The question clears once its confirming Enter lands.
+        if (keys == '\r') questions.remove(s.id);
+      });
+      return true;
+    }
 
     ApiClient client(ServerConfig s) => ApiClient(s, httpClient: MockClient((req) async {
           paths.add(req.url.path);
+          final q = RegExp(r'^/api/sessions/([^/]+)/pending-question$').firstMatch(req.url.path);
+          if (q != null) {
+            final pending = questions[q.group(1)];
+            return http.Response(jsonEncode(pending == null ? {'pending': false} : {'pending': true, 'question': pending}), 200);
+          }
+          if (req.method == 'POST' && req.url.path == '/api/sessions') {
+            posts.add(req);
+            final body = jsonDecode(req.body) as Map;
+            return http.Response(jsonEncode({'id': 'reopened-1', 'name': body['name'], 'agent': body['agent']}), 200);
+          }
           switch (req.url.path) {
             case '/api/version':
-              return http.Response(jsonEncode({'version': '1.74.0', 'serverName': 'Home', 'serverColor': '#E27BF5', 'capabilities': capabilities}), 200);
+              return http.Response(jsonEncode({'version': '1.81.0', 'serverName': 'Home', 'serverColor': '#E27BF5', 'capabilities': capabilities}), 200);
             case '/api/sessions':
               return http.Response(jsonEncode(rows), 200);
             case '/api/machine':
@@ -223,7 +273,7 @@ void main() {
                 'uptimeSec': 90000,
               }), 200);
             case '/api/dashboard/closed':
-              return http.Response(jsonEncode({'closed': [{'id': 'gone', 'name': 'Finished session', 'items': [], 'did': {'text': 'wrapped up'}, 'at': DateTime.now().millisecondsSinceEpoch}]}), 200);
+              return http.Response(jsonEncode({'closed': closed}), 200);
           }
           if (req.method == 'PATCH') {
             patches.add(req);
@@ -245,8 +295,15 @@ void main() {
 
     setUp(() {
       patches = [];
+      posts = [];
       paths = [];
+      sent = [];
+      questions = {};
+      inputReachable = true;
       capabilities = ['session-brief', 'session-hide', 'favorites-sync', 'session-clear-wait'];
+      closed = [
+        {'id': 'gone', 'name': 'Finished session', 'items': [], 'did': {'text': 'wrapped up'}, 'at': DateTime.now().millisecondsSinceEpoch},
+      ];
       rows = [
         _row('s1', 'Dictation work', status: 'working', brief: _briefJson(
           items: [
@@ -273,6 +330,7 @@ void main() {
           repository: r,
           servers: () => const [_server],
           clientFactory: client,
+          sessionInput: fakeInput,
           pollInterval: const Duration(hours: 1),
           onOpenSession: opened.add,
         ),
@@ -283,6 +341,14 @@ void main() {
       await tester.pump();
       return opened;
     }
+
+    /// Lets the board's own async work (HTTP, paced frames, the answer check) run.
+    Future<void> settle(WidgetTester tester, [Duration d = const Duration(milliseconds: 50)]) async {
+      await tester.runAsync(() => Future<void>.delayed(d));
+      await tester.pump();
+    }
+
+    Finder inCol(String col, Finder f) => find.descendant(of: find.byKey(ValueKey('board-col-$col')), matching: f);
 
     testWidgets('Machines (#331): collapsed it asks nothing; opened it reads each server', (tester) async {
       capabilities = [...capabilities, 'machine-profile'];
@@ -321,43 +387,408 @@ void main() {
       expect(paths, isNot(contains('/api/machine')));
     });
 
-    testWidgets('cards, needs-you, stale warning, closed strip; a tap opens the session', (tester) async {
+    /// Advances the fake clock in small steps, so paced frames and polls all run.
+    Future<void> advance(WidgetTester tester, Duration total) async {
+      for (var t = Duration.zero; t < total; t += const Duration(milliseconds: 100)) {
+        await tester.pump(const Duration(milliseconds: 100));
+      }
+    }
+
+    testWidgets('#337: three columns - Needs you, Working (incl. on its own / blocked), Idle - each with a count',
+        (tester) async {
+      rows = [
+        _row('w', 'Running one', status: 'working', brief: _briefJson()),
+        _row('p', 'Permission one', status: 'waiting', waitingFor: 'permission', brief: _briefJson()),
+        _row('o', 'Own one', brief: _briefJson(), reason: {'kind': 'self', 'text': 'waiting for CI', 'source': 'reported'}),
+        _row('x', 'External one', brief: _briefJson(), reason: {'kind': 'external', 'text': 'vendor licence', 'source': 'reported'}),
+        _row('i', 'Idle one', brief: _briefJson()),
+        _row('d', 'Done one', brief: _briefJson(), reason: {'kind': 'done', 'text': 'pushed', 'source': 'reported'}),
+        _row('n', 'Quiet one'),
+      ];
+      final r = await repo();
+      await pump(tester, r: r);
+
+      expect(inCol('you', find.text('Permission one')), findsOneWidget);
+      for (final name in ['Running one', 'Own one', 'External one']) {
+        expect(inCol('work', find.text(name)), findsOneWidget, reason: name);
+      }
+      for (final name in ['Idle one', 'Done one', 'Quiet one']) {
+        expect(inCol('idle', find.text(name)), findsOneWidget, reason: name);
+      }
+      expect(tester.widget<Text>(find.byKey(const ValueKey('board-count-Needs you'))).data, '1');
+      expect(tester.widget<Text>(find.byKey(const ValueKey('board-count-Working'))).data, '3');
+      expect(tester.widget<Text>(find.byKey(const ValueKey('board-count-Idle / done'))).data, '3');
+      // What each says: the now-line, and the reason in plain words.
+      expect(inCol('work', find.textContaining('Now: Run the tests')), findsOneWidget);
+      expect(inCol('work', find.textContaining('On its own: waiting for CI')), findsOneWidget);
+      expect(inCol('work', find.textContaining('Blocked on others: vendor licence')), findsOneWidget);
+      expect(inCol('work', find.textContaining('Last did: Fixed the mic')), findsWidgets);
+      // The idle line says what it did.
+      expect(inCol('idle', find.text('Fixed the mic')), findsWidgets);
+      // A permission prompt has no approval path in the companion: Open, and it says so.
+      expect(inCol('you', find.textContaining('Permission: Run the tests')), findsOneWidget);
+      expect(inCol('you', find.text('Allow or deny it in the session.')), findsOneWidget);
+
+      // Side by side on a wide window.
+      final you = tester.getTopLeft(find.byKey(const ValueKey('board-col-you')));
+      final work = tester.getTopLeft(find.byKey(const ValueKey('board-col-work')));
+      final idle = tester.getTopLeft(find.byKey(const ValueKey('board-col-idle')));
+      expect(you.dy, work.dy);
+      expect(you.dx, lessThan(work.dx));
+      expect(work.dx, lessThan(idle.dx));
+
+      // Every chrome the board used to carry is gone (#337).
+      for (final gone in ['board-tabs', 'board-favorites', 'board-sort', 'board-grouping', 'board-search', 'board-chip-you']) {
+        expect(find.byKey(ValueKey(gone)), findsNothing, reason: '$gone was removed');
+      }
+      await tester.pumpWidget(const SizedBox());
+    });
+
+    testWidgets('#337: on a phone the columns stack into one', (tester) async {
+      rows = [
+        _row('w', 'Running one', status: 'working', brief: _briefJson()),
+        _row('p', 'Permission one', status: 'waiting', waitingFor: 'permission'),
+        _row('i', 'Idle one', brief: _briefJson()),
+      ];
+      final r = await repo();
+      await pump(tester, r: r, width: 390);
+      final you = tester.getTopLeft(find.byKey(const ValueKey('board-col-you')));
+      final work = tester.getTopLeft(find.byKey(const ValueKey('board-col-work')));
+      final idle = tester.getTopLeft(find.byKey(const ValueKey('board-col-idle')));
+      expect(work.dx, you.dx);
+      expect(idle.dx, you.dx);
+      expect(you.dy, lessThan(work.dy));
+      expect(work.dy, lessThan(idle.dy));
+      expect(tester.takeException(), isNull);
+      await tester.pumpWidget(const SizedBox());
+    });
+
+    testWidgets('cards: work items, stale warning; Open opens the session', (tester) async {
       final r = await repo();
       final opened = await pump(tester, r: r);
-
       expect(find.text('Dictation work'), findsOneWidget);
       expect(find.text('#291'), findsOneWidget);
       expect(find.text('ready for test'), findsOneWidget);
-      expect(find.text('Run the tests'), findsOneWidget, reason: 'Now shows while working');
       expect(find.textContaining('Report may be out of date: gh issue close touched #4242'), findsOneWidget);
-      // #313: by reason (the default), the waiting session leads in its own section.
-      expect(find.descendant(of: find.byKey(const ValueKey('board-sec-you')), matching: find.text('Waiting one')), findsOneWidget);
-      expect(find.text('Nothing reported yet'), findsOneWidget, reason: 'a Claude session with no brief yet');
-      expect(find.text('Finished session'), findsOneWidget);
-
-      // A visible session that needs you IS the first section; the strip would repeat it.
-      expect(find.byKey(const ValueKey('board-needs-you')), findsNothing);
-
-      await tester.tap(find.text('Dictation work'));
+      expect(inCol('you', find.text('Waiting one')), findsOneWidget);
+      await tester.tap(find.byKey(ValueKey('board-open-${_server.baseUrl}-s1')));
       await tester.pump();
       expect(opened.single.id, 's1');
+      await tester.pumpWidget(const SizedBox());
+    });
+
+    testWidgets('#337: a question card answers through the overlay\'s own frames (buildAnswerFrames)', (tester) async {
+      final question = {
+        'toolUseId': 't1',
+        'questions': [
+          {
+            'header': 'Branch',
+            'question': 'Which branch should the hotfix go to?',
+            'multiSelect': false,
+            'hasPreview': true, // the layout where a digit only MOVES - Enter commits
+            'options': [
+              {'label': 'net8_master', 'description': '', 'preview': 'a'},
+              {'label': 'release/8.4', 'description': '', 'preview': 'b'},
+            ],
+          },
+        ],
+      };
+      questions = {'q': question};
+      rows = [_row('q', 'Combi', status: 'waiting', waitingFor: 'question', brief: _briefJson())];
+      final r = await repo();
+      final opened = await pump(tester, r: r);
+      await settle(tester);
+
+      expect(inCol('you', find.textContaining('Question: Which branch should the hotfix go to?')), findsOneWidget);
+      final release = find.byKey(ValueKey('board-answer-${_server.baseUrl}-q-1'));
+      expect(release, findsOneWidget);
+      expect(find.descendant(of: release, matching: find.text('release/8.4')), findsOneWidget);
+
+      // "Other…" is the session's: its free-text rules depend on the layout (#143).
+      await tester.tap(find.byKey(ValueKey('board-other-${_server.baseUrl}-q')));
+      await tester.pump();
+      expect(opened.single.id, 'q');
+
+      await tester.tap(release);
+      await advance(tester, const Duration(seconds: 3));
+
+      final expected = buildAnswerFrames(PendingQuestion.fromJson({'pending': true, 'question': question})!.questions, [
+        {1},
+      ]).map((f) => f.keys).toList();
+      expect(expected, ['2', '\r'], reason: 'previewed layout: digit, then the committing Enter');
+      expect(sent, [for (final k in expected) ('q', k)], reason: 'exactly the overlay\'s frames, nothing re-derived');
 
       await tester.pumpWidget(const SizedBox());
     });
 
-    testWidgets('pin sends the WHOLE pinned list; unpin removes one', (tester) async {
+    testWidgets('#337: a question that does not take is said out loud, and the Enter is re-sent ONCE', (tester) async {
+      questions = {
+        'q': {
+          'toolUseId': 't1',
+          'questions': [
+            {
+              'header': 'H',
+              'question': 'Pick one',
+              'multiSelect': false,
+              'options': [
+                {'label': 'A'},
+                {'label': 'B'},
+              ],
+            },
+          ],
+        },
+      };
+      rows = [_row('q', 'Stuck one', status: 'waiting', waitingFor: 'question')];
+      final r = await repo();
+      await pump(tester, r: r);
+      await settle(tester);
+      // This session never takes the answer: the question stays pending.
+      Future<bool> deaf(Session s, Future<void> Function(void Function(String keys) send) body) async {
+        await body((keys) => sent.add((s.id, keys)));
+        return true;
+      }
+
+      await tester.pumpWidget(MaterialApp(
+        theme: AppTheme.dark,
+        home: WorkBoardScreen(
+          repository: r,
+          servers: () => const [_server],
+          clientFactory: client,
+          sessionInput: deaf,
+          pollInterval: const Duration(hours: 1),
+          onOpenSession: (_) {},
+        ),
+      ));
+      await settle(tester);
+      await tester.tap(find.byKey(ValueKey('board-answer-${_server.baseUrl}-q-0')));
+      await advance(tester, const Duration(seconds: 10));
+      expect(sent.map((e) => e.$2), ['1', '\r', '\r'], reason: 'the confirm is re-sent once, never more');
+      expect(find.textContaining('The answer did not take'), findsOneWidget);
+      expect(find.byKey(ValueKey('board-answer-${_server.baseUrl}-q-0')), findsOneWidget, reason: 'put back');
+      ScaffoldMessenger.of(tester.element(find.byType(ListView))).clearSnackBars();
+      await tester.pumpWidget(const SizedBox());
+    });
+
+    testWidgets('#337: a multi-question prompt offers no one-press buttons - it is answered in the session', (tester) async {
+      Map<String, dynamic> item(String q) => {
+            'header': q,
+            'question': q,
+            'multiSelect': false,
+            'options': [
+              {'label': 'A'},
+            ],
+          };
+      questions = {
+        'q': {
+          'toolUseId': 't',
+          'questions': [item('one'), item('two')],
+        },
+      };
+      rows = [_row('q', 'Two questions', status: 'waiting', waitingFor: 'question')];
+      final r = await repo();
+      await pump(tester, r: r);
+      await settle(tester);
+      expect(find.byKey(ValueKey('board-answer-${_server.baseUrl}-q-0')), findsNothing);
+      expect(find.text('Several answers are needed - Open to answer.'), findsOneWidget);
+      await tester.pumpWidget(const SizedBox());
+    });
+
+    testWidgets('#337: "waiting on you" shows the ask and replies through buildComposeSubmission', (tester) async {
+      rows = [
+        _row('r', 'OSDP SC', brief: _briefJson(), reason: {'kind': 'you', 'text': 'say which switches', 'source': 'reported'}),
+      ];
+      final r = await repo();
+      await pump(tester, r: r);
+      expect(inCol('you', find.textContaining('Waiting: say which switches')), findsOneWidget);
+      expect(inCol('you', find.textContaining('Asks: Fixed the mic')), findsOneWidget, reason: "the last TL;DR is the ask");
+
+      await tester.enterText(find.byKey(const ValueKey('board-reply-field')), 'positions 6 and 8');
+      await tester.tap(find.byKey(const ValueKey('board-reply-send')));
+      await tester.pump();
+      await settle(tester);
+      expect(sent, [('r', buildComposeSubmission('positions 6 and 8'))]);
+      expect(sent.single.$2, 'positions 6 and 8\r', reason: 'one frame, the compose bar\'s');
+      expect(tester.widget<TextField>(find.byKey(const ValueKey('board-reply-field'))).controller!.text, isEmpty);
+      await tester.pumpWidget(const SizedBox());
+    });
+
+    testWidgets('#337: a reply is refused while the agent is still starting (#147); an unreachable session keeps the words',
+        (tester) async {
+      rows = [
+        {..._row('r', 'Booting', brief: _briefJson(), reason: {'kind': 'you', 'text': 'go?', 'source': 'reported'}), 'agentReady': false},
+        _row('u', 'Unreachable', brief: _briefJson(), reason: {'kind': 'you', 'text': 'go?', 'source': 'reported'}),
+      ];
+      final r = await repo();
+      await pump(tester, r: r);
+      final sends = find.byKey(const ValueKey('board-reply-send'));
+      final booting = find.descendant(of: find.byKey(ValueKey('board-${_server.baseUrl}-r')), matching: sends);
+      expect(tester.widget<FilledButton>(booting).onPressed, isNull);
+
+      inputReachable = false;
+      final field = find.descendant(
+          of: find.byKey(ValueKey('board-${_server.baseUrl}-u')), matching: find.byKey(const ValueKey('board-reply-field')));
+      await tester.enterText(field, 'keep me');
+      await tester.tap(find.descendant(of: find.byKey(ValueKey('board-${_server.baseUrl}-u')), matching: sends));
+      await tester.pump();
+      await settle(tester);
+      expect(sent, isEmpty);
+      expect(tester.widget<TextField>(field).controller!.text, 'keep me');
+      expect(find.text('Could not reach "Unreachable" - nothing was sent'), findsOneWidget);
+      ScaffoldMessenger.of(tester.element(find.byType(ListView))).clearSnackBars();
+      await tester.pumpWidget(const SizedBox());
+    });
+
+    testWidgets('#337 review: a single MULTI-select question offers no one-press buttons either', (tester) async {
+      questions = {
+        'q': {
+          'toolUseId': 't',
+          'questions': [
+            {
+              'header': 'Pick',
+              'question': 'Which ones?',
+              'multiSelect': true,
+              'options': [
+                {'label': 'A'},
+                {'label': 'B'},
+              ],
+            },
+          ],
+        },
+      };
+      rows = [_row('q', 'Multi', status: 'waiting', waitingFor: 'question')];
+      final r = await repo();
+      await pump(tester, r: r);
+      await settle(tester);
+      expect(find.textContaining('Question: Which ones?'), findsOneWidget);
+      expect(find.byKey(ValueKey('board-answer-${_server.baseUrl}-q-0')), findsNothing,
+          reason: 'one press would toggle a row, not answer');
+      expect(find.text('Several answers are needed - Open to answer.'), findsOneWidget);
+      await tester.pumpWidget(const SizedBox());
+    });
+
+    testWidgets('#337 review: a reply the agent did not take (#179) is put back in its box, with a notice',
+        (tester) async {
+      rows = [
+        _row('r', 'OSDP SC', brief: _briefJson(), reason: {'kind': 'you', 'text': 'say which', 'source': 'reported'}),
+      ];
+      final r = await repo();
+      await pump(tester, r: r);
+      // A report the repository was already holding from BEFORE this send is not about it.
+      r.debugApplyNotify(NotifyEvent.fromJson(
+          {'type': 'submitUnconfirmed', 'id': 'r', 'at': DateTime.now().millisecondsSinceEpoch - 60000}));
+      await tester.pump();
+      final field = find.byKey(const ValueKey('board-reply-field'));
+      TextEditingController box() => tester.widget<TextField>(field).controller!;
+
+      await tester.enterText(field, 'positions 6 and 8');
+      await tester.tap(find.byKey(const ValueKey('board-reply-send')));
+      await tester.pump();
+      await settle(tester);
+      expect(sent.single.$2, 'positions 6 and 8\r');
+      expect(box().text, isEmpty, reason: 'delivered to an attached session');
+      expect(find.textContaining('did not take your reply'), findsNothing, reason: 'the old report is not this send');
+
+      // Now the server reports THIS submit was swallowed.
+      r.debugApplyNotify(NotifyEvent.fromJson(
+          {'type': 'submitUnconfirmed', 'id': 'r', 'at': DateTime.now().millisecondsSinceEpoch + 1000}));
+      await tester.pump();
+      await tester.pump();
+      expect(box().text, 'positions 6 and 8', reason: 'the words come back');
+      expect(find.textContaining('"OSDP SC" did not take your reply - it is back in the box'), findsOneWidget);
+      expect(r.submitUnconfirmedAt('r'), isNull, reason: 'consumed once');
+      ScaffoldMessenger.of(tester.element(find.byType(ListView))).clearSnackBars();
+      await tester.pumpWidget(const SizedBox());
+    });
+
+    testWidgets('#337 review: Stop re-reads the status and sends nothing to a session that has stopped', (tester) async {
+      rows = [_row('w', 'Running one', status: 'working', brief: _briefJson())];
+      final r = await repo();
+      await pump(tester, r: r);
+      // It finishes between the last poll and the press.
+      rows = [_row('w', 'Running one', status: 'idle', brief: _briefJson())];
+      await tester.tap(find.byKey(ValueKey('board-stop-${_server.baseUrl}-w')));
+      await tester.pump();
+      await settle(tester);
+      await settle(tester);
+      expect(sent, isEmpty, reason: 'an Esc to a session that is not working is some other key (#55)');
+      expect(find.text('"Running one" is no longer working - Stop was not sent'), findsOneWidget);
+      ScaffoldMessenger.of(tester.element(find.byType(ListView))).clearSnackBars();
+      await tester.pumpWidget(const SizedBox());
+    });
+
+    testWidgets('#337: Stop sends exactly one Esc, and only a WORKING session offers it', (tester) async {
+      rows = [
+        _row('w', 'Running one', status: 'working', brief: _briefJson()),
+        _row('o', 'Own one', brief: _briefJson(), reason: {'kind': 'self', 'text': 'CI', 'source': 'reported'}),
+      ];
+      final r = await repo();
+      await pump(tester, r: r);
+      expect(find.byKey(ValueKey('board-stop-${_server.baseUrl}-o')), findsNothing,
+          reason: 'Esc interrupts only a working turn (#55); elsewhere it is some other key');
+      await tester.tap(find.byKey(ValueKey('board-stop-${_server.baseUrl}-w')));
+      await tester.pump();
+      await settle(tester);
+      expect(sent, [('w', '\x1b')]);
+      await tester.pumpWidget(const SizedBox());
+    });
+
+    testWidgets('#337: a session stuck in a menu (#316) offers Esc, which closes it', (tester) async {
+      rows = [_row('m', 'Menu one', brief: _briefJson(), reason: {'kind': 'menu', 'text': '', 'source': 'screen'})];
+      final r = await repo();
+      await pump(tester, r: r);
+      await tester.tap(find.byKey(ValueKey('board-esc-${_server.baseUrl}-m')));
+      await tester.pump();
+      await settle(tester);
+      expect(sent, [('m', '\x1b')]);
+      await tester.pumpWidget(const SizedBox());
+    });
+
+    testWidgets('"Not waiting" clears a reported wait; a mechanical one offers no such button (#320)', (tester) async {
+      rows = [
+        _row('r', 'Reported one', brief: _briefJson(), reason: {'kind': 'you', 'text': 'say go', 'source': 'reported'}),
+        _row('m', 'Mechanical one', status: 'waiting', waitingFor: 'permission', brief: _briefJson(),
+            reason: {'kind': 'you', 'text': 'approve a tool', 'source': 'status'}),
+      ];
+      final r = await repo();
+      await pump(tester, r: r);
+      expect(find.byKey(ValueKey('board-clear-wait-${_server.baseUrl}-m')), findsNothing);
+      await tester.tap(find.byKey(ValueKey('board-clear-wait-${_server.baseUrl}-r')));
+      await tester.pump();
+      await settle(tester);
+      expect('${patches.last.url.path} ${patches.last.body}', '/api/sessions/r/brief {"clearWait":true}');
+      await tester.pumpWidget(const SizedBox());
+    });
+
+    testWidgets('a hidden session that needs you stays in Needs you, marked hidden, with Not waiting (#324)', (tester) async {
+      rows = [
+        _row('r', 'Reported one', brief: {..._briefJson(), 'hidden': true},
+            reason: {'kind': 'you', 'text': 'say go', 'source': 'reported'}),
+      ];
+      final r = await repo();
+      await pump(tester, r: r);
+      final card = find.byKey(ValueKey('board-${_server.baseUrl}-r'));
+      expect(inCol('you', card), findsOneWidget);
+      expect(find.descendant(of: card, matching: find.text('hidden')), findsOneWidget);
+      await tester.tap(find.byKey(ValueKey('board-clear-wait-${_server.baseUrl}-r')));
+      await tester.pump();
+      await settle(tester);
+      expect('${patches.last.url.path} ${patches.last.body}', '/api/sessions/r/brief {"clearWait":true}');
+      await tester.pumpWidget(const SizedBox());
+    });
+
+    testWidgets('pin (from the menu) sends the WHOLE pinned list; unpin removes one', (tester) async {
       final r = await repo();
       await pump(tester, r: r);
 
-      final card = find.byKey(ValueKey('board-${_server.baseUrl}-s1'));
-      await tester.tap(find.descendant(of: card, matching: find.widgetWithText(OutlinedButton, 'Pin work item')));
+      await tester.tap(find.byKey(ValueKey('board-more-${_server.baseUrl}-s1')));
+      await tester.pumpAndSettle();
+      await tester.tap(find.text('Pin work item'));
       await tester.pumpAndSettle();
       await tester.enterText(find.byKey(const ValueKey('pin-ref')), '#888');
       await tester.enterText(find.byKey(const ValueKey('pin-title')), 'New pin');
       await tester.tap(find.byKey(const ValueKey('pin-save')));
       await tester.pump();
-      await tester.runAsync(() => Future<void>.delayed(const Duration(milliseconds: 50)));
-      await tester.pump();
+      await settle(tester);
 
       expect(patches, hasLength(1));
       expect(patches.single.url.path, '/api/sessions/s1/brief');
@@ -370,8 +801,7 @@ void main() {
 
       await tester.tap(find.byTooltip('Unpin #777'));
       await tester.pump();
-      await tester.runAsync(() => Future<void>.delayed(const Duration(milliseconds: 50)));
-      await tester.pump();
+      await settle(tester);
       expect(jsonDecode(patches.last.body), {'pinned': <dynamic>[]});
 
       await tester.pumpWidget(const SizedBox());
@@ -388,13 +818,12 @@ void main() {
       await tester.pumpAndSettle();
       await tester.tap(find.text('Stop reporting'));
       await tester.pumpAndSettle();
-      await tester.runAsync(() => Future<void>.delayed(const Duration(milliseconds: 50)));
+      await settle(tester);
       await tester.tap(find.byKey(ValueKey('board-more-${_server.baseUrl}-off')));
       await tester.pumpAndSettle();
       await tester.tap(find.text('Resume reporting'));
       await tester.pumpAndSettle();
-      await tester.runAsync(() => Future<void>.delayed(const Duration(milliseconds: 50)));
-      await tester.pump();
+      await settle(tester);
       expect(patches.map((p) => '${p.url.path} ${p.body}'), [
         '/api/sessions/on/brief {"optOut":true}',
         '/api/sessions/off/brief {"optOut":false}',
@@ -407,7 +836,6 @@ void main() {
       final r = await repo();
       await pump(tester, r: r);
       expect(find.text('Dictation work'), findsOneWidget, reason: 'the card still shows what the row carries');
-      expect(find.text('Pin work item'), findsNothing);
       expect(find.byKey(ValueKey('board-more-${_server.baseUrl}-s1')), findsNothing, reason: 'nothing it could take');
       expect(find.byTooltip('Unpin #777'), findsNothing);
       expect(paths, isNot(contains('/api/dashboard/closed')));
@@ -416,7 +844,7 @@ void main() {
 
     testWidgets('a phone-width card with a qualified ref, a state and an unpin does not overflow', (tester) async {
       rows = [
-        _row('s1', 'Narrow', brief: _briefJson(items: [
+        _row('s1', 'Narrow', status: 'working', brief: _briefJson(items: [
           {'ref': 'Adiel-Sharabi/web-terminal#306', 'key': 'k', 'title': 'Companion dashboard', 'state': 'ready-for-test', 'source': 'pinned', 'pin': {'title': '', 'state': null}},
         ])),
       ];
@@ -430,8 +858,9 @@ void main() {
     testWidgets('the pin dialog fits above a phone keyboard', (tester) async {
       final r = await repo();
       await pump(tester, r: r, width: 360);
-      final card = find.byKey(ValueKey('board-${_server.baseUrl}-s1'));
-      await tester.tap(find.descendant(of: card, matching: find.widgetWithText(OutlinedButton, 'Pin work item')));
+      await tester.tap(find.byKey(ValueKey('board-more-${_server.baseUrl}-s1')));
+      await tester.pumpAndSettle();
+      await tester.tap(find.text('Pin work item'));
       await tester.pumpAndSettle();
       expect(find.byKey(const ValueKey('pin-ref')), findsOneWidget);
       // Now the keyboard comes up under a short phone screen.
@@ -443,24 +872,26 @@ void main() {
       await tester.pumpWidget(const SizedBox());
     });
 
-    testWidgets('favourites lead, in pinned order, and are not repeated below', (tester) async {
+    testWidgets('favourites carry a star and lead their column, in pinned order', (tester) async {
       rows = [
+        _row('c', 'Gamma', brief: _briefJson()),
         _row('a', 'Alpha', brief: _briefJson(), favorite: true, rank: 2),
         _row('b', 'Beta', brief: _briefJson(), favorite: true, rank: 1),
-        _row('c', 'Gamma', brief: _briefJson()),
       ];
       final r = await repo();
       await pump(tester, r: r);
-      final favs = find.byKey(const ValueKey('board-favorites'));
-      expect(find.descendant(of: favs, matching: find.text('Alpha')), findsOneWidget);
-      expect(find.descendant(of: favs, matching: find.text('Gamma')), findsNothing);
+      double y(String name) => tester.getTopLeft(inCol('idle', find.text(name))).dy;
+      expect(y('Beta'), lessThan(y('Alpha')), reason: 'rank 1 before rank 2');
+      expect(y('Alpha'), lessThan(y('Gamma')), reason: 'favourites first');
       expect(find.text('Alpha'), findsOneWidget, reason: 'moved, not repeated');
-      expect(tester.getTopLeft(find.text('Beta')).dx, lessThan(tester.getTopLeft(find.text('Alpha')).dx),
-          reason: 'pinned order: rank 1 before rank 2 (side by side in the wide grid)');
+      expect(find.descendant(of: find.byKey(ValueKey('board-${_server.baseUrl}-a')), matching: find.byIcon(Icons.star)),
+          findsOneWidget);
+      expect(find.descendant(of: find.byKey(ValueKey('board-${_server.baseUrl}-c')), matching: find.byIcon(Icons.star)),
+          findsNothing);
       await tester.pumpWidget(const SizedBox());
     });
 
-    testWidgets('hide from the menu sends hidden:true, offers Undo, and the Hidden tab unhides', (tester) async {
+    testWidgets('hide from the menu sends hidden:true, offers Undo, and the Hidden fold unhides', (tester) async {
       rows = [
         _row('v', 'Visible one', brief: _briefJson()),
         _row('h', 'Hidden one', brief: {..._briefJson(), 'hidden': true}),
@@ -468,28 +899,27 @@ void main() {
       final r = await repo();
       await pump(tester, r: r);
       expect(find.text('Hidden one'), findsNothing);
-      expect(find.text('Hidden 1'), findsOneWidget);
+      expect(find.text('Hidden (1)'), findsOneWidget);
 
       await tester.tap(find.byKey(ValueKey('board-more-${_server.baseUrl}-v')));
       await tester.pumpAndSettle();
       await tester.tap(find.text('Hide from dashboard'));
       await tester.pump();
-      await tester.runAsync(() => Future<void>.delayed(const Duration(milliseconds: 50)));
-      await tester.pump();
+      await settle(tester);
       expect(patches.map((p) => '${p.url.path} ${p.body}'), ['/api/sessions/v/brief {"hidden":true}']);
       await tester.pumpAndSettle();
       expect(find.text('Undo'), findsOneWidget);
       await tester.tap(find.text('Undo'));
       await tester.pump();
-      await tester.runAsync(() => Future<void>.delayed(const Duration(milliseconds: 50)));
+      await settle(tester);
       expect(patches.last.body, '{"hidden":false}');
 
-      await tester.tap(find.text('Hidden 1'));
+      await tester.tap(find.text('Hidden (1)'));
       await tester.pump();
       expect(find.text('Hidden one'), findsOneWidget);
       await tester.tap(find.text('Unhide'));
       await tester.pump();
-      await tester.runAsync(() => Future<void>.delayed(const Duration(milliseconds: 50)));
+      await settle(tester);
       expect('${patches.last.url.path} ${patches.last.body}', '/api/sessions/h/brief {"hidden":false}');
       ScaffoldMessenger.of(tester.element(find.byType(ListView))).clearSnackBars();
       await tester.pumpWidget(const SizedBox());
@@ -503,7 +933,7 @@ void main() {
       await tester.pumpAndSettle();
       await tester.tap(find.text('Hide from dashboard'));
       await tester.pump();
-      await tester.runAsync(() => Future<void>.delayed(const Duration(milliseconds: 50)));
+      await settle(tester);
       await tester.pumpAndSettle();
       expect(find.text('Hidden "Visible one"'), findsOneWidget);
       await tester.pump(const Duration(seconds: 6));
@@ -522,7 +952,7 @@ void main() {
       await tester.pumpAndSettle();
       await tester.tap(find.text('Hide from dashboard'));
       await tester.pump();
-      await tester.runAsync(() => Future<void>.delayed(const Duration(milliseconds: 50)));
+      await settle(tester);
       await tester.pumpAndSettle();
       await tester.pump(const Duration(seconds: 6));
       await tester.pumpAndSettle();
@@ -531,22 +961,12 @@ void main() {
       await tester.pumpWidget(const SizedBox());
     });
 
-    testWidgets('reasons group the board; done is collapsed; the card carries the machine stripe', (tester) async {
+    testWidgets('a card carries the machine stripe', (tester) async {
       rows = [
         _row('x', 'External one', brief: _briefJson(), reason: {'kind': 'external', 'text': 'vendor licence', 'source': 'reported'}),
-        _row('d', 'Done one', brief: _briefJson(), reason: {'kind': 'done', 'text': 'pushed', 'source': 'reported'}),
-        _row('q', 'Quiet one'),
       ];
       final r = await repo();
       await pump(tester, r: r);
-      expect(find.text('Blocked on others'), findsOneWidget);
-      expect(find.text('Blocked: vendor licence'), findsOneWidget);
-      expect(find.text('Not reported'), findsOneWidget);
-      expect(find.text('Quiet one'), findsOneWidget);
-      expect(find.text('Done one'), findsNothing, reason: 'Done starts collapsed');
-      await tester.tap(find.text('Done'));
-      await tester.pump();
-      expect(find.text('Done one'), findsOneWidget);
       final stripe = find.descendant(
         of: find.byKey(ValueKey('board-${_server.baseUrl}-x')),
         matching: find.byWidgetPredicate((w) => w is ColoredBox && w.color == const Color(0xFFE27BF5)),
@@ -565,61 +985,67 @@ void main() {
       await tester.pumpWidget(const SizedBox());
     });
 
-    testWidgets('"Not waiting" clears a reported wait; a mechanical reason offers no such item (#320)', (tester) async {
-      rows = [
-        _row('r', 'Reported one', brief: _briefJson(), reason: {'kind': 'you', 'text': 'say go', 'source': 'reported'}),
-        _row('m', 'Mechanical one', status: 'waiting', waitingFor: 'permission', brief: _briefJson(),
-            reason: {'kind': 'you', 'text': 'approve a tool', 'source': 'status'}),
+    testWidgets('#337: closed sessions are grouped by day; Reopen resumes the conversation on ITS server', (tester) async {
+      final now = DateTime.now();
+      final yesterday = now.subtract(const Duration(days: 1)).millisecondsSinceEpoch;
+      closed = [
+        {
+          'id': 'c1',
+          'name': 'GP10 version',
+          'did': {'text': 'Built 8.4.2'},
+          'at': now.millisecondsSinceEpoch,
+          'cwd': 'C:/dev/gp10',
+          'agent': 'claude',
+          'claudeSessionId': '0b7e2c1a-1111-2222-3333-444455556666',
+          'resumeCommand': 'claude --resume 0b7e2c1a-1111-2222-3333-444455556666',
+        },
+        {'id': 'c2', 'name': 'Plain shell', 'at': yesterday, 'resumeCommand': null},
       ];
+      rows = [_row('i', 'Idle one', brief: _briefJson())];
       final r = await repo();
-      await pump(tester, r: r);
-      await tester.tap(find.byKey(ValueKey('board-more-${_server.baseUrl}-m')));
-      await tester.pumpAndSettle();
-      expect(find.text('Not waiting'), findsNothing);
-      await tester.tapAt(const Offset(5, 5));
-      await tester.pumpAndSettle();
-      await tester.tap(find.byKey(ValueKey('board-more-${_server.baseUrl}-r')));
-      await tester.pumpAndSettle();
-      await tester.tap(find.text('Not waiting'));
-      await tester.pumpAndSettle();
-      await tester.runAsync(() => Future<void>.delayed(const Duration(milliseconds: 50)));
-      expect('${patches.last.url.path} ${patches.last.body}', '/api/sessions/r/brief {"clearWait":true}');
-      await tester.pumpWidget(const SizedBox());
-    });
-
-    testWidgets('a hidden session in the Needs-you strip offers Not waiting there - only for a reported wait (#324)',
-        (tester) async {
-      rows = [
-        _row('r', 'Reported one', brief: {..._briefJson(), 'hidden': true},
-            reason: {'kind': 'you', 'text': 'say go', 'source': 'reported'}),
-        _row('m', 'Mechanical one', status: 'waiting', waitingFor: 'permission', brief: {..._briefJson(), 'hidden': true},
-            reason: {'kind': 'you', 'text': 'approve a tool', 'source': 'status'}),
-      ];
-      final r = await repo();
-      await pump(tester, r: r);
-      final reported = find.byKey(ValueKey('board-needs-${_server.baseUrl}-r'));
-      final mechanical = find.byKey(ValueKey('board-needs-${_server.baseUrl}-m'));
-      expect(reported, findsOneWidget);
-      expect(mechanical, findsOneWidget);
-      expect(find.descendant(of: mechanical, matching: find.byTooltip('Not waiting: Mechanical one')), findsNothing);
-      // "hidden" sits before the long reason, so a phone's ellipsis cannot hide it.
-      expect(find.descendant(of: reported, matching: find.textContaining('Reported one · hidden ·')), findsOneWidget);
-      await tester.tap(find.descendant(of: reported, matching: find.byTooltip('Not waiting: Reported one')));
+      final opened = await pump(tester, r: r);
+      expect(find.text('GP10 version'), findsNothing, reason: 'folded until asked');
+      await tester.tap(find.text('Closed in the last days (2)'));
       await tester.pump();
-      await tester.runAsync(() => Future<void>.delayed(const Duration(milliseconds: 50)));
-      expect('${patches.last.url.path} ${patches.last.body}', '/api/sessions/r/brief {"clearWait":true}');
+      expect(find.text('Today'), findsOneWidget);
+      expect(find.text('Yesterday'), findsOneWidget);
+      expect(find.text('Built 8.4.2'), findsOneWidget);
+      // A record the server could not name a conversation for is greyed, with no button.
+      expect(find.byKey(ValueKey('board-reopen-${_server.baseUrl}-c2')), findsNothing);
+      expect(tester.widget<Opacity>(find.byKey(ValueKey('board-closed-${_server.baseUrl}-c2'))).opacity, lessThan(1));
+
+      await tester.tap(find.byKey(ValueKey('board-reopen-${_server.baseUrl}-c1')));
+      await tester.pump();
+      await settle(tester);
+      expect(posts, hasLength(1));
+      expect(posts.single.url.toString(), startsWith(_server.baseUrl), reason: 'on the server it closed on');
+      expect(jsonDecode(posts.single.body), {
+        'name': 'GP10 version',
+        'cwd': 'C:/dev/gp10',
+        'autoCommand': 'claude --resume 0b7e2c1a-1111-2222-3333-444455556666',
+        'agent': 'claude',
+      });
+      expect(opened.single.id, 'reopened-1', reason: 'the new session is opened (selected in the pane on a wide window)');
       await tester.pumpWidget(const SizedBox());
     });
 
-    testWidgets('#337: only the tabs are left above the board - no order, grouping, search or chips', (tester) async {
+    testWidgets('#337: a closed conversation that is live again offers Open, not a second copy', (tester) async {
+      const conv = '0b7e2c1a-1111-2222-3333-444455556666';
+      closed = [
+        {'id': 'c1', 'name': 'GP10 version', 'at': DateTime.now().millisecondsSinceEpoch, 'cwd': 'C:/w', 'claudeSessionId': conv, 'resumeCommand': 'claude --resume $conv'},
+      ];
+      rows = [
+        {..._row('live', 'GP10 again', brief: _briefJson()), 'claudeSessionId': conv},
+      ];
       final r = await repo();
-      await pump(tester, r: r);
-      expect(find.byKey(const ValueKey('board-tabs')), findsOneWidget);
-      for (final gone in ['board-sort', 'board-grouping', 'board-search', 'board-chip-you']) {
-        expect(find.byKey(ValueKey(gone)), findsNothing, reason: '$gone was removed');
-      }
-      expect(find.text('By server'), findsNothing);
-      expect(find.text('By work item'), findsNothing);
+      final opened = await pump(tester, r: r);
+      await tester.tap(find.text('Closed in the last days (1)'));
+      await tester.pump();
+      expect(find.byKey(ValueKey('board-reopen-${_server.baseUrl}-c1')), findsNothing);
+      await tester.tap(find.byKey(ValueKey('board-closed-open-${_server.baseUrl}-c1')));
+      await tester.pump();
+      expect(opened.single.id, 'live');
+      expect(posts, isEmpty);
       await tester.pumpWidget(const SizedBox());
     });
 
@@ -637,6 +1063,7 @@ void main() {
                   repository: r,
                   servers: () => const [_server],
                   clientFactory: client,
+                  sessionInput: fakeInput,
                   pollInterval: const Duration(hours: 1),
                   onOpenSession: (_) {},
                 ),
@@ -656,6 +1083,36 @@ void main() {
       await open(embedded: true);
       expect(find.byType(WorkBoardScreen), findsOneWidget);
       expect(find.byType(BackButton), findsNothing);
+      await tester.pumpWidget(const SizedBox());
+    });
+
+    testWidgets('the board reads in a LIGHT theme too', (tester) async {
+      rows = [
+        _row('w', 'Running one', status: 'working', brief: _briefJson()),
+        _row('r', 'Reported one', brief: _briefJson(), reason: {'kind': 'you', 'text': 'go?', 'source': 'reported'}),
+      ];
+      final r = await repo();
+      tester.view.physicalSize = const Size(1200, 2400);
+      tester.view.devicePixelRatio = 1;
+      addTearDown(tester.view.resetPhysicalSize);
+      addTearDown(tester.view.resetDevicePixelRatio);
+      await tester.pumpWidget(MaterialApp(
+        theme: ThemeData.light(),
+        home: WorkBoardScreen(
+          repository: r,
+          servers: () => const [_server],
+          clientFactory: client,
+          sessionInput: fakeInput,
+          pollInterval: const Duration(hours: 1),
+          onOpenSession: (_) {},
+        ),
+      ));
+      await tester.runAsync(() => r.refresh());
+      await tester.pump();
+      expect(find.text('Reported one'), findsOneWidget);
+      expect(tester.takeException(), isNull);
+      final head = tester.widget<Text>(find.text('NEEDS YOU'));
+      expect(head.style?.color, isNot(AppColors.caution), reason: 'a darker amber, readable on white');
       await tester.pumpWidget(const SizedBox());
     });
   });

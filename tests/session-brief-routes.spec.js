@@ -243,8 +243,31 @@ test.describe('#298 sessions dashboard — server wiring', () => {
     await expect.poll(async () => {
       const j = await (await ctx.get('/api/dashboard/closed')).json();
       return j.closed.find((c) => c.id === closing) || null;
-    }, { timeout: 10000 }).toMatchObject({ name, items: [{ ref: '#5', state: 'done' }] });
+    }, { timeout: 10000 }).toMatchObject({ name, items: [{ ref: '#5', state: 'done' }], resumeCommand: null });
     expect(await briefOf(ctx, closing)).toBeUndefined();
+  });
+
+  test('#337: a closed record carries what a Reopen needs - cwd, agent, conversation and the resume command', async () => {
+    const conv = '0b7e2c1a-3370-4337-8337-000000000337';
+    // `echo` keeps the PTY harmless; the worker reads the conversation id off the
+    // command exactly as it does for a real `claude --resume <id>`.
+    const r = await ctx.post('/api/sessions', { data: { name: `reopen-${Date.now()}`, autoCommand: `echo claude --resume ${conv}` } });
+    expect(r.status()).toBe(200);
+    const closing = (await r.json()).id;
+    await hook(closing, 'UserPromptSubmit', { prompt: 'p', cwd: 'C:/wt-337-agent-cwd' });
+    await expect.poll(async () => {
+      const row = (await (await ctx.get('/api/sessions')).json()).find((s) => s.id === closing);
+      return row && row.claudeSessionId;
+    }, { timeout: 10000 }).toBe(conv); // a list read records the launch
+    await ctx.delete(`/api/sessions/${closing}`);
+    await expect.poll(async () => {
+      const j = await (await ctx.get('/api/dashboard/closed')).json();
+      return j.closed.find((c) => c.id === closing) || null;
+    }, { timeout: 10000 }).toMatchObject({
+      cwd: 'C:/wt-337-agent-cwd',
+      claudeSessionId: conv,
+      resumeCommand: `echo claude --resume ${conv}`,
+    });
   });
 
   test('scripts/wt-report.js — what the agent actually runs — reports, and says why when it cannot', async () => {

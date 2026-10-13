@@ -137,7 +137,7 @@ session is told how on every prompt, and a turn that changed an item without rep
 it is held for one short report before it ends. A report that has fallen behind says
 so on its card. Pin a work item yourself, or switch reporting off for one session.
 Every **claude.ai artifact** a session published (an overview page, a plan, a report) is
-a link on its card, newest first, and on the closed-sessions strip for a day after it ends. It is read
+a link on its card, newest first, and on the closed-sessions list for a week after it ends. It is read
 from the publish itself rather than reported, artifacts published before this shipped are
 picked up from the session's transcript, and the filter finds a session by an artifact's
 title.
@@ -156,6 +156,14 @@ working** (needs you, including a session stuck in a menu, working, running on i
 blocked on others, idle, done), by server or
 by work item; filter by text or machine and choose the order; and **hide** a session that is
 not relevant (with an undo) into a Hidden tab, stored on its server so every device agrees.
+
+In the **companion app** the dashboard is a **session board** you can act from: three columns
+(**Needs you**, **Working**, **Idle / done**), and on a wide window it fills the main area whenever
+no session is open. A question card answers with one press per option, a session waiting on you
+takes a one-line reply, **Stop** interrupts a working session, a session stuck in a menu gets Esc,
+and **Not waiting** clears a reported wait. **Closed in the last days** keeps a week of closed
+sessions, grouped by day, and **Reopen** starts a new session that resumes that conversation on
+the same server.
 
 **Why a session is idle** — the session list and the dashboard say why a session that is not
 working is not working: it is waiting on you, it will carry on by itself (a CI run, a build, a
