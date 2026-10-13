@@ -891,10 +891,12 @@ class _TitleFilter extends StatefulWidget {
 
 class _TitleFilterState extends State<_TitleFilter> {
   late final TextEditingController _c = TextEditingController(text: widget.value);
+  final FocusNode _focus = FocusNode(debugLabel: 'session-title-filter');
 
   @override
   void dispose() {
     _c.dispose();
+    _focus.dispose();
     super.dispose();
   }
 
@@ -906,6 +908,13 @@ class _TitleFilterState extends State<_TitleFilter> {
         key: const ValueKey('session-title-filter'),
         controller: _c,
         onChanged: widget.onChanged,
+        focusNode: _focus,
+        // #347 - a touch anywhere else lets go of the field. Flutter's own tap-outside
+        // does that for a mouse only, so on a phone the filter stayed focused under
+        // every row tap, sheet and screen the list opened, its route remembered it, and
+        // the pop that came back refocused it and opened the keyboard. Letting go HERE,
+        // before whatever the touch opens, also clears that memory.
+        onTapOutside: (_) => _focus.unfocus(),
         textInputAction: TextInputAction.search,
         decoration: InputDecoration(
           isDense: true,

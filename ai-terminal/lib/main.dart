@@ -209,6 +209,10 @@ class _AiTerminalAppState extends State<AiTerminalApp>
       return route.isFirst || route.settings.name == name;
     });
     if (!alreadyOpen) {
+      // #347 - no touch reached the list, so its title filter may still hold focus;
+      // let go before the push, or the Back from this session refocuses it and opens
+      // the keyboard.
+      FocusManager.instance.primaryFocus?.unfocus();
       nav.push(MaterialPageRoute(
         settings: RouteSettings(name: name),
         builder: (_) => SessionScreen(sessionId: sessionId),
