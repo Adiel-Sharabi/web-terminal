@@ -173,6 +173,19 @@ reports it is waiting on you and it is not, **Not waiting** (in the card's menu,
 entry in the Needs you strip, where a hidden session shows, or on its row in the session list)
 clears it. The session list also has a **filter by title** box.
 
+**Hand off a long session** — a Claude session that has run for days re-reads its whole
+context on every turn, and past ~700k tokens it starts losing track of what it already read.
+When one is idle, its own report says it is waiting on someone else or done, and its context
+is at least 500k tokens, the companion's board offers **Hand off** on its row. One press makes
+the session update its tracker and write a brief for its successor (it posts no GitHub
+comment), says whether closing it would lose anything, then starts a fresh session in the same
+folder from that brief. The old session closes only once the new one has actually started a
+turn and nothing would be lost; otherwise it stays open and the row says why. Every failure
+leaves it as it was, and **Cancel** works at every step until the moment it closes. The brief is
+written outside the session's folder, so a session that asks before writing files will ask once. Tune it with a `handoff` block in `config.json` (`ctxThreshold`, default
+500000; `idleMin`, default 10; `enabled`), read live. Claude only: another agent is offered
+nothing.
+
 **A colour per machine** — set `serverColor` on each server and its sessions carry that colour
 in the session list and on the dashboard of every client.
 

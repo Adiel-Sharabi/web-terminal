@@ -81,5 +81,8 @@ session-briefs.test.json
 session-briefs.test.json.tmp
 session-briefs.json.corrupt-*
 session-briefs.test.json.corrupt-*
+# #340 hand-off briefs (one per handed-off session; written by the agent)
+handoffs/
+handoffs.test/
 # Which device sent each prompt (#311): the suite's copy (production's is under logs/).
 device-ops.test.jsonl
