@@ -182,9 +182,19 @@ comment), says whether closing it would lose anything, then starts a fresh sessi
 folder from that brief. The old session closes only once the new one has actually started a
 turn and nothing would be lost; otherwise it stays open and the row says why. Every failure
 leaves it as it was, and **Cancel** works at every step until the moment it closes. The brief is
-written outside the session's folder, so a session that asks before writing files will ask once. Tune it with a `handoff` block in `config.json` (`ctxThreshold`, default
-500000; `idleMin`, default 10; `enabled`), read live. Claude only: another agent is offered
-nothing.
+written outside the session's folder, so a session that asks before writing files will ask once.
+
+**It also happens on its own.** About once a minute the server hands off, one at a time, any
+session the board would offer it for, with no press. The successor is named like the old
+session with a number after it, `name (2)`. A **Cancel** or **Dismiss**, or an attempt that ended
+kept or failed, stops it trying that session again until you type into it. Every start and every
+outcome (closed, kept, failed, cancelled) is appended to `handoffs/handoff-log.jsonl`, with who
+started it, the context size, the verdict and the successor, so the automatic hand-offs can be
+judged afterwards. The briefs are kept for a week.
+
+Tune it with a `handoff` block in `config.json` (`ctxThreshold`, default 500000; `idleMin`,
+default 10; `auto: false` to go back to the button only; `enabled: false` for neither), read
+live. Claude only: another agent is offered nothing.
 
 **A colour per machine** — set `serverColor` on each server and its sessions carry that colour
 in the session list and on the dashboard of every client.
