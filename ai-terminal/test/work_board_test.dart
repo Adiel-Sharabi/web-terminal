@@ -45,7 +45,13 @@ Map<String, dynamic> _briefJson({
     };
 
 Map<String, dynamic> _row(String id, String name,
-        {String status = 'idle', Object? brief, String? waitingFor, Object? reason, bool favorite = false, int? rank}) =>
+        {String status = 'idle',
+        Object? brief,
+        String? waitingFor,
+        Object? reason,
+        bool favorite = false,
+        int? rank,
+        Object? handoff}) =>
     {
       'id': id,
       'name': name,
@@ -58,6 +64,7 @@ Map<String, dynamic> _row(String id, String name,
       'reason': reason,
       'favorite': favorite,
       'favoriteRank': rank,
+      'handoff': handoff,
     };
 
 Session _session(String id, {SessionBrief? brief, String status = 'idle'}) => Session(
@@ -178,6 +185,32 @@ void main() {
       expect(list.single.server, _server);
       expect(list.single.items.single.state, 'done');
     });
+
+    test('#340: startHandoff POSTs an empty JSON body; cancelHandoff DELETEs the same route', () async {
+      final seen = <http.Request>[];
+      final client = ApiClient(_server, httpClient: MockClient((req) async {
+        seen.add(req);
+        return http.Response(jsonEncode({'ok': true}), 200);
+      }));
+      await client.startHandoff('s1');
+      await client.cancelHandoff('s1');
+      expect(seen.map((r) => '${r.method} ${r.url.path}'), ['POST /api/sessions/s1/handoff', 'DELETE /api/sessions/s1/handoff']);
+      expect(jsonDecode(seen.first.body), isEmpty);
+      expect(seen.first.headers['content-type'], contains('application/json'));
+      expect(seen.last.headers['authorization'], 'Bearer tok');
+    });
+
+    test('#340: a 409 carries the server\'s own words; a 404 on cancel is a 404', () async {
+      final client = ApiClient(_server, httpClient: MockClient((req) async => req.method == 'POST'
+          ? http.Response(jsonEncode({'error': 'Not a hand-off candidate', 'why': 'ctx-too-small'}), 409)
+          : http.Response(jsonEncode({'error': 'No hand-off to cancel'}), 404)));
+      await expectLater(
+          client.startHandoff('s1'),
+          throwsA(isA<ApiException>()
+              .having((e) => e.status, 'status', 409)
+              .having((e) => e.message, 'message', 'Not a hand-off candidate')));
+      await expectLater(client.cancelHandoff('s1'), throwsA(isA<ApiException>().having((e) => e.status, 'status', 404)));
+    });
   });
 
   group('rules', () {
@@ -220,6 +253,11 @@ void main() {
   group('WorkBoardScreen', () {
     late List<http.Request> patches;
     late List<http.Request> posts;
+
+    /// Every POST/DELETE to /api/sessions/:id/handoff (#340), and what the server answers.
+    late List<http.Request> handoffCalls;
+    late int handoffStatus;
+    late String handoffReply;
     late List<String> paths;
     late List<Map<String, dynamic>> rows;
     late List<String> capabilities;
@@ -249,6 +287,10 @@ void main() {
           if (q != null) {
             final pending = questions[q.group(1)];
             return http.Response(jsonEncode(pending == null ? {'pending': false} : {'pending': true, 'question': pending}), 200);
+          }
+          if (RegExp(r'^/api/sessions/[^/]+/handoff$').hasMatch(req.url.path)) {
+            handoffCalls.add(req);
+            return http.Response(handoffReply, handoffStatus);
           }
           if (req.method == 'POST' && req.url.path == '/api/sessions') {
             posts.add(req);
@@ -296,11 +338,14 @@ void main() {
     setUp(() {
       patches = [];
       posts = [];
+      handoffCalls = [];
+      handoffStatus = 200;
+      handoffReply = jsonEncode({'ok': true});
       paths = [];
       sent = [];
       questions = {};
       inputReachable = true;
-      capabilities = ['session-brief', 'session-hide', 'favorites-sync', 'session-clear-wait'];
+      capabilities = ['session-brief', 'session-hide', 'favorites-sync', 'session-clear-wait', 'session-handoff'];
       closed = [
         {'id': 'gone', 'name': 'Finished session', 'items': [], 'did': {'text': 'wrapped up'}, 'at': DateTime.now().millisecondsSinceEpoch},
       ];
@@ -1046,6 +1091,224 @@ void main() {
       await tester.pump();
       expect(opened.single.id, 'live');
       expect(posts, isEmpty);
+      await tester.pumpWidget(const SizedBox());
+    });
+
+    /// #340 - every Hand off button on screen (any session).
+    Finder handoffButtons() => find.byWidgetPredicate(
+        (w) => w.key is ValueKey<String> && (w.key as ValueKey<String>).value.startsWith('board-handoff-btn-'));
+
+    int agoMs(Duration d) => DateTime.now().millisecondsSinceEpoch - d.inMilliseconds;
+
+    testWidgets('#340: an Idle candidate shows its context and Hand off; the confirm says what will happen, and only Hand off sends',
+        (tester) async {
+      rows = [
+        _row('big', 'Big session', brief: _briefJson(), handoff: {'suggest': true, 'ctxTokens': 612000, 'why': null, 'run': null}),
+      ];
+      final r = await repo();
+      await pump(tester, r: r);
+      final btn = find.byKey(ValueKey('board-handoff-btn-${_server.baseUrl}-big'));
+      expect(inCol('idle', find.text('612k ctx')), findsOneWidget);
+      expect(inCol('idle', btn), findsOneWidget);
+
+      await tester.tap(btn);
+      await tester.pumpAndSettle();
+      expect(find.text('Hand off "Big session" (612k ctx)?'), findsOneWidget);
+      expect(find.textContaining('closes afterwards only if nothing would be lost'), findsOneWidget);
+      await tester.tap(find.text('Cancel'));
+      await tester.pumpAndSettle();
+      expect(handoffCalls, isEmpty, reason: 'declining the confirm sends nothing');
+
+      await tester.tap(btn);
+      await tester.pumpAndSettle();
+      await tester.tap(find.byKey(const ValueKey('board-handoff-confirm')));
+      await tester.pump();
+      await settle(tester);
+      expect(handoffCalls.map((c) => '${c.method} ${c.url.path} ${c.body}'), ['POST /api/sessions/big/handoff {}']);
+      await tester.pumpWidget(const SizedBox());
+    });
+
+    testWidgets('#340: the server refusing (409) is said in its own words', (tester) async {
+      rows = [_row('big', 'Big session', brief: _briefJson(), handoff: {'suggest': true, 'ctxTokens': null})];
+      handoffStatus = 409;
+      handoffReply = jsonEncode({'error': 'Not a hand-off candidate', 'why': 'busy'});
+      final r = await repo();
+      await pump(tester, r: r);
+      expect(inCol('idle', find.text('Long session')), findsOneWidget, reason: 'no size known: no invented number');
+      await tester.tap(find.byKey(ValueKey('board-handoff-btn-${_server.baseUrl}-big')));
+      await tester.pumpAndSettle();
+      expect(find.text('Hand off "Big session"?'), findsOneWidget);
+      await tester.tap(find.byKey(const ValueKey('board-handoff-confirm')));
+      await tester.pump();
+      await settle(tester);
+      await tester.pump();
+      expect(find.text('Could not hand off "Big session": Not a hand-off candidate'), findsOneWidget);
+      ScaffoldMessenger.of(tester.element(find.byType(ListView))).clearSnackBars();
+      await tester.pumpWidget(const SizedBox());
+    });
+
+    testWidgets('#340: no Hand off for a non-candidate, an agent without one, a Working card or a hidden row', (tester) async {
+      const cand = {'suggest': true, 'ctxTokens': 700000, 'run': null};
+      rows = [
+        _row('no', 'Not yet', brief: _briefJson(), handoff: {'suggest': false, 'ctxTokens': 90000, 'why': 'ctx-too-small', 'run': null}),
+        _row('none', 'No hand-off', brief: _briefJson()),
+        _row('work', 'Busy one', status: 'working', brief: _briefJson(), handoff: cand),
+        _row('hid', 'Hidden big', brief: {..._briefJson(), 'hidden': true}, handoff: cand),
+      ];
+      final r = await repo();
+      await pump(tester, r: r);
+      expect(find.text('Not yet'), findsOneWidget);
+      expect(find.text('Busy one'), findsOneWidget);
+      expect(handoffButtons(), findsNothing);
+      expect(find.text('700k ctx'), findsNothing);
+      await tester.tap(find.text('Hidden (1)'));
+      await tester.pump();
+      expect(find.text('Hidden big'), findsOneWidget);
+      expect(handoffButtons(), findsNothing);
+      await tester.pumpWidget(const SizedBox());
+    });
+
+    testWidgets('#340: a server without session-handoff offers no button, but a run it left on a row is still drawn',
+        (tester) async {
+      capabilities = ['session-brief', 'session-hide', 'favorites-sync'];
+      rows = [
+        _row('big', 'Big session', brief: _briefJson(), handoff: {'suggest': true, 'ctxTokens': 612000, 'run': null}),
+        _row('go', 'Going one', brief: _briefJson(), handoff: {
+          'suggest': false,
+          'run': {'state': 'spawning', 'startedAt': agoMs(const Duration(minutes: 1))},
+        }),
+      ];
+      final r = await repo();
+      await pump(tester, r: r);
+      expect(handoffButtons(), findsNothing);
+      expect(find.textContaining('Handing off: starting the new session…'), findsOneWidget);
+      await tester.pumpWidget(const SizedBox());
+    });
+
+    testWidgets('#340: a run follows its session between columns; Cancel in every in-flight state', (tester) async {
+      rows = [
+        // Wrapping makes the old session Working: a card, not a row.
+        _row('wrap', 'Wrapping one', status: 'working', brief: _briefJson(), handoff: {
+          'suggest': true,
+          'ctxTokens': 650000,
+          'run': {'state': 'wrapping', 'startedAt': agoMs(const Duration(minutes: 4)), 'at': agoMs(const Duration(seconds: 3))},
+        }),
+        _row('close', 'Closing one', brief: _briefJson(), handoff: {
+          'suggest': true,
+          'run': {'state': 'closing', 'startedAt': agoMs(const Duration(minutes: 9)), 'successorId': 'n', 'successorName': 'Closing one 2'},
+        }),
+        _row('ver', 'Verifying one', brief: _briefJson(), handoff: {
+          'suggest': true,
+          'run': {'state': 'verifying', 'startedAt': agoMs(const Duration(minutes: 5)), 'successorId': 'n2', 'successorName': 'Verifying one 2'},
+        }),
+      ];
+      final r = await repo();
+      await pump(tester, r: r);
+      expect(inCol('work', find.textContaining('Handing off: writing its brief… · 4m')), findsOneWidget);
+      expect(inCol('idle', find.textContaining('Handing off: closing this one when its turn ends…')), findsOneWidget);
+      expect(inCol('idle', find.textContaining('Handing off: checking "Verifying one 2" came up…')), findsOneWidget);
+      expect(handoffButtons(), findsNothing, reason: 'a row with a run offers no second one');
+
+      final base = _server.baseUrl;
+      expect(find.byKey(ValueKey('board-handoff-cancel-$base-wrap')), findsOneWidget);
+      expect(find.byKey(ValueKey('board-handoff-cancel-$base-ver')), findsOneWidget);
+      expect(find.byKey(ValueKey('board-handoff-cancel-$base-close')), findsOneWidget, reason: 'closing waits for the old turn to end, and can be cancelled');
+
+      await tester.tap(find.byKey(ValueKey('board-handoff-cancel-$base-wrap')));
+      await tester.pump();
+      await settle(tester);
+      expect(handoffCalls.map((c) => '${c.method} ${c.url.path}'), ['DELETE /api/sessions/wrap/handoff']);
+      await tester.pumpWidget(const SizedBox());
+    });
+
+    testWidgets('#340: kept and failed say why; Dismiss clears the run; Open new session opens the successor', (tester) async {
+      rows = [
+        _row('old', 'Old session', brief: _briefJson(), handoff: {
+          'suggest': true,
+          'run': {
+            'state': 'kept',
+            'reason': 'unsaved-work',
+            'keptBecause': 'two files are not committed',
+            'successorId': 'new',
+            'successorName': 'Old session 2'
+          },
+        }),
+        _row('new', 'Old session 2', status: 'working', brief: _briefJson()),
+        _row('bad', 'Failed one', brief: _briefJson(), handoff: {
+          'suggest': true,
+          'run': {'state': 'failed', 'reason': 'no-brief'},
+        }),
+        _row('hid', 'Hidden failed', brief: {..._briefJson(), 'hidden': true}, handoff: {
+          'suggest': true,
+          'run': {'state': 'failed', 'reason': 'no-slot'},
+        }),
+      ];
+      final r = await repo();
+      final opened = await pump(tester, r: r);
+      final base = _server.baseUrl;
+      expect(find.text('Handed off, but this session was kept: two files are not committed'), findsOneWidget);
+      expect(find.text('Hand-off did not finish: It never wrote its brief'), findsOneWidget);
+      expect(handoffButtons(), findsNothing);
+
+      // The fresh session is in the list, so the kept row can open it.
+      await tester.tap(find.byKey(ValueKey('board-handoff-successor-$base-old')));
+      await tester.pump();
+      expect(opened.map((s) => s.id), ['new']);
+      expect(find.byKey(ValueKey('board-handoff-successor-$base-bad')), findsNothing);
+
+      await tester.tap(find.byKey(ValueKey('board-handoff-dismiss-$base-bad')));
+      await tester.pump();
+      await settle(tester);
+      expect(handoffCalls.map((c) => '${c.method} ${c.url.path}'), ['DELETE /api/sessions/bad/handoff']);
+
+      // A hidden row shows its run (so it is never invisible) but offers no new one.
+      await tester.tap(find.text('Hidden (1)'));
+      await tester.pump();
+      expect(find.text('Hand-off did not finish: No free session slot on this server'), findsOneWidget);
+      expect(handoffButtons(), findsNothing);
+      await tester.pumpWidget(const SizedBox());
+    });
+
+    testWidgets('#340: dismissing a run that is already gone (404) is not an error', (tester) async {
+      rows = [
+        _row('bad', 'Failed one', brief: _briefJson(), handoff: {
+          'suggest': true,
+          'run': {'state': 'failed', 'reason': 'successor-gone'},
+        }),
+      ];
+      handoffStatus = 404;
+      handoffReply = jsonEncode({'error': 'No hand-off'});
+      final r = await repo();
+      await pump(tester, r: r);
+      expect(find.text('Hand-off did not finish: The new session was closed'), findsOneWidget);
+      await tester.tap(find.byKey(ValueKey('board-handoff-dismiss-${_server.baseUrl}-bad')));
+      await tester.pump();
+      await settle(tester);
+      expect(handoffCalls, hasLength(1));
+      expect(find.textContaining('Could not'), findsNothing);
+      await tester.pumpWidget(const SizedBox());
+    });
+
+    testWidgets('#340: a phone-width row with a long name, a long kept reason and a candidate does not overflow', (tester) async {
+      rows = [
+        _row('a', 'A very long session name that keeps going and going', brief: _briefJson(), handoff: {
+          'suggest': true,
+          'run': {
+            'state': 'kept',
+            'reason': 'unsaved-work',
+            'keptBecause': 'the working tree has uncommitted changes in nine files and a half-written migration that nothing else records',
+            'successorId': 'b',
+            'successorName': 'B'
+          },
+        }),
+        _row('b', 'B', status: 'working', brief: _briefJson()),
+        _row('c', 'Another long session name that is very long', brief: _briefJson(), handoff: {'suggest': true, 'ctxTokens': 1200000}),
+      ];
+      final r = await repo();
+      await pump(tester, r: r, width: 360);
+      expect(find.text('1.2M ctx'), findsOneWidget);
+      expect(find.textContaining('Handed off, but this session was kept'), findsOneWidget);
+      expect(tester.takeException(), isNull);
       await tester.pumpWidget(const SizedBox());
     });
 

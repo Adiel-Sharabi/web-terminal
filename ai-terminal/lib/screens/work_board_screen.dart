@@ -17,6 +17,8 @@
 //  * Stop and Esc -> a lone `0x1b`, which the worker reads as an interrupt only for a
 //    `working` session (#55's interrupt contract);
 //  * Not waiting -> the existing clearWait PATCH (#320);
+//  * Hand off -> `POST /api/sessions/:id/handoff` (#340): the SERVER names a candidate
+//    (`handoff.suggest`) and runs it; this draws the button and the run's state;
 //  * Reopen -> `POST /api/sessions` with the resume command the SERVER derived.
 // The keys travel through [SessionInputRunner] (`services/session_input.dart`), the
 // same `/ws/:id` socket the session screen writes through.
@@ -40,6 +42,7 @@ import '../services/session_repository.dart';
 import '../theme/app_theme.dart';
 import '../theme/status_colors.dart';
 import '../widgets/format_utils.dart';
+import '../widgets/handoff_chip.dart';
 import '../widgets/question_overlay.dart'
     show answerNeedsConfirm, awaitAnswerLanded, buildAnswerFrames, deliverAnswerFrames;
 import '../widgets/reason_chip.dart';
@@ -261,6 +264,10 @@ class _WorkBoardScreenState extends State<WorkBoardScreen> {
 
   /// Closed records reopened from here, so a second press cannot start a second copy.
   final Set<String> _reopened = {};
+
+  /// Sessions with a hand-off request (#340) in flight, by [_bkey]: its button is down
+  /// until the answer is read back, so a second press cannot start a second run.
+  final Set<String> _handoffBusy = {};
 
   // #337 review - a reply is the person's words, so it follows the session screen's
   // rule (#179): kept until delivered, and put back if the agent never took it.
@@ -650,12 +657,73 @@ class _WorkBoardScreenState extends State<WorkBoardScreen> {
     }
   }
 
+  /// The fresh session a hand-off run started, when it is in the list.
+  Session? _successorOf(Session s) {
+    final id = s.handoff?.run?.successorId;
+    if (id == null) return null;
+    for (final x in _sessions) {
+      if (x.server.baseUrl == s.server.baseUrl && x.id == id) return x;
+    }
+    return null;
+  }
+
+  /// Hand [s] off to a fresh session (#340). It ends by CLOSING this one, so it asks
+  /// first and says what will happen; the server owns every other rule and answers 409
+  /// when the session is not a candidate (any more) or a run is already going.
+  Future<void> _handoff(Session s) async {
+    final k = _bkey(s);
+    if (_handoffBusy.contains(k)) return;
+    final tokens = s.handoff?.ctxTokens;
+    final ok = await showDialog<bool>(
+      context: context,
+      builder: (dialog) => AlertDialog(
+        title: Text(tokens == null
+            ? 'Hand off "${s.name}"?'
+            : 'Hand off "${s.name}" (${formatTokensShort(tokens)} ctx)?'),
+        content: const Text('It writes a brief and updates its tracker (this can take several minutes). '
+            'A fresh session then starts in the same folder from that brief. '
+            'This one closes afterwards only if nothing would be lost; otherwise it stays open.'),
+        actions: [
+          TextButton(onPressed: () => Navigator.pop(dialog, false), child: const Text('Cancel')),
+          FilledButton(
+            key: const ValueKey('board-handoff-confirm'),
+            onPressed: () => Navigator.pop(dialog, true),
+            child: const Text('Hand off'),
+          ),
+        ],
+      ),
+    );
+    if (ok != true || !mounted) return;
+    await _handoffCall(s, () => _client(s.server).startHandoff(s.id), 'hand off');
+  }
+
+  /// Cancel a run before the old session is closed, or dismiss one that ended (#340):
+  /// the same DELETE clears either. No run left to clear (404) is the outcome asked for.
+  Future<void> _cancelHandoff(Session s) =>
+      _handoffCall(s, () => _client(s.server).cancelHandoff(s.id), 'clear the hand-off of');
+
+  Future<void> _handoffCall(Session s, Future<void> Function() call, String what) async {
+    final k = _bkey(s);
+    if (_handoffBusy.contains(k)) return;
+    setState(() => _handoffBusy.add(k));
+    try {
+      await call();
+    } catch (e) {
+      if (!(e is ApiException && e.status == 404)) {
+        _say('Could not $what "${s.name}": ${e is ApiException ? e.message : '$e'}');
+      }
+    }
+    await _repo.refresh();
+    if (mounted) setState(() => _handoffBusy.remove(k));
+  }
+
   BoardActions _actionsFor(Session s) {
     final base = s.server.baseUrl;
     final brief = _repo.supportsBrief(base);
     final k = _bkey(s);
     final q = _questions[k];
     final kind = boardNeedsYou(s) ? needKindOf(s) : null;
+    final successor = _successorOf(s);
     return BoardActions(
       onOpen: () => widget.onOpenSession(s),
       onPin: brief ? () => _pin(s) : null,
@@ -667,6 +735,11 @@ class _WorkBoardScreenState extends State<WorkBoardScreen> {
       // #320 - only a REPORTED reason is the person's to clear.
       onClearWait: _repo.canClearWait(s) ? () => _patch(s, clearWait: true) : null,
       onStar: _repo.supportsFavorites(base) ? () => _toggleStar(s) : null,
+      onHandoff: _repo.canHandoff(s) ? () => _handoff(s) : null,
+      // Not gated on the capability: a run that is on the row can always be cleared.
+      onCancelHandoff: s.handoff?.run != null ? () => _cancelHandoff(s) : null,
+      onOpenSuccessor: successor == null ? null : () => widget.onOpenSession(successor),
+      handoffBusy: _handoffBusy.contains(k),
       question: kind == NeedKind.question ? q : null,
       answering: q != null && _answered[k] == questionSignature(q),
       busy: _busy.contains(k),
@@ -839,6 +912,16 @@ class BoardActions {
   final VoidCallback? onStar;
   final VoidCallback? onClearWait;
 
+  /// #340 - hand a long session off to a fresh one; null unless the server named it a
+  /// candidate and has no run going. [onCancelHandoff] cancels a run in flight or
+  /// dismisses one that ended; [onOpenSuccessor] opens the fresh session.
+  final VoidCallback? onHandoff;
+  final VoidCallback? onCancelHandoff;
+  final VoidCallback? onOpenSuccessor;
+
+  /// A hand-off request for this session is in flight.
+  final bool handoffBusy;
+
   /// #337 - the live question a question card answers, when it has been read.
   final PendingQuestion? question;
 
@@ -863,6 +946,10 @@ class BoardActions {
     this.onHide,
     this.onStar,
     this.onClearWait,
+    this.onHandoff,
+    this.onCancelHandoff,
+    this.onOpenSuccessor,
+    this.handoffBusy = false,
     this.question,
     this.answering = false,
     this.busy = false,
@@ -1034,6 +1121,78 @@ Widget _labelled(BuildContext context, String label, String text, {int maxLines 
   );
 }
 
+/// The hand-off line of a card or row (#340), or null when there is nothing to show.
+/// A run is drawn wherever its session sits - wrapping turns an idle session into a
+/// working one, so the line follows it between columns. The Hand off button is offered
+/// only where [offer] is set (the Idle column's rows) and the server named a candidate.
+Widget? _handoffStrip(Session s, BoardActions a, {required bool offer}) {
+  if (s.handoff?.run == null && !(offer && a.onHandoff != null)) return null;
+  return _HandoffStrip(session: s, actions: a);
+}
+
+class _HandoffStrip extends StatelessWidget {
+  const _HandoffStrip({required this.session, required this.actions});
+  final Session session;
+  final BoardActions actions;
+
+  @override
+  Widget build(BuildContext context) {
+    final s = session;
+    final a = actions;
+    final idk = '${s.server.baseUrl}-${s.id}';
+    final key = ValueKey('board-handoff-$idk');
+    final run = s.handoff?.run;
+    if (run == null) {
+      // A candidate: how much it carries, and the button.
+      return Row(key: key, children: [
+        HandoffCtxChip(key: ValueKey('board-handoff-ctx-$idk'), tokens: s.handoff?.ctxTokens),
+        const Spacer(),
+        TextButton.icon(
+          key: ValueKey('board-handoff-btn-$idk'),
+          style: _compactText,
+          onPressed: a.handoffBusy ? null : a.onHandoff,
+          icon: const Icon(Icons.swap_horiz, size: 16),
+          label: Text(a.handoffBusy ? 'Handing off…' : 'Hand off'),
+        ),
+      ]);
+    }
+    final chip = HandoffRunChip(run: run);
+    if (run.active) {
+      // Cancel only until the old session is being closed (the server refuses after).
+      return Row(key: key, children: [
+        Flexible(child: chip),
+        if (run.cancellable && a.onCancelHandoff != null)
+          TextButton(
+            key: ValueKey('board-handoff-cancel-$idk'),
+            style: _compactText,
+            onPressed: a.handoffBusy ? null : a.onCancelHandoff,
+            child: const Text('Cancel'),
+          ),
+      ]);
+    }
+    // Ended: kept or failed. Nothing is lost either way; Dismiss clears the notice.
+    return Column(key: key, crossAxisAlignment: CrossAxisAlignment.start, children: [
+      chip,
+      Wrap(spacing: 6, children: [
+        if (run.state == 'kept' && a.onOpenSuccessor != null)
+          TextButton(
+            key: ValueKey('board-handoff-successor-$idk'),
+            style: _compactText,
+            onPressed: a.onOpenSuccessor,
+            child: const Text('Open new session'),
+          ),
+        if (a.onCancelHandoff != null)
+          TextButton(
+            key: ValueKey('board-handoff-dismiss-$idk'),
+            style: _compactText,
+            onPressed: a.handoffBusy ? null : a.onCancelHandoff,
+            child: const Text('Dismiss'),
+          ),
+      ]),
+    ]);
+  }
+}
+
 /// One session's card in the Needs-you or Working column (#337).
 class BoardCard extends StatelessWidget {
   const BoardCard({super.key, required this.session, required this.actions, this.color});
@@ -1064,6 +1223,8 @@ class BoardCard extends StatelessWidget {
       if (b?.staleReason != null)
         Text('⚠ Report may be out of date: ${b!.staleReason}',
             key: const ValueKey('board-stale'), style: const TextStyle(color: AppColors.caution, fontSize: 12)),
+      // A run follows its session out of the Idle column: wrapping makes it Working (#340).
+      ?_handoffStrip(s, actions, offer: false),
       if (needs) ..._needControls(context, idk),
       Wrap(spacing: 6, runSpacing: 4, crossAxisAlignment: WrapCrossAlignment.center, children: [
         OutlinedButton(key: ValueKey('board-open-$idk'), style: _smallOutlined, onPressed: actions.onOpen, child: const Text('Open')),
@@ -1436,6 +1597,10 @@ class BoardRow extends StatelessWidget {
                     ],
                   ]),
                   if (!inline) Padding(padding: const EdgeInsets.fromLTRB(14, 0, 8, 4), child: didText),
+                  // Hand off (#340): its own line, because this row's main line is full on
+                  // a phone. A hidden row shows a run but offers no new one.
+                  if (_handoffStrip(s, actions, offer: !unhide) case final strip?)
+                    Padding(padding: const EdgeInsets.fromLTRB(14, 0, 6, 4), child: strip),
                   // A done session is a row, and a finished one is exactly where its
                   // overview artifact is worth finding again (#329).
                   if (artifacts.isNotEmpty)

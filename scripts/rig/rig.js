@@ -50,7 +50,10 @@ const PIPE = process.platform === 'win32'
 
 // Source that makes up the app. Everything else (config, data, node_modules, git,
 // build output) is deliberately NOT synced.
-const SYNC_FILES = ['server.js', 'pty-worker.js', 'monitor.js', 'app.html', 'terminal.html', 'lobby.html', 'sw.js'];
+// The two agent-side scripts too: the server hands their rig paths to the agent (#298
+// report, #340 hand-off verdict), and a missing script fails as "cannot find module".
+const SYNC_FILES = ['server.js', 'pty-worker.js', 'monitor.js', 'app.html', 'terminal.html', 'lobby.html', 'sw.js',
+  'scripts/wt-report.js', 'scripts/wt-handoff.js'];
 const SYNC_DIRS = ['lib', 'public', 'hooks'];
 
 const log = (m) => console.log(`[rig] ${m}`);

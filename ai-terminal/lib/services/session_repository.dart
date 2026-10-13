@@ -147,6 +147,9 @@ class SessionRepository {
   /// Per-server `machine-profile` capability (#331), from the same call.
   final Map<String, bool> _machineSupported = <String, bool>{};
 
+  /// Per-server `session-handoff` capability (#340), from the same call.
+  final Map<String, bool> _handoffSupported = <String, bool>{};
+
   // Live `/ws/notify` subscriptions, keyed by server base URL, alongside the
   // exact [ServerConfig] each was opened with (to detect a token change).
   // Re-synced from [AppConfig.serversStream] as servers are added/removed.
@@ -329,6 +332,15 @@ class SessionRepository {
 
   /// Whether the server at [baseUrl] answers `GET /api/machine` (#331).
   bool supportsMachine(String baseUrl) => _machineSupported[baseUrl] ?? false;
+
+  /// Whether the server at [baseUrl] can hand a session off to a fresh one (#340).
+  bool supportsHandoff(String baseUrl) => _handoffSupported[baseUrl] ?? false;
+
+  /// THE rule for offering "Hand off" (#340): the server named this session a candidate
+  /// (`handoff.suggest` - it owns the context threshold and the task-boundary gates),
+  /// no run is under way or awaiting a Dismiss, and the server advertises the route.
+  bool canHandoff(Session s) =>
+      supportsHandoff(s.server.baseUrl) && s.handoff?.suggest == true && s.handoff?.run == null;
 
   /// THE rule for offering "Not waiting" (#320/#324/#327), used by the session menu and
   /// the dashboard alike: only a wait the AGENT reported is the person's to clear (a live
@@ -589,6 +601,7 @@ class SessionRepository {
     _hideSupported.remove(baseUrl);
     _clearWaitSupported.remove(baseUrl);
     _machineSupported.remove(baseUrl);
+    _handoffSupported.remove(baseUrl);
   }
 
   /// Updates [_apiErrors], [_compacting] and [_submitUnconfirmedAt] from a
@@ -1066,6 +1079,7 @@ class SessionRepository {
       _hideSupported[server.baseUrl] = info.has('session-hide');
       _clearWaitSupported[server.baseUrl] = info.has('session-clear-wait');
       _machineSupported[server.baseUrl] = info.has('machine-profile');
+      _handoffSupported[server.baseUrl] = info.has('session-handoff');
       final color = info.serverColor;
       if (color != null) _serverColor[server.baseUrl] = color;
       _namesResolved.add(server.baseUrl);

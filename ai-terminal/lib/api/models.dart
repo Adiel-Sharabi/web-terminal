@@ -259,6 +259,12 @@ class Session {
   /// outlived any turn by hours), not a live build (#313). False when none run.
   final bool backgroundStale;
 
+  /// Whether this long session can be handed off to a fresh one, and where a run
+  /// stands (#340), or `null`: the agent does not support it, or the server is too
+  /// old to say. Decided server-side (the server sends `handoff` only for an agent
+  /// that has a hand-off); never re-derived here, and never keyed on [agent].
+  final SessionHandoff? handoff;
+
   /// Creates a session value object. [autoCommand] is optional (default `''`)
   /// so existing call sites and tests that predate the field keep compiling.
   const Session({
@@ -287,6 +293,7 @@ class Session {
     this.reason,
     this.backgroundSince,
     this.backgroundStale = false,
+    this.handoff,
   });
 
   /// This session with a different pinned rank (#124), for the optimistic half of
@@ -322,6 +329,7 @@ class Session {
     reason: reason,
     backgroundSince: backgroundSince,
     backgroundStale: backgroundStale,
+    handoff: handoff,
   );
 
   /// Builds a [Session] from one element of the `GET /api/sessions` array,
@@ -359,6 +367,7 @@ class Session {
       reason: SessionReason.fromJson(json['reason']),
       backgroundSince: _backgroundSince(json['backgroundTasks']),
       backgroundStale: _backgroundStale(json['backgroundTasks']),
+      handoff: SessionHandoff.fromJson(json['handoff']),
     );
   }
 
@@ -756,6 +765,100 @@ class SessionReason {
       since: _asInt(json['since']),
       until: _asInt(json['until']),
       source: (json['source'] ?? '').toString(),
+    );
+  }
+}
+
+/// Whether a long session can be handed off to a fresh one, and where a run stands
+/// (#340), as `GET /api/sessions` sends it. The server decides every part of it
+/// (the context size, the task-boundary gates, the verdicts); this only carries it.
+class SessionHandoff {
+  /// The server offers the button: past the context threshold and at a task boundary.
+  final bool suggest;
+
+  /// Context tokens carried, for the "612k ctx" chip, or null when the server did not say.
+  final int? ctxTokens;
+
+  /// Which gate said no. Debug only - never shown.
+  final String? why;
+
+  /// The run in flight, or one that ended and awaits a Dismiss. Null: none.
+  final HandoffRun? run;
+
+  const SessionHandoff({this.suggest = false, this.ctxTokens, this.why, this.run});
+
+  static SessionHandoff? fromJson(dynamic json) {
+    if (json is! Map) return null;
+    final ct = _asInt(json['ctxTokens']);
+    final why = json['why']?.toString().trim();
+    return SessionHandoff(
+      suggest: json['suggest'] == true,
+      ctxTokens: (ct != null && ct > 0) ? ct : null,
+      why: (why == null || why.isEmpty) ? null : why,
+      run: HandoffRun.fromJson(json['run']),
+    );
+  }
+}
+
+/// One hand-off run (#340): the old session writes a brief, a successor starts from
+/// it, the successor is verified, then the old one closes - unless something would
+/// be lost.
+class HandoffRun {
+  /// `wrapping`, `spawning`, `verifying`, `closing` (in flight) or `kept`, `failed` (ended).
+  final String state;
+
+  /// Why it ended: a failure code (`no-brief`, `no-slot`, ...) or, for `kept`,
+  /// `unsaved-work`. Null while in flight.
+  final String? reason;
+
+  /// For `kept`: the agent's own one-line account of what would have been lost.
+  final String? keptBecause;
+
+  /// When the run started and when it last moved (epoch ms), or null.
+  final int? startedAt;
+  final int? at;
+
+  /// The fresh session, once it exists.
+  final String? successorId;
+  final String? successorName;
+
+  const HandoffRun({
+    required this.state,
+    this.reason,
+    this.keptBecause,
+    this.startedAt,
+    this.at,
+    this.successorId,
+    this.successorName,
+  });
+
+  static const activeStates = <String>['wrapping', 'spawning', 'verifying', 'closing'];
+  static const endedStates = <String>['kept', 'failed'];
+
+  /// Still running. A run that has ended waits for a Dismiss.
+  bool get active => activeStates.contains(state);
+
+  /// Every in-flight state can be cancelled, `closing` included: it waits for the old
+  /// session's own turn to end, and the server re-checks the run right before the kill.
+  bool get cancellable => active;
+
+  static HandoffRun? fromJson(dynamic json) {
+    if (json is! Map) return null;
+    final state = json['state']?.toString();
+    // An unknown state from a newer server renders as no run, never as a guess.
+    if (state == null || !(activeStates.contains(state) || endedStates.contains(state))) return null;
+    String? str(Object? v) {
+      final t = v is String ? v.trim() : null;
+      return (t == null || t.isEmpty) ? null : t;
+    }
+    return HandoffRun(
+      state: state,
+      reason: str(json['reason']),
+      keptBecause: str(json['keptBecause']),
+      startedAt: _asInt(json['startedAt']),
+      at: _asInt(json['at']),
+      successorId: str(json['successorId']),
+      successorName: str(json['successorName']),
     );
   }
 }

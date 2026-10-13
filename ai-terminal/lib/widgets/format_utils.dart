@@ -96,6 +96,16 @@ String formatBytesShort(int? bytes) {
   return '${(bytes / 1024).round()} KB';
 }
 
+/// A token count for a glance: `612k`, `1.2M`, `850`, or `—` when unknown (#340).
+String formatTokensShort(int? tokens) {
+  if (tokens == null || tokens < 0) return '—';
+  if (tokens < 1000) return '$tokens';
+  final k = (tokens / 1000).round();
+  if (k < 1000) return '${k}k';
+  final oneDp = (tokens / 100000).round() / 10;
+  return oneDp == oneDp.roundToDouble() ? '${oneDp.round()}M' : '${oneDp}M';
+}
+
 /// A percentage for a glance: `18%`, `0.4%` below 10, or `—` when unknown.
 /// Sub-1% detail is kept because an agent sitting at 0.4% and one at 0% are
 /// different, and rounding the first to `0%` would say the session is doing

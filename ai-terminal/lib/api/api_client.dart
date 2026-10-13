@@ -456,6 +456,21 @@ class ApiClient {
     return SessionBrief.fromJson(_asMap(_decode(res))['brief']);
   }
 
+  /// Starts handing [sessionId] off to a fresh session (`POST /api/sessions/:id/handoff`,
+  /// #340). The server answers 409 `{error}` when the session is not a candidate or a
+  /// run is already going; that text is the [ApiException] message. The run itself
+  /// rides back on the next session poll as `handoff.run`.
+  Future<void> startHandoff(String sessionId) async {
+    await _send('POST', '/api/sessions/$sessionId/handoff', body: const <String, dynamic>{});
+  }
+
+  /// Cancels [sessionId]'s run before the old session is closed, or dismisses one that
+  /// ended (`DELETE /api/sessions/:id/handoff`, #340). Either way the run is cleared.
+  /// 409 once the old session is closing; 404 when there is no run.
+  Future<void> cancelHandoff(String sessionId) async {
+    await _send('DELETE', '/api/sessions/$sessionId/handoff');
+  }
+
   /// Sessions on THIS server that ended in the last day, newest first
   /// (`GET /api/dashboard/closed`, #298). A server too old for the route 404s,
   /// which throws like any other failure; the caller treats that as "none".

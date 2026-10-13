@@ -766,6 +766,7 @@ void main() {
         reason: const SessionReason(kind: 'you', text: 'x'),
         backgroundSince: 77,
         backgroundStale: true,
+        handoff: const SessionHandoff(suggest: true, ctxTokens: 612000),
       );
 
       final moved = original.withFavoriteRank(999);
@@ -794,6 +795,76 @@ void main() {
       expect(moved.reason, same(original.reason), reason: 'a dropped reason flips the row back to a bare status word');
       expect(moved.backgroundSince, 77);
       expect(moved.backgroundStale, isTrue);
+      expect(moved.handoff, same(original.handoff), reason: 'a dropped handoff hides the Hand off button until the next poll (#340)');
+    });
+  });
+
+  group('Session.handoff (#340)', () {
+    test('absent or null: the agent has no hand-off, so the row offers none', () {
+      expect(Session.fromJson(_server, {'id': 'x'}).handoff, isNull);
+      expect(Session.fromJson(_server, {'id': 'x', 'handoff': null}).handoff, isNull);
+      expect(Session.fromJson(_server, {'id': 'x', 'handoff': 'yes'}).handoff, isNull);
+    });
+
+    test('a candidate carries its size and no run', () {
+      final h = Session.fromJson(_server, {
+        'id': 'x',
+        'handoff': {'suggest': true, 'ctxTokens': 612000, 'why': null, 'run': null},
+      }).handoff!;
+      expect(h.suggest, isTrue);
+      expect(h.ctxTokens, 612000);
+      expect(h.why, isNull);
+      expect(h.run, isNull);
+    });
+
+    test('suggest is true only for true; a bad size is dropped, never zero', () {
+      final h = Session.fromJson(_server, {
+        'id': 'x',
+        'handoff': {'suggest': 'true', 'ctxTokens': 0, 'why': ' too small '},
+      }).handoff!;
+      expect(h.suggest, isFalse);
+      expect(h.ctxTokens, isNull);
+      expect(h.why, 'too small');
+    });
+
+    test('a run in flight reads every field', () {
+      final run = Session.fromJson(_server, {
+        'id': 'x',
+        'handoff': {
+          'suggest': false,
+          'run': {'state': 'verifying', 'startedAt': 1000, 'at': 2000, 'successorId': 'n1', 'successorName': 'proj 2'},
+        },
+      }).handoff!.run!;
+      expect(run.state, 'verifying');
+      expect(run.active, isTrue);
+      expect(run.cancellable, isTrue);
+      expect((run.startedAt, run.at), (1000, 2000));
+      expect((run.successorId, run.successorName), ('n1', 'proj 2'));
+      expect(run.reason, isNull);
+    });
+
+    test('closing is in flight and can still be cancelled (it waits for the old turn to end)', () {
+      final run = HandoffRun.fromJson({'state': 'closing'})!;
+      expect(run.active, isTrue);
+      expect(run.cancellable, isTrue);
+    });
+
+    test('kept carries the agent\'s own reason; failed carries a code; neither is active', () {
+      final kept = HandoffRun.fromJson({'state': 'kept', 'reason': 'unsaved-work', 'keptBecause': ' two files uncommitted '})!;
+      expect(kept.active, isFalse);
+      expect(kept.reason, 'unsaved-work');
+      expect(kept.keptBecause, 'two files uncommitted');
+      final failed = HandoffRun.fromJson({'state': 'failed', 'reason': 'no-brief'})!;
+      expect(failed.active, isFalse);
+      expect(failed.cancellable, isFalse);
+      expect(failed.reason, 'no-brief');
+    });
+
+    test('an unknown state from a newer server is no run, not a guess', () {
+      expect(HandoffRun.fromJson({'state': 'teleporting'}), isNull);
+      expect(HandoffRun.fromJson({'reason': 'x'}), isNull);
+      expect(HandoffRun.fromJson('wrapping'), isNull);
+      expect(Session.fromJson(_server, {'id': 'x', 'handoff': {'suggest': true, 'run': {'state': 'teleporting'}}}).handoff!.run, isNull);
     });
   });
 }
