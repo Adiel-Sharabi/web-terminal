@@ -1505,14 +1505,14 @@ class _SessionScreenState extends State<SessionScreen>
       _dismissedQuestionKey = answeredKey;
     });
     _finishTerminalComposing();
-    for (var i = 0; i < frames.length; i++) {
-      if (!mounted) return;
-      _connection?.sendInput(frames[i].keys);
-      if (i < frames.length - 1) {
-        await Future<void>.delayed(Duration(milliseconds: frames[i].delayMs));
-      }
-    }
-    if (mounted) _scrollToBottom();
+    // The one pacing loop, shared with the sessions board (#337).
+    final sent = await deliverAnswerFrames(
+      frames,
+      (keys) => _connection?.sendInput(keys),
+      alive: () => mounted,
+    );
+    if (!sent || !mounted) return;
+    _scrollToBottom();
     // Verify the answer actually landed — and un-strand it if it didn't. We just
     // dismissed the overlay optimistically, so a dropped answer would otherwise
     // sit hidden-but-pending forever (the user only learns Claude never moved).
@@ -1559,27 +1559,18 @@ class _SessionScreenState extends State<SessionScreen>
   }) async {
     final api = _api;
     if (api == null) return;
-    PendingQuestion? stillPending;
-    var resentEnter = false;
-    for (var attempt = 0; attempt < _answerVerifyAttempts; attempt++) {
-      await Future<void>.delayed(const Duration(milliseconds: 900));
-      if (!mounted) return;
-      final PendingQuestion? q;
-      try {
-        q = await api.pendingQuestion(widget.sessionId);
-      } catch (_) {
-        return; // best-effort — don't spam Enters when polling is failing
-      }
-      if (!mounted) return;
-      // Cleared, or a genuinely different prompt took its place → answer landed.
-      if (q == null || questionSignature(q) != answeredKey) return;
-      stillPending = q;
-      if (resendEnter && !resentEnter) {
-        resentEnter = true;
+    // The rule itself is shared with the sessions board (#337): [awaitAnswerLanded].
+    final stillPending = await awaitAnswerLanded(
+      isSame: (q) => questionSignature(q) == answeredKey,
+      resendEnter: resendEnter,
+      poll: () => api.pendingQuestion(widget.sessionId),
+      resend: () {
         _finishTerminalComposing();
-        _connection?.sendInput('\r'); // dropped confirm → resend exactly once
-      }
-    }
+        _connection?.sendInput('\r');
+      },
+      alive: () => mounted,
+      attempts: _answerVerifyAttempts,
+    );
     // Exhausted retries with the same prompt up → surface it again so the user
     // can retry, instead of a silently stuck, hidden question.
     if (mounted &&
@@ -1942,7 +1933,7 @@ class _SessionScreenState extends State<SessionScreen>
         //
         // Known cost, accepted: forking from the split pushes a route over it,
         // so a parent that dies while you are in the fork clears the pane
-        // behind, and popping the fork lands on "Pick a session". That is a
+        // behind, and popping the fork lands on the board (#337). That is a
         // transient annoyance; gating it on isCurrent instead left a DEAD
         // session selected indefinitely whenever a dialog was open, which is
         // persistent. Do not "restore" that guard without reading this.

@@ -324,6 +324,72 @@ List<AnswerFrame> buildAnswerFrames(
 bool answerNeedsConfirm(List<AnswerFrame> frames) =>
     frames.isNotEmpty && frames.last.keys == '\r';
 
+/// Writes [frames] through [send], each followed by its own settle delay (none after
+/// the last). THE one pacing loop for an answer: the session screen's overlay and the
+/// sessions board (#337) both deliver through it, so a frame set built by
+/// [buildAnswerFrames] lands in the same separate stdin reads whichever surface sent it.
+///
+/// Stops as soon as [alive] says the sender is gone, and returns whether every frame
+/// went out.
+Future<bool> deliverAnswerFrames(
+  List<AnswerFrame> frames,
+  void Function(String keys) send, {
+  bool Function()? alive,
+}) async {
+  for (var i = 0; i < frames.length; i++) {
+    if (alive != null && !alive()) return false;
+    send(frames[i].keys);
+    if (i < frames.length - 1) {
+      await Future<void>.delayed(Duration(milliseconds: frames[i].delayMs));
+    }
+  }
+  return true;
+}
+
+/// Waits for an answered question to clear, re-sending a dropped confirming Enter
+/// ONCE when [resendEnter] (see [answerNeedsConfirm]). Polls [poll] up to [attempts]
+/// times, [every] apart.
+///
+/// Returns the question STILL pending after every attempt: the answer never took, and
+/// the caller should put it back in front of the user. Returns null when it cleared or
+/// was replaced by a different one ([isSame] false), and also when polling failed or
+/// [alive] went false, because neither is evidence the answer was lost, and a retry on
+/// no evidence types into whatever sits on the prompt line.
+///
+/// Why the Enter is re-sent at most once: if the selector has in fact closed, every
+/// extra `\r` submits whatever sits on Claude's prompt line.
+Future<PendingQuestion?> awaitAnswerLanded({
+  required bool Function(PendingQuestion q) isSame,
+  required bool resendEnter,
+  required Future<PendingQuestion?> Function() poll,
+  required void Function() resend,
+  bool Function()? alive,
+  int attempts = 8,
+  Duration every = const Duration(milliseconds: 900),
+}) async {
+  PendingQuestion? stillPending;
+  var resent = false;
+  for (var attempt = 0; attempt < attempts; attempt++) {
+    await Future<void>.delayed(every);
+    if (alive != null && !alive()) return null;
+    final PendingQuestion? q;
+    try {
+      q = await poll();
+    } catch (_) {
+      return null; // best-effort — don't spam Enters when polling is failing
+    }
+    if (alive != null && !alive()) return null;
+    // Cleared, or a genuinely different prompt took its place → answer landed.
+    if (q == null || !isSame(q)) return null;
+    stillPending = q;
+    if (resendEnter && !resent) {
+      resent = true;
+      resend(); // dropped confirm → resend exactly once
+    }
+  }
+  return stillPending;
+}
+
 /// The text of the most recent non-empty assistant turn in [turns] — the
 /// message that led up to the question, so it can be shown as context above the
 /// overlay ("read the whole answer before the question"). Null when there's no

@@ -1,38 +1,35 @@
 import 'package:flutter/foundation.dart';
 
-/// What the detail pane of the wide split shows: nothing yet, one session, or the
-/// sessions dashboard (#337).
+/// What the detail pane of the wide split shows: one session, or the sessions board
+/// (#337).
 ///
-/// ONE value rather than a session id plus a "board is open" flag: two fields
-/// would let the pane be asked to show a session AND the board at once, and every
-/// reader would have to pick a winner. Here showing the board and showing a
-/// session replace each other by construction.
+/// Exactly TWO states. The board IS what the pane shows when no session is open: it
+/// is the default on launch and where closing a session lands, so there is no third
+/// "nothing picked" state whose placeholder only said "pick something". One value, so
+/// the pane can never be asked to show a session AND the board at once.
 @immutable
 class DetailPane {
-  const DetailPane._(this.sessionId, this.isBoard);
+  const DetailPane._(this.sessionId);
 
-  /// Nothing picked yet: the "Pick a session" placeholder.
-  static const DetailPane empty = DetailPane._(null, false);
-
-  /// The sessions dashboard, beside the list (#337).
-  static const DetailPane board = DetailPane._(null, true);
+  /// The sessions board, beside the list (#337). Also the start state.
+  static const DetailPane board = DetailPane._(null);
 
   /// One session, by id.
-  const DetailPane.session(String id) : this._(id, false);
+  const DetailPane.session(String id) : this._(id);
 
-  /// The session shown, or null when the pane shows the board or nothing.
+  /// The session shown, or null when the pane shows the board.
   final String? sessionId;
-  final bool isBoard;
+
+  bool get isBoard => sessionId == null;
 
   @override
-  bool operator ==(Object other) =>
-      other is DetailPane && other.sessionId == sessionId && other.isBoard == isBoard;
+  bool operator ==(Object other) => other is DetailPane && other.sessionId == sessionId;
 
   @override
-  int get hashCode => Object.hash(sessionId, isBoard);
+  int get hashCode => sessionId.hashCode;
 
   @override
-  String toString() => isBoard ? 'DetailPane.board' : 'DetailPane(${sessionId ?? 'empty'})';
+  String toString() => isBoard ? 'DetailPane.board' : 'DetailPane($sessionId)';
 }
 
 /// Single source of truth for "what the wide split view's detail pane shows".
@@ -56,32 +53,31 @@ class DetailPane {
 /// accepted an id alone. Anything richer would be a second source of truth for
 /// the same fact.
 ///
-/// #337 adds the dashboard as a third thing the pane can show, so the value is a
-/// [DetailPane] rather than a bare id; see there for why it is one value.
+/// #337 makes the sessions board what the pane shows whenever no session is open, so
+/// the value is a [DetailPane] rather than a bare id; see there for why it is one value.
 class SessionSelection {
   SessionSelection._();
 
   static final SessionSelection instance = SessionSelection._();
 
   /// What the split view's detail pane shows.
-  final ValueNotifier<DetailPane> pane = ValueNotifier<DetailPane>(DetailPane.empty);
+  final ValueNotifier<DetailPane> pane = ValueNotifier<DetailPane>(DetailPane.board);
 
-  /// The session the split view shows, or null for none (nothing picked, or the
-  /// dashboard is showing).
+  /// The session the split view shows, or null when the board is showing.
   String? get selectedId => pane.value.sessionId;
 
-  /// Whether the split view's detail pane shows the dashboard (#337).
+  /// Whether the split view's detail pane shows the board (#337).
   bool get boardShown => pane.value.isBoard;
 
   /// Shows session [id] in the pane, replacing whatever was there (the board too).
   void select(String id) => pane.value = DetailPane.session(id);
 
-  /// Shows the dashboard in the pane. Already showing it: a no-op, exactly as
+  /// Shows the board in the pane. Already showing it: a no-op, exactly as
   /// selecting the session that is already showing is.
   void showBoard() => pane.value = DetailPane.board;
 
-  /// Back to the "Pick a session" placeholder.
-  void clear() => pane.value = DetailPane.empty;
+  /// No session open any more (it ended): back to the board.
+  void clear() => pane.value = DetailPane.board;
 
   /// True while a **wide** `AdaptiveHome` is mounted — i.e. while selecting is
   /// a real alternative to pushing a route.
@@ -98,7 +94,7 @@ class SessionSelection {
   /// otherwise leak one test's selection into the next.
   @visibleForTesting
   void reset() {
-    pane.value = DetailPane.empty;
+    pane.value = DetailPane.board;
     splitMounted = false;
   }
 }

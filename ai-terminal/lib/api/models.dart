@@ -774,6 +774,15 @@ class ClosedSession {
   /// What it published (#329), so a closed session's artifacts stay one tap away.
   final List<BriefArtifact> artifacts;
 
+  /// #337 - what a Reopen needs, as the SERVER derived it (`lib/session-brief.js`
+  /// resumeOf): where to run, which agent, which conversation, and the command that
+  /// resumes it. [resumeCommand] is null when the server could not name the
+  /// conversation (or is too old to say), and then the record cannot be reopened.
+  final String? cwd;
+  final String? agent;
+  final String? claudeSessionId;
+  final String? resumeCommand;
+
   const ClosedSession({
     required this.id,
     required this.name,
@@ -783,7 +792,14 @@ class ClosedSession {
     this.did,
     this.at,
     this.artifacts = const <BriefArtifact>[],
+    this.cwd,
+    this.agent,
+    this.claudeSessionId,
+    this.resumeCommand,
   });
+
+  /// Whether a Reopen can resume THIS conversation. Never guessed on the client.
+  bool get canReopen => resumeCommand != null && cwd != null;
 
   static ClosedSession? fromJson(ServerConfig server, dynamic json) {
     if (json is! Map) return null;
@@ -791,6 +807,10 @@ class ClosedSession {
     if (id.isEmpty) return null;
     final name = (json['name'] ?? '').toString();
     final headline = json['headline']?.toString().trim();
+    String? str(Object? v) {
+      final t = v is String ? v.trim() : null;
+      return (t == null || t.isEmpty) ? null : t;
+    }
     return ClosedSession(
       id: id,
       name: name.isEmpty ? id : name,
@@ -800,6 +820,10 @@ class ClosedSession {
       did: BriefLine.fromJson(json['did']),
       at: _asInt(json['at']),
       artifacts: BriefArtifact.listFromJson(json['artifacts']),
+      cwd: str(json['cwd']),
+      agent: str(json['agent']),
+      claudeSessionId: str(json['claudeSessionId']),
+      resumeCommand: str(json['resumeCommand']),
     );
   }
 }
