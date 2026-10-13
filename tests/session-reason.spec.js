@@ -26,7 +26,8 @@ test.describe('sessionReason (#313)', () => {
   // A turn that ended asking the user for something while a helper it started still runs:
   // the status stays `working` (the subagent idle-gate), yet the person owes an answer.
   // Measured 2026-10-13 on "OSDP SC 23651 - B": three asks sat under Working, invisible.
-  // A typed prompt clears a reported wait, so a "you" that exists is the agent's latest word.
+  // Only a "you" from the latest turn, once that turn ended, counts: a task notification
+  // starts a turn without clearing a "you", so an older one must not outrank it.
   const turn = (turnAt, on, at, stoppedAt) => ({ brief: { turnAt, stoppedAt, wait: { on, what: 'bench approval + key choice', at } } });
   test('a "you" from a turn that ENDED beats working (a helper still runs) - the asks must reach Needs you', () => {
     const r = sessionReason({ status: 'working', ...turn(T, 'you', T + 5_000, T + 6_000) });
