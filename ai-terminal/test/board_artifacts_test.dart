@@ -72,11 +72,6 @@ void main() {
     expect(closed.artifacts.single.title, 'Artifact');
   });
 
-  test('the text filter finds a session by an artifact title', () {
-    expect(boardMatches(_session(_brief), 'streamline', const {}), isTrue);
-    expect(boardMatches(_session(_brief), 'evil', const {}), isFalse);
-  });
-
   testWidgets('a card shows the artifact; a tap opens IT, never the session', (tester) async {
     var opened = 0;
     await tester.pumpWidget(MaterialApp(

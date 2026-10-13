@@ -539,8 +539,10 @@ class BriefItem {
   final String ref;
 
   /// The server's cross-session identity for this item (`globalKey` in
-  /// `lib/session-brief.js`). "By work item" groups on it rather than on [ref],
-  /// because `#297` in one repo and `owner/repo#297` elsewhere can be one item.
+  /// `lib/session-brief.js`). The web dashboard's "By work item" groups on it
+  /// rather than on [ref], because `#297` in one repo and `owner/repo#297`
+  /// elsewhere can be one item. The companion's board has no such grouping
+  /// since #337; the field is kept as the wire carries it.
   final String key;
   final String title;
 

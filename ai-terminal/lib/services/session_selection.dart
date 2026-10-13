@@ -1,6 +1,41 @@
 import 'package:flutter/foundation.dart';
 
-/// Single source of truth for "which session the wide split view is showing".
+/// What the detail pane of the wide split shows: nothing yet, one session, or the
+/// sessions dashboard (#337).
+///
+/// ONE value rather than a session id plus a "board is open" flag: two fields
+/// would let the pane be asked to show a session AND the board at once, and every
+/// reader would have to pick a winner. Here showing the board and showing a
+/// session replace each other by construction.
+@immutable
+class DetailPane {
+  const DetailPane._(this.sessionId, this.isBoard);
+
+  /// Nothing picked yet: the "Pick a session" placeholder.
+  static const DetailPane empty = DetailPane._(null, false);
+
+  /// The sessions dashboard, beside the list (#337).
+  static const DetailPane board = DetailPane._(null, true);
+
+  /// One session, by id.
+  const DetailPane.session(String id) : this._(id, false);
+
+  /// The session shown, or null when the pane shows the board or nothing.
+  final String? sessionId;
+  final bool isBoard;
+
+  @override
+  bool operator ==(Object other) =>
+      other is DetailPane && other.sessionId == sessionId && other.isBoard == isBoard;
+
+  @override
+  int get hashCode => Object.hash(sessionId, isBoard);
+
+  @override
+  String toString() => isBoard ? 'DetailPane.board' : 'DetailPane(${sessionId ?? 'empty'})';
+}
+
+/// Single source of truth for "what the wide split view's detail pane shows".
 ///
 /// Two things open a session and they used to be unrelated mechanisms (#76):
 ///
@@ -20,13 +55,33 @@ import 'package:flutter/foundation.dart';
 /// id, exactly as the pushed route always has, and `SessionScreen` has always
 /// accepted an id alone. Anything richer would be a second source of truth for
 /// the same fact.
+///
+/// #337 adds the dashboard as a third thing the pane can show, so the value is a
+/// [DetailPane] rather than a bare id; see there for why it is one value.
 class SessionSelection {
   SessionSelection._();
 
   static final SessionSelection instance = SessionSelection._();
 
-  /// The session the split view should show, or null for "none picked yet".
-  final ValueNotifier<String?> selectedId = ValueNotifier<String?>(null);
+  /// What the split view's detail pane shows.
+  final ValueNotifier<DetailPane> pane = ValueNotifier<DetailPane>(DetailPane.empty);
+
+  /// The session the split view shows, or null for none (nothing picked, or the
+  /// dashboard is showing).
+  String? get selectedId => pane.value.sessionId;
+
+  /// Whether the split view's detail pane shows the dashboard (#337).
+  bool get boardShown => pane.value.isBoard;
+
+  /// Shows session [id] in the pane, replacing whatever was there (the board too).
+  void select(String id) => pane.value = DetailPane.session(id);
+
+  /// Shows the dashboard in the pane. Already showing it: a no-op, exactly as
+  /// selecting the session that is already showing is.
+  void showBoard() => pane.value = DetailPane.board;
+
+  /// Back to the "Pick a session" placeholder.
+  void clear() => pane.value = DetailPane.empty;
 
   /// True while a **wide** `AdaptiveHome` is mounted — i.e. while selecting is
   /// a real alternative to pushing a route.
@@ -43,7 +98,7 @@ class SessionSelection {
   /// otherwise leak one test's selection into the next.
   @visibleForTesting
   void reset() {
-    selectedId.value = null;
+    pane.value = DetailPane.empty;
     splitMounted = false;
   }
 }

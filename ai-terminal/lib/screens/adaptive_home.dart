@@ -6,17 +6,26 @@ import '../services/session_selection.dart';
 import '../widgets/empty_state.dart';
 import 'dashboard_screen.dart';
 import 'session_screen.dart';
+import 'work_board_screen.dart';
 
 /// Root screen that adapts to width. On a narrow window (phone) it is just the
 /// [DashboardScreen] and tapping a session pushes a full-screen route. On a wide
 /// window (desktop, tablet landscape) it becomes a master-detail split: the
 /// session list as a left rail, the selected session live in the right pane.
+/// The sessions dashboard opens in that pane too (#337), beside the list rather
+/// than over it; what the pane shows is [SessionSelection.pane].
 ///
 /// In split mode the rail is user-resizable by dragging the divider; the chosen
 /// width is the single source of truth (`_railWidth`), clamped to
 /// [railMinWidth]..[railMaxWidth] and persisted so it survives restarts.
 class AdaptiveHome extends StatefulWidget {
-  const AdaptiveHome({super.key});
+  const AdaptiveHome({super.key, this.boardBuilder});
+
+  /// Test seam: builds the dashboard the pane shows, given the callback that
+  /// opens a session. Defaults to a [WorkBoardScreen] on the shared repository;
+  /// a test hands one a faked server, which the singletons cannot have.
+  @visibleForTesting
+  final WorkBoardScreen Function(void Function(Session session) onOpenSession)? boardBuilder;
 
   /// Below this width we stay single-pane (phone behavior); at or above it we
   /// show the list + detail split.
@@ -68,12 +77,12 @@ class _AdaptiveHomeState extends State<AdaptiveHome> {
   void initState() {
     super.initState();
     _loadRailWidth();
-    _selection.selectedId.addListener(_onSelectionChanged);
+    _selection.pane.addListener(_onSelectionChanged);
   }
 
   @override
   void dispose() {
-    _selection.selectedId.removeListener(_onSelectionChanged);
+    _selection.pane.removeListener(_onSelectionChanged);
     // A torn-down split can no longer show a selection, so the notification
     // path must go back to pushing a route.
     _selection.splitMounted = false;
@@ -83,7 +92,7 @@ class _AdaptiveHomeState extends State<AdaptiveHome> {
   void _onSelectionChanged() {
     if (!mounted) return;
     setState(() {
-      if (_hint?.id != _selection.selectedId.value) _hint = null;
+      if (_hint?.id != _selection.selectedId) _hint = null;
     });
   }
 
@@ -107,6 +116,14 @@ class _AdaptiveHomeState extends State<AdaptiveHome> {
     await prefs.setDouble(AdaptiveHome._railWidthPrefKey, _railWidth);
   }
 
+  void _select(Session s) {
+    _hint = s;
+    _selection.select(s.id);
+  }
+
+  static WorkBoardScreen _defaultBoard(void Function(Session) onOpenSession) =>
+      WorkBoardScreen(embedded: true, onOpenSession: onOpenSession);
+
   @override
   Widget build(BuildContext context) {
     return LayoutBuilder(
@@ -121,7 +138,7 @@ class _AdaptiveHomeState extends State<AdaptiveHome> {
           // Phone / narrow: the dashboard pushes routes itself.
           return DashboardScreen(key: _dashboardKey);
         }
-        final selectedId = _selection.selectedId.value;
+        final selectedId = _selection.selectedId;
         return Row(
           children: [
             SizedBox(
@@ -129,10 +146,8 @@ class _AdaptiveHomeState extends State<AdaptiveHome> {
               child: DashboardScreen(
                 key: _dashboardKey,
                 selectedId: selectedId,
-                onSelectSession: (s) {
-                  _hint = s;
-                  _selection.selectedId.value = s.id;
-                },
+                onSelectSession: _select,
+                onShowBoard: _selection.showBoard,
               ),
             ),
             _RailResizeHandle(
@@ -141,7 +156,11 @@ class _AdaptiveHomeState extends State<AdaptiveHome> {
               onDragEnd: _persistRailWidth,
             ),
             Expanded(
-              child: selectedId == null
+              child: _selection.boardShown
+                  // A board card opens its session the way a rail tap does,
+                  // which is also what replaces the board.
+                  ? (widget.boardBuilder ?? _defaultBoard)(_select)
+                  : selectedId == null
                   ? const EmptyState(
                       icon: Icons.dashboard_customize_outlined,
                       title: 'Pick a session',

@@ -1,6 +1,6 @@
 // #306 — the sessions dashboard in the companion. Pins the wire parsing of a
 // session's `brief` (built server-side by lib/session-brief.js), the two API calls,
-// the pure grouping/status rules, and the screen end to end against a faked server:
+// the pure status/section rules, and the screen end to end against a faked server:
 // a card shows its work items, a session owing an answer is in "Needs you", a pin
 // sends the whole pinned list, and a tap opens the session.
 import 'dart:convert';
@@ -161,19 +161,6 @@ void main() {
   });
 
   group('rules', () {
-    test('groupByWorkItem groups on the server key, keeps sessions without items apart', () {
-      SessionBrief brief(List<BriefItem> items) => SessionBrief(items: items);
-      final a = _session('a', brief: brief(const [BriefItem(ref: '#297', key: 'o/r#297'), BriefItem(ref: '#1', key: 'o/r#1')]));
-      final b = _session('b', brief: brief(const [BriefItem(ref: 'o/r#297', key: 'o/r#297')]));
-      final c = _session('c');
-      final g = groupByWorkItem([a, b, c]);
-      expect(g.groups.map((x) => x.item.key), ['o/r#297', 'o/r#1']);
-      expect(g.groups.first.sessions.map((s) => s.id), ['a', 'b']);
-      expect(g.groups[1].sessions, isEmpty, reason: 'a card shows once, under its FIRST item');
-      expect(g.groups[1].refs.map((s) => s.id), ['a']);
-      expect(g.none.map((s) => s.id), ['c']);
-    });
-
     test('boardStatusOf: capped wins, a question is named', () {
       final capped = Session.fromJson(_server, {
         ..._row('a', 'a', status: 'working'),
@@ -319,9 +306,9 @@ void main() {
       // the server's level colours it: a nearly full drive is the error colour
       final disk = tester.widget<Text>(find.descendant(of: card, matching: find.text('C: 5.0 GB free of 931 GB')));
       expect(disk.style?.color, AppTheme.dark.colorScheme.error);
-      // remembered on this device
+      // remembered on this device - and it is the only view setting left to remember (#337)
       final saved = jsonDecode((await SharedPreferences.getInstance()).getString('wt.dashboard.view')!) as Map;
-      expect(saved['machines'], isTrue);
+      expect(saved, {'machines': true});
     });
 
     testWidgets('Machines: a server too old for it says so and is never asked', (tester) async {
@@ -348,16 +335,12 @@ void main() {
       expect(find.text('Nothing reported yet'), findsOneWidget, reason: 'a Claude session with no brief yet');
       expect(find.text('Finished session'), findsOneWidget);
 
+      // A visible session that needs you IS the first section; the strip would repeat it.
+      expect(find.byKey(const ValueKey('board-needs-you')), findsNothing);
+
       await tester.tap(find.text('Dictation work'));
       await tester.pump();
       expect(opened.single.id, 's1');
-
-      // By server: the Needs-you strip and the server's own header.
-      await tester.tap(find.text('By server'));
-      await tester.pump();
-      expect(find.byKey(const ValueKey('board-needs-you')), findsOneWidget);
-      expect(find.textContaining('Waiting one · Home · a permission'), findsOneWidget);
-      expect(find.text('● online · 1.74.0'), findsOneWidget);
 
       await tester.pumpWidget(const SizedBox());
     });
@@ -548,23 +531,6 @@ void main() {
       await tester.pumpWidget(const SizedBox());
     });
 
-    testWidgets('the filter narrows the cards by name, work item and machine', (tester) async {
-      rows = [
-        _row('a', 'Alpha', brief: _briefJson()),
-        _row('b', 'Beta', brief: _briefJson(items: [{'ref': 'ado:777', 'key': 'ado:777', 'title': 'Galaxy', 'state': 'planning', 'source': 'agent'}])),
-      ];
-      final r = await repo();
-      await pump(tester, r: r);
-      await tester.enterText(find.byKey(const ValueKey('board-search')), 'galaxy');
-      await tester.pump();
-      expect(find.text('Beta'), findsOneWidget);
-      expect(find.text('Alpha'), findsNothing);
-      await tester.enterText(find.byKey(const ValueKey('board-search')), 'nothing like it');
-      await tester.pump();
-      expect(find.text('No session matches the filter.'), findsOneWidget);
-      await tester.pumpWidget(const SizedBox());
-    });
-
     testWidgets('reasons group the board; done is collapsed; the card carries the machine stripe', (tester) async {
       rows = [
         _row('x', 'External one', brief: _briefJson(), reason: {'kind': 'external', 'text': 'vendor licence', 'source': 'reported'}),
@@ -645,37 +611,52 @@ void main() {
       await tester.pumpWidget(const SizedBox());
     });
 
-    testWidgets('a summary chip filters to its sessions; tapping it again shows all (#318)', (tester) async {
-      rows = [
-        _row('w', 'Waiting one', status: 'waiting', waitingFor: 'permission'),
-        _row('k', 'Working one', status: 'working', brief: _briefJson()),
-        _row('q', 'Quiet one', brief: _briefJson()),
-      ];
+    testWidgets('#337: only the tabs are left above the board - no order, grouping, search or chips', (tester) async {
       final r = await repo();
       await pump(tester, r: r);
-      expect(find.text('1 needs you'), findsOneWidget);
-      await tester.tap(find.byKey(const ValueKey('board-chip-you')));
-      await tester.pump();
-      expect(find.text('Waiting one'), findsWidgets);
-      expect(find.text('Working one'), findsNothing);
-      expect(find.text('Quiet one'), findsNothing);
-      await tester.tap(find.byKey(const ValueKey('board-chip-working')));
-      await tester.pump();
-      expect(find.text('Working one'), findsOneWidget);
-      expect(find.text('Quiet one'), findsNothing);
-      await tester.tap(find.byKey(const ValueKey('board-chip-working')));
-      await tester.pump();
-      expect(find.text('Quiet one'), findsOneWidget);
+      expect(find.byKey(const ValueKey('board-tabs')), findsOneWidget);
+      for (final gone in ['board-sort', 'board-grouping', 'board-search', 'board-srv-${_server.baseUrl}', 'board-chip-you']) {
+        expect(find.byKey(ValueKey(gone)), findsNothing, reason: '$gone was removed');
+      }
+      expect(find.text('By server'), findsNothing);
+      expect(find.text('By work item'), findsNothing);
+      expect(find.textContaining('need you'), findsNothing, reason: 'the summary counts are gone');
       await tester.pumpWidget(const SizedBox());
     });
 
-    testWidgets('by work item groups sessions under the item', (tester) async {
+    testWidgets('pushed it has a back arrow; embedded beside the list it has none (#337)', (tester) async {
       final r = await repo();
-      await pump(tester, r: r);
-      await tester.tap(find.text('By work item'));
-      await tester.pump();
-      expect(find.text('#291 Dictate'), findsOneWidget);
-      expect(find.text('No work item'), findsOneWidget);
+      // Both are pushed over a first route, so only [embedded] can take the arrow away.
+      Future<void> open({required bool embedded}) async {
+        await tester.pumpWidget(MaterialApp(
+          theme: AppTheme.dark,
+          home: Builder(
+            builder: (context) => TextButton(
+              onPressed: () => Navigator.of(context).push(MaterialPageRoute(
+                builder: (_) => WorkBoardScreen(
+                  embedded: embedded,
+                  repository: r,
+                  servers: () => const [_server],
+                  clientFactory: client,
+                  pollInterval: const Duration(hours: 1),
+                  onOpenSession: (_) {},
+                ),
+              )),
+              child: const Text('open'),
+            ),
+          ),
+        ));
+        await tester.tap(find.text('open'));
+        await tester.pump();
+        await tester.pump(const Duration(seconds: 1));
+      }
+
+      await open(embedded: false);
+      expect(find.byType(BackButton), findsOneWidget);
+      await tester.pumpWidget(const SizedBox());
+      await open(embedded: true);
+      expect(find.byType(WorkBoardScreen), findsOneWidget);
+      expect(find.byType(BackButton), findsNothing);
       await tester.pumpWidget(const SizedBox());
     });
   });

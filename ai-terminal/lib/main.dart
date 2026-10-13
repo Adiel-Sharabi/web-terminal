@@ -193,7 +193,7 @@ class _AiTerminalAppState extends State<AiTerminalApp>
       // Reveal the split: a route pushed while the window was narrow, or by
       // Fork / the list, would otherwise still be covering it.
       nav.popUntil((route) => route.isFirst);
-      SessionSelection.instance.selectedId.value = sessionId;
+      SessionSelection.instance.select(sessionId);
       return;
     }
 

@@ -1946,8 +1946,8 @@ class _SessionScreenState extends State<SessionScreen>
         // transient annoyance; gating it on isCurrent instead left a DEAD
         // session selected indefinitely whenever a dialog was open, which is
         // persistent. Do not "restore" that guard without reading this.
-        if (SessionSelection.instance.selectedId.value == widget.sessionId) {
-          SessionSelection.instance.selectedId.value = null;
+        if (SessionSelection.instance.selectedId == widget.sessionId) {
+          SessionSelection.instance.clear();
         }
       case SessionExit.stay:
         break;

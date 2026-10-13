@@ -66,7 +66,12 @@ const String kCollapsedKeyPrefix = 'wt.collapsed.';
 const String kFavoritesGroupKey = '__favorites__';
 
 class DashboardScreen extends StatefulWidget {
-  const DashboardScreen({super.key, this.selectedId, this.onSelectSession});
+  const DashboardScreen({
+    super.key,
+    this.selectedId,
+    this.onSelectSession,
+    this.onShowBoard,
+  });
 
   /// In the wide-screen split view, the id of the session shown in the detail
   /// pane — its row is highlighted. `null` in normal (phone) mode.
@@ -75,6 +80,11 @@ class DashboardScreen extends StatefulWidget {
   /// When set (split view), tapping a session selects it in the detail pane
   /// instead of pushing a full-screen route.
   final void Function(Session session)? onSelectSession;
+
+  /// When set (split view), the dashboard button shows the sessions dashboard
+  /// in the detail pane, beside this list (#337), instead of pushing it as a
+  /// full-screen route over everything.
+  final VoidCallback? onShowBoard;
 
   @override
   State<DashboardScreen> createState() => _DashboardScreenState();
@@ -177,6 +187,12 @@ class _DashboardScreenState extends State<DashboardScreen> {
   }
 
   void _openWorkBoard() {
+    // Split view: show it in the detail pane. Phone: push a full-screen route.
+    final onShow = widget.onShowBoard;
+    if (onShow != null) {
+      onShow();
+      return;
+    }
     Navigator.of(context).push(
       MaterialPageRoute(
         builder: (ctx) => WorkBoardScreen(
