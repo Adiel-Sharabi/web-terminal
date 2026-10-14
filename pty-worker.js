@@ -31,8 +31,11 @@ const blockingPrompt = require('./lib/blocking-prompt');
 // #228 — INSTRUMENTATION ONLY: what the PTY was showing when a session went
 // cap-blocked by metrics with the detector below having never seen a thing.
 const capSample = require('./lib/cap-sample');
+// #350 — the pure rules for finishing a turn an AUTO compaction ended; the policy
+// (which agent, how long a grace) is the registry's `compactResume`.
+const compactResume = require('./lib/compact-resume');
 
-const WORKER_VERSION = '0.8.0'; // 0.8.0: #316 - a Claude session whose composer is covered by a panel or menu (/status, /usage, /model, /config, Agent View) publishes `inMenu` (lib/menu-state.js, by the ORDER of the composer marker and a panel footer in the PTY stream). 0.7.0: #179 — a client submit that produces no agent activity within the provider's submitConfirm window is reported as `submitUnconfirmed`, so a prompt swallowed by a TUI that was not at its composer stops vanishing silently. Prior 0.6.2: a session restored from a scrollback that ends mid-alt-screen (Claude killed while in /tui fullscreen, so ?1049l never arrived) gets a corrective ?1049l appended, instead of stranding xterm in the alt buffer showing a frozen frame over a live shell. Prior 0.6.1: the submit gap is measured against the wire, not the frame.
+const WORKER_VERSION = '0.9.0'; // 0.9.0: #350 - an AUTO compaction that ended the turn (claude 2.1.29x) is finished with a typed `continue` after a silent grace (lib/compact-resume.js, registry `compactResume`). 0.8.0: #316 - a Claude session whose composer is covered by a panel or menu (/status, /usage, /model, /config, Agent View) publishes `inMenu` (lib/menu-state.js, by the ORDER of the composer marker and a panel footer in the PTY stream). 0.7.0: #179 — a client submit that produces no agent activity within the provider's submitConfirm window is reported as `submitUnconfirmed`, so a prompt swallowed by a TUI that was not at its composer stops vanishing silently. Prior 0.6.2: a session restored from a scrollback that ends mid-alt-screen (Claude killed while in /tui fullscreen, so ?1049l never arrived) gets a corrective ?1049l appended, instead of stranding xterm in the alt buffer showing a frozen frame over a live shell. Prior 0.6.1: the submit gap is measured against the wire, not the frame.
 
 // --- Optional latency instrumentation (opt-in via WT_LATENCY_DEBUG=1) -----
 const _LATENCY_DEBUG = process.env.WT_LATENCY_DEBUG === '1';
@@ -1081,6 +1084,84 @@ function clearCompacting(session, reason) {
   broadcastEvent('compacting', { id: session.id, compacting: false, since: null });
 }
 
+// --- #350: finish a turn that an AUTO compaction ended ----------------------------
+//
+// Since claude 2.1.29x an auto compaction mid-turn ENDS the turn: the summary is
+// written and then nothing runs until a human types. Measured in this worker's log:
+// `PreCompact` -> `compacting ... started (hook)` and then nothing, `compacting` clearing
+// only on its 360s backstop. Claude's SessionStart hook (source "compact") WAS being
+// POSTed throughout - and ignored, and server.js did not even forward its `source`.
+//
+// So: PreCompact(trigger auto) remembers whose compaction it is; SessionStart(compact)
+// says it is over; and then the turn is given `compactResume.graceMs` to carry on by
+// itself. THE GATE IS SILENCE FROM EVERY HOOK, not the session's status: after the stalled
+// compaction the status may still read `working`, because no Stop ever arrived, so
+// `status === 'working'` (fireAutoResume's gate) would refuse exactly the case this is for.
+// Any hook at all - a tool, a prompt, a Stop, a Notification, a subagent - is the turn
+// carrying on or the user being back, and cancels (handleHook). A manual /compact is never
+// armed: its trigger is 'manual', and an unrecognised or missing trigger reads as manual.
+//
+// ONE-SHOT per compaction: `_compactTrigger` is consumed the moment the compaction ends, so
+// a second SessionStart(compact) with no PreCompact before it arms nothing.
+
+/** Stand down: the turn carried on, or the user is back. Idempotent. */
+function cancelCompactResume(session) {
+  if (session._compactResumeTimer) { clearTimeout(session._compactResumeTimer); session._compactResumeTimer = null; }
+}
+
+// The ONE place the timer is created, so the arm and the not-ready retry share it. The fire
+// function and its due time hang on the timer object, as scheduleAutoResume does (#268), so
+// the test-only __testCompactResumeDue can bring an armed timer due NOW instead of a spec
+// betting a wall-clock window.
+function scheduleCompactResume(session, delayMs) {
+  cancelCompactResume(session);
+  const fire = () => fireCompactResume(session);
+  const timer = setTimeout(fire, delayMs);
+  timer._wtFire = fire;
+  timer._wtFireAt = Date.now() + delayMs;
+  if (typeof timer.unref === 'function') timer.unref();
+  session._compactResumeTimer = timer;
+}
+
+// SessionStart(source compact): the compaction is over. Always clears the indicator -
+// before this the only things that did were the next prompt/tool and the 360s backstop -
+// and arms the nudge only for an auto compaction of an agent that declares a policy.
+function noteCompactionFinished(session) {
+  const trigger = session._compactTrigger;
+  session._compactTrigger = null; // consumed: one compaction, one chance
+  clearCompacting(session, 'finished');
+  const policy = agents.compactResumePolicy(sessionAgent(session));
+  if (!policy || trigger !== 'auto') return;
+  scheduleCompactResume(session, policy.graceMs);
+  log(`compact-resume: "${session.name}" (${session.id}) auto-compaction finished - typing continue in ${policy.graceMs}ms unless the turn carries on`);
+}
+
+function fireCompactResume(session) {
+  session._compactResumeTimer = null;
+  const s = sessions.get(session.id);
+  if (!s) return;
+  // A question or a permission prompt is on screen: the session is waiting for a PERSON,
+  // and `continue` would be typed into the prompt that is asking. (Any hook cancels, so
+  // this can only be reached with a status that was already `waiting` when the
+  // compaction ended - kept because this is a worker-originated write and it is cheap.)
+  if (s.status === 'waiting' || s.questionPending) {
+    log(`compact-resume: "${s.name}" (${s.id}) blocked on the user - skipped`);
+    return;
+  }
+  // #147 - the agent has to EXIST before anything is typed at it. DEFER, never skip (see
+  // fireAutoResume): the window is real and the session still needs its nudge. The hook that
+  // armed this has itself forced readiness (markAgentReadyFromActivity), and the latch is
+  // one-way, so this is belt and braces today - it is here because the rule is "any new
+  // worker-originated write checks _ready", and the latch's known exit-to-shell gap is the
+  // day it stops being unreachable.
+  if (s._ready && !s._ready.ready) {
+    scheduleCompactResume(s, AUTO_RESUME_READY_RETRY_MS);
+    return;
+  }
+  log(`compact-resume: "${s.name}" (${s.id}) typing continue after auto-compaction`);
+  try { submitLine(s, 'continue'); } catch (e) { log(`compact-resume: continue write failed: ${e.message}`); }
+}
+
 // Low-level write to a session's PTY. Mirrors the write into a per-session
 // buffer under WT_TEST so specs can assert the exact bytes we send to the agent
 // (CR-vs-LF is the difference between "submitted" and "stuck in the box").
@@ -1207,6 +1288,10 @@ function noteInterrupt(session, data) {
   // Claude fires NO hook on an interrupt (#55 §6), so without this the watch runs to
   // its timeout and reports a prompt the user themselves cancelled. Found in review.
   cancelSubmitWatch(session);
+  // #350 - Esc says STOP, and like the watch above it must not wait for the `working`
+  // gate: the grace after an auto compaction is a window in which the session may read
+  // either, and a person pressing Esc in it does not want a `continue` typed afterwards.
+  cancelCompactResume(session);
   if (session.status !== 'working') return;
   session.status = 'idle';
   // Esc cancels the whole turn — subagents included. Their SubagentStop may never
@@ -2220,6 +2305,7 @@ function createSession(id, cwd, name, autoCommand, savedScrollback, claudeSessio
     if (session._readyFallback) { clearTimeout(session._readyFallback); session._readyFallback = null; }
     cancelSubmitWatch(session); // #179 — a dead PTY cannot confirm anything
     cancelAutoResume(session); // #69 — same reasoning, a dead PTY has nothing to resume
+    cancelCompactResume(session); // #350 — and nothing to continue
     session._inputQueue = null; // a withheld CR dies with its PTY
     if (session.autoCommand && /\bclaude\b/i.test(session.autoCommand)) {
       // #23: at exit, only attribute a conversation this session provably owns.
@@ -2314,6 +2400,13 @@ function handleHook(session, event, claudeSessionId, prompt, agentId, opts) {
   // event will do: what is being distinguished is "the agent is doing something" from
   // "the TUI swallowed the keystrokes", and a blocked TUI fires nothing at all.
   confirmSubmitWatch(session);
+  // #350 - and proof the turn did NOT stall after an auto compaction, or that the user is
+  // back. ANY hook will do, for the same reason as above and the opposite sign: the nudge
+  // exists only for a session that has gone completely silent since its compaction ended.
+  // Placed here, ahead of the switch, so no event can be forgotten (a Stop, a Notification
+  // and a subagent's events all count) - the only hook that does not cancel is the one
+  // that arms it.
+  if (!compactResume.finishesCompaction(event, opts && opts.source)) cancelCompactResume(session);
   const prevStatus = session.status;
   const fromSubagent = !!agentId;
   let notifyType = null, notifyMsg = null;
@@ -2505,6 +2598,14 @@ function handleHook(session, event, claudeSessionId, prompt, agentId, opts) {
       // COMPACTING_MAX_MS timer inside setCompacting is the stuck-guard for a
       // compaction whose resume never comes.
       setCompacting(session, 'hook');
+      // #350 - and whose compaction it is. Remembered until SessionStart says it is over;
+      // an unknown or missing trigger reads as manual, i.e. never nudged.
+      session._compactTrigger = compactResume.triggerKind(opts && opts.trigger);
+      break;
+    case 'SessionStart':
+      // Every SessionStart used to fall through this switch untouched, and every source
+      // but 'compact' still does: a fresh start, a resume and a /clear change no status.
+      if (compactResume.finishesCompaction(event, opts && opts.source)) noteCompactionFinished(session);
       break;
   }
 
@@ -2635,6 +2736,7 @@ const rpcHandlers = {
     session._inputQueue = null; // a withheld CR dies with its PTY
     cancelSubmitWatch(session); // #179
     cancelAutoResume(session); // #69
+    cancelCompactResume(session); // #350
     try { session.term.kill(); } catch {}
     // Eagerly remove from the map so immediate follow-up RPCs see it as gone
     // (matches legacy server.js behavior). The onExit handler still fires later
@@ -2667,7 +2769,7 @@ const rpcHandlers = {
     const session = sessions.get(requireUuid(params.id));
     if (!session) throw new Error('session not found');
     return handleHook(session, params.event, params.claudeSessionId, params.prompt, params.agentId,
-      { questionPending: params.questionPending });
+      { questionPending: params.questionPending, trigger: params.trigger, source: params.source });
   },
 
   // #69 — server.js calls this whenever sessionMetrics() learns (or loses) this
@@ -2826,6 +2928,24 @@ const rpcHandlers = {
     const session = sessions.get(requireUuid(params.id));
     if (!session) throw new Error('session not found');
     const timer = session._autoResumeTimer;
+    if (!timer) return { armed: false };
+    const fireAt = timer._wtFireAt;
+    if (params.peek) return { armed: true, fireAt };
+    clearTimeout(timer);
+    timer._wtFire();
+    return { armed: true, fireAt };
+  },
+
+  // #350 - the same instrument for the post-compaction nudge: bring the armed timer due
+  // NOW and run it, through the very function its setTimeout would call. `{ armed: false }`
+  // when nothing is armed - which is how a cancel test proves a decision rather than a
+  // window that had not elapsed (a cancel that was removed would leave the timer to fire
+  // right here). `peek: true` reports the due time without firing.
+  __testCompactResumeDue: async (params) => {
+    if (!process.env.WT_TEST) throw new Error('test-only RPC');
+    const session = sessions.get(requireUuid(params.id));
+    if (!session) throw new Error('session not found');
+    const timer = session._compactResumeTimer;
     if (!timer) return { armed: false };
     const fireAt = timer._wtFireAt;
     if (params.peek) return { armed: true, fireAt };

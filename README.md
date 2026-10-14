@@ -42,6 +42,12 @@ Full instructions: **[docs/INSTALL.md](docs/INSTALL.md)**.
   window reopens, and the session picks itself back up a minute after it does — so a limit
   hit overnight costs you the window, not the morning. Only sessions actually observed to be
   capped are resumed, and any row's badge turns it off for that session.
+- **It finishes a turn that auto-compaction cut short.** Recent Claude Code versions end the
+  turn when they compact the conversation on their own, and then wait for you to type. When
+  an *automatic* compaction finishes and the session stays completely silent for 15 seconds,
+  the worker types `continue` for you. Any sign of life in that window — a tool call, a
+  prompt, Esc — cancels it, a `/compact` you ran yourself is never nudged, and a session
+  waiting on your answer is left alone.
 - **One sidebar, every machine.** Run it on several boxes and drive them all from one list.
 - **Private by construction.** It binds to localhost; you reach it over your own VPN. Push
   notifications are content-free wake-ups — the text is fetched from your server, not a relay.
