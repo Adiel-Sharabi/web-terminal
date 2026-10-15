@@ -56,6 +56,11 @@ notify-prefs.json
 
 # Per-session favorites/pin ranks (#60 — the server-side SSOT for the pinned group)
 favorites.json
+# Who started each session POSTed here (#351) - the spawn reaper's verdicts, per machine; the suite's copy too.
+spawned-sessions.json
+spawned-sessions.json.tmp
+spawned-sessions.test.json
+spawned-sessions.test.json.tmp
 # Per-session 5h auto-resume opt-out (#137) — same class as notify-prefs.json above.
 auto-resume-prefs.json
 
