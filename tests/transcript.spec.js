@@ -1065,3 +1065,42 @@ test.describe('lib/transcript.attachSubagentStubs', () => {
     });
   });
 });
+
+// #353 - claude 2.1.300 writes a copy of each message as it was sent to the API.
+// Shape taken from a real transcript: the record's keys are exactly these, and it
+// carries no timestamp. It must never become a turn, whatever its role.
+const blob = (role, text) => ({
+  type: 'api-request-blob', sessionId: 's', hash: 'h',
+  message: { role, content: [{ type: 'text', text }] },
+});
+
+test.describe('#353 api-request-blob lines are copies, not turns', () => {
+  test('a blob of any role parses to null', () => {
+    for (const role of ['user', 'assistant', 'system']) {
+      expect(parseTranscriptTurn(JSON.stringify(blob(role, 'Rotate the artifact to Hebrew.')))).toBeNull();
+    }
+  });
+
+  test('a prompt and its blob copy give ONE user turn, not two', () => {
+    const lines = [
+      // Real-first, as 1914 of 1940 measured pairs are; the gate does not depend on order.
+      { ...user('Rotate the artifact to Hebrew.'), timestamp: '2026-10-15T10:00:00.000Z' },
+      blob('user', 'Rotate the artifact to Hebrew.'),
+      asst('On it.'),
+      blob('assistant', 'On it.'),
+    ];
+    const buf = Buffer.from(lines.map((l) => JSON.stringify(l)).join('\n') + '\n', 'utf8');
+    const r = scanTurnsBackward((off, len) => buf.slice(off, off + len), buf.length, {});
+    expect(r.turns.map((t) => t.role + ':' + t.text)).toEqual([
+      'user:Rotate the artifact to Hebrew.',
+      'assistant:On it.',
+    ]);
+    expect(r.turns[0].ts).toBe('2026-10-15T10:00:00.000Z');
+  });
+
+  test('lastAssistantText skips a newer blob that re-sends an OLDER reply as history', () => {
+    const p = writeTranscript([asst('Earlier words.'), user('next'), asst('Final answer.'), blob('assistant', 'Earlier words.')]);
+    try { expect(lastAssistantText(p)).toBe('Final answer.'); }
+    finally { fs.unlinkSync(p); }
+  });
+});
