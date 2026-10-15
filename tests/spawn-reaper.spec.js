@@ -12,8 +12,8 @@ const fs = require('fs');
 const path = require('path');
 const crypto = require('crypto');
 const WebSocket = require('ws');
-const { test, expect } = require('@playwright/test');
-const { BASE, AUTH, authCtx, claudeProjectsRoot } = require('./test-helpers');
+const { test, expect, request: pwRequest } = require('@playwright/test');
+const { BASE, AUTH, readHookToken, claudeProjectsRoot } = require('./test-helpers');
 const R = require('../lib/spawn-reaper');
 const { negotiateSize, isActiveViewer } = require('../lib/terminal-size');
 
@@ -72,6 +72,19 @@ test.describe('#351 shouldClose - every gate, alone', () => {
     // exactly when it is asked, so the reaper reads raw lists and nothing is exempt by age.
     expect(decide(row({ backgroundTasks: [{ id: 'p1', description: 'shell command', stale: true }] }))).toEqual({ close: false, why: 'background-work' });
     expect(decide(row({ backgroundTasks: [{ id: 'b1', startedAt: NOW - 30 * HOUR }] }))).toEqual({ close: false, why: 'background-work' });
+  });
+
+  test('inside its idle window a session is "recent" whatever a READ said - no read needs consulting at all', () => {
+    // A fresh server has no process snapshot yet; that is no reason to name for a session that
+    // could not be closed anyway. The turn-state gates still outrank the clock.
+    const young = { lastActivity: NOW - 1000 };
+    for (const patch of [{ backgroundTasks: null }, { backgroundTasks: [{ id: 'b1' }] }, { usageLimit: null }, { usageLimit: { waiting: true } }, { favorite: true }]) {
+      expect(decide(row({ ...young, ...patch })), JSON.stringify(patch)).toEqual({ close: false, why: 'recent' });
+    }
+    expect(decide(row({ ...young, status: 'working' })).why).toBe('working');
+    expect(decide(row({ ...young, status: 'waiting' })).why).toBe('waiting');
+    expect(decide(row({ ...young, compacting: true })).why).toBe('compacting');
+    expect(decide(row({ ...young, activeViewers: 1 })).why).toBe('viewer');
   });
 
   test('UNKNOWN work (null) is not NONE ([]): only a known-empty list lets it close', () => {
@@ -406,6 +419,25 @@ test.describe('#351 spawn-store - persistence', () => {
     expect(Object.keys(onDisk()).sort()).toEqual([id(1), id(4)]);
   });
 
+  test('SHIFT (the test lever) moves the whole verdict clock back, and keeps a viewer inside the window inside it', () => {
+    const a = rig(), b = rig(), c = rig();
+    // never viewed: shifted past the window it is an agent's
+    a.s.created(id(1)); expect(a.s.metaOf(id(1)).by).toBe('pending');
+    expect(a.s.shift(id(1), WINDOW + 1)).toBe(true);
+    expect(a.s.metaOf(id(1))).toMatchObject({ by: 'agent', createdAt: NOW - WINDOW - 1 });
+    // viewed inside the window: the view moves with the creation, so it stays a person's
+    b.s.created(id(2)); b.clock.adv(1000); b.s.noteViewed(id(2));
+    expect(b.s.shift(id(2), 10 * WINDOW)).toBe(true);
+    expect(b.s.metaOf(id(2)).by).toBe('human');
+    // a persisted verdict: creation AND last view move, and the file follows
+    c.s.created(id(3)); c.clock.adv(WINDOW); c.s.metaOf(id(3)); c.clock.adv(500); c.s.noteViewed(id(3));
+    expect(c.s.shift(id(3), 7000)).toBe(true);
+    expect(c.onDisk()[id(3)]).toMatchObject({ createdAt: NOW - 7000, lastViewedAt: NOW + WINDOW + 500 - 7000 });
+    // nothing to move, or no number
+    expect(c.s.shift(id(99), 1)).toBe(false);
+    expect(c.s.shift(id(3), NaN)).toBe(false);
+  });
+
   test('FORGET removes a session\'s verdict from memory and from the file', () => {
     const { s, clock, onDisk } = rig();
     s.created(id(1)); clock.adv(WINDOW); s.metaOf(id(1));
@@ -482,6 +514,17 @@ test.describe('#351 server.js wiring (pinned against the source)', () => {
     expect(new Set(all)).toEqual(new Set(['process.env.WT_SPAWN_CLASSIFY_MS', 'process.env.WT_SPAWN_IDLE_MS']));
   });
 
+  test('the time lever exists only under WT_TEST', () => {
+    const at = SERVER_SRC.indexOf("app.post('/api/test/spawn-age/:id'");
+    expect(at).toBeGreaterThan(0);
+    const open = SERVER_SRC.lastIndexOf('if (process.env.WT_TEST) {', at);
+    const close = SERVER_SRC.slice(at).search(/\n\}\r?\n/);
+    expect(open).toBeGreaterThan(0);
+    // the route sits inside that one WT_TEST block, not after its closing brace
+    expect(SERVER_SRC.slice(open, at + close)).toContain("app.post('/api/test/spawn-age/:id'");
+    expect(SERVER_SRC.slice(open, at)).not.toMatch(/\n\}\r?\n/);
+  });
+
   test('the knob is read live, by the documented name, with the library default', () => {
     expect(SERVER_SRC).toContain("liveConfig('spawnedSessionIdleCloseHours', spawnReaper.DEFAULT_IDLE_HOURS)");
   });
@@ -511,15 +554,16 @@ test.describe('#351 server.js wiring (pinned against the source)', () => {
     expect(sweep.slice(0, sweep.indexOf('const _spawnReaperTicker'))).toContain('spawnStore.prune(');
   });
 
-  test('the reaper reads RAW work (never the aged badge helpers) from a FRESH process snapshot', () => {
+  test('the reaper reads RAW work (never the aged badge helpers) and never awaits a process snapshot (#280)', () => {
     const at = SERVER_SRC.indexOf('async function reaperRunningWork(s)');
     const body = SERVER_SRC.slice(at, SERVER_SRC.indexOf('let _spawnSweepBusy'));
     expect(body).toContain('readBackgroundTasks(s)');
-    expect(body).toContain('processTree.snapshot(Date.now(), { maxAgeMs: REAPER_SNAPSHOT_MAX_AGE_MS })');
+    expect(body).toContain('processTree.snapshotNoWait()');
+    expect(body).not.toMatch(/processTree\s*\.\s*snapshot\b\s*\(/);
     expect(body).toContain('processTree.liveWorkUnder(');
     // the badge's helpers age a task out at 6h, mark a shell stale at 6h, swallow errors to [],
-    // and answer [] for an old snapshot - each would make the gate dead or fail-open
-    for (const lenient of ['sessionRunningWork', 'sessionBackgroundTasks', 'sessionRunningShells', 'freshBackgroundTasks', 'snapshotNoWait', 'runningShellsUnder']) {
+    // and turn a missing snapshot into [] - each would make the gate dead or fail-open
+    for (const lenient of ['sessionRunningWork', 'sessionBackgroundTasks', 'sessionRunningShells', 'freshBackgroundTasks', 'runningShellsUnder']) {
       expect(body).not.toContain(lenient);
     }
   });
@@ -550,6 +594,22 @@ test.describe('#351 server.js wiring (pinned against the source)', () => {
 });
 
 // --- the real server -------------------------------------------------------------
+//
+// NO WALL-CLOCK BETS. Measured on Home (2026-10-15): a bare Node process doing nothing but a
+// 10 ms timer is stalled for 8-16 s out of every 20 s, in stalls of up to 8 s, with and without
+// anything of ours running (`snapshotNoWait` spawning PowerShell makes no difference). Every
+// fixed sleep, window and timeout in a spec is a bet against that, so this section makes none:
+//   * "inside the classify window" has 60 s of slack (playwright.config.js);
+//   * "past the window" and "untouched for hours" are never waited for: POST
+//     /api/test/spawn-age/:id and age-session move the clocks, and every sweep is asked at the
+//     REAL 6 h threshold;
+//   * a state a spec depends on is polled for (a socket attached, output landed), never slept for;
+//   * HTTP goes out with `Connection: close`. The server drops an idle keep-alive socket after
+//     5 s (Node's default), and a client that is stalled across that instant writes its next
+//     request to a socket the server has already closed: ECONNRESET / "socket hang up".
+//     Reproduced against this suite server: 5 of 5 stalled requests reset, 0 of 8 with `close`;
+//   * the socket helper copes with the server having closed the socket first (a session the
+//     sweep closes ends its viewers' sockets before the HTTP answer reaches the spec).
 
 const CLASSIFY_MS = Number(process.env.WT_SPAWN_CLASSIFY_MS) || 0;
 const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
@@ -564,21 +624,9 @@ async function rawCookie() {
   return (res.headers.get('set-cookie') || '').split(';')[0];
 }
 
-/** A viewer socket on /ws/:id. `mode`: 'active' | 'background' | null (say nothing). */
-async function attach(cookie, id, mode) {
-  const ws = new WebSocket(`${BASE.replace('http', 'ws')}/ws/${id}`, { headers: { Cookie: cookie } });
-  await new Promise((resolve, reject) => { ws.once('open', resolve); ws.once('error', reject); });
-  if (mode) ws.send(JSON.stringify({ mode, browserId: `reaper-${Math.random()}` }));
-  await sleep(500); // the attach RPC, and the mode message queued behind it
-  return {
-    ws,
-    close: () => new Promise((r) => { ws.once('close', r); try { ws.close(); } catch { r(); } }),
-  };
-}
-
 test.describe('#351 against the real server', () => {
-  test.skip(!CLASSIFY_MS, 'needs the suite server\'s shortened classify window (playwright.config.js)');
-  test.setTimeout(60000);
+  test.skip(!CLASSIFY_MS, 'needs the suite server\'s classify window (playwright.config.js)');
+  test.setTimeout(120000); // a bound for a failure, not a bet: nothing below sleeps for a window
 
   /** @type {import('@playwright/test').APIRequestContext} */
   let ctx;
@@ -588,7 +636,13 @@ test.describe('#351 against the real server', () => {
   let made = [];
 
   test.beforeAll(async () => { cookie = await rawCookie(); });
-  test.beforeEach(async () => { ctx = await authCtx(); made = []; });
+  test.beforeEach(async () => {
+    ctx = await pwRequest.newContext({
+      baseURL: BASE,
+      extraHTTPHeaders: { Cookie: cookie, 'X-WT-Hook-Token': readHookToken(), Connection: 'close' },
+    });
+    made = [];
+  });
   test.afterEach(async () => {
     for (const id of made) await ctx.delete(`/api/sessions/${id}`).catch(() => {});
     await ctx.dispose();
@@ -604,24 +658,88 @@ test.describe('#351 against the real server', () => {
   const rowOf = async (id) => (await (await ctx.get('/api/sessions')).json()).find((s) => s.id === id);
   const clusterRowOf = async (id) => (await (await ctx.get('/api/cluster/sessions')).json()).sessions.find((s) => s.id === id);
   const exists = async (id) => Boolean(await rowOf(id));
-  /** Run the reaper now. `idleMs` is the test threshold; omit it for the real 6 hours. */
-  const sweep = async (idleMs, fail) => {
+  const until = async (fn, what, ms = 60000) => {
+    const end = Date.now() + ms;
+    for (;;) {
+      const v = await fn();
+      if (v) return v;
+      if (Date.now() > end) throw new Error(`timed out waiting for ${what}`);
+      await sleep(300);
+    }
+  };
+
+  // ---- the time levers ----
+  const ageSpawn = async (id, ms) => expect((await ctx.post(`/api/test/spawn-age/${id}`, { data: { ms } })).status()).toBe(200);
+  const ageActivity = async (id, ms) => expect((await ctx.post(`/api/test/age-session/${id}`, { data: { ageMinutes: ms / 60000, activityOnly: true } })).status()).toBe(200);
+  /** The classify window has passed for [id]. */
+  const pastWindow = (id) => ageSpawn(id, CLASSIFY_MS + 1000);
+  /** [id] has been untouched for 7 hours: created, last viewed and last written to. */
+  const untouched = async (id) => { await ageSpawn(id, 7 * HOUR); await ageActivity(id, 7 * HOUR); };
+
+  /** Run the reaper now, at the real threshold. `fail`: reads to make fail ('work', 'metrics'). */
+  const sweep = async (fail) => {
     // A sweep that finds another one running (the 5-minute ticker, or a slow earlier call) says so
     // and does nothing; ask again rather than read the empty answer as "kept".
-    for (let i = 0; i < 40; i++) {
-      const out = await (await ctx.post('/api/test/spawn-reaper-sweep', { data: { ...(idleMs ? { idleMs } : {}), ...(fail ? { fail } : {}) } })).json();
+    for (let i = 0; i < 80; i++) {
+      const out = await (await ctx.post('/api/test/spawn-reaper-sweep', { data: fail ? { fail } : {} })).json();
       if (!out.skipped) return out;
       await sleep(250);
     }
     throw new Error('the reaper sweep stayed busy');
   };
-  const pastWindow = () => sleep(CLASSIFY_MS + 400);
+  /**
+   * Make [id] look untouched, ask the reaper, and return its answer - re-establishing the PREMISE
+   * until it holds, never retrying the answer under test:
+   *  - 'recent' means something touched the session after it was aged (a slow shell's first
+   *    prompt landing late): age it again and ask again;
+   *  - 'work-unknown' means the process snapshot is not there yet (the first sweep after the
+   *    server starts asks for it in the background, #280): ask again once it has landed -
+   *    unless the spec injected that failure itself.
+   */
+  async function sweepUntouched(id, fail, ms = 90000) {
+    const end = Date.now() + ms;
+    const injected = Array.isArray(fail) && fail.includes('work');
+    for (;;) {
+      await untouched(id);
+      const out = await sweep(fail);
+      const why = out.kept[id];
+      const premiseMissing = why === 'recent' || (why === 'work-unknown' && !injected);
+      if (out.closed.includes(id) || !premiseMissing) return out;
+      if (Date.now() > end) throw new Error(`the premise never held for ${id}: kept as ${JSON.stringify(why)}`);
+      await sleep(1000);
+    }
+  }
+  /** The reaper closes [id] (once its premise holds). */
+  async function reaped(id) {
+    const out = await sweepUntouched(id);
+    expect(out.closed, JSON.stringify(out.kept[id])).toContain(id);
+  }
+
+  /** A viewer socket on /ws/:id: resolves once the SERVER has attached it (the worker counts it). */
+  async function attach(id, mode) {
+    const ws = new WebSocket(`${BASE.replace('http', 'ws')}/ws/${id}`, { headers: { Cookie: cookie } });
+    await new Promise((resolve, reject) => { ws.once('open', resolve); ws.once('error', reject); });
+    if (mode) ws.send(JSON.stringify({ mode, browserId: `reaper-${Math.random()}` }));
+    await until(async () => ((await rowOf(id)) || {}).clients > 0, 'the socket to be attached');
+    return {
+      ws,
+      // Safe whoever closed first: a session the sweep ends takes its viewers' sockets with it, and a
+      // 'close' that has already fired is never emitted again.
+      close: () => new Promise((r) => {
+        if (ws.readyState === WebSocket.CLOSED) return r();
+        ws.once('close', r);
+        try { ws.close(); } catch { r(); }
+      }),
+    };
+  }
+  /** After a viewer socket is gone, wait until the server has let go of it. */
+  const detached = (id) => until(async () => ((await rowOf(id)) || { clients: 0 }).clients === 0, 'the socket to be detached');
 
   test('no viewer in the window -> agent-started; the sweep closes it only once it is idle long enough', async () => {
     const id = await create('rp-agent', { spawnedBy: `   a helper agent   ${'x'.repeat(200)}` });
     // Inside the window nothing is claimed yet.
     expect((await rowOf(id)).spawn).toMatchObject({ by: 'pending' });
-    await pastWindow();
+    await pastWindow(id);
 
     const r = await rowOf(id);
     expect(r.spawn.by).toBe('agent');
@@ -631,110 +749,101 @@ test.describe('#351 against the real server', () => {
     // ...on the cluster list too (the second shaper)
     expect((await clusterRowOf(id)).spawn).toMatchObject({ by: 'agent' });
 
-    // The real threshold is 6 hours: a brand-new session is kept, and says why.
+    // The real threshold is 6 hours: a brand-new session is kept, and says why - without having
+    // consulted any read (a fresh server has no process snapshot, which is no reason to name).
     const kept = await sweep();
     expect(kept.closed).not.toContain(id);
     expect(kept.kept[id]).toBe('recent');
     expect(await exists(id)).toBe(true);
 
-    // Shortened to 1.5s it closes - once its last output is that old.
-    let closed = false;
-    for (let i = 0; i < 20 && !closed; i++) {
-      closed = (await sweep(1500)).closed.includes(id);
-      if (!closed) await sleep(500);
-    }
-    expect(closed).toBe(true);
+    // Untouched for 7 hours it closes.
+    await reaped(id);
     expect(await exists(id)).toBe(false);
     expect((await ctx.delete(`/api/sessions/${id}`)).status()).toBe(404);
   });
 
   test('an ACTIVE viewer that stays past the window -> a person\'s session, never closed', async () => {
     const id = await create('rp-human-stays');
-    const v = await attach(cookie, id, 'active'); // the mode message alone must classify it
-    await pastWindow();
+    const v = await attach(id, 'active'); // the mode message alone must classify it
+    await pastWindow(id);
     expect((await rowOf(id)).spawn.by).toBe('human');
     await v.close();
-    await sleep(1600);
-    const s = await sweep(1500);
+    await detached(id);
+    await untouched(id);
+    const s = await sweep();
     expect(s.closed).not.toContain(id);
     expect(await exists(id)).toBe(true);
   });
 
   test('an ACTIVE viewer that looks and leaves inside the window -> a person\'s session too', async () => {
     const id = await create('rp-human-leaves');
-    const v = await attach(cookie, id, 'active');
+    const v = await attach(id, 'active');
     await v.close(); // gone again: only the CLASSIFICATION is under test, not the viewer gate
-    await pastWindow();
+    await detached(id);
+    await pastWindow(id);
 
     expect((await rowOf(id)).spawn.by).toBe('human');
     expect((await clusterRowOf(id)).spawn.by).toBe('human');
-    await sleep(1600);
-    const s = await sweep(1500);
+    await untouched(id);
+    const s = await sweep();
     expect(s.closed).not.toContain(id);
     expect(await exists(id)).toBe(true);
   });
 
   test('a BACKGROUND socket is not a viewer: it neither classifies a person nor holds the session open', async () => {
     const id = await create('rp-bg');
-    const v = await attach(cookie, id, 'background');
-    await pastWindow();
+    const v = await attach(id, 'background');
+    await pastWindow(id);
     expect((await rowOf(id)).spawn.by).toBe('agent');
 
-    let closed = false;
-    for (let i = 0; i < 20 && !closed; i++) {
-      closed = (await sweep(1500)).closed.includes(id);
-      if (!closed) await sleep(500);
-    }
-    expect(closed).toBe(true);
+    await reaped(id);
     expect(await exists(id)).toBe(false);
-    await v.close().catch(() => {});
+    await v.close();
   });
 
   test('a viewer who is attached holds an agent-started session; once they leave, the clock starts from then', async () => {
     const id = await create('rp-watch');
-    await pastWindow();
+    await pastWindow(id);
     expect((await rowOf(id)).spawn.by).toBe('agent');
 
-    const v = await attach(cookie, id, 'active'); // a person opens it, late
-    await sleep(1700);
-    const held = await sweep(1500);
+    const v = await attach(id, 'active'); // a person opens it, late
+    const held = await sweepUntouched(id);
     expect(held.closed).not.toContain(id);
     expect(held.kept[id]).toBe('viewer');
     expect(await exists(id)).toBe(true);
 
     await v.close();
-    await sleep(300);
-    // They have only just left: viewed a moment ago, so not idle for 1.5s yet.
-    const fresh = await sweep(60_000);
+    await detached(id);
+    // They have only just left: that is the last time it was viewed, so it is "recent" - the
+    // session itself has been untouched for 7 hours (aged above) and is no reason.
+    const fresh = await sweep();
     expect(fresh.closed).not.toContain(id);
     expect(fresh.kept[id]).toBe('recent');
 
-    let closed = false;
-    for (let i = 0; i < 20 && !closed; i++) {
-      closed = (await sweep(1500)).closed.includes(id);
-      if (!closed) await sleep(500);
-    }
-    expect(closed).toBe(true);
+    await reaped(id); // 7 hours after they left, it closes
   });
 
-  test('a session that is printing output is not closed (builtins only: the reason is the output, not a child process)', async () => {
+  test('a session that is writing output is not closed - the output alone holds it', async () => {
     const id = await create('rp-busy');
-    await pastWindow();
+    await pastWindow(id);
     expect((await rowOf(id)).spawn.by).toBe('agent');
-    // A shell printing every 300ms for a while. `read -t` is a builtin, so no child process
-    // is alive between lines and the only thing that can hold the session is its output. A
-    // background socket's input is dropped by the server, so an ACTIVE one types the command
-    // and then hands the session back (background): no viewer is attached while the sweep
-    // decides, and its last view is older than the 1s threshold by then.
-    const typer = await attach(cookie, id, 'active');
-    typer.ws.send('for i in $(seq 1 60); do echo tick$i; read -t 0.3 _x; done\r');
-    typer.ws.send(JSON.stringify({ mode: 'background' }));
-    await sleep(1800);
-    const s = await sweep(1000);
+    // A background socket's input is dropped by the server, so an ACTIVE one types the command
+    // and leaves. `echo` is a builtin: no child process, so the only thing that can hold the
+    // session is the output it just wrote.
+    const typer = await attach(id, 'active');
+    const typedAt = Date.now();
+    typer.ws.send('echo output-holds-it\r');
+    await until(async () => ((await rowOf(id)) || {}).lastActivity >= typedAt, 'the echo to be written');
+    await typer.close();
+    await detached(id);
+    await ageSpawn(id, 7 * HOUR); // created and last viewed are now 7 hours ago; lastActivity is not
+
+    const s = await sweep();
     expect(s.closed).not.toContain(id);
     expect(s.kept[id]).toBe('recent');
     expect(await exists(id)).toBe(true);
-    await typer.close().catch(() => {});
+
+    await reaped(id); // control: the same session, its output now 7 hours old, closes
   });
 
   // ---- #351 review round: the late view, the persisted verdict, the dead gate, the unknowns ----
@@ -753,10 +862,11 @@ test.describe('#351 against the real server', () => {
       await closed;
     };
     const personal = await create('rp-early-active');
-    const bystander = await create('rp-early-background');
     await sendAndLeave(personal, { mode: 'active', browserId: 'early-1' });
+    const bystander = await create('rp-early-background');
     await sendAndLeave(bystander, { mode: 'background', browserId: 'early-2' }); // a keepOpen socket is not a person
-    await pastWindow();
+    await pastWindow(personal);
+    await pastWindow(bystander);
     expect((await rowOf(personal)).spawn.by).toBe('human');
     expect((await rowOf(bystander)).spawn.by).toBe('agent');
   });
@@ -766,12 +876,12 @@ test.describe('#351 against the real server', () => {
     test.skip(!file, 'needs the suite\'s WT_SPAWNED_SESSIONS_FILE');
     const verdicts = () => JSON.parse(fs.readFileSync(file, 'utf8'));
     const id = await create('rp-file', { spawnedBy: 'file-test' });
-    await pastWindow();
+    await pastWindow(id);
     expect((await rowOf(id)).spawn.by).toBe('agent');
     expect(verdicts()[id]).toMatchObject({ by: 'agent', spawnedBy: 'file-test' });
     expect((await ctx.delete(`/api/sessions/${id}`)).status()).toBe(200);
     // sessionExited arrives a moment after the row leaves the list; no sweep runs in between
-    await expect.poll(() => Object.prototype.hasOwnProperty.call(verdicts(), id), { timeout: 10000 }).toBe(false);
+    await expect.poll(() => Object.prototype.hasOwnProperty.call(verdicts(), id), { timeout: 30000 }).toBe(false);
   });
 
   const FIXTURE_DIR = path.join(claudeProjectsRoot(), '__wt-spawnreaper-fixture__');
@@ -800,26 +910,23 @@ test.describe('#351 against the real server', () => {
       })).status()).toBe(200);
       await hook('UserPromptSubmit', { transcript_path: fixture, prompt: 'go' });
       await hook('Stop', {});
-      await expect.poll(async () => (await rowOf(id))?.status, { timeout: 15000 }).toBe('idle');
-      await pastWindow();
+      await expect.poll(async () => (await rowOf(id))?.status, { timeout: 30000 }).toBe('idle');
+      await pastWindow(id);
       expect((await rowOf(id)).spawn.by).toBe('agent');
-      // the badge has aged it out ...
-      await expect.poll(async () => (await rowOf(id)).backgroundTasks, { timeout: 15000, intervals: [500] }).toEqual([]);
+      // the badge has aged it out (a real 2.5 s the suite server is configured with) ...
+      await expect.poll(async () => (await rowOf(id)).backgroundTasks, { timeout: 30000, intervals: [500] }).toEqual([]);
       // ... and the reaper has not: the ONLY thing holding the session is the running launch
-      const held = await sweep(1500);
+      const held = await sweepUntouched(id);
       expect(held.closed).not.toContain(id);
       expect(held.kept[id]).toBe('background-work');
       expect(await exists(id)).toBe(true);
 
       // The transcript records the finish: nothing else changed, and now it closes.
       fs.appendFileSync(fixture, finishLine('bgsr1') + '\n', 'utf8');
-      let closed = false;
-      for (let i = 0; i < 20 && !closed; i++) {
-        const s = await sweep(1500);
-        closed = s.closed.includes(id);
-        if (!closed) await sleep(500);
-      }
-      expect(closed).toBe(true);
+      await until(async () => {
+        const out = await sweepUntouched(id);
+        return out.closed.includes(id);
+      }, 'the finished launch to release the session');
     } finally {
       try { fs.rmSync(FIXTURE_DIR, { recursive: true, force: true }); } catch { /* best effort */ }
     }
@@ -827,40 +934,26 @@ test.describe('#351 against the real server', () => {
 
   test('a read that could not tell keeps the session: unknown work, then unknown usage - and it closes once both can be read', async () => {
     const id = await create('rp-unknown');
-    await pastWindow();
+    await pastWindow(id);
     expect((await rowOf(id)).spawn.by).toBe('agent');
 
-    const noWork = await sweep(1500, ['work']);
+    const noWork = await sweepUntouched(id, ['work']);
     expect(noWork.closed).not.toContain(id);
     expect(noWork.kept[id]).toBe('work-unknown');
 
-    const noUsage = await sweep(1500, ['metrics']);
+    const noUsage = await sweepUntouched(id, ['metrics']);
     expect(noUsage.closed).not.toContain(id);
     expect(noUsage.kept[id]).toBe('usage-unknown');
     expect(await exists(id)).toBe(true);
 
-    let closed = false;
-    for (let i = 0; i < 20 && !closed; i++) {
-      closed = (await sweep(1500)).closed.includes(id);
-      if (!closed) await sleep(500);
-    }
-    expect(closed).toBe(true);
+    await reaped(id);
   });
 
   // ---- a hand-off successor (#340/#345) ----------------------------------------------------
 
   const LAUNCH = "printf '\\xe2\\x9d\\xaf\\xc2\\xa0 ready\\n'; echo claude";
   const HANDOFF_DIR = process.env.WT_HANDOFF_DIR || path.join(__dirname, '..', 'handoffs.test');
-  const until = async (fn, what, ms = 30000) => {
-    const end = Date.now() + ms;
-    for (;;) {
-      const v = await fn();
-      if (v) return v;
-      if (Date.now() > end) throw new Error(`timed out waiting for ${what}`);
-      await sleep(300);
-    }
-  };
-  const hookToken = () => { try { return fs.readFileSync(path.join(__dirname, '..', '.hook-token'), 'utf8').trim(); } catch { return ''; } };
+  const hookToken = readHookToken;
   const agentHook = async (id, event, body = {}) => (await ctx.post('/api/hook', {
     data: { hook_event_name: event, ...body }, headers: { 'X-WT-Hook-Token': hookToken(), 'X-WT-Session-ID': id },
   })).status();
@@ -871,8 +964,8 @@ test.describe('#351 against the real server', () => {
    *  spawn verdict); `extra` is the request body (a spawnedBy label). */
   async function handoffCandidate(name, extra = {}, { viewed = false } = {}) {
     const id = await create(name, { agent: 'claude', autoCommand: LAUNCH, ...extra });
-    // A person opens it inside the classify window - before the (slow) setup below can outlast it.
-    if (viewed) await (await attach(cookie, id, 'active')).close();
+    // A person opens it inside the classify window.
+    if (viewed) { const v = await attach(id, 'active'); await v.close(); await detached(id); }
     await until(async () => (await rowOf(id))?.agentReady === true, 'the session to be ready');
     const conv = crypto.randomUUID();
     expect(await agentHook(id, 'UserPromptSubmit', { session_id: conv, prompt: 'work' })).toBe(200);
@@ -900,11 +993,10 @@ test.describe('#351 against the real server', () => {
   };
 
   test('a hand-off successor of an agent-started session is agent-started too, with the spawner carried over', async () => {
-    test.setTimeout(120000);
     const base = `rp-handoff-agent-${Date.now()}`;
     try {
       const id = await handoffCandidate(base, { name: base, spawnedBy: 'nightly' });
-      await pastWindow();
+      await pastWindow(id);
       const before = await rowOf(id);
       expect(before.spawn).toMatchObject({ by: 'agent', spawnedBy: 'nightly' });
       const succ = await handOff(id, before.name);
@@ -914,11 +1006,10 @@ test.describe('#351 against the real server', () => {
   });
 
   test('...and a PERSON\'s session gives its successor no verdict, as before', async () => {
-    test.setTimeout(120000);
     const base = `rp-handoff-human-${Date.now()}`;
     try {
       const id = await handoffCandidate(base, { name: base }, { viewed: true });
-      await pastWindow();
+      await pastWindow(id);
       const before = await rowOf(id);
       expect(before.spawn.by).toBe('human');
       const succ = await handOff(id, before.name);
