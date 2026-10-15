@@ -196,6 +196,18 @@ Tune it with a `handoff` block in `config.json` (`ctxThreshold`, default 500000;
 default 10; `auto: false` to go back to the button only; `enabled: false` for neither), read
 live. Claude only: another agent is offered nothing.
 
+**Helper sessions don't pile up** — an agent that starts a session with `POST /api/sessions`
+(often on another machine) and never closes it used to hold one of the machine's session slots
+for as long as it lived. Now a session nobody opens within a minute of creating it counts as
+agent-started (a person opens the session they just made; an agent's API call never does, so
+this does not depend on how the caller logged in), and once its turn has ended and nobody has
+looked at it or touched it for `spawnedSessionIdleCloseHours` (default 6, `0` turns it off, read
+live from `config.json`) the server closes it and logs a `spawn-reaper: closed` line. A session
+that is running, waiting on you, compacting, running a background command, favourited, or held
+by a usage limit is never closed, and neither is any session the server did not see created
+(restored after a restart, or made another way). A caller can pass `spawnedBy` (a short label)
+when it creates a session; session rows carry `spawn: { by, spawnedBy, createdAt }`.
+
 **A colour per machine** — set `serverColor` on each server and its sessions carry that colour
 in the session list and on the dashboard of every client.
 

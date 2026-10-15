@@ -75,3 +75,6 @@ else {
 // #272 refusal off the briefs file instead of the token store.
 if (process.env.WT_SESSION_BRIEFS_FILE) reset(process.env.WT_SESSION_BRIEFS_FILE, '#298');
 if (process.env.WT_DEVICE_OPS_FILE) reset(process.env.WT_DEVICE_OPS_FILE, '#311');
+// #351 - the spawn reaper's verdicts: per-run state like the files above, so a run starts
+// from none rather than from whatever an interrupted one left.
+if (process.env.WT_SPAWNED_SESSIONS_FILE) reset(process.env.WT_SPAWNED_SESSIONS_FILE, '#351');

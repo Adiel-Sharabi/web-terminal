@@ -73,6 +73,12 @@ process.env.WT_HANDOFF_DIR = path.join(__dirname, 'handoffs.test');
 // #311 - the device-ops log. The suite's submits must never land in production's
 // logs/device-ops.jsonl, where they would be counted as real use; reset per run like the above.
 process.env.WT_DEVICE_OPS_FILE = path.join(__dirname, 'device-ops.test.jsonl');
+// #351 - the spawn reaper's verdicts, and its classify window shortened from 60s to 3s so a
+// spec can watch a session become `agent`-started. Only the window: the idle threshold stays
+// at its real value for the suite server's own sweep (a spec passes a short one to the test
+// trigger), so no other spec's session is ever reaped.
+process.env.WT_SPAWNED_SESSIONS_FILE = path.join(__dirname, 'spawned-sessions.test.json');
+process.env.WT_SPAWN_CLASSIFY_MS = '3000';
 
 module.exports = defineConfig({
   testDir: './tests',
