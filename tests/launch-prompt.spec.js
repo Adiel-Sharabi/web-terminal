@@ -46,8 +46,36 @@ test.describe('withoutLaunchPrompt (#360)', () => {
   test('words outside claude\'s own argv are never touched', () => {
     expect(strip('cd "C:/my dir" && claude "go"')).toBe('cd "C:/my dir" && claude');
     expect(strip('claude "go" && echo done')).toBe('claude && echo done');
-    expect(strip('claude "go" > out.log')).toBe('claude > out.log');
     expect(strip('C:/tools/claude.exe "go"')).toBe('C:/tools/claude.exe');
+    expect(strip('FOO=1 npx claude "go"')).toBe('FOO=1 npx claude');
+  });
+
+  test('only a program word in COMMAND POSITION is the launch', () => {
+    // A path argument ending in "claude" is not the program: the first cut stripped
+    // `pull` here, which broke git and so the launch behind it.
+    expect(strip('git -C ~/work/claude pull --ff-only && claude "go"')).toBe('git -C ~/work/claude pull --ff-only && claude');
+    expect(strip('echo claude "go"')).toBe('echo claude "go"');
+  });
+
+  test('SECURITY: anything not read exactly as bash reads it is left whole', () => {
+    // Each of these, split naively, would turn inert text into a command that RUNS
+    // (review of the first cut reproduced the first two in bash). Unchanged = safe.
+    const whole = [
+      'claude "fix the bug" # notes; echo hi > PWNED',
+      "claude $'a\\' ; echo hi > PWNED ; \\'' #'",
+      'claude $CLAUDE_FLAGS "go"',
+      'claude `cat flags` "go"',
+      'claude $(cat flags) "go"',
+      'claude "a $(echo ")" b"',
+      'claude "cost $5"',
+      '(claude "go")',
+      'claude {a,b} "go"',
+      'claude "go" > out.log',
+      'claude "go">out.log',
+      'claude < in.txt "go"',
+      'claude \\\n--model opus "go"',
+    ];
+    for (const c of whole) expect(strip(c), c).toBe(c);
   });
 
   test('nothing to strip, or nothing safe to parse, returns the command unchanged', () => {

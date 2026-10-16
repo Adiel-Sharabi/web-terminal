@@ -397,6 +397,9 @@ test.describe('closed sessions', () => {
     // the worker's answer at exit wins over the listed id; a fork is reopened as itself
     expect(B.resumeOf({ autoCommand: 'claude --resume aaaaaaaa-0000 --fork-session', claudeSessionId: 'aaaaaaaa-0000', cwd: 'C:/w' },
       { conversationId: conv }).resumeCommand).toBe(`claude --resume ${conv}`);
+    // #360: a Reopen does not hand the conversation its launch prompt again
+    expect(B.resumeOf({ autoCommand: 'claude --dangerously-skip-permissions "Read t.md and execute it."', claudeSessionId: conv, cwd: 'C:/w' })
+      .resumeCommand).toBe(`claude --dangerously-skip-permissions --resume ${conv}`);
     // no conversation, a plain shell, or an agent the rule does not cover: no resume
     expect(B.resumeOf({ autoCommand: 'claude', cwd: 'C:/w' }).resumeCommand).toBeNull();
     expect(B.resumeOf({ autoCommand: '', claudeSessionId: conv, cwd: 'C:/w' }).resumeCommand).toBeNull();
