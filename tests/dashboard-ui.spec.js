@@ -408,7 +408,11 @@ test.describe('#298 sessions dashboard (app.html)', () => {
 
     // Remembered on this device: still open after a reload.
     await page.reload();
-    if (!(await page.locator('#dashboard').isVisible())) await page.click('#dashBtn');
+    // The URL still carries #dashboard, so the app reopens it ITSELF once its startup
+    // finishes. Wait for that - never "click if not visible yet": the check ran before
+    // startup and the click landed after it, toggling the dashboard SHUT, which left the
+    // cards in the DOM but hidden (failing on CI and locally from 2026-10-16).
+    await expect(page.locator('#dashboard')).toBeVisible();
     await expect(page.locator('.db-machines [data-action=machines]')).toHaveAttribute('aria-expanded', 'true');
     await expect(page.locator('.db-mach').first()).toBeVisible();
     expect(errors).toEqual([]);
