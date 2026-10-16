@@ -65,6 +65,20 @@ test.describe('restart hold (#359)', () => {
     expect(M.noteStatus(h, agentRow())).toBe(h); // a worker older than the field
     expect(M.noteStatus(h, agentRow({ lastTurnEndAt: T0 + 5 }))).toBe(h); // the turn before the prompt
     expect(M.noteStatus(h, agentRow({ lastTurnEndAt: T0 + 30 })).sessions.a.answeredAt).toBe(T0 + 30);
+    // An agent that reports through hooks must show DELIVERY first: the worker stamps even
+    // a stray Stop on an idle session, which the prompt never caused.
+    const hooked = agentRow({ hookStatus: true, lastTurnEndAt: T0 + 30 });
+    expect(M.noteStatus(h, hooked)).toBe(h);
+    h = M.noteHook(h, 'a', 'UserPromptSubmit', { prompt: M.wrapUpPrompt('x') }, T0 + 20);
+    expect(M.noteStatus(h, hooked).sessions.a.answeredAt).toBe(T0 + 30);
+  });
+
+  test('a compacting session is not told and not ready; a capped one says why it waits', () => {
+    expect(M.canPrompt(agentRow({ compacting: true }))).toBe(false);
+    const told = { promptedAt: T0 + 1, deliveredAt: T0 + 2, answeredAt: T0 + 3 };
+    expect(M.verdict(told, agentRow({ compacting: true }), [])).toEqual({ state: M.STATES.WORKING, why: 'compacting its context' });
+    expect(M.verdict({ promptedAt: T0 + 1, deliveredAt: T0 + 2, answeredAt: null }, agentRow({ capBlocked: true }), []).why)
+      .toBe('told, but capped at its usage limit until the reset');
   });
 
   test('a prompt the worker reports as not taken is typed again - at most MAX_TRIES times', () => {

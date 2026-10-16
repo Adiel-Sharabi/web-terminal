@@ -2961,6 +2961,8 @@ function saveMaint() {
 // little; lib/maintenance.js allows for that.
 const machineBootAt = () => Date.now() - Math.round(os.uptime() * 1000);
 const maintRowsOf = (sessions) => Object.fromEntries(sessions.map((s) => [s.id, s]));
+// The worker row plus the one server-side fact the rules read (a pending question).
+const maintRowOf = (row) => ({ ...row, waitingFor: sessionWaitingFor(row) });
 // Every change to the hold goes through here: read _maint.hold at the moment of the
 // change (never a copy taken before an await), apply one pure step, save if it moved.
 function maintUpdate(step) {
@@ -2996,7 +2998,7 @@ async function maintTick() {
     let changed = false;
     if (_maint.hold) {
       for (const id of Object.keys(_maint.hold.sessions)) {
-        const row = rows[id] && { ...rows[id], waitingFor: sessionWaitingFor(rows[id]) };
+        const row = rows[id] && maintRowOf(rows[id]);
         if (!row || !_maint.hold) continue;
         maintUpdate((h) => maintLib.noteStatus(h, row));
         if (maintLib.shouldPrompt(_maint.hold.sessions[id], row)) {
@@ -3010,7 +3012,7 @@ async function maintTick() {
       const expired = Date.now() - _maint.back.since > maintLib.BACK_TIMEOUT_MS;
       const pending = [];
       for (const id of _maint.back.pending) {
-        const row = rows[id] && { ...rows[id], waitingFor: sessionWaitingFor(rows[id]) };
+        const row = rows[id] && maintRowOf(rows[id]);
         // Not in the list: not restored. The worker restores every saved session before it
         // answers its first RPC, so a missing id here is gone for good, not still coming.
         if (!row) continue;
@@ -3038,7 +3040,7 @@ async function maintStatus() {
   if (!_maint.hold) return { ...maintLib.status(null, {}, {}), back };
   const works = {};
   for (const s of sessions) {
-    rows[s.id] = { ...s, waitingFor: sessionWaitingFor(s) };
+    rows[s.id] = maintRowOf(s);
     works[s.id] = await reaperRunningWork(s);
   }
   const out = maintLib.status(_maint.hold, rows, works);
