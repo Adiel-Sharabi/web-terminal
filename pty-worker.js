@@ -1828,6 +1828,10 @@ function armIdle(session, event) {
 
 // The ONE place a hook flips a session to idle.
 function applyIdle(session, event) {
+  // #359 - when the agent's turn last ENDED. Only a Stop: an idle Notification is not a
+  // turn end, and an Esc interrupt never comes here. Claude's Stop hook and Codex's
+  // finished-turn OSC 9 both arrive as 'Stop', so this is the one fact for every agent.
+  if (event === 'Stop') session.lastTurnEndAt = Date.now();
   // The debounce outlives the session if it exited in the window — don't announce
   // a status for a PTY that is gone (killSession clears the timer; an exit races).
   if (!sessions.has(sessionIdOf(session))) return;
@@ -2013,8 +2017,11 @@ function sessionSummary(id, s) {
     // detector reads as ready too: the gate must fail OPEN, because a client that
     // wrongly believes a live session is starting can never submit to it again.
     agentReady: s._ready ? s._ready.ready : true,
-    // #359 - how many subagents are live, so "working" can say what it is waiting on.
+    // #359 - how many subagents are live, so "working" can say what it is waiting on,
+    // and when the agent's turn last ended (applyIdle), so a restart hold can tell that a
+    // session answered its wrap-up prompt whatever channel reports its turns.
     subagents: s.subagents ? s.subagents.size : 0,
+    lastTurnEndAt: s.lastTurnEndAt || null,
     // #190 — WHY it is not ready, when we can say. A recognised startup selector is
     // on screen: the session is blocked on a question, not booting. Null is the
     // normal answer and means "nothing recognised", never "nothing is wrong" — the

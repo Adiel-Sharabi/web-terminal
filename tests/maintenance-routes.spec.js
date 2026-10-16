@@ -88,7 +88,8 @@ test.describe('#359 restart hold - server', () => {
       return sb.includes(TAG);
     }, 'the prompt in the agent\'s terminal');
     expect((await verdictOf(shell)).promptedAt).toBeNull();
-    expect((await verdictOf(agent)).state).toBe('answering');
+    // Typed is not delivered: until the agent's own UserPromptSubmit carries it, it may not have landed.
+    expect(await verdictOf(agent)).toMatchObject({ state: 'answering', why: 'prompt typed; waiting for the agent to take it' });
 
     // A second prepare does not start a second hold.
     expect((await ctx.post('/api/maintenance/prepare', { data: { reason: 'again' } })).status()).toBe(409);
@@ -98,13 +99,19 @@ test.describe('#359 restart hold - server', () => {
     expect(refused.status()).toBe(503);
     expect((await refused.json()).restartHold).toMatchObject({ reason: 'spec restart' });
     const forced = await make(`maint-forced-${Date.now()}`, { force: true });
-    expect((await verdictOf(forced)).startedDuringHold).toBe(true);
+    // Forced through the hold: tracked, so it is told and judged like the rest.
+    expect((await verdictOf(forced)).untracked).toBe(false);
 
     // A hand-off would boot a successor: refused too.
     const h = await ctx.post(`/api/sessions/${agent}/handoff`, { data: { force: true } });
     expect(h.status()).toBe(409);
     expect((await h.json()).why).toBe('restart-hold');
 
+    // A Stop before delivery answers nothing; the tagged UserPromptSubmit is delivery.
+    expect(await hook(agent, 'Stop', { session_id: conv })).toBe(200);
+    expect((await verdictOf(agent)).answeredAt).toBeNull();
+    expect(await hook(agent, 'UserPromptSubmit', { session_id: conv, prompt: `${TAG} wrap up` })).toBe(200);
+    await until(async () => (await verdictOf(agent))?.deliveredAt, 'the prompt to count as delivered');
     // A SUBAGENT's Stop is not the answer; the main agent's is.
     expect(await hook(agent, 'Stop', { session_id: conv, agent_id: 'sub-1' })).toBe(200);
     expect((await verdictOf(agent)).answeredAt).toBeNull();
@@ -118,6 +125,53 @@ test.describe('#359 restart hold - server', () => {
     expect(await (await ctx.delete('/api/maintenance')).json()).toMatchObject({ ok: true, cancelled: true });
     expect((await status()).hold).toBeNull();
     await make(`maint-after-${Date.now()}`, {});
+  });
+
+  test('a WORKING session is not told until its turn ends - never queued behind it', async () => {
+    const agent = await make(`maint-busy-${Date.now()}`, { agent: 'claude', autoCommand: LAUNCH });
+    await until(async () => (await rowOf(agent))?.agentReady === true, 'the agent to be ready');
+    const conv = crypto.randomUUID();
+    expect(await hook(agent, 'UserPromptSubmit', { session_id: conv, prompt: 'long job' })).toBe(200);
+    await until(async () => (await rowOf(agent))?.status === 'working', 'the agent to be working');
+    expect((await ctx.post('/api/maintenance/prepare', { data: { reason: 'busy spec' } })).status()).toBe(200);
+    // Several ticks pass; it stays untold while it works.
+    await new Promise((r) => setTimeout(r, 7000));
+    expect(await verdictOf(agent)).toMatchObject({ state: 'working', promptedAt: null });
+    expect(await hook(agent, 'Stop', { session_id: conv })).toBe(200);
+    await until(async () => (await verdictOf(agent))?.promptedAt, 'the prompt once the turn ended');
+  });
+
+  test('after the restart: the hold clears itself and the told session hears the machine is back', async () => {
+    const agent = await make(`maint-back-${Date.now()}`, { agent: 'claude', autoCommand: LAUNCH });
+    await until(async () => (await rowOf(agent))?.agentReady === true, 'the agent to be ready');
+    const conv = crypto.randomUUID();
+    expect(await hook(agent, 'UserPromptSubmit', { session_id: conv, prompt: 'work' })).toBe(200);
+    expect(await hook(agent, 'Stop', { session_id: conv })).toBe(200);
+    await until(async () => (await rowOf(agent))?.status === 'idle', 'the agent to go idle');
+    // What a cold restart leaves behind: a hold that told this session, recorded against a
+    // process it no longer runs in. bootAt null leaves only the process signal to decide.
+    const hold = {
+      reason: 'back spec', startedAt: Date.now() - 60000, bootAt: null,
+      sessions: { [agent]: { name: 'x', pid: 1, agent: 'claude', promptedAt: Date.now() - 50000, deliveredAt: null, answeredAt: null, tries: 1 } },
+    };
+    expect((await ctx.post('/api/test/maintenance-state', { data: { hold } })).status()).toBe(200);
+    await until(async () => (await status()).hold === null, 'the hold to clear itself');
+    await until(async () => {
+      const sb = await (await ctx.get(`/api/sessions/${agent}/scrollback`)).text();
+      return sb.includes('The machine is back');
+    }, 'the back notice in the agent\'s terminal');
+    await until(async () => (await status()).back === null, 'the back list to empty');
+    // Nothing is refused any more.
+    await make(`maint-back-after-${Date.now()}`, {});
+  });
+
+  test('a hold whose sessions all still run in their own processes is NOT a restart (hot reload)', async () => {
+    const shell = await make(`maint-hot-${Date.now()}`, { autoCommand: '' });
+    expect((await ctx.post('/api/maintenance/prepare', { data: { reason: 'hot spec' } })).status()).toBe(200);
+    await new Promise((r) => setTimeout(r, 4000));
+    const s = await status();
+    expect(s.hold).toMatchObject({ reason: 'hot spec' });
+    expect(s.sessions.find((v) => v.id === shell)).toBeTruthy();
   });
 
   test('the CLI drives the same routes, and its exit code is the answer', async () => {

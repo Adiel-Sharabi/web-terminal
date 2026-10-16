@@ -1610,6 +1610,8 @@ workerClient.on('blockedPrompt', ({ id, blockedPrompt }) => {
 workerClient.on('submitUnconfirmed', ({ id, at }) => {
   const payload = JSON.stringify({ type: 'submitUnconfirmed', id, at: at ?? null });
   for (const client of notifyClients) { try { client.send(payload); } catch {} }
+  // #359 - a restart hold's wrap-up prompt that did not land is typed again.
+  try { maintUpdate((h) => maintLib.noteUnconfirmed(h, id)); } catch (e) { console.error(`maintenance: ${e.message}`); }
 });
 
 workerClient.on('sessionExited', ({ id, claudeSessionId }) => {
@@ -2959,8 +2961,12 @@ function saveMaint() {
 // little; lib/maintenance.js allows for that.
 const machineBootAt = () => Date.now() - Math.round(os.uptime() * 1000);
 const maintRowsOf = (sessions) => Object.fromEntries(sessions.map((s) => [s.id, s]));
-function setMaintEntry(id, patch) {
-  _maint.hold = { ..._maint.hold, sessions: { ..._maint.hold.sessions, [id]: { ..._maint.hold.sessions[id], ...patch } } };
+// Every change to the hold goes through here: read _maint.hold at the moment of the
+// change (never a copy taken before an await), apply one pure step, save if it moved.
+function maintUpdate(step) {
+  if (!_maint.hold) return;
+  const next = step(_maint.hold);
+  if (next !== _maint.hold) { _maint.hold = next; saveMaint(); }
 }
 
 /** The restart happened: drop the hold and queue the "back" notice. */
@@ -2972,11 +2978,9 @@ function maintCheckRestarted(rows) {
   saveMaint();
 }
 
-/** A hook for a held session: the MAIN agent's Stop after the prompt is its answer. */
+/** A hook for a held session: delivery (the tagged UserPromptSubmit) and the answer (its Stop). */
 function maintNoteHook(id, event, body) {
-  if (!_maint.hold) return;
-  const next = maintLib.noteHook(_maint.hold, id, event, body, Date.now());
-  if (next !== _maint.hold) { _maint.hold = next; saveMaint(); }
+  maintUpdate((h) => maintLib.noteHook(h, id, event, body, Date.now()));
 }
 
 let _maintBusy = false;
@@ -2993,14 +2997,12 @@ async function maintTick() {
     if (_maint.hold) {
       for (const id of Object.keys(_maint.hold.sessions)) {
         const row = rows[id] && { ...rows[id], waitingFor: sessionWaitingFor(rows[id]) };
-        if (!row) continue;
-        const next = maintLib.noteStatus(_maint.hold, row, Date.now());
-        if (next !== _maint.hold) { _maint.hold = next; changed = true; }
-        if (!_maint.hold.sessions[id].promptedAt && maintLib.canPrompt(row)) {
+        if (!row || !_maint.hold) continue;
+        maintUpdate((h) => maintLib.noteStatus(h, row));
+        if (maintLib.shouldPrompt(_maint.hold.sessions[id], row)) {
           typePrompt(id, maintLib.wrapUpPrompt(_maint.hold.reason));
-          setMaintEntry(id, { promptedAt: Date.now() });
-          changed = true;
-          console.log(`[maintenance] ${id}: told to wrap up`);
+          maintUpdate((h) => maintLib.notePrompted(h, id, Date.now()));
+          console.log(`[maintenance] ${id}: told to wrap up (try ${_maint.hold.sessions[id].tries})`);
         }
       }
     }
@@ -3009,7 +3011,9 @@ async function maintTick() {
       const pending = [];
       for (const id of _maint.back.pending) {
         const row = rows[id] && { ...rows[id], waitingFor: sessionWaitingFor(rows[id]) };
-        if (!row) continue; // not restored: nobody to tell
+        // Not in the list: not restored. The worker restores every saved session before it
+        // answers its first RPC, so a missing id here is gone for good, not still coming.
+        if (!row) continue;
         if (maintLib.canSendBack(row)) {
           typePrompt(id, maintLib.backPrompt(_maint.back.reason));
           console.log(`[maintenance] ${id}: told the machine is back`);
@@ -5704,6 +5708,14 @@ if (process.env.WT_TEST) {
   // session's classify window / viewed clock back by `ms`. A spec says "this was created 7 hours
   // ago" instead of sleeping for the classify window, which a host that stalls its processes for
   // seconds (measured on Home) turns into a coin flip.
+  // #359 - set the restart hold's state outright, so a spec can drive what only a real
+  // restart produces (tracked sessions whose processes changed) through the real tick.
+  app.post('/api/test/maintenance-state', express.json({ limit: '64kb' }), async (req, res) => {
+    _maint = { hold: req.body?.hold || null, back: req.body?.back || null };
+    saveMaint();
+    await maintTick();
+    res.json({ ok: true });
+  });
   app.post('/api/test/spawn-age/:id', express.json(), (req, res) => {
     const ok = spawnStore.shift(req.params.id, Number(req.body?.ms));
     res.status(ok ? 200 : 404).json({ ok });
@@ -5804,7 +5816,11 @@ app.post('/api/maintenance/prepare', express.json({ limit: '4kb' }), async (req,
   try {
     if (_maint.hold) return res.status(409).json({ error: 'a restart hold is already on', ...(await maintStatus()) });
     const { sessions } = await workerClient.rpc('listSessions');
-    _maint = { hold: maintLib.startHold({ reason: req.body?.reason, now: Date.now(), bootAt: machineBootAt(), sessions }), back: null };
+    // Checked again: another prepare may have landed while the list was read.
+    if (_maint.hold) return res.status(409).json({ error: 'a restart hold is already on', ...(await maintStatus()) });
+    // A "back" notice still on its way is kept: a prepare straight after a restart must
+    // not swallow the notice for the restart that just happened.
+    _maint = { hold: maintLib.startHold({ reason: req.body?.reason, now: Date.now(), bootAt: machineBootAt(), sessions }), back: _maint.back };
     saveMaint();
     console.log(`[maintenance] restart hold started (${_maint.hold.reason}) over ${sessions.length} session(s)`);
     await maintTick();
@@ -5877,6 +5893,8 @@ app.post('/api/sessions', express.json({ limit: '16kb' }), async (req, res) => {
       cwd = liveCwd;
     }
     const created = await workerClient.rpc('createSession', { id, cwd, name, autoCommand, agent });
+    // #359 - a session forced through a restart hold is told and judged like the rest.
+    maintUpdate((h) => maintLib.trackSession(h, { id, name, agent: agentsLib.resolveAgent(created.agent, autoCommand) }));
     // #351 - start the classify window: a person opens a session they made, an agent's call never does.
     spawnStore.created(id, req.body?.spawnedBy);
     invalidateClusterSessionsCache(); // new session must show in the sidebar immediately
@@ -6903,7 +6921,8 @@ app.post('/api/claude-sessions/import', express.json({ limit: '50mb' }), async (
     console.log(`[${new Date().toISOString()}] Imported claude session ${safeProject}/${safeId} (${content.length} bytes)`);
 
     // Optionally create a terminal session to resume this claude session
-    if (autoResume && maintRefusal()) return res.status(503).json({ ok: true, imported: true, ...maintRefusal() });
+    const held = autoResume ? maintRefusal() : null;
+    if (held) return res.status(503).json({ imported: true, ...held });
     if (autoResume) {
       const projectPath = decodeProjectPath(safeProject);
       let cwd = projectPath;

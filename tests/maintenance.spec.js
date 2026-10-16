@@ -28,9 +28,10 @@ test.describe('restart hold (#359)', () => {
     expect(M.wrapUpPrompt('Windows update')).toContain('Windows update');
   });
 
-  test('a prompt is typed only into an agent that can take it - never into a selector', () => {
+  test('a prompt is typed only into an agent IDLE at its composer - never into a selector, never queued', () => {
     expect(M.canPrompt(agentRow())).toBe(true);
-    expect(M.canPrompt(agentRow({ status: 'working' }))).toBe(true); // queues behind the turn
+    // Queued behind a running turn, an Esc would leave it unsent while the turn still ends.
+    expect(M.canPrompt(agentRow({ status: 'working' }))).toBe(false);
     expect(M.canPrompt(shellRow())).toBe(false);
     expect(M.canPrompt(agentRow({ agentReady: false }))).toBe(false); // still booting (#147)
     // Text typed into a permission prompt or a menu would ANSWER it.
@@ -41,34 +42,66 @@ test.describe('restart hold (#359)', () => {
     expect(M.canPrompt(null)).toBe(false);
   });
 
-  test('the answer is the MAIN agent\'s Stop after the prompt - never prose, never a subagent', () => {
+  test('delivery is the agent\'s own tagged UserPromptSubmit; the answer is the MAIN Stop after it', () => {
     let h = hold();
-    // Before the prompt: a Stop answers nothing.
+    // Before the prompt: nothing counts.
     expect(M.noteHook(h, 'a', 'Stop', {}, T0 + 1)).toBe(h);
-    h = { ...h, sessions: { ...h.sessions, a: { ...h.sessions.a, promptedAt: T0 + 10 } } };
+    h = M.notePrompted(h, 'a', T0 + 10);
+    expect(h.sessions.a).toMatchObject({ promptedAt: T0 + 10, tries: 1 });
+    // A Stop before delivery is the PREVIOUS turn's, or a turn the prompt never started.
+    expect(M.noteHook(h, 'a', 'Stop', {}, T0 + 15)).toBe(h);
+    // Some other prompt is not delivery; a subagent's events never count.
+    expect(M.noteHook(h, 'a', 'UserPromptSubmit', { prompt: 'something else' }, T0 + 16)).toBe(h);
+    expect(M.noteHook(h, 'a', 'UserPromptSubmit', { prompt: M.wrapUpPrompt('x'), agent_id: 's1' }, T0 + 16)).toBe(h);
+    h = M.noteHook(h, 'a', 'UserPromptSubmit', { prompt: M.wrapUpPrompt('x') }, T0 + 17);
+    expect(h.sessions.a.deliveredAt).toBe(T0 + 17);
     expect(M.noteHook(h, 'a', 'Stop', { agent_id: 'sub-1' }, T0 + 20)).toBe(h);
-    expect(M.noteHook(h, 'a', 'PostToolUse', {}, T0 + 20)).toBe(h);
     expect(M.noteHook(h, 'nope', 'Stop', {}, T0 + 20)).toBe(h);
     expect(M.noteHook(h, 'a', 'Stop', {}, T0 + 20).sessions.a.answeredAt).toBe(T0 + 20);
   });
 
-  test('an agent with no Stop hook is answered by working-then-idle after the prompt', () => {
+  test('the worker\'s lastTurnEndAt answers for any agent - Codex has no Stop hook', () => {
+    let h = M.notePrompted(hold(), 'a', T0 + 10);
+    expect(M.noteStatus(h, agentRow())).toBe(h); // a worker older than the field
+    expect(M.noteStatus(h, agentRow({ lastTurnEndAt: T0 + 5 }))).toBe(h); // the turn before the prompt
+    expect(M.noteStatus(h, agentRow({ lastTurnEndAt: T0 + 30 })).sessions.a.answeredAt).toBe(T0 + 30);
+  });
+
+  test('a prompt the worker reports as not taken is typed again - at most MAX_TRIES times', () => {
     let h = hold();
-    h = { ...h, sessions: { ...h.sessions, a: { ...h.sessions.a, promptedAt: T0 + 10 } } };
-    expect(M.noteStatus(h, agentRow(), T0 + 20).sessions.a.answeredAt).toBeNull(); // idle, never seen working
-    h = M.noteStatus(h, agentRow({ status: 'working' }), T0 + 20);
-    expect(h.sessions.a.sawWorking).toBe(true);
-    expect(M.noteStatus(h, agentRow(), T0 + 30).sessions.a.answeredAt).toBe(T0 + 30);
+    for (let i = 0; i < M.MAX_TRIES; i++) {
+      expect(M.shouldPrompt(h.sessions.a, agentRow())).toBe(true);
+      h = M.notePrompted(h, 'a', T0 + i);
+      expect(M.shouldPrompt(h.sessions.a, agentRow())).toBe(false);
+      h = M.noteUnconfirmed(h, 'a');
+      expect(h.sessions.a.promptedAt).toBeNull();
+    }
+    expect(M.shouldPrompt(h.sessions.a, agentRow())).toBe(false);
+    expect(M.verdict(h.sessions.a, agentRow(), []).why).toBe(`the wrap-up prompt did not land after ${M.MAX_TRIES} tries`);
+    // Once delivered, a late "unconfirmed" changes nothing.
+    let d = M.noteHook(M.notePrompted(hold(), 'a', T0), 'a', 'UserPromptSubmit', { prompt: M.wrapUpPrompt('x') }, T0 + 1);
+    expect(M.noteUnconfirmed(d, 'a')).toBe(d);
+  });
+
+  test('a session started during the hold (force) is tracked and told like the rest', () => {
+    const h = M.trackSession(hold(), { id: 'n', name: 'N', agent: 'claude' });
+    expect(h.sessions.n).toMatchObject({ agent: 'claude', promptedAt: null, pid: null });
+    expect(M.trackSession(h, { id: 'n', name: 'again' })).toBe(h);
+    expect(M.trackSession(null, { id: 'x' })).toBeNull();
   });
 
   test('verdicts come from state, and only ready/gone allow the restart', () => {
     const told = { promptedAt: T0 + 1, answeredAt: T0 + 2 };
     const S = M.STATES;
     expect(M.verdict({ promptedAt: null }, agentRow(), []).state).toBe(S.NOT_TOLD);
-    expect(M.verdict({ promptedAt: T0 + 1, answeredAt: null }, agentRow(), []).state).toBe(S.ANSWERING);
+    expect(M.verdict({ promptedAt: T0 + 1, answeredAt: null }, agentRow(), []))
+      .toEqual({ state: S.ANSWERING, why: 'prompt typed; waiting for the agent to take it' });
+    expect(M.verdict({ promptedAt: T0 + 1, deliveredAt: T0 + 2, answeredAt: null }, agentRow(), []).why).toBe('told; its turn has not ended yet');
+    expect(M.verdict(told, agentRow({ status: 'waiting', waitingFor: 'permission' }), []).why).toBe('waiting for you: approve a tool');
+    expect(M.verdict(told, agentRow({ blockedPrompt: { kind: 'trust' } }), []).state).toBe(S.NEEDS_YOU);
     expect(M.verdict(told, agentRow({ status: 'working' }), []).state).toBe(S.WORKING);
     expect(M.verdict(told, agentRow({ status: 'working', subagents: 2 }), []).why).toBe('working, waiting on 2 subagents');
-    expect(M.verdict(told, agentRow({ status: 'waiting', waitingFor: 'question' }), []).why).toBe('waiting for you: a question');
+    expect(M.verdict(told, agentRow({ status: 'waiting', waitingFor: 'question' }), []).why).toBe('waiting for you: answer a question');
     expect(M.verdict(told, agentRow({ inMenu: true }), []).state).toBe(S.NEEDS_YOU);
     expect(M.verdict(told, agentRow(), [{ pid: 5, name: 'dotnet.exe' }]))
       .toEqual({ state: S.BUSY, why: 'still running: dotnet.exe' });
@@ -91,10 +124,10 @@ test.describe('restart hold (#359)', () => {
     expect(M.status(h, rows, { a: [] }).safeToRestart).toBe(false);
     // Closed since: still safe.
     expect(M.status(h, { a: agentRow() }, { a: [] }).safeToRestart).toBe(true);
-    // Started after the hold (with force): judged too, and flagged.
+    // A session the hold never registered: judged too, and flagged.
     const late = M.status(h, { ...rows, n: agentRow({ id: 'n', name: 'N', status: 'working' }) }, { a: [], s: [], n: [] });
     expect(late.safeToRestart).toBe(false);
-    expect(late.sessions[0]).toMatchObject({ id: 'n', state: 'working', startedDuringHold: true });
+    expect(late.sessions[0]).toMatchObject({ id: 'n', state: 'working', untracked: true });
     expect(M.status(null, rows, {})).toEqual({ hold: null, safeToRestart: null, sessions: [] });
   });
 

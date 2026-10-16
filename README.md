@@ -199,8 +199,11 @@ live. Claude only: another agent is offered nothing.
 **Prepare a machine for a restart** — one action, one honest answer.
 `node scripts/wt-maintenance.js prepare "Windows update"` (add `--server <url|name>` for a cluster
 peer) sets a **restart hold**: every agent session is told, through its own terminal, to bring its
-current step to a safe stop and end its turn. A session parked on a permission prompt or a menu is
-told once it is back at its composer, so the text never answers the question. While the hold is
+current step to a safe stop and end its turn. A session is told only when it is idle at its
+composer: one that is mid-turn, or parked on a permission prompt or a menu, is told once its turn
+ends, so the text is never queued behind a turn or answers a question. "Told" means the agent's
+own prompt hook carried the text, and "answered" means a turn ended after that. A prompt the agent
+visibly did not take is typed again, up to three times. While the hold is
 on, new sessions are refused (`503`; pass `"force": true` to override) and no hand-off starts.
 `wt-maintenance.js status --wait` reports one verdict per session: `ready`, `working`,
 `needs-you`, `busy` (a build or test still running under it), `answering` or `not-told`. It
