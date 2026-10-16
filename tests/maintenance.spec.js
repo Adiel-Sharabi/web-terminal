@@ -1,0 +1,172 @@
+// @ts-check
+// Unit tests for lib/maintenance.js (#359): the rules of a restart hold.
+
+const { test, expect } = require('@playwright/test');
+const M = require('../lib/maintenance');
+const { classifyUserTurn } = require('../lib/user-turn');
+
+const T0 = 1_000_000;
+const BOOT = 500_000;
+const agentRow = (over = {}) => ({ id: 'a', name: 'A', agent: 'claude', status: 'idle', agentReady: true, pid: 11, ...over });
+const shellRow = (over = {}) => ({ id: 's', name: 'S', agent: null, status: 'idle', pid: 22, ...over });
+const hold = () => M.startHold({ reason: 'Windows update', now: T0, bootAt: BOOT, sessions: [agentRow(), shellRow()] });
+
+test.describe('restart hold (#359)', () => {
+  test('a new hold tracks every session; nothing is told yet', () => {
+    const h = hold();
+    expect(h.reason).toBe('Windows update');
+    expect(Object.keys(h.sessions).sort()).toEqual(['a', 's']);
+    expect(h.sessions.a).toMatchObject({ pid: 11, agent: 'claude', promptedAt: null, answeredAt: null });
+    expect(M.startHold({ reason: '', now: T0, bootAt: BOOT, sessions: [] }).reason).toBe('restart');
+  });
+
+  test('the prompts are tagged, so the chat lens never shows them as "You"', () => {
+    for (const p of [M.wrapUpPrompt('x'), M.backPrompt('x')]) {
+      expect(p).not.toMatch(/[\r\n]/);
+      expect(classifyUserTurn(p)).toMatchObject({ kind: 'system', from: 'Restart' });
+    }
+    expect(M.wrapUpPrompt('Windows update')).toContain('Windows update');
+  });
+
+  test('a prompt is typed only into an agent IDLE at its composer - never into a selector, never queued', () => {
+    expect(M.canPrompt(agentRow())).toBe(true);
+    // Queued behind a running turn, an Esc would leave it unsent while the turn still ends.
+    expect(M.canPrompt(agentRow({ status: 'working' }))).toBe(false);
+    expect(M.canPrompt(shellRow())).toBe(false);
+    expect(M.canPrompt(agentRow({ agentReady: false }))).toBe(false); // still booting (#147)
+    // Text typed into a permission prompt or a menu would ANSWER it.
+    expect(M.canPrompt(agentRow({ status: 'waiting' }))).toBe(false);
+    expect(M.canPrompt(agentRow({ inMenu: true }))).toBe(false);
+    expect(M.canPrompt(agentRow({ blockedPrompt: { kind: 'x' } }))).toBe(false);
+    expect(M.canPrompt(agentRow({ waitingFor: 'question' }))).toBe(false);
+    expect(M.canPrompt(null)).toBe(false);
+  });
+
+  test('delivery is the agent\'s own tagged UserPromptSubmit; the answer is the MAIN Stop after it', () => {
+    let h = hold();
+    // Before the prompt: nothing counts.
+    expect(M.noteHook(h, 'a', 'Stop', {}, T0 + 1)).toBe(h);
+    h = M.notePrompted(h, 'a', T0 + 10);
+    expect(h.sessions.a).toMatchObject({ promptedAt: T0 + 10, tries: 1 });
+    // A Stop before delivery is the PREVIOUS turn's, or a turn the prompt never started.
+    expect(M.noteHook(h, 'a', 'Stop', {}, T0 + 15)).toBe(h);
+    // Some other prompt is not delivery; a subagent's events never count.
+    expect(M.noteHook(h, 'a', 'UserPromptSubmit', { prompt: 'something else' }, T0 + 16)).toBe(h);
+    expect(M.noteHook(h, 'a', 'UserPromptSubmit', { prompt: M.wrapUpPrompt('x'), agent_id: 's1' }, T0 + 16)).toBe(h);
+    h = M.noteHook(h, 'a', 'UserPromptSubmit', { prompt: M.wrapUpPrompt('x') }, T0 + 17);
+    expect(h.sessions.a.deliveredAt).toBe(T0 + 17);
+    expect(M.noteHook(h, 'a', 'Stop', { agent_id: 'sub-1' }, T0 + 20)).toBe(h);
+    expect(M.noteHook(h, 'nope', 'Stop', {}, T0 + 20)).toBe(h);
+    expect(M.noteHook(h, 'a', 'Stop', {}, T0 + 20).sessions.a.answeredAt).toBe(T0 + 20);
+  });
+
+  test('the worker\'s lastTurnEndAt answers for any agent - Codex has no Stop hook', () => {
+    let h = M.notePrompted(hold(), 'a', T0 + 10);
+    expect(M.noteStatus(h, agentRow())).toBe(h); // a worker older than the field
+    expect(M.noteStatus(h, agentRow({ lastTurnEndAt: T0 + 5 }))).toBe(h); // the turn before the prompt
+    expect(M.noteStatus(h, agentRow({ lastTurnEndAt: T0 + 30 })).sessions.a.answeredAt).toBe(T0 + 30);
+    // An agent that reports through hooks must show DELIVERY first: the worker stamps even
+    // a stray Stop on an idle session, which the prompt never caused.
+    const hooked = agentRow({ hookStatus: true, lastTurnEndAt: T0 + 30 });
+    expect(M.noteStatus(h, hooked)).toBe(h);
+    h = M.noteHook(h, 'a', 'UserPromptSubmit', { prompt: M.wrapUpPrompt('x') }, T0 + 20);
+    expect(M.noteStatus(h, hooked).sessions.a.answeredAt).toBe(T0 + 30);
+  });
+
+  test('a compacting session is not told and not ready; a capped one says why it waits', () => {
+    expect(M.canPrompt(agentRow({ compacting: true }))).toBe(false);
+    const told = { promptedAt: T0 + 1, deliveredAt: T0 + 2, answeredAt: T0 + 3 };
+    expect(M.verdict(told, agentRow({ compacting: true }), [])).toEqual({ state: M.STATES.WORKING, why: 'compacting its context' });
+    expect(M.verdict({ promptedAt: T0 + 1, deliveredAt: T0 + 2, answeredAt: null }, agentRow({ capBlocked: true }), []).why)
+      .toBe('told, but capped at its usage limit until the reset');
+  });
+
+  test('a prompt the worker reports as not taken is typed again - at most MAX_TRIES times', () => {
+    let h = hold();
+    for (let i = 0; i < M.MAX_TRIES; i++) {
+      expect(M.shouldPrompt(h.sessions.a, agentRow())).toBe(true);
+      h = M.notePrompted(h, 'a', T0 + i);
+      expect(M.shouldPrompt(h.sessions.a, agentRow())).toBe(false);
+      h = M.noteUnconfirmed(h, 'a');
+      expect(h.sessions.a.promptedAt).toBeNull();
+    }
+    expect(M.shouldPrompt(h.sessions.a, agentRow())).toBe(false);
+    expect(M.verdict(h.sessions.a, agentRow(), []).why).toBe(`the wrap-up prompt did not land after ${M.MAX_TRIES} tries`);
+    // Once delivered, a late "unconfirmed" changes nothing.
+    let d = M.noteHook(M.notePrompted(hold(), 'a', T0), 'a', 'UserPromptSubmit', { prompt: M.wrapUpPrompt('x') }, T0 + 1);
+    expect(M.noteUnconfirmed(d, 'a')).toBe(d);
+  });
+
+  test('a session started during the hold (force) is tracked and told like the rest', () => {
+    const h = M.trackSession(hold(), { id: 'n', name: 'N', agent: 'claude' });
+    expect(h.sessions.n).toMatchObject({ agent: 'claude', promptedAt: null, pid: null });
+    expect(M.trackSession(h, { id: 'n', name: 'again' })).toBe(h);
+    expect(M.trackSession(null, { id: 'x' })).toBeNull();
+  });
+
+  test('verdicts come from state, and only ready/gone allow the restart', () => {
+    const told = { promptedAt: T0 + 1, answeredAt: T0 + 2 };
+    const S = M.STATES;
+    expect(M.verdict({ promptedAt: null }, agentRow(), []).state).toBe(S.NOT_TOLD);
+    expect(M.verdict({ promptedAt: T0 + 1, answeredAt: null }, agentRow(), []))
+      .toEqual({ state: S.ANSWERING, why: 'prompt typed; waiting for the agent to take it' });
+    expect(M.verdict({ promptedAt: T0 + 1, deliveredAt: T0 + 2, answeredAt: null }, agentRow(), []).why).toBe('told; its turn has not ended yet');
+    expect(M.verdict(told, agentRow({ status: 'waiting', waitingFor: 'permission' }), []).why).toBe('waiting for you: approve a tool');
+    expect(M.verdict(told, agentRow({ blockedPrompt: { kind: 'trust' } }), []).state).toBe(S.NEEDS_YOU);
+    expect(M.verdict(told, agentRow({ status: 'working' }), []).state).toBe(S.WORKING);
+    expect(M.verdict(told, agentRow({ status: 'working', subagents: 2 }), []).why).toBe('working, waiting on 2 subagents');
+    expect(M.verdict(told, agentRow({ status: 'waiting', waitingFor: 'question' }), []).why).toBe('waiting for you: answer a question');
+    expect(M.verdict(told, agentRow({ inMenu: true }), []).state).toBe(S.NEEDS_YOU);
+    expect(M.verdict(told, agentRow(), [{ pid: 5, name: 'dotnet.exe' }]))
+      .toEqual({ state: S.BUSY, why: 'still running: dotnet.exe' });
+    // Could not read the process tree: not "ready" on a guess.
+    expect(M.verdict(told, agentRow(), null).state).toBe(S.UNKNOWN);
+    expect(M.verdict(told, agentRow(), []).state).toBe(S.READY);
+    // A plain shell is never told; it is ready when nothing runs under it.
+    expect(M.verdict({ promptedAt: null }, shellRow(), []).state).toBe(S.READY);
+    expect(M.verdict({ promptedAt: null }, shellRow(), [{ name: 'npm.cmd' }]).state).toBe(S.BUSY);
+    expect(M.verdict(told, null, null).state).toBe(S.GONE);
+  });
+
+  test('safeToRestart is true only when every session is ready or gone - a late session counts', () => {
+    let h = hold();
+    h = { ...h, sessions: { ...h.sessions, a: { ...h.sessions.a, promptedAt: T0 + 1, answeredAt: T0 + 2 } } };
+    const rows = { a: agentRow(), s: shellRow() };
+    expect(M.status(h, rows, { a: [], s: [] }).safeToRestart).toBe(true);
+    expect(M.status(h, rows, { a: [], s: [{ name: 'node.exe' }] }).safeToRestart).toBe(false);
+    // A work read that never happened is not "nothing running".
+    expect(M.status(h, rows, { a: [] }).safeToRestart).toBe(false);
+    // Closed since: still safe.
+    expect(M.status(h, { a: agentRow() }, { a: [] }).safeToRestart).toBe(true);
+    // A session the hold never registered: judged too, and flagged.
+    const late = M.status(h, { ...rows, n: agentRow({ id: 'n', name: 'N', status: 'working' }) }, { a: [], s: [], n: [] });
+    expect(late.safeToRestart).toBe(false);
+    expect(late.sessions[0]).toMatchObject({ id: 'n', state: 'working', untracked: true });
+    expect(M.status(null, rows, {})).toEqual({ hold: null, safeToRestart: null, sessions: [] });
+  });
+
+  test('the restart is detected by a new boot OR new processes - a hot reload is neither', () => {
+    const h = hold();
+    // Same boot, same pids: a hot reload of server.js. The hold stays.
+    expect(M.restarted(h, { a: agentRow(), s: shellRow() }, BOOT + 1000)).toBe(false);
+    // A reboot.
+    expect(M.restarted(h, {}, BOOT + 10 * 60 * 1000)).toBe(true);
+    // A cold restart of web-terminal: same boot, every surviving session respawned.
+    expect(M.restarted(h, { a: agentRow({ pid: 99 }), s: shellRow({ pid: 98 }) }, BOOT)).toBe(true);
+    // ...but ONE session in its old process means it has not happened.
+    expect(M.restarted(h, { a: agentRow({ pid: 99 }), s: shellRow() }, BOOT)).toBe(false);
+    // Every tracked session closed by hand proves nothing.
+    expect(M.restarted(h, { z: agentRow({ id: 'z', pid: 7 }) }, BOOT)).toBe(false);
+    expect(M.restarted(null, {}, BOOT)).toBe(false);
+  });
+
+  test('the "back" notice goes to the sessions that were told, once they are at the composer', () => {
+    let h = hold();
+    expect(M.backList(h, T0)).toBeNull(); // nobody was told
+    h = { ...h, sessions: { ...h.sessions, a: { ...h.sessions.a, promptedAt: T0 + 1 } } };
+    expect(M.backList(h, T0 + 5)).toEqual({ reason: 'Windows update', since: T0 + 5, pending: ['a'] });
+    expect(M.canSendBack(agentRow())).toBe(true);
+    expect(M.canSendBack(agentRow({ status: 'working' }))).toBe(false);
+    expect(M.canSendBack(agentRow({ agentReady: false }))).toBe(false);
+  });
+});

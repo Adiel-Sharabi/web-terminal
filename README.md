@@ -196,6 +196,25 @@ Tune it with a `handoff` block in `config.json` (`ctxThreshold`, default 500000;
 default 10; `auto: false` to go back to the button only; `enabled: false` for neither), read
 live. Claude only: another agent is offered nothing.
 
+**Prepare a machine for a restart** — one action, one honest answer.
+`node scripts/wt-maintenance.js prepare "Windows update"` (add `--server <url|name>` for a cluster
+peer) sets a **restart hold**: every agent session is told, through its own terminal, to bring its
+current step to a safe stop and end its turn. A session is told only when it is idle at its
+composer: one that is mid-turn, or parked on a permission prompt or a menu, is told once its turn
+ends, so the text is never queued behind a turn or answers a question. "Told" means the agent's
+own prompt hook carried the text, and "answered" means a turn ended after that. A prompt the agent
+visibly did not take is typed again, up to three times. While the hold is
+on, new sessions are refused (`503`; pass `"force": true` to override) and no hand-off starts.
+`wt-maintenance.js status --wait` reports one verdict per session: `ready`, `working`,
+`needs-you`, `busy` (a build or test still running under it), `answering` or `not-told`. It
+exits 0 once it is safe to restart. The verdict is decided from state the server already has: the
+session's status, what is running under its terminal, and whether its turn ended after it was
+told. What the agent wrote is shown alongside but never decides it. The hold clears itself once
+the restart has happened, whether the machine rebooted or web-terminal was cold-restarted. The
+sessions it had told are then sent a "the machine is back" notice once they are up again.
+`wt-maintenance.js cancel` lifts it by hand. Routes: `POST /api/maintenance/prepare`,
+`GET /api/maintenance/status`, `DELETE /api/maintenance`.
+
 **Helper sessions don't pile up** — an agent that starts a session with `POST /api/sessions`
 (often on another machine) and never closes it used to hold one of the machine's session slots
 for as long as it lived. Now a session nobody opens within two minutes of creating it counts as
