@@ -62,6 +62,14 @@ test.describe('withoutLaunchPrompt (#360)', () => {
     // (review of the first cut reproduced the first two in bash). Unchanged = safe.
     const whole = [
       'claude "fix the bug" # notes; echo hi > PWNED',
+      // ...and one with NO other refused character, so the `#` rule alone holds it.
+      'claude "go" # notes; touch PWNED',
+      // Bash splits on space/tab only: other whitespace must not become a separator.
+      'claude "go" --verbose',
+      'claude "go"\r--model x',
+      // cmd.exe as the configured shell: `^` escapes, `%` expands.
+      'claude "go" ^& echo PWNED',
+      'claude "50%" --verbose',
       "claude $'a\\' ; echo hi > PWNED ; \\'' #'",
       'claude $CLAUDE_FLAGS "go"',
       'claude `cat flags` "go"',
