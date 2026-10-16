@@ -127,7 +127,7 @@ test.describe('prompts and launch (#340)', () => {
 
   test('a successor starts a FRESH conversation: every resume flag is removed', () => {
     const launches = (c) => agents.commandLaunches('claude', c);
-    const f = (c) => H.freshLaunchCommand(c, launches, agents.handoffPolicy('claude'));
+    const f = (c) => H.freshLaunchCommand(c, launches, agents.handoffPolicy('claude'), agents.launchGrammar('claude'));
     expect(f('claude --resume 1234-abcd --dangerously-skip-permissions')).toBe('claude --dangerously-skip-permissions');
     expect(f('claude --dangerously-skip-permissions --resume=1234-abcd')).toBe('claude --dangerously-skip-permissions');
     expect(f('claude -r 1234-abcd')).toBe('claude');
@@ -136,6 +136,9 @@ test.describe('prompts and launch (#340)', () => {
     expect(f('claude --resume 1234 --fork-session')).toBe('claude');
     // `-r` only as a whole flag: `-rf`-style clusters are not touched.
     expect(f('claude --model x -rf')).toBe('claude --model x -rf');
+    // #360: the OLD session's launch prompt is not the successor's task - the brief is.
+    expect(f('claude --dangerously-skip-permissions "Read C:/temp/t.md and execute it."')).toBe('claude --dangerously-skip-permissions');
+    expect(f('claude --resume 1234 --append-system-prompt "be terse" "go"')).toBe('claude --append-system-prompt "be terse"');
     // A command that does not launch the agent at all is no answer.
     expect(f('pwsh')).toBeNull();
     expect(f('')).toBeNull();

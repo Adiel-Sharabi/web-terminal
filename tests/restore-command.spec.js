@@ -50,6 +50,29 @@ test.describe('resolveRestoreRunCommand', () => {
     })).toBe('claude --resume eeee1111-2222-3333-4444-555566667777');
   });
 
+  test('#360: a resume does NOT resubmit the prompt the session was launched with', () => {
+    // The exact real-world shape: an agent-started session whose launch prompt says
+    // "execute it". Restored with that prompt still on the command line, the resumed
+    // conversation was handed the task again on every cold restart.
+    const id = 'abcd1234-5678-9abc-def0-123456789abc';
+    expect(resolveRestoreRunCommand({
+      autoCommand: 'claude --dangerously-skip-permissions "Read C:/temp/bh.md in full, then execute it. Do not stop to ask."',
+      claudeSessionId: id,
+    })).toBe(`claude --dangerously-skip-permissions --resume ${id}`);
+    expect(resolveRestoreRunCommand({ autoCommand: "claude --model opus 'go'", claudeSessionId: id }))
+      .toBe(`claude --model opus --resume ${id}`);
+    // A flag's own quoted value is not a prompt and survives.
+    expect(resolveRestoreRunCommand({ autoCommand: 'claude --append-system-prompt "be terse"', claudeSessionId: id }))
+      .toBe(`claude --append-system-prompt "be terse" --resume ${id}`);
+  });
+
+  test('#360: with NO known conversation the launch prompt is kept - nothing ran yet', () => {
+    // Restore then starts fresh (#23), and a fresh start of a prompted session is the
+    // launch it was created with.
+    expect(resolveRestoreRunCommand({ autoCommand: 'claude "go"', claudeSessionId: null }))
+      .toBe('claude "go"');
+  });
+
   test('explicit user --continue is honored even without a recorded id', () => {
     // The user deliberately typed --continue: respect their intent verbatim.
     expect(resolveRestoreRunCommand({ autoCommand: 'claude --continue', claudeSessionId: null }))
