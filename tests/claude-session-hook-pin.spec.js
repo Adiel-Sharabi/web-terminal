@@ -132,40 +132,23 @@ test.describe('Claude session UUID pinned from hook payload', () => {
     // (collision). Once a hook has pinned a UUID, restore must rewrite the
     // command to `--resume <id>` so each session re-attaches to its own
     // Claude conversation. We can't exercise the cross-process restart from
-    // a Playwright test, so we simulate it by calling the worker's pure
-    // restore-cmd resolution: drop `--continue` if `claudeSessionId` is set.
-    const path = require('path');
-    const { spawnSync } = require('child_process');
-    const probe = `
-      const id = 'cafef00d-1111-2222-3333-444444444444';
-      function rebuild(autoCommand, claudeSessionId) {
-        let cmd = autoCommand || '';
-        if (cmd && /\\bclaude\\b/i.test(cmd)) {
-          if (claudeSessionId) {
-            cmd = cmd.replace(/\\s*--resume\\s+\\S+/g, '')
-                     .replace(/\\s*--continue\\b/g, '')
-                     .trimEnd() + ' --resume ' + claudeSessionId;
-          } else if (!/(--continue|--resume)\\b/.test(cmd)) {
-            cmd = cmd.trimEnd() + ' --continue';
-          }
-        }
-        return cmd;
-      }
-      // The exact buggy input the user reported: --continue + known UUID.
-      console.log(rebuild('claude --continue', id));
-      // With --resume <stale> + a fresher known UUID, it should re-pin.
-      console.log(rebuild('claude --resume deadbeef-0000-0000-0000-000000000000', id));
-      // No UUID known → fall back to --continue.
-      console.log(rebuild('claude', null));
-      // Already plain claude with UUID → just append --resume.
-      console.log(rebuild('claude --dangerously-skip-permissions', id));
-    `;
-    const r = spawnSync(process.execPath, ['-e', probe], { encoding: 'utf8' });
-    const lines = r.stdout.trim().split(/\r?\n/);
-    expect(lines[0]).toBe('claude --resume cafef00d-1111-2222-3333-444444444444');
-    expect(lines[1]).toBe('claude --resume cafef00d-1111-2222-3333-444444444444');
-    expect(lines[2]).toBe('claude --continue');
-    expect(lines[3]).toBe('claude --dangerously-skip-permissions --resume cafef00d-1111-2222-3333-444444444444');
+    // a Playwright test, so we call the worker's own restore-cmd resolution.
+    //
+    // #360: this used to run a hand-copied PASTE of that rule in a child
+    // process, and the paste had drifted - it still asserted the pre-#23
+    // `--continue` fallback the module had dropped long before. Import the
+    // module the worker imports, so the test can only ever pin the real rule.
+    const { resolveRestoreRunCommand: rebuild } = require('../lib/restore-command');
+    const id = 'cafef00d-1111-2222-3333-444444444444';
+    const r = (autoCommand, claudeSessionId) => rebuild({ autoCommand, claudeSessionId });
+    // The exact buggy input the user reported: --continue + known UUID.
+    expect(r('claude --continue', id)).toBe('claude --resume cafef00d-1111-2222-3333-444444444444');
+    // With --resume <stale> + a fresher known UUID, it should re-pin.
+    expect(r('claude --resume deadbeef-0000-0000-0000-000000000000', id)).toBe('claude --resume cafef00d-1111-2222-3333-444444444444');
+    // No UUID known: start fresh, never an implicit --continue (#23).
+    expect(r('claude', null)).toBe('claude');
+    // Already plain claude with UUID → just append --resume.
+    expect(r('claude --dangerously-skip-permissions', id)).toBe('claude --dangerously-skip-permissions --resume cafef00d-1111-2222-3333-444444444444');
   });
 
   test('malformed session_id is rejected (no UUID, no overwrite)', async () => {
