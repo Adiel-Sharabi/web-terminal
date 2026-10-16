@@ -78,3 +78,6 @@ if (process.env.WT_DEVICE_OPS_FILE) reset(process.env.WT_DEVICE_OPS_FILE, '#311'
 // #351 - the spawn reaper's verdicts: per-run state like the files above, so a run starts
 // from none rather than from whatever an interrupted one left.
 if (process.env.WT_SPAWNED_SESSIONS_FILE) reset(process.env.WT_SPAWNED_SESSIONS_FILE, '#351');
+// #359 - a restart hold an interrupted run left on would refuse every session the next
+// run tries to create.
+if (process.env.WT_MAINTENANCE_FILE) reset(process.env.WT_MAINTENANCE_FILE, '#359');

@@ -91,3 +91,8 @@ handoffs/
 handoffs.test/
 # Which device sent each prompt (#311): the suite's copy (production's is under logs/).
 device-ops.test.jsonl
+# A restart hold (#359) - per machine; the suite's copy too.
+maintenance.json
+maintenance.json.tmp
+maintenance.test.json
+maintenance.test.json.tmp

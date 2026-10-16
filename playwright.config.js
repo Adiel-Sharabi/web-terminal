@@ -81,6 +81,9 @@ process.env.WT_DEVICE_OPS_FILE = path.join(__dirname, 'device-ops.test.jsonl');
 // session is ever reaped.
 process.env.WT_SPAWNED_SESSIONS_FILE = path.join(__dirname, 'spawned-sessions.test.json');
 process.env.WT_SPAWN_CLASSIFY_MS = '60000';
+// #359 - the restart hold. A hold left in production's maintenance.json by a spec would
+// refuse every new session on the real server; reset per run like the above.
+process.env.WT_MAINTENANCE_FILE = path.join(__dirname, 'maintenance.test.json');
 
 module.exports = defineConfig({
   testDir: './tests',

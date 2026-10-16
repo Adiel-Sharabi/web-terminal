@@ -2013,6 +2013,8 @@ function sessionSummary(id, s) {
     // detector reads as ready too: the gate must fail OPEN, because a client that
     // wrongly believes a live session is starting can never submit to it again.
     agentReady: s._ready ? s._ready.ready : true,
+    // #359 - how many subagents are live, so "working" can say what it is waiting on.
+    subagents: s.subagents ? s.subagents.size : 0,
     // #190 — WHY it is not ready, when we can say. A recognised startup selector is
     // on screen: the session is blocked on a question, not booting. Null is the
     // normal answer and means "nothing recognised", never "nothing is wrong" — the
