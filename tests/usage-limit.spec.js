@@ -381,41 +381,10 @@ test.describe('#142 — an observed cap EXPIRES, and names the right window', ()
   });
 });
 
-// #364 - the 5h cap grants a small allowance in which the agent keeps running tools, and
-// Claude can resume itself at the reset. Both defeated #227's "a tool event proves the cap
-// is lifted": the first by cancelling the resume of a session that was still capped, the
-// second by leaving a window in which our `continue` lands after Claude's own. Two pure
-// rules answer them; pty-worker.js applies them (tests/reset-resume.spec.js drives that).
-test.describe('#364 — workEventCancelsResume', () => {
-  test('a tool or subagent event does NOT cancel while the server says the window is spent', () => {
-    // The list is the rule's own, so a fourth tool event added to it is covered here
-    // without this test being edited - and the three the issue names are pinned by name.
-    expect(u.TOOL_EVENTS).toEqual(['PreToolUse', 'PostToolUse', 'SubagentStart']);
-    for (const event of u.TOOL_EVENTS) {
-      expect(u.workEventCancelsResume({ event, capBlocked: true })).toBe(false);
-    }
-  });
-
-  test('...and cancels exactly as before whenever capBlocked is anything but true', () => {
-    // Strict `=== true`, the same reading the arming gate uses: an older server.js that
-    // never sends the field, or a block that lifted, keeps "running work proves the cap
-    // is not in force". `!== false` would let a missing field keep the resume.
-    for (const event of u.TOOL_EVENTS) {
-      for (const capBlocked of [false, undefined, null, 'true', 1]) {
-        expect(u.workEventCancelsResume({ event, capBlocked: /** @type {any} */ (capBlocked) })).toBe(true);
-      }
-    }
-    expect(u.workEventCancelsResume(/** @type {any} */ (undefined))).toBe(true);
-  });
-
-  test('a prompt is unchanged: it cancels (and the worker re-arms), capped or not', () => {
-    expect(u.workEventCancelsResume({ event: 'UserPromptSubmit', capBlocked: true })).toBe(true);
-    expect(u.workEventCancelsResume({ event: 'UserPromptSubmit', capBlocked: false })).toBe(true);
-    // An event this rule has never heard of is not exempted by capBlocked either.
-    expect(u.workEventCancelsResume({ event: 'Stop', capBlocked: true })).toBe(true);
-  });
-});
-
+// #364 - Claude can resume itself at the reset, and a human can come back inside the settle
+// minute. Either way the session has already worked, and our `continue` would land on top
+// of it. One pure rule answers it; pty-worker.js applies it (tests/reset-resume.spec.js
+// drives that).
 test.describe('#364 — workedSinceReset', () => {
   const RESET = NOW;
 

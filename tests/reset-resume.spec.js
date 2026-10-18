@@ -343,90 +343,35 @@ test.describe('#69 — 5h usage-limit auto-resume', () => {
 
   // ...and the fix is exactly one event wide. The signal is not "is the user back" but
   // WHAT THEY ASKED FOR: Esc says stop (above), a prompt says go (the test above), and
-  // a TOOL RUNNING used to be the one that proved the cap is not in force - an agent that
-  // is executing is not an agent the quota is refusing.
+  // a TOOL RUNNING is the one that genuinely proves the cap is not in force — an agent
+  // that is executing is not an agent the quota is refusing. Non-vacuous: the timer is
+  // asserted present first, so this cannot pass by never arming.
   //
-  // #364 - THAT HOLDS ONLY WHEN THE SERVER DOES NOT SAY THE WINDOW IS SPENT. The cap now
-  // grants an allowance in which Claude keeps running tools to finish its task, so a tool
-  // event while capBlocked is the allowance being spent, not the quota coming back. This
-  // test used to assert the cancel for a capBlocked:true session - pinning exactly the
-  // behaviour that left a still-capped session with nothing armed - and is corrected
-  // here rather than deleted: the cancel survives, in the test below, for the case it is
-  // true of. Non-vacuous: the timer is asserted present first, so this cannot pass by
-  // never arming.
-  test('#364 — a TOOL running does NOT cancel it while the window is still SPENT, and it still fires', async () => {
+  // #364 NOTE: under the 5h wrap-up allowance a tool event no longer PROVES the cap is lifted
+  // (a capped Claude keeps running tools to finish its task), but cancelling is still right:
+  // a wrap-up that finished must not be continued, and one cut off is resumed by Claude's own
+  // auto-continue. This test therefore stays as it was on master - see pty-worker.js.
+  test('#227 — a TOOL running still cancels it: work is proof the cap is not in force', async () => {
     const pipe = workerPipePath();
     const dataDir = makeTempDataDir();
-    const worker = spawnWorker(pipe, dataDir, { WT_AUTO_RESUME_ON_RESET: '1', WT_HOOK_STOP_DEBOUNCE_MS: '20' });
+    const worker = spawnWorker(pipe, dataDir, { WT_AUTO_RESUME_ON_RESET: '1' });
     try {
       const client = await connectClient(pipe);
       const ev = makeEventCollector(client);
       const { id } = await rpc(client, 'createSession', { cwd: os.tmpdir(), name: 'reset-pretool', agent: 'claude', autoCommand: '' });
 
-      const resetAt = farReset();
-      await setResetAt(client, id, resetAt); // capBlocked: true - genuinely capped
-      expect((await findSession(client, id)).autoResumeArmed).toBe(true);
-
-      // The allowance at work: tools, then a subagent. Each is asserted on its own, so a
-      // gate that covered only the first event could not hide behind it.
-      await rpc(client, 'hookEvent', { id, event: 'PreToolUse', tool: 'Bash' });
-      expect((await findSession(client, id)).autoResumeArmed).toBe(true);
-      await rpc(client, 'hookEvent', { id, event: 'PostToolUse', tool: 'Bash' });
-      expect((await findSession(client, id)).autoResumeArmed).toBe(true);
-      await rpc(client, 'hookEvent', { id, event: 'SubagentStart', agentId: 'sub-1' });
-      expect((await findSession(client, id)).autoResumeArmed).toBe(true);
-      await rpc(client, 'hookEvent', { id, event: 'SubagentStop', agentId: 'sub-1' });
-
-      // The turn ends before the reset. Not decoration: while the session is still
-      // WORKING, the fire-time `working` guard would refuse a surviving timer on its own,
-      // so the fire below could not tell a live timer from that guard - and idle is the
-      // state in which only the timer itself stands between the session and a typed
-      // `continue` (#268).
-      await rpc(client, 'hookEvent', { id, event: 'Stop' });
-      await expect.poll(async () => (await findSession(client, id)).status,
-        { timeout: 5000, message: 'the turn never went idle' }).toBe('idle');
-
-      // THE POSITIVE CONTROL FOR THE FIRE-TIME GATE (#364): all of that work was BEFORE
-      // the reset, so it is the allowance or a refused prompt, not a resume - and the
-      // resume still has to happen. Without this, "work after the reset suppresses it"
-      // could be satisfied by "work ever suppresses it".
-      expect(await dueNow(client, id)).toEqual({ armed: true, fireAt: resetAt + AUTO_RESUME_DELAY_FAST_MS });
-      expect(ev.events.some((e) => e.event === 'autoResume' && e.params.id === id)).toBe(true);
-      expect(writesOf(await rpc(client, '__testGetWrites', { id }))).toContain('continue');
-
-      ev.stop();
-      await rpc(client, 'killSession', { id });
-      await client.close();
-    } finally {
-      await worker.stop();
-      rmRf(dataDir);
-    }
-  });
-
-  // The other half, kept from #227: when the server does NOT say the window is spent, a
-  // tool running is still proof the cap is not in force. Armed here on the worker's OWN
-  // sighting of the cap prompt with capBlocked:false - the one way a timer exists without
-  // a spent-window reading, since setFiveHResetAt arms nothing for a window that is not
-  // spent. LIMIT_PROMPT is the spec's existing fixture, defined further down.
-  test('#227 — a TOOL running still cancels it when the server does NOT say the window is spent', async () => {
-    const pipe = workerPipePath();
-    const dataDir = makeTempDataDir();
-    const worker = spawnWorker(pipe, dataDir, { WT_AUTO_RESUME_ON_RESET: '1', WT_HOOK_STOP_DEBOUNCE_MS: '20' });
-    try {
-      const client = await connectClient(pipe);
-      const ev = makeEventCollector(client);
-      const { id } = await rpc(client, 'createSession', { cwd: os.tmpdir(), name: 'reset-pretool-uncapped', agent: 'claude', autoCommand: '' });
-
-      await inject(client, id, LIMIT_PROMPT);
-      await ev.waitFor((e) => e.event === 'usageLimitPrompt' && e.params.id === id);
-      await setResetAt(client, id, farReset(), false);
+      await setResetAt(client, id, farReset());
       expect((await findSession(client, id)).autoResumeArmed).toBe(true);
 
       await rpc(client, 'hookEvent', { id, event: 'PreToolUse', tool: 'Bash' });
       expect((await findSession(client, id)).autoResumeArmed).toBe(false);
 
-      // Idle before the negative, for the reason given above: with the session left
-      // working, the fire-time `working` guard would refuse a surviving timer by itself.
+      // The turn ends before the reset comes due. Not decoration: while the session is
+      // still WORKING, the fire-time `working` guard would refuse a surviving timer on
+      // its own, so the negative below could not tell a cancel from that guard. Idle,
+      // only the cancel stands between a surviving timer and a typed `continue` -
+      // measured (#268) by deleting the cancel: with the session left working, the
+      // negative stayed green.
       await rpc(client, 'hookEvent', { id, event: 'Stop' });
       await expect.poll(async () => (await findSession(client, id)).status,
         { timeout: 5000, message: 'the turn never went idle' }).toBe('idle');

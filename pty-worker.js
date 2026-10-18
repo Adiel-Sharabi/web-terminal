@@ -2443,22 +2443,23 @@ function handleHook(session, event, claudeSessionId, prompt, agentId, opts) {
       // equally good proof that it finished.
       clearCompacting(session, 'resumed');
       // #364 - WHEN work last started, whatever kind. fireAutoResume compares it with
-      // the reset (usageLimit.workedSinceReset): a session that did something once its
+      // the reset (usageLimit.workedSinceReset): a session that reported work once its
       // window had turned over - Claude's own auto-continue, a human who came back - has
       // already been resumed, and typing `continue` after it is the duplicate #231 names.
-      // Stamped on a prompt as well as on a tool: a prompt does not cancel the timer (see
-      // below) but a prompt submitted after the reset RAN. Memory-only, like the timer.
+      // Stamped on a prompt as well as on a tool: a prompt cancels and re-arms (below),
+      // but a prompt submitted after the reset RAN. Memory-only, like the timer.
       session._lastWorkAt = Date.now();
       // #69 — same signal: the user (or a retry) is back, so a pending 5h-reset
       // auto-resume for this session is now stale. Does not consume the window —
       // see cancelAutoResume. (#227 narrowed what "stale" means here; read on.)
       //
-      // #364 - AND #227's "a tool event proves the cap is lifted" NO LONGER HOLDS while
-      // the server still reports the window spent: a capped Claude keeps running tools on
-      // the allowance it is given to finish its task, so this cancel disarmed a session
-      // that was still capped and nothing re-armed it. The rule is pure, in
-      // lib/usage-limit.js; the event STAYS a cancel whenever capBlocked is not true.
-      if (usageLimit.workEventCancelsResume({ event, capBlocked: session.capBlocked })) cancelAutoResume(session);
+      // #364 - UNDER THE WRAP-UP ALLOWANCE A TOOL EVENT NO LONGER *PROVES* THE CAP IS
+      // LIFTED: a capped Claude keeps running tools to finish its task. CANCELLING IS STILL
+      // RIGHT, and this was weighed and kept: a wrap-up that FINISHED must not be
+      // continued (unattended, that restarts done work on fresh quota), and one that was
+      // cut off is resumed by Claude's own auto-continue. A main-agent `Stop` cancel is the
+      // better discriminator - UNMEASURED, so deliberately not implemented here.
+      cancelAutoResume(session);
       clearObservedCapBlock(session); // #138 - and so is a cap prompt seen earlier
       // #227 - ...BUT BEING BACK IS NOT BEING UNBLOCKED, and that distinction is the
       // whole bug. A submitted prompt proves the user is PRESENT; it proves nothing
@@ -2478,9 +2479,8 @@ function handleHook(session, event, claudeSessionId, prompt, agentId, opts) {
       // The signal is not "is the user back" but WHAT THEY ASKED FOR, which is why
       // this is one event and not the whole block. Esc says STOP (noteInterrupt, and
       // it only fires from `working`, so a turn really was running). A tool event says
-      // WORK IS RUNNING, which proves the cap is not in force WHEN THE SERVER DOES NOT
-      // SAY IT IS (#364 narrowed this: while capBlocked it proves nothing, see above).
-      // Only a prompt says GO - a request the cap is still refusing.
+      // WORK IS RUNNING, which genuinely proves the cap is not in force. Only a
+      // prompt says GO - a request the cap is still refusing.
       //
       // Deliberately AFTER clearObservedCapBlock, not before: this re-arms on
       // session.capBlocked alone - the server's live metrics reading, which expires on
