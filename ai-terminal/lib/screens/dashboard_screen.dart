@@ -386,25 +386,32 @@ class _DashboardScreenState extends State<DashboardScreen> {
     final s = row.session;
     final muted = Theme.of(context).colorScheme.onSurfaceVariant;
     if (row.depth > 0) {
-      return Stack(
+      // The indent gives way to the card on a narrow row (a phone), where the
+      // arrow alone - in the card's own margin - marks the row as a child.
+      return LayoutBuilder(
         // The reorderable list needs the key on the row it is handed.
         key: ValueKey('tree-${s.id}'),
-        children: [
-          Padding(
-            padding: EdgeInsetsDirectional.only(start: row.indent),
-            child: card,
-          ),
-          PositionedDirectional(
-            start: AppSpacing.screenPadding + row.indent - 18,
-            top: 18,
-            child: Icon(
-              Icons.subdirectory_arrow_right,
-              size: 16,
-              color: muted,
-              semanticLabel: 'Opened by the session above',
-            ),
-          ),
-        ],
+        builder: (context, box) {
+          final indent = row.indentWithin(box.maxWidth);
+          return Stack(
+            children: [
+              Padding(
+                padding: EdgeInsetsDirectional.only(start: indent),
+                child: card,
+              ),
+              PositionedDirectional(
+                start: AppSpacing.screenPadding + indent - 15,
+                top: 18,
+                child: Icon(
+                  Icons.subdirectory_arrow_right,
+                  size: 14,
+                  color: muted,
+                  semanticLabel: 'Opened by the session above',
+                ),
+              ),
+            ],
+          );
+        },
       );
     }
     final parent = tree.parentOf(s);

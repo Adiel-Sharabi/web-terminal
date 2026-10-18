@@ -81,6 +81,14 @@ void main() {
       expect(_rows(SessionTree(list).flatten(list)), ['x', '  y']);
     });
 
+    test('the session list indents only as far as the row can afford (#374 review)', () {
+      final deep = SessionTreeRow(_s('a'), 3);
+      expect(deep.indentWithin(800), 60, reason: 'room to spare: the full indent');
+      expect(deep.indentWithin(412), 12, reason: 'a big phone: what is left above the card minimum');
+      expect(deep.indentWithin(384), 0);
+      expect(deep.indentWithin(360), 0, reason: 'a small phone: no indent, the arrow marks the row');
+    });
+
     test('indentation stops growing past the cap, so a deep chain keeps room for its title', () {
       final list = [_s('a'), _s('b', parent: 'a'), _s('c', parent: 'b'), _s('d', parent: 'c'), _s('e', parent: 'd')];
       final rows = SessionTree(list).flatten(list);

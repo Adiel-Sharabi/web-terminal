@@ -106,4 +106,20 @@ class SessionTreeRow {
   static const double step = 20;
   static const int maxIndentLevels = 3;
   double get indent => step * (depth > maxIndentLevels ? maxIndentLevels : depth);
+
+  /// The narrowest row the session list's card fits in with every chip it can
+  /// show (status or reason, context %, recap, bell, star, time). Measured: a
+  /// reason-chip card overflows at 340dp, and the status word is squeezed to an
+  /// ellipsis well before that.
+  static const double minCardRow = 400;
+
+  /// [indent], but never so much that the row is left narrower than
+  /// [minCardRow]: an indent is a hint, the card's contents are the content. On
+  /// a phone that means little or no indent - the caller marks the row some
+  /// other way (the session list puts an arrow in the gutter).
+  double indentWithin(double rowWidth) {
+    final spare = rowWidth - minCardRow;
+    if (spare <= 0) return 0;
+    return indent < spare ? indent : spare;
+  }
 }
