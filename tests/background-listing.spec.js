@@ -610,7 +610,7 @@ test.describe('inline exec', () => {
    * A fake execFile that takes `spawnMs` of a fake clock to RETURN - a CreateProcess held by an
    * AV hook - and hangs afterwards. Returns what the watchdog was armed with and who it killed.
    */
-  function slowLaunch(spawnMs, timeoutMs, receivedAt) {
+  function slowLaunch(spawnMs, timeoutMs, sentAgoMs = 0) {
     const clock = { t: 5000 };
     /** @type {{fn: Function, ms: number}|null} */ let armed = null;
     /** @type {number[]} */ const killed = [];
@@ -620,11 +620,13 @@ test.describe('inline exec', () => {
       setTimer: (fn, ms) => { armed = { fn, ms }; return { unref() {} }; },
       now: () => clock.t,
     });
-    const pending = exec({ bin: 'b', argv: [], env: {}, timeoutMs }, receivedAt === undefined ? clock.t : receivedAt);
+    // The sender stamped its deadline `sentAgoMs` before the exec got the request.
+    const deadline = clock.t - sentAgoMs + timeoutMs;
+    const pending = exec({ bin: 'b', argv: [], env: {}, timeoutMs }, deadline);
     return { pending, armed: () => armed, killed };
   }
 
-  test('the child\'s budget counts from RECEIPT: a spawn that took 8.3 s leaves 1.7 s of 10 s', async () => {
+  test('the child budget is the SENDER deadline: a spawn that took 8.3 s leaves 1.7 s of 10 s', async () => {
     const r = slowLaunch(8300, 10000);
     expect(r.armed()?.ms, 'armed for what is left, not for the full 10 s').toBe(1700);
     /** @type {any} */ (r.armed()).fn();
@@ -640,34 +642,63 @@ test.describe('inline exec', () => {
     expect(r.killed).toEqual([777]);
   });
 
-  test('time spent QUEUED before the request was handled counts too: the deadline is receipt-based', async () => {
-    // Received 4 s before the spawn began (the thread was busy), spawn itself instant: 6 s left.
-    const r = slowLaunch(0, 10000, 1000);
+  test('a request that waited in the queue has only what is left of the SENDER deadline', async () => {
+    // Sent 4 s before the exec got it (the thread was busy), spawn itself instant: 6 s left,
+    // not a fresh 10 s from the moment the thread got round to it.
+    const r = slowLaunch(0, 10000, 4000);
     expect(r.armed()?.ms).toBe(6000);
     /** @type {any} */ (r.armed()).fn();
     await r.pending;
   });
 
-  test('the worker handler stamps the request when it RECEIVES it and passes that to the exec', async () => {
+  test('the worker handler passes the sender\'s absolute deadline to the exec, untouched', async () => {
     /** @type {any[]} */ const seen = [];
     /** @type {any[]} */ const posted = [];
     let t = 100;
     const handle = createHandler({
       now: () => t,
-      exec: async (req, receivedAt) => { seen.push({ req, receivedAt }); t = 9999; return { ok: true, stdout: '[]' }; },
+      exec: async (req, deadline) => { seen.push({ req, deadline }); t = 9999; return { ok: true, stdout: '[]' }; },
       post: (m) => posted.push(m),
     });
-    await handle({ id: 7, req: { bin: 'b' } });
-    expect(seen).toEqual([{ req: { bin: 'b' }, receivedAt: 100 }]);
+    await handle({ id: 7, req: { bin: 'b' }, deadline: 5000 });
+    expect(seen, 'the exec gets the SENDER\'s deadline, not one the thread makes up').toEqual([{ req: { bin: 'b' }, deadline: 5000 }]);
     expect(posted).toEqual([{ id: 7, result: { ok: true, stdout: '[]' } }]);
+
+    // No deadline on the message (nothing in this repo sends that): fall back to now + timeoutMs.
+    t = 100;
+    await handle({ id: 10, req: { bin: 'b', timeoutMs: 400 } });
+    expect(seen[1].deadline).toBe(500);
 
     await handle(null);                                            // junk is ignored, not answered
     await handle({ id: 8 });
-    expect(posted).toHaveLength(1);
+    expect(posted).toHaveLength(2);
 
-    const throwing = createHandler({ exec: async () => { throw new Error('x'); }, post: (m) => posted.push(m) });
-    await throwing({ id: 9, req: {} });
-    expect(posted[1]).toEqual({ id: 9, result: { ok: false, reason: 'worker-threw' } });
+    const throwing = createHandler({ now: () => 1, exec: async () => { throw new Error('x'); }, post: (m) => posted.push(m) });
+    await throwing({ id: 9, req: {}, deadline: 50 });
+    expect(posted[2]).toEqual({ id: 9, result: { ok: false, reason: 'worker-threw' } });
+  });
+
+  test('a request whose deadline passed while it was queued is answered "expired" and NEVER spawned', async () => {
+    /** @type {any[]} */ const spawned = [];
+    /** @type {any[]} */ const posted = [];
+    let t = 1000;
+    const handle = createHandler({
+      now: () => t,
+      exec: async (req) => { spawned.push(req); return { ok: true, stdout: '[]' }; },
+      post: (m) => posted.push(m),
+    });
+    // Sent at t=1000 with a 10 s budget; the thread was blocked and gets to it at t=40000.
+    t = 40000;
+    await handle({ id: 1, req: { bin: 'b', timeoutMs: 10000 }, deadline: 11000 });
+    expect(spawned, 'no process is started for a caller that stopped waiting').toEqual([]);
+    expect(posted).toEqual([{ id: 1, result: { ok: false, reason: 'expired' } }]);
+
+    // Exactly at the deadline is already too late; one millisecond before is not.
+    await handle({ id: 2, req: { bin: 'b' }, deadline: 40000 });
+    expect(spawned).toEqual([]);
+    await handle({ id: 3, req: { bin: 'b' }, deadline: 40001 });
+    expect(spawned).toHaveLength(1);
+    expect(posted[2]).toEqual({ id: 3, result: { ok: true, stdout: '[]' } });
   });
 
   // ---- a real stub process ----
@@ -776,15 +807,23 @@ require(${JSON.stringify(DEFAULT_WORKER_PATH)});
   };
   const trivial = (bin) => ({ bin, argv: [], env: {}, cwd: os.tmpdir(), timeoutMs: 200 });
 
-  /** A Worker constructor that remembers each thread and whether it has really exited. */
+  /**
+   * A Worker constructor that remembers each thread: whether it has really exited, how many
+   * times terminate() was CALLED on it (a spy, so "never terminated" needs no sleep), and every
+   * message posted to it.
+   */
   function recordingCtor() {
     const Real = require('worker_threads').Worker;
-    /** @type {{ w: any, exited: boolean }[]} */ const made = [];
+    /** @type {{ w: any, exited: boolean, terminated: number, posted: any[] }[]} */ const made = [];
     class Recording {
       constructor(p) {
         const w = new Real(p);
-        const rec = { w, exited: false };
+        const rec = { w, exited: false, terminated: 0, posted: [] };
         w.once('exit', () => { rec.exited = true; });
+        const terminate = w.terminate.bind(w);
+        w.terminate = () => { rec.terminated++; return terminate(); };
+        const postMessage = w.postMessage.bind(w);
+        w.postMessage = (m, ...rest) => { rec.posted.push(m); return postMessage(m, ...rest); };
         made.push(rec);
         return w;
       }
@@ -830,22 +869,55 @@ require(${JSON.stringify(DEFAULT_WORKER_PATH)});
     expect(Date.now() - t0, 'answered by the main-thread deadline, not by waiting out the block').toBeLessThan(25000);
     expect(h.running(), 'the thread is still the host\'s thread').toBe(true);
     expect(rec.made, 'and no replacement was made').toHaveLength(1);
-    // Give a (wrong) terminate() every chance to land before looking.
-    await new Promise((r) => setTimeout(r, 500));
-    expect(rec.made[0].exited, 'the thread must not have been terminated').toBe(false);
+    // A wrong implementation terminates in the very callback that resolved the request, so the
+    // spy has already seen it by now - no sleep, no bet on when a thread finishes exiting.
+    expect(rec.made[0].terminated, 'terminate() must never have been called').toBe(0);
+    expect(rec.made[0].exited).toBe(false);
+  });
+
+  test('the main thread stamps an ABSOLUTE deadline (its clock + timeoutMs) on every message', async () => {
+    const rec = recordingCtor();
+    const h = host({ WorkerCtor: rec.Ctor });
+    const before = Date.now();
+    await h.exec({ ...stubReq('ok'), timeoutMs: 45000 });
+    const after = Date.now();
+    const sent = rec.made[0].posted;
+    expect(sent).toHaveLength(1);
+    expect(sent[0].deadline).toBeGreaterThanOrEqual(before + 45000);
+    expect(sent[0].deadline).toBeLessThanOrEqual(after + 45000);
+  });
+
+  test('a request that expired before the thread got to it is never spawned (real thread, real stub)', async () => {
+    const h = host({ graceMs: 100 });
+    // timeoutMs 0 = a deadline that is already past when the message arrives, however fast the
+    // thread is. Whichever answer reaches the main thread first - its own deadline + grace
+    // ("worker-timeout") or the thread's "expired" - the request fails, and which one wins is
+    // a race this test does not care about.
+    const dead = stubReq('ok');
+    const gone = await h.exec({ ...dead, timeoutMs: 0 });
+    expect(gone.ok).toBe(false);
+    expect(['worker-timeout', 'expired']).toContain(/** @type {any} */ (gone).reason);
+    // The thread is serial: once THIS one is answered, the dead one has been handled before it.
+    const live = stubReq('ok');
+    expect((await h.exec(live)).ok).toBe(true);
+    const logOf = (r) => fs.readFileSync(r.env.STUB_LOG, 'utf8').split('\n').filter(Boolean);
+    expect(logOf(dead), 'the expired request must not have started a process').toEqual([]);
+    expect(logOf(live), 'the live one did').toHaveLength(1);
   });
 
   test('a reply that arrives after the deadline is ignored, and does not disturb the next request', async () => {
     const rec = recordingCtor();
     const h = host({ workerPath: hostile, graceMs: 100, WorkerCtor: rec.Ctor });
-    // 'LATE' parks the thread for 1.5 s, then answers (exec:ENOENT) - long after the 200 ms deadline.
+    // 'LATE' parks the thread for 1.5 s, then answers ("expired": its 200 ms deadline is long
+    // gone by then) - after the main thread has already given up on it.
     expect(await h.exec(trivial('LATE'))).toEqual({ ok: false, reason: 'worker-timeout' });
     // This one queues behind the late one in the same thread. If the late reply were taken for
-    // its answer, it would read exec:ENOENT instead of the stub's rows.
+    // its answer, it would read "expired" instead of the stub's rows.
     const next = await h.exec(stubReq('ok'));
     expect(next.ok, 'the next request gets ITS reply').toBe(true);
     expect(JSON.parse(/** @type {any} */ (next).stdout)).toHaveLength(1);
     expect(rec.made, 'the same thread served both').toHaveLength(1);
+    expect(rec.made[0].terminated).toBe(0);
     expect(rec.made[0].exited).toBe(false);
   });
 
@@ -858,6 +930,7 @@ require(${JSON.stringify(DEFAULT_WORKER_PATH)});
     expect(h.running()).toBe(true);
     expect((await h.exec(stubReq('ok'))).ok).toBe(true);
     expect(rec.made, 'the same thread served the next request').toHaveLength(1);
+    expect(rec.made[0].terminated).toBe(0);
     expect(rec.made[0].exited).toBe(false);
   });
 
@@ -883,6 +956,7 @@ require(${JSON.stringify(DEFAULT_WORKER_PATH)});
     h.dispose();
     expect(await inflight).toEqual({ ok: false, reason: 'disposed' });
     expect(h.running()).toBe(false);
+    expect(rec.made[0].terminated, 'dispose is the one place that terminates').toBe(1);
     await expect.poll(() => rec.made[0].exited, {
       timeout: 20000, message: 'dispose must stop the thread - no worker outlives a shutdown',
     }).toBe(true);
