@@ -151,6 +151,8 @@ drive and virtual-memory figures cost the server a CIM query, so they are read o
 the section is open (`GET /api/machine`, cached for a minute); whether it is open is
 remembered per device.
 
+**Background agents** — the agents Claude runs in the background (`claude agents --json`) are listed machine-wide on the server (`GET /api/dashboard/background-agents`): name, project folder, state and what a blocked one is waiting on. Read-only, fetched only when asked and cached for 30 seconds, and a machine without a recent `claude` simply reports it as unavailable.
+
 It is a place to work FROM: your **Favorites** lead it; sessions group by **why they are not
 working** (needs you, including a session stuck in a menu, working, running on its own,
 blocked on others, idle, done), by server or

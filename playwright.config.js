@@ -84,6 +84,12 @@ process.env.WT_SPAWN_CLASSIFY_MS = '60000';
 // #359 - the restart hold. A hold left in production's maintenance.json by a spec would
 // refuse every new session on the real server; reset per run like the above.
 process.env.WT_MAINTENANCE_FILE = path.join(__dirname, 'maintenance.test.json');
+// #366 - the binary behind GET /api/dashboard/background-agents. The suite must never launch
+// the real CLI: its listing names every project's sessions on the machine, and a developer
+// box and a CI runner would answer differently. Pointing it at a path that does not exist
+// makes the route's answer the same everywhere ({available:false}), and means a regression
+// that ignored the override would show up on any machine that has a real `claude`.
+process.env.WT_CLAUDE_BIN = path.join(__dirname, 'no-such-claude.test.exe');
 
 module.exports = defineConfig({
   testDir: './tests',
