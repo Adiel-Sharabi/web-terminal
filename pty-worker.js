@@ -1044,6 +1044,25 @@ function fireAutoResume(session, resetAt) {
     log(`auto-resume: "${s.name}" (${s.id}) reset window passed but session is working — skipped`);
     return;
   }
+  // #364 - the session already did something once its window turned over, so it HAS
+  // been resumed - by Claude's own auto-continue, or by a human who came back inside
+  // the settle minute - and `continue` now would be typed into an answered turn. Not
+  // deferring to the native one in advance: whether it is enabled is not observable
+  // from here, and this asks only what DID happen. Kept apart from the `working` check
+  // above for the same reason that one is kept apart from the cap check: that one needs
+  // the turn to be live right now, this one is true after it has ended.
+  //
+  // WHAT THIS DOES NOT COVER: #231's PRE-reset case (a 99.5% window that rounds to 100,
+  // a prompt that ran normally BEFORE the reset). That work is older than the reset, so
+  // it is indistinguishable here from a cap-refused prompt or a spent allowance, and
+  // both of those still need the resume. It needs its own measurement.
+  //
+  // The one-shot is already consumed above, so a skip here is final for this window -
+  // the same as the two skips before it.
+  if (usageLimit.workedSinceReset({ lastWorkAt: s._lastWorkAt, resetAt })) {
+    log(`auto-resume: "${s.name}" (${s.id}) reset window passed but the session already worked since the reset (${new Date(s._lastWorkAt).toISOString()}) — skipped`);
+    return;
+  }
   // Cleared only on the path that actually acts. It used to be cleared above the
   // `working` check, which threw the observation away on a fire that then declined
   // to type — and since the one-shot is already consumed by then, that window had
@@ -2423,9 +2442,24 @@ function handleHook(session, event, claudeSessionId, prompt, agentId, opts) {
       // runs while the conversation is compacting, so a subagent's own event is
       // equally good proof that it finished.
       clearCompacting(session, 'resumed');
+      // #364 - WHEN work last started, whatever kind. fireAutoResume compares it with
+      // the reset (usageLimit.workedSinceReset): a session that reported work once its
+      // window had turned over - Claude's own auto-continue, a human who came back - has
+      // already been resumed, and typing `continue` after it is the duplicate #231 names.
+      // Stamped on a prompt as well as on a tool: a prompt cancels and re-arms (below),
+      // but a prompt submitted after the reset RAN. Memory-only, like the timer.
+      session._lastWorkAt = Date.now();
       // #69 — same signal: the user (or a retry) is back, so a pending 5h-reset
       // auto-resume for this session is now stale. Does not consume the window —
       // see cancelAutoResume. (#227 narrowed what "stale" means here; read on.)
+      //
+      // #364 - UNDER THE WRAP-UP ALLOWANCE A TOOL EVENT NO LONGER *PROVES* THE CAP IS
+      // LIFTED: a capped Claude keeps running tools to finish its task. CANCELLING IS STILL
+      // RIGHT, and this was weighed and kept: a wrap-up that FINISHED must not be
+      // continued (unattended, that restarts done work on fresh quota), and one that was
+      // cut off is EXPECTED to be resumed by Claude's own auto-continue (default-on, but its
+      // behaviour here is unmeasured). A main-agent `Stop` cancel is the
+      // better discriminator - UNMEASURED, so deliberately not implemented here.
       cancelAutoResume(session);
       clearObservedCapBlock(session); // #138 - and so is a cap prompt seen earlier
       // #227 - ...BUT BEING BACK IS NOT BEING UNBLOCKED, and that distinction is the

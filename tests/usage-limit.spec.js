@@ -380,3 +380,30 @@ test.describe('#142 — an observed cap EXPIRES, and names the right window', ()
     }).waiting).toBe(true);
   });
 });
+
+// #364 - Claude can resume itself at the reset, and a human can come back inside the settle
+// minute. Either way the session has already worked, and our `continue` would land on top
+// of it. One pure rule answers it; pty-worker.js applies it (tests/reset-resume.spec.js
+// drives that).
+test.describe('#364 — workedSinceReset', () => {
+  const RESET = NOW;
+
+  test('work at or after the reset counts; the reset instant itself is "after"', () => {
+    expect(u.workedSinceReset({ lastWorkAt: RESET, resetAt: RESET })).toBe(true);
+    expect(u.workedSinceReset({ lastWorkAt: RESET + 1, resetAt: RESET })).toBe(true);
+    expect(u.workedSinceReset({ lastWorkAt: RESET + 59 * 1000, resetAt: RESET })).toBe(true);
+  });
+
+  test('work BEFORE the reset never counts, however recent - it still needs the resume', () => {
+    expect(u.workedSinceReset({ lastWorkAt: RESET - 1, resetAt: RESET })).toBe(false);
+    expect(u.workedSinceReset({ lastWorkAt: RESET - 60 * 1000, resetAt: RESET })).toBe(false);
+  });
+
+  test('unknown on either side suppresses nothing: no recorded work, no reset', () => {
+    for (const v of [undefined, null, 0, -1, NaN, Infinity, '1700000000000']) {
+      expect(u.workedSinceReset({ lastWorkAt: /** @type {any} */ (v), resetAt: RESET })).toBe(false);
+      expect(u.workedSinceReset({ lastWorkAt: RESET, resetAt: /** @type {any} */ (v) })).toBe(false);
+    }
+    expect(u.workedSinceReset(/** @type {any} */ (undefined))).toBe(false);
+  });
+});

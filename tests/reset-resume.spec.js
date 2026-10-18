@@ -346,6 +346,11 @@ test.describe('#69 — 5h usage-limit auto-resume', () => {
   // a TOOL RUNNING is the one that genuinely proves the cap is not in force — an agent
   // that is executing is not an agent the quota is refusing. Non-vacuous: the timer is
   // asserted present first, so this cannot pass by never arming.
+  //
+  // #364 NOTE: under the 5h wrap-up allowance a tool event no longer PROVES the cap is lifted
+  // (a capped Claude keeps running tools to finish its task), but cancelling is still right:
+  // a wrap-up that finished must not be continued, and one cut off is resumed by Claude's own
+  // auto-continue. This test therefore stays as it was on master - see pty-worker.js.
   test('#227 — a TOOL running still cancels it: work is proof the cap is not in force', async () => {
     const pipe = workerPipePath();
     const dataDir = makeTempDataDir();
@@ -384,6 +389,75 @@ test.describe('#69 — 5h usage-limit auto-resume', () => {
       rmRf(dataDir);
     }
   });
+
+  // #364 - A SESSION THAT ALREADY WORKED AFTER THE RESET HAS BEEN RESUMED. Claude's own
+  // auto-continue enqueues a prompt at the reset; a human may come back inside the
+  // settle minute. Either way a `continue` typed at reset+60s lands in a turn that was
+  // already answered (#231's post-reset half). The work is sent BEFORE the window is
+  // armed with a reset already in the past - the real timer's catch-up path, which is
+  // how a late metrics push meets a session that moved first - because a timer armed for
+  // a FUTURE reset cannot be brought to a moment after it: there is no worker clock to move.
+  //
+  // How the skip is observed without a window to bet on: fireAutoResume persists the
+  // one-shot BEFORE it decides anything, so the file naming this reset proves the fire
+  // RAN; the write log is read after that, over the same single-threaded worker, so it
+  // cannot predate the decision. The CONTROL session takes the identical route without
+  // the work and must type, or "nothing was written" could mean the fire never got there.
+  for (const workEvent of ['PreToolUse', 'UserPromptSubmit']) {
+    test(`#364 — a ${workEvent} AFTER the reset stands the resume down; without one it types`, async () => {
+      const pipe = workerPipePath();
+      const dataDir = makeTempDataDir();
+      const worker = spawnWorker(pipe, dataDir, { WT_AUTO_RESUME_ON_RESET: '1', WT_HOOK_STOP_DEBOUNCE_MS: '20' });
+      const oneShotOf = (id) => {
+        try {
+          const saved = JSON.parse(fs.readFileSync(path.join(dataDir, 'sessions.json'), 'utf8'));
+          return (saved.find((s) => s.id === id) || {}).autoResumeFiredForResetAt || null;
+        } catch { return null; }
+      };
+      const settleIdle = async (client, id) => {
+        await rpc(client, 'hookEvent', { id, event: 'Stop' });
+        await expect.poll(async () => (await findSession(client, id)).status,
+          { timeout: 5000, message: 'the turn never went idle' }).toBe('idle');
+      };
+      try {
+        const client = await connectClient(pipe);
+        const ev = makeEventCollector(client);
+        const worked = (await rpc(client, 'createSession', { cwd: os.tmpdir(), name: 'worked-after-reset', agent: 'claude', autoCommand: '' })).id;
+        const control = (await rpc(client, 'createSession', { cwd: os.tmpdir(), name: 'idle-after-reset', agent: 'claude', autoCommand: '' })).id;
+
+        // The session that did something once its window had turned over. Idle again by
+        // the time the resume is armed, so the fire-time `working` guard is not what
+        // refuses it. The reset is an hour old: this work is, by construction, after it.
+        await rpc(client, 'hookEvent', { id: worked, event: workEvent, prompt: 'carry on', tool: 'Bash' });
+        await settleIdle(client, worked);
+        // The control only ever saw a Stop, which is not work: it must not count as one.
+        await settleIdle(client, control);
+
+        const resetAt = pastReset();
+        await setResetAt(client, worked, resetAt);
+        await setResetAt(client, control, resetAt);
+
+        // Each fire has RUN once its one-shot is on disk.
+        await expect.poll(() => oneShotOf(worked), { timeout: 5000, message: 'the worked session never fired' }).toBe(resetAt);
+        await expect.poll(() => oneShotOf(control), { timeout: 5000, message: 'the control never fired' }).toBe(resetAt);
+
+        // The control typed (its text now, its CR a gap later - awaited, not slept for).
+        await waitForWrites(client, control, (w) => w.includes('continue'), 'the control continue');
+        // ...and the session that had already worked did not, nor announced that it did.
+        expect(writesOf(await rpc(client, '__testGetWrites', { id: worked }))).not.toContain('continue');
+        expect(ev.events.some((e) => e.event === 'autoResume' && e.params.id === worked)).toBe(false);
+        expect(ev.events.some((e) => e.event === 'autoResume' && e.params.id === control)).toBe(true);
+
+        ev.stop();
+        await rpc(client, 'killSession', { id: worked });
+        await rpc(client, 'killSession', { id: control });
+        await client.close();
+      } finally {
+        await worker.stop();
+        rmRf(dataDir);
+      }
+    });
+  }
 
   test('opted-out session with a resetAt is never touched', async () => {
     const pipe = workerPipePath();
