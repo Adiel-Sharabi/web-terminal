@@ -1044,6 +1044,25 @@ function fireAutoResume(session, resetAt) {
     log(`auto-resume: "${s.name}" (${s.id}) reset window passed but session is working — skipped`);
     return;
   }
+  // #364 - the session already did something once its window turned over, so it HAS
+  // been resumed - by Claude's own auto-continue, or by a human who came back inside
+  // the settle minute - and `continue` now would be typed into an answered turn. Not
+  // deferring to the native one in advance: whether it is enabled is not observable
+  // from here, and this asks only what DID happen. Kept apart from the `working` check
+  // above for the same reason that one is kept apart from the cap check: that one needs
+  // the turn to be live right now, this one is true after it has ended.
+  //
+  // WHAT THIS DOES NOT COVER: #231's PRE-reset case (a 99.5% window that rounds to 100,
+  // a prompt that ran normally BEFORE the reset). That work is older than the reset, so
+  // it is indistinguishable here from a cap-refused prompt or a spent allowance, and
+  // both of those still need the resume. It needs its own measurement.
+  //
+  // The one-shot is already consumed above, so a skip here is final for this window -
+  // the same as the two skips before it.
+  if (usageLimit.workedSinceReset({ lastWorkAt: s._lastWorkAt, resetAt })) {
+    log(`auto-resume: "${s.name}" (${s.id}) reset window passed but the session already worked since the reset (${new Date(s._lastWorkAt).toISOString()}) — skipped`);
+    return;
+  }
   // Cleared only on the path that actually acts. It used to be cleared above the
   // `working` check, which threw the observation away on a fire that then declined
   // to type — and since the one-shot is already consumed by then, that window had
@@ -2423,10 +2442,23 @@ function handleHook(session, event, claudeSessionId, prompt, agentId, opts) {
       // runs while the conversation is compacting, so a subagent's own event is
       // equally good proof that it finished.
       clearCompacting(session, 'resumed');
+      // #364 - WHEN work last started, whatever kind. fireAutoResume compares it with
+      // the reset (usageLimit.workedSinceReset): a session that did something once its
+      // window had turned over - Claude's own auto-continue, a human who came back - has
+      // already been resumed, and typing `continue` after it is the duplicate #231 names.
+      // Stamped on a prompt as well as on a tool: a prompt does not cancel the timer (see
+      // below) but a prompt submitted after the reset RAN. Memory-only, like the timer.
+      session._lastWorkAt = Date.now();
       // #69 — same signal: the user (or a retry) is back, so a pending 5h-reset
       // auto-resume for this session is now stale. Does not consume the window —
       // see cancelAutoResume. (#227 narrowed what "stale" means here; read on.)
-      cancelAutoResume(session);
+      //
+      // #364 - AND #227's "a tool event proves the cap is lifted" NO LONGER HOLDS while
+      // the server still reports the window spent: a capped Claude keeps running tools on
+      // the allowance it is given to finish its task, so this cancel disarmed a session
+      // that was still capped and nothing re-armed it. The rule is pure, in
+      // lib/usage-limit.js; the event STAYS a cancel whenever capBlocked is not true.
+      if (usageLimit.workEventCancelsResume({ event, capBlocked: session.capBlocked })) cancelAutoResume(session);
       clearObservedCapBlock(session); // #138 - and so is a cap prompt seen earlier
       // #227 - ...BUT BEING BACK IS NOT BEING UNBLOCKED, and that distinction is the
       // whole bug. A submitted prompt proves the user is PRESENT; it proves nothing
@@ -2446,8 +2478,9 @@ function handleHook(session, event, claudeSessionId, prompt, agentId, opts) {
       // The signal is not "is the user back" but WHAT THEY ASKED FOR, which is why
       // this is one event and not the whole block. Esc says STOP (noteInterrupt, and
       // it only fires from `working`, so a turn really was running). A tool event says
-      // WORK IS RUNNING, which genuinely proves the cap is not in force. Only a
-      // prompt says GO - a request the cap is still refusing.
+      // WORK IS RUNNING, which proves the cap is not in force WHEN THE SERVER DOES NOT
+      // SAY IT IS (#364 narrowed this: while capBlocked it proves nothing, see above).
+      // Only a prompt says GO - a request the cap is still refusing.
       //
       // Deliberately AFTER clearObservedCapBlock, not before: this re-arms on
       // session.capBlocked alone - the server's live metrics reading, which expires on

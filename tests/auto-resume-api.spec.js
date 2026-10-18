@@ -10,10 +10,21 @@ const { test, expect } = require('@playwright/test');
 const fs = require('fs');
 const os = require('os');
 const path = require('path');
-const { BASE, authCtx, loginPage } = require('./test-helpers');
+const WebSocket = require('ws');
+const { BASE, AUTH, authCtx, loginPage } = require('./test-helpers');
 
 async function autoResumeOf(ctx, id) {
   return (await ctx.get(`/api/sessions/${id}/auto-resume`)).json();
+}
+// A raw login cookie for the /ws/:id socket (the same helper shape as ws-input-dropped.spec.js).
+async function rawCookie() {
+  const res = await fetch(`${BASE}/login`, {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/x-www-form-urlencoded' },
+    body: new URLSearchParams({ user: AUTH.user, password: AUTH.password }),
+    redirect: 'manual',
+  });
+  return (res.headers.get('set-cookie') || '').split(';')[0];
 }
 async function sessionRow(ctx, id) {
   const list = await (await ctx.get('/api/sessions')).json();
@@ -31,7 +42,7 @@ async function sessionRow(ctx, id) {
 // It is also the only test here that reproduces the reported failure end to end: a row
 // reading "resumes ..." for a session whose timer had already been destroyed.
 test.describe('#227 — the badge REPORTS the timer, it does not predict it', () => {
-  test('a hook cancelling the timer flips the row to NOT armed, while the derivation still says armed', async () => {
+  test('an interrupt cancelling the timer flips the row to NOT armed, while the derivation still says armed', async () => {
     const ctx = await authCtx();
     const uuid = '227ca9ed-0000-0000-0000-0000000000c1';
     const cwd = path.join(process.env.TEMP || os.tmpdir(), `wt-ar227-${process.pid}`);
@@ -59,11 +70,30 @@ test.describe('#227 — the badge REPORTS the timer, it does not predict it', ()
         .toBe(true);
       expect((await sessionRow(ctx, id)).usageLimit.waiting).toBe(true);
 
-      // Now a TOOL runs. That genuinely proves the cap is not in force, so the worker
-      // cancels the timer (#227 keeps this behaviour — only a PROMPT re-arms). The
-      // metrics have not moved, so the old derivation still computes `armed: true`:
-      // this is exactly the divergence that rendered "resumes 21:51" all night.
+      // #364 - A TOOL RUNNING NO LONGER CANCELS THE TIMER WHILE THE WINDOW IS SPENT: a
+      // capped Claude keeps running tools on the cap's allowance. This test used a
+      // PreToolUse as its cancel, and so pinned the very behaviour that left a still-capped
+      // session with nothing armed; it needs a cancel that still holds with the metrics
+      // unmoved, and an interrupt is one (Esc says STOP, whatever the quota). The row must
+      // keep reporting the timer through the tool event - the worker's report agrees:
       await ctx.post(`/api/session/${id}/hook`, { data: { event: 'PreToolUse', session_id: uuid, tool: 'Bash' } });
+      expect((await sessionRow(ctx, id)).usageLimit.armed).toBe(true);
+
+      // Now the user interrupts the turn (a lone Esc on a WORKING session - the hook above
+      // left it working). The worker cancels the timer. The metrics have not moved, so
+      // the old derivation still computes `armed: true`: this is exactly the divergence
+      // that rendered "resumes 21:51" all night. /ws/:id ignores input from a socket that
+      // has not declared itself active, so the mode frame goes first.
+      const ws = new WebSocket(`${BASE.replace('http', 'ws')}/ws/${id}`, { headers: { Cookie: await rawCookie() } });
+      try {
+        await new Promise((resolve, reject) => { ws.once('open', resolve); ws.once('error', reject); });
+        ws.send(JSON.stringify({ mode: 'active', browserId: 'ar227-interrupt' }));
+        await new Promise((r) => setTimeout(r, 250));
+        ws.send('\x1b');  // a lone Esc
+      } finally {
+        // The socket is only the delivery vehicle; the poll below is the assertion.
+        setTimeout(() => { try { ws.close(); } catch { /* already closed */ } }, 1500);
+      }
 
       await expect.poll(async () => (await sessionRow(ctx, id)).usageLimit.armed,
         { timeout: 8000, message: 'the row kept claiming a resume the worker had cancelled' })
@@ -72,7 +102,7 @@ test.describe('#227 — the badge REPORTS the timer, it does not predict it', ()
       // NB: the row does not republish the worker's raw `autoResumeArmed` — the list is
       // shaped field by field and that field is consumed server-side, inside
       // usageLimitFields. Asserting on it here was this test's own first bug. It does
-      // not weaken the gate: after a PreToolUse the metrics have not moved, so the OLD
+      // not weaken the gate: after the Esc the metrics have not moved, so the OLD
       // derivation still computes `armed: true` (capBlocked, enabled, canArm, resetAt
       // all unchanged), and only the worker's answer can make this false.
       //
