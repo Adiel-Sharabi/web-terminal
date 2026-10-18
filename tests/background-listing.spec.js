@@ -32,6 +32,7 @@ const { createBackgroundListing } = require('../lib/background-listing-runner');
 const {
   createInlineExec, createThreadedExec, MAX_STDOUT_BYTES, DEFAULT_WORKER_PATH,
 } = require('../lib/background-listing-exec');
+const { createHandler } = require('../lib/background-listing-worker');
 const { authCtx, noAuthCtx } = require('./test-helpers');
 
 const U1 = '11111111-1111-4111-8111-111111111111';
@@ -594,6 +595,7 @@ test.describe('inline exec', () => {
       execFile: (f, a, o, cb) => { lateCallback = cb; return { pid: 4242 }; },
       killTree: (pid) => killed.push(pid),
       setTimer: (fn, ms) => { armed = { fn, ms }; return { unref() {} }; },
+      now: () => 1000,
     });
     const pending = exec({ bin: 'b', argv: [], env: {}, timeoutMs: 12345 });
     expect(armed && armed.ms).toBe(12345);
@@ -602,6 +604,70 @@ test.describe('inline exec', () => {
     expect(killed).toEqual([4242]);
     // The killed child's callback arrives afterwards: it must change nothing.
     /** @type {Function} */ (lateCallback)(null, '[]');
+  });
+
+  /**
+   * A fake execFile that takes `spawnMs` of a fake clock to RETURN - a CreateProcess held by an
+   * AV hook - and hangs afterwards. Returns what the watchdog was armed with and who it killed.
+   */
+  function slowLaunch(spawnMs, timeoutMs, receivedAt) {
+    const clock = { t: 5000 };
+    /** @type {{fn: Function, ms: number}|null} */ let armed = null;
+    /** @type {number[]} */ const killed = [];
+    const exec = createInlineExec({
+      execFile: () => { clock.t += spawnMs; return { pid: 777 }; },
+      killTree: (pid) => killed.push(pid),
+      setTimer: (fn, ms) => { armed = { fn, ms }; return { unref() {} }; },
+      now: () => clock.t,
+    });
+    const pending = exec({ bin: 'b', argv: [], env: {}, timeoutMs }, receivedAt === undefined ? clock.t : receivedAt);
+    return { pending, armed: () => armed, killed };
+  }
+
+  test('the child\'s budget counts from RECEIPT: a spawn that took 8.3 s leaves 1.7 s of 10 s', async () => {
+    const r = slowLaunch(8300, 10000);
+    expect(r.armed()?.ms, 'armed for what is left, not for the full 10 s').toBe(1700);
+    /** @type {any} */ (r.armed()).fn();
+    expect(await r.pending).toEqual({ ok: false, reason: 'timeout' });
+    expect(r.killed, 'the worker\'s own watchdog killed its child').toEqual([777]);
+  });
+
+  test('a spawn that used up the whole budget gets its child killed at once (clamped to zero)', async () => {
+    const r = slowLaunch(13000, 10000);
+    expect(r.armed()?.ms).toBe(0);
+    /** @type {any} */ (r.armed()).fn();
+    expect(await r.pending).toEqual({ ok: false, reason: 'timeout' });
+    expect(r.killed).toEqual([777]);
+  });
+
+  test('time spent QUEUED before the request was handled counts too: the deadline is receipt-based', async () => {
+    // Received 4 s before the spawn began (the thread was busy), spawn itself instant: 6 s left.
+    const r = slowLaunch(0, 10000, 1000);
+    expect(r.armed()?.ms).toBe(6000);
+    /** @type {any} */ (r.armed()).fn();
+    await r.pending;
+  });
+
+  test('the worker handler stamps the request when it RECEIVES it and passes that to the exec', async () => {
+    /** @type {any[]} */ const seen = [];
+    /** @type {any[]} */ const posted = [];
+    let t = 100;
+    const handle = createHandler({
+      now: () => t,
+      exec: async (req, receivedAt) => { seen.push({ req, receivedAt }); t = 9999; return { ok: true, stdout: '[]' }; },
+      post: (m) => posted.push(m),
+    });
+    await handle({ id: 7, req: { bin: 'b' } });
+    expect(seen).toEqual([{ req: { bin: 'b' }, receivedAt: 100 }]);
+    expect(posted).toEqual([{ id: 7, result: { ok: true, stdout: '[]' } }]);
+
+    await handle(null);                                            // junk is ignored, not answered
+    await handle({ id: 8 });
+    expect(posted).toHaveLength(1);
+
+    const throwing = createHandler({ exec: async () => { throw new Error('x'); }, post: (m) => posted.push(m) });
+    await throwing({ id: 9, req: {} });
+    expect(posted[1]).toEqual({ id: 9, result: { ok: false, reason: 'worker-threw' } });
   });
 
   // ---- a real stub process ----
@@ -669,13 +735,16 @@ test.describe('threaded exec (real worker thread)', () => {
     dir = fs.mkdtempSync(path.join(os.tmpdir(), 'wt366t-'));
     stub = path.join(dir, 'stub-claude.js');
     fs.writeFileSync(stub, STUB_SOURCE);
-    // Behaves like the real worker, except for three bins. BLOCK parks the thread the way a
-    // CreateProcess stuck in an AV hook does: its own timers cannot fire. CRASH ends the
-    // thread. THROW is an uncaught exception.
+    // Behaves like the real worker, except for four bins. BLOCK parks the thread for good (as
+    // far as a test is concerned) the way a CreateProcess stuck in an AV hook does: its own
+    // timers cannot fire. LATE parks it briefly and then lets the real worker answer, so the
+    // reply arrives AFTER the main thread's deadline. CRASH ends the thread. THROW is an
+    // uncaught exception.
     hostile = path.join(dir, 'hostile-worker.js');
     fs.writeFileSync(hostile, `
 const { parentPort } = require('worker_threads');
 parentPort.on('message', (m) => {
+  if (m.req.bin === 'LATE') Atomics.wait(new Int32Array(new SharedArrayBuffer(4)), 0, 0, 1500);
   if (m.req.bin === 'BLOCK') Atomics.wait(new Int32Array(new SharedArrayBuffer(4)), 0, 0, 30000);
   if (m.req.bin === 'CRASH') process.exit(3);
   if (m.req.bin === 'THROW') throw new Error('worker blew up');
@@ -724,15 +793,21 @@ require(${JSON.stringify(DEFAULT_WORKER_PATH)});
   }
 
   test('is lazy: no thread until the first call, then ONE long-lived thread serves every call', async () => {
-    const h = host();
+    const rec = recordingCtor();
+    const h = host({ WorkerCtor: rec.Ctor });
     expect(h.running()).toBe(false);
+    expect(rec.made, 'nothing is constructed up front').toHaveLength(0);
     const a = await h.exec(stubReq('ok'));
     expect(a.ok).toBe(true);
     expect(JSON.parse(/** @type {any} */ (a).stdout)).toHaveLength(1);
     expect(h.running()).toBe(true);
-    const b = await h.exec(stubReq('ok'));
-    expect(b.ok).toBe(true);
+    // Further calls, a failing one among them, reuse the same thread.
+    expect((await h.exec(stubReq('ok'))).ok).toBe(true);
+    expect((await h.exec(stubReq('exit1'))).ok).toBe(false);
+    expect((await h.exec(stubReq('ok'))).ok).toBe(true);
     expect(h.running()).toBe(true);
+    expect(rec.made, 'ONE thread across every call').toHaveLength(1);
+    expect(rec.made[0].exited).toBe(false);
   });
 
   test('failures cross the thread as a reason code, with nothing the child printed', async () => {
@@ -744,32 +819,60 @@ require(${JSON.stringify(DEFAULT_WORKER_PATH)});
       .toEqual({ ok: false, reason: 'exec:ENOENT' });
   });
 
-  test('a thread that never answers is abandoned after timeout + grace, and the next call gets a fresh one', async () => {
+  test('at its deadline the main thread stops WAITING - it does not terminate or replace the thread', async () => {
+    // The thread's own deadline is what kills the child, and a terminated thread takes that
+    // timer with it: terminating here would orphan a claude.exe on every window.
     const rec = recordingCtor();
-    const h = host({ workerPath: hostile, graceMs: 300, WorkerCtor: rec.Ctor });
+    const h = host({ workerPath: hostile, graceMs: 100, WorkerCtor: rec.Ctor });
     const t0 = Date.now();
     const stuck = await h.exec(trivial('BLOCK'));       // the thread parks for up to 30 s
     expect(stuck).toEqual({ ok: false, reason: 'worker-timeout' });
-    expect(Date.now() - t0, 'answered by the main-thread backstop, not by waiting out the block').toBeLessThan(25000);
-    expect(h.running(), 'the stuck thread was dropped').toBe(false);
-    await expect.poll(() => rec.made[0].exited, {
-      timeout: 20000, message: 'the abandoned thread must be terminated, not left to leak',
-    }).toBe(true);
-
-    const next = await h.exec(stubReq('ok'));
-    expect(next.ok, 'a replacement thread serves the next call').toBe(true);
-    expect(h.running()).toBe(true);
+    expect(Date.now() - t0, 'answered by the main-thread deadline, not by waiting out the block').toBeLessThan(25000);
+    expect(h.running(), 'the thread is still the host\'s thread').toBe(true);
+    expect(rec.made, 'and no replacement was made').toHaveLength(1);
+    // Give a (wrong) terminate() every chance to land before looking.
+    await new Promise((r) => setTimeout(r, 500));
+    expect(rec.made[0].exited, 'the thread must not have been terminated').toBe(false);
   });
 
-  test('a thread that dies, or throws, is reported and replaced', async () => {
-    const h = host({ workerPath: hostile, graceMs: 20000 });
+  test('a reply that arrives after the deadline is ignored, and does not disturb the next request', async () => {
+    const rec = recordingCtor();
+    const h = host({ workerPath: hostile, graceMs: 100, WorkerCtor: rec.Ctor });
+    // 'LATE' parks the thread for 1.5 s, then answers (exec:ENOENT) - long after the 200 ms deadline.
+    expect(await h.exec(trivial('LATE'))).toEqual({ ok: false, reason: 'worker-timeout' });
+    // This one queues behind the late one in the same thread. If the late reply were taken for
+    // its answer, it would read exec:ENOENT instead of the stub's rows.
+    const next = await h.exec(stubReq('ok'));
+    expect(next.ok, 'the next request gets ITS reply').toBe(true);
+    expect(JSON.parse(/** @type {any} */ (next).stdout)).toHaveLength(1);
+    expect(rec.made, 'the same thread served both').toHaveLength(1);
+    expect(rec.made[0].exited).toBe(false);
+  });
+
+  test('a request that cannot be posted fails alone: it says nothing about the thread, which is kept', async () => {
+    const rec = recordingCtor();
+    const h = host({ WorkerCtor: rec.Ctor });
+    // A function cannot be structured-cloned, so postMessage throws DataCloneError.
+    const bad = { ...stubReq('ok'), env: { f() {} } };
+    expect(await h.exec(bad)).toEqual({ ok: false, reason: 'worker-post' });
+    expect(h.running()).toBe(true);
+    expect((await h.exec(stubReq('ok'))).ok).toBe(true);
+    expect(rec.made, 'the same thread served the next request').toHaveLength(1);
+    expect(rec.made[0].exited).toBe(false);
+  });
+
+  test('a thread that dies, or throws, is reported and recreated - and only then', async () => {
+    const rec = recordingCtor();
+    const h = host({ workerPath: hostile, graceMs: 20000, WorkerCtor: rec.Ctor });
     expect(await h.exec(trivial('CRASH'))).toEqual({ ok: false, reason: 'worker-exit' });
     expect(h.running()).toBe(false);
     expect((await h.exec(stubReq('ok'))).ok).toBe(true);
+    expect(rec.made, 'recreated after it died').toHaveLength(2);
 
     expect(await h.exec(trivial('THROW'))).toEqual({ ok: false, reason: 'worker-error' });
     expect(h.running()).toBe(false);
     expect((await h.exec(stubReq('ok'))).ok, 'restartable more than once').toBe(true);
+    expect(rec.made).toHaveLength(3);
   });
 
   test('dispose answers what is in flight, stops the thread, and the host can start another', async () => {
@@ -810,14 +913,20 @@ test.describe('server.js wiring (source gate)', () => {
   // SIGTERM'd, which is exactly what a hot reload does to production. So these read the source,
   // the way tests/app-input-path.spec.js does: nothing here can be seen by a request.
   const src = fs.readFileSync(path.join(__dirname, '..', 'server.js'), 'utf8');
-  // The CODE of the block: its comments explain why nothing here may spawn, so they say "spawn".
-  const routeBlock = src.slice(
-    src.indexOf('// #366 - the background / dispatched agents'),
-    src.indexOf("app.get('/api/dashboard/background-agents'"),
-  ).replace(/^\s*\/\/.*$/gm, '');
+  // The CODE of the block AND of the route handler, through its closing `});`: a spawn inside
+  // the handler body is as bad as one in the setup. Comments explain why nothing here may
+  // spawn, so they say "spawn" and are dropped.
+  const blockStart = src.indexOf('// #366 - the background / dispatched agents');
+  const handlerStart = src.indexOf("app.get('/api/dashboard/background-agents'");
+  const close = /\r?\n\}\);/.exec(src.slice(handlerStart));
+  const handlerEnd = close ? handlerStart + close.index + close[0].length : blockStart;
+  const routeBlock = src.slice(blockStart, handlerEnd).replace(/^\s*\/\/.*$/gm, '');
 
   test('the listing is started through the worker-thread exec, never an execFile on the main loop', () => {
     expect(routeBlock.length, 'the #366 block was not found').toBeGreaterThan(200);
+    expect(routeBlock, 'the slice must reach into the handler body, or a spawn there goes unseen')
+      .toContain('res.json(await _backgroundListing.get())');
+    expect(routeBlock.trimEnd().endsWith('});'), 'and end at the handler\'s closing').toBe(true);
     expect(routeBlock).toContain('createThreadedExec(');
     expect(routeBlock).toContain('exec: _backgroundListingExec.exec');
     expect(routeBlock, 'CreateProcess on the main thread is the freeze this exists to avoid')

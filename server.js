@@ -7341,7 +7341,9 @@ async function gracefulShutdown(signal) {
   // Land any status reports still inside the write debounce, so a restart never
   // costs an idle session the last reading it will ever push (#72).
   try { flushClaudeMetrics(); } catch {}
-  // The listing's worker thread (#366). process.exit() ends it anyway; this answers a call in flight.
+  // The listing's worker thread (#366): terminates it and answers a call in flight. It cannot
+  // interrupt a native CreateProcessW already running inside the thread, and Node joins worker
+  // threads on exit, so a shutdown that lands during a blocked spawn waits that spawn out.
   try { if (_backgroundListingExec) _backgroundListingExec.dispose(); } catch {}
   console.log(`[${new Date().toISOString()}] Exiting.`);
   process.exit(0);
