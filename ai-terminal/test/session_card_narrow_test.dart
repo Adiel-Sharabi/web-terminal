@@ -7,6 +7,7 @@ import 'package:flutter_test/flutter_test.dart';
 import 'package:ai_terminal/api/models.dart';
 import 'package:ai_terminal/widgets/session_card.dart';
 import 'package:ai_terminal/theme/app_theme.dart';
+import 'package:ai_terminal/util/session_tree.dart';
 
 const _home = ServerConfig(name: 'Home', baseUrl: 'http://home.example:7681', bearerToken: 't');
 
@@ -52,7 +53,9 @@ void main() {
   // (#313). It cannot shrink below its icon and padding, so it needs the width the
   // session list keeps for a card (SessionTreeRow.minCardRow), not less: these are
   // the widths a row actually gets there, indented or not.
-  for (final w in [360.0, 384.0, 412.0, 800.0]) {
+  // minCardRow is in the list so the constant stays bound to this measurement: lower it
+  // below what the card needs and this goes red.
+  for (final w in [360.0, SessionTreeRow.minCardRow, 412.0, 800.0]) {
     testWidgets('a card with a reason chip fits at ${w}dp', (tester) async {
       await _pumpCard(tester, w,
           _card('idle', reason: const SessionReason(kind: 'external', text: 'waiting on the vendor licence', source: 'reported')));
