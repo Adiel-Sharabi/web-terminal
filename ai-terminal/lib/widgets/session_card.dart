@@ -260,10 +260,17 @@ class SessionCard extends StatelessWidget {
                     if (showReason)
                       Flexible(child: ReasonChip(reason: session.reason!))
                     else if (label.isNotEmpty && !hasApiError)
-                      Text(
-                        label,
-                        style: theme.textTheme.bodySmall?.copyWith(
-                          color: StatusColor.forStatus(status),
+                      // Flexible, so a narrow row (a phone, or a helper indented
+                      // under its parent, #374) shortens the word rather than
+                      // overflowing: every other item on this row is fixed.
+                      Flexible(
+                        child: Text(
+                          label,
+                          maxLines: 1,
+                          overflow: TextOverflow.ellipsis,
+                          style: theme.textTheme.bodySmall?.copyWith(
+                            color: StatusColor.forStatus(status),
+                          ),
                         ),
                       ),
                     // #137 — sitting out the 5h usage window. Placed here, directly

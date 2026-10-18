@@ -923,9 +923,17 @@ class _WorkBoardScreenState extends State<WorkBoardScreen> {
 
   /// #374 - a session opened by one in the same column sits under it, indented. One
   /// whose parent is in another column stays where it is; its card names the parent.
+  ///
+  /// The wrapper carries a key of its own: without one, a column that loses a row
+  /// matches unkeyed wrappers by position and REBUILDS the card inside, which drops
+  /// the focus of a reply being typed into it.
   static Widget _indented(SessionTreeRow r, Widget child) => r.depth == 0
       ? child
-      : Padding(padding: EdgeInsetsDirectional.only(start: r.indent), child: child);
+      : Padding(
+          key: ValueKey('board-tree-${r.session.server.baseUrl}-${r.session.id}'),
+          padding: EdgeInsetsDirectional.only(start: r.indent),
+          child: child,
+        );
 }
 
 /// What a card or row can do, already bound to its session. A null action means the

@@ -238,7 +238,9 @@ parent may be on another machine, and a malformed id is refused with 400). In th
 session list the helper sits under its parent, indented; one whose parent is on another machine
 is labelled `↳ opened by <parent> · <machine>`. On the dashboard a helper sits under its parent
 within a column, says who opened it, and the parent's card lists the sessions it opened with
-their status, each one tap away. A hand-off successor stays under the same parent.
+their status, each one tap away. A hand-off keeps the tree at both ends: a helper's successor
+stays under the same parent, and a parent's successor publishes `spawn.replaces` (the ids it took
+the place of), so helpers that still name the old id, on any machine, find their parent.
 
 **A colour per machine** — set `serverColor` on each server and its sessions carry that colour
 in the session list and on the dashboard of every client.

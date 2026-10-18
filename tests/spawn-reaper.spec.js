@@ -267,7 +267,7 @@ test.describe('#351 isActiveModeFrame - exactly the frame that makes a viewer a 
 test.describe('#351 successorVerdict - a hand-off successor of an agent-started session is agent-started', () => {
   test('agent in, agent out: spawner carried, clock restarted, never viewed', () => {
     expect(R.successorVerdict(meta({ spawnedBy: 'nightly', lastViewedAt: NOW - 5 }), NOW)).toEqual({
-      by: 'agent', createdAt: NOW, spawnedBy: 'nightly', lastViewedAt: null, parentId: null,
+      by: 'agent', createdAt: NOW, spawnedBy: 'nightly', lastViewedAt: null,
     });
   });
   test('a person\'s, a pending, an unknown or a junk predecessor passes nothing on', () => {
@@ -343,7 +343,7 @@ test.describe('#351 spawn-store - persistence', () => {
     clock.adv(WINDOW);
     expect(s.metaOf(id(1))).toMatchObject({ by: 'agent', createdAt: NOW, spawnedBy: 'nightly', lastViewedAt: null });
     expect(onDisk()[id(1)]).toMatchObject({ by: 'agent', createdAt: NOW, spawnedBy: 'nightly' });
-    expect(s.field(id(1))).toEqual({ by: 'agent', spawnedBy: 'nightly', createdAt: NOW, parentId: null });
+    expect(s.field(id(1))).toEqual({ by: 'agent', spawnedBy: 'nightly', createdAt: NOW, parentId: null, replaces: [] });
   });
 
   test('a view inside the window -> human; a view after it -> still agent', () => {
@@ -454,7 +454,7 @@ test.describe('#351 spawn-store - persistence', () => {
     const { s, clock, onDisk, make } = rig();
     s.created(id(1), 'nightly'); clock.adv(WINDOW + 7);
     const v = s.inherit(id(1), id(10));
-    expect(v).toEqual({ by: 'agent', createdAt: NOW + WINDOW + 7, spawnedBy: 'nightly', lastViewedAt: null, parentId: null });
+    expect(v).toEqual({ by: 'agent', createdAt: NOW + WINDOW + 7, spawnedBy: 'nightly', lastViewedAt: null });
     expect(onDisk()[id(10)]).toMatchObject({ by: 'agent', spawnedBy: 'nightly', createdAt: NOW + WINDOW + 7 });
     expect(make().field(id(10))).toMatchObject({ by: 'agent', spawnedBy: 'nightly' });
 
@@ -1000,20 +1000,21 @@ test.describe('#351 against the real server', () => {
       const before = await rowOf(id);
       expect(before.spawn).toMatchObject({ by: 'agent', spawnedBy: 'nightly' });
       const succ = await handOff(id, before.name);
-      expect(succ.spawn).toMatchObject({ by: 'agent', spawnedBy: 'nightly' });
+      expect(succ.spawn).toMatchObject({ by: 'agent', spawnedBy: 'nightly', replaces: [id] });
       expect(succ.spawn.createdAt).toBeGreaterThan(before.spawn.createdAt); // its own clock
     } finally { await dropByPrefix(base); }
   });
 
-  test('...and a PERSON\'s session gives its successor no verdict, as before', async () => {
+  test('...and a PERSON\'s session gives its successor no verdict, as before - but it keeps its place and its parent (#374)', async () => {
     const base = `rp-handoff-human-${Date.now()}`;
+    const parent = crypto.randomUUID();
     try {
-      const id = await handoffCandidate(base, { name: base }, { viewed: true });
+      const id = await handoffCandidate(base, { name: base, parentId: parent }, { viewed: true });
       await pastWindow(id);
       const before = await rowOf(id);
-      expect(before.spawn.by).toBe('human');
+      expect(before.spawn).toMatchObject({ by: 'human', parentId: parent });
       const succ = await handOff(id, before.name);
-      expect(succ.spawn).toBeNull();
+      expect(succ.spawn).toEqual({ by: null, spawnedBy: null, createdAt: null, parentId: parent, replaces: [id] });
     } finally { await dropByPrefix(base); }
   });
 });
@@ -1036,9 +1037,8 @@ test.describe('#374 parentIdOf - the caller names its own session, or nothing', 
     expect(R.cleanParentId(ID)).toBe(ID);
     for (const v of [undefined, null, '', 'junk', 7]) expect(R.cleanParentId(v)).toBeNull();
   });
-  test('a hand-off successor stays under its predecessor\'s parent', () => {
-    expect(R.successorVerdict(meta({ parentId: ID }), NOW)).toMatchObject({ by: 'agent', parentId: ID });
-    expect(R.successorVerdict(meta({ parentId: 'junk' }), NOW)).toMatchObject({ parentId: null });
+  test('the VERDICT carries no parent: a successor\'s parent lives in the lineage, for every successor', () => {
+    expect(R.successorVerdict(meta({ parentId: ID }), NOW)).not.toHaveProperty('parentId');
   });
 });
 
@@ -1060,7 +1060,7 @@ test.describe('#374 spawn-store - the parent rides the verdict', () => {
   test('published while pending, written with the verdict, and back after a restart', () => {
     const { s, clock, make, onDisk } = rig();
     s.created(id(2), 'helper', id(1));
-    expect(s.field(id(2))).toEqual({ by: 'pending', spawnedBy: 'helper', createdAt: NOW, parentId: id(1) });
+    expect(s.field(id(2))).toEqual({ by: 'pending', spawnedBy: 'helper', createdAt: NOW, parentId: id(1), replaces: [] });
     clock.adv(WINDOW);
     expect(s.field(id(2))).toMatchObject({ by: 'agent', parentId: id(1) });
     expect(onDisk()[id(2)]).toMatchObject({ by: 'agent', parentId: id(1) });
@@ -1083,14 +1083,51 @@ test.describe('#374 spawn-store - the parent rides the verdict', () => {
   test('a junk parent on disk is dropped on load, the verdict itself is kept', () => {
     const { file, make } = rig();
     fs.writeFileSync(file, JSON.stringify({ [id(5)]: { by: 'agent', createdAt: NOW, spawnedBy: null, lastViewedAt: null, parentId: '../../etc' } }));
-    expect(make().field(id(5))).toEqual({ by: 'agent', spawnedBy: null, createdAt: NOW, parentId: null });
+    expect(make().field(id(5))).toEqual({ by: 'agent', spawnedBy: null, createdAt: NOW, parentId: null, replaces: [] });
   });
   test('INHERIT: an agent-started child\'s successor is that parent\'s child as well', () => {
     const { s, clock } = rig();
     s.created(id(2), 'helper', id(1));
     clock.adv(WINDOW);
     s.inherit(id(2), id(9));
-    expect(s.field(id(9))).toMatchObject({ by: 'agent', parentId: id(1) });
+    expect(s.field(id(9))).toMatchObject({ by: 'agent', parentId: id(1), replaces: [id(2)] });
+  });
+  test('INHERIT: a helper a PERSON looked at keeps its parent too, with no verdict (never closed, as before)', () => {
+    const { s, clock } = rig();
+    s.created(id(2), null, id(1));
+    s.noteViewed(id(2));
+    clock.adv(WINDOW);
+    expect(s.inherit(id(2), id(9))).toBeNull();
+    expect(s.metaOf(id(9))).toBeNull();
+    expect(s.field(id(9))).toEqual({ by: null, spawnedBy: null, createdAt: null, parentId: id(1), replaces: [id(2)] });
+  });
+  test('LINEAGE: a parent handed off twice replaces both old ids, newest first, and it survives a restart', () => {
+    const { s, make, onDisk } = rig();
+    s.inherit(id(1), id(11));
+    s.forget(id(1));
+    s.inherit(id(11), id(12));
+    s.forget(id(11));
+    expect(s.field(id(12))).toMatchObject({ by: null, parentId: null, replaces: [id(11), id(1)] });
+    expect(onDisk()._lineage[id(12)].replaces).toEqual([id(11), id(1)]);
+    expect(onDisk()._lineage[id(11)]).toBeUndefined();
+    expect(make().field(id(12)).replaces).toEqual([id(11), id(1)]);
+  });
+  test('LINEAGE: forget and prune drop it; junk on disk is dropped on load', () => {
+    const { s, file, make } = rig();
+    s.inherit(id(1), id(11));
+    s.forget(id(11));
+    expect(s.field(id(11))).toBeNull();
+    s.inherit(id(2), id(12));
+    s.prune(new Set(), NOW + 5);
+    expect(s.field(id(12))).toBeNull();
+    fs.writeFileSync(file, JSON.stringify({ _lineage: {
+      [id(20)]: { replaces: [id(3), '../x', 7, id(20)], parentId: 'junk', at: NOW },
+      [id(21)]: { replaces: 'nope' },
+      'not-an-id': { replaces: [id(4)] },
+    } }));
+    const t = make();
+    expect(t.field(id(20))).toEqual({ by: null, spawnedBy: null, createdAt: null, parentId: null, replaces: [id(3)] });
+    expect(t.field(id(21))).toBeNull();
   });
 });
 

@@ -1040,6 +1040,9 @@ void main() {
       expect(cTop.dy, greaterThan(pTop.dy));
       expect(oTop.dy, greaterThan(cTop.dy), reason: 'the helper is pulled up under its parent');
       expect(cTop.dx, greaterThan(pTop.dx), reason: 'and indented');
+      // The indent wrapper is keyed, so a column that loses a row moves the card
+      // rather than rebuilding it (which would drop a reply box's focus).
+      expect(find.byKey(ValueKey('board-tree-${_server.baseUrl}-c1')), findsOneWidget);
       expect(tester.getTopLeft(card('other')).dx, pTop.dx);
       // The parent's card lists BOTH helpers, the idle one in another column too.
       final family = find.byKey(ValueKey('board-family-${_server.baseUrl}-p'));

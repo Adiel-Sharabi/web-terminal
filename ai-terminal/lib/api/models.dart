@@ -273,6 +273,13 @@ class Session {
   /// case the session is drawn at top level. See `lib/util/session_tree.dart`.
   final String? parentId;
 
+  /// The ids of the sessions this one took the place of in a hand-off, newest
+  /// first (#374, `spawn.replaces`), or empty. A helper names its parent by the
+  /// id it had when it opened the helper, and a parent handed off since then has
+  /// a new one: [SessionTree] treats each id here as another name for this
+  /// session, so the helper still finds it, on whichever machine it runs.
+  final List<String> replaces;
+
   /// Creates a session value object. [autoCommand] is optional (default `''`)
   /// so existing call sites and tests that predate the field keep compiling.
   const Session({
@@ -303,6 +310,7 @@ class Session {
     this.backgroundStale = false,
     this.handoff,
     this.parentId,
+    this.replaces = const <String>[],
   });
 
   /// This session with a different pinned rank (#124), for the optimistic half of
@@ -340,6 +348,7 @@ class Session {
     backgroundStale: backgroundStale,
     handoff: handoff,
     parentId: parentId,
+    replaces: replaces,
   );
 
   /// Builds a [Session] from one element of the `GET /api/sessions` array,
@@ -379,7 +388,16 @@ class Session {
       backgroundStale: _backgroundStale(json['backgroundTasks']),
       handoff: SessionHandoff.fromJson(json['handoff']),
       parentId: _parentId(json['spawn']),
+      replaces: _replaces(json['spawn']),
     );
+  }
+
+  /// `spawn.replaces` (#374): strings only, empty when absent.
+  static List<String> _replaces(dynamic spawn) {
+    if (spawn is! Map) return const <String>[];
+    final r = spawn['replaces'];
+    if (r is! List) return const <String>[];
+    return [for (final x in r) if (x is String && x.isNotEmpty) x];
   }
 
   /// `spawn.parentId` (#374), or null: an older server has no such field, and a

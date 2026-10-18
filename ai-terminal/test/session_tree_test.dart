@@ -5,7 +5,7 @@ import 'package:flutter_test/flutter_test.dart';
 const _home = ServerConfig(name: 'Home', baseUrl: 'http://h:7681', bearerToken: 't');
 const _office = ServerConfig(name: 'Office', baseUrl: 'http://o:7681', bearerToken: 't');
 
-Session _s(String id, {String? parent, ServerConfig server = _home}) => Session(
+Session _s(String id, {String? parent, ServerConfig server = _home, List<String> replaces = const []}) => Session(
       id: id,
       name: id,
       cwd: '',
@@ -15,6 +15,7 @@ Session _s(String id, {String? parent, ServerConfig server = _home}) => Session(
       notifyLevel: 'important',
       server: server,
       parentId: parent,
+      replaces: replaces,
     );
 
 List<String> _rows(List<SessionTreeRow> rows) => [for (final r in rows) '${'  ' * r.depth}${r.session.id}'];
@@ -48,6 +49,36 @@ void main() {
       expect(rows.map((r) => r.session.id).toSet(), {'self', 'x', 'y', 'k'});
       expect(rows, hasLength(4));
       expect(rows.firstWhere((r) => r.session.id == 'self').depth, 0);
+    });
+
+    test('a parent handed off keeps its helpers: they name the OLD id, which its successor replaces', () {
+      final successor = _s('p2', server: _office, replaces: ['p1', 'p0']);
+      final kid = _s('k', parent: 'p1');
+      final older = _s('k0', parent: 'p0');
+      final list = [kid, successor, older];
+      final tree = SessionTree(list);
+      expect(tree.parentOf(kid), same(successor));
+      expect(tree.parentOf(older), same(successor), reason: 'the whole chain, not just the last hop');
+      expect(_rows(tree.flatten(list)), ['p2', '  k', '  k0']);
+    });
+
+    test('a replaced id that a LIVE session still has is that session, not its successor', () {
+      final old = _s('p1');
+      final successor = _s('p2', replaces: ['p1']);
+      final kid = _s('k', parent: 'p1');
+      expect(SessionTree([old, successor, kid]).parentOf(kid), same(old));
+    });
+
+    test('two server entries for the same box: both rows are kept, each exactly once', () {
+      final a = _s('x');
+      final b = _s('x', server: _office);
+      final rows = SessionTree([a, b]).flatten([a, b]);
+      expect(rows.map((r) => r.session), [same(a), same(b)]);
+    });
+
+    test('in a loop the first listed becomes the root and the rest hang under it', () {
+      final list = [_s('x', parent: 'y'), _s('y', parent: 'x')];
+      expect(_rows(SessionTree(list).flatten(list)), ['x', '  y']);
     });
 
     test('indentation stops growing past the cap, so a deep chain keeps room for its title', () {

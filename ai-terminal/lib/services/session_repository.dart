@@ -834,6 +834,7 @@ class SessionRepository {
             // #374: so a cold launch already draws helpers under their parent,
             // rather than flat until the first refresh moves them.
             'parentId': s.parentId,
+            'replaces': s.replaces,
           },
       ]);
 
@@ -868,7 +869,12 @@ class SessionRepository {
           server: server,
           favorite: e['favorite'] == true,
           favoriteRank: _asInt(e['favoriteRank']),
-          parentId: e['parentId'] is String ? e['parentId'] as String : null,
+          parentId: e['parentId'] is String && (e['parentId'] as String).isNotEmpty
+              ? e['parentId'] as String
+              : null,
+          replaces: e['replaces'] is List
+              ? [for (final x in e['replaces'] as List) if (x is String && x.isNotEmpty) x]
+              : const <String>[],
         ));
       }
       return out;
