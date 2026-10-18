@@ -2,15 +2,22 @@
 // #366 - the background / dispatched agents `claude agents --json` lists, served read-only.
 //
 // What is under test is the SERVER half: what the CLI's output is allowed to become
-// (lib/background-listing.js), when and how it is run (lib/background-listing-runner.js),
-// which registry entry says so (lib/agents.js), and that the route is auth-only.
+// (lib/background-listing.js), when it is run and cached (lib/background-listing-runner.js),
+// where the child is started - a worker thread, so a slow CreateProcess cannot freeze the
+// server's loop (lib/background-listing-exec.js) - which registry entry says so
+// (lib/agents.js), and that the route is auth-only.
 //
 // EVERY ROW BELOW IS SYNTHETIC. The real listing names every project's sessions and working
 // directories on the machine, so no fixture is copied from it - the shapes (field names,
 // the five `state` words, `kind`, `waitingFor`) come from the issue and from probing the
-// CLI's KEYS, never its values. The suite never launches the real CLI either: the runner is
-// driven through a stub executable (a tiny node script) over a REAL child process, and the
-// shared server is pointed at a nonexistent binary by playwright.config.js (WT_CLAUDE_BIN).
+// CLI's KEYS, never its values. The suite never launches the real CLI either: the exec layers
+// are driven through a stub executable (a tiny node script) over a REAL child process and
+// real worker threads, and the shared server is pointed at a nonexistent binary by
+// playwright.config.js (WT_CLAUDE_BIN).
+//
+// NO TEST HERE BETS ON A WALL-CLOCK WINDOW. This host's processes stall for seconds at a time,
+// so a watchdog is fired by hand once the stub says it is ready, a clock is injected for the
+// TTL, and a pending exec is a deferred promise rather than a sleeping process.
 const { test, expect } = require('@playwright/test');
 const fs = require('fs');
 const os = require('os');
@@ -22,6 +29,9 @@ const {
   parseBackgroundListing, scrubEnv, resolveBin, MAX_ROWS,
 } = require('../lib/background-listing');
 const { createBackgroundListing } = require('../lib/background-listing-runner');
+const {
+  createInlineExec, createThreadedExec, MAX_STDOUT_BYTES, DEFAULT_WORKER_PATH,
+} = require('../lib/background-listing-exec');
 const { authCtx, noAuthCtx } = require('./test-helpers');
 
 const U1 = '11111111-1111-4111-8111-111111111111';
@@ -191,17 +201,36 @@ test.describe('parseBackgroundListing (pure)', () => {
 // ============================================================================
 
 test.describe('scrubEnv (pure)', () => {
-  const spec = { prefix: 'CLAUDE', keep: ['CLAUDE_CONFIG_DIR'] };
+  const spec = { names: ['CLAUDECODE', 'CLAUDE_CODE_ENTRYPOINT', 'CLAUDE_CODE_CHILD_SESSION'] };
 
-  test('drops every CLAUDE* variable except CLAUDE_CONFIG_DIR, case-insensitively', () => {
+  test('drops exactly the named markers, case-insensitively, and nothing else', () => {
     const input = {
-      CLAUDECODE: '1', CLAUDE_CODE_ENTRYPOINT: 'cli', Claude_Other: 'x',
-      CLAUDE_CONFIG_DIR: 'C:\\cfg', claude_config_dir: 'lower',
-      PATH: 'C:\\bin', ANTHROPIC_API_KEY: 'keep-me', HOME: 'h',
+      CLAUDECODE: '1', Claude_Code_Entrypoint: 'cli', CLAUDE_CODE_CHILD_SESSION: '1',
+      CLAUDE_CONFIG_DIR: 'C:\\cfg', CLAUDE_CODE_GIT_BASH_PATH: 'C:\\git\\bash.exe',
+      CLAUDE_CODE_USE_BEDROCK: '1', ANTHROPIC_API_KEY: 'keep-me', PATH: 'C:\\bin',
     };
     const out = scrubEnv(input, spec);
-    expect(Object.keys(out).sort()).toEqual(['ANTHROPIC_API_KEY', 'CLAUDE_CONFIG_DIR', 'HOME', 'PATH', 'claude_config_dir'].sort());
-    expect(out.CLAUDE_CONFIG_DIR).toBe('C:\\cfg');
+    expect(Object.keys(out).sort()).toEqual(
+      ['ANTHROPIC_API_KEY', 'CLAUDE_CODE_GIT_BASH_PATH', 'CLAUDE_CODE_USE_BEDROCK', 'CLAUDE_CONFIG_DIR', 'PATH'],
+    );
+  });
+
+  test('the registry list strips every marker a live session carries and none of the operator settings', () => {
+    const { scrubEnv: reg } = /** @type {any} */ (agents.backgroundListingFor('claude'));
+    const markers = [
+      'CLAUDECODE', 'CLAUDE_CODE_ENTRYPOINT', 'CLAUDE_CODE_CHILD_SESSION', 'CLAUDE_CODE_SESSION_ID',
+      'CLAUDE_CODE_BRIDGE_SESSION_ID', 'CLAUDE_CODE_MESSAGING_SOCKET', 'CLAUDE_CODE_MESSAGING_TOKEN',
+      'CLAUDE_CODE_SESSION_ATTENDED', 'CLAUDE_CODE_EXECPATH', 'CLAUDE_PID',
+    ];
+    // Settings an operator chose, which a server started with them needs the child to honour.
+    const operator = [
+      'CLAUDE_CONFIG_DIR', 'CLAUDE_CODE_GIT_BASH_PATH', 'CLAUDE_CODE_USE_BEDROCK',
+      'CLAUDE_CODE_EXPERIMENTAL_AGENT_TEAMS', 'ANTHROPIC_API_KEY',
+    ];
+    const input = Object.fromEntries([...markers, ...operator].map((k) => [k, 'x']));
+    const out = scrubEnv(input, reg);
+    for (const k of markers) expect(out, k).not.toHaveProperty(k);
+    for (const k of operator) expect(out, k).toHaveProperty(k);
   });
 
   test('does not mutate its input, and survives a missing env or spec', () => {
@@ -228,6 +257,21 @@ test.describe('resolveBin (pure)', () => {
     expect(resolveBin(win({ exists }))).toBe('C:\\y z\\claude.exe');
     expect(seen.every((p) => p.endsWith('claude.exe'))).toBe(true);
     expect(resolveBin(win({ exists: (p) => p.endsWith('claude.cmd') }))).toBeNull();
+  });
+
+  test('a relative PATH entry is never consulted - it would resolve against the server\'s cwd', () => {
+    const seen = [];
+    const exists = (p) => { seen.push(p); return true; };
+    expect(resolveBin(win({ pathValue: '.;bin;..\\up;C:\\ok', exists }))).toBe('C:\\ok\\claude.exe');
+    expect(seen).toEqual(['C:\\ok\\claude.exe']);
+
+    const seenPosix = [];
+    const found = resolveBin({
+      bin: 'claude', platform: 'linux', home: '/home/u', pathValue: './bin::bin:/usr/bin',
+      exists: (p) => { seenPosix.push(p); return p === '/usr/bin/claude'; },
+    });
+    expect(found).toBe('/usr/bin/claude');
+    expect(seenPosix).toEqual(['/usr/bin/claude']);
   });
 
   test('falls back to ~/.local/bin when PATH does not carry it', () => {
@@ -262,7 +306,11 @@ test.describe('registry: backgroundListing', () => {
     expect(cfg.bin).toBe('claude');
     expect(cfg.timeoutMs).toBeGreaterThan(0);
     expect(cfg.ttlMs).toBeGreaterThan(0);
-    expect(cfg.scrubEnv).toEqual({ prefix: 'CLAUDE', keep: ['CLAUDE_CONFIG_DIR'] });
+    // An explicit list: the operator's own CLAUDE_* settings must reach the child.
+    expect(cfg.scrubEnv.names).toContain('CLAUDECODE');
+    expect(cfg.scrubEnv.names).toContain('CLAUDE_CODE_CHILD_SESSION');
+    expect(cfg.scrubEnv.names).not.toContain('CLAUDE_CONFIG_DIR');
+    expect(cfg.scrubEnv).not.toHaveProperty('prefix');
     expect(Object.isFrozen(cfg)).toBe(true);
     expect(Object.isFrozen(cfg.argv)).toBe(true);
   });
@@ -280,23 +328,187 @@ test.describe('registry: backgroundListing', () => {
 });
 
 // ============================================================================
-// The runner - a REAL child process, a stub executable, an injected clock
+// The runner - single-flight, cache, failure reporting. A fake exec: no process at all.
+// ============================================================================
+
+test.describe('runner (fake exec)', () => {
+  const rowsText = (rows = [bg(), interactive()]) => JSON.stringify(rows);
+
+  function harness(over = {}) {
+    const ctl = {
+      t: 1000,
+      bin: /** @type {string|null} */ ('/opt/claude'),
+      calls: /** @type {any[]} */ ([]),
+      failures: /** @type {string[]} */ ([]),
+      // What the next exec call returns (a function so a test can hand back a pending promise).
+      next: /** @type {(req: any) => any} */ (() => ({ ok: true, stdout: rowsText() })),
+    };
+    const cfg = { ...agents.backgroundListingFor('claude'), ...(over.cfg || {}) };
+    const runner = createBackgroundListing({
+      cfg,
+      resolve: () => ctl.bin,
+      exec: over.exec || ((req) => { ctl.calls.push(req); return ctl.next(req); }),
+      now: () => ctl.t,
+      env: () => ({
+        PATH: 'C:\\bin', CLAUDECODE: '1', CLAUDE_CODE_ENTRYPOINT: 'cli', CLAUDE_CODE_SESSION_ID: 's',
+        CLAUDE_CONFIG_DIR: 'C:\\cfg', CLAUDE_CODE_GIT_BASH_PATH: 'C:\\git\\bash.exe',
+      }),
+      cwd: 'D:\\home',
+      onFailure: (r) => ctl.failures.push(r),
+    });
+    return { runner, ctl, cfg };
+  }
+
+  test('asks exec for the registry argv and timeout, in the right cwd, with a scrubbed env', async () => {
+    const h = harness();
+    const out = await h.runner.get();
+    expect(out.available).toBe(true);
+    expect(out.agents.map((r) => r.id)).toEqual(['a1b2c3d4']);
+    expect(JSON.stringify(out)).not.toContain('4242');
+
+    expect(h.ctl.calls).toHaveLength(1);
+    const req = h.ctl.calls[0];
+    expect(req.bin).toBe('/opt/claude');
+    expect(req.argv).toEqual(['agents', '--json']);
+    expect(req.cwd).toBe('D:\\home');
+    expect(req.timeoutMs).toBe(h.cfg.timeoutMs);
+    expect(req.env.CLAUDECODE).toBeUndefined();
+    expect(req.env.CLAUDE_CODE_ENTRYPOINT).toBeUndefined();
+    expect(req.env.CLAUDE_CODE_SESSION_ID).toBeUndefined();
+    expect(req.env.CLAUDE_CONFIG_DIR).toBe('C:\\cfg');
+    expect(req.env.CLAUDE_CODE_GIT_BASH_PATH).toBe('C:\\git\\bash.exe');
+    expect(req.env.PATH).toBe('C:\\bin');
+    expect(h.ctl.failures).toEqual([]);
+  });
+
+  test('a failed exec is unavailable and its reason is passed to the failure hook', async () => {
+    const h = harness();
+    h.ctl.next = () => ({ ok: false, reason: 'exec:1' });
+    expect(await h.runner.get()).toEqual({ available: false });
+    expect(h.ctl.failures).toEqual(['exec:1']);
+  });
+
+  test('output that is not JSON, or not an array, is unavailable', async () => {
+    for (const stdout of ['{not json', '{"agents":[]}', '']) {
+      const h = harness();
+      h.ctl.next = () => ({ ok: true, stdout });
+      expect(await h.runner.get(), stdout).toEqual({ available: false });
+      expect(h.ctl.failures, stdout).toEqual(['bad-output']);
+    }
+  });
+
+  test('no resolvable binary is unavailable and starts nothing', async () => {
+    const h = harness();
+    h.ctl.bin = null;
+    expect(await h.runner.get()).toEqual({ available: false });
+    expect(h.ctl.failures).toEqual(['no-binary']);
+    expect(h.ctl.calls).toHaveLength(0);
+  });
+
+  test('an exec that throws or rejects, or a resolver that throws, is unavailable - never a rejection', async () => {
+    const a = harness({ exec: () => { throw new Error('exploded'); } });
+    expect(await a.runner.get()).toEqual({ available: false });
+    expect(a.ctl.failures).toEqual(['exec-threw']);
+
+    const b = harness({ exec: () => Promise.reject(new Error('rejected')) });
+    expect(await b.runner.get()).toEqual({ available: false });
+    expect(b.ctl.failures).toEqual(['exec-threw']);
+
+    const c = createBackgroundListing({
+      cfg: agents.backgroundListingFor('claude'), resolve: () => { throw new Error('nope'); },
+      exec: () => { throw new Error('unreachable'); },
+    });
+    expect(await c.get()).toEqual({ available: false });
+
+    const d = harness({ exec: () => ({ ok: false }) });
+    expect(await d.runner.get()).toEqual({ available: false });
+    expect(d.ctl.failures).toEqual(['exec-failed']);
+  });
+
+  test('concurrent callers share ONE exec; the answer is then served from memory until the TTL', async () => {
+    const h = harness();
+    /** @type {(v: any) => void} */ let release = () => {};
+    h.ctl.next = () => new Promise((resolve) => { release = resolve; });
+    const calls = [h.runner.get(), h.runner.get(), h.runner.get()];
+    expect(h.ctl.calls, 'all three joined the one in flight').toHaveLength(1);
+    release({ ok: true, stdout: rowsText() });
+    const [a, b, c] = await Promise.all(calls);
+    expect(a).toBe(b);
+    expect(b).toBe(c);
+    expect(a.available).toBe(true);
+
+    h.ctl.t += h.cfg.ttlMs - 1;
+    expect(await h.runner.get()).toBe(a);
+    expect(h.ctl.calls, 'inside the TTL: no new exec').toHaveLength(1);
+
+    h.ctl.t += 2;
+    h.ctl.next = () => ({ ok: true, stdout: rowsText() });
+    await h.runner.get();
+    expect(h.ctl.calls, 'past the TTL: exactly one more').toHaveLength(2);
+  });
+
+  test('a FAILURE is held for the TTL too, so a broken CLI is not respawned by every poll', async () => {
+    const h = harness();
+    h.ctl.next = () => ({ ok: false, reason: 'exec:1' });
+    expect(await h.runner.get()).toEqual({ available: false });
+    expect(await h.runner.get()).toEqual({ available: false });
+    expect(await h.runner.get()).toEqual({ available: false });
+    expect(h.ctl.calls).toHaveLength(1);
+
+    h.ctl.t += h.cfg.ttlMs + 1;
+    h.ctl.next = () => ({ ok: true, stdout: rowsText() });
+    expect((await h.runner.get()).available, 'recovers once the window lapses').toBe(true);
+    expect(h.ctl.calls).toHaveLength(2);
+  });
+
+  test('the failure hook fires when the reason CHANGES, not once per window', async () => {
+    const h = harness();
+    const again = async (next) => { h.ctl.t += h.cfg.ttlMs + 1; h.ctl.next = next; await h.runner.get(); };
+    const fail = (reason) => () => ({ ok: false, reason });
+    const good = () => ({ ok: true, stdout: rowsText() });
+
+    h.ctl.next = fail('timeout');
+    await h.runner.get();
+    await again(fail('timeout'));
+    await again(fail('timeout'));
+    expect(h.ctl.failures, 'an outage that lasts is one line').toEqual(['timeout']);
+
+    await again(fail('exec:1'));
+    expect(h.ctl.failures, 'a different reason is reported').toEqual(['timeout', 'exec:1']);
+
+    await again(good);
+    await again(fail('exec:1'));
+    expect(h.ctl.failures, 'after a success, the same failure is news again').toEqual(['timeout', 'exec:1', 'exec:1']);
+  });
+
+  test('nothing is started at construction', async () => {
+    const h = harness();
+    expect(h.ctl.calls).toHaveLength(0);
+  });
+});
+
+// ============================================================================
+// The inline exec - where the child is started. Fake execFile for the options and the
+// ordering rules; a REAL stub process for what only a process can show.
 // ============================================================================
 
 const STUB_SOURCE = `
 const fs = require('fs');
-fs.appendFileSync(process.env.STUB_LOG, process.pid + '\\n');
+const { spawn } = require('child_process');
+const log = process.env.STUB_LOG;
+fs.appendFileSync(log, 'pid ' + process.pid + '\\n');
 const mode = process.env.STUB_MODE;
-const rows = JSON.stringify(JSON.parse(process.env.STUB_ROWS));
-if (mode === 'ok') process.stdout.write(rows);
-else if (mode === 'slow') setTimeout(() => process.stdout.write(rows), 500);
+if (mode === 'ok') process.stdout.write(process.env.STUB_ROWS);
 else if (mode === 'exit1') { process.stdout.write('SECRET-STDOUT-MARKER'); process.stderr.write('SECRET-STDERR-MARKER'); process.exit(1); }
-else if (mode === 'badjson') process.stdout.write('{not json SECRET-STDOUT-MARKER');
-else if (mode === 'object') process.stdout.write('{"agents":[]}');
-else if (mode === 'hang') setInterval(() => {}, 1000);
+else if (mode === 'tree') {
+  const g = spawn(process.execPath, ['-e', 'setInterval(() => {}, 1000)'], { stdio: 'ignore', windowsHide: true });
+  fs.appendFileSync(log, 'grandchild ' + g.pid + '\\n');
+  fs.appendFileSync(log, 'ready\\n');   // everything the test waits for exists by now
+  setInterval(() => {}, 1000);
+}
 `;
 
-test.describe('runner (real child process, stub executable)', () => {
+test.describe('inline exec', () => {
   /** @type {string} */ let dir;
   /** @type {string} */ let stub;
 
@@ -307,163 +519,318 @@ test.describe('runner (real child process, stub executable)', () => {
   });
   test.afterAll(() => { try { fs.rmSync(dir, { recursive: true, force: true }); } catch { /* best effort */ } });
 
-  /** A runner over the stub; `ctl.mode` picks what the stub does, `ctl.t` is the clock. */
-  function harness(over = {}) {
-    const log = path.join(dir, `spawns-${Math.random().toString(36).slice(2)}.log`);
+  const aliveState = (pid) => {
+    try { process.kill(pid, 0); return 'alive'; } catch (e) { return e.code === 'EPERM' ? 'alive' : 'gone'; }
+  };
+  const logLines = (log) => fs.readFileSync(log, 'utf8').split('\n').filter(Boolean);
+
+  /** A request that runs the stub in `mode`; its log is a file of its own. */
+  function stubReq(mode, over = {}) {
+    const log = path.join(dir, `run-${Math.random().toString(36).slice(2)}.log`);
     fs.writeFileSync(log, '');
-    const ctl = {
-      mode: 'ok', t: 1000, bin: /** @type {string|null} */ ('stub'),
-      calls: /** @type {any[]} */ ([]), failures: /** @type {string[]} */ ([]),
+    return {
+      log,
+      req: {
+        bin: process.execPath,
+        argv: [stub],
+        env: { ...process.env, STUB_MODE: mode, STUB_LOG: log, STUB_ROWS: JSON.stringify([bg(), interactive()]) },
+        cwd: os.tmpdir(),
+        timeoutMs: 60000,
+        ...over,
+      },
     };
-    const cfg = { ...agents.backgroundListingFor('claude'), timeoutMs: 5000, ...(over.cfg || {}) };
-    const runner = createBackgroundListing({
-      cfg,
-      resolve: () => ctl.bin,
-      // The wrapper swaps the executable for node + the stub, but hands the runner's own
-      // options through untouched (recording them), so what the runner asked for is
-      // what is asserted.
-      execFile: over.execFile || ((file, args, o, cb) => {
-        ctl.calls.push({ file, args, opts: o });
-        return execFile(process.execPath, [stub, ...args], {
-          ...o,
-          env: {
-            ...o.env,
-            STUB_MODE: ctl.mode,
-            STUB_LOG: log,
-            STUB_ROWS: JSON.stringify([bg(), interactive()]),
-          },
-        }, cb);
-      }),
-      killTree,
-      now: () => ctl.t,
-      env: () => ({
-        PATH: process.env.PATH, SystemRoot: process.env.SystemRoot,
-        CLAUDECODE: '1', CLAUDE_CODE_ENTRYPOINT: 'cli', CLAUDE_CONFIG_DIR: 'C:\\cfg',
-      }),
-      cwd: os.tmpdir(),
-      onFailure: (r) => ctl.failures.push(r),
-    });
-    const spawns = () => fs.readFileSync(log, 'utf8').split('\n').filter(Boolean);
-    return { runner, ctl, cfg, spawns };
   }
 
-  test('success: parsed rows, the registry argv, a scrubbed env, no console window', async () => {
-    const h = harness();
-    const out = await h.runner.get();
-    expect(out.available).toBe(true);
-    expect(out.agents.map((r) => r.id)).toEqual(['a1b2c3d4']);
-    expect(JSON.stringify(out)).not.toContain('4242');
+  // ---- fake execFile: options, ordering, and the watchdog's wiring ----
 
-    expect(h.ctl.calls).toHaveLength(1);
-    const { args, opts } = h.ctl.calls[0];
-    expect(args).toEqual(['agents', '--json']);
-    expect(opts.windowsHide).toBe(true);
-    expect(opts.cwd).toBe(os.tmpdir());
-    expect(opts.env.CLAUDECODE).toBeUndefined();
-    expect(opts.env.CLAUDE_CODE_ENTRYPOINT).toBeUndefined();
-    expect(opts.env.CLAUDE_CONFIG_DIR).toBe('C:\\cfg');
-    expect(opts.env.PATH).toBe(process.env.PATH);
-    expect(h.ctl.failures).toEqual([]);
+  test('hands execFile the request verbatim, hidden, with an output ceiling', async () => {
+    /** @type {any[]} */ const calls = [];
+    const exec = createInlineExec({
+      execFile: (file, args, opts, cb) => { calls.push({ file, args, opts }); setImmediate(() => cb(null, '[]')); return { pid: 1 }; },
+      killTree: () => {},
+    });
+    const env = { A: '1' };
+    const res = await exec({ bin: 'B', argv: ['x', 'y'], env, cwd: 'C', timeoutMs: 5 });
+    expect(res).toEqual({ ok: true, stdout: '[]' });
+    expect(calls).toHaveLength(1);
+    expect(calls[0].file).toBe('B');
+    expect(calls[0].args).toEqual(['x', 'y']);
+    expect(calls[0].opts.env).toBe(env);
+    expect(calls[0].opts.cwd).toBe('C');
+    expect(calls[0].opts.windowsHide).toBe(true);
+    expect(calls[0].opts.maxBuffer).toBe(MAX_STDOUT_BYTES);
   });
 
-  test('a non-zero exit is unavailable, and neither stdout nor stderr reaches the failure hook', async () => {
-    const h = harness();
-    h.ctl.mode = 'exit1';
-    expect(await h.runner.get()).toEqual({ available: false });
-    expect(h.ctl.failures).toEqual(['exec:1']);
-    expect(h.ctl.failures.join(' ')).not.toContain('SECRET');
+  test('a failure is a short reason code; a throwing execFile is "spawn-threw"', async () => {
+    const failing = (err) => createInlineExec({
+      execFile: (f, a, o, cb) => { setImmediate(() => cb(err, 'SECRET-STDOUT-MARKER')); return { pid: 1 }; },
+      killTree: () => {},
+    });
+    const req = { bin: 'b', argv: [], env: {}, timeoutMs: 5 };
+    expect(await failing(Object.assign(new Error('x'), { code: 1 }))(req)).toEqual({ ok: false, reason: 'exec:1' });
+    expect(await failing(Object.assign(new Error('x'), { code: 'ENOENT' }))(req)).toEqual({ ok: false, reason: 'exec:ENOENT' });
+    expect(await failing(new Error('x'))(req)).toEqual({ ok: false, reason: 'exec:error' });
+
+    const throwing = createInlineExec({ execFile: () => { throw new Error('boom'); }, killTree: () => {} });
+    expect(await throwing(req)).toEqual({ ok: false, reason: 'spawn-threw' });
   });
 
-  test('output that is not JSON, or not an array, is unavailable', async () => {
-    for (const mode of ['badjson', 'object']) {
-      const h = harness();
-      h.ctl.mode = mode;
-      expect(await h.runner.get(), mode).toEqual({ available: false });
-      expect(h.ctl.failures, mode).toEqual(['bad-output']);
-      expect(h.ctl.failures.join(' ')).not.toContain('SECRET');
+  test('an execFile that calls back BEFORE it returns settles at once and arms no watchdog', async () => {
+    let armed = 0;
+    const exec = createInlineExec({
+      execFile: (f, a, o, cb) => { cb(null, '[]'); return { pid: 7 }; },     // synchronous callback
+      killTree: () => { throw new Error('must not kill a finished request'); },
+      setTimer: () => { armed++; return null; },
+    });
+    expect(await exec({ bin: 'b', argv: [], env: {}, timeoutMs: 5 })).toEqual({ ok: true, stdout: '[]' });
+    expect(armed, 'no timer should be left behind for a request that is already over').toBe(0);
+  });
+
+  test('the watchdog is armed for timeoutMs and, when it fires, kills the TREE of the child it started', async () => {
+    /** @type {{fn: Function, ms: number}|null} */ let armed = null;
+    /** @type {Function|null} */ let lateCallback = null;
+    /** @type {number[]} */ const killed = [];
+    const exec = createInlineExec({
+      execFile: (f, a, o, cb) => { lateCallback = cb; return { pid: 4242 }; },
+      killTree: (pid) => killed.push(pid),
+      setTimer: (fn, ms) => { armed = { fn, ms }; return { unref() {} }; },
+    });
+    const pending = exec({ bin: 'b', argv: [], env: {}, timeoutMs: 12345 });
+    expect(armed && armed.ms).toBe(12345);
+    /** @type {any} */ (armed).fn();
+    expect(await pending).toEqual({ ok: false, reason: 'timeout' });
+    expect(killed).toEqual([4242]);
+    // The killed child's callback arrives afterwards: it must change nothing.
+    /** @type {Function} */ (lateCallback)(null, '[]');
+  });
+
+  // ---- a real stub process ----
+
+  test('runs a real child: stdout comes back, and the registry-shaped request works end to end', async () => {
+    const { req, log } = stubReq('ok');
+    const res = await createInlineExec({ execFile, killTree })(req);
+    expect(res.ok).toBe(true);
+    expect(JSON.parse(/** @type {any} */ (res).stdout)).toHaveLength(2);
+    expect(logLines(log)).toHaveLength(1);
+  });
+
+  test('a non-zero exit is "exec:1" and NOTHING the child printed reaches the result', async () => {
+    const { req } = stubReq('exit1');
+    const res = await createInlineExec({ execFile, killTree })(req);
+    expect(res).toEqual({ ok: false, reason: 'exec:1' });
+    expect(JSON.stringify(res)).not.toContain('SECRET');
+  });
+
+  test('a hung child is killed together with the grandchild it started', async () => {
+    // The stub starts a grandchild and then says "ready". The watchdog is driven BY HAND once
+    // that line exists, so no bet is placed on how fast a process boots on a host that stalls
+    // for seconds at a time (a fixed timeout shorter than the boot reads an empty log).
+    /** @type {Function|null} */ let fire = null;
+    const exec = createInlineExec({
+      execFile, killTree,
+      setTimer: (fn) => { fire = fn; return { unref() {} }; },
+    });
+    const { req, log } = stubReq('tree');
+    const pending = exec(req);
+    await expect.poll(() => logLines(log).includes('ready'), {
+      timeout: 60000, message: 'the stub never became ready',
+    }).toBe(true);
+
+    const lines = logLines(log);
+    const child = Number(lines.find((l) => l.startsWith('pid '))?.slice(4));
+    const grandchild = Number(lines.find((l) => l.startsWith('grandchild '))?.slice(11));
+    expect(child).toBeGreaterThan(0);
+    expect(grandchild).toBeGreaterThan(0);
+    expect(aliveState(child)).toBe('alive');
+    expect(aliveState(grandchild)).toBe('alive');
+
+    /** @type {Function} */ (fire)();
+    expect(await pending).toEqual({ ok: false, reason: 'timeout' });
+    for (const [who, pid] of [['child', child], ['grandchild', grandchild]]) {
+      await expect.poll(() => aliveState(/** @type {number} */ (pid)), {
+        timeout: 20000, message: `the ${who} must not be left running`,
+      }).toBe('gone');
     }
   });
+});
 
-  test('a hang past the timeout is unavailable, and the child is really killed', async () => {
-    const h = harness({ cfg: { timeoutMs: 600 } });
-    h.ctl.mode = 'hang';
+// ============================================================================
+// The threaded exec - the worker thread server.js uses. REAL threads; a hostile worker
+// script stands in for a thread that is blocked in CreateProcess or has died.
+// ============================================================================
+
+test.describe('threaded exec (real worker thread)', () => {
+  /** @type {string} */ let dir;
+  /** @type {string} */ let stub;
+  /** @type {string} */ let hostile;
+  /** @type {ReturnType<typeof createThreadedExec>[]} */ const hosts = [];
+
+  test.beforeAll(() => {
+    dir = fs.mkdtempSync(path.join(os.tmpdir(), 'wt366t-'));
+    stub = path.join(dir, 'stub-claude.js');
+    fs.writeFileSync(stub, STUB_SOURCE);
+    // Behaves like the real worker, except for three bins. BLOCK parks the thread the way a
+    // CreateProcess stuck in an AV hook does: its own timers cannot fire. CRASH ends the
+    // thread. THROW is an uncaught exception.
+    hostile = path.join(dir, 'hostile-worker.js');
+    fs.writeFileSync(hostile, `
+const { parentPort } = require('worker_threads');
+parentPort.on('message', (m) => {
+  if (m.req.bin === 'BLOCK') Atomics.wait(new Int32Array(new SharedArrayBuffer(4)), 0, 0, 30000);
+  if (m.req.bin === 'CRASH') process.exit(3);
+  if (m.req.bin === 'THROW') throw new Error('worker blew up');
+});
+require(${JSON.stringify(DEFAULT_WORKER_PATH)});
+`);
+  });
+  test.afterAll(() => {
+    for (const h of hosts) { try { h.dispose(); } catch { /* best effort */ } }
+    try { fs.rmSync(dir, { recursive: true, force: true }); } catch { /* best effort */ }
+  });
+
+  /** @param {object} [o] */
+  function host(o = {}) {
+    const h = createThreadedExec(o);
+    hosts.push(h);
+    return h;
+  }
+  const stubReq = (mode) => {
+    const log = path.join(dir, `t-${Math.random().toString(36).slice(2)}.log`);
+    fs.writeFileSync(log, '');
+    return {
+      bin: process.execPath,
+      argv: [stub],
+      env: { ...process.env, STUB_MODE: mode, STUB_LOG: log, STUB_ROWS: JSON.stringify([bg()]) },
+      cwd: os.tmpdir(),
+      timeoutMs: 60000,
+    };
+  };
+  const trivial = (bin) => ({ bin, argv: [], env: {}, cwd: os.tmpdir(), timeoutMs: 200 });
+
+  /** A Worker constructor that remembers each thread and whether it has really exited. */
+  function recordingCtor() {
+    const Real = require('worker_threads').Worker;
+    /** @type {{ w: any, exited: boolean }[]} */ const made = [];
+    class Recording {
+      constructor(p) {
+        const w = new Real(p);
+        const rec = { w, exited: false };
+        w.once('exit', () => { rec.exited = true; });
+        made.push(rec);
+        return w;
+      }
+    }
+    return { Ctor: Recording, made };
+  }
+
+  test('is lazy: no thread until the first call, then ONE long-lived thread serves every call', async () => {
+    const h = host();
+    expect(h.running()).toBe(false);
+    const a = await h.exec(stubReq('ok'));
+    expect(a.ok).toBe(true);
+    expect(JSON.parse(/** @type {any} */ (a).stdout)).toHaveLength(1);
+    expect(h.running()).toBe(true);
+    const b = await h.exec(stubReq('ok'));
+    expect(b.ok).toBe(true);
+    expect(h.running()).toBe(true);
+  });
+
+  test('failures cross the thread as a reason code, with nothing the child printed', async () => {
+    const h = host();
+    const failed = await h.exec(stubReq('exit1'));
+    expect(failed).toEqual({ ok: false, reason: 'exec:1' });
+    expect(JSON.stringify(failed)).not.toContain('SECRET');
+    expect(await h.exec({ ...stubReq('ok'), bin: path.join(dir, 'does-not-exist.exe') }))
+      .toEqual({ ok: false, reason: 'exec:ENOENT' });
+  });
+
+  test('a thread that never answers is abandoned after timeout + grace, and the next call gets a fresh one', async () => {
+    const rec = recordingCtor();
+    const h = host({ workerPath: hostile, graceMs: 300, WorkerCtor: rec.Ctor });
     const t0 = Date.now();
-    expect(await h.runner.get()).toEqual({ available: false });
-    expect(Date.now() - t0).toBeLessThan(4500);
-    expect(h.ctl.failures).toEqual(['timeout']);
+    const stuck = await h.exec(trivial('BLOCK'));       // the thread parks for up to 30 s
+    expect(stuck).toEqual({ ok: false, reason: 'worker-timeout' });
+    expect(Date.now() - t0, 'answered by the main-thread backstop, not by waiting out the block').toBeLessThan(25000);
+    expect(h.running(), 'the stuck thread was dropped').toBe(false);
+    await expect.poll(() => rec.made[0].exited, {
+      timeout: 20000, message: 'the abandoned thread must be terminated, not left to leak',
+    }).toBe(true);
 
-    const pid = Number(h.spawns()[0]);
-    expect(pid).toBeGreaterThan(0);
-    await expect.poll(() => {
-      try { process.kill(pid, 0); return 'alive'; } catch (e) { return e.code === 'EPERM' ? 'alive' : 'gone'; }
-    }, { timeout: 8000, message: 'the timed-out child must not be left running' }).toBe('gone');
+    const next = await h.exec(stubReq('ok'));
+    expect(next.ok, 'a replacement thread serves the next call').toBe(true);
+    expect(h.running()).toBe(true);
   });
 
-  test('no resolvable binary is unavailable and spawns nothing', async () => {
-    const h = harness();
-    h.ctl.bin = null;
-    expect(await h.runner.get()).toEqual({ available: false });
-    expect(h.ctl.failures).toEqual(['no-binary']);
-    expect(h.spawns()).toHaveLength(0);
+  test('a thread that dies, or throws, is reported and replaced', async () => {
+    const h = host({ workerPath: hostile, graceMs: 20000 });
+    expect(await h.exec(trivial('CRASH'))).toEqual({ ok: false, reason: 'worker-exit' });
+    expect(h.running()).toBe(false);
+    expect((await h.exec(stubReq('ok'))).ok).toBe(true);
+
+    expect(await h.exec(trivial('THROW'))).toEqual({ ok: false, reason: 'worker-error' });
+    expect(h.running()).toBe(false);
+    expect((await h.exec(stubReq('ok'))).ok, 'restartable more than once').toBe(true);
   });
 
-  test('a spawn that throws, or a resolver that throws, is unavailable - never a rejection', async () => {
-    const a = harness({ execFile: () => { throw new Error('spawn exploded'); } });
-    expect(await a.runner.get()).toEqual({ available: false });
-    expect(a.ctl.failures).toEqual(['spawn-threw']);
+  test('dispose answers what is in flight, stops the thread, and the host can start another', async () => {
+    const rec = recordingCtor();
+    const h = host({ workerPath: hostile, graceMs: 20000, WorkerCtor: rec.Ctor });
+    const inflight = h.exec(trivial('BLOCK'));
+    await expect.poll(() => h.running()).toBe(true);
+    h.dispose();
+    expect(await inflight).toEqual({ ok: false, reason: 'disposed' });
+    expect(h.running()).toBe(false);
+    await expect.poll(() => rec.made[0].exited, {
+      timeout: 20000, message: 'dispose must stop the thread - no worker outlives a shutdown',
+    }).toBe(true);
+    h.dispose();                                         // idempotent
+    expect((await h.exec(stubReq('ok'))).ok).toBe(true);
+  });
 
-    const b = harness();
-    b.ctl.bin = /** @type {any} */ ('stub');
-    const throwing = createBackgroundListing({
-      cfg: b.cfg, resolve: () => { throw new Error('nope'); }, execFile: () => { throw new Error('unreachable'); },
-      killTree,
+  test('a thread that cannot be started is "worker-start", and the next call tries again', async () => {
+    let attempts = 0;
+    const Real = require('worker_threads').Worker;
+    const h = host({
+      WorkerCtor: class {
+        constructor(p) { attempts++; if (attempts === 1) throw new Error('no threads today'); return new Real(p); }
+      },
     });
-    expect(await throwing.get()).toEqual({ available: false });
-  });
-
-  test('concurrent callers share ONE spawn; the answer is then served from memory until the TTL', async () => {
-    const h = harness();
-    h.ctl.mode = 'slow';
-    const [a, b, c] = await Promise.all([h.runner.get(), h.runner.get(), h.runner.get()]);
-    expect(h.spawns()).toHaveLength(1);
-    expect(a).toBe(b);
-    expect(b).toBe(c);
-    expect(a.available).toBe(true);
-
-    h.ctl.t += h.cfg.ttlMs - 1;
-    expect(await h.runner.get()).toBe(a);
-    expect(h.spawns(), 'inside the TTL: no new spawn').toHaveLength(1);
-
-    h.ctl.t += 2;
-    h.ctl.mode = 'ok';
-    await h.runner.get();
-    expect(h.spawns(), 'past the TTL: exactly one more').toHaveLength(2);
-  });
-
-  test('a FAILURE is held for the TTL too, so a broken CLI is not respawned by every poll', async () => {
-    const h = harness();
-    h.ctl.mode = 'exit1';
-    expect(await h.runner.get()).toEqual({ available: false });
-    expect(await h.runner.get()).toEqual({ available: false });
-    expect(await h.runner.get()).toEqual({ available: false });
-    expect(h.spawns()).toHaveLength(1);
-
-    h.ctl.t += h.cfg.ttlMs + 1;
-    h.ctl.mode = 'ok';
-    expect((await h.runner.get()).available, 'recovers once the window lapses').toBe(true);
-    expect(h.spawns()).toHaveLength(2);
-  });
-
-  test('nothing spawns at construction or until asked', async () => {
-    const h = harness();
-    expect(h.spawns()).toHaveLength(0);
-    expect(h.ctl.calls).toHaveLength(0);
+    expect(await h.exec(stubReq('ok'))).toEqual({ ok: false, reason: 'worker-start' });
+    expect((await h.exec(stubReq('ok'))).ok).toBe(true);
+    expect(attempts).toBe(2);
   });
 });
 
 // ============================================================================
 // The route - on the suite's server (WT_CLAUDE_BIN points at a binary that is not there)
 // ============================================================================
+
+test.describe('server.js wiring (source gate)', () => {
+  // A behavioural test of either needs a server that is spawning on the main thread or being
+  // SIGTERM'd, which is exactly what a hot reload does to production. So these read the source,
+  // the way tests/app-input-path.spec.js does: nothing here can be seen by a request.
+  const src = fs.readFileSync(path.join(__dirname, '..', 'server.js'), 'utf8');
+  // The CODE of the block: its comments explain why nothing here may spawn, so they say "spawn".
+  const routeBlock = src.slice(
+    src.indexOf('// #366 - the background / dispatched agents'),
+    src.indexOf("app.get('/api/dashboard/background-agents'"),
+  ).replace(/^\s*\/\/.*$/gm, '');
+
+  test('the listing is started through the worker-thread exec, never an execFile on the main loop', () => {
+    expect(routeBlock.length, 'the #366 block was not found').toBeGreaterThan(200);
+    expect(routeBlock).toContain('createThreadedExec(');
+    expect(routeBlock).toContain('exec: _backgroundListingExec.exec');
+    expect(routeBlock, 'CreateProcess on the main thread is the freeze this exists to avoid')
+      .not.toMatch(/\bexecFile\b|\bspawn\b|createInlineExec|\bexecFileSync\b|\bexecSync\b/);
+  });
+
+  test('graceful shutdown stops the worker thread', () => {
+    const start = src.indexOf('async function gracefulShutdown');
+    const body = src.slice(start, src.indexOf("process.on('SIGINT'", start));
+    expect(start).toBeGreaterThan(0);
+    expect(body).toContain('_backgroundListingExec.dispose()');
+  });
+});
 
 test.describe('GET /api/dashboard/background-agents', () => {
   test('is auth-only: 401 with no credentials', async () => {
