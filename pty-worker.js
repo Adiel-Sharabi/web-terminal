@@ -2457,7 +2457,8 @@ function handleHook(session, event, claudeSessionId, prompt, agentId, opts) {
       // LIFTED: a capped Claude keeps running tools to finish its task. CANCELLING IS STILL
       // RIGHT, and this was weighed and kept: a wrap-up that FINISHED must not be
       // continued (unattended, that restarts done work on fresh quota), and one that was
-      // cut off is resumed by Claude's own auto-continue. A main-agent `Stop` cancel is the
+      // cut off is EXPECTED to be resumed by Claude's own auto-continue (default-on, but its
+      // behaviour here is unmeasured). A main-agent `Stop` cancel is the
       // better discriminator - UNMEASURED, so deliberately not implemented here.
       cancelAutoResume(session);
       clearObservedCapBlock(session); // #138 - and so is a cap prompt seen earlier
