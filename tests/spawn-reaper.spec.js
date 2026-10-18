@@ -343,7 +343,7 @@ test.describe('#351 spawn-store - persistence', () => {
     clock.adv(WINDOW);
     expect(s.metaOf(id(1))).toMatchObject({ by: 'agent', createdAt: NOW, spawnedBy: 'nightly', lastViewedAt: null });
     expect(onDisk()[id(1)]).toMatchObject({ by: 'agent', createdAt: NOW, spawnedBy: 'nightly' });
-    expect(s.field(id(1))).toEqual({ by: 'agent', spawnedBy: 'nightly', createdAt: NOW });
+    expect(s.field(id(1))).toEqual({ by: 'agent', spawnedBy: 'nightly', createdAt: NOW, parentId: null, replaces: [] });
   });
 
   test('a view inside the window -> human; a view after it -> still agent', () => {
@@ -393,7 +393,7 @@ test.describe('#351 spawn-store - persistence', () => {
       'not-a-uuid': { by: 'agent', createdAt: NOW },
     }));
     const s = make();
-    expect(s.metaOf(id(1))).toEqual({ by: 'agent', createdAt: NOW, spawnedBy: 'nightly', lastViewedAt: NOW + 5 });
+    expect(s.metaOf(id(1))).toEqual({ by: 'agent', createdAt: NOW, spawnedBy: 'nightly', lastViewedAt: NOW + 5, parentId: null });
     expect(s.metaOf(id(2)).by).toBe('human');
     for (const gone of [id(3), id(4), id(5), 'not-a-uuid']) expect(s.metaOf(gone)).toBeNull();
     expect(errors).toEqual([]);
@@ -1000,20 +1000,175 @@ test.describe('#351 against the real server', () => {
       const before = await rowOf(id);
       expect(before.spawn).toMatchObject({ by: 'agent', spawnedBy: 'nightly' });
       const succ = await handOff(id, before.name);
-      expect(succ.spawn).toMatchObject({ by: 'agent', spawnedBy: 'nightly' });
+      expect(succ.spawn).toMatchObject({ by: 'agent', spawnedBy: 'nightly', replaces: [id] });
       expect(succ.spawn.createdAt).toBeGreaterThan(before.spawn.createdAt); // its own clock
     } finally { await dropByPrefix(base); }
   });
 
-  test('...and a PERSON\'s session gives its successor no verdict, as before', async () => {
+  test('...and a PERSON\'s session gives its successor no verdict, as before - but it keeps its place and its parent (#374)', async () => {
     const base = `rp-handoff-human-${Date.now()}`;
+    const parent = crypto.randomUUID();
     try {
-      const id = await handoffCandidate(base, { name: base }, { viewed: true });
+      const id = await handoffCandidate(base, { name: base, parentId: parent }, { viewed: true });
       await pastWindow(id);
       const before = await rowOf(id);
-      expect(before.spawn.by).toBe('human');
+      expect(before.spawn).toMatchObject({ by: 'human', parentId: parent });
       const succ = await handOff(id, before.name);
-      expect(succ.spawn).toBeNull();
+      expect(succ.spawn).toEqual({ by: null, spawnedBy: null, createdAt: null, parentId: parent, replaces: [id] });
     } finally { await dropByPrefix(base); }
+  });
+});
+
+// --- #374: the session that opened this one ------------------------------------------
+
+test.describe('#374 parentIdOf - the caller names its own session, or nothing', () => {
+  const ID = '0a1b2c3d-4e5f-4a6b-8c7d-9e0f1a2b3c4d';
+  test('absent, null and empty are "no parent", not an error', () => {
+    for (const v of [undefined, null, '']) expect(R.parentIdOf(v)).toEqual({ ok: true, id: null });
+  });
+  test('a session id is kept, lower-cased (ids are minted lower-case, so equality just works)', () => {
+    expect(R.parentIdOf(ID)).toEqual({ ok: true, id: ID });
+    expect(R.parentIdOf(ID.toUpperCase())).toEqual({ ok: true, id: ID });
+  });
+  test('anything else is MALFORMED (the route refuses it) - including an unexpanded shell variable', () => {
+    for (const v of ['$WT_SESSION_ID', 'abc', ` ${ID}`, `${ID}x`, 7, {}, [], true]) expect(R.parentIdOf(v), String(v)).toEqual({ ok: false });
+  });
+  test('cleanParentId: a stored value is re-checked - a clean id or null, never junk', () => {
+    expect(R.cleanParentId(ID)).toBe(ID);
+    for (const v of [undefined, null, '', 'junk', 7]) expect(R.cleanParentId(v)).toBeNull();
+  });
+  test('the VERDICT carries no parent: a successor\'s parent lives in the lineage, for every successor', () => {
+    expect(R.successorVerdict(meta({ parentId: ID }), NOW)).not.toHaveProperty('parentId');
+  });
+});
+
+test.describe('#374 spawn-store - the parent rides the verdict', () => {
+  const { createSpawnStore } = require('../lib/spawn-store');
+  const { emptyCwd } = require('./test-helpers');
+  const id = (n) => `00000000-0000-4000-8000-${String(n).padStart(12, '0')}`;
+  const isId = (s) => /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/.test(s);
+  const WINDOW = 3000;
+  function rig() {
+    const file = path.join(emptyCwd('spawn-store-parent'), 'spawned-sessions.json');
+    let t = NOW;
+    const clock = { now: () => t, adv: (ms) => { t += ms; } };
+    const make = () => createSpawnStore({ file, classifyMs: WINDOW, isId, now: clock.now, log: () => {} });
+    const onDisk = () => JSON.parse(fs.readFileSync(file, 'utf8'));
+    return { file, clock, make, onDisk, s: make() };
+  }
+
+  test('published while pending, written with the verdict, and back after a restart', () => {
+    const { s, clock, make, onDisk } = rig();
+    s.created(id(2), 'helper', id(1));
+    expect(s.field(id(2))).toEqual({ by: 'pending', spawnedBy: 'helper', createdAt: NOW, parentId: id(1), replaces: [] });
+    clock.adv(WINDOW);
+    expect(s.field(id(2))).toMatchObject({ by: 'agent', parentId: id(1) });
+    expect(onDisk()[id(2)]).toMatchObject({ by: 'agent', parentId: id(1) });
+    expect(make().field(id(2))).toMatchObject({ by: 'agent', parentId: id(1) });
+  });
+  test('a person\'s session keeps its parent too: who opened it is not who looked at it', () => {
+    const { s, clock } = rig();
+    s.created(id(2), null, id(1));
+    s.noteViewed(id(2));
+    clock.adv(WINDOW);
+    expect(s.field(id(2))).toMatchObject({ by: 'human', parentId: id(1) });
+  });
+  test('no parent named -> null; a session is never its own parent', () => {
+    const { s } = rig();
+    s.created(id(3), null);
+    s.created(id(4), null, id(4));
+    expect(s.field(id(3)).parentId).toBeNull();
+    expect(s.field(id(4)).parentId).toBeNull();
+  });
+  test('a junk parent on disk is dropped on load, the verdict itself is kept', () => {
+    const { file, make } = rig();
+    fs.writeFileSync(file, JSON.stringify({ [id(5)]: { by: 'agent', createdAt: NOW, spawnedBy: null, lastViewedAt: null, parentId: '../../etc' } }));
+    expect(make().field(id(5))).toEqual({ by: 'agent', spawnedBy: null, createdAt: NOW, parentId: null, replaces: [] });
+  });
+  test('INHERIT: an agent-started child\'s successor is that parent\'s child as well', () => {
+    const { s, clock } = rig();
+    s.created(id(2), 'helper', id(1));
+    clock.adv(WINDOW);
+    s.inherit(id(2), id(9));
+    expect(s.field(id(9))).toMatchObject({ by: 'agent', parentId: id(1), replaces: [id(2)] });
+  });
+  test('INHERIT: a helper a PERSON looked at keeps its parent too, with no verdict (never closed, as before)', () => {
+    const { s, clock } = rig();
+    s.created(id(2), null, id(1));
+    s.noteViewed(id(2));
+    clock.adv(WINDOW);
+    expect(s.inherit(id(2), id(9))).toBeNull();
+    expect(s.metaOf(id(9))).toBeNull();
+    expect(s.field(id(9))).toEqual({ by: null, spawnedBy: null, createdAt: null, parentId: id(1), replaces: [id(2)] });
+  });
+  test('LINEAGE: a parent handed off twice replaces both old ids, newest first, and it survives a restart', () => {
+    const { s, make, onDisk } = rig();
+    s.inherit(id(1), id(11));
+    s.forget(id(1));
+    s.inherit(id(11), id(12));
+    s.forget(id(11));
+    expect(s.field(id(12))).toMatchObject({ by: null, parentId: null, replaces: [id(11), id(1)] });
+    expect(onDisk()._lineage[id(12)].replaces).toEqual([id(11), id(1)]);
+    expect(onDisk()._lineage[id(11)]).toBeUndefined();
+    expect(make().field(id(12)).replaces).toEqual([id(11), id(1)]);
+  });
+  test('LINEAGE: forget and prune drop it; junk on disk is dropped on load', () => {
+    const { s, file, make } = rig();
+    s.inherit(id(1), id(11));
+    s.forget(id(11));
+    expect(s.field(id(11))).toBeNull();
+    s.inherit(id(2), id(12));
+    s.prune(new Set(), NOW + 5);
+    expect(s.field(id(12))).toBeNull();
+    fs.writeFileSync(file, JSON.stringify({ _lineage: {
+      [id(20)]: { replaces: [id(3), '../x', 7, id(20)], parentId: 'junk', at: NOW },
+      [id(21)]: { replaces: 'nope' },
+      'not-an-id': { replaces: [id(4)] },
+    } }));
+    const t = make();
+    expect(t.field(id(20))).toEqual({ by: null, spawnedBy: null, createdAt: null, parentId: null, replaces: [id(3)] });
+    expect(t.field(id(21))).toBeNull();
+  });
+});
+
+test.describe('#374 against the real server', () => {
+  test.setTimeout(60000);
+  /** @type {import('@playwright/test').APIRequestContext} */
+  let ctx;
+  let made = [];
+  test.beforeEach(async () => {
+    const cookie = await rawCookie();
+    ctx = await pwRequest.newContext({ baseURL: BASE, extraHTTPHeaders: { Cookie: cookie, Connection: 'close' } });
+    made = [];
+  });
+  test.afterEach(async () => {
+    for (const id of made) await ctx.delete(`/api/sessions/${id}`).catch(() => {});
+    await ctx.dispose();
+  });
+  const create = (name, extra = {}) => ctx.post('/api/sessions', { data: { name: `${name}-${Date.now()}`, ...extra } });
+  const rows = async () => (await (await ctx.get('/api/sessions')).json());
+
+  test('POST parentId -> spawn.parentId on the session list and the cluster list', async () => {
+    const pr = await create('pt-parent');
+    expect(pr.status()).toBe(200);
+    const parent = (await pr.json()).id;
+    made.push(parent);
+    const cr = await create('pt-child', { parentId: parent.toUpperCase(), spawnedBy: 'pt-parent' });
+    expect(cr.status()).toBe(200);
+    const child = (await cr.json()).id;
+    made.push(child);
+    expect((await rows()).find((s) => s.id === child).spawn).toMatchObject({ parentId: parent, spawnedBy: 'pt-parent' });
+    const cluster = (await (await ctx.get('/api/cluster/sessions')).json()).sessions;
+    expect(cluster.find((s) => s.id === child).spawn).toMatchObject({ parentId: parent });
+    // The parent itself was named by nobody.
+    expect((await rows()).find((s) => s.id === parent).spawn).toMatchObject({ parentId: null });
+  });
+
+  test('a malformed parentId is REFUSED and nothing is created', async () => {
+    const before = (await rows()).length;
+    const r = await create('pt-bad', { parentId: '$WT_SESSION_ID' });
+    expect(r.status()).toBe(400);
+    expect((await r.json()).error).toMatch(/parentId/);
+    expect((await rows()).length).toBe(before);
   });
 });

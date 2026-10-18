@@ -767,6 +767,8 @@ void main() {
         backgroundSince: 77,
         backgroundStale: true,
         handoff: const SessionHandoff(suggest: true, ctxTokens: 612000),
+        parentId: 'parent-7',
+        replaces: const ['old-1'],
       );
 
       final moved = original.withFavoriteRank(999);
@@ -796,6 +798,29 @@ void main() {
       expect(moved.backgroundSince, 77);
       expect(moved.backgroundStale, isTrue);
       expect(moved.handoff, same(original.handoff), reason: 'a dropped handoff hides the Hand off button until the next poll (#340)');
+      expect(moved.parentId, 'parent-7', reason: 'a dropped parentId moves a child session to top level until the next poll (#374)');
+      expect(moved.replaces, ['old-1'], reason: 'a dropped replaces orphans the helpers of a handed-off parent (#374)');
+    });
+  });
+
+  group('Session.parentId (#374)', () {
+    const server = ServerConfig(name: 'Home', baseUrl: 'http://h:7681', bearerToken: 't');
+    Session parse(Object? spawn) => Session.fromJson(server, {'id': 'c', 'spawn': ?spawn});
+    test('read from spawn.parentId', () {
+      expect(parse({'by': 'agent', 'parentId': 'p-1'}).parentId, 'p-1');
+    });
+    test('spawn.replaces: strings only, empty when absent', () {
+      expect(parse({'by': null, 'replaces': ['a', 7, '', 'b']}).replaces, ['a', 'b']);
+      expect(parse({'by': 'agent'}).replaces, isEmpty);
+      expect(parse(null).replaces, isEmpty);
+    });
+    test('absent everywhere an older server or an unnamed session leaves it', () {
+      expect(parse(null).parentId, isNull);
+      expect(parse({'by': 'agent', 'parentId': null}).parentId, isNull);
+      expect(parse({'by': 'agent'}).parentId, isNull);
+      expect(parse({'by': 'agent', 'parentId': ''}).parentId, isNull);
+      expect(parse({'by': 'agent', 'parentId': 7}).parentId, isNull);
+      expect(parse('junk').parentId, isNull);
     });
   });
 

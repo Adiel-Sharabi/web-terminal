@@ -33,6 +33,7 @@ import '../services/resource_monitor.dart';
 import '../services/session_repository.dart';
 import '../theme/app_theme.dart';
 import '../theme/status_colors.dart';
+import '../util/session_tree.dart';
 import '../widgets/app_version_label.dart';
 import '../widgets/attention_detail_sheet.dart';
 import '../widgets/empty_state.dart';
@@ -347,15 +348,95 @@ class _DashboardScreenState extends State<DashboardScreen> {
 
   /// A server group's rows as a reorderable sliver (issue #22). Rows are dragged
   /// by their handle (see [_buildCard]); [onReorder] persists the new order.
-  Widget _reorderableGroup(List<Session> sessions, ServerConfig server) {
+  ///
+  /// #374 - the rows arrive as a tree ([SessionTree.flatten]): a session another
+  /// session opened sits under it, indented. Dragging still writes the order as
+  /// shown, and the next build puts a child back under its parent.
+  Widget _reorderableGroup(
+    List<SessionTreeRow> rows,
+    ServerConfig server,
+    SessionTree tree,
+  ) {
+    final sessions = [for (final r in rows) r.session];
     return SliverReorderableList(
-      itemCount: sessions.length,
+      itemCount: rows.length,
       // onReorderItem delivers newIndex already adjusted for the removed item,
       // so no manual `if (newIndex > oldIndex) newIndex--` dance.
       onReorderItem: (oldIndex, newIndex) =>
           _onReorderGroup(server, sessions, oldIndex, newIndex),
-      itemBuilder: (context, i) =>
-          _buildCard(context, sessions[i], favoriteRow: false, reorderIndex: i),
+      itemBuilder: (context, i) => _treeRow(
+        context,
+        rows[i],
+        tree,
+        _buildCard(context, rows[i].session, favoriteRow: false, reorderIndex: i),
+      ),
+    );
+  }
+
+  /// [card] placed for its row in the session tree (#374). A child under its
+  /// parent says so by its place: indented, with an arrow in the indent. A child
+  /// whose parent is listed elsewhere (another server's group) is not indented -
+  /// that would hang it under an unrelated row - and says where it came from.
+  Widget _treeRow(
+    BuildContext context,
+    SessionTreeRow row,
+    SessionTree tree,
+    Widget card,
+  ) {
+    final s = row.session;
+    final muted = Theme.of(context).colorScheme.onSurfaceVariant;
+    if (row.depth > 0) {
+      // The indent gives way to the card on a narrow row (a phone), where the
+      // arrow alone - in the card's own margin - marks the row as a child.
+      return LayoutBuilder(
+        // The reorderable list needs the key on the row it is handed.
+        key: ValueKey('tree-${s.id}'),
+        builder: (context, box) {
+          final indent = row.indentWithin(box.maxWidth);
+          return Stack(
+            children: [
+              Padding(
+                padding: EdgeInsetsDirectional.only(start: indent),
+                child: card,
+              ),
+              PositionedDirectional(
+                start: AppSpacing.screenPadding + indent - 15,
+                top: 18,
+                child: Icon(
+                  Icons.subdirectory_arrow_right,
+                  size: 14,
+                  color: muted,
+                  semanticLabel: 'Opened by the session above',
+                ),
+              ),
+            ],
+          );
+        },
+      );
+    }
+    final parent = tree.parentOf(s);
+    if (parent == null) return card;
+    return Column(
+      key: ValueKey('tree-${s.id}'),
+      crossAxisAlignment: CrossAxisAlignment.start,
+      mainAxisSize: MainAxisSize.min,
+      children: [
+        Padding(
+          padding: const EdgeInsetsDirectional.only(
+            start: AppSpacing.screenPadding + 4,
+            end: AppSpacing.screenPadding,
+            top: 4,
+          ),
+          child: Text(
+            '↳ opened by ${parent.name} · ${parent.server.name}',
+            key: ValueKey('tree-from-${s.id}'),
+            maxLines: 1,
+            overflow: TextOverflow.ellipsis,
+            style: Theme.of(context).textTheme.labelSmall?.copyWith(color: muted),
+          ),
+        ),
+        card,
+      ],
     );
   }
 
@@ -437,6 +518,9 @@ class _DashboardScreenState extends State<DashboardScreen> {
                 final downCount = offlineNames.length + needsAuthNames.length;
                 final allOffline = servers.isNotEmpty && downCount == servers.length;
                 final visible = sessions == null ? null : _filtered(sessions);
+                // #374 - built over EVERY session, not the filtered ones: a
+                // parent on a server the chips hide is still a parent.
+                final tree = SessionTree(sessions ?? const <Session>[]);
                 final matches = visible == null || _query.trim().isEmpty
                     ? null
                     : sessionsMatchingTitle(visible, _query);
@@ -632,8 +716,11 @@ class _DashboardScreenState extends State<DashboardScreen> {
                             // so it's consistent across devices and survives
                             // reconnect.
                             _reorderableGroup(
-                              orderedSessionsFor(group, SessionRepository.instance),
+                              tree.flatten(
+                                orderedSessionsFor(group, SessionRepository.instance),
+                              ),
                               group.server,
+                              tree,
                             ),
                         ],
                         const SliverToBoxAdapter(child: SizedBox(height: 96)),

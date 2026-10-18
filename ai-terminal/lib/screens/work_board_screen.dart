@@ -41,6 +41,7 @@ import '../services/session_input.dart';
 import '../services/session_repository.dart';
 import '../theme/app_theme.dart';
 import '../theme/status_colors.dart';
+import '../util/session_tree.dart';
 import '../widgets/format_utils.dart';
 import '../widgets/handoff_chip.dart';
 import '../widgets/question_overlay.dart'
@@ -241,6 +242,19 @@ class _WorkBoardScreenState extends State<WorkBoardScreen> {
   StreamSubscription<List<Session>>? _sub;
   Timer? _poll;
   List<Session> _sessions = const [];
+
+  /// #374 - who opened whom, over every session on every server. Rebuilt only
+  /// when the list itself is replaced.
+  SessionTree get _tree {
+    if (!identical(_treeOf, _sessions)) {
+      _treeOf = _sessions;
+      _treeCache = SessionTree(_sessions);
+    }
+    return _treeCache!;
+  }
+
+  SessionTree? _treeCache;
+  List<Session>? _treeOf;
   final Map<String, ({DateTime at, List<ClosedSession> list})> _closed = {};
   bool _hiddenOpen = false;
   bool _closedOpen = false;
@@ -739,6 +753,9 @@ class _WorkBoardScreenState extends State<WorkBoardScreen> {
       // Not gated on the capability: a run that is on the row can always be cleared.
       onCancelHandoff: s.handoff?.run != null ? () => _cancelHandoff(s) : null,
       onOpenSuccessor: successor == null ? null : () => widget.onOpenSession(successor),
+      parent: _tree.parentOf(s),
+      children: _tree.childrenOf(s),
+      onOpenRelated: widget.onOpenSession,
       handoffBusy: _handoffBusy.contains(k),
       question: kind == NeedKind.question ? q : null,
       answering: q != null && _answered[k] == questionSignature(q),
@@ -784,14 +801,18 @@ class _WorkBoardScreenState extends State<WorkBoardScreen> {
       title: 'Needs you',
       color: pal.you,
       count: needs.length,
-      children: needs.isEmpty ? [_ColumnEmpty('Nothing is waiting on you.', style: muted)] : [for (final s in needs) card(s)],
+      children: needs.isEmpty
+          ? [_ColumnEmpty('Nothing is waiting on you.', style: muted)]
+          : [for (final r in _tree.flatten(needs)) _indented(r, card(r.session))],
     );
     final workCol = BoardColumnView(
       key: const ValueKey('board-col-work'),
       title: 'Working',
       color: pal.work,
       count: working.length,
-      children: working.isEmpty ? [_ColumnEmpty('Nothing is running.', style: muted)] : [for (final s in working) card(s)],
+      children: working.isEmpty
+          ? [_ColumnEmpty('Nothing is running.', style: muted)]
+          : [for (final r in _tree.flatten(working)) _indented(r, card(r.session))],
     );
     final idleCol = BoardColumnView(
       key: const ValueKey('board-col-idle'),
@@ -800,7 +821,8 @@ class _WorkBoardScreenState extends State<WorkBoardScreen> {
       count: idle.length,
       children: [
         if (idle.isEmpty) _ColumnEmpty(all.isEmpty ? 'No sessions on any server.' : 'Nothing idle.', style: muted),
-        for (final s in idle) BoardRow(key: _key(s), session: s, color: _colorOf(s.server.baseUrl), actions: _actionsFor(s)),
+        for (final r in _tree.flatten(idle))
+          _indented(r, BoardRow(key: _key(r.session), session: r.session, color: _colorOf(r.session.server.baseUrl), actions: _actionsFor(r.session))),
         const SizedBox(height: 4),
         _Fold(
           key: const ValueKey('board-hidden'),
@@ -898,6 +920,20 @@ class _WorkBoardScreenState extends State<WorkBoardScreen> {
   }
 
   Key _key(Session s) => ValueKey('board-${s.server.baseUrl}-${s.id}');
+
+  /// #374 - a session opened by one in the same column sits under it, indented. One
+  /// whose parent is in another column stays where it is; its card names the parent.
+  ///
+  /// The wrapper carries a key of its own: without one, a column that loses a row
+  /// matches unkeyed wrappers by position and REBUILDS the card inside, which drops
+  /// the focus of a reply being typed into it.
+  static Widget _indented(SessionTreeRow r, Widget child) => r.depth == 0
+      ? child
+      : Padding(
+          key: ValueKey('board-tree-${r.session.server.baseUrl}-${r.session.id}'),
+          padding: EdgeInsetsDirectional.only(start: r.indent),
+          child: child,
+        );
 }
 
 /// What a card or row can do, already bound to its session. A null action means the
@@ -918,6 +954,12 @@ class BoardActions {
   final VoidCallback? onHandoff;
   final VoidCallback? onCancelHandoff;
   final VoidCallback? onOpenSuccessor;
+
+  /// #374 - the session that opened this one and the sessions it opened, while they
+  /// are listed (see [SessionTree]); [onOpenRelated] opens one of them.
+  final Session? parent;
+  final List<Session> children;
+  final void Function(Session)? onOpenRelated;
 
   /// A hand-off request for this session is in flight.
   final bool handoffBusy;
@@ -949,6 +991,9 @@ class BoardActions {
     this.onHandoff,
     this.onCancelHandoff,
     this.onOpenSuccessor,
+    this.parent,
+    this.children = const <Session>[],
+    this.onOpenRelated,
     this.handoffBusy = false,
     this.question,
     this.answering = false,
@@ -1125,6 +1170,64 @@ Widget _labelled(BuildContext context, String label, String text, {int maxLines 
 /// A run is drawn wherever its session sits - wrapping turns an idle session into a
 /// working one, so the line follows it between columns. The Hand off button is offered
 /// only where [offer] is set (the Idle column's rows) and the server named a candidate.
+/// #374 - who opened [s] and whom it opened, or null when neither is listed. Each
+/// name opens that session; the opened ones carry their status dot, so a parent's
+/// card shows how its helpers are doing without leaving the column.
+Widget? _familyLine(Session s, BoardActions a) {
+  if (a.parent == null && a.children.isEmpty) return null;
+  return _FamilyLine(session: s, actions: a);
+}
+
+class _FamilyLine extends StatelessWidget {
+  const _FamilyLine({required this.session, required this.actions});
+  final Session session;
+  final BoardActions actions;
+
+  @override
+  Widget build(BuildContext context) {
+    final theme = Theme.of(context);
+    final muted = theme.textTheme.bodySmall?.copyWith(color: BoardPalette.of(context).idle);
+    final s = session;
+    final a = actions;
+    final idk = '${s.server.baseUrl}-${s.id}';
+    Widget link(Session x, {Widget? lead}) {
+      final where = x.server.baseUrl == s.server.baseUrl ? '' : ' · ${x.server.name}';
+      return InkWell(
+        key: ValueKey('board-related-$idk-${x.id}'),
+        borderRadius: BorderRadius.circular(AppShape.small),
+        onTap: a.onOpenRelated == null ? null : () => a.onOpenRelated!(x),
+        child: Padding(
+          padding: const EdgeInsets.symmetric(horizontal: 4, vertical: 2),
+          child: Row(mainAxisSize: MainAxisSize.min, children: [
+            if (lead != null) ...[lead, const SizedBox(width: 4)],
+            Flexible(
+              child: Text('${x.name}$where',
+                  maxLines: 1,
+                  overflow: TextOverflow.ellipsis,
+                  style: theme.textTheme.bodySmall?.copyWith(fontWeight: FontWeight.w600)),
+            ),
+          ]),
+        ),
+      );
+    }
+
+    return Column(key: ValueKey('board-family-$idk'), crossAxisAlignment: CrossAxisAlignment.start, children: [
+      if (a.parent case final p?)
+        Row(children: [
+          Icon(Icons.subdirectory_arrow_right, size: 14, color: muted?.color),
+          const SizedBox(width: 2),
+          Text('opened by', style: muted),
+          Flexible(child: link(p)),
+        ]),
+      if (a.children.isNotEmpty)
+        Wrap(spacing: 2, runSpacing: 0, crossAxisAlignment: WrapCrossAlignment.center, children: [
+          Text('opened ${a.children.length}:', style: muted),
+          for (final c in a.children) link(c, lead: StatusDot(status: boardStatusOf(c).dot, size: 7)),
+        ]),
+    ]);
+  }
+}
+
 Widget? _handoffStrip(Session s, BoardActions a, {required bool offer}) {
   if (s.handoff?.run == null && !(offer && a.onHandoff != null)) return null;
   return _HandoffStrip(session: s, actions: a);
@@ -1217,6 +1320,7 @@ class BoardCard extends StatelessWidget {
 
     final body = <Widget>[
       _head(context, pal, muted),
+      ?_familyLine(s, actions),
       if (needs) ..._needLines(context) else ..._workLines(context, pal),
       for (final it in items) _itemRow(context, it),
       if (b != null && b.artifacts.isNotEmpty) ArtifactLinks(b.artifacts),
@@ -1597,6 +1701,8 @@ class BoardRow extends StatelessWidget {
                     ],
                   ]),
                   if (!inline) Padding(padding: const EdgeInsets.fromLTRB(14, 0, 8, 4), child: didText),
+                  if (_familyLine(s, actions) case final family?)
+                    Padding(padding: const EdgeInsets.fromLTRB(14, 0, 8, 4), child: family),
                   // Hand off (#340): its own line, because this row's main line is full on
                   // a phone. A hidden row shows a run but offers no new one.
                   if (_handoffStrip(s, actions, offer: !unhide) case final strip?)
