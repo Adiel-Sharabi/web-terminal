@@ -230,7 +230,15 @@ by a usage limit is never closed, nor is one whose state the server could not re
 rather than guess), and neither is any session the server did not see created (restored after a
 restart, or made another way). The successor of an agent-started session handed off to a fresh one
 is agent-started too. A caller can pass `spawnedBy` (a short label)
-when it creates a session; session rows carry `spawn: { by, spawnedBy, createdAt }`.
+when it creates a session; session rows carry `spawn: { by, spawnedBy, createdAt, parentId }`.
+
+**Helper sessions show as children** — a session that opens another passes its own id as
+`parentId` on `POST /api/sessions` (inside a web-terminal session that is `$WT_SESSION_ID`; the
+parent may be on another machine, and a malformed id is refused with 400). In the companion's
+session list the helper sits under its parent, indented; one whose parent is on another machine
+is labelled `↳ opened by <parent> · <machine>`. On the dashboard a helper sits under its parent
+within a column, says who opened it, and the parent's card lists the sessions it opened with
+their status, each one tap away. A hand-off successor stays under the same parent.
 
 **A colour per machine** — set `serverColor` on each server and its sessions carry that colour
 in the session list and on the dashboard of every client.

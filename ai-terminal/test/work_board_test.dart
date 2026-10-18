@@ -51,7 +51,8 @@ Map<String, dynamic> _row(String id, String name,
         Object? reason,
         bool favorite = false,
         int? rank,
-        Object? handoff}) =>
+        Object? handoff,
+        String? parentId}) =>
     {
       'id': id,
       'name': name,
@@ -65,6 +66,7 @@ Map<String, dynamic> _row(String id, String name,
       'favorite': favorite,
       'favoriteRank': rank,
       'handoff': handoff,
+      if (parentId != null) 'spawn': {'by': 'agent', 'spawnedBy': null, 'createdAt': 1, 'parentId': parentId},
     };
 
 Session _session(String id, {SessionBrief? brief, String status = 'idle'}) => Session(
@@ -1017,6 +1019,53 @@ void main() {
         matching: find.byWidgetPredicate((w) => w is ColoredBox && w.color == const Color(0xFFE27BF5)),
       );
       expect(stripe, findsOneWidget, reason: 'the server declared #E27BF5');
+      await tester.pumpWidget(const SizedBox());
+    });
+
+    testWidgets('#374: a session another one opened sits under it, says who opened it, and the parent lists its helpers',
+        (tester) async {
+      rows = [
+        _row('c1', 'Helper build', status: 'working', parentId: 'p'),
+        _row('p', 'Orchestrator', status: 'working'),
+        _row('other', 'Unrelated', status: 'working'),
+        _row('c2', 'Helper review', parentId: 'p'),
+      ];
+      final r = await repo();
+      final opened = await pump(tester, r: r);
+      Finder card(String id) => find.byKey(ValueKey('board-${_server.baseUrl}-$id'));
+      // In Working the helper follows its parent (not its list position), indented.
+      final pTop = tester.getTopLeft(card('p'));
+      final cTop = tester.getTopLeft(card('c1'));
+      final oTop = tester.getTopLeft(card('other'));
+      expect(cTop.dy, greaterThan(pTop.dy));
+      expect(oTop.dy, greaterThan(cTop.dy), reason: 'the helper is pulled up under its parent');
+      expect(cTop.dx, greaterThan(pTop.dx), reason: 'and indented');
+      expect(tester.getTopLeft(card('other')).dx, pTop.dx);
+      // The parent's card lists BOTH helpers, the idle one in another column too.
+      final family = find.byKey(ValueKey('board-family-${_server.baseUrl}-p'));
+      expect(find.descendant(of: family, matching: find.text('opened 2:')), findsOneWidget);
+      await tester.tap(find.byKey(ValueKey('board-related-${_server.baseUrl}-p-c2')));
+      expect(opened.map((s) => s.id), ['c2']);
+      // Each helper names its parent, and the name opens it.
+      expect(find.descendant(of: card('c1'), matching: find.text('opened by')), findsOneWidget);
+      expect(find.descendant(of: card('c2'), matching: find.text('opened by')), findsOneWidget,
+          reason: 'an Idle row says it too');
+      await tester.tap(find.byKey(ValueKey('board-related-${_server.baseUrl}-c1-p')));
+      expect(opened.map((s) => s.id), ['c2', 'p']);
+      // An unrelated session carries no family line at all.
+      expect(find.byKey(ValueKey('board-family-${_server.baseUrl}-other')), findsNothing);
+      await tester.pumpWidget(const SizedBox());
+    });
+
+    testWidgets('#374: a phone-width helper card and row with long names do not overflow', (tester) async {
+      rows = [
+        _row('p', 'An orchestrator session with a long name', status: 'working'),
+        _row('c1', 'A helper session with an equally long name', status: 'working', parentId: 'p'),
+        _row('c2', 'Another helper session with a long name', parentId: 'p'),
+      ];
+      final r = await repo();
+      await pump(tester, r: r, width: 360);
+      expect(tester.takeException(), isNull);
       await tester.pumpWidget(const SizedBox());
     });
 

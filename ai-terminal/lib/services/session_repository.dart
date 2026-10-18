@@ -831,6 +831,9 @@ class SessionRepository {
             // instead of momentarily looking unfavorited.
             'favorite': s.favorite,
             'favoriteRank': s.favoriteRank,
+            // #374: so a cold launch already draws helpers under their parent,
+            // rather than flat until the first refresh moves them.
+            'parentId': s.parentId,
           },
       ]);
 
@@ -865,6 +868,7 @@ class SessionRepository {
           server: server,
           favorite: e['favorite'] == true,
           favoriteRank: _asInt(e['favoriteRank']),
+          parentId: e['parentId'] is String ? e['parentId'] as String : null,
         ));
       }
       return out;

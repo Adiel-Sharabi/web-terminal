@@ -265,6 +265,14 @@ class Session {
   /// that has a hand-off); never re-derived here, and never keyed on [agent].
   final SessionHandoff? handoff;
 
+  /// The id of the session that opened this one, when it said so (#374), or
+  /// `null`. Read from the server's `spawn.parentId`: an agent that starts a
+  /// helper session passes its own id, and the session list and the dashboard
+  /// draw this one as that one's child. The parent may live on another server
+  /// (ids are UUIDs, unique across the cluster), or may already be gone, in which
+  /// case the session is drawn at top level. See `lib/util/session_tree.dart`.
+  final String? parentId;
+
   /// Creates a session value object. [autoCommand] is optional (default `''`)
   /// so existing call sites and tests that predate the field keep compiling.
   const Session({
@@ -294,6 +302,7 @@ class Session {
     this.backgroundSince,
     this.backgroundStale = false,
     this.handoff,
+    this.parentId,
   });
 
   /// This session with a different pinned rank (#124), for the optimistic half of
@@ -330,6 +339,7 @@ class Session {
     backgroundSince: backgroundSince,
     backgroundStale: backgroundStale,
     handoff: handoff,
+    parentId: parentId,
   );
 
   /// Builds a [Session] from one element of the `GET /api/sessions` array,
@@ -368,7 +378,16 @@ class Session {
       backgroundSince: _backgroundSince(json['backgroundTasks']),
       backgroundStale: _backgroundStale(json['backgroundTasks']),
       handoff: SessionHandoff.fromJson(json['handoff']),
+      parentId: _parentId(json['spawn']),
     );
+  }
+
+  /// `spawn.parentId` (#374), or null: an older server has no such field, and a
+  /// session nobody named a parent for has `null` there.
+  static String? _parentId(dynamic spawn) {
+    if (spawn is! Map) return null;
+    final p = spawn['parentId'];
+    return (p is String && p.isNotEmpty) ? p : null;
   }
 
   /// Accepts only the two kinds the server can send, so an unknown future value
