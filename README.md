@@ -236,7 +236,7 @@ when it creates a session; session rows carry `spawn: { by, spawnedBy, createdAt
 `parentId` on `POST /api/sessions` (inside a web-terminal session that is `$WT_SESSION_ID`; the
 parent may be on another machine, and a malformed id is refused with 400). In the companion's
 session list the helper sits under its parent, indented; one whose parent is on another machine
-is labelled `↳ opened by <parent> · <machine>`. On the dashboard a helper sits under its parent
+stays in its own machine's group, and its family line (below) names the parent. On the dashboard a helper sits under its parent
 within a column, says who opened it, and the parent's card lists the sessions it opened with
 their status, each one tap away. A hand-off keeps the tree at both ends: a helper's successor
 stays under the same parent, and a parent's successor publishes `spawn.replaces` (the ids it took
@@ -248,6 +248,12 @@ In the session list, a session with sub-sessions in its own machine's group has 
 every level below it): tap it to fold them away and again to bring them back. Folded, the line keeps one
 status dot per hidden session, so a helper waiting on you still shows; the choice is remembered
 on the device.
+A run often spans machines (a lead on one box opens workers on two others), which the per-machine
+groups cut apart, so every card with relatives on any machine has a **family line**:
+`↑ <parent> · <machine>   ↓ N sub-sessions` (the machine only when it is another one). Tap it
+for the whole family: the tree from its top-most session down, on every machine, with live status
+dots and the session you came from marked; tap a row to open that session. Inside a session, a strip
+under the title lists its ancestors, each one tap away, and opens the same family view.
 
 **A colour per machine** — set `serverColor` on each server and its sessions carry that colour
 in the session list and on the dashboard of every client.

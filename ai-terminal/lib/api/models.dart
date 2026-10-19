@@ -452,6 +452,10 @@ class Session {
   /// A short 8-char id fragment, handy for `Session {shortId}` fallback names.
   String get shortId => id.length <= 8 ? id : id.substring(0, 8);
 
+  /// What a session is called on screen: its name, or `Session <shortId>` when
+  /// it has none.
+  String get displayName => name.isEmpty ? 'Session $shortId' : name;
+
   /// The pinned group in DISPLAY order: every favorited session in
   /// [sessions] (which may span several cluster servers), sorted by
   /// `(favoriteRank, id)`. Never stored — always recomputed from the live

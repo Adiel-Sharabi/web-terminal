@@ -252,9 +252,7 @@ class _SessionActionsSheet extends StatelessWidget {
               horizontal: AppSpacing.screenPadding,
             ),
             child: Text(
-              session.name.isEmpty
-                  ? 'Session ${session.shortId}'
-                  : session.name,
+              session.displayName,
               style: Theme.of(context).textTheme.titleMedium,
               maxLines: 1,
               overflow: TextOverflow.ellipsis,
