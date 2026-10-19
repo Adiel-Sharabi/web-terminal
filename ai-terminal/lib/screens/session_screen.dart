@@ -1067,6 +1067,65 @@ enum SessionExit {
   stay,
 }
 
+/// The route name a pushed [SessionScreen] carries, so the next open of the same
+/// session finds that copy instead of stacking another: a notification tap (#45)
+/// and a jump between relatives (#380).
+String sessionRouteName(String sessionId) => 'session/$sessionId';
+
+/// Models what a notification tap does to the navigation stack (issue #45):
+/// opening a session from a notification must leave exactly one screen above
+/// the list, so a single Back press returns to the list every time.
+///
+/// [stack] is the current route names, bottom→top (index 0 is the session
+/// list). Returns the resulting stack: session screens stacked above the list
+/// are collapsed — popped down to the list, or to an already-open copy of the
+/// [target] (whose live state we keep rather than rebuild) — and [target] ends
+/// up as the single screen on top. Re-tapping the same or another notification
+/// never piles up duplicate screens (Back had to be pressed 3×). Pure mirror of
+/// the `Navigator.popUntil` + dedup in [openSessionOnStack].
+List<String> resolveNotificationStack(List<String> stack, String target) {
+  if (stack.isEmpty) return [target];
+  final result = List<String>.from(stack);
+  // popUntil stops at the first route (from the top) that is the list or an
+  // existing copy of the target.
+  while (result.length > 1 && result.last != target) {
+    result.removeLast();
+  }
+  if (result.last != target) result.add(target);
+  return result;
+}
+
+/// The session a detached window (#14) was launched on. Its screen is the window's
+/// root, not a named route, so a jump back to it is recognised by id.
+String? _standaloneRootId;
+
+/// Opens [sessionId] as the ONE session screen above the root: pops down to the
+/// root or to an already-open copy of it, and pushes only when none was open
+/// ([resolveNotificationStack] is the model). A notification tap (#45) and a jump
+/// between relatives (#380) both come here, so neither can pile up live copies of
+/// a session, each holding its own socket.
+void openSessionOnStack(NavigatorState nav, String sessionId, {Session? initialSession}) {
+  if (sessionId == _standaloneRootId) {
+    nav.popUntil((route) => route.isFirst);
+    return;
+  }
+  final name = sessionRouteName(sessionId);
+  var alreadyOpen = false;
+  nav.popUntil((route) {
+    if (route.settings.name == name) alreadyOpen = true;
+    return route.isFirst || route.settings.name == name;
+  });
+  if (alreadyOpen) return;
+  // #347 - no touch reached the list, so its title filter may still hold focus;
+  // let go before the push, or the Back from this session refocuses it and opens
+  // the keyboard.
+  FocusManager.instance.primaryFocus?.unfocus();
+  nav.push(MaterialPageRoute(
+    settings: RouteSettings(name: name),
+    builder: (_) => SessionScreen(sessionId: sessionId, initialSession: initialSession),
+  ));
+}
+
 SessionExit sessionExitFor({
   required bool embedded,
   required bool standalone,
@@ -1282,6 +1341,7 @@ class _SessionScreenState extends State<SessionScreen>
   void initState() {
     super.initState();
     _session = widget.initialSession;
+    if (widget.standalone) _standaloneRootId = widget.sessionId;
     WidgetsBinding.instance.addObserver(this);
     _terminal.onOutput = _handleTerminalOutput;
     _terminal.onResize = (w, h, pw, ph) {
@@ -2559,16 +2619,15 @@ class _SessionScreenState extends State<SessionScreen>
 
   /// #380 - opens a relative from the family strip or sheet the way this screen
   /// was opened: the split pane selects it ([SessionSelection] is what that pane
-  /// shows), anything else pushes it, so Back comes back here.
+  /// shows); anywhere else it becomes the one session screen on the stack, never
+  /// a second live copy of one already open.
   void _openRelated(Session s) {
     final exit = sessionExitFor(embedded: widget.embedded, standalone: widget.standalone);
     if (exit == SessionExit.clearSelection) {
       SessionSelection.instance.select(s.id);
       return;
     }
-    Navigator.of(context).push(
-      MaterialPageRoute(builder: (_) => SessionScreen(sessionId: s.id, initialSession: s)),
-    );
+    openSessionOnStack(Navigator.of(context), s.id, initialSession: s);
   }
 
   // --- Compose bar: text changes, live '/' streaming, history -------------

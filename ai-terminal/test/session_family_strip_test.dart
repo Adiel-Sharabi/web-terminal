@@ -74,7 +74,7 @@ void main() {
 
     await tester.tap(find.byKey(const ValueKey('family-badge-worker')));
     await tester.pumpAndSettle();
-    expect(find.text('4 related sessions on 2 machines'), findsOneWidget);
+    expect(find.text('Family · 4 sessions on 2 machines'), findsOneWidget);
     // Its own row only closes the sheet; another row opens that session.
     await tester.tap(find.byKey(const ValueKey('family-row-worker')));
     await tester.pumpAndSettle();

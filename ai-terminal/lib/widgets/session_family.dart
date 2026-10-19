@@ -45,6 +45,14 @@ String familySummary(SessionTree tree, Session s) {
   ].join('   ');
 }
 
+/// [label] for a screen reader, which would read the arrows as "up arrow".
+String spokenFamily(String label) => label
+    .replaceAll('↑ ', 'opened by ')
+    .replaceAll('↓ ', '')
+    .replaceAll('↑', 'above: ')
+    .replaceAll('↓', 'below: ')
+    .replaceAll(' · ', ' on ');
+
 /// Whether [s] has any relative still listed, on any machine.
 bool hasFamily(SessionTree tree, Session s) =>
     tree.parentOf(s) != null || tree.childrenOf(s).isNotEmpty;
@@ -64,7 +72,7 @@ class FamilyBadge extends StatelessWidget {
     final color = theme.colorScheme.primary;
     return Semantics(
       button: true,
-      label: 'Family $label. Show the sessions it is related to',
+      label: 'Family: ${spokenFamily(label)}. Show the related sessions',
       excludeSemantics: true,
       onTap: onTap,
       child: Tooltip(
@@ -141,7 +149,7 @@ Future<void> showFamilySheet(
               child: Text(
                 here == null
                     ? 'This session has ended'
-                    : '${rows.length} related sessions'
+                    : 'Family · ${rows.length} sessions'
                         '${machines.length > 1 ? ' on ${machines.length} machines' : ''}',
                 style: theme.textTheme.titleMedium,
               ),
@@ -309,7 +317,12 @@ class _Crumb extends StatelessWidget {
   Widget build(BuildContext context) {
     final theme = Theme.of(context);
     final text = showServer ? '${session.displayName} · ${session.server.name}' : session.displayName;
-    return InkWell(
+    return Semantics(
+      button: true,
+      label: 'Open $text',
+      excludeSemantics: true,
+      onTap: onTap,
+      child: InkWell(
       key: ValueKey('family-crumb-${session.id}'),
       onTap: onTap,
       borderRadius: BorderRadius.circular(AppShape.small),
@@ -319,6 +332,7 @@ class _Crumb extends StatelessWidget {
           text,
           style: theme.textTheme.labelMedium?.copyWith(color: theme.colorScheme.primary),
         ),
+      ),
       ),
     );
   }

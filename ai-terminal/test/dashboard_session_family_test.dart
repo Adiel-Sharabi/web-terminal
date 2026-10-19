@@ -72,7 +72,7 @@ void main() {
 
     await tester.tap(find.byKey(const ValueKey('family-badge-lead-h')));
     await tester.pumpAndSettle();
-    expect(find.text('6 related sessions on 3 machines'), findsOneWidget);
+    expect(find.text('Family · 6 sessions on 3 machines'), findsOneWidget);
     for (final id in ['master', 'lead-h', 'w1', 'w2', 'lead-o', 'w3']) {
       expect(find.byKey(ValueKey('family-row-$id')), findsOneWidget, reason: '$id is in the family');
     }

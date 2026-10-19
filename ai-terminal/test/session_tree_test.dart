@@ -205,5 +205,29 @@ void main() {
       expect(t.familyOf(x).map((r) => r.session.id).toSet(), {'x', 'y'});
       expect(t.familyOf(x), hasLength(2));
     });
+
+    test('a self-parent, a 3-cycle and a cycle with a tail are each listed once', () {
+      final self = _s('self', parent: 'self');
+      expect(_rows(SessionTree([self]).familyOf(self)), ['self']);
+
+      final a = _s('a', parent: 'c');
+      final b = _s('b', parent: 'a');
+      final c = _s('c', parent: 'b');
+      final tail = _s('tail', parent: 'b');
+      final t = SessionTree([a, b, c, tail]);
+      for (final s in [a, b, c, tail]) {
+        final ids = t.familyOf(s).map((r) => r.session.id).toList();
+        expect(ids.toSet(), {'a', 'b', 'c', 'tail'}, reason: 'asked from ${s.id}');
+        expect(ids, hasLength(4), reason: 'asked from ${s.id}: each exactly once');
+      }
+    });
+
+    test('a hand-off successor stands in for the id its children still name', () {
+      final succ = _s('new-boss', replaces: ['old-boss']);
+      final kid = _s('kid', parent: 'old-boss', server: _office);
+      final t = SessionTree([kid, succ]);
+      expect(t.ancestorsOf(kid), [succ]);
+      expect(_rows(t.familyOf(kid)), ['new-boss', '  kid']);
+    });
   });
 }
