@@ -46,6 +46,7 @@ import '../widgets/session_action_sheet.dart';
 import '../widgets/resource_stats.dart';
 import '../widgets/server_badge.dart';
 import '../widgets/session_card.dart';
+import '../widgets/session_family.dart';
 import '../widgets/status_dot.dart';
 import 'session_screen.dart';
 import 'settings_screen.dart';
@@ -275,8 +276,11 @@ class _DashboardScreenState extends State<DashboardScreen> {
     BuildContext context,
     Session session, {
     required bool favoriteRow,
+    required SessionTree tree,
     int? reorderIndex,
   }) {
+    // #380 - its relatives on ANY machine, which the per-machine groups cannot draw.
+    final family = hasFamily(tree, session) ? familySummary(tree, session) : null;
     final attentionKind =
         SessionRepository.instance.isAttentionDismissed(session.id)
         ? null
@@ -336,6 +340,10 @@ class _DashboardScreenState extends State<DashboardScreen> {
         session,
         onChanged: SessionRepository.instance.refresh,
       ),
+      familyLabel: family,
+      onFamilyTap: family == null
+          ? null
+          : () => showFamilySheet(context, sessionId: session.id, onOpen: _openSession),
       dragHandle: buildReorderDragHandle(context, reorderIndex),
     );
   }
@@ -403,8 +411,7 @@ class _DashboardScreenState extends State<DashboardScreen> {
       itemBuilder: (context, i) => _treeRow(
         context,
         rows[i],
-        tree,
-        _buildCard(context, rows[i].session, favoriteRow: false, reorderIndex: i),
+        _buildCard(context, rows[i].session, favoriteRow: false, tree: tree, reorderIndex: i),
       ),
     );
   }
@@ -412,17 +419,16 @@ class _DashboardScreenState extends State<DashboardScreen> {
   /// [card] placed for its row in the session tree (#374). A child under its
   /// parent says so by its place: indented, with an arrow in the indent. A child
   /// whose parent is listed elsewhere (another server's group) is not indented -
-  /// that would hang it under an unrelated row - and says where it came from.
+  /// that would hang it under an unrelated row - and its card's family line
+  /// (#380) names the parent instead.
   Widget _treeRow(
     BuildContext context,
     SessionTreeRow row,
-    SessionTree tree,
     Widget card,
   ) {
     final s = row.session;
     final muted = Theme.of(context).colorScheme.onSurfaceVariant;
-    final parent = row.depth > 0 ? null : tree.parentOf(s);
-    if (row.depth == 0 && parent == null && row.descendants == 0) return card;
+    if (row.depth == 0 && row.descendants == 0) return card;
     // The indent gives way to the card on a narrow row (a phone), where the
     // arrow alone - in the card's own margin - marks the row as a child.
     return LayoutBuilder(
@@ -455,21 +461,6 @@ class _DashboardScreenState extends State<DashboardScreen> {
           crossAxisAlignment: CrossAxisAlignment.start,
           mainAxisSize: MainAxisSize.min,
           children: [
-            if (parent != null)
-              Padding(
-                padding: const EdgeInsetsDirectional.only(
-                  start: AppSpacing.screenPadding + 4,
-                  end: AppSpacing.screenPadding,
-                  top: 4,
-                ),
-                child: Text(
-                  '↳ opened by ${parent.name} · ${parent.server.name}',
-                  key: ValueKey('tree-from-${s.id}'),
-                  maxLines: 1,
-                  overflow: TextOverflow.ellipsis,
-                  style: Theme.of(context).textTheme.labelSmall?.copyWith(color: muted),
-                ),
-              ),
             body,
             if (row.descendants > 0)
               _ChildrenToggle(
@@ -680,7 +671,7 @@ class _DashboardScreenState extends State<DashboardScreen> {
                         )
                       else
                         SliverList.list(children: [
-                          for (final s in matches) _buildCard(context, s, favoriteRow: false),
+                          for (final s in matches) _buildCard(context, s, favoriteRow: false, tree: tree),
                           const SizedBox(height: 96),
                         ]),
                     ]
@@ -708,6 +699,7 @@ class _DashboardScreenState extends State<DashboardScreen> {
                             context,
                             s,
                             favoriteRow: true,
+                            tree: tree,
                             reorderIndex: reorderIndex,
                           ),
                           collapsed: _isCollapsed(kFavoritesGroupKey),

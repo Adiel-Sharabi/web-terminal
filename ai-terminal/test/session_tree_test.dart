@@ -164,4 +164,46 @@ void main() {
     expect(sessionDotStatus(s, const ApiErrorInfo(active: true)), SessionStatus.apiError);
     expect(sessionDotStatus(s, const ApiErrorInfo(active: false)), SessionStatus.idle);
   });
+  group('SessionTree family (#380)', () {
+    const xps = ServerConfig(name: 'XPS', baseUrl: 'http://x:7681', bearerToken: 't');
+    // A run over three machines: a master on XPS opens a lead on Home and one on
+    // Office, and each lead opens workers on its own machine.
+    final master = _s('master', server: xps);
+    final leadH = _s('lead-h', parent: 'master');
+    final leadO = _s('lead-o', parent: 'master', server: _office);
+    final w1 = _s('w1', parent: 'lead-h');
+    final w2 = _s('w2', parent: 'lead-h');
+    final w3 = _s('w3', parent: 'lead-o', server: _office);
+    final other = _s('other');
+    final tree = SessionTree([w3, other, w1, leadO, master, w2, leadH]);
+
+    test('ancestors run nearest first, across machines', () {
+      expect(tree.ancestorsOf(w3), [leadO, master]);
+      expect(tree.ancestorsOf(master), isEmpty);
+    });
+
+    test('descendants are everything under a session, on every machine', () {
+      expect(tree.descendantsOf(master).map((s) => s.id).toSet(), {'lead-h', 'lead-o', 'w1', 'w2', 'w3'});
+      expect(tree.descendantsOf(leadH).map((s) => s.id), ['w1', 'w2']);
+      expect(tree.descendantsOf(other), isEmpty);
+    });
+
+    test('a family is the WHOLE tree from its top, whichever member you ask from', () {
+      final fromWorker = _rows(tree.familyOf(w3));
+      expect(fromWorker.first, 'master');
+      expect(fromWorker.toSet(), {'master', '  lead-o', '    w3', '  lead-h', '    w1', '    w2'});
+      expect(_rows(tree.familyOf(leadH)), fromWorker, reason: 'the same tree from any member');
+      expect(_rows(tree.familyOf(other)), ['other'], reason: 'a session with no relatives is a family of one');
+    });
+
+    test('a loop is still a finite family, each session once', () {
+      final x = _s('x', parent: 'y');
+      final y = _s('y', parent: 'x');
+      final t = SessionTree([x, y]);
+      expect(t.ancestorsOf(x), [y]);
+      expect(t.descendantsOf(x), [y]);
+      expect(t.familyOf(x).map((r) => r.session.id).toSet(), {'x', 'y'});
+      expect(t.familyOf(x), hasLength(2));
+    });
+  });
 }

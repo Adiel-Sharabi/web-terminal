@@ -27,6 +27,7 @@ import 'format_utils.dart';
 import 'resource_stats.dart';
 import 'reason_chip.dart';
 import 'server_badge.dart';
+import 'session_family.dart' show FamilyBadge;
 import 'status_dot.dart';
 
 /// The status dot a session gets: its status, overridden by a live API error
@@ -51,6 +52,8 @@ class SessionCard extends StatelessWidget {
     this.onRecapTap,
     this.onMoreTap,
     this.onAutoResumeTap,
+    this.familyLabel,
+    this.onFamilyTap,
     this.selected = false,
     this.dragHandle,
   });
@@ -97,6 +100,15 @@ class SessionCard extends StatelessWidget {
   /// session (#137). `null` renders the chip as a plain label with no tap target,
   /// which is what a read-only surface wants.
   final VoidCallback? onAutoResumeTap;
+
+  /// #380 - `↑ Master · XPS   ↓ 2 sub-sessions` when the session has relatives
+  /// on any machine ([familySummary]); null shows no line. A line of its own:
+  /// in the title row it cost a 360dp phone all but ~23dp of the name.
+  final String? familyLabel;
+
+  /// Tapping the family badge - opens the family sheet. Null with a
+  /// [familyLabel] would be a badge you cannot use, so both or neither.
+  final VoidCallback? onFamilyTap;
 
   /// True when this row is the one shown in the split view's detail pane —
   /// draws a primary-colored outline so the active session is obvious.
@@ -146,9 +158,7 @@ class SessionCard extends StatelessWidget {
   Widget build(BuildContext context) {
     final theme = Theme.of(context);
     final status = sessionStatusFromString(session.status);
-    final displayName = session.name.isEmpty
-        ? 'Session ${session.shortId}'
-        : session.name;
+    final displayName = session.displayName;
     final hasApiError = apiError?.active == true;
     // A live api-error override already screams for attention on its own —
     // don't also show the (redundant, status-derived) "API error" chip.
@@ -381,6 +391,20 @@ class SessionCard extends StatelessWidget {
                   ],
                 ),
               ),
+              if (familyLabel != null && onFamilyTap != null) ...[
+                const SizedBox(height: 4),
+                Padding(
+                  padding: const EdgeInsets.only(left: 16),
+                  child: Align(
+                    alignment: AlignmentDirectional.centerStart,
+                    child: FamilyBadge(
+                      key: ValueKey('family-badge-${session.id}'),
+                      label: familyLabel!,
+                      onTap: onFamilyTap!,
+                    ),
+                  ),
+                ),
+              ],
               if (hasApiError && (apiError?.text?.isNotEmpty ?? false)) ...[
                 const SizedBox(height: 4),
                 Padding(

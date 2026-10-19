@@ -107,9 +107,7 @@ class _AttentionDetailSheetState extends State<_AttentionDetailSheet> {
   Widget build(BuildContext context) {
     final theme = Theme.of(context);
     final session = widget.session;
-    final displayName = session.name.isEmpty
-        ? 'Session ${session.shortId}'
-        : session.name;
+    final displayName = session.displayName;
 
     return SingleChildScrollView(
       padding: const EdgeInsets.fromLTRB(

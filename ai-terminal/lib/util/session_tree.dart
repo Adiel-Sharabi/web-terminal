@@ -49,6 +49,43 @@ class SessionTree {
   /// The sessions [s] opened that are still listed, in list order.
   List<Session> childrenOf(Session s) => _children[s] ?? const <Session>[];
 
+  /// #380 - who opened [s], who opened that, and so on: nearest first, on any
+  /// server. A loop ends at the first session already seen.
+  List<Session> ancestorsOf(Session s) {
+    final out = <Session>[];
+    final seen = Set<Session>.identity()..add(s);
+    for (var p = parentOf(s); p != null && seen.add(p); p = parentOf(p)) {
+      out.add(p);
+    }
+    return out;
+  }
+
+  /// #380 - everything under [s] at any depth, on any server, parent before
+  /// child. A loop back to [s] or to a session already listed ends there.
+  List<Session> descendantsOf(Session s) {
+    final out = <Session>[];
+    final seen = Set<Session>.identity()..add(s);
+    void walk(Session p) {
+      for (final c in childrenOf(p)) {
+        if (!seen.add(c)) continue;
+        out.add(c);
+        walk(c);
+      }
+    }
+
+    walk(s);
+    return out;
+  }
+
+  /// #380 - [s]'s whole family as rows: its top-most ancestor and everything
+  /// under that, across every server - the one tree a run spread over several
+  /// machines really is, which the per-machine session list cannot draw.
+  List<SessionTreeRow> familyOf(Session s) {
+    final up = ancestorsOf(s);
+    final root = up.isEmpty ? s : up.last;
+    return flatten([root, ...descendantsOf(root)]);
+  }
+
   /// [list] reordered so every session follows its parent, when that parent is
   /// in [list] too, with its depth under it. Everything else keeps its place in
   /// [list]: roots stay in their given order (the server's drag order, a

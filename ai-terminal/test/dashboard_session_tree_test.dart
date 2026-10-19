@@ -65,8 +65,12 @@ void main() {
     expect(other.dx, boss.dx);
     expect(find.byKey(const ValueKey('tree-kid')), findsOneWidget);
 
-    // On Office it is a top-level row (its parent is not in that group), captioned.
-    expect(find.text('↳ opened by Orchestrator · Home'), findsOneWidget);
+    // On Office it is a top-level row (its parent is not in that group), and its
+    // card's family line (#380) names the parent and its machine.
+    expect(
+      find.descendant(of: find.byKey(const ValueKey('family-badge-far')), matching: find.text('↑ Orchestrator · Home')),
+      findsOneWidget,
+    );
     expect(tester.getTopLeft(find.text('Remote helper')).dx, boss.dx);
     expect(tester.takeException(), isNull);
   });

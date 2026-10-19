@@ -59,6 +59,7 @@ import '../widgets/submit_unconfirmed_banner.dart';
 import '../widgets/terminal_tail_strip.dart';
 import '../widgets/terminal_key_strip.dart';
 import '../widgets/app_bottom_sheet.dart';
+import '../widgets/session_family.dart' show FamilyStrip;
 
 /// #194 Part 1 -- how often the chat lens's terminal-tail strip may recompute.
 /// A ceiling on a hot path, not a delay anyone can perceive: the strip exists
@@ -2556,6 +2557,20 @@ class _SessionScreenState extends State<SessionScreen>
     }
   }
 
+  /// #380 - opens a relative from the family strip or sheet the way this screen
+  /// was opened: the split pane selects it ([SessionSelection] is what that pane
+  /// shows), anything else pushes it, so Back comes back here.
+  void _openRelated(Session s) {
+    final exit = sessionExitFor(embedded: widget.embedded, standalone: widget.standalone);
+    if (exit == SessionExit.clearSelection) {
+      SessionSelection.instance.select(s.id);
+      return;
+    }
+    Navigator.of(context).push(
+      MaterialPageRoute(builder: (_) => SessionScreen(sessionId: s.id, initialSession: s)),
+    );
+  }
+
   // --- Compose bar: text changes, live '/' streaming, history -------------
 
   /// Reacts to every change of [_composeController] — but a pure caret/
@@ -4163,9 +4178,7 @@ class _SessionScreenState extends State<SessionScreen>
     }
 
     final status = sessionStatusFromString(session.status);
-    final displayName = session.name.isEmpty
-        ? 'Session ${session.shortId}'
-        : session.name;
+    final displayName = session.displayName;
 
     return Scaffold(
       appBar: AppBar(
@@ -4267,6 +4280,9 @@ class _SessionScreenState extends State<SessionScreen>
       body: _withFileDrop(Stack(children: [
         Column(
         children: [
+          // #380 - who opened this session and what it opened, on any machine;
+          // nothing for a session with no relatives.
+          FamilyStrip(sessionId: widget.sessionId, onOpen: _openRelated),
           // #74: the session's meta bar — cwd + usage badges on the flexible
           // side, session controls on the right. These controls used to sit in
           // the app bar, where they crowded the title out of existence; here the
