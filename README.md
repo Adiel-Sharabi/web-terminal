@@ -241,6 +241,10 @@ within a column, says who opened it, and the parent's card lists the sessions it
 their status, each one tap away. A hand-off keeps the tree at both ends: a helper's successor
 stays under the same parent, and a parent's successor publishes `spawn.replaces` (the ids it took
 the place of), so helpers that still name the old id, on any machine, find their parent.
+In the session list, a session with sub-sessions in its own machine's group has a line under it (`N sub-sessions`, counting
+every level below it): tap it to fold them away and again to bring them back. Folded, the line keeps one
+status dot per hidden session, so a helper waiting on you still shows; the choice is remembered
+on the device.
 
 **A colour per machine** — set `serverColor` on each server and its sessions carry that colour
 in the session list and on the dashboard of every client.
