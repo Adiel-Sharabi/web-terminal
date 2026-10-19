@@ -241,6 +241,9 @@ within a column, says who opened it, and the parent's card lists the sessions it
 their status, each one tap away. A hand-off keeps the tree at both ends: a helper's successor
 stays under the same parent, and a parent's successor publishes `spawn.replaces` (the ids it took
 the place of), so helpers that still name the old id, on any machine, find their parent.
+A script that sends only `spawnedBy` (no `parentId`) is traced instead: when the request comes from
+this machine, the server follows the calling process up to the session it runs in and records that
+as the parent.
 In the session list, a session with sub-sessions in its own machine's group has a line under it (`N sub-sessions`, counting
 every level below it): tap it to fold them away and again to bring them back. Folded, the line keeps one
 status dot per hidden session, so a helper waiting on you still shows; the choice is remembered
