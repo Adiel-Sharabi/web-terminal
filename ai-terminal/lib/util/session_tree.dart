@@ -60,7 +60,16 @@ class SessionTree {
   /// [list] appears exactly once, loops included. Rows are matched by
   /// identity, not id, so two server entries reaching the same box (a LAN and
   /// a tailnet URL) still show both of their rows.
-  List<SessionTreeRow> flatten(List<Session> list) {
+  ///
+  /// #377 - a session whose id is in [folded] keeps its whole subtree out of
+  /// the result: they ride on its row as [SessionTreeRow.folded], so a caller
+  /// can still show their status and still write every id when it saves an
+  /// order. A session handed off to a successor stays folded under the new id
+  /// ([foldIds] is what a caller must clear to unfold it).
+  List<SessionTreeRow> flatten(
+    List<Session> list, {
+    Set<String> folded = const <String>{},
+  }) {
     final here = Set<Session>.identity()..addAll(list);
     final kids = Map<Session, List<Session>>.identity();
     final roots = <Session>[];
@@ -74,12 +83,36 @@ class SessionTree {
     }
     final out = <SessionTreeRow>[];
     final placed = Set<Session>.identity();
+    bool isFolded(Session s) => foldIds(s).any(folded.contains);
+    void hide(Session s, List<Session> into) {
+      if (!placed.add(s)) return;
+      into.add(s);
+      for (final c in kids[s] ?? const <Session>[]) {
+        hide(c, into);
+      }
+    }
+
     void walk(Session s, int depth) {
       if (!placed.add(s)) return;
+      final at = out.length;
       out.add(SessionTreeRow(s, depth));
+      if (isFolded(s)) {
+        final hidden = <Session>[];
+        for (final c in kids[s] ?? const <Session>[]) {
+          hide(c, hidden);
+        }
+        out[at] = SessionTreeRow(s, depth, descendants: hidden.length, folded: hidden);
+        return;
+      }
       for (final c in kids[s] ?? const <Session>[]) {
         walk(c, depth + 1);
       }
+      // Everything under it: the rows shown below it, and what those fold.
+      var under = 0;
+      for (var i = at + 1; i < out.length; i++) {
+        under += 1 + out[i].folded.length;
+      }
+      out[at] = SessionTreeRow(s, depth, descendants: under);
     }
 
     for (final r in roots) {
@@ -91,15 +124,35 @@ class SessionTree {
     }
     return out;
   }
+
+  /// The ids under which [s] counts as folded (#377): its own, and every id it
+  /// replaced in a hand-off. Folding stores its own id; unfolding must clear
+  /// them all, or a fold made before a hand-off could never be undone.
+  static List<String> foldIds(Session s) => [s.id, ...s.replaces];
 }
 
 /// One row of [SessionTree.flatten]: the session and how deep it sits under
 /// sessions shown directly above it (0 = top level).
 class SessionTreeRow {
-  const SessionTreeRow(this.session, this.depth);
+  const SessionTreeRow(
+    this.session,
+    this.depth, {
+    this.descendants = 0,
+    this.folded = const <Session>[],
+  });
 
   final Session session;
   final int depth;
+
+  /// How many sessions hang under this one in the list it was flattened from,
+  /// at any depth, whether shown below it or folded into it or into a row
+  /// below it - so folding never changes the number.
+  final int descendants;
+
+  /// The sessions under this one that the caller folded away (#377), in the
+  /// order they would have been shown. Empty when the row is expanded.
+  final List<Session> folded;
+  bool get isFolded => folded.isNotEmpty;
 
   /// How far to indent the row: deep chains stop indenting so a phone-width
   /// row keeps room for its title.

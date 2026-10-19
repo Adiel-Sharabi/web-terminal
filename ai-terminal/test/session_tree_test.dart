@@ -1,5 +1,8 @@
 import 'package:ai_terminal/api/models.dart';
+import 'package:ai_terminal/screens/dashboard_screen.dart' show reorderedGroupIds;
+import 'package:ai_terminal/theme/status_colors.dart';
 import 'package:ai_terminal/util/session_tree.dart';
+import 'package:ai_terminal/widgets/session_card.dart' show sessionDotStatus;
 import 'package:flutter_test/flutter_test.dart';
 
 const _home = ServerConfig(name: 'Home', baseUrl: 'http://h:7681', bearerToken: 't');
@@ -95,5 +98,70 @@ void main() {
       expect(rows.map((r) => r.depth), [0, 1, 2, 3, 4]);
       expect(rows.last.indent, SessionTreeRow.step * SessionTreeRow.maxIndentLevels);
     });
+  });
+
+  group('folding a session\'s children (#377)', () {
+    final list = [_s('a'), _s('k1', parent: 'a'), _s('g', parent: 'k1'), _s('k2', parent: 'a'), _s('z')];
+
+    test('expanded, a parent row counts everything under it, at any depth', () {
+      final rows = SessionTree(list).flatten(list);
+      expect(_rows(rows), ['a', '  k1', '    g', '  k2', 'z']);
+      expect([for (final r in rows) r.descendants], [3, 1, 0, 0, 0]);
+      expect(rows.every((r) => !r.isFolded), isTrue);
+    });
+
+    test('a folded session hides its whole subtree and carries it, in display order', () {
+      final rows = SessionTree(list).flatten(list, folded: {'a'});
+      expect(_rows(rows), ['a', 'z']);
+      expect(rows.first.isFolded, isTrue);
+      expect(rows.first.descendants, 3);
+      expect([for (final s in rows.first.folded) s.id], ['k1', 'g', 'k2']);
+    });
+
+    test('folding a child folds only its own subtree', () {
+      final rows = SessionTree(list).flatten(list, folded: {'k1'});
+      expect(_rows(rows), ['a', '  k1', '  k2', 'z']);
+      expect(rows[0].descendants, 3, reason: 'folding below a changes nothing about what hangs under a');
+      expect(rows[1].descendants, 1);
+      expect([for (final s in rows[1].folded) s.id], ['g']);
+    });
+
+    test('a fold survives a hand-off: the successor is folded under the id it replaces', () {
+      final successor = _s('a2', replaces: ['a']);
+      final l = [successor, _s('k', parent: 'a')];
+      final rows = SessionTree(l).flatten(l, folded: {'a'});
+      expect(_rows(rows), ['a2']);
+      expect(rows.first.isFolded, isTrue);
+      expect(SessionTree.foldIds(successor), ['a2', 'a'],
+          reason: 'unfolding must clear the replaced id too, or the fold could never be undone');
+    });
+
+    test('folding a session with no children changes nothing', () {
+      final rows = SessionTree(list).flatten(list, folded: {'z', 'g'});
+      expect(_rows(rows), ['a', '  k1', '    g', '  k2', 'z']);
+      expect(rows.any((r) => r.isFolded), isFalse);
+    });
+
+    test('a loop is still drawn once when folded', () {
+      final l = [_s('x', parent: 'y'), _s('y', parent: 'x')];
+      final rows = SessionTree(l).flatten(l, folded: {'x'});
+      expect(_rows(rows), ['x']);
+      expect([for (final s in rows.first.folded) s.id], ['y']);
+    });
+
+    test('reordering a group writes a folded row\'s hidden sessions straight after it', () {
+      final rows = SessionTree(list).flatten(list, folded: {'a'}); // shown: a, z
+      expect(reorderedGroupIds(rows, 1, 0), ['z', 'a', 'k1', 'g', 'k2']);
+      expect(reorderedGroupIds(rows, 0, 1), ['z', 'a', 'k1', 'g', 'k2']);
+      final open = SessionTree(list).flatten(list);
+      expect(reorderedGroupIds(open, 4, 0), ['z', 'a', 'k1', 'g', 'k2']);
+    });
+  });
+
+  test('a folded helper\'s dot is the card\'s dot: a live API error wins over its status (#377)', () {
+    final s = _s('h');
+    expect(sessionDotStatus(s, null), SessionStatus.idle);
+    expect(sessionDotStatus(s, const ApiErrorInfo(active: true)), SessionStatus.apiError);
+    expect(sessionDotStatus(s, const ApiErrorInfo(active: false)), SessionStatus.idle);
   });
 }

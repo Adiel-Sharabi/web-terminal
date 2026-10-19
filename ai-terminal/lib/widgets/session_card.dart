@@ -29,6 +29,12 @@ import 'reason_chip.dart';
 import 'server_badge.dart';
 import 'status_dot.dart';
 
+/// The status dot a session gets: its status, overridden by a live API error
+/// (which already screams for attention on its own). The ONE rule for it - the
+/// card's dot and the session list's folded-children line (#377) both draw it.
+SessionStatus sessionDotStatus(Session session, ApiErrorInfo? apiError) =>
+    apiError?.active == true ? SessionStatus.apiError : sessionStatusFromString(session.status);
+
 class SessionCard extends StatelessWidget {
   const SessionCard({
     super.key,
@@ -147,7 +153,7 @@ class SessionCard extends StatelessWidget {
     // A live api-error override already screams for attention on its own —
     // don't also show the (redundant, status-derived) "API error" chip.
     final effectiveAttentionKind = hasApiError ? null : attentionKind;
-    final dotStatus = hasApiError ? SessionStatus.apiError : status;
+    final dotStatus = sessionDotStatus(session, apiError);
     final label = statusLabel(status);
     final showReason = !hasApiError && hasReasonChip(session.reason);
 

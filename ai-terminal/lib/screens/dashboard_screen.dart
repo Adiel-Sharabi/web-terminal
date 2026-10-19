@@ -9,7 +9,8 @@
 /// group per server (name + online dot + count), mirroring the web
 /// sidebar's collapsible groups. Each group's collapsed/expanded state is
 /// per-device and persisted in [SharedPreferences] under
-/// `wt.collapsed.<key>` (`__favorites__`, or the server's base URL).
+/// `wt.collapsed.<key>` (`__favorites__`, or the server's base URL); a
+/// session's folded sub-sessions (#377) under `wt.collapsed.tree.<id>`.
 ///
 /// Per-server group ORDER follows the user's configured server order
 /// ([AppConfig.servers]) rather than session recency — owner: "the server
@@ -66,6 +67,10 @@ const String kCollapsedKeyPrefix = 'wt.collapsed.';
 /// The collapse-state key for the pinned Favorites group.
 const String kFavoritesGroupKey = '__favorites__';
 
+/// The collapse-state key prefix for a session whose children are folded away
+/// (#377): `wt.collapsed.tree.<session id>`.
+const String kTreeFoldKeyPrefix = 'tree.';
+
 class DashboardScreen extends StatefulWidget {
   const DashboardScreen({
     super.key,
@@ -100,7 +105,8 @@ class _DashboardScreenState extends State<DashboardScreen> {
   String _query = '';
 
   /// Per-group collapse state, keyed by [kFavoritesGroupKey] or a server's
-  /// base URL. Loaded from (and persisted to) [SharedPreferences].
+  /// base URL, and per-session folds keyed `tree.<id>` (#377). Loaded from
+  /// (and persisted to) [SharedPreferences].
   Map<String, bool> _collapsed = const <String, bool>{};
 
   @override
@@ -164,6 +170,37 @@ class _DashboardScreenState extends State<DashboardScreen> {
     final prefs = await SharedPreferences.getInstance();
     await prefs.setBool('$kCollapsedKeyPrefix$key', next);
   }
+
+  /// Folds or unfolds [row]'s children (#377). Folding stores the session's own
+  /// id; unfolding clears every id it is folded under ([SessionTree.foldIds]),
+  /// so a fold made before a hand-off can still be undone on the successor.
+  /// Expanded is the default, so it is stored as no key at all.
+  Future<void> _toggleFold(SessionTreeRow row) async {
+    final keys = [
+      for (final id in SessionTree.foldIds(row.session)) '$kTreeFoldKeyPrefix$id',
+    ];
+    final fold = !row.isFolded;
+    setState(() => _collapsed = {
+          ..._collapsed,
+          if (fold) keys.first: true else for (final k in keys) k: false,
+        });
+    final prefs = await SharedPreferences.getInstance();
+    if (fold) {
+      await prefs.setBool('$kCollapsedKeyPrefix${keys.first}', true);
+    } else {
+      for (final k in keys) {
+        await prefs.remove('$kCollapsedKeyPrefix$k');
+      }
+    }
+  }
+
+  /// The sessions whose children are folded away in the session list (#377),
+  /// stored beside the groups' collapse state under [kTreeFoldKeyPrefix].
+  Set<String> get _foldedSessions => {
+        for (final e in _collapsed.entries)
+          if (e.value && e.key.startsWith(kTreeFoldKeyPrefix))
+            e.key.substring(kTreeFoldKeyPrefix.length),
+      };
 
   List<Session> _filtered(List<Session> sessions) {
     if (_filter == _kAllServers) return sessions;
@@ -357,13 +394,12 @@ class _DashboardScreenState extends State<DashboardScreen> {
     ServerConfig server,
     SessionTree tree,
   ) {
-    final sessions = [for (final r in rows) r.session];
     return SliverReorderableList(
       itemCount: rows.length,
       // onReorderItem delivers newIndex already adjusted for the removed item,
       // so no manual `if (newIndex > oldIndex) newIndex--` dance.
       onReorderItem: (oldIndex, newIndex) =>
-          _onReorderGroup(server, sessions, oldIndex, newIndex),
+          _onReorderGroup(server, rows, oldIndex, newIndex),
       itemBuilder: (context, i) => _treeRow(
         context,
         rows[i],
@@ -385,15 +421,18 @@ class _DashboardScreenState extends State<DashboardScreen> {
   ) {
     final s = row.session;
     final muted = Theme.of(context).colorScheme.onSurfaceVariant;
-    if (row.depth > 0) {
-      // The indent gives way to the card on a narrow row (a phone), where the
-      // arrow alone - in the card's own margin - marks the row as a child.
-      return LayoutBuilder(
-        // The reorderable list needs the key on the row it is handed.
-        key: ValueKey('tree-${s.id}'),
-        builder: (context, box) {
-          final indent = row.indentWithin(box.maxWidth);
-          return Stack(
+    final parent = row.depth > 0 ? null : tree.parentOf(s);
+    if (row.depth == 0 && parent == null && row.descendants == 0) return card;
+    // The indent gives way to the card on a narrow row (a phone), where the
+    // arrow alone - in the card's own margin - marks the row as a child.
+    return LayoutBuilder(
+      // The reorderable list needs the key on the row it is handed.
+      key: ValueKey('tree-${s.id}'),
+      builder: (context, box) {
+        final indent = row.indentWithin(box.maxWidth);
+        Widget body = card;
+        if (row.depth > 0) {
+          body = Stack(
             children: [
               Padding(
                 padding: EdgeInsetsDirectional.only(start: indent),
@@ -411,46 +450,49 @@ class _DashboardScreenState extends State<DashboardScreen> {
               ),
             ],
           );
-        },
-      );
-    }
-    final parent = tree.parentOf(s);
-    if (parent == null) return card;
-    return Column(
-      key: ValueKey('tree-${s.id}'),
-      crossAxisAlignment: CrossAxisAlignment.start,
-      mainAxisSize: MainAxisSize.min,
-      children: [
-        Padding(
-          padding: const EdgeInsetsDirectional.only(
-            start: AppSpacing.screenPadding + 4,
-            end: AppSpacing.screenPadding,
-            top: 4,
-          ),
-          child: Text(
-            '↳ opened by ${parent.name} · ${parent.server.name}',
-            key: ValueKey('tree-from-${s.id}'),
-            maxLines: 1,
-            overflow: TextOverflow.ellipsis,
-            style: Theme.of(context).textTheme.labelSmall?.copyWith(color: muted),
-          ),
-        ),
-        card,
-      ],
+        }
+        return Column(
+          crossAxisAlignment: CrossAxisAlignment.start,
+          mainAxisSize: MainAxisSize.min,
+          children: [
+            if (parent != null)
+              Padding(
+                padding: const EdgeInsetsDirectional.only(
+                  start: AppSpacing.screenPadding + 4,
+                  end: AppSpacing.screenPadding,
+                  top: 4,
+                ),
+                child: Text(
+                  '↳ opened by ${parent.name} · ${parent.server.name}',
+                  key: ValueKey('tree-from-${s.id}'),
+                  maxLines: 1,
+                  overflow: TextOverflow.ellipsis,
+                  style: Theme.of(context).textTheme.labelSmall?.copyWith(color: muted),
+                ),
+              ),
+            body,
+            if (row.descendants > 0)
+              _ChildrenToggle(
+                key: ValueKey('tree-fold-${s.id}'),
+                row: row,
+                start: AppSpacing.screenPadding + indent,
+                onTap: () => _toggleFold(row),
+              ),
+          ],
+        );
+      },
     );
   }
 
   void _onReorderGroup(
     ServerConfig server,
-    List<Session> ordered,
+    List<SessionTreeRow> rows,
     int oldIndex,
     int newIndex,
   ) {
     if (newIndex == oldIndex) return;
-    final ids = [for (final s in ordered) s.id];
-    final moved = ids.removeAt(oldIndex);
-    ids.insert(newIndex, moved);
-    SessionRepository.instance.reorderServerSessions(server, ids);
+    SessionRepository.instance
+        .reorderServerSessions(server, reorderedGroupIds(rows, oldIndex, newIndex));
   }
 
   @override
@@ -718,6 +760,7 @@ class _DashboardScreenState extends State<DashboardScreen> {
                             _reorderableGroup(
                               tree.flatten(
                                 orderedSessionsFor(group, SessionRepository.instance),
+                                folded: _foldedSessions,
                               ),
                               group.server,
                               tree,
@@ -953,6 +996,93 @@ class _ServerGroupHeader extends StatelessWidget {
             // too long to share the row. Renders nothing while the view is off.
             ServerResourceLine(baseUrl: baseUrl),
           ],
+        ),
+      ),
+    );
+  }
+}
+
+/// #377 - the session ids of a server group after its row [oldIndex] is dragged
+/// to [newIndex], for [SessionRepository.reorderServerSessions]. [rows] are the
+/// rows as SHOWN, so a folded row's hidden sessions are written straight after
+/// it: leaving them out would send them to the end of the server's order.
+List<String> reorderedGroupIds(List<SessionTreeRow> rows, int oldIndex, int newIndex) {
+  final order = [...rows];
+  order.insert(newIndex, order.removeAt(oldIndex));
+  return [
+    for (final r in order) ...[r.session.id, for (final f in r.folded) f.id],
+  ];
+}
+
+/// #377 - the line under a session that opened others: how many sessions hang
+/// under it (at any depth), and a tap to fold them away or bring them back.
+/// Folded, it carries one status dot per hidden session, so a child waiting on
+/// an answer still shows.
+class _ChildrenToggle extends StatelessWidget {
+  const _ChildrenToggle({
+    super.key,
+    required this.row,
+    required this.start,
+    required this.onTap,
+  });
+
+  final SessionTreeRow row;
+  final double start;
+  final VoidCallback onTap;
+
+  static const int _maxDots = 8;
+
+  @override
+  Widget build(BuildContext context) {
+    final theme = Theme.of(context);
+    final muted = theme.colorScheme.onSurfaceVariant;
+    final style = theme.textTheme.labelSmall?.copyWith(color: muted);
+    final n = row.descendants;
+    final label = n == 1 ? '1 sub-session' : '$n sub-sessions';
+    return Padding(
+      padding: EdgeInsetsDirectional.only(start: start, end: AppSpacing.screenPadding),
+      child: Semantics(
+        button: true,
+        expanded: !row.isFolded,
+        label: row.isFolded ? 'Show $label' : 'Fold $label',
+        // excludeSemantics drops the InkWell's own tap action, so it is given
+        // back here - or a screen reader announces a button it cannot press.
+        onTap: onTap,
+        excludeSemantics: true,
+        child: InkWell(
+          onTap: onTap,
+          borderRadius: BorderRadius.circular(8),
+          child: ConstrainedBox(
+            constraints: const BoxConstraints(minHeight: 40),
+            child: Row(
+              children: [
+                Icon(
+                  row.isFolded ? Icons.chevron_right : Icons.expand_more,
+                  size: 18,
+                  color: muted,
+                ),
+                const SizedBox(width: 4),
+                Flexible(
+                  child: Text(label, maxLines: 1, overflow: TextOverflow.ellipsis, style: style),
+                ),
+                if (row.isFolded) ...[
+                  for (final f in row.folded.take(_maxDots))
+                    Padding(
+                      padding: const EdgeInsetsDirectional.only(start: 6),
+                      child: StatusDot(
+                        status: sessionDotStatus(f, SessionRepository.instance.apiErrorFor(f.id)),
+                        size: 8,
+                      ),
+                    ),
+                  if (row.folded.length > _maxDots)
+                    Padding(
+                      padding: const EdgeInsetsDirectional.only(start: 4),
+                      child: Text('+${row.folded.length - _maxDots}', style: style),
+                    ),
+                ],
+              ],
+            ),
+          ),
         ),
       ),
     );
