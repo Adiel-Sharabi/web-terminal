@@ -246,6 +246,13 @@ p.onData(d => {
 });
 
 const tick = setInterval(() => {
+  // A trusted cwd (see above) never shows the trust prompt: the boot just goes quiet
+  // at the composer.
+  if (state === 'trust' && Date.now() - t0 > 4000 && Date.now() - lastData > 2500) {
+    state = 'settle';
+    buf = '';
+    console.log('[' + stamp() + '] no trust prompt — composer is up');
+  }
   if (state === 'settle' && Date.now() - lastData > 2500) {
     state = 'awaiting-tool';
     elicitAt = Date.now();
