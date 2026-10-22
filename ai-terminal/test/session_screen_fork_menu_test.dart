@@ -188,6 +188,123 @@ void main() {
     });
   });
 
+  group('shouldClearQuestionDrafts (#383: keep a typed answer until the question is gone)', () {
+    PendingQuestion q(String question) => PendingQuestion(
+          toolUseId: 't',
+          questions: [
+            PendingQuestionItem(
+              header: 'H',
+              question: question,
+              multiSelect: false,
+              hasPreview: false,
+              options: [QuestionOption(label: 'Red')],
+            ),
+          ],
+        );
+
+    test('the same question still pending -> keep', () {
+      final cur = q('Pick one');
+      expect(
+        shouldClearQuestionDrafts(
+            draftKey: questionSignature(cur), observed: true, current: cur),
+        isFalse,
+      );
+    });
+
+    test('a positive observation that it is gone -> clear', () {
+      expect(
+        shouldClearQuestionDrafts(
+            draftKey: questionSignature(q('Pick one')),
+            observed: true,
+            current: null),
+        isTrue,
+      );
+    });
+
+    test('a positive observation of a DIFFERENT question -> clear', () {
+      expect(
+        shouldClearQuestionDrafts(
+            draftKey: questionSignature(q('Pick one')),
+            observed: true,
+            current: q('Pick another')),
+        isTrue,
+      );
+    });
+
+    test('no successful poll (stalled link) -> keep, even with nothing seen', () {
+      expect(
+        shouldClearQuestionDrafts(
+            draftKey: questionSignature(q('Pick one')),
+            observed: false,
+            current: null),
+        isFalse,
+      );
+    });
+
+    test('no drafts held -> nothing to clear', () {
+      expect(
+        shouldClearQuestionDrafts(draftKey: null, observed: true, current: null),
+        isFalse,
+      );
+    });
+  });
+
+  // The two call sites (the 4 s poll, the post-answer verify) both record through
+  // [PendingQuestionObservation], so what they pass to the rule is tested here.
+  group('PendingQuestionObservation (#383: what the polls actually saw)', () {
+    PendingQuestion q(String question) => PendingQuestion(
+          toolUseId: 't',
+          questions: [
+            PendingQuestionItem(
+              header: 'H',
+              question: question,
+              multiSelect: false,
+              hasPreview: false,
+              options: [QuestionOption(label: 'Red')],
+            ),
+          ],
+        );
+
+    test('a poll that throws observes nothing, so the drafts are kept', () async {
+      final seen = PendingQuestionObservation();
+      await expectLater(
+          seen.record(() async => throw Exception('link down')), throwsException);
+      expect(seen.observed, isFalse);
+      expect(seen.shouldClearDrafts(questionSignature(q('Pick one'))), isFalse);
+    });
+
+    test('a poll that returns the same question keeps the drafts', () async {
+      final seen = PendingQuestionObservation();
+      await seen.record(() async => q('Pick one'));
+      expect(seen.observed, isTrue);
+      expect(seen.lastSeen, isNotNull);
+      expect(seen.shouldClearDrafts(questionSignature(q('Pick one'))), isFalse);
+    });
+
+    test('a poll that returns null (cleared) is evidence: clear', () async {
+      final seen = PendingQuestionObservation();
+      await seen.record(() async => null);
+      expect(seen.observed, isTrue);
+      expect(seen.shouldClearDrafts(questionSignature(q('Pick one'))), isTrue);
+    });
+
+    test('a poll that returns a different question clears', () async {
+      final seen = PendingQuestionObservation();
+      await seen.record(() async => q('Pick another'));
+      expect(seen.shouldClearDrafts(questionSignature(q('Pick one'))), isTrue);
+    });
+
+    test('only the LAST poll counts: a failure after a sighting keeps what was seen',
+        () async {
+      final seen = PendingQuestionObservation();
+      await seen.record(() async => q('Pick one'));
+      await expectLater(
+          seen.record(() async => throw Exception('link down')), throwsException);
+      expect(seen.lastSeen, isNotNull);
+      expect(seen.shouldClearDrafts(questionSignature(q('Pick one'))), isFalse);
+    });
+  });
+
   // The dismissal/answered identity must key on question CONTENT, not toolUseId:
   // the server reports a synthetic `hook-<id>-<seq>` while the question is live
   // and the real `toolu_…` once it falls back to the transcript. Keying on the id

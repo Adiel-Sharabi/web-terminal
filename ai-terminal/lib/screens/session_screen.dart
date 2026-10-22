@@ -1040,6 +1040,139 @@ bool shouldResurfaceAfterAnswer({
   required String? dismissedKey,
 }) => stillPending && dismissedKey == answeredKey;
 
+/// Whether the typed Other/note drafts ([draftKey] is the signature they were typed
+/// for) must be dropped, given what the last poll [observed] (#383).
+///
+/// Keep them while the same question is pending; clear them only on a POSITIVE
+/// observation that it is gone ([current] null) or different. [observed] is false
+/// when no poll has succeeded: a failed poll says nothing about the question, and a
+/// stalled link is exactly when a long dictated answer must not be thrown away.
+/// Pure so both call sites (the 4 s poll, the post-answer verify) share one rule.
+bool shouldClearQuestionDrafts({
+  required String? draftKey,
+  required bool observed,
+  required PendingQuestion? current,
+}) => draftKey != null && observed && questionSignature(current) != draftKey;
+
+/// What the polls of one wait actually SAW, for [shouldClearQuestionDrafts] (#383).
+/// Both call sites (the 4 s poll, the post-answer verify) record through [record],
+/// so "was anything observed" and "what was last seen" are captured here once,
+/// where a test can reach them, instead of in two hand-written closures.
+class PendingQuestionObservation {
+  bool observed = false;
+  PendingQuestion? lastSeen;
+
+  /// Runs [poll]. A poll that throws observes nothing (and rethrows); one that
+  /// returns, even null, is a positive observation.
+  Future<PendingQuestion?> record(
+      Future<PendingQuestion?> Function() poll) async {
+    final q = await poll();
+    observed = true;
+    lastSeen = q;
+    return q;
+  }
+
+  /// Whether the drafts typed for [draftKey] must be dropped given what was seen.
+  bool shouldClearDrafts(String? draftKey) => shouldClearQuestionDrafts(
+        draftKey: draftKey,
+        observed: observed,
+        current: lastSeen,
+      );
+}
+
+/// The verdict of waiting for an answered question to clear: [stillPending] is
+/// [awaitAnswerLanded]'s result (non-null only when every retry still showed it),
+/// [seen] what the polls actually observed.
+class AnswerVerification {
+  const AnswerVerification(this.stillPending, this.seen);
+  final PendingQuestion? stillPending;
+  final PendingQuestionObservation seen;
+}
+
+/// [awaitAnswerLanded] with every poll recorded through a
+/// [PendingQuestionObservation], so the caller can tell a question that cleared
+/// from a poll that merely failed. [poll] is injected so the decision is testable
+/// without a live ApiClient (#383).
+Future<AnswerVerification> verifyAnswerLanded({
+  required String answeredKey,
+  required bool resendEnter,
+  required Future<PendingQuestion?> Function() poll,
+  required void Function() resend,
+  bool Function()? alive,
+  int attempts = 8,
+  Duration every = const Duration(milliseconds: 900),
+}) async {
+  final seen = PendingQuestionObservation();
+  final stillPending = await awaitAnswerLanded(
+    isSame: (q) => questionSignature(q) == answeredKey,
+    resendEnter: resendEnter,
+    poll: () => seen.record(poll),
+    resend: resend,
+    alive: alive,
+    attempts: attempts,
+    every: every,
+  );
+  return AnswerVerification(stillPending, seen);
+}
+
+/// What the screen does with its card once an answer has been verified (#383).
+/// [apply] false: leave the card as it is. True: make [question] the card (null
+/// unmounts it) and, if [undismiss], clear the optimistic dismissal so it shows.
+class AnswerSettlement {
+  const AnswerSettlement({
+    this.apply = false,
+    this.question,
+    this.undismiss = false,
+  });
+  final bool apply;
+  final PendingQuestion? question;
+  final bool undismiss;
+}
+
+/// Everything the screen decides once an answer to the question signed
+/// [answeredKey] has been verified ([verdict]), in one place so a test can reach it
+/// (#383). Settles [drafts]: gone or replaced -> the typed words did their job, drop
+/// them (and the not-landed flag, [QuestionDrafts.markSent], with them); anything
+/// else -> leave them, flagged or not as they already were. The flag is NOT set
+/// here: it was set when the answer went out, so a card mounted before this point
+/// is covered, and a verify that observed nothing (a failed poll proves neither
+/// way) still leaves the question flagged.
+///
+/// The card follows the same observation. A card reopened from the chip DURING the
+/// verify is still mounted with the old question's Other text and no flag, and one
+/// Enter on it would type that answer as a new prompt, or into a different question's
+/// selector. So a positive gone-or-different observation of the ANSWERED question
+/// returns that observation (null, or the new question) as the card, the way the 4 s
+/// poll does; a question still pending after every retry is put back
+/// ([shouldResurfaceAfterAnswer]); anything else leaves the card alone. The caller
+/// only applies it, inside `setState`.
+AnswerSettlement settleAfterAnswer({
+  required QuestionDrafts drafts,
+  required String answeredKey,
+  required AnswerVerification verdict,
+  required String? dismissedKey,
+}) {
+  if (verdict.seen.shouldClearDrafts(drafts.key)) drafts.clear();
+  if (shouldResurfaceAfterAnswer(
+    stillPending: verdict.stillPending != null,
+    answeredKey: answeredKey,
+    dismissedKey: dismissedKey,
+  )) {
+    return AnswerSettlement(
+        apply: true, question: verdict.stillPending, undismiss: true);
+  }
+  final seen = verdict.seen;
+  if (seen.observed && questionSignature(seen.lastSeen) != answeredKey) {
+    final shown = seen.lastSeen;
+    return AnswerSettlement(
+      apply: true,
+      question: shown,
+      undismiss: shown != null && questionSignature(shown) != dismissedKey,
+    );
+  }
+  return const AnswerSettlement();
+}
+
 /// How a [SessionScreen] LEAVES when the session it shows is gone from the list.
 ///
 /// There are three shapes of this screen and only one of them sits on a route
@@ -1221,6 +1354,9 @@ class _SessionScreenState extends State<SessionScreen>
   // `hook-<id>-<seq>` (live) and the real `toolu_…` (transcript), which used to
   // read as a brand-new question and re-show the overlay.
   String? _dismissedQuestionKey;
+  // Other/note text typed into the overlay, kept here so a resurfaced overlay
+  // (an answer that did not land) finds it again instead of starting empty (#383).
+  final QuestionDrafts _questionDrafts = QuestionDrafts();
   String?
   _questionContext; // Claude's preceding message, shown above the question
   Timer? _questionPoll;
@@ -1503,9 +1639,10 @@ class _SessionScreenState extends State<SessionScreen>
   Future<void> _pollPendingQuestion() async {
     final api = _api;
     if (api == null) return;
+    final seen = PendingQuestionObservation();
     PendingQuestion? q;
     try {
-      q = await api.pendingQuestion(widget.sessionId);
+      q = await seen.record(() => api.pendingQuestion(widget.sessionId));
     } catch (_) {
       return; // best-effort; keep whatever's on screen
     }
@@ -1517,6 +1654,9 @@ class _SessionScreenState extends State<SessionScreen>
     if (q != null && questionSignature(q) != _dismissedQuestionKey) {
       _dismissedQuestionKey = null;
     }
+    // The typed Other/note drafts belong to the question they were typed for (#383):
+    // a different one, or none, drops them.
+    if (seen.shouldClearDrafts(_questionDrafts.key)) _questionDrafts.clear();
     if (q?.toolUseId != _pendingQuestion?.toolUseId) {
       setState(() {
         _pendingQuestion = q;
@@ -1552,6 +1692,16 @@ class _SessionScreenState extends State<SessionScreen>
     setState(() => _dismissedQuestionKey = null);
   }
 
+  /// "Answer in terminal" on the question card. Normally it only hides the card
+  /// (the terminal is already one tap away). After an answer with words did not
+  /// land the terminal is where the user must FINISH it, so go there too (#383).
+  void _dismissQuestionOverlay() {
+    final partlyTyped =
+        _questionDrafts.flaggedFor(questionSignature(_pendingQuestion));
+    setState(() => _dismissedQuestionKey = questionSignature(_pendingQuestion));
+    if (partlyTyped) _setLens('terminal');
+  }
+
   /// into one PTY read and the TUI's batched update confirms the stale top row.
   /// Each frame carries its own settle delay so transition frames land in
   /// separate reads. Hides the overlay optimistically; the next poll confirms.
@@ -1566,12 +1716,19 @@ class _SessionScreenState extends State<SessionScreen>
       _dismissedQuestionKey = answeredKey;
     });
     _finishTerminalComposing();
+    // Flag BEFORE the keys go out (#383): the words may be in the terminal from the
+    // first frame on, and a card reopened from the chip mid-verify, or after a verify
+    // whose polls all failed, must not offer a blind replay. Only a positive
+    // gone-or-different observation clears it ([settleAfterAnswer], the 4 s poll).
+    _questionDrafts.markSent(answeredKey, frames);
     // The one pacing loop, shared with the sessions board (#337).
     final sent = await deliverAnswerFrames(
       frames,
       (keys) => _connection?.sendInput(keys),
       alive: () => mounted,
     );
+    // `sent` is false only when this screen unmounted mid-send; with no connection
+    // the keys drop silently and the flag stays (the safe direction).
     if (!sent || !mounted) return;
     _scrollToBottom();
     // Verify the answer actually landed — and un-strand it if it didn't. We just
@@ -1621,8 +1778,10 @@ class _SessionScreenState extends State<SessionScreen>
     final api = _api;
     if (api == null) return;
     // The rule itself is shared with the sessions board (#337): [awaitAnswerLanded].
-    final stillPending = await awaitAnswerLanded(
-      isSame: (q) => questionSignature(q) == answeredKey,
+    // What the polls actually SAW: [awaitAnswerLanded] returns null for a cleared
+    // question and also for a poll that threw, and only the first is evidence.
+    final verdict = await verifyAnswerLanded(
+      answeredKey: answeredKey,
       resendEnter: resendEnter,
       poll: () => api.pendingQuestion(widget.sessionId),
       resend: () {
@@ -1632,19 +1791,26 @@ class _SessionScreenState extends State<SessionScreen>
       alive: () => mounted,
       attempts: _answerVerifyAttempts,
     );
-    // Exhausted retries with the same prompt up → surface it again so the user
-    // can retry, instead of a silently stuck, hidden question.
-    if (mounted &&
-        shouldResurfaceAfterAnswer(
-          stillPending: stillPending != null,
-          answeredKey: answeredKey,
-          dismissedKey: _dismissedQuestionKey,
-        )) {
-      setState(() {
-        _dismissedQuestionKey = null;
-        _pendingQuestion = stillPending;
-      });
-    }
+    if (!mounted) return;
+    // Landed (or replaced): the typed answer did its job. Otherwise (still pending,
+    // or a failed poll that proves neither) the drafts and the flag set at send time
+    // stay (#383). Exhausted retries with the same prompt up -> surface it again
+    // so the user can retry, instead of a silently stuck, hidden question. The
+    // setState is what lets a card reopened mid-verify see the settled drafts.
+    final settled = settleAfterAnswer(
+      drafts: _questionDrafts,
+      answeredKey: answeredKey,
+      verdict: verdict,
+      dismissedKey: _dismissedQuestionKey,
+    );
+    if (!settled.apply) return;
+    final changed = settled.question?.toolUseId != _pendingQuestion?.toolUseId;
+    setState(() {
+      if (settled.undismiss) _dismissedQuestionKey = null;
+      _pendingQuestion = settled.question;
+      if (changed) _questionContext = null;
+    });
+    if (changed && settled.question != null) unawaited(_loadQuestionContext());
   }
 
   /// Whether the Chat lens is available for THIS session: the server advertises
@@ -4765,11 +4931,11 @@ class _SessionScreenState extends State<SessionScreen>
           QuestionOverlay(
             question: _pendingQuestion!,
             contextText: _questionContext,
+            drafts: _questionDrafts,
+            draftKey: questionSignature(_pendingQuestion),
             onSend: _answerQuestion,
             onKey: _sendRawToTerminal,
-            onDismiss: () => setState(
-              () => _dismissedQuestionKey = questionSignature(_pendingQuestion),
-            ),
+            onDismiss: _dismissQuestionOverlay,
           ),
       ])),
     );

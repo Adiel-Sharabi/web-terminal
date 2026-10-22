@@ -41,10 +41,21 @@ class _SubmitIntent extends Intent {
 
 /// One outbound frame: send [keys], then wait [delayMs] before the next frame.
 class AnswerFrame {
-  const AnswerFrame(this.keys, this.delayMs);
+  const AnswerFrame(this.keys, this.delayMs,
+      {this.text = false, this.other = false})
+      : assert(!other || text, 'an Other frame carries text');
 
   /// The bytes to write to the PTY.
   final String keys;
+
+  /// True for a frame carrying the user's own words (an Other answer or a note)
+  /// rather than a key (#383). The session screen reads it to know that an
+  /// answer which did not land may be partly typed into the terminal.
+  final bool text;
+
+  /// True for the Other free-text frame specifically, the one whose own committing
+  /// `\r` follows it. [answerNeedsConfirm] reads it: see there (#383).
+  final bool other;
 
   /// How long to wait after sending, before the next frame. Frames that must
   /// land in *separate* stdin reads (question transitions, a confirming Enter)
@@ -127,7 +138,9 @@ class AnswerFrame {
 ///   `options.length + 1`). Answering with free text is THREE separate, delayed
 ///   stdin writes: the row digit (consumed as the selector, NOT part of the
 ///   answer), the text, then Enter to submit — each in its own PTY read (a
-///   text+CR burst reads as a paste, not a submit). See [otherText].
+///   text+CR burst reads as a paste, not a submit). See [otherText]. The text
+///   frame is sent as a bracketed paste since #383, so a bunched delivery cannot
+///   lose it.
 ///
 /// [otherText] is an optional per-question free-text answer (parallel to
 /// [selections]); a non-empty, non-whitespace entry routes a COMPACT
@@ -216,8 +229,18 @@ List<AnswerFrame> buildAnswerFrames(
       // SINGLE-SELECT only: in multi-select the "Type something." row is a
       // checkbox that toggles (no free-text input), so this path is gated off
       // and the multi-select branch below ignores otherText entirely.
+      //
+      // THE TEXT GOES OUT AS A BRACKETED PASTE (#383). The gaps above are made on
+      // this client and are not kept end to end: a reconnect flush, the server's
+      // pre-attach queue or a stalled link can deliver the frames in ONE read, and
+      // then Claude's paste-burst detector absorbs a long text's CR (the question
+      // stays pending) or drops the digit (the default row is recorded). Measured
+      // on claude 2.1.308: bunched, a 149-byte text+CR recorded NOTHING; as a
+      // bracketed paste it was recorded whole, bunched with its digit or its CR,
+      // newlines and 1.2 KB included. See [_bracketOtherText] for the ESC rule.
       frames.add(AnswerFrame('${q.options.length + 1}', gap)); // "Type something."
-      frames.add(AnswerFrame(other, gap)); // the free-text answer
+      frames.add(AnswerFrame(_bracketOtherText(other), gap,
+          text: true, other: true)); // the free-text answer
       frames.add(const AnswerFrame('\r', gap)); // submit
     } else if (!multiQuestion &&
         !q.multiSelect &&
@@ -252,7 +275,7 @@ List<AnswerFrame> buildAnswerFrames(
         frames.add(const AnswerFrame('\x1b[B', settle)); // down to the chosen row
       }
       frames.add(const AnswerFrame('n', gap)); // open the note editor
-      frames.add(AnswerFrame(note, gap)); // the note text
+      frames.add(AnswerFrame(note, gap, text: true)); // the note text
       frames.add(const AnswerFrame('\x1b', gap)); // ESC — closes the EDITOR only
       frames.add(const AnswerFrame('\r', gap)); // commit the highlighted option
     } else if (q.multiSelect) {
@@ -311,6 +334,28 @@ List<AnswerFrame> buildAnswerFrames(
   return frames;
 }
 
+/// Wraps an Other answer in a bracketed paste (#383), so it survives frames that
+/// reach Claude bunched in one read. A text carrying ESC is returned bare, never
+/// stripped or sanitised: it may hold its own paste markers, and deleting an inner
+/// `ESC[200~` reconstitutes a close — the same refusal the worker's
+/// `bracketLongBody` makes. Refusing costs nothing; that text has the unbracketed
+/// shape that was already working when the gaps survive.
+String _bracketOtherText(String text) =>
+    text.contains('\x1b') ? text : '\x1b[200~$text\x1b[201~';
+
+/// The words inside a frame built by [_bracketOtherText]: the inverse, so the words
+/// a frame carried are read back from the FRAME rather than from whatever the card
+/// holds now. A bare text (one that carried ESC) is returned as it is.
+String _unbracketOtherText(String keys) {
+  const open = '\x1b[200~';
+  const close = '\x1b[201~';
+  return keys.length >= open.length + close.length &&
+          keys.startsWith(open) &&
+          keys.endsWith(close)
+      ? keys.substring(open.length, keys.length - close.length)
+      : keys;
+}
+
 /// True when [frames] end in a confirming Enter — multi-question (Enter
 /// finalizes the Submit-review screen) and, since the preview-layout fix,
 /// single-select-single too (its digit no longer submits on its own in every
@@ -321,16 +366,38 @@ List<AnswerFrame> buildAnswerFrames(
 /// actually landed (it can be coalesced away by cluster-path bunching) and
 /// re-send it: derived from the frames, so it stays true by construction rather
 /// than by a second rule kept in sync.
-bool answerNeedsConfirm(List<AnswerFrame> frames) =>
-    frames.isNotEmpty && frames.last.keys == '\r';
+///
+/// An Other text followed by more of the same answer never gets the re-sent Enter
+/// (#383). Measured on claude 2.1.308: when the bracketed text, its CR and the NEXT
+/// tab's digit and CR reach Claude in ONE read, the CR becomes a newline inside the
+/// Other editor and the digit is typed after it, so the question stays pending. A
+/// blind Enter would then commit "text, newline, 2" as the answer.
+///
+/// That is the only shape measured to go wrong, so it is the only one refused: an
+/// Other text whose own CR is followed by more than the final Submit-review CR, i.e.
+/// Other on a NON-last tab of a multi-question answer. A single-question Other, a
+/// note (its ESC already closed the editor) and an Other on the last tab keep the
+/// resend, which is their only automatic recovery.
+bool answerNeedsConfirm(List<AnswerFrame> frames) {
+  if (frames.isEmpty || frames.last.keys != '\r') return false;
+  for (var i = 0; i < frames.length; i++) {
+    // frames[i + 1] is the Other text's own committing CR; anything after it
+    // besides the last frame (the Submit-review CR) belongs to a later tab.
+    if (frames[i].other && frames.length > i + 3) return false;
+  }
+  return true;
+}
 
 /// Writes [frames] through [send], each followed by its own settle delay (none after
 /// the last). THE one pacing loop for an answer: the session screen's overlay and the
 /// sessions board (#337) both deliver through it, so a frame set built by
 /// [buildAnswerFrames] lands in the same separate stdin reads whichever surface sent it.
 ///
-/// Stops as soon as [alive] says the sender is gone, and returns whether every frame
-/// went out.
+/// Stops as soon as [alive] says the sender is gone, and returns false only then.
+/// [send] is fire-and-forget: a sender with no connection drops the keys silently
+/// and this still returns true, so the not-landed flag ([QuestionDrafts.markSent])
+/// stays up for an answer that was never typed. That is the safe direction: the
+/// notice costs one tap, a lost one types into a closed selector.
 Future<bool> deliverAnswerFrames(
   List<AnswerFrame> frames,
   void Function(String keys) send, {
@@ -528,6 +595,75 @@ const double kWideCtxColumn = 392; // the lead-up's own column
 const double kQuestionMin = 52;
 const double kQuestionMax = 260;
 
+/// The free-text drafts ("Other" answers and notes) typed into a question overlay,
+/// kept by whoever OUTLIVES the overlay (#383).
+///
+/// An answer that did not land makes the overlay resurface as a NEW widget with
+/// empty controllers, so a long dictated answer was gone and had to be retyped.
+/// This holds one question's drafts, keyed by its content signature
+/// (`questionSignature`): a different question starts empty, and the owner calls
+/// [clear] once the question is answered.
+///
+/// Only WORDS are kept. Picks are never restored (one Enter on a stale pick would
+/// type its digit into a selector that has already closed), and a note is shown
+/// as text, never put back into the note field.
+class QuestionDrafts {
+  String? key;
+  List<String?> other = const [];
+  List<String?> note = const [];
+
+  /// An answer carrying words was SENT for the question signed [key] and has not been
+  /// seen to land. The terminal may already hold part of it (an editor with the text
+  /// typed in, a highlight moved a row), so the overlay stops offering a blind Send
+  /// for THAT question: a replay types `4` and the text into an editor that already
+  /// holds them.
+  ///
+  /// Verified, never predicted: [markSent] sets it BEFORE the keys go out, so a card
+  /// mounted at any point afterwards (the "A question is waiting" chip during the
+  /// verify, a verify whose polls all failed) is already covered. Only [clear] drops
+  /// it, and `clear()` runs only on a positive gone-or-different observation. Tied
+  /// to the question's signature, not to a `toolUseId`: a hook-id -> transcript-id
+  /// re-report of the SAME question is exactly when the selector may have closed,
+  /// and a false notice costs one tap where a lost one types into a closed selector.
+  bool notLanded = false;
+
+  /// The words of the LAST answer sent for [key], as that answer carried them (read
+  /// off its frames). It is what the notice's copy block shows, because it is what
+  /// the terminal may hold, so it is NOT the live draft ([other], [note]). Every
+  /// send, the deliberate "Send again anyway" included, replaces it with what was
+  /// just sent.
+  List<String> sentWords = const [];
+
+  /// Whether the question signed [questionKey] is the one flagged by [markSent].
+  bool flaggedFor(String questionKey) => notLanded && key == questionKey;
+
+  /// The words the notice shows: [sentWords], untouched by whatever the card is
+  /// edited or tapped into after the send.
+  List<String> get words => sentWords;
+
+  /// Called just before [frames], the answer to the question signed [answeredKey],
+  /// is delivered. Flags it only if the answer carries words and these are the
+  /// drafts held for that question: an answer of plain digits replays harmlessly.
+  /// Each call re-takes the snapshot, so a second send shows the words it sent.
+  void markSent(String answeredKey, List<AnswerFrame> frames) {
+    if (key != answeredKey || !frames.any((f) => f.text)) return;
+    notLanded = true;
+    sentWords = [
+      for (final f in frames)
+        if (f.text && _unbracketOtherText(f.keys).trim().isNotEmpty)
+          _unbracketOtherText(f.keys).trim(),
+    ];
+  }
+
+  void clear() {
+    key = null;
+    other = const [];
+    note = const [];
+    notLanded = false;
+    sentWords = const [];
+  }
+}
+
 class QuestionOverlay extends StatefulWidget {
   const QuestionOverlay({
     super.key,
@@ -536,9 +672,16 @@ class QuestionOverlay extends StatefulWidget {
     required this.onDismiss,
     required this.onKey,
     this.contextText,
+    this.drafts,
+    this.draftKey = '',
   });
 
   final PendingQuestion question;
+
+  /// Where the typed Other/note text survives a resurfacing (#383), keyed by
+  /// [draftKey]. Null keeps the old behaviour (nothing outlives the overlay).
+  final QuestionDrafts? drafts;
+  final String draftKey;
 
   /// Claude's preceding message (the lead-up to the question), shown scrollable
   /// above the question so the full answer is readable before answering. Null
@@ -609,6 +752,12 @@ class _QuestionOverlayState extends State<QuestionOverlay> {
   /// corrected in the same pass rather than left as the next report.
   late List<TextEditingController> _noteControllers;
 
+  /// The notes typed before this overlay was rebuilt, per tab (#383). Never put back
+  /// into [_noteText] (a note needs its option picked and nothing is picked again):
+  /// they survive only as words, in [QuestionDrafts.words]' block and in the saved
+  /// drafts.
+  late List<String?> _keptNotes;
+
   /// Drives [_contextPanel]'s scroll view so a [Scrollbar] can show a thumb.
   /// Without one, a clipped lead-up reads as a COMPLETE message — the reported
   /// failure: the options were unjudgeable and nothing hinted at scrolling.
@@ -660,8 +809,51 @@ class _QuestionOverlayState extends State<QuestionOverlay> {
     _selected = [for (final _ in widget.question.questions) <int>{}];
     _otherText = [for (final _ in widget.question.questions) null];
     _noteText = [for (final _ in widget.question.questions) null];
+    _keptNotes = [for (final _ in widget.question.questions) null];
     _otherControllers = _freshControllers();
     _noteControllers = _freshControllers();
+    _restoreDrafts();
+  }
+
+  /// Puts back what was typed for THIS question before the overlay was rebuilt
+  /// (#383): the Other text, which implies its own row so it needs no pick. Nothing
+  /// else comes back as input: a pick or a note restored here would make the card a
+  /// ready-to-send answer that can replay into a selector that has already closed.
+  /// A note is kept as text only ([_keptNotes]). A draft kept for another question,
+  /// or for a prompt with a different number of tabs, is ignored.
+  void _restoreDrafts() {
+    final d = widget.drafts;
+    final n = widget.question.questions.length;
+    if (d == null || d.key != widget.draftKey || d.other.length != n) return;
+    for (var i = 0; i < n; i++) {
+      final o = d.other[i];
+      if (o != null) {
+        _otherText[i] = o;
+        _otherControllers[i].text = o;
+      }
+      _keptNotes[i] = i < d.note.length ? d.note[i] : null;
+    }
+  }
+
+  /// Mirrors the typed text into [QuestionOverlay.drafts]. Called at every change
+  /// rather than at dispose, so the owner's `clear()` on a landed answer cannot be
+  /// undone by the overlay unmounting afterwards.
+  void _saveDrafts() {
+    final d = widget.drafts;
+    if (d == null) return;
+    // Another question's flag and sent words must not follow the draft over to this
+    // one. The LIVE draft below is saved on every edit, flagged or not: the sent
+    // words are a separate snapshot ([QuestionDrafts.sentWords]).
+    if (d.key != widget.draftKey) {
+      d.notLanded = false;
+      d.sentWords = const [];
+    }
+    d
+      ..key = widget.draftKey
+      ..other = List.of(_otherText)
+      ..note = [
+        for (var i = 0; i < _noteText.length; i++) _noteText[i] ?? _keptNotes[i]
+      ];
   }
 
   @override
@@ -678,6 +870,7 @@ class _QuestionOverlayState extends State<QuestionOverlay> {
       _selected = [for (final _ in widget.question.questions) <int>{}];
       _otherText = [for (final _ in widget.question.questions) null];
       _noteText = [for (final _ in widget.question.questions) null];
+      _keptNotes = [for (final _ in widget.question.questions) null];
       // Swap the lists now, drop the old controllers at the END of this frame:
       // the fields they back are still mounted until the rebuild this update
       // schedules tears them down, and a controller disposed out from under a
@@ -694,6 +887,12 @@ class _QuestionOverlayState extends State<QuestionOverlay> {
       // exists to fix.
       _ctxExpandedOverride = null;
       if (_qScroll.hasClients) _qScroll.jumpTo(0);
+      // The SAME question re-reported under a new toolUseId (hook id -> transcript
+      // id) is not a new prompt: put its drafts back instead of wiping them (#383).
+      // A different question has a different key and is left empty. The "did not
+      // land" notice is tied to that same key ([QuestionDrafts.flaggedFor]), so it
+      // follows the question and not the id.
+      _restoreDrafts();
     }
   }
 
@@ -729,6 +928,7 @@ class _QuestionOverlayState extends State<QuestionOverlay> {
           ..clear()
           ..add(i);
       }
+      _saveDrafts();
     });
     _revealPreview(q, i);
   }
@@ -780,6 +980,7 @@ class _QuestionOverlayState extends State<QuestionOverlay> {
     setState(() {
       _selected[_tab].clear();
       _otherText[_tab] = _otherControllers[_tab].text;
+      _saveDrafts();
     });
   }
 
@@ -796,6 +997,7 @@ class _QuestionOverlayState extends State<QuestionOverlay> {
       } else {
         _noteText[_tab] = _noteControllers[_tab].text;
       }
+      _saveDrafts();
     });
   }
 
@@ -811,6 +1013,17 @@ class _QuestionOverlayState extends State<QuestionOverlay> {
   bool get _everyQuestionAnswered =>
       List.generate(_selected.length, _isAnswered)
           .every((answered) => answered);
+
+  /// THE one way an answer leaves this card: the button, hardware Enter and a soft
+  /// keyboard's Send action (`onSubmitted`) all come through here, so no trigger can
+  /// bypass the completeness or the partly-typed gate (#383). Only the explicit
+  /// "Send again anyway" button passes [deliberate]: a keystroke, on any platform,
+  /// must not replay words the terminal may already hold.
+  void _trySend({bool deliberate = false}) {
+    if (!_everyQuestionAnswered) return;
+    if (_partlyTyped && !deliberate) return;
+    _send();
+  }
 
   void _send() {
     widget.onSend(buildAnswerFrames(
@@ -878,9 +1091,11 @@ class _QuestionOverlayState extends State<QuestionOverlay> {
                   ),
                   // Same completeness gate as the Send button (_footer below) —
                   // an incomplete selection is a no-op, never a partial submit.
+                  // And, like the button, never a blind replay once the terminal
+                  // may hold part of the answer (#383): that takes a deliberate tap.
                   _SubmitIntent: CallbackAction<_SubmitIntent>(
                     onInvoke: (intent) {
-                      if (_everyQuestionAnswered) _send();
+                      _trySend();
                       return null;
                     },
                   ),
@@ -1360,9 +1575,12 @@ class _QuestionOverlayState extends State<QuestionOverlay> {
         maxLines: 4,
         textInputAction: TextInputAction.send,
         style: theme.textTheme.bodyLarge,
-        onChanged: (v) => setState(() => _otherText[_tab] = v),
+        onChanged: (v) => setState(() {
+          _otherText[_tab] = v;
+          _saveDrafts();
+        }),
         onSubmitted: (_) {
-          if (_everyQuestionAnswered) _send();
+          _trySend();
         },
         decoration: InputDecoration(
           hintText: 'Type your answer…',
@@ -1437,9 +1655,12 @@ class _QuestionOverlayState extends State<QuestionOverlay> {
         maxLines: 4,
         textInputAction: TextInputAction.send,
         style: theme.textTheme.bodyLarge,
-        onChanged: (v) => setState(() => _noteText[_tab] = v),
+        onChanged: (v) => setState(() {
+          _noteText[_tab] = v;
+          _saveDrafts();
+        }),
         onSubmitted: (_) {
-          if (_everyQuestionAnswered) _send();
+          _trySend();
         },
         decoration: InputDecoration(
           hintText: 'Add a note for this option…',
@@ -1613,6 +1834,59 @@ class _QuestionOverlayState extends State<QuestionOverlay> {
     );
   }
 
+  /// The answer carrying words was sent and has not been seen to land (#383): see
+  /// [QuestionDrafts.notLanded].
+  bool get _partlyTyped =>
+      widget.drafts?.flaggedFor(widget.draftKey) ?? false;
+
+  /// Shown instead of an inviting Send once [_partlyTyped]. The words stay visible
+  /// and selectable here whichever tab is open, so they can be copied out, exactly
+  /// as they were sent ([QuestionDrafts.words]).
+  Widget _partlyTypedNotice(ThemeData theme) {
+    final words = widget.drafts?.words ?? const <String>[];
+    return Container(
+      width: double.infinity,
+      padding: const EdgeInsets.all(10),
+      decoration: BoxDecoration(
+        color: theme.colorScheme.errorContainer.withValues(alpha: 0.5),
+        borderRadius: BorderRadius.circular(AppShape.medium),
+      ),
+      child: Column(
+        crossAxisAlignment: CrossAxisAlignment.start,
+        children: [
+          Text(
+            'This answer did not land and may be partly typed in the terminal. '
+            'Open the session there to finish it, or send it again anyway.',
+            style: theme.textTheme.bodySmall,
+          ),
+          if (words.isNotEmpty)
+            ConstrainedBox(
+              constraints: const BoxConstraints(maxHeight: 56),
+              child: SingleChildScrollView(
+                child: Padding(
+                  padding: const EdgeInsets.only(top: 6),
+                  child: SelectableText(
+                    words.join('\n'),
+                    key: const ValueKey('partly-typed-words'),
+                    style: theme.textTheme.bodySmall?.copyWith(
+                      // 'monospace' resolves to nothing off Android (#145).
+                      fontFamily: 'monospace',
+                      fontFamilyFallback: const [
+                        'Consolas',
+                        'Menlo',
+                        'DejaVu Sans Mono',
+                        'Courier New',
+                      ],
+                    ),
+                  ),
+                ),
+              ),
+            ),
+        ],
+      ),
+    );
+  }
+
   Widget _footer(ThemeData theme, PendingQuestionItem q) {
     final canSend = _everyQuestionAnswered;
     return Padding(
@@ -1652,21 +1926,39 @@ class _QuestionOverlayState extends State<QuestionOverlay> {
             ),
             const SizedBox(height: 8),
           ],
+          if (_partlyTyped) ...[
+            _partlyTypedNotice(theme),
+            const SizedBox(height: 8),
+          ],
           Row(
             children: [
               Expanded(
-                child: OutlinedButton(
-                  onPressed: widget.onDismiss,
-                  child: const Text('Answer in terminal'),
-                ),
+                // After an answer with words did not land, finishing it in the
+                // terminal is the default action and a replay is the deliberate one.
+                child: _partlyTyped
+                    ? FilledButton(
+                        onPressed: widget.onDismiss,
+                        child: const Text('Answer in terminal'),
+                      )
+                    : OutlinedButton(
+                        onPressed: widget.onDismiss,
+                        child: const Text('Answer in terminal'),
+                      ),
               ),
               const SizedBox(width: 10),
               Expanded(
-                child: FilledButton.icon(
-                  onPressed: canSend ? _send : null,
-                  icon: const Icon(Icons.send, size: 18),
-                  label: Text(canSend ? 'Send answer' : 'Pick an option'),
-                ),
+                child: _partlyTyped
+                    ? OutlinedButton.icon(
+                        onPressed:
+                            canSend ? () => _trySend(deliberate: true) : null,
+                        icon: const Icon(Icons.send, size: 18),
+                        label: Text(canSend ? 'Send again anyway' : 'Pick an option'),
+                      )
+                    : FilledButton.icon(
+                        onPressed: canSend ? _trySend : null,
+                        icon: const Icon(Icons.send, size: 18),
+                        label: Text(canSend ? 'Send answer' : 'Pick an option'),
+                      ),
               ),
             ],
           ),

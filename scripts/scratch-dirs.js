@@ -62,6 +62,15 @@ const DIRS = Object.freeze({
    * the assertion a property of the test instead of of the machine.
    */
   tests: process.env.WT_TESTS_DIR || path.join(PARENT, 'wt-tests'),
+  /**
+   * Per-run working directories for scripts/rig/probe-askq-layout.js.
+   *
+   * Must sit under the trusted tree (trust is inherited, so claude boots to its
+   * composer instead of the folder-trust dialog whose default row is "No, exit")
+   * and must NOT be under `rig`: rig.js's orphan sweep matches the `wt-rig` basename
+   * in command lines, and these directories are created and deleted per run.
+   */
+  askq: process.env.WT_ASKQ_DIR || path.join(PARENT, 'askq-runs'),
 });
 
 /** `C:\dev\x\y` -> `/c/dev/x/y`, the form Git Bash needs. */

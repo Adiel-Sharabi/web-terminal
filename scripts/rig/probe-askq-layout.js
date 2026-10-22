@@ -19,11 +19,37 @@
 //     once answered), so "nothing recorded" and "not yet answered" look alike —
 //     assert on which option came back, not on whether a question is pending;
 //   * each run gets its OWN temp cwd, or parallel probes read each other's
-//     transcripts.
+//     transcripts;
+//   * the child must not inherit WT_SESSION_ID / WT_HOOK_TOKEN: its hooks would
+//     report to production as the session that ran the probe, flipping it to
+//     `waiting` with the probe's question (an answer to it would be typed into the
+//     real agent).
+//
+// Known limit: the "tool is up" and "composer is up" steps are inferred from output
+// SILENCE (4 s / 2.5 s of no data), not from a marker. A slow boot or a slow tool
+// render can trip them early; that is the same fallback shape as #147's timer. The
+// verdict is unaffected (it is read from the transcript), but a run that drove the
+// keys too early shows as "no AskUserQuestion recorded".
 //
 // Usage:
 //   node scripts/rig/probe-askq-layout.js --shape preview-mq --keys "1,CR,2,3,RIGHT,CR"
 //   node scripts/rig/probe-askq-layout.js --shape plain-mq   --keys "1,2,3,RIGHT,CR"
+//
+// Exact frames, optionally BUNCHED (#383). `--frames` is a JSON array of strings, one
+// per frame, written verbatim (JSON escapes give you ESC: "\u001b[200~..."); it
+// replaces --keys. Each frame is one PTY write, `--gap` ms apart (default 600, the
+// companion's pacing). `--bunch` joins chosen frames into ONE write, the way a
+// reconnect flush, the server's pre-attach queue or a stalled link delivers frames
+// that were sent apart: comma-separated groups of 0-based indices ("0-2,3" = frames
+// 0,1,2 as one write, then frame 3), "all" = the whole set as one write. Frames not
+// named stay separate writes. `--expect` is a JSON array of substrings the recorded
+// answer must contain (reported as EXPECT).
+//   node scripts/rig/probe-askq-layout.js --shape plain-mq2 --bunch all \
+//     --frames '["4","\u001b[200~some long text\u001b[201~","\r","2","\r"]' \
+//     --expect '["some long text","Medium"]'
+//
+// `--keep` leaves the run's temp cwd, and the transcript folder claude wrote for it under
+// ~/.claude/projects, in place (both are deleted when the run ends).
 //
 // Env: CLAUDE_BIN overrides the claude executable; XTERM_HEADLESS points at an
 // @xterm/headless install (optional — without it the screen snapshots are
@@ -35,16 +61,60 @@ const os = require('os');
 const path = require('path');
 const { execFileSync } = require('child_process');
 
-const pty = require(path.join(__dirname, '..', '..', 'node_modules', 'node-pty'));
+// A worktree has no node_modules of its own (never junction one in), so fall back to
+// NODE_PATH, which a run from a worktree points at the checkout that has them.
+const localPty = path.join(__dirname, '..', '..', 'node_modules', 'node-pty');
+const pty = require(fs.existsSync(localPty) ? localPty : 'node-pty');
 const { claudeProjectDirName } = require(path.join(__dirname, '..', '..', 'lib', 'transcript.js'));
+const { DIRS } = require('../scratch-dirs');
 
 // ---------------------------------------------------------------- arguments
 function arg(name, fallback) {
   const i = process.argv.indexOf('--' + name);
   return i >= 0 && process.argv[i + 1] ? process.argv[i + 1] : fallback;
 }
+const KEEP = process.argv.includes('--keep');
 const SHAPE = arg('shape', 'preview-mq');
 const KEYS = arg('keys', '').split(',').map(s => s.trim()).filter(Boolean);
+const FRAMES = arg('frames') ? JSON.parse(arg('frames')) : null;
+const GAP_MS = Number(arg('gap', '600'));
+if (!Number.isFinite(GAP_MS) || GAP_MS < 0) throw new Error('--gap must be a non-negative number of ms, got ' + JSON.stringify(arg('gap')));
+const BUNCH = arg('bunch');
+const EXPECT = arg('expect') ? JSON.parse(arg('expect')) : [];
+if (!(Array.isArray(EXPECT) && EXPECT.every(e => typeof e === 'string'))) {
+  throw new Error('--expect must be a JSON array of strings');
+}
+if (BUNCH && !FRAMES) {
+  throw new Error('--bunch groups the writes of --frames, so it needs --frames');
+}
+if (FRAMES && !(Array.isArray(FRAMES) && FRAMES.every(f => typeof f === 'string'))) {
+  throw new Error('--frames must be a JSON array of strings');
+}
+
+// The PTY writes a frame set becomes: `--bunch` joins contiguous frames into one write.
+function planWrites(frames, bunch) {
+  const spec = bunch === 'all' ? ['0-' + (frames.length - 1)] : (bunch ? bunch.split(',') : []);
+  const joined = new Map(); // first index -> last index of its group
+  for (const g of spec) {
+    const m = /^(\d+)(?:-(\d+))?$/.exec(g.trim());
+    if (!m) throw new Error('bad --bunch group ' + JSON.stringify(g));
+    const a = Number(m[1]);
+    const b = m[2] === undefined ? a : Number(m[2]);
+    if (a > b || b >= frames.length) throw new Error('--bunch group out of range: ' + g);
+    for (const [from, to] of joined) {
+      if (a <= to && from <= b) throw new Error('--bunch groups overlap: ' + g + ' and ' + from + '-' + to);
+    }
+    joined.set(a, b);
+  }
+  const writes = [];
+  for (let i = 0; i < frames.length;) {
+    const last = joined.has(i) ? joined.get(i) : i;
+    writes.push(frames.slice(i, last + 1).join(''));
+    i = last + 1;
+  }
+  return writes;
+}
+if (FRAMES) planWrites(FRAMES, BUNCH); // reject a bad --bunch before claude is spawned
 const TIMEOUT_MS = Number(arg('timeout', '150000'));
 
 // ------------------------------------------------------------- claude binary
@@ -164,11 +234,23 @@ const TOK = {
 const keyBytes = t => (TOK[t] !== undefined ? TOK[t] : t);
 
 // ------------------------------------------------------------------- run it
-const cwd = fs.mkdtempSync(path.join(os.tmpdir(), 'askq-'));
+// A scratch cwd UNDER the trusted tree (scratch-dirs.js owns where): trust is
+// inherited, so claude boots straight to its composer instead of parking on the
+// folder-trust dialog, whose default row is "No, exit" (#190).
+// Resolved, so a WT_ASKQ_DIR with a trailing separator still compares equal to the
+// parent of the mkdtemp dir below (path.join drops the separator; a raw string compare
+// would then skip the cleanup silently).
+const askqRoot = path.resolve(DIRS.askq);
+fs.mkdirSync(askqRoot, { recursive: true });
+const cwd = fs.mkdtempSync(path.join(askqRoot, 'r-'));
+// Scrub EVERY CLAUDE* variable (a nested child session persists no transcript), except
+// the Git Bash path claude needs on Windows, and EVERY WT_* variable (see the header:
+// the child's hooks would otherwise report to production as the calling session).
 const childEnv = { ...process.env };
-delete childEnv.CLAUDE_CODE_CHILD_SESSION; // else the transcript is never written
-delete childEnv.CLAUDE_CODE_SESSION_ID;
-delete childEnv.CLAUDE_CODE_ENTRYPOINT;
+for (const k of Object.keys(childEnv)) {
+  if (k === 'CLAUDE_CODE_GIT_BASH_PATH') continue;
+  if (/^CLAUDE/i.test(k) || /^WT_/i.test(k)) delete childEnv[k];
+}
 
 const p = pty.spawn(resolveClaude(), ['--dangerously-skip-permissions'], {
   name: 'xterm-256color', cols: COLS, rows: ROWS, cwd, env: childEnv,
@@ -197,6 +279,13 @@ p.onData(d => {
 });
 
 const tick = setInterval(() => {
+  // A trusted cwd (see above) never shows the trust prompt: the boot just goes quiet
+  // at the composer.
+  if (state === 'trust' && Date.now() - t0 > 4000 && Date.now() - lastData > 2500) {
+    state = 'settle';
+    buf = '';
+    console.log('[' + stamp() + '] no trust prompt — composer is up');
+  }
   if (state === 'settle' && Date.now() - lastData > 2500) {
     state = 'awaiting-tool';
     elicitAt = Date.now();
@@ -211,9 +300,25 @@ const tick = setInterval(() => {
     state = 'driving';
     console.log('[' + stamp() + '] tool idle-waiting — capturing');
     console.log('\n===== SCREEN A: initial tool render =====\n' + screen() + '\n');
-    driveKeys();
+    if (FRAMES) driveFrames(); else driveKeys();
   }
 }, 500);
+
+// Writes the exact `--frames`, bunched per `--bunch`, `--gap` ms apart (#383).
+async function driveFrames() {
+  const sleep = ms => new Promise(r => setTimeout(r, ms));
+  const writes = planWrites(FRAMES, BUNCH);
+  console.log('[' + stamp() + '] ' + FRAMES.length + ' frames as ' + writes.length + ' write(s), ' + GAP_MS + 'ms apart');
+  for (let i = 0; i < writes.length; i++) {
+    p.write(writes[i]);
+    console.log('[' + stamp() + '] >>> write ' + (i + 1) + '/' + writes.length + ': ' +
+      JSON.stringify(writes[i]).slice(0, 120) + ' (' + Buffer.byteLength(writes[i]) + ' B)');
+    if (i < writes.length - 1) await sleep(GAP_MS);
+  }
+  await sleep(9000); // let claude record the tool_result
+  console.log('===== FINAL screen =====\n' + screen() + '\n');
+  verdict();
+}
 
 async function driveKeys() {
   const sleep = ms => new Promise(r => setTimeout(r, ms));
@@ -230,11 +335,19 @@ async function driveKeys() {
 }
 
 // ------------------------------------------------------------------ verdict
+// Exit status: a run that was told what to expect (--expect) and did not confirm it
+// exits non-zero, so a script or CI step can tell a pass from a miss. Runs once: the
+// timeout and a drive that outlives it can both arrive here.
+let exitCode = 0;
+let verdictDone = false;
 // The ONLY trustworthy readout: what claude recorded as the answer.
 function verdict() {
+  if (verdictDone) return;
+  verdictDone = true;
+  if (EXPECT.length) exitCode = 1; // cleared only by an answer that holds every expectation
   clearInterval(tick);
   try { p.kill(); } catch { /* already gone */ }
-  const dir = path.join(os.homedir(), '.claude', 'projects', claudeProjectDirName(cwd));
+  const dir = transcriptDir();
   console.log('\n================ VERDICT (from transcript) ================');
   console.log('cwd:        ' + cwd);
   console.log('transcript: ' + dir);
@@ -264,6 +377,8 @@ function verdict() {
     console.log('   once answered, so this means the prompt was never submitted.)');
     return finish();
   }
+  let confirmed = 0;
+  let anyMissing = false;
   for (const a of asks) {
     console.log('\n--- asked (' + a.id + ') ---');
     for (const [i, q] of (a.input.questions || []).entries()) {
@@ -276,21 +391,83 @@ function verdict() {
     const r = results.get(a.id);
     if (!r) {
       console.log('  ANSWER: (none recorded — still pending / never submitted)');
+      anyMissing = true; // an unanswered ask confirms nothing
       continue;
     }
-    const body = typeof r.content === 'string' ? r.content : JSON.stringify(r.content);
+    const body = resultText(r.content);
     console.log('  ANSWER: ' + body.replace(/\s+/g, ' ').slice(0, 600));
+    if (EXPECT.length) {
+      const missing = EXPECT.filter(e => !body.includes(e));
+      console.log(missing.length ? '  EXPECT: MISSING ' + JSON.stringify(missing) : '  EXPECT: all ' + EXPECT.length + ' found');
+      if (missing.length) anyMissing = true; else confirmed++;
+    }
   }
+  if (EXPECT.length && confirmed > 0 && !anyMissing) exitCode = 0;
   finish();
 }
 
-function finish() {
-  console.log('\n(temp cwd left in place for inspection: ' + cwd + ')');
-  setTimeout(() => process.exit(0), 400);
+// The text of a tool_result: a string, or an array of content blocks (take each block's
+// own text, so --expect matches what was recorded and not its JSON escaping).
+function resultText(content) {
+  if (typeof content === 'string') return content;
+  if (Array.isArray(content)) {
+    return content.map(b => (typeof b === 'string' ? b : b && typeof b.text === 'string' ? b.text : JSON.stringify(b))).join('\n');
+  }
+  return JSON.stringify(content);
+}
+
+// The folder claude writes this run's transcript to: ~/.claude/projects/<encoded cwd>.
+function transcriptDir() {
+  return path.join(os.homedir(), '.claude', 'projects', claudeProjectDirName(cwd));
+}
+
+// Removes the transcript folder of THIS run and nothing else: the path is derived from
+// the run's own mkdtemp cwd, and it is only removed when that cwd sits directly under
+// the askq root and the folder, named by the encoding of that cwd, resolves to a direct
+// child of the projects directory (an encoding that escaped it would fail the dirname check).
+function removeTranscriptDir() {
+  const projects = path.join(os.homedir(), '.claude', 'projects');
+  const dir = transcriptDir();
+  if (path.resolve(path.dirname(cwd)) !== askqRoot) return null;
+  if (path.dirname(dir) !== projects) return null;
+  if (!fs.existsSync(dir)) return null;
+  fs.rmSync(dir, { recursive: true, force: true });
+  return dir;
+}
+
+// Windows will not remove a directory a live process has as its cwd, so wait for the
+// child to be gone before deleting the run dir, and retry briefly.
+let exited = false;
+p.onExit(() => { exited = true; });
+
+async function removeRunDir() {
+  for (let i = 0; i < 20 && !exited; i++) await new Promise(r => setTimeout(r, 250));
+  for (let i = 0; i < 10; i++) {
+    try { fs.rmSync(cwd, { recursive: true, force: true }); return true; } catch { await new Promise(r => setTimeout(r, 300)); }
+  }
+  return false;
+}
+
+async function finish() {
+  if (KEEP) {
+    console.log('\n(temp cwd kept for inspection: ' + cwd + ')');
+    console.log('(transcript folder kept: ' + transcriptDir() + ')');
+  } else if (path.resolve(path.dirname(cwd)) === askqRoot) {
+    const gone = await removeRunDir();
+    console.log(gone ? '\n(temp cwd removed; --keep leaves it): ' + cwd : '\n(could NOT remove temp cwd: ' + cwd + ')');
+    // After the child is gone, so claude cannot write into it again.
+    try {
+      const removed = removeTranscriptDir();
+      console.log(removed ? '(transcript folder removed: ' + removed + ')' : '(no transcript folder to remove)');
+    } catch (e) {
+      console.log('(could NOT remove the transcript folder: ' + e.message + ')');
+    }
+  }
+  setTimeout(() => process.exit(exitCode), 400);
 }
 
 setTimeout(() => {
-  if (state !== 'done') {
+  if (state !== 'done' && !verdictDone) {
     console.log('[' + stamp() + '] TIMEOUT in state=' + state);
     console.log('===== TIMEOUT screen =====\n' + screen() + '\n');
     verdict();
