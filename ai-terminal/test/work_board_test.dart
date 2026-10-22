@@ -268,6 +268,9 @@ void main() {
     /// The pending question per session id, as `GET /pending-question` answers it.
     late Map<String, Map<String, dynamic>> questions;
 
+    /// What `GET /pending-question` answers with when it is not 200 (#383: a failed poll).
+    late int questionStatus;
+
     /// Every key the board wrote, as (session id, keys) - through the injected
     /// [SessionInputRunner], i.e. exactly what would go down the session's socket.
     late List<(String, String)> sent;
@@ -287,6 +290,7 @@ void main() {
           paths.add(req.url.path);
           final q = RegExp(r'^/api/sessions/([^/]+)/pending-question$').firstMatch(req.url.path);
           if (q != null) {
+            if (questionStatus != 200) return http.Response('', questionStatus);
             final pending = questions[q.group(1)];
             return http.Response(jsonEncode(pending == null ? {'pending': false} : {'pending': true, 'question': pending}), 200);
           }
@@ -346,6 +350,7 @@ void main() {
       paths = [];
       sent = [];
       questions = {};
+      questionStatus = 200;
       inputReachable = true;
       capabilities = ['session-brief', 'session-hide', 'favorites-sync', 'session-clear-wait', 'session-handoff'];
       closed = [
@@ -614,6 +619,71 @@ void main() {
       expect(find.byKey(ValueKey('board-answer-${_server.baseUrl}-q-0')), findsOneWidget, reason: 'put back');
       ScaffoldMessenger.of(tester.element(find.byType(ListView))).clearSnackBars();
       await tester.pumpWidget(const SizedBox());
+    });
+
+    group('#383: the answer is re-checked just before its first key', () {
+      Map<String, dynamic> pick(String question) => {
+            'toolUseId': 't1',
+            'questions': [
+              {
+                'header': 'H',
+                'question': question,
+                'multiSelect': false,
+                'options': [
+                  {'label': 'A'},
+                  {'label': 'B'},
+                ],
+              },
+            ],
+          };
+
+      Future<void> pressA(WidgetTester tester) async {
+        await tester.tap(find.byKey(ValueKey('board-answer-${_server.baseUrl}-q-0')));
+        await advance(tester, const Duration(seconds: 3));
+      }
+
+      testWidgets('a question replaced since the card was drawn: ZERO writes, and the card shows the new one',
+          (tester) async {
+        questions = {'q': pick('Pick one')};
+        rows = [_row('q', 'Asker', status: 'waiting', waitingFor: 'question')];
+        await pump(tester, r: await repo());
+        await settle(tester);
+        expect(find.textContaining('Question: Pick one'), findsOneWidget);
+        questions = {'q': pick('Pick another')}; // answered elsewhere, and a new one asked
+        await pressA(tester);
+        expect(sent, isEmpty, reason: 'an answer for the old question must not reach the new one');
+        expect(find.text('"Asker" is asking something else now - nothing was sent'), findsOneWidget);
+        expect(find.textContaining('Question: Pick another'), findsOneWidget);
+        ScaffoldMessenger.of(tester.element(find.byType(ListView))).clearSnackBars();
+        await tester.pumpWidget(const SizedBox());
+      });
+
+      testWidgets('a question no longer asked: ZERO writes', (tester) async {
+        questions = {'q': pick('Pick one')};
+        rows = [_row('q', 'Asker', status: 'waiting', waitingFor: 'question')];
+        await pump(tester, r: await repo());
+        await settle(tester);
+        questions = {};
+        await pressA(tester);
+        expect(sent, isEmpty);
+        expect(find.text('"Asker" is no longer asking it - nothing was sent'), findsOneWidget);
+        ScaffoldMessenger.of(tester.element(find.byType(ListView))).clearSnackBars();
+        await tester.pumpWidget(const SizedBox());
+      });
+
+      testWidgets('a check that fails refuses: ZERO writes, and the buttons come back', (tester) async {
+        questions = {'q': pick('Pick one')};
+        rows = [_row('q', 'Asker', status: 'waiting', waitingFor: 'question')];
+        await pump(tester, r: await repo());
+        await settle(tester);
+        questionStatus = 500;
+        await pressA(tester);
+        expect(sent, isEmpty, reason: 'a stalled link is no evidence the question is still there');
+        expect(find.text('Could not check "Asker" is still asking it, so nothing was sent'), findsOneWidget);
+        expect(find.byKey(ValueKey('board-answer-${_server.baseUrl}-q-0')), findsOneWidget);
+        ScaffoldMessenger.of(tester.element(find.byType(ListView))).clearSnackBars();
+        await tester.pumpWidget(const SizedBox());
+      });
     });
 
     testWidgets('#337: a multi-question prompt offers no one-press buttons - it is answered in the session', (tester) async {

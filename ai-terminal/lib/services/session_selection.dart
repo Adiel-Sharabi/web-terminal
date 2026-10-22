@@ -1,35 +1,42 @@
 import 'package:flutter/foundation.dart';
 
-/// What the detail pane of the wide split shows: one session, or the sessions board
-/// (#337).
+/// What the detail pane of the wide split shows: one session, the sessions board
+/// (#337), or the questions inbox (#383).
 ///
-/// Exactly TWO states. The board IS what the pane shows when no session is open: it
-/// is the default on launch and where closing a session lands, so there is no third
-/// "nothing picked" state whose placeholder only said "pick something". One value, so
-/// the pane can never be asked to show a session AND the board at once.
+/// The board IS what the pane shows when nothing else is picked: it is the default on
+/// launch and where closing a session lands, so there is no "nothing picked" state
+/// whose placeholder only said "pick something". One value, so the pane can never be
+/// asked to show a session AND a board at once.
 @immutable
 class DetailPane {
-  const DetailPane._(this.sessionId);
+  const DetailPane._(this.sessionId, {this.isInbox = false});
 
   /// The sessions board, beside the list (#337). Also the start state.
   static const DetailPane board = DetailPane._(null);
 
+  /// The questions inbox, beside the list (#383).
+  static const DetailPane inbox = DetailPane._(null, isInbox: true);
+
   /// One session, by id.
   const DetailPane.session(String id) : this._(id);
 
-  /// The session shown, or null when the pane shows the board.
+  /// The session shown, or null when the pane shows the board or the inbox.
   final String? sessionId;
 
-  bool get isBoard => sessionId == null;
+  /// The pane shows the questions inbox.
+  final bool isInbox;
+
+  bool get isBoard => sessionId == null && !isInbox;
 
   @override
-  bool operator ==(Object other) => other is DetailPane && other.sessionId == sessionId;
+  bool operator ==(Object other) =>
+      other is DetailPane && other.sessionId == sessionId && other.isInbox == isInbox;
 
   @override
-  int get hashCode => sessionId.hashCode;
+  int get hashCode => Object.hash(sessionId, isInbox);
 
   @override
-  String toString() => isBoard ? 'DetailPane.board' : 'DetailPane($sessionId)';
+  String toString() => isInbox ? 'DetailPane.inbox' : (isBoard ? 'DetailPane.board' : 'DetailPane($sessionId)');
 }
 
 /// Single source of truth for "what the wide split view's detail pane shows".
@@ -63,7 +70,7 @@ class SessionSelection {
   /// What the split view's detail pane shows.
   final ValueNotifier<DetailPane> pane = ValueNotifier<DetailPane>(DetailPane.board);
 
-  /// The session the split view shows, or null when the board is showing.
+  /// The session the split view shows, or null when the board or the inbox is showing.
   String? get selectedId => pane.value.sessionId;
 
   /// Whether the split view's detail pane shows the board (#337).
@@ -75,6 +82,12 @@ class SessionSelection {
   /// Shows the board in the pane. Already showing it: a no-op, exactly as
   /// selecting the session that is already showing is.
   void showBoard() => pane.value = DetailPane.board;
+
+  /// Shows the questions inbox in the pane (#383).
+  void showInbox() => pane.value = DetailPane.inbox;
+
+  /// Whether the split view's detail pane shows the questions inbox.
+  bool get inboxShown => pane.value.isInbox;
 
   /// No session open any more (it ended): back to the board.
   void clear() => pane.value = DetailPane.board;

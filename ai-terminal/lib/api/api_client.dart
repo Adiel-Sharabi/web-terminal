@@ -485,6 +485,23 @@ class ApiClient {
         : const <ClosedSession>[];
   }
 
+  /// The background and dispatched agents the agent CLI lists on this machine
+  /// (`GET /api/dashboard/background-agents`, #366), or null when the server says the
+  /// listing is unavailable (no CLI, a failed run). A server too old for the route
+  /// answers 404, which is thrown as an [ApiException] for the caller to remember.
+  Future<List<BackgroundAgentRow>?> backgroundAgents() async {
+    final res = await _send('GET', '/api/dashboard/background-agents');
+    final m = _asMap(_decode(res));
+    if (m['available'] != true) return null;
+    final list = m['agents'];
+    return list is List
+        ? list
+            .map((j) => BackgroundAgentRow.fromJson(server, j))
+            .whereType<BackgroundAgentRow>()
+            .toList(growable: false)
+        : const <BackgroundAgentRow>[];
+  }
+
   /// Sets or clears [sessionId]'s pin (`PATCH /api/sessions/:id/favorite`,
   /// issue #60).
   ///

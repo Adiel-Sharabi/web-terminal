@@ -35,6 +35,7 @@ import '../services/desktop_alert_service.dart';
 import '../services/dictation_service.dart';
 import '../services/detach_window_service.dart';
 import '../services/notification_service.dart';
+import '../services/question_draft_store.dart';
 import '../services/favorite_toggle.dart';
 import '../services/session_repository.dart';
 import '../services/session_selection.dart';
@@ -1354,9 +1355,13 @@ class _SessionScreenState extends State<SessionScreen>
   // `hook-<id>-<seq>` (live) and the real `toolu_…` (transcript), which used to
   // read as a brand-new question and re-show the overlay.
   String? _dismissedQuestionKey;
-  // Other/note text typed into the overlay, kept here so a resurfaced overlay
-  // (an answer that did not land) finds it again instead of starting empty (#383).
-  final QuestionDrafts _questionDrafts = QuestionDrafts();
+  // Other/note text typed into the overlay, kept per SESSION so a resurfaced overlay
+  // (an answer that did not land) finds it again instead of starting empty, and so
+  // the questions inbox answering the same session sees the same words and flag
+  // (#383). Looked up, not owned. A question is only fetched once the server is
+  // known, so the empty fallback is never the key while a card is shown.
+  QuestionDrafts get _questionDrafts => QuestionDraftStore.instance.of(
+      _api?.server.baseUrl ?? _session?.server.baseUrl ?? '', widget.sessionId);
   String?
   _questionContext; // Claude's preceding message, shown above the question
   Timer? _questionPoll;

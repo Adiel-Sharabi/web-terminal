@@ -34,6 +34,7 @@ import '../services/resource_monitor.dart';
 import '../services/session_repository.dart';
 import '../theme/app_theme.dart';
 import '../theme/status_colors.dart';
+import '../util/inbox_items.dart' show inboxBadgeCount;
 import '../util/session_tree.dart';
 import '../widgets/app_version_label.dart';
 import '../widgets/attention_detail_sheet.dart';
@@ -50,6 +51,7 @@ import '../widgets/session_family.dart';
 import '../widgets/status_dot.dart';
 import 'session_screen.dart';
 import 'settings_screen.dart';
+import 'questions_inbox_screen.dart';
 import 'work_board_screen.dart';
 
 // #180 — `favoriteToggleAllowed` and the toggle itself moved to
@@ -78,6 +80,7 @@ class DashboardScreen extends StatefulWidget {
     this.selectedId,
     this.onSelectSession,
     this.onShowBoard,
+    this.onShowInbox,
   });
 
   /// In the wide-screen split view, the id of the session shown in the detail
@@ -92,6 +95,10 @@ class DashboardScreen extends StatefulWidget {
   /// in the detail pane, beside this list (#337), instead of pushing it as a
   /// full-screen route over everything.
   final VoidCallback? onShowBoard;
+
+  /// When set (split view), the questions button shows the questions inbox in the
+  /// detail pane (#383) instead of pushing it as a full-screen route.
+  final VoidCallback? onShowInbox;
 
   @override
   State<DashboardScreen> createState() => _DashboardScreenState();
@@ -237,6 +244,30 @@ class _DashboardScreenState extends State<DashboardScreen> {
         builder: (ctx) => WorkBoardScreen(
           // Close the board, then open the session exactly as a tap on its row
           // here would: selected in the split, or pushed on a phone.
+          onOpenSession: (s) {
+            Navigator.of(ctx).pop();
+            _openSession(s);
+          },
+          onOpenInbox: () {
+            Navigator.of(ctx).pop();
+            _openInbox();
+          },
+        ),
+      ),
+    );
+  }
+
+  /// The questions inbox (#383): split view shows it in the detail pane, a phone
+  /// pushes it. Opening a session from it works as a tap on its row here does.
+  void _openInbox() {
+    final onShow = widget.onShowInbox;
+    if (onShow != null) {
+      onShow();
+      return;
+    }
+    Navigator.of(context).push(
+      MaterialPageRoute(
+        builder: (ctx) => QuestionsInboxScreen(
           onOpenSession: (s) {
             Navigator.of(ctx).pop();
             _openSession(s);
@@ -586,6 +617,25 @@ class _DashboardScreenState extends State<DashboardScreen> {
                             );
                           },
                         ),
+                        // #383 - every question waiting on you, answered in
+                        // one place. The count is the blocking items only, read
+                        // off the rows already here: no request of its own.
+                        Builder(builder: (context) {
+                          final waiting = inboxBadgeCount(sessions ?? const <Session>[]);
+                          return IconButton(
+                            key: const ValueKey('open-questions-inbox'),
+                            icon: Badge(
+                              key: const ValueKey('questions-inbox-badge'),
+                              isLabelVisible: waiting > 0,
+                              label: Text('$waiting'),
+                              child: const Icon(Icons.question_answer_outlined),
+                            ),
+                            tooltip: waiting > 0
+                                ? 'Questions: $waiting waiting for you'
+                                : 'Questions: nothing waiting for you',
+                            onPressed: _openInbox,
+                          );
+                        }),
                         // #306 — what every session is working on.
                         IconButton(
                           key: const ValueKey('open-work-board'),

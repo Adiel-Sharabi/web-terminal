@@ -2495,3 +2495,66 @@ class MachineProfile {
     );
   }
 }
+
+/// One background or dispatched agent the agent CLI lists on a machine (#366), as
+/// `GET /api/dashboard/background-agents` sends it (shaped by
+/// `lib/background-listing.js`). Machine-level: it carries no parent session, only
+/// the conversation id ([sessionId]) it runs.
+class BackgroundAgentRow {
+  const BackgroundAgentRow({
+    required this.server,
+    this.id,
+    this.sessionId,
+    this.name,
+    this.cwdTail,
+    this.state,
+    this.status,
+    this.waitingFor,
+    this.startedAt,
+  });
+
+  /// The machine whose CLI listed it.
+  final ServerConfig server;
+  final String? id;
+
+  /// The conversation it runs (a lowercase UUID), or null.
+  final String? sessionId;
+  final String? name;
+
+  /// The last segment of its working directory.
+  final String? cwdTail;
+  final String? state;
+  final String? status;
+
+  /// What it is waiting on, in the CLI's words, or null when it is not waiting.
+  final String? waitingFor;
+
+  /// Epoch milliseconds, or null.
+  final int? startedAt;
+
+  /// A row with neither an id nor a conversation is dropped, as the server drops it.
+  static BackgroundAgentRow? fromJson(ServerConfig server, dynamic json) {
+    if (json is! Map) return null;
+    String? str(String k) {
+      final v = json[k];
+      if (v is! String) return null;
+      final t = v.trim();
+      return t.isEmpty ? null : t;
+    }
+
+    final id = str('id');
+    final sessionId = str('sessionId');
+    if (id == null && sessionId == null) return null;
+    return BackgroundAgentRow(
+      server: server,
+      id: id,
+      sessionId: sessionId,
+      name: str('name'),
+      cwdTail: str('cwdTail'),
+      state: str('state'),
+      status: str('status'),
+      waitingFor: str('waitingFor'),
+      startedAt: _asInt(json['startedAt']),
+    );
+  }
+}
