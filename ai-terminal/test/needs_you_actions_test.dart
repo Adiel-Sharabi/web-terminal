@@ -165,6 +165,90 @@ void main() {
           reason: 'the session screen reads the same drafts: no blind replay there either');
       expect(drafts.words, ['a long answer']);
     }, timeout: const Timeout(Duration(seconds: 30)));
+
+    test('F4: a question answered elsewhere while the socket attaches gets ZERO keys', () async {
+      final a = await actions();
+      final s = _session();
+      final shown = _pq('Pick one');
+      final drafts = QuestionDraftStore.instance.of(_server.baseUrl, s.id)..key = questionSignature(shown);
+      final slow = NeedsYouActions(
+        repository: a.repository,
+        client: client,
+        input: (s, body) async {
+          // The attach takes its time (seconds, on a slow link); meanwhile the
+          // question is answered in the terminal and another is asked. A check made
+          // at the press has long since come back by then.
+          await Future<void>.delayed(const Duration(milliseconds: 200));
+          pending = _qJson('Pick another');
+          await body(written.add);
+          return true;
+        },
+        say: said.add,
+      );
+      addTearDown(slow.dispose);
+      final frames = buildAnswerFrames(shown.questions, [<int>{}], otherText: ['words']);
+      expect(await slow.answer(s, shown, frames), PreWriteVerdict.changed);
+      expect(written, isEmpty, reason: 'the re-check runs on the attached socket, right before the first key');
+      expect(drafts.notLanded, isFalse, reason: 'flagged only as a first key goes out');
+      expect(said.single, contains('asking something else now'));
+    });
+
+    test('F6: a poll that sees the question gone drops its not-landed flag, so the same question later is not blocked',
+        () async {
+      final a = await actions();
+      final s = _session();
+      final shown = _pq('Pick one');
+      final sig = questionSignature(shown);
+      final drafts = QuestionDraftStore.instance.of(_server.baseUrl, s.id)..key = sig;
+      drafts.markSent(sig, buildAnswerFrames(shown.questions, [<int>{}], otherText: ['half typed']));
+      expect(a.quickAnswerBlocked(s, shown), isTrue);
+
+      status = 503; // a failed poll is no observation: the flag stays
+      await a.refreshQuestions([s]);
+      expect(drafts.flaggedFor(sig), isTrue);
+
+      status = 200;
+      pending = null; // answered in the terminal
+      await Future<void>.delayed(const Duration(milliseconds: 5));
+      await a.refreshQuestions([s]);
+      pending = _qJson('Pick one'); // the very same question, asked again
+      await Future<void>.delayed(const Duration(milliseconds: 5));
+      await a.refreshQuestions([s]);
+      expect(a.questionFor(s), isNotNull);
+      expect(drafts.flaggedFor(sig), isFalse);
+      expect(a.quickAnswerBlocked(s, shown), isFalse);
+    });
+
+    test('a read-only look at a session never creates drafts for it', () async {
+      final a = await actions();
+      final s = _session();
+      expect(a.quickAnswerBlocked(s, _pq('Pick one')), isFalse);
+      expect(QuestionDraftStore.instance.peek(_server.baseUrl, s.id), isNull);
+    });
+
+    test('quickAnswer refuses, with ZERO keys, a question one press cannot answer', () async {
+      final a = await actions();
+      final multi = PendingQuestion.fromJson({
+        'pending': true,
+        'question': {
+          'toolUseId': 'm',
+          'questions': [
+            {
+              'header': 'H',
+              'question': 'Which ones?',
+              'multiSelect': true,
+              'options': [
+                {'label': 'A'},
+                {'label': 'B'},
+              ],
+            },
+          ],
+        },
+      })!;
+      expect(await a.quickAnswer(_session(), multi, 0), PreWriteVerdict.refused);
+      expect(written, isEmpty);
+      expect(said.single, contains('nothing was sent'));
+    });
   });
 
   test('the session screen looks its drafts up in the store, and owns none of its own', () {

@@ -224,10 +224,24 @@ class _QuestionsInboxScreenState extends State<QuestionsInboxScreen> {
 
   void _fetchAll() {
     if (_disposed) return;
+    _pruneFocusCaches();
     unawaited(_needs.refreshQuestions(_sessions.where((s) => needKindOf(s) == NeedKind.question)));
     unawaited(_refreshRecaps());
     unawaited(_refreshAttention());
     unawaited(_refreshFocused());
+  }
+
+  /// Drops the focused-view reads of sessions that are no longer items (the one still
+  /// on screen under a banner is kept), so the maps cannot grow for the app's life.
+  void _pruneFocusCaches() {
+    final live = {
+      for (final it in _items)
+        if (it.session != null) sessionKey(it.session!),
+      if (_snapshot?.session != null) sessionKey(_snapshot!.session!),
+    };
+    _tails.removeWhere((k, _) => !live.contains(k));
+    _context.removeWhere((k, _) => !live.contains(k));
+    _expanded.removeWhere((k) => !live.contains(k));
   }
 
   /// A prose candidate's recap, once per (session, lastActivity): never on a poll.
@@ -301,7 +315,10 @@ class _QuestionsInboxScreenState extends State<QuestionsInboxScreen> {
           if (_disposed) return;
           _context[k] = (sig: sig, text: lastAssistantText(page.messages));
           _changed();
-        } catch (_) {/* the card simply has no lead-up panel */}
+        } catch (_) {
+          // No lead-up panel for now; asked again on the next refresh, not cached.
+          if (_context[k]?.sig == sig && _context[k]?.text == null) _context.remove(k);
+        }
       case InboxKind.permission || InboxKind.menu || InboxKind.waiting:
         if (!force && _tails.containsKey(k)) return;
         if (it.kind == InboxKind.permission && force) unawaited(_refreshAttention(force: k));
@@ -366,17 +383,39 @@ class _QuestionsInboxScreenState extends State<QuestionsInboxScreen> {
         dismissed: _dismissed,
       );
 
-  InboxItem? _currentFocus() {
-    final k = _focusKey;
-    if (k == null) return null;
+  /// The item under [key] now, whatever it waits on.
+  InboxItem? _itemAt(String key) {
     for (final it in _items) {
-      if (it.key == k) return it;
+      if (it.key == key) return it;
     }
     return null;
   }
 
-  Session? _freshRow(Session s) =>
-      _repo.current.where((x) => sessionKey(x) == sessionKey(s)).firstOrNull;
+  /// The focused item, if it is still the SAME item: the same session waiting on the
+  /// same kind of thing, and for a question the same question (#383). A session that
+  /// moves from one wait to another under the person's typing is a replacement, not
+  /// an update, and must leave the words they typed on screen.
+  InboxItem? _currentFocus() {
+    final k = _focusKey;
+    if (k == null) return null;
+    final it = _itemAt(k);
+    if (it == null) return null;
+    final was = _snapshot;
+    return was == null || _sameItem(was, it) ? it : null;
+  }
+
+  /// [now] is [was] still, rather than something else waiting in the same session. A
+  /// question not yet read when [was] was seen takes whatever question arrives.
+  static bool _sameItem(InboxItem was, InboxItem now) =>
+      was.key == now.key &&
+      was.kind == now.kind &&
+      (was.kind != InboxKind.question ||
+          was.question == null ||
+          questionSignature(was.question) == questionSignature(now.question));
+
+  /// An item's identity in the focused view: [_sameItem] as a key.
+  static String _identity(InboxItem it) =>
+      '${it.key}|${it.kind.name}|${it.kind == InboxKind.question ? questionSignature(it.question).hashCode : ''}';
 
   /// The words typed into [it] that have not been sent: what would be lost if it went.
   List<String> _typedWords(InboxItem it) {
@@ -385,8 +424,8 @@ class _QuestionsInboxScreenState extends State<QuestionsInboxScreen> {
     switch (it.kind) {
       case InboxKind.question:
         final q = it.question;
-        final d = QuestionDraftStore.instance.of(s.server.baseUrl, s.id);
-        if (q == null || d.key != questionSignature(q) || d.flaggedFor(d.key!)) return const [];
+        final d = QuestionDraftStore.instance.peek(s.server.baseUrl, s.id);
+        if (q == null || d == null || d.key != questionSignature(q) || d.flaggedFor(d.key!)) return const [];
         return [
           for (final w in [...d.other, ...d.note])
             if (w != null && w.trim().isNotEmpty) w.trim(),
@@ -411,6 +450,21 @@ class _QuestionsInboxScreenState extends State<QuestionsInboxScreen> {
   InboxItem? _nextAfter(String key) {
     final items = _items.where((i) => i.key != key).toList();
     return items.where((i) => i.blocking).firstOrNull ?? items.firstOrNull;
+  }
+
+  /// On from the focused item under [key]: to what that session waits on now, if it
+  /// waits on something else, else to the next item ([_moveOn]).
+  void _advance(String key) {
+    final now = _itemAt(key);
+    if (now == null) {
+      _moveOn(key);
+      return;
+    }
+    _update(() {
+      _focusKey = key;
+      _snapshot = now;
+    });
+    unawaited(_refreshFocused());
   }
 
   void _moveOn(String fromKey) {
@@ -468,41 +522,19 @@ class _QuestionsInboxScreenState extends State<QuestionsInboxScreen> {
   }
 
   /// A reply to an agent that asked in prose (c): only while it is still idle on the
-  /// SAME reply, re-read first.
-  Future<bool> _replyProse(Session s, String text) async {
-    await _repo.refresh();
-    if (_disposed) return false;
-    final fresh = _freshRow(s);
-    if (fresh == null || fresh.status != 'idle' || fresh.lastActivity != s.lastActivity) {
-      _say('"${s.name}" has moved on since - nothing was sent');
-      return false;
-    }
-    return _needs.reply(fresh, text);
-  }
+  /// SAME reply, re-read first ([NeedsYouActions.reply]).
+  Future<bool> _replyProse(Session s, String text) => _needs.reply(s, text,
+      still: (fresh) => fresh.status == 'idle' && fresh.lastActivity == s.lastActivity,
+      movedOn: '"${s.name}" has moved on since - nothing was sent');
 
-  /// A reply to an agent that reported it waits on you (d): only while it still does.
-  Future<bool> _replyReported(Session s, String text) async {
-    await _repo.refresh();
-    if (_disposed) return false;
-    final fresh = _freshRow(s);
-    if (fresh == null || fresh.reason?.kind != 'you' || fresh.status == 'working') {
-      _say('"${s.name}" is no longer waiting on you - nothing was sent');
-      return false;
-    }
-    return _needs.reply(fresh, text);
-  }
+  /// A reply to an agent that reported it waits on you (d): only while it still does,
+  /// and never into a selector that has come up since ([replyStillWanted]).
+  Future<bool> _replyReported(Session s, String text) => _needs.reply(s, text,
+      still: replyStillWanted, movedOn: '"${s.name}" is no longer waiting on you - nothing was sent');
 
   /// Esc to close a panel over the composer (e): only while one still covers it.
-  Future<void> _esc(Session s) async {
-    await _repo.refresh();
-    if (_disposed) return;
-    final fresh = _freshRow(s);
-    if (fresh == null || fresh.reason?.kind != 'menu') {
-      _say('"${s.name}" no longer shows a menu - Esc was not sent');
-      return;
-    }
-    await _needs.esc(fresh);
-  }
+  Future<void> _esc(Session s) => _needs.esc(s,
+      still: escStillCloses, movedOn: '"${s.name}" no longer shows a menu - Esc was not sent');
 
   Future<void> _notWaiting(Session s) async {
     try {
@@ -659,16 +691,17 @@ class _QuestionsInboxScreenState extends State<QuestionsInboxScreen> {
     if (it == null) return const SizedBox.shrink();
     final words = live == null ? _typedWords(it) : const <String>[];
     if (live == null && words.isEmpty) {
-      // Gone, with nothing typed that could be lost: on to the next one.
+      // Gone or replaced, with nothing typed that could be lost: on to what it waits
+      // on now, or to the next one.
       scheduleMicrotask(() {
-        if (!_disposed && _focusKey == k && _currentFocus() == null) _moveOn(k);
+        if (!_disposed && _focusKey == k && _currentFocus() == null) _advance(k);
       });
     }
     return Column(crossAxisAlignment: CrossAxisAlignment.stretch, children: [
       // The banner joins ABOVE the view; the view below keeps its element (the list
       // diff matches from the bottom too), so its typed words and caret stay put.
       if (live == null && words.isNotEmpty) _goneBanner(context, it, words),
-      Expanded(child: _FocusView(key: ValueKey('inbox-focus-${it.key}'), item: it, state: this, gone: live == null)),
+      Expanded(child: _FocusView(key: ValueKey('inbox-focus-${_identity(it)}'), item: it, state: this, gone: live == null)),
     ]);
   }
 
@@ -695,7 +728,7 @@ class _QuestionsInboxScreenState extends State<QuestionsInboxScreen> {
           alignment: Alignment.centerRight,
           child: TextButton(
             key: const ValueKey('inbox-gone-next'),
-            onPressed: () => _moveOn(it.key),
+            onPressed: () => _advance(it.key),
             child: const Text('Next'),
           ),
         ),
@@ -715,17 +748,9 @@ class _FocusRoute extends StatelessWidget {
     return ValueListenableBuilder<int>(
       valueListenable: state._rev,
       builder: (context, _, _) {
-        final it = state._currentFocus() ?? state._snapshot;
+        // The view's own head names the session and its machine, so the bar does not.
         return Scaffold(
-          appBar: AppBar(
-            title: Row(children: [
-              Flexible(child: Text(it?.session?.name ?? it?.agent?.name ?? 'Question', overflow: TextOverflow.ellipsis)),
-              if (it != null) ...[
-                const SizedBox(width: 8),
-                ServerBadge(name: it.server.name, color: state._colorOf(it.server.baseUrl)),
-              ],
-            ]),
-          ),
+          appBar: AppBar(title: const Text('Questions')),
           body: SafeArea(child: state._focusPane(context)),
         );
       },
@@ -971,6 +996,10 @@ class _FocusView extends StatelessWidget {
               draftKey: questionSignature(q),
               elsewhereLabel: 'Open session',
               onKey: null,
+              // Takes focus as it mounts, so hardware Enter reaches it on a desktop.
+              // An autofocus never moves focus that is already held, so a reply box
+              // being typed into keeps it.
+              autofocus: true,
               onDismiss: () => state._openSession(s),
               onSend: (frames) => unawaited(state._answer(it, q, frames)),
             ),

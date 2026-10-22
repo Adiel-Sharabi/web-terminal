@@ -394,6 +394,16 @@ class SessionRepository {
     if (_anyServerReachable()) await _writeCache(merged);
   }
 
+  /// Re-reads the ONE server at [baseUrl], through the same per-server queue as
+  /// [refresh], and paints the result. True only when THAT server answered: a failed
+  /// fetch leaves its last-known rows in the list, and a caller about to write on the
+  /// strength of a row must not mistake them for a fresh answer (#383).
+  Future<bool> refreshServer(String baseUrl) async {
+    await _refreshServer(baseUrl);
+    _emitPartial();
+    return _serverOnline[baseUrl] == true;
+  }
+
   /// The merged, sorted list for [servers], from the per-server last-known
   /// buckets — the same source a FAILED fetch falls back to, so a server still
   /// in flight contributes its previous list rather than a hole.

@@ -143,6 +143,8 @@ List<InboxItem> inboxItemsOf(
       reply: reply,
     ));
   }
+  final blockingKeys = {for (final it in blocking) it.key};
+  final agentKeys = <String>{};
   for (final e in agents.entries) {
     for (final a in e.value) {
       if ((a.waitingFor ?? '').isEmpty) continue;
@@ -153,9 +155,18 @@ List<InboxItem> inboxItemsOf(
           break;
         }
       }
+      // Its session already blocks on the person: that item is the one to answer, and
+      // a second card for the same wait would only say it twice.
+      if (runs != null && blockingKeys.contains(sessionKey(runs))) continue;
+      // Unique even for rows the CLI gives no id: two cards may never share a key.
+      final base = '${a.server.baseUrl}|agent|${a.id ?? a.sessionId}';
+      var key = base;
+      for (var n = 2; !agentKeys.add(key); n++) {
+        key = '$base#$n';
+      }
       background.add(InboxItem(
         kind: InboxKind.background,
-        key: '${a.server.baseUrl}|agent|${a.id ?? a.sessionId}',
+        key: key,
         server: a.server,
         session: runs,
         agent: a,

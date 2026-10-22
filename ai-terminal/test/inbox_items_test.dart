@@ -184,6 +184,26 @@ void main() {
       expect(items[2].session, isNull);
     });
 
+    test('review N: keys stay unique for rows with no id, and a session already blocking gets no second card', () {
+      final blocked = _s('pty', status: 'waiting', waitingFor: 'permission', claudeSessionId: 'abc');
+      BackgroundAgentRow noId(String? conv) =>
+          BackgroundAgentRow(server: _home, sessionId: conv, name: 'n', waitingFor: 'approve');
+      final items = inboxItemsOf([blocked], agents: {
+        _home.baseUrl: [
+          _agent('a1', waitingFor: 'approve', sessionId: 'abc'), // its session is the blocking item
+          noId('zzz'),
+          noId('zzz'),
+          noId(null),
+          noId(null),
+        ],
+      });
+      final keys = items.map((i) => i.key).toList();
+      expect(keys.toSet(), hasLength(keys.length), reason: 'a duplicate ValueKey is a crash');
+      expect(items.where((i) => i.kind == InboxKind.background), hasLength(4));
+      expect(keys, isNot(contains('${_home.baseUrl}|agent|a1')));
+      expect(items.first.kind, InboxKind.permission);
+    });
+
     test('BackgroundAgentRow.fromJson keeps the fields and drops a row with no id and no conversation', () {
       final r = BackgroundAgentRow.fromJson(_home, {
         'id': 'x1',

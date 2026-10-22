@@ -476,18 +476,9 @@ class _WorkBoardScreenState extends State<WorkBoardScreen> {
 
   /// Stop = Esc to a session that is STILL working. The card may be up to a poll old,
   /// and an Esc that reaches a session which has since stopped is some other key
-  /// (#55), so the status is re-read first.
-  Future<void> _stop(Session s) async {
-    await _repo.refresh();
-    if (!mounted) return;
-    final k = _bkey(s);
-    final fresh = _repo.current.where((x) => _bkey(x) == k).firstOrNull;
-    if (fresh == null || fresh.status != 'working') {
-      _say('"${s.name}" is no longer working - Stop was not sent');
-      return;
-    }
-    await _needs.esc(fresh);
-  }
+  /// (#55), so [NeedsYouActions.esc] re-reads the status first.
+  Future<void> _stop(Session s) => _needs.esc(s,
+      still: (fresh) => fresh.status == 'working', movedOn: '"${s.name}" is no longer working - Stop was not sent');
 
   /// The live session that has [c]'s conversation open again, if any: then the record
   /// offers Open rather than a second copy.
@@ -609,12 +600,17 @@ class _WorkBoardScreenState extends State<WorkBoardScreen> {
       answerBlocked: q != null && _needs.quickAnswerBlocked(s, q),
       busy: _needs.isBusy(s),
       onAnswer: (kind == NeedKind.question && q != null) ? (i) => _answer(s, q, i) : null,
-      onReply: kind == NeedKind.reported ? (text) => _needs.reply(s, text) : null,
+      onReply: kind == NeedKind.reported
+          ? (text) => _needs.reply(s, text,
+              still: replyStillWanted, movedOn: '"${s.name}" is no longer waiting on you - nothing was sent')
+          : null,
       replyBox: kind == NeedKind.reported ? _needs.replyBox(s) : null,
       // A lone Esc reads as an interrupt only to a WORKING session; anywhere else it
       // would be some other key (#55), so Stop is offered only there.
       onStop: s.status == 'working' ? () => _stop(s) : null,
-      onEsc: kind == NeedKind.menu ? () => _needs.esc(s) : null,
+      onEsc: kind == NeedKind.menu
+          ? () => _needs.esc(s, still: escStillCloses, movedOn: '"${s.name}" no longer shows a menu - Esc was not sent')
+          : null,
     );
   }
 

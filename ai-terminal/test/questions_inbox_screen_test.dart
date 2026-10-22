@@ -3,6 +3,7 @@
 // thing it answers has moved on; the words typed here belong to the session, so the
 // session screen's overlay sees them; what is fetched, and what never is; and the two
 // layouts plus the split view's third pane.
+import 'dart:async';
 import 'dart:convert';
 
 import 'package:ai_terminal/api/api_client.dart';
@@ -104,10 +105,17 @@ void main() {
   late List<(String, String)> sent;
   late List<ServerConfig> servers;
   late bool answerTakes;
+  late int failPolls; // pending-question polls still to fail with a 500
+  late bool failPollAfterKeys; // the first key sent arms one failing poll
+  Completer<void>? sessionsGate; // holds the NEXT /api/sessions until completed
 
   Future<bool> fakeInput(Session s, Future<void> Function(void Function(String keys) send) body) async {
     await body((keys) {
       sent.add((s.id, keys));
+      if (failPollAfterKeys) {
+        failPollAfterKeys = false;
+        failPolls = 1;
+      }
       // The question clears once its confirming Enter lands, unless this session is deaf.
       if (keys == '\r' && answerTakes) questions.remove(s.id);
     });
@@ -120,6 +128,10 @@ void main() {
         final id = RegExp(r'^/api/sessions/([^/]+)/').firstMatch(p)?.group(1);
         if (p.endsWith('/pending-question')) {
           if (questionStatus != 200) return http.Response('', questionStatus);
+          if (failPolls > 0) {
+            failPolls--;
+            return http.Response('', 500);
+          }
           final q = questions[id];
           return _json(q == null ? {'pending': false} : {'pending': true, 'question': q});
         }
@@ -146,6 +158,11 @@ void main() {
                 jsonEncode({'version': '1.88.0', 'serverName': s.name, 'capabilities': ['session-brief', 'session-clear-wait']}),
                 200);
           case '/api/sessions':
+            final gate = sessionsGate;
+            if (gate != null) {
+              sessionsGate = null;
+              await gate.future;
+            }
             final st = sessionsStatus[s.baseUrl] ?? 200;
             if (st != 200) return http.Response('', st);
             return http.Response(jsonEncode(rows[s.baseUrl] ?? const []), 200);
@@ -182,6 +199,9 @@ void main() {
     sent = [];
     servers = [_home];
     answerTakes = true;
+    failPolls = 0;
+    failPollAfterKeys = false;
+    sessionsGate = null;
   });
   tearDown(SessionSelection.instance.reset);
 
@@ -671,5 +691,142 @@ void main() {
     await tester.pump();
     expect(tester.widget<TextField>(box).textDirection, TextDirection.rtl);
     await done(tester);
+  });
+
+  group('review round N: nothing is written on a stale or doubtful reading', () {
+    final reported = {'kind': 'you', 'text': 'pick a title', 'source': 'reported', 'since': 1};
+    Map<String, dynamic> docs({String status = 'idle', String? waitingFor, Object? reason}) =>
+        _row('d', 'Docs', status: status, waitingFor: waitingFor, reason: reason, brief: {
+          'v': 1,
+          'reporting': 'on',
+          'items': [],
+          'did': {'text': 'Which title?'},
+        });
+    Finder replyField() => find.descendant(of: find.byKey(const ValueKey('inbox-focus-reply')), matching: find.byType(TextField));
+    Finder replySend() => find.descendant(of: find.byKey(const ValueKey('inbox-focus-reply')), matching: find.text('Send'));
+
+    for (final selector in ['permission', 'question']) {
+      testWidgets('F1: a reported wait that has become a $selector selector gets ZERO writes', (tester) async {
+        final r = await repo();
+        rows = {_home.baseUrl: [docs(reason: reported)]};
+        await pump(tester, r);
+        // Server side only: the card on screen is a poll old and still shows the wait.
+        // The server says `kind: you` for a waiting row too, so the kind alone passes.
+        rows = {
+          _home.baseUrl: [
+            docs(status: 'waiting', waitingFor: selector, reason: {
+              'kind': 'you',
+              'text': selector == 'question' ? 'answer a question' : 'approve a tool',
+              'source': 'status',
+            }),
+          ],
+        };
+        await tester.enterText(replyField(), 'Call it Atlas');
+        await tester.tap(replySend());
+        await settle(tester);
+        await settle(tester);
+        expect(sent, isEmpty, reason: 'a reply\'s text and CR in a selector would answer it');
+        expect(find.text('"Docs" is no longer waiting on you - nothing was sent'), findsOneWidget);
+        await done(tester);
+      });
+    }
+
+    testWidgets('F1: a "you" the server keeps while a helper runs (status working) still takes the reply',
+        (tester) async {
+      final r = await repo();
+      rows = {_home.baseUrl: [docs(reason: reported)]};
+      await pump(tester, r);
+      rows = {_home.baseUrl: [docs(status: 'working', reason: reported)]};
+      await tester.enterText(replyField(), 'Call it Atlas');
+      await tester.tap(replySend());
+      await settle(tester);
+      await settle(tester);
+      expect(sent, [('d', buildComposeSubmission('Call it Atlas'))], reason: 'a prompt typed mid-turn is queued (#249)');
+      await done(tester);
+    });
+
+    testWidgets('F2: a re-read whose server did not answer refuses, though its stale row still says "you"',
+        (tester) async {
+      final r = await repo();
+      rows = {_home.baseUrl: [docs(reason: reported)]};
+      await pump(tester, r);
+      sessionsStatus = {_home.baseUrl: 500}; // the repository falls back to the last-known row
+      await tester.enterText(replyField(), 'Call it Atlas');
+      await tester.tap(replySend());
+      await settle(tester);
+      await settle(tester);
+      expect(sent, isEmpty);
+      expect(find.text('Could not check "Docs" - nothing was sent'), findsOneWidget);
+      await done(tester);
+    });
+
+    testWidgets('F3: two presses during a slow re-read write exactly once', (tester) async {
+      final r = await repo();
+      rows = {_home.baseUrl: [docs(reason: reported)]};
+      await pump(tester, r);
+      final gate = Completer<void>();
+      sessionsGate = gate; // the first press's re-read hangs on a slow peer
+      await tester.enterText(replyField(), 'Call it Atlas');
+      await tester.tap(replySend());
+      await tester.pump();
+      await tester.tap(replySend(), warnIfMissed: false);
+      await tester.pump();
+      gate.complete();
+      await settle(tester);
+      await settle(tester);
+      expect(sent, [('d', buildComposeSubmission('Call it Atlas'))]);
+      await done(tester);
+    });
+
+    testWidgets('F5: a verify poll that throws is not "Answered", and the buttons come back once it is seen still up',
+        (tester) async {
+      rows = {_home.baseUrl: [_row('q', 'Asker', status: 'waiting', waitingFor: 'question', lastActivity: 1)]};
+      questions = {'q': _single('Pick one')};
+      answerTakes = false; // still asked afterwards
+      failPollAfterKeys = true; // the verify's poll fails: whether it took is unknown
+      await pump(tester, await repo());
+      final btn = find.byKey(const ValueKey('inbox-answer-http://h:7681|q-0'));
+      await tester.tap(btn);
+      await advance(tester, const Duration(seconds: 12));
+      await settle(tester);
+      expect(sent, isNotEmpty, reason: 'the keys did go out');
+      expect(find.text('Answered "Asker"'), findsNothing, reason: 'a failed poll observed nothing');
+      expect(find.text('Answer sent - waiting for it to land...'), findsNothing,
+          reason: 'a later read saw it still asked: not "landing" for good');
+      expect(btn, findsOneWidget, reason: 'back to the not-landed state: its buttons');
+      await done(tester);
+    });
+
+    testWidgets('F7: the focused question becomes a prose item while words are typed: the banner keeps them',
+        (tester) async {
+      final r = await repo();
+      rows = {_home.baseUrl: [_row('q', 'Asker', status: 'waiting', waitingFor: 'question', lastActivity: 1)]};
+      questions = {'q': _single('Which name?')};
+      await pump(tester, r);
+      await tester.tap(inPanel(find.text('Other\u2026')));
+      await tester.pump();
+      await tester.enterText(inPanel(find.byType(TextField)), 'my long careful answer');
+      await tester.pump();
+
+      // Answered in the terminal, and the agent's reply now asks in prose: the SAME
+      // session is still an item, of another kind.
+      rows = {_home.baseUrl: [_row('q', 'Asker', lastActivity: 2)]};
+      questions = {};
+      recaps = {
+        'q': {'name': 'Asker', 'cwd': '/w', 'status': 'idle', 'reply': {'text': 'Shall I call it Atlas?', 'at': 'x'}},
+      };
+      await tester.runAsync(() => r.refresh());
+      await settle(tester);
+      await settle(tester);
+      expect(find.byKey(const ValueKey('inbox-card-http://h:7681|q')), findsOneWidget, reason: 'now a prose item');
+      expect(find.byKey(const ValueKey('inbox-gone-banner')), findsOneWidget);
+      expect(tester.widget<SelectableText>(find.byKey(const ValueKey('inbox-gone-words'))).data, 'my long careful answer');
+
+      await tester.tap(find.byKey(const ValueKey('inbox-gone-next')));
+      await settle(tester);
+      expect(find.byKey(const ValueKey('inbox-gone-banner')), findsNothing);
+      expect(find.byKey(const ValueKey('inbox-focus-reply')), findsOneWidget, reason: 'on to what it waits on now');
+      await done(tester);
+    });
   });
 }

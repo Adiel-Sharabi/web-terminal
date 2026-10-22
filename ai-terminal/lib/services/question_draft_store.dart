@@ -26,6 +26,11 @@ class QuestionDraftStore {
   QuestionDrafts of(String baseUrl, String sessionId) =>
       _drafts.putIfAbsent('$baseUrl|$sessionId', QuestionDrafts.new);
 
+  /// The drafts of that session if any were ever made, else null. For a read-only
+  /// look ("is it flagged", "what is typed"), which must not leave an empty entry
+  /// behind for every session it looked at.
+  QuestionDrafts? peek(String baseUrl, String sessionId) => _drafts['$baseUrl|$sessionId'];
+
   /// Forgets every session's drafts, so one test cannot see another's words.
   @visibleForTesting
   void resetForTest() => _drafts.clear();
