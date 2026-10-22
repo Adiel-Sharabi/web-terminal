@@ -1078,6 +1078,64 @@ class PendingQuestionObservation {
         observed: observed,
         current: lastSeen,
       );
+
+  /// True when the last SUCCESSFUL poll still showed the question signed
+  /// [answeredKey]: the answer was sent and the selector was still up afterwards.
+  /// A poll that threw changes nothing here, so "saw it pending, then the link
+  /// failed" still counts (#383).
+  bool sawStillPending(String answeredKey) =>
+      observed && lastSeen != null && questionSignature(lastSeen) == answeredKey;
+}
+
+/// The verdict of waiting for an answered question to clear: [stillPending] is
+/// [awaitAnswerLanded]'s result (non-null only when every retry still showed it),
+/// [seen] what the polls actually observed.
+class AnswerVerification {
+  const AnswerVerification(this.stillPending, this.seen);
+  final PendingQuestion? stillPending;
+  final PendingQuestionObservation seen;
+}
+
+/// [awaitAnswerLanded] with every poll recorded through a
+/// [PendingQuestionObservation], so the caller can tell a question that cleared
+/// from a poll that merely failed. [poll] is injected so the decision is testable
+/// without a live ApiClient (#383).
+Future<AnswerVerification> verifyAnswerLanded({
+  required String answeredKey,
+  required bool resendEnter,
+  required Future<PendingQuestion?> Function() poll,
+  required void Function() resend,
+  bool Function()? alive,
+  int attempts = 8,
+  Duration every = const Duration(milliseconds: 900),
+}) async {
+  final seen = PendingQuestionObservation();
+  final stillPending = await awaitAnswerLanded(
+    isSame: (q) => questionSignature(q) == answeredKey,
+    resendEnter: resendEnter,
+    poll: () => seen.record(poll),
+    resend: resend,
+    alive: alive,
+    attempts: attempts,
+    every: every,
+  );
+  return AnswerVerification(stillPending, seen);
+}
+
+/// Settles [drafts] after an answer to the question signed [answeredKey], whose
+/// polls are summarised in [seen]: gone or replaced -> the typed words did their
+/// job, drop them; still up on the last successful poll -> the answer did not take
+/// and the terminal may hold part of [frames], so flag it ([QuestionDrafts.partlyTyped]);
+/// never observed -> say nothing (a failed poll proves neither). Flags whether or
+/// not the overlay resurfaces now, because the user can reopen it from the
+/// "A question is waiting" chip later (#383).
+void settleDraftsAfterAnswer(QuestionDrafts drafts, String answeredKey,
+    List<AnswerFrame> frames, PendingQuestionObservation seen) {
+  if (seen.shouldClearDrafts(drafts.key)) {
+    drafts.clear();
+  } else if (seen.sawStillPending(answeredKey)) {
+    drafts.markNotLanded(answeredKey, frames);
+  }
 }
 
 /// How a [SessionScreen] LEAVES when the session it shows is gone from the list.
@@ -1599,6 +1657,15 @@ class _SessionScreenState extends State<SessionScreen>
     setState(() => _dismissedQuestionKey = null);
   }
 
+  /// "Answer in terminal" on the question card. Normally it only hides the card
+  /// (the terminal is already one tap away). After an answer with words did not
+  /// land the terminal is where the user must FINISH it, so go there too (#383).
+  void _dismissQuestionOverlay() {
+    final partlyTyped = _questionDrafts.partlyTyped;
+    setState(() => _dismissedQuestionKey = questionSignature(_pendingQuestion));
+    if (partlyTyped) _setLens('terminal');
+  }
+
   /// into one PTY read and the TUI's batched update confirms the stale top row.
   /// Each frame carries its own settle delay so transition frames land in
   /// separate reads. Hides the overlay optimistically; the next poll confirms.
@@ -1672,11 +1739,10 @@ class _SessionScreenState extends State<SessionScreen>
     // The rule itself is shared with the sessions board (#337): [awaitAnswerLanded].
     // What the polls actually SAW: [awaitAnswerLanded] returns null for a cleared
     // question and also for a poll that threw, and only the first is evidence.
-    final seen = PendingQuestionObservation();
-    final stillPending = await awaitAnswerLanded(
-      isSame: (q) => questionSignature(q) == answeredKey,
+    final verdict = await verifyAnswerLanded(
+      answeredKey: answeredKey,
       resendEnter: resendEnter,
-      poll: () => seen.record(() => api.pendingQuestion(widget.sessionId)),
+      poll: () => api.pendingQuestion(widget.sessionId),
       resend: () {
         _finishTerminalComposing();
         _connection?.sendInput('\r');
@@ -1684,11 +1750,13 @@ class _SessionScreenState extends State<SessionScreen>
       alive: () => mounted,
       attempts: _answerVerifyAttempts,
     );
-    // Landed (or replaced): the typed answer has done its job. Still pending: the
-    // overlay is about to come back and must find it again. A failed poll proves
-    // neither, so it keeps them (#383).
-    if (mounted && seen.shouldClearDrafts(_questionDrafts.key)) {
-      _questionDrafts.clear();
+    final stillPending = verdict.stillPending;
+    // Landed (or replaced): the typed answer has done its job. Still pending on the
+    // last good poll: it did not take, whether or not the overlay is about to come
+    // back. A failed poll proves neither, so it keeps the drafts (#383).
+    if (mounted) {
+      settleDraftsAfterAnswer(
+          _questionDrafts, answeredKey, frames, verdict.seen);
     }
     // Exhausted retries with the same prompt up → surface it again so the user
     // can retry, instead of a silently stuck, hidden question.
@@ -1698,9 +1766,6 @@ class _SessionScreenState extends State<SessionScreen>
           answeredKey: answeredKey,
           dismissedKey: _dismissedQuestionKey,
         )) {
-      // The terminal may hold part of the words by now: the overlay must not
-      // invite a blind replay (#383).
-      _questionDrafts.markNotLanded(answeredKey, frames);
       setState(() {
         _dismissedQuestionKey = null;
         _pendingQuestion = stillPending;
@@ -4830,9 +4895,7 @@ class _SessionScreenState extends State<SessionScreen>
             draftKey: questionSignature(_pendingQuestion),
             onSend: _answerQuestion,
             onKey: _sendRawToTerminal,
-            onDismiss: () => setState(
-              () => _dismissedQuestionKey = questionSignature(_pendingQuestion),
-            ),
+            onDismiss: _dismissQuestionOverlay,
           ),
       ])),
     );

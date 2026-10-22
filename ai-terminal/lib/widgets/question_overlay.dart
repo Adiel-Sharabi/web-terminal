@@ -777,14 +777,15 @@ class _QuestionOverlayState extends State<QuestionOverlay> {
         _otherText[i] = o;
         _otherControllers[i].text = o;
       }
-      // A note is only meaningful on a chosen option, so it comes back together
-      // with that choice or not at all.
-      final nt = i < d.note.length ? d.note[i] : null;
+      // Every tab's pick comes back, so a resurfaced card is ready to send again.
+      // A note is only meaningful on a chosen option, so it returns only together
+      // with that choice.
       final sel = i < d.selected.length ? d.selected[i] : const <int>{};
+      _selected[i] = {...sel};
+      final nt = i < d.note.length ? d.note[i] : null;
       if (nt != null && sel.isNotEmpty) {
         _noteText[i] = nt;
         _noteControllers[i].text = nt;
-        _selected[i] = {...sel};
       }
     }
   }
@@ -835,6 +836,11 @@ class _QuestionOverlayState extends State<QuestionOverlay> {
       // The SAME question re-reported under a new toolUseId (hook id -> transcript
       // id) is not a new prompt: put its drafts back instead of wiping them (#383).
       // A different question has a different key and is left empty.
+      //
+      // The "did not land" notice belongs to the ask that failed: an identical
+      // question asked AGAIN under a new id is a fresh prompt whose selector is
+      // untouched, so it must not inherit a warning about the old one.
+      widget.drafts?.partlyTyped = false;
       _restoreDrafts();
     }
   }
@@ -957,6 +963,17 @@ class _QuestionOverlayState extends State<QuestionOverlay> {
       List.generate(_selected.length, _isAnswered)
           .every((answered) => answered);
 
+  /// THE one way an answer leaves this card: the button, hardware Enter and a soft
+  /// keyboard's Send action (`onSubmitted`) all come through here, so no trigger can
+  /// bypass the completeness or the partly-typed gate (#383). Only the explicit
+  /// "Send again anyway" button passes [deliberate]: a keystroke, on any platform,
+  /// must not replay words the terminal may already hold.
+  void _trySend({bool deliberate = false}) {
+    if (!_everyQuestionAnswered) return;
+    if (_partlyTyped && !deliberate) return;
+    _send();
+  }
+
   void _send() {
     widget.onSend(buildAnswerFrames(
       widget.question.questions,
@@ -1027,7 +1044,7 @@ class _QuestionOverlayState extends State<QuestionOverlay> {
                   // may hold part of the answer (#383): that takes a deliberate tap.
                   _SubmitIntent: CallbackAction<_SubmitIntent>(
                     onInvoke: (intent) {
-                      if (_everyQuestionAnswered && !_partlyTyped) _send();
+                      _trySend();
                       return null;
                     },
                   ),
@@ -1512,7 +1529,7 @@ class _QuestionOverlayState extends State<QuestionOverlay> {
           _saveDrafts();
         }),
         onSubmitted: (_) {
-          if (_everyQuestionAnswered) _send();
+          _trySend();
         },
         decoration: InputDecoration(
           hintText: 'Type your answer…',
@@ -1592,7 +1609,7 @@ class _QuestionOverlayState extends State<QuestionOverlay> {
           _saveDrafts();
         }),
         onSubmitted: (_) {
-          if (_everyQuestionAnswered) _send();
+          _trySend();
         },
         decoration: InputDecoration(
           hintText: 'Add a note for this option…',
@@ -1877,12 +1894,13 @@ class _QuestionOverlayState extends State<QuestionOverlay> {
               Expanded(
                 child: _partlyTyped
                     ? OutlinedButton.icon(
-                        onPressed: canSend ? _send : null,
+                        onPressed:
+                            canSend ? () => _trySend(deliberate: true) : null,
                         icon: const Icon(Icons.send, size: 18),
                         label: Text(canSend ? 'Send again anyway' : 'Pick an option'),
                       )
                     : FilledButton.icon(
-                        onPressed: canSend ? _send : null,
+                        onPressed: canSend ? _trySend : null,
                         icon: const Icon(Icons.send, size: 18),
                         label: Text(canSend ? 'Send answer' : 'Pick an option'),
                       ),

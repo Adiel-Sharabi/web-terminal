@@ -407,13 +407,13 @@ function transcriptDir() {
 
 // Removes the transcript folder of THIS run and nothing else: the path is derived from
 // the run's own mkdtemp cwd, and it is only removed when that cwd sits directly under
-// the askq root and the folder is a direct child of the projects directory whose name
-// is exactly the encoding of the cwd.
+// the askq root and the folder, named by the encoding of that cwd, resolves to a direct
+// child of the projects directory (an encoding that escaped it would fail the dirname check).
 function removeTranscriptDir() {
   const projects = path.join(os.homedir(), '.claude', 'projects');
   const dir = transcriptDir();
   if (path.resolve(path.dirname(cwd)) !== askqRoot) return null;
-  if (path.dirname(dir) !== projects || path.basename(dir) !== claudeProjectDirName(cwd)) return null;
+  if (path.dirname(dir) !== projects) return null;
   if (!fs.existsSync(dir)) return null;
   fs.rmSync(dir, { recursive: true, force: true });
   return dir;

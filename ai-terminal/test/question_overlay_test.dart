@@ -810,7 +810,7 @@ void main() {
         {0},
         <int>{}
       ], otherText: const [null, 'typed']);
-      expect(_keys(frames), ['1', '3', '[200~typed[201~', '\r', '\r']);
+      expect(_keys(frames), ['1', '3', '\x1b[200~typed\x1b[201~', '\r', '\r']);
       expect(answerNeedsConfirm(frames), isTrue);
     });
 
@@ -821,7 +821,7 @@ void main() {
         {1}
       ], otherText: const ['typed', '']);
       expect(_keys(frames),
-          ['3', '[200~typed[201~', '\r', '2', '\r']);
+          ['3', '\x1b[200~typed\x1b[201~', '\r', '2', '\r']);
       expect(frames.where((f) => f.other).length, 1);
       expect(answerNeedsConfirm(frames), isFalse);
     });
@@ -834,7 +834,7 @@ void main() {
       final frames = buildAnswerFrames([_q(['A', 'B', 'C'], preview: true)], [
         {1}
       ], noteText: const ['a note']);
-      expect(_keys(frames), ['[B', 'n', 'a note', '', '\r']);
+      expect(_keys(frames), ['\x1b[B', 'n', 'a note', '\x1b', '\r']);
       expect(frames.any((f) => f.text && !f.other), isTrue);
       expect(answerNeedsConfirm(frames), isTrue);
     });
@@ -3495,7 +3495,9 @@ void main() {
         );
 
     Future<void> mount(WidgetTester tester, QuestionDrafts drafts,
-        {List<List<AnswerFrame>>? sent, VoidCallback? onDismiss}) async {
+        {List<List<AnswerFrame>>? sent,
+        VoidCallback? onDismiss,
+        PendingQuestion? question}) async {
       tester.view.physicalSize = const Size(412 * 3, 915 * 3);
       tester.view.devicePixelRatio = 3.0;
       addTearDown(tester.view.reset);
@@ -3504,7 +3506,7 @@ void main() {
         home: Scaffold(
           body: Stack(children: [
             QuestionOverlay(
-              question: pq('t2'),
+              question: question ?? pq('t2'),
               drafts: drafts,
               draftKey: 'sig-A',
               onSend: (f) => sent?.add(f),
@@ -3566,6 +3568,103 @@ void main() {
       } finally {
         debugDefaultTargetPlatformOverride = null;
       }
+    });
+
+    // On Android/iOS no Enter shortcut is installed: the keyboard's Send key reaches
+    // the field's onSubmitted directly, so it needs its own proof (#383).
+    for (final platform in [TargetPlatform.android, TargetPlatform.iOS]) {
+      testWidgets('the soft keyboard Send key is NOT a blind replay (Other, '
+          '$platform)', (tester) async {
+        debugDefaultTargetPlatformOverride = platform;
+        try {
+          final sent = <List<AnswerFrame>>[];
+          await mount(tester, held(partlyTyped: true), sent: sent);
+          await tester.showKeyboard(find.byType(TextField));
+          await tester.testTextInput.receiveAction(TextInputAction.send);
+          await tester.pump();
+          expect(sent, isEmpty);
+        } finally {
+          debugDefaultTargetPlatformOverride = null;
+        }
+      });
+
+      testWidgets('the soft keyboard Send key is NOT a blind replay (note, '
+          '$platform)', (tester) async {
+        debugDefaultTargetPlatformOverride = platform;
+        try {
+          final sent = <List<AnswerFrame>>[];
+          final drafts = QuestionDrafts()
+            ..key = 'sig-A'
+            ..other = [null]
+            ..note = ['a note']
+            ..selected = [
+              {1}
+            ]
+            ..partlyTyped = true;
+          await mount(tester, drafts,
+              sent: sent,
+              question: PendingQuestion(
+                  toolUseId: 't2',
+                  questions: [_q(['Alpha', 'Beta'], preview: true)]));
+          expect(find.byType(TextField), findsOneWidget);
+          await tester.showKeyboard(find.byType(TextField));
+          await tester.testTextInput.receiveAction(TextInputAction.send);
+          await tester.pump();
+          expect(sent, isEmpty);
+        } finally {
+          debugDefaultTargetPlatformOverride = null;
+        }
+      });
+
+      testWidgets('without the flag the soft keyboard Send key sends '
+          '($platform)', (tester) async {
+        debugDefaultTargetPlatformOverride = platform;
+        try {
+          final sent = <List<AnswerFrame>>[];
+          await mount(tester, held(partlyTyped: false), sent: sent);
+          await tester.showKeyboard(find.byType(TextField));
+          await tester.testTextInput.receiveAction(TextInputAction.send);
+          await tester.pump();
+          expect(sent, hasLength(1));
+        } finally {
+          debugDefaultTargetPlatformOverride = null;
+        }
+      });
+    }
+
+    testWidgets('every tab\'s pick is restored, so Send again is ready',
+        (tester) async {
+      final drafts = QuestionDrafts()
+        ..key = 'sig-A'
+        ..other = [null, null]
+        ..note = [null, null]
+        ..selected = [
+          {0},
+          {1}
+        ]
+        ..partlyTyped = true;
+      await mount(tester, drafts,
+          question: PendingQuestion(
+              toolUseId: 't2',
+              questions: [_q(['A', 'B']), _q(['X', 'Y'])]));
+      // Both tabs answered: the deliberate action is live, not "Pick an option".
+      expect(find.widgetWithText(OutlinedButton, 'Send again anyway'),
+          findsOneWidget);
+      expect(find.text('Pick an option'), findsNothing);
+    });
+
+    testWidgets('a re-asked question under a NEW toolUseId drops the notice but '
+        'keeps the words', (tester) async {
+      final drafts = held(partlyTyped: true);
+      await mount(tester, drafts);
+      expect(find.textContaining('may be partly typed'), findsOneWidget);
+
+      await mount(tester, drafts, question: pq('t3'));
+      expect(drafts.partlyTyped, isFalse);
+      expect(find.textContaining('may be partly typed'), findsNothing);
+      expect(tester.widget<TextField>(find.byType(TextField)).controller!.text,
+          'deploy to staging');
+      expect(find.widgetWithText(FilledButton, 'Send answer'), findsOneWidget);
     });
 
     testWidgets('without the flag nothing changes: no notice, Send is the default',
