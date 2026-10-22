@@ -791,13 +791,26 @@ void main() {
       expect(answerNeedsConfirm(frames), isTrue);
     });
 
-    test('Other free-text answer ends in Enter -> needs confirm', () {
+    test('Other free-text answer is NEVER re-sent an Enter (#383)', () {
+      // It ends in Enter, but a blind re-sent Enter after a bunched delivery
+      // commits the editor's leftovers (text, newline, next digit) as the answer.
       final frames = buildAnswerFrames([_q(['A', 'B', 'C'])], [<int>{}],
           otherText: const ['hello']);
-      expect(answerNeedsConfirm(frames), isTrue);
+      expect(frames.last.keys, '\r');
+      expect(answerNeedsConfirm(frames), isFalse);
     });
 
-    test('note (#64 Gap 1) ends in Enter -> needs confirm', () {
+    test('Other on one tab of a multi-question answer: no re-sent Enter (#383)',
+        () {
+      final frames = buildAnswerFrames([_q(['A', 'B']), _q(['X', 'Y'])], [
+        <int>{},
+        {1}
+      ], otherText: const ['typed', '']);
+      expect(frames.where((f) => f.text).length, 1);
+      expect(answerNeedsConfirm(frames), isFalse);
+    });
+
+    test('note (#64 Gap 1) ends in Enter but is never re-sent one (#383)', () {
       // preview: true, or this never enters the note branch at all (#143) and
       // the test passes on the plain digit path under a note's title — an
       // assertion that would survive the note path being deleted outright.
@@ -805,7 +818,8 @@ void main() {
         {1}
       ], noteText: const ['a note']);
       expect(_keys(frames), ['\x1b[B', 'n', 'a note', '\x1b', '\r']);
-      expect(answerNeedsConfirm(frames), isTrue);
+      // A note is the user's words too (#383): no blind re-sent Enter.
+      expect(answerNeedsConfirm(frames), isFalse);
     });
 
     test('empty frame list needs no confirm', () {

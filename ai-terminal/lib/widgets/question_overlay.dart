@@ -41,10 +41,14 @@ class _SubmitIntent extends Intent {
 
 /// One outbound frame: send [keys], then wait [delayMs] before the next frame.
 class AnswerFrame {
-  const AnswerFrame(this.keys, this.delayMs);
+  const AnswerFrame(this.keys, this.delayMs, {this.text = false});
 
   /// The bytes to write to the PTY.
   final String keys;
+
+  /// True for a frame carrying the user's own words (an Other answer or a note)
+  /// rather than a key. [answerNeedsConfirm] reads it: see there (#383).
+  final bool text;
 
   /// How long to wait after sending, before the next frame. Frames that must
   /// land in *separate* stdin reads (question transitions, a confirming Enter)
@@ -228,7 +232,7 @@ List<AnswerFrame> buildAnswerFrames(
       // bracketed paste it was recorded whole, bunched with its digit or its CR,
       // newlines and 1.2 KB included. See [_bracketOtherText] for the ESC rule.
       frames.add(AnswerFrame('${q.options.length + 1}', gap)); // "Type something."
-      frames.add(AnswerFrame(_bracketOtherText(other), gap)); // the free-text answer
+      frames.add(AnswerFrame(_bracketOtherText(other), gap, text: true)); // the free-text answer
       frames.add(const AnswerFrame('\r', gap)); // submit
     } else if (!multiQuestion &&
         !q.multiSelect &&
@@ -263,7 +267,7 @@ List<AnswerFrame> buildAnswerFrames(
         frames.add(const AnswerFrame('\x1b[B', settle)); // down to the chosen row
       }
       frames.add(const AnswerFrame('n', gap)); // open the note editor
-      frames.add(AnswerFrame(note, gap)); // the note text
+      frames.add(AnswerFrame(note, gap, text: true)); // the note text
       frames.add(const AnswerFrame('\x1b', gap)); // ESC — closes the EDITOR only
       frames.add(const AnswerFrame('\r', gap)); // commit the highlighted option
     } else if (q.multiSelect) {
@@ -341,8 +345,16 @@ String _bracketOtherText(String text) =>
 /// actually landed (it can be coalesced away by cluster-path bunching) and
 /// re-send it: derived from the frames, so it stays true by construction rather
 /// than by a second rule kept in sync.
+///
+/// An answer carrying the user's own words never gets the re-sent Enter (#383).
+/// Measured on claude 2.1.308: when the bracketed text, its CR and the next tab's
+/// digit and CR reach Claude in ONE read, the CR becomes a newline INSIDE the
+/// Other editor and the digit is typed after it. The question stays pending, so a
+/// blind re-sent Enter would then commit "text, newline, 2" as the answer: a
+/// silently wrong answer instead of a pending one. Without it, the overlay
+/// resurfaces with the words kept ([QuestionDrafts]) and the user sends again.
 bool answerNeedsConfirm(List<AnswerFrame> frames) =>
-    frames.isNotEmpty && frames.last.keys == '\r';
+    frames.isNotEmpty && frames.last.keys == '\r' && !frames.any((f) => f.text);
 
 /// Writes [frames] through [send], each followed by its own settle delay (none after
 /// the last). THE one pacing loop for an answer: the session screen's overlay and the
