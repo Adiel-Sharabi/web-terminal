@@ -296,10 +296,10 @@ void main() {
     });
 
     // #383 — the Other text is sent as a bracketed paste. Measured on claude
-    // 2.1.308 (issue383 report A): the same bytes bunched into one read lost a
-    // 149-byte answer outright (question left pending) or dropped the digit (the
-    // default row recorded); as a bracketed paste the text survived bunching with
-    // its digit and with its CR, with newlines and at 1.2 KB.
+    // 2.1.308: the same bytes bunched into one read lost a 149-byte answer
+    // outright (question left pending) or dropped the digit (the default row
+    // recorded); as a bracketed paste the text survived bunching with its digit and
+    // with its CR, with newlines and at 1.2 KB.
     test('Other text is a BRACKETED PASTE, so frames bunched in one read cannot '
         'lose it (#383)', () {
       final frames = buildAnswerFrames(
@@ -791,35 +791,52 @@ void main() {
       expect(answerNeedsConfirm(frames), isTrue);
     });
 
-    test('Other free-text answer is NEVER re-sent an Enter (#383)', () {
-      // It ends in Enter, but a blind re-sent Enter after a bunched delivery
-      // commits the editor's leftovers (text, newline, next digit) as the answer.
+    // #383 — the resend-once Enter is withheld only for the ONE shape measured to
+    // go wrong (claude 2.1.308): a bracketed Other text whose own CR is followed,
+    // in the same answer, by the next tab's frames. Bunched into one read, the CR
+    // becomes a newline inside the editor and the next digit is typed after it, so
+    // a blind Enter would commit "text, newline, 2". Every other shape keeps it.
+    test('single-question Other keeps the resend: a lost CR leaves exactly the '
+        'text in the editor (#383)', () {
       final frames = buildAnswerFrames([_q(['A', 'B', 'C'])], [<int>{}],
           otherText: const ['hello']);
       expect(frames.last.keys, '\r');
-      expect(answerNeedsConfirm(frames), isFalse);
+      expect(answerNeedsConfirm(frames), isTrue);
     });
 
-    test('Other on one tab of a multi-question answer: no re-sent Enter (#383)',
-        () {
+    test('Other on the LAST tab keeps the resend: only the Submit CR follows it '
+        '(#383)', () {
+      final frames = buildAnswerFrames([_q(['A', 'B']), _q(['X', 'Y'])], [
+        {0},
+        <int>{}
+      ], otherText: const [null, 'typed']);
+      expect(_keys(frames), ['1', '3', '[200~typed[201~', '\r', '\r']);
+      expect(answerNeedsConfirm(frames), isTrue);
+    });
+
+    test('Other on a NON-last tab: NO resend, the next tab rides behind its CR '
+        '(#383)', () {
       final frames = buildAnswerFrames([_q(['A', 'B']), _q(['X', 'Y'])], [
         <int>{},
         {1}
       ], otherText: const ['typed', '']);
-      expect(frames.where((f) => f.text).length, 1);
+      expect(_keys(frames),
+          ['3', '[200~typed[201~', '\r', '2', '\r']);
+      expect(frames.where((f) => f.other).length, 1);
       expect(answerNeedsConfirm(frames), isFalse);
     });
 
-    test('note (#64 Gap 1) ends in Enter but is never re-sent one (#383)', () {
+    test('note (#64 Gap 1) keeps the resend: its ESC already closed the editor '
+        '(#383)', () {
       // preview: true, or this never enters the note branch at all (#143) and
       // the test passes on the plain digit path under a note's title — an
       // assertion that would survive the note path being deleted outright.
       final frames = buildAnswerFrames([_q(['A', 'B', 'C'], preview: true)], [
         {1}
       ], noteText: const ['a note']);
-      expect(_keys(frames), ['\x1b[B', 'n', 'a note', '\x1b', '\r']);
-      // A note is the user's words too (#383): no blind re-sent Enter.
-      expect(answerNeedsConfirm(frames), isFalse);
+      expect(_keys(frames), ['[B', 'n', 'a note', '', '\r']);
+      expect(frames.any((f) => f.text && !f.other), isTrue);
+      expect(answerNeedsConfirm(frames), isTrue);
     });
 
     test('empty frame list needs no confirm', () {

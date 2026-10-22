@@ -41,14 +41,21 @@ class _SubmitIntent extends Intent {
 
 /// One outbound frame: send [keys], then wait [delayMs] before the next frame.
 class AnswerFrame {
-  const AnswerFrame(this.keys, this.delayMs, {this.text = false});
+  const AnswerFrame(this.keys, this.delayMs,
+      {this.text = false, this.other = false})
+      : assert(!other || text, 'an Other frame carries text');
 
   /// The bytes to write to the PTY.
   final String keys;
 
   /// True for a frame carrying the user's own words (an Other answer or a note)
-  /// rather than a key. [answerNeedsConfirm] reads it: see there (#383).
+  /// rather than a key (#383). The session screen reads it to know that an
+  /// answer which did not land may be partly typed into the terminal.
   final bool text;
+
+  /// True for the Other free-text frame specifically, the one whose own committing
+  /// `\r` follows it. [answerNeedsConfirm] reads it: see there (#383).
+  final bool other;
 
   /// How long to wait after sending, before the next frame. Frames that must
   /// land in *separate* stdin reads (question transitions, a confirming Enter)
@@ -232,7 +239,8 @@ List<AnswerFrame> buildAnswerFrames(
       // bracketed paste it was recorded whole, bunched with its digit or its CR,
       // newlines and 1.2 KB included. See [_bracketOtherText] for the ESC rule.
       frames.add(AnswerFrame('${q.options.length + 1}', gap)); // "Type something."
-      frames.add(AnswerFrame(_bracketOtherText(other), gap, text: true)); // the free-text answer
+      frames.add(AnswerFrame(_bracketOtherText(other), gap,
+          text: true, other: true)); // the free-text answer
       frames.add(const AnswerFrame('\r', gap)); // submit
     } else if (!multiQuestion &&
         !q.multiSelect &&
@@ -346,15 +354,26 @@ String _bracketOtherText(String text) =>
 /// re-send it: derived from the frames, so it stays true by construction rather
 /// than by a second rule kept in sync.
 ///
-/// An answer carrying the user's own words never gets the re-sent Enter (#383).
-/// Measured on claude 2.1.308: when the bracketed text, its CR and the next tab's
-/// digit and CR reach Claude in ONE read, the CR becomes a newline INSIDE the
-/// Other editor and the digit is typed after it. The question stays pending, so a
-/// blind re-sent Enter would then commit "text, newline, 2" as the answer: a
-/// silently wrong answer instead of a pending one. Without it, the overlay
-/// resurfaces with the words kept ([QuestionDrafts]) and the user sends again.
-bool answerNeedsConfirm(List<AnswerFrame> frames) =>
-    frames.isNotEmpty && frames.last.keys == '\r' && !frames.any((f) => f.text);
+/// An Other text followed by more of the same answer never gets the re-sent Enter
+/// (#383). Measured on claude 2.1.308: when the bracketed text, its CR and the NEXT
+/// tab's digit and CR reach Claude in ONE read, the CR becomes a newline inside the
+/// Other editor and the digit is typed after it, so the question stays pending. A
+/// blind Enter would then commit "text, newline, 2" as the answer.
+///
+/// That is the only shape measured to go wrong, so it is the only one refused: an
+/// Other text whose own CR is followed by more than the final Submit-review CR, i.e.
+/// Other on a NON-last tab of a multi-question answer. A single-question Other, a
+/// note (its ESC already closed the editor) and an Other on the last tab keep the
+/// resend, which is their only automatic recovery.
+bool answerNeedsConfirm(List<AnswerFrame> frames) {
+  if (frames.isEmpty || frames.last.keys != '\r') return false;
+  for (var i = 0; i < frames.length; i++) {
+    // frames[i + 1] is the Other text's own committing CR; anything after it
+    // besides the last frame (the Submit-review CR) belongs to a later tab.
+    if (frames[i].other && frames.length > i + 3) return false;
+  }
+  return true;
+}
 
 /// Writes [frames] through [send], each followed by its own settle delay (none after
 /// the last). THE one pacing loop for an answer: the session screen's overlay and the
