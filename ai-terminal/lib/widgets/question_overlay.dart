@@ -127,7 +127,9 @@ class AnswerFrame {
 ///   `options.length + 1`). Answering with free text is THREE separate, delayed
 ///   stdin writes: the row digit (consumed as the selector, NOT part of the
 ///   answer), the text, then Enter to submit — each in its own PTY read (a
-///   text+CR burst reads as a paste, not a submit). See [otherText].
+///   text+CR burst reads as a paste, not a submit). See [otherText]. The text
+///   frame is sent as a bracketed paste since #383, so a bunched delivery cannot
+///   lose it.
 ///
 /// [otherText] is an optional per-question free-text answer (parallel to
 /// [selections]); a non-empty, non-whitespace entry routes a COMPACT
@@ -216,8 +218,17 @@ List<AnswerFrame> buildAnswerFrames(
       // SINGLE-SELECT only: in multi-select the "Type something." row is a
       // checkbox that toggles (no free-text input), so this path is gated off
       // and the multi-select branch below ignores otherText entirely.
+      //
+      // THE TEXT GOES OUT AS A BRACKETED PASTE (#383). The gaps above are made on
+      // this client and are not kept end to end: a reconnect flush, the server's
+      // pre-attach queue or a stalled link can deliver the frames in ONE read, and
+      // then Claude's paste-burst detector absorbs a long text's CR (the question
+      // stays pending) or drops the digit (the default row is recorded). Measured
+      // on claude 2.1.308: bunched, a 149-byte text+CR recorded NOTHING; as a
+      // bracketed paste it was recorded whole, bunched with its digit or its CR,
+      // newlines and 1.2 KB included. See [_bracketOtherText] for the ESC rule.
       frames.add(AnswerFrame('${q.options.length + 1}', gap)); // "Type something."
-      frames.add(AnswerFrame(other, gap)); // the free-text answer
+      frames.add(AnswerFrame(_bracketOtherText(other), gap)); // the free-text answer
       frames.add(const AnswerFrame('\r', gap)); // submit
     } else if (!multiQuestion &&
         !q.multiSelect &&
@@ -310,6 +321,15 @@ List<AnswerFrame> buildAnswerFrames(
   }
   return frames;
 }
+
+/// Wraps an Other answer in a bracketed paste (#383), so it survives frames that
+/// reach Claude bunched in one read. A text carrying ESC is returned bare, never
+/// stripped or sanitised: it may hold its own paste markers, and deleting an inner
+/// `ESC[200~` reconstitutes a close — the same refusal the worker's
+/// `bracketLongBody` makes. Refusing costs nothing; that text has the unbracketed
+/// shape that was already working when the gaps survive.
+String _bracketOtherText(String text) =>
+    text.contains('\x1b') ? text : '\x1b[200~$text\x1b[201~';
 
 /// True when [frames] end in a confirming Enter — multi-question (Enter
 /// finalizes the Submit-review screen) and, since the preview-layout fix,
@@ -528,6 +548,26 @@ const double kWideCtxColumn = 392; // the lead-up's own column
 const double kQuestionMin = 52;
 const double kQuestionMax = 260;
 
+/// The free-text drafts ("Other" answers and notes) typed into a question overlay,
+/// kept by whoever OUTLIVES the overlay (#383).
+///
+/// An answer that did not land makes the overlay resurface as a NEW widget with
+/// empty controllers, so a long dictated answer was gone and had to be retyped.
+/// This holds one question's drafts, keyed by its content signature
+/// (`questionSignature`): a different question starts empty, and the owner calls
+/// [clear] once the question is answered.
+class QuestionDrafts {
+  String? key;
+  List<String?> other = const [];
+  List<String?> note = const [];
+
+  void clear() {
+    key = null;
+    other = const [];
+    note = const [];
+  }
+}
+
 class QuestionOverlay extends StatefulWidget {
   const QuestionOverlay({
     super.key,
@@ -536,9 +576,16 @@ class QuestionOverlay extends StatefulWidget {
     required this.onDismiss,
     required this.onKey,
     this.contextText,
+    this.drafts,
+    this.draftKey = '',
   });
 
   final PendingQuestion question;
+
+  /// Where the typed Other/note text survives a resurfacing (#383), keyed by
+  /// [draftKey]. Null keeps the old behaviour (nothing outlives the overlay).
+  final QuestionDrafts? drafts;
+  final String draftKey;
 
   /// Claude's preceding message (the lead-up to the question), shown scrollable
   /// above the question so the full answer is readable before answering. Null
@@ -662,6 +709,40 @@ class _QuestionOverlayState extends State<QuestionOverlay> {
     _noteText = [for (final _ in widget.question.questions) null];
     _otherControllers = _freshControllers();
     _noteControllers = _freshControllers();
+    _restoreDrafts();
+  }
+
+  /// Puts back what was typed for THIS question before the overlay was rebuilt
+  /// (#383). A draft kept for another question, or for a prompt with a different
+  /// number of tabs, is ignored.
+  void _restoreDrafts() {
+    final d = widget.drafts;
+    final n = widget.question.questions.length;
+    if (d == null || d.key != widget.draftKey || d.other.length != n) return;
+    for (var i = 0; i < n; i++) {
+      final o = d.other[i];
+      if (o != null) {
+        _otherText[i] = o;
+        _otherControllers[i].text = o;
+      }
+      final nt = i < d.note.length ? d.note[i] : null;
+      if (nt != null) {
+        _noteText[i] = nt;
+        _noteControllers[i].text = nt;
+      }
+    }
+  }
+
+  /// Mirrors the typed text into [QuestionOverlay.drafts]. Called at every change
+  /// rather than at dispose, so the owner's `clear()` on a landed answer cannot be
+  /// undone by the overlay unmounting afterwards.
+  void _saveDrafts() {
+    final d = widget.drafts;
+    if (d == null) return;
+    d
+      ..key = widget.draftKey
+      ..other = List.of(_otherText)
+      ..note = List.of(_noteText);
   }
 
   @override
@@ -721,6 +802,7 @@ class _QuestionOverlayState extends State<QuestionOverlay> {
     setState(() {
       // Choosing a listed option exits Other mode (mutually exclusive).
       _otherText[_tab] = null;
+      _saveDrafts();
       final set = _selected[_tab];
       if (q.multiSelect) {
         set.contains(i) ? set.remove(i) : set.add(i);
@@ -780,6 +862,7 @@ class _QuestionOverlayState extends State<QuestionOverlay> {
     setState(() {
       _selected[_tab].clear();
       _otherText[_tab] = _otherControllers[_tab].text;
+      _saveDrafts();
     });
   }
 
@@ -796,6 +879,7 @@ class _QuestionOverlayState extends State<QuestionOverlay> {
       } else {
         _noteText[_tab] = _noteControllers[_tab].text;
       }
+      _saveDrafts();
     });
   }
 
@@ -1360,7 +1444,10 @@ class _QuestionOverlayState extends State<QuestionOverlay> {
         maxLines: 4,
         textInputAction: TextInputAction.send,
         style: theme.textTheme.bodyLarge,
-        onChanged: (v) => setState(() => _otherText[_tab] = v),
+        onChanged: (v) => setState(() {
+          _otherText[_tab] = v;
+          _saveDrafts();
+        }),
         onSubmitted: (_) {
           if (_everyQuestionAnswered) _send();
         },
@@ -1437,7 +1524,10 @@ class _QuestionOverlayState extends State<QuestionOverlay> {
         maxLines: 4,
         textInputAction: TextInputAction.send,
         style: theme.textTheme.bodyLarge,
-        onChanged: (v) => setState(() => _noteText[_tab] = v),
+        onChanged: (v) => setState(() {
+          _noteText[_tab] = v;
+          _saveDrafts();
+        }),
         onSubmitted: (_) {
           if (_everyQuestionAnswered) _send();
         },

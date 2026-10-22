@@ -279,7 +279,7 @@ void main() {
       // 3 options -> the implied "Type something." row is digit 4; the digit is
       // CONSUMED (selects the row, not part of the answer); then the free text;
       // then Enter submits.
-      expect(_keys(frames), ['4', 'deploy to staging', '\r']);
+      expect(_keys(frames), ['4', '\x1b[200~deploy to staging\x1b[201~', '\r']);
       // All three must land in SEPARATE stdin reads (text+CR in one burst reads
       // as a paste, not a submit) -> each carries the full inter-frame gap.
       for (final f in frames) {
@@ -291,8 +291,73 @@ void main() {
       final qs = [_q(['A', 'B', 'C'])];
       expect(
         _keys(buildAnswerFrames(qs, [<int>{}], otherText: const ['  hi there '])),
-        ['4', 'hi there', '\r'],
+        ['4', '\x1b[200~hi there\x1b[201~', '\r'],
       );
+    });
+
+    // #383 — the Other text is sent as a bracketed paste. Measured on claude
+    // 2.1.308 (issue383 report A): the same bytes bunched into one read lost a
+    // 149-byte answer outright (question left pending) or dropped the digit (the
+    // default row recorded); as a bracketed paste the text survived bunching with
+    // its digit and with its CR, with newlines and at 1.2 KB.
+    test('Other text is a BRACKETED PASTE, so frames bunched in one read cannot '
+        'lose it (#383)', () {
+      final frames = buildAnswerFrames(
+        [_q(['A', 'B', 'C'])],
+        [<int>{}],
+        otherText: const ['deploy to staging'],
+      );
+      expect(_keys(frames),
+          ['4', '\x1b[200~deploy to staging\x1b[201~', '\r']);
+      // The pacing is untouched: each frame still carries its own gap.
+      for (final f in frames) {
+        expect(f.delayMs, 600);
+      }
+    });
+
+    test('Other text carrying ESC is sent BARE — never stripped or bracketed '
+        '(#383)', () {
+      // Deleting an inner ESC[200~ reconstitutes a close, so refusing is the only
+      // safe handling (the worker's bracketLongBody makes the same refusal).
+      const nasty = 'a \x1b[201~ b';
+      final keys = _keys(buildAnswerFrames(
+        [_q(['A', 'B', 'C'])],
+        [<int>{}],
+        otherText: const [nasty],
+      ));
+      expect(keys, ['4', nasty, '\r']);
+    });
+
+    test('Other text with a newline is bracketed and the newline is kept (#383)',
+        () {
+      final keys = _keys(buildAnswerFrames(
+        [_q(['A', 'B'])],
+        [<int>{}],
+        otherText: const ['first line\nsecond line'],
+      ));
+      expect(keys,
+          ['3', '\x1b[200~first line\nsecond line\x1b[201~', '\r']);
+    });
+
+    test('only the Other text frame is bracketed: preview, multi-select and '
+        'plain digit paths are unchanged (#383)', () {
+      final preview = buildAnswerFrames(
+          [_q(['A', 'B'], preview: true)], [<int>{1}],
+          otherText: const ['ignored']);
+      final multi = buildAnswerFrames(
+          [_q(['A', 'B', 'C'], multi: true)], [<int>{0, 2}],
+          otherText: const ['ignored']);
+      final plain = buildAnswerFrames([_q(['A', 'B'])], [<int>{1}]);
+      final note = buildAnswerFrames(
+          [_q(['A', 'B'], preview: true)], [<int>{1}],
+          noteText: const ['a note']);
+      for (final f in [preview, multi, plain, note]) {
+        expect(_keys(f).any((k) => k.contains('\x1b[200~')), isFalse);
+      }
+      expect(_keys(preview), ['2', '\r']);
+      expect(_keys(multi), ['1', '3', '\x1b[C', '1']);
+      expect(_keys(plain), ['2', '\r']);
+      expect(_keys(note), ['\x1b[B', 'n', 'a note', '\x1b', '\r']);
     });
 
     test('multi-select ignores Other entirely (no free-text path)', () {
@@ -352,7 +417,7 @@ void main() {
       // then the text, then the CR that commits it and moves to the next tab.
       // Q2 is a plain compact single-select digit. The loop tail then adds the
       // single Submit-review Enter.
-      expect(_keys(frames), ['3', 'freeform', '\r', '1', '\r']);
+      expect(_keys(frames), ['3', '\x1b[200~freeform\x1b[201~', '\r', '1', '\r']);
       // Each of the three Other frames must land in its OWN PTY read, or the
       // text+CR burst reads as a paste and submits nothing.
       expect(frames[1].delayMs, greaterThanOrEqualTo(500));
@@ -376,7 +441,7 @@ void main() {
         otherText: const [null, 'extra large please'],
       );
       expect(_keys(frames),
-          ['1', '4', 'extra large please', '\r', '\r']);
+          ['1', '4', '\x1b[200~extra large please\x1b[201~', '\r', '\r']);
     });
 
     // #143 — re-measured and the deferral HOLDS, so this is now un-skipped and
@@ -442,7 +507,7 @@ void main() {
         otherText: const ['indigo actually', 'extra large please'],
       );
       expect(_keys(frames),
-          ['3', '\r', '4', 'extra large please', '\r', '\r']);
+          ['3', '\r', '4', '\x1b[200~extra large please\x1b[201~', '\r', '\r']);
       expect(_keys(frames), isNot(contains('indigo actually')));
     });
   });
@@ -578,7 +643,7 @@ void main() {
         otherText: const ['free text answer'],
         noteText: const ['should never appear'],
       );
-      expect(_keys(frames), ['4', 'free text answer', '\r']);
+      expect(_keys(frames), ['4', '\x1b[200~free text answer\x1b[201~', '\r']);
       expect(_keys(frames), isNot(contains('should never appear')));
     });
 
@@ -1194,7 +1259,7 @@ void main() {
     await tester.pumpAndSettle();
 
     // 3 options -> "Type something." is row 4, then the text, then submit.
-    expect(_keys(sent!), ['4', 'deploy to staging', '\r']);
+    expect(_keys(sent!), ['4', '\x1b[200~deploy to staging\x1b[201~', '\r']);
   });
 
   testWidgets('picking a listed option after Other exits free-text mode',
@@ -3073,7 +3138,7 @@ void main() {
       // each branch CR commits its text and advances, and the tail Enter
       // finalises the Submit review.
       expect(_keys(sent),
-          ['3', 'alpha answer', '\r', '3', 'beta answer', '\r', '\r']);
+          ['3', '\x1b[200~alpha answer\x1b[201~', '\r', '3', '\x1b[200~beta answer\x1b[201~', '\r', '\r']);
     });
 
     testWidgets('a tab answered only via Other shows its chip tick',
@@ -3194,6 +3259,93 @@ void main() {
       await tester.tap(find.text('Other…'));
       await tester.pumpAndSettle();
       expect(fieldText(tester), isEmpty);
+    });
+  });
+
+  // #383 — an answer that did not land brings the overlay back as a NEW widget.
+  // Its controllers started empty, so a long dictated Other answer was gone and
+  // had to be retyped. The session screen now keeps the drafts in a
+  // [QuestionDrafts] that outlives the overlay.
+  group('Other drafts survive a resurfaced overlay (#383)', () {
+    PendingQuestion pq(String id, String question) => PendingQuestion(
+          toolUseId: id,
+          questions: [
+            PendingQuestionItem(
+              header: 'H',
+              question: question,
+              multiSelect: false,
+              hasPreview: false,
+              options: [QuestionOption(label: 'Red'), QuestionOption(label: 'Green')],
+            ),
+          ],
+        );
+
+    Future<void> mount(WidgetTester tester, PendingQuestion q,
+        QuestionDrafts drafts, String key) async {
+      tester.view.physicalSize = const Size(412 * 3, 915 * 3);
+      tester.view.devicePixelRatio = 3.0;
+      addTearDown(tester.view.reset);
+      await tester.pumpWidget(MaterialApp(
+        theme: AppTheme.dark,
+        home: Scaffold(
+          body: Stack(children: [
+            QuestionOverlay(
+              question: q,
+              drafts: drafts,
+              draftKey: key,
+              onSend: (_) {},
+              onKey: (_) {},
+              onDismiss: () {},
+            ),
+          ]),
+        ),
+      ));
+      await tester.pumpAndSettle();
+    }
+
+    Future<void> unmount(WidgetTester tester) async {
+      await tester.pumpWidget(const MaterialApp(home: SizedBox()));
+      await tester.pumpAndSettle();
+    }
+
+    String fieldText(WidgetTester tester) =>
+        tester.widget<TextField>(find.byType(TextField)).controller!.text;
+
+    testWidgets('the same question comes back with its typed text', (tester) async {
+      final drafts = QuestionDrafts();
+      final q = pq('t1', 'Pick one');
+      await mount(tester, q, drafts, 'sig-A');
+      await tester.tap(find.text('Other…'));
+      await tester.pumpAndSettle();
+      await tester.enterText(find.byType(TextField), 'a long dictated answer');
+      await tester.pumpAndSettle();
+
+      await unmount(tester);
+      // The same question under another toolUseId (hook id -> transcript id).
+      await mount(tester, pq('t2', 'Pick one'), drafts, 'sig-A');
+
+      expect(fieldText(tester), 'a long dictated answer');
+      // Other is active again, so Send is live without retyping.
+      expect(find.widgetWithText(FilledButton, 'Send answer'), findsOneWidget);
+    });
+
+    testWidgets('a DIFFERENT question starts empty, and a cleared draft is gone',
+        (tester) async {
+      final drafts = QuestionDrafts();
+      await mount(tester, pq('t1', 'Pick one'), drafts, 'sig-A');
+      await tester.tap(find.text('Other…'));
+      await tester.pumpAndSettle();
+      await tester.enterText(find.byType(TextField), 'typed for A');
+      await tester.pumpAndSettle();
+      await unmount(tester);
+
+      await mount(tester, pq('t3', 'Pick another'), drafts, 'sig-B');
+      expect(find.byType(TextField), findsNothing);
+      await unmount(tester);
+
+      drafts.clear();
+      await mount(tester, pq('t1', 'Pick one'), drafts, 'sig-A');
+      expect(find.byType(TextField), findsNothing);
     });
   });
 }

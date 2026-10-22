@@ -1221,6 +1221,9 @@ class _SessionScreenState extends State<SessionScreen>
   // `hook-<id>-<seq>` (live) and the real `toolu_…` (transcript), which used to
   // read as a brand-new question and re-show the overlay.
   String? _dismissedQuestionKey;
+  // Other/note text typed into the overlay, kept here so a resurfaced overlay
+  // (an answer that did not land) finds it again instead of starting empty (#383).
+  final QuestionDrafts _questionDrafts = QuestionDrafts();
   String?
   _questionContext; // Claude's preceding message, shown above the question
   Timer? _questionPoll;
@@ -1517,6 +1520,12 @@ class _SessionScreenState extends State<SessionScreen>
     if (q != null && questionSignature(q) != _dismissedQuestionKey) {
       _dismissedQuestionKey = null;
     }
+    // The typed Other/note drafts belong to the question they were typed for (#383):
+    // a different one, or none, drops them.
+    if (_questionDrafts.key != null &&
+        questionSignature(q) != _questionDrafts.key) {
+      _questionDrafts.clear();
+    }
     if (q?.toolUseId != _pendingQuestion?.toolUseId) {
       setState(() {
         _pendingQuestion = q;
@@ -1634,6 +1643,9 @@ class _SessionScreenState extends State<SessionScreen>
     );
     // Exhausted retries with the same prompt up → surface it again so the user
     // can retry, instead of a silently stuck, hidden question.
+    // Landed (or replaced): the typed answer has done its job. Still pending: the
+    // overlay is about to come back and must find it again (#383).
+    if (mounted && stillPending == null) _questionDrafts.clear();
     if (mounted &&
         shouldResurfaceAfterAnswer(
           stillPending: stillPending != null,
@@ -4765,6 +4777,8 @@ class _SessionScreenState extends State<SessionScreen>
           QuestionOverlay(
             question: _pendingQuestion!,
             contextText: _questionContext,
+            drafts: _questionDrafts,
+            draftKey: questionSignature(_pendingQuestion),
             onSend: _answerQuestion,
             onKey: _sendRawToTerminal,
             onDismiss: () => setState(
