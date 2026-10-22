@@ -3521,7 +3521,8 @@ void main() {
       ..key = 'sig-A'
       ..other = ['deploy to staging']
       ..note = [null]
-      ..notLanded = partlyTyped;
+      ..notLanded = partlyTyped
+      ..sentWords = partlyTyped ? ['deploy to staging'] : [];
 
     testWidgets('shows the notice, keeps the words selectable, and demotes Send',
         (tester) async {
@@ -3696,7 +3697,8 @@ void main() {
         ..key = 'sig-A'
         ..other = ['first answer', null, 'third answer']
         ..note = [null, 'a note on two', null]
-        ..notLanded = true;
+        ..notLanded = true
+        ..sentWords = ['first answer', 'a note on two', 'third answer'];
       await mount(tester, drafts,
           question: PendingQuestion(toolUseId: 't2', questions: [
             _q(['A', 'B']),
@@ -3714,7 +3716,8 @@ void main() {
         ..key = 'sig-A'
         ..other = ['deploy to staging']
         ..note = ['   ']
-        ..notLanded = true;
+        ..notLanded = true
+        ..sentWords = ['deploy to staging'];
       await mount(tester, drafts);
       final words = tester.widget<SelectableText>(
           find.byKey(const ValueKey('partly-typed-words')));
@@ -3815,7 +3818,7 @@ void main() {
       final words = tester.widget<SelectableText>(
           find.byKey(const ValueKey('partly-typed-words')));
       expect(words.data, 'deploy to staging');
-      expect(drafts.other, ['deploy to staging']);
+      expect(drafts.sentWords, ['deploy to staging']);
       expect(drafts.flaggedFor('sig-A'), isTrue);
     });
 
@@ -3855,8 +3858,59 @@ void main() {
       final words = tester.widget<SelectableText>(
           find.byKey(const ValueKey('partly-typed-words')));
       expect(words.data, 'deploy to staging');
+      expect(drafts.other, ['something else'], reason: 'the live draft follows');
       drafts.clear();
       expect(drafts.words, isEmpty);
+      expect(drafts.other, isEmpty, reason: 'clear() drops both');
+    });
+
+    // The SENT snapshot (the copy block) and the LIVE draft (the Other field) are two
+    // things. A deliberate re-send replaces the snapshot with what it just sent.
+    testWidgets('"Send again anyway" after an edit: the block shows the NEW words '
+        'once that send is marked', (tester) async {
+      final drafts = QuestionDrafts()
+        ..key = 'sig-A'
+        ..other = ['use postgres']
+        ..note = [null];
+      drafts.markSent('sig-A', [
+        const AnswerFrame('3', 0),
+        const AnswerFrame('use postgres', 0, text: true, other: true),
+        const AnswerFrame('\r', 0),
+      ]);
+      final sent = <List<AnswerFrame>>[];
+      await mount(tester, drafts, sent: sent);
+      await tester.enterText(find.byType(TextField), 'use sqlite');
+      await tester.pumpAndSettle();
+      await tester.tap(find.text('Send again anyway'));
+      await tester.pump();
+      expect(sent, hasLength(1));
+      // What the screen does in _answerQuestion, before the keys go out.
+      drafts.markSent('sig-A', sent.single);
+
+      // The second send also fails: the card comes back.
+      await mount(tester, drafts, question: pq('t3'));
+      final words = tester.widget<SelectableText>(
+          find.byKey(const ValueKey('partly-typed-words')));
+      expect(words.data, 'use sqlite');
+      expect(tester.widget<TextField>(find.byType(TextField)).controller!.text,
+          'use sqlite');
+    });
+
+    testWidgets('a half-finished edit on a flagged card survives a same-question '
+        're-report (didUpdateWidget)', (tester) async {
+      final drafts = sentNotSettled();
+      await mount(tester, drafts);
+      await tester.enterText(find.byType(TextField), 'deploy to prod, half-fin');
+      await tester.pumpAndSettle();
+
+      await mount(tester, drafts, question: pq('t7')); // hook id -> transcript id
+      expect(tester.widget<TextField>(find.byType(TextField)).controller!.text,
+          'deploy to prod, half-fin',
+          reason: 'the live edit is restored, not the first send');
+      final words = tester.widget<SelectableText>(
+          find.byKey(const ValueKey('partly-typed-words')));
+      expect(words.data, 'deploy to staging', reason: 'the block is what was sent');
+      expect(drafts.flaggedFor('sig-A'), isTrue);
     });
 
     test('markSent flags only an answer that carried words, for ITS drafts',
@@ -3881,8 +3935,12 @@ void main() {
       c.markSent('k', words);
       expect(c.flaggedFor('k'), isTrue);
       expect(c.flaggedFor('another'), isFalse, reason: 'bound to its signature');
+      expect(c.sentWords, ['hello']);
+      c.markSent('k', [const AnswerFrame('world', 0, text: true)]);
+      expect(c.sentWords, ['world'], reason: 'a later send replaces the snapshot');
       c.clear();
       expect(c.flaggedFor('k'), isFalse, reason: 'clear() forgets it');
+      expect(c.sentWords, isEmpty);
     });
   });
 }

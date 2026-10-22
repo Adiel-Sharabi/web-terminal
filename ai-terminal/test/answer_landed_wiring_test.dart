@@ -52,7 +52,7 @@ Future<AnswerVerification> _verify(String key, List<Object?> polls) {
 
 /// Runs [settleAfterAnswer] the way the screen does, with its dismissal key set to
 /// the answered question's (the optimistic hide), unless [dismissedKey] is given.
-PendingQuestion? _settle(QuestionDrafts d, String key, AnswerVerification v,
+AnswerSettlement _settle(QuestionDrafts d, String key, AnswerVerification v,
         {String? dismissedKey}) =>
     settleAfterAnswer(
       drafts: d,
@@ -86,7 +86,9 @@ void main() {
       final v = await _verify(key, [_q('Pick one', id: 'seen'), _q('Pick one', id: 'seen')]);
       final d = _sent(key);
       final back = _settle(d, key, v);
-      expect(back, same(v.stillPending));
+      expect(back.apply, isTrue);
+      expect(back.question, same(v.stillPending));
+      expect(back.undismiss, isTrue);
       expect(d.flaggedFor(key), isTrue);
       expect(d.key, key, reason: 'the words stay');
     });
@@ -105,7 +107,7 @@ void main() {
       final v = await _verify(key, [_q('Pick one'), _q('Pick one')]);
       final d = _sent(key);
       final back = _settle(d, key, v, dismissedKey: 'something-else');
-      expect(back, isNull, reason: 'dismissal moved on: do not resurface');
+      expect(back.apply, isFalse, reason: 'dismissal moved on: do not resurface');
       expect(d.flaggedFor(key), isTrue);
     });
 
@@ -114,7 +116,7 @@ void main() {
       final v = await _verify(key, [_q('Pick one'), Exception('link down')]);
       expect(v.stillPending, isNull, reason: 'a failed poll is not "still pending"');
       final d = _sent(key);
-      expect(_settle(d, key, v), isNull);
+      expect(_settle(d, key, v).apply, isFalse);
       expect(d.flaggedFor(key), isTrue);
       expect(d.key, key);
     });
@@ -123,7 +125,8 @@ void main() {
         () async {
       final v = await _verify(key, [Exception('a'), Exception('b')]);
       final d = _sent(key);
-      expect(_settle(d, key, v), isNull);
+      expect(_settle(d, key, v).apply, isFalse,
+          reason: 'a failed poll proves nothing: the card stays as it is');
       expect(d.flaggedFor(key), isTrue,
           reason: 'a verify that saw nothing must not leave a replayable card');
       expect(d.key, key);
@@ -133,19 +136,41 @@ void main() {
         () async {
       final v = await _verify(key, [_q('Pick one'), null]);
       final d = _sent(key);
-      expect(_settle(d, key, v), isNull);
+      final back = _settle(d, key, v);
       expect(d.key, isNull);
       expect(d.notLanded, isFalse);
       expect(d.flaggedFor(key), isFalse);
+      expect(d.sentWords, isEmpty);
+      // A card reopened from the chip mid-verify must unmount (#383).
+      expect(back.apply, isTrue);
+      expect(back.question, isNull, reason: 'gone: the stale card is unmounted');
+      expect(back.undismiss, isFalse);
     });
 
     test('replaced by a DIFFERENT question: a positive observation, flag dropped',
         () async {
-      final v = await _verify(key, [_q('Something else entirely')]);
+      final other = _q('Something else entirely', id: 'new');
+      final v = await _verify(key, [other]);
       final d = _sent(key);
-      _settle(d, key, v);
+      final back = _settle(d, key, v);
       expect(d.notLanded, isFalse);
       expect(d.key, isNull);
+      // The card becomes the NEW question, with none of the old words carried over.
+      expect(back.apply, isTrue);
+      expect(back.question, same(other));
+      expect(back.undismiss, isTrue);
+      expect(d.words, isEmpty);
+      expect(d.other, isEmpty);
+      expect(d.flaggedFor(questionSignature(other)), isFalse);
+    });
+
+    test('a digits-only answer that was replaced still swaps the card', () async {
+      final other = _q('Something else entirely', id: 'new');
+      final v = await _verify(key, [other]);
+      final d = QuestionDrafts(); // nothing typed, nothing flagged
+      final back = _settle(d, key, v);
+      expect(back.apply, isTrue);
+      expect(back.question, same(other));
     });
 
     test('a digits-only answer is never flagged', () async {
@@ -183,15 +208,18 @@ void main() {
       expect(
           b,
           contains(RegExp(r'if \(!mounted\) return;\s*(?://[^\n]*\s*)*'
-              r'final resurface = settleAfterAnswer\(')));
+              r'final settled = settleAfterAnswer\(')));
       expect(b, contains('verdict: verdict,'));
       expect(b, contains('drafts: _questionDrafts,'));
       // The result is applied in ONE setState, so a card reopened mid-verify
-      // rebuilds with the settled drafts.
+      // rebuilds with the settled drafts AND the question the verify observed
+      // (unmounted when gone, the new one when replaced).
+      expect(b, contains('if (!settled.apply) return;'));
       expect(
           b,
-          contains(RegExp(r'setState\(\(\) \{\s+if \(resurface != null\) \{\s+'
-              r'_dismissedQuestionKey = null;\s+_pendingQuestion = resurface;')));
+          contains(RegExp(r'setState\(\(\) \{\s+if \(settled\.undismiss\) '
+              r'_dismissedQuestionKey = null;\s+'
+              r'_pendingQuestion = settled\.question;')));
     });
 
     test('_answerQuestion flags the words BEFORE the first key goes out', () {
@@ -206,7 +234,7 @@ void main() {
     });
 
     test('settleAfterAnswer sets no flag of its own (only clear() drops it)', () {
-      final i = src.indexOf('PendingQuestion? settleAfterAnswer(');
+      final i = src.indexOf('AnswerSettlement settleAfterAnswer(');
       final b = src.substring(i, src.indexOf('\n}\n', i));
       expect(b, isNot(contains('markSent')));
       expect(b, isNot(contains('notLanded')));

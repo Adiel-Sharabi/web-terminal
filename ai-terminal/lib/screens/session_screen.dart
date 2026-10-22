@@ -1115,6 +1115,20 @@ Future<AnswerVerification> verifyAnswerLanded({
   return AnswerVerification(stillPending, seen);
 }
 
+/// What the screen does with its card once an answer has been verified (#383).
+/// [apply] false: leave the card as it is. True: make [question] the card (null
+/// unmounts it) and, if [undismiss], clear the optimistic dismissal so it shows.
+class AnswerSettlement {
+  const AnswerSettlement({
+    this.apply = false,
+    this.question,
+    this.undismiss = false,
+  });
+  final bool apply;
+  final PendingQuestion? question;
+  final bool undismiss;
+}
+
 /// Everything the screen decides once an answer to the question signed
 /// [answeredKey] has been verified ([verdict]), in one place so a test can reach it
 /// (#383). Settles [drafts]: gone or replaced -> the typed words did their job, drop
@@ -1124,22 +1138,39 @@ Future<AnswerVerification> verifyAnswerLanded({
 /// is covered, and a verify that observed nothing (a failed poll proves neither
 /// way) still leaves the question flagged.
 ///
-/// Returns the question to put back on screen, or null when the overlay stays as it
-/// is ([shouldResurfaceAfterAnswer]). The caller only applies it, inside `setState`.
-PendingQuestion? settleAfterAnswer({
+/// The card follows the same observation. A card reopened from the chip DURING the
+/// verify is still mounted with the old question's Other text and no flag, and one
+/// Enter on it would type that answer as a new prompt, or into a different question's
+/// selector. So a positive gone-or-different observation of the ANSWERED question
+/// returns that observation (null, or the new question) as the card, the way the 4 s
+/// poll does; a question still pending after every retry is put back
+/// ([shouldResurfaceAfterAnswer]); anything else leaves the card alone. The caller
+/// only applies it, inside `setState`.
+AnswerSettlement settleAfterAnswer({
   required QuestionDrafts drafts,
   required String answeredKey,
   required AnswerVerification verdict,
   required String? dismissedKey,
 }) {
   if (verdict.seen.shouldClearDrafts(drafts.key)) drafts.clear();
-  return shouldResurfaceAfterAnswer(
+  if (shouldResurfaceAfterAnswer(
     stillPending: verdict.stillPending != null,
     answeredKey: answeredKey,
     dismissedKey: dismissedKey,
-  )
-      ? verdict.stillPending
-      : null;
+  )) {
+    return AnswerSettlement(
+        apply: true, question: verdict.stillPending, undismiss: true);
+  }
+  final seen = verdict.seen;
+  if (seen.observed && questionSignature(seen.lastSeen) != answeredKey) {
+    final shown = seen.lastSeen;
+    return AnswerSettlement(
+      apply: true,
+      question: shown,
+      undismiss: shown != null && questionSignature(shown) != dismissedKey,
+    );
+  }
+  return const AnswerSettlement();
 }
 
 /// How a [SessionScreen] LEAVES when the session it shows is gone from the list.
@@ -1696,6 +1727,8 @@ class _SessionScreenState extends State<SessionScreen>
       (keys) => _connection?.sendInput(keys),
       alive: () => mounted,
     );
+    // `sent` is false only when this screen unmounted mid-send; with no connection
+    // the keys drop silently and the flag stays (the safe direction).
     if (!sent || !mounted) return;
     _scrollToBottom();
     // Verify the answer actually landed — and un-strand it if it didn't. We just
@@ -1764,18 +1797,20 @@ class _SessionScreenState extends State<SessionScreen>
     // stay (#383). Exhausted retries with the same prompt up -> surface it again
     // so the user can retry, instead of a silently stuck, hidden question. The
     // setState is what lets a card reopened mid-verify see the settled drafts.
-    final resurface = settleAfterAnswer(
+    final settled = settleAfterAnswer(
       drafts: _questionDrafts,
       answeredKey: answeredKey,
       verdict: verdict,
       dismissedKey: _dismissedQuestionKey,
     );
+    if (!settled.apply) return;
+    final changed = settled.question?.toolUseId != _pendingQuestion?.toolUseId;
     setState(() {
-      if (resurface != null) {
-        _dismissedQuestionKey = null;
-        _pendingQuestion = resurface;
-      }
+      if (settled.undismiss) _dismissedQuestionKey = null;
+      _pendingQuestion = settled.question;
+      if (changed) _questionContext = null;
     });
+    if (changed && settled.question != null) unawaited(_loadQuestionContext());
   }
 
   /// Whether the Chat lens is available for THIS session: the server advertises

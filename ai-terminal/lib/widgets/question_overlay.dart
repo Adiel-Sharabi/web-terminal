@@ -343,6 +343,19 @@ List<AnswerFrame> buildAnswerFrames(
 String _bracketOtherText(String text) =>
     text.contains('\x1b') ? text : '\x1b[200~$text\x1b[201~';
 
+/// The words inside a frame built by [_bracketOtherText]: the inverse, so the words
+/// a frame carried are read back from the FRAME rather than from whatever the card
+/// holds now. A bare text (one that carried ESC) is returned as it is.
+String _unbracketOtherText(String keys) {
+  const open = '\x1b[200~';
+  const close = '\x1b[201~';
+  return keys.length >= open.length + close.length &&
+          keys.startsWith(open) &&
+          keys.endsWith(close)
+      ? keys.substring(open.length, keys.length - close.length)
+      : keys;
+}
+
 /// True when [frames] end in a confirming Enter — multi-question (Enter
 /// finalizes the Submit-review screen) and, since the preview-layout fix,
 /// single-select-single too (its digit no longer submits on its own in every
@@ -380,8 +393,11 @@ bool answerNeedsConfirm(List<AnswerFrame> frames) {
 /// sessions board (#337) both deliver through it, so a frame set built by
 /// [buildAnswerFrames] lands in the same separate stdin reads whichever surface sent it.
 ///
-/// Stops as soon as [alive] says the sender is gone, and returns whether every frame
-/// went out.
+/// Stops as soon as [alive] says the sender is gone, and returns false only then.
+/// [send] is fire-and-forget: a sender with no connection drops the keys silently
+/// and this still returns true, so the not-landed flag ([QuestionDrafts.markSent])
+/// stays up for an answer that was never typed. That is the safe direction: the
+/// notice costs one tap, a lost one types into a closed selector.
 Future<bool> deliverAnswerFrames(
   List<AnswerFrame> frames,
   void Function(String keys) send, {
@@ -596,11 +612,11 @@ class QuestionDrafts {
   List<String?> other = const [];
   List<String?> note = const [];
 
-  /// An answer carrying these words was SENT for the question signed [key] and has
-  /// not been seen to land. The terminal may already hold part of it (an editor with
-  /// the text typed in, a highlight moved a row), so the overlay stops offering a
-  /// blind Send for THAT question: a replay types `4` and the text into an editor
-  /// that already holds them.
+  /// An answer carrying words was SENT for the question signed [key] and has not been
+  /// seen to land. The terminal may already hold part of it (an editor with the text
+  /// typed in, a highlight moved a row), so the overlay stops offering a blind Send
+  /// for THAT question: a replay types `4` and the text into an editor that already
+  /// holds them.
   ///
   /// Verified, never predicted: [markSent] sets it BEFORE the keys go out, so a card
   /// mounted at any point afterwards (the "A question is waiting" chip during the
@@ -611,23 +627,32 @@ class QuestionDrafts {
   /// and a false notice costs one tap where a lost one types into a closed selector.
   bool notLanded = false;
 
+  /// The words of the LAST answer sent for [key], as that answer carried them (read
+  /// off its frames). It is what the notice's copy block shows, because it is what
+  /// the terminal may hold, so it is NOT the live draft ([other], [note]). Every
+  /// send, the deliberate "Send again anyway" included, replaces it with what was
+  /// just sent.
+  List<String> sentWords = const [];
+
   /// Whether the question signed [questionKey] is the one flagged by [markSent].
   bool flaggedFor(String questionKey) => notLanded && key == questionKey;
 
-  /// Every word held, per tab: the Other text, then the note, blanks skipped. While
-  /// [notLanded] is up [other] and [note] are frozen (the overlay stops saving), so
-  /// this is the words as they were sent, whatever the card is tapped into after.
-  List<String> get words => [
-        for (var i = 0; i < other.length; i++)
-          for (final t in [other[i], i < note.length ? note[i] : null])
-            if (t != null && t.trim().isNotEmpty) t.trim(),
-      ];
+  /// The words the notice shows: [sentWords], untouched by whatever the card is
+  /// edited or tapped into after the send.
+  List<String> get words => sentWords;
 
   /// Called just before [frames], the answer to the question signed [answeredKey],
   /// is delivered. Flags it only if the answer carries words and these are the
   /// drafts held for that question: an answer of plain digits replays harmlessly.
+  /// Each call re-takes the snapshot, so a second send shows the words it sent.
   void markSent(String answeredKey, List<AnswerFrame> frames) {
-    if (key == answeredKey && frames.any((f) => f.text)) notLanded = true;
+    if (key != answeredKey || !frames.any((f) => f.text)) return;
+    notLanded = true;
+    sentWords = [
+      for (final f in frames)
+        if (f.text && _unbracketOtherText(f.keys).trim().isNotEmpty)
+          _unbracketOtherText(f.keys).trim(),
+    ];
   }
 
   void clear() {
@@ -635,6 +660,7 @@ class QuestionDrafts {
     other = const [];
     note = const [];
     notLanded = false;
+    sentWords = const [];
   }
 }
 
@@ -815,11 +841,13 @@ class _QuestionOverlayState extends State<QuestionOverlay> {
   void _saveDrafts() {
     final d = widget.drafts;
     if (d == null) return;
-    // Another question's flag must not follow the words over to this one.
-    if (d.key != widget.draftKey) d.notLanded = false;
-    // The words of a sent answer are frozen until clear(): a later tap on a listed
-    // option or a removed note must not take them out of the notice's copy block.
-    if (d.notLanded) return;
+    // Another question's flag and sent words must not follow the draft over to this
+    // one. The LIVE draft below is saved on every edit, flagged or not: the sent
+    // words are a separate snapshot ([QuestionDrafts.sentWords]).
+    if (d.key != widget.draftKey) {
+      d.notLanded = false;
+      d.sentWords = const [];
+    }
     d
       ..key = widget.draftKey
       ..other = List.of(_otherText)
