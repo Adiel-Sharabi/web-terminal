@@ -3347,5 +3347,49 @@ void main() {
       await mount(tester, pq('t1', 'Pick one'), drafts, 'sig-A');
       expect(find.byType(TextField), findsNothing);
     });
+
+    // A note hangs off a CHOSEN option. Restored alone it left the note active
+    // with nothing selected: field hidden, text-entry layout on, no way to see it.
+    testWidgets('a note comes back WITH the option it was attached to',
+        (tester) async {
+      final drafts = QuestionDrafts();
+      PendingQuestion previewed(String id) => PendingQuestion(
+            toolUseId: id,
+            questions: [_q(['Alpha', 'Beta', 'Gamma'], preview: true)],
+          );
+      await mount(tester, previewed('n1'), drafts, 'sig-N');
+      await tester.tap(find.text('Beta'));
+      await tester.pumpAndSettle();
+      await tester.tap(find.text('Add a note'));
+      await tester.pumpAndSettle();
+      await tester.enterText(find.byType(TextField), 'explain the tradeoffs');
+      await tester.pumpAndSettle();
+      await unmount(tester);
+
+      await mount(tester, previewed('n2'), drafts, 'sig-N');
+
+      expect(fieldText(tester), 'explain the tradeoffs');
+      expect(find.text('Remove note'), findsOneWidget);
+      // Beta is the selected option again, so Send is live and says so.
+      expect(find.widgetWithText(FilledButton, 'Send answer'), findsOneWidget);
+      expect(drafts.selected.single, {1});
+    });
+
+    testWidgets('a note whose option was lost is not restored on its own',
+        (tester) async {
+      final drafts = QuestionDrafts()
+        ..key = 'sig-N'
+        ..note = ['orphan note']
+        ..selected = [<int>{}];
+      await mount(
+          tester,
+          PendingQuestion(
+              toolUseId: 'n3',
+              questions: [_q(['Alpha', 'Beta'], preview: true)]),
+          drafts,
+          'sig-N');
+      expect(find.byType(TextField), findsNothing);
+      expect(find.text('Add a note'), findsNothing);
+    });
   });
 }

@@ -188,6 +188,67 @@ void main() {
     });
   });
 
+  group('shouldClearQuestionDrafts (#383: keep a typed answer until the question is gone)', () {
+    PendingQuestion q(String question) => PendingQuestion(
+          toolUseId: 't',
+          questions: [
+            PendingQuestionItem(
+              header: 'H',
+              question: question,
+              multiSelect: false,
+              hasPreview: false,
+              options: [QuestionOption(label: 'Red')],
+            ),
+          ],
+        );
+
+    test('the same question still pending -> keep', () {
+      final cur = q('Pick one');
+      expect(
+        shouldClearQuestionDrafts(
+            draftKey: questionSignature(cur), observed: true, current: cur),
+        isFalse,
+      );
+    });
+
+    test('a positive observation that it is gone -> clear', () {
+      expect(
+        shouldClearQuestionDrafts(
+            draftKey: questionSignature(q('Pick one')),
+            observed: true,
+            current: null),
+        isTrue,
+      );
+    });
+
+    test('a positive observation of a DIFFERENT question -> clear', () {
+      expect(
+        shouldClearQuestionDrafts(
+            draftKey: questionSignature(q('Pick one')),
+            observed: true,
+            current: q('Pick another')),
+        isTrue,
+      );
+    });
+
+    test('no successful poll (stalled link) -> keep, even with nothing seen', () {
+      expect(
+        shouldClearQuestionDrafts(
+            draftKey: questionSignature(q('Pick one')),
+            observed: false,
+            current: null),
+        isFalse,
+      );
+    });
+
+    test('no drafts held -> nothing to clear', () {
+      expect(
+        shouldClearQuestionDrafts(draftKey: null, observed: true, current: null),
+        isFalse,
+      );
+    });
+  });
+
   // The dismissal/answered identity must key on question CONTENT, not toolUseId:
   // the server reports a synthetic `hook-<id>-<seq>` while the question is live
   // and the real `toolu_…` once it falls back to the transcript. Keying on the id

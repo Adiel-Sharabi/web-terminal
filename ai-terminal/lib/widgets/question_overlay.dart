@@ -561,10 +561,16 @@ class QuestionDrafts {
   List<String?> other = const [];
   List<String?> note = const [];
 
+  /// The option(s) each tab had chosen. A note belongs to the option it was
+  /// attached to: restored alone it would leave the note active with nothing
+  /// selected, hiding its field and forcing text-entry layout for no reason.
+  List<Set<int>> selected = const [];
+
   void clear() {
     key = null;
     other = const [];
     note = const [];
+    selected = const [];
   }
 }
 
@@ -725,10 +731,14 @@ class _QuestionOverlayState extends State<QuestionOverlay> {
         _otherText[i] = o;
         _otherControllers[i].text = o;
       }
+      // A note is only meaningful on a chosen option, so it comes back together
+      // with that choice or not at all.
       final nt = i < d.note.length ? d.note[i] : null;
-      if (nt != null) {
+      final sel = i < d.selected.length ? d.selected[i] : const <int>{};
+      if (nt != null && sel.isNotEmpty) {
         _noteText[i] = nt;
         _noteControllers[i].text = nt;
+        _selected[i] = {...sel};
       }
     }
   }
@@ -742,7 +752,8 @@ class _QuestionOverlayState extends State<QuestionOverlay> {
     d
       ..key = widget.draftKey
       ..other = List.of(_otherText)
-      ..note = List.of(_noteText);
+      ..note = List.of(_noteText)
+      ..selected = [for (final s in _selected) {...s}];
   }
 
   @override
@@ -802,7 +813,6 @@ class _QuestionOverlayState extends State<QuestionOverlay> {
     setState(() {
       // Choosing a listed option exits Other mode (mutually exclusive).
       _otherText[_tab] = null;
-      _saveDrafts();
       final set = _selected[_tab];
       if (q.multiSelect) {
         set.contains(i) ? set.remove(i) : set.add(i);
@@ -811,6 +821,7 @@ class _QuestionOverlayState extends State<QuestionOverlay> {
           ..clear()
           ..add(i);
       }
+      _saveDrafts();
     });
     _revealPreview(q, i);
   }
