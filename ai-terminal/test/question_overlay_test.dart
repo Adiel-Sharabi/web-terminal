@@ -3312,7 +3312,10 @@ void main() {
         );
 
     Future<void> mount(WidgetTester tester, PendingQuestion q,
-        QuestionDrafts drafts, String key) async {
+        QuestionDrafts drafts, String key,
+        {void Function(List<AnswerFrame>)? onSend,
+        void Function(String)? onKey,
+        VoidCallback? onDismiss}) async {
       tester.view.physicalSize = const Size(412 * 3, 915 * 3);
       tester.view.devicePixelRatio = 3.0;
       addTearDown(tester.view.reset);
@@ -3324,9 +3327,9 @@ void main() {
               question: q,
               drafts: drafts,
               draftKey: key,
-              onSend: (_) {},
-              onKey: (_) {},
-              onDismiss: () {},
+              onSend: onSend ?? (_) {},
+              onKey: onKey ?? (_) {},
+              onDismiss: onDismiss ?? () {},
             ),
           ]),
         ),
@@ -3406,10 +3409,18 @@ void main() {
       expect(drafts.selected.single, {1});
     });
 
+    // The note is dropped when its option is gone. Asserted on what a live note
+    // CHANGES: while a note is active the arrow keys stay with the caret, so they
+    // are not forwarded to the TUI. Dropped, they are. (The first version of this
+    // test asserted that no field showed, which holds either way: with no option
+    // chosen the note field is hidden even when the note is restored. It also left
+    // `other` empty, so _restoreDrafts returned before reaching the gate at all.)
     testWidgets('a note whose option was lost is not restored on its own',
         (tester) async {
+      final keys = <String>[];
       final drafts = QuestionDrafts()
         ..key = 'sig-N'
+        ..other = [null]
         ..note = ['orphan note']
         ..selected = [<int>{}];
       await mount(
@@ -3418,9 +3429,177 @@ void main() {
               toolUseId: 'n3',
               questions: [_q(['Alpha', 'Beta'], preview: true)]),
           drafts,
-          'sig-N');
+          'sig-N',
+          onKey: keys.add);
       expect(find.byType(TextField), findsNothing);
-      expect(find.text('Add a note'), findsNothing);
+      await tester.sendKeyEvent(LogicalKeyboardKey.arrowDown);
+      await tester.pump();
+      expect(keys, ['\x1b[B']);
+    });
+
+    // The SAME question re-reported under a new toolUseId while the overlay is
+    // mounted goes through didUpdateWidget, not initState (#383).
+    testWidgets('the same question under a new toolUseId keeps its drafts in '
+        'place; a different one wipes them', (tester) async {
+      final drafts = QuestionDrafts();
+      await mount(tester, pq('t1', 'Pick one'), drafts, 'sig-A');
+      await tester.tap(find.text('Other…'));
+      await tester.pumpAndSettle();
+      await tester.enterText(find.byType(TextField), 'dictated words');
+      await tester.pumpAndSettle();
+
+      Future<void> rebuild(PendingQuestion q, String key) async {
+        await tester.pumpWidget(MaterialApp(
+          theme: AppTheme.dark,
+          home: Scaffold(
+            body: Stack(children: [
+              QuestionOverlay(
+                question: q,
+                drafts: drafts,
+                draftKey: key,
+                onSend: (_) {},
+                onKey: (_) {},
+                onDismiss: () {},
+              ),
+            ]),
+          ),
+        ));
+        await tester.pumpAndSettle();
+      }
+
+      await rebuild(pq('t2', 'Pick one'), 'sig-A');
+      expect(fieldText(tester), 'dictated words');
+      expect(find.widgetWithText(FilledButton, 'Send answer'), findsOneWidget);
+
+      await rebuild(pq('t3', 'Pick another'), 'sig-B');
+      expect(find.byType(TextField), findsNothing);
+    });
+  });
+
+  // #383 — after an answer carrying words did NOT land, the terminal may already
+  // hold part of it. A replay types the row digit and the text into an editor that
+  // already holds them (`deploy to staging4deploy to staging`) or moves a highlight
+  // one row too far, so Send must stop being the inviting default.
+  group('a resurfaced overlay after a NOT-landed answer with words (#383)', () {
+    PendingQuestion pq(String id) => PendingQuestion(
+          toolUseId: id,
+          questions: [
+            PendingQuestionItem(
+              header: 'H',
+              question: 'Pick one',
+              multiSelect: false,
+              hasPreview: false,
+              options: [QuestionOption(label: 'Red'), QuestionOption(label: 'Green')],
+            ),
+          ],
+        );
+
+    Future<void> mount(WidgetTester tester, QuestionDrafts drafts,
+        {List<List<AnswerFrame>>? sent, VoidCallback? onDismiss}) async {
+      tester.view.physicalSize = const Size(412 * 3, 915 * 3);
+      tester.view.devicePixelRatio = 3.0;
+      addTearDown(tester.view.reset);
+      await tester.pumpWidget(MaterialApp(
+        theme: AppTheme.dark,
+        home: Scaffold(
+          body: Stack(children: [
+            QuestionOverlay(
+              question: pq('t2'),
+              drafts: drafts,
+              draftKey: 'sig-A',
+              onSend: (f) => sent?.add(f),
+              onKey: (_) {},
+              onDismiss: onDismiss ?? () {},
+            ),
+          ]),
+        ),
+      ));
+      await tester.pumpAndSettle();
+    }
+
+    QuestionDrafts held({required bool partlyTyped}) => QuestionDrafts()
+      ..key = 'sig-A'
+      ..other = ['deploy to staging']
+      ..note = [null]
+      ..selected = [<int>{}]
+      ..partlyTyped = partlyTyped;
+
+    testWidgets('shows the notice, keeps the words selectable, and demotes Send',
+        (tester) async {
+      await mount(tester, held(partlyTyped: true));
+
+      expect(find.textContaining('may be partly typed in the terminal'),
+          findsOneWidget);
+      final words = tester.widget<SelectableText>(
+          find.byKey(const ValueKey('partly-typed-words')));
+      expect(words.data, 'deploy to staging');
+      // The field still holds the draft too.
+      expect(tester.widget<TextField>(find.byType(TextField)).controller!.text,
+          'deploy to staging');
+      // The terminal is the default action; the replay is the deliberate one.
+      expect(find.widgetWithText(FilledButton, 'Answer in terminal'),
+          findsOneWidget);
+      expect(find.widgetWithText(OutlinedButton, 'Send again anyway'),
+          findsOneWidget);
+      expect(find.text('Send answer'), findsNothing);
+    });
+
+    testWidgets('"Send again anyway" still sends, once, on a deliberate tap',
+        (tester) async {
+      final sent = <List<AnswerFrame>>[];
+      await mount(tester, held(partlyTyped: true), sent: sent);
+      await tester.tap(find.text('Send again anyway'));
+      await tester.pump();
+      expect(sent, hasLength(1));
+      expect(_keys(sent.single),
+          ['3', '\x1b[200~deploy to staging\x1b[201~', '\r']);
+    });
+
+    testWidgets('hardware Enter is NOT a blind replay', (tester) async {
+      debugDefaultTargetPlatformOverride = TargetPlatform.windows;
+      try {
+        final sent = <List<AnswerFrame>>[];
+        await mount(tester, held(partlyTyped: true), sent: sent);
+        await tester.sendKeyEvent(LogicalKeyboardKey.enter);
+        await tester.pump();
+        expect(sent, isEmpty);
+      } finally {
+        debugDefaultTargetPlatformOverride = null;
+      }
+    });
+
+    testWidgets('without the flag nothing changes: no notice, Send is the default',
+        (tester) async {
+      await mount(tester, held(partlyTyped: false));
+      expect(find.textContaining('partly typed'), findsNothing);
+      expect(find.byKey(const ValueKey('partly-typed-words')), findsNothing);
+      expect(find.widgetWithText(FilledButton, 'Send answer'), findsOneWidget);
+      expect(find.widgetWithText(OutlinedButton, 'Answer in terminal'),
+          findsOneWidget);
+    });
+
+    test('markNotLanded flags only an answer that carried words, for ITS drafts',
+        () {
+      final words = [
+        const AnswerFrame('3', 600),
+        const AnswerFrame('hello', 600, text: true, other: true),
+        const AnswerFrame('\r', 600),
+      ];
+      final digits = [const AnswerFrame('1', 600), const AnswerFrame('\r', 600)];
+
+      final a = QuestionDrafts()..key = 'k';
+      a.markNotLanded('k', digits);
+      expect(a.partlyTyped, isFalse, reason: 'digits replay harmlessly');
+
+      final b = QuestionDrafts()..key = 'other-question';
+      b.markNotLanded('k', words);
+      expect(b.partlyTyped, isFalse, reason: 'not the drafts of that question');
+
+      final c = QuestionDrafts()..key = 'k';
+      c.markNotLanded('k', words);
+      expect(c.partlyTyped, isTrue);
+      c.clear();
+      expect(c.partlyTyped, isFalse, reason: 'clear() forgets it');
     });
   });
 }

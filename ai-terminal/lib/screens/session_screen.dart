@@ -1054,6 +1054,32 @@ bool shouldClearQuestionDrafts({
   required PendingQuestion? current,
 }) => draftKey != null && observed && questionSignature(current) != draftKey;
 
+/// What the polls of one wait actually SAW, for [shouldClearQuestionDrafts] (#383).
+/// Both call sites (the 4 s poll, the post-answer verify) record through [record],
+/// so "was anything observed" and "what was last seen" are captured here once,
+/// where a test can reach them, instead of in two hand-written closures.
+class PendingQuestionObservation {
+  bool observed = false;
+  PendingQuestion? lastSeen;
+
+  /// Runs [poll]. A poll that throws observes nothing (and rethrows); one that
+  /// returns, even null, is a positive observation.
+  Future<PendingQuestion?> record(
+      Future<PendingQuestion?> Function() poll) async {
+    final q = await poll();
+    observed = true;
+    lastSeen = q;
+    return q;
+  }
+
+  /// Whether the drafts typed for [draftKey] must be dropped given what was seen.
+  bool shouldClearDrafts(String? draftKey) => shouldClearQuestionDrafts(
+        draftKey: draftKey,
+        observed: observed,
+        current: lastSeen,
+      );
+}
+
 /// How a [SessionScreen] LEAVES when the session it shows is gone from the list.
 ///
 /// There are three shapes of this screen and only one of them sits on a route
@@ -1520,9 +1546,10 @@ class _SessionScreenState extends State<SessionScreen>
   Future<void> _pollPendingQuestion() async {
     final api = _api;
     if (api == null) return;
+    final seen = PendingQuestionObservation();
     PendingQuestion? q;
     try {
-      q = await api.pendingQuestion(widget.sessionId);
+      q = await seen.record(() => api.pendingQuestion(widget.sessionId));
     } catch (_) {
       return; // best-effort; keep whatever's on screen
     }
@@ -1536,13 +1563,7 @@ class _SessionScreenState extends State<SessionScreen>
     }
     // The typed Other/note drafts belong to the question they were typed for (#383):
     // a different one, or none, drops them.
-    if (shouldClearQuestionDrafts(
-      draftKey: _questionDrafts.key,
-      observed: true,
-      current: q,
-    )) {
-      _questionDrafts.clear();
-    }
+    if (seen.shouldClearDrafts(_questionDrafts.key)) _questionDrafts.clear();
     if (q?.toolUseId != _pendingQuestion?.toolUseId) {
       setState(() {
         _pendingQuestion = q;
@@ -1606,6 +1627,7 @@ class _SessionScreenState extends State<SessionScreen>
     if (answeredKey.isNotEmpty) {
       await _verifyAnswerLanded(
         answeredKey,
+        frames: frames,
         resendEnter: answerNeedsConfirm(frames),
       );
     }
@@ -1642,6 +1664,7 @@ class _SessionScreenState extends State<SessionScreen>
   /// waiting, and (pre-#19-dismissal) not even a re-bump to signal it.
   Future<void> _verifyAnswerLanded(
     String answeredKey, {
+    required List<AnswerFrame> frames,
     required bool resendEnter,
   }) async {
     final api = _api;
@@ -1649,17 +1672,11 @@ class _SessionScreenState extends State<SessionScreen>
     // The rule itself is shared with the sessions board (#337): [awaitAnswerLanded].
     // What the polls actually SAW: [awaitAnswerLanded] returns null for a cleared
     // question and also for a poll that threw, and only the first is evidence.
-    var observed = false;
-    PendingQuestion? lastSeen;
+    final seen = PendingQuestionObservation();
     final stillPending = await awaitAnswerLanded(
       isSame: (q) => questionSignature(q) == answeredKey,
       resendEnter: resendEnter,
-      poll: () async {
-        final q = await api.pendingQuestion(widget.sessionId);
-        observed = true;
-        lastSeen = q;
-        return q;
-      },
+      poll: () => seen.record(() => api.pendingQuestion(widget.sessionId)),
       resend: () {
         _finishTerminalComposing();
         _connection?.sendInput('\r');
@@ -1667,25 +1684,23 @@ class _SessionScreenState extends State<SessionScreen>
       alive: () => mounted,
       attempts: _answerVerifyAttempts,
     );
-    // Exhausted retries with the same prompt up → surface it again so the user
-    // can retry, instead of a silently stuck, hidden question.
     // Landed (or replaced): the typed answer has done its job. Still pending: the
     // overlay is about to come back and must find it again. A failed poll proves
     // neither, so it keeps them (#383).
-    if (mounted &&
-        shouldClearQuestionDrafts(
-          draftKey: _questionDrafts.key,
-          observed: observed,
-          current: lastSeen,
-        )) {
+    if (mounted && seen.shouldClearDrafts(_questionDrafts.key)) {
       _questionDrafts.clear();
     }
+    // Exhausted retries with the same prompt up → surface it again so the user
+    // can retry, instead of a silently stuck, hidden question.
     if (mounted &&
         shouldResurfaceAfterAnswer(
           stillPending: stillPending != null,
           answeredKey: answeredKey,
           dismissedKey: _dismissedQuestionKey,
         )) {
+      // The terminal may hold part of the words by now: the overlay must not
+      // invite a blind replay (#383).
+      _questionDrafts.markNotLanded(answeredKey, frames);
       setState(() {
         _dismissedQuestionKey = null;
         _pendingQuestion = stillPending;

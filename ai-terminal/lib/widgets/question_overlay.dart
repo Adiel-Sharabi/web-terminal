@@ -597,11 +597,26 @@ class QuestionDrafts {
   /// selected, hiding its field and forcing text-entry layout for no reason.
   List<Set<int>> selected = const [];
 
+  /// True when an answer carrying these words was sent and did not land, so the
+  /// terminal may already hold part of it (an editor with the text typed in, a
+  /// highlight moved a row). The overlay then stops offering a blind Send: a replay
+  /// types `4` and the text into an editor that already holds them. Set by the
+  /// owner when it resurfaces the overlay, cleared with the rest by [clear].
+  bool partlyTyped = false;
+
+  /// Called when [frames], the answer to the question signed [answeredKey], did not
+  /// land. Marks [partlyTyped] only if the answer carried words and these are the
+  /// drafts held for that question: an answer of plain digits replays harmlessly.
+  void markNotLanded(String answeredKey, List<AnswerFrame> frames) {
+    if (key == answeredKey && frames.any((f) => f.text)) partlyTyped = true;
+  }
+
   void clear() {
     key = null;
     other = const [];
     note = const [];
     selected = const [];
+    partlyTyped = false;
   }
 }
 
@@ -817,6 +832,10 @@ class _QuestionOverlayState extends State<QuestionOverlay> {
       // exists to fix.
       _ctxExpandedOverride = null;
       if (_qScroll.hasClients) _qScroll.jumpTo(0);
+      // The SAME question re-reported under a new toolUseId (hook id -> transcript
+      // id) is not a new prompt: put its drafts back instead of wiping them (#383).
+      // A different question has a different key and is left empty.
+      _restoreDrafts();
     }
   }
 
@@ -1004,9 +1023,11 @@ class _QuestionOverlayState extends State<QuestionOverlay> {
                   ),
                   // Same completeness gate as the Send button (_footer below) —
                   // an incomplete selection is a no-op, never a partial submit.
+                  // And, like the button, never a blind replay once the terminal
+                  // may hold part of the answer (#383): that takes a deliberate tap.
                   _SubmitIntent: CallbackAction<_SubmitIntent>(
                     onInvoke: (intent) {
-                      if (_everyQuestionAnswered) _send();
+                      if (_everyQuestionAnswered && !_partlyTyped) _send();
                       return null;
                     },
                   ),
@@ -1745,6 +1766,55 @@ class _QuestionOverlayState extends State<QuestionOverlay> {
     );
   }
 
+  /// The words typed for this prompt (Other answers and notes), across all tabs.
+  List<String> get _draftWords => [
+        for (final t in [..._otherText, ..._noteText])
+          if (t != null && t.trim().isNotEmpty) t.trim(),
+      ];
+
+  /// The answer carrying these words was sent and did not land (#383): see
+  /// [QuestionDrafts.partlyTyped].
+  bool get _partlyTyped => widget.drafts?.partlyTyped ?? false;
+
+  /// Shown instead of an inviting Send once [_partlyTyped]. The words stay visible
+  /// and selectable here whichever tab is open, so they can be copied out.
+  Widget _partlyTypedNotice(ThemeData theme) {
+    final words = _draftWords;
+    return Container(
+      width: double.infinity,
+      padding: const EdgeInsets.all(10),
+      decoration: BoxDecoration(
+        color: theme.colorScheme.errorContainer.withValues(alpha: 0.5),
+        borderRadius: BorderRadius.circular(AppShape.medium),
+      ),
+      child: Column(
+        crossAxisAlignment: CrossAxisAlignment.start,
+        children: [
+          Text(
+            'This answer did not land and may be partly typed in the terminal. '
+            'Open the session there to finish it, or send it again anyway.',
+            style: theme.textTheme.bodySmall,
+          ),
+          if (words.isNotEmpty)
+            ConstrainedBox(
+              constraints: const BoxConstraints(maxHeight: 56),
+              child: SingleChildScrollView(
+                child: Padding(
+                  padding: const EdgeInsets.only(top: 6),
+                  child: SelectableText(
+                    words.join('\n'),
+                    key: const ValueKey('partly-typed-words'),
+                    style: theme.textTheme.bodySmall
+                        ?.copyWith(fontFamily: 'monospace'),
+                  ),
+                ),
+              ),
+            ),
+        ],
+      ),
+    );
+  }
+
   Widget _footer(ThemeData theme, PendingQuestionItem q) {
     final canSend = _everyQuestionAnswered;
     return Padding(
@@ -1784,21 +1854,38 @@ class _QuestionOverlayState extends State<QuestionOverlay> {
             ),
             const SizedBox(height: 8),
           ],
+          if (_partlyTyped) ...[
+            _partlyTypedNotice(theme),
+            const SizedBox(height: 8),
+          ],
           Row(
             children: [
               Expanded(
-                child: OutlinedButton(
-                  onPressed: widget.onDismiss,
-                  child: const Text('Answer in terminal'),
-                ),
+                // After an answer with words did not land, finishing it in the
+                // terminal is the default action and a replay is the deliberate one.
+                child: _partlyTyped
+                    ? FilledButton(
+                        onPressed: widget.onDismiss,
+                        child: const Text('Answer in terminal'),
+                      )
+                    : OutlinedButton(
+                        onPressed: widget.onDismiss,
+                        child: const Text('Answer in terminal'),
+                      ),
               ),
               const SizedBox(width: 10),
               Expanded(
-                child: FilledButton.icon(
-                  onPressed: canSend ? _send : null,
-                  icon: const Icon(Icons.send, size: 18),
-                  label: Text(canSend ? 'Send answer' : 'Pick an option'),
-                ),
+                child: _partlyTyped
+                    ? OutlinedButton.icon(
+                        onPressed: canSend ? _send : null,
+                        icon: const Icon(Icons.send, size: 18),
+                        label: Text(canSend ? 'Send again anyway' : 'Pick an option'),
+                      )
+                    : FilledButton.icon(
+                        onPressed: canSend ? _send : null,
+                        icon: const Icon(Icons.send, size: 18),
+                        label: Text(canSend ? 'Send answer' : 'Pick an option'),
+                      ),
               ),
             ],
           ),
