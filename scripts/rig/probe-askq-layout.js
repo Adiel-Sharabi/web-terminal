@@ -48,7 +48,8 @@
 //     --frames '["4","\u001b[200~some long text\u001b[201~","\r","2","\r"]' \
 //     --expect '["some long text","Medium"]'
 //
-// `--keep` leaves the run's temp cwd in place (it is deleted when the run ends).
+// `--keep` leaves the run's temp cwd, and the transcript folder claude wrote for it under
+// ~/.claude/projects, in place (both are deleted when the run ends).
 //
 // Env: CLAUDE_BIN overrides the claude executable; XTERM_HEADLESS points at an
 // @xterm/headless install (optional — without it the screen snapshots are
@@ -80,6 +81,9 @@ const GAP_MS = Number(arg('gap', '600'));
 if (!Number.isFinite(GAP_MS) || GAP_MS < 0) throw new Error('--gap must be a non-negative number of ms, got ' + JSON.stringify(arg('gap')));
 const BUNCH = arg('bunch');
 const EXPECT = arg('expect') ? JSON.parse(arg('expect')) : [];
+if (!(Array.isArray(EXPECT) && EXPECT.every(e => typeof e === 'string'))) {
+  throw new Error('--expect must be a JSON array of strings');
+}
 if (FRAMES && !(Array.isArray(FRAMES) && FRAMES.every(f => typeof f === 'string'))) {
   throw new Error('--frames must be a JSON array of strings');
 }
@@ -230,7 +234,10 @@ const keyBytes = t => (TOK[t] !== undefined ? TOK[t] : t);
 // A scratch cwd UNDER the trusted tree (scratch-dirs.js owns where): trust is
 // inherited, so claude boots straight to its composer instead of parking on the
 // folder-trust dialog, whose default row is "No, exit" (#190).
-const askqRoot = DIRS.askq;
+// Resolved, so a WT_ASKQ_DIR with a trailing separator still compares equal to the
+// parent of the mkdtemp dir below (path.join drops the separator; a raw string compare
+// would then skip the cleanup silently).
+const askqRoot = path.resolve(DIRS.askq);
 fs.mkdirSync(askqRoot, { recursive: true });
 const cwd = fs.mkdtempSync(path.join(askqRoot, 'r-'));
 // Scrub EVERY CLAUDE* variable (a nested child session persists no transcript), except
@@ -329,7 +336,7 @@ async function driveKeys() {
 function verdict() {
   clearInterval(tick);
   try { p.kill(); } catch { /* already gone */ }
-  const dir = path.join(os.homedir(), '.claude', 'projects', claudeProjectDirName(cwd));
+  const dir = transcriptDir();
   console.log('\n================ VERDICT (from transcript) ================');
   console.log('cwd:        ' + cwd);
   console.log('transcript: ' + dir);
@@ -393,6 +400,25 @@ function resultText(content) {
   return JSON.stringify(content);
 }
 
+// The folder claude writes this run's transcript to: ~/.claude/projects/<encoded cwd>.
+function transcriptDir() {
+  return path.join(os.homedir(), '.claude', 'projects', claudeProjectDirName(cwd));
+}
+
+// Removes the transcript folder of THIS run and nothing else: the path is derived from
+// the run's own mkdtemp cwd, and it is only removed when that cwd sits directly under
+// the askq root and the folder is a direct child of the projects directory whose name
+// is exactly the encoding of the cwd.
+function removeTranscriptDir() {
+  const projects = path.join(os.homedir(), '.claude', 'projects');
+  const dir = transcriptDir();
+  if (path.resolve(path.dirname(cwd)) !== askqRoot) return null;
+  if (path.dirname(dir) !== projects || path.basename(dir) !== claudeProjectDirName(cwd)) return null;
+  if (!fs.existsSync(dir)) return null;
+  fs.rmSync(dir, { recursive: true, force: true });
+  return dir;
+}
+
 // Windows will not remove a directory a live process has as its cwd, so wait for the
 // child to be gone before deleting the run dir, and retry briefly.
 let exited = false;
@@ -409,9 +435,17 @@ async function removeRunDir() {
 async function finish() {
   if (KEEP) {
     console.log('\n(temp cwd kept for inspection: ' + cwd + ')');
-  } else if (path.dirname(cwd) === askqRoot) {
+    console.log('(transcript folder kept: ' + transcriptDir() + ')');
+  } else if (path.resolve(path.dirname(cwd)) === askqRoot) {
     const gone = await removeRunDir();
-    console.log(gone ? '\n(temp cwd removed; --keep leaves it)' : '\n(could NOT remove temp cwd: ' + cwd + ')');
+    console.log(gone ? '\n(temp cwd removed; --keep leaves it): ' + cwd : '\n(could NOT remove temp cwd: ' + cwd + ')');
+    // After the child is gone, so claude cannot write into it again.
+    try {
+      const removed = removeTranscriptDir();
+      console.log(removed ? '(transcript folder removed: ' + removed + ')' : '(no transcript folder to remove)');
+    } catch (e) {
+      console.log('(could NOT remove the transcript folder: ' + e.message + ')');
+    }
   }
   setTimeout(() => process.exit(0), 400);
 }
