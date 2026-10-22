@@ -19,7 +19,17 @@
 //     once answered), so "nothing recorded" and "not yet answered" look alike —
 //     assert on which option came back, not on whether a question is pending;
 //   * each run gets its OWN temp cwd, or parallel probes read each other's
-//     transcripts.
+//     transcripts;
+//   * the child must not inherit WT_SESSION_ID / WT_HOOK_TOKEN: its hooks would
+//     report to production as the session that ran the probe, flipping it to
+//     `waiting` with the probe's question (an answer to it would be typed into the
+//     real agent).
+//
+// Known limit: the "tool is up" and "composer is up" steps are inferred from output
+// SILENCE (4 s / 2.5 s of no data), not from a marker. A slow boot or a slow tool
+// render can trip them early; that is the same fallback shape as #147's timer. The
+// verdict is unaffected (it is read from the transcript), but a run that drove the
+// keys too early shows as "no AskUserQuestion recorded".
 //
 // Usage:
 //   node scripts/rig/probe-askq-layout.js --shape preview-mq --keys "1,CR,2,3,RIGHT,CR"
@@ -37,6 +47,8 @@
 //   node scripts/rig/probe-askq-layout.js --shape plain-mq2 --bunch all \
 //     --frames '["4","\u001b[200~some long text\u001b[201~","\r","2","\r"]' \
 //     --expect '["some long text","Medium"]'
+//
+// `--keep` leaves the run's temp cwd in place (it is deleted when the run ends).
 //
 // Env: CLAUDE_BIN overrides the claude executable; XTERM_HEADLESS points at an
 // @xterm/headless install (optional — without it the screen snapshots are
@@ -60,10 +72,12 @@ function arg(name, fallback) {
   const i = process.argv.indexOf('--' + name);
   return i >= 0 && process.argv[i + 1] ? process.argv[i + 1] : fallback;
 }
+const KEEP = process.argv.includes('--keep');
 const SHAPE = arg('shape', 'preview-mq');
 const KEYS = arg('keys', '').split(',').map(s => s.trim()).filter(Boolean);
 const FRAMES = arg('frames') ? JSON.parse(arg('frames')) : null;
 const GAP_MS = Number(arg('gap', '600'));
+if (!Number.isFinite(GAP_MS) || GAP_MS < 0) throw new Error('--gap must be a non-negative number of ms, got ' + JSON.stringify(arg('gap')));
 const BUNCH = arg('bunch');
 const EXPECT = arg('expect') ? JSON.parse(arg('expect')) : [];
 if (FRAMES && !(Array.isArray(FRAMES) && FRAMES.every(f => typeof f === 'string'))) {
@@ -80,6 +94,9 @@ function planWrites(frames, bunch) {
     const a = Number(m[1]);
     const b = m[2] === undefined ? a : Number(m[2]);
     if (a > b || b >= frames.length) throw new Error('--bunch group out of range: ' + g);
+    for (const [from, to] of joined) {
+      if (a <= to && from <= b) throw new Error('--bunch groups overlap: ' + g + ' and ' + from + '-' + to);
+    }
     joined.set(a, b);
   }
   const writes = [];
@@ -90,6 +107,7 @@ function planWrites(frames, bunch) {
   }
   return writes;
 }
+if (FRAMES) planWrites(FRAMES, BUNCH); // reject a bad --bunch before claude is spawned
 const TIMEOUT_MS = Number(arg('timeout', '150000'));
 
 // ------------------------------------------------------------- claude binary
@@ -212,12 +230,17 @@ const keyBytes = t => (TOK[t] !== undefined ? TOK[t] : t);
 // A scratch cwd UNDER the trusted tree (scratch-dirs.js owns where): trust is
 // inherited, so claude boots straight to its composer instead of parking on the
 // folder-trust dialog, whose default row is "No, exit" (#190).
-const askqRoot = path.join(DIRS.rig, 'askq-runs');
+const askqRoot = DIRS.askq;
 fs.mkdirSync(askqRoot, { recursive: true });
 const cwd = fs.mkdtempSync(path.join(askqRoot, 'r-'));
-// Scrub EVERY CLAUDE* variable: a nested child session persists no transcript.
+// Scrub EVERY CLAUDE* variable (a nested child session persists no transcript), except
+// the Git Bash path claude needs on Windows, and EVERY WT_* variable (see the header:
+// the child's hooks would otherwise report to production as the calling session).
 const childEnv = { ...process.env };
-for (const k of Object.keys(childEnv)) if (/^CLAUDE/i.test(k)) delete childEnv[k];
+for (const k of Object.keys(childEnv)) {
+  if (k === 'CLAUDE_CODE_GIT_BASH_PATH') continue;
+  if (/^CLAUDE/i.test(k) || /^WT_/i.test(k)) delete childEnv[k];
+}
 
 const p = pty.spawn(resolveClaude(), ['--dangerously-skip-permissions'], {
   name: 'xterm-256color', cols: COLS, rows: ROWS, cwd, env: childEnv,
@@ -350,7 +373,7 @@ function verdict() {
       console.log('  ANSWER: (none recorded — still pending / never submitted)');
       continue;
     }
-    const body = typeof r.content === 'string' ? r.content : JSON.stringify(r.content);
+    const body = resultText(r.content);
     console.log('  ANSWER: ' + body.replace(/\s+/g, ' ').slice(0, 600));
     if (EXPECT.length) {
       const missing = EXPECT.filter(e => !body.includes(e));
@@ -360,8 +383,36 @@ function verdict() {
   finish();
 }
 
-function finish() {
-  console.log('\n(temp cwd left in place for inspection: ' + cwd + ')');
+// The text of a tool_result: a string, or an array of content blocks (take each block's
+// own text, so --expect matches what was recorded and not its JSON escaping).
+function resultText(content) {
+  if (typeof content === 'string') return content;
+  if (Array.isArray(content)) {
+    return content.map(b => (typeof b === 'string' ? b : b && typeof b.text === 'string' ? b.text : JSON.stringify(b))).join('\n');
+  }
+  return JSON.stringify(content);
+}
+
+// Windows will not remove a directory a live process has as its cwd, so wait for the
+// child to be gone before deleting the run dir, and retry briefly.
+let exited = false;
+p.onExit(() => { exited = true; });
+
+async function removeRunDir() {
+  for (let i = 0; i < 20 && !exited; i++) await new Promise(r => setTimeout(r, 250));
+  for (let i = 0; i < 10; i++) {
+    try { fs.rmSync(cwd, { recursive: true, force: true }); return true; } catch { await new Promise(r => setTimeout(r, 300)); }
+  }
+  return false;
+}
+
+async function finish() {
+  if (KEEP) {
+    console.log('\n(temp cwd kept for inspection: ' + cwd + ')');
+  } else if (path.dirname(cwd) === askqRoot) {
+    const gone = await removeRunDir();
+    console.log(gone ? '\n(temp cwd removed; --keep leaves it)' : '\n(could NOT remove temp cwd: ' + cwd + ')');
+  }
   setTimeout(() => process.exit(0), 400);
 }
 
