@@ -40,3 +40,42 @@ bool _isStrongLtr(int r) {
   if (r >= 0x0300 && r <= 0x036F) return false; // combining marks
   return true;
 }
+
+/// [text] cut into paragraphs at blank lines, the unit [textDirectionFor] decides
+/// (#383): one reply can hold a Hebrew paragraph and an English one, and each starts
+/// at its own edge. A blank line inside a fenced code block does not cut it, so a
+/// fence is never split across two paragraphs. Paragraphs keep their own text,
+/// trimmed of the blank lines around them; empty ones are dropped.
+List<String> paragraphsOf(String text) {
+  final out = <String>[];
+  final cur = <String>[];
+  var inFence = false;
+  void flush() {
+    final p = cur.join('\n').trim();
+    if (p.isNotEmpty) out.add(p);
+    cur.clear();
+  }
+
+  for (final line in text.split('\n')) {
+    if (line.trimLeft().startsWith('```')) inFence = !inFence;
+    if (!inFence && line.trim().isEmpty) {
+      flush();
+    } else {
+      cur.add(line);
+    }
+  }
+  flush();
+  return out;
+}
+
+/// Whether every paragraph of [text] reads the same way, so it can be laid out as one
+/// block in that direction. Null when they differ.
+TextDirection? uniformDirectionOf(String text) {
+  TextDirection? dir;
+  for (final p in paragraphsOf(text)) {
+    final d = textDirectionFor(p);
+    if (dir != null && d != dir) return null;
+    dir = d;
+  }
+  return dir ?? TextDirection.ltr;
+}

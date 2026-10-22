@@ -1,5 +1,7 @@
 import 'package:flutter/material.dart';
 
+import '../util/text_direction.dart';
+
 /// The reply under a "waiting on you" card (#337). Sends through [onSend], which
 /// submits exactly as the compose bar does. One line by default; [multiline] gives a
 /// box that grows, where Enter is a newline and the button sends.
@@ -34,6 +36,38 @@ final ButtonStyle _smallFilled = FilledButton.styleFrom(
 class _ReplyBoxState extends State<ReplyBox> {
   TextEditingController get _text => widget.controller;
 
+  /// The field reads in the direction of what is typed into it (#383), decided again
+  /// as it changes: a Hebrew reply starts at the right edge.
+  TextDirection _dir = TextDirection.ltr;
+
+  @override
+  void initState() {
+    super.initState();
+    _dir = textDirectionFor(_text.text);
+    _text.addListener(_onText);
+  }
+
+  @override
+  void didUpdateWidget(covariant ReplyBox old) {
+    super.didUpdateWidget(old);
+    if (old.controller != widget.controller) {
+      old.controller.removeListener(_onText);
+      widget.controller.addListener(_onText);
+      _onText();
+    }
+  }
+
+  @override
+  void dispose() {
+    _text.removeListener(_onText);
+    super.dispose();
+  }
+
+  void _onText() {
+    final d = textDirectionFor(_text.text);
+    if (d != _dir && mounted) setState(() => _dir = d);
+  }
+
   Future<void> _send() async {
     final t = _text.text;
     if (t.trim().isEmpty || widget.busy || !widget.ready) return;
@@ -51,6 +85,7 @@ class _ReplyBoxState extends State<ReplyBox> {
         child: TextField(
           key: const ValueKey('board-reply-field'),
           controller: _text,
+          textDirection: _dir,
           minLines: 1,
           maxLines: multiline ? 6 : 1,
           keyboardType: multiline ? TextInputType.multiline : null,

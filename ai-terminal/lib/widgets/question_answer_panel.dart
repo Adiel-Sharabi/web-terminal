@@ -17,6 +17,7 @@ import '../api/models.dart';
 import '../theme/app_theme.dart';
 import 'compose_bar.dart' show composeUsesSoftKeyboard;
 import 'conversation_view.dart' show markdownStyle, openChatLink;
+import 'directional_text.dart';
 import 'question_overlay.dart';
 
 /// Forwards a raw key sequence to the PTY (#50). Carried by the panel's
@@ -681,7 +682,7 @@ class _QuestionAnswerPanelState extends State<QuestionAnswerPanel> {
         child: SingleChildScrollView(
           controller: _qScroll,
           primary: false,
-          child: Text(text, style: theme.textTheme.bodyLarge),
+          child: DirectionalText(text, style: theme.textTheme.bodyLarge),
         ),
       ),
     );
@@ -760,17 +761,23 @@ class _QuestionAnswerPanelState extends State<QuestionAnswerPanel> {
                   // with a custom `a` builder: a builder returns a WIDGET, which
                   // shatters the paragraph into separate RichTexts and breaks
                   // selection across any sentence containing a link (#83).
-                  child: MarkdownBody(
-                    data: text,
-                    selectable: false,
-                    fitContent: true,
-                    extensionSet: md.ExtensionSet.gitHubWeb,
-                    onTapLink: (_, href, _) => openChatLink(href),
-                    styleSheet: markdownStyle(
-                      theme,
-                      theme.textTheme.bodyMedium
-                          ?.copyWith(color: theme.colorScheme.onSurface),
-                      theme.textTheme.bodySmall,
+                  //
+                  // Each paragraph reads in its own direction (#383): one block
+                  // when they agree, which is the common case and renders as before.
+                  child: directionalBlock(
+                    text,
+                    (t) => MarkdownBody(
+                      data: t,
+                      selectable: false,
+                      fitContent: true,
+                      extensionSet: md.ExtensionSet.gitHubWeb,
+                      onTapLink: (_, href, _) => openChatLink(href),
+                      styleSheet: markdownStyle(
+                        theme,
+                        theme.textTheme.bodyMedium
+                            ?.copyWith(color: theme.colorScheme.onSurface),
+                        theme.textTheme.bodySmall,
+                      ),
                     ),
                   ),
                 ),
@@ -1113,7 +1120,7 @@ class _QuestionAnswerPanelState extends State<QuestionAnswerPanel> {
                   child: Column(
                     crossAxisAlignment: CrossAxisAlignment.start,
                     children: [
-                      Text(opt.label, style: theme.textTheme.bodyLarge),
+                      DirectionalText(opt.label, style: theme.textTheme.bodyLarge),
                       if (opt.description.isNotEmpty)
                         Padding(
                           padding: const EdgeInsets.only(top: 2),

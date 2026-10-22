@@ -24,7 +24,8 @@ import '../screens/session_screen.dart'
         questionSignature,
         resolveSubmitUnconfirmedReaction,
         verifyAnswerLanded;
-import '../widgets/question_overlay.dart' show AnswerFrame, answerNeedsConfirm, deliverAnswerFrames;
+import '../util/inbox_items.dart' show sessionKey;
+import '../widgets/question_overlay.dart' show AnswerFrame, answerNeedsConfirm, buildAnswerFrames, deliverAnswerFrames;
 import 'question_draft_store.dart';
 import 'session_input.dart';
 import 'session_repository.dart';
@@ -105,7 +106,7 @@ class NeedsYouActions extends ChangeNotifier {
   bool _disposed = false;
 
   /// One session, across servers: two servers can each have an `s1`.
-  static String keyOf(Session s) => '${s.server.baseUrl}|${s.id}';
+  static String keyOf(Session s) => sessionKey(s);
 
   /// The live question behind [s]'s card, once it has been read.
   PendingQuestion? questionFor(Session s) => _questions[keyOf(s)];
@@ -172,7 +173,12 @@ class NeedsYouActions extends ChangeNotifier {
   /// is put back, with a word that it did not take. The session's drafts
   /// ([QuestionDraftStore]) follow the session screen's rules: flagged when an answer
   /// carrying words goes out, cleared only when a poll positively saw the question go.
-  Future<PreWriteVerdict> answer(Session s, PendingQuestion shown, List<AnswerFrame> frames) async {
+  ///
+  /// [onSettled] hears once the keys have gone out and been checked: true when the
+  /// question was seen to go (or be replaced), false when it is still up or the
+  /// session could not be reached. It is not called for a refused answer.
+  Future<PreWriteVerdict> answer(Session s, PendingQuestion shown, List<AnswerFrame> frames,
+      {void Function(bool landed)? onSettled}) async {
     final k = keyOf(s);
     final sig = questionSignature(shown);
     if (_busy.contains(k)) return PreWriteVerdict.refused;
@@ -217,6 +223,7 @@ class NeedsYouActions extends ChangeNotifier {
       if (verdict.seen.shouldClearDrafts(drafts.key)) drafts.clear();
     });
     if (_disposed) return verdict;
+    onSettled?.call(ok && stuck == null);
     if (!ok || stuck != null) {
       _answered.remove(k);
       _changed();
@@ -277,6 +284,33 @@ class NeedsYouActions extends ChangeNotifier {
       say('"${s.name}" did not take your reply'
           '${reaction.restore ? ' - it is back in the box' : ''}. Open it to see what is on its screen.');
     }
+  }
+
+  /// An answer from [s]'s session did not land and may be partly typed in its terminal
+  /// (#383, [QuestionDrafts.flaggedFor]): a one-press answer is refused for [q] until
+  /// that settles, wherever the press comes from. A digit typed now could land in the
+  /// Other editor that still holds the earlier text. The full card shows why instead.
+  bool quickAnswerBlocked(Session s, PendingQuestion q) =>
+      QuestionDraftStore.instance.of(s.server.baseUrl, s.id).flaggedFor(questionSignature(q));
+
+  /// A one-press answer: option [index] of [q]'s only question. Refused, with nothing
+  /// written, while [quickAnswerBlocked]; otherwise [answer] with the overlay's frames.
+  Future<PreWriteVerdict> quickAnswer(Session s, PendingQuestion q, int index,
+      {void Function(bool landed)? onSettled}) async {
+    if (quickAnswerBlocked(s, q)) {
+      say('An answer to "${s.name}" did not land - open it to finish, nothing was sent');
+      // The flag was set elsewhere (the session screen) since this card drew its
+      // buttons: redraw it without them.
+      _changed();
+      return PreWriteVerdict.refused;
+    }
+    return answer(
+        s,
+        q,
+        buildAnswerFrames(q.questions, [
+          {index},
+        ]),
+        onSettled: onSettled);
   }
 
   /// A lone Esc: interrupts a working turn, closes a menu over the composer.

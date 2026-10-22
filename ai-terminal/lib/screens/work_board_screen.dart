@@ -43,17 +43,18 @@ import '../services/session_input.dart';
 import '../services/session_repository.dart';
 import '../theme/app_theme.dart';
 import '../theme/status_colors.dart';
+import '../util/needs_you.dart';
 import '../util/session_tree.dart';
 import '../widgets/brief_item_row.dart';
 import '../widgets/format_utils.dart';
 import '../widgets/handoff_chip.dart';
 import '../widgets/machine_stripe.dart';
 import '../widgets/question_answer_panel.dart' show quickAnswerable;
-import '../widgets/question_overlay.dart' show buildAnswerFrames;
 import '../widgets/reason_chip.dart';
 import '../widgets/reply_box.dart';
 import '../widgets/server_badge.dart';
 import '../widgets/status_dot.dart';
+export '../util/needs_you.dart';
 export '../widgets/brief_item_row.dart' show briefStateColors, briefStateLabel;
 
 /// A session's status as the board shows it: a label and a colour.
@@ -97,15 +98,6 @@ String noItemReason(Session s) {
   return b.reportingOn ? 'No work item' : 'Reporting is off for this session';
 }
 
-/// Owes the person something: a live prompt, or the agent said it is their move.
-/// A panel over the composer (#316) owes the person an Esc as much as a prompt owes an
-/// answer, so it is "needs you" too.
-bool boardNeedsYou(Session s) =>
-    s.status == 'waiting' || s.reason?.kind == 'you' || s.reason?.kind == 'menu';
-
-/// Hidden from the board (#314).
-bool boardIsHidden(Session s) => s.brief?.hidden == true;
-
 /// The reason groups, finest grain. [boardColumnOf] folds them into the three columns.
 enum ReasonSection { needsYou, working, self, external, idle, notReported, done }
 
@@ -140,21 +132,6 @@ BoardColumn boardColumnOf(Session s) => switch (reasonSectionOf(s)) {
       ReasonSection.working || ReasonSection.self || ReasonSection.external => BoardColumn.working,
       _ => BoardColumn.idle,
     };
-
-/// What a Needs-you card is waiting for, which decides its inline control.
-enum NeedKind { question, permission, menu, reported, other }
-
-/// The kind of need, from the server's own fields: `waitingFor` (#79) first, because
-/// a live prompt is what actually blocks the agent, then the reason (#313/#316).
-NeedKind needKindOf(Session s) {
-  if (s.status == 'waiting') {
-    if (s.waitingFor == 'question') return NeedKind.question;
-    if (s.waitingFor == 'permission') return NeedKind.permission;
-  }
-  if (s.reason?.kind == 'menu') return NeedKind.menu;
-  if (s.reason?.kind == 'you') return NeedKind.reported;
-  return NeedKind.other;
-}
 
 /// The board's colours (#337): amber for "needs you", blue for "working", muted for
 /// idle. One place, resolved per brightness, so the board reads in light and dark.
@@ -192,9 +169,15 @@ class WorkBoardScreen extends StatefulWidget {
     this.clientFactory,
     this.sessionInput,
     this.pollInterval = const Duration(seconds: 5),
+    this.onOpenInbox,
   });
 
   final void Function(Session session) onOpenSession;
+
+  /// Opens the questions inbox (#383), where every waiting question is answered in one
+  /// place; the caller decides how (the split's detail pane, or a pushed route). Null
+  /// hides the Needs-you column's link to it.
+  final VoidCallback? onOpenInbox;
 
   /// True when shown inline as the detail pane of the wide split view (#337), not
   /// pushed as its own route. Suppresses the AppBar back button, as
@@ -488,9 +471,8 @@ class _WorkBoardScreenState extends State<WorkBoardScreen> {
 
   /// Answers a single-select question with option [index], through the overlay's own
   /// frames (#19), after [NeedsYouActions.answer]'s re-check that it is still asked.
-  Future<void> _answer(Session s, PendingQuestion q, int index) => _needs.answer(s, q, buildAnswerFrames(q.questions, [
-        {index},
-      ]));
+  /// Refused while an earlier answer with words did not land ([NeedsYouActions.quickAnswer]).
+  Future<void> _answer(Session s, PendingQuestion q, int index) => _needs.quickAnswer(s, q, index);
 
   /// Stop = Esc to a session that is STILL working. The card may be up to a poll old,
   /// and an Esc that reaches a session which has since stopped is some other key
@@ -624,6 +606,7 @@ class _WorkBoardScreenState extends State<WorkBoardScreen> {
       handoffBusy: _handoffBusy.contains(k),
       question: kind == NeedKind.question ? q : null,
       answering: q != null && _needs.isAnswering(s, q),
+      answerBlocked: q != null && _needs.quickAnswerBlocked(s, q),
       busy: _needs.isBusy(s),
       onAnswer: (kind == NeedKind.question && q != null) ? (i) => _answer(s, q, i) : null,
       onReply: kind == NeedKind.reported ? (text) => _needs.reply(s, text) : null,
@@ -666,6 +649,14 @@ class _WorkBoardScreenState extends State<WorkBoardScreen> {
       title: 'Needs you',
       color: pal.you,
       count: needs.length,
+      action: widget.onOpenInbox == null
+          ? null
+          : TextButton(
+              key: const ValueKey('board-open-inbox'),
+              style: _compactText,
+              onPressed: widget.onOpenInbox,
+              child: const Text('Answer in Questions'),
+            ),
       children: needs.isEmpty
           ? [_ColumnEmpty('Nothing is waiting on you.', style: muted)]
           : [for (final r in _tree.flatten(needs)) _indented(r, card(r.session))],
@@ -835,6 +826,10 @@ class BoardActions {
   /// The question above was just answered from here and is still landing.
   final bool answering;
 
+  /// An earlier answer to the question above, with words, did not land (#383): its
+  /// one-press buttons are withheld until that settles.
+  final bool answerBlocked;
+
   /// A write to this session is in flight.
   final bool busy;
   final void Function(int option)? onAnswer;
@@ -862,6 +857,7 @@ class BoardActions {
     this.handoffBusy = false,
     this.question,
     this.answering = false,
+    this.answerBlocked = false,
     this.busy = false,
     this.onAnswer,
     this.onReply,
@@ -873,11 +869,15 @@ class BoardActions {
 
 /// One of the board's three columns: a coloured header with a count, then its cards.
 class BoardColumnView extends StatelessWidget {
-  const BoardColumnView({super.key, required this.title, required this.color, required this.count, required this.children});
+  const BoardColumnView(
+      {super.key, required this.title, required this.color, required this.count, required this.children, this.action});
   final String title;
   final Color color;
   final int count;
   final List<Widget> children;
+
+  /// A button at the end of the header, or null.
+  final Widget? action;
 
   @override
   Widget build(BuildContext context) {
@@ -892,6 +892,7 @@ class BoardColumnView extends StatelessWidget {
           const SizedBox(width: 6),
           Text('$count', key: ValueKey('board-count-$title'),
               style: head.copyWith(fontFamily: 'monospace', fontFamilyFallback: const ['Consolas', 'Menlo'])),
+          if (action != null) ...[const Spacer(), action!],
         ]),
       ),
       for (final c in children) Padding(padding: const EdgeInsets.only(bottom: 8), child: c),
@@ -1315,6 +1316,14 @@ class BoardCard extends StatelessWidget {
         if (q == null) return const [];
         if (actions.answering) {
           return [Text('Answer sent - waiting for it to land…', style: Theme.of(context).textTheme.bodySmall)];
+        }
+        // A digit after an answer that did not land could type into the editor that
+        // still holds its words (#383): finish it in the session instead.
+        if (actions.answerBlocked) {
+          return [
+            Text('An answer did not land and may be partly typed - Open to finish it.',
+                key: ValueKey('board-answer-blocked-$idk'), style: Theme.of(context).textTheme.bodySmall),
+          ];
         }
         // Option buttons only where one press IS the whole answer: one question, one
         // choice. Several questions, or several choices, are answered in the session.
