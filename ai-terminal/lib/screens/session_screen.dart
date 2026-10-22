@@ -1126,7 +1126,7 @@ Future<AnswerVerification> verifyAnswerLanded({
 /// [answeredKey] has been verified ([verdict]), in one place so a test can reach it
 /// (#383). Settles [drafts]: gone or replaced -> the typed words did their job, drop
 /// them; still up on the last successful poll -> the answer did not take and the
-/// terminal may hold part of [frames], so flag the question the polls last saw
+/// terminal may hold part of [frames], so flag the question
 /// ([QuestionDrafts.markNotLanded]); never observed -> say nothing (a failed poll
 /// proves neither). Flags whether or not the overlay resurfaces now, because the
 /// user can reopen it from the "A question is waiting" chip later.
@@ -1144,7 +1144,7 @@ PendingQuestion? settleAfterAnswer({
   if (seen.shouldClearDrafts(drafts.key)) {
     drafts.clear();
   } else if (seen.sawStillPending(answeredKey)) {
-    drafts.markNotLanded(answeredKey, frames, seen.lastSeen!.toolUseId);
+    drafts.markNotLanded(answeredKey, frames);
   }
   return shouldResurfaceAfterAnswer(
     stillPending: verdict.stillPending != null,
@@ -1679,7 +1679,7 @@ class _SessionScreenState extends State<SessionScreen>
   /// land the terminal is where the user must FINISH it, so go there too (#383).
   void _dismissQuestionOverlay() {
     final partlyTyped =
-        _questionDrafts.partlyTypedFor(_pendingQuestion?.toolUseId);
+        _questionDrafts.flaggedFor(questionSignature(_pendingQuestion));
     setState(() => _dismissedQuestionKey = questionSignature(_pendingQuestion));
     if (partlyTyped) _setLens('terminal');
   }

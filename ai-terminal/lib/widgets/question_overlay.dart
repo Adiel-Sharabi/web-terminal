@@ -587,49 +587,44 @@ const double kQuestionMax = 260;
 /// This holds one question's drafts, keyed by its content signature
 /// (`questionSignature`): a different question starts empty, and the owner calls
 /// [clear] once the question is answered.
+///
+/// Only WORDS are kept. Picks are never restored (one Enter on a stale pick would
+/// type its digit into a selector that has already closed), and a note is shown
+/// as text, never put back into the note field.
 class QuestionDrafts {
   String? key;
   List<String?> other = const [];
   List<String?> note = const [];
 
-  /// The option(s) each tab had chosen. A note belongs to the option it was
-  /// attached to: restored alone it would leave the note active with nothing
-  /// selected, hiding its field and forcing text-entry layout for no reason.
-  List<Set<int>> selected = const [];
+  /// An answer carrying these words was sent for the question signed [key] and did
+  /// not land. The terminal may already hold part of it (an editor with the text
+  /// typed in, a highlight moved a row), so the overlay stops offering a blind Send
+  /// for THAT question: a replay types `4` and the text into an editor that already
+  /// holds them. Set by [markNotLanded] when the last successful poll of the
+  /// post-answer verify still showed the answered question up, whether or not the
+  /// overlay resurfaces at once (the "A question is waiting" chip can reopen it
+  /// later). Tied to the question's signature, not to a `toolUseId`: a hook-id ->
+  /// transcript-id re-report of the SAME question is exactly when the selector may
+  /// have closed, and a false notice costs one tap where a lost one types into a
+  /// closed selector. Only [clear] drops it.
+  bool notLanded = false;
 
-  /// The `toolUseId` of the question an answer carrying these words was sent for
-  /// and did not land, or null. The terminal may already hold part of it (an editor
-  /// with the text typed in, a highlight moved a row), so the overlay stops offering
-  /// a blind Send for THAT question: a replay types `4` and the text into an editor
-  /// that already holds them. Set by [markNotLanded] when the last successful poll
-  /// of the post-answer verify still showed the answered question up, whether or not
-  /// the overlay resurfaces at once (the "A question is waiting" chip can reopen it
-  /// later). Cleared with the rest by [clear].
-  String? notLandedId;
-
-  /// Whether the question [toolUseId] is the one flagged by [markNotLanded]. An
-  /// identical question asked AGAIN under a new id is a fresh prompt with an
-  /// untouched selector and must not inherit a warning about the old one.
-  bool partlyTypedFor(String? toolUseId) =>
-      notLandedId != null && notLandedId == toolUseId;
+  /// Whether the question signed [questionKey] is the one flagged by
+  /// [markNotLanded].
+  bool flaggedFor(String questionKey) => notLanded && key == questionKey;
 
   /// Called when [frames], the answer to the question signed [answeredKey], did not
-  /// land and [toolUseId] is the question still showing. Flags it only if the answer
-  /// carried words and these are the drafts held for that question: an answer of
-  /// plain digits replays harmlessly.
-  void markNotLanded(
-      String answeredKey, List<AnswerFrame> frames, String toolUseId) {
-    if (key == answeredKey && frames.any((f) => f.text)) {
-      notLandedId = toolUseId;
-    }
+  /// land. Flags it only if the answer carried words and these are the drafts held
+  /// for that question: an answer of plain digits replays harmlessly.
+  void markNotLanded(String answeredKey, List<AnswerFrame> frames) {
+    if (key == answeredKey && frames.any((f) => f.text)) notLanded = true;
   }
 
   void clear() {
     key = null;
     other = const [];
     note = const [];
-    selected = const [];
-    notLandedId = null;
+    notLanded = false;
   }
 }
 
@@ -721,6 +716,11 @@ class _QuestionOverlayState extends State<QuestionOverlay> {
   /// corrected in the same pass rather than left as the next report.
   late List<TextEditingController> _noteControllers;
 
+  /// The notes typed before this overlay was rebuilt, per tab (#383). Never put back
+  /// into [_noteText] (a note needs its option picked and nothing is picked again):
+  /// they survive only as words, in [_draftWords]'s block and in the saved drafts.
+  late List<String?> _keptNotes;
+
   /// Drives [_contextPanel]'s scroll view so a [Scrollbar] can show a thumb.
   /// Without one, a clipped lead-up reads as a COMPLETE message — the reported
   /// failure: the options were unjudgeable and nothing hinted at scrolling.
@@ -772,38 +772,29 @@ class _QuestionOverlayState extends State<QuestionOverlay> {
     _selected = [for (final _ in widget.question.questions) <int>{}];
     _otherText = [for (final _ in widget.question.questions) null];
     _noteText = [for (final _ in widget.question.questions) null];
+    _keptNotes = [for (final _ in widget.question.questions) null];
     _otherControllers = _freshControllers();
     _noteControllers = _freshControllers();
     _restoreDrafts();
   }
 
   /// Puts back what was typed for THIS question before the overlay was rebuilt
-  /// (#383). A draft kept for another question, or for a prompt with a different
-  /// number of tabs, is ignored.
+  /// (#383): the Other text, which implies its own row so it needs no pick. Nothing
+  /// else comes back as input: a pick or a note restored here would make the card a
+  /// ready-to-send answer that can replay into a selector that has already closed.
+  /// A note is kept as text only ([_keptNotes]). A draft kept for another question,
+  /// or for a prompt with a different number of tabs, is ignored.
   void _restoreDrafts() {
     final d = widget.drafts;
     final n = widget.question.questions.length;
     if (d == null || d.key != widget.draftKey || d.other.length != n) return;
-    final partly = d.partlyTypedFor(widget.question.toolUseId);
     for (var i = 0; i < n; i++) {
       final o = d.other[i];
       if (o != null) {
         _otherText[i] = o;
         _otherControllers[i].text = o;
       }
-      // Picks come back for an answer that did not land (the card is then ready
-      // for a deliberate resend) and for a tab that holds a note, which is only
-      // meaningful on its chosen option. A plain resurface starts with nothing
-      // picked: one Enter on an old pick would type its digit onto the prompt line
-      // of a selector that has already closed.
-      final nt = i < d.note.length ? d.note[i] : null;
-      final keepPick = partly || nt != null;
-      final sel = keepPick && i < d.selected.length ? d.selected[i] : const <int>{};
-      _selected[i] = {...sel};
-      if (nt != null && sel.isNotEmpty) {
-        _noteText[i] = nt;
-        _noteControllers[i].text = nt;
-      }
+      _keptNotes[i] = i < d.note.length ? d.note[i] : null;
     }
   }
 
@@ -813,11 +804,14 @@ class _QuestionOverlayState extends State<QuestionOverlay> {
   void _saveDrafts() {
     final d = widget.drafts;
     if (d == null) return;
+    // Another question's flag must not follow the words over to this one.
+    if (d.key != widget.draftKey) d.notLanded = false;
     d
       ..key = widget.draftKey
       ..other = List.of(_otherText)
-      ..note = List.of(_noteText)
-      ..selected = [for (final s in _selected) {...s}];
+      ..note = [
+        for (var i = 0; i < _noteText.length; i++) _noteText[i] ?? _keptNotes[i]
+      ];
   }
 
   @override
@@ -834,6 +828,7 @@ class _QuestionOverlayState extends State<QuestionOverlay> {
       _selected = [for (final _ in widget.question.questions) <int>{}];
       _otherText = [for (final _ in widget.question.questions) null];
       _noteText = [for (final _ in widget.question.questions) null];
+      _keptNotes = [for (final _ in widget.question.questions) null];
       // Swap the lists now, drop the old controllers at the END of this frame:
       // the fields they back are still mounted until the rebuild this update
       // schedules tears them down, and a controller disposed out from under a
@@ -853,8 +848,8 @@ class _QuestionOverlayState extends State<QuestionOverlay> {
       // The SAME question re-reported under a new toolUseId (hook id -> transcript
       // id) is not a new prompt: put its drafts back instead of wiping them (#383).
       // A different question has a different key and is left empty. The "did not
-      // land" notice is bound to the id it was raised for ([partlyTypedFor]), so a
-      // new id drops it without any reset here.
+      // land" notice is tied to that same key ([QuestionDrafts.flaggedFor]), so it
+      // follows the question and not the id.
       _restoreDrafts();
     }
   }
@@ -1797,16 +1792,18 @@ class _QuestionOverlayState extends State<QuestionOverlay> {
     );
   }
 
-  /// The words typed for this prompt (Other answers and notes), across all tabs.
+  /// The words typed for this prompt, per tab: its Other text, then its note (the
+  /// live one, else the one kept from before a resurface).
   List<String> get _draftWords => [
-        for (final t in [..._otherText, ..._noteText])
-          if (t != null && t.trim().isNotEmpty) t.trim(),
+        for (var i = 0; i < _otherText.length; i++)
+          for (final t in [_otherText[i], _noteText[i] ?? _keptNotes[i]])
+            if (t != null && t.trim().isNotEmpty) t.trim(),
       ];
 
   /// The answer carrying these words was sent and did not land (#383): see
-  /// [QuestionDrafts.partlyTypedFor].
+  /// [QuestionDrafts.notLanded].
   bool get _partlyTyped =>
-      widget.drafts?.partlyTypedFor(widget.question.toolUseId) ?? false;
+      widget.drafts?.flaggedFor(widget.draftKey) ?? false;
 
   /// Shown instead of an inviting Send once [_partlyTyped]. The words stay visible
   /// and selectable here whichever tab is open, so they can be copied out.
