@@ -597,18 +597,31 @@ class QuestionDrafts {
   /// selected, hiding its field and forcing text-entry layout for no reason.
   List<Set<int>> selected = const [];
 
-  /// True when an answer carrying these words was sent and did not land, so the
-  /// terminal may already hold part of it (an editor with the text typed in, a
-  /// highlight moved a row). The overlay then stops offering a blind Send: a replay
-  /// types `4` and the text into an editor that already holds them. Set by the
-  /// owner when it resurfaces the overlay, cleared with the rest by [clear].
-  bool partlyTyped = false;
+  /// The `toolUseId` of the question an answer carrying these words was sent for
+  /// and did not land, or null. The terminal may already hold part of it (an editor
+  /// with the text typed in, a highlight moved a row), so the overlay stops offering
+  /// a blind Send for THAT question: a replay types `4` and the text into an editor
+  /// that already holds them. Set by [markNotLanded] when the last successful poll
+  /// of the post-answer verify still showed the answered question up, whether or not
+  /// the overlay resurfaces at once (the "A question is waiting" chip can reopen it
+  /// later). Cleared with the rest by [clear].
+  String? notLandedId;
+
+  /// Whether the question [toolUseId] is the one flagged by [markNotLanded]. An
+  /// identical question asked AGAIN under a new id is a fresh prompt with an
+  /// untouched selector and must not inherit a warning about the old one.
+  bool partlyTypedFor(String? toolUseId) =>
+      notLandedId != null && notLandedId == toolUseId;
 
   /// Called when [frames], the answer to the question signed [answeredKey], did not
-  /// land. Marks [partlyTyped] only if the answer carried words and these are the
-  /// drafts held for that question: an answer of plain digits replays harmlessly.
-  void markNotLanded(String answeredKey, List<AnswerFrame> frames) {
-    if (key == answeredKey && frames.any((f) => f.text)) partlyTyped = true;
+  /// land and [toolUseId] is the question still showing. Flags it only if the answer
+  /// carried words and these are the drafts held for that question: an answer of
+  /// plain digits replays harmlessly.
+  void markNotLanded(
+      String answeredKey, List<AnswerFrame> frames, String toolUseId) {
+    if (key == answeredKey && frames.any((f) => f.text)) {
+      notLandedId = toolUseId;
+    }
   }
 
   void clear() {
@@ -616,7 +629,7 @@ class QuestionDrafts {
     other = const [];
     note = const [];
     selected = const [];
-    partlyTyped = false;
+    notLandedId = null;
   }
 }
 
@@ -771,18 +784,22 @@ class _QuestionOverlayState extends State<QuestionOverlay> {
     final d = widget.drafts;
     final n = widget.question.questions.length;
     if (d == null || d.key != widget.draftKey || d.other.length != n) return;
+    final partly = d.partlyTypedFor(widget.question.toolUseId);
     for (var i = 0; i < n; i++) {
       final o = d.other[i];
       if (o != null) {
         _otherText[i] = o;
         _otherControllers[i].text = o;
       }
-      // Every tab's pick comes back, so a resurfaced card is ready to send again.
-      // A note is only meaningful on a chosen option, so it returns only together
-      // with that choice.
-      final sel = i < d.selected.length ? d.selected[i] : const <int>{};
-      _selected[i] = {...sel};
+      // Picks come back for an answer that did not land (the card is then ready
+      // for a deliberate resend) and for a tab that holds a note, which is only
+      // meaningful on its chosen option. A plain resurface starts with nothing
+      // picked: one Enter on an old pick would type its digit onto the prompt line
+      // of a selector that has already closed.
       final nt = i < d.note.length ? d.note[i] : null;
+      final keepPick = partly || nt != null;
+      final sel = keepPick && i < d.selected.length ? d.selected[i] : const <int>{};
+      _selected[i] = {...sel};
       if (nt != null && sel.isNotEmpty) {
         _noteText[i] = nt;
         _noteControllers[i].text = nt;
@@ -835,12 +852,9 @@ class _QuestionOverlayState extends State<QuestionOverlay> {
       if (_qScroll.hasClients) _qScroll.jumpTo(0);
       // The SAME question re-reported under a new toolUseId (hook id -> transcript
       // id) is not a new prompt: put its drafts back instead of wiping them (#383).
-      // A different question has a different key and is left empty.
-      //
-      // The "did not land" notice belongs to the ask that failed: an identical
-      // question asked AGAIN under a new id is a fresh prompt whose selector is
-      // untouched, so it must not inherit a warning about the old one.
-      widget.drafts?.partlyTyped = false;
+      // A different question has a different key and is left empty. The "did not
+      // land" notice is bound to the id it was raised for ([partlyTypedFor]), so a
+      // new id drops it without any reset here.
       _restoreDrafts();
     }
   }
@@ -1790,8 +1804,9 @@ class _QuestionOverlayState extends State<QuestionOverlay> {
       ];
 
   /// The answer carrying these words was sent and did not land (#383): see
-  /// [QuestionDrafts.partlyTyped].
-  bool get _partlyTyped => widget.drafts?.partlyTyped ?? false;
+  /// [QuestionDrafts.partlyTypedFor].
+  bool get _partlyTyped =>
+      widget.drafts?.partlyTypedFor(widget.question.toolUseId) ?? false;
 
   /// Shown instead of an inviting Send once [_partlyTyped]. The words stay visible
   /// and selectable here whichever tab is open, so they can be copied out.

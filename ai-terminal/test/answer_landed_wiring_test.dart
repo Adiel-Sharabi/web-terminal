@@ -1,7 +1,7 @@
 // #383 — the answer-landed decision and the call sites that apply it.
 //
 // `_verifyAnswerLanded` needs a live ApiClient, so the decision lives in the pure
-// [verifyAnswerLanded] / [settleDraftsAfterAnswer] (poll injected) and is tested
+// [verifyAnswerLanded] / [settleAfterAnswer] (poll injected) and is tested
 // here directly. The SECOND half is the wiring: that the screen actually calls
 // them, and that "Answer in terminal" opens the terminal after a not-landed answer.
 // No behavioural test can see a call deleted from the screen, so those are asserted
@@ -50,6 +50,18 @@ Future<AnswerVerification> _verify(String key, List<Object?> polls) {
   );
 }
 
+/// Runs [settleAfterAnswer] the way the screen does, with its dismissal key set to
+/// the answered question's (the optimistic hide), unless [dismissedKey] is given.
+PendingQuestion? _settle(QuestionDrafts d, String key, AnswerVerification v,
+        {List<AnswerFrame>? frames, String? dismissedKey}) =>
+    settleAfterAnswer(
+      drafts: d,
+      answeredKey: key,
+      frames: frames ?? _words,
+      verdict: v,
+      dismissedKey: dismissedKey ?? key,
+    );
+
 QuestionDrafts _drafts(String key) => QuestionDrafts()
   ..key = key
   ..other = ['typed']
@@ -57,56 +69,68 @@ QuestionDrafts _drafts(String key) => QuestionDrafts()
   ..selected = [<int>{}];
 
 void main() {
-  group('settleDraftsAfterAnswer (what the polls saw -> the drafts)', () {
+  group('settleAfterAnswer (the verdict -> drafts + resurface)', () {
     final key = questionSignature(_q('Pick one'));
 
-    test('still pending on every poll: flagged (the overlay resurfaces)', () async {
-      final v = await _verify(key, [_q('Pick one'), _q('Pick one')]);
-      expect(v.stillPending, isNotNull);
+    test('still pending on every poll: flagged for the id the polls saw, and the '
+        'question comes back', () async {
+      final v = await _verify(key, [_q('Pick one', id: 'seen'), _q('Pick one', id: 'seen')]);
       final d = _drafts(key);
-      settleDraftsAfterAnswer(d, key, _words, v.seen);
-      expect(d.partlyTyped, isTrue);
+      final back = _settle(d, key, v);
+      expect(back, same(v.stillPending));
+      expect(d.partlyTypedFor('seen'), isTrue);
+      expect(d.partlyTypedFor('another-id'), isFalse,
+          reason: 'bound to the id it was raised for');
       expect(d.key, key, reason: 'the words stay');
     });
 
-    test('pending once, then the next poll THROWS: still flagged, though nothing '
-        'resurfaces', () async {
+    test('flagged although nothing resurfaces: the user already moved on, but the '
+        'chip can reopen the card', () async {
+      final v = await _verify(key, [_q('Pick one'), _q('Pick one')]);
+      final d = _drafts(key);
+      final back = _settle(d, key, v, dismissedKey: 'something-else');
+      expect(back, isNull, reason: 'dismissal moved on: do not resurface');
+      expect(d.partlyTypedFor('t'), isTrue);
+    });
+
+    test('pending once, then the next poll THROWS: flagged, nothing resurfaces',
+        () async {
       final v = await _verify(key, [_q('Pick one'), Exception('link down')]);
       expect(v.stillPending, isNull, reason: 'a failed poll is not "still pending"');
       final d = _drafts(key);
-      settleDraftsAfterAnswer(d, key, _words, v.seen);
-      expect(d.partlyTyped, isTrue,
+      expect(_settle(d, key, v), isNull);
+      expect(d.partlyTypedFor('t'), isTrue,
           reason: 'the chip can reopen the card later; it must already be flagged');
       expect(d.key, key);
     });
 
-    test('every poll throws: nothing was observed, nothing is flagged or cleared',
+    test('every poll throws: nothing was observed, nothing flagged or cleared',
         () async {
       final v = await _verify(key, [Exception('a'), Exception('b')]);
       final d = _drafts(key);
-      settleDraftsAfterAnswer(d, key, _words, v.seen);
-      expect(d.partlyTyped, isFalse);
+      expect(_settle(d, key, v), isNull);
+      expect(d.notLandedId, isNull);
       expect(d.key, key);
     });
 
     test('pending, then cleared: the answer landed, drafts are dropped', () async {
       final v = await _verify(key, [_q('Pick one'), null]);
       final d = _drafts(key);
-      settleDraftsAfterAnswer(d, key, _words, v.seen);
+      expect(_settle(d, key, v), isNull);
       expect(d.key, isNull);
-      expect(d.partlyTyped, isFalse);
+      expect(d.notLandedId, isNull);
     });
 
     test('a digits-only answer is never flagged', () async {
       final v = await _verify(key, [_q('Pick one'), _q('Pick one')]);
       final d = _drafts(key);
-      settleDraftsAfterAnswer(
-          d, key, [const AnswerFrame('1', 0), const AnswerFrame('\r', 0)], v.seen);
-      expect(d.partlyTyped, isFalse);
+      _settle(d, key, v,
+          frames: [const AnswerFrame('1', 0), const AnswerFrame('\r', 0)]);
+      expect(d.notLandedId, isNull);
     });
   });
 
-  group('the screen applies them (source-level; no ApiClient to pump)', () {
+  group('the screen applies it (source-level; no ApiClient to pump)', () {
     final src = File('lib/screens/session_screen.dart').readAsStringSync();
 
     // The text of the member that begins at [signature], up to the next
@@ -119,13 +143,17 @@ void main() {
       return src.substring(start, end < 0 ? src.length : end);
     }
 
-    test('_verifyAnswerLanded verifies through the recorded polls and settles '
-        'the drafts', () {
+    test('_verifyAnswerLanded verifies through the recorded polls, then settles '
+        'UNCONDITIONALLY and applies the result inside setState', () {
       final b = body('Future<void> _verifyAnswerLanded(');
       // Not a substring of the method's own name (`_verifyAnswerLanded(`).
       expect(b, contains(RegExp(r'(?<![_\w])verifyAnswerLanded\(')));
-      expect(b, contains('settleDraftsAfterAnswer('));
-      expect(b, contains('_questionDrafts'));
+      // At the method body's own indent: inside an `if` it would be 6+ spaces, and
+      // an answer that never resurfaces would never be flagged.
+      expect(b, contains(RegExp(r'\n    final resurface = settleAfterAnswer\(')));
+      expect(b, contains('verdict: verdict,'));
+      expect(b, contains('drafts: _questionDrafts,'));
+      expect(b, contains(RegExp(r'setState\(\(\) \{\s+if \(resurface != null\)')));
     });
 
     test('the 4 s poll records what it saw before clearing drafts', () {
@@ -138,8 +166,9 @@ void main() {
         () {
       expect(src, contains('onDismiss: _dismissQuestionOverlay'));
       final b = body('void _dismissQuestionOverlay()');
-      expect(b, contains('_questionDrafts.partlyTyped'));
-      expect(b, contains("_setLens('terminal')"));
+      expect(b, contains('final partlyTyped ='));
+      expect(b, contains('partlyTypedFor(_pendingQuestion?.toolUseId)'));
+      expect(b, contains("if (partlyTyped) _setLens('terminal');"));
       expect(b, contains('_dismissedQuestionKey'));
     });
   });

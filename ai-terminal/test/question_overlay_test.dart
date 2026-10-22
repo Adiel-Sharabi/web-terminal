@@ -3524,7 +3524,7 @@ void main() {
       ..other = ['deploy to staging']
       ..note = [null]
       ..selected = [<int>{}]
-      ..partlyTyped = partlyTyped;
+      ..notLandedId = partlyTyped ? 't2' : null;
 
     testWidgets('shows the notice, keeps the words selectable, and demotes Send',
         (tester) async {
@@ -3600,7 +3600,7 @@ void main() {
             ..selected = [
               {1}
             ]
-            ..partlyTyped = true;
+            ..notLandedId = 't2';
           await mount(tester, drafts,
               sent: sent,
               question: PendingQuestion(
@@ -3642,7 +3642,7 @@ void main() {
           {0},
           {1}
         ]
-        ..partlyTyped = true;
+        ..notLandedId = 't2';
       await mount(tester, drafts,
           question: PendingQuestion(
               toolUseId: 't2',
@@ -3660,11 +3660,46 @@ void main() {
       expect(find.textContaining('may be partly typed'), findsOneWidget);
 
       await mount(tester, drafts, question: pq('t3'));
-      expect(drafts.partlyTyped, isFalse);
+      expect(drafts.partlyTypedFor('t3'), isFalse);
       expect(find.textContaining('may be partly typed'), findsNothing);
       expect(tester.widget<TextField>(find.byType(TextField)).controller!.text,
           'deploy to staging');
       expect(find.widgetWithText(FilledButton, 'Send answer'), findsOneWidget);
+    });
+
+    // The same flag reaching the overlay by a path other than didUpdateWidget: a
+    // card mounted fresh (initState, the "A question is waiting" chip) for an
+    // identical question that now carries a different id.
+    testWidgets('a card MOUNTED for an identical question under a new id has no '
+        'notice, keeps the words', (tester) async {
+      final drafts = held(partlyTyped: true); // flagged for 't2'
+      await mount(tester, drafts, question: pq('t9'));
+      expect(find.textContaining('may be partly typed'), findsNothing);
+      expect(tester.widget<TextField>(find.byType(TextField)).controller!.text,
+          'deploy to staging');
+      expect(find.widgetWithText(FilledButton, 'Send answer'), findsOneWidget);
+    });
+
+    QuestionDrafts picked({required bool partlyTyped}) => QuestionDrafts()
+      ..key = 'sig-A'
+      ..other = [null]
+      ..note = [null]
+      ..selected = [
+        {1}
+      ]
+      ..notLandedId = partlyTyped ? 't2' : null;
+
+    testWidgets('a NORMAL resurface comes back with nothing picked', (tester) async {
+      await mount(tester, picked(partlyTyped: false));
+      // No pick restored: one Enter must not replay a stale digit.
+      expect(find.text('Pick an option'), findsOneWidget);
+      expect(find.text('Send answer'), findsNothing);
+    });
+
+    testWidgets('a not-landed resurface restores the pick', (tester) async {
+      await mount(tester, picked(partlyTyped: true));
+      expect(find.text('Pick an option'), findsNothing);
+      expect(find.text('Send again anyway'), findsOneWidget);
     });
 
     testWidgets('without the flag nothing changes: no notice, Send is the default',
@@ -3687,18 +3722,20 @@ void main() {
       final digits = [const AnswerFrame('1', 600), const AnswerFrame('\r', 600)];
 
       final a = QuestionDrafts()..key = 'k';
-      a.markNotLanded('k', digits);
-      expect(a.partlyTyped, isFalse, reason: 'digits replay harmlessly');
+      a.markNotLanded('k', digits, 'id');
+      expect(a.partlyTypedFor('id'), isFalse, reason: 'digits replay harmlessly');
 
       final b = QuestionDrafts()..key = 'other-question';
-      b.markNotLanded('k', words);
-      expect(b.partlyTyped, isFalse, reason: 'not the drafts of that question');
+      b.markNotLanded('k', words, 'id');
+      expect(b.partlyTypedFor('id'), isFalse,
+          reason: 'not the drafts of that question');
 
       final c = QuestionDrafts()..key = 'k';
-      c.markNotLanded('k', words);
-      expect(c.partlyTyped, isTrue);
+      c.markNotLanded('k', words, 'id');
+      expect(c.partlyTypedFor('id'), isTrue);
+      expect(c.partlyTypedFor('new-id'), isFalse, reason: 'bound to its id');
       c.clear();
-      expect(c.partlyTyped, isFalse, reason: 'clear() forgets it');
+      expect(c.partlyTypedFor('id'), isFalse, reason: 'clear() forgets it');
     });
   });
 }
