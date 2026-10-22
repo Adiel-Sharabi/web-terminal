@@ -84,6 +84,9 @@ const EXPECT = arg('expect') ? JSON.parse(arg('expect')) : [];
 if (!(Array.isArray(EXPECT) && EXPECT.every(e => typeof e === 'string'))) {
   throw new Error('--expect must be a JSON array of strings');
 }
+if (BUNCH && !FRAMES) {
+  throw new Error('--bunch groups the writes of --frames, so it needs --frames');
+}
 if (FRAMES && !(Array.isArray(FRAMES) && FRAMES.every(f => typeof f === 'string'))) {
   throw new Error('--frames must be a JSON array of strings');
 }
@@ -332,8 +335,16 @@ async function driveKeys() {
 }
 
 // ------------------------------------------------------------------ verdict
+// Exit status: a run that was told what to expect (--expect) and did not confirm it
+// exits non-zero, so a script or CI step can tell a pass from a miss. Runs once: the
+// timeout and a drive that outlives it can both arrive here.
+let exitCode = 0;
+let verdictDone = false;
 // The ONLY trustworthy readout: what claude recorded as the answer.
 function verdict() {
+  if (verdictDone) return;
+  verdictDone = true;
+  if (EXPECT.length) exitCode = 1; // cleared only by an answer that holds every expectation
   clearInterval(tick);
   try { p.kill(); } catch { /* already gone */ }
   const dir = transcriptDir();
@@ -366,6 +377,8 @@ function verdict() {
     console.log('   once answered, so this means the prompt was never submitted.)');
     return finish();
   }
+  let confirmed = 0;
+  let anyMissing = false;
   for (const a of asks) {
     console.log('\n--- asked (' + a.id + ') ---');
     for (const [i, q] of (a.input.questions || []).entries()) {
@@ -378,6 +391,7 @@ function verdict() {
     const r = results.get(a.id);
     if (!r) {
       console.log('  ANSWER: (none recorded — still pending / never submitted)');
+      anyMissing = true; // an unanswered ask confirms nothing
       continue;
     }
     const body = resultText(r.content);
@@ -385,8 +399,10 @@ function verdict() {
     if (EXPECT.length) {
       const missing = EXPECT.filter(e => !body.includes(e));
       console.log(missing.length ? '  EXPECT: MISSING ' + JSON.stringify(missing) : '  EXPECT: all ' + EXPECT.length + ' found');
+      if (missing.length) anyMissing = true; else confirmed++;
     }
   }
+  if (EXPECT.length && confirmed > 0 && !anyMissing) exitCode = 0;
   finish();
 }
 
@@ -447,11 +463,11 @@ async function finish() {
       console.log('(could NOT remove the transcript folder: ' + e.message + ')');
     }
   }
-  setTimeout(() => process.exit(0), 400);
+  setTimeout(() => process.exit(exitCode), 400);
 }
 
 setTimeout(() => {
-  if (state !== 'done') {
+  if (state !== 'done' && !verdictDone) {
     console.log('[' + stamp() + '] TIMEOUT in state=' + state);
     console.log('===== TIMEOUT screen =====\n' + screen() + '\n');
     verdict();

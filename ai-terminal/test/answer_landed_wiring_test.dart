@@ -53,39 +53,47 @@ Future<AnswerVerification> _verify(String key, List<Object?> polls) {
 /// Runs [settleAfterAnswer] the way the screen does, with its dismissal key set to
 /// the answered question's (the optimistic hide), unless [dismissedKey] is given.
 PendingQuestion? _settle(QuestionDrafts d, String key, AnswerVerification v,
-        {List<AnswerFrame>? frames, String? dismissedKey}) =>
+        {String? dismissedKey}) =>
     settleAfterAnswer(
       drafts: d,
       answeredKey: key,
-      frames: frames ?? _words,
       verdict: v,
       dismissedKey: dismissedKey ?? key,
     );
 
-QuestionDrafts _drafts(String key) => QuestionDrafts()
+/// The drafts of a question whose answer has just been SENT: the screen marks them
+/// before the first key goes out, so everything below starts from that state.
+QuestionDrafts _sent(String key, {List<AnswerFrame>? frames}) => QuestionDrafts()
   ..key = key
   ..other = ['typed']
-  ..note = [null];
+  ..note = [null]
+  ..markSent(key, frames ?? _words);
 
 void main() {
   group('settleAfterAnswer (the verdict -> drafts + resurface)', () {
     final key = questionSignature(_q('Pick one'));
 
-    test('still pending on every poll: flagged for the question SIGNATURE, and the '
-        'question comes back', () async {
-      final v = await _verify(key, [_q('Pick one', id: 'seen'), _q('Pick one', id: 'seen')]);
-      final d = _drafts(key);
-      final back = _settle(d, key, v);
-      expect(back, same(v.stillPending));
+    test('marking happens at SEND time: before any poll the question is flagged',
+        () {
+      final d = _sent(key);
       expect(d.flaggedFor(key), isTrue);
       expect(d.flaggedFor(questionSignature(_q('Pick another'))), isFalse,
           reason: 'another question is not flagged');
+    });
+
+    test('still pending on every poll: the flag stays and the question comes back',
+        () async {
+      final v = await _verify(key, [_q('Pick one', id: 'seen'), _q('Pick one', id: 'seen')]);
+      final d = _sent(key);
+      final back = _settle(d, key, v);
+      expect(back, same(v.stillPending));
+      expect(d.flaggedFor(key), isTrue);
       expect(d.key, key, reason: 'the words stay');
     });
 
     test('the same question re-reported under ANOTHER id keeps the flag', () async {
       final v = await _verify(key, [_q('Pick one', id: 'hook'), _q('Pick one', id: 'hook')]);
-      final d = _drafts(key);
+      final d = _sent(key);
       _settle(d, key, v);
       // The id is not part of the flag: a hook-id -> transcript-id re-report is
       // exactly when the selector may have closed.
@@ -95,45 +103,57 @@ void main() {
     test('flagged although nothing resurfaces: the user already moved on, but the '
         'chip can reopen the card', () async {
       final v = await _verify(key, [_q('Pick one'), _q('Pick one')]);
-      final d = _drafts(key);
+      final d = _sent(key);
       final back = _settle(d, key, v, dismissedKey: 'something-else');
       expect(back, isNull, reason: 'dismissal moved on: do not resurface');
       expect(d.flaggedFor(key), isTrue);
     });
 
-    test('pending once, then the next poll THROWS: flagged, nothing resurfaces',
-        () async {
+    test('pending once, then the next poll THROWS: still flagged, nothing '
+        'resurfaces', () async {
       final v = await _verify(key, [_q('Pick one'), Exception('link down')]);
       expect(v.stillPending, isNull, reason: 'a failed poll is not "still pending"');
-      final d = _drafts(key);
+      final d = _sent(key);
       expect(_settle(d, key, v), isNull);
-      expect(d.flaggedFor(key), isTrue,
-          reason: 'the chip can reopen the card later; it must already be flagged');
+      expect(d.flaggedFor(key), isTrue);
       expect(d.key, key);
     });
 
-    test('every poll throws: nothing was observed, nothing flagged or cleared',
+    test('every poll THROWS: nothing was observed, so the flag set at send stays',
         () async {
       final v = await _verify(key, [Exception('a'), Exception('b')]);
-      final d = _drafts(key);
+      final d = _sent(key);
       expect(_settle(d, key, v), isNull);
-      expect(d.notLanded, isFalse);
+      expect(d.flaggedFor(key), isTrue,
+          reason: 'a verify that saw nothing must not leave a replayable card');
       expect(d.key, key);
     });
 
-    test('pending, then cleared: the answer landed, drafts are dropped', () async {
+    test('pending, then cleared: the answer landed, drafts and flag are dropped',
+        () async {
       final v = await _verify(key, [_q('Pick one'), null]);
-      final d = _drafts(key);
+      final d = _sent(key);
       expect(_settle(d, key, v), isNull);
       expect(d.key, isNull);
       expect(d.notLanded, isFalse);
+      expect(d.flaggedFor(key), isFalse);
+    });
+
+    test('replaced by a DIFFERENT question: a positive observation, flag dropped',
+        () async {
+      final v = await _verify(key, [_q('Something else entirely')]);
+      final d = _sent(key);
+      _settle(d, key, v);
+      expect(d.notLanded, isFalse);
+      expect(d.key, isNull);
     });
 
     test('a digits-only answer is never flagged', () async {
-      final v = await _verify(key, [_q('Pick one'), _q('Pick one')]);
-      final d = _drafts(key);
-      _settle(d, key, v,
+      final d = _sent(key,
           frames: [const AnswerFrame('1', 0), const AnswerFrame('\r', 0)]);
+      expect(d.notLanded, isFalse);
+      final v = await _verify(key, [_q('Pick one'), _q('Pick one')]);
+      _settle(d, key, v);
       expect(d.notLanded, isFalse);
     });
   });
@@ -172,6 +192,24 @@ void main() {
           b,
           contains(RegExp(r'setState\(\(\) \{\s+if \(resurface != null\) \{\s+'
               r'_dismissedQuestionKey = null;\s+_pendingQuestion = resurface;')));
+    });
+
+    test('_answerQuestion flags the words BEFORE the first key goes out', () {
+      final b = body('Future<void> _answerQuestion(');
+      final mark = b.indexOf(
+          RegExp(r'_questionDrafts\.markSent\(answeredKey, frames\);'));
+      final send = b.indexOf('deliverAnswerFrames(');
+      expect(mark, greaterThanOrEqualTo(0));
+      expect(send, greaterThanOrEqualTo(0));
+      expect(mark, lessThan(send),
+          reason: 'a card mounted mid-send must already be flagged');
+    });
+
+    test('settleAfterAnswer sets no flag of its own (only clear() drops it)', () {
+      final i = src.indexOf('PendingQuestion? settleAfterAnswer(');
+      final b = src.substring(i, src.indexOf('\n}\n', i));
+      expect(b, isNot(contains('markSent')));
+      expect(b, isNot(contains('notLanded')));
     });
 
     test('the 4 s poll records what it saw before clearing drafts', () {

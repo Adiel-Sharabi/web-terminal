@@ -3743,7 +3743,123 @@ void main() {
           findsOneWidget);
     });
 
-    test('markNotLanded flags only an answer that carried words, for ITS drafts',
+    // The flag is set when the answer is SENT (markSent), so a card mounted before
+    // any verify has settled is already covered (#383): the chip reopening it
+    // mid-verify, or a verify whose polls all failed.
+    QuestionDrafts sentNotSettled() {
+      final d = QuestionDrafts()
+        ..key = 'sig-A'
+        ..other = ['deploy to staging']
+        ..note = [null];
+      d.markSent('sig-A', [
+        const AnswerFrame('3', 0),
+        const AnswerFrame('deploy to staging', 0, text: true, other: true),
+        const AnswerFrame('\r', 0),
+      ]);
+      return d;
+    }
+
+    testWidgets('flagged at send, mounted BEFORE any settle: the notice shows and '
+        'Send sends nothing', (tester) async {
+      final sent = <List<AnswerFrame>>[];
+      await mount(tester, sentNotSettled(), sent: sent);
+      expect(find.textContaining('may be partly typed in the terminal'),
+          findsOneWidget);
+      expect(find.text('Send answer'), findsNothing);
+      expect(find.widgetWithText(OutlinedButton, 'Send again anyway'),
+          findsOneWidget);
+      expect(sent, isEmpty);
+    });
+
+    testWidgets('flagged at send, mounted BEFORE any settle: hardware Enter sends '
+        'nothing', (tester) async {
+      debugDefaultTargetPlatformOverride = TargetPlatform.windows;
+      try {
+        final sent = <List<AnswerFrame>>[];
+        await mount(tester, sentNotSettled(), sent: sent);
+        await tester.sendKeyEvent(LogicalKeyboardKey.enter);
+        await tester.pump();
+        expect(sent, isEmpty);
+        expect(find.textContaining('may be partly typed'), findsOneWidget);
+      } finally {
+        debugDefaultTargetPlatformOverride = null;
+      }
+    });
+
+    for (final platform in [TargetPlatform.android, TargetPlatform.iOS]) {
+      testWidgets('flagged at send, mounted BEFORE any settle: the soft keyboard '
+          'send action sends nothing ($platform)', (tester) async {
+        debugDefaultTargetPlatformOverride = platform;
+        try {
+          final sent = <List<AnswerFrame>>[];
+          await mount(tester, sentNotSettled(), sent: sent);
+          await tester.showKeyboard(find.byType(TextField));
+          await tester.testTextInput.receiveAction(TextInputAction.send);
+          await tester.pump();
+          expect(sent, isEmpty);
+          expect(find.textContaining('may be partly typed'), findsOneWidget);
+        } finally {
+          debugDefaultTargetPlatformOverride = null;
+        }
+      });
+    }
+
+    // A tap on a listed option leaves Other mode, which used to null the saved Other
+    // text and take the words out of the notice's copy block.
+    testWidgets('a mis-tap on a listed option keeps the words in the block and the '
+        'drafts', (tester) async {
+      final drafts = sentNotSettled();
+      await mount(tester, drafts);
+      await tester.tap(find.text('Red'));
+      await tester.pumpAndSettle();
+      final words = tester.widget<SelectableText>(
+          find.byKey(const ValueKey('partly-typed-words')));
+      expect(words.data, 'deploy to staging');
+      expect(drafts.other, ['deploy to staging']);
+      expect(drafts.flaggedFor('sig-A'), isTrue);
+    });
+
+    testWidgets('a note removed after the flag still shows in the block as it was '
+        'sent', (tester) async {
+      final drafts = QuestionDrafts()
+        ..key = 'sig-A'
+        ..other = [null]
+        ..note = ['explain the tradeoffs'];
+      drafts.markSent('sig-A', [
+        const AnswerFrame('2', 0),
+        const AnswerFrame('explain the tradeoffs', 0, text: true),
+        const AnswerFrame('\r', 0),
+      ]);
+      await mount(tester, drafts,
+          question: PendingQuestion(
+              toolUseId: 't2',
+              questions: [_q(['Alpha', 'Beta'], preview: true)]));
+      await tester.tap(find.text('Beta'));
+      await tester.pumpAndSettle();
+      await tester.tap(find.text('Add a note'));
+      await tester.pumpAndSettle();
+      await tester.tap(find.text('Remove note'));
+      await tester.pumpAndSettle();
+      final words = tester.widget<SelectableText>(
+          find.byKey(const ValueKey('partly-typed-words')));
+      expect(words.data, 'explain the tradeoffs');
+      expect(drafts.note, ['explain the tradeoffs']);
+    });
+
+    testWidgets('editing the Other text on a flagged card does not rewrite the '
+        'sent words', (tester) async {
+      final drafts = sentNotSettled();
+      await mount(tester, drafts);
+      await tester.enterText(find.byType(TextField), 'something else');
+      await tester.pumpAndSettle();
+      final words = tester.widget<SelectableText>(
+          find.byKey(const ValueKey('partly-typed-words')));
+      expect(words.data, 'deploy to staging');
+      drafts.clear();
+      expect(drafts.words, isEmpty);
+    });
+
+    test('markSent flags only an answer that carried words, for ITS drafts',
         () {
       final words = [
         const AnswerFrame('3', 600),
@@ -3753,16 +3869,16 @@ void main() {
       final digits = [const AnswerFrame('1', 600), const AnswerFrame('\r', 600)];
 
       final a = QuestionDrafts()..key = 'k';
-      a.markNotLanded('k', digits);
+      a.markSent('k', digits);
       expect(a.flaggedFor('k'), isFalse, reason: 'digits replay harmlessly');
 
       final b = QuestionDrafts()..key = 'other-question';
-      b.markNotLanded('k', words);
+      b.markSent('k', words);
       expect(b.flaggedFor('k'), isFalse, reason: 'not the drafts of that question');
       expect(b.flaggedFor('other-question'), isFalse);
 
       final c = QuestionDrafts()..key = 'k';
-      c.markNotLanded('k', words);
+      c.markSent('k', words);
       expect(c.flaggedFor('k'), isTrue);
       expect(c.flaggedFor('another'), isFalse, reason: 'bound to its signature');
       c.clear();

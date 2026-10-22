@@ -1078,13 +1078,6 @@ class PendingQuestionObservation {
         observed: observed,
         current: lastSeen,
       );
-
-  /// True when the last SUCCESSFUL poll still showed the question signed
-  /// [answeredKey]: the answer was sent and the selector was still up afterwards.
-  /// A poll that threw changes nothing here, so "saw it pending, then the link
-  /// failed" still counts (#383).
-  bool sawStillPending(String answeredKey) =>
-      observed && lastSeen != null && questionSignature(lastSeen) == answeredKey;
 }
 
 /// The verdict of waiting for an answered question to clear: [stillPending] is
@@ -1125,27 +1118,21 @@ Future<AnswerVerification> verifyAnswerLanded({
 /// Everything the screen decides once an answer to the question signed
 /// [answeredKey] has been verified ([verdict]), in one place so a test can reach it
 /// (#383). Settles [drafts]: gone or replaced -> the typed words did their job, drop
-/// them; still up on the last successful poll -> the answer did not take and the
-/// terminal may hold part of [frames], so flag the question
-/// ([QuestionDrafts.markNotLanded]); never observed -> say nothing (a failed poll
-/// proves neither). Flags whether or not the overlay resurfaces now, because the
-/// user can reopen it from the "A question is waiting" chip later.
+/// them (and the not-landed flag, [QuestionDrafts.markSent], with them); anything
+/// else -> leave them, flagged or not as they already were. The flag is NOT set
+/// here: it was set when the answer went out, so a card mounted before this point
+/// is covered, and a verify that observed nothing (a failed poll proves neither
+/// way) still leaves the question flagged.
 ///
 /// Returns the question to put back on screen, or null when the overlay stays as it
 /// is ([shouldResurfaceAfterAnswer]). The caller only applies it, inside `setState`.
 PendingQuestion? settleAfterAnswer({
   required QuestionDrafts drafts,
   required String answeredKey,
-  required List<AnswerFrame> frames,
   required AnswerVerification verdict,
   required String? dismissedKey,
 }) {
-  final seen = verdict.seen;
-  if (seen.shouldClearDrafts(drafts.key)) {
-    drafts.clear();
-  } else if (seen.sawStillPending(answeredKey)) {
-    drafts.markNotLanded(answeredKey, frames);
-  }
+  if (verdict.seen.shouldClearDrafts(drafts.key)) drafts.clear();
   return shouldResurfaceAfterAnswer(
     stillPending: verdict.stillPending != null,
     answeredKey: answeredKey,
@@ -1698,6 +1685,11 @@ class _SessionScreenState extends State<SessionScreen>
       _dismissedQuestionKey = answeredKey;
     });
     _finishTerminalComposing();
+    // Flag BEFORE the keys go out (#383): the words may be in the terminal from the
+    // first frame on, and a card reopened from the chip mid-verify, or after a verify
+    // whose polls all failed, must not offer a blind replay. Only a positive
+    // gone-or-different observation clears it ([settleAfterAnswer], the 4 s poll).
+    _questionDrafts.markSent(answeredKey, frames);
     // The one pacing loop, shared with the sessions board (#337).
     final sent = await deliverAnswerFrames(
       frames,
@@ -1712,7 +1704,6 @@ class _SessionScreenState extends State<SessionScreen>
     if (answeredKey.isNotEmpty) {
       await _verifyAnswerLanded(
         answeredKey,
-        frames: frames,
         resendEnter: answerNeedsConfirm(frames),
       );
     }
@@ -1749,7 +1740,6 @@ class _SessionScreenState extends State<SessionScreen>
   /// waiting, and (pre-#19-dismissal) not even a re-bump to signal it.
   Future<void> _verifyAnswerLanded(
     String answeredKey, {
-    required List<AnswerFrame> frames,
     required bool resendEnter,
   }) async {
     final api = _api;
@@ -1769,15 +1759,14 @@ class _SessionScreenState extends State<SessionScreen>
       attempts: _answerVerifyAttempts,
     );
     if (!mounted) return;
-    // Landed (or replaced): the typed answer did its job. Still pending on the last
-    // good poll: it did not take. A failed poll proves neither, so it keeps the
-    // drafts (#383). Exhausted retries with the same prompt up -> surface it again
+    // Landed (or replaced): the typed answer did its job. Otherwise (still pending,
+    // or a failed poll that proves neither) the drafts and the flag set at send time
+    // stay (#383). Exhausted retries with the same prompt up -> surface it again
     // so the user can retry, instead of a silently stuck, hidden question. The
     // setState is what lets a card reopened mid-verify see the settled drafts.
     final resurface = settleAfterAnswer(
       drafts: _questionDrafts,
       answeredKey: answeredKey,
-      frames: frames,
       verdict: verdict,
       dismissedKey: _dismissedQuestionKey,
     );

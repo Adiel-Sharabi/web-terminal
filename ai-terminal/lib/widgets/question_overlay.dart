@@ -596,27 +596,37 @@ class QuestionDrafts {
   List<String?> other = const [];
   List<String?> note = const [];
 
-  /// An answer carrying these words was sent for the question signed [key] and did
-  /// not land. The terminal may already hold part of it (an editor with the text
-  /// typed in, a highlight moved a row), so the overlay stops offering a blind Send
-  /// for THAT question: a replay types `4` and the text into an editor that already
-  /// holds them. Set by [markNotLanded] when the last successful poll of the
-  /// post-answer verify still showed the answered question up, whether or not the
-  /// overlay resurfaces at once (the "A question is waiting" chip can reopen it
-  /// later). Tied to the question's signature, not to a `toolUseId`: a hook-id ->
-  /// transcript-id re-report of the SAME question is exactly when the selector may
-  /// have closed, and a false notice costs one tap where a lost one types into a
-  /// closed selector. Only [clear] drops it.
+  /// An answer carrying these words was SENT for the question signed [key] and has
+  /// not been seen to land. The terminal may already hold part of it (an editor with
+  /// the text typed in, a highlight moved a row), so the overlay stops offering a
+  /// blind Send for THAT question: a replay types `4` and the text into an editor
+  /// that already holds them.
+  ///
+  /// Verified, never predicted: [markSent] sets it BEFORE the keys go out, so a card
+  /// mounted at any point afterwards (the "A question is waiting" chip during the
+  /// verify, a verify whose polls all failed) is already covered. Only [clear] drops
+  /// it, and `clear()` runs only on a positive gone-or-different observation. Tied
+  /// to the question's signature, not to a `toolUseId`: a hook-id -> transcript-id
+  /// re-report of the SAME question is exactly when the selector may have closed,
+  /// and a false notice costs one tap where a lost one types into a closed selector.
   bool notLanded = false;
 
-  /// Whether the question signed [questionKey] is the one flagged by
-  /// [markNotLanded].
+  /// Whether the question signed [questionKey] is the one flagged by [markSent].
   bool flaggedFor(String questionKey) => notLanded && key == questionKey;
 
-  /// Called when [frames], the answer to the question signed [answeredKey], did not
-  /// land. Flags it only if the answer carried words and these are the drafts held
-  /// for that question: an answer of plain digits replays harmlessly.
-  void markNotLanded(String answeredKey, List<AnswerFrame> frames) {
+  /// Every word held, per tab: the Other text, then the note, blanks skipped. While
+  /// [notLanded] is up [other] and [note] are frozen (the overlay stops saving), so
+  /// this is the words as they were sent, whatever the card is tapped into after.
+  List<String> get words => [
+        for (var i = 0; i < other.length; i++)
+          for (final t in [other[i], i < note.length ? note[i] : null])
+            if (t != null && t.trim().isNotEmpty) t.trim(),
+      ];
+
+  /// Called just before [frames], the answer to the question signed [answeredKey],
+  /// is delivered. Flags it only if the answer carries words and these are the
+  /// drafts held for that question: an answer of plain digits replays harmlessly.
+  void markSent(String answeredKey, List<AnswerFrame> frames) {
     if (key == answeredKey && frames.any((f) => f.text)) notLanded = true;
   }
 
@@ -718,7 +728,8 @@ class _QuestionOverlayState extends State<QuestionOverlay> {
 
   /// The notes typed before this overlay was rebuilt, per tab (#383). Never put back
   /// into [_noteText] (a note needs its option picked and nothing is picked again):
-  /// they survive only as words, in [_draftWords]'s block and in the saved drafts.
+  /// they survive only as words, in [QuestionDrafts.words]' block and in the saved
+  /// drafts.
   late List<String?> _keptNotes;
 
   /// Drives [_contextPanel]'s scroll view so a [Scrollbar] can show a thumb.
@@ -806,6 +817,9 @@ class _QuestionOverlayState extends State<QuestionOverlay> {
     if (d == null) return;
     // Another question's flag must not follow the words over to this one.
     if (d.key != widget.draftKey) d.notLanded = false;
+    // The words of a sent answer are frozen until clear(): a later tap on a listed
+    // option or a removed note must not take them out of the notice's copy block.
+    if (d.notLanded) return;
     d
       ..key = widget.draftKey
       ..other = List.of(_otherText)
@@ -1792,23 +1806,16 @@ class _QuestionOverlayState extends State<QuestionOverlay> {
     );
   }
 
-  /// The words typed for this prompt, per tab: its Other text, then its note (the
-  /// live one, else the one kept from before a resurface).
-  List<String> get _draftWords => [
-        for (var i = 0; i < _otherText.length; i++)
-          for (final t in [_otherText[i], _noteText[i] ?? _keptNotes[i]])
-            if (t != null && t.trim().isNotEmpty) t.trim(),
-      ];
-
-  /// The answer carrying these words was sent and did not land (#383): see
+  /// The answer carrying words was sent and has not been seen to land (#383): see
   /// [QuestionDrafts.notLanded].
   bool get _partlyTyped =>
       widget.drafts?.flaggedFor(widget.draftKey) ?? false;
 
   /// Shown instead of an inviting Send once [_partlyTyped]. The words stay visible
-  /// and selectable here whichever tab is open, so they can be copied out.
+  /// and selectable here whichever tab is open, so they can be copied out, exactly
+  /// as they were sent ([QuestionDrafts.words]).
   Widget _partlyTypedNotice(ThemeData theme) {
-    final words = _draftWords;
+    final words = widget.drafts?.words ?? const <String>[];
     return Container(
       width: double.infinity,
       padding: const EdgeInsets.all(10),
@@ -1833,8 +1840,16 @@ class _QuestionOverlayState extends State<QuestionOverlay> {
                   child: SelectableText(
                     words.join('\n'),
                     key: const ValueKey('partly-typed-words'),
-                    style: theme.textTheme.bodySmall
-                        ?.copyWith(fontFamily: 'monospace'),
+                    style: theme.textTheme.bodySmall?.copyWith(
+                      // 'monospace' resolves to nothing off Android (#145).
+                      fontFamily: 'monospace',
+                      fontFamilyFallback: const [
+                        'Consolas',
+                        'Menlo',
+                        'DejaVu Sans Mono',
+                        'Courier New',
+                      ],
+                    ),
                   ),
                 ),
               ),
