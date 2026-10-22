@@ -11,7 +11,8 @@
 //
 // The controls never decide WHAT to write. Each one calls the owner of its bytes:
 //  * a question's option buttons -> [buildAnswerFrames] + [deliverAnswerFrames] +
-//    [awaitAnswerLanded], the question overlay's own path (#19, the hasPreview rules);
+//    [awaitAnswerLanded], the question overlay's own path (#19, the hasPreview rules),
+//    after a re-check that the question is still the one asked (#383);
 //  * a reply -> [buildComposeSubmission], the compose bar's one-frame submit (#44),
 //    refused while the agent is not ready (#147);
 //  * Stop and Esc -> a lone `0x1b`, which the worker reads as an interrupt only for a
@@ -37,21 +38,23 @@ import 'package:url_launcher/url_launcher.dart';
 import '../api/api_client.dart';
 import '../api/models.dart';
 import '../services/app_config.dart';
+import '../services/needs_you_actions.dart';
 import '../services/session_input.dart';
 import '../services/session_repository.dart';
 import '../theme/app_theme.dart';
 import '../theme/status_colors.dart';
 import '../util/session_tree.dart';
+import '../widgets/brief_item_row.dart';
 import '../widgets/format_utils.dart';
 import '../widgets/handoff_chip.dart';
-import '../widgets/question_overlay.dart'
-    show answerNeedsConfirm, awaitAnswerLanded, buildAnswerFrames, deliverAnswerFrames;
+import '../widgets/machine_stripe.dart';
+import '../widgets/question_answer_panel.dart' show quickAnswerable;
+import '../widgets/question_overlay.dart' show buildAnswerFrames;
 import '../widgets/reason_chip.dart';
+import '../widgets/reply_box.dart';
 import '../widgets/server_badge.dart';
 import '../widgets/status_dot.dart';
-import 'session_screen.dart'
-    show SubmitUnconfirmedOutcome, buildComposeSubmission, kSubmitPendingGrace, questionSignature,
-        resolveSubmitUnconfirmedReaction;
+export '../widgets/brief_item_row.dart' show briefStateColors, briefStateLabel;
 
 /// A session's status as the board shows it: a label and a colour.
 class BoardStatus {
@@ -86,20 +89,6 @@ String _hhmm(int ms) {
   final t = DateTime.fromMillisecondsSinceEpoch(ms);
   return '${t.hour.toString().padLeft(2, '0')}:${t.minute.toString().padLeft(2, '0')}';
 }
-
-/// `ready-for-test` -> `ready for test`.
-String briefStateLabel(String state) => state.replaceAll('-', ' ');
-
-/// The pill colours for a work-item state; matches `app.html`'s `.db-state.s-*`.
-({Color bg, Color fg}) briefStateColors(String? state) => switch (state) {
-      'planning' => (bg: const Color(0xFF2A2540), fg: const Color(0xFFC9BCFF)),
-      'in-progress' => (bg: const Color(0xFF3A2A12), fg: const Color(0xFFFFB454)),
-      'blocked' => (bg: const Color(0xFF3A1D26), fg: const Color(0xFFFF9AAC)),
-      'ready-for-test' => (bg: const Color(0xFF123A33), fg: const Color(0xFF5FE8C9)),
-      'committed' => (bg: const Color(0xFF1B2B3D), fg: const Color(0xFF9CC6F0)),
-      'done' => (bg: const Color(0xFF1D3320), fg: const Color(0xFF8FD59A)),
-      _ => (bg: const Color(0xFF2A303C), fg: const Color(0xFFC3C9D4)),
-    };
 
 /// Why a session shows no work item.
 String noItemReason(Session s) {
@@ -235,7 +224,6 @@ class WorkBoardScreen extends StatefulWidget {
 class _WorkBoardScreenState extends State<WorkBoardScreen> {
   static const _closedEvery = Duration(seconds: 30);
   static const _machineEvery = Duration(seconds: 30);
-  static const _questionEvery = Duration(seconds: 4);
   static const _prefsKey = 'wt.dashboard.view';
 
   late final SessionRepository _repo = widget.repository ?? SessionRepository.instance;
@@ -264,17 +252,14 @@ class _WorkBoardScreenState extends State<WorkBoardScreen> {
   bool _machinesOpen = false;
   final Map<String, ({DateTime at, MachineProfile? data, bool failed})> _machines = {};
 
-  // #337 - the live question behind each question card, by [_bkey]: asked only for a
-  // session that is waiting on one. null = asked, nothing pending.
-  final Map<String, PendingQuestion?> _questions = {};
-  final Map<String, DateTime> _questionAt = {};
-
-  /// Sessions with a write in flight, so a second press cannot double-answer.
-  final Set<String> _busy = {};
-
-  /// The signature of a question answered from here, by [_bkey]: its buttons stay
-  /// down until the server stops reporting it, so it cannot be answered twice.
-  final Map<String, String> _answered = {};
+  /// #337 - the writers behind the Needs-you cards and their state (the live
+  /// questions, the writes in flight, the replies awaiting #179), shared in shape with
+  /// the questions inbox (#383).
+  ///
+  /// The runner and the client are read through the CURRENT widget at each call: a
+  /// rebuilt board keeps this state, and a runner captured once would outlive it.
+  late final NeedsYouActions _needs = NeedsYouActions(
+      repository: _repo, client: _client, input: (s, body) => _input(s, body), say: _say);
 
   /// Closed records reopened from here, so a second press cannot start a second copy.
   final Set<String> _reopened = {};
@@ -282,19 +267,6 @@ class _WorkBoardScreenState extends State<WorkBoardScreen> {
   /// Sessions with a hand-off request (#340) in flight, by [_bkey]: its button is down
   /// until the answer is read back, so a second press cannot start a second run.
   final Set<String> _handoffBusy = {};
-
-  // #337 review - a reply is the person's words, so it follows the session screen's
-  // rule (#179): kept until delivered, and put back if the agent never took it.
-  /// Each reply box's text, by [_bkey]: owned here so a reply can be put back into it.
-  final Map<String, TextEditingController> _replyBoxes = {};
-
-  /// The last reply sent from here per session, and when, for a #179 restore.
-  final Map<String, ({String text, int at})> _pendingReply = {};
-
-  /// The `submitUnconfirmed` stamp already reacted to, per session.
-  final Map<String, int?> _handledUnconfirmed = {};
-
-  TextEditingController _replyBox(Session s) => _replyBoxes.putIfAbsent(_bkey(s), TextEditingController.new);
 
   List<ServerConfig> get _servers => (widget.servers ?? () => AppConfig.servers)();
   ApiClient _client(ServerConfig s) => (widget.clientFactory ?? ApiClient.new)(s);
@@ -308,11 +280,12 @@ class _WorkBoardScreenState extends State<WorkBoardScreen> {
   void initState() {
     super.initState();
     _sessions = _repo.current;
+    _needs.addListener(_onNeeds);
     unawaited(_loadPrefs());
     _sub = _repo.sessions.listen((list) {
       if (!mounted) return;
       setState(() => _sessions = list);
-      _checkUnconfirmedReplies();
+      _needs.checkUnconfirmedReplies(_sessions);
       unawaited(_refreshClosed());
       unawaited(_refreshMachines());
       unawaited(_refreshQuestions());
@@ -330,10 +303,13 @@ class _WorkBoardScreenState extends State<WorkBoardScreen> {
   void dispose() {
     _poll?.cancel();
     _sub?.cancel();
-    for (final c in _replyBoxes.values) {
-      c.dispose();
-    }
+    _needs.removeListener(_onNeeds);
+    _needs.dispose();
     super.dispose();
+  }
+
+  void _onNeeds() {
+    if (mounted) setState(() {});
   }
 
   // Which folds are open is per DEVICE (a phone and a desk can want different views);
@@ -406,30 +382,9 @@ class _WorkBoardScreenState extends State<WorkBoardScreen> {
     if (mounted) setState(() {});
   }
 
-  /// #337 - the question behind each question card, from the same route the session
-  /// screen's overlay reads (`GET /api/sessions/:id/pending-question`).
-  Future<void> _refreshQuestions() async {
-    final waiting = _sessions.where((s) => needKindOf(s) == NeedKind.question).toList();
-    final live = {for (final s in waiting) _bkey(s)};
-    _questions.removeWhere((k, _) => !live.contains(k));
-    _questionAt.removeWhere((k, _) => !live.contains(k));
-    _answered.removeWhere((k, _) => !live.contains(k));
-    final now = DateTime.now();
-    final due = waiting.where((s) {
-      final at = _questionAt[_bkey(s)];
-      return at == null || now.difference(at) > _questionEvery;
-    }).toList();
-    if (due.isEmpty) return;
-    for (final s in due) {
-      _questionAt[_bkey(s)] = now;
-    }
-    await Future.wait(due.map((s) async {
-      try {
-        _questions[_bkey(s)] = await _client(s.server).pendingQuestion(s.id);
-      } catch (_) {/* keep what is shown; the card still offers Open */}
-    }));
-    if (mounted) setState(() {});
-  }
+  /// #337 - the question behind each question card ([NeedsYouActions.refreshQuestions]).
+  Future<void> _refreshQuestions() =>
+      _needs.refreshQuestions(_sessions.where((s) => needKindOf(s) == NeedKind.question));
 
   void _toggleMachines() {
     setState(() => _machinesOpen = !_machinesOpen);
@@ -531,101 +486,11 @@ class _WorkBoardScreenState extends State<WorkBoardScreen> {
 
   // ---- #337: the controls. Each writes bytes another module owns. -----------------
 
-  /// Runs one write against [s], one at a time per session. False when the session
-  /// could not be reached, which is said out loud: nothing was sent.
-  Future<bool> _write(Session s, Future<void> Function(void Function(String keys) send) body) async {
-    final k = _bkey(s);
-    if (_busy.contains(k)) return false;
-    setState(() => _busy.add(k));
-    final ok = await _input(s, body);
-    if (mounted) setState(() => _busy.remove(k));
-    if (!ok) _say('Could not reach "${s.name}" - nothing was sent');
-    return ok;
-  }
-
-  /// Answers a single-select question with option [index], through the overlay's
-  /// own frames, pacing and confirm (#19). A question still up after every check is
-  /// put back, with a word that it did not take.
-  Future<void> _answer(Session s, PendingQuestion q, int index) async {
-    final k = _bkey(s);
-    final sig = questionSignature(q);
-    final frames = buildAnswerFrames(q.questions, [
-      {index},
-    ]);
-    setState(() => _answered[k] = sig);
-    PendingQuestion? stuck;
-    final ok = await _write(s, (send) async {
-      await deliverAnswerFrames(frames, send);
-      stuck = await awaitAnswerLanded(
-        isSame: (p) => questionSignature(p) == sig,
-        resendEnter: answerNeedsConfirm(frames),
-        poll: () => _client(s.server).pendingQuestion(s.id),
-        resend: () => send('\r'),
-      );
-    });
-    if (!mounted) return;
-    if (!ok || stuck != null) setState(() => _answered.remove(k));
-    if (ok && stuck != null) _say('The answer did not take - open "${s.name}" to answer it there');
-    unawaited(_repo.refresh());
-  }
-
-  /// A reply to a session that said it is waiting on you: the compose bar's submit,
-  /// one frame (#44). Refused while the agent is not at its composer (#147), as the
-  /// compose bar refuses it.
-  Future<bool> _reply(Session s, String text) async {
-    final val = text.replaceFirst(RegExp(r'[\r\n]+$'), '');
-    if (val.trim().isEmpty) return false;
-    if (!s.agentReady) {
-      _say('"${s.name}" is still starting - nothing was sent');
-      return false;
-    }
-    final sentAt = DateTime.now().millisecondsSinceEpoch;
-    final ok = await _write(s, (send) async => send(buildComposeSubmission(val)));
-    if (ok) {
-      // Delivered to an ATTACHED session (see services/session_input.dart). Whether
-      // the agent then took it is #179's verdict, watched in [_checkUnconfirmedReplies].
-      _pendingReply[_bkey(s)] = (text: val, at: sentAt);
-      unawaited(_repo.refresh());
-    }
-    return ok;
-  }
-
-  /// #179 for the board: a reply the agent's TUI swallowed is reported by the server
-  /// as `submitUnconfirmed`. The decision is the session screen's own
-  /// ([resolveSubmitUnconfirmedReaction]: only a report stamped at or after this send,
-  /// only inside [kSubmitPendingGrace], only into an empty box); this is the glue.
-  void _checkUnconfirmedReplies() {
-    if (_pendingReply.isEmpty) return;
-    final now = DateTime.now().millisecondsSinceEpoch;
-    for (final s in _sessions) {
-      final k = _bkey(s);
-      final pending = _pendingReply[k];
-      if (pending == null) continue;
-      final at = _repo.submitUnconfirmedAt(s.id);
-      final fresh = now - pending.at < kSubmitPendingGrace.inMilliseconds;
-      final reaction = resolveSubmitUnconfirmedReaction(
-        eventAt: at,
-        lastHandledAt: _handledUnconfirmed[k],
-        pendingText: fresh ? pending.text : null,
-        composeIsEmpty: (_replyBoxes[k]?.text ?? '').isEmpty,
-        lastSubmitAt: pending.at,
-      );
-      if (!fresh) _pendingReply.remove(k);
-      if (reaction.outcome == SubmitUnconfirmedOutcome.unchanged) continue;
-      _handledUnconfirmed[k] = at;
-      if (reaction.outcome == SubmitUnconfirmedOutcome.notMine) continue;
-      _repo.clearSubmitUnconfirmed(s.id);
-      _pendingReply.remove(k);
-      if (reaction.restore) _replyBox(s).text = reaction.text!;
-      _say('"${s.name}" did not take your reply'
-          '${reaction.restore ? ' - it is back in the box' : ''}. Open it to see what is on its screen.');
-    }
-  }
-
-  /// A lone Esc: interrupts a working turn, closes a menu over the composer.
-  Future<void> _esc(Session s) async {
-    if (await _write(s, (send) async => send('\x1b'))) unawaited(_repo.refresh());
-  }
+  /// Answers a single-select question with option [index], through the overlay's own
+  /// frames (#19), after [NeedsYouActions.answer]'s re-check that it is still asked.
+  Future<void> _answer(Session s, PendingQuestion q, int index) => _needs.answer(s, q, buildAnswerFrames(q.questions, [
+        {index},
+      ]));
 
   /// Stop = Esc to a session that is STILL working. The card may be up to a poll old,
   /// and an Esc that reaches a session which has since stopped is some other key
@@ -639,7 +504,7 @@ class _WorkBoardScreenState extends State<WorkBoardScreen> {
       _say('"${s.name}" is no longer working - Stop was not sent');
       return;
     }
-    await _esc(fresh);
+    await _needs.esc(fresh);
   }
 
   /// The live session that has [c]'s conversation open again, if any: then the record
@@ -735,7 +600,7 @@ class _WorkBoardScreenState extends State<WorkBoardScreen> {
     final base = s.server.baseUrl;
     final brief = _repo.supportsBrief(base);
     final k = _bkey(s);
-    final q = _questions[k];
+    final q = _needs.questionFor(s);
     final kind = boardNeedsYou(s) ? needKindOf(s) : null;
     final successor = _successorOf(s);
     return BoardActions(
@@ -758,15 +623,15 @@ class _WorkBoardScreenState extends State<WorkBoardScreen> {
       onOpenRelated: widget.onOpenSession,
       handoffBusy: _handoffBusy.contains(k),
       question: kind == NeedKind.question ? q : null,
-      answering: q != null && _answered[k] == questionSignature(q),
-      busy: _busy.contains(k),
+      answering: q != null && _needs.isAnswering(s, q),
+      busy: _needs.isBusy(s),
       onAnswer: (kind == NeedKind.question && q != null) ? (i) => _answer(s, q, i) : null,
-      onReply: kind == NeedKind.reported ? (text) => _reply(s, text) : null,
-      replyBox: kind == NeedKind.reported ? _replyBox(s) : null,
+      onReply: kind == NeedKind.reported ? (text) => _needs.reply(s, text) : null,
+      replyBox: kind == NeedKind.reported ? _needs.replyBox(s) : null,
       // A lone Esc reads as an interrupt only to a WORKING session; anywhere else it
       // would be some other key (#55), so Stop is offered only there.
       onStop: s.status == 'working' ? () => _stop(s) : null,
-      onEsc: kind == NeedKind.menu ? () => _esc(s) : null,
+      onEsc: kind == NeedKind.menu ? () => _needs.esc(s) : null,
     );
   }
 
@@ -1137,13 +1002,6 @@ final ButtonStyle _smallOutlined = OutlinedButton.styleFrom(
   textStyle: const TextStyle(fontSize: 12, fontWeight: FontWeight.w600),
 );
 
-final ButtonStyle _smallFilled = FilledButton.styleFrom(
-  visualDensity: VisualDensity.compact,
-  padding: const EdgeInsets.symmetric(horizontal: 12),
-  minimumSize: const Size(0, 30),
-  textStyle: const TextStyle(fontSize: 12, fontWeight: FontWeight.w600),
-);
-
 final ButtonStyle _compactText = TextButton.styleFrom(
   visualDensity: VisualDensity.compact,
   padding: const EdgeInsets.symmetric(horizontal: 8),
@@ -1322,7 +1180,7 @@ class BoardCard extends StatelessWidget {
       _head(context, pal, muted),
       ?_familyLine(s, actions),
       if (needs) ..._needLines(context) else ..._workLines(context, pal),
-      for (final it in items) _itemRow(context, it),
+      for (final it in items) BriefItemRow(it, onUnpin: actions.onUnpin),
       if (b != null && b.artifacts.isNotEmpty) ArtifactLinks(b.artifacts),
       if (b?.staleReason != null)
         Text('⚠ Report may be out of date: ${b!.staleReason}',
@@ -1359,7 +1217,7 @@ class BoardCard extends StatelessWidget {
           side: BorderSide(color: needs ? pal.you.withValues(alpha: 0.55) : theme.colorScheme.outlineVariant),
         ),
         clipBehavior: Clip.antiAlias,
-        child: _Striped(
+        child: MachineStripe(
           color: color,
           child: InkWell(
             onTap: actions.onOpen,
@@ -1460,7 +1318,7 @@ class BoardCard extends StatelessWidget {
         }
         // Option buttons only where one press IS the whole answer: one question, one
         // choice. Several questions, or several choices, are answered in the session.
-        final simple = q.questions.length == 1 && !q.questions.first.multiSelect && actions.onAnswer != null;
+        final simple = quickAnswerable(q) && actions.onAnswer != null;
         if (!simple) {
           return [Text('Several answers are needed - Open to answer.', style: Theme.of(context).textTheme.bodySmall)];
         }
@@ -1495,7 +1353,7 @@ class BoardCard extends StatelessWidget {
       case NeedKind.reported:
         if (actions.onReply == null || actions.replyBox == null) return const [];
         return [
-          _ReplyBox(
+          ReplyBox(
             key: ValueKey('board-reply-$idk'),
             controller: actions.replyBox!,
             name: s.name,
@@ -1507,116 +1365,6 @@ class BoardCard extends StatelessWidget {
       case NeedKind.other:
         return const [];
     }
-  }
-
-  Widget _itemRow(BuildContext context, BriefItem it) {
-    final theme = Theme.of(context);
-    final ref = Text(it.ref,
-        maxLines: 1,
-        overflow: TextOverflow.ellipsis,
-        style: TextStyle(
-          color: theme.colorScheme.primary,
-          fontFamily: 'monospace',
-          fontFamilyFallback: const ['Consolas', 'Menlo', 'Courier New'],
-          fontSize: 12,
-          decoration: it.url != null ? TextDecoration.underline : null,
-        ));
-    final uri = it.url == null ? null : Uri.tryParse(it.url!);
-    return Tooltip(
-      message: it.note,
-      child: Row(children: [
-        // Flexible: a qualified ref (`owner/repo#306`) beside a state pill and an
-        // unpin button is wider than a phone card. The ref gives way, not the pill.
-        Flexible(
-          child: uri != null
-              ? InkWell(
-                  onTap: () => launchUrl(uri, mode: LaunchMode.externalApplication),
-                  child: ref,
-                )
-              : ref,
-        ),
-        const SizedBox(width: 8),
-        Expanded(
-          child: Text(it.title, maxLines: 1, overflow: TextOverflow.ellipsis, style: theme.textTheme.bodySmall),
-        ),
-        if (it.state != null) ...[const SizedBox(width: 6), _StatePill(it.state!)],
-        if (it.pinned && actions.onUnpin != null)
-          IconButton(
-            tooltip: 'Unpin ${it.ref}',
-            visualDensity: VisualDensity.compact,
-            iconSize: 16,
-            icon: const Icon(Icons.close),
-            onPressed: () => actions.onUnpin!(it),
-          ),
-      ]),
-    );
-  }
-}
-
-/// The one-line reply under a "waiting on you" card (#337). Sends through
-/// [BoardActions.onReply], which submits exactly as the compose bar does.
-class _ReplyBox extends StatefulWidget {
-  const _ReplyBox({
-    super.key,
-    required this.controller,
-    required this.name,
-    required this.ready,
-    required this.busy,
-    required this.onSend,
-  });
-  final TextEditingController controller;
-  final String name;
-  final bool ready;
-  final bool busy;
-  final Future<bool> Function(String text) onSend;
-
-  @override
-  State<_ReplyBox> createState() => _ReplyBoxState();
-}
-
-class _ReplyBoxState extends State<_ReplyBox> {
-  TextEditingController get _text => widget.controller;
-
-  Future<void> _send() async {
-    final t = _text.text;
-    if (t.trim().isEmpty || widget.busy || !widget.ready) return;
-    // The words stay in the box until they are DELIVERED to an attached session; if
-    // the agent then does not take them, the board puts them back (#179).
-    if (await widget.onSend(t) && mounted && _text.text == t) _text.clear();
-  }
-
-  @override
-  Widget build(BuildContext context) {
-    final canSend = widget.ready && !widget.busy;
-    return Row(children: [
-      Expanded(
-        child: TextField(
-          key: const ValueKey('board-reply-field'),
-          controller: _text,
-          minLines: 1,
-          maxLines: 1,
-          textInputAction: TextInputAction.send,
-          onSubmitted: (_) => _send(),
-          style: const TextStyle(fontSize: 13),
-          decoration: InputDecoration(
-            isDense: true,
-            hintText: widget.ready ? 'Reply to this session…' : 'Starting the agent…',
-            border: const OutlineInputBorder(),
-            contentPadding: const EdgeInsets.symmetric(horizontal: 8, vertical: 8),
-          ),
-        ),
-      ),
-      const SizedBox(width: 6),
-      Tooltip(
-        message: widget.ready ? 'Send to ${widget.name}' : 'Starting the agent',
-        child: FilledButton(
-          key: const ValueKey('board-reply-send'),
-          style: _smallFilled,
-          onPressed: canSend ? _send : null,
-          child: const Text('Send'),
-        ),
-      ),
-    ]);
   }
 }
 
@@ -1651,7 +1399,7 @@ class BoardRow extends StatelessWidget {
           side: BorderSide(color: theme.colorScheme.outlineVariant),
         ),
         clipBehavior: Clip.antiAlias,
-        child: _Striped(
+        child: MachineStripe(
           color: color,
           child: InkWell(
             onTap: actions.onOpen,
@@ -1824,38 +1572,6 @@ class ClosedList extends StatelessWidget {
       ));
     }
     return Column(crossAxisAlignment: CrossAxisAlignment.stretch, children: rows);
-  }
-}
-
-class _StatePill extends StatelessWidget {
-  const _StatePill(this.state);
-  final String state;
-
-  @override
-  Widget build(BuildContext context) {
-    final c = briefStateColors(state);
-    return Container(
-      padding: const EdgeInsets.symmetric(horizontal: 7, vertical: 1),
-      decoration: BoxDecoration(color: c.bg, borderRadius: BorderRadius.circular(999)),
-      child: Text(briefStateLabel(state),
-          style: TextStyle(color: c.fg, fontSize: 10, fontWeight: FontWeight.w600)),
-    );
-  }
-}
-
-/// The machine stripe (#315): 3px of the machine's colour down the left edge. Nothing
-/// else on the board uses a left stripe, so it can only ever mean "which machine".
-class _Striped extends StatelessWidget {
-  const _Striped({required this.color, required this.child});
-  final Color? color;
-  final Widget child;
-  @override
-  Widget build(BuildContext context) {
-    if (color == null) return child;
-    return Stack(children: [
-      child,
-      Positioned(left: 0, top: 0, bottom: 0, width: 3, child: ColoredBox(color: color!)),
-    ]);
   }
 }
 
