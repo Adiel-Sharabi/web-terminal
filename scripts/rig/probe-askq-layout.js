@@ -25,6 +25,19 @@
 //   node scripts/rig/probe-askq-layout.js --shape preview-mq --keys "1,CR,2,3,RIGHT,CR"
 //   node scripts/rig/probe-askq-layout.js --shape plain-mq   --keys "1,2,3,RIGHT,CR"
 //
+// Exact frames, optionally BUNCHED (#383). `--frames` is a JSON array of strings, one
+// per frame, written verbatim (JSON escapes give you ESC: "\u001b[200~..."); it
+// replaces --keys. Each frame is one PTY write, `--gap` ms apart (default 600, the
+// companion's pacing). `--bunch` joins chosen frames into ONE write, the way a
+// reconnect flush, the server's pre-attach queue or a stalled link delivers frames
+// that were sent apart: comma-separated groups of 0-based indices ("0-2,3" = frames
+// 0,1,2 as one write, then frame 3), "all" = the whole set as one write. Frames not
+// named stay separate writes. `--expect` is a JSON array of substrings the recorded
+// answer must contain (reported as EXPECT).
+//   node scripts/rig/probe-askq-layout.js --shape plain-mq2 --bunch all \
+//     --frames '["4","\u001b[200~some long text\u001b[201~","\r","2","\r"]' \
+//     --expect '["some long text","Medium"]'
+//
 // Env: CLAUDE_BIN overrides the claude executable; XTERM_HEADLESS points at an
 // @xterm/headless install (optional — without it the screen snapshots are
 // skipped, the transcript verdict is unaffected).
@@ -35,8 +48,12 @@ const os = require('os');
 const path = require('path');
 const { execFileSync } = require('child_process');
 
-const pty = require(path.join(__dirname, '..', '..', 'node_modules', 'node-pty'));
+// A worktree has no node_modules of its own (never junction one in), so fall back to
+// NODE_PATH, which a run from a worktree points at the checkout that has them.
+const localPty = path.join(__dirname, '..', '..', 'node_modules', 'node-pty');
+const pty = require(fs.existsSync(localPty) ? localPty : 'node-pty');
 const { claudeProjectDirName } = require(path.join(__dirname, '..', '..', 'lib', 'transcript.js'));
+const { DIRS } = require('../scratch-dirs');
 
 // ---------------------------------------------------------------- arguments
 function arg(name, fallback) {
@@ -45,6 +62,34 @@ function arg(name, fallback) {
 }
 const SHAPE = arg('shape', 'preview-mq');
 const KEYS = arg('keys', '').split(',').map(s => s.trim()).filter(Boolean);
+const FRAMES = arg('frames') ? JSON.parse(arg('frames')) : null;
+const GAP_MS = Number(arg('gap', '600'));
+const BUNCH = arg('bunch');
+const EXPECT = arg('expect') ? JSON.parse(arg('expect')) : [];
+if (FRAMES && !(Array.isArray(FRAMES) && FRAMES.every(f => typeof f === 'string'))) {
+  throw new Error('--frames must be a JSON array of strings');
+}
+
+// The PTY writes a frame set becomes: `--bunch` joins contiguous frames into one write.
+function planWrites(frames, bunch) {
+  const spec = bunch === 'all' ? ['0-' + (frames.length - 1)] : (bunch ? bunch.split(',') : []);
+  const joined = new Map(); // first index -> last index of its group
+  for (const g of spec) {
+    const m = /^(\d+)(?:-(\d+))?$/.exec(g.trim());
+    if (!m) throw new Error('bad --bunch group ' + JSON.stringify(g));
+    const a = Number(m[1]);
+    const b = m[2] === undefined ? a : Number(m[2]);
+    if (a > b || b >= frames.length) throw new Error('--bunch group out of range: ' + g);
+    joined.set(a, b);
+  }
+  const writes = [];
+  for (let i = 0; i < frames.length;) {
+    const last = joined.has(i) ? joined.get(i) : i;
+    writes.push(frames.slice(i, last + 1).join(''));
+    i = last + 1;
+  }
+  return writes;
+}
 const TIMEOUT_MS = Number(arg('timeout', '150000'));
 
 // ------------------------------------------------------------- claude binary
@@ -164,11 +209,15 @@ const TOK = {
 const keyBytes = t => (TOK[t] !== undefined ? TOK[t] : t);
 
 // ------------------------------------------------------------------- run it
-const cwd = fs.mkdtempSync(path.join(os.tmpdir(), 'askq-'));
+// A scratch cwd UNDER the trusted tree (scratch-dirs.js owns where): trust is
+// inherited, so claude boots straight to its composer instead of parking on the
+// folder-trust dialog, whose default row is "No, exit" (#190).
+const askqRoot = path.join(DIRS.rig, 'askq-runs');
+fs.mkdirSync(askqRoot, { recursive: true });
+const cwd = fs.mkdtempSync(path.join(askqRoot, 'r-'));
+// Scrub EVERY CLAUDE* variable: a nested child session persists no transcript.
 const childEnv = { ...process.env };
-delete childEnv.CLAUDE_CODE_CHILD_SESSION; // else the transcript is never written
-delete childEnv.CLAUDE_CODE_SESSION_ID;
-delete childEnv.CLAUDE_CODE_ENTRYPOINT;
+for (const k of Object.keys(childEnv)) if (/^CLAUDE/i.test(k)) delete childEnv[k];
 
 const p = pty.spawn(resolveClaude(), ['--dangerously-skip-permissions'], {
   name: 'xterm-256color', cols: COLS, rows: ROWS, cwd, env: childEnv,
@@ -211,9 +260,25 @@ const tick = setInterval(() => {
     state = 'driving';
     console.log('[' + stamp() + '] tool idle-waiting — capturing');
     console.log('\n===== SCREEN A: initial tool render =====\n' + screen() + '\n');
-    driveKeys();
+    if (FRAMES) driveFrames(); else driveKeys();
   }
 }, 500);
+
+// Writes the exact `--frames`, bunched per `--bunch`, `--gap` ms apart (#383).
+async function driveFrames() {
+  const sleep = ms => new Promise(r => setTimeout(r, ms));
+  const writes = planWrites(FRAMES, BUNCH);
+  console.log('[' + stamp() + '] ' + FRAMES.length + ' frames as ' + writes.length + ' write(s), ' + GAP_MS + 'ms apart');
+  for (let i = 0; i < writes.length; i++) {
+    p.write(writes[i]);
+    console.log('[' + stamp() + '] >>> write ' + (i + 1) + '/' + writes.length + ': ' +
+      JSON.stringify(writes[i]).slice(0, 120) + ' (' + Buffer.byteLength(writes[i]) + ' B)');
+    if (i < writes.length - 1) await sleep(GAP_MS);
+  }
+  await sleep(9000); // let claude record the tool_result
+  console.log('===== FINAL screen =====\n' + screen() + '\n');
+  verdict();
+}
 
 async function driveKeys() {
   const sleep = ms => new Promise(r => setTimeout(r, ms));
@@ -280,6 +345,10 @@ function verdict() {
     }
     const body = typeof r.content === 'string' ? r.content : JSON.stringify(r.content);
     console.log('  ANSWER: ' + body.replace(/\s+/g, ' ').slice(0, 600));
+    if (EXPECT.length) {
+      const missing = EXPECT.filter(e => !body.includes(e));
+      console.log(missing.length ? '  EXPECT: MISSING ' + JSON.stringify(missing) : '  EXPECT: all ' + EXPECT.length + ' found');
+    }
   }
   finish();
 }
