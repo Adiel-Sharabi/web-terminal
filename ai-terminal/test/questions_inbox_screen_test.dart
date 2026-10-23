@@ -17,8 +17,10 @@ import 'package:ai_terminal/services/server_store.dart';
 import 'package:ai_terminal/services/session_repository.dart';
 import 'package:ai_terminal/services/session_selection.dart';
 import 'package:ai_terminal/theme/app_theme.dart';
+import 'package:ai_terminal/widgets/question_answer_panel.dart';
 import 'package:ai_terminal/widgets/question_overlay.dart';
 import 'package:flutter/material.dart';
+import 'package:flutter_markdown/flutter_markdown.dart';
 import 'package:flutter_test/flutter_test.dart';
 import 'package:http/http.dart' as http;
 import 'package:http/testing.dart';
@@ -91,6 +93,12 @@ Map<String, dynamic> _previewedMulti() => {
       ],
     };
 
+/// A transcript whose current turn is [text], after a prompt the person typed.
+List<Map<String, dynamic>> _reply(String text, {String at = 'x'}) => [
+      {'role': 'user', 'text': 'go on', 'typedText': 'go on', 'userKind': 'human', 'toolUses': []},
+      {'role': 'assistant', 'text': text, 'toolUses': [], 'ts': at},
+    ];
+
 void main() {
   TestWidgetsFlutterBinding.ensureInitialized();
 
@@ -98,7 +106,7 @@ void main() {
   late Map<String, int> sessionsStatus; // by base URL
   late Map<String, Map<String, dynamic>> questions; // by session id
   late int questionStatus;
-  late Map<String, Map<String, dynamic>> recaps; // by session id
+  late Map<String, List<Map<String, dynamic>>> transcripts; // turns by session id
   late Map<String, int> agentsStatus; // by base URL
   late Map<String, Object> agentsBody; // by base URL
   late List<String> paths; // '<server name> <method> <path>'
@@ -108,6 +116,9 @@ void main() {
   late int failPolls; // pending-question polls still to fail with a 500
   late bool failPollAfterKeys; // the first key sent arms one failing poll
   Completer<void>? sessionsGate; // holds the NEXT /api/sessions until completed
+  late List<Completer<void>> transcriptHolds; // each holds the next transcript read, in order
+  late Map<String, Map<String, dynamic>> attentions; // by session id; a default record otherwise
+  late List<Completer<void>> attentionHolds; // each holds the next attention read, in order
 
   Future<bool> fakeInput(Session s, Future<void> Function(void Function(String keys) send) body) async {
     await body((keys) {
@@ -135,15 +146,17 @@ void main() {
           final q = questions[id];
           return _json(q == null ? {'pending': false} : {'pending': true, 'question': q});
         }
-        if (p.endsWith('/recap')) {
-          final r = recaps[id];
-          return r == null ? http.Response('', 404) : http.Response(jsonEncode(r), 200);
-        }
         if (p.endsWith('/transcript')) {
-          return http.Response(jsonEncode({'messages': [], 'cursor': null, 'hasMore': false}), 200);
+          final t = transcripts[id]; // what the transcript held when it was asked
+          if (transcriptHolds.isNotEmpty) await transcriptHolds.removeAt(0).future;
+          return t == null
+              ? http.Response('', 404)
+              : http.Response(jsonEncode({'messages': t, 'cursor': null, 'hasMore': false}), 200);
         }
         if (p.endsWith('/attention')) {
-          return http.Response(jsonEncode({'kind': 'approval', 'reason': 'Bash: rm -rf build', 'lastMessage': 'About to clean.'}), 200);
+          final a = attentions[id] ?? {'kind': 'approval', 'reason': 'Bash: rm -rf build', 'lastMessage': 'About to clean.'};
+          if (attentionHolds.isNotEmpty) await attentionHolds.removeAt(0).future;
+          return http.Response(jsonEncode(a), 200);
         }
         if (p.endsWith('/scrollback')) {
           const data = 'Do you want to run rm -rf build?\r\n1. Yes\r\n2. No\r\n';
@@ -192,7 +205,7 @@ void main() {
     sessionsStatus = {};
     questions = {};
     questionStatus = 200;
-    recaps = {};
+    transcripts = {};
     agentsStatus = {};
     agentsBody = {};
     paths = [];
@@ -202,6 +215,9 @@ void main() {
     failPolls = 0;
     failPollAfterKeys = false;
     sessionsGate = null;
+    transcriptHolds = [];
+    attentions = {};
+    attentionHolds = [];
   });
   tearDown(SessionSelection.instance.reset);
 
@@ -536,7 +552,7 @@ void main() {
     await done(tester);
   });
 
-  testWidgets('8.14: pending-question only for question rows; a recap once per activity',
+  testWidgets('8.14: pending-question only for question rows; a turn once per activity',
       (tester) async {
     final r = await repo();
     rows = {
@@ -546,15 +562,15 @@ void main() {
         _row('c', 'Idle', lastActivity: 100),
       ],
     };
-    recaps = {
-      'c': {'name': 'Idle', 'cwd': '/w', 'status': 'idle', 'reply': {'text': 'Shall I go on?', 'at': 'x'}},
-    };
+    transcripts = {'c': _reply('Shall I go on?')};
     await pump(tester, r);
     await tester.runAsync(() => r.refresh());
     await settle(tester);
     expect(paths.where((p) => p.endsWith('/pending-question')), isEmpty, reason: 'no row is a question');
-    expect(paths.where((p) => p.endsWith('/c/recap')), hasLength(1), reason: 'once per lastActivity, not per poll');
-    expect(paths.where((p) => p.endsWith('/p/recap') || p.endsWith('/d/recap')), isEmpty);
+    expect(paths.where((p) => p.endsWith('/c/transcript')), hasLength(1), reason: 'once per lastActivity, not per poll');
+    expect(paths.where((p) => p.endsWith('/d/transcript')), hasLength(1), reason: 'a reported wait: its last reply, once');
+    expect(paths.where((p) => p.endsWith('/p/transcript')), hasLength(1), reason: 'a permission: once per wait');
+    expect(paths.where((p) => p.endsWith('/recap')), isEmpty, reason: 'the transcript replaced the recap');
     expect(find.byKey(const ValueKey('inbox-card-http://h:7681|c')), findsOneWidget, reason: 'it asks in prose');
 
     rows = {
@@ -565,7 +581,7 @@ void main() {
     };
     await tester.runAsync(() => r.refresh());
     await settle(tester);
-    expect(paths.where((p) => p.endsWith('/c/recap')), hasLength(2), reason: 'new activity, read again');
+    expect(paths.where((p) => p.endsWith('/c/transcript')), hasLength(2), reason: 'new activity, read again');
     await done(tester);
   });
 
@@ -675,12 +691,13 @@ void main() {
     expect(text(opt).textDirection, TextDirection.rtl);
     expect(text('English').textDirection, TextDirection.ltr);
     // The card: the line reads right to left, and its English label is an isolated
-    // left-to-right run, so it shows as "Question:", never ":Question".
+    // left-to-right run, so it shows as "Question - H:", never ":Question". H is the
+    // question's own header.
     final card = tester.widget<RichText>(find.descendant(
         of: find.byKey(const ValueKey('inbox-card-http://h:7681|q')),
         matching: find.byWidgetPredicate((w) => w is RichText && w.text.toPlainText().contains(he))));
     expect(card.textDirection, TextDirection.rtl);
-    expect(card.text.toPlainText(), startsWith(String.fromCharCodes([0x2066, ...'Question:'.codeUnits, 0x2069])));
+    expect(card.text.toPlainText(), startsWith(String.fromCharCodes([0x2066, ...'Question - H:'.codeUnits, 0x2069])));
     await done(tester);
 
     rows = {_home.baseUrl: [_row('d', 'Docs', reason: {'kind': 'you', 'text': 'x', 'source': 'reported'})]};
@@ -812,9 +829,7 @@ void main() {
       // session is still an item, of another kind.
       rows = {_home.baseUrl: [_row('q', 'Asker', lastActivity: 2)]};
       questions = {};
-      recaps = {
-        'q': {'name': 'Asker', 'cwd': '/w', 'status': 'idle', 'reply': {'text': 'Shall I call it Atlas?', 'at': 'x'}},
-      };
+      transcripts = {'q': _reply('Shall I call it Atlas?')};
       await tester.runAsync(() => r.refresh());
       await settle(tester);
       await settle(tester);
@@ -826,6 +841,440 @@ void main() {
       await settle(tester);
       expect(find.byKey(const ValueKey('inbox-gone-banner')), findsNothing);
       expect(find.byKey(const ValueKey('inbox-focus-reply')), findsOneWidget, reason: 'on to what it waits on now');
+      await done(tester);
+    });
+  });
+
+  group('the agent\'s real, whole words (#383 brief R)', () {
+    Map<String, dynamic> say(String text) => {'role': 'assistant', 'text': text, 'toolUses': [], 'ts': 't-$text'.hashCode.toString()};
+    Map<String, dynamic> tool(String name, {Map<String, dynamic> input = const {}, String? result}) => {
+          'role': 'assistant',
+          'text': '',
+          'toolUses': [
+            {'name': name, 'inputPreview': '', 'id': 'tu-$name', 'input': input, 'result': ?result},
+          ],
+        };
+    Map<String, dynamic> typed(String text) =>
+        {'role': 'user', 'text': text, 'typedText': text, 'userKind': 'human', 'toolUses': []};
+    String filler(int n) => List.generate(n, (i) => 'Step $i of the analysis went fine.').join(' ');
+    String plain(WidgetTester t, Finder f) => t.widgetList<RichText>(find.descendant(of: f, matching: find.byType(RichText)))
+        .map((w) => w.text.toPlainText())
+        .join('\n');
+
+    testWidgets('a question\'s lead-up in the inbox is the WHOLE turn, joined', (tester) async {
+      rows = {_home.baseUrl: [_row('q', 'Asker', status: 'waiting', waitingFor: 'question', lastActivity: 1)]};
+      questions = {'q': _single('Pick one')};
+      transcripts = {
+        'q': [
+          say('OLD_TURN'),
+          typed('fix the login'),
+          say('What I found:'),
+          tool('Bash', result: 'ok'),
+          say('- the cookie expires\n- the token is stale'),
+          tool('AskUserQuestion'),
+        ],
+      };
+      await pump(tester, await repo());
+      await settle(tester);
+      final panel = tester.widget<QuestionAnswerPanel>(find.byKey(const ValueKey('inbox-question-panel')));
+      expect(panel.contextText, 'What I found:\n\n- the cookie expires\n- the token is stale');
+      await done(tester);
+    });
+
+    testWidgets('a card shows the question sentence, its header and "+N more", and opens in place', (tester) async {
+      final long = '${filler(8)} Which store should the session cache use?';
+      rows = {_home.baseUrl: [_row('q', 'Asker', status: 'waiting', waitingFor: 'question', lastActivity: 1)]};
+      questions = {
+        'q': {
+          'toolUseId': 't1',
+          'questions': [
+            {'header': 'Store', 'question': long, 'multiSelect': false, 'options': [{'label': 'Redis'}, {'label': 'SQLite'}]},
+            {'header': 'TTL', 'question': 'How long should entries live?', 'multiSelect': false, 'options': [{'label': '1h'}]},
+          ],
+        },
+      };
+      await pump(tester, await repo(), width: 420, height: 1200);
+      const key = 'http://h:7681|q';
+      final card = find.byKey(const ValueKey('inbox-card-$key'));
+      final snippet = plain(tester, find.byKey(const ValueKey('inbox-snippet-$key')));
+      expect(snippet, contains('Question - Store:'));
+      expect(snippet, contains('Which store should the session cache use?'), reason: 'the sentence that asks');
+      expect(snippet, isNot(contains('Step 0 ')), reason: 'not the head of the text');
+      expect(find.descendant(of: card, matching: find.text('+1 more question')), findsOneWidget);
+
+      await tester.tap(find.byKey(const ValueKey('inbox-expand-$key')));
+      await tester.pumpAndSettle();
+      final whole = plain(tester, find.byKey(const ValueKey('inbox-whole-$key')));
+      expect(whole, contains(long), reason: 'the full question, in place');
+      expect(whole, contains('Question - TTL:'));
+      expect(whole, contains('How long should entries live?'));
+      expect(find.byKey(const ValueKey('inbox-more-$key')), findsNothing, reason: 'none is left out once it is open');
+      expect(find.byKey(const ValueKey('inbox-question-panel')), findsNothing, reason: 'expanding does not open it');
+      await done(tester);
+    });
+
+    testWidgets('prose (c): found from the full reply, and the focused view shows it whole, TL;DR first', (tester) async {
+      final tldr = '${filler(9)} Should I post the draft to the issue?';
+      expect(tldr.indexOf('?'), greaterThan(280), reason: 'past where the recap cut it');
+      rows = {_home.baseUrl: [_row('c', 'Idle', lastActivity: 5)]};
+      transcripts = {
+        'c': [typed('draft it'), say('BODY_PARAGRAPH with the analysis.'), tool('Read', result: 'ok'), say('## TL;DR\n$tldr')],
+      };
+      await pump(tester, await repo());
+      await settle(tester);
+      expect(find.byKey(const ValueKey('inbox-card-http://h:7681|c')), findsOneWidget, reason: 'it asks');
+      final md = tester.widget<MarkdownBody>(
+          find.descendant(of: find.byKey(const ValueKey('inbox-last-reply')), matching: find.byType(MarkdownBody)));
+      expect(md.data, startsWith('## TL;DR\n\n$tldr'));
+      expect(md.data, contains('BODY_PARAGRAPH with the analysis.'));
+      await done(tester);
+    });
+
+    testWidgets('reported (d): the card asks in the agent\'s words, the focused view shows the real reply', (tester) async {
+      rows = {
+        _home.baseUrl: [
+          _row('d', 'Docs', reason: {'kind': 'you', 'text': 'pick a title', 'source': 'reported', 'since': 1}, brief: {
+            'v': 1,
+            'reporting': 'on',
+            'items': [],
+            'did': {'text': 'speech form of the tldr'},
+          }),
+        ],
+      };
+      transcripts = {
+        'd': [typed('write it'), say('${filler(10)}\n\nI drafted it above. Tell me which title to use.\n\n## TL;DR\nDrafted.')],
+      };
+      await pump(tester, await repo());
+      await settle(tester);
+      const key = 'http://h:7681|d';
+      expect(plain(tester, find.byKey(const ValueKey('inbox-snippet-$key'))), contains('Tell me which title to use.'));
+      final md = tester.widget<MarkdownBody>(
+          find.descendant(of: find.byKey(const ValueKey('inbox-last-reply')), matching: find.byType(MarkdownBody)));
+      expect(md.data, startsWith('## TL;DR\n\nDrafted.'));
+      expect(md.data, contains('Step 9 of the analysis'));
+      expect(find.textContaining('speech form', findRichText: true), findsNothing, reason: 'not brief.did');
+      await done(tester);
+    });
+
+    testWidgets('permission (b): the command being approved, from the transcript, and the whole lead-up', (tester) async {
+      const cmd = 'rm -rf build && git clean -fdx';
+      // The server's "now" line names the same tool: with no line, no command is named.
+      rows = {
+        _home.baseUrl: [
+          _row('p', 'Cleanup', status: 'waiting', waitingFor: 'permission', lastActivity: 1, brief: {
+            'v': 1,
+            'reporting': 'on',
+            'items': [],
+            'now': {'text': 'Bash \u00b7 Clean the build', 'at': 1},
+          }),
+        ],
+      };
+      transcripts = {
+        'p': [typed('clean up'), say('The build folder is stale.'), tool('Read', result: 'ok'), say('Removing it now.'), tool('Bash', input: {'command': cmd})],
+      };
+      await pump(tester, await repo());
+      await settle(tester);
+      expect(tester.widget<SelectableText>(find.byKey(const ValueKey('inbox-tool-call'))).data, cmd);
+      final lead = tester.widget<MarkdownBody>(
+          find.descendant(of: find.byKey(const ValueKey('inbox-lead')), matching: find.byType(MarkdownBody)));
+      expect(lead.data, 'The build folder is stale.\n\nRemoving it now.');
+      expect(find.byKey(const ValueKey('inbox-lead-toggle')), findsNothing, reason: 'two short lines fit: nothing to show');
+      expect(find.textContaining('About to clean.', findRichText: true), findsNothing, reason: 'not the attention 200 chars');
+      final card = find.byKey(const ValueKey('inbox-card-http://h:7681|p'));
+      expect(find.descendant(of: card, matching: find.text(cmd)), findsOneWidget);
+      await done(tester);
+    });
+
+    testWidgets('permission (b): a lead-up taller than its clamp offers Show all, and opens in place', (tester) async {
+      rows = {_home.baseUrl: [_row('p', 'Cleanup', status: 'waiting', waitingFor: 'permission', lastActivity: 1)]};
+      transcripts = {
+        'p': [typed('clean up'), say(List.generate(60, (i) => 'Paragraph $i of the plan.').join('\n\n')), tool('Bash', input: {'command': 'ls'})],
+      };
+      await pump(tester, await repo());
+      await settle(tester);
+      final toggle = find.byKey(const ValueKey('inbox-lead-toggle'));
+      expect(toggle, findsOneWidget, reason: 'sixty paragraphs overflow the clamp');
+      final lead = tester.getRect(find.byKey(const ValueKey('inbox-lead')));
+      // report-T finding 5: the clamp is a share of the view, not a fixed 160.
+      expect(lead.height, greaterThan(kLeadClamp * 2), reason: 'a 1000px window gives the lead-up the room it has');
+      // Clamped, it shows the END (next to the tool call); the head is what Show all adds.
+      final last = tester.getRect(find.textContaining('Paragraph 59 of the plan.', findRichText: true));
+      expect(last.bottom, lessThanOrEqualTo(lead.bottom + 0.5));
+      expect(last.top, greaterThanOrEqualTo(lead.top - 0.5));
+      expect(tester.getRect(find.textContaining('Paragraph 0 of the plan.', findRichText: true)).bottom,
+          lessThanOrEqualTo(lead.top + 0.5),
+          reason: 'the head is above the clamp');
+      await tester.tap(toggle);
+      await tester.pumpAndSettle();
+      expect(tester.getSize(find.byKey(const ValueKey('inbox-lead'))).height, greaterThan(kLeadClamp));
+      expect(find.descendant(of: toggle, matching: find.text('Show less')), findsOneWidget);
+      await done(tester);
+    });
+  });
+  group('review findings on the full text (report-T)', () {
+    Map<String, dynamic> say(String text) => {'role': 'assistant', 'text': text, 'toolUses': [], 'ts': 't-$text'.hashCode.toString()};
+    Map<String, dynamic> call(String cmd, {String? result, String name = 'Bash'}) => {
+          'role': 'assistant',
+          'text': '',
+          'toolUses': [
+            {'name': name, 'inputPreview': '', 'id': 'tu-$cmd', 'input': {'command': cmd, 'description': cmd}, 'result': ?result},
+          ],
+        };
+    Map<String, dynamic> typed(String text) =>
+        {'role': 'user', 'text': text, 'typedText': text, 'userKind': 'human', 'toolUses': []};
+    Map<String, dynamic> brief(String now, int at) => {
+          'v': 1,
+          'reporting': 'on',
+          'items': [],
+          'now': {'text': now, 'at': at},
+        };
+    Map<String, dynamic> perm(String id, {required int act, int? nowAt, String now = 'Bash \u00b7 step'}) =>
+        _row(id, 'Perm $id', status: 'waiting', waitingFor: 'permission', lastActivity: act, brief: nowAt == null ? null : brief(now, nowAt));
+    Finder cmd(String c) => find.textContaining(c, findRichText: true);
+    int reads(String suffix) => paths.where((p) => p.endsWith(suffix)).length;
+    String? shown(WidgetTester tester) {
+      final f = find.byKey(const ValueKey('inbox-tool-call'));
+      return f.evaluate().isEmpty ? null : tester.widget<SelectableText>(f).data;
+    }
+
+    testWidgets('F1: parallel calls, or a subagent asking, name NO command; the line above stays', (tester) async {
+      rows = {
+        _home.baseUrl: [
+          perm('a', act: 1),
+          perm('b', act: 2, nowAt: 2, now: 'Subagent: Bash \u00b7 push'),
+          perm('c', act: 3, nowAt: 3),
+        ],
+      };
+      transcripts = {
+        'a': [typed('clean'), say('Two at once.'), call('CMD_PARALLEL_1'), call('CMD_PARALLEL_2')],
+        'b': [typed('review'), call('CMD_SUBAGENT_CALL')],
+        'c': [typed('push'), say('Pushing.'), call('CMD_GOOD')],
+      };
+      await pump(tester, await repo());
+      await settle(tester);
+      expect(cmd('CMD_PARALLEL'), findsNothing, reason: 'which of the two asks is not on disk');
+      expect(cmd('CMD_SUBAGENT_CALL'), findsNothing, reason: 'the server says a subagent is asking');
+      expect(cmd('CMD_GOOD'), findsOneWidget, reason: 'the control: one call, and the server agrees');
+      expect(find.descendant(of: find.byKey(const ValueKey('inbox-card-http://h:7681|b')), matching: cmd('Subagent: Bash')),
+          findsOneWidget,
+          reason: 'what waits is still said');
+      await done(tester);
+    });
+
+    testWidgets("F2: permission B never shows A's command while B's read is out", (tester) async {
+      final r = await repo();
+      rows = {_home.baseUrl: [perm('p', act: 10, nowAt: 10)]};
+      transcripts = {'p': [typed('go'), say('Step one.'), call('CMD_A')]};
+      await pump(tester, r);
+      await settle(tester);
+      expect(shown(tester), 'CMD_A');
+
+      final hold = Completer<void>();
+      transcriptHolds = [hold];
+      rows = {_home.baseUrl: [perm('p', act: 20, nowAt: 20)]};
+      transcripts = {'p': [typed('go'), say('Step one.'), call('CMD_A', result: 'ok'), say('Step two.'), call('CMD_B')]};
+      await tester.runAsync(() => r.refresh());
+      await settle(tester);
+      expect(cmd('CMD_A'), findsNothing, reason: "A's command under B's wait is the wrong one");
+      hold.complete();
+      await settle(tester);
+      expect(shown(tester), 'CMD_B');
+      await done(tester);
+    });
+
+    testWidgets('F2: two reads that land out of order leave the NEWER one', (tester) async {
+      final r = await repo();
+      final holdA = Completer<void>();
+      transcriptHolds = [holdA];
+      rows = {_home.baseUrl: [perm('p', act: 10, nowAt: 10)]};
+      transcripts = {'p': [typed('go'), call('CMD_A')]};
+      await pump(tester, r);
+      await settle(tester);
+
+      rows = {_home.baseUrl: [perm('p', act: 20, nowAt: 20)]};
+      transcripts = {'p': [typed('go'), call('CMD_A', result: 'ok'), call('CMD_B')]};
+      await tester.runAsync(() => r.refresh());
+      await settle(tester);
+      expect(shown(tester), 'CMD_B');
+
+      holdA.complete(); // A's read, asked first, lands last
+      await settle(tester);
+      expect(cmd('CMD_A'), findsNothing);
+      expect(shown(tester), 'CMD_B');
+      await done(tester);
+    });
+
+    testWidgets('U-SF1: with no brief line, an A-then-B swap names NO command; the line above stays', (tester) async {
+      final r = await repo();
+      rows = {_home.baseUrl: [perm('p', act: 10)]};
+      transcripts = {'p': [typed('go'), say('Step one.'), call('CMD_A')]};
+      await pump(tester, r);
+      await settle(tester);
+      expect(shown(tester), isNull, reason: 'no "now" line: the transcript alone cannot say which wait this is');
+      expect(cmd('CMD_A'), findsNothing);
+
+      // A's wait ends; B's begins, read before B's call is on disk: the open call is still A's.
+      rows = {_home.baseUrl: [_row('p', 'Perm p', status: 'working', lastActivity: 15)]};
+      await tester.runAsync(() => r.refresh());
+      await settle(tester);
+      rows = {_home.baseUrl: [perm('p', act: 20)]};
+      await tester.runAsync(() => r.refresh());
+      await settle(tester);
+      expect(reads('/p/transcript'), 2, reason: 'B was read');
+      expect(cmd('CMD_A'), findsNothing, reason: "A's command under B's wait is the wrong one");
+      expect(find.descendant(of: find.byKey(const ValueKey('inbox-card-http://h:7681|p')), matching: cmd('Bash: rm -rf build')),
+          findsOneWidget,
+          reason: 'what waits is still said');
+      await done(tester);
+    });
+
+    testWidgets("U-nit1: a new call in the same wait shows nothing of A's record while B's read is out", (tester) async {
+      // A new PreToolUse (brief.now.at) is a new wait while the row stays a permission,
+      // so its record is replaced in place rather than dropped. No transcript here:
+      // the record's lastMessage is the lead-up.
+      final r = await repo();
+      rows = {_home.baseUrl: [perm('p', act: 10, nowAt: 10)]};
+      attentions = {'p': {'kind': 'approval', 'reason': 'REASON_A', 'lastMessage': 'MSG_A said this.'}};
+      await pump(tester, r);
+      await settle(tester);
+      expect(cmd('MSG_A'), findsOneWidget);
+
+      final hold = Completer<void>();
+      attentionHolds = [hold];
+      attentions = {'p': {'kind': 'approval', 'reason': 'REASON_B', 'lastMessage': 'MSG_B said this.'}};
+      rows = {_home.baseUrl: [perm('p', act: 20, nowAt: 20)]};
+      await tester.runAsync(() => r.refresh());
+      await settle(tester);
+      expect(reads('/p/attention'), 2, reason: 'B is being read');
+      expect(cmd('MSG_A'), findsNothing, reason: "A's words under B's wait");
+      hold.complete();
+      await settle(tester);
+      expect(cmd('MSG_B'), findsOneWidget);
+      await done(tester);
+    });
+
+    testWidgets('U-nit1: a late attention read for A does not land under B', (tester) async {
+      final r = await repo();
+      final holdA = Completer<void>();
+      attentionHolds = [holdA];
+      attentions = {'p': {'kind': 'approval', 'reason': 'REASON_A', 'lastMessage': 'MSG_A said this.'}};
+      rows = {_home.baseUrl: [perm('p', act: 10)]};
+      await pump(tester, r);
+      await settle(tester);
+
+      rows = {_home.baseUrl: [_row('p', 'Perm p', status: 'working', lastActivity: 15)]};
+      await tester.runAsync(() => r.refresh());
+      await settle(tester);
+      attentions = {'p': {'kind': 'approval', 'reason': 'REASON_B', 'lastMessage': 'MSG_B said this.'}};
+      rows = {_home.baseUrl: [perm('p', act: 20)]};
+      await tester.runAsync(() => r.refresh());
+      await settle(tester);
+      expect(cmd('REASON_B'), findsWidgets);
+
+      holdA.complete(); // A's read, asked first, lands last
+      await settle(tester);
+      expect(cmd('REASON_A'), findsNothing);
+      expect(cmd('MSG_A'), findsNothing);
+      expect(cmd('REASON_B'), findsWidgets);
+      await done(tester);
+    });
+
+    testWidgets('U-nit2: a prose ask whose lastActivity moves during EVERY read still appears', (tester) async {
+      final r = await repo();
+      final holds = List.generate(8, (_) => Completer<void>());
+      transcriptHolds = [...holds];
+      Map<String, dynamic> idle(int act) => _row('c', 'Idle', lastActivity: act);
+      transcripts = {'c': [typed('push the fix'), say('Tests pass. Should I push it?')]};
+      rows = {_home.baseUrl: [idle(1)]};
+      await pump(tester, r);
+      await settle(tester);
+      // Each read is still out when the terminal moves on again, and lands only after.
+      for (var i = 0; i < 4; i++) {
+        rows = {_home.baseUrl: [idle(2 + i)]};
+        await tester.runAsync(() => r.refresh());
+        await settle(tester);
+        holds[i].complete();
+        await settle(tester);
+      }
+      expect(find.byKey(const ValueKey('inbox-card-http://h:7681|c')), findsOneWidget,
+          reason: 'a reply read a moment ago is still the reply');
+      // One read at a time per session, and each one that lands re-reads at once for
+      // the newest lastActivity rather than waiting for the next poll: 1 + 4.
+      expect(reads('/c/transcript'), 5);
+      for (final h in holds) {
+        if (!h.isCompleted) h.complete();
+      }
+      await settle(tester);
+      await done(tester);
+    });
+
+    testWidgets('F3: terminal output (a new lastActivity) during the SAME wait re-reads nothing', (tester) async {
+      final r = await repo();
+      rows = {_home.baseUrl: [perm('a', act: 1, nowAt: 5), perm('b', act: 1)]};
+      transcripts = {'a': [typed('go'), call('CMD_A')], 'b': [typed('go'), call('CMD_B')]};
+      await pump(tester, r);
+      await settle(tester);
+      expect([reads('/a/transcript'), reads('/b/transcript')], [1, 1]);
+      expect([reads('/a/attention'), reads('/b/attention')], [1, 1]);
+
+      for (final act in [2, 3, 4]) {
+        // The prompt repaints: the worker bumps lastActivity on every PTY chunk.
+        rows = {_home.baseUrl: [perm('a', act: act, nowAt: 5), perm('b', act: act)]};
+        await tester.runAsync(() => r.refresh());
+        await settle(tester);
+      }
+      expect([reads('/a/transcript'), reads('/b/transcript')], [1, 1], reason: 'one wait, one read');
+      expect([reads('/a/attention'), reads('/b/attention')], [1, 1]);
+      expect(cmd('CMD_A'), findsWidgets, reason: 'and the command stays on screen throughout');
+
+      // A NEW wait is read: a new call (a new PreToolUse), or a wait that ended and came back.
+      rows = {_home.baseUrl: [perm('a', act: 9, nowAt: 9), _row('b', 'Perm b', status: 'working', lastActivity: 9)]};
+      await tester.runAsync(() => r.refresh());
+      await settle(tester);
+      rows = {_home.baseUrl: [perm('a', act: 10, nowAt: 9), perm('b', act: 10)]};
+      await tester.runAsync(() => r.refresh());
+      await settle(tester);
+      expect([reads('/a/transcript'), reads('/b/transcript')], [2, 2]);
+      await done(tester);
+    });
+
+    testWidgets('F4: a /cost after "Should I push it?" keeps the ask in the inbox', (tester) async {
+      rows = {_home.baseUrl: [_row('c', 'Idle', lastActivity: 5)]};
+      transcripts = {
+        'c': [
+          typed('push the fix'),
+          say('Tests pass. Should I push it?'),
+          {'role': 'user', 'text': '<command-name>/cost</command-name>', 'typedText': '/cost', 'userKind': 'command', 'toolUses': []},
+          {'role': 'user', 'text': '<local-command-stdout>Total: 1</local-command-stdout>', 'typedText': '', 'userKind': 'system', 'toolUses': []},
+        ],
+      };
+      await pump(tester, await repo());
+      await settle(tester);
+      expect(find.byKey(const ValueKey('inbox-card-http://h:7681|c')), findsOneWidget);
+      await done(tester);
+    });
+
+    testWidgets('F5: a question in a narrow pane gives its lead-up the room the options leave, opened at the end',
+        (tester) async {
+      rows = {_home.baseUrl: [_row('q', 'Asker', status: 'waiting', waitingFor: 'question', lastActivity: 1)]};
+      questions = {'q': _single('Pick one')};
+      transcripts = {
+        'q': [typed('go'), say(List.generate(40, (i) => 'Lead line $i of the reasoning.').join('\n\n')), call('x', name: 'AskUserQuestion')],
+      };
+      // 1200 wide: the focus pane is under the two-column threshold, the stacked shape.
+      await pump(tester, await repo(), width: 1200, height: 800);
+      await settle(tester);
+      final lastLine = find.textContaining('Lead line 39 ', findRichText: true);
+      final box = tester.getRect(find.ancestor(of: lastLine, matching: find.byType(SingleChildScrollView)).first);
+      // The old budget charged the question its 260px ceiling and the options their
+      // floor: at this size the lead-up got nothing and started collapsed.
+      expect(box.height, greaterThan(300));
+      expect(tester.getRect(inPanel(find.text('B'))).bottom, lessThan(800), reason: 'every option still on screen');
+      final last = tester.getRect(lastLine);
+      expect(last.bottom, lessThanOrEqualTo(box.bottom + 0.5), reason: 'opens at the end, next to the question');
+      expect(last.top, greaterThanOrEqualTo(box.top - 0.5));
+      expect(tester.getRect(find.textContaining('Lead line 0 ', findRichText: true)).bottom, lessThanOrEqualTo(box.top + 0.5),
+          reason: 'the head is a scroll up');
       await done(tester);
     });
   });

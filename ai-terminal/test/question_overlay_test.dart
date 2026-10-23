@@ -885,30 +885,6 @@ void main() {
     });
   });
 
-  group('lastAssistantText (question context)', () {
-    test('returns the most recent non-empty assistant turn', () {
-      final turns = [
-        const TranscriptTurn(role: 'assistant', text: 'old', toolUses: [], ts: null),
-        const TranscriptTurn(role: 'user', text: 'hi', toolUses: [], ts: null),
-        const TranscriptTurn(
-            role: 'assistant', text: 'the full answer', toolUses: [], ts: null),
-        const TranscriptTurn(role: 'user', text: 'ok', toolUses: [], ts: null),
-      ];
-      expect(lastAssistantText(turns), 'the full answer');
-    });
-
-    test('skips empty assistant turns; null when none', () {
-      expect(
-        lastAssistantText(const [
-          TranscriptTurn(role: 'assistant', text: '   ', toolUses: [], ts: null),
-          TranscriptTurn(role: 'user', text: 'x', toolUses: [], ts: null),
-        ]),
-        isNull,
-      );
-      expect(lastAssistantText(const []), isNull);
-    });
-  });
-
   testWidgets('shows Claude\'s preceding message as context when provided',
       (tester) async {
     // A roomy card: since #108 the lead-up starts collapsed when there is no
@@ -1016,14 +992,16 @@ void main() {
       findsOneWidget,
     );
 
-    // Guards the other half of the report: what you see first must be the
-    // BEGINNING of the explanation, never its tail.
-    final position = tester
-        .state<ScrollableState>(
-          find.ancestor(of: ctxText, matching: find.byType(Scrollable)).first,
-        )
-        .position;
-    expect(position.pixels, 0.0);
+    // What you see first is the END of the explanation (#383), the part next
+    // to the question: the lead-up is now the agent's whole turn, and its
+    // head is a scroll up. (This read "the BEGINNING, never its tail" while the
+    // lead-up was one block; the old rule before that showed the last block.)
+    final vp = tester.getRect(viewport.first);
+    final tail = tester.getRect(find.textContaining('TAIL_SO_EVERY_WRITE'));
+    expect(tail.bottom, lessThanOrEqualTo(vp.bottom + 0.5));
+    expect(tail.top, greaterThanOrEqualTo(vp.top - 0.5));
+    // (It fits on this window, so the head shows too; the phone test below
+    // overflows, and there the head is a scroll up.)
   });
 
   testWidgets(
@@ -1962,10 +1940,13 @@ void main() {
           ],
         );
 
-    Future<void> pumpPhone(WidgetTester tester) async {
+    Future<void> pumpPhone(WidgetTester tester,
+        {double height = 915,
+        double width = 412,
+        List<PendingQuestionItem>? questions}) async {
       // A Pixel-class phone in logical pixels. NOT the 800x600 default: the
       // whole defect is a short-card squeeze and a roomy harness hides it.
-      tester.view.physicalSize = const Size(412 * 3, 915 * 3);
+      tester.view.physicalSize = Size(width * 3, height * 3);
       tester.view.devicePixelRatio = 3.0;
       addTearDown(tester.view.reset);
       await tester.pumpWidget(
@@ -1977,7 +1958,7 @@ void main() {
                 QuestionOverlay(
                   question: PendingQuestion(
                     toolUseId: 'm94',
-                    questions: [mobileQuestion()],
+                    questions: questions ?? [mobileQuestion()],
                   ),
                   contextText: _longLeadUp,
                   onSend: (_) {},
@@ -2024,6 +2005,43 @@ void main() {
       expect(visibleOptions(tester), greaterThanOrEqualTo(2));
     });
 
+    testWidgets(
+        'a multi-question prompt on a 360x640 phone keeps two whole option rows (#383)',
+        (tester) async {
+      // The tab strip is laid out inside the question block, and its height was
+      // ALSO charged to that block's cap: 38px off the options of every
+      // multi-question prompt. With this six-line question the options
+      // measured 202px charged twice and 240px charged once; review measured
+      // 180 against 218 on its own prompt - one row and a sliced second there,
+      // #94's shape.
+      final first = mobileQuestion();
+      await pumpPhone(tester, width: 360, height: 640, questions: [
+        PendingQuestionItem(
+          header: first.header,
+          question: 'QMARK Should it change the app, or change the database '
+              'so that the check is permitted?',
+          multiSelect: false,
+          hasPreview: false,
+          options: first.options,
+        ),
+        const PendingQuestionItem(
+          header: 'Then',
+          question: 'And after it?',
+          multiSelect: false,
+          hasPreview: false,
+          options: [
+            QuestionOption(label: 'Ship it'),
+            QuestionOption(label: 'Hold it'),
+          ],
+        ),
+      ]);
+      expect(find.text('Then'), findsOneWidget, reason: 'the tab strip is up');
+      expect(optionViewport(tester).height, greaterThanOrEqualTo(218));
+      // Two WHOLE rows: the second row's description, not just its label.
+      expect(tester.getRect(find.textContaining('Grant the read')).bottom,
+          lessThanOrEqualTo(optionViewport(tester).bottom + 0.5));
+    });
+
     testWidgets('the question is fully readable without scrolling it',
         (tester) async {
       await pumpPhone(tester);
@@ -2042,7 +2060,10 @@ void main() {
       // of scrolling down to reach an option carried it away. You could see
       // what you were choosing between, or what you were choosing FOR, never
       // both at once. It is now pinned outside that view.
-      await pumpPhone(tester);
+      //
+      // A short phone (620): on a full-height one the lead-up yields first since
+      // #383, so all four options fit and there is nothing to scroll.
+      await pumpPhone(tester, height: 620);
       final text = find.textContaining('QMARK');
       final questionBefore = tester.getRect(text);
       final optionBefore = tester.getRect(find.text('Change the app'));
@@ -2065,23 +2086,59 @@ void main() {
       // is the one who knows when they have finished reading it. Without this
       // lever a long explanation and four described options cannot both fit a
       // phone — no split of a fixed card can make them.
+      //
+      // Since #383 the lead-up takes only what the options leave, so on a full
+      // phone it is open AND every option is reachable: nothing to hand back.
       await pumpPhone(tester);
-      final expanded = optionViewport(tester).height;
       expect(find.textContaining('HEAD_'), findsOneWidget);
+      expect(visibleOptions(tester), 4);
+
+      // On a short one the options fill their share and the lead-up starts
+      // collapsed; opened by hand it takes room from them, and collapsing it
+      // hands that room straight back.
+      await pumpPhone(tester, height: 620);
+      expect(find.textContaining('HEAD_'), findsNothing);
+      final collapsedFirst = optionViewport(tester).height;
+      await tester.tap(find.text('Claude said'));
+      await tester.pumpAndSettle();
+      expect(find.textContaining('HEAD_'), findsOneWidget);
+      final expanded = optionViewport(tester).height;
+      expect(expanded, lessThan(collapsedFirst));
 
       await tester.tap(find.text('Claude said'));
       await tester.pumpAndSettle();
 
       expect(find.textContaining('HEAD_'), findsNothing);
       expect(optionViewport(tester).height, greaterThan(expanded));
-      // The point of collapsing is to finish the job, so it must actually get
-      // you there: every option reachable, no scrolling.
-      expect(visibleOptions(tester), 4);
 
       // ...and it is a toggle, not a one-way door — the lead-up comes back.
       await tester.tap(find.text('Claude said'));
       await tester.pumpAndSettle();
       expect(find.textContaining('HEAD_'), findsOneWidget);
+    });
+
+    testWidgets('the lead-up opens at its END, the head a scroll up (#383)',
+        (tester) async {
+      // The lead-up is the agent's whole turn now; the part that leads into
+      // the question is its last paragraphs, so that is what shows first.
+      await pumpPhone(tester);
+      final vp = tester.getRect(find
+          .ancestor(
+              of: find.textContaining('HEAD_'),
+              matching: find.byType(SingleChildScrollView))
+          .first);
+      final tail = tester.getRect(find.textContaining('TAIL_SO_EVERY_WRITE'));
+      expect(tail.bottom, lessThanOrEqualTo(vp.bottom + 0.5));
+      expect(tail.top, greaterThanOrEqualTo(vp.top - 0.5));
+      expect(tester.getRect(find.textContaining('HEAD_')).bottom,
+          lessThanOrEqualTo(vp.top + 0.5),
+          reason: 'it overflows here, so the head starts above the viewport');
+      await tester.drag(
+          find.textContaining('TAIL_SO_EVERY_WRITE'), const Offset(0, 800));
+      await tester.pumpAndSettle();
+      expect(tester.getRect(find.textContaining('HEAD_')).top,
+          greaterThanOrEqualTo(vp.top - 0.5),
+          reason: 'and scrolling up reaches it');
     });
 
     testWidgets('a SHORT question reserves only what it needs', (tester) async {
@@ -2186,6 +2243,12 @@ void main() {
       expect(find.text('Space'), findsNothing);
       expect(find.text('Esc'), findsNothing);
       final hidden = optionViewport(tester).height;
+      Rect lead() => tester.getRect(find
+          .ancestor(
+              of: find.textContaining('HEAD_'),
+              matching: find.byType(SingleChildScrollView))
+          .first);
+      final leadHidden = lead().height;
 
       await tester.tap(find.byTooltip('Show raw keys'));
       await tester.pumpAndSettle();
@@ -2194,9 +2257,15 @@ void main() {
       // it is the only one of that strip's keys that means anything AT a prompt.
       expect(find.text('Esc'), findsOneWidget);
 
-      // Revealing them costs the options room — which is exactly why it is not
-      // the default.
-      expect(optionViewport(tester).height, lessThan(hidden));
+      // Revealing them costs room - which is exactly why it is not the
+      // default. Since #383 it is the LEAD-UP's room, which yields first; the
+      // options keep theirs.
+      expect(
+          find.textContaining('HEAD_').evaluate().isEmpty ||
+              lead().height < leadHidden,
+          isTrue,
+          reason: 'the lead-up shrinks, or collapses to its heading');
+      expect(optionViewport(tester).height, greaterThanOrEqualTo(hidden));
     });
 
     testWidgets('the lead-up toggle is two-way even when it starts collapsed',
