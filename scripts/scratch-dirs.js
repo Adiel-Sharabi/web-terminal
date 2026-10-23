@@ -71,6 +71,12 @@ const DIRS = Object.freeze({
    * in command lines, and these directories are created and deleted per run.
    */
   askq: process.env.WT_ASKQ_DIR || path.join(PARENT, 'askq-runs'),
+  /**
+   * The working directory of the `claude -p` run that writes an inbox digest (#383).
+   * Never a project: the run has every tool off, and a project cwd would still hand
+   * the CLI a CLAUDE.md to read and a repo to be confused by.
+   */
+  digest: process.env.WT_DIGEST_DIR || path.join(PARENT, 'digest-runs'),
 });
 
 /** `C:\dev\x\y` -> `/c/dev/x/y`, the form Git Bash needs. */

@@ -73,6 +73,19 @@ the session list or from the open session itself), and a one-click recap answeri
 drill-in, context-window and rate-limit badges, background-work indicator, and read-aloud
 that filters out the parts nobody wants spoken.
 
+**Inbox digest** — a waiting session's whole turn is often pages long, so the inbox can ask the
+server for a short, model-written briefing of one wait: what the session is about, what exactly
+is being asked, and what you need to know to answer (`GET /api/sessions/:id/digest`, advertised
+as the `inbox-digest` capability). It is context only: the real question and its options stay
+the authority, and nothing it says answers or changes anything. A run happens only when a client
+asks (never on a poll), is cached per wait, and is shared by concurrent askers; at most two run
+at once. It calls your own `claude -p` login with every tool and setting switched off, from a
+scratch folder, and writes in the language of your last prompt. Configure it with an
+`inboxDigest` block in `config.json` — `enabled` (default true), `model` (default `sonnet`) and
+`command` (the CLI, as a path or `[path, ...args]`; default: `claude.exe` on `PATH`, then
+`~/.local/bin`). It is read live and is **not** settable over HTTP, because `command` is
+something the server runs.
+
 **Mobile & PWA** — installable, with a compose bar built for soft keyboards, a touch
 toolbar, long-press menus, and reconnect the instant you return to the app. When a phone
 and a desktop watch the same session, the shared terminal is sized to fit the **smaller**
