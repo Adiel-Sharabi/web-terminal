@@ -142,3 +142,10 @@ test('server.js feeds the brief "did" from the RAW summary and keeps it off /spe
   expect(fn).toContain('briefLib.clipWords(raw');
   expect(src).toContain('res.json({ text, ts, agent });');
 });
+
+test('did from a bold TL;DR label has no stray ** (bold after the colon too)', () => {
+  const did = (text) => rawSummaryFromTurns([{ role: 'assistant', text }]).text;
+  expect(did('Long body.\n\n**TL;DR:** fixed `snake_case_name`')).toBe('fixed `snake_case_name`');
+  expect(did('Long body.\n\n**Summary:** fixed it')).toBe('fixed it');
+  expect(did('**TL;DR**: fixed it')).toBe('fixed it'); // bold closed before the colon still works
+});
