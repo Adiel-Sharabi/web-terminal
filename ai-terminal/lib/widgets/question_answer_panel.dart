@@ -45,6 +45,26 @@ class _SubmitIntent extends Intent {
 bool quickAnswerable(PendingQuestion q) =>
     q.questions.length == 1 && !q.questions.first.multiSelect;
 
+/// The agent's own words as the lead-up panel renders them: markdown on the chat
+/// lens's sheet, each paragraph in its own reading direction (see the comment at
+/// its use in [QuestionAnswerPanel]). Public so a caller building a
+/// [QuestionAnswerPanel.contextBody] shows the same text the same way (#383).
+Widget leadUpMarkdown(ThemeData theme, String text) => directionalBlock(
+      text,
+      (t) => MarkdownBody(
+        data: t,
+        selectable: false,
+        fitContent: true,
+        extensionSet: md.ExtensionSet.gitHubWeb,
+        onTapLink: (_, href, _) => openChatLink(href),
+        styleSheet: markdownStyle(
+          theme,
+          theme.textTheme.bodyMedium?.copyWith(color: theme.colorScheme.onSurface),
+          theme.textTheme.bodySmall,
+        ),
+      ),
+    );
+
 class QuestionAnswerPanel extends StatefulWidget {
   const QuestionAnswerPanel({
     super.key,
@@ -53,6 +73,7 @@ class QuestionAnswerPanel extends StatefulWidget {
     required this.onDismiss,
     this.onKey,
     this.contextText,
+    this.contextBody,
     this.contextLabel = 'Claude said',
     this.drafts,
     this.draftKey = '',
@@ -71,6 +92,12 @@ class QuestionAnswerPanel extends StatefulWidget {
   /// above the question so the full answer is readable before answering. Null
   /// when unavailable.
   final String? contextText;
+
+  /// Shown in the lead-up panel's place of [contextText], when the caller has more
+  /// than one text to put there (#383: the inbox's AI summary, with the agent's own
+  /// words behind a toggle). The panel's size budget, its collapse and its
+  /// open-at-the-end scroll are the same for both. Null shows [contextText].
+  final Widget? contextBody;
 
   /// The heading over [contextText]: "Claude said" for the agent's own words; the
   /// "You asked / Earlier it said" fallback goes under its own heading, because an
@@ -540,7 +567,7 @@ class _QuestionAnswerPanelState extends State<QuestionAnswerPanel> {
             // you must interact with — measured at the real mount on a
             // 412x915 phone, a 206px option viewport showing ONE row
             // with the second sliced through its description.
-            final hasContext =
+            final hasContext = widget.contextBody != null ||
                 (widget.contextText ?? '').trim().isNotEmpty;
             // In the wide shape the lead-up is beside the options, not
             // above them, so it is not part of this subtraction at all.
@@ -647,8 +674,7 @@ class _QuestionAnswerPanelState extends State<QuestionAnswerPanel> {
                                 alignment: Alignment.topCenter,
                                 minHeight: 0,
                                 maxHeight: double.infinity,
-                                child: _contextPanel(theme,
-                                    widget.contextText!.trim(), 0.0, false),
+                                child: _contextPanel(theme, 0.0, false),
                               ),
                             ),
                           );
@@ -660,8 +686,8 @@ class _QuestionAnswerPanelState extends State<QuestionAnswerPanel> {
                         // from the room".
                         final expanded = _ctxExpandedOverride ??
                             (body >= kCtxMinUseful);
-                        return _contextPanel(theme, widget.contextText!.trim(),
-                            expanded ? body : 0.0, expanded);
+                        return _contextPanel(
+                            theme, expanded ? body : 0.0, expanded);
                       }),
                     ),
                   if (!wide)
@@ -681,11 +707,7 @@ class _QuestionAnswerPanelState extends State<QuestionAnswerPanel> {
                               width: kWideCtxColumn,
                               // Always expanded here: it is not borrowing
                               // from anyone, so there is nothing to decide.
-                              child: _contextPanel(
-                                  theme,
-                                  widget.contextText!.trim(),
-                                  ctxColumnH,
-                                  true),
+                              child: _contextPanel(theme, ctxColumnH, true),
                             ),
                           Expanded(child: qa),
                         ],
@@ -730,8 +752,7 @@ class _QuestionAnswerPanelState extends State<QuestionAnswerPanel> {
 
   /// Claude's preceding message, scrollable, so the full answer is readable
   /// before answering (the question alone often carries only the tail).
-  Widget _contextPanel(
-      ThemeData theme, String text, double maxHeight, bool expanded) {
+  Widget _contextPanel(ThemeData theme, double maxHeight, bool expanded) {
     // [maxHeight] bounds the BODY, never the panel. Constraining the whole
     // Container collapsed the HEADER with it: at maxHeight 0 the "Claude said"
     // row became zero-height, so the chevron could not be tapped and the toggle
@@ -815,22 +836,8 @@ class _QuestionAnswerPanelState extends State<QuestionAnswerPanel> {
                   //
                   // Each paragraph reads in its own direction (#383): one block
                   // when they agree, which is the common case and renders as before.
-                  child: directionalBlock(
-                    text,
-                    (t) => MarkdownBody(
-                      data: t,
-                      selectable: false,
-                      fitContent: true,
-                      extensionSet: md.ExtensionSet.gitHubWeb,
-                      onTapLink: (_, href, _) => openChatLink(href),
-                      styleSheet: markdownStyle(
-                        theme,
-                        theme.textTheme.bodyMedium
-                            ?.copyWith(color: theme.colorScheme.onSurface),
-                        theme.textTheme.bodySmall,
-                      ),
-                    ),
-                  ),
+                  child: widget.contextBody ??
+                      leadUpMarkdown(theme, widget.contextText!.trim()),
                 ),
               ),
             ),

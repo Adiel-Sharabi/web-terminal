@@ -2558,3 +2558,83 @@ class BackgroundAgentRow {
     );
   }
 }
+
+/// What a digest answer is (#383): the server's `status`. [missing] answers a `peek`
+/// that found nothing cached; [unknown] is any status this client does not know.
+enum InboxDigestStatus { ready, none, missing, unavailable, failed, unknown }
+
+/// A model-written summary of what a session waits on you for
+/// (`GET /api/sessions/:id/digest`, #383): what it is about, what exactly is being
+/// asked, and what is needed to answer. It is CONTEXT only. The question, its options
+/// and a permission's command come from the session itself and never from here.
+class InboxDigest {
+  const InboxDigest({
+    required this.status,
+    this.reason,
+    this.waitKey,
+    this.about = '',
+    this.asking = const [],
+    this.know = const [],
+    this.model,
+    this.generatedAt,
+  });
+
+  final InboxDigestStatus status;
+
+  /// Why it is `unavailable` or `failed` (`disabled`, `no-cli`, `busy`, `timeout`,
+  /// `error`, `bad-output`); null otherwise.
+  final String? reason;
+
+  /// The server's signature of the wait this summary was written for.
+  final String? waitKey;
+
+  /// One to three sentences: what the session is working on and where it got to.
+  final String about;
+
+  /// One self-contained line per question being asked.
+  final List<String> asking;
+
+  /// The facts needed to decide, as bullets.
+  final List<String> know;
+
+  final String? model;
+
+  /// When it was written, in epoch milliseconds (sent as a number or an ISO string).
+  final int? generatedAt;
+
+  /// A summary there is something to show for. A `ready` answer whose fields all came
+  /// back empty is read as nothing to summarise.
+  bool get isReady => status == InboxDigestStatus.ready && (about.isNotEmpty || asking.isNotEmpty || know.isNotEmpty);
+
+  factory InboxDigest.fromJson(Map<String, dynamic> json) {
+    String text(Object? v) => v is String ? v.trim() : '';
+    List<String> lines(Object? v) => v is List
+        ? [
+            for (final e in v)
+              if (text(e).isNotEmpty) text(e),
+          ]
+        : const [];
+    final status = switch (json['status']) {
+      'ready' => InboxDigestStatus.ready,
+      'none' => InboxDigestStatus.none,
+      'missing' => InboxDigestStatus.missing,
+      'unavailable' => InboxDigestStatus.unavailable,
+      'failed' => InboxDigestStatus.failed,
+      _ => InboxDigestStatus.unknown,
+    };
+    final at = json['generatedAt'];
+    return InboxDigest(
+      status: status,
+      reason: json['reason'] is String ? json['reason'] as String : null,
+      waitKey: json['waitKey'] is String ? json['waitKey'] as String : null,
+      about: text(json['about']),
+      asking: lines(json['asking']),
+      know: lines(json['know']),
+      model: json['model'] is String ? json['model'] as String : null,
+      generatedAt: at is num ? at.toInt() : (at is String ? DateTime.tryParse(at)?.millisecondsSinceEpoch : null),
+    );
+  }
+
+  @override
+  String toString() => 'InboxDigest(${status.name}${reason == null ? '' : '/$reason'}, ${asking.length} asking)';
+}
