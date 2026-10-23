@@ -34,11 +34,13 @@ test('a 1221-char question survives whole', () => {
 });
 
 test('a question over the cap is cut at a word with an ellipsis', () => {
-  const q = 'word '.repeat(2000);
+  // 11-char period: a naive slice at PQ_QUESTION_CAP-1 lands 6 letters into a word.
+  const q = 'abcdefghij '.repeat(500);
+  expect(q.slice(0, PQ_QUESTION_CAP - 1).endsWith('abcdef')).toBe(true); // fixture check
   const shaped = shapeQuestions({ questions: [{ header: 'H', question: q, options: [{ label: 'A' }] }] });
   const out = shaped[0].question;
   expect(out.length).toBeLessThanOrEqual(PQ_QUESTION_CAP);
-  expect(out.endsWith('word…')).toBe(true);
+  expect(out.endsWith('abcdefghij…')).toBe(true);
 });
 
 test('hasPreview still comes from the RAW options, and descriptions keep the 800 cap', () => {
@@ -49,14 +51,19 @@ test('hasPreview still comes from the RAW options, and descriptions keep the 800
 });
 
 test('background waitingFor is cut at a word with an ellipsis', () => {
-  const text = 'needs approval to run the migration script on the staging database '.repeat(10).trim();
+  // 11-char period: a naive cut at 400 lands mid-word.
+  const text = 'abcdefghij '.repeat(60).trim();
+  expect(text.slice(0, 399).endsWith('abc')).toBe(true); // fixture check
   const rows = parseBackgroundListing(JSON.stringify([
     { kind: 'background', id: 'deadbeef', state: 'blocked', status: 'waiting', waitingFor: text }]));
   const w = rows[0].waitingFor;
   expect(w.length).toBeLessThanOrEqual(400);
   expect(w.endsWith('…')).toBe(true);
-  expect(text.startsWith(w.slice(0, -1))).toBe(true);
-  expect(text[w.length - 1]).toBe(' ');
+  expect(w.endsWith('abcdefghij…')).toBe(true);
+  // 300 chars is a real sentence length and must come back whole (fails at the old 200).
+  const mid = 'abcdefghi '.repeat(30).trim();
+  const kept = parseBackgroundListing(JSON.stringify([{ kind: 'background', id: 'deadbeef', waitingFor: mid }]));
+  expect(kept[0].waitingFor).toBe(mid);
   const short = parseBackgroundListing(JSON.stringify([{ kind: 'background', id: 'deadbeef', waitingFor: 'dialog open' }]));
   expect(short[0].waitingFor).toBe('dialog open');
 });
@@ -89,9 +96,43 @@ test('raw did: without a TL;DR, fenced code is dropped, tool-only turns skipped,
     { role: 'assistant', text: '', ts: 'b' },
   ];
   expect(rawSummaryFromTurns(turns).text).toBe('Here is the plan for my_module. Then run it.');
-  const did = B.clipWords('word '.repeat(300), B.LIMITS.did);
+  const did = B.clipWords('abcdefghij '.repeat(100), B.LIMITS.did);
   expect(did.length).toBeLessThanOrEqual(B.LIMITS.did);
-  expect(did.endsWith('word…')).toBe(true);
+  expect(did.endsWith('abcdefghij…')).toBe(true);
+});
+
+test('a ~500-char did with a TL;DR comes back whole (fails at the old 280 cap)', () => {
+  const tldr = 'Fixed the_thing in foo-bar. ' + 'abcdefghi '.repeat(46).trim();
+  expect(tldr.length).toBeGreaterThan(480);
+  const turns = [{ role: 'assistant', text: 'Long body.\n\n## TL;DR\n' + tldr, ts: 't' }];
+  const did = B.clipWords(rawSummaryFromTurns(turns).text, B.LIMITS.did);
+  expect(did).toBe(tldr);
+});
+
+test.describe('did is ONE plain line, stripped at block level', () => {
+  const noBlockMarkup = (t) => {
+    expect(t).not.toMatch(/^#/);
+    expect(t).not.toContain('|');
+    expect(t).not.toContain('```');
+    expect(t).not.toContain('~~~');
+    expect(t).not.toContain('\n');
+  };
+  const did = (text) => rawSummaryFromTurns([{ role: 'assistant', text }]).text;
+  test('headings, bullets and a table', () => {
+    const t = did('## Findings\n\n- a\n- b\n\n| a | b |\n|---|---|\n| 1 | 2 |');
+    noBlockMarkup(t);
+    expect(t).toBe('Findings a b');
+  });
+  test('bullets with bold, identifiers survive', () => {
+    const t = did('- merged the fix\n- please pick **A** for `snake_case_name`');
+    noBlockMarkup(t);
+    expect(t).toBe('merged the fix please pick **A** for `snake_case_name`');
+  });
+  test('a ~~~ fence, an hr and numbered items', () => {
+    const t = did('1. first\n---\n~~~\ncode | x\n~~~\n2) second');
+    noBlockMarkup(t);
+    expect(t).toBe('first second');
+  });
 });
 
 test('server.js feeds the brief "did" from the RAW summary and keeps it off /speech (source gate)', () => {

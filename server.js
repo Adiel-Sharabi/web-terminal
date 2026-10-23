@@ -6297,10 +6297,12 @@ app.get('/api/sessions/:id/transcript', async (req, res) => {
 // Only a small tail is scanned — one prose turn is all that can be spoken, and a
 // deep page would be read and then thrown away.
 const SPEECH_SCAN_TURNS = 12; // enough to step back over a run of tool-only turns
-// The agent's latest WORD on a transcript (lib/speech.js) - its TL;DR when it wrote one.
-// Shared by GET /speech and the sessions dashboard's "did" line (#298), so the two can
-// never disagree about what the agent last said. Returns { text, ts, agent }; throws on
-// an unreadable file.
+// The agent's latest WORD on a transcript (lib/speech.js). Returns { text, ts, agent, raw }:
+// `text` is the read-aloud form GET /speech serves; `raw` is the same turns' newest summary
+// in written form (identifiers intact) for the sessions dashboard's "did" line (#298/#383).
+// They share the turn WINDOW and the TL;DR preference but each skips turns that reduce to
+// nothing by its OWN rules, so they can pick different turns (e.g. a turn of only a bare
+// URL has a raw form and no spoken one). Throws on an unreadable file.
 function speechFromTranscriptPath(tpath) {
   let fd;
   try {
