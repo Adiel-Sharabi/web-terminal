@@ -218,21 +218,29 @@ class _QuestionsInboxScreenState extends State<QuestionsInboxScreen> {
   /// for that wait, kept for the life of the screen.
   final Map<String, InboxDigest> _digests = {};
 
-  /// The newest summary that landed for each session's REPLY stamp: shown under a
-  /// newer one until that one lands, by the turn's own progress rule ([_turnFor]).
-  /// Only for as long as the session stays on a reply ([_pruneDigests]).
-  final Map<String, ({String stamp, InboxDigest digest})> _digestLatest = {};
+  /// For a REPLY's summary, by the same key: the words of the reply it was asked for
+  /// ([_replyWords]). A reply's stamp follows lastActivity, which says nothing about
+  /// whether the reply is still the same one, so the words are what tie it.
+  final Map<String, int> _digestWords = {};
+
+  /// The newest summary that landed for each session's REPLY stamp, with the words it
+  /// was asked for: shown under a newer stamp until that one lands, by the turn's own
+  /// progress rule ([_turnFor]), but only while the reply on screen is still those
+  /// words. Only for as long as the session stays on a reply ([_pruneDigests]).
+  final Map<String, ({String stamp, InboxDigest digest, int words})> _digestLatest = {};
 
   /// The reply stamp each session's newest reply summary was asked for, dropped when
   /// the session leaves the reply: a summary that lands after that is not its latest
   /// ([_turnWant]'s rule, for the summary).
   final Map<String, String> _digestReplyWant = {};
 
-  /// Sessions whose reply summary landed less than [kDigestReplyReaskAfter] ago.
-  final Set<String> _digestCooling = {};
+  /// Sessions whose reply summary landed less than [kDigestReplyReaskAfter] ago, each
+  /// with the timer that ends it.
+  final Map<String, Timer> _digestCooling = {};
 
-  /// Sessions whose summary the SERVER answered as failed less than
-  /// [kDigestFailureMemory] ago, each with the timer that ends it.
+  /// Summaries, by `[sessionKey]|stamp`, that the SERVER answered as failed less than
+  /// [kDigestFailureMemory] ago, each with the timer that ends it. By wait, not by
+  /// session: one wait's failure says nothing about the next one's.
   final Map<String, Timer> _digestFailedAt = {};
 
   /// The timers above and the re-asks, cancelled with the screen.
@@ -628,6 +636,32 @@ class _QuestionsInboxScreenState extends State<QuestionsInboxScreen> {
     hold?.call(t);
   }
 
+  /// How many summary timers are held: one cancelled must not be held until dispose.
+  @visibleForTesting
+  int get digestTimerCount => _digestTimers.length;
+
+  /// Cancels a timer [_after] started, and lets go of it.
+  void _cancelTimer(Timer? t) {
+    if (t == null) return;
+    t.cancel();
+    _digestTimers.remove(t);
+  }
+
+  /// The words of [s]'s reply as the focused view shows them ([AgentTurn.leadUp]: the
+  /// reply, or what led up to it), as a hash: what a reply's summary is tied to.
+  int _replyWords(Session s) => (_turnFor(s)?.leadUp ?? '').hashCode;
+
+  /// Something was sent to [s] from here: the reply it was on is answered, so its
+  /// summary is no longer the latest, and the next reply is summarised as soon as it
+  /// shows. That reply can come back before a poll ever sees the session work.
+  void _sentTo(Session s) {
+    final k = sessionKey(s);
+    _digestLatest.remove(k);
+    _digestReplyWant.remove(k);
+    _cancelTimer(_digestCooling.remove(k));
+    _changed();
+  }
+
   /// Keeps only the summaries of the wait each listed session is in NOW: one answered,
   /// or one it has moved on from, takes its own with it, so the same wait coming back
   /// is summarised anew and the map does not grow with every lastActivity. And a
@@ -644,6 +678,7 @@ class _QuestionsInboxScreenState extends State<QuestionsInboxScreen> {
       if (_isReplyStamp(stamp)) onReply.add(k);
     }
     _digests.removeWhere((key, _) => !current.contains(key));
+    _digestWords.removeWhere((key, _) => !current.contains(key));
     _digestLatest.removeWhere((k, _) => !onReply.contains(k));
     _digestReplyWant.removeWhere((k, _) => !onReply.contains(k));
   }
@@ -666,7 +701,11 @@ class _QuestionsInboxScreenState extends State<QuestionsInboxScreen> {
       final k = sessionKey(s);
       final key = '$k|$stamp';
       final focused = it.key == _focusKey;
-      if (_digests.containsKey(key) || _digestsInFlight.contains(key)) continue;
+      final reply = _isReplyStamp(stamp);
+      if (_digestsInFlight.contains(key)) continue;
+      // A reply's summary is kept only while the reply on screen is the one it was
+      // asked for: new words under the same stamp are asked for again.
+      if (_digests.containsKey(key) && (!reply || _digestWords[key] == _replyWords(s))) continue;
       final at = _digestQueue.indexWhere((q) => sessionKey(q.$1) == k && q.$2 == stamp);
       if (at >= 0) {
         // Already waiting for a slot: the focused item goes to the front of the queue.
@@ -676,13 +715,17 @@ class _QuestionsInboxScreenState extends State<QuestionsInboxScreen> {
         }
         continue;
       }
-      if (_isReplyStamp(stamp)) {
+      if (reply) {
         // A reply is summarised one at a time per session, like its read: the one out
         // asks again when it lands if lastActivity moved meanwhile ([_loadDigest]).
         if (_digestsInFlight.any((f) => f.startsWith('$k|'))) continue;
+        // Nor while its words are being read: they are what the summary is tied to
+        // ([_replyWords]), and the read that lands asks again ([_refreshTurns]).
+        if (_turnReading(k)) continue;
         // And not again within [kDigestReplyReaskAfter] of the last one, while that
-        // one is still shown: a timer asks once the time is up.
-        if (_digestCooling.contains(k) && _digestLatest.containsKey(k)) continue;
+        // one is still shown: a timer asks once the time is up. A reply whose words
+        // changed is not that one, and is asked for at once.
+        if (_digestCooling.containsKey(k) && _digestLatest[k]?.words == _replyWords(s)) continue;
       }
       if (focused) {
         _digestQueue.insert(0, (s, stamp));
@@ -701,6 +744,7 @@ class _QuestionsInboxScreenState extends State<QuestionsInboxScreen> {
       final (queued, stamp) = _digestQueue.removeAt(0);
       final s = _sessionAt(sessionKey(queued));
       if (s == null || _digestStamp(s) != stamp || !_digestReachable(s)) continue;
+      if (_isReplyStamp(stamp) && _turnReading(sessionKey(s))) continue;
       unawaited(_loadDigest(s, stamp));
     }
   }
@@ -714,6 +758,8 @@ class _QuestionsInboxScreenState extends State<QuestionsInboxScreen> {
     _digestsInFlight.add(key);
     final reply = _isReplyStamp(stamp);
     if (reply) _digestReplyWant[k] = stamp;
+    // The reply on screen as it is asked for: the server reads at least that much.
+    final words = _replyWords(s);
     InboxDigest d;
     var answered = false;
     try {
@@ -731,37 +777,49 @@ class _QuestionsInboxScreenState extends State<QuestionsInboxScreen> {
     if (_disposed) return;
     _digests[key] = d;
     if (reply) {
+      _digestWords[key] = words;
       // The session's latest only while it is still on the reply this was asked for:
       // one that has left it since must not get an older reply's words back.
-      if (_digestReplyWant[k] == stamp) _digestLatest[k] = (stamp: stamp, digest: d);
-      _digestCooling.add(k);
+      if (_digestReplyWant[k] == stamp) _digestLatest[k] = (stamp: stamp, digest: d, words: words);
+      _cancelTimer(_digestCooling.remove(k));
       _after(kDigestReplyReaskAfter, () {
         _digestCooling.remove(k);
         _refreshDigests();
-      });
+      }, hold: (t) => _digestCooling[k] = t);
     }
     if (answered && d.status == InboxDigestStatus.failed) {
       // The server remembers it, and would answer a retry with the same failure.
-      _digestFailedAt.remove(k)?.cancel();
-      _after(kDigestFailureMemory, () => _update(() => _digestFailedAt.remove(k)), hold: (t) => _digestFailedAt[k] = t);
+      _cancelTimer(_digestFailedAt.remove(key));
+      _after(kDigestFailureMemory, () => _update(() => _digestFailedAt.remove(key)),
+          hold: (t) => _digestFailedAt[key] = t);
     }
     _changed();
     _pumpDigests();
   }
 
   /// [s]'s summary for the wait it is in now, else null: the one for its exact stamp,
-  /// or for a reply the newest reply summary that landed.
-  InboxDigest? _digestFor(Session s) {
+  /// or for a reply the newest reply summary that landed. A reply's, either way, only
+  /// while the reply on screen is still the words it was asked for ([_replyWords]):
+  /// an answer typed in the terminal brings a new reply with no working in between,
+  /// and the last reply's summary over it would fold the new words away.
+  InboxDigest? _digestFor(Session s) => _shownDigest(s)?.digest;
+
+  /// [_digestFor], with the `[sessionKey]|stamp` the summary was asked for.
+  ({String key, InboxDigest digest})? _shownDigest(Session s) {
     final stamp = _digestStamp(s);
     if (stamp == null) return null;
     final k = sessionKey(s);
-    final exact = _digests['$k|$stamp'];
-    if (exact != null) return exact;
+    final key = '$k|$stamp';
+    final exact = _digests[key];
     // A question or a permission is STRICT: an older wait's summary, landed late or
     // not, is never shown under this one - one approval's words under the next is
     // worse than "Summarising...".
-    if (!_isReplyStamp(stamp)) return null;
-    return _digestLatest[k]?.digest;
+    if (!_isReplyStamp(stamp)) return exact == null ? null : (key: key, digest: exact);
+    final words = _replyWords(s);
+    if (exact != null && _digestWords[key] == words) return (key: key, digest: exact);
+    final latest = _digestLatest[k];
+    if (latest == null || latest.words != words) return null;
+    return (key: '$k|${latest.stamp}', digest: latest.digest);
   }
 
   /// What [it]'s focused view does with its summary ([DigestView]).
@@ -782,7 +840,11 @@ class _QuestionsInboxScreenState extends State<QuestionsInboxScreen> {
 
   /// Whether a retry of [s]'s failed summary would be answered from the server's
   /// memory of the failure ([kDigestFailureMemory]), so none is offered yet.
-  bool _digestRetryWaits(Session s) => _digestFailedAt.containsKey(sessionKey(s));
+  /// The failure is the shown summary's own: another wait's says nothing about it.
+  bool _digestRetryWaits(Session s) {
+    final shown = _shownDigest(s);
+    return shown != null && _digestFailedAt.containsKey(shown.key);
+  }
 
   /// Forgets [s]'s failed summary for the wait it is in, and asks again.
   void _retryDigest(Session s) {
@@ -791,7 +853,7 @@ class _QuestionsInboxScreenState extends State<QuestionsInboxScreen> {
     final k = sessionKey(s);
     _digests.remove('$k|$stamp');
     if (_digestLatest[k]?.digest.isReady == false) _digestLatest.remove(k);
-    _digestCooling.remove(k);
+    _cancelTimer(_digestCooling.remove(k));
     _changed();
   }
 
@@ -941,6 +1003,7 @@ class _QuestionsInboxScreenState extends State<QuestionsInboxScreen> {
     final s = it.session!;
     await _needs.answer(s, q, frames, onSettled: (landed) {
       if (!landed || _disposed) return;
+      _sentTo(s);
       _say('Answered "${s.name}"');
       if (_focusKey == it.key) _moveOn(it.key);
     });
@@ -949,24 +1012,39 @@ class _QuestionsInboxScreenState extends State<QuestionsInboxScreen> {
   Future<void> _quickAnswer(InboxItem it, PendingQuestion q, int index) async {
     final s = it.session!;
     await _needs.quickAnswer(s, q, index, onSettled: (landed) {
-      if (landed && !_disposed) _say('Answered "${s.name}"');
+      if (!landed || _disposed) return;
+      _sentTo(s);
+      _say('Answered "${s.name}"');
     });
   }
 
   /// A reply to an agent that asked in prose (c): only while it is still idle on the
   /// SAME reply, re-read first ([NeedsYouActions.reply]).
-  Future<bool> _replyProse(Session s, String text) => _needs.reply(s, text,
-      still: (fresh) => fresh.status == 'idle' && fresh.lastActivity == s.lastActivity,
-      movedOn: '"${s.name}" has moved on since - nothing was sent');
+  Future<bool> _replyProse(Session s, String text) => _replied(
+      s,
+      _needs.reply(s, text,
+          still: (fresh) => fresh.status == 'idle' && fresh.lastActivity == s.lastActivity,
+          movedOn: '"${s.name}" has moved on since - nothing was sent'));
 
   /// A reply to an agent that reported it waits on you (d): only while it still does,
   /// and never into a selector that has come up since ([replyStillWanted]).
-  Future<bool> _replyReported(Session s, String text) => _needs.reply(s, text,
-      still: replyStillWanted, movedOn: '"${s.name}" is no longer waiting on you - nothing was sent');
+  Future<bool> _replyReported(Session s, String text) => _replied(
+      s,
+      _needs.reply(s, text,
+          still: replyStillWanted, movedOn: '"${s.name}" is no longer waiting on you - nothing was sent'));
+
+  /// [sent], noting a reply that went out ([_sentTo]).
+  Future<bool> _replied(Session s, Future<bool> sent) async {
+    final ok = await sent;
+    if (ok && !_disposed) _sentTo(s);
+    return ok;
+  }
 
   /// Esc to close a panel over the composer (e): only while one still covers it.
-  Future<void> _esc(Session s) => _needs.esc(s,
-      still: escStillCloses, movedOn: '"${s.name}" no longer shows a menu - Esc was not sent');
+  Future<void> _esc(Session s) async {
+    await _needs.esc(s, still: escStillCloses, movedOn: '"${s.name}" no longer shows a menu - Esc was not sent');
+    if (!_disposed) _sentTo(s);
+  }
 
   Future<void> _notWaiting(Session s) async {
     try {

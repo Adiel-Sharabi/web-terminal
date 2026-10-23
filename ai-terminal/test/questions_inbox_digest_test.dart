@@ -32,7 +32,7 @@ http.Response _json(Object body, [int status = 200]) => http.Response.bytes(utf8
     headers: {'content-type': 'application/json; charset=utf-8'});
 
 Map<String, dynamic> _row(String id, String name,
-        {String status = 'idle', String? waitingFor, int? lastActivity, Object? brief}) =>
+        {String status = 'idle', String? waitingFor, Object? reason, int? lastActivity, Object? brief}) =>
     {
       'id': id,
       'name': name,
@@ -41,6 +41,7 @@ Map<String, dynamic> _row(String id, String name,
       'notifyLevel': 'important',
       'agent': 'claude',
       'waitingFor': waitingFor,
+      'reason': reason,
       'lastActivity': lastActivity,
       'brief': brief,
     };
@@ -155,6 +156,8 @@ void main() {
   late int holdAt; // how many of [digestHolds] have been taken
   late List<String> digestCalls; // session ids, in order
   late Set<String> down; // base URLs that answer nothing; their digest call never returns
+  late Map<String, Completer<void>> transcriptHolds; // per session: holds its transcript reads
+  late List<String> sent; // session ids written to, in order
 
   ApiClient client(ServerConfig s) => ApiClient(s, httpClient: MockClient((req) async {
         final p = req.url.path;
@@ -175,6 +178,7 @@ void main() {
           return _json(q == null ? {'pending': false} : {'pending': true, 'question': q});
         }
         if (p.endsWith('/transcript')) {
+          await transcriptHolds[id]?.future;
           final t = transcripts[id];
           return t == null ? http.Response('', 404) : _json({'messages': t, 'cursor': null, 'hasMore': false});
         }
@@ -218,6 +222,8 @@ void main() {
     holdAt = 0;
     digestCalls = [];
     down = {};
+    transcriptHolds = {};
+    sent = [];
   });
   tearDown(SessionSelection.instance.reset);
 
@@ -241,7 +247,10 @@ void main() {
         repository: r,
         servers: () => servers,
         clientFactory: client,
-        sessionInput: (s, body) async => true,
+        sessionInput: (s, body) async {
+          sent.add(s.id);
+          return true;
+        },
         pollInterval: every,
         focusInterval: every,
         agentsInterval: every,
@@ -253,7 +262,7 @@ void main() {
   }
 
   Future<void> done(WidgetTester tester) async {
-    for (final h in digestHolds) {
+    for (final h in [...digestHolds, ...transcriptHolds.values]) {
       if (!h.isCompleted) h.complete();
     }
     await settle(tester);
@@ -969,6 +978,112 @@ void main() {
       expect(command.bottom, lessThanOrEqualTo(open.top), reason: 'and not under them');
       expect(tester.getRect(find.byKey(const ValueKey('inbox-digest'))).top, greaterThanOrEqualTo(command.bottom),
           reason: 'the summary comes after the command');
+      await done(tester);
+    });
+  });
+
+  group('a reply\'s summary is tied to its words (report Z)', () {
+    const wait = {'kind': 'you', 'text': 'keep the old API?', 'source': 'reported', 'since': 1};
+    final reporting = {
+      'v': 1,
+      'reporting': 'on',
+      'items': [],
+      'did': {'text': 'Asks'},
+    };
+    Map<String, dynamic> reported(int act) => _row('d', 'Docs', reason: wait, lastActivity: act, brief: reporting);
+    int timers(WidgetTester tester) =>
+        (tester.state(find.byType(QuestionsInboxScreen)) as dynamic).digestTimerCount as int;
+
+    testWidgets('answered from the inbox, a new reply before the next poll: the old summary is not shown over it',
+        (tester) async {
+      final r = await repo();
+      rows = {_home.baseUrl: [reported(1)]};
+      transcripts = {'d': [_typed('tidy up'), _say('Done. Keep the old API? REPLY_A')]};
+      digestAnswers = {
+        'd': [
+          (200, _ready(asking: ['ASK_A'])),
+          (200, _ready(asking: ['ASK_B'])),
+        ],
+      };
+      await pump(tester, r);
+      await settle(tester);
+      expect(text('ASK_A'), findsWidgets, reason: 'precondition: the first reply is summarised');
+      final reply = find.byKey(const ValueKey('inbox-focus-reply'));
+      await tester.enterText(find.descendant(of: reply, matching: find.byType(TextField)), 'no');
+      await tester.tap(find.descendant(of: reply, matching: find.text('Send')));
+      await settle(tester);
+      expect(sent, ['d'], reason: 'precondition: the reply went out');
+      // The agent answers within seconds: the next poll sees it idle on a new ask, and
+      // nothing of it working. Its new words are still being read.
+      rows = {_home.baseUrl: [reported(2)]};
+      transcripts = {'d': [_typed('no'), _say('Removed it. Bump the version? REPLY_B')]};
+      final read = transcriptHolds['d'] = Completer<void>();
+      await tester.runAsync(() => r.refresh());
+      await settle(tester);
+      expect(text('ASK_A'), findsNothing, reason: 'the reply it summarised was answered from here');
+      expect(find.byKey(const ValueKey('inbox-digest-loading')), findsOneWidget);
+      read.complete();
+      await settle(tester);
+      expect(digestCalls, ['d', 'd'], reason: 'asked for at once, not after the re-ask time');
+      expect(text('ASK_B'), findsWidgets);
+      await done(tester);
+    });
+
+    testWidgets('answered in the terminal, the new reply with no working between: asked for at once', (tester) async {
+      final r = await repo();
+      rows = {_home.baseUrl: [reported(1)]};
+      transcripts = {'d': [_typed('tidy up'), _say('Done. Keep the old API? REPLY_A')]};
+      digestHolds = [Completer<void>()..complete(), Completer<void>()];
+      digestAnswers = {
+        'd': [
+          (200, _ready(asking: ['ASK_A'])),
+          (200, _ready(asking: ['ASK_B'])),
+        ],
+      };
+      await pump(tester, r);
+      await settle(tester);
+      expect(text('ASK_A'), findsWidgets, reason: 'precondition: the first reply is summarised');
+      // Typed in the terminal: the inbox never sees it, only the next poll's new reply.
+      rows = {_home.baseUrl: [reported(2)]};
+      transcripts = {'d': [_typed('no'), _say('Removed it. Bump the version? REPLY_B')]};
+      await tester.runAsync(() => r.refresh());
+      await settle(tester);
+      expect(text('ASK_A'), findsNothing, reason: 'it summarises words no longer on screen');
+      expect(find.byKey(const ValueKey('inbox-digest-loading')), findsOneWidget);
+      expect(text('REPLY_B'), findsWidgets, reason: 'the teaser is the new reply');
+      expect(digestCalls, ['d', 'd'], reason: 'asked for at once, not after the re-ask time');
+      digestHolds[1].complete();
+      await settle(tester);
+      expect(text('ASK_B'), findsWidgets);
+      // Every timer has fired or was cancelled; none is held until dispose.
+      await tester.pump(kDigestFailureMemory);
+      await settle(tester);
+      expect(digestCalls, ['d', 'd'], reason: 'the same words are not asked for again');
+      expect(timers(tester), 0);
+      await done(tester);
+    });
+
+    testWidgets('one wait\'s failure does not hold back the retry of the next', (tester) async {
+      final r = await repo();
+      oneQuestion();
+      digestAnswers = {
+        'q': [
+          (502, {'status': 'failed', 'reason': 'timeout'}),
+          (503, {'status': 'unavailable', 'reason': 'busy'}),
+        ],
+      };
+      await pump(tester, r);
+      await settle(tester);
+      expect(find.byKey(const ValueKey('inbox-digest-retry-wait')), findsOneWidget, reason: 'precondition');
+      // A new call asks the same words: a new wait, refused by a busy server.
+      questions = {'q': _single('Pick one', id: 't2')};
+      await tester.runAsync(() => Future<void>.delayed(const Duration(milliseconds: 4300)));
+      await tester.runAsync(() => r.refresh());
+      await settle(tester);
+      expect(digestCalls, ['q', 'q']);
+      expect(find.byKey(const ValueKey('inbox-digest-retry')), findsOneWidget,
+          reason: 'the server holds no failure for this wait');
+      expect(find.byKey(const ValueKey('inbox-digest-retry-wait')), findsNothing);
       await done(tester);
     });
   });
