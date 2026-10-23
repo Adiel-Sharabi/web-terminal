@@ -89,6 +89,22 @@ void main() {
       expect(askingInProse('Done. Nobody needs to tell me anything.'), isFalse);
     });
 
+    test('a statement that merely STARTS like a request is not an ask (report-T)', () {
+      // Both found in real replies: a review's finding, and a note about a guess.
+      expect(askingInProse('Traced the retry path.\n\nWhich of the two places fired the second write is still a guess.'),
+          isFalse);
+      expect(
+          askingInProse('Review done.\n\n{"severity": "should-fix", "finding": "The retry is not idempotent. '
+              'Confirm with the author that the second write is safe to repeat, and add a test for it '
+              'before this merges, since the replay path runs on every reconnect and nothing in the '
+              'suite exercises it today."}'),
+          isFalse);
+      // The asks beside them still count.
+      expect(askingInProse('Which of the two should I keep.'), isTrue);
+      expect(askingInProse('Which one do you want.'), isTrue);
+      expect(askingInProse('Please confirm the target branch.'), isTrue);
+    });
+
     test('an ask above the final paragraph, followed by a report, is not one', () {
       expect(askingInProse('Should I push it?\n\nPushed it anyway; CI is green.\n\n## TL;DR\nPushed; CI green.'), isFalse);
     });

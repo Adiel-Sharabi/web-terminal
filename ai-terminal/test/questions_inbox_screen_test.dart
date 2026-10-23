@@ -116,6 +116,7 @@ void main() {
   late int failPolls; // pending-question polls still to fail with a 500
   late bool failPollAfterKeys; // the first key sent arms one failing poll
   Completer<void>? sessionsGate; // holds the NEXT /api/sessions until completed
+  late List<Completer<void>> transcriptHolds; // each holds the next transcript read, in order
 
   Future<bool> fakeInput(Session s, Future<void> Function(void Function(String keys) send) body) async {
     await body((keys) {
@@ -144,7 +145,8 @@ void main() {
           return _json(q == null ? {'pending': false} : {'pending': true, 'question': q});
         }
         if (p.endsWith('/transcript')) {
-          final t = transcripts[id];
+          final t = transcripts[id]; // what the transcript held when it was asked
+          if (transcriptHolds.isNotEmpty) await transcriptHolds.removeAt(0).future;
           return t == null
               ? http.Response('', 404)
               : http.Response(jsonEncode({'messages': t, 'cursor': null, 'hasMore': false}), 200);
@@ -209,6 +211,7 @@ void main() {
     failPolls = 0;
     failPollAfterKeys = false;
     sessionsGate = null;
+    transcriptHolds = [];
   });
   tearDown(SessionSelection.instance.reset);
 
@@ -969,17 +972,189 @@ void main() {
     testWidgets('permission (b): a lead-up taller than its clamp offers Show all, and opens in place', (tester) async {
       rows = {_home.baseUrl: [_row('p', 'Cleanup', status: 'waiting', waitingFor: 'permission', lastActivity: 1)]};
       transcripts = {
-        'p': [typed('clean up'), say(List.generate(12, (i) => 'Paragraph $i of the plan.').join('\n\n')), tool('Bash', input: {'command': 'ls'})],
+        'p': [typed('clean up'), say(List.generate(60, (i) => 'Paragraph $i of the plan.').join('\n\n')), tool('Bash', input: {'command': 'ls'})],
       };
       await pump(tester, await repo());
       await settle(tester);
       final toggle = find.byKey(const ValueKey('inbox-lead-toggle'));
-      expect(toggle, findsOneWidget, reason: 'twelve paragraphs overflow the clamp');
-      expect(tester.getSize(find.byKey(const ValueKey('inbox-lead'))).height, kLeadClamp);
+      expect(toggle, findsOneWidget, reason: 'sixty paragraphs overflow the clamp');
+      final lead = tester.getRect(find.byKey(const ValueKey('inbox-lead')));
+      // report-T finding 5: the clamp is a share of the view, not a fixed 160.
+      expect(lead.height, greaterThan(kLeadClamp * 2), reason: 'a 1000px window gives the lead-up the room it has');
+      // Clamped, it shows the END (next to the tool call); the head is what Show all adds.
+      final last = tester.getRect(find.textContaining('Paragraph 59 of the plan.', findRichText: true));
+      expect(last.bottom, lessThanOrEqualTo(lead.bottom + 0.5));
+      expect(last.top, greaterThanOrEqualTo(lead.top - 0.5));
+      expect(tester.getRect(find.textContaining('Paragraph 0 of the plan.', findRichText: true)).bottom,
+          lessThanOrEqualTo(lead.top + 0.5),
+          reason: 'the head is above the clamp');
       await tester.tap(toggle);
       await tester.pumpAndSettle();
       expect(tester.getSize(find.byKey(const ValueKey('inbox-lead'))).height, greaterThan(kLeadClamp));
       expect(find.descendant(of: toggle, matching: find.text('Show less')), findsOneWidget);
+      await done(tester);
+    });
+  });
+  group('review findings on the full text (report-T)', () {
+    Map<String, dynamic> say(String text) => {'role': 'assistant', 'text': text, 'toolUses': [], 'ts': 't-$text'.hashCode.toString()};
+    Map<String, dynamic> call(String cmd, {String? result, String name = 'Bash'}) => {
+          'role': 'assistant',
+          'text': '',
+          'toolUses': [
+            {'name': name, 'inputPreview': '', 'id': 'tu-$cmd', 'input': {'command': cmd, 'description': cmd}, 'result': ?result},
+          ],
+        };
+    Map<String, dynamic> typed(String text) =>
+        {'role': 'user', 'text': text, 'typedText': text, 'userKind': 'human', 'toolUses': []};
+    Map<String, dynamic> brief(String now, int at) => {
+          'v': 1,
+          'reporting': 'on',
+          'items': [],
+          'now': {'text': now, 'at': at},
+        };
+    Map<String, dynamic> perm(String id, {required int act, int? nowAt, String now = 'Bash \u00b7 step'}) =>
+        _row(id, 'Perm $id', status: 'waiting', waitingFor: 'permission', lastActivity: act, brief: nowAt == null ? null : brief(now, nowAt));
+    Finder cmd(String c) => find.textContaining(c, findRichText: true);
+    int reads(String suffix) => paths.where((p) => p.endsWith(suffix)).length;
+    String? shown(WidgetTester tester) {
+      final f = find.byKey(const ValueKey('inbox-tool-call'));
+      return f.evaluate().isEmpty ? null : tester.widget<SelectableText>(f).data;
+    }
+
+    testWidgets('F1: parallel calls, or a subagent asking, name NO command; the line above stays', (tester) async {
+      rows = {
+        _home.baseUrl: [
+          perm('a', act: 1),
+          perm('b', act: 2, nowAt: 2, now: 'Subagent: Bash \u00b7 push'),
+          perm('c', act: 3, nowAt: 3),
+        ],
+      };
+      transcripts = {
+        'a': [typed('clean'), say('Two at once.'), call('CMD_PARALLEL_1'), call('CMD_PARALLEL_2')],
+        'b': [typed('review'), call('CMD_SUBAGENT_CALL')],
+        'c': [typed('push'), say('Pushing.'), call('CMD_GOOD')],
+      };
+      await pump(tester, await repo());
+      await settle(tester);
+      expect(cmd('CMD_PARALLEL'), findsNothing, reason: 'which of the two asks is not on disk');
+      expect(cmd('CMD_SUBAGENT_CALL'), findsNothing, reason: 'the server says a subagent is asking');
+      expect(cmd('CMD_GOOD'), findsOneWidget, reason: 'the control: one call, and the server agrees');
+      expect(find.descendant(of: find.byKey(const ValueKey('inbox-card-http://h:7681|b')), matching: cmd('Subagent: Bash')),
+          findsOneWidget,
+          reason: 'what waits is still said');
+      await done(tester);
+    });
+
+    testWidgets("F2: permission B never shows A's command while B's read is out", (tester) async {
+      final r = await repo();
+      rows = {_home.baseUrl: [perm('p', act: 10, nowAt: 10)]};
+      transcripts = {'p': [typed('go'), say('Step one.'), call('CMD_A')]};
+      await pump(tester, r);
+      await settle(tester);
+      expect(shown(tester), 'CMD_A');
+
+      final hold = Completer<void>();
+      transcriptHolds = [hold];
+      rows = {_home.baseUrl: [perm('p', act: 20, nowAt: 20)]};
+      transcripts = {'p': [typed('go'), say('Step one.'), call('CMD_A', result: 'ok'), say('Step two.'), call('CMD_B')]};
+      await tester.runAsync(() => r.refresh());
+      await settle(tester);
+      expect(cmd('CMD_A'), findsNothing, reason: "A's command under B's wait is the wrong one");
+      hold.complete();
+      await settle(tester);
+      expect(shown(tester), 'CMD_B');
+      await done(tester);
+    });
+
+    testWidgets('F2: two reads that land out of order leave the NEWER one', (tester) async {
+      final r = await repo();
+      final holdA = Completer<void>();
+      transcriptHolds = [holdA];
+      rows = {_home.baseUrl: [perm('p', act: 10, nowAt: 10)]};
+      transcripts = {'p': [typed('go'), call('CMD_A')]};
+      await pump(tester, r);
+      await settle(tester);
+
+      rows = {_home.baseUrl: [perm('p', act: 20, nowAt: 20)]};
+      transcripts = {'p': [typed('go'), call('CMD_A', result: 'ok'), call('CMD_B')]};
+      await tester.runAsync(() => r.refresh());
+      await settle(tester);
+      expect(shown(tester), 'CMD_B');
+
+      holdA.complete(); // A's read, asked first, lands last
+      await settle(tester);
+      expect(cmd('CMD_A'), findsNothing);
+      expect(shown(tester), 'CMD_B');
+      await done(tester);
+    });
+
+    testWidgets('F3: terminal output (a new lastActivity) during the SAME wait re-reads nothing', (tester) async {
+      final r = await repo();
+      rows = {_home.baseUrl: [perm('a', act: 1, nowAt: 5), perm('b', act: 1)]};
+      transcripts = {'a': [typed('go'), call('CMD_A')], 'b': [typed('go'), call('CMD_B')]};
+      await pump(tester, r);
+      await settle(tester);
+      expect([reads('/a/transcript'), reads('/b/transcript')], [1, 1]);
+      expect([reads('/a/attention'), reads('/b/attention')], [1, 1]);
+
+      for (final act in [2, 3, 4]) {
+        // The prompt repaints: the worker bumps lastActivity on every PTY chunk.
+        rows = {_home.baseUrl: [perm('a', act: act, nowAt: 5), perm('b', act: act)]};
+        await tester.runAsync(() => r.refresh());
+        await settle(tester);
+      }
+      expect([reads('/a/transcript'), reads('/b/transcript')], [1, 1], reason: 'one wait, one read');
+      expect([reads('/a/attention'), reads('/b/attention')], [1, 1]);
+      expect(cmd('CMD_A'), findsWidgets, reason: 'and the command stays on screen throughout');
+
+      // A NEW wait is read: a new call (a new PreToolUse), or a wait that ended and came back.
+      rows = {_home.baseUrl: [perm('a', act: 9, nowAt: 9), _row('b', 'Perm b', status: 'working', lastActivity: 9)]};
+      await tester.runAsync(() => r.refresh());
+      await settle(tester);
+      rows = {_home.baseUrl: [perm('a', act: 10, nowAt: 9), perm('b', act: 10)]};
+      await tester.runAsync(() => r.refresh());
+      await settle(tester);
+      expect([reads('/a/transcript'), reads('/b/transcript')], [2, 2]);
+      await done(tester);
+    });
+
+    testWidgets('F4: a /cost after "Should I push it?" keeps the ask in the inbox', (tester) async {
+      rows = {_home.baseUrl: [_row('c', 'Idle', lastActivity: 5)]};
+      transcripts = {
+        'c': [
+          typed('push the fix'),
+          say('Tests pass. Should I push it?'),
+          {'role': 'user', 'text': '<command-name>/cost</command-name>', 'typedText': '/cost', 'userKind': 'command', 'toolUses': []},
+          {'role': 'user', 'text': '<local-command-stdout>Total: 1</local-command-stdout>', 'typedText': '', 'userKind': 'system', 'toolUses': []},
+        ],
+      };
+      await pump(tester, await repo());
+      await settle(tester);
+      expect(find.byKey(const ValueKey('inbox-card-http://h:7681|c')), findsOneWidget);
+      await done(tester);
+    });
+
+    testWidgets('F5: a question in a narrow pane gives its lead-up the room the options leave, opened at the end',
+        (tester) async {
+      rows = {_home.baseUrl: [_row('q', 'Asker', status: 'waiting', waitingFor: 'question', lastActivity: 1)]};
+      questions = {'q': _single('Pick one')};
+      transcripts = {
+        'q': [typed('go'), say(List.generate(40, (i) => 'Lead line $i of the reasoning.').join('\n\n')), call('x', name: 'AskUserQuestion')],
+      };
+      // 1200 wide: the focus pane is under the two-column threshold, the stacked shape.
+      await pump(tester, await repo(), width: 1200, height: 800);
+      await settle(tester);
+      final lastLine = find.textContaining('Lead line 39 ', findRichText: true);
+      final box = tester.getRect(find.ancestor(of: lastLine, matching: find.byType(SingleChildScrollView)).first);
+      // The old budget charged the question its 260px ceiling and the options their
+      // floor: at this size the lead-up got nothing and started collapsed.
+      expect(box.height, greaterThan(300));
+      expect(tester.getRect(inPanel(find.text('B'))).bottom, lessThan(800), reason: 'every option still on screen');
+      final last = tester.getRect(lastLine);
+      expect(last.bottom, lessThanOrEqualTo(box.bottom + 0.5), reason: 'opens at the end, next to the question');
+      expect(last.top, greaterThanOrEqualTo(box.top - 0.5));
+      expect(tester.getRect(find.textContaining('Lead line 0 ', findRichText: true)).bottom, lessThanOrEqualTo(box.top + 0.5),
+          reason: 'the head is a scroll up');
       await done(tester);
     });
   });

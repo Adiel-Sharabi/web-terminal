@@ -120,6 +120,17 @@ final RegExp _requestStart = RegExp(
     r"(?:can you |could you )?confirm\b)",
     caseSensitive: false);
 
+/// A sentence opening on "which" (with no question mark) asks only when it is put to
+/// the person: it names "you", or what "I"/"we" should do. "Which of the two places
+/// fired ... is still a guess" is a statement about the code, not an ask.
+final RegExp _which = RegExp(r"^(?:(?:please|so|now|ok|okay)[,]?\s+)?which\b", caseSensitive: false);
+final RegExp _addressed = RegExp(r"\b(?:you|your|should i|shall i|should we|shall we|do i|do we)\b", caseSensitive: false);
+
+/// "Confirm with the author that ..." sends someone ELSE to confirm: a review finding,
+/// not a request of the person reading.
+final RegExp _confirmElsewhere =
+    RegExp(r"^(?:(?:please|so|now|ok|okay)[,]?\s+)?(?:can you |could you )?confirm\s+with\b", caseSensitive: false);
+
 /// "Let me know if ..." / "Tell me if ..." is an OFFER at the end of a done reply
 /// ("Let me know if you want more") unless it lays out a choice.
 final RegExp _offer = RegExp(r"^(?:(?:please|so|now)[,]?\s+)?(?:let me know|tell me) if\b", caseSensitive: false);
@@ -132,6 +143,8 @@ bool _asks(String sentence) {
   // A typographic apostrophe ("I'll" typed as I-U+2019-ll) reads as a plain one.
   final s = sentence.replaceFirst(RegExp(r'^[\s>*_#\-\d.)]+'), '').replaceAll(_rsquo, "'");
   if (!_requestStart.hasMatch(s)) return false;
+  if (_which.hasMatch(s) && !_addressed.hasMatch(s)) return false;
+  if (_confirmElsewhere.hasMatch(s)) return false;
   return !_offer.hasMatch(s) || _choice.hasMatch(s);
 }
 

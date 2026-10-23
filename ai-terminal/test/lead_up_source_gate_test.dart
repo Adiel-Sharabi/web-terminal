@@ -31,6 +31,21 @@ void main() {
     }
   });
 
+  test('the overlay drops a lead-up read that lands after a newer question (report-T)', () {
+    // A read started for question A that lands once B is up must not put A's
+    // lead-up over B. No session-screen harness drives the question poll, so the
+    // guard is pinned on the source: the id is taken before the read and compared
+    // after it, before anything is kept.
+    final src = _read(overlay);
+    final body = RegExp(r'Future<void> _loadQuestionContext\(\) async \{([\s\S]*?)\n  \}').firstMatch(src)!.group(1)!;
+    final before = body.indexOf('final forId = _pendingQuestion?.toolUseId;');
+    final read = body.indexOf('await loadAgentTurn(');
+    final check = body.indexOf('_pendingQuestion?.toolUseId != forId');
+    final keep = body.indexOf('_questionContext = turn.leadUp');
+    expect([before, read, check, keep].every((i) => i >= 0), isTrue, reason: body);
+    expect(before < read && read < check && check < keep, isTrue);
+  });
+
   test('the old one-line rule is gone from lib', () {
     final hits = <String>[];
     for (final e in Directory('lib').listSync(recursive: true)) {

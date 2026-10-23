@@ -19,11 +19,14 @@
 // Everything else is asked only while the screen is mounted, and only for the items
 // that need it: a question row's live question (throttled by [NeedsYouActions]), the
 // agent's current turn from its transcript ([loadAgentTurn]: once per (session,
-// lastActivity) for a prose candidate or a reported wait, once per wait for a
-// permission, once per question for the focused question), the focused item's
-// permission detail and terminal tail, and each server's background agents.
+// lastActivity) for a prose candidate or a reported wait, once per WAIT for a
+// permission ([_waitStamp], never on terminal output) and again when it is focused
+// at most every [kTurnRefocusEvery], once per question for the focused question),
+// the focused item's permission detail and terminal tail, and each server's
+// background agents.
 
 import 'dart:async';
+import 'dart:math' as math;
 
 import 'package:flutter/material.dart';
 import 'package:flutter_markdown/flutter_markdown.dart';
@@ -69,6 +72,13 @@ const int kInboxTailBytes = 32768;
 
 /// How many terminal rows the focused view shows.
 const int kInboxTailLines = 14;
+
+/// Focusing a permission re-reads its turn, but never more often than this.
+const Duration kTurnRefocusEvery = Duration(seconds: 15);
+
+/// The share of the focused view's height a permission's lead-up may fill before
+/// "Show all" ([kLeadClamp] is the least it gets).
+const double kLeadShare = 0.6;
 
 class QuestionsInboxScreen extends StatefulWidget {
   const QuestionsInboxScreen({
@@ -135,8 +145,21 @@ class _QuestionsInboxScreenState extends State<QuestionsInboxScreen> {
   final Map<String, ({String stamp, AgentTurn? turn})> _turns = {};
   final Set<String> _turnsInFlight = {};
 
-  /// A permission row's attention record, with the wait start it was read for.
-  final Map<String, ({int? since, AttentionInfo? info})> _attention = {};
+  /// The stamp the newest read of each session's turn was started for: a read that
+  /// lands for any other stamp is older than one already asked for, and is dropped,
+  /// so two reads that land out of order cannot leave the older one on screen.
+  final Map<String, String> _turnWant = {};
+
+  /// When each session's turn was last read, for the refocus throttle.
+  final Map<String, DateTime> _turnReadAt = {};
+
+  /// The lastActivity a session had when it was first seen waiting for a permission,
+  /// by [sessionKey], for as long as it keeps waiting: what tells one wait from the
+  /// next when the server gives no start of its own ([_waitStamp]).
+  final Map<String, int?> _permSeen = {};
+
+  /// A permission row's attention record, with the wait ([_waitStamp]) it was read for.
+  final Map<String, ({String wait, AttentionInfo? info})> _attention = {};
 
   /// The focused item's terminal tail, by [sessionKey].
   final Map<String, List<String>> _tails = {};
@@ -174,10 +197,14 @@ class _QuestionsInboxScreenState extends State<QuestionsInboxScreen> {
   void initState() {
     super.initState();
     _sessions = _repo.current;
+    _notePermissionWaits();
     _needs.addListener(_onNeeds);
     _sub = _repo.sessions.listen((list) {
       if (_disposed) return;
-      _update(() => _sessions = list);
+      _update(() {
+        _sessions = list;
+        _notePermissionWaits();
+      });
       _needs.checkUnconfirmedReplies(_sessions);
       _fetchAll();
     });
@@ -260,7 +287,7 @@ class _QuestionsInboxScreenState extends State<QuestionsInboxScreen> {
           final q = _needs.questionFor(s);
           return q == null ? null : 'q|${questionSignature(q)}';
         case NeedKind.permission:
-          return 'p|${s.reason?.since ?? s.lastActivity}';
+          return 'p|${_waitStamp(s)}';
         case NeedKind.reported:
           return 'a|${s.lastActivity}';
         default:
@@ -268,6 +295,55 @@ class _QuestionsInboxScreenState extends State<QuestionsInboxScreen> {
       }
     }
     return proseCandidate(s) ? 'a|${s.lastActivity}' : null;
+  }
+
+  /// Which permission wait [s] is in. NOT its lastActivity, which the worker bumps on
+  /// every chunk of terminal output, and the server gives a `waiting` row no start
+  /// (`lib/session-reason.js`: `since: null`), so a stamp built on it re-read the
+  /// turn and the attention record on every repaint of the prompt (#383). It is the
+  /// kind of wait, the server's PreToolUse time for the tool that waits
+  /// (`brief.now.at`: a new call is a new wait), and the lastActivity the session had
+  /// when this inbox first saw it waiting ([_permSeen]), which holds still for as
+  /// long as it waits.
+  String _waitStamp(Session s) =>
+      '${s.waitingFor}|${s.brief?.now?.at ?? ''}|${_permSeen[sessionKey(s)] ?? s.lastActivity}';
+
+  /// Records when each permission wait was first seen, and forgets the ones that
+  /// ended, so the next wait of the same session is a new one.
+  void _notePermissionWaits() {
+    final waiting = <String>{};
+    for (final s in _sessions) {
+      if (!boardNeedsYou(s) || needKindOf(s) != NeedKind.permission) continue;
+      final k = sessionKey(s);
+      waiting.add(k);
+      _permSeen.putIfAbsent(k, () => s.lastActivity);
+    }
+    _permSeen.removeWhere((k, _) => !waiting.contains(k));
+  }
+
+  /// [s]'s turn as read for the stamp [s] has NOW, else null (#383): a turn read for
+  /// an earlier wait, or an earlier reply, is not this one's, and showing it would put
+  /// one permission's command under the next until the next read lands.
+  AgentTurn? _turnFor(Session s) {
+    final e = _turns[sessionKey(s)];
+    final stamp = _turnStamp(s);
+    return e != null && stamp != null && e.stamp == stamp ? e.turn : null;
+  }
+
+  /// Reads [s]'s current turn for [stamp] and keeps it under that stamp, unless a read
+  /// for another stamp was started since ([_turnWant]). A failed read is kept as
+  /// nothing when [keepFailed], so it is not asked again until the stamp changes.
+  Future<void> _loadTurn(Session s, String stamp, {required bool earlier, bool keepFailed = true}) async {
+    final k = sessionKey(s);
+    final flight = '$k|$stamp';
+    if (_turnsInFlight.contains(flight)) return;
+    _turnsInFlight.add(flight);
+    _turnWant[k] = stamp;
+    final turn = await _readTurn(s, earlier: earlier);
+    _turnsInFlight.remove(flight);
+    if (_disposed || _turnWant[k] != stamp) return;
+    _turnReadAt[k] = DateTime.now();
+    if (turn != null || keepFailed) _turns[k] = (stamp: stamp, turn: turn);
   }
 
   /// The current turn of every listed session that needs one, except a question, which
@@ -286,19 +362,14 @@ class _QuestionsInboxScreenState extends State<QuestionsInboxScreen> {
       due.add((s, stamp));
     }
     final focus = _snapshot?.session;
-    _turns.removeWhere((k, _) => !live.contains(k) && (focus == null || sessionKey(focus) != k));
+    bool keep(String k) => live.contains(k) || (focus != null && sessionKey(focus) == k);
+    _turns.removeWhere((k, _) => !keep(k));
+    _turnWant.removeWhere((k, _) => !keep(k));
+    _turnReadAt.removeWhere((k, _) => !keep(k));
     if (due.isEmpty) return;
-    await Future.wait(due.map((d) async {
-      final (s, stamp) = d;
-      final k = sessionKey(s);
-      _turnsInFlight.add('$k|$stamp');
-      // A blocking item shows "You asked / Earlier it said" when its turn has no prose;
-      // a prose candidate with no prose asks nothing, so it needs no older page.
-      final turn = await _readTurn(s, earlier: boardNeedsYou(s));
-      _turnsInFlight.remove('$k|$stamp');
-      if (_disposed) return;
-      _turns[k] = (stamp: stamp, turn: turn);
-    }));
+    // A blocking item shows "You asked / Earlier it said" when its turn has no prose;
+    // a prose candidate with no prose asks nothing, so it needs no older page.
+    await Future.wait(due.map((d) => _loadTurn(d.$1, d.$2, earlier: boardNeedsYou(d.$1))));
     _changed();
   }
 
@@ -320,19 +391,18 @@ class _QuestionsInboxScreenState extends State<QuestionsInboxScreen> {
     _attention.removeWhere((k, _) => !live.contains(k));
     final due = rows.where((s) {
       final k = sessionKey(s);
-      final since = s.reason?.since ?? s.lastActivity;
-      return k == force || _attention[k] == null || _attention[k]!.since != since;
+      return k == force || _attention[k] == null || _attention[k]!.wait != _waitStamp(s);
     }).toList();
     if (due.isEmpty) return;
     for (final s in due) {
-      final since = s.reason?.since ?? s.lastActivity;
-      _attention[sessionKey(s)] = (since: since, info: _attention[sessionKey(s)]?.info);
+      _attention[sessionKey(s)] = (wait: _waitStamp(s), info: _attention[sessionKey(s)]?.info);
     }
     await Future.wait(due.map((s) async {
       try {
+        final wait = _waitStamp(s);
         final info = await _client(s.server).attention(s.id);
         if (_disposed) return;
-        _attention[sessionKey(s)] = (since: s.reason?.since ?? s.lastActivity, info: info);
+        _attention[sessionKey(s)] = (wait: wait, info: info);
       } catch (_) {/* the card falls back to the session's own words */}
     }));
     _changed();
@@ -340,7 +410,9 @@ class _QuestionsInboxScreenState extends State<QuestionsInboxScreen> {
 
   /// What only the FOCUSED item needs: a question's lead-up (once per question), and
   /// the terminal tail of a permission, menu or plain wait ([force]: re-read it).
-  Future<void> _refreshFocused({bool force = false}) async {
+  /// [refocus]: the person has just opened it, so a permission's turn is read again
+  /// (at most every [kTurnRefocusEvery]) in case its wait changed unseen.
+  Future<void> _refreshFocused({bool force = false, bool refocus = false}) async {
     if (_disposed) return;
     final it = _currentFocus();
     final s = it?.session;
@@ -351,15 +423,19 @@ class _QuestionsInboxScreenState extends State<QuestionsInboxScreen> {
         final q = it.question;
         if (q == null) return;
         final stamp = 'q|${questionSignature(q)}';
-        if (_turns[k]?.stamp == stamp || _turnsInFlight.contains('$k|$stamp')) return;
-        _turnsInFlight.add('$k|$stamp');
-        final turn = await _readTurn(s, earlier: true);
-        _turnsInFlight.remove('$k|$stamp');
-        if (_disposed) return;
+        if (_turns[k]?.stamp == stamp) return;
         // A failed read is not kept: no lead-up panel for now, asked again next time.
-        if (turn != null) _turns[k] = (stamp: stamp, turn: turn);
+        await _loadTurn(s, stamp, earlier: true, keepFailed: false);
         _changed();
       case InboxKind.permission || InboxKind.menu || InboxKind.waiting:
+        final stamp = _turnStamp(s);
+        final read = _turnReadAt[k];
+        if (refocus &&
+            it.kind == InboxKind.permission &&
+            stamp != null &&
+            (read == null || DateTime.now().difference(read) >= kTurnRefocusEvery)) {
+          unawaited(_loadTurn(s, stamp, earlier: true).then((_) => _changed()));
+        }
         if (!force && _tails.containsKey(k)) return;
         if (it.kind == InboxKind.permission && force) unawaited(_refreshAttention(force: k));
         await _readTail(s);
@@ -418,7 +494,9 @@ class _QuestionsInboxScreenState extends State<QuestionsInboxScreen> {
           for (final s in _sessions)
             if (needKindOf(s) == NeedKind.question) sessionKey(s): _needs.questionFor(s),
         },
-        turns: {for (final e in _turns.entries) e.key: e.value.turn},
+        turns: {
+          for (final s in _sessions) sessionKey(s): ?_turnFor(s),
+        },
         agents: _agents,
         dismissed: _dismissed,
       );
@@ -483,7 +561,7 @@ class _QuestionsInboxScreenState extends State<QuestionsInboxScreen> {
       _focusKey = it.key;
       _snapshot = it;
     });
-    unawaited(_refreshFocused());
+    unawaited(_refreshFocused(refocus: true));
   }
 
   /// The next blocking item after [key], or the first item left.
@@ -898,15 +976,18 @@ class _ToolCall extends StatelessWidget {
   }
 }
 
-/// The agent's lead-up, clamped to [kLeadClamp] until opened. "Show all" is offered only
-/// when the text is actually taller than the clamp - measured after layout, since a
-/// character count cannot know the width it wraps at.
+/// The agent's lead-up, clamped until opened to [clamp]: a share of the view's height
+/// ([kLeadShare]), never less than [kLeadClamp]. "Show all" is offered only when the
+/// text is actually taller than the clamp - measured after layout, since a character
+/// count cannot know the width it wraps at. Clamped, it shows the END of the text,
+/// the part next to the tool call (#383); the head is what "Show all" adds.
 const double kLeadClamp = 160;
 
 class _ClampedLead extends StatefulWidget {
-  const _ClampedLead({required this.open, required this.onToggle, required this.child});
+  const _ClampedLead({required this.open, required this.onToggle, required this.clamp, required this.child});
   final bool open;
   final VoidCallback onToggle;
+  final double clamp;
   final Widget child;
 
   @override
@@ -934,12 +1015,13 @@ class _ClampedLeadState extends State<_ClampedLead> {
     WidgetsBinding.instance.addPostFrameCallback((_) => _measure());
     return Column(crossAxisAlignment: CrossAxisAlignment.start, children: [
       ConstrainedBox(
-        constraints: BoxConstraints(maxHeight: widget.open ? double.infinity : kLeadClamp),
+        constraints: BoxConstraints(maxHeight: widget.open ? double.infinity : widget.clamp),
         child: ClipRect(
             child: SingleChildScrollView(
                 key: const ValueKey('inbox-lead'),
                 controller: _scroll,
                 physics: const NeverScrollableScrollPhysics(),
+                reverse: true,
                 child: widget.child)),
       ),
       if (widget.open || _overflows)
@@ -1029,10 +1111,10 @@ class _InboxCard extends StatelessWidget {
                 key: ValueKey('inbox-more-${it.key}'), style: Theme.of(context).textTheme.bodySmall),
         ];
       case InboxKind.permission:
-        final tool = it.turn?.pendingTool;
+        final tool = permissionToolCall(it.turn?.pendingTool, s!.brief?.now?.text);
         final what = tool == null ? null : toolCallText(tool);
         return [
-          _labelled(context, 'Permission', state._permissionReason(s!), maxLines: 2),
+          _labelled(context, 'Permission', state._permissionReason(s), maxLines: 2),
           if (what != null) _ToolCall(name: tool!.name, text: what, maxLines: 2),
         ];
       case InboxKind.prose:
@@ -1190,6 +1272,7 @@ class _FocusView extends StatelessWidget {
       final q = it.question;
       if (q == null) return const Center(child: Text('Reading the question...'));
       final ctx = state._turns[sessionKey(s)];
+      final lead = ctx?.stamp == 'q|${questionSignature(q)}' ? ctx?.turn : null;
       return Column(crossAxisAlignment: CrossAxisAlignment.stretch, children: [
         Padding(padding: const EdgeInsets.fromLTRB(16, 12, 16, 0), child: _InboxHead(item: it, state: state)),
         if (s.brief?.items.isNotEmpty ?? false)
@@ -1200,7 +1283,8 @@ class _FocusView extends StatelessWidget {
             child: QuestionAnswerPanel(
               key: const ValueKey('inbox-question-panel'),
               question: q,
-              contextText: ctx?.stamp == 'q|${questionSignature(q)}' ? ctx?.turn?.leadUp : null,
+              contextText: lead?.leadUp,
+              contextLabel: lead?.leadUpLabel ?? kLeadUpLabel,
               drafts: QuestionDraftStore.instance.of(s.server.baseUrl, s.id),
               draftKey: questionSignature(q),
               elsewhereLabel: 'Open session',
@@ -1216,11 +1300,6 @@ class _FocusView extends StatelessWidget {
         ),
       ]);
     }
-    final children = <Widget>[
-      _InboxHead(item: it, state: state),
-      if (s?.brief?.items.isNotEmpty ?? false) ...[for (final i in s!.brief!.items) BriefItemRow(i)],
-      ..._body(context),
-    ];
     final actions = _actions(context);
     return Container(
       margin: const EdgeInsets.all(12),
@@ -1231,12 +1310,19 @@ class _FocusView extends StatelessWidget {
       ),
       child: Column(crossAxisAlignment: CrossAxisAlignment.stretch, children: [
         Expanded(
-          child: SingleChildScrollView(
-            padding: const EdgeInsets.all(16),
-            child: Column(crossAxisAlignment: CrossAxisAlignment.stretch, children: [
-              for (final (i, w) in children.indexed) Padding(padding: EdgeInsets.only(top: i == 0 ? 0 : 10), child: w),
-            ]),
-          ),
+          child: LayoutBuilder(builder: (context, box) {
+            final children = <Widget>[
+              _InboxHead(item: it, state: state),
+              if (s?.brief?.items.isNotEmpty ?? false) ...[for (final i in s!.brief!.items) BriefItemRow(i)],
+              ..._body(context, box.maxHeight),
+            ];
+            return SingleChildScrollView(
+              padding: const EdgeInsets.all(16),
+              child: Column(crossAxisAlignment: CrossAxisAlignment.stretch, children: [
+                for (final (i, w) in children.indexed) Padding(padding: EdgeInsets.only(top: i == 0 ? 0 : 10), child: w),
+              ]),
+            );
+          }),
         ),
         ...actions,
       ]),
@@ -1272,17 +1358,22 @@ class _FocusView extends StatelessWidget {
   Widget _label(BuildContext context, String text) => Text(text,
       style: Theme.of(context).textTheme.labelLarge?.copyWith(color: Theme.of(context).colorScheme.onSurfaceVariant));
 
-  List<Widget> _body(BuildContext context) {
+  /// What the focused item says, for a view [viewport] tall.
+  List<Widget> _body(BuildContext context, double viewport) {
     final it = item;
     final s = it.session;
     switch (it.kind) {
       case InboxKind.permission:
         // What led up to it is the agent's whole turn, not the notification's 200
         // characters; the attention record's text stays only as the fallback.
-        final tool = it.turn?.pendingTool;
+        // Only an UNAMBIGUOUS call is named ([permissionToolCall]): a wrong command on
+        // an approval screen is worse than none, and the line above still says what
+        // waits.
+        final tool = permissionToolCall(it.turn?.pendingTool, s!.brief?.now?.text);
         final what = tool == null ? null : toolCallText(tool);
-        final lead = it.turn?.leadUp ?? state._attention[sessionKey(s!)]?.info?.lastMessage?.trim() ?? '';
-        final k = sessionKey(s!);
+        final turnLead = it.turn?.leadUp;
+        final lead = turnLead ?? state._attention[sessionKey(s)]?.info?.lastMessage?.trim() ?? '';
+        final k = sessionKey(s);
         final open = state._expanded.contains(k);
         return [
           _label(context, 'Permission'),
@@ -1292,9 +1383,10 @@ class _FocusView extends StatelessWidget {
             _ToolCall(name: tool!.name, text: what),
           ],
           if (lead.isNotEmpty) ...[
-            _label(context, 'Claude said'),
+            _label(context, turnLead != null ? it.turn!.leadUpLabel : kLeadUpLabel),
             _ClampedLead(
               open: open,
+              clamp: math.max(kLeadClamp, viewport * kLeadShare),
               onToggle: () => state._update(() => open ? state._expanded.remove(k) : state._expanded.add(k)),
               child: _markdown(context, lead),
             ),

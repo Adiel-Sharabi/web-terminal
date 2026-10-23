@@ -1365,6 +1365,7 @@ class _SessionScreenState extends State<SessionScreen>
       _api?.server.baseUrl ?? _session?.server.baseUrl ?? '', widget.sessionId);
   String?
   _questionContext; // Claude's preceding message, shown above the question
+  String _questionContextLabel = kLeadUpLabel; // the heading it goes under
   Timer? _questionPoll;
 
   // --- Chat/Terminal lens ---------------------------------------------------
@@ -1677,14 +1678,22 @@ class _SessionScreenState extends State<SessionScreen>
   /// Reads the agent's whole current turn ([loadAgentTurn], the one rule the
   /// questions inbox reads too) and stashes it as the pending question's lead-up
   /// (shown above the question in the overlay).
+  ///
+  /// Kept only while the question it was read for is still the one shown: a read for
+  /// an older question that lands after a newer one has arrived is dropped, or the
+  /// newer question would sit under the older one's lead-up (#383).
   Future<void> _loadQuestionContext() async {
     final api = _api;
-    if (api == null) return;
+    final forId = _pendingQuestion?.toolUseId;
+    if (api == null || forId == null) return;
     try {
       final turn = await loadAgentTurn(
           (before, limit) => api.transcript(widget.sessionId, before: before, limit: limit));
-      final text = turn.leadUp;
-      if (mounted) setState(() => _questionContext = text);
+      if (!mounted || _pendingQuestion?.toolUseId != forId) return;
+      setState(() {
+        _questionContext = turn.leadUp;
+        _questionContextLabel = turn.leadUpLabel;
+      });
     } catch (_) {
       // Best-effort — the overlay just omits the context panel.
     }
@@ -4939,6 +4948,7 @@ class _SessionScreenState extends State<SessionScreen>
           QuestionOverlay(
             question: _pendingQuestion!,
             contextText: _questionContext,
+            contextLabel: _questionContextLabel,
             drafts: _questionDrafts,
             draftKey: questionSignature(_pendingQuestion),
             onSend: _answerQuestion,

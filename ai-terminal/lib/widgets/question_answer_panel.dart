@@ -53,6 +53,7 @@ class QuestionAnswerPanel extends StatefulWidget {
     required this.onDismiss,
     this.onKey,
     this.contextText,
+    this.contextLabel = 'Claude said',
     this.drafts,
     this.draftKey = '',
     this.elsewhereLabel = 'Answer in terminal',
@@ -70,6 +71,11 @@ class QuestionAnswerPanel extends StatefulWidget {
   /// above the question so the full answer is readable before answering. Null
   /// when unavailable.
   final String? contextText;
+
+  /// The heading over [contextText]: "Claude said" for the agent's own words; the
+  /// "You asked / Earlier it said" fallback goes under its own heading, because an
+  /// earlier reply did not lead up to this question (#383).
+  final String contextLabel;
 
   /// Send the built answer as timed frames (the caller honours each delay).
   final void Function(List<AnswerFrame> frames) onSend;
@@ -540,7 +546,10 @@ class _QuestionAnswerPanelState extends State<QuestionAnswerPanel> {
             // above them, so it is not part of this subtraction at all.
             final fixed = kHeaderH +
                 kFooterH +
-                (questions.length > 1 ? kTabStripH : 0);
+                (questions.length > 1 ? kTabStripH : 0) +
+                (_keysShown && widget.onKey != null && !_textEntryActive
+                    ? kKeysRowH
+                    : 0);
             final shared = cardMax - fixed - kOptionFloor;
             // The question is served next and always keeps two lines. It
             // is PINNED (below) and bounded rather than free to fill the
@@ -549,16 +558,18 @@ class _QuestionAnswerPanelState extends State<QuestionAnswerPanel> {
             // nothing while letting a six-line one be read without
             // scrolling.
             final qMax = shared.clamp(kQuestionMin, kQuestionMax);
-            // The lead-up takes the remainder — and COLLAPSES rather
-            // than showing a slit. It is the one panel that can honestly
-            // say "there is more": it has a scrollbar AND an expander.
-            final ctxRoom = shared - qMax - kCtxChrome;
-            final ctxSpare =
-                ctxRoom >= kCtxMinUseful ? ctxRoom.clamp(0.0, kCtxMax) : 0.0;
-            // Open by default only when the panel can show enough to be
-            // worth its frame. Null means "decide from the room".
-            final expanded =
-                _ctxExpandedOverride ?? (ctxSpare >= kCtxMinUseful);
+            // The lead-up takes what the question and the options ACTUALLY
+            // leave (#383), not what their ceilings would: it is a Flexible
+            // below, laid out after them, so a one-line question and two
+            // short options hand it everything else. The question block is
+            // capped at the card less the chrome and the lead-up's own
+            // collapsed frame, so on a phone the options keep their room and
+            // the lead-up is what collapses first (#94/#108). An explicit tap
+            // on a cramped card still buys it a real share ([ctxFloor]): the
+            // budget decides the DEFAULT, never what the user may read.
+            final ctxFloor = _ctxExpandedOverride == true
+                ? (cardMax * 0.35).clamp(kCtxMinUseful, 300.0)
+                : 0.0;
             // The lead-up's own column runs the full height between the
             // header and the footer, so it needs no share of `shared`.
             final ctxColumnH =
@@ -571,6 +582,26 @@ class _QuestionAnswerPanelState extends State<QuestionAnswerPanel> {
             final hideCtxForTyping =
                 _textEntryActive &&
                     composeUsesSoftKeyboard(defaultTargetPlatform);
+            final showCtx = hasContext && !hideCtxForTyping;
+            final qaMax = (cardMax -
+                    fixed -
+                    (!wide && showCtx ? kCtxChrome + ctxFloor : 0.0))
+                .clamp(0.0, double.infinity);
+            // The question and its options. Pinned question first (#94):
+            // it used to be the first child of the option scroll view, so
+            // the moment you scrolled down to reach an option the question
+            // left the screen - you could see what you were choosing
+            // between, or what you were choosing FOR, never both. That is
+            // the reported "the actual question text is sometimes missing".
+            final qa = Column(
+              mainAxisSize: MainAxisSize.min,
+              children: [
+                if (questions.length > 1) _tabs(theme, questions),
+                if (q.question.isNotEmpty)
+                  _questionText(theme, q.question, qMax),
+                Flexible(child: _optionList(theme, q)),
+              ],
+            );
             return Container(
               constraints: BoxConstraints(
                   maxWidth: wide ? kWideCardMax : 640,
@@ -594,63 +625,67 @@ class _QuestionAnswerPanelState extends State<QuestionAnswerPanel> {
                   // read by then, so drop this panel to give the input
                   // room; it returns the moment Other/the note is
                   // deselected.
-                  if (!wide && !hideCtxForTyping && hasContext)
-                    _contextPanel(
-                      theme,
-                      widget.contextText!.trim(),
-                      // An explicit tap gets a real share even on a
-                      // cramped card — the budget decides the DEFAULT,
-                      // never what the user is allowed to read.
-                      expanded
-                          ? (ctxSpare >= kCtxMinUseful
-                              ? ctxSpare
-                              : (cardMax * 0.35).clamp(
-                                  kCtxMinUseful, 300.0))
-                          : 0.0,
-                      expanded,
+                  // Stacked (a phone, a narrow pane): the lead-up above the
+                  // question, in the room the question block leaves. Laid
+                  // out AFTER that block, which is inflexible and capped at
+                  // [qaMax], so it is the lead-up that yields.
+                  if (!wide && showCtx)
+                    Flexible(
+                      child: LayoutBuilder(builder: (context, room) {
+                        if (room.maxHeight < kCtxChrome) {
+                          // Less room than its own frame: its heading,
+                          // clipped, rather than an overflow.
+                          return SizedBox(
+                            height: room.maxHeight,
+                            child: ClipRect(
+                              child: OverflowBox(
+                                alignment: Alignment.topCenter,
+                                minHeight: 0,
+                                maxHeight: double.infinity,
+                                child: _contextPanel(theme,
+                                    widget.contextText!.trim(), 0.0, false),
+                              ),
+                            ),
+                          );
+                        }
+                        final body = (room.maxHeight - kCtxChrome)
+                            .clamp(0.0, double.infinity);
+                        // Open by default only when the panel can show
+                        // enough to be worth its frame. Null means "decide
+                        // from the room".
+                        final expanded = _ctxExpandedOverride ??
+                            (body >= kCtxMinUseful);
+                        return _contextPanel(theme, widget.contextText!.trim(),
+                            expanded ? body : 0.0, expanded);
+                      }),
                     ),
-                  // The question and its options, and — only in the wide
-                  // shape — the lead-up standing beside them rather than
-                  // above them.
-                  Flexible(
-                    child: Row(
-                      crossAxisAlignment: CrossAxisAlignment.start,
-                      children: [
-                        if (wide && !hideCtxForTyping && hasContext)
-                          SizedBox(
-                            width: kWideCtxColumn,
-                            // Always expanded here: it is not borrowing
-                            // from anyone, so there is nothing to decide.
-                            child: _contextPanel(
-                                theme,
-                                widget.contextText!.trim(),
-                                ctxColumnH,
-                                true),
-                          ),
-                        Expanded(
-                          child: Column(
-                            mainAxisSize: MainAxisSize.min,
-                            children: [
-                              if (questions.length > 1)
-                                _tabs(theme, questions),
-                              // PINNED, outside the option scroll view
-                              // (#94). It used to be the first child of
-                              // that view, so the moment you scrolled
-                              // down to reach an option the question left
-                              // the screen — you could see what you were
-                              // choosing between, or what you were
-                              // choosing FOR, never both. That is the
-                              // reported "the actual question text is
-                              // sometimes missing".
-                              if (q.question.isNotEmpty)
-                                _questionText(theme, q.question, qMax),
-                              Flexible(child: _optionList(theme, q)),
-                            ],
-                          ),
-                        ),
-                      ],
+                  if (!wide)
+                    ConstrainedBox(
+                      constraints: BoxConstraints(maxHeight: qaMax),
+                      child: qa,
+                    )
+                  else
+                    // Wide: the lead-up stands beside the question and the
+                    // options rather than above them.
+                    Flexible(
+                      child: Row(
+                        crossAxisAlignment: CrossAxisAlignment.start,
+                        children: [
+                          if (showCtx)
+                            SizedBox(
+                              width: kWideCtxColumn,
+                              // Always expanded here: it is not borrowing
+                              // from anyone, so there is nothing to decide.
+                              child: _contextPanel(
+                                  theme,
+                                  widget.contextText!.trim(),
+                                  ctxColumnH,
+                                  true),
+                            ),
+                          Expanded(child: qa),
+                        ],
+                      ),
                     ),
-                  ),
                   _footer(theme, q),
                 ],
               ),
@@ -721,7 +756,7 @@ class _QuestionAnswerPanelState extends State<QuestionAnswerPanel> {
                 const SizedBox(width: 5),
                 Expanded(
                   child: Text(
-                    'Claude said',
+                    widget.contextLabel,
                     style: theme.textTheme.labelSmall?.copyWith(
                       color: theme.colorScheme.onSurfaceVariant,
                     ),
@@ -737,7 +772,11 @@ class _QuestionAnswerPanelState extends State<QuestionAnswerPanel> {
           ),
           if (expanded) ...[
             const SizedBox(height: 6),
-            ConstrainedBox(
+            // Flexible as well as capped: the panel lives in a bounded slot,
+            // and a body that cannot shrink would overflow it when the
+            // chrome measures a pixel taller than [kCtxChrome].
+            Flexible(
+              child: ConstrainedBox(
               constraints: BoxConstraints(maxHeight: maxHeight),
               child: Scrollbar(
                 controller: _ctxScroll,
@@ -745,6 +784,13 @@ class _QuestionAnswerPanelState extends State<QuestionAnswerPanel> {
                 child: SingleChildScrollView(
                   controller: _ctxScroll,
                   primary: false,
+                  // Opens at the END (#383): the lead-up is now the agent's
+                  // whole turn, and the part that leads into the question is
+                  // its last paragraphs, next to the question; the head is a
+                  // scroll up. `reverse` anchors the viewport to the bottom
+                  // of the text, so a lead-up that arrives after the card is
+                  // up, or grows, still opens at its end.
+                  reverse: true,
                   // #108 — RENDERED, not raw. This was a plain Text, so the
                   // agent's own formatting arrived as literal syntax: a
                   // screenshot showed `**6 approved and marked Committed, 1
@@ -782,6 +828,7 @@ class _QuestionAnswerPanelState extends State<QuestionAnswerPanel> {
                   ),
                 ),
               ),
+            ),
             ),
           ],
         ],

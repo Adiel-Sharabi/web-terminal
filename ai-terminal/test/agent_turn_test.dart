@@ -199,4 +199,107 @@ void main() {
       expect(t.leadUp, 'About to clean.');
     });
   });
+
+  // Review findings on the full-text change (report-T).
+  group('the approval screen names a call only when it is unambiguous', () {
+    ToolUse bash(String cmd, {String? result}) => ToolUse(name: 'Bash', inputPreview: '', input: {'command': cmd}, result: result);
+    TranscriptTurn calls(List<ToolUse> uses) => TranscriptTurn(role: 'assistant', text: '', toolUses: uses, ts: null);
+
+    test('one waiting call: named', () {
+      final p = pendingToolUse([_typed('ship it'), _say('Pushing.'), calls([bash('git push')])]);
+      expect(p?.input['command'], 'git push');
+    });
+
+    test('parallel calls, both waiting: which one asks is unknown, so none', () {
+      // Claude Code writes each block of one message as its own line: two lines here.
+      expect(pendingToolUse([_typed('clean'), calls([bash('rm -rf dist')]), calls([bash('git push --force')])]), isNull);
+      expect(pendingToolUse([_typed('clean'), calls([bash('rm -rf dist'), bash('git push --force')])]), isNull);
+    });
+
+    test('an allow-listed call still running beside the one that asks: none', () {
+      expect(pendingToolUse([_typed('go'), calls([bash('npm test')]), _say('Meanwhile:'), calls([bash('git push')])]), isNull);
+    });
+
+    test('a subagent asking: the open Agent/Task call is not the command, so none', () {
+      for (final name in ['Agent', 'Task']) {
+        expect(
+            pendingToolUse([
+              _typed('review it'),
+              _tool(name, input: {'description': 'review', 'prompt': '{"files": ["a.dart"]}'}),
+            ]),
+            isNull,
+            reason: name);
+      }
+    });
+
+    test('a finished call does not count against the one that waits', () {
+      final p = pendingToolUse([_typed('go'), calls([bash('ls', result: 'a b')]), calls([bash('git push')])]);
+      expect(p?.input['command'], 'git push');
+    });
+
+    test('the server\'s own "now" line must agree; a subagent\'s, or another tool\'s, hides it', () {
+      final p = bash('git push');
+      const dot = '\u00b7';
+      expect(permissionToolCall(p, null), same(p), reason: 'no line: the transcript alone');
+      expect(permissionToolCall(p, 'Bash $dot Push to origin'), same(p));
+      expect(permissionToolCall(p, 'Subagent: Bash $dot Push to origin'), isNull);
+      expect(permissionToolCall(p, 'Subagent $dot review the diff'), isNull);
+      expect(permissionToolCall(p, 'Edit $dot a.dart'), isNull);
+      const mcp = ToolUse(name: 'mcp__github__create_issue', inputPreview: '', input: {'title': 'x'});
+      expect(permissionToolCall(mcp, 'github $dot create_issue'), same(mcp));
+      expect(permissionToolCall(null, 'Bash $dot x'), isNull);
+    });
+  });
+
+  group('a turn begins at a HUMAN prompt (the server\'s isHumanPrompt)', () {
+    test('/cost after an ask is not a boundary: the ask still stands', () {
+      final t = agentTurnOf([
+        _typed('push the fix'),
+        _say('Tests pass. Should I push it?'),
+        _user('<command-name>/cost</command-name>\n<command-message>cost</command-message>\n<command-args></command-args>', 'command'),
+        _user('<local-command-stdout>Total cost: \$0.42</local-command-stdout>', 'system'),
+      ]);
+      expect(t.prose, 'Tests pass. Should I push it?');
+      expect(t.youAsked, 'push the fix');
+    });
+
+    test('a skill or prompt command (written message-first, read as human) IS a boundary', () {
+      final t = agentTurnOf([
+        _typed('earlier'),
+        _say('OLD_REPLY'),
+        _user('<command-message>dds-recap</command-message>\n<command-name>/dds-recap</command-name>\n<command-args>383</command-args>',
+            'human'),
+        _user('Base directory for this skill: x', 'meta'),
+        _say('Recap: 3 done.'),
+      ]);
+      expect(t.prose, 'Recap: 3 done.');
+      expect(t.prose, isNot(contains('OLD_REPLY')));
+    });
+  });
+
+  group('what the lead-up says about itself', () {
+    test('the fallback goes under its own heading, not "Claude said"', () {
+      final prose = agentTurnOf([_typed('go'), _say('words')]);
+      expect(prose.leadUpLabel, kLeadUpLabel);
+      final fallback = agentTurnOf([_typed('first'), _say('earlier words'), _typed('second'), _tool('Bash')]);
+      expect(fallback.leadUp, contains('**You asked:**'));
+      expect(fallback.leadUpLabel, kLeadUpFallbackLabel);
+      expect(kLeadUpFallbackLabel, isNot(kLeadUpLabel));
+    });
+
+    test('a turn the cap cut says so; one that reached its prompt does not', () async {
+      final cut = await loadAgentTurn(_Pages([
+        _typed('far back'),
+        for (var i = 0; i < 1000; i++) _tool('Bash', result: 'ok'),
+        _say('tail'),
+      ]).read);
+      expect(cut.capped, isTrue);
+      expect(cut.leadUp, '$kAgentTurnCappedNote\n\ntail');
+      final whole = await loadAgentTurn(_Pages([_typed('go'), _say('tail')]).read);
+      expect(whole.capped, isFalse);
+      expect(whole.leadUp, 'tail');
+      final short = await loadAgentTurn(_Pages([_say('no prompt at all'), _say('tail')]).read);
+      expect(short.capped, isFalse, reason: 'the transcript ran out: nothing was left unread');
+    });
+  });
 }

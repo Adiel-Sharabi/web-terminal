@@ -28,14 +28,24 @@ const int kAgentTurnMorePage = 200;
 /// requests is the most a single question can cost.
 const int kAgentTurnMaxTurns = 450;
 
-/// Whether [t] is a prompt the person TYPED: a `role:user` turn the server classified
-/// as `human` or `command` (a slash command is the person's own turn), or, from an
-/// older server that sends no verdict, one the local classifier reads as human. A
-/// tool result never arrives as a turn at all; a teammate message, a task
-/// notification, hook feedback and a skill body are user turns nobody typed.
+/// Whether [t] is a prompt the person TYPED, which is what begins a turn: the server's
+/// own rule (`lib/recap.js` `isHumanPrompt`), a `role:user` turn whose verdict is
+/// `human`. A turn with no verdict the client knows (an older server, a Codex rollout)
+/// falls back to the local classifier, as the server's `kindOfTurn` does.
+///
+/// A `command` verdict is NOT a boundary. Measured over 436 local transcripts: the 87
+/// name-first trios the server reads as `command` (`/cost`, `/model`, `/mcp`,
+/// `/clear`, `/compact`, ...) and their `<local-command-stdout>` (read as `system`)
+/// are local commands that start no agent turn, so a reply asking "Should I push
+/// it?" still stands after one. A command that runs a prompt or a skill (`/issue`,
+/// `/dds-recap`) is written message-first, which the server reads as `human` - all
+/// 56 such turns were answered by the agent - so it IS a boundary. The chat lens
+/// still renders `command` as the person's own bubble ([userTurnKindFromWire]); that
+/// is a rendering choice, not where a turn begins.
 bool isHumanPrompt(TranscriptTurn t) {
   if (!t.isUser) return false;
-  return (userTurnKindFromWire(t.userKind) ?? classifyUserTurn(t.text).kind) == UserTurnKind.human;
+  if (userTurnKindFromWire(t.userKind) != null) return t.userKind == 'human';
+  return classifyUserTurn(t.text).kind == UserTurnKind.human;
 }
 
 /// What the person typed for the human turn [t]: the server's `typedText` when it sent
@@ -52,6 +62,7 @@ class AgentTurn {
     this.youAsked,
     this.earlier,
     this.reachedPrompt = false,
+    this.capped = false,
     this.at,
     this.pendingTool,
   });
@@ -70,32 +81,53 @@ class AgentTurn {
   /// The human prompt was found within the read cap: [prose] is the WHOLE turn.
   final bool reachedPrompt;
 
+  /// The read stopped at [kAgentTurnMaxTurns] with older turns left unread, so [prose]
+  /// may be only the newer part of the turn. [leadUp] says so.
+  final bool capped;
+
   /// The timestamp of the turn's newest text block, or null.
   final String? at;
 
-  /// The newest tool call of the turn when it has no result yet: what a permission
-  /// prompt is asking to run.
+  /// The one tool call of the turn still without a result, when exactly one is
+  /// ([pendingToolUse]): what a permission prompt may be asking to run. Show it only
+  /// through [permissionToolCall].
   final ToolUse? pendingTool;
 
   /// The text shown above a question or a permission, as markdown: the turn's prose,
-  /// or, when it has none, "You asked" and "Earlier it said", each labelled. Null when
-  /// there is nothing to show.
+  /// or, when it has none, "You asked" and "Earlier it said", each labelled; led by a
+  /// note when the read cap cut the turn ([capped]). Null when there is nothing to show.
   String? get leadUp {
-    if (prose.isNotEmpty) return prose;
-    final parts = <String>[
-      if ((youAsked ?? '').isNotEmpty) '**You asked:**\n\n$youAsked',
-      if ((earlier ?? '').isNotEmpty) '**Earlier it said:**\n\n$earlier',
-    ];
+    final body = prose.isNotEmpty
+        ? prose
+        : [
+            if ((youAsked ?? '').isNotEmpty) '**You asked:**\n\n$youAsked',
+            if ((earlier ?? '').isNotEmpty) '**Earlier it said:**\n\n$earlier',
+          ].join('\n\n');
+    final parts = [if (capped) kAgentTurnCappedNote, if (body.isNotEmpty) body];
     return parts.isEmpty ? null : parts.join('\n\n');
   }
+
+  /// The heading [leadUp] goes under: the agent's words are "Claude said"; the
+  /// fallback is the person's own prompt and an EARLIER reply, which did not lead up
+  /// to the wait, so it is not.
+  String get leadUpLabel => prose.isNotEmpty ? kLeadUpLabel : kLeadUpFallbackLabel;
 }
+
+/// The heading over the agent's own words for the turn.
+const String kLeadUpLabel = 'Claude said';
+
+/// The heading over the "You asked / Earlier it said" fallback.
+const String kLeadUpFallbackLabel = 'Before it asked';
+
+/// What a lead-up begins with when the read cap cut it.
+const String kAgentTurnCappedNote = '_Earlier text not loaded - open the session._';
 
 /// The current turn of [turns] (newest last): pure, so the paging in [loadAgentTurn]
 /// and every rule here can be tested on a plain list.
-AgentTurn agentTurnOf(List<TranscriptTurn> turns, {ToolUse? pendingTool}) {
+AgentTurn agentTurnOf(List<TranscriptTurn> turns, {ToolUse? pendingTool, bool capped = false}) {
   final prose = _proseBack(turns, turns.length);
   if (prose.prompt == null) {
-    return AgentTurn(prose: prose.text, at: prose.at, pendingTool: pendingTool);
+    return AgentTurn(prose: prose.text, at: prose.at, pendingTool: pendingTool, capped: capped);
   }
   final youAsked = promptTextOf(turns[prose.prompt!]);
   final earlier = prose.text.isEmpty ? _proseBack(turns, prose.prompt!).text : null;
@@ -104,6 +136,7 @@ AgentTurn agentTurnOf(List<TranscriptTurn> turns, {ToolUse? pendingTool}) {
     youAsked: youAsked,
     earlier: earlier == null || earlier.isEmpty ? null : earlier,
     reachedPrompt: true,
+    capped: capped,
     at: prose.at,
     pendingTool: pendingTool,
   );
@@ -134,19 +167,54 @@ bool _needsOlder(List<TranscriptTurn> turns, {required bool earlier}) {
   return _proseBack(turns, cur.prompt!).prompt == null;
 }
 
-/// The newest tool call in the newest page [turns] when it carries no result. Read
-/// from the newest page only: a result is attached to its call only when both are on
-/// one page, and the newest page holds everything newer than any call on it.
+/// Tools whose open call means a SUBAGENT is at work: a permission asked while one
+/// is open may be the subagent's own, which the main transcript does not hold.
+const Set<String> _subagentTools = {'Agent', 'Task'};
+
+/// The tool call a permission prompt waits on, read from the newest page [turns], or
+/// null unless that is UNAMBIGUOUS: exactly one call since the person's last prompt
+/// has no result, and it is not a subagent's dispatch. A wrong command on an
+/// approval screen is worse than none, and each of these would show a wrong one:
+///  * parallel calls (`rm -rf dist` and `git push --force`, both waiting): which of
+///    them is asking is not on disk;
+///  * an allow-listed call still running beside the one that asks;
+///  * a subagent asking: the main transcript's open call is the `Agent`/`Task` that
+///    started it, and its input is the subagent's brief.
+/// Read from the newest page only: a result is attached to its call only when both
+/// are on one page, and the newest page holds everything newer than any call on it.
+/// Show it through [permissionToolCall], which also checks it against the server.
 ToolUse? pendingToolUse(List<TranscriptTurn> turns) {
+  ToolUse? open;
   for (var i = turns.length - 1; i >= 0; i--) {
     final t = turns[i];
-    if (isHumanPrompt(t)) return null;
-    if (t.isAssistant && t.toolUses.isNotEmpty) {
-      final last = t.toolUses.last;
-      return last.result == null ? last : null;
+    if (isHumanPrompt(t)) break;
+    if (!t.isAssistant) continue;
+    for (final u in t.toolUses) {
+      if (u.result != null) continue;
+      if (open != null) return null;
+      open = u;
     }
   }
-  return null;
+  return open == null || _subagentTools.contains(open.name) ? null : open;
+}
+
+/// The call a permission prompt waits on, as the approval screen may show it:
+/// [pending] ([pendingToolUse]) when the server's own "now" line [now] agrees, else
+/// null. [now] is `brief.now`, written from the newest PreToolUse
+/// (`lib/session-brief.js` describeTool: `Bash <dot> <what>`, `Subagent: ...` for a
+/// subagent's call and `Subagent <dot> ...` for a dispatch, `<server> <dot> <tool>`
+/// for an MCP tool; the dot is U+00B7). A subagent's line, or one naming another
+/// tool, means the open call in the transcript is not the one asking. No line (an
+/// older server, no hooks) leaves [pending] as the transcript says.
+ToolUse? permissionToolCall(ToolUse? pending, String? now) {
+  if (pending == null) return null;
+  final line = now?.trim() ?? '';
+  if (line.isEmpty) return pending;
+  if (line.startsWith('Subagent')) return null;
+  final head = line.split(' \u00b7 ').first.trim();
+  final name = pending.name;
+  final want = name.startsWith('mcp__') ? name.split('__')[1] : name;
+  return head == want ? pending : null;
 }
 
 /// One transcript page: older than [before] (null for the newest), at most [limit].
@@ -168,7 +236,9 @@ Future<AgentTurn> loadAgentTurn(TranscriptPageReader read, {bool earlier = true}
     turns = [...page.messages, ...turns];
     cursor = page.cursor;
   }
-  return agentTurnOf(turns, pendingTool: pendingToolUse(first.messages));
+  // Stopped by the cap, not by the prompt or the transcript's start.
+  final capped = cursor != null && turns.length >= kAgentTurnMaxTurns && _needsOlder(turns, earlier: false);
+  return agentTurnOf(turns, pendingTool: pendingToolUse(first.messages), capped: capped);
 }
 
 /// What a tool call [t] acts on, as the person approving it needs to read it: a

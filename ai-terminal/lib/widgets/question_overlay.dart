@@ -510,6 +510,7 @@ final RegExp _inlineMd = RegExp(r'`([^`]+)`|\*\*([^*]+)\*\*');
 const double kHeaderH = 68; // title + icon buttons
 const double kFooterH = 66; // the two action buttons (nav strip is behind a toggle)
 const double kTabStripH = 38; // multi-question chip strip
+const double kKeysRowH = 36; // the raw-key row, two rows of keys at a phone width (#108)
 const double kCtxChrome = 50; // lead-up panel margin + padding + label row
 const double kOptionRowMax = 96; // label + a two-line description at 412dp
 const double kOptionPeek = 16; // a deliberate half-row: "there is more below"
@@ -530,7 +531,6 @@ const double kOptionFloor = 2 * kOptionRowMax + kOptionPeek; // 268
 /// Below this the panel renders as its header row alone — collapsed, but always
 /// tappable, because it is the only route back to the context.
 const double kCtxMinUseful = 96;
-const double kCtxMax = 300;
 
 // --- The wide layout (#108) --------------------------------------------------
 //
@@ -641,6 +641,7 @@ class QuestionOverlay extends StatelessWidget {
     required this.onDismiss,
     required this.onKey,
     this.contextText,
+    this.contextLabel = 'Claude said',
     this.drafts,
     this.draftKey = '',
   });
@@ -649,6 +650,9 @@ class QuestionOverlay extends StatelessWidget {
   final QuestionDrafts? drafts;
   final String draftKey;
   final String? contextText;
+
+  /// The heading over [contextText] ([QuestionAnswerPanel.contextLabel]).
+  final String contextLabel;
   final void Function(List<AnswerFrame> frames) onSend;
 
   /// Hide the overlay without answering (raw key strip / terminal still works).
@@ -671,6 +675,7 @@ class QuestionOverlay extends StatelessWidget {
               onDismiss: onDismiss,
               onKey: onKey,
               contextText: contextText,
+              contextLabel: contextLabel,
               drafts: drafts,
               draftKey: draftKey,
               autofocus: true,
