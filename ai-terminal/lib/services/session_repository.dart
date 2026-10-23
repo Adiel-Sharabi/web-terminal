@@ -150,6 +150,9 @@ class SessionRepository {
   /// Per-server `session-handoff` capability (#340), from the same call.
   final Map<String, bool> _handoffSupported = <String, bool>{};
 
+  /// Per-server `inbox-digest` capability (#383), from the same call.
+  final Map<String, bool> _digestSupported = <String, bool>{};
+
   // Live `/ws/notify` subscriptions, keyed by server base URL, alongside the
   // exact [ServerConfig] each was opened with (to detect a token change).
   // Re-synced from [AppConfig.serversStream] as servers are added/removed.
@@ -335,6 +338,10 @@ class SessionRepository {
 
   /// Whether the server at [baseUrl] can hand a session off to a fresh one (#340).
   bool supportsHandoff(String baseUrl) => _handoffSupported[baseUrl] ?? false;
+
+  /// Whether the server at [baseUrl] writes an AI summary of a wait
+  /// (`GET /api/sessions/:id/digest`, #383). An older one has no such route.
+  bool supportsDigest(String baseUrl) => _digestSupported[baseUrl] ?? false;
 
   /// THE rule for offering "Hand off" (#340): the server named this session a candidate
   /// (`handoff.suggest` - it owns the context threshold and the task-boundary gates),
@@ -612,6 +619,7 @@ class SessionRepository {
     _clearWaitSupported.remove(baseUrl);
     _machineSupported.remove(baseUrl);
     _handoffSupported.remove(baseUrl);
+    _digestSupported.remove(baseUrl);
   }
 
   /// Updates [_apiErrors], [_compacting] and [_submitUnconfirmedAt] from a
@@ -1100,6 +1108,7 @@ class SessionRepository {
       _clearWaitSupported[server.baseUrl] = info.has('session-clear-wait');
       _machineSupported[server.baseUrl] = info.has('machine-profile');
       _handoffSupported[server.baseUrl] = info.has('session-handoff');
+      _digestSupported[server.baseUrl] = info.has('inbox-digest');
       final color = info.serverColor;
       if (color != null) _serverColor[server.baseUrl] = color;
       _namesResolved.add(server.baseUrl);

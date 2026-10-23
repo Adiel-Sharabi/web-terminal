@@ -395,6 +395,24 @@ class ApiClient {
     return body.map((e) => e.toString()).toList(growable: false);
   }
 
+  /// How long a digest is waited for. The server runs a model to answer, which takes
+  /// seconds when warm and is cut off by the server at about 90 s, plus any time
+  /// queued behind other runs; a shorter deadline here would abandon a run the server
+  /// then caches for nobody.
+  static const Duration digestTimeout = Duration(seconds: 100);
+
+  /// An AI summary of what [sessionId] waits on you for
+  /// (`GET /api/sessions/:id/digest`, #383). Only for a server that advertises
+  /// `inbox-digest`. A `503 unavailable` or `502 failed` is an ANSWER, returned with
+  /// its reason, not thrown. [peek] returns only a summary the server already has
+  /// (`missing` when it has none) and never starts a run. Throws [ApiException] on
+  /// anything else, a timeout or an unreachable server included.
+  Future<InboxDigest> digest(String sessionId, {bool peek = false}) async {
+    final res = await _send('GET', '/api/sessions/$sessionId/digest',
+        query: peek ? const {'peek': '1'} : null, timeout: digestTimeout, alsoAccept: const {502, 503});
+    return InboxDigest.fromJson(_asMap(_decode(res)));
+  }
+
   /// Reads the structured attention record for [sessionId]
   /// (`GET /api/sessions/:id/attention`).
   Future<AttentionInfo> attention(String sessionId) async {
@@ -862,8 +880,10 @@ class ApiClient {
     Map<String, String>? query,
     Map<String, String>? extraHeaders,
     Duration? timeout,
+    Set<int> alsoAccept = const {},
   }) async {
-    // Per-call deadline, defaulting to the shared one. Only /api/resources sets it.
+    // Per-call deadline, defaulting to the shared one. [alsoAccept]: error statuses
+    // whose body is an answer the caller reads, not a failure.
     final deadline = timeout ?? _timeout;
     var uri = Uri.parse('${server.baseUrl}$path');
     if (query != null) uri = uri.replace(queryParameters: query);
@@ -893,7 +913,7 @@ class ApiClient {
         default:
           throw ApiException(0, 'Unsupported method $method');
       }
-      if (res.statusCode < 200 || res.statusCode >= 300) {
+      if ((res.statusCode < 200 || res.statusCode >= 300) && !alsoAccept.contains(res.statusCode)) {
         throw ApiException(res.statusCode, _errorMessage(res));
       }
       return res;
