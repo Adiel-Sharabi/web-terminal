@@ -95,8 +95,9 @@ class QuestionAnswerPanel extends StatefulWidget {
 
   /// Shown in the lead-up panel's place of [contextText], when the caller has more
   /// than one text to put there (#383: the inbox's AI summary, with the agent's own
-  /// words behind a toggle). The panel's size budget, its collapse and its
-  /// open-at-the-end scroll are the same for both. Null shows [contextText].
+  /// words behind a toggle). The panel's size budget and its collapse are the
+  /// same for both; a body opens at its top, where [contextText] opens at its
+  /// end. Null shows [contextText].
   final Widget? contextBody;
 
   /// The heading over [contextText]: "Claude said" for the agent's own words; the
@@ -816,7 +817,12 @@ class _QuestionAnswerPanelState extends State<QuestionAnswerPanel> {
                   // scroll up. `reverse` anchors the viewport to the bottom
                   // of the text, so a lead-up that arrives after the card is
                   // up, or grows, still opens at its end.
-                  reverse: true,
+                  //
+                  // A [contextBody] opens at the TOP: the inbox's summary
+                  // reads About -> Asking -> Good to know, and opened at its
+                  // end it showed the last facts with About scrolled away
+                  // (seen on the real app, not in a test).
+                  reverse: widget.contextBody == null,
                   // #108 — RENDERED, not raw. This was a plain Text, so the
                   // agent's own formatting arrived as literal syntax: a
                   // screenshot showed `**6 approved and marked Committed, 1

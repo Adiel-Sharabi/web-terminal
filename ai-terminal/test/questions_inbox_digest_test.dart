@@ -422,6 +422,30 @@ void main() {
       await done(tester);
     });
 
+    testWidgets('a summary taller than its slot opens at its top: About first, not the last fact', (tester) async {
+      oneQuestion();
+      digestAnswers = {
+        'q': [
+          (200, _ready(
+              about: 'TOP_ABOUT the session moved the cache.',
+              asking: ['Which store?'],
+              know: List.generate(14, (i) => 'KNOW_$i: a fact that matters for the choice, long enough to wrap on a desktop panel too.'))),
+        ],
+      };
+      await pump(tester, await repo());
+      await settle(tester);
+      final scroller = find
+          .ancestor(of: find.byKey(const ValueKey('inbox-digest')), matching: find.byType(SingleChildScrollView))
+          .first;
+      final view = tester.getRect(scroller);
+      final pos = tester.state<ScrollableState>(find.descendant(of: scroller, matching: find.byType(Scrollable)).first).position;
+      expect(pos.maxScrollExtent, greaterThan(0), reason: 'the summary must overflow its slot, or this proves nothing');
+      final about = tester.getRect(find.byKey(const ValueKey('inbox-digest-about')));
+      expect(about.top, greaterThanOrEqualTo(view.top - 0.5), reason: 'About is in view, not scrolled off the top');
+      expect(about.top, lessThan(view.bottom));
+      await done(tester);
+    });
+
     testWidgets('phone 360x640: a long summary yields, the options and Send stay on screen', (tester) async {
       oneQuestion();
       digestAnswers = {
