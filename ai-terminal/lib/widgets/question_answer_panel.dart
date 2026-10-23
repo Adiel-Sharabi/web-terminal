@@ -74,6 +74,7 @@ class QuestionAnswerPanel extends StatefulWidget {
     this.onKey,
     this.contextText,
     this.contextBody,
+    this.contextAtTop = false,
     this.contextLabel = 'Claude said',
     this.drafts,
     this.draftKey = '',
@@ -96,9 +97,14 @@ class QuestionAnswerPanel extends StatefulWidget {
   /// Shown in the lead-up panel's place of [contextText], when the caller has more
   /// than one text to put there (#383: the inbox's AI summary, with the agent's own
   /// words behind a toggle). The panel's size budget and its collapse are the
-  /// same for both; a body opens at its top, where [contextText] opens at its
-  /// end. Null shows [contextText].
+  /// same for both, and so is where it opens: at its end ([contextAtTop] says
+  /// otherwise). Null shows [contextText].
   final Widget? contextBody;
+
+  /// Opens [contextBody] at its TOP rather than its end: only for a body that
+  /// reads from its head, the inbox's ready summary (About first). The agent's
+  /// own words, in any wrapper, open at their end, next to the question (#108).
+  final bool contextAtTop;
 
   /// The heading over [contextText]: "Claude said" for the agent's own words; the
   /// "You asked / Earlier it said" fallback goes under its own heading, because an
@@ -818,11 +824,13 @@ class _QuestionAnswerPanelState extends State<QuestionAnswerPanel> {
                   // of the text, so a lead-up that arrives after the card is
                   // up, or grows, still opens at its end.
                   //
-                  // A [contextBody] opens at the TOP: the inbox's summary
-                  // reads About -> Asking -> Good to know, and opened at its
-                  // end it showed the last facts with About scrolled away
-                  // (seen on the real app, not in a test).
-                  reverse: widget.contextBody == null,
+                  // A [contextBody] the caller marks [contextAtTop] opens at the
+                  // TOP: the inbox's summary reads About -> Asking -> Good to
+                  // know, and opened at its end it showed the last facts with
+                  // About scrolled away (seen on the real app, not in a test).
+                  // Any other body is the agent's words again, and opens at
+                  // its end like them.
+                  reverse: !(widget.contextBody != null && widget.contextAtTop),
                   // #108 — RENDERED, not raw. This was a plain Text, so the
                   // agent's own formatting arrived as literal syntax: a
                   // screenshot showed `**6 approved and marked Committed, 1

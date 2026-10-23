@@ -26,6 +26,7 @@ import 'package:http/testing.dart';
 import 'package:shared_preferences/shared_preferences.dart';
 
 const _home = ServerConfig(name: 'Home', baseUrl: 'http://h:7681', bearerToken: 'tok');
+const _peer = ServerConfig(name: 'Peer', baseUrl: 'http://p:7681', bearerToken: 'tok');
 
 http.Response _json(Object body, [int status = 200]) => http.Response.bytes(utf8.encode(jsonEncode(body)), status,
     headers: {'content-type': 'application/json; charset=utf-8'});
@@ -153,12 +154,14 @@ void main() {
   late List<Completer<void>> digestHolds; // each holds the next digest answer, in order
   late int holdAt; // how many of [digestHolds] have been taken
   late List<String> digestCalls; // session ids, in order
+  late Set<String> down; // base URLs that answer nothing; their digest call never returns
 
   ApiClient client(ServerConfig s) => ApiClient(s, httpClient: MockClient((req) async {
         final p = req.url.path;
         final id = RegExp(r'^/api/sessions/([^/]+)/').firstMatch(p)?.group(1);
         if (p.endsWith('/digest')) {
           digestCalls.add(id!);
+          if (down.contains(s.baseUrl)) await Completer<void>().future;
           // A runaway re-ask loop is a failure, not a hang: past this, never answered.
           if (digestCalls.length > 20) await Completer<void>().future;
           final list = digestAnswers[id] ?? [(200, {'status': 'none', 'waitKey': null})];
@@ -166,6 +169,7 @@ void main() {
           if (holdAt < digestHolds.length) await digestHolds[holdAt++].future;
           return _json(a.$2, a.$1);
         }
+        if (down.contains(s.baseUrl)) throw http.ClientException('down');
         if (p.endsWith('/pending-question')) {
           final q = questions[id];
           return _json(q == null ? {'pending': false} : {'pending': true, 'question': q});
@@ -191,10 +195,10 @@ void main() {
         return http.Response('', 404);
       }));
 
-  Future<SessionRepository> repo() async {
+  Future<SessionRepository> repo({List<ServerConfig> servers = const [_home]}) async {
     SharedPreferences.setMockInitialValues({
       ServerStore.storageKey: jsonEncode([
-        {'name': _home.name, 'baseUrl': _home.baseUrl, 'bearerToken': _home.bearerToken},
+        for (final sv in servers) {'name': sv.name, 'baseUrl': sv.baseUrl, 'bearerToken': sv.bearerToken},
       ]),
     });
     final store = ServerStore.forTest();
@@ -213,6 +217,7 @@ void main() {
     digestHolds = [];
     holdAt = 0;
     digestCalls = [];
+    down = {};
   });
   tearDown(SessionSelection.instance.reset);
 
@@ -223,7 +228,8 @@ void main() {
     }
   }
 
-  Future<void> pump(WidgetTester tester, SessionRepository r, {double width = 1400, double height = 1000}) async {
+  Future<void> pump(WidgetTester tester, SessionRepository r,
+      {double width = 1400, double height = 1000, List<ServerConfig> servers = const [_home]}) async {
     tester.view.physicalSize = Size(width, height);
     tester.view.devicePixelRatio = 1;
     addTearDown(tester.view.resetPhysicalSize);
@@ -233,7 +239,7 @@ void main() {
       theme: AppTheme.dark,
       home: QuestionsInboxScreen(
         repository: r,
-        servers: () => const [_home],
+        servers: () => servers,
         clientFactory: client,
         sessionInput: (s, body) async => true,
         pollInterval: every,
@@ -337,7 +343,8 @@ void main() {
       await done(tester);
     });
 
-    testWidgets('failed: today\'s lead-up, open, with a retry that asks again', (tester) async {
+    testWidgets('failed: today\'s lead-up, open; a retry only once the server forgot the failure, and it asks again',
+        (tester) async {
       oneQuestion();
       digestAnswers = {
         'q': [
@@ -350,8 +357,15 @@ void main() {
       expect(text('LEAD_TAIL'), findsOneWidget, reason: 'the words, as today');
       expect(panel(tester).contextLabel, 'Claude said');
       expect(find.byKey(const ValueKey('inbox-digest')), findsNothing);
-      expect(find.text('Summary failed - retry'), findsOneWidget);
       expect(find.textContaining('error', findRichText: true), findsNothing, reason: 'no error banner');
+      // Inside the server's failure memory a retry would get the same 502 at once.
+      expect(find.text('Summary failed - try again in a minute'), findsOneWidget);
+      expect(find.byKey(const ValueKey('inbox-digest-retry')), findsNothing, reason: 'no button that cannot work');
+      await tester.pump(kDigestFailureMemory - const Duration(seconds: 1));
+      expect(find.byKey(const ValueKey('inbox-digest-retry')), findsNothing, reason: 'measured from the failure');
+      await tester.pump(const Duration(seconds: 2));
+      expect(find.text('Summary failed - retry'), findsOneWidget);
+      expect(find.byKey(const ValueKey('inbox-digest-retry-wait')), findsNothing);
       expect(digestCalls, ['q']);
       await tester.tap(find.byKey(const ValueKey('inbox-digest-retry')));
       await settle(tester);
@@ -400,8 +414,14 @@ void main() {
       expect(t.maxLines, 2);
       expect(t.overflow, TextOverflow.ellipsis);
       expect(t.textSpan!.toPlainText(), contains('CARD_ASK'));
-      expect(find.descendant(of: find.byKey(const ValueKey('inbox-card-http://h:7681|q')), matching: text('SECOND_ASK')),
-          findsNothing);
+      expect(t.textSpan!.toPlainText(), startsWith('\u2066AI summary:\u2069'), reason: 'labelled as the AI\'s');
+      final card = find.byKey(const ValueKey('inbox-card-http://h:7681|q'));
+      expect(find.descendant(of: card, matching: text('SECOND_ASK')), findsNothing);
+      // The real question is still the card's, and the AI line is added BELOW it.
+      final real = find.descendant(of: card, matching: find.byKey(const ValueKey('inbox-snippet-http://h:7681|q')));
+      expect(real, findsOneWidget);
+      expect(tester.widget<Text>(real).textSpan!.toPlainText(), contains('Pick one'));
+      expect(tester.getRect(row).top, greaterThanOrEqualTo(tester.getRect(real).bottom));
       await done(tester);
     });
 
@@ -590,7 +610,10 @@ void main() {
       holds[0].complete();
       await settle(tester);
       expect(text('REPLY_ASK_1'), findsWidgets, reason: 'a summary seconds old is still the summary');
-      expect(digestCalls, ['c', 'c'], reason: 'and the newest is asked for as soon as it lands');
+      expect(digestCalls, ['c'], reason: 'not again so soon: the server would answer from its cache');
+      await tester.pump(kDigestReplyReaskAfter);
+      await settle(tester);
+      expect(digestCalls, ['c', 'c'], reason: 'and the newest is asked for once the time is up');
       holds[1].complete();
       await settle(tester);
       expect(text('REPLY_ASK_2'), findsWidgets);
@@ -617,7 +640,16 @@ void main() {
       expect(find.byKey(const ValueKey('inbox-digest')), findsOneWidget);
       expect(tester.widget<SelectableText>(find.byKey(const ValueKey('inbox-tool-call'))).data, cmd);
       final card = find.byKey(const ValueKey('inbox-card-http://h:7681|p'));
-      expect(find.descendant(of: card, matching: find.text(cmd)), findsOneWidget, reason: 'the card\'s too');
+      final cardCmd = find.descendant(of: card, matching: find.text(cmd));
+      expect(cardCmd, findsOneWidget, reason: 'the card\'s too');
+      // The card keeps the real reason as its permission line; the summary's ask is an
+      // extra line UNDER the command, labelled, never in place of either.
+      final reason = find.descendant(of: card, matching: text('Permission:'));
+      expect(reason, findsOneWidget);
+      expect(tester.widget<RichText>(reason).text.toPlainText(), contains('Bash \u00b7 Clean'));
+      final ai = find.descendant(of: card, matching: find.byKey(const ValueKey('inbox-digest-row-http://h:7681|p')));
+      expect(tester.widget<Text>(ai).textSpan!.toPlainText(), contains('AI summary'));
+      expect(tester.getRect(ai).top, greaterThanOrEqualTo(tester.getRect(cardCmd).bottom));
       expect(find.text('Wants to run'), findsOneWidget);
       // The lead-up folds; opened, it is the same clamped lead as today.
       expect(find.byKey(const ValueKey('inbox-lead')), findsNothing);
@@ -651,9 +683,299 @@ void main() {
       await pump(tester, await repo());
       await settle(tester);
       expect(find.byKey(const ValueKey('inbox-last-reply')), findsOneWidget);
-      expect(find.byKey(const ValueKey('inbox-digest-retry')), findsOneWidget);
+      expect(find.byKey(const ValueKey('inbox-digest-retry-wait')), findsOneWidget);
       expect(find.byKey(const ValueKey('inbox-full-toggle')), findsNothing);
+      await tester.pump(kDigestFailureMemory);
+      expect(find.byKey(const ValueKey('inbox-digest-retry')), findsOneWidget);
       await done(tester);
     });
+  });
+
+  group('one wait\'s summary is never another\'s', () {
+    Map<String, dynamic> idle(int act) => _row('c', 'Idle', lastActivity: act);
+
+    testWidgets('a reply, then work, then a new reply: the first reply\'s summary is never shown under the second',
+        (tester) async {
+      final r = await repo();
+      rows = {_home.baseUrl: [idle(1)]};
+      transcripts = {'c': [_typed('ship it'), _say('Built. Should I deploy to prod?')]};
+      digestHolds = [Completer<void>()..complete(), Completer<void>()];
+      digestAnswers = {
+        'c': [
+          (200, _ready(asking: ['DEPLOY_ASK'])),
+          (200, _ready(asking: ['MERGE_ASK'])),
+        ],
+      };
+      await pump(tester, r);
+      await settle(tester);
+      expect(text('DEPLOY_ASK'), findsWidgets);
+      rows = {_home.baseUrl: [_row('c', 'Idle', status: 'working', lastActivity: 2)]};
+      await tester.runAsync(() => r.refresh());
+      await settle(tester);
+      rows = {_home.baseUrl: [idle(3)]};
+      transcripts = {'c': [_typed('ship it'), _say('Deployed. Should I merge the PR?')]};
+      await tester.runAsync(() => r.refresh());
+      await settle(tester);
+      expect(text('Should I merge'), findsWidgets, reason: 'the new reply is listed');
+      expect(text('DEPLOY_ASK'), findsNothing, reason: 'a "yes" typed now answers the merge, not the deploy');
+      expect(find.byKey(const ValueKey('inbox-digest-loading')), findsOneWidget);
+      expect(digestCalls, ['c', 'c'], reason: 'a new reply after work is asked for at once');
+      digestHolds[1].complete();
+      await settle(tester);
+      expect(text('MERGE_ASK'), findsWidgets);
+      await done(tester);
+    });
+
+    testWidgets('a reply summary that lands after the session went to work is not shown under its next reply',
+        (tester) async {
+      final r = await repo();
+      rows = {_home.baseUrl: [idle(1)]};
+      transcripts = {'c': [_typed('ship it'), _say('Built. Should I deploy to prod?')]};
+      digestHolds = [Completer<void>(), Completer<void>()];
+      final holds = [...digestHolds];
+      digestAnswers = {
+        'c': [
+          (200, _ready(asking: ['DEPLOY_ASK'])),
+          (200, _ready(asking: ['MERGE_ASK'])),
+        ],
+      };
+      await pump(tester, r);
+      await settle(tester);
+      expect(digestCalls, ['c']);
+      rows = {_home.baseUrl: [_row('c', 'Idle', status: 'working', lastActivity: 2)]};
+      await tester.runAsync(() => r.refresh());
+      await settle(tester);
+      rows = {_home.baseUrl: [idle(3)]};
+      transcripts = {'c': [_typed('ship it'), _say('Deployed. Should I merge the PR?')]};
+      await tester.runAsync(() => r.refresh());
+      await settle(tester);
+      holds[0].complete();
+      await settle(tester);
+      expect(text('Should I merge'), findsWidgets);
+      expect(text('DEPLOY_ASK'), findsNothing, reason: 'it landed for a reply the session has left');
+      expect(find.byKey(const ValueKey('inbox-digest-loading')), findsOneWidget);
+      holds[1].complete();
+      await settle(tester);
+      expect(text('MERGE_ASK'), findsWidgets);
+      await done(tester);
+    });
+
+    testWidgets('the same question, answered and then asked again, is summarised anew', (tester) async {
+      final r = await repo();
+      oneQuestion();
+      digestAnswers = {
+        'q': [
+          (200, _ready(asking: ['FIRST_TIME'])),
+          (200, _ready(asking: ['SECOND_TIME'])),
+        ],
+      };
+      await pump(tester, r);
+      await settle(tester);
+      expect(inPanel(text('FIRST_TIME')), findsOneWidget);
+      // Answered: the session goes back to idle with nothing to ask.
+      rows = {_home.baseUrl: [_row('q', 'Asker', lastActivity: 2)]};
+      questions = {};
+      transcripts = {'q': [_typed('go'), _say('Done.')]};
+      await tester.runAsync(() => r.refresh());
+      await settle(tester);
+      // The same words, even the same tool-call id: only leaving the inbox tells them apart.
+      oneQuestion();
+      await tester.runAsync(() => r.refresh());
+      await settle(tester);
+      expect(digestCalls, ['q', 'q']);
+      expect(inPanel(text('SECOND_TIME')), findsOneWidget);
+      expect(text('FIRST_TIME'), findsNothing);
+      await done(tester);
+    });
+
+    testWidgets('the same question asked again by a new tool call, without leaving, is summarised anew', (tester) async {
+      final r = await repo();
+      oneQuestion();
+      digestAnswers = {
+        'q': [
+          (200, _ready(asking: ['FIRST_CALL'])),
+          (200, _ready(asking: ['SECOND_CALL'])),
+        ],
+      };
+      await pump(tester, r);
+      await settle(tester);
+      expect(digestCalls, ['q']);
+      questions = {'q': _single('Pick one', id: 't2')};
+      // The question is re-read at most every few seconds of real time.
+      await tester.runAsync(() => Future<void>.delayed(const Duration(milliseconds: 4300)));
+      await tester.runAsync(() => r.refresh());
+      await settle(tester);
+      expect(digestCalls, ['q', 'q']);
+      expect(inPanel(text('SECOND_CALL')), findsOneWidget);
+      await done(tester);
+    });
+  });
+
+  group('fetching, review fixes', () {
+    testWidgets('a reply is not asked again within the re-ask time while its summary is shown', (tester) async {
+      final r = await repo();
+      rows = {_home.baseUrl: [_row('c', 'Idle', lastActivity: 1)]};
+      transcripts = {'c': [_typed('push it'), _say('Tests pass. Should I push it?')]};
+      digestAnswers = {'c': [(200, _ready(asking: ['REPLY_ASK']))]};
+      await pump(tester, r);
+      await settle(tester);
+      for (var act = 2; act < 6; act++) {
+        rows = {_home.baseUrl: [_row('c', 'Idle', lastActivity: act)]};
+        await tester.runAsync(() => r.refresh());
+        await settle(tester);
+      }
+      expect(digestCalls, ['c'], reason: 'a repaint is not a new reply to summarise');
+      expect(text('REPLY_ASK'), findsWidgets);
+      await tester.pump(kDigestReplyReaskAfter);
+      await settle(tester);
+      expect(digestCalls, ['c', 'c'], reason: 'once the time is up, the newest is asked for');
+      await done(tester);
+    });
+
+    testWidgets('an offline peer\'s items take no slot; a reachable item gets its summary', (tester) async {
+      const both = [_home, _peer];
+      final r = await repo(servers: both);
+      rows = {
+        _peer.baseUrl: [
+          for (var i = 0; i < 3; i++)
+            // Permissions: their wait is stamped from the row alone, so they would be
+            // asked for even though nothing else about them can be read.
+            _row('o$i', 'Off$i', status: 'waiting', waitingFor: 'permission', lastActivity: i + 1, brief: _brief('Bash \u00b7 x', i + 1)),
+        ],
+        _home.baseUrl: [_row('h', 'Home', status: 'waiting', waitingFor: 'question', lastActivity: 50)],
+      };
+      questions = {
+        'h': _single('Home Q', id: 'h'),
+      };
+      digestAnswers = {'h': [(200, _ready(asking: ['HOME_ASK']))]};
+      // Seen once while up (rows, questions and the capability), then down for good.
+      await tester.runAsync(() => r.refresh());
+      down = {_peer.baseUrl};
+      for (var i = 0; i < SessionRepository.offlineAfterFailures; i++) {
+        await tester.runAsync(() => r.refresh());
+      }
+      expect(r.serverUsable[_peer.baseUrl], isFalse, reason: 'precondition: the peer is offline');
+      expect(r.supportsDigest(_peer.baseUrl), isTrue, reason: 'precondition: it said it writes summaries');
+      await pump(tester, r, servers: both);
+      await settle(tester);
+      expect(find.byKey(const ValueKey('inbox-card-http://p:7681|o0')), findsOneWidget,
+          reason: 'precondition: its items are still listed');
+      expect(digestCalls.where((c) => c.startsWith('o')), isEmpty, reason: 'nothing is asked of a server that is down');
+      expect(digestCalls, ['h']);
+      expect(text('HOME_ASK'), findsWidgets);
+      await done(tester);
+    });
+
+    testWidgets('focusing an item already waiting for a slot moves it to the front', (tester) async {
+      rows = {
+        _home.baseUrl: [
+          for (var i = 0; i < 5; i++) _row('s$i', 'S$i', status: 'waiting', waitingFor: 'question', lastActivity: i + 1),
+        ],
+      };
+      questions = {for (var i = 0; i < 5; i++) 's$i': _single('Q$i', id: 'id$i')};
+      digestHolds = List.generate(5, (_) => Completer<void>());
+      final holds = [...digestHolds];
+      await pump(tester, await repo());
+      await settle(tester);
+      expect(digestCalls.length, 3);
+      final queued = [for (var i = 0; i < 5; i++) 's$i'].where((x) => !digestCalls.contains(x)).toList();
+      expect(queued.length, 2);
+      final last = queued.last;
+      await tester.tap(find.byKey(ValueKey('inbox-open-http://h:7681|$last')));
+      await settle(tester);
+      holds[0].complete();
+      await settle(tester);
+      expect(digestCalls[3], last, reason: 'the item on screen is the next one written');
+      await done(tester);
+    });
+  });
+
+  group('layout, review fixes', () {
+    String paragraphs(String head, String tail) =>
+        [head, for (var i = 0; i < 30; i++) 'Paragraph $i of what the agent said before it asked.', tail].join('\n\n');
+
+    Rect scrollerOf(WidgetTester tester, Finder f) =>
+        tester.getRect(find.ancestor(of: f, matching: find.byType(SingleChildScrollView)).first);
+
+    testWidgets('a failed summary\'s lead-up opens at its END, next to the question', (tester) async {
+      oneQuestion(lead: paragraphs('LEAD_HEAD', 'LEAD_TAIL'));
+      digestAnswers = {'q': [(502, {'status': 'failed', 'reason': 'timeout'})]};
+      await pump(tester, await repo());
+      await settle(tester);
+      final tail = inPanel(text('LEAD_TAIL'));
+      final view = scrollerOf(tester, tail);
+      expect(tester.getRect(tail).bottom, lessThanOrEqualTo(view.bottom + 0.5), reason: 'its end is in view');
+      expect(tester.getRect(tail).top, greaterThanOrEqualTo(view.top));
+      expect(tester.getRect(inPanel(text('LEAD_HEAD'))).bottom, lessThan(view.top), reason: 'it overflows: the head is a scroll up');
+      await done(tester);
+    });
+
+    testWidgets('a ready summary with its full context opened opens at the END of the words', (tester) async {
+      oneQuestion(lead: paragraphs('LEAD_HEAD', 'LEAD_TAIL'));
+      digestAnswers = {'q': [(200, _ready())]};
+      await pump(tester, await repo());
+      await settle(tester);
+      await tester.tap(find.byKey(const ValueKey('inbox-full-toggle')));
+      await tester.pumpAndSettle();
+      final tail = inPanel(text('LEAD_TAIL'));
+      final view = scrollerOf(tester, tail);
+      expect(tester.getRect(tail).bottom, lessThanOrEqualTo(view.bottom + 0.5));
+      expect(tester.getRect(tail).top, greaterThanOrEqualTo(view.top));
+      await done(tester);
+    });
+
+    testWidgets('a failed summary with no lead-up has no "Claude said" over nothing; its retry still shows',
+        (tester) async {
+      rows = {_home.baseUrl: [_row('q', 'Asker', status: 'waiting', waitingFor: 'question', lastActivity: 1)]};
+      questions = {'q': _single('Pick one')}; // no transcript: no lead-up
+      digestAnswers = {'q': [(502, {'status': 'failed', 'reason': 'timeout'})]};
+      await pump(tester, await repo());
+      await settle(tester);
+      expect(find.text('Claude said'), findsNothing);
+      expect(panel(tester).contextBody, isNull);
+      expect(find.byKey(const ValueKey('inbox-digest-retry-wait')), findsOneWidget);
+      await done(tester);
+    });
+
+    testWidgets('phone 360x640, permission: the command is on screen with the actions, the summary below it',
+        (tester) async {
+      const cmd = 'git push origin feature';
+      rows = {
+        _home.baseUrl: [
+          _row('p', 'Pusher', status: 'waiting', waitingFor: 'permission', lastActivity: 1, brief: _brief('Bash \u00b7 Push', 1)),
+        ],
+      };
+      transcripts = {'p': [_typed('push'), _say('About to push.'), _call(cmd)]};
+      digestAnswers = {
+        'p': [
+          (200, _ready(
+              about: List.filled(6, 'The session finished the feature and is ready to publish it to the remote.').join(' '),
+              asking: ['Allow the session to push the feature branch to origin?'],
+              know: List.generate(6, (i) => 'KNOW_$i: a fact that matters for the choice, long enough to wrap twice on a phone.'))),
+        ],
+      };
+      await pump(tester, await repo(), width: 360, height: 640);
+      await settle(tester);
+      await tester.tap(find.byKey(const ValueKey('inbox-open-http://h:7681|p')));
+      await tester.pumpAndSettle();
+      await settle(tester);
+      expect(tester.takeException(), isNull);
+      expect(find.byKey(const ValueKey('inbox-digest')), findsOneWidget);
+      final command = tester.getRect(find.byKey(const ValueKey('inbox-tool-call')));
+      expect(command.top, greaterThanOrEqualTo(0));
+      expect(command.bottom, lessThanOrEqualTo(640), reason: 'the command is on screen');
+      final open = tester.getRect(find.byKey(const ValueKey('inbox-open-session')));
+      expect(open.bottom, lessThanOrEqualTo(640), reason: 'with the actions');
+      expect(command.bottom, lessThanOrEqualTo(open.top), reason: 'and not under them');
+      expect(tester.getRect(find.byKey(const ValueKey('inbox-digest'))).top, greaterThanOrEqualTo(command.bottom),
+          reason: 'the summary comes after the command');
+      await done(tester);
+    });
+  });
+
+  test('leadTeaser cuts on characters: an emoji is never split', () {
+    final t = leadTeaser('a${List.filled(20, '\u{1F600}').join()}', maxChars: 9);
+    expect(t.runes.any((r) => r >= 0xD800 && r <= 0xDFFF), isFalse, reason: 'no lone surrogate');
+    expect(t, '\u2026${List.filled(9, '\u{1F600}').join()}');
   });
 }

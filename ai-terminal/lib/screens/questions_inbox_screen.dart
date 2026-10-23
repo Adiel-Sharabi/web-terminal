@@ -90,6 +90,16 @@ const int kDigestMaxInFlight = 3;
 /// How many of its last lines a lead-up shows while its summary is being written.
 const int kDigestTeaserLines = 3;
 
+/// How long a server answers a failed summary from memory, with the same failure
+/// (`lib/inbox-digest.js`, `failureTtlMs`): a retry inside it cannot succeed, so none
+/// is offered until it has passed.
+const Duration kDigestFailureMemory = Duration(seconds: 60);
+
+/// A reply's summary is not asked for again sooner than this after the last one
+/// landed, while that one is still shown: its stamp follows lastActivity, which moves
+/// with every chunk of output, and the server answers the same wait from its cache.
+const Duration kDigestReplyReaskAfter = Duration(seconds: 20);
+
 /// What the focused view does with an item's AI summary (#383): [off] (the server
 /// writes none, or there is no wait to stamp yet) and [plain] (it answered that there
 /// is nothing to show) are today's view; [loading] and [ready] fold the agent's own
@@ -210,7 +220,23 @@ class _QuestionsInboxScreenState extends State<QuestionsInboxScreen> {
 
   /// The newest summary that landed for each session's REPLY stamp: shown under a
   /// newer one until that one lands, by the turn's own progress rule ([_turnFor]).
+  /// Only for as long as the session stays on a reply ([_pruneDigests]).
   final Map<String, ({String stamp, InboxDigest digest})> _digestLatest = {};
+
+  /// The reply stamp each session's newest reply summary was asked for, dropped when
+  /// the session leaves the reply: a summary that lands after that is not its latest
+  /// ([_turnWant]'s rule, for the summary).
+  final Map<String, String> _digestReplyWant = {};
+
+  /// Sessions whose reply summary landed less than [kDigestReplyReaskAfter] ago.
+  final Set<String> _digestCooling = {};
+
+  /// Sessions whose summary the SERVER answered as failed less than
+  /// [kDigestFailureMemory] ago, each with the timer that ends it.
+  final Map<String, Timer> _digestFailedAt = {};
+
+  /// The timers above and the re-asks, cancelled with the screen.
+  final Set<Timer> _digestTimers = {};
 
   /// The `[sessionKey]|stamp` of each summary asked for and not yet answered.
   final Set<String> _digestsInFlight = {};
@@ -258,6 +284,9 @@ class _QuestionsInboxScreenState extends State<QuestionsInboxScreen> {
     _poll?.cancel();
     _focusTick?.cancel();
     _agentsTick?.cancel();
+    for (final t in _digestTimers) {
+      t.cancel();
+    }
     _sub?.cancel();
     _needs.removeListener(_onNeeds);
     _needs.dispose();
@@ -313,12 +342,6 @@ class _QuestionsInboxScreenState extends State<QuestionsInboxScreen> {
     _tails.removeWhere((k, _) => !live.contains(k));
     _expanded.removeWhere((k) => !live.contains(k));
     _cardOpen.removeWhere((k) => !_items.any((it) => it.key == k));
-    // Summaries are kept for every session still listed, item or not, so a wait that
-    // comes back is not asked for again; a session that is gone takes its own.
-    final listed = {for (final s in _sessions) sessionKey(s)};
-    bool gone(String key) => !listed.any((k) => key.startsWith('$k|'));
-    _digests.removeWhere((key, _) => gone(key));
-    _digestLatest.removeWhere((k, _) => !listed.contains(k));
   }
 
   /// What a session's current turn is read for, or null when none is needed: a
@@ -577,28 +600,91 @@ class _QuestionsInboxScreenState extends State<QuestionsInboxScreen> {
   /// The session listed under [k] now, if it still is.
   Session? _sessionAt(String k) => _sessions.where((x) => sessionKey(x) == k).firstOrNull;
 
+  /// Whether [s]'s server can be asked for a summary now: it writes them, and it is not
+  /// offline or signed out (the rule [_refreshAgents] asks by). A request to a server
+  /// that cannot answer holds one of the [kDigestMaxInFlight] slots until it times out.
+  bool _digestReachable(Session s) =>
+      _repo.supportsDigest(s.server.baseUrl) && _repo.serverUsable[s.server.baseUrl] != false;
+
+  /// The wait a summary is kept for: the turn's stamp ([_turnStamp]), and for a question
+  /// also its tool call, the id the server's own `waitKey` is built from. A question is
+  /// stamped by its words, so the same question asked again is the same turn read; it
+  /// is a new wait all the same, and its summary is written anew.
+  String? _digestStamp(Session s) {
+    final stamp = _turnStamp(s);
+    if (stamp == null || !stamp.startsWith('q|')) return stamp;
+    final id = _needs.questionFor(s)?.toolUseId ?? '';
+    return id.isEmpty ? stamp : '$stamp|$id';
+  }
+
+  /// Runs [fn] after [d], unless the screen goes first; [hold] is handed the timer.
+  void _after(Duration d, VoidCallback fn, {void Function(Timer t)? hold}) {
+    late final Timer t;
+    t = Timer(d, () {
+      _digestTimers.remove(t);
+      if (!_disposed) fn();
+    });
+    _digestTimers.add(t);
+    hold?.call(t);
+  }
+
+  /// Keeps only the summaries of the wait each listed session is in NOW: one answered,
+  /// or one it has moved on from, takes its own with it, so the same wait coming back
+  /// is summarised anew and the map does not grow with every lastActivity. And a
+  /// session that leaves its reply (to work, or to a question) loses its latest reply
+  /// summary, as [_refreshTurns] drops its turn, so the NEXT reply never shows it.
+  void _pruneDigests() {
+    final current = <String>{};
+    final onReply = <String>{};
+    for (final s in _sessions) {
+      final stamp = _digestStamp(s);
+      if (stamp == null) continue;
+      final k = sessionKey(s);
+      current.add('$k|$stamp');
+      if (_isReplyStamp(stamp)) onReply.add(k);
+    }
+    _digests.removeWhere((key, _) => !current.contains(key));
+    _digestLatest.removeWhere((k, _) => !onReply.contains(k));
+    _digestReplyWant.removeWhere((k, _) => !onReply.contains(k));
+  }
+
   /// Asks for the summary of every item that has none for the stamp it has NOW
-  /// ([_turnStamp], the turn's own rule: a question per question, a permission per
+  /// ([_digestStamp], the turn's own rule: a question per question, a permission per
   /// wait, a reply per lastActivity). A stamp that did not change asks nothing, so a
   /// poll that changed nothing costs nothing. A server that does not advertise
-  /// `inbox-digest` is never asked.
+  /// `inbox-digest`, or cannot be reached, is never asked.
   void _refreshDigests() {
     if (_disposed) return;
+    _pruneDigests();
     var added = false;
     for (final it in _items) {
       if (!_digestible(it)) continue;
       final s = it.session!;
-      if (!_repo.supportsDigest(s.server.baseUrl)) continue;
-      final stamp = _turnStamp(s);
+      if (!_digestReachable(s)) continue;
+      final stamp = _digestStamp(s);
       if (stamp == null) continue;
       final k = sessionKey(s);
       final key = '$k|$stamp';
+      final focused = it.key == _focusKey;
       if (_digests.containsKey(key) || _digestsInFlight.contains(key)) continue;
-      if (_digestQueue.any((q) => sessionKey(q.$1) == k && q.$2 == stamp)) continue;
-      // A reply is summarised one at a time per session, like its read: the one out
-      // asks again when it lands if lastActivity moved meanwhile ([_loadDigest]).
-      if (_isReplyStamp(stamp) && _digestsInFlight.any((f) => f.startsWith('$k|'))) continue;
-      if (it.key == _focusKey) {
+      final at = _digestQueue.indexWhere((q) => sessionKey(q.$1) == k && q.$2 == stamp);
+      if (at >= 0) {
+        // Already waiting for a slot: the focused item goes to the front of the queue.
+        if (focused && at > 0) {
+          _digestQueue.insert(0, _digestQueue.removeAt(at));
+          added = true;
+        }
+        continue;
+      }
+      if (_isReplyStamp(stamp)) {
+        // A reply is summarised one at a time per session, like its read: the one out
+        // asks again when it lands if lastActivity moved meanwhile ([_loadDigest]).
+        if (_digestsInFlight.any((f) => f.startsWith('$k|'))) continue;
+        // And not again within [kDigestReplyReaskAfter] of the last one, while that
+        // one is still shown: a timer asks once the time is up.
+        if (_digestCooling.contains(k) && _digestLatest.containsKey(k)) continue;
+      }
+      if (focused) {
         _digestQueue.insert(0, (s, stamp));
       } else {
         _digestQueue.add((s, stamp));
@@ -609,12 +695,12 @@ class _QuestionsInboxScreenState extends State<QuestionsInboxScreen> {
   }
 
   /// Starts queued summaries while a slot is free. One whose wait moved on while it
-  /// queued is dropped: the wait it is now in is queued on its own.
+  /// queued, or whose server went out of reach, is dropped: it is queued again as it is.
   void _pumpDigests() {
     while (_digestsInFlight.length < kDigestMaxInFlight && _digestQueue.isNotEmpty) {
       final (queued, stamp) = _digestQueue.removeAt(0);
       final s = _sessionAt(sessionKey(queued));
-      if (s == null || _turnStamp(s) != stamp) continue;
+      if (s == null || _digestStamp(s) != stamp || !_digestReachable(s)) continue;
       unawaited(_loadDigest(s, stamp));
     }
   }
@@ -626,9 +712,13 @@ class _QuestionsInboxScreenState extends State<QuestionsInboxScreen> {
     final k = sessionKey(s);
     final key = '$k|$stamp';
     _digestsInFlight.add(key);
+    final reply = _isReplyStamp(stamp);
+    if (reply) _digestReplyWant[k] = stamp;
     InboxDigest d;
+    var answered = false;
     try {
       d = await _client(s.server).digest(s.id);
+      answered = true;
     } on ApiException catch (e) {
       // 404: a server that says it has the route and does not is an older one.
       d = e.status == 404
@@ -640,7 +730,21 @@ class _QuestionsInboxScreenState extends State<QuestionsInboxScreen> {
     _digestsInFlight.remove(key);
     if (_disposed) return;
     _digests[key] = d;
-    if (_isReplyStamp(stamp)) _digestLatest[k] = (stamp: stamp, digest: d);
+    if (reply) {
+      // The session's latest only while it is still on the reply this was asked for:
+      // one that has left it since must not get an older reply's words back.
+      if (_digestReplyWant[k] == stamp) _digestLatest[k] = (stamp: stamp, digest: d);
+      _digestCooling.add(k);
+      _after(kDigestReplyReaskAfter, () {
+        _digestCooling.remove(k);
+        _refreshDigests();
+      });
+    }
+    if (answered && d.status == InboxDigestStatus.failed) {
+      // The server remembers it, and would answer a retry with the same failure.
+      _digestFailedAt.remove(k)?.cancel();
+      _after(kDigestFailureMemory, () => _update(() => _digestFailedAt.remove(k)), hold: (t) => _digestFailedAt[k] = t);
+    }
     _changed();
     _pumpDigests();
   }
@@ -648,7 +752,7 @@ class _QuestionsInboxScreenState extends State<QuestionsInboxScreen> {
   /// [s]'s summary for the wait it is in now, else null: the one for its exact stamp,
   /// or for a reply the newest reply summary that landed.
   InboxDigest? _digestFor(Session s) {
-    final stamp = _turnStamp(s);
+    final stamp = _digestStamp(s);
     if (stamp == null) return null;
     final k = sessionKey(s);
     final exact = _digests['$k|$stamp'];
@@ -664,9 +768,10 @@ class _QuestionsInboxScreenState extends State<QuestionsInboxScreen> {
   DigestView _digestView(InboxItem it) {
     final s = it.session;
     if (s == null || !_digestible(it) || !_repo.supportsDigest(s.server.baseUrl)) return DigestView.off;
-    if (_turnStamp(s) == null) return DigestView.off;
+    if (_digestStamp(s) == null) return DigestView.off;
     final d = _digestFor(s);
-    if (d == null) return DigestView.loading;
+    // Nothing is asked of a server out of reach, so nothing is being written.
+    if (d == null) return _digestReachable(s) ? DigestView.loading : DigestView.off;
     if (d.isReady) return DigestView.ready;
     // A busy server is a moment's refusal, not an answer about this wait: offer the
     // same retry a failed run gets, rather than keep it for the life of the screen.
@@ -675,13 +780,18 @@ class _QuestionsInboxScreenState extends State<QuestionsInboxScreen> {
     return retry ? DigestView.failed : DigestView.plain;
   }
 
+  /// Whether a retry of [s]'s failed summary would be answered from the server's
+  /// memory of the failure ([kDigestFailureMemory]), so none is offered yet.
+  bool _digestRetryWaits(Session s) => _digestFailedAt.containsKey(sessionKey(s));
+
   /// Forgets [s]'s failed summary for the wait it is in, and asks again.
   void _retryDigest(Session s) {
-    final stamp = _turnStamp(s);
-    if (stamp == null) return;
+    final stamp = _digestStamp(s);
+    if (stamp == null || _digestRetryWaits(s)) return;
     final k = sessionKey(s);
     _digests.remove('$k|$stamp');
     if (_digestLatest[k]?.digest.isReady == false) _digestLatest.remove(k);
+    _digestCooling.remove(k);
     _changed();
   }
 
@@ -764,6 +874,8 @@ class _QuestionsInboxScreenState extends State<QuestionsInboxScreen> {
       _snapshot = it;
     });
     unawaited(_refreshFocused(refocus: true));
+    // Its summary, if it is still waiting for a slot, is the next one asked for.
+    _refreshDigests();
   }
 
   /// The next blocking item after [key], or the first item left.
@@ -1088,7 +1200,7 @@ final ButtonStyle _smallOutlined = OutlinedButton.styleFrom(
 /// A labelled line: `<b>Label:</b> text`, in the direction of the text's first
 /// paragraph. [maxLines] clamps it; null shows it whole, for a [questionSnippet] that is
 /// already shortened at a sentence boundary and must not be cut again mid-word.
-Widget _labelled(BuildContext context, String label, String text, {int? maxLines = 3, Key? key}) {
+Widget _labelled(BuildContext context, String label, String text, {int? maxLines = 3, Key? key, TextStyle? style}) {
   final theme = Theme.of(context);
   return Text.rich(
     TextSpan(children: [
@@ -1101,7 +1213,7 @@ Widget _labelled(BuildContext context, String label, String text, {int? maxLines
     maxLines: maxLines,
     overflow: maxLines == null ? null : TextOverflow.ellipsis,
     textDirection: textDirectionFor(paragraphsOf(text).firstOrNull ?? ''),
-    style: theme.textTheme.bodySmall?.copyWith(fontSize: 13),
+    style: style ?? theme.textTheme.bodySmall?.copyWith(fontSize: 13),
   );
 }
 
@@ -1250,8 +1362,11 @@ Widget _subLabel(BuildContext context, String text) => Text(text,
 String leadTeaser(String text, {int lines = kDigestTeaserLines, int maxChars = 300}) {
   final kept = text.split('\n').map((l) => l.trimRight()).where((l) => l.trim().isNotEmpty).toList();
   var out = kept.sublist(math.max(0, kept.length - lines)).join('\n');
-  if (out.length > maxChars) {
-    final cut = out.substring(out.length - maxChars);
+  // Counted and cut in characters, not UTF-16 units, so an emoji or a combining mark
+  // is never split in two.
+  final chars = out.characters;
+  if (chars.length > maxChars) {
+    final cut = chars.skip(chars.length - maxChars).toString();
     final sp = cut.indexOf(' ');
     out = '\u2026${sp < 0 ? cut : cut.substring(sp + 1)}';
   }
@@ -1302,15 +1417,25 @@ class _DigestBlock extends StatelessWidget {
   }
 }
 
-/// "Summary failed - retry": the agent's own words stay where they are, open.
+/// "Summary failed - retry": the agent's own words stay where they are, open. While
+/// the server still remembers the failure ([waits]) a retry would get it again at
+/// once, so it says when to try instead of offering a button that cannot work.
 class _DigestRetry extends StatelessWidget {
-  const _DigestRetry({required this.onRetry});
+  const _DigestRetry({required this.waits, required this.onRetry});
+  final bool waits;
   final VoidCallback onRetry;
 
   @override
   Widget build(BuildContext context) => Align(
         alignment: AlignmentDirectional.centerStart,
-        child: TextButton(
+        child: waits
+            ? Padding(
+                padding: const EdgeInsetsDirectional.only(start: 6, top: 6, bottom: 6),
+                child: Text('Summary failed - try again in a minute',
+                    key: const ValueKey('inbox-digest-retry-wait'),
+                    style: TextStyle(fontSize: 12, color: Theme.of(context).colorScheme.onSurfaceVariant)),
+              )
+            : TextButton(
           key: const ValueKey('inbox-digest-retry'),
           style: TextButton.styleFrom(visualDensity: VisualDensity.compact, padding: const EdgeInsets.symmetric(horizontal: 6)),
           onPressed: onRetry,
@@ -1433,24 +1558,17 @@ class _InboxCard extends StatelessWidget {
   List<Widget> _kindLines(BuildContext context) {
     final it = item;
     final s = it.session;
-    // With a summary ready, what the row says is asked is its first ask, in two lines:
-    // the whole text is one tap away, in the focused view.
+    // With a summary ready, its first ask is ADDED under the row's own words, which
+    // stay exactly as they were: they are the authority, the summary a reading of it.
     final d = s == null || !_QuestionsInboxScreenState._digestible(it) ? null : state._digestFor(s);
     final ask = d != null && d.isReady ? d.asking.firstOrNull : null;
+    final ai = ask == null ? null : _aiLine(context, ask);
     switch (it.kind) {
       case InboxKind.question:
         final q = it.question;
         if (q == null || q.questions.isEmpty) return [_labelled(context, 'Question', 'reading it...')];
         final first = q.questions.first;
         final more = q.questions.length - 1;
-        if (ask != null) {
-          return [
-            _aiLine(context, _questionLabel(first), ask),
-            if (more > 0)
-              Text('+$more more question${more == 1 ? '' : 's'}',
-                  key: ValueKey('inbox-more-${it.key}'), style: Theme.of(context).textTheme.bodySmall),
-          ];
-        }
         return [
           _Snippet(
             item: it,
@@ -1464,30 +1582,30 @@ class _InboxCard extends StatelessWidget {
           if (more > 0 && !state._cardOpen.contains(it.key))
             Text('+$more more question${more == 1 ? '' : 's'}',
                 key: ValueKey('inbox-more-${it.key}'), style: Theme.of(context).textTheme.bodySmall),
+          ?ai,
         ];
       case InboxKind.permission:
         final tool = permissionToolCall(it.turn?.pendingTool, s!.brief?.now?.text);
         final what = tool == null ? null : toolCallText(tool);
         return [
-          if (ask != null) _aiLine(context, 'Permission', ask) else _labelled(context, 'Permission', state._permissionReason(s), maxLines: 2),
+          _labelled(context, 'Permission', state._permissionReason(s), maxLines: 2),
           if (what != null) _ToolCall(name: tool!.name, text: what, maxLines: 2),
+          ?ai,
         ];
       case InboxKind.prose:
         final reply = it.turn!.prose;
-        if (ask != null) return [_aiLine(context, 'May be asking', ask)];
         return [
           _Snippet(
               item: it, state: state, label: 'May be asking', text: askingScope(reply), whole: [(label: 'May be asking', text: askingScope(reply))]),
+          ?ai,
         ];
       case InboxKind.reported:
         final waiting = s!.reason?.text ?? '';
         final asks = _reportedAsk(it);
         return [
           if (waiting.isNotEmpty) _labelled(context, 'Waiting', waiting),
-          if (ask != null)
-            _aiLine(context, 'Asks', ask)
-          else if (asks != null)
-            _Snippet(item: it, state: state, label: 'Asks', text: asks, whole: [(label: 'Asks', text: asks)]),
+          if (asks != null) _Snippet(item: it, state: state, label: 'Asks', text: asks, whole: [(label: 'Asks', text: asks)]),
+          ?ai,
         ];
       case InboxKind.menu:
         return [_labelled(context, 'Stuck in a menu', 'a panel covers the composer')];
@@ -1502,15 +1620,21 @@ class _InboxCard extends StatelessWidget {
     }
   }
 
-  /// A row's line from its AI summary, marked as such, two lines at most.
-  Widget _aiLine(BuildContext context, String label, String text) {
-    final muted = Theme.of(context).colorScheme.onSurfaceVariant;
+  /// A row's line from its AI summary, under the row's own words: labelled as such,
+  /// smaller and muted, two lines at most.
+  Widget _aiLine(BuildContext context, String text) {
+    final theme = Theme.of(context);
+    final muted = theme.colorScheme.onSurfaceVariant;
     return Row(crossAxisAlignment: CrossAxisAlignment.start, children: [
       Padding(
-        padding: const EdgeInsets.only(top: 2, right: 4),
-        child: Tooltip(message: 'AI summary', child: Icon(Icons.auto_awesome, size: 12, color: muted)),
+        padding: const EdgeInsetsDirectional.only(top: 2, end: 4),
+        child: Icon(Icons.auto_awesome, size: 11, color: muted),
       ),
-      Expanded(child: _labelled(context, label, text, maxLines: 2, key: ValueKey('inbox-digest-row-${item.key}'))),
+      Expanded(
+          child: _labelled(context, kDigestLabel, text,
+              maxLines: 2,
+              key: ValueKey('inbox-digest-row-${item.key}'),
+              style: theme.textTheme.bodySmall?.copyWith(fontSize: 12, color: muted))),
     ]);
   }
 
@@ -1651,12 +1775,19 @@ class _FocusView extends StatelessWidget {
       // the one the panel shrinks first, so on a phone the options keep their room
       // (#94/#108). The question and its options are the panel's, untouched.
       final hasLead = leadText != null && leadText.isNotEmpty;
+      final retry = view == DigestView.failed
+          ? _DigestRetry(waits: state._digestRetryWaits(s), onRetry: () => state._retryDigest(s))
+          : null;
       final body = switch (view) {
         DigestView.off || DigestView.plain => null,
-        DigestView.failed => Column(crossAxisAlignment: CrossAxisAlignment.stretch, mainAxisSize: MainAxisSize.min, children: [
-            if (hasLead) leadUpMarkdown(theme, leadText),
-            _DigestRetry(onRetry: () => state._retryDigest(s)),
-          ]),
+        // With no words to show, the retry sits above the panel: a "Claude said"
+        // heading over nothing but it would say something that is not there.
+        DigestView.failed => !hasLead
+            ? null
+            : Column(crossAxisAlignment: CrossAxisAlignment.stretch, mainAxisSize: MainAxisSize.min, children: [
+                leadUpMarkdown(theme, leadText),
+                retry!,
+              ]),
         DigestView.loading || DigestView.ready => _DigestSection(
             item: it,
             state: state,
@@ -1674,6 +1805,7 @@ class _FocusView extends StatelessWidget {
         Padding(padding: const EdgeInsets.fromLTRB(16, 12, 16, 0), child: _InboxHead(item: it, state: state)),
         if (s.brief?.items.isNotEmpty ?? false)
           Padding(padding: const EdgeInsets.fromLTRB(16, 6, 16, 0), child: BriefItemRow(s.brief!.items.first)),
+        if (retry != null && !hasLead) Padding(padding: const EdgeInsets.fromLTRB(10, 4, 16, 0), child: retry),
         Expanded(
           child: Align(
             alignment: Alignment.topCenter,
@@ -1682,6 +1814,9 @@ class _FocusView extends StatelessWidget {
               question: q,
               contextText: lead?.leadUp,
               contextBody: body,
+              // Only a ready summary reads from its head; its words opened under
+              // it, a failed summary's words, or a teaser, open at their end (#108).
+              contextAtTop: view == DigestView.ready && !state._fullContext.contains(it.key),
               contextLabel: view == DigestView.loading || view == DigestView.ready ? kDigestLabel : leadLabel,
               drafts: QuestionDraftStore.instance.of(s.server.baseUrl, s.id),
               draftKey: questionSignature(q),
@@ -1787,14 +1922,17 @@ class _FocusView extends StatelessWidget {
         // "Wants to run" is the transcript's tool call, checked against the server's
         // line, and NEVER the summary's words: a wrong command on an approval screen
         // is worse than none.
+        // What is being approved comes FIRST, right under the head: the summary is a
+        // reading of it and goes below, so on a phone it never pushes the command
+        // off the screen.
         return [
-          ..._summary(context, full, lead),
           _label(context, 'Permission'),
           DirectionalText(state._permissionReason(s), style: Theme.of(context).textTheme.bodyLarge),
           if (what != null) ...[
             _label(context, 'Wants to run'),
             _ToolCall(name: tool!.name, text: what),
           ],
+          ..._summary(context, full, lead),
           if (!_folded) ...full,
           _label(context, 'Its screen'),
           _tail(context, s),
@@ -1870,7 +2008,7 @@ class _FocusView extends StatelessWidget {
       case DigestView.off || DigestView.plain:
         return const [];
       case DigestView.failed:
-        return [_DigestRetry(onRetry: () => state._retryDigest(s!))];
+        return [_DigestRetry(waits: state._digestRetryWaits(s!), onRetry: () => state._retryDigest(s))];
       case DigestView.loading || DigestView.ready:
         return [
           _DigestSection(
