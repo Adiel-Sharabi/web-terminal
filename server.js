@@ -6492,6 +6492,7 @@ app.get('/api/sessions/:id/recap', async (req, res) => {
 //   200 { status:'ready', waitKey, about, asking:[], know:[], model, generatedAt, cached }
 //   200 { status:'none',  waitKey:null }         nothing to summarise
 //   200 { status:'missing', waitKey }            ?peek=1 and nothing is cached
+//   502 { status:'failed', reason }              ?peek=1 inside a remembered failure (~60s)
 //   503 { status:'unavailable', reason:'disabled'|'no-cli'|'busy' }
 //   502 { status:'failed',      reason:'timeout'|'error'|'bad-output' }
 //

@@ -179,6 +179,17 @@ test.describe('the permission call is named only when it is unambiguous (SF1)', 
     const k = (permission) => d.waitKeyOf({ promptTurn: turn, lastAssistant: null, permission });
     expect(k({ tool: null })).not.toBe(k({ tool: 'Bash', input: { command: 'ls' } }));
   });
+  test('an unfinished call is marked as not run, so the summary never reports it as done', () => {
+    // Measured on the rig: with `rm` awaiting approval the digest said the agent "ran the
+    // delete". A call with no result is waiting or running, and the prompt must say so.
+    const turn = { role: 'user', text: 'x', typedText: 'x', ts: 't' };
+    const turns = [asst(done('Read', { file_path: 'a.js' })), asst(open('Bash', { command: 'rm -rf build' }))];
+    const p = d.buildPrompt({ name: 'n', cwd: 'c', promptTurn: turn, turns, permission: { tool: null } });
+    const lines = p.split('\n');
+    expect(lines.find((l) => l.includes('rm -rf build'))).toContain('NO RESULT YET');
+    expect(lines.find((l) => l.startsWith('[tool] Read: a.js'))).not.toContain('NO RESULT YET');
+    expect(p).toContain('has NOT completed');
+  });
 });
 
 test.describe('the transcript is read once per change (SF2)', () => {
