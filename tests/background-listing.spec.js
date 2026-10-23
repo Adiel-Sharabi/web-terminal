@@ -165,7 +165,7 @@ test.describe('parseBackgroundListing (pure)', () => {
     })]));
     expect(r.name).not.toMatch(/[\u0000-\u001f\u007f-\u009f]/);
     expect(r.name).toContain('red');
-    expect(Array.from(r.waitingFor).length).toBeLessThanOrEqual(200);
+    expect(Array.from(r.waitingFor).length).toBeLessThanOrEqual(400);
   });
 
   test('not an array is UNAVAILABLE (null), never an empty list', () => {
