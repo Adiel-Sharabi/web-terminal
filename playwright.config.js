@@ -90,6 +90,13 @@ process.env.WT_MAINTENANCE_FILE = path.join(__dirname, 'maintenance.test.json');
 // makes the route's answer the same everywhere ({available:false}), and means a regression
 // that ignored the override would show up on any machine that has a real `claude`.
 process.env.WT_CLAUDE_BIN = path.join(__dirname, 'no-such-claude.test.exe');
+// #383 - the inbox digest runs `claude -p`. The suite must never call the real model, so the
+// runner is a fake CLI (tests/fixtures/fake-digest-cli.js) that records what it was given
+// into FAKE_DIGEST_DIR and answers as that directory's mode.json says. The ceiling is short
+// so the timeout spec does not wait 90 s; a normal fake run answers in well under a second.
+process.env.WT_INBOX_DIGEST_COMMAND = JSON.stringify([process.execPath, path.join(__dirname, 'tests', 'fixtures', 'fake-digest-cli.js')]);
+process.env.FAKE_DIGEST_DIR = path.join(require('./scripts/scratch-dirs').DIRS.tests, 'digest-fake');
+process.env.WT_INBOX_DIGEST_TIMEOUT_MS = '4000';
 
 module.exports = defineConfig({
   testDir: './tests',

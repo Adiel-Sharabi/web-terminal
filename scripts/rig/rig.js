@@ -53,7 +53,9 @@ const PIPE = process.platform === 'win32'
 // The two agent-side scripts too: the server hands their rig paths to the agent (#298
 // report, #340 hand-off verdict), and a missing script fails as "cannot find module".
 const SYNC_FILES = ['server.js', 'pty-worker.js', 'monitor.js', 'app.html', 'terminal.html', 'lobby.html', 'sw.js',
-  'scripts/wt-report.js', 'scripts/wt-handoff.js'];
+  'scripts/wt-report.js', 'scripts/wt-handoff.js',
+  // #383: server.js reads the inbox digest's scratch cwd from it.
+  'scripts/scratch-dirs.js'];
 const SYNC_DIRS = ['lib', 'public', 'hooks'];
 
 const log = (m) => console.log(`[rig] ${m}`);
