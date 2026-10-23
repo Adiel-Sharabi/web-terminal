@@ -406,7 +406,7 @@ test.describe('running the CLI', () => {
       env: {
         ...process.env, FAKE_DIGEST_DIR: tmp,
         CLAUDECODE: '1', CLAUDE_CODE_ENTRYPOINT: 'cli', CLAUDE_CODE_SSE_PORT: '1',
-        WT_SESSION_ID: 'x', WT_HOOK_TOKEN: 'y',
+        WT_SESSION_ID: 'x', WT_HOOK_TOKEN: 'y', CLAUDE_CONFIG_DIR: tmp,
       },
     });
     await s.get('S', input('K', `please summarise ${secret}`));
@@ -420,7 +420,9 @@ test.describe('running the CLI', () => {
     expect(run.argv[run.argv.indexOf('--setting-sources') + 1]).toBe('');
     expect(run.argv).not.toContain('--bare');
     for (const n of run.envNames) expect(n).not.toMatch(/^(CLAUDECODE|CLAUDE_CODE_ENTRYPOINT|CLAUDE_CODE_SSE_PORT|WT_)/i);
-    expect(run.envNames).toEqual(expect.arrayContaining(['PATH']));
+    // A kept variable must arrive. Not PATH: on Windows libuv re-adds PATH to any child
+    // env that lacks it, so a PATH check here passes even when the scrub drops it.
+    expect(run.envNames).toContain('CLAUDE_CONFIG_DIR');
     expect(fs.realpathSync(run.cwd)).toBe(fs.realpathSync(path.join(tmp, 'scratch')));
   });
 
