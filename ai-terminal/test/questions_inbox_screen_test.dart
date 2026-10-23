@@ -117,6 +117,8 @@ void main() {
   late bool failPollAfterKeys; // the first key sent arms one failing poll
   Completer<void>? sessionsGate; // holds the NEXT /api/sessions until completed
   late List<Completer<void>> transcriptHolds; // each holds the next transcript read, in order
+  late Map<String, Map<String, dynamic>> attentions; // by session id; a default record otherwise
+  late List<Completer<void>> attentionHolds; // each holds the next attention read, in order
 
   Future<bool> fakeInput(Session s, Future<void> Function(void Function(String keys) send) body) async {
     await body((keys) {
@@ -152,7 +154,9 @@ void main() {
               : http.Response(jsonEncode({'messages': t, 'cursor': null, 'hasMore': false}), 200);
         }
         if (p.endsWith('/attention')) {
-          return http.Response(jsonEncode({'kind': 'approval', 'reason': 'Bash: rm -rf build', 'lastMessage': 'About to clean.'}), 200);
+          final a = attentions[id] ?? {'kind': 'approval', 'reason': 'Bash: rm -rf build', 'lastMessage': 'About to clean.'};
+          if (attentionHolds.isNotEmpty) await attentionHolds.removeAt(0).future;
+          return http.Response(jsonEncode(a), 200);
         }
         if (p.endsWith('/scrollback')) {
           const data = 'Do you want to run rm -rf build?\r\n1. Yes\r\n2. No\r\n';
@@ -212,6 +216,8 @@ void main() {
     failPollAfterKeys = false;
     sessionsGate = null;
     transcriptHolds = [];
+    attentions = {};
+    attentionHolds = [];
   });
   tearDown(SessionSelection.instance.reset);
 
@@ -952,7 +958,17 @@ void main() {
 
     testWidgets('permission (b): the command being approved, from the transcript, and the whole lead-up', (tester) async {
       const cmd = 'rm -rf build && git clean -fdx';
-      rows = {_home.baseUrl: [_row('p', 'Cleanup', status: 'waiting', waitingFor: 'permission', lastActivity: 1)]};
+      // The server's "now" line names the same tool: with no line, no command is named.
+      rows = {
+        _home.baseUrl: [
+          _row('p', 'Cleanup', status: 'waiting', waitingFor: 'permission', lastActivity: 1, brief: {
+            'v': 1,
+            'reporting': 'on',
+            'items': [],
+            'now': {'text': 'Bash \u00b7 Clean the build', 'at': 1},
+          }),
+        ],
+      };
       transcripts = {
         'p': [typed('clean up'), say('The build folder is stale.'), tool('Read', result: 'ok'), say('Removing it now.'), tool('Bash', input: {'command': cmd})],
       };
@@ -1085,6 +1101,110 @@ void main() {
       await settle(tester);
       expect(cmd('CMD_A'), findsNothing);
       expect(shown(tester), 'CMD_B');
+      await done(tester);
+    });
+
+    testWidgets('U-SF1: with no brief line, an A-then-B swap names NO command; the line above stays', (tester) async {
+      final r = await repo();
+      rows = {_home.baseUrl: [perm('p', act: 10)]};
+      transcripts = {'p': [typed('go'), say('Step one.'), call('CMD_A')]};
+      await pump(tester, r);
+      await settle(tester);
+      expect(shown(tester), isNull, reason: 'no "now" line: the transcript alone cannot say which wait this is');
+      expect(cmd('CMD_A'), findsNothing);
+
+      // A's wait ends; B's begins, read before B's call is on disk: the open call is still A's.
+      rows = {_home.baseUrl: [_row('p', 'Perm p', status: 'working', lastActivity: 15)]};
+      await tester.runAsync(() => r.refresh());
+      await settle(tester);
+      rows = {_home.baseUrl: [perm('p', act: 20)]};
+      await tester.runAsync(() => r.refresh());
+      await settle(tester);
+      expect(reads('/p/transcript'), 2, reason: 'B was read');
+      expect(cmd('CMD_A'), findsNothing, reason: "A's command under B's wait is the wrong one");
+      expect(find.descendant(of: find.byKey(const ValueKey('inbox-card-http://h:7681|p')), matching: cmd('Bash: rm -rf build')),
+          findsOneWidget,
+          reason: 'what waits is still said');
+      await done(tester);
+    });
+
+    testWidgets("U-nit1: a new call in the same wait shows nothing of A's record while B's read is out", (tester) async {
+      // A new PreToolUse (brief.now.at) is a new wait while the row stays a permission,
+      // so its record is replaced in place rather than dropped. No transcript here:
+      // the record's lastMessage is the lead-up.
+      final r = await repo();
+      rows = {_home.baseUrl: [perm('p', act: 10, nowAt: 10)]};
+      attentions = {'p': {'kind': 'approval', 'reason': 'REASON_A', 'lastMessage': 'MSG_A said this.'}};
+      await pump(tester, r);
+      await settle(tester);
+      expect(cmd('MSG_A'), findsOneWidget);
+
+      final hold = Completer<void>();
+      attentionHolds = [hold];
+      attentions = {'p': {'kind': 'approval', 'reason': 'REASON_B', 'lastMessage': 'MSG_B said this.'}};
+      rows = {_home.baseUrl: [perm('p', act: 20, nowAt: 20)]};
+      await tester.runAsync(() => r.refresh());
+      await settle(tester);
+      expect(reads('/p/attention'), 2, reason: 'B is being read');
+      expect(cmd('MSG_A'), findsNothing, reason: "A's words under B's wait");
+      hold.complete();
+      await settle(tester);
+      expect(cmd('MSG_B'), findsOneWidget);
+      await done(tester);
+    });
+
+    testWidgets('U-nit1: a late attention read for A does not land under B', (tester) async {
+      final r = await repo();
+      final holdA = Completer<void>();
+      attentionHolds = [holdA];
+      attentions = {'p': {'kind': 'approval', 'reason': 'REASON_A', 'lastMessage': 'MSG_A said this.'}};
+      rows = {_home.baseUrl: [perm('p', act: 10)]};
+      await pump(tester, r);
+      await settle(tester);
+
+      rows = {_home.baseUrl: [_row('p', 'Perm p', status: 'working', lastActivity: 15)]};
+      await tester.runAsync(() => r.refresh());
+      await settle(tester);
+      attentions = {'p': {'kind': 'approval', 'reason': 'REASON_B', 'lastMessage': 'MSG_B said this.'}};
+      rows = {_home.baseUrl: [perm('p', act: 20)]};
+      await tester.runAsync(() => r.refresh());
+      await settle(tester);
+      expect(cmd('REASON_B'), findsWidgets);
+
+      holdA.complete(); // A's read, asked first, lands last
+      await settle(tester);
+      expect(cmd('REASON_A'), findsNothing);
+      expect(cmd('MSG_A'), findsNothing);
+      expect(cmd('REASON_B'), findsWidgets);
+      await done(tester);
+    });
+
+    testWidgets('U-nit2: a prose ask whose lastActivity moves during EVERY read still appears', (tester) async {
+      final r = await repo();
+      final holds = List.generate(8, (_) => Completer<void>());
+      transcriptHolds = [...holds];
+      Map<String, dynamic> idle(int act) => _row('c', 'Idle', lastActivity: act);
+      transcripts = {'c': [typed('push the fix'), say('Tests pass. Should I push it?')]};
+      rows = {_home.baseUrl: [idle(1)]};
+      await pump(tester, r);
+      await settle(tester);
+      // Each read is still out when the terminal moves on again, and lands only after.
+      for (var i = 0; i < 4; i++) {
+        rows = {_home.baseUrl: [idle(2 + i)]};
+        await tester.runAsync(() => r.refresh());
+        await settle(tester);
+        holds[i].complete();
+        await settle(tester);
+      }
+      expect(find.byKey(const ValueKey('inbox-card-http://h:7681|c')), findsOneWidget,
+          reason: 'a reply read a moment ago is still the reply');
+      // One read at a time per session, and each one that lands re-reads at once for
+      // the newest lastActivity rather than waiting for the next poll: 1 + 4.
+      expect(reads('/c/transcript'), 5);
+      for (final h in holds) {
+        if (!h.isCompleted) h.complete();
+      }
+      await settle(tester);
       await done(tester);
     });
 

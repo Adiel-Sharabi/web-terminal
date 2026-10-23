@@ -205,11 +205,13 @@ ToolUse? pendingToolUse(List<TranscriptTurn> turns) {
 /// subagent's call and `Subagent <dot> ...` for a dispatch, `<server> <dot> <tool>`
 /// for an MCP tool; the dot is U+00B7). A subagent's line, or one naming another
 /// tool, means the open call in the transcript is not the one asking. No line (an
-/// older server, no hooks) leaves [pending] as the transcript says.
+/// older server, no hooks) names NO call: the transcript alone cannot tell this wait's
+/// call from the one a previous wait left open (an A-then-B swap read before B's call
+/// is on disk shows A's command), and the "Permission:" line still says what is asked.
 ToolUse? permissionToolCall(ToolUse? pending, String? now) {
   if (pending == null) return null;
   final line = now?.trim() ?? '';
-  if (line.isEmpty) return pending;
+  if (line.isEmpty) return null;
   if (line.startsWith('Subagent')) return null;
   final head = line.split(' \u00b7 ').first.trim();
   final name = pending.name;

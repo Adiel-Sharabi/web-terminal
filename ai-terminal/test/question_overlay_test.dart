@@ -1940,10 +1940,13 @@ void main() {
           ],
         );
 
-    Future<void> pumpPhone(WidgetTester tester, {double height = 915}) async {
+    Future<void> pumpPhone(WidgetTester tester,
+        {double height = 915,
+        double width = 412,
+        List<PendingQuestionItem>? questions}) async {
       // A Pixel-class phone in logical pixels. NOT the 800x600 default: the
       // whole defect is a short-card squeeze and a roomy harness hides it.
-      tester.view.physicalSize = Size(412 * 3, height * 3);
+      tester.view.physicalSize = Size(width * 3, height * 3);
       tester.view.devicePixelRatio = 3.0;
       addTearDown(tester.view.reset);
       await tester.pumpWidget(
@@ -1955,7 +1958,7 @@ void main() {
                 QuestionOverlay(
                   question: PendingQuestion(
                     toolUseId: 'm94',
-                    questions: [mobileQuestion()],
+                    questions: questions ?? [mobileQuestion()],
                   ),
                   contextText: _longLeadUp,
                   onSend: (_) {},
@@ -2000,6 +2003,43 @@ void main() {
       // Was 0. The card exists so a question can be answered from it; an
       // overlay showing no option at all is one you have to leave.
       expect(visibleOptions(tester), greaterThanOrEqualTo(2));
+    });
+
+    testWidgets(
+        'a multi-question prompt on a 360x640 phone keeps two whole option rows (#383)',
+        (tester) async {
+      // The tab strip is laid out inside the question block, and its height was
+      // ALSO charged to that block's cap: 38px off the options of every
+      // multi-question prompt. With this six-line question the options
+      // measured 202px charged twice and 240px charged once; review measured
+      // 180 against 218 on its own prompt - one row and a sliced second there,
+      // #94's shape.
+      final first = mobileQuestion();
+      await pumpPhone(tester, width: 360, height: 640, questions: [
+        PendingQuestionItem(
+          header: first.header,
+          question: 'QMARK Should it change the app, or change the database '
+              'so that the check is permitted?',
+          multiSelect: false,
+          hasPreview: false,
+          options: first.options,
+        ),
+        const PendingQuestionItem(
+          header: 'Then',
+          question: 'And after it?',
+          multiSelect: false,
+          hasPreview: false,
+          options: [
+            QuestionOption(label: 'Ship it'),
+            QuestionOption(label: 'Hold it'),
+          ],
+        ),
+      ]);
+      expect(find.text('Then'), findsOneWidget, reason: 'the tab strip is up');
+      expect(optionViewport(tester).height, greaterThanOrEqualTo(218));
+      // Two WHOLE rows: the second row's description, not just its label.
+      expect(tester.getRect(find.textContaining('Grant the read')).bottom,
+          lessThanOrEqualTo(optionViewport(tester).bottom + 0.5));
     });
 
     testWidgets('the question is fully readable without scrolling it',

@@ -322,13 +322,25 @@ class _QuestionsInboxScreenState extends State<QuestionsInboxScreen> {
   }
 
   /// [s]'s turn as read for the stamp [s] has NOW, else null (#383): a turn read for
-  /// an earlier wait, or an earlier reply, is not this one's, and showing it would put
-  /// one permission's command under the next until the next read lands.
+  /// an earlier wait is not this one's, and showing it would put one permission's
+  /// command under the next until the next read lands. A reply ([_isReplyStamp]) is
+  /// the exception: the newest one that landed is shown even when lastActivity has
+  /// moved since it was asked for. A reply seconds old is still the reply, and holding
+  /// out for an exact match meant a session whose output outran its read never showed.
   AgentTurn? _turnFor(Session s) {
     final e = _turns[sessionKey(s)];
     final stamp = _turnStamp(s);
-    return e != null && stamp != null && e.stamp == stamp ? e.turn : null;
+    if (e == null || stamp == null) return null;
+    if (e.stamp == stamp) return e.turn;
+    return _isReplyStamp(stamp) && _isReplyStamp(e.stamp) ? e.turn : null;
   }
+
+  /// A stamp for the last reply of a reported wait or a prose candidate: one taken
+  /// from lastActivity, which moves with every chunk of terminal output.
+  static bool _isReplyStamp(String stamp) => stamp.startsWith('a|');
+
+  /// Whether any read of the turn of the session keyed [k] is still out.
+  bool _turnReading(String k) => _turnsInFlight.any((f) => f.startsWith('$k|'));
 
   /// Reads [s]'s current turn for [stamp] and keeps it under that stamp, unless a read
   /// for another stamp was started since ([_turnWant]). A failed read is kept as
@@ -341,9 +353,18 @@ class _QuestionsInboxScreenState extends State<QuestionsInboxScreen> {
     _turnWant[k] = stamp;
     final turn = await _readTurn(s, earlier: earlier);
     _turnsInFlight.remove(flight);
-    if (_disposed || _turnWant[k] != stamp) return;
-    _turnReadAt[k] = DateTime.now();
-    if (turn != null || keepFailed) _turns[k] = (stamp: stamp, turn: turn);
+    if (_disposed) return;
+    if (_turnWant[k] == stamp) {
+      _turnReadAt[k] = DateTime.now();
+      if (turn != null || keepFailed) _turns[k] = (stamp: stamp, turn: turn);
+    }
+    // A reply is read one at a time per session ([_refreshTurns]): if lastActivity
+    // moved while this one was out, read again now rather than on the next poll.
+    final now = _sessions.where((x) => sessionKey(x) == k).firstOrNull;
+    final want = now == null ? null : _turnStamp(now);
+    if (want != null && _isReplyStamp(want) && _turns[k]?.stamp != want && !_turnReading(k)) {
+      unawaited(_refreshTurns());
+    }
   }
 
   /// The current turn of every listed session that needs one, except a question, which
@@ -359,6 +380,12 @@ class _QuestionsInboxScreenState extends State<QuestionsInboxScreen> {
       final k = sessionKey(s);
       live.add(k);
       if (stamp.startsWith('q|') || _turns[k]?.stamp == stamp || _turnsInFlight.contains('$k|$stamp')) continue;
+      // A reply waits for the read already out for its session, which re-checks when
+      // it lands ([_loadTurn]). Starting one per lastActivity instead left every read
+      // older than the newest asked for, so none was kept and the item never showed.
+      // A permission is not held back: its stamp is strict, and a new wait wants a
+      // new read now.
+      if (_isReplyStamp(stamp) && _turnReading(k)) continue;
       due.add((s, stamp));
     }
     final focus = _snapshot?.session;
@@ -395,14 +422,20 @@ class _QuestionsInboxScreenState extends State<QuestionsInboxScreen> {
     }).toList();
     if (due.isEmpty) return;
     for (final s in due) {
-      _attention[sessionKey(s)] = (wait: _waitStamp(s), info: _attention[sessionKey(s)]?.info);
+      // A re-read of the SAME wait keeps its record on screen meanwhile; a new wait
+      // starts with none, so the last wait's words never show under this one.
+      final old = _attention[sessionKey(s)];
+      final wait = _waitStamp(s);
+      _attention[sessionKey(s)] = (wait: wait, info: old?.wait == wait ? old?.info : null);
     }
     await Future.wait(due.map((s) async {
       try {
+        final k = sessionKey(s);
         final wait = _waitStamp(s);
         final info = await _client(s.server).attention(s.id);
-        if (_disposed) return;
-        _attention[sessionKey(s)] = (wait: wait, info: info);
+        // Dropped when a newer wait was asked for while this read was out.
+        if (_disposed || _attention[k]?.wait != wait) return;
+        _attention[k] = (wait: wait, info: info);
       } catch (_) {/* the card falls back to the session's own words */}
     }));
     _changed();

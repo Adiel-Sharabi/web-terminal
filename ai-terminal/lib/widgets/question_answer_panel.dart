@@ -544,9 +544,10 @@ class _QuestionAnswerPanelState extends State<QuestionAnswerPanel> {
                 (widget.contextText ?? '').trim().isNotEmpty;
             // In the wide shape the lead-up is beside the options, not
             // above them, so it is not part of this subtraction at all.
+            final tabs = questions.length > 1 ? kTabStripH : 0.0;
             final fixed = kHeaderH +
                 kFooterH +
-                (questions.length > 1 ? kTabStripH : 0) +
+                tabs +
                 (_keysShown && widget.onKey != null && !_textEntryActive
                     ? kKeysRowH
                     : 0);
@@ -583,8 +584,12 @@ class _QuestionAnswerPanelState extends State<QuestionAnswerPanel> {
                 _textEntryActive &&
                     composeUsesSoftKeyboard(defaultTargetPlatform);
             final showCtx = hasContext && !hideCtxForTyping;
+            // [qa] lays out the tab strip itself, so its cap leaves the
+            // strip IN: charging it here as well took 38px off the options
+            // of every multi-question prompt (on a 360x640 phone, one whole
+            // row and a sliced second - the #94 shape).
             final qaMax = (cardMax -
-                    fixed -
+                    (fixed - tabs) -
                     (!wide && showCtx ? kCtxChrome + ctxFloor : 0.0))
                 .clamp(0.0, double.infinity);
             // The question and its options. Pinned question first (#94):

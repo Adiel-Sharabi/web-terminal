@@ -240,7 +240,8 @@ void main() {
     test('the server\'s own "now" line must agree; a subagent\'s, or another tool\'s, hides it', () {
       final p = bash('git push');
       const dot = '\u00b7';
-      expect(permissionToolCall(p, null), same(p), reason: 'no line: the transcript alone');
+      expect(permissionToolCall(p, null), isNull, reason: 'no line: the transcript alone cannot tell A from B');
+      expect(permissionToolCall(p, '  '), isNull, reason: 'a blank line is no line');
       expect(permissionToolCall(p, 'Bash $dot Push to origin'), same(p));
       expect(permissionToolCall(p, 'Subagent: Bash $dot Push to origin'), isNull);
       expect(permissionToolCall(p, 'Subagent $dot review the diff'), isNull);
