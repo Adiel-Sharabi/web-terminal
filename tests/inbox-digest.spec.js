@@ -65,13 +65,22 @@ test.describe('the model\'s answer is parsed strictly', () => {
 });
 
 test.describe('the environment handed to the child', () => {
-  test('nothing that would make it a nested session, or leak a secret, survives', () => {
+  test('what makes it a nested session, and our hook and auth variables, are removed', () => {
     const out = d.scrubEnv({
-      CLAUDECODE: '1', CLAUDE_CODE_ENTRYPOINT: 'cli', claude_code_anything: 'x', CLAUDE_CODE_OAUTH_TOKEN: 't',
-      WT_SESSION_ID: 'abc', WT_HOOK_TOKEN: 'h', WT_IPC_TOKEN: 'i', WT_PASS: 'p',
+      CLAUDECODE: '1', CLAUDE_CODE_ENTRYPOINT: 'cli', CLAUDE_CODE_SSE_PORT: '1',
+      CLAUDE_CODE_SESSION_ID: 's', CLAUDE_CODE_CHILD_SESSION: '1', CLAUDE_CODE_MESSAGING_SOCKET: 'pipe',
+      claudecode: 'lower-case names are matched too',
+      WT_SESSION_ID: 'abc', WT_HOOK_TOKEN: 'h', WT_IPC_TOKEN: 'i', WT_PASS: 'p', WT_ANYTHING_ELSE: 'x',
       PATH: '/bin', USERPROFILE: 'C:\\Users\\x', SystemRoot: 'C:\\Windows',
     });
     expect(Object.keys(out).sort()).toEqual(['PATH', 'SystemRoot', 'USERPROFILE']);
+  });
+  test('the rest of CLAUDE_CODE_* is KEPT: the child needs it to run and to log in', () => {
+    const out = d.scrubEnv({
+      CLAUDE_CODE_GIT_BASH_PATH: 'C:\\Git\\bash.exe', CLAUDE_CODE_OAUTH_TOKEN: 't', CLAUDE_CODE_SOMETHING_NEW: 'n',
+      CLAUDECODE: '1',
+    });
+    expect(Object.keys(out).sort()).toEqual(['CLAUDE_CODE_GIT_BASH_PATH', 'CLAUDE_CODE_OAUTH_TOKEN', 'CLAUDE_CODE_SOMETHING_NEW']);
   });
 });
 
@@ -104,13 +113,104 @@ test.describe('the wait\'s identity', () => {
   test('a new prompt, a different question and a different permission each change it', () => {
     const base = d.waitKeyOf({ promptTurn: prompt, lastAssistant: a1 });
     expect(d.waitKeyOf({ promptTurn: { ...prompt, typedText: 'other', ts: 'later' }, lastAssistant: a1 })).not.toBe(base);
-    const q1 = d.waitKeyOf({ promptTurn: prompt, lastAssistant: a1, question: { toolUseId: 'q1', questions: [] } });
-    const q2 = d.waitKeyOf({ promptTurn: prompt, lastAssistant: a1, question: { toolUseId: 'q2', questions: [] } });
+    const qa = [{ question: 'Which?', options: [{ label: 'A' }] }];
+    const qb = [{ question: 'Which one instead?', options: [{ label: 'A' }] }];
+    const q1 = d.waitKeyOf({ promptTurn: prompt, lastAssistant: a1, question: { toolUseId: 'q1', questions: qa } });
+    const q2 = d.waitKeyOf({ promptTurn: prompt, lastAssistant: a1, question: { toolUseId: 'q1', questions: qb } });
     expect(q1).not.toBe(base);
     expect(q1).not.toBe(q2);
     const x1 = d.waitKeyOf({ promptTurn: prompt, lastAssistant: a1, permission: { tool: 'Bash', input: { command: 'ls' } } });
     const x2 = d.waitKeyOf({ promptTurn: prompt, lastAssistant: a1, permission: { tool: 'Bash', input: { command: 'rm -rf x' } } });
     expect(x1).not.toBe(x2);
+  });
+});
+
+test.describe('one open question is ONE wait, whoever named it (N4)', () => {
+  const prompt = { role: 'user', text: 'do it', typedText: 'do it', ts: 't0' };
+  const a1 = { role: 'assistant', text: 'one', toolUses: [], ts: 't1' };
+  const questions = [{ question: 'Delete which folder?', options: [{ label: 'build/' }, { label: 'dist/' }] }];
+  test('the live hook capture and the transcript fallback give the same key', () => {
+    const live = { toolUseId: 'hook-sess-7', questions };
+    const fromTranscript = { toolUseId: 'toolu_01ABC', questions: JSON.parse(JSON.stringify(questions)) };
+    expect(d.waitKeyOf({ promptTurn: prompt, lastAssistant: a1, question: live }))
+      .toBe(d.waitKeyOf({ promptTurn: prompt, lastAssistant: a1, question: fromTranscript }));
+  });
+});
+
+test.describe('the permission call is named only when it is unambiguous (SF1)', () => {
+  const open = (name, input = {}) => ({ name, input, id: name, result: undefined });
+  const done = (name, input = {}) => ({ name, input, id: name, result: 'ok' });
+  const asst = (...toolUses) => ({ role: 'assistant', text: '', toolUses });
+  test('the good case: one open call that the now-line names', () => {
+    const turns = [asst(done('Read')), asst(open('Bash', { command: 'rm -rf build' }))];
+    expect(d.permissionCallOf(turns, 'Bash \u00b7 remove the build folder')).toEqual({ tool: 'Bash', input: { command: 'rm -rf build' } });
+    expect(d.permissionCallOf([asst(open('mcp__github__create_issue', { t: 1 }))], 'github \u00b7 create_issue'))
+      .toEqual({ tool: 'mcp__github__create_issue', input: { t: 1 } });
+  });
+  test('an open Agent/Task call is the SUBAGENT\'s brief, not what is being asked', () => {
+    expect(d.permissionCallOf([asst(open('Agent', { prompt: 'go' }))], 'Subagent \u00b7 go')).toBeNull();
+    expect(d.permissionCallOf([asst(open('Task', { prompt: 'go' }))], 'Task')).toBeNull();
+    // A subagent's own Bash asks while the Agent call is still open in the main transcript.
+    expect(d.permissionCallOf([asst(open('Agent'))], 'Subagent: Bash \u00b7 rm')).toBeNull();
+  });
+  test('two open calls (in one message, or as separate turns): which one asks is not on disk', () => {
+    const turns = [asst(open('Bash', { command: 'rm -rf dist' }), open('Bash', { command: 'git push --force' }))];
+    expect(d.permissionCallOf(turns, 'Bash \u00b7 something')).toBeNull();
+    // Codex writes parallel calls as separate turns.
+    expect(d.permissionCallOf([asst(open('Bash', { command: 'a' })), asst(open('Bash', { command: 'b' }))], 'Bash')).toBeNull();
+  });
+  test('an older message\'s open call is not the newest wait (its result may sit on a newer page)', () => {
+    const turns = [asst(open('Bash', { command: 'old' })), asst(done('Read'))];
+    expect(d.permissionCallOf(turns, 'Bash')).toBeNull();
+  });
+  test('no now-line, a subagent line, or another tool\'s line names no call', () => {
+    const turns = [asst(open('Bash', { command: 'ls' }))];
+    expect(d.permissionCallOf(turns, undefined)).toBeNull();
+    expect(d.permissionCallOf(turns, '  ')).toBeNull();
+    expect(d.permissionCallOf(turns, 'Subagent: Bash \u00b7 ls')).toBeNull();
+    expect(d.permissionCallOf(turns, 'Edit \u00b7 x.js')).toBeNull();
+  });
+  test('with no tool the prompt says a permission is waiting and forbids guessing one', () => {
+    const turn = { role: 'user', text: 'x', typedText: 'x', ts: 't' };
+    const p = d.buildPrompt({ name: 'n', cwd: 'c', promptTurn: turn, turns: [], permission: { tool: null } });
+    expect(p).toContain('PENDING PERMISSION');
+    expect(p).toContain('NOT known');
+    expect(p).not.toContain('Tool:');
+    const k = (permission) => d.waitKeyOf({ promptTurn: turn, lastAssistant: null, permission });
+    expect(k({ tool: null })).not.toBe(k({ tool: 'Bash', input: { command: 'ls' } }));
+  });
+});
+
+test.describe('the transcript is read once per change (SF2)', () => {
+  test('an unchanged file costs a stat; a changed size or mtime reads again', () => {
+    let reads = 0;
+    let st = { size: 10, mtimeMs: 100 };
+    const w = d.createWaitCache({ stat: () => st, derive: (p) => ({ n: ++reads, p }) });
+    expect(w.get('/t').n).toBe(1);
+    expect(w.get('/t').n).toBe(1);
+    expect(reads).toBe(1);
+    st = { size: 11, mtimeMs: 100 };
+    expect(w.get('/t').n).toBe(2);
+    st = { size: 11, mtimeMs: 101 };
+    expect(w.get('/t').n).toBe(3);
+    expect(w.get('/t').n).toBe(3);
+  });
+  test('each path has its own entry, and the table is bounded', () => {
+    let reads = 0;
+    const w = d.createWaitCache({ stat: () => ({ size: 1, mtimeMs: 1 }), derive: () => ++reads, max: 2 });
+    w.get('/a'); w.get('/b'); w.get('/c');
+    expect(reads).toBe(3);
+    w.get('/c'); w.get('/b');
+    expect(reads).toBe(3);
+    w.get('/a');
+    expect(reads).toBe(4);
+  });
+  test('a failing stat or derive is not remembered', () => {
+    let fail = true;
+    const w = d.createWaitCache({ stat: () => ({ size: 1, mtimeMs: 1 }), derive: () => { if (fail) throw new Error('x'); return 'ok'; } });
+    expect(() => w.get('/a')).toThrow();
+    fail = false;
+    expect(w.get('/a')).toBe('ok');
   });
 });
 
@@ -237,6 +337,36 @@ test.describe('running the CLI', () => {
     expect(runs()).toHaveLength(2);
   });
 
+  test('during a failure window a PEEK reports the failure, in the same shape as a run does (N5)', async () => {
+    setMode({ mode: 'bad' });
+    let t = 1_000_000;
+    const s = service({}, { now: () => t });
+    const first = await s.get('S', input('K'));
+    const peek = await s.get('S', input('K'), { peek: true });
+    expect(peek).toEqual(first);
+    expect(peek).toEqual({ status: 502, body: { status: 'failed', reason: 'bad-output' } });
+    expect(runs()).toHaveLength(1);
+    // Past the window the peek is `missing` again, and still starts nothing.
+    t += 61_000;
+    expect((await s.get('S', input('K'), { peek: true })).body.status).toBe('missing');
+    expect(runs()).toHaveLength(1);
+  });
+
+  test('shutdown kills the children THIS service spawned, by recorded handle (N9)', async () => {
+    setMode({ mode: 'sleep', ms: 30000 });
+    const s = service({ timeoutMs: 60000 });
+    const p = s.get('S', input('K'));
+    await expect.poll(() => runs().length, { timeout: 8000 }).toBe(1);
+    const pid = runs()[0].pid;
+    expect(s._stats().children).toBe(1);
+    expect(s.shutdown()).toBe(1);
+    await expect.poll(() => { try { process.kill(pid, 0); return 'alive'; } catch { return 'gone'; } },
+      { timeout: 5000 }).toBe('gone');
+    await p; // the run ends (as a failure), nothing hangs
+    expect(s._stats().children).toBe(0);
+    expect(s.shutdown()).toBe(0);
+  });
+
   test('past the running slots and the short queue the answer is busy', async () => {
     setMode({ mode: 'ok', delayMs: 800 });
     const s = service({}, { limits: { maxRunning: 1, maxQueued: 1 } });
@@ -278,7 +408,8 @@ test.describe('running the CLI', () => {
     expect(run.argv[run.argv.indexOf('--tools') + 1]).toBe('');
     expect(run.argv[run.argv.indexOf('--setting-sources') + 1]).toBe('');
     expect(run.argv).not.toContain('--bare');
-    for (const n of run.envNames) expect(n).not.toMatch(/^(CLAUDECODE|CLAUDE_CODE_|WT_SESSION_ID$|WT_HOOK_TOKEN$)/i);
+    for (const n of run.envNames) expect(n).not.toMatch(/^(CLAUDECODE|CLAUDE_CODE_ENTRYPOINT|CLAUDE_CODE_SSE_PORT|WT_)/i);
+    expect(run.envNames).toEqual(expect.arrayContaining(['PATH']));
     expect(fs.realpathSync(run.cwd)).toBe(fs.realpathSync(path.join(tmp, 'scratch')));
   });
 

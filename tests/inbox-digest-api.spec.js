@@ -146,7 +146,12 @@ test.describe('GET /api/sessions/:id/digest', () => {
     expect(run.stdin).toContain('[tool] shell_command');
     expect(run.stdin).toContain('Shall I delete it?');
     expect(run.argv.join(' ')).not.toContain('build folder');
-    for (const n of run.envNames) expect(n).not.toMatch(/^(CLAUDECODE|CLAUDE_CODE_|WT_SESSION_ID$|WT_HOOK_TOKEN$)/i);
+    // playwright.config.js gives the suite server one variable of each kind, so this is not
+    // vacuous on a machine whose server env happens to hold none of them (N6).
+    expect(run.envNames).toContain('CLAUDE_CODE_DIGEST_SPEC_KEPT');
+    expect(run.envNames).not.toContain('CLAUDE_CODE_SSE_PORT');
+    expect(run.envNames).not.toContain('WT_DIGEST_SPEC_SCRUBBED');
+    for (const n of run.envNames) expect(n).not.toMatch(/^(CLAUDECODE|CLAUDE_CODE_ENTRYPOINT|CLAUDE_CODE_SSE_PORT|WT_)/i);
     // Never a project: the child runs in the scratch directory.
     expect(path.basename(run.cwd)).toBe('digest-runs');
     await ctx.delete(`/api/sessions/${id}`);
@@ -227,28 +232,95 @@ test.describe('GET /api/sessions/:id/digest', () => {
     await raw.dispose();
   });
 
-  test('a blocked permission is sent as the tool call still waiting for its result', async () => {
-    const cwd = emptyCwd('digest-perm');
+  /** A session blocked on a permission, with a rollout holding [calls] open. [now] is the
+   *  PreToolUse the brief's "now" line is written from (null: none arrived). */
+  async function blockedOn(name, calls, now) {
+    const cwd = emptyCwd(name);
     writeRollout(cwd, [
       say('assistant', 'Cleaning up now.', 2),
-      line('response_item', { type: 'function_call', name: 'shell_command', arguments: '{"command":"rm -rf build"}', call_id: 'p1' }, 3),
+      ...calls.map(([tool, args], i) => line('response_item', {
+        type: 'function_call', name: tool, arguments: JSON.stringify(args), call_id: `p${i}`,
+      }, 3 + i)),
     ]);
     const ctx = await authCtx();
     const raw = await hookCtx();
-    const id = await mkSession(ctx, cwd);
+    const id = await mkSession(ctx, cwd, name);
+    if (now) await raw.post('/api/hook', { headers: { 'X-WT-Session-ID': id }, data: { hook_event_name: 'PreToolUse', ...now } });
     await raw.post('/api/hook', {
       headers: { 'X-WT-Session-ID': id },
-      data: { hook_event_name: 'PermissionRequest', tool_name: 'shell_command', tool_input: { command: 'rm -rf build' } },
+      data: { hook_event_name: 'PermissionRequest', tool_name: 'shell_command', tool_input: {} },
     });
     await expect.poll(async () => (await (await ctx.get('/api/sessions')).json()).find((s) => s.id === id)?.status).toBe('waiting');
     expect((await ctx.get(`/api/sessions/${id}/digest`)).status()).toBe(200);
     const [run] = runs();
-    expect(run.stdin).toContain('PENDING PERMISSION');
-    expect(run.stdin).toContain('Tool: shell_command');
-    expect(run.stdin).toContain('rm -rf build');
     await ctx.delete(`/api/sessions/${id}`);
     await ctx.dispose();
     await raw.dispose();
+    return run.stdin;
+  }
+  const NOT_KNOWN = 'Which tool and command it is for is NOT known';
+
+  test('a blocked permission names the ONE open call when the brief agrees', async () => {
+    const stdin = await blockedOn('digest-perm', [['shell_command', { command: 'rm -rf build' }]],
+      { tool_name: 'shell_command', tool_input: { command: 'rm -rf build' } });
+    expect(stdin).toContain('PENDING PERMISSION');
+    expect(stdin).toContain('Tool: shell_command');
+    expect(stdin).toContain('rm -rf build');
+    expect(stdin).not.toContain(NOT_KNOWN);
+  });
+
+  test('an open Agent call, with a subagent\'s tool asking, names NO command', async () => {
+    const stdin = await blockedOn('digest-perm-agent', [['Agent', { description: 'sweep', prompt: 'delete everything old' }]],
+      { tool_name: 'Bash', tool_input: { command: 'rm -rf old' }, agent_id: 'sub-1' });
+    expect(stdin).toContain('PENDING PERMISSION');
+    expect(stdin).toContain(NOT_KNOWN);
+    expect(stdin).not.toContain('Tool: Agent');
+    expect(stdin).not.toContain('delete everything old\n');
+  });
+
+  test('two parallel open calls name NO command', async () => {
+    const stdin = await blockedOn('digest-perm-two', [['shell_command', { command: 'rm -rf dist' }], ['shell_command', { command: 'git push --force' }]],
+      { tool_name: 'shell_command', tool_input: { command: 'git push --force' } });
+    expect(stdin).toContain(NOT_KNOWN);
+    expect(stdin).not.toContain('Tool: shell_command');
+  });
+
+  test('one open call but no now-line from the server names NO command', async () => {
+    const stdin = await blockedOn('digest-perm-noline', [['shell_command', { command: 'rm -rf build' }]], null);
+    expect(stdin).toContain(NOT_KNOWN);
+    expect(stdin).not.toContain('Tool: shell_command');
+  });
+
+  test('an unchanged transcript is not read again; an appended line is (SF2)', async () => {
+    const cwd = emptyCwd('digest-reads');
+    const p = writeRollout(cwd, [say('assistant', 'AAAA first thought.', 2)]);
+    // Pin the mtime to a whole second so a rewrite below can restore it exactly.
+    const T = Math.floor(Date.now() / 1000) - 60;
+    fs.utimesSync(p, T, T);
+    const ctx = await authCtx();
+    const id = await mkSession(ctx, cwd);
+    const peek = async () => (await (await ctx.get(`/api/sessions/${id}/digest?peek=1`)).json()).waitKey;
+    const k1 = await peek();
+    // The same bytes' worth of DIFFERENT content, same size, same mtime: a route that read the
+    // file again would see a new wait; one that trusts size + mtime keeps the old one.
+    fs.writeFileSync(p, fs.readFileSync(p, 'utf8').replace('AAAA first', 'BBBB first'));
+    fs.utimesSync(p, T, T);
+    expect(await peek()).toBe(k1);
+    // Any real change moves the size or the mtime and is read.
+    fs.appendFileSync(p, say('assistant', 'Actually, a second thought.', 3) + '\n');
+    expect(await peek()).not.toBe(k1);
+    await ctx.delete(`/api/sessions/${id}`);
+    await ctx.dispose();
+  });
+
+  test('graceful shutdown of the server kills the digest children it spawned (N9, against the source)', () => {
+    // No behavioural test can see this: a signal handler does not run on a Windows
+    // TerminateProcess, and a real SIGTERM would take the suite's own server down. So the
+    // wiring is pinned in the source, like the other "nothing goes round it" gates here.
+    const src = fs.readFileSync(path.join(__dirname, '..', 'server.js'), 'utf8');
+    const body = src.slice(src.indexOf('async function gracefulShutdown('), src.indexOf("process.on('SIGINT'"));
+    expect(body).toContain('digestService.shutdown()');
+    expect(body.indexOf('digestService.shutdown()')).toBeLessThan(body.indexOf('process.exit(0)'));
   });
 
   test('a reply that is not JSON is a 502 failed/bad-output, never a half digest', async () => {

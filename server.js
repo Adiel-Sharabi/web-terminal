@@ -6211,6 +6211,21 @@ app.post('/api/sessions/:id/attention/clear', (req, res) => {
 // file path comes ONLY from the validated stash (or a re-validated derivation),
 // never from the request; Cache-Control: no-store. Reads only the chunks a page
 // needs — a tens-of-MB transcript costs a few 256KB reads, not a full-file load.
+// A positional reader over an open fd, in the shape transcript.scanTurnsBackward takes:
+// fills `len` bytes from `off` (a read may return short) and returns fewer only at EOF.
+function fdChunkReader(fd) {
+  return (off, len) => {
+    const buf = Buffer.alloc(len);
+    let read = 0;
+    while (read < len) {
+      const n = fs.readSync(fd, buf, read, len - read, off + read);
+      if (n <= 0) break;
+      read += n;
+    }
+    return read === len ? buf : buf.slice(0, read);
+  };
+}
+
 app.get('/api/sessions/:id/transcript', async (req, res) => {
   res.set('Cache-Control', 'no-store');
   const id = req.params.id;
@@ -6240,16 +6255,7 @@ app.get('/api/sessions/:id/transcript', async (req, res) => {
     // A stale cursor past EOF just reads the tail rather than erroring.
     if (before != null && before > size) before = size;
     fd = fs.openSync(tpath, 'r');
-    const readChunk = (off, len) => {
-      const buf = Buffer.alloc(len);
-      let read = 0;
-      while (read < len) {
-        const n = fs.readSync(fd, buf, read, len - read, off + read);
-        if (n <= 0) break;
-        read += n;
-      }
-      return read === len ? buf : buf.slice(0, read);
-    };
+    const readChunk = fdChunkReader(fd);
     // Which agent wrote this transcript decides how a LINE is parsed; the paging,
     // cursor and tool_use↔result pairing are shared (lib/agents.js is the registry).
     const agent = agentForTranscriptPath(tpath);
@@ -6314,16 +6320,7 @@ function speechFromTranscriptPath(tpath) {
   try {
     const size = fs.statSync(tpath).size;
     fd = fs.openSync(tpath, 'r');
-    const readChunk = (off, len) => {
-      const buf = Buffer.alloc(len);
-      let read = 0;
-      while (read < len) {
-        const n = fs.readSync(fd, buf, read, len - read, off + read);
-        if (n <= 0) break;
-        read += n;
-      }
-      return read === len ? buf : buf.slice(0, read);
-    };
+    const readChunk = fdChunkReader(fd);
     const agent = agentForTranscriptPath(tpath);
     const adapter = getAdapter(agent);
     const { turns } = transcript.scanTurnsBackward(readChunk, size, {
@@ -6438,16 +6435,7 @@ app.get('/api/sessions/:id/recap', async (req, res) => {
   try {
     const size = fs.statSync(tpath).size;
     fd = fs.openSync(tpath, 'r');
-    const readChunk = (off, len) => {
-      const buf = Buffer.alloc(len);
-      let read = 0;
-      while (read < len) {
-        const n = fs.readSync(fd, buf, read, len - read, off + read);
-        if (n <= 0) break;
-        read += n;
-      }
-      return read === len ? buf : buf.slice(0, read);
-    };
+    const readChunk = fdChunkReader(fd);
     const agent = agentForTranscriptPath(tpath);
     const adapter = getAdapter(agent);
     // Page backward until recap.MAX_PROMPTS HUMAN prompts are in hand (or a
@@ -6535,16 +6523,7 @@ function readTurnsToLastPrompt(tpath) {
   try {
     const size = fs.statSync(tpath).size;
     fd = fs.openSync(tpath, 'r');
-    const readChunk = (off, len) => {
-      const buf = Buffer.alloc(len);
-      let read = 0;
-      while (read < len) {
-        const n = fs.readSync(fd, buf, read, len - read, off + read);
-        if (n <= 0) break;
-        read += n;
-      }
-      return read === len ? buf : buf.slice(0, read);
-    };
+    const readChunk = fdChunkReader(fd);
     const adapter = getAdapter(agentForTranscriptPath(tpath));
     let turns = [];
     let before = null;
@@ -6567,6 +6546,17 @@ function readTurnsToLastPrompt(tpath) {
   }
 }
 
+// What the digest reads of a transcript, remembered per file while its size + mtime hold.
+const digestWaits = inboxDigest.createWaitCache({
+  stat: (p) => fs.statSync(p),
+  derive: (p) => {
+    const { turns, promptIndex } = readTurnsToLastPrompt(p);
+    let question = null;
+    try { question = pendingQuestionFromTranscript(p); } catch { question = null; }
+    return { turns, promptIndex, question };
+  },
+});
+
 app.get('/api/sessions/:id/digest', async (req, res) => {
   res.set('Cache-Control', 'no-store');
   const id = req.params.id;
@@ -6580,24 +6570,23 @@ app.get('/api/sessions/:id/digest', async (req, res) => {
     const tpath = await resolveSessionTranscriptPath(id);
     if (!tpath) return none();
 
-    const { turns, promptIndex } = readTurnsToLastPrompt(tpath);
+    // One stat per request when the file is unchanged (SF2): the walk and the tail read run
+    // only when the transcript's size or mtime moved.
+    const { turns, promptIndex, question: transcriptQuestion } = digestWaits.get(tpath);
     const promptTurn = promptIndex >= 0 ? turns[promptIndex] : null;
     const since = turns.slice(promptIndex + 1);
     const lastAssistant = [...since].reverse().find((t) => t && t.role === 'assistant') || null;
 
     // What is being asked: the live AskUserQuestion, else one the transcript still holds
-    // unanswered; failing both, a blocked session is asking permission for its newest
-    // tool call that has no result yet. Anything else is an ask made in prose.
-    let question = (_notifyState.get(id) || {}).pendingQuestion || null;
-    if (!question) { try { question = pendingQuestionFromTranscript(tpath); } catch { question = null; } }
+    // unanswered; failing both, a blocked session is asking permission. The call is named
+    // only when it is unambiguous (inboxDigest.permissionCallOf: one open call, not a
+    // subagent's, agreeing with the brief's "now" line); otherwise the digest says only that
+    // a permission is waiting. Anything else is an ask made in prose.
+    let question = (_notifyState.get(id) || {}).pendingQuestion || transcriptQuestion || null;
     let permission = null;
     if (!question && sessionWaitingFor(session) === 'permission') {
-      for (let i = since.length - 1; i >= 0 && !permission; i--) {
-        const uses = (since[i] && since[i].toolUses) || [];
-        for (let j = uses.length - 1; j >= 0; j--) {
-          if (typeof uses[j].result !== 'string') { permission = { tool: uses[j].name, input: uses[j].input }; break; }
-        }
-      }
+      const nowLine = ((getBriefEntry(id) || {}).now || {}).text;
+      permission = inboxDigest.permissionCallOf(since, nowLine) || { tool: null };
     }
     if (!question && !permission && !inboxDigest.hasAgentText(since)) return none();
 
@@ -6662,16 +6651,7 @@ app.get('/api/sessions/:id/subagent/:toolUseId', async (req, res) => {
     const size = fs.statSync(file).size;
     if (before != null && before > size) before = size;
     fd = fs.openSync(file, 'r');
-    const readChunk = (off, len) => {
-      const buf = Buffer.alloc(len);
-      let read = 0;
-      while (read < len) {
-        const n = fs.readSync(fd, buf, read, len - read, off + read);
-        if (n <= 0) break;
-        read += n;
-      }
-      return read === len ? buf : buf.slice(0, read);
-    };
+    const readChunk = fdChunkReader(fd);
     const { turns, cursor, hasMore } = transcript.scanTurnsBackward(readChunk, size, { before, limit });
     // Deeper nesting: a subagent can itself spawn subagents (all in the same flat
     // subagents dir), so stamp nested Task tool_uses too — resolved-set from THIS
@@ -7503,6 +7483,8 @@ async function gracefulShutdown(signal) {
   // interrupt a native CreateProcessW already running inside the thread, and Node joins worker
   // threads on exit, so a shutdown that lands during a blocked spawn waits that spawn out.
   try { if (_backgroundListingExec) _backgroundListingExec.dispose(); } catch {}
+  // The digest runs (#383) this process spawned: killed by the handles recorded at spawn.
+  try { digestService.shutdown(); } catch {}
   console.log(`[${new Date().toISOString()}] Exiting.`);
   process.exit(0);
 }
