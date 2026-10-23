@@ -53,9 +53,17 @@ test.describe('the model\'s answer is parsed strictly', () => {
       JSON.stringify({ result: JSON.stringify({ about: '', asking: [], know: [] }) }),
       JSON.stringify({ result: JSON.stringify({ about: 'a', asking: 'not a list', know: [] }) }),
       JSON.stringify({ result: JSON.stringify({ about: 'a', asking: [1], know: [] }) }),
-      JSON.stringify({ result: JSON.stringify({ about: 'a', asking: ['q'], know: Array(6).fill('x') }) }),
+      // Too many questions: cutting the list would hide one, so the answer is refused.
+      JSON.stringify({ result: JSON.stringify({ about: 'a', asking: Array(9).fill('q'), know: [] }) }),
     ];
     for (const b of bad) expect(d.parseModelOutput(b), b).toBeNull();
+  });
+  test('a sixth fact keeps the first five rather than failing the whole summary', () => {
+    // Seen live (1 in 4 real runs): asked for 0 to 5, the model gave more, and the whole
+    // summary was refused although nothing in it was wrong.
+    const know = ['f1', 'f2', 'f3', 'f4', 'f5', 'f6', 'f7'];
+    const r = d.parseModelOutput(JSON.stringify({ result: JSON.stringify({ about: 'a', asking: ['q'], know }) }));
+    expect(r).toEqual({ about: 'a', asking: ['q'], know: ['f1', 'f2', 'f3', 'f4', 'f5'] });
   });
   test('over-long strings are cut with an ellipsis rather than rejected', () => {
     const r = d.parseModelOutput(JSON.stringify({ about: 'a'.repeat(5000), asking: ['q'], know: [] }));
