@@ -43,6 +43,7 @@ import '../services/speech_service.dart';
 import '../theme/app_theme.dart';
 import '../util/terminal_write.dart';
 import '../theme/status_colors.dart';
+import '../util/agent_turn.dart';
 import '../util/attach_overlap.dart';
 import '../util/scrollback_window.dart';
 import '../util/terminal_links.dart';
@@ -1673,14 +1674,16 @@ class _SessionScreenState extends State<SessionScreen>
     }
   }
 
-  /// Fetches the transcript tail and stashes Claude's most recent message as
-  /// the pending question's context (shown above the question in the overlay).
+  /// Reads the agent's whole current turn ([loadAgentTurn], the one rule the
+  /// questions inbox reads too) and stashes it as the pending question's lead-up
+  /// (shown above the question in the overlay).
   Future<void> _loadQuestionContext() async {
     final api = _api;
     if (api == null) return;
     try {
-      final page = await api.transcript(widget.sessionId, limit: 12);
-      final text = lastAssistantText(page.messages);
+      final turn = await loadAgentTurn(
+          (before, limit) => api.transcript(widget.sessionId, before: before, limit: limit));
+      final text = turn.leadUp;
       if (mounted) setState(() => _questionContext = text);
     } catch (_) {
       // Best-effort — the overlay just omits the context panel.

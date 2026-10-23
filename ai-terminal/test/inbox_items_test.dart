@@ -7,6 +7,7 @@ import 'dart:convert';
 import 'package:ai_terminal/api/api_client.dart';
 import 'package:ai_terminal/api/models.dart';
 import 'package:ai_terminal/screens/work_board_screen.dart' show BoardColumn, boardColumnOf;
+import 'package:ai_terminal/util/agent_turn.dart';
 import 'package:ai_terminal/util/inbox_items.dart';
 import 'package:ai_terminal/util/text_direction.dart';
 import 'package:flutter/painting.dart';
@@ -42,12 +43,8 @@ Session _s(
       if (hidden) 'brief': {'v': 1, 'reporting': 'on', 'items': [], 'hidden': true},
     });
 
-SessionRecap _recap(String reply, {String at = '2026-10-22T10:00:00Z'}) => SessionRecap.fromJson({
-      'name': 'x',
-      'cwd': '/w',
-      'status': 'idle',
-      'reply': {'text': reply, 'at': at},
-    });
+AgentTurn _recap(String reply, {String at = '2026-10-22T10:00:00Z'}) =>
+    AgentTurn(prose: reply, at: at, youAsked: 'go', reachedPrompt: true);
 
 BackgroundAgentRow _agent(String id, {String? waitingFor, String? sessionId, int? startedAt, ServerConfig server = _home}) =>
     BackgroundAgentRow(server: server, id: id, sessionId: sessionId, name: 'agent-$id', waitingFor: waitingFor, startedAt: startedAt);
@@ -78,7 +75,7 @@ void main() {
           _s('old', reason: {'kind': 'you', 'text': '', 'since': 100, 'source': 'reported'}, lastActivity: 999),
           _s('unknown', status: 'waiting', waitingFor: 'permission'),
         ],
-        recaps: {'${_home.baseUrl}|prose': _recap('Which one should I take?')},
+        turns: {'${_home.baseUrl}|prose': _recap('Which one should I take?')},
         agents: {
           _home.baseUrl: [_agent('a1', waitingFor: 'approve the plan', startedAt: 5)],
         },
@@ -131,20 +128,20 @@ void main() {
 
   group('prose gating (8.8)', () {
     final asks = _recap('Done.\n\nShould I push it?');
-    Map<String, SessionRecap?> recap(String id) => {'${_home.baseUrl}|$id': asks};
+    Map<String, AgentTurn?> recap(String id) => {'${_home.baseUrl}|$id': asks};
 
     test('an idle agent row with no report and a question in its last paragraph is an item', () {
-      final items = inboxItemsOf([_s('c', lastActivity: 5)], recaps: recap('c'));
+      final items = inboxItemsOf([_s('c', lastActivity: 5)], turns: recap('c'));
       expect(items.single.kind, InboxKind.prose);
       expect(items.single.blocking, isFalse);
-      expect(items.single.reply!.text, contains('push it?'));
+      expect(items.single.turn!.prose, contains('push it?'));
     });
 
     test('a row that reported a self or done wait is not an item', () {
       for (final kind in ['self', 'done']) {
         final s = _s('c', reason: {'kind': kind, 'text': 'x', 'source': 'reported'});
         expect(proseCandidate(s), isFalse, reason: kind);
-        expect(inboxItemsOf([s], recaps: recap('c')), isEmpty, reason: kind);
+        expect(inboxItemsOf([s], turns: recap('c')), isEmpty, reason: kind);
       }
     });
 
@@ -153,15 +150,15 @@ void main() {
       expect(proseCandidate(_s('c', hidden: true)), isFalse);
       expect(proseCandidate(_s('c', agent: null)), isFalse);
       expect(proseCandidate(_s('c')), isTrue);
-      expect(inboxItemsOf([_s('c')], recaps: {'${_home.baseUrl}|c': _recap('All done.')}), isEmpty);
+      expect(inboxItemsOf([_s('c')], turns: {'${_home.baseUrl}|c': _recap('All done.')}), isEmpty);
     });
 
     test('"not a question" dismisses THAT reply; a newer one asks again', () {
       final s = _s('c');
-      final dismissed = {proseDismissKey(s, asks.reply!)};
-      expect(inboxItemsOf([s], recaps: recap('c'), dismissed: dismissed), isEmpty);
+      final dismissed = {proseDismissKey(s, asks)};
+      expect(inboxItemsOf([s], turns: recap('c'), dismissed: dismissed), isEmpty);
       final newer = _recap('Should I push it now?', at: '2026-10-22T11:00:00Z');
-      expect(inboxItemsOf([s], recaps: {'${_home.baseUrl}|c': newer}, dismissed: dismissed), hasLength(1));
+      expect(inboxItemsOf([s], turns: {'${_home.baseUrl}|c': newer}, dismissed: dismissed), hasLength(1));
     });
   });
 

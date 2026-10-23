@@ -433,18 +433,6 @@ Future<PendingQuestion?> awaitAnswerLanded({
   return stillPending;
 }
 
-/// The text of the most recent non-empty assistant turn in [turns] — the
-/// message that led up to the question, so it can be shown as context above the
-/// overlay ("read the whole answer before the question"). Null when there's no
-/// assistant prose yet. Pure, so it's unit-testable.
-String? lastAssistantText(List<TranscriptTurn> turns) {
-  for (var i = turns.length - 1; i >= 0; i--) {
-    final t = turns[i];
-    if (t.isAssistant && t.text.trim().isNotEmpty) return t.text.trim();
-  }
-  return null;
-}
-
 /// Renders the INLINE markdown an option description actually carries, as
 /// [TextSpan]s (#108).
 ///

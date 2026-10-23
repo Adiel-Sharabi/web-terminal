@@ -17,8 +17,10 @@
 // What is fetched, and when (report-L section 4). The rows come from
 // [SessionRepository] with a faster poll while the screen is open, as on the board.
 // Everything else is asked only while the screen is mounted, and only for the items
-// that need it: a question row's live question (throttled by [NeedsYouActions]), a prose
-// candidate's recap once per (session, lastActivity), the focused item's lead-up,
+// that need it: a question row's live question (throttled by [NeedsYouActions]), the
+// agent's current turn from its transcript ([loadAgentTurn]: once per (session,
+// lastActivity) for a prose candidate or a reported wait, once per wait for a
+// permission, once per question for the focused question), the focused item's
 // permission detail and terminal tail, and each server's background agents.
 
 import 'dart:async';
@@ -36,8 +38,10 @@ import '../services/question_draft_store.dart';
 import '../services/session_input.dart';
 import '../services/session_repository.dart';
 import '../theme/app_theme.dart';
+import '../util/agent_turn.dart';
 import '../util/inbox_items.dart';
 import '../util/needs_you.dart';
+import '../util/reply_text.dart';
 import '../util/scrollback_window.dart' show scrollbackTailOffset;
 import '../util/session_tree.dart';
 import '../util/terminal_tail.dart';
@@ -49,7 +53,7 @@ import '../widgets/directional_text.dart';
 import '../widgets/format_utils.dart';
 import '../widgets/machine_stripe.dart';
 import '../widgets/question_answer_panel.dart';
-import '../widgets/question_overlay.dart' show AnswerFrame, kWideMinWidth, lastAssistantText;
+import '../widgets/question_overlay.dart' show AnswerFrame, kWideMinWidth;
 import '../widgets/reply_box.dart';
 import '../widgets/server_badge.dart';
 import '../widgets/session_family.dart';
@@ -126,15 +130,13 @@ class _QuestionsInboxScreenState extends State<QuestionsInboxScreen> {
   late final NeedsYouActions _needs = NeedsYouActions(
       repository: _repo, client: _client, input: (s, body) => _input(s, body), say: _say);
 
-  /// A prose candidate's recap, by [sessionKey], with the `lastActivity` it was read at.
-  final Map<String, ({int? at, SessionRecap? recap})> _recaps = {};
-  final Set<String> _recapsInFlight = {};
+  /// The agent's current turn ([loadAgentTurn]), by [sessionKey], with the stamp it
+  /// was read for ([_turnStamp]): a new stamp is read afresh.
+  final Map<String, ({String stamp, AgentTurn? turn})> _turns = {};
+  final Set<String> _turnsInFlight = {};
 
   /// A permission row's attention record, with the wait start it was read for.
   final Map<String, ({int? since, AttentionInfo? info})> _attention = {};
-
-  /// A question's lead-up, by [sessionKey], for the question signature it was read for.
-  final Map<String, ({String sig, String? text})> _context = {};
 
   /// The focused item's terminal tail, by [sessionKey].
   final Map<String, List<String>> _tails = {};
@@ -159,6 +161,9 @@ class _QuestionsInboxScreenState extends State<QuestionsInboxScreen> {
 
   /// Lead-up text being expanded in a permission view.
   final Set<String> _expanded = {};
+
+  /// Cards whose question or ask is shown whole, in place, by [InboxItem.key].
+  final Set<String> _cardOpen = {};
 
   List<ServerConfig> get _servers => (widget.servers ?? () => AppConfig.servers)();
   ApiClient _client(ServerConfig s) => (widget.clientFactory ?? ApiClient.new)(s);
@@ -226,7 +231,7 @@ class _QuestionsInboxScreenState extends State<QuestionsInboxScreen> {
     if (_disposed) return;
     _pruneFocusCaches();
     unawaited(_needs.refreshQuestions(_sessions.where((s) => needKindOf(s) == NeedKind.question)));
-    unawaited(_refreshRecaps());
+    unawaited(_refreshTurns());
     unawaited(_refreshAttention());
     unawaited(_refreshFocused());
   }
@@ -240,34 +245,72 @@ class _QuestionsInboxScreenState extends State<QuestionsInboxScreen> {
       if (_snapshot?.session != null) sessionKey(_snapshot!.session!),
     };
     _tails.removeWhere((k, _) => !live.contains(k));
-    _context.removeWhere((k, _) => !live.contains(k));
     _expanded.removeWhere((k) => !live.contains(k));
+    _cardOpen.removeWhere((k) => !_items.any((it) => it.key == k));
   }
 
-  /// A prose candidate's recap, once per (session, lastActivity): never on a poll.
-  Future<void> _refreshRecaps() async {
-    final candidates = _sessions.where(proseCandidate).toList();
-    final live = {for (final s in candidates) sessionKey(s)};
-    _recaps.removeWhere((k, _) => !live.contains(k));
-    final due = candidates.where((s) {
-      final k = sessionKey(s);
-      final hit = _recaps[k];
-      return !_recapsInFlight.contains(k) && (hit == null || hit.at != s.lastActivity);
-    }).toList();
-    if (due.isEmpty) return;
-    for (final s in due) {
-      _recapsInFlight.add(sessionKey(s));
+  /// What a session's current turn is read for, or null when none is needed: a
+  /// question's lead-up (once per question, read only while it is focused), a
+  /// permission's lead-up and tool call (once per wait), and the last reply of a
+  /// reported wait or a prose candidate (once per lastActivity: never on a poll).
+  String? _turnStamp(Session s) {
+    if (boardNeedsYou(s)) {
+      switch (needKindOf(s)) {
+        case NeedKind.question:
+          final q = _needs.questionFor(s);
+          return q == null ? null : 'q|${questionSignature(q)}';
+        case NeedKind.permission:
+          return 'p|${s.reason?.since ?? s.lastActivity}';
+        case NeedKind.reported:
+          return 'a|${s.lastActivity}';
+        default:
+          return null;
+      }
     }
-    await Future.wait(due.map((s) async {
-      SessionRecap? recap;
-      try {
-        recap = await _client(s.server).recap(s.id);
-      } catch (_) {/* no reply to read is no question to show; asked again on new activity */}
-      _recapsInFlight.remove(sessionKey(s));
+    return proseCandidate(s) ? 'a|${s.lastActivity}' : null;
+  }
+
+  /// The current turn of every listed session that needs one, except a question, which
+  /// is read only while focused ([_refreshFocused]). A read that fails is kept as
+  /// nothing for that stamp: no reply to read is no question to show, and it is asked
+  /// again on new activity.
+  Future<void> _refreshTurns() async {
+    final due = <(Session, String)>[];
+    final live = <String>{};
+    for (final s in _sessions) {
+      final stamp = _turnStamp(s);
+      if (stamp == null) continue;
+      final k = sessionKey(s);
+      live.add(k);
+      if (stamp.startsWith('q|') || _turns[k]?.stamp == stamp || _turnsInFlight.contains('$k|$stamp')) continue;
+      due.add((s, stamp));
+    }
+    final focus = _snapshot?.session;
+    _turns.removeWhere((k, _) => !live.contains(k) && (focus == null || sessionKey(focus) != k));
+    if (due.isEmpty) return;
+    await Future.wait(due.map((d) async {
+      final (s, stamp) = d;
+      final k = sessionKey(s);
+      _turnsInFlight.add('$k|$stamp');
+      // A blocking item shows "You asked / Earlier it said" when its turn has no prose;
+      // a prose candidate with no prose asks nothing, so it needs no older page.
+      final turn = await _readTurn(s, earlier: boardNeedsYou(s));
+      _turnsInFlight.remove('$k|$stamp');
       if (_disposed) return;
-      _recaps[sessionKey(s)] = (at: s.lastActivity, recap: recap);
+      _turns[k] = (stamp: stamp, turn: turn);
     }));
     _changed();
+  }
+
+  /// [s]'s current turn, or null when its transcript could not be read.
+  Future<AgentTurn?> _readTurn(Session s, {required bool earlier}) async {
+    final api = _client(s.server);
+    try {
+      return await loadAgentTurn((before, limit) => api.transcript(s.id, before: before, limit: limit),
+          earlier: earlier);
+    } catch (_) {
+      return null;
+    }
   }
 
   /// A permission row's attention record, once per wait; the focused one is re-read.
@@ -307,18 +350,15 @@ class _QuestionsInboxScreenState extends State<QuestionsInboxScreen> {
       case InboxKind.question:
         final q = it.question;
         if (q == null) return;
-        final sig = questionSignature(q);
-        if (_context[k]?.sig == sig) return;
-        _context[k] = (sig: sig, text: null);
-        try {
-          final page = await _client(s.server).transcript(s.id, limit: 12);
-          if (_disposed) return;
-          _context[k] = (sig: sig, text: lastAssistantText(page.messages));
-          _changed();
-        } catch (_) {
-          // No lead-up panel for now; asked again on the next refresh, not cached.
-          if (_context[k]?.sig == sig && _context[k]?.text == null) _context.remove(k);
-        }
+        final stamp = 'q|${questionSignature(q)}';
+        if (_turns[k]?.stamp == stamp || _turnsInFlight.contains('$k|$stamp')) return;
+        _turnsInFlight.add('$k|$stamp');
+        final turn = await _readTurn(s, earlier: true);
+        _turnsInFlight.remove('$k|$stamp');
+        if (_disposed) return;
+        // A failed read is not kept: no lead-up panel for now, asked again next time.
+        if (turn != null) _turns[k] = (stamp: stamp, turn: turn);
+        _changed();
       case InboxKind.permission || InboxKind.menu || InboxKind.waiting:
         if (!force && _tails.containsKey(k)) return;
         if (it.kind == InboxKind.permission && force) unawaited(_refreshAttention(force: k));
@@ -378,7 +418,7 @@ class _QuestionsInboxScreenState extends State<QuestionsInboxScreen> {
           for (final s in _sessions)
             if (needKindOf(s) == NeedKind.question) sessionKey(s): _needs.questionFor(s),
         },
-        recaps: {for (final e in _recaps.entries) e.key: e.value.recap},
+        turns: {for (final e in _turns.entries) e.key: e.value.turn},
         agents: _agents,
         dismissed: _dismissed,
       );
@@ -560,7 +600,7 @@ class _QuestionsInboxScreenState extends State<QuestionsInboxScreen> {
 
   void _notAQuestion(InboxItem it) {
     final s = it.session;
-    final r = it.reply;
+    final r = it.turn;
     if (s == null || r == null) return;
     _update(() => _dismissed.add(proseDismissKey(s, r)));
     _moveOn(it.key);
@@ -765,9 +805,10 @@ final ButtonStyle _smallOutlined = OutlinedButton.styleFrom(
   textStyle: const TextStyle(fontSize: 12, fontWeight: FontWeight.w600),
 );
 
-/// A labelled, clamped line: `<b>Label:</b> text`, in the direction of the text's
-/// first paragraph (a clamped snippet is one block).
-Widget _labelled(BuildContext context, String label, String text, {int maxLines = 3, Key? key}) {
+/// A labelled line: `<b>Label:</b> text`, in the direction of the text's first
+/// paragraph. [maxLines] clamps it; null shows it whole, for a [questionSnippet] that is
+/// already shortened at a sentence boundary and must not be cut again mid-word.
+Widget _labelled(BuildContext context, String label, String text, {int? maxLines = 3, Key? key}) {
   final theme = Theme.of(context);
   return Text.rich(
     TextSpan(children: [
@@ -778,10 +819,137 @@ Widget _labelled(BuildContext context, String label, String text, {int maxLines 
     ]),
     key: key,
     maxLines: maxLines,
-    overflow: TextOverflow.ellipsis,
+    overflow: maxLines == null ? null : TextOverflow.ellipsis,
     textDirection: textDirectionFor(paragraphsOf(text).firstOrNull ?? ''),
     style: theme.textTheme.bodySmall?.copyWith(fontSize: 13),
   );
+}
+
+/// A card's question or ask: the sentence that asks ([questionSnippet], cut only at
+/// sentence boundaries), and, when that left something out, a tap that shows [whole]
+/// in place, so it can be read without opening the item (#383). The rest of the card
+/// still opens it.
+class _Snippet extends StatelessWidget {
+  const _Snippet({required this.item, required this.state, required this.label, required this.text, required this.whole});
+  final InboxItem item;
+  final _QuestionsInboxScreenState state;
+  final String label;
+  final String text;
+
+  /// Everything the card can show in place: each question with its own header.
+  final List<({String label, String text})> whole;
+
+  @override
+  Widget build(BuildContext context) {
+    final theme = Theme.of(context);
+    final short = questionSnippet(text);
+    final canOpen = short != text.trim() || whole.length > 1;
+    final open = canOpen && state._cardOpen.contains(item.key);
+    final shown = open
+        ? Column(key: ValueKey('inbox-whole-${item.key}'), crossAxisAlignment: CrossAxisAlignment.start, children: [
+            for (final (i, w) in whole.indexed)
+              Padding(
+                  padding: EdgeInsets.only(top: i == 0 ? 0 : 6), child: _labelled(context, w.label, w.text.trim(), maxLines: null)),
+          ])
+        : _labelled(context, label, short, maxLines: null, key: ValueKey('inbox-snippet-${item.key}'));
+    if (!canOpen) return shown;
+    return InkWell(
+      key: ValueKey('inbox-expand-${item.key}'),
+      onTap: () => state._update(() => open ? state._cardOpen.remove(item.key) : state._cardOpen.add(item.key)),
+      child: Column(crossAxisAlignment: CrossAxisAlignment.start, children: [
+        shown,
+        Text(open ? 'Show less' : 'Show all',
+            style: theme.textTheme.labelSmall?.copyWith(color: theme.colorScheme.primary, fontWeight: FontWeight.w600)),
+      ]),
+    );
+  }
+}
+
+/// The tool call a permission prompt asks to run, as the transcript recorded it: its
+/// name and, in monospace, the command or path being approved. [maxLines] clamps it in
+/// a card; null shows it whole and selectable.
+class _ToolCall extends StatelessWidget {
+  const _ToolCall({required this.name, required this.text, this.maxLines});
+  final String name;
+  final String text;
+  final int? maxLines;
+
+  @override
+  Widget build(BuildContext context) {
+    final theme = Theme.of(context);
+    final mono = theme.textTheme.bodySmall?.copyWith(
+        fontFamily: 'monospace', fontFamilyFallback: const ['Consolas', 'Menlo', 'Courier New'], fontSize: 12.5);
+    final body = maxLines == null
+        ? SelectableText(text, key: const ValueKey('inbox-tool-call'), style: mono)
+        : Text(text, maxLines: maxLines, overflow: TextOverflow.ellipsis, style: mono, textDirection: TextDirection.ltr);
+    return Container(
+      width: double.infinity,
+      padding: const EdgeInsets.all(8),
+      decoration: BoxDecoration(
+        color: theme.colorScheme.surfaceContainerHighest,
+        borderRadius: BorderRadius.circular(AppShape.small),
+      ),
+      child: Column(crossAxisAlignment: CrossAxisAlignment.start, children: [
+        if (name.isNotEmpty)
+          Text(name, style: theme.textTheme.labelSmall?.copyWith(fontWeight: FontWeight.w700, color: theme.colorScheme.onSurfaceVariant)),
+        body,
+      ]),
+    );
+  }
+}
+
+/// The agent's lead-up, clamped to [kLeadClamp] until opened. "Show all" is offered only
+/// when the text is actually taller than the clamp - measured after layout, since a
+/// character count cannot know the width it wraps at.
+const double kLeadClamp = 160;
+
+class _ClampedLead extends StatefulWidget {
+  const _ClampedLead({required this.open, required this.onToggle, required this.child});
+  final bool open;
+  final VoidCallback onToggle;
+  final Widget child;
+
+  @override
+  State<_ClampedLead> createState() => _ClampedLeadState();
+}
+
+class _ClampedLeadState extends State<_ClampedLead> {
+  final _scroll = ScrollController();
+  bool _overflows = false;
+
+  void _measure() {
+    if (!mounted || widget.open || !_scroll.hasClients) return;
+    final over = _scroll.position.maxScrollExtent > 0;
+    if (over != _overflows) setState(() => _overflows = over);
+  }
+
+  @override
+  void dispose() {
+    _scroll.dispose();
+    super.dispose();
+  }
+
+  @override
+  Widget build(BuildContext context) {
+    WidgetsBinding.instance.addPostFrameCallback((_) => _measure());
+    return Column(crossAxisAlignment: CrossAxisAlignment.start, children: [
+      ConstrainedBox(
+        constraints: BoxConstraints(maxHeight: widget.open ? double.infinity : kLeadClamp),
+        child: ClipRect(
+            child: SingleChildScrollView(
+                key: const ValueKey('inbox-lead'),
+                controller: _scroll,
+                physics: const NeverScrollableScrollPhysics(),
+                child: widget.child)),
+      ),
+      if (widget.open || _overflows)
+        TextButton(
+          key: const ValueKey('inbox-lead-toggle'),
+          onPressed: widget.onToggle,
+          child: Text(widget.open ? 'Show less' : 'Show all'),
+        ),
+    ]);
+  }
 }
 
 /// One item in the list: the head every card shares, what it waits on, and the
@@ -843,18 +1011,42 @@ class _InboxCard extends StatelessWidget {
     switch (it.kind) {
       case InboxKind.question:
         final q = it.question;
-        final text = (q == null || q.questions.isEmpty) ? 'reading it...' : q.questions.first.question;
-        return [_labelled(context, 'Question', text, maxLines: 3)];
+        if (q == null || q.questions.isEmpty) return [_labelled(context, 'Question', 'reading it...')];
+        final first = q.questions.first;
+        final more = q.questions.length - 1;
+        return [
+          _Snippet(
+            item: it,
+            state: state,
+            label: _questionLabel(first),
+            text: first.question,
+            whole: [
+              for (final x in q.questions) (label: _questionLabel(x), text: x.question),
+            ],
+          ),
+          if (more > 0 && !state._cardOpen.contains(it.key))
+            Text('+$more more question${more == 1 ? '' : 's'}',
+                key: ValueKey('inbox-more-${it.key}'), style: Theme.of(context).textTheme.bodySmall),
+        ];
       case InboxKind.permission:
-        return [_labelled(context, 'Permission', state._permissionReason(s!), maxLines: 2)];
+        final tool = it.turn?.pendingTool;
+        final what = tool == null ? null : toolCallText(tool);
+        return [
+          _labelled(context, 'Permission', state._permissionReason(s!), maxLines: 2),
+          if (what != null) _ToolCall(name: tool!.name, text: what, maxLines: 2),
+        ];
       case InboxKind.prose:
-        final paras = it.reply!.text.trim().split(RegExp(r'\n[ \t]*\n'));
-        return [_labelled(context, 'May be asking', paras.last.trim(), maxLines: 4)];
+        final reply = it.turn!.prose;
+        return [
+          _Snippet(
+              item: it, state: state, label: 'May be asking', text: askingScope(reply), whole: [(label: 'May be asking', text: askingScope(reply))]),
+        ];
       case InboxKind.reported:
         final waiting = s!.reason?.text ?? '';
+        final ask = _reportedAsk(it);
         return [
           if (waiting.isNotEmpty) _labelled(context, 'Waiting', waiting),
-          if (s.brief?.did != null) _labelled(context, 'Asks', s.brief!.did!.text, maxLines: 4),
+          if (ask != null) _Snippet(item: it, state: state, label: 'Asks', text: ask, whole: [(label: 'Asks', text: ask)]),
         ];
       case InboxKind.menu:
         return [_labelled(context, 'Stuck in a menu', 'a panel covers the composer')];
@@ -867,6 +1059,23 @@ class _InboxCard extends StatelessWidget {
       case InboxKind.waiting:
         return [_labelled(context, 'Needs you', 'open it to see what it is waiting on')];
     }
+  }
+
+  /// A question's label on a card: its own header (the chip Claude gives it), so a
+  /// card says what the question is about before the question itself.
+  static String _questionLabel(PendingQuestionItem q) {
+    final h = q.header.trim();
+    return h.isEmpty ? 'Question' : 'Question - $h';
+  }
+
+  /// What a reported wait asks, in the agent's own words: the part of its last reply
+  /// that decides whether it asks ([askingScope]); before that is read, or when the
+  /// turn has no prose, the session's TL;DR (`brief.did`).
+  static String? _reportedAsk(InboxItem it) {
+    final prose = it.turn?.prose ?? '';
+    if (prose.isNotEmpty) return askingScope(prose);
+    final did = it.session?.brief?.did?.text.trim() ?? '';
+    return did.isEmpty ? null : did;
   }
 
   List<Widget> _controls(BuildContext context) {
@@ -980,7 +1189,7 @@ class _FocusView extends StatelessWidget {
     if (it.kind == InboxKind.question && s != null) {
       final q = it.question;
       if (q == null) return const Center(child: Text('Reading the question...'));
-      final ctx = state._context[sessionKey(s)];
+      final ctx = state._turns[sessionKey(s)];
       return Column(crossAxisAlignment: CrossAxisAlignment.stretch, children: [
         Padding(padding: const EdgeInsets.fromLTRB(16, 12, 16, 0), child: _InboxHead(item: it, state: state)),
         if (s.brief?.items.isNotEmpty ?? false)
@@ -991,7 +1200,7 @@ class _FocusView extends StatelessWidget {
             child: QuestionAnswerPanel(
               key: const ValueKey('inbox-question-panel'),
               question: q,
-              contextText: ctx?.sig == questionSignature(q) ? ctx?.text : null,
+              contextText: ctx?.stamp == 'q|${questionSignature(q)}' ? ctx?.turn?.leadUp : null,
               drafts: QuestionDraftStore.instance.of(s.server.baseUrl, s.id),
               draftKey: questionSignature(q),
               elsewhereLabel: 'Open session',
@@ -1068,22 +1277,26 @@ class _FocusView extends StatelessWidget {
     final s = it.session;
     switch (it.kind) {
       case InboxKind.permission:
-        final info = state._attention[sessionKey(s!)]?.info;
-        final last = info?.lastMessage?.trim() ?? '';
-        final k = sessionKey(s);
+        // What led up to it is the agent's whole turn, not the notification's 200
+        // characters; the attention record's text stays only as the fallback.
+        final tool = it.turn?.pendingTool;
+        final what = tool == null ? null : toolCallText(tool);
+        final lead = it.turn?.leadUp ?? state._attention[sessionKey(s!)]?.info?.lastMessage?.trim() ?? '';
+        final k = sessionKey(s!);
         final open = state._expanded.contains(k);
         return [
           _label(context, 'Permission'),
           DirectionalText(state._permissionReason(s), style: Theme.of(context).textTheme.bodyLarge),
-          if (last.isNotEmpty) ...[
+          if (what != null) ...[
+            _label(context, 'Wants to run'),
+            _ToolCall(name: tool!.name, text: what),
+          ],
+          if (lead.isNotEmpty) ...[
             _label(context, 'Claude said'),
-            DirectionalText(last, maxLines: open ? null : 6, overflow: open ? null : TextOverflow.ellipsis),
-            Align(
-              alignment: Alignment.centerLeft,
-              child: TextButton(
-                onPressed: () => state._update(() => open ? state._expanded.remove(k) : state._expanded.add(k)),
-                child: Text(open ? 'Show less' : 'Show all'),
-              ),
+            _ClampedLead(
+              open: open,
+              onToggle: () => state._update(() => open ? state._expanded.remove(k) : state._expanded.add(k)),
+              child: _markdown(context, lead),
             ),
           ],
           _label(context, 'Its screen'),
@@ -1097,12 +1310,28 @@ class _FocusView extends StatelessWidget {
           _tail(context, s!),
         ];
       case InboxKind.prose:
-        return [_label(context, 'Its last reply'), _markdown(context, it.reply!.text)];
+        return [
+          _label(context, 'Its last reply'),
+          KeyedSubtree(key: const ValueKey('inbox-last-reply'), child: _markdown(context, tldrFirst(it.turn!.prose))),
+        ];
       case InboxKind.reported:
         final waiting = s!.reason?.text ?? '';
+        final turn = it.turn;
+        final prose = turn?.prose ?? '';
         return [
           if (waiting.isNotEmpty) ...[_label(context, 'Waiting for'), DirectionalText(waiting)],
-          if (s.brief?.did != null) ...[_label(context, 'Asks'), _markdown(context, s.brief!.did!.text)],
+          // The real reply, TL;DR first. When the turn has no prose, what led up to
+          // it; the session's TL;DR only until the transcript has been read.
+          if (prose.isNotEmpty) ...[
+            _label(context, 'Its last reply'),
+            KeyedSubtree(key: const ValueKey('inbox-last-reply'), child: _markdown(context, tldrFirst(prose))),
+          ] else if (turn?.leadUp != null) ...[
+            _label(context, 'Before it asked'),
+            KeyedSubtree(key: const ValueKey('inbox-last-reply'), child: _markdown(context, turn!.leadUp!)),
+          ] else if (s.brief?.did != null) ...[
+            _label(context, 'Asks'),
+            _markdown(context, s.brief!.did!.text),
+          ],
         ];
       case InboxKind.background:
         final a = it.agent!;

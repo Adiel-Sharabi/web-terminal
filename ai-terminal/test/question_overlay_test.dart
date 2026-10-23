@@ -885,30 +885,6 @@ void main() {
     });
   });
 
-  group('lastAssistantText (question context)', () {
-    test('returns the most recent non-empty assistant turn', () {
-      final turns = [
-        const TranscriptTurn(role: 'assistant', text: 'old', toolUses: [], ts: null),
-        const TranscriptTurn(role: 'user', text: 'hi', toolUses: [], ts: null),
-        const TranscriptTurn(
-            role: 'assistant', text: 'the full answer', toolUses: [], ts: null),
-        const TranscriptTurn(role: 'user', text: 'ok', toolUses: [], ts: null),
-      ];
-      expect(lastAssistantText(turns), 'the full answer');
-    });
-
-    test('skips empty assistant turns; null when none', () {
-      expect(
-        lastAssistantText(const [
-          TranscriptTurn(role: 'assistant', text: '   ', toolUses: [], ts: null),
-          TranscriptTurn(role: 'user', text: 'x', toolUses: [], ts: null),
-        ]),
-        isNull,
-      );
-      expect(lastAssistantText(const []), isNull);
-    });
-  });
-
   testWidgets('shows Claude\'s preceding message as context when provided',
       (tester) async {
     // A roomy card: since #108 the lead-up starts collapsed when there is no
