@@ -7,18 +7,23 @@
 const { test, expect } = require('@playwright/test');
 const H = require('../lib/handoff');
 const agents = require('../lib/agents');
+const { contextBudget } = require('../lib/context-budget');
 
 const T = 1_700_000_000_000;
 const MIN = 60 * 1000;
 const cfg = H.handoffConfig(null);
 
+/** The budget the server publishes for a 1M session under a 400k auto-compact window
+ *  (#393): hand-off at 300k. */
+const BUDGET = contextBudget({ ctxWindow: 1_000_000, autoCompactWindow: 400_000 });
 /** A session that should be offered a hand-off: idle 30 min after a finished turn,
- *  reported waiting on a third party, 60% of a 1M window. */
+ *  reported waiting on a third party, 32% of a 1M window - past the 300k hand-off point,
+ *  short of the 367k compaction. */
 function candidate() {
   return {
     agent: 'claude', status: 'idle', waitingFor: null, compacting: false, agentReady: true,
     usageLimit: null, backgroundTasks: [], reason: { kind: 'external', text: 'PR review' },
-    metrics: { ctx: 60, ctxWindow: 1_000_000 },
+    metrics: { ctx: 32, ctxWindow: 1_000_000, budget: BUDGET },
     brief: { hidden: false, turnAt: T - 40 * MIN, stoppedAt: T - 30 * MIN,
       wait: { on: 'external', what: 'PR review', at: T - 30 * MIN }, items: [{ ref: '#1', state: 'in-progress' }], handoff: null },
   };
@@ -27,7 +32,7 @@ const judge = (row, over = {}) => H.handoffCandidate(row, { now: T, cfg, support
 
 test.describe('handoffCandidate (#340)', () => {
   test('the perfect candidate is suggested, with its occupancy', () => {
-    expect(judge(candidate())).toEqual({ suggest: true, why: null, ctxTokens: 600_000, run: null });
+    expect(judge(candidate())).toEqual({ suggest: true, why: null, ctxTokens: 320_000, run: null });
   });
 
   test('an agent that does not declare hand-off gets NO field at all', () => {
@@ -58,8 +63,9 @@ test.describe('handoffCandidate (#340)', () => {
     ['a new turn started after the last stop', (r) => { r.brief.turnAt = T - 1 * MIN; }, 'recent'],
     ['not at a boundary', (r) => { r.brief.wait = { on: 'self' }; }, 'no-boundary'],
     ['no metrics', (r) => { r.metrics = null; }, 'no-metrics'],
-    ['no window', (r) => { r.metrics = { ctx: 60, ctxWindow: null }; }, 'no-metrics'],
-    ['under the threshold', (r) => { r.metrics = { ctx: 40, ctxWindow: 1_000_000 }; }, 'small'],
+    ['no window', (r) => { r.metrics = { ctx: 32, ctxWindow: null, budget: BUDGET }; }, 'no-metrics'],
+    ['no budget and no configured threshold', (r) => { r.metrics = { ctx: 32, ctxWindow: 1_000_000 }; }, 'no-metrics'],
+    ['under the threshold', (r) => { r.metrics = { ctx: 29, ctxWindow: 1_000_000, budget: BUDGET }; }, 'small'],
   ];
   for (const [name, mutate, why, over] of gates) {
     test(`not suggested when ${name}`, () => {
@@ -91,15 +97,39 @@ test.describe('handoffCandidate (#340)', () => {
     expect(H.occupancy({ ctx: 50 })).toBeNull();
     // Exactly the threshold qualifies.
     const r = candidate();
-    r.metrics = { ctx: 50, ctxWindow: 1_000_000 };
+    r.metrics = { ctx: 30, ctxWindow: 1_000_000, budget: BUDGET };
     expect(judge(r).suggest).toBe(true);
   });
 
   test('config: thresholds are live values; a bad one falls back to the default', () => {
     expect(H.handoffConfig({ ctxThreshold: 700_000, idleMin: 5 })).toMatchObject({ ctxThreshold: 700_000, idleMin: 5, enabled: true });
-    expect(H.handoffConfig({ ctxThreshold: -1, idleMin: 'x' })).toMatchObject({ ctxThreshold: 500_000, idleMin: 10 });
+    // #393 - no ctxThreshold default: unset (or bad) leaves it to the session's budget.
+    expect(H.handoffConfig({ ctxThreshold: -1, idleMin: 'x' })).toMatchObject({ ctxThreshold: null, idleMin: 10 });
+    expect(H.handoffConfig(null).ctxThreshold).toBeNull();
     const r = candidate();
     expect(judge(r, { cfg: H.handoffConfig({ ctxThreshold: 700_000 }) }).why).toBe('small');
+  });
+
+  test('#393 - unset, the threshold is the budget hand-off point, reachable before compaction', () => {
+    // The old fixed 500k sat ABOVE the 367k compaction point: no session could reach it.
+    expect(BUDGET.handoffAt).toBeLessThan(BUDGET.compactAt);
+    expect(H.ctxThresholdFor(cfg, { budget: BUDGET })).toBe(300_000);
+    const r = candidate(); // 320k: between the hand-off point and compaction
+    expect(r.metrics.ctx * 10_000).toBeLessThan(BUDGET.compactAt);
+    expect(judge(r).suggest).toBe(true);
+    // The budget moves with the setting: a 600k window puts the same session under it.
+    r.metrics.budget = contextBudget({ ctxWindow: 1_000_000, autoCompactWindow: 600_000 });
+    expect(judge(r).why).toBe('small');
+    // An explicit config wins over the budget, either way.
+    expect(judge(r, { cfg: H.handoffConfig({ ctxThreshold: 310_000 }) }).suggest).toBe(true);
+    expect(H.ctxThresholdFor(H.handoffConfig({ ctxThreshold: 310_000 }), { budget: BUDGET })).toBe(310_000);
+    expect(H.ctxThresholdFor(cfg, {})).toBeNull();
+    // A machine WITHOUT the setting: the model window decides, and the hand-off point is
+    // capped at the old 500k - a 1M session at 600k is still offered, not left to grow to
+    // 750k inside the ~700k harm zone.
+    r.metrics = { ctx: 60, ctxWindow: 1_000_000, budget: contextBudget({ ctxWindow: 1_000_000 }) };
+    expect(r.metrics.budget.handoffAt).toBe(500_000);
+    expect(judge(r).suggest).toBe(true);
   });
 
   test('force may skip only the judgement gates, never the safety ones', () => {

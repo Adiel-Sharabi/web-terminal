@@ -78,12 +78,36 @@ class SessionMetaBar extends StatelessWidget {
     // Prefer the live status-line value; fall back to the transcript estimate.
     if (m?.ctx != null) {
       // Shared SSOT thresholds via ctxColor — the same helper the session list
-      // uses, so the two surfaces can never drift apart.
+      // uses, so the two surfaces can never drift apart. Judged against the
+      // server's context budget when it publishes one (#393).
       chips.add(_chip(theme, Icons.data_usage, 'ctx ${m!.ctx}%',
-          ctxColor(theme, m.ctx!)));
+          ctxColor(theme, m.ctx!,
+              tokens: m.ctxUsed,
+              warnAt: m.budget?.warnAt,
+              handoffAt: m.budget?.handoffAt)));
     } else if (derivedCtx != null) {
       chips.add(_chip(theme, Icons.data_usage, 'ctx ~$derivedCtx%',
-          ctxColor(theme, derivedCtx!)));
+          ctxColor(theme, derivedCtx!,
+              tokens: m?.tokensAt(derivedCtx!),
+              warnAt: m?.budget?.warnAt,
+              handoffAt: m?.budget?.handoffAt)));
+    }
+    // #393 — the compaction count, beside the figure it explains.
+    final compacted = compactionsLabel(m?.compactions);
+    if (compacted != null) {
+      chips.add(Tooltip(
+        message: compactionsTooltip(m!.compactions!),
+        child: Padding(
+          padding: const EdgeInsets.only(right: 8),
+          child: Text(
+            compacted,
+            style: theme.textTheme.labelSmall?.copyWith(
+              color: theme.colorScheme.onSurfaceVariant,
+              fontFeatures: const [FontFeature.tabularFigures()],
+            ),
+          ),
+        ),
+      ));
     }
     // Same SSOT treatment as ctxColor above: the thresholds live in
     // format_utils, and the 7d window reads on its OWN scale — it stays

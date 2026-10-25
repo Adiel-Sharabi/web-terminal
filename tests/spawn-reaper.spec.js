@@ -975,7 +975,7 @@ test.describe('#351 against the real server', () => {
       headers: { 'X-WT-Hook-Token': hookToken() },
     });
     expect(rep.status()).toBe(200);
-    expect((await ctx.post('/api/claude-status', { data: { session_id: conv, context_window: { context_window_size: 1_000_000, used_percentage: 60 } } })).status()).toBe(200);
+    expect((await ctx.post('/api/claude-status', { data: { session_id: conv, context_window: { context_window_size: 1_000_000, used_percentage: 80 } } })).status()).toBe(200);
     await until(async () => (await rowOf(id))?.status === 'idle', 'the session to go idle');
     return id;
   }

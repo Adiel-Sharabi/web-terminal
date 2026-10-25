@@ -70,6 +70,10 @@ process.env.WT_API_TOKENS_FILE = path.join(__dirname, 'api-tokens.test.json');
 process.env.WT_SESSION_BRIEFS_FILE = path.join(__dirname, 'session-briefs.test.json');
 // #340 - hand-off brief files land here, never in the production handoffs/ dir.
 process.env.WT_HANDOFF_DIR = path.join(__dirname, 'handoffs.test');
+// #393 - the agent settings the context budget reads (autoCompactWindow). Never the real
+// ~/.claude/settings.json: the suite's budget must not depend on the machine it runs on, and
+// tests/context-budget.spec.js writes and edits this one to prove the setting is read live.
+process.env.WT_AGENT_SETTINGS_DIR = path.join(require('./scripts/scratch-dirs').DIRS.tests, 'agent-settings');
 // #311 - the device-ops log. The suite's submits must never land in production's
 // logs/device-ops.jsonl, where they would be counted as real use; reset per run like the above.
 process.env.WT_DEVICE_OPS_FILE = path.join(__dirname, 'device-ops.test.jsonl');

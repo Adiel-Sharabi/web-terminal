@@ -239,6 +239,26 @@ class SessionCard extends StatelessWidget {
                       ),
                     ),
                   ),
+                  // #393 — how often this conversation has compacted, so a
+                  // long session is visible at a glance beside a fresh one. On
+                  // the TITLE row, not beside the ctx%: the name above is
+                  // Expanded and ellipsizes, while the status row has no slack
+                  // left (its reason chip cannot shrink, and a count there
+                  // overflowed a 360dp card).
+                  if (compactionsLabel(session.metrics?.compactions)
+                      case final compacted?) ...[
+                    const SizedBox(width: 6),
+                    Tooltip(
+                      message: compactionsTooltip(session.metrics!.compactions!),
+                      child: Text(
+                        compacted,
+                        style: theme.textTheme.bodySmall?.copyWith(
+                          color: theme.colorScheme.onSurfaceVariant,
+                          fontFeatures: const [FontFeature.tabularFigures()],
+                        ),
+                      ),
+                    ),
+                  ],
                   const SizedBox(width: 8),
                   if (session.agent != null) ...[
                     _AgentChip(agentId: session.agent!),
@@ -304,7 +324,8 @@ class SessionCard extends StatelessWidget {
                     ],
                     // #38 — live Claude context-window % (never recomputed;
                     // read straight off the session payload). Color via the
-                    // shared ctxColor SSOT (warn 50 / danger 70). Absent/stale
+                    // shared ctxColor SSOT, against the server's context
+                    // budget when it publishes one (#393). Absent/stale
                     // metrics.ctx → no badge.
                     if (session.metrics?.ctx != null) ...[
                       if (label.isNotEmpty && !hasApiError)
@@ -312,7 +333,10 @@ class SessionCard extends StatelessWidget {
                       Text(
                         '${session.metrics!.ctx}%',
                         style: theme.textTheme.bodySmall?.copyWith(
-                          color: ctxColor(theme, session.metrics!.ctx!),
+                          color: ctxColor(theme, session.metrics!.ctx!,
+                              tokens: session.metrics!.ctxUsed,
+                              warnAt: session.metrics!.budget?.warnAt,
+                              handoffAt: session.metrics!.budget?.handoffAt),
                           fontWeight: FontWeight.w600,
                           fontFeatures: const [FontFeature.tabularFigures()],
                         ),

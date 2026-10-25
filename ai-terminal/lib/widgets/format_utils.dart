@@ -17,13 +17,37 @@ const int kCtxDangerPct = 70;
 /// windows can never drift to two different "warning" colours.
 const Color kWarnAmber = Color(0xFFE0A030);
 
-/// Green below [kCtxWarnPct], amber up to [kCtxDangerPct], red at/above — the
-/// quick context-pressure read shown everywhere a ctx% appears.
-Color ctxColor(ThemeData theme, int pct) {
+/// The quick context-pressure read shown everywhere a ctx% appears.
+///
+/// #393 — when the server publishes the session's context BUDGET (its
+/// `metrics.budget`: where the agent actually compacts, from Claude's
+/// `autoCompactWindow`) and the occupancy in [tokens], the colour is judged
+/// against that: green below [warnAt], amber from it, red from [handoffAt] —
+/// the point the server offers a hand-off, before compaction cuts into the
+/// work. A 1M window compacting at ~367k never reached 50% (the largest of 79
+/// live sessions was 36%), so the % rule below was green forever.
+///
+/// Without a budget (an older server, or an agent that declares none) it is
+/// the old rule: amber at [kCtxWarnPct], red at [kCtxDangerPct] of the window.
+Color ctxColor(ThemeData theme, int pct,
+    {int? tokens, int? warnAt, int? handoffAt}) {
+  if (tokens != null && warnAt != null && handoffAt != null) {
+    if (tokens >= handoffAt) return theme.colorScheme.error;
+    if (tokens >= warnAt) return kWarnAmber;
+    return theme.colorScheme.primary;
+  }
   if (pct >= kCtxDangerPct) return theme.colorScheme.error;
   if (pct >= kCtxWarnPct) return kWarnAmber;
   return theme.colorScheme.primary;
 }
+
+/// #393 — the compaction count as shown beside the ctx figure (`↻3`), or null
+/// when there is nothing to show (never compacted, or not reported).
+String? compactionsLabel(int? n) => n != null && n > 0 ? '\u21bb$n' : null;
+
+/// The tooltip under [compactionsLabel].
+String compactionsTooltip(int n) =>
+    n == 1 ? 'Compacted once' : 'Compacted $n times';
 
 /// Rate-limit window pressure — the SINGLE source of truth for the 5h/7d
 /// colours. As with [ctxColor], do not copy these numbers into a call site.
