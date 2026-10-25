@@ -89,1194 +89,423 @@ Three supervised Node.js processes. See `docs/ARCHITECTURE.md` for the full walk
 - Optional latency instrumentation: `WT_LATENCY_DEBUG=1` env (server + worker) and `?rtt=1` query (browser overlay)
 - Dev tooling under `scripts/` — typing probe, WS latency harnesses (do not edit without coordinating; sanitisation workstream owns these)
 
-## The session recap — "my last prompt" is NOT `role === 'user'`
+## Findings archive — the law is here, the evidence is in `docs/findings/`
 
-`GET /api/sessions/:id/recap` (rules in `lib/recap.js`, pure) answers *where was I in
-this one?* for a sidebar full of sessions: last prompt, the agent's latest word, the
-current task, and the work done since.
+This file is the **law**: what you must and must not do, and which module owns each
+rule. The **evidence** behind each law — measurement tables, probe recipes, refuted
+hypotheses, review post-mortems, superseded corrections — was moved *verbatim* to
+`docs/findings/` on 2026-09-15, when this file passed the 150k-char limit and stopped
+loading at all. Nothing was summarised away; it was relocated.
 
-**The trap, and the reason this is a module rather than three lines in `server.js`:** a
-transcript is full of `role:user` turns the human never typed — a teammate message, a
-`<task-notification>`, Stop-hook feedback, a post-compaction summary, and above all
-**slash commands**. Running `/compact` writes a user turn whose text is
-`<command-name>/compact</command-name>`, so in a just-compacted session — precisely
-when you most need a recap — the newest user turn is that echo, and a naive reading
-reports *"your last prompt was: compact"*. **Confidently wrong is worse than absent.**
-Genuine prompts also arrive with `<system-reminder>` blocks stapled on, so even a real
-one needs its wrapper stripped or the card shows injected instructions instead of your
-sentence; a turn that is *nothing but* reminders is not a prompt at all.
-
-**Reuse, don't re-derive.** The reply prefers an author-marked `## TL;DR` through
-`lib/speech.js`'s `extractSummary` — that section exists to be exactly this.
-
-**On demand, never on the poll.** One recap costs a transcript tail read; doing it per
-row per sidebar refresh would be a disk storm for text nobody is looking at.
-
-**Degrades, never 404s.** A plain shell has no transcript, but *"idle, in `<cwd>`, 20m
-ago"* still orients you — and a 404 would make the icon look broken on exactly the rows
-most likely to be clicked. The client always receives the full shape.
-
-> **`classifyUserTurn` currently exists twice** — here and in the companion's
-> `conversation_view.dart`, which uses it for bubble labelling. The server copy is the
-> authority and recognises strictly more (slash commands, system-reminders). Two copies
-> of one rule is the drift this codebase keeps paying for; consolidating the Dart side
-> onto a server-published field is a separate additive change, **not** a "keep them in
-> sync" instruction.
-
-## A prompt sent WHILE THE AGENT WORKS is not a `role:user` turn (#249)
-
-Claude Code records a prompt submitted mid-turn as an **attachment**, never as a
-user message:
-
-```json
-{"type":"attachment","timestamp":"…",
- "attachment":{"type":"queued_command","prompt":"…",
-               "commandMode":"prompt","origin":{"kind":"human"},"source_uuid":"…"}}
-```
-
-`parseTranscriptTurn` read only `user`/`assistant` lines, so **the chat lens never
-received the prompt at all**. The only thing showing it was the client's optimistic
-`Queued` echo (#31) — and `conversation_view.dart` renders echoes after every
-transcript turn *and* after the working indicator, so everything the agent produced
-in reply appeared **above** it. Reported 2026-09-09 as *"the terminal took it and
-responded for it, but in the chat lens it looks in a wrong order."*
-
-**The same gap has a worse second half.** The echo reconciles by matching a turn's
-`typedText` (#149); against a turn that does not exist it can never match, so once
-the session leaves `working`/`waiting` the 90 s safety timeout **deletes** it and the
-prompt leaves chat entirely. That is the 2026-08-16 report (*"I add prompt … I can't
-see it in chat"*) arriving through a different door — #149 fixed the comparison, and
-the thing being compared against was missing all along.
-
-**MEASURED** over 972 transcripts / 641 `queued_command` records (a live corpus — it
-was 973 files an hour later in review and every derived count below reproduced
-exactly):
-
-| `commandMode` / `origin.kind` | count |
+| file | covers |
 |---|---|
-| `task-notification` / (no origin) | 520 |
-| `prompt` / `human` | 87 |
-| `prompt` / `peer` | 34 |
-
-**80 of the 87 human ones have no `role:user` turn anywhere in their session** whose
-`typedText` matches. The 7 that do are coincidences (short words like `continue`,
-typed again later); exactly **one** matches within six records, and reading that
-session shows a genuine second send — the turn was interrupted
-(`[Request interrupted by user]`) and the sentence re-typed 28 s later. Re-run over
-all 54 real sessions with the fix in place: 87 turns emitted, **0 adjacent duplicate
-user bubbles**.
-
-**The fix is one branch in `lib/transcript.js`, server-side only** — the chat lens is
-fixed with **no client release**, the same arrangement `typedText` itself uses, and it
-**hot-reloads**. The turn is emitted at the attachment's own byte position, which is
-what puts it above the reply.
-
-*Say "the chat lens", not "both clients".* Only the companion has one — `app.html`
-carries no reference to `/transcript`, `typedText` or `userKind` at all — and a first
-draft of this section said "both clients" anyway. That exact phrase is already
-recorded as wrong once in this file, for a different reason (#206, where the second
-client was `terminal.html` and nobody had checked). **An older companion is covered
-too, and by construction:** `turnMatchKey` falls back to `normEcho(turn.text)` when
-`typedText` is absent, and here `text === typedText`, so the echo reconciles even on a
-build predating #149.
-
-**TWO GATES, and both are narrowings rather than sniffs.** `commandMode === 'prompt'`
-excludes `task-notification`: 520 rows of plumbing (`classifyUserTurn` reads one as
-`system`, so the cost is noise, not a mislabelled bubble), **34 of which restate a
-notification that already arrives as a real `role:user` turn** — matched on the
-shared `<task-id>`, the only sound comparison, since **not one of the 520 is
-textually identical** to a user turn and a prefix match therefore answers whatever
-length you pick. `origin.kind === 'human'` excludes `peer`: another agent's queued message is
-wrapped in `<agent-message from="…">`, **a signature `classifyUserTurn` does not
-recognise** — it classifies as `human`, so admitting one would put another agent's
-words in a **"You"** bubble, which is the teammate-bubble bug this repo has already
-paid for once. None of the 34 appears as a `role:user` turn either, so a queued
-teammate message stays invisible in chat; that is #250, and its fix is a
-signature in `lib/user-turn.js`, not a wider gate here.
-
-**Build the turn from `attachment.prompt`, never from `rendered`.** The `rendered`
-array restates the prompt inside a `<system-reminder>` telling the *agent* how the
-message was delivered — wrapper text, not what the user typed, and an echo compared
-against it could never match. Same trap as #149, one layer out. A queued prompt
-carrying a pasted image arrives as content blocks: keep the text, drop the base64.
-
-**Unmeasured, deliberately.** A queued **slash command** — 0 of the 87 start with
-`/`, so which `commandMode` one carries is unknown; if it is not `'prompt'` it stays
-as it is today. And Codex, whose rollout has no equivalent record and was not looked
-at, per the standing convention that Claude's behaviour is not evidence about it.
-
-> **The screenshot said "one bubble in the wrong place"; the transcript said "no
-> bubble at all".** Both readings fit the crop, and they have different fixes — a
-> client ordering change versus a server parser gap. What settled it was reading the
-> actual transcript: `queue-operation enqueue`, then the attachment, then the reply,
-> with no user message anywhere between. *The rollout is ground truth; the screen
-> lies* — the same rule the Codex work established, applied to a screenshot.
-
-> **MUTATE ONE GATE AT A TIME, and a negative fixture faithful to the corpus is the
-> one most likely to be vacuous.** Both gate tests were confirmed red by removing
-> BOTH gates together, and that proved nothing about either. The `task-notification`
-> fixture is drawn from real data, where all 520 carry **no `origin`** — so the
-> ORIGIN gate turns it away, and `commandMode !== 'prompt'` could be deleted with the
-> whole suite still green. The fix is a second, deliberately **synthetic** fixture (a
-> human `origin` on a task-notification, a shape that does not occur) whose only job
-> is to fail when that one line goes. Caught in review, and it is this repo's
-> "audit the negatives first" rule arriving from a new direction: the usual vacuous
-> negative passes because the feature is absent, this one passes because a
-> *different* guard fires first.
-
-> **And one number in the first draft was an artifact of its own threshold.** It
-> claimed 9 of the 520 task-notifications already arrive as real user turns; that 9
-> came from testing whether a user turn contained the prompt's first 120 characters.
-> A 60-char prefix gives 15, exact equality gives **0**, and the sound comparison —
-> the `<task-id>` they share — gives **34**. A measurement whose answer moves with a
-> parameter nobody chose deliberately is not a measurement. State the predicate, not
-> just the count.
-
-## Scrollback has TWO byte spaces, and they diverge at the HEAD (#167/#176/#178)
-
-**A byte offset into a session's scrollback is not a position.** `pty-worker.js`
-trims the buffer's HEAD on every PTY write (2 MB cap), so `offset 0` names a
-different byte on every request while `total` sits pinned at the cap — and
-nothing on the wire says so. Every paging bug in this area (#167 on the
-companion, #178 on `app.html`) is that one fact, met from a different direction.
-The rule everywhere is now: **anchor on CONTENT, over-fetch so the anchor is
-inside the slice, cut where it reappears, and STOP rather than guess** — the
-failure mode is less history, never history that repeats and never a silent hole.
-
-**And the server builds two DIFFERENT strings from that one buffer:**
-
-| | how it is built |
-|---|---|
-| the WS attach replay (`server.js` ~:5204) | **truncate** the raw buffer to `scrollbackReplayLimit`, **then** `sanitizeReplay` |
-| `GET /api/sessions/:id/scrollback` (~:4729) | `sanitizeReplay` the **whole** buffer, **then** slice by `offset`/`limit` |
-
-`sanitizeReplay` is length-changing **and stateful** — it tracks alt-screen from
-the start of whatever string it is given — so those two orders are **not**
-equivalent. Measured 2026-08-27 against a live server, comparing the two over the
-same buffer:
-
-| content | replay is an exact substring of `/scrollback` | common **suffix** run |
-|---|---|---|
-| plain text | **yes**, at exactly `httpLen - replayLen` | 32768 / 32768 |
-| escape-heavy (DA/DSR/ED + alt-screen) | **no** | **30947 / 31517** |
-
-The escape-heavy divergence is at the **head**, and its mechanism is exact: the
-truncated copy begins mid-stream, never sees the earlier `ESC[?1049h`, believes it
-is outside alt-screen, and strips an `ESC[2J` the whole-buffer pass keeps.
-
-**So: they agree over the TAIL and disagree near the HEAD.** Any rule that has to
-line the two up must take its anchor from the **end of what is on screen**, never
-from the head of an incoming replay — which is exactly what
-`ai-terminal/lib/util/attach_overlap.dart` does (#176), and why
-`tests/attach-replay-overlap.spec.js` pins the invariant **on the server**, with a
-2x margin over the companion's 4096-unit anchor. That gate is server-side on
-purpose: reordering either sanitise pass is a server change, and it would
-otherwise surface only as #176 coming back on a client nobody was testing.
-
-The attach replay also carries an `ESC[?2004h` prefix when the session is in
-bracketed-paste mode (`pty-worker.js`). That is terminal **state**, not content —
-it is not in the scrollback and can never match an anchor, so a cut must preserve
-it rather than treat it as duplicate bytes. It is why the measured replay was
-32776 and not 32768.
-
-## The companion vendors `xterm` — do not undo it (#81)
-
-`ai-terminal/third_party/xterm` is stock xterm 4.0.0 **plus one patch**, wired in by
-`dependency_overrides`. Full write-up: `ai-terminal/third_party/xterm/README-PATCH.md`.
-Every hunk is marked `WEB-TERMINAL PATCH (#81)` — **grep for it before re-vendoring or
-"upgrading"**, because 4.0.0 is the latest release and a bare re-vendor silently
-restores the bug.
-
-**One defect produced two symptoms that read as unrelated bugs.** `Buffer.scrollUp`,
-`scrollDown` and `deleteLines` shifted a line with `lines[to] = lines[from]`, which
-copies the *reference*: the line ends up in two slots, and since `_adoptChild`
-unconditionally detaches the destination's previous occupant, the next iteration
-detaches the line the previous one just moved. So a scroll left 27 of 30 lines
-**still in the array but detached from it**. Detached lines still *paint* (the painter
-walks the array), but `TerminalController.selection` is null whenever either anchor is
-detached — that is "text visible, nothing selects". And a later `_moveChild` calls
-`_move` on such a line, dereferencing `_owner!`: in debug an
-`assert(attached)`, in **release** a hard throw out of `Terminal.write` inside a
-WebSocket listener, which kills the widget subtree — that is the blank terminal.
-
-Codex-only because those three methods are reached only inside a DECSTBM margin, and
-Codex sets 12 scroll regions on startup where Claude's TUI sets none. `insertLines`
-right next door already used `lines.swap` and was correct, which is how we know it was
-an oversight rather than a design.
-
-**Two methodological lessons, both of which cost a wrong root cause first.** (1) *A
-blank lens next to a healthy chat lens is not evidence about the server* — chat is
-built server-side from the rollout and never touches xterm, so the two lenses failing
-differently localises the fault to the widget. (2) *Instrument, don't reason about
-buffer internals.* Two confident hypotheses (a DECSTBM sequence; `insert` overflowing a
-full ring) were both wrong; a five-line `print` in `_adoptChild` named the real cause in
-one run and showed the buffer was nowhere near full (`len=30 arr=5000`).
-
-**Verification bar for any change here:** run upstream's own suite against pristine and
-patched copies and compare (README-PATCH.md has the recipe). Both give `+108 ~2 -2`;
-the two `textScaler` failures are pre-existing Flutter-SDK drift.
-
-## Chat links are TextSpans — never a widget in the text flow (#83)
-
-**A `MarkdownElementBuilder` can only return a Widget, and a widget cannot live inside
-a paragraph.** That one API fact is the whole bug, and it is worth stating because the
-builder API *looks* like the natural place to add a per-link affordance.
-
-Measured on flutter_markdown 0.7.7+1, rendering the sentence `see LINK tail`
-(where LINK is an ordinary markdown inline link labelled `example`):
-
-| | RichTexts | structure |
-|---|---|---|
-| custom `a` builder | **4** | `"see "` \| `"example"` \| `" tail"` — separate render objects |
-| native `onTapLink` | **2** | one paragraph: `[see ][example ←Tap][ tail]` |
-
-The ancestor `SelectionArea` (#27) walks a **paragraph**, so a shattered sentence is one
-it cannot drag across. That is why the symptom was *"dragging selects nothing"* rather
-than the narrower "the URL itself isn't selectable" — **the link poisons the whole
-sentence around it.** The widget's own `GestureDetector` compounded it: `onLongPressStart`
-holds the gesture arena for exactly the button-down a selection drag begins on.
-
-The same builder also attached the tap recognizer to the **wrong fragment** (`" tail"`),
-so tapping trailing prose opened the link while the link text did nothing. Nobody had
-reported that; it fell out of the instrumentation.
-
-**Two traps, both of which cost a wrong answer first.**
-
-1. **A widget test cannot see this bug, and a *plausible* widget test can be worse than
-   none.** The first test written for the fix asserted "no `WidgetSpan` in the span tree"
-   — and **passed against the buggy code**, because the mechanism is paragraph
-   fragmentation, not a `WidgetSpan`. Assert on the RichText *count* for a sentence, and
-   on which span carries the recognizer. Both are red against the old rendering.
-2. **Instrument, don't reason** (the #81 lesson, again). Printing the real span tree in
-   both configurations named the mechanism in one run, after reasoning had produced a
-   confident wrong one.
-
-**The rule going forward:** any per-link affordance must be reachable from a `TextSpan`
-recognizer or from the `SelectionArea`'s context menu — **never from a widget in the text
-flow**. Reintroducing a builder to add "Copy link" silently reintroduces this bug.
-
-**What the fix traded away, deliberately:** the per-link long-press / right-click
-"Open / Copy link" menu is gone. It existed *because* links were unselectable. For a bare
-autolinked URL — what an agent actually prints — the link text **is** the href, so
-ordinary select + copy now yields the URL. For a labelled link — one whose text differs from its
-URL — the URL is no longer copyable from the UI; a tap still opens it.
-
-**Still not verified by an automated test:** that a real mouse drag on the shipped Windows
-build now highlights. Synthetic pointer events never traverse the OS input path — eight
-widget tests passed against the original report. Use
-`scripts/rig/probe-drive-selection.ps1` with a URL-containing fixture and **always
-`-ShotDuring`**: without the mid-drag screenshot, "nothing was selected" and "nothing was
-rendered to select" are indistinguishable.
-
-## Multi-Agent Support (Claude Code + Codex)
-
-A session knows *which* AI CLI agent it runs. `agent` is a real, persisted session field: `'claude'`, `'codex'`, or `null` for a plain shell. **`null` is never coerced to `'claude'`.**
-
-### The rule: one registry, no branching
-Everything agent-specific lives in **`lib/agents.js`** — parser, transcript root, transcript-resolution strategy, subagent-trace support, label, colour, and submit policy. **Adding a CLI agent is one parser module + one registry entry.** If you find yourself writing `if (agent === 'codex')` in `server.js`, `pty-worker.js`, `app.html` or the companion, you are in the wrong file — add a field to the provider instead.
-
-`GET /api/agents` serves the catalogue, so both clients render the picker and the per-agent tint with **no client release** when an agent is added or renamed. The companion holds no agent table (`AgentCatalog`); neither does `app.html`.
-
-An **explicit** agent is authoritative: a session declared `claude` is never served a Codex transcript. Only a session with no recorded agent falls back to cross-provider discovery.
-
-### Codex facts (verified empirically against codex-cli 0.144.0 — do not trust the docs)
-
-**Submit is CR, never LF — for every agent.** See "Input & Submit Contract" below: that section is the law, and it supersedes any older phrasing here. Both TUIs read raw mode where Enter is `\r` (0x0D); an `\n` inserts a newline in the prompt box and submits nothing.
-
-**Rollout transcripts** live at `~/.codex/sessions/YYYY/MM/DD/rollout-<iso>-<uuid>.jsonl` and are **not cwd-keyed** — `cwd` appears only in the first `session_meta` line (which is ~8 KB; a naive 4 KB read truncates it mid-JSON). `session_id` **is** the rollout UUID.
-
-> **A Codex transcript path is DISCOVERED, never derived — so it must never be cached forever.** Codex writes a **new rollout on every run**, and resolution is "the newest rollout matching this cwd", so the correct answer changes while nothing about the web-terminal session does. `resolveSessionTranscriptPath` stashes the resolved path and only the **hook** path re-stashed it — which Codex does not have — so the chat lens pinned whatever was newest the first time it was opened and froze. Observed on a fleet server 2026-07-21: a **2026-07-14** rollout served with seven newer ones for the same cwd on disk, the newest 25 minutes old. Claude is immune for **two** independent reasons (its path is a pure derivation from cwd + conversation id, *and* its hooks re-stash it); Codex has neither. The provider now declares `transcriptPathStable`, and a discovered path is re-derived past a 10s TTL. **Symptom to recognise:** a live, correct terminal next to a chat lens showing another day — that is a *resolution* bug, not a rendering one, and `cwd` alone is not a session identity when several rollouts share a directory.
-
-> **A conversation needs an identity ON THE WIRE, or no cache can know it is stale.** Claude has `claudeSessionId`; a Codex conversation had **nothing**, and `cwd` is not an identity (one server ran seven rollouts in one directory). That single gap produced the same bug twice, at two layers: the **server** cached a resolved path with nothing to invalidate it (1.45.1, fixed with a TTL), and then the **client** cached the turns themselves with nothing to invalidate them (1.47.0) — a chat lens showing a 17h-old conversation beside a live terminal, with the API serving the current one correctly all along. The id is now derived once in the registry (`conversationIdFromPath`: Claude's is the basename, Codex's is the trailing UUID of `rollout-<iso>-<uuid>.jsonl` — match it as a UUID, the ISO stamp has dashes too) and published as **`agentSessionId`**. **Do not fold it into `claudeSessionId`** however tempting (it would need no client release): `app.html` shows the Fork button on that field and forks with `claude --resume <id>`. **Symptom to recognise:** terminal live, chat old — check the API first, because it decides whether you are chasing a server bug or a client one.
-
-Tool calls are **one line each**, `function_call.arguments` is a JSON **string**, `custom_tool_call_output.output` is a JSON envelope `{output, metadata}` needing unwrap, and `event_msg` lines restate `response_item` text — parse one or every turn doubles.
-
-**Usage metrics.** Claude *pushes* its status line to `POST /api/claude-status`; Codex *records* the same numbers in its rollout, so a provider may expose `readMetrics(tail)` and the server fills the identical `metrics` shape. Three traps: `total_token_usage.total_tokens` is the session's **cumulative** spend (millions — using it reports thousands of percent), so context occupancy is `last_token_usage.input_tokens`; `cached_input_tokens` is a **subset** of `input_tokens`, not an addition; and the 5h/7d windows are matched by **`window_minutes` (300 / 10080)**, never by `primary`/`secondary` order. `turn_context` (model/effort) is written once per **user** turn, so a long agent turn buries it above the tail — the server reads head+tail.
-
-**The cap itself is NOT a prompt — it is a rollout error, and that is the exact opposite of Claude (#142).** Claude presents an *answerable selector* at its cap, which is why the registry gives it a `usageLimitPrompt` and `pty-worker.js` answers it by writing a digit. Codex presents **nothing to answer**: the turn simply ends, and the rollout records an `event_msg` → `task_complete` carrying `error.codex_error_info: "usage_limit_exceeded"` with `last_agent_message: null`. Captured on a fleet server **2026-08-02** (`used_percent: 100.0`, `window_minutes: 10080`, `credits.has_credits: false`, `plan_type: "plus"`). So a `usageLimitPrompt` for Codex is not merely unmeasured — it is **the wrong shape entirely**, and a PTY-scanning matcher would wait forever for bytes that never come; the detectable signal is the rollout error, which `readMetrics` already opens the right file for. **Two limits on that capture, both load-bearing:** it is the **7-day** window (`10080`), not the 5h one, and the account also had zero credits — so it is "weekly cap + no credits", not necessarily a plain 5h cap. And **nobody has ever hit Codex's 5h cap on this fleet** — measured peaks 34% / 72% / 2% across 118 rollouts on the three machines — so #142 does not unblock by waiting, and `autoResume: { arm: false }` stands until either the 5h shape is captured or the non-blocking failure is judged not worth resuming from at all. That last point is the real question now: **Claude's auto-resume exists because a capped Claude session sits BLOCKED**, and a capped Codex session returns to its composer instead.
-
-> ### CORRECTED 2026-08-04 — hooks DO run. `SessionStart` is LAZY.
->
-> This section previously read *"Hooks DO NOT RUN on codex-cli 0.144.6"*. **That was
-> wrong, and the error was in the probe, not in Codex.** Re-measured on the same
-> version with `scripts/rig/probe-codex-hooks.js` (isolated `CODEX_HOME`, one marker
-> file per event, written by a `.bat` before anything that could fail):
->
-> | run | `SessionStart` | `UserPromptSubmit` |
-> |---|---|---|
-> | a prompt is submitted | **FIRED** | **FIRED** |
-> | no prompt, 40s (`NO_PROMPT=1`) | never | never |
->
-> **`SessionStart` does not fire when the process starts — it fires when the FIRST
-> TURN BEGINS.** That is the same laziness as the rollout file, which Codex also
-> creates only on the first turn, and it is why item 4 below reached the opposite
-> conclusion: it asserted *"it needs no turn to have started"*, waited at the
-> composer, and saw nothing. **A hook that has not fired yet and a hook engine that
-> never fires look identical if you never start a turn.**
->
-> **So #78 is buildable.** Both halves of its premise hold on this version.
->
-> Two traps that each produced a confident WRONG answer first, kept because they
-> generalise:
-> * **A TOML bare key after a `[table]` header belongs to that table.** Writing
->   `model = "..."` below `[features]` made Codex read `features.model`, reject the
->   *whole* config (`invalid type: string, expected a boolean`), and therefore never
->   enable the hooks gate — reported by the probe as "hooks don't run". A probe must
->   **abort** on a config-load error, never fold it into a negative verdict.
-> * **Codex refuses to create its helper binaries under `%TEMP%`.** Put the probe's
->   `CODEX_HOME` somewhere else (`scripts/scratch-dirs.js` owns the location).
->
-> Everything in items 1–3 below was re-confirmed and still stands. Item 4 is the
-> part that was wrong.
-
-What was established, in order:
-
-1. **The feature gate is real and satisfied.** `[features] hooks = true` in `~/.codex/config.toml`, whose own comment reads *"Hook engine is gated; without this hooks silently no-op."* Present on all three machines.
-2. **The file IS parsed.** A user-level `~/.codex/hooks.json` in Claude Code's JSON shape is read and its definitions enumerated — Codex names them internally in **snake_case** (`pre_tool_use`, `permission_request`, `post_tool_use`, `pre_compact`, `post_compact`, `session_start`, `user_prompt_submit`, `subagent_start`, `subagent_stop`, `stop`), keyed `'<hooks.json path>:<event>:<group>:<index>'`.
-3. **Trust is a real interactive gate, and it is answerable and PERSISTENT.** A new/changed definition makes the next launch stop *before the composer renders* on `Hooks need review — N hooks are new or changed … 1. Review hooks  2. Trust all and continue  3. Continue without trusting`. Digit `2` + Enter answers it. The answer is recorded in `config.toml` as `[hooks.state.'<key>'] trusted_hash = "sha256:…"` and **survives across sessions**: re-creating a byte-identical `hooks.json` raised no prompt at all. Changing only the command string re-prompted, so **the hash covers the command** — and with one identical command registered across ten events the ten hashes still differed, so it folds in the event/index too.
-4. ~~**And yet no hook process is ever spawned.**~~ **SUPERSEDED — see the correction above.** The marker-file method was right and is still the right method; the *conclusion* was wrong because the run never started a turn, and `SessionStart` is lazy. The claim inside it — *"it needs no turn to have started"* — is the specific false assumption.
-
-**#78's premise holds.** Hooks are a real channel on this version: richer than OSC 9 (tool names, prompts, transcript paths, session id) where OSC 9 gives only a notification string.
-
-**Item 6 (the fate of OSC 9) is now a genuine choice, not a default.** OSC 9's structural gap stands — it fires on exactly two occasions, an approval and a finished turn, so **`working` is unreachable through it by construction**. Hooks close that gap (`UserPromptSubmit` / `PreToolUse` / `PostToolUse`). Keeping OSC 9 as a zero-install fallback is still defensible; relying on it *because hooks don't work* is not.
-
-**One thing hooks do NOT fix:** a session that has been launched but has not yet taken a turn fires nothing at all, so first-turn status still has to come from somewhere else (or be treated as idle, which it is).
-
-> **Probing this is only safe if you clean up.** An installed-but-untrusted `hooks.json` **blocks every new Codex session** — the same failure class as the `Update available` nag, and fatal for a worker-spawned PTY that has nobody to answer it. Delete the file the moment the probe ends and relaunch once to confirm the composer returns. Strip the `[hooks.state]` entries too: a stale `trusted_hash` silently pre-trusts a matching definition later, with nobody reviewing it.
-
-**Why OSC 9 cannot be retired on its own (#78 item 1):** it fires on exactly two occasions — an approval and a finished turn. **There is no turn-start notification, so `working` is unreachable through it by construction.** That is a structural gap hooks would close, not a deployment bug.
-
-> **Probing this is safe only if you clean up.** `~/.codex/hooks.json` did not exist on any machine; creating one is additive, but it **blocks new Codex sessions from that moment on**. Delete it the instant the probe ends and re-launch once to confirm the composer comes back.
-
-**Status comes from OSC 9 in the PTY — the channel that replaces hooks.** With `tui.notifications = true`, `notification_method = "osc9"` and `notification_condition = "always"`, the Codex TUI writes its notifications straight into the terminal. For a normal user that is the *weaker* channel (it only paints in their emulator — which is why `approval-requested` on the external `notify` program is still an open upstream request: openai/codex #11808, #17716, #19921). For web-terminal it is the *stronger* one, because **`pty-worker.js` is the terminal** and already reads every byte.
-
-- **Measured off a real PTY** (0.144.0, re-confirmed end-to-end on 0.144.6): an approval emits `ESC]9;Codex wants to edit 0 files BEL`; a finished turn emits the agent's last message the same way. The external `notify` program only ever fires `agent-turn-complete` — its payload is `{type, thread-id, turn-id, cwd, client, input-messages, last-assistant-message}`.
-- **`notification_condition` defaults to `unfocused`, and a PTY has no focus state** — without `always`, nothing is emitted and the feature looks broken rather than unconfigured. `scripts/install-codex-notify.js` writes all three keys (sibling of `install-statusline.js`); **a COLD restart is required** because this is worker-side.
-- **`lib/osc9-notify.js` owns only the byte rule** and buffers across chunk boundaries. A notification fires **exactly once**, so a sequence split across two PTY reads that is dropped is a status that never updates — unlike the api-error sniff next door, which gets away with no buffering because its phrase stays on screen and repeats.
-- **What a body MEANS is a registry field** (`statusFromOutput.approvalPattern`), never a branch. A plain shell and every unknown agent default to **not** reading status from output — OSC 9 is a general terminal notification that vim or a build script can emit, and none of them is an agent.
-- **Applied through `handleHook`** (an approval IS a `PermissionRequest`, a finished turn IS a `Stop`) so it inherits the idle debounce, held-stop rule and push rather than growing a second status machine. That reuse passes **`hookDriven: false`**: `handleHook` sets `session.hookStatus`, and `isClaudeSession()` reads that flag as proof the session is Claude, which gates the API-error sniff whose recovery **types** `continue` and `/compact` into the PTY. Arming it on Codex would type Claude's recovery into Codex's composer.
-- **NOT established:** what a *declined* approval emits. A lone Esc produced no further notification, but Codex's approval UI is a select list, so Esc most likely never answered it — the rig confirmed the session correctly stays `waiting` on a question nobody answered. Note `noteInterrupt` is gated on `working` on purpose, so Esc at a permission prompt is an answer, not an interrupt.
-
-**NEVER copy `~/.codex/auth.json` into a second `CODEX_HOME`.** Codex refreshes on start and the refresh token rotates; the copy triggers "refresh token was already used", and reuse-detection can revoke the whole token family. Use a stub provider (`model_providers.<name>` with `base_url`, `wire_api="responses"` — `"chat"` was removed) and no auth file.
-
-### How to verify Codex behaviour (methods that work)
-- **The rollout is ground truth; the screen lies.** Codex writes a user message to its rollout only when a turn actually *starts*. Scraping the TUI cannot distinguish "text sitting in the composer" from "submitted" — reading the rollout can. Assert on the rollout.
-- **Probe in an already-trusted cwd that no live session uses.** A fresh directory triggers Codex's trust prompt. A probe run in a live session's cwd writes a *newer* rollout and will hijack that session's Chat lens via `findRolloutForCwd`. Clean up probe rollouts afterwards.
-- **Drive the real path, not a reimplementation.** Worker behaviour is testable by spawning `pty-worker.js` on an isolated pipe and sending a real `TYPE_PTY_IN` frame (see `tests/worker-submit-cr.spec.js`); `__testGetWrites` returns the exact bytes written to the PTY.
-- **A regression test must fail without the fix.** Flip the registry flag off and confirm the new specs go red before believing them.
-- **Trust silently overrides `approval_policy`.** A probe asking for an approval in a *trusted* project (`c:\dev` is trusted here) just runs the command and never prompts. Force the prompt with `-c sandbox_mode="read-only"` and a task that writes — otherwise you "prove" an approval path that never ran.
-- **A `-c` override in an autoCommand goes through a SHELL.** `-c tui.notification_method="osc9"` loses its quotes to bash and Codex rejects the bare TOML value at startup. Single-quote the whole override: `-c 'tui.notification_method="osc9"'`.
-- **Never key readiness on "esc to interrupt", or on the startup banner.** A cold TUI prints `esc to interrupt` while booting MCP servers, and the npm shim can print a self-update log and exit straight back to bash — both false-positive, and the prompt then goes to the shell where it submits nothing. The banner is worse: `OpenAI Codex (v0.144.0)` was contiguous text in 0.144.0 and is **not** in 0.144.6, so it broke on a routine auto-update. Key on the composer's model/effort line (`gpt-5.5 high`). Codex auto-updates **mid-run** — expect the version to move under you.
-
-### The agent task list (#73) — the issue's premise was inverted
-
-**Check the tool names against real data before building on an issue's description.** #73 is titled after `TodoWrite`, which appears as an actual `tool_use` **zero** times across 400 transcripts — claude-code emits `TaskCreate` / `TaskUpdate` / `TaskList`. And the hard part is the opposite of what the issue assumed:
-
-- **Codex is the easy one.** `update_plan` carries the WHOLE plan every call (`arguments` is a JSON *string* holding `plan: [{step, status}]`), so the newest one in the rollout *is* the current state. Read the tail; remember nothing.
-- **Claude is the hard one.** `TaskCreate`/`TaskUpdate` are **deltas**, and **the task id is not in the tool input at all** — it exists only in the result *prose* (`"Task #7 created successfully: …"`; `TaskUpdate` does carry `taskId`, but only because the model was told the id by that prose). Reconstructing the list means folding **forward** from the session start, which a **backward**-paging transcript reader cannot do. So Claude's list is folded from the live hook stream instead.
-
-**`TaskList`'s result is a whole-list snapshot** (`#6 [completed] subject (owner)`) and Claude is explicitly told to call it after finishing a task — that is the **repair path** that makes a fold started mid-session safe, and it is why losing the state on a hot reload is tolerable. Prefer a subject already known from `TaskCreate` over the snapshot's: the line appends ` (owner)` and real subjects end in parentheses too, so stripping it would mangle titles.
-
-**The fold lives in `server.js` beside `pendingQuestion`, NOT in the worker** — deliberately, and against the #61/#65 precedent. It is *derived, repairable* state rather than an authority: it drives no dot and fires no push, so it needs no worker protocol change and no cold restart. If it ever gains such a job, it belongs in the worker.
-
-**An update for a task whose create was never seen still renders** (as `Task #<id>`). Dropping it would hide in-progress work, which is the single thing the panel exists to show.
-
-### Deployment consequence
-Anything touching `pty-worker.js` (including `lib/agents.js` fields the worker reads) needs a **COLD restart** — a hot `server.js`-only reload leaves the old worker running with the old behaviour. See "Deployment & Operations".
-
-## A ConPTY `term.kill()` is ALREADY graceful — `/exit` buys nothing (#191)
-
-**`session.term.kill()` in `pty-worker.js` does not hard-kill THE AGENT.** With
-`useConptyDll: true` — production's default, and `config.json` does not override it —
-node-pty's JS path is `this._inSocket.destroy(); this._ptyNative.kill(pty, true)`
-(`windowsPtyAgent.js:133-161`), and the console-process-list walk that `process.kill`s
-every pid really is the *other* JS branch (`!useConptyDll`, `:162-179`) — and that walk
-*includes the agent*, which is why a deployment there is expected to behave like arm C.
-So **the kill leaves the agent alive — only the shell is terminated** — and it runs its
-**ordinary shutdown**, which is why today's "hard kill" already ends with
-`lastGracefulShutdown: true`.
-
-The wording is deliberate: *"the agent sees its console close and…"* names **one of two
-indistinguishable causes** and stood here until review. The console close and the shell's
-death happen microseconds apart inside one native call, so the agent loses its console and
-its parent at the same instant and nothing measured says which triggered the exit.
-
-> **But "it only closes the pseudoconsole" is WRONG, and this file said so until a review
-> read one layer further down.** `PtyKill` in node-pty's own
-> `src/win/conpty.cc:534-568` calls `ConptyClosePseudoConsole(handle->hpc)` and **then**,
-> *only* in the `useConptyDll` branch, `TerminateProcess(handle->hShell, 1)`. `hShell` is
-> the process node-pty `CreateProcess`'d (`:442`) — **the shell**. So production's path
-> closes the pseudoconsole *and* hard-terminates bash, which is the exact inverse of the
-> impression the sentence above gave on its own.
->
-> **The conclusion survives and is better explained for it.** The agent is a *child* of
-> that shell, and Windows `TerminateProcess` does not touch descendants — so the agent is
-> never terminated. It is orphaned rather than killed, and exits on its own, which
-> is a more specific account of the ~870 ms than "the console closed" and also explains
-> why no shell lingers. **What is graceful is the agent's exit, not the teardown**: the
-> shell is killed outright with exit code 1 and gets no shutdown at all. Nothing here
-> needs it to.
->
-> **The methodological lesson is the one this repo keeps re-learning.** The original claim
-> was read off `windowsPtyAgent.js` — where the branch names really do say what it said —
-> and stopped there. The JS layer's vocabulary was mistaken for the behaviour. *Read to
-> the layer that acts*, the same rule as "the rollout is ground truth; the screen lies".
-
-**MEASURED** (`scripts/rig/probe-exit-flush.js`, claude 2.1.251, 2026-08-31), invoked
-`--arms ABC --dwell 20000` — **neither is the default** (`--arms AB`, `--dwell 0`), so the
-control arm is off unless you ask for it and a rerun that omits these does not reproduce
-the table. Three arms, each a real PTY spawned production-shaped, gated on the #190
-composer marker, one completed turn, 20s dwell, then ended:
-
-| | A `term.kill()` (today) | B `/exit` awaited | C `process.kill` (control) |
-|---|---|---|---|
-| transcript lines at teardown | +4 | +5 | **0** |
-| `lastGracefulShutdown` | false -> **true** | false -> **true** | stays **false** |
-| `SessionEnd` hook | **fired** | **fired** | not fired |
-| `.claude.json` | 29 project keys | the same 29 | **byte-identical** |
-| time for the agent to go | ~870 ms | ~1030 ms | ~15 ms |
-
-*Two rows are weaker than they look, and knowing which matters if you rerun this.* The
-`29` is a hand tally of key-diff rows — no code path emits a count. And **`byte-identical`
-is printed off an empty KEY diff, not a byte comparison**; the claim happens to be true
-because the tree sha1 corroborates it independently, but the line asserting it could not
-establish it. Likewise `{"display":"/exit"}` was read out of `history.jsonl` directly —
-`diffTrees` prints paths and sizes, with content previews for the transcript alone.
-
-**Arm C is the control that proves the mechanism — and what separates it from A is WHICH
-PROCESS is terminated, not whether one is.** Both arms hard-terminate something: A
-terminates the *shell* (see the correction above), C terminates the ***agent itself***
-(`process.kill(R.claudePid)`, on a pid the probe discovered by walking down from one it
-spawned). A `TerminateProcess`d agent writes none of the four lines, fires no `SessionEnd`
-and leaves `.claude.json` byte-identical — so **the writing is done by the agent's own
-shutdown, not by the teardown ceremony around it**, and that shutdown is reachable
-precisely because A leaves the agent alive to run it. Stated as
-"terminate versus no terminate" — as this section did at first — the control would prove
-nothing, because A terminates too.
-A and B differ by **two artifacts in two different files** — which is one transcript line
-(the table's +4 against +5) plus one `history.jsonl` entry, not "two lines" as this said
-until review noticed it contradicted the table one paragraph above. **Both are caused BY
-typing `/exit`, not preserved by it**: a `file-history-snapshot` with
-`trackedFileBackups:{}` (an empty message boundary for the `/exit` input) and a
-`history.jsonl` entry reading `{"display":"/exit"}` — your own keystroke. The `cost-state` roll-up and the whole `last*` block in `.claude.json`
-(`lastSessionId`, `lastCost`, `lastModelUsage`) — the state the graceful path was expected
-to own — have **the same keys written by the hard kill**. *Keys, not values*: two different
-sessions cannot have equal `lastSessionId` or `lastCost`, so "written identically" — which
-stood here at first — invites a comparison the measurement never made and could not make.
-
-**So #191's `/exit` half is refuted for the session shape measured.** A ceremony that buys
-nothing makes Kill feel broken, and a submit is not reliably one keystroke (one run needed
-a second CR after 8s). The *rename* half is untouched by this and belongs at **naming**
-time, not at kill time, so Kill stays instant. Read limit 4 below before treating the
-refutation as reaching a fully-loaded session — it does not.
-
-**Limits, stated rather than glossed — and the last one is the one that could reopen this.**
-
-1. **It is a property of the ConPTY-close path, not of Windows.** node-pty's other branch
-   `process.kill`s the whole **console process list**, which contains the agent, so such a
-   deployment behaves like arm C and loses all four lines — not on this fleet, and
-   unmeasured.
-2. **Killing MID-TURN was never measured.** Every arm killed an idle session after a
-   completed turn.
-3. **The evidence is Claude-only; the decision is fleet-wide.** Kill stays instant for
-   Codex sessions and plain shells too, and neither was measured. Same convention as
-   `readiness` and `submit.bracketAbove`: Claude's behaviour is not evidence about Codex
-   in either direction.
-4. **THE MEASURED SESSION WAS MINIMAL, AND THAT IS THE GAP THAT MATTERS.** No MCP servers,
-   no plugins, no statusLine, `autoCompactEnabled: false`. A real session on this fleet
-   runs several MCP servers — and **MCP teardown is the most plausible concrete form of
-   the report's "work Claude is doing" at exit**, which is the thing `/exit` was proposed
-   to protect. *This probe could not have seen it.* So the refutation is sound for the
-   session shape it measured and does **not** reach a fully-loaded one. Anyone reopening
-   #191 should start here: add MCP servers to the isolated config and rerun the same three
-   arms, rather than re-arguing the ConPTY mechanism, which is now settled.
-
-**A fifth limit, added when the mechanism was corrected.** *Which* event makes the agent
-exit is **not** measured. Two candidates arrive microseconds apart inside one native call —
-its console closes, and its parent dies — so "orphaned by the closing pseudoconsole" is
-inference from arm C plus the process tree (`TerminateProcess` spares descendants), not a
-captured sequence. What IS earned is the weaker and sufficient claim: **the agent is left
-alive and runs its ordinary shutdown.**
-
-Two readings are closed rather than left open. The flush cannot pre-date the kill: the
-BEFORE snapshot is taken *after* the dwell and *before* the end-action, so anything written
-earlier is already in the baseline and the +4 is measured strictly across the teardown. And
-it cannot be the terminate itself, on two independent grounds — the terminate targets bash,
-and arm C shows that terminating the agent writes nothing.
-
-> **The isolating experiment is CHEAP, and this limit first claimed the opposite.** It said
-> a fourth arm "would need … the native call directly, which node-pty's API does not
-> expose". Wrong, and review answered it in one line: `process.kill(shellPid)` alone, with
-> no `term.kill()` — the same shape as arm C — kills the parent without closing the
-> console and separates the two causes. So the arm is **unrun, not impossible**. Recorded
-> because it is the same error as the one being corrected on the line above: *a claim about
-> what cannot be done, made without checking.*
-
-Nothing in this repo depends on telling the two apart — either way the agent flushes and
-`/exit` adds nothing — which is why the arm is named here rather than run.
-
-> **A liveness check on a pid you failed to find PASSES.** The probe locates the agent
-> process by NAME under the shell it spawned, so an install running it under a shim (an
-> npm wrapper is `node.exe`) leaves the pid null — and `alive(null)` is false, so every
-> wait loop exits on its first test. Arm A's wait, which exists to prove the hard kill
-> reaches the agent, would report *"agent died 0ms after it"* having checked nothing; arm
-> B's await would return instantly and let `term.kill()` fire straight after, so **B
-> silently degenerates into A** — the exact #191 trap the probe was written to avoid,
-> reproduced by the probe. Both failures print a plausible table and no error. It now
-> aborts instead. Same lesson as the Codex TOML probe below: **a setup failure must abort,
-> never be folded into a verdict.** (The recorded runs above were not affected — a null
-> pid yields ~0ms in both arms, and they measured ~870ms and ~1030ms.)
->
-> **A probe that spawns `claude` from inside a Claude Code session must scrub `CLAUDE*`
-> from the child env.** The first four runs wrote **no transcript at all**, in both arms,
-> because the probe inherited `CLAUDE_CODE_CHILD_SESSION=1`, `CLAUDE_CODE_SESSION_ID`,
-> `CLAUDECODE=1` and `CLAUDE_CODE_MESSAGING_SOCKET` (a named pipe into the PARENT) — **a
-> nested child session persists nothing**, so the measurement reads as "unmeasurable" when
-> it is really "not isolated". Sibling of the `CODEX_HOME` rule under Codex above.
->
-> *The inventory is measured; the CAUSE is inferred.* All four names were confirmed present
-> in a real session's environment, and scrubbing them fixed it — but the probe scrubs three
-> whole prefixes unconditionally with no flag to disable, so it can say neither **which**
-> variable mattered nor that "a nested child session persists nothing" is the mechanism.
-> Scrub all of them anyway; just do not cite this as evidence for the mechanism.
->
-> **A guard must hash the file the ACTOR CAN WRITE.** Copying `.credentials.json` into the
-> isolated `CLAUDE_CONFIG_DIR` is the probe's one break in isolation, and the safety net
-> described for it — *"re-checks the original file's hash afterwards and SHOUTS if it
-> moved"* — hashed `~/.claude/.credentials.json`. **The child runs with
-> `CLAUDE_CONFIG_DIR` pointed elsewhere and never opens that file**, so it is unchanged by
-> construction and the check printed `unchanged: true` in precisely the scenario it existed
-> to catch. The file that shows a rotation is the **copy** — which was being shredded a few
-> lines earlier, destroying the evidence unread on every normal run. What actually makes a
-> refresh impossible is the `--min-token-life` refusal; the hash check was a second line of
-> defence that was never in the line of fire. It now hashes each copy at creation and
-> compares just before the shred, and the original is checked separately for the different
-> thing it does show (the HOST refreshing mid-run). **Generalises past credentials: name
-> the writer before choosing what to watch** — the same error as asserting on the screen
-> when the rollout is ground truth.
+| `docs/findings/input-submit.md` | #44 #55 #137 #138 #146 #147 #179 #190 #201 #204 #206 #209 #213 #218 |
+| `docs/findings/agents-codex.md` | multi-agent registry, Codex empirics, hooks, OSC 9, #73 #78 #142 #191 #227 |
+| `docs/findings/questions.md` | #19 #84 #143 #145 #236 #239 |
+| `docs/findings/chat-lens.md` | session recap, #249 #194 #210, scrollback #167 #176 #178, #81 #83 |
+
+**Read the covering archive file before reopening any issue it names, and add new
+measurements there rather than here.** Every table in it records the agent version it
+was taken against — a claude or codex release can move any of these numbers, and no
+unit test catches that. A measurement kept in *this* file is a law nobody can load.
 
 ## Input & Submit Contract (issue #55) — this is law, not guidance
 
-The sentence *"Enter doesn't run it"* has described at least four **different** bugs in different layers. A change to input or submit is correct only if it satisfies the rules below, and each rule has a test that fails without it. Full spec: issue #55.
+The sentence *"Enter doesn't run it"* has described at least four **different** bugs in
+different layers. A change to input or submit is correct only if it satisfies the rules
+below, and each has a test that fails without it. Evidence:
+`docs/findings/input-submit.md`.
 
-**Compose bar = the app's text box.** Not the agent's own TUI prompt. **Submit = the agent actually starts a turn** — text appearing in its prompt box is *not* submit.
+**Compose bar = the app's text box**, not the agent's own TUI prompt. **Submit = the
+agent actually starts a turn** — text appearing in its prompt box is *not* submit, which
+is why the only valid detector anywhere in this area is *"did a turn start"*. The
+PTY/rollout is ground truth; the screen lies.
 
 ### The keyboard contract — chosen by PLATFORM, never by lens
-Chat and terminal lenses share one compose bar with one set of keys.
 
 | Platform | Enter | Ctrl+Enter | Send button |
 |---|---|---|---|
 | **Desktop** (hardware kbd) | **Submit** | Newline | Submit |
 | **Mobile** (soft kbd) | **Newline** | (n/a) | **Submit** |
 
-Mobile is Send-only because the **Android IME commits Enter as literal `"\n"` *text*, not a key event** — a submit bound to an Enter *keydown* is unreliable by construction there. The gate is `composeUsesSoftKeyboard()` (companion `compose_bar.dart`; `app.html` mirrors it off the UA). In `app.html`, **visibility** of the bar is keyed on `isMobile`, which ORs in `innerWidth < 600` — so a narrow *desktop* window shows the bar and must still submit on Enter. Visibility ≠ platform; do not collapse them.
+Mobile is Send-only because the **Android IME commits Enter as literal `"\n"` text, not
+a key event** — a submit bound to an Enter keydown is unreliable there by construction.
+The gate is `composeUsesSoftKeyboard()` (companion `compose_bar.dart`; `app.html` mirrors
+it off the UA). In `app.html` the bar's **visibility** keys on `isMobile`, which ORs in
+`innerWidth < 600`, so a narrow *desktop* window shows the bar and must still submit on
+Enter. **Visibility is not platform — do not collapse them.** The bar is multi-line
+(`minLines:1, maxLines:5`) and a soft-wrapped line contains no `\n`.
 
-The bar is **multi-line** (`minLines:1, maxLines:5`), soft-wraps, and a wrapped line contains **no** `\n`.
-
-**A widget test cannot prove any of this.** Synthetic key events never traverse the OS text-input path, so a widget test passes while the shipped app is broken. Desktop Enter needs real injected OS keystrokes (`scripts/rig/probe-drive-windows.ps1` + `tool/compose_probe.dart`); mobile needs a real device.
+**A widget test cannot prove any of this.** Synthetic key events never traverse the OS
+text-input path, so a widget test passes while the shipped app is broken. Desktop Enter
+needs real injected OS keystrokes (`scripts/rig/probe-drive-windows.ps1` +
+`tool/compose_probe.dart`); mobile needs a real device.
 
 ### Client-side encoding — `buildComposeSubmission` (one function per client)
-1. Strip a **trailing** newline. 2. If a `\n` **remains** → `ESC[200~` + text + `ESC[201~` + `\r`. 3. Else → text + `\r`. 4. Send as **ONE** frame (#44: a client that dies mid-submit must not lose half of it).
 
-A live `/`-line streams to the PTY as you type so the agent's slash menu narrows. That prompt is **one line**, so `composeLiveProjection()` **drops newlines** — mirroring one as `\r` would *submit*, which is exactly how Enter came to fire a `/`-line on mobile while merely newlining everywhere else.
+1. Strip a **trailing** newline. 2. If a `\n` **remains** -> `ESC[200~` + text +
+`ESC[201~` + `\r`. 3. Else -> text + `\r`. 4. Send as **ONE** frame (#44: a client that
+dies mid-submit must not lose half of it).
 
-### The wire cap and the offline-buffer ceiling are ONE number (#201)
+A live `/`-line streams to the PTY as you type so the agent's slash menu narrows. That
+prompt is **one line**, so `composeLiveProjection()` **drops newlines** — mirroring one
+as `\r` would *submit*, which is exactly how Enter came to fire a `/`-line on mobile
+while merely newlining everywhere else.
+
+### The wire cap and the offline-buffer ceiling are ONE number (#201/#204/#206)
 
 `WS_INPUT_MAX` (`server.js`, per frame) and the companion's `_inputBufferHardCap`
 (`api_client.dart`, total) are both **256 KB in UTF-16 code units** and are equal by
 construction: **nothing the offline buffer can hold within its ceiling may be refused at
-the wire.** The `65536` that stood there until #201 was an inherited default (commit
-`a96e7ba`, 2026-03-23) which also bounded no memory — `ws` assembles a whole message
-before `handleMessage` runs, so the bound that bounds is **`WS_MAX_PAYLOAD` (4 MiB), now
-set in `wsOptions`**. It is **16x the app cap** — about 5.3x the app cap's worst-case
-byte width (256 KB x 3 = 786,432; three is the most UTF-8 bytes one BMP code unit can
-take). The gap is wide rather than snug because `ws` answers an oversize frame by
-**closing the socket**, not by letting the app send its `inputDropped` notice, so the
-zone between the two caps is where an accidental oversend is still reported honestly.
-`scripts/check-shared-constants.js` fails the build if the pair drifts.
+the wire.** The bound that bounds memory is **`WS_MAX_PAYLOAD` (4 MiB) in `wsOptions`** —
+`ws` assembles a whole message before `handleMessage` runs. It is deliberately ~5.3x the
+app cap's worst-case byte width, not snug, because `ws` answers an oversize frame by
+**closing the socket** rather than letting the app send its notice; the zone between the
+two caps is where an accidental oversend is still reported honestly.
 
-**#204 — and every refusal now SAYS SO, which is the rule that was actually being
-broken.** #193's principle is that dropped input must be visible; two paths never
-honoured it, and #201 made one of them reachable.
+**Every refusal must SAY SO** — #193's principle, which three paths once broke:
 
-- **The companion refuses at the APP cap itself** (`sendInput`, before the
-  live/buffered branch), reporting on the same `inputDropped` stream. That makes
-  `WS_MAX_PAYLOAD` **unreachable from that client** — strictly better than defending
-  against it, because *a refusal by the APP keeps the socket and the session; a refusal
-  by the TRANSPORT costs the connection.* The comparison is `>`, matching the server's
-  `msg.length > WS_INPUT_MAX` exactly: a write **at** the cap is legal on both sides,
-  and over-refusing would be the same silent loss in the other direction. One number
-  serves both roles (per-frame wire cap, whole-buffer total) because the #201 invariant
-  makes them one number; a second Dart constant would be a third copy of the value whose
-  whole problem was that its copies looked independent.
-- **`app.html` is gated too now (#206)** — and the reason it was not is worth keeping,
-  because **half the premise was stale.**
-  - **But "both clients" was wrong, and briefly stood in this file as a claim.** There
-    was a THIRD page, and it was the worst off of the three: **`terminal.html`**, the
-    legacy terminal-only view served at `/s/:id` and linked from `lobby.html`. (That link
-    still exists and still points at `/s/`; it simply lands on the redirect now.) Four
-    ungated input sends (a Ctrl+V paste among them) **and** it discarded the server's own
-    `inputDropped` frame — there is no notice UI in that file to render one in. So there:
-    a >256 KB paste was refused by the server and reported to nobody, and a >4 MiB paste
-    closed the socket with nobody told why. The value of a record like this one is that it
-    is accurate, and the previous sentence here was the second comment in two PRs to claim
-    a convenient thing nobody had checked.
-  - **#218 closed it by UNSERVING the page, not by gating it.** `/s/:id` now redirects to
-    `/app/:id` (302 — a 301 is cached indefinitely and would make a revert a support
-    problem). The page keeps its four ungated sends; what makes that safe is that nothing
-    routes to it, which is why `check-shared-constants.js` still gates **three** copies of
-    `WS_INPUT_MAX` and not four, and why `tests/legacy-route-redirect.spec.js` asserts
-    **against the source** that no route serves the file — a route added next year would
-    leave every behavioural test in the repo green.
-  - **And the issue's own caveat was BACKWARDS, which is why it was worth checking rather
-    than believing.** #218 warned that a redirect might drop the CLUSTER case, since
-    `terminal.html` "builds its own WebSocket URL". It has **no cluster code at all** —
-    its socket is always `location.host` + `/ws/<id>` — and the old route gated on a
-    `getSession` RPC answered by the **local** worker only, so a peer-hosted id threw and
-    bounced the user to `/`. `app.html` resolves the same bare `/app/:id` against
-    `/api/cluster/sessions` and opens the peer through the `/cluster/:serverUrl/ws/:id`
-    proxy. So the redirect **adds** capability: an `/s/` link reaches a peer session for
-    the first time. *A caveat is a hypothesis; this one cost one grep to falsify.*
-  This bullet used to say the file had "no single input path"; in fact `sendInput` had
-  been the coalescing path for typing and for the compose bar all along, and exactly
-  **four** sites wrote past it to `ws.send` — the image-path paste, the mobile toolbar
-  key, the long-press Paste action, the tap-to-move arrow repeat. So the fix is a
-  **funnel** (`sendPtyInput` wrapping `ws.send`), not the new mechanism the issue
-  budgeted for. *Check the claim before you cost the work.*
-  - The cap is tested **before** the socket state: the refusal is a fact about the data,
-    and a notice that appeared only when a socket happened to be open would be the
-    flakiest possible affordance.
-  - **Every caller's FRAMING is untouched.** #55/#44 make a submit one frame on purpose,
-    and #87's images-only submit needs its paste close and its bare CR to reach the wire
-    as separate writes a measured gap apart. This wraps a send; it re-coalesces nobody.
-  - **A funnel's whole value is that nothing goes round it**, and no behavioural test can
-    see that — a `ws.send` added next year would leave every other test in the repo
-    green. `tests/app-input-path.spec.js` therefore asserts it against the **source**,
-    with an allowlist of the frames that are not input (`resize`, `mode`, `heartbeat`,
-    the notify ping), as well as driving the cap end to end.
-  - `WS_INPUT_MAX` is now a **third** site in `scripts/check-shared-constants.js`. An
-    ungated copy would decide whether the browser refuses a write itself or lets the
-    **transport** refuse it — and the transport refuses by closing the socket.
-- **The cluster proxy tells the browser when its reconnect buffer refuses a write** —
-  the remote link is what is down, `localWs` is open throughout. **Once per outage, not
-  once per keystroke:** the buffer LATCHES (#201), so everything after the first refusal
-  is refused for the same reason, and a banner per character is noise that teaches you to
-  ignore the one that mattered. The reporting rule therefore lives with the latch in
-  `lib/reconnect-buffer.js` (`decide`) rather than as an `if` beside it.
-- **And #209 is the OPPOSITE case on that same path, which was silent for longer.**
-  There the buffer is full and says no; here every write is *accepted* and the whole
-  buffer is then discarded because the peer never came back — so nothing was ever
-  refused and there was no signal at all, just `1001 Remote unreachable` about **37s**
-  (500ms/1s/2s/4s/5s-capped x 10) after typing into a session that looked merely laggy.
-  `attemptReconnect` now sends one notice naming the total before the close, under a
-  third `reason` — **`'peer-unreachable'`, not `'buffer-full'`**, which means *there was
-  no room left* and is exactly what did not happen. The buffer is cleared **before** the
-  close, which makes a second report impossible by construction — defensively: nothing
-  re-enters that branch today, and saying otherwise would be a comment claiming a
-  measured path. The send-then-close ordering, by contrast, IS asserted, from inside the
-  close handler rather than assumed of `ws`.
-- **Three things review caught in that fix, each a rule rather than a patch — and all
-  three of the give-up's decisions ended up in `lib/reconnect-buffer.js` as `giveUp`,
-  beside `decide`, for the reason stated one bullet up.** Left at the call site they had
-  already become two loose counters and an assignment: exactly the `if` this module was
-  extracted to prevent. `giveUp` also makes them testable with no socket and no 37
-  seconds.
-  (1) **"What was lost" is not "what was held."** Once the buffer latches, `count` is
-  pinned at 100 and every later refusal lands in no array — so the give-up must add a
-  tally kept beside the latch, or it tells someone who typed 105 things that it lost
-  100, *with a precise figure*. The earlier `buffer-full` notice does **not** cover the
-  remainder: both render into the same element, so the second **replaces** the first.
-  (2) **`next.latched` is true unconditionally**, because `close()` leaves `readyState`
-  at CLOSING and `ws` keeps delivering `message` — otherwise a write in that gap is
-  admitted to a buffer that can never be flushed. An empty buffer has the same window,
-  so the latch cannot hang off "something was lost". **This is the half no integration
-  test can reach** — it guards a window inside a closing socket, where by construction
-  no notice could be sent to observe it — which is the argument for the rule living in
-  a pure module at all: *the rule is testable even where the race is not.*
-  (3) **A BACKGROUND SOCKET IS STILL A SOCKET THE SERVER REPORTS ON.** `app.html`'s two
-  background `onmessage` handlers listed `inputDropped` in their *ignore* set. That was
-  survivable while every refusal fired *as you typed* — you are still on that session
-  when it lands — and is not survivable for a notice that arrives **37s later**, by
-  which time you have very likely switched away. They now stash it on the session's
-  cache entry, drained once on return (a notice belongs to the session it was raised on,
-  #179's rule). With `keepSessionsOpen` off there is no background socket at all, so
-  there is nothing to stash.
+- **The companion refuses at the APP cap itself** (`sendInput`, before the live/buffered
+  branch), on the `inputDropped` stream, which makes `WS_MAX_PAYLOAD` unreachable from
+  that client. *A refusal by the APP keeps the socket and the session; a refusal by the
+  TRANSPORT costs the connection.* The comparison is `>`, matching the server's
+  `msg.length > WS_INPUT_MAX` exactly — a write **at** the cap is legal on both sides.
+- **`app.html` funnels every input write through `sendPtyInput`** wrapping `ws.send`.
+  A funnel's whole value is that nothing goes round it, and no behavioural test can see
+  that, so `tests/app-input-path.spec.js` asserts it against the **source** with an
+  allowlist of the frames that are not input (`resize`, `mode`, `heartbeat`, notify ping).
+  The cap is tested **before** the socket state — the refusal is a fact about the data.
+  **Every caller's FRAMING is untouched:** #55/#44 make a submit one frame on purpose and
+  #87's images-only submit needs its paste close and bare CR a measured gap apart, so this
+  wraps a send and re-coalesces nobody.
+- **`terminal.html` is NO LONGER SERVED** (#218). `/s/:id` returns a **302** to `/app/:id`
+  (a 301 is cached indefinitely and would make a revert a support problem). The page keeps
+  four ungated sends and cannot render an `inputDropped` notice at all; what makes that
+  safe is that nothing routes to it. `tests/legacy-route-redirect.spec.js` asserts
+  **against the source** that no route serves the file, because a route added next year
+  would leave every behavioural test green. The redirect *adds* capability: `app.html`
+  resolves a bare `/app/:id` against `/api/cluster/sessions`, so an `/s/` link reaches a
+  peer session for the first time.
+- **The cluster proxy reports its own refusals, once per outage, not once per keystroke.**
+  The reconnect buffer **latches**, so everything after the first refusal is refused for
+  the same reason; the reporting rule therefore lives with the latch in
+  `lib/reconnect-buffer.js` (`decide`, `giveUp`) rather than as an `if` beside it. Two
+  distinct reasons: **`buffer-full`** (no room left) and **`peer-unreachable`** (#209 —
+  every write was *accepted* and the whole buffer then discarded when the peer never came
+  back, ~37s of silence before `1001`). `giveUp` must tally what was **lost**, not what was
+  **held** (once latched, `count` is pinned and later refusals land in no array), sets
+  `latched` **unconditionally** (`close()` leaves `readyState` at CLOSING and `ws` keeps
+  delivering `message`), and clears the buffer **before** the close.
+- **A BACKGROUND SOCKET IS STILL A SOCKET THE SERVER REPORTS ON.** `app.html`'s background
+  `onmessage` handlers stash `inputDropped` on the session's cache entry and drain it once
+  on return — a notice belongs to the session it was raised on (#179). Survivable while
+  every refusal fired as you typed; not survivable for one arriving 37s later.
 
-**`WT_CLUSTER_TOKENS_FILE`** exists so that regression test can write a cluster entry
-pointing at a dead port. `cluster-tokens.json` holds a live bearer token for **every peer
-in the cluster**, and a backup/restore around the test is not enough — a suite run that is
-SIGTERM'd part-way (what happens when the full suite outlives a 10-minute tool ceiling)
-never reaches its restore. Redirect the path and the real file is never opened.
+`WS_INPUT_MAX` is a **three-copy** constant gated by `scripts/check-shared-constants.js`.
+An ungated copy would decide whether the browser refuses a write itself or lets the
+transport refuse it by closing the socket.
+
+**`WT_CLUSTER_TOKENS_FILE`** exists so a regression test can write a cluster entry pointing
+at a dead port. `cluster-tokens.json` holds a live bearer token for **every peer**, and a
+backup/restore around the test is not enough — a suite run SIGTERM'd part-way never reaches
+its restore. Redirect the path and the real file is never opened.
 
 ### Server-side delivery — the SSOT, and where the real bug lived
-**Every agent TUI folds one read into a paste and swallows a trailing CR.** Codex does it at any length (`paste_burst.rs`); **Claude does it too** — it just needs a bigger read to trip it. Measured against the real Claude TUI, atomic `text\r` in ONE write:
 
-| chars | atomic `text\r` | CR split off |
-|---|---|---|
-| 20 / 40 / 60 | submitted | submitted |
-| **80 / 120** | **NOT submitted** | submitted |
-
-That single fact explains the whole "sometimes Enter works, sometimes it doesn't" class of report: **a short test prompt submitted, and a real one was typed into the prompt box and never sent.** Claude looked exempt for months because every quick test was short.
+**Every agent TUI folds one read into a paste and swallows a trailing CR.** Codex does it
+at any length (`paste_burst.rs`); **Claude does it too**, it just needs a bigger read —
+measured against the real TUI, atomic `text\r` in ONE write submits at 20/40/60 chars and
+**does NOT submit at 80/120**. That single fact explains the whole "sometimes Enter works"
+class of report: a short test prompt submitted, and a real one was typed into the prompt
+box and never sent. Claude looked exempt for months because every quick test was short.
 
 - The **worker** owns submit timing. Clients stay unaware and unchanged.
-- A frame that is **text ending in `\r`** is split: write the text now, write the lone `\r` after `submit.gapMs`. Input arriving in the gap **queues behind** it (order preserved).
-- A **bare `\r` on a cold PTY is never split** — nothing was just written, so nothing can absorb it. So ordinary char-by-char shell typing is never rewritten and never delayed.
-- **The gap is measured against the wire, not against the frame.** A bare `\r` written within `submit.gapMs` of a frame that **closed a bracketed paste** IS withheld, and goes out alone after the gap. The burst detector reads bytes; our frame boundaries are invisible to it, so two frames microseconds apart are one read and fold together. This is not a hypothetical — it is the images-only submit: the compose bar sends each staged image as its own `ESC[200~<path>ESC[201~` frame, and with no prompt text the submit behind it is a bare CR. With text it was always fine (`text\r` splits), which is exactly why "attach an image and press Send" typed the image and sent no Enter while every other prompt worked. Keep it **narrow — only a paste close shades a CR**; widening it to "any recent write" would delay every shell Enter, and short non-paste reads are measured to submit fine.
-- Bracketed paste does **not** exempt the CR. Measured: ≤30 ms is still absorbed, ≥60 ms submits. **Only a real temporal gap works — never "fix" a submit problem by changing the bytes.**
-
+- A frame that is **text ending in `\r`** is split: write the text now, write the lone `\r`
+  after `submit.gapMs`. Input arriving in the gap **queues behind** it (order preserved).
+- A **bare `\r` on a cold PTY is never split** — nothing was just written, so nothing can
+  absorb it. Ordinary char-by-char shell typing is never rewritten and never delayed.
+- **The gap is measured against the wire, not against the frame.** A bare `\r` written
+  within `submit.gapMs` of a frame that **closed a bracketed paste** IS withheld and goes
+  out alone. The burst detector reads bytes; our frame boundaries are invisible to it. This
+  is the images-only submit (#87): each staged image is its own `ESC[200~<path>ESC[201~`
+  frame and with no prompt text the submit behind it is a bare CR. Keep it **narrow — only
+  a paste close shades a CR**; widening it to "any recent write" would delay every shell
+  Enter.
+- Bracketed paste does **not** exempt the CR (<=30 ms is still absorbed, >=60 ms submits).
+  **Only a real temporal gap works — never "fix" a submit problem by changing the bytes.**
 
 ### A DICTATED prompt has no newline, so nothing ever bracketed it (#213)
 
-The rule above rescues the **CR**. It leaves the **BODY** to the TUI's own paste inference,
-and for one shape of prompt that inference loses the text. `buildComposeSubmission` picks
-its byte shape on exactly one predicate — **does the buffer contain a newline** — so a
-pasted paragraph goes bracketed and **a dictated one does not**. Dictation emits no line
-breaks at all. That is the whole mechanism, and it is why the long prompts that break are
-always the spoken ones.
-
-**Measured** (`scripts/rig/probe-paste-single-line.js`, claude 2.1.251, verdict from the
-**transcript** — a composer scrolls, so its screen shows a tail whether or not the head
-arrived, which is exactly why this survived so long):
-
-| chars | unbracketed (what a dictated prompt sends) | bracketed |
-|---|---|---|
-| 288 / 488 / 988 | whole | — |
-| 588 | whole once, **NOT SUBMITTED** once | whole |
-| 1088 | **no turn** — nothing survived to start one | — |
-| 1588 | **HEAD CUT of exactly 1024**, twice | whole |
-| 2588 | — | whole |
-
-**1024 is a buffer boundary, not a timing artifact**: at 1588 the survivor is the last 564
-characters and begins **mid-token at offset 1024**, reproducibly. And it is the **HEAD**
-that goes — the shape of #89 (1582 sent, the last 666 received), whose root cause was
-never pinned and now is.
-
-**Three probes existed and each covered a different cell.** `verify-long-prompt.js`:
-unbracketed 1582 → a plain **shell**, intact. `probe-paste-truncation.js`: bracketed → a
-shell, intact to 32 KB. `probe-paste-claude.js`: bracketed → **real Claude**, intact to
-41,899. Nobody had put **unbracketed into a real agent**. The first of those matters
-twice: it already carries this exact shape at this exact size through the whole
-HTTP → WS → server → worker → PTY path intact, so **the transport is exonerated by
-measurement, not by argument** — and that is why #193's fleet-wide hunt found nothing. It
-measured a *pasted paragraph*, which has newlines.
+The rule above rescues the **CR** and leaves the **BODY** to the TUI's own paste inference.
+`buildComposeSubmission` picks its byte shape on exactly one predicate — **does the buffer
+contain a newline** — so a pasted paragraph goes bracketed and **a dictated one does not**.
+Dictation emits no line breaks. That is why the long prompts that break are always the
+spoken ones: unbracketed, Claude's TUI loses the **HEAD**, cutting exactly **1024 bytes** (a
+buffer boundary, reproducible), and at ~1088 loses the prompt entirely.
 
 **The fix is `submit.bracketAbove` in the registry, applied in the worker** — one owner,
-every client fixed with no client release, `app.html` included. Claude declares **512 BYTES** (not characters — dictated
-Hebrew is two bytes a character, so 512 of them land on the cliff exactly):
-under the 1024 cliff *and* under 588, where the submit was lost on one run of two, so the
-threshold sits below the flakiness rather than below the cliff. Codex and plain shells
-declare **none**, and undeclared means never — today's bytes exactly. That asymmetry is
-deliberate: splitting a CR is invisible to a reader that does not need it, while
-`ESC[200~` is only correct for one that understands the sequence, and a shell with
-bracketed paste off would take the markers as literal text.
+every client fixed with no client release, and it hot-reloads. Claude declares **512
+BYTES** (not characters — dictated Hebrew is two bytes per character, so 512 of them land
+on the cliff exactly); **Codex and plain shells declare none, and undeclared means never.**
+That asymmetry is deliberate: splitting a CR is invisible to a reader that does not need
+it, while `ESC[200~` is only correct for one that understands the sequence, and a shell
+with bracketed paste off would take the markers as literal text.
+
+**Refused, never sanitised.** A body carrying ESC, CR or LF is left exactly as it is — it
+may already be a bracketed paste, an arrow key, or a live `/`-line's backspaces. Stripping
+markers out of a body is no defence (deleting the inner `ESC[200~` from
+`a ESC[2 ESC[200~ 01~ b` reconstitutes a close), and refusing costs nothing because every
+such body already has a working shape.
 
 > **This does NOT contradict "never fix a submit problem by changing the bytes."** That
-> rule is about the **CR** — about making Enter be Enter, where only a temporal gap works,
-> and the gap is kept here untouched. This changes the **BODY**, and it does not disguise
-> it as something else: a compose submit *is* a block insert, so the frame is being
-> labelled as what it already was. `contains('\n')` was a proxy for "is this a paste", and
-> the proxy is what was wrong.
-
-**Refused, never sanitised.** A body carrying ESC, CR or LF is left exactly as it is —
-it may already be a bracketed paste, an arrow key, or a live `/`-line's backspaces.
-`_pasteInner`'s lesson is that stripping markers out of a body is no defence (deleting the
-inner `ESC[200~` from `a ESC[2 ESC[200~ 01~ b` reconstitutes a close), and refusing costs
-nothing because every such body already has a working shape.
-
-**Codex is deliberately unmeasured**, the same convention `readiness` follows: its
-paste-burst handling is its own (`paste_burst.rs`), so Claude's cliff is not evidence
-about it in either direction. And the threshold is measured against **one claude version**
-— a release that changes its paste inference needs a rig re-probe, which no unit test can
-catch.
+> rule is about the **CR** — making Enter be Enter, where only a temporal gap works, and
+> that gap is untouched here. This changes the **BODY**, and does not disguise it as
+> something else: a compose submit *is* a block insert. `contains('\n')` was a proxy for
+> "is this a paste", and the proxy is what was wrong.
 
 ### Interrupt (Esc) — status must go idle promptly
-Claude fires **no hook** on a user interrupt (`Stop` does not run), and worker status is otherwise hook-driven — so an interrupted session sat on "Claude is working" until `correctStaleStatus` rescued it **5 minutes** later. But the **worker writes the Esc byte itself**, so it is the one component that can know: a **lone `0x1b`** (`isEscapeKey` — length 1, so an arrow's `ESC [ A` never counts) sent to a **`working`** session flips it to idle at once. Gated on `working` on purpose: Esc at a permission prompt (`waiting`) *rejects the tool* and Claude carries on. No push fires — the user is the one who pressed Esc.
+
+Claude fires **no hook** on a user interrupt (`Stop` does not run), so an interrupted
+session sat on "working" until `correctStaleStatus` rescued it 5 minutes later. The
+**worker writes the Esc byte itself**, so it is the one component that can know: a **lone
+`0x1b`** (`isEscapeKey` — length 1, so an arrow's `ESC [ A` never counts) sent to a
+**`working`** session flips it to idle at once. Gated on `working` on purpose — Esc at a
+permission prompt (`waiting`) *rejects the tool* and Claude carries on. No push fires; the
+user is the one who pressed Esc. A **plain shell declares `onEscape: false`**, so Esc in
+vim or less is never read as "the agent stopped".
 
 ### Where it lives (no branching, ever)
-`lib/agents.js` — the registry: each provider declares `submit: { gapMs, crBurstsAsPaste }` and `interrupt: { onEscape }`. A **plain shell declares `onEscape: false`**, so Esc in vim/less is never read as "the agent stopped". `lib/submit-frames.js` — the pure byte rules (`splitTrailingCr`, `isEscapeKey`). `pty-worker.js` — applies them where bytes meet the PTY. **An `if (agent === 'codex')` in `server.js`, `pty-worker.js`, `app.html` or the companion means the change is in the wrong file — add a registry field instead.**
+
+`lib/agents.js` — the registry: each provider declares `submit: { gapMs, crBurstsAsPaste,
+bracketAbove }`, `interrupt: { onEscape }`, `readiness`, `submitConfirm`.
+`lib/submit-frames.js` / `lib/submit-confirm.js` / `lib/agent-ready.js` — the pure rules.
+`pty-worker.js` — applies them where bytes meet the PTY. **An `if (agent === 'codex')` in
+`server.js`, `pty-worker.js`, `app.html` or the companion means the change is in the wrong
+file — add a registry field instead.**
 
 ### How to verify (no production cold-restart to test a hypothesis)
-`node scripts/rig/rig.js up` runs a complete, **isolated** web-terminal (port 7999, own worker pipe, own data dir, own config) from the working tree — it cannot touch production. `node scripts/rig/verify-submit.js` proves a LONG prompt actually submits, end to end. **The PTY/rollout is ground truth; the screen lies** — Claude echoes a submitted prompt back into its transcript, so "is the text still visible" cannot distinguish *typed* from *submitted*. The only valid detector is **"did a turn start"**.
+
+`node scripts/rig/rig.js up` runs a complete, **isolated** web-terminal (port 7999, own
+worker pipe, own data dir, own config) from the working tree — it cannot touch production.
+`node scripts/rig/verify-submit.js` proves a LONG prompt actually submits, end to end.
+Claude echoes a submitted prompt back into its transcript, so "is the text still visible"
+cannot distinguish *typed* from *submitted*.
 
 ### A spawned agent is NOT ready when its session is (#147)
 
-Submit has a precondition the contract above assumed: **the agent has to exist.**
-A new session drops the user into the chat lens seconds before `claude` boots, and
-until its composer is up the PTY is still sitting at the **shell** — so a prompt
-sent in that window is handed to bash, runs as a command or does nothing, and is
-gone with no error anywhere. Reported 2026-08-20 on the phone, the tablet and the
-Windows desktop *at once*, which is what located it as a missing **server** signal
-rather than three client bugs.
+Submit has a precondition the contract above assumed: **the agent has to exist.** A new
+session drops the user into the chat lens seconds before `claude` boots, so a prompt sent
+in that window is handed to **bash** and is gone with no error anywhere. Measured boot to
+composer: **5.0s and 6.1s on the same machine** — that spread is the whole argument for a
+**marker over a timer**, since a timer tuned to the fast boot eats prompts on the slow one.
 
-Measured with `scripts/rig/probe-claude-ready.js` against claude 2.1.237, verdict
-taken from **"did a turn start"** (the screen cannot tell a typed line from a
-submitted one — that is why this survived):
+The marker is a registry field (`readiness.composer`), the rule is pure
+(`lib/agent-ready.js`), and `pty-worker.js` applies it. **Codex deliberately declares
+none** — an unmeasured marker is what #143 shipped — and undeclared means *ready
+immediately*.
 
-| | run 1 | run 2 |
-|---|---|---|
-| bash prompt | 3.3s | 3.3s |
-| `claude` typed | 3.7s | 3.7s |
-| **composer caret** | **5.0s** | **6.1s** |
+- **The scan does not start until the launch command has been written.** Before that the
+  PTY shows the *shell*, and `❯` is the default prompt glyph of starship, pure and several
+  oh-my-posh themes.
+- **A session with no `autoCommand` is never gated at all** — it is a shell until you type
+  something, and gating it would block the very submit that types `claude`.
+- **It can never wedge:** any hook forces it ready; a **45s fallback**
+  (`WT_READY_FALLBACK_MS`) covers `command not found` or a crash on launch; a plain shell
+  and every unknown agent are ready from birth; `server.js`, `POST /api/sessions` and the
+  companion all read a **missing** field as ready, so an older worker never refuses a
+  submit. The fallback is a **ceiling, not a detector**.
+- **A restored session is NOT seeded from its scrollback.** Restore spawns a fresh shell
+  and re-runs `claude --resume <id>`, which boots *slower* than a cold start; seeding from
+  the old scrollback (which still holds the previous life's marker) marked every restored
+  session ready at t=0 and killed the gate after every cold restart.
+- **The live `/`-line is gated too**, not just submit — it writes bytes as you type, so a
+  `/co` typed in the first seconds landed on bash's command line and the worker then typed
+  `claude --resume …` onto the same line, running `/coclaude --resume …`.
+- The client gates **submit only** — typing is untouched, the text stays in the box, and it
+  is **not** auto-sent on ready, because firing a prompt somebody was still editing is its
+  own way to lose their words.
+- **`app.html` is gated too (#263)**, from two sources: the pushed
+  `{type:'agentReady', id}` notify event (a Set — readiness only goes false -> true) and
+  the sidebar row for peers, since `connectNotify` opens one socket to this host only.
+  **The refusal re-reads the sidebar**, so the press that was refused is what corrects a
+  stale answer, and the **Send button is deliberately NOT disabled** — a disabled button
+  cannot ask for fresh data.
+- **Known gap:** the latch is one-way and does not reset when the agent **exits** back to
+  its shell (`/exit`, Ctrl-D, a crashed TUI). That session keeps reporting ready, so a
+  later submit reaches bash. The client's Set mirrors the worker's latch, so it is wrong in
+  exactly the same cases and no others; fixing it belongs in the worker, the only component
+  that sees the bytes.
 
-`submit before the caret -> NO turn started, bash printed "command not found"`
-`submit after  the caret -> a turn started`
+### The readiness marker is `❯` + U+00A0, and the bare caret was a real bug (#190)
 
-**That 1.1s spread on ONE machine is the whole argument for a marker over a
-timer.** A timer tuned to the fast boot eats prompts on the slow one; one tuned to
-the slow boot makes every session feel broken.
+Measured on claude 2.1.251, the composer writes the caret followed by **U+00A0 NO-BREAK
+SPACE** — a 5-byte marker, well inside `lib/agent-ready.js`'s `CARRY_BYTES`. It was not a
+tidy-up: **Claude's folder-trust dialog draws the same `❯` as its selection cursor**, so
+the latch flipped on a session parked at a *selector*, published it ready, and cleared the
+client to submit into it. Every alternative candidate died in measurement — `⏵⏵` is
+mode-dependent, the `───` rule is drawn by the trust dialog too, `Try` is a rotating
+placeholder, and `agents` is truncated away at 52 columns (a phone-only regression of
+exactly the #146 shape).
 
-The marker is a **registry field** (`lib/agents.js` → `readiness.composer`), the
-rule is pure (`lib/agent-ready.js`), and `pty-worker.js` applies it where bytes
-meet the PTY — the same shape as submit and interrupt. **Codex deliberately
-declares none**: its candidate has not been measured against a real boot, and an
-unmeasured marker is exactly what #143 shipped. Undeclared means *ready
-immediately* — today's behaviour, unchanged.
-
-**The scan does not start until the launch command has been written.** Before
-that the PTY is showing the *shell*, and `❯` is the default prompt glyph of
-starship, pure and several oh-my-posh themes — on such a box the latch would flip
-before the agent was even launched and the gate would silently no-op. A session
-with **no** `autoCommand` is never gated at all: it is a shell until you type
-something, and gating it would block the very submit that types `claude`.
-
-**It can never wedge**, because a session stuck on "starting" would be worse than
-the bug: any hook forces it ready; a **45s fallback** (`WT_READY_FALLBACK_MS`)
-forces it if no marker ever arrives, which is the only thing that covers `claude:
-command not found` or a crash on launch; a plain shell and every unknown agent are
-ready from birth; and `server.js`, `POST /api/sessions` and the companion all read
-a missing field as **ready**, so an older worker or an older server never refuses a
-submit. The fallback is a **ceiling, not a detector** — the marker is still the
-signal, and 45s sits far above the measured 5–6s boot so it cannot race a
-slow-but-working start.
-
-> **A restored session is NOT seeded from its scrollback**, and the first cut of
-> this got it backwards. Restore does not reattach anything: it spawns a **fresh
-> shell** and re-runs `claude --resume <id>`, which boots *slower* than a cold
-> start. Seeding from the old scrollback — which still holds the previous life's
-> marker — marked every restored session ready at t=0, so the gate was dead after
-> every cold restart, including the one this change itself needs to deploy.
-
-> **Two known gaps, both recorded rather than guessed at.**
->
-> 1. The latch is one-way and does not reset when the agent **exits** back to its
->    shell (`/exit`, Ctrl-D, a crashed TUI). That session keeps reporting ready, so
->    a later submit reaches bash — #147 again, further along.
-> 2. `❯` is also the default PS1 of starship, pure and some oh-my-posh themes.
->    Arming after the launch write stops the shell's *first* prompt from counting,
->    but not one printed straight after a launch that **failed** — there the latch
->    flips in milliseconds and never reaches the 45s fallback. **Measured
->    2026-08-20: not live on this fleet** — Git Bash's PS1 ends in `$` and a failed
->    launch prints `bash: …: command not found`.
->
-> Gap 2 is **narrowed by #190** — those themes print `❯` + an ordinary U+0020,
-> which the new marker rejects. **Inferred, NOT measured:** no such theme was run,
-> because none is installed on this fleet. By this repo's own standard that is a
-> reasoned expectation, not a captured fact. Gap 1 stands unchanged.
-
-### The marker is `❯` + U+00A0, and the bare caret was a real bug (#190)
-
-> **It is a dialog FAMILY, not one dialog.** Review of PR #202 measured a THIRD
-> sibling while checking the marker: opening a fresh cwd under a checkout that has
-> a `CLAUDE.md` parks on **"Allow external CLAUDE.md file imports?"** — the same
-> shape exactly (unnumbered, `❯` then CHA, no spaces anywhere, `Enter to confirm`,
-> and a **refusing default row**: "No, disable external imports"). The new marker
-> correctly does not match it; **the old bare caret did**, so #202 fixes this one
-> too, un-asked.
->
-> **This breaks the "trust is inherited" reassurance.** Folder trust really is
-> inherited — nothing under a trusted `C:/dev` raises the TRUST prompt — but that
-> is trust-specific. A descendant of a trusted directory can still park on the
-> imports selector. So "the tree is trusted" is **not** the same as "no selector
-> will block a new session", and any test that relies on the first to mean the
-> second is wrong. When #194 Part 1 builds the surfacing, target the family by
-> shape (`❯` + CHA, no spaces, `Enter to confirm`), not the trust prompt alone.
-
-
-The measurement the block above deferred is done (`scripts/rig/probe-trust-prompt.js`,
-claude **2.1.251**). **The composer writes the caret followed by U+00A0 NO-BREAK SPACE.**
-That is a 5-byte marker, well inside `lib/agent-ready.js`'s `CARRY_BYTES`, so nothing
-there changes.
-
-It was not a tidy-up. **Claude's folder-trust dialog draws the same `❯` as its selection
-cursor**, so the latch flipped on a session parked at a *selector*, published it ready,
-and cleared the client to submit into it.
-
-| case | `❯` | `❯`+NBSP | `⏵⏵` | `───` | `Try` | `agents` |
-|---|---|---|---|---|---|---|
-| composer, 120 cols | yes | **YES** | yes | yes | yes | yes |
-| composer, 52 cols | yes | **YES** | yes | yes | yes | **no** |
-| composer, `--permission-mode default` / `plan` | yes | **YES** | **no** | yes | yes | yes |
-| trust dialog, 120 / 52 | yes | **no** | no | yes | no | no |
-| bare shell | no | **no** | no | no | no | no |
-
-Every alternative died in that table, which is why none is declared: `⏵⏵` is
-**mode-dependent** (absent in default mode; plan mode prints `⏸`), the `───` rule is
-drawn by the trust dialog too, `Try` is the rotating empty-composer placeholder, and
-`agents` is **truncated away at 52 columns** — a phone-only regression of exactly the
-#146 shape. `effort` matched only via this fleet's own statusLine script.
-
-**A restored session still latches**, measured rather than assumed, because the opposite
-answer would have been worse than the bug: `claude --resume <id>` prints the marker
-~1.1s after the launch write at both widths, confirmed through a real cold restart. A
-resume against a **missing** conversation prints `No conversation found with session ID:
-…` and returns to the shell with **no caret at all**, so the 45s fallback still owns
-that case — unchanged in width, since the bare caret did not match there either.
-
-> **Write it as escapes; keep the source ASCII-only.** A literal U+00A0 is invisible in
-> a diff and is normalised to an ordinary space in transit — four attempts to write the
-> escape form into the probe silently came back as a literal, and the marker line itself
-> landed as a literal on the first edit. Nothing non-ASCII means nothing to normalise.
->
-> **And the NEGATIVE test is the load-bearing one.** If normalisation hits the rule and
-> a literal in the test together, the positive assertion still passes — both sides became
-> ordinary spaces. Only *"must NOT match `❯` + U+0020"* goes red. Demonstrated, not
-> reasoned: `tests/composer-marker.spec.js` builds both characters with
-> `String.fromCodePoint` for exactly this reason. **Version drift is uncatchable by any
-> unit test** — a claude release that changes the glyph or the spacing needs a rig
-> re-probe.
+> **Write it as escapes; keep the source ASCII-only.** A literal U+00A0 is invisible in a
+> diff and is normalised to an ordinary space in transit. **And the NEGATIVE test is the
+> load-bearing one:** if normalisation hits the rule and the test together, the positive
+> assertion still passes — only *"must NOT match `❯` + U+0020"* goes red.
+> `tests/composer-marker.spec.js` builds both characters with `String.fromCodePoint` for
+> exactly this reason. A claude release that changes the glyph or the spacing needs a rig
+> re-probe; no unit test can catch that.
 
 ### Claude's folder-trust dialog is a THIRD layout, and a submit there KILLS the agent (#190)
 
 Neither #19's compact (digits) nor its side-by-side (a preview box). It is an
-**unnumbered, arrow-driven list**, and **the default row is the destructive one**:
+**unnumbered, arrow-driven list whose default row is the destructive one** (`❯ No, exit`),
+so `↓` then Enter answers it. Driven, every other candidate **exited to bash** — a digit, a
+bare Enter, and the reported case: **a real prompt followed by its submit CR**, where the
+trailing CR confirms `No, exit` and **the agent is gone**, so the *next* prompt goes to the
+shell. `--dangerously-skip-permissions` does not suppress it.
 
-```
- Quick safety check: Is this a project you created or one you trust? …
- ❯ No, exit
-   Yes, I trust this folder
- Enter to confirm · Esc to cancel
-```
+**The dialog emits NO SPACES.** Every word is positioned with CHA
+(`\e[2GQuick\e[8Gsafety\e[15Gcheck:…`), so an ANSI-stripped stream reads
+`Quicksafetycheck:Isthis…` and **any matcher must reconstruct columns first**. The longest
+contiguous literal in the whole dialog is one word. No alt-screen and no distinguishing DEC
+mode accompanies it.
 
-So `↓` then Enter answers it — verdict from `hasTrustDialogAccepted` on disk plus "did a
-turn start", never the screen. Driven, every other candidate **exited to bash**: a digit
-(there are none to press), a bare Enter, and — the reported case — **a real prompt
-followed by its submit CR**. That last one is why this is worse than #190's own premise:
-the words are not merely eaten, the trailing CR confirms `No, exit` and **the agent is
-gone**, so the *next* prompt goes to the shell. `--dangerously-skip-permissions` does not
-suppress it.
+**It is a dialog FAMILY, not one dialog.** A fresh cwd under a checkout that has a
+`CLAUDE.md` parks on *"Allow external CLAUDE.md file imports?"* — same shape exactly
+(unnumbered, `❯` then CHA, no spaces, `Enter to confirm`, a refusing default row). So
+**"the tree is trusted" is NOT "no selector will block a new session"**: folder trust is
+inherited by descendants, but that is trust-specific. Target the family by **shape** (`❯` +
+CHA, no spaces, `Enter to confirm`), never the trust prompt alone.
 
-**The dialog emits NO SPACES.** Every word is positioned with CHA — the bytes are
-`\e[2GQuick\e[8Gsafety\e[15Gcheck:\e[22GIs\e[25Gthis…` — so an ANSI-stripped stream reads
-`Quicksafetycheck:Isthis…` and **any matcher must reconstruct columns first**. The
-longest contiguous literal in the whole dialog is one word. No alt-screen and no
-distinguishing DEC mode accompany it, so #179's finding holds: there is nothing to key on
-but the text.
+> **Trust is INHERITED, which is a hard constraint on ever testing this:** an ancestor of
+> the scratch parent is already trusted, so **nothing `scripts/scratch-dirs.js` creates can
+> ever show the prompt** — the rig's own cwd included. A reproduction needs a cwd with no
+> trusted ancestor. And `hasTrustDialogAccepted: false` does **not** mean untrusted.
 
-> **Trust is INHERITED by descendants**, which is a hard constraint on ever testing this:
-> an ancestor of the scratch parent is already trusted, so **nothing `scripts/scratch-dirs.js`
-> creates can ever show the prompt** — the rig's own cwd included. A reproduction needs a
-> cwd with no trusted ancestor. And `hasTrustDialogAccepted: false` does **not** mean
-> untrusted: 18 of 87 entries were false, including directories in daily use.
+**Deliberately NOT fixed:** detecting the dialog, withholding the 45s fallback, surfacing
+it in the chat lens, auto-answering. #190 and #194 Part 1 both want the surfacing built
+once, and the right design is **refuse-and-explain rather than delay** — a false refusal
+costs a message, a false permit costs the agent.
 
-**Deliberately NOT fixed here:** detecting the dialog, withholding the 45s fallback,
-surfacing it in the chat lens, auto-answering. #190 and #194 Part 1 both want the
-surfacing built once. The right design is **refuse-and-explain** rather than delay — a
-false refusal costs a message, a false permit costs the agent.
+### A CLIENT gate does not cover a WORKER-originated write (#137/#138 x #147)
 
-The client gates **submit only** — typing is untouched and the text stays in the
-box. It is **not** auto-sent on ready, on purpose: firing a prompt somebody was
-still editing is its own way to lose their words.
+The gate above lives in the client, which is right for a *prompt* — a person typed it. But
+the worker writes into a PTY on its own account too. `fireAutoResume` ends in
+`submitLine(s, 'continue')`, and `armAutoResumeTimer` runs on the **restore** path with
+`Math.max(0, fireAt - Date.now())` — **zero** for a window that turned over while the
+worker was down. So a cold restart of a capped session fired while `claude --resume <id>`
+was still booting and `continue` landed on **bash**: #147 again, produced by the feature
+meant to rescue the session, and the `status === 'working'` guard cannot see it because **a
+booting session is not `working`.**
 
-The **live `/`-line is gated too**, not just submit. That path writes bytes *as
-you type*, so a `/co` typed in the first seconds landed on bash's command line and
-the worker then typed `claude --resume …` onto the same line — running
-`/coclaude --resume …`, which starts no agent at all. Gating submit alone left a
-failure worse than the one being fixed.
-
-> **DONE (#263) — and the deferral's stated reason was false by the time it was
-> written.** This read *"`app.html` is ungated. It keeps no session-state map to hang
-> `agentReady` on"*; `renderComposeCommands` had been doing exactly that lookup since
-> #188, cluster-safe (matching on server as well as id, #180), to grey out the quick-
-> commands button. So the web client correctly refused to fire a *slash command* into a
-> booting agent and cheerfully submitted a *prompt* into one. **Check the claim before
-> you cost the work** — the same lesson as #206's "no single input path", which was also
-> a budget written from a premise nobody had re-read.
->
-> **Two sources, because the sidebar payload alone would WEDGE.** Nothing refreshes it
-> on a timer — it is event-driven — so `agentReady:false` could outlive the boot it
-> describes. The server already PUSHES `{type:'agentReady', id}` on the notify socket
-> (that push exists because "a poll interval here is a submit that stays refused for no
-> reason"), and readiness only ever goes false → true, so the live half is a Set. The
-> push reaches **local sessions only** — `connectNotify` opens one socket, to this host,
-> and a peer's worker events never cross the cluster proxy — so a peer falls back to the
-> row, and **the refusal re-reads the sidebar**: the press that was refused is what
-> corrects a stale answer, which is this repo's *verify, don't predict* rule (#179)
-> arriving on the client.
->
-> **The Send button is deliberately NOT disabled**, which is where this parts company
-> with the companion's `_canSend`. The companion holds a live per-session state stream;
-> here the negative can come from a payload with nothing scheduled to refresh it, and a
-> **disabled button cannot ask for fresh data** — the press is what triggers the re-read.
-> Disabling it would turn a stale `false` into a compose bar that is permanently dead,
-> which is worse than the bug being fixed.
->
-> **The client's latch inherits gap 1 above and cannot be worse than it.** The worker's
-> latch is one-way and does not reset when an agent exits back to its shell, so a client
-> Set that mirrors it is wrong in exactly the same cases and no others — an agent that
-> `/exit`s leaves both believing it is up. Fixing that belongs in the worker, which is the
-> only component that sees the bytes; nothing here should try to guess it independently.
-
-### A CLIENT gate does not cover a WORKER-originated write (#137/#138 × #147)
-
-The gate above lives in the client, which is right for a *prompt* — a person typed
-it. But the worker writes into a PTY on its own account too, and none of those
-sites consulted readiness. `fireAutoResume` (the 5h auto-resume, #137/#138) ends in
-`submitLine(s, 'continue')`, and `armAutoResumeTimer` runs on the **restore** path
-with `Math.max(0, fireAt - Date.now())` — **zero** for a window that turned over
-while the worker was down. So a cold restart of a capped session re-armed and fired
-while `claude --resume <id>` was still booting, which boots *slower* than a cold
-start: `continue` landed on **bash**. That is #147 again, produced by the feature
-meant to rescue the session, and the `status === 'working'` guard cannot see it —
-**a booting session is not `working`.**
-
-Neither change has this defect alone; the merge of the two creates it. **Any new
-worker-originated write must check `session._ready`** and **defer**, never skip: the
-window is real and the session still needs its nudge. Check it *before* the one-shot
-(`autoResumeFiredForResetAt`) is consumed — `armAutoResumeTimer` refuses to re-arm on
-a consumed one — and let the retry ride `session._autoResumeTimer` so a dead PTY or a
-returning user cancels it like any other armed resume. The wait needs no ceiling of
-its own: #147's 45s fallback is armed for **every** session at spawn.
+**Any new worker-originated write must check `session._ready`** and **defer, never skip** —
+the session still needs its nudge. Check it *before* the one-shot
+(`autoResumeFiredForResetAt`) is consumed, and let the retry ride `session._autoResumeTimer`
+so a dead PTY or a returning user cancels it like any other armed resume.
 
 ### A detector's phrase must not be in our own source (#138)
 
-The cap-prompt detector scans **all** agent-session PTY output and answers by
-**writing a keystroke**. Its phrase was captured verbatim into a `lib/agents.js`
-comment and assembled in `tests/reset-resume.spec.js` — so a Claude session working
-in this checkout that `cat`'d, grepped or diffed either file matched, typed a stray
-`1` into its composer and recorded a cap block that never happened. **A match that
-causes an action is not a reading; treat "our own repo prints this" as a live input.**
-The rule is now structural and pure (`lib/usage-limit.js` `matchUsageLimitPrompt`):
-the sentence must **start** its line as a numbered option and have a sibling option
-**above or below** it — above *or* below, because "stop and wait" is the last option
-in a reordered render. The registry declares only the sentence.
+The cap-prompt detector scans **all** agent-session PTY output and answers by **writing a
+keystroke**. Its phrase was once captured verbatim into a `lib/agents.js` comment and
+assembled in a test, so a Claude session that `cat`'d, grepped or diffed either file
+matched, typed a stray `1` into its composer and recorded a cap block that never happened.
+**A match that causes an action is not a reading; treat "our own repo prints this" as a
+live input.** The rule is now structural and pure (`lib/usage-limit.js`
+`matchUsageLimitPrompt`): the sentence must **start** its line as a numbered option and
+have a sibling option **above or below** it. The registry declares only the sentence.
 
 ### A submit is VERIFIED, never predicted (#179) — and alt-screen is not the signal
 
-`/usage`, a slash menu, a permission prompt, a crashed TUI back at bash: each swallows
-a prompt as navigation, so the compose bar submits, nothing appears, and **the words are
-gone with no error anywhere**. It is #147's failure class arriving later — #147 solved
-*"the agent is not up YET"*, this is *"the agent is not at its composer ANY MORE"*, which
-`lib/agent-ready.js` already recorded as its own one-way-latch limitation.
+`/usage`, a slash menu, a permission prompt, a crashed TUI back at bash: each swallows a
+prompt as navigation, so the compose bar submits, nothing appears, and **the words are gone
+with no error anywhere.** It is #147's failure class arriving later — *the agent is not at
+its composer ANY MORE*.
 
-**#179 proposed alt-screen (`ESC[?1049h`/`l`) as the general blocked marker and said, in
-bold, to measure it first. Measured, it is WRONG.** Two probes on claude **2.1.250**
-(`scripts/rig/probe-altscreen-block.js`, `scripts/rig/probe-blocked-markers.js`),
-verdicts taken from *did a turn start* because the screen cannot tell typed from
-submitted:
-
-| state | DEC modes on entering | a submit here |
-|---|---|---|
-| ordinary turn (control) | none | **starts a turn** |
-| `/usage` | `?25l ?25h ?25l` — cursor only | **no turn** |
-| slash menu open | `?25l ?25h` | **no turn** |
-| Agent View (`←`) | mouse off, `?2004l`, `?1004`, `?2031`, `?9001` | dispatches a **NEW session** |
-
-**Not one blocking state emitted `ESC[?1049h`** — including Agent View, which the docs
-and our own notes called always-fullscreen (see #146 below). Nothing else lines up
-either: cursor-hide catches `/usage` but not the slash menu, and it toggles during
-ordinary repaints, so keying on it would refuse legitimate submits. **So no marker is
-declared, deliberately** — an unmeasured marker is what #143 shipped.
+**#179 proposed alt-screen (`ESC[?1049h`) as the general blocked marker. Measured, it is
+WRONG: not one blocking state emits it**, Agent View included. Nothing else lines up
+either — cursor-hide catches `/usage` but not the slash menu and toggles during ordinary
+repaints. **So no marker is declared, deliberately.**
 
 **The rule is inverted instead, and it is one #55 already made law: submit means a turn
 actually starts.** Do not predict whether the PTY can accept a prompt — write it, then
 check that it landed. `lib/submit-confirm.js` holds the pure rules, `lib/agents.js`
-declares `submitConfirm: { timeoutMs }`, `pty-worker.js` arms the clock **when the
-submit CR goes out** (not when the frame arrives — the CR is withheld for `submit.gapMs`)
-and stops it on the first hook. **Any** hook: what is being separated is *the agent is
-doing something* from *the TUI ate the keystrokes*, and that must not depend on which
-event a given prompt shape happens to produce. A timeout publishes `submitUnconfirmed`,
-pushed and never persisted — it is a one-shot fact addressed to whoever just typed.
+declares `submitConfirm: { timeoutMs }`, `pty-worker.js` arms the clock **when the submit
+CR goes out** (not when the frame arrives — the CR is withheld for `submit.gapMs`) and
+stops it on the first hook. **Any** hook: what is being separated is *the agent is doing
+something* from *the TUI ate the keystrokes*, and that must not depend on which event a
+given prompt shape happens to produce. A timeout publishes `submitUnconfirmed`, pushed and
+never persisted — a one-shot fact addressed to whoever just typed.
 
-**Every gate fails CLOSED, because a false alarm is worse than the silence it replaces**
-— it would teach you to distrust the notice on the one occasion it is true. Not armed
-when: the provider declares nothing (Codex, plain shells — today's behaviour exactly);
-the session has never delivered a hook (`hookStatus`, the same proof `isClaudeSession()`
-uses — so a box without hooks installed is untouched); the write came from the worker
-itself (auto-resume's `continue`, the API-error ladder — no draft to give back); the
-session is **already `working`** (the composer QUEUES behind a running turn and need not
-report it for minutes); the session is **mid-compaction** (#129 measured that Claude
-reports *idle* part-way through a `/compact`, so the status gate cannot see it and no
-hook fires until it finishes); **Esc arrives inside the window** (Claude fires no hook on
-an interrupt, and the session is still `idle` there, so the interrupt gate could not see
-it either); or the line **starts with `/`** — `/usage` legitimately starts no turn, and
-flagging it would fire on exactly the views the user opened on purpose.
+**Every gate fails CLOSED, because a false alarm is worse than the silence it replaces** —
+it would teach you to distrust the notice on the one occasion it is true. Not armed when:
+the provider declares nothing (Codex, plain shells); the session has never delivered a hook
+(`hookStatus`, the same proof `isClaudeSession()` uses, so a box without hooks installed is
+untouched); the write came from the worker itself (no draft to give back); the session is
+already **`working`** (the composer queues behind a running turn); the session is
+**mid-compaction** (#129 — Claude reports *idle* part-way through a `/compact`); **Esc
+arrives inside the window** (no hook fires on an interrupt and the session is still idle);
+or the line **starts with `/`** (`/usage` legitimately starts no turn).
 
-That last one is why the line is accumulated from the bytes written rather than read off
-the submit frame: a live `/`-line is streamed as you type (#55), so its submit frame is a
-**bare CR** carrying no text at all. Two details of that accumulation are load-bearing,
-and both were review findings: **the cap keeps the HEAD** (slicing the tail threw the
-leading `/` away, so a long slash command read as a prompt and got watched), and **a
-paste is not typing** — its body is dropped, because the images-only submit (#87) pastes
-a file PATH, and a POSIX `/home/...` was reading as a slash command while a Windows
-`C:\\Users\\...` was not. The same action, two answers, decided by the platform.
+That last gate is why the line is accumulated from the **bytes written** rather than read
+off the submit frame: a live `/`-line is streamed as you type, so its submit frame is a
+**bare CR** carrying no text. Two details are load-bearing: **the cap keeps the HEAD**
+(slicing the tail threw the leading `/` away, so a long slash command read as a prompt and
+got watched), and **a paste is not typing** — its body is dropped, because #87's
+images-only submit pastes a file PATH and a POSIX `/home/...` read as a slash command while
+a Windows `C:\Users\...` did not.
 
 **The clients hold the words, and they EXPIRE.** The event carries no text, so recovery is
-each client's own copy — restored only into an empty compose bar, only for a report
-stamped at or after that client's own last submit, and only inside a grace window,
-because **silence is success**: the worker reports inside 8s or never, so a prompt still
-pending long after that provably landed. Without those last two, a report stranded from
-before a screen was open replayed against a fresh, successful prompt — banner up, words
-back in the box, and the obvious next move is to send them a second time.
+each client's own copy — restored only into an **empty** compose bar, only for a report
+stamped at or after that client's own last submit, and only inside a grace window, because
+**silence is success**: the worker reports inside 8s or never, so a prompt still pending
+long after that provably landed. Without the last two, a report stranded from before a
+screen was open replayed against a fresh, successful prompt — banner up, words back in the
+box, and the obvious next move is to send them a second time.
 
 ### Agent View (`←`) is NOT alt-screen, and it REDIRECTS your next prompt (#146)
 
 Anthropic's fullscreen doc says agent view always renders on the alternate screen
 "regardless of the `tui` setting". **On claude 2.1.250 it does not** — measured twice,
-independently: entering it emits **zero** `?1049` toggles, no DECSTBM and no ED. It is
-an ordinary inline render into the normal buffer (5602 bytes at 120 columns, 3992 at 52).
-So none of the #81-class scroll-region machinery is involved, and there is no fullscreen
-fragment problem to fix.
+independently: entering it emits **zero** `?1049` toggles, no DECSTBM and no ED. It is an
+ordinary inline render into the normal buffer, so none of the #81-class scroll-region
+machinery is involved and there is no fullscreen fragment problem to fix.
 
-**The captures are deliberately NOT checked in.** `claude agents` lists every Claude
-session on the machine by name and one-line summary, so an Agent View frame from this
-fleet carries real client and project names into a PUBLIC repo. Re-capture with
-`scripts/rig/probe-altscreen-block.js` when it is needed; keep the numbers, not the bytes.
+**The real hazard is behavioural.** `←` on an empty prompt line backgrounds your
+conversation, and the composer you then face is Agent View's **dispatch** box: a prompt
+typed there starts a **new background session** instead of reaching the conversation you
+were in. Worse than swallowed — the words run somewhere you did not choose, and it is
+exactly what #179's verifier catches, since the dispatched session's hooks are not this
+session's. The way back **is** on screen (`esc returns`), which is the part the original
+report could not see at phone width.
 
-**The real hazard is behavioural, not visual.** `←` on an empty prompt line backgrounds
-your conversation, and the composer you then face is Agent View's **dispatch** box:
-measured, a prompt typed there starts a **new background session** instead of reaching
-the conversation you were in. That is worse than swallowed — the words run somewhere you
-did not choose. It is also exactly what #179's verifier catches, since the dispatched
-session's hooks are not this session's.
+**The rendering fault was WIDTH, and it was ours.** Claude renders perfectly for the width
+it is told about (at 52 columns it truncates every row itself; nothing wraps). A viewer
+NARROWER than the PTY then wraps every long line — rows clipped, sections overprinting, a
+dead region below. Agent View is simply the densest full-width screen Claude draws, so it
+shows the fault first; nothing about it is special.
 
-The way back **is** on screen (`Your conversation moved to the background — enter opens
-it · esc returns`), which is the part the original report could not see at phone width.
-
-**The rendering fault was WIDTH, and it was ours.** Two captures settle it:
-
-| PTY width when Agent View was entered | result |
-|---|---|
-| 120 cols (the worker default) | 74 lines, up to ~120 columns wide |
-| 52 cols (a phone), set by a real resize first | **max line exactly 52** — Claude truncates every row itself; nothing wraps |
-
-Claude renders perfectly for the width it is told about. A viewer NARROWER than the PTY
-then wraps every long line — rows clipped at the right edge, sections overprinting, a dead
-region below, which is the reported screenshot exactly. Agent View is simply the densest
-full-width screen Claude draws, so it shows the fault first; nothing about it is special.
-
-**Why the phone had the wrong width: the PTY size was LAST-WRITER-WINS.** `server.js`
-applied every resize message immediately and neither it nor the worker tracked per-viewer
-sizes, so a desktop relaying out (window resize, sidebar toggle, compose bar growing)
-stole the columns back seconds after a phone attached. The rule is now **the smallest
-ACTIVE viewer wins** (`lib/terminal-size.js`, applied in `server.js`): a terminal smaller
-than its viewer only wastes space, while one larger is unreadable, and only the second
-loses information. A background socket has no vote, so a phone in a pocket cannot hold a
-desktop at phone width — and that is what makes it self-healing. **Server-side only, so it
-hot-reloads**; the worker's `resizeSession` is unchanged.
-
-Two review findings worth carrying. The negotiated size is cached **only once the worker
-has accepted it**: writing it optimistically left the server believing a size a rejected
-resize never applied, and every identical relayout afterwards was then swallowed by the
-dedupe — #146's own symptom, reintroduced by #146's fix. And a viewer that arrives
-without changing the answer still gets a **nudge** (`rows-1`, then `rows`), because
-`app.html`'s own `nudgeRedraw` cannot work through a `min()` that collapses both halves of
-its flick to the same value. `tests/terminal-size.spec.js`
+**The PTY size was LAST-WRITER-WINS**, so a desktop relaying out stole the columns back
+seconds after a phone attached. The rule is now **the smallest ACTIVE viewer wins**
+(`lib/terminal-size.js`, applied in `server.js`, which owns the sockets — so it
+**hot-reloads**, and the worker only ever sees a count): a terminal smaller than its viewer
+only wastes space, while one larger is unreadable, and only the second loses information. A
+**background socket has no vote**, so a phone in a pocket cannot hold a desktop at phone
+width — that is what makes it self-healing. Two review findings worth carrying: the
+negotiated size is cached **only once the worker has accepted it** (writing it
+optimistically left the server believing a size a rejected resize never applied, and every
+identical relayout was then swallowed by the dedupe — #146's own symptom, reintroduced by
+#146's fix), and a viewer that arrives without changing the answer still gets a **nudge**
+(`rows-1`, then `rows`), because `app.html`'s `nudgeRedraw` cannot work through a `min()`
+that collapses both halves of its flick to the same value. `tests/terminal-size.spec.js`
 asks the PTY itself with `stty size` rather than trusting the message it sent.
 
-**Chat lens: nothing to render, and that is a structural answer, not a deferral.** Agent
-View is TUI paint and writes nothing to the transcript — the same finding as #131. The
-only honest route is `claude agents --json`, which is a separate feature, not a rendering
-fix.
+**Chat lens: nothing to render**, and that is a structural answer, not a deferral — Agent
+View is TUI paint and writes nothing to the transcript (the same finding as #131). The only
+honest route is `claude agents --json`, a separate feature.
+
+**Agent View captures are deliberately NOT checked in:** `claude agents` lists every Claude
+session on the machine by name and one-line summary, and this repo is public. Keep the
+numbers, not the bytes.
 
 ### `app.html` is ONE CLASSIC SCRIPT: `window.f = () => f()` is infinite recursion
 
@@ -1287,252 +516,304 @@ innocent-looking line that exposes it for a test:
 window.showSubmitUnconfirmed = () => showSubmitUnconfirmed();   // NO
 ```
 
-overwrites the global binding with the arrow, and the arrow's body then resolves to
-**itself**. The first call blows the stack, the script dies where it stands, and the
-whole app is inert — empty sidebar, `(no session)`, every click timing out. Write
-`window.f = f;`, or just rely on the declaration already being global. (A wrapper is
-only safe when it names something ELSE: `window.__setAutoScroll = (v) => { autoScroll = v; }`
-is fine.)
+overwrites the global binding with the arrow, whose body then resolves to **itself**. The
+first call blows the stack, the script dies where it stands, and the whole app is inert —
+empty sidebar, `(no session)`, every click timing out. Write `window.f = f;`, or rely on
+the declaration already being global. (A wrapper is only safe when it names something
+ELSE: `window.__setAutoScroll = (v) => { autoScroll = v; }` is fine.)
 
 **The methodology lesson is the bigger one.** This shipped past a LOCAL full-suite run
-that reported *1346 passed, 0 failed*, and was caught by CI failing **73** UI specs —
-then reproduced in ten seconds by loading the page in a real browser and reading
-`pageerror`. A green suite is evidence, not proof: when a change touches `app.html`,
-**load the page and check the console** before believing the run. The rig makes that
-cheap and safe — `node scripts/rig/rig.js up`, then drive `http://127.0.0.1:7999`
-with a standalone Playwright script on a port the suite is not using.
+reporting *1346 passed, 0 failed*, and was caught by CI failing **73** UI specs — then
+reproduced in ten seconds by loading the page in a real browser and reading `pageerror`. A
+green suite is evidence, not proof: **when a change touches `app.html`, load the page and
+check the console** before believing the run. `node scripts/rig/rig.js up`, then drive
+`http://127.0.0.1:7999` with a standalone Playwright script on a port the suite is not
+using.
 
-## The chat lens's tail strip: "the last N rows" is the FURNITURE, not the screen (#194/#210)
+## Multi-Agent Support (Claude Code + Codex)
 
-The strip (#194 Part 1) shows the terminal's last few non-blank rows inside the chat
-lens, so a session parked on something chat has no bubble for is still visible. #179 is
-why it shows the screen rather than naming the state: **not one blocked state emits a
-distinguishing byte**, so a classifier for "blocked" is permanently incomplete.
+A session knows *which* AI CLI agent it runs. `agent` is a real, persisted session field:
+`'claude'`, `'codex'`, or `null` for a plain shell. **`null` is never coerced to
+`'claude'`.** Evidence and the full Codex empirics: `docs/findings/agents-codex.md`.
 
-**That thesis is right, and the first implementation read it too literally.** Claude ends
-every composer screen with a FIXED FOOTER — the composer box's bottom border, the mode
-hint, the status line, any update notice. "The last 4 non-blank rows" and "that footer"
-are therefore **the same thing by construction**, whatever happened above them. So the
-strip rendered four identical rows on every idle session, held ~90px of the chat view
-open to do it, and was least informative in exactly the state its own gate
-(`status != 'working'`) selects for. Reported from the phone as *"it always shows the
-status bar… not sure how effective it is"*.
+### The rule: one registry, no branching
 
-**The fix inverts what is recognised.** Recognise exactly ONE thing — the ordinary
-composer — and recognise it in order to **stay quiet**. A screen without that marker near
-its foot falls through to the tail as before, whether or not anyone has measured it, and
-an agent declaring no marker is never gated at all. **The failure direction is showing the
-terminal, never hiding it**, which is the opposite of a classifier's, so #179's argument
-does not apply to it. The strip appearing now MEANS something is on screen, instead of
-meaning nothing.
+Everything agent-specific lives in **`lib/agents.js`** — parser, transcript root,
+transcript-resolution strategy, subagent-trace support, label, colour, submit policy,
+readiness, submit confirmation. **Adding a CLI agent is one parser module + one registry
+entry.** If you find yourself writing `if (agent === 'codex')` in `server.js`,
+`pty-worker.js`, `app.html` or the companion, you are in the wrong file — add a field to
+the provider instead.
 
-**Say "a screen without the marker", not "every dialog".** The set that falls through is
-defined by the marker's absence, and only the screens in the table below were actually
-measured for it. **The tool-approval / AskUserQuestion selector was NOT** — no capture of
-one exists anywhere in this repo, and #190 established NBSP-absence for the trust dialog
-only. If that selector draws the composer within the window, the strip hides on a blocked
-screen. It is the least costly place for this gap to sit — a hook-driven wait already has
-#79's banner and the #19/#143 question overlay, so unlike the trust dialog the session is
-not invisible — but it is a gap, not a proof, and it needs a rig case before anyone claims
-otherwise.
+`GET /api/agents` serves the catalogue, so both clients render the picker, the per-agent
+tint and (since #210) the composer marker with **no client release** when an agent is added
+or renamed. The companion holds no agent table; neither does `app.html`.
 
-The marker is the one `lib/agents.js` already owns and #190 already measured (U+276F +
-U+00A0, and the folder-trust dialog draws the same caret WITHOUT it). It is **published
-on `GET /api/agents`** rather than retyped in Dart — the same arrangement the label and
-the colour use, and the same rule that keeps the companion holding no agent table. One
-definition now serves two jobs: the worker gates submits with it (#147), the companion
-tests the rendered screen with it. **That it survives rendering was measured, not
-assumed** — writing caret+NBSP into the vendored xterm and reading the row back through
-`getText()` returns code units `[10095, 160]`, so caret+U+0020 still fails to match.
+An **explicit** agent is authoritative: a session declared `claude` is never served a Codex
+transcript. Only a session with no recorded agent falls back to cross-provider discovery.
 
-**MEASURED** (`scripts/rig/probe-tail-strip.js` drives the real TUI;
-`tool/tail_strip_report.dart` renders each capture through the app's own xterm):
+### Codex facts (verified empirically — do not trust the docs)
 
-| screen | caret's distance above the last non-blank row |
-|---|---|
-| idle, 120 cols | **3** |
-| idle, 52 cols | **4** — a phone footer is a row taller |
-| slash menu, `/usa` | **9** — the BINDING case |
-| slash menu, `/usage` | 14 |
-| slash menu, bare `/` | 16 |
-| Agent View | 20 |
-| `/usage` panel | **no caret on screen at all** |
-| slash menu, `/zzzq` | 2 — nothing matches, so there is NO MENU |
+**Submit is CR, never LF — for every agent.** Both TUIs read raw mode where Enter is `\r`
+(0x0D); an `\n` inserts a newline in the prompt box and submits nothing.
 
-**The narrowed menu is what sets the ceiling, and measuring only the bare `/` would have
-missed it.** Bare `/` is the menu at its TALLEST — its ~16 entries are the only reason the
-caret sits far up the screen. Type a few characters, the list filters, and the caret comes
-back to 9. A first cut of the constant sat at 8 and cleared that by ONE row; review caught
-it, and the extra probe case is what turned an argument into a number.
+**Rollout transcripts** live at
+`~/.codex/sessions/YYYY/MM/DD/rollout-<iso>-<uuid>.jsonl` and are **not cwd-keyed** — `cwd`
+appears only in the first `session_meta` line (~8 KB; a naive 4 KB read truncates it
+mid-JSON). `session_id` **is** the rollout UUID. Tool calls are **one line each**,
+`function_call.arguments` is a JSON **string**, `custom_tool_call_output.output` is a JSON
+envelope needing unwrap, and `event_msg` lines restate `response_item` text — parse one or
+every turn doubles.
 
-So the measured bound is **[5, 8]** — at least the widest idle footer (4, plus a row for
-an update notice), strictly under the narrowed menu's 9 — and `kComposerScanRows = 7` is
-the balanced point inside it: three rows of headroom above, two of clearance below. The
-`/zzzq` row is not a counter-example: with nothing matching, Claude draws no menu at all
-and the screen IS an ordinary composer, where Enter submits normally.
+> **A Codex transcript path is DISCOVERED, never derived — so it must never be cached
+> forever.** Codex writes a **new rollout on every run**, and resolution is "the newest
+> rollout matching this cwd", so the correct answer changes while nothing about the
+> web-terminal session does. Claude is immune for two independent reasons (its path is a
+> pure derivation from cwd + conversation id, *and* its hooks re-stash it); Codex has
+> neither. The provider declares `transcriptPathStable` and a discovered path is re-derived
+> past a **10s TTL**. **Symptom to recognise:** a live, correct terminal next to a chat lens
+> showing another day is a *resolution* bug, not a rendering one — and `cwd` alone is not a
+> session identity when several rollouts share a directory.
 
-**The captures are deliberately NOT checked in** — #146's rule: an Agent View frame names
-every Claude session on the machine and this repo is public, and the idle frame carries a
-status line naming a project and a user. Keep the numbers, drop the bytes.
+> **A conversation needs an identity ON THE WIRE, or no cache can know it is stale.** That
+> one gap produced the same bug twice, at two layers: the server cached a resolved path with
+> nothing to invalidate it, then the client cached the turns themselves. The id is derived
+> once in the registry (`conversationIdFromPath` — Claude's is the basename, Codex's is the
+> trailing UUID of `rollout-<iso>-<uuid>.jsonl`; match it as a UUID, the ISO stamp has
+> dashes too) and published as **`agentSessionId`**. **Do not fold it into
+> `claudeSessionId`** however tempting: `app.html` shows the Fork button on that field and
+> forks with `claude --resume <id>`. **Symptom:** terminal live, chat old — check the API
+> first, because it decides whether you are chasing a server bug or a client one.
 
-**Two findings that each cost a wrong answer first, both kept because they generalise.**
+**Usage metrics.** Claude *pushes* its status line to `POST /api/claude-status`; Codex
+*records* the same numbers in its rollout, so a provider may expose `readMetrics(tail)` and
+the server fills the identical `metrics` shape. Three traps: `total_token_usage.total_tokens`
+is the session's **cumulative** spend (millions — using it reports thousands of percent), so
+context occupancy is `last_token_usage.input_tokens`; `cached_input_tokens` is a **subset**
+of `input_tokens`, not an addition; and the 5h/7d windows are matched by **`window_minutes`
+(300 / 10080)**, never by `primary`/`secondary` order. `turn_context` (model/effort) is
+written once per **user** turn, so a long agent turn buries it above the tail — the server
+reads head+tail.
 
-1. **The rig falsified the first cut on its first run.** The scan counted rows up from the
-   **bottom of the viewport**; a real idle screen puts its content in rows 0–12 of a
-   30-row viewport, so the caret sat at row 9 with **seventeen blank rows beneath the
-   footer** and no window size could reach it. It was a silent no-op that changed no
-   behaviour at all — and **every synthetic fixture passed against it**, because none of
-   them had trailing blanks. The anchor is now the last row WITH CONTENT: *a screen is not
-   the same shape as a window.* Same anchor-on-content lesson as #167/#178, arriving from
-   a third direction.
-2. **The issue's own reasoning about the slash menu was wrong — and then the first
-   measurement of it was still not enough.** The filed table predicted the menu would keep
-   the composer on screen and hide the strip; measured, bare `/` pushes the caret 16 rows
-   up, so the strip correctly SHOWS. All three "unmeasured" rows came back better than
-   inferred. But **one sample of a variable screen is not a measurement of it**: review
-   pointed out that a menu NARROWED by typing shrinks back toward the composer, and the
-   follow-up probe found 9 — one row from the bound as first set. **Measure the family,
-   not the specimen**, and prefer the tightest member.
+**The cap itself is NOT a prompt — it is a rollout error, the exact opposite of Claude
+(#142).** Claude presents an *answerable selector*, which is why the registry gives it a
+`usageLimitPrompt` and `pty-worker.js` answers it with a digit. Codex presents **nothing to
+answer**: the turn simply ends and the rollout records `task_complete` carrying
+`error.codex_error_info: "usage_limit_exceeded"`. So a `usageLimitPrompt` for Codex is not
+merely unmeasured, it is **the wrong shape entirely** — a PTY-scanning matcher would wait
+forever for bytes that never come. `autoResume: { arm: false }` stands: **nobody has ever
+hit Codex's 5h cap on this fleet**, so #142 does not unblock by waiting, and the real
+question is that **Claude's auto-resume exists because a capped Claude session sits
+BLOCKED**, while a capped Codex session returns to its composer.
 
-**Codex is deliberately unchanged.** It declares no readiness marker (#147: an unmeasured
-marker is what #143 shipped) and its composer line varies with model and effort, so it
-publishes null and the strip behaves exactly as before #210 there. A screen marker for
-Codex is its own separately-measured change — note it would NOT be safe to reuse
-`readiness.composer` for it, because that field also gates submits.
+**Hooks DO run, and `SessionStart` is LAZY** — it fires when the first turn begins, not
+when the process starts (the same laziness as the rollout file). A hook that has not fired
+yet and a hook engine that never fires look identical if you never start a turn. The
+feature gate is `[features] hooks = true` in `~/.codex/config.toml`; trust is a real
+interactive gate that **blocks before the composer renders** and is answerable with `2` +
+Enter, recorded as a `trusted_hash` that survives across sessions.
+
+> **Probing hooks is only safe if you clean up.** An installed-but-untrusted `hooks.json`
+> **blocks every new Codex session** — the same failure class as the `Update available`
+> nag, and fatal for a worker-spawned PTY that has nobody to answer it. Delete the file the
+> moment the probe ends and relaunch once to confirm the composer returns. Strip the
+> `[hooks.state]` entries too: a stale `trusted_hash` silently pre-trusts a matching
+> definition later, with nobody reviewing it.
+
+**Status comes from OSC 9 in the PTY.** With `tui.notifications = true`,
+`notification_method = "osc9"` and `notification_condition = "always"`, the Codex TUI writes
+its notifications straight into the terminal — for a normal user the *weaker* channel, for
+web-terminal the *stronger* one, because **`pty-worker.js` is the terminal** and already
+reads every byte. `notification_condition` defaults to `unfocused` and **a PTY has no focus
+state**, so without `always` nothing is emitted and the feature looks broken rather than
+unconfigured; `scripts/install-codex-notify.js` writes all three keys and **a COLD restart
+is required** because this is worker-side.
+
+- **`lib/osc9-notify.js` owns only the byte rule** and buffers across chunk boundaries. A
+  notification fires **exactly once**, so a sequence split across two PTY reads that is
+  dropped is a status that never updates — unlike the api-error sniff next door, which gets
+  away with no buffering because its phrase stays on screen and repeats.
+- **What a body MEANS is a registry field** (`statusFromOutput.approvalPattern`), never a
+  branch. A plain shell and every unknown agent default to **not** reading status from
+  output — OSC 9 is a general terminal notification that vim or a build script can emit.
+- **Applied through `handleHook`** (an approval IS a `PermissionRequest`, a finished turn IS
+  a `Stop`) so it inherits the idle debounce, held-stop rule and push rather than growing a
+  second status machine. That reuse passes **`hookDriven: false`**: `handleHook` sets
+  `session.hookStatus`, which `isClaudeSession()` reads as proof the session is Claude, and
+  that gates the API-error sniff whose recovery **types** `continue` and `/compact` into the
+  PTY. Arming it on Codex would type Claude's recovery into Codex's composer.
+- **OSC 9 cannot be retired on its own:** it fires on exactly two occasions, an approval and
+  a finished turn, so **`working` is unreachable through it by construction**. Hooks close
+  that gap. Keeping OSC 9 as a zero-install fallback is defensible; relying on it *because
+  hooks don't work* is not.
+
+**NEVER copy `~/.codex/auth.json` into a second `CODEX_HOME`.** Codex refreshes on start
+and the refresh token rotates; the copy triggers "refresh token was already used", and
+reuse-detection can revoke the whole token family. Use a stub provider
+(`model_providers.<name>` with `base_url`, `wire_api="responses"` — `"chat"` was removed)
+and no auth file.
+
+### How to verify Codex behaviour (methods that work)
+
+- **The rollout is ground truth; the screen lies.** Codex writes a user message to its
+  rollout only when a turn actually *starts*, so scraping the TUI cannot distinguish "text
+  sitting in the composer" from "submitted". Assert on the rollout.
+- **Probe in an already-trusted cwd that no live session uses.** A fresh directory triggers
+  the trust prompt; a probe in a live session's cwd writes a *newer* rollout and hijacks
+  that session's chat lens via `findRolloutForCwd`. Clean up probe rollouts afterwards.
+- **Drive the real path, not a reimplementation.** Spawn `pty-worker.js` on an isolated pipe
+  and send a real `TYPE_PTY_IN` frame (see `tests/worker-submit-cr.spec.js`);
+  `__testGetWrites` returns the exact bytes written to the PTY.
+- **A regression test must fail without the fix.** Flip the registry flag off and confirm
+  the new specs go red before believing them.
+- **Trust silently overrides `approval_policy`.** A probe asking for an approval in a
+  *trusted* project just runs the command and never prompts. Force it with
+  `-c sandbox_mode="read-only"` and a task that writes.
+- **A `-c` override in an autoCommand goes through a SHELL.** Single-quote the whole
+  override: `-c 'tui.notification_method="osc9"'`.
+- **Never key readiness on "esc to interrupt", or on the startup banner.** A cold TUI prints
+  `esc to interrupt` while booting MCP servers, and the npm shim can print a self-update log
+  and exit straight back to bash. The banner is worse: it was contiguous text in 0.144.0 and
+  is **not** in 0.144.6, so it broke on a routine auto-update. Key on the composer's
+  model/effort line. Codex auto-updates **mid-run** — expect the version to move under you.
+- **A setup failure must ABORT, never be folded into a negative verdict.** A TOML bare key
+  after a `[table]` header belongs to that table, so `model = "..."` below `[features]` made
+  Codex reject the whole config and never enable the hooks gate — reported by the probe as
+  "hooks don't run". And Codex refuses to create its helper binaries under `%TEMP%`; put the
+  probe's `CODEX_HOME` where `scripts/scratch-dirs.js` says.
+
+### The agent task list (#73) — the issue's premise was inverted
+
+**Check the tool names against real data before building on an issue's description.** #73
+is titled after `TodoWrite`, which appears as an actual `tool_use` **zero** times across
+400 transcripts — claude-code emits `TaskCreate` / `TaskUpdate` / `TaskList`. And the hard
+part is the opposite of what the issue assumed:
+
+- **Codex is the easy one.** `update_plan` carries the WHOLE plan every call (`arguments` is
+  a JSON *string* holding `plan: [{step, status}]`), so the newest one in the rollout *is*
+  the current state. Read the tail; remember nothing.
+- **Claude is the hard one.** `TaskCreate`/`TaskUpdate` are **deltas**, and **the task id is
+  not in the tool input at all** — it exists only in the result *prose*. Reconstructing the
+  list means folding **forward** from the session start, which a **backward**-paging
+  transcript reader cannot do, so Claude's list is folded from the live hook stream instead.
+
+**`TaskList`'s result is a whole-list snapshot** and Claude is explicitly told to call it
+after finishing a task — that is the **repair path** that makes a fold started mid-session
+safe, and why losing the state on a hot reload is tolerable. Prefer a subject already known
+from `TaskCreate` over the snapshot's: the line appends ` (owner)` and real subjects end in
+parentheses too. **An update for a task whose create was never seen still renders** (as
+`Task #<id>`) — dropping it would hide in-progress work, the single thing the panel exists
+to show.
+
+**The fold lives in `server.js` beside `pendingQuestion`, NOT in the worker** —
+deliberately, and against the #61/#65 precedent. It is *derived, repairable* state rather
+than an authority: it drives no dot and fires no push, so it needs no worker protocol change
+and no cold restart. If it ever gains such a job, it belongs in the worker.
+
+### Deployment consequence
+
+Anything touching `pty-worker.js` (including `lib/agents.js` fields the worker reads) needs
+a **COLD restart** — a hot `server.js`-only reload leaves the old worker running with the
+old behaviour.
+
+## A ConPTY `term.kill()` is ALREADY graceful — `/exit` buys nothing (#191)
+
+**`session.term.kill()` does not hard-kill THE AGENT.** With `useConptyDll: true`
+(production's default), node-pty's `PtyKill` closes the pseudoconsole and then
+`TerminateProcess`es **the shell**. The agent is a *child* of that shell, and Windows
+`TerminateProcess` does not touch descendants — so the agent is **orphaned rather than
+killed** and runs its **ordinary shutdown**. What is graceful is the agent's exit, not the
+teardown: bash is killed outright with exit code 1 and gets no shutdown at all. Nothing
+here needs it to.
+
+Measured (claude 2.1.251, three arms on real PTYs): `term.kill()` and an awaited `/exit`
+both flush the transcript, fire `SessionEnd` and leave `lastGracefulShutdown: true`, while
+`process.kill` on the agent itself writes nothing — so **the writing is done by the agent's
+own shutdown, not by the teardown ceremony around it.** `/exit` adds exactly two artifacts,
+both *caused by* typing `/exit` rather than preserved by it.
+
+**So #191's `/exit` half is refuted for the session shape measured**, and Kill stays
+instant: a ceremony that buys nothing makes Kill feel broken, and a submit is not reliably
+one keystroke. The *rename* half is untouched and belongs at **naming** time.
+
+**Before reopening, read limit 4 in the archive.** The measured session was minimal — no MCP
+servers, no plugins, no statusLine — and **MCP teardown is the most plausible concrete form
+of the report's "work Claude is doing" at exit**, which the probe could not have seen. Start
+by adding MCP servers to the isolated config and rerunning the same three arms, rather than
+re-arguing the ConPTY mechanism, which is settled. The evidence is also **Claude-only while
+the decision is fleet-wide** (Codex and plain shells were not measured), and killing
+**mid-turn** was never measured at all.
+
+> **A probe that spawns `claude` from inside a Claude Code session must scrub `CLAUDE*` from
+> the child env** — a nested child session persists nothing, so the measurement reads as
+> "unmeasurable" when it is really "not isolated". **And a liveness check on a pid you
+> failed to find PASSES**, so a probe that locates the agent by name must ABORT when the pid
+> is null, or every wait loop exits on its first test and prints a plausible table having
+> checked nothing.
 
 ## A resume is REPORTED, never predicted — and a retry is not a rescue (#227)
 
-Two defects, one event, and the second is why the first ran unnoticed for a night.
-Reported as *"I saw a few with auto resume label but they didn't resume."*
+Two defects, one event. Reported as *"I saw a few with auto resume label but they didn't
+resume."* Evidence — including the controlled pair inside one worker process that proves it
+— is in `docs/findings/agents-codex.md`.
 
-**The evidence is a controlled pair inside ONE worker process** — two sessions, the same
-build, and the **same reset minute**, differing — in the only way that can reach the
-timer — in whether a prompt was submitted after it armed:
+**Defect 1 — "the user is back" is not "the block is over."** `UserPromptSubmit` cancelled
+the armed resume. A submitted prompt proves the user is PRESENT; it proves nothing about the
+quota, and while capped that prompt cannot run. Nothing re-armed, so **the feature was
+defeated by the most natural human response to the thing it exists to fix.**
 
-| 2026-09-04, reset 08:51:00 | armed | retry after arming | at the reset |
-|---|---|---|---|
-| session A | 07:35:07 | **yes**, 07:46:13 | **no log line of any kind** |
-| session B | 08:20:05 | **no** | **fired 08:51:00.020**, `idle -> working` 236 ms later |
+The signal is not *is the user back* but **what they asked for**, which is why the fix is
+one event wide: **Esc says STOP** (and only fires from `working`), **a tool event says WORK
+IS RUNNING** (which genuinely proves the cap is not in force), **only a prompt says GO.**
+The re-arm sits deliberately *after* `clearObservedCapBlock` and rides `session.capBlocked`
+alone — the server's live, self-expiring reading — so #138's rule that a sighting must not
+outlive its window is untouched.
 
-Session B is the control: it proves the write reaches the composer and starts a real
-turn, so nothing about readiness, the selector or the byte shape is implicated.
+**Defect 2 — `armed` was a PREDICTION of the worker's decision, evaluated against a subset
+of the worker's gates.** It could not see the one-shot, the worker's own
+`capBlocked`/`limitPromptAt`, or a hook having cancelled the timer, so both clients went on
+rendering `resumes 21:51` with nothing scheduled. The worker had published the truth since
+#138 (`autoResumeArmed`) and **no production code read it.** It is now the answer whenever
+the worker gives one, with **ABSENT kept apart from FALSE** so a cluster peer merely behind
+falls back to the derivation rather than going dark.
 
-> **The first version of this section used a WEAKER pair and asserted something false
-> about it** — 2026-08-31 against 2026-09-03, described as "same worker process, no
-> restart across either window". There *was* a restart between them (07:39:17 on
-> 09-03, the #213 deploy, which touched `pty-worker.js`), so those two windows ran
-> different builds, and one of the "same three sessions" had exited and was not
-> restored. The claim was contradicted by a fact already in hand: the worker PID's
-> start time *was* that restart, read as "the worker is fresh" and then forgotten one
-> paragraph later. Found in review. **The replacement is stronger, not a retreat** —
-> same process, same build, same reset instant, one difference that can reach the timer — which is the lesson:
-> when a controlled comparison turns out to be confounded, look for the better
-> comparison in the same data before defending the first one.
+> **Sharing a MODULE is not sharing an ANSWER.** Both sides imported `lib/usage-limit.js`
+> and then evaluated it against **different state**. SSOT is satisfied by one *owner of the
+> fact*, not one *copy of the rule*: where a fact is a live decision some process already
+> made, the honest wire field is that process's report. Same shape as #179 — do not predict
+> whether the PTY accepted a submit; write it and check that it landed.
 
-**Fire-time refusals log a reason** — `no longer cap-blocked`, `is working`,
-`still starting` — which is what makes total silence mean the timer was **destroyed**
-rather than declined. Two returns in `fireAutoResume` are nevertheless SILENT
-(`if (!s) return` and the `autoResumeOnResetEnabled() || fiveHResetAt !== resetAt`
-re-check), so the inference needs them excluded rather than ignored: the session was
-alive and hooking hours later, and session B fired **at the same instant** — both
-timers were armed for 08:51:00.000 and B went out 20 ms into it, a window no config flip
-fits inside. **Push-time cancels are silent too** (`armAutoResumeTimer`
-returns early without logging, and `setFiveHResetAt` pushes are not logged at all), so
-"the only variable was the retry" rests on the log **plus** the reported badge still
-reading `resumes` — a `capBlocked:false` or `enabled:false` push would have changed it
-to nothing or to `on hold`.
+**A test pinned the broken behaviour** rather than catching it: the spec's helper defaults
+`capBlocked = true`, so *"a new UserPromptSubmit cancels the pending continue"* asserted the
+field failure exactly. Corrected, not deleted — and **the correction must not be made by
+flipping `capBlocked` to false**, because nothing arms at all in that case and the test
+would pass vacuously.
 
-**Defect 1 — "the user is back" is not "the block is over."** `UserPromptSubmit`
-cancelled the armed resume. A submitted prompt proves the user is PRESENT; it proves
-nothing about the quota, and while capped that prompt cannot run. Nothing re-armed:
-`armAutoResumeTimer` is re-entered only on a **changed** `setFiveHResetAt` (or on
-restore, or on the PTY cap detector — neither of which was going to happen here), and
-`_pushResetState` de-dupes on exactly the three fields that had not changed. **So the
-feature was defeated by the most natural human response to the thing it exists to fix.**
-
-The signal is not *is the user back* but **what they asked for**, which is why the fix
-is one event wide and the rest of the block is untouched: **Esc says STOP** (and only
-fires from `working`, so a turn really was running), **a tool event says WORK IS
-RUNNING** (which genuinely proves the cap is not in force), **only a prompt says GO**.
-The re-arm sits deliberately *after* `clearObservedCapBlock` and rides
-`session.capBlocked` alone — the server's live, self-expiring metrics reading — so
-#138's rule that a sighting must not outlive its window is untouched, and it never
-resurrects an observation the user has just answered.
-
-**Defect 2 — `armed` was a PREDICTION of the worker's decision, evaluated against a
-subset of the worker's gates.** It could not see the one-shot, the worker's own
-`capBlocked`/`limitPromptAt`, or a hook having cancelled the timer — so both clients
-went on rendering `resumes 21:51` from the 19:27 cancel until that moment passed, with
-nothing scheduled for any of it. (That interval is derived from the cancel and the
-promised time; what is *measured* is that no timer existed.) The worker had
-published the truth since #138 (`autoResumeArmed: !!s._autoResumeTimer`) and **no
-production code read it** — `server.js` had zero hits. (The worker's own tests did read
-it, six times; an earlier draft of this section said "one grep hit repo-wide", which was
-a scoped grep over the production files reported as if it had covered the repo.) It is now the answer whenever the worker gives
-one, with **ABSENT kept apart from FALSE** so a cluster peer merely behind falls back to
-the derivation rather than going dark.
-
-> **Sharing a MODULE is not sharing an ANSWER.** The comment above the call site read
-> *"one server-side derivation, shared with the worker's arming gate, so the badge can
-> never claim something the timer disagrees with"* — and it was false the whole time.
-> Both sides imported `lib/usage-limit.js` and then evaluated it against **different
-> state**. SSOT is satisfied by one *owner of the fact*, not by one *copy of the rule*:
-> where a fact is a live decision some process already made, the honest wire field is
-> that process's report, and re-deriving it beside the authority is how the two came
-> apart silently. Same shape as #179 — *do not predict whether the PTY accepted a
-> submit; write it and check that it landed.*
-
-**A test pinned the broken behaviour** rather than catching it — the spec's helper
-defaults `capBlocked = true`, so *"a new UserPromptSubmit cancels the pending continue"*
-asserted the cancel winning for a session that was still capped, i.e. the field failure
-exactly. Corrected, not deleted. (Its Esc sibling reads the same way at a glance and is
-**not** the same case: Esc's cancel is still right, so exactly one test changed.) **And the correction must not be made by flipping
-`capBlocked` to false**: nothing arms at all in that case, so the test would pass
-vacuously — the same trap as #221's dead assertion, reached from the other side.
-
-> **What the re-arm TRADES AWAY, found in review and named rather than discovered
-> later.** `clampPct` **rounds**, so a window at a real 99.5% arrives as exactly 100 and
-> `isCapBlocked` is true while the account is still answering. Before this change, any
-> prompt after arming disarmed the timer for good — so a prompt that actually RAN could
-> never be followed by an unwanted `continue`. Now a question-and-answer turn with no
-> tool call re-arms on its `UserPromptSubmit`, `Stop` does not cancel, and if the status
-> line still rounds to 100 at reset+60s, `continue` is typed into a session whose last
-> prompt was already answered — the exact harm #138's header exists to prevent. The only
-> remaining guard is the `status === 'working'` check at fire time.
->
-> The log offers a discriminator for a follow-up, and it is worth writing down because
-> it is not obvious: **a cap-REFUSED prompt ends in a Notification-only idle with no
-> `Stop`; a prompt that RAN ends in `Stop`.** Three samples, unmeasured beyond that — so
-> it is a lead, not a rule, and gating the re-arm on it needs its own measurement.
-
-> **One gap the fix does not close, named rather than glossed.** A retry leaves the
-> session `working`, and `fireAutoResume` consumes the one-shot *before* its
-> `status === 'working'` check — so a session still marked working at the reset burns
-> the window and skips. Pre-existing (#138 chose "consumed whether or not we act"), and
-> narrow in practice: the measured session fell back to idle 62 s after the retry
-> against a 2.5-hour wait, and `correctStaleStatus` rescues a stale `working` after five
-> minutes. It is a real edge, not a hypothetical, and it belongs to the
-> one-shot's ordering rather than to this fix.
+> **What the re-arm TRADES AWAY.** `clampPct` **rounds**, so a window at a real 99.5%
+> arrives as exactly 100 and `isCapBlocked` is true while the account is still answering. A
+> question-and-answer turn with no tool call now re-arms on its `UserPromptSubmit`, `Stop`
+> does not cancel, and if the status line still rounds to 100 at reset+60s, `continue` is
+> typed into a session whose last prompt was already answered. The only remaining guard is
+> the `status === 'working'` check at fire time. A lead for a follow-up, unmeasured beyond
+> three samples: **a cap-REFUSED prompt ends in a Notification-only idle with no `Stop`; a
+> prompt that RAN ends in `Stop`.**
 
 **Noted, unfixed:** `usage-limit:` appears **zero** times in the whole worker log across
-three real cap events, so #138's PTY detector that answers the cap selector with *stop
-and wait* has never matched in production. Not blocking — the session-B control (and
-the three 2026-08-31 fires) shows the session recovers at the reset without it — so it is a separate measurement question, not
-a guess to fold in here.
+three real cap events, so #138's PTY detector that answers the cap selector has never
+matched in production. Not blocking — the session recovers at the reset without it.
 
 ## AskUserQuestion — the LAYOUT decides what the keys mean (#19)
 
-Answering Claude's question overlay drives its real TUI selector by writing keys
-into the PTY, and **the same digit does three different things depending on the
-layout Claude picked**. The layout is not cosmetic and it is not guessable, so it
-travels on the wire: `_shapeQuestions` publishes **`hasPreview`** per question and
-`buildAnswerFrames` is the one place that turns it into keys.
+Answering Claude's question overlay drives its real TUI selector by writing keys into the
+PTY, and **the same digit does three different things depending on the layout Claude
+picked**. The layout is not cosmetic and it is not guessable, so it travels on the wire:
+`_shapeQuestions` publishes **`hasPreview`** per question and `buildAnswerFrames` is the one
+place that turns it into keys. Evidence, probe transcripts and the full key tables:
+`docs/findings/questions.md`.
 
-**The rule.** When any option of a question carries a `preview`, that question
-renders **side-by-side** (options left, preview box right); otherwise it renders as
-a **compact** list. Layout is per **QUESTION**, not per prompt — measured against
-claude 2.1.220, a previewed Q1 rendered side-by-side while the same prompt's
-preview-less multi-select Q2 rendered compact.
+**The rule.** When any option of a question carries a `preview`, that question renders
+**side-by-side** (options left, preview box right); otherwise **compact**. Layout is per
+**QUESTION**, not per prompt.
 
 | question | compact | side-by-side (`hasPreview`) |
 |---|---|---|
@@ -1540,253 +821,358 @@ preview-less multi-select Q2 rendered compact.
 | single-select, **multi**-question | digit selects **and auto-advances** the tab — an extra Enter would commit the NEXT tab's default row | digit advances nothing; **Enter commits AND advances** |
 | multi-select | digits toggle and stay; **Right-arrow** advances (Enter would toggle) | n/a — previews are not supported on multi-select |
 
-So a compact tab of a multi-question prompt must get **no** Enter and a previewed
-one **must**. That is a branch, never an unconditional trailing Enter — the
-compact layout is measured to answer correctly without it.
+So a compact tab of a multi-question prompt must get **no** Enter and a previewed one
+**must**. That is a branch, never an unconditional trailing Enter.
 
-**This produced a real bug twice, in the same shape.** Reported 2026-08-03: *"the
-chat lens didn't fill the multiselect part at all even I see and mark it. I had to
-do it on terminal."* The prompt was a previewed single-select Q1 plus a
-multi-select Q2, so every key meant for Q2 landed back on Q1, Q1 submitted blank,
-and the trailing Enter toggled whichever Q2 row the cursor happened to sit on.
-The earlier single-question half of the same rule is #84.
+**`hasPreview` is derived from the RAW option list — never recompute it from the shaped
+one.** The shaped list can lose a preview three ways: its option had no label and was
+filtered out, it fell past `PQ_MAX_OPTIONS`, or the body was a non-string/whitespace and was
+never attached. Any of the three silently flips the question to the compact layout, and the
+layout decides what every answer key MEANS. (This drifted once *after* the rule was written
+down, which is the argument for the test, not for more prose.)
 
-**Verify with `scripts/rig/probe-askq-layout.js`** — it spawns the real `claude`
-on a real PTY, drives a candidate key sequence and reads the verdict from the
-transcript's `tool_result`. **Never assert on the screen: it cannot tell
-*highlighted* from *submitted*.** A **pending** question is not in the transcript
-at all (the `tool_use` is written only once answered), so "nothing recorded" and
-"not yet answered" look identical — assert on *which option came back*. Measured:
+**Verify with `scripts/rig/probe-askq-layout.js`** — it spawns the real `claude` on a real
+PTY and reads the verdict from the transcript's `tool_result`. **Never assert on the screen:
+it cannot tell *highlighted* from *submitted*.** A **pending** question is not in the
+transcript at all (the `tool_use` is written only once answered), so "nothing recorded" and
+"not yet answered" look identical — assert on *which option came back*. Shapes:
+`preview-mq`, `plain-mq`, `preview-single`, `plain-single`, `plain-multi`, `plain-mq2`.
 
-```
-preview-mq  2,1,3,→,\r     -> Q1 BLANK, nothing submitted   (the bug)
-preview-mq  2,\r,1,3,→,\r  -> "Pick a color"="Green", "Pick fruits"="Apple, Cherry"
-plain-mq    2,1,3,→,\r     -> "Pick a color"="Green", "Pick fruits"="Apple, Cherry"
-```
+### The preview BODY crosses the wire too (#145)
 
-The last line is the regression guard: it must keep passing **without** the extra
-Enter, which is why the fix is a branch on `hasPreview` and not a blanket Enter.
+It used to be dropped as *"free-form, can be large, and nothing renders it"* — right for
+exactly as long as nothing rendered it. `_shapeQuestions` now publishes `preview` per
+option, capped at **`PQ_PREVIEW_CAP = 2000`** — its own budget, not the 800 sized for a
+label, because a preview is a multi-line **block**. The overlay renders it in **monospace
+and unparsed** (its markup *is* the content) on the **selected row only**, clamped to
+`kPreviewMaxLines` with a visible ellipsis. Revealing it on select mirrors the TUI, where
+moving the highlight swaps the box and Enter commits; a tap here likewise only moves the
+selection, so reading a preview never costs you a choice.
 
-### The preview BODY now crosses the wire too (#145)
+Selecting also **scrolls that row into view** — without it the feature is invisible in the
+case it was reported from, since the option list gets ~two rows on a phone and choosing the
+last option opens a ~300px block entirely below the viewport. Note the font too:
+`'monospace'` is an Android/fontconfig alias that resolves to **nothing** on Windows, macOS
+and iOS, so the block carries a `fontFamilyFallback`.
 
-It used to be dropped on purpose — *"free-form, can be large, and nothing renders
-it"* — which was right for exactly as long as nothing rendered it. Reported
-2026-08-19: a three-option prompt whose labels were `Land #182 (.debug suffix)` /
-`Play closed track upload` / `Leave it` kept every package name, snippet and
-blocker **inside the preview box**, so the chat lens was strictly less
-informative than the terminal *on the questions that need the most reading* —
-and no amount of client work could fix it, because the bytes were never sent.
+### `n` is preview-ONLY and `Type something.` is compact-ONLY (#143)
 
-`_shapeQuestions` now publishes `preview` per option, capped at
-**`PQ_PREVIEW_CAP = 2000`** — its own budget, not the 800 sized for a label or a
-blurb, because a preview is a multi-line **block**. The overlay renders it in
-**monospace and unparsed** (its markup *is* the content) on the **selected row
-only**, clamped to `kPreviewMaxLines` with a visible ellipsis. Revealing it on
-select mirrors the TUI, where moving the highlight swaps the box and Enter
-commits; a tap here likewise only moves the selection, so reading a preview
-never costs you a choice.
+The two free-text affordances are **mirror images**, and the overlay offers exactly the one
+its layout has. **A card offers the note affordance or the `Other…` row, never both** — so
+"Other wins when both are set" is not a branch-order fact; the layout decides which is
+eligible at all.
 
-**`hasPreview` is still derived from the RAW option list — never recompute it
-from the shaped one.** The shaped list can lose a preview three ways: its option
-had no label and was filtered out, it fell past `PQ_MAX_OPTIONS`, or the body was
-a non-string/whitespace and was never attached. (Capping is **not** one of them —
-`_pqCap` truncates, it cannot empty a non-empty preview.) Any of the three would
-silently flip the question to the compact layout, and the layout decides what
-every answer key MEANS.
+- **Notes exist only side-by-side.** The compact footer reads `Enter to select · ↑/↓ to
+  navigate · Esc to cancel` and `n` is a **no-op** there. #64 Gap 1 shipped a note sequence
+  that was never device-verified and was wrong in *both* layouts: on a compact card
+  `↓×idx, n, <note>, CR` degenerates to `↓×idx, CR` — **a correct plain selection with the
+  note silently discarded.** Nothing looked broken, which is why it survived to ship.
+  *Confidently wrong is worse than absent.* The working sequence is
+  `↓, n, <note>, ESC, CR`: **`Esc` closes the note EDITOR without cancelling the
+  question**, despite the footer reading `Esc to cancel`. It is a lone `0x1b`, which
+  `isEscapeKey` would read as an interrupt — but that rule is gated on a `working` session
+  and one owing an answer is `waiting`, so it is not armed here.
+- **`Other` exists only compact.** Side-by-side lists only the real options and then `Chat
+  about this` — **there is no `Type something.` row at all**, and the un-gated sequence does
+  not merely lose the free text: the trailing CR **submits an option the user never
+  picked.** Compact (single and multi-question) works: the digit opens a free-text editor
+  and Enter commits it and advances the tab.
+- **Multi-select holds.** The trailing row is a **checkbox** with no free-text input;
+  submitting with only it checked records **`The user did not answer the questions.`** — the
+  whole answer comes back null, not merely textless.
 
-The block is revealed by **selecting** its option, and selecting also **scrolls
-that row into view**. Without it the feature is invisible in the case it was
-reported from: the option list gets `kOptionFloor` (~two rows) on a phone, so
-choosing the last option opens a ~300px block entirely below the viewport — the
-radio fills and nothing else appears to happen. Note the font too: `'monospace'`
-is an Android/fontconfig alias that resolves to **nothing** on Windows, macOS and
-iOS, so the block carries a `fontFamilyFallback` — without it the alignment this
-whole treatment exists to preserve is lost on the desktop build.
+Claude also renders a **`Chat about this`** row at `options.length + 2` that the overlay does
+not model at all.
 
-### The layout also decides whether NOTES exist at all (#143)
+### A live question was erased by the NEXT tool — a SUBAGENT's counted (#236/#239)
 
-The same rule reaches further than the digit. **`n` ("add a note") is a
-side-by-side-layout feature and does not exist in the compact one.** Measured
-against claude **2.1.234**, verdicts from the transcript:
+The clearing rule beside `pendingQuestion` in `server.js` read *"a different tool started ->
+prior question resolved"*. True of a strictly **sequential** single agent; false the moment
+anything runs concurrently beside it — which is the ordinary shape of a session that has
+dispatched a subagent. Measured: the subagent's `Bash` cleared the main agent's question 19
+ms after it was asked, and the user answered 37 s later — **37 s of a question nothing was
+showing.**
 
-| layout | footer | `n` |
-|---|---|---|
-| compact | `Enter to select · ↑/↓ to navigate · Esc to cancel` | **ignored — no-op** |
-| side-by-side | `… · `**`n to add notes`**` · Esc to cancel` | opens a note editor |
-
-#64 Gap 1 shipped a note sequence that was **never device-verified** and was
-wrong in *both* layouts. On a compact card `n` and the note text are simply
-swallowed, so `↓×idx, n, <note>, CR` degenerates to `↓×idx, CR` — **a correct
-plain selection with the note silently discarded.** Nothing looked broken, which
-is exactly why it survived to ship. That is the failure mode this repo keeps
-paying for: *confidently wrong is worse than absent.*
-
-```
-↓,n,<note>,CR       -> "=(no option selected) notes: …"   the ANSWER is lost
-↓,CR,n,<note>,CR    -> "=Green"                           the NOTE is lost
-↓,n,<note>,ESC,CR   -> "=Green … notes: …"                both  <- the rule
-```
-
-**`Esc` closes the note EDITOR without cancelling the question**, despite the
-footer reading `Esc to cancel`. The whole fix rests on that. It is a lone `0x1b`,
-which `isEscapeKey` would read as an interrupt — but that rule is gated on a
-`working` session and one owing an answer is `waiting`, so it is not armed here.
-
-### `Other` (free text) is a COMPACT feature — the exact mirror of notes (#143)
-
-**`n` exists only side-by-side; `Type something.` exists only compact.** The two
-free-text affordances are mirror images, and the overlay now offers exactly the
-one its layout has. That symmetry is the whole rule; the three bullets below are
-just what each shape measured.
-
-- **Side-by-side — NOT OFFERED, and the reason is not caution.** Measured on
-  claude **2.1.237** (`--shape preview-single --keys "4,indigo actually,CR"`):
-  the previewed selector lists only the real options and then `Chat about this`
-  — **there is no `Type something.` row at all**. The screens after the digit
-  and after the text were **byte-identical** to the first render, and the
-  trailing CR committed the still-default top row. The transcript recorded
-  `"Pick a color"="Red"`. So the un-gated sequence does not merely lose the free
-  text: **it submits an option the user never picked** — worse than the note bug
-  this issue is named for, which at least landed the right option.
-- **Compact multi-question — WORKS, deferral lifted.** The digit lands on the
-  `Type something.` row and opens a free-text editor (the footer gains
-  `ctrl+g to edit in Notepad`); Enter commits it **and** advances the tab, just
-  like a single-select digit. `4,<text>,CR,1,→,CR` recorded both answers intact.
-  The lift is **compact-only**, because compact is the only layout it was driven
-  against.
-- **Multi-select — HOLDS.** The trailing row is a **checkbox** (`5. [✔] Type
-  something`) with no free-text input; the typed text is swallowed, and
-  submitting with only it checked records **`The user did not answer the
-  questions.`** — the whole answer comes back null, not merely textless.
-
-One consequence worth stating because it reads as a bug otherwise: **a card
-offers the note affordance or the `Other…` row, never both.** Notes are
-previewed-only, Other is compact-only, so "Other wins when both are set" is no
-longer a branch-order fact — the layout decides which one is eligible at all.
-
-Claude also renders a **`Chat about this`** row at `options.length + 2` that the
-overlay does not model at all.
-
-Shapes for `scripts/rig/probe-askq-layout.js`: `preview-mq`, `plain-mq`,
-`preview-single`, plus `plain-single`, `plain-multi` and `plain-mq2` (two
-single-select tabs — the only shape that exercises `Other` on a LAST tab, since
-`plain-mq`'s Q2 is multi-select) added for the above.
-
-> **`hasPreview` was being read off the SLICED option list.** `_shapeQuestions`
-> computed it from `kept` — post-`PQ_MAX_OPTIONS` — while its own comment three
-> lines above named that slice as one of the three ways a preview goes missing.
-> A preview carried only by an option past the cap therefore reported *compact*
-> for a question Claude lays out *side-by-side*, and every answer key means
-> something else across that line. Fixed to read the raw list, with the test that
-> was red first. **The rule was written down and the code still drifted from it —
-> which is the argument for the test, not for more prose.**
-
-### A live question was erased by the NEXT tool — a SUBAGENT's counted (#236)
-
-The clearing rule beside `pendingQuestion` in `server.js` read *"a different tool
-started → prior question resolved"*. True of a strictly **sequential** single agent;
-false the moment anything runs concurrently beside it — which is the ordinary shape of a
-session that has dispatched a subagent.
-
-**MEASURED** on adiel-Home 2026-09-07 from this repo's own session, reading the main
-transcript and the subagent's (`<session>/subagents/agent-*.jsonl`, `isSidechain`) beside
-`logs/worker.log`:
-
-| | |
-|---|---|
-| 09:48:12.687 | the main agent dispatches a subagent (`Agent`) |
-| 09:48:20.539 | the main agent asks **AskUserQuestion** → `working -> waiting` |
-| **09:48:25.527** | **the SUBAGENT runs `Bash`** → `waiting -> working`, 19 ms later |
-| 09:49:02.107 | the user answers — 37 s of a question nothing was showing |
-
-**Nothing ran in the main transcript in that window**, so the clearing `PreToolUse` was
-provably the subagent's — and a subagent's hooks carry `agent_id` (#61). The log alone
-could not have said that: it names the event, not whose it was.
-
-**The REPORTED incident, on adiel-0ffice twelve minutes earlier, has the same log shape and
-is not proven to be the same cause** — its hook body was never captured, and the question
-sat unanswered there for ten further minutes. What bounds the alternative is measured, on
-adiel-Home: of 923 transcripts, **93 of the 94** assistant messages that issue an
-`AskUserQuestion` issue it **alone**. The one exception is a `[Bash, AskUserQuestion]`
-batch whose `Bash` was emitted at 11:31:41.142 and had **returned** by 11:31:41.334 —
-2.1 s before the question block existed at 11:31:43.453 — so it ran serially and no
-`PreToolUse` of its could follow the question. Office's own `subagents/` directory would
-settle Office outright, and is cheaper than closing the gap below.
-
-> **The first cut of that measurement said "never batched", and it was an artifact of the
-> transcript format.** Claude Code writes **each content block on its own JSONL line**, so
-> grouping by line reports zero batching *everywhere* — and the positive control gives it
-> away at once: grouped by `message.id`, **4,755 of 40,024** tool-using messages are
-> batched. The same case also disproves the reason that was offered with it: a turn is
-> **not** suspended while a tool call is outstanding, since that `Bash` ran while its
-> message was still streaming. What remains unmeasured is a question-FIRST batch
-> (`[AskUserQuestion, X]`, **0 of 94** observed): whether the executor starts `X` before
-> the question resolves is **inferred** from Claude Code's serial handling of tools that
-> are not concurrency-safe, not measured. *Count what the format actually groups, and run
-> the positive control* — the same lesson as the negative-sweep rule.
-
-**Both of the chat lens's signals die together, which is why NOTHING showed.**
-`waitingFor` (#79) needs status `waiting` **and** a captured question, and the overlay's
+**Both of the chat lens's signals die together, which is why NOTHING showed.** `waitingFor`
+(#79) needs status `waiting` **and** a captured question, and the overlay's
 `/pending-question` falls back to a transcript that **by design cannot hold an unanswered
 question** (#19). The lone survivor was #194's terminal tail strip — the *backstop* —
 reported as *"no indication, instead a last line small window"*.
 
-**The rule now: only the MAIN agent's next tool resolves a question** — `!agentId` is the
-whole fix, and the discriminator was already free: `agent_id` is read in that same function
-for #61, twenty lines below the branch that needed it. `UserPromptSubmit`, `Stop` and the
-question's own `PostToolUse` stay ungated.
+**The rules now:**
 
-**Gated on the EVENT's agent, not on the question's**, which is the narrower of the two
-rules on offer. *"Only the agent that ASKED it may resolve it"* is more general and would
-generalise a case that has never occurred: **0 of 775** subagent transcripts here contain an
-AskUserQuestion. If one ever does, the only thing that stops resolving it is its **own
-sibling tool calls** — its `PostToolUse` still answers it, and so do the main agent's next
-tool, `UserPromptSubmit` and `Stop`. Only a *lost* `PostToolUse` (a hot reload in the
-window) leaves it standing until the turn's `Stop`: one event later, in the direction that
-SHOWS a question rather than hides one.
+1. **Only the MAIN agent's next tool resolves a question** — `!agentId` is the whole fix,
+   and the discriminator was already free (`agent_id` is read in that same function for
+   #61). `UserPromptSubmit`, `Stop` and the question's own `PostToolUse` stay ungated.
+   Gated on the **EVENT's** agent, not the question's: *"only the agent that ASKED it may
+   resolve it"* is more general and would generalise a case that has never occurred (**0 of
+   775** subagent transcripts here contain an AskUserQuestion).
+2. **`armIdle` refuses to idle a session with a pending question** (#239) — the funnel BOTH
+   idle routes pass through, rather than a copy at the release site. When subagents are live
+   an idle `Notification` is parked as `heldStop` *before* the question check, so the
+   `SubagentStop` that releases it bypassed the guard entirely: **the SUBAGENT finishing
+   idled a session blocked on the MAIN agent's question.** Exactly one of the two holdable
+   events is dangerous — a held `Stop` is safe by accident (`server.js` classifies it as
+   resolving a question and sends `questionPending:false` with it), while a `Notification`
+   carries no opinion (#98's tri-state) so the flag survives the hold.
 
-**On THIS path the worker needs no matching guard, and that is a decision rather than an
-omission.** Its status is `questionPending ? 'waiting' : 'working'`, so #98's tri-state leaves the
-flag alone, the session stays `waiting`, and it is spared the **5-minute** clock that had
-been demoting it to idle while the prompt was still on screen. Since #230 a blocked-on-user
-session is not timed out at ALL, so there is no longer a second, longer clock behind it.
+The check sits at **arm** time, not in `applyIdle`, because `applyIdle` runs the #129 compact
+replay above the status flip and returning early there would skip it. The debounce window
+that ordering appears to leave open **cannot happen**: `questionPending: true` is only ever
+sent for `PreToolUse` + `AskUserQuestion`, and the worker's `PreToolUse` case calls
+`cancelPendingIdle` — the very hook that raises the flag destroys any armed idle. *Naming a
+gap is only worth doing if the gap is real; an invented one is the same defect as an
+unmeasured claim, wearing humility.*
 
-**A held idle `Notification` is a SECOND path to the same symptom, and #238 deliberately
-did not touch it — FIXED SEPARATELY IN #239.** When subagents are live the idle event is
-parked as `heldStop` *before* that question check, and the `SubagentStop` that releases it
-hands it to `armIdle`, which had no question check on any path. So the guard was bypassed
-by the ordinary shape of a session that had dispatched a subagent, and the SUBAGENT
-finishing idled a session blocked on the MAIN agent's question. The refusal now lives in
-`armIdle` — the funnel BOTH idle routes pass through — rather than being copied to the
-release site.
+**On this path the worker needs no matching guard**, a decision rather than an omission: its
+status is `questionPending ? 'waiting' : 'working'`, so the session stays `waiting` and is
+spared the 5-minute clock. Since #230 a blocked-on-user session is **not timed out at all**.
 
-**Exactly one of the two holdable events is dangerous, and it is the more frequent kind of
-block.** A held `Stop` is safe BY ACCIDENT: `server.js` classifies it as an event that
-RESOLVES a question and sends `questionPending:false` with it, so the flag is already clear
-on release. A `Notification` carries no opinion at all (#98's tri-state), so the flag
-survives the hold. The precondition is routine rather than exotic — `Notification held`
-appears **365** times in adiel-Home's worker log since #61's hold shipped, `Stop held`
-another 771; what was unobserved is only the coincidence with a live question.
+## The session recap — "my last prompt" is NOT `role === 'user'`
 
-> **WHY THE CHECK SITS AT ARM TIME, and a gap that turned out not to exist.** Putting it in
-> `applyIdle` would also catch a question arriving during the 750 ms debounce, but `applyIdle`
-> runs the #129 compact replay ABOVE the status flip, so returning early there would skip it.
-> The first draft of this note offered that debounce window as a **known gap**; review traced
-> it and it **cannot happen** — `questionPending: true` is only ever sent for `PreToolUse` +
-> `AskUserQuestion`, and the worker's `PreToolUse` case calls `cancelPendingIdle`, so the very
-> hook that raises the flag destroys any armed idle. *Naming a gap is only worth doing if the
-> gap is real; an invented one is the same defect as an unmeasured claim, wearing humility.*
+`GET /api/sessions/:id/recap` (rules in `lib/recap.js`, pure) answers *where was I in this
+one?* for a sidebar full of sessions: last prompt, the agent's latest word, the current task,
+and the work done since.
 
-> **The second regression test's first draft asserted the WRONG thing**, which is worth
-> keeping because it is a fact about #61 rather than about #239. Answering the question
-> BEFORE the `SubagentStop` leaves the session `working`, and correctly so: a main-agent
-> `PostToolUse` drops the held event outright, because a parent that picked its turn back
-> up must not be handed a stale "done" when its subagent exits. The honest shape is to let
-> the release be REFUSED first, then answer, then send a fresh idle.
+**The trap:** a transcript is full of `role:user` turns the human never typed — a teammate
+message, a `<task-notification>`, Stop-hook feedback, a post-compaction summary, and above
+all **slash commands**. Running `/compact` writes a user turn whose text is
+`<command-name>/compact</command-name>`, so in a just-compacted session — precisely when you
+most need a recap — the newest user turn is that echo, and a naive reading reports *"your
+last prompt was: compact"*. **Confidently wrong is worse than absent.** Genuine prompts also
+arrive with `<system-reminder>` blocks stapled on, so even a real one needs its wrapper
+stripped, and a turn that is *nothing but* reminders is not a prompt at all.
 
-**Not #230**, whose *correctly*-set `waiting` was retracted by that same corrector at 12h -
-same symptom, opposite end of the timescale: this one lasted 6.1 s on Office, 5.0 s on Home.
-#230 has since removed that horizon entirely (measured wrong 71 times out of 72).
+**`lib/user-turn.js` is the one owner of what a `role:user` turn IS** — `classifyUserTurn`
+(which turns a human actually TYPED) and `typedTextOf` (the characters they typed, which the
+chat lens's Queued echo matches on, #149). Its only import is the leaf `lib/ansi.js`, so
+`lib/transcript.js` can use it without a require cycle. `lib/recap.js` re-exports
+`classifyUserTurn` for its existing importers — **change the rule in `lib/user-turn.js`,
+never there.**
+
+**Reuse, don't re-derive:** the reply prefers an author-marked `## TL;DR` through
+`lib/speech.js`'s `extractSummary` — that section exists to be exactly this. **On demand,
+never on the poll** — one recap costs a transcript tail read, and doing it per row per
+sidebar refresh would be a disk storm for text nobody is looking at. **Degrades, never
+404s:** a plain shell has no transcript, but *"idle, in `<cwd>`, 20m ago"* still orients
+you, and a 404 would make the icon look broken on exactly the rows most likely to be
+clicked.
+
+> **`classifyUserTurn` currently exists twice** — here and in the companion's
+> `conversation_view.dart`, which uses it for bubble labelling. The server copy is the
+> authority and recognises strictly more. Consolidating the Dart side onto a
+> server-published field is a separate additive change, **not** a "keep them in sync"
+> instruction.
+
+## A prompt sent WHILE THE AGENT WORKS is not a `role:user` turn (#249)
+
+Claude Code records a prompt submitted mid-turn as an **attachment**, never as a user
+message: `{"type":"attachment","attachment":{"type":"queued_command","prompt":"…",
+"commandMode":"prompt","origin":{"kind":"human"}}}`. `parseTranscriptTurn` read only
+`user`/`assistant` lines, so **the chat lens never received the prompt at all** — the only
+thing showing it was the client's optimistic `Queued` echo (#31), rendered *after* every
+transcript turn, so everything the agent produced in reply appeared **above** it. And the
+echo reconciles by matching a turn's `typedText` (#149); against a turn that does not exist
+it can never match, so the 90 s safety timeout **deletes** it and the prompt leaves chat
+entirely.
+
+**The fix is one branch in `lib/transcript.js`, server-side only** — the chat lens is fixed
+with **no client release** and it **hot-reloads**. The turn is emitted at the attachment's
+own byte position, which is what puts it above the reply. An older companion is covered by
+construction: `turnMatchKey` falls back to `normEcho(turn.text)` when `typedText` is absent,
+and here `text === typedText`.
+
+**TWO GATES, and both are narrowings rather than sniffs.** `commandMode === 'prompt'`
+excludes `task-notification` (520 of 641 records — plumbing, and 34 of them restate a
+notification that already arrives as a real `role:user` turn). `origin.kind === 'human'`
+excludes `peer`: another agent's queued message is wrapped in `<agent-message from="…">`, **a
+signature `classifyUserTurn` does not recognise** — it classifies as `human`, so admitting
+one would put another agent's words in a **"You"** bubble, the teammate-bubble bug this repo
+has already paid for once. A queued teammate message therefore stays invisible in chat; that
+is #250, and its fix is a signature in `lib/user-turn.js`, not a wider gate here.
+
+**Build the turn from `attachment.prompt`, never from `rendered`.** The `rendered` array
+restates the prompt inside a `<system-reminder>` telling the *agent* how the message was
+delivered — wrapper text, not what the user typed, and an echo compared against it could
+never match. Same trap as #149, one layer out. A queued prompt carrying a pasted image
+arrives as content blocks: keep the text, drop the base64.
+
+*Say "the chat lens", not "both clients".* Only the companion has one — `app.html` carries
+no reference to `/transcript`, `typedText` or `userKind` at all. That exact phrase is
+recorded as wrong twice in this repo's history.
+
+> **MUTATE ONE GATE AT A TIME, and a negative fixture faithful to the corpus is the one most
+> likely to be vacuous.** Both gate tests were confirmed red by removing BOTH gates together,
+> which proved nothing about either: the `task-notification` fixture is drawn from real data
+> where all 520 carry **no `origin`**, so the ORIGIN gate turns it away and
+> `commandMode !== 'prompt'` could be deleted with the whole suite still green. The fix is a
+> second, deliberately **synthetic** fixture whose only job is to fail when that one line
+> goes. The usual vacuous negative passes because the feature is absent; this one passes
+> because a *different* guard fires first.
+
+> **And state the PREDICATE, not just the count.** A first draft claimed 9 of the 520
+> task-notifications already arrive as real user turns; that 9 came from testing a 120-char
+> prefix. A 60-char prefix gives 15, exact equality gives **0**, and the sound comparison —
+> the `<task-id>` they share — gives **34**. A measurement whose answer moves with a
+> parameter nobody chose deliberately is not a measurement.
+
+## The chat lens's tail strip shows the FURNITURE unless something else is on screen (#194/#210)
+
+The strip shows the terminal's last few non-blank rows inside the chat lens, so a session
+parked on something chat has no bubble for is still visible. #179 is why it shows the screen
+rather than naming the state: **not one blocked state emits a distinguishing byte**, so a
+classifier for "blocked" is permanently incomplete.
+
+**That thesis is right, and the first implementation read it too literally.** Claude ends
+every composer screen with a FIXED FOOTER, so "the last 4 non-blank rows" and "that footer"
+are **the same thing by construction**, whatever happened above them. The strip rendered four
+identical rows on every idle session, held ~90px of the chat view open to do it, and was
+least informative in exactly the state its own gate selects for.
+
+**The fix inverts what is recognised.** Recognise exactly ONE thing — the ordinary composer
+marker (#190's caret + U+00A0, **published on `GET /api/agents`** rather than retyped in
+Dart) — and recognise it in order to **stay quiet**. A screen without that marker near its
+foot falls through to the tail as before, whether or not anyone has measured it. **The
+failure direction is showing the terminal, never hiding it**, which is the opposite of a
+classifier's, so #179's argument does not apply. The strip appearing now MEANS something is
+on screen.
+
+`kComposerScanRows = 7`, inside a measured bound of **[5, 8]**: at least the widest idle
+footer (4, plus a row for an update notice), strictly under the **narrowed slash menu's 9**.
+**The narrowed menu sets the ceiling, and measuring only the bare `/` would have missed
+it** — bare `/` is the menu at its TALLEST (16 rows up), and typing a few characters filters
+the list and brings the caret back to 9. A first cut sat at 8 and cleared that by one row.
+
+**The anchor is the last row WITH CONTENT, not the bottom of the viewport.** A real idle
+screen puts its content in rows 0–12 of a 30-row viewport, so counting up from the viewport
+floor put the caret 17 blank rows out of reach — a silent no-op that changed no behaviour at
+all, and **every synthetic fixture passed against it** because none had trailing blanks.
+*A screen is not the same shape as a window* — the same anchor-on-content lesson as
+#167/#178, from a third direction.
+
+**Say "a screen without the marker", not "every dialog".** The **tool-approval /
+AskUserQuestion selector was NOT measured** — no capture of one exists in this repo, and
+#190 established NBSP-absence for the trust dialog only. If that selector draws the composer
+within the window, the strip hides on a blocked screen. It is the least costly place for the
+gap to sit (a hook-driven wait already has #79's banner and the #19/#143 overlay), but it is
+a gap, not a proof, and it needs a rig case before anyone claims otherwise.
+
+**Codex is deliberately unchanged** — it declares no readiness marker and its composer line
+varies with model and effort, so it publishes null and the strip behaves as before #210.
+A screen marker for Codex is its own separately-measured change, and it would **not** be
+safe to reuse `readiness.composer` for it, because that field also gates submits.
+
+**Captures are deliberately NOT checked in** (#146's rule): an idle frame carries a status
+line naming a project and a user, and this repo is public. Keep the numbers, drop the bytes.
+
+## Scrollback has TWO byte spaces, and they diverge at the HEAD (#167/#176/#178)
+
+**A byte offset into a session's scrollback is not a position.** `pty-worker.js` trims the
+buffer's HEAD on every PTY write (2 MB cap), so `offset 0` names a different byte on every
+request while `total` sits pinned at the cap — and nothing on the wire says so. Every paging
+bug in this area is that one fact, met from a different direction. The rule everywhere is:
+**anchor on CONTENT, over-fetch so the anchor is inside the slice, cut where it reappears,
+and STOP rather than guess** — the failure mode is less history, never history that repeats
+and never a silent hole.
+
+**And the server builds two DIFFERENT strings from that one buffer:** the WS attach replay
+**truncates** the raw buffer to `scrollbackReplayLimit` and *then* sanitises, while
+`GET /api/sessions/:id/scrollback` sanitises the **whole** buffer and *then* slices.
+`sanitizeReplay` is length-changing **and stateful** (it tracks alt-screen from the start of
+whatever string it is given), so those two orders are **not** equivalent. Measured on
+escape-heavy content they share a 30947/31517 **suffix** and disagree at the **head**: the
+truncated copy begins mid-stream, never sees the earlier `ESC[?1049h`, believes it is
+outside alt-screen, and strips an `ESC[2J` the whole-buffer pass keeps.
+
+**So they agree over the TAIL and disagree near the HEAD.** Any rule that lines the two up
+must take its anchor from the **end of what is on screen**, never from the head of an
+incoming replay — which is what `ai-terminal/lib/util/attach_overlap.dart` does (#176), and
+why `tests/attach-replay-overlap.spec.js` pins the invariant **on the server**, with a 2x
+margin over the companion's 4096-unit anchor. That gate is server-side on purpose:
+reordering either sanitise pass is a server change, and it would otherwise surface only as
+#176 coming back on a client nobody was testing.
+
+The attach replay also carries an `ESC[?2004h` prefix when the session is in bracketed-paste
+mode. That is terminal **state**, not content — it is not in the scrollback and can never
+match an anchor, so a cut must preserve it rather than treat it as duplicate bytes.
+
+`lib/scrollback-window.js` holds the pure content-anchored walk and is **served to
+`app.html` at `/lib/scrollback-window.js`**, so the browser runs the same bytes
+`tests/scrollback-window.spec.js` pins rather than a pasted copy. It is a port of the
+companion's `ai-terminal/lib/util/scrollback_window.dart` (#167), which stays the canonical
+write-up of the rule.
+
+## The companion vendors `xterm` — do not undo it (#81)
+
+`ai-terminal/third_party/xterm` is stock xterm 4.0.0 **plus one patch**, wired in by
+`dependency_overrides`. Full write-up: `ai-terminal/third_party/xterm/README-PATCH.md`.
+Every hunk is marked `WEB-TERMINAL PATCH (#81)` — **grep for it before re-vendoring or
+"upgrading"**, because 4.0.0 is the latest release and a bare re-vendor silently restores the
+bug.
+
+**One defect produced two symptoms that read as unrelated bugs.** `Buffer.scrollUp`,
+`scrollDown` and `deleteLines` shifted a line with `lines[to] = lines[from]`, which copies
+the *reference*: the line ends up in two slots, and since `_adoptChild` unconditionally
+detaches the destination's previous occupant, the next iteration detaches the line the
+previous one just moved. A scroll left 27 of 30 lines **still in the array but detached from
+it**. Detached lines still *paint*, but `TerminalController.selection` is null whenever
+either anchor is detached — that is "text visible, nothing selects". And a later `_moveChild`
+dereferences `_owner!`: an assert in debug, a **hard throw out of `Terminal.write` inside a
+WebSocket listener** in release, which kills the widget subtree — that is the blank terminal.
+Codex-only because those three methods are reached only inside a DECSTBM margin, and Codex
+sets 12 scroll regions on startup where Claude's TUI sets none. `insertLines` right next door
+already used `lines.swap` and was correct, which is how we know it was an oversight.
+
+**Two methodological lessons, both of which cost a wrong root cause first.** (1) *A blank
+lens next to a healthy chat lens is not evidence about the server* — chat is built
+server-side from the rollout and never touches xterm, so the two lenses failing differently
+localises the fault to the widget. (2) *Instrument, don't reason about buffer internals.* Two
+confident hypotheses were wrong; a five-line `print` in `_adoptChild` named the real cause in
+one run.
+
+**Verification bar for any change here:** run upstream's own suite against pristine and
+patched copies and compare (README-PATCH.md has the recipe). Both give `+108 ~2 -2`; the two
+`textScaler` failures are pre-existing Flutter-SDK drift.
+
+## Chat links are TextSpans — never a widget in the text flow (#83)
+
+**A `MarkdownElementBuilder` can only return a Widget, and a widget cannot live inside a
+paragraph.** That one API fact is the whole bug, and it is worth stating because the builder
+API *looks* like the natural place to add a per-link affordance. Measured on
+flutter_markdown 0.7.7+1, rendering `see LINK tail`: a custom `a` builder produces **4**
+RichTexts (`"see "` | `"example"` | `" tail"` — separate render objects), native `onTapLink`
+produces **2** (one paragraph).
+
+The ancestor `SelectionArea` (#27) walks a **paragraph**, so a shattered sentence is one it
+cannot drag across — which is why the symptom was *"dragging selects nothing"* rather than
+the narrower "the URL isn't selectable": **the link poisons the whole sentence around it.**
+The widget's own `GestureDetector` compounded it (`onLongPressStart` holds the gesture arena
+for exactly the button-down a selection drag begins on), and the builder attached the tap
+recognizer to the **wrong fragment** (`" tail"`), so tapping trailing prose opened the link
+while the link text did nothing.
+
+**The rule going forward:** any per-link affordance must be reachable from a `TextSpan`
+recognizer or from the `SelectionArea`'s context menu — **never from a widget in the text
+flow.** Reintroducing a builder to add "Copy link" silently reintroduces this bug.
+
+**What the fix traded away, deliberately:** the per-link long-press / right-click "Open /
+Copy link" menu is gone. It existed *because* links were unselectable. For a bare autolinked
+URL — what an agent actually prints — the link text **is** the href, so ordinary select +
+copy now yields the URL. For a labelled link the URL is no longer copyable from the UI; a tap
+still opens it.
+
+**Two traps, both of which cost a wrong answer first.** (1) **A widget test cannot see this
+bug, and a *plausible* widget test can be worse than none** — the first test asserted "no
+`WidgetSpan` in the span tree" and **passed against the buggy code**, because the mechanism
+is paragraph fragmentation, not a `WidgetSpan`. Assert on the RichText *count* for a
+sentence, and on which span carries the recognizer. (2) **Instrument, don't reason** (the #81
+lesson again).
+
+**Still not verified by an automated test:** that a real mouse drag on the shipped Windows
+build highlights. Synthetic pointer events never traverse the OS input path — eight widget
+tests passed against the original report. Use `scripts/rig/probe-drive-selection.ps1` with a
+URL-containing fixture and **always `-ShotDuring`**: without the mid-drag screenshot,
+"nothing was selected" and "nothing was rendered to select" are indistinguishable.
 
 ## Auth System
 - Cookie-based session auth (primary, for browser users)
