@@ -215,7 +215,7 @@ context budget; `idleMin`, default 10; `auto: false` to go back to the button on
 setting says, not at the model's window: at 400k it compacts at about 367k, which is 36% of a
 1M window. The server reads that setting from `~/.claude/settings.json` (a change applies within
 seconds, no restart) and publishes each session's **context budget** on its metrics: warn at
-62.5% of the window (250k at 400k), hand off at 75% (300k), compact at the window minus 33k.
+62.5% of the window (250k at 400k), hand off at 75% (300k; never above 500k), compact at the window minus 33k.
 With the setting unset, the model's window is the limit. The companion colours the ctx figure on
 the session card and the meta bar against it: green, amber from the warn point, red from the
 hand-off point. It also shows how many times the conversation has compacted (`↻3`), counted
