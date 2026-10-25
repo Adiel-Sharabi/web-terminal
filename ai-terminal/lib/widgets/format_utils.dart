@@ -45,6 +45,10 @@ Color ctxColor(ThemeData theme, int pct,
 /// when there is nothing to show (never compacted, or not reported).
 String? compactionsLabel(int? n) => n != null && n > 0 ? '\u21bb$n' : null;
 
+/// The tooltip under [compactionsLabel].
+String compactionsTooltip(int n) =>
+    n == 1 ? 'Compacted once' : 'Compacted $n times';
+
 /// Rate-limit window pressure — the SINGLE source of truth for the 5h/7d
 /// colours. As with [ctxColor], do not copy these numbers into a call site.
 ///

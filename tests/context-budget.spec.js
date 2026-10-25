@@ -20,7 +20,9 @@ test.describe('contextBudget (#393)', () => {
   });
 
   test('unset, or not below the model window, the model window is the limit', () => {
-    const model = { warnAt: 625_000, handoffAt: 750_000, compactAt: 1_000_000, source: 'model' };
+    // Compaction at the window minus the same 33k (Office: median 967k unset). The hand-off
+    // is capped at the old 500k - never 750k, past the ~700k harm zone - and warn keeps 5/6.
+    const model = { warnAt: 416_667, handoffAt: 500_000, compactAt: 967_000, source: 'model' };
     expect(B.contextBudget({ ctxWindow: 1_000_000 })).toEqual(model);
     expect(B.contextBudget({ ctxWindow: 1_000_000, autoCompactWindow: 1_000_000 })).toEqual(model);
     expect(B.contextBudget({ ctxWindow: 1_000_000, autoCompactWindow: 2_000_000 })).toEqual(model);
@@ -29,6 +31,15 @@ test.describe('contextBudget (#393)', () => {
     expect(B.contextBudget({ autoCompactWindow: 400_000 })).toMatchObject({ handoffAt: 300_000, source: 'autoCompactWindow' });
     expect(B.contextBudget({})).toBeNull();
     expect(B.contextBudget({ ctxWindow: 0 })).toBeNull();
+    // A 200k model: 150k hand-off, 167k compaction - the ratios, uncapped.
+    expect(B.contextBudget({ ctxWindow: 200_000 })).toEqual({ warnAt: 125_000, handoffAt: 150_000, compactAt: 167_000, source: 'model' });
+  });
+
+  test('the hand-off point never passes the cap, whatever the window', () => {
+    for (const w of [400_000, 700_000, 800_000, 999_999]) {
+      expect(B.contextBudget({ ctxWindow: 1_000_000, autoCompactWindow: w }).handoffAt).toBeLessThanOrEqual(B.HANDOFF_MAX_TOKENS);
+    }
+    expect(B.HANDOFF_MAX_TOKENS).toBe(500_000);
   });
 
   test('the thresholds stay ordered even for a tiny window', () => {
@@ -119,10 +130,15 @@ test.describe('scanCompactions (#393)', () => {
 test.describe('the server publishes the budget, occupancy and compaction count (#393)', () => {
   const DIR = path.join(claudeProjectsRoot(), '__wt-ctxbudget-fixture__');
   const fixture = path.join(DIR, `wt_ctx_${process.pid}.jsonl`);
+  // playwright.config.js points the server's agent-settings lookup here (WT_AGENT_SETTINGS_DIR).
+  const SETTINGS = path.join(process.env.WT_AGENT_SETTINGS_DIR || '', ...agents.contextBudgetPolicy('claude').settingsFile);
+  const writeSettings = (obj) => { fs.mkdirSync(path.dirname(SETTINGS), { recursive: true }); fs.writeFileSync(SETTINGS, JSON.stringify(obj), 'utf8'); };
   let ctx;
   let id;
 
   test.beforeAll(async () => {
+    expect(process.env.WT_AGENT_SETTINGS_DIR).toBeTruthy();
+    writeSettings({ autoCompactWindow: 400_000, autoCompactEnabled: true });
     ctx = await authCtx();
     fs.mkdirSync(DIR, { recursive: true });
     fs.writeFileSync(fixture, [turnLine('a'), recordLine(1), quoteLine(), recordLine(2)].join('\n') + '\n', 'utf8');
@@ -142,6 +158,7 @@ test.describe('the server publishes the budget, occupancy and compaction count (
   test.afterAll(async () => {
     if (id) { try { await ctx.delete(`/api/sessions/${id}`); } catch {} }
     try { fs.rmSync(DIR, { recursive: true, force: true }); } catch {}
+    try { fs.rmSync(path.dirname(path.dirname(SETTINGS)), { recursive: true, force: true }); } catch {}
     await ctx.dispose();
   });
 
@@ -151,16 +168,23 @@ test.describe('the server publishes the budget, occupancy and compaction count (
   };
 
   test('on the row, and the count follows the transcript as it grows', async () => {
-    const m = await metricsOf();
-    expect(m).toMatchObject({ ctx: 31, ctxWindow: 1_000_000, ctxUsed: 310_000 });
-    // Which source decides is this machine's settings; that it is one, and ordered, is not.
-    expect(['autoCompactWindow', 'model']).toContain(m.budget.source);
-    expect(m.budget.warnAt).toBeLessThanOrEqual(m.budget.handoffAt);
-    expect(m.budget.handoffAt).toBeLessThanOrEqual(m.budget.compactAt);
+    // The settings file's 400k decides - read from the file, not from the model window.
+    await expect.poll(async () => (await metricsOf()).budget, { timeout: 15000, intervals: [300] })
+      .toEqual({ warnAt: 250_000, handoffAt: 300_000, compactAt: 367_000, source: 'autoCompactWindow' });
+    expect(await metricsOf()).toMatchObject({ ctx: 31, ctxWindow: 1_000_000, ctxUsed: 310_000 });
     // Counted behind the poll, so it lands within a poll or two - never the quoted line.
     await expect.poll(async () => (await metricsOf()).compactions, { timeout: 10000, intervals: [200] }).toBe(2);
     fs.appendFileSync(fixture, `${turnLine('b')}\n${recordLine(3)}\n`, 'utf8');
     await expect.poll(async () => (await metricsOf()).compactions, { timeout: 10000, intervals: [200] }).toBe(3);
+  });
+
+  test('a settings edit lands with no restart; switching auto-compact off falls back to the model', async () => {
+    writeSettings({ autoCompactWindow: 600_000 });
+    await expect.poll(async () => (await metricsOf()).budget.compactAt, { timeout: 15000, intervals: [500] }).toBe(567_000);
+    writeSettings({ autoCompactWindow: 600_000, autoCompactEnabled: false });
+    await expect.poll(async () => (await metricsOf()).budget.source, { timeout: 15000, intervals: [500] }).toBe('model');
+    writeSettings({ autoCompactWindow: 400_000 });
+    await expect.poll(async () => (await metricsOf()).budget.handoffAt, { timeout: 15000, intervals: [500] }).toBe(300_000);
   });
 
   test('every session list carries the same fields (the cluster merge too)', async () => {

@@ -96,7 +96,7 @@ class SessionMetaBar extends StatelessWidget {
     final compacted = compactionsLabel(m?.compactions);
     if (compacted != null) {
       chips.add(Tooltip(
-        message: 'Compacted ${m!.compactions} times',
+        message: compactionsTooltip(m!.compactions!),
         child: Padding(
           padding: const EdgeInsets.only(right: 8),
           child: Text(

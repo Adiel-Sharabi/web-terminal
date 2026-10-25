@@ -124,6 +124,12 @@ test.describe('handoffCandidate (#340)', () => {
     expect(judge(r, { cfg: H.handoffConfig({ ctxThreshold: 310_000 }) }).suggest).toBe(true);
     expect(H.ctxThresholdFor(H.handoffConfig({ ctxThreshold: 310_000 }), { budget: BUDGET })).toBe(310_000);
     expect(H.ctxThresholdFor(cfg, {})).toBeNull();
+    // A machine WITHOUT the setting: the model window decides, and the hand-off point is
+    // capped at the old 500k - a 1M session at 600k is still offered, not left to grow to
+    // 750k inside the ~700k harm zone.
+    r.metrics = { ctx: 60, ctxWindow: 1_000_000, budget: contextBudget({ ctxWindow: 1_000_000 }) };
+    expect(r.metrics.budget.handoffAt).toBe(500_000);
+    expect(judge(r).suggest).toBe(true);
   });
 
   test('force may skip only the judgement gates, never the safety ones', () => {

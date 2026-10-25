@@ -3577,22 +3577,29 @@ async function compactionTranscriptPath(id) {
 
 // The agent's auto-compact window, from its settings file under the agent home. Stat at
 // most every few seconds and re-read only when the file changed, so a settings edit lands
-// with no restart and a poll costs nothing. Unreadable or absent reads as unset.
+// with no restart and a poll costs nothing. Absent reads as unset. A file that does not
+// parse keeps the last good value and is retried next check: Claude Code writes this file
+// itself, so a read can land mid-write. WT_AGENT_SETTINGS_DIR replaces the agent home for
+// this one lookup, so the suite can drive the setting without touching the real file.
 const _acwCache = new Map(); // settings path -> { checkedAt, mtimeMs, value }
 const ACW_RECHECK_MS = 5000;
 function agentAutoCompactWindow(policy) {
-  const file = path.join(transcriptHome(), ...policy.settingsFile);
+  const file = path.join(process.env.WT_AGENT_SETTINGS_DIR || transcriptHome(), ...policy.settingsFile);
   const now = Date.now();
   let e = _acwCache.get(file);
   if (e && now - e.checkedAt < ACW_RECHECK_MS) return e.value;
   let mtimeMs = null;
   try { mtimeMs = fs.statSync(file).mtimeMs; } catch { /* absent */ }
   if (!e || e.mtimeMs !== mtimeMs) {
-    let settings = null;
-    if (mtimeMs !== null) {
-      try { settings = JSON.parse(fs.readFileSync(file, 'utf8')); } catch { settings = null; }
+    if (mtimeMs === null) e = { value: null, mtimeMs };
+    else {
+      try {
+        const settings = JSON.parse(fs.readFileSync(file, 'utf8'));
+        e = { value: contextBudgetLib.autoCompactWindowFrom(settings, policy), mtimeMs };
+      } catch {
+        e = { value: e ? e.value : null, mtimeMs: null }; // unparsed: re-read next time
+      }
     }
-    e = { value: contextBudgetLib.autoCompactWindowFrom(settings, policy), mtimeMs };
   }
   e.checkedAt = now;
   _acwCache.set(file, e);
@@ -3627,10 +3634,10 @@ async function scanCompactionFile(tpath, record) {
   if (st.size < e.offset) e = contextBudgetLib.emptyScan(); // rewritten, not appended
   if (st.size > e.offset) {
     const fh = await fs.promises.open(tpath, 'r');
+    const buf = Buffer.allocUnsafe(Math.min(COMPACTION_CHUNK, st.size - e.offset));
     try {
       while (e.offset < st.size) {
-        const len = Math.min(COMPACTION_CHUNK, st.size - e.offset);
-        const buf = Buffer.alloc(len);
+        const len = Math.min(buf.length, st.size - e.offset);
         const { bytesRead } = await fh.read(buf, 0, len, e.offset);
         const next = contextBudgetLib.scanCompactions(e, buf.subarray(0, bytesRead), record);
         if (next.offset === e.offset) break; // only an unfinished line left

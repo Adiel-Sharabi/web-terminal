@@ -73,6 +73,8 @@ void main() {
       expect(compactionsLabel(3), '↻3');
       expect(compactionsLabel(0), isNull);
       expect(compactionsLabel(null), isNull);
+      expect(compactionsTooltip(1), 'Compacted once');
+      expect(compactionsTooltip(4), 'Compacted 4 times');
     });
   });
 

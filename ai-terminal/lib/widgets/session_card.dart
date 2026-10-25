@@ -249,7 +249,7 @@ class SessionCard extends StatelessWidget {
                       case final compacted?) ...[
                     const SizedBox(width: 6),
                     Tooltip(
-                      message: 'Compacted ${session.metrics!.compactions} times',
+                      message: compactionsTooltip(session.metrics!.compactions!),
                       child: Text(
                         compacted,
                         style: theme.textTheme.bodySmall?.copyWith(
