@@ -191,7 +191,7 @@ clears it. The session list also has a **filter by title** box.
 **Hand off a long session** — a Claude session that has run for days re-reads its whole
 context on every turn, and past ~700k tokens it starts losing track of what it already read.
 When one is idle, its own report says it is waiting on someone else or done, and its context
-is at least 500k tokens, the companion's board offers **Hand off** on its row. One press makes
+has passed the session's hand-off point (below), the companion's board offers **Hand off** on its row. One press makes
 the session update its tracker and write a brief for its successor (it posts no GitHub
 comment), says whether closing it would lose anything, then starts a fresh session in the same
 folder from that brief. The old session closes only once the new one has actually started a
@@ -207,9 +207,19 @@ outcome (closed, kept, failed, cancelled) is appended to `handoffs/handoff-log.j
 started it, the context size, the verdict and the successor, so the automatic hand-offs can be
 judged afterwards. The briefs are kept for a week.
 
-Tune it with a `handoff` block in `config.json` (`ctxThreshold`, default 500000; `idleMin`,
-default 10; `auto: false` to go back to the button only; `enabled: false` for neither), read
-live. Claude only: another agent is offered nothing.
+Tune it with a `handoff` block in `config.json` (`ctxThreshold`, default: the session's
+context budget; `idleMin`, default 10; `auto: false` to go back to the button only;
+`enabled: false` for neither), read live. Claude only: another agent is offered nothing.
+
+**See how close a session is to compacting** — Claude compacts where its `autoCompactWindow`
+setting says, not at the model's window: at 400k it compacts at about 367k, which is 36% of a
+1M window. The server reads that setting from `~/.claude/settings.json` (a change applies within
+seconds, no restart) and publishes each session's **context budget** on its metrics: warn at
+62.5% of the window (250k at 400k), hand off at 75% (300k), compact at the window minus 33k.
+With the setting unset, the model's window is the limit. The companion colours the ctx figure on
+the session card and the meta bar against it: green, amber from the warn point, red from the
+hand-off point. It also shows how many times the conversation has compacted (`↻3`), counted
+from the transcript. An older server publishes no budget and the colour keeps its old % rule.
 
 **Prepare a machine for a restart** — one action, one honest answer.
 `node scripts/wt-maintenance.js prepare "Windows update"` (add `--server <url|name>` for a cluster

@@ -65,7 +65,7 @@ async function bigIdleSession(ctx, name) {
   expect(await hook(id, 'Stop', { session_id: conv })).toBe(200);
   const rep = await agentPost(id, 'report', { items: [{ ref: '#1', title: 'x', state: 'in-progress' }], wait: { on: 'external', what: 'PR review' } });
   expect(rep.status).toBe(200);
-  const st = await ctx.post('/api/claude-status', { data: { session_id: conv, context_window: { context_window_size: 1_000_000, used_percentage: 60 } } });
+  const st = await ctx.post('/api/claude-status', { data: { session_id: conv, context_window: { context_window_size: 1_000_000, used_percentage: 80 } } });
   expect(st.status()).toBe(200);
   await until(async () => (await rowOf(ctx, id))?.status === 'idle', 'the old session to go idle');
   return id;
@@ -96,7 +96,7 @@ test.describe('#340 hand-off — server', () => {
     const name = `handoff-gate-${Date.now()}`; made.push(name);
     const id = await bigIdleSession(ctx, name);
     const h = (await rowOf(ctx, id)).handoff;
-    expect(h).toMatchObject({ suggest: false, why: 'recent', ctxTokens: 600000, run: null });
+    expect(h).toMatchObject({ suggest: false, why: 'recent', ctxTokens: 800000, run: null });
     const r = await ctx.post(`/api/sessions/${id}/handoff`, { data: {} });
     expect(r.status()).toBe(409);
     expect((await r.json()).why).toBe('recent');
@@ -212,7 +212,7 @@ test.describe('#340 hand-off — server', () => {
       const id = await bigIdleSession(ctx, name);
       const run = await until(async () => (await rowOf(ctx, id))?.handoff?.run, 'an automatic start', 20000);
       expect(run).toMatchObject({ state: 'wrapping', trigger: 'auto' });
-      expect(logOf(id).find((l) => l.event === 'started')).toMatchObject({ trigger: 'auto', name, ctxTokens: 600000 });
+      expect(logOf(id).find((l) => l.event === 'started')).toMatchObject({ trigger: 'auto', name, ctxTokens: 800000 });
 
       expect((await ctx.delete(`/api/sessions/${id}/handoff`)).status()).toBe(200);
       expect(logOf(id).find((l) => l.event === 'cancelled')).toBeTruthy();
@@ -224,7 +224,7 @@ test.describe('#340 hand-off — server', () => {
       const conv = crypto.randomUUID();
       expect(await hook(id, 'UserPromptSubmit', { session_id: conv, prompt: 'carry on' })).toBe(200);
       expect(await hook(id, 'Stop', { session_id: conv })).toBe(200);
-      expect((await ctx.post('/api/claude-status', { data: { session_id: conv, context_window: { context_window_size: 1_000_000, used_percentage: 60 } } })).status()).toBe(200);
+      expect((await ctx.post('/api/claude-status', { data: { session_id: conv, context_window: { context_window_size: 1_000_000, used_percentage: 80 } } })).status()).toBe(200);
       expect((await agentPost(id, 'report', { items: [{ ref: '#1', title: 'x', state: 'in-progress' }], wait: { on: 'external', what: 'PR review' } })).status).toBe(200);
       let last;
       const again = await until(async () => { last = await rowOf(ctx, id); return last?.handoff?.run; }, 'a second automatic start', 20000)

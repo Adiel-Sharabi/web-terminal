@@ -20,7 +20,7 @@ Session _card(String status, {SessionReason? reason}) => Session(
       lastActivity: DateTime.now().millisecondsSinceEpoch - 13 * 3600 * 1000,
       notifyLevel: 'important',
       server: _home,
-      metrics: const SessionMetrics(ctx: 85),
+      metrics: const SessionMetrics(ctx: 85, compactions: 16), // #393: the widest count seen
       reason: reason,
     );
 
@@ -79,7 +79,7 @@ void main() {
           lastActivity: DateTime.now().millisecondsSinceEpoch - 13 * 3600 * 1000,
           notifyLevel: 'important',
           server: _home,
-          metrics: const SessionMetrics(ctx: 85),
+          metrics: const SessionMetrics(ctx: 85, compactions: 16), // #393: the widest count seen
         );
         await tester.pumpWidget(MaterialApp(
           theme: AppTheme.dark,

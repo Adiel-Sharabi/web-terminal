@@ -33,6 +33,7 @@ const taskListLib = require('./lib/task-list');
 const briefLib = require('./lib/session-brief');
 const sessionReasonLib = require('./lib/session-reason');
 const handoffLib = require('./lib/handoff');
+const contextBudgetLib = require('./lib/context-budget');
 const maintLib = require('./lib/maintenance');
 const usageLimit = require('./lib/usage-limit');
 // #190 — imported for ONE thing: the default of `autoAnswerBlockingPrompt`, so this
@@ -3519,7 +3520,7 @@ function usageLimitFields(sessionId, metrics, session) {
 // null → the default provider, which has no readMetrics) never triggers a file read.
 async function sessionMetrics(s) {
   const pushed = getStatusMetrics(s.claudeSessionId);
-  if (pushed) { armResetTimerFromMetrics(s.id, pushed); return pushed; }
+  if (pushed) { armResetTimerFromMetrics(s.id, pushed); return withContextBudget(s, pushed); }
   const adapter = getAdapter(s.agent);
   if (typeof adapter.readMetrics !== 'function') return null;
 
@@ -3531,7 +3532,115 @@ async function sessionMetrics(s) {
   _metricsMiss.delete(s.id);
   const metrics = readTranscriptMetrics(tpath, adapter);
   armResetTimerFromMetrics(s.id, metrics);
-  return metrics;
+  return withContextBudget(s, metrics);
+}
+
+// --- #393 the context budget and the compaction count, on every session's metrics ---
+//
+// The rule is lib/context-budget.js's; this is the I/O. Added in sessionMetrics, the one
+// choke point both row shapers and the hand-off row read, so none of them can lack it.
+//   ctxUsed      occupancy in tokens (what the budget is compared with)
+//   budget       {warnAt, handoffAt, compactAt, source}; null for an agent that declares
+//                no budget (lib/agents.js contextBudget) - a client keeps its old rule
+//   compactions  how many times this conversation compacted; null until counted, or for
+//                an agent that declares no compaction record
+// The agent is the METRICS' owner first: a pushed status line is Claude's whichever
+// session carries it (#56), so a plain-shell session running claude still gets a budget.
+async function withContextBudget(s, metrics) {
+  if (!metrics) return metrics;
+  const agent = metrics.agent || s.agent || null;
+  const policy = agentsLib.contextBudgetPolicy(agent);
+  const budget = policy
+    ? contextBudgetLib.contextBudget({ ctxWindow: metrics.ctxWindow, autoCompactWindow: agentAutoCompactWindow(policy) })
+    : null;
+  const record = agentsLib.compactionRecord(agent);
+  const tpath = record ? await compactionTranscriptPath(s.id) : '';
+  return {
+    ...metrics,
+    ctxUsed: contextBudgetLib.occupancy(metrics),
+    budget,
+    compactions: tpath ? compactionCount(tpath, record) : null,
+  };
+}
+
+// A status line is pushed before the conversation's first message, so its transcript
+// may not exist yet - and a miss costs a worker RPC and a projects walk. Not on every
+// poll: a miss is remembered for the same minute the metrics path uses.
+const _compactionPathMiss = new Map(); // session id -> ts of the last failed resolution
+async function compactionTranscriptPath(id) {
+  const missedAt = _compactionPathMiss.get(id);
+  if (missedAt && Date.now() - missedAt < _metricsMissTtlMs) return '';
+  const tpath = await resolveSessionTranscriptPath(id).catch(() => '');
+  if (tpath) _compactionPathMiss.delete(id); else _compactionPathMiss.set(id, Date.now());
+  return tpath;
+}
+
+// The agent's auto-compact window, from its settings file under the agent home. Stat at
+// most every few seconds and re-read only when the file changed, so a settings edit lands
+// with no restart and a poll costs nothing. Unreadable or absent reads as unset.
+const _acwCache = new Map(); // settings path -> { checkedAt, mtimeMs, value }
+const ACW_RECHECK_MS = 5000;
+function agentAutoCompactWindow(policy) {
+  const file = path.join(transcriptHome(), ...policy.settingsFile);
+  const now = Date.now();
+  let e = _acwCache.get(file);
+  if (e && now - e.checkedAt < ACW_RECHECK_MS) return e.value;
+  let mtimeMs = null;
+  try { mtimeMs = fs.statSync(file).mtimeMs; } catch { /* absent */ }
+  if (!e || e.mtimeMs !== mtimeMs) {
+    let settings = null;
+    if (mtimeMs !== null) {
+      try { settings = JSON.parse(fs.readFileSync(file, 'utf8')); } catch { settings = null; }
+    }
+    e = { value: contextBudgetLib.autoCompactWindowFrom(settings, policy), mtimeMs };
+  }
+  e.checkedAt = now;
+  _acwCache.set(file, e);
+  return e.value;
+}
+
+// The compaction count of one transcript. The poll NEVER waits for it (#280's rule): it
+// answers from the last scan and queues the next one. A transcript only grows, so each
+// scan reads just the bytes added since the last (lib/context-budget.js scanCompactions);
+// the first scan of a 150MB transcript is the only big read, and scans run one at a time
+// so a hot reload with ten long sessions does not read them all at once.
+const _compactionScans = new Map(); // transcript path -> scan state
+const _compactionQueued = new Set();
+let _compactionQueue = Promise.resolve();
+const COMPACTION_CHUNK = 4 * 1024 * 1024;
+const COMPACTION_SCANS_MAX = 200;
+function compactionCount(tpath, record) {
+  const e = _compactionScans.get(tpath);
+  if (!_compactionQueued.has(tpath)) {
+    _compactionQueued.add(tpath);
+    _compactionQueue = _compactionQueue
+      .then(() => scanCompactionFile(tpath, record))
+      .catch(() => {})
+      .then(() => { _compactionQueued.delete(tpath); });
+  }
+  return e ? e.count : null;
+}
+
+async function scanCompactionFile(tpath, record) {
+  const st = await fs.promises.stat(tpath);
+  let e = _compactionScans.get(tpath) || contextBudgetLib.emptyScan();
+  if (st.size < e.offset) e = contextBudgetLib.emptyScan(); // rewritten, not appended
+  if (st.size > e.offset) {
+    const fh = await fs.promises.open(tpath, 'r');
+    try {
+      while (e.offset < st.size) {
+        const len = Math.min(COMPACTION_CHUNK, st.size - e.offset);
+        const buf = Buffer.alloc(len);
+        const { bytesRead } = await fh.read(buf, 0, len, e.offset);
+        const next = contextBudgetLib.scanCompactions(e, buf.subarray(0, bytesRead), record);
+        if (next.offset === e.offset) break; // only an unfinished line left
+        e = next;
+      }
+    } finally { await fh.close(); }
+  }
+  _compactionScans.delete(tpath); // re-insert: the Map's order is then least-recent first
+  _compactionScans.set(tpath, e);
+  if (_compactionScans.size > COMPACTION_SCANS_MAX) _compactionScans.delete(_compactionScans.keys().next().value);
 }
 
 // Background commands still RUNNING in this session (#background-work badge).

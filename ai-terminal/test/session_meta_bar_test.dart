@@ -409,4 +409,33 @@ void main() {
       }
     });
   });
+
+  // #393 - the meta bar's ctx chip is judged against the server's budget too,
+  // including the transcript estimate, and carries the compaction count.
+  group('context budget (#393)', () {
+    const budget = ContextBudget(warnAt: 250000, handoffAt: 300000, compactAt: 367000);
+    Color? colorOf(WidgetTester tester, String text) =>
+        tester.widget<Text>(find.text(text)).style?.color;
+
+    testWidgets('live ctx past the hand-off point is red, with the count', (tester) async {
+      await pumpBar(tester, session: _session(metrics: const SessionMetrics(
+          ctx: 31, ctxWindow: 1000000, ctxUsed: 310000, budget: budget, compactions: 5)));
+      expect(colorOf(tester, 'ctx 31%'), AppTheme.dark.colorScheme.error);
+      expect(find.text('↻5'), findsOneWidget);
+    });
+
+    testWidgets('the estimate is judged against the budget as well', (tester) async {
+      await pumpBar(tester,
+          session: _session(metrics: const SessionMetrics(
+              ctxWindow: 1000000, budget: budget, model: 'Opus')),
+          derivedCtx: 26);
+      expect(colorOf(tester, 'ctx ~26%'), kWarnAmber);
+    });
+
+    testWidgets('an older server: the % rule, no count', (tester) async {
+      await pumpBar(tester, session: _session(metrics: const SessionMetrics(ctx: 31)));
+      expect(colorOf(tester, 'ctx 31%'), AppTheme.dark.colorScheme.primary);
+      expect(find.textContaining('↻'), findsNothing);
+    });
+  });
 }

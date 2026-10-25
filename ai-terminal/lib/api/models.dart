@@ -972,6 +972,32 @@ class ClosedSession {
   }
 }
 
+/// #393 — where a session's context actually runs out, as the server derives
+/// it (lib/context-budget.js) from the agent's auto-compact setting. Token
+/// counts of context OCCUPANCY. Absent from an older server and for an agent
+/// that declares none — the ctx colour then keeps its % rule.
+class ContextBudget {
+  final int warnAt;
+  final int handoffAt;
+  final int compactAt;
+
+  const ContextBudget({
+    required this.warnAt,
+    required this.handoffAt,
+    required this.compactAt,
+  });
+
+  /// null unless all three are positive and ordered — a budget that is not one
+  /// would colour against nonsense, and no colour rule beats a wrong one.
+  static ContextBudget? fromJson(dynamic json) {
+    if (json is! Map) return null;
+    int? t(dynamic v) => v is num && v > 0 ? v.toInt() : null;
+    final w = t(json['warnAt']), h = t(json['handoffAt']), c = t(json['compactAt']);
+    if (w == null || h == null || c == null || w > h || h > c) return null;
+    return ContextBudget(warnAt: w, handoffAt: h, compactAt: c);
+  }
+}
+
 class SessionMetrics {
   final int? ctx;
 
@@ -991,6 +1017,16 @@ class SessionMetrics {
   final String? model;
   final String? effort;
 
+  /// #393 — context occupancy in tokens, as the server computed it.
+  final int? ctxUsed;
+
+  /// #393 — the budget [ctxUsed] is judged against; see [ContextBudget].
+  final ContextBudget? budget;
+
+  /// #393 — how many times this conversation has compacted (auto and
+  /// `/compact`), or null when the server has not counted it.
+  final int? compactions;
+
   const SessionMetrics({
     this.ctx,
     this.ctxWindow,
@@ -998,7 +1034,15 @@ class SessionMetrics {
     this.sevenD,
     this.model,
     this.effort,
+    this.ctxUsed,
+    this.budget,
+    this.compactions,
   });
+
+  /// The occupancy behind a ctx% computed elsewhere (the transcript estimate),
+  /// so it can be judged against [budget] too. null without a window.
+  int? tokensAt(int pct) =>
+      ctxWindow == null ? null : (pct * ctxWindow! / 100).round();
 
   /// Parses the `metrics` object from a session JSON element. Returns `null`
   /// when the field is absent/null or when no numeric metric is present, so the
@@ -1020,6 +1064,11 @@ class SessionMetrics {
       sevenD: pct(json['sevenD']),
       model: str(json['model']),
       effort: str(json['effort']),
+      ctxUsed: tokens(json['ctxUsed']),
+      budget: ContextBudget.fromJson(json['budget']),
+      compactions: json['compactions'] is num && json['compactions'] >= 0
+          ? (json['compactions'] as num).toInt()
+          : null,
     );
     // ctxWindow alone is not a reading — it says how big the window is, not how
     // much of it is used — so it does not by itself make a renderable metric.
@@ -1040,7 +1089,8 @@ class SessionMetrics {
       fiveH != null ||
       sevenD != null ||
       model != null ||
-      effort != null;
+      effort != null ||
+      (compactions ?? 0) > 0;
 }
 
 /// The `GET /api/sessions/:id/attention` response: the last recorded attention
