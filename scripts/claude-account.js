@@ -51,6 +51,7 @@ function main([verb, arg]) {
     const r = account.switchTo(arg);
     if (r.alreadyActive) return console.log(`already on ${r.to}; refreshed its saved copy "${r.label}"`);
     if (r.from) console.log(`saved ${r.from} first`);
+    if (r.warning) console.error(`WARNING: ${r.warning}`);
     return console.log(`switched to ${r.to}. Check /status in a running session.`);
   }
   throw new account.Refusal('usage: claude-account.js status | save [label] | switch <label|email>');

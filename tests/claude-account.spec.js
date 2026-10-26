@@ -130,6 +130,72 @@ test.describe('claude-account', () => {
     expect(r.out).toContain('no saved account');
     expect(fs.readFileSync(credFile(home), 'utf8')).toBe(credText);
   });
+
+  // The two files must never name different accounts: the next save would file B's
+  // tokens under A. A read-only .claude.json makes the SECOND write fail for real.
+  test('when .claude.json cannot be written, the login is put back and the saved copies stay right', () => {
+    const home = makeHome();
+    login(home, ACCOUNT_A);
+    run(home, 'save');
+    login(home, ACCOUNT_B);
+    run(home, 'save');
+    const credText = fs.readFileSync(credFile(home), 'utf8');
+    fs.chmodSync(configFile(home), 0o444);
+    try {
+      const r = run(home, 'switch', 'a@example.com');
+      expect(r.code, r.out).toBe(2);
+      expect(r.out).toContain('the login was put back');
+    } finally {
+      fs.chmodSync(configFile(home), 0o644);
+    }
+    expect(JSON.parse(fs.readFileSync(credFile(home), 'utf8'))).toEqual(JSON.parse(credText));
+    expect(JSON.parse(fs.readFileSync(configFile(home), 'utf8')).oauthAccount).toEqual(ACCOUNT_B.account);
+    // A later switch still finds A's own tokens under A.
+    expect(run(home, 'switch', 'a@example.com').code).toBe(0);
+    expect(JSON.parse(fs.readFileSync(credFile(home), 'utf8')).claudeAiOauth).toEqual(ACCOUNT_A.oauth);
+  });
+
+  test('one user in two organizations is two accounts', () => {
+    const home = makeHome();
+    const personal = { oauth: ACCOUNT_A.oauth, account: { ...ACCOUNT_A.account, organizationUuid: 'org-personal' } };
+    const team = {
+      oauth: { ...ACCOUNT_B.oauth, refreshTokenExpiresAt: Date.now() + 20 * 864e5 },
+      account: { ...ACCOUNT_A.account, organizationUuid: 'org-team' },
+    };
+    login(home, personal);
+    run(home, 'save', 'personal');
+    login(home, team);
+    run(home, 'save', 'team');
+    const r = run(home, 'switch', 'personal');
+    expect(r.code, r.out).toBe(0);
+    expect(r.out).not.toContain('already on');
+    expect(JSON.parse(fs.readFileSync(credFile(home), 'utf8')).claudeAiOauth).toEqual(personal.oauth);
+    expect(run(home, 'switch', 'team').code).toBe(0);
+    expect(JSON.parse(fs.readFileSync(credFile(home), 'utf8')).claudeAiOauth).toEqual(team.oauth);
+  });
+
+  test('save refuses a label that holds another account, in any letter case', () => {
+    const home = makeHome();
+    login(home, ACCOUNT_A);
+    expect(run(home, 'save', 'work').code).toBe(0);
+    const store = path.join(home, '.config', 'web-terminal', 'claude-accounts');
+    const savedA = fs.readFileSync(path.join(store, 'work.json'), 'utf8');
+    login(home, ACCOUNT_B);
+    for (const label of ['work', 'WORK']) {
+      const r = run(home, 'save', label);
+      expect(r.code, label).toBe(2);
+      expect(r.out).toContain('already holds another saved login');
+    }
+    expect(fs.readFileSync(path.join(store, 'work.json'), 'utf8')).toBe(savedA);
+  });
+
+  test('an email outside the label alphabet still gets a default label', () => {
+    const home = makeHome();
+    login(home, { oauth: ACCOUNT_A.oauth, account: { ...ACCOUNT_A.account, emailAddress: "o'brien@example.com" } });
+    const r = run(home, 'save');
+    expect(r.code, r.out).toBe(0);
+    expect(r.out).toContain('"o_brien@example.com"');
+  });
 });
 
 // The routes behind the companion's per-machine "Switch account". The test server reads

@@ -6002,7 +6002,7 @@ app.post('/api/claude-account/switch', express.json({ limit: '4kb' }), (req, res
   try {
     const home = claudeAccountHome();
     const result = claudeAccount.switchTo(target, home);
-    console.log(`[claude-account] ${result.alreadyActive ? 'already on' : 'switched to'} ${result.label}`);
+    console.log(`[claude-account] ${result.alreadyActive ? 'already on' : 'switched to'} ${result.label}${result.warning ? ` - WARNING: ${result.warning}` : ''}`);
     res.json({ ...result, status: claudeAccount.status(home) });
   } catch (e) { claudeAccountError(res, e); }
 });

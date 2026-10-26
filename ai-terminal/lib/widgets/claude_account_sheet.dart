@@ -75,6 +75,8 @@ class _ClaudeAccountSheetState extends State<ClaudeAccountSheet> {
 
   Future<void> _switch(ClaudeAccount to) async {
     final name = to.email ?? to.label ?? '?';
+    // Busy from the first tap, so a second tap cannot open a second dialog.
+    setState(() => _busy = true);
     final ok = await showDialog<bool>(
       context: context,
       builder: (context) => AlertDialog(
@@ -87,7 +89,11 @@ class _ClaudeAccountSheetState extends State<ClaudeAccountSheet> {
         ],
       ),
     );
-    if (ok != true || !mounted) return;
+    if (!mounted) return;
+    if (ok != true) {
+      setState(() => _busy = false);
+      return;
+    }
     await _run(() => widget.client.switchClaudeAccount(to.key!), '${widget.machineName} is now on $name');
   }
 
