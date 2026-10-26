@@ -11,9 +11,33 @@
 
 ## Multi-Agent Support (Claude Code + Codex)
 
+**Law, as `CLAUDE.md` stated it until 2026-10-26** — moved here verbatim when `CLAUDE.md` became a one-line-per-rule digest. Frozen history: the digest line in `CLAUDE.md` is the only current law.
+
+A session knows *which* AI CLI agent it runs. `agent` is a real, persisted session field:
+`'claude'`, `'codex'`, or `null` for a plain shell. **`null` is never coerced to
+`'claude'`.** Evidence and the full Codex empirics: `docs/findings/agents-codex.md`.
+
+*(End of the moved law text. The evidence below was written earlier; where the two disagree, re-measure rather than pick one.)*
+
 A session knows *which* AI CLI agent it runs. `agent` is a real, persisted session field: `'claude'`, `'codex'`, or `null` for a plain shell. **`null` is never coerced to `'claude'`.**
 
 ### The rule: one registry, no branching
+
+**Law, as `CLAUDE.md` stated it until 2026-10-26** — moved here verbatim when `CLAUDE.md` became a one-line-per-rule digest. Frozen history: the digest line in `CLAUDE.md` is the only current law.
+
+Everything agent-specific lives in **`lib/agents.js`** — parser, transcript root,
+transcript-resolution strategy, subagent-trace support, label, colour, submit policy,
+readiness, submit confirmation. **Adding a CLI agent is one parser module + one registry
+entry.** If you find yourself writing `if (agent === 'codex')` in `server.js`,
+`pty-worker.js`, `app.html` or the companion, you are in the wrong file — add a field to
+the provider instead.
+
+`GET /api/agents` serves the catalogue, so both clients render the picker, the per-agent
+tint and (since #210) the composer marker with **no client release** when an agent is added
+or renamed. The companion holds no agent table; neither does `app.html`.
+
+*(End of the moved law text. The evidence below was written earlier; where the two disagree, re-measure rather than pick one.)*
+
 Everything agent-specific lives in **`lib/agents.js`** — parser, transcript root, transcript-resolution strategy, subagent-trace support, label, colour, and submit policy. **Adding a CLI agent is one parser module + one registry entry.** If you find yourself writing `if (agent === 'codex')` in `server.js`, `pty-worker.js`, `app.html` or the companion, you are in the wrong file — add a field to the provider instead.
 
 `GET /api/agents` serves the catalogue, so both clients render the picker and the per-agent tint with **no client release** when an agent is added or renamed. The companion holds no agent table (`AgentCatalog`); neither does `app.html`.
@@ -21,6 +45,93 @@ Everything agent-specific lives in **`lib/agents.js`** — parser, transcript ro
 An **explicit** agent is authoritative: a session declared `claude` is never served a Codex transcript. Only a session with no recorded agent falls back to cross-provider discovery.
 
 ### Codex facts (verified empirically against codex-cli 0.144.0 — do not trust the docs)
+
+**Law, as `CLAUDE.md` stated it until 2026-10-26** — moved here verbatim when `CLAUDE.md` became a one-line-per-rule digest. Frozen history: the digest line in `CLAUDE.md` is the only current law.
+
+**Submit is CR, never LF — for every agent.** Both TUIs read raw mode where Enter is `\r`
+(0x0D); an `\n` inserts a newline in the prompt box and submits nothing.
+
+**Rollout transcripts** live at
+`~/.codex/sessions/YYYY/MM/DD/rollout-<iso>-<uuid>.jsonl` and are **not cwd-keyed** — `cwd`
+appears only in the first `session_meta` line (~8 KB; a naive 4 KB read truncates it
+mid-JSON). `session_id` **is** the rollout UUID. Tool calls are **one line each**,
+`function_call.arguments` is a JSON **string**, `custom_tool_call_output.output` is a JSON
+envelope needing unwrap, and `event_msg` lines restate `response_item` text — parse one or
+every turn doubles.
+
+> **A Codex transcript path is DISCOVERED, never derived — so it must never be cached
+> forever.** Codex writes a **new rollout on every run**, and resolution is "the newest
+> rollout matching this cwd", so the correct answer changes while nothing about the
+> web-terminal session does. Claude is immune for two independent reasons (its path is a
+> pure derivation from cwd + conversation id, *and* its hooks re-stash it); Codex has
+> neither. The provider declares `transcriptPathStable` and a discovered path is re-derived
+> past a **10s TTL**. **Symptom to recognise:** a live, correct terminal next to a chat lens
+> showing another day is a *resolution* bug, not a rendering one — and `cwd` alone is not a
+> session identity when several rollouts share a directory.
+
+> **A conversation needs an identity ON THE WIRE, or no cache can know it is stale.** That
+> one gap produced the same bug twice, at two layers: the server cached a resolved path with
+> nothing to invalidate it, then the client cached the turns themselves. The id is derived
+> once in the registry (`conversationIdFromPath` — Claude's is the basename, Codex's is the
+> trailing UUID of `rollout-<iso>-<uuid>.jsonl`; match it as a UUID, the ISO stamp has
+> dashes too) and published as **`agentSessionId`**. **Do not fold it into
+> `claudeSessionId`** however tempting: `app.html` shows the Fork button on that field and
+> forks with `claude --resume <id>`. **Symptom:** terminal live, chat old — check the API
+> first, because it decides whether you are chasing a server bug or a client one.
+
+**The cap itself is NOT a prompt — it is a rollout error, the exact opposite of Claude
+(#142).** Claude presents an *answerable selector*, which is why the registry gives it a
+`usageLimitPrompt` and `pty-worker.js` answers it with a digit. Codex presents **nothing to
+answer**: the turn simply ends and the rollout records `task_complete` carrying
+`error.codex_error_info: "usage_limit_exceeded"`. So a `usageLimitPrompt` for Codex is not
+merely unmeasured, it is **the wrong shape entirely** — a PTY-scanning matcher would wait
+forever for bytes that never come. `autoResume: { arm: false }` stands: **nobody has ever
+hit Codex's 5h cap on this fleet**, so #142 does not unblock by waiting, and the real
+question is that **Claude's auto-resume exists because a capped Claude session sits
+BLOCKED**, while a capped Codex session returns to its composer.
+
+**Hooks DO run, and `SessionStart` is LAZY** — it fires when the first turn begins, not
+when the process starts (the same laziness as the rollout file). A hook that has not fired
+yet and a hook engine that never fires look identical if you never start a turn. The
+feature gate is `[features] hooks = true` in `~/.codex/config.toml`; trust is a real
+interactive gate that **blocks before the composer renders** and is answerable with `2` +
+Enter, recorded as a `trusted_hash` that survives across sessions.
+
+> **Probing hooks is only safe if you clean up.** An installed-but-untrusted `hooks.json`
+> **blocks every new Codex session** — the same failure class as the `Update available`
+> nag, and fatal for a worker-spawned PTY that has nobody to answer it. Delete the file the
+> moment the probe ends and relaunch once to confirm the composer returns. Strip the
+> `[hooks.state]` entries too: a stale `trusted_hash` silently pre-trusts a matching
+> definition later, with nobody reviewing it.
+
+**Status comes from OSC 9 in the PTY.** With `tui.notifications = true`,
+`notification_method = "osc9"` and `notification_condition = "always"`, the Codex TUI writes
+its notifications straight into the terminal — for a normal user the *weaker* channel, for
+web-terminal the *stronger* one, because **`pty-worker.js` is the terminal** and already
+reads every byte. `notification_condition` defaults to `unfocused` and **a PTY has no focus
+state**, so without `always` nothing is emitted and the feature looks broken rather than
+unconfigured; `scripts/install-codex-notify.js` writes all three keys and **a COLD restart
+is required** because this is worker-side.
+
+- **`lib/osc9-notify.js` owns only the byte rule** and buffers across chunk boundaries. A
+  notification fires **exactly once**, so a sequence split across two PTY reads that is
+  dropped is a status that never updates — unlike the api-error sniff next door, which gets
+  away with no buffering because its phrase stays on screen and repeats.
+- **What a body MEANS is a registry field** (`statusFromOutput.approvalPattern`), never a
+  branch. A plain shell and every unknown agent default to **not** reading status from
+  output — OSC 9 is a general terminal notification that vim or a build script can emit.
+- **Applied through `handleHook`** (an approval IS a `PermissionRequest`, a finished turn IS
+  a `Stop`) so it inherits the idle debounce, held-stop rule and push rather than growing a
+  second status machine. That reuse passes **`hookDriven: false`**: `handleHook` sets
+  `session.hookStatus`, which `isClaudeSession()` reads as proof the session is Claude, and
+  that gates the API-error sniff whose recovery **types** `continue` and `/compact` into the
+  PTY. Arming it on Codex would type Claude's recovery into Codex's composer.
+- **OSC 9 cannot be retired on its own:** it fires on exactly two occasions, an approval and
+  a finished turn, so **`working` is unreachable through it by construction**. Hooks close
+  that gap. Keeping OSC 9 as a zero-install fallback is defensible; relying on it *because
+  hooks don't work* is not.
+
+*(End of the moved law text. The evidence below was written earlier; where the two disagree, re-measure rather than pick one.)*
 
 **Submit is CR, never LF — for every agent.** See "Input & Submit Contract" below: that section is the law, and it supersedes any older phrasing here. Both TUIs read raw mode where Enter is `\r` (0x0D); an `\n` inserts a newline in the prompt box and submits nothing.
 
@@ -97,6 +208,38 @@ What was established, in order:
 **NEVER copy `~/.codex/auth.json` into a second `CODEX_HOME`.** Codex refreshes on start and the refresh token rotates; the copy triggers "refresh token was already used", and reuse-detection can revoke the whole token family. Use a stub provider (`model_providers.<name>` with `base_url`, `wire_api="responses"` — `"chat"` was removed) and no auth file.
 
 ### How to verify Codex behaviour (methods that work)
+
+**Law, as `CLAUDE.md` stated it until 2026-10-26** — moved here verbatim when `CLAUDE.md` became a one-line-per-rule digest. Frozen history: the digest line in `CLAUDE.md` is the only current law.
+
+- **The rollout is ground truth; the screen lies.** Codex writes a user message to its
+  rollout only when a turn actually *starts*, so scraping the TUI cannot distinguish "text
+  sitting in the composer" from "submitted". Assert on the rollout.
+- **Probe in an already-trusted cwd that no live session uses.** A fresh directory triggers
+  the trust prompt; a probe in a live session's cwd writes a *newer* rollout and hijacks
+  that session's chat lens via `findRolloutForCwd`. Clean up probe rollouts afterwards.
+- **Drive the real path, not a reimplementation.** Spawn `pty-worker.js` on an isolated pipe
+  and send a real `TYPE_PTY_IN` frame (see `tests/worker-submit-cr.spec.js`);
+  `__testGetWrites` returns the exact bytes written to the PTY.
+- **A regression test must fail without the fix.** Flip the registry flag off and confirm
+  the new specs go red before believing them.
+- **Trust silently overrides `approval_policy`.** A probe asking for an approval in a
+  *trusted* project just runs the command and never prompts. Force it with
+  `-c sandbox_mode="read-only"` and a task that writes.
+- **A `-c` override in an autoCommand goes through a SHELL.** Single-quote the whole
+  override: `-c 'tui.notification_method="osc9"'`.
+- **Never key readiness on "esc to interrupt", or on the startup banner.** A cold TUI prints
+  `esc to interrupt` while booting MCP servers, and the npm shim can print a self-update log
+  and exit straight back to bash. The banner is worse: it was contiguous text in 0.144.0 and
+  is **not** in 0.144.6, so it broke on a routine auto-update. Key on the composer's
+  model/effort line. Codex auto-updates **mid-run** — expect the version to move under you.
+- **A setup failure must ABORT, never be folded into a negative verdict.** A TOML bare key
+  after a `[table]` header belongs to that table, so `model = "..."` below `[features]` made
+  Codex reject the whole config and never enable the hooks gate — reported by the probe as
+  "hooks don't run". And Codex refuses to create its helper binaries under `%TEMP%`; put the
+  probe's `CODEX_HOME` where `scripts/scratch-dirs.js` says.
+
+*(End of the moved law text. The evidence below was written earlier; where the two disagree, re-measure rather than pick one.)*
+
 - **The rollout is ground truth; the screen lies.** Codex writes a user message to its rollout only when a turn actually *starts*. Scraping the TUI cannot distinguish "text sitting in the composer" from "submitted" — reading the rollout can. Assert on the rollout.
 - **Probe in an already-trusted cwd that no live session uses.** A fresh directory triggers Codex's trust prompt. A probe run in a live session's cwd writes a *newer* rollout and will hijack that session's Chat lens via `findRolloutForCwd`. Clean up probe rollouts afterwards.
 - **Drive the real path, not a reimplementation.** Worker behaviour is testable by spawning `pty-worker.js` on an isolated pipe and sending a real `TYPE_PTY_IN` frame (see `tests/worker-submit-cr.spec.js`); `__testGetWrites` returns the exact bytes written to the PTY.
@@ -106,6 +249,26 @@ What was established, in order:
 - **Never key readiness on "esc to interrupt", or on the startup banner.** A cold TUI prints `esc to interrupt` while booting MCP servers, and the npm shim can print a self-update log and exit straight back to bash — both false-positive, and the prompt then goes to the shell where it submits nothing. The banner is worse: `OpenAI Codex (v0.144.0)` was contiguous text in 0.144.0 and is **not** in 0.144.6, so it broke on a routine auto-update. Key on the composer's model/effort line (`gpt-5.5 high`). Codex auto-updates **mid-run** — expect the version to move under you.
 
 ### The agent task list (#73) — the issue's premise was inverted
+
+**Law, as `CLAUDE.md` stated it until 2026-10-26** — moved here verbatim when `CLAUDE.md` became a one-line-per-rule digest. Frozen history: the digest line in `CLAUDE.md` is the only current law.
+
+- **Codex is the easy one.** `update_plan` carries the WHOLE plan every call (`arguments` is
+  a JSON *string* holding `plan: [{step, status}]`), so the newest one in the rollout *is*
+  the current state. Read the tail; remember nothing.
+- **Claude is the hard one.** `TaskCreate`/`TaskUpdate` are **deltas**, and **the task id is
+  not in the tool input at all** — it exists only in the result *prose*. Reconstructing the
+  list means folding **forward** from the session start, which a **backward**-paging
+  transcript reader cannot do, so Claude's list is folded from the live hook stream instead.
+
+**`TaskList`'s result is a whole-list snapshot** and Claude is explicitly told to call it
+after finishing a task — that is the **repair path** that makes a fold started mid-session
+safe, and why losing the state on a hot reload is tolerable. Prefer a subject already known
+from `TaskCreate` over the snapshot's: the line appends ` (owner)` and real subjects end in
+parentheses too. **An update for a task whose create was never seen still renders** (as
+`Task #<id>`) — dropping it would hide in-progress work, the single thing the panel exists
+to show.
+
+*(End of the moved law text. The evidence below was written earlier; where the two disagree, re-measure rather than pick one.)*
 
 **Check the tool names against real data before building on an issue's description.** #73 is titled after `TodoWrite`, which appears as an actual `tool_use` **zero** times across 400 transcripts — claude-code emits `TaskCreate` / `TaskUpdate` / `TaskList`. And the hard part is the opposite of what the issue assumed:
 
@@ -122,6 +285,43 @@ What was established, in order:
 Anything touching `pty-worker.js` (including `lib/agents.js` fields the worker reads) needs a **COLD restart** — a hot `server.js`-only reload leaves the old worker running with the old behaviour. See "Deployment & Operations".
 
 ## A ConPTY `term.kill()` is ALREADY graceful — `/exit` buys nothing (#191)
+
+**Law, as `CLAUDE.md` stated it until 2026-10-26** — moved here verbatim when `CLAUDE.md` became a one-line-per-rule digest. Frozen history: the digest line in `CLAUDE.md` is the only current law.
+
+**`session.term.kill()` does not hard-kill THE AGENT.** With `useConptyDll: true`
+(production's default), node-pty's `PtyKill` closes the pseudoconsole and then
+`TerminateProcess`es **the shell**. The agent is a *child* of that shell, and Windows
+`TerminateProcess` does not touch descendants — so the agent is **orphaned rather than
+killed** and runs its **ordinary shutdown**. What is graceful is the agent's exit, not the
+teardown: bash is killed outright with exit code 1 and gets no shutdown at all. Nothing
+here needs it to.
+
+Measured (claude 2.1.251, three arms on real PTYs): `term.kill()` and an awaited `/exit`
+both flush the transcript, fire `SessionEnd` and leave `lastGracefulShutdown: true`, while
+`process.kill` on the agent itself writes nothing — so **the writing is done by the agent's
+own shutdown, not by the teardown ceremony around it.** `/exit` adds exactly two artifacts,
+both *caused by* typing `/exit` rather than preserved by it.
+
+**So #191's `/exit` half is refuted for the session shape measured**, and Kill stays
+instant: a ceremony that buys nothing makes Kill feel broken, and a submit is not reliably
+one keystroke. The *rename* half is untouched and belongs at **naming** time.
+
+**Before reopening, read limit 4 in the archive.** The measured session was minimal — no MCP
+servers, no plugins, no statusLine — and **MCP teardown is the most plausible concrete form
+of the report's "work Claude is doing" at exit**, which the probe could not have seen. Start
+by adding MCP servers to the isolated config and rerunning the same three arms, rather than
+re-arguing the ConPTY mechanism, which is settled. The evidence is also **Claude-only while
+the decision is fleet-wide** (Codex and plain shells were not measured), and killing
+**mid-turn** was never measured at all.
+
+> **A probe that spawns `claude` from inside a Claude Code session must scrub `CLAUDE*` from
+> the child env** — a nested child session persists nothing, so the measurement reads as
+> "unmeasurable" when it is really "not isolated". **And a liveness check on a pid you
+> failed to find PASSES**, so a probe that locates the agent by name must ABORT when the pid
+> is null, or every wait loop exits on its first test and prints a plausible table having
+> checked nothing.
+
+*(End of the moved law text. The evidence below was written earlier; where the two disagree, re-measure rather than pick one.)*
 
 **`session.term.kill()` in `pty-worker.js` does not hard-kill THE AGENT.** With
 `useConptyDll: true` — production's default, and `config.json` does not override it —
@@ -293,6 +493,59 @@ Nothing in this repo depends on telling the two apart — either way the agent f
 > when the rollout is ground truth.
 
 ## A resume is REPORTED, never predicted — and a retry is not a rescue (#227)
+
+**Law, as `CLAUDE.md` stated it until 2026-10-26** — moved here verbatim when `CLAUDE.md` became a one-line-per-rule digest. Frozen history: the digest line in `CLAUDE.md` is the only current law.
+
+Two defects, one event. Reported as *"I saw a few with auto resume label but they didn't
+resume."* Evidence — including the controlled pair inside one worker process that proves it
+— is in `docs/findings/agents-codex.md`.
+
+**Defect 1 — "the user is back" is not "the block is over."** `UserPromptSubmit` cancelled
+the armed resume. A submitted prompt proves the user is PRESENT; it proves nothing about the
+quota, and while capped that prompt cannot run. Nothing re-armed, so **the feature was
+defeated by the most natural human response to the thing it exists to fix.**
+
+The signal is not *is the user back* but **what they asked for**, which is why the fix is
+one event wide: **Esc says STOP** (and only fires from `working`), **a tool event says WORK
+IS RUNNING** (which genuinely proves the cap is not in force), **only a prompt says GO.**
+The re-arm sits deliberately *after* `clearObservedCapBlock` and rides `session.capBlocked`
+alone — the server's live, self-expiring reading — so #138's rule that a sighting must not
+outlive its window is untouched.
+
+**Defect 2 — `armed` was a PREDICTION of the worker's decision, evaluated against a subset
+of the worker's gates.** It could not see the one-shot, the worker's own
+`capBlocked`/`limitPromptAt`, or a hook having cancelled the timer, so both clients went on
+rendering `resumes 21:51` with nothing scheduled. The worker had published the truth since
+#138 (`autoResumeArmed`) and **no production code read it.** It is now the answer whenever
+the worker gives one, with **ABSENT kept apart from FALSE** so a cluster peer merely behind
+falls back to the derivation rather than going dark.
+
+> **Sharing a MODULE is not sharing an ANSWER.** Both sides imported `lib/usage-limit.js`
+> and then evaluated it against **different state**. SSOT is satisfied by one *owner of the
+> fact*, not one *copy of the rule*: where a fact is a live decision some process already
+> made, the honest wire field is that process's report. Same shape as #179 — do not predict
+> whether the PTY accepted a submit; write it and check that it landed.
+
+**A test pinned the broken behaviour** rather than catching it: the spec's helper defaults
+`capBlocked = true`, so *"a new UserPromptSubmit cancels the pending continue"* asserted the
+field failure exactly. Corrected, not deleted — and **the correction must not be made by
+flipping `capBlocked` to false**, because nothing arms at all in that case and the test
+would pass vacuously.
+
+> **What the re-arm TRADES AWAY.** `clampPct` **rounds**, so a window at a real 99.5%
+> arrives as exactly 100 and `isCapBlocked` is true while the account is still answering. A
+> question-and-answer turn with no tool call now re-arms on its `UserPromptSubmit`, `Stop`
+> does not cancel, and if the status line still rounds to 100 at reset+60s, `continue` is
+> typed into a session whose last prompt was already answered. The only remaining guard is
+> the `status === 'working'` check at fire time. A lead for a follow-up, unmeasured beyond
+> three samples: **a cap-REFUSED prompt ends in a Notification-only idle with no `Stop`; a
+> prompt that RAN ends in `Stop`.**
+
+**Noted, unfixed:** `usage-limit:` appears **zero** times in the whole worker log across
+three real cap events, so #138's PTY detector that answers the cap selector has never
+matched in production. Not blocking — the session recovers at the reset without it.
+
+*(End of the moved law text. The evidence below was written earlier; where the two disagree, re-measure rather than pick one.)*
 
 Two defects, one event, and the second is why the first ran unnoticed for a night.
 Reported as *"I saw a few with auto resume label but they didn't resume."*
