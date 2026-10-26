@@ -11,11 +11,38 @@
 
 ## Input & Submit Contract (issue #55) — this is law, not guidance
 
+**Law, as `CLAUDE.md` stated it until 2026-10-26** — moved here verbatim when `CLAUDE.md` became a one-line-per-rule digest. Frozen history: the digest line in `CLAUDE.md` is the only current law.
+
+The sentence *"Enter doesn't run it"* has described at least four **different** bugs in
+different layers. A change to input or submit is correct only if it satisfies the rules
+below, and each has a test that fails without it. Evidence:
+`docs/findings/input-submit.md`.
+
+**Compose bar = the app's text box**, not the agent's own TUI prompt. **Submit = the
+agent actually starts a turn** — text appearing in its prompt box is *not* submit, which
+is why the only valid detector anywhere in this area is *"did a turn start"*. The
+PTY/rollout is ground truth; the screen lies.
+
+*(End of the moved law text. The evidence below was written earlier; where the two disagree, re-measure rather than pick one.)*
+
 The sentence *"Enter doesn't run it"* has described at least four **different** bugs in different layers. A change to input or submit is correct only if it satisfies the rules below, and each rule has a test that fails without it. Full spec: issue #55.
 
 **Compose bar = the app's text box.** Not the agent's own TUI prompt. **Submit = the agent actually starts a turn** — text appearing in its prompt box is *not* submit.
 
 ### The keyboard contract — chosen by PLATFORM, never by lens
+
+**Law, as `CLAUDE.md` stated it until 2026-10-26** — moved here verbatim when `CLAUDE.md` became a one-line-per-rule digest. Frozen history: the digest line in `CLAUDE.md` is the only current law.
+
+Mobile is Send-only because the **Android IME commits Enter as literal `"\n"` text, not
+a key event** — a submit bound to an Enter keydown is unreliable there by construction.
+The gate is `composeUsesSoftKeyboard()` (companion `compose_bar.dart`; `app.html` mirrors
+it off the UA). In `app.html` the bar's **visibility** keys on `isMobile`, which ORs in
+`innerWidth < 600`, so a narrow *desktop* window shows the bar and must still submit on
+Enter. **Visibility is not platform — do not collapse them.** The bar is multi-line
+(`minLines:1, maxLines:5`) and a soft-wrapped line contains no `\n`.
+
+*(End of the moved law text. The evidence below was written earlier; where the two disagree, re-measure rather than pick one.)*
+
 Chat and terminal lenses share one compose bar with one set of keys.
 
 | Platform | Enter | Ctrl+Enter | Send button |
@@ -30,11 +57,80 @@ The bar is **multi-line** (`minLines:1, maxLines:5`), soft-wraps, and a wrapped 
 **A widget test cannot prove any of this.** Synthetic key events never traverse the OS text-input path, so a widget test passes while the shipped app is broken. Desktop Enter needs real injected OS keystrokes (`scripts/rig/probe-drive-windows.ps1` + `tool/compose_probe.dart`); mobile needs a real device.
 
 ### Client-side encoding — `buildComposeSubmission` (one function per client)
+
+**Law, as `CLAUDE.md` stated it until 2026-10-26** — moved here verbatim when `CLAUDE.md` became a one-line-per-rule digest. Frozen history: the digest line in `CLAUDE.md` is the only current law.
+
+1. Strip a **trailing** newline. 2. If a `\n` **remains** -> `ESC[200~` + text +
+`ESC[201~` + `\r`. 3. Else -> text + `\r`. 4. Send as **ONE** frame (#44: a client that
+dies mid-submit must not lose half of it).
+
+*(End of the moved law text. The evidence below was written earlier; where the two disagree, re-measure rather than pick one.)*
+
 1. Strip a **trailing** newline. 2. If a `\n` **remains** → `ESC[200~` + text + `ESC[201~` + `\r`. 3. Else → text + `\r`. 4. Send as **ONE** frame (#44: a client that dies mid-submit must not lose half of it).
 
 A live `/`-line streams to the PTY as you type so the agent's slash menu narrows. That prompt is **one line**, so `composeLiveProjection()` **drops newlines** — mirroring one as `\r` would *submit*, which is exactly how Enter came to fire a `/`-line on mobile while merely newlining everywhere else.
 
 ### The wire cap and the offline-buffer ceiling are ONE number (#201)
+
+**Law, as `CLAUDE.md` stated it until 2026-10-26** — moved here verbatim when `CLAUDE.md` became a one-line-per-rule digest. Frozen history: the digest line in `CLAUDE.md` is the only current law.
+
+`WS_INPUT_MAX` (`server.js`, per frame) and the companion's `_inputBufferHardCap`
+(`api_client.dart`, total) are both **256 KB in UTF-16 code units** and are equal by
+construction: **nothing the offline buffer can hold within its ceiling may be refused at
+the wire.** The bound that bounds memory is **`WS_MAX_PAYLOAD` (4 MiB) in `wsOptions`** —
+`ws` assembles a whole message before `handleMessage` runs. It is deliberately ~5.3x the
+app cap's worst-case byte width, not snug, because `ws` answers an oversize frame by
+**closing the socket** rather than letting the app send its notice; the zone between the
+two caps is where an accidental oversend is still reported honestly.
+
+**Every refusal must SAY SO** — #193's principle, which three paths once broke:
+
+- **The companion refuses at the APP cap itself** (`sendInput`, before the live/buffered
+  branch), on the `inputDropped` stream, which makes `WS_MAX_PAYLOAD` unreachable from
+  that client. *A refusal by the APP keeps the socket and the session; a refusal by the
+  TRANSPORT costs the connection.* The comparison is `>`, matching the server's
+  `msg.length > WS_INPUT_MAX` exactly — a write **at** the cap is legal on both sides.
+- **`app.html` funnels every input write through `sendPtyInput`** wrapping `ws.send`.
+  A funnel's whole value is that nothing goes round it, and no behavioural test can see
+  that, so `tests/app-input-path.spec.js` asserts it against the **source** with an
+  allowlist of the frames that are not input (`resize`, `mode`, `heartbeat`, notify ping).
+  The cap is tested **before** the socket state — the refusal is a fact about the data.
+  **Every caller's FRAMING is untouched:** #55/#44 make a submit one frame on purpose and
+  #87's images-only submit needs its paste close and bare CR a measured gap apart, so this
+  wraps a send and re-coalesces nobody.
+- **`terminal.html` is NO LONGER SERVED** (#218). `/s/:id` returns a **302** to `/app/:id`
+  (a 301 is cached indefinitely and would make a revert a support problem). The page keeps
+  four ungated sends and cannot render an `inputDropped` notice at all; what makes that
+  safe is that nothing routes to it. `tests/legacy-route-redirect.spec.js` asserts
+  **against the source** that no route serves the file, because a route added next year
+  would leave every behavioural test green. The redirect *adds* capability: `app.html`
+  resolves a bare `/app/:id` against `/api/cluster/sessions`, so an `/s/` link reaches a
+  peer session for the first time.
+- **The cluster proxy reports its own refusals, once per outage, not once per keystroke.**
+  The reconnect buffer **latches**, so everything after the first refusal is refused for
+  the same reason; the reporting rule therefore lives with the latch in
+  `lib/reconnect-buffer.js` (`decide`, `giveUp`) rather than as an `if` beside it. Two
+  distinct reasons: **`buffer-full`** (no room left) and **`peer-unreachable`** (#209 —
+  every write was *accepted* and the whole buffer then discarded when the peer never came
+  back, ~37s of silence before `1001`). `giveUp` must tally what was **lost**, not what was
+  **held** (once latched, `count` is pinned and later refusals land in no array), sets
+  `latched` **unconditionally** (`close()` leaves `readyState` at CLOSING and `ws` keeps
+  delivering `message`), and clears the buffer **before** the close.
+- **A BACKGROUND SOCKET IS STILL A SOCKET THE SERVER REPORTS ON.** `app.html`'s background
+  `onmessage` handlers stash `inputDropped` on the session's cache entry and drain it once
+  on return — a notice belongs to the session it was raised on (#179). Survivable while
+  every refusal fired as you typed; not survivable for one arriving 37s later.
+
+`WS_INPUT_MAX` is a **three-copy** constant gated by `scripts/check-shared-constants.js`.
+An ungated copy would decide whether the browser refuses a write itself or lets the
+transport refuse it by closing the socket.
+
+**`WT_CLUSTER_TOKENS_FILE`** exists so a regression test can write a cluster entry pointing
+at a dead port. `cluster-tokens.json` holds a live bearer token for **every peer**, and a
+backup/restore around the test is not enough — a suite run SIGTERM'd part-way never reaches
+its restore. Redirect the path and the real file is never opened.
+
+*(End of the moved law text. The evidence below was written earlier; where the two disagree, re-measure rather than pick one.)*
 
 `WS_INPUT_MAX` (`server.js`, per frame) and the companion's `_inputBufferHardCap`
 (`api_client.dart`, total) are both **256 KB in UTF-16 code units** and are equal by
@@ -163,6 +259,33 @@ SIGTERM'd part-way (what happens when the full suite outlives a 10-minute tool c
 never reaches its restore. Redirect the path and the real file is never opened.
 
 ### Server-side delivery — the SSOT, and where the real bug lived
+
+**Law, as `CLAUDE.md` stated it until 2026-10-26** — moved here verbatim when `CLAUDE.md` became a one-line-per-rule digest. Frozen history: the digest line in `CLAUDE.md` is the only current law.
+
+**Every agent TUI folds one read into a paste and swallows a trailing CR.** Codex does it
+at any length (`paste_burst.rs`); **Claude does it too**, it just needs a bigger read —
+measured against the real TUI, atomic `text\r` in ONE write submits at 20/40/60 chars and
+**does NOT submit at 80/120**. That single fact explains the whole "sometimes Enter works"
+class of report: a short test prompt submitted, and a real one was typed into the prompt
+box and never sent. Claude looked exempt for months because every quick test was short.
+
+- The **worker** owns submit timing. Clients stay unaware and unchanged.
+- A frame that is **text ending in `\r`** is split: write the text now, write the lone `\r`
+  after `submit.gapMs`. Input arriving in the gap **queues behind** it (order preserved).
+- A **bare `\r` on a cold PTY is never split** — nothing was just written, so nothing can
+  absorb it. Ordinary char-by-char shell typing is never rewritten and never delayed.
+- **The gap is measured against the wire, not against the frame.** A bare `\r` written
+  within `submit.gapMs` of a frame that **closed a bracketed paste** IS withheld and goes
+  out alone. The burst detector reads bytes; our frame boundaries are invisible to it. This
+  is the images-only submit (#87): each staged image is its own `ESC[200~<path>ESC[201~`
+  frame and with no prompt text the submit behind it is a bare CR. Keep it **narrow — only
+  a paste close shades a CR**; widening it to "any recent write" would delay every shell
+  Enter.
+- Bracketed paste does **not** exempt the CR (<=30 ms is still absorbed, >=60 ms submits).
+  **Only a real temporal gap works — never "fix" a submit problem by changing the bytes.**
+
+*(End of the moved law text. The evidence below was written earlier; where the two disagree, re-measure rather than pick one.)*
+
 **Every agent TUI folds one read into a paste and swallows a trailing CR.** Codex does it at any length (`paste_burst.rs`); **Claude does it too** — it just needs a bigger read to trip it. Measured against the real Claude TUI, atomic `text\r` in ONE write:
 
 | chars | atomic `text\r` | CR split off |
@@ -180,6 +303,37 @@ That single fact explains the whole "sometimes Enter works, sometimes it doesn't
 
 
 ### A DICTATED prompt has no newline, so nothing ever bracketed it (#213)
+
+**Law, as `CLAUDE.md` stated it until 2026-10-26** — moved here verbatim when `CLAUDE.md` became a one-line-per-rule digest. Frozen history: the digest line in `CLAUDE.md` is the only current law.
+
+The rule above rescues the **CR** and leaves the **BODY** to the TUI's own paste inference.
+`buildComposeSubmission` picks its byte shape on exactly one predicate — **does the buffer
+contain a newline** — so a pasted paragraph goes bracketed and **a dictated one does not**.
+Dictation emits no line breaks. That is why the long prompts that break are always the
+spoken ones: unbracketed, Claude's TUI loses the **HEAD**, cutting exactly **1024 bytes** (a
+buffer boundary, reproducible), and at ~1088 loses the prompt entirely.
+
+**The fix is `submit.bracketAbove` in the registry, applied in the worker** — one owner,
+every client fixed with no client release, and it hot-reloads. Claude declares **512
+BYTES** (not characters — dictated Hebrew is two bytes per character, so 512 of them land
+on the cliff exactly); **Codex and plain shells declare none, and undeclared means never.**
+That asymmetry is deliberate: splitting a CR is invisible to a reader that does not need
+it, while `ESC[200~` is only correct for one that understands the sequence, and a shell
+with bracketed paste off would take the markers as literal text.
+
+**Refused, never sanitised.** A body carrying ESC, CR or LF is left exactly as it is — it
+may already be a bracketed paste, an arrow key, or a live `/`-line's backspaces. Stripping
+markers out of a body is no defence (deleting the inner `ESC[200~` from
+`a ESC[2 ESC[200~ 01~ b` reconstitutes a close), and refusing costs nothing because every
+such body already has a working shape.
+
+> **This does NOT contradict "never fix a submit problem by changing the bytes."** That
+> rule is about the **CR** — making Enter be Enter, where only a temporal gap works, and
+> that gap is untouched here. This changes the **BODY**, and does not disguise it as
+> something else: a compose submit *is* a block insert. `contains('\n')` was a proxy for
+> "is this a paste", and the proxy is what was wrong.
+
+*(End of the moved law text. The evidence below was written earlier; where the two disagree, re-measure rather than pick one.)*
 
 The rule above rescues the **CR**. It leaves the **BODY** to the TUI's own paste inference,
 and for one shape of prompt that inference loses the text. `buildComposeSubmission` picks
@@ -244,15 +398,99 @@ about it in either direction. And the threshold is measured against **one claude
 catch.
 
 ### Interrupt (Esc) — status must go idle promptly
+
+**Law, as `CLAUDE.md` stated it until 2026-10-26** — moved here verbatim when `CLAUDE.md` became a one-line-per-rule digest. Frozen history: the digest line in `CLAUDE.md` is the only current law.
+
+Claude fires **no hook** on a user interrupt (`Stop` does not run), so an interrupted
+session sat on "working" until `correctStaleStatus` rescued it 5 minutes later. The
+**worker writes the Esc byte itself**, so it is the one component that can know: a **lone
+`0x1b`** (`isEscapeKey` — length 1, so an arrow's `ESC [ A` never counts) sent to a
+**`working`** session flips it to idle at once. Gated on `working` on purpose — Esc at a
+permission prompt (`waiting`) *rejects the tool* and Claude carries on. No push fires; the
+user is the one who pressed Esc. A **plain shell declares `onEscape: false`**, so Esc in
+vim or less is never read as "the agent stopped".
+
+*(End of the moved law text. The evidence below was written earlier; where the two disagree, re-measure rather than pick one.)*
+
 Claude fires **no hook** on a user interrupt (`Stop` does not run), and worker status is otherwise hook-driven — so an interrupted session sat on "Claude is working" until `correctStaleStatus` rescued it **5 minutes** later. But the **worker writes the Esc byte itself**, so it is the one component that can know: a **lone `0x1b`** (`isEscapeKey` — length 1, so an arrow's `ESC [ A` never counts) sent to a **`working`** session flips it to idle at once. Gated on `working` on purpose: Esc at a permission prompt (`waiting`) *rejects the tool* and Claude carries on. No push fires — the user is the one who pressed Esc.
 
 ### Where it lives (no branching, ever)
+
+**Law, as `CLAUDE.md` stated it until 2026-10-26** — moved here verbatim when `CLAUDE.md` became a one-line-per-rule digest. Frozen history: the digest line in `CLAUDE.md` is the only current law.
+
+`lib/agents.js` — the registry: each provider declares `submit: { gapMs, crBurstsAsPaste,
+bracketAbove }`, `interrupt: { onEscape }`, `readiness`, `submitConfirm`.
+`lib/submit-frames.js` / `lib/submit-confirm.js` / `lib/agent-ready.js` — the pure rules.
+`pty-worker.js` — applies them where bytes meet the PTY. **An `if (agent === 'codex')` in
+`server.js`, `pty-worker.js`, `app.html` or the companion means the change is in the wrong
+file — add a registry field instead.**
+
+*(End of the moved law text. The evidence below was written earlier; where the two disagree, re-measure rather than pick one.)*
+
 `lib/agents.js` — the registry: each provider declares `submit: { gapMs, crBurstsAsPaste }` and `interrupt: { onEscape }`. A **plain shell declares `onEscape: false`**, so Esc in vim/less is never read as "the agent stopped". `lib/submit-frames.js` — the pure byte rules (`splitTrailingCr`, `isEscapeKey`). `pty-worker.js` — applies them where bytes meet the PTY. **An `if (agent === 'codex')` in `server.js`, `pty-worker.js`, `app.html` or the companion means the change is in the wrong file — add a registry field instead.**
 
 ### How to verify (no production cold-restart to test a hypothesis)
+
+**Law, as `CLAUDE.md` stated it until 2026-10-26** — moved here verbatim when `CLAUDE.md` became a one-line-per-rule digest. Frozen history: the digest line in `CLAUDE.md` is the only current law.
+
+`node scripts/rig/rig.js up` runs a complete, **isolated** web-terminal (port 7999, own
+worker pipe, own data dir, own config) from the working tree — it cannot touch production.
+`node scripts/rig/verify-submit.js` proves a LONG prompt actually submits, end to end.
+Claude echoes a submitted prompt back into its transcript, so "is the text still visible"
+cannot distinguish *typed* from *submitted*.
+
+*(End of the moved law text. The evidence below was written earlier; where the two disagree, re-measure rather than pick one.)*
+
 `node scripts/rig/rig.js up` runs a complete, **isolated** web-terminal (port 7999, own worker pipe, own data dir, own config) from the working tree — it cannot touch production. `node scripts/rig/verify-submit.js` proves a LONG prompt actually submits, end to end. **The PTY/rollout is ground truth; the screen lies** — Claude echoes a submitted prompt back into its transcript, so "is the text still visible" cannot distinguish *typed* from *submitted*. The only valid detector is **"did a turn start"**.
 
 ### A spawned agent is NOT ready when its session is (#147)
+
+**Law, as `CLAUDE.md` stated it until 2026-10-26** — moved here verbatim when `CLAUDE.md` became a one-line-per-rule digest. Frozen history: the digest line in `CLAUDE.md` is the only current law.
+
+Submit has a precondition the contract above assumed: **the agent has to exist.** A new
+session drops the user into the chat lens seconds before `claude` boots, so a prompt sent
+in that window is handed to **bash** and is gone with no error anywhere. Measured boot to
+composer: **5.0s and 6.1s on the same machine** — that spread is the whole argument for a
+**marker over a timer**, since a timer tuned to the fast boot eats prompts on the slow one.
+
+The marker is a registry field (`readiness.composer`), the rule is pure
+(`lib/agent-ready.js`), and `pty-worker.js` applies it. **Codex deliberately declares
+none** — an unmeasured marker is what #143 shipped — and undeclared means *ready
+immediately*.
+
+- **The scan does not start until the launch command has been written.** Before that the
+  PTY shows the *shell*, and `❯` is the default prompt glyph of starship, pure and several
+  oh-my-posh themes.
+- **A session with no `autoCommand` is never gated at all** — it is a shell until you type
+  something, and gating it would block the very submit that types `claude`.
+- **It can never wedge:** any hook forces it ready; a **45s fallback**
+  (`WT_READY_FALLBACK_MS`) covers `command not found` or a crash on launch; a plain shell
+  and every unknown agent are ready from birth; `server.js`, `POST /api/sessions` and the
+  companion all read a **missing** field as ready, so an older worker never refuses a
+  submit. The fallback is a **ceiling, not a detector**.
+- **A restored session is NOT seeded from its scrollback.** Restore spawns a fresh shell
+  and re-runs `claude --resume <id>`, which boots *slower* than a cold start; seeding from
+  the old scrollback (which still holds the previous life's marker) marked every restored
+  session ready at t=0 and killed the gate after every cold restart.
+- **The live `/`-line is gated too**, not just submit — it writes bytes as you type, so a
+  `/co` typed in the first seconds landed on bash's command line and the worker then typed
+  `claude --resume …` onto the same line, running `/coclaude --resume …`.
+- The client gates **submit only** — typing is untouched, the text stays in the box, and it
+  is **not** auto-sent on ready, because firing a prompt somebody was still editing is its
+  own way to lose their words.
+- **`app.html` is gated too (#263)**, from two sources: the pushed
+  `{type:'agentReady', id}` notify event (a Set — readiness only goes false -> true) and
+  the sidebar row for peers, since `connectNotify` opens one socket to this host only.
+  **The refusal re-reads the sidebar**, so the press that was refused is what corrects a
+  stale answer, and the **Send button is deliberately NOT disabled** — a disabled button
+  cannot ask for fresh data.
+- **Known gap:** the latch is one-way and does not reset when the agent **exits** back to
+  its shell (`/exit`, Ctrl-D, a crashed TUI). That session keeps reporting ready, so a
+  later submit reaches bash. The client's Set mirrors the worker's latch, so it is wrong in
+  exactly the same cases and no others; fixing it belongs in the worker, the only component
+  that sees the bytes.
+
+*(End of the moved law text. The evidence below was written earlier; where the two disagree, re-measure rather than pick one.)*
 
 Submit has a precondition the contract above assumed: **the agent has to exist.**
 A new session drops the user into the chat lens seconds before `claude` boots, and
@@ -329,6 +567,27 @@ slow-but-working start.
 
 ### The marker is `❯` + U+00A0, and the bare caret was a real bug (#190)
 
+**Law, as `CLAUDE.md` stated it until 2026-10-26** — moved here verbatim when `CLAUDE.md` became a one-line-per-rule digest. Frozen history: the digest line in `CLAUDE.md` is the only current law.
+
+Measured on claude 2.1.251, the composer writes the caret followed by **U+00A0 NO-BREAK
+SPACE** — a 5-byte marker, well inside `lib/agent-ready.js`'s `CARRY_BYTES`. It was not a
+tidy-up: **Claude's folder-trust dialog draws the same `❯` as its selection cursor**, so
+the latch flipped on a session parked at a *selector*, published it ready, and cleared the
+client to submit into it. Every alternative candidate died in measurement — `⏵⏵` is
+mode-dependent, the `───` rule is drawn by the trust dialog too, `Try` is a rotating
+placeholder, and `agents` is truncated away at 52 columns (a phone-only regression of
+exactly the #146 shape).
+
+> **Write it as escapes; keep the source ASCII-only.** A literal U+00A0 is invisible in a
+> diff and is normalised to an ordinary space in transit. **And the NEGATIVE test is the
+> load-bearing one:** if normalisation hits the rule and the test together, the positive
+> assertion still passes — only *"must NOT match `❯` + U+0020"* goes red.
+> `tests/composer-marker.spec.js` builds both characters with `String.fromCodePoint` for
+> exactly this reason. A claude release that changes the glyph or the spacing needs a rig
+> re-probe; no unit test can catch that.
+
+*(End of the moved law text. The evidence below was written earlier; where the two disagree, re-measure rather than pick one.)*
+
 > **It is a dialog FAMILY, not one dialog.** Review of PR #202 measured a THIRD
 > sibling while checking the marker: opening a fresh cwd under a checkout that has
 > a `CLAUDE.md` parks on **"Allow external CLAUDE.md file imports?"** — the same
@@ -390,6 +649,35 @@ that case — unchanged in width, since the bare caret did not match there eithe
 > re-probe.
 
 ### Claude's folder-trust dialog is a THIRD layout, and a submit there KILLS the agent (#190)
+
+**Law, as `CLAUDE.md` stated it until 2026-10-26** — moved here verbatim when `CLAUDE.md` became a one-line-per-rule digest. Frozen history: the digest line in `CLAUDE.md` is the only current law.
+
+Neither #19's compact (digits) nor its side-by-side (a preview box). It is an
+**unnumbered, arrow-driven list whose default row is the destructive one** (`❯ No, exit`),
+so `↓` then Enter answers it. Driven, every other candidate **exited to bash** — a digit, a
+bare Enter, and the reported case: **a real prompt followed by its submit CR**, where the
+trailing CR confirms `No, exit` and **the agent is gone**, so the *next* prompt goes to the
+shell. `--dangerously-skip-permissions` does not suppress it.
+
+**The dialog emits NO SPACES.** Every word is positioned with CHA
+(`\e[2GQuick\e[8Gsafety\e[15Gcheck:…`), so an ANSI-stripped stream reads
+`Quicksafetycheck:Isthis…` and **any matcher must reconstruct columns first**. The longest
+contiguous literal in the whole dialog is one word. No alt-screen and no distinguishing DEC
+mode accompanies it.
+
+**It is a dialog FAMILY, not one dialog.** A fresh cwd under a checkout that has a
+`CLAUDE.md` parks on *"Allow external CLAUDE.md file imports?"* — same shape exactly
+(unnumbered, `❯` then CHA, no spaces, `Enter to confirm`, a refusing default row). So
+**"the tree is trusted" is NOT "no selector will block a new session"**: folder trust is
+inherited by descendants, but that is trust-specific. Target the family by **shape** (`❯` +
+CHA, no spaces, `Enter to confirm`), never the trust prompt alone.
+
+> **Trust is INHERITED, which is a hard constraint on ever testing this:** an ancestor of
+> the scratch parent is already trusted, so **nothing `scripts/scratch-dirs.js` creates can
+> ever show the prompt** — the rig's own cwd included. A reproduction needs a cwd with no
+> trusted ancestor. And `hasTrustDialogAccepted: false` does **not** mean untrusted.
+
+*(End of the moved law text. The evidence below was written earlier; where the two disagree, re-measure rather than pick one.)*
 
 Neither #19's compact (digits) nor its side-by-side (a preview box). It is an
 **unnumbered, arrow-driven list**, and **the default row is the destructive one**:
@@ -472,6 +760,24 @@ failure worse than the one being fixed.
 
 ### A CLIENT gate does not cover a WORKER-originated write (#137/#138 × #147)
 
+**Law, as `CLAUDE.md` stated it until 2026-10-26** — moved here verbatim when `CLAUDE.md` became a one-line-per-rule digest. Frozen history: the digest line in `CLAUDE.md` is the only current law.
+
+The gate above lives in the client, which is right for a *prompt* — a person typed it. But
+the worker writes into a PTY on its own account too. `fireAutoResume` ends in
+`submitLine(s, 'continue')`, and `armAutoResumeTimer` runs on the **restore** path with
+`Math.max(0, fireAt - Date.now())` — **zero** for a window that turned over while the
+worker was down. So a cold restart of a capped session fired while `claude --resume <id>`
+was still booting and `continue` landed on **bash**: #147 again, produced by the feature
+meant to rescue the session, and the `status === 'working'` guard cannot see it because **a
+booting session is not `working`.**
+
+**Any new worker-originated write must check `session._ready`** and **defer, never skip** —
+the session still needs its nudge. Check it *before* the one-shot
+(`autoResumeFiredForResetAt`) is consumed, and let the retry ride `session._autoResumeTimer`
+so a dead PTY or a returning user cancels it like any other armed resume.
+
+*(End of the moved law text. The evidence below was written earlier; where the two disagree, re-measure rather than pick one.)*
+
 The gate above lives in the client, which is right for a *prompt* — a person typed
 it. But the worker writes into a PTY on its own account too, and none of those
 sites consulted readiness. `fireAutoResume` (the 5h auto-resume, #137/#138) ends in
@@ -493,6 +799,19 @@ its own: #147's 45s fallback is armed for **every** session at spawn.
 
 ### A detector's phrase must not be in our own source (#138)
 
+**Law, as `CLAUDE.md` stated it until 2026-10-26** — moved here verbatim when `CLAUDE.md` became a one-line-per-rule digest. Frozen history: the digest line in `CLAUDE.md` is the only current law.
+
+The cap-prompt detector scans **all** agent-session PTY output and answers by **writing a
+keystroke**. Its phrase was once captured verbatim into a `lib/agents.js` comment and
+assembled in a test, so a Claude session that `cat`'d, grepped or diffed either file
+matched, typed a stray `1` into its composer and recorded a cap block that never happened.
+**A match that causes an action is not a reading; treat "our own repo prints this" as a
+live input.** The rule is now structural and pure (`lib/usage-limit.js`
+`matchUsageLimitPrompt`): the sentence must **start** its line as a numbered option and
+have a sibling option **above or below** it. The registry declares only the sentence.
+
+*(End of the moved law text. The evidence below was written earlier; where the two disagree, re-measure rather than pick one.)*
+
 The cap-prompt detector scans **all** agent-session PTY output and answers by
 **writing a keystroke**. Its phrase was captured verbatim into a `lib/agents.js`
 comment and assembled in `tests/reset-resume.spec.js` — so a Claude session working
@@ -505,6 +824,56 @@ the sentence must **start** its line as a numbered option and have a sibling opt
 in a reordered render. The registry declares only the sentence.
 
 ### A submit is VERIFIED, never predicted (#179) — and alt-screen is not the signal
+
+**Law, as `CLAUDE.md` stated it until 2026-10-26** — moved here verbatim when `CLAUDE.md` became a one-line-per-rule digest. Frozen history: the digest line in `CLAUDE.md` is the only current law.
+
+`/usage`, a slash menu, a permission prompt, a crashed TUI back at bash: each swallows a
+prompt as navigation, so the compose bar submits, nothing appears, and **the words are gone
+with no error anywhere.** It is #147's failure class arriving later — *the agent is not at
+its composer ANY MORE*.
+
+**#179 proposed alt-screen (`ESC[?1049h`) as the general blocked marker. Measured, it is
+WRONG: not one blocking state emits it**, Agent View included. Nothing else lines up
+either — cursor-hide catches `/usage` but not the slash menu and toggles during ordinary
+repaints. **So no marker is declared, deliberately.**
+
+**The rule is inverted instead, and it is one #55 already made law: submit means a turn
+actually starts.** Do not predict whether the PTY can accept a prompt — write it, then
+check that it landed. `lib/submit-confirm.js` holds the pure rules, `lib/agents.js`
+declares `submitConfirm: { timeoutMs }`, `pty-worker.js` arms the clock **when the submit
+CR goes out** (not when the frame arrives — the CR is withheld for `submit.gapMs`) and
+stops it on the first hook. **Any** hook: what is being separated is *the agent is doing
+something* from *the TUI ate the keystrokes*, and that must not depend on which event a
+given prompt shape happens to produce. A timeout publishes `submitUnconfirmed`, pushed and
+never persisted — a one-shot fact addressed to whoever just typed.
+
+**Every gate fails CLOSED, because a false alarm is worse than the silence it replaces** —
+it would teach you to distrust the notice on the one occasion it is true. Not armed when:
+the provider declares nothing (Codex, plain shells); the session has never delivered a hook
+(`hookStatus`, the same proof `isClaudeSession()` uses, so a box without hooks installed is
+untouched); the write came from the worker itself (no draft to give back); the session is
+already **`working`** (the composer queues behind a running turn); the session is
+**mid-compaction** (#129 — Claude reports *idle* part-way through a `/compact`); **Esc
+arrives inside the window** (no hook fires on an interrupt and the session is still idle);
+or the line **starts with `/`** (`/usage` legitimately starts no turn).
+
+That last gate is why the line is accumulated from the **bytes written** rather than read
+off the submit frame: a live `/`-line is streamed as you type, so its submit frame is a
+**bare CR** carrying no text. Two details are load-bearing: **the cap keeps the HEAD**
+(slicing the tail threw the leading `/` away, so a long slash command read as a prompt and
+got watched), and **a paste is not typing** — its body is dropped, because #87's
+images-only submit pastes a file PATH and a POSIX `/home/...` read as a slash command while
+a Windows `C:\Users\...` did not.
+
+**The clients hold the words, and they EXPIRE.** The event carries no text, so recovery is
+each client's own copy — restored only into an **empty** compose bar, only for a report
+stamped at or after that client's own last submit, and only inside a grace window, because
+**silence is success**: the worker reports inside 8s or never, so a prompt still pending
+long after that provably landed. Without the last two, a report stranded from before a
+screen was open replayed against a fresh, successful prompt — banner up, words back in the
+box, and the obvious next move is to send them a second time.
+
+*(End of the moved law text. The evidence below was written earlier; where the two disagree, re-measure rather than pick one.)*
 
 `/usage`, a slash menu, a permission prompt, a crashed TUI back at bash: each swallows
 a prompt as navigation, so the compose bar submits, nothing appears, and **the words are
@@ -574,6 +943,49 @@ back in the box, and the obvious next move is to send them a second time.
 
 ### Agent View (`←`) is NOT alt-screen, and it REDIRECTS your next prompt (#146)
 
+**Law, as `CLAUDE.md` stated it until 2026-10-26** — moved here verbatim when `CLAUDE.md` became a one-line-per-rule digest. Frozen history: the digest line in `CLAUDE.md` is the only current law.
+
+Anthropic's fullscreen doc says agent view always renders on the alternate screen
+"regardless of the `tui` setting". **On claude 2.1.250 it does not** — measured twice,
+independently: entering it emits **zero** `?1049` toggles, no DECSTBM and no ED. It is an
+ordinary inline render into the normal buffer, so none of the #81-class scroll-region
+machinery is involved and there is no fullscreen fragment problem to fix.
+
+**The real hazard is behavioural.** `←` on an empty prompt line backgrounds your
+conversation, and the composer you then face is Agent View's **dispatch** box: a prompt
+typed there starts a **new background session** instead of reaching the conversation you
+were in. Worse than swallowed — the words run somewhere you did not choose, and it is
+exactly what #179's verifier catches, since the dispatched session's hooks are not this
+session's. The way back **is** on screen (`esc returns`), which is the part the original
+report could not see at phone width.
+
+**The rendering fault was WIDTH, and it was ours.** Claude renders perfectly for the width
+it is told about (at 52 columns it truncates every row itself; nothing wraps). A viewer
+NARROWER than the PTY then wraps every long line — rows clipped, sections overprinting, a
+dead region below. Agent View is simply the densest full-width screen Claude draws, so it
+shows the fault first; nothing about it is special.
+
+**The PTY size was LAST-WRITER-WINS**, so a desktop relaying out stole the columns back
+seconds after a phone attached. The rule is now **the smallest ACTIVE viewer wins**
+(`lib/terminal-size.js`, applied in `server.js`, which owns the sockets — so it
+**hot-reloads**, and the worker only ever sees a count): a terminal smaller than its viewer
+only wastes space, while one larger is unreadable, and only the second loses information. A
+**background socket has no vote**, so a phone in a pocket cannot hold a desktop at phone
+width — that is what makes it self-healing. Two review findings worth carrying: the
+negotiated size is cached **only once the worker has accepted it** (writing it
+optimistically left the server believing a size a rejected resize never applied, and every
+identical relayout was then swallowed by the dedupe — #146's own symptom, reintroduced by
+#146's fix), and a viewer that arrives without changing the answer still gets a **nudge**
+(`rows-1`, then `rows`), because `app.html`'s `nudgeRedraw` cannot work through a `min()`
+that collapses both halves of its flick to the same value. `tests/terminal-size.spec.js`
+asks the PTY itself with `stty size` rather than trusting the message it sent.
+
+**Agent View captures are deliberately NOT checked in:** `claude agents` lists every Claude
+session on the machine by name and one-line summary, and this repo is public. Keep the
+numbers, not the bytes.
+
+*(End of the moved law text. The evidence below was written earlier; where the two disagree, re-measure rather than pick one.)*
+
 Anthropic's fullscreen doc says agent view always renders on the alternate screen
 "regardless of the `tui` setting". **On claude 2.1.250 it does not** — measured twice,
 independently: entering it emits **zero** `?1049` toggles, no DECSTBM and no ED. It is
@@ -633,6 +1045,24 @@ only honest route is `claude agents --json`, which is a separate feature, not a 
 fix.
 
 ### `app.html` is ONE CLASSIC SCRIPT: `window.f = () => f()` is infinite recursion
+
+**Law, as `CLAUDE.md` stated it until 2026-10-26** — moved here verbatim when `CLAUDE.md` became a one-line-per-rule digest. Frozen history: the digest line in `CLAUDE.md` is the only current law.
+
+overwrites the global binding with the arrow, whose body then resolves to **itself**. The
+first call blows the stack, the script dies where it stands, and the whole app is inert —
+empty sidebar, `(no session)`, every click timing out. Write `window.f = f;`, or rely on
+the declaration already being global. (A wrapper is only safe when it names something
+ELSE: `window.__setAutoScroll = (v) => { autoScroll = v; }` is fine.)
+
+**The methodology lesson is the bigger one.** This shipped past a LOCAL full-suite run
+reporting *1346 passed, 0 failed*, and was caught by CI failing **73** UI specs — then
+reproduced in ten seconds by loading the page in a real browser and reading `pageerror`. A
+green suite is evidence, not proof: **when a change touches `app.html`, load the page and
+check the console** before believing the run. `node scripts/rig/rig.js up`, then drive
+`http://127.0.0.1:7999` with a standalone Playwright script on a port the suite is not
+using.
+
+*(End of the moved law text. The evidence below was written earlier; where the two disagree, re-measure rather than pick one.)*
 
 A top-level `function f(){}` in a classic script **is already `window.f`**. So the
 innocent-looking line that exposes it for a test:

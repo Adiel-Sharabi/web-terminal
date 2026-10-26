@@ -11,6 +11,34 @@
 
 ## The session recap — "my last prompt" is NOT `role === 'user'`
 
+**Law, as `CLAUDE.md` stated it until 2026-10-26** — moved here verbatim when `CLAUDE.md` became a one-line-per-rule digest. Frozen history: the digest line in `CLAUDE.md` is the only current law.
+
+**The trap:** a transcript is full of `role:user` turns the human never typed — a teammate
+message, a `<task-notification>`, Stop-hook feedback, a post-compaction summary, and above
+all **slash commands**. Running `/compact` writes a user turn whose text is
+`<command-name>/compact</command-name>`, so in a just-compacted session — precisely when you
+most need a recap — the newest user turn is that echo, and a naive reading reports *"your
+last prompt was: compact"*. **Confidently wrong is worse than absent.** Genuine prompts also
+arrive with `<system-reminder>` blocks stapled on, so even a real one needs its wrapper
+stripped, and a turn that is *nothing but* reminders is not a prompt at all.
+
+**`lib/user-turn.js` is the one owner of what a `role:user` turn IS** — `classifyUserTurn`
+(which turns a human actually TYPED) and `typedTextOf` (the characters they typed, which the
+chat lens's Queued echo matches on, #149). Its only import is the leaf `lib/ansi.js`, so
+`lib/transcript.js` can use it without a require cycle. `lib/recap.js` re-exports
+`classifyUserTurn` for its existing importers — **change the rule in `lib/user-turn.js`,
+never there.**
+
+**Reuse, don't re-derive:** the reply prefers an author-marked `## TL;DR` through
+`lib/speech.js`'s `extractSummary` — that section exists to be exactly this. **On demand,
+never on the poll** — one recap costs a transcript tail read, and doing it per row per
+sidebar refresh would be a disk storm for text nobody is looking at. **Degrades, never
+404s:** a plain shell has no transcript, but *"idle, in `<cwd>`, 20m ago"* still orients
+you, and a 404 would make the icon look broken on exactly the rows most likely to be
+clicked.
+
+*(End of the moved law text. The evidence below was written earlier; where the two disagree, re-measure rather than pick one.)*
+
 `GET /api/sessions/:id/recap` (rules in `lib/recap.js`, pure) answers *where was I in
 this one?* for a sidebar full of sessions: last prompt, the agent's latest word, the
 current task, and the work done since.
@@ -44,6 +72,45 @@ most likely to be clicked. The client always receives the full shape.
 > sync" instruction.
 
 ## A prompt sent WHILE THE AGENT WORKS is not a `role:user` turn (#249)
+
+**Law, as `CLAUDE.md` stated it until 2026-10-26** — moved here verbatim when `CLAUDE.md` became a one-line-per-rule digest. Frozen history: the digest line in `CLAUDE.md` is the only current law.
+
+Claude Code records a prompt submitted mid-turn as an **attachment**, never as a user
+message: `{"type":"attachment","attachment":{"type":"queued_command","prompt":"…",
+"commandMode":"prompt","origin":{"kind":"human"}}}`. `parseTranscriptTurn` read only
+`user`/`assistant` lines, so **the chat lens never received the prompt at all** — the only
+thing showing it was the client's optimistic `Queued` echo (#31), rendered *after* every
+transcript turn, so everything the agent produced in reply appeared **above** it. And the
+echo reconciles by matching a turn's `typedText` (#149); against a turn that does not exist
+it can never match, so the 90 s safety timeout **deletes** it and the prompt leaves chat
+entirely.
+
+**The fix is one branch in `lib/transcript.js`, server-side only** — the chat lens is fixed
+with **no client release** and it **hot-reloads**. The turn is emitted at the attachment's
+own byte position, which is what puts it above the reply. An older companion is covered by
+construction: `turnMatchKey` falls back to `normEcho(turn.text)` when `typedText` is absent,
+and here `text === typedText`.
+
+*Say "the chat lens", not "both clients".* Only the companion has one — `app.html` carries
+no reference to `/transcript`, `typedText` or `userKind` at all. That exact phrase is
+recorded as wrong twice in this repo's history.
+
+> **MUTATE ONE GATE AT A TIME, and a negative fixture faithful to the corpus is the one most
+> likely to be vacuous.** Both gate tests were confirmed red by removing BOTH gates together,
+> which proved nothing about either: the `task-notification` fixture is drawn from real data
+> where all 520 carry **no `origin`**, so the ORIGIN gate turns it away and
+> `commandMode !== 'prompt'` could be deleted with the whole suite still green. The fix is a
+> second, deliberately **synthetic** fixture whose only job is to fail when that one line
+> goes. The usual vacuous negative passes because the feature is absent; this one passes
+> because a *different* guard fires first.
+
+> **And state the PREDICATE, not just the count.** A first draft claimed 9 of the 520
+> task-notifications already arrive as real user turns; that 9 came from testing a 120-char
+> prefix. A 60-char prefix gives 15, exact equality gives **0**, and the sound comparison —
+> the `<task-id>` they share — gives **34**. A measurement whose answer moves with a
+> parameter nobody chose deliberately is not a measurement.
+
+*(End of the moved law text. The evidence below was written earlier; where the two disagree, re-measure rather than pick one.)*
 
 Claude Code records a prompt submitted mid-turn as an **attachment**, never as a
 user message:
@@ -154,6 +221,45 @@ at, per the standing convention that Claude's behaviour is not evidence about it
 
 ## Scrollback has TWO byte spaces, and they diverge at the HEAD (#167/#176/#178)
 
+**Law, as `CLAUDE.md` stated it until 2026-10-26** — moved here verbatim when `CLAUDE.md` became a one-line-per-rule digest. Frozen history: the digest line in `CLAUDE.md` is the only current law.
+
+**A byte offset into a session's scrollback is not a position.** `pty-worker.js` trims the
+buffer's HEAD on every PTY write (2 MB cap), so `offset 0` names a different byte on every
+request while `total` sits pinned at the cap — and nothing on the wire says so. Every paging
+bug in this area is that one fact, met from a different direction. The rule everywhere is:
+**anchor on CONTENT, over-fetch so the anchor is inside the slice, cut where it reappears,
+and STOP rather than guess** — the failure mode is less history, never history that repeats
+and never a silent hole.
+
+**And the server builds two DIFFERENT strings from that one buffer:** the WS attach replay
+**truncates** the raw buffer to `scrollbackReplayLimit` and *then* sanitises, while
+`GET /api/sessions/:id/scrollback` sanitises the **whole** buffer and *then* slices.
+`sanitizeReplay` is length-changing **and stateful** (it tracks alt-screen from the start of
+whatever string it is given), so those two orders are **not** equivalent. Measured on
+escape-heavy content they share a 30947/31517 **suffix** and disagree at the **head**: the
+truncated copy begins mid-stream, never sees the earlier `ESC[?1049h`, believes it is
+outside alt-screen, and strips an `ESC[2J` the whole-buffer pass keeps.
+
+**So they agree over the TAIL and disagree near the HEAD.** Any rule that lines the two up
+must take its anchor from the **end of what is on screen**, never from the head of an
+incoming replay — which is what `ai-terminal/lib/util/attach_overlap.dart` does (#176), and
+why `tests/attach-replay-overlap.spec.js` pins the invariant **on the server**, with a 2x
+margin over the companion's 4096-unit anchor. That gate is server-side on purpose:
+reordering either sanitise pass is a server change, and it would otherwise surface only as
+#176 coming back on a client nobody was testing.
+
+The attach replay also carries an `ESC[?2004h` prefix when the session is in bracketed-paste
+mode. That is terminal **state**, not content — it is not in the scrollback and can never
+match an anchor, so a cut must preserve it rather than treat it as duplicate bytes.
+
+`lib/scrollback-window.js` holds the pure content-anchored walk and is **served to
+`app.html` at `/lib/scrollback-window.js`**, so the browser runs the same bytes
+`tests/scrollback-window.spec.js` pins rather than a pasted copy. It is a port of the
+companion's `ai-terminal/lib/util/scrollback_window.dart` (#167), which stays the canonical
+write-up of the rule.
+
+*(End of the moved law text. The evidence below was written earlier; where the two disagree, re-measure rather than pick one.)*
+
 **A byte offset into a session's scrollback is not a position.** `pty-worker.js`
 trims the buffer's HEAD on every PTY write (2 MB cap), so `offset 0` names a
 different byte on every request while `total` sits pinned at the cap — and
@@ -201,6 +307,30 @@ it rather than treat it as duplicate bytes. It is why the measured replay was
 
 ## The companion vendors `xterm` — do not undo it (#81)
 
+**Law, as `CLAUDE.md` stated it until 2026-10-26** — moved here verbatim when `CLAUDE.md` became a one-line-per-rule digest. Frozen history: the digest line in `CLAUDE.md` is the only current law.
+
+**One defect produced two symptoms that read as unrelated bugs.** `Buffer.scrollUp`,
+`scrollDown` and `deleteLines` shifted a line with `lines[to] = lines[from]`, which copies
+the *reference*: the line ends up in two slots, and since `_adoptChild` unconditionally
+detaches the destination's previous occupant, the next iteration detaches the line the
+previous one just moved. A scroll left 27 of 30 lines **still in the array but detached from
+it**. Detached lines still *paint*, but `TerminalController.selection` is null whenever
+either anchor is detached — that is "text visible, nothing selects". And a later `_moveChild`
+dereferences `_owner!`: an assert in debug, a **hard throw out of `Terminal.write` inside a
+WebSocket listener** in release, which kills the widget subtree — that is the blank terminal.
+Codex-only because those three methods are reached only inside a DECSTBM margin, and Codex
+sets 12 scroll regions on startup where Claude's TUI sets none. `insertLines` right next door
+already used `lines.swap` and was correct, which is how we know it was an oversight.
+
+**Two methodological lessons, both of which cost a wrong root cause first.** (1) *A blank
+lens next to a healthy chat lens is not evidence about the server* — chat is built
+server-side from the rollout and never touches xterm, so the two lenses failing differently
+localises the fault to the widget. (2) *Instrument, don't reason about buffer internals.* Two
+confident hypotheses were wrong; a five-line `print` in `_adoptChild` named the real cause in
+one run.
+
+*(End of the moved law text. The evidence below was written earlier; where the two disagree, re-measure rather than pick one.)*
+
 `ai-terminal/third_party/xterm` is stock xterm 4.0.0 **plus one patch**, wired in by
 `dependency_overrides`. Full write-up: `ai-terminal/third_party/xterm/README-PATCH.md`.
 Every hunk is marked `WEB-TERMINAL PATCH (#81)` — **grep for it before re-vendoring or
@@ -237,6 +367,48 @@ patched copies and compare (README-PATCH.md has the recipe). Both give `+108 ~2 
 the two `textScaler` failures are pre-existing Flutter-SDK drift.
 
 ## Chat links are TextSpans — never a widget in the text flow (#83)
+
+**Law, as `CLAUDE.md` stated it until 2026-10-26** — moved here verbatim when `CLAUDE.md` became a one-line-per-rule digest. Frozen history: the digest line in `CLAUDE.md` is the only current law.
+
+**A `MarkdownElementBuilder` can only return a Widget, and a widget cannot live inside a
+paragraph.** That one API fact is the whole bug, and it is worth stating because the builder
+API *looks* like the natural place to add a per-link affordance. Measured on
+flutter_markdown 0.7.7+1, rendering `see LINK tail`: a custom `a` builder produces **4**
+RichTexts (`"see "` | `"example"` | `" tail"` — separate render objects), native `onTapLink`
+produces **2** (one paragraph).
+
+The ancestor `SelectionArea` (#27) walks a **paragraph**, so a shattered sentence is one it
+cannot drag across — which is why the symptom was *"dragging selects nothing"* rather than
+the narrower "the URL isn't selectable": **the link poisons the whole sentence around it.**
+The widget's own `GestureDetector` compounded it (`onLongPressStart` holds the gesture arena
+for exactly the button-down a selection drag begins on), and the builder attached the tap
+recognizer to the **wrong fragment** (`" tail"`), so tapping trailing prose opened the link
+while the link text did nothing.
+
+**The rule going forward:** any per-link affordance must be reachable from a `TextSpan`
+recognizer or from the `SelectionArea`'s context menu — **never from a widget in the text
+flow.** Reintroducing a builder to add "Copy link" silently reintroduces this bug.
+
+**What the fix traded away, deliberately:** the per-link long-press / right-click "Open /
+Copy link" menu is gone. It existed *because* links were unselectable. For a bare autolinked
+URL — what an agent actually prints — the link text **is** the href, so ordinary select +
+copy now yields the URL. For a labelled link the URL is no longer copyable from the UI; a tap
+still opens it.
+
+**Two traps, both of which cost a wrong answer first.** (1) **A widget test cannot see this
+bug, and a *plausible* widget test can be worse than none** — the first test asserted "no
+`WidgetSpan` in the span tree" and **passed against the buggy code**, because the mechanism
+is paragraph fragmentation, not a `WidgetSpan`. Assert on the RichText *count* for a
+sentence, and on which span carries the recognizer. (2) **Instrument, don't reason** (the #81
+lesson again).
+
+**Still not verified by an automated test:** that a real mouse drag on the shipped Windows
+build highlights. Synthetic pointer events never traverse the OS input path — eight widget
+tests passed against the original report. Use `scripts/rig/probe-drive-selection.ps1` with a
+URL-containing fixture and **always `-ShotDuring`**: without the mid-drag screenshot,
+"nothing was selected" and "nothing was rendered to select" are indistinguishable.
+
+*(End of the moved law text. The evidence below was written earlier; where the two disagree, re-measure rather than pick one.)*
 
 **A `MarkdownElementBuilder` can only return a Widget, and a widget cannot live inside
 a paragraph.** That one API fact is the whole bug, and it is worth stating because the
@@ -289,6 +461,57 @@ widget tests passed against the original report. Use
 rendered to select" are indistinguishable.
 
 ## The chat lens's tail strip: "the last N rows" is the FURNITURE, not the screen (#194/#210)
+
+**Law, as `CLAUDE.md` stated it until 2026-10-26** — moved here verbatim when `CLAUDE.md` became a one-line-per-rule digest. Frozen history: the digest line in `CLAUDE.md` is the only current law.
+
+The strip shows the terminal's last few non-blank rows inside the chat lens, so a session
+parked on something chat has no bubble for is still visible. #179 is why it shows the screen
+rather than naming the state: **not one blocked state emits a distinguishing byte**, so a
+classifier for "blocked" is permanently incomplete.
+
+**That thesis is right, and the first implementation read it too literally.** Claude ends
+every composer screen with a FIXED FOOTER, so "the last 4 non-blank rows" and "that footer"
+are **the same thing by construction**, whatever happened above them. The strip rendered four
+identical rows on every idle session, held ~90px of the chat view open to do it, and was
+least informative in exactly the state its own gate selects for.
+
+**The fix inverts what is recognised.** Recognise exactly ONE thing — the ordinary composer
+marker (#190's caret + U+00A0, **published on `GET /api/agents`** rather than retyped in
+Dart) — and recognise it in order to **stay quiet**. A screen without that marker near its
+foot falls through to the tail as before, whether or not anyone has measured it. **The
+failure direction is showing the terminal, never hiding it**, which is the opposite of a
+classifier's, so #179's argument does not apply. The strip appearing now MEANS something is
+on screen.
+
+`kComposerScanRows = 7`, inside a measured bound of **[5, 8]**: at least the widest idle
+footer (4, plus a row for an update notice), strictly under the **narrowed slash menu's 9**.
+**The narrowed menu sets the ceiling, and measuring only the bare `/` would have missed
+it** — bare `/` is the menu at its TALLEST (16 rows up), and typing a few characters filters
+the list and brings the caret back to 9. A first cut sat at 8 and cleared that by one row.
+
+**The anchor is the last row WITH CONTENT, not the bottom of the viewport.** A real idle
+screen puts its content in rows 0–12 of a 30-row viewport, so counting up from the viewport
+floor put the caret 17 blank rows out of reach — a silent no-op that changed no behaviour at
+all, and **every synthetic fixture passed against it** because none had trailing blanks.
+*A screen is not the same shape as a window* — the same anchor-on-content lesson as
+#167/#178, from a third direction.
+
+**Say "a screen without the marker", not "every dialog".** The **tool-approval /
+AskUserQuestion selector was NOT measured** — no capture of one exists in this repo, and
+#190 established NBSP-absence for the trust dialog only. If that selector draws the composer
+within the window, the strip hides on a blocked screen. It is the least costly place for the
+gap to sit (a hook-driven wait already has #79's banner and the #19/#143 overlay), but it is
+a gap, not a proof, and it needs a rig case before anyone claims otherwise.
+
+**Codex is deliberately unchanged** — it declares no readiness marker and its composer line
+varies with model and effort, so it publishes null and the strip behaves as before #210.
+A screen marker for Codex is its own separately-measured change, and it would **not** be
+safe to reuse `readiness.composer` for it, because that field also gates submits.
+
+**Captures are deliberately NOT checked in** (#146's rule): an idle frame carries a status
+line naming a project and a user, and this repo is public. Keep the numbers, drop the bytes.
+
+*(End of the moved law text. The evidence below was written earlier; where the two disagree, re-measure rather than pick one.)*
 
 The strip (#194 Part 1) shows the terminal's last few non-blank rows inside the chat
 lens, so a session parked on something chat has no bubble for is still visible. #179 is

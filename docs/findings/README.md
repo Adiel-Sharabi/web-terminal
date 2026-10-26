@@ -14,6 +14,20 @@ So the two kinds of writing that had grown up together were separated:
 The move was **verbatim**. Nothing was summarised or dropped on the way in; the duplicate
 paragraphs an incremental edit had left behind were removed, and that is all.
 
+**Second step, 2026-10-26: `CLAUDE.md` became a digest** (~97k → ~25k characters, so every
+turn of every session re-reads about 18k fewer tokens). It now holds one line per rule,
+grouped by area, each area naming its file here. The long-form law prose it used to carry
+was moved here **verbatim** too:
+
+- where a section here already covered the same rule, the paragraphs that were not already
+  here sit at the top of that section, between a **"Law, as `CLAUDE.md` stated it until
+  2026-10-26"** line and an *"End of the moved law text"* line;
+- the sections with no counterpart here (overview, gates, architecture, security, tests,
+  deploy, cluster) moved whole into [`operations.md`](operations.md);
+- every rule was triaged against the CODE first (KEEP / MERGE / OBSOLETE / STALE). The
+  few whose claim the code had overtaken went to [`retired-rules.md`](retired-rules.md),
+  verbatim, each with the evidence that retired it.
+
 ## The files
 
 | file | covers |
@@ -22,6 +36,8 @@ paragraphs an incremental edit had left behind were removed, and that is all.
 | [`agents-codex.md`](agents-codex.md) | the multi-agent registry, Codex empirics, the hooks investigation, OSC 9 — #73 #78 #142 #191 #227 |
 | [`questions.md`](questions.md) | AskUserQuestion layouts, keys, notes and free text — #19 #84 #143 #145 #236 #239 |
 | [`chat-lens.md`](chat-lens.md) | the session recap, queued prompts, the tail strip, scrollback, the companion widget layer — #81 #83 #167 #176 #178 #194 #210 #249 |
+| [`retired-rules.md`](retired-rules.md) | rules the code has overtaken — kept verbatim, with the evidence; none of them binds |
+| [`operations.md`](operations.md) | the pre-digest full text of overview, gates, architecture inventory, auth and security (#257 #264), test config (#240), deploy and operations, cluster |
 
 ## Rules for this directory
 
@@ -34,6 +50,12 @@ paragraphs an incremental edit had left behind were removed, and that is all.
   paste threshold or banner needs a rig re-probe.
 - **When a law in `CLAUDE.md` and the evidence here disagree, the evidence is older.** It
   says how the number was obtained and against what; go and re-measure rather than pick one.
+- **The digest line in `CLAUDE.md` is the only current law; the moved law text here is
+  frozen history**, the full form of that line as of 2026-10-26. Change a rule in `CLAUDE.md`;
+  if its reasoning changed, add a dated note here rather than editing the frozen text. Never
+  let a rule exist only here — if it binds, it needs a line in `CLAUDE.md`. The one
+  exception is DORMANT code (Codex, `app.html`): `CLAUDE.md` keeps their never-do rules
+  and a pointer to the file here, which holds the rest and must be read before touching it.
 - **Captures are deliberately not checked in.** An Agent View frame names every Claude
   session on the machine, and an idle frame carries a status line naming a project and a
   user. This repo is public: keep the numbers, drop the bytes.
