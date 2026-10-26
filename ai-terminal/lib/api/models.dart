@@ -2688,3 +2688,74 @@ class InboxDigest {
   @override
   String toString() => 'InboxDigest(${status.name}${reason == null ? '' : '/$reason'}, ${asking.length} asking)';
 }
+
+/// One Claude login on a machine (#389): the active one, or a saved copy. Who and
+/// until when only - the server never sends a token.
+class ClaudeAccount {
+  const ClaudeAccount({
+    this.label,
+    this.email,
+    this.organization,
+    this.plan,
+    this.refreshExpiresAt,
+    this.refreshExpiringSoon = false,
+    this.active = false,
+    this.broken = false,
+  });
+
+  /// The saved copy's name on that machine; null for an active login never saved.
+  final String? label;
+  final String? email;
+  final String? organization;
+  final String? plan;
+
+  /// When the login's refresh token expires; after that the account needs a new /login.
+  final DateTime? refreshExpiresAt;
+
+  /// The server's own judgement that [refreshExpiresAt] is close.
+  final bool refreshExpiringSoon;
+
+  /// A saved copy of the account this machine is logged in to now.
+  final bool active;
+
+  /// A saved file the server could not read.
+  final bool broken;
+
+  /// What the server takes to name it in a switch.
+  String? get key => label ?? email;
+
+  factory ClaudeAccount.fromJson(Map<String, dynamic> json) {
+    String? text(Object? v) => v is String && v.isNotEmpty ? v : null;
+    final exp = json['refreshExpiresAt'];
+    return ClaudeAccount(
+      label: text(json['label']),
+      email: text(json['email']),
+      organization: text(json['organization']),
+      plan: text(json['plan']),
+      refreshExpiresAt: exp is num ? DateTime.fromMillisecondsSinceEpoch(exp.toInt()) : null,
+      refreshExpiringSoon: json['refreshExpiringSoon'] == true,
+      active: json['active'] == true,
+      broken: json['broken'] == true,
+    );
+  }
+}
+
+/// `GET /api/claude-account` (#389): the machine's login now, and every saved one.
+class ClaudeAccountStatus {
+  const ClaudeAccountStatus({this.active, this.saved = const []});
+
+  /// Null when the machine is not logged in.
+  final ClaudeAccount? active;
+  final List<ClaudeAccount> saved;
+
+  factory ClaudeAccountStatus.fromJson(Map<String, dynamic> json) {
+    final active = json['active'];
+    final saved = json['saved'];
+    return ClaudeAccountStatus(
+      active: active is Map<String, dynamic> ? ClaudeAccount.fromJson(active) : null,
+      saved: saved is List
+          ? saved.whereType<Map<String, dynamic>>().map(ClaudeAccount.fromJson).toList(growable: false)
+          : const [],
+    );
+  }
+}

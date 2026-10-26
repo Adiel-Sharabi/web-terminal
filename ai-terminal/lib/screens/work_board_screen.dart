@@ -46,6 +46,7 @@ import '../theme/status_colors.dart';
 import '../util/needs_you.dart';
 import '../util/session_tree.dart';
 import '../widgets/brief_item_row.dart';
+import '../widgets/claude_account_sheet.dart';
 import '../widgets/format_utils.dart';
 import '../widgets/handoff_chip.dart';
 import '../widgets/machine_stripe.dart';
@@ -710,6 +711,10 @@ class _WorkBoardScreenState extends State<WorkBoardScreen> {
                   color: _colorOf(sv.baseUrl),
                   note: _machineNote(sv),
                   profile: _machines[sv.baseUrl]?.data,
+                  // #389 - only where the server can take it; an older one would 404.
+                  onAccount: _repo.supportsClaudeAccount(sv.baseUrl) && _repo.serverUsable[sv.baseUrl] == true
+                      ? () => showClaudeAccountSheet(context, client: _client(sv), machineName: sv.name)
+                      : null,
                 ),
             ],
           ),
@@ -1637,9 +1642,12 @@ String _machineUptime(int? sec) {
 /// One machine in the dashboard's Machines section (#331). Colours follow the SERVER's
 /// `level` on each reading; this widget holds no thresholds.
 class MachineCard extends StatelessWidget {
-  const MachineCard({super.key, required this.name, this.color, this.note, this.profile});
+  const MachineCard({super.key, required this.name, this.color, this.note, this.profile, this.onAccount});
   final String name;
   final Color? color;
+
+  /// Opens this machine's "Switch account" sheet (#389); null hides the button.
+  final VoidCallback? onAccount;
 
   /// Shown instead of readings (offline, too old, reading…), or null.
   final String? note;
@@ -1678,6 +1686,14 @@ class MachineCard extends StatelessWidget {
               ServerSwatch(color: color),
               Expanded(child: Text(name, style: theme.textTheme.titleSmall?.copyWith(fontWeight: FontWeight.w700))),
               if (up.isNotEmpty) Text(up, style: muted),
+              if (onAccount != null)
+                IconButton(
+                  key: ValueKey('machine-account-$name'),
+                  icon: const Icon(Icons.manage_accounts_outlined, size: 20),
+                  tooltip: 'Claude account',
+                  visualDensity: VisualDensity.compact,
+                  onPressed: onAccount,
+                ),
             ]),
             const SizedBox(height: 6),
             if (note != null || p == null)
