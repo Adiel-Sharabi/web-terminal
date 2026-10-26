@@ -240,6 +240,23 @@ sessions it had told are then sent a "the machine is back" notice once they are 
 `wt-maintenance.js cancel` lifts it by hand. Routes: `POST /api/maintenance/prepare`,
 `GET /api/maintenance/status`, `DELETE /api/maintenance`.
 
+**Switch a machine's Claude account** — with two Claude subscriptions, move a machine from one
+to the other without logging in again. In the companion, the account button on a machine's card
+(dashboard → Machines) shows who that machine is logged in to and the accounts saved on it; pick
+one and the machine switches. Its **running** sessions follow with no restart, because Claude Code
+rereads its login from disk. Only the login changes (`claudeAiOauth` in
+`~/.claude/.credentials.json`, `oauthAccount` in `~/.claude.json`); MCP logins and everything else
+in both files stay as they were. The current login is saved before every switch, so its newest
+refresh token is never lost. Each machine is switched on its own, and each keeps **its own** saved
+copy of each account in `~/.config/web-terminal/claude-accounts/` (readable only by you): never
+copy one machine's login to another, or they may log each other out. To add an account on a
+machine, run `/login` in a Claude session there, then save it (the sheet's **Save this login**, or
+`node scripts/claude-account.js save`). The same from a terminal: `node scripts/claude-account.js
+status | save [label] | switch <label|email>`. Routes: `GET /api/claude-account`,
+`POST /api/claude-account/switch` (`{"account": "<label or email>"}`),
+`POST /api/claude-account/save`; advertised as the `claude-account` capability. No response ever
+carries a token.
+
 **Helper sessions don't pile up** — an agent that starts a session with `POST /api/sessions`
 (often on another machine) and never closes it used to hold one of the machine's session slots
 for as long as it lived. Now a session nobody opens within two minutes of creating it counts as

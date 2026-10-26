@@ -15,6 +15,12 @@ const TEST_IPC_TOKEN = crypto.randomBytes(32).toString('base64');
 process.env.WT_CLAUDE_METRICS_FILE = path.join(__dirname, 'claude-metrics.test.json');
 process.env.WT_CLAUDE_METRICS_DEBOUNCE_MS = '250';
 
+// #389 - the home whose Claude login /api/claude-account reads and switches. Without it
+// the server under test would switch the REAL login of the machine running the suite;
+// server.js refuses the route under WT_TEST when this is unset. Only a path is set here
+// (never a delete at module scope, see #240): tests/claude-account.spec.js fills it.
+process.env.WT_CLAUDE_ACCOUNT_HOME = path.join(require('os').tmpdir(), 'wt-claude-account-test-home');
+
 // #204 — the same protection, for a file that matters more. `cluster-tokens.json`
 // holds a live bearer token for every peer in the real cluster, and
 // tests/cluster-proxy-drop.spec.js has to PUT AN ENTRY IN IT (one pointing at a dead

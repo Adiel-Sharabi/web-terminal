@@ -320,6 +320,27 @@ class ApiClient {
     }
   }
 
+  /// This machine's Claude login and its saved accounts (`GET /api/claude-account`,
+  /// #389). Only for a server that advertises `claude-account`. Throws [ApiException];
+  /// a 409 carries the server's reason (an unreadable login file, say).
+  Future<ClaudeAccountStatus> claudeAccount() async {
+    final res = await _send('GET', '/api/claude-account');
+    return ClaudeAccountStatus.fromJson(_asMap(_decode(res)));
+  }
+
+  /// Switches THIS machine to the saved account [account] (its label or email); the
+  /// server saves the current login first. Returns the status after the switch.
+  Future<ClaudeAccountStatus> switchClaudeAccount(String account) async {
+    final res = await _send('POST', '/api/claude-account/switch', body: {'account': account});
+    return ClaudeAccountStatus.fromJson(_asMap(_asMap(_decode(res))['status']));
+  }
+
+  /// Saves this machine's current login, so it can be switched back to later.
+  Future<ClaudeAccountStatus> saveClaudeAccount() async {
+    final res = await _send('POST', '/api/claude-account/save', body: const <String, dynamic>{});
+    return ClaudeAccountStatus.fromJson(_asMap(_asMap(_decode(res))['status']));
+  }
+
   /// Reads this server's runtime defaults (`GET /api/config`).
   ///
   /// Only the [ServerRuntimeConfig] subset is surfaced; auth/cluster/tuning keys
