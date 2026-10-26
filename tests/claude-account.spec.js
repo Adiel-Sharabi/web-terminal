@@ -134,6 +134,8 @@ test.describe('claude-account', () => {
   // The two files must never name different accounts: the next save would file B's
   // tokens under A. A read-only .claude.json makes the SECOND write fail for real.
   test('when .claude.json cannot be written, the login is put back and the saved copies stay right', () => {
+    // Read-only only stops a rename on Windows (the attribute); POSIX rename ignores the mode.
+    test.skip(process.platform !== 'win32', 'the fault is injected through the Windows read-only attribute');
     const home = makeHome();
     login(home, ACCOUNT_A);
     run(home, 'save');
@@ -172,6 +174,34 @@ test.describe('claude-account', () => {
     expect(JSON.parse(fs.readFileSync(credFile(home), 'utf8')).claudeAiOauth).toEqual(personal.oauth);
     expect(run(home, 'switch', 'team').code).toBe(0);
     expect(JSON.parse(fs.readFileSync(credFile(home), 'utf8')).claudeAiOauth).toEqual(team.oauth);
+  });
+
+  test('one email in two organizations, saved without labels, gets two entries', () => {
+    const home = makeHome();
+    const personal = { oauth: ACCOUNT_A.oauth, account: { ...ACCOUNT_A.account, organizationUuid: 'org-personal' } };
+    const team = { oauth: ACCOUNT_B.oauth, account: { ...ACCOUNT_A.account, organizationUuid: 'org-team' } };
+    login(home, personal);
+    expect(run(home, 'save').out).toContain('"a@example.com"');
+    login(home, team);
+    const r = run(home, 'save');
+    expect(r.code, r.out).toBe(0);
+    expect(r.out).toContain('"a@example.com-org-team"');
+    // The email is also the first entry's LABEL, and a label match wins.
+    expect(run(home, 'switch', 'a@example.com').code).toBe(0);
+    expect(JSON.parse(fs.readFileSync(credFile(home), 'utf8')).claudeAiOauth).toEqual(personal.oauth);
+  });
+
+  test('an email saved in two organizations under other labels is refused as ambiguous', () => {
+    const home = makeHome();
+    login(home, { oauth: ACCOUNT_A.oauth, account: { ...ACCOUNT_A.account, organizationUuid: 'org-personal' } });
+    run(home, 'save', 'personal');
+    login(home, { oauth: ACCOUNT_B.oauth, account: { ...ACCOUNT_A.account, organizationUuid: 'org-team' } });
+    run(home, 'save', 'team');
+    const credText = fs.readFileSync(credFile(home), 'utf8');
+    const r = run(home, 'switch', 'a@example.com');
+    expect(r.code, r.out).toBe(2);
+    expect(r.out).toContain('name one by its label');
+    expect(fs.readFileSync(credFile(home), 'utf8')).toBe(credText);
   });
 
   test('save refuses a label that holds another account, in any letter case', () => {
