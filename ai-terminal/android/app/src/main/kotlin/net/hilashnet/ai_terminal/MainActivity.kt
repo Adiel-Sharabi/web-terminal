@@ -1,7 +1,9 @@
 package net.hilashnet.ai_terminal
 
 import android.content.pm.PackageManager
+import android.os.Bundle
 import android.speech.tts.TextToSpeech
+import android.view.View
 import io.flutter.embedding.android.FlutterActivity
 import io.flutter.embedding.engine.FlutterEngine
 import io.flutter.plugin.common.EventChannel
@@ -22,6 +24,12 @@ class MainActivity : FlutterActivity() {
     private var tts: TextToSpeech? = null
     private var ready = false
     private var dictation: Dictation? = null
+
+    override fun onCreate(savedInstanceState: Bundle?) {
+        super.onCreate(savedInstanceState)
+        // #400 - FlutterActivity has set its FlutterView as the content by now.
+        findViewById<View>(FLUTTER_VIEW_ID)?.let(ImeInsetRepair::install)
+    }
 
     override fun configureFlutterEngine(flutterEngine: FlutterEngine) {
         super.configureFlutterEngine(flutterEngine)
