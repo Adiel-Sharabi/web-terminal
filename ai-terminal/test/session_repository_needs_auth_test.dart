@@ -176,7 +176,19 @@ void main() {
       expect(msg, isNot(contains('3')));
     });
 
-    test('joinNames - the badge tooltip uses it too', () {
+    test('several needing sign-in AND several down: both halves named (#402)',
+        () {
+      expect(
+        OfflineBanner.messageFor(
+          offline: const ['Home', 'Lab'],
+          needsAuth: const ['Office', 'XPS'],
+        ),
+        'Office and XPS need sign-in — their tokens expired. Settings › Servers. '
+        'Home and Lab are unreachable',
+      );
+    });
+
+    test('joinNames', () {
       expect(OfflineBanner.joinNames(const <String>[]), '');
       expect(OfflineBanner.joinNames(const ['A']), 'A');
       expect(OfflineBanner.joinNames(const ['A', 'B']), 'A and B');

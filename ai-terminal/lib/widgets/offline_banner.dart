@@ -27,9 +27,8 @@ class OfflineBanner extends StatelessWidget {
   /// of at the one screen that fixes it.
   final List<String> needsAuthServerNames;
 
-  /// The message, exposed so a test can assert the wording without pumping the
-  /// widget and so the two cases can never drift apart silently.
-  @visibleForTesting
+  /// The message - also the dashboard's down-badge tooltip (#402), and public
+  /// so a test can assert the wording without pumping the widget.
   static String messageFor({
     required List<String> offline,
     required List<String> needsAuth,
@@ -56,7 +55,8 @@ class OfflineBanner extends StatelessWidget {
         : '${joinNames(offline)} are unreachable';
   }
 
-  /// "A", "A and B", "A, B and C" - also the dashboard badge's tooltip.
+  /// "A", "A and B", "A, B and C".
+  @visibleForTesting
   static String joinNames(List<String> names) {
     if (names.length < 2) return names.join();
     return '${names.sublist(0, names.length - 1).join(', ')} and ${names.last}';
