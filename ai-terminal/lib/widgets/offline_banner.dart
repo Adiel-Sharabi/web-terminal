@@ -1,6 +1,6 @@
 /// Partial-offline banner — spec §2:
 /// "⚠ {Server} is unreachable — sessions from this server may be stale"
-/// (or "N servers are unreachable" for multiple), `ServerOffline` 12% bg +
+/// (or "A and B are unreachable" for multiple), `ServerOffline` 12% bg +
 /// 4dp left border.
 library;
 
@@ -39,19 +39,27 @@ class OfflineBanner extends StatelessWidget {
     // made an expired token read as a network fault. But it no longer HIDES the
     // other half - a server that is genuinely down is still down, and a banner
     // naming only the 401 left it unreported until the token was fixed.
+    // #402 - every server is NAMED, however many: a bare count ("2 servers are
+    // unreachable") left the user unable to tell which ones.
     if (needsAuth.isNotEmpty) {
       final auth = needsAuth.length == 1
           ? '${needsAuth.first} needs sign-in — its token expired. Settings › Servers › ${needsAuth.first}'
-          : '${needsAuth.length} servers need sign-in — their tokens expired. Settings › Servers';
+          : '${joinNames(needsAuth)} need sign-in — their tokens expired. Settings › Servers';
       if (offline.isEmpty) return auth;
       final down = offline.length == 1
           ? '${offline.first} is unreachable'
-          : '${offline.length} servers are unreachable';
+          : '${joinNames(offline)} are unreachable';
       return '$auth. $down';
     }
     return offline.length == 1
         ? '${offline.first} is unreachable — sessions from this server may be stale'
-        : '${offline.length} servers are unreachable';
+        : '${joinNames(offline)} are unreachable';
+  }
+
+  /// "A", "A and B", "A, B and C" - also the dashboard badge's tooltip.
+  static String joinNames(List<String> names) {
+    if (names.length < 2) return names.join();
+    return '${names.sublist(0, names.length - 1).join(', ')} and ${names.last}';
   }
 
   @override

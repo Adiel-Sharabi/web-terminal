@@ -652,10 +652,16 @@ class _DashboardScreenState extends State<DashboardScreen> {
                           Padding(
                             padding: const EdgeInsets.only(right: 12),
                             child: Center(
-                              child: Badge(
-                                label: Text('$downCount'),
-                                backgroundColor: StatusColor.serverOffline,
-                                child: const Icon(Icons.cloud_off),
+                              // #402 - the count alone cannot say WHO is down.
+                              child: Tooltip(
+                                message: OfflineBanner.joinNames(
+                                    [...needsAuthNames, ...offlineNames]),
+                                triggerMode: TooltipTriggerMode.tap,
+                                child: Badge(
+                                  label: Text('$downCount'),
+                                  backgroundColor: StatusColor.serverOffline,
+                                  child: const Icon(Icons.cloud_off),
+                                ),
                               ),
                             ),
                           ),

@@ -154,16 +154,33 @@ void main() {
           offline: const ['XPS', 'Home'],
           needsAuth: const ['Office'],
         ),
-        contains('2 servers are unreachable'),
+        contains('XPS and Home are unreachable'),
       );
     });
 
-    test('plural needs-auth does not name one server', () {
+    test('plural needs-auth names every server (#402)', () {
       final msg = OfflineBanner.messageFor(
         offline: const <String>[],
         needsAuth: const ['Office', 'XPS'],
       );
-      expect(msg, contains('2 servers need sign-in'));
+      expect(msg, startsWith('Office and XPS need sign-in'));
+      expect(msg, isNot(contains('Settings › Servers ›')));
+    });
+
+    test('several servers down are all NAMED, never just counted (#402)', () {
+      final msg = OfflineBanner.messageFor(
+        offline: const ['Office', 'XPS', 'Home'],
+        needsAuth: const <String>[],
+      );
+      expect(msg, 'Office, XPS and Home are unreachable');
+      expect(msg, isNot(contains('3')));
+    });
+
+    test('joinNames - the badge tooltip uses it too', () {
+      expect(OfflineBanner.joinNames(const <String>[]), '');
+      expect(OfflineBanner.joinNames(const ['A']), 'A');
+      expect(OfflineBanner.joinNames(const ['A', 'B']), 'A and B');
+      expect(OfflineBanner.joinNames(const ['A', 'B', 'C']), 'A, B and C');
     });
 
     test('the unreachable wording is unchanged when nothing needs auth', () {
@@ -179,7 +196,7 @@ void main() {
           offline: const ['Office', 'XPS'],
           needsAuth: const <String>[],
         ),
-        '2 servers are unreachable',
+        'Office and XPS are unreachable',
       );
     });
   });
