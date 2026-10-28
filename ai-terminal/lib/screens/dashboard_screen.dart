@@ -559,7 +559,7 @@ class _DashboardScreenState extends State<DashboardScreen> {
                 final usable = SessionRepository.instance.serverUsable;
                 // A 401 server is in BOTH maps (it is not reachable for our
                 // purposes), so the offline list excludes it to stop one server
-                // being counted twice in the banner's "N servers" wording.
+                // being named twice in the banner.
                 final needsAuthNames = servers
                     .where((s) => needsAuth[s.baseUrl] == true)
                     .map((s) => s.name)
@@ -652,10 +652,23 @@ class _DashboardScreenState extends State<DashboardScreen> {
                           Padding(
                             padding: const EdgeInsets.only(right: 12),
                             child: Center(
-                              child: Badge(
-                                label: Text('$downCount'),
-                                backgroundColor: StatusColor.serverOffline,
-                                child: const Icon(Icons.cloud_off),
+                              // #402 - the count alone cannot say WHO is down.
+                              // The banner's own words, reasons included: when
+                              // every server is down the banner is hidden and
+                              // this is the only place that names them.
+                              child: Tooltip(
+                                key: const ValueKey('servers-down-badge'),
+                                message: OfflineBanner.messageFor(
+                                  offline: offlineNames,
+                                  needsAuth: needsAuthNames,
+                                ),
+                                triggerMode: TooltipTriggerMode.tap,
+                                showDuration: const Duration(seconds: 8),
+                                child: Badge(
+                                  label: Text('$downCount'),
+                                  backgroundColor: StatusColor.serverOffline,
+                                  child: const Icon(Icons.cloud_off),
+                                ),
                               ),
                             ),
                           ),
