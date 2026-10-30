@@ -92,8 +92,12 @@ test.describe('restart hold (#359)', () => {
     // UserPromptSubmit prompt still starting with the tag.
     const longPath = `C:\\Users\\someone-long\\AppData\\Local\\Temp\\claude\\C--dev-web-terminal\\checkout\\scripts\\wt-maintenance.js`;
     const reason = 'r'.repeat(200);
-    for (const p of [M.wrapUpPrompt(reason, longPath), M.calledOffPrompt(reason), M.backPrompt(reason)]) {
-      expect(Buffer.byteLength(p)).toBeLessThan(512);
+    // A reason in Hebrew is two bytes a character: the byte budget, not the char count, binds.
+    const wide = String.fromCodePoint(0x05d0).repeat(200);
+    for (const r of [reason, wide]) {
+      for (const p of [M.wrapUpPrompt(r, longPath), M.calledOffPrompt(r), M.backPrompt(r)]) {
+        expect(Buffer.byteLength(p)).toBeLessThan(512);
+      }
     }
     expect(longPath.length).toBeGreaterThan(100);
     // The hold itself keeps the full (200) reason; only the typed text is shortened.
