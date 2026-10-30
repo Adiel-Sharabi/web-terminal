@@ -20,7 +20,7 @@ const SERVER_SRC = fs.readFileSync(path.join(__dirname, '..', 'server.js'), 'utf
 const HANDOFF_DIR = process.env.WT_HANDOFF_DIR || path.join(__dirname, '..', 'handoffs.test');
 // printf of the marker's UTF-8 bytes, then a word that makes the registry read the
 // command as launching claude (lib/agents.js programMatcher).
-const LAUNCH = "printf '\\xe2\\x9d\\xaf\\xc2\\xa0 ready\\n'; echo claude";
+const LAUNCH = "printf '\\xe2\\x9d\\xaf\\xc2\\xa0 ready\\n\\x1b[>0q'; echo claude";
 
 async function hook(id, event, body = {}) {
   const c = await pwRequest.newContext({ baseURL: BASE });

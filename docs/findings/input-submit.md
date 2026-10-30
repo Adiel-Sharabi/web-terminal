@@ -565,6 +565,42 @@ slow-but-working start.
 > because none is installed on this fleet. By this repo's own standard that is a
 > reasoned expectation, not a captured fact. Gap 1 stands unchanged.
 
+### The composer is NOT the end of startup: a CR before Claude's next query is lost (#404)
+
+**Seen in production (2026-10-29/30, claude 2.1.314):** two automatic hand-offs — one on Office-Tests, one on Office — typed their first prompt
+into the successor; the words appeared in the composer and **no turn started** (`successor-not-up`
+after 3 min; the prompt sat there until a person pressed Enter hours later). The other 26
+hand-offs in the same ten days worked. In the Office successor's PTY bytes the prompt
+arrived at byte 1345, ~3.3 s after the composer marker, and Claude's **second** terminal
+query (`ESC[>0q`, then `ESC[?u`, OSC 7501) at byte 2170, its status line at 2217. A
+successful successor had both **before** the prompt. Nothing in the prompt mattered: 343
+and 363 bytes, the same as the ones that worked, below `bracketAbove`.
+
+**Reproduced on the rig** (`scripts/rig/probe-startup-cr.js`: prompt + CR as one frame at a
+fixed delay after the first composer draw; verdict from the `UserPromptSubmit` hook, sent to
+the rig through `rig-http.js` `writeProjectHooks`):
+
+| delay after composer | 0 ms | 100 ms | 200 ms | 250+ ms |
+|---|---|---|---|---|
+| turn started | 0/5 | 2/7 | 3/3 | 17/17 |
+
+The predictor is the **CR**, not the text: "the CR (text + `submit.gapMs`) arrived after the
+post-composer query" matched the verdict in 22 of 23 trials, and the miss was within the
+probe's few-ms clock error. Composer → query was 200–460 ms on Home; on the loaded Office box
+it was past 3.3 s. `--continue` and `--resume <id>` (what a restore types) send the same query after their composer. Claude
+**also** sends it once before its banner, so only an occurrence *after* the composer counts.
+
+**Fix:** `readiness.settled` (`lib/agents.js`) — ready means the composer, THEN that query
+(`lib/agent-ready.js`, two-stage; an agent that declares none is unchanged). The worker clears
+a #190 selector report at the composer (nothing is in front of it any more) and bounds the
+settle wait with `WT_READY_SETTLE_MS` (10 s) — a **ceiling**, logged loudly, so a release
+that stops sending the query costs seconds, not the 45 s fallback. **After the fix, on the
+rig:** sent as soon as the worker said ready, 5/5 started a turn (the bare-composer control
+stayed 0/5); ready lagged the composer by 286–333 ms; `verify-handoff.js` PASS.
+`SessionStart` never reached the worker in these runs (0 lines in the rig's log), so the
+"any hook forces ready" net did not reopen the window; if it ever starts arriving before the
+query, it will.
+
 ### The marker is `❯` + U+00A0, and the bare caret was a real bug (#190)
 
 **Law, as `CLAUDE.md` stated it until 2026-10-26** — moved here verbatim when `CLAUDE.md` became a one-line-per-rule digest. Frozen history: the digest line in `CLAUDE.md` is the only current law.

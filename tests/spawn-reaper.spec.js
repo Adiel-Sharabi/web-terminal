@@ -951,7 +951,7 @@ test.describe('#351 against the real server', () => {
 
   // ---- a hand-off successor (#340/#345) ----------------------------------------------------
 
-  const LAUNCH = "printf '\\xe2\\x9d\\xaf\\xc2\\xa0 ready\\n'; echo claude";
+  const LAUNCH = "printf '\\xe2\\x9d\\xaf\\xc2\\xa0 ready\\n\\x1b[>0q'; echo claude";
   const HANDOFF_DIR = process.env.WT_HANDOFF_DIR || path.join(__dirname, '..', 'handoffs.test');
   const hookToken = readHookToken;
   const agentHook = async (id, event, body = {}) => (await ctx.post('/api/hook', {

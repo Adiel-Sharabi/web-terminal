@@ -11,7 +11,7 @@ const crypto = require('crypto');
 const { test, expect, request: pwRequest } = require('@playwright/test');
 const { BASE, authCtx, readHookToken } = require('./test-helpers');
 
-const LAUNCH = "printf '\\xe2\\x9d\\xaf\\xc2\\xa0 ready\\n'; echo claude";
+const LAUNCH = "printf '\\xe2\\x9d\\xaf\\xc2\\xa0 ready\\n\\x1b[>0q'; echo claude";
 const TAG = '[web-terminal restart]';
 
 async function hook(id, event, body = {}) {
