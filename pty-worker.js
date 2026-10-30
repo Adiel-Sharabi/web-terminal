@@ -1606,7 +1606,7 @@ function armReadySettleCeiling(session) {
     if (!d || d.ready) return;
     // No #190 hold here, unlike the fallback: this timer is armed only once the
     // composer has been drawn, which clears the report and ends selector detection.
-    if (d.force()) announceAgentReady(session, 'composer marker; startup settle marker NEVER seen — ceiling');
+    if (d.force()) announceAgentReady(session, 'composer marker; startup settle marker NEVER seen - ceiling');
   }, READY_SETTLE_CEILING_MS);
   if (session._readySettleTimer.unref) session._readySettleTimer.unref();
 }
