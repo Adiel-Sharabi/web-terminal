@@ -40,6 +40,9 @@ const { connectClient, rpc } = require('./worker-ipc');   // #262 - one owner fo
 // make these fixtures stop representing a composer with nothing going red.
 const CARET = String.fromCodePoint(0x276f);
 const NBSP = String.fromCodePoint(0x00a0);
+// #404 - what Claude sends once its composer is up; until it arrives a CR is lost. The
+// registry's settle marker: a faithful startup is the composer THEN this.
+const STARTUP_SETTLED = `${String.fromCodePoint(0x1b)}[>0q${String.fromCodePoint(0x1b)}[?u`;
 
 function workerPipePath() {
   return process.platform === 'win32'
@@ -54,7 +57,7 @@ function makeTempDataDir() {
   return dir;
 }
 
-function spawnWorker(pipePath, dataDir) {
+function spawnWorker(pipePath, dataDir, extraEnv = {}) {
   const proc = spawn(process.execPath, [path.join(__dirname, '..', 'pty-worker.js')], {
     env: {
       ...process.env,
@@ -63,6 +66,7 @@ function spawnWorker(pipePath, dataDir) {
       WT_WORKER_DATA_DIR: dataDir,
       WT_WORKER_QUIET: '1',
       WT_WORKER_NO_DEFAULT: '1',
+      ...extraEnv,
     },
     stdio: ['ignore', 'pipe', 'pipe'],
     windowsHide: true,
@@ -80,6 +84,7 @@ function spawnWorker(pipePath, dataDir) {
 }
 
 const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
+const SETTLE_CEILING_MS = 1500;
 
 test.describe('#147 agent readiness on the PTY output path', () => {
   let worker, client, dataDir, pipePath, events;
@@ -87,7 +92,9 @@ test.describe('#147 agent readiness on the PTY output path', () => {
   test.beforeEach(async () => {
     pipePath = workerPipePath();
     dataDir = makeTempDataDir();
-    worker = spawnWorker(pipePath, dataDir);
+    // #404 - a short settle ceiling, so its test needs no long wait. Every negative below
+    // is read within ~100 ms, far inside it.
+    worker = spawnWorker(pipePath, dataDir, { WT_READY_SETTLE_MS: String(SETTLE_CEILING_MS) });
     client = await connectClient(pipePath);
     events = [];
     client.on('frame', (frame) => {
@@ -156,6 +163,7 @@ test.describe('#147 agent readiness on the PTY output path', () => {
     expect((await summaryOf(id)).agentReady).toBe(false);
 
     await inject(id, `\r\n╭──────╮\r\n│ ${CARET}${NBSP}try "fix" │\r\n`);
+    await inject(id, STARTUP_SETTLED);
     await sleep(60);
 
     expect((await summaryOf(id)).agentReady).toBe(true);
@@ -167,7 +175,8 @@ test.describe('#147 agent readiness on the PTY output path', () => {
     const id = await newSession('claude');
     await inject(id, CARET);
     await inject(id, `${CARET}${NBSP}and again\r\n`);
-    await inject(id, `${CARET}${NBSP}ordinary output`); // the marker AGAIN - the edge under test
+    await inject(id, STARTUP_SETTLED);
+    await inject(id, `${CARET}${NBSP}ordinary output${STARTUP_SETTLED}`); // both AGAIN - the edge under test
     await sleep(60);
 
     expect((await summaryOf(id)).agentReady).toBe(true);
@@ -192,6 +201,7 @@ test.describe('#147 agent readiness on the PTY output path', () => {
     expect((await summaryOf(id)).agentReady).toBe(false);
 
     await inject(id, `${CARET}${NBSP}`);
+    await inject(id, STARTUP_SETTLED);
     await sleep(60);
     expect((await summaryOf(id)).agentReady).toBe(true);
   });
@@ -212,9 +222,10 @@ test.describe('#147 agent readiness on the PTY output path', () => {
     const { id } = await rpc(client, 'createSession', {
       cwd: dataDir, name: 's-early', agent: 'claude', autoCommand: 'echo launching-claude',
     });
-    // The REAL marker, before the launch command has been written. Only the arming
-    // gate can hold this not-ready, so deleting the gate turns this test red.
-    await inject(id, `${CARET}${NBSP}`);
+    // The REAL markers - composer and the #404 startup query - before the launch
+    // command has been written. Only the arming gate can hold this not-ready, so
+    // deleting the gate turns this test red.
+    await inject(id, `${CARET}${NBSP}${STARTUP_SETTLED}`);
     await sleep(60);
     expect((await summaryOf(id)).agentReady).toBe(false);
   });
@@ -250,6 +261,62 @@ test.describe('#147 agent readiness on the PTY output path', () => {
 
     expect((await summaryOf(id)).agentReady).toBe(true);
     expect(readyEvents()).toHaveLength(1);
+  });
+
+  // #404 - two automatic hand-offs typed their prompt between the composer and this
+  // query on loaded boxes: the words stayed in the composer and no turn ever started.
+  test('#404 the composer ALONE is not ready - the startup query after it is', async () => {
+    const id = await newSession('claude');
+    await inject(id, `\r\n${CARET}${NBSP}Try "fix lint errors"\r\n`);
+    await sleep(60);
+    expect((await summaryOf(id)).agentReady).toBe(false);
+    expect(readyEvents()).toHaveLength(0);
+
+    await inject(id, `status line${STARTUP_SETTLED}`);
+    await sleep(60);
+    expect((await summaryOf(id)).agentReady).toBe(true);
+    expect(readyEvents()).toHaveLength(1);
+  });
+
+  test('#404 a startup query BEFORE the composer does not count', async () => {
+    // Claude sends it before its banner too. Counting that one is the bug.
+    const id = await newSession('claude');
+    await inject(id, `${STARTUP_SETTLED} banner\r\n`);
+    await inject(id, `${CARET}${NBSP}Try\r\n`);
+    await sleep(60);
+    expect((await summaryOf(id)).agentReady).toBe(false);
+  });
+
+  test('#404 the settle wait is bounded: no query at all still ends in ready', async () => {
+    // A CLI release that stops sending the query must cost a few seconds and a log
+    // line, never a session stuck on "starting" until the 45 s fallback.
+    const id = await newSession('claude');
+    await inject(id, `${CARET}${NBSP}Try\r\n`);
+    await sleep(60);
+    expect((await summaryOf(id)).agentReady).toBe(false);
+    await expect.poll(async () => (await summaryOf(id)).agentReady,
+      { timeout: SETTLE_CEILING_MS + 3000 }).toBe(true);
+    expect(readyEvents()).toHaveLength(1);
+  });
+
+  test('#404 the 45 s fallback does not cut the settle wait short', async () => {
+    // A slow boot that draws its composer just before the fallback fires must still wait
+    // for the startup query: forcing ready there lets a CR land in the lost window. Own
+    // worker, so the fallback can be short and the settle ceiling long.
+    const FALLBACK_MS = 8000;
+    client.close();
+    await worker.stop();
+    pipePath = workerPipePath();
+    worker = spawnWorker(pipePath, dataDir, { WT_READY_FALLBACK_MS: String(FALLBACK_MS), WT_READY_SETTLE_MS: '60000' });
+    client = await connectClient(pipePath);
+    const born = Date.now();
+    const id = await newSession('claude');
+    await inject(id, `${CARET}${NBSP}Try\r\n`);
+    // The precondition, asserted: the composer landed BEFORE the fallback was due.
+    // Otherwise the fallback has already fired and this test proves nothing.
+    expect(Date.now() - born, 'the launch write came too late to test the fallback').toBeLessThan(FALLBACK_MS - 1000);
+    await sleep(Math.max(0, born + FALLBACK_MS + 700 - Date.now()));
+    expect((await summaryOf(id)).agentReady).toBe(false);
   });
 
   test('ordinary shell output never flips a claude session ready', async () => {

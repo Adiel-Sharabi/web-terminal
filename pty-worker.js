@@ -1411,7 +1411,10 @@ const BLOCK_CARET_BYTES = Buffer.from(blockingPrompt.CARET, 'utf8');
 
 function detectBlockingPromptInOutput(session, buf) {
   const d = session._ready;
-  if (!d || d.ready) return;                    // past the composer: out of scope
+  // Past the composer: out of scope. `composerSeen`, not `ready` (#404): a session
+  // waiting for startup to settle has already drawn the composer, so nothing is in
+  // front of it, and a report raised now would hold the gate over an empty screen.
+  if (!d || d.composerSeen) return;
   // NOTE it does NOT also wait for `_autoCommandSentAt`, the way
   // detectAgentReadyInOutput next door does. #147 has to wait because its marker is a
   // CARET, which is the default prompt glyph of starship, pure and several oh-my-posh
@@ -1570,8 +1573,42 @@ function detectAgentReadyInOutput(session, buf) {
   // it. Waiting costs nothing: the marker cannot appear before the command that
   // produces it.
   if (!session._autoCommandSentAt) return;
-  if (!d.push(buf)) return;
-  announceAgentReady(session, 'composer marker');
+  const composerBefore = d.composerSeen;
+  if (d.push(buf)) {
+    announceAgentReady(session, composerBefore ? 'startup settled after the composer' : 'composer marker');
+    return;
+  }
+  // #404 — the composer is up but startup has not settled: a CR now would be lost.
+  // The composer does prove one thing already: no startup selector is in front of it,
+  // so a #190 report is cleared HERE rather than at ready, or it would outlive the
+  // dialog for the whole settle wait.
+  if (d.composerSeen && !composerBefore) {
+    log(`ready: session "${session.name}" composer drawn; waiting for startup to settle`);
+    clearBlockingPrompt(session);
+    armReadySettleCeiling(session);
+  }
+}
+
+// #404 — how long a session may sit between "composer drawn" and "startup settled"
+// before it is declared ready anyway. A CEILING, like READY_FALLBACK_MS below, not a
+// detector: the settle marker is the signal, measured 200-460 ms behind the composer
+// on Home and past 3 s on a loaded Office box (a LOWER bound: the real gap there was
+// not measured, so 10 s is a judgement, not a measurement). This only bounds a CLI release that
+// stops sending it, so that the failure is "ready 10 s late" and a loud log line,
+// never a session held at "starting" for the whole 45 s fallback.
+const READY_SETTLE_CEILING_MS = Number.isFinite(Number(process.env.WT_READY_SETTLE_MS)) && Number(process.env.WT_READY_SETTLE_MS) > 0
+  ? Number(process.env.WT_READY_SETTLE_MS) : 10000;
+function armReadySettleCeiling(session) {
+  if (session._readySettleTimer) return;
+  session._readySettleTimer = setTimeout(() => {
+    session._readySettleTimer = null;
+    const d = session._ready;
+    if (!d || d.ready) return;
+    // No #190 hold here, unlike the fallback: this timer is armed only once the
+    // composer has been drawn, which clears the report and ends selector detection.
+    if (d.force()) announceAgentReady(session, 'composer marker; startup settle marker NEVER seen — ceiling');
+  }, READY_SETTLE_CEILING_MS);
+  if (session._readySettleTimer.unref) session._readySettleTimer.unref();
 }
 
 // #147 F4 — the backstop that keeps "degrades to ready LATE, never ready NEVER"
@@ -1594,6 +1631,9 @@ function armReadyFallback(session) {
   if (!d || d.ready) return;
   session._readyFallback = setTimeout(() => {
     session._readyFallback = null;
+    // #404 - the composer is up and the settle wait is running: its own ceiling
+    // decides. Forcing ready here would let a CR land before Claude's startup query.
+    if (d.composerSeen) return;
     // #190 — THE CEILING IS FOR AN ABSENCE OF EVIDENCE, NOT AGAINST EVIDENCE.
     //
     // Everything the paragraph above lists — `command not found`, a crash on
@@ -1643,6 +1683,7 @@ function armReadyFallback(session) {
 function announceAgentReady(session, why) {
   log(`ready: session "${session.name}" agent accepting input (${why})`);
   session.dirty = true;
+  if (session._readySettleTimer) { clearTimeout(session._readySettleTimer); session._readySettleTimer = null; }
   // #190 — the composer is up, so nothing is parked in front of it. This is the one
   // funnel every route to ready passes through, which is why the clear lives here
   // rather than being copied to each of them (the #239 lesson, in miniature).
@@ -2211,7 +2252,8 @@ function createSession(id, cwd, name, autoCommand, savedScrollback, claudeSessio
   // until the user launches something — and gating it would block the very
   // compose-bar submit that types `claude`, which is the opposite of the point.
   const readyMarker = autoCommand ? agents.readinessMarker(sessionAgent(session)) : null;
-  session._ready = createReadyDetector(readyMarker);
+  // #404 — and, where the provider declares one, the marker that says startup is over.
+  session._ready = createReadyDetector(readyMarker, readyMarker ? agents.readinessSettledMarker(sessionAgent(session)) : null);
   armReadyFallback(session);
   // #316 - is a panel or menu covering the composer right now? Only for an agent that
   // declares both markers (Claude); fed only once the composer has latched, below.
@@ -2246,6 +2288,7 @@ function createSession(id, cwd, name, autoCommand, savedScrollback, claudeSessio
     session._compactReplay = null;
     if (session._submitTimer) { clearTimeout(session._submitTimer); session._submitTimer = null; }
     if (session._readyFallback) { clearTimeout(session._readyFallback); session._readyFallback = null; }
+    if (session._readySettleTimer) { clearTimeout(session._readySettleTimer); session._readySettleTimer = null; }
     cancelSubmitWatch(session); // #179 — a dead PTY cannot confirm anything
     cancelAutoResume(session); // #69 — same reasoning, a dead PTY has nothing to resume
     session._inputQueue = null; // a withheld CR dies with its PTY
@@ -2675,6 +2718,7 @@ const rpcHandlers = {
     if (session.idleTimer) clearTimeout(session.idleTimer);
     if (session._submitTimer) { clearTimeout(session._submitTimer); session._submitTimer = null; }
     if (session._readyFallback) { clearTimeout(session._readyFallback); session._readyFallback = null; }
+    if (session._readySettleTimer) { clearTimeout(session._readySettleTimer); session._readySettleTimer = null; }
     session._inputQueue = null; // a withheld CR dies with its PTY
     cancelSubmitWatch(session); // #179
     cancelAutoResume(session); // #69

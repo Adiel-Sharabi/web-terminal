@@ -28,6 +28,8 @@ const at = (n) => `${ESC}[${n}G`;
 const grey = `${ESC}[38;2;153;153;153m`;
 
 const COMPOSER = `${ESC}[38;2;136;136;136m${'-'.repeat(8)}${ESC}[39m\r\n${CARET}${NBSP}\r\n`;
+// #404 - Claude is ready only once this follows its composer (lib/agents.js readiness.settled).
+const STARTUP_SETTLED = `${ESC}[>0q${ESC}[?u`;
 const STATUS_PANEL = `${at(2)}Status${at(9)}Config${at(16)}Usage\r\n\r\n${at(2)}${grey}Esc${at(7)}to${at(10)}cancel${ESC}[39m\r\n`;
 const CONFIG_PANEL = `${grey}Enter/↓ to select · ↑ to tabs · Esc to clear${ESC}[39m\r\n`;
 const AGENT_VIEW = `${grey} ·${at(27)}enter${at(33)}to${at(36)}return${at(43)}·${ESC}[39m\r\n`;
@@ -166,7 +168,7 @@ test.describe('#316 the worker publishes inMenu', () => {
 
     // The ready latch ignores output until the launch command has been written (#147
     // F3), so feed the composer until the worker has latched.
-    await expect.poll(async () => { await inject(id, COMPOSER); return (await summary(id)).agentReady; },
+    await expect.poll(async () => { await inject(id, COMPOSER + STARTUP_SETTLED); return (await summary(id)).agentReady; },
       { timeout: 10_000 }).toBe(true);
     await inject(id, STATUS_PANEL);
     const inside = await summary(id);
@@ -182,7 +184,7 @@ test.describe('#316 the worker publishes inMenu', () => {
   test('after the agent EXITS, a shell printing the phrase is not a menu; the agent coming back re-arms it', async () => {
     const { id } = await rpc(client, 'createSession', { cwd: dataDir, name: 'exit', agent: 'claude', autoCommand: 'echo probe' });
     await sleep(150);
-    await expect.poll(async () => { await inject(id, COMPOSER); return (await summary(id)).agentReady; },
+    await expect.poll(async () => { await inject(id, COMPOSER + STARTUP_SETTLED); return (await summary(id)).agentReady; },
       { timeout: 10_000 }).toBe(true);
     await inject(id, STATUS_PANEL);
     expect((await summary(id)).inMenu).toBe(true);

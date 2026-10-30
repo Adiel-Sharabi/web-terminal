@@ -53,6 +53,8 @@ const TRUST_DIALOG = [
 
 /** The composer, which is what answering the dialog produces. Caret + NO-BREAK SPACE. */
 const COMPOSER = `${ESC}[38;2;136;136;136m${'-'.repeat(8)}${ESC}[39m\r\n${CARET}${NBSP}${ESC}[2mTry`;
+// #404 - Claude is ready only once this follows its composer (lib/agents.js readiness.settled).
+const STARTUP_SETTLED = `${ESC}[>0q${ESC}[?u`;
 
 // Short enough to keep the spec quick, long enough that the injection below lands well
 // inside it. The DEFAULT is 45s (#147); what is under test is the decision the timer
@@ -249,8 +251,37 @@ test.describe('#190 a startup selector holds the submit gate shut', () => {
 
     await rpc(client, '__testInjectOutput', { id, data: COMPOSER });
 
+    // #404 - the composer alone clears the report (nothing is in front of it any more),
+    // while ready waits for startup to settle.
+    const drawn = await summary(client, id);
+    expect(drawn.blockedPrompt).toBeNull();
+    expect(drawn.agentReady).toBe(false);
+
+    await rpc(client, '__testInjectOutput', { id, data: STARTUP_SETTLED });
     const s = await summary(client, id);
     expect(s.agentReady).toBe(true);
+    expect(s.blockedPrompt).toBeNull();
+  });
+
+  test('#404 a selector shape AFTER the composer is not reported - detection ends at the composer', async () => {
+    // Selector detection stops once the composer is drawn, not once the session is ready:
+    // during the settle wait nothing is in front of the composer, and a report raised then
+    // would hold the gate over an empty screen. This spec's 700 ms fallback would force ready
+    // before the composer even arrives (nothing holds it here), so this worker gets the default.
+    await start({ WT_AUTO_ANSWER_BLOCKING_PROMPT: '0', WT_READY_FALLBACK_MS: '45000' });
+    const id = await claudeSession();
+    const deadline = Date.now() + 20000;
+    let armed = false;
+    while (Date.now() < deadline && !armed) {
+      armed = writesOf(await rpc(client, '__testGetWrites', { id })).some((x) => x.includes('echo probe'));
+      if (!armed) await sleep(200);
+    }
+    expect(armed, 'the autoCommand was never written, so readiness never armed').toBe(true);
+
+    await rpc(client, '__testInjectOutput', { id, data: COMPOSER });
+    await rpc(client, '__testInjectOutput', { id, data: TRUST_DIALOG });
+    const s = await summary(client, id);
+    expect(s.agentReady).toBe(false); // still settling
     expect(s.blockedPrompt).toBeNull();
   });
 

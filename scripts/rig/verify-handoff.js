@@ -5,10 +5,8 @@
 // folder, takes its first turn from the brief, and the old session closes. Nothing here
 // touches production's sessions.
 //
-// HOOKS. The installed http hooks post to production's port, so a rig session's events
-// would never reach the rig. The session's folder therefore carries a project-level
-// `.claude/settings.local.json` registering the same hooks against the rig's port; Claude
-// fires both. Production answers its copy with "session not found" and drops it.
+// HOOKS. The session runs in a folder whose project settings send its hooks to the rig
+// as well (rig-http.js writeProjectHooks).
 //
 // The context gate is forced (`force: true`): a 500k-token session cannot be made on
 // demand, and the status line pushes to production, so the rig has no metrics at all.
@@ -20,7 +18,7 @@
 
 const fs = require('fs');
 const path = require('path');
-const { PORT, WS_BASE, login, api } = require('./rig-http');
+const { WS_BASE, login, api, writeProjectHooks } = require('./rig-http');
 const { openTerminal } = require('./rig-ws');
 
 const RIG = require('../scratch-dirs').DIRS.rig;
@@ -29,20 +27,6 @@ const NAME = `handoff-e2e-${Date.now().toString(36)}`;
 const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
 const t0 = Date.now();
 const say = (m) => console.log(`[verify +${Math.round((Date.now() - t0) / 1000)}s] ${m}`);
-
-const EVENTS = ['SessionStart', 'UserPromptSubmit', 'PreToolUse', 'PostToolUse', 'SubagentStart',
-  'SubagentStop', 'Notification', 'Stop', 'PreCompact'];
-
-function writeProjectHooks() {
-  fs.mkdirSync(path.join(CWD, '.claude'), { recursive: true });
-  const hook = {
-    type: 'http', url: `http://127.0.0.1:${PORT}/api/hook`,
-    headers: { 'X-WT-Session-ID': '$WT_SESSION_ID', 'X-WT-Hook-Token': '$WT_HOOK_TOKEN' },
-    allowedEnvVars: ['WT_SESSION_ID', 'WT_HOOK_TOKEN'],
-  };
-  const hooks = Object.fromEntries(EVENTS.map((e) => [e, [{ hooks: [hook] }]]));
-  fs.writeFileSync(path.join(CWD, '.claude', 'settings.local.json'), JSON.stringify({ hooks }, null, 2));
-}
 
 async function rowOf(cookie, id) {
   return (await api(cookie, 'GET', '/api/sessions')).find((s) => s.id === id) || null;
@@ -60,7 +44,7 @@ async function until(fn, what, ms) {
 
 (async () => {
   say(`rig ${WS_BASE}, folder ${CWD}`);
-  writeProjectHooks();
+  writeProjectHooks(CWD);
   const cookie = await login();
   const { id } = await api(cookie, 'POST', '/api/sessions', {
     name: NAME, cwd: CWD, agent: 'claude', autoCommand: 'claude --dangerously-skip-permissions',

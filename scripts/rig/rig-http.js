@@ -86,4 +86,25 @@ async function api(cookie, method, path, payload) {
   return res.body ? JSON.parse(res.body) : null;
 }
 
-module.exports = { PORT, HOST, WS_BASE, USER, PASS, request, login, api };
+// HOOKS. The installed http hooks post to production's port, so a rig session's events
+// never reach the rig (rig.js, KNOWN LIMIT). A folder carrying a project-level
+// `.claude/settings.local.json` that registers the same hooks against the rig's port makes
+// Claude fire both; production answers its copy with "session not found" and drops it. Any
+// verifier whose verdict is hook-driven (a turn started, a status) runs its session there.
+const HOOK_EVENTS = ['SessionStart', 'UserPromptSubmit', 'PreToolUse', 'PostToolUse', 'SubagentStart',
+  'SubagentStop', 'Notification', 'Stop', 'PreCompact'];
+
+function writeProjectHooks(dir) {
+  const fs = require('fs');
+  const path = require('path');
+  fs.mkdirSync(path.join(dir, '.claude'), { recursive: true });
+  const hook = {
+    type: 'http', url: `http://${HOST}:${PORT}/api/hook`,
+    headers: { 'X-WT-Session-ID': '$WT_SESSION_ID', 'X-WT-Hook-Token': '$WT_HOOK_TOKEN' },
+    allowedEnvVars: ['WT_SESSION_ID', 'WT_HOOK_TOKEN'],
+  };
+  const hooks = Object.fromEntries(HOOK_EVENTS.map((e) => [e, [{ hooks: [hook] }]]));
+  fs.writeFileSync(path.join(dir, '.claude', 'settings.local.json'), JSON.stringify({ hooks }, null, 2));
+}
+
+module.exports = { PORT, HOST, WS_BASE, USER, PASS, request, login, api, writeProjectHooks };

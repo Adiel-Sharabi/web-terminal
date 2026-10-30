@@ -106,3 +106,76 @@ test.describe('lib/agent-ready.createReadyDetector', () => {
     expect(d.ready).toBe(false);
   });
 });
+
+// #404 - Claude draws its composer before it has finished starting, then sends one more
+// terminal query; a CR that lands before that query is dropped while the words stay in
+// the composer. Measured with scripts/rig/probe-startup-cr.js (claude 2.1.314). The
+// fixtures use the REGISTRY's markers, so a change to either is what these tests judge.
+test.describe('lib/agent-ready - #404 the composer is not the end of startup', () => {
+  const agents = require('../lib/agents');
+  const COMPOSER = agents.readinessMarker('claude');
+  const SETTLED = agents.readinessSettledMarker('claude');
+  const ESC = String.fromCharCode(0x1b);
+  const composer = String.fromCodePoint(0x276f, 0x00a0) + 'Try "fix lint errors"';
+  const query = `${ESC}[>0q${ESC}[?u${ESC}]7501;?${String.fromCharCode(7)}`;
+
+  test('Claude declares a settle marker, and it is the startup query', () => {
+    expect(SETTLED).toBeInstanceOf(RegExp);
+    expect(SETTLED.test(query)).toBe(true);
+    // A different XT query is not it.
+    expect(SETTLED.test(`${ESC}[0q`)).toBe(false);
+    // Codex and a plain shell declare none: their readiness is unchanged.
+    expect(agents.readinessSettledMarker('codex')).toBeNull();
+    expect(agents.readinessSettledMarker(null)).toBeNull();
+  });
+
+  test('the composer ALONE is not ready; the query after it is', () => {
+    const d = createReadyDetector(COMPOSER, SETTLED);
+    expect(d.push(`banner\r\n${composer}\r\n`)).toBe(false);
+    expect(d.composerSeen).toBe(true);
+    expect(d.ready).toBe(false);
+    expect(d.push('status line')).toBe(false);
+    expect(d.push(query)).toBe(true);
+    expect(d.ready).toBe(true);
+    expect(d.push(query)).toBe(false); // the edge is reported once
+  });
+
+  test('a query BEFORE the composer does not count - Claude sends one before its banner too', () => {
+    // The load-bearing negative: the production capture of the failed hand-off has the
+    // query once before the banner. Counting it would declare ready at the composer,
+    // which is the bug.
+    const d = createReadyDetector(COMPOSER, SETTLED);
+    expect(d.push(`${query}${ESC}[>4m banner`)).toBe(false);
+    expect(d.push(composer)).toBe(false);
+    expect(d.ready).toBe(false);
+    // And one carried across the boundary is not retroactively counted either.
+    const e = createReadyDetector(COMPOSER, SETTLED);
+    expect(e.push(`${ESC}[>0q`)).toBe(false);
+    expect(e.push(composer)).toBe(false);
+    expect(e.ready).toBe(false);
+  });
+
+  test('composer and query in ONE read: ready at once, but only for the query AFTER it', () => {
+    expect(createReadyDetector(COMPOSER, SETTLED).push(`${composer}\r\n${query}`)).toBe(true);
+    expect(createReadyDetector(COMPOSER, SETTLED).push(`${query}\r\n${composer}`)).toBe(false);
+  });
+
+  test('a query SPLIT across reads after the composer is still found', () => {
+    const d = createReadyDetector(COMPOSER, SETTLED);
+    d.push(composer);
+    expect(d.push(`x${ESC}[>`)).toBe(false);
+    expect(d.push('0q')).toBe(true);
+  });
+
+  test('no settle marker declared: the composer alone is ready, as before', () => {
+    const d = createReadyDetector(COMPOSER, null);
+    expect(d.push(composer)).toBe(true);
+  });
+
+  test('force() still releases a session waiting to settle', () => {
+    const d = createReadyDetector(COMPOSER, SETTLED);
+    d.push(composer);
+    expect(d.force()).toBe(true);
+    expect(d.ready).toBe(true);
+  });
+});

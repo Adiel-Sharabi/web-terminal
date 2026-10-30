@@ -1023,7 +1023,8 @@ test.describe('#147 — a resume waits for the agent to exist', () => {
       expect((await findSession(client, id)).autoResumeArmed).toBe(true);
 
       // The composer appears — the same path term.onData feeds.
-      await inject(client, id, '\r\n' + CARET + NBSP + 'try "fix"\r\n');
+      // #404 - and then the query Claude sends once startup is over; ready waits for it.
+      await inject(client, id, '\r\n' + CARET + NBSP + 'try "fix"\r\n' + String.fromCodePoint(0x1b) + '[>0q');
       // The deferral's own retry timer (50ms under WT_AUTO_RESUME_FAST) picks it up.
       const fired = await ev.waitFor((e) => e.event === 'autoResume' && e.params.id === id, 5000);
       expect(fired.params.resetAt).toBe(resetAt);
