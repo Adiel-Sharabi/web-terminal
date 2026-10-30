@@ -2985,7 +2985,7 @@ function maintUpdate(step) {
 
 /** The restart happened: drop the hold and queue the "back" notice. */
 function maintCheckRestarted(rows) {
-  if (!_maint.hold || !maintLib.restarted(_maint.hold, rows, machineBootAt())) return;
+  if (!_maint.hold || !maintLib.restarted(_maint.hold, rows, machineBootAt(), workerClient.workerIdentity())) return;
   const back = maintLib.backList(_maint.hold, Date.now());
   console.log(`[maintenance] restart detected: hold "${_maint.hold.reason}" cleared${back ? `, ${back.pending.length} session(s) to tell` : ''}`);
   _maint = { hold: null, back };
@@ -5955,7 +5955,7 @@ app.post('/api/maintenance/prepare', express.json({ limit: '4kb' }), async (req,
     if (_maint.hold) return res.status(409).json({ error: 'a restart hold is already on', ...(await maintStatus()) });
     // A "back" notice still on its way is kept: a prepare straight after a restart must
     // not swallow the notice for the restart that just happened.
-    _maint = { hold: maintLib.startHold({ reason: req.body?.reason, now: Date.now(), bootAt: machineBootAt(), sessions }), back: _maint.back };
+    _maint = { hold: maintLib.startHold({ reason: req.body?.reason, now: Date.now(), bootAt: machineBootAt(), worker: workerClient.workerIdentity(), sessions }), back: _maint.back };
     saveMaint();
     console.log(`[maintenance] restart hold started (${_maint.hold.reason}) over ${sessions.length} session(s)`);
     await maintTick();

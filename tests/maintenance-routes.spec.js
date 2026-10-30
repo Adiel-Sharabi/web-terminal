@@ -174,6 +174,18 @@ test.describe('#359 restart hold - server', () => {
     expect(s.sessions.find((v) => v.id === shell)).toBeTruthy();
   });
 
+  test('#406: a hold over NO sessions clears when it was made against another worker, and stays against this one', async () => {
+    // What a cold restart leaves behind on an empty machine: a hold recorded against a
+    // worker that is not the one answering now. No session can vote, bootAt is null.
+    const old = { reason: 'empty spec', startedAt: Date.now() - 60000, bootAt: null, worker: { pid: 1, startedAt: 1 }, sessions: {} };
+    expect((await ctx.post('/api/test/maintenance-state', { data: { hold: old } })).status()).toBe(200);
+    await until(async () => (await status()).hold === null, 'the hold of another worker to clear itself');
+    // A hold made now by prepare records THIS worker: ticks and status reads leave it alone.
+    expect((await ctx.post('/api/maintenance/prepare', { data: { reason: 'same worker spec' } })).status()).toBe(200);
+    await new Promise((r) => setTimeout(r, 7000));
+    expect((await status()).hold).toMatchObject({ reason: 'same worker spec' });
+  });
+
   test('the CLI drives the same routes, and its exit code is the answer', async () => {
     const { spawnSync } = require('child_process');
     const path = require('path');

@@ -160,6 +160,29 @@ test.describe('restart hold (#359)', () => {
     expect(M.restarted(null, {}, BOOT)).toBe(false);
   });
 
+  test('#406: a different WORKER is a restart even with no sessions to vote; the same worker (a hot reload) is not', () => {
+    const W = { pid: 500, startedAt: T0 - 5000 };
+    const empty = M.startHold({ reason: 'r', now: T0, bootAt: BOOT, sessions: [], worker: W });
+    expect(empty.worker).toEqual(W);
+    // Nothing tracked, same boot: before #406 only a reboot could clear it.
+    expect(M.restarted(empty, {}, BOOT)).toBe(false);
+    // A hot reload of server.js: the same worker answers the ping.
+    expect(M.restarted(empty, {}, BOOT, { ...W })).toBe(false);
+    // A cold restart: a new worker (new pid and start time)...
+    expect(M.restarted(empty, {}, BOOT, { pid: 777, startedAt: T0 + 9000 })).toBe(true);
+    // ...and either field alone is a different worker (pids are reused, clocks are not).
+    expect(M.restarted(empty, {}, BOOT, { pid: 500, startedAt: T0 + 9000 })).toBe(true);
+    expect(M.restarted(empty, {}, BOOT, { pid: 777, startedAt: W.startedAt })).toBe(true);
+    // A hold made against a worker that reported nothing (older than the field): a worker
+    // that started AFTER the hold is new; one that started before it is the one it knew.
+    const blind = M.startHold({ reason: 'r', now: T0, bootAt: BOOT, sessions: [] });
+    expect(blind.worker).toBeNull();
+    expect(M.restarted(blind, {}, BOOT, { pid: 1, startedAt: T0 + 1 })).toBe(true);
+    expect(M.restarted(blind, {}, BOOT, { pid: 1, startedAt: T0 - 1 })).toBe(false);
+    // No worker identity now (none attached, or an older worker): the other signals decide.
+    expect(M.restarted(empty, {}, BOOT, null)).toBe(false);
+  });
+
   test('the "back" notice goes to the sessions that were told, once they are at the composer', () => {
     let h = hold();
     expect(M.backList(h, T0)).toBeNull(); // nobody was told
