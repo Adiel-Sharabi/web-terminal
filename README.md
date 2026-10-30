@@ -245,7 +245,7 @@ nothing runs under it.
 `wt-maintenance.js status --wait` reports one verdict per session (with its answer): `ready`,
 `working`, `needs-you`, `busy` (a build or test still running under it), `answering`, `declined`,
 `deferred` or `not-told`. It exits 0 once it is safe to restart, which means every session is
-`ready`. The verdict is decided from state the server already has. The hold clears itself once
+`ready` or `gone` (closed since the hold began). The verdict is decided from state the server already has. The hold clears itself once
 the restart has happened: the machine rebooted, every tracked session runs in a new process, or
 the worker itself is a new one (so a hold over a machine with no sessions clears too; a hot
 reload of `server.js` keeps the worker and never counts). The sessions it had asked are then sent

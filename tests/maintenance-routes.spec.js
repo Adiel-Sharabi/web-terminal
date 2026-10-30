@@ -292,16 +292,18 @@ test.describe('#359 restart hold - server', () => {
     const conv = crypto.randomUUID();
     expect(await hook(busy, 'UserPromptSubmit', { session_id: conv, prompt: 'long job' })).toBe(200);
     await until(async () => (await rowOf(busy))?.status === 'working', 'the agent to be working');
-    const never = await make(`maint-off-never-${Date.now()}`, { agent: 'claude', autoCommand: LAUNCH });
-    await until(async () => (await rowOf(never))?.agentReady === true, 'the third agent to be ready');
+    // Idle at its composer, so only the hold's own "never asked" can keep it from the notice.
+    const { agent: never } = await idleAgent('off-never');
     const now = Date.now();
     const entry = (over = {}) => ({ name: 'x', pid: null, agent: 'claude', promptedAt: now - 5000, deliveredAt: null, answeredAt: null, tries: 1, asks: 1, answer: null, ...over });
     const hold = {
       reason: 'off spec', startedAt: Date.now() - 1000, bootAt: null,
-      sessions: { [agent]: entry({ answer: 'no' }), [busy]: entry(), [never]: entry({ promptedAt: null, tries: 0 }) },
+      sessions: { [agent]: entry({ answer: 'no' }), [busy]: entry(), [never]: entry({ promptedAt: null, tries: 3 }) }, // tries spent: the tick will not ask it
     };
     expect((await ctx.post('/api/test/maintenance-state', { data: { hold } })).status()).toBe(200);
     expect(await (await ctx.delete('/api/maintenance')).json()).toMatchObject({ ok: true, cancelled: true });
+    // A second cancel finds no hold and must not wipe the notices still owed.
+    expect(await (await ctx.delete('/api/maintenance')).json()).toMatchObject({ ok: true, cancelled: false });
     // The idle session hears it; the working one is not interrupted...
     await until(async () => (await scrollbackOf(agent)).includes('is called off'), 'the called-off notice in the idle session');
     await new Promise((r) => setTimeout(r, 4000));
@@ -311,6 +313,19 @@ test.describe('#359 restart hold - server', () => {
     await until(async () => (await scrollbackOf(busy)).includes('is called off'), 'the called-off notice once the turn ended');
     expect(await scrollbackOf(never)).not.toContain('is called off');
     expect(await scrollbackOf(agent)).not.toContain('The machine is back');
+  });
+
+  test('#407: an agent that appears while the hold is on is tracked and asked - never ready unasked', async () => {
+    const { agent } = await idleAgent('late');
+    // A hold whose session list missed this agent (made between the refusal check and the list).
+    const hold = { reason: 'late spec', startedAt: Date.now() - 1000, bootAt: null, sessions: {} };
+    expect((await ctx.post('/api/test/maintenance-state', { data: { hold } })).status()).toBe(200);
+    const first = await status();
+    expect(first.safeToRestart).toBe(false);
+    expect(first.sessions.find((v) => v.id === agent).state).not.toBe('ready');
+    await until(async () => { const v = await verdictOf(agent); return v && !v.untracked && v.promptedAt; }, 'the tick to track and ask it');
+    expect((await status()).safeToRestart).toBe(false);
+    await until(async () => (await scrollbackOf(agent)).includes('A question, not an order'), 'the question in its terminal');
   });
 
   test('#406: a hold over NO sessions clears when it was made against another worker, and stays against this one', async () => {

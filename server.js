@@ -3029,6 +3029,11 @@ async function maintTick() {
     maintCheckRestarted(rows);
     let changed = false;
     if (_maint.hold) {
+      // An agent that appeared while the hold is on (created between the refusal check and
+      // the prepare's session list) is tracked, so it is asked like the rest.
+      for (const [id, r] of Object.entries(rows)) {
+        if (r.agent && !_maint.hold.sessions[id]) maintUpdate((h) => maintLib.trackSession(h, r));
+      }
       for (const id of Object.keys(_maint.hold.sessions)) {
         const row = rows[id] && maintRowOf(rows[id]);
         if (!row || !_maint.hold) continue;
@@ -5996,9 +6001,11 @@ app.post('/api/maintenance/answer', express.json({ limit: '4kb' }), (req, res) =
 app.delete('/api/maintenance', (req, res) => {
   const had = !!_maint.hold;
   if (had) console.log(`[maintenance] restart hold cancelled (${_maint.hold.reason})`);
-  const off = had ? maintLib.backList(_maint.hold, Date.now()) : null;
-  _maint = { hold: null, back: null, off };
-  saveMaint();
+  // No hold: nothing to cancel, and the notices still owed (called off, back) are kept.
+  if (had) {
+    _maint = { hold: null, back: null, off: maintLib.backList(_maint.hold, Date.now()) };
+    saveMaint();
+  }
   maintTick();
   res.json({ ok: true, cancelled: had });
 });

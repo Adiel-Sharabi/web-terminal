@@ -77,15 +77,45 @@ test.describe('restart hold (#359)', () => {
     const p = M.wrapUpPrompt('Windows update', 'C:\\dev\\web-terminal\\scripts\\wt-maintenance.js');
     expect(p).toContain('Windows update');
     expect(p).toMatch(/A question, not an order/);
-    expect(p).toMatch(/"no" and "later" are perfectly fine answers/);
-    expect(p).toMatch(/only THEN run/); // yes comes after a safe stop
-    // Every command carries the ABSOLUTE script path (sessions run in any cwd), with
-    // forward slashes so neither bash nor PowerShell reads an escape in it.
-    const cmd = 'node "C:/dev/web-terminal/scripts/wt-maintenance.js" answer';
-    for (const a of ['yes', 'later --minutes 30', 'no --reason']) expect(p).toContain(`${cmd} ${a}`);
+    expect(p).toMatch(/"no" or "later" is fine/);
+    expect(p).toMatch(/reach a safe stop.*then answer yes/); // yes comes after a safe stop
+    // The command carries the ABSOLUTE script path (sessions run in any cwd), with forward
+    // slashes so neither bash nor PowerShell reads an escape in it, and every answer's flags.
+    expect(p).toContain('node "C:/dev/web-terminal/scripts/wt-maintenance.js" answer yes|no|later [--minutes N] [--reason "why"]');
+    expect(p).toMatch(/chat is not read/);
     expect(p).not.toContain('\\');
-    expect(p).not.toMatch(/about to restart/);
-    expect(M.calledOffPrompt('Windows update')).toMatch(/called off.*carry on exactly as normal/);
+    expect(M.calledOffPrompt('Windows update')).toMatch(/called off\. Carry on as normal/);
+  });
+
+  test('#407: the hold prompts stay under Claude\'s 512-byte submit.bracketAbove, whatever the reason and path', () => {
+    // Over it, Claude gets the text as a bracketed paste (#213) and delivery hangs on the
+    // UserPromptSubmit prompt still starting with the tag.
+    const longPath = `C:\\Users\\someone-long\\AppData\\Local\\Temp\\claude\\C--dev-web-terminal\\checkout\\scripts\\wt-maintenance.js`;
+    const reason = 'r'.repeat(200);
+    for (const p of [M.wrapUpPrompt(reason, longPath), M.calledOffPrompt(reason), M.backPrompt(reason)]) {
+      expect(Buffer.byteLength(p)).toBeLessThan(512);
+    }
+    expect(longPath.length).toBeGreaterThan(100);
+    // The hold itself keeps the full (200) reason; only the typed text is shortened.
+    expect(M.startHold({ reason, now: T0, bootAt: BOOT, sessions: [] }).reason).toHaveLength(200);
+  });
+
+  test('#407: text we store or type loses C0, DEL and C1 control characters', () => {
+    const c1 = String.fromCodePoint(0x85, 0x9b, 0x9f);
+    const r = M.parseAnswer({ sessionId: 'a', answer: 'no', reason: `a${c1}b${String.fromCodePoint(0x7f)}c` });
+    expect(r.reason).toBe('a   b c');
+    expect(M.parseAnswer({ sessionId: 'a', answer: 'no', reason: `caf${String.fromCodePoint(0xe9)}` }).reason).toBe(`caf${String.fromCodePoint(0xe9)}`);
+  });
+
+  test('#407: an agent the hold does not track is never ready - it has not been asked', () => {
+    const h = M.startHold({ reason: 'r', now: T0, bootAt: BOOT, sessions: [] });
+    const rows = { n: agentRow({ id: 'n', name: 'N' }) };
+    const st = M.status(h, rows, { n: [] });
+    expect(st.safeToRestart).toBe(false);
+    expect(st.sessions[0]).toMatchObject({ id: 'n', state: 'not-told', untracked: true });
+    // Tracked, it is asked like the rest; an untracked plain shell keeps the old rule.
+    expect(M.status(M.trackSession(h, rows.n), rows, { n: [] }).sessions[0]).toMatchObject({ state: 'not-told', untracked: false });
+    expect(M.status(h, { s: shellRow() }, { s: [] }).safeToRestart).toBe(true);
   });
 
   test('#407: an answer is validated strictly - enum, clamped integer minutes, untrusted reason', () => {
