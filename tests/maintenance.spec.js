@@ -90,7 +90,8 @@ test.describe('restart hold (#359)', () => {
   test('#407: the hold prompts stay under Claude\'s 512-byte submit.bracketAbove, whatever the reason and path', () => {
     // Over it, Claude gets the text as a bracketed paste (#213) and delivery hangs on the
     // UserPromptSubmit prompt still starting with the tag.
-    const longPath = `C:\\Users\\someone-long\\AppData\\Local\\Temp\\claude\\C--dev-web-terminal\\checkout\\scripts\\wt-maintenance.js`;
+    // No user folder in it: the #260 gate (scripts/check-no-secrets.js) flags any C:\Users\<name>.
+    const longPath = `D:\\work\\a-rather-long-checkout-folder\\nested\\deeper\\web-terminal-worktree\\checkout\\scripts\\wt-maintenance.js`;
     const reason = 'r'.repeat(200);
     // A reason in Hebrew is two bytes a character: the byte budget, not the char count, binds.
     const wide = String.fromCodePoint(0x05d0).repeat(200);
