@@ -32,7 +32,8 @@ const blockingPrompt = require('./lib/blocking-prompt');
 // cap-blocked by metrics with the detector below having never seen a thing.
 const capSample = require('./lib/cap-sample');
 
-const WORKER_VERSION = '0.8.0'; // 0.8.0: #316 - a Claude session whose composer is covered by a panel or menu (/status, /usage, /model, /config, Agent View) publishes `inMenu` (lib/menu-state.js, by the ORDER of the composer marker and a panel footer in the PTY stream). 0.7.0: #179 — a client submit that produces no agent activity within the provider's submitConfirm window is reported as `submitUnconfirmed`, so a prompt swallowed by a TUI that was not at its composer stops vanishing silently. Prior 0.6.2: a session restored from a scrollback that ends mid-alt-screen (Claude killed while in /tui fullscreen, so ?1049l never arrived) gets a corrective ?1049l appended, instead of stranding xterm in the alt buffer showing a frozen frame over a live shell. Prior 0.6.1: the submit gap is measured against the wire, not the frame.
+const WORKER_STARTED_AT = Date.now();
+const WORKER_VERSION = '0.9.0'; // 0.9.0: #406 - the ping reply carries `pid` and `startedAt`, so the restart hold (lib/maintenance.js) can tell a new worker from the old one. 0.8.0: #316 - a Claude session whose composer is covered by a panel or menu (/status, /usage, /model, /config, Agent View) publishes `inMenu` (lib/menu-state.js, by the ORDER of the composer marker and a panel footer in the PTY stream). 0.7.0: #179 — a client submit that produces no agent activity within the provider's submitConfirm window is reported as `submitUnconfirmed`, so a prompt swallowed by a TUI that was not at its composer stops vanishing silently. Prior 0.6.2: a session restored from a scrollback that ends mid-alt-screen (Claude killed while in /tui fullscreen, so ?1049l never arrived) gets a corrective ?1049l appended, instead of stranding xterm in the alt buffer showing a frozen frame over a live shell. Prior 0.6.1: the submit gap is measured against the wire, not the frame.
 
 // --- Optional latency instrumentation (opt-in via WT_LATENCY_DEBUG=1) -----
 const _LATENCY_DEBUG = process.env.WT_LATENCY_DEBUG === '1';
@@ -2620,7 +2621,7 @@ function requireUuid(id) {
 }
 
 const rpcHandlers = {
-  ping: async () => ({ ok: true, version: WORKER_VERSION }),
+  ping: async () => ({ ok: true, version: WORKER_VERSION, pid: process.pid, startedAt: WORKER_STARTED_AT }),
 
   listSessions: async () => {
     const list = [];
