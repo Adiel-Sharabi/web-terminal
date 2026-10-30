@@ -223,22 +223,37 @@ from the transcript. An older server publishes no budget and the colour keeps it
 
 **Prepare a machine for a restart** — one action, one honest answer.
 `node scripts/wt-maintenance.js prepare "Windows update"` (add `--server <url|name>` for a cluster
-peer) sets a **restart hold**: every agent session is told, through its own terminal, to bring its
-current step to a safe stop and end its turn. A session is told only when it is idle at its
-composer: one that is mid-turn, or parked on a permission prompt or a menu, is told once its turn
-ends, so the text is never queued behind a turn or answers a question. "Told" means the agent's
-own prompt hook carried the text, and "answered" means a turn ended after that. A prompt the agent
-visibly did not take is typed again, up to three times. While the hold is
-on, new sessions are refused (`503`; pass `"force": true` to override) and no hand-off starts.
-`wt-maintenance.js status --wait` reports one verdict per session: `ready`, `working`,
-`needs-you`, `busy` (a build or test still running under it), `answering` or `not-told`. It
-exits 0 once it is safe to restart. The verdict is decided from state the server already has: the
-session's status, what is running under its terminal, and whether its turn ended after it was
-told. What the agent wrote is shown alongside but never decides it. The hold clears itself once
-the restart has happened, whether the machine rebooted or web-terminal was cold-restarted. The
-sessions it had told are then sent a "the machine is back" notice once they are up again.
-`wt-maintenance.js cancel` lifts it by hand. Routes: `POST /api/maintenance/prepare`,
-`GET /api/maintenance/status`, `DELETE /api/maintenance`.
+peer) sets a **restart hold**. The hold **asks, it does not order**: every agent session is asked,
+through its own terminal, whether a restart suits it now, and "no" and "later" are fine answers
+(in the middle of a long build, with unpushed work). A session is asked only when it is idle at
+its composer: one that is mid-turn, or parked on a permission prompt or a menu, is asked once its
+turn ends, so the text is never queued behind a turn or answers a question. "Asked" means the
+agent's own prompt hook carried the text. A prompt the agent visibly did not take is typed again,
+up to three times. While the hold is on, new sessions are refused (`503`; pass `"force": true`
+to override) and no hand-off starts.
+
+The session answers with a command, `wt-maintenance.js answer yes|no|later [--minutes N]
+[--reason "..."]`, which reports its answer to the server as state under its own
+`$WT_SESSION_ID`; nothing it writes in the chat is read. `yes` (after it has brought its step to a
+safe stop) makes it `ready` once its turn has ended and nothing runs under it. `no` makes it
+`declined`, with its reason, and blocks the restart until the hold is cancelled or a new one is
+prepared. `later` makes it `deferred` for N minutes (5 to 240, default 30), after which it is asked
+again, at most four asks in all. A session that has been asked, ended its turn and said nothing
+stays `answering`: silence is not agreement. A plain shell is never asked and is `ready` when
+nothing runs under it.
+
+`wt-maintenance.js status --wait` reports one verdict per session (with its answer): `ready`,
+`working`, `needs-you`, `busy` (a build or test still running under it), `answering`, `declined`,
+`deferred` or `not-told`. It exits 0 once it is safe to restart, which means every session is
+`ready`. The verdict is decided from state the server already has. The hold clears itself once
+the restart has happened: the machine rebooted, every tracked session runs in a new process, or
+the worker itself is a new one (so a hold over a machine with no sessions clears too; a hot
+reload of `server.js` keeps the worker and never counts). The sessions it had asked are then sent
+a "the machine is back" notice once they are up again. `wt-maintenance.js cancel` lifts it by
+hand and tells every session it had asked that the restart is called off and to carry on as
+normal (typed once each is idle at its composer). Routes: `POST /api/maintenance/prepare`,
+`POST /api/maintenance/answer` (`{sessionId, answer, minutes?, reason?}`), `GET
+/api/maintenance/status`, `DELETE /api/maintenance`.
 
 **Switch a machine's Claude account** — with two Claude subscriptions, move a machine from one
 to the other without logging in again. In the companion, the account button on a machine's card

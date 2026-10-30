@@ -21,7 +21,7 @@ test.describe('restart hold (#359)', () => {
   });
 
   test('the prompts are tagged, so the chat lens never shows them as "You"', () => {
-    for (const p of [M.wrapUpPrompt('x'), M.backPrompt('x')]) {
+    for (const p of [M.wrapUpPrompt('x', '/abs/wt-maintenance.js'), M.backPrompt('x'), M.calledOffPrompt('x')]) {
       expect(p).not.toMatch(/[\r\n]/);
       expect(classifyUserTurn(p)).toMatchObject({ kind: 'system', from: 'Restart' });
     }
@@ -73,6 +73,109 @@ test.describe('restart hold (#359)', () => {
     expect(M.noteStatus(h, hooked).sessions.a.answeredAt).toBe(T0 + 30);
   });
 
+  test('#407: the prompt ASKS - a polite question that makes "no" and "later" fine, with an absolute answer command', () => {
+    const p = M.wrapUpPrompt('Windows update', 'C:\\dev\\web-terminal\\scripts\\wt-maintenance.js');
+    expect(p).toContain('Windows update');
+    expect(p).toMatch(/A question, not an order/);
+    expect(p).toMatch(/"no" and "later" are perfectly fine answers/);
+    expect(p).toMatch(/only THEN run/); // yes comes after a safe stop
+    // Every command carries the ABSOLUTE script path (sessions run in any cwd), with
+    // forward slashes so neither bash nor PowerShell reads an escape in it.
+    const cmd = 'node "C:/dev/web-terminal/scripts/wt-maintenance.js" answer';
+    for (const a of ['yes', 'later --minutes 30', 'no --reason']) expect(p).toContain(`${cmd} ${a}`);
+    expect(p).not.toContain('\\');
+    expect(p).not.toMatch(/about to restart/);
+    expect(M.calledOffPrompt('Windows update')).toMatch(/called off.*carry on exactly as normal/);
+  });
+
+  test('#407: an answer is validated strictly - enum, clamped integer minutes, untrusted reason', () => {
+    const ok = (b) => M.parseAnswer({ sessionId: 'a', ...b });
+    expect(ok({ answer: 'yes' })).toMatchObject({ ok: true, answer: 'yes', minutes: M.MINUTES_DEFAULT, reason: null });
+    expect(ok({ answer: 'later', minutes: 1 }).minutes).toBe(M.MINUTES_MIN);
+    expect(ok({ answer: 'later', minutes: 99999 }).minutes).toBe(M.MINUTES_MAX);
+    expect(ok({ answer: 'later', minutes: 12.6 }).minutes).toBe(13);
+    for (const answer of ['maybe', 'YES', '', null, undefined, 1, ['yes']]) expect(ok({ answer }).ok).toBe(false);
+    for (const minutes of ['30', NaN, Infinity, {}]) expect(ok({ answer: 'later', minutes }).ok).toBe(false);
+    expect(ok({ answer: 'no', reason: 42 }).ok).toBe(false);
+    expect(M.parseAnswer({ answer: 'yes' }).ok).toBe(false); // no sessionId
+    expect(M.parseAnswer(null).ok).toBe(false);
+    const r = ok({ answer: 'no', reason: `a${String.fromCodePoint(0)}b${String.fromCodePoint(13, 10)}${'x'.repeat(500)}` });
+    expect(r.reason).not.toMatch(/[\x00-\x1f]/);
+    expect(r.reason.length).toBeLessThanOrEqual(200);
+  });
+
+  test('#407: only a session the hold tracked AND asked can answer; no hold -> 409', () => {
+    const h = M.notePrompted(hold(), 'a', T0 + 5);
+    expect(M.noteAnswer(null, { sessionId: 'a', answer: 'yes' }, T0)).toMatchObject({ status: 409 });
+    expect(M.noteAnswer(h, { sessionId: 'a', answer: 'maybe' }, T0)).toMatchObject({ status: 400 });
+    expect(M.noteAnswer(h, { sessionId: 'zzz', answer: 'yes' }, T0)).toMatchObject({ status: 404 });
+    expect(M.noteAnswer(h, { sessionId: 's', answer: 'yes' }, T0)).toMatchObject({ status: 409 }); // never asked
+    const r = M.noteAnswer(h, { sessionId: 'a', answer: 'later', minutes: 20, reason: 'long build' }, T0 + 100);
+    expect(r.status).toBe(200);
+    expect(r.hold.sessions.a).toMatchObject({ answer: 'later', answerAt: T0 + 100, until: T0 + 100 + 20 * 60000, answerReason: 'long build' });
+    // It may change its mind; "yes" carries no reason and no deadline.
+    const y = M.noteAnswer(r.hold, { sessionId: 'a', answer: 'yes', reason: 'ignored' }, T0 + 200).hold.sessions.a;
+    expect(y).toMatchObject({ answer: 'yes', answerReason: null, until: null });
+  });
+
+  test('#407: yes is ready only once the turn ended and nothing runs; silence is never agreement', () => {
+    const S = M.STATES;
+    const e = (over) => ({ promptedAt: T0 + 1, deliveredAt: T0 + 2, answeredAt: null, asks: 1, answer: null, ...over });
+    // Turn over, never said anything: stays answering, with a clear why.
+    expect(M.verdict(e({ answeredAt: T0 + 3 }), agentRow(), [])).toEqual({ state: S.ANSWERING, why: 'told; has not answered (yes, no or later)' });
+    // yes, but the turn has not ended: not yet.
+    expect(M.verdict(e({ answer: 'yes' }), agentRow(), [])).toEqual({ state: S.ANSWERING, why: 'said yes; its turn has not ended yet' });
+    // yes + turn over + nothing running: ready. A running build still blocks it.
+    expect(M.verdict(e({ answer: 'yes', answeredAt: T0 + 3 }), agentRow(), []).state).toBe(S.READY);
+    expect(M.verdict(e({ answer: 'yes', answeredAt: T0 + 3 }), agentRow(), [{ name: 'dotnet.exe' }]).state).toBe(S.BUSY);
+    // no: declined, with the reason, even while it carries on working; and it blocks SAFE.
+    const no = e({ answer: 'no', answerReason: 'mid long build', answeredAt: T0 + 3 });
+    expect(M.verdict(no, agentRow(), [])).toMatchObject({ state: S.DECLINED });
+    expect(M.verdict(no, agentRow(), []).why).toContain('mid long build');
+    expect(M.verdict(no, agentRow({ status: 'working' }), []).state).toBe(S.DECLINED);
+    expect(M.verdict(no, null, null).state).toBe(S.GONE); // closed: gone
+    // A plain shell has no question to answer.
+    expect(M.verdict({ promptedAt: null }, shellRow(), []).state).toBe(S.READY);
+    // Only ready/gone are clear.
+    let h = { ...hold(), sessions: { a: { ...hold().sessions.a, ...no }, s: hold().sessions.s } };
+    const st = M.status(h, { a: agentRow(), s: shellRow() }, { a: [], s: [] }, T0 + 10);
+    expect(st.safeToRestart).toBe(false);
+    expect(st.sessions.find((v) => v.id === 'a')).toMatchObject({ state: 'declined', answer: 'no', answerReason: 'mid long build' });
+    h = { ...h, sessions: { ...h.sessions, a: { ...h.sessions.a, ...e({ answer: 'yes', answeredAt: T0 + 3 }) } } };
+    expect(M.status(h, { a: agentRow(), s: shellRow() }, { a: [], s: [] }, T0 + 10).safeToRestart).toBe(true);
+  });
+
+  test('#407: a "later" is deferred until its time, then asked again - at most MAX_ASKS times', () => {
+    const S = M.STATES;
+    let h = M.notePrompted(hold(), 'a', T0);
+    expect(h.sessions.a.asks).toBe(1);
+    h = M.noteAnswer(h, { sessionId: 'a', answer: 'later', minutes: 10, reason: 'build' }, T0 + 1000).hold;
+    const e = () => h.sessions.a;
+    const until = T0 + 1000 + 10 * 60000;
+    expect(M.verdict(e(), agentRow(), [], T0 + 2000)).toMatchObject({ state: S.DEFERRED });
+    expect(M.verdict(e(), agentRow(), [], T0 + 2000).why).toMatch(/asked again in 10 min/);
+    expect(M.verdict(e(), agentRow({ status: 'working' }), [], T0 + 2000).state).toBe(S.DEFERRED);
+    // Not asked before its time, nor into a busy session; asked once time is up and idle.
+    expect(M.shouldPrompt(e(), agentRow(), until - 1)).toBe(false);
+    expect(M.shouldPrompt(e(), agentRow({ status: 'working' }), until)).toBe(false);
+    expect(M.shouldPrompt(e(), agentRow(), until)).toBe(true);
+    expect(M.verdict(e(), agentRow(), [], until).why).toMatch(/time is up/);
+    // Asking again is a FRESH question: the old answer and turn end are void.
+    h = M.notePrompted(h, 'a', until + 1);
+    expect(e()).toMatchObject({ promptedAt: until + 1, asks: 2, answer: null, until: null, deliveredAt: null, answeredAt: null, tries: 1 });
+    expect(M.shouldPrompt(e(), agentRow(), until + 2)).toBe(false);
+    expect(M.verdict(e(), agentRow(), [], until + 2).state).toBe(S.ANSWERING);
+    // Bounded: after MAX_ASKS asks a "later" is not asked again, and says so.
+    for (let n = 2; n < M.MAX_ASKS; n++) {
+      h = M.noteAnswer(h, { sessionId: 'a', answer: 'later', minutes: 5 }, T0 + n).hold;
+      h = M.notePrompted(h, 'a', T0 + 10 + n);
+    }
+    expect(e().asks).toBe(M.MAX_ASKS);
+    h = M.noteAnswer(h, { sessionId: 'a', answer: 'later', minutes: 5 }, T0).hold;
+    expect(M.shouldPrompt(e(), agentRow(), T0 + 24 * 3600000)).toBe(false);
+    expect(M.verdict(e(), agentRow(), [], T0 + 24 * 3600000).why).toMatch(/asked 4 times/);
+  });
+
   test('a compacting session is not told and not ready; a capped one says why it waits', () => {
     expect(M.canPrompt(agentRow({ compacting: true }))).toBe(false);
     const told = { promptedAt: T0 + 1, deliveredAt: T0 + 2, answeredAt: T0 + 3 };
@@ -105,7 +208,7 @@ test.describe('restart hold (#359)', () => {
   });
 
   test('verdicts come from state, and only ready/gone allow the restart', () => {
-    const told = { promptedAt: T0 + 1, answeredAt: T0 + 2 };
+    const told = { promptedAt: T0 + 1, answeredAt: T0 + 2, answer: 'yes' };
     const S = M.STATES;
     expect(M.verdict({ promptedAt: null }, agentRow(), []).state).toBe(S.NOT_TOLD);
     expect(M.verdict({ promptedAt: T0 + 1, answeredAt: null }, agentRow(), []))
@@ -130,7 +233,7 @@ test.describe('restart hold (#359)', () => {
 
   test('safeToRestart is true only when every session is ready or gone - a late session counts', () => {
     let h = hold();
-    h = { ...h, sessions: { ...h.sessions, a: { ...h.sessions.a, promptedAt: T0 + 1, answeredAt: T0 + 2 } } };
+    h = { ...h, sessions: { ...h.sessions, a: { ...h.sessions.a, promptedAt: T0 + 1, answeredAt: T0 + 2, answer: 'yes' } } };
     const rows = { a: agentRow(), s: shellRow() };
     expect(M.status(h, rows, { a: [], s: [] }).safeToRestart).toBe(true);
     expect(M.status(h, rows, { a: [], s: [{ name: 'node.exe' }] }).safeToRestart).toBe(false);
