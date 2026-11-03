@@ -21,7 +21,7 @@ const fs = require('fs');
 const os = require('os');
 const crypto = require('crypto');
 const ipc = require('../lib/ipc');
-const { connectClient, rpc, waitForTyped, stopWorker } = require('./worker-ipc');   // #262 - one owner for the budget
+const { connectClient, rpc, stopWorker } = require('./worker-ipc');   // #262 - one owner for the budget
 const agents = require('../lib/agents');
 
 const GAP = agents.submitPolicy('codex').gapMs;
@@ -303,7 +303,7 @@ test.describe('agent-aware submit CR on the PTY input path', () => {
     const { id } = await rpc(client, 'createSession', {
       cwd: dataDir, name: 'Before', agent: 'claude', autoCommand: 'echo claude',
     });
-    await waitForTyped(client, id, 'echo claude'); // snapshot AFTER the launch is typed
+    await sleep(400); // let the PTY + autoCommand settle so we snapshot cleanly
     const before = writesOf(await rpc(client, '__testGetWrites', { id })).length;
 
     await rpc(client, 'renameSession', { id, name: 'My New Name' });

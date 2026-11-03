@@ -28,8 +28,6 @@ const usageLimit = require('./lib/usage-limit');
 // #190 — the pure rules for Claude's startup selector family; the strings it
 // matches on are lib/agents.js fields.
 const blockingPrompt = require('./lib/blocking-prompt');
-// ConPTY holds a new shell ~3 s for an answer to its startup DA1 query; the rule is pure.
-const { createConptyStartupResponder } = require('./lib/conpty-startup');
 // #228 — INSTRUMENTATION ONLY: what the PTY was showing when a session went
 // cap-blocked by metrics with the detector below having never seen a thing.
 const capSample = require('./lib/cap-sample');
@@ -1353,7 +1351,6 @@ function cancelSubmitWatch(session) {
 // Per-chunk PTY output processing — shared by the real term.onData handler and
 // the test-only __testInjectOutput RPC so both exercise the same path.
 function processPtyOutput(session, buf) {
-  answerConptyStartupQuery(session, buf);
   // Track bracketed-paste mode so we can re-assert it on re-attach.
   const bp = scanBracketedPaste(buf);
   if (bp !== null) session.bracketedPaste = bp;
@@ -1370,20 +1367,6 @@ function processPtyOutput(session, buf) {
   if (session.clientCount > 0) {
     broadcastPtyOut(session, buf);
   }
-}
-
-// ConPTY's startup DA1 query (lib/conpty-startup.js): no viewer is attached at spawn,
-// so the worker answers it, once, inside ConPTY's own preamble. Written straight to the
-// PTY, not through termWrite: it is the TERMINAL's reply, not typing, so the #179 line
-// tracker and the #87 paste stamp must never see it. Recorded under WT_TEST in its own
-// list (`terminalReplies` of __testGetWrites), so a spec still sees every byte sent.
-function answerConptyStartupQuery(session, buf) {
-  const responder = session._conptyStartup;
-  if (!responder || responder.done) return;
-  const reply = responder.feed(buf.toString('utf8'));
-  if (!reply) return;
-  if (process.env.WT_TEST) (session._testTerminalReplies || (session._testTerminalReplies = [])).push(reply);
-  try { session.term.write(reply); } catch (e) { log(`session ${session.id} DA1 reply failed: ${e.message}`); }
 }
 
 // --- #190: the startup selector family ---------------------------------------
@@ -2281,16 +2264,8 @@ function createSession(id, cwd, name, autoCommand, savedScrollback, claudeSessio
   // from termWrite, and one that started half-populated would answer wrongly the first
   // time a plain shell did acquire an agent.
   session._submitLine = submitConfirm.createSubmitLineTracker();
-  // Windows only: ConPTY is what asks. Anywhere else nothing in the preamble does.
-  session._conptyStartup = process.platform === 'win32' ? createConptyStartupResponder() : null;
 
   term.onData((data) => {
-    // killTerm: ConPTY is past its start-up once the SHELL has drawn something - its own
-    // preamble (escape sequences only) does not count.
-    if (!session._ptyStarted && /[^\x00-\x20\x7f]/.test(stripAnsiForScan(typeof data === 'string' ? data : data.toString('latin1')))) {
-      session._ptyStarted = true;
-      if (session._killWhenStarted) { const k = session._killWhenStarted; session._killWhenStarted = null; k(); }
-    }
     // Issue #13: normalize PTY output to Buffer once here so the rest of the
     // worker (scrollback chunks, broadcastPtyOut) operates on Buffers.
     // - Linux: `data` is already a Buffer (encoding: null honored).
@@ -2645,22 +2620,6 @@ function requireUuid(id) {
   return id;
 }
 
-// A ConPTY killed BEFORE it has spoken (ConPTY's start-up, ~40 ms to ~1.5 s) is closed by
-// node-pty without its OpenConsole.exe going away: the console, one of the 32 Git for
-// Windows' MSYS allows machine-wide, then lives as long as this worker does - measured
-// 2026-11-03, a create followed at once by killSession left up to 3 of 8 held 6 s later,
-// and a full suite run strands ~20. So a session that has not printed yet is killed on its
-// first output instead, or after KILL_STARTUP_CAP_MS if it never prints. The session is
-// removed from the map at once either way; only the OS handle waits.
-const KILL_STARTUP_CAP_MS = 2000;
-function killTerm(session) {
-  const kill = () => { try { session.term.kill(); } catch {} };
-  if (process.platform !== 'win32' || session._ptyStarted) return kill();
-  const t = setTimeout(() => { session._ptyStarted = true; kill(); }, KILL_STARTUP_CAP_MS);
-  t.unref();
-  session._killWhenStarted = () => { clearTimeout(t); kill(); };
-}
-
 const rpcHandlers = {
   ping: async () => ({ ok: true, version: WORKER_VERSION, pid: process.pid, startedAt: WORKER_STARTED_AT }),
 
@@ -2764,7 +2723,7 @@ const rpcHandlers = {
     session._inputQueue = null; // a withheld CR dies with its PTY
     cancelSubmitWatch(session); // #179
     cancelAutoResume(session); // #69
-    killTerm(session);
+    try { session.term.kill(); } catch {}
     // Eagerly remove from the map so immediate follow-up RPCs see it as gone
     // (matches legacy server.js behavior). The onExit handler still fires later
     // for cleanup (delete scrollback, save configs, broadcast event) but it's
@@ -2969,12 +2928,7 @@ const rpcHandlers = {
     if (!process.env.WT_TEST) throw new Error('test-only RPC');
     const session = sessions.get(requireUuid(params.id));
     if (!session) throw new Error('session not found');
-    return {
-      writes: (session._testWrites || []).slice(),
-      // Answers the worker gave AS THE TERMINAL (ConPTY's startup DA1), kept apart
-      // from `writes` because they are not input anyone typed.
-      terminalReplies: (session._testTerminalReplies || []).slice(),
-    };
+    return { writes: (session._testWrites || []).slice() };
   },
 
   __testInjectScrollback: async (params) => {
