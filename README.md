@@ -255,6 +255,27 @@ normal (typed once each is idle at its composer). Routes: `POST /api/maintenance
 `POST /api/maintenance/answer` (`{sessionId, answer, minutes?, reason?}`), `GET
 /api/maintenance/status`, `DELETE /api/maintenance`.
 
+**Share scarce resources across the cluster** — one queue for AM8 slots, test VMs, office
+controllers and build turns (`slot:`, `vm:`, `controller:`, `build:`), so two sessions on two
+machines cannot take the same VM and a crashed session cannot hold one forever. ONE server is the
+authority (`leases.authority` in `config.json`); every other server forwards lease calls to it
+with its cluster token. `node scripts/wt-lease.js acquire vm:X [--wait]` from inside a session
+asks YOUR machine's server, which is granted or queued (FIFO, with its position). The lease ends
+on `release`, at its TTL, after three missed heartbeats (only a lease without a session needs
+them), or when its holder session ends — closed, reaped or crashed: its server tells the
+authority at once, and the authority confirms every holder's session against its machine each
+minute. The next waiter is then granted. An authority that cannot be reached grants nothing (fail
+closed) and stops nothing: holders keep running, and a returning authority restarts their
+heartbeat clocks. `leases.resources` reserves a resource for a role (`reservedFor: "release"`) or
+bars it (`neverLease: true`). A request may state `needs: {memGB, diskGB}`, checked against this
+machine's own readings (`/api/machine`) before anything is queued. `wt-lease.js record <id> --pid
+N --path <dir>` lists what the lease started on this machine; release kills only a recorded pid
+that is still the same process (by creation time, never by name) and removes only recorded
+folders inside `leases.cleanupRoots` — junctions are unlinked, never followed, and a real git
+repository is never removed. `wt-lease.js list` shows who holds what, who waits, and for how long.
+Routes: `POST /api/leases`, `GET /api/leases[/:id]`, `POST /api/leases/:id/heartbeat`,
+`DELETE /api/leases/:id`, `POST /api/leases/:id/record`, `GET /api/admission`.
+
 **Switch a machine's Claude account** — with two Claude subscriptions, move a machine from one
 to the other without logging in again. In the companion, the account button on a machine's card
 (dashboard → Machines) shows who that machine is logged in to and the accounts saved on it; pick
