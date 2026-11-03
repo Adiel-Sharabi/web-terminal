@@ -24,20 +24,20 @@ import 'app_bottom_sheet.dart';
 /// `agent` is load-bearing among those three: the screen opened from this object
 /// gates its Chat lens on it (#119).
 ///
-/// The refresh is started, never awaited: it fans out to every configured
-/// server, so one unreachable peer would hold the new session closed for that
-/// peer's whole client deadline (27-40 s measured), exactly as fork and the
-/// work board already avoid.
+/// The session is RECORDED, not waited for: [SessionRepository.noteCreated]
+/// paints it at once and refreshes in the background. Awaiting that refresh
+/// meant waiting on every configured server, so one unreachable peer held the
+/// new session closed for its whole client deadline (27-40 s measured).
 ///
-/// [clientBuilder] and [refreshList] are injectable for tests; production
-/// callers use the defaults, a real [ApiClient] and [SessionRepository.refresh].
+/// [clientBuilder] and [recordCreated] are injectable for tests; production
+/// callers use the defaults, a real [ApiClient] and [SessionRepository.noteCreated].
 Future<void> showNewSessionSheet(
   BuildContext context, {
   required List<ServerConfig> servers,
   required ServerConfig initialServer,
   required ValueChanged<Session> onCreated,
   ApiClient Function(ServerConfig server)? clientBuilder,
-  Future<void> Function()? refreshList,
+  void Function(Session created)? recordCreated,
 }) {
   return showAppBottomSheet<void>(
     context: context,
@@ -48,7 +48,7 @@ Future<void> showNewSessionSheet(
       initialServer: initialServer,
       onCreated: onCreated,
       clientBuilder: clientBuilder ?? ApiClient.new,
-      refreshList: refreshList ?? SessionRepository.instance.refresh,
+      recordCreated: recordCreated ?? SessionRepository.instance.noteCreated,
     ),
   );
 }
@@ -139,14 +139,14 @@ class _NewSessionSheet extends StatefulWidget {
     required this.initialServer,
     required this.onCreated,
     required this.clientBuilder,
-    required this.refreshList,
+    required this.recordCreated,
   });
 
   final List<ServerConfig> servers;
   final ServerConfig initialServer;
   final ValueChanged<Session> onCreated;
   final ApiClient Function(ServerConfig server) clientBuilder;
-  final Future<void> Function() refreshList;
+  final void Function(Session created) recordCreated;
 
   @override
   State<_NewSessionSheet> createState() => _NewSessionSheetState();
@@ -375,7 +375,7 @@ class _NewSessionSheetState extends State<_NewSessionSheet> {
         autoCommand: command.isEmpty ? null : command,
         agent: _agent,
       );
-      unawaited(widget.refreshList());
+      widget.recordCreated(created);
       if (!mounted) return;
       Navigator.of(context).pop();
       widget.onCreated(created);

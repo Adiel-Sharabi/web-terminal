@@ -2,7 +2,6 @@
 // filter, mirroring the web's showFolders: case-insensitive substring match,
 // empty query shows everything) and the server dropdown's visibility (owner:
 // "there is no server selection" — it must show even with a single server).
-import 'dart:async';
 import 'dart:convert';
 
 import 'package:flutter/material.dart';
@@ -400,8 +399,7 @@ void main() {
     testWidgets('opens the new session without waiting for the list refresh', (
       tester,
     ) async {
-      final neverEnds = Completer<void>();
-      var refreshStarted = false;
+      Session? recorded;
       Session? opened;
       await tester.pumpWidget(
         MaterialApp(
@@ -414,10 +412,9 @@ void main() {
                   servers: const [server],
                   initialServer: server,
                   onCreated: (s) => opened = s,
-                  refreshList: () {
-                    refreshStarted = true;
-                    return neverEnds.future;
-                  },
+                  // The production hook (SessionRepository.noteCreated) refreshes
+                  // in the background; this one never finishes anything at all.
+                  recordCreated: (s) => recorded = s,
                   clientBuilder: (server) => ApiClient(
                     server,
                     httpClient: MockClient((req) async {
@@ -441,7 +438,7 @@ void main() {
       await tester.tap(find.widgetWithText(FilledButton, 'Create'));
       await tester.pumpAndSettle();
 
-      expect(refreshStarted, isTrue, reason: 'the list is still refreshed');
+      expect(recorded?.id, 'new-1', reason: 'recorded, so the list carries it at once');
       expect(opened?.id, 'new-1');
       expect(find.text('New session'), findsNothing, reason: 'the sheet closed');
     });

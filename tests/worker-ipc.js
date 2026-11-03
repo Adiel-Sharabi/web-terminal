@@ -282,4 +282,23 @@ function assertBudgetCanFire(budgetMs, what) {
   );
 }
 
-module.exports = { RPC_BUDGET_MS, CONNECT_BUDGET_MS, connectClient, rpc, assertBudgetCanFire };
+/// Waits until the worker has typed [cmd] (a session's autoCommand) into its PTY, so
+/// a spec can snapshot its writes AFTER the launch rather than racing it. THROWS if it
+/// never happens: a spec that went on would be measuring a session that never started.
+///
+/// A fixed sleep used to stand in for this and only held because ConPTY kept every new
+/// shell ~3 s waiting for an answer to its DA1 query; the worker answers it now
+/// (lib/conpty-startup.js) and the command lands ~0.6 s after create, inside the window
+/// those sleeps assumed was quiet.
+async function waitForTyped(client, id, cmd, timeoutMs = 12000) {
+  const deadline = Date.now() + timeoutMs;
+  for (;;) {
+    const writes = ((await rpc(client, '__testGetWrites', { id })).writes || [])
+      .map((w) => (typeof w === 'string' ? w : Buffer.from(w.data || w).toString('utf8')));
+    if (writes.some((w) => w.includes(cmd))) return writes;
+    if (Date.now() > deadline) throw new Error(`setup: autoCommand "${cmd}" was never typed; writes=${JSON.stringify(writes)}`);
+    await new Promise((r) => setTimeout(r, 100));
+  }
+}
+
+module.exports = { RPC_BUDGET_MS, CONNECT_BUDGET_MS, connectClient, rpc, assertBudgetCanFire, waitForTyped };

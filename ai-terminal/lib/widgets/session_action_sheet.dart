@@ -7,6 +7,7 @@ import 'package:flutter/material.dart';
 
 import '../api/api_client.dart';
 import '../api/models.dart';
+import '../services/session_repository.dart';
 import '../theme/app_theme.dart';
 import 'app_bottom_sheet.dart';
 
@@ -228,7 +229,8 @@ class _SessionActionsSheet extends StatelessWidget {
         cwd: session.cwd,
         autoCommand: buildForkAutoCommand(session),
       );
-      onChanged();
+      // Recorded, not refreshed-and-awaited: the fork's screen opens before any list has it.
+      SessionRepository.instance.noteCreated(forked);
       if (context.mounted) Navigator.pop(context);
       onForked?.call(forked);
     } catch (e) {

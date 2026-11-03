@@ -9,7 +9,7 @@
 // half - a worker-written DA1 reply landing in a running program would be typed input.
 // The preamble bytes are the real ones captured from a spawn; built from code points.
 const { test, expect } = require('@playwright/test');
-const { createConptyStartupResponder, DA1_REPLY } = require('../lib/conpty-startup');
+const { createConptyStartupResponder, DA1_REPLY, ANSWER_WINDOW_MS } = require('../lib/conpty-startup');
 
 const ESC = String.fromCodePoint(0x1b);
 const BEL = String.fromCodePoint(0x07);
@@ -68,6 +68,33 @@ test.describe('ConPTY startup DA1 responder', () => {
   test('a title OSC before the query does not count as text', () => {
     const r = createConptyStartupResponder();
     expect(r.feed(ESC + ']0;MINGW64' + BEL + ESC + '[c')).toBe(DA1_REPLY);
+  });
+
+  // Review, 2026-11-03 (reproduced): with the worker's loop blocked past ConPTY's
+  // own ~3 s timeout, the preamble and the prompt arrive as ONE chunk. ConPTY is no
+  // longer waiting, so a reply then goes to bash as typed input (`1;2c` echoed, the
+  // restore ran `1;2cclaude --resume <id>`). Both guards below fail toward silence.
+  test('NOT when the shell already printed after the query (ConPTY gave up waiting)', () => {
+    const NL = String.fromCodePoint(0x0d, 0x0a);
+    const coalesced = PRE_2 + ESC + '[?2004h' + ESC + ']0;MINGW64:/c/dev' + BEL
+      + NL + ESC + '[32madiel@host' + ESC + '[0m' + NL + '$ ';
+    const r = createConptyStartupResponder();
+    expect(r.feed(coalesced)).toBeNull();
+    expect(r.done).toBe(true);
+  });
+
+  test('NOT once the answer window since the spawn has passed', () => {
+    let t = 1000;
+    const r = createConptyStartupResponder({ spawnedAt: 1000, now: () => t });
+    t = 1000 + ANSWER_WINDOW_MS + 1;
+    expect(r.feed(PRE_2)).toBeNull();
+    expect(r.done).toBe(true);
+  });
+
+  test('still answers just inside the window, and the window sits well under the ~3.2 s ConPTY waits', () => {
+    const r = createConptyStartupResponder({ spawnedAt: 0, now: () => ANSWER_WINDOW_MS });
+    expect(r.feed(PRE_2)).toBe(DA1_REPLY);
+    expect(ANSWER_WINDOW_MS).toBeLessThanOrEqual(2000);
   });
 
   test('gives up once the preamble outgrows anything ConPTY sends', () => {

@@ -140,7 +140,8 @@ test.describe('auto-command reaches the shell whole (restore prime)', () => {
 
   // ConPTY holds a new shell until its startup DA1 query is answered, or ~3 s pass
   // (lib/conpty-startup.js). Unanswered, the command was typed at ~3.6 s (worker.log,
-  // every session for months); answered, at ~0.6 s. The bound sits between the two.
+  // every session for months); answered, at ~0.6 s. The bound sits between the two,
+  // with CI headroom: unanswered is ConPTY's ~3.2 s PLUS the 370 ms settle and prime.
   test('ConPTY\'s startup query is answered first, so the shell is not held ~3 s', async () => {
     test.skip(process.platform !== 'win32', 'ConPTY is Windows-only');
     const cmd = 'echo fast-start';
@@ -152,6 +153,6 @@ test.describe('auto-command reaches the shell whole (restore prime)', () => {
     expect(writes.some((w) => w.includes(cmd)), `writes=${JSON.stringify(writes)}`).toBe(true);
     const { terminalReplies } = await rpc(client, '__testGetWrites', { id });
     expect(terminalReplies).toEqual([DA1_REPLY]); // once, and only that
-    expect(elapsed, 'the shell waited out ConPTY\'s DA1 timeout').toBeLessThan(2500);
+    expect(elapsed, 'the shell waited out ConPTY\'s DA1 timeout').toBeLessThan(3000);
   });
 });
