@@ -96,3 +96,12 @@ maintenance.json
 maintenance.json.tmp
 maintenance.test.json
 maintenance.test.json.tmp
+# Cluster resource leases (#412): the authority's table and each machine's cleanup ledger.
+leases.json
+leases.json.tmp
+leases.test.json
+leases.test.json.tmp
+lease-records.json
+lease-records.json.tmp
+lease-records.test.json
+lease-records.test.json.tmp

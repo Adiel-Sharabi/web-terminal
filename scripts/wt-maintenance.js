@@ -25,49 +25,17 @@
 // Exit code: 0 = safe to restart (or the command succeeded), 1 = not yet, 2 = error /
 // no hold.
 
-const fs = require('fs');
-const path = require('path');
+const api = require('./wt-api');
 
-const ROOT = path.join(__dirname, '..');
 const args = process.argv.slice(2);
 const flag = (name) => { const i = args.indexOf(name); return i < 0 ? undefined : (args[i + 1] && !args[i + 1].startsWith('--') ? args[i + 1] : true); };
 const positional = args.filter((a, i) => !a.startsWith('--') && !(i > 0 && ['--server', '--wait', '--minutes', '--reason', '--session'].includes(args[i - 1])));
 const [cmd, ...rest] = positional;
 const asJson = args.includes('--json');
 
-function readJson(file) {
-  try { return JSON.parse(fs.readFileSync(file, 'utf8')); } catch { return null; }
-}
-
 /** { url, token } for --server, or for this machine. */
-function target() {
-  const want = flag('--server');
-  if (want && want !== true) {
-    const peers = readJson(process.env.WT_CLUSTER_TOKENS_FILE || path.join(ROOT, 'cluster-tokens.json')) || {};
-    const norm = (u) => String(u).replace(/\/+$/, '').toLowerCase();
-    const hit = Object.entries(peers).find(([u, v]) => norm(u) === norm(want) || (v && typeof v === 'object' && String(v.name || '').toLowerCase() === String(want).toLowerCase()));
-    if (!hit) throw new Error(`no cluster peer "${want}" in cluster-tokens.json`);
-    return { url: hit[0].replace(/\/+$/, ''), token: typeof hit[1] === 'string' ? hit[1] : hit[1].token };
-  }
-  const tokens = readJson(process.env.WT_API_TOKENS_FILE || path.join(ROOT, 'api-tokens.json')) || {};
-  const now = Date.now();
-  const live = Object.entries(tokens)
-    .filter(([, v]) => v && (!v.expires || new Date(v.expires).getTime() > now))
-    .sort((a, b) => new Date(b[1].expires || 0) - new Date(a[1].expires || 0));
-  if (!live.length) throw new Error('no unexpired API token in api-tokens.json for the local server');
-  return { url: `http://127.0.0.1:${process.env.WT_SESSION_PORT || 7681}`, token: live[0][0] };
-}
-
-async function call(t, method, route, body) {
-  const r = await fetch(t.url + route, {
-    method,
-    headers: { Authorization: `Bearer ${t.token}`, ...(body ? { 'Content-Type': 'application/json' } : {}) },
-    body: body ? JSON.stringify(body) : undefined,
-    signal: AbortSignal.timeout(60000),
-  });
-  const j = await r.json().catch(() => ({}));
-  return { status: r.status, json: j };
-}
+const target = () => api.target(flag('--server'));
+const call = api.call;
 
 function render(t, s) {
   if (!s.hold) {
