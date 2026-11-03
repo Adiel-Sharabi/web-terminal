@@ -2285,6 +2285,12 @@ function createSession(id, cwd, name, autoCommand, savedScrollback, claudeSessio
   session._conptyStartup = process.platform === 'win32' ? createConptyStartupResponder() : null;
 
   term.onData((data) => {
+    // killTerm: ConPTY is past its start-up once the SHELL has drawn something - its own
+    // preamble (escape sequences only) does not count.
+    if (!session._ptyStarted && /[^ - ]/.test(stripAnsiForScan(typeof data === 'string' ? data : data.toString('latin1')))) {
+      session._ptyStarted = true;
+      if (session._killWhenStarted) { const k = session._killWhenStarted; session._killWhenStarted = null; k(); }
+    }
     // Issue #13: normalize PTY output to Buffer once here so the rest of the
     // worker (scrollback chunks, broadcastPtyOut) operates on Buffers.
     // - Linux: `data` is already a Buffer (encoding: null honored).
@@ -2639,6 +2645,22 @@ function requireUuid(id) {
   return id;
 }
 
+// A ConPTY killed BEFORE it has spoken (ConPTY's start-up, ~40 ms to ~1.5 s) is closed by
+// node-pty without its OpenConsole.exe going away: the console, one of the 32 Git for
+// Windows' MSYS allows machine-wide, then lives as long as this worker does - measured
+// 2026-11-03, a create followed at once by killSession left up to 3 of 8 held 6 s later,
+// and a full suite run strands ~20. So a session that has not printed yet is killed on its
+// first output instead, or after KILL_STARTUP_CAP_MS if it never prints. The session is
+// removed from the map at once either way; only the OS handle waits.
+const KILL_STARTUP_CAP_MS = 2000;
+function killTerm(session) {
+  const kill = () => { try { session.term.kill(); } catch {} };
+  if (process.platform !== 'win32' || session._ptyStarted) return kill();
+  const t = setTimeout(() => { session._ptyStarted = true; kill(); }, KILL_STARTUP_CAP_MS);
+  t.unref();
+  session._killWhenStarted = () => { clearTimeout(t); kill(); };
+}
+
 const rpcHandlers = {
   ping: async () => ({ ok: true, version: WORKER_VERSION, pid: process.pid, startedAt: WORKER_STARTED_AT }),
 
@@ -2742,7 +2764,7 @@ const rpcHandlers = {
     session._inputQueue = null; // a withheld CR dies with its PTY
     cancelSubmitWatch(session); // #179
     cancelAutoResume(session); // #69
-    try { session.term.kill(); } catch {}
+    killTerm(session);
     // Eagerly remove from the map so immediate follow-up RPCs see it as gone
     // (matches legacy server.js behavior). The onExit handler still fires later
     // for cleanup (delete scrollback, save configs, broadcast event) but it's

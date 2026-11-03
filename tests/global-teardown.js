@@ -1,7 +1,13 @@
 const fs = require('fs');
 const path = require('path');
 
+const { endServerSessions } = require('./test-helpers');
+
 module.exports = async function globalTeardown() {
+  // Before Playwright stops the webServer: see endServerSessions.
+  const ended = await endServerSessions();
+  if (ended) console.log(`[teardown] ended ${ended} session(s) the suite server still held`);
+
   const configPath = path.join(__dirname, '..', 'config.json');
   const backupPath = path.join(__dirname, '..', 'config.json.bak');
 

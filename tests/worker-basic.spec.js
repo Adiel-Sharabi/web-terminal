@@ -5,7 +5,7 @@ const { spawn } = require('child_process');
 const path = require('path');
 const crypto = require('crypto');
 const ipc = require('../lib/ipc');
-const { rpc } = require('./worker-ipc');   // #262 - one owner for the budget
+const { rpc, stopWorker } = require('./worker-ipc');   // #262 - one owner for the budget
 
 function workerPipePath() {
   return process.platform === 'win32'
@@ -32,11 +32,7 @@ function spawnWorker(pipePath, extraEnv = {}) {
     proc,
     getStdout: () => stdout,
     getStderr: () => stderr,
-    stop: () => new Promise((resolve) => {
-      if (proc.exitCode !== null || proc.signalCode !== null) return resolve();
-      proc.once('exit', () => resolve());
-      try { proc.kill(); } catch {}
-    }),
+    stop: () => stopWorker(proc),
   };
 }
 

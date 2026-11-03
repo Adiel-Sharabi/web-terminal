@@ -228,7 +228,41 @@ async function routeSocket(page, pathname) {
   };
 }
 
+/**
+ * END EVERY SESSION THE SUITE'S SERVER STILL HOLDS, and wait until each console is gone.
+ *
+ * Each session is one `OpenConsole.exe`, a child of the suite server's worker. Playwright
+ * stops the server with a hard tree kill, so whatever consoles are still open then are
+ * orphaned, and Git for Windows' MSYS runtime refuses to start bash past 32 consoles
+ * machine-wide ("console device allocation failure - too many consoles in use"), so a
+ * full run's leftovers break the NEXT run - and production's new sessions. Measured
+ * 2026-11-03: one full run left 22 of them. Called from `global-teardown.js`, which runs
+ * before the `webServer` is stopped. Never throws: a server that is already gone has no
+ * sessions to end.
+ * @returns {Promise<number>} how many sessions it ended
+ */
+async function endServerSessions() {
+  let ctx;
+  try {
+    ctx = await authCtx();
+    const res = await ctx.get('/api/sessions');
+    if (!res.ok()) return 0;
+    const sessions = await res.json();
+    const list = Array.isArray(sessions) ? sessions : (sessions.sessions || []);
+    for (const s of list) await ctx.delete('/api/sessions/' + encodeURIComponent(s.id));
+    // killSession returns before ConPTY has closed the console; give it a moment so the
+    // server's hard stop does not land in the middle of that.
+    if (list.length) await new Promise((r) => setTimeout(r, 1500));
+    return list.length;
+  } catch {
+    return 0;
+  } finally {
+    if (ctx) await ctx.dispose().catch(() => {});
+  }
+}
+
 module.exports = {
+  endServerSessions,
   BASE, AUTH, authCtx, noAuthCtx, loginPage, readHookToken,
   FIXTURE_YEARS, codexSessionsRoot, claudeProjectsRoot, isFixtureRollout,
   sweepCodexFixtures, emptyCwd,

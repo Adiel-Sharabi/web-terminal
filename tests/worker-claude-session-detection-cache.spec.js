@@ -29,7 +29,7 @@ const path = require('path');
 const fs = require('fs');
 const os = require('os');
 const crypto = require('crypto');
-const { connectClient, rpc } = require('./worker-ipc');   // #262 - one owner for the budget
+const { connectClient, rpc, stopWorker } = require('./worker-ipc');   // #262 - one owner for the budget
 
 function workerPipePath() {
   return process.platform === 'win32'
@@ -73,13 +73,7 @@ function spawnWorker(pipePath, dataDir, extraEnv = {}) {
   return {
     proc,
     getStderr: () => stderr,
-    stop: () => new Promise((resolve) => {
-      if (proc.exitCode !== null || proc.signalCode !== null) return resolve();
-      let exited = false;
-      proc.once('exit', () => { exited = true; resolve(); });
-      try { proc.kill(); } catch {}
-      setTimeout(() => { if (!exited) { try { proc.kill('SIGKILL'); } catch {} resolve(); } }, 3000);
-    }),
+    stop: () => stopWorker(proc),
   };
 }
 

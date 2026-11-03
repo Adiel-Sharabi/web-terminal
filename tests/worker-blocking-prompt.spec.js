@@ -30,7 +30,7 @@ const path = require('path');
 const fs = require('fs');
 const os = require('os');
 const crypto = require('crypto');
-const { connectClient, rpc, waitForTyped } = require('./worker-ipc');   // #262 - one owner for the budget
+const { connectClient, rpc, waitForTyped, stopWorker } = require('./worker-ipc');   // #262 - one owner for the budget
 const agents = require('../lib/agents');
 
 const ESC = String.fromCodePoint(0x001b);
@@ -92,13 +92,7 @@ function spawnWorker(pipePath, dataDir, extraEnv) {
   });
   return {
     proc,
-    stop: () => new Promise((resolve) => {
-      if (proc.exitCode !== null || proc.signalCode !== null) return resolve();
-      let exited = false;
-      proc.once('exit', () => { exited = true; resolve(); });
-      try { proc.kill(); } catch {}
-      setTimeout(() => { if (!exited) { try { proc.kill('SIGKILL'); } catch {} resolve(); } }, 3000);
-    }),
+    stop: () => stopWorker(proc),
   };
 }
 
