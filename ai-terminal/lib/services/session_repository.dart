@@ -75,6 +75,10 @@ class SessionRepository {
 
   final Map<String, ApiClient> _clients = <String, ApiClient>{};
   final Map<String, List<Session>> _lastByServer = <String, List<Session>>{};
+  // Sessions THIS client just created, per server, kept in the list until a fetch
+  // of that server which STARTED after the create answers (see [noteCreated]).
+  final Map<String, Map<String, ({Session session, DateTime at})>> _created =
+      <String, Map<String, ({Session session, DateTime at})>>{};
   final Map<String, bool> _serverOnline = <String, bool>{};
   // Servers that answered 401 on their last [refresh] — reachable, but refusing
   // our bearer. Kept APART from `_serverOnline` because the two need opposite
@@ -424,8 +428,43 @@ class SessionRepository {
   /// The one owner of "what is the list right now": a partial paint and the
   /// final emit of the same round must not be able to disagree about it.
   List<Session> _mergedFor(List<ServerConfig> servers) => <Session>[
-        for (final s in servers) ...?_lastByServer[s.baseUrl],
+        for (final s in servers) ..._rowsFor(s.baseUrl),
       ]..sort(compareSessions);
+
+  /// One server's rows: its last-known list, plus any session this client created
+  /// there that no answer since has had the chance to include.
+  List<Session> _rowsFor(String baseUrl) {
+    final known = _lastByServer[baseUrl] ?? const <Session>[];
+    final created = _created[baseUrl];
+    if (created == null || created.isEmpty) return known;
+    final ids = {for (final s in known) s.id};
+    return <Session>[
+      ...known,
+      for (final c in created.values)
+        if (!ids.contains(c.session.id)) c.session,
+    ];
+  }
+
+  /// Records [session], just created by this client, and paints it at once.
+  ///
+  /// The screen for a new session opens before any list has it, and a screen
+  /// treats a list without its session as "the session is gone" and closes. A
+  /// refresh is no help on its own: it fans out to every server, a fast server
+  /// answers first, and the merged list it paints still carries the creating
+  /// server's PRE-create rows (as does a poll round already in flight). So the
+  /// row is held here until a fetch of its server that started AFTER this call
+  /// comes back - from then on the server's own answer is the truth, including
+  /// "it is gone".
+  ///
+  /// Also starts the refresh that fetches the real row - never awaited by the
+  /// caller: it waits on EVERY server, an offline one for its whole deadline.
+  void noteCreated(Session session) {
+    (_created[session.server.baseUrl] ??=
+        <String, ({Session session, DateTime at})>{})[session.id] =
+        (session: session, at: DateTime.now());
+    _emitPartial();
+    unawaited(refresh());
+  }
 
   /// Paints what has arrived so far, part-way through a [refresh].
   ///
@@ -612,6 +651,7 @@ class SessionRepository {
   void _forgetServer(String baseUrl) {
     _clients.remove(baseUrl)?.close();
     _lastByServer.remove(baseUrl);
+    _created.remove(baseUrl);
     _serverOnline.remove(baseUrl);
     _serverNeedsAuth.remove(baseUrl);
     _serverFailStreak.remove(baseUrl);
@@ -783,6 +823,7 @@ class SessionRepository {
   }
 
   Future<void> _fetchServer(ServerConfig server) async {
+    final startedAt = DateTime.now();
     try {
       final list = await _clientFor(server).listSessions();
       if (_configFor(server.baseUrl) == null) return;
@@ -790,6 +831,8 @@ class SessionRepository {
       _serverNeedsAuth[server.baseUrl] = false;
       _serverFailStreak[server.baseUrl] = 0;
       _lastByServer[server.baseUrl] = list;
+      // A list asked for after a create was recorded has had its chance to carry it.
+      _created[server.baseUrl]?.removeWhere((_, c) => !c.at.isAfter(startedAt));
     } catch (e) {
       if (_configFor(server.baseUrl) == null) return;
       // A 401 is NOT unreachability — the server answered, and refused us. It

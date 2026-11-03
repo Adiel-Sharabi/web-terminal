@@ -17,7 +17,7 @@ const path = require('path');
 const fs = require('fs');
 const os = require('os');
 const crypto = require('crypto');
-const { connectClient, rpc } = require('./worker-ipc');   // #262 - one owner for the budget
+const { connectClient, rpc, stopWorker } = require('./worker-ipc');   // #262 - one owner for the budget
 
 const MAX_SCROLLBACK_SIZE = 2 * 1024 * 1024;
 const BP_ON_HEX = Buffer.from('\x1b[?2004h').toString('hex');
@@ -55,13 +55,7 @@ function spawnWorker(pipePath, dataDir, extraEnv = {}) {
   proc.stderr.on('data', d => { stderr += d.toString(); });
   return {
     proc,
-    stop: () => new Promise((resolve) => {
-      if (proc.exitCode !== null || proc.signalCode !== null) return resolve();
-      let exited = false;
-      proc.once('exit', () => { exited = true; resolve(); });
-      try { proc.kill(); } catch {}
-      setTimeout(() => { if (!exited) { try { proc.kill('SIGKILL'); } catch {} resolve(); } }, 3000);
-    }),
+    stop: () => stopWorker(proc),
   };
 }
 test.describe('pty-worker bracketed-paste re-assert on attach', () => {

@@ -385,6 +385,65 @@ void main() {
     });
   });
 
+  group('opening the created session', () {
+    const server = ServerConfig(
+      name: 'Solo',
+      baseUrl: 'http://x',
+      bearerToken: 't',
+    );
+
+    // The list refresh fans out to EVERY configured server, and an unreachable
+    // peer holds it for its whole client deadline (twice, when a poll round is
+    // already in flight): 27-40 s measured on Home with XPS and a MacBook down.
+    // The session just created must open at once, whatever the refresh is doing.
+    testWidgets('opens the new session without waiting for the list refresh', (
+      tester,
+    ) async {
+      Session? recorded;
+      Session? opened;
+      await tester.pumpWidget(
+        MaterialApp(
+          theme: AppTheme.dark,
+          home: Scaffold(
+            body: Builder(
+              builder: (context) => ElevatedButton(
+                onPressed: () => showNewSessionSheet(
+                  context,
+                  servers: const [server],
+                  initialServer: server,
+                  onCreated: (s) => opened = s,
+                  // The production hook (SessionRepository.noteCreated) refreshes
+                  // in the background; this one never finishes anything at all.
+                  recordCreated: (s) => recorded = s,
+                  clientBuilder: (server) => ApiClient(
+                    server,
+                    httpClient: MockClient((req) async {
+                      if (req.method == 'POST' &&
+                          req.url.path == '/api/sessions') {
+                        return http.Response('{"id":"new-1","name":"x"}', 200);
+                      }
+                      return http.Response('{}', 200);
+                    }),
+                  ),
+                ),
+                child: const Text('open'),
+              ),
+            ),
+          ),
+        ),
+      );
+      await tester.tap(find.text('open'));
+      await tester.pumpAndSettle();
+
+      await tester.tap(find.widgetWithText(FilledButton, 'Create'));
+      await tester.pumpAndSettle();
+
+      expect(recorded?.id, 'new-1', reason: 'recorded, so the list carries it at once');
+      expect(opened?.id, 'new-1');
+      expect(find.text('New session'), findsNothing, reason: 'the sheet closed');
+    });
+  });
+
   group('filterFolders', () {
     const folders = [
       r'C:\dev\web-terminal',

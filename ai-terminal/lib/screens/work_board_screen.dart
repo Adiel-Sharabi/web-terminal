@@ -502,7 +502,7 @@ class _WorkBoardScreenState extends State<WorkBoardScreen> {
       final created = await _client(c.server)
           .createSession(name: c.name, cwd: c.cwd, autoCommand: c.resumeCommand, agent: c.agent);
       if (!mounted) return;
-      unawaited(_repo.refresh());
+      _repo.noteCreated(created);
       widget.onOpenSession(created);
     } catch (e) {
       if (mounted) setState(() => _reopened.remove(k));

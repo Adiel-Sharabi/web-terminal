@@ -16,7 +16,7 @@ const path = require('path');
 const fs = require('fs');
 const os = require('os');
 const crypto = require('crypto');
-const { connectClient, rpc } = require('./worker-ipc');
+const { connectClient, rpc, stopWorker } = require('./worker-ipc');
 const agents = require('../lib/agents');
 const { createMenuDetector } = require('../lib/menu-state');
 const { sessionReason } = require('../lib/session-reason');
@@ -146,12 +146,7 @@ test.describe('#316 the worker publishes inMenu', () => {
   });
   test.afterEach(async () => {
     try { client.close(); } catch {}
-    await new Promise((resolve) => {
-      if (proc.exitCode !== null) return resolve();
-      proc.once('exit', resolve);
-      try { proc.kill(); } catch {}
-      setTimeout(resolve, 3000);
-    });
+    await stopWorker(proc);
     try { fs.rmSync(dataDir, { recursive: true, force: true }); } catch {}
   });
 

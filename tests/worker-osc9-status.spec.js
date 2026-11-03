@@ -18,7 +18,7 @@ const fs = require('fs');
 const os = require('os');
 const crypto = require('crypto');
 const ipc = require('../lib/ipc');
-const { connectClient, rpc } = require('./worker-ipc');   // #262 - one owner for the budget
+const { connectClient, rpc, stopWorker } = require('./worker-ipc');   // #262 - one owner for the budget
 
 const IDLE_DEBOUNCE = 120; // WT_HOOK_STOP_DEBOUNCE_MS below
 const OSC9 = (body) => `\x1b]9;${body}\x07`;
@@ -53,13 +53,7 @@ function spawnWorker(pipePath, dataDir) {
   });
   return {
     proc,
-    stop: () => new Promise((resolve) => {
-      if (proc.exitCode !== null || proc.signalCode !== null) return resolve();
-      let exited = false;
-      proc.once('exit', () => { exited = true; resolve(); });
-      try { proc.kill(); } catch {}
-      setTimeout(() => { if (!exited) { try { proc.kill('SIGKILL'); } catch {} resolve(); } }, 3000);
-    }),
+    stop: () => stopWorker(proc),
   };
 }
 

@@ -1122,3 +1122,36 @@ then reproduced in ten seconds by loading the page in a real browser and reading
 cheap and safe — `node scripts/rig/rig.js up`, then drive `http://127.0.0.1:7999`
 with a standalone Playwright script on a port the suite is not using.
 
+
+
+## ConPTY startup DA1: every new shell waited ~3 s (2026-11-03)
+
+node-pty 1.1.0 (installed 2026-07-30) ships its own `conpty.dll`/`OpenConsole.exe`, used because `useConptyDll: true`. At spawn that ConPTY writes `ESC[1t`, then `ESC[c` (DA1, Primary Device Attributes) `ESC[?1004h ESC[?9001h`, and holds the child until DA1 is answered or its own timeout passes. A session is spawned with no viewer attached, so nobody answered.
+
+Measured on Home, spawning `C:/Program Files/Git/bin/bash.exe` through node-pty exactly as the worker does:
+
+| | first prompt |
+|---|---|
+| unanswered (before) | 3260 ms (also 3223 ms with `--noprofile`: not the rc files) |
+| answered with `ESC[?1;2c` | 264 ms |
+| answered with a Windows Terminal style reply | 239 ms |
+
+The same MSYS binaries launched from a native parent without a PTY start in ~25 ms, so it is not MSYS start-up either. `worker.log` showed `created -> auto-command` at a steady 3.6-3.9 s on every session for months: that was this wait plus the worker's own 370 ms settle and prime.
+
+**Answering it from the worker was tried and WITHDRAWN (#416 -> #418).** The worker replied `ESC[?1;2c` once, only inside ConPTY's preamble and within 1.5 s of spawn (a reply after ConPTY stops waiting is typed into the shell as `1;2c`). Prompts came at 240 ms, but under create/kill churn the worker died natively and consoles were stranded; see the next section. Do not answer DA1 from the worker until #418 finds a way that passes the churn probe. Two specs still snapshot inside the hold with fixed sleeps (worker-blocking-prompt `claudeSession`, worker-submit-cr rename): with the reply on, three blocking-prompt tests failed until they waited for the launch instead - a #418 fix must rework them.
+
+The companion half of the same complaint: the New session sheet awaited `SessionRepository.refresh()`, which fans out to every configured server, before opening the session it had just created. An unreachable peer costs its 10 s version call plus its 10 s session call, twice when a poll round is already in flight: 27-40 s between `created` and `Client joined` on 2026-11-02/03, with XPS and a MacBook offline. The sheet now opens at once. That exposed a race the await had hidden (review): `SessionScreen` treats a list without its session as gone and closes, and a fast peer answering first paints the creating server's PRE-create rows (so does a poll round already in flight). `SessionRepository.noteCreated` holds the new row until a fetch of that server which STARTED after the create answers; from then on the server's answer is the truth, including "gone". Every create path uses it: the sheet, both forks, the work board's reopen (`test/session_repository_note_created_test.dart`, `test/new_session_sheet_test.dart`).
+
+### Why the DA1 reply was withdrawn: native worker crash under churn (2026-11-03)
+
+Probe: an isolated worker, 8 rounds of 8 sessions, each round created and killed at once (the burst a test server or a quick open/close produces). The worker exits with `0xC0000005` (access violation) or `0xC0000409` (fail-fast); Windows logs no Application Error event. The crash lands while the killed sessions are exiting, ~0.5 s after creation.
+
+| worker | runs that crashed |
+|---|---|
+| master (no reply, immediate kill) | 3 / 16 |
+| reply + kill deferred to the shell's first output | 11 / 16, again 8 / 12 |
+| reply, deferred kill moved out of the onData callback | 5 / 12 |
+| reply, kill only >= 1 s after the shell's first output | 7 / 12 |
+| no reply, deferred kill | 0 / 18 |
+
+Kill timing does not explain it; the reply does. With the reply, a session killed while starting also kept its `OpenConsole.exe` for the worker's lifetime (up to 3 of 8 per round; a full suite run stranded ~20 of Git for Windows' 32 machine-wide consoles, and new bash then dies with "too many consoles in use"). Without the reply, an immediate kill held 0 consoles in every round, so no deferred kill is needed. The crash itself (master's 3/16) is open in #418 with the probe; it needs a crash dump to name the faulting module.

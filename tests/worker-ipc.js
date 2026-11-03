@@ -165,6 +165,8 @@
 // claim is only worth making if someone checked it.
 const ipc = require('../lib/ipc');
 const { test } = require('@playwright/test');
+const path = require('path');
+const { execFile } = require('child_process');
 
 /** The shared ceiling. See THE BUDGET RULE above before changing it. */
 const RPC_BUDGET_MS = 15000;
@@ -282,4 +284,43 @@ function assertBudgetCanFire(budgetMs, what) {
   );
 }
 
-module.exports = { RPC_BUDGET_MS, CONNECT_BUDGET_MS, connectClient, rpc, assertBudgetCanFire };
+/**
+ * STOP A TEST-SPAWNED WORKER WITHOUT LEAVING ITS CONSOLES BEHIND.
+ *
+ * Every PTY session is one `OpenConsole.exe` (node-pty's conpty), a child of the worker.
+ * Git for Windows' MSYS runtime allows 32 consoles machine-wide, and bash dies at start-up
+ * with "console device allocation failure - too many consoles in use" past that - the
+ * suite and production share the cap. `proc.kill()` on Windows is TerminateProcess on the
+ * worker alone: a console whose session was killed a moment before (the ConPTY start-up is
+ * asynchronous, so a kill that lands inside it does not stop the console that is about to
+ * appear) still has the worker as its parent, is not yet gone, and outlives the worker as
+ * an ORPHAN. Measured 2026-11-03 on Home, while the worker answered ConPTY's DA1 query (since
+ * withdrawn): a spec that creates 8 sessions and kills them at once left 1-2 of them per run;
+ * across a full run they filled the cap and ~65 unrelated tests failed.
+ *
+ * `taskkill /T` ends the worker AND whatever is still its descendant at that instant, which
+ * is exactly those consoles. It deliberately does NOT go through `killSession`: specs that
+ * restart a worker over the same data dir (worker-binary-pty, worker-scrollback-chunks)
+ * rely on the sessions still being persisted when the first worker stops. Only a PID the
+ * caller spawned is ever passed in. Elsewhere it is plain `proc.kill()`.
+ *
+ * @param {import('child_process').ChildProcess} proc the worker the spec spawned
+ * @param {number} [graceMs] after this long it is SIGKILLed and the promise resolves anyway
+ * @returns {Promise<void>}
+ */
+function stopWorker(proc, graceMs = 3000) {
+  return new Promise((resolve) => {
+    if (proc.exitCode !== null || proc.signalCode !== null) return resolve();
+    let done = false;
+    const finish = () => { if (!done) { done = true; clearTimeout(timer); resolve(); } };
+    const timer = setTimeout(() => { try { proc.kill('SIGKILL'); } catch {} finish(); }, graceMs);
+    proc.once('exit', finish);
+    if (process.platform !== 'win32') { try { proc.kill(); } catch {} return; }
+    const taskkill = path.join(process.env.SystemRoot || 'C:\\Windows', 'System32', 'taskkill.exe');
+    execFile(taskkill, ['/T', '/F', '/PID', String(proc.pid)], { windowsHide: true }, (err) => {
+      if (err) { try { proc.kill(); } catch {} }
+    });
+  });
+}
+
+module.exports = { RPC_BUDGET_MS, CONNECT_BUDGET_MS, connectClient, rpc, assertBudgetCanFire, stopWorker };

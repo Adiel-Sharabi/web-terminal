@@ -2783,7 +2783,7 @@ class _SessionScreenState extends State<SessionScreen>
         cwd: session.cwd,
         autoCommand: buildForkAutoCommand(session),
       );
-      unawaited(SessionRepository.instance.refresh());
+      SessionRepository.instance.noteCreated(forked);
       if (!mounted) return;
       Navigator.of(context).push(
         MaterialPageRoute(
