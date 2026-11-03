@@ -144,6 +144,23 @@ test.describe('recorded paths (#412)', () => {
     expect((await C.checkPath(123, o)).ok).toBe(false);
   });
 
+  test('a folder INSIDE a repository or worktree, or a .git folder, is refused; no roots configured refuses all', async () => {
+    const repo = path.join(base, 'repo2');
+    fs.mkdirSync(path.join(repo, '.git'), { recursive: true });
+    fs.mkdirSync(path.join(repo, 'src'), { recursive: true });
+    expect((await C.checkPath(path.join(repo, 'src'), opts())).ok).toBe(false);
+    expect((await C.checkPath(path.join(repo, '.git'), opts())).ok).toBe(false);
+    expect((await C.removeRecorded(path.join(repo, 'src'), opts())).result).toBe('refused');
+    expect(fs.existsSync(path.join(repo, 'src'))).toBe(true);
+    const wt = path.join(base, 'wt2');
+    fs.mkdirSync(path.join(wt, 'node_modules'), { recursive: true });
+    fs.writeFileSync(path.join(wt, '.git'), 'gitdir: C:/nowhere/.git/worktrees/wt2\n');
+    expect((await C.checkPath(path.join(wt, 'node_modules'), opts())).ok).toBe(false);
+    const plain = path.join(base, 'plain');
+    fs.mkdirSync(plain);
+    expect((await C.checkPath(plain, { roots: C.DEFAULT_ROOTS, protect: [] })).error).toMatch(/cleanupRoots/);
+  });
+
   test('removal re-checks at release time: a path that became a repository since is refused', async () => {
     const dir = path.join(base, 'later-repo');
     fs.mkdirSync(dir);

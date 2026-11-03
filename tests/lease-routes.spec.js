@@ -243,15 +243,19 @@ test.describe.serial('cluster resource leases across two servers (#412)', () => 
     const second = cli('acquire', 'build:bravo', '--no-session');
     expect(second.status).toBe(1);
     expect(second.stdout).toMatch(/QUEUED #1/);
+    // Taken and no --wait: it says so and leaves the queue, so nobody is granted it later.
+    expect(second.stderr).toMatch(/left the queue/);
+    const row = (await (await b.get('/api/leases')).json()).resources.find((x) => x.resource === 'build:bravo');
+    expect(row.queue).toEqual([]);
+    // acquire/record name this machine; --server would name another's pids.
+    expect(cli('record', id, '--pid', '1234', '--server', 'alpha').status).toBe(2);
     const list = cli('list');
     expect(list.status).toBe(0);
     expect(list.stdout).toMatch(/lease authority: alpha/);
     // Without a session and without --no-session it refuses rather than make a lease nobody holds.
     expect(cli('acquire', 'build:bravo').status).toBe(2);
     expect(cli('release', id).status).toBe(0);
-    const secondId = second.stdout.trim().split(/\s+/)[0];
-    expect((await leaseOf(b, secondId)).body.lease).toMatchObject({ state: 'held' });
-    expect(cli('release', secondId).status).toBe(0);
+    expect((await leaseOf(b, id)).status).toBe(404);
   });
 
   test('authority down: no new lease, holders keep running; the authority comes back with its table', async () => {

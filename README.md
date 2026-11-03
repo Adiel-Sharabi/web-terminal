@@ -271,8 +271,10 @@ bars it (`neverLease: true`). A request may state `needs: {memGB, diskGB}`, chec
 machine's own readings (`/api/machine`) before anything is queued. `wt-lease.js record <id> --pid
 N --path <dir>` lists what the lease started on this machine; release kills only a recorded pid
 that is still the same process (by creation time, never by name) and removes only recorded
-folders inside `leases.cleanupRoots` — junctions are unlinked, never followed, and a real git
-repository is never removed. `wt-lease.js list` shows who holds what, who waits, and for how long.
+folders inside `leases.cleanupRoots` (none until configured) — junctions are unlinked, never
+followed, and nothing in or above a git repository or worktree is ever removed. Only the lease
+table that granted a lease can declare it ended, so a rolled-back or replaced authority never
+triggers a cleanup. A session closed by its own hand-off passes its leases to its successor. `wt-lease.js list` shows who holds what, who waits, and for how long.
 Routes: `POST /api/leases`, `GET /api/leases[/:id]`, `POST /api/leases/:id/heartbeat`,
 `DELETE /api/leases/:id`, `POST /api/leases/:id/record`, `GET /api/admission`.
 

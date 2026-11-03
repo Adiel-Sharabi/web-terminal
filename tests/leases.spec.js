@@ -25,7 +25,7 @@ function grant(state, over = {}, now = T0) {
 
 test.describe('lease requests (#412)', () => {
   test('the first request is granted, the second for the same resource is queued with its position', () => {
-    let s = L.emptyState();
+    let s = L.emptyState('t1');
     const a = grant(s, { body: { holderSessionId: 'aaaaaaaa-0000-4000-8000-000000000001' } });
     s = a.state;
     expect(a.lease.state).toBe('held');
@@ -41,7 +41,7 @@ test.describe('lease requests (#412)', () => {
 
   test('the same holder asking twice for one resource gets its existing lease back, not a second place', () => {
     const sid = 'aaaaaaaa-0000-4000-8000-000000000001';
-    const a = grant(L.emptyState(), { body: { holderSessionId: sid } });
+    const a = grant(L.emptyState('t1'), { body: { holderSessionId: sid } });
     const again = grant(a.state, { body: { holderSessionId: sid } }, T0 + 5 * SEC);
     expect(again.existing).toBe(true);
     expect(again.lease.id).toBe(a.lease.id);
@@ -53,7 +53,7 @@ test.describe('lease requests (#412)', () => {
   });
 
   test('release grants the next waiter in FIFO order', () => {
-    let s = L.emptyState();
+    let s = L.emptyState('t1');
     const a = grant(s); s = a.state;
     const b = grant(s, {}, T0 + 1 * SEC); s = b.state;
     const c = grant(s, {}, T0 + 2 * SEC); s = c.state;
@@ -70,7 +70,7 @@ test.describe('lease requests (#412)', () => {
   });
 
   test('releasing a WAITER grants nobody and leaves the holder alone', () => {
-    let s = L.emptyState();
+    let s = L.emptyState('t1');
     const a = grant(s); s = a.state;
     const b = grant(s, {}, T0 + SEC); s = b.state;
     const r = L.release(s, b.lease.id, 'released', T0 + 2 * SEC);
@@ -81,7 +81,7 @@ test.describe('lease requests (#412)', () => {
 
 test.describe('every way a lease ends (#412)', () => {
   test('TTL expiry releases the holder and grants the waiter; a heartbeat with ttlSec extends it', () => {
-    let s = L.emptyState();
+    let s = L.emptyState('t1');
     const a = grant(s, { body: { ttlSec: 60, heartbeatSec: 0, holderSessionId: 'aaaaaaaa-0000-4000-8000-000000000001' } }); s = a.state;
     const b = grant(s, { body: { holderSessionId: 'bbbbbbbb-0000-4000-8000-000000000002' } }, T0 + SEC); s = b.state;
     // Not yet.
@@ -97,14 +97,14 @@ test.describe('every way a lease ends (#412)', () => {
   });
 
   test('a heartbeat WITHOUT ttlSec keeps the lease alive but does not extend its TTL', () => {
-    const a = grant(L.emptyState(), { body: { ttlSec: 60, heartbeatSec: 10 } });
+    const a = grant(L.emptyState('t1'), { body: { ttlSec: 60, heartbeatSec: 10 } });
     const hb = L.heartbeat(a.state, a.lease.id, T0 + 20 * SEC);
     expect(hb.lease.expiresAt).toBe(T0 + 60 * SEC);
     expect(hb.lease.lastHeartbeatAt).toBe(T0 + 20 * SEC);
   });
 
   test('missed heartbeats (3 intervals) release a holder AND drop a waiter', () => {
-    let s = L.emptyState();
+    let s = L.emptyState('t1');
     const a = grant(s, { body: { heartbeatSec: 10 } }); s = a.state;
     const b = grant(s, { body: { heartbeatSec: 10 } }, T0); s = b.state;
     const c = grant(s, { body: { heartbeatSec: 10 } }, T0); s = c.state;
@@ -117,14 +117,14 @@ test.describe('every way a lease ends (#412)', () => {
   });
 
   test('heartbeatSec 0 is never timed out by silence (its session vouches for it), only by TTL', () => {
-    const a = grant(L.emptyState(), { body: { heartbeatSec: 0, ttlSec: 3600, holderSessionId: 'aaaaaaaa-0000-4000-8000-000000000001' } });
+    const a = grant(L.emptyState('t1'), { body: { heartbeatSec: 0, ttlSec: 3600, holderSessionId: 'aaaaaaaa-0000-4000-8000-000000000001' } });
     expect(L.sweep(a.state, T0 + 3599 * SEC).released).toEqual([]);
     expect(L.sweep(a.state, T0 + 3600 * SEC).released.map((r) => r.why)).toEqual(['ttl']);
   });
 
   test('the holder session ending releases every lease it holds or waits for, on THAT machine only', () => {
     const sid = 'aaaaaaaa-0000-4000-8000-000000000001';
-    let s = L.emptyState();
+    let s = L.emptyState('t1');
     const a = grant(s, { body: { holderSessionId: sid }, node: 'https://home.example' }); s = a.state;
     const b = grant(s, { body: { resource: 'vm:Y', holderSessionId: 'bbbbbbbb-0000-4000-8000-000000000002' } }); s = b.state;
     const bQueued = grant(s, { body: { resource: 'vm:Y', holderSessionId: sid }, node: 'https://home.example' }); s = bQueued.state;
@@ -139,7 +139,7 @@ test.describe('every way a lease ends (#412)', () => {
   test('a liveness reading releases the holders it does not list - and only a READ list counts', () => {
     const alive = 'aaaaaaaa-0000-4000-8000-000000000001';
     const dead = 'dddddddd-0000-4000-8000-000000000004';
-    let s = L.emptyState();
+    let s = L.emptyState('t1');
     const a = grant(s, { body: { holderSessionId: dead }, node: 'https://home.example' }); s = a.state;
     const b = grant(s, { body: { resource: 'vm:Y', holderSessionId: alive }, node: 'https://home.example' }); s = b.state;
     const w = grant(s, { body: { holderSessionId: 'cccccccc-0000-4000-8000-000000000003' } }); s = w.state;
@@ -154,12 +154,31 @@ test.describe('every way a lease ends (#412)', () => {
   });
 
   test('resume() after the authority was down restarts every heartbeat clock (holders keep going)', () => {
-    const a = grant(L.emptyState(), { body: { heartbeatSec: 10 } });
+    const a = grant(L.emptyState('t1'), { body: { heartbeatSec: 10 } });
     // Ten minutes of authority downtime: inside the 1 h TTL, far past 3 x 10 s of heartbeats.
     const later = T0 + 600 * SEC;
     expect(L.sweep(a.state, later).released.map((r) => r.why)).toEqual(['heartbeat']);
     const resumed = L.resume(a.state, later);
     expect(L.sweep(resumed, later + 29 * SEC).released).toEqual([]);
+  });
+});
+
+test.describe('hand-off (#412 + #345)', () => {
+  test('a handed-off holder\'s leases move to its successor: nothing ends, nobody is granted', () => {
+    const from = 'aaaaaaaa-0000-4000-8000-000000000001';
+    const to = 'eeeeeeee-0000-4000-8000-000000000005';
+    let s = L.emptyState('t1');
+    const a = grant(s, { body: { holderSessionId: from }, node: 'https://home.example' }); s = a.state;
+    const w = grant(s, { body: { holderSessionId: 'cccccccc-0000-4000-8000-000000000003' } }); s = w.state;
+    const r = L.transferHolder(s, 'https://home.example', from, to);
+    expect(r.moved).toEqual([a.lease.id]);
+    expect(r.state.leases.find((l) => l.id === a.lease.id)).toMatchObject({ state: 'held', holder: { sessionId: to } });
+    // Only on that machine, and only real ids.
+    expect(L.transferHolder(s, 'self', from, to).moved).toEqual([]);
+    expect(L.transferHolder(s, 'https://home.example', from, 'junk').moved).toEqual([]);
+    // The old id ending later releases nothing; the successor ending does.
+    expect(L.holderEnded(r.state, 'https://home.example', from, T0).released).toEqual([]);
+    expect(L.holderEnded(r.state, 'https://home.example', to, T0).released.map((x) => x.id)).toEqual([a.lease.id]);
   });
 });
 
@@ -204,7 +223,7 @@ test.describe('request validation (#412)', () => {
   });
 
   test('the queue and the table are bounded', () => {
-    let s = L.emptyState();
+    let s = L.emptyState('t1');
     for (let i = 0; i <= L.LIMITS.maxQueue; i++) s = grant(s, {}, T0 + i).state;
     const over = L.request(s, req(), T0 + 9999, ids);
     expect(over.status).toBe(429);
@@ -243,6 +262,10 @@ test.describe('the authority (#412)', () => {
     expect(L.resolveAuthority({ authority: 'office' }, cluster, 'https://office.example/', 'Office')).toEqual({ mode: 'self' });
     expect(L.resolveAuthority({ authority: 'home' }, [], null, 'HOME')).toEqual({ mode: 'self' });
     expect(L.resolveAuthority({ authority: 'nobody' }, cluster, null, 'home').mode).toBe('invalid');
+    // Office with no publicUrl (or one spelled unlike its cluster entry) is still itself, never
+    // a peer it would forward to - i.e. to itself, forever.
+    expect(L.resolveAuthority({ authority: 'office' }, cluster, null, 'Office')).toEqual({ mode: 'self' });
+    expect(L.resolveAuthority({ authority: 'office' }, cluster, 'https://office.example:443', 'office')).toEqual({ mode: 'self' });
     expect(L.resolveAuthority({ authority: 7 }, cluster, null, 'home').mode).toBe('invalid');
   });
 
@@ -257,16 +280,17 @@ test.describe('the authority (#412)', () => {
 
 test.describe('state file (#412)', () => {
   test('round-trips, and a damaged file is UNREADABLE rather than an empty table', () => {
-    const a = grant(L.emptyState());
+    const a = grant(L.emptyState('t1'));
     const back = L.parseState(JSON.parse(JSON.stringify(a.state)));
     expect(back).toEqual({ ok: true, state: a.state });
-    for (const bad of [null, 'x', [], { version: 1 }, { version: 1, leases: 'x', released: [] }, { version: 1, leases: [{ id: 'x' }], released: [] }, { version: 2, leases: [], released: [] }]) {
+    expect(a.state.tableId).toBe('t1');
+    for (const bad of [null, 'x', [], { version: 1 }, { version: 1, leases: [], released: [] }, { version: 1, leases: 'x', released: [] }, { version: 1, leases: [{ id: 'x' }], released: [] }, { version: 2, leases: [], released: [] }]) {
       expect(L.parseState(bad).ok, JSON.stringify(bad)).toBe(false);
     }
   });
 
   test('the listing says who holds what, who waits, and for how long', () => {
-    let s = L.emptyState();
+    let s = L.emptyState('t1');
     s = grant(s, { body: { holderSessionId: 'aaaaaaaa-0000-4000-8000-000000000001', meta: { wi: 1 } } }).state;
     s = grant(s, { node: 'https://home.example', server: 'home' }, T0 + 10 * SEC).state;
     const out = L.listing(s, T0 + 70 * SEC);

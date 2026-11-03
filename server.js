@@ -1634,7 +1634,13 @@ workerClient.on('sessionExited', ({ id, claudeSessionId }) => {
   spawnStore.forget(id);   // #351: nor a verdict on who started it
   // #412: and no lease - closed, reaped or crashed, the holder is gone. (try: the broker is
   // created further down this file; an exit can only arrive once the module has loaded.)
-  try { leaseBroker.onSessionExited(id); } catch (e) { console.error(`[leases] ${e.message}`); }
+  // A session closed by its own hand-off (#340/#345) passes its leases to the successor, which
+  // carries on the work - read before closeBrief below drops the record.
+  try {
+    const h = (briefStore().sessions[id] || {}).handoff;
+    const successor = h && h.successorId && ['closing', 'kept'].includes(h.state) ? h.successorId : null;
+    leaseBroker.onSessionExited(id, successor);
+  } catch (e) { console.error(`[leases] ${e.message}`); }
   pruneAutoResumePref(id); // #137: and no auto-resume opt-out either
   closeBrief(id, undefined, claudeSessionId); // #298/#337: the dashboard keeps a record for a week, reopenable
   const set = sessionClients.get(id);
@@ -6044,7 +6050,12 @@ const leaseBroker = createLeaseBroker({
   fetch: clusterFetch,
   listLocalSessionIds: async () => (await workerClient.rpc('listSessions', {}, MACHINE_QUERY_WAIT_MS)).sessions.map((s) => s.id),
   readMachine: readMachineProfile,
-  protectedPids: () => [process.pid, process.ppid, (workerClient.workerIdentity() || {}).pid].filter(Number.isInteger),
+  // Null until the worker has told us its pid: a pid record is then refused, never accepted
+  // with the one pid whose kill would end every PTY on the machine left off the list.
+  protectedPids: () => {
+    const w = workerClient.workerIdentity();
+    return w && Number.isInteger(w.pid) ? [process.pid, process.ppid, w.pid].filter(Number.isInteger) : null;
+  },
 });
 const leaseJson = express.json({ limit: '8kb' });
 app.get('/api/leases', leaseBroker.routes.list);

@@ -18,7 +18,7 @@
 // `--no-session` (a script outside any session) makes it a heartbeat lease: run
 // `heartbeat <id>` at least every --heartbeat seconds or it is released after three
 // misses. `--wait` keeps a queued request in line until granted (exit 0) or the minutes
-// run out (it then leaves the queue, exit 1).
+// run out; without it, or when the minutes run out, a queued request leaves the queue (exit 1).
 //
 // `record` lists what the lease started on this machine - pids, temp dirs, worktrees -
 // for release to clean up: a pid only while it is still the same process (creation time),
@@ -55,6 +55,9 @@ function needsFromFlags() {
 }
 
 async function main() {
+  // acquire and record name THIS machine: its session for the holder, its pids and folders for
+  // the cleanup. Sent to another server they would name the wrong machine's.
+  if (flag('--server') !== undefined && (cmd === 'acquire' || cmd === 'record')) throw new Error(`${cmd} talks to this machine's own server; --server is only for heartbeat, release, list and admission`);
   const t = target(flag('--server'));
   if (cmd === 'acquire') {
     if (!arg) throw new Error('acquire needs a resource: wt-lease.js acquire vm:NAME');
@@ -83,7 +86,13 @@ async function main() {
       const out = asJson ? JSON.stringify(lease, null, 2) : line(lease);
       if (out !== last) { console.log(out); last = out; }
       if (lease.state === 'held') return 0;
-      if (!until) return 1;
+      if (!until) {
+        // Nobody will be waiting for it: a request left in line would be granted, later, to an
+        // agent that moved on, and hold the resource for its whole TTL.
+        await call(t, 'DELETE', `/api/leases/${lease.id}`);
+        console.error(`${t.url}: ${lease.resource} is taken; left the queue (use --wait to stay in line)`);
+        return 1;
+      }
       if (Date.now() > until) {
         await call(t, 'DELETE', `/api/leases/${lease.id}`);
         console.error(`${t.url}: still queued after the wait; left the queue`);
