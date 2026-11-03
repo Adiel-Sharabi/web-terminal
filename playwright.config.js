@@ -76,6 +76,9 @@ process.env.WT_API_TOKENS_FILE = path.join(__dirname, 'api-tokens.test.json');
 process.env.WT_SESSION_BRIEFS_FILE = path.join(__dirname, 'session-briefs.test.json');
 // #340 - hand-off brief files land here, never in the production handoffs/ dir.
 process.env.WT_HANDOFF_DIR = path.join(__dirname, 'handoffs.test');
+// #413 - the work-item event log. The suite's reports and closes must never land in
+// production's logs/work-items.jsonl, where a `continue ado:N` would read them; reset per run.
+process.env.WT_WORK_ITEMS_LOG_FILE = path.join(__dirname, 'work-items.test.jsonl');
 // #393 - the agent settings the context budget reads (autoCompactWindow). Never the real
 // ~/.claude/settings.json: the suite's budget must not depend on the machine it runs on, and
 // tests/context-budget.spec.js writes and edits this one to prove the setting is read live.

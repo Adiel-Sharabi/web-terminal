@@ -40,7 +40,7 @@ const ROOT = process.env.WT_RESET_ROOT ? path.resolve(process.env.WT_RESET_ROOT)
 // protected but never narrow it: setting WT_RESET_ROOT elsewhere does not make the real
 // checkout's store deletable.
 const PRODUCTION = new Set([CHECKOUT, ROOT].flatMap((dir) =>
-  ['api-tokens.json', 'config.json', 'cluster-tokens.json'].map((f) => path.resolve(dir, f).toLowerCase())));
+  ['api-tokens.json', 'config.json', 'cluster-tokens.json', path.join('logs', 'work-items.jsonl'), path.join('logs', 'work-items.jsonl.1')].map((f) => path.resolve(dir, f).toLowerCase())));
 
 function reset(file, issue) {
   const abs = path.resolve(ROOT, file);
@@ -75,6 +75,11 @@ else {
 // #272 refusal off the briefs file instead of the token store.
 if (process.env.WT_SESSION_BRIEFS_FILE) reset(process.env.WT_SESSION_BRIEFS_FILE, '#298');
 if (process.env.WT_DEVICE_OPS_FILE) reset(process.env.WT_DEVICE_OPS_FILE, '#311');
+// #413 - the work-item event log (and its one rotated generation).
+if (process.env.WT_WORK_ITEMS_LOG_FILE) {
+  reset(process.env.WT_WORK_ITEMS_LOG_FILE, '#413');
+  reset(`${process.env.WT_WORK_ITEMS_LOG_FILE}.1`, '#413');
+}
 // #351 - the spawn reaper's verdicts: per-run state like the files above, so a run starts
 // from none rather than from whatever an interrupted one left.
 if (process.env.WT_SPAWNED_SESSIONS_FILE) reset(process.env.WT_SPAWNED_SESSIONS_FILE, '#351');
