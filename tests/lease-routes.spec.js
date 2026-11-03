@@ -154,8 +154,38 @@ test.describe.serial('cluster resource leases across two servers (#412)', () => 
     const granted = await until(async () => { const l = await leaseOf(a, queued.lease.id); return l.body.lease && l.body.lease.state === 'held' ? l : null; });
     expect(granted && granted.body.lease).toMatchObject({ state: 'held', position: 0 });
     expect((await leaseOf(a, held.lease.id)).body).toMatchObject({ released: { why: 'holder-ended' } });
-    expect((await a.delete(`/api/leases/${queued.lease.id}`)).ok()).toBe(true);
+    expect((await a.delete(`/api/leases/${queued.lease.id}`, { data: { holderSessionId: sA } })).ok()).toBe(true);
     await a.delete(`/api/sessions/${sA}`);
+  });
+
+  test('only the holder session may release or heartbeat a lease; every other caller gets 403 and the lease stays', async () => {
+    const sB = await session(b, 'lease-owner-b');
+    const sB2 = await session(b, 'lease-bystander-b');
+    const lease = (await (await b.post('/api/leases', { data: { resource: 'vm:Owned', holderSessionId: sB } })).json()).lease;
+    expect(lease.state).toBe('held');
+    const refusals = [
+      ['another session on the holder\'s machine', () => b.delete(`/api/leases/${lease.id}`, { data: { holderSessionId: sB2 } })],
+      ['the holder\'s machine, no session named', () => b.delete(`/api/leases/${lease.id}`)],
+      ['the authority\'s machine, the holder\'s session id', () => a.delete(`/api/leases/${lease.id}`, { data: { holderSessionId: sB } })],
+      ['a heartbeat from another session', () => b.post(`/api/leases/${lease.id}/heartbeat`, { data: { holderSessionId: sB2 } })],
+      ['a heartbeat from the authority\'s machine', () => a.post(`/api/leases/${lease.id}/heartbeat`, { data: {} })],
+    ];
+    for (const [who, send] of refusals) {
+      const r = await send();
+      expect(r.status(), `${who}: ${await r.text()}`).toBe(403);
+      expect((await r.json()).error).toMatch(/only its holder/);
+    }
+    expect((await leaseOf(a, lease.id)).body.lease).toMatchObject({ state: 'held' });
+    // A lease taken on the authority with no session is the authority machine's: a peer cannot end it.
+    const bare = (await (await a.post('/api/leases', { data: { resource: 'vm:Bare', heartbeatSec: 10 } })).json()).lease;
+    expect((await b.delete(`/api/leases/${bare.id}`)).status()).toBe(403);
+    expect((await a.delete(`/api/leases/${bare.id}`)).ok()).toBe(true);
+    // The holder, through its own server.
+    expect((await b.post(`/api/leases/${lease.id}/heartbeat`, { data: { holderSessionId: sB } })).ok()).toBe(true);
+    expect((await b.delete(`/api/leases/${lease.id}`, { data: { holderSessionId: sB } })).ok()).toBe(true);
+    expect((await leaseOf(a, lease.id)).body).toMatchObject({ released: { why: 'released' } });
+    await b.delete(`/api/sessions/${sB}`);
+    await b.delete(`/api/sessions/${sB2}`);
   });
 
   test('a holder whose session is gone from its machine is released by ONE sweep, even when its exit was never heard', async () => {
@@ -254,6 +284,10 @@ test.describe.serial('cluster resource leases across two servers (#412)', () => 
     expect(list.stdout).toMatch(/lease authority: alpha/);
     // Without a session and without --no-session it refuses rather than make a lease nobody holds.
     expect(cli('acquire', 'build:bravo').status).toBe(2);
+    // A session that is not the holder is refused, and says why.
+    const notMine = cli('release', id, '--session', crypto.randomUUID());
+    expect(notMine.status).toBe(2);
+    expect(notMine.stderr).toMatch(/only its holder/);
     expect(cli('release', id).status).toBe(0);
     expect((await leaseOf(b, id)).status).toBe(404);
   });

@@ -7,8 +7,8 @@
 //   node scripts/wt-lease.js acquire vm:AM8-SanityVM [--role release] [--ttl 3600]
 //        [--heartbeat 60] [--meta '{"wi":25309}'] [--mem 8 --disk 40 --drive C:]
 //        [--wait [minutes]] [--no-session] [--json]
-//   node scripts/wt-lease.js heartbeat <id> [--ttl 3600]
-//   node scripts/wt-lease.js release <id>
+//   node scripts/wt-lease.js heartbeat <id> [--ttl 3600] [--no-session | --session <id>]
+//   node scripts/wt-lease.js release <id> [--no-session | --session <id>]
 //   node scripts/wt-lease.js list [--json]
 //   node scripts/wt-lease.js record <id> --pid 1234 [--pid ...] [--path C:\dev\wt-1 ...]
 //   node scripts/wt-lease.js admission [--mem 8] [--disk 40] [--drive C:]
@@ -19,6 +19,10 @@
 // `heartbeat <id>` at least every --heartbeat seconds or it is released after three
 // misses. `--wait` keeps a queued request in line until granted (exit 0) or the minutes
 // run out; without it, or when the minutes run out, a queued request leaves the queue (exit 1).
+//
+// Only a lease's HOLDER may heartbeat or release it (403 otherwise): its machine - so run
+// these against your own server, like acquire - and its session, which is $WT_SESSION_ID
+// unless --session names another or --no-session says the lease was taken without one.
 //
 // `record` lists what the lease started on this machine - pids, temp dirs, worktrees -
 // for release to clean up: a pid only while it is still the same process (creation time),
@@ -54,6 +58,13 @@ function needsFromFlags() {
   return Object.keys(needs).length ? needs : undefined;
 }
 
+/** The session this call is made for: --session <id>, else $WT_SESSION_ID; none with --no-session. */
+function holderSession() {
+  if (args.includes('--no-session')) return null;
+  const session = flag('--session');
+  return (session && session !== true ? session : process.env.WT_SESSION_ID) || null;
+}
+
 async function main() {
   // acquire and record name THIS machine: its session for the holder, its pids and folders for
   // the cleanup. Sent to another server they would name the wrong machine's.
@@ -62,12 +73,12 @@ async function main() {
   if (cmd === 'acquire') {
     if (!arg) throw new Error('acquire needs a resource: wt-lease.js acquire vm:NAME');
     const body = { resource: arg };
-    const session = flag('--session');
+    const sid = holderSession();
     if (!args.includes('--no-session')) {
-      const sid = session && session !== true ? session : process.env.WT_SESSION_ID;
       if (!sid) throw new Error('not inside a web-terminal session ($WT_SESSION_ID is not set); pass --no-session for a heartbeat lease');
       body.holderSessionId = sid;
     }
+    const as = sid ? { holderSessionId: sid } : {};
     if (num('--ttl') !== undefined) body.ttlSec = num('--ttl');
     if (num('--heartbeat') !== undefined) body.heartbeatSec = num('--heartbeat');
     const role = flag('--role');
@@ -89,17 +100,17 @@ async function main() {
       if (!until) {
         // Nobody will be waiting for it: a request left in line would be granted, later, to an
         // agent that moved on, and hold the resource for its whole TTL.
-        await call(t, 'DELETE', `/api/leases/${lease.id}`);
+        await call(t, 'DELETE', `/api/leases/${lease.id}`, as);
         console.error(`${t.url}: ${lease.resource} is taken; left the queue (use --wait to stay in line)`);
         return 1;
       }
       if (Date.now() > until) {
-        await call(t, 'DELETE', `/api/leases/${lease.id}`);
+        await call(t, 'DELETE', `/api/leases/${lease.id}`, as);
         console.error(`${t.url}: still queued after the wait; left the queue`);
         return 1;
       }
       await new Promise((res) => setTimeout(res, 15000));
-      r = await call(t, 'POST', `/api/leases/${lease.id}/heartbeat`, {});
+      r = await call(t, 'POST', `/api/leases/${lease.id}/heartbeat`, as);
       if (r.status !== 200) return fail(t, r);
       lease = r.json.lease;
     }
@@ -107,9 +118,11 @@ async function main() {
   if (cmd === 'heartbeat' || cmd === 'release') {
     if (!arg) throw new Error(`${cmd} needs a lease id`);
     const ttl = num('--ttl');
+    const sid = holderSession();
+    const as = sid ? { holderSessionId: sid } : {};
     const r = cmd === 'release'
-      ? await call(t, 'DELETE', `/api/leases/${arg}`)
-      : await call(t, 'POST', `/api/leases/${arg}/heartbeat`, ttl === undefined ? {} : { ttlSec: ttl });
+      ? await call(t, 'DELETE', `/api/leases/${arg}`, as)
+      : await call(t, 'POST', `/api/leases/${arg}/heartbeat`, ttl === undefined ? as : { ...as, ttlSec: ttl });
     if (r.status !== 200) return fail(t, r);
     console.log(asJson ? JSON.stringify(r.json, null, 2) : (cmd === 'release' ? `released ${arg}` : line(r.json.lease)));
     return 0;
@@ -142,7 +155,7 @@ async function main() {
     if (r.status === 200) { console.log(`${t.url}: admitted`); return 0; }
     return fail(t, r);
   }
-  console.error('usage: wt-lease.js acquire <resource> [--role R] [--ttl S] [--wait [min]] [--mem GB --disk GB] [--no-session] | heartbeat <id> | release <id> | list | record <id> --pid N --path P | admission [--mem GB] [--disk GB]   [--server <url|name>] [--json]');
+  console.error('usage: wt-lease.js acquire <resource> [--role R] [--ttl S] [--wait [min]] [--mem GB --disk GB] [--no-session] | heartbeat <id> | release <id> [--no-session | --session ID] | list | record <id> --pid N --path P | admission [--mem GB] [--disk GB]   [--server <url|name>] [--json]');
   return 2;
 }
 

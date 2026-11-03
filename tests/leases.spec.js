@@ -321,3 +321,32 @@ test.describe('admission (#412)', () => {
     expect(L.admission(n({ memGB: 1 }), { memory: null, disks: null }, 'C:').reasons[0]).toMatch(/unknown/);
   });
 });
+
+test.describe('only a lease\'s holder may release it or heartbeat it (#412)', () => {
+  test('notHolder: the same machine AND the same session (or both none); anything else is a 403', () => {
+    const sid = 'aaaaaaaa-0000-4000-8000-0000000000aa';
+    const other = 'aaaaaaaa-0000-4000-8000-0000000000bb';
+    let s = L.emptyState('t-holder');
+    const bySession = grant(s, { body: { holderSessionId: sid }, node: 'http://bravo.test' });
+    s = bySession.state;
+    const bare = grant(s, { body: { resource: 'vm:Bare', heartbeatSec: 10 }, node: 'http://bravo.test' });
+    s = bare.state;
+    const id = bySession.lease.id;
+    // The holder: its machine and its session (case does not matter).
+    expect(L.notHolder(s, id, { node: 'http://bravo.test', sessionId: sid.toUpperCase() })).toBe(null);
+    // Another session on the holder's machine, no session there, the same session id from another
+    // machine, an unknown machine.
+    for (const caller of [{ node: 'http://bravo.test', sessionId: other }, { node: 'http://bravo.test', sessionId: null },
+      { node: 'self', sessionId: sid }, { node: null, sessionId: sid }]) {
+      const r = L.notHolder(s, id, caller);
+      expect(r, JSON.stringify(caller)).toMatchObject({ status: 403 });
+      expect(r && r.error).toMatch(/only its holder/);
+    }
+    // A lease with no session is its machine's: a caller there naming no session holds it; a session does not.
+    expect(L.notHolder(s, bare.lease.id, { node: 'http://bravo.test', sessionId: null })).toBe(null);
+    expect(L.notHolder(s, bare.lease.id, { node: 'http://bravo.test', sessionId: sid })).toMatchObject({ status: 403 });
+    expect(L.notHolder(s, bare.lease.id, { node: 'self', sessionId: null })).toMatchObject({ status: 403 });
+    // An unknown lease is not this rule's to answer (release and heartbeat say 404).
+    expect(L.notHolder(s, 'aaaaaaaa-0000-4000-8000-0000000000cc', { node: 'self', sessionId: null })).toBe(null);
+  });
+});
