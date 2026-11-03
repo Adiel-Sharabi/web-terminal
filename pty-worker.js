@@ -2287,7 +2287,7 @@ function createSession(id, cwd, name, autoCommand, savedScrollback, claudeSessio
   term.onData((data) => {
     // killTerm: ConPTY is past its start-up once the SHELL has drawn something - its own
     // preamble (escape sequences only) does not count.
-    if (!session._ptyStarted && /[^ - ]/.test(stripAnsiForScan(typeof data === 'string' ? data : data.toString('latin1')))) {
+    if (!session._ptyStarted && /[^\x00-\x20\x7f]/.test(stripAnsiForScan(typeof data === 'string' ? data : data.toString('latin1')))) {
       session._ptyStarted = true;
       if (session._killWhenStarted) { const k = session._killWhenStarted; session._killWhenStarted = null; k(); }
     }
