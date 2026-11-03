@@ -206,6 +206,16 @@ test.describe('lease broker (#412)', () => {
     expect(r.code).toBe(503);
     expect(r.body.nothingRecorded).toBe(true);
     expect((await call(b.routes.records)).body.records).toEqual({});
+    // A lease that already had a record keeps it, unchanged, when a later save fails.
+    const led = path.join(dir, 'led');
+    fs.mkdirSync(led);
+    const q = await sleeper();
+    const b2 = broker(dir, { fetch: alphaFetch({}), recordsFile: path.join(led, 'records.json') }).b;
+    expect((await call(b2.routes.record, { params: { id: LEASE }, body: { pids: [p.pid] } })).code).toBe(200);
+    fs.rmSync(led, { recursive: true, force: true });
+    expect((await call(b2.routes.record, { params: { id: LEASE }, body: { pids: [q.pid] } })).code).toBe(503);
+    const kept = (await call(b2.routes.records)).body.records[LEASE];
+    expect(kept.items.map((i) => i.pid)).toEqual([p.pid]);
   });
 
   test('a server that is not the authority never sweeps a table it once owned', async () => {
