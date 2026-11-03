@@ -361,7 +361,10 @@ in the session list and on the dashboard of every client.
 
 **Cluster** — merge several servers into one sidebar, each showing its own CPU and
 **free memory** so you can pick where to work; optional direct-terminal mode skips the
-proxy hop for a large latency win.
+proxy hop for a large latency win. The tokens servers hold for each other **renew
+themselves** before they expire, each peer shows its token's days left (flagged under 14),
+and `node scripts/cluster-relink.js --apply` re-links any broken link from one machine
+without typing a password — see [docs/CLUSTER.md](docs/CLUSTER.md#peer-tokens-renewal-and-relinking-415).
 
 **Headroom, not percentages** — the memory readout leads with the room actually left
 (*"12.7G free of 31.7G"*), keeping the percentage as context, and colours on the

@@ -8,7 +8,48 @@ Running Web Terminal on several machines and driving them from one sidebar.
 3. **Login to remote** — click Login next to the server in the sidebar
 4. **Done** — both servers auto-discover each other. Repeat for more servers.
 
-Each server keeps its own credentials. Inter-server auth uses API tokens (90-day expiry). By default all traffic proxies through your connected server — no CORS issues.
+Each server keeps its own credentials. Inter-server auth uses API tokens (90 days each, renewed automatically - see below). By default all traffic proxies through your connected server — no CORS issues.
+
+## Peer tokens: renewal and relinking (#415)
+
+A server holds one bearer token per peer (`cluster-tokens.json`), minted BY that peer and
+valid for 90 days. Peers are usually linked in one sitting, so before #415 the whole cluster
+dropped on the same day (2026-11-03: every link not re-logged by hand answered 401). The
+rules live in `lib/peer-tokens.js`.
+
+**Renewal (automatic).** Every 6 hours (and 60 s after a start) each server asks every
+configured peer what the token it holds expires (`GET /api/cluster/token`, authenticated by
+that token) and stores the answer - never trusting its own stored copy, so a renewal whose
+answer was lost shows up as a started grace. With less than **30 days** left it calls the
+peer's `POST /api/cluster/token/renew` and stores the fresh token. The peer keeps the old
+token working for a **7-day grace** (long enough for a laptop asleep over a weekend to retry
+with it), then drops it. The cluster proxy never forwards these two routes (403). A token in use never
+reaches its expiry; a peer that is offline for a while is renewed when it is back, as long as
+it comes back inside the 30 days.
+
+**Warning.** `/api/cluster/sessions` reports, for each peer in `servers[]`:
+`tokenExpires` (ms, or null when unknown), `tokenDaysLeft` and `tokenExpiring` (true under
+**14 days** - renewal is failing, look at the log line `Cluster token <name>: ... FAILED`).
+
+**Forcing a renewal.** `POST /api/cluster/peer-tokens/renew` with `{"url": "<peer url>",
+"force": true}` renews now and answers one result per peer (never a token). Without `force`
+it does what the scheduled run would.
+
+**Relinking a broken link** - an expired or revoked token, or none stored. From any machine
+whose server still reaches the others:
+
+```bash
+node scripts/cluster-relink.js           # every machine -> peer link: ok / broken / offline, days left
+node scripts/cluster-relink.js --apply   # re-link the broken ones
+```
+
+For each broken link A -> B it mints a fresh token on B (`POST /api/cluster/client-token`,
+straight to B or through a machine that still reaches it) and installs it on A
+(`POST /api/cluster/register`, via A's own API or one hop through a peer's cluster proxy).
+No password is typed and no token is printed. It repairs this machine's own links first, then
+works outward in rounds; a machine it has no path to is named, not guessed at. Exit code 0 =
+every reachable link works, 1 = some link is still broken. It uses this machine's server with a
+token from `api-tokens.json`, so run it in the checkout the server runs from.
 
 ## Server Load (#152)
 
