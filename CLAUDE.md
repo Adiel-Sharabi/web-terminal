@@ -120,6 +120,7 @@ Each line has already cost a bug; the bracketed findings file holds its full tex
 
 ## Cluster & Workflow
 - `config.json`: a `cluster` array of `{name, url}` plus `publicUrl`; `/api/cluster/sessions` skips the server matching `publicUrl` (else duplicates); the companion merges client-side. `passAllEnv` (default false) controls the spawned shell's environment.
+- **Peer tokens renew, never re-login by hand (#415)** `[operations.md]`: each server renews a peer token under 30 days left (`lib/peer-tokens.js`; expiry re-asked from the peer every run, old token valid 7 days; the proxy never forwards the token routes); `servers[]` carries `tokenDaysLeft`/`tokenExpiring` (< 14 d). A link already broken (401) → `node scripts/cluster-relink.js [--apply]` from any machine with working links - never ask for a peer password.
 - Issues (`Adiel-Sharabi/web-terminal`): check open issues and PRs → assess clarity → **reproduce before fixing** → tests first → full suite → subagents for individual fixes.
 
 ## Evidence index — `docs/findings/`
