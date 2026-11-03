@@ -211,6 +211,29 @@ Tune it with a `handoff` block in `config.json` (`ctxThreshold`, default: the se
 context budget; `idleMin`, default 10; `auto: false` to go back to the button only;
 `enabled: false` for neither), read live. Claude only: another agent is offered nothing.
 
+**Resume by work item, on any machine** — a session's brief and its hand-off are named after
+the SESSION; the work is named after its **work item** (`ado:25309`, `#413`). Whenever a
+session's work on an item ends — it is closed, it exits or crashes, it is found gone after a
+restart, it is handed off — and whenever an item enters its report or changes state, the server
+appends one line per item to `logs/work-items.jsonl` (rotated at 5 MB): which session, on which
+machine, when, and how it ended. `GET /api/work-items/<ref>/events` lists them;
+`GET /api/work-items/<ref>?cluster=1` merges every server's answer with the newest snapshot and
+the hand-off brief, and an agent in a session gets the same from
+`node scripts/wt-work-item.js ado:25309` — the starting point for a `continue ado:25309`.
+web-terminal does not write tracker cards itself: set `workItemHook` in `config.json`
+(`{"command": "C:/Program Files/nodejs/node.exe", "args": ["C:/tools/wi-flow.js", "card"], "timeoutMs": 30000}`)
+and the server runs that program once per item with a JSON payload on stdin — the reason, the
+item, the session, the machine, the agent's last report and the session's brief. No shell is
+used (a `.bat`/`.cmd` is refused: name the program and pass the script in `args`); a failure is
+logged and never holds up the close. Absent, nothing runs.
+
+**What each machine is for** — `machineCapabilities` in `config.json` is a short static list
+(`["builds", "flutter", "adb"]`, `["controllers", "host:ci-vm-1", "avoid:heavy-builds"]`):
+lower-case letters, digits and `. _ : -`. It is returned by `GET /api/machine` (`capabilities`),
+`/api/version` and the cluster's server list (`machineCapabilities`), so a dispatcher can pick the
+least-loaded machine that has what a job needs. A malformed list is refused whole
+(`capabilities: null` with `capabilitiesError`), never trimmed.
+
 **See how close a session is to compacting** — Claude compacts where its `autoCompactWindow`
 setting says, not at the model's window: at 400k it compacts at about 367k, which is 36% of a
 1M window. The server reads that setting from `~/.claude/settings.json` (a change applies within
@@ -254,6 +277,29 @@ hand and tells every session it had asked that the restart is called off and to 
 normal (typed once each is idle at its composer). Routes: `POST /api/maintenance/prepare`,
 `POST /api/maintenance/answer` (`{sessionId, answer, minutes?, reason?}`), `GET
 /api/maintenance/status`, `DELETE /api/maintenance`.
+
+**Share scarce resources across the cluster** — one queue for AM8 slots, test VMs, office
+controllers and build turns (`slot:`, `vm:`, `controller:`, `build:`), so two sessions on two
+machines cannot take the same VM and a crashed session cannot hold one forever. ONE server is the
+authority (`leases.authority` in `config.json`); every other server forwards lease calls to it
+with its cluster token. `node scripts/wt-lease.js acquire vm:X [--wait]` from inside a session
+asks YOUR machine's server, which is granted or queued (FIFO, with its position). The lease ends
+on `release`, at its TTL, after three missed heartbeats (only a lease without a session needs
+them), or when its holder session ends — closed, reaped or crashed: its server tells the
+authority at once, and the authority confirms every holder's session against its machine each
+minute. The next waiter is then granted. An authority that cannot be reached grants nothing (fail
+closed) and stops nothing: holders keep running, and a returning authority restarts their
+heartbeat clocks. `leases.resources` reserves a resource for a role (`reservedFor: "release"`) or
+bars it (`neverLease: true`). A request may state `needs: {memGB, diskGB}`, checked against this
+machine's own readings (`/api/machine`) before anything is queued. `wt-lease.js record <id> --pid
+N --path <dir>` lists what the lease started on this machine; release kills only a recorded pid
+that is still the same process (by creation time, never by name) and removes only recorded
+folders inside `leases.cleanupRoots` (none until configured) — junctions are unlinked, never
+followed, and nothing in or above a git repository or worktree is ever removed. Only the lease
+table that granted a lease can declare it ended, so a rolled-back or replaced authority never
+triggers a cleanup. A session closed by its own hand-off passes its leases to its successor. Only the lease's holder — its own machine and its session (`$WT_SESSION_ID`, or `--no-session` for a lease taken without one) — may release or heartbeat it; anyone else gets `403`. `wt-lease.js list` shows who holds what, who waits, and for how long.
+Routes: `POST /api/leases`, `GET /api/leases[/:id]`, `POST /api/leases/:id/heartbeat`,
+`DELETE /api/leases/:id`, `POST /api/leases/:id/record`, `GET /api/admission`.
 
 **Switch a machine's Claude account** — with two Claude subscriptions, move a machine from one
 to the other without logging in again. In the companion, the account button on a machine's card

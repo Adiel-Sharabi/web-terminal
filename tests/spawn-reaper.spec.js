@@ -488,7 +488,7 @@ test.describe('#351 server.js wiring (pinned against the source)', () => {
     const del = SERVER_SRC.slice(SERVER_SRC.indexOf("app.delete('/api/sessions/:id'"));
     expect(del.slice(0, del.indexOf('\n});'))).toContain('killLocalSession(req.params.id)');
     const sweep = SERVER_SRC.slice(SERVER_SRC.indexOf('async function spawnReaperSweep'));
-    expect(sweep.slice(0, sweep.indexOf('const _spawnReaperTicker'))).toContain('killLocalSession(s.id)');
+    expect(sweep.slice(0, sweep.indexOf('const _spawnReaperTicker'))).toContain("killLocalSession(s.id, 'reaped')") // #413: the sweep names how it ended the session;
   });
 
   test('the sweep is local-only: it never reaches into a peer', () => {
@@ -572,7 +572,7 @@ test.describe('#351 server.js wiring (pinned against the source)', () => {
     const sweep = SERVER_SRC.slice(SERVER_SRC.indexOf('async function spawnReaperSweep'));
     const body = sweep.slice(0, sweep.indexOf('const _spawnReaperTicker'));
     const check = body.lastIndexOf('activeViewerCount(s.id) > 0');
-    const kill = body.indexOf('await killLocalSession(s.id)');
+    const kill = body.indexOf("await killLocalSession(s.id, 'reaped')");
     expect(check).toBeGreaterThan(0);
     expect(kill).toBeGreaterThan(check);
     expect(body.slice(check, kill)).not.toContain('await');

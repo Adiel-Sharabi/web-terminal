@@ -91,8 +91,20 @@ handoffs/
 handoffs.test/
 # Which device sent each prompt (#311): the suite's copy (production's is under logs/).
 device-ops.test.jsonl
+# The work-item event log (#413): the suite's copy (production's is under logs/).
+work-items.test.jsonl
+work-items.test.jsonl.1
 # A restart hold (#359) - per machine; the suite's copy too.
 maintenance.json
 maintenance.json.tmp
 maintenance.test.json
 maintenance.test.json.tmp
+# Cluster resource leases (#412): the authority's table and each machine's cleanup ledger.
+leases.json
+leases.json.tmp
+leases.test.json
+leases.test.json.tmp
+lease-records.json
+lease-records.json.tmp
+lease-records.test.json
+lease-records.test.json.tmp

@@ -76,6 +76,9 @@ process.env.WT_API_TOKENS_FILE = path.join(__dirname, 'api-tokens.test.json');
 process.env.WT_SESSION_BRIEFS_FILE = path.join(__dirname, 'session-briefs.test.json');
 // #340 - hand-off brief files land here, never in the production handoffs/ dir.
 process.env.WT_HANDOFF_DIR = path.join(__dirname, 'handoffs.test');
+// #413 - the work-item event log. The suite's reports and closes must never land in
+// production's logs/work-items.jsonl, where a `continue ado:N` would read them; reset per run.
+process.env.WT_WORK_ITEMS_LOG_FILE = path.join(__dirname, 'work-items.test.jsonl');
 // #393 - the agent settings the context budget reads (autoCompactWindow). Never the real
 // ~/.claude/settings.json: the suite's budget must not depend on the machine it runs on, and
 // tests/context-budget.spec.js writes and edits this one to prove the setting is read live.
@@ -94,6 +97,11 @@ process.env.WT_SPAWN_CLASSIFY_MS = '60000';
 // #359 - the restart hold. A hold left in production's maintenance.json by a spec would
 // refuse every new session on the real server; reset per run like the above.
 process.env.WT_MAINTENANCE_FILE = path.join(__dirname, 'maintenance.test.json');
+// #412 - the lease table and this machine's cleanup ledger. The suite's server has no
+// `leases` config, so it never writes either; redirected anyway, because a spec that ever
+// gave it one must not move a production lease or clean up what production recorded.
+process.env.WT_LEASES_FILE = path.join(__dirname, 'leases.test.json');
+process.env.WT_LEASE_RECORDS_FILE = path.join(__dirname, 'lease-records.test.json');
 // #366 - the binary behind GET /api/dashboard/background-agents. The suite must never launch
 // the real CLI: its listing names every project's sessions on the machine, and a developer
 // box and a CI runner would answer differently. Pointing it at a path that does not exist
