@@ -161,6 +161,20 @@ test.describe('recorded paths (#412)', () => {
     expect((await C.checkPath(plain, { roots: C.DEFAULT_ROOTS, protect: [] })).error).toMatch(/cleanupRoots/);
   });
 
+  test('a junction inside a root that points INTO a repository does not hide the repository', async () => {
+    // base\repo3\.git + base\repo3\src\build; base\lnk -> base\repo3\src. Lexically
+    // base\lnk\build has no .git parent; really it is inside repo3.
+    const repo = path.join(base, 'repo3');
+    fs.mkdirSync(path.join(repo, '.git'), { recursive: true });
+    fs.mkdirSync(path.join(repo, 'src', 'build'), { recursive: true });
+    fs.symlinkSync(path.join(repo, 'src'), path.join(base, 'lnk'), 'junction');
+    const via = path.join(base, 'lnk', 'build');
+    expect((await C.checkPath(via, opts())).error).toMatch(/inside a git repository/);
+    expect((await C.checkPath(path.join(base, 'lnk', 'not-yet'), opts())).error).toMatch(/inside a git repository/);
+    expect((await C.removeRecorded(via, opts())).result).toBe('refused');
+    expect(fs.existsSync(path.join(repo, 'src', 'build'))).toBe(true);
+  });
+
   test('removal re-checks at release time: a path that became a repository since is refused', async () => {
     const dir = path.join(base, 'later-repo');
     fs.mkdirSync(dir);

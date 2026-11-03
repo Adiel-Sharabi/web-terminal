@@ -156,6 +156,58 @@ test.describe('lease broker (#412)', () => {
     expect(fs.existsSync(path.join(dir, 'records.json'))).toBe(false);
   });
 
+  test('a session closed by its hand-off passes its leases to the successor; a plain exit releases them', async () => {
+    const A = 'aaaaaaaa-0000-4000-8000-000000000001';
+    const SUCC = 'aaaaaaaa-0000-4000-8000-000000000002';
+    const B = 'aaaaaaaa-0000-4000-8000-000000000003';
+    const W = 'aaaaaaaa-0000-4000-8000-000000000004';
+    const b = createLeaseBroker({
+      stateFile: path.join(dir, 'leases.json'), recordsFile: path.join(dir, 'records.json'), checkoutDir: path.join(__dirname, '..'),
+      leasesConfig: () => ({ authority: 'self' }), cluster: () => [], publicUrl: () => null, serverName: () => 'solo',
+      clusterToken: () => null, fetch: async () => { throw new Error('unused'); }, listLocalSessionIds: async () => [], readMachine: async () => null,
+      protectedPids: () => [], log: () => {}, error: () => {},
+    });
+    expect((await call(b.routes.create, { body: { resource: 'vm:X', holderSessionId: A } })).code).toBe(200);
+    expect((await call(b.routes.create, { body: { resource: 'vm:Y', holderSessionId: B } })).code).toBe(200);
+    expect((await call(b.routes.create, { body: { resource: 'vm:Y', holderSessionId: W } })).body.lease.state).toBe('queued');
+    const holderOf = async (res) => (await call(b.routes.list)).body.resources.find((r) => r.resource === res).holder;
+    // The worker's sessionExited for a session the hand-off closed: the lease moves.
+    b.onSessionExited(A, SUCC);
+    expect((await holderOf('vm:X')).holder.sessionId).toBe(SUCC);
+    // A plain exit ends B's lease and the next in line is granted.
+    b.onSessionExited(B, null);
+    expect((await holderOf('vm:Y')).holder.sessionId).toBe(W);
+    // The route takes the same successor, from a holder's machine.
+    const r = await call(b.routes.holderEnded, { body: { holderSessionId: SUCC, successorSessionId: A } });
+    expect(r.code).toBe(200);
+    expect(r.body.moved).toHaveLength(1);
+    expect((await holderOf('vm:X')).holder.sessionId).toBe(A);
+    expect((await call(b.routes.holderEnded, { body: { holderSessionId: A, successorSessionId: 'nope' } })).code).toBe(400);
+  });
+
+  test('a non-authority tells the authority who the successor is', async () => {
+    const A = 'bbbbbbbb-0000-4000-8000-000000000001';
+    const SUCC = 'bbbbbbbb-0000-4000-8000-000000000002';
+    const sent = [];
+    const { b } = broker(dir, { fetch: async (url, opts) => { sent.push({ url, body: JSON.parse(opts.body) }); return { status: 200, body: '{}' }; } });
+    b.onSessionExited(A, SUCC);
+    b.onSessionExited(SUCC, null);
+    await new Promise((r) => setTimeout(r, 50));
+    expect(sent.map((s) => s.url)).toEqual(['http://alpha.test/api/leases/holder-ended', 'http://alpha.test/api/leases/holder-ended']);
+    expect(sent[0].body).toMatchObject({ holderSessionId: A, successorSessionId: SUCC });
+    expect(sent[1].body.holderSessionId).toBe(SUCC);
+    expect(sent[1].body).not.toHaveProperty('successorSessionId');
+  });
+
+  test('a record the ledger cannot save is refused, not answered as recorded', async () => {
+    const p = await sleeper();
+    const b = broker(dir, { fetch: alphaFetch({}), recordsFile: path.join(dir, 'no-such-dir', 'records.json') }).b;
+    const r = await call(b.routes.record, { params: { id: LEASE }, body: { pids: [p.pid] } });
+    expect(r.code).toBe(503);
+    expect(r.body.nothingRecorded).toBe(true);
+    expect((await call(b.routes.records)).body.records).toEqual({});
+  });
+
   test('a server that is not the authority never sweeps a table it once owned', async () => {
     const id = '11111111-2222-4333-8444-666666666666';
     fs.writeFileSync(path.join(dir, 'leases.json'), JSON.stringify({ version: 1, tableId: 'old', released: [], leases: [{
