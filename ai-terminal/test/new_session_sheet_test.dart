@@ -2,6 +2,7 @@
 // filter, mirroring the web's showFolders: case-insensitive substring match,
 // empty query shows everything) and the server dropdown's visibility (owner:
 // "there is no server selection" — it must show even with a single server).
+import 'dart:async';
 import 'dart:convert';
 
 import 'package:flutter/material.dart';
@@ -382,6 +383,67 @@ void main() {
       await tester.pump();
 
       expect(sentCwd, r'C:\custom\path');
+    });
+  });
+
+  group('opening the created session', () {
+    const server = ServerConfig(
+      name: 'Solo',
+      baseUrl: 'http://x',
+      bearerToken: 't',
+    );
+
+    // The list refresh fans out to EVERY configured server, and an unreachable
+    // peer holds it for its whole client deadline (twice, when a poll round is
+    // already in flight): 27-40 s measured on Home with XPS and a MacBook down.
+    // The session just created must open at once, whatever the refresh is doing.
+    testWidgets('opens the new session without waiting for the list refresh', (
+      tester,
+    ) async {
+      final neverEnds = Completer<void>();
+      var refreshStarted = false;
+      Session? opened;
+      await tester.pumpWidget(
+        MaterialApp(
+          theme: AppTheme.dark,
+          home: Scaffold(
+            body: Builder(
+              builder: (context) => ElevatedButton(
+                onPressed: () => showNewSessionSheet(
+                  context,
+                  servers: const [server],
+                  initialServer: server,
+                  onCreated: (s) => opened = s,
+                  refreshList: () {
+                    refreshStarted = true;
+                    return neverEnds.future;
+                  },
+                  clientBuilder: (server) => ApiClient(
+                    server,
+                    httpClient: MockClient((req) async {
+                      if (req.method == 'POST' &&
+                          req.url.path == '/api/sessions') {
+                        return http.Response('{"id":"new-1","name":"x"}', 200);
+                      }
+                      return http.Response('{}', 200);
+                    }),
+                  ),
+                ),
+                child: const Text('open'),
+              ),
+            ),
+          ),
+        ),
+      );
+      await tester.tap(find.text('open'));
+      await tester.pumpAndSettle();
+
+      await tester.tap(find.widgetWithText(FilledButton, 'Create'));
+      await tester.pumpAndSettle();
+
+      expect(refreshStarted, isTrue, reason: 'the list is still refreshed');
+      expect(opened?.id, 'new-1');
+      expect(find.text('New session'), findsNothing, reason: 'the sheet closed');
     });
   });
 

@@ -1122,3 +1122,22 @@ then reproduced in ten seconds by loading the page in a real browser and reading
 cheap and safe — `node scripts/rig/rig.js up`, then drive `http://127.0.0.1:7999`
 with a standalone Playwright script on a port the suite is not using.
 
+
+
+## ConPTY startup DA1: every new shell waited ~3 s (2026-11-03)
+
+node-pty 1.1.0 (installed 2026-07-30) ships its own `conpty.dll`/`OpenConsole.exe`, used because `useConptyDll: true`. At spawn that ConPTY writes `ESC[1t`, then `ESC[c` (DA1, Primary Device Attributes) `ESC[?1004h ESC[?9001h`, and holds the child until DA1 is answered or its own timeout passes. A session is spawned with no viewer attached, so nobody answered.
+
+Measured on Home, spawning `C:/Program Files/Git/bin/bash.exe` through node-pty exactly as the worker does:
+
+| | first prompt |
+|---|---|
+| unanswered (before) | 3260 ms (also 3223 ms with `--noprofile`: not the rc files) |
+| answered with `ESC[?1;2c` | 264 ms |
+| answered with a Windows Terminal style reply | 239 ms |
+
+The same MSYS binaries launched from a native parent without a PTY start in ~25 ms, so it is not MSYS start-up either. `worker.log` showed `created -> auto-command` at a steady 3.6-3.9 s on every session for months: that was this wait plus the worker's own 370 ms settle and prime.
+
+The rule (`lib/conpty-startup.js`): reply `ESC[?1;2c` (what xterm.js answers) ONCE per spawn, and only while everything the PTY has printed is escape sequences. The first printable byte closes the window for good, so a program that asks later (vim, a TUI) never gets a worker-written reply typed into its input. Written with `term.write`, not `termWrite`: the #179 line tracker and the #87 paste stamp must not see a terminal reply as typing. Windows only. Gates: `tests/conpty-startup.spec.js` (the negatives carry the weight) and `tests/worker-auto-command.spec.js` (real worker: the reply is reported once, the command is typed in under 2.5 s).
+
+The companion half of the same complaint: the New session sheet awaited `SessionRepository.refresh()`, which fans out to every configured server, before opening the session it had just created. An unreachable peer costs its 10 s version call plus its 10 s session call, twice when a poll round is already in flight: 27-40 s between `created` and `Client joined` on 2026-11-02/03, with XPS and a MacBook offline. Fork and the work board already refreshed unawaited; the sheet now does too (`test/new_session_sheet_test.dart`).
