@@ -211,6 +211,29 @@ Tune it with a `handoff` block in `config.json` (`ctxThreshold`, default: the se
 context budget; `idleMin`, default 10; `auto: false` to go back to the button only;
 `enabled: false` for neither), read live. Claude only: another agent is offered nothing.
 
+**Resume by work item, on any machine** — a session's brief and its hand-off are named after
+the SESSION; the work is named after its **work item** (`ado:25309`, `#413`). Whenever a
+session's work on an item ends — it is closed, it exits or crashes, it is found gone after a
+restart, it is handed off — and whenever an item enters its report or changes state, the server
+appends one line per item to `logs/work-items.jsonl` (rotated at 5 MB): which session, on which
+machine, when, and how it ended. `GET /api/work-items/<ref>/events` lists them;
+`GET /api/work-items/<ref>?cluster=1` merges every server's answer with the newest snapshot and
+the hand-off brief, and an agent in a session gets the same from
+`node scripts/wt-work-item.js ado:25309` — the starting point for a `continue ado:25309`.
+web-terminal does not write tracker cards itself: set `workItemHook` in `config.json`
+(`{"command": "C:/Program Files/nodejs/node.exe", "args": ["C:/tools/wi-flow.js", "card"], "timeoutMs": 30000}`)
+and the server runs that program once per item with a JSON payload on stdin — the reason, the
+item, the session, the machine, the agent's last report and the session's brief. No shell is
+used (a `.bat`/`.cmd` is refused: name the program and pass the script in `args`); a failure is
+logged and never holds up the close. Absent, nothing runs.
+
+**What each machine is for** — `machineCapabilities` in `config.json` is a short static list
+(`["builds", "flutter", "adb"]`, `["controllers", "host:ci-vm-1", "avoid:heavy-builds"]`):
+lower-case letters, digits and `. _ : -`. It is returned by `GET /api/machine` (`capabilities`),
+`/api/version` and the cluster's server list (`machineCapabilities`), so a dispatcher can pick the
+least-loaded machine that has what a job needs. A malformed list is refused whole
+(`capabilities: null` with `capabilitiesError`), never trimmed.
+
 **See how close a session is to compacting** — Claude compacts where its `autoCompactWindow`
 setting says, not at the model's window: at 400k it compacts at about 367k, which is 36% of a
 1M window. The server reads that setting from `~/.claude/settings.json` (a change applies within
