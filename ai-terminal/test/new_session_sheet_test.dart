@@ -498,4 +498,128 @@ void main() {
       expect(cwdWithTrailingSep(''), '');
     });
   });
+  // #421 - the limit is soft: the sheet SHOWS the chosen machine's count, coloured by
+  // the server's level, and never stops the create.
+  group('session count (#421)', () {
+    test('wording follows the server level; unknown is said, never zero', () {
+      expect(sessionCountLine(null, loading: true), 'Counting sessions on this machine...');
+      expect(sessionCountLine(null, loading: false), 'Sessions on this machine: unknown');
+      expect(
+        sessionCountLine((count: 1, working: 1, waiting: 0, max: 10, level: 'ok'), loading: false),
+        '1 session already on this machine (1 working, 0 waiting)',
+      );
+      expect(
+        sessionCountLine((count: 10, working: 2, waiting: 1, max: 10, level: 'warn'), loading: false),
+        '10 sessions already on this machine (2 working, 1 waiting) - at the limit of 10',
+      );
+      expect(
+        sessionCountLine((count: 12, working: 3, waiting: 0, max: 10, level: 'hot'), loading: false),
+        '12 sessions already on this machine (3 working, 0 waiting) - over the limit of 10',
+      );
+    });
+
+    testWidgets('a machine past its limit reads red, and Create still creates', (tester) async {
+      const server = ServerConfig(name: 'Busy', baseUrl: 'http://x', bearerToken: 't');
+      final posted = <String>[];
+      await tester.pumpWidget(
+        MaterialApp(
+          theme: AppTheme.dark,
+          home: Scaffold(
+            body: Builder(
+              builder: (context) => ElevatedButton(
+                onPressed: () => showNewSessionSheet(
+                  context,
+                  servers: const [server],
+                  initialServer: server,
+                  onCreated: (_) {},
+                  recordCreated: (_) {},
+                  clientBuilder: (server) => ApiClient(
+                    server,
+                    httpClient: MockClient((req) async {
+                      if (req.url.path == '/api/machine') {
+                        return http.Response(
+                          jsonEncode({
+                            'sessions': {'count': 11, 'working': 4, 'waiting': 1, 'max': 10, 'level': 'hot'},
+                          }),
+                          200,
+                        );
+                      }
+                      if (req.method == 'POST' && req.url.path == '/api/sessions') {
+                        posted.add(req.url.path);
+                        return http.Response(jsonEncode({'id': 'n1', 'name': 'S12', 'agent': null}), 200);
+                      }
+                      return http.Response('{}', 200);
+                    }),
+                  ),
+                ),
+                child: const Text('open'),
+              ),
+            ),
+          ),
+        ),
+      );
+      await tester.tap(find.text('open'));
+      await tester.pumpAndSettle();
+
+      final line = find.byKey(const ValueKey('new-session-count'));
+      expect(line, findsOneWidget);
+      final text = tester.widget<Text>(line);
+      expect(text.data, '11 sessions already on this machine (4 working, 1 waiting) - over the limit of 10');
+      final ctx = tester.element(line);
+      expect(text.style?.color, Theme.of(ctx).colorScheme.error);
+
+      await tester.tap(find.widgetWithText(FilledButton, 'Create'));
+      await tester.pumpAndSettle();
+      expect(posted, ['/api/sessions']);
+    });
+
+    // The SERVER decides the colour: a level that contradicts the raw numbers must win,
+    // or a client that recomputed the threshold would pass the test above too.
+    testWidgets('the colour and wording follow the server level, not the numbers', (tester) async {
+      const server = ServerConfig(name: 'Odd', baseUrl: 'http://x', bearerToken: 't');
+      final asked = <String>[];
+      await tester.pumpWidget(
+        MaterialApp(
+          theme: AppTheme.dark,
+          home: Scaffold(
+            body: Builder(
+              builder: (context) => ElevatedButton(
+                onPressed: () => showNewSessionSheet(
+                  context,
+                  servers: const [server],
+                  initialServer: server,
+                  onCreated: (_) {},
+                  clientBuilder: (server) => ApiClient(
+                    server,
+                    httpClient: MockClient((req) async {
+                      if (req.url.path == '/api/machine') {
+                        asked.add(req.url.query);
+                        return http.Response(
+                          jsonEncode({
+                            'sessions': {'count': 3, 'working': 0, 'waiting': 0, 'max': 10, 'level': 'hot'},
+                          }),
+                          200,
+                        );
+                      }
+                      return http.Response('{}', 200);
+                    }),
+                  ),
+                ),
+                child: const Text('open'),
+              ),
+            ),
+          ),
+        ),
+      );
+      await tester.tap(find.text('open'));
+      await tester.pumpAndSettle();
+
+      final line = find.byKey(const ValueKey('new-session-count'));
+      final text = tester.widget<Text>(line);
+      expect(text.data, endsWith('over the limit of 10'));
+      expect(text.style?.color, Theme.of(tester.element(line)).colorScheme.error);
+      // The cheap answer: never the CIM-backed full profile.
+      expect(asked, ['part=sessions']);
+    });
+  });
 }

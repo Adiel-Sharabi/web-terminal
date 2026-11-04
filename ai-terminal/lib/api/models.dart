@@ -2485,7 +2485,8 @@ class MachineFree {
 String? machineLevel(dynamic v) => const {'ok', 'warn', 'hot'}.contains(v) ? v as String : null;
 
 /// A server's answer to `GET /api/machine` (#331): what choosing where to open a new
-/// session needs. Read only while the dashboard's Machines section is open.
+/// session needs. Read in full only while the dashboard's Machines section is open; the
+/// new-session sheet reads its sessions part (#421).
 class MachineProfile {
   final int? cpuPct;
   final int? cores;

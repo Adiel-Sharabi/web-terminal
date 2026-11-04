@@ -15,6 +15,7 @@ import '../api/models.dart';
 import '../services/session_repository.dart';
 import '../theme/app_theme.dart';
 import 'app_bottom_sheet.dart';
+import 'format_utils.dart' show kWarnAmber;
 
 /// Opens the new-session sheet for [initialServer] (pre-selected; usually the
 /// server of the currently-viewed context, falling back to the first
@@ -51,6 +52,27 @@ Future<void> showNewSessionSheet(
       recordCreated: recordCreated ?? SessionRepository.instance.noteCreated,
     ),
   );
+}
+
+/// The line under the server picker (#421): how many sessions the chosen machine
+/// already runs. The limit is SOFT - nothing is refused - so this only informs; the
+/// server's `level` (lib/machine-profile.js `sessionsLevel`) decides the colour and
+/// the wording past it, and this client holds no threshold. [loading] = still asking;
+/// a null [s] after that = the machine did not say (offline, or an older server).
+/// Pure/testable.
+String sessionCountLine(
+  ({int count, int working, int waiting, int max, String? level})? s, {
+  required bool loading,
+}) {
+  if (s == null) return loading ? 'Counting sessions on this machine...' : 'Sessions on this machine: unknown';
+  final noun = s.count == 1 ? 'session' : 'sessions';
+  final limit = switch (s.level) {
+    'hot' => ' - over the limit of ${s.max}',
+    'warn' => ' - at the limit of ${s.max}',
+    _ => '',
+  };
+  return '${s.count} $noun already on this machine '
+      '(${s.working} working, ${s.waiting} waiting)$limit';
 }
 
 /// Case-insensitive substring filter over the live folder list — matches the
@@ -194,6 +216,10 @@ class _NewSessionSheetState extends State<_NewSessionSheet> {
   List<AgentInfo> _agents = const [];
   String? _agent;
 
+  // #421 - the chosen machine's session count, from its `GET /api/machine`.
+  MachineProfile? _machine;
+  bool _machineLoading = true;
+
   @override
   void initState() {
     super.initState();
@@ -266,8 +292,20 @@ class _NewSessionSheetState extends State<_NewSessionSheet> {
     });
   }
 
+  /// Never blocks the rest of the load: the count is information, not a gate. Asks for
+  /// the sessions part only, so opening the sheet never costs the server a CIM query.
+  Future<void> _loadMachine(ServerConfig server) async {
+    final profile = await widget.clientBuilder(server).machine(sessionsOnly: true);
+    if (!mounted || _server != server) return;
+    setState(() {
+      _machine = profile;
+      _machineLoading = false;
+    });
+  }
+
   Future<void> _loadForServer(ServerConfig server) async {
     final api = widget.clientBuilder(server);
+    unawaited(_loadMachine(server));
     await _loadConfig(server);
 
     try {
@@ -299,6 +337,9 @@ class _NewSessionSheetState extends State<_NewSessionSheet> {
       _agent = null;
       // The folder list is about to be replaced; drop any stale highlight.
       _highlight = -1;
+      // Never show one machine's count under another's name.
+      _machine = null;
+      _machineLoading = true;
     });
     _loadForServer(value);
   }
@@ -438,6 +479,19 @@ class _NewSessionSheetState extends State<_NewSessionSheet> {
                     .map((s) => DropdownMenuItem(value: s, child: Text(s.name)))
                     .toList(growable: false),
                 onChanged: _onServerChanged,
+              ),
+              const SizedBox(height: 6),
+              Text(
+                sessionCountLine(_machine?.sessions, loading: _machineLoading),
+                key: const ValueKey('new-session-count'),
+                style: theme.textTheme.bodySmall?.copyWith(
+                  color: switch (_machine?.sessions?.level) {
+                    'hot' => theme.colorScheme.error,
+                    'warn' => kWarnAmber,
+                    _ => AppColors.onSurfaceVariant,
+                  },
+                  fontWeight: _machine?.sessions?.level == 'hot' ? FontWeight.w600 : null,
+                ),
               ),
               const SizedBox(height: 12),
             ],
