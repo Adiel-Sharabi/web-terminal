@@ -103,7 +103,7 @@ that without updating it turns the project's clearest promise into a lie.
 Tests run against a dedicated server instance on port **17681** with credentials `testuser` / `testpass:colon`. The test server is started automatically by Playwright via `playwright.config.js` — you do not need to start it manually.
 
 Key notes:
-- Tests run **serially** (`workers: 1`). The max-session limit (10) causes flaky failures when tests run in parallel.
+- Tests run **serially** (`workers: 1`): every spec shares one test server. (Before #421 a hard 10-session limit also made parallel runs fail; the limit is now soft.)
 - `diagnostic.spec.js`, `mobile-debug.spec.js`, and `paste-diag.spec.js` are excluded from the default run (see `testIgnore` in `playwright.config.js`). They require special environment variables or extra setup — see the comment header at the top of each spec file.
 - The `conpty_console_list_agent.js: AttachConsole failed` warning in test output is **harmless** — it is a node-pty warning that appears when killing sessions in Session 0 or test environments.
 - The test run backs up and restores `config.json`, but overwrites the password hash. If you run tests against a local dev instance, re-apply the correct password afterward.

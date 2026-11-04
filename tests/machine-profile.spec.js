@@ -49,8 +49,11 @@ test.describe('machine profile rules (#331)', () => {
     expect(M.cpuLevel(75)).toBe('warn');
     expect(M.cpuLevel(5)).toBe('ok');
     expect(M.cpuLevel(null)).toBeNull();
-    expect(M.sessionsLevel(10, 10)).toBe('hot');
-    expect(M.sessionsLevel(9, 10)).toBe('warn');
+    // #421 - a SOFT limit: red only PAST it, amber AT it (the next one goes past).
+    expect(M.sessionsLevel(14, 10)).toBe('hot');
+    expect(M.sessionsLevel(11, 10)).toBe('hot');
+    expect(M.sessionsLevel(10, 10)).toBe('warn');
+    expect(M.sessionsLevel(9, 10)).toBe('ok');
     expect(M.sessionsLevel(3, 10)).toBe('ok');
     expect(M.sessionsLevel(0, 1)).toBe('ok');   // a limit of one: an empty box is not a warning
   });

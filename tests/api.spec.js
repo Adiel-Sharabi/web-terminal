@@ -50,33 +50,34 @@ test.describe('Session Lifecycle', () => {
     await ctx.dispose();
   });
 
-  test('session limit returns 429 when max reached', async () => {
+  test('#421: the session limit is SOFT - past it a session is created and the count turns hot', async () => {
     const ctx = await authCtx();
     const created = [];
 
     try {
-      // Get current sessions to know how many exist
       const listRes = await ctx.get('/api/sessions');
       const existing = await listRes.json();
-      const toCreate = 10 - existing.length;
-
-      // Create sessions up to the limit (with small delays to avoid overwhelming node-pty)
-      for (let i = 0; i < toCreate; i++) {
-        const res = await ctx.post('/api/sessions', {
-          data: { name: `Limit Test ${i}` },
-        });
+      // Up to the soft limit (10, the default; config.test.json sets none): amber.
+      const toLimit = Math.max(0, 10 - existing.length);
+      for (let i = 0; i < toLimit; i++) {
+        const res = await ctx.post('/api/sessions', { data: { name: `Limit Test ${i}` } });
         expect(res.status()).toBe(200);
-        const data = await res.json();
-        created.push(data.id);
+        created.push((await res.json()).id);
       }
+      const atLimit = await (await ctx.get('/api/machine')).json();
+      expect(atLimit.sessions).toMatchObject({ max: 10, level: existing.length > 10 ? 'hot' : 'warn' });
 
-      // Next one should fail with 429
-      const overRes = await ctx.post('/api/sessions', {
-        data: { name: 'Over Limit' },
-      });
-      expect(overRes.status()).toBe(429);
-      const overData = await overRes.json();
-      expect(overData.error).toContain('Session limit');
+      // Past it: still created (this was a 429 "Session limit reached" before #421)...
+      const overRes = await ctx.post('/api/sessions', { data: { name: 'Over Limit' } });
+      expect(overRes.status()).toBe(200);
+      const over = await overRes.json();
+      expect(typeof over.id).toBe('string');
+      created.push(over.id);
+
+      // ...and the machine profile says so in red.
+      const past = await (await ctx.get('/api/machine')).json();
+      expect(past.sessions.count).toBeGreaterThan(10);
+      expect(past.sessions.level).toBe('hot');
     } finally {
       // Clean up created sessions (one at a time, ignore errors)
       for (const id of created) {

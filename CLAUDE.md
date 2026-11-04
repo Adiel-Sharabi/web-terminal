@@ -105,7 +105,7 @@ Each line has already cost a bug; the bracketed findings file holds its full tex
 ## Tests
 - Port 17681, `testuser` / `testpass:colon`; `playwright.config.js`. Under `WT_TEST` the processes use `config.test.json`, never the production `config.json`.
 - **Redirect, don't back up:** `WT_CONFIG_FILE` (all three processes), `WT_API_TOKENS_FILE` (#272 — keeps the suite out of the production token store), `WT_CLUSTER_TOKENS_FILE`, `WT_CLAUDE_METRICS_FILE`. The per-run reset of those test files (#240) is `scripts/reset-test-run-files.js`, the first half of the `webServer` command — **never at `playwright.config.js` module scope** (every worker and listing re-requires it: it revoked a live run's tokens) and never in `global-setup.js` (runs after `webServer` has read them).
-- Serial (`workers: 1`; 10-session limit). `diagnostic`/`mobile-debug`/`paste-diag` specs are `testIgnore`d; `diagnostic.spec.js` hits the LIVE server with `DIAG_PASS` (the `playwright.diag.config.js` its header names is not in the repo).
+- Serial (`workers: 1`; the 10-session limit is soft since #421, but keep it serial - every spec shares one server). `diagnostic`/`mobile-debug`/`paste-diag` specs are `testIgnore`d; `diagnostic.spec.js` hits the LIVE server with `DIAG_PASS` (the `playwright.diag.config.js` its header names is not in the repo).
 - **The suite is NOT flaky** — everything addresses `127.0.0.1` (`localhost` resolves to `::1`). A lone failure from a subset run may be a `webServer` race: re-run that spec alone. The full suite (12–15 min) exceeds the Bash 10-minute cap — run it in the background. `AttachConsole failed` is a harmless node-pty warning.
 
 ## Deployment & Operations

@@ -311,9 +311,14 @@ class ApiClient {
   /// virtual memory, load and session count, for the dashboard's Machines section.
   /// The server runs a CIM query to answer, so it is asked only while that section is
   /// open. `null` on any failure, which the section renders as unknown.
-  Future<MachineProfile?> machine() async {
+  ///
+  /// [sessionsOnly] (#421, the new-session sheet's count line) asks the server to skip
+  /// the CIM query: its virtual-memory and drive fields come back unknown, the session
+  /// count and level at once. An older server ignores the parameter and answers in full.
+  Future<MachineProfile?> machine({bool sessionsOnly = false}) async {
     try {
-      final res = await _send('GET', '/api/machine', timeout: const Duration(seconds: 15));
+      final res = await _send('GET', sessionsOnly ? '/api/machine?part=sessions' : '/api/machine',
+          timeout: const Duration(seconds: 15));
       return MachineProfile.fromJson(_decode(res));
     } catch (_) {
       return null;

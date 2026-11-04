@@ -156,13 +156,17 @@ picked up from the session's transcript, and the filter finds a session by an ar
 title.
 
 A collapsible **Machines** section answers *which machine should I open a new session on?*
-For each server it shows its sessions against the session limit (and how many are working
+For each server it shows its sessions against the soft session limit (and how many are working
 or waiting), CPU load and cores, free memory, free **virtual memory** (commit, which can run
 out before memory does), free space on each fixed drive, and uptime. A reading that is low
 is amber or red, decided by the server (`lib/machine-profile.js`) so both clients agree. The
 drive and virtual-memory figures cost the server a CIM query, so they are read only while
 the section is open (`GET /api/machine`, cached for a minute); whether it is open is
 remembered per device.
+
+The session limit is **soft** (`maxSessions`, default 10): a machine never refuses a new
+session for the count. The **New session** sheet shows how many sessions the chosen machine
+already runs, amber at the limit and red past it.
 
 **Background agents** — the agents Claude runs in the background (`claude agents --json`) are listed machine-wide on the server (`GET /api/dashboard/background-agents`): name, project folder, state and what a blocked one is waiting on. Read-only, fetched only when asked and cached for 30 seconds, and a machine without a recent `claude` simply reports it as unavailable.
 
