@@ -23,6 +23,7 @@ import 'package:http/testing.dart';
 import 'package:shared_preferences/shared_preferences.dart';
 
 const _server = ServerConfig(name: 'Home', baseUrl: 'http://h:7681', bearerToken: 'tok');
+const _server2 = ServerConfig(name: 'Office', baseUrl: 'http://o:7681', bearerToken: 'tok');
 
 Map<String, dynamic> _briefJson({
   List<Object>? items,
@@ -265,6 +266,13 @@ void main() {
     late List<String> capabilities;
     late List<Map<String, dynamic>> closed;
 
+    /// What `GET /api/leases` answers (#428).
+    late int leaseStatus;
+
+    /// Per-server override of [leaseStatus] (a 503 answers the authority-down body), by base URL.
+    late Map<String, int> leaseStatusFor;
+    late Map<String, dynamic> leaseBody;
+
     /// The pending question per session id, as `GET /pending-question` answers it.
     late Map<String, Map<String, dynamic>> questions;
 
@@ -322,6 +330,13 @@ void main() {
               }), 200);
             case '/api/dashboard/closed':
               return http.Response(jsonEncode({'closed': closed}), 200);
+            case '/api/leases':
+              final st = leaseStatusFor[s.baseUrl];
+              if (st == 503) {
+                return http.Response(
+                    jsonEncode({'error': 'the lease authority is unreachable; no new lease can be granted', 'authority': 'Office'}), 503);
+              }
+              return http.Response(jsonEncode(leaseBody), st ?? leaseStatus);
           }
           if (req.method == 'PATCH') {
             patches.add(req);
@@ -330,10 +345,10 @@ void main() {
           return http.Response('', 404);
         }));
 
-    Future<SessionRepository> repo() async {
+    Future<SessionRepository> repo({List<ServerConfig> servers = const [_server]}) async {
       SharedPreferences.setMockInitialValues({
         ServerStore.storageKey: jsonEncode([
-          {'name': _server.name, 'baseUrl': _server.baseUrl, 'bearerToken': _server.bearerToken},
+          for (final sv in servers) {'name': sv.name, 'baseUrl': sv.baseUrl, 'bearerToken': sv.bearerToken},
         ]),
       });
       final store = ServerStore.forTest();
@@ -352,6 +367,9 @@ void main() {
       questions = {};
       questionStatus = 200;
       inputReachable = true;
+      leaseStatus = 200;
+      leaseStatusFor = {};
+      leaseBody = {'authority': 'Office', 'now': DateTime.now().millisecondsSinceEpoch, 'resources': [], 'released': []};
       capabilities = ['session-brief', 'session-hide', 'favorites-sync', 'session-clear-wait', 'session-handoff'];
       closed = [
         {'id': 'gone', 'name': 'Finished session', 'items': [], 'did': {'text': 'wrapped up'}, 'at': DateTime.now().millisecondsSinceEpoch},
@@ -370,7 +388,8 @@ void main() {
       ];
     });
 
-    Future<List<Session>> pump(WidgetTester tester, {required SessionRepository r, double width = 1200}) async {
+    Future<List<Session>> pump(WidgetTester tester,
+        {required SessionRepository r, double width = 1200, List<ServerConfig> servers = const [_server]}) async {
       final opened = <Session>[];
       tester.view.physicalSize = Size(width, 2400);
       tester.view.devicePixelRatio = 1;
@@ -380,7 +399,7 @@ void main() {
         theme: AppTheme.dark,
         home: WorkBoardScreen(
           repository: r,
-          servers: () => const [_server],
+          servers: () => servers,
           clientFactory: client,
           sessionInput: fakeInput,
           pollInterval: const Duration(hours: 1),
@@ -426,7 +445,129 @@ void main() {
       expect(disk.style?.color, AppTheme.dark.colorScheme.error);
       // remembered on this device - and it is the only view setting left to remember (#337)
       final saved = jsonDecode((await SharedPreferences.getInstance()).getString('wt.dashboard.view')!) as Map;
-      expect(saved, {'machines': true});
+      expect(saved, {'machines': true, 'leases': false});
+    });
+
+    /// A lease table: s1 holds vm:X, s2 waits for it.
+    Map<String, dynamic> leaseTable() {
+      final now = DateTime.now().millisecondsSinceEpoch;
+      Map<String, dynamic> l(String id, String state, String sid, int position) => {
+            'id': id, 'resource': 'vm:X', 'state': state, 'position': position,
+            'holder': {'server': 'Home', 'sessionId': sid}, 'role': null, 'meta': null,
+            'ttlSec': 3600, 'heartbeatSec': 0, 'requestedAt': now - 120000,
+            'grantedAt': state == 'held' ? now - 120000 : null, 'expiresAt': state == 'held' ? now + 600000 : null,
+            'lastHeartbeatAt': now,
+          };
+      return {
+        'authority': 'Office',
+        'now': now,
+        'resources': [
+          {'resource': 'vm:X', 'holder': l('L1', 'held', 's1', 0), 'queue': [l('L2', 'queued', 's2', 1)]},
+        ],
+        'released': [],
+      };
+    }
+
+    testWidgets('Leases (#428): the waiter card says what it waits for and links its holder; the fold lists both', (tester) async {
+      capabilities = [...capabilities, 'leases'];
+      leaseBody = leaseTable();
+      final r = await repo();
+      final opened = await pump(tester, r: r);
+      await settle(tester);
+      expect(paths, contains('/api/leases'), reason: 'asked while the fold is closed: the cards need it');
+      expect(find.text('Leases (1 held, 1 waiting)'), findsOneWidget);
+      expect(find.text('Waiting for vm:X'), findsOneWidget);
+      expect(find.text('Holds vm:X'), findsOneWidget);
+      await tester.tap(find.byKey(const ValueKey('lease-holder-link-L2')));
+      expect(opened.map((s) => s.id), ['s1'], reason: 'tap through to the holder session');
+
+      await tester.tap(find.text('Leases (1 held, 1 waiting)'));
+      await settle(tester);
+      final res = find.byKey(const ValueKey('lease-res-vm:X'));
+      expect(res, findsOneWidget);
+      // (the waiter card's holder link says the first name too, outside the panel)
+      expect(find.descendant(of: res, matching: find.text('Dictation work on Home')), findsOneWidget);
+      expect(find.descendant(of: res, matching: find.text('Waiting one on Home')), findsOneWidget);
+    });
+
+    testWidgets('Leases: an unreachable authority says so - never an empty table, nor the last one, and the cards say nothing', (tester) async {
+      capabilities = [...capabilities, 'leases'];
+      leaseBody = leaseTable();
+      final r = await repo();
+      await pump(tester, r: r);
+      await settle(tester);
+      // A good table first, so "says nothing" below is the down path clearing it.
+      expect(find.text('Waiting for vm:X'), findsOneWidget);
+
+      leaseStatus = 503;
+      leaseBody = {'error': 'the lease authority is unreachable; no new lease can be granted', 'authority': 'Office'};
+      await tester.tap(find.text('Leases (1 held, 1 waiting)')); // opening it re-asks at once
+      await settle(tester);
+      expect(find.text('Leases (unknown)'), findsOneWidget);
+      expect(find.textContaining('Waiting for'), findsNothing);
+      expect(find.textContaining('Holds vm:X'), findsNothing);
+      expect(find.text('Who holds what is unknown: Home says the lease authority is unreachable; no new lease can be granted (authority: Office)'),
+          findsOneWidget);
+      expect(find.byKey(const ValueKey('leases-empty')), findsNothing);
+    });
+
+    testWidgets('Leases: a server that cannot reach the authority falls through to the next; asked at most every 10 s; gone with the capability', (tester) async {
+      capabilities = [...capabilities, 'leases'];
+      leaseBody = leaseTable();
+      leaseStatusFor = {_server.baseUrl: 503};
+      final r = await repo(servers: const [_server, _server2]);
+      final board = [_server, _server2];
+      await pump(tester, r: r, servers: board);
+      await settle(tester);
+      expect(find.text('Leases (1 held, 1 waiting)'), findsOneWidget, reason: 'the second server answered');
+      final asked = paths.where((x) => x == '/api/leases').length;
+      expect(asked, 2, reason: 'Home (503) first, then Office');
+
+      // throttle: another round inside 10 s asks nobody
+      await tester.runAsync(() => r.refresh());
+      await settle(tester);
+      expect(paths.where((x) => x == '/api/leases').length, asked);
+
+      // no lease-capable server left to vouch for the table (removed from the list; a
+      // server that stops advertising `leases` takes the same path once the repository
+      // re-reads its capabilities): the section AND the cards' lines go at once, inside
+      // the 10 s throttle.
+      board.clear();
+      await tester.runAsync(() => r.refresh());
+      await settle(tester);
+      expect(find.byKey(const ValueKey('board-leases')), findsNothing);
+      expect(find.textContaining('Holds vm:X'), findsNothing);
+      expect(find.textContaining('Waiting for vm:X'), findsNothing);
+    });
+
+    testWidgets('Leases: an IDLE holder says what it holds on its row', (tester) async {
+      capabilities = [...capabilities, 'leases'];
+      rows = [...rows, _row('s3', 'Idle holder', status: 'idle')];
+      final t = leaseTable();
+      final now = t['now'] as int;
+      (t['resources'] as List).add({
+        'resource': 'controller:10.0.0.7',
+        'holder': {
+          'id': 'L9', 'resource': 'controller:10.0.0.7', 'state': 'held', 'position': 0,
+          'holder': {'server': 'Home', 'sessionId': 'S3'}, 'role': null, 'meta': null,
+          'ttlSec': 3600, 'heartbeatSec': 0, 'requestedAt': now - 60000, 'grantedAt': now - 60000,
+          'expiresAt': now + 600000, 'lastHeartbeatAt': now,
+        },
+        'queue': [],
+      });
+      leaseBody = t;
+      final r = await repo();
+      await pump(tester, r: r);
+      await settle(tester);
+      expect(inCol('idle', find.text('Holds controller:10.0.0.7')), findsOneWidget);
+    });
+
+    testWidgets('Leases: a server that does not advertise them is never asked, and there is no section', (tester) async {
+      final r = await repo();
+      await pump(tester, r: r);
+      await settle(tester);
+      expect(paths, isNot(contains('/api/leases')));
+      expect(find.byKey(const ValueKey('board-leases')), findsNothing);
     });
 
     testWidgets('Machines: a server too old for it says so and is never asked', (tester) async {

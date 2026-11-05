@@ -164,6 +164,16 @@ drive and virtual-memory figures cost the server a CIM query, so they are read o
 the section is open (`GET /api/machine`, cached for a minute); whether it is open is
 remembered per device.
 
+A collapsible **Leases** section shows every cluster resource lease (below): for each resource,
+who holds it (the session and its machine, for how long, until when) and who waits behind it in
+order, with a tap through to the holder's session. Its title carries the counts, so it tells
+even closed. A session's own card says what it holds, or what it is waiting for, its place in
+line and who holds it. The table is read every 10 seconds from one server that advertises
+`leases` (a server does so only when `leases.authority` is configured; each forwards to the
+lease authority); when the authority cannot be reached the
+section says the table is unknown, and the cards say nothing, rather than show an empty or old
+table. Display only: release stays with the holder.
+
 The session limit is **soft** (`maxSessions`, default 10): a machine never refuses a new
 session for the count. The **New session** sheet shows how many sessions the chosen machine
 already runs, amber at the limit and red past it.
@@ -303,7 +313,8 @@ followed, and nothing in or above a git repository or worktree is ever removed. 
 table that granted a lease can declare it ended, so a rolled-back or replaced authority never
 triggers a cleanup. A session closed by its own hand-off passes its leases to its successor. Only the lease's holder — its own machine and its session (`$WT_SESSION_ID`, or `--no-session` for a lease taken without one) — may release or heartbeat it; anyone else gets `403`. `wt-lease.js list` shows who holds what, who waits, and for how long.
 Routes: `POST /api/leases`, `GET /api/leases[/:id]`, `POST /api/leases/:id/heartbeat`,
-`DELETE /api/leases/:id`, `POST /api/leases/:id/record`, `GET /api/admission`.
+`DELETE /api/leases/:id`, `POST /api/leases/:id/record`, `GET /api/admission`. The companion's
+dashboard shows the table (Leases section, above).
 
 **Switch a machine's Claude account** — with two Claude subscriptions, move a machine from one
 to the other without logging in again. In the companion, the account button on a machine's card

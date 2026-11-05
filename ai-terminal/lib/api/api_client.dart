@@ -325,6 +325,28 @@ class ApiClient {
     }
   }
 
+  /// Every cluster resource lease: who holds each one and who waits (`GET /api/leases`,
+  /// #412), for the board's Leases section (#428). Only for a server that advertises
+  /// `leases`; any such server forwards to the lease authority.
+  ///
+  /// Throws [ApiException] rather than answering empty: a 503 is the server saying the
+  /// authority could not be reached (or none is configured), and its message - with the
+  /// authority's name when the server gave it - is what the section shows instead of a
+  /// list. A malformed body is a transport-level failure, never "no leases".
+  Future<LeaseListing> leases() async {
+    final res = await _send('GET', '/api/leases', alsoAccept: const {503});
+    final body = _decode(res);
+    if (res.statusCode == 503) {
+      final m = _asMap(body);
+      final error = m['error'] is String ? m['error'] as String : 'the lease authority is unavailable';
+      final authority = m['authority'];
+      throw ApiException(503, authority is String && authority.isNotEmpty ? '$error (authority: $authority)' : error);
+    }
+    final listing = LeaseListing.fromJson(body, receivedAt: DateTime.now());
+    if (listing == null) throw const ApiException(0, 'Malformed server response');
+    return listing;
+  }
+
   /// This machine's Claude login and its saved accounts (`GET /api/claude-account`,
   /// #389). Only for a server that advertises `claude-account`. Throws [ApiException];
   /// a 409 carries the server's reason (an unreadable login file, say).

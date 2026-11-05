@@ -49,6 +49,7 @@ import '../widgets/brief_item_row.dart';
 import '../widgets/claude_account_sheet.dart';
 import '../widgets/format_utils.dart';
 import '../widgets/handoff_chip.dart';
+import '../widgets/lease_view.dart';
 import '../widgets/machine_stripe.dart';
 import '../widgets/question_answer_panel.dart' show quickAnswerable;
 import '../widgets/reason_chip.dart';
@@ -208,6 +209,7 @@ class WorkBoardScreen extends StatefulWidget {
 class _WorkBoardScreenState extends State<WorkBoardScreen> {
   static const _closedEvery = Duration(seconds: 30);
   static const _machineEvery = Duration(seconds: 30);
+  static const _leaseEvery = Duration(seconds: 10);
   static const _prefsKey = 'wt.dashboard.view';
 
   late final SessionRepository _repo = widget.repository ?? SessionRepository.instance;
@@ -235,6 +237,16 @@ class _WorkBoardScreenState extends State<WorkBoardScreen> {
   // server a CIM query. `failed` keeps "could not read" apart from "not asked yet".
   bool _machinesOpen = false;
   final Map<String, ({DateTime at, MachineProfile? data, bool failed})> _machines = {};
+
+  // #428 - the lease table (#412), asked of ONE lease-capable server (each forwards to
+  // the authority) whether or not its section is open: the cards of holders and
+  // waiters say what they hold or wait for. [_leaseDown] is why it is unknown; with it
+  // the cards say nothing rather than repeat an older table as if it were current.
+  bool _leasesOpen = false;
+  LeaseListing? _leaseTable;
+  String? _leaseDown;
+  DateTime? _leasesAt;
+  bool _leasesAsking = false;
 
   /// #337 - the writers behind the Needs-you cards and their state (the live
   /// questions, the writes in flight, the replies awaiting #179), shared in shape with
@@ -272,6 +284,7 @@ class _WorkBoardScreenState extends State<WorkBoardScreen> {
       _needs.checkUnconfirmedReplies(_sessions);
       unawaited(_refreshClosed());
       unawaited(_refreshMachines());
+      unawaited(_refreshLeases());
       unawaited(_refreshQuestions());
     });
     // Only while the app is in the foreground: `main.dart` stops the repository's own
@@ -306,13 +319,14 @@ class _WorkBoardScreenState extends State<WorkBoardScreen> {
       final m = jsonDecode(raw);
       if (m is! Map || !mounted) return;
       if (m['machines'] is bool) setState(() => _machinesOpen = m['machines'] as bool);
+      if (m['leases'] is bool) setState(() => _leasesOpen = m['leases'] as bool);
       unawaited(_refreshMachines());
     } catch (_) {/* defaults */}
   }
 
   Future<void> _savePrefs() async {
     try {
-      await (await SharedPreferences.getInstance()).setString(_prefsKey, jsonEncode({'machines': _machinesOpen}));
+      await (await SharedPreferences.getInstance()).setString(_prefsKey, jsonEncode({'machines': _machinesOpen, 'leases': _leasesOpen}));
     } catch (_) {/* a preference that cannot be saved is not a reason to refuse the change */}
   }
 
@@ -364,6 +378,84 @@ class _WorkBoardScreenState extends State<WorkBoardScreen> {
       _machines[sv.baseUrl] = (at: DateTime.now(), data: p, failed: p == null);
     }));
     if (mounted) setState(() {});
+  }
+
+  /// The servers that can answer `GET /api/leases`, in the configured order.
+  List<ServerConfig> get _leaseServers => _servers.where((sv) => _repo.supportsLeases(sv.baseUrl)).toList();
+
+  /// #428 - re-reads the lease table, at most every [_leaseEvery]. Asks the lease-capable
+  /// servers in order until one answers: a server that cannot reach the authority says
+  /// so (503), and another may still reach it. Every one failing is the table UNKNOWN,
+  /// with the first server's reason, never an empty table.
+  Future<void> _refreshLeases({bool force = false}) async {
+    if (_leasesAsking || !mounted) return;
+    // Before the throttle: a table with no server left to vouch for it goes at once.
+    final capable = _leaseServers;
+    if (capable.isEmpty) {
+      // No server answers lease calls any more (a rollback, a server removed): the old
+      // table must not go on feeding the cards. The section itself is gone.
+      if (_leaseTable != null || _leaseDown != null) {
+        setState(() {
+          _leaseTable = null;
+          _leaseDown = null;
+        });
+      }
+      return;
+    }
+    final at = _leasesAt;
+    if (!force && at != null && DateTime.now().difference(at) < _leaseEvery) return;
+    final usable = capable.where((sv) => _repo.serverUsable[sv.baseUrl] == true).toList();
+    _leasesAt = DateTime.now();
+    if (usable.isEmpty) {
+      setState(() {
+        _leaseTable = null;
+        _leaseDown = 'no server that answers lease calls is reachable';
+      });
+      return;
+    }
+    _leasesAsking = true;
+    LeaseListing? got;
+    String? firstError;
+    try {
+      for (final sv in usable) {
+        try {
+          got = await _client(sv).leases();
+          break;
+        } on ApiException catch (e) {
+          firstError ??= '${sv.name} says ${e.message}';
+        }
+      }
+    } finally {
+      _leasesAsking = false;
+    }
+    if (!mounted) return;
+    setState(() {
+      _leaseTable = got;
+      _leaseDown = got == null ? firstError : null;
+    });
+  }
+
+  /// The Leases fold's title: its counts once known, so a closed fold still tells.
+  String _leasesTitle() {
+    final t = _leaseTable;
+    if (_leaseDown != null) return 'Leases (unknown)';
+    if (t == null) return 'Leases';
+    return 'Leases (${t.heldCount} held, ${t.waitingCount} waiting)';
+  }
+
+  void _toggleLeases() {
+    setState(() => _leasesOpen = !_leasesOpen);
+    unawaited(_savePrefs());
+    unawaited(_refreshLeases(force: true));
+  }
+
+  /// A listed session by id, for a lease's holder (ids are UUIDs, unique fleet-wide).
+  Session? _sessionById(String id) {
+    final want = id.toLowerCase();
+    for (final s in _sessions) {
+      if (s.id.toLowerCase() == want) return s;
+    }
+    return null;
   }
 
   /// #337 - the question behind each question card ([NeedsYouActions.refreshQuestions]).
@@ -595,6 +687,7 @@ class _WorkBoardScreenState extends State<WorkBoardScreen> {
       parent: _tree.parentOf(s),
       children: _tree.childrenOf(s),
       onOpenRelated: widget.onOpenSession,
+      leases: _leaseDown == null ? sessionLeases(_leaseTable, s, _sessionById) : const [],
       handoffBusy: _handoffBusy.contains(k),
       question: kind == NeedKind.question ? q : null,
       answering: q != null && _needs.isAnswering(s, q),
@@ -718,6 +811,23 @@ class _WorkBoardScreenState extends State<WorkBoardScreen> {
                 ),
             ],
           ),
+        if (_leaseServers.isNotEmpty)
+          _Fold(
+            key: const ValueKey('board-leases'),
+            title: _leasesTitle(),
+            subtitle: 'who holds each cluster resource, and who waits',
+            flag: _leaseDown != null ? AppColors.caution : null,
+            open: _leasesOpen,
+            onToggle: _toggleLeases,
+            children: [
+              LeasesPanel(
+                listing: _leaseTable,
+                down: _leaseDown,
+                sessionOf: _sessionById,
+                onOpen: widget.onOpenSession,
+              ),
+            ],
+          ),
         if (closed.isNotEmpty)
           _Fold(
             key: const ValueKey('board-closed'),
@@ -818,6 +928,10 @@ class BoardActions {
   final List<Session> children;
   final void Function(Session)? onOpenRelated;
 
+  /// #428 - the cluster resource leases this session holds or waits for; a waiter's
+  /// holder opens through [onOpenRelated].
+  final List<SessionLease> leases;
+
   /// A hand-off request for this session is in flight.
   final bool handoffBusy;
 
@@ -855,6 +969,7 @@ class BoardActions {
     this.parent,
     this.children = const <Session>[],
     this.onOpenRelated,
+    this.leases = const <SessionLease>[],
     this.handoffBusy = false,
     this.question,
     this.answering = false,
@@ -1181,6 +1296,7 @@ class BoardCard extends StatelessWidget {
     final body = <Widget>[
       _head(context, pal, muted),
       ?_familyLine(s, actions),
+      if (actions.leases.isNotEmpty) SessionLeaseLines(leases: actions.leases, onOpen: actions.onOpenRelated),
       if (needs) ..._needLines(context) else ..._workLines(context, pal),
       for (final it in items) BriefItemRow(it, onUnpin: actions.onUnpin),
       if (b != null && b.artifacts.isNotEmpty) ArtifactLinks(b.artifacts),
@@ -1461,6 +1577,11 @@ class BoardRow extends StatelessWidget {
                   if (!inline) Padding(padding: const EdgeInsets.fromLTRB(14, 0, 8, 4), child: didText),
                   if (_familyLine(s, actions) case final family?)
                     Padding(padding: const EdgeInsets.fromLTRB(14, 0, 8, 4), child: family),
+                  // #428 - an idle session can still hold a resource; say so where it is seen.
+                  if (actions.leases.isNotEmpty)
+                    Padding(
+                        padding: const EdgeInsets.fromLTRB(14, 0, 8, 4),
+                        child: SessionLeaseLines(leases: actions.leases, onOpen: actions.onOpenRelated)),
                   // Hand off (#340): its own line, because this row's main line is full on
                   // a phone. A hidden row shows a run but offers no new one.
                   if (_handoffStrip(s, actions, offer: !unhide) case final strip?)
