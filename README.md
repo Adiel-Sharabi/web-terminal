@@ -311,7 +311,7 @@ that is still the same process (by creation time, never by name) and removes onl
 folders inside `leases.cleanupRoots` (none until configured) — junctions are unlinked, never
 followed, and nothing in or above a git repository or worktree is ever removed. Only the lease
 table that granted a lease can declare it ended, so a rolled-back or replaced authority never
-triggers a cleanup. A session closed by its own hand-off passes its leases to its successor. Only the lease's holder — its own machine and its session (`$WT_SESSION_ID`, or `--no-session` for a lease taken without one) — may release or heartbeat it; anyone else gets `403`. `wt-lease.js list` shows who holds what, who waits, and for how long.
+triggers a cleanup. A session closed by its own hand-off passes its leases to its successor. Only the lease's holder — its own machine and its session (`$WT_SESSION_ID`, or `--no-session` for a lease taken without one) — may release or heartbeat it; anyone else gets `403`. `wt-lease.js list` shows who holds what, who waits, and for how long. A call to or from the authority that fails (unreachable, timed out, or answered 5xx or with no JSON; a 4xx is the authority answering, not a failure) is logged on the calling server, naming the call, the lease or resource, the peer, the failure and the elapsed time; at most once a minute per kind, with a count of the repeats.
 Routes: `POST /api/leases`, `GET /api/leases[/:id]`, `POST /api/leases/:id/heartbeat`,
 `DELETE /api/leases/:id`, `POST /api/leases/:id/record`, `GET /api/admission`. The companion's
 dashboard shows the table (Leases section, above).
