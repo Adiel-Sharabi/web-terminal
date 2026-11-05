@@ -35,7 +35,7 @@ test.describe('#425 skip rate limit', () => {
   });
   test('a skip line carries the reason and the numbers, nothing else', () => {
     const r = usageLog.skipRecord({ id: 'i', name: 'n', agent: 'claude', reason: 'no-boundary', source: 'handoffCandidate', ctxTokens: 7, status: 'idle' }, T);
-    expect(r).toEqual({ t: new Date(T).toISOString(), event: 'skipped', id: 'i', name: 'n', agent: 'claude', reason: 'no-boundary', source: 'handoffCandidate', status: 'idle', ctxTokens: 7 });
+    expect(r).toEqual({ at: new Date(T).toISOString(), event: 'skipped', id: 'i', name: 'n', agent: 'claude', reason: 'no-boundary', source: 'handoffCandidate', status: 'idle', ctxTokens: 7 });
     expect(usageLog.skipRecord({ id: 'i', reason: 'x', source: 's' }, T).ctxTokens).toBeNull();
   });
 });
@@ -78,6 +78,39 @@ test.describe('#425 bounded append', () => {
       fs.writeFileSync(path.join(dir, 'blocker'), '');
       expect(() => usageLog.appendRecord(path.join(dir, 'blocker', 'a.jsonl'), { a: 1 })).not.toThrow(); // a file used as a directory
     } finally { fs.rmSync(dir, { recursive: true, force: true }); }
+  });
+});
+
+test.describe('#425 bounded append - correctness', () => {
+  test('the cap counts BYTES: two multi-byte records under the cap in characters still roll over', async () => {
+    const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'wt-usage-'));
+    const file = path.join(dir, 'b.jsonl');
+    try {
+      usageLog.appendRecord(file, { p: 'é'.repeat(30) }, 100);
+      await sleep(50);
+      usageLog.appendRecord(file, { p: 'é'.repeat(30) }, 100);
+      await until(() => fs.existsSync(`${file}.1`), 'a byte-counted rollover');
+    } finally { fs.rmSync(dir, { recursive: true, force: true }); }
+  });
+  test('a rename that fails for a real reason is reported once and the counter is NOT reset', async () => {
+    const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'wt-usage-'));
+    const file = path.join(dir, 'r.jsonl');
+    const seen = [];
+    const orig = console.error;
+    console.error = (...a) => { seen.push(a.join(' ')); };
+    try {
+      usageLog.appendRecord(file, { i: 0, pad: 'x'.repeat(40) }, 100);
+      await sleep(50);
+      fs.mkdirSync(`${file}.1`); fs.writeFileSync(path.join(`${file}.1`, 'keep'), ''); // a rename onto a non-empty directory fails
+      usageLog.appendRecord(file, { i: 1, pad: 'x'.repeat(40) }, 100);
+      await sleep(50);
+      usageLog.appendRecord(file, { i: 2, pad: 'x'.repeat(40) }, 100);
+      await sleep(100);
+      expect(seen.filter((l) => l.includes('cannot roll over'))).toHaveLength(1);
+      fs.rmSync(`${file}.1`, { recursive: true, force: true });
+      usageLog.appendRecord(file, { i: 3, pad: 'x'.repeat(40) }, 100); // counter still over the cap: rolls at once
+      await until(() => fs.existsSync(`${file}.1`) && fs.statSync(`${file}.1`).isFile(), 'the retried rollover');
+    } finally { console.error = orig; fs.rmSync(dir, { recursive: true, force: true }); }
   });
 });
 
@@ -191,6 +224,26 @@ test.describe('#425 server logs', () => {
       if (id) { try { await ctx.delete(`/api/sessions/${id}`); } catch {} }
       await ctx.dispose();
     }
+  });
+
+  test('a server boot writes a start line, so attaches an exit left open can be closed', async () => {
+    const file = process.env.WT_DEVICE_VIEWS_FILE;
+    const start = linesOf(file).find((l) => l.event === 'start');
+    expect(start).toBeTruthy();
+    expect(Object.keys(start).sort()).toEqual(['event', 'server', 't']);
+  });
+
+  test('a hook for an id that fails validation does not teach the cost log a session id', async () => {
+    const file = process.env.WT_SESSION_COST_FILE;
+    const ctx = await authCtx();
+    try {
+      const conv = crypto.randomUUID();
+      const r = await ctx.post('/api/session/not-a-uuid-425/hook', { data: { hook_event_name: 'UserPromptSubmit', session_id: conv } });
+      expect(r.status()).toBe(404);
+      expect((await ctx.post('/api/claude-status', { data: { session_id: conv, cost: { total_cost_usd: 3 } } })).status()).toBe(200);
+      const line = await until(() => linesOf(file).find((l) => l.agentSessionId === conv), 'the cost line');
+      expect(line.id).toBeNull();
+    } finally { await ctx.dispose(); }
   });
 
   test('a statusLine post writes one cost line; a repeat is held back; a big step writes another', async () => {
