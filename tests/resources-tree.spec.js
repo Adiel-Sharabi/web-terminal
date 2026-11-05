@@ -604,7 +604,7 @@ test.describe('#411 the REAL query carries a shell\'s command line, byte for byt
     test.skip(process.platform !== 'win32', 'the process query is Windows-only');
     test.setTimeout(60000);
     const { spawn, execFileSync } = require('child_process');
-    const { mcpServerShellFor } = require('../lib/agents');
+    const { mcpLaunchFor } = require('../lib/agents');
     // Exactly how cross-spawn launches a .cmd shim: verbatim args, every argument ^"-quoted.
     const child = spawn(process.env.comspec || 'cmd.exe',
       ['/d', '/s', '/c', '"ping ^"-n^" ^"30^" ^"127.0.0.1^""'],
@@ -616,7 +616,7 @@ test.describe('#411 the REAL query carries a shell\'s command line, byte for byt
       const row = (procs || []).find((p) => p.pid === child.pid);
       expect(row, 'the spawned cmd.exe is in the snapshot').toBeTruthy();
       expect(String(row && row.cmd)).toContain('/d /s /c "ping ^"-n^" ^"30^" ^"127.0.0.1^""');
-      expect(mcpServerShellFor('claude').test(String(row && row.cmd))).toBe(true);
+      expect(mcpLaunchFor('claude').mcpServerShell.test(String(row && row.cmd))).toBe(true);
       // Non-shells carry no command line - the snapshot does not grow by every argv.
       expect((procs || []).filter((p) => /^node(\.exe)?$/i.test(p.name)).every((p) => p.cmd === undefined)).toBe(true);
     } finally {

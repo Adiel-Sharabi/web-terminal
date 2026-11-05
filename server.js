@@ -3059,7 +3059,7 @@ async function reaperRunningWork(s) {
     else {
       const procs = processTree.snapshotNoWait();
       // #411: the agent's MCP-server shells are not work (an npx server lives as long as it).
-      shells = procs ? processTree.liveWorkUnder(procs, s.pid, { mcpServerShell: agentsLib.mcpServerShellFor(s.agent) }) : null;
+      shells = procs ? processTree.liveWorkUnder(procs, s.pid, agentsLib.mcpLaunchFor(s.agent)) : null;
     }
     return spawnReaper.combineWork(tasks, shells);
   } catch {
@@ -3945,7 +3945,7 @@ async function sessionRunningShells(s) {
   try {
     const procs = processTree.snapshotNoWait();
     if (!procs) return []; // non-Windows, no good snapshot yet, too old, or the query failed — "cannot tell"
-    return processTree.runningShellsUnder(procs, s.pid, { mcpServerShell: agentsLib.mcpServerShellFor(s.agent) });
+    return processTree.runningShellsUnder(procs, s.pid, agentsLib.mcpLaunchFor(s.agent));
   } catch {
     return [];
   }

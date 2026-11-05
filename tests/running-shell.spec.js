@@ -145,7 +145,7 @@ test.describe('runningShellsUnder — a shell BELOW the agent is a running comma
 // tree on adiel-xps, 2026-11-05, Claude Code 2.1.318 - the firebase PLUGIN's MCP server,
 // started 2.8 s after its agent and alive for 4 days. npx spawns a SECOND cmd.exe below
 // it, so dropping only the outer shell would surface the inner one as "work".
-const { mcpServerShellFor } = require('../lib/agents');
+const { mcpLaunchFor } = require('../lib/agents');
 
 const MCP_NPX_LINE = 'C:\\WINDOWS\\system32\\cmd.exe /d /s /c "npx ^"-y^" ^"firebase-tools@latest^" ^"mcp^" ^"--only^" ^"core^,crashlytics^""';
 // Claude's own PowerShell TOOL is also a `cmd.exe /d /s /c` child of the agent (captured from
@@ -162,7 +162,7 @@ const BIND_DEVICE = [
   { pid: 24432, ppid: 26760, name: 'cmd.exe', cmd: 'C:\\WINDOWS\\system32\\cmd.exe /d /s /c firebase mcp --only core,crashlytics' },
   { pid: 32524, ppid: 24432, name: 'node.exe' },
 ];
-const CLAUDE_MCP = { mcpServerShell: mcpServerShellFor('claude') };
+const CLAUDE_MCP = mcpLaunchFor('claude');
 
 test.describe('#411 an MCP server launched through a shell is not running work', () => {
   test('the real npx MCP tree reports NOTHING - neither the outer nor the inner cmd.exe', () => {
@@ -215,15 +215,50 @@ test.describe('#411 an MCP server launched through a shell is not running work',
     expect(runningShellsUnder(tree, 5000, CLAUDE_MCP).map((s) => s.pid)).toEqual([980]);
   });
 
+  test('under a NON-runner .cmd (a global shim) the node below IS the server - its build is work', () => {
+    // Final-gate finding: the hop rule must not fire for any .cmd. A globally installed
+    // server's shim starts the server node directly, so a shell under that node is a
+    // tool's command, exactly as under a server launched as plain node.
+    const tree = [
+      { pid: 6000, ppid: 1, name: 'conhost.exe' },
+      { pid: 6001, ppid: 6000, name: 'bash.exe', cmd: 'bash' },
+      { pid: 6002, ppid: 6001, name: 'claude.exe' },
+      { pid: 6003, ppid: 6002, name: 'cmd.exe', cmd: 'C:\\WINDOWS\\system32\\cmd.exe /d /s /c "desktop-commander ^"--no-onboarding^""' },
+      { pid: 6004, ppid: 6003, name: 'node.exe' },
+      { pid: 6005, ppid: 6004, name: 'cmd.exe', cmd: 'C:\\WINDOWS\\system32\\cmd.exe /d /s /c "dotnet build big.sln"' },
+      { pid: 6006, ppid: 6005, name: 'dotnet.exe' },
+    ];
+    expect(runningShellsUnder(tree, 6000, CLAUDE_MCP).map((s) => s.pid)).toEqual([6005]);
+    const { liveWorkUnder } = require('../lib/process-tree');
+    expect(liveWorkUnder(tree, 6000, CLAUDE_MCP).map((s) => s.pid)).toEqual([6005]);
+  });
+
+  test('a runner named by full, escaped path (C:\\Program^ Files\\nodejs\\npx.cmd) still gets its hop', () => {
+    const tree = BIND_DEVICE.map((p) => (p.pid === 37424
+      ? { ...p, cmd: 'C:\\WINDOWS\\system32\\cmd.exe /d /s /c "C:\\Program^ Files\\nodejs\\npx.cmd ^"-y^" ^"firebase-tools@latest^" ^"mcp^""' }
+      : p));
+    expect(runningShellsUnder(tree, 5000, CLAUDE_MCP)).toEqual([]);
+  });
+
+  test('the hop only under a NODE runner child - another image below the launcher is not npx', () => {
+    const tree = BIND_DEVICE.map((p) => (p.pid === 26760 ? { ...p, name: 'python.exe' } : p));
+    expect(runningShellsUnder(tree, 5000, CLAUDE_MCP).map((s) => s.pid)).toEqual([24432]);
+  });
+
   test('two agents in one tree, and a /g pattern, are each judged on their own rows', () => {
     // A stateful (/g) RegExp keeps lastIndex between test() calls; without the reset the
     // second matching row would be tested from the wrong offset and read as work.
     const tree = [...BIND_DEVICE,
       { pid: 990, ppid: 5001, name: 'claude.exe' },
       { pid: 991, ppid: 990, name: 'cmd.exe', cmd: MCP_NPX_LINE },
+      { pid: 993, ppid: 991, name: 'node.exe' },
+      { pid: 994, ppid: 993, name: 'cmd.exe', cmd: 'C:\\WINDOWS\\system32\\cmd.exe /d /s /c firebase mcp' },
       { pid: 992, ppid: 990, name: 'powershell.exe', cmd: 'powershell.exe -NoProfile' }];
-    const g = new RegExp(CLAUDE_MCP.mcpServerShell.source, 'gi');
-    expect(runningShellsUnder(tree, 5000, { mcpServerShell: g }).map((s) => s.pid)).toEqual([992]);
+    const opts = {
+      mcpServerShell: new RegExp(CLAUDE_MCP.mcpServerShell.source, 'gi'),
+      mcpPackageRunner: new RegExp(CLAUDE_MCP.mcpPackageRunner.source, 'gi'),
+    };
+    expect(runningShellsUnder(tree, 5000, opts).map((s) => s.pid)).toEqual([992]);
   });
 
   test('server.js passes the agent\'s shape at EVERY call site (dropping it is silent)', () => {
@@ -232,7 +267,7 @@ test.describe('#411 an MCP server launched through a shell is not running work',
     const src = require('fs').readFileSync(require('path').join(__dirname, '..', 'server.js'), 'utf8');
     const calls = src.match(/processTree\.(?:runningShellsUnder|liveWorkUnder)\([^)]*\)/g) || [];
     expect(calls.length).toBeGreaterThanOrEqual(2);
-    for (const c of calls) expect(c).toContain('mcpServerShellFor(s.agent)');
+    for (const c of calls) expect(c).toContain('mcpLaunchFor(s.agent)');
   });
 
   test('liveWorkUnder (the reaper and the restart hold) takes the same rule', () => {
@@ -242,13 +277,19 @@ test.describe('#411 an MCP server launched through a shell is not running work',
   });
 });
 
-test.describe('#411 mcpServerShellFor - the launch shape lives in the agent registry', () => {
-  const re = mcpServerShellFor('claude');
+test.describe('#411 mcpLaunchFor - the launch shape lives in the agent registry', () => {
+  const re = mcpLaunchFor('claude').mcpServerShell;
   test('Claude declares it; Codex, a plain shell and unknown ids do not', () => {
     expect(re).toBeInstanceOf(RegExp);
-    expect(mcpServerShellFor('codex')).toBeNull();
-    expect(mcpServerShellFor(null)).toBeNull();
-    expect(mcpServerShellFor('nope')).toBeNull();
+    expect(mcpLaunchFor('claude').mcpPackageRunner).toBeInstanceOf(RegExp);
+    expect(mcpLaunchFor('codex')).toEqual({});
+    expect(mcpLaunchFor(null)).toEqual({});
+    expect(mcpLaunchFor('nope')).toEqual({});
+  });
+  test('the package runners are named exactly - a server shim is not one', () => {
+    const r = mcpLaunchFor('claude').mcpPackageRunner;
+    for (const ok of ['npx', 'npx.cmd', 'NPX.CMD', 'npm', 'pnpm.cmd', 'pnpx', 'yarn', 'bunx']) expect(r.test(ok), ok).toBe(true);
+    for (const no of ['desktop-commander', 'npx-server', 'mynpx.cmd', 'node', '']) expect(r.test(no), no).toBe(false);
   });
   test('matches the cross-spawn launch, including a quoted comspec and a spaced shim path', () => {
     expect(re.test(MCP_NPX_LINE)).toBe(true);
