@@ -91,6 +91,10 @@ handoffs/
 handoffs.test/
 # Which device sent each prompt (#311): the suite's copy (production's is under logs/).
 device-ops.test.jsonl
+# The usage logs (#425): the suite's copies (production's are under logs/ and handoffs/).
+handoff-skips.test.jsonl*
+session-cost.test.jsonl*
+device-views.test.jsonl*
 # The work-item event log (#413): the suite's copy (production's is under logs/).
 work-items.test.jsonl
 work-items.test.jsonl.1

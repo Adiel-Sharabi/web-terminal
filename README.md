@@ -393,6 +393,14 @@ for free too.
 and `scripts/device-ops-report.js` turns a week of it into operations and active hours
 per device, in and out of office hours.
 
+**Usage logs (#425)** — written by the server, never shown to an agent, never holding prompt
+text, each rolled over at 20 MB: `handoffs/handoff-skips.jsonl` (a session the automatic
+hand-off scan passed over, with the gate that said no), `logs/session-cost.jsonl` (the
+status line's `cost` and context size, sampled per session), and `logs/device-views.jsonl`
+(a client attaching to, switching mode on, and leaving a session, keyed by tailnet address
+like the line above). `node scripts/phone-usage-snapshot.js --device <host:port>` keeps the
+companion's daily foreground time from a phone over adb in `logs/phone-usage.jsonl`.
+
 **Companion app** — a native Android + Windows client with the chat lens and push that
 works while the app is closed.
 
