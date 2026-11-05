@@ -75,6 +75,10 @@ else {
 // #272 refusal off the briefs file instead of the token store.
 if (process.env.WT_SESSION_BRIEFS_FILE) reset(process.env.WT_SESSION_BRIEFS_FILE, '#298');
 if (process.env.WT_DEVICE_OPS_FILE) reset(process.env.WT_DEVICE_OPS_FILE, '#311');
+// #425 - the usage logs (and the one rotated generation of each).
+for (const v of ['WT_HANDOFF_SKIPS_FILE', 'WT_SESSION_COST_FILE', 'WT_DEVICE_VIEWS_FILE']) {
+  if (process.env[v]) { reset(process.env[v], '#425'); reset(`${process.env[v]}.1`, '#425'); }
+}
 // #413 - the work-item event log (and its one rotated generation).
 if (process.env.WT_WORK_ITEMS_LOG_FILE) {
   reset(process.env.WT_WORK_ITEMS_LOG_FILE, '#413');

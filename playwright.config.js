@@ -86,6 +86,11 @@ process.env.WT_AGENT_SETTINGS_DIR = path.join(require('./scripts/scratch-dirs').
 // #311 - the device-ops log. The suite's submits must never land in production's
 // logs/device-ops.jsonl, where they would be counted as real use; reset per run like the above.
 process.env.WT_DEVICE_OPS_FILE = path.join(__dirname, 'device-ops.test.jsonl');
+// #425 - the usage logs (hand-off skip reasons, session cost, viewer time): the suite's copies,
+// reset per run, so its sessions never count as real use in production's logs/.
+process.env.WT_HANDOFF_SKIPS_FILE = path.join(__dirname, 'handoff-skips.test.jsonl');
+process.env.WT_SESSION_COST_FILE = path.join(__dirname, 'session-cost.test.jsonl');
+process.env.WT_DEVICE_VIEWS_FILE = path.join(__dirname, 'device-views.test.jsonl');
 // #351 - the spawn reaper's verdicts, and its classify window: 60 s, generous on purpose. A spec
 // that needs a viewer INSIDE the window has 60 s of slack on a host whose processes stall for
 // seconds at a time (a bare Node timer measured 8 s late on Home), and one that needs it PASSED
