@@ -255,8 +255,9 @@ test.describe('restart hold (#359)', () => {
     expect(M.verdict(told, agentRow({ status: 'working', subagents: 2 }), []).why).toBe('working, waiting on 2 subagents');
     expect(M.verdict(told, agentRow({ status: 'waiting', waitingFor: 'question' }), []).why).toBe('waiting for you: answer a question');
     expect(M.verdict(told, agentRow({ inMenu: true }), []).state).toBe(S.NEEDS_YOU);
+    // #410: an agent that said yes is told apart, and a shell is named with its pid.
     expect(M.verdict(told, agentRow(), [{ pid: 5, name: 'dotnet.exe' }]))
-      .toEqual({ state: S.BUSY, why: 'still running: dotnet.exe' });
+      .toEqual({ state: S.BUSY, why: 'said yes, but still running: dotnet.exe pid 5' });
     // Could not read the process tree: not "ready" on a guess.
     expect(M.verdict(told, agentRow(), null).state).toBe(S.UNKNOWN);
     expect(M.verdict(told, agentRow(), []).state).toBe(S.READY);
@@ -329,5 +330,170 @@ test.describe('restart hold (#359)', () => {
     expect(M.canSendBack(agentRow())).toBe(true);
     expect(M.canSendBack(agentRow({ status: 'working' }))).toBe(false);
     expect(M.canSendBack(agentRow({ agentReady: false }))).toBe(false);
+  });
+});
+
+test.describe('restart hold: a yes with work still running is asked about it, once (#410)', () => {
+  const MIN = 60000;
+  const build = { pid: 4242, name: 'cmd.exe', startMs: T0 - 30 * MIN };
+  const task = { id: 'b1', description: 'dotnet test the whole solution', startedAt: T0 - 20 * MIN };
+  // Asked, took the question, said yes, and its turn ended at T0 + 3.
+  const saidYes = () => {
+    let h = M.notePrompted(hold(), 'a', T0);
+    h = M.noteHook(h, 'a', 'UserPromptSubmit', { prompt: M.wrapUpPrompt('x') }, T0 + 1);
+    h = M.noteAnswer(h, { sessionId: 'a', answer: 'yes' }, T0 + 2).hold;
+    h = M.noteHook(h, 'a', 'Stop', {}, T0 + 3);
+    expect(h.sessions.a).toMatchObject({ answer: 'yes', answeredAt: T0 + 3 });
+    return h;
+  };
+  const busyAt = (h, at, work = [build]) => M.noteWork(h, 'a', agentRow(), work, at);
+  const due = T0 + 10 + 5 * MIN;
+
+  test('busySince is stamped when the session first reads BUSY and cleared when it no longer does', () => {
+    let h = busyAt(saidYes(), T0 + 10);
+    expect(h.sessions.a.busySince).toBe(T0 + 10);
+    // Still busy later: the first observation stands.
+    expect(busyAt(h, T0 + 20)).toBe(h);
+    // Could not read what runs: nothing is learnt, nothing changes.
+    expect(busyAt(h, T0 + 20, null)).toBe(h);
+    // The work ended: cleared, and the session is ready.
+    const done = busyAt(h, T0 + 30, []);
+    expect(done.sessions.a.busySince).toBeNull();
+    expect(M.verdict(done.sessions.a, agentRow(), [], T0 + 30).state).toBe(M.STATES.READY);
+    // Mid-turn it reads WORKING, not BUSY: a new turn restarts the clock.
+    expect(M.noteWork(h, 'a', agentRow({ status: 'working' }), [build], T0 + 40).sessions.a.busySince).toBeNull();
+    // Nothing to stamp before the yes: the session is still answering.
+    expect(M.noteWork(hold(), 'a', agentRow(), [build], T0 + 10).sessions.a.busySince).toBeFalsy();
+    // A plain shell with a build under it is busy too (status says since when).
+    expect(M.noteWork(hold(), 's', shellRow(), [build], T0 + 10).sessions.s.busySince).toBe(T0 + 10);
+  });
+
+  test('ONE follow-up once it has been busy NUDGE_AFTER_MS - never before, never twice', () => {
+    expect(M.NUDGE_AFTER_MS).toBe(5 * MIN);
+    let h = busyAt(saidYes(), T0 + 10);
+    expect(M.shouldNudge(h.sessions.a, agentRow(), [build], due - 1)).toBe(false);
+    expect(M.shouldNudge(h.sessions.a, agentRow(), [build], due)).toBe(true);
+    h = M.noteNudged(h, 'a', due);
+    expect(h.sessions.a).toMatchObject({ nudgedAt: due, nudgeTries: 1, nudgeDeliveredAt: null });
+    expect(M.shouldNudge(h.sessions.a, agentRow(), [build], due + 60 * MIN)).toBe(false);
+    // A delivered follow-up stays the only one, even when a new job starts after it.
+    h = M.noteHook(h, 'a', 'UserPromptSubmit', { prompt: M.busyPrompt('x', [build], null) }, due + 1);
+    expect(M.shouldNudge(h.sessions.a, agentRow(), [build, task], due + 60 * MIN)).toBe(false);
+  });
+
+  test('every gate alone stops the follow-up', () => {
+    const e = busyAt(saidYes(), T0 + 10).sessions.a;
+    const at = (entry, row = agentRow(), work = [build]) => M.shouldNudge(entry, row, work, due);
+    expect(at(e)).toBe(true);
+    // Not at its composer: typed text would answer a selector, or queue behind a turn.
+    for (const over of [{ status: 'working' }, { status: 'waiting', waitingFor: 'permission' }, { inMenu: true },
+      { compacting: true }, { agentReady: false }, { blockedPrompt: { kind: 'trust' } }]) {
+      expect(at(e, agentRow(over)), JSON.stringify(over)).toBe(false);
+    }
+    expect(at(e, agentRow(), null)).toBe(false); // could not read the work
+    expect(at(e, agentRow(), [])).toBe(false);   // nothing runs: it is ready
+    for (const answer of [null, 'no', 'later']) expect(at({ ...e, answer }), String(answer)).toBe(false);
+    expect(at({ ...e, answeredAt: null })).toBe(false); // its turn has not ended
+    expect(at({ ...e, busySince: null })).toBe(false);
+    expect(at({ ...e, busySince: due - 5 * MIN + 1 })).toBe(false);
+    expect(at({ ...e, nudgedAt: due - 1 })).toBe(false);
+    expect(at({ ...e, nudgeTries: M.MAX_TRIES })).toBe(false);
+    expect(at(e, shellRow({ id: 'a' }))).toBe(false); // a plain shell is never asked
+    expect(M.shouldNudge(null, agentRow(), [build], due)).toBe(false);
+  });
+
+  test('delivery is the tagged UserPromptSubmit; one not taken is typed again, at most MAX_TRIES times', () => {
+    const base = busyAt(saidYes(), T0 + 10);
+    let h = M.noteNudged(base, 'a', due);
+    const p = M.busyPrompt('x', [build], null);
+    // Only the main agent's tagged prompt counts.
+    expect(M.noteHook(h, 'a', 'UserPromptSubmit', { prompt: 'something else' }, due + 1)).toBe(h);
+    expect(M.noteHook(h, 'a', 'UserPromptSubmit', { prompt: p, agent_id: 'sub' }, due + 1)).toBe(h);
+    const d = M.noteHook(h, 'a', 'UserPromptSubmit', { prompt: p }, due + 1);
+    // Delivered - and the yes and its turn end stand: the follow-up is not a new question.
+    expect(d.sessions.a).toMatchObject({ nudgeDeliveredAt: due + 1, answer: 'yes', answeredAt: T0 + 3, promptedAt: T0 });
+    expect(M.noteHook(d, 'a', 'Stop', {}, due + 5).sessions.a.answeredAt).toBe(T0 + 3);
+    expect(M.noteUnconfirmed(d, 'a')).toBe(d);
+    // Not taken: forgotten so the tick types it again; the wrap-up prompt's own record stays.
+    for (let i = 1; i <= M.MAX_TRIES; i++) {
+      expect(h.sessions.a.nudgeTries).toBe(i);
+      h = M.noteUnconfirmed(h, 'a');
+      expect(h.sessions.a).toMatchObject({ nudgedAt: null, promptedAt: T0, answer: 'yes', answeredAt: T0 + 3 });
+      const again = M.shouldNudge(h.sessions.a, agentRow(), [build], due + i);
+      expect(again).toBe(i < M.MAX_TRIES);
+      if (again) h = M.noteNudged(h, 'a', due + i);
+    }
+    // A stray "unconfirmed" with no follow-up out changes nothing.
+    expect(M.noteUnconfirmed(base, 'a')).toBe(base);
+  });
+
+  test('a "later" after the follow-up defers; asking again later starts the follow-up afresh', () => {
+    let h = M.noteNudged(busyAt(saidYes(), T0 + 10), 'a', due);
+    h = M.noteAnswer(h, { sessionId: 'a', answer: 'later', minutes: 10, reason: 'release build' }, due + 1000).hold;
+    expect(M.verdict(h.sessions.a, agentRow(), [build], due + 2000).state).toBe(M.STATES.DEFERRED);
+    const until = due + 1000 + 10 * MIN;
+    expect(M.shouldPrompt(h.sessions.a, agentRow(), until)).toBe(true);
+    h = M.notePrompted(h, 'a', until);
+    expect(h.sessions.a).toMatchObject({ busySince: null, nudgedAt: null, nudgeTries: 0, nudgeDeliveredAt: null });
+    // And a "no" after it declines, whatever still runs.
+    const no = M.noteAnswer(M.noteNudged(busyAt(saidYes(), T0 + 10), 'a', due), { sessionId: 'a', answer: 'no' }, due + 1).hold;
+    expect(M.verdict(no.sessions.a, agentRow(), [build], due + 2).state).toBe(M.STATES.DECLINED);
+  });
+
+  test('the follow-up names what runs and since when, and how to answer - one tagged line', () => {
+    const p = M.busyPrompt('Windows update', [build, task], build.startMs, '/abs/scripts/wt-maintenance.js');
+    expect(p).not.toMatch(/[\r\n]/);
+    expect(classifyUserTurn(p)).toMatchObject({ kind: 'system', from: 'Restart' });
+    for (const part of ['Windows update', 'you said yes', 'cmd.exe pid 4242', 'dotnet test the whole solution',
+      `since ${M.clockOf(build.startMs)}`, 'stop it', 'later --minutes N', 'node "/abs/scripts/wt-maintenance.js" answer later|no']) {
+      expect(p, part).toContain(part);
+    }
+    expect(M.busyPrompt('x', [task], null)).not.toContain('since');
+    // Backslashes in the script path are written forward, as the wrap-up prompt does.
+    expect(M.busyPrompt('x', [task], null, 'C:\\wt\\scripts\\wt-maintenance.js')).toContain('"C:/wt/scripts/wt-maintenance.js"');
+  });
+
+  test('the follow-up stays under 512 BYTES in the worst case - only the work list is shortened', () => {
+    const longPath = `D:\\work\\a-rather-long-checkout-folder\\nested\\deeper\\web-terminal-worktree\\checkout\\scripts\\wt-maintenance.js`;
+    const heb = (n) => String.fromCodePoint(0x05d0).repeat(n);
+    const works = [
+      Array.from({ length: 12 }, (_, i) => ({ id: `t${i}`, description: heb(120), startedAt: T0 })),
+      Array.from({ length: 12 }, (_, i) => ({ pid: 100000 + i, name: `${'x'.repeat(200)}.exe`, startMs: T0 })),
+      [{ id: 't', description: 'd'.repeat(500) }],
+    ];
+    for (const reason of ['r'.repeat(200), heb(200)]) {
+      for (const w of works) {
+        const p = M.busyPrompt(reason, w, T0, longPath);
+        expect(Buffer.byteLength(p)).toBeLessThan(512);
+        expect(p.startsWith('[web-terminal restart]')).toBe(true);
+        expect(p).toContain(`node "${longPath.replace(/\\/g, '/')}" answer later|no`);
+      }
+    }
+  });
+
+  test('status says it said yes but still runs X since when, and when it was asked about it', () => {
+    const S = M.STATES;
+    let h = busyAt(saidYes(), T0 + 10);
+    const e = () => h.sessions.a;
+    // Since: the work's own start (the oldest), else when the hold first saw it busy.
+    expect(M.verdict(e(), agentRow(), [build, task], T0 + 20)).toEqual({
+      state: S.BUSY, why: `said yes, but still running: cmd.exe pid 4242, dotnet test the whole solution since ${M.clockOf(build.startMs)}`,
+    });
+    expect(M.verdict(e(), agentRow(), [{ pid: 9, name: 'bash.exe' }], T0 + 20).why)
+      .toBe(`said yes, but still running: bash.exe pid 9 since ${M.clockOf(T0 + 10)}`);
+    h = M.noteNudged(h, 'a', due);
+    expect(M.verdict(e(), agentRow(), [build], due + 1).why)
+      .toBe(`said yes, but still running: cmd.exe pid 4242 since ${M.clockOf(build.startMs)}; asked about it at ${M.clockOf(due)}`);
+    // A plain shell keeps "still running", now with its start.
+    expect(M.verdict({ promptedAt: null }, shellRow(), [{ pid: 7, name: 'npm.cmd', startMs: T0 }], T0 + 1).why)
+      .toBe(`still running: npm.cmd pid 7 since ${M.clockOf(T0)}`);
+    const st = M.status(h, { a: agentRow(), s: shellRow() }, { a: [build], s: [] }, due + 1);
+    expect(st.sessions.find((v) => v.id === 'a')).toMatchObject({ state: 'busy', busySince: T0 + 10, nudgedAt: due });
+    expect(st.safeToRestart).toBe(false);
+  });
+
+  test('clockOf is local HH:MM', () => {
+    expect(M.clockOf(new Date(2026, 10, 5, 7, 4, 59).getTime())).toBe('07:04');
+    expect(M.clockOf(null)).toBe('');
   });
 });
