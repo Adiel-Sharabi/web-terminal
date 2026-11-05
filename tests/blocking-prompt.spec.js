@@ -95,9 +95,9 @@ test.describe('#190 matchBlockingPrompt - the real dialog', () => {
     const hit = matchBlockingPrompt(TRUST, CFG);
     expect(hit.id).toBe('folder-trust');
     expect(hit.target).toBe(1);
-    // One row down from the cursor, then confirm. Matches the sequence measured to
-    // answer it (`probe-trust-prompt.js drive`: down-enter).
-    expect(hit.keys).toEqual([DOWN, CR]);
+    // ONE key: one row down toward the accepted row. The CR is NOT planned here - it
+    // goes out only once a redraw shows the highlight ON that row (#430, below).
+    expect(hit.key).toBe(DOWN);
   });
 
   test('a REORDERED render moves the keys with it - and would be fatal if it did not', () => {
@@ -113,7 +113,7 @@ test.describe('#190 matchBlockingPrompt - the real dialog', () => {
     expect(hit.options).toEqual(['Yes, I trust this folder', 'No, exit']);
     expect(hit.cursor).toBe(0);
     expect(hit.target).toBe(0);
-    expect(hit.keys).toEqual([CR]);            // already highlighted: just confirm
+    expect(hit.key).toBe(CR);                 // already highlighted: just confirm
   });
 
   test('the cursor BELOW its sibling still resolves, upward', () => {
@@ -125,7 +125,7 @@ test.describe('#190 matchBlockingPrompt - the real dialog', () => {
     const hit = matchBlockingPrompt(below.join('\r\n'), CFG);
     expect(hit.options).toEqual(['No, exit', 'Never, thanks']);
     expect(hit.cursor).toBe(1);
-    expect(hit.keys).toBeNull();
+    expect(hit.key).toBeNull();
   });
 });
 
@@ -231,18 +231,19 @@ test.describe('#190 the registry decides who is scanned at all', () => {
   test('only the ROW THAT WILL BE PRESSED is declared', () => {
     // Not a title, not the question - the label of the option the keys select. The
     // thing acted on is the thing matched.
-    expect(CFG.known.map((k) => k.id)).toEqual(['folder-trust']);
+    expect(CFG.known.map((k) => k.id)).toEqual(['folder-trust', 'external-imports']);
     expect(CFG.known[0].accept.test('Yes, I trust this folder')).toBe(true);
     expect(CFG.known[0].accept.test('No, exit')).toBe(false);
+    expect(CFG.known[1].accept.test('Yes, allow external imports')).toBe(true);
+    expect(CFG.known[1].accept.test('No, disable external imports')).toBe(false);
   });
 });
 
 test.describe('#190 an UNKNOWN member is reported, never answered', () => {
   test('the family is recognised by shape with no keys at all', () => {
-    // The external-CLAUDE.md imports selector is the sibling this covers. Its wording
-    // is UNMEASURED (it appears only after trust is answered, and this box ran out of
-    // console handles before it could be captured), so this fixture is SYNTHETIC and
-    // stands for "any member we have not measured" rather than for that dialog.
+    // A look-alike of the external-imports selector whose accept row is NOT the
+    // measured label (#430 measured `Yes, allow external imports`). It stands for
+    // "any member we have not measured": reported, and nothing pressed.
     const unknown = [
       `${at(2)}Allow${at(8)}external${at(17)}CLAUDE.md${at(27)}file${at(32)}imports?`,
       '',
@@ -254,7 +255,7 @@ test.describe('#190 an UNKNOWN member is reported, never answered', () => {
     const hit = matchBlockingPrompt(unknown, CFG);
     expect(hit).not.toBeNull();
     expect(hit.id).toBeNull();                 // not a member we know how to answer
-    expect(hit.keys).toBeNull();               // ...so nothing is pressed
+    expect(hit.key).toBeNull();                // ...so nothing is pressed
     expect(hit.options).toEqual(['No, disable external imports', 'Yes, allow them']);
   });
 });
@@ -287,5 +288,159 @@ test.describe('#190 the auto-answer DEFAULT is pinned, not merely exercised', ()
     // is a default that can move in a refactor nobody reads twice.
     const { AUTO_ANSWER_BLOCKING_PROMPT_DEFAULT } = require('../lib/blocking-prompt');
     expect(AUTO_ANSWER_BLOCKING_PROMPT_DEFAULT).toBe(false);
+  });
+});
+
+// ---------------------------------------------------------------------------------
+// #430 - the answer is a LOOP: one key, then look again.
+//
+// MEASURED on the rig (claude 2.1.318, 2026-11-06): the worker's old plan - Down, then
+// CR 600 ms later, both decided off the first render - exited the agent 3 runs of 3.
+// A key landing inside Claude's startup window moves the highlight and is then UNDONE
+// by a redraw with the caret back on `No, exit`, which the scheduled CR confirmed.
+// The fixtures below mirror the measured byte STRUCTURE (in-place redraws joined by
+// relative cursor moves; the erase run that follows a CR; the exit to a shell), built
+// from code points like everything else here. No capture is checked in.
+// ---------------------------------------------------------------------------------
+
+const LF = String.fromCodePoint(0x000a);
+const BEL = String.fromCodePoint(0x0007);
+/** CUU/CUD/CUF/CUB - relative moves, which end a redrawn label. */
+const mv = (n, f) => `${ESC}[${n}${f}`;
+
+/** The dialog's own trailing bytes after a full render: park the cursor, print nothing. */
+const AFTER_RENDER = `${CR}${LF}${mv(1, 'C')}${mv(4, 'A')}`;
+
+/** Measured: the highlight moved to `Yes` - two rows rewritten on ONE line. */
+const REDRAW_ON_YES = `${mv(1, 'D')}${mv(4, 'B')}${CR}${mv(1, 'C')}${mv(4, 'A')} ${at(4)}No, exit`
+  + `${CR}${mv(1, 'C')}${mv(1, 'B')}${sgr}${CARET}${at(4)}Yes, I trust this folder${off}`
+  + `${CR}${LF}${LF}${LF}${mv(1, 'C')}${mv(3, 'A')}`;
+
+/** Measured ~150 ms after a key sent inside the startup window: the highlight is BACK. */
+const REDRAW_RESET = `${mv(1, 'D')}${mv(3, 'B')}${mv(1, 'C')}${mv(4, 'A')}${sgr}${CARET}${at(4)}No, exit`
+  + `${mv(1, 'C')}${mv(1, 'B')}${off} ${at(4)}Yes, I trust this folder`
+  + `${CR}${LF}${LF}${LF}${mv(1, 'C')}${mv(4, 'A')}`;
+
+/** Claude's startup query round, sent in the same millisecond as the dialog. Prints nothing. */
+const STARTUP_QUERIES = `${ESC}[>0q${ESC}[?u${ESC}]7501;?${BEL}${ESC}[c`;
+
+/** What answering does to the dialog before the next screen: erase every row. */
+const ERASED = `${mv(1, 'D')}${mv(3, 'B')}` + `${ESC}[2K${mv(1, 'A')}`.repeat(12) + `${ESC}[G`;
+
+/** The agent is gone: its exit sequences, then a shell prompt. Generic names only. */
+const SHELL_PROMPT = `${ESC}[>4m${ESC}[<u${ESC}[?2004l${ESC}(B${ESC}7${ESC}[r${ESC}8`
+  + `${CR}${LF}${ESC}]0;MINGW64:/c/x${BEL}${CR}${LF}${ESC}[32muser@host ${ESC}[33m/c/x${ESC}[0m${CR}${LF}$ `;
+
+/** The external-imports member, measured structure: caret at col 3, labels at col 5. */
+const IMPORTS_LINES = [
+  `${at(3)}${ESC}[1mAllow${at(9)}external${at(18)}CLAUDE.md${at(28)}file${at(33)}imports?${ESC}[22m`,
+  '',
+  `${at(3)}${sgr}${CARET}${at(5)}No,${at(9)}disable${at(17)}external${at(26)}imports${off}`,
+  `${at(5)}Yes,${at(10)}allow${at(16)}external${at(25)}imports`,
+  '',
+  `${at(3)}${ESC}[38;2;153;153;153mEnter${at(9)}to${at(12)}confirm${at(20)}.${at(22)}Esc${at(26)}to${at(29)}cancel${off}`,
+];
+const IMPORTS = IMPORTS_LINES.join(CR + LF);
+
+test.describe('#430 the CR goes out only against a highlight the screen SHOWS', () => {
+  test('the dialog with only the startup queries after it is LIVE and wants Down', () => {
+    // Positive control for `live`: the query round prints nothing, so without this the
+    // first key could never be pressed and every negative below would pass vacuously.
+    const hit = matchBlockingPrompt(TRUST + AFTER_RENDER + STARTUP_QUERIES, CFG);
+    expect(hit.live).toBe(true);
+    expect(hit.cursor).toBe(0);
+    expect(hit.key).toBe(DOWN);
+  });
+
+  test('an in-place redraw onto Yes is read as the highlight, and THEN the CR', () => {
+    const hit = matchBlockingPrompt(TRUST + AFTER_RENDER + STARTUP_QUERIES + REDRAW_ON_YES, CFG);
+    expect(hit.options).toEqual(['No, exit', 'Yes, I trust this folder']);
+    expect(hit.cursor).toBe(1);
+    expect(hit.live).toBe(true);
+    expect(hit.key).toBe(CR);
+  });
+
+  test('NEGATIVE - the measured RESET redraw after it gets another Down, NEVER the CR', () => {
+    // The exact failure: the arrow landed, then the dialog redrew with the caret back on
+    // `No, exit`. A CR here exits the agent. Reading the highlight off the FIRST caret
+    // (the full render) would also say row 0 here, so the positive test above is what
+    // proves the LAST redraw is read; this one proves a reset is never confirmed.
+    const hit = matchBlockingPrompt(TRUST + AFTER_RENDER + REDRAW_ON_YES + REDRAW_RESET, CFG);
+    expect(hit.cursor).toBe(0);
+    expect(hit.key).toBe(DOWN);
+  });
+
+  test('NEGATIVE - a highlight whose label is not an option presses nothing', () => {
+    const odd = `${CR}${mv(1, 'C')}${mv(1, 'B')}${sgr}${CARET}${at(4)}Yes, I trust this folder and its parent${off}${CR}${LF}`;
+    const hit = matchBlockingPrompt(TRUST + AFTER_RENDER + odd, CFG);
+    expect(hit.cursor).toBe(-1);
+    expect(hit.key).toBeNull();
+  });
+});
+
+test.describe('#430 nothing is pressed into a dialog that is no longer on screen', () => {
+  test('NEGATIVE - the agent exited to its shell: not live, no key', () => {
+    // Office, 2026-11-05: the agent had exited, the report stayed, and the carry still
+    // matched - so ten minutes later the worker typed Down + CR into bash.
+    const hit = matchBlockingPrompt(TRUST + AFTER_RENDER + REDRAW_RESET + SHELL_PROMPT, CFG);
+    expect(hit).not.toBeNull();                // still REPORTED: the carry holds it
+    expect(hit.live).toBe(false);
+    expect(hit.key).toBeNull();
+  });
+
+  test('NEGATIVE - an erase on the SAME line as the redraw (no LF first) is still seen', () => {
+    // `live` must read the rest of the update's own line, not only the lines after it.
+    const sameLine = REDRAW_ON_YES.slice(0, REDRAW_ON_YES.indexOf(CR + LF)) + `${ESC}[2K${mv(1, 'A')}${ESC}[2K`;
+    expect(matchBlockingPrompt(TRUST + AFTER_RENDER + sameLine, CFG).key).toBeNull();
+    // ...and the same line WITHOUT the erase is live: the sibling row redrawn on it is
+    // part of the dialog, so this negative is not passing on that.
+    const plain = REDRAW_ON_YES.slice(0, REDRAW_ON_YES.indexOf(CR + LF));
+    expect(matchBlockingPrompt(TRUST + AFTER_RENDER + plain, CFG).key).toBe(CR);
+  });
+
+  test('NEGATIVE - the dialog was ERASED after its CR: no second CR into the next screen', () => {
+    const hit = matchBlockingPrompt(TRUST + AFTER_RENDER + REDRAW_ON_YES + ERASED, CFG);
+    expect(hit.cursor).toBe(1);                // the highlight WAS on Yes...
+    expect(hit.live).toBe(false);              // ...but the dialog is gone
+    expect(hit.key).toBeNull();
+  });
+});
+
+test.describe('#430 the external-imports member', () => {
+  test('recognised and answered - one Down toward `Yes, allow external imports`', () => {
+    const hit = matchBlockingPrompt(IMPORTS + AFTER_RENDER, CFG);
+    expect(hit.id).toBe('external-imports');
+    expect(hit.options).toEqual(['No, disable external imports', 'Yes, allow external imports']);
+    expect(hit.target).toBe(1);
+    expect(hit.key).toBe(DOWN);
+  });
+
+  test('NEGATIVE - a look-alike accept row is reported, never answered', () => {
+    const lookalike = [...IMPORTS_LINES];
+    lookalike[3] = `${at(5)}Yes,${at(10)}allow${at(16)}external${at(25)}imports${at(33)}everywhere`;
+    const hit = matchBlockingPrompt(lookalike.join(CR + LF) + AFTER_RENDER, CFG);
+    expect(hit).not.toBeNull();
+    expect(hit.id).toBeNull();
+    expect(hit.key).toBeNull();
+  });
+
+  test('NEGATIVE - a look-alike trust row is reported, never answered', () => {
+    const lookalike = [...TRUST_LINES];
+    lookalike[9] = `${at(4)}Yes,${at(9)}I${at(11)}trust${at(17)}this${at(22)}folder${at(29)}and${at(33)}its${at(37)}parents`;
+    const hit = matchBlockingPrompt(lookalike.join(CR + LF) + AFTER_RENDER, CFG);
+    expect(hit).not.toBeNull();
+    expect(hit.id).toBeNull();
+    expect(hit.key).toBeNull();
+  });
+
+  test('the LAST dialog in the carry is the one on screen - trust answered, imports next', () => {
+    // The carry is 4 KB, so it still holds the trust dialog when the imports one is
+    // drawn below it. Taking the FIRST match would answer trust again - a CR read off a
+    // highlight that is no longer on screen.
+    const hit = matchBlockingPrompt(TRUST + AFTER_RENDER + REDRAW_ON_YES + ERASED + IMPORTS + AFTER_RENDER, CFG);
+    expect(hit.id).toBe('external-imports');
+    expect(hit.cursor).toBe(0);
+    expect(hit.live).toBe(true);
+    expect(hit.key).toBe(DOWN);
   });
 });

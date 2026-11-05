@@ -492,7 +492,7 @@ async function family(cookie) {
       console.log(`     id      : ${hit.id === null ? 'null (family by shape only)' : hit.id}`);
       console.log(`     options : ${JSON.stringify(hit.options)}`);
       console.log(`     cursor  : ${hit.cursor}   target: ${hit.target}`);
-      console.log(`     keys    : ${JSON.stringify(hit.keys)}`);
+      console.log(`     next key: ${JSON.stringify(hit.key)}   live: ${hit.live}`);
       console.log(`---- SCREEN ----\n${screen(term.text()).split('\n').slice(-16).join('\n')}`);
 
       // END TO END, not just the rule: what does the SERVER say about this session?
@@ -507,11 +507,22 @@ async function family(cookie) {
         console.log(`     server after it : ${await readGate(cookie, id)}`);
         console.log(`     matcher still   : ${matchBlockingPrompt(term.text(), cfg) ? 'MATCHING' : 'no'}`);
       }
-      // Answer it exactly as the worker would: one key at a time, with a real gap.
-      // A lumped write is the #55 trap and it is worse here than on a composer.
-      const keys = hit.keys || [DOWN, '\r'];
+      // Answer it as the worker does (#430): after a quiet period, ONE key read off the
+      // screen as it is now, then look again - the CR only once a redraw shows the
+      // highlight on the accepted row. An unknown member still gets Down + CR here, as
+      // before: this is a probe measuring the family, never production.
       const before = term.text().length;
-      for (const k of keys) { term.send(k); await sleep(cfg.answerGapMs); }
+      if (hit.id) {
+        for (let n = 0; n < 8; n++) {
+          await sleep(cfg.answerGapMs);
+          const now = matchBlockingPrompt(term.text().slice(mark), cfg);
+          if (!now || !now.key) break;
+          term.send(now.key);
+          if (now.key === '\r') break;
+        }
+      } else {
+        for (const k of [DOWN, '\r']) { term.send(k); await sleep(cfg.answerGapMs); }
+      }
       // Wait for the screen to move on before asking again, then advance the mark so
       // the dialog just answered can never be seen again.
       const t1 = Date.now();

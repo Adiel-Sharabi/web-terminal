@@ -1448,6 +1448,15 @@ function detectBlockingPromptInOutput(session, buf) {
     ? Buffer.from(hay.subarray(hay.length - BLOCK_PROMPT_CARRY))
     : Buffer.from(hay);
 
+  // #430 - the key just pressed has been answered by a redraw of the caret: only now
+  // may the next key be decided. Bytes that arrive before it (a query, a title) are
+  // not that answer, and deciding on them would read the screen from before the key.
+  // Two bytes of the carry go with the chunk: a read can split the caret's three bytes.
+  if (session._blockAwaitRedraw
+    && hay.subarray(Math.max(0, hay.length - buf.length - 2)).includes(BLOCK_CARET_BYTES)) {
+    session._blockAwaitRedraw = false;
+  }
+
   const hit = blockingPrompt.matchBlockingPrompt(hay.toString('utf8'), cfg);
   if (!hit) return;
   applyBlockingPrompt(session, hit, cfg);
@@ -1455,10 +1464,11 @@ function detectBlockingPromptInOutput(session, buf) {
 
 /**
  * Record the block, tell everyone, and - only if the owner asked for it and only
- * for a member whose answer is declared - press the keys.
+ * for a member whose answer is declared - arm the next key.
  *
- * Re-entered on every repaint, so it is idempotent on the RECORD (same member, same
- * options: nothing broadcast twice) and cooldown-guarded on the WRITE.
+ * Re-entered on every chunk while the dialog is in the carry, so it is idempotent on
+ * the RECORD (same member, same options: nothing broadcast twice), and the WRITE is
+ * one key per quiet period, decided when the period ends (#430).
  */
 function applyBlockingPrompt(session, hit, cfg) {
   const now = Date.now();
@@ -1479,36 +1489,84 @@ function applyBlockingPrompt(session, hit, cfg) {
       blockedPrompt: publicBlockedPrompt(session),
     });
   }
-  if (!hit.keys || !autoAnswerBlockingPromptEnabled()) return;
-  // Same cooldown reasoning as the 5h cap prompt: the TUI repaints, so one dialog
-  // crosses several chunks, and answering three times would send stray arrows into
-  // the composer once it opens.
-  if (session._blockAnsweredAt && now - session._blockAnsweredAt < LIMIT_PROMPT_COOLDOWN_MS) return;
-  session._blockAnsweredAt = now;
-  log(`blocking-prompt: "${session.name}" (${session.id}) auto-answering ${hit.id}`
-    + ` - selecting ${JSON.stringify(hit.options[hit.target])} (row ${hit.cursor} -> ${hit.target})`);
-  writeBlockingPromptKeys(session, hit.keys, cfg);
+  if (!hit.id || !autoAnswerBlockingPromptEnabled()) return;
+  // #430 - wait for the screen to go QUIET, then press one key against what it shows.
+  // Every chunk lands here while the dialog is in the carry, so every chunk pushes the
+  // key back: a reset redraw (measured ~150 ms after a key sent inside Claude's startup
+  // window) restarts the wait, and the key chosen when it fires is read off THAT redraw.
+  armBlockingPromptAnswer(session, cfg);
 }
 
 /**
- * Write the answer one key at a time, with a real gap between them.
- *
- * NEVER as one write. #55 is law here: every agent TUI folds one read into a paste
- * and swallows a trailing CR, and only a temporal gap fixes it. The failure mode on
- * a selector is worse than on a composer - an absorbed CR leaves the arrow applied
- * and the dialog unanswered, and the NEXT CR to arrive (a user's submit) confirms
- * whatever row the arrow left highlighted.
+ * The most keys the worker will ever press into one session's startup dialogs (#430).
+ * The measured run is four - Down and CR for folder trust, the same again for the
+ * external-imports selector that can follow it - plus one arrow for each reset redraw.
+ * Past this the dialog is not responding the way it was measured to, and it is left
+ * on screen, reported, for a person.
  */
-function writeBlockingPromptKeys(session, keys, cfg) {
-  const gap = (cfg && cfg.answerGapMs > 0) ? cfg.answerGapMs : 600;
-  keys.forEach((k, i) => {
-    const t = setTimeout(() => {
-      if (!sessions.has(sessionIdOf(session))) return; // session went away mid-answer
-      try { termWrite(session, k); }
-      catch (e) { log(`blocking-prompt: answer write failed: ${e.message}`); }
-    }, i * gap);
-    if (t.unref) t.unref();
-  });
+const BLOCK_ANSWER_MAX_KEYS = 8;
+
+// Test-only shortening, the same shape as WT_READY_FALLBACK_MS: the worker specs must
+// finish inside ConPTY's ~3 s startup hold (#418), after which the real shell prints.
+const BLOCK_ANSWER_GAP_OVERRIDE_MS = Number(process.env.WT_BLOCK_ANSWER_GAP_MS) || 0;
+
+function armBlockingPromptAnswer(session, cfg) {
+  const gap = BLOCK_ANSWER_GAP_OVERRIDE_MS > 0 ? BLOCK_ANSWER_GAP_OVERRIDE_MS
+    : (cfg && cfg.answerGapMs > 0) ? cfg.answerGapMs : 600;
+  if (session._blockAnswerTimer) clearTimeout(session._blockAnswerTimer);
+  session._blockAnswerTimer = setTimeout(() => answerBlockingPromptNow(session, cfg), gap);
+  if (session._blockAnswerTimer.unref) session._blockAnswerTimer.unref();
+}
+
+/**
+ * Press the ONE next key, decided against the screen as it is now (#430).
+ *
+ * Re-matched from the carry rather than remembered from the hit that armed the timer:
+ * whatever arrived during the wait is what is on screen. Nothing is pressed unless the
+ * dialog is still the last thing drawn (`live` - the agent may have exited to its shell)
+ * and the highlight can be read; the CR only when it is ON the accepted row.
+ *
+ * NEVER two keys in one write. #55 is law here: every agent TUI folds one read into a
+ * paste and swallows a trailing CR. One key per quiet period gives every key its own
+ * read and its own redraw to be checked against.
+ */
+function answerBlockingPromptNow(session, cfg) {
+  session._blockAnswerTimer = null;
+  if (!sessions.has(sessionIdOf(session))) return;          // session went away
+  const d = session._ready;
+  if (!d || d.composerSeen || !session.blockedPrompt) return; // answered, or gone
+  if (!autoAnswerBlockingPromptEnabled()) return;
+  // The last key has not been redrawn yet. Nothing re-arms until a chunk carrying the
+  // caret arrives, so a key the TUI swallowed leaves the dialog reported, not pressed.
+  if (session._blockAwaitRedraw) return;
+  const carry = session._blockCarry;
+  if (!carry || !carry.length) return;
+  const hit = blockingPrompt.matchBlockingPrompt(carry.toString('utf8'), cfg);
+  if (!hit || !hit.id || !hit.key) {
+    if (hit && hit.id && !hit.live && !session._blockStaleLogged) {
+      session._blockStaleLogged = true;
+      log(`blocking-prompt: "${session.name}" (${session.id}) not answering ${hit.id}`
+        + ' - something printed after the dialog, or erased it, so it is no longer on screen');
+    }
+    return;
+  }
+  const n = session._blockAnswerKeys || 0;
+  if (n >= BLOCK_ANSWER_MAX_KEYS) {
+    if (n === BLOCK_ANSWER_MAX_KEYS) {
+      session._blockAnswerKeys = n + 1;
+      log(`blocking-prompt: "${session.name}" (${session.id}) giving up on ${hit.id}`
+        + ` after ${n} keys - the selector stays on screen, reported`);
+    }
+    return;
+  }
+  session._blockAnswerKeys = n + 1;
+  const what = hit.key === blockingPrompt.CR
+    ? `confirming ${JSON.stringify(hit.options[hit.target])}`
+    : `moving ${hit.key === blockingPrompt.DOWN ? 'down' : 'up'} (highlight on row ${hit.cursor}, want ${hit.target})`;
+  log(`blocking-prompt: "${session.name}" (${session.id}) auto-answering ${hit.id} - ${what}`);
+  session._blockAwaitRedraw = true;
+  try { termWrite(session, hit.key); }
+  catch (e) { log(`blocking-prompt: answer write failed: ${e.message}`); }
 }
 
 /** The wire shape - the internal `signature` is ours, not the client's. */
@@ -1520,6 +1578,7 @@ function publicBlockedPrompt(session) {
 
 /** Answered, or gone: the session is at its composer and nothing is blocking it. */
 function clearBlockingPrompt(session) {
+  if (session._blockAnswerTimer) { clearTimeout(session._blockAnswerTimer); session._blockAnswerTimer = null; }
   if (!session.blockedPrompt) return;
   session.blockedPrompt = null;
   session._blockCarry = null;

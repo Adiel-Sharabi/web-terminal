@@ -51,6 +51,22 @@ const TRUST_DIALOG = [
   `${at(2)}${ESC}[38;2;153;153;153mEnter${at(8)}to${at(11)}confirm${at(19)}.${at(21)}Esc${at(25)}to${at(28)}cancel${ESC}[39m`,
 ].join('\r\n');
 
+// #430 - the measured byte STRUCTURE around the dialog (claude 2.1.318, rig), built from
+// code points. See tests/blocking-prompt.spec.js for each one's role.
+const LF = String.fromCodePoint(0x000a);
+const BEL = String.fromCodePoint(0x0007);
+const mv = (n, f) => `${ESC}[${n}${f}`;
+const SGR_HL = `${ESC}[38;2;177;185;249m`;
+const AFTER_RENDER = `${CR}${LF}${mv(1, 'C')}${mv(4, 'A')}`;
+const STARTUP_QUERIES = `${ESC}[>0q${ESC}[?u${ESC}]7501;?${BEL}${ESC}[c`;
+const REDRAW_ON_YES = `${mv(1, 'D')}${mv(4, 'B')}${CR}${mv(1, 'C')}${mv(4, 'A')} ${at(4)}No, exit`
+  + `${CR}${mv(1, 'C')}${mv(1, 'B')}${SGR_HL}${CARET}${at(4)}Yes, I trust this folder${ESC}[39m`
+  + `${CR}${LF}${LF}${LF}${mv(1, 'C')}${mv(3, 'A')}`;
+const REDRAW_RESET = `${mv(1, 'D')}${mv(3, 'B')}${mv(1, 'C')}${mv(4, 'A')}${SGR_HL}${CARET}${at(4)}No, exit`
+  + `${mv(1, 'C')}${mv(1, 'B')}${ESC}[39m ${at(4)}Yes, I trust this folder`
+  + `${CR}${LF}${LF}${LF}${mv(1, 'C')}${mv(4, 'A')}`;
+const SHELL_PROMPT = `${ESC}[>4m${ESC}[<u${ESC}[?2004l${CR}${LF}${ESC}[32muser@host ${ESC}[33m/c/x${ESC}[0m${CR}${LF}$ `;
+
 /** The composer, which is what answering the dialog produces. Caret + NO-BREAK SPACE. */
 const COMPOSER = `${ESC}[38;2;136;136;136m${'-'.repeat(8)}${ESC}[39m\r\n${CARET}${NBSP}${ESC}[2mTry`;
 // #404 - Claude is ready only once this follows its composer (lib/agents.js readiness.settled).
@@ -294,22 +310,98 @@ test.describe('#190 a startup selector holds the submit gate shut', () => {
     expect((await summary(client, id)).blockedPrompt.id).toBe('folder-trust');
   });
 
-  test('auto-answer ON writes the arrows and the CR SEPARATELY', async () => {
-    await start({ WT_AUTO_ANSWER_BLOCKING_PROMPT: '1' });
+  // ---------------------------------------------------------------------------------
+  // #430 - auto-answer ON is a LOOP: wait for quiet, press ONE key, look again.
+  //
+  // The old plan (Down at once, CR 600 ms later) exited the agent 3 runs of 3 on the
+  // rig, claude 2.1.318: a key inside Claude's startup window was undone by a redraw
+  // with the caret back on `No, exit`, and the scheduled CR confirmed it. These drive
+  // that sequence through the real worker. The quiet period is shortened (test-only
+  // WT_BLOCK_ANSWER_GAP_MS) so every case ends inside ConPTY's ~3 s startup hold (#418),
+  // before the real shell under the session prints anything.
+  // ---------------------------------------------------------------------------------
+  const QUIET = 200;
+  const ON = { WT_AUTO_ANSWER_BLOCKING_PROMPT: '1', WT_BLOCK_ANSWER_GAP_MS: String(QUIET) };
+  const writesSince = async (id, before) =>
+    writesOf(await rpc(client, '__testGetWrites', { id })).slice(before);
+
+  test('#430 auto-answer ON waits for the screen to go QUIET, then presses ONE key', async () => {
+    await start(ON);
     const id = await claudeSession();
     const before = writesOf(await rpc(client, '__testGetWrites', { id })).length;
 
-    await rpc(client, '__testInjectOutput', { id, data: TRUST_DIALOG });
+    await rpc(client, '__testInjectOutput', { id, data: TRUST_DIALOG + AFTER_RENDER });
+    await sleep(QUIET / 2);
+    // More output - the query round Claude sends with the dialog - restarts the wait.
+    await rpc(client, '__testInjectOutput', { id, data: STARTUP_QUERIES });
+    await sleep(QUIET * 0.75);
+    // 1.25 x QUIET since the dialog, 0.75 x since the last output: a timer armed only
+    // by the FIRST sighting would have pressed already.
+    expect(await writesSince(id, before)).toEqual([]);
 
-    // The CR must NOT have gone out with the arrow. #55 is law: one read folds into a
-    // paste and swallows the trailing CR, and here that would leave the arrow applied
-    // and the dialog unanswered - so the next CR to arrive (a user's submit) confirms
-    // whatever row the arrow left highlighted.
-    await sleep(Math.max(40, GAP_MS / 4));
-    expect(writesOf(await rpc(client, '__testGetWrites', { id })).slice(before)).toEqual([DOWN]);
+    await sleep(QUIET * 1.5);
+    expect(await writesSince(id, before)).toEqual([DOWN]);
 
-    await sleep(GAP_MS + 300);
-    expect(writesOf(await rpc(client, '__testGetWrites', { id })).slice(before)).toEqual([DOWN, CR]);
+    // And NO CR: nothing has shown the highlight on `Yes`. The old plan sent it here.
+    await sleep(QUIET * 2);
+    expect(await writesSince(id, before)).toEqual([DOWN]);
+  });
+
+  test('#430 the CR waits for a redraw ON Yes - a RESET redraw gets another Down, never a CR', async () => {
+    await start(ON);
+    const id = await claudeSession();
+    const before = writesOf(await rpc(client, '__testGetWrites', { id })).length;
+
+    await rpc(client, '__testInjectOutput', { id, data: TRUST_DIALOG + AFTER_RENDER });
+    await sleep(QUIET * 1.75);
+    expect(await writesSince(id, before)).toEqual([DOWN]);
+
+    // The measured failure: the arrow lands, then the dialog redraws with the caret
+    // back on `No, exit`, inside the quiet period.
+    await rpc(client, '__testInjectOutput', { id, data: REDRAW_ON_YES });
+    await sleep(QUIET / 4);
+    await rpc(client, '__testInjectOutput', { id, data: REDRAW_RESET });
+    await sleep(QUIET * 1.75);
+    expect(await writesSince(id, before)).toEqual([DOWN, DOWN]);
+
+    await rpc(client, '__testInjectOutput', { id, data: REDRAW_ON_YES });
+    await sleep(QUIET * 1.75);
+    expect(await writesSince(id, before)).toEqual([DOWN, DOWN, CR]);
+  });
+
+  test('#430 after a key, nothing more until ITS redraw arrives - other output does not count', async () => {
+    await start(ON);
+    const id = await claudeSession();
+    const before = writesOf(await rpc(client, '__testGetWrites', { id })).length;
+
+    await rpc(client, '__testInjectOutput', { id, data: TRUST_DIALOG + AFTER_RENDER });
+    await sleep(QUIET * 1.75);
+    expect(await writesSince(id, before)).toEqual([DOWN]);
+
+    // Output with no caret in it - not the Down's redraw. Deciding on it would read the
+    // screen from BEFORE the Down (highlight still on `No, exit`) and press Down again.
+    await rpc(client, '__testInjectOutput', { id, data: STARTUP_QUERIES });
+    await sleep(QUIET * 2);
+    expect(await writesSince(id, before)).toEqual([DOWN]);
+
+    await rpc(client, '__testInjectOutput', { id, data: REDRAW_ON_YES });
+    await sleep(QUIET * 1.75);
+    expect(await writesSince(id, before)).toEqual([DOWN, CR]);
+  });
+
+  test('#430 an agent that exited to its SHELL is never typed into', async () => {
+    // Office, 2026-11-05: the agent had exited, its report stayed, the carry still
+    // matched - and ten minutes later the worker typed Down + CR into bash.
+    await start(ON);
+    const id = await claudeSession();
+    const before = writesOf(await rpc(client, '__testGetWrites', { id })).length;
+
+    await rpc(client, '__testInjectOutput', { id, data: TRUST_DIALOG + AFTER_RENDER });
+    await rpc(client, '__testInjectOutput', { id, data: SHELL_PROMPT });
+    await sleep(QUIET * 3);
+    expect(await writesSince(id, before)).toEqual([]);
+    // Still REPORTED - stopping the typing must not hide the block.
+    expect((await summary(client, id)).blockedPrompt.id).toBe('folder-trust');
   });
 
   test('a plain shell is never scanned, whatever its output', async () => {
