@@ -370,6 +370,37 @@ test.describe('#430 the CR goes out only against a highlight the screen SHOWS', 
     expect(hit.key).toBe(DOWN);
   });
 
+  test('NEGATIVE - a later caret drawn WITHOUT a CHA after it is unreadable, so no key', () => {
+    // Gate review: the reset redraw drawn as caret + CUF (or caret + space) instead of
+    // caret + CHA. The screen then shows the highlight on `No, exit`; reading it off the
+    // earlier caret+CHA redraw on `Yes` would send the CR that kills the agent.
+    const noCha = [
+      `${CR}${LF}${sgr}${CARET}${mv(1, 'C')}No, exit${off}`,                       // own line, CUF
+      `${CR}${LF}${sgr}${CARET} No, exit${off}`,                                   // own line, space
+      `${mv(1, 'C')}${mv(1, 'B')}${sgr}${CARET} No, exit${off}`,                   // same line as the redraw
+    ];
+    const base = TRUST + AFTER_RENDER + REDRAW_ON_YES.slice(0, REDRAW_ON_YES.indexOf(CR + LF));
+    for (const tail of noCha) {
+      expect(matchBlockingPrompt(base + tail, CFG).key).toBeNull();
+    }
+    // Positive control: without that tail, the same bytes confirm.
+    expect(matchBlockingPrompt(base, CFG).key).toBe(CR);
+  });
+
+  test('NEGATIVE - something printed on the FOOTER line itself means the dialog is gone', () => {
+    expect(matchBlockingPrompt(TRUST + `${CR}$ `, CFG).key).toBeNull();
+    expect(matchBlockingPrompt(TRUST + `${ESC}[2K`, CFG).key).toBeNull();
+    expect(matchBlockingPrompt(TRUST, CFG).key).toBe(DOWN);  // control
+  });
+
+  test('NEGATIVE - other ways of clearing the screen count as an erase', () => {
+    const onYes = TRUST + AFTER_RENDER + REDRAW_ON_YES;
+    expect(matchBlockingPrompt(onYes, CFG).key).toBe(CR);    // control
+    for (const clear of [`${ESC}[5X`, `${ESC}c`, `${ESC}[?2J`, `${ESC}[?1049l`]) {
+      expect(matchBlockingPrompt(onYes + clear, CFG).key).toBeNull();
+    }
+  });
+
   test('NEGATIVE - a highlight whose label is not an option presses nothing', () => {
     const odd = `${CR}${mv(1, 'C')}${mv(1, 'B')}${sgr}${CARET}${at(4)}Yes, I trust this folder and its parent${off}${CR}${LF}`;
     const hit = matchBlockingPrompt(TRUST + AFTER_RENDER + odd, CFG);

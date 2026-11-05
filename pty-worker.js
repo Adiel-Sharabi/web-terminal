@@ -1508,7 +1508,12 @@ const BLOCK_ANSWER_MAX_KEYS = 8;
 
 // Test-only shortening, the same shape as WT_READY_FALLBACK_MS: the worker specs must
 // finish inside ConPTY's ~3 s startup hold (#418), after which the real shell prints.
-const BLOCK_ANSWER_GAP_OVERRIDE_MS = Number(process.env.WT_BLOCK_ANSWER_GAP_MS) || 0;
+// Clamped: setTimeout reads anything past 2^31-1 (Infinity included) as 1 ms, which
+// would quietly bring the #430 race back.
+const BLOCK_ANSWER_GAP_OVERRIDE_MS = (() => {
+  const n = Number(process.env.WT_BLOCK_ANSWER_GAP_MS);
+  return Number.isFinite(n) && n > 0 ? Math.min(n, 60000) : 0;
+})();
 
 function armBlockingPromptAnswer(session, cfg) {
   const gap = BLOCK_ANSWER_GAP_OVERRIDE_MS > 0 ? BLOCK_ANSWER_GAP_OVERRIDE_MS

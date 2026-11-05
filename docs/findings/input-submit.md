@@ -822,9 +822,11 @@ The same window #404 measured for a prompt sent just after the composer.
 
 **Fix (`lib/blocking-prompt.js`, worker loop in `pty-worker.js`):** the answer is ONE key at a
 time, never a plan. The worker presses only after the screen has been quiet for `answerGapMs`
-(600 ms; any output restarts the wait) and re-matches the carry when it fires: an arrow while the
-highlight is elsewhere, the CR **only** when the latest redraw shows the highlight on the accepted
-row. The highlight is read from the LAST caret drawn (Claude moves it by rewriting two rows on one
+(600 ms; every chunk in which the dialog is still matched restarts the wait), waits for each key's
+own redraw (a chunk carrying the caret) before deciding the next, and re-matches the carry when it
+fires: an arrow while the highlight is elsewhere, the CR **only** when the latest redraw shows the
+highlight on the accepted row. A caret drawn after that redraw any other way (no CHA after it) makes
+the highlight unreadable, so nothing is pressed; so does a footer line with anything after it. The highlight is read from the LAST caret drawn (Claude moves it by rewriting two rows on one
 line with relative cursor moves, not a repaint), and the LAST dialog in the carry is the one on
 screen. `live` refuses any key once something prints after the dialog (the shell, after an exit)
 or it is erased (Claude erases it after the CR, before the next screen). At most 8 keys per

@@ -320,7 +320,7 @@ test.describe('#190 a startup selector holds the submit gate shut', () => {
   // WT_BLOCK_ANSWER_GAP_MS) so every case ends inside ConPTY's ~3 s startup hold (#418),
   // before the real shell under the session prints anything.
   // ---------------------------------------------------------------------------------
-  const QUIET = 200;
+  const QUIET = 300;
   const ON = { WT_AUTO_ANSWER_BLOCKING_PROMPT: '1', WT_BLOCK_ANSWER_GAP_MS: String(QUIET) };
   const writesSince = async (id, before) =>
     writesOf(await rpc(client, '__testGetWrites', { id })).slice(before);
@@ -331,12 +331,13 @@ test.describe('#190 a startup selector holds the submit gate shut', () => {
     const before = writesOf(await rpc(client, '__testGetWrites', { id })).length;
 
     await rpc(client, '__testInjectOutput', { id, data: TRUST_DIALOG + AFTER_RENDER });
-    await sleep(QUIET / 2);
+    await sleep(QUIET * 0.75);
     // More output - the query round Claude sends with the dialog - restarts the wait.
     await rpc(client, '__testInjectOutput', { id, data: STARTUP_QUERIES });
-    await sleep(QUIET * 0.75);
-    // 1.25 x QUIET since the dialog, 0.75 x since the last output: a timer armed only
-    // by the FIRST sighting would have pressed already.
+    await sleep(QUIET * 0.6);
+    // ~1.35 x QUIET since the dialog, 0.6 x since the last output - about 100 ms of
+    // margin either way: a timer armed only by the FIRST sighting has pressed already,
+    // the restarted one has not.
     expect(await writesSince(id, before)).toEqual([]);
 
     await sleep(QUIET * 1.5);
@@ -387,6 +388,22 @@ test.describe('#190 a startup selector holds the submit gate shut', () => {
     await rpc(client, '__testInjectOutput', { id, data: REDRAW_ON_YES });
     await sleep(QUIET * 1.75);
     expect(await writesSince(id, before)).toEqual([DOWN, CR]);
+  });
+
+  test('#430 the agent becoming ready while a key is armed cancels it - nothing typed', async () => {
+    await start(ON);
+    const id = await claudeSession();
+    const before = writesOf(await rpc(client, '__testGetWrites', { id })).length;
+
+    await rpc(client, '__testInjectOutput', { id, data: TRUST_DIALOG + AFTER_RENDER });
+    await sleep(QUIET / 3);
+    // Answered by someone else before the key fires: a hook arrives, which forces the
+    // session ready (composerSeen) - the composer itself is not scanned until the
+    // autoCommand is written, ~3.7 s in, past this test's window.
+    await rpc(client, 'hookEvent', { id, event: 'UserPromptSubmit' });
+    await sleep(QUIET * 2);
+    expect(await writesSince(id, before)).toEqual([]);
+    expect((await summary(client, id)).blockedPrompt).toBeNull();
   });
 
   test('#430 an agent that exited to its SHELL is never typed into', async () => {
