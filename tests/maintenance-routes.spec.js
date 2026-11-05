@@ -340,6 +340,43 @@ test.describe('#359 restart hold - server', () => {
     expect((await status()).hold).toMatchObject({ reason: 'same worker spec' });
   });
 
+  test('#410: a yes still running work after NUDGE_AFTER_MS is asked about it ONCE, and status says what and since when', async () => {
+    // Real work under the PTY: the launch leaves a NATIVE program running behind the prompt.
+    // (An MSYS one like `sleep` is orphaned out of the Windows tree - its forked parent exits
+    // on exec - so the process snapshot cannot see it; a native one keeps a bash stub above it.)
+    const agent = await make(`maint-nudge-${Date.now()}`, { agent: 'claude', autoCommand: `${LAUNCH}; ping -n 120 127.0.0.1 > /dev/null &` });
+    await until(async () => (await rowOf(agent))?.agentReady === true, 'the agent to be ready');
+    const conv = crypto.randomUUID();
+    expect(await hook(agent, 'UserPromptSubmit', { session_id: conv, prompt: 'work' })).toBe(200);
+    expect(await hook(agent, 'Stop', { session_id: conv })).toBe(200);
+    await until(async () => (await rowOf(agent))?.status === 'idle', 'the agent to go idle');
+    // Said yes and its turn ended.
+    const now = Date.now();
+    const entry = { name: 'x', pid: null, agent: 'claude', promptedAt: now - 590000, deliveredAt: now - 589000, answeredAt: now - 580000, tries: 1, asks: 1, answer: 'yes', answerAt: now - 585000 };
+    const setHold = (over) => ctx.post('/api/test/maintenance-state', { data: { hold: { reason: 'nudge spec', startedAt: now - 1000, bootAt: null, sessions: { [agent]: { ...entry, ...over } } } } });
+    expect((await setHold({})).status()).toBe(200);
+    // The tick stamps busySince once the process snapshot shows the work (a snapshot taken
+    // before it started reads empty, and clears it).
+    await until(async () => { const r = await verdictOf(agent); return r?.state === 'busy' && r.busySince; }, 'the work to be seen', 45000);
+    expect((await verdictOf(agent)).nudgedAt).toBeNull(); // seen just now: not yet
+    // Backdate it past NUDGE_AFTER_MS: the next tick asks.
+    expect((await setHold({ busySince: now - 400000 })).status()).toBe(200);
+    const v = await until(async () => { const r = await verdictOf(agent); return r?.nudgedAt ? r : null; }, 'the follow-up', 30000);
+    expect(v).toMatchObject({ state: 'busy', busySince: now - 400000 });
+    expect(v.why).toMatch(/^said yes, but still running: ping\.exe pid \d+ since \d\d:\d\d; asked about it at \d\d:\d\d$/i);
+    // Matched before column 80: the echoed line wraps past it.
+    await until(async () => (await scrollbackOf(agent)).includes('Restart (nudge spec): you said yes, but'), 'the follow-up in the terminal');
+    // The agent takes it (its own tagged UserPromptSubmit), and its turn ends.
+    expect(await hook(agent, 'UserPromptSubmit', { session_id: conv, prompt: `${TAG} Restart (nudge spec): you said yes` })).toBe(200);
+    expect(await hook(agent, 'Stop', { session_id: conv })).toBe(200);
+    await until(async () => (await rowOf(agent))?.status === 'idle', 'the agent to go idle again');
+    // Still busy, idle at its composer, several ticks and past the unconfirmed window: never a second one.
+    await new Promise((r) => setTimeout(r, 10000));
+    const sb = await scrollbackOf(agent);
+    expect(sb.split('Restart (nudge spec): you said yes, but').length - 1).toBe(1);
+    expect(await verdictOf(agent)).toMatchObject({ state: 'busy', answer: 'yes' });
+  });
+
   test('the CLI drives the same routes, and its exit code is the answer', async () => {
     const { spawnSync } = require('child_process');
     const path = require('path');
