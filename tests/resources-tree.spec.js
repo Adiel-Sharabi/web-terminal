@@ -225,6 +225,20 @@ test.describe('parseSnapshotOutput — the wire format', () => {
   test('blank lines and short rows are skipped, not turned into NaN processes', () => {
     expect(parseSnapshotOutput('\r\n\r\nbroken|row\r\n7|1|a|1|2|3\r\n')).toHaveLength(1);
   });
+
+  test('#411 field 7 is a shell\'s command line, kept whole even when it contains |', () => {
+    // APPENDED last, so the six columns before it keep their meaning, and everything after
+    // the sixth separator is the command line - a pipeline inside it must not be cut.
+    const rows = parseSnapshotOutput('5|4|cmd.exe|1|2|3|cmd.exe /d /s /c "a | b"');
+    expect(rows[0].name).toBe('cmd.exe');
+    expect(rows[0].cpu100ns).toBe(3);
+    expect(rows[0].cmd).toBe('cmd.exe /d /s /c "a | b"');
+  });
+
+  test('#411 a row with no command line carries none (non-shells, or an unreadable one)', () => {
+    expect(parseSnapshotOutput('5|4|node.exe|1|2|3|')[0].cmd).toBeUndefined();
+    expect(parseSnapshotOutput('5|4|node.exe|1|2|3')[0].cmd).toBeUndefined();
+  });
 });
 
 test.describe('shapeReport — the API contract', () => {
@@ -580,6 +594,36 @@ test.describe('#165 the snapshot pair carries the memory counter', () => {
     expect(procs.length).toBeGreaterThan(0);
     // Unknown, never fabricated — the process rows survive, the pressure figure does not.
     expect(_peekCacheForTests().perf).toBeNull();
+  });
+});
+
+test.describe('#411 the REAL query carries a shell\'s command line, byte for byte', () => {
+  test('a cross-spawn-shaped cmd.exe we start reads back matching the agent\'s MCP shape', async () => {
+    // _setQueryForTests replaces the spawn, so only the real WMI query can show that the
+    // line the matcher sees is the line Windows recorded (quotes, carets and all).
+    test.skip(process.platform !== 'win32', 'the process query is Windows-only');
+    test.setTimeout(60000);
+    const { spawn, execFileSync } = require('child_process');
+    const { mcpLaunchFor } = require('../lib/agents');
+    // Exactly how cross-spawn launches a .cmd shim: verbatim args, every argument ^"-quoted.
+    const child = spawn(process.env.comspec || 'cmd.exe',
+      ['/d', '/s', '/c', '"ping ^"-n^" ^"30^" ^"127.0.0.1^""'],
+      { windowsVerbatimArguments: true, windowsHide: true, stdio: 'ignore' });
+    try {
+      _resetForTests();
+      const procs = await snapshot(Date.now());
+      expect(Array.isArray(procs)).toBe(true);
+      const row = (procs || []).find((p) => p.pid === child.pid);
+      expect(row, 'the spawned cmd.exe is in the snapshot').toBeTruthy();
+      expect(String(row && row.cmd)).toContain('/d /s /c "ping ^"-n^" ^"30^" ^"127.0.0.1^""');
+      expect(mcpLaunchFor('claude').mcpServerShell.test(String(row && row.cmd))).toBe(true);
+      // Non-shells carry no command line - the snapshot does not grow by every argv.
+      expect((procs || []).filter((p) => /^node(\.exe)?$/i.test(p.name)).every((p) => p.cmd === undefined)).toBe(true);
+    } finally {
+      // Only the pid this test recorded, with its tree (the ping below it).
+      try { execFileSync('taskkill', ['/PID', String(child.pid), '/T', '/F'], { windowsHide: true, stdio: 'ignore' }); } catch { /* already gone */ }
+      _resetForTests();
+    }
   });
 });
 
