@@ -14,6 +14,12 @@ const snap = require('../scripts/phone-usage-snapshot');
 
 const linesOf = (file) => (fs.existsSync(file) ? fs.readFileSync(file, 'utf8') : '').split('\n').filter(Boolean).map((l) => JSON.parse(l));
 const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
+// Temp-dir cleanup is best effort: on a Windows runner a just-closed append handle can keep
+// the directory non-empty for a while (ENOTEMPTY); a leftover temp dir is not a test failure.
+function rmTmp(dir) {
+  try { fs.rmSync(dir, { recursive: true, force: true, maxRetries: 20, retryDelay: 100 }); } catch { /* left for the OS */ }
+}
+
 async function until(fn, what, ms = 20000) {
   const end = Date.now() + ms;
   for (;;) {
@@ -77,7 +83,7 @@ test.describe('#425 bounded append', () => {
       expect(fs.statSync(file).size).toBeLessThanOrEqual(200);
       fs.writeFileSync(path.join(dir, 'blocker'), '');
       expect(() => usageLog.appendRecord(path.join(dir, 'blocker', 'a.jsonl'), { a: 1 })).not.toThrow(); // a file used as a directory
-    } finally { fs.rmSync(dir, { recursive: true, force: true, maxRetries: 20, retryDelay: 50 }); }
+    } finally { rmTmp(dir); }
   });
 });
 
@@ -90,7 +96,9 @@ test.describe('#425 bounded append - correctness', () => {
       await sleep(50);
       usageLog.appendRecord(file, { p: 'é'.repeat(30) }, 100);
       await until(() => fs.existsSync(`${file}.1`), 'a byte-counted rollover');
-    } finally { fs.rmSync(dir, { recursive: true, force: true, maxRetries: 20, retryDelay: 50 }); }
+      // the second record lands in a NEW file after the roll; wait for it, or cleanup races that append
+      await until(() => fs.existsSync(file) && fs.statSync(file).size > 0, 'the post-rollover append');
+    } finally { rmTmp(dir); }
   });
   test('a rename that fails for a real reason is reported once and the counter is NOT reset', async () => {
     const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'wt-usage-'));
@@ -110,7 +118,8 @@ test.describe('#425 bounded append - correctness', () => {
       fs.rmSync(`${file}.1`, { recursive: true, force: true });
       usageLog.appendRecord(file, { i: 3, pad: 'x'.repeat(40) }, 100); // counter still over the cap: rolls at once
       await until(() => fs.existsSync(`${file}.1`) && fs.statSync(`${file}.1`).isFile(), 'the retried rollover');
-    } finally { console.error = orig; fs.rmSync(dir, { recursive: true, force: true, maxRetries: 20, retryDelay: 50 }); }
+      await until(() => fs.existsSync(file) && fs.statSync(file).size > 0, 'the post-rollover append');
+    } finally { console.error = orig; rmTmp(dir); }
   });
 });
 
@@ -182,7 +191,7 @@ test.describe('#425 phone usage snapshot', () => {
       expect(r.status).toBe(1);
       expect(r.stderr).toContain('phone-usage-snapshot:');
       expect(fs.existsSync(out)).toBe(false);
-    } finally { fs.rmSync(dir, { recursive: true, force: true, maxRetries: 20, retryDelay: 50 }); }
+    } finally { rmTmp(dir); }
   });
 });
 
