@@ -77,7 +77,7 @@ test.describe('#425 bounded append', () => {
       expect(fs.statSync(file).size).toBeLessThanOrEqual(200);
       fs.writeFileSync(path.join(dir, 'blocker'), '');
       expect(() => usageLog.appendRecord(path.join(dir, 'blocker', 'a.jsonl'), { a: 1 })).not.toThrow(); // a file used as a directory
-    } finally { fs.rmSync(dir, { recursive: true, force: true }); }
+    } finally { fs.rmSync(dir, { recursive: true, force: true, maxRetries: 20, retryDelay: 50 }); }
   });
 });
 
@@ -90,7 +90,7 @@ test.describe('#425 bounded append - correctness', () => {
       await sleep(50);
       usageLog.appendRecord(file, { p: 'é'.repeat(30) }, 100);
       await until(() => fs.existsSync(`${file}.1`), 'a byte-counted rollover');
-    } finally { fs.rmSync(dir, { recursive: true, force: true }); }
+    } finally { fs.rmSync(dir, { recursive: true, force: true, maxRetries: 20, retryDelay: 50 }); }
   });
   test('a rename that fails for a real reason is reported once and the counter is NOT reset', async () => {
     const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'wt-usage-'));
@@ -110,7 +110,7 @@ test.describe('#425 bounded append - correctness', () => {
       fs.rmSync(`${file}.1`, { recursive: true, force: true });
       usageLog.appendRecord(file, { i: 3, pad: 'x'.repeat(40) }, 100); // counter still over the cap: rolls at once
       await until(() => fs.existsSync(`${file}.1`) && fs.statSync(`${file}.1`).isFile(), 'the retried rollover');
-    } finally { console.error = orig; fs.rmSync(dir, { recursive: true, force: true }); }
+    } finally { console.error = orig; fs.rmSync(dir, { recursive: true, force: true, maxRetries: 20, retryDelay: 50 }); }
   });
 });
 
@@ -182,7 +182,7 @@ test.describe('#425 phone usage snapshot', () => {
       expect(r.status).toBe(1);
       expect(r.stderr).toContain('phone-usage-snapshot:');
       expect(fs.existsSync(out)).toBe(false);
-    } finally { fs.rmSync(dir, { recursive: true, force: true }); }
+    } finally { fs.rmSync(dir, { recursive: true, force: true, maxRetries: 20, retryDelay: 50 }); }
   });
 });
 
