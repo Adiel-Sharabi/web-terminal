@@ -657,6 +657,17 @@ test.describe('/api/version', () => {
     await ctx.dispose();
   });
 
+  // #428 - the companion's Leases section asks only a server advertising `leases`: an
+  // older server's 404 must never read as "nobody holds anything".
+  // The suite server has no leases.authority, so it must NOT advertise it (every read
+  // would be a 503); lease-routes.spec.js asserts the configured case.
+  test('does not advertise leases without a lease authority', async () => {
+    const ctx = await authCtx();
+    const data = await (await ctx.get('/api/version')).json();
+    expect(data.capabilities).not.toContain('leases');
+    await ctx.dispose();
+  });
+
   // A hot reload restarts server.js and leaves the WORKER running, so `version` and
   // `worker` move independently — a worker-side feature can be merged, pulled, and
   // reported shipped while the old worker runs on inertly. #185 hit exactly that

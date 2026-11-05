@@ -144,6 +144,8 @@ test.describe.serial('cluster resource leases across two servers (#412)', () => 
     const queued = await ra.json();
     expect(queued).toMatchObject({ granted: false, lease: { state: 'queued', position: 1, holder: { server: 'alpha', sessionId: sA } } });
     // The dashboard, read through the PEER (forwarded): who holds, who waits.
+    // #428 - both advertise it, so the companion asks them.
+    for (const c of [a, b]) expect((await (await c.get('/api/version')).json()).capabilities).toContain('leases');
     const list = await (await b.get('/api/leases')).json();
     const row = list.resources.find((x) => x.resource === 'vm:X');
     expect(list.authority).toBe('alpha');

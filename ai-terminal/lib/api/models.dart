@@ -2760,3 +2760,141 @@ class ClaudeAccountStatus {
     );
   }
 }
+
+/// One lease as the lease authority shows it (`GET /api/leases`, #412), for the
+/// board's Leases section (#428). Display only: release is holder-only on the server.
+///
+/// Times are on THIS device's clock: the authority's own `now` travels with the
+/// answer, so each instant is moved by (device now - authority now) when parsed and a
+/// skewed clock on either side never shows a lease as held for minutes it was not.
+class Lease {
+  final String id;
+  final String resource;
+
+  /// Held (the one holder) or queued (a waiter).
+  final bool held;
+
+  /// 1-based place in line for a waiter; 0 for the holder.
+  final int position;
+
+  /// The holder's machine, as its own server named itself; null when not stamped.
+  final String? server;
+
+  /// The holder's session (lower-case UUID); null for a script that took the lease
+  /// without one and keeps it with heartbeats.
+  final String? sessionId;
+  final String? role;
+
+  /// Granted (held) or asked (waiting), as a local epoch in ms.
+  final int? sinceMs;
+
+  /// When a held lease runs out unless its holder extends it, as a local epoch in ms.
+  final int? expiresMs;
+
+  const Lease({
+    required this.id,
+    required this.resource,
+    required this.held,
+    this.position = 0,
+    this.server,
+    this.sessionId,
+    this.role,
+    this.sinceMs,
+    this.expiresMs,
+  });
+
+  static Lease? fromJson(dynamic json, {required int skewMs}) {
+    if (json is! Map) return null;
+    final id = json['id'];
+    final resource = json['resource'];
+    if (id is! String || resource is! String) return null;
+    final held = json['state'] == 'held';
+    final holder = json['holder'] is Map ? json['holder'] as Map : const {};
+    int? local(dynamic v) {
+      final n = _asInt(v);
+      return n == null ? null : n + skewMs;
+    }
+
+    final server = holder['server'];
+    final sid = holder['sessionId'];
+    final role = json['role'];
+    return Lease(
+      id: id,
+      resource: resource,
+      held: held,
+      position: _asInt(json['position']) ?? 0,
+      server: server is String && server.isNotEmpty ? server : null,
+      sessionId: sid is String && sid.isNotEmpty ? sid.toLowerCase() : null,
+      role: role is String && role.isNotEmpty ? role : null,
+      sinceMs: local(held ? json['grantedAt'] : json['requestedAt']),
+      expiresMs: held ? local(json['expiresAt']) : null,
+    );
+  }
+}
+
+/// One resource in the lease table: who holds it and who waits, in line order.
+class LeaseResource {
+  final String resource;
+  final Lease? holder;
+  final List<Lease> queue;
+  const LeaseResource({required this.resource, this.holder, this.queue = const []});
+}
+
+/// The authority's answer to `GET /api/leases` (#412): every resource someone holds or
+/// waits for. Any server answers by forwarding to the authority; when the authority
+/// cannot be reached the server says so (503), which is never this empty listing.
+class LeaseListing {
+  /// The authority's server name.
+  final String? authority;
+  final List<LeaseResource> resources;
+  const LeaseListing({this.authority, this.resources = const []});
+
+  int get heldCount => resources.where((r) => r.holder != null).length;
+  int get waitingCount => resources.fold(0, (n, r) => n + r.queue.length);
+
+  /// Every lease [sessionId] holds or waits for, holders first.
+  List<Lease> forSession(String sessionId) {
+    final id = sessionId.toLowerCase();
+    return [
+      for (final r in resources)
+        if (r.holder?.sessionId == id) r.holder!,
+      for (final r in resources)
+        for (final w in r.queue)
+          if (w.sessionId == id) w,
+    ];
+  }
+
+  /// The resource [lease] is held or waited for on.
+  LeaseResource? resourceOf(Lease lease) {
+    for (final r in resources) {
+      if (r.resource == lease.resource) return r;
+    }
+    return null;
+  }
+
+  /// Null when the body is not a listing: a malformed answer is unknown, never "none".
+  /// [receivedAt] is this device's clock when the answer arrived.
+  static LeaseListing? fromJson(dynamic json, {required DateTime receivedAt}) {
+    if (json is! Map || json['resources'] is! List) return null;
+    final authNow = _asInt(json['now']);
+    final skew = authNow == null ? 0 : receivedAt.millisecondsSinceEpoch - authNow;
+    final out = <LeaseResource>[];
+    for (final r in json['resources'] as List) {
+      if (r is! Map || r['resource'] is! String) continue;
+      final queue = r['queue'] is List
+          ? (r['queue'] as List).map((q) => Lease.fromJson(q, skewMs: skew)).whereType<Lease>().toList()
+          : <Lease>[];
+      queue.sort((a, b) => a.position.compareTo(b.position));
+      out.add(LeaseResource(
+        resource: r['resource'] as String,
+        holder: Lease.fromJson(r['holder'], skewMs: skew),
+        queue: List.unmodifiable(queue),
+      ));
+    }
+    final authority = json['authority'];
+    return LeaseListing(
+      authority: authority is String && authority.isNotEmpty ? authority : null,
+      resources: List.unmodifiable(out),
+    );
+  }
+}

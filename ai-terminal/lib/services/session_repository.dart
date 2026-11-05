@@ -154,6 +154,9 @@ class SessionRepository {
   /// Per-server `claude-account` capability (#389), from the same call.
   final Map<String, bool> _claudeAccountSupported = <String, bool>{};
 
+  /// Per-server `leases` capability (#428), from the same call.
+  final Map<String, bool> _leasesSupported = <String, bool>{};
+
   /// Per-server `session-handoff` capability (#340), from the same call.
   final Map<String, bool> _handoffSupported = <String, bool>{};
 
@@ -345,6 +348,9 @@ class SessionRepository {
 
   /// Whether the server at [baseUrl] can read and switch its machine's Claude login (#389).
   bool supportsClaudeAccount(String baseUrl) => _claudeAccountSupported[baseUrl] ?? false;
+
+  /// Whether the server at [baseUrl] answers `GET /api/leases` (#412; shown by #428).
+  bool supportsLeases(String baseUrl) => _leasesSupported[baseUrl] ?? false;
 
   /// Whether the server at [baseUrl] can hand a session off to a fresh one (#340).
   bool supportsHandoff(String baseUrl) => _handoffSupported[baseUrl] ?? false;
@@ -665,6 +671,7 @@ class SessionRepository {
     _clearWaitSupported.remove(baseUrl);
     _machineSupported.remove(baseUrl);
     _claudeAccountSupported.remove(baseUrl);
+    _leasesSupported.remove(baseUrl);
     _handoffSupported.remove(baseUrl);
     _digestSupported.remove(baseUrl);
   }
@@ -1158,6 +1165,7 @@ class SessionRepository {
       _clearWaitSupported[server.baseUrl] = info.has('session-clear-wait');
       _machineSupported[server.baseUrl] = info.has('machine-profile');
       _claudeAccountSupported[server.baseUrl] = info.has('claude-account');
+      _leasesSupported[server.baseUrl] = info.has('leases');
       _handoffSupported[server.baseUrl] = info.has('session-handoff');
       _digestSupported[server.baseUrl] = info.has('inbox-digest');
       final color = info.serverColor;
