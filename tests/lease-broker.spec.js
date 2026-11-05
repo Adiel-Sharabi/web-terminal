@@ -343,6 +343,14 @@ test.describe('a failed lease forward is logged (#429)', () => {
     expect(f).toHaveLength(2);
     expect(f[1]).toMatch(/1 more/);
     expect(f[1]).toContain(L2.slice(0, 8));
+    // The same lease failing again is one subject, not a hint of others ("...").
+    clock.t += 15 * 1000;
+    for (let i = 0; i < 4; i++) await call(b.routes.heartbeat, { params: { id: LEASE }, body: {} });
+    clock.t += 61 * 1000;
+    await call(b.routes.heartbeat, { params: { id: LEASE }, body: {} });
+    const g = forwardLines(lines);
+    expect(g).toHaveLength(3);
+    expect(g[2]).toContain('(+4 more like it since the last line: lease 11111111)');
   });
 
   test('nothing a peer or a caller controls can forge a log line', async () => {
