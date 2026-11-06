@@ -137,7 +137,11 @@ points at the Terminal lens. Your draft stays in the box, because nothing was ev
 Answering it — or any hook from the agent — clears the block on its own.
 Typing the answer *for* you is a separate, opt-in setting
 (`autoAnswerBlockingPrompt`, **off** by default: trusting a folder is what decides
-whether an agent may execute what is in it).
+whether an agent may execute what is in it). Turned on, it answers yes to folder trust
+and to the external-`CLAUDE.md` imports prompt, one key at a time: it waits for the
+screen to settle, and confirms only when the screen shows the highlight on the yes
+row, so a dialog that resets its highlight while the agent is still starting up is
+never confirmed on `No, exit` (#430).
 
 **Sessions dashboard** — the ▦ button (in the companion app, the dashboard icon on the
 Sessions screen) opens every session on every server at once: the

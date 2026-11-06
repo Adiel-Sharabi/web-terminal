@@ -794,6 +794,54 @@ failure worse than the one being fixed.
 > `/exit`s leaves both believing it is up. Fixing that belongs in the worker, which is the
 > only component that sees the bytes; nothing here should try to guess it independently.
 
+### The auto-answer KILLED the agent: a key inside Claude's startup window is undone (#430)
+
+**Catalogue, 2026-10-22 .. 2026-11-05, worker logs on all four servers** (`blocking-prompt:` and
+`ready: ... fallback` lines): every session parked at a startup selector was **folder trust** —
+Home 7, XPS 3, Office 2, Office-Tests 0. No other member appeared. The sessions that hit the 45 s
+fallback with no selector reported (Home: a worker restart's 7 resumed sessions, one `--model`
+launch; Office: two) all went on to take prompts, so none of them was a security prompt.
+`autoAnswerBlockingPrompt` was turned on fleet-wide on 2026-11-05; Office's two parked sessions
+after that are the only auto-answer attempts, and **both ended with the agent gone**: the worker
+logged "auto-answering ... (row 0 -> 1)", 40 s later the selector was still reported (the report
+is never cleared on exit), and ten minutes later the stale carry re-matched and the worker typed
+Down + CR into the bash prompt the agent had exited to.
+
+**Reproduced on the rig, claude 2.1.318** (fresh cwd under `C:\`, outside every trusted tree):
+3/3 exited to bash through the real worker. Timed bytes: dialog drawn at t, Claude's query
+round (`ESC[>0q ESC[?u OSC 7501 ESC[c`) at t+1 ms, the worker's Down at once, a redraw with the
+highlight on `Yes` at t+5 ms — then **at t+153 ms a redraw with the highlight back on `No, exit`**,
+and the CR scheduled for t+600 ms confirmed it. With no key pressed there is no such redraw.
+Driven by hand (auto-answer off), the Down's delay after the dialog decides it:
+
+| Down after the dialog | 0–5 ms | 100 ms | 250 ms | 500 ms | 1000 ms |
+|---|---|---|---|---|---|
+| answered (trusted on disk, composer ready) | 0/4 | 0/3 | 3/3 | 3/3 | 2/2 |
+
+The same window #404 measured for a prompt sent just after the composer.
+
+**Fix (`lib/blocking-prompt.js`, worker loop in `pty-worker.js`):** the answer is ONE key at a
+time, never a plan. The worker presses only after the screen has been quiet for `answerGapMs`
+(600 ms; every chunk in which the dialog is still matched restarts the wait), waits for each key's
+own redraw (a chunk carrying the caret) before deciding the next, and re-matches the carry when it
+fires: an arrow while the highlight is elsewhere, the CR **only** when the latest redraw shows the
+highlight on the accepted row. A caret drawn after that redraw any other way (no CHA after it) makes
+the highlight unreadable, so nothing is pressed; so does a footer line with anything after it. The highlight is read from the LAST caret drawn (Claude moves it by rewriting two rows on one
+line with relative cursor moves, not a repaint), and the LAST dialog in the carry is the one on
+screen. `live` refuses any key once something prints after the dialog (the shell, after an exit)
+or it is erased (Claude erases it after the CR, before the next screen). At most 8 keys per
+session. **After the fix, on the rig:** 5/5 trusted and ready, and the trust → external-imports
+chain 3/3 (`hasTrustDialogAccepted` and `hasClaudeMdExternalIncludesApproved` both true).
+
+**The external-imports member, measured (2.1.318):** a project `CLAUDE.md` importing a file
+outside the project, in a just-trusted folder, shows `Allow external CLAUDE.md file imports?` with
+`❯ No, disable external imports` (default) / `Yes, allow external imports`; caret at column 3,
+labels at 5. An import of a file under an already-approved tree (`C:/dev/...`) does not show it.
+
+**Known gap, not fixed here:** a session whose agent exits at the selector keeps its stale
+`blockedPrompt` and its readiness latch (the same gap #147 records); with `live` the worker no
+longer types into it.
+
 ### A CLIENT gate does not cover a WORKER-originated write (#137/#138 × #147)
 
 **Law, as `CLAUDE.md` stated it until 2026-10-26** — moved here verbatim when `CLAUDE.md` became a one-line-per-rule digest. Frozen history: the digest line in `CLAUDE.md` is the only current law.
