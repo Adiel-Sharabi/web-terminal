@@ -222,18 +222,76 @@ just what each shape measured.
   like a single-select digit. `4,<text>,CR,1,→,CR` recorded both answers intact.
   The lift is **compact-only**, because compact is the only layout it was driven
   against.
-- **Multi-select — HOLDS.** The trailing row is a **checkbox** (`5. [✔] Type
-  something`) with no free-text input; the typed text is swallowed, and
-  submitting with only it checked records **`The user did not answer the
-  questions.`** — the whole answer comes back null, not merely textless.
+- **Multi-select — DID HOLD on 2.1.237/2.1.234, LIFTED on 2.1.319 (#423,
+  2026-11-07).** See "Multi-select free text and Chat about this" below: the
+  *digit* still only toggles the checkbox, but the *cursor* reaches a real inline
+  field.
 
 One consequence worth stating because it reads as a bug otherwise: **a card
 offers the note affordance or the `Other…` row, never both.** Notes are
 previewed-only, Other is compact-only, so "Other wins when both are set" is no
 longer a branch-order fact — the layout decides which one is eligible at all.
 
-Claude also renders a **`Chat about this`** row at `options.length + 2` that the
-overlay does not model at all.
+### Multi-select free text and `Chat about this` (#423, claude 2.1.319, 2026-11-07)
+
+Re-measured on the isolated rig, every verdict read from the transcript's
+`tool_result`. The 2.1.237 "HOLDS" bullet above no longer describes the TUI; a
+number here holds only for the agent version recorded.
+
+**Rows the terminal draws.** Multi-select (single question, or any tab):
+`1..n [ ] option`, `n+1 [ ] Type something`, an unnumbered nav row (**Next** on a
+non-last tab, **Submit** on the last or only tab), a separator, `n+2 Chat about
+this`. Compact single-select (one or many questions): `1..n`, `n+1 Type
+something.`, separator, `n+2 Chat about this`. Side-by-side: `1..n`, separator,
+an **unnumbered** `Chat about this`; no `Type something` row and no digit.
+
+**Multi-select free text WORKS, by cursor, not by digit.** The digit `n+1` only
+toggles the checkbox and leaves the cursor on row 1, so typed text is swallowed,
+and ticking it that way records `The user did not answer the questions.` (as on
+2.1.237). `Down` x n moves the cursor onto the row and it becomes an inline field
+(the footer gains `ctrl+g to edit in Notepad`). **Typing ticks it by itself.
+`Enter` on the row UN-ticks it. `Right-arrow` inside the field moves the caret.**
+`Down` (or `Tab`) leaves the field onto the unnumbered Next/Submit row; `CR` there
+goes to the next tab, or to Review on the last tab, where `1` or `CR` submits.
+Verified: `1,3 | Down x4 | ESC[200~hello thereESC[201~ | Down | CR | 1` recorded
+`"Pick fruits"="Apple, Cherry, hello there"` at gaps of 250 and 700 ms. Two
+multi-select tabs with text on both recorded `"Apple, note A"`, `"note B"`. Text
+on the last tab of `plain-mq` recorded `"hello there"`. A newline in the paste is
+recorded as a space. Bunching the text sequence is safe; bunching the tick digits
+loses them (also true of the existing non-text path, unchanged).
+`buildAnswerFrames` therefore emits ticks, `Down` x n, bracketed text, `Down`,
+`CR`, and `1` only for a single question (a several-question prompt's loop tail
+already adds the Review `CR`). **Never the digit `n+1`, never a `CR` or
+`Right-arrow` after the text.** The card offers `Other…` on every `!hasPreview`
+question and, in multi-select, combines it with the ticks.
+
+**`Chat about this` REJECTS the call** (`tool_result` is an error). Compact
+layouts number it `n+2` and the digit chooses it at once (plain-single n=3 -> 5;
+plain-multi n=4 -> 6; plain-mq Q1 -> 5, Q2 multi -> 6). Side-by-side numbers
+nothing: `Down` x n then `CR` (preview-single and preview-mq Q1, n=3). Picks
+already made ride along (`"Pick a color"` Answer: Green). The digit is relative
+to the tab the TUI is ON, so `buildChatFrames` replays the earlier tabs' picks
+first (and the current multi-select tab's ticks). Hooks: `UserPromptSubmit`,
+`PreToolUse`, then `Stop` about 1.9 s later; **no** `PostToolUse` and no
+`PostToolUseFailure`, so the server's `pendingQuestion` clears on `Stop` (already
+listed in `server.js`). Claude then asks what to clarify and goes idle. Two
+consequences in the app: the card is hidden by the host on send (the user then
+types in the chat bar), and **Chat never gets the re-sent Enter**
+(`answerNeedsConfirm`), because the question is still reported ~1 s after the
+first 0.9 s verify poll and a blind Enter would land in a prompt the user has
+begun to type in.
+
+**Design choices that are the app's, not the TUI's.** Chat is refused (greyed,
+tooltip says why) while an earlier tab is unanswered: replaying it would pick that
+tab's top row and send Claude an answer nobody gave, and the way past an
+unanswered single-select tab was not measured. It lives in the card header, not
+as a row in the option list: a list row is charged to the options' natural
+height, which on a phone comes out of the lead-up, and measurably collapsed it
+and overflowed the card by 2 px in the #94 height tests.
+
+**Not measured:** `Esc` inside the field; returning to a tab already left; a
+resent card onto a TUI that has already advanced (#383); `Right-arrow` as a way
+past an unanswered single-select tab.
 
 Shapes for `scripts/rig/probe-askq-layout.js`: `preview-mq`, `plain-mq`,
 `preview-single`, plus `plain-single`, `plain-multi` and `plain-mq2` (two

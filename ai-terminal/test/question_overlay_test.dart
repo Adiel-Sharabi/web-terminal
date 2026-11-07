@@ -339,40 +339,27 @@ void main() {
           ['3', '\x1b[200~first line\nsecond line\x1b[201~', '\r']);
     });
 
-    test('only the Other text frame is bracketed: preview, multi-select and '
-        'plain digit paths are unchanged (#383)', () {
+    test('only the Other text frame is bracketed: preview and plain digit '
+        'paths are unchanged (#383)', () {
       final preview = buildAnswerFrames(
           [_q(['A', 'B'], preview: true)], [<int>{1}],
           otherText: const ['ignored']);
-      final multi = buildAnswerFrames(
-          [_q(['A', 'B', 'C'], multi: true)], [<int>{0, 2}],
+      // A multi-select question WITH a preview is not a layout the TUI draws, but
+      // hasPreview is the only layout decider here: Other never applies to it.
+      final multiPreview = buildAnswerFrames(
+          [_q(['A', 'B', 'C'], multi: true, preview: true)], [<int>{0, 2}],
           otherText: const ['ignored']);
       final plain = buildAnswerFrames([_q(['A', 'B'])], [<int>{1}]);
       final note = buildAnswerFrames(
           [_q(['A', 'B'], preview: true)], [<int>{1}],
           noteText: const ['a note']);
-      for (final f in [preview, multi, plain, note]) {
+      for (final f in [preview, multiPreview, plain, note]) {
         expect(_keys(f).any((k) => k.contains('\x1b[200~')), isFalse);
       }
       expect(_keys(preview), ['2', '\r']);
-      expect(_keys(multi), ['1', '3', '\x1b[C', '1']);
+      expect(_keys(multiPreview), ['1', '3', '\x1b[C', '1']);
       expect(_keys(plain), ['2', '\r']);
       expect(_keys(note), ['\x1b[B', 'n', 'a note', '\x1b', '\r']);
-    });
-
-    test('multi-select ignores Other entirely (no free-text path)', () {
-      // On-device: in multi-select the "Type something." row is a CHECKBOX —
-      // digit N+1 only toggles it, it does NOT open a free-text input and any
-      // typed text is discarded. So Other is not offered for multi-select and
-      // buildAnswerFrames must ignore otherText here, emitting the normal
-      // toggle+confirm frames instead.
-      final qs = [_q(['A', 'B', 'C'], multi: true)];
-      expect(
-        _keys(buildAnswerFrames(qs, [
-          {0, 2}
-        ], otherText: const ['custom'])),
-        ['1', '3', '\x1b[C', '1'],
-      );
     });
 
     test('blank/whitespace Other falls back to the numeric selection', () {
@@ -444,19 +431,18 @@ void main() {
           ['1', '4', '\x1b[200~extra large please\x1b[201~', '\r', '\r']);
     });
 
-    // #143 — re-measured and the deferral HOLDS, so this is now un-skipped and
-    // pins real, verified behaviour rather than an intention.
-    test('multi-select + Other stays deferred: the checkbox row has no '
-        'free-text input (#143 — re-measured, deferral holds)', () {
-      // Measured on claude 2.1.234: pressing the trailing row's digit CHECKS a
-      // box ("5. [x] Type something") rather than opening a field, and the
-      // typed text is swallowed. Submitting with only that row checked records
-      // "The user did not answer the questions." — the WHOLE answer comes back
-      // null, which is worse than merely losing the text. So buildAnswerFrames
-      // must never emit the free-text path for a multi-select question.
+    // #423 — the #143 deferral ("multi-select + Other stays deferred") was
+    // re-measured on claude 2.1.319 and no longer holds: the DIGIT still only
+    // toggles the row's checkbox (and ticking only that records "The user did not
+    // answer the questions."), but the CURSOR reaches a real inline field. The
+    // tests of the new sequence are in the group 'multi-select Other (#423)'
+    // below; this one pins what must STILL be true, the digit never being used.
+    test('multi-select + Other never uses the row digit (#423)', () {
       final qs = [_q(['A', 'B', 'C'], multi: true)];
       final frames = buildAnswerFrames(qs, [<int>{}], otherText: const ['x']);
-      expect(_keys(frames), isNot(contains('x')));
+      expect(_keys(frames), isNot(contains('4')),
+          reason: 'digit options.length+1 only toggles the checkbox');
+      expect(_keys(frames), contains('\x1b[200~x\x1b[201~'));
     });
 
     // ---------------------------------------------------------------- #143
@@ -1804,33 +1790,585 @@ void main() {
     });
   });
 
-  testWidgets('Other row is not offered for a multi-select question',
-      (tester) async {
-    // Multi-select's "Type something." row is a TUI checkbox that never opens a
-    // free-text input (on-device verified), so the overlay must not offer Other.
-    await tester.pumpWidget(
-      MaterialApp(
-        theme: AppTheme.dark,
-        home: Scaffold(
-          body: Stack(
-            children: [
-              QuestionOverlay(
-                question: PendingQuestion(
-                  toolUseId: 'ms1',
-                  questions: [_q(['Alpha', 'Beta', 'Gamma'], multi: true)],
-                ),
-                onSend: (_) {},
-                onKey: (_) {},
-                onDismiss: () {},
-              ),
+  // ------------------------------------------------------------------- #423
+  // Multi-select free text and "Chat about this". Measured on claude 2.1.319 on
+  // the isolated rig, every verdict read from the transcript's tool_result (the
+  // evidence is in docs/findings/questions.md). Before this the card showed a
+  // multi-select question's checkboxes and nothing else: no free text, no Chat.
+  group('multi-select Other frames (#423)', () {
+    const down = '\x1b[B';
+    const pasted = '\x1b[200~hello there\x1b[201~';
+
+    test('ticks, Down x n, bracketed text, Down, CR, then Review "1"', () {
+      // Verified end to end: 1,3 | Down x4 | ESC[200~hello thereESC[201~ | Down |
+      // CR | 1 recorded "Apple, Cherry, hello there".
+      final qs = [_q(['Apple', 'Banana', 'Cherry', 'Date'], multi: true)];
+      final frames = buildAnswerFrames(qs, [
+        {0, 2}
+      ], otherText: const ['hello there']);
+      expect(_keys(frames),
+          ['1', '3', down, down, down, down, pasted, down, '\r', '1']);
+      final text = frames.singleWhere((f) => f.other);
+      expect(text.text, isTrue);
+      expect(text.keys, pasted);
+    });
+
+    test('no row digit, no CR and no Right-arrow before or after the text', () {
+      // The digit n+1 only toggles the checkbox and the text is swallowed; Enter
+      // on the row UN-ticks it; Right-arrow inside the field only moves the caret.
+      final qs = [_q(['Apple', 'Banana', 'Cherry', 'Date'], multi: true)];
+      final keys = _keys(buildAnswerFrames(qs, [
+        {0, 2}
+      ], otherText: const ['hello there']));
+      final at = keys.indexOf(pasted);
+      expect(at, greaterThan(0));
+      final before = keys.sublist(0, at);
+      expect(before, isNot(contains('5')), reason: 'the n+1 digit');
+      expect(before, isNot(contains('\r')), reason: 'Enter un-ticks the row');
+      expect(before, isNot(contains('\x1b[C')));
+      expect(keys.sublist(at + 1), isNot(contains('\x1b[C')),
+          reason: 'Right-arrow in the field moves the caret');
+    });
+
+    test('Other alone (nothing ticked) is a whole answer', () {
+      final qs = [_q(['A', 'B', 'C'], multi: true)];
+      expect(
+        _keys(buildAnswerFrames(qs, [<int>{}], otherText: const ['hello there'])),
+        [down, down, down, pasted, down, '\r', '1'],
+      );
+    });
+
+    test('the cursor moves and the text each get their own read', () {
+      final frames = buildAnswerFrames([_q(['A', 'B'], multi: true)], [
+        {0}
+      ], otherText: const ['hello there']);
+      final at = frames.indexWhere((f) => f.other);
+      for (final f in frames.sublist(1)) {
+        expect(f.delayMs, greaterThanOrEqualTo(500), reason: f.keys);
+      }
+      expect(frames[at - 1].keys, down);
+      expect(frames[at + 1].keys, down);
+    });
+
+    test('in a several-question prompt the loop tail submits Review: no "1"',
+        () {
+      // Verified: text on the last tab of plain-mq recorded "hello there".
+      final qs = [
+        _q(['A', 'B']),
+        _q(['W', 'X', 'Y', 'Z'], multi: true),
+      ];
+      expect(
+        _keys(buildAnswerFrames(qs, [
+          {1},
+          <int>{}
+        ], otherText: const [null, 'hello there'])),
+        ['2', down, down, down, down, pasted, down, '\r', '\r'],
+      );
+    });
+
+    test('two multi-select tabs with text on both (measured: both recorded)',
+        () {
+      final qs = [
+        _q(['A', 'B', 'C'], multi: true),
+        _q(['X', 'Y', 'Z'], multi: true),
+      ];
+      expect(
+        _keys(buildAnswerFrames(qs, [
+          <int>{},
+          <int>{}
+        ], otherText: const ['note A', 'note B'])),
+        [
+          down, down, down, '\x1b[200~note A\x1b[201~', down, '\r',
+          down, down, down, '\x1b[200~note B\x1b[201~', down, '\r',
+          '\r',
+        ],
+      );
+    });
+
+    test('blank Other keeps the ticks path', () {
+      final qs = [_q(['A', 'B', 'C'], multi: true)];
+      final expected = ['1', '3', '\x1b[C', '1'];
+      expect(
+          _keys(buildAnswerFrames(qs, [
+            {0, 2}
+          ], otherText: const ['   '])),
+          expected);
+      expect(
+          _keys(buildAnswerFrames(qs, [
+            {0, 2}
+          ])),
+          expected);
+    });
+
+    test('single-select Other is untouched (digit, text, CR)', () {
+      expect(
+        _keys(buildAnswerFrames([_q(['A', 'B', 'C'])], [<int>{}],
+            otherText: const ['hello there'])),
+        ['4', pasted, '\r'],
+      );
+    });
+
+    group('answerNeedsConfirm', () {
+      test('a lone multi-select Other ends in "1": no blind Enter', () {
+        final frames = buildAnswerFrames([_q(['A', 'B'], multi: true)], [
+          {0}
+        ], otherText: const ['x']);
+        expect(frames.last.keys, '1');
+        expect(answerNeedsConfirm(frames), isFalse);
+      });
+
+      test('multi-select Other on the LAST tab keeps the resend', () {
+        final frames = buildAnswerFrames(
+            [_q(['A', 'B']), _q(['X', 'Y'], multi: true)],
+            [
+              {0},
+              {1}
             ],
+            otherText: const [null, 'typed']);
+        expect(answerNeedsConfirm(frames), isTrue);
+      });
+
+      test('multi-select Other on a NON-last tab: no resend, the next tab rides '
+          'behind its CR', () {
+        final frames = buildAnswerFrames(
+            [_q(['X', 'Y'], multi: true), _q(['A', 'B'])],
+            [
+              {1},
+              {0}
+            ],
+            otherText: const ['typed', null]);
+        expect(frames.last.keys, '\r');
+        expect(answerNeedsConfirm(frames), isFalse);
+      });
+    });
+  });
+
+  group('buildChatFrames (#423)', () {
+    const down = '\x1b[B';
+
+    test('compact: the digit options.length + 2, once, no Enter', () {
+      // Measured: plain-single n=3 -> 5; plain-multi n=4 -> 6.
+      final single = buildChatFrames([_q(['A', 'B', 'C'])], [<int>{}], 0)!;
+      expect(_keys(single), ['5']);
+      expect(single.last.chat, isTrue);
+      final multi = buildChatFrames(
+          [_q(['A', 'B', 'C', 'D'], multi: true)], [<int>{}], 0)!;
+      expect(_keys(multi), ['6']);
+      expect(multi.last.chat, isTrue);
+    });
+
+    test('side-by-side: NO digit exists, Down x options.length then Enter', () {
+      final frames = buildChatFrames(
+          [_q(['A', 'B', 'C'], preview: true)], [<int>{}], 0)!;
+      expect(_keys(frames), [down, down, down, '\r']);
+      expect(frames.last.chat, isTrue);
+      expect(frames.last.delayMs, greaterThanOrEqualTo(500));
+    });
+
+    test('hasPreview alone decides the layout, not the option count or the '
+        'select mode', () {
+      expect(
+          _keys(buildChatFrames(
+              [_q(['A', 'B'], preview: true)], [<int>{}], 0)!),
+          [down, down, '\r']);
+      expect(_keys(buildChatFrames([_q(['A', 'B'])], [<int>{}], 0)!), ['4']);
+    });
+
+    test('a multi-select tab keeps the ticks made on it; a single-select pick '
+        'is not replayed (its digit would submit)', () {
+      expect(
+          _keys(buildChatFrames([_q(['A', 'B', 'C'], multi: true)], [
+            {0, 2}
+          ], 0)!),
+          ['1', '3', '5']);
+      expect(
+          _keys(buildChatFrames([_q(['A', 'B', 'C'])], [
+            {1}
+          ], 0)!),
+          ['5']);
+    });
+
+    test('from tab t it replays tabs 0..t-1 first, then chats', () {
+      final qs = [
+        _q(['A', 'B']), // compact single: digit advances
+        _q(['X', 'Y', 'Z'], preview: true), // side-by-side: digit then Enter
+        _q(['P', 'Q']), // the tab we chat from: n=2 -> 4
+      ];
+      final sel = [
+        {1},
+        {2},
+        <int>{}
+      ];
+      expect(_keys(buildChatFrames(qs, sel, 2)!), ['2', '3', '\r', '4']);
+      expect(_keys(buildChatFrames(qs, sel, 1)!),
+          ['2', down, down, down, '\r']);
+      expect(_keys(buildChatFrames(qs, sel, 0)!), ['4'],
+          reason: 'tab 0 has two options: n + 2');
+    });
+
+    test('a multi-select tab before it is advanced with Right-arrow, and the '
+        'Review Enter is never sent', () {
+      final qs = [_q(['A', 'B', 'C'], multi: true), _q(['X', 'Y'])];
+      final keys = _keys(buildChatFrames(qs, [
+        {0, 2},
+        <int>{}
+      ], 1)!);
+      expect(keys, ['1', '3', '\x1b[C', '4']);
+      expect(keys, isNot(contains('\r')));
+    });
+
+    test('an earlier tab answered with Other text is replayed as Other', () {
+      final qs = [_q(['A', 'B']), _q(['X', 'Y'])];
+      expect(
+        _keys(buildChatFrames(qs, [
+          <int>{},
+          <int>{}
+        ], 1, otherText: const ['mine', null])!),
+        ['3', '\x1b[200~mine\x1b[201~', '\r', '4'],
+      );
+    });
+
+    test('null when an earlier tab has no answer: nothing is guessed', () {
+      final qs = [_q(['A', 'B']), _q(['X', 'Y']), _q(['P', 'Q'])];
+      final sel = [
+        {0},
+        <int>{},
+        <int>{}
+      ];
+      expect(buildChatFrames(qs, sel, 2), isNull,
+          reason: 'tab 1 is unanswered, so replaying it would pick its top row');
+      expect(buildChatFrames(qs, sel, 1), isNotNull);
+      expect(buildChatFrames(qs, [<int>{}, <int>{}, <int>{}], 0), isNotNull,
+          reason: 'tab 0 needs no replay');
+      expect(buildChatFrames(qs, sel, 3), isNull);
+    });
+
+    test('Chat never gets the re-sent Enter, even where it ends in Enter', () {
+      // Chat rejects the question; the server reports it gone on Claude's Stop,
+      // about 1.9 s after the key, later than the first verify poll.
+      final sideBySide = buildChatFrames(
+          [_q(['A', 'B', 'C'], preview: true)], [<int>{}], 0)!;
+      expect(sideBySide.last.keys, '\r');
+      expect(answerNeedsConfirm(sideBySide), isFalse);
+      expect(
+          answerNeedsConfirm(buildChatFrames([_q(['A', 'B'])], [<int>{}], 0)!),
+          isFalse);
+    });
+
+    test('no text frame is ever sent by Chat', () {
+      final frames = buildChatFrames(
+          [_q(['A', 'B']), _q(['X', 'Y'])],
+          [
+            {0},
+            <int>{}
+          ],
+          1)!;
+      expect(frames.any((f) => f.text), isFalse);
+    });
+  });
+
+  group('the card: multi-select Other (#423)', () {
+    Future<List<AnswerFrame>> pumpCard(
+        WidgetTester tester, List<PendingQuestionItem> qs) async {
+      final sent = <AnswerFrame>[];
+      tester.view.physicalSize = const Size(412 * 3, 915 * 3);
+      tester.view.devicePixelRatio = 3.0;
+      addTearDown(tester.view.reset);
+      await tester.pumpWidget(
+        MaterialApp(
+          theme: AppTheme.dark,
+          home: Scaffold(
+            body: Stack(
+              children: [
+                QuestionOverlay(
+                  question: PendingQuestion(toolUseId: 'ms-other', questions: qs),
+                  onSend: sent.addAll,
+                  onKey: (_) {},
+                  onDismiss: () {},
+                ),
+              ],
+            ),
           ),
         ),
-      ),
-    );
-    await tester.pumpAndSettle();
-    expect(find.text('Other…'), findsNothing);
-    expect(find.byType(TextField), findsNothing);
+      );
+      await tester.pumpAndSettle();
+      return sent;
+    }
+
+    testWidgets('Other is offered on a multi-select question and opens a field',
+        (tester) async {
+      await pumpCard(tester, [_q(['Alpha', 'Beta', 'Gamma'], multi: true)]);
+      expect(find.text('Other…'), findsOneWidget);
+      expect(find.byType(TextField), findsNothing);
+      await tester.tap(find.text('Other…'));
+      await tester.pumpAndSettle();
+      expect(find.byType(TextField), findsOneWidget);
+    });
+
+    testWidgets('Other COMBINES with the ticks, in either order, and the frames '
+        'carry both', (tester) async {
+      final sent = await pumpCard(
+          tester, [_q(['Alpha', 'Beta', 'Gamma'], multi: true)]);
+      await tester.tap(find.text('Alpha'));
+      await tester.pumpAndSettle();
+      await tester.tap(find.text('Other…'));
+      await tester.pumpAndSettle();
+      await tester.enterText(find.byType(TextField), 'hello there');
+      await tester.pumpAndSettle();
+      // Ticking another option afterwards must not close Other or lose its text.
+      await tester.tap(find.text('Gamma'));
+      await tester.pumpAndSettle();
+      expect(find.byType(TextField), findsOneWidget);
+      expect(
+          tester.widget<TextField>(find.byType(TextField)).controller!.text,
+          'hello there');
+
+      await tester.tap(find.widgetWithText(FilledButton, 'Send answer'));
+      await tester.pumpAndSettle();
+      expect(_keys(sent), [
+        '1', '3',
+        '\x1b[B', '\x1b[B', '\x1b[B',
+        '\x1b[200~hello there\x1b[201~',
+        '\x1b[B', '\r', '1',
+      ]);
+    });
+
+    testWidgets('Other alone enables Send; a second tap on Other turns it off',
+        (tester) async {
+      final sent = await pumpCard(
+          tester, [_q(['Alpha', 'Beta', 'Gamma'], multi: true)]);
+      expect(find.widgetWithText(FilledButton, 'Pick an option'), findsOneWidget);
+      await tester.tap(find.text('Other…'));
+      await tester.pumpAndSettle();
+      await tester.enterText(find.byType(TextField), 'only words');
+      await tester.pumpAndSettle();
+      expect(find.widgetWithText(FilledButton, 'Send answer'), findsOneWidget);
+
+      await tester.tap(find.text('Other…'));
+      await tester.pumpAndSettle();
+      expect(find.byType(TextField), findsNothing);
+      expect(find.widgetWithText(FilledButton, 'Pick an option'), findsOneWidget,
+          reason: 'off again, and nothing else is ticked');
+
+      // Turned back on, its words are still there.
+      await tester.tap(find.text('Other…'));
+      await tester.pumpAndSettle();
+      expect(
+          tester.widget<TextField>(find.byType(TextField)).controller!.text,
+          'only words');
+      await tester.tap(find.widgetWithText(FilledButton, 'Send answer'));
+      await tester.pumpAndSettle();
+      expect(_keys(sent).where((k) => k.contains('only words')),
+          ['\x1b[200~only words\x1b[201~']);
+    });
+
+    testWidgets('a single-select question is unchanged: picking an option '
+        'closes Other, and Other drops the pick', (tester) async {
+      await pumpCard(tester, [_q(['Alpha', 'Beta', 'Gamma'])]);
+      await tester.tap(find.text('Beta'));
+      await tester.pumpAndSettle();
+      await tester.tap(find.text('Other…'));
+      await tester.pumpAndSettle();
+      expect(find.byType(TextField), findsOneWidget);
+      expect(find.widgetWithText(FilledButton, 'Pick an option'), findsOneWidget,
+          reason: 'Other dropped the pick and has no words yet');
+      await tester.tap(find.text('Alpha'));
+      await tester.pumpAndSettle();
+      expect(find.byType(TextField), findsNothing);
+      expect(find.widgetWithText(FilledButton, 'Send answer'), findsOneWidget);
+    });
+
+    testWidgets('a previewed (side-by-side) card still offers NO Other',
+        (tester) async {
+      await pumpCard(tester, [_q(['Alpha', 'Beta', 'Gamma'], preview: true)]);
+      expect(find.text('Other…'), findsNothing);
+    });
+  });
+
+  group('the card: Chat about this (#423)', () {
+    Future<List<AnswerFrame>> pumpCard(
+        WidgetTester tester, List<PendingQuestionItem> qs,
+        {QuestionDrafts? drafts, String draftKey = ''}) async {
+      final sent = <AnswerFrame>[];
+      tester.view.physicalSize = const Size(412 * 3, 915 * 3);
+      tester.view.devicePixelRatio = 3.0;
+      addTearDown(tester.view.reset);
+      await tester.pumpWidget(
+        MaterialApp(
+          theme: AppTheme.dark,
+          home: Scaffold(
+            body: Stack(
+              children: [
+                QuestionOverlay(
+                  question: PendingQuestion(toolUseId: 'chat', questions: qs),
+                  onSend: sent.addAll,
+                  onKey: (_) {},
+                  onDismiss: () {},
+                  drafts: drafts,
+                  draftKey: draftKey,
+                ),
+              ],
+            ),
+          ),
+        ),
+      );
+      await tester.pumpAndSettle();
+      return sent;
+    }
+
+    final chat = find.byKey(const ValueKey('chat-about-this'));
+
+    bool chatEnabled(WidgetTester tester) =>
+        tester.widget<IconButton>(chat).onPressed != null;
+
+    testWidgets('compact: one digit, options.length + 2, sent at once',
+        (tester) async {
+      final sent = await pumpCard(tester, [_q(['Alpha', 'Beta', 'Gamma'])]);
+      expect(chatEnabled(tester), isTrue);
+      await tester.tap(chat);
+      await tester.pumpAndSettle();
+      expect(_keys(sent), ['5']);
+      expect(sent.last.chat, isTrue);
+    });
+
+    testWidgets('side-by-side: Down x options.length, then Enter',
+        (tester) async {
+      final sent = await pumpCard(
+          tester, [_q(['Alpha', 'Beta', 'Gamma'], preview: true)]);
+      await tester.tap(chat);
+      await tester.pumpAndSettle();
+      expect(_keys(sent), ['\x1b[B', '\x1b[B', '\x1b[B', '\r']);
+    });
+
+    testWidgets('multi-select: the ticks on the tab ride along', (tester) async {
+      final sent = await pumpCard(
+          tester, [_q(['Alpha', 'Beta', 'Gamma'], multi: true)]);
+      await tester.tap(find.text('Alpha'));
+      await tester.pumpAndSettle();
+      await tester.tap(chat);
+      await tester.pumpAndSettle();
+      expect(_keys(sent), ['1', '5']);
+    });
+
+    testWidgets('it needs no answer: the button works on a fresh card',
+        (tester) async {
+      await pumpCard(tester, [_q(['Alpha', 'Beta'], multi: true)]);
+      expect(find.widgetWithText(FilledButton, 'Pick an option'), findsOneWidget);
+      expect(chatEnabled(tester), isTrue);
+    });
+
+    testWidgets('from a later tab it replays the earlier tabs; with one '
+        'unanswered it is greyed and says why', (tester) async {
+      final sent = await pumpCard(tester, [
+        _q(['Red', 'Green'], header: 'Colour'),
+        _q(['Apple', 'Pear', 'Fig'], header: 'Fruit'),
+      ]);
+      // On tab 0 it needs no replay.
+      expect(chatEnabled(tester), isTrue);
+
+      await tester.tap(find.byType(ChoiceChip).at(1));
+      await tester.pumpAndSettle();
+      expect(chatEnabled(tester), isFalse,
+          reason: 'tab 0 is unanswered; replaying it would pick Red');
+      expect(find.byTooltip('Chat about this (answer the earlier questions first)'),
+          findsOneWidget);
+      await tester.tap(chat, warnIfMissed: false);
+      expect(sent, isEmpty);
+
+      await tester.tap(find.byType(ChoiceChip).at(0));
+      await tester.pumpAndSettle();
+      await tester.tap(find.text('Green'));
+      await tester.pumpAndSettle();
+      await tester.tap(find.byType(ChoiceChip).at(1));
+      await tester.pumpAndSettle();
+      expect(chatEnabled(tester), isTrue);
+      await tester.tap(chat);
+      await tester.pumpAndSettle();
+      expect(_keys(sent), ['2', '5'], reason: 'tab 0 pick, then n+2 on tab 1');
+    });
+
+    testWidgets('it is withheld while an earlier answer may sit in the '
+        'terminal editor (#383)', (tester) async {
+      final drafts = QuestionDrafts()
+        ..key = 'sig'
+        ..notLanded = true;
+      await pumpCard(tester, [_q(['Alpha', 'Beta'])],
+          drafts: drafts, draftKey: 'sig');
+      expect(chatEnabled(tester), isFalse);
+    });
+  });
+
+  group('the card: which question, which are left (#423)', () {
+    testWidgets('the header names the open question; unanswered tabs wear an '
+        'empty circle, answered ones a tick', (tester) async {
+      tester.view.physicalSize = const Size(412 * 3, 915 * 3);
+      tester.view.devicePixelRatio = 3.0;
+      addTearDown(tester.view.reset);
+      await tester.pumpWidget(
+        MaterialApp(
+          theme: AppTheme.dark,
+          home: Scaffold(
+            body: Stack(
+              children: [
+                QuestionOverlay(
+                  question: PendingQuestion(toolUseId: 'prog', questions: [
+                    _q(['Red', 'Green'], header: 'Colour'),
+                    _q(['Apple', 'Pear'], header: 'Fruit'),
+                    _q(['Cat', 'Dog'], header: 'Pet'),
+                  ]),
+                  onSend: (_) {},
+                  onKey: (_) {},
+                  onDismiss: () {},
+                ),
+              ],
+            ),
+          ),
+        ),
+      );
+      await tester.pumpAndSettle();
+      final progress = find.byKey(const ValueKey('question-progress'));
+      Finder circleIn(int i) => find.descendant(
+          of: find.byType(ChoiceChip).at(i),
+          matching: find.byIcon(Icons.radio_button_unchecked));
+
+      expect(tester.widget<Text>(progress).data, 'Question 1 of 3');
+      for (var i = 0; i < 3; i++) {
+        expect(circleIn(i), findsOneWidget, reason: 'tab $i is unanswered');
+      }
+
+      await tester.tap(find.text('Green'));
+      await tester.pumpAndSettle();
+      expect(circleIn(0), findsNothing, reason: 'answered: the tick replaces it');
+      expect(circleIn(1), findsOneWidget);
+      expect(circleIn(2), findsOneWidget);
+
+      await tester.tap(find.byType(ChoiceChip).at(2));
+      await tester.pumpAndSettle();
+      expect(tester.widget<Text>(progress).data, 'Question 3 of 3');
+    });
+
+    testWidgets('a single question shows no progress line', (tester) async {
+      await tester.pumpWidget(
+        MaterialApp(
+          theme: AppTheme.dark,
+          home: Scaffold(
+            body: Stack(
+              children: [
+                QuestionOverlay(
+                  question: PendingQuestion(
+                      toolUseId: 'one', questions: [_q(['Red', 'Green'])]),
+                  onSend: (_) {},
+                  onKey: (_) {},
+                  onDismiss: () {},
+                ),
+              ],
+            ),
+          ),
+        ),
+      );
+      await tester.pumpAndSettle();
+      expect(find.byKey(const ValueKey('question-progress')), findsNothing);
+    });
   });
 
   testWidgets('#108: the lead-up is RENDERED markdown, not raw syntax',
