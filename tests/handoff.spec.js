@@ -77,6 +77,36 @@ test.describe('handoffCandidate (#340)', () => {
     });
   }
 
+  test('a reported "self" wait with nothing running goes stale (idle >= staleSelfMin)', () => {
+    const stale = (idleMin) => {
+      const r = candidate();
+      r.reason = { kind: 'self', text: 'run 9k', source: 'reported' };
+      r.brief.wait = { on: 'self', what: 'run 9k', at: T - idleMin * MIN };
+      r.brief.stoppedAt = T - idleMin * MIN;
+      r.brief.turnAt = T - (idleMin + 10) * MIN;
+      return r;
+    };
+    expect(judge(stale(31))).toMatchObject({ suggest: true, why: null });
+    expect(judge(stale(10)).why).toBe('reason-self');
+    const live = stale(31);
+    live.backgroundTasks = [{ description: 'build', startedAt: T - 40 * MIN }];
+    live.reason = { kind: 'self', text: 'build', source: 'background' };
+    expect(judge(live).why).toBe('reason-self');
+    // A stale-flagged task is not live, but the reason then stays a reported one: stale.
+    const armed = stale(31);
+    armed.usageLimit = { waiting: false };
+    armed.reason = { kind: 'self', text: 'usage cap', source: 'usage-limit' };
+    expect(judge(armed).why).toBe('reason-self');
+    // staleSelfMin is configurable; a bad value falls back to 30.
+    expect(judge(stale(31), { cfg: H.handoffConfig({ staleSelfMin: 60 }) }).why).toBe('reason-self');
+    expect(H.handoffConfig({ staleSelfMin: 'x' }).staleSelfMin).toBe(30);
+    // Safety gates still apply to a stale self wait.
+    const big = stale(31); big.status = 'working';
+    expect(judge(big).why).toBe('not-idle');
+    const small = stale(31); small.metrics = { ctx: 29, ctxWindow: 1_000_000, budget: BUDGET };
+    expect(judge(small).why).toBe('small');
+  });
+
   test('a boundary is "external", "done", or every item finished', () => {
     const r = candidate();
     r.brief.wait = { on: 'done' };
