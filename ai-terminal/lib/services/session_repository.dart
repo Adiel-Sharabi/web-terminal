@@ -343,6 +343,13 @@ class SessionRepository {
   /// would accept the PATCH and silently ignore it.
   bool supportsClearWait(String baseUrl) => _clearWaitSupported[baseUrl] ?? false;
 
+  /// Test-only: marks the server at [baseUrl] as advertising `session-clear-wait`
+  /// without a fetched version, so a widget test can reach the "Not waiting" row
+  /// ([canClearWait]) on a screen that reads this singleton.
+  @visibleForTesting
+  void debugSetClearWaitSupported(String baseUrl, bool supported) =>
+      _clearWaitSupported[baseUrl] = supported;
+
   /// Whether the server at [baseUrl] answers `GET /api/machine` (#331).
   bool supportsMachine(String baseUrl) => _machineSupported[baseUrl] ?? false;
 

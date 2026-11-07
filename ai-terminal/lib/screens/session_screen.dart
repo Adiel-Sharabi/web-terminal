@@ -2099,7 +2099,7 @@ class _SessionScreenState extends State<SessionScreen>
     // The announcement and the selection-clear deliberately do NOT, and that
     // is the whole reason this is a named local rather than a test inlined at
     // all three sites. `isCurrent` is false for ANY route above — including
-    // this screen's own modals (Kill confirm, Rename, the actions sheet, the
+    // this screen's own modals (Kill confirm, Rename, the Notify level picker, the
     // font-size dialog). Gating them on it meant a session dying while a
     // dialog was open produced no toast and never cleared the selection, and
     // because `_session` is already null by then nothing retried when the
@@ -4460,20 +4460,22 @@ class _SessionScreenState extends State<SessionScreen>
                 _toggleSpeak(session);
                 return;
               }
-              showSessionActionsSheet(
-                context,
-                session,
-                canClearWait: SessionRepository.instance.canClearWait(session),
-                onChanged: SessionRepository.instance.refresh,
-                onForked: (forked) => Navigator.of(context).push(
-                  MaterialPageRoute(
-                    builder: (_) => SessionScreen(
-                      sessionId: forked.id,
-                      initialSession: forked,
-                    ),
-                  ),
-                ),
-              );
+              // #424: each remaining entry goes STRAIGHT to its own dialog or
+              // picker. They used to fall through to the dashboard's actions
+              // sheet, which then asked again which of them was meant - menu,
+              // sheet, confirm for a kill. The actions live in
+              // session_action_sheet.dart and are shared with that sheet.
+              final onChanged = SessionRepository.instance.refresh;
+              switch (value) {
+                case 'rename':
+                  promptAndRenameSession(context, session, onChanged: onChanged);
+                case 'kill':
+                  confirmAndKillSession(context, session, onChanged: onChanged);
+                case 'notify':
+                  showNotifyLevelPicker(context, session, onChanged: onChanged);
+                case 'clearwait':
+                  clearSessionWait(context, session, onChanged: onChanged);
+              }
             },
             itemBuilder: (context) => [
               PopupMenuItem(
@@ -4499,6 +4501,25 @@ class _SessionScreenState extends State<SessionScreen>
               const PopupMenuItem(value: 'rename', child: Text('Rename')),
               const PopupMenuItem(value: 'kill', child: Text('Kill')),
               const PopupMenuItem(value: 'notify', child: Text('Notify level')),
+              // #327: the only way to this on the session screen was the sheet
+              // the entries above no longer open. Last, so the entries above
+              // keep their position whether or not it is offered.
+              if (SessionRepository.instance.canClearWait(session))
+                PopupMenuItem(
+                  value: 'clearwait',
+                  child: ListTile(
+                    contentPadding: EdgeInsets.zero,
+                    leading: const Icon(Icons.hourglass_disabled_outlined),
+                    title: const Text('Not waiting'),
+                    subtitle: (session.reason?.text ?? '').isEmpty
+                        ? null
+                        : Text(
+                            'Agent says: ${session.reason!.text}',
+                            maxLines: 2,
+                            overflow: TextOverflow.ellipsis,
+                          ),
+                  ),
+                ),
             ],
           ),
         ],
