@@ -7,6 +7,7 @@
 library;
 
 import 'package:flutter/material.dart';
+import 'package:flutter/services.dart' show LogicalKeyboardKey;
 
 import '../api/api_client.dart';
 import '../api/models.dart';
@@ -80,16 +81,11 @@ Future<void> showNotifyLevelPicker(
           _NotifyLevelRadios(
             groupValue: session.notifyLevel,
             onSelected: (level) async {
-              try {
-                await api.setNotifyLevel(session.id, level);
-                onChanged();
-              } catch (e) {
-                if (context.mounted) {
-                  ScaffoldMessenger.of(
-                    context,
-                  ).showSnackBar(SnackBar(content: Text('Failed: $e')));
-                }
-              }
+              await _runSessionAction(
+                context,
+                onChanged,
+                () => api.setNotifyLevel(session.id, level),
+              );
               if (context.mounted) Navigator.pop(context);
             },
           ),
@@ -100,7 +96,7 @@ Future<void> showNotifyLevelPicker(
   );
 }
 
-/// Runs one mutation of [session]: [onChanged] after it, a "Failed" snackbar if it
+/// Runs one mutation of a session: [onChanged] after it, a "Failed" snackbar if it
 /// threw. The one place that rule lives for every action in this file.
 Future<void> _runSessionAction(
   BuildContext context,
@@ -119,6 +115,36 @@ Future<void> _runSessionAction(
   }
 }
 
+/// The keys that press the focused button on desktop (Flutter's default
+/// `ActivateIntent` shortcuts), re-mapped for a dialog that must not be confirmed
+/// by a key still held down from the pick that opened it (#424).
+///
+/// A held key reaches the dialog as REPEAT events, and the default shortcuts accept
+/// those, so the autofocused Kill button would be pressed ~half a second after the
+/// dialog appeared. Each key therefore activates only on a fresh key-down
+/// (`includeRepeats: false`), and a repeat is consumed here
+/// ([DoNothingAndStopPropagationIntent]) so the app-level default - which does accept
+/// it - never sees it. Order matters: the first activator that accepts the event wins.
+const Map<ShortcutActivator, Intent> _freshPressActivates =
+    <ShortcutActivator, Intent>{
+      SingleActivator(LogicalKeyboardKey.enter, includeRepeats: false):
+          ActivateIntent(),
+      SingleActivator(LogicalKeyboardKey.enter):
+          DoNothingAndStopPropagationIntent(),
+      SingleActivator(LogicalKeyboardKey.numpadEnter, includeRepeats: false):
+          ActivateIntent(),
+      SingleActivator(LogicalKeyboardKey.numpadEnter):
+          DoNothingAndStopPropagationIntent(),
+      SingleActivator(LogicalKeyboardKey.space, includeRepeats: false):
+          ActivateIntent(),
+      SingleActivator(LogicalKeyboardKey.space):
+          DoNothingAndStopPropagationIntent(),
+      SingleActivator(LogicalKeyboardKey.select, includeRepeats: false):
+          ActivateIntent(),
+      SingleActivator(LogicalKeyboardKey.select):
+          DoNothingAndStopPropagationIntent(),
+    };
+
 /// THE kill flow (#424): ONE confirmation, then `DELETE`. Called by the actions
 /// sheet's "Kill session" row and by the session screen's ⋮ menu alike - a second
 /// copy of this dialog is how the two would drift apart.
@@ -127,10 +153,10 @@ Future<void> _runSessionAction(
 /// "Failed" snackbar, as ever), false when they cancelled or [context] went away - so
 /// a caller that has a sheet of its own to close knows whether to.
 ///
-/// Keyboard (desktop): Esc cancels - the dialog route's default dismiss - and Enter
-/// confirms, because the destructive button is the autofocused one. That is safe
-/// here: the dialog only ever opens from a deliberate pick of "Kill", never from a
-/// key the user might still be typing.
+/// Keyboard (desktop): Esc cancels - the dialog route's default dismiss - and a FRESH
+/// Enter press confirms, because the destructive button is the autofocused one. It is
+/// fresh-press only ([_freshPressActivates]): the pick that opened this dialog may
+/// itself have been an Enter that is still held, and its repeats must not kill.
 Future<bool> confirmAndKillSession(
   BuildContext context,
   Session session, {
@@ -139,23 +165,26 @@ Future<bool> confirmAndKillSession(
 }) async {
   final confirmed = await showDialog<bool>(
     context: context,
-    builder: (context) => AlertDialog(
-      title: const Text('Kill session?'),
-      content: const Text('This cannot be undone.'),
-      actions: [
-        TextButton(
-          onPressed: () => Navigator.pop(context, false),
-          child: const Text('Cancel'),
-        ),
-        FilledButton(
-          autofocus: true,
-          style: FilledButton.styleFrom(
-            backgroundColor: Theme.of(context).colorScheme.error,
+    builder: (context) => Shortcuts(
+      shortcuts: _freshPressActivates,
+      child: AlertDialog(
+        title: const Text('Kill session?'),
+        content: const Text('This cannot be undone.'),
+        actions: [
+          TextButton(
+            onPressed: () => Navigator.pop(context, false),
+            child: const Text('Cancel'),
           ),
-          onPressed: () => Navigator.pop(context, true),
-          child: const Text('Kill'),
-        ),
-      ],
+          FilledButton(
+            autofocus: true,
+            style: FilledButton.styleFrom(
+              backgroundColor: Theme.of(context).colorScheme.error,
+            ),
+            onPressed: () => Navigator.pop(context, true),
+            child: const Text('Kill'),
+          ),
+        ],
+      ),
     ),
   );
   if (confirmed != true || !context.mounted) return false;

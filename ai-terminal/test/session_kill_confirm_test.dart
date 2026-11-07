@@ -1,8 +1,11 @@
 // #424 - the kill confirmation and the `DELETE` live in ONE place
 // (`confirmAndKillSession`), called by the session screen's ⋮ menu and by the
-// actions sheet's "Kill session" row alike. These tests drive it directly with a
-// recording HTTP client, then through the sheet, so a second copy of the dialog
-// (or a sheet that stops calling the shared one) shows up as a missing request.
+// actions sheet's "Kill session" row alike. These are characterisation tests of
+// that shared flow: driven directly with a recording HTTP client, then through the
+// sheet's Kill and Rename rows. They pin what the flow does (one confirm, one
+// DELETE, Esc/Enter, error colour, the sheet's close rule); they do not detect a
+// second copy of the dialog added elsewhere - the session screen's menu test
+// (session_menu_direct_actions_test.dart) covers that call site.
 import 'dart:convert';
 
 import 'package:flutter/foundation.dart';
@@ -159,6 +162,69 @@ void main() {
       expect(requests(), ['DELETE /api/sessions/s1']);
       expect(results, [true]);
     });
+
+    // The pick that opens the dialog can itself be a key-DOWN on the keyboard (Enter
+    // or Space on a menu item / sheet row). The OS keeps repeating a held key, and
+    // Flutter's default shortcuts accept repeats - so without the dialog's own
+    // fresh-press-only mapping the autofocused Kill button was pressed ~500 ms later.
+    //
+    // (Numpad Enter is mapped the same way but cannot be simulated here: flutter_test
+    // has no Windows key code for it.)
+    for (final key in [LogicalKeyboardKey.enter, LogicalKeyboardKey.space]) {
+      testWidgets(
+        'desktop: ${key.debugName} held from the pick that opened it does not kill; a fresh press does',
+        (tester) async {
+          final results = <bool>[];
+          debugDefaultTargetPlatformOverride = TargetPlatform.windows;
+          try {
+            await tester.pumpWidget(
+              MaterialApp(
+                home: Scaffold(
+                  body: Builder(
+                    builder: (context) => TextButton(
+                      autofocus: true,
+                      onPressed: () async => results.add(
+                        await confirmAndKillSession(
+                          context,
+                          _session(),
+                          onChanged: () => changed++,
+                          api: api(),
+                        ),
+                      ),
+                      child: const Text('open'),
+                    ),
+                  ),
+                ),
+              ),
+            );
+            await tester.pump();
+
+            // The pick: a key-DOWN on the focused opener.
+            await tester.sendKeyDownEvent(key);
+            await tester.pumpAndSettle();
+            expect(find.text('Kill session?'), findsOneWidget);
+
+            // The user is still holding it; the OS repeats.
+            await tester.sendKeyRepeatEvent(key);
+            await tester.sendKeyRepeatEvent(key);
+            await tester.pumpAndSettle();
+            expect(find.text('Kill session?'), findsOneWidget, reason: 'still asking');
+            expect(sent, isEmpty, reason: 'a repeat is not a confirm');
+            expect(results, isEmpty);
+
+            // Released, then pressed again on purpose: that confirms.
+            await tester.sendKeyUpEvent(key);
+            await tester.sendKeyEvent(key);
+            await tester.pumpAndSettle();
+          } finally {
+            debugDefaultTargetPlatformOverride = null;
+          }
+
+          expect(requests(), ['DELETE /api/sessions/s1']);
+          expect(results, [true]);
+        },
+      );
+    }
 
     testWidgets('a failed DELETE is a snackbar, still reported as attempted', (
       tester,
