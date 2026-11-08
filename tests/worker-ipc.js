@@ -329,9 +329,10 @@ async function waitForShellOutput(client, id, timeoutMs = 12000) {
  * worker alone: a console whose session was killed a moment before (the ConPTY start-up is
  * asynchronous, so a kill that lands inside it does not stop the console that is about to
  * appear) still has the worker as its parent, is not yet gone, and outlives the worker as
- * an ORPHAN. Measured 2026-11-03 on Home: a spec that creates 8 sessions and kills them at
- * once left 1-2 of them per run; across a full run they filled the cap and ~65 unrelated
- * tests failed.
+ * an ORPHAN. Measured 2026-11-03 on Home, while the worker answered ConPTY's DA1 query on
+ * node-pty 1.1.0 (#416; the reply is back on 1.2.0-beta.18, #418): a spec that creates 8
+ * sessions and kills them at once left 1-2 of them per run; across a full run they filled
+ * the cap and ~65 unrelated tests failed.
  *
  * `taskkill /T` ends the worker AND whatever is still its descendant at that instant, which
  * is exactly those consoles. It deliberately does NOT go through `killSession`: specs that
@@ -351,7 +352,7 @@ function stopWorker(proc, graceMs = 3000) {
     const timer = setTimeout(() => { try { proc.kill('SIGKILL'); } catch {} finish(); }, graceMs);
     proc.once('exit', finish);
     if (process.platform !== 'win32') { try { proc.kill(); } catch {} return; }
-    const taskkill = path.join(process.env.SystemRoot || 'C:\Windows', 'System32', 'taskkill.exe');
+    const taskkill = path.join(process.env.SystemRoot || 'C:\\Windows', 'System32', 'taskkill.exe');
     execFile(taskkill, ['/T', '/F', '/PID', String(proc.pid)], { windowsHide: true }, (err) => {
       if (err) { try { proc.kill(); } catch {} }
     });

@@ -71,7 +71,7 @@ test.describe('#418 ConPTY startup DA1 reply (real worker, real PTY)', () => {
     const t0 = Date.now();
     const { id } = await rpc(client, 'createSession', { cwd: dataDir, name, autoCommand: '' });
     const deadline = t0 + 12000;
-    let sb = '';
+    let sb;
     for (;;) {
       sb = String((await rpc(client, 'getScrollback', { id })).data || '');
       const afterQuery = sb.includes(DA1_QUERY) ? sb.slice(sb.indexOf(DA1_QUERY) + DA1_QUERY.length) : '';

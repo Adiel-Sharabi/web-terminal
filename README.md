@@ -457,6 +457,12 @@ PC Browser ──────┘                │
 That split is the reason a `server.js` restart keeps your sessions running — see
 [docs/ARCHITECTURE.md](docs/ARCHITECTURE.md).
 
+A new session's shell is up in about a quarter of a second. Windows' pseudo-console asks
+the terminal a start-up question and holds the shell ~3 s for the answer; nobody is attached
+yet when a session starts, so the worker answers it itself, once. That is safe only on the
+node-pty version the repo pins (an exact 1.2.0 beta - see
+[docs/findings/operations.md](docs/findings/operations.md)).
+
 ## Platform
 
 **Windows-first by design**, where browser-based terminals are scarce. On Linux or macOS

@@ -1186,7 +1186,7 @@ Measured on Home, spawning `C:/Program Files/Git/bin/bash.exe` through node-pty 
 
 The same MSYS binaries launched from a native parent without a PTY start in ~25 ms, so it is not MSYS start-up either. `worker.log` showed `created -> auto-command` at a steady 3.6-3.9 s on every session for months: that was this wait plus the worker's own 370 ms settle and prime.
 
-**Answering it from the worker was tried and WITHDRAWN (#416 -> #418).** The worker replied `ESC[?1;2c` once, only inside ConPTY's preamble and within 1.5 s of spawn (a reply after ConPTY stops waiting is typed into the shell as `1;2c`). Prompts came at 240 ms, but under create/kill churn the worker died natively and consoles were stranded; see the next section. Do not answer DA1 from the worker until #418 finds a way that passes the churn probe. Two specs still snapshot inside the hold with fixed sleeps (worker-blocking-prompt `claudeSession`, worker-submit-cr rename): with the reply on, three blocking-prompt tests failed until they waited for the launch instead - a #418 fix must rework them.
+**Superseded by #418 (last section): the reply is back, on node-pty 1.2.0-beta.18.** **Answering it from the worker was tried and WITHDRAWN (#416 -> #418).** The worker replied `ESC[?1;2c` once, only inside ConPTY's preamble and within 1.5 s of spawn (a reply after ConPTY stops waiting is typed into the shell as `1;2c`). Prompts came at 240 ms, but under create/kill churn the worker died natively and consoles were stranded; see the next section. Do not answer DA1 from the worker until #418 finds a way that passes the churn probe. Two specs still snapshot inside the hold with fixed sleeps (worker-blocking-prompt `claudeSession`, worker-submit-cr rename): with the reply on, three blocking-prompt tests failed until they waited for the launch instead - a #418 fix must rework them.
 
 The companion half of the same complaint: the New session sheet awaited `SessionRepository.refresh()`, which fans out to every configured server, before opening the session it had just created. An unreachable peer costs its 10 s version call plus its 10 s session call, twice when a poll round is already in flight: 27-40 s between `created` and `Client joined` on 2026-11-02/03, with XPS and a MacBook offline. The sheet now opens at once. That exposed a race the await had hidden (review): `SessionScreen` treats a list without its session as gone and closes, and a fast peer answering first paints the creating server's PRE-create rows (so does a poll round already in flight). `SessionRepository.noteCreated` holds the new row until a fetch of that server which STARTED after the create answers; from then on the server's answer is the truth, including "gone". Every create path uses it: the sheet, both forks, the work board's reopen (`test/session_repository_note_created_test.dart`, `test/new_session_sheet_test.dart`).
 
@@ -1203,3 +1203,33 @@ Probe: an isolated worker, 8 rounds of 8 sessions, each round created and killed
 | no reply, deferred kill | 0 / 18 |
 
 Kill timing does not explain it; the reply does. With the reply, a session killed while starting also kept its `OpenConsole.exe` for the worker's lifetime (up to 3 of 8 per round; a full suite run stranded ~20 of Git for Windows' 32 machine-wide consoles, and new bash then dies with "too many consoles in use"). Without the reply, an immediate kill held 0 consoles in every round, so no deferred kill is needed. The crash itself (master's 3/16) is open in #418 with the probe; it needs a crash dump to name the faulting module.
+
+### #418: the crash was node-pty 1.1.0's, so the reply is back on 1.2.0-beta.18 (2026-11-07/08)
+
+Crash dumps (procdump `-ma -e` attached to an isolated worker; 4 of 4 identical): `0xC0000005`, a read of address 0 on a session's exit-watcher thread, in `conpty.node` (`SetupExitCallback` lambda, conpty.cc:106 - `assert(remove_pty_baton(baton->id))`, live in the prebuilt binary). `remove_pty_baton` runs `remove_if` + `erase` on the global `std::vector<std::unique_ptr<pty_baton>> ptyHandles` from every exit thread with **no lock**, while the main thread pushes to it (`startProcess`) and reads it (`connect`/`resize`/`kill`). Many sessions created and killed at once means many exit threads erasing while the main thread pushes and reads. Not conpty.dll, not OpenConsole.exe, not node. The DA1 reply only raised the rate: shells start (and so die) sooner, so more exit threads overlap the next round's creates.
+
+Why Windows recorded no crash event: the worker's parent is node, and libuv sets `SEM_NOGPFAULTERRORBOX`, which children inherit, so WER never runs. A debugger (procdump) catches it.
+
+Upstream fix: microsoft/node-pty `fa83ecfc` "fix(win): use-after-free from unsynchronized access to ptyhandles (#922)", 2026-05-13, which adds a mutex around every `ptyHandles` access. First published in **1.2.0-beta.13**. There is no stable 1.2.0; 1.2.0-beta.18 (2026-10-23) is pinned exactly. It bundles ConPTY 1.25.2603.03002 (1.1.0 bundled 1.23.2510.08001), and `useConptyDll` is still honoured (the option node-pty deprecated is `useConpty`, not this one).
+
+ConPTY 1.25 holds the child for the DA1 answer exactly as 1.23 did, so the upgrade alone does not remove the wait; the reply is still needed.
+
+Churn probe (an isolated real `pty-worker.js`, 8 rounds of 8 sessions created and killed at once, 1 s apart; held = OpenConsole.exe still parented by the worker afterwards):
+
+| worker | runs that crashed | held consoles |
+|---|---|---|
+| 1.1.0, no reply (master), 2026-11-03 | 3 / 16 | 0 |
+| 1.1.0 + reply, 2026-11-03 | 11 / 16, again 8 / 12 | up to 3 per round |
+| 1.1.0, no reply, 2026-11-07 (all batches) | 12 / 27 (4 / 16 in one batch); 11 of them `0xC0000005` | 0 |
+| 1.1.0 + reply, 2026-11-07 | 3 / 5 | 0 |
+| 1.2.0-beta.18, no reply | 0 / 19 | 0 |
+| 1.2.0-beta.18 + reply (probe preload) | 0 / 19 | 0 |
+| **this change: the real worker, beta.18 installed, its own reply** | REAL_CHURN | REAL_HELD |
+
+First bash prompt after spawn, real PTY bytes: 1.1.0 unanswered 3280 / 3291 / 3684 ms; 1.1.0 answered 244 / 307 / 317 ms; beta.18 unanswered 3306 / 3281 ms; beta.18 answered 274 / 253 / 243 ms. REAL_LATENCY
+
+The deferred kill from #416 (kill a starting session only after its first output) is NOT brought back: with beta.18 an immediate kill held 0 consoles in every run.
+
+What pins it: `tests/conpty-startup.spec.js` fails when `package.json` names node-pty with a range or below 1.2.0-beta.13, or when the installed node-pty differs from the pin; `tests/worker-conpty-da1.spec.js` drives a real worker and fails when the reply is not sent, sent twice, sent for a later query, or when the prompt takes 1.5 s or more - and its control (`WT_CONPTY_DA1_REPLY=0`) fails if ConPTY ever stops holding an unanswered shell (then the reply may be unnecessary). Mutating one gate at a time, each was red.
+
+The two specs that snapshotted inside the hold were reworked to anchor on content: `worker-submit-cr` waits for the shell's first output (`waitForShellOutput`) or the typed launch (`waitForTyped`); `worker-blocking-prompt` launches `echo probe-$((1+1))` and waits for its OUTPUT `probe-2` and a quiet scrollback, so the only output during a case is what the case injects, and counts its readiness ceiling (3000 ms) from the create, aborting if setup came within 1 s of it. With the old `sleep(150)` and the reply on, 6 of its cases fail.
