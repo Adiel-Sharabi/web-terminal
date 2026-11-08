@@ -167,6 +167,7 @@ const ipc = require('../lib/ipc');
 const { test } = require('@playwright/test');
 const path = require('path');
 const { execFile } = require('child_process');
+const { stripAnsi } = require('../lib/ansi');
 
 /** The shared ceiling. See THE BUDGET RULE above before changing it. */
 const RPC_BUDGET_MS = 15000;
@@ -284,6 +285,40 @@ function assertBudgetCanFire(budgetMs, what) {
   );
 }
 
+/// Waits until the worker has typed [cmd] (a session's autoCommand) into its PTY, so
+/// a spec can snapshot its writes AFTER the launch rather than racing it. THROWS if it
+/// never happens: a spec that went on would be measuring a session that never started.
+///
+/// A fixed sleep used to stand in for this and only held because ConPTY kept every new
+/// shell ~3 s waiting for an answer to its DA1 query; the worker answers it now
+/// (lib/conpty-startup.js) and the command lands ~0.6 s after create, inside the window
+/// those sleeps assumed was quiet.
+async function waitForTyped(client, id, cmd, timeoutMs = 12000) {
+  const deadline = Date.now() + timeoutMs;
+  for (;;) {
+    const writes = ((await rpc(client, '__testGetWrites', { id })).writes || [])
+      .map((w) => (typeof w === 'string' ? w : Buffer.from(w.data || w).toString('utf8')));
+    if (writes.some((w) => w.includes(cmd))) return writes;
+    if (Date.now() > deadline) throw new Error(`setup: autoCommand "${cmd}" was never typed; writes=${JSON.stringify(writes)}`);
+    await new Promise((r) => setTimeout(r, 100));
+  }
+}
+
+/// Waits until the session's shell has drawn something a viewer would see (its first
+/// prompt) in the REAL PTY bytes the worker received, and returns that scrollback. A spec
+/// that acts on a fresh session anchors here, so the shell's start-up output is all
+/// behind it rather than racing it - never a fixed sleep, whose length was a bet on
+/// ConPTY's ~3 s DA1 hold (#418). THROWS if it never happens (a setup failure).
+async function waitForShellOutput(client, id, timeoutMs = 12000) {
+  const deadline = Date.now() + timeoutMs;
+  for (;;) {
+    const sb = String((await rpc(client, 'getScrollback', { id })).data || '');
+    if (/[^\x00-\x20\x7f]/.test(stripAnsi(sb))) return sb;
+    if (Date.now() > deadline) throw new Error(`setup: session ${id} printed nothing in ${timeoutMs} ms`);
+    await new Promise((r) => setTimeout(r, 25));
+  }
+}
+
 /**
  * STOP A TEST-SPAWNED WORKER WITHOUT LEAVING ITS CONSOLES BEHIND.
  *
@@ -294,9 +329,9 @@ function assertBudgetCanFire(budgetMs, what) {
  * worker alone: a console whose session was killed a moment before (the ConPTY start-up is
  * asynchronous, so a kill that lands inside it does not stop the console that is about to
  * appear) still has the worker as its parent, is not yet gone, and outlives the worker as
- * an ORPHAN. Measured 2026-11-03 on Home, while the worker answered ConPTY's DA1 query (since
- * withdrawn): a spec that creates 8 sessions and kills them at once left 1-2 of them per run;
- * across a full run they filled the cap and ~65 unrelated tests failed.
+ * an ORPHAN. Measured 2026-11-03 on Home: a spec that creates 8 sessions and kills them at
+ * once left 1-2 of them per run; across a full run they filled the cap and ~65 unrelated
+ * tests failed.
  *
  * `taskkill /T` ends the worker AND whatever is still its descendant at that instant, which
  * is exactly those consoles. It deliberately does NOT go through `killSession`: specs that
@@ -316,11 +351,11 @@ function stopWorker(proc, graceMs = 3000) {
     const timer = setTimeout(() => { try { proc.kill('SIGKILL'); } catch {} finish(); }, graceMs);
     proc.once('exit', finish);
     if (process.platform !== 'win32') { try { proc.kill(); } catch {} return; }
-    const taskkill = path.join(process.env.SystemRoot || 'C:\\Windows', 'System32', 'taskkill.exe');
+    const taskkill = path.join(process.env.SystemRoot || 'C:\Windows', 'System32', 'taskkill.exe');
     execFile(taskkill, ['/T', '/F', '/PID', String(proc.pid)], { windowsHide: true }, (err) => {
       if (err) { try { proc.kill(); } catch {} }
     });
   });
 }
 
-module.exports = { RPC_BUDGET_MS, CONNECT_BUDGET_MS, connectClient, rpc, assertBudgetCanFire, stopWorker };
+module.exports = { RPC_BUDGET_MS, CONNECT_BUDGET_MS, connectClient, rpc, assertBudgetCanFire, waitForTyped, waitForShellOutput, stopWorker };

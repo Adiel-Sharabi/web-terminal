@@ -30,7 +30,7 @@ const path = require('path');
 const fs = require('fs');
 const os = require('os');
 const crypto = require('crypto');
-const { connectClient, rpc, stopWorker } = require('./worker-ipc');   // #262 - one owner for the budget
+const { connectClient, rpc, waitForTyped, stopWorker } = require('./worker-ipc');   // #262 - one owner for the budget
 const agents = require('../lib/agents');
 
 const ESC = String.fromCodePoint(0x001b);
@@ -155,7 +155,9 @@ test.describe('#190 a startup selector holds the submit gate shut', () => {
   async function claudeSession() {
     const { id } = await rpc(client, 'createSession',
       { cwd: dataDir, name: 'blocked', agent: 'claude', autoCommand: 'echo probe' });
-    await sleep(150);
+    // After the launch is typed, so a spec's `before` snapshot excludes the prime and
+    // the command (and readiness, which arms only after it, is in play).
+    await waitForTyped(client, id, 'echo probe');
     return id;
   }
 
@@ -428,7 +430,7 @@ test.describe('#190 a startup selector holds the submit gate shut', () => {
     await start({ WT_AUTO_ANSWER_BLOCKING_PROMPT: '1' });
     const { id } = await rpc(client, 'createSession',
       { cwd: dataDir, name: 'shell', autoCommand: 'echo probe' });
-    await sleep(150);
+    await waitForTyped(client, id, 'echo probe');
     const before = writesOf(await rpc(client, '__testGetWrites', { id })).length;
 
     await rpc(client, '__testInjectOutput', { id, data: TRUST_DIALOG });

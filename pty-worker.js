@@ -28,6 +28,8 @@ const usageLimit = require('./lib/usage-limit');
 // #190 — the pure rules for Claude's startup selector family; the strings it
 // matches on are lib/agents.js fields.
 const blockingPrompt = require('./lib/blocking-prompt');
+// ConPTY holds a new shell ~3 s for an answer to its startup DA1 query; the rule is pure.
+const { createConptyStartupResponder } = require('./lib/conpty-startup');
 // #228 — INSTRUMENTATION ONLY: what the PTY was showing when a session went
 // cap-blocked by metrics with the detector below having never seen a thing.
 const capSample = require('./lib/cap-sample');
@@ -1351,6 +1353,7 @@ function cancelSubmitWatch(session) {
 // Per-chunk PTY output processing — shared by the real term.onData handler and
 // the test-only __testInjectOutput RPC so both exercise the same path.
 function processPtyOutput(session, buf) {
+  answerConptyStartupQuery(session, buf);
   // Track bracketed-paste mode so we can re-assert it on re-attach.
   const bp = scanBracketedPaste(buf);
   if (bp !== null) session.bracketedPaste = bp;
@@ -1367,6 +1370,20 @@ function processPtyOutput(session, buf) {
   if (session.clientCount > 0) {
     broadcastPtyOut(session, buf);
   }
+}
+
+// ConPTY's startup DA1 query (lib/conpty-startup.js): no viewer is attached at spawn,
+// so the worker answers it, once, inside ConPTY's own preamble. Written straight to the
+// PTY, not through termWrite: it is the TERMINAL's reply, not typing, so the #179 line
+// tracker and the #87 paste stamp must never see it. Recorded under WT_TEST in its own
+// list (`terminalReplies` of __testGetWrites), so a spec still sees every byte sent.
+function answerConptyStartupQuery(session, buf) {
+  const responder = session._conptyStartup;
+  if (!responder || responder.done) return;
+  const reply = responder.feed(buf.toString('utf8'));
+  if (!reply) return;
+  if (process.env.WT_TEST) (session._testTerminalReplies || (session._testTerminalReplies = [])).push(reply);
+  try { session.term.write(reply); } catch (e) { log(`session ${session.id} DA1 reply failed: ${e.message}`); }
 }
 
 // --- #190: the startup selector family ---------------------------------------
@@ -2328,6 +2345,11 @@ function createSession(id, cwd, name, autoCommand, savedScrollback, claudeSessio
   // from termWrite, and one that started half-populated would answer wrongly the first
   // time a plain shell did acquire an agent.
   session._submitLine = submitConfirm.createSubmitLineTracker();
+  // Windows only: ConPTY is what asks. Anywhere else nothing in the preamble does.
+  // WT_CONPTY_DA1_REPLY=0 turns it off (an escape hatch, and the specs' control: the
+  // ~3 s hold comes back).
+  session._conptyStartup = process.platform === 'win32' && process.env.WT_CONPTY_DA1_REPLY !== '0'
+    ? createConptyStartupResponder() : null;
 
   term.onData((data) => {
     // Issue #13: normalize PTY output to Buffer once here so the rest of the
@@ -2992,7 +3014,12 @@ const rpcHandlers = {
     if (!process.env.WT_TEST) throw new Error('test-only RPC');
     const session = sessions.get(requireUuid(params.id));
     if (!session) throw new Error('session not found');
-    return { writes: (session._testWrites || []).slice() };
+    return {
+      writes: (session._testWrites || []).slice(),
+      // Answers the worker gave AS THE TERMINAL (ConPTY's startup DA1), kept apart
+      // from `writes` because they are not input anyone typed.
+      terminalReplies: (session._testTerminalReplies || []).slice(),
+    };
   },
 
   __testInjectScrollback: async (params) => {

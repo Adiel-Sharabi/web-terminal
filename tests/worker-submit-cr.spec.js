@@ -21,7 +21,7 @@ const fs = require('fs');
 const os = require('os');
 const crypto = require('crypto');
 const ipc = require('../lib/ipc');
-const { connectClient, rpc, stopWorker } = require('./worker-ipc');   // #262 - one owner for the budget
+const { connectClient, rpc, waitForTyped, waitForShellOutput, stopWorker } = require('./worker-ipc');   // #262 - one owner for the budget
 const agents = require('../lib/agents');
 
 const GAP = agents.submitPolicy('codex').gapMs;
@@ -85,7 +85,7 @@ test.describe('agent-aware submit CR on the PTY input path', () => {
 
   async function newSession(agent) {
     const { id } = await rpc(client, 'createSession', { cwd: dataDir, name: `s-${agent || 'shell'}`, agent });
-    await sleep(150); // let the PTY settle before we watch its writes
+    await waitForShellOutput(client, id); // the shell's start-up is behind us (#418), not raced
     await rpc(client, '__testGetWrites', { id }); // sanity: session exists
     return id;
   }
@@ -303,7 +303,7 @@ test.describe('agent-aware submit CR on the PTY input path', () => {
     const { id } = await rpc(client, 'createSession', {
       cwd: dataDir, name: 'Before', agent: 'claude', autoCommand: 'echo claude',
     });
-    await sleep(400); // let the PTY + autoCommand settle so we snapshot cleanly
+    await waitForTyped(client, id, 'echo claude'); // snapshot AFTER the launch is typed
     const before = writesOf(await rpc(client, '__testGetWrites', { id })).length;
 
     await rpc(client, 'renameSession', { id, name: 'My New Name' });
@@ -350,7 +350,7 @@ test.describe('a long single-line submit is declared a paste (#213)', () => {
 
   async function newSession(agent) {
     const { id } = await rpc(client, 'createSession', { cwd: dataDir, name: `s-${agent || 'shell'}`, agent });
-    await sleep(150);
+    await waitForShellOutput(client, id); // anchor on the prompt, not a timer (#418)
     await rpc(client, '__testGetWrites', { id });
     return id;
   }
