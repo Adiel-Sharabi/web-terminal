@@ -226,7 +226,7 @@ started it, the context size, the verdict and the successor, so the automatic ha
 judged afterwards. The briefs are kept for a week.
 
 Tune it with a `handoff` block in `config.json` (`ctxThreshold`, default: the session's
-context budget; `idleMin`, default 10; `auto: false` to go back to the button only;
+context budget; `idleMin`, default 10; `staleSelfMin`, default 30: a reported "wake myself" wait with no background task running is stale after that long idle, so the hand-off takes it; `auto: false` to go back to the button only;
 `enabled: false` for neither), read live. Claude only: another agent is offered nothing.
 
 **Resume by work item, on any machine** — a session's brief and its hand-off are named after
