@@ -690,7 +690,7 @@ class _WorkBoardScreenState extends State<WorkBoardScreen> {
       leases: _leaseDown == null ? sessionLeases(_leaseTable, s, _sessionById) : const [],
       handoffBusy: _handoffBusy.contains(k),
       question: kind == NeedKind.question ? q : null,
-      answering: q != null && _needs.isAnswering(s, q),
+      answeringNote: q == null ? null : _needs.answeringNote(s, q),
       answerBlocked: q != null && _needs.quickAnswerBlocked(s, q),
       busy: _needs.isBusy(s),
       onAnswer: (kind == NeedKind.question && q != null) ? (i) => _answer(s, q, i) : null,
@@ -938,8 +938,9 @@ class BoardActions {
   /// #337 - the live question a question card answers, when it has been read.
   final PendingQuestion? question;
 
-  /// The question above was just answered from here and is still landing.
-  final bool answering;
+  /// What the card says while the question above, just answered from here, is still
+  /// landing ([NeedsYouActions.answeringNote]); null when it is not.
+  final String? answeringNote;
 
   /// An earlier answer to the question above, with words, did not land (#383): its
   /// one-press buttons are withheld until that settles.
@@ -972,7 +973,7 @@ class BoardActions {
     this.leases = const <SessionLease>[],
     this.handoffBusy = false,
     this.question,
-    this.answering = false,
+    this.answeringNote,
     this.answerBlocked = false,
     this.busy = false,
     this.onAnswer,
@@ -1431,8 +1432,9 @@ class BoardCard extends StatelessWidget {
       case NeedKind.question:
         final q = actions.question;
         if (q == null) return const [];
-        if (actions.answering) {
-          return [Text('Answer sent - waiting for it to land…', style: Theme.of(context).textTheme.bodySmall)];
+        final note = actions.answeringNote;
+        if (note != null) {
+          return [Text(note, style: Theme.of(context).textTheme.bodySmall)];
         }
         // A digit after an answer that did not land could type into the editor that
         // still holds its words (#383): finish it in the session instead.

@@ -350,8 +350,10 @@ class _QuestionAnswerPanelState extends State<QuestionAnswerPanel> {
 
   void _toggle(PendingQuestionItem q, int i) {
     setState(() {
-      // Choosing a listed option exits Other mode (mutually exclusive).
-      _otherText[_tab] = null;
+      // Choosing a listed option exits Other mode (mutually exclusive), except in
+      // a multi-select question: there Other is a checkbox like the rest and
+      // combines with the ticks (#423).
+      if (!q.multiSelect) _otherText[_tab] = null;
       final set = _selected[_tab];
       if (q.multiSelect) {
         set.contains(i) ? set.remove(i) : set.add(i);
@@ -402,16 +404,25 @@ class _QuestionAnswerPanelState extends State<QuestionAnswerPanel> {
     });
   }
 
-  /// Activates the free-text ("Other") answer for the current tab: clears any
-  /// numeric picks (Other is mutually exclusive) and reveals the text field.
+  /// Activates the free-text ("Other") answer for the current tab and reveals the
+  /// text field. In a SINGLE-select question it also clears any numeric picks (Other
+  /// is mutually exclusive there); a multi-select question keeps them (see below).
   ///
   /// The seed is THIS tab's own controller (#164) — empty on a tab that has
   /// never been free-texted, and whatever was typed here before on one that
   /// was. It is never another tab's text.
-  void _chooseOther() {
+  ///
+  /// In a multi-select question Other is one more checkbox (#423): it keeps the
+  /// ticks, and a second tap turns it off again (its text stays in the controller,
+  /// so turning it back on restores it).
+  void _chooseOther(PendingQuestionItem q) {
     setState(() {
-      _selected[_tab].clear();
-      _otherText[_tab] = _otherControllers[_tab].text;
+      if (q.multiSelect) {
+        _otherText[_tab] = _otherActive ? null : _otherControllers[_tab].text;
+      } else {
+        _selected[_tab].clear();
+        _otherText[_tab] = _otherControllers[_tab].text;
+      }
       _saveDrafts();
     });
   }
@@ -439,8 +450,7 @@ class _QuestionAnswerPanelState extends State<QuestionAnswerPanel> {
   /// The chip read [_selected] alone, so a tab answered by free text reported
   /// itself unanswered while Send said the prompt was ready. Two readouts of
   /// one fact is the drift this repo keeps paying for; there is now one.
-  bool _isAnswered(int i) =>
-      _selected[i].isNotEmpty || (_otherText[i]?.trim().isNotEmpty ?? false);
+  bool _isAnswered(int i) => isQuestionAnswered(_selected[i], _otherText[i]);
 
   bool get _everyQuestionAnswered =>
       List.generate(_selected.length, _isAnswered)
@@ -464,6 +474,29 @@ class _QuestionAnswerPanelState extends State<QuestionAnswerPanel> {
       otherText: _otherText,
       noteText: _noteText,
     ));
+  }
+
+  /// The frames of "Chat about this" from the open tab, or null while they cannot
+  /// be built ([buildChatFrames]: an earlier tab is unanswered).
+  List<AnswerFrame>? get _chatFrames => buildChatFrames(
+        widget.question.questions,
+        _selected,
+        _tab,
+        otherText: _otherText,
+      );
+
+  /// Chat about this (#423): reject the question and talk it over. Sent through the
+  /// same [QuestionAnswerPanel.onSend] as an answer, so the host hides the card the
+  /// moment the keys go out, and the user then types in the chat bar. Like the
+  /// blind Send, never while words of an earlier answer may sit in the terminal's
+  /// editor (its digit would be typed into them) - but that gate lives on the header
+  /// button, this method's only trigger: `chatEnabled` in [_header] disables it when
+  /// [_partlyTyped], and the 'withheld while an earlier answer may sit in the terminal
+  /// editor' card test pins that. A second check here could never fire.
+  void _trySendChat() {
+    final frames = _chatFrames;
+    if (frames == null) return;
+    widget.onSend(frames);
   }
 
   @override
@@ -863,6 +896,13 @@ class _QuestionAnswerPanelState extends State<QuestionAnswerPanel> {
   }
 
   Widget _header(ThemeData theme, int count) {
+    // "Chat about this" lives HERE (#423), not in the option list. A row in the
+    // list is charged to the options' natural height, and on a phone that room
+    // comes straight out of the lead-up: it measurably collapsed the lead-up and
+    // overflowed the card by 2px at the heights the #94 tests pin. An icon button
+    // costs no height, and stays reachable however far the options are scrolled.
+    final chatReachable = _chatFrames != null;
+    final chatEnabled = chatReachable && !_partlyTyped;
     return Padding(
       padding: const EdgeInsets.fromLTRB(16, 14, 8, 6),
       child: Row(
@@ -870,9 +910,29 @@ class _QuestionAnswerPanelState extends State<QuestionAnswerPanel> {
           Icon(Icons.help_outline, size: 18, color: theme.colorScheme.primary),
           const SizedBox(width: 8),
           Expanded(
-            child: Text(
-              count > 1 ? 'Claude is asking ($count questions)' : 'Claude is asking',
-              style: theme.textTheme.titleSmall,
+            child: Column(
+              crossAxisAlignment: CrossAxisAlignment.start,
+              children: [
+                Text(
+                  'Claude is asking',
+                  maxLines: 1,
+                  overflow: TextOverflow.ellipsis,
+                  style: theme.textTheme.titleSmall,
+                ),
+                // Which question of several is open (#423). Which are still
+                // unanswered is the tab chips' job (a tick, or an empty circle):
+                // a count here would not fit beside three icons on a narrow phone.
+                if (count > 1)
+                  Text(
+                    'Question ${_tab + 1} of $count',
+                    key: const ValueKey('question-progress'),
+                    maxLines: 1,
+                    overflow: TextOverflow.ellipsis,
+                    style: theme.textTheme.labelSmall?.copyWith(
+                      color: theme.colorScheme.onSurfaceVariant,
+                    ),
+                  ),
+              ],
             ),
           ),
           // Raw keys need a terminal to go to (#383): with none, no toggle.
@@ -885,6 +945,21 @@ class _QuestionAnswerPanelState extends State<QuestionAnswerPanel> {
               tooltip: _keysShown ? 'Hide raw keys' : 'Show raw keys',
               onPressed: () => setState(() => _keysShown = !_keysShown),
             ),
+          // Claude's last row, for when none of the choices fits and the question
+          // needs talking over first. It REJECTS the question, so it is a button
+          // beside Dismiss and not a row among the answers. When it cannot be
+          // offered it stays, greyed, and the tooltip says why: an absent button
+          // would read as a card that cannot do what the terminal can.
+          IconButton(
+            key: const ValueKey('chat-about-this'),
+            icon: const Icon(Icons.chat_bubble_outline, size: 20),
+            tooltip: _partlyTyped
+                ? 'Chat about this (finish the earlier answer in the terminal first)'
+                : !chatReachable
+                    ? 'Chat about this (answer the earlier questions first)'
+                    : 'Chat about this: skip the question and talk it over',
+            onPressed: chatEnabled ? _trySendChat : null,
+          ),
           IconButton(
             icon: const Icon(Icons.close, size: 20),
             tooltip: 'Dismiss (answer in the terminal instead)',
@@ -911,6 +986,12 @@ class _QuestionAnswerPanelState extends State<QuestionAnswerPanel> {
               : questions[i].header;
           return ChoiceChip(
             selected: selected,
+            // A question still to answer wears an empty circle, an answered one
+            // the tick in its label (#423): "which are left" reads off the strip
+            // without opening each tab.
+            avatar: answered
+                ? null
+                : const Icon(Icons.radio_button_unchecked, size: 14),
             onSelected: (_) {
               // Switching tabs saves and loads nothing: since #164 the free
               // text lives in that tab's OWN controller, so the field simply
@@ -976,20 +1057,23 @@ class _QuestionAnswerPanelState extends State<QuestionAnswerPanel> {
             _noteAffordance(theme),
             if (_noteActive) _noteField(theme),
           ],
-          // Free-text ("Other") answer. Offered for a COMPACT single-select
-          // question, multi-question included since #143 measured the
+          // Free-text ("Other") answer. Offered for a COMPACT question, single-
+          // or multi-select, multi-question included since #143 measured the
           // tab-advance working there.
           //
-          // Two exclusions, and they are the mirror image of the note gate
-          // above — this card offers exactly what the layout it mirrors offers.
-          // Side-by-side (hasPreview): that selector renders NO "Type
-          // something." row, so the digit moves nothing, the text is swallowed
-          // and the trailing CR commits whatever row is highlighted — measured
-          // recording "Red" for a free-text answer of "indigo actually".
-          // Multi-select: its "Type something." row is a checkbox with no
-          // free-text input. See buildAnswerFrames for both measurements.
-          if (!q.multiSelect && !q.hasPreview) ...[
-            _otherTile(theme),
+          // The one exclusion is the mirror image of the note gate above — this
+          // card offers exactly what the layout it mirrors offers. Side-by-side
+          // (hasPreview): that selector renders NO "Type something." row, so the
+          // digit moves nothing, the text is swallowed and the trailing CR
+          // commits whatever row is highlighted — measured recording "Red" for a
+          // free-text answer of "indigo actually".
+          //
+          // Multi-select was excluded too until #423: on claude 2.1.237 its row
+          // had no text input. On 2.1.319 the cursor reaches a real inline
+          // field, and buildAnswerFrames types into it. See there for both
+          // measurements.
+          if (!q.hasPreview) ...[
+            _otherTile(theme, q),
             if (_otherActive) _otherField(theme),
           ],
           const SizedBox(height: 4),
@@ -1000,8 +1084,9 @@ class _QuestionAnswerPanelState extends State<QuestionAnswerPanel> {
   }
 
   /// The "Other…" row — same shell as [_optionTile]. Tapping it activates the
-  /// free-text answer for this tab.
-  Widget _otherTile(ThemeData theme) {
+  /// free-text answer for this tab. In a multi-select question it is a checkbox
+  /// like its neighbours (#423) and tapping it again turns it off.
+  Widget _otherTile(ThemeData theme, PendingQuestionItem q) {
     final active = _otherActive;
     return Padding(
       padding: const EdgeInsets.symmetric(vertical: 3),
@@ -1012,13 +1097,17 @@ class _QuestionAnswerPanelState extends State<QuestionAnswerPanel> {
         borderRadius: BorderRadius.circular(AppShape.medium),
         child: InkWell(
           borderRadius: BorderRadius.circular(AppShape.medium),
-          onTap: _chooseOther,
+          onTap: () => _chooseOther(q),
           child: Padding(
             padding: const EdgeInsets.symmetric(horizontal: 12, vertical: 10),
             child: Row(
               children: [
                 Icon(
-                  active ? Icons.radio_button_checked : Icons.edit_outlined,
+                  active
+                      ? (q.multiSelect
+                          ? Icons.check_box
+                          : Icons.radio_button_checked)
+                      : Icons.edit_outlined,
                   size: 20,
                   color: active
                       ? theme.colorScheme.primary

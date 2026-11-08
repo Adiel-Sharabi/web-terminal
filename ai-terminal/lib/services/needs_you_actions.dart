@@ -28,7 +28,7 @@ import '../screens/session_screen.dart'
         verifyAnswerLanded;
 import '../util/inbox_items.dart' show sessionKey;
 import '../widgets/question_answer_panel.dart' show quickAnswerable;
-import '../widgets/question_overlay.dart' show AnswerFrame, answerNeedsConfirm, buildAnswerFrames, deliverAnswerFrames;
+import '../widgets/question_overlay.dart' show AnswerFrame, answerIsVerifiable, answerNeedsConfirm, buildAnswerFrames, deliverAnswerFrames;
 import 'question_draft_store.dart';
 import 'session_input.dart';
 import 'session_repository.dart';
@@ -62,6 +62,19 @@ PreWriteVerdict preWriteVerdict(String shownSig, PendingQuestion? fresh, bool po
   if (pollFailed) return PreWriteVerdict.refused;
   if (fresh == null) return PreWriteVerdict.gone;
   return questionSignature(fresh) == shownSig ? PreWriteVerdict.proceed : PreWriteVerdict.changed;
+}
+
+/// How an answer sent from a card ended, for [NeedsYouActions.answer]'s `onSettled`.
+enum AnswerSettled {
+  /// A poll SAW the question go (or be replaced).
+  landed,
+
+  /// Still up after every check, or no check answered.
+  notLanded,
+
+  /// "Chat about this" went out (#423): it rejects the question, so there is nothing
+  /// to verify ([answerIsVerifiable]) and the conversation goes on in the session.
+  chatSent,
 }
 
 /// The board's (and the inbox's) writers and their state. [say] reports a refusal or a
@@ -98,6 +111,9 @@ class NeedsYouActions extends ChangeNotifier {
   /// down until the server stops reporting it, so it cannot be answered twice.
   final Map<String, String> _answered = {};
 
+  /// The keys of [_answered] whose answer was "Chat about this" (#423).
+  final Set<String> _chatSent = {};
+
   /// An answer whose keys went out but whose landing no poll saw (every check failed),
   /// by [keyOf], with when it settled. Its card says "landing" only until a read made
   /// after that moment sees the session again (#383): it cannot sit there for good.
@@ -128,6 +144,16 @@ class NeedsYouActions extends ChangeNotifier {
   /// [q] was just answered from here and is still landing.
   bool isAnswering(Session s, PendingQuestion q) => _answered[keyOf(s)] == questionSignature(q);
 
+  /// What a card says in place of its controls while [isAnswering] (null otherwise):
+  /// the one wording for the board and the inbox. A "Chat about this" has no landing
+  /// to wait for (#423).
+  String? answeringNote(Session s, PendingQuestion q) {
+    if (!isAnswering(s, q)) return null;
+    return _chatSent.contains(keyOf(s))
+        ? 'Sent "Chat about this" - the conversation goes on in the session'
+        : 'Answer sent - waiting for it to land...';
+  }
+
   /// The reply box of [s], created empty on first use.
   TextEditingController replyBox(Session s) => _replyBoxes.putIfAbsent(keyOf(s), TextEditingController.new);
 
@@ -145,6 +171,7 @@ class NeedsYouActions extends ChangeNotifier {
     _questions.removeWhere((k, _) => !live.contains(k));
     _questionAt.removeWhere((k, _) => !live.contains(k));
     _answered.removeWhere((k, _) => !live.contains(k));
+    _chatSent.removeWhere((k) => !_answered.containsKey(k));
     _unverified.removeWhere((k, _) => !live.contains(k));
     final now = DateTime.now();
     final due = list.where((s) {
@@ -188,6 +215,7 @@ class NeedsYouActions extends ChangeNotifier {
     if (since != null && !askedAt.isBefore(since) && !_busy.contains(k)) {
       _unverified.remove(k);
       _answered.remove(k);
+      _chatSent.remove(k);
     }
   }
 
@@ -247,20 +275,23 @@ class NeedsYouActions extends ChangeNotifier {
   /// rules: flagged as an answer carrying words goes out, cleared only when a poll
   /// positively saw the question go.
   ///
-  /// [onSettled] hears once the keys have gone out and been checked: true only when a
-  /// poll SAW the question go (or be replaced), false when it is still up or no check
-  /// answered. It is not called when nothing was written.
+  /// [onSettled] hears once the keys have gone out and been checked: [AnswerSettled.landed]
+  /// only when a poll SAW the question go (or be replaced), [AnswerSettled.notLanded] when
+  /// it is still up or no check answered, [AnswerSettled.chatSent] for a "Chat about this",
+  /// which is never checked (#423). It is not called when nothing was written.
   Future<PreWriteVerdict> answer(Session s, PendingQuestion shown, List<AnswerFrame> frames,
-      {void Function(bool landed)? onSettled}) async {
+      {void Function(AnswerSettled outcome)? onSettled}) async {
     final k = keyOf(s);
     final sig = questionSignature(shown);
     var verdict = PreWriteVerdict.refused;
     var polled = false;
+    var rejected = false;
     PendingQuestion? fresh;
     AnswerVerification? checked;
     final reached = await _exclusive(s, () {
       // Down from the press, so the card cannot offer a second answer meanwhile.
       _answered[k] = sig;
+      _chatSent.remove(k);
       _unverified.remove(k);
       _changed();
       return _send(s, (send) async {
@@ -281,6 +312,12 @@ class NeedsYouActions extends ChangeNotifier {
         // Flagged as the first key goes out (#383), as the session screen does.
         drafts.markSent(sig, frames);
         await deliverAnswerFrames(frames, send);
+        // "Chat about this" (#423) rejects the question: nothing lands to verify, and a
+        // resent Enter would go into the reply Claude is already writing.
+        if (!answerIsVerifiable(frames)) {
+          rejected = true;
+          return;
+        }
         checked = await verifyAnswerLanded(
           answeredKey: sig,
           resendEnter: answerNeedsConfirm(frames),
@@ -292,10 +329,23 @@ class NeedsYouActions extends ChangeNotifier {
     });
     if (reached == null) return PreWriteVerdict.refused;
     if (_disposed) return verdict;
+    if (rejected) {
+      // Sent and not checked. `_answered[k]` stays down, so no card offers a second
+      // answer, until the session leaves the waiting list: the server clears the
+      // question once the rejected tool_result is in the transcript, about a second.
+      // Settled as a Chat, so the inbox moves on from it rather than leave it live.
+      _chatSent.add(k);
+      say('Sent "Chat about this" to "${s.name}" - open it to reply');
+      onSettled?.call(AnswerSettled.chatSent);
+      _changed();
+      unawaited(repository.refresh());
+      return verdict;
+    }
     final v = checked;
     if (v == null) {
       // Nothing was written: not reached (said by [_send]), or the re-check refused.
       _answered.remove(k);
+      _chatSent.remove(k);
       if (polled) _questions[k] = fresh;
       _changed();
       if (reached) {
@@ -311,7 +361,7 @@ class NeedsYouActions extends ChangeNotifier {
     // Landed only on a POSITIVE observation: [awaitAnswerLanded] also returns null
     // when its poll threw, and that proves nothing either way.
     final landed = v.seen.observed && questionSignature(v.seen.lastSeen) != sig;
-    onSettled?.call(landed);
+    onSettled?.call(landed ? AnswerSettled.landed : AnswerSettled.notLanded);
     if (stuck != null) {
       _answered.remove(k);
       say('The answer did not take - open "${s.name}" to answer it there');
@@ -394,7 +444,7 @@ class NeedsYouActions extends ChangeNotifier {
   /// written, unless one press IS the whole answer ([quickAnswerable]) and while
   /// [quickAnswerBlocked]; otherwise [answer] with the overlay's frames.
   Future<PreWriteVerdict> quickAnswer(Session s, PendingQuestion q, int index,
-      {void Function(bool landed)? onSettled}) async {
+      {void Function(AnswerSettled outcome)? onSettled}) async {
     if (!quickAnswerable(q) || index < 0 || index >= q.questions.first.options.length) {
       say('"${s.name}" needs more than one press to answer - open it, nothing was sent');
       return PreWriteVerdict.refused;

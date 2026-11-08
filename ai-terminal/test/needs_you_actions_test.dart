@@ -80,9 +80,11 @@ void main() {
     late int status;
     late List<String> written;
     late List<String> said;
+    late int questionPolls;
 
     ApiClient client(ServerConfig s) => ApiClient(s, httpClient: MockClient((req) async {
           if (req.url.path.endsWith('/pending-question')) {
+            questionPolls++;
             if (status != 200) return http.Response('', status);
             return http.Response(jsonEncode(pending == null ? {'pending': false} : {'pending': true, 'question': pending}), 200);
           }
@@ -123,6 +125,7 @@ void main() {
       status = 200;
       written = [];
       said = [];
+      questionPolls = 0;
       QuestionDraftStore.instance.resetForTest();
     });
 
@@ -165,6 +168,53 @@ void main() {
           reason: 'the session screen reads the same drafts: no blind replay there either');
       expect(drafts.words, ['a long answer']);
     }, timeout: const Timeout(Duration(seconds: 30)));
+
+    // #423 - "Chat about this" REJECTS the question: no PostToolUse follows, and the
+    // server clears it from the transcript's rejected tool_result in about a second.
+    // There is nothing to verify, and a resent Enter would land in Claude's reply.
+    for (final sideBySide in [false, true]) {
+      test('"Chat about this" (${sideBySide ? 'side-by-side, ends in Enter' : 'compact'}) is sent and NOT '
+          'verified: no later poll, no "did not take", the card stays down', () async {
+        final a = await actions();
+        final s = _session();
+        final json = _qJson('Pick one');
+        if (sideBySide) ((json['questions'] as List).first as Map<String, dynamic>)['hasPreview'] = true;
+        pending = json;
+        final shown = PendingQuestion.fromJson({'pending': true, 'question': json})!;
+        final frames = buildChatFrames(shown.questions, [<int>{}], 0)!;
+        expect(frames.last.chat, isTrue);
+        final settled = <AnswerSettled>[];
+        // The server keeps reporting it throughout: a verify would still be answered "up".
+        final stillAsking = NeedsYouActions(
+          repository: a.repository,
+          client: client,
+          input: (s, body) async {
+            await body(written.add);
+            return true;
+          },
+          say: said.add,
+          questionEvery: Duration.zero,
+        );
+        addTearDown(stillAsking.dispose);
+        final watch = Stopwatch()..start();
+        final verdict = await stillAsking.answer(s, shown, frames, onSettled: settled.add);
+        expect(verdict, PreWriteVerdict.proceed);
+        expect(written, frames.map((f) => f.keys).toList(), reason: 'the frames and nothing after them');
+        expect(questionPolls, 1, reason: 'only the pre-write re-check; no verify polls');
+        expect(watch.elapsed, lessThan(const Duration(seconds: 5)),
+            reason: 'the verify budget alone is 8 x 900 ms');
+        expect(said.single, contains('Chat about this'));
+        expect(said.join(), isNot(contains('did not take')));
+        expect(settled, [AnswerSettled.chatSent],
+            reason: 'settled as a Chat - the inbox moves on, and nothing says "Answered"');
+        expect(stillAsking.isBusy(s), isFalse);
+        expect(stillAsking.isAnswering(s, shown), isTrue,
+            reason: 'the card stays down for this question, as after any answer');
+        // Worded for a Chat, not "waiting for it to land" (there is no landing).
+        expect(stillAsking.answeringNote(s, shown), contains('Chat about this'));
+        expect(stillAsking.answeringNote(s, shown), isNot(contains('land')));
+      }, timeout: const Timeout(Duration(seconds: 30)));
+    }
 
     test('F4: a question answered elsewhere while the socket attaches gets ZERO keys', () async {
       final a = await actions();

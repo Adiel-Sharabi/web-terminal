@@ -183,6 +183,24 @@ void main() {
     });
   });
 
+  // #423 - "Chat about this" REJECTS the question and Claude fires no hook for it; the
+  // server clears it once the rejected tool_result is in the transcript (about a second,
+  // tests/issue423-rejected-question-clears.spec.js). The screen holds nothing of its
+  // own: a Chat is an ordinary dismissal, which covers that second.
+  group('a question turned down with "Chat about this" (#423)', () {
+    final asked = _q('Pick one');
+    final key = questionSignature(asked);
+
+    test('is dismissed like any answer: off the card while still reported', () {
+      expect(questionOverlayVisible(asked, key), isFalse);
+    });
+
+    test('an identical re-ask is not hidden without a trace: its chip shows', () {
+      // The old screen-side hold kept an identical question off the card AND the chip.
+      expect(pendingQuestionChipVisible(asked, key), isTrue);
+    });
+  });
+
   group('the screen applies it (source-level; no ApiClient to pump)', () {
     final src = File('lib/screens/session_screen.dart').readAsStringSync();
 
@@ -235,9 +253,34 @@ void main() {
 
     test('settleAfterAnswer sets no flag of its own (only clear() drops it)', () {
       final i = src.indexOf('AnswerSettlement settleAfterAnswer(');
-      final b = src.substring(i, src.indexOf('\n}\n', i));
+      // CRLF-tolerant: a Windows checkout (core.autocrlf) holds \r\n, never a bare \n.
+      final end = src.indexOf(RegExp(r'\r?\n\}\r?\n'), i);
+      final b = src.substring(i, end);
       expect(b, isNot(contains('markSent')));
       expect(b, isNot(contains('notLanded')));
+    });
+
+    test('_answerQuestion never verifies a Chat, and holds nothing of its own (#423)', () {
+      final b = body('Future<void> _answerQuestion(');
+      expect(
+          b,
+          contains(RegExp(r'if \(answeredKey\.isNotEmpty && answerIsVerifiable\(frames\)\) '
+              r'\{\s+await _verifyAnswerLanded\(')));
+      // The server clears a rejected question now; a screen-side hold would be a
+      // second owner of "is it still pending".
+      expect(src, isNot(contains('_rejectedQuestionKey')));
+    });
+
+    test('ONE predicate: neither the screen nor the board re-derives "is Chat"', () {
+      final board = File('lib/services/needs_you_actions.dart').readAsStringSync();
+      expect(src, contains('answerIsVerifiable(frames)'));
+      expect(board, contains('answerIsVerifiable(frames)'));
+      // Pinned to the predicate's own read (`f.chat` in answerIsVerifiable), not any
+      // `.chat`, which would also match an unrelated name.
+      final overlay = File('lib/widgets/question_overlay.dart').readAsStringSync();
+      expect(overlay, contains('!frames.any((f) => f.chat)'));
+      expect(src, isNot(contains('f.chat')));
+      expect(board, isNot(contains('f.chat')));
     });
 
     test('the 4 s poll records what it saw before clearing drafts', () {

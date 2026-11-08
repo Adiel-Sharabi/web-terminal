@@ -1751,7 +1751,10 @@ class _SessionScreenState extends State<SessionScreen>
     // Verify the answer actually landed — and un-strand it if it didn't. We just
     // dismissed the overlay optimistically, so a dropped answer would otherwise
     // sit hidden-but-pending forever (the user only learns Claude never moved).
-    if (answeredKey.isNotEmpty) {
+    // "Chat about this" (#423) rejects the question instead of answering it: never
+    // verified or resent ([answerIsVerifiable]). The dismissal above covers the
+    // second or so until the server sees the rejected tool_result and clears it.
+    if (answeredKey.isNotEmpty && answerIsVerifiable(frames)) {
       await _verifyAnswerLanded(
         answeredKey,
         resendEnter: answerNeedsConfirm(frames),

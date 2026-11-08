@@ -18,7 +18,7 @@ import 'question_answer_panel.dart';
 /// One outbound frame: send [keys], then wait [delayMs] before the next frame.
 class AnswerFrame {
   const AnswerFrame(this.keys, this.delayMs,
-      {this.text = false, this.other = false})
+      {this.text = false, this.other = false, this.chat = false})
       : assert(!other || text, 'an Other frame carries text');
 
   /// The bytes to write to the PTY.
@@ -32,6 +32,11 @@ class AnswerFrame {
   /// True for the Other free-text frame specifically, the one whose own committing
   /// `\r` follows it. [answerNeedsConfirm] reads it: see there (#383).
   final bool other;
+
+  /// True for the frame that picks Claude's "Chat about this" row (#423). That
+  /// choice REJECTS the question rather than answering it, so [answerIsVerifiable]
+  /// reads it to say there is no landing to wait for: see there.
+  final bool chat;
 
   /// How long to wait after sending, before the next frame. Frames that must
   /// land in *separate* stdin reads (question transitions, a confirming Enter)
@@ -109,7 +114,7 @@ class AnswerFrame {
 ///   the "Submit" review then digit "1" ("Submit answers") to finalize (#39).
 /// - multi-question: after every tab is answered a Submit review appears whose
 ///   default is "Submit answers", so a trailing `Enter` finalizes it.
-/// - free-text ("Other"), COMPACT SINGLE-SELECT only: the compact selector
+/// - free-text ("Other"), COMPACT SINGLE-SELECT: the compact selector
 ///   renders an implied "Type something." row just after the real options (row
 ///   `options.length + 1`). Answering with free text is THREE separate, delayed
 ///   stdin writes: the row digit (consumed as the selector, NOT part of the
@@ -117,11 +122,15 @@ class AnswerFrame {
 ///   text+CR burst reads as a paste, not a submit). See [otherText]. The text
 ///   frame is sent as a bracketed paste since #383, so a bunched delivery cannot
 ///   lose it.
+/// - free-text ("Other"), COMPACT MULTI-SELECT (#423): the same row is a
+///   checkbox and its digit only toggles it, so it is reached by CURSOR, not by
+///   digit. See the multi-select branch below for the measured sequence.
 ///
 /// [otherText] is an optional per-question free-text answer (parallel to
-/// [selections]); a non-empty, non-whitespace entry routes a COMPACT
-/// SINGLE-SELECT question through the "Other" path above instead of its numeric
-/// selection. Two exclusions, each measured rather than assumed:
+/// [selections]); a non-empty, non-whitespace entry routes a COMPACT question
+/// through the "Other" path above instead of its numeric selection (a
+/// multi-select one keeps its ticks as well). One exclusion, measured rather
+/// than assumed:
 ///
 /// - SIDE-BY-SIDE (`hasPreview`) — THE ROW DOES NOT EXIST THERE. Measured on
 ///   claude 2.1.237 with `probe-askq-layout.js --shape preview-single --keys
@@ -135,13 +144,15 @@ class AnswerFrame {
 ///   issue is about — `n` exists only side-by-side, "Type something." only
 ///   compact — and it is worse, because the answer is confidently wrong rather
 ///   than merely incomplete.
-/// - MULTI-SELECT — the row is a CHECKBOX. Re-measured on claude 2.1.234:
-///   checking it and submitting records "The user did not answer the
-///   questions.", so the whole answer is lost, not merely its text.
+///
+/// (MULTI-SELECT was a second exclusion until #423 re-measured it on claude
+/// 2.1.319: the row's digit still only toggles its checkbox, and submitting with
+/// only that ticked still records "The user did not answer the questions." — but
+/// the CURSOR reaches a real inline text field. See the multi-select branch.)
 ///
 /// MULTI-QUESTION is included since #143 measured it working — but only in the
 /// compact layout, which is the only shape that was driven. The overlay hides
-/// the Other row wherever this branch will not consume it.
+/// the Other row wherever the branches below will not consume it.
 ///
 /// [noteText] (issue #64 Gap 1) is an optional per-question NOTE attached to
 /// an ALREADY-chosen option — distinct from [otherText]/#36, which REPLACES
@@ -171,12 +182,90 @@ List<AnswerFrame> buildAnswerFrames(
   List<Set<int>> selections, {
   List<String?> otherText = const [],
   List<String?> noteText = const [],
+}) =>
+    _answerFrames(questions, selections,
+        otherText: otherText, noteText: noteText);
+
+/// Whether a question holds an answer: a pick, or free text with a word in it.
+/// THE one definition, read by the card's Send gate and tab ticks and by
+/// [buildChatFrames], which refuses to replay a tab that has none (#423).
+bool isQuestionAnswered(Set<int> selection, String? otherText) =>
+    selection.isNotEmpty || (otherText?.trim().isNotEmpty ?? false);
+
+/// The frames that choose Claude's "Chat about this" row on tab [tab] (#423), or
+/// null when they cannot be built honestly.
+///
+/// Chat REJECTS the question (its `tool_result` is an error); Claude replies
+/// asking what to clarify and goes idle, and the picks made so far ride along
+/// ("Pick a color" Answer: Green). Measured on claude 2.1.319, verdicts from the
+/// transcript. The row is reached differently per LAYOUT, and the layout is per
+/// question ([PendingQuestionItem.hasPreview], the only decider):
+///
+///   compact (single or multi-select, any tab)  the digit `options.length + 2`,
+///                                              at once, no Enter
+///   side-by-side (preview)                     NO digit exists: Down x
+///                                              `options.length`, then Enter
+///
+/// The digit and the Down count are relative to the tab the TUI is ON, which is
+/// always tab 0 at the start, so the picks of tabs 0..[tab]-1 are replayed first
+/// (the per-question loop of [buildAnswerFrames], without the Submit-review
+/// Enter), then the current tab's ticks if it is multi-select, which the TUI
+/// keeps. A current single-select pick is not replayed: its digit would submit.
+///
+/// Null when an earlier tab has no answer. Replaying it would pick that tab's
+/// default top row and send Claude an answer nobody gave, and the way past an
+/// unanswered tab (Right-arrow on a single-select) was not measured. The card
+/// says so instead of guessing.
+List<AnswerFrame>? buildChatFrames(
+  List<PendingQuestionItem> questions,
+  List<Set<int>> selections,
+  int tab, {
+  List<String?> otherText = const [],
+}) {
+  if (tab < 0 || tab >= questions.length) return null;
+  for (var i = 0; i < tab; i++) {
+    final sel = i < selections.length ? selections[i] : const <int>{};
+    final other = i < otherText.length ? otherText[i] : null;
+    if (!isQuestionAnswered(sel, other)) return null;
+  }
+  const gap = 600;
+  const settle = 250;
+  final frames = _answerFrames(questions, selections,
+      otherText: otherText, replayTabs: tab);
+  final q = questions[tab];
+  final n = q.options.length;
+  if (q.multiSelect) {
+    final sel = tab < selections.length ? selections[tab] : const <int>{};
+    for (final i in sel.toList()..sort()) {
+      frames.add(AnswerFrame('${i + 1}', settle)); // keep the ticks made here
+    }
+  }
+  if (q.hasPreview) {
+    for (var i = 0; i < n; i++) {
+      frames.add(const AnswerFrame('\x1b[B', settle)); // down to "Chat about this"
+    }
+    frames.add(const AnswerFrame('\r', gap, chat: true));
+  } else {
+    frames.add(AnswerFrame('${n + 2}', gap, chat: true));
+  }
+  return frames;
+}
+
+/// [buildAnswerFrames]' body. [replayTabs] stops after that many tabs and adds no
+/// Submit-review Enter: the replay [buildChatFrames] needs to put the TUI on tab
+/// [replayTabs]. Null answers the whole prompt.
+List<AnswerFrame> _answerFrames(
+  List<PendingQuestionItem> questions,
+  List<Set<int>> selections, {
+  List<String?> otherText = const [],
+  List<String?> noteText = const [],
+  int? replayTabs,
 }) {
   const gap = 600; // between frames that must be read separately
   const settle = 250; // between absolute toggles (safe to coalesce)
   final frames = <AnswerFrame>[];
   final multiQuestion = questions.length > 1;
-  for (var qi = 0; qi < questions.length; qi++) {
+  for (var qi = 0; qi < (replayTabs ?? questions.length); qi++) {
     final q = questions[qi];
     final sel = qi < selections.length ? selections[qi] : const <int>{};
     final other = qi < otherText.length ? otherText[qi]?.trim() : null;
@@ -202,9 +291,9 @@ List<AnswerFrame> buildAnswerFrames(
       // answer was "indigo actually". THE LAYOUT DECIDES WHETHER THE ROW EXISTS
       // AT ALL — exactly as it does for `n` in the note branch below.
       //
-      // SINGLE-SELECT only: in multi-select the "Type something." row is a
-      // checkbox that toggles (no free-text input), so this path is gated off
-      // and the multi-select branch below ignores otherText entirely.
+      // SINGLE-SELECT only: in multi-select the row's digit just toggles its
+      // checkbox, so a multi-select question takes the cursor path in its own
+      // branch below (#423).
       //
       // THE TEXT GOES OUT AS A BRACKETED PASTE (#383). The gaps above are made on
       // this client and are not kept end to end: a reconnect flush, the server's
@@ -259,7 +348,38 @@ List<AnswerFrame> buildAnswerFrames(
       for (final i in rows) {
         frames.add(AnswerFrame('${i + 1}', settle)); // toggle row i
       }
-      if (multiQuestion) {
+      if (!q.hasPreview && other != null && other.isNotEmpty) {
+        // Free text on a multi-select question (#423). Measured on claude 2.1.319,
+        // verdicts from the transcript: the digit `options.length + 1` is NOT the
+        // way in. It only toggles the row's checkbox and leaves the cursor on row
+        // 1, so the text is swallowed, and ticking only that row records "The user
+        // did not answer the questions." (as it did on 2.1.237). The CURSOR is the
+        // way: Down x `options.length` lands on the row and it becomes an inline
+        // field (the footer gains "ctrl+g to edit in Notepad"). Then:
+        //   * typing ticks the row by itself, so no digit;
+        //   * NO Enter after the text: Enter on the row UN-ticks it, and
+        //     Right-arrow inside the field only moves the caret;
+        //   * Down leaves the field for the unnumbered Next/Submit row;
+        //   * Enter there goes to the next tab, or to Review on the last or only
+        //     tab. A lone question then needs the Review "Submit answers" digit;
+        //     with several, the loop's tail Enter is that submit.
+        // Verified: 1,3 | Down x4 | ESC[200~hello thereESC[201~ | Down | CR | 1
+        // recorded "Apple, Cherry, hello there" at gaps of 250 and 700 ms; two
+        // multi-select tabs with text on both recorded both. A newline in the
+        // paste is recorded as a space. The text goes out as a bracketed paste
+        // (#383); bunching THESE frames is safe, bunching the tick digits above
+        // is not (existing fragility, unchanged).
+        for (var i = 0; i < q.options.length; i++) {
+          frames.add(const AnswerFrame('\x1b[B', gap)); // cursor onto "Type something"
+        }
+        frames.add(AnswerFrame(_bracketOtherText(other), gap,
+            text: true, other: true)); // the free text
+        frames.add(const AnswerFrame('\x1b[B', gap)); // leave the field
+        frames.add(const AnswerFrame('\r', gap)); // next tab, or Review
+        if (!multiQuestion) {
+          frames.add(const AnswerFrame('1', gap)); // Review: "Submit answers"
+        }
+      } else if (multiQuestion) {
         // A multi-select question inside a multi-question prompt. Advance to the
         // NEXT question tab with Right-arrow — NOT Enter. This branch used to
         // send Enter, and the else-branch below already knew why that is wrong:
@@ -304,7 +424,7 @@ List<AnswerFrame> buildAnswerFrames(
       }
     }
   }
-  if (multiQuestion) {
+  if (multiQuestion && replayTabs == null) {
     frames.add(const AnswerFrame('\r', gap)); // Submit-review screen
   }
   return frames;
@@ -332,6 +452,19 @@ String _unbracketOtherText(String keys) {
       : keys;
 }
 
+/// Whether the caller should WAIT to see the question clear after [frames] go out
+/// ([verifyAnswerLanded] and its resurfacing), or send them and let go (#423).
+///
+/// False for "Chat about this", and this one owner is read by the session screen
+/// and by the sessions board and inbox alike. Chat REJECTS the question: Claude fires
+/// no hook for it, and the server clears the question only once it sees the rejected
+/// tool_result in the transcript (about a second; before that server fix, not until
+/// Claude's Stop after the whole reply). A rejection has no landing to confirm and
+/// nothing the user could retry, and a verify's resent Enter, or a "did not take"
+/// that puts the card back, would type into the reply Claude is already writing.
+bool answerIsVerifiable(List<AnswerFrame> frames) =>
+    !frames.any((f) => f.chat);
+
 /// True when [frames] end in a confirming Enter — multi-question (Enter
 /// finalizes the Submit-review screen) and, since the preview-layout fix,
 /// single-select-single too (its digit no longer submits on its own in every
@@ -353,13 +486,24 @@ String _unbracketOtherText(String keys) {
 /// Other text whose own CR is followed by more than the final Submit-review CR, i.e.
 /// Other on a NON-last tab of a multi-question answer. A single-question Other, a
 /// note (its ESC already closed the editor) and an Other on the last tab keep the
-/// resend, which is their only automatic recovery.
+/// resend, which is their only automatic recovery. A multi-select Other (#423)
+/// reads the same way, its own CR being the one after the Down that leaves the
+/// field; that shape was not measured either way, so it follows the same rule
+/// (on the LAST tab that makes its resend a deliberate, unmeasured loosening:
+/// docs/findings/questions.md).
+///
+/// A "Chat about this" answer is not verified at all ([answerIsVerifiable]), so it
+/// is never asked for a resend either.
 bool answerNeedsConfirm(List<AnswerFrame> frames) {
   if (frames.isEmpty || frames.last.keys != '\r') return false;
+  if (!answerIsVerifiable(frames)) return false;
   for (var i = 0; i < frames.length; i++) {
-    // frames[i + 1] is the Other text's own committing CR; anything after it
-    // besides the last frame (the Submit-review CR) belongs to a later tab.
-    if (frames[i].other && frames.length > i + 3) return false;
+    if (!frames[i].other) continue;
+    // The Other text's own committing CR is the first one after it; anything
+    // after that besides the last frame (the Submit-review CR) belongs to a
+    // later tab.
+    final own = frames.indexWhere((f) => f.keys == '\r', i + 1);
+    if (own >= 0 && frames.length > own + 2) return false;
   }
   return true;
 }
