@@ -2226,7 +2226,8 @@ function checkPendingQuestion(id) {
   w.mtimeMs = st.mtimeMs;
   if (!resolvedIdsTail(w.tpath).has(w.toolUseId)) return { question, resolvedNow: false };
   console.log(`[${new Date().toISOString()}] question ${String(id).slice(0, 8)}: tool_result for ${w.toolUseId} `
-    + 'is in the transcript with no hook (rejected) - cleared');
+    + 'in transcript, no PostToolUse yet - cleared');
+  // Only what was seen: an ordinary answer's own PostToolUse can still be on its way.
   // Runs synchronously up to its worker RPC, which clears pendingQuestion and unwatches.
   processHookEvent(id, 'PostToolUse', undefined, { tool_name: 'AskUserQuestion' })
     .catch((e) => console.error(`question clear for ${String(id).slice(0, 8)} failed: ${e.message}`));

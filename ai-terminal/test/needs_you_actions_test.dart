@@ -170,8 +170,8 @@ void main() {
     }, timeout: const Timeout(Duration(seconds: 30)));
 
     // #423 - "Chat about this" REJECTS the question: no PostToolUse follows, and the
-    // server reports it until Claude's Stop, long after the verify budget. Verifying it
-    // could only end in "The answer did not take", with the card offered again.
+    // server clears it from the transcript's rejected tool_result in about a second.
+    // There is nothing to verify, and a resent Enter would land in Claude's reply.
     for (final sideBySide in [false, true]) {
       test('"Chat about this" (${sideBySide ? 'side-by-side, ends in Enter' : 'compact'}) is sent and NOT '
           'verified: no later poll, no "did not take", the card stays down', () async {

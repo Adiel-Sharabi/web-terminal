@@ -2045,9 +2045,10 @@ void main() {
 
     test('Chat is never verified, so never asked for a resend, even where it ends '
         'in Enter', () {
-      // Chat rejects the question; the server reports it gone on Claude's Stop,
-      // later than the verify budget. ONE predicate, [answerIsVerifiable], decides it
-      // for the session screen and the sessions board alike.
+      // Chat rejects the question and fires no hook; the server clears it from the
+      // transcript's rejected tool_result in about a second, and a resent Enter would
+      // land in Claude's reply. ONE predicate, [answerIsVerifiable], decides it for the
+      // session screen and the sessions board alike.
       final sideBySide = buildChatFrames(
           [_q(['A', 'B', 'C'], preview: true)], [<int>{}], 0)!;
       expect(sideBySide.last.keys, '\r');
