@@ -1636,6 +1636,7 @@ workerClient.on('sessionExited', ({ id, claudeSessionId }) => {
   // ntfy: drop any pending timers + stored level for the dead session.
   const nst = _notifyState.get(id);
   if (nst) { if (nst.idleTimer) clearTimeout(nst.idleTimer); if (nst.apiErrTimer) clearTimeout(nst.apiErrTimer); _notifyState.delete(id); }
+  unwatchPendingQuestion(id); // #423 (function declaration, hoisted)
   pruneNotifyPref(id);
   pruneFavorite(id);   // #60: a dead session leaves no pin behind
   spawnStore.forget(id);   // #351: nor a verdict on who started it
@@ -2158,6 +2159,80 @@ function _logDroppedNotification(body) {
   }
 }
 
+// --- #423 a question the user REJECTED fires no hook ------------------------------
+// "Chat about this" turns the AskUserQuestion down instead of answering it. MEASURED on
+// claude 2.1.319 (2026-11-08, isolated rig, 6 runs): the rejected tool_result
+// (is_error, toolDenialKind "user-rejected") is in the transcript within ~10 ms of the
+// key, and NO hook follows it - no PostToolUse, no PostToolUseFailure. The next hook is
+// the main agent's next tool, or Stop 27-38 s later after a text-only reply. Until then
+// the pendingQuestion below stood, so every card that reads it (inbox, board, a freshly
+// opened session screen) offered a question whose keys would land in a working Claude.
+//
+// The fix reads the one record that does exist: the transcript. PreToolUse carries the
+// real `tool_use_id` (equal to the transcript tool_use id, 6/6), so the question is over
+// when a tool_result for THAT id is written - matched by id only, never by text, so an
+// identical re-ask is never cleared by the old answer. Without a real id or a
+// transcript path nothing here runs and the question clears exactly as before.
+//
+// Clearing goes through processHookEvent as the PostToolUse Claude did not send - the
+// same clear and the same worker signal an ordinary answer produces (questionPending
+// false, status 'working': Claude IS replying), so no rule is copied and pty-worker.js
+// is unchanged. Checked on a 1 s timer while a question is pending (one stat when the
+// file has not moved, so it clears with no viewer polling), and at every read of the
+// question: /pending-question, the digest, and the rows' waitingFor.
+const QUESTION_WATCH_MS = 1000;
+// Claude's ids are `toolu_<base62>`; anything else is not used. It is only ever compared
+// with transcript ids, never used as a path or written anywhere.
+const _TOOL_USE_ID_RE = /^[A-Za-z0-9_-]{1,128}$/;
+const _questionWatch = new Map(); // session id -> { question, toolUseId, tpath, size, mtimeMs, timer }
+
+function unwatchPendingQuestion(id) {
+  const w = _questionWatch.get(id);
+  if (!w) return;
+  clearInterval(w.timer);
+  _questionWatch.delete(id);
+}
+
+// `tpath` is the session's stashed transcript path, already through safeTranscriptPath.
+function watchPendingQuestion(id, question, toolUseId, tpath) {
+  unwatchPendingQuestion(id);
+  if (typeof toolUseId !== 'string' || !_TOOL_USE_ID_RE.test(toolUseId)) return;
+  if (typeof tpath !== 'string' || !tpath) return;
+  const timer = setInterval(() => {
+    try { checkPendingQuestion(id); } catch (e) { console.error(`question watch failed: ${e.message}`); }
+  }, QUESTION_WATCH_MS);
+  if (timer.unref) timer.unref();
+  _questionWatch.set(id, { question, toolUseId, tpath, size: -1, mtimeMs: -1, timer });
+}
+
+/** THE owner of "is the captured question still pending" (#423). Clears it when the
+ *  transcript holds a tool_result for its real id. Synchronous on purpose: the check
+ *  and the clear happen in one tick, so no hook can slip between them and be undone.
+ *  `resolvedNow`: this call cleared it, so a worker status read BEFORE the call is the
+ *  question's 'waiting' and says nothing any more. */
+function checkPendingQuestion(id) {
+  const ns = _notifyState.get(id);
+  const question = (ns && ns.pendingQuestion) || null;
+  const w = _questionWatch.get(id);
+  if (!w) return { question, resolvedNow: false };
+  if (!question || w.question !== question) {
+    unwatchPendingQuestion(id);
+    return { question, resolvedNow: false };
+  }
+  let st;
+  try { st = fs.statSync(w.tpath); } catch { return { question, resolvedNow: false }; }
+  if (st.size === w.size && st.mtimeMs === w.mtimeMs) return { question, resolvedNow: false };
+  w.size = st.size;
+  w.mtimeMs = st.mtimeMs;
+  if (!resolvedIdsTail(w.tpath).has(w.toolUseId)) return { question, resolvedNow: false };
+  console.log(`[${new Date().toISOString()}] question ${String(id).slice(0, 8)}: tool_result for ${w.toolUseId} `
+    + 'is in the transcript with no hook (rejected) - cleared');
+  // Runs synchronously up to its worker RPC, which clears pendingQuestion and unwatches.
+  processHookEvent(id, 'PostToolUse', undefined, { tool_name: 'AskUserQuestion' })
+    .catch((e) => console.error(`question clear for ${String(id).slice(0, 8)} failed: ${e.message}`));
+  return { question: null, resolvedNow: true };
+}
+
 // Returns { status } like the worker RPC. Resolves immediately for a dropped
 // event so the calling HTTP handler can reply.
 async function processHookEvent(id, rawEvent, claudeSessionId, body) {
@@ -2262,7 +2337,10 @@ async function processHookEvent(id, rawEvent, claudeSessionId, body) {
   if (rawEvent === 'PreToolUse' && _tool === 'AskUserQuestion') {
     const questions = transcript.shapeQuestions(body.tool_input);
     if (questions.length) {
-      _nstate(id).pendingQuestion = { toolUseId: `hook-${id}-${seq}`, questions };
+      const question = { toolUseId: `hook-${id}-${seq}`, questions };
+      _nstate(id).pendingQuestion = question;
+      // #423 - the real id and the transcript let a rejection, which fires no hook, clear it.
+      watchPendingQuestion(id, question, body.tool_use_id, _nstate(id).transcriptPath);
       questionSignal = true;
     }
   } else if (
@@ -2275,6 +2353,7 @@ async function processHookEvent(id, rawEvent, claudeSessionId, body) {
   ) {
     const ns = _notifyState.get(id);
     if (ns && ns.pendingQuestion) ns.pendingQuestion = null;
+    unwatchPendingQuestion(id);
     // Say `false` even when this process held no question: everything that reaches
     // here resolves one by definition — a subagent's PreToolUse no longer does, and no
     // longer reaches — so this is real evidence, not the absence of it. It is
@@ -7201,6 +7280,8 @@ app.get('/api/sessions/:id/digest', async (req, res) => {
   res.set('Cache-Control', 'no-store');
   const id = req.params.id;
   try {
+    // #423 - settled BEFORE the worker is asked, so its status and the question agree.
+    checkPendingQuestion(id);
     let session;
     try { session = await workerClient.rpc('getSession', { id }); }
     catch { return res.status(404).json({ error: 'no such session' }); }
@@ -7328,7 +7409,12 @@ app.get('/api/sessions/:id/subagent/:toolUseId', async (req, res) => {
 // the banner and the overlay can never disagree about whether a question is on screen.
 function sessionWaitingFor(s) {
   if (!s) return null;
-  return waitingForRule(s.status, !!(_notifyState.get(s.id) || {}).pendingQuestion);
+  // #423 - the same owner the overlay route reads. A question this call found rejected
+  // leaves `s.status` (read from the worker before the clear reached it) at the
+  // question's 'waiting', which with no question would read as a permission prompt.
+  const { question, resolvedNow } = checkPendingQuestion(s.id);
+  if (resolvedNow) return null;
+  return waitingForRule(s.status, !!question);
 }
 
 // The newest UNanswered AskUserQuestion in the transcript's tail, or null. The fallback
@@ -7355,7 +7441,9 @@ app.get('/api/sessions/:id/pending-question', async (req, res) => {
   // Prefer the LIVE question captured from the PreToolUse hook — it's present
   // while the prompt is on screen, unlike the transcript (which only gets the
   // tool_use after the answer). The transcript scan below stays as a fallback.
-  const live = (_notifyState.get(id) || {}).pendingQuestion;
+  // #423 - unless the transcript already holds its (rejected) tool_result: then the
+  // transcript scan below answers, and it finds the question resolved.
+  const live = checkPendingQuestion(id).question;
   if (live) return res.json({ pending: true, question: live });
   const tpath = await resolveSessionTranscriptPath(id);
   if (!tpath) return res.status(404).json({ error: 'no transcript for session' });
