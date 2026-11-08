@@ -34,8 +34,8 @@ class AnswerFrame {
   final bool other;
 
   /// True for the frame that picks Claude's "Chat about this" row (#423). That
-  /// choice REJECTS the question rather than answering it, so [answerNeedsConfirm]
-  /// reads it to withhold the re-sent Enter: see there.
+  /// choice REJECTS the question rather than answering it, so [answerIsVerifiable]
+  /// reads it to say there is no landing to wait for: see there.
   final bool chat;
 
   /// How long to wait after sending, before the next frame. Frames that must
@@ -452,6 +452,21 @@ String _unbracketOtherText(String keys) {
       : keys;
 }
 
+/// Whether the caller should WAIT to see the question clear after [frames] go out
+/// ([verifyAnswerLanded] and its resurfacing), or send them and let go (#423).
+///
+/// False for "Chat about this", and this one owner is read by the session screen
+/// and by the sessions board and inbox alike. Chat REJECTS the question: it gets no
+/// PostToolUse, so the server reports the question until Claude's Stop, when Claude
+/// ends the reply turn that follows. That was about 1.9 s on the rig and is a whole
+/// turn on a real session, longer than the verify budget (8 polls, 900 ms apart). A
+/// verify would then call the question "not landed", put the card back and say "did
+/// not take", and a Send from that card would type a digit and an Enter into a
+/// Claude that is already working. A rejection has no landing to confirm and
+/// nothing the user could retry.
+bool answerIsVerifiable(List<AnswerFrame> frames) =>
+    !frames.any((f) => f.chat);
+
 /// True when [frames] end in a confirming Enter — multi-question (Enter
 /// finalizes the Submit-review screen) and, since the preview-layout fix,
 /// single-select-single too (its digit no longer submits on its own in every
@@ -475,16 +490,15 @@ String _unbracketOtherText(String keys) {
 /// note (its ESC already closed the editor) and an Other on the last tab keep the
 /// resend, which is their only automatic recovery. A multi-select Other (#423)
 /// reads the same way, its own CR being the one after the Down that leaves the
-/// field; that shape was not measured to go wrong, it is held to the same rule
-/// rather than given a looser one.
+/// field; that shape was not measured either way, so it follows the same rule
+/// (on the LAST tab that makes its resend a deliberate, unmeasured loosening:
+/// docs/findings/questions.md).
 ///
-/// A "Chat about this" answer (#423) never gets it. It rejects the question, which
-/// the server reports gone only on Claude's Stop, about 1.9 s after the key. The
-/// first check is 0.9 s after the last frame, so it would always see the question
-/// still up and send an Enter into a prompt the user has begun to type in.
+/// A "Chat about this" answer is not verified at all ([answerIsVerifiable]), so it
+/// is never asked for a resend either.
 bool answerNeedsConfirm(List<AnswerFrame> frames) {
   if (frames.isEmpty || frames.last.keys != '\r') return false;
-  if (frames.any((f) => f.chat)) return false;
+  if (!answerIsVerifiable(frames)) return false;
   for (var i = 0; i < frames.length; i++) {
     if (!frames[i].other) continue;
     // The Other text's own committing CR is the first one after it; anything

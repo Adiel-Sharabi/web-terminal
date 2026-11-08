@@ -404,8 +404,9 @@ class _QuestionAnswerPanelState extends State<QuestionAnswerPanel> {
     });
   }
 
-  /// Activates the free-text ("Other") answer for the current tab: clears any
-  /// numeric picks (Other is mutually exclusive) and reveals the text field.
+  /// Activates the free-text ("Other") answer for the current tab and reveals the
+  /// text field. In a SINGLE-select question it also clears any numeric picks (Other
+  /// is mutually exclusive there); a multi-select question keeps them (see below).
   ///
   /// The seed is THIS tab's own controller (#164) — empty on a tab that has
   /// never been free-texted, and whatever was typed here before on one that
@@ -488,10 +489,13 @@ class _QuestionAnswerPanelState extends State<QuestionAnswerPanel> {
   /// same [QuestionAnswerPanel.onSend] as an answer, so the host hides the card the
   /// moment the keys go out, and the user then types in the chat bar. Like the
   /// blind Send, never while words of an earlier answer may sit in the terminal's
-  /// editor: its digit would be typed into them.
+  /// editor (its digit would be typed into them) - but that gate lives on the header
+  /// button, this method's only trigger: `chatEnabled` in [_header] disables it when
+  /// [_partlyTyped], and the 'withheld while an earlier answer may sit in the terminal
+  /// editor' card test pins that. A second check here could never fire.
   void _trySendChat() {
     final frames = _chatFrames;
-    if (frames == null || _partlyTyped) return;
+    if (frames == null) return;
     widget.onSend(frames);
   }
 

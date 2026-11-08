@@ -2043,19 +2043,52 @@ void main() {
       expect(buildChatFrames(qs, sel, 3), isNull);
     });
 
-    test('Chat never gets the re-sent Enter, even where it ends in Enter', () {
+    test('Chat is never verified, so never asked for a resend, even where it ends '
+        'in Enter', () {
       // Chat rejects the question; the server reports it gone on Claude's Stop,
-      // about 1.9 s after the key, later than the first verify poll.
+      // later than the verify budget. ONE predicate, [answerIsVerifiable], decides it
+      // for the session screen and the sessions board alike.
       final sideBySide = buildChatFrames(
           [_q(['A', 'B', 'C'], preview: true)], [<int>{}], 0)!;
       expect(sideBySide.last.keys, '\r');
+      expect(answerIsVerifiable(sideBySide), isFalse);
       expect(answerNeedsConfirm(sideBySide), isFalse);
-      expect(
-          answerNeedsConfirm(buildChatFrames([_q(['A', 'B'])], [<int>{}], 0)!),
-          isFalse);
+      final compact = buildChatFrames([_q(['A', 'B'])], [<int>{}], 0)!;
+      expect(answerIsVerifiable(compact), isFalse);
+      expect(answerNeedsConfirm(compact), isFalse);
+      // Chat from a later tab replays the earlier tabs' answers first: still Chat.
+      final later = buildChatFrames(
+          [_q(['A', 'B']), _q(['X', 'Y'])],
+          [
+            {0},
+            <int>{}
+          ],
+          1)!;
+      expect(answerIsVerifiable(later), isFalse);
     });
 
-    test('no text frame is ever sent by Chat', () {
+    test('every ordinary answer is verifiable, so its landing is still checked',
+        () {
+      final qs = [
+        [_q(['A', 'B'])],
+        [_q(['A', 'B'], multi: true)],
+        [_q(['A', 'B'], preview: true)],
+        [_q(['A', 'B']), _q(['X', 'Y'], multi: true)],
+      ];
+      for (final q in qs) {
+        final sel = [for (final _ in q) <int>{0}];
+        expect(answerIsVerifiable(buildAnswerFrames(q, sel)), isTrue,
+            reason: '${q.length} question(s)');
+        expect(
+            answerIsVerifiable(buildAnswerFrames(q, sel,
+                otherText: [for (final _ in q) 'typed'])),
+            isTrue);
+      }
+      expect(answerIsVerifiable(const []), isTrue,
+          reason: 'no frames carry no Chat flag');
+    });
+
+    test('no text frame is sent by Chat when no earlier tab has Other text', () {
       final frames = buildChatFrames(
           [_q(['A', 'B']), _q(['X', 'Y'])],
           [

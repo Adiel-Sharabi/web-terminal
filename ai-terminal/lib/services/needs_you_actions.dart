@@ -28,7 +28,7 @@ import '../screens/session_screen.dart'
         verifyAnswerLanded;
 import '../util/inbox_items.dart' show sessionKey;
 import '../widgets/question_answer_panel.dart' show quickAnswerable;
-import '../widgets/question_overlay.dart' show AnswerFrame, answerNeedsConfirm, buildAnswerFrames, deliverAnswerFrames;
+import '../widgets/question_overlay.dart' show AnswerFrame, answerIsVerifiable, answerNeedsConfirm, buildAnswerFrames, deliverAnswerFrames;
 import 'question_draft_store.dart';
 import 'session_input.dart';
 import 'session_repository.dart';
@@ -256,6 +256,7 @@ class NeedsYouActions extends ChangeNotifier {
     final sig = questionSignature(shown);
     var verdict = PreWriteVerdict.refused;
     var polled = false;
+    var rejected = false;
     PendingQuestion? fresh;
     AnswerVerification? checked;
     final reached = await _exclusive(s, () {
@@ -281,6 +282,12 @@ class NeedsYouActions extends ChangeNotifier {
         // Flagged as the first key goes out (#383), as the session screen does.
         drafts.markSent(sig, frames);
         await deliverAnswerFrames(frames, send);
+        // "Chat about this" (#423) rejects the question: nothing lands, and the server
+        // reports it until Claude's Stop, so a verify here could only end in "did not take".
+        if (!answerIsVerifiable(frames)) {
+          rejected = true;
+          return;
+        }
         checked = await verifyAnswerLanded(
           answeredKey: sig,
           resendEnter: answerNeedsConfirm(frames),
@@ -292,6 +299,15 @@ class NeedsYouActions extends ChangeNotifier {
     });
     if (reached == null) return PreWriteVerdict.refused;
     if (_disposed) return verdict;
+    if (rejected) {
+      // Sent and not checked. `_answered[k]` stays down, so the card offers no second
+      // answer, until the session leaves the waiting list (Claude's Stop, in seconds).
+      // No `onSettled`: nothing was answered, the thread goes on in the session.
+      say('Sent "Chat about this" to "${s.name}" - open it to reply');
+      _changed();
+      unawaited(repository.refresh());
+      return verdict;
+    }
     final v = checked;
     if (v == null) {
       // Nothing was written: not reached (said by [_send]), or the re-check refused.

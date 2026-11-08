@@ -275,11 +275,27 @@ first (and the current multi-select tab's ticks). Hooks: `UserPromptSubmit`,
 `PreToolUse`, then `Stop` about 1.9 s later; **no** `PostToolUse` and no
 `PostToolUseFailure`, so the server's `pendingQuestion` clears on `Stop` (already
 listed in `server.js`). Claude then asks what to clarify and goes idle. Two
-consequences in the app: the card is hidden by the host on send (the user then
-types in the chat bar), and **Chat never gets the re-sent Enter**
-(`answerNeedsConfirm`), because the question is still reported ~1 s after the
-first 0.9 s verify poll and a blind Enter would land in a prompt the user has
-begun to type in.
+consequences in the app, both because nothing ever lands: the card is hidden by
+the host on send (the user then types in the chat bar), and **a Chat send is
+fire-and-forget** - never verified, never resent, never resurfaced. The server
+reports the question until `Stop`, which comes after Claude's whole reply and can
+outlast the 7.2 s verify budget; verifying it resurfaced the card, claimed "The
+answer did not take", and a Send from there typed a digit and an Enter into a
+working Claude. `answerIsVerifiable` (frames carrying the Chat flag are not) is
+the ONE predicate, read by the session screen and by the sessions board/inbox
+(`NeedsYouActions.answer`, which says "Sent Chat about this" and leaves its
+"answering" mark up until the session leaves the waiting list). The session screen
+also holds the rejected question off its card AND off the "A question is waiting"
+chip while the server still reports it, until a poll sees it gone or replaced.
+A re-ask of the identical question before any poll saw the first one go would be
+held back too; re-opening the session shows it.
+
+**A deliberate, UNMEASURED loosening:** the re-sent Enter now goes out for a
+multi-select `Other` on the LAST tab of a several-question prompt (text, `Down`,
+`CR`, Review `CR`); the old gate (`frames.length > i + 3`, counted from the text
+frame) refused it because of the extra `Down`, the new one counts from the `CR` that
+commits the Other. Risk: a lost `Down` lets the resent `CR` land in the field and
+UN-tick `Other`. Not seen, not measured.
 
 **Design choices that are the app's, not the TUI's.** Chat is refused (greyed,
 tooltip says why) while an earlier tab is unanswered: replaying it would pick that
@@ -292,6 +308,13 @@ and overflowed the card by 2 px in the #94 height tests.
 **Not measured:** `Esc` inside the field; returning to a tab already left; a
 resent card onto a TUI that has already advanced (#383); `Right-arrow` as a way
 past an unanswered single-select tab.
+
+**Chat from tab 2 (measured 2026-11-07, claude 2.1.319, #423): PASS in all four
+layout pairs**, with exactly `buildChatFrames`' output and tab 1 answered `Green`
+each time. The `tool_result` is the rejection ("The user wants to clarify these
+questions"), Q1 `Answer: Green`, Q2 `(No answer provided)`. side-by-side then
+compact-multi: `2, CR, 6`; side-by-side then side-by-side: `2, CR, Down x3, CR`;
+compact then side-by-side: `2, Down x3, CR`; side-by-side then compact: `2, CR, 5`.
 
 Shapes for `scripts/rig/probe-askq-layout.js`: `preview-mq`, `plain-mq`,
 `preview-single`, plus `plain-single`, `plain-multi` and `plain-mq2` (two
