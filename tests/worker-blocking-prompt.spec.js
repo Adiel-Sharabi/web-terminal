@@ -30,7 +30,8 @@ const path = require('path');
 const fs = require('fs');
 const os = require('os');
 const crypto = require('crypto');
-const { connectClient, rpc, waitForTyped, stopWorker } = require('./worker-ipc');   // #262 - one owner for the budget
+const { connectClient, rpc, waitForTyped, stopWorker } = require('./worker-ipc');
+const { stripAnsi } = require('../lib/ansi');   // #262 - one owner for the budget
 const agents = require('../lib/agents');
 
 const ESC = String.fromCodePoint(0x001b);
@@ -72,11 +73,17 @@ const COMPOSER = `${ESC}[38;2;136;136;136m${'-'.repeat(8)}${ESC}[39m\r\n${CARET}
 // #404 - Claude is ready only once this follows its composer (lib/agents.js readiness.settled).
 const STARTUP_SETTLED = `${ESC}[>0q${ESC}[?u`;
 
-// Short enough to keep the spec quick, long enough that the injection below lands well
-// inside it. The DEFAULT is 45s (#147); what is under test is the decision the timer
-// makes when it fires, not its length.
-const FALLBACK_MS = 700;
+// Short enough to keep the spec quick, long enough that claudeSession's setup (the launch
+// typed, run and quiet: ~1 s since #418 answers ConPTY's DA1) and the injection after it
+// land well inside it - claudeSession ABORTS if they do not. Counted from the CREATE, as
+// the worker arms it at spawn. The DEFAULT is 45s (#147); what is under test is the
+// decision the timer makes when it fires, not its length.
+const FALLBACK_MS = 3000;
 const GAP_MS = agents.blockingPromptsFor('claude').answerGapMs;
+// The session's inert launch command, and what bash prints when it runs it (differs from
+// the echo of the typing, so the output alone proves the command ran).
+const LAUNCH = 'echo probe-$((1+1))';
+const LAUNCH_OUTPUT = 'probe-2';
 
 function workerPipePath() {
   return process.platform === 'win32'
@@ -152,14 +159,42 @@ test.describe('#190 a startup selector holds the submit gate shut', () => {
    *
    * The command itself is inert; what matters is that one EXISTS.
    */
+  let createdAt = 0;
   async function claudeSession() {
+    createdAt = Date.now();
     const { id } = await rpc(client, 'createSession',
-      { cwd: dataDir, name: 'blocked', agent: 'claude', autoCommand: 'echo probe' });
+      { cwd: dataDir, name: 'blocked', agent: 'claude', autoCommand: LAUNCH });
     // After the launch is typed, so a spec's `before` snapshot excludes the prime and
     // the command (and readiness, which arms only after it, is in play).
-    await waitForTyped(client, id, 'echo probe');
+    await waitForTyped(client, id, LAUNCH);
+    await waitForShellQuiet(id);
+    // A setup that ran past the ceiling would test nothing (the fallback has already
+    // decided) - abort rather than report.
+    const used = Date.now() - createdAt;
+    if (used > FALLBACK_MS - 1000) throw new Error(`setup: the session took ${used} ms to start, too close to the ${FALLBACK_MS} ms ceiling under test`);
     return id;
   }
+
+  // ANCHOR ON CONTENT, NOT A TIMER (#418). The launch's OUTPUT is `probe-2` while its
+  // echo is `probe-$((1+1))`, so seeing it means bash has run the command; the session
+  // is then left alone until its scrollback stops changing. From here the only output
+  // the worker sees is what a case injects. These cases used to end inside ConPTY's ~3 s
+  // DA1 hold instead, before the shell printed at all - a hold the worker now answers.
+  async function waitForShellQuiet(id, quietMs = 250, timeoutMs = 12000) {
+    const deadline = Date.now() + timeoutMs;
+    let last = null;
+    let since = Date.now();
+    for (;;) {
+      const sb = String((await rpc(client, 'getScrollback', { id })).data || '');
+      if (sb !== last) { last = sb; since = Date.now(); }
+      else if (stripAnsi(sb).includes(LAUNCH_OUTPUT) && Date.now() - since >= quietMs) return;
+      if (Date.now() > deadline) throw new Error(`setup: the launch never ran and went quiet; scrollback tail=${JSON.stringify(stripAnsi(sb).slice(-300))}`);
+      await sleep(25);
+    }
+  }
+
+  /** Sleeps until [extraMs] past the readiness ceiling, counted from the create. */
+  const pastCeiling = (extraMs) => sleep(Math.max(0, createdAt + FALLBACK_MS + extraMs - Date.now()));
 
   test('it is REPORTED, and survives the #147 readiness ceiling', async () => {
     await start({ WT_AUTO_ANSWER_BLOCKING_PROMPT: '0' });
@@ -180,7 +215,7 @@ test.describe('#190 a startup selector holds the submit gate shut', () => {
 
     // THE ASSERTION THAT IS RED WITHOUT THE FIX. Past the ceiling, the old code calls
     // `d.force()` and publishes agentReady: true for a session sitting on `No, exit`.
-    await sleep(FALLBACK_MS + 400);
+    await pastCeiling(400);
     const after = await summary(client, id);
     expect(after.agentReady).toBe(false);
     expect(after.blockedPrompt.id).toBe('folder-trust');
@@ -194,7 +229,7 @@ test.describe('#190 a startup selector holds the submit gate shut', () => {
     const id = await claudeSession();
 
     await rpc(client, '__testInjectOutput', { id, data: 'bash: claude: command not found\r\n' });
-    await sleep(FALLBACK_MS + 400);
+    await pastCeiling(400);
 
     const s = await summary(client, id);
     expect(s.agentReady).toBe(true);
@@ -213,7 +248,7 @@ test.describe('#190 a startup selector holds the submit gate shut', () => {
     const id = await claudeSession();
 
     await rpc(client, '__testInjectOutput', { id, data: TRUST_DIALOG });
-    await sleep(FALLBACK_MS + 300);            // past the ceiling, still held
+    await pastCeiling(300);                    // past the ceiling, still held
     expect((await summary(client, id)).agentReady).toBe(false);
 
     await rpc(client, 'hookEvent', { id, event: 'UserPromptSubmit' });
@@ -236,7 +271,7 @@ test.describe('#190 a startup selector holds the submit gate shut', () => {
 
     // WAIT FOR AN EXACT OBSERVATION, NOT A DURATION. #147's readiness scan does not arm
     // until the autoCommand has actually been WRITTEN - a real bash prompt plus
-    // AUTO_CMD_SETTLE_MS plus the prime, measured at ~3.7s on this fleet and a different
+    // AUTO_CMD_SETTLE_MS plus the prime, ~0.7 s since #418 (~3.7 s before) and a different
     // number on every box. A sleep here would be a timer bet, which is this suite's
     // recurring defect rather than flake. `__testGetWrites` says exactly when it landed.
     const deadline = Date.now() + 20000;
@@ -248,7 +283,7 @@ test.describe('#190 a startup selector holds the submit gate shut', () => {
       // what reports, and reports the actual cause.
       try {
         armed = writesOf(await rpc(client, '__testGetWrites', { id }))
-          .some((x) => x.includes('echo probe'));
+          .some((x) => x.includes(LAUNCH));
       } catch (e) { gone = e.message; break; }
       if (!armed) await sleep(200);
     }
@@ -256,8 +291,8 @@ test.describe('#190 a startup selector holds the submit gate shut', () => {
       'the worker never wrote the autoCommand, so #147 readiness never armed and this '
         + 'rule was never exercised'
         + (gone ? ` (the session vanished first: ${gone})` : '')
-        + '. On a healthy box the shell reaches its prompt in ~3.3s and the command is '
-        + 'written at ~3.7s. A box whose consoles are exhausted kills bash at that '
+        + '. On a healthy box the shell reaches its prompt in ~0.3 s and the command is '
+        + 'written at ~0.7 s. A box whose consoles are exhausted kills bash at that '
         + 'exact moment - check `Get-CimInstance Win32_Process -Filter "Name=\'OpenConsole.exe\'"`'
         + ' against cygwin\'s ceiling of 32 before treating this as a code failure.').toBe(true);
 
@@ -285,7 +320,7 @@ test.describe('#190 a startup selector holds the submit gate shut', () => {
     const deadline = Date.now() + 20000;
     let armed = false;
     while (Date.now() < deadline && !armed) {
-      armed = writesOf(await rpc(client, '__testGetWrites', { id })).some((x) => x.includes('echo probe'));
+      armed = writesOf(await rpc(client, '__testGetWrites', { id })).some((x) => x.includes(LAUNCH));
       if (!armed) await sleep(200);
     }
     expect(armed, 'the autoCommand was never written, so readiness never armed').toBe(true);
@@ -319,8 +354,8 @@ test.describe('#190 a startup selector holds the submit gate shut', () => {
   // rig, claude 2.1.318: a key inside Claude's startup window was undone by a redraw
   // with the caret back on `No, exit`, and the scheduled CR confirmed it. These drive
   // that sequence through the real worker. The quiet period is shortened (test-only
-  // WT_BLOCK_ANSWER_GAP_MS) so every case ends inside ConPTY's ~3 s startup hold (#418),
-  // before the real shell under the session prints anything.
+  // WT_BLOCK_ANSWER_GAP_MS); claudeSession has let the real shell run its launch and go
+  // quiet first (#418), so the only output during a case is what the case injects.
   // ---------------------------------------------------------------------------------
   const QUIET = 300;
   const ON = { WT_AUTO_ANSWER_BLOCKING_PROMPT: '1', WT_BLOCK_ANSWER_GAP_MS: String(QUIET) };
@@ -400,8 +435,7 @@ test.describe('#190 a startup selector holds the submit gate shut', () => {
     await rpc(client, '__testInjectOutput', { id, data: TRUST_DIALOG + AFTER_RENDER });
     await sleep(QUIET / 3);
     // Answered by someone else before the key fires: a hook arrives, which forces the
-    // session ready (composerSeen) - the composer itself is not scanned until the
-    // autoCommand is written, ~3.7 s in, past this test's window.
+    // session ready (composerSeen); nothing on screen is a composer.
     await rpc(client, 'hookEvent', { id, event: 'UserPromptSubmit' });
     await sleep(QUIET * 2);
     expect(await writesSince(id, before)).toEqual([]);
