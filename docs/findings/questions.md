@@ -272,23 +272,48 @@ nothing: `Down` x n then `CR` (preview-single and preview-mq Q1, n=3). Picks
 already made ride along (`"Pick a color"` Answer: Green). The digit is relative
 to the tab the TUI is ON, so `buildChatFrames` replays the earlier tabs' picks
 first (and the current multi-select tab's ticks). Hooks: `UserPromptSubmit`,
-`PreToolUse`, then `Stop` about 1.9 s later; **no** `PostToolUse` and no
-`PostToolUseFailure`, so the server's `pendingQuestion` clears on `Stop` (already
-listed in `server.js`). Claude then asks what to clarify and goes idle. Two
+`PreToolUse`, then `Stop` about 1.9 s later on the rig; **no** `PostToolUse` and no
+`PostToolUseFailure`. Claude then asks what to clarify and goes idle. Two
 consequences in the app, both because nothing ever lands: the card is hidden by
 the host on send (the user then types in the chat bar), and **a Chat send is
-fire-and-forget** - never verified, never resent, never resurfaced. The server
-reports the question until `Stop`, which comes after Claude's whole reply and can
-outlast the 7.2 s verify budget; verifying it resurfaced the card, claimed "The
-answer did not take", and a Send from there typed a digit and an Enter into a
-working Claude. `answerIsVerifiable` (frames carrying the Chat flag are not) is
-the ONE predicate, read by the session screen and by the sessions board/inbox
-(`NeedsYouActions.answer`, which says "Sent Chat about this" and leaves its
-"answering" mark up until the session leaves the waiting list). The session screen
-also holds the rejected question off its card AND off the "A question is waiting"
-chip while the server still reports it, until a poll sees it gone or replaced.
-A re-ask of the identical question before any poll saw the first one go would be
-held back too; re-opening the session shows it.
+fire-and-forget** - never verified, never resent, never resurfaced.
+`answerIsVerifiable` (frames carrying the Chat flag are not) is the ONE predicate,
+read by the session screen and by the sessions board/inbox (`NeedsYouActions.answer`,
+which says "Sent Chat about this", settles it as `AnswerSettled.chatSent` so the
+inbox focus card moves on instead of staying live, and words the card's answering
+line for a Chat via `answeringNote`).
+
+**The server clears a rejected question from the TRANSCRIPT (measured 2026-11-08,
+claude 2.1.319, isolated rig, 6 runs).** `PreToolUse(AskUserQuestion)` carries
+`tool_use_id` (and `transcript_path`), equal to the transcript tool_use id 6/6. The
+rejected `tool_result` (`is_error: true`, `toolDenialKind: "user-rejected"`) is in the
+transcript JSONL within ~10 ms of the key; `Stop` comes 27-38 s later on a real reply,
+and in a text-only reply `Stop` is the FIRST hook after the key (it carries no
+tool_use_id). An ordinary answer's `PostToolUse` carries tool_use_id. So before the
+fix `pendingQuestion` stood for the whole reply: the inbox focus card, the board and
+any freshly opened session screen offered the question, and a press typed keys into a
+working Claude (the session screen's own client-side hold covered only the screen that
+sent it, and is gone now).
+
+The fix (`server.js` `checkPendingQuestion`, the one owner): the PreToolUse's real id
+(validated `^[A-Za-z0-9_-]{1,128}$`) and the session's stashed transcript path (already
+through `safeTranscriptPath`) are kept beside the question; when a `tool_result` for
+THAT id is in the transcript tail (`resolvedIdsTail`) the question is cleared through
+`processHookEvent` as the `PostToolUse` Claude did not send - the same clear and the
+same worker signal an ordinary answer produces (`questionPending: false`, status
+`working`, since Claude is replying). Matched by id only, never by text: an identical
+re-ask is not cleared by the old result. Checked on a 1 s timer while a question is
+pending (one `stat` while the file has not moved; stopped on any clear, on session
+exit, and by itself when the question it watches is replaced) and at every read:
+`/pending-question`, the digest, and the rows' `waitingFor` (a row whose worker status
+was read before that same call cleared it reports `waitingFor: null`, not
+`permission`). No real id or no transcript path: exactly the old behaviour.
+`pty-worker.js` is unchanged (hot reload). Pinned by
+`tests/issue423-rejected-question-clears.spec.js`, every gate mutation-checked.
+
+**Not measured:** `Esc` on the question in the terminal also writes a rejection with no
+hook; the fix now reads it as `working` (then the 5-minute stale rule), where before the
+question stood until the next prompt.
 
 **A deliberate, UNMEASURED loosening:** the re-sent Enter now goes out for a
 multi-select `Other` on the LAST tab of a several-question prompt (text, `Down`,
