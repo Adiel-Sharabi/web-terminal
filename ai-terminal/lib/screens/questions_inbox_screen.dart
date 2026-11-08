@@ -1001,18 +1001,21 @@ class _QuestionsInboxScreenState extends State<QuestionsInboxScreen> {
 
   Future<void> _answer(InboxItem it, PendingQuestion q, List<AnswerFrame> frames) async {
     final s = it.session!;
-    await _needs.answer(s, q, frames, onSettled: (landed) {
-      if (!landed || _disposed) return;
+    await _needs.answer(s, q, frames, onSettled: (outcome) {
+      if (outcome == AnswerSettled.notLanded || _disposed) return;
       _sentTo(s);
-      _say('Answered "${s.name}"');
+      // A "Chat about this" (#423) is said by NeedsYouActions; it is no answer.
+      if (outcome == AnswerSettled.landed) _say('Answered "${s.name}"');
+      // Either way the card is done with: a Chat must not leave it live on a session
+      // that is now replying, where a press would type into that reply.
       if (_focusKey == it.key) _moveOn(it.key);
     });
   }
 
   Future<void> _quickAnswer(InboxItem it, PendingQuestion q, int index) async {
     final s = it.session!;
-    await _needs.quickAnswer(s, q, index, onSettled: (landed) {
-      if (!landed || _disposed) return;
+    await _needs.quickAnswer(s, q, index, onSettled: (outcome) {
+      if (outcome != AnswerSettled.landed || _disposed) return;
       _sentTo(s);
       _say('Answered "${s.name}"');
     });
@@ -1741,8 +1744,9 @@ class _InboxCard extends StatelessWidget {
       case InboxKind.question:
         final q = it.question;
         if (q == null || s == null) return const [];
-        if (state._needs.isAnswering(s, q)) {
-          return [Text('Answer sent - waiting for it to land...', style: Theme.of(context).textTheme.bodySmall)];
+        final note = state._needs.answeringNote(s, q);
+        if (note != null) {
+          return [Text(note, key: ValueKey('inbox-answering-$idk'), style: Theme.of(context).textTheme.bodySmall)];
         }
         final blocked = state._needs.quickAnswerBlocked(s, q);
         final answer = OutlinedButton(

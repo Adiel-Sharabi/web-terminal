@@ -1030,28 +1030,6 @@ String questionSignature(PendingQuestion? q) {
   return b.toString();
 }
 
-bool _isRejectedQuestion(PendingQuestion? q, String? rejectedKey) =>
-    rejectedKey != null && q != null && questionSignature(q) == rejectedKey;
-
-/// #423 - the question a poll [observed] leaves on screen, given the question
-/// [rejectedKey] that "Chat about this" turned down ([answerIsVerifiable]).
-///
-/// Claude rejects the call, so no PostToolUse ever clears the server's
-/// `pendingQuestion`: only Claude's Stop does, after its whole reply, which can outlast
-/// any verify budget. Until then the poll keeps returning the rejected question, and
-/// showing it - as the card, or as the "A question is waiting" chip that reopens the
-/// card - would invite a Send that types a digit and an Enter into a working Claude.
-/// So it is held back (null) while the server still reports it.
-PendingQuestion? questionAfterRejection(PendingQuestion? observed, String? rejectedKey) =>
-    _isRejectedQuestion(observed, rejectedKey) ? null : observed;
-
-/// #423 - the rejected key after a poll that [observed] the server's question:
-/// kept while that same question is still reported, dropped on a POSITIVE observation
-/// that it is gone (Stop) or replaced, so a later question is never held back by it.
-/// Callers only pass an observation a poll actually made: a failed poll says nothing.
-String? rejectedKeyAfterPoll(String? rejectedKey, PendingQuestion? observed) =>
-    _isRejectedQuestion(observed, rejectedKey) ? rejectedKey : null;
-
 /// After verifying a submitted answer, whether the overlay must be re-shown: the
 /// same prompt is [stillPending] (the answer never landed after every retry) AND
 /// it's still the one we optimistically dismissed ([dismissedKey] == the answered
@@ -1378,10 +1356,6 @@ class _SessionScreenState extends State<SessionScreen>
   // `hook-<id>-<seq>` (live) and the real `toolu_…` (transcript), which used to
   // read as a brand-new question and re-show the overlay.
   String? _dismissedQuestionKey;
-  // Signature of a question turned down with "Chat about this" (#423, see
-  // [answerIsVerifiable]); [questionAfterRejection] keeps it off the card AND the chip
-  // for as long as the server still reports it.
-  String? _rejectedQuestionKey;
   // Other/note text typed into the overlay, kept per SESSION so a resurfaced overlay
   // (an answer that did not land) finds it again instead of starting empty, and so
   // the questions inbox answering the same session sees the same words and flag
@@ -1690,12 +1664,6 @@ class _SessionScreenState extends State<SessionScreen>
     // The typed Other/note drafts belong to the question they were typed for (#383):
     // a different one, or none, drops them.
     if (seen.shouldClearDrafts(_questionDrafts.key)) _questionDrafts.clear();
-    // A question "Chat about this" turned down (#423) stays off the screen while the
-    // server still reports it (it clears only at Claude's Stop); the first poll that
-    // sees it gone or replaced ends the hold. Drafts above read the raw observation.
-    final held = questionAfterRejection(q, _rejectedQuestionKey);
-    _rejectedQuestionKey = rejectedKeyAfterPoll(_rejectedQuestionKey, q);
-    q = held;
     if (q?.toolUseId != _pendingQuestion?.toolUseId) {
       setState(() {
         _pendingQuestion = q;
@@ -1763,9 +1731,6 @@ class _SessionScreenState extends State<SessionScreen>
     setState(() {
       _pendingQuestion = null;
       _dismissedQuestionKey = answeredKey;
-      // "Chat about this" (#423) rejects the question instead of answering it, so
-      // there is no landing to wait for: hold it off the screen, and never verify.
-      _rejectedQuestionKey = answerIsVerifiable(frames) ? null : answeredKey;
     });
     _finishTerminalComposing();
     // Flag BEFORE the keys go out (#383): the words may be in the terminal from the
@@ -1786,6 +1751,9 @@ class _SessionScreenState extends State<SessionScreen>
     // Verify the answer actually landed — and un-strand it if it didn't. We just
     // dismissed the overlay optimistically, so a dropped answer would otherwise
     // sit hidden-but-pending forever (the user only learns Claude never moved).
+    // "Chat about this" (#423) rejects the question instead of answering it: never
+    // verified or resent ([answerIsVerifiable]). The dismissal above covers the
+    // second or so until the server sees the rejected tool_result and clears it.
     if (answeredKey.isNotEmpty && answerIsVerifiable(frames)) {
       await _verifyAnswerLanded(
         answeredKey,

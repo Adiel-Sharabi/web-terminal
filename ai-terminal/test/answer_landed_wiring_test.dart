@@ -183,47 +183,21 @@ void main() {
     });
   });
 
-  // #423 - "Chat about this" REJECTS the question (no PostToolUse), so the server
-  // reports it until Claude's Stop. Verifying that always looked "stuck": the card came
-  // back and a Send typed a digit and an Enter into a working Claude.
+  // #423 - "Chat about this" REJECTS the question and Claude fires no hook for it; the
+  // server clears it once the rejected tool_result is in the transcript (about a second,
+  // tests/issue423-rejected-question-clears.spec.js). The screen holds nothing of its
+  // own: a Chat is an ordinary dismissal, which covers that second.
   group('a question turned down with "Chat about this" (#423)', () {
     final asked = _q('Pick one');
     final key = questionSignature(asked);
 
-    test('held back from the card AND the "question is waiting" chip while reported', () {
-      final shown = questionAfterRejection(asked, key);
-      expect(shown, isNull);
-      // The user's own dismissal is the key too (the screen sets both at send time).
-      expect(questionOverlayVisible(shown, key), isFalse);
-      expect(pendingQuestionChipVisible(shown, key), isFalse);
-      // Without the hold the poll would hand the same question straight back, and the
-      // chip reopens the card.
+    test('is dismissed like any answer: off the card while still reported', () {
+      expect(questionOverlayVisible(asked, key), isFalse);
+    });
+
+    test('an identical re-ask is not hidden without a trace: its chip shows', () {
+      // The old screen-side hold kept an identical question off the card AND the chip.
       expect(pendingQuestionChipVisible(asked, key), isTrue);
-    });
-
-    test('the hold outlasts the verify budget: 20 polls of the same question', () {
-      String? rejected = key;
-      for (var i = 0; i < 20; i++) {
-        expect(questionAfterRejection(asked, rejected), isNull, reason: 'poll $i');
-        rejected = rejectedKeyAfterPoll(rejected, asked);
-      }
-      expect(rejected, key);
-    });
-
-    test('a poll that sees it GONE ends the hold; a different question is never held', () {
-      expect(rejectedKeyAfterPoll(key, null), isNull);
-      final other = _q('Pick another');
-      expect(questionAfterRejection(other, key), same(other));
-      expect(rejectedKeyAfterPoll(key, other), isNull);
-      // After it ended, a later question - even this one asked again - shows normally.
-      expect(questionAfterRejection(asked, rejectedKeyAfterPoll(key, null)), same(asked));
-    });
-
-    test('with no rejection nothing is held and no key appears', () {
-      expect(questionAfterRejection(asked, null), same(asked));
-      expect(questionAfterRejection(null, key), isNull);
-      expect(rejectedKeyAfterPoll(null, asked), isNull);
-      expect(rejectedKeyAfterPoll(null, null), isNull);
     });
   });
 
@@ -286,46 +260,27 @@ void main() {
       expect(b, isNot(contains('notLanded')));
     });
 
-    test('_answerQuestion holds a rejected question and never verifies it (#423)', () {
+    test('_answerQuestion never verifies a Chat, and holds nothing of its own (#423)', () {
       final b = body('Future<void> _answerQuestion(');
-      expect(
-          b,
-          contains('_rejectedQuestionKey = answerIsVerifiable(frames) ? '
-              'null : answeredKey;'));
       expect(
           b,
           contains(RegExp(r'if \(answeredKey\.isNotEmpty && answerIsVerifiable\(frames\)\) '
               r'\{\s+await _verifyAnswerLanded\(')));
-    });
-
-    test('the 4 s poll reads the raw question for the drafts and the rejected key, '
-        'then shows the held one (#423)', () {
-      final b = body('Future<void> _pollPendingQuestion()');
-      // Anchored at the start of a line: a commented-out copy (`// q = held;`) is not
-      // the line this test is looking for.
-      int at(String code) =>
-          b.indexOf(RegExp('^[ \\t]*${RegExp.escape(code)}', multiLine: true));
-      final drafts = at('if (seen.shouldClearDrafts(');
-      final held = at('final held = questionAfterRejection(q, _rejectedQuestionKey);');
-      final key = at('_rejectedQuestionKey = rejectedKeyAfterPoll(_rejectedQuestionKey, q);');
-      final swap = at('q = held;');
-      final apply = at('if (q?.toolUseId != _pendingQuestion?.toolUseId)');
-      for (final i in [drafts, held, key, swap, apply]) {
-        expect(i, greaterThanOrEqualTo(0));
-      }
-      expect(drafts, lessThan(held));
-      expect(held, lessThan(key));
-      expect(key, lessThan(swap),
-          reason: 'the key must be read off the RAW observation, before q is replaced');
-      expect(swap, lessThan(apply));
+      // The server clears a rejected question now; a screen-side hold would be a
+      // second owner of "is it still pending".
+      expect(src, isNot(contains('_rejectedQuestionKey')));
     });
 
     test('ONE predicate: neither the screen nor the board re-derives "is Chat"', () {
       final board = File('lib/services/needs_you_actions.dart').readAsStringSync();
       expect(src, contains('answerIsVerifiable(frames)'));
       expect(board, contains('answerIsVerifiable(frames)'));
-      expect(src, isNot(contains('.chat')));
-      expect(board, isNot(contains('.chat')));
+      // Pinned to the predicate's own read (`f.chat` in answerIsVerifiable), not any
+      // `.chat`, which would also match an unrelated name.
+      final overlay = File('lib/widgets/question_overlay.dart').readAsStringSync();
+      expect(overlay, contains('!frames.any((f) => f.chat)'));
+      expect(src, isNot(contains('f.chat')));
+      expect(board, isNot(contains('f.chat')));
     });
 
     test('the 4 s poll records what it saw before clearing drafts', () {

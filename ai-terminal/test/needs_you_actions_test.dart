@@ -183,8 +183,8 @@ void main() {
         final shown = PendingQuestion.fromJson({'pending': true, 'question': json})!;
         final frames = buildChatFrames(shown.questions, [<int>{}], 0)!;
         expect(frames.last.chat, isTrue);
-        final settled = <bool>[];
-        // The server never stops reporting it (the question clears only at Claude's Stop).
+        final settled = <AnswerSettled>[];
+        // The server keeps reporting it throughout: a verify would still be answered "up".
         final stillAsking = NeedsYouActions(
           repository: a.repository,
           client: client,
@@ -205,10 +205,14 @@ void main() {
             reason: 'the verify budget alone is 8 x 900 ms');
         expect(said.single, contains('Chat about this'));
         expect(said.join(), isNot(contains('did not take')));
-        expect(settled, isEmpty, reason: 'nothing was answered, so nothing is "Answered"');
+        expect(settled, [AnswerSettled.chatSent],
+            reason: 'settled as a Chat - the inbox moves on, and nothing says "Answered"');
         expect(stillAsking.isBusy(s), isFalse);
         expect(stillAsking.isAnswering(s, shown), isTrue,
             reason: 'the card stays down for this question, as after any answer');
+        // Worded for a Chat, not "waiting for it to land" (there is no landing).
+        expect(stillAsking.answeringNote(s, shown), contains('Chat about this'));
+        expect(stillAsking.answeringNote(s, shown), isNot(contains('land')));
       }, timeout: const Timeout(Duration(seconds: 30)));
     }
 

@@ -456,14 +456,12 @@ String _unbracketOtherText(String keys) {
 /// ([verifyAnswerLanded] and its resurfacing), or send them and let go (#423).
 ///
 /// False for "Chat about this", and this one owner is read by the session screen
-/// and by the sessions board and inbox alike. Chat REJECTS the question: it gets no
-/// PostToolUse, so the server reports the question until Claude's Stop, when Claude
-/// ends the reply turn that follows. That was about 1.9 s on the rig and is a whole
-/// turn on a real session, longer than the verify budget (8 polls, 900 ms apart). A
-/// verify would then call the question "not landed", put the card back and say "did
-/// not take", and a Send from that card would type a digit and an Enter into a
-/// Claude that is already working. A rejection has no landing to confirm and
-/// nothing the user could retry.
+/// and by the sessions board and inbox alike. Chat REJECTS the question: Claude fires
+/// no hook for it, and the server clears the question only once it sees the rejected
+/// tool_result in the transcript (about a second; before that server fix, not until
+/// Claude's Stop after the whole reply). A rejection has no landing to confirm and
+/// nothing the user could retry, and a verify's resent Enter, or a "did not take"
+/// that puts the card back, would type into the reply Claude is already writing.
 bool answerIsVerifiable(List<AnswerFrame> frames) =>
     !frames.any((f) => f.chat);
 

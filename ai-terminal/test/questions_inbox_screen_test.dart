@@ -379,6 +379,35 @@ void main() {
       expect(tester.widget<EditableText>(inPanel(find.byType(EditableText))).focusNode.hasFocus, isTrue);
       await done(tester);
     });
+    // #423 - "Chat about this" rejects the question, and the server goes on reporting it
+    // for the second or so until it sees the rejected tool_result. The focus card used to
+    // stay live through all of that (and, before the server fix, through Claude's whole
+    // reply): a press typed keys into a Claude that was already replying.
+    testWidgets('8.10 (#423): after "Chat about this" the focus card moves on, and the list says it was a Chat',
+        (tester) async {
+      rows = {
+        _home.baseUrl: [
+          _row('q', 'Asker', status: 'waiting', waitingFor: 'question', lastActivity: 1),
+          _row('q2', 'Second', status: 'waiting', waitingFor: 'question', lastActivity: 2),
+        ]
+      };
+      questions = {'q': _single('Pick one'), 'q2': _single('Pick two', id: 't2')};
+      await pump(tester, await repo());
+      expect(inPanel(find.text('Pick one')), findsOneWidget, reason: 'the oldest wait is focused');
+      await tester.tap(inPanel(find.byKey(const ValueKey('chat-about-this'))));
+      await advance(tester, const Duration(seconds: 3));
+      expect(sent, [('q', '4')], reason: 'compact, two options: the digit n+2, nothing after it');
+      expect(questions.containsKey('q'), isTrue, reason: 'the server still reports it');
+      // Predicate: the focus is no longer on the rejected question.
+      expect(inPanel(find.text('Pick one')), findsNothing);
+      expect(inPanel(find.text('Pick two')), findsOneWidget);
+      expect(find.text('Sent "Chat about this" to "Asker" - open it to reply'), findsOneWidget);
+      expect(find.text('Answered "Asker"'), findsNothing, reason: 'a Chat answers nothing');
+      final note = find.byKey(const ValueKey('inbox-answering-http://h:7681|q'));
+      expect(note, findsOneWidget);
+      expect(tester.widget<Text>(note).data, contains('Chat about this'));
+      await done(tester);
+    });
   });
 
   group('#383 item 5: an answer that did not land refuses a one-press answer', () {
