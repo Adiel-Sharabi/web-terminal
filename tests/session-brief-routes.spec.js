@@ -374,10 +374,22 @@ test.describe('#313 / #314 / #315 — reason, hidden, server colour', () => {
     expect((await rowOf('/api/sessions')).brief.hidden).toBe(false);
   });
 
+  test('#445: an inbox dismissal round-trips through PATCH on BOTH lists; a bad one is refused', async () => {
+    expect((await rowOf('/api/sessions')).brief?.inboxDismissed ?? []).toEqual([]); // a fresh session has no brief
+    expect((await ctx.patch(`/api/sessions/${id}/brief`, { data: { inboxDismiss: { add: 'a|abc' } } })).status()).toBe(200);
+    expect((await rowOf('/api/sessions')).brief.inboxDismissed).toEqual(['a|abc']);
+    expect((await clusterRow()).brief.inboxDismissed).toEqual(['a|abc']);
+    expect((await ctx.patch(`/api/sessions/${id}/brief`, { data: { inboxDismiss: { add: 'a|\u0007' } } })).status()).toBe(400);
+    expect((await ctx.patch(`/api/sessions/${id}/brief`, { data: { inboxDismiss: 'a|abc' } })).status()).toBe(400);
+    expect((await rowOf('/api/sessions')).brief.inboxDismissed).toEqual(['a|abc']);
+    expect((await ctx.patch(`/api/sessions/${id}/brief`, { data: { inboxDismiss: { remove: 'a|abc' } } })).status()).toBe(200);
+    expect((await rowOf('/api/sessions')).brief.inboxDismissed).toEqual([]);
+  });
+
   test('the server declares a colour and the capabilities, in /api/version and the cluster servers', async () => {
     const v = await (await ctx.get('/api/version')).json();
     expect(v.serverColor).toMatch(/^#[0-9a-fA-F]{6}$/);
-    for (const cap of ['server-color', 'session-hide', 'session-reason', 'session-clear-wait']) expect(v.capabilities).toContain(cap);
+    for (const cap of ['server-color', 'session-hide', 'session-reason', 'session-clear-wait', 'inbox-dismiss']) expect(v.capabilities).toContain(cap);
     const c = await (await ctx.get('/api/cluster/sessions')).json();
     expect(c.servers[0].color).toBe(v.serverColor);
   });

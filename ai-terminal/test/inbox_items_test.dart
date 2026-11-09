@@ -153,12 +153,87 @@ void main() {
       expect(inboxItemsOf([_s('c')], turns: {'${_home.baseUrl}|c': _recap('All done.')}), isEmpty);
     });
 
-    test('"not a question" dismisses THAT reply; a newer one asks again', () {
+    test('"not a question" dismisses THAT reply; a newer one asks again (#445)', () {
       final s = _s('c');
-      final dismissed = {proseDismissKey(s, asks)};
-      expect(inboxItemsOf([s], turns: recap('c'), dismissed: dismissed), isEmpty);
+      final sig = inboxDismissSig(inboxItemsOf([s], turns: recap('c')).single)!;
+      bool isDismissed(InboxItem it, String x) => x == sig;
+      expect(inboxItemsOf([s], turns: recap('c'), isDismissed: isDismissed).single.dismissed, isTrue);
+      // The same reply read again (a new object, the same words and time) is still dismissed.
+      final again = {'${_home.baseUrl}|c': _recap('Done.\n\nShould I push it?')};
+      expect(inboxItemsOf([s], turns: again, isDismissed: isDismissed).single.dismissed, isTrue);
       final newer = _recap('Should I push it now?', at: '2026-10-22T11:00:00Z');
-      expect(inboxItemsOf([s], turns: {'${_home.baseUrl}|c': newer}, dismissed: dismissed), hasLength(1));
+      expect(inboxItemsOf([s], turns: {'${_home.baseUrl}|c': newer}, isDismissed: isDismissed).single.dismissed, isFalse);
+    });
+  });
+
+  group('#445 dismissing from the card', () {
+    final asks = _recap('Done.\n\nShould I push it?');
+    InboxItem prose() => inboxItemsOf([_s('c')], turns: {'${_home.baseUrl}|c': asks}).single;
+    InboxItem background({String waitingFor = 'approve', String? sessionId}) => inboxItemsOf([
+          if (sessionId != null) _s('pty', claudeSessionId: sessionId),
+        ], agents: {
+          _home.baseUrl: [_agent('a1', waitingFor: waitingFor, sessionId: sessionId)],
+        }).single;
+    InboxItem kindOf(Session s) => inboxItemsOf([s]).single;
+    final blockers = {
+      InboxKind.question: _s('q', status: 'waiting', waitingFor: 'question'),
+      InboxKind.permission: _s('p', status: 'waiting', waitingFor: 'permission'),
+      InboxKind.menu: _s('m', reason: {'kind': 'menu', 'source': 'screen'}),
+      InboxKind.reported: _s('r', reason: {'kind': 'you', 'text': 'x', 'source': 'reported', 'since': 1}),
+      InboxKind.waiting: _s('w', status: 'waiting'),
+    };
+
+    test('a signature names what was asked, from server data alone, in the shape the server keeps', () {
+      final a = inboxDismissSig(prose())!;
+      expect(a, matches(RegExp(r'^[\x20-\x7e]{1,200}$')), reason: 'lib/session-brief.js applyInboxDismiss');
+      // The reply's time decides it, not the device's base URL or the session id.
+      final other = inboxItemsOf([_s('c', server: _office)], turns: {'${_office.baseUrl}|c': asks}).single;
+      expect(inboxDismissSig(other), a);
+      // With no time, the words decide it.
+      final untimed = AgentTurn(prose: 'Should I push it?', youAsked: 'go', reachedPrompt: true);
+      final u = inboxItemsOf([_s('c')], turns: {'${_home.baseUrl}|c': untimed}).single;
+      expect(inboxDismissSig(u), isNot(a));
+      expect(inboxDismissSig(u), inboxDismissSig(inboxItemsOf([_s('c')], turns: {
+        '${_home.baseUrl}|c': AgentTurn(prose: 'Should I push it?', youAsked: 'other', reachedPrompt: true),
+      }).single));
+    });
+
+    test('a background agent is never dismissible: it may wait on a permission, and it leaves by itself', () {
+      for (final it in [background(), background(sessionId: 'abc')]) {
+        expect(it.kind, InboxKind.background);
+        expect(inboxDismissSig(it), isNull);
+        expect(inboxItemsOf(it.session == null ? [] : [it.session!], agents: {
+          _home.baseUrl: [it.agent!],
+        }, isDismissed: (_, _) => true).single.dismissed, isFalse);
+      }
+    });
+
+    test('a blocker is never dismissible: no signature, never flagged, still counted', () {
+      for (final e in blockers.entries) {
+        final it = kindOf(e.value);
+        expect(it.kind, e.key);
+        expect(inboxDismissSig(it), isNull, reason: '${e.key}');
+        expect(inboxItemsOf([e.value], isDismissed: (_, _) => true).single.dismissed, isFalse, reason: '${e.key}');
+      }
+      expect(inboxBadgeCount(blockers.values.toList()), blockers.length);
+    });
+
+    test('the menu offers each kind only what is safe for it, and never Dismiss for a blocker', () {
+      List<InboxCardAction> menu(InboxItem it, {bool clear = false, bool copy = true}) =>
+          inboxCardMenuActions(it, canClearWait: clear, hasCopyText: copy);
+      expect(menu(prose()), [InboxCardAction.notAQuestion, InboxCardAction.open, InboxCardAction.copy]);
+      expect(menu(kindOf(blockers[InboxKind.reported]!), clear: true),
+          [InboxCardAction.notWaiting, InboxCardAction.open, InboxCardAction.copy]);
+      expect(menu(kindOf(blockers[InboxKind.reported]!)), [InboxCardAction.open, InboxCardAction.copy],
+          reason: 'an older server cannot clear it, and a local hide would break the badge');
+      for (final k in [InboxKind.question, InboxKind.permission]) {
+        expect(menu(kindOf(blockers[k]!)), [InboxCardAction.open, InboxCardAction.copy], reason: '$k');
+      }
+      for (final k in [InboxKind.menu, InboxKind.waiting]) {
+        expect(menu(kindOf(blockers[k]!), copy: false), [InboxCardAction.open], reason: '$k');
+      }
+      expect(menu(background(sessionId: 'abc')), [InboxCardAction.open, InboxCardAction.copy]);
+      expect(menu(background()), [InboxCardAction.copy], reason: 'no session to open');
     });
   });
 

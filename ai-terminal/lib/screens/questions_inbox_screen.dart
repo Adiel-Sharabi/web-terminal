@@ -32,6 +32,7 @@ import 'dart:async';
 import 'dart:math' as math;
 
 import 'package:flutter/material.dart';
+import 'package:flutter/services.dart' show Clipboard, ClipboardData;
 import 'package:flutter_markdown/flutter_markdown.dart';
 import 'package:markdown/markdown.dart' as md;
 import 'package:xterm/xterm.dart';
@@ -64,6 +65,7 @@ import '../widgets/reply_box.dart';
 import '../widgets/server_badge.dart';
 import '../widgets/session_family.dart';
 import '../widgets/terminal_tail_strip.dart';
+import '../widgets/timed_snack_bar.dart';
 import 'session_screen.dart' show questionSignature;
 import 'work_board_screen.dart' show BoardColumnView, BoardPalette;
 
@@ -196,8 +198,12 @@ class _QuestionsInboxScreenState extends State<QuestionsInboxScreen> {
   /// Servers whose background-agent route answered 404: not asked again while open.
   final Set<String> _agentsSkip = {};
 
-  /// Replies marked "not a question" ([proseDismissKey]). Local and in memory.
-  final Set<String> _dismissed = {};
+  /// The "Dismissed" section is open (#445). Closed on every visit.
+  bool _showDismissed = false;
+
+  /// Where the last press on a card went down, for a long-press's menu (#445): the
+  /// InkWell reports a long-press without its position.
+  Offset? _pressAt;
 
   /// The item shown in the focused view, by [InboxItem.key], and the last item seen
   /// under that key: what stays on screen, under a banner, if it stops waiting while
@@ -320,11 +326,9 @@ class _QuestionsInboxScreenState extends State<QuestionsInboxScreen> {
     unawaited(_refreshFocused());
   }
 
-  void _say(String text) {
+  void _say(String text, {SnackBarAction? action}) {
     if (_disposed || !mounted) return;
-    final m = ScaffoldMessenger.maybeOf(context);
-    m?.hideCurrentSnackBar();
-    m?.showSnackBar(SnackBar(content: Text(text), duration: const Duration(seconds: 5)));
+    showTimedSnackBar(context, text, action: action);
   }
 
   // ---- fetching ------------------------------------------------------------------
@@ -862,7 +866,14 @@ class _QuestionsInboxScreenState extends State<QuestionsInboxScreen> {
 
   // ---- the items -----------------------------------------------------------------
 
-  List<InboxItem> get _items => inboxItemsOf(
+  /// The items shown with the others: every one but those the person dismissed.
+  List<InboxItem> get _items => [
+        for (final it in _allItems)
+          if (!it.dismissed) it,
+      ];
+
+  /// Every item, the dismissed ones (#445) flagged, for the "Dismissed" section.
+  List<InboxItem> get _allItems => inboxItemsOf(
         _sessions,
         questions: {
           for (final s in _sessions)
@@ -872,7 +883,7 @@ class _QuestionsInboxScreenState extends State<QuestionsInboxScreen> {
           for (final s in _sessions) sessionKey(s): ?_turnFor(s),
         },
         agents: _agents,
-        dismissed: _dismissed,
+        isDismissed: (it, sig) => it.session != null && _repo.isInboxDismissed(it.server, it.session!, sig),
       );
 
   /// The item under [key] now, whatever it waits on.
@@ -1071,13 +1082,151 @@ class _QuestionsInboxScreenState extends State<QuestionsInboxScreen> {
     return 'a tool wants to run';
   }
 
-  void _notAQuestion(InboxItem it) {
+  /// Dismisses [it] (#445), "Not a question" for a prose ask: it hides THAT ask
+  /// ([inboxDismissSig]) on every device until a new one comes, never writes to the
+  /// session, and offers Undo. A menu opened on an ask the card no longer shows hides
+  /// nothing: the card has moved on, and so does nothing else.
+  Future<void> _dismiss(InboxItem it) async {
+    final sig = inboxDismissSig(it);
     final s = it.session;
-    final r = it.turn;
-    if (s == null || r == null) return;
-    _update(() => _dismissed.add(proseDismissKey(s, r)));
-    _moveOn(it.key);
+    if (sig == null || s == null) return;
+    final now = _itemAt(it.key);
+    if (now == null || inboxDismissSig(now) != sig) {
+      _say('"${s.name}" moved on - nothing was hidden');
+      return;
+    }
+    // On before it goes, while the next item is still found from it.
+    if (_focusKey == it.key || _routeOpen) _moveOn(it.key);
+    SnackBarAction undo() => SnackBarAction(
+        key: const ValueKey('inbox-undo'), label: 'Undo', onPressed: () => unawaited(_restore(it, sig)));
+    final synced = _repo.supportsInboxDismiss(it.server.baseUrl);
+    final saved = _repo.setInboxDismissed(it.server, s, sig, true);
+    _say(synced ? 'Hid "${s.name}" - back when it asks again' : 'Hid "${s.name}" on this device only - back when it asks again',
+        action: undo());
+    // Only while it is still hidden: after an Undo, a late failure is about a choice
+    // the person already took back.
+    if (!await saved && !_disposed && _repo.isInboxDismissed(it.server, s, sig)) {
+      _say('Hid "${s.name}" on this device only - the server did not save it', action: undo());
+    }
   }
+
+  /// Brings a dismissed [it] back (#445): the Undo, and Restore in "Dismissed".
+  Future<void> _restore(InboxItem it, String sig) async {
+    final s = it.session;
+    if (s == null) return;
+    if (!await _repo.setInboxDismissed(it.server, s, sig, false) && !_disposed && !_repo.isInboxDismissed(it.server, s, sig)) {
+      _say('"${s.name}" is back on this device only - the server did not save it');
+    }
+  }
+
+  /// "Not waiting" (#445; a card's menu and the focused view's button): only while the
+  /// session is still in the SAME reported wait [it] showed. The server clears whatever
+  /// wait the session reports now, so a newer one must not be cleared by a click on an
+  /// older one. The row is read again from its own server first, as a reply or an Esc
+  /// is (#383, `NeedsYouActions._stillThere`): the card can be a poll old, and a server
+  /// that did not answer leaves only that old row, which proves nothing.
+  Future<void> _notWaitingIfSame(InboxItem it) async {
+    final s = it.session;
+    if (s == null) return;
+    final answered = await _repo.refreshServer(s.server.baseUrl);
+    if (_disposed) return;
+    if (!answered) {
+      _say('Could not check "${s.name}" - nothing was cleared');
+      return;
+    }
+    final fresh = _repo.current.where((x) => sessionKey(x) == sessionKey(s)).firstOrNull;
+    if (fresh == null ||
+        !boardNeedsYou(fresh) ||
+        needKindOf(fresh) != NeedKind.reported ||
+        fresh.reason?.since != s.reason?.since) {
+      _say('"${s.name}" moved on - nothing was cleared');
+      return;
+    }
+    await _notWaiting(fresh);
+  }
+
+  /// The card's ask as text, for Copy (#445), or null when it shows none of its own.
+  String? _copyText(InboxItem it) {
+    final s = it.session;
+    switch (it.kind) {
+      case InboxKind.question:
+        final q = it.question;
+        if (q == null || q.questions.isEmpty) return null;
+        return [for (final x in q.questions) x.question].join('\n\n');
+      case InboxKind.permission:
+        if (s == null) return null;
+        final tool = permissionToolCall(it.turn?.pendingTool, s.brief?.now?.text);
+        final what = tool == null ? null : toolCallText(tool);
+        return [_permissionReason(s), ?what].join('\n');
+      case InboxKind.prose:
+        final r = it.turn?.prose ?? '';
+        return r.isEmpty ? null : askingScope(r);
+      case InboxKind.reported:
+        final text = [s?.reason?.text ?? '', _InboxCard._reportedAsk(it) ?? ''].where((t) => t.isNotEmpty).join('\n\n');
+        return text.isEmpty ? null : text;
+      case InboxKind.background:
+        final w = it.agent?.waitingFor ?? '';
+        return w.isEmpty ? null : w;
+      case InboxKind.menu || InboxKind.waiting:
+        return null;
+    }
+  }
+
+  /// A card's right-click / long-press menu (#445), at [at] (global), or at the card
+  /// itself when no press position is known. Nothing in it answers, rejects or types.
+  Future<void> _showCardMenu(InboxItem it, BuildContext cardContext, Offset? at) async {
+    final overlay = Overlay.of(context).context.findRenderObject() as RenderBox?;
+    final card = cardContext.findRenderObject() as RenderBox?;
+    if (overlay == null) return;
+    final s = it.session;
+    final copy = _copyText(it);
+    final actions = inboxCardMenuActions(it, canClearWait: s != null && _repo.canClearWait(s), hasCopyText: copy != null);
+    if (actions.isEmpty) return;
+    final pos = at ?? card?.localToGlobal(const Offset(16, 16)) ?? Offset.zero;
+    final picked = await showMenu<InboxCardAction>(
+      context: context,
+      position: RelativeRect.fromRect(pos & const Size(1, 1), Offset.zero & overlay.size),
+      items: [
+        for (final a in actions)
+          PopupMenuItem<InboxCardAction>(
+            key: ValueKey('inbox-menu-${a.name}'),
+            value: a,
+            child: Row(children: [
+              Icon(_cardMenuIcon(a), size: 18),
+              const SizedBox(width: 10),
+              Text(_cardMenuLabel(a)),
+            ]),
+          ),
+      ],
+    );
+    if (picked == null || _disposed) return;
+    switch (picked) {
+      case InboxCardAction.notAQuestion:
+        await _dismiss(it);
+      case InboxCardAction.notWaiting:
+        await _notWaitingIfSame(it);
+      case InboxCardAction.open:
+        if (s != null) _openSession(s);
+      case InboxCardAction.copy:
+        await Clipboard.setData(ClipboardData(text: copy!));
+        _say('Copied');
+    }
+  }
+
+  /// The menu's words are the focused view's own, so one action never has two names.
+  static String _cardMenuLabel(InboxCardAction a) => switch (a) {
+        InboxCardAction.notAQuestion => 'Not a question',
+        InboxCardAction.notWaiting => 'Not waiting',
+        InboxCardAction.open => 'Open session',
+        InboxCardAction.copy => 'Copy text',
+      };
+
+  static IconData _cardMenuIcon(InboxCardAction a) => switch (a) {
+        InboxCardAction.notAQuestion => Icons.visibility_off_outlined,
+        InboxCardAction.notWaiting => Icons.do_not_disturb_on_outlined,
+        InboxCardAction.open => Icons.open_in_new,
+        InboxCardAction.copy => Icons.copy,
+      };
 
   // ---- build ---------------------------------------------------------------------
 
@@ -1148,10 +1297,16 @@ class _QuestionsInboxScreenState extends State<QuestionsInboxScreen> {
             '${down.length == 1 ? 'its' : 'their'} questions can\'t be shown.',
             key: const ValueKey('inbox-offline-caveat'),
             style: muted);
+    final dismissed = [
+      for (final it in _allItems)
+        if (it.dismissed) it,
+    ];
+    final hidden = dismissed.isEmpty ? null : _dismissedSection(context, dismissed);
     if (blocking.isEmpty && background.isEmpty) {
       return ListView(padding: const EdgeInsets.all(24), children: [
         Text('Nothing is waiting for you.', key: const ValueKey('inbox-empty'), style: theme.textTheme.titleMedium),
         if (caveat != null) ...[const SizedBox(height: 8), caveat],
+        if (hidden != null) ...[const SizedBox(height: 16), hidden],
       ]);
     }
     Widget card(InboxItem it) => _InboxCard(
@@ -1186,9 +1341,55 @@ class _QuestionsInboxScreenState extends State<QuestionsInboxScreen> {
               count: background.length,
               children: [for (final it in background) card(it)],
             ),
+          if (hidden != null) ...[const SizedBox(height: 12), hidden],
         ],
       ),
     );
+  }
+
+  /// What the person dismissed (#445), collapsed under the list: every one of them
+  /// still waits, so none is gone without a trace, and each can be brought back.
+  Widget _dismissedSection(BuildContext context, List<InboxItem> items) {
+    final theme = Theme.of(context);
+    final muted = theme.textTheme.bodySmall?.copyWith(color: theme.colorScheme.onSurfaceVariant);
+    return Column(key: const ValueKey('inbox-dismissed'), crossAxisAlignment: CrossAxisAlignment.stretch, children: [
+      InkWell(
+        key: const ValueKey('inbox-dismissed-toggle'),
+        onTap: () => _update(() => _showDismissed = !_showDismissed),
+        child: Padding(
+          padding: const EdgeInsets.symmetric(vertical: 8, horizontal: 4),
+          child: Row(children: [
+            Icon(_showDismissed ? Icons.expand_less : Icons.expand_more, size: 18, color: muted?.color),
+            const SizedBox(width: 6),
+            Text('Dismissed (${items.length})', style: muted),
+          ]),
+        ),
+      ),
+      if (_showDismissed)
+        for (final it in items)
+          Opacity(
+            opacity: 0.7,
+            child: Padding(
+              padding: const EdgeInsets.only(bottom: 4),
+              child: Row(key: ValueKey('inbox-dismissed-${it.key}'), children: [
+                Expanded(
+                  child: Column(crossAxisAlignment: CrossAxisAlignment.start, children: [
+                    Text(it.session?.name ?? it.agent?.name ?? '', maxLines: 1, overflow: TextOverflow.ellipsis),
+                    Text(_copyText(it) ?? '', maxLines: 1, overflow: TextOverflow.ellipsis, style: muted),
+                  ]),
+                ),
+                TextButton(
+                  key: ValueKey('inbox-restore-${it.key}'),
+                  onPressed: () {
+                    final sig = inboxDismissSig(it);
+                    if (sig != null) unawaited(_restore(it, sig));
+                  },
+                  child: const Text('Restore'),
+                ),
+              ]),
+            ),
+          ),
+    ]);
   }
 
   /// The focused item, or the banner left when it stopped waiting with words typed.
@@ -1615,7 +1816,20 @@ class _InboxCard extends StatelessWidget {
         color: state._colorOf(it.server.baseUrl),
         child: InkWell(
           key: ValueKey('inbox-open-${it.key}'),
-          onTap: () => state._open(it, wide),
+          onTap: () {
+            state._pressAt = null;
+            state._open(it, wide);
+          },
+          // #445: right-click (desktop) and long-press (touch) open the card's menu. A
+          // field or a button inside the card wins its own gesture first. The press
+          // position is used once, by the long-press it belongs to.
+          onTapDown: (d) => state._pressAt = d.globalPosition,
+          onSecondaryTapUp: (d) => unawaited(state._showCardMenu(it, context, d.globalPosition)),
+          onLongPress: () {
+            final at = state._pressAt;
+            state._pressAt = null;
+            unawaited(state._showCardMenu(it, context, at));
+          },
           child: Padding(
             padding: const EdgeInsets.fromLTRB(12, 10, 10, 8),
             child: Column(crossAxisAlignment: CrossAxisAlignment.start, children: [
@@ -2140,10 +2354,12 @@ class _FocusView extends StatelessWidget {
           row([
             if (!reported)
               TextButton(
-                  key: const ValueKey('inbox-not-question'), onPressed: () => state._notAQuestion(it), child: const Text('Not a question')),
+                  key: const ValueKey('inbox-not-question'), onPressed: () => state._dismiss(it), child: const Text('Not a question')),
             if (reported && state._repo.canClearWait(s))
               TextButton(
-                  key: const ValueKey('inbox-not-waiting'), onPressed: () => state._notWaiting(s), child: const Text('Not waiting')),
+                  key: const ValueKey('inbox-not-waiting'),
+                  onPressed: () => unawaited(state._notWaitingIfSame(it)),
+                  child: const Text('Not waiting')),
             openBtn,
           ]),
         ];

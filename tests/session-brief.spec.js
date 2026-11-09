@@ -574,3 +574,36 @@ test.describe('artifacts (#329)', () => {
     expect(merged).toEqual([{ url: URL2, title: 'b', at: T0 - 9 }, { url: URL1, title: 'hook', at: T0 }]);
   });
 });
+
+test.describe('#445 applyInboxDismiss - what a person dismissed from the questions inbox', () => {
+  test('add puts the signature first, once; remove drops it; the list is capped', () => {
+    let r = B.applyInboxDismiss(undefined, { add: 'a|1' });
+    expect(r.error).toBeUndefined();
+    expect(r.list).toEqual(['a|1']);
+    r = B.applyInboxDismiss(['a|1', 'g|2'], { add: 'g|2' });
+    expect(r.list).toEqual(['g|2', 'a|1']);
+    r = B.applyInboxDismiss(['g|2', 'a|1'], { remove: 'a|1' });
+    expect(r.list).toEqual(['g|2']);
+    let list = [];
+    for (let i = 0; i < B.LIMITS.inboxDismissed + 3; i++) list = B.applyInboxDismiss(list, { add: `a|${i}` }).list;
+    expect(list.length).toBe(B.LIMITS.inboxDismissed);
+    expect(list[0]).toBe(`a|${B.LIMITS.inboxDismissed + 2}`); // the newest kept, the oldest dropped
+  });
+
+  test('refuses anything but ONE add or remove of a short printable-ASCII signature', () => {
+    for (const op of [null, 'a|1', {}, { add: 'a|1', remove: 'a|1' }, { add: '' }, { add: 7 },
+      { add: 'x'.repeat(B.LIMITS.inboxSig + 1) }, { add: 'a|\n' }, { add: 'a|é' }, { drop: 'a|1' }]) {
+      expect(B.applyInboxDismiss([], op).error, JSON.stringify(op)).toBeTruthy();
+    }
+    expect(B.applyInboxDismiss([], { add: 'x'.repeat(B.LIMITS.inboxSig) }).error).toBeUndefined();
+  });
+
+  test('buildBrief publishes the list (empty when none) and never shares the stored array', () => {
+    expect(B.buildBrief(B.emptyEntry()).inboxDismissed).toEqual([]);
+    const e = { ...B.emptyEntry(), inboxDismissed: ['a|1'] };
+    const b = B.buildBrief(e);
+    expect(b.inboxDismissed).toEqual(['a|1']);
+    b.inboxDismissed.push('x');
+    expect(e.inboxDismissed).toEqual(['a|1']);
+  });
+});

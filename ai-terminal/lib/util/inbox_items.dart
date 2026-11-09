@@ -4,6 +4,8 @@
 // `waitingFor`, the transcript's last turn); this only arranges them, so the inbox and
 // the board can never disagree about who needs you.
 
+import 'dart:convert';
+
 import '../api/models.dart';
 import 'agent_turn.dart';
 import 'needs_you.dart';
@@ -49,9 +51,14 @@ class InboxItem {
     this.since,
     this.question,
     this.turn,
+    this.dismissed = false,
   });
 
   final InboxKind kind;
+
+  /// The person dismissed this ask (#445): it is listed under "Dismissed", not with the
+  /// others. Only an item with an [inboxDismissSig] can be; a blocker never is.
+  final bool dismissed;
 
   /// Stable across refreshes: the session's `<baseUrl>|<id>` ([sessionKey]), or for a
   /// background agent `<baseUrl>|agent|<id or conversation>`.
@@ -81,9 +88,65 @@ class InboxItem {
 /// One session, across servers: two servers can each have an `s1`.
 String sessionKey(Session s) => '${s.server.baseUrl}|${s.id}';
 
-/// The key under which a "not a question" dismissal of [s]'s reply [reply] is kept:
-/// a NEW reply asks afresh.
-String proseDismissKey(Session s, AgentTurn reply) => '${sessionKey(s)}|${reply.at ?? reply.prose.hashCode}';
+/// What a dismissal of [it] is kept under (#445), or null when it cannot be dismissed.
+///
+/// Only a prose ask ("Not a question"): it never blocks the agent, and it belongs to a
+/// session whose server can keep the dismissal. A question, a permission, a menu or a
+/// bare wait blocks the agent; a reported wait leaves only through the server's own
+/// clear (`Not waiting`), so the inbox's blocking count stays the board's Needs-you
+/// count. A background agent may be waiting on a permission, often runs in no listed
+/// session (nowhere to keep a dismissal for other devices), and leaves by itself once
+/// it stops waiting.
+///
+/// It names WHAT was asked, from server data alone (never the device's base URL), so
+/// every device computes the same signature and the session's server can keep it for
+/// all of them (`brief.inboxDismissed`, `lib/session-brief.js` applyInboxDismiss: 1-200
+/// printable ASCII). A new reply is a new signature: that is what brings a dismissed
+/// item back, and nothing else does.
+String? inboxDismissSig(InboxItem it) {
+  if (it.kind != InboxKind.prose || it.session == null) return null;
+  final r = it.turn;
+  return r == null ? null : 'a|${_fnv1a(r.at ?? r.prose)}';
+}
+
+/// 32-bit FNV-1a over [s]'s UTF-8 bytes, as 8 hex digits: stable across runs and
+/// platforms, unlike [String.hashCode].
+String _fnv1a(String s) {
+  var h = 0x811c9dc5;
+  for (final b in utf8.encode(s)) {
+    h = ((h ^ b) * 0x01000193) & 0xffffffff;
+  }
+  return h.toRadixString(16).padLeft(8, '0');
+}
+
+/// Whether the person dismissed [item], whose [inboxDismissSig] is [sig].
+typedef InboxDismissed = bool Function(InboxItem item, String sig);
+
+/// What a card's right-click / long-press menu offers (#445). None answers, rejects or
+/// types anything into the session.
+enum InboxCardAction {
+  /// A prose ask: the focused view's own "Not a question".
+  notAQuestion,
+
+  /// A reported wait, where the server can clear it (#320): the focused view's own
+  /// "Not waiting".
+  notWaiting,
+
+  /// Open the session.
+  open,
+
+  /// Copy the card's ask.
+  copy,
+}
+
+/// The menu for [it], in order: its own way out first, then Open, then Copy. A blocker
+/// gets no dismissal at all ([inboxDismissSig]); a reported wait only the server's clear.
+List<InboxCardAction> inboxCardMenuActions(InboxItem it, {required bool canClearWait, required bool hasCopyText}) => [
+      if (it.kind == InboxKind.prose && inboxDismissSig(it) != null) InboxCardAction.notAQuestion,
+      if (it.kind == InboxKind.reported && canClearWait) InboxCardAction.notWaiting,
+      if (it.session != null) InboxCardAction.open,
+      if (hasCopyText) InboxCardAction.copy,
+    ];
 
 /// Whether [s] could be asking in prose (c), before its reply has been read: an idle
 /// agent that owes nothing the board knows of, did not report a wait of its own
@@ -112,14 +175,32 @@ InboxKind _kindOfNeed(NeedKind k) => switch (k) {
 /// [rows] are the session rows on every server. [questions], [turns] are keyed by
 /// [sessionKey]: the live question of a question row, the agent's current turn (read
 /// for a [proseCandidate], a reported wait and a permission). [agents] are each server's background agents, by base URL.
-/// [dismissed] holds the [proseDismissKey]s the person marked "not a question".
+/// [isDismissed] says which asks the person dismissed (#445): those items come back
+/// with [InboxItem.dismissed] set, in their place, for the caller to list apart. Only
+/// an item with an [inboxDismissSig] is asked about, so a blocker never is.
 List<InboxItem> inboxItemsOf(
   List<Session> rows, {
   Map<String, PendingQuestion?> questions = const {},
   Map<String, AgentTurn?> turns = const {},
   Map<String, List<BackgroundAgentRow>> agents = const {},
-  Set<String> dismissed = const {},
+  InboxDismissed? isDismissed,
 }) {
+  InboxItem flag(InboxItem it) {
+    final sig = isDismissed == null ? null : inboxDismissSig(it);
+    if (sig == null || !isDismissed!(it, sig)) return it;
+    return InboxItem(
+      kind: it.kind,
+      key: it.key,
+      server: it.server,
+      session: it.session,
+      agent: it.agent,
+      since: it.since,
+      question: it.question,
+      turn: it.turn,
+      dismissed: true,
+    );
+  }
+
   final blocking = <InboxItem>[];
   final background = <InboxItem>[];
   for (final s in rows) {
@@ -140,15 +221,14 @@ List<InboxItem> inboxItemsOf(
     if (!proseCandidate(s)) continue;
     final reply = turns[k];
     if (reply == null || reply.prose.isEmpty || !askingInProse(reply.prose)) continue;
-    if (dismissed.contains(proseDismissKey(s, reply))) continue;
-    background.add(InboxItem(
+    background.add(flag(InboxItem(
       kind: InboxKind.prose,
       key: k,
       server: s.server,
       session: s,
       since: s.lastActivity,
       turn: reply,
-    ));
+    )));
   }
   final blockingKeys = {for (final it in blocking) it.key};
   final agentKeys = <String>{};
@@ -171,14 +251,14 @@ List<InboxItem> inboxItemsOf(
       for (var n = 2; !agentKeys.add(key); n++) {
         key = '$base#$n';
       }
-      background.add(InboxItem(
+      background.add(flag(InboxItem(
         kind: InboxKind.background,
         key: key,
         server: a.server,
         session: runs,
         agent: a,
         since: a.startedAt,
-      ));
+      )));
     }
   }
   return [..._oldestFirst(blocking), ..._oldestFirst(background)];

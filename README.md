@@ -89,6 +89,18 @@ scratch folder, and writes in the language of your last prompt. Configure it wit
 `~/.local/bin`). It is read live and is **not** settable over HTTP, because `command` is
 something the server runs.
 
+**Inbox card menu** — right-click a card in the companion's questions inbox (long-press on a
+phone or tablet) for what fits that card: **Not a question** for a reply misread as asking,
+**Not waiting** for a reported wait, plus **Open session** and **Copy text**. Nothing in it
+answers, rejects or types into the session, and a real question, a permission prompt or a
+background agent cannot be dismissed at all (a background agent leaves the inbox by itself once
+it stops waiting), so the inbox's count stays the board's Needs-you count. A dismissed ask
+moves to a collapsed **Dismissed** list with Restore (and Undo right after), and comes back by
+itself when the session asks something new. Dismissals are kept with the session on its own
+server (`PATCH /api/sessions/:id/brief` with `inboxDismiss`, the brief's `inboxDismissed`,
+advertised as `inbox-dismiss`), so every device hides the same asks and they survive restarts;
+against an older server they hold on that device only, until the app restarts.
+
 **Mobile & PWA** — installable, with a compose bar built for soft keyboards, a touch
 toolbar, long-press menus, and reconnect the instant you return to the app. When a phone
 and a desktop watch the same session, the shared terminal is sized to fit the **smaller**

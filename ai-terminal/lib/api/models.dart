@@ -726,6 +726,10 @@ class SessionBrief {
   /// The claude.ai artifacts it published, newest first (#329).
   final List<BriefArtifact> artifacts;
 
+  /// The questions-inbox asks a person dismissed (#445), by `inboxDismissSig`, newest
+  /// first. Kept with the session on its server, so every device hides the same ones.
+  final List<String> inboxDismissed;
+
   const SessionBrief({
     this.reportingOn = true,
     this.items = const <BriefItem>[],
@@ -737,6 +741,7 @@ class SessionBrief {
     this.staleReason,
     this.hidden = false,
     this.artifacts = const <BriefArtifact>[],
+    this.inboxDismissed = const <String>[],
   });
 
   static SessionBrief? fromJson(dynamic json) {
@@ -755,6 +760,9 @@ class SessionBrief {
       staleReason: (reason == null || reason.isEmpty) ? null : reason,
       hidden: json['hidden'] == true,
       artifacts: BriefArtifact.listFromJson(json['artifacts']),
+      inboxDismissed: json['inboxDismissed'] is List
+          ? [for (final x in json['inboxDismissed'] as List) if (x is String && x.isNotEmpty) x]
+          : const <String>[],
     );
   }
 

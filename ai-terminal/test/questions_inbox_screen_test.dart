@@ -19,7 +19,9 @@ import 'package:ai_terminal/services/session_selection.dart';
 import 'package:ai_terminal/theme/app_theme.dart';
 import 'package:ai_terminal/widgets/question_answer_panel.dart';
 import 'package:ai_terminal/widgets/question_overlay.dart';
+import 'package:flutter/gestures.dart' show kSecondaryButton;
 import 'package:flutter/material.dart';
+import 'package:flutter/services.dart';
 import 'package:flutter_markdown/flutter_markdown.dart';
 import 'package:flutter_test/flutter_test.dart';
 import 'package:http/http.dart' as http;
@@ -118,6 +120,10 @@ void main() {
   Completer<void>? sessionsGate; // holds the NEXT /api/sessions until completed
   late List<Completer<void>> transcriptHolds; // each holds the next transcript read, in order
   late Map<String, Map<String, dynamic>> attentions; // by session id; a default record otherwise
+  late Map<String, List<String>> kept; // #445: brief.inboxDismissed the server keeps, by session id
+  late List<Map<String, dynamic>> briefPatches; // #445: every PATCH /brief body
+  late bool dismissCap; // #445: the server advertises inbox-dismiss
+  late List<Completer<bool>> dismissHolds; // #445: each holds the next inboxDismiss PATCH; false fails it
   late List<Completer<void>> attentionHolds; // each holds the next attention read, in order
 
   Future<bool> fakeInput(Session s, Future<void> Function(void Function(String keys) send) body) async {
@@ -163,12 +169,26 @@ void main() {
           return http.Response(jsonEncode({'data': data, 'total': data.length, 'offset': 0, 'limit': data.length}), 200);
         }
         if (p.endsWith('/brief') && req.method == 'PATCH') {
+          final body = jsonDecode(req.body) as Map<String, dynamic>;
+          final op = body['inboxDismiss'];
+          if (op is Map && dismissHolds.isNotEmpty && !await dismissHolds.removeAt(0).future) {
+            return http.Response('', 500);
+          }
+          briefPatches.add(body);
+          if (op is Map && dismissCap) {
+            final list = (kept[id!] ?? const <String>[]).where((x) => x != (op['add'] ?? op['remove'])).toList();
+            kept[id] = [?(op['add'] as String?), ...list];
+          }
           return http.Response(jsonEncode({'ok': true}), 200);
         }
         switch (p) {
           case '/api/version':
             return http.Response(
-                jsonEncode({'version': '1.88.0', 'serverName': s.name, 'capabilities': ['session-brief', 'session-clear-wait']}),
+                jsonEncode({
+                  'version': '1.88.0',
+                  'serverName': s.name,
+                  'capabilities': ['session-brief', 'session-clear-wait', if (dismissCap) 'inbox-dismiss'],
+                }),
                 200);
           case '/api/sessions':
             final gate = sessionsGate;
@@ -178,7 +198,21 @@ void main() {
             }
             final st = sessionsStatus[s.baseUrl] ?? 200;
             if (st != 200) return http.Response('', st);
-            return http.Response(jsonEncode(rows[s.baseUrl] ?? const []), 200);
+            return http.Response(
+                jsonEncode([
+                  for (final r in rows[s.baseUrl] ?? const <Map<String, dynamic>>[])
+                    if ((kept[r['id']] ?? const []).isEmpty)
+                      r
+                    else
+                      {
+                        ...r,
+                        'brief': {
+                          ...(r['brief'] as Map<String, dynamic>? ?? {'v': 1, 'reporting': 'on', 'items': []}),
+                          'inboxDismissed': kept[r['id']],
+                        },
+                      },
+                ]),
+                200);
           case '/api/dashboard/background-agents':
             final st = agentsStatus[s.baseUrl] ?? 200;
             if (st != 200) return http.Response('', st);
@@ -218,6 +252,10 @@ void main() {
     transcriptHolds = [];
     attentions = {};
     attentionHolds = [];
+    kept = {};
+    briefPatches = [];
+    dismissCap = true;
+    dismissHolds = [];
   });
   tearDown(SessionSelection.instance.reset);
 
@@ -1304,6 +1342,343 @@ void main() {
       expect(last.top, greaterThanOrEqualTo(box.top - 0.5));
       expect(tester.getRect(find.textContaining('Lead line 0 ', findRichText: true)).bottom, lessThanOrEqualTo(box.top + 0.5),
           reason: 'the head is a scroll up');
+      await done(tester);
+    });
+  });
+
+  group('#445: a card\'s right-click / long-press menu, and what it dismisses', () {
+    const key = 'http://h:7681|c';
+    final card = find.byKey(const ValueKey('inbox-card-$key'));
+    void proseAsks({String text = 'Done.\n\nShould I push it?', String at = 'r1', int lastActivity = 5}) {
+      // A brief, as a real server sends one: a row that carries a brief WITHOUT the
+      // signature must not undo a choice it is older than (or, on an older server, any).
+      rows = {
+        _home.baseUrl: [
+          _row('c', 'Idle', lastActivity: lastActivity, brief: {'v': 1, 'reporting': 'on', 'items': []}),
+        ],
+      };
+      transcripts = {'c': _reply(text, at: at)};
+    }
+
+    Future<void> rightClick(WidgetTester tester, Finder f) async {
+      await tester.tap(f, buttons: kSecondaryButton);
+      await tester.pumpAndSettle();
+    }
+
+    Future<void> pick(WidgetTester tester, String action) async {
+      await tester.tap(find.byKey(ValueKey('inbox-menu-$action')));
+      await tester.pumpAndSettle();
+      await settle(tester);
+    }
+
+    List<String> menu() => [
+          for (final a in ['notAQuestion', 'notWaiting', 'open', 'copy'])
+            if (find.byKey(ValueKey('inbox-menu-$a')).evaluate().isNotEmpty) a,
+        ];
+
+    Map<String, String>? dismissOp(Map<String, dynamic> b) => (b['inboxDismiss'] as Map?)?.cast<String, String>();
+
+    testWidgets('right-click: "Not a question" hides it, the server keeps it, Undo brings it back', (tester) async {
+      proseAsks();
+      final r = await repo();
+      await pump(tester, r);
+      await settle(tester);
+      expect(card, findsOneWidget);
+      await rightClick(tester, card);
+      expect(menu(), ['notAQuestion', 'open', 'copy']);
+      await pick(tester, 'notAQuestion');
+      expect(card, findsNothing, reason: 'gone from the list at once');
+      expect(sent, isEmpty, reason: 'a dismissal never types into the session');
+      final add = dismissOp(briefPatches.single)!;
+      expect(add.keys, ['add']);
+      expect(kept['c'], [add['add']], reason: 'kept with the session, on its server');
+      expect(find.byKey(const ValueKey('inbox-dismissed')), findsOneWidget, reason: 'never hidden without a trace');
+      expect(find.text('Dismissed (1)'), findsOneWidget);
+      expect(find.textContaining('back when it asks again'), findsOneWidget);
+      await tester.tap(find.byKey(const ValueKey('inbox-undo')));
+      await tester.pump();
+      await settle(tester);
+      expect(card, findsOneWidget, reason: 'Undo');
+      expect(dismissOp(briefPatches.last), {'remove': add['add']});
+      expect(kept['c'], isEmpty);
+      await done(tester);
+    });
+
+    testWidgets('long-press opens the same menu', (tester) async {
+      proseAsks();
+      await pump(tester, await repo(), width: 500);
+      await settle(tester);
+      await tester.longPress(card);
+      await tester.pumpAndSettle();
+      expect(menu(), ['notAQuestion', 'open', 'copy']);
+      await pick(tester, 'copy');
+      expect(find.text('Copied'), findsOneWidget);
+      await done(tester);
+    });
+
+    testWidgets('it stays dismissed across a restart and on a poll; only a NEW reply brings it back', (tester) async {
+      proseAsks();
+      await pump(tester, await repo());
+      await settle(tester);
+      await rightClick(tester, card);
+      await pick(tester, 'notAQuestion');
+      await done(tester);
+      // A restart: a new repository and screen, which only know what the server kept.
+      final r = await repo();
+      await pump(tester, r);
+      await settle(tester);
+      expect(card, findsNothing, reason: 'the server kept it');
+      expect(find.text('Dismissed (1)'), findsOneWidget);
+      // Terminal output moves lastActivity; the reply is the same one.
+      rows = {_home.baseUrl: [_row('c', 'Idle', lastActivity: 9)]};
+      await tester.runAsync(() => r.refresh());
+      await settle(tester);
+      expect(card, findsNothing, reason: 'the same ask, read again');
+      // A new turn with a new reply asks afresh.
+      proseAsks(text: 'Pushed.\n\nShould I open the PR?', at: 'r2', lastActivity: 20);
+      await tester.runAsync(() => r.refresh());
+      await settle(tester);
+      expect(card, findsOneWidget, reason: 'something new');
+      expect(find.byKey(const ValueKey('inbox-dismissed')), findsNothing);
+      await done(tester);
+    });
+
+    testWidgets('Restore in "Dismissed" brings it back', (tester) async {
+      proseAsks();
+      await pump(tester, await repo());
+      await settle(tester);
+      await rightClick(tester, card);
+      await pick(tester, 'notAQuestion');
+      ScaffoldMessenger.of(tester.element(find.byType(Scaffold).first)).clearSnackBars();
+      await tester.pumpAndSettle();
+      expect(find.byKey(const ValueKey('inbox-restore-$key')), findsNothing, reason: 'collapsed');
+      await tester.tap(find.byKey(const ValueKey('inbox-dismissed-toggle')));
+      await tester.pump();
+      await tester.tap(find.byKey(const ValueKey('inbox-restore-$key')));
+      await tester.pump();
+      await settle(tester);
+      expect(card, findsOneWidget);
+      expect(kept['c'], isEmpty);
+      await done(tester);
+    });
+
+    testWidgets('a blocking question offers no Dismiss: Open and Copy only', (tester) async {
+      rows = {_home.baseUrl: [_row('q', 'Asker', status: 'waiting', waitingFor: 'question', lastActivity: 1)]};
+      questions = {'q': _single('Pick one')};
+      await pump(tester, await repo());
+      await settle(tester);
+      String? copied;
+      tester.binding.defaultBinaryMessenger.setMockMethodCallHandler(SystemChannels.platform, (call) async {
+        if (call.method == 'Clipboard.setData') copied = (call.arguments as Map)['text'] as String?;
+        return null;
+      });
+      addTearDown(() => tester.binding.defaultBinaryMessenger.setMockMethodCallHandler(SystemChannels.platform, null));
+      await rightClick(tester, find.byKey(const ValueKey('inbox-card-http://h:7681|q')));
+      expect(menu(), ['open', 'copy']);
+      await pick(tester, 'copy');
+      expect(copied, 'Pick one');
+      expect(sent, isEmpty, reason: 'nothing is answered');
+      await done(tester);
+    });
+
+    testWidgets('a reported wait: "Not waiting" clears it on the server; a wait that moved on is not cleared', (tester) async {
+      Map<String, dynamic> waits(int since) =>
+          _row('d', 'Docs', reason: {'kind': 'you', 'text': 'pick a title', 'source': 'reported', 'since': since});
+      rows = {_home.baseUrl: [waits(1)]};
+      final r = await repo();
+      await pump(tester, r);
+      await settle(tester);
+      final d = find.byKey(const ValueKey('inbox-card-http://h:7681|d'));
+      await rightClick(tester, d);
+      expect(menu(), ['notWaiting', 'open', 'copy']);
+      // The session reports a NEW wait while the menu is open.
+      rows = {_home.baseUrl: [waits(2)]};
+      await tester.runAsync(() => r.refresh());
+      await pick(tester, 'notWaiting');
+      expect(briefPatches, isEmpty, reason: 'a menu opened on one wait never clears the next');
+      expect(find.textContaining('moved on'), findsOneWidget);
+      await rightClick(tester, d);
+      await pick(tester, 'notWaiting');
+      expect(briefPatches.single, {'clearWait': true});
+      await done(tester);
+    });
+
+    testWidgets('"Not waiting" reads the row again first: a newer wait the card never showed is not cleared',
+        (tester) async {
+      Map<String, dynamic> waits(int since) =>
+          _row('d', 'Docs', reason: {'kind': 'you', 'text': 'pick a title', 'source': 'reported', 'since': since});
+      rows = {_home.baseUrl: [waits(1)]};
+      await pump(tester, await repo());
+      await settle(tester);
+      final d = find.byKey(const ValueKey('inbox-card-http://h:7681|d'));
+      await rightClick(tester, d);
+      // The server has a NEW wait; no poll has brought it to the card.
+      rows = {_home.baseUrl: [waits(2)]};
+      await pick(tester, 'notWaiting');
+      expect(briefPatches, isEmpty, reason: 'the card was a poll old');
+      expect(find.textContaining('moved on - nothing was cleared'), findsOneWidget);
+      await done(tester);
+    });
+
+    testWidgets('the focused view\'s "Not waiting" reads the row again too', (tester) async {
+      Map<String, dynamic> waits(int since) =>
+          _row('d', 'Docs', reason: {'kind': 'you', 'text': 'pick a title', 'source': 'reported', 'since': since});
+      rows = {_home.baseUrl: [waits(1)]};
+      await pump(tester, await repo());
+      await settle(tester);
+      await tester.tap(find.byKey(const ValueKey('inbox-open-http://h:7681|d')));
+      await tester.pumpAndSettle();
+      rows = {_home.baseUrl: [waits(2)]}; // a newer wait, not yet polled
+      await tester.tap(find.byKey(const ValueKey('inbox-not-waiting')));
+      await tester.pumpAndSettle();
+      await settle(tester);
+      expect(briefPatches, isEmpty, reason: 'a newer wait than the one shown');
+      expect(find.textContaining('moved on - nothing was cleared'), findsOneWidget);
+      await tester.tap(find.byKey(const ValueKey('inbox-not-waiting')));
+      await tester.pumpAndSettle();
+      await settle(tester);
+      expect(briefPatches.single, {'clearWait': true}, reason: 'the wait now shown');
+      await done(tester);
+    });
+
+    testWidgets('"Not waiting" refuses when its server does not answer the re-read', (tester) async {
+      rows = {
+        _home.baseUrl: [
+          _row('d', 'Docs', reason: {'kind': 'you', 'text': 'pick a title', 'source': 'reported', 'since': 1}),
+        ],
+      };
+      await pump(tester, await repo());
+      await settle(tester);
+      await rightClick(tester, find.byKey(const ValueKey('inbox-card-http://h:7681|d')));
+      sessionsStatus[_home.baseUrl] = 500;
+      await pick(tester, 'notWaiting');
+      expect(briefPatches, isEmpty, reason: 'its last row is the very row the card was drawn from');
+      expect(find.textContaining('Could not check "Docs" - nothing was cleared'), findsOneWidget);
+      await done(tester);
+    });
+
+    testWidgets('a server without inbox-dismiss: hidden on this device, nothing sent', (tester) async {
+      dismissCap = false;
+      proseAsks();
+      final r = await repo();
+      await pump(tester, r);
+      await settle(tester);
+      await rightClick(tester, card);
+      await pick(tester, 'notAQuestion');
+      expect(card, findsNothing);
+      expect(briefPatches, isEmpty, reason: 'an older server would ignore the key and answer 200');
+      expect(find.textContaining('on this device only'), findsOneWidget, reason: 'it says it is not synced');
+      await tester.runAsync(() => r.refresh());
+      await settle(tester);
+      expect(card, findsNothing, reason: 'a poll does not undo it');
+      await done(tester);
+    });
+
+    testWidgets('a menu opened on one reply hides nothing once a NEW reply asks', (tester) async {
+      proseAsks();
+      final r = await repo();
+      await pump(tester, r);
+      await settle(tester);
+      await rightClick(tester, card);
+      // A new turn lands, and is read, while the menu is open.
+      proseAsks(text: 'Pushed.\n\nShould I open the PR?', at: 'r2', lastActivity: 20);
+      await tester.runAsync(() => r.refresh());
+      await settle(tester);
+      expect(find.textContaining('open the PR', findRichText: true), findsWidgets, reason: 'the new reply is on the card');
+      await pick(tester, 'notAQuestion');
+      expect(briefPatches, isEmpty, reason: 'the new ask was never dismissed');
+      expect(card, findsOneWidget);
+      expect(find.textContaining('moved on - nothing was hidden'), findsOneWidget);
+      await done(tester);
+    });
+
+    testWidgets('an Undo reaches the server AFTER the dismissal it undoes, and a late failure says nothing',
+        (tester) async {
+      proseAsks();
+      final r = await repo();
+      await pump(tester, r);
+      await settle(tester);
+      final first = Completer<bool>();
+      final second = Completer<bool>();
+      dismissHolds = [first, second];
+      await rightClick(tester, card);
+      await pick(tester, 'notAQuestion');
+      await tester.tap(find.byKey(const ValueKey('inbox-undo')));
+      await tester.pump();
+      expect(card, findsOneWidget, reason: 'Undo shows at once');
+      expect(dismissHolds, [second], reason: 'the Undo waits: only the dismissal is at the server');
+      // The dismissal fails after the person already undid it: nothing to report.
+      await tester.runAsync(() async {
+        first.complete(false);
+        await Future<void>.delayed(const Duration(milliseconds: 20));
+      });
+      await tester.pump();
+      expect(dismissHolds, isEmpty, reason: 'the Undo went out once the dismissal answered');
+      second.complete(true);
+      await tester.runAsync(() => Future<void>.delayed(const Duration(milliseconds: 20)));
+      await tester.pump();
+      // A snackbar queues behind the one on screen: take that one down to see the next.
+      ScaffoldMessenger.of(tester.element(find.byType(Scaffold).first)).hideCurrentSnackBar();
+      await tester.pump();
+      await tester.pump(const Duration(seconds: 1));
+      expect(find.textContaining('the server did not save it'), findsNothing,
+          reason: 'the failed choice was already taken back');
+      expect(briefPatches.map(dismissOp).single!.keys, ['remove']);
+      expect(card, findsOneWidget);
+      await done(tester);
+    });
+
+    testWidgets('the focused view\'s "Not a question" is the same dismissal', (tester) async {
+      proseAsks();
+      await pump(tester, await repo());
+      await settle(tester);
+      await tester.tap(find.byKey(const ValueKey('inbox-open-$key')));
+      await tester.pumpAndSettle();
+      await tester.tap(find.byKey(const ValueKey('inbox-not-question')));
+      await tester.pumpAndSettle();
+      await settle(tester);
+      expect(card, findsNothing);
+      expect(dismissOp(briefPatches.single)!.keys, ['add']);
+      expect(find.text('Dismissed (1)'), findsOneWidget);
+      expect(sent, isEmpty);
+      await done(tester);
+    });
+
+    testWidgets('a poll while the dismissal is still on its way does not bring the card back', (tester) async {
+      proseAsks();
+      final r = await repo();
+      await pump(tester, r);
+      await settle(tester);
+      final hold = Completer<bool>();
+      dismissHolds = [hold];
+      await rightClick(tester, card);
+      await pick(tester, 'notAQuestion');
+      // The server has not kept it yet, and a poll brings its row without it.
+      await tester.runAsync(() => r.refresh());
+      await settle(tester);
+      expect(card, findsNothing, reason: 'the row is older than the choice');
+      await tester.runAsync(() async {
+        hold.complete(true);
+        await Future<void>.delayed(const Duration(milliseconds: 20));
+        await r.refresh();
+      });
+      await settle(tester);
+      expect(card, findsNothing, reason: 'now the server keeps it');
+      expect(kept['c'], hasLength(1));
+      await done(tester);
+    });
+
+    testWidgets('a dismissal the server refuses says so while it is still hidden', (tester) async {
+      proseAsks();
+      await pump(tester, await repo());
+      await settle(tester);
+      dismissHolds = [Completer<bool>()..complete(false)];
+      await rightClick(tester, card);
+      await pick(tester, 'notAQuestion');
+      await tester.runAsync(() => Future<void>.delayed(const Duration(milliseconds: 20)));
+      await tester.pump();
+      expect(card, findsNothing);
+      expect(find.textContaining('Hid "Idle" on this device only - the server did not save it'), findsOneWidget);
       await done(tester);
     });
   });
