@@ -265,6 +265,9 @@ class Session {
   /// that has a hand-off); never re-derived here, and never keyed on [agent].
   final SessionHandoff? handoff;
 
+  /// The last check-in on a stale self-wait and its answer (#443), or `null`.
+  final SessionCheckIn? checkIn;
+
   /// The id of the session that opened this one, when it said so (#374), or
   /// `null`. Read from the server's `spawn.parentId`: an agent that starts a
   /// helper session passes its own id, and the session list and the dashboard
@@ -309,6 +312,7 @@ class Session {
     this.backgroundSince,
     this.backgroundStale = false,
     this.handoff,
+    this.checkIn,
     this.parentId,
     this.replaces = const <String>[],
   });
@@ -347,6 +351,7 @@ class Session {
     backgroundSince: backgroundSince,
     backgroundStale: backgroundStale,
     handoff: handoff,
+    checkIn: checkIn,
     parentId: parentId,
     replaces: replaces,
   );
@@ -387,6 +392,7 @@ class Session {
       backgroundSince: _backgroundSince(json['backgroundTasks']),
       backgroundStale: _backgroundStale(json['backgroundTasks']),
       handoff: SessionHandoff.fromJson(json['handoff']),
+      checkIn: SessionCheckIn.fromJson(json['checkIn']),
       parentId: _parentId(json['spawn']),
       replaces: _replaces(json['spawn']),
     );
@@ -815,6 +821,36 @@ class SessionReason {
       until: _asInt(json['until']),
       source: (json['source'] ?? '').toString(),
     );
+  }
+}
+
+/// The last check-in web-terminal typed into an idle session whose self-wait nothing
+/// could keep, and what came back (#443), as `GET /api/sessions` sends it - only while
+/// the idle period it was sent in lasts. The server reads the answer off the session's
+/// own report (`lib/check-in.js`); this only carries it.
+class SessionCheckIn {
+  /// When it was typed (epoch ms).
+  final int sentAt;
+
+  /// How long the session had been idle then, in minutes, or null.
+  final int? idleMin;
+
+  /// `sent`, `lost` (no turn started), `answering`, `interrupted` (its turn ended with
+  /// no Stop, e.g. an Esc), `done`, `you`, `external`, `resumed` (reported self with
+  /// something alive now) or `stuck` (self again with nothing alive, or no report at all).
+  final String state;
+
+  const SessionCheckIn({required this.sentAt, this.idleMin, required this.state});
+
+  static const states = <String>['sent', 'lost', 'answering', 'interrupted', 'done', 'you', 'external', 'resumed', 'stuck'];
+
+  static SessionCheckIn? fromJson(dynamic json) {
+    if (json is! Map) return null;
+    final sentAt = _asInt(json['sentAt']);
+    final state = json['state']?.toString();
+    // An unknown state from a newer server shows nothing, never a guess.
+    if (sentAt == null || state == null || !states.contains(state)) return null;
+    return SessionCheckIn(sentAt: sentAt, idleMin: _asInt(json['idleMin']), state: state);
   }
 }
 

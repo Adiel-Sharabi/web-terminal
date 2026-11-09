@@ -277,6 +277,9 @@ test.describe('verdict and run (#340)', () => {
     expect(JSON.stringify(p)).not.toContain('secret');
     expect(p).toMatchObject({ state: 'kept', reason: 'unsaved-work', keptBecause: 'unpushed', successorId: 's', successorName: 'n (2)' });
     expect(H.publicRun(null)).toBeNull();
+    // #443 - a refused wrap-up write is published (the check-in gate reads this shape).
+    expect(p.typed).toBeNull();
+    expect(H.publicRun({ ...run, typed: false }).typed).toBe(false);
     expect(H.isActive(p)).toBe(false);
     expect(H.isActive(H.startRun(T, 'x'))).toBe(true);
   });

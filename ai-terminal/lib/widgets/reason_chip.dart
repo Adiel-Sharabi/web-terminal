@@ -52,6 +52,58 @@ String reasonLabel(SessionReason? r, {DateTime? now}) {
 /// Whether [r] draws a chip at all (a running turn keeps "Working").
 bool hasReasonChip(SessionReason? r) => r != null && r.kind != 'working';
 
+/// #443 - the words for a check-in and what came back: "Checked in 14:02 → done".
+/// '' for none. The server decides the state (`lib/check-in.js`); this only names it.
+String checkInLabel(SessionCheckIn? c) {
+  if (c == null) return '';
+  final t = DateTime.fromMillisecondsSinceEpoch(c.sentAt);
+  final at = '${t.hour.toString().padLeft(2, '0')}:${t.minute.toString().padLeft(2, '0')}';
+  final what = switch (c.state) {
+    'sent' => '',
+    'lost' => ' · not delivered',
+    'answering' => ' · answering',
+    'interrupted' => ' · interrupted',
+    'done' => ' → done',
+    'you' => ' → needs you',
+    'external' => ' → blocked on others',
+    'resumed' => ' → resumed',
+    'stuck' => ' → still nothing running',
+    _ => '',
+  };
+  return 'Checked in $at$what';
+}
+
+/// #443 - a muted marker beside the reason chip: web-terminal asked this idle session
+/// whether it was finished or should resume, and what came back.
+class CheckInChip extends StatelessWidget {
+  const CheckInChip({super.key, required this.checkIn});
+
+  final SessionCheckIn checkIn;
+
+  @override
+  Widget build(BuildContext context) {
+    final label = checkInLabel(checkIn);
+    // "Still nothing running" is the one answer that wants a person; the rest are muted.
+    final fg = checkIn.state == 'stuck' || checkIn.state == 'lost' ? StatusColor.waiting : const Color(0xFF7C879E);
+    final idle = checkIn.idleMin == null ? '' : ' after ${durShort(checkIn.idleMin! * 60000)} idle';
+    return Tooltip(
+      message: 'web-terminal checked in$idle: finished, or should it resume?\n$label',
+      child: Row(
+        key: ValueKey('check-in-${checkIn.state}'),
+        mainAxisSize: MainAxisSize.min,
+        children: [
+          Icon(Icons.mark_chat_read_outlined, size: 11, color: fg),
+          const SizedBox(width: 3),
+          Flexible(
+            child: Text(label, maxLines: 1, overflow: TextOverflow.ellipsis,
+                style: TextStyle(color: fg, fontSize: 11)),
+          ),
+        ],
+      ),
+    );
+  }
+}
+
 class ReasonChip extends StatelessWidget {
   const ReasonChip({super.key, required this.reason});
 

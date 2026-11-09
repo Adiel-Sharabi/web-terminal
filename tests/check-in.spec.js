@@ -1,0 +1,373 @@
+// @ts-check
+// #443 milestone 2 - check in on a session whose reported self-wait nothing can keep. The
+// rule is pure (lib/check-in.js). Pinned here: a check-in may be typed only when EVERY gate
+// holds, and each gate is tested by breaking it ALONE on an otherwise-perfect candidate
+// (#249's lesson: a negative that breaks two gates proves nothing about either), asserting
+// WHICH gate said no. Also: once per idle period, the off switches, the prompt (bytes, tag,
+// classification), delivery and the answer read as state, and the published field.
+const { test, expect } = require('@playwright/test');
+const C = require('../lib/check-in');
+const H = require('../lib/handoff');
+const agents = require('../lib/agents');
+const { sessionReason } = require('../lib/session-reason');
+const { classifyUserTurn, typedTextOf, USER_KINDS, CHECKIN_PROMPT_TAG } = require('../lib/user-turn');
+const briefLib = require('../lib/session-brief');
+
+const T = 1_700_000_000_000;
+const MIN = 60 * 1000;
+
+/** A session that should be checked in on: its turn ended [idleMin] ago having reported
+ *  "self", nothing is running, and every safety field is clear. Its reason is the REAL
+ *  rule's (lib/session-reason.js) - the same row the server stamps. */
+function candidate(idleMin = 120) {
+  const row = {
+    id: 's1', agent: 'claude', status: 'idle', waitingFor: null, compacting: false, agentReady: true,
+    blockedPrompt: null, inMenu: false, capBlocked: false, autoResumeArmed: false, usageLimit: null,
+    backgroundTasks: [],
+    brief: { turnAt: T - (idleMin + 5) * MIN, stoppedAt: T - idleMin * MIN,
+      wait: { on: 'self', what: 'watch the CI run', at: T - idleMin * MIN - 1000 },
+      handoff: null, checkIn: null, checkInOff: false },
+  };
+  return { ...row, reason: sessionReason(row) };
+}
+const block = (row, over = {}) => C.checkInBlock(row, { now: T, supported: true, ...over });
+
+test.describe('checkInBlock (#443)', () => {
+  test('the perfect candidate may be checked in on', () => {
+    const r = candidate();
+    expect(r.reason).toMatchObject({ kind: 'self', source: 'reported' });
+    expect(block(r)).toBeNull();
+  });
+
+  test('the fleet switch, the per-session switch and the registry each say no alone', () => {
+    expect(block(candidate(), { cfg: C.checkInConfig({ enabled: false }) })).toBe('disabled');
+    expect(block(candidate(), { supported: false })).toBe('unsupported');
+    const off = candidate(); off.brief.checkInOff = true;
+    expect(block(off)).toBe('off');
+    // Default ON (the owner's call): no config at all, or any other value, is on.
+    expect(C.checkInConfig(null).enabled).toBe(true);
+    expect(C.checkInConfig({ enabled: 'no' }).enabled).toBe(true);
+    // Declared for Claude only; a plain shell and Codex never.
+    expect(agents.checksIn('claude')).toBe(true);
+    expect(agents.checksIn('codex')).toBe(false);
+    expect(agents.checksIn(null)).toBe(false);
+    expect(agents.checksIn('nope')).toBe(false);
+  });
+
+  test('never into another prompt\'s turn: a restart hold or a hand-off in flight', () => {
+    expect(block(candidate(), { hold: true })).toBe('restart-hold');
+    const h = candidate(); h.brief.handoff = { state: 'wrapping' };
+    expect(block(h)).toBe('handoff');
+    // A hand-off that ended kept or failed told it to stop (a successor may hold the work):
+    // never "pick it back up" until the session has been active again.
+    for (const state of ['kept', 'failed']) {
+      // Its wrap-up prompt started the session's latest turn (a turn inside the run).
+      const k = candidate(); k.brief.handoff = { state, startedAt: k.brief.turnAt - 1000, at: k.brief.stoppedAt + 1000 };
+      expect(block(k)).toBe('handed-off');
+      k.brief.handoff = { state, startedAt: k.brief.turnAt - 2000, at: k.brief.turnAt - 1000 }; // a turn began after it ended
+      expect(block(k)).toBeNull();
+    }
+    // A FAILED run whose wrap-up started no turn may still have its words unsubmitted in
+    // the composer (a lost CR): a check-in's CR would submit both. It blocks - unless the
+    // worker link refused the write (`typed: false`), which typed nothing.
+    // Built through H.publicRun, the shaper server.js serves the row from: a stored field
+    // the gate reads must survive it (the first cut read `typed`, which it dropped).
+    const never = (state, extra) => { const k = candidate(); k.brief.handoff = H.publicRun({ state, startedAt: k.brief.turnAt + 500, at: k.brief.stoppedAt + 1000, ...extra }); return block(k); };
+    expect(never('failed')).toBe('handed-off');
+    expect(never('failed', { typed: false })).toBeNull();
+    expect(never('kept')).toBe('handed-off');
+    expect(never('kept', { typed: false })).toBe('handed-off'); // a successor holds the work
+    // A run with no end time, or a brief with no turn time, cannot prove a later turn: block.
+    const noAt = candidate(); noAt.brief.handoff = { state: 'kept', startedAt: 1 };
+    expect(block(noAt)).toBe('handed-off');
+    const noTurn = candidate(); noTurn.brief.handoff = { state: 'failed', startedAt: 1, at: 2 }; noTurn.brief.turnAt = null;
+    expect(block(noTurn)).toBe('handed-off');
+  });
+
+  test('an API error is its own owner\'s (the worker\'s auto-continue), never a check-in', () => {
+    const r = candidate(); r.apiError = true;
+    expect(block(r)).toBe('api-error');
+  });
+
+  test('fails CLOSED when live work cannot be read', () => {
+    // A transcript that cannot be found or read, or no process snapshot yet, reads as
+    // "nothing running" to the badge readers; before a write it is "cannot tell".
+    expect(block(candidate(), { liveKnown: false })).toBe('cannot-tell');
+    expect(block(candidate(), { liveKnown: true })).toBeNull();
+  });
+
+  // Each safety field is broken ALONE; the row's reason is left as the candidate's (a
+  // reported self), so the field's own gate is the only thing that can say no.
+  for (const [what, mutate, why] of /** @type {[string, (r: any) => void, string][]} */ ([
+    ['working', (r) => { r.status = 'working'; }, 'not-idle'],
+    ['a pending question', (r) => { r.waitingFor = 'question'; }, 'waiting'],
+    ['a permission prompt', (r) => { r.waitingFor = 'permission'; }, 'waiting'],
+    ['compacting', (r) => { r.compacting = true; }, 'compacting'],
+    ['not ready (#147)', (r) => { r.agentReady = false; }, 'not-ready'],
+    ['a startup selector on screen (#190)', (r) => { r.blockedPrompt = { kind: 'folder-trust' }; }, 'not-ready'],
+    ['in a menu (#316)', (r) => { r.inMenu = true; }, 'menu'],
+    ['cap-blocked', (r) => { r.capBlocked = true; }, 'capped'],
+    ['auto-resume armed', (r) => { r.autoResumeArmed = true; }, 'capped'],
+    ['a usage cap in force', (r) => { r.usageLimit = { waiting: true, armed: false }; }, 'capped'],
+  ])) {
+    test(`never while ${what}`, () => {
+      const r = candidate();
+      mutate(r);
+      expect(block(r)).toBe(why);
+    });
+  }
+
+  test('waits on you, external or done are never stale; nor is self with a live waker', () => {
+    for (const on of ['you', 'external', 'done']) {
+      const r = candidate();
+      r.brief.wait = { ...r.brief.wait, on };
+      expect(block({ ...r, reason: sessionReason(r) })).toBe('not-stale');
+    }
+    const live = candidate();
+    live.backgroundTasks = [{ id: 'm1', kind: 'monitor', description: 'CI watcher', startedAt: T - 200 * MIN }];
+    expect(block({ ...live, reason: sessionReason(live) })).toBe('not-stale');
+    // A stale-flagged entry is not alive (milestone 1): the self-wait is stale again.
+    const dead = candidate();
+    dead.backgroundTasks = [{ id: 'b1', kind: 'command', description: 'build', startedAt: T - 900 * MIN, stale: true }];
+    expect(block({ ...dead, reason: sessionReason(dead) })).toBeNull();
+    // No report at all (the turn ended with no wait): nothing claims a self-wait.
+    const none = candidate();
+    none.brief.wait = null;
+    expect(block({ ...none, reason: sessionReason(none) })).toBe('not-stale');
+  });
+
+  test('the threshold: afterMin past the point the self-wait went stale (default 30 + 60)', () => {
+    expect(C.DEFAULTS.afterMin).toBe(60);
+    expect(H.handoffConfig(null).staleSelfMin).toBe(30);
+    expect(block(candidate(89))).toBe('recent');
+    expect(block(candidate(90))).toBeNull();
+    // 20 min idle is not even stale yet.
+    expect(block(candidate(20))).toBe('not-stale');
+    // Both halves are configurable; bad values fall back.
+    expect(block(candidate(90), { cfg: C.checkInConfig({ afterMin: 120 }) })).toBe('recent');
+    expect(block(candidate(45), { cfg: C.checkInConfig({ afterMin: 10 }) })).toBeNull();
+    expect(block(candidate(45), { hcfg: H.handoffConfig({ staleSelfMin: 60 }), cfg: C.checkInConfig({ afterMin: 10 }) })).toBe('not-stale');
+    expect(C.checkInConfig({ afterMin: -5 }).afterMin).toBe(60);
+    expect(C.checkInConfig({ afterMin: 'x' }).afterMin).toBe(60);
+  });
+
+  test('someone typing in the last 10 minutes defers it', () => {
+    expect(block(candidate(), { inputAt: T - 5 * MIN })).toBe('typing');
+    expect(block(candidate(), { inputAt: T - 11 * MIN })).toBeNull();
+    // Keystrokes live in memory only: after a reload nobody knows, so the quiet period
+    // counts from the server's start at least.
+    expect(block(candidate(), { startedAt: T - 2 * MIN })).toBe('typing');
+    expect(block(candidate(), { inputAt: T - 60 * MIN, startedAt: T - 5 * MIN })).toBe('typing');
+    expect(block(candidate(), { startedAt: T - 11 * MIN })).toBeNull();
+  });
+
+  test('the cheap pre-filter passes only what the full rule could allow', () => {
+    const e = (over = {}) => ({ turnAt: T - 125 * MIN, stoppedAt: T - 120 * MIN,
+      reported: { wait: { on: 'self', what: 'x', at: T - 121 * MIN } }, checkIn: null, ...over });
+    const worth = (x) => C.worthReading(x, { now: T });
+    expect(worth(e())).toBe(true);
+    expect(worth(e({ checkInOff: true }))).toBe(false);
+    expect(worth(e({ reported: { wait: { on: 'done', at: T - 121 * MIN } } }))).toBe(false);
+    expect(worth(e({ reported: null }))).toBe(false);
+    expect(worth(e({ stoppedAt: T - 80 * MIN }))).toBe(false);
+    expect(worth(e({ stoppedAt: T - 130 * MIN }))).toBe(false); // a turn running (stoppedAt < turnAt)
+    expect(worth(e({ checkIn: C.startRecord(T - 10 * MIN, 110) }))).toBe(false);
+    expect(worth(null)).toBe(false);
+  });
+
+  test('a check-in still landing is in flight for the other writers', () => {
+    const rec = C.startRecord(T - MIN, 90);
+    expect(C.inFlight(rec, T)).toBe(true);
+    expect(C.inFlight({ ...rec, deliveredAt: T - 50000 }, T)).toBe(false);
+    expect(C.inFlight(rec, T + 3 * MIN)).toBe(false); // past deliverMs: lost, not landing
+    expect(C.inFlight(null, T)).toBe(false);
+  });
+});
+
+test.describe('once per idle period (#443)', () => {
+  test('a check-in in this idle period blocks the next, through its own turn and after it', () => {
+    const r = candidate();
+    // Sent, not yet delivered.
+    r.brief.checkIn = C.startRecord(T - 30 * MIN, 90);
+    expect(block(r)).toBe('asked');
+    // Delivered: its own turn is the session's latest turn. Answered "self" with nothing
+    // running, so the row is stale-self again - and still never asked a second time.
+    const sent = T - 40 * MIN;
+    const a = candidate();
+    a.brief.checkIn = { ...C.startRecord(sent, 90), deliveredAt: sent + 2000, endedAt: sent + 60000, answer: { on: 'self', what: 'x' } };
+    a.brief.turnAt = sent + 2000;
+    a.brief.stoppedAt = sent + 60000;
+    a.brief.wait = { on: 'self', what: 'x', at: sent + 50000 };
+    const again = { ...a, reason: sessionReason(a) };
+    expect(again.reason).toMatchObject({ kind: 'self', source: 'reported' });
+    expect(block(again, { now: sent + 10 * 60 * MIN })).toBe('asked');
+  });
+
+  test('the period ends when the session is active again: a later turn re-arms it', () => {
+    const sent = T - 300 * MIN;
+    const r = candidate(120);
+    r.brief.checkIn = { ...C.startRecord(sent, 90), deliveredAt: sent + 2000, endedAt: sent + 60000, answer: { on: 'self', what: 'x' } };
+    // turnAt (T - 125 min) is a later turn than the check-in's own.
+    expect(C.periodOpen(r.brief.checkIn, r.brief.turnAt)).toBe(false);
+    expect(block(r)).toBeNull();
+    // Never delivered: the period lasts until ANY turn starts after the send.
+    expect(C.periodOpen(C.startRecord(sent, 90), sent - 1)).toBe(true);
+    expect(C.periodOpen(C.startRecord(sent, 90), sent + 1)).toBe(false);
+  });
+});
+
+test.describe('the check-in prompt (#443)', () => {
+  test('starts with the tag, stays under 512 bytes in the worst case, and reads as automated', () => {
+    const p = C.checkInPrompt({ idleMin: 95, what: 'watch the CI run' });
+    expect(p.startsWith(CHECKIN_PROMPT_TAG)).toBe(true);
+    expect(p).toContain('95 min');
+    expect(p).toContain('("watch the CI run")');
+    expect(p).toContain('report wait done');
+    expect(p).not.toMatch(/[\r\n]/);
+    // Worst case: days idle, the longest what, every char 3 bytes, quotes and newlines.
+    const worst = C.checkInPrompt({ idleMin: 99999, what: `"\n${'א…'.repeat(200)}` });
+    expect(Buffer.byteLength(worst)).toBeLessThanOrEqual(511);
+    expect(worst.startsWith(CHECKIN_PROMPT_TAG)).toBe(true);
+    expect(worst).toContain('1667 h');
+    // The session's words reach the PTY as keystrokes: no control character survives
+    // (an ESC would interrupt, a paste close would end a bracket, a CR would submit).
+    const esc = String.fromCodePoint(0x1b);
+    const nasty = C.checkInPrompt({ idleMin: 95, what: `a${esc}[201~b\rc${String.fromCodePoint(0x7f)}d${String.fromCodePoint(0x9b)}e` });
+    expect(nasty).not.toMatch(/[\u0000-\u001f\u007f-\u009f]/);
+    expect(nasty).toContain('("a [201~b c d e")');
+    // 4-byte characters do not fit beside the rest: the session's words are dropped, the
+    // question stays whole.
+    const emoji = C.checkInPrompt({ idleMin: 99999, what: '\u{1F600}'.repeat(100) });
+    expect(Buffer.byteLength(emoji)).toBeLessThanOrEqual(511);
+    expect(emoji).toContain('report wait done');
+    expect(Buffer.byteLength(C.checkInPrompt({ idleMin: 90 }))).toBeLessThanOrEqual(511);
+    // The chat lens and the recap: a system turn, never "You".
+    const k = classifyUserTurn(p);
+    expect(k.kind).toBe(USER_KINDS.SYSTEM);
+    expect(k.from).toBe('Check-in');
+    expect(typedTextOf(p)).toBe('');
+  });
+
+  test('delivered, it clears the self-wait and is NOT the person\'s prompt', () => {
+    const e0 = { ...briefLib.emptyEntry(), turnAt: T - 100 * MIN, stoppedAt: T - 95 * MIN,
+      reported: { items: [], headline: null, at: T - 96 * MIN, wait: { on: 'self', what: 'x', at: T - 96 * MIN } },
+      prompt: { text: 'the last thing I typed', at: T - 100 * MIN } };
+    const e1 = briefLib.foldHook(e0, 'UserPromptSubmit', { prompt: C.checkInPrompt({ idleMin: 95 }) }, T);
+    expect(e1.reported.wait).toBeNull();
+    expect(e1.prompt).toEqual(e0.prompt);
+    expect(e1.promptsSinceReport || 0).toBe(e0.promptsSinceReport || 0);
+  });
+});
+
+test.describe('delivery and the answer, as state (#443)', () => {
+  const sent = T - 10 * MIN;
+  const base = () => ({ ...briefLib.emptyEntry(), turnAt: T - 200 * MIN, stoppedAt: T - 190 * MIN,
+    reported: { items: [], headline: null, at: T - 191 * MIN, wait: { on: 'self', what: 'x', at: T - 191 * MIN } },
+    checkIn: C.startRecord(sent, 190) });
+  /** Fold a hook exactly as server.js does: the brief first, then the check-in, one clock. */
+  const fold = (e, event, body, now) => C.noteHook(briefLib.foldHook(e, event, body, now), event, body, now);
+  const report = (e, wait, now) => briefLib.applyReport(e, { items: [], headline: null, wait, partial: true }, now);
+
+  test('delivery is the tagged UserPromptSubmit only', () => {
+    const e = base();
+    expect(fold(e, 'UserPromptSubmit', { prompt: 'hello' }, sent + 1000).checkIn.deliveredAt).toBeNull();
+    expect(fold(e, 'UserPromptSubmit', { prompt: '<task-notification>x</task-notification>' }, sent + 1000).checkIn.deliveredAt).toBeNull();
+    const d = fold(e, 'UserPromptSubmit', { prompt: C.checkInPrompt({ idleMin: 190 }) }, sent + 1000);
+    expect(d.checkIn.deliveredAt).toBe(sent + 1000);
+    expect(d.turnAt).toBe(sent + 1000);
+    // No record, no change.
+    const none = { ...base(), checkIn: null };
+    expect(C.noteHook(none, 'UserPromptSubmit', { prompt: C.checkInPrompt({ idleMin: 1 }) }, sent)).toBe(none);
+  });
+
+  for (const on of ['done', 'you', 'external', 'self']) {
+    test(`the wait reported in the check-in's turn is the answer (${on})`, () => {
+      let e = fold(base(), 'UserPromptSubmit', { prompt: C.checkInPrompt({ idleMin: 190 }) }, sent + 1000);
+      e = report(e, { on, what: 'w' }, sent + 5000);
+      e = fold(e, 'Stop', {}, sent + 6000);
+      expect(e.checkIn).toMatchObject({ endedAt: sent + 6000, answer: { on, what: 'w' } });
+    });
+  }
+
+  test('no report in that turn is no answer - the old self-wait never counts', () => {
+    let e = fold(base(), 'UserPromptSubmit', { prompt: C.checkInPrompt({ idleMin: 190 }) }, sent + 1000);
+    e = fold(e, 'Stop', {}, sent + 6000);
+    expect(e.checkIn).toMatchObject({ endedAt: sent + 6000, answer: null });
+  });
+
+  test('only the check-in\'s own turn answers it; a later Stop changes nothing', () => {
+    let e = fold(base(), 'UserPromptSubmit', { prompt: C.checkInPrompt({ idleMin: 190 }) }, sent + 1000);
+    e = fold(e, 'Stop', {}, sent + 6000);
+    const ended = e.checkIn;
+    e = fold(e, 'UserPromptSubmit', { prompt: '<task-notification>x</task-notification>' }, sent + 9000);
+    e = report(e, { on: 'done' }, sent + 9500);
+    e = fold(e, 'Stop', {}, sent + 10000);
+    expect(e.checkIn).toEqual(ended);
+    // A Stop before delivery (the turn that was running when it was typed) answers nothing.
+    const pre = fold(base(), 'Stop', {}, sent + 500);
+    expect(pre.checkIn.endedAt).toBeNull();
+  });
+
+  test('a check-in turn that never Stopped (Esc) is not answered by the NEXT turn', () => {
+    let e = fold(base(), 'UserPromptSubmit', { prompt: C.checkInPrompt({ idleMin: 190 }) }, sent + 1000);
+    e = fold(e, 'UserPromptSubmit', { prompt: '<task-notification>x</task-notification>' }, sent + 9000);
+    e = report(e, { on: 'done' }, sent + 9500);
+    e = fold(e, 'Stop', {}, sent + 10000);
+    expect(e.checkIn).toMatchObject({ deliveredAt: sent + 1000, endedAt: null, answer: null });
+  });
+
+  test('a wait reported BEFORE delivery is never the answer', () => {
+    // foldHook clears a self-wait on delivery; this pins the check-in's own guard too.
+    const e = { ...base(), turnAt: sent + 1000, stoppedAt: sent + 6000,
+      reported: { items: [], headline: null, at: sent - 1, wait: { on: 'external', what: 'x', at: sent - 1 } },
+      checkIn: { ...C.startRecord(sent, 190), deliveredAt: sent + 1000 } };
+    expect(C.noteHook(e, 'Stop', {}, sent + 6000).checkIn).toMatchObject({ endedAt: sent + 6000, answer: null });
+  });
+});
+
+test.describe('the published field (#443)', () => {
+  const sent = T - 10 * MIN;
+  const rowWith = (rec, over = {}) => {
+    const r = candidate(120);
+    r.brief.checkIn = C.publicRecord(rec);
+    if (Number.isFinite(rec.deliveredAt)) r.brief.turnAt = rec.deliveredAt;
+    return { ...r, ...over };
+  };
+  const field = (row, now = T) => C.checkInField(row, { now, supported: true });
+
+  test('what came back, in one word', () => {
+    const rec = C.startRecord(sent, 125);
+    expect(field(rowWith(rec), sent + MIN)).toEqual({ sentAt: sent, idleMin: 125, state: 'sent', answeredAt: null });
+    expect(field(rowWith(rec), sent + 4 * MIN).state).toBe('lost');
+    const dl = { ...rec, deliveredAt: sent + 1000 };
+    expect(field(rowWith(dl, { status: 'working' })).state).toBe('answering');
+    // An Esc ends the turn with no Stop (Claude fires no hook; the worker flips it idle):
+    // idle past the grace with no answer means none is coming.
+    expect(field(rowWith(dl)).state).toBe('interrupted');
+    expect(field(rowWith(dl), dl.deliveredAt + 10000).state).toBe('answering'); // a Stop may still be folding
+    expect(field(rowWith(dl), dl.deliveredAt + 31000).state).toBe('interrupted');
+    const ans = (on) => ({ ...dl, endedAt: sent + 9000, answer: on ? { on, what: '' } : null });
+    expect(field(rowWith(ans('done')))).toMatchObject({ state: 'done', answeredAt: sent + 9000 });
+    expect(field(rowWith(ans('you'))).state).toBe('you');
+    expect(field(rowWith(ans('external'))).state).toBe('external');
+    expect(field(rowWith(ans('self'))).state).toBe('stuck');
+    expect(field(rowWith(ans(null))).state).toBe('stuck');
+    expect(field(rowWith(ans('self'), { backgroundTasks: [{ id: 'm', kind: 'monitor', startedAt: sent }] })).state).toBe('resumed');
+    expect(field(rowWith(ans('self'), { backgroundTasks: [{ id: 'm', kind: 'monitor', startedAt: sent, stale: true }] })).state).toBe('stuck');
+  });
+
+  test('gone once the session is active again, and never for an agent that does not check in', () => {
+    const r = rowWith({ ...C.startRecord(sent, 125), deliveredAt: sent + 1000, endedAt: sent + 9000, answer: { on: 'done', what: '' } });
+    expect(field(r)).not.toBeNull();
+    r.brief.turnAt = sent + 20000;
+    expect(field(r)).toBeNull();
+    expect(C.checkInField(rowWith(C.startRecord(sent, 1)), { now: T, supported: false })).toBeNull();
+    expect(field(candidate())).toBeNull();
+  });
+
+  test('the log line names the event, the session and the answer', () => {
+    const rec = { ...C.startRecord(sent, 125), answer: { on: 'done', what: '' } };
+    expect(C.logRecord('answered', 's1', rec, T, { name: 'n' })).toEqual({
+      at: new Date(T).toISOString(), event: 'answered', id: 's1', sentAt: sent, idleMin: 125, answer: 'done', name: 'n' });
+  });
+});
