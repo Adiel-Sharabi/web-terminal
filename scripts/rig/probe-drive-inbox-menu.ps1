@@ -170,7 +170,7 @@ function Shot([string]$name) {
   Say "SHOT $path"
 }
 # The probe logs LOGICAL pixels; a posted mouse message carries PHYSICAL client pixels.
-# $script:dpr is read from the probe's READY line before the first click.
+# $script:dpr is read from the probe's READY line before the window is sized.
 $script:dpr = 0
 function Center($rect) {
   return @([int](($rect[0] + $rect[2] / 2) * $script:dpr), [int](($rect[1] + $rect[3] / 2) * $script:dpr))
@@ -188,8 +188,22 @@ try {
   Say "PROBE pid=$($proc.Id) session=$($proc.SessionId)"
   if (-not (WaitFor { [W]::TopOf([uint32]$proc.Id) -ne [IntPtr]::Zero } 20000)) { Say 'ABORT: no probe window'; Finish 2 }
   $script:top = [W]::TopOf([uint32]$proc.Id)
-  # Off-screen, unactivated, 1300x900 (wide layout: the list beside the focused item).
+  # Off-screen and unactivated first; sized once the probe says its pixel ratio.
   [W]::SetWindowPos($script:top, [IntPtr]::Zero, -4000, 40, 1300, 900, 0x0014) | Out-Null
+  # The probe logs LOGICAL pixels and a window is sized in PHYSICAL ones: read its ratio
+  # (the latest READY, after the move) before sizing or clicking anything.
+  if (-not (WaitFor { @(LogLines | Where-Object { $_ -like 'READY dpr=*' }).Count -gt 0 } 20000)) {
+    Say 'ABORT: the probe never drew its first frame'; Finish 2
+  }
+  $ready = LogLines | Where-Object { $_ -like 'READY dpr=*' } | Select-Object -Last 1
+  $parsed = 0.0
+  if (-not [double]::TryParse($ready.Substring(10), [Globalization.NumberStyles]::Float, [Globalization.CultureInfo]::InvariantCulture, [ref]$parsed) -or $parsed -le 0) {
+    Say "ABORT: no device pixel ratio from the probe ($ready)"; Finish 2
+  }
+  $script:dpr = $parsed
+  Say "PROBE $ready"
+  # 1300x900 LOGICAL: the wide layout (the list beside the focused item) at any scale.
+  [W]::SetWindowPos($script:top, [IntPtr]::Zero, -4000, 40, [int](1300 * $script:dpr), [int](900 * $script:dpr), 0x0014) | Out-Null
   $view = [W]::FindWindowEx($script:top, [IntPtr]::Zero, 'FLUTTERVIEW', [NullString]::Value)
   if ($view -eq [IntPtr]::Zero) { Say 'ABORT: no FLUTTERVIEW child'; Finish 2 }
   $cardC = 'inbox-card-http://probe.invalid:7681|c'
@@ -198,16 +212,17 @@ try {
   if (-not (WaitFor { $pp = LastPos; $pp.ContainsKey($cardC) -and $pp.ContainsKey($cardQ) } 30000)) {
     Say 'ABORT: the cards never appeared'; Shot 'abort.png'; Finish 2
   }
+  # Prove the WIDE layout before relying on it: there the oldest wait (the reported
+  # card) opens beside the list and hides its own reply box. In the narrow layout the
+  # box shows from the start, a click opens a full-screen route over the cards, and
+  # every later step would report a negative instead of a setup failure.
+  Start-Sleep -Milliseconds 700
+  if ((LastPos).ContainsKey($replyD)) {
+    Say 'ABORT: not the wide layout (the reported card shows its reply box before any click)'; Shot 'abort.png'; Finish 2
+  }
   # The wide layout opens the oldest wait (the reported one) beside the list, and an
   # open card hides its own reply box. Open the question instead (a left click opens
   # it; nothing is answered), so the reported card shows its reply field.
-  $ready = LogLines | Where-Object { $_ -like 'READY dpr=*' } | Select-Object -First 1
-  $parsed = 0.0
-  if (-not $ready -or -not [double]::TryParse($ready.Substring(10), [Globalization.NumberStyles]::Float, [Globalization.CultureInfo]::InvariantCulture, [ref]$parsed) -or $parsed -le 0) {
-    Say "ABORT: no device pixel ratio from the probe ($ready)"; Finish 2
-  }
-  $script:dpr = $parsed
-  Say "PROBE $ready"
   $q0 = Center (LastPos)[$cardQ]
   [W]::Click($view, $q0[0], $q0[1], $false)
   if (-not (WaitFor { (LastPos).ContainsKey($replyD) } 5000)) {
