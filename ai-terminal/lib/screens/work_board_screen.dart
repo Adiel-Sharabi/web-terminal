@@ -1410,6 +1410,8 @@ class BoardCard extends StatelessWidget {
         _labelled(context, 'Now', b!.now!.text)
       else
         _labelled(context, boardStatusOf(s).label, b?.headline ?? '…'),
+      // #443: web-terminal checked in on a stale self-wait; what came back.
+      if (s.checkIn != null) _labelled(context, 'Check-in', checkInLabel(s.checkIn), key: const ValueKey('board-check-in')),
       if (b?.did != null)
         Text('Last did: ${b!.did!.text}',
             maxLines: 2, overflow: TextOverflow.ellipsis, style: TextStyle(color: pal.idle, fontSize: 12)),

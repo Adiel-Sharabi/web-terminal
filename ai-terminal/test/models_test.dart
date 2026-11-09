@@ -767,6 +767,7 @@ void main() {
         backgroundSince: 77,
         backgroundStale: true,
         handoff: const SessionHandoff(suggest: true, ctxTokens: 612000),
+        checkIn: const SessionCheckIn(sentAt: 1700000000000, idleMin: 95, state: 'done'),
         parentId: 'parent-7',
         replaces: const ['old-1'],
       );
@@ -798,6 +799,7 @@ void main() {
       expect(moved.backgroundSince, 77);
       expect(moved.backgroundStale, isTrue);
       expect(moved.handoff, same(original.handoff), reason: 'a dropped handoff hides the Hand off button until the next poll (#340)');
+      expect(moved.checkIn, same(original.checkIn), reason: 'a dropped checkIn hides the check-in marker until the next poll (#443)');
       expect(moved.parentId, 'parent-7', reason: 'a dropped parentId moves a child session to top level until the next poll (#374)');
       expect(moved.replaces, ['old-1'], reason: 'a dropped replaces orphans the helpers of a handed-off parent (#374)');
     });

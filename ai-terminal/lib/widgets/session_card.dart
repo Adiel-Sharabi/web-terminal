@@ -309,6 +309,12 @@ class SessionCard extends StatelessWidget {
                           ),
                         ),
                       ),
+                    // #443: web-terminal checked in on a stale self-wait; what came back.
+                    // Beside whatever the status shows (while it answers, that is "Working").
+                    if (session.checkIn != null) ...[
+                      const SizedBox(width: 6),
+                      Flexible(child: CheckInChip(checkIn: session.checkIn!)),
+                    ],
                     // #137 — sitting out the 5h usage window. Placed here, directly
                     // after the status word and before the capacity numbers,
                     // because it QUALIFIES what the session is doing rather than
