@@ -26,8 +26,19 @@
 # tap; not proven), while the same click in Session 0 chose it. Read MENU_RESULT.
 #
 # Each run reads only its own lines: the probe empties its log and writes
-# `RUN pid=<pid>` first, and this reads what follows that line for the probe it found.
-# A probe built before that line existed gives nothing to read, so the run ABORTs.
+# `RUN pid=<pid> token=<t>` first, and this reads what follows THAT line. The token is
+# made up by the launching side and handed to both (`--run-token=<t>` to the probe, `-Token
+# <t>` to -Drive), so the line cannot be mistaken for an earlier process's even when
+# Windows reuses its pid. The probe is found the same way, by the token on its command
+# line, so two probes of one exe are never confused. A probe built before the token
+# existed, or started without it, never writes a matching line, so the run ABORTs.
+# If the RUN line later leaves the log (a SECOND probe emptied the shared log), the run
+# ABORTs at its next read: an emptied log would make every "key absent" wait pass.
+#
+# By hand, with nobody logged on (Session 0 only):
+#   $t = [guid]::NewGuid().ToString('N')
+#   Start-Process <probe exe> -ArgumentList "--run-token=$t"
+#   powershell -NoProfile -ExecutionPolicy Bypass -File scripts\rig\probe-drive-inbox-menu.ps1 -Drive -Exe <probe exe> -Out <dir> -Token $t
 #
 # Build the probe first:  ai-terminal/scripts/build-probe-windows.sh tool/inbox_menu_probe.dart
 #
@@ -43,11 +54,18 @@ param(
   [switch]$Drive,
   # The logged-on Windows account whose session runs the probe (no default: agent
   # shells can have an empty USERNAME). Not needed with -Drive.
-  [string]$User
+  [string]$User,
+  # -Drive only: the run token the probe was started with (--run-token=<t>). The
+  # launching side makes one up; by hand, see the header.
+  [string]$Token
 )
 
 $ErrorActionPreference = 'Stop'
 $verdict = Join-Path $Out 'verdict.txt'
+# LOWERCASE hex only, 8-64 chars (the probe's own check is lowercase-only, so this is matched
+# case-sensitively): the probe echoes it into a line matched EXACTLY, and it is spliced into
+# a VBS string and a command-line pattern, so nothing else may be in it.
+$tokenOk = '^[0-9a-f]{8,64}$'
 
 if (-not $Drive) {
   if (-not $User) { Write-Output 'ABORT: pass -User <the logged-on Windows account>'; exit 2 }
@@ -59,11 +77,13 @@ if (-not $Drive) {
   Remove-Item -Force -ErrorAction SilentlyContinue (Join-Path $dir 'inbox-menu-probe.log'), (Join-Path $dir 'inbox-menu-probe.quit')
   $vbs = Join-Path $Out 'launch.vbs'
   $me = $MyInvocation.MyCommand.Path
+  # One random token for this run, handed to the probe AND the driver (see the header).
+  $tok = [guid]::NewGuid().ToString('N')
   # Window style 4: shown without taking focus. The driver parks it off-screen at once.
   $lines = @(
     'Set sh = CreateObject("WScript.Shell")',
-    ('sh.Run """' + $Exe + '""", 4, False'),
-    ('sh.Run "powershell.exe -NoProfile -ExecutionPolicy Bypass -File ""' + $me + '"" -Drive -Exe ""' + $Exe + '"" -Out ""' + $Out + '""", 0, False')
+    ('sh.Run """' + $Exe + '"" --run-token=' + $tok + '", 4, False'),
+    ('sh.Run "powershell.exe -NoProfile -ExecutionPolicy Bypass -File ""' + $me + '"" -Drive -Exe ""' + $Exe + '"" -Out ""' + $Out + '"" -Token ' + $tok + '", 0, False')
   )
   Set-Content -Path $vbs -Value $lines -Encoding ASCII
   $task = 'wt-inbox-menu-probe-gui'
@@ -85,6 +105,7 @@ if (-not $Drive) {
 }
 
 # ---- Session 1 side: drive the probe ---------------------------------------------------
+if ($Token -cnotmatch $tokenOk) { Write-Output 'ABORT: -Drive needs -Token <8-64 hex chars>, the --run-token the probe was started with'; exit 2 }
 Add-Type -AssemblyName System.Drawing
 Add-Type @"
 using System;
@@ -100,6 +121,7 @@ public class W {
   [DllImport("user32.dll")] public static extern bool SetWindowPos(IntPtr h, IntPtr after, int x, int y, int cx, int cy, uint flags);
   [DllImport("user32.dll")] public static extern bool PrintWindow(IntPtr h, IntPtr hdc, uint flags);
   [DllImport("user32.dll")] public static extern bool GetWindowRect(IntPtr h, out RECT r);
+  [DllImport("user32.dll")] static extern IntPtr SendMessageTimeout(IntPtr h, uint m, IntPtr w, IntPtr l, uint flags, uint ms, out IntPtr result);
   [StructLayout(LayoutKind.Sequential)] public struct RECT { public int L, T, R, B; }
 
   // The probe's top-level window: a visible one, else (Session 0, where nothing is
@@ -116,6 +138,13 @@ public class W {
       return true;
     }, IntPtr.Zero);
     return found != IntPtr.Zero ? found : hosting;
+  }
+
+  // True when the window answers a WM_NULL within a second (SMTO_ABORTIFHUNG): a hung or
+  // suspended probe does not.
+  public static bool Responds(IntPtr h) {
+    IntPtr r;
+    return SendMessageTimeout(h, 0, IntPtr.Zero, IntPtr.Zero, 0x2, 1000, out r) != IntPtr.Zero;
   }
 
   static IntPtr Pt(int x, int y) { return (IntPtr)((y << 16) | (x & 0xFFFF)); }
@@ -147,17 +176,33 @@ $dir = Split-Path $Exe
 $logFile = Join-Path $dir 'inbox-menu-probe.log'
 $quit = Join-Path $dir 'inbox-menu-probe.quit'
 
-# Only THIS run's lines: those after the probe's own `RUN pid=<its pid>` line. Before the
-# probe is found, or if its RUN line is not there (an older log), there are none, so
-# every wait times out into an ABORT instead of reading another run's verdicts.
-$script:runPid = 0
-function LogLines {
-  if ($script:runPid -eq 0 -or -not (Test-Path $logFile)) { return @() }
+# Only THIS run's lines: those after the probe's own `RUN pid=<its pid> token=<t>` line.
+# $script:runMark is that line, set once the probe is found; before it is set, or if the
+# line is not in the log (an older probe, another run's block), there are none, so every
+# wait times out into an ABORT instead of reading another run's verdicts.
+$script:runMark = $null
+$script:runSeen = $false
+# The lines after this run's RUN line, or $null when the log does not hold that line.
+function ReadRun {
+  if (-not $script:runMark -or -not (Test-Path $logFile)) { return $null }
   $all = @(Get-Content $logFile)
-  $at = -1
-  for ($i = $all.Count - 1; $i -ge 0; $i--) { if ($all[$i] -eq "RUN pid=$($script:runPid)") { $at = $i; break } }
-  if ($at -lt 0) { return @() }
-  return @($all | Select-Object -Skip ($at + 1))
+  for ($i = $all.Count - 1; $i -ge 0; $i--) {
+    if ($all[$i] -eq $script:runMark) { return ,@($all | Select-Object -Skip ($i + 1)) }
+  }
+  return $null
+}
+# Once the RUN line has been seen it can only leave the log if a SECOND probe emptied the
+# shared file (a probe starts by doing exactly that). Then every later read would be an
+# empty log, and a "key absent" wait (PROSE_CARD_GONE) would pass: ABORT instead. Every
+# read of the log goes through here, so no wait and no verdict can skip the check.
+function LogLines {
+  $l = ReadRun
+  if ($null -eq $l) {
+    if ($script:runSeen) { throw 'this run''s RUN line is gone from the log: another probe emptied or replaced it' }
+    return @()
+  }
+  $script:runSeen = $true
+  return $l
 }
 # The probe's pixel ratio now: its latest DPR line (0 when none).
 function LastDpr {
@@ -174,12 +219,45 @@ function LastPos {
   foreach ($n in $o.PSObject.Properties) { $h[$n.Name] = $n.Value }
   return $h
 }
+# The ONE way to click. The posted coordinates came from $script:dpr, so the probe's latest
+# DPR line must still be that one when the click goes out: a display-scale change (the
+# window dragged to another monitor, a scale setting) would otherwise turn clicks into
+# misses that read as negatives; here it ABORTs instead. The probe polls its ratio every
+# 250 ms, so a change inside the last 250 ms before a click can still go unseen: this
+# narrows the window, it does not close it. And a probe that has exited cannot receive
+# a click at all (the message goes nowhere and the run would read "menu not opened").
+function ClickAt($pt, [bool]$right) {
+  $now = LastDpr
+  if ($now -ne $script:dpr) {
+    throw "the pixel ratio changed before a click ($($script:dpr) -> $now): the coordinates no longer map to the window"
+  }
+  if (-not $script:proc) { throw 'no probe process to click' }
+  $script:proc.Refresh()
+  if ($script:proc.HasExited) { throw "the probe (pid $($script:proc.Id)) has exited: nothing can receive the click" }
+  [W]::Click($script:view, $pt[0], $pt[1], $right)
+}
+# How many times the probe has logged the RIGHT button going down in this run.
+function RightDowns { @(LogLines | Where-Object { $_ -like 'PTR down *buttons=2' }).Count }
+# A right click, CONFIRMED: the probe must log the button going down after it, else the
+# click never reached the app (a hung probe, a window that moved) and every verdict after
+# it would be a negative ("menu not opened") instead of an ABORT. One rule for every
+# right click in the run.
+function RightClick($pt, [string]$what) {
+  $before = RightDowns
+  ClickAt $pt $true
+  if (-not (WaitFor { (RightDowns) -gt $before } 5000)) {
+    Shot 'abort.png'
+    throw "the right button never reached the app ($what)"
+  }
+}
 function WaitFor([scriptblock]$cond, [int]$ms) {
   $deadline = (Get-Date).AddMilliseconds($ms)
   while ((Get-Date) -lt $deadline) { if (& $cond) { return $true }; Start-Sleep -Milliseconds 150 }
   return $false
 }
 function Shot([string]$name) {
+  # PrintWindow waits for the window: a hung probe would block it forever.
+  if (-not [W]::Responds($script:top)) { Say "SHOT $name skipped: the probe window does not answer"; return }
   $r = New-Object W+RECT
   [W]::GetWindowRect($script:top, [ref]$r) | Out-Null
   $bmp = New-Object System.Drawing.Bitmap ($r.R - $r.L), ($r.B - $r.T)
@@ -200,15 +278,31 @@ function Center($rect) {
 function MenuKeys { (LastPos).Keys | Where-Object { $_ -like 'inbox-menu-*' } | ForEach-Object { $_.Substring(11) } | Sort-Object }
 function PushCount { @(LogLines | Where-Object { $_ -like 'PUSH *' }).Count }
 
+# The probe is the process running THIS exe (full path) that was started with THIS run's
+# token as a whole argument (not a substring of a longer one): never another probe of the
+# same exe, never anything else. A failing process query is NOT "not started": it throws,
+# and the run ABORTs with the real cause.
+function FindProbe {
+  $c = Get-CimInstance Win32_Process |
+    Where-Object { $_.ExecutablePath -eq $Exe -and $_.CommandLine -cmatch "(^|\s)--run-token=$Token(\s|$)" } |
+    Select-Object -First 1
+  if ($c) { return (Get-Process -Id $c.ProcessId -ErrorAction SilentlyContinue) }
+  return $null
+}
+
 $proc = $null
 try {
-  # The probe is the process running THIS exe, by full path: never anything else.
-  if (-not (WaitFor { $null -ne (Get-Process -ErrorAction SilentlyContinue | Where-Object { $_.Path -eq $Exe }) } 20000)) {
+  if (-not (WaitFor { $script:proc = FindProbe; $null -ne $script:proc } 20000)) {
     Say 'ABORT: the probe process never started'; Finish 2
   }
-  $proc = Get-Process | Where-Object { $_.Path -eq $Exe } | Select-Object -First 1
   Say "PROBE pid=$($proc.Id) session=$($proc.SessionId)"
-  $script:runPid = $proc.Id
+  $script:runMark = "RUN pid=$($proc.Id) token=$Token"
+  # The probe empties the log, then writes this line: until it is there, whatever the log
+  # holds belongs to an earlier process (which can even have had this pid).
+  if (-not (WaitFor { $null -ne (ReadRun) } 20000)) {
+    Say 'ABORT: the probe never wrote its RUN line with this run''s token (an older probe build, or started without --run-token)'; Finish 2
+  }
+  $script:runSeen = $true
   if (-not (WaitFor { [W]::TopOf([uint32]$proc.Id) -ne [IntPtr]::Zero } 20000)) { Say 'ABORT: no probe window'; Finish 2 }
   $script:top = [W]::TopOf([uint32]$proc.Id)
   # Off-screen and unactivated first; sized once the probe says its pixel ratio.
@@ -224,8 +318,8 @@ try {
   Say "PROBE dpr=$($script:dpr)"
   # 1300x900 LOGICAL: the wide layout (the list beside the focused item) at any scale.
   [W]::SetWindowPos($script:top, [IntPtr]::Zero, -4000, 40, [int](1300 * $script:dpr), [int](900 * $script:dpr), 0x0014) | Out-Null
-  $view = [W]::FindWindowEx($script:top, [IntPtr]::Zero, 'FLUTTERVIEW', [NullString]::Value)
-  if ($view -eq [IntPtr]::Zero) { Say 'ABORT: no FLUTTERVIEW child'; Finish 2 }
+  $script:view = [W]::FindWindowEx($script:top, [IntPtr]::Zero, 'FLUTTERVIEW', [NullString]::Value)
+  if ($script:view -eq [IntPtr]::Zero) { Say 'ABORT: no FLUTTERVIEW child'; Finish 2 }
   $cardC = 'inbox-card-http://probe.invalid:7681|c'
   $cardQ = 'inbox-card-http://probe.invalid:7681|q'
   $replyD = 'inbox-reply-http://probe.invalid:7681|d'
@@ -240,15 +334,11 @@ try {
   if ((LastPos).ContainsKey($replyD)) {
     Say 'ABORT: not the wide layout (the reported card shows its reply box before any click)'; Shot 'abort.png'; Finish 2
   }
-  # Every click converts with this ratio: it must still be the one the window was sized by.
-  if ((LastDpr) -ne $script:dpr) {
-    Say "ABORT: the pixel ratio changed after sizing ($($script:dpr) -> $(LastDpr))"; Finish 2
-  }
   # The wide layout opens the oldest wait (the reported one) beside the list, and an
   # open card hides its own reply box. Open the question instead (a left click opens
   # it; nothing is answered), so the reported card shows its reply field.
   $q0 = Center (LastPos)[$cardQ]
-  [W]::Click($view, $q0[0], $q0[1], $false)
+  ClickAt $q0 $false
   if (-not (WaitFor { (LastPos).ContainsKey($replyD) } 5000)) {
     Say 'ABORT: the reported card never showed its reply field'; Shot 'abort.png'; Finish 2
   }
@@ -259,11 +349,9 @@ try {
   $pos = LastPos
   $c = Center $pos[$cardC]
   $pushes = PushCount
-  [W]::Click($view, $c[0], $c[1], $true)
+  RightClick $c 'prose card'
   $opened = WaitFor { (PushCount) -gt $pushes -and @(MenuKeys).Count -gt 0 } 5000
-  $rdown = @(LogLines | Where-Object { $_ -like 'PTR down *buttons=2' }).Count
-  Say "RCLICK_DELIVERED (prose card): $($rdown -gt 0)"
-  if ($rdown -eq 0) { Say 'ABORT: the right button never reached the app'; Shot 'abort.png'; Finish 2 }
+  Say 'RCLICK_DELIVERED (prose card): True'
   Start-Sleep -Milliseconds 500
   Shot '2-menu-prose.png'
   Say "PROSE_MENU_OPENED: $opened"
@@ -273,7 +361,7 @@ try {
   $pos = LastPos
   if ($pos.ContainsKey('inbox-menu-notAQuestion')) {
     $m = Center $pos['inbox-menu-notAQuestion']
-    [W]::Click($view, $m[0], $m[1], $false)
+    ClickAt $m $false
     $patched = WaitFor { @(LogLines | Where-Object { $_ -like 'HTTP PATCH /api/sessions/c/brief*inboxDismiss*add*' }).Count -gt 0 } 5000
     $gone = WaitFor { -not (LastPos).ContainsKey($cardC) } 5000
     Start-Sleep -Milliseconds 400
@@ -291,25 +379,25 @@ try {
   $pos = LastPos
   $f = $pos[$replyD]
   $pushes = PushCount
-  $fc = Center @(($f[0] + 30), $f[1], 0, $f[3]); [W]::Click($view, $fc[0], $fc[1], $true)
+  $fc = Center @(($f[0] + 30), $f[1], 0, $f[3]); RightClick $fc 'reply field'
   Start-Sleep -Milliseconds 1500
   Shot '4-rclick-in-reply-field.png'
   Say ("FIELD_RCLICK_OPENED_CARD_MENU: " + (((PushCount) -gt $pushes) -or (@(MenuKeys).Count -gt 0)))
   # Close whatever the field opened: a left click on the app bar's title.
-  $t = Center @(60, 28, 0, 0); [W]::Click($view, $t[0], $t[1], $false)
+  $t = Center @(60, 28, 0, 0); ClickAt $t $false
   Start-Sleep -Milliseconds 600
 
   # 4. Right-click the blocking question card: no Dismiss.
   $pos = LastPos
   $q = Center $pos[$cardQ]
   $pushes = PushCount
-  [W]::Click($view, $q[0], $q[1], $true)
+  RightClick $q 'question card'
   $opened = WaitFor { (PushCount) -gt $pushes -and @(MenuKeys).Count -gt 0 } 5000
   Start-Sleep -Milliseconds 500
   Shot '5-menu-question.png'
   Say "QUESTION_MENU_OPENED: $opened"
   Say ("QUESTION_MENU: " + ((MenuKeys) -join ','))
-  $t = Center @(60, 28, 0, 0); [W]::Click($view, $t[0], $t[1], $false)
+  $t = Center @(60, 28, 0, 0); ClickAt $t $false
   Start-Sleep -Milliseconds 500
 
   $typed = @(LogLines | Where-Object { $_ -like 'INPUT *' }).Count

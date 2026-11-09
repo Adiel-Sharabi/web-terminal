@@ -9,7 +9,8 @@
 // client) against a fake cluster served in-process - it never contacts a server and
 // never touches the installed companion's preferences - and logs, one line each:
 //
-//   RUN pid=<pid>                      - first line of THIS run (the log starts empty)
+//   RUN pid=<pid> token=<t>            - first line of THIS run (the log starts empty); <t> is
+//                                        the --run-token the driver passed (`none` if none)
 //   READY dpr=<d>                      - first frame drawn
 //   DPR <d>                            - the pixel ratio, again whenever it changes
 //   PTR <phase> <x>,<y> buttons=<b>    - every pointer event that reached the app
@@ -23,6 +24,9 @@
 //
 // Build:  scripts/build-probe-windows.sh tool/inbox_menu_probe.dart
 // Drive:  scripts/rig/probe-drive-inbox-menu.ps1
+// Start:  ai_terminal.exe --run-token=<8-64 hex chars>   (the driver makes the token up and
+//         passes the same one to both, so a log block an earlier process left behind - even
+//         one with a reused pid - can never be taken for this run's)
 // Log:    inbox-menu-probe.log next to the exe. It exits when inbox-menu-probe.quit
 //         appears there, or after five minutes.
 
@@ -243,13 +247,26 @@ Map<String, List<double>> _positions() {
   return out;
 }
 
-Future<void> main() async {
+/// The `--run-token=<hex>` the driver passed, or `none`. Only hex of a sane length is echoed
+/// into the log: the token is a line the driver matches EXACTLY, and nothing else may ride in it.
+String _runToken(List<String> args) {
+  const flag = '--run-token=';
+  for (final a in args) {
+    if (a.startsWith(flag)) {
+      final t = a.substring(flag.length);
+      if (RegExp(r'^[0-9a-f]{8,64}$').hasMatch(t)) return t;
+    }
+  }
+  return 'none';
+}
+
+Future<void> main(List<String> args) async {
   // A fresh log and no stale quit file: a run must never read a previous run's lines.
-  // The RUN line names this process, so a driver reads only what follows it.
+  // The RUN line carries the driver's token, so a driver reads only what follows ITS line.
   _logFile.writeAsStringSync('', flush: true);
   final quit = File('$_dir${Platform.pathSeparator}inbox-menu-probe.quit');
   if (quit.existsSync()) quit.deleteSync();
-  log('RUN pid=$pid');
+  log('RUN pid=$pid token=${_runToken(args)}');
   WidgetsFlutterBinding.ensureInitialized();
   // In-memory preferences: the probe must never read or write the installed companion's.
   SharedPreferences.setMockInitialValues({
