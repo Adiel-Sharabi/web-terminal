@@ -25,7 +25,8 @@ ScaffoldFeatureController<SnackBar, SnackBarClosedReason>? showTimedSnackBar(
       content: Text(text),
       action: action,
       duration: duration,
-      persist: MediaQuery.accessibleNavigationOf(context),
+      // Only an Undo needs the time; a plain word ("Copied") still leaves.
+      persist: action != null && MediaQuery.accessibleNavigationOf(context),
     ),
   );
 }

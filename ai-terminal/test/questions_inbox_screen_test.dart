@@ -1350,7 +1350,13 @@ void main() {
     const key = 'http://h:7681|c';
     final card = find.byKey(const ValueKey('inbox-card-$key'));
     void proseAsks({String text = 'Done.\n\nShould I push it?', String at = 'r1', int lastActivity = 5}) {
-      rows = {_home.baseUrl: [_row('c', 'Idle', lastActivity: lastActivity)]};
+      // A brief, as a real server sends one: a row that carries a brief WITHOUT the
+      // signature must not undo a choice it is older than (or, on an older server, any).
+      rows = {
+        _home.baseUrl: [
+          _row('c', 'Idle', lastActivity: lastActivity, brief: {'v': 1, 'reporting': 'on', 'items': []}),
+        ],
+      };
       transcripts = {'c': _reply(text, at: at)};
     }
 
@@ -1511,6 +1517,27 @@ void main() {
       await pick(tester, 'notWaiting');
       expect(briefPatches, isEmpty, reason: 'the card was a poll old');
       expect(find.textContaining('moved on - nothing was cleared'), findsOneWidget);
+      await done(tester);
+    });
+
+    testWidgets('the focused view\'s "Not waiting" reads the row again too', (tester) async {
+      Map<String, dynamic> waits(int since) =>
+          _row('d', 'Docs', reason: {'kind': 'you', 'text': 'pick a title', 'source': 'reported', 'since': since});
+      rows = {_home.baseUrl: [waits(1)]};
+      await pump(tester, await repo());
+      await settle(tester);
+      await tester.tap(find.byKey(const ValueKey('inbox-open-http://h:7681|d')));
+      await tester.pumpAndSettle();
+      rows = {_home.baseUrl: [waits(2)]}; // a newer wait, not yet polled
+      await tester.tap(find.byKey(const ValueKey('inbox-not-waiting')));
+      await tester.pumpAndSettle();
+      await settle(tester);
+      expect(briefPatches, isEmpty, reason: 'a newer wait than the one shown');
+      expect(find.textContaining('moved on - nothing was cleared'), findsOneWidget);
+      await tester.tap(find.byKey(const ValueKey('inbox-not-waiting')));
+      await tester.pumpAndSettle();
+      await settle(tester);
+      expect(briefPatches.single, {'clearWait': true}, reason: 'the wait now shown');
       await done(tester);
     });
 

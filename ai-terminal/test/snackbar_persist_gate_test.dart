@@ -23,6 +23,6 @@ void main() {
   });
 
   test('the helper itself sets persist (the gate trusts it)', () {
-    expect(File('lib/widgets/timed_snack_bar.dart').readAsStringSync(), contains('persist: MediaQuery.accessibleNavigationOf(context)'));
+    expect(File('lib/widgets/timed_snack_bar.dart').readAsStringSync(), contains('persist: action != null && MediaQuery.accessibleNavigationOf(context)'));
   });
 }

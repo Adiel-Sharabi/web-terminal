@@ -169,7 +169,12 @@ function Shot([string]$name) {
   $bmp.Save($path, [System.Drawing.Imaging.ImageFormat]::Png); $bmp.Dispose()
   Say "SHOT $path"
 }
-function Center($rect) { return @([int]($rect[0] + $rect[2] / 2), [int]($rect[1] + $rect[3] / 2)) }
+# The probe logs LOGICAL pixels; a posted mouse message carries PHYSICAL client pixels.
+# $script:dpr is read from the probe's READY line before the first click.
+$script:dpr = 0
+function Center($rect) {
+  return @([int](($rect[0] + $rect[2] / 2) * $script:dpr), [int](($rect[1] + $rect[3] / 2) * $script:dpr))
+}
 function MenuKeys { (LastPos).Keys | Where-Object { $_ -like 'inbox-menu-*' } | ForEach-Object { $_.Substring(11) } | Sort-Object }
 function PushCount { @(LogLines | Where-Object { $_ -like 'PUSH *' }).Count }
 
@@ -196,13 +201,18 @@ try {
   # The wide layout opens the oldest wait (the reported one) beside the list, and an
   # open card hides its own reply box. Open the question instead (a left click opens
   # it; nothing is answered), so the reported card shows its reply field.
+  $ready = LogLines | Where-Object { $_ -like 'READY dpr=*' } | Select-Object -First 1
+  $parsed = 0.0
+  if (-not $ready -or -not [double]::TryParse($ready.Substring(10), [Globalization.NumberStyles]::Float, [Globalization.CultureInfo]::InvariantCulture, [ref]$parsed) -or $parsed -le 0) {
+    Say "ABORT: no device pixel ratio from the probe ($ready)"; Finish 2
+  }
+  $script:dpr = $parsed
+  Say "PROBE $ready"
   $q0 = Center (LastPos)[$cardQ]
   [W]::Click($view, $q0[0], $q0[1], $false)
   if (-not (WaitFor { (LastPos).ContainsKey($replyD) } 5000)) {
     Say 'ABORT: the reported card never showed its reply field'; Shot 'abort.png'; Finish 2
   }
-  $ready = LogLines | Where-Object { $_ -like 'READY *' } | Select-Object -First 1
-  Say "PROBE $ready"
   Start-Sleep -Milliseconds 800
   Shot '1-before.png'
 
@@ -242,12 +252,12 @@ try {
   $pos = LastPos
   $f = $pos[$replyD]
   $pushes = PushCount
-  [W]::Click($view, [int]($f[0] + 30), [int]($f[1] + $f[3] / 2), $true)
+  $fc = Center @(($f[0] + 30), $f[1], 0, $f[3]); [W]::Click($view, $fc[0], $fc[1], $true)
   Start-Sleep -Milliseconds 1500
   Shot '4-rclick-in-reply-field.png'
   Say ("FIELD_RCLICK_OPENED_CARD_MENU: " + (((PushCount) -gt $pushes) -or (@(MenuKeys).Count -gt 0)))
   # Close whatever the field opened: a left click on the app bar's title.
-  [W]::Click($view, 60, 28, $false)
+  $t = Center @(60, 28, 0, 0); [W]::Click($view, $t[0], $t[1], $false)
   Start-Sleep -Milliseconds 600
 
   # 4. Right-click the blocking question card: no Dismiss.
@@ -260,7 +270,7 @@ try {
   Shot '5-menu-question.png'
   Say "QUESTION_MENU_OPENED: $opened"
   Say ("QUESTION_MENU: " + ((MenuKeys) -join ','))
-  [W]::Click($view, 60, 28, $false)
+  $t = Center @(60, 28, 0, 0); [W]::Click($view, $t[0], $t[1], $false)
   Start-Sleep -Milliseconds 500
 
   $typed = @(LogLines | Where-Object { $_ -like 'INPUT *' }).Count

@@ -1119,13 +1119,13 @@ class _QuestionsInboxScreenState extends State<QuestionsInboxScreen> {
     }
   }
 
-  /// "Not waiting" from a card's menu (#445): only while the card's session is still in
-  /// the SAME reported wait the menu was opened on. The server clears whatever wait the
-  /// session reports now, so a newer one must not be cleared by a menu opened on an
-  /// older one. The row is read again from its own server first, as every write from a
-  /// card is (#383, `NeedsYouActions._stillThere`): the card can be a poll old, and a
-  /// server that did not answer leaves only that old row, which proves nothing.
-  Future<void> _notWaitingFromMenu(InboxItem it) async {
+  /// "Not waiting" (#445; a card's menu and the focused view's button): only while the
+  /// session is still in the SAME reported wait [it] showed. The server clears whatever
+  /// wait the session reports now, so a newer one must not be cleared by a click on an
+  /// older one. The row is read again from its own server first, as a reply or an Esc
+  /// is (#383, `NeedsYouActions._stillThere`): the card can be a poll old, and a server
+  /// that did not answer leaves only that old row, which proves nothing.
+  Future<void> _notWaitingIfSame(InboxItem it) async {
     final s = it.session;
     if (s == null) return;
     final answered = await _repo.refreshServer(s.server.baseUrl);
@@ -1204,7 +1204,7 @@ class _QuestionsInboxScreenState extends State<QuestionsInboxScreen> {
       case InboxCardAction.notAQuestion:
         await _dismiss(it);
       case InboxCardAction.notWaiting:
-        await _notWaitingFromMenu(it);
+        await _notWaitingIfSame(it);
       case InboxCardAction.open:
         if (s != null) _openSession(s);
       case InboxCardAction.copy:
@@ -2357,7 +2357,9 @@ class _FocusView extends StatelessWidget {
                   key: const ValueKey('inbox-not-question'), onPressed: () => state._dismiss(it), child: const Text('Not a question')),
             if (reported && state._repo.canClearWait(s))
               TextButton(
-                  key: const ValueKey('inbox-not-waiting'), onPressed: () => state._notWaiting(s), child: const Text('Not waiting')),
+                  key: const ValueKey('inbox-not-waiting'),
+                  onPressed: () => unawaited(state._notWaitingIfSame(it)),
+                  child: const Text('Not waiting')),
             openBtn,
           ]),
         ];
