@@ -376,22 +376,25 @@ test.describe('#359 restart hold - server', () => {
     // Backdate it past NUDGE_AFTER_MS: the next tick asks.
     expect((await setHold({ busySince: now - 400000 })).status()).toBe(200);
     await untilVerdict(agent, (r) => r.nudgedAt, 'the follow-up', 30000);
+    // Matched before column 80: the echoed line wraps past it.
+    await until(async () => (await scrollbackOf(agent)).includes('Restart (nudge spec): you said yes, but'), 'the follow-up in the terminal');
+    // The agent takes it (its own tagged UserPromptSubmit), and its turn ends. Delivered
+    // BEFORE any further wait (#440): the worker's submit window is 8 s, and a follow-up not
+    // confirmed inside it is typed again - which this spec would then count as a second one.
+    expect(await hook(agent, 'UserPromptSubmit', { session_id: conv, prompt: `${TAG} Restart (nudge spec): you said yes` })).toBe(200);
+    expect(await hook(agent, 'Stop', { session_id: conv })).toBe(200);
+    await until(async () => (await rowOf(agent))?.status === 'idle', 'the agent to go idle again');
     // The follow-up is TYPED, so the shell redraws its prompt, and a snapshot taken during
     // that redraw lists the prompt's subshells beside the ping's (#440). The verdict is
     // rebuilt from each fresh snapshot, so it names the ping again within one TTL.
     const v = await untilVerdict(agent, (r) => PING.test(r.why), 'status to name the ping after the follow-up', 30000);
     expect(v).toMatchObject({ state: 'busy', busySince: now - 400000 });
     expect(v.why).toMatch(/^said yes, but still running: ping\.exe pid \d+ since \d\d:\d\d; asked about it at \d\d:\d\d$/i);
-    // Matched before column 80: the echoed line wraps past it.
-    await until(async () => (await scrollbackOf(agent)).includes('Restart (nudge spec): you said yes, but'), 'the follow-up in the terminal');
-    // The agent takes it (its own tagged UserPromptSubmit), and its turn ends.
-    expect(await hook(agent, 'UserPromptSubmit', { session_id: conv, prompt: `${TAG} Restart (nudge spec): you said yes` })).toBe(200);
-    expect(await hook(agent, 'Stop', { session_id: conv })).toBe(200);
-    await until(async () => (await rowOf(agent))?.status === 'idle', 'the agent to go idle again');
     // Still busy, idle at its composer, several ticks and past the unconfirmed window: never a second one.
     await new Promise((r) => setTimeout(r, 10000));
     const sb = await scrollbackOf(agent);
-    expect(sb.split('Restart (nudge spec): you said yes, but').length - 1).toBe(1);
+    const typed = sb.split('Restart (nudge spec): you said yes, but').length - 1;
+    expect(typed, `follow-up typed ${typed} times; last verdict: ${JSON.stringify(await verdictOf(agent))}`).toBe(1);
     expect(await verdictOf(agent)).toMatchObject({ state: 'busy', answer: 'yes' });
   });
 
