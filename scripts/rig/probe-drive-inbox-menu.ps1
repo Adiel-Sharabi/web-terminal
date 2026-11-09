@@ -62,8 +62,9 @@ param(
 
 $ErrorActionPreference = 'Stop'
 $verdict = Join-Path $Out 'verdict.txt'
-# Hex only, 8-64 chars: the probe echoes it into a line matched EXACTLY, and it is spliced
-# into a VBS string and a command-line pattern, so nothing else may be in it.
+# LOWERCASE hex only, 8-64 chars (the probe's own check is lowercase-only, so this is matched
+# case-sensitively): the probe echoes it into a line matched EXACTLY, and it is spliced into
+# a VBS string and a command-line pattern, so nothing else may be in it.
 $tokenOk = '^[0-9a-f]{8,64}$'
 
 if (-not $Drive) {
@@ -104,7 +105,7 @@ if (-not $Drive) {
 }
 
 # ---- Session 1 side: drive the probe ---------------------------------------------------
-if ($Token -notmatch $tokenOk) { Write-Output 'ABORT: -Drive needs -Token <8-64 hex chars>, the --run-token the probe was started with'; exit 2 }
+if ($Token -cnotmatch $tokenOk) { Write-Output 'ABORT: -Drive needs -Token <8-64 hex chars>, the --run-token the probe was started with'; exit 2 }
 Add-Type -AssemblyName System.Drawing
 Add-Type @"
 using System;
@@ -120,6 +121,7 @@ public class W {
   [DllImport("user32.dll")] public static extern bool SetWindowPos(IntPtr h, IntPtr after, int x, int y, int cx, int cy, uint flags);
   [DllImport("user32.dll")] public static extern bool PrintWindow(IntPtr h, IntPtr hdc, uint flags);
   [DllImport("user32.dll")] public static extern bool GetWindowRect(IntPtr h, out RECT r);
+  [DllImport("user32.dll")] static extern IntPtr SendMessageTimeout(IntPtr h, uint m, IntPtr w, IntPtr l, uint flags, uint ms, out IntPtr result);
   [StructLayout(LayoutKind.Sequential)] public struct RECT { public int L, T, R, B; }
 
   // The probe's top-level window: a visible one, else (Session 0, where nothing is
@@ -136,6 +138,13 @@ public class W {
       return true;
     }, IntPtr.Zero);
     return found != IntPtr.Zero ? found : hosting;
+  }
+
+  // True when the window answers a WM_NULL within a second (SMTO_ABORTIFHUNG): a hung or
+  // suspended probe does not.
+  public static bool Responds(IntPtr h) {
+    IntPtr r;
+    return SendMessageTimeout(h, 0, IntPtr.Zero, IntPtr.Zero, 0x2, 1000, out r) != IntPtr.Zero;
   }
 
   static IntPtr Pt(int x, int y) { return (IntPtr)((y << 16) | (x & 0xFFFF)); }
@@ -210,16 +219,36 @@ function LastPos {
   foreach ($n in $o.PSObject.Properties) { $h[$n.Name] = $n.Value }
   return $h
 }
-# The ONE way to click: the posted coordinates came from $script:dpr, so the probe's
-# latest pixel ratio must still be that one at the instant of the click. A display-scale
-# change (the window dragged to another monitor, a scale setting) would otherwise turn
-# the clicks into misses that read as negatives; here it ABORTs instead.
+# The ONE way to click. The posted coordinates came from $script:dpr, so the probe's latest
+# DPR line must still be that one when the click goes out: a display-scale change (the
+# window dragged to another monitor, a scale setting) would otherwise turn clicks into
+# misses that read as negatives; here it ABORTs instead. The probe polls its ratio every
+# 250 ms, so a change inside the last 250 ms before a click can still go unseen: this
+# narrows the window, it does not close it. And a probe that has exited cannot receive
+# a click at all (the message goes nowhere and the run would read "menu not opened").
 function ClickAt($pt, [bool]$right) {
   $now = LastDpr
   if ($now -ne $script:dpr) {
     throw "the pixel ratio changed before a click ($($script:dpr) -> $now): the coordinates no longer map to the window"
   }
+  if (-not $script:proc) { throw 'no probe process to click' }
+  $script:proc.Refresh()
+  if ($script:proc.HasExited) { throw "the probe (pid $($script:proc.Id)) has exited: nothing can receive the click" }
   [W]::Click($script:view, $pt[0], $pt[1], $right)
+}
+# How many times the probe has logged the RIGHT button going down in this run.
+function RightDowns { @(LogLines | Where-Object { $_ -like 'PTR down *buttons=2' }).Count }
+# A right click, CONFIRMED: the probe must log the button going down after it, else the
+# click never reached the app (a hung probe, a window that moved) and every verdict after
+# it would be a negative ("menu not opened") instead of an ABORT. One rule for every
+# right click in the run.
+function RightClick($pt, [string]$what) {
+  $before = RightDowns
+  ClickAt $pt $true
+  if (-not (WaitFor { (RightDowns) -gt $before } 5000)) {
+    Shot 'abort.png'
+    throw "the right button never reached the app ($what)"
+  }
 }
 function WaitFor([scriptblock]$cond, [int]$ms) {
   $deadline = (Get-Date).AddMilliseconds($ms)
@@ -227,6 +256,8 @@ function WaitFor([scriptblock]$cond, [int]$ms) {
   return $false
 }
 function Shot([string]$name) {
+  # PrintWindow waits for the window: a hung probe would block it forever.
+  if (-not [W]::Responds($script:top)) { Say "SHOT $name skipped: the probe window does not answer"; return }
   $r = New-Object W+RECT
   [W]::GetWindowRect($script:top, [ref]$r) | Out-Null
   $bmp = New-Object System.Drawing.Bitmap ($r.R - $r.L), ($r.B - $r.T)
@@ -248,10 +279,12 @@ function MenuKeys { (LastPos).Keys | Where-Object { $_ -like 'inbox-menu-*' } | 
 function PushCount { @(LogLines | Where-Object { $_ -like 'PUSH *' }).Count }
 
 # The probe is the process running THIS exe (full path) that was started with THIS run's
-# token: never another probe of the same exe, never anything else.
+# token as a whole argument (not a substring of a longer one): never another probe of the
+# same exe, never anything else. A failing process query is NOT "not started": it throws,
+# and the run ABORTs with the real cause.
 function FindProbe {
-  $c = Get-CimInstance Win32_Process -ErrorAction SilentlyContinue |
-    Where-Object { $_.ExecutablePath -eq $Exe -and $_.CommandLine -like "*--run-token=$Token*" } |
+  $c = Get-CimInstance Win32_Process |
+    Where-Object { $_.ExecutablePath -eq $Exe -and $_.CommandLine -cmatch "(^|\s)--run-token=$Token(\s|$)" } |
     Select-Object -First 1
   if ($c) { return (Get-Process -Id $c.ProcessId -ErrorAction SilentlyContinue) }
   return $null
@@ -259,10 +292,9 @@ function FindProbe {
 
 $proc = $null
 try {
-  if (-not (WaitFor { $null -ne (FindProbe) } 20000)) {
+  if (-not (WaitFor { $script:proc = FindProbe; $null -ne $script:proc } 20000)) {
     Say 'ABORT: the probe process never started'; Finish 2
   }
-  $proc = FindProbe
   Say "PROBE pid=$($proc.Id) session=$($proc.SessionId)"
   $script:runMark = "RUN pid=$($proc.Id) token=$Token"
   # The probe empties the log, then writes this line: until it is there, whatever the log
@@ -317,11 +349,9 @@ try {
   $pos = LastPos
   $c = Center $pos[$cardC]
   $pushes = PushCount
-  ClickAt $c $true
+  RightClick $c 'prose card'
   $opened = WaitFor { (PushCount) -gt $pushes -and @(MenuKeys).Count -gt 0 } 5000
-  $rdown = @(LogLines | Where-Object { $_ -like 'PTR down *buttons=2' }).Count
-  Say "RCLICK_DELIVERED (prose card): $($rdown -gt 0)"
-  if ($rdown -eq 0) { Say 'ABORT: the right button never reached the app'; Shot 'abort.png'; Finish 2 }
+  Say 'RCLICK_DELIVERED (prose card): True'
   Start-Sleep -Milliseconds 500
   Shot '2-menu-prose.png'
   Say "PROSE_MENU_OPENED: $opened"
@@ -349,7 +379,7 @@ try {
   $pos = LastPos
   $f = $pos[$replyD]
   $pushes = PushCount
-  $fc = Center @(($f[0] + 30), $f[1], 0, $f[3]); ClickAt $fc $true
+  $fc = Center @(($f[0] + 30), $f[1], 0, $f[3]); RightClick $fc 'reply field'
   Start-Sleep -Milliseconds 1500
   Shot '4-rclick-in-reply-field.png'
   Say ("FIELD_RCLICK_OPENED_CARD_MENU: " + (((PushCount) -gt $pushes) -or (@(MenuKeys).Count -gt 0)))
@@ -361,7 +391,7 @@ try {
   $pos = LastPos
   $q = Center $pos[$cardQ]
   $pushes = PushCount
-  ClickAt $q $true
+  RightClick $q 'question card'
   $opened = WaitFor { (PushCount) -gt $pushes -and @(MenuKeys).Count -gt 0 } 5000
   Start-Sleep -Milliseconds 500
   Shot '5-menu-question.png'
