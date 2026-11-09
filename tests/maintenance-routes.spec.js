@@ -375,7 +375,11 @@ test.describe('#359 restart hold - server', () => {
     expect((await verdictOf(agent)).nudgedAt).toBeNull(); // seen just now: not yet
     // Backdate it past NUDGE_AFTER_MS: the next tick asks.
     expect((await setHold({ busySince: now - 400000 })).status()).toBe(200);
-    await untilVerdict(agent, (r) => r.nudgedAt, 'the follow-up', 30000);
+    const asked = await untilVerdict(agent, (r) => r.nudgedAt, 'the follow-up', 30000);
+    // busySince is asserted HERE, before the hooks: the UserPromptSubmit below makes the row
+    // `working` until its Stop lands, and a tick in that window reads no work and clears
+    // busySince (noteWork), so after the hooks it may be re-stamped to a fresh time.
+    expect(asked).toMatchObject({ state: 'busy', busySince: now - 400000 });
     // Matched before column 80: the echoed line wraps past it.
     await until(async () => (await scrollbackOf(agent)).includes('Restart (nudge spec): you said yes, but'), 'the follow-up in the terminal');
     // The agent takes it (its own tagged UserPromptSubmit), and its turn ends. Delivered
@@ -388,7 +392,7 @@ test.describe('#359 restart hold - server', () => {
     // that redraw lists the prompt's subshells beside the ping's (#440). The verdict is
     // rebuilt from each fresh snapshot, so it names the ping again within one TTL.
     const v = await untilVerdict(agent, (r) => PING.test(r.why), 'status to name the ping after the follow-up', 30000);
-    expect(v).toMatchObject({ state: 'busy', busySince: now - 400000 });
+    expect(v.state).toBe('busy');
     expect(v.why).toMatch(/^said yes, but still running: ping\.exe pid \d+ since \d\d:\d\d; asked about it at \d\d:\d\d$/i);
     // Still busy, idle at its composer, several ticks and past the unconfirmed window: never a second one.
     await new Promise((r) => setTimeout(r, 10000));
