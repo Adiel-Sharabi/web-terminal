@@ -512,12 +512,18 @@ class ApiClient {
   /// argument is left out of the request, so it is left unchanged. Returns the
   /// brief the server rebuilt.
   Future<SessionBrief?> patchBrief(String sessionId,
-      {List<Map<String, dynamic>>? pinned, bool? optOut, bool? hidden, bool clearWait = false}) async {
+      {List<Map<String, dynamic>>? pinned,
+      bool? optOut,
+      bool? hidden,
+      bool clearWait = false,
+      Map<String, String>? inboxDismiss}) async {
     final res = await _send('PATCH', '/api/sessions/$sessionId/brief', body: {
       'pinned': ?pinned,
       'optOut': ?optOut,
       'hidden': ?hidden,
       if (clearWait) 'clearWait': true,
+      // #445: {add: sig} or {remove: sig}, a questions-inbox dismissal.
+      'inboxDismiss': ?inboxDismiss,
     });
     return SessionBrief.fromJson(_asMap(_decode(res))['brief']);
   }

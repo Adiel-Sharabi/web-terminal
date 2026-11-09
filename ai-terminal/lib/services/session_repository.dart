@@ -148,6 +148,21 @@ class SessionRepository {
   /// Per-server `session-clear-wait` capability (#320), from the same call.
   final Map<String, bool> _clearWaitSupported = <String, bool>{};
 
+  /// Per-server `inbox-dismiss` capability (#445), from the same call.
+  final Map<String, bool> _inboxDismissSupported = <String, bool>{};
+
+  /// What THIS device last set for each questions-inbox dismissal (#445), by
+  /// [_inboxSlot] then signature, until the session's own row agrees ([_pruneInboxDismiss]): the
+  /// hide (or the Undo) shows at once instead of after the next poll. The server's
+  /// `brief.inboxDismissed` is the truth; on a server too old to keep it, this is all
+  /// there is (this device, this run).
+  final Map<String, Map<String, bool>> _inboxDismissOverride = <String, Map<String, bool>>{};
+
+  /// The last inbox-dismiss write sent for each `<slot>|<sig>` (#445): the next one for
+  /// the same ask waits for it, so an Undo can never reach the server before the
+  /// dismissal it undoes.
+  final Map<String, Future<void>> _inboxDismissWrites = <String, Future<void>>{};
+
   /// Per-server `machine-profile` capability (#331), from the same call.
   final Map<String, bool> _machineSupported = <String, bool>{};
 
@@ -350,6 +365,14 @@ class SessionRepository {
   void debugSetClearWaitSupported(String baseUrl, bool supported) =>
       _clearWaitSupported[baseUrl] = supported;
 
+  /// Whether the server at [baseUrl] keeps questions-inbox dismissals (#445).
+  bool supportsInboxDismiss(String baseUrl) => _inboxDismissSupported[baseUrl] ?? false;
+
+  /// Test-only: marks the server at [baseUrl] as advertising `inbox-dismiss`.
+  @visibleForTesting
+  void debugSetInboxDismissSupported(String baseUrl, bool supported) =>
+      _inboxDismissSupported[baseUrl] = supported;
+
   /// Whether the server at [baseUrl] answers `GET /api/machine` (#331).
   bool supportsMachine(String baseUrl) => _machineSupported[baseUrl] ?? false;
 
@@ -416,6 +439,7 @@ class SessionRepository {
     _seedCompacting(merged);
     _pruneCompacting(merged);
     _pruneSubmitUnconfirmed(merged);
+    _pruneInboxDismiss(merged);
     if (!_sessions.isClosed) _sessions.add(merged);
     await _cacheNames(merged);
     // Persist the merged list for the next cold launch — but only when at least
@@ -676,6 +700,8 @@ class SessionRepository {
     _serverColor.remove(baseUrl);
     _hideSupported.remove(baseUrl);
     _clearWaitSupported.remove(baseUrl);
+    _inboxDismissSupported.remove(baseUrl);
+    _inboxDismissOverride.removeWhere((k, _) => k.startsWith('$baseUrl|'));
     _machineSupported.remove(baseUrl);
     _claudeAccountSupported.remove(baseUrl);
     _leasesSupported.remove(baseUrl);
@@ -997,6 +1023,65 @@ class SessionRepository {
     }
   }
 
+  /// Where this device keeps its inbox choices for [s] on [server] (#445): per server
+  /// and session.
+  static String _inboxSlot(ServerConfig server, Session s) => '${server.baseUrl}|${s.id}';
+
+  /// Whether the person dismissed the inbox ask [sig] (#445; `inboxDismissSig`) of
+  /// [s] on [server]: this device's own latest choice while the server has not
+  /// caught up, else what the session's server keeps for every device.
+  bool isInboxDismissed(ServerConfig server, Session s, String sig) =>
+      _inboxDismissOverride[_inboxSlot(server, s)]?[sig] ?? (s.brief?.inboxDismissed.contains(sig) ?? false);
+
+  /// Dismisses (or, with [dismissed] false, restores) the inbox ask [sig] of [s]
+  /// (#445): at once on this device, then on the session's server, which keeps it for
+  /// every device and across restarts. It never writes to the session itself. Writes
+  /// for the same ask go out one after another, in the order they were made.
+  ///
+  /// Returns false when the server was asked and did not take it; the choice then
+  /// holds on this device only, and the caller says so. A server too old to keep it
+  /// (no `inbox-dismiss`) is never asked: true ([supportsInboxDismiss] tells the
+  /// caller which).
+  Future<bool> setInboxDismissed(ServerConfig server, Session s, String sig, bool dismissed) {
+    final slot = _inboxSlot(server, s);
+    (_inboxDismissOverride[slot] ??= <String, bool>{})[sig] = dismissed;
+    _reemit();
+    if (!supportsInboxDismiss(server.baseUrl)) return Future.value(true);
+    final key = '$slot|$sig';
+    final before = _inboxDismissWrites[key] ?? Future<void>.value();
+    final write = before.then((_) async {
+      try {
+        await _clientFor(server).patchBrief(s.id, inboxDismiss: {dismissed ? 'add' : 'remove': sig});
+        return true;
+      } catch (_) {
+        return false;
+      }
+    });
+    final done = write.then((_) {});
+    _inboxDismissWrites[key] = done;
+    unawaited(done.whenComplete(() {
+      if (identical(_inboxDismissWrites[key], done)) _inboxDismissWrites.remove(key);
+    }));
+    return write;
+  }
+
+  /// Drops this device's inbox choices (#445) that a fresh row now agrees with, and
+  /// those of sessions no longer listed. A dismissal the server never keeps (no
+  /// capability) never agrees with its row, so it stays: it is the only record. Runs
+  /// on [refresh]'s final pass, so a row fetched before the PATCH landed cannot undo
+  /// the choice.
+  void _pruneInboxDismiss(List<Session> sessions) {
+    if (_inboxDismissOverride.isEmpty) return;
+    final bySlot = <String, Session>{for (final s in sessions) _inboxSlot(s.server, s): s};
+    _inboxDismissOverride.removeWhere((slot, choices) {
+      final s = bySlot[slot];
+      if (s == null) return true;
+      final kept = s.brief?.inboxDismissed ?? const <String>[];
+      choices.removeWhere((sig, want) => kept.contains(sig) == want);
+      return choices.isEmpty;
+    });
+  }
+
   /// Re-emits the current list so the dashboard rebuilds (StreamBuilder fires on
   /// every event regardless of list identity). Used when a derived overlay
   /// ([_dismissedAttention], server order) changes without a new fetch.
@@ -1170,6 +1255,7 @@ class SessionRepository {
       _serverVersion[server.baseUrl] = info.version;
       _hideSupported[server.baseUrl] = info.has('session-hide');
       _clearWaitSupported[server.baseUrl] = info.has('session-clear-wait');
+      _inboxDismissSupported[server.baseUrl] = info.has('inbox-dismiss');
       _machineSupported[server.baseUrl] = info.has('machine-profile');
       _claudeAccountSupported[server.baseUrl] = info.has('claude-account');
       _leasesSupported[server.baseUrl] = info.has('leases');

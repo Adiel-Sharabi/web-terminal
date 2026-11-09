@@ -56,6 +56,7 @@ import '../widgets/reason_chip.dart';
 import '../widgets/reply_box.dart';
 import '../widgets/server_badge.dart';
 import '../widgets/status_dot.dart';
+import '../widgets/timed_snack_bar.dart';
 export '../util/needs_you.dart';
 export '../widgets/brief_item_row.dart' show briefStateColors, briefStateLabel;
 
@@ -484,17 +485,7 @@ class _WorkBoardScreenState extends State<WorkBoardScreen> {
     // An Undo outlives the screen (the snackbar is the root messenger's), so its
     // failure can land here after the board was closed.
     if (!mounted) return;
-    final m = ScaffoldMessenger.maybeOf(context);
-    m?.hideCurrentSnackBar();
-    // #322 - `persist` is load-bearing: the SDK defaults a snackbar WITH an action (our
-    // Undo) to persist, ignoring `duration`, so the toast never left the screen. It must
-    // still persist under TalkBack/VoiceOver, where the user needs time to reach Undo -
-    // the protection that default exists for.
-    m?.showSnackBar(SnackBar(
-        content: Text(text),
-        action: action,
-        duration: const Duration(seconds: 5),
-        persist: MediaQuery.accessibleNavigationOf(context)));
+    showTimedSnackBar(context, text, action: action);
   }
 
   Future<bool> _patch(Session s,
