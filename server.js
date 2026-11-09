@@ -699,18 +699,23 @@ function buildSubagentIndex(subDir) {
 // Reads only the tail (a Task's tool_result lands right after its subagent ends), so
 // it's cheap regardless of transcript size. Returns an empty set on any read error.
 function resolvedIdsTail(tpath) {
-  try {
-    const size = fs.statSync(tpath).size;
-    const start = Math.max(0, size - 262144); // 256KB tail
-    const len = size - start;
-    if (len <= 0) return new Set();
-    const buf = Buffer.alloc(len);
-    const fd = fs.openSync(tpath, 'r');
-    try { fs.readSync(fd, buf, 0, len, start); } finally { fs.closeSync(fd); }
-    let text = buf.toString('utf8');
-    if (start > 0) { const nl = text.indexOf('\n'); if (nl >= 0) text = text.slice(nl + 1); }
-    return transcript.collectResolvedIds(text);
-  } catch { return new Set(); }
+  try { return transcript.collectResolvedIds(transcriptTailText(tpath)); } catch { return new Set(); }
+}
+
+// A transcript's last 256KB from its first whole line. THROWS on a failed read (#441):
+// a caller that remembers what it has read must be able to tell "read, nothing there"
+// from "not read".
+function transcriptTailText(tpath) {
+  const size = fs.statSync(tpath).size;
+  const start = Math.max(0, size - 262144); // 256KB tail
+  const len = size - start;
+  if (len <= 0) return '';
+  const buf = Buffer.alloc(len);
+  const fd = fs.openSync(tpath, 'r');
+  try { fs.readSync(fd, buf, 0, len, start); } finally { fs.closeSync(fd); }
+  let text = buf.toString('utf8');
+  if (start > 0) { const nl = text.indexOf('\n'); if (nl >= 0) text = text.slice(nl + 1); }
+  return text;
 }
 
 // Overridable for the SAME reason as WT_CLAUDE_METRICS_FILE and WT_EXEC_AUDIT_FILE,
@@ -2181,6 +2186,18 @@ function _logDroppedNotification(body) {
 // is unchanged. Checked on a 1 s timer while a question is pending (one stat when the
 // file has not moved, so it clears with no viewer polling), and at every read of the
 // question: /pending-question, the digest, and the rows' waitingFor.
+//
+// #441 - Esc on the question in the terminal ALSO rejects it with no hook, and then the
+// turn is OVER. MEASURED on claude 2.1.319 (2026-11-09, isolated rig, run hooks captured,
+// 3 Esc runs: compact single, side-by-side, multi-select): no hook at all after the Esc,
+// not even the idle Notification in 57-75 s; the result line's `toolUseResult` is the plain
+// "User rejected tool use", then "[Request interrupted by user for tool use]" ~8 ms later.
+// A Chat (3 runs) writes an "Error: ..." string there and Claude replies, Stop ~2.2 s
+// later. So a plain rejection is cleared as the PostToolUse AND the Stop Claude did not
+// send: the PostToolUse drops the question flag and leaves 'waiting' at once (a Stop
+// alone would hold 'waiting' - with no question, a "permission" - through the worker's
+// idle debounce), the Stop idles it through the same funnel as a real one. Before, it
+// read 'working' until the 5-minute stale rule.
 const QUESTION_WATCH_MS = 1000;
 // Claude's ids are `toolu_<base62>`; anything else is not used. It is only ever compared
 // with transcript ids, never used as a path or written anywhere.
@@ -2223,16 +2240,31 @@ function checkPendingQuestion(id) {
   let st;
   try { st = fs.statSync(w.tpath); } catch { return { question, resolvedNow: false }; }
   if (st.size === w.size && st.mtimeMs === w.mtimeMs) return { question, resolvedNow: false };
+  let outcome;
+  // #441 - remembered only once READ: a failed read (EBUSY while Claude writes) must not
+  // mark this size and mtime as seen, or nothing looks again until the next write.
+  try { outcome = transcript.toolResultOutcome(transcriptTailText(w.tpath), w.toolUseId); }
+  catch { return { question, resolvedNow: false }; }
   w.size = st.size;
   w.mtimeMs = st.mtimeMs;
-  if (!resolvedIdsTail(w.tpath).has(w.toolUseId)) return { question, resolvedNow: false };
+  if (!outcome) return { question, resolvedNow: false };
   console.log(`[${new Date().toISOString()}] question ${String(id).slice(0, 8)}: tool_result for ${w.toolUseId} `
-    + 'in transcript, no PostToolUse yet - cleared');
+    + `in transcript, no PostToolUse yet - cleared${outcome.interrupted ? ' (Esc: the turn ended)' : ''}`);
   // Only what was seen: an ordinary answer's own PostToolUse can still be on its way.
-  // Runs synchronously up to its worker RPC, which clears pendingQuestion and unwatches.
-  processHookEvent(id, 'PostToolUse', undefined, { tool_name: 'AskUserQuestion' })
+  // Each runs synchronously up to its worker RPC, so they reach the worker in this order;
+  // the first clears pendingQuestion and unwatches.
+  const clear = (event, body) => processHookEvent(id, event, undefined, body)
     .catch((e) => console.error(`question clear for ${String(id).slice(0, 8)} failed: ${e.message}`));
+  clear('PostToolUse', { tool_name: 'AskUserQuestion' });
+  if (outcome.interrupted) clear('Stop', {});
   return { question: null, resolvedNow: true };
+}
+
+/** #441 - every watched question settled, for a caller about to read the worker's
+ *  statuses: the read then sees the clear, so a row never pairs the question's
+ *  'waiting' with no question (as /digest already does for one session). */
+function settlePendingQuestions() {
+  for (const id of [..._questionWatch.keys()]) checkPendingQuestion(id);
 }
 
 // Returns { status } like the worker RPC. Resolves immediately for a dropped
@@ -5364,6 +5396,7 @@ async function _computeClusterSessions(reqUser) {
 
   // Local sessions (via worker)
   try {
+    settlePendingQuestions(); // #441 - before the statuses are read, so they agree
     const { sessions: localList } = await workerClient.rpc('listSessions');
     reconcileBriefs(localList.map((s) => s.id)); // #298 - sessions that ended while we were down
     const localMetrics = await Promise.all(localList.map((s) => sessionMetrics(s).catch(() => null)));
@@ -6396,6 +6429,7 @@ app.get('/api/sessions', async (req, res) => {
     // spawn a PowerShell (processTree.snapshot), so it is the phase most worth
     // telling apart from the rest when this route goes slow.
     const _t0 = performance.now();
+    settlePendingQuestions(); // #441 - before the statuses are read, so they agree
     const { sessions: list } = await workerClient.rpc('listSessions');
     reconcileBriefs(list.map((s) => s.id)); // #298 - sessions that ended while we were down
     const _tRpc = performance.now();
@@ -7646,19 +7680,7 @@ function sessionWaitingFor(s) {
 // The newest UNanswered AskUserQuestion in the transcript's tail, or null. The fallback
 // /pending-question serves and the digest (#383) reads, so there is one tail rule.
 function pendingQuestionFromTranscript(tpath) {
-  const size = fs.statSync(tpath).size;
-  const TAIL = 262144; // 256KB tail — a pending question is the last tool_use
-  const start = Math.max(0, size - TAIL);
-  const len = size - start;
-  let text = '';
-  if (len > 0) {
-    const buf = Buffer.alloc(len);
-    const fd = fs.openSync(tpath, 'r');
-    try { fs.readSync(fd, buf, 0, len, start); } finally { fs.closeSync(fd); }
-    text = buf.toString('utf8');
-    if (start > 0) { const nl = text.indexOf('\n'); if (nl >= 0) text = text.slice(nl + 1); }
-  }
-  return transcript.pendingQuestion(text);
+  return transcript.pendingQuestion(transcriptTailText(tpath)); // a pending question is the last tool_use
 }
 
 app.get('/api/sessions/:id/pending-question', async (req, res) => {
