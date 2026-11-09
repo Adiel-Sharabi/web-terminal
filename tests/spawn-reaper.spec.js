@@ -309,6 +309,31 @@ test.describe('#351 liveWorkUnder - running work by ANY age, from the process tr
     expect(liveWorkUnder([p(10, 1, 'bash.exe'), p(11, 10, 'bash.exe'), p(12, 11, 'dotnet.exe')], 10)).toHaveLength(1);
   });
 
+  // #440: Windows keeps a dead parent's pid in ParentProcessId and reuses pids, so another
+  // session's process can hang below this one's shell. A child cannot start before its parent.
+  test('#440: a process that started BEFORE its "parent" is a recycled pid, never this session\'s work', () => {
+    // Measured shape: a 07:30 powershell.exe under the ping's bash stub started at 07:38.
+    const ping = [p(10, 1, 'bash.exe', 100), p(11, 10, 'bash.exe', 110), p(12, 11, 'bash.exe', 120), p(13, 12, 'PING.EXE', 125)];
+    expect(liveWorkUnder([...ping, p(14, 12, 'powershell.exe', 50)], 10).map((w) => w.name)).toEqual(['PING.EXE']);
+    // Under the idle prompt itself: still nothing running.
+    expect(liveWorkUnder([p(10, 1, 'bash.exe', 100), p(11, 10, 'bash.exe', 110), p(14, 11, 'powershell.exe', 50)], 10)).toEqual([]);
+    // With an agent: a recycled shell below the agent is not a tool call either.
+    const agent = [p(10, 1, 'bash.exe', 100), p(11, 10, 'bash.exe', 110), p(12, 11, 'claude.exe', 120)];
+    expect(liveWorkUnder([...agent, p(15, 12, 'powershell.exe', 50)], 10)).toEqual([]);
+    expect(liveWorkUnder([...agent, p(15, 12, 'powershell.exe', 130)], 10).map((w) => w.pid)).toEqual([15]);
+  });
+
+  test('#440: a recycled agent pid does not switch the rule - the real work below the prompt still counts', () => {
+    // Read as "an agent is here", the agent rule would look for shells under a claude.exe
+    // that is not in this tree at all, and the dotnet build would vanish (failing OPEN).
+    const tree = [p(10, 1, 'bash.exe', 100), p(11, 10, 'bash.exe', 110), p(12, 11, 'dotnet.exe', 130), p(13, 11, 'claude.exe', 50)];
+    expect(liveWorkUnder(tree, 10).map((w) => w.name)).toEqual(['dotnet.exe']);
+  });
+
+  test('#440: a row with no start time keeps its link (busy is the safe error)', () => {
+    expect(liveWorkUnder([p(10, 1, 'bash.exe', 100), p(11, 10, 'bash.exe', 110), p(12, 11, 'npm.exe', null)], 10)).toHaveLength(1);
+  });
+
   test('garbage in, nothing out (the caller treats a missing snapshot as UNKNOWN before it gets here)', () => {
     expect(liveWorkUnder(null, 10)).toEqual([]);
     expect(liveWorkUnder([p(10, 1, 'bash.exe')], NaN)).toEqual([]);
