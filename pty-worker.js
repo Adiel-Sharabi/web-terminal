@@ -2137,7 +2137,9 @@ function sessionSummary(id, s) {
     id,
     name: s.name,
     cwd: s.cwd,
-    pid: s.term.pid,
+    // node-pty >= 1.2 (#418) launches the child asynchronously: term.pid is 0 for the
+    // ~50 ms until ConPTY connects. 0 was never a pid - report unknown as null.
+    pid: s.term.pid > 0 ? s.term.pid : null,
     status: s.status,
     lastActivity: s.lastActivity,
     clients: s.clientCount || 0,
@@ -2444,7 +2446,7 @@ function createSession(id, cwd, name, autoCommand, savedScrollback, claudeSessio
     }
   }
 
-  log(`session ${id} created (pid ${term.pid}, cwd ${session.cwd}${cmdToRun ? ', cmd ' + cmdToRun : ''})`);
+  log(`session ${id} created (pid ${term.pid || 'pending'}, cwd ${session.cwd}${cmdToRun ? ', cmd ' + cmdToRun : ''})`);
   saveSessionConfigs();
   return session;
 }
@@ -2706,6 +2708,16 @@ function requireUuid(id) {
   return id;
 }
 
+// #418 - node-pty >= 1.2 starts the child only once ConPTY's output pipe is connected,
+// so term.pid stays 0 for ~50 ms after spawn (measured: 43-62 ms on Home). Waits for it,
+// polling (node-pty exposes no public event), never longer than [ceilingMs].
+async function waitForPtyPid(session, ceilingMs = 2000) {
+  const deadline = Date.now() + ceilingMs;
+  while (session && session.term && !(session.term.pid > 0) && Date.now() < deadline) {
+    await new Promise((r) => setTimeout(r, 5));
+  }
+}
+
 const rpcHandlers = {
   ping: async () => ({ ok: true, version: WORKER_VERSION, pid: process.pid, startedAt: WORKER_STARTED_AT }),
 
@@ -2751,6 +2763,10 @@ const rpcHandlers = {
     // than hardcoded false — a plain shell and any agent with no declared
     // marker really are ready the moment they exist.
     const born = sessions.get(id);
+    // The created session has its process before the answer goes out, as it did on
+    // node-pty 1.1.0 (pid at spawn); 1.2 connects ~50 ms later (#418). Bounded: a
+    // ConPTY that never connects still answers, its pid reported as null.
+    await waitForPtyPid(born);
     return { id, name, agent, agentReady: born && born._ready ? born._ready.ready : true };
   },
 
