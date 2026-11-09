@@ -6,8 +6,8 @@
 //    3 Esc runs (compact single, side-by-side, multi-select) fired no hook at all after
 //    the Esc (not even the idle Notification, watched 57-75 s); the result line's
 //    `toolUseResult` is the plain "User rejected tool use", and the line after it is
-//    "[Request interrupted by user for tool use]". 3 Chat runs wrote an "Error: ..." string
-//    there and fired Stop ~2.2 s later. Before this the session read 'working' after an
+//    "[Request interrupted by user for tool use]". 5 Chat runs wrote an "Error: ..." string
+//    there and fired Stop 2.2-2.6 s after the key. Before this the session read 'working' after an
 //    Esc until the 5-minute stale rule; now it reads idle.
 // 4. The row poll that clears the question used to return status 'waiting' with
 //    waitingFor null (the worker's status was read before the clear reached it).
@@ -190,12 +190,17 @@ test.describe('#441 the server after a rejected question', () => {
       + '[Console]::Out.WriteLine("locked"); [Console]::Out.Flush(); '
       + `Start-Sleep -Milliseconds ${lockMs}; $f.Unlock(0, 1); $f.Close()`],
     { windowsHide: true, env: { ...process.env, WT441_LOCK: tpath }, stdio: ['ignore', 'pipe', 'inherit'] });
-    const exited = new Promise((r) => ps.on('exit', r));
+    // A failed spawn fails THIS test: with no 'error' listener it would crash the worker.
+    let spawnError = null;
+    ps.on('error', (e) => { spawnError = e; });
+    const exited = new Promise((r) => { ps.on('exit', r); ps.on('error', r); });
     await new Promise((resolve, reject) => {
       let out = '';
       ps.stdout.on('data', (d) => { out += d; if (out.includes('locked')) resolve(); });
       ps.on('exit', () => reject(new Error('the lock process exited before locking')));
+      ps.on('error', (e) => reject(new Error(`the lock process did not start: ${e.message}`)));
     });
+    expect(spawnError).toBeNull();
     appendChat(tpath, 'toolu_441_busy');
     // Setup, not the claim: the read must really fail and the stat really succeed, or the
     // test would pass for the wrong reason.

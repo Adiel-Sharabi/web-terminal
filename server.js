@@ -2192,7 +2192,7 @@ function _logDroppedNotification(body) {
 // 3 Esc runs: compact single, side-by-side, multi-select): no hook at all after the Esc,
 // not even the idle Notification in 57-75 s; the result line's `toolUseResult` is the plain
 // "User rejected tool use", then "[Request interrupted by user for tool use]" ~8 ms later.
-// A Chat (3 runs) writes an "Error: ..." string there and Claude replies, Stop ~2.2 s
+// A Chat (5 runs) writes an "Error: ..." string there and Claude replies, Stop 2.2-2.6 s
 // later. So a plain rejection is cleared as the PostToolUse AND the Stop Claude did not
 // send: the PostToolUse drops the question flag and leaves 'waiting' at once (a Stop
 // alone would hold 'waiting' - with no question, a "permission" - through the worker's

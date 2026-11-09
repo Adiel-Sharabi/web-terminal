@@ -333,7 +333,9 @@ question a `waiting` row is published as a permission prompt), the `Stop` idles 
 the same funnel as a real one. Consequences of that funnel, accepted: the worker's
 `lastTurnEndAt` is stamped (the turn did end), and an `all`-level session gets the "Claude
 stopped" push (the default level `important` does not). The brief is not folded (as for a
-worker-detected Esc interrupt). Server-only; `pty-worker.js` unchanged.
+worker-detected Esc interrupt). Server-only; `pty-worker.js` unchanged. The worker does
+load `lib/transcript.js`, but this change only adds an export the worker never calls, so a
+hot reload is enough.
 
 **The row poll that clears it now reads the new status (#441).** `/api/sessions` and the
 cluster merge's local branch settle every watched question (`settlePendingQuestions`)
