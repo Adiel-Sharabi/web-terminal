@@ -220,6 +220,12 @@ test.describe('#359 restart hold - server', () => {
     const shell = await make(`maint-ans-shell-${Date.now()}`, { autoCommand: '' });
     expect((await ctx.post('/api/maintenance/prepare', { data: { reason: 'answer spec' } })).status()).toBe(200);
     await until(async () => (await verdictOf(agent))?.promptedAt, 'the question to be typed');
+    // The agent takes it (its tagged UserPromptSubmit) AT ONCE, as a real agent does (#440):
+    // the worker's submit window is 8 s, and a prompt not confirmed inside it is forgotten
+    // (promptedAt reset) and retyped, so a delivery that lands later is ignored and the turn
+    // never ends.
+    const deliverAt = Date.now();
+    expect(await hook(agent, 'UserPromptSubmit', { session_id: conv, prompt: `${TAG} question` })).toBe(200);
     const sb = await until(async () => { const t = await scrollbackOf(agent); return t.includes(TAG) ? t : null; }, 'the question in the terminal');
     expect(sb).toContain('A question, not an order');
     // Strict: an enum, a number for minutes, text for the reason, a tracked and asked session.
@@ -232,8 +238,6 @@ test.describe('#359 restart hold - server', () => {
     expect((await verdictOf(agent)).answer).toBeNull();
 
     // The turn the question started ends WITHOUT an answer: not ready, and it says why.
-    const deliverAt = Date.now();
-    expect(await hook(agent, 'UserPromptSubmit', { session_id: conv, prompt: `${TAG} question` })).toBe(200);
     expect(await hook(agent, 'Stop', { session_id: conv })).toBe(200);
     await untilVerdict(agent, (v) => v.answeredAt, `the turn to end (delivered at ${deliverAt})`);
     await new Promise((r) => setTimeout(r, 1500));
