@@ -48,6 +48,15 @@
 //     --frames '["4","\u001b[200~some long text\u001b[201~","\r","2","\r"]' \
 //     --expect '["some long text","Medium"]'
 //
+// `--hooks` (#441) also registers http hooks for this run only (a `--settings` file pointing at
+// a server this script runs on an ephemeral port; the user's own hooks are untouched and, with
+// WT_* scrubbed, name no session) and prints each event as it lands, stamped like the keys, with
+// its tool and tool_use_id. `--linger <ms>` is how long to keep claude alive after the last key
+// (default 9000) - long enough for a late Stop or the idle Notification. The verdict also lists
+// what the transcript holds AFTER each answer (type, role, content shape, text head), which is
+// where an interrupt shows itself.
+//   node scripts/rig/probe-askq-layout.js --shape plain-single --keys "ESC" --hooks --linger 75000
+//
 // `--keep` leaves the run's temp cwd, and the transcript folder claude wrote for it under
 // ~/.claude/projects, in place (both are deleted when the run ends).
 //
@@ -115,7 +124,10 @@ function planWrites(frames, bunch) {
   return writes;
 }
 if (FRAMES) planWrites(FRAMES, BUNCH); // reject a bad --bunch before claude is spawned
-const TIMEOUT_MS = Number(arg('timeout', '150000'));
+const HOOKS = process.argv.includes('--hooks');
+const LINGER_MS = Number(arg('linger', '9000'));
+if (!Number.isFinite(LINGER_MS) || LINGER_MS < 0) throw new Error('--linger must be a non-negative number of ms');
+const TIMEOUT_MS = Number(arg('timeout', String(150000 + LINGER_MS)));
 
 // ------------------------------------------------------------- claude binary
 function resolveClaude() {
@@ -224,6 +236,14 @@ const SHAPES = {
     'field. Q1: header "Color", question "Pick a color", three options "Red", ' +
     '"Green", "Blue". Q2: header "Size", question "Pick a size", three options ' +
     '"Small", "Medium", "Large". Do not run any other tool or say anything first.',
+  // Two MULTI-select questions, no previews (#441): the only shape with a multi-select
+  // tab that is NOT the last, where the row under "Type something" is Next, not Submit.
+  'plain-mq-multi2':
+    'Call the AskUserQuestion tool RIGHT NOW, in ONE call, and do nothing else first. ' +
+    'EXACTLY two questions, both multiSelect true, and NO option may have a "preview" ' +
+    'field. Q1: header "Fruit", question "Pick fruits", three options "Apple", ' +
+    '"Banana", "Cherry". Q2: header "Tools", question "Pick tools", three options ' +
+    '"Hammer", "Saw", "Drill". Do not run any other tool or say anything first.',
 };
 if (!SHAPES[SHAPE]) throw new Error('unknown --shape ' + SHAPE + ' (have: ' + Object.keys(SHAPES).join(', ') + ')');
 
@@ -252,9 +272,46 @@ for (const k of Object.keys(childEnv)) {
   if (/^CLAUDE/i.test(k) || /^WT_/i.test(k)) delete childEnv[k];
 }
 
-const p = pty.spawn(resolveClaude(), ['--dangerously-skip-permissions'], {
-  name: 'xterm-256color', cols: COLS, rows: ROWS, cwd, env: childEnv,
-});
+// --hooks (#441): every event claude raises for THIS run, as it lands.
+const HOOK_EVENTS = ['UserPromptSubmit', 'PreToolUse', 'PostToolUse', 'PostToolUseFailure', 'Stop',
+  'StopFailure', 'Notification', 'SubagentStop', 'PermissionRequest'];
+let hookServer = null;
+const settingsFile = path.join(cwd, '.probe-hooks.json');
+function startHooks() {
+  const http = require('http');
+  hookServer = http.createServer((req, res) => {
+    let body = '';
+    req.on('data', (c) => { body += c; });
+    req.on('end', () => {
+      let o = {};
+      try { o = JSON.parse(body); } catch { /* not JSON */ }
+      const bits = [o.hook_event_name || '?'];
+      if (o.tool_name) bits.push('tool=' + o.tool_name);
+      if (o.tool_use_id) bits.push('tool_use_id=' + o.tool_use_id);
+      if (o.notification_type) bits.push('type=' + o.notification_type);
+      if (o.message) bits.push('message=' + JSON.stringify(String(o.message).slice(0, 80)));
+      if (o.agent_id) bits.push('agent_id=' + o.agent_id);
+      console.log('[' + stamp() + '] HOOK ' + bits.join(' '));
+      res.writeHead(200, { 'Content-Type': 'application/json' });
+      res.end('{}');
+    });
+  });
+  return new Promise((resolve) => hookServer.listen(0, '127.0.0.1', () => {
+    const port = hookServer.address().port;
+    const hook = () => [{ hooks: [{ type: 'http', url: 'http://127.0.0.1:' + port + '/hook', timeout: 10 }] }];
+    const hooks = {};
+    for (const e of HOOK_EVENTS) hooks[e] = hook();
+    fs.writeFileSync(settingsFile, JSON.stringify({ hooks }));
+    resolve();
+  }));
+}
+
+let p = null;
+function spawnClaude() {
+  const args = ['--dangerously-skip-permissions'].concat(HOOKS ? ['--settings', settingsFile] : []);
+  p = pty.spawn(resolveClaude(), args, { name: 'xterm-256color', cols: COLS, rows: ROWS, cwd, env: childEnv });
+  wire();
+}
 
 let buf = '';
 let lastData = Date.now();
@@ -263,6 +320,8 @@ let elicitAt = 0;
 const t0 = Date.now();
 const stamp = () => ((Date.now() - t0) / 1000).toFixed(1);
 
+function wire() {
+p.onExit(() => { exited = true; });
 p.onData(d => {
   buf += d;
   if (term) term.write(d);
@@ -277,8 +336,11 @@ p.onData(d => {
     }, 500);
   }
 });
+}
+if (HOOKS) startHooks().then(spawnClaude); else spawnClaude();
 
 const tick = setInterval(() => {
+  if (!p) return;
   // A trusted cwd (see above) never shows the trust prompt: the boot just goes quiet
   // at the composer.
   if (state === 'trust' && Date.now() - t0 > 4000 && Date.now() - lastData > 2500) {
@@ -315,7 +377,7 @@ async function driveFrames() {
       JSON.stringify(writes[i]).slice(0, 120) + ' (' + Buffer.byteLength(writes[i]) + ' B)');
     if (i < writes.length - 1) await sleep(GAP_MS);
   }
-  await sleep(9000); // let claude record the tool_result
+  await sleep(LINGER_MS); // let claude record the tool_result
   console.log('===== FINAL screen =====\n' + screen() + '\n');
   verdict();
 }
@@ -329,7 +391,7 @@ async function driveKeys() {
     await sleep(1400);
     console.log('===== after ' + KEYS[i] + ' =====\n' + screen() + '\n');
   }
-  await sleep(9000); // let claude record the tool_result
+  await sleep(LINGER_MS); // let claude record the tool_result
   console.log('===== FINAL screen =====\n' + screen() + '\n');
   verdict();
 }
@@ -347,6 +409,7 @@ function verdict() {
   if (EXPECT.length) exitCode = 1; // cleared only by an answer that holds every expectation
   clearInterval(tick);
   try { p.kill(); } catch { /* already gone */ }
+  if (hookServer) hookServer.close();
   const dir = transcriptDir();
   console.log('\n================ VERDICT (from transcript) ================');
   console.log('cwd:        ' + cwd);
@@ -358,19 +421,49 @@ function verdict() {
   }
   const asks = [];
   const results = new Map();
+  const lines = []; // every parsed line, in order, for the "after the answer" listing (#441)
+  const resultLine = new Map(); // tool_use_id -> index into lines
   for (const f of files) {
     const txt = fs.readFileSync(path.join(dir, f), 'utf8');
     for (const raw of txt.split('\n')) {
       if (!raw.trim()) continue;
       let o; try { o = JSON.parse(raw); } catch { continue; }
+      lines.push(o);
       const c = o && o.message && o.message.content;
       if (!Array.isArray(c)) continue;
       for (const b of c) {
         if (b && b.type === 'tool_use' && b.name === 'AskUserQuestion') asks.push(b);
-        else if (b && b.type === 'tool_result' && b.tool_use_id) results.set(b.tool_use_id, b);
+        else if (b && b.type === 'tool_result' && b.tool_use_id) {
+          results.set(b.tool_use_id, b);
+          resultLine.set(b.tool_use_id, lines.length - 1);
+        }
       }
     }
   }
+  // One line per transcript record: type, role, the shape of its content, and its text head.
+  const describe = (o) => {
+    const m = o.message || {};
+    const c = m.content;
+    let what = '';
+    if (typeof c === 'string') what = 'text ' + JSON.stringify(c.slice(0, 90));
+    else if (Array.isArray(c)) {
+      what = c.map((b) => {
+        if (!b) return '?';
+        if (b.type === 'text') return 'text ' + JSON.stringify(String(b.text).slice(0, 90));
+        if (b.type === 'tool_result') return 'tool_result(' + b.tool_use_id + (b.is_error ? ', is_error' : '') + ') '
+          + JSON.stringify(resultText(b.content).slice(0, 90));
+        if (b.type === 'tool_use') return 'tool_use(' + b.name + ' ' + b.id + ')';
+        return b.type;
+      }).join(' + ');
+    }
+    const extra = [];
+    if (o.toolUseResult && typeof o.toolUseResult === 'object' && o.toolUseResult.toolDenialKind) {
+      extra.push('toolDenialKind=' + o.toolUseResult.toolDenialKind);
+    } else if (typeof o.toolUseResult === 'string') extra.push('toolUseResult=' + JSON.stringify(o.toolUseResult.slice(0, 60)));
+    if (o.isMeta) extra.push('isMeta');
+    if (o.subtype) extra.push('subtype=' + o.subtype);
+    return (o.type || '?') + '/' + (m.role || '-') + (extra.length ? ' [' + extra.join(' ') + ']' : '') + ' ' + what;
+  };
   if (!asks.length) {
     console.log('RESULT: NO AskUserQuestion tool_use RECORDED.');
     console.log('  (a PENDING question is not in the transcript — it is written only');
@@ -396,6 +489,9 @@ function verdict() {
     }
     const body = resultText(r.content);
     console.log('  ANSWER: ' + body.replace(/\s+/g, ' ').slice(0, 600));
+    const at = resultLine.get(a.id);
+    console.log('  RESULT LINE: ' + describe(lines[at]));
+    for (const o of lines.slice(at + 1, at + 9)) console.log('  AFTER: ' + describe(o));
     if (EXPECT.length) {
       const missing = EXPECT.filter(e => !body.includes(e));
       console.log(missing.length ? '  EXPECT: MISSING ' + JSON.stringify(missing) : '  EXPECT: all ' + EXPECT.length + ' found');
@@ -438,7 +534,6 @@ function removeTranscriptDir() {
 // Windows will not remove a directory a live process has as its cwd, so wait for the
 // child to be gone before deleting the run dir, and retry briefly.
 let exited = false;
-p.onExit(() => { exited = true; });
 
 async function removeRunDir() {
   for (let i = 0; i < 20 && !exited; i++) await new Promise(r => setTimeout(r, 250));

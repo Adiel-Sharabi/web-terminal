@@ -311,9 +311,79 @@ was read before that same call cleared it reports `waitingFor: null`, not
 `pty-worker.js` is unchanged (hot reload). Pinned by
 `tests/issue423-rejected-question-clears.spec.js`, every gate mutation-checked.
 
-**Not measured:** `Esc` on the question in the terminal also writes a rejection with no
-hook; the fix now reads it as `working` (then the 5-minute stale rule), where before the
-question stood until the next prompt.
+**`Esc` on the question ends the turn, and now reads idle (#441, measured 2026-11-09,
+claude 2.1.319, isolated rig).** `probe-askq-layout.js --hooks` registers http hooks for
+the run alone and stamps each event against the keys. 3 Esc runs (`plain-single`,
+`preview-single`, `plain-multi`): after the Esc **no hook at all**, not even the idle
+Notification (watched 57-75 s). The result line is `is_error` with
+`toolDenialKind: "user-rejected"` (the same as Chat) and **`toolUseResult: "User rejected
+tool use"`**; its text says "STOP what you are doing and wait for the user"; ~8 ms later
+a user line `[Request interrupted by user for tool use]`, then `system/turn_duration`.
+5 Chat runs (`plain-single` digit 5; `preview-single` reached by a digit + `Down` or by
+`Down` x n, then `CR`): `toolUseResult` is a string starting `Error: The user doesn't want
+to proceed`, the text says "the user said: The user wants to clarify these questions",
+Claude replies, `Stop` 2.2-2.6 s after the key, and (in the one run watched that long) the
+idle Notification 60 s after the Stop. So between #423 and #441 an Esc read
+`working` until the 5-minute stale rule. Now `checkPendingQuestion` reads the result
+line's own `toolUseResult` (`transcript.toolResultOutcome`; the field, not the interrupt
+line 8 ms later, so there is no window between two writes) and clears a plain rejection as
+the `PostToolUse` AND the `Stop` Claude did not send: the PostToolUse leaves `waiting` at
+once (a `Stop` alone holds `waiting` through the worker's 750 ms idle debounce, and with no
+question a `waiting` row is published as a permission prompt), the `Stop` idles it through
+the same funnel as a real one. Consequences of that funnel, accepted: the worker's
+`lastTurnEndAt` is stamped (the turn did end), and an `all`-level session gets the "Claude
+stopped" push (the default level `important` does not). The brief is not folded (as for a
+worker-detected Esc interrupt). Server-only; `pty-worker.js` unchanged. The worker does
+load `lib/transcript.js`, but this change only adds an export the worker never calls, so a
+hot reload is enough.
+
+**The row poll that clears it now reads the new status (#441).** `/api/sessions` and the
+cluster merge's local branch settle every watched question (`settlePendingQuestions`)
+before asking the worker for statuses, as `/digest` already did for one session; before,
+the poll that cleared it returned `status: waiting, waitingFor: null`. **A failed tail read
+is no longer cached (#441):** the size and mtime are remembered only after the read
+succeeds (`transcriptTailText` throws instead of returning nothing), so a read that hit
+`EBUSY` is retried on the next tick rather than at the next write. Pinned by
+`tests/issue441-question-followups.spec.js`.
+
+**The cursor moves are already start-independent (#441, measured 2026-11-09, claude
+2.1.319) - no code change.** The concern was that a user who moved the cursor in the
+terminal first would make the relative moves overshoot. Measured, per-key screens and
+transcript verdicts:
+- **Side-by-side Chat (`Down` x n, `CR`):** `Chat about this` is the LAST row and `Down`
+  CLAMPS there (a `Down` on it stays). From row 2: `Down`, then the app's `Down` x3, `CR`
+  recorded the Chat rejection (`preview-single`; the same on `preview-mq` Q1). The digit
+  form also works (`Down`, `3`, `Down`, `CR` and from Chat itself `Down` x3, `3`, `Down`,
+  `CR`: both Chat - a side-by-side digit only moves), but it is not needed.
+- **Multi-select `Other`:** the text goes out as a bracketed PASTE (#383), and a paste
+  lands in the `Type something` field from ANY row: with the cursor on row 3, on Submit and
+  on Chat, `paste, Down, CR, 1` recorded `"Pick fruits"="hello there"` each time, and the
+  app's own frames after a move to row 3 (`Down` x2, `1`, `3`, `Down` x4, paste, `Down`,
+  `CR`, `1`) recorded `"Apple, Cherry, hello there"`. TYPED text is different and is what
+  the concern assumed: plain `hello` on row 3, Submit or Chat is swallowed (verdicts: none,
+  and Chat twice, since the following `CR` landed on Chat). So the paste, not the `Down`
+  count, is what makes it land - keep it a paste.
+- Measured on the way, for whoever needs an absolute move later: in multi-select `Down`
+  clamps on Chat; `Up` from Chat goes Submit, then `Type something`; `Up` from row 1 WRAPS
+  to `Type something`; a digit ticks without moving the cursor. `Down` x (n+2), `Up` x2
+  lands on the field from any row (verified on `plain-multi` from rows 1 and 3, `plain-mq`
+  Q2 and both tabs of the new `plain-mq-multi2` shape, all recorded intact) - unused,
+  because the paste already does it.
+
+**Notes lost on Chat (#441 item 3) - FALSE PREMISE, no change.** Notes exist only on a
+ONE-question prompt: the card offers the affordance only when
+`questions.length == 1` (`question_answer_panel.dart`), and `buildAnswerFrames` consumes a
+note only when `!multiQuestion`. `buildChatFrames` replays earlier tabs only when the Chat
+is on tab 1 or later, i.e. on a prompt of two or more questions, where no note can exist.
+Carrying `noteText` into the replay would change no byte. (A note on the CURRENT tab of a
+single side-by-side question is dropped with its pick: #423's choice not to replay a
+current single-select pick; carrying both would be a new, unmeasured sequence.)
+
+**Also measured, not changed:** `pty-worker.js`'s `noteInterrupt` comment says Esc at a
+permission prompt "REJECTS the tool and Claude carries on". For AskUserQuestion it does
+not carry on (above); a Bash permission prompt was not measured. The `waiting` gate there
+stays right for another reason: the note sequence's own `ESC` must not read as an
+interrupt.
 
 **A deliberate, UNMEASURED loosening:** the re-sent Enter now goes out for a
 multi-select `Other` on the LAST tab of a several-question prompt (text, `Down`,
