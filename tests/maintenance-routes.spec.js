@@ -8,6 +8,7 @@
 // The "agent" is a bash session declared `claude` whose launch prints Claude's composer
 // marker (#190), as in handoff-routes.spec.js.
 const crypto = require('crypto');
+const fs = require('fs');
 const { test, expect, request: pwRequest } = require('@playwright/test');
 const { BASE, authCtx, readHookToken } = require('./test-helpers');
 
@@ -43,6 +44,11 @@ test.describe('#359 restart hold - server', () => {
   const rowOf = async (id) => (await (await ctx.get('/api/sessions')).json()).find((s) => s.id === id);
   const status = async () => (await ctx.get('/api/maintenance/status')).json();
   const verdictOf = async (id) => (await status()).sessions.find((s) => s.id === id);
+  // #440: the hold's own entry for a session (tries, promptedAt, deliveredAt, answeredAt...),
+  // read from the suite server's maintenance file - status serves only part of it.
+  const holdEntryOf = (id) => {
+    try { return JSON.parse(fs.readFileSync(process.env.WT_MAINTENANCE_FILE, 'utf8')).hold.sessions[id] || null; } catch (e) { return `unreadable: ${e.message}`; }
+  };
   // #440: wait for a verdict, and on a timeout SAY what it was - "timed out" alone left
   // a CI failure with nothing to go on.
   async function untilVerdict(id, pred, what, ms) {
@@ -50,7 +56,7 @@ test.describe('#359 restart hold - server', () => {
     try {
       return await until(async () => { last = await verdictOf(id); return last && pred(last) ? last : null; }, what, ms);
     } catch (e) {
-      throw new Error(`${e.message}; last verdict: ${last ? `${last.state} - ${last.why}` : 'none'}`);
+      throw new Error(`${e.message}; last verdict: ${last ? `${last.state} - ${last.why}` : 'none'}; hold entry at ${Date.now()}: ${JSON.stringify(holdEntryOf(id))}`);
     }
   }
   async function make(name, data) {
@@ -226,9 +232,10 @@ test.describe('#359 restart hold - server', () => {
     expect((await verdictOf(agent)).answer).toBeNull();
 
     // The turn the question started ends WITHOUT an answer: not ready, and it says why.
+    const deliverAt = Date.now();
     expect(await hook(agent, 'UserPromptSubmit', { session_id: conv, prompt: `${TAG} question` })).toBe(200);
     expect(await hook(agent, 'Stop', { session_id: conv })).toBe(200);
-    await until(async () => (await verdictOf(agent))?.answeredAt, 'the turn to end');
+    await untilVerdict(agent, (v) => v.answeredAt, `the turn to end (delivered at ${deliverAt})`);
     await new Promise((r) => setTimeout(r, 1500));
     expect(await verdictOf(agent)).toMatchObject({ state: 'answering', why: 'told; has not answered (yes, no or later)' });
     expect((await status()).safeToRestart).toBe(false);
