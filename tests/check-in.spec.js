@@ -70,7 +70,9 @@ test.describe('checkInBlock (#443)', () => {
     // A FAILED run whose wrap-up started no turn may still have its words unsubmitted in
     // the composer (a lost CR): a check-in's CR would submit both. It blocks - unless the
     // worker link refused the write (`typed: false`), which typed nothing.
-    const never = (state, extra) => { const k = candidate(); k.brief.handoff = { state, startedAt: k.brief.turnAt + 500, at: k.brief.stoppedAt + 1000, ...extra }; return block(k); };
+    // Built through H.publicRun, the shaper server.js serves the row from: a stored field
+    // the gate reads must survive it (the first cut read `typed`, which it dropped).
+    const never = (state, extra) => { const k = candidate(); k.brief.handoff = H.publicRun({ state, startedAt: k.brief.turnAt + 500, at: k.brief.stoppedAt + 1000, ...extra }); return block(k); };
     expect(never('failed')).toBe('handed-off');
     expect(never('failed', { typed: false })).toBeNull();
     expect(never('kept')).toBe('handed-off');
