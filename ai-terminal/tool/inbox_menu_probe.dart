@@ -9,7 +9,9 @@
 // client) against a fake cluster served in-process - it never contacts a server and
 // never touches the installed companion's preferences - and logs, one line each:
 //
+//   RUN pid=<pid>                      - first line of THIS run (the log starts empty)
 //   READY dpr=<d>                      - first frame drawn
+//   DPR <d>                            - the pixel ratio, again whenever it changes
 //   PTR <phase> <x>,<y> buttons=<b>    - every pointer event that reached the app
 //   PUSH <route type> / POP            - a route opened or closed (the card's menu is one)
 //   POS {"key": [x, y, w, h], ...}     - where the cards, menu items and fields are now
@@ -242,6 +244,12 @@ Map<String, List<double>> _positions() {
 }
 
 Future<void> main() async {
+  // A fresh log and no stale quit file: a run must never read a previous run's lines.
+  // The RUN line names this process, so a driver reads only what follows it.
+  _logFile.writeAsStringSync('', flush: true);
+  final quit = File('$_dir${Platform.pathSeparator}inbox-menu-probe.quit');
+  if (quit.existsSync()) quit.deleteSync();
+  log('RUN pid=$pid');
   WidgetsFlutterBinding.ensureInitialized();
   // In-memory preferences: the probe must never read or write the installed companion's.
   SharedPreferences.setMockInitialValues({
@@ -288,9 +296,16 @@ Future<void> main() async {
     log('READY dpr=${view.devicePixelRatio}');
   });
   var last = '';
+  double? lastDpr;
   final started = DateTime.now();
-  final quit = File('$_dir${Platform.pathSeparator}inbox-menu-probe.quit');
   Timer.periodic(const Duration(milliseconds: 250), (t) {
+    // The ratio can change when the window moves to another monitor: say so every time,
+    // so a driver that converts these logical positions can check it still holds.
+    final dpr = WidgetsBinding.instance.platformDispatcher.views.first.devicePixelRatio;
+    if (dpr != lastDpr) {
+      lastDpr = dpr;
+      log('DPR $dpr');
+    }
     final now = jsonEncode(_positions());
     if (now != last) {
       last = now;

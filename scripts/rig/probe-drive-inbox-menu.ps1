@@ -25,6 +25,10 @@
 # a menu item closed the menu WITHOUT choosing (likely a mouse-leave cancelling the
 # tap; not proven), while the same click in Session 0 chose it. Read MENU_RESULT.
 #
+# Each run reads only its own lines: the probe empties its log and writes
+# `RUN pid=<pid>` first, and this reads what follows that line for the probe it found.
+# A probe built before that line existed gives nothing to read, so the run ABORTs.
+#
 # Build the probe first:  ai-terminal/scripts/build-probe-windows.sh tool/inbox_menu_probe.dart
 #
 # It never touches the user's own companion: the probe is its own exe, with in-memory
@@ -143,7 +147,25 @@ $dir = Split-Path $Exe
 $logFile = Join-Path $dir 'inbox-menu-probe.log'
 $quit = Join-Path $dir 'inbox-menu-probe.quit'
 
-function LogLines { if (Test-Path $logFile) { @(Get-Content $logFile) } else { @() } }
+# Only THIS run's lines: those after the probe's own `RUN pid=<its pid>` line. Before the
+# probe is found, or if its RUN line is not there (an older log), there are none, so
+# every wait times out into an ABORT instead of reading another run's verdicts.
+$script:runPid = 0
+function LogLines {
+  if ($script:runPid -eq 0 -or -not (Test-Path $logFile)) { return @() }
+  $all = @(Get-Content $logFile)
+  $at = -1
+  for ($i = $all.Count - 1; $i -ge 0; $i--) { if ($all[$i] -eq "RUN pid=$($script:runPid)") { $at = $i; break } }
+  if ($at -lt 0) { return @() }
+  return @($all | Select-Object -Skip ($at + 1))
+}
+# The probe's pixel ratio now: its latest DPR line (0 when none).
+function LastDpr {
+  $l = LogLines | Where-Object { $_ -like 'DPR *' } | Select-Object -Last 1
+  $v = 0.0
+  if ($l -and [double]::TryParse($l.Substring(4), [Globalization.NumberStyles]::Float, [Globalization.CultureInfo]::InvariantCulture, [ref]$v)) { return $v }
+  return 0.0
+}
 function LastPos {
   $p = LogLines | Where-Object { $_ -like 'POS *' } | Select-Object -Last 1
   if (-not $p) { return @{} }
@@ -186,22 +208,20 @@ try {
   }
   $proc = Get-Process | Where-Object { $_.Path -eq $Exe } | Select-Object -First 1
   Say "PROBE pid=$($proc.Id) session=$($proc.SessionId)"
+  $script:runPid = $proc.Id
   if (-not (WaitFor { [W]::TopOf([uint32]$proc.Id) -ne [IntPtr]::Zero } 20000)) { Say 'ABORT: no probe window'; Finish 2 }
   $script:top = [W]::TopOf([uint32]$proc.Id)
   # Off-screen and unactivated first; sized once the probe says its pixel ratio.
   [W]::SetWindowPos($script:top, [IntPtr]::Zero, -4000, 40, 1300, 900, 0x0014) | Out-Null
   # The probe logs LOGICAL pixels and a window is sized in PHYSICAL ones: read its ratio
-  # (the latest READY, after the move) before sizing or clicking anything.
+  # after the move (which can land on another monitor's scale) before sizing anything.
   if (-not (WaitFor { @(LogLines | Where-Object { $_ -like 'READY dpr=*' }).Count -gt 0 } 20000)) {
     Say 'ABORT: the probe never drew its first frame'; Finish 2
   }
-  $ready = LogLines | Where-Object { $_ -like 'READY dpr=*' } | Select-Object -Last 1
-  $parsed = 0.0
-  if (-not [double]::TryParse($ready.Substring(10), [Globalization.NumberStyles]::Float, [Globalization.CultureInfo]::InvariantCulture, [ref]$parsed) -or $parsed -le 0) {
-    Say "ABORT: no device pixel ratio from the probe ($ready)"; Finish 2
-  }
-  $script:dpr = $parsed
-  Say "PROBE $ready"
+  Start-Sleep -Milliseconds 600
+  $script:dpr = LastDpr
+  if ($script:dpr -le 0) { Say 'ABORT: no device pixel ratio from the probe'; Finish 2 }
+  Say "PROBE dpr=$($script:dpr)"
   # 1300x900 LOGICAL: the wide layout (the list beside the focused item) at any scale.
   [W]::SetWindowPos($script:top, [IntPtr]::Zero, -4000, 40, [int](1300 * $script:dpr), [int](900 * $script:dpr), 0x0014) | Out-Null
   $view = [W]::FindWindowEx($script:top, [IntPtr]::Zero, 'FLUTTERVIEW', [NullString]::Value)
@@ -219,6 +239,10 @@ try {
   Start-Sleep -Milliseconds 700
   if ((LastPos).ContainsKey($replyD)) {
     Say 'ABORT: not the wide layout (the reported card shows its reply box before any click)'; Shot 'abort.png'; Finish 2
+  }
+  # Every click converts with this ratio: it must still be the one the window was sized by.
+  if ((LastDpr) -ne $script:dpr) {
+    Say "ABORT: the pixel ratio changed after sizing ($($script:dpr) -> $(LastDpr))"; Finish 2
   }
   # The wide layout opens the oldest wait (the reported one) beside the list, and an
   # open card hides its own reply box. Open the question instead (a left click opens
