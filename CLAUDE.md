@@ -47,6 +47,7 @@ Each line has already cost a bug; the bracketed findings file holds its full tex
 - `agent` is `'claude'`, `'codex'` or `null`; **`null` is never coerced to `'claude'`**. An explicit agent is authoritative; only an agent-less session falls back to cross-provider discovery.
 - **Submit is CR, never LF, for every agent.** A plain shell and unknown agents never read status from PTY output (OSC 9 is something vim can emit).
 - A conversation's wire identity is **`agentSessionId`** (`conversationIdFromPath`); **never fold it into `claudeSessionId`** (Fork runs `claude --resume <that>`). "Terminal live, chat old": check the API first.
+- **Live work is every waker (#443), not just shells:** `lib/background-tasks.js` kinds `command`/`agent`/`monitor`/`wakeup`/`cron`/`child` fill `backgroundTasks`, the ONE list the reason row, #437 `isStaleSelf` and the reaper read. A Monitor notification is an EVENT, not an end. Read the transcript incrementally, never a fixed tail (256 KB missed 23-81% of launches).
 - **Task list (#73):** `TaskCreate`/`TaskUpdate` deltas (never `TodoWrite`; the id is only in the result prose) folded from the live hook stream in `server.js` beside `pendingQuestion` — derived state, no dot or push (gaining one moves it to the worker). `TaskList` repairs it; prefer `TaskCreate`'s subject; an unseen create still renders as `Task #<id>`.
 
 ### Input & submit — law, not guidance (#55) `[input-submit.md]`
