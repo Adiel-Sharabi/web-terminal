@@ -1224,9 +1224,9 @@ Churn probe (an isolated real `pty-worker.js`, 8 rounds of 8 sessions created an
 | 1.1.0 + reply, 2026-11-07 | 3 / 5 | 0 |
 | 1.2.0-beta.18, no reply | 0 / 19 | 0 |
 | 1.2.0-beta.18 + reply (probe preload) | 0 / 19 | 0 |
-| **this change: the real worker, beta.18 installed, its own reply** | REAL_CHURN | REAL_HELD |
+| **this change: the real worker, beta.18 installed, its own reply** | **0 / 20** (procdump attached, no dump) | **0** |
 
-First bash prompt after spawn, real PTY bytes: 1.1.0 unanswered 3280 / 3291 / 3684 ms; 1.1.0 answered 244 / 307 / 317 ms; beta.18 unanswered 3306 / 3281 ms; beta.18 answered 274 / 253 / 243 ms. REAL_LATENCY
+First bash prompt after spawn, real PTY bytes: 1.1.0 unanswered 3280 / 3291 / 3684 ms; 1.1.0 answered 244 / 307 / 317 ms; beta.18 unanswered 3306 / 3281 ms; beta.18 answered 274 / 253 / 243 ms. The real changed worker (2026-11-09): answered 377 / 558 / 308 / 293 / 785 ms, none with a stray `1;2c` typed into the shell; with `WT_CONPTY_DA1_REPLY=0` 3299 / 3216 / 3245 ms.
 
 The deferred kill from #416 (kill a starting session only after its first output) is NOT brought back: with beta.18 an immediate kill held 0 consoles in every run.
 
