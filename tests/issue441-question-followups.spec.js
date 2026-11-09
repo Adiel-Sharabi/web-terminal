@@ -178,15 +178,17 @@ test.describe('#441 the server after a rejected question', () => {
   });
 
   test('a failed transcript read is looked at again without another write', async () => {
-    test.skip(process.platform !== 'win32', 'locks the file with a Windows share mode');
+    test.skip(process.platform !== 'win32', 'locks a byte range the Windows way');
     expect((await ask('toolu_441_busy')).status).toBe('waiting');
-    // Hold the transcript open with share mode WRITE only: an append still works, a read
-    // fails (EBUSY), a stat does not - exactly a read that fails while Claude writes.
+    // Lock the transcript's FIRST BYTE (LockFileEx, from another process): a read that
+    // covers it fails with EBUSY while a stat, an open and an append at the end all still
+    // work - exactly a read that fails while the file is busy. (A share mode does not do
+    // it: node opens a file held with FileShare.None for reading without complaint.)
     const lockMs = 3 * WATCH_MS;
     const ps = spawn('powershell.exe', ['-NoProfile', '-NonInteractive', '-Command',
-      '$f = [System.IO.File]::Open($env:WT441_LOCK, "Open", "Read", "Write"); '
+      '$f = [System.IO.File]::Open($env:WT441_LOCK, "Open", "ReadWrite", "ReadWrite"); $f.Lock(0, 1); '
       + '[Console]::Out.WriteLine("locked"); [Console]::Out.Flush(); '
-      + `Start-Sleep -Milliseconds ${lockMs}; $f.Close()`],
+      + `Start-Sleep -Milliseconds ${lockMs}; $f.Unlock(0, 1); $f.Close()`],
     { windowsHide: true, env: { ...process.env, WT441_LOCK: tpath }, stdio: ['ignore', 'pipe', 'inherit'] });
     const exited = new Promise((r) => ps.on('exit', r));
     await new Promise((resolve, reject) => {
@@ -197,11 +199,15 @@ test.describe('#441 the server after a rejected question', () => {
     appendChat(tpath, 'toolu_441_busy');
     // Setup, not the claim: the read must really fail and the stat really succeed, or the
     // test would pass for the wrong reason.
+    const readAll = () => {
+      const fd = fs.openSync(tpath, 'r');
+      try { fs.readSync(fd, Buffer.alloc(16), 0, 16, 0); } finally { fs.closeSync(fd); }
+    };
     expect(() => fs.statSync(tpath)).not.toThrow();
-    expect(() => fs.closeSync(fs.openSync(tpath, 'r'))).toThrow();
+    expect(readAll).toThrow();
     expect(await pending()).toBe(true); // read failed: still pending
     await exited;
-    expect(() => fs.closeSync(fs.openSync(tpath, 'r'))).not.toThrow();
+    expect(readAll).not.toThrow();
     // Nothing is written after the lock lifts: only a check that did not cache the failed
     // read's size and mtime can see the result now.
     await expect.poll(pending, { timeout: 3 * WATCH_MS }).toBe(false);
