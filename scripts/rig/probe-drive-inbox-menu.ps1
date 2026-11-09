@@ -192,7 +192,7 @@ function Shot([string]$name) {
   Say "SHOT $path"
 }
 # The probe logs LOGICAL pixels; a posted mouse message carries PHYSICAL client pixels.
-# $script:dpr is read from the probe's READY line before the window is sized.
+# $script:dpr is the probe's latest DPR line, read after the move and before sizing.
 $script:dpr = 0
 function Center($rect) {
   return @([int](($rect[0] + $rect[2] / 2) * $script:dpr), [int](($rect[1] + $rect[3] / 2) * $script:dpr))
