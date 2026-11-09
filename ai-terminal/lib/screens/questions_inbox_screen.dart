@@ -1122,16 +1122,27 @@ class _QuestionsInboxScreenState extends State<QuestionsInboxScreen> {
   /// "Not waiting" from a card's menu (#445): only while the card's session is still in
   /// the SAME reported wait the menu was opened on. The server clears whatever wait the
   /// session reports now, so a newer one must not be cleared by a menu opened on an
-  /// older one.
+  /// older one. The row is read again from its own server first, as every write from a
+  /// card is (#383, `NeedsYouActions._stillThere`): the card can be a poll old, and a
+  /// server that did not answer leaves only that old row, which proves nothing.
   Future<void> _notWaitingFromMenu(InboxItem it) async {
     final s = it.session;
     if (s == null) return;
-    final now = _itemAt(it.key);
-    if (now == null || now.kind != InboxKind.reported || now.session?.reason?.since != s.reason?.since) {
+    final answered = await _repo.refreshServer(s.server.baseUrl);
+    if (_disposed) return;
+    if (!answered) {
+      _say('Could not check "${s.name}" - nothing was cleared');
+      return;
+    }
+    final fresh = _repo.current.where((x) => sessionKey(x) == sessionKey(s)).firstOrNull;
+    if (fresh == null ||
+        !boardNeedsYou(fresh) ||
+        needKindOf(fresh) != NeedKind.reported ||
+        fresh.reason?.since != s.reason?.since) {
       _say('"${s.name}" moved on - nothing was cleared');
       return;
     }
-    await _notWaiting(now.session!);
+    await _notWaiting(fresh);
   }
 
   /// The card's ask as text, for Copy (#445), or null when it shows none of its own.

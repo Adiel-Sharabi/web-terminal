@@ -16,7 +16,7 @@
 # this script (-Drive) in the user's session through wscript.exe (no console), waits
 # for the verdict, and removes the task again.
 #
-#   powershell -NoProfile -ExecutionPolicy Bypass -File scripts\rig\probe-drive-inbox-menu.ps1 -Exe <probe exe> -Out <dir>
+#   powershell -NoProfile -ExecutionPolicy Bypass -File scripts\rig\probe-drive-inbox-menu.ps1 -Exe <probe exe> -Out <dir> -User <account>
 #
 # With nobody logged on (no Session 1), start the probe yourself in Session 0 and run
 # this with -Drive: messages and layout work there and the LOG is the readout, but
@@ -37,13 +37,16 @@ param(
   [Parameter(Mandatory = $true)][string]$Exe,
   [Parameter(Mandatory = $true)][string]$Out,
   [switch]$Drive,
-  [string]$User = 'adiel'
+  # The logged-on Windows account whose session runs the probe (no default: agent
+  # shells can have an empty USERNAME). Not needed with -Drive.
+  [string]$User
 )
 
 $ErrorActionPreference = 'Stop'
 $verdict = Join-Path $Out 'verdict.txt'
 
 if (-not $Drive) {
+  if (-not $User) { Write-Output 'ABORT: pass -User <the logged-on Windows account>'; exit 2 }
   # ---- Session 0 side: launch in the user's session, wait, clean up ----------------
   if (-not (Test-Path $Exe)) { throw "probe exe not found: $Exe" }
   New-Item -ItemType Directory -Force $Out | Out-Null
@@ -72,6 +75,8 @@ if (-not $Drive) {
   }
   if (-not (Test-Path $verdict)) { Write-Output 'ABORT: the driver wrote no verdict within 150 s'; exit 2 }
   Get-Content $verdict
+  # The driver's own exit code is lost through wscript: the verdict carries it.
+  if (Select-String -Path $verdict -Pattern '^ABORT' -Quiet) { exit 2 }
   exit 0
 }
 

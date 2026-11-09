@@ -94,11 +94,12 @@ phone or tablet) for what fits that card: **Not a question** for a reply misread
 **Not waiting** for a reported wait, plus **Open session** and **Copy text**. Nothing in it
 answers, rejects or types into the session, and a real question, a permission prompt or a
 background agent cannot be dismissed at all (a background agent leaves the inbox by itself once
-it stops waiting), so the inbox's count stays the board's Needs-you count. A dismissed ask moves to a collapsed **Dismissed** list with Restore (and Undo
-right after), and comes back by itself when the session asks something new. Dismissals are kept
-with the session on its own server (`PATCH /api/sessions/:id/brief` with `inboxDismiss`, the
-brief's `inboxDismissed`, advertised as `inbox-dismiss`), so every device hides the same asks
-and they survive restarts; against an older server they hold on that device only.
+it stops waiting), so the inbox's count stays the board's Needs-you count. A dismissed ask
+moves to a collapsed **Dismissed** list with Restore (and Undo right after), and comes back by
+itself when the session asks something new. Dismissals are kept with the session on its own
+server (`PATCH /api/sessions/:id/brief` with `inboxDismiss`, the brief's `inboxDismissed`,
+advertised as `inbox-dismiss`), so every device hides the same asks and they survive restarts;
+against an older server they hold on that device only, until the app restarts.
 
 **Mobile & PWA** — installable, with a compose bar built for soft keyboards, a touch
 toolbar, long-press menus, and reconnect the instant you return to the app. When a phone

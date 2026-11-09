@@ -1497,6 +1497,39 @@ void main() {
       await done(tester);
     });
 
+    testWidgets('"Not waiting" reads the row again first: a newer wait the card never showed is not cleared',
+        (tester) async {
+      Map<String, dynamic> waits(int since) =>
+          _row('d', 'Docs', reason: {'kind': 'you', 'text': 'pick a title', 'source': 'reported', 'since': since});
+      rows = {_home.baseUrl: [waits(1)]};
+      await pump(tester, await repo());
+      await settle(tester);
+      final d = find.byKey(const ValueKey('inbox-card-http://h:7681|d'));
+      await rightClick(tester, d);
+      // The server has a NEW wait; no poll has brought it to the card.
+      rows = {_home.baseUrl: [waits(2)]};
+      await pick(tester, 'notWaiting');
+      expect(briefPatches, isEmpty, reason: 'the card was a poll old');
+      expect(find.textContaining('moved on - nothing was cleared'), findsOneWidget);
+      await done(tester);
+    });
+
+    testWidgets('"Not waiting" refuses when its server does not answer the re-read', (tester) async {
+      rows = {
+        _home.baseUrl: [
+          _row('d', 'Docs', reason: {'kind': 'you', 'text': 'pick a title', 'source': 'reported', 'since': 1}),
+        ],
+      };
+      await pump(tester, await repo());
+      await settle(tester);
+      await rightClick(tester, find.byKey(const ValueKey('inbox-card-http://h:7681|d')));
+      sessionsStatus[_home.baseUrl] = 500;
+      await pick(tester, 'notWaiting');
+      expect(briefPatches, isEmpty, reason: 'its last row is the very row the card was drawn from');
+      expect(find.textContaining('Could not check "Docs" - nothing was cleared'), findsOneWidget);
+      await done(tester);
+    });
+
     testWidgets('a server without inbox-dismiss: hidden on this device, nothing sent', (tester) async {
       dismissCap = false;
       proseAsks();
@@ -1565,6 +1598,46 @@ void main() {
           reason: 'the failed choice was already taken back');
       expect(briefPatches.map(dismissOp).single!.keys, ['remove']);
       expect(card, findsOneWidget);
+      await done(tester);
+    });
+
+    testWidgets('the focused view\'s "Not a question" is the same dismissal', (tester) async {
+      proseAsks();
+      await pump(tester, await repo());
+      await settle(tester);
+      await tester.tap(find.byKey(const ValueKey('inbox-open-$key')));
+      await tester.pumpAndSettle();
+      await tester.tap(find.byKey(const ValueKey('inbox-not-question')));
+      await tester.pumpAndSettle();
+      await settle(tester);
+      expect(card, findsNothing);
+      expect(dismissOp(briefPatches.single)!.keys, ['add']);
+      expect(find.text('Dismissed (1)'), findsOneWidget);
+      expect(sent, isEmpty);
+      await done(tester);
+    });
+
+    testWidgets('a poll while the dismissal is still on its way does not bring the card back', (tester) async {
+      proseAsks();
+      final r = await repo();
+      await pump(tester, r);
+      await settle(tester);
+      final hold = Completer<bool>();
+      dismissHolds = [hold];
+      await rightClick(tester, card);
+      await pick(tester, 'notAQuestion');
+      // The server has not kept it yet, and a poll brings its row without it.
+      await tester.runAsync(() => r.refresh());
+      await settle(tester);
+      expect(card, findsNothing, reason: 'the row is older than the choice');
+      await tester.runAsync(() async {
+        hold.complete(true);
+        await Future<void>.delayed(const Duration(milliseconds: 20));
+        await r.refresh();
+      });
+      await settle(tester);
+      expect(card, findsNothing, reason: 'now the server keeps it');
+      expect(kept['c'], hasLength(1));
       await done(tester);
     });
 
