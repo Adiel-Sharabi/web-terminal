@@ -1203,3 +1203,31 @@ Probe: an isolated worker, 8 rounds of 8 sessions, each round created and killed
 | no reply, deferred kill | 0 / 18 |
 
 Kill timing does not explain it; the reply does. With the reply, a session killed while starting also kept its `OpenConsole.exe` for the worker's lifetime (up to 3 of 8 per round; a full suite run stranded ~20 of Git for Windows' 32 machine-wide consoles, and new bash then dies with "too many consoles in use"). Without the reply, an immediate kill held 0 consoles in every round, so no deferred kill is needed. The crash itself (master's 3/16) is open in #418 with the probe; it needs a crash dump to name the faulting module.
+
+### #418 measured: the crash is node-pty 1.1.0's; 1.2 fixes it but brings ConPTY 1.25's resize query - pinned at 1.1.0 (2026-11-07..09)
+
+**The crash.** Crash dumps (procdump `-ma -e` attached to an isolated worker, 4 of 4 identical): `0xC0000005`, a read of address 0 on a session's exit-watcher thread in `conpty.node` (`SetupExitCallback` lambda, conpty.cc:106, `assert(remove_pty_baton(baton->id))`). `remove_pty_baton` erases from the global `ptyHandles` vector with NO lock while the main thread pushes to it (spawn) and reads it (connect/resize/kill). Not conpty.dll, OpenConsole.exe or node. The DA1 reply only raised the rate (faster starts, more overlapping exits). Windows logged no crash because libuv sets `SEM_NOGPFAULTERRORBOX` and the worker inherits it. Upstream fix: microsoft/node-pty `fa83ecfc` (#922), a mutex around every `ptyHandles` access, first published in 1.2.0-beta.13; no stable 1.2.0 exists.
+
+| churn probe (8 rounds x 8 sessions created and killed at once) | runs that crashed | held consoles |
+|---|---|---|
+| 1.1.0, no reply, 2026-11-07 (all batches) | 12 / 27 (11 of them `0xC0000005`) | 0 |
+| 1.1.0 + reply, 2026-11-07 | 3 / 5 | 0 |
+| 1.2.0-beta.18, no reply | 0 / 19 | 0 |
+| 1.2.0-beta.18 + reply (probe preload) | 0 / 19 | 0 |
+| 1.2.0-beta.18, the real worker with its own reply (procdump attached) | 0 / 20 | 0 |
+
+First prompt on the real beta.18 worker with the reply: 293-785 ms (5 samples), and 3216-3299 ms with it off. ConPTY 1.25 holds an unanswered shell exactly as 1.23 did.
+
+**Why it did not ship: ConPTY 1.25 asks for the cursor position on every resize.** 1.2.0-beta.13, beta.15 and beta.18 all bundle ConPTY 1.25.2603.03002; 1.1.0 bundles 1.23.2510.08001, which never asks. No 1.2 build has the crash fix without the new query. After `resize`, 1.25 writes `ESC[6n` and withholds the shell's input until a terminal answers `ESC[<r>;<c>R`. Real worker, Git Bash, 2026-11-09:
+
+| answers to the query | what happened |
+|---|---|
+| one (one attached xterm) | consumed by ConPTY: redraw 30 ms later, the next command ran clean |
+| two (two attached xterms; the companion's xterm answers CPR too, `terminal.dart` `cursorPosition`) | the extra answer reached bash as typed text: `bash: 3Recho: command not found` |
+| none (resize with no xterm attached) | ConPTY re-asked every ~0.5 s and a typed `echo` had not run 1.5 s later; the suite's bare-WS viewers lost their typed `stty size` probe this way |
+
+The suite showed it: on beta.18 (reply on or off) mobile-compose-bar (app.html's xterm.js sent `ESC[3;3R` as unprompted input, 7 tests) and terminal-size (#146 probe eaten) failed; both pass on 1.1.0.
+
+**1.2 also starts the child asynchronously.** `term.pid` is 0 for ~50 ms after `pty.spawn` (43-62 ms measured) until ConPTY's output pipe connects; 1.1.0 has it at spawn. hot-reload (PTY pid survives) and resources-api (a new session has a reading) failed on it.
+
+**Decision (owner, 2026-11-09): do not ship.** node-pty is pinned EXACTLY `1.1.0` (the old `^1.0.0` would let a fresh install take a stable 1.2), and `tests/node-pty-pin.spec.js` fails on any other pin in `package.json` or the lockfile, naming the reason. The worker keeps not answering DA1, so the 1.1.0 crash stays at master's churn rate. An upgrade needs a worker-side plan for the resize query first (one answer per query whatever the number of viewers, and an answer, or no resize, when none is attached), plus the pid wait. The trial (node-pty 1.2.0-beta.18 + the reply + the pid wait) is kept on branch `fix/418-da1-reply`, never merged.
