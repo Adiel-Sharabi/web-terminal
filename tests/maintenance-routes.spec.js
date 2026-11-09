@@ -43,6 +43,16 @@ test.describe('#359 restart hold - server', () => {
   const rowOf = async (id) => (await (await ctx.get('/api/sessions')).json()).find((s) => s.id === id);
   const status = async () => (await ctx.get('/api/maintenance/status')).json();
   const verdictOf = async (id) => (await status()).sessions.find((s) => s.id === id);
+  // #440: wait for a verdict, and on a timeout SAY what it was - "timed out" alone left
+  // a CI failure with nothing to go on.
+  async function untilVerdict(id, pred, what, ms) {
+    let last;
+    try {
+      return await until(async () => { last = await verdictOf(id); return last && pred(last) ? last : null; }, what, ms);
+    } catch (e) {
+      throw new Error(`${e.message}; last verdict: ${last ? `${last.state} - ${last.why}` : 'none'}`);
+    }
+  }
   async function make(name, data) {
     const r = await ctx.post('/api/sessions', { data: { name, ...data } });
     expect(r.status()).toBe(200);
@@ -237,7 +247,7 @@ test.describe('#359 restart hold - server', () => {
 
     // yes, with its turn over and nothing running -> ready, and the hold is safe.
     expect((await answer({ sessionId: agent, answer: 'yes' })).status()).toBe(200);
-    await until(async () => (await verdictOf(agent))?.state === 'ready', 'yes to make the agent ready');
+    await untilVerdict(agent, (v) => v.state === 'ready', 'yes to make the agent ready');
     expect((await status()).safeToRestart).toBe(true);
 
     // The CLI reports the same answer with the session's own $WT_SESSION_ID.
@@ -356,12 +366,20 @@ test.describe('#359 restart hold - server', () => {
     const setHold = (over) => ctx.post('/api/test/maintenance-state', { data: { hold: { reason: 'nudge spec', startedAt: now - 1000, bootAt: null, sessions: { [agent]: { ...entry, ...over } } } } });
     expect((await setHold({})).status()).toBe(200);
     // The tick stamps busySince once the process snapshot shows the work (a snapshot taken
-    // before it started reads empty, and clears it).
-    await until(async () => { const r = await verdictOf(agent); return r?.state === 'busy' && r.busySince; }, 'the work to be seen', 45000);
+    // before it started reads empty, and clears it). #440: wait for THE PING, not for any
+    // busy: a snapshot is served for its TTL, and one taken while the login shell drew its
+    // first prompt - before the launch started ping - shows only the prompt's own
+    // `$(__git_ps1)` subshells, so it reads busy with git.exe.
+    const PING = /^said yes, but still running: ping\.exe pid \d+ since \d\d:\d\d/i;
+    await untilVerdict(agent, (r) => r.state === 'busy' && r.busySince && PING.test(r.why), 'the ping to be seen', 45000);
     expect((await verdictOf(agent)).nudgedAt).toBeNull(); // seen just now: not yet
     // Backdate it past NUDGE_AFTER_MS: the next tick asks.
     expect((await setHold({ busySince: now - 400000 })).status()).toBe(200);
-    const v = await until(async () => { const r = await verdictOf(agent); return r?.nudgedAt ? r : null; }, 'the follow-up', 30000);
+    await untilVerdict(agent, (r) => r.nudgedAt, 'the follow-up', 30000);
+    // The follow-up is TYPED, so the shell redraws its prompt, and a snapshot taken during
+    // that redraw lists the prompt's subshells beside the ping's (#440). The verdict is
+    // rebuilt from each fresh snapshot, so it names the ping again within one TTL.
+    const v = await untilVerdict(agent, (r) => PING.test(r.why), 'status to name the ping after the follow-up', 30000);
     expect(v).toMatchObject({ state: 'busy', busySince: now - 400000 });
     expect(v.why).toMatch(/^said yes, but still running: ping\.exe pid \d+ since \d\d:\d\d; asked about it at \d\d:\d\d$/i);
     // Matched before column 80: the echoed line wraps past it.
