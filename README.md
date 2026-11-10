@@ -244,10 +244,10 @@ Tune it with a `handoff` block in `config.json` (`ctxThreshold`, default: the se
 context budget; `idleMin`, default 10; `staleSelfMin`, default 30: a reported "wake myself" wait with nothing running that could wake it (a background command, async subagent, Monitor, pending wake-up or cron job, or a live child session, #443) is stale after that long idle, so the hand-off takes it; `auto: false` to go back to the button only;
 `enabled: false` for neither), read live. Claude only: another agent is offered nothing.
 
-**Check-in on a lost self-wait (#443)** — a session that said it would resume on its own
+**Check-in on an idle session (#443, #458)** — a session that said it would resume on its own
 (`wait: self`) can lose whatever was meant to wake it: a watcher killed by a restart, a timer
 cut off by a compaction, a report another session never posts. Once such a session has been
-stale (nothing alive that could wake it, see `staleSelfMin` above) for another hour,
+stale (nothing alive that could wake it, see `staleSelfMin` above) for another half hour,
 web-terminal types **one** short, tagged question into it: are you finished (report wait
 `done`), or was a watcher lost (pick the work back up), or do you need the owner (report wait
 `you`)? The answer is the wait the session reports, not its prose. The session list and the
@@ -255,20 +255,25 @@ dashboard show it: "Checked in 14:02 → done", "→ resumed", "→ needs you", 
 running" when it reported self again with nothing to wake it. It is asked once per idle period:
 never again until the session has been active again. Never typed into a session that is
 working, compacting, booting, capped or armed to auto-resume, in a menu, asking you a question,
-waiting on you or on others, showing an API error, being handed off (or handed off and not
+waiting on you or reported done, showing an API error, being handed off (or handed off and not
 active since), under a restart hold, or that someone typed into in the last 10 minutes
 (counted from the server's start after a reload); never when its transcript cannot be read,
 because "nothing running" must be a reading, not a failed read; Claude only. The chat lens shows it as a **Check-in** system turn,
 never as "You". Every check-in and every answer is appended to `handoffs/check-in-log.jsonl`.
 On by default: a `checkIn` block in `config.json` turns it off fleet-wide (`enabled: false`) or
-tunes it (`afterMin`, default 60: minutes after the session became stale, so 90 min idle with
+tunes it (`afterMin`, default 30: minutes after the session became stale, so 60 min idle with
 the default `staleSelfMin`; `everyMs`, default 60000: at most one check-in per scan), and
 `PATCH /api/sessions/:id/brief` with `{"checkInOff": true}` turns it off for one session.
 Two more cases are asked even though something is still listed as running (#456), each in its own
 words: a lead whose child sessions have **all** stopped (finished, or waiting on someone - often
-on it), once the last of them and the lead have been idle 90 min, whatever its own watchers say;
-and, as a backstop, any reported self-wait idle `withLiveWorkMin` (default 180) minutes, because
-a running watcher is not proof it will ever fire. The log line records which case asked (`why`).
+on it), once the last of them and the lead have been idle 60 min, whatever its own watchers say;
+and, as a backstop, any reported self-wait idle `withLiveWorkMin` (default 60) minutes, because
+a running watcher is not proof it will ever fire. So every reported self-wait is asked at an idle
+hour, and raising `afterMin` alone delays nothing: raise `withLiveWorkMin` with it. A session that reported waiting on someone or something else (`external`: CI, a PR, another
+session) is asked too once idle `externalMin` (default 60) minutes (#458): what it waited for may
+have come without waking it; if it is still pending it reports `external` again, and one that
+reports nothing keeps its standing wait ("→ blocked on others"). A wait on you
+and a session that reported done are never asked. The log line records which case asked (`why`).
 
 **Resume by work item, on any machine** — a session's brief and its hand-off are named after
 the SESSION; the work is named after its **work item** (`ado:25309`, `#413`). Whenever a

@@ -117,15 +117,15 @@ test.describe('checkInBlock (#443)', () => {
     });
   }
 
-  test('waits on you, external or done are never stale; nor is self with a live waker', () => {
-    for (const on of ['you', 'external', 'done']) {
+  test('waits on you or done are never stale; nor is self with a live waker before the backstop', () => {
+    for (const on of ['you', 'done']) {
       const r = candidate();
       r.brief.wait = { ...r.brief.wait, on };
       expect(block({ ...r, reason: sessionReason(r) })).toBe('not-stale');
     }
     const live = candidate();
     live.backgroundTasks = [{ id: 'm1', kind: 'monitor', description: 'CI watcher', startedAt: T - 200 * MIN }];
-    expect(block({ ...live, reason: sessionReason(live) })).toBe('not-stale');
+    expect(block({ ...live, reason: sessionReason(live) }, { cfg: C.checkInConfig({ withLiveWorkMin: 500 }) })).toBe('not-stale');
     // A stale-flagged entry is not alive (milestone 1): the self-wait is stale again.
     const dead = candidate();
     dead.backgroundTasks = [{ id: 'b1', kind: 'command', description: 'build', startedAt: T - 900 * MIN, stale: true }];
@@ -136,19 +136,20 @@ test.describe('checkInBlock (#443)', () => {
     expect(block({ ...none, reason: sessionReason(none) })).toBe('not-stale');
   });
 
-  test('the threshold: afterMin past the point the self-wait went stale (default 30 + 60)', () => {
-    expect(C.DEFAULTS.afterMin).toBe(60);
+  test('the threshold: afterMin past the point the self-wait went stale (default 30 + 30, #458)', () => {
+    expect(C.DEFAULTS.afterMin).toBe(30);
     expect(H.handoffConfig(null).staleSelfMin).toBe(30);
-    expect(block(candidate(89))).toBe('recent');
-    expect(block(candidate(90))).toBeNull();
+    expect(block(candidate(59))).toBe('recent');
+    expect(block(candidate(60))).toBeNull();
     // 20 min idle is not even stale yet.
     expect(block(candidate(20))).toBe('not-stale');
-    // Both halves are configurable; bad values fall back.
-    expect(block(candidate(90), { cfg: C.checkInConfig({ afterMin: 120 }) })).toBe('recent');
+    // Both halves are configurable; bad values fall back. (The backstop is moved out of the
+    // way: by default it asks at the same hour, whatever afterMin says.)
+    expect(block(candidate(90), { cfg: C.checkInConfig({ afterMin: 120, withLiveWorkMin: 500 }) })).toBe('recent');
     expect(block(candidate(45), { cfg: C.checkInConfig({ afterMin: 10 }) })).toBeNull();
     expect(block(candidate(45), { hcfg: H.handoffConfig({ staleSelfMin: 60 }), cfg: C.checkInConfig({ afterMin: 10 }) })).toBe('not-stale');
-    expect(C.checkInConfig({ afterMin: -5 }).afterMin).toBe(60);
-    expect(C.checkInConfig({ afterMin: 'x' }).afterMin).toBe(60);
+    expect(C.checkInConfig({ afterMin: -5 }).afterMin).toBe(30);
+    expect(C.checkInConfig({ afterMin: 'x' }).afterMin).toBe(30);
   });
 
   test('someone typing in the last 10 minutes defers it', () => {
@@ -169,7 +170,7 @@ test.describe('checkInBlock (#443)', () => {
     expect(worth(e({ checkInOff: true }))).toBe(false);
     expect(worth(e({ reported: { wait: { on: 'done', at: T - 121 * MIN } } }))).toBe(false);
     expect(worth(e({ reported: null }))).toBe(false);
-    expect(worth(e({ stoppedAt: T - 80 * MIN }))).toBe(false);
+    expect(worth(e({ stoppedAt: T - 50 * MIN }))).toBe(false);
     expect(worth(e({ stoppedAt: T - 130 * MIN }))).toBe(false); // a turn running (stoppedAt < turnAt)
     expect(worth(e({ checkIn: C.startRecord(T - 10 * MIN, 110) }))).toBe(false);
     expect(worth(null)).toBe(false);
@@ -387,33 +388,38 @@ test.describe('a self-wait whose live work cannot wake it (#456)', () => {
   const why = (row, over = {}) => C.checkInReading(row, { now: T, ...over });
 
   test('the old reading is named: a stale self-wait with nothing alive', () => {
-    expect(why(candidate(90))).toBe('stale-self');
-    expect(why(candidate(89))).toBeNull();
+    expect(why(candidate(60))).toBe('stale-self');
+    expect(why(candidate(59))).toBeNull();
   });
 
   test('children parked: every child stopped, so the lead is asked despite its watcher', () => {
+    // The backstop moved out of the way (by default it asks at the same hour, #458), so
+    // this reading is pinned on its own.
+    const cfg = C.checkInConfig({ withLiveWorkMin: 10000 });
     const r = lead(120);
     expect(r.reason).toMatchObject({ kind: 'self', source: 'background' });
-    // Today's behaviour without children: live work, not stale.
-    expect(block(r)).toBe('not-stale');
+    // Without children: live work, not stale.
+    expect(block(r, { cfg })).toBe('not-stale');
     const kids = [parked(100), parked(95)];
-    expect(block(r, { children: kids })).toBeNull();
+    expect(block(r, { cfg, children: kids })).toBeNull();
+    expect(why(r, { cfg, children: kids })).toBe('children-parked');
+    // At the default backstop too, the words are the children's.
     expect(why(r, { children: kids })).toBe('children-parked');
     // Break each condition ALONE.
-    expect(block(r, { children: [parked(100), { live: true, endedAt: T - 95 * MIN }] })).toBe('not-stale');
-    expect(block(r, { children: [parked(100), parked(89)] })).toBe('not-stale');  // the last child stopped too recently
-    expect(block(lead(89), { children: kids })).toBe('not-stale');                // the lead itself too recently
-    expect(block(r, { children: [] })).toBe('not-stale');                         // no children: nothing parked
-    expect(block(r, { children: [parked(100), { live: false, endedAt: null }] })).toBe('not-stale'); // unknown end: fail closed
+    expect(block(r, { cfg, children: [parked(100), { live: true, endedAt: T - 95 * MIN }] })).toBe('not-stale');
+    expect(block(r, { cfg, children: [parked(100), parked(59)] })).toBe('not-stale');  // the last child stopped too recently
+    expect(block(lead(59), { cfg, children: kids })).toBe('not-stale');                // the lead itself too recently
+    expect(block(r, { cfg, children: [] })).toBe('not-stale');                         // no children: nothing parked
+    expect(block(r, { cfg, children: [parked(100), { live: false, endedAt: null }] })).toBe('not-stale'); // unknown end: fail closed
     // Same clock as the stale-self reading: staleSelfMin + afterMin.
-    expect(block(r, { children: kids, cfg: C.checkInConfig({ afterMin: 70 }) })).toBe('not-stale');
+    expect(block(r, { children: kids, cfg: C.checkInConfig({ afterMin: 70, withLiveWorkMin: 10000 }) })).toBe('not-stale');
   });
 
-  test('the backstop: a self-wait idle withLiveWorkMin (default 180) is asked even with live work', () => {
-    expect(C.DEFAULTS.withLiveWorkMin).toBe(180);
-    expect(block(lead(179))).toBe('not-stale');
-    expect(block(lead(180))).toBeNull();
-    expect(why(lead(180))).toBe('long-self');
+  test('the backstop: a self-wait idle withLiveWorkMin (default 60, #458) is asked even with live work', () => {
+    expect(C.DEFAULTS.withLiveWorkMin).toBe(60);
+    expect(block(lead(59))).toBe('not-stale');
+    expect(block(lead(60))).toBeNull();
+    expect(why(lead(60))).toBe('long-self');
     // A live child is live work like any other: the backstop still asks.
     const kid = lead(200);
     expect(block(kid, { children: [{ live: true, endedAt: null }] })).toBeNull();
@@ -425,12 +431,12 @@ test.describe('a self-wait whose live work cannot wake it (#456)', () => {
     // so the words never claim work is listed as running.
     expect(why(candidate(35), { cfg: C.checkInConfig({ withLiveWorkMin: 20 }) })).toBe('stale-self');
     expect(why(lead(35), { cfg: C.checkInConfig({ withLiveWorkMin: 20 }) })).toBe('long-self');
-    expect(C.checkInConfig({ withLiveWorkMin: 0 }).withLiveWorkMin).toBe(180);
-    expect(C.checkInConfig({ withLiveWorkMin: 'x' }).withLiveWorkMin).toBe(180);
+    expect(C.checkInConfig({ withLiveWorkMin: 0 }).withLiveWorkMin).toBe(60);
+    expect(C.checkInConfig({ withLiveWorkMin: 'x' }).withLiveWorkMin).toBe(60);
   });
 
-  test('only a REPORTED self-wait: you, external, done or no report are never asked, however long', () => {
-    for (const on of ['you', 'external', 'done']) {
+  test('only a REPORTED self or external wait: you, done or no report are never asked, however long', () => {
+    for (const on of ['you', 'done']) {
       const r = lead(600);
       r.brief.wait = { ...r.brief.wait, on };
       const row = { ...r, reason: sessionReason(r) };
@@ -456,8 +462,8 @@ test.describe('a self-wait whose live work cannot wake it (#456)', () => {
     const e = (stoppedMin) => ({ turnAt: T - (stoppedMin + 5) * MIN, stoppedAt: T - stoppedMin * MIN,
       reported: { wait: { on: 'self', what: 'x', at: T - stoppedMin * MIN - 1000 } }, checkIn: null });
     const late = { cfg: C.checkInConfig({ afterMin: 300 }) };
-    expect(C.worthReading(e(179), { now: T, ...late })).toBe(false);
-    expect(C.worthReading(e(180), { now: T, ...late })).toBe(true);  // the backstop comes first here
+    expect(C.worthReading(e(59), { now: T, ...late })).toBe(false);
+    expect(C.worthReading(e(60), { now: T, ...late })).toBe(true);  // the backstop comes first here
   });
 
   test('each reading asks in its own words, never claiming nothing runs when something does', () => {
@@ -489,5 +495,102 @@ test.describe('a self-wait whose live work cannot wake it (#456)', () => {
     expect(rec.why).toBe('long-self');
     expect(C.startRecord(T, 95).why).toBe('stale-self');
     expect(C.logRecord('sent', 's1', rec, T)).toMatchObject({ event: 'sent', why: 'long-self' });
+  });
+});
+
+// #458 - the owner's call: an idle hour is the point to ask, and a session waiting on
+// someone else may have missed what it waited for, as surely as a self-wait's waker. Every
+// reported self-wait is asked at an idle hour (the readings above only pick the words), an
+// external wait too; a wait on the owner and a session that reported done never are.
+test.describe('an external wait idle an hour is asked too (#458)', () => {
+  /** A session that reported waiting on someone else [idleMin] ago. */
+  function ext(idleMin = 120, over = {}) {
+    const r = candidate(idleMin);
+    r.brief.wait = { on: 'external', what: 'PR review by the platform team', at: T - idleMin * MIN - 1000 };
+    Object.assign(r, over);
+    return { ...r, reason: sessionReason(r) };
+  }
+  const why = (row, over = {}) => C.checkInReading(row, { now: T, ...over });
+
+  test('asked at externalMin (default 60), not before', () => {
+    expect(C.DEFAULTS.externalMin).toBe(60);
+    expect(block(ext(59))).toBe('not-stale');
+    expect(block(ext(60))).toBeNull();
+    expect(why(ext(60))).toBe('external');
+    // Configurable; bad values fall back.
+    expect(block(ext(100), { cfg: C.checkInConfig({ externalMin: 120 }) })).toBe('not-stale');
+    expect(block(ext(30), { cfg: C.checkInConfig({ externalMin: 20 }) })).toBeNull();
+    expect(C.checkInConfig({ externalMin: 0 }).externalMin).toBe(60);
+    expect(C.checkInConfig({ externalMin: 'x' }).externalMin).toBe(60);
+  });
+
+  test('its own clock: the self-wait clocks do not move it, nor it them', () => {
+    const fast = C.checkInConfig({ afterMin: 1, withLiveWorkMin: 1 });
+    expect(block(ext(40), { cfg: fast, hcfg: H.handoffConfig({ staleSelfMin: 1 }) })).toBe('not-stale');
+    expect(block(candidate(60), { cfg: C.checkInConfig({ externalMin: 500 }) })).toBeNull();
+  });
+
+  test('live work and children do not hold it back: it waits on neither', () => {
+    const busy = ext(90, { backgroundTasks: [{ id: 'w1', kind: 'monitor', description: 'PR watcher', startedAt: T - 90 * MIN }] });
+    expect(block(busy, { children: [{ live: true, endedAt: null }] })).toBeNull();
+    expect(why(busy, { children: [{ live: true, endedAt: null }] })).toBe('external');
+  });
+
+  test('every earlier gate still says no first, and it is asked once per idle period', () => {
+    const r = ext(600);
+    expect(block({ ...r, waitingFor: { kind: 'question' } })).toBe('waiting');
+    expect(block({ ...r, status: 'working' })).toBe('not-idle');
+    expect(block(r, { inputAt: T - 2 * MIN })).toBe('typing');
+    expect(block(r, { liveKnown: false })).toBe('cannot-tell');
+    expect(block({ ...r, brief: { ...r.brief, checkInOff: true } })).toBe('off');
+    // Answered "external" again: the period stays open until a later turn starts.
+    const rec = { ...C.startRecord(T - 30 * MIN, 570, 'external'), deliveredAt: T - 29 * MIN, endedAt: T - 28 * MIN,
+      answer: { on: 'external', what: 'still in review' } };
+    const asked = { ...r, brief: { ...r.brief, checkIn: rec, turnAt: T - 29 * MIN, stoppedAt: T - 28 * MIN } };
+    expect(block(asked)).toBe('asked');
+    expect(C.outcome(rec, asked, T)).toBe('external');
+  });
+
+  test('the cheap pre-filter lets an external wait through on its own clock, never you or done', () => {
+    const e = (on, stoppedMin) => ({ turnAt: T - (stoppedMin + 5) * MIN, stoppedAt: T - stoppedMin * MIN,
+      reported: { wait: { on, what: 'x', at: T - stoppedMin * MIN - 1000 } }, checkIn: null });
+    expect(C.worthReading(e('external', 59), { now: T })).toBe(false);
+    expect(C.worthReading(e('external', 60), { now: T })).toBe(true);
+    const cfg = C.checkInConfig({ externalMin: 120, afterMin: 1, withLiveWorkMin: 1 });
+    expect(C.worthReading(e('external', 100), { now: T, cfg })).toBe(false);
+    expect(C.worthReading(e('self', 100), { now: T, cfg })).toBe(true);
+    for (const on of ['you', 'done']) expect(C.worthReading(e(on, 600), { now: T })).toBe(false);
+  });
+
+  test('asks in its own words: waiting on someone else, and how to say it still is', () => {
+    const p = C.checkInPrompt({ idleMin: 75, what: 'PR review', why: 'external' });
+    expect(p.startsWith(CHECKIN_PROMPT_TAG)).toBe(true);
+    expect(p).toContain('waiting on someone or something else ("PR review")');
+    expect(p).not.toContain('resume on your own');
+    expect(p).not.toContain('nothing that could wake you is running');
+    // An external wait can stand across turns that DID wake the session (a task
+    // notification ends only a self-wait), so its words never claim nothing woke it.
+    expect(p).not.toMatch(/woken/);
+    for (const w of ['report wait external', 'report wait done', 'report wait you', 'pick the work back up']) expect(p).toContain(w);
+    expect(p).not.toMatch(/[\r\n]/);
+    expect(classifyUserTurn(p).kind).toBe(USER_KINDS.SYSTEM);
+    // The self readings keep their words.
+    for (const w of ['stale-self', 'children-parked', 'long-self']) expect(C.checkInPrompt({ idleMin: 75, why: w })).toContain('resume on your own');
+    const worst = C.checkInPrompt({ idleMin: 99999, what: `"\n${'א…'.repeat(200)}`, why: 'external' });
+    expect(Buffer.byteLength(worst)).toBeLessThanOrEqual(511);
+    expect(worst).toContain('report wait external');
+  });
+
+  test('no report to an external check-in: the wait still standing is the state, never "still nothing running"', () => {
+    const r = ext(600);
+    const rec = (why) => ({ ...C.startRecord(T - 30 * MIN, 570, why), deliveredAt: T - 29 * MIN, endedAt: T - 28 * MIN, answer: null });
+    const row = (why, wait = r.brief.wait) => ({ ...r, brief: { ...r.brief, wait, checkIn: C.publicRecord(rec(why)), turnAt: T - 29 * MIN, stoppedAt: T - 28 * MIN } });
+    // The published record carries the reading, so the row's field can tell.
+    expect(C.publicRecord(rec('external')).why).toBe('external');
+    expect(C.checkInField(row('external'), { now: T, supported: true }).state).toBe('external');
+    // Break each half alone: a self reading, or the wait no longer external, is stuck as before.
+    expect(C.checkInField(row('stale-self'), { now: T, supported: true }).state).toBe('stuck');
+    expect(C.checkInField(row('external', null), { now: T, supported: true }).state).toBe('stuck');
+    expect(C.checkInField(row('external', { ...r.brief.wait, on: 'self' }), { now: T, supported: true }).state).toBe('stuck');
   });
 });

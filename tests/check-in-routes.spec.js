@@ -280,6 +280,28 @@ test.describe('#443 check-in - server', () => {
     await until(async () => (await rowOf(parent))?.checkIn, 'the parent\'s check-in once the child is gone');
   });
 
+  test('#458 an external wait is asked in its own words; a wait on you or done never is', async () => {
+    const stamp = Date.now();
+    const ext = await endedTurn(`checkin-ext-${stamp}`, { on: 'external', what: 'PR review by the platform team' });
+    const you = await endedTurn(`checkin-you-${stamp}`, { on: 'you', what: 'pick a threshold' });
+    const done = await endedTurn(`checkin-fin-${stamp}`, { on: 'done', what: 'all merged' });
+    await setConfig({ ...FAST, checkIn: { ...FAST.checkIn, externalMin: 0.01 } });
+    await until(async () => (await rowOf(ext))?.checkIn, 'a check-in on the external wait');
+    const sb = await until(async () => { const t = await scrollback(ext); return t.includes(TAG) ? t : null; }, 'the check-in in the terminal');
+    expect(sb).toContain('waiting on someone or something else');
+    expect(sb).toContain('PR review by the platform team');
+    expect(sb).toContain('report wait external');
+    expect(logOf(ext).filter((l) => l.event === 'sent')).toMatchObject([{ why: 'external' }]);
+    // One check-in per scan, every 300 ms: well past the scans that would have reached them.
+    await sleep(4000);
+    for (const id of [you, done]) {
+      expect((await rowOf(id)).checkIn).toBeNull();
+      expect(await scrollback(id)).not.toContain(TAG);
+      expect(logOf(id)).toHaveLength(0);
+    }
+    expect(logOf(ext).filter((l) => l.event === 'sent')).toHaveLength(1);
+  });
+
   test('the per-session and the fleet off switches each mean none at all', async () => {
     const id = await endedTurn(`checkin-off-${Date.now()}`, { on: 'self', what: 'x' });
     expect((await ctx.patch(`/api/sessions/${id}/brief`, { data: { checkInOff: 'yes' } })).status()).toBe(400);
