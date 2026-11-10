@@ -325,6 +325,40 @@ test.describe('addChildWork - a live child is live work for its parent', () => {
   });
 });
 
+// #456 - the check-in asks a lead whose children have ALL stopped. It reads the SAME
+// verdict addChildWork appends, per direct child, live or not.
+test.describe('childVerdicts - each direct child, live or parked, by the one rule (#456)', () => {
+  const verdicts = (rows, pid) => B.childVerdicts(rows, pid).map((v) => [v.row.id, v.live]);
+
+  test('direct children only, each with addChildWork\'s verdict', () => {
+    const rows = [row('P'),
+      childOf('W', 'P', { status: 'working' }),
+      childOf('D', 'P'),                                                       // idle, nothing running
+      childOf('B', 'P', { backgroundTasks: [{ id: 'b1', kind: 'command' }] }), // idle with its own work
+      childOf('G', 'P'), childOf('GG', 'G', { status: 'working' }),           // idle with a live child
+      childOf('S', 'P', { backgroundTasks: [{ id: 'b2', kind: 'command', stale: true }] })];
+    expect(verdicts(rows, 'P')).toEqual([['W', true], ['D', false], ['B', true], ['G', true], ['S', false]]);
+    // The grandchild is G's, not P's.
+    expect(verdicts(rows, 'G')).toEqual([['GG', true]]);
+  });
+
+  test('no children, an unknown parent, a cycle', () => {
+    expect(B.childVerdicts([row('P')], 'P')).toEqual([]);
+    expect(B.childVerdicts([row('P')], 'nope')).toEqual([]);
+    expect(B.childVerdicts(null, 'P')).toEqual([]);
+    const cyc = [row('P'), childOf('A', 'P'), childOf('X', 'Y'), childOf('Y', 'X')];
+    expect(verdicts(cyc, 'P')).toEqual([['A', false]]);
+    expect(verdicts(cyc, 'X')).toEqual([['Y', false]]);
+  });
+
+  test('agrees with addChildWork on the same rows', () => {
+    const rows = [row('P'), childOf('W', 'P', { status: 'waiting' }), childOf('D', 'P')];
+    const v = verdicts(rows, 'P');
+    B.addChildWork(rows);
+    expect(childIds(rows[0])).toEqual(v.filter(([, live]) => live).map(([id]) => `child-${id}`));
+  });
+});
+
 // --- the consumers: the reason row and #437's stale-self rule read every kind --------------
 test.describe('consumers - a self-wait with any live kind is not stale', () => {
   const cfg = H.handoffConfig(null);
