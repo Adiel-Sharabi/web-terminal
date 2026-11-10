@@ -421,6 +421,10 @@ test.describe('a self-wait whose live work cannot wake it (#456)', () => {
     // Configurable; bad values fall back.
     expect(block(lead(200), { cfg: C.checkInConfig({ withLiveWorkMin: 240 }) })).toBe('not-stale');
     expect(block(lead(130), { cfg: C.checkInConfig({ withLiveWorkMin: 120 }) })).toBeNull();
+    // A backstop shorter than the stale-self clock: nothing alive still reads stale-self,
+    // so the words never claim work is listed as running.
+    expect(why(candidate(35), { cfg: C.checkInConfig({ withLiveWorkMin: 20 }) })).toBe('stale-self');
+    expect(why(lead(35), { cfg: C.checkInConfig({ withLiveWorkMin: 20 }) })).toBe('long-self');
     expect(C.checkInConfig({ withLiveWorkMin: 0 }).withLiveWorkMin).toBe(180);
     expect(C.checkInConfig({ withLiveWorkMin: 'x' }).withLiveWorkMin).toBe(180);
   });
