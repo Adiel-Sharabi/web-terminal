@@ -212,9 +212,51 @@ test.describe('#443 check-in - server', () => {
       expect(row.checkIn).toBeNull();
       expect(await scrollback(id)).not.toContain(TAG);
       expect(logOf(id)).toHaveLength(0);
+      // #456 - the backstop: past withLiveWorkMin it IS asked, live waker or not, in words
+      // that do not claim nothing is running.
+      await setConfig({ ...FAST, checkIn: { ...FAST.checkIn, withLiveWorkMin: 0.02 } });
+      await until(async () => (await rowOf(id))?.checkIn, 'the backstop check-in');
+      const sb = await until(async () => { const t = await scrollback(id); return t.includes(TAG) ? t : null; }, 'the check-in in the terminal');
+      expect(sb).toContain('still listed as running');
+      expect(logOf(id).filter((l) => l.event === 'sent')).toEqual([expect.objectContaining({ why: 'long-self' })]);
     } finally {
       fs.rmSync(dir, { recursive: true, force: true });
     }
+  });
+
+  test('#456 a lead whose watcher still runs is asked once every child has stopped', async () => {
+    // The night of 2026-11-09: the lead's watcher ran all night and saw nothing; its
+    // children had finished and were waiting on it.
+    const at = Date.now() - 60 * 1000;
+    const watcher = transcript('lead', [
+      JSON.stringify({ type: 'assistant', timestamp: iso(at), message: { role: 'assistant', content: [{ type: 'tool_use', id: 'tu_w', name: 'Monitor', input: { command: 'node w.js', description: 'watch my workers', timeout_ms: 3600000 } }] } }),
+      JSON.stringify({ type: 'user', timestamp: iso(at + 1000), message: { role: 'user', content: [{ type: 'tool_result', tool_use_id: 'tu_w', content: 'Monitor started (task cw1).' }] }, toolUseResult: { taskId: 'cw1', timeoutMs: 3600000, persistent: false } }),
+    ]);
+    const lead = await endedTurn(`checkin-lead-${Date.now()}`, { on: 'self', what: 'my workers' }, watcher);
+    const cr = await ctx.post('/api/sessions', { data: { name: `checkin-worker-${Date.now()}`, agent: 'claude', autoCommand: LAUNCH, parentId: lead } });
+    expect(cr.status()).toBe(200);
+    const child = (await cr.json()).id;
+    made.push(child);
+    await until(async () => (await rowOf(child))?.agentReady === true, 'the child to be ready');
+    const childTp = transcript('worker');
+    // The child mid-turn: live, so the lead has a live waker beside its watcher - not asked.
+    const conv = crypto.randomUUID();
+    expect(await hook(child, 'UserPromptSubmit', { session_id: conv, prompt: 'build it', transcript_path: childTp })).toBe(200);
+    await until(async () => ((await rowOf(lead))?.backgroundTasks || []).some((t) => t.id === 'cw1'), 'the watcher to be live work');
+    await setConfig(FAST);
+    await sleep(4000);
+    expect((await rowOf(lead)).checkIn).toBeNull();
+    expect(await scrollback(lead)).not.toContain(TAG);
+    // The child stops, waiting on its lead. The watcher still runs - and the lead is asked.
+    expect(await report(child, { on: 'external', what: 'lead starts the next step' })).toBe(200);
+    expect(await hook(child, 'Stop', { session_id: conv, transcript_path: childTp })).toBe(200);
+    await until(async () => (await rowOf(lead))?.checkIn, 'the lead\'s check-in');
+    expect(((await rowOf(lead)).backgroundTasks || []).some((t) => t.id === 'cw1')).toBe(true);
+    const sb = await until(async () => { const t = await scrollback(lead); return t.includes(TAG) ? t : null; }, 'the check-in in the terminal');
+    expect(sb).toContain('child session');
+    expect(logOf(lead).filter((l) => l.event === 'sent')).toEqual([expect.objectContaining({ why: 'children-parked' })]);
+    // The child itself reported external: never asked.
+    expect((await rowOf(child)).checkIn).toBeNull();
   });
 
   test('fails closed through children: a child whose work cannot be read blocks its parent\'s check-in', async () => {

@@ -264,6 +264,11 @@ On by default: a `checkIn` block in `config.json` turns it off fleet-wide (`enab
 tunes it (`afterMin`, default 60: minutes after the session became stale, so 90 min idle with
 the default `staleSelfMin`; `everyMs`, default 60000: at most one check-in per scan), and
 `PATCH /api/sessions/:id/brief` with `{"checkInOff": true}` turns it off for one session.
+Two more cases are asked even though something is still listed as running (#456), each in its own
+words: a lead whose child sessions have **all** stopped (finished, or waiting on someone - often
+on it), once the last of them and the lead have been idle 90 min, whatever its own watchers say;
+and, as a backstop, any reported self-wait idle `withLiveWorkMin` (default 180) minutes, because
+a running watcher is not proof it will ever fire. The log line records which case asked (`why`).
 
 **Resume by work item, on any machine** — a session's brief and its hand-off are named after
 the SESSION; the work is named after its **work item** (`ado:25309`, `#413`). Whenever a

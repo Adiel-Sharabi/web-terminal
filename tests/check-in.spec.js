@@ -368,6 +368,122 @@ test.describe('the published field (#443)', () => {
   test('the log line names the event, the session and the answer', () => {
     const rec = { ...C.startRecord(sent, 125), answer: { on: 'done', what: '' } };
     expect(C.logRecord('answered', 's1', rec, T, { name: 'n' })).toEqual({
-      at: new Date(T).toISOString(), event: 'answered', id: 's1', sentAt: sent, idleMin: 125, answer: 'done', name: 'n' });
+      at: new Date(T).toISOString(), event: 'answered', id: 's1', sentAt: sent, idleMin: 125, why: 'stale-self', answer: 'done', name: 'n' });
+  });
+});
+
+// #456 - a self-wait whose live work cannot wake it. Night of 2026-11-09: a lead waited on
+// child sessions that had all finished and were waiting on IT, while its own watcher (a
+// background command whose filter swallowed every event) kept it "live" for 7.5 h. Two more
+// readings may ask; each is pinned by breaking it ALONE, and the old gates still hold.
+test.describe('a self-wait whose live work cannot wake it (#456)', () => {
+  /** The night's lead: self-wait [idleMin] ago, a background watcher still running. */
+  function lead(idleMin = 120) {
+    const r = candidate(idleMin);
+    r.backgroundTasks = [{ id: 'w1', kind: 'command', description: 'Wait for the next worker event', startedAt: T - idleMin * MIN }];
+    return { ...r, reason: sessionReason(r) };
+  }
+  const parked = (endedMinAgo) => ({ live: false, endedAt: T - endedMinAgo * MIN });
+  const why = (row, over = {}) => C.checkInReading(row, { now: T, ...over });
+
+  test('the old reading is named: a stale self-wait with nothing alive', () => {
+    expect(why(candidate(90))).toBe('stale-self');
+    expect(why(candidate(89))).toBeNull();
+  });
+
+  test('children parked: every child stopped, so the lead is asked despite its watcher', () => {
+    const r = lead(120);
+    expect(r.reason).toMatchObject({ kind: 'self', source: 'background' });
+    // Today's behaviour without children: live work, not stale.
+    expect(block(r)).toBe('not-stale');
+    const kids = [parked(100), parked(95)];
+    expect(block(r, { children: kids })).toBeNull();
+    expect(why(r, { children: kids })).toBe('children-parked');
+    // Break each condition ALONE.
+    expect(block(r, { children: [parked(100), { live: true, endedAt: T - 95 * MIN }] })).toBe('not-stale');
+    expect(block(r, { children: [parked(100), parked(89)] })).toBe('not-stale');  // the last child stopped too recently
+    expect(block(lead(89), { children: kids })).toBe('not-stale');                // the lead itself too recently
+    expect(block(r, { children: [] })).toBe('not-stale');                         // no children: nothing parked
+    expect(block(r, { children: [parked(100), { live: false, endedAt: null }] })).toBe('not-stale'); // unknown end: fail closed
+    // Same clock as the stale-self reading: staleSelfMin + afterMin.
+    expect(block(r, { children: kids, cfg: C.checkInConfig({ afterMin: 70 }) })).toBe('not-stale');
+  });
+
+  test('the backstop: a self-wait idle withLiveWorkMin (default 180) is asked even with live work', () => {
+    expect(C.DEFAULTS.withLiveWorkMin).toBe(180);
+    expect(block(lead(179))).toBe('not-stale');
+    expect(block(lead(180))).toBeNull();
+    expect(why(lead(180))).toBe('long-self');
+    // A live child is live work like any other: the backstop still asks.
+    const kid = lead(200);
+    expect(block(kid, { children: [{ live: true, endedAt: null }] })).toBeNull();
+    expect(why(kid, { children: [{ live: true, endedAt: null }] })).toBe('long-self');
+    // Configurable; bad values fall back.
+    expect(block(lead(200), { cfg: C.checkInConfig({ withLiveWorkMin: 240 }) })).toBe('not-stale');
+    expect(block(lead(130), { cfg: C.checkInConfig({ withLiveWorkMin: 120 }) })).toBeNull();
+    expect(C.checkInConfig({ withLiveWorkMin: 0 }).withLiveWorkMin).toBe(180);
+    expect(C.checkInConfig({ withLiveWorkMin: 'x' }).withLiveWorkMin).toBe(180);
+  });
+
+  test('only a REPORTED self-wait: you, external, done or no report are never asked, however long', () => {
+    for (const on of ['you', 'external', 'done']) {
+      const r = lead(600);
+      r.brief.wait = { ...r.brief.wait, on };
+      const row = { ...r, reason: sessionReason(r) };
+      expect(block(row, { children: [parked(500)] })).toBe('not-stale');
+    }
+    const none = lead(600);
+    none.brief.wait = null;
+    expect(block({ ...none, reason: sessionReason(none) }, { children: [parked(500)] })).toBe('not-stale');
+  });
+
+  test('every earlier gate still says no first', () => {
+    const r = lead(600);
+    const kids = [parked(500)];
+    expect(block({ ...r, waitingFor: { kind: 'question' } }, { children: kids })).toBe('waiting');
+    expect(block({ ...r, status: 'working' }, { children: kids })).toBe('not-idle');
+    expect(block(r, { children: kids, inputAt: T - 2 * MIN })).toBe('typing');
+    expect(block(r, { children: kids, liveKnown: false })).toBe('cannot-tell');
+    expect(block({ ...r, brief: { ...r.brief, checkIn: C.startRecord(T - 10 * MIN, 590) } }, { children: kids })).toBe('asked');
+    expect(block({ ...r, brief: { ...r.brief, checkInOff: true } }, { children: kids })).toBe('off');
+  });
+
+  test('the cheap pre-filter lets through whatever the earliest reading could allow', () => {
+    const e = (stoppedMin) => ({ turnAt: T - (stoppedMin + 5) * MIN, stoppedAt: T - stoppedMin * MIN,
+      reported: { wait: { on: 'self', what: 'x', at: T - stoppedMin * MIN - 1000 } }, checkIn: null });
+    const late = { cfg: C.checkInConfig({ afterMin: 300 }) };
+    expect(C.worthReading(e(179), { now: T, ...late })).toBe(false);
+    expect(C.worthReading(e(180), { now: T, ...late })).toBe(true);  // the backstop comes first here
+  });
+
+  test('each reading asks in its own words, never claiming nothing runs when something does', () => {
+    const stale = C.checkInPrompt({ idleMin: 95, what: 'w', why: 'stale-self' });
+    expect(stale).toBe(C.checkInPrompt({ idleMin: 95, what: 'w' })); // the default reading is unchanged
+    expect(stale).toContain('nothing that could wake you is running');
+    const kids = C.checkInPrompt({ idleMin: 120, what: 'workers', why: 'children-parked' });
+    const long = C.checkInPrompt({ idleMin: 200, what: 'watcher', why: 'long-self' });
+    for (const p of [kids, long]) {
+      expect(p.startsWith(CHECKIN_PROMPT_TAG)).toBe(true);
+      expect(p).not.toContain('nothing that could wake you is running');
+      expect(p).toContain('report wait done');
+      expect(p).toContain('report wait you');
+      expect(p).not.toMatch(/[\r\n]/);
+      expect(classifyUserTurn(p).kind).toBe(USER_KINDS.SYSTEM);
+    }
+    expect(kids).toContain('child session');
+    expect(long).toContain('3 h');
+    expect(long).toContain('still listed as running');
+    for (const w of ['children-parked', 'long-self']) {
+      const worst = C.checkInPrompt({ idleMin: 99999, what: `"\n${'א…'.repeat(200)}`, why: w });
+      expect(Buffer.byteLength(worst)).toBeLessThanOrEqual(511);
+      expect(worst).toContain('report wait you');
+    }
+  });
+
+  test('the record and the log line carry the reading', () => {
+    const rec = C.startRecord(T, 200, 'long-self');
+    expect(rec.why).toBe('long-self');
+    expect(C.startRecord(T, 95).why).toBe('stale-self');
+    expect(C.logRecord('sent', 's1', rec, T)).toMatchObject({ event: 'sent', why: 'long-self' });
   });
 });
