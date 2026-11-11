@@ -1738,10 +1738,13 @@ class _SessionScreenState extends State<SessionScreen>
     // whose polls all failed, must not offer a blind replay. Only a positive
     // gone-or-different observation clears it ([settleAfterAnswer], the 4 s poll).
     _questionDrafts.markSent(answeredKey, frames);
-    // The one pacing loop, shared with the sessions board (#337).
-    final sent = await deliverAnswerFrames(
+    // The server types it (#271): an app pause mid-answer used to null this screen's
+    // connection and lose the keys after it. Shared with the sessions board (#337).
+    final api = _api;
+    final sent = await deliverAnswer(
       frames,
-      (keys) => _connection?.sendInput(keys),
+      post: api == null ? null : (wire) => api.postAnswer(widget.sessionId, wire),
+      send: (keys) => _connection?.sendInput(keys),
       alive: () => mounted,
     );
     // `sent` is false only when this screen unmounted mid-send; with no connection
@@ -1806,7 +1809,12 @@ class _SessionScreenState extends State<SessionScreen>
       poll: () => api.pendingQuestion(widget.sessionId),
       resend: () {
         _finishTerminalComposing();
-        _connection?.sendInput('\r');
+        // Through the server too (#271): the pause that lost the Enter would lose this.
+        unawaited(deliverAnswer(
+          const [AnswerFrame('\r', 0)],
+          post: (wire) => api.postAnswer(widget.sessionId, wire),
+          send: (keys) => _connection?.sendInput(keys),
+        ));
       },
       alive: () => mounted,
       attempts: _answerVerifyAttempts,

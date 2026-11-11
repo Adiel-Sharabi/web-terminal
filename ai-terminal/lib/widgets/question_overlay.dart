@@ -533,6 +533,44 @@ Future<bool> deliverAnswerFrames(
   return true;
 }
 
+/// Hands [frames] to the SERVER to type ([post], `POST /api/sessions/:id/answer`, #271),
+/// falling back to [deliverAnswerFrames] over [send] only when the server is too old
+/// for the route ([post] returns null) or there is no [post] at all.
+///
+/// Why the server types it: the frames take seconds to write with their gaps, and this
+/// app replaces or drops its terminal socket on every pause and resume. Measured
+/// 2026-11-11: a phone reattached ten times in three minutes, and the last keys of a
+/// multi-select answer (Other text, Enter, submit digit) were written into a closed
+/// connection and lost without a trace. One request cannot be cut in half that way.
+///
+/// After the server accepts, this waits as long as the typing takes, so the caller's
+/// verify starts once the keys are out, exactly as it did after the local loop. A
+/// failed [post] is NOT retried over [send]: it may have reached the server, and the
+/// same keys typed twice put the answer into the selector twice. It returns as if
+/// sent, so the not-landed flag stays up and the verify puts the card back when the
+/// question is still there (the same safe direction as [deliverAnswerFrames]).
+///
+/// Returns false only when [alive] says the caller is gone.
+Future<bool> deliverAnswer(
+  List<AnswerFrame> frames, {
+  required Future<int?> Function(List<Map<String, Object>> frames)? post,
+  required void Function(String keys) send,
+  bool Function()? alive,
+}) async {
+  if (post == null) return deliverAnswerFrames(frames, send, alive: alive);
+  final int? ms;
+  try {
+    ms = await post([
+      for (final f in frames) {'keys': f.keys, 'delayMs': f.delayMs},
+    ]);
+  } catch (_) {
+    return alive == null || alive();
+  }
+  if (ms == null) return deliverAnswerFrames(frames, send, alive: alive);
+  if (ms > 0) await Future<void>.delayed(Duration(milliseconds: ms));
+  return alive == null || alive();
+}
+
 /// Waits for an answered question to clear, re-sending a dropped confirming Enter
 /// ONCE when [resendEnter] (see [answerNeedsConfirm]). Polls [poll] up to [attempts]
 /// times, [every] apart.

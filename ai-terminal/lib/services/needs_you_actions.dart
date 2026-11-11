@@ -28,7 +28,7 @@ import '../screens/session_screen.dart'
         verifyAnswerLanded;
 import '../util/inbox_items.dart' show sessionKey;
 import '../widgets/question_answer_panel.dart' show quickAnswerable;
-import '../widgets/question_overlay.dart' show AnswerFrame, answerIsVerifiable, answerNeedsConfirm, buildAnswerFrames, deliverAnswerFrames;
+import '../widgets/question_overlay.dart' show AnswerFrame, answerIsVerifiable, answerNeedsConfirm, buildAnswerFrames, deliverAnswer;
 import 'question_draft_store.dart';
 import 'session_input.dart';
 import 'session_repository.dart';
@@ -311,7 +311,10 @@ class NeedsYouActions extends ChangeNotifier {
         final drafts = QuestionDraftStore.instance.of(s.server.baseUrl, s.id);
         // Flagged as the first key goes out (#383), as the session screen does.
         drafts.markSent(sig, frames);
-        await deliverAnswerFrames(frames, send);
+        // The server types it (#271): this socket dies with the app on a pause.
+        final api = client(s.server);
+        Future<int?> post(List<Map<String, Object>> wire) => api.postAnswer(s.id, wire);
+        await deliverAnswer(frames, post: post, send: send);
         // "Chat about this" (#423) rejects the question: nothing lands to verify, and a
         // resent Enter would go into the reply Claude is already writing.
         if (!answerIsVerifiable(frames)) {
@@ -322,7 +325,8 @@ class NeedsYouActions extends ChangeNotifier {
           answeredKey: sig,
           resendEnter: answerNeedsConfirm(frames),
           poll: () => client(s.server).pendingQuestion(s.id),
-          resend: () => send('\r'),
+          resend: () => unawaited(
+              deliverAnswer(const [AnswerFrame('\r', 0)], post: post, send: send)),
         );
         if (checked!.seen.shouldClearDrafts(drafts.key)) drafts.clear();
       });

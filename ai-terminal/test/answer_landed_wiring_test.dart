@@ -244,11 +244,24 @@ void main() {
       final b = body('Future<void> _answerQuestion(');
       final mark = b.indexOf(
           RegExp(r'_questionDrafts\.markSent\(answeredKey, frames\);'));
-      final send = b.indexOf('deliverAnswerFrames(');
+      final send = b.indexOf('deliverAnswer(');
       expect(mark, greaterThanOrEqualTo(0));
       expect(send, greaterThanOrEqualTo(0));
       expect(mark, lessThan(send),
           reason: 'a card mounted mid-send must already be flagged');
+    });
+
+    test('the answer and its resent Enter are typed by the SERVER (#271)', () {
+      // A pause nulls `_connection` mid-answer; a socket-paced answer lost its tail.
+      final b = body('Future<void> _answerQuestion(');
+      expect(b, contains('post: api == null ? null : (wire) => api.postAnswer(widget.sessionId, wire),'));
+      expect(b, isNot(contains('deliverAnswerFrames(')));
+      final v = body('Future<void> _verifyAnswerLanded(');
+      expect(v, contains('post: (wire) => api.postAnswer(widget.sessionId, wire),'));
+      expect(v, isNot(contains("_connection?.sendInput('\\r');")));
+      final board = File('lib/services/needs_you_actions.dart').readAsStringSync();
+      expect(board, contains('api.postAnswer(s.id, wire)'));
+      expect(board, isNot(contains('deliverAnswerFrames(')));
     });
 
     test('settleAfterAnswer sets no flag of its own (only clear() drops it)', () {
