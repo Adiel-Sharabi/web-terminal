@@ -65,6 +65,19 @@ void main() {
       expect(ok, isTrue, reason: 'the caller verifies, and puts the card back if needed');
     });
 
+    test('a 400 (the server refused it and typed nothing) goes over the socket', () async {
+      final sent = <String>[];
+      await deliverAnswer(const [AnswerFrame('1', 0), AnswerFrame('\r', 0)],
+          post: (_) async => throw const ApiException(400, 'frames take 70000 ms'), send: sent.add);
+      expect(sent, ['1', '\r']);
+    });
+
+    test('a 409 (another answer still being typed) is not typed again', () async {
+      final sent = <String>[];
+      await deliverAnswer(_frames, post: (_) async => throw const ApiException(409, 'busy'), send: sent.add);
+      expect(sent, isEmpty);
+    });
+
     test('reports a caller that went away', () async {
       expect(await deliverAnswer(_frames, post: (_) async => 0, send: (_) {}, alive: () => false), isFalse);
     });

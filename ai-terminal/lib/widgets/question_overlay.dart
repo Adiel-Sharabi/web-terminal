@@ -11,6 +11,7 @@ library;
 
 import 'package:flutter/material.dart';
 
+import '../api/api_client.dart' show ApiException;
 import '../api/models.dart';
 import 'question_answer_panel.dart';
 
@@ -563,6 +564,11 @@ Future<bool> deliverAnswer(
     ms = await post([
       for (final f in frames) {'keys': f.keys, 'delayMs': f.delayMs},
     ]);
+  } on ApiException catch (e) {
+    // 400: the server REFUSED the frames and wrote none (a shape past its caps), so
+    // the socket loop cannot type them twice; it is the only way they go out at all.
+    if (e.status == 400) return deliverAnswerFrames(frames, send, alive: alive);
+    return alive == null || alive();
   } catch (_) {
     return alive == null || alive();
   }

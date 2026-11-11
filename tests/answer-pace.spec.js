@@ -121,9 +121,17 @@ test.describe('POST /api/sessions/:id/answer (#271)', () => {
         // The output line, not the echoed command line: the word stands alone after a newline.
         return /\n\r?paced-271-ok\r?\n/.test(stripAnsi(sb.data || ''));
       }, { timeout: 15000 }).toBe(true);
-      // The slot is free again once the answer is typed.
-      const third = await ctx.post(`/api/sessions/${id}/answer`, { data: { frames: [{ keys: ' ' }] } });
-      expect(third.status()).toBe(202);
+      // A frame over the IPC socket's 16 KB high-water mark makes the write return
+      // false while the bytes are still delivered; the frames AFTER it must still go
+      // out (gate review: reading false as "link down" cut the submit keys off).
+      const big = await ctx.post(`/api/sessions/${id}/answer`, {
+        data: { frames: [{ keys: 'x'.repeat(40000), delayMs: 1500 }, { keys: '\x15', delayMs: 600 }, { keys: 'echo after-big-271\r' }] },
+      });
+      expect(big.status()).toBe(202);
+      await expect.poll(async () => {
+        const sb = await (await ctx.get(`/api/sessions/${id}/scrollback`)).json();
+        return /\n\r?after-big-271\r?\n/.test(stripAnsi(sb.data || ''));
+      }, { timeout: 30000 }).toBe(true);
     } finally {
       await ctx.delete(`/api/sessions/${id}`);
       await ctx.dispose();

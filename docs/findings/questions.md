@@ -450,6 +450,16 @@ post-tick frames bunched into one write, the downs and the rest bunched as two w
 are right and survive bunching and resizes; only the client could not be relied on to send
 them. Why the field ticked without the text stays unexplained (no input log exists).
 
+**Limits, stated.** A write is "lost" only when the worker LINK is down
+(`workerClient.isConnected()`), never when the socket write returns `false`: that is Node's
+backpressure signal, the bytes still delivered, and a frame over the 16 KB high-water mark
+returns it (gate review measured 17 KB, 66 KB and 200 KB writes: `false`, all delivered).
+Reading it as lost stopped an answer right before its submit keys. A 400 means the server
+typed nothing, so the companion types it over its socket instead. The pacing lives in
+`server.js`, so a `server.js` hot reload inside an answer's typing window (up to 60 s) cuts
+it, as an app pause used to: rarer, and the client's verify puts the card back. Pacing in
+`pty-worker.js` would close that, at the price of a cold restart to ship.
+
 ### A live question was erased by the NEXT tool — a SUBAGENT's counted (#236)
 
 **Law, as `CLAUDE.md` stated it until 2026-10-26** — moved here verbatim when `CLAUDE.md` became a one-line-per-rule digest. Frozen history: the digest line in `CLAUDE.md` is the only current law.

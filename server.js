@@ -7709,9 +7709,12 @@ app.post('/api/sessions/:id/answer', express.json({ limit: '2mb' }), async (req,
   const src = deviceOps.clientSource(req);
   const run = _answerPacer.run(id, v.frames, {
     write: (keys) => {
-      let ok;
-      try { ok = workerClient.sendPtyIn(id, Buffer.from(keys)) !== false; } catch { ok = false; }
-      if (!ok) return false;
+      // Down means the LINK is down. sendPtyIn's return value is the socket write's,
+      // and `false` there is Node's "buffer full" signal, the bytes still queued and
+      // delivered: a frame over 16 KB returns it, so reading it as "lost" stopped an
+      // answer right before its submit keys (the #271 bug again, gate review).
+      if (!workerClient.isConnected()) return false;
+      try { workerClient.sendPtyIn(id, Buffer.from(keys)); } catch { return false; }
       _lastInputAt.set(id, Date.now()); // #345 - nobody is handed off mid-answer
       if (deviceOps.isSubmitFrame(keys)) { // #311 - counted as the socket path counts it
         deviceOps.recordOp(DEVICE_OPS_FILE, { t: new Date().toISOString(), src, server: getServerName() });
