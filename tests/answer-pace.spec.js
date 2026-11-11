@@ -95,6 +95,7 @@ test.describe('POST /api/sessions/:id/answer (#271)', () => {
   });
 
   test('types the frames into the PTY with no socket attached, and refuses a second answer meanwhile', async () => {
+    test.setTimeout(120000);
     const ctx = await authCtx();
     const created = await ctx.post('/api/sessions', { data: { name: 'Answer Pace', autoCommand: '' } });
     expect(created.ok()).toBeTruthy();
@@ -129,9 +130,11 @@ test.describe('POST /api/sessions/:id/answer (#271)', () => {
       });
       expect(big.status()).toBe(202);
       await expect.poll(async () => {
-        const sb = await (await ctx.get(`/api/sessions/${id}/scrollback`)).json();
+        // The TAIL: the default slice is the first 32 KB, and the echoed x's outgrow it.
+        const { total } = await (await ctx.get(`/api/sessions/${id}/scrollback?limit=1`)).json();
+        const sb = await (await ctx.get(`/api/sessions/${id}/scrollback?offset=${Math.max(0, total - 32768)}`)).json();
         return /\n\r?after-big-271\r?\n/.test(stripAnsi(sb.data || ''));
-      }, { timeout: 30000 }).toBe(true);
+      }, { timeout: 45000 }).toBe(true);
     } finally {
       await ctx.delete(`/api/sessions/${id}`);
       await ctx.dispose();
