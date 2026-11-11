@@ -425,6 +425,41 @@ single-select tabs — the only shape that exercises `Other` on a LAST tab, sinc
 > was red first. **The rule was written down and the code still drifted from it —
 > which is the argument for the test, not for more prose.**
 
+### The SERVER types the answer, not the client (#271, claude 2.1.322, 2026-11-11)
+
+**Rule.** The companion builds the frames (`buildAnswerFrames`, unchanged) and POSTs them
+once to `POST /api/sessions/:id/answer` (`{frames: [{keys, delayMs}]}`); `server.js` writes
+each frame through the worker's input path and waits its delay before the next
+(`lib/answer-pace.js`). 202 with `ms` (how long the typing takes) as soon as the frames are
+accepted, so the request is never held open by the app it protects. One answer per session
+at a time (409). A malformed body is refused whole (400), never coerced. The companion falls
+back to its own socket loop ONLY on a bare 404 (a server without the route); a failed POST is
+never retyped over the socket, because it may have landed and a second copy types the answer
+into the selector twice. The resent confirming Enter goes the same way.
+
+**Evidence.** A phone answering a 4-option multi-select with 3 ticks and Other text. The
+device-views log shows its socket reattaching 10 times in 2 min 44 s, most within 150 ms
+(the companion's own close-and-reopen on every `AppLifecycleState.resumed`; `paused` nulls
+`_connection`). The PTY output shows the 3 ticks and 3 cursor-downs landed, then about 40
+full repaints (one per reattach), then the cursor entering the Other field. The field was
+ticked but never showed the text, and no Review screen was ever drawn: the text, the CR and the
+`1` were written into a dead connection. The same 11 frames replayed on the rig against
+2.1.322 recorded `Apple, Banana, Date, <text>` 5 times out of 5: paced 600 ms apart, all
+post-tick frames bunched into one write, the downs and the rest bunched as two writes, at a
+57x14 PTY, and at 57x14 with 12-step resize storms before frames 7, 8 and 9. So the keys
+are right and survive bunching and resizes; only the client could not be relied on to send
+them. Why the field ticked without the text stays unexplained (no input log exists).
+
+**Limits, stated.** A write is "lost" only when the worker LINK is down
+(`workerClient.isConnected()`), never when the socket write returns `false`: that is Node's
+backpressure signal, the bytes still delivered, and a frame over the 16 KB high-water mark
+returns it (gate review measured 17 KB, 66 KB and 200 KB writes: `false`, all delivered).
+Reading it as lost stopped an answer right before its submit keys. A 400 means the server
+typed nothing, so the companion types it over its socket instead. The pacing lives in
+`server.js`, so a `server.js` hot reload inside an answer's typing window (up to 60 s) cuts
+it, as an app pause used to: rarer, and the client's verify puts the card back. Pacing in
+`pty-worker.js` would close that, at the price of a cold restart to ship.
+
 ### A live question was erased by the NEXT tool — a SUBAGENT's counted (#236)
 
 **Law, as `CLAUDE.md` stated it until 2026-10-26** — moved here verbatim when `CLAUDE.md` became a one-line-per-rule digest. Frozen history: the digest line in `CLAUDE.md` is the only current law.

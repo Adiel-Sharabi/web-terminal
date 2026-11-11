@@ -477,6 +477,34 @@ class ApiClient {
     await _send('POST', '/api/sessions/$sessionId/attention/clear', body: {});
   }
 
+  /// Hands an AskUserQuestion answer to the server to TYPE (`POST /api/sessions/:id/answer`,
+  /// #271): [frames] are `{keys, delayMs}` in order, and the server writes each one and
+  /// waits its delay before the next, so an app pause or a socket reattach mid-answer can
+  /// no longer cut the sequence short.
+  ///
+  /// Returns how long the typing takes in ms once the server accepted it, or null when
+  /// the server is too old for the route (a bare 404; the route's own 404 names the
+  /// session in a JSON `error` and throws like every other failure). A null is the one
+  /// answer that lets the caller fall back to typing over its socket: any other failure
+  /// may already have reached the server, and typing it a second time would put the keys
+  /// into the selector twice.
+  Future<int?> postAnswer(String sessionId, List<Map<String, Object>> frames) async {
+    final res = await _send('POST', '/api/sessions/$sessionId/answer',
+        body: {'frames': frames}, alsoAccept: const {404});
+    if (res.statusCode == 404) {
+      Object? body;
+      try {
+        body = jsonDecode(res.body);
+      } catch (_) {/* a bare 404 page: the route does not exist */}
+      if (body is Map && body['error'] != null) {
+        throw ApiException(404, body['error'].toString());
+      }
+      return null;
+    }
+    final ms = _asMap(_decode(res))['ms'];
+    return ms is int ? ms : 0;
+  }
+
   /// Reads the per-session push level (`GET /api/sessions/:id/notify-level`),
   /// one of `off` / `important` / `all`.
   Future<String> notifyLevel(String sessionId) async {

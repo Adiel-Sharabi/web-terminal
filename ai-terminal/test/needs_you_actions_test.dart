@@ -81,8 +81,17 @@ void main() {
     late List<String> written;
     late List<String> said;
     late int questionPolls;
+    late bool answerRoute; // #271: a server that types the answer itself
+    late List<String> posted;
 
     ApiClient client(ServerConfig s) => ApiClient(s, httpClient: MockClient((req) async {
+          if (answerRoute && req.url.path.endsWith('/answer')) {
+            for (final f in (jsonDecode(req.body)['frames'] as List)) {
+              posted.add(f['keys'] as String);
+              if (f['keys'] == '\r') pending = null;
+            }
+            return http.Response(jsonEncode({'ok': true, 'frames': posted.length, 'ms': 0}), 202);
+          }
           if (req.url.path.endsWith('/pending-question')) {
             questionPolls++;
             if (status != 200) return http.Response('', status);
@@ -126,7 +135,20 @@ void main() {
       written = [];
       said = [];
       questionPolls = 0;
+      answerRoute = false;
+      posted = [];
       QuestionDraftStore.instance.resetForTest();
+    });
+
+    test('a server with the answer route types it: no key goes over the socket (#271)', () async {
+      answerRoute = true;
+      final a = await actions();
+      final s = _session();
+      final shown = _pq('Pick one');
+      final frames = buildAnswerFrames(shown.questions, [{0}]);
+      expect(await a.answer(s, shown, frames), PreWriteVerdict.proceed);
+      expect(written, isEmpty, reason: 'the socket dies with the app on a pause');
+      expect(posted, frames.map((f) => f.keys).toList());
     });
 
     test('a refused re-check writes ZERO keys and flags nothing', () async {

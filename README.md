@@ -39,7 +39,9 @@ Full instructions: **[docs/INSTALL.md](docs/INSTALL.md)**.
   agent's transcript as chat, with proper cards for shell commands, file edits and subagents.
   When the agent asks you a question, the card offers what the terminal's selector does:
   the options, free text (on a multi-select question too, alongside the ticks), and *Chat
-  about this* to talk the question over instead of answering it.
+  about this* to talk the question over instead of answering it. The server types the
+  answer (`POST /api/sessions/:id/answer`, the keys and the gaps between them), so a phone
+  that pauses or reconnects halfway through an answer no longer loses its last keys.
 - **It waits out the 5-hour cap for you.** When an agent hits its usage limit it blocks on a
   question ("stop and wait, or upgrade?"). The worker answers *wait*, the row shows when the
   window reopens, and the session picks itself back up a minute after it does — so a limit
