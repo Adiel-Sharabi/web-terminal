@@ -2550,6 +2550,9 @@ function handleHook(session, event, claudeSessionId, prompt, agentId, opts) {
       // the one event that provably comes from the MAIN agent, so it cannot be a
       // subagent's own tool call clearing the parent's deferred Stop.
       resetSubagentTracking(session);
+      // #461 - once the compact replay is written, a new turn is the replay's (or the user's):
+      // its Stop is a real turn end, even if our /compact's own Stop never arrived.
+      if (session._awaitCompactStop && !session._compactReplay) session._awaitCompactStop = false;
       // falls through
     case 'PreToolUse':
     case 'PostToolUse':

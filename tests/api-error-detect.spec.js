@@ -392,12 +392,35 @@ test.describe('API-error detection + auto-continue', () => {
       };
       await cutOnce(); await cutOnce(); await cutOnce(); // continue, continue, /compact
       expect(actions().map((e) => e.params.action)).toEqual(['continue', 'continue', 'compact']);
-      await rpc(client, 'hookEvent', { id, event: 'Stop' }); // the /compact's own Stop -> replay
+      // The fast fallback has already replayed; the /compact's own Stop arrives late and must
+      // land (past the Stop debounce) before the next turn, as Claude's does.
       await ev.waitFor((e) => e.event === 'apiError' && e.params.id === id && e.params.action === 'replay-prompt');
+      await rpc(client, 'hookEvent', { id, event: 'Stop' });
+      await sleep(100);
       const n = actions().length;
       await cutOnce(); // the replay was cut too: exhausted, however long it took
       expect(actions().length).toBe(n);
       // A turn that succeeds ends the episode; the next cut starts the ladder again.
+      await rpc(client, 'hookEvent', { id, event: 'UserPromptSubmit' });
+      await rpc(client, 'hookEvent', { id, event: 'Stop' });
+      await sleep(100);
+      await cutOnce();
+      expect(actions().slice(-1)[0].params).toMatchObject({ autoContinue: 1, action: 'continue' });
+    });
+  });
+
+  test('#461: if our /compact\'s Stop never arrives, the replayed turn\'s Stop still ends the episode', async () => {
+    await ladderCase('no-compact-stop', async (client, id, ev) => {
+      const actions = () => ev.apiActions().filter((e) => e.params.id === id && (e.params.action === 'continue' || e.params.action === 'compact'));
+      const cutOnce = async () => {
+        await rpc(client, 'hookEvent', { id, event: 'UserPromptSubmit' });
+        await inject(client, id, CUT_LINES[0] + '\r\n');
+        await cutIdle(client, id);
+        await sleep(500);
+      };
+      await cutOnce(); await cutOnce(); await cutOnce(); // continue, continue, /compact
+      await ev.waitFor((e) => e.event === 'apiError' && e.params.id === id && e.params.action === 'replay-prompt');
+      // No Stop for the /compact. The replayed prompt starts a turn, and that turn succeeds.
       await rpc(client, 'hookEvent', { id, event: 'UserPromptSubmit' });
       await rpc(client, 'hookEvent', { id, event: 'Stop' });
       await sleep(100);
