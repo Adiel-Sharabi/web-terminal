@@ -429,6 +429,27 @@ test.describe('API-error detection + auto-continue', () => {
     });
   });
 
+  test('#461: our /compact\'s own UserPromptSubmit does not cancel the skip of its Stop', async () => {
+    await ladderCase('compact-ups', async (client, id, ev) => {
+      const actions = () => ev.apiActions().filter((e) => e.params.id === id && (e.params.action === 'continue' || e.params.action === 'compact'));
+      const cut = async () => {
+        await rpc(client, 'hookEvent', { id, event: 'UserPromptSubmit' });
+        await inject(client, id, CUT_LINES[0] + '\r\n');
+        await cutIdle(client, id);
+      };
+      await cut(); await sleep(500); await cut(); await sleep(500); await cut();
+      await ev.waitFor((e) => e.event === 'apiError' && e.params.id === id && e.params.action === 'compact');
+      // Claude's hook for the /compact we typed: the replay is still pending.
+      await rpc(client, 'hookEvent', { id, event: 'UserPromptSubmit' });
+      await ev.waitFor((e) => e.event === 'apiError' && e.params.id === id && e.params.action === 'replay-prompt');
+      await rpc(client, 'hookEvent', { id, event: 'Stop' }); // the /compact's own Stop, late
+      await sleep(100);
+      const n = actions().length;
+      await cut(); await sleep(500); // the replay was cut: still exhausted
+      expect(actions().length).toBe(n);
+    });
+  });
+
   test('does not auto-continue when the feature is disabled', async () => {
     const pipe = workerPipePath();
     const dataDir = makeTempDataDir();
