@@ -263,8 +263,10 @@ test.describe('API-error detection + auto-continue', () => {
       expect(a1.params.action).toBe('continue');
       const found = await findSession(client, id);
       expect(found.apiError).toBe(true);
-      expect(found.apiErrorAt).toBeGreaterThanOrEqual(t0);
-      expect(found.apiErrorAt).toBeLessThanOrEqual(Date.now());
+      // Two processes' clocks: CI saw the worker's read 1 ms behind ours. Allow that skew.
+      const SKEW_MS = 50;
+      expect(found.apiErrorAt).toBeGreaterThanOrEqual(t0 - SKEW_MS);
+      expect(found.apiErrorAt).toBeLessThanOrEqual(Date.now() + SKEW_MS);
       // Cleared by the resumed turn: the time goes with it.
       await rpc(client, 'hookEvent', { id, event: 'UserPromptSubmit' });
       const after = await findSession(client, id);
