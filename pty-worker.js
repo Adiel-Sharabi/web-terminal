@@ -138,11 +138,14 @@ const PORT_HINT = parseInt(process.env.WT_PORT || liveConfig('port', '7681'));
 // errors (400/401 — retrying won't help) only flag + notify.
 const _apiErrFast = process.env.WT_API_ERROR_FAST === '1'; // tests: shrink timers
 // Backoff before each auto action (overload often needs a breather to subside).
-const API_ERROR_BACKOFF_MS = _apiErrFast ? [40, 40, 40] : [5000, 15000, 30000];
+// Tests: the first backoff is long enough to land a hook inside it (#461's fire-time re-check).
+const API_ERROR_BACKOFF_MS = _apiErrFast ? [300, 40, 40] : [5000, 15000, 30000];
 const API_ERROR_MAX_ATTEMPTS = 3;     // total auto actions per episode
 const API_ERROR_COMPACT_ATTEMPT = 3;  // the attempt that runs /compact + replay
-const API_ERROR_EPISODE_MS = 120000;  // a new error this long after the last auto
-                                       // action starts a fresh episode (resets count)
+// #461 - an episode ends only when a turn SUCCEEDS (a Stop that was not our /compact's),
+// never on a clock: the ladder now waits for the agent's idle (~1 min after a cut), so the
+// old 120 s window reset the count on almost every attempt and an outage would have been
+// retried forever, each `continue` a full-context request.
 const API_ERROR_COMPACT_MIN_WAIT_MS = _apiErrFast ? 10 : 1500;       // ignore the settle-idle right after /compact
 const API_ERROR_COMPACT_FALLBACK_MS = _apiErrFast ? 300 : 45000;     // replay anyway if no idle hook arrives
 const API_ERROR_NEEDLE = Buffer.from('API Error');
@@ -243,11 +246,8 @@ function stripAnsiForScan(s) {
   return s.replace(/\x1b\[[0-9;?]*[ -/]*[@-~]/g, '');
 }
 
-function isTransientApiError(line) {
-  // Retryable: overload, rate limit, gateway/timeout, transport errors.
-  if (/\b(408|409|425|429|500|502|503|504|520|521|522|523|524|529)\b/.test(line)) return true;
-  return /overload|rate.?limit|temporar|time(?:d)?\s*out|timeout|connection (?:error|reset)|econnreset|etimedout|enetunreach|fetch failed|socket hang up|service unavailable|bad gateway|gateway time/i.test(line);
-}
+// Retryable or not: the rule and the real lines it was measured on live in lib/api-error.js (#461).
+const { isTransientApiError } = require('./lib/api-error');
 
 // Write a minimal readline config that enables bracketed paste mode.
 // Bash 4.4 ships with the setting available but OFF by default; this opts it
@@ -828,21 +828,44 @@ function logCapTailSample(session) {
   }
 }
 
+// #461 - did the error CUT the agent's turn? The sniff matches "API Error" anywhere in the
+// PTY stream, so a line is only a sighting: a session echoing the phrase (a test file, an
+// issue text, a redraw of an old error) prints it too. A turn the error really ended was
+// running when the line appeared (status working) and has had no Stop since - Claude fires
+// none for it, and goes idle on its Notification about a minute later. An Esc clears the
+// mark (noteInterrupt), so a turn the user stopped is never one.
+function apiErrorCutTurn(session) {
+  return Boolean(session.apiError && session._apiErrorWhileWorking && Number.isFinite(session.lastApiErrorAt)
+    && !(session.lastTurnEndAt >= session.lastApiErrorAt));
+}
+
 function markApiError(session, line) {
   const transient = isTransientApiError(line);
   session.apiError = true;
   session.apiErrorText = line;
   session.lastApiErrorAt = Date.now();
+  session._apiErrorTransient = transient;
+  session._apiErrorWhileWorking = session.status === 'working';
   log(`api-error: "${session.name}" (${session.id}) ${transient ? 'transient' : 'non-transient'}: ${line}`);
   broadcastEvent('apiError', { id: session.id, name: session.name, apiError: true, text: line, transient });
-  if (transient) scheduleAutoContinue(session);
+  // #461 - the ladder no longer starts here: it starts when the agent goes idle on the turn
+  // the error cut (applyIdle). Started on the sighting, any 5 s gap between hooks typed
+  // `continue` into a session that had only SHOWN the phrase while working.
+}
+
+// #461 - called from applyIdle: the agent stopped without a Stop. If a transient error cut
+// the turn it just left, walk the ladder.
+function maybeStartApiErrorLadder(session, event) {
+  if (event === 'Stop' || !session._apiErrorTransient || !apiErrorCutTurn(session)) return;
+  if (session._autoContinueTimer) return; // already walking
+  scheduleAutoContinue(session);
 }
 
 // Clears the highlight (called when Claude next starts working — a retry, ours
 // or the user's). Cancels a pending auto-continue timer but deliberately does
 // NOT reset the attempt counter: a brief working blip between two overload
 // errors must stay in the same episode, else the ladder loops forever. The
-// counter only resets via the episode-timeout in scheduleAutoContinue.
+// counter only resets on a successful Stop (#461, scheduleAutoContinue).
 function clearApiError(session) {
   if (session._autoContinueTimer) { clearTimeout(session._autoContinueTimer); session._autoContinueTimer = null; }
   if (!session.apiError) return false;
@@ -856,8 +879,8 @@ function clearApiError(session) {
 function scheduleAutoContinue(session) {
   if (!autoContinueEnabled()) return;
   const now = Date.now();
-  if (!session._lastAutoContinueAt || (now - session._lastAutoContinueAt) > API_ERROR_EPISODE_MS) {
-    session.autoContinueCount = 0; // fresh episode
+  if (!session._lastAutoContinueAt || session._lastSuccessfulStopAt > session._lastAutoContinueAt) {
+    session.autoContinueCount = 0; // fresh episode: a turn succeeded since our last action
   }
   const count = session.autoContinueCount || 0;
   if (count >= API_ERROR_MAX_ATTEMPTS) {
@@ -873,12 +896,19 @@ function scheduleAutoContinue(session) {
     session._autoContinueTimer = null;
     const s = sessions.get(session.id);
     if (!s) return;
+    // #461 - re-read at fire time: a Stop, a resumed turn or an Esc in the backoff means the
+    // turn is no longer one the error cut, and nothing may be typed.
+    if (s.status !== 'idle' || !apiErrorCutTurn(s)) {
+      log(`api-error: "${s.name}" auto attempt ${attempt} skipped - the turn is no longer cut (status ${s.status})`);
+      return;
+    }
     if (attempt >= API_ERROR_COMPACT_ATTEMPT) {
       // Failed twice — shrink context with /compact, then replay the last
       // prompt once Claude settles (idle hook or fallback timer).
       try { submitLine(s, '/compact'); } catch (e) { log(`api-error: /compact write failed: ${e.message}`); return; }
       log(`api-error: "${s.name}" auto attempt ${attempt}/${API_ERROR_MAX_ATTEMPTS}: sent /compact`);
       armCompactReplay(s);
+      s._awaitCompactStop = true; // #461 - its Stop is not a successful turn
       setCompacting(s, 'auto-recovery'); // #65 — same indicator as a user's own /compact
       broadcastEvent('apiError', { id: s.id, name: s.name, apiError: true, text: s.apiErrorText || '', transient: true, autoContinue: attempt, action: 'compact' });
     } else {
@@ -1185,6 +1215,8 @@ function writePromptToTerm(session, text) {
 // write. Every agent we ship does fold one, so in practice every submit is split — see
 // the measurements on `claude.submit` in lib/agents.js.
 function writeUserInput(session, data) {
+  // #461 - someone is typing: a pending auto-continue would be appended to their line.
+  if (session._autoContinueTimer) { clearTimeout(session._autoContinueTimer); session._autoContinueTimer = null; log(`api-error: "${session.name}" auto-continue cancelled - input arrived`); }
   if (!agents.submitPolicy(sessionAgent(session)).crBurstsAsPaste) {
     deliver(session, data);
     return;
@@ -1239,6 +1271,9 @@ function noteInterrupt(session, data) {
   // auto-resume for this session is now stale (same reasoning as clearApiError).
   cancelAutoResume(session);
   clearObservedCapBlock(session); // #138 - and so is a cap prompt seen earlier
+  // #461 - the user stopped this turn: an API error seen during it is no longer anyone's
+  // to retry or ask about (this also cancels a pending auto-continue).
+  clearApiError(session);
   log(`interrupt: "${session.name}" working → idle (Esc)`);
   // No notifyType: the user is at the keyboard — they just pressed Esc. Pushing "Claude is
   // done" to their phone for an interrupt they performed themselves would be noise.
@@ -1943,10 +1978,14 @@ function armIdle(session, event) {
     log(`hook: session "${session.name}" ${event} not idled - a question is still on screen`);
     return;
   }
+  // #461 - a Stop still inside the debounce is never downgraded by a later Notification:
+  // the Stop is the turn-end fact (lastTurnEndAt, the API-error ladder's "not cut" proof).
+  const honoured = session.idleTimer && session._pendingIdleEvent === 'Stop' ? 'Stop' : event;
   cancelPendingIdle(session);
+  session._pendingIdleEvent = honoured;
   session.idleTimer = setTimeout(() => {
     session.idleTimer = null;
-    applyIdle(session, event);
+    applyIdle(session, honoured);
   }, HOOK_IDLE_DEBOUNCE_MS);
   if (typeof session.idleTimer.unref === 'function') session.idleTimer.unref();
 }
@@ -1957,6 +1996,12 @@ function applyIdle(session, event) {
   // turn end, and an Esc interrupt never comes here. Claude's Stop hook and Codex's
   // finished-turn OSC 9 both arrive as 'Stop', so this is the one fact for every agent.
   if (event === 'Stop') session.lastTurnEndAt = Date.now();
+  // #461 - a turn that SUCCEEDED ends the API-error episode. The Stop of our own /compact
+  // (its replay still pending) is not one: the replay may fail the same way.
+  if (event === 'Stop') {
+    if (session._awaitCompactStop) session._awaitCompactStop = false;
+    else if (!session._compactReplay) session._lastSuccessfulStopAt = session.lastTurnEndAt;
+  }
   // The debounce outlives the session if it exited in the window — don't announce
   // a status for a PTY that is gone (killSession clears the timer; an exit races).
   if (!sessions.has(sessionIdOf(session))) return;
@@ -1968,6 +2013,8 @@ function applyIdle(session, event) {
   if (session._compactReplay && (Date.now() - session._compactReplay.setAt) > API_ERROR_COMPACT_MIN_WAIT_MS) {
     doCompactReplay(session, 'idle-hook');
   }
+  maybeStartApiErrorLadder(session, event); // #461 - after lastTurnEndAt is stamped above
+
   // #129 — idle does NOT mean the compaction settled, and this is where the
   // reported bug lived. `clearCompacting(session, 'idle')` used to run here on
   // the #65 assumption that "idle means whatever /compact was in flight has
@@ -2130,6 +2177,9 @@ function sessionSummary(id, s) {
     hookStatus: !!s.hookStatus,
     apiError: !!s.apiError,
     apiErrorText: s.apiError ? (s.apiErrorText || '') : '',
+    // #461 - when the standing error was seen, so the check-in can tell an error the
+    // auto-continue still owns from one nobody retried. The worker's clock, never a guess.
+    apiErrorAt: s.apiError && Number.isFinite(s.lastApiErrorAt) ? s.lastApiErrorAt : null,
     compacting: !!(s.compacting),
     compactingSince: s.compacting ? s.compacting.since : null,
     // #69 — the 5h reset time both agents report, via setFiveHResetAt. #137 renders
@@ -2500,6 +2550,9 @@ function handleHook(session, event, claudeSessionId, prompt, agentId, opts) {
       // the one event that provably comes from the MAIN agent, so it cannot be a
       // subagent's own tool call clearing the parent's deferred Stop.
       resetSubagentTracking(session);
+      // #461 - once the compact replay is written, a new turn is the replay's (or the user's):
+      // its Stop is a real turn end, even if our /compact's own Stop never arrived.
+      if (session._awaitCompactStop && !session._compactReplay) session._awaitCompactStop = false;
       // falls through
     case 'PreToolUse':
     case 'PostToolUse':
@@ -2626,7 +2679,8 @@ function handleHook(session, event, claudeSessionId, prompt, agentId, opts) {
       // SubagentStop above releases it through the same debounce.
       const live = subagentSet(session);
       if (live.size > 0) {
-        session.heldStop = event;
+        // #461 - a held Stop is the turn-end fact: a later idle Notification never replaces it.
+        if (session.heldStop !== 'Stop') session.heldStop = event;
         log(`hook: session "${session.name}" ${event} held — ${live.size} subagent(s) in flight`);
         break;
       }
