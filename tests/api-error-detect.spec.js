@@ -46,6 +46,7 @@ function spawnWorker(pipePath, dataDir, extraEnv = {}) {
       WT_WORKER_QUIET: '1',
       WT_WORKER_NO_DEFAULT: '1',
       WT_API_ERROR_FAST: '1',
+      WT_HOOK_STOP_DEBOUNCE_MS: '20',
       ...extraEnv,
     },
     stdio: ['ignore', 'pipe', 'pipe'],
@@ -101,6 +102,9 @@ function makeEventCollector(client) {
 }
 
 const inject = (client, id, data) => rpc(client, '__testInjectOutput', { id, data });
+// #461 - the ladder starts only when the agent goes idle WITHOUT a Stop on the turn the error
+// cut (Claude fires no Stop for it; its idle Notification comes about a minute later).
+const cutIdle = (client, id) => rpc(client, 'hookEvent', { id, event: 'Notification' });
 const sleep = (ms) => new Promise(r => setTimeout(r, ms));
 
 async function findSession(client, id) {
@@ -126,6 +130,7 @@ const CUT_LINES = [
   'API Error: Unable to connect to API (ConnectionRefused)',
   'API Error: Unable to connect to API',
   'API Error: API returned an empty or malformed response',
+  'API Error: The response stopped arriving.',
 ];
 // Retrying these fails the same way: they stay flagged-only.
 const PERMANENT_LINES = [
@@ -133,6 +138,9 @@ const PERMANENT_LINES = [
   'API Error: 401 {"type":"error","error":{"type":"authentication_error"}}',
   'API Error: 403 Attention Required! | Cloudflare',
   'API Error: an image in the conversation could not be processed',
+  // A certificate or proxy problem: "unable to connect" alone would read transient.
+  'API Error: Unable to connect to API due to SSL certificate verification error',
+  'API Error: Unable to connect to API (SELF_SIGNED_CERT_IN_CHAIN)',
 ];
 
 test.describe('which API errors are worth retrying (#461, lib/api-error.js)', () => {
@@ -219,6 +227,7 @@ test.describe('API-error detection + auto-continue', () => {
       await rpc(client, 'hookEvent', { id, event: 'UserPromptSubmit' });
 
       await inject(client, id, BAD_REQUEST);
+      await cutIdle(client, id); // #461 - the agent idles on the turn the error cut
       const detect = await ev.waitFor(e => e.event === 'apiError' && e.params.id === id && e.params.apiError === true);
       expect(detect.params.transient).toBe(false);
 
@@ -247,6 +256,7 @@ test.describe('API-error detection + auto-continue', () => {
       expect(before.apiErrorAt).toBeNull();
       const t0 = Date.now();
       await inject(client, id, CUT_LINES[0] + '\r\n');
+      await cutIdle(client, id);
       const detect = await ev.waitFor(e => e.event === 'apiError' && e.params.id === id && e.params.apiError === true);
       expect(detect.params.transient).toBe(true);
       const a1 = await ev.waitFor(e => e.event === 'apiError' && e.params.id === id && e.params.autoContinue === 1);
@@ -269,6 +279,110 @@ test.describe('API-error detection + auto-continue', () => {
     }
   });
 
+  // #461 - the ladder types into a terminal, so it acts only on a turn the error CUT: the line
+  // appeared while the agent worked, and the agent then idled with no Stop. Each negative
+  // below breaks exactly one of those, on an otherwise-identical session.
+  async function ladderCase(name, steps, agent) {
+    const pipe = workerPipePath();
+    const dataDir = makeTempDataDir();
+    const worker = spawnWorker(pipe, dataDir, { WT_AUTO_CONTINUE_API_ERROR: '1' });
+    try {
+      const client = await connectClient(pipe);
+      const ev = makeEventCollector(client);
+      const { id } = await rpc(client, 'createSession', { cwd: os.tmpdir(), name, autoCommand: '', ...(agent ? { agent } : {}) });
+      await steps(client, id, ev);
+      ev.stop();
+      await rpc(client, 'killSession', { id });
+      await client.close();
+    } finally {
+      await worker.stop();
+      rmRf(dataDir);
+    }
+  }
+  const quiet = async (ev, id) => { await sleep(400); return ev.apiActions().filter((e) => e.params.id === id).length; };
+
+  test('#461: an error line in a turn that then ends with a Stop is never retried', async () => {
+    await ladderCase('echo-then-stop', async (client, id, ev) => {
+      await rpc(client, 'hookEvent', { id, event: 'UserPromptSubmit' });
+      await inject(client, id, CUT_LINES[0] + '\r\n'); // e.g. a tool printing the phrase
+      await rpc(client, 'hookEvent', { id, event: 'Stop' });
+      await cutIdle(client, id); // the later idle Notification of a finished turn
+      expect(await quiet(ev, id)).toBe(0);
+      expect((await findSession(client, id)).apiError).toBe(true); // flagged, never typed into
+    });
+  });
+
+  test('#461: an error line drawn while the agent is idle (a redraw) is never retried', async () => {
+    await ladderCase('idle-redraw', async (client, id, ev) => {
+      await rpc(client, 'hookEvent', { id, event: 'UserPromptSubmit' });
+      await rpc(client, 'hookEvent', { id, event: 'Stop' });
+      await sleep(100);
+      expect((await findSession(client, id)).status).toBe('idle');
+      await inject(client, id, CUT_LINES[0] + '\r\n');
+      await cutIdle(client, id);
+      expect(await quiet(ev, id)).toBe(0);
+    });
+  });
+
+  test('#461: no idle, no retry - an error line in a turn still running is never typed into', async () => {
+    await ladderCase('no-idle', async (client, id, ev) => {
+      await rpc(client, 'hookEvent', { id, event: 'UserPromptSubmit' });
+      await inject(client, id, CUT_LINES[0] + '\r\n');
+      expect(await quiet(ev, id)).toBe(0); // the old ladder had typed `continue` by now
+    });
+  });
+
+  test('#461: Esc on the turn clears the error: nothing is retried, nothing published', async () => {
+    await ladderCase('esc', async (client, id, ev) => {
+      await rpc(client, 'hookEvent', { id, event: 'UserPromptSubmit' });
+      await inject(client, id, CUT_LINES[0] + '\r\n');
+      client.send(ipc.encodePtyIn(id, Buffer.from(String.fromCodePoint(0x1b), 'utf8')));
+      await sleep(150);
+      const s = await findSession(client, id);
+      expect(s.status).toBe('idle');
+      expect(s.apiError).toBe(false);
+      expect(s.apiErrorAt).toBeNull();
+      await cutIdle(client, id);
+      expect(await quiet(ev, id)).toBe(0);
+    }, 'claude'); // Esc interrupts only an agent that declares it (lib/agents.js)
+  });
+
+  test('#461: a Stop inside the backoff stops the typed retry (re-read when the timer fires)', async () => {
+    await ladderCase('recheck', async (client, id, ev) => {
+      await rpc(client, 'hookEvent', { id, event: 'UserPromptSubmit' });
+      await inject(client, id, CUT_LINES[0] + '\r\n');
+      await cutIdle(client, id);
+      await sleep(100); // idled and armed (the first fast backoff is 300 ms)
+      await rpc(client, 'hookEvent', { id, event: 'Stop' }); // the turn ended after all
+      expect(await quiet(ev, id)).toBe(0);
+    });
+  });
+
+  test('#461: an episode ends only on a turn that SUCCEEDED, never on our /compact\'s Stop', async () => {
+    await ladderCase('episode', async (client, id, ev) => {
+      const actions = () => ev.apiActions().filter((e) => e.params.id === id && (e.params.action === 'continue' || e.params.action === 'compact'));
+      const cutOnce = async () => {
+        await rpc(client, 'hookEvent', { id, event: 'UserPromptSubmit' });
+        await inject(client, id, CUT_LINES[0] + '\r\n');
+        await cutIdle(client, id);
+        await sleep(500);
+      };
+      await cutOnce(); await cutOnce(); await cutOnce(); // continue, continue, /compact
+      expect(actions().map((e) => e.params.action)).toEqual(['continue', 'continue', 'compact']);
+      await rpc(client, 'hookEvent', { id, event: 'Stop' }); // the /compact's own Stop -> replay
+      await ev.waitFor((e) => e.event === 'apiError' && e.params.id === id && e.params.action === 'replay-prompt');
+      const n = actions().length;
+      await cutOnce(); // the replay was cut too: exhausted, however long it took
+      expect(actions().length).toBe(n);
+      // A turn that succeeds ends the episode; the next cut starts the ladder again.
+      await rpc(client, 'hookEvent', { id, event: 'UserPromptSubmit' });
+      await rpc(client, 'hookEvent', { id, event: 'Stop' });
+      await sleep(100);
+      await cutOnce();
+      expect(actions().slice(-1)[0].params).toMatchObject({ autoContinue: 1, action: 'continue' });
+    });
+  });
+
   test('does not auto-continue when the feature is disabled', async () => {
     const pipe = workerPipePath();
     const dataDir = makeTempDataDir();
@@ -280,6 +394,7 @@ test.describe('API-error detection + auto-continue', () => {
       await rpc(client, 'hookEvent', { id, event: 'UserPromptSubmit' });
 
       await inject(client, id, OVERLOADED);
+      await cutIdle(client, id); // #461 - the agent idles on the turn the error cut
       await ev.waitFor(e => e.event === 'apiError' && e.params.id === id && e.params.apiError === true);
       await sleep(300);
       expect(ev.apiActions().length).toBe(0);
@@ -334,18 +449,21 @@ test.describe('API-error detection + auto-continue', () => {
 
       // Error #1 -> attempt 1 = continue
       await inject(client, id, OVERLOADED);
+      await cutIdle(client, id); // #461 - the agent idles on the turn the error cut
       const a1 = await ev.waitFor(e => e.event === 'apiError' && e.params.autoContinue === 1);
       expect(a1.params.action).toBe('continue');
       await rpc(client, 'hookEvent', { id, event: 'UserPromptSubmit' }); // resume -> clears flag
 
       // Error #2 -> attempt 2 = continue
       await inject(client, id, OVERLOADED);
+      await cutIdle(client, id); // #461 - the agent idles on the turn the error cut
       const a2 = await ev.waitFor(e => e.event === 'apiError' && e.params.autoContinue === 2);
       expect(a2.params.action).toBe('continue');
       await rpc(client, 'hookEvent', { id, event: 'UserPromptSubmit' });
 
       // Error #3 -> attempt 3 = /compact, then replay captured prompt on idle
       await inject(client, id, OVERLOADED);
+      await cutIdle(client, id); // #461 - the agent idles on the turn the error cut
       const a3 = await ev.waitFor(e => e.event === 'apiError' && e.params.autoContinue === 3);
       expect(a3.params.action).toBe('compact');
       // The idle hook (or fallback timer) triggers the prompt replay.
@@ -357,6 +475,7 @@ test.describe('API-error detection + auto-continue', () => {
       await rpc(client, 'hookEvent', { id, event: 'UserPromptSubmit' });
       const before = ev.apiActions().length;
       await inject(client, id, OVERLOADED);
+      await cutIdle(client, id); // #461 - the agent idles on the turn the error cut
       await sleep(300);
       expect(ev.apiActions().length).toBe(before);
 
@@ -382,6 +501,7 @@ test.describe('API-error detection + auto-continue', () => {
       await rpc(client, 'hookEvent', { id, event: 'UserPromptSubmit', prompt: 'do the thing' });
 
       await inject(client, id, OVERLOADED);
+      await cutIdle(client, id); // #461 - the agent idles on the turn the error cut
       await ev.waitFor(e => e.event === 'apiError' && e.params.autoContinue === 1 && e.params.action === 'continue');
       await sleep(120); // let the deferred CR land
 
@@ -414,12 +534,15 @@ test.describe('API-error detection + auto-continue', () => {
 
       // Walk to attempt 3 (/compact), clearing the flag between errors.
       await inject(client, id, OVERLOADED);
+      await cutIdle(client, id); // #461 - the agent idles on the turn the error cut
       await ev.waitFor(e => e.event === 'apiError' && e.params.autoContinue === 1);
       await rpc(client, 'hookEvent', { id, event: 'UserPromptSubmit' });
       await inject(client, id, OVERLOADED);
+      await cutIdle(client, id); // #461 - the agent idles on the turn the error cut
       await ev.waitFor(e => e.event === 'apiError' && e.params.autoContinue === 2);
       await rpc(client, 'hookEvent', { id, event: 'UserPromptSubmit' });
       await inject(client, id, OVERLOADED);
+      await cutIdle(client, id); // #461 - the agent idles on the turn the error cut
       await ev.waitFor(e => e.event === 'apiError' && e.params.autoContinue === 3 && e.params.action === 'compact');
       await rpc(client, 'hookEvent', { id, event: 'Stop' });
       await ev.waitFor(e => e.event === 'apiError' && e.params.action === 'replay-prompt');
@@ -461,12 +584,15 @@ test.describe('API-error detection + auto-continue', () => {
       await rpc(client, 'hookEvent', { id, event: 'UserPromptSubmit', prompt: dictated });
 
       await inject(client, id, OVERLOADED);
+      await cutIdle(client, id); // #461 - the agent idles on the turn the error cut
       await ev.waitFor(e => e.event === 'apiError' && e.params.autoContinue === 1);
       await rpc(client, 'hookEvent', { id, event: 'UserPromptSubmit' });
       await inject(client, id, OVERLOADED);
+      await cutIdle(client, id); // #461 - the agent idles on the turn the error cut
       await ev.waitFor(e => e.event === 'apiError' && e.params.autoContinue === 2);
       await rpc(client, 'hookEvent', { id, event: 'UserPromptSubmit' });
       await inject(client, id, OVERLOADED);
+      await cutIdle(client, id); // #461 - the agent idles on the turn the error cut
       await ev.waitFor(e => e.event === 'apiError' && e.params.autoContinue === 3 && e.params.action === 'compact');
       await rpc(client, 'hookEvent', { id, event: 'Stop' });
       await ev.waitFor(e => e.event === 'apiError' && e.params.action === 'replay-prompt');
@@ -500,12 +626,15 @@ test.describe('API-error detection + auto-continue', () => {
       await rpc(client, 'hookEvent', { id, event: 'PreToolUse' });
 
       await inject(client, id, OVERLOADED);
+      await cutIdle(client, id); // #461 - the agent idles on the turn the error cut
       await ev.waitFor(e => e.event === 'apiError' && e.params.autoContinue === 1);
       await rpc(client, 'hookEvent', { id, event: 'PreToolUse' });
       await inject(client, id, OVERLOADED);
+      await cutIdle(client, id); // #461 - the agent idles on the turn the error cut
       await ev.waitFor(e => e.event === 'apiError' && e.params.autoContinue === 2);
       await rpc(client, 'hookEvent', { id, event: 'PreToolUse' });
       await inject(client, id, OVERLOADED);
+      await cutIdle(client, id); // #461 - the agent idles on the turn the error cut
       await ev.waitFor(e => e.event === 'apiError' && e.params.autoContinue === 3 && e.params.action === 'compact');
       await rpc(client, 'hookEvent', { id, event: 'Stop' });
       const replay = await ev.waitFor(e => e.event === 'apiError' && e.params.action === 'replay-prompt');

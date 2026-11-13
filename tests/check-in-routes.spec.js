@@ -331,4 +331,47 @@ test.describe('#443 check-in - server', () => {
     expect((await anon.patch(`/api/sessions/${id}/brief`, { data: { checkInOff: true }, headers: { 'X-WT-Hook-Token': readHookToken() } })).status()).toBe(401);
     await anon.dispose();
   });
+  test('#461: a turn an API error cut is asked in its own words; one that then Stopped never is', async () => {
+    // The ladder off, so only the check-in types; apiErrorMin short.
+    await setConfig({ ...FAST, autoContinueOnApiError: false, checkIn: { ...FAST.checkIn, apiErrorMin: 0.02 } });
+    const open = async (name) => {
+      const r = await ctx.post('/api/sessions', { data: { name, agent: 'claude', autoCommand: LAUNCH } });
+      expect(r.status()).toBe(200);
+      const id = (await r.json()).id;
+      made.push(id);
+      await until(async () => (await rowOf(id))?.agentReady === true, 'the session to be ready');
+      return id;
+    };
+    // The error line reaches the PTY the way Claude's does: as output while the turn runs.
+    // Built from parts so this file is not itself the line (#138).
+    const line = ['API', 'Error:', 'Connection', 'lost', 'mid-response.'].join(' ');
+    const cutTurnIn = async (id, endWith) => {
+      const conv = crypto.randomUUID();
+      const tp = { transcript_path: transcript(id.slice(0, 8)) };
+      expect(await hook(id, 'UserPromptSubmit', { session_id: conv, prompt: 'work', ...tp })).toBe(200);
+      const typed = await ctx.post(`/api/sessions/${id}/answer`, { data: { frames: [{ keys: `echo ${line}\r`, delayMs: 0 }] } });
+      expect(typed.status()).toBe(202);
+      // The public row does not carry the flag (the check-in reads the worker's own): wait for the output.
+      await until(async () => (await scrollback(id)).includes(line), 'the line in the terminal');
+      // Claude's idle Notification (its 60 s idle_prompt): any other kind is dropped by the server.
+      const idle = endWith === 'Notification' ? { notification_type: 'idle_prompt', message: 'Claude is waiting for your input' } : {};
+      expect(await hook(id, endWith, { session_id: conv, ...tp, ...idle })).toBe(200);
+      await until(async () => (await rowOf(id))?.status === 'idle', 'the session to go idle');
+    };
+    const cut = await open(`checkin-apierr-${Date.now()}`);
+    const ended = await open(`checkin-apierr-stop-${Date.now()}`);
+    await cutTurnIn(ended, 'Stop');         // the line printed, then the turn ENDED: a sighting
+    await cutTurnIn(cut, 'Notification');   // no Stop: Claude's idle after a cut turn
+
+    const sb = await until(async () => { const t = await scrollback(cut); return t.includes(TAG) ? t : null; }, 'the check-in in the cut session');
+    expect(sb).toContain('cut off by an API error');
+    expect(sb).toContain('Connection lost mid-response');
+    expect(logOf(cut).filter((l) => l.event === 'sent').map((l) => l.why)).toEqual(['api-error']);
+    // The session whose turn ended was never asked, though it shows the same line.
+    await sleep(3000);
+    expect(await scrollback(ended)).not.toContain(TAG);
+    expect(logOf(ended)).toHaveLength(0);
+    // Asked once: it stays asked through more scans.
+    expect(logOf(cut).filter((l) => l.event === 'sent')).toHaveLength(1);
+  });
 });

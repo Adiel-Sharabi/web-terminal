@@ -277,10 +277,13 @@ have come without waking it; if it is still pending it reports `external` again,
 reports nothing keeps its standing wait ("→ blocked on others"). A wait on you
 and a session that reported done are never asked. The log line records which case asked (`why`).
 A turn cut short by an API error (#461) reports no wait at all. Network failures such as
-"Connection lost mid-response" or "Can't reach the API server" now count as transient, so the
-worker sends `continue` within seconds. If that gives up, or the error is one it never retries, the
-session is asked once its error has stood `apiErrorMin` (default 60) minutes over the turn it cut,
-in its own words: the error line, and to pick the work back up if it is unfinished.
+"Connection lost mid-response" or "Can't reach the API server" now count as transient, so once
+Claude goes idle on the turn the error cut (about a minute later), the worker types `continue`.
+It never types for an error line that only appeared on screen in a turn that then finished, or
+after you pressed Esc, and it gives up after continue, continue, /compact until a turn succeeds.
+If that gives up, or the error is one it never retries, the session is asked once its error has
+stood `apiErrorMin` (default 60) minutes, in its own words: what failed, and to pick the work
+back up if it is unfinished. It is asked once per run of failed turns, never hourly.
 
 **Resume by work item, on any machine** — a session's brief and its hand-off are named after
 the SESSION; the work is named after its **work item** (`ado:25309`, `#413`). Whenever a

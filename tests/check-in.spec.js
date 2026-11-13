@@ -619,21 +619,44 @@ test.describe('a turn an API error cut, with nothing retrying it, is asked (#461
     expect(C.checkInConfig({ apiErrorMin: -1 }).apiErrorMin).toBe(60);
   });
 
-  test('only a turn the error CUT: each half broken alone keeps the old api-error block', () => {
-    // The turn ended normally after the line was printed (a session echoing "API Error").
+  test('only a turn the error CUT: a sighting over a turn that ended blocks nothing, a row that cannot tell blocks', () => {
+    // The turn ended normally after the line was printed (a session echoing "API Error"):
+    // not cut, so not asked by this reading - and the flag is no longer the auto-continue's.
     const ended = cut(); ended.brief = { ...ended.brief, stoppedAt: T - 100 * MIN };
-    expect(block(ended)).toBe('api-error');
     expect(why(ended)).toBeNull();
+    expect(block(ended)).toBe('not-stale');
+    // ...so a self-wait session showing a stale sighting is still asked as before.
+    const selfWait = candidate(); Object.assign(selfWait, { apiError: true, apiErrorAt: selfWait.brief.turnAt + 1000 });
+    expect(block(selfWait)).toBeNull();
+    expect(why(selfWait)).toBe('stale-self');
+    // A FRESH sighting over a turn that ended is no ladder's either: it blocks nothing.
+    const freshSight = candidate(); Object.assign(freshSight, { apiError: true, apiErrorAt: T - 5 * MIN });
+    freshSight.brief = { ...freshSight.brief, turnAt: T - 125 * MIN, stoppedAt: T - 2 * MIN };
+    expect(block(freshSight)).not.toBe('api-error');
     // The error was seen BEFORE the current turn began: not this turn's.
-    expect(block(cut(120, { apiErrorAt: T - 125 * MIN }))).toBe('api-error');
-    // An older worker publishes no apiErrorAt: fail closed.
+    expect(why(cut(120, { apiErrorAt: T - 125 * MIN }))).toBeNull();
+    // An older worker publishes no apiErrorAt: cannot tell, blocked as before.
     expect(block(cut(120, { apiErrorAt: null }))).toBe('api-error');
     expect(block(cut(120, { apiErrorAt: undefined }))).toBe('api-error');
+    expect(block(selfWait.brief && { ...selfWait, apiErrorAt: null })).toBe('api-error');
     // No standing error: a cut turn with no report is nothing the check-in can read.
     expect(block(cut(120, { apiError: false }))).toBe('not-stale');
     // No turn time at all: cannot prove a cut.
     const noTurn = cut(); noTurn.brief = { ...noTurn.brief, turnAt: null };
-    expect(block(noTurn)).toBe('api-error');
+    expect(why(noTurn)).toBeNull();
+  });
+
+  test('a wait on the owner or done, reported in the turn before it was cut, is never asked (#458 still binds)', () => {
+    for (const on of ['you', 'done']) {
+      const r = cut(600); r.brief = { ...r.brief, wait: { on, what: 'approve the plan', at: r.brief.turnAt + 1000 } };
+      expect(why(r)).toBeNull();
+      // Reported in an EARLIER turn: this turn's prompt answered it, so the cut turn is asked.
+      const old = cut(600); old.brief = { ...old.brief, wait: { on, what: 'approve the plan', at: old.brief.turnAt - 1000 } };
+      expect(why(old)).toBe('api-error');
+    }
+    // The raw entry (the pre-filter's view) keeps it under reported.
+    const entry = { turnAt: T - 122 * MIN, stoppedAt: T - 150 * MIN, reported: { wait: { on: 'you', what: 'x', at: T - 121 * MIN } }, checkIn: null };
+    expect(C.worthReading(entry, { now: T, listed: { apiError: true, apiErrorAt: T - 120 * MIN } })).toBe(false);
   });
 
   test('every earlier gate still says no first', () => {
@@ -648,16 +671,21 @@ test.describe('a turn an API error cut, with nothing retrying it, is asked (#461
     expect(block({ ...r, brief: { ...r.brief, checkInOff: true } })).toBe('off');
   });
 
-  test('asked once per idle period: a check-in whose own turn the error cut again is not re-asked', () => {
+  test('asked once per RUN of cut turns: neither its own cut turn nor the ladder\'s later ones re-ask it; a turn that ends does', () => {
     const r = cut(600);
     const rec = { ...C.startRecord(T - 30 * MIN, 570, 'api-error'), deliveredAt: T - 29 * MIN };
     // Its turn began at delivery and an API error cut it too: no Stop, a newer error.
     const again = { ...r, apiErrorAt: T - 28 * MIN, brief: { ...r.brief, checkIn: rec, turnAt: T - 29 * MIN } };
     expect(block(again)).toBe('api-error'); // the new error is fresh: the auto-continue's
     expect(block(again, { now: T + 10 * 60 * MIN })).toBe('asked'); // stale, but already asked
-    // A later turn (a person's prompt) re-arms it.
-    const later = { ...again, brief: { ...again.brief, turnAt: T - 10 * MIN }, apiErrorAt: T - 5 * MIN };
-    expect(block(later, { now: T + 120 * MIN })).toBeNull();
+    // The worker's ladder then typed `continue`: a LATER turn, which ends the idle period -
+    // and was cut as well (an outage). Hours on, still not asked again.
+    const ladder = { ...again, brief: { ...again.brief, turnAt: T - 10 * MIN }, apiErrorAt: T - 9 * MIN };
+    for (const later of [120, 600, 6000]) expect(block(ladder, { now: T + later * MIN })).toBe('not-stale');
+    // A turn that ENDED after the check-in re-arms it: the next cut is a new run.
+    const next = { ...ladder, brief: { ...ladder.brief, stoppedAt: T - 20 * MIN } };
+    expect(block(next, { now: T + 120 * MIN })).toBeNull();
+    expect(why(next, { now: T + 120 * MIN })).toBe('api-error');
   });
 
   test('the cheap pre-filter lets it through from the worker\'s list row, which carries the error', () => {
@@ -684,7 +712,10 @@ test.describe('a turn an API error cut, with nothing retrying it, is asked (#461
     const p = C.checkInPrompt({ idleMin: 26 * 60, what: ERR, why: 'api-error' });
     expect(p.startsWith(CHECKIN_PROMPT_TAG)).toBe(true);
     expect(p).toContain('You have been idle 26 h. Your last turn was cut off by an API error');
-    expect(p).toContain('("API Error: Connection lost mid-response');
+    expect(p).toContain('("Connection lost mid-response');
+    // Never the phrase the worker sniffs: the agent echoes its prompt (#138).
+    expect(p).not.toContain('API Error');
+    expect(C.checkInPrompt({ idleMin: 90, what: 'x API Error y', why: 'api-error' })).not.toContain('API Error');
     expect(p).toContain('nothing retried it');
     for (const w of ['pick it back up', 'report wait done', 'report wait you']) expect(p).toContain(w);
     // It reported nothing: never claim it said it would resume, or waited on someone.
