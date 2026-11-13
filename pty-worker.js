@@ -243,11 +243,8 @@ function stripAnsiForScan(s) {
   return s.replace(/\x1b\[[0-9;?]*[ -/]*[@-~]/g, '');
 }
 
-function isTransientApiError(line) {
-  // Retryable: overload, rate limit, gateway/timeout, transport errors.
-  if (/\b(408|409|425|429|500|502|503|504|520|521|522|523|524|529)\b/.test(line)) return true;
-  return /overload|rate.?limit|temporar|time(?:d)?\s*out|timeout|connection (?:error|reset)|econnreset|etimedout|enetunreach|fetch failed|socket hang up|service unavailable|bad gateway|gateway time/i.test(line);
-}
+// Retryable or not: the rule and the real lines it was measured on live in lib/api-error.js (#461).
+const { isTransientApiError } = require('./lib/api-error');
 
 // Write a minimal readline config that enables bracketed paste mode.
 // Bash 4.4 ships with the setting available but OFF by default; this opts it
@@ -2130,6 +2127,9 @@ function sessionSummary(id, s) {
     hookStatus: !!s.hookStatus,
     apiError: !!s.apiError,
     apiErrorText: s.apiError ? (s.apiErrorText || '') : '',
+    // #461 - when the standing error was seen, so the check-in can tell an error the
+    // auto-continue still owns from one nobody retried. The worker's clock, never a guess.
+    apiErrorAt: s.apiError && Number.isFinite(s.lastApiErrorAt) ? s.lastApiErrorAt : null,
     compacting: !!(s.compacting),
     compactingSince: s.compacting ? s.compacting.since : null,
     // #69 — the 5h reset time both agents report, via setFiveHResetAt. #137 renders

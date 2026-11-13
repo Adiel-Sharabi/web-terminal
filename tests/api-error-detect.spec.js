@@ -111,6 +111,48 @@ async function findSession(client, id) {
 const OVERLOADED = 'API Error: 529 Overloaded. This is a server-side issue, usually temporary.\r\n';
 const BAD_REQUEST = 'API Error: 400 {"type":"error","error":{"message":"bad request"}}\r\n';
 
+// #461 - the transport failures Claude prints today, verbatim from the worker logs that
+// called every one of them non-transient (so no auto-continue ever ran). A plain "continue"
+// resumed the measured one after 26 h idle.
+const CUT_LINES = [
+  'API Error: Connection lost mid-response. The response above may be incomplete.',
+  'API Error: Connection closed mid-response. The response above may be incomplete.',
+  'API Error: Server error mid-response. The response above may be incomplete.',
+  'API Error: Response stalled mid-stream. The response above may be incomplete.',
+  "API Error: Can't reach the API server \u2014 check your internet connection",
+  // The TUI positions words by cursor moves, so the stripped line can lose its spaces.
+  "API Error:Can'treachtheAPIserver\u2014checkyourinternetorD",
+  'API Error: Can\u2019t reach the API server',
+  'API Error: Unable to connect to API (ConnectionRefused)',
+  'API Error: Unable to connect to API',
+  'API Error: API returned an empty or malformed response',
+];
+// Retrying these fails the same way: they stay flagged-only.
+const PERMANENT_LINES = [
+  'API Error: 400 {"type":"error","error":{"message":"bad request"}}',
+  'API Error: 401 {"type":"error","error":{"type":"authentication_error"}}',
+  'API Error: 403 Attention Required! | Cloudflare',
+  'API Error: an image in the conversation could not be processed',
+];
+
+test.describe('which API errors are worth retrying (#461, lib/api-error.js)', () => {
+  const { isTransientApiError } = require('../lib/api-error');
+  test('every transport failure Claude prints is transient', () => {
+    for (const l of CUT_LINES) expect(isTransientApiError(l), l).toBe(true);
+  });
+  test('the ones retrying cannot fix stay non-transient', () => {
+    for (const l of PERMANENT_LINES) expect(isTransientApiError(l), l).toBe(false);
+    expect(isTransientApiError('')).toBe(false);
+    expect(isTransientApiError(undefined)).toBe(false);
+  });
+  test('the rules it had before still hold', () => {
+    for (const l of ['API Error: 529 Overloaded', 'API Error: 429 rate_limit_error', 'API Error: Request timed out.',
+      'API Error: Connection error.', 'API Error: read ECONNRESET', 'API Error: fetch failed', 'API Error: 503 Service Unavailable']) {
+      expect(isTransientApiError(l), l).toBe(true);
+    }
+  });
+});
+
 test.describe('API-error detection + auto-continue', () => {
   test('flags a Claude session and emits an apiError event on detection', async () => {
     const pipe = workerPipePath();
@@ -183,6 +225,41 @@ test.describe('API-error detection + auto-continue', () => {
       await sleep(300); // longer than the (fast) backoff
       expect(ev.apiActions().length).toBe(0);
 
+      ev.stop();
+      await rpc(client, 'killSession', { id });
+      await client.close();
+    } finally {
+      await worker.stop();
+      rmRf(dataDir);
+    }
+  });
+
+  test('#461: a connection lost mid-response is transient, auto-continues, and publishes when it was seen', async () => {
+    const pipe = workerPipePath();
+    const dataDir = makeTempDataDir();
+    const worker = spawnWorker(pipe, dataDir, { WT_AUTO_CONTINUE_API_ERROR: '1' });
+    try {
+      const client = await connectClient(pipe);
+      const ev = makeEventCollector(client);
+      const { id } = await rpc(client, 'createSession', { cwd: os.tmpdir(), name: 'cut', autoCommand: '' });
+      await rpc(client, 'hookEvent', { id, event: 'UserPromptSubmit' });
+      const before = await findSession(client, id);
+      expect(before.apiErrorAt).toBeNull();
+      const t0 = Date.now();
+      await inject(client, id, CUT_LINES[0] + '\r\n');
+      const detect = await ev.waitFor(e => e.event === 'apiError' && e.params.id === id && e.params.apiError === true);
+      expect(detect.params.transient).toBe(true);
+      const a1 = await ev.waitFor(e => e.event === 'apiError' && e.params.id === id && e.params.autoContinue === 1);
+      expect(a1.params.action).toBe('continue');
+      const found = await findSession(client, id);
+      expect(found.apiError).toBe(true);
+      expect(found.apiErrorAt).toBeGreaterThanOrEqual(t0);
+      expect(found.apiErrorAt).toBeLessThanOrEqual(Date.now());
+      // Cleared by the resumed turn: the time goes with it.
+      await rpc(client, 'hookEvent', { id, event: 'UserPromptSubmit' });
+      const after = await findSession(client, id);
+      expect(after.apiError).toBe(false);
+      expect(after.apiErrorAt).toBeNull();
       ev.stop();
       await rpc(client, 'killSession', { id });
       await client.close();

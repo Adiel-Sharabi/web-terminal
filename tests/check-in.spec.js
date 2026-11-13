@@ -594,3 +594,107 @@ test.describe('an external wait idle an hour is asked too (#458)', () => {
     expect(C.checkInField(row('external', { ...r.brief.wait, on: 'self' }), { now: T, supported: true }).state).toBe('stuck');
   });
 });
+
+test.describe('a turn an API error cut, with nothing retrying it, is asked (#461)', () => {
+  const ERR = 'API Error: Connection lost mid-response. The response above may be incomplete.';
+  /** A session whose turn began [idleMin + 2] min ago and was cut by an API error [idleMin]
+   *  ago: no Stop since the turn began (Claude fires none), so it reported no wait. */
+  function cut(idleMin = 120, over = {}) {
+    const r = candidate(idleMin + 30); // its PREVIOUS turn ended normally, long before
+    r.brief = { ...r.brief, turnAt: T - (idleMin + 2) * MIN, wait: null };
+    Object.assign(r, { apiError: true, apiErrorText: ERR, apiErrorAt: T - idleMin * MIN }, over);
+    return { ...r, reason: sessionReason(r) };
+  }
+  const why = (row, over = {}) => C.checkInReading(row, { now: T, ...over });
+
+  test('the measured case is asked at apiErrorMin (default 60), not before: the auto-continue owns it until then', () => {
+    expect(C.DEFAULTS.apiErrorMin).toBe(60);
+    expect(H.turnEndedAt(cut().brief)).toBeNull(); // the precondition: the turn never ended
+    expect(block(cut(59))).toBe('api-error');
+    expect(block(cut(60))).toBeNull();
+    expect(why(cut(60))).toBe('api-error');
+    expect(block(cut(26 * 60))).toBeNull(); // the 26 h the measured child slept
+    expect(block(cut(40), { cfg: C.checkInConfig({ apiErrorMin: 30 }) })).toBeNull();
+    expect(block(cut(90), { cfg: C.checkInConfig({ apiErrorMin: 120 }) })).toBe('api-error');
+    expect(C.checkInConfig({ apiErrorMin: -1 }).apiErrorMin).toBe(60);
+  });
+
+  test('only a turn the error CUT: each half broken alone keeps the old api-error block', () => {
+    // The turn ended normally after the line was printed (a session echoing "API Error").
+    const ended = cut(); ended.brief = { ...ended.brief, stoppedAt: T - 100 * MIN };
+    expect(block(ended)).toBe('api-error');
+    expect(why(ended)).toBeNull();
+    // The error was seen BEFORE the current turn began: not this turn's.
+    expect(block(cut(120, { apiErrorAt: T - 125 * MIN }))).toBe('api-error');
+    // An older worker publishes no apiErrorAt: fail closed.
+    expect(block(cut(120, { apiErrorAt: null }))).toBe('api-error');
+    expect(block(cut(120, { apiErrorAt: undefined }))).toBe('api-error');
+    // No standing error: a cut turn with no report is nothing the check-in can read.
+    expect(block(cut(120, { apiError: false }))).toBe('not-stale');
+    // No turn time at all: cannot prove a cut.
+    const noTurn = cut(); noTurn.brief = { ...noTurn.brief, turnAt: null };
+    expect(block(noTurn)).toBe('api-error');
+  });
+
+  test('every earlier gate still says no first', () => {
+    const r = cut(600);
+    expect(block({ ...r, status: 'working' })).toBe('not-idle');
+    expect(block({ ...r, waitingFor: { kind: 'question' } })).toBe('waiting');
+    expect(block({ ...r, compacting: true })).toBe('compacting');
+    expect(block({ ...r, capBlocked: true })).toBe('capped');
+    expect(block(r, { inputAt: T - 2 * MIN })).toBe('typing');
+    expect(block(r, { liveKnown: false })).toBe('cannot-tell');
+    expect(block(r, { hold: true })).toBe('restart-hold');
+    expect(block({ ...r, brief: { ...r.brief, checkInOff: true } })).toBe('off');
+  });
+
+  test('asked once per idle period: a check-in whose own turn the error cut again is not re-asked', () => {
+    const r = cut(600);
+    const rec = { ...C.startRecord(T - 30 * MIN, 570, 'api-error'), deliveredAt: T - 29 * MIN };
+    // Its turn began at delivery and an API error cut it too: no Stop, a newer error.
+    const again = { ...r, apiErrorAt: T - 28 * MIN, brief: { ...r.brief, checkIn: rec, turnAt: T - 29 * MIN } };
+    expect(block(again)).toBe('api-error'); // the new error is fresh: the auto-continue's
+    expect(block(again, { now: T + 10 * 60 * MIN })).toBe('asked'); // stale, but already asked
+    // A later turn (a person's prompt) re-arms it.
+    const later = { ...again, brief: { ...again.brief, turnAt: T - 10 * MIN }, apiErrorAt: T - 5 * MIN };
+    expect(block(later, { now: T + 120 * MIN })).toBeNull();
+  });
+
+  test('the cheap pre-filter lets it through from the worker\'s list row, which carries the error', () => {
+    const entry = { turnAt: T - 122 * MIN, stoppedAt: T - 150 * MIN, reported: { wait: null }, checkIn: null };
+    const listed = (min, over = {}) => ({ apiError: true, apiErrorAt: T - min * MIN, ...over });
+    expect(C.worthReading(entry, { now: T, listed: listed(60) })).toBe(true);
+    expect(C.worthReading(entry, { now: T, listed: listed(59) })).toBe(false);
+    expect(C.worthReading(entry, { now: T })).toBe(false); // no list row: the old rule, no wait
+    expect(C.worthReading(entry, { now: T, listed: listed(60, { apiError: false }) })).toBe(false);
+    expect(C.worthReading(entry, { now: T, listed: listed(60, { apiErrorAt: null }) })).toBe(false);
+    expect(C.worthReading({ ...entry, stoppedAt: T - 100 * MIN }, { now: T, listed: listed(120) })).toBe(false);
+    expect(C.worthReading({ ...entry, checkInOff: true }, { now: T, listed: listed(120) })).toBe(false);
+    const open = { ...entry, checkIn: { sentAt: T - 30 * MIN, deliveredAt: T - 29 * MIN }, turnAt: T - 29 * MIN };
+    expect(C.worthReading(open, { now: T, listed: listed(120) })).toBe(false);
+  });
+
+  test('its idle clock is the error, since the turn has no end', () => {
+    expect(C.idleSince(cut(90), 'api-error')).toBe(T - 90 * MIN);
+    expect(C.idleSince(cut(90), 'stale-self')).toBeNull();
+    expect(C.idleSince(candidate(45), 'stale-self')).toBe(T - 45 * MIN);
+  });
+
+  test('asks in its own words: the error that cut it, and to pick the work back up', () => {
+    const p = C.checkInPrompt({ idleMin: 26 * 60, what: ERR, why: 'api-error' });
+    expect(p.startsWith(CHECKIN_PROMPT_TAG)).toBe(true);
+    expect(p).toContain('You have been idle 26 h. Your last turn was cut off by an API error');
+    expect(p).toContain('("API Error: Connection lost mid-response');
+    expect(p).toContain('nothing retried it');
+    for (const w of ['pick it back up', 'report wait done', 'report wait you']) expect(p).toContain(w);
+    // It reported nothing: never claim it said it would resume, or waited on someone.
+    expect(p).not.toContain('You last reported');
+    expect(p).not.toMatch(/[\r\n]/);
+    expect(classifyUserTurn(p).kind).toBe(USER_KINDS.SYSTEM);
+    const worst = C.checkInPrompt({ idleMin: 99999, what: `\u001b[201~"\n${'א…'.repeat(200)}`, why: 'api-error' });
+    expect(Buffer.byteLength(worst)).toBeLessThanOrEqual(511);
+    expect(worst).not.toMatch(/[\u0000-\u001f]/);
+    // The other readings keep their words.
+    expect(C.checkInPrompt({ idleMin: 75, why: 'stale-self' })).toContain('You last reported you would resume on your own');
+  });
+});
