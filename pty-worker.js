@@ -865,7 +865,7 @@ function maybeStartApiErrorLadder(session, event) {
 // or the user's). Cancels a pending auto-continue timer but deliberately does
 // NOT reset the attempt counter: a brief working blip between two overload
 // errors must stay in the same episode, else the ladder loops forever. The
-// counter only resets via the episode-timeout in scheduleAutoContinue.
+// counter only resets on a successful Stop (#461, scheduleAutoContinue).
 function clearApiError(session) {
   if (session._autoContinueTimer) { clearTimeout(session._autoContinueTimer); session._autoContinueTimer = null; }
   if (!session.apiError) return false;
@@ -908,6 +908,7 @@ function scheduleAutoContinue(session) {
       try { submitLine(s, '/compact'); } catch (e) { log(`api-error: /compact write failed: ${e.message}`); return; }
       log(`api-error: "${s.name}" auto attempt ${attempt}/${API_ERROR_MAX_ATTEMPTS}: sent /compact`);
       armCompactReplay(s);
+      s._awaitCompactStop = true; // #461 - its Stop is not a successful turn
       setCompacting(s, 'auto-recovery'); // #65 — same indicator as a user's own /compact
       broadcastEvent('apiError', { id: s.id, name: s.name, apiError: true, text: s.apiErrorText || '', transient: true, autoContinue: attempt, action: 'compact' });
     } else {
@@ -1214,6 +1215,8 @@ function writePromptToTerm(session, text) {
 // write. Every agent we ship does fold one, so in practice every submit is split — see
 // the measurements on `claude.submit` in lib/agents.js.
 function writeUserInput(session, data) {
+  // #461 - someone is typing: a pending auto-continue would be appended to their line.
+  if (session._autoContinueTimer) { clearTimeout(session._autoContinueTimer); session._autoContinueTimer = null; log(`api-error: "${session.name}" auto-continue cancelled - input arrived`); }
   if (!agents.submitPolicy(sessionAgent(session)).crBurstsAsPaste) {
     deliver(session, data);
     return;
@@ -1995,7 +1998,10 @@ function applyIdle(session, event) {
   if (event === 'Stop') session.lastTurnEndAt = Date.now();
   // #461 - a turn that SUCCEEDED ends the API-error episode. The Stop of our own /compact
   // (its replay still pending) is not one: the replay may fail the same way.
-  if (event === 'Stop' && !session._compactReplay) session._lastSuccessfulStopAt = session.lastTurnEndAt;
+  if (event === 'Stop') {
+    if (session._awaitCompactStop) session._awaitCompactStop = false;
+    else if (!session._compactReplay) session._lastSuccessfulStopAt = session.lastTurnEndAt;
+  }
   // The debounce outlives the session if it exited in the window — don't announce
   // a status for a PTY that is gone (killSession clears the timer; an exit races).
   if (!sessions.has(sessionIdOf(session))) return;
@@ -2670,7 +2676,8 @@ function handleHook(session, event, claudeSessionId, prompt, agentId, opts) {
       // SubagentStop above releases it through the same debounce.
       const live = subagentSet(session);
       if (live.size > 0) {
-        session.heldStop = event;
+        // #461 - a held Stop is the turn-end fact: a later idle Notification never replaces it.
+        if (session.heldStop !== 'Stop') session.heldStop = event;
         log(`hook: session "${session.name}" ${event} held — ${live.size} subagent(s) in flight`);
         break;
       }

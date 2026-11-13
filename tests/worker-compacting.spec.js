@@ -353,12 +353,15 @@ test.describe('#65 — unified compacting state', () => {
 
       // Walk the escalation ladder to attempt 3, which is the /compact step.
       await inject(client, id, OVERLOADED);
+      await rpc(client, 'hookEvent', { id, event: 'Notification' }); // #461 - the ladder starts on the cut turn's idle
       await ev.waitFor(e => e.event === 'apiError' && e.params.autoContinue === 1);
       await rpc(client, 'hookEvent', { id, event: 'UserPromptSubmit' });
       await inject(client, id, OVERLOADED);
+      await rpc(client, 'hookEvent', { id, event: 'Notification' }); // #461 - the ladder starts on the cut turn's idle
       await ev.waitFor(e => e.event === 'apiError' && e.params.autoContinue === 2);
       await rpc(client, 'hookEvent', { id, event: 'UserPromptSubmit' });
       await inject(client, id, OVERLOADED);
+      await rpc(client, 'hookEvent', { id, event: 'Notification' }); // #461 - the ladder starts on the cut turn's idle
       await ev.waitFor(e => e.event === 'apiError' && e.params.autoContinue === 3 && e.params.action === 'compact');
 
       const frame = await ev.waitFor(e => e.event === 'compacting' && e.params.id === id && e.params.compacting === true);

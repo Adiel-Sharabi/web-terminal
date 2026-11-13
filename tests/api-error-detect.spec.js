@@ -358,6 +358,29 @@ test.describe('API-error detection + auto-continue', () => {
     });
   });
 
+  test('#461: a held Stop (a subagent still running) is never replaced by a later Notification', async () => {
+    await ladderCase('held-stop', async (client, id, ev) => {
+      await rpc(client, 'hookEvent', { id, event: 'UserPromptSubmit' });
+      await rpc(client, 'hookEvent', { id, event: 'SubagentStart', agentId: 'sub-1' });
+      await inject(client, id, CUT_LINES[0] + '\r\n'); // an echo while the turn works
+      await rpc(client, 'hookEvent', { id, event: 'Stop' });         // held: the subagent runs on
+      await cutIdle(client, id);                                     // Claude's idle, also held
+      await rpc(client, 'hookEvent', { id, event: 'SubagentStop', agentId: 'sub-1' });
+      expect(await quiet(ev, id)).toBe(0); // released as the Stop it was: a finished turn
+    });
+  });
+
+  test('#461: a keystroke during the backoff cancels the typed retry (it would join their line)', async () => {
+    await ladderCase('typing', async (client, id, ev) => {
+      await rpc(client, 'hookEvent', { id, event: 'UserPromptSubmit' });
+      await inject(client, id, CUT_LINES[0] + '\r\n');
+      await cutIdle(client, id);
+      await sleep(100); // armed: the first fast backoff is 300 ms
+      client.send(ipc.encodePtyIn(id, Buffer.from('h', 'utf8')));
+      expect(await quiet(ev, id)).toBe(0);
+    });
+  });
+
   test('#461: an episode ends only on a turn that SUCCEEDED, never on our /compact\'s Stop', async () => {
     await ladderCase('episode', async (client, id, ev) => {
       const actions = () => ev.apiActions().filter((e) => e.params.id === id && (e.params.action === 'continue' || e.params.action === 'compact'));
