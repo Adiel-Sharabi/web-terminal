@@ -358,18 +358,24 @@ across hand-offs. It hands itself off like any session and is followed through `
 #351 reaper and the check-in leave it alone. Its row carries `role: "supervisor"`.
 - **Cases** (`lib/supervisor-cases.js`), at most one per rule per session and wait: **R2** an orphan
   whose lead is gone waits on it (stand in for the lead); **R3** no progress: the same check-in answer
-  twice in one idle period, or a wait past its own `checkBy`; **R6** a turn working with no hook for
-  `hungMin` (45) and no subagent or Monitor under it; **R9** the same failure back across turns:
+  twice in one idle period, or a wait past its own `checkBy`; **R4** a session waiting on the owner
+  (by day too; the owner's push still goes out): the dispatcher answers it if the rules settle it or
+  it can be undone, steers round it, or asks the owner; **R6** a turn working with no hook for
+  `hungMin` (45), not already stopped, with nothing live under it (no command, subagent, Monitor or
+  wakeup); **R9** the same failure back across turns:
   every session row now carries `circling` (`lib/circling.js`: the tool and failure line seen most
-  often in the last 6 h, numbers blanked, with how many times and over how many prompts), read from
-  the transcript pass that finds background work; a case needs `circleMin` (4) over 2+ turns.
+  often in the last 6 h, numbers blanked, its fingerprint `fp`, with how many times and over how many
+  prompts), read from the transcript pass that finds background work; a case needs `circleMin` (4)
+  over 2+ turns, and is keyed on the fingerprint, so a new wording is the same case.
   A case whose trigger moves on (a new report, the turn ends) is retired. Cases and cards are logged
-  to `handoffs/supervisor-cases.jsonl`.
+  to `handoffs/supervisor-cases.jsonl`. Session text a case line quotes (a name, a wait, a failure)
+  is stripped of `` ` $ " \ ``, so a line typed into a shell by mistake stays inert.
 - The case reaches the dispatcher as one tagged prompt (`Case <id> (<rule>): ...`) through the
   gated prompt; its first case rides its command line, because a fresh agent reads `active` until
-  its first turn ends. **Paused, switched off or at its usage cap**, or a case it could not take in
-  30 min, goes **straight to the owner**: "Needs you", and an owner-wait push on the same ladder
-  as a reported wait (held at night). The morning push says what the night shift did
+  its first turn ends. **Paused, switched off or at its usage cap**, or a case it has not TAKEN
+  (acted on with a verb naming the case, `ask-owner` or `resolve`) 30 min after it was handed
+  over, goes **straight to the owner**: "Needs you", and an owner-wait push on the same ladder
+  as a reported wait (held at night; an R4 case is that wait itself, so it is not pushed twice). The morning push says what the night shift did
   ("Overnight: 2 answered, 1 coached, 3 woken. 4 things wait on you").
 - **Verbs** (`scripts/wt-supervise.js`, Bearer auth, authority only, every one re-checked):
   `sessions`, `cases`, `case <id>`, `tail <session> [n]`, `wake|coach|lead <session> "<text>"`,
@@ -381,7 +387,8 @@ across hand-offs. It hands itself off like any session and is followed through `
   and `spawn` arrive with phases 4 and 5) acts by default, because each can be undone; the owner
   flips one to recommend with `supervisor.autonomy.<class>` or `POST /api/supervisor/autonomy`. In
   recommend mode, and ALWAYS for a text asking for what only the owner decides (merging or pushing,
-  GitHub comments, deleting data, an install, spending money, anything outward-facing), the verb
+  GitHub comments, deleting data, an install, spending money, anything outward-facing - matched
+  word by word and deliberately broad: a false positive costs only a card), the verb
   makes a **card** instead: `POST /api/supervisor/cards/:id {decision: approve|dismiss}` types it
   (through every gate) or drops it; each class's record (approved, dismissed, pending) is in
   `GET /api/supervisor/state` (`cases`, `cards`, `dispatcher`, `autonomy`).

@@ -36,6 +36,14 @@ test.describe('#468 R9 evidence: the same failure across turns (lib/circling.js)
     expect(f.sample).toBe('Error: expected 200, got 500');
   });
 
+  test('fp is the failure\'s identity: a new wording of the same failure keeps it, the sample moves', () => {
+    const s = circ.createCirclingScanner();
+    s.feed(run(4, ['p1', 'p2'], (i) => `Error: test ${i + 10} timed out after ${i + 30}s`));
+    const f = s.field(T0 + 10 * MIN);
+    expect(f.fp).toBe(circ.fingerprint('Bash', 'Error: test 99 timed out after 99s'));
+    expect(f.sample).toBe('Error: test 13 timed out after 33s');
+  });
+
   test('negatives: under PUBLISH_MIN, outside the window, a subagent line, a different failure each time', () => {
     const a = circ.createCirclingScanner(); a.feed(run(circ.PUBLISH_MIN - 1, ['p1', 'p2']));
     expect(a.field(T0 + 10 * MIN)).toBeNull();
@@ -65,7 +73,7 @@ test.describe('#468 R9 evidence: the same failure across turns (lib/circling.js)
 // --- lib/supervisor-cases.js: which cases L1 opens -----------------------------------
 const cfg = cases.dispatcherConfig(null);
 const node = (over) => ({ id: id(1), server: 'alpha', name: 'worker', status: 'idle', wait: null, checkIn: null, compacting: false, waitingFor: null,
-  liveAgents: 0, circling: null, nowAt: null, turnAt: null, reportAt: null, now: null, ...over });
+  liveWork: 0, circling: null, nowAt: null, turnAt: null, stoppedAt: null, reportAt: null, now: null, reason: null, ...over });
 const graphOf = (...nodes) => ({ at: T0, complete: true, nodes, aliases: {} });
 const cand = (n, extra = {}) => cases.caseCandidates({ graph: graphOf(n), verdicts: extra.verdicts || {}, resolutions: extra.resolutions || {}, now: extra.now || T0, cfg, skip: extra.skip });
 
@@ -111,16 +119,73 @@ test.describe('#468 the cases L1 opens (caseCandidates)', () => {
     expect(cand(node({ ...hung, status: 'idle' }))).toEqual([]);
     expect(cand(node({ ...hung, compacting: true }))).toEqual([]);
     expect(cand(node({ ...hung, waitingFor: 'permission' }))).toEqual([]);
-    expect(cand(node({ ...hung, liveAgents: 1 }))).toEqual([]);
+    expect(cand(node({ ...hung, liveWork: 1 }))).toEqual([]);                 // a command, an agent, a Monitor...
+    expect(cand(node({ ...hung, stoppedAt: T0 - 55 * MIN }))).toEqual([]);    // the turn already stopped
+    expect(cand(node({ ...hung, stoppedAt: T0 - 65 * MIN })).map((c) => c.rule)).toEqual(['R6']); // a Stop of the turn before
   });
 
-  test('R9: one failure circleMin times over 2+ turns, seen in the last hour', () => {
-    const c9 = { tool: 'Bash', sample: 'error: expected 200, got 500', count: 4, turns: 2, lastAt: T0 - 5 * MIN };
-    expect(cand(node({ circling: c9, wait: { on: 'self', what: 'x', at: T0 - MIN } })).map((c) => c.rule)).toEqual(['R9']);
-    expect(cand(node({ circling: { ...c9, count: 3 } }))).toEqual([]);
-    expect(cand(node({ circling: { ...c9, turns: 1 } }))).toEqual([]);
-    expect(cand(node({ circling: { ...c9, lastAt: T0 - 61 * MIN } }))).toEqual([]);
+  test('R4: a session waiting on the owner (the same waits the owner ladder pushes)', () => {
+    const you = { wait: { on: 'you', what: 'which layer?', at: T0 - 5 * MIN }, reason: { kind: 'you', source: 'reported', text: 'which layer?' } };
+    const [c] = cand(node(you));
+    expect(c).toMatchObject({ rule: 'R4', key: `R4|${id(1)}|${T0 - 5 * MIN}`, waitAt: T0 - 5 * MIN });
+    expect(cand(node({ ...you, reason: { ...you.reason, source: 'status' } }))).toEqual([]); // a question/approval: its server pushes
+    expect(cand(node({ ...you, reason: { ...you.reason, kind: 'self' } }))).toEqual([]);
+    expect(cases.caseHolds(c, node(you), graphOf())).toBe(true);
+    expect(cases.caseHolds(c, node({ ...you, wait: { ...you.wait, at: T0 } }), graphOf())).toBe(false); // a new report
+    expect(cases.caseHolds(c, node({ ...you, reason: null }), graphOf())).toBe(false);                  // answered
+  });
+
+  test('R9: one failure circleMin times over 2+ turns, seen in the last hour, by a session not done', () => {
+    const c9 = { tool: 'Bash', sample: 'error: expected 200, got 500', fp: 'Bash|error: expected #, got #', count: 4, turns: 2, lastAt: T0 - 5 * MIN };
+    const live = { wait: { on: 'self', what: 'x', at: T0 - MIN } };
+    expect(cand(node({ ...live, circling: c9 })).map((c) => c.rule)).toEqual(['R9']);
+    expect(cand(node({ circling: c9 })).map((c) => c.rule)).toEqual(['R9']); // no report at all still counts
+    // one gate at a time, each with the same live wait as the positive
+    expect(cand(node({ ...live, circling: { ...c9, count: 3 } }))).toEqual([]);
+    expect(cand(node({ ...live, circling: { ...c9, turns: 1 } }))).toEqual([]);
+    expect(cand(node({ ...live, circling: { ...c9, lastAt: T0 - 61 * MIN } }))).toEqual([]);
     expect(cand(node({ circling: c9, wait: { on: 'done', what: '', at: T0 } }))).toEqual([]);
+  });
+
+  test('R9 keys and holds on the fingerprint, not the newest wording', () => {
+    const c9 = { tool: 'Bash', sample: 'error: test 3 timed out', fp: 'Bash|error: test # timed out', count: 4, turns: 2, lastAt: T0 - 5 * MIN };
+    const [a] = cand(node({ circling: c9 }));
+    const [b] = cand(node({ circling: { ...c9, sample: 'error: test 7 timed out' } }));
+    expect(a.key).toBe(b.key);
+    expect(cases.caseHolds(a, node({ circling: { ...c9, sample: 'error: test 9 timed out' } }), graphOf())).toBe(true);
+    expect(cases.caseHolds(a, node({ circling: { ...c9, fp: 'Bash|other' } }), graphOf())).toBe(false);
+  });
+
+  test('every rule\'s case, as OPENED and stored, still holds on the node that opened it', () => {
+    // Through openCase, the one builder server.js stores: a field a rule holds on (R9's fp,
+    // R2/R3/R4's waitAt, R6's turnAt) dropped on the way would retire the case next scan.
+    const lead = id(9);
+    const fixtures = [
+      [{ wait: { on: 'external', what: 'the lead', at: T0 - 30 * MIN } }, { verdicts: { [id(1)]: { state: 'orphan', parentId: lead } } }],
+      [{ wait: { on: 'external', what: 'CI', at: T0 - 31 * MIN, checkBy: 30 } }, {}],
+      [{ wait: { on: 'you', what: 'q', at: T0 - MIN }, reason: { kind: 'you', source: 'reported' } }, {}],
+      [{ status: 'working', turnAt: T0 - 60 * MIN, nowAt: T0 - 50 * MIN }, {}],
+      [{ circling: { tool: 'Bash', sample: 's', fp: 'Bash|s', count: 4, turns: 2, lastAt: T0 - MIN } }, {}],
+      [{ circling: { tool: 'Bash', sample: 'old peer, no fp', count: 4, turns: 2, lastAt: T0 - MIN } }, {}],
+    ];
+    const seen = [];
+    for (const [over, extra] of fixtures) {
+      const n = node(over);
+      const [k] = cand(n, extra);
+      const stored = cases.openCase(k, 'abcd0001', T0);
+      seen.push(k.rule);
+      expect(cases.caseHolds(stored, n, graphOf(n), extra.verdicts || {}), k.rule).toBe(true);
+    }
+    expect(seen).toEqual(['R2', 'R3', 'R4', 'R6', 'R9', 'R9']);
+  });
+
+  test('a case line keeps session text inert: no backtick, $, double quote or backslash from it', () => {
+    const evil = 'x`id` $(rm -rf ~) "q" \\n';
+    const [c] = cand(node({ name: evil, circling: { tool: 'Bash;rm', sample: evil, fp: 'f', count: 4, turns: 2, lastAt: T0 - MIN } }));
+    const inner = c.line.replace(/^Session "|"\. Coach it\.$/g, '');
+    expect(inner).not.toMatch(/[`$\\]/);
+    expect(c.line.split('"').length - 1).toBe(4); // only the template's own two pairs
+    expect(c.line).toContain('same Bashrm failure');
   });
 
   test('the dispatcher itself (skip) never gets a case', () => {
@@ -135,7 +200,20 @@ test.describe('#468 the cases L1 opens (caseCandidates)', () => {
     expect(cases.caseHolds(c, null, graphOf())).toBe(false);
     expect(cases.caseHolds(c, null, { ...graphOf(), complete: false })).toBe(true);
     expect(cases.caseHolds({ rule: 'R6', turnAt: 5 }, node({ status: 'idle', turnAt: 5 }), graphOf())).toBe(false);
-    expect(cases.caseHolds({ rule: 'R9', sample: 'a' }, node({ circling: { sample: 'a' } }), graphOf())).toBe(true);
+    expect(cases.caseHolds({ rule: 'R9', fp: 'a' }, node({ circling: { sample: 'z', fp: 'a' } }), graphOf())).toBe(true);
+  });
+
+  test('caseDue: delivered but never TAKEN goes to the owner; taken, escalated or closed rests', () => {
+    const U = cases.CASE_UNTAKEN_MS;
+    const c = { id: 'c1c1c1c1', openedAt: T0, deliveredAt: null, takenAt: null, escalated: null, resolvedAt: null };
+    expect(cases.caseDue(c, T0 + MIN)).toBe('deliver');
+    expect(cases.caseDue(c, T0 + U + MIN)).toBe('escalate');                          // never handed over
+    const d = { ...c, deliveredAt: T0 + 10 * MIN };
+    expect(cases.caseDue(d, T0 + 11 * MIN)).toBeNull();                               // with the dispatcher
+    expect(cases.caseDue(d, T0 + 10 * MIN + U + MIN)).toBe('escalate');               // and never acted on
+    expect(cases.caseDue({ ...d, takenAt: T0 + 12 * MIN }, T0 + 10 * MIN + U + MIN)).toBeNull();
+    expect(cases.caseDue({ ...d, escalated: { at: 1 } }, T0 + 10 * MIN + U + MIN)).toBeNull();
+    expect(cases.caseDue({ ...d, resolvedAt: 1 }, T0 + 10 * MIN + U + MIN)).toBeNull();
   });
 });
 
@@ -157,7 +235,10 @@ test.describe('#468 a verb acts or becomes a card (verbDecision)', () => {
 
   test('the owner\'s reserved actions are never typed on the dispatcher\'s word', () => {
     for (const t of ['go ahead and merge the PR', 'run gh pr merge 12', 'git push origin it', 'post a comment on the GitHub issue',
-      'delete the old branch', 'rm -rf the build folder', 'install the MSI on the host', 'buy more credits', 'email the customer the notes']) {
+      'delete the old branch', 'rm -rf the build folder', 'install the MSI on the host', 'buy more credits', 'email the customer the notes',
+      // the phrases a narrower list let through
+      'commit and push', 'go ahead and merge it', 'push it', 'open the PR', 'delete the worktree', 'remove the old files', 'rm -r out',
+      'comment on the issue', 'reply on GitHub', 'reset the DB', 'Remove-Item -Recurse .\\out', 'publish the notes', 'send it to the team']) {
       const d = cases.verbDecision({ verb: 'lead', text: t, cfg });
       expect(d.mode, t).toBe('card');
     }
@@ -178,6 +259,10 @@ test.describe('#468 a verb acts or becomes a card (verbDecision)', () => {
     expect(Buffer.byteLength(p, 'utf8')).toBeLessThanOrEqual(TEXT_BYTES_MAX);
     expect(p).toMatch(/^Case abcd1234 \(R9\): /);
     expect(p).toMatch(/case abcd1234$/);
+    // cut on a character boundary: a line of emoji never leaves half a surrogate pair
+    const e = cases.casePrompt({ id: 'abcd1234', rule: 'R9', line: '\u{1F600}'.repeat(300) }, 'C:/x/wt-supervise.js', TEXT_BYTES_MAX);
+    expect(Buffer.byteLength(e, 'utf8')).toBeLessThanOrEqual(TEXT_BYTES_MAX);
+    expect(Buffer.from(e, 'utf8').toString('utf8')).toBe(e);
   });
 
   test('the dispatcher cannot take a case when off, paused or capped', () => {
@@ -204,6 +289,19 @@ test.describe('#468 escalations and cards reach the owner', () => {
     cases.foldCases([{ event: 'resolved', at: 5, caseId: 'c1c1c1c1', how: 'done' }, { event: 'decided', at: 6, cardId: 'aaaa0001', decision: 'approve' }], f);
     expect(cases.ownerItems(f)).toEqual([]);
     expect(cases.autonomyRecord(cfg, f.cards).owner).toMatchObject({ approved: 1, dismissed: 0 });
+  });
+
+  test('taken is the first action on a case; an R4 the rules escalated is not pushed twice', () => {
+    const open = (cid, rule) => ({ event: 'open', at: 1, case: { id: cid, key: `${rule}|${cid}`, rule, sessionId: id(1), server: 'alpha', line: 'L', openedAt: 1 } });
+    const f = cases.foldCases([open('a1a1a1a1', 'R4'), open('b2b2b2b2', 'R4'), open('c3c3c3c3', 'R3'),
+      { event: 'taken', at: 5, caseId: 'a1a1a1a1', via: 'answer' }, { event: 'taken', at: 9, caseId: 'a1a1a1a1', via: 'coach' },
+      { event: 'escalated', at: 6, caseId: 'b2b2b2b2', question: 'L', by: 'rules', auto: true },
+      { event: 'escalated', at: 7, caseId: 'c3c3c3c3', question: 'L', by: 'rules', auto: true }]);
+    expect(f.cases.a1a1a1a1.takenAt).toBe(5);
+    // the R4 wait is already on the owner ladder itself; the R3 escalation is news
+    expect(cases.ownerItems(f).map((x) => x.key)).toEqual(['case|c3c3c3c3']);
+    cases.foldCases([{ event: 'escalated', at: 8, caseId: 'a1a1a1a1', question: 'Server or client?', by: 'dispatcher' }], f);
+    expect(cases.ownerItems(f).map((x) => x.key)).toEqual(['case|c3c3c3c3', 'case|a1a1a1a1']);
   });
 
   test('an id is data: __proto__ and other unminted ids never land in the maps', () => {
@@ -244,10 +342,11 @@ test.describe('#468 escalations and cards reach the owner', () => {
 test('#468 nodeOf keeps brief.now as text and its time, the check-in, live work and R9 evidence', () => {
   const n = sup.nodeOf({ id: id(1), status: 'working', compacting: false, waitingFor: null,
     backgroundTasks: [{ kind: 'agent' }, { kind: 'command' }, { kind: 'monitor', stale: true }],
-    circling: { tool: 'Bash', sample: 's', count: 4, turns: 2, lastAt: T0 },
+    circling: { tool: 'Bash', sample: 's', fp: 'Bash|s', count: 4, turns: 2, lastAt: T0 },
     usageLimit: { waiting: true },
-    brief: { now: { text: 'Bash: npm test', at: T0 - MIN }, turnAt: T0 - 2 * MIN, reportAt: null,
+    brief: { now: { text: 'Bash: npm test', at: T0 - MIN }, turnAt: T0 - 2 * MIN, stoppedAt: T0 - 3 * MIN, reportAt: null,
       checkIn: { sentAt: T0 - 3 * MIN, n: 2, deliveredAt: T0 - 3 * MIN, endedAt: T0 - 2 * MIN, answer: { on: 'self', what: 'x' } } } }, 'alpha');
-  expect(n).toMatchObject({ now: 'Bash: npm test', nowAt: T0 - MIN, turnAt: T0 - 2 * MIN, liveAgents: 1, capped: true,
-    checkIn: { n: 2, answer: { on: 'self' } }, circling: { count: 4, turns: 2 } });
+  // liveWork: every live waker (the agent AND the command), never a stale one
+  expect(n).toMatchObject({ now: 'Bash: npm test', nowAt: T0 - MIN, turnAt: T0 - 2 * MIN, stoppedAt: T0 - 3 * MIN, liveWork: 2, capped: true,
+    checkIn: { n: 2, answer: { on: 'self' } }, circling: { count: 4, turns: 2, fp: 'Bash|s' } });
 });

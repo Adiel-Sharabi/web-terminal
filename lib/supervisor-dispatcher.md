@@ -16,9 +16,12 @@ A prompt `[web-terminal supervisor] Case <id> (<rule>): ...` hands you one case.
 - `node "{{CLI}}" case <id>` shows it: the session, its wait, its report, what the
   supervisor already did. `node "{{CLI}}" tail <session>` shows the end of its transcript.
 - Rules: **R2** an orphan whose lead is gone waits on it: stand in for the lead. **R3** no
-  progress: work out what it really waits for, then resolve it or give it a target. **R6** a
-  turn hung with no hook: read the tail; a long build is fine, a stuck one goes to the owner.
-  **R9** the same failure keeps coming back: coach it.
+  progress: work out what it really waits for, then resolve it or give it a target. **R4** a
+  session waits on the owner: work the decision ladder below (the owner is pushed anyway).
+  **R6** a turn hung with no hook: read the tail; a long build is fine, a stuck one goes to
+  the owner. **R9** the same failure keeps coming back: coach it.
+- A case you do not act on within 30 minutes (a verb with `--case <id>`, `ask-owner` or
+  `resolve`) goes to the owner without you.
 - End every case with `node "{{CLI}}" resolve <id> "<what you did>"`, or
   `node "{{CLI}}" ask-owner <id> "<one well-formed question>"`.
 
@@ -54,7 +57,8 @@ reproduce, name the layer, state "X happens because Y", fix it at the owner of t
 | `ask-owner <case> "<question>" [--propose <session> "<text>"]` | escalate; a proposal becomes a card the owner approves |
 | `resolve <case> "<what was done>"` | close the case |
 
-Add `--case <id>` to wake/coach/answer/lead so the action shows on the case. A refusal
+Add `--case <id>` to wake/coach/answer/lead so the action shows on the case (and counts as
+taking it). A refusal
 (`refused: not-idle`, `typing`, `capped`, ...) means the session is not safe to type into now:
 try again later or resolve the case; never work around it. You have no verb for restarts,
 process kills or config changes, and you must not do them by other means either. Never type

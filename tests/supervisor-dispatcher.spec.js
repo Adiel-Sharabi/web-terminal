@@ -96,13 +96,16 @@ test.describe.serial('#468 the dispatcher takes the cases the rules cannot settl
     expect(row.autoCommand).toContain(`"${TAG} You are the Supervisor's dispatcher.`);
     expect((await state()).cases.find((x) => x.id === caseId).deliveredAt).toBeTruthy();
     // Its first turn ends; a LATER case is typed into it through the gated prompt.
-    await report(disp, { on: 'external', what: 'the next case' });
+    // Its wait carries a checkBy, so R3 WOULD open a case on it but for the dispatcher skip.
+    await report(disp, { on: 'external', what: 'the next case', checkBy: 1 });
     const W1 = await turnWith('w468a', { on: 'self', what: 'the tests', checkBy: 1 });
     const c1 = await until(() => caseOf(W1), 'a second case');
     await until(async () => (await screen(disp)).includes(`${TAG} Case ${c1.id} (R3):`), 'the second case typed into the dispatcher');
     expect((await state()).cases.find((x) => x.id === c1.id).deliveredAt).toBeTruthy();
-    // The dispatcher never gets a case about itself (its own report has a wait, unchecked).
+    // The dispatcher never gets a case about itself (its own wait is long past its checkBy).
     expect((await state()).cases.every((x) => x.sessionId !== disp)).toBe(true);
+    // Handed over is not taken: the case waits for the dispatcher to act on it.
+    expect((await state()).cases.find((x) => x.id === caseId).takenAt).toBeNull();
   });
 
   test('the dispatcher reads the case and coaches the session through the gated prompt', async () => {
@@ -113,6 +116,8 @@ test.describe.serial('#468 the dispatcher takes the cases the rules cannot settl
     expect(r.status(), await r.text()).toBe(200);
     expect((await r.json()).delivered).toBe(true);
     await until(async () => (await screen(W)).includes(`${TAG} Coaching: step back and restate the problem`), 'the coaching typed');
+    // A verb naming the case TAKES it: it no longer goes to the owner after 30 minutes.
+    expect((await state()).cases.find((x) => x.id === caseId).takenAt).toBeTruthy();
     // An id is data: an unminted one is never looked up.
     expect((await a.get('/api/supervisor/cases/__proto__')).status()).toBe(404);
     expect((await a.post('/api/supervisor/cards/constructor', { data: { decision: 'dismiss' } })).status()).toBe(404);
@@ -174,5 +179,13 @@ test.describe.serial('#468 the dispatcher takes the cases the rules cannot settl
     await until(async () => (await state()).cases.find((x) => x.id === c.id).resolvedAt, 'the case retired');
     expect((await state()).cases.find((x) => x.id === c.id).resolution.by).toBe('rules');
     await a.post('/api/supervisor/pause', { data: { paused: false } });
+  });
+
+  test('a session waiting on the owner opens an R4 case for the dispatcher; the owner is pushed too', async () => {
+    const W3 = await turnWith('w468c', { on: 'you', what: 'server or client?' });
+    const c = await until(() => caseOf(W3), 'an R4 case');
+    expect(c.rule).toBe('R4');
+    expect(c.line).toContain('server or client?');
+    await until(async () => (await drain()).some((m) => m.data.kind === 'owner-wait' && m.data.sessionId === W3), 'the owner push');
   });
 });
