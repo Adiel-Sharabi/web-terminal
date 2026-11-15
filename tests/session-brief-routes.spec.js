@@ -301,10 +301,14 @@ test.describe('#298 one helper for both session shapers', () => {
   test('/api/sessions and the cluster merge\'s local branch both call sessionBriefField', () => {
     // Four fields were each forgotten in one of these two hand-shaped lists before; a
     // behavioural test of the merge only sees the branch it happens to exercise.
+    // #466 - the supervisor's graph rows (supervisorLocalRows) are the third and last list
+    // that names the field; each place is pinned, so a fourth list fails here.
     const calls = SERVER_SRC.match(/brief: sessionBriefField\(s\)/g) || [];
-    expect(calls.length).toBe(2);
+    expect(calls.length).toBe(3);
     const merge = SERVER_SRC.slice(SERVER_SRC.indexOf('async function _computeClusterSessions'));
     expect(merge.slice(0, merge.indexOf('result.push(...localShaped)'))).toContain('brief: sessionBriefField(s)');
+    const graph = SERVER_SRC.slice(SERVER_SRC.indexOf('async function supervisorLocalRows'));
+    expect(graph.slice(0, graph.indexOf('\n}'))).toContain('brief: sessionBriefField(s)');
   });
 });
 

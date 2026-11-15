@@ -296,6 +296,29 @@ no wait. Why a session was NOT asked is in `handoffs/check-in-skips.jsonl`: the 
 it (typing, cannot tell, a menu, ...), one line per session when the reason changes and the same
 reason at most every 15 minutes; "no reading yet" is not logged.
 
+**The supervisor, phase 1: facts and the journal (#466)** — the first part of a cluster-wide
+supervisor ([docs/SUPERVISOR-DESIGN.md](docs/SUPERVISOR-DESIGN.md)). It is **read-only**: it
+takes no action on any session yet.
+- A reported wait can name what it waits on, so it can later be looked up: `"target"` is one of
+  `session` (`id`), `lead` (the session that opened this one), `pr` and `ci` (`provider`
+  github or ado, `repo`, and `number`, `pr` or `runId`), `workitem` (`ref`), `time`
+  (`until`, ISO) or `child` (`ids`); `"checkBy"` gives the minutes until it is overdue. A wrong
+  shape is refused with the right one; a wait with no target works as before.
+- `POST /api/sessions` takes an optional `goal` (one line, up to 300 characters). A hand-off
+  successor inherits it.
+- Every server appends its sessions' lifecycle (opened, hand-off, closed and why: closed, reaped,
+  handed-off, exited, lost) to `logs/sessions-journal.jsonl` and serves it at `GET /api/journal?since=`.
+- `POST /api/sessions/:id/prompt {text}` types one `[web-terminal supervisor]` prompt, only when the
+  gates the check-in and the restart hold use all allow it (idle, ready, no menu or blocked
+  prompt, no restart hold or hand-off, nobody typing); otherwise it answers `refused` with why.
+- On the lease authority (`leases.authority`) only, every server is polled each minute into one
+  work graph (`GET /api/supervisor/state`: sessions, leads and children through hand-offs, Needs you,
+  Live, Ready to close, History). A session whose lead is gone from **every** server, on two scans at
+  least 5 minutes apart with every server answering, is marked an orphan; a server that does not
+  answer makes it "unknown", never an orphan. Changes are logged to `handoffs/supervisor-log.jsonl`.
+  Config `supervisor`: `enabled` (default true), `exclude` (server names left out entirely),
+  `everySec` (default 60).
+
 **Resume by work item, on any machine** — a session's brief and its hand-off are named after
 the SESSION; the work is named after its **work item** (`ado:25309`, `#413`). Whenever a
 session's work on an item ends — it is closed, it exits or crashes, it is found gone after a
