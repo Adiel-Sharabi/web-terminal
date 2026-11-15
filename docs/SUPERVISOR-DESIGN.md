@@ -55,8 +55,9 @@ Measured by: the time each wait spends with no fact, no dispatcher case and no o
 computed from the supervisor's own log. Target: never above 60 min (in quiet hours: never
 above 60 min with no dispatcher attempt).
 
-**Scope: every machine in the cluster,** Office-Tests and the MacBook included. Office-Tests
-must first be brought up to the current server version.
+**Scope: every machine in the cluster except the MacBook** (Office, Home, XPS, Help and
+Office-Tests). Office-Tests must first be brought up to the current server version. A
+peer can be excluded by config (`supervisor.exclude`), and the MacBook is.
 
 **Not in v1:** failover of the supervisor host; replacing the agents' own orchestration
 (leads still run their children).
@@ -415,6 +416,8 @@ Phases (each a child issue of #465):
 | Shabbat and Yom Tov | Jerusalem times. Every Yom Tov is quiet too. No bothering from 1 h before it starts to 1 h after it ends. |
 | Bothering the owner | As little as possible: handle it yourself. Answer for the owner when the decision can be undone; wait when it is very important. |
 | The questions page | Out of scope here (a separate issue). |
+| Office-Tests | In scope. Update it and cold-restart it when phase 1 needs it, after checking it has no live sessions. |
+| The MacBook | Out of scope: the supervisor ignores it entirely. |
 | What this is | Something that runs inside web-terminal and has a brain, managing all of these operations: the built-in Supervisor (§3). |
 
 ## 14. Open questions
