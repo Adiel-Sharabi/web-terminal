@@ -235,6 +235,48 @@ test.describe('#466 the sessions journal', () => {
     expect(J.trimEvents(lines, T0 + 1).map((e) => e.id)).toEqual([ID(2), ID(3)]);
     expect(J.trimEvents(lines, T0 + 1, { max: 1 }).map((e) => e.id)).toEqual([ID(3)]);
   });
+
+  // A fake peer: GET /api/journal?since= served by pageAfter over its lines, [limit] per page.
+  const peer = (lines, limit, calls = []) => async (since) => {
+    calls.push(since);
+    return { ok: true, status: 200, body: JSON.stringify(J.pageAfter(lines, since, limit)) };
+  };
+
+  test('a peer journal backlog is read page by page, bounded per poll, and resumes', async () => {
+    const lines = Array.from({ length: 7 }, (_, i) => J.openedRecord({ id: ID(i + 1), at: T0 + i }));
+    const calls = [];
+    const r1 = await J.readPeerJournal({ cursor: null, fromMs: T0 - MIN, fetchPage: peer(lines, 2, calls), pages: 3 });
+    expect(r1.status).toBe('ok');
+    // 3 pages of 2: the first from fromMs, the rest from the cursor's millisecond (re-read,
+    // deduped by mergeEvents), so each later page moves the cursor by one here.
+    expect(calls).toEqual([T0 - MIN - 1, T0, T0 + 1]);
+    expect(r1.events.map((e) => e.at)).toEqual([T0, T0 + 1, T0 + 2, T0 + 3]);
+    expect(r1.cursor).toBe(T0 + 3);
+    // The next poll resumes at the cursor and reaches the end; nothing was lost on the way.
+    const r2 = await J.readPeerJournal({ cursor: r1.cursor, fromMs: 0, fetchPage: peer(lines, 2), pages: 3 });
+    expect(r2.cursor).toBe(T0 + 6);
+    const all = J.mergeEvents(r1.events, r2.events).map((e) => e.id);
+    expect(all).toEqual(lines.map((e) => e.id));
+  });
+
+  test('a peer journal read stops on a page that does not move, an error, or an empty first page', async () => {
+    // 1001 events in ONE millisecond: pageAfter returns the whole group with more:false, but a
+    // peer that kept saying more would be re-read forever - the cursor did not move, so stop.
+    const stuck = async () => ({ ok: true, status: 200, body: JSON.stringify({ events: [J.openedRecord({ id: ID(1), at: T0 })], more: true }) });
+    let n = 0;
+    const counted = async (s) => { n++; return stuck(s); };
+    const r = await J.readPeerJournal({ cursor: T0, fromMs: 0, fetchPage: counted, pages: 5 });
+    expect(n).toBe(1);
+    expect(r.cursor).toBe(T0);
+    // A refusal keeps the cursor and names the status; a throw is 'unreachable'.
+    const e404 = await J.readPeerJournal({ cursor: T0, fromMs: 0, fetchPage: async () => ({ ok: false, status: 404 }) });
+    expect(e404).toEqual({ events: [], cursor: T0, status: 'HTTP 404' });
+    const boom = await J.readPeerJournal({ cursor: null, fromMs: T0, fetchPage: async () => { throw new Error('down'); } });
+    expect(boom).toEqual({ events: [], cursor: null, status: 'unreachable' });
+    // An empty first page seeds the cursor at fromMs, so the next poll does not re-read 30 days.
+    const empty = await J.readPeerJournal({ cursor: null, fromMs: T0, fetchPage: peer([], 2) });
+    expect(empty).toEqual({ events: [], cursor: T0, status: 'ok' });
+  });
 });
 
 test.describe('#466 the cluster work graph and the orphan rule', () => {
