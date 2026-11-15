@@ -186,7 +186,7 @@ test.describe('checkInBlock (#443)', () => {
 });
 
 test.describe('once per idle period (#443)', () => {
-  test('a check-in in this idle period blocks the next, through its own turn and after it', () => {
+  test('a check-in in this idle period blocks the next, through its own turn and until a repeat is due (#463)', () => {
     const r = candidate();
     // Sent, not yet delivered.
     r.brief.checkIn = C.startRecord(T - 30 * MIN, 90);
@@ -201,7 +201,9 @@ test.describe('once per idle period (#443)', () => {
     a.brief.wait = { on: 'self', what: 'x', at: sent + 50000 };
     const again = { ...a, reason: sessionReason(a) };
     expect(again.reason).toMatchObject({ kind: 'self', source: 'reported' });
-    expect(block(again, { now: sent + 10 * 60 * MIN })).toBe('asked');
+    expect(block(again, { now: sent + 60000 + 59 * MIN })).toBe('asked');
+    // #463: an hour after its answer it may be asked again (see the #463 block below).
+    expect(block(again, { now: sent + 60000 + 60 * MIN })).toBeNull();
   });
 
   test('the period ends when the session is active again: a later turn re-arms it', () => {
@@ -369,7 +371,7 @@ test.describe('the published field (#443)', () => {
   test('the log line names the event, the session and the answer', () => {
     const rec = { ...C.startRecord(sent, 125), answer: { on: 'done', what: '' } };
     expect(C.logRecord('answered', 's1', rec, T, { name: 'n' })).toEqual({
-      at: new Date(T).toISOString(), event: 'answered', id: 's1', sentAt: sent, idleMin: 125, why: 'stale-self', answer: 'done', name: 'n' });
+      at: new Date(T).toISOString(), event: 'answered', id: 's1', sentAt: sent, idleMin: 125, why: 'stale-self', n: 1, answer: 'done', name: 'n' });
   });
 });
 
@@ -727,5 +729,178 @@ test.describe('a turn an API error cut, with nothing retrying it, is asked (#461
     expect(worst).not.toMatch(/[\u0000-\u001f]/);
     // The other readings keep their words.
     expect(C.checkInPrompt({ idleMin: 75, why: 'stale-self' })).toContain('You last reported you would resume on your own');
+  });
+});
+
+// #463 - two sessions sat on a CI watcher that missed its event (2026-11-15). One had its
+// self-wait cleared by a lead's typed prompt and reported none after it, so no reading saw it
+// (102 min). The other was asked once, answered self with a fresh watcher, and the period
+// never let it be asked again (3 h 23 min). Each gate is broken alone.
+test.describe('a stuck watcher with no report, and a repeat after the answer (#463)', () => {
+  /** Case 1: no wait reported (cleared by a typed prompt), has reported before, a watcher
+   *  still listed as running, its turn ended [idleMin] ago. */
+  function unreported(idleMin = 120) {
+    const r = candidate(idleMin);
+    r.brief.wait = null;
+    r.brief.reporting = 'on';
+    r.brief.reportAt = T - (idleMin + 6) * MIN;
+    r.backgroundTasks = [{ id: 'w1', kind: 'command', description: 'Wait for PR builds to finish', startedAt: T - (idleMin + 1) * MIN }];
+    return { ...r, reason: sessionReason(r) };
+  }
+  const why = (row, over = {}) => C.checkInReading(row, { now: T, ...over });
+
+  test('no wait reported, live work listed: asked at withLiveWorkMin, as live-unreported', () => {
+    expect(unreported(60).reason).toMatchObject({ kind: 'self', source: 'background' });
+    expect(block(unreported(59))).toBe('not-stale');
+    expect(block(unreported(60))).toBeNull();
+    expect(why(unreported(60))).toBe('live-unreported');
+    expect(block(unreported(130), { cfg: C.checkInConfig({ withLiveWorkMin: 120 }) })).toBeNull();
+    expect(block(unreported(119), { cfg: C.checkInConfig({ withLiveWorkMin: 120 }) })).toBe('not-stale');
+  });
+
+  test('each of its conditions, broken alone, says no', () => {
+    // Never reported anything: a session that does not use the dashboard is not asked.
+    const never = unreported(600); never.brief.reportAt = null;
+    expect(block(never)).toBe('not-stale');
+    // Reporting off (dashboard off, opted out, an excluded cwd): the brief publishes no wait
+    // whatever was reported, so "no wait" is not a reading.
+    const off = unreported(600); off.brief.reporting = 'off';
+    expect(block(off)).toBe('not-stale');
+    const absent = unreported(600); delete absent.brief.reporting;
+    expect(block(absent)).toBe('not-stale');
+    // Nothing listed as running (the task went stale): no reading claims work runs.
+    const gone = unreported(600); gone.backgroundTasks = [{ ...gone.backgroundTasks[0], stale: true }];
+    expect(block({ ...gone, reason: sessionReason(gone) })).toBe('not-stale');
+    // A reported wait on the owner or done is never asked, live work or not (#458).
+    for (const on of ['you', 'done']) {
+      const w = unreported(600); w.brief.wait = { on, what: 'x', at: w.brief.stoppedAt - 1000 };
+      expect(block({ ...w, reason: sessionReason(w) })).toBe('not-stale');
+    }
+    // Every earlier gate still says no first.
+    const r = unreported(600);
+    expect(block({ ...r, status: 'working' })).toBe('not-idle');
+    expect(block(r, { inputAt: T - 2 * MIN })).toBe('typing');
+    expect(block(r, { liveKnown: false })).toBe('cannot-tell');
+    expect(block({ ...r, brief: { ...r.brief, checkInOff: true } })).toBe('off');
+  });
+
+  test('the cheap pre-filter lets an unreported session through at withLiveWorkMin, only if it reported before', () => {
+    const e = (stoppedMin, reported) => ({ turnAt: T - (stoppedMin + 5) * MIN, stoppedAt: T - stoppedMin * MIN, reported, checkIn: null });
+    const cleared = { items: [], headline: 'h', at: T - 200 * MIN, wait: null };
+    expect(C.worthReading(e(59, cleared), { now: T })).toBe(false);
+    expect(C.worthReading(e(60, cleared), { now: T })).toBe(true);
+    expect(C.worthReading(e(600, null), { now: T })).toBe(false);
+    expect(C.worthReading(e(600, { wait: null }), { now: T })).toBe(false); // no report time
+  });
+
+  test('its prompt says nothing was reported and names the work, never "you last reported"', () => {
+    const p = C.checkInPrompt({ idleMin: 102, what: 'Wait for PR builds to finish', why: 'live-unreported' });
+    expect(p.startsWith(CHECKIN_PROMPT_TAG)).toBe(true);
+    expect(p).toContain('reported no wait');
+    expect(p).toContain('("Wait for PR builds to finish")');
+    expect(p).not.toContain('You last reported');
+    expect(p).not.toContain('nothing that could wake you is running');
+    expect(p).toContain('report wait self');
+    expect(p).toContain('report wait done');
+    expect(classifyUserTurn(p).kind).toBe(USER_KINDS.SYSTEM);
+    const worst = C.checkInPrompt({ idleMin: 99999, what: `"\n${'א…'.repeat(200)}`, why: 'live-unreported' });
+    expect(Buffer.byteLength(worst)).toBeLessThanOrEqual(511);
+    expect(worst).toContain('report wait you');
+  });
+
+  /** Case 2: the [n]th check-in of the period, answered [on] [answeredMin] ago, idle since. */
+  function answered(answeredMin, on = 'self', n = 1, row = null) {
+    const r = row || candidate(answeredMin);
+    const ended = T - answeredMin * MIN;
+    const sent = ended - 2 * MIN;
+    const rec = { ...C.startRecord(sent, 61, 'long-self', n), deliveredAt: sent + 1000, endedAt: ended, answer: on ? { on, what: 'x' } : null };
+    const brief = { ...r.brief, checkIn: C.publicRecord(rec), turnAt: sent + 1000, stoppedAt: ended,
+      wait: on ? { on, what: 'x', at: ended - 1000 } : r.brief.wait };
+    const out = { ...r, brief };
+    return { ...out, reason: sessionReason(out) };
+  }
+  /** A session with a fresh watcher listed as running. */
+  const watching = (min) => {
+    const r = candidate(min);
+    r.backgroundTasks = [{ id: 'w2', kind: 'command', description: 'watch PR', startedAt: T - min * MIN }];
+    return r;
+  };
+
+  test('answered self with a fresh watcher: asked again an hour after the answer, then 2 h, then 4 h', () => {
+    expect(block(answered(59, 'self', 1, watching(59)))).toBe('asked');
+    expect(block(answered(60, 'self', 1, watching(60)))).toBeNull();
+    expect(why(answered(60, 'self', 1, watching(60)))).toBe('long-self');
+    expect(block(answered(119, 'self', 2, watching(119)))).toBe('asked');
+    expect(block(answered(120, 'self', 2, watching(120)))).toBeNull();
+    expect(block(answered(239, 'self', 3, watching(239)))).toBe('asked');
+    expect(block(answered(240, 'self', 3, watching(240)))).toBeNull();
+    // maxPerPeriod (4) asks: no fifth, however long.
+    expect(block(answered(60000, 'self', 4, watching(60000)))).toBe('asked');
+    expect(block(answered(600, 'self', 2, watching(600)), { cfg: C.checkInConfig({ maxPerPeriod: 2 }) })).toBe('asked');
+    expect(block(answered(30, 'self', 1, watching(30)), { cfg: C.checkInConfig({ repeatMin: 20, withLiveWorkMin: 20 }) })).toBeNull();
+  });
+
+  test('answered external (waiting on a lead that reported done) repeats too; no report repeats only while work is listed', () => {
+    expect(block(answered(59, 'external'))).toBe('asked');
+    expect(block(answered(60, 'external'))).toBeNull();
+    expect(why(answered(60, 'external'))).toBe('external');
+    // No report in the check-in's turn. The check-in is a SYSTEM turn, so its own
+    // UserPromptSubmit cleared the self-wait (session-brief foldHook): the wait is gone, as
+    // in production. With work still listed it repeats as live-unreported...
+    const listed = watching(60); listed.brief.wait = null; listed.brief.reporting = 'on'; listed.brief.reportAt = T - 200 * MIN;
+    const a = answered(60, null, 1, listed);
+    expect(a.brief.wait).toBeNull();
+    expect(block(a)).toBeNull();
+    expect(why(a)).toBe('live-unreported');
+    // ...with nothing alive, no reading applies: never asked again (a no-report finish).
+    const bare = candidate(60); bare.brief.wait = null; bare.brief.reporting = 'on'; bare.brief.reportAt = T - 200 * MIN;
+    expect(block(answered(6000, null, 1, bare))).toBe('not-stale');
+  });
+
+  test('never repeats after a wait on the owner, done, an Esc, or a check-in that never landed', () => {
+    for (const on of ['you', 'done']) {
+      const rec = { ...C.startRecord(T - 600 * MIN, 61), deliveredAt: T - 599 * MIN, endedAt: T - 598 * MIN, answer: { on, what: 'x' } };
+      expect(C.repeatDue(rec, T)).toBe(false); // the gate itself, apart from the reading
+    }
+    const esc = { ...C.startRecord(T - 600 * MIN, 61), deliveredAt: T - 599 * MIN, endedAt: null, answer: null };
+    expect(C.repeatDue(esc, T)).toBe(false);
+    const r = candidate(600);
+    expect(block({ ...r, brief: { ...r.brief, checkIn: esc, turnAt: T - 599 * MIN, stoppedAt: T - 610 * MIN } })).toBe('asked');
+    const lost = C.startRecord(T - 600 * MIN, 61);
+    expect(C.repeatDue(lost, T)).toBe(false);
+    expect(block({ ...r, brief: { ...r.brief, checkIn: lost } })).toBe('asked');
+    // The same records with an answer that may repeat ARE due: the negatives above are the gate's.
+    expect(C.repeatDue({ ...esc, endedAt: T - 598 * MIN, answer: { on: 'self', what: 'x' } }, T)).toBe(true);
+  });
+
+  test('a repeat due also passes the cheap pre-filter; a real turn still ends the period', () => {
+    const ended = T - 61 * MIN;
+    const rec = { ...C.startRecord(ended - 2 * MIN, 61, 'long-self'), deliveredAt: ended - MIN, endedAt: ended, answer: { on: 'self', what: 'x' } };
+    const e = { turnAt: ended - MIN, stoppedAt: ended, reported: { at: ended - 1000, wait: { on: 'self', what: 'x', at: ended - 1000 } }, checkIn: rec };
+    expect(C.worthReading(e, { now: T })).toBe(true);
+    expect(C.worthReading(e, { now: T - 2 * MIN })).toBe(false); // repeat not due yet
+    // A later turn (a person, a notification): the period is over, the count starts again.
+    expect(C.periodOpen(rec, T - 30 * MIN)).toBe(false);
+  });
+
+  test('the count travels: record, published field, log line; an older record counts as the first', () => {
+    expect(C.startRecord(T, 61).n).toBe(1);
+    expect(C.startRecord(T, 61, 'external', 3).n).toBe(3);
+    expect(C.publicRecord(C.startRecord(T, 61, 'external', 3)).n).toBe(3);
+    expect(C.logRecord('sent', 's1', C.startRecord(T, 61, 'long-self', 2), T)).toMatchObject({ n: 2, why: 'long-self' });
+    const old = { sentAt: T, idleMin: 61, why: 'long-self', deliveredAt: null, endedAt: null, answer: null };
+    expect(C.askCount(old)).toBe(1);
+    expect(C.publicRecord(old).n).toBe(1);
+    expect(C.checkInConfig({ repeatMin: 0 }).repeatMin).toBe(60);
+    expect(C.checkInConfig({ maxPerPeriod: 'x' }).maxPerPeriod).toBe(4);
+    expect(C.checkInConfig({ maxPerPeriod: 2.7 }).maxPerPeriod).toBe(2);
+  });
+
+  test('the skip log keeps the gates that refused, not "no reading yet"', () => {
+    for (const r of ['not-stale', 'recent']) expect(C.skipWorthLogging(r)).toBe(false);
+    for (const r of ['cannot-tell', 'typing', 'asked', 'handed-off', 'not-ready', 'menu', 'capped', 'api-error', 'waiting']) {
+      expect(C.skipWorthLogging(r)).toBe(true);
+    }
+    expect(C.skipWorthLogging(null)).toBe(false);
   });
 });

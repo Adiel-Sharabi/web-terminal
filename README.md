@@ -254,8 +254,13 @@ web-terminal types **one** short, tagged question into it: are you finished (rep
 `done`), or was a watcher lost (pick the work back up), or do you need the owner (report wait
 `you`)? The answer is the wait the session reports, not its prose. The session list and the
 dashboard show it: "Checked in 14:02 → done", "→ resumed", "→ needs you", or "→ still nothing
-running" when it reported self again with nothing to wake it. It is asked once per idle period:
-never again until the session has been active again. Never typed into a session that is
+running" when it reported self again with nothing to wake it. Its answer often starts a fresh
+watcher, and that one can miss its event too, so a session that answered self or external (or
+reported nothing while work is still listed as running) is asked again once it has been idle
+`repeatMin` (default 60) minutes since that
+answer, then twice that, then four times (1 h, 2 h, 4 h), at most `maxPerPeriod` (default 4)
+times per idle period (#463). A session that answered "you" or "done", or pressed Esc, is not
+asked again until it has been active again. Never typed into a session that is
 working, compacting, booting, capped or armed to auto-resume, in a menu, asking you a question,
 waiting on you or reported done, showing an API error (until it has stood an hour over the turn it cut, below), being handed off (or handed off and not
 active since), under a restart hold, or that someone typed into in the last 10 minutes
@@ -284,6 +289,12 @@ after you pressed Esc, and it gives up after continue, continue, /compact until 
 If that gives up, or the error is one it never retries, the session is asked once its error has
 stood `apiErrorMin` (default 60) minutes, in its own words: what failed, and to pick the work
 back up if it is unfinished. It is asked once per run of failed turns, never hourly.
+A session whose wait was cleared without a new one (you or another session typed a follow-up,
+and its reply reported nothing) is asked too if reporting is on for it, it has reported before,
+and work is still listed as running after `withLiveWorkMin` (#463), in words that say it reported
+no wait. Why a session was NOT asked is in `handoffs/check-in-skips.jsonl`: the gate that refused
+it (typing, cannot tell, a menu, ...), one line per session when the reason changes and the same
+reason at most every 15 minutes; "no reading yet" is not logged.
 
 **Resume by work item, on any machine** — a session's brief and its hand-off are named after
 the SESSION; the work is named after its **work item** (`ado:25309`, `#413`). Whenever a
