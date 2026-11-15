@@ -496,7 +496,8 @@ test.describe('wait and hidden (#313, #314)', () => {
     const e = B.applyReport(B.emptyEntry(), { items: [{ ref: '#5', title: 'Thing', state: 'blocked' }], headline: 'h' }, T0);
     // The REAL command, not a placeholder: it is in the note every time, so it counts.
     const cmd = B.reportCommand('C:/dev/web-terminal/scripts/wt-report.js');
-    expect(B.instructionText(e, cmd).length).toBeLessThanOrEqual(1420);
+    // #466 raised it from 1420 by the one wait-target line (lib/wait-target.js teaches the rest).
+    expect(B.instructionText(e, cmd).length).toBeLessThanOrEqual(1600);
   });
 });
 

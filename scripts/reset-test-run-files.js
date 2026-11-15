@@ -84,6 +84,11 @@ if (process.env.WT_WORK_ITEMS_LOG_FILE) {
   reset(process.env.WT_WORK_ITEMS_LOG_FILE, '#413');
   reset(`${process.env.WT_WORK_ITEMS_LOG_FILE}.1`, '#413');
 }
+// #466 - the sessions journal (and its one rotated generation).
+if (process.env.WT_SESSIONS_JOURNAL_FILE) {
+  reset(process.env.WT_SESSIONS_JOURNAL_FILE, '#466');
+  reset(`${process.env.WT_SESSIONS_JOURNAL_FILE}.1`, '#466');
+}
 // #351 - the spawn reaper's verdicts: per-run state like the files above, so a run starts
 // from none rather than from whatever an interrupted one left.
 if (process.env.WT_SPAWNED_SESSIONS_FILE) reset(process.env.WT_SPAWNED_SESSIONS_FILE, '#351');
