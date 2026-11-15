@@ -15,6 +15,7 @@ import 'package:http/http.dart' as http;
 import 'package:web_socket_channel/web_socket_channel.dart';
 
 import 'models.dart';
+import 'supervisor_models.dart';
 
 /// Uniform error type for every [ApiClient] operation.
 ///
@@ -345,6 +346,17 @@ class ApiClient {
     final listing = LeaseListing.fromJson(body, receivedAt: DateTime.now());
     if (listing == null) throw const ApiException(0, 'Malformed server response');
     return listing;
+  }
+
+  /// The supervisor's view of the cluster (`GET /api/supervisor/state`, #466). Only the
+  /// lease authority carries the graph; any other server answers `role: peer` with the
+  /// authority's name, or `role: none`. A server too old for the route 404s, thrown like
+  /// any failure; a body that is not a state is a transport-level failure, never "empty".
+  Future<SupervisorState> supervisorState() async {
+    final res = await _send('GET', '/api/supervisor/state');
+    final state = SupervisorState.fromJson(_decode(res), receivedAt: DateTime.now());
+    if (state == null) throw const ApiException(0, 'Malformed server response');
+    return state;
   }
 
   /// This machine's Claude login and its saved accounts (`GET /api/claude-account`,

@@ -4,6 +4,7 @@ import 'package:shared_preferences/shared_preferences.dart';
 import '../api/models.dart';
 import '../services/session_selection.dart';
 import 'dashboard_screen.dart';
+import 'journal_screen.dart';
 import 'questions_inbox_screen.dart';
 import 'session_screen.dart';
 import 'work_board_screen.dart';
@@ -20,7 +21,7 @@ import 'work_board_screen.dart';
 /// width is the single source of truth (`_railWidth`), clamped to
 /// [railMinWidth]..[railMaxWidth] and persisted so it survives restarts.
 class AdaptiveHome extends StatefulWidget {
-  const AdaptiveHome({super.key, this.boardBuilder, this.inboxBuilder});
+  const AdaptiveHome({super.key, this.boardBuilder, this.inboxBuilder, this.journalBuilder});
 
   /// Test seam: builds the dashboard the pane shows, given the callback that
   /// opens a session. Defaults to a [WorkBoardScreen] on the shared repository;
@@ -31,6 +32,10 @@ class AdaptiveHome extends StatefulWidget {
   /// Test seam: builds the questions inbox the pane shows (#383), as [boardBuilder].
   @visibleForTesting
   final QuestionsInboxScreen Function(void Function(Session session) onOpenSession)? inboxBuilder;
+
+  /// Test seam: builds the supervisor's journal the pane shows (#466), as [boardBuilder].
+  @visibleForTesting
+  final JournalScreen Function(void Function(Session session) onOpenSession)? journalBuilder;
 
   /// Below this width we stay single-pane (phone behavior); at or above it we
   /// show the list + detail split.
@@ -132,6 +137,9 @@ class _AdaptiveHomeState extends State<AdaptiveHome> {
   static QuestionsInboxScreen _defaultInbox(void Function(Session) onOpenSession) =>
       QuestionsInboxScreen(embedded: true, onOpenSession: onOpenSession);
 
+  static JournalScreen _defaultJournal(void Function(Session) onOpenSession) =>
+      JournalScreen(embedded: true, onOpenSession: onOpenSession);
+
   @override
   Widget build(BuildContext context) {
     return LayoutBuilder(
@@ -157,6 +165,7 @@ class _AdaptiveHomeState extends State<AdaptiveHome> {
                 onSelectSession: _select,
                 onShowBoard: _selection.showBoard,
                 onShowInbox: _selection.showInbox,
+                onShowJournal: _selection.showJournal,
               ),
             ),
             _RailResizeHandle(
@@ -168,6 +177,9 @@ class _AdaptiveHomeState extends State<AdaptiveHome> {
               child: _selection.inboxShown
                   // The questions inbox (#383), opened from the rail or the board.
                   ? (widget.inboxBuilder ?? _defaultInbox)(_select)
+                  : _selection.journalShown
+                  // The supervisor's journal (#466), opened from the rail.
+                  ? (widget.journalBuilder ?? _defaultJournal)(_select)
                   : selectedId == null
                   // No session open: the board (#337). A board card opens its
                   // session the way a rail tap does, which is also what replaces

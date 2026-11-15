@@ -49,6 +49,7 @@ import '../widgets/server_badge.dart';
 import '../widgets/session_card.dart';
 import '../widgets/session_family.dart';
 import '../widgets/status_dot.dart';
+import 'journal_screen.dart';
 import 'session_screen.dart';
 import 'settings_screen.dart';
 import 'questions_inbox_screen.dart';
@@ -81,6 +82,7 @@ class DashboardScreen extends StatefulWidget {
     this.onSelectSession,
     this.onShowBoard,
     this.onShowInbox,
+    this.onShowJournal,
   });
 
   /// In the wide-screen split view, the id of the session shown in the detail
@@ -99,6 +101,10 @@ class DashboardScreen extends StatefulWidget {
   /// When set (split view), the questions button shows the questions inbox in the
   /// detail pane (#383) instead of pushing it as a full-screen route.
   final VoidCallback? onShowInbox;
+
+  /// When set (split view), the journal button shows the supervisor's journal in the
+  /// detail pane (#466) instead of pushing it as a full-screen route.
+  final VoidCallback? onShowJournal;
 
   @override
   State<DashboardScreen> createState() => _DashboardScreenState();
@@ -268,6 +274,25 @@ class _DashboardScreenState extends State<DashboardScreen> {
     Navigator.of(context).push(
       MaterialPageRoute(
         builder: (ctx) => QuestionsInboxScreen(
+          onOpenSession: (s) {
+            Navigator.of(ctx).pop();
+            _openSession(s);
+          },
+        ),
+      ),
+    );
+  }
+
+  /// The supervisor's journal (#466), placed and opened as the questions inbox is.
+  void _openJournal() {
+    final onShow = widget.onShowJournal;
+    if (onShow != null) {
+      onShow();
+      return;
+    }
+    Navigator.of(context).push(
+      MaterialPageRoute(
+        builder: (ctx) => JournalScreen(
           onOpenSession: (s) {
             Navigator.of(ctx).pop();
             _openSession(s);
@@ -636,6 +661,14 @@ class _DashboardScreenState extends State<DashboardScreen> {
                             onPressed: _openInbox,
                           );
                         }),
+                        // #466 - the supervisor's journal: who needs you, what is
+                        // live, what is ready to close, and what ended.
+                        IconButton(
+                          key: const ValueKey('open-journal'),
+                          icon: const Icon(Icons.menu_book_outlined),
+                          tooltip: 'Journal: needs you, live, ready to close, history',
+                          onPressed: _openJournal,
+                        ),
                         // #306 — what every session is working on.
                         IconButton(
                           key: const ValueKey('open-work-board'),
