@@ -480,6 +480,12 @@ within a column, says who opened it, and the parent's card lists the sessions it
 their status, each one tap away. A hand-off keeps the tree at both ends: a helper's successor
 stays under the same parent, and a parent's successor publishes `spawn.replaces` (the ids it took
 the place of), so helpers that still name the old id, on any machine, find their parent.
+A session that hands **itself** off (it opens its own successor mid-turn, e.g. when its context
+fills) passes `replaces: "$WT_SESSION_ID"` on `POST /api/sessions`: the new session is recorded as
+its successor (its predecessor's parent, goal and pins, a `hand-off` in the journal), never as its
+child, so it is not an orphan once the old session closes. Only the session itself may: the server
+traces the request to the session it runs in and refuses anyone else (403), a `parentId` other than
+the replaced id (400), and a session that is not on this server (404).
 A script that sends only `spawnedBy` (no `parentId`) is traced instead: when the request comes from
 this machine, the server follows the calling process up to the session it runs in and records that
 as the parent.

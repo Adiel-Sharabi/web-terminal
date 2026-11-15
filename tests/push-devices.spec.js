@@ -171,3 +171,50 @@ test.describe('FCM transport (G2) via the test sink', () => {
     }
   });
 });
+
+// #467 - the registry sat beside server.js with no override, so every registration the suite
+// (or a server a spec spawns) made landed in PRODUCTION's push-devices.json of the checkout it
+// ran in: a real push would then fan out to fake tokens. Serial: the redirect check gates the
+// registration below, which would otherwise demonstrate the leak by causing it. Production is
+// compared by stat only (it holds real device tokens).
+test.describe('#467 the test server registers into its OWN device registry', () => {
+  test.describe.configure({ mode: 'serial' });
+  const fs = require('fs');
+  const path = require('path');
+  const { execFileSync } = require('child_process');
+  const ROOT = path.join(__dirname, '..');
+  const PROD = path.resolve(ROOT, 'push-devices.json');
+  const statOf = (f) => { try { const s = fs.statSync(f); return { exists: true, size: s.size, mtimeMs: s.mtimeMs }; } catch { return { exists: false, size: 0, mtimeMs: 0 }; } };
+
+  test('the registry is redirected, away from production, to a gitignored file the server honours', () => {
+    const file = process.env.WT_PUSH_DEVICES_FILE;
+    expect(file, 'playwright.config.js must set WT_PUSH_DEVICES_FILE').toBeTruthy();
+    expect(path.resolve(String(file)).toLowerCase()).not.toBe(PROD.toLowerCase());
+    let ignored = true;
+    try { execFileSync('git', ['check-ignore', '-q', path.relative(ROOT, path.resolve(String(file)))], { cwd: ROOT, windowsHide: true }); } catch { ignored = false; }
+    expect(ignored, 'the test registry must be gitignored').toBe(true);
+    const src = fs.readFileSync(path.join(ROOT, 'server.js'), 'utf8');
+    expect(/const PUSH_DEVICES_FILE = process\.env\.WT_PUSH_DEVICES_FILE\s*\|\|/.test(src),
+      'server.js must resolve PUSH_DEVICES_FILE from WT_PUSH_DEVICES_FILE first').toBe(true);
+  });
+
+  test('registering a device writes the test registry and leaves production untouched', async () => {
+    const before = statOf(PROD);
+    const ctx = await authCtx();
+    const token = mkToken('iso467');
+    try {
+      expect((await ctx.post('/api/push/devices', { data: { fcmToken: token, deviceName: 'isolation' } })).status()).toBe(200);
+      // Positive control: it landed where the redirect says, so "production unchanged" means something.
+      const list = JSON.parse(fs.readFileSync(path.resolve(String(process.env.WT_PUSH_DEVICES_FILE)), 'utf8'));
+      expect(list.some((d) => d.token === token)).toBe(true);
+      const after = statOf(PROD);
+      expect(after.exists, 'the suite must not CREATE a production push-devices.json').toBe(before.exists);
+      // A production server sharing the checkout may PRUNE its own list (shrink); a leaked
+      // registration can only grow it.
+      if (after.exists && (after.size !== before.size || after.mtimeMs !== before.mtimeMs)) expect(after.size).toBeLessThan(before.size);
+    } finally {
+      await ctx.delete(`/api/push/devices/${encodeURIComponent(token)}`).catch(() => {});
+      await ctx.dispose();
+    }
+  });
+});

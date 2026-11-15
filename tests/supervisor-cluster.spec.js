@@ -51,6 +51,7 @@ async function startServer(dir, port, label, extraEnv = {}) {
     WT_MAINTENANCE_FILE: f('maintenance.json'), WT_DEVICE_OPS_FILE: f('device-ops.jsonl'),
     WT_CLAUDE_METRICS_FILE: f('metrics.json'), WT_HANDOFF_DIR: f('handoffs'),
     WT_WORK_ITEMS_LOG_FILE: f('work-items.jsonl'), WT_SESSIONS_JOURNAL_FILE: f('sessions-journal.jsonl'),
+    WT_PUSH_DEVICES_FILE: f('push-devices.json'),
     WT_SUPERVISOR_EVERY_MS: '1000', WT_SUPERVISOR_ORPHAN_CONFIRM_MS: String(CONFIRM_MS),
     // #467: quiet hours pinned off (a run at night must not hold pushes); a spec flips them.
     WT_QUIET_FORCE: '0',
@@ -279,7 +280,8 @@ test.describe.serial('#467 the supervisor wakes and reaches the owner across two
     expect(wake).toMatchObject({ server: 'bravo', rule: 'R1' });
     expect(wake.text).toBe(`Your wait "the timer" changed: the time ${at} has passed. Carry on, or report a new wait.`);
     // Typed on B, through B's own gate.
-    await until(async () => (await (await b.get(`/api/sessions/${id}/scrollback`)).text()).includes(`${TAG} Your wait "the timer" changed`), 'the prompt on B');
+    // The scrollback route answers JSON: read its text, never the escaped body (a `"` is `\"` there).
+    await until(async () => (await (await b.get(`/api/sessions/${id}/scrollback`)).json()).data.includes(`${TAG} Your wait "the timer" changed`), 'the prompt on B');
     expect(supLog(dirB).some((l) => l.event === 'prompt-delivered' && l.id === id)).toBe(true);
     // Once: the same wait is never woken again.
     await sleep(4000);

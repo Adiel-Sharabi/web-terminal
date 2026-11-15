@@ -606,8 +606,12 @@ test.describe('#351 server.js wiring (pinned against the source)', () => {
   test('a hand-off successor is registered by the one start path, right after it is created', () => {
     const at = SERVER_SRC.indexOf('async function spawnSuccessor(');
     const body = SERVER_SRC.slice(at, SERVER_SRC.indexOf('async function verifySuccessor'));
-    expect(body).toContain('spawnStore.inherit(id, sid)');
-    expect(body.indexOf("workerClient.rpc('createSession'")).toBeLessThan(body.indexOf('spawnStore.inherit(id, sid)'));
+    expect(body).toContain('recordHandoff(id, sid,');
+    expect(body.indexOf("workerClient.rpc('createSession'")).toBeLessThan(body.indexOf('recordHandoff(id, sid,'));
+    // #472 - ONE record of a hand-off, whoever made it: the inherit lives in recordHandoff only.
+    const rec = SERVER_SRC.slice(SERVER_SRC.indexOf('function recordHandoff('), at);
+    expect(rec).toContain('spawnStore.inherit(id, sid, goal)');
+    expect(SERVER_SRC.split('spawnStore.inherit(').length - 1).toBe(1);
   });
 
   test('every active-viewer transition feeds the clock', () => {

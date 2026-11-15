@@ -82,6 +82,9 @@ process.env.WT_WORK_ITEMS_LOG_FILE = path.join(__dirname, 'work-items.test.jsonl
 // #466 - the sessions journal: the suite's opens and closes never land in production's
 // logs/sessions-journal.jsonl, where the supervisor would merge them into the real journal.
 process.env.WT_SESSIONS_JOURNAL_FILE = path.join(__dirname, 'sessions-journal.test.jsonl');
+// #467 - the push device registry: the suite's registrations never land in production's
+// push-devices.json, where a real push would fan out to them; reset per run.
+process.env.WT_PUSH_DEVICES_FILE = path.join(__dirname, 'push-devices.test.json');
 // #393 - the agent settings the context budget reads (autoCompactWindow). Never the real
 // ~/.claude/settings.json: the suite's budget must not depend on the machine it runs on, and
 // tests/context-budget.spec.js writes and edits this one to prove the setting is read live.
