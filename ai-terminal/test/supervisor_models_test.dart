@@ -190,6 +190,28 @@ void main() {
     expect(s.history, hasLength(1), reason: 'an empty map is an entry with nothing said');
   });
 
+  test('a timestamp no DateTime can hold is not said, never a crash later', () {
+    final s = SupervisorState.fromJson({
+      'role': 'authority',
+      'at': 9e15,
+      'now': -9e15,
+      'sessions': [
+        {'id': 'k', 'wait': {'on': 'you', 'at': 9e15}, 'orphan': {'state': 'orphan', 'since': double.infinity}},
+      ],
+      'history': [
+        {'id': 'h', 'closedAt': -9e15, 'openedAt': 8640000000000000},
+      ],
+    }, receivedAt: DateTime(2026))!;
+    expect(s.at, isNull);
+    expect(s.skewMs, 0, reason: 'no usable now: no skew');
+    expect(s.sessions.single.wait!.at, isNull);
+    expect(s.sessions.single.orphan!.since, isNull);
+    expect(s.history.single.closedAt, isNull);
+    expect(s.history.single.openedAt, 8640000000000000, reason: 'the edge itself is a real time');
+    final skewed = SupervisorState.fromJson({'role': 'authority', 'now': 0}, receivedAt: DateTime(2026))!;
+    expect(skewed.local(8640000000000000), isNull, reason: 'a skew past the edge is not a time either');
+  });
+
   test('a body that is not a state is unknown (null), never an empty state', () {
     for (final body in <dynamic>[null, [], 'x', 3, <String, dynamic>{}, {'enabled': true}]) {
       expect(SupervisorState.fromJson(body, receivedAt: DateTime(2026)), isNull, reason: '$body');

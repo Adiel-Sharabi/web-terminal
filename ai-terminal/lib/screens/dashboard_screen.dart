@@ -75,6 +75,22 @@ const String kFavoritesGroupKey = '__favorites__';
 /// (#377): `wt.collapsed.tree.<session id>`.
 const String kTreeFoldKeyPrefix = 'tree.';
 
+/// Room the Sessions bar keeps for the build's version label ([AppVersionBadge]).
+const double kBarVersionReserve = 96;
+
+/// #466 - whether the Sessions bar folds Journal and Settings into one More menu.
+///
+/// The bar holds the version label, five buttons and, while a server is down, the
+/// #402 badge - the only place that names down servers when every one is. A bar too
+/// narrow for all of it (the split's rail at its 240 px minimum, a 360 dp phone)
+/// clipped its last items, so below that width the two least-used buttons become
+/// one: folded, the bar is never wider than it was before the Journal existed.
+/// A button is 48 px at standard density, 4 px less per density step (40 on desktop).
+bool dashboardFoldsActions(double width, VisualDensity density) {
+  final button = 48 + 4 * density.horizontal;
+  return width < kBarVersionReserve + 6 * button;
+}
+
 class DashboardScreen extends StatefulWidget {
   const DashboardScreen({
     super.key,
@@ -554,7 +570,11 @@ class _DashboardScreenState extends State<DashboardScreen> {
         // notifies nothing, so it is safe on the build path.
         ResourceMonitor.instance.updateServers(servers);
         return Scaffold(
-          body: RefreshIndicator(
+          // #466 - how wide the bar is decides whether Journal and Settings fold
+          // into one More menu ([dashboardFoldsActions]).
+          body: LayoutBuilder(builder: (context, box) {
+          final foldActions = dashboardFoldsActions(box.maxWidth, Theme.of(context).visualDensity);
+          return RefreshIndicator(
             // #97: a pull also re-checks the cluster, so a server added on ANY
             // box shows up here without reinstalling or retyping it. Sessions
             // are refreshed first and awaited — that is what the user pulled
@@ -663,12 +683,13 @@ class _DashboardScreenState extends State<DashboardScreen> {
                         }),
                         // #466 - the supervisor's journal: who needs you, what is
                         // live, what is ready to close, and what ended.
-                        IconButton(
-                          key: const ValueKey('open-journal'),
-                          icon: const Icon(Icons.menu_book_outlined),
-                          tooltip: 'Journal: needs you, live, ready to close, history',
-                          onPressed: _openJournal,
-                        ),
+                        if (!foldActions)
+                          IconButton(
+                            key: const ValueKey('open-journal'),
+                            icon: const Icon(Icons.menu_book_outlined),
+                            tooltip: 'Journal: needs you, live, ready to close, history',
+                            onPressed: _openJournal,
+                          ),
                         // #306 — what every session is working on.
                         IconButton(
                           key: const ValueKey('open-work-board'),
@@ -676,11 +697,36 @@ class _DashboardScreenState extends State<DashboardScreen> {
                           tooltip: 'Dashboard: what every session is working on',
                           onPressed: _openWorkBoard,
                         ),
-                        IconButton(
-                          icon: const Icon(Icons.settings_outlined),
-                          tooltip: 'Settings',
-                          onPressed: _openSettings,
-                        ),
+                        if (!foldActions)
+                          IconButton(
+                            icon: const Icon(Icons.settings_outlined),
+                            tooltip: 'Settings',
+                            onPressed: _openSettings,
+                          )
+                        else
+                          PopupMenuButton<VoidCallback>(
+                            key: const ValueKey('dashboard-more'),
+                            tooltip: 'More',
+                            icon: const Icon(Icons.more_vert),
+                            onSelected: (open) => open(),
+                            itemBuilder: (_) => [
+                              PopupMenuItem(
+                                key: const ValueKey('open-journal'),
+                                value: _openJournal,
+                                child: const ListTile(
+                                  leading: Icon(Icons.menu_book_outlined),
+                                  title: Text('Journal'),
+                                ),
+                              ),
+                              PopupMenuItem(
+                                value: _openSettings,
+                                child: const ListTile(
+                                  leading: Icon(Icons.settings_outlined),
+                                  title: Text('Settings'),
+                                ),
+                              ),
+                            ],
+                          ),
                         if (downCount > 0)
                           Padding(
                             padding: const EdgeInsets.only(right: 12),
@@ -861,7 +907,8 @@ class _DashboardScreenState extends State<DashboardScreen> {
                 );
               },
             ),
-          ),
+          );
+          }),
           floatingActionButton: FloatingActionButton(
             onPressed: () => _createSession(servers),
             child: const Icon(Icons.add),

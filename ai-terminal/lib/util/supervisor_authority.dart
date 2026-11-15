@@ -8,7 +8,8 @@
 //   * otherwise a `role: peer` answer names the authority: the configured server of that
 //     name (case-insensitive) is the supervisor - and when it did not answer, or is not
 //     in this app's list, the page says exactly that;
-//   * otherwise nobody has one: `role: none` is "no lease authority is configured"; a
+//   * otherwise nobody has one: `role: none` is "no lease authority is configured" - but
+//     only when no server failed to answer (the authority may be the silent one); a
 //     server too old for the route (404) and a server that did not answer are each said
 //     as what they are, never as "nothing to show".
 
@@ -108,7 +109,10 @@ SupervisorFind findSupervisor(List<ServerConfig> servers, Map<String, Supervisor
         server: match, message: "The supervisor's server ($name) is not reachable: $why");
   }
   final answers = [for (final sv in servers) ?probes[sv.baseUrl]];
-  if (answers.any((p) => p.state?.role == 'none')) {
+  // "None configured" only when no server failed to answer: the authority may be the
+  // one that did not, and a server without a lease config cannot know better.
+  final failedToAnswer = answers.any((p) => !p.answered && p.status != 404);
+  if (!failedToAnswer && answers.any((p) => p.state?.role == 'none')) {
     return const SupervisorFind(SupervisorFindKind.noAuthority,
         message: 'No supervisor: no lease authority is configured');
   }

@@ -26,7 +26,9 @@ class SupervisorWait {
   final String on;
   final String what;
 
-  /// When it was reported, on the AUTHORITY's clock (epoch ms).
+  /// When it was reported (epoch ms), on the clock of the session's own server, which
+  /// the authority relays as is; [SupervisorState.local] corrects it by the authority's
+  /// skew, which is right while the cluster's clocks agree.
   final int? at;
 
   /// The kind of the named target (`session`, `lead`, `pr`, ...), when one was named.
@@ -45,7 +47,7 @@ class SupervisorWait {
     return SupervisorWait(
       on: on,
       what: _str(j['what']) ?? '',
-      at: _int(j['at']),
+      at: _ms(j['at']),
       targetKind: t is Map ? _str(t['kind']) : null,
       checkBy: _int(j['checkBy']),
     );
@@ -64,7 +66,7 @@ class SupervisorOrphan {
   static SupervisorOrphan? fromJson(dynamic j) {
     if (j is! Map) return null;
     final s = _str(j['state']);
-    return s == null ? null : SupervisorOrphan(state: s, parentId: _str(j['parentId']), since: _int(j['since']));
+    return s == null ? null : SupervisorOrphan(state: s, parentId: _str(j['parentId']), since: _ms(j['since']));
   }
 }
 
@@ -137,7 +139,7 @@ class SupervisorNode {
       items: _items(j['items']),
       wait: SupervisorWait.fromJson(j['wait']),
       orphan: SupervisorOrphan.fromJson(j['orphan']),
-      openedAt: journal is Map ? _int(journal['openedAt']) : null,
+      openedAt: journal is Map ? _ms(journal['openedAt']) : null,
     );
   }
 }
@@ -182,8 +184,8 @@ class JournalEntry {
       name: _str(j['name']),
       cwd: _str(j['cwd']),
       why: _str(j['why']),
-      openedAt: _int(j['openedAt']),
-      closedAt: _int(j['closedAt']),
+      openedAt: _ms(j['openedAt']),
+      closedAt: _ms(j['closedAt']),
       goal: _str(j['goal']),
       headline: _str(j['headline']),
       did: _str(j['did']),
@@ -256,7 +258,7 @@ class SupervisorState {
   bool get isAuthority => role == 'authority';
 
   /// An authority timestamp on this device's clock.
-  int? local(int? authorityMs) => authorityMs == null ? null : authorityMs + skewMs;
+  int? local(int? authorityMs) => authorityMs == null ? null : _inRange(authorityMs + skewMs);
 
   SupervisorNode? node(String id) {
     for (final n in sessions) {
@@ -277,13 +279,13 @@ class SupervisorState {
     if (j is! Map) return null;
     final role = _str(j['role']);
     if (role == null) return null;
-    final now = _int(j['now']);
+    final now = _ms(j['now']);
     final auth = j['authority'];
     return SupervisorState(
       role: role,
       enabled: j['enabled'] != false,
       authorityName: auth is Map ? _str(auth['name']) : null,
-      at: _int(j['at']),
+      at: _ms(j['at']),
       everyMs: _int(j['everyMs']),
       complete: j['complete'] == true,
       servers: _list(j['servers'], SupervisorServer.fromJson),
@@ -300,6 +302,15 @@ class SupervisorState {
 String? _str(dynamic v) => v is String && v.isNotEmpty ? v : null;
 
 int? _int(dynamic v) => v is int ? v : (v is num && v.isFinite ? v.toInt() : null);
+
+/// The widest epoch-ms [DateTime] takes: one value beyond it throws a RangeError in
+/// every formatter, so a corrupt timestamp from any server would blank the whole page.
+const int _maxMs = 8640000000000000;
+
+int? _inRange(int? ms) => ms == null || ms.abs() > _maxMs ? null : ms;
+
+/// An epoch-ms timestamp, or null when it is not one [DateTime] can hold.
+int? _ms(dynamic v) => v is num && v.isFinite && v.abs() <= _maxMs ? v.toInt() : null;
 
 List<T> _list<T>(dynamic v, T? Function(dynamic) parse) =>
     v is List ? List.unmodifiable(v.map(parse).whereType<T>()) : const [];

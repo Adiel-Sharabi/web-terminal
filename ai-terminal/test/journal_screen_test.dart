@@ -9,7 +9,10 @@ import 'dart:convert';
 import 'package:ai_terminal/api/api_client.dart';
 import 'package:ai_terminal/api/models.dart';
 import 'package:ai_terminal/screens/adaptive_home.dart';
+import 'package:ai_terminal/screens/dashboard_screen.dart' show dashboardFoldsActions;
 import 'package:ai_terminal/screens/journal_screen.dart';
+import 'package:ai_terminal/services/server_store.dart';
+import 'package:ai_terminal/services/session_repository.dart';
 import 'package:ai_terminal/services/session_selection.dart';
 import 'package:ai_terminal/theme/app_theme.dart';
 import 'package:flutter/material.dart';
@@ -20,6 +23,12 @@ import 'package:shared_preferences/shared_preferences.dart';
 
 const _home = ServerConfig(name: 'Home', baseUrl: 'http://h:7681', bearerToken: 'tok');
 const _office = ServerConfig(name: 'Office', baseUrl: 'http://o:7681', bearerToken: 'tok');
+
+// Made-up session ids, in the shape the server mints (the page sends nothing else back).
+const _n1 = '00000000-0000-4000-8000-000000000001';
+const _n2 = '00000000-0000-4000-8000-000000000002';
+const _n3 = '00000000-0000-4000-8000-000000000003';
+const _n4 = '00000000-0000-4000-8000-000000000004';
 
 Map<String, dynamic> _node(String id, String name, String server,
         {String status = 'idle', Object? wait, Object? orphan, String? goal, String? headline, String? now}) =>
@@ -52,21 +61,21 @@ Map<String, dynamic> _state(int now, {bool complete = true}) => {
         if (!complete) {'name': 'Laptop', 'ok': false, 'reason': 'HTTP 502', 'sessions': 0},
       ],
       'sessions': [
-        _node('n1', 'Alpha', 'Office',
+        _node(_n1, 'Alpha', 'Office',
             status: 'waiting',
             goal: 'Ship the widget',
             wait: {'on': 'you', 'what': 'pick a colour', 'at': now - 12 * 60000}),
-        _node('n2', 'Beta', 'Home',
+        _node(_n2, 'Beta', 'Home',
             status: 'working',
             headline: 'Running the suite',
             wait: {'on': 'external', 'what': 'CI run', 'at': now, 'target': {'kind': 'ci'}},
             orphan: {'state': 'orphan', 'parentId': 'p', 'since': now}),
-        _node('n3', 'Gamma', 'Home', status: 'working', now: 'Reading code', orphan: {'state': 'unknown', 'parentId': 'q'}),
-        _node('n4', 'Delta', 'Office', wait: {'on': 'done', 'what': 'finished', 'at': now}),
+        _node(_n3, 'Gamma', 'Home', status: 'working', now: 'Reading code', orphan: {'state': 'unknown', 'parentId': 'q'}),
+        _node(_n4, 'Delta', 'Home', wait: {'on': 'done', 'what': 'finished', 'at': now}),
       ],
-      'needsYou': ['n1'],
-      'live': ['n2', 'n3'],
-      'readyToClose': ['n4'],
+      'needsYou': [_n1],
+      'live': [_n2, _n3],
+      'readyToClose': [_n4],
       'history': [
         {
           'id': 'h1',
@@ -98,11 +107,13 @@ http.Response _json(Object body, [int status = 200]) => http.Response.bytes(utf8
 void main() {
   late List<String> asked;
   late Map<String, Object> answers; // baseUrl -> body (a 404 when absent)
+  late Map<String, List<Map<String, dynamic>>> rows; // baseUrl -> GET /api/sessions
   late List<Session> opened;
 
   ApiClient client(ServerConfig sv) => ApiClient(sv, httpClient: MockClient((req) async {
         asked.add('${sv.name} ${req.method} ${req.url.path}');
         if (req.method == 'DELETE') return _json({'ok': true});
+        if (req.url.path == '/api/sessions') return _json(rows[sv.baseUrl] ?? const []);
         final body = answers[sv.baseUrl];
         return body == null ? _json({'error': 'not found'}, 404) : _json(body);
       }));
@@ -111,6 +122,7 @@ void main() {
     SharedPreferences.setMockInitialValues({});
     SessionSelection.instance.reset();
     asked = [];
+    rows = {};
     opened = [];
     final now = DateTime.now().millisecondsSinceEpoch;
     answers = {
@@ -120,20 +132,21 @@ void main() {
   });
   tearDown(SessionSelection.instance.reset);
 
-  JournalScreen screen({bool embedded = false}) => JournalScreen(
+  JournalScreen screen({bool embedded = false, SessionRepository? repository}) => JournalScreen(
         embedded: embedded,
+        repository: repository,
         onOpenSession: opened.add,
         servers: () => const [_home, _office],
         clientFactory: client,
         refreshFloor: const Duration(hours: 1),
       );
 
-  Future<void> pump(WidgetTester tester) async {
+  Future<void> pump(WidgetTester tester, {SessionRepository? repository}) async {
     tester.view.physicalSize = const Size(900, 2400);
     tester.view.devicePixelRatio = 1;
     addTearDown(tester.view.resetPhysicalSize);
     addTearDown(tester.view.resetDevicePixelRatio);
-    await tester.pumpWidget(MaterialApp(theme: AppTheme.dark, home: screen()));
+    await tester.pumpWidget(MaterialApp(theme: AppTheme.dark, home: screen(repository: repository)));
     await tester.pump();
     await tester.pump();
   }
@@ -158,20 +171,20 @@ void main() {
     expect(find.text('History (2)'), findsOneWidget);
 
     // Needs you: name, machine, the wait's what, how long it has waited, the goal.
-    expect(inRow('journal-needs-n1', 'Alpha'), findsOneWidget);
-    expect(inRow('journal-needs-n1', 'Office'), findsOneWidget);
-    expect(inRow('journal-needs-n1', 'pick a colour - waiting 12m'), findsOneWidget);
-    expect(inRow('journal-needs-n1', 'Goal: Ship the widget'), findsOneWidget);
+    expect(inRow('journal-needs-$_n1', 'Alpha'), findsOneWidget);
+    expect(inRow('journal-needs-$_n1', 'Office'), findsOneWidget);
+    expect(inRow('journal-needs-$_n1', 'pick a colour - waiting 12m'), findsOneWidget);
+    expect(inRow('journal-needs-$_n1', 'Goal: Ship the widget'), findsOneWidget);
     // Live: headline (or now), the wait with its target kind, the orphan badges.
-    expect(inRow('journal-live-n2', 'Running the suite'), findsOneWidget);
-    expect(inRow('journal-live-n2', 'Waits on external (ci): CI run'), findsOneWidget);
-    expect(find.byKey(const ValueKey('journal-orphan-n2')), findsOneWidget);
-    expect(find.byKey(const ValueKey('journal-lead-unknown-n2')), findsNothing);
-    expect(inRow('journal-live-n3', 'Reading code'), findsOneWidget);
-    expect(find.byKey(const ValueKey('journal-lead-unknown-n3')), findsOneWidget);
-    expect(find.byKey(const ValueKey('journal-orphan-n3')), findsNothing);
+    expect(inRow('journal-live-$_n2', 'Running the suite'), findsOneWidget);
+    expect(inRow('journal-live-$_n2', 'Waits on external (ci): CI run'), findsOneWidget);
+    expect(find.byKey(ValueKey('journal-orphan-$_n2')), findsOneWidget);
+    expect(find.byKey(ValueKey('journal-lead-unknown-$_n2')), findsNothing);
+    expect(inRow('journal-live-$_n3', 'Reading code'), findsOneWidget);
+    expect(find.byKey(ValueKey('journal-lead-unknown-$_n3')), findsOneWidget);
+    expect(find.byKey(ValueKey('journal-orphan-$_n3')), findsNothing);
     // Ready to close carries its Close.
-    expect(find.byKey(const ValueKey('journal-close-n4')), findsOneWidget);
+    expect(find.byKey(ValueKey('journal-close-$_n4')), findsOneWidget);
     // The scan line names the authority; a complete scan names nobody silent.
     expect(find.textContaining('on Office'), findsOneWidget);
     expect(find.byKey(const ValueKey('journal-incomplete')), findsNothing);
@@ -214,34 +227,88 @@ void main() {
     expect(await search(''), (true, true));
     // The live sections are not filtered by History's search.
     await search('parser');
-    expect(find.byKey(const ValueKey('journal-needs-n1')), findsOneWidget);
+    expect(find.byKey(ValueKey('journal-needs-$_n1')), findsOneWidget);
     await done(tester);
   });
 
   testWidgets('Close confirms, then kills through the session\'s own server, and the row goes', (tester) async {
     await pump(tester);
-    await tester.tap(find.byKey(const ValueKey('journal-close-n4')));
+    await tester.tap(find.byKey(ValueKey('journal-close-$_n4')));
     await tester.pumpAndSettle();
     expect(find.text('Kill session?'), findsOneWidget, reason: "the app's one kill confirmation");
     await tester.tap(find.text('Cancel'));
     await tester.pumpAndSettle();
     expect(asked.where((a) => a.contains('DELETE')), isEmpty, reason: 'cancel kills nothing');
 
-    await tester.tap(find.byKey(const ValueKey('journal-close-n4')));
+    await tester.tap(find.byKey(ValueKey('journal-close-$_n4')));
     await tester.pumpAndSettle();
     await tester.tap(find.text('Kill'));
     await tester.pumpAndSettle();
-    expect(asked.where((a) => a.contains('DELETE')), ['Office DELETE /api/sessions/n4']);
-    expect(find.byKey(const ValueKey('journal-ready-n4')), findsNothing);
+    expect(asked.where((a) => a.contains('DELETE')), ['Home DELETE /api/sessions/$_n4'],
+        reason: "the session's own server, not the authority's");
+    expect(find.byKey(ValueKey('journal-ready-$_n4')), findsNothing);
     expect(find.text('Ready to close (0)'), findsOneWidget);
+    await done(tester);
+  });
+
+  testWidgets('Close refuses a session the app sees working again since the scan', (tester) async {
+    rows = {
+      _home.baseUrl: [
+        {'id': _n4, 'name': 'Delta', 'cwd': '/w', 'status': 'working', 'agent': 'claude'},
+      ],
+    };
+    SharedPreferences.setMockInitialValues({
+      ServerStore.storageKey: jsonEncode([
+        for (final s in const [_home, _office]) {'name': s.name, 'baseUrl': s.baseUrl, 'bearerToken': s.bearerToken},
+      ]),
+    });
+    final store = ServerStore.forTest();
+    await store.init();
+    final repo = SessionRepository.forTest(store: store, clientFactory: client);
+    await tester.runAsync(repo.refresh);
+    expect(repo.current.map((s) => '${s.id} ${s.status}'), ['$_n4 working'], reason: 'precondition');
+    await pump(tester, repository: repo);
+    await tester.tap(find.byKey(ValueKey('journal-close-$_n4')));
+    await tester.pump();
+    expect(find.byKey(const ValueKey('journal-close-refused')), findsOneWidget);
+    expect(find.text('Kill session?'), findsNothing, reason: 'no dialog, no kill');
+    expect(asked.where((a) => a.contains('DELETE')), isEmpty);
+    await done(tester);
+  });
+
+  testWidgets('a node whose id is not a session id is never sent back in a URL', (tester) async {
+    final st = _state(DateTime.now().millisecondsSinceEpoch);
+    (st['sessions'] as List).add(_node('../leases/x', 'Odd', 'Home', wait: {'on': 'done', 'what': 'x'}));
+    (st['readyToClose'] as List).add('../leases/x');
+    answers[_office.baseUrl] = st;
+    await pump(tester);
+    final close = find.byKey(const ValueKey('journal-close-../leases/x'));
+    expect(find.descendant(of: close, matching: find.text('Not reachable')), findsOneWidget);
+    await tester.tap(close);
+    await tester.pumpAndSettle();
+    expect(find.text('Kill session?'), findsNothing);
+    expect(asked.where((a) => a.contains('DELETE')), isEmpty);
+    await done(tester);
+  });
+
+  testWidgets('a timestamp no clock can hold never blanks the page', (tester) async {
+    final st = _state(DateTime.now().millisecondsSinceEpoch);
+    (st['history'] as List).add({'id': 'h3', 'machine': 'Home', 'name': 'Eta', 'why': 'lost', 'closedAt': -9e15});
+    ((st['sessions'] as List).first as Map)['wait'] = {'on': 'you', 'what': 'odd clock', 'at': 9e15};
+    answers[_office.baseUrl] = st;
+    await pump(tester);
+    expect(tester.takeException(), isNull);
+    expect(inRow('journal-history-Home|h3', 'Eta'), findsOneWidget);
+    expect(find.text('Unknown day'), findsOneWidget);
+    expect(inRow('journal-needs-$_n1', 'odd clock'), findsOneWidget);
     await done(tester);
   });
 
   testWidgets('tapping a live row opens that session on its own server', (tester) async {
     await pump(tester);
-    await tester.tap(find.byKey(const ValueKey('journal-live-n2')));
+    await tester.tap(find.byKey(ValueKey('journal-live-$_n2')));
     await tester.pump();
-    expect(opened.map((s) => '${s.id} ${s.server.name} ${s.name}'), ['n2 Home Beta']);
+    expect(opened.map((s) => '${s.id} ${s.server.name} ${s.name}'), ['$_n2 Home Beta']);
     await done(tester);
   });
 
@@ -274,9 +341,12 @@ void main() {
         home: AdaptiveHome(journalBuilder: (open) => screen(embedded: true)),
       ));
       await tester.pump();
+      // A 340 px rail at standard density folds Journal and Settings into More.
+      expect(find.byKey(const ValueKey('open-journal')), findsNothing);
+      await tester.tap(find.byKey(const ValueKey('dashboard-more')));
+      await tester.pumpAndSettle();
       await tester.tap(find.byKey(const ValueKey('open-journal')));
-      await tester.pump();
-      await tester.pump();
+      await tester.pumpAndSettle();
       expect(SessionSelection.instance.pane.value, DetailPane.journal);
       expect(find.byType(JournalScreen), findsOneWidget);
       expect(find.byType(BackButton), findsNothing, reason: 'beside the list there is nothing to go back to');
@@ -315,6 +385,21 @@ void main() {
     expect(SessionSelection.instance.inboxShown, isFalse);
     expect(SessionSelection.instance.boardShown, isFalse);
     SessionSelection.instance.reset();
+  });
+
+  test('journalRefreshPeriod: the served period, never under the floor', () {
+    const floor = Duration(seconds: 30);
+    expect(journalRefreshPeriod(60000, floor), const Duration(minutes: 1));
+    expect(journalRefreshPeriod(5000, floor), floor);
+    expect(journalRefreshPeriod(null, floor), const Duration(minutes: 1));
+  });
+
+  test('dashboardFoldsActions: the bar folds only when it cannot hold every button', () {
+    const desktop = VisualDensity.compact, phone = VisualDensity.standard;
+    expect(dashboardFoldsActions(AdaptiveHome.railMinWidth, desktop), isTrue, reason: 'the rail at its minimum');
+    expect(dashboardFoldsActions(AdaptiveHome.railWidth, desktop), isFalse, reason: 'the default rail on desktop');
+    expect(dashboardFoldsActions(360, phone), isTrue, reason: 'a 360 dp phone');
+    expect(dashboardFoldsActions(412, phone), isFalse);
   });
 
   test('waitedFor: the length of a wait, short', () {

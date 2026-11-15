@@ -39,6 +39,15 @@ bool journalEntryMatches(JournalEntry e, String query) {
   return hay.any((s) => s != null && s.toLowerCase().contains(q));
 }
 
+/// How long the page waits between reads: the served scan period, never under [floor]
+/// (30 s by default). An authority that said nothing is read once a minute.
+Duration journalRefreshPeriod(int? everyMs, Duration floor) =>
+    Duration(milliseconds: math.max(everyMs ?? 60000, floor.inMilliseconds));
+
+/// A session id as the server mints it. Anything else is never sent back in a URL: a
+/// node comes from the authority, and its id would ride another server's token.
+final RegExp _uuid = RegExp(r'^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$', caseSensitive: false);
+
 /// A wait's length, short: `<1m`, `12m`, `3h`, `2d`.
 String waitedFor(int? sinceMs, DateTime now) {
   if (sinceMs == null) return '';
@@ -124,19 +133,20 @@ class _JournalScreenState extends State<JournalScreen> {
           probes[sv.baseUrl] = SupervisorProbe.failed(e.status, e.message);
         }
       }));
+      if (!mounted) return;
+      final find = findSupervisor(servers, probes);
+      setState(() {
+        _find = find;
+        final listed = {for (final n in find.state?.sessions ?? const <SupervisorNode>[]) n.id};
+        _closed.retainAll(listed);
+      });
     } finally {
       _asking = false;
+      // Rescheduled whatever happened above, so one bad read never ends the refresh.
+      if (mounted) {
+        _timer = Timer(journalRefreshPeriod(_find?.state?.everyMs, widget.refreshFloor), () => unawaited(_refresh()));
+      }
     }
-    if (!mounted) return;
-    final find = findSupervisor(servers, probes);
-    setState(() {
-      _find = find;
-      final listed = {for (final n in find.state?.sessions ?? const <SupervisorNode>[]) n.id};
-      _closed.retainAll(listed);
-    });
-    final every = find.state?.everyMs ?? 60000;
-    final period = Duration(milliseconds: math.max(every, widget.refreshFloor.inMilliseconds));
-    _timer = Timer(period, () => unawaited(_refresh()));
   }
 
   /// The configured server a node lives on, by the name the authority gave it.
@@ -149,15 +159,21 @@ class _JournalScreenState extends State<JournalScreen> {
     return null;
   }
 
-  /// The app's own row for [n] when it has one, else one built from the node. Null when
-  /// its server is not in this app's list: nothing here could reach it.
-  Session? _sessionOf(SupervisorNode n) {
-    final server = _serverNamed(n.server);
-    if (server == null) return null;
+  /// The app's own live row for [n], when it has one.
+  Session? _liveRow(SupervisorNode n, ServerConfig server) {
     for (final s in _repo.current) {
       if (s.id == n.id && s.server.baseUrl == server.baseUrl) return s;
     }
-    return Session.fromJson(server, {
+    return null;
+  }
+
+  /// The app's own row for [n] when it has one, else one built from the node. Null when
+  /// its server is not in this app's list, or its id is not a session id: nothing here
+  /// could (or may) reach it.
+  Session? _sessionOf(SupervisorNode n) {
+    final server = _serverNamed(n.server);
+    if (server == null || !_uuid.hasMatch(n.id)) return null;
+    return _liveRow(n, server) ?? Session.fromJson(server, {
       'id': n.id,
       'name': n.name ?? n.id,
       'cwd': n.cwd ?? '',
@@ -169,8 +185,19 @@ class _JournalScreenState extends State<JournalScreen> {
   Future<void> _close(SupervisorNode n) async {
     final s = _sessionOf(n);
     if (s == null) return;
+    // "Ready to close" is the last scan's verdict, up to a minute or two old. The app's
+    // own row is fresher: a session that started working again since is not closed.
+    if (s.status != 'idle') {
+      ScaffoldMessenger.of(context).showSnackBar(SnackBar(
+          key: const ValueKey('journal-close-refused'),
+          content: Text('Not closed: ${s.name} is ${s.status} now, not idle')));
+      return;
+    }
     var killed = false;
-    await confirmAndKillSession(context, s, api: _client(s.server), onChanged: () => killed = true);
+    await confirmAndKillSession(context, s, api: _client(s.server), onChanged: () {
+      killed = true;
+      unawaited(_repo.refresh());
+    });
     if (!killed || !mounted) return;
     setState(() => _closed.add(n.id));
   }
@@ -319,7 +346,7 @@ class _JournalScreenState extends State<JournalScreen> {
     final title = Row(children: [
       Flexible(child: Text(n.name ?? n.id, overflow: TextOverflow.ellipsis, style: theme.textTheme.titleSmall)),
       const SizedBox(width: 8),
-      Text(n.server ?? '?', style: muted),
+      Flexible(child: Text(n.server ?? '?', overflow: TextOverflow.ellipsis, style: muted)),
       if (n.leadGone) ...[
         const SizedBox(width: 8),
         _Badge('lead gone', theme.colorScheme.error, key: ValueKey('journal-orphan-${n.id}')),
@@ -368,7 +395,7 @@ class _JournalScreenState extends State<JournalScreen> {
         title: Row(children: [
           Flexible(child: Text(e.name ?? e.id ?? '?', overflow: TextOverflow.ellipsis, style: theme.textTheme.titleSmall)),
           const SizedBox(width: 8),
-          Text(e.machine ?? '?', style: muted),
+          Flexible(child: Text(e.machine ?? '?', overflow: TextOverflow.ellipsis, style: muted)),
         ]),
         subtitle: Column(crossAxisAlignment: CrossAxisAlignment.start, children: [
           Text('${e.why ?? 'ended'} at ${clockTime(closed)}', style: muted),

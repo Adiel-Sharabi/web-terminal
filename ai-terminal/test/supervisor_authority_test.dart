@@ -59,10 +59,21 @@ void main() {
     expect(f.message, contains("not in this app's server list"));
   });
 
-  test('role none anywhere, and no authority or peer: no lease authority is configured', () {
-    final f = findSupervisor([_home, _office], {_home.baseUrl: _none, _office.baseUrl: _down});
+  test('role none, no authority or peer, and nobody silent: no lease authority is configured', () {
+    final f = findSupervisor([_home, _office], {_home.baseUrl: _none, _office.baseUrl: _none});
     expect(f.kind, SupervisorFindKind.noAuthority);
     expect(f.message, 'No supervisor: no lease authority is configured');
+  });
+
+  test('role none does not hide a server that failed to answer: it may be the authority', () {
+    final f = findSupervisor([_home, _office], {_home.baseUrl: _none, _office.baseUrl: _down});
+    expect(f.kind, SupervisorFindKind.nobodyAnswered);
+    expect(f.message, 'No supervisor found: Office: Server unreachable');
+  });
+
+  test('role none beside a server too old for the route is still none configured', () {
+    final f = findSupervisor([_home, _office], {_home.baseUrl: _none, _office.baseUrl: _old});
+    expect(f.kind, SupervisorFindKind.noAuthority);
   });
 
   test('every server too old for the route is "not new enough", not "no authority"', () {
