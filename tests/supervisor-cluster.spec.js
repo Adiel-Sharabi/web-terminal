@@ -32,7 +32,7 @@ async function until(fn, what, ms = 30000) {
 }
 
 /** Boot one isolated server in [dir] on [port]. Files and tokens are set up by the caller. */
-async function startServer(dir, port, label) {
+async function startServer(dir, port, label, extraEnv = {}) {
   const dataDir = path.join(dir, 'data');
   fs.mkdirSync(path.join(dataDir, 'scrollback'), { recursive: true });
   fs.mkdirSync(path.join(dataDir, 'logs'), { recursive: true });
@@ -52,6 +52,9 @@ async function startServer(dir, port, label) {
     WT_CLAUDE_METRICS_FILE: f('metrics.json'), WT_HANDOFF_DIR: f('handoffs'),
     WT_WORK_ITEMS_LOG_FILE: f('work-items.jsonl'), WT_SESSIONS_JOURNAL_FILE: f('sessions-journal.jsonl'),
     WT_SUPERVISOR_EVERY_MS: '1000', WT_SUPERVISOR_ORPHAN_CONFIRM_MS: String(CONFIRM_MS),
+    // #467: quiet hours pinned off (a run at night must not hold pushes); a spec flips them.
+    WT_QUIET_FORCE: '0',
+    ...extraEnv,
   };
   const proc = spawn(process.execPath, [path.join(ROOT, 'server.js')], { cwd: ROOT, env, stdio: ['ignore', 'pipe', 'pipe'], windowsHide: true });
   let out = '';
@@ -187,5 +190,155 @@ test.describe.serial('#466 the supervisor across two servers', () => {
     expect(node(later, kid).orphan.state).toBe('unknown');
     expect(later.orphans).not.toContain(kid);
     expect(supLog().some((l) => l.event === 'server' && l.server === 'bravo' && l.ok === false)).toBe(true);
+  });
+});
+
+// #467 - phase 2 across the same two-server rig: R1 wakes a session on the PEER through the
+// peer's own gated prompt, once per wait; R4 pushes a wait on the owner from the authority,
+// naming the peer; quiet hours hold both kinds of push and release ONE when they end.
+test.describe.serial('#467 the supervisor wakes and reaches the owner across two servers', () => {
+  test.setTimeout(120000);
+  const TAG = '[web-terminal supervisor]';
+  const LAUNCH = "printf '\\xe2\\x9d\\xaf\\xc2\\xa0 ready\\n\\x1b[>0q'; echo claude";
+  const portA = 18040 + Math.floor(Math.random() * 20);
+  const portB = portA + 25;
+  const urlA = `http://127.0.0.1:${portA}`;
+  const urlB = `http://127.0.0.1:${portB}`;
+  const tokA = crypto.randomBytes(32).toString('hex');
+  const tokB = crypto.randomBytes(32).toString('hex');
+  let dirA; let dirB; let A; let B; let a; let b;
+  const sink = [];
+  const drain = async () => { sink.push(...(await (await a.get('/api/push/test-sink')).json()).items); return sink; };
+  const files = (dir, self, token, peerUrl, peerToken, peerName) => {
+    fs.writeFileSync(path.join(dir, 'config.json'), JSON.stringify({
+      serverName: self === urlA ? 'alpha' : 'bravo', publicUrl: self,
+      cluster: [{ name: 'alpha', url: urlA }, { name: 'bravo', url: urlB }],
+      leases: { authority: 'alpha' }, checkIn: { typingQuietMin: 0.01 }, supervisor: {},
+    }));
+    fs.writeFileSync(path.join(dir, 'api-tokens.json'), JSON.stringify({ [token]: { label: 'supervisor-spec', created: Date.now(), expires: Date.now() + 3600e3 } }));
+    fs.writeFileSync(path.join(dir, 'cluster-tokens.json'), JSON.stringify({ [peerUrl]: { token: peerToken, name: peerName, authenticated: Date.now() } }));
+  };
+  const hookToken = () => fs.readFileSync(path.join(ROOT, '.hook-token'), 'utf8').trim();
+  const hook = async (base, id, event, body = {}) => {
+    const c = await pwRequest.newContext({ baseURL: base });
+    const r = await c.post('/api/hook', { data: { hook_event_name: event, ...body }, headers: { 'X-WT-Hook-Token': hookToken(), 'X-WT-Session-ID': id } });
+    await c.dispose();
+    expect(r.status()).toBe(200);
+  };
+  const report = async (base, id, body) => {
+    const c = await pwRequest.newContext({ baseURL: base });
+    const r = await c.post(`/api/session/${id}/report`, { data: body, headers: { 'X-WT-Hook-Token': hookToken() } });
+    const t = await r.text();
+    await c.dispose();
+    expect(r.status(), t).toBe(200);
+  };
+  /** An agent session on [ctx] that is ready, has run one turn reporting [wait], and is idle. */
+  const turnWith = async (ctx, base, label, wait) => {
+    const r = await ctx.post('/api/sessions', { data: { name: label, cwd: emptyCwd(label), agent: 'claude', autoCommand: LAUNCH } });
+    expect(r.ok(), await r.text()).toBe(true);
+    const id = (await r.json()).id;
+    const row = async () => (await (await ctx.get('/api/sessions')).json()).find((s) => s.id === id);
+    await until(async () => (await row())?.agentReady === true, `${label} ready`);
+    const conv = crypto.randomUUID();
+    await hook(base, id, 'UserPromptSubmit', { session_id: conv, prompt: 'work' });
+    await report(base, id, { items: [{ ref: '#1', title: 'phase 2', state: 'in-progress' }], wait });
+    await hook(base, id, 'Stop', { session_id: conv });
+    await until(async () => (await row())?.status === 'idle', `${label} idle`);
+    return id;
+  };
+  const supLog = (dir) => {
+    const f = path.join(dir, 'handoffs', 'supervisor-log.jsonl');
+    return (fs.existsSync(f) ? fs.readFileSync(f, 'utf8') : '').split('\n').filter(Boolean).map((l) => JSON.parse(l));
+  };
+  const state = async () => (await a.get('/api/supervisor/state')).json();
+  const ownerPushes = (id) => sink.filter((m) => m.data.kind === 'owner-wait' && m.data.sessionId === id);
+
+  test.beforeAll(async () => {
+    dirA = fs.mkdtempSync(path.join(os.tmpdir(), 'wt467-A-'));
+    dirB = fs.mkdtempSync(path.join(os.tmpdir(), 'wt467-B-'));
+    files(dirA, urlA, tokA, urlB, tokB, 'bravo');
+    files(dirB, urlB, tokB, urlA, tokA, 'alpha');
+    [A, B] = await Promise.all([
+      startServer(dirA, portA, 'a2', { WT_FCM_TEST: '1', WT_PUSH_PROVIDER: 'fcm' }),
+      startServer(dirB, portB, 'b2')]);
+    a = await bearer(A.base, tokA);
+    b = await bearer(B.base, tokB);
+    const reg = await a.post('/api/push/devices', { data: { fcmToken: `fcm-467-${crypto.randomUUID()}`, deviceName: 'spec' } });
+    expect(reg.ok(), await reg.text()).toBe(true);
+  });
+  test.afterAll(async () => {
+    for (const c of [a, b]) { try { await c.dispose(); } catch { /* gone */ } }
+    for (const s of [A, B]) { try { await s.stop(); } catch { /* gone */ } }
+    for (const d of [dirA, dirB]) { try { fs.rmSync(d, { recursive: true, force: true }); } catch { /* best effort */ } }
+  });
+
+  test('R1: a wait on the peer whose target resolves is woken with the fact, once', async () => {
+    const at = new Date(Date.now() + 2000).toISOString();
+    const id = await turnWith(b, B.base, 'sup-wake-b', { on: 'external', what: 'the timer', target: { kind: 'time', until: at } });
+    const wake = await until(async () => supLog(dirA).find((l) => l.event === 'wake' && l.id === id), 'the wake', 40000);
+    expect(wake).toMatchObject({ server: 'bravo', rule: 'R1' });
+    expect(wake.text).toBe(`Your wait "the timer" changed: the time ${at} has passed. Carry on, or report a new wait.`);
+    // Typed on B, through B's own gate.
+    await until(async () => (await (await b.get(`/api/sessions/${id}/scrollback`)).text()).includes(`${TAG} Your wait "the timer" changed`), 'the prompt on B');
+    expect(supLog(dirB).some((l) => l.event === 'prompt-delivered' && l.id === id)).toBe(true);
+    // Once: the same wait is never woken again.
+    await sleep(4000);
+    expect(supLog(dirA).filter((l) => l.event === 'wake' && l.id === id)).toHaveLength(1);
+    const n = (await state()).sessions.find((x) => x.id === id);
+    expect(n.waitState).toMatchObject({ state: 'resolved' });
+    expect(n.supervisor[0]).toMatchObject({ rule: 'R1', outcome: 'delivered' });
+    expect((await b.delete(`/api/sessions/${id}`)).status()).toBe(200);
+  });
+
+  test('R4: a wait on the owner pushes from the authority, naming the peer; quiet hours hold it and send ONE summary', async () => {
+    await drain(); sink.length = 0;
+    const id = await turnWith(b, B.base, 'sup-owner-b', { on: 'you', what: 'pick a name' });
+    const push = await until(async () => { await drain(); return ownerPushes(id)[0]; }, 'the owner push', 30000);
+    expect(push.data).toMatchObject({ serverName: 'bravo', deepLink: `${urlB}/app/${id}` });
+    expect(push.android.priority).toBe('high');
+    await sleep(3000);
+    await drain();
+    expect(ownerPushes(id)).toHaveLength(1); // no repeat by day before remindEveryMin
+
+    // Quiet: a NEW wait on the owner is held, not pushed.
+    expect((await a.post('/api/test/quiet', { data: { quiet: true } })).ok()).toBe(true);
+    await report(B.base, id, { wait: { on: 'you', what: 'pick again' } });
+    await sleep(4000);
+    await drain();
+    expect(ownerPushes(id)).toHaveLength(1);
+    expect(supLog(dirA).some((l) => l.event === 'owner-summary')).toBe(false);
+    // Quiet ends: ONE summary push.
+    expect((await a.post('/api/test/quiet', { data: { quiet: false } })).ok()).toBe(true);
+    await until(async () => { await drain(); return ownerPushes(id).length === 2; }, 'the summary push', 20000);
+    expect(supLog(dirA).filter((l) => l.event === 'owner-summary')).toEqual([expect.objectContaining({ count: 1 })]);
+    await sleep(3000);
+    await drain();
+    expect(ownerPushes(id)).toHaveLength(2);
+    expect((await b.delete(`/api/sessions/${id}`)).status()).toBe(200);
+  });
+
+  test('an approval push in quiet hours is held, and sent when they end only if it still waits', async () => {
+    await drain(); sink.length = 0;
+    const mk = async (label) => (await (await a.post('/api/sessions', { data: { name: label, cwd: emptyCwd(label) } })).json()).id;
+    const ask = (id) => hook(A.base, id, 'Notification', { message: 'Claude needs your permission to run a command' });
+    const approvals = (id) => sink.filter((m) => m.data.kind === 'approval' && m.data.sessionId === id);
+    const kept = await mk('sup-quiet-kept');
+    const answered = await mk('sup-quiet-answered');
+    expect((await a.post('/api/test/quiet', { data: { quiet: true } })).ok()).toBe(true);
+    await ask(kept);
+    await ask(answered);
+    await until(async () => (await (await a.get(`/api/sessions/${kept}/attention`)).json()).kind === 'approval', 'the attention record');
+    await sleep(2500);
+    await drain();
+    expect(approvals(kept)).toEqual([]);
+    expect(approvals(answered)).toEqual([]);
+    await hook(A.base, answered, 'UserPromptSubmit', { prompt: 'yes' }); // answered in the night
+    expect((await a.post('/api/test/quiet', { data: { quiet: false } })).ok()).toBe(true);
+    await until(async () => { await drain(); return approvals(kept).length === 1; }, 'the held approval', 20000);
+    await sleep(2500);
+    await drain();
+    expect(approvals(kept)).toHaveLength(1);
+    expect(approvals(answered)).toEqual([]);
+    for (const id of [kept, answered]) await a.delete(`/api/sessions/${id}`);
   });
 });
