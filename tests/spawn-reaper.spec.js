@@ -500,12 +500,12 @@ test.describe('#351 spawn-store - persistence', () => {
 // --- the source gates -----------------------------------------------------------
 
 test.describe('#351 server.js wiring (pinned against the source)', () => {
-  const list = SERVER_SRC.slice(SERVER_SRC.indexOf("app.get('/api/sessions'"));
+  const list = SERVER_SRC.slice(SERVER_SRC.indexOf('async function sessionsListRows'));
   const merge = SERVER_SRC.slice(SERVER_SRC.indexOf('async function _computeClusterSessions'));
 
   test('both session shapers carry `spawn` from the one helper', () => {
     // Fields were each forgotten in one of these two hand-shaped lists before (#298).
-    expect(list.slice(0, list.indexOf('res.json(shaped)'))).toContain('spawn: spawnStore.field(s.id)');
+    expect(list.slice(0, list.indexOf('return shaped;'))).toContain('spawn: spawnStore.field(s.id)');
     expect(merge.slice(0, merge.indexOf('result.push(...localShaped)'))).toContain('spawn: spawnStore.field(s.id)');
   });
 

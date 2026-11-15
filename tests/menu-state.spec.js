@@ -95,8 +95,8 @@ test.describe('#316 the rule: panel footer vs composer, by order', () => {
     const src = fs.readFileSync(path.join(__dirname, '..', 'server.js'), 'utf8');
     const merge = src.slice(src.indexOf('async function _computeClusterSessions'));
     expect(merge.slice(0, merge.indexOf('result.push(...localShaped)'))).toContain('inMenu: s.inMenu === true');
-    const list = src.slice(src.indexOf("app.get('/api/sessions'"));
-    expect(list.slice(0, list.indexOf('res.json(shaped)'))).toContain('inMenu: s.inMenu === true');
+    const list = src.slice(src.indexOf('async function sessionsListRows'));
+    expect(list.slice(0, list.indexOf('return shaped;'))).toContain('inMenu: s.inMenu === true');
   });
 
   test('a footer split across two PTY reads is still seen', () => {

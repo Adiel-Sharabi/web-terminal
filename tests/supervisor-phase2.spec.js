@@ -270,7 +270,7 @@ test.describe('#467 R4 the owner ladder', () => {
   const cfg = SV.supervisorConfig({ remindEveryMin: 120 });
   const you = (n, at, source = 'reported') => ({ id: ID(n), server: 'Home', name: `s${n}`,
     wait: { on: 'you', what: `pick ${n}`, at }, reason: { kind: 'you', text: '', source } });
-  const step = (nodes, ladder, now, quiet = false) => SV.ownerPlan({ graph: { nodes }, ladder, quiet, now, cfg });
+  const step = (nodes, ladder, now, quiet = false, complete = true) => SV.ownerPlan({ graph: { nodes, complete }, ladder, quiet, now, cfg });
 
   test('by day: a push when the wait starts, a reminder every 2 h, none in between', () => {
     const s1 = step([you(1, T0)], {}, T0);
@@ -281,7 +281,8 @@ test.describe('#467 R4 the owner ladder', () => {
 
   test('an answer stops it, a new report restarts it; an approval is counted, never pushed', () => {
     const s1 = step([you(1, T0)], {}, T0);
-    expect(step([], s1.ladder, T0 + MIN).ladder).toEqual({});
+    expect(step([], s1.ladder, T0 + MIN).ladder).toEqual({}); // a complete scan without it: gone
+    expect(step([{ ...you(1, T0), wait: null, reason: { kind: 'idle', source: 'status' } }], s1.ladder, T0 + MIN).ladder).toEqual({}); // answered
     expect(step([you(1, T0 + 5 * MIN)], s1.ladder, T0 + 5 * MIN).pushes).toHaveLength(1);
     expect(step([you(2, T0, 'status')], {}, T0).pushes).toEqual([]);
     expect(SV.ownerWaitOf({ ...you(1, T0), reason: { kind: 'working', source: 'status' } })).toBe(false); // mid-turn
@@ -304,6 +305,46 @@ test.describe('#467 R4 the owner ladder', () => {
     const day = step([you(1, T0)], {}, T0);
     expect(step([you(1, T0)], day.ladder, T0 + 30 * MIN, true).ladder[`${ID(1)}|${T0}`].held).toBe(false);
     expect(step([you(1, T0)], step([you(1, T0)], day.ladder, T0 + 30 * MIN, true).ladder, T0 + 60 * MIN).summary).toBe(null);
+  });
+});
+
+test.describe('#467 review fixes', () => {
+  const cfg = SV.supervisorConfig({ remindEveryMin: 120 });
+  const you = (n, at) => ({ id: ID(n), server: 'Home', name: `s${n}`, wait: { on: 'you', what: `pick ${n}`, at }, reason: { kind: 'you', text: '', source: 'reported' } });
+  const step = (nodes, ladder, now, complete = true) => SV.ownerPlan({ graph: { nodes, complete }, ladder, quiet: false, now, cfg });
+
+  test('R4: a wait out of sight for a scan keeps its place - no push again on its return', () => {
+    const s1 = step([you(1, T0)], {}, T0);
+    expect(s1.pushes).toHaveLength(1);
+    // A Monitor event: the session reads working for a moment, the same wait still on it.
+    const working = { ...you(1, T0), reason: { kind: 'working', source: 'status' } };
+    const s2 = step([working], s1.ladder, T0 + MIN);
+    expect(s2.pushes).toEqual([]);
+    expect(step([you(1, T0)], s2.ladder, T0 + 2 * MIN).pushes).toEqual([]); // back, inside the interval
+    // A peer missed one poll (an incomplete scan): kept too.
+    const s3 = step([], s1.ladder, T0 + MIN, false);
+    expect(step([you(1, T0)], s3.ladder, T0 + 2 * MIN).pushes).toEqual([]);
+    // Still reminded on time.
+    expect(step([you(1, T0)], s3.ladder, T0 + 120 * MIN).pushes.map((p) => p.n)).toEqual([2]);
+  });
+
+  test('a session waiting on its waiter is a mutual wait, never a wake (both would wake forever)', () => {
+    const lead = { id: ID(1), server: 'Home', parentId: null, replaces: [ID(7)], wait: { on: 'external', what: 'the child', at: T0, target: { kind: 'session', id: ID(2) } } };
+    const ctx = (child) => ({ waiter: lead, find: (id) => (id === ID(2) ? child : null), absence: () => 'unknown', leadVerdict: null, now: T0 + HOUR });
+    const child = (target) => ({ id: ID(2), server: 'Home', parentId: ID(1), wait: { on: 'external', what: 'the lead', at: T0 + MIN, ...(target ? { target } : {}) } });
+    expect(WT.resolveLocal(lead.wait.target, ctx(child(null))).state).toBe('resolved'); // a plain new report: news
+    expect(WT.resolveLocal(lead.wait.target, ctx(child({ kind: 'lead' }))).state).toBe('pending');
+    expect(WT.resolveLocal(lead.wait.target, ctx(child({ kind: 'session', id: ID(1) }))).state).toBe('pending');
+    expect(WT.resolveLocal(lead.wait.target, ctx(child({ kind: 'session', id: ID(7) }))).state).toBe('pending'); // an old id of mine
+    expect(WT.resolveLocal(lead.wait.target, ctx(child({ kind: 'session', id: ID(3) }))).state).toBe('resolved');
+  });
+
+  test('R2: an orphan that reported done is not told', () => {
+    const verdicts = { [ID(1)]: { state: 'orphan', parentId: ID(9) } };
+    const node = (wait) => ({ id: ID(1), server: 'Home', name: 's1', wait });
+    const plan = (nodes) => SV.planActions({ graph: { nodes }, verdicts, resolutions: {}, done: new Set(), acts: {}, now: T0, cfg });
+    expect(plan([node({ on: 'external', what: 'x', at: T0 - HOUR })])).toHaveLength(1);
+    expect(plan([node({ on: 'done', what: '', at: T0 - HOUR })])).toEqual([]);
   });
 });
 

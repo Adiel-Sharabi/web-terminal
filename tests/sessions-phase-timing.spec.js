@@ -25,13 +25,15 @@ const SRC = fs
   .split('\r\n')
   .join('\n');
 
-/** The body of `app.get('/api/sessions', ...)`, up to the next route. */
+/** What `app.get('/api/sessions', ...)` serves: the body of sessionsListRows (#467 moved the
+ *  shaping there so the supervisor reads the same rows), which the route must still call. */
 function sessionsHandler() {
-  const start = SRC.indexOf("app.get('/api/sessions', async (req, res)");
-  expect(start, 'the /api/sessions route must exist').toBeGreaterThan(-1);
-  const next = SRC.indexOf('\napp.', start + 10);
-  expect(next, 'the route must be followed by another one').toBeGreaterThan(start);
-  return SRC.slice(start, next);
+  const route = SRC.indexOf("app.get('/api/sessions', async (req, res)");
+  expect(route, 'the /api/sessions route must exist').toBeGreaterThan(-1);
+  expect(SRC.slice(route, SRC.indexOf('\napp.', route + 10))).toContain('await sessionsListRows()');
+  const start = SRC.indexOf('async function sessionsListRows');
+  expect(start, 'sessionsListRows must exist').toBeGreaterThan(-1);
+  return SRC.slice(start, SRC.indexOf('\n}\n', start) + 3);
 }
 
 /** The body of a top-level `function <name>(...) { ... }`. */

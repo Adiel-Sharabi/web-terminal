@@ -6563,96 +6563,104 @@ app.post('/api/upload-file', express.raw({ type: '*/*', limit: '50mb' }), (req, 
 });
 
 // --- API: list sessions ---
+/** The rows GET /api/sessions serves: shaped, with their #313 reasons. The ONE list builder
+ *  for this server's sessions - the route sends it, and the supervisor (#467) reads its own
+ *  server through it, so a local row is exactly the row a peer serves (a reason included). */
+async function sessionsListRows() {
+  // Phase-timed - see _logSlowSessions. `runningWork` is the one that can
+  // spawn a PowerShell (processTree.snapshot), so it is the phase most worth
+  // telling apart from the rest when this route goes slow.
+  const _t0 = performance.now();
+  settlePendingQuestions(); // #441 - before the statuses are read, so they agree
+  const { sessions: list } = await workerClient.rpc('listSessions');
+  reconcileBriefs(list.map((s) => s.id)); // #298 - sessions that ended while we were down
+  const _tRpc = performance.now();
+  const listMetrics = await Promise.all(list.map((s) => sessionMetrics(s).catch(() => null)));
+  const _tMetrics = performance.now();
+  const listConvIds = await Promise.all(list.map((s) => sessionConversationId(s).catch(() => null)));
+  const _tConv = performance.now();
+  const listBgTasks = await Promise.all(list.map((s) => sessionRunningWork(s).catch(() => [])));
+  const _tWork = performance.now();
+  _logSlowSessions({
+    rpc: _tRpc - _t0,
+    metrics: _tMetrics - _tRpc,
+    convIds: _tConv - _tMetrics,
+    runningWork: _tWork - _tConv,
+  }, _tWork - _t0);
+  const shaped = list.map((s, i) => ({
+    id: s.id, name: s.name, cwd: s.cwd,
+    clients: s.clients || 0, pid: s.pid, status: s.status,
+    lastActivity: s.lastActivity, autoCommand: s.autoCommand || '',
+    // Which AI agent this session runs (null = plain shell). Drives the sidebar
+    // tint and the chat lens; see GET /api/agents for the catalogue.
+    agent: s.agent ?? null,
+    claudeSessionId: s.claudeSessionId,
+    // Agent-neutral conversation identity. Equals claudeSessionId for Claude; for an
+    // agent whose transcript is discovered (Codex) it is the rollout UUID. A client
+    // drops its cached transcript when this changes — see sessionConversationId.
+    // Deliberately NOT folded into claudeSessionId: app.html shows the Fork button on
+    // that field and forks with `claude --resume <id>`, so a Codex id there would offer
+    // a fork that cannot work.
+    agentSessionId: listConvIds[i],
+    notifyLevel: getNotifyLevel(s.id),
+    // #60 — favorite (pin) + its rank. Server-side so every device sees one
+    // truth; a peer's favorites ride to the cluster list on THIS array.
+    ...favoriteFields(s.id),
+    // #137 — is this session sitting out its 5h window, when does it come back,
+    // and is a resume actually armed for it. One server-side derivation
+    // (lib/usage-limit.js), shared with the worker's arming gate.
+    //
+    // #227 — this used to end "so the badge can never claim something the timer
+    // disagrees with". IT COULD, AND IT DID, all night: sharing a MODULE is not
+    // sharing an ANSWER, and the derivation here saw only a subset of the worker's
+    // gates. `armed` now carries the worker's own autoResumeArmed instead.
+    usageLimit: usageLimitFields(s.id, listMetrics[i], s),
+    // #65 — compaction in progress. Unlike apiError, this rides the poll (and
+    // the cluster merge) so a client opening/reconnecting mid-compaction still
+    // sees the indicator, and the poll-seed agrees with the live 'compacting'
+    // push instead of clearing it. Worker-owned (sessionSummary), live-pushed too.
+    compacting: s.compacting || false,
+    compactingSince: s.compactingSince ?? null,
+    // #147 — is the agent's composer up? Rides the poll AND the cluster merge, not
+    // just the live push, so a client that opens a session mid-boot (or reconnects,
+    // or is looking at a peer's session) starts from the truth instead of assuming.
+    // `?? true` is the deliberate failure mode: an older worker sends no such field,
+    // and reading that as "starting" would refuse submit on every session it owns.
+    agentReady: s.agentReady ?? true,
+    // #190 — WHY it is not ready, when the worker recognised the screen. Rides the
+    // poll and the cluster merge for the same reason `agentReady` does: a client
+    // that opens a session mid-block must start from the truth, and null (an older
+    // worker, or nothing recognised) reads as an ordinary boot.
+    blockedPrompt: s.blockedPrompt ?? null,
+    // #316 — a panel or menu over the composer (worker-derived), for sessionReason.
+    inMenu: s.inMenu === true,
+    inMenuSince: s.inMenuSince ?? null,
+    metrics: listMetrics[i],
+    // Background commands still running (`run_in_background`). Rides the poll and
+    // the cluster merge like `compacting`, so a peer's builds are visible too. The
+    // STATUS is untouched — a session can be idle and still be building.
+    backgroundTasks: listBgTasks[i],
+    // #79 — WHAT this session is blocked on ('question' | 'permission' | null), so
+    // the chat lens can say so instead of looking identical to an idle session.
+    // Derived server-side (lib/waiting-for.js) precisely so both clients and the
+    // cluster merge agree with the status dot rather than each re-deriving it.
+    waitingFor: sessionWaitingFor(s),
+    // #298 — what this session is working on, for the sessions dashboard: work items
+    // and their states, what it is doing now, what it just did. One helper for both
+    // shapers (sessionBriefField); null for a session no hook has spoken for.
+    brief: sessionBriefField(s),
+    // #351 - who started it, for a session POSTed here (null = no verdict, never auto-closed).
+    // One helper for both shapers, like `brief` above.
+    spawn: spawnStore.field(s.id),
+  }));
+  // #313 - WHY a non-working session is not working (lib/session-reason.js).
+  addSessionReasons(shaped);
+  return shaped;
+}
+
 app.get('/api/sessions', async (req, res) => {
   try {
-    // Phase-timed - see _logSlowSessions. `runningWork` is the one that can
-    // spawn a PowerShell (processTree.snapshot), so it is the phase most worth
-    // telling apart from the rest when this route goes slow.
-    const _t0 = performance.now();
-    settlePendingQuestions(); // #441 - before the statuses are read, so they agree
-    const { sessions: list } = await workerClient.rpc('listSessions');
-    reconcileBriefs(list.map((s) => s.id)); // #298 - sessions that ended while we were down
-    const _tRpc = performance.now();
-    const listMetrics = await Promise.all(list.map((s) => sessionMetrics(s).catch(() => null)));
-    const _tMetrics = performance.now();
-    const listConvIds = await Promise.all(list.map((s) => sessionConversationId(s).catch(() => null)));
-    const _tConv = performance.now();
-    const listBgTasks = await Promise.all(list.map((s) => sessionRunningWork(s).catch(() => [])));
-    const _tWork = performance.now();
-    _logSlowSessions({
-      rpc: _tRpc - _t0,
-      metrics: _tMetrics - _tRpc,
-      convIds: _tConv - _tMetrics,
-      runningWork: _tWork - _tConv,
-    }, _tWork - _t0);
-    const shaped = list.map((s, i) => ({
-      id: s.id, name: s.name, cwd: s.cwd,
-      clients: s.clients || 0, pid: s.pid, status: s.status,
-      lastActivity: s.lastActivity, autoCommand: s.autoCommand || '',
-      // Which AI agent this session runs (null = plain shell). Drives the sidebar
-      // tint and the chat lens; see GET /api/agents for the catalogue.
-      agent: s.agent ?? null,
-      claudeSessionId: s.claudeSessionId,
-      // Agent-neutral conversation identity. Equals claudeSessionId for Claude; for an
-      // agent whose transcript is discovered (Codex) it is the rollout UUID. A client
-      // drops its cached transcript when this changes — see sessionConversationId.
-      // Deliberately NOT folded into claudeSessionId: app.html shows the Fork button on
-      // that field and forks with `claude --resume <id>`, so a Codex id there would offer
-      // a fork that cannot work.
-      agentSessionId: listConvIds[i],
-      notifyLevel: getNotifyLevel(s.id),
-      // #60 — favorite (pin) + its rank. Server-side so every device sees one
-      // truth; a peer's favorites ride to the cluster list on THIS array.
-      ...favoriteFields(s.id),
-      // #137 — is this session sitting out its 5h window, when does it come back,
-      // and is a resume actually armed for it. One server-side derivation
-      // (lib/usage-limit.js), shared with the worker's arming gate.
-      //
-      // #227 — this used to end "so the badge can never claim something the timer
-      // disagrees with". IT COULD, AND IT DID, all night: sharing a MODULE is not
-      // sharing an ANSWER, and the derivation here saw only a subset of the worker's
-      // gates. `armed` now carries the worker's own autoResumeArmed instead.
-      usageLimit: usageLimitFields(s.id, listMetrics[i], s),
-      // #65 — compaction in progress. Unlike apiError, this rides the poll (and
-      // the cluster merge) so a client opening/reconnecting mid-compaction still
-      // sees the indicator, and the poll-seed agrees with the live 'compacting'
-      // push instead of clearing it. Worker-owned (sessionSummary), live-pushed too.
-      compacting: s.compacting || false,
-      compactingSince: s.compactingSince ?? null,
-      // #147 — is the agent's composer up? Rides the poll AND the cluster merge, not
-      // just the live push, so a client that opens a session mid-boot (or reconnects,
-      // or is looking at a peer's session) starts from the truth instead of assuming.
-      // `?? true` is the deliberate failure mode: an older worker sends no such field,
-      // and reading that as "starting" would refuse submit on every session it owns.
-      agentReady: s.agentReady ?? true,
-      // #190 — WHY it is not ready, when the worker recognised the screen. Rides the
-      // poll and the cluster merge for the same reason `agentReady` does: a client
-      // that opens a session mid-block must start from the truth, and null (an older
-      // worker, or nothing recognised) reads as an ordinary boot.
-      blockedPrompt: s.blockedPrompt ?? null,
-      // #316 — a panel or menu over the composer (worker-derived), for sessionReason.
-      inMenu: s.inMenu === true,
-      inMenuSince: s.inMenuSince ?? null,
-      metrics: listMetrics[i],
-      // Background commands still running (`run_in_background`). Rides the poll and
-      // the cluster merge like `compacting`, so a peer's builds are visible too. The
-      // STATUS is untouched — a session can be idle and still be building.
-      backgroundTasks: listBgTasks[i],
-      // #79 — WHAT this session is blocked on ('question' | 'permission' | null), so
-      // the chat lens can say so instead of looking identical to an idle session.
-      // Derived server-side (lib/waiting-for.js) precisely so both clients and the
-      // cluster merge agree with the status dot rather than each re-deriving it.
-      waitingFor: sessionWaitingFor(s),
-      // #298 — what this session is working on, for the sessions dashboard: work items
-      // and their states, what it is doing now, what it just did. One helper for both
-      // shapers (sessionBriefField); null for a session no hook has spoken for.
-      brief: sessionBriefField(s),
-      // #351 - who started it, for a session POSTed here (null = no verdict, never auto-closed).
-      // One helper for both shapers, like `brief` above.
-      spawn: spawnStore.field(s.id),
-    }));
-    // #313 - WHY a non-working session is not working (lib/session-reason.js).
-    addSessionReasons(shaped);
+    const shaped = await sessionsListRows();
     // Log when a remote server fetches our sessions (Bearer = cluster call).
     // Throttled to avoid hammering the disk: only logs on change or after
     // CLUSTER_LOG_MIN_GAP_MS. Without this, peer polling produces multiple
@@ -6934,6 +6942,10 @@ app.get('/api/journal', (req, res) => {
 // per session, and the row is read TWICE - once for the rule, once right before typing - so
 // a turn, a question or a menu that came up during the awaits is never typed into.
 const _gatedPromptBusy = new Set();
+// The last refusal logged per session: a caller that retries every scan (the supervisor) would
+// otherwise write one line a minute while a session stays busy, and the capped log would trim
+// away the `wake` lines supervisorSeed reads to never wake twice.
+const _gatedPromptRefused = new Map();
 /// Type one gated prompt into local session [id] (lib/safe-prompt.js). [body] is the route's
 /// `{text, tag?, expectWaitAt?}`; [by] names the caller for the log. Returns `{status, json}`:
 /// the route sends it as is, and the supervisor (#467) calls it directly for its own server's
@@ -6942,7 +6954,8 @@ async function gatedPrompt(id, body, by) {
   const p = safePrompt.promptOf(body);
   if (p.error) return { status: 400, json: { error: p.error } };
   const refuse = (why, status = 409) => {
-    supervisorLog({ event: 'prompt-refused', id, why, by });
+    if (_gatedPromptRefused.get(id) !== why) supervisorLog({ event: 'prompt-refused', id, why, by });
+    _gatedPromptRefused.set(id, why);
     return { status, json: { delivered: false, refused: why } };
   };
   if (_gatedPromptBusy.has(id)) return refuse('busy');
@@ -6965,6 +6978,7 @@ async function gatedPrompt(id, body, by) {
     // Typed text is input: the check-in and the hand-off scan leave the session alone for their
     // quiet period, so neither types its own prompt behind this one.
     _lastInputAt.set(id, Date.now());
+    _gatedPromptRefused.delete(id);
     supervisorLog({ event: 'prompt-delivered', id, by, bytes: Buffer.byteLength(p.prompt, 'utf8') });
     return { status: 200, json: { delivered: true } };
   } catch (e) {
@@ -7003,11 +7017,9 @@ function supervisorCfg() {
 /** This server's own sessions as the graph reads them: the same spawn and brief helpers as
  *  /api/sessions, so a field cannot mean one thing here and another there. */
 async function supervisorLocalRows() {
-  const { sessions } = await workerClient.rpc('listSessions');
-  return sessions.map((s) => ({
-    id: s.id, name: s.name, cwd: s.cwd, status: s.status, agent: s.agent ?? null, clients: s.clients || 0,
-    spawn: spawnStore.field(s.id), brief: sessionBriefField(s),
-  }));
+  // #467 - the rows GET /api/sessions serves, never a slimmer copy: R4 reads `reason`, which a
+  // hand-built row lacked, so a wait on the owner on THIS server was never pushed.
+  return sessionsListRows();
 }
 
 /** Every in-scope server's sessions, and the journal lines it wrote since the last poll.

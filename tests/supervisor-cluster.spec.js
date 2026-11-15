@@ -319,6 +319,16 @@ test.describe.serial('#467 the supervisor wakes and reaches the owner across two
     expect((await b.delete(`/api/sessions/${id}`)).status()).toBe(200);
   });
 
+  test('R4 on the authority itself: a wait on the owner of one of ITS OWN sessions pushes too', async () => {
+    // The supervisor reads its own server through the /api/sessions rows (sessionsListRows),
+    // reason included; a slimmer local row once lacked it, so a local wait never pushed.
+    await drain(); sink.length = 0;
+    const id = await turnWith(a, A.base, 'sup-owner-a', { on: 'you', what: 'pick locally' });
+    const push = await until(async () => { await drain(); return ownerPushes(id)[0]; }, 'the local owner push', 30000);
+    expect(push.data).toMatchObject({ serverName: 'alpha' });
+    expect((await a.delete(`/api/sessions/${id}`)).status()).toBe(200);
+  });
+
   test('an approval push in quiet hours is held, and sent when they end only if it still waits', async () => {
     await drain(); sink.length = 0;
     const mk = async (label) => (await (await a.post('/api/sessions', { data: { name: label, cwd: emptyCwd(label) } })).json()).id;
