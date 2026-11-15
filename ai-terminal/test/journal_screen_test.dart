@@ -304,6 +304,39 @@ void main() {
     await done(tester);
   });
 
+  testWidgets('a failed read is said, and the page reads again on its timer', (tester) async {
+    var calls = 0;
+    ApiClient flaky(ServerConfig sv) => ApiClient(sv, httpClient: MockClient((req) async {
+          asked.add('${sv.name} ${req.method} ${req.url.path}');
+          if (sv == _office && calls++ == 0) throw StateError('boom');
+          final body = answers[sv.baseUrl];
+          return body == null ? _json({'error': 'not found'}, 404) : _json(body);
+        }));
+    tester.view.physicalSize = const Size(900, 2400);
+    tester.view.devicePixelRatio = 1;
+    addTearDown(tester.view.resetPhysicalSize);
+    addTearDown(tester.view.resetDevicePixelRatio);
+    await tester.pumpWidget(MaterialApp(
+      theme: AppTheme.dark,
+      home: JournalScreen(
+        onOpenSession: opened.add,
+        servers: () => const [_home, _office],
+        clientFactory: flaky,
+        refreshFloor: const Duration(seconds: 30),
+      ),
+    ));
+    await tester.pump();
+    await tester.pump();
+    expect(find.byKey(const ValueKey('journal-empty')), findsOneWidget, reason: 'the first read failed');
+    expect(asked.where((a) => a.startsWith('Office')), hasLength(1));
+    // Nothing served a period, so the next read is a minute later.
+    await tester.pump(const Duration(seconds: 61));
+    await tester.pump();
+    expect(asked.where((a) => a.startsWith('Office')), hasLength(2), reason: 'the refresh survived the failure');
+    expect(find.text('Needs you (1)'), findsOneWidget);
+    await done(tester);
+  });
+
   testWidgets('tapping a live row opens that session on its own server', (tester) async {
     await pump(tester);
     await tester.tap(find.byKey(ValueKey('journal-live-$_n2')));
@@ -392,6 +425,7 @@ void main() {
     expect(journalRefreshPeriod(60000, floor), const Duration(minutes: 1));
     expect(journalRefreshPeriod(5000, floor), floor);
     expect(journalRefreshPeriod(null, floor), const Duration(minutes: 1));
+    expect(journalRefreshPeriod(10000000000000000, floor), const Duration(days: 1), reason: 'capped');
   });
 
   test('dashboardFoldsActions: the bar folds only when it cannot hold every button', () {

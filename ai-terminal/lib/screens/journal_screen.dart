@@ -40,9 +40,10 @@ bool journalEntryMatches(JournalEntry e, String query) {
 }
 
 /// How long the page waits between reads: the served scan period, never under [floor]
-/// (30 s by default). An authority that said nothing is read once a minute.
-Duration journalRefreshPeriod(int? everyMs, Duration floor) =>
-    Duration(milliseconds: math.max(everyMs ?? 60000, floor.inMilliseconds));
+/// (30 s by default), and never over a day (a served period too large for a [Duration]
+/// would fire at once, every time). An authority that said nothing is read once a minute.
+Duration journalRefreshPeriod(int? everyMs, Duration floor) => Duration(
+    milliseconds: math.max(math.min(everyMs ?? 60000, const Duration(days: 1).inMilliseconds), floor.inMilliseconds));
 
 /// A session id as the server mints it. Anything else is never sent back in a URL: a
 /// node comes from the authority, and its id would ride another server's token.
@@ -131,6 +132,9 @@ class _JournalScreenState extends State<JournalScreen> {
           probes[sv.baseUrl] = SupervisorProbe.answered(await _client(sv).supervisorState());
         } on ApiException catch (e) {
           probes[sv.baseUrl] = SupervisorProbe.failed(e.status, e.message);
+        } catch (e) {
+          // Not swallowed: it is this server's answer, said on the page like any failure.
+          probes[sv.baseUrl] = SupervisorProbe.failed(0, 'unreadable answer ($e)');
         }
       }));
       if (!mounted) return;
@@ -191,6 +195,8 @@ class _JournalScreenState extends State<JournalScreen> {
       ScaffoldMessenger.of(context).showSnackBar(SnackBar(
           key: const ValueKey('journal-close-refused'),
           content: Text('Not closed: ${s.name} is ${s.status} now, not idle')));
+      // The refusal read the app's own row; make sure the next look is a fresh one.
+      unawaited(_repo.refresh());
       return;
     }
     var killed = false;
