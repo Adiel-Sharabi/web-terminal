@@ -212,3 +212,92 @@ test.describe('#377 against the real server', () => {
     }
   });
 });
+
+// #472 - a session that hands ITSELF off (it is working when it asks, so the server's hand-off
+// refuses it) used to open its successor as its own CHILD: once it closed, the successor read
+// as an orphan and phase 2's R2 would tell a healthy session its lead was gone.
+// `replaces: <own id>` on POST /api/sessions records a successor, proven by the caller trace.
+test.describe('#472 replaces - the rule', () => {
+  const R = require('../lib/spawn-reaper');
+  const O = '44444444-4444-4444-8444-444444444444';
+  const L = '55555555-5555-4555-8555-555555555555';
+  test('the shape: absent is none; junk is refused; a parentId may only repeat the replaced id', () => {
+    expect(R.replacesOf(undefined, undefined)).toEqual({ ok: true, id: null });
+    expect(R.replacesOf('', L)).toEqual({ ok: true, id: null });
+    expect(R.replacesOf('../x', undefined).ok).toBe(false);
+    expect(R.replacesOf(O.toUpperCase(), O)).toEqual({ ok: true, id: O });
+    expect(R.replacesOf(O, L).ok).toBe(false); // a successor's parent is never the caller's pick
+  });
+  test('who: only the session itself, proven by the trace; untraced is refused', () => {
+    expect(R.replacesRefusal(O, O)).toBeNull();
+    expect(R.replacesRefusal(O, O.toUpperCase())).toBeNull();
+    expect(R.replacesRefusal(O, L)).toMatch(/calling session/);
+    expect(R.replacesRefusal(O, null)).toMatch(/calling session/);
+  });
+  test('the store: the successor keeps the predecessor\'s parent and goal, or the goal it was opened with', () => {
+    const file = path.join(fs.mkdtempSync(path.join(os.tmpdir(), 'wt-472-')), 'spawned.json');
+    const st = createSpawnStore({ file, log: () => {} });
+    st.created(O, 'lead', L, 'ship phase 2');
+    const S1 = '66666666-6666-4666-8666-666666666666';
+    const S2 = '77777777-7777-4777-8777-777777777777';
+    st.inherit(O, S1);
+    expect(st.field(S1)).toMatchObject({ parentId: L, replaces: [O], goal: 'ship phase 2' });
+    st.inherit(S1, S2, 'ship phase 2, then deploy');
+    expect(st.field(S2)).toMatchObject({ parentId: L, replaces: [S1, O], goal: 'ship phase 2, then deploy' });
+  });
+});
+
+test.describe('#472 replaces against the real server', () => {
+  test.skip(process.platform !== 'win32', 'the trace reads Windows netstat and process tables');
+  test.setTimeout(90000);
+
+  test('a session that opens its own successor makes a SUCCESSOR (its lead\'s), never its own child; nobody else may', async () => {
+    const login = await fetch(`${BASE}/login`, {
+      method: 'POST', headers: { 'Content-Type': 'application/x-www-form-urlencoded' },
+      body: new URLSearchParams({ user: AUTH.user, password: AUTH.password }), redirect: 'manual',
+    });
+    const cookie = (login.headers.get('set-cookie') || '').split(';')[0];
+    const ctx = await pwRequest.newContext({ baseURL: BASE, extraHTTPHeaders: { Cookie: cookie, Connection: 'close' } });
+    const made = [];
+    const t0 = Date.now() - 1;
+    const rows = async () => (await ctx.get('/api/sessions')).json();
+    try {
+      const mk = async (data) => { const r = await ctx.post('/api/sessions', { data }); expect(r.status(), await r.text()).toBe(200); const id = (await r.json()).id; made.push(id); return id; };
+      const lead = await mk({ name: `pt472-lead-${Date.now()}` });
+      const succName = `pt472-succ-${Date.now()}`;
+      // The old session runs the hand-off itself, from inside its own shell: `replaces` and the
+      // legacy `parentId` both name itself ($WT_SESSION_ID, expanded by bash in the PTY).
+      const body = `{\\"name\\":\\"${succName}\\",\\"replaces\\":\\"$WT_SESSION_ID\\",\\"parentId\\":\\"$WT_SESSION_ID\\"}`;
+      const cmd = `curl.exe -s -o /dev/null -X POST -H 'Cookie: ${cookie}' -H 'Content-Type: application/json' --data "${body}" ${BASE}/api/sessions`;
+      expect(cmd.length).toBeLessThanOrEqual(500);
+      const old = await mk({ name: `pt472-old-${Date.now()}`, parentId: lead, autoCommand: cmd });
+      let succ = null;
+      for (let i = 0; i < 60 && !(succ && succ.spawn); i++) {
+        succ = (await rows()).find((s) => s.name === succName) || null;
+        if (!(succ && succ.spawn)) await new Promise((r) => setTimeout(r, 500));
+      }
+      expect(succ, 'the successor the old session asked for was created').not.toBeNull();
+      made.push(succ.id);
+      // The lead's, replacing the old one - not the old one's child.
+      expect(succ.spawn).toMatchObject({ parentId: lead, replaces: [old] });
+      // The old session closes: the successor still hangs under the live lead (no orphan).
+      expect((await ctx.delete(`/api/sessions/${old}`)).status()).toBe(200);
+      expect((await rows()).find((s) => s.id === succ.id).spawn).toMatchObject({ parentId: lead, replaces: [old] });
+      // The journal says hand-off, made by the agent.
+      const events = (await (await ctx.get(`/api/journal?since=${t0}`)).json()).events;
+      expect(events.some((e) => e.event === 'hand-off' && e.id === old && e.to === succ.id && e.trigger === 'agent')).toBe(true);
+
+      // Nobody else may: this request comes from the test runner, inside no session.
+      const other = await mk({ name: `pt472-other-${Date.now()}` });
+      const before = (await rows()).length;
+      const r = await ctx.post('/api/sessions', { data: { name: `pt472-forged-${Date.now()}`, replaces: other } });
+      expect(r.status()).toBe(403);
+      expect((await ctx.post('/api/sessions', { data: { name: `pt472-mixed-${Date.now()}`, replaces: other, parentId: lead } })).status()).toBe(400);
+      expect((await ctx.post('/api/sessions', { data: { name: `pt472-gone-${Date.now()}`, replaces: '88888888-8888-4888-8888-888888888888' } })).status()).toBe(404);
+      expect((await rows()).length).toBe(before); // a refusal creates nothing
+    } finally {
+      for (const id of made) await ctx.delete(`/api/sessions/${id}`).catch(() => {});
+      await ctx.dispose();
+    }
+  });
+});

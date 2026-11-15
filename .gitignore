@@ -66,6 +66,7 @@ auto-resume-prefs.json
 
 # FCM device registry (companion app push tokens — semi-sensitive)
 push-devices.json
+push-devices.test.json
 
 # local test rig instance (scripts/rig/rig.js creates this outside the repo)
 /wt-rig/

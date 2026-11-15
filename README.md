@@ -319,6 +319,35 @@ takes no action on any session yet.
   Config `supervisor`: `enabled` (default true), `exclude` (server names left out entirely),
   `everySec` (default 60).
 
+**The supervisor, phase 2: wake on fact and reach the owner (#467)** — the supervisor now acts,
+only on what can be undone, and only through the gated prompt of the session's own server.
+- **Wake on fact (R1).** Every targeted wait is looked up each scan: `session`, `lead`, `child`
+  and `time` from the cluster graph; `pr`, `ci` and `workitem` through the `gh` login and the ADO
+  REST API (`ADO_PAT`, read from the User environment and never logged; `supervisor.ado.org` and
+  `.project` say where ADO targets live). The answer is pending, resolved, gone or unknown, and
+  **unknown never acts**. A resolved or gone target wakes its session **once per wait** with
+  `[web-terminal supervisor] Your wait "<what>" changed: <fact>. Carry on, or report a new wait.`
+  The prompt names the wait it answers (`expectWaitAt`), so a session that reported again since is
+  refused `stale`. A bare `#123` target is qualified with the reporting repo when it is reported.
+- **Tell an orphan (R2).** A session whose lead is confirmed gone is told so, once.
+- **Reach the owner (R4).** A reported wait on the owner (`wait.on = you`, its turn ended) sends a
+  new `owner-wait` push from the lease authority only, naming the session's own server, then a
+  reminder every `remindEveryMin` (120) by day. An answer stops it; a new report starts it again.
+  Approvals and questions keep their own push.
+- **Quiet hours.** Nights (`22:00-08:00`), **Shabbat and every Yom Tov** (Israeli calendar) by
+  Jerusalem times, from 1 h before candle-lighting (40 min before sunset) to 1 h after tzeit (8.5°),
+  computed on the server with no outside service. Owner-wait, approval, API-error, auto-resume and
+  idle pushes are **held, never dropped**; when quiet hours end, ONE push replaces them (the
+  supervisor's "N things wait on you", and each server's own held pushes that still wait).
+- Every action shows inline on its session in `GET /api/supervisor/state` (`supervisor`,
+  `waitState`), with `quiet` and the recent `actions`; every decision is logged with its inputs.
+- Config `supervisor`: `wake` (false: plan and log only), `ownerPush`, `remindEveryMin`,
+  `actionsPerHour` (default 4 per session), `resolveEveryMin` (default 2), `ado`, and
+  `quietHours` (`enabled`, `nights`, `timeZone`, `holyDays`, `latitude`, `longitude`, `candleMin`,
+  `tzeitDeg`, `marginMin`; `false` switches them off).
+- **A push needs a transport:** `push.provider` (`fcm` with `push.fcm.serviceAccountPath`, or ntfy).
+  With none configured, the supervisor decides and logs, and nothing reaches the phone.
+
 **Resume by work item, on any machine** — a session's brief and its hand-off are named after
 the SESSION; the work is named after its **work item** (`ado:25309`, `#413`). Whenever a
 session's work on an item ends — it is closed, it exits or crashes, it is found gone after a
@@ -451,6 +480,12 @@ within a column, says who opened it, and the parent's card lists the sessions it
 their status, each one tap away. A hand-off keeps the tree at both ends: a helper's successor
 stays under the same parent, and a parent's successor publishes `spawn.replaces` (the ids it took
 the place of), so helpers that still name the old id, on any machine, find their parent.
+A session that hands **itself** off (it opens its own successor mid-turn, e.g. when its context
+fills) passes `replaces: "$WT_SESSION_ID"` on `POST /api/sessions`: the new session is recorded as
+its successor (its predecessor's parent, goal and pins, a `hand-off` in the journal), never as its
+child, so it is not an orphan once the old session closes. Only the session itself may: the server
+traces the request to the session it runs in and refuses anyone else (403), a `parentId` other than
+the replaced id (400), and a session that is not on this server (404).
 A script that sends only `spawnedBy` (no `parentId`) is traced instead: when the request comes from
 this machine, the server follows the calling process up to the session it runs in and records that
 as the parent.

@@ -40,7 +40,7 @@ const ROOT = process.env.WT_RESET_ROOT ? path.resolve(process.env.WT_RESET_ROOT)
 // protected but never narrow it: setting WT_RESET_ROOT elsewhere does not make the real
 // checkout's store deletable.
 const PRODUCTION = new Set([CHECKOUT, ROOT].flatMap((dir) =>
-  ['api-tokens.json', 'config.json', 'cluster-tokens.json', path.join('logs', 'work-items.jsonl'), path.join('logs', 'work-items.jsonl.1')].map((f) => path.resolve(dir, f).toLowerCase())));
+  ['api-tokens.json', 'config.json', 'cluster-tokens.json', 'push-devices.json', path.join('logs', 'work-items.jsonl'), path.join('logs', 'work-items.jsonl.1')].map((f) => path.resolve(dir, f).toLowerCase())));
 
 function reset(file, issue) {
   const abs = path.resolve(ROOT, file);
@@ -95,3 +95,5 @@ if (process.env.WT_SPAWNED_SESSIONS_FILE) reset(process.env.WT_SPAWNED_SESSIONS_
 // #359 - a restart hold an interrupted run left on would refuse every session the next
 // run tries to create.
 if (process.env.WT_MAINTENANCE_FILE) reset(process.env.WT_MAINTENANCE_FILE, '#359');
+// #467 - the push device registry: a run starts with no devices but its own.
+if (process.env.WT_PUSH_DEVICES_FILE) reset(process.env.WT_PUSH_DEVICES_FILE, '#467');
