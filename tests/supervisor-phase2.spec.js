@@ -328,15 +328,16 @@ test.describe('#467 review fixes', () => {
     expect(step([you(1, T0)], s3.ladder, T0 + 120 * MIN).pushes.map((p) => p.n)).toEqual([2]);
   });
 
-  test('a session waiting on its waiter is a mutual wait, never a wake (both would wake forever)', () => {
+  test('a session that waits on its waiter wakes it with exactly that (a child asking its lead)', () => {
     const lead = { id: ID(1), server: 'Home', parentId: null, replaces: [ID(7)], wait: { on: 'external', what: 'the child', at: T0, target: { kind: 'session', id: ID(2) } } };
     const ctx = (child) => ({ waiter: lead, find: (id) => (id === ID(2) ? child : null), absence: () => 'unknown', leadVerdict: null, now: T0 + HOUR });
-    const child = (target) => ({ id: ID(2), server: 'Home', parentId: ID(1), wait: { on: 'external', what: 'the lead', at: T0 + MIN, ...(target ? { target } : {}) } });
+    const child = (target) => ({ id: ID(2), server: 'Home', name: 's2', parentId: ID(1), wait: { on: 'external', what: 'the lead', at: T0 + MIN, ...(target ? { target } : {}) } });
     expect(WT.resolveLocal(lead.wait.target, ctx(child(null))).state).toBe('resolved'); // a plain new report: news
-    expect(WT.resolveLocal(lead.wait.target, ctx(child({ kind: 'lead' }))).state).toBe('pending');
-    expect(WT.resolveLocal(lead.wait.target, ctx(child({ kind: 'session', id: ID(1) }))).state).toBe('pending');
-    expect(WT.resolveLocal(lead.wait.target, ctx(child({ kind: 'session', id: ID(7) }))).state).toBe('pending'); // an old id of mine
-    expect(WT.resolveLocal(lead.wait.target, ctx(child({ kind: 'session', id: ID(3) }))).state).toBe('resolved');
+    const onMe = { state: 'resolved', fact: 'session "s2" is waiting on you (the lead)' };
+    expect(WT.resolveLocal(lead.wait.target, ctx(child({ kind: 'lead' })))).toMatchObject(onMe);
+    expect(WT.resolveLocal(lead.wait.target, ctx(child({ kind: 'session', id: ID(1) })))).toMatchObject(onMe);
+    expect(WT.resolveLocal(lead.wait.target, ctx(child({ kind: 'session', id: ID(7) })))).toMatchObject(onMe); // an old id of mine
+    expect(WT.resolveLocal(lead.wait.target, ctx(child({ kind: 'session', id: ID(3) }))).fact).toContain('reported a new wait');
   });
 
   test('R2: an orphan that reported done is not told', () => {

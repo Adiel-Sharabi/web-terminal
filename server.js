@@ -6954,8 +6954,8 @@ async function gatedPrompt(id, body, by) {
   const p = safePrompt.promptOf(body);
   if (p.error) return { status: 400, json: { error: p.error } };
   const refuse = (why, status = 409) => {
-    if (_gatedPromptRefused.get(id) !== why) supervisorLog({ event: 'prompt-refused', id, why, by });
-    _gatedPromptRefused.set(id, why);
+    if (_gatedPromptRefused.get(`${id}|${by}`) !== why) supervisorLog({ event: 'prompt-refused', id, why, by });
+    _gatedPromptRefused.set(`${id}|${by}`, why);
     return { status, json: { delivered: false, refused: why } };
   };
   if (_gatedPromptBusy.has(id)) return refuse('busy');
@@ -6978,7 +6978,7 @@ async function gatedPrompt(id, body, by) {
     // Typed text is input: the check-in and the hand-off scan leave the session alone for their
     // quiet period, so neither types its own prompt behind this one.
     _lastInputAt.set(id, Date.now());
-    _gatedPromptRefused.delete(id);
+    _gatedPromptRefused.delete(`${id}|${by}`);
     supervisorLog({ event: 'prompt-delivered', id, by, bytes: Buffer.byteLength(p.prompt, 'utf8') });
     return { status: 200, json: { delivered: true } };
   } catch (e) {
