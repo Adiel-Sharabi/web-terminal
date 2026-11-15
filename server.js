@@ -6889,7 +6889,7 @@ app.post('/api/sessions/:id/prompt', express.json({ limit: '8kb' }), async (req,
     const { sessions } = await workerClient.rpc('listSessions');
     if (!sessions.some((s) => s.id === id)) return res.status(404).json({ error: 'session not found' });
     const ctx = () => ({ brief: getBriefEntry(id) || {}, hold: Boolean(_maint.hold), busy: _checkInBusy || _autoScanBusy,
-      inputAt: _lastInputAt.get(id), startedAt: CHECKIN_STARTED_AT, now: Date.now(), typingQuietMin: checkInCfg().typingQuietMin });
+      inputAt: _lastInputAt.get(id), startedAt: CHECKIN_STARTED_AT, now: Date.now(), cfg: checkInCfg() });
     const row = await handoffRowFor(id, sessions);
     const why = safePrompt.promptRefusal(row, ctx());
     if (why) return refuse(why);
@@ -6940,6 +6940,7 @@ async function supervisorLocalRows() {
 
 /** Every in-scope server's sessions, and the journal lines it wrote since the last poll.
  *  A server that does not answer is `ok: false` - the graph reads that as "unknown". */
+const SUPERVISOR_JOURNAL_PAGES = 5;
 async function supervisorPoll(cfg) {
   const me = getServerName();
   const out = [];
@@ -6973,19 +6974,27 @@ async function supervisorPoll(cfg) {
     // Its journal, from where the last poll stopped. A peer too old to have one answers 404:
     // its sessions still count, its history is simply not known.
     try {
-      const since = Number.isFinite(_sup.cursors[server.name]) ? _sup.cursors[server.name] : Date.now() - 30 * 24 * 60 * 60 * 1000;
-      // From the last millisecond already read, not after it: a line written in that same
-      // millisecond after the last poll would otherwise never be fetched. mergeEvents dedupes.
-      const jr = await clusterFetch(`${server.url}/api/journal?since=${since - 1}`, { headers, timeout: 8000 });
-      if (jr.ok) {
+      // A backlog (a first poll reads 30 days) takes a few pages; a bounded number per poll,
+      // and only while the cursor moves - a page that ends where it began stops the loop.
+      for (let pageNo = 0; pageNo < SUPERVISOR_JOURNAL_PAGES; pageNo++) {
+        const since = Number.isFinite(_sup.cursors[server.name]) ? _sup.cursors[server.name] : Date.now() - 30 * 24 * 60 * 60 * 1000;
+        // From the last millisecond already read, not after it: a line written in that same
+        // millisecond after the last poll would otherwise never be fetched. mergeEvents dedupes.
+        const jr = await clusterFetch(`${server.url}/api/journal?since=${since - 1}`, { headers, timeout: 8000 });
+        if (!jr.ok) { entry.journal = `HTTP ${jr.status}`; break; }
         const page = JSON.parse(jr.body);
         const events = journalLib.cleanEvents(page && page.events);
-        if (events.length) {
-          _sup.journal[server.name] = journalLib.trimEvents(journalLib.mergeEvents(_sup.journal[server.name], events), Date.now());
-          _sup.cursors[server.name] = events[events.length - 1].at;
-        } else if (!Number.isFinite(_sup.cursors[server.name])) _sup.cursors[server.name] = since;
         entry.journal = 'ok';
-      } else entry.journal = `HTTP ${jr.status}`;
+        if (!events.length) {
+          if (!Number.isFinite(_sup.cursors[server.name])) _sup.cursors[server.name] = since;
+          break;
+        }
+        _sup.journal[server.name] = journalLib.trimEvents(journalLib.mergeEvents(_sup.journal[server.name], events), Date.now());
+        const next = events[events.length - 1].at;
+        const moved = !Number.isFinite(_sup.cursors[server.name]) || next > _sup.cursors[server.name];
+        _sup.cursors[server.name] = next;
+        if (!(page && page.more) || !moved) break;
+      }
     } catch (e) { entry.journal = 'unreachable'; }
     return entry;
   }));

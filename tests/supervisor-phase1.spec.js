@@ -14,6 +14,7 @@ const { createSpawnStore, goalOf, GOAL_MAX } = require('../lib/spawn-store');
 const J = require('../lib/session-journal');
 const SV = require('../lib/supervisor');
 const SP = require('../lib/safe-prompt');
+const { checkInConfig } = require('../lib/check-in');
 const { classifyUserTurn, USER_KINDS, SUPERVISOR_PROMPT_TAG } = require('../lib/user-turn');
 
 const ID = (n) => `${String(n).padStart(8, '0')}-0000-4000-8000-000000000000`;
@@ -160,6 +161,10 @@ test.describe('#466 the sessions journal', () => {
     const o = J.openedRecord({ id: ID(1), at: T0, via: 'api', name: 'n', cwd: 'C:\\w', agent: 'claude', spawnedBy: 'lead', parentId: ID(2).toUpperCase(), goal: 'g', replaces: [ID(3), 'bad'] });
     expect(o).toEqual({ v: 1, event: 'opened', at: T0, id: ID(1), via: 'api', name: 'n', cwd: 'C:\\w', agent: 'claude', spawnedBy: 'lead', parentId: ID(2), goal: 'g', replaces: [ID(3)] });
     expect(J.openedRecord({ id: ID(1), at: T0 })).not.toHaveProperty('replaces');
+    // The spawn store's label rule, not a second one: control and bidi characters go.
+    const unsafe = `le${String.fromCodePoint(0x1b)}[31mad${String.fromCodePoint(0x202e)}x`;
+    expect(J.openedRecord({ id: ID(1), at: T0, spawnedBy: unsafe }).spawnedBy).toBe('le[31madx');
+    expect(J.openedRecord({ id: ID(1), at: T0, spawnedBy: String.fromCodePoint(0x200b) }).spawnedBy).toBeNull();
     const c = J.closedRecord({ id: ID(1), at: T0, why: 'reaped', name: 'n', by: 'agent', successorId: null,
       brief: { headline: 'h', did: 'word '.repeat(100), items: [{ ref: '#1', state: 'done', title: 'x' }], wait: { on: 'done', what: 'nothing', at: 1 } } });
     expect(c).toMatchObject({ event: 'closed', why: 'reaped', by: 'agent', headline: 'h', items: [{ ref: '#1', state: 'done' }], wait: { on: 'done', what: 'nothing' } });
@@ -358,7 +363,7 @@ test.describe('#466 the cluster work graph and the orphan rule', () => {
 
 test.describe('#466 the gated prompt', () => {
   const ok = { agent: 'claude', agentReady: true, status: 'idle', inMenu: false, blockedPrompt: null, waitingFor: null, compacting: false };
-  const ctx = { brief: {}, hold: false, busy: false, inputAt: undefined, startedAt: T0 - 60 * MIN, now: T0, typingQuietMin: 10 };
+  const ctx = { brief: {}, hold: false, busy: false, inputAt: undefined, startedAt: T0 - 60 * MIN, now: T0, cfg: checkInConfig({ typingQuietMin: 10 }) };
 
   test('the body: one tagged line under 512 bytes, refused rather than cleaned', () => {
     expect(SP.promptOf({ text: ' carry on ' })).toEqual({ prompt: `${SUPERVISOR_PROMPT_TAG} carry on` });
@@ -399,6 +404,12 @@ test.describe('#466 the gated prompt', () => {
       ['compacting', { ...ok, compacting: true }, {}],
       ['capped', { ...ok, capBlocked: true }, {}],
       ['capped', { ...ok, usageLimit: { waiting: true } }, {}],
+      // #461: a turn an API error cut 5 min ago - the worker's auto-continue owns it. Read off
+      // the ROW's published brief, as the check-in reads it (server.js handoffRowFor sets it).
+      ['api-error', { ...ok, apiError: true, apiErrorAt: T0 - 5 * MIN, brief: { turnAt: T0 - 9 * MIN } }, {}],
+      ['api-error', { ...ok, apiError: true }, {}],
+      // A configured delivery window is the check-in's own, not the default.
+      ['check-in', ok, { brief: { checkIn: { sentAt: T0 - 10 * MIN } }, cfg: checkInConfig({ typingQuietMin: 10, deliverMs: 20 * MIN }) }],
       ['typing', ok, { inputAt: T0 - 9 * MIN }],
       ['typing', ok, { startedAt: T0 - MIN }],
     ];
@@ -408,5 +419,9 @@ test.describe('#466 the gated prompt', () => {
     expect(SP.promptRefusal(ok, { ...ctx, inputAt: T0 - 11 * MIN })).toBeNull();
     expect(SP.promptRefusal(ok, { ...ctx, brief: { checkIn: { sentAt: T0 - 1000, deliveredAt: T0 - 500 } } })).toBeNull();
     expect(SP.promptRefusal(ok, { ...ctx, brief: { handoff: { state: 'kept', at: T0 - 9 }, turnAt: T0 - 5 } })).toBeNull();
+    // The cut turn has stood apiErrorMin: nobody owns it any more. A sighting over an ended turn blocks nothing.
+    expect(SP.promptRefusal({ ...ok, apiError: true, apiErrorAt: T0 - 61 * MIN, brief: { turnAt: T0 - 70 * MIN } }, ctx)).toBeNull();
+    expect(SP.promptRefusal({ ...ok, apiError: true, apiErrorAt: T0 - 5 * MIN, brief: { turnAt: T0 - 9 * MIN, stoppedAt: T0 - 2 * MIN } }, ctx)).toBeNull();
+    expect(SP.promptRefusal(ok, { ...ctx, brief: { checkIn: { sentAt: T0 - 10 * MIN } } })).toBeNull();
   });
 });
