@@ -63,6 +63,9 @@ const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
 const count = (s, sub) => s.split(sub).length - 1;
 const logOf = (id) => (fs.existsSync(LOG) ? fs.readFileSync(LOG, 'utf8') : '').split('\n')
   .filter(Boolean).map((l) => JSON.parse(l)).filter((l) => l.id === id);
+const SKIPS = path.join(HANDOFF_DIR, 'check-in-skips.jsonl'); // #463
+const skipsOf = (id) => (fs.existsSync(SKIPS) ? fs.readFileSync(SKIPS, 'utf8') : '').split('\n')
+  .filter(Boolean).map((l) => JSON.parse(l)).filter((l) => l.id === id);
 
 test.describe('#443 check-in - server', () => {
   test.setTimeout(120000);
@@ -373,5 +376,66 @@ test.describe('#443 check-in - server', () => {
     expect(logOf(ended)).toHaveLength(0);
     // Asked once: it stays asked through more scans.
     expect(logOf(cut).filter((l) => l.event === 'sent')).toHaveLength(1);
+  });
+
+  test('#463 a session the full rule refuses is logged with the gate that said no', async () => {
+    // No transcript_path in its hooks: live work cannot be told, so the rule says cannot-tell.
+    const r = await ctx.post('/api/sessions', { data: { name: `checkin-skip-${Date.now()}`, agent: 'claude', autoCommand: LAUNCH } });
+    const id = (await r.json()).id;
+    made.push(id);
+    await until(async () => (await rowOf(id))?.agentReady === true, 'the session to be ready');
+    const conv = crypto.randomUUID();
+    expect(await hook(id, 'UserPromptSubmit', { session_id: conv, prompt: 'work' })).toBe(200);
+    expect(await report(id, { on: 'self', what: 'x' })).toBe(200);
+    expect(await hook(id, 'Stop', { session_id: conv })).toBe(200);
+    await until(async () => (await rowOf(id))?.status === 'idle', 'idle');
+    await setConfig(FAST);
+    const line = await until(async () => skipsOf(id).find((l) => l.reason === 'cannot-tell'), 'the skip line');
+    expect(line).toMatchObject({ event: 'skipped', source: 'row', agent: 'claude', status: 'idle' });
+    // The same gate on every scan (each 300 ms): one line, not one per scan.
+    await sleep(3000);
+    expect(skipsOf(id).filter((l) => l.reason === 'cannot-tell')).toHaveLength(1);
+    expect(logOf(id)).toHaveLength(0);
+  });
+
+  test('#463 an answered check-in is asked again after repeatMin, and counted', async () => {
+    const id = await endedTurn(`checkin-repeat-${Date.now()}`, { on: 'self', what: 'wait for the build' });
+    // repeatMin 0.1 min: the second ask is due 6 s after the first answer, not at once.
+    await setConfig({ ...FAST, checkIn: { ...FAST.checkIn, repeatMin: 0.1 } });
+    const ci = await until(async () => (await rowOf(id))?.checkIn, 'a check-in');
+    await until(async () => (await scrollback(id)).includes(TAG), 'the check-in in the terminal');
+    const conv = crypto.randomUUID();
+    expect(await hook(id, 'UserPromptSubmit', { session_id: conv, prompt: `${TAG} You have been idle 1 min.` })).toBe(200);
+    expect(await report(id, { on: 'self', what: 'a new watcher on the build' })).toBe(200);
+    expect(await hook(id, 'Stop', { session_id: conv })).toBe(200);
+    await until(async () => { const r = await rowOf(id); return r?.checkIn?.state === 'stuck' && r.status === 'idle'; }, 'answered');
+    // Inside repeatMin: not asked again.
+    await sleep(2000);
+    expect(logOf(id).filter((l) => l.event === 'sent')).toHaveLength(1);
+    // Past it: asked again, as the second check-in of the same idle period.
+    const again = await until(async () => { const c = (await rowOf(id))?.checkIn; return c && c.sentAt > ci.sentAt ? c : null; }, 'the repeat check-in', 30000);
+    expect(again.state).toBe('sent');
+    expect(logOf(id).filter((l) => l.event === 'sent').map((l) => l.n)).toEqual([1, 2]);
+  });
+
+  test('#463 no wait reported since a typed prompt, a watcher still running: asked as live-unreported', async () => {
+    const at = Date.now() - 60 * 1000;
+    const watcher = transcript('unreported', [
+      JSON.stringify({ type: 'assistant', timestamp: iso(at), message: { role: 'assistant', content: [{ type: 'tool_use', id: 'tu_u', name: 'Monitor', input: { command: 'node w.js', description: 'watch the PR builds', timeout_ms: 3600000 } }] } }),
+      JSON.stringify({ type: 'user', timestamp: iso(at + 1000), message: { role: 'user', content: [{ type: 'tool_result', tool_use_id: 'tu_u', content: 'Monitor started (task cu1).' }] }, toolUseResult: { taskId: 'cu1', timeoutMs: 3600000, persistent: false } }),
+    ]);
+    const id = await endedTurn(`checkin-unreported-${Date.now()}`, { on: 'self', what: 'verify-ci on the PR' }, watcher);
+    // A lead types a follow-up: that clears the self-wait, and the reply reports none.
+    await turn(id, 'if review finds a must-fix, revert that part', null, watcher);
+    await until(async () => ((await rowOf(id))?.backgroundTasks || []).some((t) => t.id === 'cu1'), 'the watcher to be live work');
+    const row = await rowOf(id);
+    expect(row.brief.wait).toBeNull();
+    expect(row.reason).toMatchObject({ kind: 'self', source: 'background' });
+    await setConfig({ ...FAST, checkIn: { ...FAST.checkIn, withLiveWorkMin: 0.02 } });
+    await until(async () => (await rowOf(id))?.checkIn, 'the check-in');
+    const sb = await until(async () => { const t = await scrollback(id); return t.includes(TAG) ? t : null; }, 'the check-in in the terminal');
+    expect(sb).toContain('reported no wait');
+    expect(sb).toContain('watch the PR builds');
+    expect(logOf(id).filter((l) => l.event === 'sent')).toEqual([expect.objectContaining({ why: 'live-unreported', n: 1 })]);
   });
 });
