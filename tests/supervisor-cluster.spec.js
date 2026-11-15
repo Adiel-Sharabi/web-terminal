@@ -162,6 +162,17 @@ test.describe.serial('#466 the supervisor across two servers', () => {
     expect((await (await b.get('/api/sessions')).json()).some((s) => s.id === kid)).toBe(true);
   });
 
+  test('a child whose lead was never seen in scope (an excluded server) is "unknown", never an orphan', async () => {
+    const kid = await session(a, 'sup-child-of-excluded', { parentId: crypto.randomUUID() });
+    await until(async () => node(await state(), kid)?.orphan, 'a verdict on the child');
+    await sleep(CONFIRM_MS + 3000);
+    const st = await state();
+    expect(st.complete).toBe(true);
+    expect(node(st, kid).orphan).toMatchObject({ state: 'unknown', why: 'lead-never-seen' });
+    expect(st.orphans).not.toContain(kid);
+    expect((await a.delete(`/api/sessions/${kid}`)).status()).toBe(200);
+  });
+
   test('a server that stops answering makes its sessions\' children "unknown", never orphans', async () => {
     const lead = await session(b, 'sup-lead-b');
     const kid = await session(a, 'sup-child-a', { parentId: lead });

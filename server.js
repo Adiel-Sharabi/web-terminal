@@ -2693,7 +2693,7 @@ function journalClosed(id, { lost = false, at } = {}) {
     const meta = spawnStore.metaOf(id);
     const brief = e ? briefLib.buildBrief(e, { reporting: briefLib.reportingEnabled(e, dashboardConfig()), origin: originForCwd(e.cwd) }) : null;
     const successorId = h && h.successorId && ['closing', 'kept'].includes(h.state) ? h.successorId : null;
-    journalAppend(journalLib.closedRecord({ id, at: at || Date.now(), why, name: e && e.name, brief, by: meta && meta.by, successorId }));
+    journalAppend(journalLib.closedRecord({ id, at: Date.now(), endedAt: at, why, name: e && e.name, brief, by: meta && meta.by, successorId }));
   } catch (err) { console.error(`[journal] closed ${id}: ${err.message}`); }
 }
 
@@ -6915,7 +6915,7 @@ app.post('/api/sessions/:id/prompt', express.json({ limit: '8kb' }), async (req,
 function supervisorAuthority() {
   return leasesLib.resolveAuthority(liveConfig('leases', undefined), getClusterConfig(), liveConfig('publicUrl', null), getServerName());
 }
-const _sup = { graph: null, sightings: {}, verdicts: {}, journal: {}, cursors: {}, localJournal: null, at: 0, busy: false };
+const _sup = { graph: null, sightings: {}, verdicts: {}, journal: {}, cursors: {}, known: new Set(), localJournal: null, at: 0, busy: false };
 /** config.json `supervisor`. Under WT_TEST only, two env seams shorten the clock, so a spec
  *  proves the two-scan orphan rule in seconds instead of sleeping five minutes. */
 function supervisorCfg() {
@@ -6951,8 +6951,8 @@ async function supervisorPoll(cfg) {
     try { st = fs.statSync(SESSIONS_JOURNAL_FILE); } catch { /* absent: no lines yet */ }
     const sig = st ? `${st.size}:${st.mtimeMs}` : 'none';
     if (!_sup.localJournal || _sup.localJournal.sig !== sig) {
-      _sup.localJournal = { sig };
       _sup.journal[me] = journalLib.trimEvents(workItemLog.readLines(SESSIONS_JOURNAL_FILE), Date.now());
+      _sup.localJournal = { sig };
     }
   } catch (e) { console.error(`[supervisor] local journal: ${e.message}`); }
   const tokens = loadClusterTokens();
@@ -6974,12 +6974,14 @@ async function supervisorPoll(cfg) {
     // its sessions still count, its history is simply not known.
     try {
       const since = Number.isFinite(_sup.cursors[server.name]) ? _sup.cursors[server.name] : Date.now() - 30 * 24 * 60 * 60 * 1000;
-      const jr = await clusterFetch(`${server.url}/api/journal?since=${since}`, { headers, timeout: 8000 });
+      // From the last millisecond already read, not after it: a line written in that same
+      // millisecond after the last poll would otherwise never be fetched. mergeEvents dedupes.
+      const jr = await clusterFetch(`${server.url}/api/journal?since=${since - 1}`, { headers, timeout: 8000 });
       if (jr.ok) {
         const page = JSON.parse(jr.body);
         const events = journalLib.cleanEvents(page && page.events);
         if (events.length) {
-          _sup.journal[server.name] = journalLib.trimEvents([...(_sup.journal[server.name] || []), ...events], Date.now());
+          _sup.journal[server.name] = journalLib.trimEvents(journalLib.mergeEvents(_sup.journal[server.name], events), Date.now());
           _sup.cursors[server.name] = events[events.length - 1].at;
         } else if (!Number.isFinite(_sup.cursors[server.name])) _sup.cursors[server.name] = since;
         entry.journal = 'ok';
@@ -6994,7 +6996,7 @@ async function supervisorScan() {
   const cfg = supervisorCfg();
   if (!cfg.enabled || _sup.busy) return;
   if (supervisorAuthority().mode !== 'self') {
-    if (_sup.graph) { _sup.graph = null; _sup.sightings = {}; _sup.verdicts = {}; }
+    if (_sup.graph) Object.assign(_sup, { graph: null, sightings: {}, verdicts: {}, journal: {}, cursors: {}, known: new Set(), localJournal: null });
     return;
   }
   if (Date.now() - _sup.at < cfg.everyMs) return;
@@ -7002,7 +7004,10 @@ async function supervisorScan() {
   try {
     const servers = await supervisorPoll(cfg);
     const graph = supervisorLib.buildGraph(servers, Date.now());
-    const { sightings, verdicts } = supervisorLib.noteOrphans(_sup.sightings, graph, cfg);
+    // A lead is judged only if it was ever seen in scope (live or journalled): one on an
+    // excluded server, or one this supervisor never saw, is "unknown", never an orphan.
+    const known = supervisorLib.knownIds(_sup.known, graph, journalLib.foldJournal(_sup.journal));
+    const { sightings, verdicts } = supervisorLib.noteOrphans(_sup.sightings, graph, { ...cfg, known });
     // Logged on a CHANGE only, with its inputs: a verdict, and a server that stops or starts answering.
     for (const n of graph.nodes) {
       const was = _sup.verdicts[n.id], now = verdicts[n.id];
@@ -7015,7 +7020,7 @@ async function supervisorScan() {
     for (const s of graph.servers) {
       if (before.get(s.name) !== s.ok) supervisorLog({ event: 'server', server: s.name, ok: s.ok, reason: s.reason });
     }
-    Object.assign(_sup, { graph, sightings, verdicts });
+    Object.assign(_sup, { graph, sightings, verdicts, known });
   } catch (e) {
     console.error(`[supervisor] scan: ${e.message}`);
   } finally { _sup.busy = false; }

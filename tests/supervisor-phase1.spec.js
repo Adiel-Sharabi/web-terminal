@@ -215,6 +215,16 @@ test.describe('#466 the sessions journal', () => {
     expect(c.wait.what.length).toBe(J.LIMITS.what);
   });
 
+  test('a lost session is written now and dated when it ended; a re-read page is merged once', () => {
+    const c = J.closedRecord({ id: ID(1), at: T0, endedAt: T0 - 60 * MIN, why: 'lost' });
+    expect(c).toMatchObject({ at: T0, endedAt: T0 - 60 * MIN });
+    expect(J.closedRecord({ id: ID(1), at: T0, endedAt: T0 + 5 })).not.toHaveProperty('endedAt');
+    expect(J.cleanEvents([c])[0].endedAt).toBe(T0 - 60 * MIN);
+    expect(J.foldJournal({ M: [c] })[0].closedAt).toBe(T0 - 60 * MIN);
+    const a = J.openedRecord({ id: ID(1), at: 5 }); const b = J.openedRecord({ id: ID(2), at: 5 });
+    expect(J.mergeEvents([a], [a, b])).toEqual([a, b]);
+  });
+
   test('the lead keeps a bounded window per machine', () => {
     const lines = [J.openedRecord({ id: ID(1), at: T0 - 40 * 24 * 60 * MIN }), J.openedRecord({ id: ID(2), at: T0 }), J.openedRecord({ id: ID(3), at: T0 + 1 })];
     expect(J.trimEvents(lines, T0 + 1).map((e) => e.id)).toEqual([ID(2), ID(3)]);
@@ -276,6 +286,23 @@ test.describe('#466 the cluster work graph and the orphan rule', () => {
     expect(SV.noteOrphans(s1.sightings, scan([up, homeDown], T0 + MIN), cfg).sightings).toEqual(s1.sightings);
     // ...and dropped once every server answers without it.
     expect(SV.noteOrphans(s1.sightings, scan([up, { name: 'Home', ok: true, sessions: [] }], T0 + MIN), cfg).sightings).toEqual({});
+  });
+
+  test('a lead never seen in scope (an excluded server, a server not listed) is unknown, never an orphan', () => {
+    const servers = [{ name: 'Office', ok: true, sessions: [child(ID(3), ID(1))] }];
+    const s1 = SV.noteOrphans({}, scan(servers, T0), { ...cfg, known: new Set([ID(3)]) });
+    expect(s1.verdicts[ID(3)]).toEqual({ state: 'unknown', parentId: ID(1), since: null, why: 'lead-never-seen' });
+    expect(s1.sightings).toEqual({});
+    const s2 = SV.noteOrphans(s1.sightings, scan(servers, T0 + 10 * MIN), { ...cfg, known: new Set([ID(3)]) });
+    expect(s2.verdicts[ID(3)].state).toBe('unknown');
+    // Seen once (it closed, and its close is in an in-scope journal): judged as before.
+    const known = SV.knownIds(new Set(), scan(servers, T0), J.foldJournal({ Office: [J.closedRecord({ id: ID(1), at: T0 - 1, why: 'closed' })] }));
+    expect(known.has(ID(1))).toBe(true);
+    const k1 = SV.noteOrphans({}, scan(servers, T0), { ...cfg, known });
+    expect(SV.noteOrphans(k1.sightings, scan(servers, T0 + 5 * MIN), { ...cfg, known }).verdicts[ID(3)].state).toBe('orphan');
+    // The known set is bounded, newest kept.
+    const big = SV.knownIds(new Set([ID(1), ID(2)]), scan([{ name: 'O', ok: true, sessions: [row(ID(5))] }], T0), [], 2);
+    expect([...big]).toEqual([ID(2), ID(5)]);
   });
 
   test('a new parentId restarts the clock; no scan at all is never complete', () => {
@@ -342,6 +369,8 @@ test.describe('#466 the gated prompt', () => {
     expect(SP.promptOf([]).error).toContain('object');
     expect(SP.promptOf({ text: `a${String.fromCodePoint(13)}b` }).error).toContain('control');
     expect(SP.promptOf({ text: `a${String.fromCodePoint(10)}b` }).error).toContain('control');
+    for (const cp of [0x7f, 0x85, 0x9b, 0x2028, 0x2029]) expect(SP.promptOf({ text: `a${String.fromCodePoint(cp)}b` }).error, cp.toString(16)).toContain('control');
+    expect(SP.promptOf({ text: `caf${String.fromCodePoint(0xe9)}` }).prompt).toBeTruthy();
     const room = SP.PROMPT_BYTES_MAX - Buffer.byteLength(`${SUPERVISOR_PROMPT_TAG} `);
     expect(SP.promptOf({ text: 'x'.repeat(room) }).prompt).toBeTruthy();
     expect(SP.promptOf({ text: 'x'.repeat(room + 1) }).error).toContain('bytes');
@@ -360,6 +389,7 @@ test.describe('#466 the gated prompt', () => {
       ['handoff', ok, { brief: { handoff: { state: 'wrapping' } } }],
       ['handed-off', ok, { brief: { handoff: { state: 'kept', at: T0 - 5 }, turnAt: T0 - 9 } }],
       ['busy', ok, { busy: true }],
+      ['check-in', ok, { brief: { checkIn: { sentAt: T0 - 1000 } } }],
       ['no-agent', { ...ok, agent: null }, {}],
       ['not-ready', { ...ok, agentReady: false }, {}],
       ['not-idle', { ...ok, status: 'working' }, {}],
@@ -376,6 +406,7 @@ test.describe('#466 the gated prompt', () => {
     for (const [why] of cases) expect(SP.REASONS).toContain(why);
     // Past the quiet period, and a hand-off whose session has worked since: no block.
     expect(SP.promptRefusal(ok, { ...ctx, inputAt: T0 - 11 * MIN })).toBeNull();
+    expect(SP.promptRefusal(ok, { ...ctx, brief: { checkIn: { sentAt: T0 - 1000, deliveredAt: T0 - 500 } } })).toBeNull();
     expect(SP.promptRefusal(ok, { ...ctx, brief: { handoff: { state: 'kept', at: T0 - 9 }, turnAt: T0 - 5 } })).toBeNull();
   });
 });
