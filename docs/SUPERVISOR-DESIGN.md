@@ -270,8 +270,8 @@ The owner's rule: a done session cleans up after itself before it is closed.
    - the tracker updated with its result.
 
    This is the `/dds-can-i-close` audit, but answered rather than printed.
-2. **The answer is state, not prose** (the #359 pattern): `wt-supervise.js closeout clean`,
-   or `closeout blocked "<what is left>"`.
+2. **The answer is state, not prose** (the #359 pattern): `wt-closeout.js clean`,
+   or `wt-closeout.js blocked "<what is left>"`.
 3. `clean`:
    - **The owner opened it → never closed by the supervisor.** It is marked *ready to
      close* in the journal, with its brief, so the owner can close it quickly. If it is
@@ -340,7 +340,8 @@ allows.
 |---|---|
 | every server | `wait.target` and `wait.checkBy` in `POST /api/session/:id/report` |
 | every server | `POST /api/sessions/:id/prompt {text, tag}`: a gated prompt a peer may call. It checks idle, ready, not in a menu, not blocked, not typing, and no hand-off or hold, and answers `delivered` or `refused: <why>`. Needed because `/answer` checks none of these, and `typePrompt` is local only. |
-| every server | `POST /api/sessions/:id/closeout` (hook token): the close-out answer |
+| every server | `POST /api/session/:id/closeout` (hook token): the close-out answer (#469: `scripts/wt-closeout.js`, the session's own credential, so not a `wt-supervise.js` verb) |
+| every server | `POST /api/sessions/:id/close {closeoutAt}` (#469): the gated close, re-checked by the session's own server before the kill; never the owner's session |
 | Office | `GET /api/supervisor/state`: the graph, open cases and the owner queue. The companion reads it beside the session rows. |
 | Office | `POST /api/supervisor/cases/:id` (resolve), `POST /api/supervisor/pause` |
 | Office | `handoffs/supervisor-log.jsonl` (every decision and its inputs), `supervisor-cases.jsonl` |

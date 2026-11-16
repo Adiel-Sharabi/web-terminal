@@ -400,6 +400,36 @@ across hand-offs. It hands itself off like any session and is followed through `
   `autoCommand` (default `claude --dangerously-skip-permissions`), `actionsPerHour`, `hungMin`,
   `circleMin`. The companion's Supervisor entry, cards and switches are a follow-up.
 
+**The supervisor, phase 4: close-out, then close or mark ready (#469)** — **R5**: a session that
+reported `done`, is idle, has no viewer at all and nothing live under it is asked to **close out**:
+check and fix its uncommitted and untracked changes, unpushed branches, worktrees, the processes
+and sessions it started, and the tracker. It answers as **state**, never prose:
+`node scripts/wt-closeout.js clean`, or `... blocked "<what is left>"` (`POST /api/session/:id/closeout`,
+hook token only). The rules are `lib/closeout.js`.
+- The prompt is typed through the session's own server's gated prompt as a **template**
+  (`{template: "closeout"}`): that server builds the text, naming its own path to `wt-closeout.js`.
+  It is asked once per done; a typed prompt, or a report of a wait that is not `done`, is new work
+  and clears the answer, so the next done is asked again. At most `maxAsks` asks per day.
+- **Clean, and an agent opened it** (the #351 verdict): closed once it has stayed quiet
+  `closeAfterMin`, is not a favourite, and no live session names it as its lead (children close
+  before their lead). The close goes through `POST /api/sessions/:id/close {closeoutAt}` on the
+  session's own server, which re-checks every gate right before the kill and refuses the owner's
+  session whatever the caller says. The journal records `closed-out`; the transcript stays, so
+  `claude --resume` brings it back.
+- **Clean, and the owner opened it** (or its opener is not known): **never closed** by the
+  supervisor. It is marked **Ready to close** in the journal, for the owner's one tap.
+- **Blocked**, no answer in `answerMin`, or asked `maxAsks` times: **Needs you** (and the owner-wait
+  push, held at night), never a forced close. Each session in `GET /api/supervisor/state` carries
+  `closeoutState`.
+- The dispatcher's `wt-supervise.js close <session>` (`POST /api/supervisor/close`) closes an agent's
+  session after its clean close-out, under R5's own gates (switched off, `close: false`, the quiet
+  wait, a live child, a scan some server did not answer) and the dispatcher's hourly budget.
+  A turn that starts after the answer, typed or not, voids it. `supervisor.autonomy.close: recommend`
+  turns every close into a card; Approve closes it.
+- Config `supervisor.closeout`: `enabled` (false: no asks, no closes; Ready to close is plain
+  done-and-idle), `close` (false: ask and mark, never close), `askAfterMin` (5), `answerMin` (60),
+  `closeAfterMin` (15), `maxAsks` (3). The #351 reaper keeps running until R5 has proved itself.
+
 **Resume by work item, on any machine** — a session's brief and its hand-off are named after
 the SESSION; the work is named after its **work item** (`ado:25309`, `#413`). Whenever a
 session's work on an item ends — it is closed, it exits or crashes, it is found gone after a
