@@ -75,6 +75,9 @@ const CASES = [
   { name: 'ctrl-c-working-empty', during: 'write the whole numbers from 1 to 5000 separated by single spaces', draft: '', keys: ['CTRL-C', { wait: 2500 }] },
   { name: 'esc-working-late-empty', during: 'write the whole numbers from 1 to 5000 separated by single spaces', after: 8000, draft: '', keys: [ESC, { wait: 2500 }] },
   { name: 'queued-esc-long', during: 'write the whole numbers from 1 to 5000 separated by single spaces', keys: ['CR', { wait: 1000 }, ESC, { wait: 4000 }] },
+  // Gate review 4: an idle Ctrl-C while a suggestion menu is open (a command, a file mention).
+  { name: 'ctrl-c-slash-menu', draft: '/mod', keys: [{ wait: 1500 }, 'CTRL-C', { wait: 1500 }] },
+  { name: 'ctrl-c-at-menu', draft: 'see @', keys: [{ wait: 1500 }, 'CTRL-C', { wait: 1500 }] },
 ];
 const ONLY = process.argv.slice(2);
 const NAMED = { UP: ESC + '[A', CR: String.fromCharCode(13), 'CTRL-R': String.fromCharCode(0x12), 'CTRL-C': String.fromCharCode(3), 'CTRL-W': String.fromCharCode(0x17) };

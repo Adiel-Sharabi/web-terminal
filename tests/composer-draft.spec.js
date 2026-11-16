@@ -5,7 +5,7 @@
 // only to fail closed (UNKNOWN, a draft). The NEGATIVE cases carry the weight: a false
 // "empty" lets the server's prompt submit a person's draft with it, which is the bug.
 const { test, expect } = require('@playwright/test');
-const { EMPTY, UNKNOWN, PICKER, PICKER_SENT, TEXT_MAX, hasDraft, applyInput, applySubmitted, applyStopped, applyUnconfirmed } = require('../lib/composer-draft');
+const { EMPTY, UNKNOWN, PICKER, PICKER_SENT, TEXT_MAX, hasDraft, applyInput, applySubmitted, applyStopped, applyUnconfirmed, applyServerSubmit } = require('../lib/composer-draft');
 
 const ESC = String.fromCharCode(0x1b);
 const CR = String.fromCharCode(13);
@@ -298,10 +298,10 @@ test.describe('#479 composer draft - what a keystroke leaves in the box', () => 
     // Ctrl-W over spaces with no word before them.
     expect(after(['   ', CTRL('w')])).toEqual(UNKNOWN);
     expect(after(['ab ', LEFT, LEFT, LEFT, CTRL('w')])).toEqual({ text: 'ab ', cur: 0 }); // nothing before the cursor
-    // An idle Ctrl-C with a suggestion menu perhaps open: an @-mention, a / line.
-    expect(after(['see @src', CTRL('c')], { idle: true })).toEqual(UNKNOWN);
-    expect(after(['/mod', CTRL('c')], { idle: true })).toEqual(UNKNOWN);
-    expect(after(['plain', CTRL('c')], { idle: true })).toEqual(EMPTY); // measured
+    // An idle Ctrl-C clears the line also with a suggestion menu open (measured, gate 4:
+    // probe cases ctrl-c-slash-menu, ctrl-c-at-menu).
+    expect(after(['see @', CTRL('c')], { idle: true })).toEqual(EMPTY);
+    expect(after(['/mod', CTRL('c')], { idle: true })).toEqual(EMPTY);
   });
 
   test('gate 3: right after a submit from an idle box, Esc or Ctrl-C may put the prompt back', () => {
@@ -314,9 +314,18 @@ test.describe('#479 composer draft - what a keystroke leaves in the box', () => 
     expect(after([`hello${CR}${CTRL('c')}`], { idle: true })).toEqual(UNKNOWN);
     // A terminal's reply is no key: still just sent.
     expect(applyInput(sent, CSI('I'), { idle: true }).justSent).toBe(true);
-    // Any other key ends it; so does the turn's Stop.
-    expect(applyInput(applyInput(sent, 'x', { idle: true }), BS, { idle: true })).toEqual(EMPTY);
+    // Keys typed while that turn runs do not end it (gate 4: a Ctrl-C before the turn's
+    // status arrives is an interrupt, and keeps the new text): only the turn's Stop does.
+    const typed = applyInput(sent, 'also x', { idle: true });
+    expect(typed).toEqual({ text: 'also x', cur: 6, justSent: true });
+    expect(applyInput(typed, CTRL('c'), { idle: true })).toEqual(UNKNOWN);
+    expect(applyInput(applyInput(sent, 'x', { idle: true }), BS, { idle: true })).toEqual({ text: '', cur: 0, justSent: true });
+    // The interrupt is spent: a second idle Ctrl-C clears.
+    expect(applyInput(applyInput(sent, CTRL('c'), { idle: true }), CTRL('c'), { idle: true })).toEqual(EMPTY);
+    // A CR mid-turn keeps it (the first turn has not ended).
+    expect(applyInput(typed, CR).justSent).toBe(true);
     expect(applyStopped(sent)).toEqual(EMPTY);
+    expect(applyStopped(typed)).toEqual({ text: 'also x', cur: 6 });
     expect(applyInput(applyStopped(sent), CTRL('c'), { idle: true })).toEqual(EMPTY);
     expect(applyStopped(EMPTY)).toEqual(EMPTY);
     expect(applyStopped(UNKNOWN)).toEqual(UNKNOWN);
@@ -325,10 +334,25 @@ test.describe('#479 composer draft - what a keystroke leaves in the box', () => 
   });
 
   test('gate 3: an Enter that started no turn (#179 submitUnconfirmed) leaves the words in doubt', () => {
-    expect(applyUnconfirmed(after([`hello${CR}`], { idle: true }))).toEqual(UNKNOWN);
-    expect(applyUnconfirmed(undefined)).toEqual(UNKNOWN);
+    const u = applyUnconfirmed(after([`hello${CR}`], { idle: true }));
+    expect(hasDraft(u)).toBe(true);
+    expect(applyUnconfirmed(undefined)).toEqual(u);
     expect(applyUnconfirmed(PICKER)).toEqual(PICKER); // a picker stays one
     expect(applyUnconfirmed(PICKER_SENT)).toEqual(PICKER_SENT);
+    // Gate 4: the hook may only be late (a slow hook spawn): the agent's report of the submit
+    // empties it. A key first makes it a plain unknown; a terminal's reply is no key.
+    expect(applySubmitted(u)).toEqual(EMPTY);
+    expect(applyInput(u, 'x')).toEqual(UNKNOWN);
+    expect(applySubmitted(applyInput(u, 'x'))).toEqual(UNKNOWN);
+    expect(applyInput(u, CSI('I'))).toEqual(u);
+    expect(applyInput(u, CTRL('c'), { idle: true })).toEqual(EMPTY);
+  });
+
+  test('gate 4: the server\'s own submit arms the same interrupt rule as a person\'s', () => {
+    const st = applyServerSubmit();
+    expect(hasDraft(st)).toBe(false);
+    expect(applyInput(st, ESC, { idle: true })).toEqual({ text: null, cur: null, esc: true });
+    expect(applyStopped(st)).toEqual(EMPTY);
   });
 
   test('a corrupt or foreign state is read as no record, never thrown on', () => {

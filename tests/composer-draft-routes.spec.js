@@ -288,6 +288,40 @@ test.describe('#479 an unsent draft holds the server\'s own prompts', () => {
       expect(await draftOf(id), 'a submit is assumed at first').toBeNull();
       await until(async () => (await draftOf(id)) !== null, 'the unconfirmed submit to read as a draft', 20000);
       expect(await (await prompt(id, 'over it')).json()).toEqual({ delivered: false, refused: 'draft' });
+      // Gate 4: the hook was only late (a slow hook spawn): the agent's report empties the box.
+      const conv = crypto.randomUUID();
+      expect(await hook(id, 'UserPromptSubmit', { session_id: conv, prompt: 'hello' })).toBe(200);
+      await until(async () => (await draftOf(id)) === null, 'the late submit to end the doubt');
     } finally { ws.close(); }
+  });
+
+  test('gate 4: a fresh session\'s first prompt leaves no draft (its status is the worker\'s, not unknown)', async () => {
+    const r = await ctx.post('/api/sessions', { data: { name: `draft-fresh-${crypto.randomUUID().slice(0, 8)}`, agent: 'claude', autoCommand: LAUNCH } });
+    const id = (await r.json()).id;
+    made.push(id);
+    await until(async () => (await rowOf(id))?.agentReady === true, 'the session to be ready');
+    const ws = await terminal(id); // no hook yet: the worker reads it 'active'
+    try {
+      // 'active' is at the composer: an idle Ctrl-C clears there (not only after a hook's 'idle').
+      ws.send('half'); await sleep(100); ws.send(CTRL_C);
+      await sleep(1500);
+      expect(await draftOf(id), 'Ctrl-C cleared it').toBeNull();
+      ws.send(`fix the build${CR}`);
+      await sleep(300);
+      const conv = crypto.randomUUID();
+      expect(await hook(id, 'UserPromptSubmit', { session_id: conv, prompt: 'fix the build' })).toBe(200);
+      expect(await hook(id, 'Stop', { session_id: conv })).toBe(200);
+      await until(async () => (await rowOf(id))?.status === 'idle', 'the session to go idle');
+      await sleep(1500);
+      expect(await draftOf(id), 'one prompt, sent: nothing held').toBeNull();
+      expect(await (await prompt(id, 'your wait changed')).json()).toEqual({ delivered: true });
+    } finally { ws.close(); }
+  });
+
+  test('gate 4: the server\'s own prompt that started no turn in time is not a person\'s draft', async () => {
+    const id = await idleAgent();
+    expect(await (await prompt(id, 'are you there')).json()).toEqual({ delivered: true });
+    await sleep(11000); // past the worker's 8 s submit check, with no hook
+    expect(await draftOf(id), 'the words in the box are ours').toBeNull();
   });
 });
