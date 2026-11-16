@@ -348,6 +348,58 @@ only on what can be undone, and only through the gated prompt of the session's o
 - **A push needs a transport:** `push.provider` (`fcm` with `push.fcm.serviceAccountPath`, or ntfy).
   With none configured, the supervisor decides and logs, and nothing reaches the phone.
 
+**The supervisor, phase 3: the dispatcher and the night shift (#468)** — what the rules cannot
+settle becomes a **case** for the Supervisor's own brain: one Claude Code session on the
+authority, named `web-terminal supervisor`, that the server starts when the first case needs it
+and again whenever it is gone (at most once per 5 min). It works in `handoffs/supervisor/`, where
+the server writes its standing rules (`CLAUDE.md`, from `lib/supervisor-dispatcher.md`: the
+"bother the owner last" ladder, coaching, the verbs) and where it keeps `notes.md`, its memory
+across hand-offs. It hands itself off like any session and is followed through `replaces`; the
+#351 reaper and the check-in leave it alone. Its row carries `role: "supervisor"`.
+- **Cases** (`lib/supervisor-cases.js`), at most one per rule per session and wait: **R2** an orphan
+  whose lead is gone waits on it (stand in for the lead); **R3** no progress: the same check-in answer
+  twice in one idle period, or a wait past its own `checkBy`; **R4** a session waiting on the owner
+  (by day too; the owner's push still goes out): the dispatcher answers it if the rules settle it or
+  it can be undone, steers round it, or asks the owner; **R6** a turn working with no hook for
+  `hungMin` (45), not already stopped, with nothing live under it (no command, subagent, Monitor or
+  wakeup); **R9** the same failure back across turns:
+  every session row now carries `circling` (`lib/circling.js`: the tool and failure line seen most
+  often in the last 6 h, numbers blanked, its fingerprint `fp`, with how many times and over how many
+  prompts), read from the transcript pass that finds background work; a case needs `circleMin` (4)
+  over 2+ turns, and is keyed on the fingerprint, so a new wording is the same case.
+  A case whose trigger moves on (a new report, the turn ends) is retired. Cases and cards are logged
+  to `handoffs/supervisor-cases.jsonl`. Session text a case line quotes (a name, a wait, a failure)
+  is stripped of `` ` $ " \ ``, so a line typed into a shell by mistake stays inert.
+- The case reaches the dispatcher as one tagged prompt (`Case <id> (<rule>): ...`) through the
+  gated prompt; its first case rides its command line, because a fresh agent reads `active` until
+  its first turn ends. **Paused, switched off or at its usage cap**, or a case it has not TAKEN
+  (acted on with a verb naming the case, `ask-owner` or `resolve`) 30 min after it was handed
+  over, goes **straight to the owner**: "Needs you", and an owner-wait push on the same ladder
+  as a reported wait (held at night; an R4 case is that wait itself, so it is not pushed twice). The morning push says what the night shift did
+  ("Overnight: 2 answered, 1 coached, 3 woken. 4 things wait on you").
+- **Verbs** (`scripts/wt-supervise.js`, Bearer auth, authority only, every one re-checked):
+  `sessions`, `cases`, `case <id>`, `tail <session> [n]`, `wake|coach|lead <session> "<text>"`,
+  `answer <session> "<text>" --undo "<how>"` (an answer for the owner must say how to reverse it),
+  `ask-owner <case> "<question>" [--propose <session> "<text>"]`, `resolve <case> "<what>"`. A typed
+  verb counts against the session's `actionsPerHour` and the dispatcher's own
+  `dispatcher.actionsPerHour` (30). No verb restarts, kills or changes config.
+- **Recommend first, then act (section 12).** Every class (`wake`, `coach`, `answer`, `lead`; `close`
+  and `spawn` arrive with phases 4 and 5) acts by default, because each can be undone; the owner
+  flips one to recommend with `supervisor.autonomy.<class>` or `POST /api/supervisor/autonomy`. In
+  recommend mode, and ALWAYS for a text asking for what only the owner decides (merging or pushing,
+  GitHub comments, deleting data, an install, spending money, anything outward-facing - matched
+  word by word and deliberately broad: a false positive costs only a card), the verb
+  makes a **card** instead: `POST /api/supervisor/cards/:id {decision: approve|dismiss}` types it
+  (through every gate) or drops it; each class's record (approved, dismissed, pending) is in
+  `GET /api/supervisor/state` (`cases`, `cards`, `dispatcher`, `autonomy`).
+- Routes (authority only, behind auth): `POST /api/supervisor/act`, `GET /api/supervisor/cases[/:id]`,
+  `POST /api/supervisor/cases/:id {action: resolve|ask-owner}`, `POST /api/supervisor/cards/:id`,
+  `POST /api/supervisor/pause {paused}`, `POST /api/supervisor/autonomy {class, mode}`,
+  `GET /api/supervisor/tail/:id`. The app's switches live in `handoffs/supervisor-settings.json`.
+- Config `supervisor.dispatcher`: `enabled` (false: every case goes to the owner), `cwd`,
+  `autoCommand` (default `claude --dangerously-skip-permissions`), `actionsPerHour`, `hungMin`,
+  `circleMin`. The companion's Supervisor entry, cards and switches are a follow-up.
+
 **Resume by work item, on any machine** — a session's brief and its hand-off are named after
 the SESSION; the work is named after its **work item** (`ado:25309`, `#413`). Whenever a
 session's work on an item ends — it is closed, it exits or crashes, it is found gone after a
