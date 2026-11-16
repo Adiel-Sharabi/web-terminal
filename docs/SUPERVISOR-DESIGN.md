@@ -304,6 +304,18 @@ The #351 reaper keeps running until this rule has proved itself. It is then reti
 **Where:** on the same machine, because a working folder exists only there, and only if R8
 allows.
 
+**As built (#470, `lib/replacement.js`):**
+- R7's fact is the agent's **process**, not the hook: `SessionEnd` fires on a deliberate exit
+  (`/exit`, Ctrl-C twice) and never on a crash (measured; `docs/findings/agents-codex.md`). Gone
+  after being seen, with no `SessionEnd` standing, is a death; with one, it is someone's choice
+  and is never replaced.
+- The summary of the last turns is the **dispatcher's `--note`** plus the last turns read
+  mechanically, not a `claude -p` call: the dispatcher already reads the tail with a model, and a
+  second model call would add no fact and an unverified output to the brief.
+- A job with no live session left (its session was killed) is not replaced: nothing on the
+  machine records its folder and conversation once the session is gone. A failed hand-off leaves
+  the old session open, so it is covered.
+
 ## 9. The dispatcher (L2)
 
 - **One session on Office**, named `web-terminal supervisor`, in its own working folder. L1

@@ -752,3 +752,26 @@ Pinned by `tests/api-error-detect.spec.js` (the real lines both ways; a real wor
 - `handoffs/check-in-skips.jsonl` (`WT_CHECKIN_SKIPS_FILE`): the gate that refused a session that passed the cheap pre-check, one line per change of reason and the same reason at most every 15 min (`lib/usage-log.js` shouldLogSkip, the hand-off skips' rule). A session filtered by the pre-check (asked this period, wait on you/done) gets no line: the check-in log already holds it. Nor do `not-stale` and `recent` (`skipWorthLogging`): they say "no reading yet", and with the wider pre-check they would be ~96 lines a day per idle session; the gates that REFUSED a session (cannot-tell, typing, menu, ...) are what explains a missed check-in.
 
 Pinned by `tests/check-in.spec.js` (each gate broken alone: live-unreported without a prior report, with stale work, under a you/done wait; repeats at 59/60, 119/120, 239/240 min, the cap, you/done/Esc/lost never; mutations "no repeat" and "no live-unreported" each killed) and `tests/check-in-routes.spec.js` (real server and worker: a stuck answer is asked again past `repeatMin` with log `n` 1 then 2; a self-wait cleared by a typed prompt with a Monitor running is asked as `live-unreported`; a transcript-less session logs one `cannot-tell` skip line across many scans).
+
+## An agent exit is told from a death by SessionEnd, and only a death is replaced (#470)
+
+**Measured 2026-11-16, claude 2.1.325**, a node-pty probe running `claude.exe` directly with a
+scratch `--settings` file whose `SessionEnd` hook was an http hook to a local listener:
+- `/exit` + CR: `SessionEnd`, reason `prompt_input_exit`, arrived ~0.8 s BEFORE the process exited
+  (so an http hook does get out).
+- Ctrl-C twice: the same (`prompt_input_exit`, ~0.8 s before exit).
+- `term.kill()` of the agent ITSELF (the probe's PTY child, so a hard kill): no hook at all. In
+  production `term.kill()` kills the shell, and #191 measured the orphaned agent's own shutdown
+  firing `SessionEnd`; either way the session is gone.
+
+So `SessionEnd` marks a **deliberate** exit, and a crash (or a kill of the agent) leaves **no hook**.
+#373 framed SessionEnd as "the agent died"; it is the opposite signal. The supervisor's R7 therefore
+reads the PROCESS: the agent's image (`lib/agents.js` `agentExit.process`, `claude.exe`) seen under
+the session's shell and now gone, with no `SessionEnd` standing on the brief (`agentEnded`, cleared by
+any later hook) = it died. Fails closed: never seen (an install running under `node`), a snapshot
+that cannot be read, or the exit hook not installed in the agent's settings = never judged dead.
+The worker fence half of #373 (cancel the worker's own `continue` / `/compact` writes after an exit)
+is still open; the server-side half is the gated prompt's `agent-gone` refusal.
+
+Pinned by `tests/supervisor-phase5.spec.js` (each gate mutated alone) and
+`tests/supervisor-replace-e2e.spec.js` (the process snapshot is a WT_TEST lever there).

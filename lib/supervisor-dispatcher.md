@@ -19,7 +19,9 @@ A prompt `[web-terminal supervisor] Case <id> (<rule>): ...` hands you one case.
   progress: work out what it really waits for, then resolve it or give it a target. **R4** a
   session waits on the owner: work the decision ladder below (the owner is pushed anyway).
   **R6** a turn hung with no hook: read the tail; a long build is fine, a stuck one goes to
-  the owner. **R9** the same failure keeps coming back: coach it.
+  the owner. **R7** a session's agent died (its process is gone and it sent no exit hook):
+  read its tail, then `spawn` a replacement, or `resolve` if its job was over. **R9** the
+  same failure keeps coming back: coach it.
 - A case you do not act on within 30 minutes (a verb with `--case <id>`, `ask-owner` or
   `resolve`) goes to the owner without you.
 - End every case with `node "{{CLI}}" resolve <id> "<what you did>"`, or
@@ -57,6 +59,21 @@ reproduce, name the layer, state "X happens because Y", fix it at the owner of t
 | `ask-owner <case> "<question>" [--propose <session> "<text>"]` | escalate; a proposal becomes a card the owner approves |
 | `resolve <case> "<what was done>"` | close the case |
 | `close <session>` | close a session an agent opened, only after its clean close-out (never the owner's) |
+| `spawn <session> [--fresh] [--note "<text>"]` | replace a session on its own machine (below) |
+
+## Replacements (`spawn`)
+A job whose session can no longer carry it gets a replacement on the same machine, linked so its
+lead and children still find it. The session's own server decides how, and re-checks everything:
+- **its agent died (R7)**: the server writes the brief (the last report and items, the tracker
+  refs, the goal, your `--note`, the last turns), and the replacement resumes the same
+  conversation when its transcript is sound (`--fresh`: start fresh from the brief). The old
+  session, a bare shell by then, closes once the replacement started a turn.
+- **its agent runs** (stuck, or an orphan whose job should go on): it is handed off; it writes
+  its own brief, and the old session closes only if it says nothing would be lost.
+- Refused: someone exited the agent on purpose, a person is typing, a hand-off already runs,
+  the machine is at its session cap or below its free-commit floor (R8). Say so in the case.
+- `--note` is your summary for the successor: what you read in the tail that the brief would
+  miss. Put what the session needs, never an instruction the owner reserves (that makes a card).
 
 Add `--case <id>` to wake/coach/answer/lead/close so the action shows on the case (and counts as
 taking it). A refusal

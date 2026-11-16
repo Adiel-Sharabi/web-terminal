@@ -430,6 +430,39 @@ hook token only). The rules are `lib/closeout.js`.
   done-and-idle), `close` (false: ask and mark, never close), `askAfterMin` (5), `answerMin` (60),
   `closeAfterMin` (15), `maxAsks` (3). The #351 reaper keeps running until R5 has proved itself.
 
+**The supervisor, phase 5: replacement sessions (#470)** — a job whose session can no longer
+carry it gets a **replacement** on the same machine (its working folder exists only there),
+linked through `replaces`, so its lead and its children still find it. The rules are
+`lib/replacement.js`.
+- **R7, a dead agent.** A session row carries `agentGone {seenAt, endedAt, reason}` when its
+  agent's process (`claude.exe`, the registry's `agentExit`) was seen under the session's shell
+  and is gone now. Claude's `SessionEnd` hook (now installed by `scripts/install-hooks.js`; re-run
+  it on each machine) fires on `/exit` and Ctrl-C twice, so `endedAt` set means **someone exited it
+  on purpose**: never replaced, never a case. Gone with no exit hook means it **died**: after
+  `supervisor.spawn.goneMin` (5) an R7 case goes to the dispatcher. Nothing is judged dead until
+  the agent was seen running (a reload re-learns it), nor while the exit hook is not installed.
+  The gated prompt refuses `agent-gone`: nothing is typed into the shell left behind.
+- **The dispatcher's `wt-supervise.js spawn <session> [--fresh] [--note "<text>"]`**
+  (`POST /api/supervisor/spawn`) asks the session's own server (`POST /api/sessions/:id/replace`),
+  which re-checks everything and picks the way:
+  - **the agent died**: the server writes the brief (`handoffs/handoff-<id>.md`: the last report
+    and items, the tracker refs, the goal, the dispatcher's note, the last turns). The replacement
+    **resumes the same conversation** (`--resume`) when its transcript's last line is sound, and
+    starts fresh from the brief otherwise (or with `--fresh`). Once it starts a turn, the old
+    session (a bare shell) is closed.
+  - **the agent runs** (a stuck job, an orphan whose work should go on): the supervisor starts a
+    hand-off (`trigger: "supervisor"`); the agent writes its own brief, and the old session closes
+    only on its clean verdict.
+  - Both are the #340 hand-off run, so every failure leaves the old session where it was. Refused:
+    a deliberate exit, a restart hold, a hand-off already running, a person typing, the dispatcher.
+- **R8**: never on a machine at its session cap (`maxSessions`) or below its free-commit floor
+  (`supervisor.spawn.commitFloorGb`, default 8, set per machine); a commit that cannot be read
+  refuses too.
+- `spawn` is undoable (the old transcript stays), so it acts by default;
+  `supervisor.autonomy.spawn: recommend` makes it a card, and a note asking for an owner-only
+  action always does. A replacement of an agent's session is an agent's session (R5 may close it);
+  one of the owner's stays the owner's.
+
 **Resume by work item, on any machine** — a session's brief and its hand-off are named after
 the SESSION; the work is named after its **work item** (`ado:25309`, `#413`). Whenever a
 session's work on an item ends — it is closed, it exits or crashes, it is found gone after a
