@@ -64,6 +64,7 @@ const waitTargetLib = require('./lib/wait-target');
 const journalLib = require('./lib/session-journal');
 const supervisorLib = require('./lib/supervisor');
 const replacementLib = require('./lib/replacement');
+const ansiLib = require('./lib/ansi');
 const { isWtHook } = require('./scripts/install-hooks');
 const supCases = require('./lib/supervisor-cases'); // #468 cases, verbs, cards
 const { SUPERVISOR_PROMPT_TAG } = require('./lib/user-turn'); // #468 the dispatcher's first prompt
@@ -9997,7 +9998,9 @@ app.ws('/ws/:id', (ws, req) => {
     try {
       const buf = Buffer.isBuffer(msg) ? msg : Buffer.from(msg);
       workerClient.sendPtyIn(id, buf);
-      _lastInputAt.set(id, Date.now()); // #345 - nobody is handed off mid-keystroke
+      // #345 - nobody is handed off mid-keystroke. #470 - a terminal's own replies (focus,
+      // cursor reports) are not a person typing: an attached viewer would hold every gate.
+      if (!ansiLib.onlyTerminalReports(buf.toString('utf8'))) _lastInputAt.set(id, Date.now());
     } catch {}
     // #311 - one line per submit: who sent it, never what. After every refusal above,
     // so a dropped frame is not counted as an operation.

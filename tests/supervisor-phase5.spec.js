@@ -13,6 +13,7 @@ const brief = require('../lib/session-brief');
 const safePrompt = require('../lib/safe-prompt');
 const journal = require('../lib/session-journal');
 const agents = require('../lib/agents');
+const ansi = require('../lib/ansi');
 const { EVENTS, patch, isWtHook } = require('../scripts/install-hooks');
 const { HANDOFF_PROMPT_TAG } = require('../lib/user-turn');
 
@@ -268,6 +269,17 @@ test.describe('#470 the hand-off run: the supervisor trigger, and a dead run\'s 
     expect(handoff.closeDecision(run, { ...idle, inputAt: T0 + 1 }, T0 + 2, cfg)).toEqual({ action: 'keep', reason: 'in-use' });
     expect(handoff.closeDecision({ ...run, dead: true }, { ...idle, agentGone: true, inputAt: T0 + 1 }, T0 + 2, cfg))
       .toEqual({ action: 'keep', reason: 'in-use' });
+  });
+  test('onlyTerminalReports: replies a terminal sends itself are not typing; anything a person sends is', () => {
+    const E = String.fromCodePoint(0x1b);
+    const B = String.fromCodePoint(0x07);
+    for (const r of [`${E}[I`, `${E}[O`, `${E}[12;40R`, `${E}[0n`, `${E}[?1;2c`, `${E}[>0;276;0c`,
+      `${E}]11;rgb:0000/0000/0000${B}`, `${E}]10;rgb:ffff/ffff/ffff${E}\\`, `${E}[O${E}[I`]) {
+      expect(ansi.onlyTerminalReports(r), JSON.stringify(r)).toBe(true);
+    }
+    for (const t of ['a', 'hello', '\r', `${E}`, `${E}[A`, `${E}[200~x${E}[201~`, `x${E}[I`, `${E}[Ix`, '', null]) {
+      expect(ansi.onlyTerminalReports(t), JSON.stringify(t)).toBe(false);
+    }
   });
   test('declinedStanding: a Cancel or Dismiss stands until a person types', () => {
     expect(handoff.declinedStanding({ handoffDeclinedAt: T0 })).toBe(true);
