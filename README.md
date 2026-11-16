@@ -304,10 +304,10 @@ Ctrl-C at an idle prompt clears, Backspace and the line-edit keys are followed; 
 anything it cannot follow count as a draft). The prompt is deferred and retried (the restart hold's "back" notice only until its timeout),
 and the refusal is logged as `draft`; a supervisor close is refused too. A draft nobody has typed
 into for the check-in's quiet period rides the session row as `composerDraft` (for clients) and
-shows under the Journal's **Needs you**: send it, or clear it (Ctrl-C at the idle prompt), and the session is reachable again. Esc Esc (or
+shows under the Journal's **Needs you** (`release` says how it ends): send it, or clear it (Ctrl-C at the idle prompt), and the session is reachable again. Esc Esc (or
 `/rewind`) opens Claude's Rewind picker, which can put an old prompt back in the box, and an Enter
 the server cannot see land (a slash command, a key it does not follow, a recalled prompt) may not
-have emptied it: in those cases the session stays held until Claude next reports a prompt sent.
+have emptied it: in those cases Ctrl-C does not release it (`release: "send"`), and the session stays held until Claude next reports a prompt sent.
 A plain shell (no agent with a composer) is not followed.
 
 **The supervisor, phase 1: facts and the journal (#466)** — the first part of a cluster-wide

@@ -108,6 +108,7 @@ test.describe('#479 an unsent draft holds the server\'s own prompts', () => {
       const row = await rowOf(id);
       expect(row.composerDraft, 'the row tells the owner a draft is waiting').toBeTruthy();
       expect(Number.isFinite(row.composerDraft.since)).toBe(true);
+      expect(row.composerDraft.release, 'text it follows: Ctrl-C clears it too').toBe('send-or-clear');
       // Nothing of ours reached the terminal.
       expect(await (await ctx.get(`/api/sessions/${id}/scrollback`)).text()).not.toContain(TAG);
 
@@ -146,7 +147,7 @@ test.describe('#479 an unsent draft holds the server\'s own prompts', () => {
       ws.send(CR);
       await sleep(1500);
       expect(await (await prompt(id, 'second')).json()).toEqual({ delivered: false, refused: 'draft' });
-      expect((await rowOf(id)).composerDraft, 'the row says it is held').toBeTruthy();
+      expect((await rowOf(id)).composerDraft?.release, 'the row says it is held, and only a sent prompt ends it').toBe('send');
       // The agent reports that CR submitted a prompt: the box is empty.
       const conv = crypto.randomUUID();
       expect(await hook(id, 'UserPromptSubmit', { session_id: conv, prompt: 'from the picker' })).toBe(200);
@@ -292,6 +293,24 @@ test.describe('#479 an unsent draft holds the server\'s own prompts', () => {
       const conv = crypto.randomUUID();
       expect(await hook(id, 'UserPromptSubmit', { session_id: conv, prompt: 'hello' })).toBe(200);
       await until(async () => (await draftOf(id)) === null, 'the late submit to end the doubt');
+    } finally { ws.close(); }
+  });
+
+  test('gate 5: a late submit report never erases keys typed after the Enter', async () => {
+    const id = await idleAgent();
+    const ws = await terminal(id);
+    try {
+      ws.send(`hello${CR}`); // no UserPromptSubmit yet: the worker reports it after 8 s
+      await sleep(300);
+      ws.send('next thing'); // typed before that report
+      await sleep(11000); // past the worker's 8 s submit check
+      const conv = crypto.randomUUID();
+      expect(await hook(id, 'UserPromptSubmit', { session_id: conv, prompt: 'hello' })).toBe(200);
+      expect(await hook(id, 'Stop', { session_id: conv })).toBe(200);
+      await until(async () => (await rowOf(id))?.status === 'idle', 'the session to go idle');
+      await sleep(1500);
+      expect(await draftOf(id), 'the words typed after the Enter are still in the box').toBeTruthy();
+      expect(await (await prompt(id, 'over it')).json()).toEqual({ delivered: false, refused: 'draft' });
     } finally { ws.close(); }
   });
 

@@ -348,6 +348,21 @@ test.describe('#479 composer draft - what a keystroke leaves in the box', () => 
     expect(applyInput(u, CTRL('c'), { idle: true })).toEqual(EMPTY);
   });
 
+  test('gate 5: keys typed after the Enter, before its unconfirmed report, are never erased by a late submit', () => {
+    // The worker's 8 s watch runs on through later keys: its report cannot vouch for them.
+    const typed = after([`hello${CR}`, 'next thing'], { idle: true });
+    expect(applyUnconfirmed(typed)).toEqual(UNKNOWN);
+    expect(hasDraft(applySubmitted(applyUnconfirmed(typed)))).toBe(true);
+    expect(applySubmitted(applyUnconfirmed(after(['hello', CR, 'x'], { idle: true })))).toEqual(UNKNOWN);
+    expect(applyUnconfirmed(UNKNOWN)).toEqual(UNKNOWN);
+    // A repeat report keeps the late-hook case open.
+    expect(applySubmitted(applyUnconfirmed(applyUnconfirmed(after([`hello${CR}`], { idle: true }))))).toEqual(EMPTY);
+    // An empty box after the Enter - also with an Esc pending - is the late-hook case.
+    expect(applySubmitted(applyUnconfirmed(after([`hello${CR}`, ESC])))).toEqual(EMPTY);
+    // An Esc right after an idle submit is an interrupt that may put the prompt back: a doubt.
+    expect(hasDraft(applySubmitted(applyUnconfirmed(after([`hello${CR}`, ESC], { idle: true }))))).toBe(true);
+  });
+
   test('gate 4: the server\'s own submit arms the same interrupt rule as a person\'s', () => {
     const st = applyServerSubmit();
     expect(hasDraft(st)).toBe(false);
@@ -404,14 +419,17 @@ test.describe('#479 every writer of a server prompt reads it', () => {
   test('the Journal: a session holding a left draft is under Needs you, and its node says so', () => {
     const id = (n) => `00000000-0000-4000-8000-00000000000${n}`;
     const g = sup.buildGraph([{ name: 'alpha', ok: true, sessions: [
-      { id: id(1), status: 'idle', clients: 0, brief: { wait: { on: 'self', what: 'x', at: T0 } }, composerDraft: { since: T0 - 20 * MIN } },
+      { id: id(1), status: 'idle', clients: 0, brief: { wait: { on: 'self', what: 'x', at: T0 } }, composerDraft: { since: T0 - 20 * MIN, release: 'send' } },
       { id: id(2), status: 'idle', clients: 0, brief: { wait: { on: 'self', what: 'x', at: T0 } } },
       { id: id(3), status: 'idle', clients: 0, brief: { wait: { on: 'you', what: 'pick', at: T0 } }, composerDraft: { since: T0 } },
     ] }], T0);
     const st = sup.stateOf({ graph: g, verdicts: {}, journal: [], cfg: sup.supervisorConfig(null), now: T0 });
     expect(st.needsYou).toEqual([id(3), id(1)]); // once each
     expect(st.live).toEqual([id(2)]);
-    expect(st.sessions.find((n) => n.id === id(1)).composerDraft).toEqual({ since: T0 - 20 * MIN });
+    expect(st.sessions.find((n) => n.id === id(1)).composerDraft).toEqual({ since: T0 - 20 * MIN, release: 'send' });
+    // Gate 5: a peer too old to say what ends it says nothing.
+    expect(st.sessions.find((n) => n.id === id(3)).composerDraft).toEqual({ since: T0, release: null });
+    expect(sup.nodeOf({ id: id(4), composerDraft: { since: T0, release: 'send-or-clear' } }, 'alpha').composerDraft.release).toBe('send-or-clear');
     expect(st.sessions.find((n) => n.id === id(2)).composerDraft).toBeNull();
     // A peer's malformed field is dropped, never trusted.
     expect(sup.nodeOf({ id: id(4), composerDraft: { since: 'x' } }, 'alpha').composerDraft).toBeNull();
