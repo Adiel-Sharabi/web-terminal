@@ -12,6 +12,7 @@
 //   node scripts/wt-supervise.js ask-owner <case> "<question>" [--propose <session> "<text>"]
 //   node scripts/wt-supervise.js resolve <case> "<what was done>"
 //   node scripts/wt-supervise.js close <session> [--case <case>]   (#469: an agent's, after a clean close-out)
+//   node scripts/wt-supervise.js spawn <session> [--case <case>] [--fresh] [--note "<text>"]   (#470: a replacement)
 //
 // A session is named by its id or the first 8 characters of it. --server <url|name> talks to
 // another server than this machine's (scripts/wt-api.js). Exit: 0 ok, 1 refused, 2 error.
@@ -19,7 +20,7 @@
 const api = require('./wt-api');
 
 const args = process.argv.slice(2);
-const VALUE_FLAGS = ['--case', '--undo', '--propose', '--server'];
+const VALUE_FLAGS = ['--case', '--undo', '--propose', '--server', '--note'];
 const flag = (name) => { const i = args.indexOf(name); return i < 0 ? undefined : args[i + 1]; };
 const positional = args.filter((a, i) => !a.startsWith('--') && !(i > 0 && VALUE_FLAGS.includes(args[i - 1])));
 const [cmd, a1, a2] = positional;
@@ -28,7 +29,7 @@ const t = () => api.target(flag('--server'));
 function usage() {
   console.error('usage: wt-supervise.js sessions | cases | case <id> | tail <session> [n] | wake|coach|lead <session> "<text>" [--case <id>]'
     + ' | answer <session> "<text>" --undo "<how>" | ask-owner <case> "<question>" [--propose <session> "<text>"] | resolve <case> "<what>"'
-    + ' | close <session> [--case <id>]');
+    + ' | close <session> [--case <id>] | spawn <session> [--case <id>] [--fresh] [--note "<text>"]');
   process.exit(2);
 }
 
@@ -64,6 +65,8 @@ async function main() {
     const pi = args.indexOf('--propose');
     const propose = pi >= 0 ? { session: args[pi + 1], text: args[pi + 2] } : undefined;
     r = await api.call(t(), 'POST', `/api/supervisor/cases/${encodeURIComponent(a1)}`, { action: 'ask-owner', question: a2, propose });
+  } else if (cmd === 'spawn') {
+    r = await api.call(t(), 'POST', '/api/supervisor/spawn', { session: a1, case: flag('--case'), note: flag('--note'), fresh: args.includes('--fresh') ? true : undefined });
   } else if (cmd === 'close') {
     r = await api.call(t(), 'POST', '/api/supervisor/close', { session: a1, case: flag('--case') });
   } else if (cmd === 'resolve') {

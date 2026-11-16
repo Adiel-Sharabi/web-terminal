@@ -52,6 +52,12 @@ const EVENTS = [
   'Notification',
   'Stop',
   'PreCompact',
+  // #470 (the hook half of #373) - the agent exiting ON PURPOSE (`/exit`, Ctrl-C twice: reason
+  // `prompt_input_exit`, measured on claude 2.1.325 to arrive ~0.8 s before the process exits).
+  // The worker's #316 menu detector already reads it (noteMenuHook); the server keeps it on the
+  // brief (lib/session-brief.js foldHook) so the supervisor's R7 never takes a deliberate exit
+  // for a dead agent (lib/replacement.js). It changes no status.
+  'SessionEnd',
 ];
 
 // `$WT_SESSION_ID` is expanded by Claude Code from the env the PTY was spawned with, so
