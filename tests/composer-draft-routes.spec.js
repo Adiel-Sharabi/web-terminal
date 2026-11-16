@@ -188,4 +188,106 @@ test.describe('#479 an unsent draft holds the server\'s own prompts', () => {
       expect((await r.json()).why).toBe('draft');
     } finally { ws.close(); }
   });
+  // --- gate round 3 -------------------------------------------------------------------------
+  const draftOf = async (id) => (await rowOf(id))?.composerDraft ?? null;
+
+  test('a permission answered: its first key goes to the selector, text typed while the tool runs is a draft', async () => {
+    const id = await idleAgent();
+    const conv = crypto.randomUUID();
+    expect(await hook(id, 'UserPromptSubmit', { session_id: conv, prompt: 'lint it' })).toBe(200);
+    expect(await hook(id, 'PreToolUse', { session_id: conv, tool_name: 'Bash', tool_input: { command: 'npm run lint' } })).toBe(200);
+    expect(await hook(id, 'PermissionRequest', { session_id: conv, tool_name: 'Bash' })).toBe(200);
+    await until(async () => (await rowOf(id))?.status === 'waiting', 'the session to wait on the permission');
+    const ws = await terminal(id);
+    try {
+      ws.send('1'); // the approval: no hook fires, the session stays waiting while the tool runs
+      await sleep(1500);
+      expect(await draftOf(id), "the answer is the selector's, not a draft").toBeNull();
+      ws.send('next, fix the lint'); // the person types on while the tool runs, and leaves
+      await sleep(1500);
+      expect((await rowOf(id)).status).toBe('waiting');
+      expect(await draftOf(id), 'text typed after the answer is a draft').toBeTruthy();
+    } finally { ws.close(); }
+  });
+
+  test('each waiting period\'s first key is its answer: a second permission is answered the same way', async () => {
+    const id = await idleAgent();
+    const conv = crypto.randomUUID();
+    const ask = async () => {
+      expect(await hook(id, 'PreToolUse', { session_id: conv, tool_name: 'Bash', tool_input: { command: 'npm test' } })).toBe(200);
+      expect(await hook(id, 'PermissionRequest', { session_id: conv, tool_name: 'Bash' })).toBe(200);
+      await until(async () => (await rowOf(id))?.status === 'waiting', 'the session to wait on the permission');
+    };
+    expect(await hook(id, 'UserPromptSubmit', { session_id: conv, prompt: 'test it' })).toBe(200);
+    await ask();
+    const ws = await terminal(id);
+    try {
+      ws.send('1');
+      await sleep(500);
+      expect(await hook(id, 'PostToolUse', { session_id: conv, tool_name: 'Bash' })).toBe(200);
+      await until(async () => (await rowOf(id))?.status === 'working', 'the tool to finish');
+      await ask();
+      ws.send('1'); // the second approval, in a new waiting period
+      await sleep(1500);
+      expect(await draftOf(id), 'both answers went to their selectors').toBeNull();
+    } finally { ws.close(); }
+  });
+
+  test('a plain shell has no composer: a command and Enter leave no draft', async () => {
+    const r = await ctx.post('/api/sessions', { data: { name: `draft-shell-${crypto.randomUUID().slice(0, 8)}` } });
+    const id = (await r.json()).id;
+    made.push(id);
+    const ws = await terminal(id);
+    try {
+      ws.send(`ls${CR}`);
+      await sleep(300);
+      ws.send('echo half');
+      await sleep(1500);
+      expect(await draftOf(id), 'no agent composer, so nothing is folded').toBeNull();
+    } finally { ws.close(); }
+  });
+
+  test('a prompt arriving while the agent works (a nested claude -p) does not end a picker', async () => {
+    const id = await idleAgent();
+    const ws = await terminal(id);
+    try {
+      ws.send(ESC); await sleep(100); ws.send(ESC); await sleep(100); ws.send(CR); // Rewind, a confirm
+      await sleep(1500);
+      expect(await draftOf(id)).toBeTruthy();
+      const conv = crypto.randomUUID();
+      expect(await hook(id, 'PreToolUse', { session_id: conv, tool_name: 'Bash', tool_input: { command: 'claude -p x' } })).toBe(200);
+      await until(async () => (await rowOf(id))?.status === 'working', 'the session to work');
+      expect(await hook(id, 'UserPromptSubmit', { session_id: crypto.randomUUID(), prompt: 'nested' })).toBe(200);
+      await sleep(1500);
+      expect(await draftOf(id), "a submit from another process is not this composer's").toBeTruthy();
+      expect(await hook(id, 'Stop', { session_id: conv })).toBe(200);
+      await until(async () => (await rowOf(id))?.status === 'idle', 'the session to go idle');
+      expect(await hook(id, 'UserPromptSubmit', { session_id: conv, prompt: 'from the picker' })).toBe(200);
+      await until(async () => (await draftOf(id)) === null, "the picker to end on the idle session's submit");
+    } finally { ws.close(); }
+  });
+
+  test('/clear: its SessionStart ends the picker its CR left', async () => {
+    const id = await idleAgent();
+    const ws = await terminal(id);
+    try {
+      ws.send(`/clear${CR}`); // a / line: no UserPromptSubmit follows
+      await sleep(1500);
+      expect(await draftOf(id)).toBeTruthy();
+      expect(await hook(id, 'SessionStart', { session_id: crypto.randomUUID(), source: 'clear' })).toBe(200);
+      await until(async () => (await draftOf(id)) === null, 'the picker to end on SessionStart clear');
+    } finally { ws.close(); }
+  });
+
+  test('an Enter that started no turn (#179 submitUnconfirmed) leaves the words a draft', async () => {
+    const id = await idleAgent();
+    const ws = await terminal(id);
+    try {
+      ws.send(`hello${CR}`); // no UserPromptSubmit follows: the worker reports it after 8 s
+      await sleep(1500);
+      expect(await draftOf(id), 'a submit is assumed at first').toBeNull();
+      await until(async () => (await draftOf(id)) !== null, 'the unconfirmed submit to read as a draft', 20000);
+      expect(await (await prompt(id, 'over it')).json()).toEqual({ delivered: false, refused: 'draft' });
+    } finally { ws.close(); }
+  });
 });

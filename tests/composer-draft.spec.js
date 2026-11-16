@@ -1,10 +1,11 @@
 // @ts-check
 // #479 - the composer-draft rule (lib/composer-draft.js): is a person's unsent text sitting
-// in the agent's input box? Every key's effect here is the one measured on claude 2.1.325
-// (scripts/rig/probe-draft-keys.js). The NEGATIVE cases carry the weight: a false "empty"
-// lets the server's prompt submit a person's draft with it, which is the bug.
+// in the agent's input box? A key's effect asserted as a plain edit is the one measured on
+// claude 2.1.325 (scripts/rig/probe-draft-keys.js); a key that was NOT measured is asserted
+// only to fail closed (UNKNOWN, a draft). The NEGATIVE cases carry the weight: a false
+// "empty" lets the server's prompt submit a person's draft with it, which is the bug.
 const { test, expect } = require('@playwright/test');
-const { EMPTY, UNKNOWN, PICKER, PICKER_SENT, TEXT_MAX, hasDraft, applyInput, applySubmitted } = require('../lib/composer-draft');
+const { EMPTY, UNKNOWN, PICKER, PICKER_SENT, TEXT_MAX, hasDraft, applyInput, applySubmitted, applyStopped, applyUnconfirmed } = require('../lib/composer-draft');
 
 const ESC = String.fromCharCode(0x1b);
 const CR = String.fromCharCode(13);
@@ -61,7 +62,6 @@ test.describe('#479 composer draft - what a keystroke leaves in the box', () => 
 
   test('Backspace deletes one character before the cursor; to empty is no draft', () => {
     expect(draft(['abc', BS, BS, BS])).toBe(false);
-    expect(draft(['abc', BS8, BS8, BS8])).toBe(false);
     // Negative: one short is still a draft.
     expect(draft(['abc', BS, BS])).toBe(true);
     // Backspace on an empty box does nothing (and is not a draft).
@@ -280,6 +280,55 @@ test.describe('#479 composer draft - what a keystroke leaves in the box', () => 
     expect(hasDraft(applySubmitted(after([UP, BS, CR])))).toBe(false);
     // A draft too long to follow is a draft.
     expect(after(['x'.repeat(TEXT_MAX + 1)])).toEqual(UNKNOWN);
+  });
+
+  test('gate 3: keys that were never measured fail closed', () => {
+    // 0x08 (Ctrl-Backspace in xterm.js): only 0x7f was measured. An empty box stays empty.
+    expect(after(['abc', BS8])).toEqual(UNKNOWN);
+    expect(draft([BS8])).toBe(false);
+    // A mouse click (not the wheel) may move the cursor or pick a menu row.
+    expect(after(['ab', CSI('<0;10;5M')])).toEqual(UNKNOWN);
+    expect(after(['ab', CSI('<0;10;5m')])).toEqual(UNKNOWN);
+    expect(draft([CSI('<0;10;5M')])).toBe(false);
+    expect(after(['ab', CSI('<65;10;5M')])).toEqual({ text: 'ab', cur: 2 }); // the wheel scrolls
+    // A paste holding a TAB (a completion) or a CR (Windows line ends).
+    expect(after([PASTE(`a${TAB}b`)])).toEqual(UNKNOWN);
+    expect(after([PASTE(`a${CR}${LF}b`)])).toEqual(UNKNOWN);
+    expect(after([PASTE(`a${LF}b`)])).toEqual({ text: `a${LF}b`, cur: 3 }); // LF alone was measured
+    // Ctrl-W over spaces with no word before them.
+    expect(after(['   ', CTRL('w')])).toEqual(UNKNOWN);
+    expect(after(['ab ', LEFT, LEFT, LEFT, CTRL('w')])).toEqual({ text: 'ab ', cur: 0 }); // nothing before the cursor
+    // An idle Ctrl-C with a suggestion menu perhaps open: an @-mention, a / line.
+    expect(after(['see @src', CTRL('c')], { idle: true })).toEqual(UNKNOWN);
+    expect(after(['/mod', CTRL('c')], { idle: true })).toEqual(UNKNOWN);
+    expect(after(['plain', CTRL('c')], { idle: true })).toEqual(EMPTY); // measured
+  });
+
+  test('gate 3: right after a submit from an idle box, Esc or Ctrl-C may put the prompt back', () => {
+    const sent = after([`hello${CR}`], { idle: true });
+    expect(hasDraft(sent)).toBe(false);
+    expect(sent.justSent).toBe(true);
+    // The interrupt: unknown (Claude may restore a prompt interrupted before any output).
+    expect(applyInput(sent, ESC, { idle: true })).toEqual({ text: null, cur: null, esc: true });
+    expect(applyInput(sent, CTRL('c'), { idle: true })).toEqual(UNKNOWN);
+    expect(after([`hello${CR}${CTRL('c')}`], { idle: true })).toEqual(UNKNOWN);
+    // A terminal's reply is no key: still just sent.
+    expect(applyInput(sent, CSI('I'), { idle: true }).justSent).toBe(true);
+    // Any other key ends it; so does the turn's Stop.
+    expect(applyInput(applyInput(sent, 'x', { idle: true }), BS, { idle: true })).toEqual(EMPTY);
+    expect(applyStopped(sent)).toEqual(EMPTY);
+    expect(applyInput(applyStopped(sent), CTRL('c'), { idle: true })).toEqual(EMPTY);
+    expect(applyStopped(EMPTY)).toEqual(EMPTY);
+    expect(applyStopped(UNKNOWN)).toEqual(UNKNOWN);
+    // A CR mid-turn queues the message (measured: Esc after it leaves the box empty).
+    expect(after([`hello${CR}`, ESC])).toEqual({ text: '', cur: 0, esc: true });
+  });
+
+  test('gate 3: an Enter that started no turn (#179 submitUnconfirmed) leaves the words in doubt', () => {
+    expect(applyUnconfirmed(after([`hello${CR}`], { idle: true }))).toEqual(UNKNOWN);
+    expect(applyUnconfirmed(undefined)).toEqual(UNKNOWN);
+    expect(applyUnconfirmed(PICKER)).toEqual(PICKER); // a picker stays one
+    expect(applyUnconfirmed(PICKER_SENT)).toEqual(PICKER_SENT);
   });
 
   test('a corrupt or foreign state is read as no record, never thrown on', () => {
