@@ -309,6 +309,13 @@ allows.
   (`/exit`, Ctrl-C twice) and never on a crash (measured; `docs/findings/agents-codex.md`). Gone
   after being seen, with no `SessionEnd` standing, is a death; with one, it is someone's choice
   and is never replaced.
+- Three readings, never two: **running** (seen in the newest snapshot), **gone** (absent from a
+  snapshot newer than the last sighting under the same shell and than the last hook, with the
+  exit hook installed), **unknown** (anything else). Only running is handed off (a wrap-up typed
+  into a bare shell is a command), only gone is replaced as dead, and a dead run's old shell is
+  closed only while the agent is still gone: one found running there again is kept.
+- A session that already has a successor, whose last run ended kept or failed, or whose hand-off
+  a person cancelled (until someone types) is refused: one job, one successor.
 - The summary of the last turns is the **dispatcher's `--note`** plus the last turns read
   mechanically, not a `claude -p` call: the dispatcher already reads the tail with a model, and a
   second model call would add no fact and an unverified output to the brief.

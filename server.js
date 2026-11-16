@@ -2837,6 +2837,7 @@ function workItemKeyOr400(req, res) {
 function foldBriefHook(id, event, body) {
   const prev = getBriefEntry(id);
   const now = Date.now();
+  rememberBounded(_lastHookAt, id, now); // #470 - a hook is proof of life: no older snapshot outvotes it
   // #443 - then the check-in (delivery, and its answer at that turn's Stop), on the SAME
   // clock, after the brief: it reads this hook's turnAt, stoppedAt and reported wait.
   const next = checkInLib.noteHook(briefLib.foldHook(prev, event, body, now), event, body, now);
@@ -3221,10 +3222,13 @@ async function closeHandedOff(id, run) {
   // (lib/handoff.js closeDecision). The verdict is posted from INSIDE the wrap-up turn,
   // so "the successor is up" alone would kill it mid-turn (#191 never measured that).
   const e = getBriefEntry(id) || {};
-  // #470 - a dead agent's run closes the shell it left while the agent is still gone.
-  const gone = run.dead === true ? sessionAgentGone(old) : null;
+  // #470 - a dead agent's run closes the shell it left only while the agent is still gone,
+  // and keeps it when an agent runs there again. Keystrokes after the verdict keep any run.
+  const st = run.dead === true ? sessionAgentState(old) : null;
   const d = handoffLib.closeDecision(run, { status: old.status, turnAt: e.turnAt, stoppedAt: e.stoppedAt,
-    agentGone: Boolean(gone && !Number.isFinite(gone.endedAt)) }, Date.now(), handoffCfg());
+    inputAt: _lastInputAt.get(id),
+    agentGone: Boolean(st && st.state === 'gone' && st.gone && !Number.isFinite(st.gone.endedAt)),
+    agentRunning: Boolean(st && st.state === 'running') }, Date.now(), handoffCfg());
   if (d.action === 'wait') return;
   if (d.action === 'keep') {
     if (swapHandoffRun(id, run, handoffLib.transition(run, 'kept', Date.now(), { reason: d.reason }))) {
@@ -4390,7 +4394,8 @@ function supervisorRowFields(s) {
 // Gone after being seen is a death unless the agent's exit hook (SessionEnd) stands on the brief
 // - and only while that hook is installed, or every deliberate exit would read as a death. The
 // rule is lib/replacement.js agentGoneField; this is the I/O.
-const _agentSeen = new Map(); // session id -> epoch ms it was last seen running
+const _agentSeen = new Map(); // session id -> { pid, at }: the shell it was seen under, and that snapshot's time
+const _lastHookAt = new Map(); // session id -> epoch ms of its last hook on this server (foldBriefHook)
 const _agentFoundForTests = new Map(); // WT_TEST only (POST /api/test/agent-process): id -> true | false
 const _exitHookCache = new Map(); // settings path -> { checkedAt, mtimeMs, value }
 /** Is [policy]'s exit hook installed for web-terminal (scripts/install-hooks.js) in the agent's
@@ -4413,28 +4418,46 @@ function agentExitHooked(policy) {
   _exitHookCache.set(file, e);
   return e.value;
 }
-/** The `agentGone` field for worker row [s], or null (running, never seen, cannot tell). */
-function sessionAgentGone(s) {
+/** Remember [id] in a bounded insertion-ordered map: re-inserted last, the oldest dropped. */
+function rememberBounded(map, id, value) {
+  map.delete(id);
+  map.set(id, value);
+  if (map.size > 500) map.delete(map.keys().next().value);
+}
+/** What this server can say about worker row [s]'s agent: `{state: running|gone|unknown, gone}`
+ *  (lib/replacement.js agentState). A sighting counts only for the shell it was made under, and
+ *  is stamped with its snapshot's time, so an older snapshot never reads as a death. */
+function sessionAgentState(s) {
+  const unknown = { state: 'unknown', gone: null };
   try {
     const policy = agentsLib.agentExitPolicy(s && s.agent);
-    if (!policy || !s.id) return null;
+    if (!policy || !s.id) return unknown;
     let found = null;
-    if (process.env.WT_TEST === '1' && _agentFoundForTests.has(s.id)) found = _agentFoundForTests.get(s.id);
-    else if (Number.isFinite(s.pid) && process.platform === 'win32') {
-      const procs = processTree.snapshotNoWait();
-      found = procs ? Boolean(processTree.newestDescendantNamed(procs, s.pid, policy.process)) : null;
+    let snapAt = null;
+    if (process.env.WT_TEST === '1' && _agentFoundForTests.has(s.id)) {
+      found = _agentFoundForTests.get(s.id);
+      snapAt = Date.now();
+    } else if (Number.isFinite(s.pid) && process.platform === 'win32') {
+      const snap = processTree.snapshotNoWaitAt();
+      if (snap) {
+        found = Boolean(processTree.newestDescendantNamed(snap.procs, s.pid, policy.process));
+        snapAt = snap.at;
+      }
     }
+    const prev = _agentSeen.get(s.id);
+    const seenAt = prev && prev.pid === s.pid ? prev.at : null;
     if (found === true) {
-      _agentSeen.delete(s.id); // re-inserted last: the oldest sighting is the one dropped
-      _agentSeen.set(s.id, Date.now());
-      if (_agentSeen.size > 500) _agentSeen.delete(_agentSeen.keys().next().value);
-      return null;
+      if (!(Number.isFinite(seenAt) && seenAt >= snapAt)) rememberBounded(_agentSeen, s.id, { pid: s.pid, at: snapAt });
+      return { state: 'running', gone: null };
     }
-    if (!agentExitHooked(policy)) return null;
     const ended = (getBriefEntry(s.id) || {}).agentEnded || null;
-    return replacementLib.agentGoneField({ found, seenAt: _agentSeen.has(s.id) ? _agentSeen.get(s.id) : null,
+    return replacementLib.agentState({ found, snapAt, seenAt, hookAt: _lastHookAt.get(s.id), hooked: agentExitHooked(policy),
       endedAt: ended && ended.at, endReason: ended && ended.reason });
-  } catch { return null; }
+  } catch { return unknown; }
+}
+/** The `agentGone` field for worker row [s], or null (running, never seen, cannot tell). */
+function sessionAgentGone(s) {
+  return sessionAgentState(s).gone;
 }
 const BG_TASKS_FIRST_READ = 2 * 1024 * 1024;
 // The bytes just before the read offset, re-checked on the next read: if they changed, the
@@ -8140,8 +8163,16 @@ async function replaceSession(id, { note = null, fresh = false, by = null } = {}
     const { sessions } = await workerClient.rpc('listSessions');
     if (!sessions.some((x) => x.id === id)) return { status: 404, json: { error: 'session not found' } };
     const cur = await workerClient.rpc('getSession', { id });
-    const gone = sessionAgentGone(cur);
-    const m = replacementLib.replaceMode({ gone, hold: Boolean(_maint.hold), handoffActive: handoffLib.isActive((getBriefEntry(id) || {}).handoff),
+    const agent = sessionAgentState(cur);
+    const gone = agent.gone;
+    const entry = getBriefEntry(id) || {};
+    const last = entry.handoff || null;
+    // Already handed off: its last run ended kept or failed (nobody typed since), or a successor
+    // it made still runs. A second replacement would make a second successor for one job.
+    const handedOff = checkInLib.handoffBlock(entry) === 'handed-off'
+      || Boolean(last && last.successorId && sessions.some((x) => x.id === last.successorId));
+    const m = replacementLib.replaceMode({ agent, hold: Boolean(_maint.hold), handoffActive: handoffLib.isActive(entry.handoff),
+      handedOff, declined: handoffLib.declinedStanding(entry),
       typing: checkInLib.typedRecently(_lastInputAt.get(id), CHECKIN_STARTED_AT, Date.now(), checkInCfg().typingQuietMin),
       dispatcher: isDispatcherSession(id) });
     if (m.why) return refuse(m.why);
@@ -8158,7 +8189,11 @@ async function replaceSession(id, { note = null, fresh = false, by = null } = {}
     }
     // Dead: the supervisor writes the brief. The slow reads first...
     const tpath = await resolveSessionTranscriptPath(id).catch(() => null);
-    const resumable = !fresh && Boolean(cur.claudeSessionId) && replacementLib.transcriptSound(readFileTail(tpath, 1024 * 1024));
+    // Resumed only when the transcript read IS that conversation's: a path resolved to another
+    // file would put the successor on someone else's history.
+    const resumable = !fresh && Boolean(cur.claudeSessionId) && Boolean(tpath)
+      && agentsLib.conversationIdFromPath(cur.agent, tpath) === cur.claudeSessionId
+      && replacementLib.transcriptSound(readFileTail(tpath, 1024 * 1024));
     let tail = [];
     try {
       const page = await readTranscriptPage(id, null, 8);
@@ -8168,11 +8203,14 @@ async function replaceSession(id, { note = null, fresh = false, by = null } = {}
     const e = getBriefEntry(id) || {};
     const text = replacementLib.briefText({ old: { id, name: cur.name, cwd: cur.cwd, conversationId: cur.claudeSessionId || null },
       reported: e.reported, touches: e.touches, goal: (spawnStore.field(id) || {}).goal || null, tail, gone, note, resumed: resumable, now });
+    // The successor's first prompt must fit (either way: the resume can still fall back to fresh)
+    // before anything starts, or the run would fail only after the brief and the spawn.
+    const briefFile = path.join(HANDOFF_DIR, handoffLib.briefFileName(id));
+    if ([true, false].some((resumed) => !replacementLib.replacementPrompt({ briefFile, oldName: cur.name, resumed }))) return refuse('prompt-too-long');
     // ...then the last look, with nothing awaited from here to the run: no run started meanwhile.
     if (handoffLib.isActive((getBriefEntry(id) || {}).handoff)) return refuse('in-progress');
     fs.mkdirSync(HANDOFF_DIR, { recursive: true });
     pruneHandoffBriefs();
-    const briefFile = path.join(HANDOFF_DIR, handoffLib.briefFileName(id));
     fs.writeFileSync(briefFile, text);
     const run = { ...handoffLib.startRun(now, briefFile, 'supervisor'), state: 'spawning', at: now,
       verdict: { canClose: true, why: 'its agent died; the supervisor wrote the brief' }, verdictAt: now,
@@ -8239,11 +8277,18 @@ app.post('/api/supervisor/spawn', express.json({ limit: '8kb' }), async (req, re
   }
   const now = Date.now();
   _disp.verbs = _disp.verbs.filter((t) => now - t < 60 * 60 * 1000);
-  if (_disp.verbs.length >= dcfg.actionsPerHour) return res.status(429).json({ replaced: false, refused: 'budget', why: 'the hourly action budget is spent' });
-  _disp.verbs.push(now); // reserved before the await; a refusal gives it back
+  const mine = (_sup.acts[n.id] || []).filter((t) => now - t < 60 * 60 * 1000);
+  if (_disp.verbs.length >= dcfg.actionsPerHour || mine.length >= supervisorCfg().actionsPerHour) {
+    return res.status(429).json({ replaced: false, refused: 'budget', why: 'the hourly action budget is spent (per session, or the dispatcher total)' });
+  }
+  // Reserved before the await, so two verbs at once cannot both pass; a refusal gives it back.
+  const acts = (_sup.acts[n.id] = mine);
+  _disp.verbs.push(now);
+  acts.push(now);
   const d = await supervisorReplace({ id: n.id, server: n.server, note: v.note, fresh });
   if (!(d.replaced || d.uncertain)) {
-    const i = _disp.verbs.lastIndexOf(now); if (i >= 0) _disp.verbs.splice(i, 1);
+    const drop = (arr) => { const i = arr ? arr.lastIndexOf(now) : -1; if (i >= 0) arr.splice(i, 1); };
+    drop(_disp.verbs); drop(_sup.acts[n.id]);
     return res.status(409).json({ replaced: false, refused: d.why });
   }
   take();

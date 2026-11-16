@@ -166,6 +166,18 @@ test.describe.serial('#470 replacement sessions', () => {
     await hook(H, { hook_event_name: 'Stop', session_id: conv });
     await until(async () => (await row(H))?.status === 'idle', 'idle');
     await inScan(H);
+    // Never seen running: no wrap-up is typed into what may be a bare shell.
+    const unseen = await a.post('/api/supervisor/spawn', { data: { session: H } });
+    expect(unseen.status()).toBe(409);
+    expect((await unseen.json()).refused).toBe('agent-unknown');
+    await agentProcess(H, true);
+    // Recommend mode alone (a note with no owner-only word) makes a card and starts nothing.
+    expect((await a.post('/api/supervisor/autonomy', { data: { class: 'spawn', mode: 'recommend' } })).ok()).toBe(true);
+    const rec = await a.post('/api/supervisor/spawn', { data: { session: H, note: 'carry on from the last report' } });
+    expect(rec.status(), await rec.text()).toBe(200);
+    expect(await rec.json()).toMatchObject({ replaced: false, why: 'spawn is in recommend mode' });
+    expect((await row(H)).handoff?.run ?? null).toBeNull();
+    expect((await a.post('/api/supervisor/autonomy', { data: { class: 'spawn', mode: 'act' } })).ok()).toBe(true);
     const r = await a.post('/api/supervisor/spawn', { data: { session: H } });
     expect(r.status(), await r.text()).toBe(200);
     expect(await r.json()).toMatchObject({ replaced: true, mode: 'handoff' });
@@ -177,10 +189,15 @@ test.describe.serial('#470 replacement sessions', () => {
     expect(again.status()).toBe(409);
     expect((await again.json()).refused).toBe('in-progress');
     expect((await a.delete(`/api/sessions/${H}/handoff`)).ok()).toBe(true);
+    // A person's Cancel stands for the supervisor too, until someone types.
+    const declined = await a.post('/api/supervisor/spawn', { data: { session: H } });
+    expect(declined.status()).toBe(409);
+    expect((await declined.json()).refused).toBe('declined');
   });
 
   test('R8: below the free-commit floor, nothing is spawned', async () => {
     const F = await open('r8-floor');
+    await agentProcess(F, true); // seen running: the capacity gate is the one that refuses
     await inScan(F);
     config({ spawn: { commitFloorGb: 1024 } });
     await sleep(5500); // the live config is re-read every 5 s

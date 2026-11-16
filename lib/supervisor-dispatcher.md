@@ -68,10 +68,12 @@ lead and children still find it. The session's own server decides how, and re-ch
   refs, the goal, your `--note`, the last turns), and the replacement resumes the same
   conversation when its transcript is sound (`--fresh`: start fresh from the brief). The old
   session, a bare shell by then, closes once the replacement started a turn.
-- **its agent runs** (stuck, or an orphan whose job should go on): it is handed off; it writes
-  its own brief, and the old session closes only if it says nothing would be lost.
-- Refused: someone exited the agent on purpose, a person is typing, a hand-off already runs,
-  the machine is at its session cap or below its free-commit floor (R8). Say so in the case.
+- **its agent is seen running** (stuck, or an orphan whose job should go on): it is handed off;
+  it writes its own brief, and the old session closes only if it says nothing would be lost.
+- Refused: someone exited the agent on purpose, its agent is neither seen running nor proven dead
+  (`agent-unknown`), a person is typing, a hand-off already runs, it already has a successor or a
+  person cancelled its hand-off, the machine is at its session cap or below its free-commit floor
+  (R8). Say so in the case.
 - `--note` is your summary for the successor: what you read in the tail that the brief would
   miss. Put what the session needs, never an instruction the owner reserves (that makes a card).
 

@@ -132,14 +132,40 @@ test.describe('#470 R8 and which way a session is replaced', () => {
     expect(rep.spawnConfig({ commitFloorGb: 15 }).commitFloorBytes).toBe(15 * GB);
   });
   test('replaceMode: dead, handoff, and each refusal on its own gate', () => {
-    const dead = { gone: { seenAt: T0, endedAt: null }, hold: false, handoffActive: false, typing: false, dispatcher: false };
+    const dead = { agent: { state: 'gone', gone: { seenAt: T0, endedAt: null } }, hold: false, handoffActive: false,
+      handedOff: false, declined: false, typing: false, dispatcher: false };
     expect(rep.replaceMode(dead)).toEqual({ mode: 'dead' });
-    expect(rep.replaceMode({ ...dead, gone: null })).toEqual({ mode: 'handoff' });
-    expect(rep.replaceMode({ ...dead, gone: { seenAt: T0, endedAt: T0 } })).toEqual({ why: 'deliberate' });
+    expect(rep.replaceMode({ ...dead, agent: { state: 'running', gone: null } })).toEqual({ mode: 'handoff' });
+    expect(rep.replaceMode({ ...dead, agent: { state: 'gone', gone: { seenAt: T0, endedAt: T0 } } })).toEqual({ why: 'deliberate' });
     expect(rep.replaceMode({ ...dead, hold: true })).toEqual({ why: 'restart-hold' });
     expect(rep.replaceMode({ ...dead, handoffActive: true })).toEqual({ why: 'in-progress' });
+    expect(rep.replaceMode({ ...dead, handedOff: true })).toEqual({ why: 'handed-off' });
+    expect(rep.replaceMode({ ...dead, declined: true })).toEqual({ why: 'declined' });
     expect(rep.replaceMode({ ...dead, typing: true })).toEqual({ why: 'typing' });
     expect(rep.replaceMode({ ...dead, dispatcher: true })).toEqual({ why: 'supervisor' });
+  });
+  test('replaceMode: an agent NOT seen running is never handed off (the wrap-up would be typed into a shell)', () => {
+    const base = { hold: false, handoffActive: false, handedOff: false, declined: false, typing: false, dispatcher: false };
+    expect(rep.replaceMode({ ...base, agent: { state: 'running', gone: null } })).toEqual({ mode: 'handoff' });
+    expect(rep.replaceMode({ ...base, agent: { state: 'unknown', gone: null } })).toEqual({ why: 'agent-unknown' });
+    expect(rep.replaceMode({ ...base, agent: null })).toEqual({ why: 'agent-unknown' });
+    // 'gone' with no field (a malformed reading) is not a death either.
+    expect(rep.replaceMode({ ...base, agent: { state: 'gone', gone: null } })).toEqual({ why: 'agent-unknown' });
+  });
+  test('agentState: gone only from a snapshot newer than the sighting and the last hook, with the exit hook installed', () => {
+    const dead = { found: false, snapAt: T0 + 10, seenAt: T0, hookAt: T0 + 5, hooked: true, endedAt: null };
+    expect(rep.agentState(dead)).toEqual({ state: 'gone', gone: { seenAt: T0, endedAt: null, reason: null } });
+    expect(rep.agentState({ ...dead, found: true })).toEqual({ state: 'running', gone: null });
+    const unknown = { state: 'unknown', gone: null };
+    // Each gate alone.
+    expect(rep.agentState({ ...dead, found: null })).toEqual(unknown); // cannot read
+    expect(rep.agentState({ ...dead, snapAt: null })).toEqual(unknown); // no snapshot time
+    expect(rep.agentState({ ...dead, seenAt: null })).toEqual(unknown); // never seen under this shell
+    expect(rep.agentState({ ...dead, snapAt: T0, hookAt: null })).toEqual(unknown); // not newer than the sighting
+    expect(rep.agentState({ ...dead, hookAt: T0 + 10 })).toEqual(unknown); // a hook since that snapshot
+    expect(rep.agentState({ ...dead, hooked: false })).toEqual(unknown); // no exit hook: an exit reads as a death
+    expect(rep.agentState({ ...dead, hookAt: null }).state).toBe('gone'); // no hook since start is not proof of life
+    expect(rep.agentState({ ...dead, endedAt: T0 + 5, endReason: 'prompt_input_exit' }).gone.endedAt).toBe(T0 + 5);
   });
   test('noteOf: one line, at most NOTE_MAX, refused never cut', () => {
     expect(rep.noteOf(undefined)).toEqual({ ok: true, note: null });
@@ -222,5 +248,35 @@ test.describe('#470 the hand-off run: the supervisor trigger, and a dead run\'s 
     expect(handoff.closeDecision({ ...run, dead: undefined }, old, T0 + 1, cfg).action).toBe('wait');
     expect(handoff.closeDecision(run, { ...old, agentGone: false }, T0 + 1, cfg).action).toBe('wait');
     expect(handoff.closeDecision(run, { ...old, turnAt: T0 + 5 }, T0 + 10, cfg)).toEqual({ action: 'keep', reason: 'in-use' });
+  });
+  test('closeDecision: a dead run is killed ONLY while gone - idle with its turn over is not enough', () => {
+    const cfg = handoff.handoffConfig(null);
+    const run = { state: 'closing', at: T0, verdict: { canClose: true }, verdictAt: T0, dead: true };
+    // Someone restarted the agent and it finished a turn BEFORE the verdict: idle, turn over.
+    const idle = { status: 'idle', turnAt: T0 - 10 * MIN, stoppedAt: T0 - 5 * MIN };
+    expect(handoff.closeDecision({ ...run, dead: undefined }, idle, T0 + 1, cfg)).toEqual({ action: 'kill' }); // a normal run would
+    expect(handoff.closeDecision(run, { ...idle, agentRunning: true }, T0 + 1, cfg)).toEqual({ action: 'keep', reason: 'agent-back' });
+    expect(handoff.closeDecision(run, idle, T0 + 1, cfg)).toEqual({ action: 'wait' }); // cannot tell: waits
+    expect(handoff.closeDecision(run, idle, T0 + cfg.closeTimeoutMs + 1, cfg)).toEqual({ action: 'keep', reason: 'still-busy' });
+    expect(handoff.closeDecision(run, { ...idle, agentGone: true }, T0 + 1, cfg)).toEqual({ action: 'kill' });
+  });
+  test('closeDecision: a keystroke after the verdict keeps any run (in-use)', () => {
+    const cfg = handoff.handoffConfig(null);
+    const run = { state: 'closing', at: T0, verdict: { canClose: true }, verdictAt: T0 };
+    const idle = { status: 'idle', turnAt: T0 - 10 * MIN, stoppedAt: T0 - 5 * MIN };
+    expect(handoff.closeDecision(run, { ...idle, inputAt: T0 - 1 }, T0 + 1, cfg)).toEqual({ action: 'kill' });
+    expect(handoff.closeDecision(run, { ...idle, inputAt: T0 + 1 }, T0 + 2, cfg)).toEqual({ action: 'keep', reason: 'in-use' });
+    expect(handoff.closeDecision({ ...run, dead: true }, { ...idle, agentGone: true, inputAt: T0 + 1 }, T0 + 2, cfg))
+      .toEqual({ action: 'keep', reason: 'in-use' });
+  });
+  test('declinedStanding: a Cancel or Dismiss stands until a person types', () => {
+    expect(handoff.declinedStanding({ handoffDeclinedAt: T0 })).toBe(true);
+    expect(handoff.declinedStanding({ handoffDeclinedAt: T0, prompt: { at: T0 + 1 } })).toBe(false);
+    expect(handoff.declinedStanding({ handoffDeclinedAt: T0, prompt: { at: T0 - 1 } })).toBe(true);
+    expect(handoff.declinedStanding({})).toBe(false);
+    expect(handoff.declinedStanding(null)).toBe(false);
+    // autoBlock still reads the same rule.
+    const cfg = { ...handoff.handoffConfig(null), enabled: true, auto: true };
+    expect(handoff.autoBlock({ handoffDeclinedAt: T0 }, cfg, { now: T0 + 1 })).toBe('declined');
   });
 });
