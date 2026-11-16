@@ -11,6 +11,7 @@
 //   node scripts/wt-supervise.js answer <session> "<text>" --undo "<how>" [--case <case>]
 //   node scripts/wt-supervise.js ask-owner <case> "<question>" [--propose <session> "<text>"]
 //   node scripts/wt-supervise.js resolve <case> "<what was done>"
+//   node scripts/wt-supervise.js close <session> [--case <case>]   (#469: an agent's, after a clean close-out)
 //
 // A session is named by its id or the first 8 characters of it. --server <url|name> talks to
 // another server than this machine's (scripts/wt-api.js). Exit: 0 ok, 1 refused, 2 error.
@@ -26,7 +27,8 @@ const t = () => api.target(flag('--server'));
 
 function usage() {
   console.error('usage: wt-supervise.js sessions | cases | case <id> | tail <session> [n] | wake|coach|lead <session> "<text>" [--case <id>]'
-    + ' | answer <session> "<text>" --undo "<how>" | ask-owner <case> "<question>" [--propose <session> "<text>"] | resolve <case> "<what>"');
+    + ' | answer <session> "<text>" --undo "<how>" | ask-owner <case> "<question>" [--propose <session> "<text>"] | resolve <case> "<what>"'
+    + ' | close <session> [--case <id>]');
   process.exit(2);
 }
 
@@ -62,6 +64,8 @@ async function main() {
     const pi = args.indexOf('--propose');
     const propose = pi >= 0 ? { session: args[pi + 1], text: args[pi + 2] } : undefined;
     r = await api.call(t(), 'POST', `/api/supervisor/cases/${encodeURIComponent(a1)}`, { action: 'ask-owner', question: a2, propose });
+  } else if (cmd === 'close') {
+    r = await api.call(t(), 'POST', '/api/supervisor/close', { session: a1, case: flag('--case') });
   } else if (cmd === 'resolve') {
     if (!a2) usage();
     r = await api.call(t(), 'POST', `/api/supervisor/cases/${encodeURIComponent(a1)}`, { action: 'resolve', how: a2 });

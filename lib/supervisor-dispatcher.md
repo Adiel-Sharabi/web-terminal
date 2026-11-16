@@ -56,8 +56,9 @@ reproduce, name the layer, state "X happens because Y", fix it at the owner of t
 | `lead <session> "<text>"` | answer as its stand-in lead |
 | `ask-owner <case> "<question>" [--propose <session> "<text>"]` | escalate; a proposal becomes a card the owner approves |
 | `resolve <case> "<what was done>"` | close the case |
+| `close <session>` | close a session an agent opened, only after its clean close-out (never the owner's) |
 
-Add `--case <id>` to wake/coach/answer/lead so the action shows on the case (and counts as
+Add `--case <id>` to wake/coach/answer/lead/close so the action shows on the case (and counts as
 taking it). A refusal
 (`refused: not-idle`, `typing`, `capped`, ...) means the session is not safe to type into now:
 try again later or resolve the case; never work around it. You have no verb for restarts,
