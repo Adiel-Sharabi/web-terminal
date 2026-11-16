@@ -18,6 +18,8 @@ const TAG = '[web-terminal supervisor]';
 const LAUNCH = "printf '\\xe2\\x9d\\xaf\\xc2\\xa0 ready\\n\\x1b[>0q'; echo claude";
 const BACKSPACE = String.fromCharCode(0x7f);
 const CTRL_C = String.fromCharCode(3);
+const ESC = String.fromCharCode(0x1b);
+const CR = String.fromCharCode(13);
 
 const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
 async function until(fn, what, ms = 30000) {
@@ -131,6 +133,48 @@ test.describe('#479 an unsent draft holds the server\'s own prompts', () => {
       await sleep(1500);
       expect(await (await prompt(id, 'second')).json()).toEqual({ delivered: true });
     } finally { ws.close(); }
+  });
+
+  test('Esc Esc may open Rewind: a CR does not end it, the agent\'s UserPromptSubmit does', async () => {
+    const id = await idleAgent();
+    const ws = await terminal(id);
+    try {
+      ws.send(ESC); await sleep(100); ws.send(ESC); // two frames, as a person presses them
+      await sleep(1500);
+      expect(await (await prompt(id, 'first')).json()).toEqual({ delivered: false, refused: 'draft' });
+      // A CR in the picker may confirm a message INTO the box: still held.
+      ws.send(CR);
+      await sleep(1500);
+      expect(await (await prompt(id, 'second')).json()).toEqual({ delivered: false, refused: 'draft' });
+      expect((await rowOf(id)).composerDraft, 'the row says it is held').toBeTruthy();
+      // The agent reports that CR submitted a prompt: the box is empty.
+      const conv = crypto.randomUUID();
+      expect(await hook(id, 'UserPromptSubmit', { session_id: conv, prompt: 'from the picker' })).toBe(200);
+      expect(await hook(id, 'Stop', { session_id: conv })).toBe(200);
+      await until(async () => (await rowOf(id))?.status === 'idle', 'the session to go idle');
+      await sleep(1500);
+      expect((await rowOf(id)).composerDraft ?? null).toBeNull();
+      expect(await (await prompt(id, 'third')).json()).toEqual({ delivered: true });
+    } finally { ws.close(); }
+  });
+
+  test('the restart hold does not ask a session holding a draft; it asks once the line is cleared', async () => {
+    const id = await idleAgent();
+    const ws = await terminal(id);
+    const verdictOf = async () => (await (await ctx.get('/api/maintenance/status')).json()).sessions.find((s) => s.id === id);
+    try {
+      ws.send('x');
+      await sleep(1500); // past the (shortened) typing gate
+      expect((await ctx.post('/api/maintenance/prepare', { data: { reason: 'draft spec' } })).status()).toBe(200);
+      await sleep(7000); // prepare ticks at once, then every 3 s: at least three chances to ask
+      expect((await verdictOf())?.promptedAt ?? null, 'not asked over the draft').toBeNull();
+      expect(await (await ctx.get(`/api/sessions/${id}/scrollback`)).text()).not.toContain('[web-terminal restart]');
+      ws.send(BACKSPACE);
+      await until(async () => (await verdictOf())?.promptedAt, 'the question once the box is empty');
+    } finally {
+      ws.close();
+      await ctx.delete('/api/maintenance'); // a hold left on refuses every later session in the suite
+    }
   });
 
   test('the hand-off button refuses to type its wrap-up over a draft, and says why', async () => {

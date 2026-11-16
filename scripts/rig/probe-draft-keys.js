@@ -57,8 +57,27 @@ const CASES = [
   { name: 'lf-newline', keys: ['\n'] },
   { name: 'ctrl-c-working', during: 'write the whole numbers from 1 to 400 separated by single spaces', keys: ['\x03', { wait: 4000 }] },
   { name: 'esc-working', during: 'write the whole numbers from 1 to 400 separated by single spaces', keys: [ESC, { wait: 4000 }] },
+  // Pickers that may write text INTO the box (the #479 gate review): read EVERY prompt submitted.
+  { name: 'rewind-esc-esc-cr', draft: '', keys: [ESC, ESC, { wait: 1500 }, 'CR', { wait: 2500 }] },
+  { name: 'rewind-cmd-cr-cr', draft: '/rewind', keys: ['CR', { wait: 2000 }, 'CR', { wait: 2500 }] },
+  { name: 'ctrl-r-cr', draft: '', keys: ['CTRL-R', 'READY', { wait: 1000 }, 'CR', { wait: 2500 }] },
+  { name: 'ctrl-r-ctrl-c', draft: '', keys: ['CTRL-R', 'READY', { wait: 1000 }, 'CTRL-C', { wait: 1500 }] },
+  { name: 'queued-esc', during: 'write the whole numbers from 1 to 2000 separated by single spaces', keys: ['CR', { wait: 1500 }, ESC, { wait: 4000 }] },
+  { name: 'ctrl-w-trailing-spaces', draft: 'abc  ', keys: ['CTRL-W'] },
+  { name: 'rewind-esc-esc-up-cr', draft: '', keys: [ESC, ESC, { wait: 1500 }, 'UP', 'UP', 'CR', { wait: 2500 }] },
+  { name: 'rewind-cmd-up-cr', draft: '/rewind', keys: ['CR', { wait: 2000 }, 'UP', 'UP', 'CR', { wait: 2500 }] },
+  // Does a slash command fire UserPromptSubmit (the trace shows one per submit)?
+  { name: 'slash-cost-cr', draft: '/cost', keys: ['CR', { wait: 2500 }, ESC, { wait: 1000 }] },
+  { name: 'rewind-cmd-esc', draft: '/rewind', keys: ['CR', { wait: 2000 }, ESC, { wait: 1500 }] },
+  { name: 'esc-esc-working', during: 'write the whole numbers from 1 to 5000 separated by single spaces', draft: '', keys: [ESC, ESC, { wait: 2500 }] },
+  // An interrupt with an EMPTY box: does Claude put the interrupted prompt back?
+  { name: 'esc-working-empty', during: 'write the whole numbers from 1 to 5000 separated by single spaces', draft: '', keys: [ESC, { wait: 2500 }] },
+  { name: 'ctrl-c-working-empty', during: 'write the whole numbers from 1 to 5000 separated by single spaces', draft: '', keys: ['CTRL-C', { wait: 2500 }] },
+  { name: 'esc-working-late-empty', during: 'write the whole numbers from 1 to 5000 separated by single spaces', after: 8000, draft: '', keys: [ESC, { wait: 2500 }] },
+  { name: 'queued-esc-long', during: 'write the whole numbers from 1 to 5000 separated by single spaces', keys: ['CR', { wait: 1000 }, ESC, { wait: 4000 }] },
 ];
 const ONLY = process.argv.slice(2);
+const NAMED = { UP: ESC + '[A', CR: String.fromCharCode(13), 'CTRL-R': String.fromCharCode(0x12), 'CTRL-C': String.fromCharCode(3), 'CTRL-W': String.fromCharCode(0x17) };
 
 function resolveClaude() {
   if (process.env.CLAUDE_BIN) return process.env.CLAUDE_BIN;
@@ -124,14 +143,23 @@ async function main() {
       if (c.during) { p.write(c.during); await sleep(400); p.write('\r'); await sleep(c.after || 2500); }
       for (const ch of draft) { p.write(ch); await sleep(60); }
       await sleep(500);
-      for (const k of c.keys) { if (typeof k === 'object') { await sleep(k.wait); continue; } p.write(k); await sleep(700); }
+      const n0 = events.length;
+      for (const k of c.keys) { if (typeof k === 'object') { await sleep(k.wait); continue; } p.write(NAMED[k] || k); await sleep(700); }
+      // A key that itself submitted a turn: let that turn end before the sentinel.
+      const open = () => { let o = 0; for (const e of events.slice(n0)) { if (e.hook_event_name === 'UserPromptSubmit') o += 1; else if (e.hook_event_name === 'Stop') o = 0; } return o > 0; };
+      if (open()) await waitFor(() => !open(), 90000, 'the picker turn Stop');
       if (exited) throw new Error(`claude exited during ${c.name}`);
       const ups = await prime(SENT);
       const got = ups ? String(ups.prompt) : null;
       const verdict = got === SENT ? 'CLEARED' : got === draft + SENT ? 'SURVIVED' : 'OTHER';
-      results.push({ case: c.name, verdict, ...(verdict === 'OTHER' ? { prompt: got } : {}) });
+      const all = events.slice(n0).filter((e) => e.hook_event_name === 'UserPromptSubmit').map((e) => String(e.prompt));
+      results.push({ case: c.name, verdict, ...(verdict === 'OTHER' ? { prompt: got } : {}), ...(all.length > 1 ? { allPrompts: all } : {}), trace: events.slice(n0).map((e) => e.hook_event_name).join(',') });
       console.log(JSON.stringify(results[results.length - 1]));
     }
+  } catch (e) {
+    // What the screen showed when it failed (the probe's own scratch session only).
+    if (process.env.PROBE_SCREEN) console.error(require('../../lib/ansi').stripAnsi(buf.slice(-6000)).replace(/[ ]{3,}/g, ' ').slice(-2500));
+    throw e;
   } finally {
     try { p.kill(); } catch { /* gone */ }
     server.close();

@@ -301,10 +301,13 @@ reason at most every 15 minutes; "no reading yet" is not logged.
 session whose input box holds text a person typed and did not send: the prompt's Enter would send
 their words with it. It reads what is left in the box from the keys it forwards (Enter sends,
 Ctrl-C at an idle prompt clears, Backspace and the line-edit keys are followed; history and
-anything it cannot follow count as a draft). The prompt is deferred and retried, never dropped,
+anything it cannot follow count as a draft). The prompt is deferred and retried (the restart hold's "back" notice only until its timeout),
 and the refusal is logged as `draft`; a supervisor close is refused too. A draft nobody has typed
 into for the check-in's quiet period shows on the session row (`composerDraft`) and under the
-Journal's **Needs you**: send it or clear it, and the session is reachable again.
+Journal's **Needs you**: send it or clear it, and the session is reachable again. Esc Esc (or
+`/rewind`) opens Claude's Rewind picker, which can put an old prompt back in the box, and an Enter
+the server cannot see land (a slash command, a key it does not follow, a recalled prompt) may not
+have emptied it: in those cases the session stays held until Claude next reports a prompt sent.
 
 **The supervisor, phase 1: facts and the journal (#466)** — the first part of a cluster-wide
 supervisor ([docs/SUPERVISOR-DESIGN.md](docs/SUPERVISOR-DESIGN.md)). It is **read-only**: it
