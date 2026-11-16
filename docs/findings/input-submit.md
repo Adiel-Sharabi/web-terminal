@@ -1231,3 +1231,34 @@ The suite showed it: on beta.18 (reply on or off) mobile-compose-bar (app.html's
 **1.2 also starts the child asynchronously.** `term.pid` is 0 for ~50 ms after `pty.spawn` (43-62 ms measured) until ConPTY's output pipe connects; 1.1.0 has it at spawn. hot-reload (PTY pid survives) and resources-api (a new session has a reading) failed on it.
 
 **Decision (owner, 2026-11-09): do not ship.** node-pty is pinned EXACTLY `1.1.0` (the old `^1.0.0` would let a fresh install take a stable 1.2), and `tests/node-pty-pin.spec.js` fails on any other pin in `package.json` or the lockfile, naming the reason. The worker keeps not answering DA1, so the 1.1.0 crash stays at master's churn rate. An upgrade needs a worker-side plan for the resize query first (one answer per query whatever the number of viewers, and an answer, or no resize, when none is attached), plus the pid wait. The trial (node-pty 1.2.0-beta.18 + the reply + the pid wait) is kept on branch `fix/418-da1-reply`, never merged.
+
+## #479 A server-typed prompt merged with an unsent draft (2026-11-16, 1.112.0 -> 1.112.1)
+
+**Seen.** The supervisor's close-out reached a session as the submitted prompt `"  , [web-terminal supervisor] Close-out: ..."` (bytes from the transcript). The gated prompt types `[tag] text` + CR with no prefix, so `"  , "` was already in Claude's input box, unsent, and the CR submitted it with ours. `classifyUserTurn` was right to call that turn a person's (it holds a person's keys); the tag no longer led it, so `foldHook` cleared the reported `done` wait (#313), and the close-out answer was refused. The issue as filed blamed the classifier; that premise was wrong.
+
+**Cause.** Every prompt the server types on its own (the check-in, the hand-off's wrap-up and successor prompts, the restart hold's question, nudge and notices, the gated prompt) was guarded only by `typedRecently` ("a key in the last `typingQuietMin`"). Nothing asked whether what was typed is still sitting there; a draft older than 10 min was submitted.
+
+**Fix.** `lib/composer-draft.js` folds each person's input frame (server.js WS input path, beside `_lastInputAt`) into the composer's text and cursor; `composerHasDraft` is read by every writer, which refuses `draft` and retries (check-in skip log, hand-off skip log, `prompt-refused` in the supervisor log, a `[maintenance]` line); `typePrompt` refuses as the backstop; the gated close refuses too (a close would destroy the text). Server-side only: hot reload.
+
+**Measured, claude 2.1.325** (`scripts/rig/probe-draft-keys.js`: type a draft, press the keys, type a sentinel + Enter, read UserPromptSubmit's `prompt`):
+
+| keys | the box after |
+|---|---|
+| Backspace x3 on `abc`, Ctrl-U, Ctrl-A Ctrl-K, Ctrl-W (one word) | empty |
+| Ctrl-C at an idle composer | empty |
+| Ctrl-C **during a turn** | the draft KEPT (the turn is interrupted) |
+| Esc (idle or during a turn) | kept |
+| Esc Esc 0.7 s apart / 1.8 s apart | empty / kept: the window is not known, so the rule never counts Esc |
+| Left (then typing) | kept, the text goes in at the cursor (`ab` + typed + `c`) |
+| Home + Delete | the first character deleted (`bc`) |
+| Up on an empty box | the LAST PROMPT recalled into the box |
+| Up then Down on an empty box | empty |
+| Up on a draft | replaced by the last prompt |
+| LF (Ctrl-J) | a newline in the draft |
+| a bracketed paste | its text |
+| Tab, Shift-Tab x3, PgUp on an empty box | nothing typed |
+| Enter with an `@`-mention suggestion open | submitted (not a completion) |
+
+**Fail closed.** History, an unknown key, an Alt combination (even Alt-Enter is not a submit), a cursor move over non-ASCII text (Claude moves by grapheme), a line edit on a multi-line draft, a Ctrl-W where readline and a word rule disagree (`foo.bar`), and a paste whose end is not in the frame all make the state UNKNOWN, which reads as a draft; only a CR or an idle Ctrl-C clears it. Keys sent while the session is `waiting` go to its selector and are not folded. No record reads as empty; which sessions hold one (never the text) is kept in `handoffs/composer-drafts.json`, so a hot reload brings a draft back as UNKNOWN. A draft nobody is typing (the check-in's quiet period) rides the row as `composerDraft: {since}` and joins the supervisor Journal's Needs you, so a false draft is visible, never a silent hold.
+
+**Known gaps.** The worker's own writes (the usage-limit auto-resume `continue`, the API-error continue ladder) do not read it: they live in `pty-worker.js` (cold restart). Status comes from `statusChanged`; until a session's first one after a reload, Ctrl-C is not counted as a clear. A panel left with Esc after arrow keys (`/config`) reads as a draft until the next submit. Keys are not folded while the session reads `waiting`: a `waiting` that outlived its selector (no hook came) would hide a draft typed meanwhile (review round 1; kept, since folding a selector's digits would make every terminal-answered permission a false draft). A Ctrl-C in the instant between a turn starting and its `working` status arriving is taken as a clear. A backslash before Enter (Claude's newline) is not measured and reads as UNKNOWN. The `/answer` route's frames are not folded (they answer a selector).

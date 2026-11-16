@@ -296,6 +296,16 @@ no wait. Why a session was NOT asked is in `handoffs/check-in-skips.jsonl`: the 
 it (typing, cannot tell, a menu, ...), one line per session when the reason changes and the same
 reason at most every 15 minutes; "no reading yet" is not logged.
 
+**An unsent draft holds the server's prompts (#479)** — the server never types its own prompt
+(a check-in, a hand-off, the restart hold's question, a supervisor wake or close-out) into a
+session whose input box holds text a person typed and did not send: the prompt's Enter would send
+their words with it. It reads what is left in the box from the keys it forwards (Enter sends,
+Ctrl-C at an idle prompt clears, Backspace and the line-edit keys are followed; history and
+anything it cannot follow count as a draft). The prompt is deferred and retried, never dropped,
+and the refusal is logged as `draft`; a supervisor close is refused too. A draft nobody has typed
+into for the check-in's quiet period shows on the session row (`composerDraft`) and under the
+Journal's **Needs you**: send it or clear it, and the session is reachable again.
+
 **The supervisor, phase 1: facts and the journal (#466)** — the first part of a cluster-wide
 supervisor ([docs/SUPERVISOR-DESIGN.md](docs/SUPERVISOR-DESIGN.md)). It is **read-only**: it
 takes no action on any session yet.
