@@ -271,7 +271,7 @@ The owner's rule: a done session cleans up after itself before it is closed.
 
    This is the `/dds-can-i-close` audit, but answered rather than printed.
 2. **The answer is state, not prose** (the #359 pattern): `wt-closeout.js clean`,
-   or `closeout blocked "<what is left>"`.
+   or `wt-closeout.js blocked "<what is left>"`.
 3. `clean`:
    - **The owner opened it → never closed by the supervisor.** It is marked *ready to
      close* in the journal, with its brief, so the owner can close it quickly. If it is

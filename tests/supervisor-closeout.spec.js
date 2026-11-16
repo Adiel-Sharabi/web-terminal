@@ -23,7 +23,7 @@ const done = (n, over = {}) => ({
   capped: false, role: null, by: 'agent', favorite: false, children: [], closeout: null,
   turnAt: T0 - 2 * MIN, stoppedAt: T0, reportAt: T0, wait: { on: 'done', what: 'finished', at: T0 }, ...over,
 });
-const plan = (nodes, now, extra = {}) => co.closeoutPlan({ graph: { nodes }, asks: {}, now, cfg: CFG, ...extra });
+const plan = (nodes, now, extra = {}) => co.closeoutPlan({ graph: { nodes, complete: true }, asks: {}, now, cfg: CFG, ...extra });
 const clean = (at) => ({ askedAt: at - MIN, state: 'clean', left: '', at });
 
 test.describe('#469 R5: the close-out plan (lib/closeout.js closeoutPlan)', () => {
@@ -81,7 +81,31 @@ test.describe('#469 R5: the close-out plan (lib/closeout.js closeoutPlan)', () =
     expect(held({ by: null })).toBe('owner'); // opener not known: the owner's, never closed
     expect(held({ favorite: true })).toBe('favorite');
     expect(held({ children: [id(2)] })).toBe('live-child'); // children close before their lead
-    expect(co.closeoutPlan({ graph: { nodes: [done(1, { closeout: clean(at) })] }, now: due, cfg: { ...CFG, close: false } }).why[id(1)]).toBe('close-off');
+    expect(co.closeoutPlan({ graph: { nodes: [done(1, { closeout: clean(at) })], complete: true }, now: due, cfg: { ...CFG, close: false } }).why[id(1)]).toBe('close-off');
+    // A scan some server did not answer cannot say the lead has no child there: no close
+    // (fails closed); it is still marked ready, and an unasked session is still asked.
+    const part = co.closeoutPlan({ graph: { nodes: [done(1, { closeout: clean(at) }), done(2)], complete: false }, asks: {}, now: due, cfg: CFG });
+    expect(part.close).toEqual([]);
+    expect(part.why[id(1)]).toBe('incomplete-scan');
+    expect(part.ready).toEqual([id(1)]);
+    expect(part.ask.map((x) => x.id)).toEqual([id(2)]);
+    expect(co.closeoutPlan({ graph: { nodes: [done(1, { closeout: clean(at) })] }, now: due, cfg: CFG }).why[id(1)]).toBe('incomplete-scan');
+  });
+
+  test('the dispatcher\'s close verb holds wherever R5 would: off, close off, quiet wait, incomplete scan', () => {
+    const at = T0 + MIN;
+    const due = at + CFG.closeAfterMs;
+    const n = done(1, { closeout: clean(at) });
+    const v = (over = {}, o = {}) => co.dispatcherClose(over === null ? null : { ...n, ...over }, { complete: true, now: due, cfg: CFG, ...o });
+    expect(v().close).toEqual({ key: `close|${id(1)}|${at}`, id: id(1), server: 'alpha', name: 's1', closeoutAt: at });
+    expect(v({}, { cfg: co.closeoutConfig({ enabled: false }) }).why).toBe('closeout-off');
+    expect(v({}, { cfg: co.closeoutConfig({ close: false }) }).why).toBe('close-off');
+    expect(v({}, { now: due - 1 }).why).toBe('quiet-wait');
+    expect(v({}, { complete: false }).why).toBe('incomplete-scan');
+    expect(v({ favorite: true }).why).toBe('favorite');
+    expect(v({ children: [id(2)] }).why).toBe('live-child');
+    expect(v({ status: 'working' }).why).toBe('not-due');
+    expect(v(null).why).toBe('not-due');
   });
 
   test('the owner\'s clean session is marked ready to close and never closed, however long it waits', () => {
@@ -91,7 +115,7 @@ test.describe('#469 R5: the close-out plan (lib/closeout.js closeoutPlan)', () =
 
   test('switched off, nothing is asked or closed, and ready-to-close is the plain done-and-idle', () => {
     const off = co.closeoutConfig({ enabled: false });
-    const p = co.closeoutPlan({ graph: { nodes: [done(1), done(2, { closeout: clean(T0) })] }, now: T0 + 60 * MIN, cfg: off });
+    const p = co.closeoutPlan({ graph: { nodes: [done(1), done(2, { closeout: clean(T0) })], complete: true }, now: T0 + 60 * MIN, cfg: off });
     expect(p).toMatchObject({ ask: [], close: [], ready: [id(1), id(2)] });
   });
 
@@ -135,8 +159,16 @@ test.describe('#469 the close-out answer is state, and new work clears it', () =
     expect(rep({ on: 'self', what: 'the build' }).closeout).toBeUndefined();
     expect(rep({ on: 'you', what: 'a choice' }).closeout).toBeUndefined();
     expect(brief.foldHook(entry, 'UserPromptSubmit', { prompt: 'one more thing' }, T0 + 2 * MIN).closeout).toBeUndefined();
-    // The supervisor's own prompt (the close-out itself) is a system turn: it clears nothing.
-    expect(brief.foldHook(entry, 'UserPromptSubmit', { prompt: '[web-terminal supervisor] Close-out: you reported done.' }, T0 + 2 * MIN).closeout).toEqual(entry.closeout);
+    // The close-out's own turn (a system turn) keeps the OPEN ask: the answer comes after it.
+    const asked = { ...entry, closeout: co.askedRecord(T0 + MIN) };
+    expect(brief.foldHook(asked, 'UserPromptSubmit', { prompt: '[web-terminal supervisor] Close-out: you reported done.' }, T0 + 2 * MIN).closeout).toEqual(asked.closeout);
+    // Any turn after the ANSWER - nobody typed it (a task notification, a Monitor event, a
+    // supervisor prompt) - is work the answer did not audit: the clean answer is gone.
+    expect(brief.foldHook(entry, 'UserPromptSubmit', { prompt: '<task-notification>the build finished</task-notification>' }, T0 + 2 * MIN).closeout).toBeUndefined();
+    expect(brief.foldHook(entry, 'UserPromptSubmit', { prompt: '[web-terminal supervisor] Close-out: you reported done.' }, T0 + 2 * MIN).closeout).toBeUndefined();
+    expect(co.clearedBy('turn', null, co.askedRecord(T0))).toBe(false);
+    expect(co.clearedBy('turn', null, clean(T0))).toBe(true);
+    expect(co.clearedBy('turn', null, null)).toBe(false);
     // The brief publishes it, validated.
     expect(brief.buildBrief(entry, { reporting: true }).closeout).toEqual(co.recordOf(entry.closeout));
     expect(brief.buildBrief(brief.emptyEntry(), { reporting: true }).closeout).toBeNull();
@@ -169,6 +201,9 @@ test.describe('#469 the gated close, re-checked by the session\'s own server (cl
     expect(why({ brief: { ...ok().brief, closeout: co.askedRecord(T0) } })).toBe('not-clean');
     expect(why({ closeoutAt: T0 + 2 * MIN })).toBe('stale'); // a newer answer than the one acted on
     expect(why({ closeoutAt: undefined })).toBe('stale');
+    // A turn begun after the answer (the brief's turnAt) is work it did not audit.
+    expect(why({ brief: { ...ok().brief, turnAt: T0 + 2 * MIN } })).toBe('stale');
+    expect(why({ brief: { ...ok().brief, turnAt: T0 } })).toBeNull(); // the close-out's own turn
     expect(why({ row: { status: 'working', clients: 0 } })).toBe('not-idle');
     expect(why({ row: { status: 'idle', compacting: true, clients: 0 } })).toBe('compacting');
     expect(why({ viewers: 1 })).toBe('viewer');

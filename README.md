@@ -422,7 +422,9 @@ hook token only). The rules are `lib/closeout.js`.
   push, held at night), never a forced close. Each session in `GET /api/supervisor/state` carries
   `closeoutState`.
 - The dispatcher's `wt-supervise.js close <session>` (`POST /api/supervisor/close`) closes an agent's
-  session after its clean close-out, under the same gates. `supervisor.autonomy.close: recommend`
+  session after its clean close-out, under R5's own gates (switched off, `close: false`, the quiet
+  wait, a live child, a scan some server did not answer) and the dispatcher's hourly budget.
+  A turn that starts after the answer, typed or not, voids it. `supervisor.autonomy.close: recommend`
   turns every close into a card; Approve closes it.
 - Config `supervisor.closeout`: `enabled` (false: no asks, no closes; Ready to close is plain
   done-and-idle), `close` (false: ask and mark, never close), `askAfterMin` (5), `answerMin` (60),
