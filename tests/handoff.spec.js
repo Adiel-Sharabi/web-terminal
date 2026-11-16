@@ -358,7 +358,8 @@ test.describe('review fixes (#345)', () => {
   test('server.js records every client keystroke, and never its own prompt', () => {
     const src = require('fs').readFileSync(require('path').join(__dirname, '..', 'server.js'), 'utf8');
     const ws = src.slice(src.indexOf('Send keystrokes as a TYPE_PTY_IN binary frame'));
-    expect(ws.slice(0, 400)).toContain('_lastInputAt.set(id, Date.now())');
+    // #470 - every keystroke, but not a terminal's own replies (lib/ansi.js onlyTerminalReports).
+    expect(ws.slice(0, 700)).toContain("if (!ansiLib.onlyTerminalReports(buf.toString('utf8'))) _lastInputAt.set(id, Date.now())");
     const tp = src.slice(src.indexOf('function typePrompt'));
     expect(tp.slice(0, tp.indexOf('\n}'))).not.toContain('_lastInputAt');
   });
