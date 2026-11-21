@@ -149,6 +149,46 @@ test.describe('account auto-switch rules (#483)', () => {
     expect(failed.title).toBe('Claude account switch failed on Box');
     expect(failed.message).toContain('switching to b failed: cannot read');
   });
+
+  test('the readings a pending switch rests on (kept across a restart) are the spent ones that count', () => {
+    const switchedAt = T - 60000;
+    const spent = readingAt(T);
+    const p = lib.pendingReadings([
+      ['s1', spent],
+      ['s2', readingAt(T, { sevenD: 50 })], // not spent
+      ['s3', readingAt(T - 30000)], // its response began before the switch
+      ['s4', readingAt(T, { resetAt: T - 1 })], // its week already turned over
+    ], switchedAt, T);
+    expect(Object.keys(p)).toEqual(['s1']);
+    expect(p.s1).toBe(spent);
+    expect(lib.pendingReadings(undefined, switchedAt, T)).toEqual({});
+  });
+
+  test('a session waiting on the switch is weekly-blocked by its own reading, 5-hour window or not', () => {
+    const from = T;
+    expect(lib.weeklyBlockedAtSwitch({ sevenD: 100, resumeFrom: undefined })).toBe(false);
+    expect(lib.weeklyBlockedAtSwitch({ sevenD: 100, resumeFrom: from })).toBe(true);
+    expect(lib.weeklyBlockedAtSwitch({ sevenD: 99, resumeFrom: from })).toBe(false);
+    // Metrics aged out (sevenD blank): the session's reading from before the switch speaks.
+    expect(lib.weeklyBlockedAtSwitch({ sevenD: null, reading: readingAt(T - 1000), resumeFrom: from })).toBe(true);
+    // A reading after the switch is the new account's, not the block.
+    expect(lib.weeklyBlockedAtSwitch({ sevenD: null, reading: readingAt(T + 1000), resumeFrom: from })).toBe(false);
+    expect(lib.weeklyBlockedAtSwitch({ sevenD: null, reading: readingAt(T - 1000, { sevenD: 80 }), resumeFrom: from })).toBe(false);
+  });
+
+  test('a switch that ended with a warning holds further automatic switches, and the notice says so', () => {
+    const cfg = lib.autoSwitchConfig({ enabled: true });
+    expect(lib.heldBy(undefined, T)).toBeNull();
+    const held = lib.heldBy('the login was refreshed right after the switch', T);
+    expect(held).toEqual({ warning: 'the login was refreshed right after the switch', at: T });
+    expect(lib.blockedBy({ cfg, state: { held }, now: T + 99 * DAY, holdActive: false })).toBe('warning-hold');
+    expect(lib.blockedBy({ cfg, state: { held: null }, now: T, holdActive: false })).toBeNull();
+    const warned = lib.notice('switched', { server: 'Box', from: 'a', to: 'b', resetAt: T, warning: held.warning });
+    expect(warned.message).toContain('Now using b. WARNING: the login was refreshed right after the switch.');
+    expect(warned.message).toContain('paused until the account is switched by hand');
+    expect(warned.tags).toEqual(['warning']);
+    expect(lib.notice('switched', { server: 'Box', from: 'a', to: 'b', resetAt: T }).message).not.toContain('WARNING');
+  });
 });
 
 // --- end to end: a real isolated server and its worker ---------------------------------
@@ -264,6 +304,130 @@ test.describe('account auto-switch end to end (#483)', () => {
       await ctx.dispose();
       await srv.stop();
       fs.rmSync(dir, { recursive: true, force: true });
+    }
+  });
+
+  /** An isolated server with A logged in and A, B saved; [state] seeds the state file. */
+  function autoSwitchRig(tag, state) {
+    const dir = fs.mkdtempSync(path.join(os.tmpdir(), `wt-483${tag}-`));
+    const home = path.join(dir, 'home');
+    const cwd = path.join(dir, 'cwd');
+    fs.mkdirSync(cwd);
+    writeLogin(home, A);
+    saveAs(home, A); saveAs(home, B);
+    const token = crypto.randomBytes(32).toString('hex');
+    fs.writeFileSync(path.join(dir, 'config.json'), JSON.stringify({
+      serverName: 'rig-483', claudeAccountAutoSwitch: { enabled: true, ntfy: { topic: 'wt-483-test-topic' } },
+    }));
+    fs.writeFileSync(path.join(dir, 'api-tokens.json'), JSON.stringify({ [token]: { label: '483-spec', created: Date.now(), expires: Date.now() + 3600e3 } }));
+    const stateFile = path.join(dir, 'autoswitch.json');
+    fs.writeFileSync(stateFile, JSON.stringify({ activeKey: 'a@example.com|a org', switchedAt: Date.now() - 3600e3, ...state }));
+    const boot = async () => {
+      const srv = await startServer(dir, 17950 + Math.floor(Math.random() * 40), `483${tag}`, {
+        WT_CLAUDE_ACCOUNT_HOME: home, WT_NTFY_TEST: '1', WT_ACCOUNT_SWITCH_FILE: stateFile,
+        WT_AUTO_RESUME_FAST: '1', WT_AUTO_RESUME_ON_RESET: '1', WT_READY_FALLBACK_MS: '1500',
+      });
+      return { srv, ctx: await bearer(srv.base, token) };
+    };
+    const readState = () => JSON.parse(fs.readFileSync(stateFile, 'utf8'));
+    return { dir, home, cwd, stateFile, boot, readState };
+  }
+  const resetSecIn = (ms) => Math.floor((Date.now() + ms) / 1000);
+  const accountNotices = async (ctx) => (await (await ctx.get('/api/push/ntfy-test-sink')).json()).items.filter((i) => String(i.kind).startsWith('account-'));
+
+  test('a session stopped by its WEEK alone (5-hour window not spent) resumes on the new account', async () => {
+    const rig = autoSwitchRig('w', {});
+    const { srv, ctx } = await rig.boot();
+    try {
+      // No cap selector on screen: a weekly stop is seen only in the status line.
+      const created = await ctx.post('/api/sessions', { data: { name: 'weekly-483', cwd: rig.cwd, agent: 'claude', autoCommand: 'echo idle-483' } });
+      expect(created.status(), await created.text()).toBeLessThan(300);
+      const { id } = await created.json();
+      const agentSid = crypto.randomUUID();
+      // The conversation is named by the agent's own hook, as a real Stop names it.
+      const hook = await ctx.post(`/api/session/${id}/hook`, { data: { hook_event_name: 'Stop', session_id: agentSid } });
+      expect(hook.status(), await hook.text()).toBe(200);
+      const row = async () => (await (await ctx.get('/api/sessions')).json()).find((s) => s.id === id);
+      await until(async () => { const r = await row(); return r && r.claudeSessionId === agentSid; }, 'the conversation id');
+      const screen = async () => (await ctx.get(`/api/sessions/${id}/scrollback`)).text();
+
+      const resetSec = resetSecIn(3 * DAY);
+      const push = (apiMs, sevenD) => ctx.post('/api/claude-status', { data: statusPayload(agentSid, apiMs, sevenD, resetSec) });
+      expect((await push(1000, 99)).status()).toBe(200);
+      // The 5-hour window (20%) is not spent, so the 5-hour rule alone says "not blocked".
+      const before = await row();
+      expect(before.usageLimit && before.usageLimit.capBlocked).toBeFalsy();
+      await push(1200, 100);
+      await until(async () => activeEmail(rig.home) === 'b@example.com', 'the switch');
+      await until(async () => (await screen()).includes('continue'), 'continue typed into the weekly-capped session', 20000);
+    } catch (e) {
+      throw new Error(`${e.message}\n--- isolated server log (tail) ---\n${srv.log().slice(-3000)}`);
+    } finally {
+      await ctx.dispose();
+      await srv.stop();
+      fs.rmSync(rig.dir, { recursive: true, force: true });
+    }
+  });
+
+  test('a switch held back (the cooldown) keeps its reading across a restart, and makes the switch after it', async () => {
+    // Attempted a minute ago: the cooldown blocks the switch the spent reading asks for.
+    const rig = autoSwitchRig('r', { attemptAt: Date.now() - 60e3 });
+    let { srv, ctx } = await rig.boot();
+    const agentSid = 'agent-483-restart';
+    const resetSec = resetSecIn(3 * DAY);
+    const push = (c, apiMs, sevenD) => c.post('/api/claude-status', { data: statusPayload(agentSid, apiMs, sevenD, resetSec) });
+    try {
+      expect((await push(ctx, 1000, 99)).status()).toBe(200);
+      await push(ctx, 1200, 100);
+      await new Promise((r) => setTimeout(r, 500));
+      expect(activeEmail(rig.home)).toBe('a@example.com');
+      const kept = rig.readState().pending;
+      expect(Object.keys(kept)).toEqual([agentSid]);
+      expect(kept[agentSid].fresh).toMatchObject({ sevenD: 100, delta: 200 });
+      expect(JSON.stringify(rig.readState())).not.toMatch(/secret/);
+
+      // The restart the hold leads to; the cooldown is over by the time it is back.
+      await ctx.dispose();
+      await srv.stop();
+      fs.writeFileSync(rig.stateFile, JSON.stringify({ ...rig.readState(), attemptAt: null }));
+      ({ srv, ctx } = await rig.boot());
+      // A redraw (the counter did not grow) proves nothing on its own: without the kept
+      // reading it would be a first report, a baseline. With it, the switch goes ahead.
+      expect((await push(ctx, 1200, 100)).status()).toBe(200);
+      await until(async () => activeEmail(rig.home) === 'b@example.com', 'the switch after the restart', 10000);
+      expect(rig.readState().pending).toEqual({});
+    } catch (e) {
+      throw new Error(`${e.message}\n--- isolated server log (tail) ---\n${srv.log().slice(-3000)}`);
+    } finally {
+      await ctx.dispose();
+      await srv.stop();
+      fs.rmSync(rig.dir, { recursive: true, force: true });
+    }
+  });
+
+  test('after a switch that warned, no automatic switch until one by hand clears the hold', async () => {
+    const rig = autoSwitchRig('h', { held: { warning: 'the login was refreshed right after the switch', at: Date.now() - 60e3 } });
+    const { srv, ctx } = await rig.boot();
+    try {
+      const resetSec = resetSecIn(3 * DAY);
+      const push = (apiMs, sevenD) => ctx.post('/api/claude-status', { data: statusPayload('agent-483-held', apiMs, sevenD, resetSec) });
+      expect((await push(1000, 99)).status()).toBe(200);
+      await push(1200, 100);
+      await new Promise((r) => setTimeout(r, 800));
+      expect(activeEmail(rig.home)).toBe('a@example.com');
+      expect(await accountNotices(ctx)).toHaveLength(0);
+      expect(srv.log()).toContain('not switching now (warning-hold)');
+      // A switch by hand is what the hold waits for.
+      const manual = await ctx.post('/api/claude-account/switch', { data: { account: 'b@example.com' } });
+      expect(manual.status(), await manual.text()).toBe(200);
+      expect(activeEmail(rig.home)).toBe('b@example.com');
+      expect(rig.readState().held).toBeNull();
+    } catch (e) {
+      throw new Error(`${e.message}\n--- isolated server log (tail) ---\n${srv.log().slice(-3000)}`);
+    } finally {
+      await ctx.dispose();
+      await srv.stop();
+      fs.rmSync(rig.dir, { recursive: true, force: true });
     }
   });
 });
