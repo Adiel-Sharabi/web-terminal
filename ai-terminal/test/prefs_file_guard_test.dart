@@ -140,6 +140,21 @@ void main() {
     expect(corruptCopies(), isEmpty);
   });
 
+  // The guard-level test below would also pass if a locked read were judged
+  // damage, because renaming a file this process holds open throws too (the
+  // wrong guard firing). This one pins the predicate itself.
+  test('a locked read throws instead of reading as damage', () {
+    live.writeAsStringSync(good);
+    final lock = live.openSync(mode: FileMode.append)..lockSync();
+    try {
+      expect(() => readUsablePrefs(live), throwsA(isA<FileSystemException>()));
+    } finally {
+      lock
+        ..unlockSync()
+        ..closeSync();
+    }
+  }, skip: Platform.isWindows ? false : 'only Windows locks block reads');
+
   test('a file that cannot be READ is never judged damaged', () async {
     live.writeAsStringSync(good);
     final lock = live.openSync(mode: FileMode.append)..lockSync();
