@@ -8,8 +8,8 @@ import 'package:firebase_core/firebase_core.dart';
 import 'package:flutter/foundation.dart' show kIsWeb;
 import 'package:flutter/material.dart';
 
+import 'app_boot.dart';
 import 'screens/adaptive_home.dart';
-import 'screens/startup_error_screen.dart';
 import 'screens/session_screen.dart';
 import 'services/desktop_alert_service.dart';
 import 'services/detach_window_service.dart';
@@ -102,32 +102,24 @@ Future<void> main(List<String> args) async {
   // per-device list, if any.
   //
   // #486: on Windows a crash can zero-fill the prefs file, and the plugin's
-  // unguarded decode then throws out of ServerStore.init() before runApp —
-  // the process lives on with no window at all. The guard repairs the file
-  // before anything opens SharedPreferences. A failure inside the guard itself
-  // is not fatal: the store's own read below is what decides.
-  var prefsGuard = const PrefsGuardResult(PrefsRecovery.none);
-  try {
-    prefsGuard = await guardPrefsFileForPlatform();
-  } catch (e, st) {
-    debugPrint('prefs guard failed — continuing to the normal read: $e\n$st');
+  // unguarded decode then threw out of ServerStore.init() before runApp - the
+  // process lived on with no window at all. bootApp owns the order.
+  final root = await bootApp(
+    guard: guardPrefsFileForPlatform,
+    initStore: ServerStore.instance.init,
+    settingsDir: (await prefsDirForPlatform())?.path,
+    app: (notice) => AiTerminalApp(detached: detached, startupNotice: notice),
+  );
+  if (root is AiTerminalApp) {
+    // #97: adopt any peer the cluster advertises that this device does not
+    // have yet. Deliberately NOT awaited - it makes network calls, and a slow
+    // or unreachable server must never delay the first frame. The store emits
+    // when the list changes, so the dashboard picks up new servers as they
+    // arrive. Safe to fire and forget: a round that reaches nothing changes
+    // nothing.
+    unawaited(ClusterDiscovery(store: ServerStore.instance).refresh());
   }
-  try {
-    await ServerStore.instance.init();
-  } catch (e, st) {
-    // Anything that throws here would otherwise end main() with nothing on
-    // screen. Show it instead (#486): fail toward the person, never a hang.
-    debugPrint('startup failed before the first frame: $e\n$st');
-    runApp(StartupErrorApp(error: e));
-    return;
-  }
-  // #97: adopt any peer the cluster advertises that this device does not have
-  // yet. Deliberately NOT awaited — it makes network calls, and a slow or
-  // unreachable server must never delay the first frame. The store emits when
-  // the list changes, so the dashboard picks up new servers as they arrive.
-  // Safe to fire and forget: a round that reaches nothing changes nothing.
-  unawaited(ClusterDiscovery(store: ServerStore.instance).refresh());
-  runApp(AiTerminalApp(detached: detached, startupNotice: prefsGuard.message));
+  runApp(root);
 }
 
 class AiTerminalApp extends StatefulWidget {

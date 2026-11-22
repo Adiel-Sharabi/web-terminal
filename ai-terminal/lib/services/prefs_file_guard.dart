@@ -56,8 +56,6 @@ class PrefsGuardResult {
   /// When the restored copy was saved (its modification time).
   final DateTime? backupTime;
 
-  bool get recovered => recovery != PrefsRecovery.none;
-
   /// One sentence for the person, or null when nothing happened.
   String? get message {
     switch (recovery) {
@@ -87,11 +85,16 @@ String _when(DateTime? t) {
 /// JSON object), else null. One read: the caller writes THESE bytes, so a
 /// writer in another window cannot slip a half-written file in between the
 /// check and the copy.
+///
+/// Only CONTENT counts as damage. A read that fails (a sharing violation
+/// while backup or antivirus holds the file, a permission error) throws: a
+/// good file that is merely locked must never be moved aside.
 String? readUsablePrefs(File file) {
+  final bytes = file.readAsBytesSync();
   try {
-    final text = file.readAsStringSync();
+    final text = utf8.decode(bytes);
     return json.decode(text) is Map ? text : null;
-  } catch (_) {
+  } on FormatException {
     return null;
   }
 }
@@ -111,6 +114,12 @@ void _writeAtomically(String path, String text) {
 /// damaged only after [attempts] reads [retryDelay] apart all fail (a write
 /// takes milliseconds; a zero-filled file never heals). [now] names the
 /// `.corrupt-<time>` copy; tests pass a fixed one.
+///
+/// Every step that can fail runs BEFORE the damaged file is moved, and the
+/// move is undone if putting the restored copy in place fails: a guard that
+/// throws leaves the damaged file where it was, so the startup error screen
+/// shows and the next launch tries again, and the next launch can never
+/// mistake an empty default file for a good one and overwrite [lastGoodSuffix].
 Future<PrefsGuardResult> guardPrefsFile(
   Directory dir, {
   DateTime? now,
@@ -130,29 +139,47 @@ Future<PrefsGuardResult> guardPrefsFile(
     if (i < attempts - 1) await Future<void>.delayed(retryDelay);
   }
 
+  // Stage the restore first: nothing below the move may fail un-undone.
+  final saved = lastGood.existsSync() ? readUsablePrefs(lastGood) : null;
+  final staged = File('${live.path}.tmp');
+  DateTime? savedAt;
+  if (saved != null) {
+    savedAt = lastGood.lastModifiedSync();
+    staged.writeAsStringSync(saved, flush: true);
+  }
+
   final t = now ?? DateTime.now();
-  String two(int n) => n.toString().padLeft(2, '0');
-  final stamp = '${t.year}${two(t.month)}${two(t.day)}-'
-      '${two(t.hour)}${two(t.minute)}${two(t.second)}';
+  String pad(int n, [int w = 2]) => n.toString().padLeft(w, '0');
+  final stamp = '${t.year}${pad(t.month)}${pad(t.day)}-'
+      '${pad(t.hour)}${pad(t.minute)}${pad(t.second)}${pad(t.millisecond, 3)}';
   final corrupt = live.renameSync('${live.path}.corrupt-$stamp');
 
-  final saved = lastGood.existsSync() ? readUsablePrefs(lastGood) : null;
-  if (saved != null) {
-    final savedAt = lastGood.lastModifiedSync();
-    _writeAtomically(live.path, saved);
-    return PrefsGuardResult(PrefsRecovery.restoredFromBackup,
-        corruptCopy: corrupt.path, backupTime: savedAt);
+  if (saved == null) {
+    return PrefsGuardResult(PrefsRecovery.startedFresh, corruptCopy: corrupt.path);
   }
-  return PrefsGuardResult(PrefsRecovery.startedFresh, corruptCopy: corrupt.path);
+  try {
+    staged.renameSync(live.path);
+  } catch (_) {
+    corrupt.renameSync(live.path); // undo: back to "damaged, nothing lost"
+    rethrow;
+  }
+  return PrefsGuardResult(PrefsRecovery.restoredFromBackup,
+      corruptCopy: corrupt.path, backupTime: savedAt);
 }
 
-/// The production entry point: on Windows, guards the file in the directory
-/// the plugin itself uses (the same `getApplicationSupportPath` call, so the
-/// two can never disagree on where the file is). Elsewhere a no-op: Android
-/// and iOS store preferences natively, not in this file.
-Future<PrefsGuardResult> guardPrefsFileForPlatform() async {
-  if (!Platform.isWindows) return const PrefsGuardResult(PrefsRecovery.none);
+/// Where the plugin keeps the file on this platform, or null where it does
+/// not use one (Android and iOS store preferences natively). The same
+/// `getApplicationSupportPath` call the plugin makes, so the two can never
+/// disagree on where the file is.
+Future<Directory?> prefsDirForPlatform() async {
+  if (!Platform.isWindows) return null;
   final path = await PathProviderWindows().getApplicationSupportPath();
-  if (path == null) return const PrefsGuardResult(PrefsRecovery.none);
-  return guardPrefsFile(Directory(path));
+  return path == null ? null : Directory(path);
+}
+
+/// The production entry point: guards the file in [prefsDirForPlatform].
+Future<PrefsGuardResult> guardPrefsFileForPlatform() async {
+  final dir = await prefsDirForPlatform();
+  if (dir == null) return const PrefsGuardResult(PrefsRecovery.none);
+  return guardPrefsFile(dir);
 }

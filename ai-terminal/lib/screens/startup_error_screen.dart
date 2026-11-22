@@ -9,9 +9,13 @@ import '../theme/app_theme.dart';
 /// no window and no error. This is the frame drawn instead: the error, in
 /// words the person can copy into an issue.
 class StartupErrorApp extends StatelessWidget {
-  const StartupErrorApp({super.key, required this.error});
+  const StartupErrorApp({super.key, required this.error, this.settingsDir});
 
   final Object error;
+
+  /// The folder holding the settings file, so the person can move it aside by
+  /// hand. Null where the platform keeps settings natively.
+  final String? settingsDir;
 
   @override
   Widget build(BuildContext context) {
@@ -29,9 +33,12 @@ class StartupErrorApp extends StatelessWidget {
                 const Text('AiTerminal could not start',
                     style: TextStyle(fontSize: 20, fontWeight: FontWeight.w600)),
                 const SizedBox(height: 12),
-                const Text('Reading the saved settings failed. Copy the error '
-                    'below into an issue; closing and reopening the app will '
-                    'not fix it on its own.'),
+                Text('Reading the saved settings failed. Reopening the app '
+                    'may help if the file was only locked for a moment. If it '
+                    'does not, close the app and move shared_preferences.json '
+                    'out of ${settingsDir ?? 'the app settings folder'}, then '
+                    'reopen it (it starts with default settings). Copy the '
+                    'error below into an issue.'),
                 const SizedBox(height: 16),
                 Expanded(
                   child: SingleChildScrollView(

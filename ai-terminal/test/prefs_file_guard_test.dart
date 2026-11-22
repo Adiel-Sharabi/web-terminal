@@ -3,8 +3,10 @@
 import 'dart:async';
 import 'dart:io';
 
+import 'package:ai_terminal/app_boot.dart';
 import 'package:ai_terminal/screens/startup_error_screen.dart';
 import 'package:ai_terminal/services/prefs_file_guard.dart';
+import 'package:flutter/widgets.dart';
 import 'package:flutter_test/flutter_test.dart';
 import 'package:path_provider_windows/path_provider_windows.dart';
 import 'package:shared_preferences_windows/shared_preferences_windows.dart';
@@ -51,7 +53,7 @@ void main() {
 
     expect(r.recovery, PrefsRecovery.restoredFromBackup);
     expect(live.readAsStringSync(), older);
-    expect(corruptCopies(), ['$prefsFileName.corrupt-20261122-123928']);
+    expect(corruptCopies(), ['$prefsFileName.corrupt-20261122-123928000']);
     expect(File(r.corruptCopy!).readAsBytesSync().every((b) => b == 0), isTrue);
     expect(r.message, contains('restored the copy saved'));
   });
@@ -123,6 +125,35 @@ void main() {
     expect(corruptCopies(), isEmpty);
   });
 
+  test('a restore that cannot be staged leaves the damaged file in place (nothing lost)',
+      () async {
+    zeroFill(live);
+    lastGood.writeAsStringSync(older);
+    Directory('${live.path}.tmp').createSync(); // the staging write must fail
+
+    await expectLater(guard(), throwsA(isA<FileSystemException>()));
+
+    // Still damaged, so the next launch shows the error screen and retries;
+    // the good copy is untouched, so a later launch can still restore it.
+    expect(live.readAsBytesSync().every((b) => b == 0), isTrue);
+    expect(lastGood.readAsStringSync(), older);
+    expect(corruptCopies(), isEmpty);
+  });
+
+  test('a file that cannot be READ is never judged damaged', () async {
+    live.writeAsStringSync(good);
+    final lock = live.openSync(mode: FileMode.append)..lockSync();
+    try {
+      await expectLater(guard(), throwsA(isA<FileSystemException>()));
+    } finally {
+      lock
+        ..unlockSync()
+        ..closeSync();
+    }
+    expect(live.readAsStringSync(), good);
+    expect(corruptCopies(), isEmpty);
+  }, skip: Platform.isWindows ? false : 'only Windows locks block reads');
+
   group('the real Windows plugin', () {
     SharedPreferencesWindows plugin() =>
         SharedPreferencesWindows()..pathProvider = _TempPath(dir.path);
@@ -146,5 +177,53 @@ void main() {
     await t.pumpWidget(const StartupErrorApp(error: FormatException('Unexpected character')));
     expect(find.text('AiTerminal could not start'), findsOneWidget);
     expect(find.textContaining('Unexpected character'), findsOneWidget);
+  });
+
+  group('bootApp - the order before the first frame', () {
+    Widget real(String? notice) => Text(notice ?? 'no notice', textDirection: TextDirection.ltr);
+
+    test('the guard runs BEFORE the store opens SharedPreferences', () async {
+      final calls = <String>[];
+      await bootApp(
+        guard: () async {
+          calls.add('guard');
+          return const PrefsGuardResult(PrefsRecovery.none);
+        },
+        initStore: () async => calls.add('store'),
+        app: real,
+      );
+      expect(calls, ['guard', 'store']);
+    });
+
+    test('a store that throws draws the error screen, never nothing', () async {
+      final root = await bootApp(
+        guard: () async => const PrefsGuardResult(PrefsRecovery.none),
+        initStore: () async => throw const FormatException('Unexpected character'),
+        app: real,
+        settingsDir: 'SETTINGS-DIR',
+      );
+      expect(root, isA<StartupErrorApp>());
+      expect((root as StartupErrorApp).settingsDir, 'SETTINGS-DIR');
+    });
+
+    test('a guard that throws is not fatal: the store still decides', () async {
+      var storeRan = false;
+      final root = await bootApp(
+        guard: () async => throw const FileSystemException('locked'),
+        initStore: () async => storeRan = true,
+        app: real,
+      );
+      expect(storeRan, isTrue);
+      expect((root as Text).data, 'no notice');
+    });
+
+    test("the repair's sentence reaches the app", () async {
+      final root = await bootApp(
+        guard: () async => const PrefsGuardResult(PrefsRecovery.startedFresh, corruptCopy: 'X'),
+        initStore: () async {},
+        app: real,
+      );
+      expect((root as Text).data, contains('default settings'));
+    });
   });
 }
