@@ -292,6 +292,7 @@ void main() {
         app: real,
       );
       expect(root, isA<StartupErrorApp>());
+      expect((root as StartupErrorApp).error, isA<FormatException>());
     });
 
     test('with the guard the app starts, with its servers and the notice', () async {
@@ -309,5 +310,23 @@ void main() {
       expect((root as Text).data, contains('restored the copy saved'));
       expect(store.servers.map((s) => s.baseUrl), ['https://example.test']);
     });
+
+    // The production entry point, given the SAME path provider the plugin
+    // holds: if the guard ever asked a different folder than the plugin reads,
+    // it would find nothing and the plugin would read the damaged file.
+    test('the production guard looks where the plugin reads', () async {
+      zeroFill(live);
+      lastGood.writeAsStringSync(savedWithServer);
+      final store = ServerStore.forTest();
+
+      final root = await bootApp(
+        guard: () => guardPrefsFileForPlatform(provider: _TempPath(dir.path)),
+        store: () => store,
+        app: real,
+      );
+
+      expect((root as Text).data, contains('restored the copy saved'));
+      expect(store.servers.map((s) => s.baseUrl), ['https://example.test']);
+    }, skip: Platform.isWindows ? false : 'the guard runs on Windows only');
   });
 }

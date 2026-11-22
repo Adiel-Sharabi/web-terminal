@@ -157,7 +157,13 @@ Future<PrefsGuardResult> guardPrefsFile(
   String pad(int n, [int w = 2]) => n.toString().padLeft(w, '0');
   final stamp = '${t.year}${pad(t.month)}${pad(t.day)}-'
       '${pad(t.hour)}${pad(t.minute)}${pad(t.second)}${pad(t.millisecond, 3)}';
-  final corrupt = live.renameSync('${live.path}.corrupt-$stamp');
+  final File corrupt;
+  try {
+    corrupt = live.renameSync('${live.path}.corrupt-$stamp');
+  } catch (_) {
+    if (staged.existsSync()) staged.deleteSync(); // no stale old copy left
+    rethrow;
+  }
 
   if (saved == null) {
     return PrefsGuardResult(PrefsRecovery.startedFresh, corruptCopy: corrupt.path);
@@ -176,15 +182,16 @@ Future<PrefsGuardResult> guardPrefsFile(
 /// not use one (Android and iOS store preferences natively). The same
 /// `getApplicationSupportPath` call the plugin makes, so the two can never
 /// disagree on where the file is.
-Future<Directory?> prefsDirForPlatform() async {
+Future<Directory?> prefsDirForPlatform({PathProviderWindows? provider}) async {
   if (!Platform.isWindows) return null;
-  final path = await PathProviderWindows().getApplicationSupportPath();
+  final path = await (provider ?? PathProviderWindows()).getApplicationSupportPath();
   return path == null ? null : Directory(path);
 }
 
 /// The production entry point: guards the file in [prefsDirForPlatform].
-Future<PrefsGuardResult> guardPrefsFileForPlatform() async {
-  final dir = await prefsDirForPlatform();
+/// [provider] is for tests, which hand the plugin the same one.
+Future<PrefsGuardResult> guardPrefsFileForPlatform({PathProviderWindows? provider}) async {
+  final dir = await prefsDirForPlatform(provider: provider);
   if (dir == null) return const PrefsGuardResult(PrefsRecovery.none);
   return guardPrefsFile(dir);
 }
