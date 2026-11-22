@@ -16,7 +16,7 @@ publish_to: 'none' # Remove this line if you wish to publish to pub.dev
 # https://developer.apple.com/library/archive/documentation/General/Reference/InfoPlistKeyReference/Articles/CoreFoundationKeys.html
 # In Windows, build-name is used as the major, minor, and patch parts
 # of the product and file versions while build-number is used as the build suffix.
-version: 1.90.0+196
+version: 1.90.1+197
 
 environment:
   sdk: ^3.12.2
@@ -42,6 +42,8 @@ dependencies:
   flutter_local_notifications: ^22.0.1
   web_socket_channel: ^3.0.3
   shared_preferences: ^2.5.5
+  # #486: the prefs guard asks the SAME path call the prefs plugin uses.
+  path_provider_windows: ^2.3.0
   xterm: ^4.0.0
   image_picker: ^1.2.3
   flutter_markdown: ^0.7.4
@@ -77,6 +79,8 @@ dev_dependencies:
   # Test-only: mock url_launcher's platform to assert the chat-link launch path.
   url_launcher_platform_interface: ^2.3.2
   plugin_platform_interface: ^2.1.8
+  # #486 test: drive the real Windows prefs plugin against a zero-filled file.
+  shared_preferences_windows: ^2.4.1
 
 # For information on the generic Dart part of this file, see the
 # following page: https://dart.dev/tools/pub/pubspec

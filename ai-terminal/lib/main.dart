@@ -9,10 +9,12 @@ import 'package:flutter/foundation.dart' show kIsWeb;
 import 'package:flutter/material.dart';
 
 import 'screens/adaptive_home.dart';
+import 'screens/startup_error_screen.dart';
 import 'screens/session_screen.dart';
 import 'services/desktop_alert_service.dart';
 import 'services/detach_window_service.dart';
 import 'services/notification_service.dart';
+import 'services/prefs_file_guard.dart';
 import 'services/push_service.dart';
 import 'services/server_store.dart';
 import 'services/cluster_discovery.dart';
@@ -98,23 +100,47 @@ Future<void> main(List<String> args) async {
   // pre-warm (#60): favorite/favoriteRank ride on Session itself, straight
   // from the server — DashboardScreen's own migrateOnce handles the old
   // per-device list, if any.
-  await ServerStore.instance.init();
+  //
+  // #486: on Windows a crash can zero-fill the prefs file, and the plugin's
+  // unguarded decode then throws out of ServerStore.init() before runApp —
+  // the process lives on with no window at all. The guard repairs the file
+  // before anything opens SharedPreferences. A failure inside the guard itself
+  // is not fatal: the store's own read below is what decides.
+  var prefsGuard = const PrefsGuardResult(PrefsRecovery.none);
+  try {
+    prefsGuard = await guardPrefsFileForPlatform();
+  } catch (e, st) {
+    debugPrint('prefs guard failed — continuing to the normal read: $e\n$st');
+  }
+  try {
+    await ServerStore.instance.init();
+  } catch (e, st) {
+    // Anything that throws here would otherwise end main() with nothing on
+    // screen. Show it instead (#486): fail toward the person, never a hang.
+    debugPrint('startup failed before the first frame: $e\n$st');
+    runApp(StartupErrorApp(error: e));
+    return;
+  }
   // #97: adopt any peer the cluster advertises that this device does not have
   // yet. Deliberately NOT awaited — it makes network calls, and a slow or
   // unreachable server must never delay the first frame. The store emits when
   // the list changes, so the dashboard picks up new servers as they arrive.
   // Safe to fire and forget: a round that reaches nothing changes nothing.
   unawaited(ClusterDiscovery(store: ServerStore.instance).refresh());
-  runApp(AiTerminalApp(detached: detached));
+  runApp(AiTerminalApp(detached: detached, startupNotice: prefsGuard.message));
 }
 
 class AiTerminalApp extends StatefulWidget {
-  const AiTerminalApp({super.key, this.detached});
+  const AiTerminalApp({super.key, this.detached, this.startupNotice});
 
   /// Non-null when this instance was launched as a detached window for one
   /// session (issue #14) — the app opens straight into that [SessionScreen]
   /// instead of the dashboard.
   final DetachedTarget? detached;
+
+  /// Shown once in a dialog after the first frame — today only #486's "the
+  /// settings file was damaged and was repaired" sentence.
+  final String? startupNotice;
 
   @override
   State<AiTerminalApp> createState() => _AiTerminalAppState();
@@ -128,6 +154,23 @@ class _AiTerminalAppState extends State<AiTerminalApp>
   void initState() {
     super.initState();
     WidgetsBinding.instance.addObserver(this);
+    final notice = widget.startupNotice;
+    if (notice != null) {
+      WidgetsBinding.instance.addPostFrameCallback((_) {
+        final ctx = navigatorKey.currentContext;
+        if (ctx == null) return;
+        showDialog<void>(
+          context: ctx,
+          builder: (c) => AlertDialog(
+            title: const Text('Settings repaired'),
+            content: SelectableText(notice),
+            actions: [
+              TextButton(onPressed: () => Navigator.of(c).pop(), child: const Text('OK')),
+            ],
+          ),
+        );
+      });
+    }
     SessionRepository.instance.startForeground();
     if (pushSupported) {
       _tapSub = NotificationService.onNotificationTap.listen(_openSession);
