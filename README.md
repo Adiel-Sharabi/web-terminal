@@ -585,6 +585,23 @@ status | save [label] | switch <label|email>`. Routes: `GET /api/claude-account`
 `POST /api/claude-account/save`; advertised as the `claude-account` capability. No response ever
 carries a token.
 
+**Switch automatically at the weekly limit** (opt-in, per machine) — set
+`"claudeAccountAutoSwitch": { "enabled": true, "ntfy": { "topic": "<your topic>" } }` in a machine's
+`config.json` and, when the account it is logged in to has spent its **weekly** window, it switches
+itself to the next saved account and sends one ntfy message: from which account, to which, and when
+the old one's week resets. The next account is the next saved one by label that is not known to be
+capped and whose saved refresh token has not expired; if none is left, nothing switches and one
+message says so, naming the earliest reset. A session parked on the cap, weekly or 5-hour, resumes
+on the new account through the usual auto-resume. The trigger is the status line's weekly reading,
+and only a reading from an API response that **began after** the last switch counts (the status line
+can redraw the old account's numbers for a while after a switch). At most one attempt per
+`cooldownMinutes` (default 30; a failed switch is reported and not retried before then), and never
+during a restart hold; a reading that is waiting out either one is kept across a restart. A switch
+that cannot prove the login on disk is the account it wrote (another writer refreshed it at that
+moment) says so in its notice, and no further automatic switch happens until you switch by hand.
+The notice has its own `ntfy` target, so it does not turn on the session pushes. Read live; off by
+default.
+
 **Helper sessions don't pile up** — an agent that starts a session with `POST /api/sessions`
 (often on another machine) and never closes it used to hold one of the machine's session slots
 for as long as it lived. Now a session nobody opens within two minutes of creating it counts as

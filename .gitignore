@@ -106,6 +106,9 @@ maintenance.json
 maintenance.json.tmp
 maintenance.test.json
 maintenance.test.json.tmp
+# The Claude account auto-switch state (#483) - per machine: labels and times, no tokens.
+account-autoswitch.json
+account-autoswitch.json.tmp
 # Cluster resource leases (#412): the authority's table and each machine's cleanup ledger.
 leases.json
 leases.json.tmp

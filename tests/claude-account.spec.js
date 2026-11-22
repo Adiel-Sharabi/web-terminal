@@ -299,3 +299,61 @@ test.describe('/api/claude-account', () => {
     await anon.dispose();
   });
 });
+
+// #399 - the races an unattended switch (#483) makes likely. Driven in-process so a
+// refresh can be landed at an exact point inside switchTo: before the N-th read of the
+// credentials file returns, `onRead(N)` may rewrite it, the way a running session would.
+test.describe('switchTo and a token refreshed meanwhile (#399)', () => {
+  const lib = require('../lib/claude-account');
+  const savedFile = (home, label) => path.join(home, '.config', 'web-terminal', 'claude-accounts', `${label}.json`);
+  function withCredReads(home, onRead, fn) {
+    const real = fs.readFileSync;
+    let n = 0;
+    fs.readFileSync = function (file, ...rest) {
+      if (path.resolve(String(file)) === path.resolve(credFile(home))) { n += 1; onRead(n); }
+      return real.call(this, file, ...rest);
+    };
+    try { return fn(); } finally { fs.readFileSync = real; }
+  }
+  const rotated = (who, tag) => ({ ...who, oauth: { ...who.oauth, accessToken: `access-${tag}`, refreshToken: `refresh-${tag}` } });
+  const setup = () => {
+    const home = makeHome();
+    login(home, ACCOUNT_B); lib.save(null, home);
+    login(home, ACCOUNT_A); lib.save(null, home);
+    return home;
+  };
+
+  test('item 1: a refresh of the current account between the first read and the write is saved', () => {
+    const home = setup();
+    // Read 1 is switchTo's first read; read 2 its re-read just before the write.
+    withCredReads(home, (n) => { if (n === 2) login(home, rotated(ACCOUNT_A, 'A-rotated')); }, () => lib.switchTo('b@example.com', home));
+    const savedA = JSON.parse(fs.readFileSync(savedFile(home, 'a@example.com'), 'utf8'));
+    expect(savedA.claudeAiOauth.refreshToken).toBe('refresh-A-rotated');
+    expect(JSON.parse(fs.readFileSync(credFile(home), 'utf8')).claudeAiOauth).toEqual(ACCOUNT_B.oauth);
+  });
+
+  test('item 2: the new account refreshing at once is a switch that worked', () => {
+    const home = setup();
+    // Read 3 is the post-write check.
+    const r = withCredReads(home, (n) => { if (n === 3) login(home, rotated(ACCOUNT_B, 'B-rotated')); }, () => lib.switchTo('b@example.com', home));
+    expect(r).toMatchObject({ to: 'b@example.com', fromLabel: 'a@example.com', alreadyActive: false });
+    // Not silent: a token that is not the one written could also be a late write by the old account.
+    expect(r.warning).toMatch(/refreshed right after the switch/);
+  });
+
+  test('item 2: the OLD account written back over the switch is still a failure', () => {
+    const home = setup();
+    expect(() => withCredReads(home, (n) => {
+      if (n === 3) fs.writeFileSync(credFile(home), JSON.stringify({ mcpOAuth: MCP, claudeAiOauth: ACCOUNT_A.oauth }));
+    }, () => lib.switchTo('b@example.com', home))).toThrow(/do not name b@example.com/);
+  });
+
+  test('item 3: two logins without an account id are two accounts', () => {
+    const home = makeHome();
+    const noId = (who) => ({ oauth: who.oauth, account: { emailAddress: who.account.emailAddress } });
+    login(home, noId(ACCOUNT_A)); lib.save(null, home);
+    login(home, noId(ACCOUNT_B)); lib.save(null, home);
+    expect(fs.existsSync(savedFile(home, 'a@example.com'))).toBe(true);
+    expect(JSON.parse(fs.readFileSync(savedFile(home, 'a@example.com'), 'utf8')).claudeAiOauth).toEqual(ACCOUNT_A.oauth);
+  });
+});
