@@ -84,9 +84,15 @@ Future<void> _loadRoboto() async {
 }
 
 void main() {
+  TestWidgetsFlutterBinding.ensureInitialized();
+  // Loading a font posts a "system fonts changed" message whose relayout frame
+  // callback arrives asynchronously. Inside the test body it could land after the
+  // last pump, which fails the test ("an animation is still running", seen on the
+  // Linux CI runner only). Loaded here, the test's first pump consumes it.
+  setUpAll(_loadRoboto);
+
   testWidgets('seven machines wrap into at most two rows at S25 width, no sideways scroll',
       (tester) async {
-    await _loadRoboto();
     tester.view.physicalSize = _s25Physical;
     tester.view.devicePixelRatio = _s25Dpr;
     addTearDown(tester.view.reset);
