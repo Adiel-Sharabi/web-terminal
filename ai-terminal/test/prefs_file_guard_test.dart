@@ -1,19 +1,30 @@
 // Issue #486: a crash zero-filled the Windows prefs file; the plugin's
 // unguarded decode then threw before runApp and the app had no window.
 import 'dart:async';
+import 'dart:convert';
 import 'dart:io';
 
 import 'package:ai_terminal/app_boot.dart';
 import 'package:ai_terminal/screens/startup_error_screen.dart';
 import 'package:ai_terminal/services/prefs_file_guard.dart';
+import 'package:ai_terminal/services/server_store.dart';
 import 'package:flutter/widgets.dart';
 import 'package:flutter_test/flutter_test.dart';
 import 'package:path_provider_windows/path_provider_windows.dart';
+import 'package:shared_preferences/shared_preferences.dart';
+import 'package:shared_preferences_platform_interface/shared_preferences_platform_interface.dart';
 import 'package:shared_preferences_windows/shared_preferences_windows.dart';
 
 const good = '{"flutter.wt.servers":"[]","flutter.wt.termFontSize":14.0}';
 const older = '{"flutter.wt.servers":"[\\"older\\"]"}';
 final fixedNow = DateTime(2026, 11, 22, 12, 39, 28);
+
+/// A store whose load fails, as the real one did on the zero-filled file.
+class _ThrowingStore extends ServerStore {
+  _ThrowingStore() : super.forTest();
+  @override
+  Future<void> init() async => throw const FormatException('Unexpected character');
+}
 
 /// The plugin's own path call, pointed at a temp dir.
 class _TempPath extends PathProviderWindows {
@@ -196,15 +207,21 @@ void main() {
 
   group('bootApp - the order before the first frame', () {
     Widget real(String? notice) => Text(notice ?? 'no notice', textDirection: TextDirection.ltr);
+    PrefsGuardResult nothing() => const PrefsGuardResult(PrefsRecovery.none);
 
-    test('the guard runs BEFORE the store opens SharedPreferences', () async {
+    setUp(() => SharedPreferences.setMockInitialValues(const {}));
+
+    test('the store is not even CREATED before the guard has run', () async {
       final calls = <String>[];
       await bootApp(
         guard: () async {
           calls.add('guard');
-          return const PrefsGuardResult(PrefsRecovery.none);
+          return nothing();
         },
-        initStore: () async => calls.add('store'),
+        store: () {
+          calls.add('store');
+          return ServerStore.forTest();
+        },
         app: real,
       );
       expect(calls, ['guard', 'store']);
@@ -212,33 +229,85 @@ void main() {
 
     test('a store that throws draws the error screen, never nothing', () async {
       final root = await bootApp(
-        guard: () async => const PrefsGuardResult(PrefsRecovery.none),
-        initStore: () async => throw const FormatException('Unexpected character'),
+        guard: () async => nothing(),
+        store: _ThrowingStore.new,
         app: real,
-        settingsDir: 'SETTINGS-DIR',
+        settingsDir: () async => 'SETTINGS-DIR',
       );
       expect(root, isA<StartupErrorApp>());
       expect((root as StartupErrorApp).settingsDir, 'SETTINGS-DIR');
     });
 
-    test('a guard that throws is not fatal: the store still decides', () async {
-      var storeRan = false;
+    test('a settings folder that cannot be looked up still draws the error screen', () async {
       final root = await bootApp(
-        guard: () async => throw const FileSystemException('locked'),
-        initStore: () async => storeRan = true,
+        guard: () async => nothing(),
+        store: _ThrowingStore.new,
         app: real,
+        settingsDir: () async => throw const FileSystemException('offline share'),
       );
-      expect(storeRan, isTrue);
-      expect((root as Text).data, 'no notice');
+      expect(root, isA<StartupErrorApp>());
+      expect((root as StartupErrorApp).settingsDir, isNull);
     });
 
-    test("the repair's sentence reaches the app", () async {
+    test('a guard that throws is not fatal: the store still decides', () async {
       final root = await bootApp(
-        guard: () async => const PrefsGuardResult(PrefsRecovery.startedFresh, corruptCopy: 'X'),
-        initStore: () async {},
+        guard: () async => throw const FileSystemException('locked'),
+        store: ServerStore.forTest,
         app: real,
       );
-      expect((root as Text).data, contains('default settings'));
+      expect((root as Text).data, 'no notice');
+    });
+  });
+
+  // The whole path on the real plugin and the real store: what a unit test of
+  // each piece missed once (the store read the file before the guard ran).
+  group('end to end on the real Windows plugin and ServerStore', () {
+    // What the plugin writes: the key carries its `flutter.` prefix and the
+    // server list is itself a JSON string.
+    final savedWithServer = jsonEncode({
+      'flutter.${ServerStore.storageKey}': jsonEncode([
+        {'name': 'n', 'baseUrl': 'https://example.test', 'bearerToken': 't'},
+      ]),
+    });
+    late SharedPreferencesStorePlatform before;
+
+    setUp(() {
+      before = SharedPreferencesStorePlatform.instance;
+      SharedPreferencesStorePlatform.instance =
+          SharedPreferencesWindows()..pathProvider = _TempPath(dir.path);
+      SharedPreferences.resetStatic();
+    });
+    tearDown(() {
+      SharedPreferencesStorePlatform.instance = before;
+      SharedPreferences.resetStatic();
+    });
+
+    Widget real(String? notice) => Text(notice ?? 'no notice', textDirection: TextDirection.ltr);
+
+    test('premise: without the guard a zero-filled file kills the load', () async {
+      zeroFill(live);
+      final root = await bootApp(
+        guard: () async => const PrefsGuardResult(PrefsRecovery.none),
+        store: ServerStore.forTest,
+        app: real,
+      );
+      expect(root, isA<StartupErrorApp>());
+    });
+
+    test('with the guard the app starts, with its servers and the notice', () async {
+      zeroFill(live);
+      lastGood.writeAsStringSync(savedWithServer);
+      final store = ServerStore.forTest();
+
+      final root = await bootApp(
+        guard: () => guardPrefsFile(dir, now: fixedNow, retryDelay: Duration.zero),
+        store: () => store,
+        app: real,
+      );
+
+      expect(root, isA<Text>());
+      expect((root as Text).data, contains('restored the copy saved'));
+      expect(store.servers.map((s) => s.baseUrl), ['https://example.test']);
     });
   });
 }

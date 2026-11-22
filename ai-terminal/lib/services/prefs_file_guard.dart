@@ -145,7 +145,12 @@ Future<PrefsGuardResult> guardPrefsFile(
   DateTime? savedAt;
   if (saved != null) {
     savedAt = lastGood.lastModifiedSync();
-    staged.writeAsStringSync(saved, flush: true);
+    try {
+      staged.writeAsStringSync(saved, flush: true);
+    } catch (_) {
+      if (staged.existsSync()) staged.deleteSync(); // no stale old copy left
+      rethrow;
+    }
   }
 
   final t = now ?? DateTime.now();

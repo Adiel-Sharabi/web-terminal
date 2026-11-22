@@ -106,8 +106,8 @@ Future<void> main(List<String> args) async {
   // process lived on with no window at all. bootApp owns the order.
   final root = await bootApp(
     guard: guardPrefsFileForPlatform,
-    initStore: ServerStore.instance.init,
-    settingsDir: (await prefsDirForPlatform())?.path,
+    store: () => ServerStore.instance,
+    settingsDir: () async => (await prefsDirForPlatform())?.path,
     app: (notice) => AiTerminalApp(detached: detached, startupNotice: notice),
   );
   if (root is AiTerminalApp) {
