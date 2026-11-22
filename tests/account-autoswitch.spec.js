@@ -10,6 +10,7 @@ const os = require('os');
 const path = require('path');
 const crypto = require('crypto');
 const lib = require('../lib/account-autoswitch');
+const usageLimit = require('../lib/usage-limit');
 const { startServer, bearer, until } = require('./supervisor-rig');
 
 const MIN = 60 * 1000;
@@ -166,14 +167,30 @@ test.describe('account auto-switch rules (#483)', () => {
 
   test('a session waiting on the switch is weekly-blocked by its own reading, 5-hour window or not', () => {
     const from = T;
-    expect(lib.weeklyBlockedAtSwitch({ sevenD: 100, resumeFrom: undefined })).toBe(false);
-    expect(lib.weeklyBlockedAtSwitch({ sevenD: 100, resumeFrom: from })).toBe(true);
-    expect(lib.weeklyBlockedAtSwitch({ sevenD: 99, resumeFrom: from })).toBe(false);
+    const now = T + MIN;
+    const delayMs = 60000;
+    const at = (args) => lib.weeklyBlockedAtSwitch({ resumeFrom: from, now, delayMs, ...args });
+    expect(at({ sevenD: 100, resumeFrom: undefined })).toBe(false);
+    expect(at({ sevenD: 100 })).toBe(true);
+    expect(at({ sevenD: 99 })).toBe(false);
     // Metrics aged out (sevenD blank): the session's reading from before the switch speaks.
-    expect(lib.weeklyBlockedAtSwitch({ sevenD: null, reading: readingAt(T - 1000), resumeFrom: from })).toBe(true);
+    expect(at({ sevenD: null, reading: readingAt(T - 1000) })).toBe(true);
     // A reading after the switch is the new account's, not the block.
-    expect(lib.weeklyBlockedAtSwitch({ sevenD: null, reading: readingAt(T + 1000), resumeFrom: from })).toBe(false);
-    expect(lib.weeklyBlockedAtSwitch({ sevenD: null, reading: readingAt(T - 1000, { sevenD: 80 }), resumeFrom: from })).toBe(false);
+    expect(at({ sevenD: null, reading: readingAt(T + 1000) })).toBe(false);
+    expect(at({ sevenD: null, reading: readingAt(T - 1000, { sevenD: 80 }) })).toBe(false);
+    // Bounded as the 5-hour block is: the settle delay plus the grace, then no longer.
+    const deadline = from + delayMs + usageLimit.CAP_BLOCK_GRACE_MS;
+    expect(at({ sevenD: 100, now: deadline - 1 })).toBe(true);
+    expect(at({ sevenD: 100, now: deadline })).toBe(false);
+  });
+
+  test('a reading restored from the state file is checked, not trusted', () => {
+    const good = readingAt(T);
+    expect(lib.pendingReadings([['s', good]], T - 60000, T)).toHaveProperty('s');
+    for (const bad of [{ at: undefined }, { at: 'x' }, { prevAt: undefined }, { delta: '2000' }, { delta: 0 }]) {
+      const r = { ...good, fresh: { ...good.fresh, ...bad } };
+      expect(lib.pendingReadings([['s', r]], T - 60000, T)).toEqual({});
+    }
   });
 
   test('a switch that ended with a warning holds further automatic switches, and the notice says so', () => {
