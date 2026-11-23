@@ -690,6 +690,32 @@ test.describe('wait.decision (#492)', () => {
     expect(B.buildBrief(e, { reporting: true }).wait).toBeNull();
   });
 
+  test('control characters are refused in every text field: a pick is TYPED back (gate review)', () => {
+    const cp = (n) => String.fromCodePoint(n);
+    for (const bad of [cp(27), cp(3), cp(0), cp(0x7f), cp(0x9b)]) {
+      for (const over of [
+        { question: `Q${bad}` },
+        { context: `c${bad}` },
+        { options: [{ label: `Back${bad}off` }, { label: 'b' }] },
+        { options: [{ label: 'a', consequence: `x${bad}` }, { label: 'b' }] },
+      ]) {
+        const r = v(dec(over));
+        expect(r.error, `${bad.codePointAt(0)} in ${Object.keys(over)[0]}`).toContain('control characters');
+      }
+    }
+    // Tab, CR and LF are whitespace: folded (LF kept in the context), never refused.
+    const ok = v(dec({ context: `one${cp(13)}${cp(10)}two${cp(9)}x`, options: [{ label: `a${cp(9)}b` }, { label: 'c' }] }));
+    expect(ok.error).toBeUndefined();
+    expect(ok.report.wait.decision.context).toBe(`one${cp(10)}two x`);
+    expect(ok.report.wait.decision.options[0].label).toBe('a b');
+  });
+
+  test('a decision with no "what" says its question where only "what" is read', () => {
+    const r = B.validateReport({ headline: 'h', wait: { on: 'you', decision: dec() } });
+    expect(r.report.wait.what).toBe('Which retry policy?');
+    expect(B.validateReport({ headline: 'h', wait: { on: 'you', what: 'pick one', decision: dec() } }).report.wait.what).toBe('pick one');
+  });
+
   test('the per-prompt note teaches it in one line', () => {
     const t = B.instructionText(null, 'CMD');
     expect(t).toContain('"decision": {"question", "context", "options": [{"label", "consequence"}] x2-4, "recommended": index}');

@@ -730,6 +730,14 @@ class BriefDecision {
   final int? recommended;
   const BriefDecision({required this.question, this.context, required this.options, this.recommended});
 
+  /// [other] puts the same question with the same options: the ask a pick answers. A
+  /// re-report of it keeps a pick valid; another decision (or none) makes it stale.
+  bool sameAsk(BriefDecision? other) =>
+      other != null &&
+      other.question == question &&
+      other.options.length == options.length &&
+      [for (var i = 0; i < options.length; i++) other.options[i].label == options[i].label].every((x) => x);
+
   static BriefDecision? fromJson(dynamic json) {
     if (json is! Map) return null;
     final q = json['question'];

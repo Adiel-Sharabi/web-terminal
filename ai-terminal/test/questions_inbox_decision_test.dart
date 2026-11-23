@@ -270,6 +270,36 @@ void main() {
     await done(tester);
   });
 
+  testWidgets('a pick on a card whose session now puts ANOTHER decision writes nothing (gate review #492)', (tester) async {
+    rows = [_row('d', 'Cache', decision: _decision())];
+    await pump(tester, await repo());
+    // Still a "you" wait, so the plain reply guard alone would pass - but another ask.
+    rows = [_row('d', 'Cache', decision: {..._decision(), 'question': 'Delete the old branch?'})];
+    await tester.tap(k('inbox-focus-decision-0'));
+    await settle(tester);
+    expect(sent, isEmpty);
+    await done(tester);
+  });
+
+  testWidgets('control: the same decision re-reported still takes the pick', (tester) async {
+    rows = [_row('d', 'Cache', decision: _decision())];
+    await pump(tester, await repo());
+    rows = [_row('d', 'Cache', decision: _decision())];
+    await tester.tap(k('inbox-focus-decision-0'));
+    await settle(tester);
+    expect(sent, [('d', buildComposeSubmission('Decision: Small (64 MB)'))]);
+    await done(tester);
+  });
+
+  test('sameAsk: same question and labels; another question or label is another ask', () {
+    BriefDecision d(Map<String, dynamic> m) => BriefDecision.fromJson(m)!;
+    final a = d(_decision());
+    expect(a.sameAsk(d(_decision(recommended: 0))), isTrue, reason: 'a new recommendation is the same ask');
+    expect(a.sameAsk(d({..._decision(), 'question': 'Other?'})), isFalse);
+    expect(a.sameAsk(d(_decision(options: [{'label': 'Small (64 MB)'}, {'label': 'Huge'}]))), isFalse);
+    expect(a.sameAsk(null), isFalse);
+  });
+
   testWidgets('phone width: the card lays out with no overflow', (tester) async {
     rows = [_row('d', 'Cache', decision: _decision())];
     await pump(tester, await repo(), width: 400);

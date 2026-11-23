@@ -1333,6 +1333,16 @@ class _QuestionsInboxScreenState extends State<QuestionsInboxScreen> with Widget
       _needs.reply(s, text,
           still: replyStillWanted, movedOn: '"${s.name}" is no longer waiting on you - nothing was sent'));
 
+  /// A pick on an agent's decision card (#492): the reported-wait reply, sent only while
+  /// the session still puts THAT decision [d]. A card drawn a poll ago must not answer a
+  /// newer decision the session reported since (a turn the person did not type keeps a
+  /// "you" wait alive, so [replyStillWanted] alone would pass).
+  Future<bool> _replyDecision(Session s, BriefDecision d, String label) => _replied(
+      s,
+      _needs.reply(s, 'Decision: $label',
+          still: (fresh) => replyStillWanted(fresh) && d.sameAsk(fresh.brief?.decision),
+          movedOn: '"${s.name}" asks something else now - nothing was sent'));
+
   /// [sent], noting a reply that went out ([_sentTo]).
   Future<bool> _replied(Session s, Future<bool> sent) async {
     final ok = await sent;
@@ -1448,6 +1458,14 @@ class _QuestionsInboxScreenState extends State<QuestionsInboxScreen> with Widget
         final r = it.turn?.prose ?? '';
         return r.isEmpty ? null : askingScope(r);
       case InboxKind.reported:
+        final d = s?.brief?.decision;
+        if (d != null) {
+          return [
+            d.question,
+            ?d.context,
+            for (final o in d.options) o.consequence == null ? '- ${o.label}' : '- ${o.label}: ${o.consequence}',
+          ].join('\n\n');
+        }
         final text = [s?.reason?.text ?? '', _InboxCard._reportedAsk(it) ?? ''].where((t) => t.isNotEmpty).join('\n\n');
         return text.isEmpty ? null : text;
       case InboxKind.background:
@@ -2476,9 +2494,9 @@ class _InboxCard extends StatelessWidget {
             _DecisionCard(
               decision: dec,
               compact: true,
-              busy: state._needs.isBusy(s),
+              busy: state._needs.isBusy(s) || !s.agentReady,
               optionKey: (i) => ValueKey('inbox-decision-${it.key}-$i'),
-              onPick: (label) => unawaited(state._replyReported(s, 'Decision: $label')),
+              onPick: (label) => unawaited(state._replyDecision(s, dec, label)),
             ),
           ];
         }
@@ -2961,9 +2979,9 @@ class _FocusView extends StatelessWidget {
           return [
             _DecisionCard(
               decision: dec,
-              busy: state._needs.isBusy(s),
+              busy: state._needs.isBusy(s) || !s.agentReady || gone,
               optionKey: (i) => ValueKey('inbox-focus-decision-$i'),
-              onPick: (label) => unawaited(state._replyReported(s, 'Decision: $label')),
+              onPick: (label) => unawaited(state._replyDecision(s, dec, label)),
             ),
           ];
         }
