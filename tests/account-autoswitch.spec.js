@@ -28,7 +28,7 @@ test.describe('account auto-switch rules (#483)', () => {
     expect(lib.autoSwitchConfig(undefined).enabled).toBe(false);
     expect(lib.autoSwitchConfig({ enabled: 'yes' }).enabled).toBe(false);
     const c = lib.autoSwitchConfig({ enabled: true, ntfy: { topic: 't', server: 'https://n.example/' } });
-    expect(c).toEqual({ enabled: true, cooldownMs: lib.COOLDOWN_MINUTES_DEFAULT * MIN, ntfy: { server: 'https://n.example', topic: 't' } });
+    expect(c).toEqual({ enabled: true, cooldownMs: lib.COOLDOWN_MINUTES_DEFAULT * MIN, atPct: 95, ntfy: { server: 'https://n.example', topic: 't' } });
     expect(lib.autoSwitchConfig({ enabled: true }).ntfy).toBeNull();
     expect(lib.autoSwitchConfig({ enabled: true, cooldownMinutes: 1 }).cooldownMs).toBe(lib.COOLDOWN_MINUTES_MIN * MIN);
     expect(lib.autoSwitchConfig({ enabled: true, cooldownMinutes: 1e9 }).cooldownMs).toBe(lib.COOLDOWN_MINUTES_MAX * MIN);
@@ -47,12 +47,91 @@ test.describe('account auto-switch rules (#483)', () => {
     expect(reset.fresh).toBeNull();
   });
 
-  test('spent vs not: 100 counts, 99 does not, a reset already passed does not', () => {
-    expect(lib.weeklySpent([readingAt(T)], undefined, T)).toEqual({ resetAt: T + 3 * DAY });
-    expect(lib.weeklySpent([readingAt(T, { sevenD: 99 })], undefined, T)).toBeNull();
-    expect(lib.weeklySpent([readingAt(T, { resetAt: T - 1 })], undefined, T)).toBeNull();
-    expect(lib.weeklySpent([readingAt(T, { resetAt: null })], undefined, T)).toEqual({ resetAt: null });
-    expect(lib.weeklySpent([], undefined, T)).toBeNull();
+  test('spent vs not: at the switch point counts, below it does not, a reset already passed does not', () => {
+    const at100 = { atPct: 100 };
+    expect(lib.weeklySpent([readingAt(T)], undefined, T, at100)).toEqual({ resetAt: T + 3 * DAY, pct: 100 });
+    expect(lib.weeklySpent([readingAt(T, { sevenD: 99 })], undefined, T, at100)).toBeNull();
+    expect(lib.weeklySpent([readingAt(T, { resetAt: T - 1 })], undefined, T, at100)).toBeNull();
+    expect(lib.weeklySpent([readingAt(T, { resetAt: null })], undefined, T, at100)).toEqual({ resetAt: null, pct: 100 });
+    expect(lib.weeklySpent([], undefined, T, at100)).toBeNull();
+  });
+
+  test('#490: the switch point is switchAtPct, default 95, clamped to 50..100', () => {
+    expect(lib.autoSwitchConfig({ enabled: true }).atPct).toBe(95);
+    expect(lib.autoSwitchConfig({ enabled: true, switchAtPct: 90 }).atPct).toBe(90);
+    expect(lib.autoSwitchConfig({ enabled: true, switchAtPct: 10 }).atPct).toBe(lib.SWITCH_AT_PCT_MIN);
+    expect(lib.autoSwitchConfig({ enabled: true, switchAtPct: 150 }).atPct).toBe(lib.SWITCH_AT_PCT_MAX);
+    expect(lib.autoSwitchConfig({ enabled: true, switchAtPct: '80' }).atPct).toBe(95);
+    // The overnight of 2026-11-23: every stopped session's last pushed reading was 98 or 99,
+    // because Claude does not re-render its status line on the weekly refusal. At 95 it switches.
+    const { atPct } = lib.autoSwitchConfig({ enabled: true });
+    expect(lib.weeklySpent([readingAt(T, { sevenD: 99 })], undefined, T, { atPct })).toEqual({ resetAt: T + 3 * DAY, pct: 99 });
+    expect(lib.weeklySpent([readingAt(T, { sevenD: 95 })], undefined, T, { atPct })).toEqual({ resetAt: T + 3 * DAY, pct: 95 });
+    expect(lib.weeklySpent([readingAt(T, { sevenD: 94 })], undefined, T, { atPct })).toBeNull();
+    // No opts at all is the default switch point too, never 100.
+    expect(lib.weeklySpent([readingAt(T, { sevenD: 99 })], undefined, T)).not.toBeNull();
+  });
+
+  test('#490: after a switch, a counted reading that names the OLD account\'s window never counts', () => {
+    const windowA = T + 1 * DAY;
+    const windowB = T + 6 * DAY;
+    const switchedAt = T;
+    // Before the switch, account A's sessions reported its window: those are proven A's.
+    const before = [readingAt(T - 10 * MIN, { sevenD: 80, resetAt: windowA }), readingAt(T - 5 * MIN, { sevenD: 99, resetAt: windowA })];
+    const oldWindows = lib.windowsOf(before, T - DAY, switchedAt);
+    expect(oldWindows).toEqual([windowA]);
+    // Seconds later a response that began after the switch (the counter proves it) still
+    // carries A's rate limits. Without the window check it reads as B spent: the flip back.
+    const lagging = readingAt(T + 2 * MIN, { sevenD: 100, resetAt: windowA });
+    expect(lib.weeklySpent([lagging], switchedAt, T + 3 * MIN, { atPct: 95 })).not.toBeNull();
+    expect(lib.weeklySpent([lagging], switchedAt, T + 3 * MIN, { atPct: 95, oldWindows })).toBeNull();
+    expect(lib.pendingReadings([['s1', lagging]], switchedAt, T + 3 * MIN, { atPct: 95, oldWindows })).toEqual({});
+    // B's own window at the switch point still counts.
+    const real = readingAt(T + 2 * MIN, { sevenD: 96, resetAt: windowB });
+    expect(lib.weeklySpent([lagging, real], switchedAt, T + 3 * MIN, { atPct: 95, oldWindows })).toEqual({ resetAt: windowB, pct: 96 });
+  });
+
+  test('#490: windowsOf takes only counted readings with a future reset, once each; a restored list is checked', () => {
+    const w1 = T + DAY;
+    const w2 = T + 2 * DAY;
+    const since = T - DAY;
+    const readings = [
+      readingAt(T - MIN, { resetAt: w2 }),
+      readingAt(T - 2 * MIN, { resetAt: w1 }),
+      readingAt(T - 3 * MIN, { resetAt: w1 }), // the same window twice
+      readingAt(T - 4 * MIN, { resetAt: T - 1 }), // already turned over
+      readingAt(T - 5 * MIN, { resetAt: null }), // names no window
+      readingAt(since - MIN, { resetAt: T + 3 * DAY }), // from before the previous switch: not this account's
+      lib.noteReading(null, { apiMs: 1, sevenD: 50, sevenDResetAt: T + 4 * DAY, at: T }), // a first report proves nothing
+    ];
+    expect(lib.windowsOf(readings, since, T)).toEqual([w1, w2]);
+    expect(lib.windowsOf(undefined, since, T)).toEqual([]);
+    expect(lib.isOldWindow(w1, [w1])).toBe(true);
+    expect(lib.isOldWindow(w1, [String(w1), null, {}])).toBe(false);
+    expect(lib.isOldWindow(null, [null])).toBe(false);
+    expect(lib.isOldWindow(w1, 'junk')).toBe(false);
+    // One window, reported a few seconds apart, is still one window; an hour apart is not.
+    expect(lib.isOldWindow(w1 + 30 * 1000, [w1])).toBe(true);
+    expect(lib.isOldWindow(w1 + 60 * MIN, [w1])).toBe(false);
+  });
+
+  test('#490: a switch BACK never files the account\'s own window as old (A to B to A)', () => {
+    const wA = T + 1 * DAY;
+    const wB = T + 6 * DAY;
+    // A to B by hand: A's counted readings make A's window old.
+    const firstSwitch = T;
+    const oldAfterFirst = lib.windowsOf([readingAt(T - 5 * MIN, { sevenD: 80, resetAt: wA })], T - DAY, firstSwitch);
+    expect(oldAfterFirst).toEqual([wA]);
+    // On B: a late reading of A's still counts by the API counter, and B's own reading.
+    const lateA = readingAt(T + 2 * MIN, { sevenD: 100, resetAt: wA });
+    const ownB = readingAt(T + 3 * MIN, { sevenD: 96, resetAt: wB });
+    // B to A: only B's window is old. Without `previous`, A's own window would be filed too,
+    // and A could never switch again until its week reset.
+    expect(lib.windowsOf([lateA, ownB], firstSwitch, T + 4 * MIN)).toEqual([wA, wB]);
+    const oldAfterBack = lib.windowsOf([lateA, ownB], firstSwitch, T + 4 * MIN, oldAfterFirst);
+    expect(oldAfterBack).toEqual([wB]);
+    const aAgain = readingAt(T + 10 * MIN, { sevenD: 97, resetAt: wA });
+    expect(lib.weeklySpent([aAgain], T + 4 * MIN, T + 11 * MIN, { atPct: 95, oldWindows: oldAfterBack })).toEqual({ resetAt: wA, pct: 97 });
   });
 
   test('a reading from before the last switch, or from a response that began before it, is stale', () => {
@@ -64,7 +143,7 @@ test.describe('account auto-switch rules (#483)', () => {
     // Within the report margin of the switch.
     expect(lib.weeklySpent([readingAt(T + 3000, { delta: 1000 })], switchedAt, T + MIN)).toBeNull();
     // A response that began after the switch, plus the margin: it is the new account's.
-    expect(lib.weeklySpent([readingAt(T + 60000, { delta: 2000 })], switchedAt, T + 2 * MIN)).toEqual({ resetAt: T + 3 * DAY });
+    expect(lib.weeklySpent([readingAt(T + 60000, { delta: 2000 })], switchedAt, T + 2 * MIN)).toEqual({ resetAt: T + 3 * DAY, pct: 100 });
   });
 
   test('a push lost before the switch: the bound is the PREVIOUS report, not this one', () => {
@@ -76,7 +155,7 @@ test.describe('account auto-switch rules (#483)', () => {
     expect(lib.weeklySpent([late], T, T + 3 * 60 * MIN)).toBeNull();
     // The next response after that one is provably the new login's.
     const next = lib.noteReading(late, { apiMs: 13000, sevenD: 100, sevenDResetAt: T + DAY, at: T + 3 * 60 * MIN + 10000 });
-    expect(lib.weeklySpent([next], T, T + 4 * 60 * MIN)).toEqual({ resetAt: T + DAY });
+    expect(lib.weeklySpent([next], T, T + 4 * 60 * MIN)).toEqual({ resetAt: T + DAY, pct: 100 });
   });
 
   test('each failure in a row doubles the wait before the next attempt, up to a day', () => {
@@ -149,6 +228,10 @@ test.describe('account auto-switch rules (#483)', () => {
     const failed = lib.notice('failed', { server: 'Box', from: 'a', to: 'b', error: 'cannot read', retryAt: T });
     expect(failed.title).toBe('Claude account switch failed on Box');
     expect(failed.message).toContain('switching to b failed: cannot read');
+    // #490: a switch before the limit says how far the week got.
+    const early = lib.notice('switched', { server: 'Box', from: 'a', to: 'b', resetAt: T + DAY, pct: 96 });
+    expect(early.message).toContain('a reached 96% of its weekly limit');
+    expect(lib.notice('switched', { server: 'Box', from: 'a', to: 'b', resetAt: T + DAY, pct: 100 }).message).toContain('a hit its weekly limit');
   });
 
   test('the readings a pending switch rests on (kept across a restart) are the spent ones that count', () => {
@@ -439,6 +522,72 @@ test.describe('account auto-switch end to end (#483)', () => {
       expect(manual.status(), await manual.text()).toBe(200);
       expect(activeEmail(rig.home)).toBe('b@example.com');
       expect(rig.readState().held).toBeNull();
+    } catch (e) {
+      throw new Error(`${e.message}\n--- isolated server log (tail) ---\n${srv.log().slice(-3000)}`);
+    } finally {
+      await ctx.dispose();
+      await srv.stop();
+      fs.rmSync(rig.dir, { recursive: true, force: true });
+    }
+  });
+  // #490 review - a login changed OUTSIDE this server (a /login, the CLI): the readings so far
+  // may be the new account's own, so none of its windows is filed as old, and the new
+  // account still switches at its own switch point.
+  test('#490: a login changed outside the server files no window as old; the new account still switches', async () => {
+    const rig = autoSwitchRig('o');
+    const { srv, ctx } = await rig.boot();
+    try {
+      const windowB = resetSecIn(6 * DAY);
+      writeLogin(rig.home, B); // the server recorded A; B is on disk now, written by someone else
+      const push = (apiMs, sevenD) => ctx.post('/api/claude-status', { data: statusPayload('agent-490o', apiMs, sevenD, windowB) });
+      expect((await push(1000, 90)).status()).toBe(200);
+      await push(1200, 96); // B at its switch point: first, the server only learns the login changed
+      await until(async () => (rig.readState().activeKey || '').startsWith('b@example.com'), 'the outside change recorded', 10000);
+      expect(rig.readState().oldWindows).toEqual([]);
+      expect(activeEmail(rig.home)).toBe('b@example.com');
+      await new Promise((r) => setTimeout(r, 6000)); // past the report margin
+      await push(1200, 96); // a re-render
+      await push(1300, 97); // a response that began after the record: B's own, at 97
+      await until(async () => activeEmail(rig.home) === 'a@example.com', 'the switch on B\'s own window', 10000);
+    } catch (e) {
+      throw new Error(`${e.message}\n--- isolated server log (tail) ---\n${srv.log().slice(-3000)}`);
+    } finally {
+      await ctx.dispose();
+      await srv.stop();
+      fs.rmSync(rig.dir, { recursive: true, force: true });
+    }
+  });
+
+  // #490 - the 2026-11-23 flip, replayed: a switch BY HAND to B, then a response that began
+  // after it (the API counter grew) still carrying A's spent window. It must not switch back
+  // to A. B's own window at the switch point (95 by default) then does switch, by itself.
+  test('#490: a reading naming the old account\'s window never switches back; the new one\'s at 95% does', async () => {
+    const rig = autoSwitchRig('w');
+    const { srv, ctx } = await rig.boot();
+    try {
+      const windowA = resetSecIn(1 * DAY);
+      const windowB = resetSecIn(6 * DAY);
+      const push = (apiMs, sevenD, resetSec) => ctx.post('/api/claude-status', { data: statusPayload('agent-490', apiMs, sevenD, resetSec) });
+      // Account A, on the way up: a baseline, then a counted reading below the switch point.
+      expect((await push(1000, 70, windowA)).status()).toBe(200);
+      await push(1200, 80, windowA);
+      const manual = await ctx.post('/api/claude-account/switch', { data: { account: 'b@example.com' } });
+      expect(manual.status(), await manual.text()).toBe(200);
+      expect(rig.readState().oldWindows).toEqual([windowA * 1000]);
+      // Past the report margin, a re-render, then a response that began after the switch -
+      // still naming A's window, at 100%.
+      await new Promise((r) => setTimeout(r, 6000));
+      await push(1200, 100, windowA);
+      await push(1250, 100, windowA);
+      await new Promise((r) => setTimeout(r, 800));
+      expect(activeEmail(rig.home)).toBe('b@example.com');
+      expect(await accountNotices(ctx)).toHaveLength(0);
+      // B's own window at 96%: at the switch point, so it switches to A, and the notice says how far.
+      await push(1400, 96, windowB);
+      await until(async () => activeEmail(rig.home) === 'a@example.com', 'the switch on B\'s own window', 10000);
+      const notices = await accountNotices(ctx);
+      expect(notices).toHaveLength(1);
+      expect(notices[0].message).toContain('b@example.com reached 96% of its weekly limit');
     } catch (e) {
       throw new Error(`${e.message}\n--- isolated server log (tail) ---\n${srv.log().slice(-3000)}`);
     } finally {
