@@ -83,7 +83,8 @@ test.describe('#506 Answer now: which waits, ranked by what they block', () => {
   });
 
   test('kinds: a question, a permission, a decision card and a reported wait; anything else is not on the person', () => {
-    const q = row('alpha', { status: 'waiting', waitingFor: 'question', reason: { kind: 'you', text: 'answer a question' }, turnAt: NOW - 7 * MIN });
+    const q = row('alpha', { status: 'waiting', waitingFor: 'question', reason: { kind: 'you', text: 'answer a question' }, turnAt: NOW - 7 * MIN,
+      lastActivity: NOW - 6 * MIN });
     const p = row('alpha', { status: 'waiting', waitingFor: 'permission', reason: { kind: 'you', text: 'approve a tool' } });
     const d = asking('alpha', 'choose', 3, { wait: { on: 'you', what: 'choose', at: NOW - 3 * MIN, decision: { question: 'A or B?', options: [] } } });
     const w = asking('beta', 'say go', 4);
@@ -92,8 +93,9 @@ test.describe('#506 Answer now: which waits, ranked by what they block', () => {
     const v = now({ rows: [q, p, d, w, ext, self] });
     const byKind = Object.fromEntries(v.answerNow.map((c) => [c.kind, c]));
     expect(Object.keys(byKind).sort()).toEqual(['decision', 'permission', 'question', 'wait']);
-    // The id names the wait itself: a question by the turn it came up in, a reported wait by its `at`.
-    expect(byKind.question.id).toBe(`alpha|${q.id}|question:${NOW - 7 * MIN}`);
+    // The id names the wait itself: a prompt on screen by its turn and the session's last
+    // activity, a reported wait by its `at`.
+    expect(byKind.question.id).toBe(`alpha|${q.id}|question:${NOW - 7 * MIN}.${NOW - 6 * MIN}`);
     expect(byKind.wait.id).toBe(`beta|${w.id}|wait:${NOW - 4 * MIN}`);
     expect(byKind.decision.decision).toEqual({ question: 'A or B?', options: [] });
     expect(v.moving).toEqual({ working: 0, idle: 2, total: 2 });
@@ -121,6 +123,20 @@ test.describe('#506 Answer now: which waits, ranked by what they block', () => {
       { ...todo('open'), id: 't-c', createdAt: NOW - 2 }, { ...todo('back'), id: 't-d' }] }).todo;
     expect(list.map((t) => t.id)).toEqual(['t-c', 't-b', 't-a']);
     expect(list[2].doneAt).toBe(NOW);
+  });
+
+  test('a second permission prompt in the same turn is a new card: the first one\'s to-do or later never hides it', () => {
+    const at = (last) => row('alpha', { id: 'perm-0000-4000-8000-000000000001', status: 'waiting', waitingFor: 'permission',
+      reason: { kind: 'you', text: 'approve a tool' }, turnAt: NOW - 20 * MIN, lastActivity: last });
+    const first = now({ rows: [at(NOW - 10 * MIN)] }).answerNow[0];
+    // Tool A was approved at the desk and ran; the same turn now asks about tool B.
+    const todos = [{ id: 't-1', cardId: first.id, createdAt: NOW, state: 'done', doneAt: NOW, park: { state: 'none' } }];
+    const second = now({ rows: [at(NOW - 2 * MIN)], todos, later: { [first.id]: { until: NOW + HOUR } } });
+    expect(second.answerNow).toHaveLength(1);
+    expect(second.answerNow[0].id).not.toBe(first.id);
+    // A session with no turn and no activity known still has a card (named by zeros).
+    expect(now({ rows: [row('alpha', { status: 'waiting', waitingFor: 'question', reason: { kind: 'you' }, turnAt: null, lastActivity: null })] })
+      .answerNow[0].id).toMatch(/\|question:0\.0$/);
   });
 });
 
@@ -169,6 +185,23 @@ test.describe('#506 the park message and the to-do actions', () => {
     expect(N.parkedAnswer(N.parkResult(t, { uncertain: true }, NOW))).toEqual({ delivered: false, uncertain: true });
   });
 
+  test('a prompt on screen is never sent a park message: typed text would answer it, and later it may name another wait', () => {
+    for (const kind of ['question', 'permission']) {
+      const t = N.newTodo({ id: 'card', kind, ref: 'ado:5', askedAt: NOW, sessionId: 's', server: 'alpha' }, { id: 't-3', text: null, now: NOW });
+      expect(t.park, kind).toEqual({ state: 'none', why: 'on-screen', at: NOW });
+      expect(N.parkedAnswer(t)).toEqual({ delivered: false, refused: 'on-screen', reason: N.refusalWords('on-screen') });
+      expect(N.publicTodo(t).park).toMatchObject({ state: 'none', refused: 'on-screen' });
+      // No retry either: once the prompt is gone the message could hide a NEW wait.
+      expect(N.applyAction(t, 'park', NOW)).toMatchObject({ status: 409 });
+    }
+    expect(N.refusalWords('on-screen')).toContain('answer it there');
+    // A long non-ASCII ref is cut by code point, never through a surrogate pair.
+    const ref = String.fromCodePoint(0x1F600).repeat(100);
+    const text = N.parkText({ ref });
+    expect(text).toContain(`${String.fromCodePoint(0x1F600).repeat(79)}...`);
+    expect(Buffer.from(text, 'utf8').toString('utf8')).toBe(text);
+  });
+
   test('inputs are refused with the reason; finished to-dos are kept a week', () => {
     expect(N.todoInput(null).error).toBeTruthy();
     expect(N.todoInput({ cardId: '' }).error).toBeTruthy();
@@ -207,6 +240,30 @@ test.describe('#506 the park message and the to-do actions', () => {
       const s3 = createMcState({ file, log: () => {} });
       expect(s3.todos().map((t) => t.id)).toEqual(['t-2']);
       expect(s3.later()).toEqual({});
+    } finally { fs.rmSync(dir, { recursive: true, force: true }); }
+  });
+
+  test('mc-state: a write that fails says so, and a file that exists but cannot be read is never written over', () => {
+    const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'mc-needs-'));
+    try {
+      // A directory where the file goes: the write (tmp + rename onto it) fails.
+      const blocked = path.join(dir, 'blocked.json');
+      fs.mkdirSync(blocked);
+      const logs = [];
+      const s1 = createMcState({ file: blocked, log: (m) => logs.push(m) });
+      // Reading it is not ENOENT: unreadable, so nothing is stored and nothing written.
+      expect(s1.setTodos([{ id: 't-1', cardId: 'c', createdAt: NOW, state: 'open' }], { now: true })).toBe(false);
+      expect(s1.setLater({ c: { until: NOW + 1 } })).toBe(false);
+      expect(s1.flush()).toBe(false);
+      expect(fs.statSync(blocked).isDirectory()).toBe(true);
+      expect(logs.join(' ')).toContain('unreadable');
+      // A readable state whose write fails: false, and the caller sends nothing.
+      const file = path.join(dir, 'mc-state.json');
+      const s2 = createMcState({ file, log: () => {} });
+      expect(s2.setTodos([], { now: true })).toBe(true);
+      fs.rmSync(file);
+      fs.mkdirSync(file);
+      expect(s2.setTodos([{ id: 't-2', cardId: 'c', createdAt: NOW, state: 'open' }], { now: true })).toBe(false);
     } finally { fs.rmSync(dir, { recursive: true, force: true }); }
   });
 });

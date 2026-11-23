@@ -279,7 +279,8 @@ class McCard {
 
 /// What became of a to-do's park message (#506): `sending`, `delivered`, `refused` (the
 /// session's gates said no; [reason] says why in plain words, and only the person sends it
-/// again) or `uncertain` (it may have landed; never sent again). The server's words.
+/// again), `uncertain` (it may have landed; never sent again) or `none` (a prompt on its
+/// screen: never sent; [reason] says so). The server's words.
 class McPark {
   final String? state;
   final String? refused;
@@ -294,6 +295,12 @@ class McPark {
 
   /// The session was not told, and the person may ask again.
   bool get isRefused => state == 'refused';
+
+  /// The session was not told, and why ([reason]): a refusal, or a prompt on its screen.
+  bool get notSent => state == 'refused' || state == 'none';
+
+  /// It may have reached the session (no answer came, or none yet).
+  bool get maybeSent => state == 'uncertain' || state == 'sending';
 }
 
 /// One "My to-do" entry: a hands-on thing for the desk, parked by its session.

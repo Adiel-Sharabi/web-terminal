@@ -174,7 +174,17 @@ void main() {
       expect(r.uncertain, isFalse);
       expect(r.todo?.park.isRefused, isTrue);
       expect(r.todo?.park.refused, 'draft');
-      expect(McFeed.mcParkWords(r), '; its session was told before, so nothing was sent again');
+      // Moved again after a refusal: it says NOT told, never "told before".
+      expect(McFeed.mcParkWords(r), ', but the session was not told: it has unsent text in its prompt box');
+      expect(McFeed.mcParkWords(McTodoResult.fromJson({'parked': {'delivered': true, 'already': true}})),
+          '; its session was told before, so nothing was sent again');
+      final none = McTodo.fromJson({
+        'id': 't',
+        'park': {'state': 'none', 'refused': 'on-screen', 'reason': 'a prompt is on its screen'}
+      })!;
+      expect(none.park.notSent, isTrue);
+      expect(none.park.isRefused, isFalse, reason: 'no Tell button: nothing may be sent');
+      expect(McTodo.fromJson({'id': 't', 'park': {'state': 'sending'}})!.park.maybeSent, isTrue);
       final u = McTodoResult.fromJson({'parked': {'delivered': false, 'uncertain': true}});
       expect(McFeed.mcParkWords(u), '; the message may have reached the session');
       expect(McFeed.mcParkWords(McTodoResult.fromJson({'parked': {'delivered': true}})), '; the session was told to carry on');

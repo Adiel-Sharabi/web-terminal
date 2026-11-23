@@ -211,15 +211,18 @@ Card = { id,                     // '<server>|<sessionId>|<kind>:<at>' - names t
                                  // text e.g. "blocks 3 sessions and 2 work items"
   rank, askedAt, decision: {...}|null, hasQuestion: bool }
 Todo = { id, cardId, kind, subjectKey, ref, title, project, text, server, sessionId, sessionName, createdAt, doneAt|null,
-  park: { state: 'sending'|'delivered'|'refused'|'uncertain', refused: code|null, reason: words|null, at } }
+  park: { state: 'sending'|'delivered'|'refused'|'uncertain'|'none', refused: code|null, reason: words|null, at } }
 ```
 Answer now = every LIVE session whose wait is `you` by the subjects' own rule (`sessionWaitOn`:
 its `reason`, or for a peer too old to send one, status `waiting` or a reported `you` wait): a
 question or permission prompt on screen, a decision card (#492), a reported `you` wait. One card
 per session; the card is `lib/mc-subjects.js` `needsYouCard`, the same as a subject's `needsYou`.
 Its id names the wait: a reported wait (wait, decision) by its `at` (the agent's next report is a
-new card), a prompt on screen by the turn it came up in (`brief.turnAt`). `askedAt` = the wait's
-`at`, or for a prompt on screen the session's last activity. The card's subject is the first item
+new card); a prompt on screen by the turn it came up in (`brief.turnAt`) AND the session's last
+activity (`<turnAt>.<lastActivity>`), which every later prompt moves, so a second permission prompt
+in one turn is a new card. A redraw moves it too and a parked card then comes back: wrong toward
+showing, never toward hiding a stuck session. `askedAt` = the wait's `at`, or for a prompt on
+screen the session's last activity. The card's subject is the first item
 the session carries that is not done.
 What it blocks (`why`): the asking session and every LIVE session above it in the tree
 (`lib/mc-tree.js` ancestors: an orchestrator waits on the children it opened), and the work items
@@ -235,7 +238,8 @@ new card. To-dos and "later"s live in `mc-state.json` (authority only); a finish
 or sent back) is kept 7 days, at most 500 in all.
 `POST /api/mc/todo {cardId, text?}` (text: the person's own words, at most 500 characters) ->
 `{todo, parked: {delivered, refused?, reason?, uncertain?, already?}, generatedAt}`; 404 when the
-card no longer waits. It records the to-do ON DISK (park `sending`), then sends the session ONE
+card no longer waits. It records the to-do ON DISK (park `sending`; a write that fails answers `500` and sends nothing,
+and a state file that exists but cannot be read is never written over), then sends the session ONE
 fixed park message through the gated prompt of the session's own server (`gatedPrompt` here, a
 peer's `POST /api/sessions/:id/prompt` with the stored token: the supervisor's own path), with the
 supervisor tag (a SYSTEM turn) and, for a reported wait, `expectWaitAt` = the wait's `at` (a
@@ -244,11 +248,13 @@ session that reported since answers `stale`). The text:
 The same cardId again (a second press, or after `back`) returns the same to-do with
 `already: true` and sends nothing. A refusal (a draft, a turn running, a prompt on screen: the
 gated prompt's code, `reason` in plain words) is answered and kept; it is retried ONLY by
-`park`. A prompt on screen (question, permission) always refuses (`not-idle`/`waiting`): text
-typed there would answer it; the to-do is still recorded.
+`park`. A prompt on screen (question, permission) is never sent one (park `none`, refused
+`on-screen`, no retry): text typed there would ANSWER it, and once it is gone nothing says the
+message is still about the same wait. The to-do is still recorded; the person answers it at the desk.
 `POST /api/mc/todo/:id {action}`: `done` (409 when done), `reopen` (409 unless done), `back` (to
 Answer now: the to-do leaves the list, its card shows again while it waits), `park` (resend a
-REFUSED message only; 409 when it was delivered or may have landed: `sending`, `uncertain`) ->
+REFUSED message only; 409 when it was delivered or may have landed: `sending`, `uncertain`; or
+none may be sent: `none`) ->
 `{todo, parked?, generatedAt}`; an unknown id is 404, an unknown action 400.
 `POST /api/mc/later {cardId, hours: 1-24 whole}` -> `{cardId, until, generatedAt}`: hidden until
 then, back only if still pending (404 when the card no longer waits). Not the supervisor's later.

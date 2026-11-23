@@ -241,11 +241,13 @@ class McFeed extends ChangeNotifier {
 
   /// What the server said about the park message, as the end of a sentence.
   static String mcParkWords(McTodoResult r) {
+    // Not told wins: a card moved again after a refusal must never read as "told".
+    final why = r.refused;
+    if (why != null) return ', but the session was not told: $why';
+    if (r.uncertain) return '; the message may have reached the session';
     if (r.already) return '; its session was told before, so nothing was sent again';
     if (r.delivered) return '; the session was told to carry on';
-    if (r.uncertain) return '; the message may have reached the session';
-    final why = r.refused;
-    return why == null ? '' : ', but the session was not told: $why';
+    return '';
   }
 
   ApiClient _authority() {

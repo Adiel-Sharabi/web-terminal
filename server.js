@@ -7115,14 +7115,17 @@ app.get('/api/mc/subjects/:key', async (req, res) => {
 // refusal (a draft, a turn running) is answered, never retried on its own (#479).
 const MC_TODO_ID_RE = /^t-[0-9a-f]{16}$/;
 
-/** Change one stored to-do; null when it is gone. [writeNow]: on disk before this returns. */
+/** Change one stored to-do: `{todo, ok}` (ok: stored, on disk when [writeNow]; a failed write
+ *  leaves the stored list as it was), or null when it is gone. */
 function mcUpdateTodo(id, fn, writeNow) {
-  const list = mcState.todos();
+  const before = mcState.todos();
+  const list = before.slice();
   const i = list.findIndex((t) => t.id === id);
   if (i < 0) return null;
   list[i] = fn(list[i]);
-  mcState.setTodos(mcNeeds.pruneTodos(list, Date.now()), { now: writeNow });
-  return list[i];
+  const ok = mcState.setTodos(mcNeeds.pruneTodos(list, Date.now()), { now: writeNow });
+  if (!ok) mcState.setTodos(before);
+  return { todo: list[i], ok };
 }
 
 /** Send to-do [todo]'s park message (its body was fixed when the to-do was made) and record
@@ -7137,7 +7140,8 @@ async function mcPark(todo) {
     out = { uncertain: true };
   }
   const now = Date.now();
-  return mcUpdateTodo(todo.id, (t) => mcNeeds.parkResult(t, out, now), true) || mcNeeds.parkResult(todo, out, now);
+  const u = mcUpdateTodo(todo.id, (t) => mcNeeds.parkResult(t, out, now), true);
+  return u ? u.todo : mcNeeds.parkResult(todo, out, now);
 }
 
 app.get('/api/mc/now', async (req, res) => {
@@ -7169,16 +7173,23 @@ app.post('/api/mc/todo', express.json({ limit: '8kb' }), async (req, res) => {
     const existing = todos.find((t) => t.cardId === inp.cardId);
     if (existing) {
       // Its session was already told (or refused): moving the card again never tells it twice.
-      const todo = existing.state === 'back'
-        ? mcUpdateTodo(existing.id, (t) => ({ ...t, state: 'open', backAt: null, doneAt: null, text: inp.text || t.text }), true)
-        : existing;
+      let todo = existing;
+      if (existing.state === 'back') {
+        const u = mcUpdateTodo(existing.id, (t) => ({ ...t, state: 'open', backAt: null, doneAt: null, text: inp.text || t.text }), true);
+        if (!u || !u.ok) return res.status(500).json({ error: 'could not record the to-do' });
+        todo = u.todo;
+      }
       return res.json({ todo: mcNeeds.publicTodo(todo), parked: mcNeeds.parkedAnswer(todo, { already: true }), generatedAt: now });
     }
     const card = mcNeeds.pendingCards({ nodes: v.nodes, view: v, now }).find((c) => c.id === inp.cardId);
     if (!card) return res.status(404).json({ error: 'that card no longer waits on you' });
     const todo = mcNeeds.newTodo(card, { id: `t-${crypto.randomBytes(8).toString('hex')}`, text: inp.text, now });
-    mcState.setTodos(mcNeeds.pruneTodos([...todos, todo], now), { now: true });
-    const done = await mcPark(todo);
+    // On disk BEFORE the message goes out; a failed write sends nothing.
+    if (!mcState.setTodos(mcNeeds.pruneTodos([...todos, todo], now), { now: true })) {
+      mcState.setTodos(todos);
+      return res.status(500).json({ error: 'could not record the to-do' });
+    }
+    const done = todo.park.state === 'sending' ? await mcPark(todo) : todo;
     res.json({ todo: mcNeeds.publicTodo(done), parked: mcNeeds.parkedAnswer(done), generatedAt: Date.now() });
   } catch (e) {
     console.error(`[mc] todo: ${e.message}`);
@@ -7196,9 +7207,10 @@ app.post('/api/mc/todo/:id', express.json({ limit: '8kb' }), async (req, res) =>
   if (r.error) return res.status(r.status).json({ error: r.error });
   try {
     // A retried park is marked `sending` on disk before it goes out, like the first one.
-    const todo = mcUpdateTodo(id, () => r.todo, Boolean(r.park));
-    if (!r.park) return res.json({ todo: mcNeeds.publicTodo(todo), generatedAt: Date.now() });
-    const done = await mcPark(todo);
+    const u = mcUpdateTodo(id, () => r.todo, Boolean(r.park));
+    if (!u || !u.ok) return res.status(500).json({ error: 'could not change the to-do' });
+    if (!r.park) return res.json({ todo: mcNeeds.publicTodo(u.todo), generatedAt: Date.now() });
+    const done = await mcPark(u.todo);
     res.json({ todo: mcNeeds.publicTodo(done), parked: mcNeeds.parkedAnswer(done), generatedAt: Date.now() });
   } catch (e) {
     console.error(`[mc] todo action: ${e.message}`);
@@ -7219,7 +7231,9 @@ app.post('/api/mc/later', express.json({ limit: '8kb' }), async (req, res) => {
       return res.status(404).json({ error: 'that card no longer waits on you' });
     }
     const until = now + inp.hours * 60 * 60 * 1000;
-    mcState.setLater({ ...mcNeeds.pruneLater(mcState.later(), now), [inp.cardId]: { until, at: now } });
+    if (!mcState.setLater({ ...mcNeeds.pruneLater(mcState.later(), now), [inp.cardId]: { until, at: now } })) {
+      return res.status(500).json({ error: 'could not put the card off' });
+    }
     res.json({ cardId: inp.cardId, until, generatedAt: now });
   } catch (e) {
     console.error(`[mc] later: ${e.message}`);

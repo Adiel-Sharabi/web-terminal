@@ -479,9 +479,11 @@ class _McTodoSectionState extends State<McTodoSection> {
     void act(String action) => mcRun(context, () => widget.feed.todoAction(t, action));
     // The park message, when the session was NOT told: why, and the one way to try again.
     final park = t.park;
-    final notTold = !t.done && park.isRefused
-        ? 'Its session was not told: ${park.reason ?? park.refused ?? 'refused'}'
-        : (!t.done && park.state == 'uncertain' ? 'The message may have reached its session' : null);
+    final notTold = t.done
+        ? null
+        : park.notSent
+            ? 'Its session was not told: ${park.reason ?? park.refused ?? 'refused'}'
+            : (park.maybeSent ? 'The message may have reached its session' : null);
     return Card(
       key: ValueKey('mc-todo-${t.id}'),
       margin: const EdgeInsets.only(bottom: 6),
