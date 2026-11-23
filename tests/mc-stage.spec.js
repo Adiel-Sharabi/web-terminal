@@ -135,6 +135,11 @@ test.describe('#505 evidence beats the report', () => {
     // A read that FAILED (error set, the old copy served) withdraws nothing.
     const failed = S.foldStage({ history: closed.history, reports: [], meta: meta({ state: 'Active', error: 'GitHub answered HTTP 500' }), now: T0 + 2 });
     expect(failed.stage.current).toBe('merged');
+    // Nor does a PARTIAL read (the timeline or a linked PR could not be read: `warning`, PRs missing).
+    const pr = S.foldStage({ history: [], reports: [], meta: meta({ prs: [{ number: 5, state: 'merged' }] }), now: T0 });
+    const partial = S.foldStage({ history: pr.history, reports: [], meta: meta({ prs: [], warning: 'the linked pull requests could not be read' }), now: T0 + 1 });
+    expect(partial.stage.current).toBe('merged');
+    expect(partial.changed).toBe(false);
     // Phase A merged, then phase B's PR opens: merged is withdrawn to pr-open.
     const a = S.foldStage({ history: [], reports: [], meta: meta({ prs: [{ number: 1, state: 'merged' }] }), now: T0 });
     const b = S.foldStage({ history: a.history, reports: [], meta: meta({ prs: [{ number: 1, state: 'merged' }, { number: 2, state: 'open' }] }), now: T0 + 1 });

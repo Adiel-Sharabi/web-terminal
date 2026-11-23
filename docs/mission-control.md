@@ -133,7 +133,7 @@ merged one (phase A merged, phase B open); else a merged linked PR -> merged; an
 proves nothing. A GitHub link is any cross-reference, so a PR that only mentions the item counts.
 current = the furthest of the stored history, the reports and the evidence. A stage reached by a
 REPORT never moves back (a stale report cannot lower it). A stage only the tracker proved is
-withdrawn when a fresh read (no `error`) no longer proves it (a reopened item, another PR opened),
+withdrawn when a fresh, complete read (no `error`, no `warning`) no longer proves it (a reopened item, another PR opened),
 down to what the reports and the evidence still hold. The history records ADVANCES (at most one
 entry per stage, stage order, so its times need not ascend), each `{stage, at, source, detail}`:
 `at` is the report's time for a report, the time the server saw it for evidence. Every session's
