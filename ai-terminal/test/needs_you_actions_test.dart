@@ -298,6 +298,33 @@ void main() {
       expect(QuestionDraftStore.instance.peek(_server.baseUrl, s.id), isNull);
     });
 
+    test('quickAnswerSelections keeps the guards: blocked and ill-fitting selections write ZERO keys',
+        () async {
+      final a = await actions();
+      final s = _session();
+      final shown = _pq('Pick one');
+      final sig = questionSignature(shown);
+      // A selection that does not fit the question is refused before anything is typed.
+      expect(
+          await a.quickAnswerSelections(s, shown, [
+            {9},
+          ]),
+          PreWriteVerdict.refused);
+      expect(await a.quickAnswerSelections(s, shown, const []), PreWriteVerdict.refused);
+      // An earlier answer with words did not land: refused, the same as a board press.
+      QuestionDraftStore.instance.of(_server.baseUrl, s.id)
+        ..key = sig
+        ..markSent(sig, buildAnswerFrames(shown.questions, [<int>{}], otherText: ['half typed']));
+      expect(a.quickAnswerBlocked(s, shown), isTrue);
+      expect(
+          await a.quickAnswerSelections(s, shown, [
+            {0},
+          ]),
+          PreWriteVerdict.refused);
+      expect(written, isEmpty);
+      expect(said.last, contains('did not land'));
+    });
+
     test('quickAnswer refuses, with ZERO keys, a question one press cannot answer', () async {
       final a = await actions();
       final multi = PendingQuestion.fromJson({

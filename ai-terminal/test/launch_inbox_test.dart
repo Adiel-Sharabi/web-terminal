@@ -20,11 +20,12 @@ Future<void> _size(WidgetTester tester, Size s) async {
   addTearDown(tester.view.resetDevicePixelRatio);
 }
 
-Widget _home({bool on = true, NotificationTap? tap}) => MaterialApp(
+Widget _home({bool on = true, NotificationTap? tap, bool servers = true}) => MaterialApp(
       theme: AppTheme.dark,
       home: AdaptiveHome(
         openInboxAtLaunch: () async => on,
         launchTap: () async => tap,
+        hasServers: () => servers,
       ),
     );
 
@@ -87,6 +88,16 @@ void main() {
       await tester.pump();
       await tester.pump(const Duration(seconds: 1));
       expect(find.byType(QuestionsInboxScreen), findsNothing, reason: 'pushed once, never again');
+      await tester.pumpWidget(const SizedBox());
+    });
+
+    testWidgets('narrow + on, but no server is configured yet: nothing is pushed (the dashboard says how to add one)',
+        (tester) async {
+      await _size(tester, const Size(420, 900));
+      await tester.pumpWidget(_home(servers: false));
+      await tester.pump();
+      await tester.pump(const Duration(milliseconds: 600));
+      expect(find.byType(QuestionsInboxScreen), findsNothing);
       await tester.pumpWidget(const SizedBox());
     });
 

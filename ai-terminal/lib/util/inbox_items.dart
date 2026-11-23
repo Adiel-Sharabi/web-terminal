@@ -41,6 +41,11 @@ enum InboxKind {
   /// (h) A supervisor case escalated to the owner (#492): read it, open the session.
   escalation,
 
+  /// (i) A session the SERVER says needs the owner (`needsYou`, #492) that this device's
+  /// own rows do not list as blocking: a close-out, an unsent draft. Read-only: its
+  /// way out is the session.
+  supervisorNeed,
+
   /// A session the board counts as needing you that is none of the above (status
   /// `waiting` with no `waitingFor`). Kept so the inbox's blocking count is the
   /// board's Needs-you count, never fewer.
@@ -60,6 +65,7 @@ class InboxItem {
     this.turn,
     this.card,
     this.supCase,
+    this.need,
     this.authority,
     this.dismissed = false,
   });
@@ -96,6 +102,9 @@ class InboxItem {
   final SupervisorCard? card;
   final SupervisorCase? supCase;
   final ServerConfig? authority;
+
+  /// (i) The authority's node for the session it says needs the owner.
+  final SupervisorNode? need;
 
   /// Blocks the agent until the person acts. Prose and background agents do not.
   bool get blocking => kind != InboxKind.prose && kind != InboxKind.background;

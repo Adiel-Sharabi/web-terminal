@@ -128,6 +128,47 @@ void main() {
       expect(supervisorItemsOf(st, _office, rows), hasLength(1));
     });
 
+    test("only the rules' own R4 escalation is folded into the session's wait, not any auto one", () {
+      final st = _state({
+        'cases': [
+          {'id': 'c1', 'rule': 'R2', 'sessionId': 's2', 'server': 'Home', 'line': 'stuck', 'openedAt': 1,
+            'escalated': {'question': 'stuck', 'at': 1, 'auto': true}},
+        ],
+      });
+      expect(supervisorItemsOf(st, _office, rows, blockingKeys: {sessionKey(rows[1])}), hasLength(1));
+    });
+
+    group("the server's needsYou (supervisorNeed)", () {
+      final st = _state({
+        'needsYou': ['s2', 's2', 'gone', 'x9'],
+        'sessions': [
+          {'id': 's2', 'server': 'Home', 'name': 'Closer', 'headline': 'wrapping up',
+            'wait': {'on': 'you', 'what': 'close it out?', 'at': 7}},
+          {'id': 'x9', 'server': 'Elsewhere', 'name': 'Far'},
+        ],
+      });
+
+      test('a session the server says needs you, that is not blocking here, is listed once', () {
+        final items = supervisorItemsOf(st, _office, rows);
+        expect([for (final i in items) i.kind], [InboxKind.supervisorNeed, InboxKind.supervisorNeed]);
+        final close = items.firstWhere((i) => i.need!.id == 's2');
+        expect(close.blocking, isTrue);
+        expect(close.session!.id, 's2');
+        expect(close.key, '${sessionKey(rows[1])}|need', reason: "never the bare session key: that is the session's own item");
+        expect(supervisorNeedText(close.need!), 'close it out?');
+        // A node with no listed row still shows (the push said it needs you); no key clash.
+        final far = items.firstWhere((i) => i.need!.id == 'x9');
+        expect(far.session, isNull);
+        expect(far.key, '${_office.baseUrl}|need|x9');
+        expect(supervisorNeedText(far.need!), 'It needs you');
+      });
+
+      test('not duplicated when the session already blocks here', () {
+        final items = supervisorItemsOf(st, _office, rows, blockingKeys: {sessionKey(rows[1])});
+        expect([for (final i in items) i.need!.id], ['x9']);
+      });
+    });
+
     test('nothing from a peer, a switched-off supervisor or no state', () {
       final card = {
         'cards': [
@@ -207,27 +248,89 @@ void main() {
     });
   });
 
-  group('changedSince', () {
+  group('changedSince and the seen signature', () {
+    InboxItem waiting(Session s) => InboxItem(kind: InboxKind.reported, key: sessionKey(s), server: _home, session: s);
+    Session reportedAt(int since, {int? lastActivity}) => _s('a',
+        status: 'waiting',
+        waitingFor: 'you',
+        reason: {'kind': 'you', 'text': 'x', 'source': 'reported', 'since': since},
+        lastActivity: lastActivity);
+
     test('marks a new key and a changed signature, not an unchanged one', () {
-      final s = _s('a');
-      final it = _wait(s, since: 1);
-      final cur = {it.key: inboxSeenSig(it), 'new': 'x'};
-      final seen = {it.key: inboxSeenSig(it)};
+      final it = waiting(reportedAt(1));
+      final cur = {it.key: inboxSeenSig(it)!, 'new': 'x'};
+      final seen = {it.key: inboxSeenSig(it)!};
       expect(changedSince(seen, cur), {'new'});
-      final again = _wait(s, since: 2);
-      expect(changedSince(seen, {again.key: inboxSeenSig(again)}), {again.key});
+      final again = waiting(reportedAt(2));
+      expect(changedSince(seen, {again.key: inboxSeenSig(again)!}), {again.key});
     });
 
     test('a device that never looked marks nothing: the first look is the baseline', () {
       expect(changedSince(null, {'a': '1'}), isEmpty);
     });
 
-    test('loading a question\'s details does not make it new again', () {
+    test('a waiting row whose lastActivity moves (every output chunk) keeps its signature', () {
+      final a = waiting(reportedAt(5, lastActivity: 100));
+      final b = waiting(reportedAt(5, lastActivity: 999));
+      expect(inboxSeenSig(a), isNotNull);
+      expect(inboxSeenSig(a), inboxSeenSig(b));
+      final undated = InboxItem(
+          kind: InboxKind.waiting, key: 'k', server: _home, session: _s('w', status: 'waiting', lastActivity: 1), since: 1);
+      final moved = InboxItem(
+          kind: InboxKind.waiting, key: 'k', server: _home, session: _s('w', status: 'waiting', lastActivity: 2), since: 2);
+      expect(inboxSeenSig(undated), isNull, reason: 'an undated wait is unknown, never "new again"');
+      expect(inboxSeenSig(moved), isNull);
+    });
+
+    test("a question's signature is unknown until it is read, then its tool call; another question is a new ask", () {
       final s = _s('q', status: 'waiting', waitingFor: 'question');
       final bare = InboxItem(kind: InboxKind.question, key: 'k', server: _home, session: s, since: 3);
       final read = InboxItem(
           kind: InboxKind.question, key: 'k', server: _home, session: s, since: 3, question: _ask([_q(['A'])]));
-      expect(inboxSeenSig(bare), inboxSeenSig(read));
+      expect(inboxSeenSig(bare), isNull);
+      expect(inboxSeenSig(read), 'question|t1');
+      final next = InboxItem(
+          kind: InboxKind.question,
+          key: 'k',
+          server: _home,
+          session: s,
+          question: PendingQuestion(toolUseId: 't2', questions: [_q(['A'])]));
+      expect(inboxSeenSig(next), isNot(inboxSeenSig(read)));
+    });
+
+    test("a supervisor item's signature does not move between two fetches with a different clock", () {
+      final body = {
+        'role': 'authority',
+        'now': 1000,
+        'cards': [
+          {'id': 'k1', 'sessionId': 's2', 'server': 'Home', 'text': 't', 'at': 20},
+        ],
+        'cases': [
+          {'id': 'c1', 'rule': 'R2', 'sessionId': 's2', 'server': 'Home', 'line': 'l', 'openedAt': 1,
+            'escalated': {'question': 'q', 'at': 10}},
+        ],
+        'needsYou': ['s2'],
+        'sessions': [
+          {'id': 's2', 'server': 'Home', 'wait': {'on': 'you', 'what': 'w', 'at': 3}},
+        ],
+      };
+      final rows = [_s('s2')];
+      List<String?> sigs(int receivedAt) {
+        final st = SupervisorState.fromJson(body, receivedAt: DateTime.fromMillisecondsSinceEpoch(receivedAt))!;
+        final items = supervisorItemsOf(st, _office, rows);
+        expect(items, hasLength(3));
+        return [for (final i in items) inboxSeenSig(i)];
+      }
+
+      final first = sigs(1000);
+      final second = sigs(1730); // the poll landed later: the skew-corrected clock moved
+      expect(first, second);
+      expect(first.every((x) => x != null), isTrue);
+    });
+
+    test('mergeSeen keeps what an item not listed now had, and lets the current win', () {
+      expect(mergeSeen({'a': '1', 'b': '2'}, {'b': '3', 'c': '4'}), {'a': '1', 'b': '3', 'c': '4'});
+      expect(mergeSeen(null, {'c': '4'}), {'c': '4'});
     });
   });
 }

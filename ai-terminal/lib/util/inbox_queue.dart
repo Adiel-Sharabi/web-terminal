@@ -67,7 +67,10 @@ Session? _rowOf(List<Session> rows, String? server, String? id) {
 /// [state] (and the only one that takes a decision); [rows] are every server's session
 /// rows, so a card can open its session. A case the RULES escalated (`auto`) about a
 /// session already blocking here ([blockingKeys], by [sessionKey]) is that session's own
-/// wait: its card is already in the queue, and a second one would say it twice.
+/// wait: its card is already in the queue, and a second one would say it twice. Every
+/// session the server's `needsYou` names that is NOT already blocking here (a close-out,
+/// an unsent draft) is listed as a [InboxKind.supervisorNeed]: the server's push and the
+/// journal count it, so the inbox must list it.
 List<InboxItem> supervisorItemsOf(
   SupervisorState? state,
   ServerConfig? authority,
@@ -92,7 +95,8 @@ List<InboxItem> supervisorItemsOf(
   for (final c in state.cases) {
     if (!c.waitsOnOwner) continue;
     final s = _rowOf(rows, c.server, c.sessionId);
-    if (c.escalatedAuto && s != null && blockingKeys.contains(sessionKey(s))) continue;
+    // The server's own predicate for "the rules said it" (`ownerItems`: R4 and auto).
+    if (c.rule == 'R4' && c.escalatedAuto && s != null && blockingKeys.contains(sessionKey(s))) continue;
     out.add(InboxItem(
       kind: InboxKind.escalation,
       key: '${authority.baseUrl}|case|${c.id}',
@@ -103,8 +107,35 @@ List<InboxItem> supervisorItemsOf(
       authority: authority,
     ));
   }
+  final needKeys = <String>{};
+  for (final id in state.needsYou) {
+    final n = state.node(id);
+    if (n == null) continue;
+    final s = _rowOf(rows, n.server, id);
+    if (s != null && blockingKeys.contains(sessionKey(s))) continue;
+    final key = s == null ? '${authority.baseUrl}|need|$id' : '${sessionKey(s)}|need';
+    if (!needKeys.add(key)) continue;
+    out.add(InboxItem(
+      kind: InboxKind.supervisorNeed,
+      key: key,
+      server: s?.server ?? authority,
+      session: s,
+      since: state.local(n.wait?.at),
+      need: n,
+      authority: authority,
+    ));
+  }
   out.sort((a, b) => (a.since ?? 0).compareTo(b.since ?? 0));
   return out;
+}
+
+/// What a [InboxKind.supervisorNeed] says it waits on: the wait the session reported,
+/// else its headline, else a plain line.
+String supervisorNeedText(SupervisorNode n) {
+  final what = n.wait?.what.trim() ?? '';
+  if (what.isNotEmpty) return what;
+  final h = n.headline?.trim() ?? '';
+  return h.isNotEmpty ? h : 'It needs you';
 }
 
 // ---- work items that wait on the owner ----------------------------------------------
@@ -271,11 +302,39 @@ List<InboxItem> _byWorkItem(List<InboxItem> list) {
 
 /// What an inbox entry IS, for "new since you last looked": the same key with a
 /// different signature is a new ask (a new wait, a new reply, a new question). Built
-/// from server data only, so loading a question's details never makes it "new" again.
-String inboxSeenSig(InboxItem it) {
-  final at = it.kind == InboxKind.prose ? '|${it.turn?.at ?? ''}' : '';
-  return '${it.kind.name}|${it.since ?? ''}$at';
+/// from what the SERVER dated (the wait's start, the question's tool call, the turn's
+/// time, the authority's own raw timestamps), never from `lastActivity` (it moves with
+/// every chunk of output), the skew-corrected clock, or the poll. Null when the ask
+/// cannot be told yet (a question not read; a wait with no date): the item is then not
+/// marked, and the saved baseline keeps its earlier value for that key ([mergeSeen]).
+String? inboxSeenSig(InboxItem it) {
+  final s = it.session;
+  String? nonEmpty(String? v) => v == null || v.isEmpty ? null : v;
+  final String? id = switch (it.kind) {
+    InboxKind.question => nonEmpty(it.question?.toolUseId),
+    InboxKind.permission => s?.brief?.now?.at?.toString() ?? nonEmpty(it.turn?.pendingTool?.id),
+    InboxKind.reported || InboxKind.menu || InboxKind.waiting => s?.reason?.since?.toString(),
+    InboxKind.prose => nonEmpty(it.turn?.at),
+    InboxKind.background => it.agent?.startedAt?.toString(),
+    InboxKind.card => it.card?.at?.toString(),
+    InboxKind.escalation => (it.supCase?.escalatedAt ?? it.supCase?.openedAt)?.toString(),
+    InboxKind.supervisorNeed => () {
+        final w = it.need?.wait;
+        return w == null ? 'open' : '${w.at ?? ''}|${w.what}';
+      }(),
+  };
+  return id == null ? null : '${it.kind.name}|$id';
 }
+
+/// The baseline to save: what the person saw before ([old], null when never) with
+/// [current] over it. An item not listed now (its server is offline, a filter) keeps its
+/// old signature, so it does not come back "new"; the oldest are the store's to drop.
+Map<String, String> mergeSeen(Map<String, String>? old, Map<String, String> current) => {
+      if (old != null)
+        for (final e in old.entries)
+          if (!current.containsKey(e.key)) e.key: e.value,
+      ...current,
+    };
 
 /// The signature of a work-item entry: its state and the session reporting it.
 String workItemSeenSig(WorkItemEntry e) => '${e.item.state}|${e.session.id}';

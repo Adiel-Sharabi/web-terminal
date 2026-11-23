@@ -39,6 +39,7 @@ import 'package:xterm/xterm.dart';
 
 import '../api/api_client.dart';
 import '../api/models.dart';
+import '../api/supervisor_models.dart' show SupervisorCard;
 import '../services/app_config.dart';
 import '../services/inbox_seen_store.dart';
 import '../services/needs_you_actions.dart';
@@ -220,6 +221,15 @@ class _QuestionsInboxScreenState extends State<QuestionsInboxScreen> with Widget
   bool _supAsking = false;
   Timer? _supTick;
 
+  /// The first full load is over (#492): the rows were asked for and the supervisor
+  /// answered or failed. Until then a session asked for ([_wantSession]) may simply not
+  /// be listed yet.
+  bool _firstLoaded = false;
+
+  /// Supervisor cards decided here and not yet gone from the authority's answer: hidden
+  /// at once, so a decided card does not sit there until the next fetch.
+  final Set<String> _decided = {};
+
   /// Supervisor cards being decided now, by [InboxItem.key]: both buttons are off.
   final Set<String> _cardBusy = {};
 
@@ -330,17 +340,26 @@ class _QuestionsInboxScreenState extends State<QuestionsInboxScreen> with Widget
     _focusTick = Timer.periodic(widget.focusInterval, (_) => unawaited(_refreshFocused(force: true)));
     _agentsTick = Timer.periodic(widget.agentsInterval, (_) => unawaited(_refreshAgents()));
     _supTick = Timer.periodic(widget.agentsInterval, (_) => unawaited(_refreshSupervisor()));
-    unawaited(_repo.refresh());
     _fetchAll();
     unawaited(_refreshAgents());
-    unawaited(_refreshSupervisor());
+    unawaited(_firstLoad());
+  }
+
+  /// The rows and the supervisor, once: what [_applyWanted] waits for before it gives
+  /// up on a session that is not listed.
+  Future<void> _firstLoad() async {
+    try {
+      await Future.wait([_repo.refresh(), _refreshSupervisor()]);
+    } catch (_) {/* what failed is just not listed */}
+    if (_disposed) return;
+    _update(() => _firstLoaded = true);
   }
 
   @override
   void dispose() {
     WidgetsBinding.instance.removeObserver(this);
     // The person leaves: what is listed now is what they last looked at (#492).
-    if (_baselineLoaded) unawaited(_seenStore.save(_currentSigs()));
+    if (_baselineLoaded) unawaited(_seenStore.save(mergeSeen(_baseline, _currentSigs())));
     _disposed = true;
     _supTick?.cancel();
     _poll?.cancel();
@@ -361,7 +380,7 @@ class _QuestionsInboxScreenState extends State<QuestionsInboxScreen> with Widget
     if (state == AppLifecycleState.resumed || !_baselineLoaded) return;
     // The person leaves (the app is hidden, or the window loses focus): what is listed
     // now is what they last looked at, and what comes after is new again.
-    final sigs = _currentSigs();
+    final sigs = mergeSeen(_baseline, _currentSigs());
     _baseline = sigs;
     unawaited(_seenStore.save(sigs));
   }
@@ -378,9 +397,11 @@ class _QuestionsInboxScreenState extends State<QuestionsInboxScreen> with Widget
     _saveFirstLook();
   }
 
-  /// The signature of everything the inbox lists now, by key.
+  /// The signature of everything the inbox lists now, by key. An ask whose signature
+  /// cannot be told yet ([inboxSeenSig] null) is left out: not new, and the baseline
+  /// keeps what it had.
   Map<String, String> _currentSigs() => {
-        for (final it in _queue) it.key: inboxSeenSig(it),
+        for (final it in _queue) it.key: ?inboxSeenSig(it),
         for (final e in _workEntries()) e.key: workItemSeenSig(e),
       };
 
@@ -400,7 +421,8 @@ class _QuestionsInboxScreenState extends State<QuestionsInboxScreen> with Widget
   /// The person has this item in front of them: it stops being new.
   void _noteSeen(InboxItem it) {
     final b = _baseline;
-    if (b != null) b[it.key] = inboxSeenSig(it);
+    final sig = inboxSeenSig(it);
+    if (b != null && sig != null) b[it.key] = sig;
   }
 
   List<WorkItemEntry> _workEntries() => [
@@ -417,6 +439,12 @@ class _QuestionsInboxScreenState extends State<QuestionsInboxScreen> with Widget
       final find = await askSupervisor(_servers, _client);
       if (_disposed) return;
       _supFind = find;
+      // A decided card the authority no longer lists pending needs no local hiding.
+      final pending = {
+        for (final c in find.state?.cards ?? const <SupervisorCard>[])
+          if (c.pending) '${find.server?.baseUrl}|card|${c.id}',
+      };
+      _decided.removeWhere((k) => !pending.contains(k));
       _changed();
     } finally {
       _supAsking = false;
@@ -434,7 +462,11 @@ class _QuestionsInboxScreenState extends State<QuestionsInboxScreen> with Widget
     try {
       await _client(authority).decideSupervisorCard(card.id, approve: approve);
       _say(approve ? 'Approved' : 'Dismissed');
-      if (!_disposed && _focusKey == it.key) _moveOn(it.key);
+      if (!_disposed) {
+        _decided.add(it.key);
+        if (_focusKey == it.key) _moveOn(it.key);
+        _changed();
+      }
       await _refreshSupervisor();
     } on ApiException catch (e) {
       _say('$no: ${e.message}');
@@ -1016,8 +1048,11 @@ class _QuestionsInboxScreenState extends State<QuestionsInboxScreen> with Widget
   List<InboxItem> get _queue {
     final base = _sessionItems;
     final blocking = base.where((i) => i.blocking).toList();
-    final sup = supervisorItemsOf(_supFind?.state, _supFind?.server, _sessions,
-        blockingKeys: {for (final it in blocking) it.key});
+    final sup = [
+      for (final it in supervisorItemsOf(_supFind?.state, _supFind?.server, _sessions,
+          blockingKeys: {for (final it in blocking) it.key}))
+        if (!_decided.contains(it.key)) it,
+    ];
     var merged = [...blocking, ...sup];
     if (sup.isNotEmpty) {
       final indexed = merged.indexed.toList()
@@ -1111,12 +1146,30 @@ class _QuestionsInboxScreenState extends State<QuestionsInboxScreen> with Widget
     }
   }
 
-  /// Opens the item of the asked-for session once it is listed ([_wantSession]).
+  /// Opens the item of the asked-for session once it is listed ([_wantSession]). The
+  /// request ends here when it is met; when the person is already in a focused route;
+  /// and when the first full load (rows and supervisor) did not list the session at
+  /// all - an owner-wait push for something the inbox does not show opens the session
+  /// itself, as a push always did.
   void _applyWanted(List<InboxItem> items, bool wide) {
     final want = _wantSession;
     if (want == null) return;
+    if (_routeOpen) {
+      _wantSession = null;
+      return;
+    }
     final mine = items.where((i) => i.session?.id == want).toList();
-    if (mine.isEmpty) return;
+    if (mine.isEmpty) {
+      if (!_firstLoaded) return;
+      _wantSession = null;
+      final row = _sessions.where((s) => s.id == want).firstOrNull;
+      if (row != null) {
+        scheduleMicrotask(() {
+          if (!_disposed && mounted) widget.onOpenSession(row);
+        });
+      }
+      return;
+    }
     final it = mine.where((i) => i.blocking).firstOrNull ?? mine.first;
     _wantSession = null;
     scheduleMicrotask(() {
@@ -1136,10 +1189,37 @@ class _QuestionsInboxScreenState extends State<QuestionsInboxScreen> with Widget
     _refreshDigests();
   }
 
-  /// The next blocking item after [key], or the first item left.
+  /// The items in the order they are DRAWN: the blocking ones grouped by project and
+  /// work item ([groupInbox]), then the background ones.
+  List<InboxItem> _drawnOrder() {
+    final items = _queue;
+    return [
+      for (final g in groupInbox([for (final i in items) if (i.blocking) i])) ...g.items,
+      for (final i in items) if (!i.blocking) i,
+    ];
+  }
+
+  /// The keys as last drawn: where [key] stood when it is gone from the queue already.
+  List<String> _lastDrawn = const [];
+
+  /// The next card after [key] in the order the cards are drawn, a blocking one before a
+  /// background one, wrapping to the first; null when nothing else is listed. An item
+  /// that has left the queue is placed where it was last drawn.
   InboxItem? _nextAfter(String key) {
-    final items = _queue.where((i) => i.key != key).toList();
-    return items.where((i) => i.blocking).firstOrNull ?? items.firstOrNull;
+    final now = _drawnOrder();
+    final byKey = {for (final it in now) it.key: it};
+    final order = _lastDrawn.contains(key) ? _lastDrawn : [for (final it in now) it.key];
+    final at = order.indexOf(key);
+    InboxItem? walk(bool Function(InboxItem) take) {
+      for (var i = 1; i <= order.length; i++) {
+        final it = byKey[order[(at + i) % order.length]];
+        if (it != null && it.key != key && take(it)) return it;
+      }
+      return null;
+    }
+
+    if (at < 0) return now.where((i) => i.key != key && i.blocking).firstOrNull ?? now.where((i) => i.key != key).firstOrNull;
+    return walk((i) => i.blocking) ?? walk((_) => true);
   }
 
   /// On from the focused item under [key]: to what that session waits on now, if it
@@ -1158,6 +1238,7 @@ class _QuestionsInboxScreenState extends State<QuestionsInboxScreen> with Widget
   }
 
   void _moveOn(String fromKey) {
+    _wantSession = null;
     final next = _nextAfter(fromKey);
     if (_routeOpen) {
       Navigator.of(context).maybePop();
@@ -1189,6 +1270,7 @@ class _QuestionsInboxScreenState extends State<QuestionsInboxScreen> with Widget
   }
 
   void _openSession(Session s) {
+    _wantSession = null;
     if (_routeOpen) Navigator.of(context).maybePop();
     widget.onOpenSession(s);
   }
@@ -1196,23 +1278,32 @@ class _QuestionsInboxScreenState extends State<QuestionsInboxScreen> with Widget
   // ---- the writes ----------------------------------------------------------------
 
   Future<void> _answer(InboxItem it, PendingQuestion q, List<AnswerFrame> frames) async {
-    final s = it.session!;
-    await _needs.answer(s, q, frames, onSettled: (outcome) {
-      if (outcome == AnswerSettled.notLanded || _disposed) return;
-      _sentTo(s);
-      // A "Chat about this" (#423) is said by NeedsYouActions; it is no answer.
-      if (outcome == AnswerSettled.landed) _say('Answered "${s.name}"');
-      // Either way the card is done with: a Chat must not leave it live on a session
-      // that is now replying, where a press would type into that reply.
-      if (_focusKey == it.key) _moveOn(it.key);
-    });
+    _wantSession = null;
+    await _needs.answer(it.session!, q, frames, onSettled: _settledAnswer(it));
   }
 
-  /// "Take the recommendation" (#492): the options Claude marked, answered through the
-  /// ONE answer path ([buildAnswerFrames] -> [_answer]), so the checks, the draft flags
-  /// and the move on to the next card are the panel's own.
-  Future<void> _answerRecommended(InboxItem it, PendingQuestion q, List<Set<int>> selections) =>
-      _answer(it, q, buildAnswerFrames(q.questions, selections));
+  /// What happens when an answer to [it] settles: a "Chat about this" (#423) is said by
+  /// [NeedsYouActions], no answer; either way the card is done with, and a Chat must not
+  /// leave it live on a session that is now replying, where a press would type into that
+  /// reply. Shared by the panel's Send and "take the recommendation".
+  void Function(AnswerSettled) _settledAnswer(InboxItem it) {
+    final s = it.session!;
+    return (outcome) {
+      if (outcome == AnswerSettled.notLanded || _disposed) return;
+      _sentTo(s);
+      if (outcome == AnswerSettled.landed) _say('Answered "${s.name}"');
+      if (_focusKey == it.key) _moveOn(it.key);
+    };
+  }
+
+  /// "Take the recommendation" (#492): the options Claude marked, through
+  /// [NeedsYouActions.quickAnswerSelections] (the ONE place a one-press whole answer is
+  /// guarded: a refused one never types) and then [buildAnswerFrames] -> `answer`, so
+  /// the checks, the draft flags and the move on to the next card are the panel's own.
+  Future<void> _answerRecommended(InboxItem it, PendingQuestion q, List<Set<int>> selections) async {
+    _wantSession = null;
+    await _needs.quickAnswerSelections(it.session!, q, selections, onSettled: _settledAnswer(it));
+  }
 
   Future<void> _quickAnswer(InboxItem it, PendingQuestion q, int index) async {
     final s = it.session!;
@@ -1362,6 +1453,8 @@ class _QuestionsInboxScreenState extends State<QuestionsInboxScreen> with Widget
         return it.card?.text;
       case InboxKind.escalation:
         return it.supCase?.question;
+      case InboxKind.supervisorNeed:
+        return it.need == null ? null : supervisorNeedText(it.need!);
       case InboxKind.menu || InboxKind.waiting:
         return null;
     }
@@ -1431,6 +1524,10 @@ class _QuestionsInboxScreenState extends State<QuestionsInboxScreen> with Widget
     final items = _queue;
     final blocking = items.where((i) => i.blocking).toList();
     final background = items.where((i) => !i.blocking).toList();
+    _lastDrawn = [
+      for (final g in groupInbox(blocking)) ...[for (final i in g.items) i.key],
+      for (final i in background) i.key,
+    ];
     return Scaffold(
       appBar: AppBar(
         automaticallyImplyLeading: !widget.embedded,
@@ -1499,7 +1596,10 @@ class _QuestionsInboxScreenState extends State<QuestionsInboxScreen> with Widget
         child: InkWell(
           key: ValueKey('inbox-glance-${f.name}'),
           borderRadius: BorderRadius.circular(AppShape.small),
-          onTap: () => _update(() => _filter = active ? InboxFilter.all : f),
+          onTap: () => _update(() {
+            _wantSession = null;
+            _filter = active ? InboxFilter.all : f;
+          }),
           child: Padding(
             padding: const EdgeInsets.symmetric(vertical: 4),
             child: Row(mainAxisSize: MainAxisSize.min, crossAxisAlignment: CrossAxisAlignment.baseline, textBaseline: TextBaseline.alphabetic, children: [
@@ -2299,6 +2399,8 @@ class _InboxCard extends StatelessWidget {
             Text(c.why!,
                 maxLines: 2, overflow: TextOverflow.ellipsis, style: theme.textTheme.bodySmall?.copyWith(color: theme.colorScheme.onSurfaceVariant)),
         ];
+      case InboxKind.supervisorNeed:
+        return [_labelled(context, 'Needs you', supervisorNeedText(it.need!), maxLines: 3)];
       case InboxKind.escalation:
         final c = it.supCase!;
         final theme = Theme.of(context);
@@ -2407,7 +2509,19 @@ class _InboxCard extends StatelessWidget {
           ]),
         ];
       case InboxKind.card:
-        return [_cardButtons(context, state, it, large: false, wide: wide)];
+        return [_cardButtons(context, state, it, large: false)];
+      case InboxKind.supervisorNeed:
+        if (s == null) return const [];
+        return [
+          Align(
+            alignment: AlignmentDirectional.centerStart,
+            child: TextButton(
+              key: ValueKey('inbox-need-open-${it.need!.id}'),
+              onPressed: () => state._openSession(s),
+              child: const Text('Open session'),
+            ),
+          ),
+        ];
       case InboxKind.escalation:
         if (s == null) return const [];
         return [
@@ -2456,7 +2570,7 @@ class _InboxHead extends StatelessWidget {
     final muted = theme.textTheme.bodySmall?.copyWith(color: BoardPalette.of(context).idle);
     final s = item.session;
     final tree = SessionTree(state._sessions);
-    final name = s?.name ?? item.card?.name ?? item.supCase?.name ?? item.agent?.name ?? item.agent?.cwdTail ?? 'Background agent';
+    final name = s?.name ?? item.card?.name ?? item.supCase?.name ?? item.need?.name ?? item.agent?.name ?? item.agent?.cwdTail ?? 'Background agent';
     return Row(children: [
       if (isNew) _NewMark(markKey: ValueKey('inbox-new-${item.key}')),
       Expanded(
@@ -2506,8 +2620,7 @@ class _NewMark extends StatelessWidget {
 
 /// Approve / Dismiss / Open session for a supervisor card (#492). Both decisions are off
 /// while one is being sent; the server can refuse, and says why in the snack bar.
-Widget _cardButtons(BuildContext context, _QuestionsInboxScreenState state, InboxItem it,
-    {required bool large, required bool wide}) {
+Widget _cardButtons(BuildContext context, _QuestionsInboxScreenState state, InboxItem it, {required bool large}) {
   final c = it.card!;
   final busy = state._cardBusy.contains(it.key);
   final s = it.session;
@@ -2779,6 +2892,17 @@ class _FocusView extends StatelessWidget {
             DirectionalText(c.why!, style: theme.textTheme.bodyLarge?.copyWith(height: 1.4)),
           ],
         ];
+      case InboxKind.supervisorNeed:
+        final n = it.need!;
+        final theme = Theme.of(context);
+        return [
+          _label(context, 'The supervisor says it needs you'),
+          DirectionalText(supervisorNeedText(n), style: theme.textTheme.titleMedium?.copyWith(height: 1.4)),
+          if ((n.headline ?? '').isNotEmpty && n.headline != supervisorNeedText(n)) ...[
+            _label(context, 'What it is doing'),
+            DirectionalText(n.headline!, style: theme.textTheme.bodyLarge?.copyWith(height: 1.4)),
+          ],
+        ];
       case InboxKind.escalation:
         final c = it.supCase!;
         final theme = Theme.of(context);
@@ -2884,7 +3008,7 @@ class _FocusView extends StatelessWidget {
           ]),
         ];
       case InboxKind.card:
-        return [Padding(padding: pad, child: _cardButtons(context, state, it, large: true, wide: true))];
+        return [Padding(padding: pad, child: _cardButtons(context, state, it, large: true))];
       default:
         return [row([openBtn])];
     }

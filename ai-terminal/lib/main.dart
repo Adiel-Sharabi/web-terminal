@@ -60,6 +60,27 @@ enum NotificationTarget { session, inbox }
 NotificationTarget planNotificationTarget(String? kind) =>
     kind == 'owner-wait' ? NotificationTarget.inbox : NotificationTarget.session;
 
+/// How the inbox is opened: [openInbox], or a test's spy.
+typedef InboxOpener = void Function(NavigatorState nav, {String? focusSessionId});
+
+/// What a notification tap does (#492): a session kind opens its session
+/// ([openSession], by id); an owner-wait pops everything a session pushed earlier
+/// (back to the first route) and opens the ONE inbox with that session's item focused.
+/// A seam apart from the widget, so the wiring is testable with a navigator.
+void handleNotificationTap(
+  NavigatorState nav,
+  NotificationTap tap, {
+  required void Function(String sessionId) openSession,
+  InboxOpener inbox = openInbox,
+}) {
+  if (planNotificationTarget(tap.kind) == NotificationTarget.session) {
+    openSession(tap.sessionId);
+    return;
+  }
+  nav.popUntil((route) => route.isFirst);
+  inbox(nav, focusSessionId: tap.sessionId);
+}
+
 /// FCM push + local notifications are mobile-only (firebase_messaging has no
 /// desktop support). On Windows/macOS/Linux the app is a full terminal client
 /// minus background push — everything else works.
@@ -200,16 +221,9 @@ class _AiTerminalAppState extends State<AiTerminalApp>
   }
 
   void _openTap(NotificationTap tap) {
-    if (planNotificationTarget(tap.kind) == NotificationTarget.session) {
-      _openSession(tap.sessionId);
-      return;
-    }
     final nav = navigatorKey.currentState;
     if (nav == null) return;
-    // Reveal what a pushed route (a session opened earlier) would cover, then show the
-    // inbox with that session's item focused (#492).
-    nav.popUntil((route) => route.isFirst);
-    openInbox(nav, focusSessionId: tap.sessionId);
+    handleNotificationTap(nav, tap, openSession: _openSession);
   }
 
   void _openSession(String sessionId) {

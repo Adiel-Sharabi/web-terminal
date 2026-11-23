@@ -2,6 +2,7 @@
 // header's counts as filters, groups under project headers, Claude's recommendation in
 // one press (through the one answer path), the supervisor's cards, "new since you last
 // looked", work items that wait on the owner, and the answer panel's number keys.
+import 'dart:async';
 import 'dart:convert';
 
 import 'package:ai_terminal/api/api_client.dart';
@@ -86,6 +87,8 @@ void main() {
   late List<(String, String)> posts; // path, body
   late int cardStatus;
   late List<(String, String)> sent;
+  Completer<void>? gate; // holds /api/sessions while set
+  late List<String> opened; // sessions the inbox asked the app to open
 
   Future<bool> fakeInput(Session s, Future<void> Function(void Function(String keys) send) body) async {
     await body((keys) {
@@ -110,6 +113,7 @@ void main() {
           case '/api/version':
             return _json({'version': '1.88.0', 'serverName': s.name, 'capabilities': ['session-brief']});
           case '/api/sessions':
+            await gate?.future;
             return _json(rows);
           case '/api/supervisor/state':
             return supervisor == null ? http.Response('', 404) : _json(supervisor!);
@@ -139,6 +143,8 @@ void main() {
     posts = [];
     cardStatus = 200;
     sent = [];
+    gate = null;
+    opened = [];
   });
   tearDown(SessionSelection.instance.reset);
 
@@ -150,7 +156,7 @@ void main() {
   }
 
   Future<void> pump(WidgetTester tester, SessionRepository r,
-      {double width = 1400, InboxSeenStore? seen, String? focusSessionId}) async {
+      {double width = 1400, InboxSeenStore? seen, String? focusSessionId, bool refresh = true}) async {
     tester.view.physicalSize = Size(width, 1000);
     tester.view.devicePixelRatio = 1;
     addTearDown(tester.view.resetPhysicalSize);
@@ -167,10 +173,10 @@ void main() {
         pollInterval: const Duration(hours: 1),
         focusInterval: const Duration(hours: 1),
         agentsInterval: const Duration(hours: 1),
-        onOpenSession: (_) {},
+        onOpenSession: (s) => opened.add(s.id),
       ),
     ));
-    await tester.runAsync(() => r.refresh());
+    if (refresh) await tester.runAsync(() => r.refresh());
     await settle(tester);
   }
 
@@ -272,15 +278,56 @@ void main() {
       await done(tester);
     });
 
-    testWidgets('a session not listed yet is focused the build it appears in', (tester) async {
+    testWidgets('a session not listed yet is focused the build it appears in (while the first load is out)', (tester) async {
+      rows = [];
+      gate = Completer<void>();
+      final r = await repo();
+      await pump(tester, r, focusSessionId: 'b1', refresh: false);
+      expect(focusOf('b1'), findsNothing);
+      threeWaiting();
+      gate!.complete();
+      await settle(tester);
+      expect(focusOf('b1'), findsOneWidget);
+      expect(opened, isEmpty);
+      await done(tester);
+    });
+
+    testWidgets('after the first full load the inbox does not list it: the session opens, as the push always did',
+        (tester) async {
+      // Idle, nothing waits on the owner: not an item - the item the push said exists nowhere here.
+      rows = [_row('z', 'Idle one', status: 'idle', lastActivity: 1)];
+      await pump(tester, await repo(), focusSessionId: 'z');
+      expect(opened, ['z']);
+      await done(tester);
+    });
+
+    testWidgets('not listed and no such session either: nothing opens, and the request is over', (tester) async {
       rows = [];
       final r = await repo();
-      await pump(tester, r, focusSessionId: 'b1');
-      expect(focusOf('b1'), findsNothing);
+      await pump(tester, r, focusSessionId: 'gone');
+      expect(opened, isEmpty);
       threeWaiting();
       await tester.runAsync(() => r.refresh());
       await settle(tester);
-      expect(focusOf('b1'), findsOneWidget);
+      expect(focusOf('b1'), findsNothing, reason: 'a request that found nothing does not wait for ever');
+      expect(focusOf('a1'), findsOneWidget);
+      await done(tester);
+    });
+
+    testWidgets('the person acting first (a filter) ends the request: a late arrival does not move them', (tester) async {
+      rows = [];
+      gate = Completer<void>();
+      final r = await repo();
+      await pump(tester, r, focusSessionId: 'b1', refresh: false);
+      await tester.tap(k('inbox-glance-running'));
+      await tester.pump();
+      await tester.tap(k('inbox-glance-running')); // back to all
+      await tester.pump();
+      threeWaiting();
+      gate!.complete();
+      await settle(tester);
+      expect(focusOf('b1'), findsNothing);
+      expect(focusOf('a1'), findsOneWidget, reason: 'the oldest, as with no request');
       await done(tester);
     });
   });
@@ -337,6 +384,30 @@ void main() {
     await done(tester);
   });
 
+  testWidgets("h: a session the server's needsYou names, that is not blocking here, is listed and opens its session", (tester) async {
+    rows = [_row('cl', 'Closing out', status: 'idle', lastActivity: 5)];
+    final now = DateTime.now().millisecondsSinceEpoch;
+    supervisor = {
+      'role': 'authority',
+      'enabled': true,
+      'now': now,
+      'at': now,
+      'needsYou': ['cl'],
+      'sessions': [
+        {'id': 'cl', 'server': 'Home', 'name': 'Closing out', 'wait': {'on': 'you', 'what': 'close it out?', 'at': now - 5000}},
+      ],
+    };
+    await pump(tester, await repo(), width: 500);
+    final needKey = '${key('cl')}|need';
+    expect(k('inbox-card-$needKey'), findsOneWidget);
+    expect(find.textContaining('close it out?', findRichText: true), findsWidgets);
+    expect(find.descendant(of: k('inbox-glance-needsYou'), matching: find.text('1')), findsOneWidget, reason: 'it counts as needing you');
+    await tester.tap(k('inbox-need-open-cl'));
+    await tester.pump();
+    expect(opened, ['cl']);
+    await done(tester);
+  });
+
   group('e: new since you last looked', () {
     Future<void> two(WidgetTester tester, InboxSeenStore store) async {
       rows = [
@@ -349,15 +420,23 @@ void main() {
 
     testWidgets('an item the baseline lacks, or holds with another signature, is marked; a matching one is not',
         (tester) async {
-      await two(tester, _FakeSeen({key('q'): 'question|1', key('gone'): 'question|9'}));
+      await two(tester, _FakeSeen({key('q'): 'question|tq', key('gone'): 'question|9'}));
       expect(k('inbox-new-${key('r')}'), findsOneWidget);
       expect(k('inbox-new-${key('q')}'), findsNothing);
       expect(find.text('new'), findsOneWidget);
       await done(tester);
-      await two(tester, _FakeSeen({key('q'): 'question|0', key('r'): 'question|2'}));
+      await two(tester, _FakeSeen({key('q'): 'question|old', key('r'): 'question|tr'}));
       expect(k('inbox-new-${key('q')}'), findsOneWidget, reason: 'same key, new signature: a new ask');
       expect(k('inbox-new-${key('r')}'), findsNothing);
       await done(tester);
+    });
+
+    testWidgets("leaving saves the baseline MERGED: an item not listed now (its server offline) is not forgotten", (tester) async {
+      final store = _FakeSeen({key('offline'): 'question|zz', key('q'): 'question|tq'});
+      await two(tester, store);
+      await done(tester);
+      expect(store.stored![key('offline')], 'question|zz');
+      expect(store.stored![key('r')], 'question|tr');
     });
 
     testWidgets('the first ever look marks nothing, and leaving saves what was listed', (tester) async {
@@ -448,6 +527,69 @@ void main() {
         {2},
       ]).map((f) => f.keys));
       await leave(tester);
+    });
+  });
+
+  group('after a card is dealt with, focus goes to the next card in the order it is DRAWN (#492)', () {
+    // Grouped by project, the drawn order is a1, a2, b1; by age (what the queue is) a1, b1, a2.
+    Finder focusOf(String id) => find.byWidgetPredicate((w) {
+          final k = w.key;
+          return k is ValueKey<String> && k.value.startsWith('inbox-focus-${_home.baseUrl}|$id|');
+        });
+
+    testWidgets("a: the recommended button's landed answer", (tester) async {
+      rows = [
+        _row('a1', 'A one', status: 'waiting', waitingFor: 'question', lastActivity: 1, cwd: '/w/alpha'),
+        _row('b1', 'B one', status: 'waiting', waitingFor: 'question', lastActivity: 2, cwd: '/w/beta'),
+        _row('a2', 'A two', status: 'waiting', waitingFor: 'question', lastActivity: 3, cwd: '/w/alpha'),
+      ];
+      questions = {
+        'a1': _question(['Alpha', 'Beta (Recommended)'], id: 'ta1'),
+        'b1': _question(['A', 'B'], id: 'tb1'),
+        'a2': _question(['A', 'B'], id: 'ta2'),
+      };
+      await pump(tester, await repo());
+      expect(focusOf('a1'), findsOneWidget, reason: 'the oldest wait starts focused');
+      await tester.tap(k('inbox-recommended-${key('a1')}'));
+      await tester.runAsync(() => Future<void>.delayed(const Duration(seconds: 4)));
+      await tester.pump(const Duration(seconds: 4));
+      await settle(tester);
+      expect(sent, isNotEmpty);
+      expect(focusOf('a2'), findsOneWidget, reason: 'a2 is drawn right after a1, in the same group');
+      expect(focusOf('b1'), findsNothing, reason: 'b1 is the next by AGE, which is not what the person sees next');
+      await done(tester);
+    });
+
+    testWidgets("b: a supervisor card's decision, and the decided card is hidden at once", (tester) async {
+      rows = [
+        _row('sc', 'Card session', status: 'idle', lastActivity: 1, cwd: '/w/gamma'),
+        _row('q1', 'Q one', status: 'waiting', waitingFor: 'question', lastActivity: 20000000000, cwd: '/w/alpha'),
+        _row('q2', 'Q two', status: 'waiting', waitingFor: 'question', lastActivity: 30000000000, cwd: '/w/gamma'),
+      ];
+      questions = {'q1': _question(['A', 'B'], id: 'tq1'), 'q2': _question(['A', 'B'], id: 'tq2')};
+      final now = DateTime.now().millisecondsSinceEpoch;
+      supervisor = {
+        'role': 'authority',
+        'enabled': true,
+        'now': now,
+        'at': now,
+        'cards': [
+          {'id': 'c1', 'sessionId': 'sc', 'server': 'Home', 'name': 'Card session', 'text': 'Type continue', 'at': 5},
+        ],
+      };
+      await pump(tester, await repo());
+      final cardKey = '${_home.baseUrl}|card|c1';
+      await tester.tap(find.descendant(of: k('inbox-card-$cardKey'), matching: find.text('Type continue')));
+      await tester.pump();
+      expect(find.byWidgetPredicate((w) => w.key is ValueKey<String> && (w.key! as ValueKey<String>).value.startsWith('inbox-focus-$cardKey|')),
+          findsOneWidget);
+      await tester.tap(k('inbox-card-approve-c1').last);
+      await settle(tester);
+      expect(posts, hasLength(1));
+      expect(k('inbox-card-$cardKey'), findsNothing, reason: 'hidden at once, though the authority still lists it pending');
+      expect(focusOf('q2'), findsOneWidget, reason: "q2 shares the card's project and is drawn right after it");
+      expect(focusOf('q1'), findsNothing);
+      await done(tester);
     });
   });
 }

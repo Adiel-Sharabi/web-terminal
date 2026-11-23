@@ -2,6 +2,7 @@ import 'package:flutter/material.dart';
 import 'package:shared_preferences/shared_preferences.dart';
 
 import '../api/models.dart';
+import '../services/app_config.dart';
 import '../services/launch_settings.dart';
 import '../services/notification_service.dart';
 import '../services/session_selection.dart';
@@ -31,7 +32,12 @@ class AdaptiveHome extends StatefulWidget {
     this.journalBuilder,
     this.openInboxAtLaunch,
     this.launchTap,
+    this.hasServers,
   });
+
+  /// Test seam: whether a server is configured. Defaults to [AppConfig.servers].
+  @visibleForTesting
+  final bool Function()? hasServers;
 
   /// Test seam: whether to open the inbox at launch (#492). Defaults to the stored
   /// setting ([LaunchSettings]).
@@ -121,6 +127,8 @@ class _AdaptiveHomeState extends State<AdaptiveHome> {
     if (!on || !mounted) return;
     final tap = await (widget.launchTap ?? NotificationService.initialTap)();
     if (tap != null || !mounted) return;
+    // No server yet: the dashboard's own "add a server" is what to show, not an empty inbox.
+    if (!(widget.hasServers ?? () => AppConfig.servers.isNotEmpty)()) return;
     if (_selection.splitMounted) {
       if (_selection.boardShown) _selection.showInbox();
       return;
