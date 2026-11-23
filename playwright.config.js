@@ -113,6 +113,9 @@ process.env.WT_MAINTENANCE_FILE = path.join(__dirname, 'maintenance.test.json');
 // gave it one must not move a production lease or clean up what production recorded.
 process.env.WT_LEASES_FILE = path.join(__dirname, 'leases.test.json');
 process.env.WT_LEASE_RECORDS_FILE = path.join(__dirname, 'lease-records.test.json');
+// #502 - the tracker-details cache. The suite's fake answers must never land in production's
+// mc-tracker-cache.json (they would be served as real work items); reset per run.
+process.env.WT_MC_TRACKER_CACHE_FILE = path.join(__dirname, 'mc-tracker-cache.test.json');
 // #366 - the binary behind GET /api/dashboard/background-agents. The suite must never launch
 // the real CLI: its listing names every project's sessions on the machine, and a developer
 // box and a CI runner would answer differently. Pointing it at a path that does not exist
@@ -189,6 +192,13 @@ module.exports = defineConfig({
       // spec can watch a stranded launch expire for real rather than assert around it.
       // Only that one code path reads it.
       WT_BG_TASK_MAX_AGE_MS: '2500',
+      // #502 - both trackers point at the fake tracker tests/mc-routes.spec.js
+      // serves on this port, and the tokens are the suite's own: under WT_TEST the server never
+      // reads a real GitHub token or ADO PAT, and nothing in the suite reaches a real tracker.
+      WT_MC_GITHUB_API: 'http://127.0.0.1:17688/gh',
+      WT_MC_ADO_URL: 'http://127.0.0.1:17688/ado',
+      WT_MC_GITHUB_TOKEN: 'suite-github-token',
+      WT_MC_ADO_PAT: 'suite-ado-pat',
     },
     reuseExistingServer: false,
     timeout: 30000,

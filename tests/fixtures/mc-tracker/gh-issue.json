@@ -1,0 +1,12 @@
+{
+  "number": 42,
+  "html_url": "https://github.com/acme/widgets/issues/42",
+  "title": "Widget list loses its scroll position",
+  "state": "open",
+  "user": { "login": "reporter-a" },
+  "created_at": "2026-01-02T03:04:05Z",
+  "assignee": { "login": "dev-b" },
+  "assignees": [{ "login": "dev-b" }],
+  "labels": [{ "name": "bug" }, { "name": "severity:2" }, { "name": "P1" }, { "name": "area/ui" }],
+  "type": null
+}

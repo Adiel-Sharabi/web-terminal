@@ -118,3 +118,9 @@ lease-records.json
 lease-records.json.tmp
 lease-records.test.json
 lease-records.test.json.tmp
+# #502 - Mission Control tracker-details cache (and the suite's copy)
+mc-tracker-cache.json
+mc-tracker-cache.json.tmp
+mc-tracker-cache.json.corrupt-*
+mc-tracker-cache.test.json
+mc-tracker-cache.test.json.tmp
