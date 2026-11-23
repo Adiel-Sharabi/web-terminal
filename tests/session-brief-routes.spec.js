@@ -110,6 +110,16 @@ test.describe('#298 sessions dashboard — server wiring', () => {
     expect(b.stale).toBeNull();
   });
 
+  test('a decision on a "you" wait round-trips to the session list; a bad one is refused with the shape (#492)', async () => {
+    const decision = { question: 'Ship now?', options: [{ label: 'Ship', consequence: 'Goes live' }, { label: 'Wait' }], recommended: 1 };
+    const bad = await report(id, { headline: 'h', wait: { on: 'self', what: 'x', decision } });
+    expect(bad.status).toBe(400);
+    expect(bad.json.error).toContain('only on a "you" wait');
+    const ok = await report(id, { headline: 'h', wait: { on: 'you', what: 'ship or wait', decision } });
+    expect(ok.status).toBe(200);
+    expect((await briefOf(ctx, id)).wait).toMatchObject({ on: 'you', decision });
+  });
+
   test('a Stop is blocked on an unreported tracker change — once — and NOT forwarded', async () => {
     await report(id, { items: [{ ref: '#1', state: 'in-progress' }] });
     await hook(id, 'PostToolUse', { tool_name: 'Bash', tool_input: { command: 'gh issue close 77' } });

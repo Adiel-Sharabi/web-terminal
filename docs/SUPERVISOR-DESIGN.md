@@ -186,9 +186,10 @@ its inputs.
   - Pushes in quiet hours are held, never dropped. When quiet hours end, the owner gets
     **one** push ("5 things wait on you"), not one per session.
   - The existing approval and API-error pushes respect quiet hours too.
-- **One list:** reported "you" waits, dispatcher recommendations and escalations all land in
-  the journal page (§6b). The questions inbox (#383) is not extended. Tapping a push opens
-  the journal at "Needs you".
+- **One list (#492, owner's decision 2026-11-23):** reported "you" waits, questions, blocked and
+  ready-for-test items, dispatcher recommendations and escalations all land in the companion's
+  questions inbox, the one "Needs you" surface. The journal (§6b) keeps a single "N need you"
+  row that opens it, and tapping an owner-wait push opens it on that session's card.
 
 ## 6a. Quiet hours: the night shift
 
@@ -376,7 +377,7 @@ Rules live in new pure modules (`lib/supervisor.js` for the graph and rules,
 - **The auto hand-off (#345):** unchanged. The supervisor leaves a session in hand-off
   alone, and follows `replaces`.
 - **The spawn reaper (#351):** kept until R5 is proven, then retired.
-- **The questions inbox (#383):** extended (§6).
+- **The questions inbox (#383):** extended into the one "Needs you" surface (§6, #492).
 - **The agent-exit gap (#373):** a prerequisite for R7.
 - **Child grouping (#377):** can use the supervisor's graph.
 - **If Office is down:** no supervision, and today's per-machine behaviour carries on.
@@ -385,7 +386,7 @@ Rules live in new pure modules (`lib/supervisor.js` for the graph and rules,
 ## 12. Rollout: recommend first, then act
 
 Silent shadow mode is dropped, because the owner would have nothing to look at. Instead,
-every action starts in **recommend mode**. It appears in the journal's "Needs you" as a card
+every action starts in **recommend mode**. It appears in the "Needs you" inbox (§6) as a card
 ("Wake *X*: its PR's CI went green", "Stand in for the lead of *Y*: answer *Z*") with
 **Approve** and **Dismiss** buttons. Approve performs it. Each card says why it was
 proposed.
