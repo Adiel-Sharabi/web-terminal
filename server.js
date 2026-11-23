@@ -82,6 +82,7 @@ const mcStage = require('./lib/mc-stage'); // #505 - the progress-stage order an
 const mcStateLib = require('./lib/mc-state'); // #505 - Mission Control's persisted state (stage history)
 const mcNeeds = require('./lib/mc-needs'); // #506 - Answer now vs My to-do, ranked by what it blocks
 const { createPromptEpisodes } = require('./lib/mc-episodes'); // #506 - a prompt on screen keeps one card id
+const mcAnalyst = require('./lib/mc-analyst'); // #511 - Ask, a read-only Analyst
 const recap = require('./lib/recap');
 // #383 - the model-written summary of one inbox wait. Hot-reload only: nothing in the worker loads it.
 const inboxDigest = require('./lib/inbox-digest');
@@ -7245,6 +7246,92 @@ app.post('/api/mc/later', express.json({ limit: '8kb' }), async (req, res) => {
   }
 });
 
+// --- API: #511 Mission Control Ask - a read-only Analyst (lib/mc-analyst.js) ---
+// POST /api/mc/ask {question, scope: {kind: all|project|subject|session, id}}
+//   -> {answer, sources: [Source], dataAge: {oldestAt, newestAt}, cut, scope, model, generatedAt}
+//   400 bad body · 404 unknown session/subject/project · 409/503 not the authority (mcRefusal)
+//   503 {status:'unavailable', reason: disabled|no-cli|busy} · 502 {status:'failed', reason: timeout|error|bad-output}
+// A tools-off model call over a capped bundle of what this server already knows: the cluster
+// rows' briefs, recaps for a narrow scope (a local one in-process, a peer's over its own route)
+// and the tracker CACHE (never a tracker read). It never types into a session. Config
+// `mcAnalyst` ({enabled, model, command, timeoutMs}) is NOT in ALLOWED_CONFIG_KEYS: `command` is
+// something this server EXECUTES (the inbox digest's rule).
+function mcAnalystConfig() {
+  const live = liveConfig('mcAnalyst', {});
+  const c = live && typeof live === 'object' && !Array.isArray(live) ? { ...live } : {};
+  // Test seams, under WT_TEST only: the suite points the runner at a fake CLI.
+  if (process.env.WT_TEST === '1' && process.env.WT_MC_ANALYST_COMMAND) {
+    try { c.command = JSON.parse(process.env.WT_MC_ANALYST_COMMAND); } catch { /* ignore a bad override */ }
+  }
+  if (process.env.WT_TEST === '1' && process.env.WT_MC_ANALYST_TIMEOUT_MS) c.timeoutMs = Number(process.env.WT_MC_ANALYST_TIMEOUT_MS);
+  return c;
+}
+const mcAnalystService = mcAnalyst.createAnalyst({
+  getConfig: mcAnalystConfig,
+  scratchDir: () => { fs.mkdirSync(SCRATCH_DIRS.analyst, { recursive: true }); return SCRATCH_DIRS.analyst; },
+});
+/** A session's recap for the bundle: this server's in-process, a peer's over its own route. */
+async function mcAskRecap(row) {
+  try {
+    if (!row.serverUrl) {
+      const r = await sessionRecap(row.id);
+      return r.status === 200 ? r.body : { error: 'no such session' };
+    }
+    const t = loadClusterTokens()[row.serverUrl];
+    if (!t || !t.token) return { error: 'no token for that server' };
+    const r = await clusterFetch(`${row.serverUrl}/api/sessions/${encodeURIComponent(row.id)}/recap`, { headers: { Authorization: `Bearer ${t.token}` }, timeout: 4000 });
+    return r.ok ? JSON.parse(r.body) : { error: `HTTP ${r.status}` };
+  } catch { return { error: 'the server did not answer' }; }
+}
+app.post('/api/mc/ask', express.json({ limit: '16kb' }), async (req, res) => {
+  res.set('Cache-Control', 'no-store');
+  const refused = mcRefusal(supervisorAuthority());
+  if (refused) return res.status(refused.status).json(refused.json);
+  const v = mcAnalyst.validateAsk(req.body);
+  if (!v.ok) return res.status(400).json({ error: v.error });
+  const cfg = projectsLib.validateProjects(liveConfig('projects', undefined));
+  if (!cfg.ok) return res.status(500).json({ error: `config.json projects is not valid: ${cfg.error}` });
+  if (v.scope.kind === 'project' && v.scope.id !== projectsLib.OTHER_ID && !cfg.projects.some((p) => p.id === v.scope.id)) {
+    return res.status(404).json({ error: 'no such project' });
+  }
+  let picked;
+  try {
+    const { sessions } = await cachedClusterSessions(clusterReqUser(req));
+    const me = getServerName();
+    // The project rule is /api/mc/projects' (lib/projects.js): a local cwd's git origin, a peer's items.
+    const rows = (Array.isArray(sessions) ? sessions : []).map((s) => ({ ...s,
+      project: projectsLib.projectOfSession({ cwd: s.cwd, origin: s.server === me && !s.serverUrl ? originForCwd(s.cwd) : null, items: s.brief && s.brief.items }, cfg.projects) }));
+    picked = mcAnalyst.selectSessions(rows, v.scope);
+  } catch (e) {
+    console.error(`[mc] ask: ${e.message}`);
+    return res.status(500).json({ error: 'could not read the cluster sessions' });
+  }
+  if (!picked.length) {
+    if (v.scope.kind === 'session') return res.status(404).json({ error: 'no such session in the cluster' });
+    if (v.scope.kind === 'subject') return res.status(404).json({ error: 'no session reports that work item' });
+    return res.json(mcAnalyst.emptyAnswer(v.scope, Date.now()));
+  }
+  try {
+    const recaps = new Map();
+    await Promise.all(mcAnalyst.recapTargets(picked, v.scope).map(async (r) => { recaps.set(r.id, await mcAskRecap(r)); }));
+    // The tracker CACHE only (#504's peek: never a tracker read; a copy never read is the blank Meta).
+    const metas = new Map();
+    await Promise.all(mcAnalyst.itemKeys(picked).map(async (key) => {
+      const ref = trackerMeta.parseRef(key);
+      if (ref && !ref.unqualified) metas.set(key, await mcTrackerMeta.peek(ref));
+    }));
+    const metaOf = (key) => metas.get(key) || null;
+    const now = Date.now();
+    const bundle = mcAnalyst.buildBundle({ rows: picked, metaOf, recaps, now });
+    const prompt = mcAnalyst.buildPrompt({ question: v.question, scope: v.scope, bundle, now });
+    const out = await mcAnalystService.ask({ question: v.question, scope: v.scope, bundle, prompt });
+    res.status(out.status).json(out.body);
+  } catch (e) {
+    console.error(`[mc] ask: ${e.message}`);
+    res.status(500).json({ error: 'the question could not be answered' });
+  }
+});
+
 // --- API: #413 the work-item event log ---
 // Every session that touched an item, on THIS machine: when, and how its work on it ended.
 // `/events` is the raw list; the bare route adds the newest snapshot and the hand-off
@@ -10030,14 +10117,13 @@ const RECAP_MAX_TURNS = 750; // hard budget: a recap must not read a whole 100 M
 // 450. The reported 13h session (its prompt found at 600) reads 750, the ceiling
 // it could already reach, i.e. 1.25x and not 3x.
 const RECAP_EXTRA_TURNS = RECAP_PAGE_TURNS; // one page past today's stop point
-app.get('/api/sessions/:id/recap', async (req, res) => {
-  res.set('Cache-Control', 'no-store');
-  const id = req.params.id;
-
+/** The recap of session [id] on THIS server: `{status, body}`. One builder for the route and
+ *  for Mission Control's Ask (#511), which reads it in-process for a local session. */
+async function sessionRecap(id) {
   let session;
   try { session = await workerClient.rpc('getSession', { id }); }
-  catch { return res.status(404).json({ error: 'no such session' }); }
-  if (!session) return res.status(404).json({ error: 'no such session' });
+  catch { return { status: 404, body: { error: 'no such session' } }; }
+  if (!session) return { status: 404, body: { error: 'no such session' } };
 
   const base = {
     name: session.name,
@@ -10055,7 +10141,7 @@ app.get('/api/sessions/:id/recap', async (req, res) => {
   };
 
   const tpath = await resolveSessionTranscriptPath(id);
-  if (!tpath) return res.json(base);
+  if (!tpath) return { status: 200, body: base };
 
   let fd;
   try {
@@ -10095,19 +10181,24 @@ app.get('/api/sessions/:id/recap', async (req, res) => {
       if (next == null || next === before) break; // malformed or no progress
       before = next;
     }
-    res.json({
+    return { status: 200, body: {
       ...base,
       agent,
       ...recap.buildRecap(turns),
       scan: { turns: turns.length, exhausted },
       tasks: recap.summariseTasks(readSessionTaskList(id, agent, tpath)),
-    });
+    } };
   } catch (e) {
     console.error(`GET /api/sessions/${id}/recap failed: ${e.message}`);
-    res.json(base); // a partial card beats an error dialog
+    return { status: 200, body: base }; // a partial card beats an error dialog
   } finally {
     if (fd !== undefined) { try { fs.closeSync(fd); } catch {} }
   }
+}
+app.get('/api/sessions/:id/recap', async (req, res) => {
+  res.set('Cache-Control', 'no-store');
+  const r = await sessionRecap(req.params.id);
+  res.status(r.status).json(r.body);
 });
 
 // --- GET /api/sessions/:id/digest  (#383) --------------------------------------
@@ -11165,6 +11256,8 @@ async function gracefulShutdown(signal) {
   try { digestService.shutdown(); } catch {}
   // #505 - a stage advance still inside the state file's write debounce.
   try { mcState.flush(); } catch {}
+  // Mission Control Ask runs (#511), the same way.
+  try { mcAnalystService.shutdown(); } catch {}
   console.log(`[${new Date().toISOString()}] Exiting.`);
   process.exit(0);
 }

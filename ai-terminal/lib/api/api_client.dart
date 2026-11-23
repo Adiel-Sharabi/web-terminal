@@ -14,6 +14,7 @@ import 'dart:math';
 import 'package:http/http.dart' as http;
 import 'package:web_socket_channel/web_socket_channel.dart';
 
+import 'mc_ask_models.dart';
 import 'mc_models.dart';
 import 'models.dart';
 import 'supervisor_models.dart';
@@ -465,6 +466,20 @@ class ApiClient {
     final r = McPromptResult.fromJson(body);
     if (r.delivered || r.refused != null || r.error != null) return r;
     return McPromptResult(error: 'no answer (${res.statusCode})');
+  }
+
+  /// Asks Mission Control's read-only Analyst a question about [scope]
+  /// (`POST /api/mc/ask`, #511). A model answers, so this can take a minute or two; a
+  /// `502`/`503` is thrown with the server's reason in words ([McAnswer.failureText]).
+  Future<McAnswer> mcAsk(String question, McAskScope scope) async {
+    final res = await _send('POST', '/api/mc/ask',
+        body: {'question': question, 'scope': scope.toJson()},
+        timeout: const Duration(seconds: 150),
+        alsoAccept: const {400, 409, 502, 503});
+    if (res.statusCode == 502 || res.statusCode == 503) {
+      throw ApiException(res.statusCode, McAnswer.failureText(_asMap(_decode(res))['reason']));
+    }
+    return McAnswer.fromJson(_mcAnswer(res));
   }
 
   Future<Map<String, dynamic>> _mcGet(String path, {Map<String, String>? query}) async {

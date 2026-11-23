@@ -277,7 +277,7 @@ void main() {
       await tester.pumpWidget(const SizedBox());
     });
 
-    testWidgets('phone: a bottom bar of Now, Projects, Ask, Machines; Ask says which issue fills it', (tester) async {
+    testWidgets('phone: a bottom bar of Now, Projects, Ask, Machines; Ask is the Ask view (#511)', (tester) async {
       await pump(tester, const Size(400, 860));
       expect(find.byKey(const ValueKey('mc-bottom-bar')), findsOneWidget);
       expect(find.byKey(const ValueKey('mc-rail')), findsNothing);
@@ -286,7 +286,7 @@ void main() {
       }
       await tester.tap(find.text('Ask'));
       await tester.pump();
-      expect(find.textContaining('#511'), findsOneWidget);
+      expect(find.byKey(const ValueKey('mc-ask-view')), findsOneWidget);
       await tester.pumpWidget(const SizedBox());
     });
 
