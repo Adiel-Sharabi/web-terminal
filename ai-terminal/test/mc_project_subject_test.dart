@@ -67,6 +67,20 @@ class _Cluster {
       if (subjectsStatus != 200) return http.Response(jsonEncode({'error': 'Not found'}), subjectsStatus);
       return http.Response(jsonEncode(_json('mc_subjects.json')), 200);
     }
+    if (req.method == 'POST' && path == '/api/mc/ask') {
+      return http.Response(
+          jsonEncode({
+            'answer': 'It waits on a pick [S1].',
+            'sources': [
+              {'id': 'S1', 'kind': 'session', 'label': 'login-fix', 'server': 'Alpha', 'sessionId': 's-1', 'at': null, 'url': null},
+            ],
+            'dataAge': {'oldestAt': null, 'newestAt': null},
+            'cut': null,
+            'model': 'sonnet',
+            'generatedAt': 0,
+          }),
+          200);
+    }
     if (path.startsWith('/api/mc/subjects/')) {
       if (subjectStatus != 200) return http.Response(jsonEncode({'error': 'unknown subject'}), subjectStatus);
       return http.Response(jsonEncode(_json('mc_subject.json')), 200);
@@ -408,8 +422,20 @@ void main() {
         'https://example.test/acme/widgets/pull/77',
         'https://example.test/acme/widgets/issues/41',
       ]);
-      final ask = tester.widget<TextField>(find.byKey(const ValueKey('mc-subject-ask')));
-      expect(ask.enabled, isFalse, reason: 'wired by #511');
+      // #511: the box opens an Ask page for THIS subject; its sources open the session.
+      await tester.tap(find.byKey(const ValueKey('mc-subject-ask')));
+      await tester.pumpAndSettle();
+      expect(find.byKey(const ValueKey('mc-ask-view')), findsOneWidget);
+      expect(find.byKey(const ValueKey('mc-ask-scopes')), findsNothing);
+      await tester.enterText(find.byKey(const ValueKey('mc-ask-input')), 'where is it?');
+      await tester.tap(find.byKey(const ValueKey('mc-ask-send')));
+      await tester.pump();
+      await tester.pump();
+      final ask = cluster.requests.lastWhere((r) => r.url.path == '/api/mc/ask');
+      expect(jsonDecode(ask.body), {'question': 'where is it?', 'scope': {'kind': 'subject', 'id': 'acme/widgets#41'}});
+      expect(find.text('It waits on a pick [S1].'), findsOneWidget);
+      await tester.tap(find.byKey(const ValueKey('mc-ask-source-S1')));
+      expect(opened, contains('s-1'));
       await tester.pumpWidget(const SizedBox());
     });
 
