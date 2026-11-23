@@ -1333,6 +1333,16 @@ class _QuestionsInboxScreenState extends State<QuestionsInboxScreen> with Widget
       _needs.reply(s, text,
           still: replyStillWanted, movedOn: '"${s.name}" is no longer waiting on you - nothing was sent'));
 
+  /// A pick on an agent's decision card (#492): the reported-wait reply, sent only while
+  /// the session still puts THAT decision [d]. A card drawn a poll ago must not answer a
+  /// newer decision the session reported since (a turn the person did not type keeps a
+  /// "you" wait alive, so [replyStillWanted] alone would pass).
+  Future<bool> _replyDecision(Session s, BriefDecision d, String label) => _replied(
+      s,
+      _needs.reply(s, 'Decision: $label',
+          still: (fresh) => replyStillWanted(fresh) && d.sameAsk(fresh.brief?.decision),
+          movedOn: '"${s.name}" asks something else now - nothing was sent'));
+
   /// [sent], noting a reply that went out ([_sentTo]).
   Future<bool> _replied(Session s, Future<bool> sent) async {
     final ok = await sent;
@@ -1448,6 +1458,14 @@ class _QuestionsInboxScreenState extends State<QuestionsInboxScreen> with Widget
         final r = it.turn?.prose ?? '';
         return r.isEmpty ? null : askingScope(r);
       case InboxKind.reported:
+        final d = s?.brief?.decision;
+        if (d != null) {
+          return [
+            d.question,
+            ?d.context,
+            for (final o in d.options) o.consequence == null ? '- ${o.label}' : '- ${o.label}: ${o.consequence}',
+          ].join('\n\n');
+        }
         final text = [s?.reason?.text ?? '', _InboxCard._reportedAsk(it) ?? ''].where((t) => t.isNotEmpty).join('\n\n');
         return text.isEmpty ? null : text;
       case InboxKind.background:
@@ -1947,6 +1965,99 @@ class _FocusRoute extends StatelessWidget {
   }
 }
 
+/// An agent's decision card (#492 phase B): the question as a title, its context as
+/// readable paragraphs, then one button per option with its consequence beneath. Only
+/// the server's `recommended` index is filled and marked; with none named, every
+/// option is outlined. A pick calls [onPick] with the option's label, nothing else:
+/// the caller owns the one reply path.
+class _DecisionCard extends StatelessWidget {
+  const _DecisionCard(
+      {required this.decision, required this.busy, required this.onPick, required this.optionKey, this.compact = false});
+  final BriefDecision decision;
+  final bool busy;
+  final void Function(String label) onPick;
+  final Key Function(int index) optionKey;
+
+  /// In a list card: the context is clamped, the rest is in the focused view.
+  final bool compact;
+
+  @override
+  Widget build(BuildContext context) {
+    final theme = Theme.of(context);
+    final d = decision;
+    final paragraphs = (d.context ?? '').split(RegExp(r'\n+')).map((p) => p.trim()).where((p) => p.isNotEmpty).toList();
+    final shown = compact ? paragraphs.take(1).toList() : paragraphs;
+    return Column(crossAxisAlignment: CrossAxisAlignment.stretch, mainAxisSize: MainAxisSize.min, children: [
+      DirectionalText(d.question, style: theme.textTheme.titleMedium?.copyWith(fontWeight: FontWeight.w600, height: 1.3)),
+      for (final p in shown)
+        Padding(
+          padding: const EdgeInsets.only(top: 6),
+          child: DirectionalText(p,
+              maxLines: compact ? 3 : null,
+              overflow: compact ? TextOverflow.ellipsis : null,
+              style: theme.textTheme.bodyMedium?.copyWith(height: 1.5, color: theme.colorScheme.onSurfaceVariant)),
+        ),
+      const SizedBox(height: 4),
+      for (final (i, o) in d.options.indexed)
+        Padding(
+          padding: const EdgeInsets.only(top: 6),
+          child: _option(theme, i, o, i == d.recommended),
+        ),
+    ]);
+  }
+
+  Widget _option(ThemeData theme, int i, BriefDecisionOption o, bool recommended) {
+    final cs = theme.colorScheme;
+    final fg = recommended ? cs.onPrimary : cs.onSurface;
+    final muted = recommended ? cs.onPrimary.withValues(alpha: 0.85) : cs.onSurfaceVariant;
+    final label = Row(children: [
+      Flexible(child: DirectionalText(o.label, style: theme.textTheme.bodyLarge?.copyWith(color: fg, fontWeight: FontWeight.w600))),
+      if (recommended) ...[
+        const SizedBox(width: 8),
+        Container(
+          key: ValueKey('decision-recommended-$i'),
+          padding: const EdgeInsets.symmetric(horizontal: 6, vertical: 1),
+          decoration: BoxDecoration(
+            color: cs.onPrimary.withValues(alpha: 0.2),
+            borderRadius: BorderRadius.circular(AppShape.small),
+          ),
+          child: Text('Recommended', style: theme.textTheme.labelSmall?.copyWith(color: cs.onPrimary, fontWeight: FontWeight.w600)),
+        ),
+      ],
+    ]);
+    final child = Column(crossAxisAlignment: CrossAxisAlignment.start, mainAxisSize: MainAxisSize.min, children: [
+      label,
+      if (o.consequence != null)
+        Padding(
+          padding: const EdgeInsets.only(top: 2),
+          child: DirectionalText(o.consequence!, style: theme.textTheme.bodySmall?.copyWith(color: muted, height: 1.35)),
+        ),
+    ]);
+    final shape = RoundedRectangleBorder(borderRadius: BorderRadius.circular(AppShape.small));
+    final pad = const EdgeInsets.symmetric(horizontal: 14, vertical: 10);
+    final onPressed = busy ? null : () => onPick(o.label);
+    return Align(
+      alignment: AlignmentDirectional.centerStart,
+      child: SizedBox(
+        width: double.infinity,
+        child: recommended
+            ? FilledButton(
+                key: optionKey(i),
+                style: FilledButton.styleFrom(
+                    alignment: AlignmentDirectional.centerStart, padding: pad, shape: shape, minimumSize: const Size(0, 44)),
+                onPressed: onPressed,
+                child: child)
+            : OutlinedButton(
+                key: optionKey(i),
+                style: OutlinedButton.styleFrom(
+                    alignment: AlignmentDirectional.centerStart, padding: pad, shape: shape, minimumSize: const Size(0, 44)),
+                onPressed: onPressed,
+                child: child),
+      ),
+    );
+  }
+}
+
 final ButtonStyle _smallOutlined = OutlinedButton.styleFrom(
   visualDensity: VisualDensity.compact,
   padding: const EdgeInsets.symmetric(horizontal: 10),
@@ -2377,7 +2488,19 @@ class _InboxCard extends StatelessWidget {
           ?ai,
         ];
       case InboxKind.reported:
-        final waiting = s!.reason?.text ?? '';
+        final dec = s!.brief?.decision;
+        if (dec != null) {
+          return [
+            _DecisionCard(
+              decision: dec,
+              compact: true,
+              busy: state._needs.isBusy(s) || !s.agentReady,
+              optionKey: (i) => ValueKey('inbox-decision-${it.key}-$i'),
+              onPick: (label) => unawaited(state._replyDecision(s, dec, label)),
+            ),
+          ];
+        }
+        final waiting = s.reason?.text ?? '';
         final asks = _reportedAsk(it);
         return [
           if (waiting.isNotEmpty) _labelled(context, 'Waiting', waiting),
@@ -2851,7 +2974,18 @@ class _FocusView extends StatelessWidget {
         ];
         return [..._summary(context, full, it.turn!.prose), if (!_folded) ...full];
       case InboxKind.reported:
-        final waiting = s!.reason?.text ?? '';
+        final dec = s!.brief?.decision;
+        if (dec != null) {
+          return [
+            _DecisionCard(
+              decision: dec,
+              busy: state._needs.isBusy(s) || !s.agentReady || gone,
+              optionKey: (i) => ValueKey('inbox-focus-decision-$i'),
+              onPick: (label) => unawaited(state._replyDecision(s, dec, label)),
+            ),
+          ];
+        }
+        final waiting = s.reason?.text ?? '';
         final turn = it.turn;
         final prose = turn?.prose ?? '';
         // The real reply, TL;DR first. When the turn has no prose, what led up to

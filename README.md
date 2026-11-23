@@ -318,6 +318,11 @@ takes no action on any session yet.
   github or ado, `repo`, and `number`, `pr` or `runId`), `workitem` (`ref`), `time`
   (`until`, ISO) or `child` (`ids`); `"checkBy"` gives the minutes until it is overdue. A wrong
   shape is refused with the right one; a wait with no target works as before.
+- **Decision cards (#492):** a `you` wait can carry `"decision"`: a `question` (up to 200
+  characters), an optional `context` (up to 1200, paragraphs kept), 2-4 `options` of `label`
+  (up to 80) and optional `consequence` (up to 240), and an optional `recommended` option index.
+  Only a `you` wait takes one, and it clears with that wait. The companion's inbox shows it as a
+  card; a pick is sent to the session as the reply `Decision: <label>`.
 - `POST /api/sessions` takes an optional `goal` (one line, up to 300 characters). A hand-off
   successor inherits it.
 - Every server appends its sessions' lifecycle (opened, hand-off, closed and why: closed, reaped,

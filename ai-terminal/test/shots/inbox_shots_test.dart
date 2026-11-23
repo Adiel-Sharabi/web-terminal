@@ -37,6 +37,7 @@ Map<String, dynamic> _row(String id, String name, String cwd,
         int ago = 60,
         List<Map<String, dynamic>> items = const [],
         Map<String, dynamic>? reason,
+        Map<String, dynamic>? decision,
         String? now}) =>
     {
       'id': id,
@@ -53,6 +54,7 @@ Map<String, dynamic> _row(String id, String name, String cwd,
         'reporting': 'on',
         'items': items,
         if (now != null) 'now': {'text': now, 'at': _now},
+        if (decision != null) 'wait': {'on': 'you', 'what': 'pick the cache size', 'at': _now, 'decision': decision},
       },
     };
 
@@ -105,6 +107,17 @@ void main() {
     _row('a2', 'Thumbnail cache', r'C:\dev\photo-sync',
         ago: 300,
         reason: {'kind': 'you', 'text': 'pick the cache size before I tune eviction', 'since': _now - 300000, 'source': 'reported'},
+        decision: {
+          'question': 'How large should the thumbnail cache be?',
+          'context': 'Thumbnails are rebuilt on every launch because the cache is capped at 16 MB, smaller than a typical library.\n'
+              'A bigger cache stops the rebuilds but takes disk space on phones; I can also make it adapt to free space.',
+          'options': [
+            {'label': 'Fixed 256 MB', 'consequence': 'Rebuilds stop for most libraries; uses 256 MB on every device.'},
+            {'label': 'Adapt to free space', 'consequence': 'Up to 10% of free disk; a little more code to maintain.'},
+            {'label': 'Leave it at 16 MB', 'consequence': 'No change; thumbnails keep rebuilding.'},
+          ],
+          'recommended': 1,
+        },
         items: [_it('#44', 'acme/photo-sync#44', 'Thumbnails rebuilt on every launch', 'in-progress')]),
     _row('b1', 'Release notes 2.4', r'C:\dev\garden-app', status: 'waiting', waitingFor: 'question', ago: 120, items: [
       _it('#9', 'acme/garden-app#9', 'Write the 2.4 release notes', 'in-progress'),
@@ -203,7 +216,7 @@ void main() {
         return http.Response('', 404);
       }));
 
-  Future<void> shot(WidgetTester tester, String name, Size size, double dpr) async {
+  Future<void> shot(WidgetTester tester, String name, Size size, double dpr, {String? openKey}) async {
     QuestionDraftStore.instance.resetForTest();
     SessionSelection.instance.reset();
     SharedPreferences.setMockInitialValues({
@@ -241,6 +254,13 @@ void main() {
       await tester.runAsync(() => Future<void>.delayed(const Duration(milliseconds: 40)));
       await tester.pump();
     }
+    if (openKey != null) {
+      await tester.tap(find.descendant(of: find.byKey(ValueKey('inbox-open-$openKey')), matching: find.text('Thumbnail cache')));
+      for (var i = 0; i < 4; i++) {
+        await tester.runAsync(() => Future<void>.delayed(const Duration(milliseconds: 40)));
+        await tester.pump();
+      }
+    }
     final ro = boundary.currentContext!.findRenderObject()! as RenderRepaintBoundary;
     final bytes = await tester.runAsync(() async {
       final img = await ro.toImage(pixelRatio: dpr);
@@ -253,5 +273,7 @@ void main() {
 
   final skip = out == null ? 'screenshots only: set WT_SHOTS_DIR' : null;
   testWidgets('desktop', (t) => shot(t, 'inbox-desktop', const Size(1400, 900), 1), skip: skip != null);
+  testWidgets('desktop, the decision card focused',
+      (t) => shot(t, 'inbox-desktop-decision', const Size(1400, 900), 1, openKey: '${_home.baseUrl}|a2'), skip: skip != null);
   testWidgets('phone', (t) => shot(t, 'inbox-phone', const Size(412, 915), 2.625), skip: skip != null);
 }

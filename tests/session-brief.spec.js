@@ -496,8 +496,9 @@ test.describe('wait and hidden (#313, #314)', () => {
     const e = B.applyReport(B.emptyEntry(), { items: [{ ref: '#5', title: 'Thing', state: 'blocked' }], headline: 'h' }, T0);
     // The REAL command, not a placeholder: it is in the note every time, so it counts.
     const cmd = B.reportCommand('C:/dev/web-terminal/scripts/wt-report.js');
-    // #466 raised it from 1420 by the one wait-target line (lib/wait-target.js teaches the rest).
-    expect(B.instructionText(e, cmd).length).toBeLessThanOrEqual(1600);
+    // #466 raised it from 1420 by the one wait-target line (lib/wait-target.js teaches the rest);
+    // #492 by the one decision line (the shape is refused with the right one).
+    expect(B.instructionText(e, cmd).length).toBeLessThanOrEqual(1750);
   });
 });
 
@@ -606,5 +607,117 @@ test.describe('#445 applyInboxDismiss - what a person dismissed from the questio
     expect(b.inboxDismissed).toEqual(['a|1']);
     b.inboxDismissed.push('x');
     expect(e.inboxDismissed).toEqual(['a|1']);
+  });
+});
+// #492 - a decision card rides on a "you" wait: shape refused with the right one, text
+// clipped like the other fields, served on the brief's wait, and gone with that wait.
+test.describe('wait.decision (#492)', () => {
+  const T1 = T0 + 1000;
+  const dec = (over = {}) => ({
+    question: 'Which retry policy?',
+    context: 'Uploads stall on a flaky network.',
+    options: [{ label: 'Back off', consequence: 'Gentle on the server' }, { label: 'Every 30 s' }],
+    recommended: 0,
+    ...over,
+  });
+  const v = (decision, on = 'you') => B.validateReport({ headline: 'h', wait: { on, what: 'pick a policy', decision } });
+
+  test('a well-formed decision is kept as sent, a missing consequence omitted', () => {
+    const r = v(dec());
+    expect(r.error).toBeUndefined();
+    expect(r.report.wait.decision).toEqual({
+      question: 'Which retry policy?',
+      context: 'Uploads stall on a flaky network.',
+      options: [{ label: 'Back off', consequence: 'Gentle on the server' }, { label: 'Every 30 s' }],
+      recommended: 0,
+    });
+    expect(v(dec({ recommended: undefined, context: undefined })).report.wait.decision).toEqual({
+      question: 'Which retry policy?',
+      options: [{ label: 'Back off', consequence: 'Gentle on the server' }, { label: 'Every 30 s' }],
+    });
+  });
+
+  test('it rides only on a "you" wait', () => {
+    for (const on of ['self', 'external', 'done']) {
+      expect(v(dec(), on).error).toContain('only on a "you" wait');
+    }
+  });
+
+  test('a wrong shape is refused WITH the right one', () => {
+    const cases = [
+      ['x', 'must be an object'],
+      [[], 'must be an object'],
+      [dec({ question: ' ' }), 'needs a "question"'],
+      [dec({ options: [{ label: 'only one' }] }), 'needs 2-4 "options"'],
+      [dec({ options: [1, 2, 3, 4, 5].map((n) => ({ label: `o${n}` })) }), 'needs 2-4 "options"'],
+      [dec({ options: 'a,b' }), 'needs 2-4 "options"'],
+      [dec({ options: [{ label: 'a' }, 'b'] }), 'must be objects'],
+      [dec({ options: [{ label: 'a' }, { consequence: 'no label' }] }), 'needs a "label"'],
+      [dec({ options: [{ label: 'Same' }, { label: 'same' }] }), 'two options labelled'],
+      [dec({ recommended: 2 }), '"recommended" must be an option\'s index, 0-1'],
+      [dec({ recommended: -1 }), 'index'],
+      [dec({ recommended: '0' }), 'index'],
+      [dec({ recommended: 0.5 }), 'index'],
+    ];
+    for (const [d, why] of cases) {
+      const r = v(d);
+      expect(r.error, JSON.stringify(d)).toContain(why);
+      expect(r.error).toContain('the shape is {"question"');
+    }
+  });
+
+  test('text is clipped to its limits; the context keeps its paragraphs', () => {
+    const long = (n) => 'word '.repeat(n);
+    const d = v(dec({
+      question: long(100),
+      context: `first  line\r\nsecond\r\n\r\n\r\n\r\nthird${' x'.repeat(1000)}`,
+      options: [{ label: long(40), consequence: long(100) }, { label: 'b' }],
+    })).report.wait.decision;
+    expect(d.question.length).toBeLessThanOrEqual(B.LIMITS.decisionQuestion);
+    expect(d.options[0].label.length).toBeLessThanOrEqual(B.LIMITS.decisionLabel);
+    expect(d.options[0].consequence.length).toBeLessThanOrEqual(B.LIMITS.decisionConsequence);
+    expect(d.context.length).toBeLessThanOrEqual(B.LIMITS.decisionContext);
+    expect(d.context.startsWith('first line\nsecond\n\nthird')).toBe(true);
+  });
+
+  test('served on the brief\'s wait, and gone with it when the person answers', () => {
+    let e = B.applyReport(B.emptyEntry(), v(dec()).report, T1);
+    expect(B.buildBrief(e, { reporting: true }).wait).toMatchObject({ on: 'you', decision: { question: 'Which retry policy?', recommended: 0 } });
+    // A later wait-only report without one replaces it: the card is the CURRENT ask only.
+    const plain = B.validateReport({ wait: { on: 'you', what: 'other' } }, e).report;
+    expect(B.buildBrief(B.applyReport(e, plain, T1 + 1), { reporting: true }).wait.decision).toBeUndefined();
+    e = B.foldHook(e, 'UserPromptSubmit', { prompt: 'Decision: Back off' }, T1 + 2);
+    expect(B.buildBrief(e, { reporting: true }).wait).toBeNull();
+  });
+
+  test('control characters are refused in every text field: a pick is TYPED back (gate review)', () => {
+    const cp = (n) => String.fromCodePoint(n);
+    for (const bad of [cp(27), cp(3), cp(0), cp(0x7f), cp(0x9b)]) {
+      for (const over of [
+        { question: `Q${bad}` },
+        { context: `c${bad}` },
+        { options: [{ label: `Back${bad}off` }, { label: 'b' }] },
+        { options: [{ label: 'a', consequence: `x${bad}` }, { label: 'b' }] },
+      ]) {
+        const r = v(dec(over));
+        expect(r.error, `${bad.codePointAt(0)} in ${Object.keys(over)[0]}`).toContain('control characters');
+      }
+    }
+    // Tab, CR and LF are whitespace: folded (LF kept in the context), never refused.
+    const ok = v(dec({ context: `one${cp(13)}${cp(10)}two${cp(9)}x`, options: [{ label: `a${cp(9)}b` }, { label: 'c' }] }));
+    expect(ok.error).toBeUndefined();
+    expect(ok.report.wait.decision.context).toBe(`one${cp(10)}two x`);
+    expect(ok.report.wait.decision.options[0].label).toBe('a b');
+  });
+
+  test('a decision with no "what" says its question where only "what" is read', () => {
+    const r = B.validateReport({ headline: 'h', wait: { on: 'you', decision: dec() } });
+    expect(r.report.wait.what).toBe('Which retry policy?');
+    expect(B.validateReport({ headline: 'h', wait: { on: 'you', what: 'pick one', decision: dec() } }).report.wait.what).toBe('pick one');
+  });
+
+  test('the per-prompt note teaches it in one line', () => {
+    const t = B.instructionText(null, 'CMD');
+    expect(t).toContain('"decision": {"question", "context", "options": [{"label", "consequence"}] x2-4, "recommended": index}');
   });
 });

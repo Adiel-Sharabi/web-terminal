@@ -707,6 +707,64 @@ class BriefLine {
   }
 }
 
+/// One choice on an agent's decision card (#492 phase B).
+class BriefDecisionOption {
+  final String label;
+
+  /// What picking it leads to, or null.
+  final String? consequence;
+  const BriefDecisionOption(this.label, [this.consequence]);
+}
+
+/// A decision the agent put to the person with its "waiting on you" report (#492): a
+/// question, optional context (paragraphs split by a newline), 2-4 options and the
+/// agent's own recommended index. The server validates it (`_validateDecision` in
+/// `lib/session-brief.js`); this parse is only tolerant of an older server and of junk
+/// (it returns null rather than throw, and ignores an out-of-range `recommended`).
+class BriefDecision {
+  final String question;
+  final String? context;
+  final List<BriefDecisionOption> options;
+
+  /// Index into [options], only ever the server's own; null when it named none.
+  final int? recommended;
+  const BriefDecision({required this.question, this.context, required this.options, this.recommended});
+
+  /// [other] puts the same question, context and options: the ask a pick answers. A
+  /// re-report of it keeps a pick valid; another decision (or none) makes it stale.
+  bool sameAsk(BriefDecision? other) =>
+      other != null &&
+      other.question == question &&
+      other.context == context &&
+      other.options.length == options.length &&
+      [for (var i = 0; i < options.length; i++) other.options[i].label == options[i].label].every((x) => x);
+
+  static BriefDecision? fromJson(dynamic json) {
+    if (json is! Map) return null;
+    final q = json['question'];
+    if (q is! String || q.trim().isEmpty) return null;
+    final raw = json['options'];
+    if (raw is! List) return null;
+    final opts = <BriefDecisionOption>[];
+    for (final o in raw) {
+      if (o is! Map) continue;
+      final l = o['label'];
+      if (l is! String || l.trim().isEmpty) continue;
+      final c = o['consequence'];
+      opts.add(BriefDecisionOption(l.trim(), c is String && c.trim().isNotEmpty ? c.trim() : null));
+    }
+    if (opts.length < 2) return null;
+    final ctx = json['context'];
+    final rec = json['recommended'];
+    return BriefDecision(
+      question: q.trim(),
+      context: ctx is String && ctx.trim().isNotEmpty ? ctx.trim() : null,
+      options: List.unmodifiable(opts),
+      recommended: rec is int && rec >= 0 && rec < opts.length && opts.length == raw.length ? rec : null,
+    );
+  }
+}
+
 /// What a session has told the sessions dashboard about its work (#298), as the
 /// server builds it (`buildBrief` in `lib/session-brief.js`). Every rule — which
 /// items show, pinned-over-reported precedence, when a report is stale — is made
@@ -736,6 +794,9 @@ class SessionBrief {
   /// first. Kept with the session on its server, so every device hides the same ones.
   final List<String> inboxDismissed;
 
+  /// The decision card of a "waiting on you" report (#492 phase B), or null.
+  final BriefDecision? decision;
+
   const SessionBrief({
     this.reportingOn = true,
     this.items = const <BriefItem>[],
@@ -748,6 +809,7 @@ class SessionBrief {
     this.hidden = false,
     this.artifacts = const <BriefArtifact>[],
     this.inboxDismissed = const <String>[],
+    this.decision,
   });
 
   static SessionBrief? fromJson(dynamic json) {
@@ -755,7 +817,9 @@ class SessionBrief {
     final headline = json['headline']?.toString().trim();
     final stale = json['stale'];
     final reason = stale is Map ? stale['reason']?.toString().trim() : null;
+    final wait = json['wait'];
     return SessionBrief(
+      decision: wait is Map && wait['on'] == 'you' ? BriefDecision.fromJson(wait['decision']) : null,
       reportingOn: json['reporting'] != 'off',
       items: BriefItem.listFromJson(json['items']),
       headline: (headline == null || headline.isEmpty) ? null : headline,
