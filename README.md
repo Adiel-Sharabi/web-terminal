@@ -587,14 +587,17 @@ carries a token.
 
 **Switch automatically at the weekly limit** (opt-in, per machine) — set
 `"claudeAccountAutoSwitch": { "enabled": true, "ntfy": { "topic": "<your topic>" } }` in a machine's
-`config.json` and, when the account it is logged in to has spent its **weekly** window, it switches
+`config.json` and, when the account it is logged in to reaches `switchAtPct` of its **weekly** window
+(default **95**%, 50 to 100; Claude never reports the 100% that refuses a request), it switches
 itself to the next saved account and sends one ntfy message: from which account, to which, and when
 the old one's week resets. The next account is the next saved one by label that is not known to be
 capped and whose saved refresh token has not expired; if none is left, nothing switches and one
 message says so, naming the earliest reset. A session parked on the cap, weekly or 5-hour, resumes
 on the new account through the usual auto-resume. The trigger is the status line's weekly reading,
 and only a reading from an API response that **began after** the last switch counts (the status line
-can redraw the old account's numbers for a while after a switch). At most one attempt per
+can redraw the old account's numbers for a while after a switch), and never one that names a weekly
+window (its reset time) seen on the account switched away from: a running session can carry the old
+account's numbers for a while even on a new response (#490). At most one attempt per
 `cooldownMinutes` (default 30; a failed switch is reported and not retried before then), and never
 during a restart hold; a reading that is waiting out either one is kept across a restart. A switch
 that cannot prove the login on disk is the account it wrote (another writer refreshed it at that
