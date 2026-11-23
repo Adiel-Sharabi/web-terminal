@@ -100,7 +100,11 @@ class DashboardScreen extends StatefulWidget {
     this.onShowBoard,
     this.onShowInbox,
     this.onShowJournal,
+    this.onOpenMissionControl,
   });
+
+  /// #507: switches the app to Mission Control. Null (a test, an older shell): no entry.
+  final VoidCallback? onOpenMissionControl;
 
   /// In the wide-screen split view, the id of the session shown in the detail
   /// pane — its row is highlighted. `null` in normal (phone) mode.
@@ -760,6 +764,8 @@ class _DashboardScreenState extends State<DashboardScreen> {
                           ),
                       ],
                     ),
+                    if (widget.onOpenMissionControl != null)
+                      SliverToBoxAdapter(child: _MissionControlEntry(onTap: widget.onOpenMissionControl!)),
                     SliverToBoxAdapter(
                       child: _TitleFilter(
                         value: _query,
@@ -1371,6 +1377,28 @@ class DashboardMachineFilter extends StatelessWidget {
         selected: value == label,
         onSelected: (_) => onChanged(label),
       ),
+    );
+  }
+}
+
+/// #507 - the way into Mission Control from the session list: one slim row under the bar,
+/// so the bar's own buttons (and when they fold, [dashboardFoldsActions]) stay as they are.
+class _MissionControlEntry extends StatelessWidget {
+  const _MissionControlEntry({required this.onTap});
+  final VoidCallback onTap;
+
+  @override
+  Widget build(BuildContext context) {
+    final theme = Theme.of(context);
+    return ListTile(
+      key: const ValueKey('open-mission-control'),
+      dense: true,
+      visualDensity: VisualDensity.compact,
+      leading: Icon(Icons.space_dashboard_outlined, color: theme.colorScheme.primary),
+      title: const Text('Mission Control'),
+      subtitle: const Text('Now, projects and machines, across the cluster'),
+      trailing: const Icon(Icons.chevron_right),
+      onTap: onTap,
     );
   }
 }

@@ -9,7 +9,7 @@ import 'package:flutter/foundation.dart' show kIsWeb;
 import 'package:flutter/material.dart';
 
 import 'app_boot.dart';
-import 'screens/adaptive_home.dart';
+import 'screens/home_shell.dart';
 import 'screens/session_screen.dart';
 import 'services/desktop_alert_service.dart';
 import 'services/detach_window_service.dart';
@@ -282,7 +282,7 @@ class _AiTerminalAppState extends State<AiTerminalApp>
       darkTheme: AppTheme.dark,
       themeMode: ThemeMode.dark,
       home: widget.detached == null
-          ? const AdaptiveHome()
+          ? const HomeShell()
           : SessionScreen(
               sessionId: widget.detached!.sessionId,
               standalone: true,
