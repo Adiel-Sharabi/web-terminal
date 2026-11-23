@@ -184,7 +184,8 @@ test.describe('#502/#503 Mission Control routes', () => {
     const id = (await made.json()).id;
     let closed = false;
     try {
-      // The agent says fixing; the fake tracker says PR #43 is merged.
+      // The agent says fixing; the fake tracker says PR #43 is merged and PR #44 still open, so the
+      // work goes on at pr-open (lib/mc-stage.js; merged-only is pinned in mc-stage.spec.js).
       const c = await pwRequest.newContext({ baseURL: BASE });
       const rep = await c.post(`/api/session/${id}/report`, { data: { items: [{ ref: key, title: 'Scroll', state: 'in-progress', stage: 'fixing' }] },
         headers: { 'X-WT-Hook-Token': readHookToken() } });
@@ -194,7 +195,7 @@ test.describe('#502/#503 Mission Control routes', () => {
 
       let body = null;
       let s = null;
-      for (let i = 0; i < 40 && !(s && s.stage.current === 'merged'); i++) {
+      for (let i = 0; i < 40 && !(s && s.stage.current === 'pr-open'); i++) {
         if (i) await sleep(300);
         body = await (await ctx.get('/api/mc/subjects')).json();
         s = body.subjects && body.subjects.find((x) => x.key === key);
@@ -203,7 +204,7 @@ test.describe('#502/#503 Mission Control routes', () => {
       expect(body.servers[0]).toMatchObject({ ok: true });
       expect(Number.isFinite(body.generatedAt)).toBe(true);
       expect(s).toMatchObject({ key, title: 'Widget list loses its scroll position', project: 'other', area: 'General',
-        stage: { current: 'merged', reported: 'fixing', evidence: 'merged' } });
+        stage: { current: 'pr-open', reported: 'fixing', evidence: 'pr-open' } });
       expect(s.buckets).toContain('active');
       expect(s.sessions.map((x) => [x.id, x.closed])).toEqual([[id, false]]);
 
@@ -218,7 +219,7 @@ test.describe('#502/#503 Mission Control routes', () => {
       // The projects view counts it from the same rule, stages included.
       const pv = await (await ctx.get('/api/mc/projects')).json();
       const other = pv.projects.find((p) => p.id === 'other');
-      expect(other.counts.stages.merged).toBeGreaterThanOrEqual(1);
+      expect(other.counts.stages['pr-open']).toBeGreaterThanOrEqual(1);
       expect(Object.keys(other.counts.stages)).toEqual(body.stages);
 
       // Closed: still on the subject (the closed strip keeps it a week), as closed.
@@ -235,6 +236,37 @@ test.describe('#502/#503 Mission Control routes', () => {
       expect(Number.isFinite(ref.closedAt)).toBe(true);
     } finally {
       if (!closed) await ctx.delete(`/api/sessions/${id}`).catch(() => {});
+      await ctx.dispose();
+    }
+  });
+
+  test('a closed session keeps who opened it (#504): its record carries spawn.parentId, read before the spawn store forgets', async () => {
+    const ctx = await authCtx();
+    const made = [];
+    try {
+      const p = await ctx.post('/api/sessions', { data: { name: `mc-parent-${Date.now()}`, autoCommand: '' } });
+      expect(p.status()).toBe(200);
+      const parentId = (await p.json()).id;
+      made.push(parentId);
+      const c = await ctx.post('/api/sessions', { data: { name: `mc-child-${Date.now()}`, autoCommand: '', parentId } });
+      expect(c.status()).toBe(200);
+      const childId = (await c.json()).id;
+      // The child must have a brief entry for the closed strip to record it.
+      const h = await pwRequest.newContext({ baseURL: BASE });
+      expect((await h.post(`/api/session/${childId}/report`, { data: { items: [{ ref: 'ado:4242', state: 'done' }] },
+        headers: { 'X-WT-Hook-Token': readHookToken() } })).status()).toBe(200);
+      await h.dispose();
+      expect((await ctx.delete(`/api/sessions/${childId}`)).status()).toBe(200);
+      let rec = null;
+      for (let i = 0; i < 40 && !rec; i++) {
+        await sleep(250);
+        rec = ((await (await ctx.get('/api/dashboard/closed')).json()).closed || []).find((x) => x.id === childId);
+      }
+      expect(rec).toBeTruthy();
+      expect(rec.spawn).toMatchObject({ parentId, replaces: [] });
+      expect(Number.isFinite(rec.spawn.createdAt)).toBe(true);
+    } finally {
+      for (const id of made) await ctx.delete(`/api/sessions/${id}`).catch(() => {});
       await ctx.dispose();
     }
   });

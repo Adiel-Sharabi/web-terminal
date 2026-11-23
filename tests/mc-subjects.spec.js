@@ -109,6 +109,17 @@ test.describe('#504 subjects: one work item across the cluster', () => {
     expect(v.subjects.find((s) => s.key === 'ado:501').sessions[0].parentId).toBe(succ.id);
   });
 
+  test('a run handed off and then finished stays ONE run: a closed successor holds the old id', () => {
+    const p = closedRec('alpha', { name: 'orc P', at: NOW - 50 * MIN });
+    const sId = uid('gone');
+    const kidsP = [1, 2, 3].map((i) => closedRec('beta', { name: `kp${i}`, parentId: p.rec.id, items: [{ ref: `ado:${i}` }], at: NOW - 40 * MIN }));
+    const succ = closedRec('alpha', { id: sId, name: 'orc S', replaces: [p.rec.id], at: NOW - 10 * MIN });
+    const kidsS = [4, 5].map((i) => closedRec('beta', { name: `ks${i}`, parentId: sId, items: [{ ref: `ado:${i}` }], at: NOW - 15 * MIN }));
+    // Listed in the closed strip's order (newest first per server), the predecessor first here on purpose.
+    const v = view({ closed: [p, ...kidsP, succ, ...kidsS] });
+    expect(v.runs.map((r) => [r.id, [...r.subjects].sort()])).toEqual([[sId, ['ado:1', 'ado:2', 'ado:3', 'ado:4', 'ado:5']]]);
+  });
+
   test('a bare #N or a free-text ref joins nothing: a subject of that one session', () => {
     const a = row('alpha', { items: [{ ref: '#12', key: '#12' }, { ref: 'epic-x', key: 'epic-x' }] });
     const b = row('beta', { items: [{ ref: '#12', key: '#12' }] });
@@ -210,6 +221,18 @@ test.describe('#504 what a subject waits on, and the one bucket rule', () => {
     expect(M.filterView(v, { project: 'video', area: 'Decoder' }).subjects.map((s) => s.key)).toEqual(['ado:2']);
     expect(M.filterView(v, { project: 'other' }).subjects.map((s) => s.key)).toEqual(['ado:4']);
   });
+
+  test('an area id suffixed after a collision filters exactly that area', () => {
+    const projects = pj.validateProjects([{ id: 'w', name: 'W', match: { adoProjects: ['Contoso'] },
+      areas: { source: 'ado-area', map: { 'Contoso\\A': 'Ui', 'Contoso\\B': 'UI' } } }]).projects;
+    const rows = [row('alpha', { items: [{ ref: 'ado:1' }] }), row('alpha', { items: [{ ref: 'ado:2' }] })];
+    const metaByKey = { 'ado:1': meta('ado:1', { adoProject: 'Contoso', area: 'Contoso\\A' }), 'ado:2': meta('ado:2', { adoProject: 'Contoso', area: 'Contoso\\B' }) };
+    const v = view({ rows, metaByKey, projects });
+    const pv = pj.projectsView({ projects, sessions: [], subjects: v.subjects }, { platform: 'win32' });
+    expect(pv[0].areas.map((a) => [a.id, a.name])).toEqual([['ui', 'Ui'], ['ui-x', 'UI'], ['general', 'General']]);
+    expect(M.filterView(v, { area: 'ui-x' }, { projectsView: pv }).subjects.map((s) => s.key)).toEqual(['ado:2']);
+    expect(M.filterView(v, { area: 'ui' }, { projectsView: pv }).subjects.map((s) => s.key)).toEqual(['ado:1']);
+  });
 });
 
 test.describe('#505 a subject\'s stage', () => {
@@ -234,13 +257,13 @@ test.describe('#505 a subject\'s stage', () => {
     expect(s.sessions[0].lastReport).toMatchObject({ state: 'in-progress', stage: null });
   });
 
-  test('the newest report names the reported stage', () => {
+  test("the newest report names the reported stage; an older session's further stage still counts", () => {
     const k = 'ado:9';
     const v = view({ rows: [
       row('alpha', { items: [{ ref: k, stage: 'pr-open' }], reportAt: NOW - 20 * MIN }),
       row('beta', { items: [{ ref: k, stage: 'planned' }], reportAt: NOW - 1 * MIN }),
     ] });
-    expect(v.subjects[0].stage).toMatchObject({ reported: 'planned', current: 'planned' });
+    expect(v.subjects[0].stage).toMatchObject({ reported: 'planned', current: 'pr-open' });
   });
 });
 

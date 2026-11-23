@@ -125,12 +125,19 @@ keeps every existing field and gains `stage` (`null` when none; a pinned item sh
 a pin never carries one). The per-prompt note names the list in one clause. The Stop-hook block
 rule is unchanged (a stage is never required).
 `lib/mc-stage.js` owns the order, the words and the evidence rule. Evidence (from Meta; a Meta never
-read proves nothing): a merged PR or a closed work item (`Meta.closed`) -> merged; an open PR with
-reviews -> in-review (Meta carries no review count yet, so today in-review comes only from a
-report); an open PR, draft too -> pr-open; an abandoned PR proves nothing.
-current = the furthest of the stored history, the report and the evidence: never backwards. The
-history records ADVANCES only (at most one entry per stage), each `{stage, at, source, detail}`:
-`at` is the report's time for a report, the time the server saw it for evidence.
+read proves nothing): a subject that IS a pull request (`Meta.type` 'Pull request') -> its own
+state (merged -> merged, open -> pr-open; closed unmerged proves nothing). Otherwise: a closed work
+item (`Meta.closed`) -> merged; else a linked PR still open -> pr-open (in-review with reviews; Meta
+carries no review count yet, so today in-review comes only from a report), even beside an earlier
+merged one (phase A merged, phase B open); else a merged linked PR -> merged; an abandoned PR
+proves nothing. A GitHub link is any cross-reference, so a PR that only mentions the item counts.
+current = the furthest of the stored history, the reports and the evidence. A stage reached by a
+REPORT never moves back (a stale report cannot lower it). A stage only the tracker proved is
+withdrawn when a fresh read (no `error`) no longer proves it (a reopened item, another PR opened),
+down to what the reports and the evidence still hold. The history records ADVANCES (at most one
+entry per stage, stage order, so its times need not ascend), each `{stage, at, source, detail}`:
+`at` is the report's time for a report, the time the server saw it for evidence. Every session's
+current stage on the subject is folded in, not only the newest.
 ```
 Stage = { current, reported, evidence, history: [{stage, at, source:'report'|'pr'|'tracker', detail}] }
 ```
@@ -141,12 +148,14 @@ tracker proves now (null when nothing, or unread). All null for a subject nobody
 `GET /api/mc/subjects?project=&area=` -> `{subjects: [Subject], runs: [Run], servers: [{name, ok}], stages: [id], generatedAt}`
 `GET /api/mc/subjects/:key` -> `{subject: Subject, runs: [Run], stages: [id], generatedAt}` (404 when unknown)
 
-`project` = a project id; `area` = an area id as `/api/mc/projects` names it, or its name (no case);
+`project` = a project id; `area` = an area id as `/api/mc/projects` names it, or (when no area has that id) its name, no case;
 each at most 80 characters, one value (else `400`). `runs` keeps every run holding at least one of
 the returned subjects. `stages` = the stage ids in order. `:key` takes a tracker ref in any spelling
 (`Acme/Widgets#42`, `AB#123`, URL-encoded) or a subject key as given. `servers`: this one, then each
-peer; `ok` = its sessions AND its closed strip were read this time (a peer whose strip could not be
-read keeps its last copy, `ok: false`). `generatedAt` = when the view was computed.
+peer; `ok` = its sessions AND its closed strip were read this time. An online peer whose strip read
+failed keeps its last copy (`ok: false`); an offline or unauthorised peer contributes no closed
+records. `generatedAt` = when the view was computed. The `area` filter takes the exact ids
+`/api/mc/projects` hands out (including a `-x` suffixed one after an id collision).
 ```
 Subject = { key, ref, url, title,          // title: meta.title, else the newest reported title, else the ref
   project, area, meta: Meta|null, stage: Stage,
@@ -163,7 +172,8 @@ Run = { id, server, sessionId, name, startedAt, status, subjects: [key], childre
 Data: the authority's cluster view (live rows), every server's closed strip (its own brief store;
 each peer's `GET /api/dashboard/closed` with the stored token, cached 30 s), the tracker details
 (batch; a poll waits at most 1.5 s for reads it started, then serves what the cache holds - the
-rest arrives on a later poll) and the stored stage history. The whole view is cached 3 s.
+rest arrives on a later poll; a failed read never fails the view) and the stored stage history.
+One compute runs at a time; its answer is reused for 3 s after it arrives.
 Join key = `item.key` (the brief's globalKey) across every server. A key no tracker can answer for
 (a bare `#12` from a cwd with no GitHub origin, a free-text ref) joins nothing: it is a subject of
 that one session, keyed `<key>@<session id>`, with `meta: null`. A session listed twice (live and
@@ -174,8 +184,8 @@ a parent or replaced someone), so a finished child still joins its run. On a clo
 Tree rule (`lib/mc-tree.js`, ported from `ai-terminal/lib/util/session_tree.dart`, which stays the
 owner for the old screens; MC screens render the server's `parentId`/runs and never re-derive):
 parent = `spawn.parentId` looked up across every server; a handed-off parent is found through its
-successor's `spawn.replaces`; a live session wins an id over a closed record, and a live successor
-wins its predecessor's id. A loop or a self-parent is visited once. `SessionRef.parentId` is the
+successor's `spawn.replaces`; a live session wins an id over a closed record, and a successor (live,
+or closed itself, the newest hand-off first) wins its predecessor's id over the predecessor's record. A loop or a self-parent is visited once. `SessionRef.parentId` is the
 resolved parent's id, else the raw `spawn.parentId`.
 A run = a tree root whose descendants (any depth, any server, closed included) report >= 2
 distinct subjects; its `subjects` are those plus the root's own and those of the sessions it was

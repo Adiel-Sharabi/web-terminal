@@ -7017,23 +7017,30 @@ async function _computeMcView(reqUser) {
   const refs = mcSubjects.trackerKeys(nodes).map((k) => trackerMeta.parseRef(k)).filter((r) => r && !r.unqualified);
   // Start the reads (cold and stale) and wait a little; whatever has not arrived is served
   // as the cache holds it now, and arrives on a later poll.
-  const reads = mcTrackerMeta.getMany(refs);
-  reads.catch((e) => console.error(`[mc] tracker details: ${e.message}`));
+  // A failed read never fails the view: the cache answers for it below.
+  const reads = mcTrackerMeta.getMany(refs).catch((e) => console.error(`[mc] tracker details: ${e.message}`));
   await Promise.race([reads, new Promise((r) => { const t = setTimeout(r, MC_META_WAIT_MS); if (t.unref) t.unref(); })]);
   const metaByKey = {};
   for (const m of await Promise.all(refs.map((r) => mcTrackerMeta.peek(r)))) metaByKey[m.key] = m;
   const view = mcSubjects.buildView({ nodes, metaByKey, projects: cfg.projects, stageStore: mcState, now });
-  return { ...view, servers, rows, projects: cfg.projects, generatedAt: now };
+  const sessions = rows.map((s) => ({ cwd: s.cwd, origin: s.origin, items: s.brief && s.brief.items }));
+  // Computed once: GET /api/mc/projects serves it, and its area ids are what ?area= takes.
+  const projectsOut = projectsLib.projectsView({ projects: cfg.projects, sessions, subjects: view.subjects });
+  return { ...view, servers, projectsOut, generatedAt: now };
 }
+/** The view through a short cache: one compute in flight at a time, and its answer reused for
+ *  MC_VIEW_TTL_MS after it ARRIVES (a slow compute never overlaps the next). */
 function cachedMcView(reqUser) {
   const now = Date.now();
   let entry = _mcViewCache.get(reqUser);
-  if (!entry || now - entry.ts > MC_VIEW_TTL_MS) {
-    entry = { ts: now, promise: _computeMcView(reqUser).catch((e) => {
-      if (_mcViewCache.get(reqUser) === entry) _mcViewCache.delete(reqUser);
-      throw e;
-    }) };
-    _mcViewCache.set(reqUser, entry);
+  if (!entry || (entry.doneAt !== null && now - entry.doneAt > MC_VIEW_TTL_MS)) {
+    const e = { doneAt: null, promise: null };
+    e.promise = _computeMcView(reqUser).then((v) => { e.doneAt = Date.now(); return v; }, (err) => {
+      if (_mcViewCache.get(reqUser) === e) _mcViewCache.delete(reqUser);
+      throw err;
+    });
+    _mcViewCache.set(reqUser, e);
+    entry = e;
   }
   return entry.promise;
 }
@@ -7050,8 +7057,7 @@ app.get('/api/mc/projects', async (req, res) => {
   try {
     const v = await cachedMcView(clusterReqUser(req));
     if (v.error) return res.status(500).json({ error: v.error });
-    const sessions = v.rows.map((s) => ({ cwd: s.cwd, origin: s.origin, items: s.brief && s.brief.items }));
-    res.json({ projects: projectsLib.projectsView({ projects: v.projects, sessions, subjects: v.subjects }), generatedAt: v.generatedAt });
+    res.json({ projects: v.projectsOut, generatedAt: v.generatedAt });
   } catch (e) {
     console.error(`[mc] projects: ${e.message}`);
     res.status(500).json({ error: 'could not read the cluster sessions' });
@@ -7067,7 +7073,7 @@ app.get('/api/mc/subjects', async (req, res) => {
   try {
     const v = await cachedMcView(clusterReqUser(req));
     if (v.error) return res.status(500).json({ error: v.error });
-    const f = mcSubjects.filterView(v, { project: project.value, area: area.value });
+    const f = mcSubjects.filterView(v, { project: project.value, area: area.value }, { projectsView: v.projectsOut });
     res.json({ subjects: f.subjects, runs: f.runs, servers: v.servers, stages: mcStage.STAGES, generatedAt: v.generatedAt });
   } catch (e) {
     console.error(`[mc] subjects: ${e.message}`);
@@ -11010,6 +11016,8 @@ async function gracefulShutdown(signal) {
   try { if (_backgroundListingExec) _backgroundListingExec.dispose(); } catch {}
   // The digest runs (#383) this process spawned: killed by the handles recorded at spawn.
   try { digestService.shutdown(); } catch {}
+  // #505 - a stage advance still inside the state file's write debounce.
+  try { mcState.flush(); } catch {}
   console.log(`[${new Date().toISOString()}] Exiting.`);
   process.exit(0);
 }
