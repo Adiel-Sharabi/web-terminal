@@ -8,7 +8,7 @@
       "serverUrl": "http://alpha.test:7681",
       "sessionId": "s-1",
       "sessionName": "Fix the login loop",
-      "project": "Web Terminal",
+      "project": "web-terminal",
       "subjectKey": "acme/widgets#41",
       "ref": "#41",
       "title": "Login loops after a token refresh",
@@ -42,7 +42,7 @@
       "server": "beta",
       "sessionId": "s-9",
       "sessionName": "Tidy the readme",
-      "project": "Docs",
+      "project": "docs",
       "ref": "ado:1234",
       "title": "Readme is out of date",
       "what": "Check the new wording",
@@ -53,7 +53,7 @@
     {"kind": "question", "title": "no id: cannot be addressed, so it is dropped"}
   ],
   "todo": [
-    {"id": "t-1", "cardId": "alpha|s-5|you:test", "ref": "#40", "title": "Test on a phone", "project": "Web Terminal", "text": "Try it on the tablet", "server": "alpha", "sessionId": "s-5", "createdAt": 1767222000000, "doneAt": null},
+    {"id": "t-1", "cardId": "alpha|s-5|you:test", "ref": "#40", "title": "Test on a phone", "project": "Web Terminal", "text": "Try it on the tablet", "server": "alpha", "sessionId": "s-5", "createdAt": 1767222000000, "doneAt": null, "park": {"state": "refused", "refused": "draft", "reason": "it has unsent text in its prompt box", "at": 1767222000500}},
     {"id": "t-2", "ref": "#39", "title": "Flash the board", "project": "Firmware", "createdAt": 1767100000000, "doneAt": 1767200000000}
   ],
   "moving": {"working": 4, "idle": 2, "total": 6},

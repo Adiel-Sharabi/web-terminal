@@ -427,9 +427,10 @@ class ApiClient {
   Future<McTodoResult> mcAddTodo(String cardId, {String? text}) async =>
       McTodoResult.fromJson(await _mcPost('/api/mc/todo', {'cardId': cardId, 'text': ?text}));
 
-  /// Marks to-do [id] `done`, `reopen`s it, or sends it `back` to Answer now.
-  Future<Map<String, dynamic>> mcTodoAction(String id, String action) =>
-      _mcPost('/api/mc/todo/${Uri.encodeComponent(id)}', {'action': action});
+  /// Marks to-do [id] `done`, `reopen`s it, sends it `back` to Answer now, or (`park`)
+  /// asks the server to tell its session once more after a refusal.
+  Future<McTodoResult> mcTodoAction(String id, String action) async =>
+      McTodoResult.fromJson(await _mcPost('/api/mc/todo/${Uri.encodeComponent(id)}', {'action': action}));
 
   /// Hides card [cardId] for [hours] (1-24); it comes back only if still pending.
   Future<Map<String, dynamic>> mcLater(String cardId, int hours) =>

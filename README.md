@@ -732,6 +732,13 @@ companion's daily foreground time from a phone over adb in `logs/phone-usage.jso
   report into one subject each (live sessions and the week's closed ones), with its details, stage,
   what it waits on and the runs (an orchestrator and its helper sessions) that group several;
   `GET /api/mc/subjects/:key` answers one. `GET /api/mc/projects` counts them per project and area.
+- **Answer now / My to-do (#506):** `GET /api/mc/now` lists every session stuck on you (a question,
+  a permission prompt, a decision, a reported `you` wait), most blocking first: the sessions waiting
+  above it and the work items they carry, then tracker severity, then age, with the reason in words.
+  **To my to-do** (`POST /api/mc/todo`) parks one for the desk and tells its session once, through
+  the gated prompt, to carry on and report that wait as external; a refusal (unsent text in its
+  prompt box, a turn running) is shown and sent again only when you ask. A to-do can be ticked done,
+  reopened or sent back; **Later** (`POST /api/mc/later`) hides a card for 1-24 hours.
 - Shapes and rules: [docs/mission-control.md](docs/mission-control.md).
 
 **Companion app** — a native Android + Windows client with the chat lens and push that
@@ -751,7 +758,7 @@ Full list: **[docs/FEATURES.md](docs/FEATURES.md)**.
 | **[docs/COMPANION.md](docs/COMPANION.md)** | The Android + Windows companion app |
 | **[docs/TROUBLESHOOTING.md](docs/TROUBLESHOOTING.md)** | Known symptoms and dev tooling |
 | **[docs/ARCHITECTURE.md](docs/ARCHITECTURE.md)** | How the three-process design works |
-| **[docs/mission-control.md](docs/mission-control.md)** | Mission Control's wire contract: work-item details, projects and areas, stage, subjects and runs |
+| **[docs/mission-control.md](docs/mission-control.md)** | Mission Control's wire contract: work-item details, projects and areas, stage, subjects and runs, Answer now and My to-do |
 | **[AGENTS.md](AGENTS.md)** | Point an AI agent at this repo and it can install and operate it |
 | **[CONTRIBUTING.md](CONTRIBUTING.md)** | Dev setup and the PR gate |
 | **[SECURITY.md](SECURITY.md)** | Threat model and vulnerability reporting |

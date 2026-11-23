@@ -7,8 +7,9 @@ Unknown/missing data is `null`, never guessed. Sections below a milestone that h
 are the plan, not a description of the server.
 
 Landed: Who answers, Work-item meta (#502), Projects and areas (#503), Stage (#505), Subjects
-(#504). Advertised in `/api/version` `capabilities`: `work-item-meta`, `mission-control` (#502/#503)
-and `mc-subjects` (#504/#505: the subjects routes, `stage` on report items, `counts.stages`).
+(#504), Answer now / My to-do (#506). Advertised in `/api/version` `capabilities`: `work-item-meta`,
+`mission-control` (#502/#503), `mc-subjects` (#504/#505: the subjects routes, `stage` on report
+items, `counts.stages`) and `mc-needs` (#506: `/api/mc/now`, `/api/mc/todo[/:id]`, `/api/mc/later`).
 
 ## Who answers (one owner for cluster-wide state)
 Mission Control is computed on ONE server per cluster: the same authority the supervisor uses
@@ -23,7 +24,7 @@ first server and, on that 409, on the server in its own list whose url matches `
 authority only (`lib/mc-state.js`: `mc-state.json`, override `WT_MC_STATE_FILE`, written 2 s after a
 change by tmp+rename, a corrupt file renamed aside to `.corrupt-<ms>` and logged, as the brief store
 does): each subject's stage history (#505; a subject unseen for 30 days is dropped, at most 2000
-kept); the to-dos join it in #506.
+kept), and the person's to-dos and "later"s (#506).
 `/api/work-items/:ref/meta` is answered by any server (per-server cache).
 
 ## Work-item meta (#502) - `lib/tracker-meta.js`
@@ -160,9 +161,9 @@ records. `generatedAt` = when the view was computed. The `area` filter takes the
 Subject = { key, ref, url, title,          // title: meta.title, else the newest reported title, else the ref
   project, area, meta: Meta|null, stage: Stage,
   sessions: [SessionRef],                  // newest report first
-  needsYou: Card|null,                     // until #506: {id, kind, server, serverUrl, sessionId, sessionName,
-                                           //   subjectKey, ref, title, what, askedAt, decision}; kind question|permission|decision|wait;
-                                           //   decision = the reported wait's decision (#492) on a decision card, else null
+  needsYou: Card|null,                     // {id, kind, server, serverUrl, sessionId, sessionName, subjectKey, ref, title,
+                                           //   what, askedAt, decision}: the card of #506 without its rank and why
+                                           //   (same id); decision = the reported wait's decision (#492), else null
   waitsOn: 'you'|'self'|'external'|'done'|null,
   buckets: ['active'|'doneWeek', 'needsYou'?, 'waitsOnOthers'?],   // the Counts keys it is counted under
   runId: string|null, updatedAt }
@@ -202,19 +203,56 @@ when waitsOn is you, `waitsOnOthers` when external - the companion's fallback ru
 ## Answer now / My to-do (#506) - `lib/mc-needs.js`
 `GET /api/mc/now` -> `{answerNow: [Card], todo: [Todo], moving: {working, idle, total}, projects: [Project], generatedAt}`
 ```
-Card = { id,                     // stable: '<server>|<sessionId>|<waitKey>'
+Card = { id,                     // '<server>|<sessionId>|<kind>:<at>' - names the WAIT, not the session (below)
   kind: 'question'|'permission'|'decision'|'wait',
   server, serverUrl, sessionId, sessionName, project, subjectKey, ref, title,
-  what,                          // wait.what / question header
-  why: { blocks, blockedSessions: [{server, id, name}], severity, ageMin, text },  // text e.g. "blocks 3 sessions"
+  what,                          // the reason's text / wait.what
+  why: { blocks, blockedSessions: [{server, id, name}], subjects: [key], severity, ageMin, text },
+                                 // text e.g. "blocks 3 sessions and 2 work items"
   rank, askedAt, decision: {...}|null, hasQuestion: bool }
-Todo = { id, cardId, subjectKey, ref, title, project, text, server, sessionId, createdAt, doneAt|null }
+Todo = { id, cardId, kind, subjectKey, ref, title, project, text, server, sessionId, sessionName, createdAt, doneAt|null,
+  park: { state: 'sending'|'delivered'|'refused'|'uncertain', refused: code|null, reason: words|null, at } }
 ```
-Rank: blocked sessions/subjects desc, then severity (1 highest), then age desc.
-`POST /api/mc/todo {cardId, text?}` -> `{todo, parked: {delivered, refused?}}`: records the to-do
-and sends the session ONE fixed park message through the existing gated prompt path (never twice
-for the same cardId). `POST /api/mc/todo/:id {action: 'done'|'reopen'|'back'}` (`back` = to Answer now).
-`POST /api/mc/later {cardId, hours: 1-24}`: hidden until then, back only if still pending.
+Answer now = every LIVE session whose wait is `you` by the subjects' own rule (`sessionWaitOn`:
+its `reason`, or for a peer too old to send one, status `waiting` or a reported `you` wait): a
+question or permission prompt on screen, a decision card (#492), a reported `you` wait. One card
+per session; the card is `lib/mc-subjects.js` `needsYouCard`, the same as a subject's `needsYou`.
+Its id names the wait: a reported wait (wait, decision) by its `at` (the agent's next report is a
+new card), a prompt on screen by the turn it came up in (`brief.turnAt`). `askedAt` = the wait's
+`at`, or for a prompt on screen the session's last activity. The card's subject is the first item
+the session carries that is not done.
+What it blocks (`why`): the asking session and every LIVE session above it in the tree
+(`lib/mc-tree.js` ancestors: an orchestrator waits on the children it opened), and the work items
+those carry (items reported done excluded). `severity` = the highest (lowest number) tracker
+severity of those items, null when none. Rank: blocked sessions desc, then blocked work items
+desc, then severity (null last), then age desc (unknown last), then id. `rank` is 1-based.
+`moving`: live sessions owing nothing to the person: `working` (reason working; status for an old
+peer) and `idle` (the rest).
+
+My to-do = what the person moved to their desk. A to-do (open or done) hides its card; a card
+whose wait has ended is not pending, so it never comes back; a new wait of the same session is a
+new card. To-dos and "later"s live in `mc-state.json` (authority only); a finished to-do (done,
+or sent back) is kept 7 days, at most 500 in all.
+`POST /api/mc/todo {cardId, text?}` (text: the person's own words, at most 500 characters) ->
+`{todo, parked: {delivered, refused?, reason?, uncertain?, already?}, generatedAt}`; 404 when the
+card no longer waits. It records the to-do ON DISK (park `sending`), then sends the session ONE
+fixed park message through the gated prompt of the session's own server (`gatedPrompt` here, a
+peer's `POST /api/sessions/:id/prompt` with the stored token: the supervisor's own path), with the
+supervisor tag (a SYSTEM turn) and, for a reported wait, `expectWaitAt` = the wait's `at` (a
+session that reported since answers `stale`). The text:
+`[Mission Control] The user moved your wait on <ref> to their to-do list and will handle it at the desk. Park it (do not wait for it), carry on with your other work, and report that wait as external.`
+The same cardId again (a second press, or after `back`) returns the same to-do with
+`already: true` and sends nothing. A refusal (a draft, a turn running, a prompt on screen: the
+gated prompt's code, `reason` in plain words) is answered and kept; it is retried ONLY by
+`park`. A prompt on screen (question, permission) always refuses (`not-idle`/`waiting`): text
+typed there would answer it; the to-do is still recorded.
+`POST /api/mc/todo/:id {action}`: `done` (409 when done), `reopen` (409 unless done), `back` (to
+Answer now: the to-do leaves the list, its card shows again while it waits), `park` (resend a
+REFUSED message only; 409 when it was delivered or may have landed: `sending`, `uncertain`) ->
+`{todo, parked?, generatedAt}`; an unknown id is 404, an unknown action 400.
+`POST /api/mc/later {cardId, hours: 1-24 whole}` -> `{cardId, until, generatedAt}`: hidden until
+then, back only if still pending (404 when the card no longer waits). Not the supervisor's later.
+Capability `mc-needs`.
 
 ## Questions context (#510) and Ask (#511) - `lib/mc-analyst.js`
 `GET /api/mc/questions/:cardId/context?level=ask|context|everything` -> `{level, text, sections: [{title, body}], sources: [Source], generatedAt}` (built on demand, never on a poll)

@@ -160,6 +160,29 @@ void main() {
       expect(jsonDecode(seen[2].body), {'cardId': 'c1', 'hours': 4});
     });
 
+    test('the park answer: the plain words win over the code; already and uncertain are kept (#506)', () async {
+      final r = await client((_) => _json({
+            'todo': {
+              'id': 't1',
+              'cardId': 'c1',
+              'park': {'state': 'refused', 'refused': 'draft', 'reason': 'it has unsent text in its prompt box', 'at': 5}
+            },
+            'parked': {'delivered': false, 'refused': 'draft', 'reason': 'it has unsent text in its prompt box', 'already': true}
+          }, 200)).mcAddTodo('c1');
+      expect(r.refused, 'it has unsent text in its prompt box');
+      expect(r.already, isTrue);
+      expect(r.uncertain, isFalse);
+      expect(r.todo?.park.isRefused, isTrue);
+      expect(r.todo?.park.refused, 'draft');
+      expect(McFeed.mcParkWords(r), '; its session was told before, so nothing was sent again');
+      final u = McTodoResult.fromJson({'parked': {'delivered': false, 'uncertain': true}});
+      expect(McFeed.mcParkWords(u), '; the message may have reached the session');
+      expect(McFeed.mcParkWords(McTodoResult.fromJson({'parked': {'delivered': true}})), '; the session was told to carry on');
+      expect(McFeed.mcParkWords(McTodoResult.fromJson({'parked': {'refused': 'busy'}})), ', but the session was not told: busy');
+      // A to-do from an older server carries no park: nothing to say about it.
+      expect(McTodo.fromJson({'id': 't'})!.park.state, isNull);
+    });
+
     test('a to-do without text sends no text field', () async {
       await client((_) => _json({'todo': null, 'parked': {'delivered': true}}, 200)).mcAddTodo('c1');
       expect(jsonDecode(seen.single.body), {'cardId': 'c1'});

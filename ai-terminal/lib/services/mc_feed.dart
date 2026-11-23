@@ -239,6 +239,15 @@ class McFeed extends ChangeNotifier {
 
   // --- actions on a card or a to-do: sent to the server that answered ------
 
+  /// What the server said about the park message, as the end of a sentence.
+  static String mcParkWords(McTodoResult r) {
+    if (r.already) return '; its session was told before, so nothing was sent again';
+    if (r.delivered) return '; the session was told to carry on';
+    if (r.uncertain) return '; the message may have reached the session';
+    final why = r.refused;
+    return why == null ? '' : ', but the session was not told: $why';
+  }
+
   ApiClient _authority() {
     final sv = _servedBy;
     if (sv == null) throw const ApiException(0, 'Mission Control is not reachable right now');
@@ -249,9 +258,7 @@ class McFeed extends ChangeNotifier {
   Future<String> addTodo(McCard card, {String? text}) async {
     final r = await _authority().mcAddTodo(card.id, text: text);
     unawaited(refresh());
-    if (r.delivered) return 'On your to-do list; the session was told to carry on';
-    final why = r.refused;
-    return why == null ? 'On your to-do list' : 'On your to-do list, but the session was not told: $why';
+    return 'On your to-do list${mcParkWords(r)}';
   }
 
   /// Hides [card] for [hours].
@@ -261,10 +268,12 @@ class McFeed extends ChangeNotifier {
     return hours == 1 ? 'Hidden for an hour' : 'Hidden for $hours hours';
   }
 
-  /// `done`, `reopen` or `back` (to Answer now).
-  Future<void> todoAction(McTodo todo, String action) async {
-    await _authority().mcTodoAction(todo.id, action);
+  /// `done`, `reopen`, `back` (to Answer now) or `park` (tell its session again after a
+  /// refusal). Returns what to tell the person, or null when there is nothing to say.
+  Future<String?> todoAction(McTodo todo, String action) async {
+    final r = await _authority().mcTodoAction(todo.id, action);
     unawaited(refresh());
+    return action == 'park' ? 'Asked again${mcParkWords(r)}' : null;
   }
 
   // --- subjects (#508, #509): read from the server that answered ------------

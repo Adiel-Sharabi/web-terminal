@@ -80,6 +80,7 @@ const { mcRefusal } = require('./lib/mc-authority'); // #501 - who answers /api/
 const mcSubjects = require('./lib/mc-subjects'); // #504 - one work item across every session and machine
 const mcStage = require('./lib/mc-stage'); // #505 - the progress-stage order and evidence rule
 const mcStateLib = require('./lib/mc-state'); // #505 - Mission Control's persisted state (stage history)
+const mcNeeds = require('./lib/mc-needs'); // #506 - Answer now vs My to-do, ranked by what it blocks
 const recap = require('./lib/recap');
 // #383 - the model-written summary of one inbox wait. Hot-reload only: nothing in the worker loads it.
 const inboxDigest = require('./lib/inbox-digest');
@@ -6719,7 +6720,9 @@ function serverCapabilities() {
     'mission-control',
     // #504/#505 - GET /api/mc/subjects[/:key], `stage` on report items and `counts.stages` on
     // /api/mc/projects. An older authority would 404 the subjects routes.
-    'mc-subjects'];
+    'mc-subjects',
+    // #506 - GET /api/mc/now, POST /api/mc/todo[/:id] and POST /api/mc/later (lib/mc-needs.js).
+    'mc-needs'];
   // #412/#428 - GET /api/leases (forwarded to the lease authority). The companion's Leases
   // section asks only a server that advertises it: an older one would 404, which must
   // never read as "nobody holds anything". Like 'fcm', only where it is configured: a
@@ -7026,7 +7029,7 @@ async function _computeMcView(reqUser) {
   const sessions = rows.map((s) => ({ cwd: s.cwd, origin: s.origin, items: s.brief && s.brief.items }));
   // Computed once: GET /api/mc/projects serves it, and its area ids are what ?area= takes.
   const projectsOut = projectsLib.projectsView({ projects: cfg.projects, sessions, subjects: view.subjects });
-  return { ...view, servers, projectsOut, generatedAt: now };
+  return { ...view, nodes, servers, projectsOut, generatedAt: now };
 }
 /** The view through a short cache: one compute in flight at a time, and its answer reused for
  *  MC_VIEW_TTL_MS after it ARRIVES (a slow compute never overlaps the next). */
@@ -7099,6 +7102,128 @@ app.get('/api/mc/subjects/:key', async (req, res) => {
   } catch (e) {
     console.error(`[mc] subject: ${e.message}`);
     res.status(500).json({ error: 'could not read the cluster sessions' });
+  }
+});
+
+// --- API: #506 Mission Control: Answer now vs My to-do ---
+// The rules are lib/mc-needs.js (what waits on the person, the rank and its why, what each
+// to-do action may do, the park message); the cards come from the same view as the subjects
+// (cachedMcView), and the to-dos and "later"s live in mc-state.json (lib/mc-state.js), on
+// the authority only. Moving a card to My to-do tells its session ONCE, through the gated
+// prompt of the session's own server (deliverGatedPrompt, the supervisor's path): the to-do
+// is written to disk BEFORE the message goes out, so nothing ever sends it twice, and a
+// refusal (a draft, a turn running) is answered, never retried on its own (#479).
+const MC_TODO_ID_RE = /^t-[0-9a-f]{16}$/;
+
+/** Change one stored to-do; null when it is gone. [writeNow]: on disk before this returns. */
+function mcUpdateTodo(id, fn, writeNow) {
+  const list = mcState.todos();
+  const i = list.findIndex((t) => t.id === id);
+  if (i < 0) return null;
+  list[i] = fn(list[i]);
+  mcState.setTodos(mcNeeds.pruneTodos(list, Date.now()), { now: writeNow });
+  return list[i];
+}
+
+/** Send to-do [todo]'s park message (its body was fixed when the to-do was made) and record
+ *  the answer. An error here is "it may have landed": never sent again. */
+async function mcPark(todo) {
+  const body = (todo.park && todo.park.body) || {};
+  let out;
+  try {
+    out = await deliverGatedPrompt({ server: todo.server, id: todo.sessionId, text: body.text, expectWaitAt: body.expectWaitAt }, 'mission-control');
+  } catch (e) {
+    console.error(`[mc] park message: ${e.message}`);
+    out = { uncertain: true };
+  }
+  const now = Date.now();
+  return mcUpdateTodo(todo.id, (t) => mcNeeds.parkResult(t, out, now), true) || mcNeeds.parkResult(todo, out, now);
+}
+
+app.get('/api/mc/now', async (req, res) => {
+  const refused = mcRefusal(supervisorAuthority());
+  if (refused) return res.status(refused.status).json(refused.json);
+  try {
+    const v = await cachedMcView(clusterReqUser(req));
+    if (v.error) return res.status(500).json({ error: v.error });
+    const now = Date.now();
+    const n = mcNeeds.buildNow({ nodes: v.nodes, view: v, todos: mcState.todos(), later: mcNeeds.pruneLater(mcState.later(), now), now });
+    res.json({ answerNow: n.answerNow, todo: n.todo, moving: n.moving, projects: v.projectsOut, generatedAt: v.generatedAt });
+  } catch (e) {
+    console.error(`[mc] now: ${e.message}`);
+    res.status(500).json({ error: 'could not read the cluster sessions' });
+  }
+});
+
+app.post('/api/mc/todo', express.json({ limit: '8kb' }), async (req, res) => {
+  const refused = mcRefusal(supervisorAuthority());
+  if (refused) return res.status(refused.status).json(refused.json);
+  const inp = mcNeeds.todoInput(req.body);
+  if (inp.error) return res.status(400).json({ error: inp.error });
+  try {
+    const v = await cachedMcView(clusterReqUser(req));
+    if (v.error) return res.status(500).json({ error: v.error });
+    // From here to the record on disk nothing awaits: a second press finds this to-do.
+    const now = Date.now();
+    const todos = mcState.todos();
+    const existing = todos.find((t) => t.cardId === inp.cardId);
+    if (existing) {
+      // Its session was already told (or refused): moving the card again never tells it twice.
+      const todo = existing.state === 'back'
+        ? mcUpdateTodo(existing.id, (t) => ({ ...t, state: 'open', backAt: null, doneAt: null, text: inp.text || t.text }), true)
+        : existing;
+      return res.json({ todo: mcNeeds.publicTodo(todo), parked: mcNeeds.parkedAnswer(todo, { already: true }), generatedAt: now });
+    }
+    const card = mcNeeds.pendingCards({ nodes: v.nodes, view: v, now }).find((c) => c.id === inp.cardId);
+    if (!card) return res.status(404).json({ error: 'that card no longer waits on you' });
+    const todo = mcNeeds.newTodo(card, { id: `t-${crypto.randomBytes(8).toString('hex')}`, text: inp.text, now });
+    mcState.setTodos(mcNeeds.pruneTodos([...todos, todo], now), { now: true });
+    const done = await mcPark(todo);
+    res.json({ todo: mcNeeds.publicTodo(done), parked: mcNeeds.parkedAnswer(done), generatedAt: Date.now() });
+  } catch (e) {
+    console.error(`[mc] todo: ${e.message}`);
+    res.status(500).json({ error: 'could not record the to-do' });
+  }
+});
+
+app.post('/api/mc/todo/:id', express.json({ limit: '8kb' }), async (req, res) => {
+  const refused = mcRefusal(supervisorAuthority());
+  if (refused) return res.status(refused.status).json(refused.json);
+  const id = String(req.params.id || '');
+  const action = req.body && typeof req.body === 'object' ? req.body.action : undefined;
+  const t = MC_TODO_ID_RE.test(id) ? mcState.todos().find((x) => x.id === id) : null;
+  const r = mcNeeds.applyAction(t, action, Date.now());
+  if (r.error) return res.status(r.status).json({ error: r.error });
+  try {
+    // A retried park is marked `sending` on disk before it goes out, like the first one.
+    const todo = mcUpdateTodo(id, () => r.todo, Boolean(r.park));
+    if (!r.park) return res.json({ todo: mcNeeds.publicTodo(todo), generatedAt: Date.now() });
+    const done = await mcPark(todo);
+    res.json({ todo: mcNeeds.publicTodo(done), parked: mcNeeds.parkedAnswer(done), generatedAt: Date.now() });
+  } catch (e) {
+    console.error(`[mc] todo action: ${e.message}`);
+    res.status(500).json({ error: 'could not change the to-do' });
+  }
+});
+
+app.post('/api/mc/later', express.json({ limit: '8kb' }), async (req, res) => {
+  const refused = mcRefusal(supervisorAuthority());
+  if (refused) return res.status(refused.status).json(refused.json);
+  const inp = mcNeeds.laterInput(req.body);
+  if (inp.error) return res.status(400).json({ error: inp.error });
+  try {
+    const v = await cachedMcView(clusterReqUser(req));
+    if (v.error) return res.status(500).json({ error: v.error });
+    const now = Date.now();
+    if (!mcNeeds.pendingCards({ nodes: v.nodes, view: v, now }).some((c) => c.id === inp.cardId)) {
+      return res.status(404).json({ error: 'that card no longer waits on you' });
+    }
+    const until = now + inp.hours * 60 * 60 * 1000;
+    mcState.setLater({ ...mcNeeds.pruneLater(mcState.later(), now), [inp.cardId]: { until, at: now } });
+    res.json({ cardId: inp.cardId, until, generatedAt: now });
+  } catch (e) {
+    console.error(`[mc] later: ${e.message}`);
+    res.status(500).json({ error: 'could not put the card off' });
   }
 });
 
@@ -7953,11 +8078,15 @@ function supRefusal(status, json) {
 /** Type one planned prompt through the gated prompt of the session's own server.
  *  `{delivered}`, `{uncertain}` (the request went out and no answer came: it may have
  *  landed, so it is never sent again), or `{why}`. */
-async function supervisorDeliver(a) {
+const supervisorDeliver = (a) => deliverGatedPrompt(a, 'supervisor');
+/** The one way a server-built prompt reaches a session on ANY server: gatedPrompt here, POST
+ *  /api/sessions/:id/prompt on a peer (with this server's stored token). [by] names the caller
+ *  in this server's log (the supervisor, #506 Mission Control's park message). */
+async function deliverGatedPrompt(a, by) {
   // #469: a.template names a text the session's own server builds (the close-out).
   const body = { ...(a.template ? { template: a.template } : { text: a.text }), tag: 'supervisor', ...(a.expectWaitAt ? { expectWaitAt: a.expectWaitAt } : {}) };
   if (a.server === getServerName()) {
-    const out = await gatedPrompt(a.id, body, 'supervisor');
+    const out = await gatedPrompt(a.id, body, by);
     return out.json && out.json.delivered ? { delivered: true } : supRefusal(out.status, out.json);
   }
   const peer = getClusterConfig().find((x) => x && x.name === a.server && x.url);

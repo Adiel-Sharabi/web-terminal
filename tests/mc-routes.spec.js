@@ -279,6 +279,11 @@ test.describe('#502/#503 Mission Control routes', () => {
         expect(r.status(), url).toBe(409);
         expect(await r.json(), url).toEqual({ role: 'peer', authority: { name: 'zeta', url: 'http://127.0.0.1:1' } });
       }
+      // #506 - and so does every Answer now / My to-do route, reads and writes alike.
+      expect((await ctx.get('/api/mc/now')).status()).toBe(409);
+      for (const url of ['/api/mc/todo', '/api/mc/todo/t-0123456789abcdef', '/api/mc/later']) {
+        expect((await ctx.post(url, { data: { cardId: 'x', hours: 1, action: 'done' } })).status(), url).toBe(409);
+      }
       const m = await ctx.get(`/api/work-items/${encodeURIComponent('acme/widgets#42')}/meta`);
       expect(m.status()).toBe(200);
       await ctx.dispose();

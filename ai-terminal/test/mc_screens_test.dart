@@ -184,6 +184,19 @@ void main() {
       await tester.pumpWidget(const SizedBox());
     });
 
+    testWidgets('a to-do whose session was not told says why, and Tell asks the server again (#506)', (tester) async {
+      await pump(tester);
+      expect(find.byKey(const ValueKey('mc-todo-park-t-1')), findsOneWidget);
+      expect(find.text('Its session was not told: it has unsent text in its prompt box'), findsOneWidget);
+      // The done one says nothing about its message and offers no Tell.
+      expect(find.byKey(const ValueKey('mc-todo-tell-t-2')), findsNothing);
+      await tester.tap(find.byKey(const ValueKey('mc-todo-tell-t-1')));
+      await tester.pump();
+      expect(server.posts.map((r) => '${r.url.path} ${r.body}'), ['/api/mc/todo/t-1 {"action":"park"}']);
+      await tester.pumpWidget(const SizedBox());
+      await tester.pump(const Duration(seconds: 5));
+    });
+
     testWidgets('moving counts, and project cards with area labels and a stage bar in the server order', (tester) async {
       await pump(tester);
       expect(find.text('4 working · 2 idle · 6 in all'), findsOneWidget);

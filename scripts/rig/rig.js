@@ -55,7 +55,9 @@ const PIPE = process.platform === 'win32'
 const SYNC_FILES = ['server.js', 'pty-worker.js', 'monitor.js', 'app.html', 'terminal.html', 'lobby.html', 'sw.js',
   'scripts/wt-report.js', 'scripts/wt-handoff.js', 'scripts/wt-maintenance.js', // #407 - the restart question's answer command
   // #383: server.js reads the inbox digest's scratch cwd from it.
-  'scripts/scratch-dirs.js'];
+  'scripts/scratch-dirs.js',
+  // #470: server.js reads isWtHook from it; without it the rig's server does not start.
+  'scripts/install-hooks.js'];
 const SYNC_DIRS = ['lib', 'public', 'hooks'];
 
 const log = (m) => console.log(`[rig] ${m}`);
