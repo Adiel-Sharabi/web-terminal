@@ -296,6 +296,7 @@ void main() {
     final a = d(_decision());
     expect(a.sameAsk(d(_decision(recommended: 0))), isTrue, reason: 'a new recommendation is the same ask');
     expect(a.sameAsk(d({..._decision(), 'question': 'Other?'})), isFalse);
+    expect(a.sameAsk(d({..._decision(), 'context': 'Another situation.'})), isFalse, reason: 'a generic question, a new ask');
     expect(a.sameAsk(d(_decision(options: [{'label': 'Small (64 MB)'}, {'label': 'Huge'}]))), isFalse);
     expect(a.sameAsk(null), isFalse);
   });
