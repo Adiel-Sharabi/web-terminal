@@ -1,6 +1,15 @@
 {
   "generatedAt": 1767225600000,
-  "servers": [{"name": "alpha", "ok": true}, {"name": "beta", "ok": false}],
+  "servers": [
+    {
+      "name": "alpha",
+      "ok": true
+    },
+    {
+      "name": "beta",
+      "ok": false
+    }
+  ],
   "runs": [
     {
       "id": "run-1",
@@ -9,13 +18,28 @@
       "name": "Bug hunt: login",
       "startedAt": 1767218400000,
       "status": "working",
-      "subjects": ["acme/widgets#41", "acme/widgets#42"],
+      "subjects": [
+        "acme/widgets#41",
+        "acme/widgets#42"
+      ],
       "children": [
-        {"server": "alpha", "id": "s-2", "name": "Repro #41", "status": "idle"},
-        {"server": "beta", "id": "s-3", "name": "Fix #41", "status": "working"}
+        {
+          "server": "alpha",
+          "id": "s-2",
+          "name": "Repro #41",
+          "status": "idle"
+        },
+        {
+          "server": "beta",
+          "id": "s-3",
+          "name": "Fix #41",
+          "status": "working"
+        }
       ]
     },
-    {"name": "a run with no id is dropped"}
+    {
+      "name": "a run with no id is dropped"
+    }
   ],
   "subjects": [
     {
@@ -25,17 +49,52 @@
       "title": "Login loops after a token refresh",
       "project": "web-terminal",
       "area": "Companion",
-      "meta": {"type": "Bug", "state": "open", "closed": false, "severity": 1, "severityText": "severity:1", "createdBy": "reporter-a", "createdAt": 1767052800000, "prs": []},
-      "stage": {"current": "fixing", "reported": "fixing", "evidence": null, "history": []},
+      "meta": {
+        "type": "Bug",
+        "state": "open",
+        "closed": false,
+        "severity": 1,
+        "severityText": "severity:1",
+        "createdBy": "reporter-a",
+        "createdAt": 1767052800000,
+        "prs": []
+      },
+      "stage": {
+        "current": "fixing",
+        "reported": "fixing",
+        "evidence": null,
+        "history": []
+      },
       "sessions": [
-        {"server": "alpha", "serverUrl": "http://alpha.test:7681", "id": "s-1", "name": "Orchestrator", "status": "working"},
-        {"server": "beta", "serverUrl": "http://beta.test:7681", "id": "s-3", "name": "Fix #41", "parentId": "s-1", "status": "working"}
+        {
+          "server": "alpha",
+          "serverUrl": "http://alpha.test:7681",
+          "id": "s-1",
+          "name": "Orchestrator",
+          "status": "working"
+        },
+        {
+          "server": "beta",
+          "serverUrl": "http://beta.test:7681",
+          "id": "s-3",
+          "name": "Fix #41",
+          "parentId": "s-1",
+          "status": "working"
+        }
       ],
-      "needsYou": {"id": "alpha|s-1|you:pick", "kind": "decision", "sessionId": "s-1", "what": "Which fix should ship?"},
+      "needsYou": {
+        "id": "alpha|s-1|you:pick",
+        "kind": "decision",
+        "sessionId": "s-1",
+        "what": "Which fix should ship?"
+      },
       "waitsOn": "you",
       "runId": "run-1",
       "updatedAt": 1767225000000,
-      "buckets": ["active", "needsYou"]
+      "buckets": [
+        "active",
+        "needsYou"
+      ]
     },
     {
       "key": "acme/widgets#42",
@@ -43,10 +102,27 @@
       "title": "Tabs flicker on resume",
       "project": "web-terminal",
       "area": "Companion",
-      "meta": {"type": "Bug", "state": "open", "createdBy": "reporter-b"},
-      "stage": {"current": "reproduced"},
+      "meta": {
+        "type": "Bug",
+        "state": "open",
+        "createdBy": "reporter-b"
+      },
+      "stage": {
+        "current": "reproduced"
+      },
       "sessions": [
-        {"server": "alpha", "serverUrl": "http://alpha.test:7681", "id": "s-5", "name": "Repro #42", "parentId": "s-1", "status": "idle", "wait": {"on": "external", "what": "CI on the fix branch"}}
+        {
+          "server": "alpha",
+          "serverUrl": "http://alpha.test:7681",
+          "id": "s-5",
+          "name": "Repro #42",
+          "parentId": "s-1",
+          "status": "idle",
+          "wait": {
+            "on": "external",
+            "what": "CI on the fix branch"
+          }
+        }
       ],
       "waitsOn": "external",
       "runId": "run-1",
@@ -58,13 +134,51 @@
       "title": "Readme typo",
       "project": "web-terminal",
       "area": "Server",
-      "meta": {"type": "Task", "state": "closed", "closed": true},
-      "stage": {"current": "merged"},
+      "meta": {
+        "type": "Task",
+        "state": "closed",
+        "closed": true
+      },
+      "stage": {
+        "current": "merged"
+      },
       "sessions": [],
       "waitsOn": "done",
       "updatedAt": 1767200000000
     },
-    {"title": "no key: cannot be addressed, so it is dropped"}
+    {
+      "key": "acme/widgets#44",
+      "ref": "#44",
+      "title": "Settings page scrolls twice",
+      "project": "web-terminal",
+      "area": "Server",
+      "meta": {
+        "type": "Bug",
+        "state": "open",
+        "createdBy": "reporter-c"
+      },
+      "stage": {
+        "current": "triage"
+      },
+      "sessions": [
+        {
+          "server": "alpha",
+          "serverUrl": "http://alpha.test:7681",
+          "id": "s-7",
+          "name": "Look at #44",
+          "status": "working"
+        }
+      ],
+      "waitsOn": "self",
+      "updatedAt": 1767225000000
+    },
+    {
+      "key": "acme/widgets#41",
+      "title": "a repeated key: only the first copy is kept"
+    },
+    {
+      "title": "no key: cannot be addressed, so it is dropped"
+    }
   ],
   "futureField": true
 }

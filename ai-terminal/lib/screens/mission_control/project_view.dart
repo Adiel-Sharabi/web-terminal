@@ -5,11 +5,12 @@
 // the bottom bar stays in place and a session opened from a subject (on the app's one
 // session stack, over Mission Control) comes Back to that subject.
 //
-// The header and the area tabs show the counts of the SAME answer the Now screen shows
-// (`GET /api/mc/now`, read by [McFeed]): the numbers match Now because they are Now's.
-// The rows are `GET /api/mc/subjects?project=&area=`, read again on every Now refresh.
-// Nothing is re-counted here: a filter's number is the server's count; its rows are the
-// subjects the server put under it (see [McSubject.inFilter]).
+// The header, the area tabs and the filters show the counts of the SAME answer the Now
+// screen shows (`GET /api/mc/now`, read by [McFeed]): the numbers match Now because they
+// are Now's; nothing is re-counted here. The rows are `GET /api/mc/subjects?project=&area=`,
+// read again on every Now refresh. Which rows sit under a filter is the server's
+// `buckets` once the contract carries it; until then a client-side reading of each
+// subject's fields ([McSubject.inFilter]), so the rows can differ from the count.
 
 import 'dart:async';
 
@@ -32,6 +33,7 @@ class McProjectsNavigator extends StatefulWidget {
     required this.onAnswer,
     required this.onOpenSession,
     this.actions = const [],
+    this.active = true,
     this.now,
   });
 
@@ -39,6 +41,11 @@ class McProjectsNavigator extends StatefulWidget {
   final void Function(McCard card) onAnswer;
   final void Function(String sessionId) onOpenSession;
   final List<Widget> actions;
+
+  /// Whether Mission Control is the home on screen. Hidden, it still sits in the tree
+  /// (the shell keeps both homes), and its pages must not take the system Back from the
+  /// sessions home.
+  final bool active;
 
   /// Injectable for tests: the clock ages are read against.
   final DateTime? now;
@@ -64,13 +71,12 @@ class McProjectsNavigatorState extends State<McProjectsNavigator> {
           feed: widget.feed,
           projectId: projectId,
           now: widget.now,
-          onOpenSubject: (s, order) => Navigator.of(context).push(MaterialPageRoute<void>(
+          onOpenSubject: (s) => Navigator.of(context).push(MaterialPageRoute<void>(
             settings: RouteSettings(name: 'mc-subject/${s.key}'),
             builder: (_) => McSubjectScreen(
               feed: widget.feed,
               subjectKey: s.key,
               initial: s,
-              initialOrder: order,
               onAnswer: widget.onAnswer,
               onOpenSession: widget.onOpenSession,
               now: widget.now,
@@ -82,6 +88,7 @@ class McProjectsNavigatorState extends State<McProjectsNavigator> {
   @override
   Widget build(BuildContext context) {
     return NavigatorPopHandler(
+      enabled: widget.active,
       onPopWithResult: (_) => _nav.currentState?.maybePop(),
       child: Navigator(
         key: _nav,
@@ -98,16 +105,20 @@ class McProjectsNavigatorState extends State<McProjectsNavigator> {
                   physics: const AlwaysScrollableScrollPhysics(),
                   padding: const EdgeInsets.fromLTRB(12, 8, 12, 24),
                   children: [
-                    if (widget.feed.message != null)
-                      McStaleBanner(message: widget.feed.message!, at: widget.feed.receivedAt),
-                    if (widget.feed.now == null && widget.feed.status != McStatus.loading)
-                      Text(widget.feed.message ?? 'Mission Control has not answered yet',
-                          style: Theme.of(context).textTheme.bodyMedium?.copyWith(color: AppColors.onSurfaceVariant))
-                    else
+                    if (widget.feed.now == null)
+                      widget.feed.status == McStatus.loading
+                          ? const Padding(padding: EdgeInsets.all(24), child: Center(child: CircularProgressIndicator()))
+                          : Text(widget.feed.message ?? 'Mission Control has not answered yet',
+                              key: const ValueKey('mc-projects-none'),
+                              style: Theme.of(context).textTheme.bodyMedium?.copyWith(color: AppColors.onSurfaceVariant))
+                    else ...[
+                      if (widget.feed.message != null)
+                        McStaleBanner(message: widget.feed.message!, at: widget.feed.receivedAt),
                       McProjectsSection(
                         projects: widget.feed.now?.projects ?? const [],
                         onOpen: (p) => Navigator.of(context).push(_projectRoute(p.id)),
                       ),
+                    ],
                   ],
                 ),
               ),
@@ -132,8 +143,7 @@ class McProjectScreen extends StatefulWidget {
   final McFeed feed;
   final String projectId;
 
-  /// Opens a subject; [order] is the stage order its list was drawn with.
-  final void Function(McSubject subject, List<String> order) onOpenSubject;
+  final void Function(McSubject subject) onOpenSubject;
   final DateTime? now;
 
   @override
@@ -200,6 +210,14 @@ class _McProjectScreenState extends State<McProjectScreen> {
     }
   }
 
+  /// A refresh asks Now again (which reads the rows again when it answers); only when Now
+  /// brought nothing new are the rows read on their own.
+  Future<void> _refresh() async {
+    final before = widget.feed.receivedAt;
+    await widget.feed.refresh();
+    if (mounted && widget.feed.receivedAt == before) await _load();
+  }
+
   void _pickArea(String? area) {
     if (area == _area) return;
     setState(() {
@@ -236,15 +254,12 @@ class _McProjectScreenState extends State<McProjectScreen> {
             key: const ValueKey('mc-project-refresh'),
             tooltip: 'Refresh',
             icon: const Icon(Icons.refresh),
-            onPressed: () {
-              unawaited(widget.feed.refresh());
-              unawaited(_load());
-            },
+            onPressed: () => unawaited(_refresh()),
           ),
         ],
       ),
       body: RefreshIndicator(
-        onRefresh: () => Future.wait([widget.feed.refresh(), _load()]),
+        onRefresh: _refresh,
         child: ListView(
           key: const ValueKey('mc-project-list'),
           physics: const AlwaysScrollableScrollPhysics(),
@@ -335,7 +350,7 @@ class _McProjectScreenState extends State<McProjectScreen> {
       }
       return const [Padding(padding: EdgeInsets.all(24), child: Center(child: CircularProgressIndicator()))];
     }
-    final shown = [for (final s in data.subjects) if (s.inFilter(_filter)) s];
+    final shown = [for (final s in data.subjects) if (s.inFilter(_filter, now: widget.now)) s];
     if (shown.isEmpty) {
       return [
         Padding(
@@ -348,9 +363,8 @@ class _McProjectScreenState extends State<McProjectScreen> {
     Widget row(McSubject s) => McSubjectRow(
           key: ValueKey('mc-subject-row-${s.key}'),
           subject: s,
-          order: data.stageOrder,
           now: widget.now,
-          onTap: () => widget.onOpenSubject(s, data.stageOrder),
+          onTap: () => widget.onOpenSubject(s),
         );
     final out = <Widget>[];
     final placed = <String>{};

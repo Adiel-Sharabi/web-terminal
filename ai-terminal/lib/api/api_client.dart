@@ -456,11 +456,14 @@ class ApiClient {
     try {
       body = _decode(res);
     } on ApiException {
-      body = null; // an HTML 404 from a server without the route: said below
+      // Not JSON: the route's own answers always are, so this is a server WITHOUT the
+      // route (an older one answers Express's HTML `Cannot POST`), not a missing session.
+      return McPromptResult(
+          error: res.statusCode == 404 ? 'its server cannot take prompts yet (it needs an update)' : 'no answer (${res.statusCode})');
     }
     final r = McPromptResult.fromJson(body);
     if (r.delivered || r.refused != null || r.error != null) return r;
-    return McPromptResult(error: res.statusCode == 404 ? 'session not found' : 'no answer (${res.statusCode})');
+    return McPromptResult(error: 'no answer (${res.statusCode})');
   }
 
   Future<Map<String, dynamic>> _mcGet(String path, {Map<String, String>? query}) async {

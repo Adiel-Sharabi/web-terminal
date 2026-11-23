@@ -194,7 +194,7 @@ class McRunHeader extends StatelessWidget {
       if (r.startedAt != null) 'started ${relativeTime(r.startedAt!.millisecondsSinceEpoch, now: now)}',
       if (r.server != null) 'on ${r.server}',
       if (r.status != null) 'orchestrator ${r.status}',
-      '${r.subjects.length} subjects',
+      r.subjects.length == 1 ? '1 subject' : '${r.subjects.length} subjects',
     ].join(' · ');
     return Padding(
       key: ValueKey('mc-run-${r.id}'),

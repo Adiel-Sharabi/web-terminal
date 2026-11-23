@@ -150,6 +150,7 @@ class _MissionControlHomeState extends State<MissionControlHome> {
             onAnswer: _answer,
             onOpenSession: _openSession,
             actions: _actions(),
+            active: _isActive,
           ),
         McTab.sessions => (widget.sessionsBoardBuilder ??
             (open) => WorkBoardScreen(

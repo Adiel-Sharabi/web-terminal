@@ -51,6 +51,7 @@ class _Cluster {
     's-3': (409, {'delivered': false, 'refused': 'busy'}),
   };
   int subjectsStatus = 200;
+  int subjectStatus = 200;
 
   http.Response _answer(ServerConfig sv, http.Request req) {
     requests.add(req);
@@ -66,7 +67,10 @@ class _Cluster {
       if (subjectsStatus != 200) return http.Response(jsonEncode({'error': 'Not found'}), subjectsStatus);
       return http.Response(jsonEncode(_json('mc_subjects.json')), 200);
     }
-    if (path.startsWith('/api/mc/subjects/')) return http.Response(jsonEncode(_json('mc_subject.json')), 200);
+    if (path.startsWith('/api/mc/subjects/')) {
+      if (subjectStatus != 200) return http.Response(jsonEncode({'error': 'unknown subject'}), subjectStatus);
+      return http.Response(jsonEncode(_json('mc_subject.json')), 200);
+    }
     if (req.method == 'POST') return http.Response(jsonEncode({'ok': true}), 200);
     return http.Response(jsonEncode({'error': 'Not found'}), 404);
   }
@@ -81,13 +85,13 @@ class _Cluster {
 
 void main() {
   group('wire', () {
-    test('subjects: the server order, runs, buckets when sent, junk dropped, the contract stage order', () {
+    test('subjects: the server order, runs, buckets when sent, junk and repeated keys dropped', () {
       final d = McSubjects.fromJson(_json('mc_subjects.json'));
-      expect(d.subjects.map((s) => s.key), ['acme/widgets#41', 'acme/widgets#42', 'acme/widgets#43']);
+      expect(d.subjects.map((s) => s.key), ['acme/widgets#41', 'acme/widgets#42', 'acme/widgets#43', 'acme/widgets#44']);
+      expect(d.subjects.first.title, 'Login loops after a token refresh', reason: 'the first copy of a repeated key');
       expect(d.runs.map((r) => r.id), ['run-1']);
       expect(d.runs.single.children.map((c) => c.status), ['idle', 'working']);
       expect(d.servers.map((s) => '${s.name}:${s.ok}'), ['alpha:true', 'beta:false']);
-      expect(d.stageOrder, kMcStageOrder);
       final s41 = d.subjects.first;
       expect(s41.buckets, ['active', 'needsYou']);
       expect(s41.meta?.severityLabel, 'severity:1');
@@ -98,7 +102,7 @@ void main() {
 
     test('a filter is the server buckets when sent, else read from the subject fields', () {
       final d = McSubjects.fromJson(_json('mc_subjects.json'));
-      final [s41, s42, s43] = d.subjects;
+      final [s41, s42, s43, _] = d.subjects;
       // Buckets win, even where the fields would say otherwise.
       expect(s41.inFilter(McSubjectFilter.needsYou), isTrue);
       expect(s41.inFilter(McSubjectFilter.waitsOnOthers), isFalse);
@@ -106,16 +110,22 @@ void main() {
       // No buckets: an external wait waits on others; a done wait is done, not active.
       expect(s42.inFilter(McSubjectFilter.waitsOnOthers), isTrue);
       expect(s42.inFilter(McSubjectFilter.active), isTrue);
-      expect(s43.inFilter(McSubjectFilter.doneWeek), isTrue);
+      expect(s43.inFilter(McSubjectFilter.doneWeek, now: _now), isTrue);
       expect(s43.inFilter(McSubjectFilter.active), isFalse);
+      // Done a month ago is done, but not this week; done at an unknown time neither.
+      final old = McSubject(key: 'k', waitsOn: 'done', updatedAt: _now.subtract(const Duration(days: 30)));
+      expect(old.inFilter(McSubjectFilter.doneWeek, now: _now), isFalse);
+      expect(old.inFilter(McSubjectFilter.active), isFalse);
+      expect(const McSubject(key: 'k', waitsOn: 'done').inFilter(McSubjectFilter.doneWeek, now: _now), isFalse);
     });
 
-    test('a subject detail; a server stage order wins; junk reads as empty', () {
+    test('a subject detail; junk reads as empty; a repeated session id is kept once', () {
       final d = McSubjectDetail.fromJson(_json('mc_subject.json'));
       expect(d.subject?.sessions.map((s) => s.parentId), [null, 's-1', 's-1', 's-1', 's-99']);
       expect(d.subject?.stage.stepsFor('pr-open').single.detail, 'PR #77 opened');
       expect(d.subject?.meta?.prs.single.label, 'PR #77 open');
-      expect(McSubjectDetail.fromJson({'stages': ['a', 'b']}).stageOrder, ['a', 'b']);
+      expect(McSubject.fromJson({'key': 'k', 'sessions': [{'id': 'a'}, {'id': 'a', 'name': 'again'}]})?.sessions.map((s) => s.name),
+          [null]);
       final junk = McSubjectDetail.fromJson({'subject': 'nope', 'runs': 3});
       expect(junk.subject, isNull);
       expect(junk.runs, isEmpty);
@@ -150,7 +160,10 @@ void main() {
       expect(draft.text, 'not told: someone has unsent text in its prompt box');
       expect((await answer(409, '{"delivered":false,"refused":"brand-new"}')).text, 'not told: brand-new');
       expect((await answer(400, '{"error":"text must be one line"}')).text, 'not told: text must be one line');
-      expect((await answer(404, '<html>Cannot POST</html>')).text, 'not told: session not found');
+      expect((await answer(404, '{"error":"session not found"}')).text, 'not told: session not found');
+      expect((await answer(404, '<html>Cannot POST</html>')).text,
+          'not told: its server cannot take prompts yet (it needs an update)',
+          reason: 'a non-JSON 404 is a server without the route, not a missing session');
     });
 
     test('the pause line is one line well under the gated prompt cap', () {
@@ -195,7 +208,7 @@ void main() {
           feed: feed,
           projectId: 'web-terminal',
           now: _now,
-          onOpenSubject: (s, _) => openedSubjects.add(s.key),
+          onOpenSubject: (s) => openedSubjects.add(s.key),
         ),
       ));
       await tester.pump();
@@ -244,6 +257,13 @@ void main() {
       final r42 = find.byKey(const ValueKey('mc-subject-row-acme/widgets#42'));
       expect(tester.getTopLeft(run).dy, lessThan(tester.getTopLeft(r41).dy));
       expect(tester.getTopLeft(r41).dy, lessThan(tester.getTopLeft(r42).dy));
+      // A subject in no run comes after the runs, under its own label.
+      final noRun = find.byKey(const ValueKey('mc-project-no-run'));
+      final r44 = find.byKey(const ValueKey('mc-subject-row-acme/widgets#44'));
+      expect(find.descendant(of: noRun, matching: find.text('Not in a run')), findsOneWidget);
+      expect(tester.getTopLeft(r42).dy, lessThan(tester.getTopLeft(noRun).dy));
+      expect(tester.getTopLeft(noRun).dy, lessThan(tester.getTopLeft(r44).dy));
+      expect(find.descendant(of: r44, matching: find.text('Triage · moving on its own')), findsOneWidget);
       Finder in41(Finder f) => find.descendant(of: r41, matching: f);
       expect(in41(find.text('#41')), findsOneWidget);
       expect(in41(find.text('Login loops after a token refresh')), findsOneWidget);
@@ -300,7 +320,7 @@ void main() {
     late McFeed feed;
     late List<String> answered;
     late List<String> opened;
-    late List<Uri> urls;
+    late List<String> urls;
 
     Future<void> pump(WidgetTester tester) async {
       await _size(tester, const Size(1200, 3200));
@@ -384,12 +404,20 @@ void main() {
       expect(find.descendant(of: wi, matching: find.text('Login loops after a token refresh')), findsOneWidget);
       await tester.tap(find.byKey(const ValueKey('mc-pr-77')));
       await tester.tap(find.byKey(const ValueKey('mc-subject-open-tracker')));
-      expect(urls.map((u) => u.toString()), [
+      expect(urls, [
         'https://example.test/acme/widgets/pull/77',
         'https://example.test/acme/widgets/issues/41',
       ]);
       final ask = tester.widget<TextField>(find.byKey(const ValueKey('mc-subject-ask')));
       expect(ask.enabled, isFalse, reason: 'wired by #511');
+      await tester.pumpWidget(const SizedBox());
+    });
+
+    testWidgets('a subject the server does not know says so instead of a blank page', (tester) async {
+      cluster.subjectStatus = 404;
+      await pump(tester);
+      expect(find.byKey(const ValueKey('mc-subject-error')), findsOneWidget);
+      expect(find.textContaining('does not know this subject'), findsOneWidget);
       await tester.pumpWidget(const SizedBox());
     });
 
@@ -456,6 +484,56 @@ void main() {
       await tester.pumpAndSettle();
       expect(find.byType(McSubjectScreen), findsNothing);
       expect(find.byType(McProjectScreen), findsOneWidget);
+      await tester.pumpWidget(const SizedBox());
+    });
+
+    Future<ValueNotifier<bool>> openSubject(WidgetTester tester, McFeed feed) async {
+      final active = ValueNotifier<bool>(true);
+      await tester.pumpWidget(MaterialApp(
+        theme: AppTheme.dark,
+        home: MissionControlHome(
+          feed: feed,
+          active: active,
+          onShowSessionsHome: () {},
+          sessionsBoardBuilder: (open) => const Scaffold(body: Text('the sessions board')),
+        ),
+      ));
+      await feed.refresh();
+      await tester.pumpAndSettle();
+      await tester.tap(find.byKey(const ValueKey('mc-project-web-terminal')));
+      await tester.pumpAndSettle();
+      await tester.tap(find.byKey(const ValueKey('mc-subject-acme/widgets#41')));
+      await tester.pumpAndSettle();
+      expect(find.byType(McSubjectScreen), findsOneWidget);
+      return active;
+    }
+
+    testWidgets('the system Back steps back through the Projects pages', (tester) async {
+      await _size(tester, const Size(1400, 2400));
+      final feed = _Cluster().feed();
+      addTearDown(feed.dispose);
+      await openSubject(tester, feed);
+      await tester.binding.handlePopRoute();
+      await tester.pumpAndSettle();
+      expect(find.byType(McSubjectScreen), findsNothing);
+      expect(find.byType(McProjectScreen), findsOneWidget);
+      await tester.binding.handlePopRoute();
+      await tester.pumpAndSettle();
+      expect(find.byType(McProjectScreen), findsNothing);
+      expect(find.byKey(const ValueKey('mc-projects-tab')), findsOneWidget);
+      await tester.pumpWidget(const SizedBox());
+    });
+
+    testWidgets('hidden (the sessions home on screen), its pages leave the system Back alone', (tester) async {
+      await _size(tester, const Size(1400, 2400));
+      final feed = _Cluster().feed();
+      addTearDown(feed.dispose);
+      final active = await openSubject(tester, feed);
+      active.value = false;
+      await tester.pump();
+      await tester.binding.handlePopRoute();
+      await tester.pumpAndSettle();
+      expect(find.byType(McSubjectScreen), findsOneWidget, reason: 'the hidden page is not popped');
       await tester.pumpWidget(const SizedBox());
     });
   });

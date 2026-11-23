@@ -405,10 +405,16 @@ class McTodoResult {
 List<String> _strings(dynamic v) =>
     v is List ? List<String>.unmodifiable(v.map(_str).whereType<String>()) : const <String>[];
 
+/// [items] with only the first of each [id]: a repeated id in junk data would give two
+/// sibling widgets the same key.
+List<T> _firstOf<T>(List<T> items, String Function(T) id) {
+  final seen = <String>{};
+  return List<T>.unmodifiable(items.where((x) => seen.add(id(x))));
+}
+
 /// The progress stages in order, as the contract lists them (`docs/mission-control.md`,
-/// Stage; the server owns the order in `lib/mc-stage.js`). Used only when the server's
-/// answer does not carry its own order ([McSubjects.stageOrder]); a stage outside it is
-/// shown by its name, never dropped.
+/// Stage; the server owns the order in `lib/mc-stage.js`, and the wire carries no copy of
+/// it). A stage outside it is shown by its name, never dropped.
 const List<String> kMcStageOrder = [
   'triage',
   'reproduced',
@@ -761,8 +767,9 @@ class McSubject {
   final String? runId;
   final DateTime? updatedAt;
 
-  /// The `Counts` keys the server counts this subject under, when it sends them (null
-  /// when it does not: see [inFilter]).
+  /// The `Counts` keys the server counts this subject under (`buckets`). NOT in the
+  /// contract yet - asked of the subjects lane (#504) so the filters and the counts are
+  /// one server rule; read when sent, else null (see [inFilter]).
   final List<String>? buckets;
 
   const McSubject({
@@ -795,7 +802,7 @@ class McSubject {
       area: _str(m['area']),
       meta: McMeta.fromJson(m['meta']),
       stage: McStage.fromJson(m['stage']),
-      sessions: _list(m['sessions'], McSubjectSession.fromJson),
+      sessions: _firstOf(_list(m['sessions'], McSubjectSession.fromJson), (s) => s.id),
       needsYou: McCard.fromJson(m['needsYou']),
       waitsOn: _str(m['waitsOn']),
       runId: _str(m['runId']),
@@ -810,11 +817,13 @@ class McSubject {
   /// What the screen calls it: the title, else the ref.
   String get titleLabel => title ?? meta?.title ?? refLabel;
 
-  /// Whether the subject belongs under [f]. The server's own [buckets] decide when sent
-  /// (the same rule its counts use). Without them it is read from the subject's own
-  /// fields: a card or a `you` wait needs you, an `external` wait waits on others, a
-  /// `done` wait or a closed work item is done; everything not done is active.
-  bool inFilter(McSubjectFilter f) {
+  /// Whether the subject belongs under [f]. The server's [buckets] decide when sent.
+  /// Until the contract carries them this is a CLIENT-SIDE reading of the subject's own
+  /// fields, so a filter's rows can differ from the server's count beside it: a card or a
+  /// `you` wait needs you; an `external` wait waits on others; a `done` wait or a closed
+  /// work item is done, and done THIS WEEK when it last changed within 7 days of [now]
+  /// (unknown when it changed: not this week); everything not done is active.
+  bool inFilter(McSubjectFilter f, {DateTime? now}) {
     final b = buckets;
     if (b != null) return b.contains(f.key);
     final done = waitsOn == 'done' || (meta?.closed ?? false);
@@ -822,9 +831,12 @@ class McSubject {
       McSubjectFilter.active => !done,
       McSubjectFilter.needsYou => needsYou != null || waitsOn == 'you',
       McSubjectFilter.waitsOnOthers => waitsOn == 'external',
-      McSubjectFilter.doneWeek => done,
+      McSubjectFilter.doneWeek => done && _withinWeek(updatedAt, now ?? DateTime.now()),
     };
   }
+
+  static bool _withinWeek(DateTime? at, DateTime now) =>
+      at != null && now.difference(at) <= const Duration(days: 7);
 
   /// The servers its open sessions run on, in first-seen order.
   List<String> get machines {
@@ -857,50 +869,38 @@ class McSubjects {
   final List<McSubject> subjects;
   final List<McRun> runs;
   final List<McServerState> servers;
-
-  /// The server's stage order when it sends one (`stages`), else [kMcStageOrder].
-  final List<String> stageOrder;
   final DateTime? generatedAt;
 
   const McSubjects({
     this.subjects = const [],
     this.runs = const [],
     this.servers = const [],
-    this.stageOrder = kMcStageOrder,
     this.generatedAt,
   });
 
   static McSubjects fromJson(dynamic json) {
     final m = _map(json);
     return McSubjects(
-      subjects: _list(m['subjects'], McSubject.fromJson),
-      runs: _list(m['runs'], McRun.fromJson),
+      subjects: _firstOf(_list(m['subjects'], McSubject.fromJson), (s) => s.key),
+      runs: _firstOf(_list(m['runs'], McRun.fromJson), (r) => r.id),
       servers: _list(m['servers'], McServerState.fromJson),
-      stageOrder: _stageOrder(m['stages']),
       generatedAt: _at(m['generatedAt']),
     );
   }
-}
-
-List<String> _stageOrder(dynamic v) {
-  final s = _strings(v);
-  return s.isEmpty ? kMcStageOrder : s;
 }
 
 /// `GET /api/mc/subjects/:key`.
 class McSubjectDetail {
   final McSubject? subject;
   final List<McRun> runs;
-  final List<String> stageOrder;
   final DateTime? generatedAt;
-  const McSubjectDetail({this.subject, this.runs = const [], this.stageOrder = kMcStageOrder, this.generatedAt});
+  const McSubjectDetail({this.subject, this.runs = const [], this.generatedAt});
 
   static McSubjectDetail fromJson(dynamic json) {
     final m = _map(json);
     return McSubjectDetail(
       subject: McSubject.fromJson(m['subject']),
-      runs: _list(m['runs'], McRun.fromJson),
-      stageOrder: _stageOrder(m['stages']),
+      runs: _firstOf(_list(m['runs'], McRun.fromJson), (r) => r.id),
       generatedAt: _at(m['generatedAt']),
     );
   }

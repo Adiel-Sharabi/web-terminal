@@ -12,12 +12,13 @@
 import 'dart:async';
 
 import 'package:flutter/material.dart';
-import 'package:url_launcher/url_launcher.dart';
 
 import '../../api/api_client.dart';
 import '../../api/mc_models.dart';
 import '../../services/mc_feed.dart';
 import '../../theme/app_theme.dart';
+import '../../util/terminal_links.dart' show isLaunchableHttpUrl;
+import '../../widgets/conversation_view.dart' show openChatLink;
 import '../../widgets/format_utils.dart';
 import 'now_view.dart';
 import 'subject_widgets.dart';
@@ -38,7 +39,6 @@ class McSubjectScreen extends StatefulWidget {
     required this.onAnswer,
     required this.onOpenSession,
     this.initial,
-    this.initialOrder = kMcStageOrder,
     this.now,
     this.openUrl,
   });
@@ -50,13 +50,13 @@ class McSubjectScreen extends StatefulWidget {
 
   /// The row it was opened from: shown at once, until the server's answer arrives.
   final McSubject? initial;
-  final List<String> initialOrder;
 
   /// Injectable for tests: the clock ages are read against.
   final DateTime? now;
 
-  /// Injectable for tests; defaults to opening the url in the system's browser.
-  final void Function(Uri url)? openUrl;
+  /// Test seam: receives a url that passed the app's link gate, in place of opening it.
+  /// Defaults to the app's one link opener ([openChatLink]).
+  final void Function(String url)? openUrl;
 
   @override
   State<McSubjectScreen> createState() => _McSubjectScreenState();
@@ -65,11 +65,11 @@ class McSubjectScreen extends StatefulWidget {
 class _McSubjectScreenState extends State<McSubjectScreen> {
   McSubject? _subject;
   List<McRun> _runs = const [];
-  late List<String> _order = widget.initialOrder;
   String? _error;
   bool _gone = false;
   DateTime? _feedAt;
   bool _pausing = false;
+  int _seq = 0;
 
   @override
   void initState() {
@@ -94,19 +94,20 @@ class _McSubjectScreenState extends State<McSubjectScreen> {
     }
   }
 
+  /// Reads the subject again; an answer overtaken by a newer read is dropped.
   Future<void> _load() async {
+    final seq = ++_seq;
     try {
       final d = await widget.feed.subject(widget.subjectKey);
-      if (!mounted) return;
+      if (!mounted || seq != _seq) return;
       setState(() {
         if (d.subject != null) _subject = d.subject;
         _runs = d.runs;
-        _order = d.stageOrder;
         _error = d.subject == null ? 'The server sent no subject' : null;
         _gone = false;
       });
     } on ApiException catch (e) {
-      if (!mounted) return;
+      if (!mounted || seq != _seq) return;
       setState(() {
         _gone = e.status == 404;
         _error = e.status == 404
@@ -114,18 +115,18 @@ class _McSubjectScreenState extends State<McSubjectScreen> {
             : e.message;
       });
     } catch (e) {
-      if (mounted) setState(() => _error = 'Could not read the subject: $e');
+      if (mounted && seq == _seq) setState(() => _error = 'Could not read the subject: $e');
     }
   }
 
+  /// Opens a tracker or PR link the way the app opens every link ([openChatLink]: its
+  /// http/https gate, the external browser, a refused launch swallowed).
   void _open(String? url) {
-    final uri = url == null ? null : Uri.tryParse(url);
-    if (uri == null || !(uri.scheme == 'https' || uri.scheme == 'http')) return;
     final f = widget.openUrl;
-    if (f != null) {
-      f(uri);
-    } else {
-      unawaited(launchUrl(uri, mode: LaunchMode.externalApplication));
+    if (f == null) {
+      unawaited(openChatLink(url));
+    } else if (isLaunchableHttpUrl(url)) {
+      f(url!);
     }
   }
 
@@ -246,7 +247,7 @@ class _McSubjectScreenState extends State<McSubjectScreen> {
                     const SizedBox(height: 16),
                   ],
                   mcSectionTitle(context, 'Progress'),
-                  McProgressTrack(stage: s.stage, order: _order, now: widget.now),
+                  McProgressTrack(stage: s.stage, now: widget.now),
                   const SizedBox(height: 16),
                   mcSectionTitle(context, 'Work item'),
                   McWorkItemCard(subject: s, onOpen: _open, now: widget.now),
@@ -288,7 +289,7 @@ class _McSubjectScreenState extends State<McSubjectScreen> {
   }
 }
 
-/// The progress track, one line per step in the server's order: reached or not, and for
+/// The progress track, one line per step in the stage order: reached or not, and for
 /// every step the history records, when and on what evidence.
 class McProgressTrack extends StatelessWidget {
   const McProgressTrack({super.key, required this.stage, this.order = kMcStageOrder, this.now});
@@ -353,7 +354,10 @@ class McProgressTrack extends StatelessWidget {
         ),
       if (halves.isNotEmpty)
         Padding(padding: const EdgeInsets.only(bottom: 6), child: Text(halves, key: const ValueKey('mc-stage-halves'), style: muted)),
-      for (var i = 0; i < order.length; i++) line(order[i], at >= 0 && i < at, i == at),
+      // Reached: before the current step, or recorded in the history (so a current step
+      // outside the order still shows what was reached on the way).
+      for (var i = 0; i < order.length; i++)
+        line(order[i], (at >= 0 && i < at) || stage.stepsFor(order[i]).isNotEmpty, i == at),
       for (final st in extra) line(st, true, st == stage.current),
     ]);
   }
