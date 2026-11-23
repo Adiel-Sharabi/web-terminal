@@ -124,3 +124,8 @@ mc-tracker-cache.json.tmp
 mc-tracker-cache.json.corrupt-*
 mc-tracker-cache.test.json
 mc-tracker-cache.test.json.tmp
+mc-state.json
+mc-state.json.tmp
+mc-state.json.corrupt-*
+mc-state.test.json
+mc-state.test.json.tmp

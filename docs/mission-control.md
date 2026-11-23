@@ -6,8 +6,9 @@ are ADDITIVE: no existing route or field changes. Every response carries `genera
 Unknown/missing data is `null`, never guessed. Sections below a milestone that has not landed yet
 are the plan, not a description of the server.
 
-Landed: Who answers, Work-item meta (#502), Projects and areas (#503). Both are advertised in
-`/api/version` `capabilities`: `work-item-meta` and `mission-control`.
+Landed: Who answers, Work-item meta (#502), Projects and areas (#503), Stage (#505), Subjects
+(#504). Advertised in `/api/version` `capabilities`: `work-item-meta`, `mission-control` (#502/#503)
+and `mc-subjects` (#504/#505: the subjects routes, `stage` on report items, `counts.stages`).
 
 ## Who answers (one owner for cluster-wide state)
 Mission Control is computed on ONE server per cluster: the same authority the supervisor uses
@@ -18,9 +19,11 @@ merges every peer). Mode `remote` -> every `/api/mc/*` route answers
 `409 {role:'peer', authority:{name, url}}`. Mode `invalid` (`leases.authority` names a server this
 one does not know) -> `503 {error}` naming the bad value. The companion calls `/api/mc/*` on its
 first server and, on that 409, on the server in its own list whose url matches `authority.url`
-(else shows "Mission Control is served by <name> - add that server"). Persisted MC state (stage
-history, to-dos; from #505/#506 on, not yet created) lives on the authority only (`mc-state.json`,
-override `WT_MC_STATE_FILE`, atomic tmp+rename, a corrupt file renamed aside as the brief store does).
+(else shows "Mission Control is served by <name> - add that server"). Persisted MC state lives on the
+authority only (`lib/mc-state.js`: `mc-state.json`, override `WT_MC_STATE_FILE`, written 2 s after a
+change by tmp+rename, a corrupt file renamed aside to `.corrupt-<ms>` and logged, as the brief store
+does): each subject's stage history (#505; a subject unseen for 30 days is dropped, at most 2000
+kept); the to-dos join it in #506.
 `/api/work-items/:ref/meta` is answered by any server (per-server cache).
 
 ## Work-item meta (#502) - `lib/tracker-meta.js`
@@ -102,40 +105,99 @@ config order, then `General` (a project with `source: 'none'` has `General` only
 ```
 Project = { id, name, tracker: {kind:'github', repo}|{kind:'ado', project}|null,   // the first repo, else the first ADO project
   areas: [{ id, name, counts: Counts }], counts: Counts }
-Counts = { active, needsYou, waitsOnOthers, doneWeek, sessions }
+Counts = { active, needsYou, waitsOnOthers, doneWeek, sessions,
+  stages: { triage, reproduced, planned, fixing, 'pr-open', 'in-review', merged, tested } }   // in stage order
 ```
-Until subjects exist (#504) only `sessions` is counted; `active`, `needsYou`, `waitsOnOthers` and
-`doneWeek` are 0. A session counts toward an area only where its area is known from the session
-itself: a `path` rule, or a project with `source: 'none'` (all in `General`).
+`sessions` counts live sessions (a session counts toward an area only where its area is known from
+the session itself: a `path` rule, or a project with `source: 'none'`, all in `General`). The other
+four count SUBJECTS (#504) by their `buckets` (one rule, `lib/mc-subjects.js` `bucketsOf`, so a
+screen filtering subjects by bucket gets the server's number), toward the subject's project and area.
+`stages` (#505, ordered, every stage present): subjects by `stage.current`; a subject with no stage
+is in none. An area a subject landed in that `map` does not name (an ADO Area Path's last segment)
+is listed after the mapped ones, before `General`.
 
-## Stage (#505)
+## Stage (#505) - `lib/mc-stage.js`
 Report items gain optional `stage` (validated in `lib/session-brief.js`): `triage | reproduced |
-planned | fixing | pr-open | in-review | merged | tested`. Old reports without it stay valid and
-`brief.items[]` keeps every existing field. `lib/mc-stage.js` owns the order and the evidence rule:
-effective = max(reported, evidence); evidence: an open PR -> >= pr-open, a PR with reviews ->
->= in-review, a merged PR or a closed/resolved work item -> >= merged. Never moves backwards: the
-history keeps the max reached.
+planned | fixing | pr-open | in-review | merged | tested`. Plausible words map (`repro`, `pr`,
+`review`, `verified`, ...; never a `state` word such as `in-progress` or `done`); an unknown word
+refuses the report with the list, as `state` does. Old reports without it stay valid; `brief.items[]`
+keeps every existing field and gains `stage` (`null` when none; a pinned item shows the agent's,
+a pin never carries one). The per-prompt note names the list in one clause. The Stop-hook block
+rule is unchanged (a stage is never required).
+`lib/mc-stage.js` owns the order, the words and the evidence rule. Evidence (from Meta; a Meta never
+read proves nothing): a subject that IS a pull request (`Meta.type` 'Pull request') -> its own
+state (merged -> merged, open -> pr-open; closed unmerged proves nothing). Otherwise: a closed work
+item (`Meta.closed`) -> merged; else a linked PR still open -> pr-open (in-review with reviews; Meta
+carries no review count yet, so today in-review comes only from a report), even beside an earlier
+merged one (phase A merged, phase B open); else a merged linked PR -> merged; an abandoned PR
+proves nothing. A GitHub link is any cross-reference, so a PR that only mentions the item counts.
+current = the furthest of the stored history, the reports and the evidence. A stage reached by a
+REPORT never moves back (a stale report cannot lower it). A stage only the tracker proved is
+withdrawn when a fresh, complete read (no `error`, no `warning`) no longer proves it (a reopened item, another PR opened),
+down to what the reports and the evidence still hold. The history records ADVANCES (at most one
+entry per stage, stage order, so its times need not ascend), each `{stage, at, source, detail}`:
+`at` is the report's time for a report, the time the server saw it for evidence. Every session's
+current stage on the subject is folded in, not only the newest.
 ```
 Stage = { current, reported, evidence, history: [{stage, at, source:'report'|'pr'|'tracker', detail}] }
 ```
+`reported` = the stage of the newest report on the subject that carries one; `evidence` = what the
+tracker proves now (null when nothing, or unread). All null for a subject nobody staged.
 
 ## Subjects (#504) - `lib/mc-subjects.js`
-`GET /api/mc/subjects?project=&area=` -> `{subjects: [Subject], runs: [Run], servers: [{name, ok}], generatedAt}`
-`GET /api/mc/subjects/:key` -> `{subject: Subject, runs: [Run], generatedAt}` (404 when unknown)
+`GET /api/mc/subjects?project=&area=` -> `{subjects: [Subject], runs: [Run], servers: [{name, ok}], stages: [id], generatedAt}`
+`GET /api/mc/subjects/:key` -> `{subject: Subject, runs: [Run], stages: [id], generatedAt}` (404 when unknown)
+
+`project` = a project id; `area` = an area id as `/api/mc/projects` names it, or (when no area has that id) its name, no case;
+each at most 80 characters, one value (else `400`). `runs` keeps every run holding at least one of
+the returned subjects. `stages` = the stage ids in order. `:key` takes a tracker ref in any spelling
+(`Acme/Widgets#42`, `AB#123`, URL-encoded) or a subject key as given. `servers`: this one, then each
+peer; `ok` = its sessions AND its closed strip were read this time. An online peer whose strip read
+failed keeps its last copy (`ok: false`); an offline or unauthorised peer contributes no closed
+records. `generatedAt` = when the view was computed. The `area` filter takes the exact ids
+`/api/mc/projects` hands out (including a `-x` suffixed one after an id collision).
 ```
-Subject = { key, ref, url, title,          // title: meta.title, else the latest reported title
+Subject = { key, ref, url, title,          // title: meta.title, else the newest reported title, else the ref
   project, area, meta: Meta|null, stage: Stage,
-  sessions: [SessionRef], needsYou: Card|null, waitsOn: 'you'|'self'|'external'|'done'|null,
+  sessions: [SessionRef],                  // newest report first
+  needsYou: Card|null,                     // until #506: {id, kind, server, serverUrl, sessionId, sessionName,
+                                           //   subjectKey, ref, title, what, askedAt, decision}; kind question|permission|decision|wait;
+                                           //   decision = the reported wait's decision (#492) on a decision card, else null
+  waitsOn: 'you'|'self'|'external'|'done'|null,
+  buckets: ['active'|'doneWeek', 'needsYou'?, 'waitsOnOthers'?],   // the Counts keys it is counted under
   runId: string|null, updatedAt }
 SessionRef = { server, serverUrl, id, name, parentId, status, closed: bool, closedAt,
   lastReport: { state, stage, note, headline, at } , wait: {on, what}|null }
 Run = { id, server, sessionId, name, startedAt, status, subjects: [key], children: [{server, id, name, status}] }
 ```
-Join key = `item.key` (the brief's globalKey) across every server. Tree rule: parent = `spawn.parentId`,
-a handed-off parent found through `spawn.replaces` - the server owns this rule for MC (ported from
-`ai-terminal/lib/util/session_tree.dart`, which stays the owner for the old screens; MC screens
-render the server's `parentId`/runs and never re-derive). A run = a session whose descendants
-report >= 2 distinct subjects. Closed sessions stay on a subject for 7 days (`liveClosed`).
+Data: the authority's cluster view (live rows), every server's closed strip (its own brief store;
+each peer's `GET /api/dashboard/closed` with the stored token, cached 30 s), the tracker details
+(batch; a poll waits at most 1.5 s for reads it started, then serves what the cache holds - the
+rest arrives on a later poll; a failed read never fails the view) and the stored stage history.
+One compute runs at a time; its answer is reused for 3 s after it arrives.
+Join key = `item.key` (the brief's globalKey) across every server. A key no tracker can answer for
+(a bare `#12` from a cwd with no GitHub origin, a free-text ref) joins nothing: it is a subject of
+that one session, keyed `<key>@<session id>`, with `meta: null`. A session listed twice (live and
+closed, or two urls for one box) counts once, live first. Closed sessions stay for 7 days
+(`liveClosed`); their records now keep `spawn: {parentId, replaces, createdAt}` (only when they had
+a parent or replaced someone), so a finished child still joins its run. On a closed session
+`status` is `'closed'` and `lastReport.at` is its `closedAt`.
+Tree rule (`lib/mc-tree.js`, ported from `ai-terminal/lib/util/session_tree.dart`, which stays the
+owner for the old screens; MC screens render the server's `parentId`/runs and never re-derive):
+parent = `spawn.parentId` looked up across every server; a handed-off parent is found through its
+successor's `spawn.replaces`; a live session wins an id over a closed record, and a successor (live,
+or closed itself, the newest hand-off first) wins its predecessor's id over the predecessor's record. A loop or a self-parent is visited once. `SessionRef.parentId` is the
+resolved parent's id, else the raw `spawn.parentId`.
+A run = a tree root whose descendants (any depth, any server, closed included) report >= 2
+distinct subjects; its `subjects` are those plus the root's own and those of the sessions it was
+handed off from; `startedAt` = the root's `spawn.createdAt` (null when unknown). A subject in two
+runs takes the newest run's id.
+waitsOn, per session on the subject: an item it reported `done` -> done; a closed session ->
+nothing; else its `reason` (`lib/session-reason.js`): you/external/self/done as named, working ->
+self, menu -> nothing (a peer too old to send `reason`: status `waiting` -> you, `working` -> self,
+else its reported wait). The subject takes the first of you, external, self, done that any session
+gives. Buckets: `doneWeek` when `meta.closed` or waitsOn is done, else `active`; plus `needsYou`
+when waitsOn is you, `waitsOnOthers` when external - the companion's fallback rule exactly.
 
 ## Answer now / My to-do (#506) - `lib/mc-needs.js`
 `GET /api/mc/now` -> `{answerNow: [Card], todo: [Todo], moving: {working, idle, total}, projects: [Project], generatedAt}`

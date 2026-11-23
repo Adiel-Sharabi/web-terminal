@@ -497,8 +497,9 @@ test.describe('wait and hidden (#313, #314)', () => {
     // The REAL command, not a placeholder: it is in the note every time, so it counts.
     const cmd = B.reportCommand('C:/dev/web-terminal/scripts/wt-report.js');
     // #466 raised it from 1420 by the one wait-target line (lib/wait-target.js teaches the rest);
-    // #492 by the one decision line (the shape is refused with the right one).
-    expect(B.instructionText(e, cmd).length).toBeLessThanOrEqual(1750);
+    // #492 by the one decision line (the shape is refused with the right one); #505 by the
+    // one stage clause on the States line.
+    expect(B.instructionText(e, cmd).length).toBeLessThanOrEqual(1850);
   });
 });
 

@@ -99,3 +99,5 @@ if (process.env.WT_MAINTENANCE_FILE) reset(process.env.WT_MAINTENANCE_FILE, '#35
 if (process.env.WT_PUSH_DEVICES_FILE) reset(process.env.WT_PUSH_DEVICES_FILE, '#467');
 // #502 - the tracker-details cache: a run starts from no cached work items.
 if (process.env.WT_MC_TRACKER_CACHE_FILE) reset(process.env.WT_MC_TRACKER_CACHE_FILE, '#502');
+// #505 - Mission Control's stage history: a run starts from none.
+if (process.env.WT_MC_STATE_FILE) reset(process.env.WT_MC_STATE_FILE, '#505');

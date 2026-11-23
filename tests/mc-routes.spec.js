@@ -10,8 +10,8 @@ const fs = require('fs');
 const os = require('os');
 const http = require('http');
 const path = require('path');
-const { test, expect } = require('@playwright/test');
-const { authCtx, noAuthCtx } = require('./test-helpers');
+const { test, expect, request: pwRequest } = require('@playwright/test');
+const { BASE, authCtx, noAuthCtx, readHookToken } = require('./test-helpers');
 
 const CFG_FILE = process.env.WT_CONFIG_FILE || path.join(__dirname, '..', 'config.test.json');
 const FIX = path.join(__dirname, 'fixtures', 'mc-tracker');
@@ -59,7 +59,8 @@ test.describe('#502/#503 Mission Control routes', () => {
 
   test('every new route needs auth', async () => {
     const ctx = await noAuthCtx();
-    for (const url of ['/api/work-items/acme%2Fwidgets%2342/meta', '/api/work-items/meta?refs=ado%3A1', '/api/mc/projects']) {
+    for (const url of ['/api/work-items/acme%2Fwidgets%2342/meta', '/api/work-items/meta?refs=ado%3A1', '/api/mc/projects',
+      '/api/mc/subjects', '/api/mc/subjects/ado%3A1']) {
       const r = await ctx.get(url, { maxRedirects: 0 });
       expect(r.status(), url).toBe(401);
     }
@@ -175,12 +176,109 @@ test.describe('#502/#503 Mission Control routes', () => {
     }
   });
 
+  test('subjects (#504/#505): a reported item becomes a subject with its stage from the tracker, and stays once its session closes', async () => {
+    const ctx = await authCtx();
+    const key = 'acme/widgets#42';
+    const made = await ctx.post('/api/sessions', { data: { name: `mc-subject-${Date.now()}`, autoCommand: '' } });
+    expect(made.status()).toBe(200);
+    const id = (await made.json()).id;
+    let closed = false;
+    try {
+      // The agent says fixing; the fake tracker says PR #43 is merged and PR #44 still open, so the
+      // work goes on at pr-open (lib/mc-stage.js; merged-only is pinned in mc-stage.spec.js).
+      const c = await pwRequest.newContext({ baseURL: BASE });
+      const rep = await c.post(`/api/session/${id}/report`, { data: { items: [{ ref: key, title: 'Scroll', state: 'in-progress', stage: 'fixing' }] },
+        headers: { 'X-WT-Hook-Token': readHookToken() } });
+      expect(rep.status()).toBe(200);
+      expect((await rep.json()).brief.items[0]).toMatchObject({ key, stage: 'fixing' });
+      await c.dispose();
+
+      let body = null;
+      let s = null;
+      for (let i = 0; i < 40 && !(s && s.stage.current === 'pr-open'); i++) {
+        if (i) await sleep(300);
+        body = await (await ctx.get('/api/mc/subjects')).json();
+        s = body.subjects && body.subjects.find((x) => x.key === key);
+      }
+      expect(body.stages).toEqual(['triage', 'reproduced', 'planned', 'fixing', 'pr-open', 'in-review', 'merged', 'tested']);
+      expect(body.servers[0]).toMatchObject({ ok: true });
+      expect(Number.isFinite(body.generatedAt)).toBe(true);
+      expect(s).toMatchObject({ key, title: 'Widget list loses its scroll position', project: 'other', area: 'General',
+        stage: { current: 'pr-open', reported: 'fixing', evidence: 'pr-open' } });
+      expect(s.buckets).toContain('active');
+      expect(s.sessions.map((x) => [x.id, x.closed])).toEqual([[id, false]]);
+
+      // One subject by its key, in any spelling of the ref; unknown is 404; a bad filter 400.
+      const one = await ctx.get(`/api/mc/subjects/${encodeURIComponent('Acme/Widgets#42')}`);
+      expect(one.status()).toBe(200);
+      expect((await one.json()).subject.key).toBe(key);
+      expect((await ctx.get(`/api/mc/subjects/${encodeURIComponent('ado:987654')}`)).status()).toBe(404);
+      expect((await ctx.get('/api/mc/subjects?project=a&project=b')).status()).toBe(400);
+      expect((await (await ctx.get('/api/mc/subjects?project=nope')).json()).subjects).toEqual([]);
+
+      // The projects view counts it from the same rule, stages included.
+      const pv = await (await ctx.get('/api/mc/projects')).json();
+      const other = pv.projects.find((p) => p.id === 'other');
+      expect(other.counts.stages['pr-open']).toBeGreaterThanOrEqual(1);
+      expect(Object.keys(other.counts.stages)).toEqual(body.stages);
+
+      // Closed: still on the subject (the closed strip keeps it a week), as closed.
+      expect((await ctx.delete(`/api/sessions/${id}`)).status()).toBe(200);
+      closed = true;
+      let ref = null;
+      for (let i = 0; i < 40 && !(ref && ref.closed); i++) {
+        await sleep(300);
+        const b2 = await (await ctx.get('/api/mc/subjects')).json();
+        const s2 = b2.subjects.find((x) => x.key === key);
+        ref = s2 && s2.sessions.find((x) => x.id === id);
+      }
+      expect(ref).toMatchObject({ id, closed: true, status: 'closed' });
+      expect(Number.isFinite(ref.closedAt)).toBe(true);
+    } finally {
+      if (!closed) await ctx.delete(`/api/sessions/${id}`).catch(() => {});
+      await ctx.dispose();
+    }
+  });
+
+  test('a closed session keeps who opened it (#504): its record carries spawn.parentId, read before the spawn store forgets', async () => {
+    const ctx = await authCtx();
+    const made = [];
+    try {
+      const p = await ctx.post('/api/sessions', { data: { name: `mc-parent-${Date.now()}`, autoCommand: '' } });
+      expect(p.status()).toBe(200);
+      const parentId = (await p.json()).id;
+      made.push(parentId);
+      const c = await ctx.post('/api/sessions', { data: { name: `mc-child-${Date.now()}`, autoCommand: '', parentId } });
+      expect(c.status()).toBe(200);
+      const childId = (await c.json()).id;
+      // The child must have a brief entry for the closed strip to record it.
+      const h = await pwRequest.newContext({ baseURL: BASE });
+      expect((await h.post(`/api/session/${childId}/report`, { data: { items: [{ ref: 'ado:4242', state: 'done' }] },
+        headers: { 'X-WT-Hook-Token': readHookToken() } })).status()).toBe(200);
+      await h.dispose();
+      expect((await ctx.delete(`/api/sessions/${childId}`)).status()).toBe(200);
+      let rec = null;
+      for (let i = 0; i < 40 && !rec; i++) {
+        await sleep(250);
+        rec = ((await (await ctx.get('/api/dashboard/closed')).json()).closed || []).find((x) => x.id === childId);
+      }
+      expect(rec).toBeTruthy();
+      expect(rec.spawn).toMatchObject({ parentId, replaces: [] });
+      expect(Number.isFinite(rec.spawn.createdAt)).toBe(true);
+    } finally {
+      for (const id of made) await ctx.delete(`/api/sessions/${id}`).catch(() => {});
+      await ctx.dispose();
+    }
+  });
+
   test('a server that is not the authority answers 409 naming it; a bad authority is 503; meta still answers', async () => {
     await withConfig({ cluster: [{ name: 'zeta', url: 'http://127.0.0.1:1' }], leases: { authority: 'zeta' } }, async () => {
       const ctx = await authCtx();
-      const r = await ctx.get('/api/mc/projects');
-      expect(r.status()).toBe(409);
-      expect(await r.json()).toEqual({ role: 'peer', authority: { name: 'zeta', url: 'http://127.0.0.1:1' } });
+      for (const url of ['/api/mc/projects', '/api/mc/subjects', '/api/mc/subjects/ado%3A1']) {
+        const r = await ctx.get(url);
+        expect(r.status(), url).toBe(409);
+        expect(await r.json(), url).toEqual({ role: 'peer', authority: { name: 'zeta', url: 'http://127.0.0.1:1' } });
+      }
       const m = await ctx.get(`/api/work-items/${encodeURIComponent('acme/widgets#42')}/meta`);
       expect(m.status()).toBe(200);
       await ctx.dispose();
