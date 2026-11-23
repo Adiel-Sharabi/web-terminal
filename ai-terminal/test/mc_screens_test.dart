@@ -259,8 +259,8 @@ void main() {
       expect(find.text('the sessions board'), findsOneWidget);
       await tester.tap(find.text('Projects'));
       await tester.pump();
-      expect(find.textContaining('#508'), findsOneWidget);
-      expect(find.byKey(const ValueKey('mc-project-web-terminal')), findsOneWidget, reason: "Now's projects, meanwhile");
+      expect(find.textContaining('#508'), findsNothing, reason: 'the placeholder is gone: #508 fills the tab');
+      expect(find.byKey(const ValueKey('mc-project-web-terminal')), findsOneWidget, reason: "the projects, as Now's answer has them");
       await tester.pumpWidget(const SizedBox());
     });
 
