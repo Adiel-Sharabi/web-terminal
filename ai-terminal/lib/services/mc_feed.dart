@@ -46,8 +46,13 @@ enum McStatus {
 /// default-port and trailing-slash insensitive), else null. By url ONLY, as the contract
 /// says: a same-named server elsewhere may be another install with its own state, and
 /// to-dos sent there would land in the wrong place.
-ServerConfig? serverForAuthority(List<ServerConfig> servers, McAuthority authority) {
-  final want = _place(authority.url);
+ServerConfig? serverForAuthority(List<ServerConfig> servers, McAuthority authority) =>
+    serverForUrl(servers, authority.url);
+
+/// The configured server at [url] (the same url rule as [serverForAuthority]), else null.
+/// A session's own server (#509's pause) is found this way: by url only, never by name.
+ServerConfig? serverForUrl(List<ServerConfig> servers, String? url) {
+  final want = _place(url);
   if (want == null) return null;
   for (final sv in servers) {
     if (_place(sv.baseUrl) == want) return sv;
@@ -260,6 +265,40 @@ class McFeed extends ChangeNotifier {
   Future<void> todoAction(McTodo todo, String action) async {
     await _authority().mcTodoAction(todo.id, action);
     unawaited(refresh());
+  }
+
+  // --- subjects (#508, #509): read from the server that answered ------------
+
+  /// The subjects of [project] (of [area] too, when given). Throws when Mission Control
+  /// is not reachable; a 404 is a server without the subjects route yet.
+  Future<McSubjects> subjects({required String project, String? area}) =>
+      _authority().mcSubjects(project: project, area: area);
+
+  /// One subject by [key]; a 404 is a key the server does not know (any more).
+  Future<McSubjectDetail> subject(String key) => _authority().mcSubject(key);
+
+  /// Tells every session in [sessions] [text], each through the gated prompt on ITS OWN
+  /// server (found by url in this app's list), one after the other. Never throws: each
+  /// session gets its answer - told, refused with the server's reason, or why it could
+  /// not be asked.
+  Future<List<(McSubjectSession, McPromptResult)>> tell(List<McSubjectSession> sessions, String text) async {
+    final list = servers();
+    final out = <(McSubjectSession, McPromptResult)>[];
+    for (final s in sessions) {
+      final sv = serverForUrl(list, s.serverUrl);
+      if (sv == null) {
+        out.add((s, McPromptResult(error: "its server (${s.server ?? s.serverUrl ?? 'unknown'}) is not in this app's list")));
+        continue;
+      }
+      try {
+        out.add((s, await client(sv).promptSession(s.id, text)));
+      } on ApiException catch (e) {
+        out.add((s, McPromptResult(error: e.message)));
+      } catch (e) {
+        out.add((s, McPromptResult(error: '$e')));
+      }
+    }
+    return out;
   }
 
   @override

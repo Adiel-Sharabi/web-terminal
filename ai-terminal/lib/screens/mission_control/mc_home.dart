@@ -1,8 +1,9 @@
 // #507 - Mission Control, the second home one build runs beside the current one.
 //
 // Desktop (at or above [AdaptiveHome.splitBreakpoint]): a side nav - Now, Projects,
-// Sessions, Machines. Phone: a bottom bar - Now, Projects, Ask, Machines. Projects and
-// Ask are filled by later issues (#508, #511) and say so; Sessions is the current
+// Sessions, Machines. Phone: a bottom bar - Now, Projects, Ask, Machines. Projects is
+// the projects, each project's page and each subject's (#508, #509), in its own
+// navigator; Ask is filled by a later issue (#511) and says so; Sessions is the current
 // sessions board; Machines is the board's machines and leases view.
 //
 // Nothing here touches the current home's split pane: a session opens on the app's one
@@ -25,6 +26,7 @@ import '../settings_screen.dart';
 import '../work_board_screen.dart';
 import 'machines_view.dart';
 import 'now_view.dart';
+import 'project_view.dart';
 
 /// Every place Mission Control can show. Desktop shows [desktopTabs], a phone [phoneTabs].
 enum McTab {
@@ -83,6 +85,7 @@ class MissionControlHome extends StatefulWidget {
 
 class _MissionControlHomeState extends State<MissionControlHome> {
   McTab _tab = McTab.now;
+  final GlobalKey<McProjectsNavigatorState> _projects = GlobalKey<McProjectsNavigatorState>();
 
   List<ServerConfig> _servers() => (widget.servers ?? () => AppConfig.servers)();
   ApiClient _client(ServerConfig s) => (widget.clientFactory ?? ApiClient.new)(s);
@@ -130,23 +133,23 @@ class _MissionControlHomeState extends State<MissionControlHome> {
 
   void _answer(McCard card) => pushInbox(Navigator.of(context), focusSessionId: card.sessionId);
 
+  /// A project tapped on Now: the Projects tab, on that project's page.
+  void _openProject(McProject p) {
+    setState(() => _tab = McTab.projects);
+    WidgetsBinding.instance.addPostFrameCallback((_) => _projects.currentState?.openProject(p.id));
+  }
+
   Widget _body(McTab tab) => !_isActive && (tab == McTab.sessions || tab == McTab.machines)
       ? const SizedBox.shrink()
       : switch (tab) {
-        McTab.now => McNowView(feed: _feed, onAnswer: _answer, onOpenSession: _openSession),
-        McTab.projects => ListenableBuilder(
-            listenable: _feed,
-            builder: (context, _) => ListView(
-              key: const ValueKey('mc-projects-tab'),
-              padding: const EdgeInsets.fromLTRB(12, 8, 12, 24),
-              children: [
-                const McPlaceholderNote(
-                    'One page per project and area, with every subject on it, comes with #508 (Project and Area screen). '
-                    'Until then, the projects as Now shows them:'),
-                const SizedBox(height: 12),
-                McProjectsSection(projects: _feed.now?.projects ?? const [], title: 'Projects'),
-              ],
-            ),
+        McTab.now => McNowView(
+            feed: _feed, onAnswer: _answer, onOpenSession: _openSession, onOpenProject: _openProject),
+        McTab.projects => McProjectsNavigator(
+            key: _projects,
+            feed: _feed,
+            onAnswer: _answer,
+            onOpenSession: _openSession,
+            actions: _actions(),
           ),
         McTab.sessions => (widget.sessionsBoardBuilder ??
             (open) => WorkBoardScreen(
@@ -198,8 +201,8 @@ class _MissionControlHomeState extends State<MissionControlHome> {
       // choice is kept, so turning back shows it again.
       final shown = tabs.contains(_tab) ? _tab : McTab.now;
       final index = tabs.indexOf(shown);
-      // The Sessions board brings its own bar.
-      final body = shown == McTab.sessions
+      // The Sessions board and the Projects navigator bring their own bars.
+      final body = shown == McTab.sessions || shown == McTab.projects
           ? _body(shown)
           : Scaffold(
               appBar: AppBar(

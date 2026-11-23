@@ -32,12 +32,16 @@ class McNowView extends StatelessWidget {
     required this.feed,
     required this.onAnswer,
     required this.onOpenSession,
+    this.onOpenProject,
     this.now,
   });
 
   final McFeed feed;
   final void Function(McCard card) onAnswer;
   final void Function(String sessionId) onOpenSession;
+
+  /// Opens a project's page (#508); null: the project cards are not tappable.
+  final void Function(McProject project)? onOpenProject;
 
   /// Injectable for tests: the clock ages are read against.
   final DateTime? now;
@@ -61,7 +65,7 @@ class McNowView extends StatelessWidget {
             final right = <Widget>[
               McMovingLine(moving: data.moving),
               const SizedBox(height: 16),
-              McProjectsSection(projects: data.projects),
+              McProjectsSection(projects: data.projects, onOpen: onOpenProject),
             ];
             return ListView(
               key: const ValueKey('mc-now-list'),
@@ -157,7 +161,7 @@ class McStaleBanner extends StatelessWidget {
   }
 }
 
-Widget _sectionTitle(BuildContext context, String text, {Key? key, String? hint}) {
+Widget mcSectionTitle(BuildContext context, String text, {Key? key, String? hint}) {
   final theme = Theme.of(context);
   return Padding(
     padding: const EdgeInsets.only(bottom: 8),
@@ -175,7 +179,7 @@ Widget _sectionTitle(BuildContext context, String text, {Key? key, String? hint}
   );
 }
 
-String _age(Duration d) {
+String mcAge(Duration d) {
   if (d.inMinutes < 1) return 'just now';
   if (d.inMinutes < 60) return '${d.inMinutes} min';
   if (d.inHours < 24) return '${d.inHours} h';
@@ -185,14 +189,14 @@ String _age(Duration d) {
 /// How long a card has waited: the server's `ageMin`, else since `askedAt`, else null.
 String? mcCardAge(McCard c, {DateTime? now}) {
   final m = c.why.ageMin;
-  if (m != null && m >= 0) return _age(Duration(minutes: m));
+  if (m != null && m >= 0) return mcAge(Duration(minutes: m));
   final at = c.askedAt;
   if (at == null) return null;
   final d = (now ?? DateTime.now()).difference(at);
-  return _age(d.isNegative ? Duration.zero : d);
+  return mcAge(d.isNegative ? Duration.zero : d);
 }
 
-Future<void> _run(BuildContext context, Future<String?> Function() action) async {
+Future<void> mcRun(BuildContext context, Future<String?> Function() action) async {
   try {
     final said = await action();
     if (said != null && context.mounted) showTimedSnackBar(context, said);
@@ -218,7 +222,7 @@ class _AnswerNowSection extends StatelessWidget {
   @override
   Widget build(BuildContext context) {
     return Column(crossAxisAlignment: CrossAxisAlignment.stretch, children: [
-      _sectionTitle(context, 'Answer now (${cards.length})',
+      mcSectionTitle(context, 'Answer now (${cards.length})',
           key: const ValueKey('mc-answer-now-title'), hint: 'a session is stuck on you, most blocking first'),
       if (cards.isEmpty)
         Padding(
@@ -236,8 +240,8 @@ class _AnswerNowSection extends StatelessWidget {
             now: now,
             onAnswer: () => onAnswer(c),
             onOpenSession: c.sessionId == null ? null : () => onOpenSession(c.sessionId!),
-            onLater: (h) => _run(context, () => feed.later(c, h)),
-            onTodo: () => _run(context, () => feed.addTodo(c)),
+            onLater: (h) => mcRun(context, () => feed.later(c, h)),
+            onTodo: () => mcRun(context, () => feed.addTodo(c)),
           ),
         ),
     ]);
@@ -284,9 +288,9 @@ class McAnswerCard extends StatelessWidget {
           Row(crossAxisAlignment: CrossAxisAlignment.start, children: [
             Expanded(
               child: Wrap(spacing: 6, runSpacing: 4, children: [
-                if (c.project != null) _Tag(c.project!, key: const ValueKey('mc-card-project')),
-                _Tag(c.kind, muted: true),
-                if (why.severity != null) _Tag('severity ${why.severity}', color: AppColors.caution),
+                if (c.project != null) McTag(c.project!, key: const ValueKey('mc-card-project')),
+                McTag(c.kind, muted: true),
+                if (why.severity != null) McTag('severity ${why.severity}', color: AppColors.caution),
               ]),
             ),
             if (age != null) ...[
@@ -387,8 +391,8 @@ class McAnswerCard extends StatelessWidget {
   }
 }
 
-class _Tag extends StatelessWidget {
-  const _Tag(this.text, {super.key, this.muted = false, this.color});
+class McTag extends StatelessWidget {
+  const McTag(this.text, {super.key, this.muted = false, this.color});
   final String text;
   final bool muted;
   final Color? color;
@@ -428,7 +432,7 @@ class _McTodoSectionState extends State<McTodoSection> {
     final done = widget.todos.where((t) => t.done).toList();
     final muted = Theme.of(context).textTheme.bodyMedium?.copyWith(color: AppColors.onSurfaceVariant);
     return Column(crossAxisAlignment: CrossAxisAlignment.stretch, children: [
-      _sectionTitle(context, 'My to-do (${open.length})',
+      mcSectionTitle(context, 'My to-do (${open.length})',
           key: const ValueKey('mc-todo-title'), hint: 'hands-on, for the desk; the sessions carry on'),
       if (open.isEmpty)
         Padding(
@@ -457,7 +461,7 @@ class _McTodoSectionState extends State<McTodoSection> {
       ?t.project,
       if (t.createdAt != null) relativeTime(t.createdAt!.millisecondsSinceEpoch, now: widget.now),
     ].join(' · ');
-    void act(String action) => _run(context, () async {
+    void act(String action) => mcRun(context, () async {
           await widget.feed.todoAction(t, action);
           return null;
         });
@@ -513,7 +517,7 @@ class McMovingLine extends StatelessWidget {
   Widget build(BuildContext context) {
     final theme = Theme.of(context);
     return Column(crossAxisAlignment: CrossAxisAlignment.stretch, children: [
-      _sectionTitle(context, 'Moving on its own'),
+      mcSectionTitle(context, 'Moving on its own'),
       Text(
         '${moving.working} working · ${moving.idle} idle · ${moving.total} in all',
         key: const ValueKey('mc-moving'),
@@ -525,14 +529,17 @@ class McMovingLine extends StatelessWidget {
 
 /// The projects, each a card with its area labels and its stage bar.
 class McProjectsSection extends StatelessWidget {
-  const McProjectsSection({super.key, required this.projects, this.title = 'Projects'});
+  const McProjectsSection({super.key, required this.projects, this.title = 'Projects', this.onOpen});
   final List<McProject> projects;
   final String title;
+
+  /// Opens a project's page (#508); null: the cards are not tappable.
+  final void Function(McProject project)? onOpen;
 
   @override
   Widget build(BuildContext context) {
     return Column(crossAxisAlignment: CrossAxisAlignment.stretch, children: [
-      _sectionTitle(context, title),
+      mcSectionTitle(context, title),
       if (projects.isEmpty)
         Text('No project has work yet.',
             key: const ValueKey('mc-projects-empty'),
@@ -540,15 +547,27 @@ class McProjectsSection extends StatelessWidget {
       for (final p in projects)
         Padding(
           padding: const EdgeInsets.only(bottom: 8),
-          child: McProjectCard(key: ValueKey('mc-project-${p.id}'), project: p),
+          child: McProjectCard(key: ValueKey('mc-project-${p.id}'), project: p, onTap: onOpen == null ? null : () => onOpen!(p)),
         ),
     ]);
   }
 }
 
+/// A project's (or an area's) counts in one line, as the server counted them.
+String mcCountsLine(McCounts k) => [
+      if (k.needsYou > 0) '${k.needsYou} need you',
+      if (k.waitsOnOthers > 0) '${k.waitsOnOthers} waiting on others',
+      '${k.active} active',
+      if (k.doneWeek > 0) '${k.doneWeek} done this week',
+      '${k.sessions} sessions',
+    ].join(' · ');
+
 class McProjectCard extends StatelessWidget {
-  const McProjectCard({super.key, required this.project});
+  const McProjectCard({super.key, required this.project, this.onTap});
   final McProject project;
+
+  /// Opens the project's page; null: not tappable.
+  final VoidCallback? onTap;
 
   @override
   Widget build(BuildContext context) {
@@ -556,15 +575,12 @@ class McProjectCard extends StatelessWidget {
     final muted = theme.textTheme.bodySmall?.copyWith(color: AppColors.onSurfaceVariant);
     final p = project;
     final k = p.counts;
-    final counts = [
-      if (k.needsYou > 0) '${k.needsYou} need you',
-      if (k.waitsOnOthers > 0) '${k.waitsOnOthers} waiting on others',
-      '${k.active} active',
-      if (k.doneWeek > 0) '${k.doneWeek} done this week',
-      '${k.sessions} sessions',
-    ].join(' · ');
+    final counts = mcCountsLine(k);
     return Card(
       margin: EdgeInsets.zero,
+      clipBehavior: Clip.antiAlias,
+      child: InkWell(
+      onTap: onTap,
       child: Padding(
         padding: const EdgeInsets.all(12),
         child: Column(crossAxisAlignment: CrossAxisAlignment.start, children: [
@@ -593,6 +609,7 @@ class McProjectCard extends StatelessWidget {
             ]),
           ],
         ]),
+      ),
       ),
     );
   }

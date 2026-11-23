@@ -435,8 +435,36 @@ class ApiClient {
   Future<Map<String, dynamic>> mcLater(String cardId, int hours) =>
       _mcPost('/api/mc/later', {'cardId': cardId, 'hours': hours});
 
-  Future<Map<String, dynamic>> _mcGet(String path) async {
-    final res = await _send('GET', path, alsoAccept: const {409});
+  /// The subjects of [project] (and of [area], when given), with their runs
+  /// (`GET /api/mc/subjects?project=&area=`, #508).
+  Future<McSubjects> mcSubjects({String? project, String? area}) async => McSubjects.fromJson(await _mcGet(
+      '/api/mc/subjects',
+      query: {'project': ?project, 'area': ?area}));
+
+  /// One subject by its key (`GET /api/mc/subjects/:key`, #509); a 404 is an unknown key.
+  Future<McSubjectDetail> mcSubject(String key) async =>
+      McSubjectDetail.fromJson(await _mcGet('/api/mc/subjects/${Uri.encodeComponent(key)}'));
+
+  /// Types one gated prompt [text] into session [id] on THIS server
+  /// (`POST /api/sessions/:id/prompt`, `lib/safe-prompt.js`): the server types it only
+  /// when every gate says it is safe, else answers why not. A refusal (409) and a text it
+  /// will not take (400) are answers, never thrown; a transport failure is thrown.
+  Future<McPromptResult> promptSession(String id, String text) async {
+    final res = await _send('POST', '/api/sessions/${Uri.encodeComponent(id)}/prompt',
+        body: {'text': text}, alsoAccept: const {400, 404, 409, 503});
+    dynamic body;
+    try {
+      body = _decode(res);
+    } on ApiException {
+      body = null; // an HTML 404 from a server without the route: said below
+    }
+    final r = McPromptResult.fromJson(body);
+    if (r.delivered || r.refused != null || r.error != null) return r;
+    return McPromptResult(error: res.statusCode == 404 ? 'session not found' : 'no answer (${res.statusCode})');
+  }
+
+  Future<Map<String, dynamic>> _mcGet(String path, {Map<String, String>? query}) async {
+    final res = await _send('GET', path, query: query == null || query.isEmpty ? null : query, alsoAccept: const {409});
     return _mcAnswer(res);
   }
 
