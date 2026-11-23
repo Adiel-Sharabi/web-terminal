@@ -214,6 +214,106 @@ class SupervisorServer {
 
 /// `GET /api/supervisor/state`. [role] is `authority` (the answer carries the graph),
 /// `peer` (it names the authority in [authorityName]) or `none` (no authority set up).
+/// #492 - a recommendation card (`GET /api/supervisor/state` `cards[]`, lib/supervisor-cases.js):
+/// an action the supervisor would take on a session, held until the owner approves it
+/// (`POST /api/supervisor/cards/:id {decision}`) or dismisses it. The server decides what
+/// approving does (type [text], close, replace); the app only shows it and sends the word.
+class SupervisorCard {
+  final String id;
+
+  /// The action class (`wake`, `coach`, `answer`, `close`, `spawn`, `owner`, ...).
+  final String? cls;
+  final String? sessionId;
+
+  /// The name of the server the session runs on.
+  final String? server;
+  final String? name;
+
+  /// What approving does, in the supervisor's words (the line it would type).
+  final String text;
+
+  /// Why it is a card and not an act.
+  final String? why;
+
+  /// When it was made (authority clock).
+  final int? at;
+
+  /// `approve` | `dismiss` once decided; null while it waits on the owner.
+  final String? decision;
+
+  const SupervisorCard({required this.id, this.cls, this.sessionId, this.server, this.name, this.text = '', this.why, this.at, this.decision});
+
+  bool get pending => decision == null;
+
+  static SupervisorCard? fromJson(dynamic j) {
+    if (j is! Map) return null;
+    final id = _str(j['id']);
+    if (id == null) return null;
+    return SupervisorCard(
+      id: id,
+      cls: _str(j['cls']),
+      sessionId: _str(j['sessionId']),
+      server: _str(j['server']),
+      name: _str(j['name']),
+      text: _str(j['text']) ?? '',
+      why: _str(j['why']),
+      at: _ms(j['at']),
+      decision: _str(j['decision']),
+    );
+  }
+}
+
+/// #492 - a supervisor case (`cases[]`, the server's `caseView`): something a rule noticed
+/// about a session. Only an ESCALATED, unresolved one waits on the owner.
+class SupervisorCase {
+  final String id;
+  final String? rule;
+  final String? sessionId;
+  final String? server;
+  final String? name;
+
+  /// What the rule saw.
+  final String line;
+  final int? openedAt;
+
+  /// The question put to the owner, when the case was escalated.
+  final String? question;
+  final int? escalatedAt;
+
+  /// Escalated by the rules themselves (the dispatcher could not take it), not asked.
+  final bool escalatedAuto;
+  final int? resolvedAt;
+
+  const SupervisorCase({required this.id, this.rule, this.sessionId, this.server, this.name, this.line = '', this.openedAt,
+      this.question, this.escalatedAt, this.escalatedAuto = false, this.resolvedAt});
+
+  bool get escalated => question != null;
+
+  /// Waits on the owner: escalated and not yet resolved.
+  bool get waitsOnOwner => escalated && resolvedAt == null;
+
+  static SupervisorCase? fromJson(dynamic j) {
+    if (j is! Map) return null;
+    final id = _str(j['id']);
+    if (id == null) return null;
+    final e = j['escalated'];
+    final line = _str(j['line']) ?? '';
+    return SupervisorCase(
+      id: id,
+      rule: _str(j['rule']),
+      sessionId: _str(j['sessionId']),
+      server: _str(j['server']),
+      name: _str(j['name']),
+      line: line,
+      openedAt: _ms(j['openedAt']),
+      question: e is Map ? (_str(e['question']) ?? (line.isEmpty ? null : line)) : null,
+      escalatedAt: e is Map ? _ms(e['at']) : null,
+      escalatedAuto: e is Map && e['auto'] == true,
+      resolvedAt: _ms(j['resolvedAt']),
+    );
+  }
+}
+
 class SupervisorState {
   final String role;
 
@@ -236,6 +336,10 @@ class SupervisorState {
   final List<String> readyToClose;
   final List<JournalEntry> history;
 
+  /// #492 - the recommendation cards and the cases (open first, then recently closed).
+  final List<SupervisorCard> cards;
+  final List<SupervisorCase> cases;
+
   /// This device's clock minus the authority's, from the served `now`; 0 when unsaid.
   final int skewMs;
 
@@ -252,6 +356,8 @@ class SupervisorState {
     this.live = const [],
     this.readyToClose = const [],
     this.history = const [],
+    this.cards = const [],
+    this.cases = const [],
     this.skewMs = 0,
   });
 
@@ -294,6 +400,8 @@ class SupervisorState {
       live: _ids(j['live']),
       readyToClose: _ids(j['readyToClose']),
       history: _list(j['history'], JournalEntry.fromJson),
+      cards: _list(j['cards'], SupervisorCard.fromJson),
+      cases: _list(j['cases'], SupervisorCase.fromJson),
       skewMs: now == null ? 0 : receivedAt.millisecondsSinceEpoch - now,
     );
   }

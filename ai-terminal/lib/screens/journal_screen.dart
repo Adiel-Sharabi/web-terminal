@@ -24,6 +24,7 @@ import '../api/models.dart';
 import '../api/supervisor_models.dart';
 import '../services/app_config.dart';
 import '../services/session_repository.dart';
+import '../services/supervisor_lookup.dart';
 import '../util/supervisor_authority.dart';
 import '../widgets/brief_item_row.dart' show briefStateLabel;
 import '../widgets/empty_state.dart';
@@ -125,20 +126,9 @@ class _JournalScreenState extends State<JournalScreen> {
     _asking = true;
     _timer?.cancel();
     final servers = _servers;
-    final probes = <String, SupervisorProbe>{};
     try {
-      await Future.wait(servers.map((sv) async {
-        try {
-          probes[sv.baseUrl] = SupervisorProbe.answered(await _client(sv).supervisorState());
-        } on ApiException catch (e) {
-          probes[sv.baseUrl] = SupervisorProbe.failed(e.status, e.message);
-        } catch (e) {
-          // Not swallowed: it is this server's answer, said on the page like any failure.
-          probes[sv.baseUrl] = SupervisorProbe.failed(0, 'unreadable answer ($e)');
-        }
-      }));
+      final find = await askSupervisor(servers, _client);
       if (!mounted) return;
-      final find = findSupervisor(servers, probes);
       setState(() {
         _find = find;
         final listed = {for (final n in find.state?.sessions ?? const <SupervisorNode>[]) n.id};
