@@ -314,6 +314,22 @@ void main() {
       await done(tester);
     });
 
+    testWidgets('an inbox already open: a new request waits for its own load, it does not give up on the old rows',
+        (tester) async {
+      rows = [];
+      final r = await repo();
+      await pump(tester, r); // open, first load over, nothing listed
+      gate = Completer<void>();
+      await pump(tester, r, focusSessionId: 'b1', refresh: false); // a push tap reaches the open inbox
+      expect(opened, isEmpty, reason: 'not given up on the rows held before the request');
+      threeWaiting();
+      gate!.complete();
+      await settle(tester);
+      expect(focusOf('b1'), findsOneWidget);
+      expect(opened, isEmpty);
+      await done(tester);
+    });
+
     testWidgets('the person acting first (a filter) ends the request: a late arrival does not move them', (tester) async {
       rows = [];
       gate = Completer<void>();

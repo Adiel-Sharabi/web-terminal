@@ -1143,6 +1143,10 @@ class _QuestionsInboxScreenState extends State<QuestionsInboxScreen> with Widget
     super.didUpdateWidget(old);
     if (widget.focusSessionId != null && widget.focusSessionId != old.focusSessionId) {
       _wantSession = widget.focusSessionId;
+      // A new request gets its own full load before it gives up: the wait it points
+      // at may be newer than the rows this screen holds.
+      _firstLoaded = false;
+      unawaited(_firstLoad());
     }
   }
 

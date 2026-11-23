@@ -312,7 +312,9 @@ String? inboxSeenSig(InboxItem it) {
   String? nonEmpty(String? v) => v == null || v.isEmpty ? null : v;
   final String? id = switch (it.kind) {
     InboxKind.question => nonEmpty(it.question?.toolUseId),
-    InboxKind.permission => s?.brief?.now?.at?.toString() ?? nonEmpty(it.turn?.pendingTool?.id),
+    // The tool call it waits on: another call is another ask. Not the agent's own
+    // report time, which a later report moves while the same call still waits.
+    InboxKind.permission => nonEmpty(it.turn?.pendingTool?.id),
     InboxKind.reported || InboxKind.menu || InboxKind.waiting => s?.reason?.since?.toString(),
     InboxKind.prose => nonEmpty(it.turn?.at),
     InboxKind.background => it.agent?.startedAt?.toString(),

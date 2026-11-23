@@ -4,6 +4,7 @@
 // you last looked".
 import 'package:ai_terminal/api/models.dart';
 import 'package:ai_terminal/api/supervisor_models.dart';
+import 'package:ai_terminal/util/agent_turn.dart';
 import 'package:ai_terminal/util/inbox_items.dart';
 import 'package:ai_terminal/util/inbox_queue.dart';
 import 'package:flutter_test/flutter_test.dart';
@@ -21,6 +22,7 @@ Session _s(
   String cwd = '/w',
   List<Map<String, dynamic>> items = const [],
   bool hidden = false,
+  Map<String, dynamic>? now,
 }) =>
     Session.fromJson(server, {
       'id': id,
@@ -32,7 +34,7 @@ Session _s(
       'waitingFor': waitingFor,
       'reason': reason,
       'lastActivity': lastActivity,
-      'brief': {'v': 1, 'reporting': 'on', 'items': items, if (hidden) 'hidden': true},
+      'brief': {'v': 1, 'reporting': 'on', 'items': items, if (hidden) 'hidden': true, 'now': ?now},
     });
 
 PendingQuestionItem _q(List<String> labels, {bool multi = false}) => PendingQuestionItem(
@@ -280,6 +282,20 @@ void main() {
           kind: InboxKind.waiting, key: 'k', server: _home, session: _s('w', status: 'waiting', lastActivity: 2), since: 2);
       expect(inboxSeenSig(undated), isNull, reason: 'an undated wait is unknown, never "new again"');
       expect(inboxSeenSig(moved), isNull);
+    });
+
+    test("a permission's signature is the tool call it waits on, not the agent's report time", () {
+      Session at(int t) => _s('p', status: 'waiting', waitingFor: 'permission', now: {'text': 'x', 'at': t});
+      InboxItem perm(Session s, String id) => InboxItem(
+          kind: InboxKind.permission,
+          key: 'k',
+          server: _home,
+          session: s,
+          turn: AgentTurn(prose: '', pendingTool: ToolUse(name: 'Bash', inputPreview: '', id: id)));
+      expect(inboxSeenSig(perm(at(1), 'u1')), 'permission|u1');
+      expect(inboxSeenSig(perm(at(2), 'u1')), inboxSeenSig(perm(at(1), 'u1')), reason: 'a later report, the same ask');
+      expect(inboxSeenSig(perm(at(1), 'u2')), isNot(inboxSeenSig(perm(at(1), 'u1'))), reason: 'another call is new');
+      expect(inboxSeenSig(perm(at(1), '')), isNull, reason: 'unknown until the call is read');
     });
 
     test("a question's signature is unknown until it is read, then its tool call; another question is a new ask", () {
