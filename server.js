@@ -83,6 +83,8 @@ const mcStateLib = require('./lib/mc-state'); // #505 - Mission Control's persis
 const mcNeeds = require('./lib/mc-needs'); // #506 - Answer now vs My to-do, ranked by what it blocks
 const { createPromptEpisodes } = require('./lib/mc-episodes'); // #506 - a prompt on screen keeps one card id
 const mcAnalyst = require('./lib/mc-analyst'); // #511 - Ask, a read-only Analyst
+const mcBinding = require('./lib/mc-binding'); // #512 - a session bound to a project and subjects at birth
+const mcStart = require('./lib/mc-start'); // #512 - Start work: the request, the name and brief, the machine
 const recap = require('./lib/recap');
 // #383 - the model-written summary of one inbox wait. Hot-reload only: nothing in the worker loads it.
 const inboxDigest = require('./lib/inbox-digest');
@@ -6724,7 +6726,9 @@ function serverCapabilities() {
     // /api/mc/projects. An older authority would 404 the subjects routes.
     'mc-subjects',
     // #506 - GET /api/mc/now, POST /api/mc/todo[/:id] and POST /api/mc/later (lib/mc-needs.js).
-    'mc-needs'];
+    'mc-needs',
+    // #512 - POST /api/mc/start and GET /api/mc/machines (Start work).
+    'mc-start'];
   // #412/#428 - GET /api/leases (forwarded to the lease authority). The companion's Leases
   // section asks only a server that advertises it: an older one would 404, which must
   // never read as "nobody holds anything". Like 'fcm', only where it is configured: a
@@ -7021,7 +7025,8 @@ async function _computeMcView(reqUser) {
   for (const a of peerAnswers) closed.push(...a.closed);
   const servers = [{ name: me, ok: true }, ...peerAnswers.map((a) => ({ name: a.name, ok: a.ok }))];
 
-  const nodes = mcSubjects.sessionNodes({ rows, closed, now });
+  // #512 - a session started from Start work is on its project and subjects from birth.
+  const nodes = mcBinding.applyBindings(mcSubjects.sessionNodes({ rows, closed, now }), mcState.bindings());
   // #506 - when each prompt on screen came up: its card's one id while it stays up.
   _mcPromptEpisodes.observe(nodes, now);
   const refs = mcSubjects.trackerKeys(nodes).map((k) => trackerMeta.parseRef(k)).filter((r) => r && !r.unqualified);
@@ -7033,7 +7038,7 @@ async function _computeMcView(reqUser) {
   const metaByKey = {};
   for (const m of await Promise.all(refs.map((r) => mcTrackerMeta.peek(r)))) metaByKey[m.key] = m;
   const view = mcSubjects.buildView({ nodes, metaByKey, projects: cfg.projects, stageStore: mcState, now });
-  const sessions = rows.map((s) => ({ cwd: s.cwd, origin: s.origin, items: s.brief && s.brief.items }));
+  const sessions = nodes.filter((n) => !n.closed).map((n) => ({ cwd: n.cwd, origin: n.origin, items: n.items, bound: n.boundProject }));
   // Computed once: GET /api/mc/projects serves it, and its area ids are what ?area= takes.
   const projectsOut = projectsLib.projectsView({ projects: cfg.projects, sessions, subjects: view.subjects });
   return { ...view, nodes, servers, projectsOut, generatedAt: now };
@@ -7334,6 +7339,118 @@ app.post('/api/mc/ask', express.json({ limit: '16kb' }), async (req, res) => {
   } catch (e) {
     console.error(`[mc] ask: ${e.message}`);
     res.status(500).json({ error: 'the question could not be answered' });
+  }
+});
+
+// --- API: #512 Mission Control: Start work ---
+// GET /api/mc/machines ranks the cluster's machines for a new session (lib/mc-start.js
+// machinesView) from the cluster view this server already holds plus each one's restart hold.
+// POST /api/mc/start creates the session through the ordinary create path - this server's own
+// (createSessionFrom) or a peer's POST /api/sessions with the stored cluster token, as the
+// cluster proxy sends it - and records its binding (lib/mc-binding.js) HERE, on the authority,
+// so /api/mc/subjects shows it under its subject before it reports anything.
+const MC_START_PEER_TIMEOUT_MS = 15000;
+
+/** `{held, reason}` for every server of the cluster view whose restart hold could be read. */
+async function mcMachineHolds(servers) {
+  const tokens = loadClusterTokens();
+  const holds = {};
+  await Promise.all(servers.map(async (s) => {
+    if (!s.url) { holds[s.name] = _maint.hold ? { held: true, reason: _maint.hold.reason } : { held: false }; return; }
+    const tok = tokens[s.url];
+    if (!s.online || s.needsAuth || !tok || !tok.token) return;
+    try {
+      const r = await clusterFetch(`${s.url}/api/maintenance/status`, { headers: { Authorization: `Bearer ${tok.token}` }, timeout: 3000 });
+      const j = r.ok ? JSON.parse(r.body) : null;
+      if (j && typeof j === 'object') holds[s.name] = j.hold ? { held: true, reason: typeof j.hold.reason === 'string' ? j.hold.reason : null } : { held: false };
+    } catch { /* not read: the machine is shown, never suggested */ }
+  }));
+  return holds;
+}
+
+app.get('/api/mc/machines', async (req, res) => {
+  const refused = mcRefusal(supervisorAuthority());
+  if (refused) return res.status(refused.status).json(refused.json);
+  try {
+    const cluster = await cachedClusterSessions(clusterReqUser(req));
+    const servers = (Array.isArray(cluster.servers) ? cluster.servers : []).filter((s) => s && typeof s.name === 'string');
+    const view = mcStart.machinesView({ servers, rows: cluster.sessions, holds: await mcMachineHolds(servers) });
+    res.json({ ...view, generatedAt: Date.now() });
+  } catch (e) {
+    console.error(`[mc] machines: ${e.message}`);
+    res.status(500).json({ error: 'could not read the cluster sessions' });
+  }
+});
+
+app.post('/api/mc/start', express.json({ limit: '16kb' }), async (req, res) => {
+  const refused = mcRefusal(supervisorAuthority());
+  if (refused) return res.status(refused.status).json(refused.json);
+  const cfg = projectsLib.validateProjects(liveConfig('projects', undefined));
+  if (!cfg.ok) return res.status(500).json({ error: `config.json projects is not valid: ${cfg.error}` });
+  const parsed = mcStart.parseStart(req.body, { projects: cfg.projects, parseRef: trackerMeta.parseRef });
+  if (parsed.error) return res.status(400).json({ error: parsed.error });
+  const v = parsed.value;
+  // Where: this server, or a peer of its cluster config by name (never a url from the body).
+  const me = getServerName();
+  let peer = null;
+  if (v.server !== me) {
+    const publicUrl = liveConfig('publicUrl', null);
+    peer = getClusterConfig().find((s) => s && s.name === v.server && s.url && (!publicUrl || s.url !== publicUrl)) || null;
+    if (!peer) return res.status(400).json({ error: `no machine named ${JSON.stringify(v.server.slice(0, 60))} in this cluster` });
+  }
+  try {
+    // The name's gloss is the tracker title: a cold read is waited on as a poll waits on one
+    // (MC_META_WAIT_MS), then the session is named from whatever the cache holds.
+    const refs = v.subjects.map((s) => trackerMeta.parseRef(s.key)).filter((r) => r && !r.unqualified);
+    const reads = mcTrackerMeta.getMany(refs).catch((e) => console.error(`[mc] start: tracker details: ${e.message}`));
+    await Promise.race([reads, new Promise((r) => { const t = setTimeout(r, MC_META_WAIT_MS); if (t.unref) t.unref(); })]);
+    const titles = {};
+    for (const r of refs) {
+      const m = await mcTrackerMeta.peek(r);
+      if (m && m.title) titles[r.key] = m.title;
+    }
+    const plan = mcStart.startPlan(v, { titles, command: mcStart.startCommand(liveConfig('mc', null)) });
+    const body = { name: plan.name, cwd: v.cwd, autoCommand: plan.autoCommand, goal: plan.goal };
+    let created;
+    if (!peer) {
+      const r = await createSessionFrom({ body, socket: null });
+      if (r.status !== 200) return res.status(r.status).json({ error: `${me}: ${(r.json && r.json.error) || 'the session was not created'}` });
+      created = r.json;
+    } else {
+      const tok = loadClusterTokens()[peer.url];
+      if (!tok || !tok.token) return res.status(409).json({ error: `this server is not signed in to ${peer.name}: link it under Settings, Cluster` });
+      let r;
+      try {
+        r = await clusterFetch(`${peer.url}/api/sessions`, {
+          method: 'POST', headers: { Authorization: `Bearer ${tok.token}`, 'Content-Type': 'application/json' },
+          body: JSON.stringify(body), timeout: MC_START_PEER_TIMEOUT_MS,
+        });
+      } catch (e) {
+        return res.status(502).json({ error: `${peer.name} did not answer: ${e.message}` });
+      }
+      let j = null;
+      try { j = JSON.parse(r.body); } catch { /* not JSON: said below */ }
+      if (!r.ok || !j || typeof j.id !== 'string') {
+        const why = (j && typeof j.error === 'string' && j.error.slice(0, 300)) || `HTTP ${r.status}`;
+        // A peer's refusal of the request keeps its code; its 401 (our token) must not read
+        // as the CALLER's sign-in failing, so that and every other failure is a 502.
+        return res.status([400, 404, 409].includes(r.status) ? r.status : 502).json({ error: `${peer.name}: ${why}` });
+      }
+      created = j;
+    }
+    mcState.setBinding(created.id, { project: v.project.id, subjects: v.subjects, hunt: v.hunt, server: peer ? peer.name : me, at: Date.now() });
+    // The next poll must show it: the cluster view and the MC view are both re-read.
+    invalidateClusterSessionsCache();
+    _mcViewCache.clear();
+    console.log(`[mc] started ${created.id} on ${peer ? peer.name : me} for ${v.project.id}${v.hunt ? ' (hunt)' : ''} ${v.subjects.map((s) => s.key).join(' ')}`);
+    res.json({
+      server: peer ? peer.name : me, serverUrl: peer ? peer.url : null, sessionId: created.id,
+      name: created.name || plan.name, agent: created.agent ?? null, agentReady: created.agentReady ?? true,
+      project: v.project.id, subjects: v.subjects.map((s) => s.key), hunt: v.hunt, generatedAt: Date.now(),
+    });
+  } catch (e) {
+    console.error(`[mc] start: ${e.message}`);
+    res.status(500).json({ error: 'could not start the session' });
   }
 });
 
@@ -9528,12 +9645,16 @@ let _lastSessionCreate = { name: '', cwd: '', time: 0 };
 // #472 - how long a `replaces` create waits to learn who is calling. Longer than the #377
 // parent trace (whose answer may land later): here the answer DECIDES, so none is a refusal.
 const REPLACES_TRACE_MS = 10000;
-app.post('/api/sessions', express.json({ limit: '16kb' }), async (req, res) => {
+/** #512 - the body of POST /api/sessions, as `{status, json}`: Mission Control's Start work
+ *  (POST /api/mc/start) creates a session on THIS server through exactly this path. `req`
+ *  is `{body, socket}`: the socket is read only to trace a caller (`spawnedBy`, `replaces`). */
+async function createSessionFrom(req) {
+  const answer = (status, json) => ({ status, json });
   try {
     // #359 - nothing new starts on a machine about to restart: on 2026-10-16 an
     // orchestrator started a session here 36 minutes into the wrap-up window.
     const held = req.body?.force === true ? null : maintRefusal();
-    if (held) return res.status(503).json(held);
+    if (held) return answer(503, held);
     const { sessions: existing } = await workerClient.rpc('listSessions');
     const id = crypto.randomUUID();
     const liveCwd = getDefaultCwd();
@@ -9553,42 +9674,42 @@ app.post('/api/sessions', express.json({ limit: '16kb' }), async (req, res) => {
     let agent = null;
     if (req.body?.agent != null && req.body.agent !== '') {
       if (!agentsLib.isKnownAgent(req.body.agent)) {
-        return res.status(400).json({ error: `Unknown agent: ${String(req.body.agent).slice(0, 40)}` });
+        return answer(400, { error: `Unknown agent: ${String(req.body.agent).slice(0, 40)}` });
       }
       agent = req.body.agent;
     }
     // #374 - the session that asked for this one (its own $WT_SESSION_ID), so the clients can
     // draw this as its child. A malformed id is refused, not dropped: the link would vanish silently.
     const parent = spawnReaper.parentIdOf(req.body?.parentId);
-    if (!parent.ok) return res.status(400).json({ error: 'parentId must be a session id' });
+    if (!parent.ok) return answer(400, { error: 'parentId must be a session id' });
     // #466 - what the session is opened FOR, for the journal. Refused, never cut to fit.
     const goal = spawnGoalOf(req.body?.goal);
-    if (!goal.ok) return res.status(400).json({ error: goal.error });
+    if (!goal.ok) return answer(400, { error: goal.error });
     // #472 - a session handing ITSELF off (`replaces` = its own id): proven by tracing the
     // request to the session it runs in, BEFORE anything is created. Untraceable is refused.
     const replaces = spawnReaper.replacesOf(req.body?.replaces, req.body?.parentId);
-    if (!replaces.ok) return res.status(400).json({ error: replaces.error });
+    if (!replaces.ok) return answer(400, { error: replaces.error });
     if (replaces.id) {
-      if (!existing.some((s) => s.id === replaces.id)) return res.status(404).json({ error: 'the replaced session is not on this server' });
+      if (!existing.some((s) => s.id === replaces.id)) return answer(404, { error: 'the replaced session is not on this server' });
       const caller = await Promise.race([callerSession.callerSession(req.socket, existing),
         new Promise((r) => setTimeout(() => r(null), REPLACES_TRACE_MS))]);
       const refused = spawnReaper.replacesRefusal(replaces.id, caller);
-      if (refused) return res.status(403).json({ error: refused });
+      if (refused) return answer(403, { error: refused });
     }
     // Deduplicate rapid session creation (same name + cwd within time window)
     const now = Date.now();
     if (name === _lastSessionCreate.name && cwd === _lastSessionCreate.cwd && now - _lastSessionCreate.time < DEDUP_WINDOW_MS) {
-      return res.status(409).json({ error: 'Duplicate session — please wait before creating another with the same name and folder' });
+      return answer(409, { error: 'Duplicate session — please wait before creating another with the same name and folder' });
     }
     _lastSessionCreate = { name, cwd, time: now };
     // Verify cwd exists — return error if user specified a bad path
     try {
       if (!fs.existsSync(cwd) || !fs.statSync(cwd).isDirectory()) {
-        if (req.body?.cwd) return res.status(400).json({ error: `Folder does not exist: ${cwd}` });
+        if (req.body?.cwd) return answer(400, { error: `Folder does not exist: ${cwd}` });
         cwd = liveCwd;
       }
     } catch (e) {
-      if (req.body?.cwd) return res.status(400).json({ error: `Folder does not exist: ${cwd}` });
+      if (req.body?.cwd) return answer(400, { error: `Folder does not exist: ${cwd}` });
       cwd = liveCwd;
     }
     // #377 - an agent that sent who it is (`spawnedBy`) but no parent: find the session it
@@ -9628,7 +9749,7 @@ app.post('/api/sessions', express.json({ limit: '16kb' }), async (req, res) => {
     // left the submit gate OPEN on a brand-new session — the one flow #147 is
     // about. Read from the worker's own summary rather than assumed false: a
     // plain shell and an agent with no declared marker are ready at once.
-    res.json({
+    return answer(200, {
       id: created.id,
       name: created.name,
       agent: agentsLib.resolveAgent(created.agent, autoCommand),
@@ -9636,8 +9757,12 @@ app.post('/api/sessions', express.json({ limit: '16kb' }), async (req, res) => {
     });
   } catch (e) {
     console.error(`Failed to create session: ${e.message}`);
-    res.status(500).json({ error: 'Failed to create session' });
+    return answer(500, { error: 'Failed to create session' });
   }
+}
+app.post('/api/sessions', express.json({ limit: '16kb' }), async (req, res) => {
+  const r = await createSessionFrom(req);
+  res.status(r.status).json(r.json);
 });
 
 // --- API: update session (rename, change autoCommand) ---

@@ -746,6 +746,12 @@ companion's daily foreground time from a phone over adb in `logs/phone-usage.jso
   details), capped in size, and it never types into a session. In the companion: the **Ask** tab
   on a phone, the **Ask** panel beside any tab on desktop; each source opens its session or link.
   Config `mcAnalyst` (`enabled`, `model`, `command`, `timeoutMs`) in `config.json` only.
+- **Start work (#512):** one entry point in the companion's Mission Control (Now, Projects and each
+  project's page): pick a project, then work items (or a bug hunt with no list), then a machine (the
+  least-loaded healthy one is suggested by `GET /api/mc/machines`). `POST /api/mc/start` creates the
+  session in the project's folder with a name and a brief for its agent, and binds it to the project
+  and work items at birth, so it shows under them before its first report; sessions it starts
+  inherit the binding. Config `mc.startCommand` sets the launch command.
 - Shapes and rules: [docs/mission-control.md](docs/mission-control.md).
 
 **Companion app** — a native Android + Windows client with the chat lens and push that
@@ -765,7 +771,7 @@ Full list: **[docs/FEATURES.md](docs/FEATURES.md)**.
 | **[docs/COMPANION.md](docs/COMPANION.md)** | The Android + Windows companion app |
 | **[docs/TROUBLESHOOTING.md](docs/TROUBLESHOOTING.md)** | Known symptoms and dev tooling |
 | **[docs/ARCHITECTURE.md](docs/ARCHITECTURE.md)** | How the three-process design works |
-| **[docs/mission-control.md](docs/mission-control.md)** | Mission Control's wire contract: work-item details, projects and areas, stage, subjects and runs, Answer now and My to-do, Ask |
+| **[docs/mission-control.md](docs/mission-control.md)** | Mission Control's wire contract: work-item details, projects and areas, stage, subjects and runs, Answer now and My to-do, Ask, Start work |
 | **[AGENTS.md](AGENTS.md)** | Point an AI agent at this repo and it can install and operate it |
 | **[CONTRIBUTING.md](CONTRIBUTING.md)** | Dev setup and the PR gate |
 | **[SECURITY.md](SECURITY.md)** | Threat model and vulnerability reporting |

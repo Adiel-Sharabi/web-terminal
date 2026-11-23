@@ -491,6 +491,31 @@ class ApiClient {
     return McAnswer.fromJson(_mcAnswer(res));
   }
 
+  /// The machines a session can be started on, the suggested one named (`GET /api/mc/machines`, #512).
+  Future<McMachines> mcMachines() async => McMachines.fromJson(await _mcGet('/api/mc/machines'));
+
+  /// Starts a session bound to [project] and [subjects] (or a [hunt]) on [server]
+  /// (`POST /api/mc/start`, #512). A refusal is an [ApiException] with the server's reason.
+  Future<McStartResult> mcStart({
+    required String project,
+    List<String> subjects = const [],
+    bool hunt = false,
+    required String server,
+    String? name,
+    String? brief,
+  }) async {
+    final r = McStartResult.fromJson(await _mcPost('/api/mc/start', {
+      'project': project,
+      'subjects': subjects,
+      'hunt': hunt,
+      'server': server,
+      'name': ?name,
+      'brief': ?brief,
+    }));
+    if (r == null) throw const ApiException(0, 'Malformed server response');
+    return r;
+  }
+
   Future<Map<String, dynamic>> _mcGet(String path, {Map<String, String>? query}) async {
     final res = await _send('GET', path, query: query == null || query.isEmpty ? null : query, alsoAccept: const {409});
     return _mcAnswer(res);

@@ -7,10 +7,11 @@ Unknown/missing data is `null`, never guessed. Sections below a milestone that h
 are the plan, not a description of the server.
 
 Landed: Who answers, Work-item meta (#502), Projects and areas (#503), Stage (#505), Subjects
-(#504), Answer now / My to-do (#506), Ask (#511). Advertised in `/api/version` `capabilities`: `work-item-meta`,
-`mission-control` (#502/#503), `mc-subjects` (#504/#505: the subjects routes, `stage` on report
-items, `counts.stages`) and `mc-needs` (#506: `/api/mc/now`, `/api/mc/todo[/:id]`, `/api/mc/later`); Ask has no
-capability of its own (a server without it answers a bare 404).
+(#504), Answer now / My to-do (#506), Ask (#511), Start work (#512). Advertised in `/api/version`
+`capabilities`: `work-item-meta`, `mission-control` (#502/#503), `mc-subjects` (#504/#505: the
+subjects routes, `stage` on report items, `counts.stages`), `mc-needs` (#506: `/api/mc/now`,
+`/api/mc/todo[/:id]`, `/api/mc/later`) and `mc-start` (#512: `POST /api/mc/start`,
+`GET /api/mc/machines`); Ask has no capability of its own (a server without it answers a bare 404).
 
 ## Who answers (one owner for cluster-wide state)
 Mission Control is computed on ONE server per cluster: the same authority the supervisor uses
@@ -25,7 +26,8 @@ first server and, on that 409, on the server in its own list whose url matches `
 authority only (`lib/mc-state.js`: `mc-state.json`, override `WT_MC_STATE_FILE`, written 2 s after a
 change by tmp+rename, a corrupt file renamed aside to `.corrupt-<ms>` and logged, as the brief store
 does): each subject's stage history (#505; a subject unseen for 30 days is dropped, at most 2000
-kept), and the person's to-dos and "later"s (#506).
+kept), the person's to-dos and "later"s (#506), and the Start work bindings under their own key
+`bindings` (#512; kept 8 days, at most 2000).
 `/api/work-items/:ref/meta` is answered by any server (per-server cache).
 
 ## Work-item meta (#502) - `lib/tracker-meta.js`
@@ -169,6 +171,7 @@ Subject = { key, ref, url, title,          // title: meta.title, else the newest
   buckets: ['active'|'doneWeek', 'needsYou'?, 'waitsOnOthers'?],   // the Counts keys it is counted under
   runId: string|null, updatedAt }
 SessionRef = { server, serverUrl, id, name, parentId, status, closed: bool, closedAt,
+  bound: bool,                             // #512: on this subject only through its Start work binding (no report of its own yet)
   lastReport: { state, stage, note, headline, at } , wait: {on, what}|null }
 Run = { id, server, sessionId, name, startedAt, status, subjects: [key], children: [{server, id, name, status}] }
 ```
@@ -296,7 +299,47 @@ command, timeoutMs (120000)}` - not settable through `PUT /api/config` (`command
   `503 {status:'unavailable', reason: disabled|no-cli|busy}`; `502 {status:'failed', reason:
   timeout|error|bad-output}`; `409`/`503` from `mcRefusal` like every `/api/mc/*` route.
 
-## Start work (#512)
-`POST /api/mc/start {project, subjects: [ref], hunt: bool, server, name?, brief?}` -> `{server, sessionId}`;
-the session is bound (project + subject keys recorded at birth, shown on its subject before any report).
-`GET /api/mc/machines` -> `{machines: [{name, url, ok, sessions, working, load}], suggested: name}`.
+## Start work (#512) - `lib/mc-start.js`, `lib/mc-binding.js`
+`GET /api/mc/machines` -> `{machines: [Machine], suggested: name|null, generatedAt}`
+```
+Machine = { name, url,        // url null = the authority itself
+  ok: bool,                   // reachable, signed in, and its restart hold read and off
+  why: string|null,           // 'offline', 'this server is not signed in to it', 'restart hold: <reason>',
+                              // 'its restart hold could not be read'
+  sessions, working,          // from the authority's cluster view
+  load }                      // CPU percent, null when unknown
+```
+`suggested` = the ok machine with the fewest WORKING sessions, then the fewest sessions, then the
+lowest CPU, then list order (this server first); null when none is ok. The hold is each machine's
+`GET /api/maintenance/status` (3 s); one that cannot be read is listed, never suggested.
+
+`POST /api/mc/start {project, subjects: [ref], hunt: bool, server, name?, brief?}` ->
+`{server, serverUrl, sessionId, name, agent, agentReady, project, subjects: [key], hunt, generatedAt}`.
+`project` = a configured project id; `subjects` = up to 10 refs (a bare `#N` takes the project's
+first repo; one it cannot qualify is refused); `hunt` = a bug hunt, which needs no subject (without
+it, at least one); `server` = a machine name from `/api/mc/machines` (this server, or a peer of its
+`cluster` config by name - never a url from the body); `name` <= 100, `brief` <= 500. Every refusal
+is `400 {error}` in words meant for a person: an unknown project, one with no `match.paths` ("has no
+folder"), a bad ref, an unknown machine.
+The session is created through the ordinary create path: this server's own `POST /api/sessions`
+logic, or that route on the peer with the stored cluster token (a peer's 400/404/409 keeps its
+code; anything else, its 401 included, is a 502 naming the peer). It starts in the project's
+`match.paths[0]` (a folder missing on that machine is the create route's own "Folder does not
+exist" refusal), named `<project name> <ref>[ +N] <tracker title>` (`<project name> hunt`; the
+title is the tracker's: a cold read is waited on for at most 1.5 s, as a poll waits, then the cache
+answers), with `goal` = the task and
+`autoCommand` = `<command> "<task>[ <brief>]"`: the task is `Fix <keys> (<title>) in project <name>.`
+or `Bug hunt in project <name>[, starting from <keys>].`; `<command>` is config `mc.startCommand`
+(letters, digits, space and `.:/\=_-` only), else `claude --dangerously-skip-permissions`. Text
+inside the quotes keeps letters and digits in any script and plain punctuation; every character a
+shell acts on inside double quotes (`` ` $ " \ ! % ^ & | < > ``) and every control character is
+dropped. A restart hold on the chosen machine refuses as its create route does (503 here).
+Binding: recorded at birth on the authority (`mc-state.json` `bindings`, by session id:
+`{project, subjects: [{key, ref}], hunt, server, at}`), and the MC caches are dropped, so the next
+`/api/mc/subjects` lists the session under each subject (`SessionRef.bound: true`,
+`lastReport.state: null`, `lastReport.at` = its creation) before it reports anything. The rule
+(`lib/mc-binding.js`): a session's binding is its own, else that of a session it was handed off from
+(`spawn.replaces`), else its nearest bound ancestor's (`spawn.parentId`, the tree rule above) - so an
+orchestrator's children inherit it. The PROJECT always comes from the binding (it wins over the git
+origin and the folder, while that project is configured); the SUBJECTS stand in for a report only
+until the session reports items of its own.

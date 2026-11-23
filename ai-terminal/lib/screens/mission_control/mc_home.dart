@@ -30,6 +30,7 @@ import 'ask_view.dart';
 import 'machines_view.dart';
 import 'now_view.dart';
 import 'project_view.dart';
+import 'start_work_sheet.dart';
 
 /// Every place Mission Control can show. Desktop shows [desktopTabs], a phone [phoneTabs].
 enum McTab {
@@ -164,6 +165,7 @@ class _MissionControlHomeState extends State<MissionControlHome> {
             feed: _feed,
             onAnswer: _answer,
             onOpenSession: _openSession,
+            onStartWork: (projectId) => _startWork(projectId: projectId),
             actions: _actions(),
             active: _isActive,
           ),
@@ -212,7 +214,18 @@ class _MissionControlHomeState extends State<MissionControlHome> {
         ),
       );
 
+  /// #512 - the one Start work entry point; [projectId] preselects a project.
+  void _startWork({String? projectId}) =>
+      showStartWorkSheet(context, feed: _feed, projectId: projectId, onOpenSession: _openSession);
+
   List<Widget> _actions() => [
+        if (_tab == McTab.now || _tab == McTab.projects)
+          IconButton(
+            key: const ValueKey('mc-start-work'),
+            tooltip: 'Start work',
+            icon: const Icon(Icons.play_circle_outline),
+            onPressed: _startWork,
+          ),
         if (_tab == McTab.now)
           IconButton(
             key: const ValueKey('mc-refresh'),

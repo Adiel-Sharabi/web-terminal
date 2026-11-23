@@ -996,3 +996,80 @@ String mcRefusalText(String code) => switch (code) {
       'worker-unavailable' => 'its server could not type into it',
       _ => code,
     };
+
+// --- Start work (#512): `GET /api/mc/machines`, `POST /api/mc/start` -----------------
+
+/// One machine a session can be started on, as the authority ranks it.
+class McMachine {
+  final String name;
+
+  /// Null for the authority itself (its own sessions), else the server's url.
+  final String? url;
+
+  /// Reachable, signed in, and known not to be held for a restart.
+  final bool ok;
+
+  /// Why it cannot take a session (offline, a restart hold, ...), or null.
+  final String? why;
+  final int sessions;
+  final int working;
+
+  /// CPU percent, or null when unknown.
+  final int? load;
+
+  const McMachine({required this.name, this.url, this.ok = false, this.why, this.sessions = 0, this.working = 0, this.load});
+
+  static McMachine? fromJson(dynamic json) {
+    final m = _map(json);
+    final name = _str(m['name']);
+    if (name == null) return null;
+    final load = m['load'];
+    return McMachine(
+      name: name,
+      url: _str(m['url']),
+      ok: _bool(m['ok']),
+      why: _str(m['why']),
+      sessions: _count(m['sessions']),
+      working: _count(m['working']),
+      load: load is num && load.isFinite ? load.round() : null,
+    );
+  }
+
+  /// `3 sessions, 1 working, CPU 40%`, or why it cannot take one.
+  String get line {
+    final busy = '$sessions session${sessions == 1 ? '' : 's'}, $working working${load == null ? '' : ', CPU $load%'}';
+    return ok ? busy : '${why ?? 'not available'} - $busy';
+  }
+}
+
+/// `GET /api/mc/machines`.
+class McMachines {
+  final List<McMachine> machines;
+
+  /// The name of the machine the server suggests (least loaded healthy one), or null.
+  final String? suggested;
+  const McMachines({this.machines = const [], this.suggested});
+
+  static McMachines fromJson(dynamic json) {
+    final m = _map(json);
+    return McMachines(machines: _list(m['machines'], McMachine.fromJson), suggested: _str(m['suggested']));
+  }
+}
+
+/// `POST /api/mc/start`'s answer: the session it started and where.
+class McStartResult {
+  final String sessionId;
+  final String? name;
+  final String? server;
+
+  /// Null when the session runs on the authority itself.
+  final String? serverUrl;
+  const McStartResult({required this.sessionId, this.name, this.server, this.serverUrl});
+
+  static McStartResult? fromJson(dynamic json) {
+    final m = _map(json);
+    final id = _str(m['sessionId']);
+    if (id == null) return null;
+    return McStartResult(sessionId: id, name: _str(m['name']), server: _str(m['server']), serverUrl: _str(m['serverUrl']));
+  }
+}
