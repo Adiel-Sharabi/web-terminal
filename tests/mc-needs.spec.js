@@ -10,6 +10,7 @@ const { test, expect } = require('@playwright/test');
 const M = require('../lib/mc-subjects');
 const N = require('../lib/mc-needs');
 const { createMcState } = require('../lib/mc-state');
+const { createPromptEpisodes } = require('../lib/mc-episodes');
 const { promptOf, PROMPT_BYTES_MAX } = require('../lib/safe-prompt');
 
 const NOW = 1_800_000_000_000;
@@ -37,8 +38,9 @@ const asking = (server, what, ago, over = {}) => row(server, {
 const working = (server, over = {}) => row(server, { status: 'working', reason: { kind: 'working', text: '' }, ...over });
 const meta = (key, over = {}) => ({ key, ref: key, title: `Title of ${key}`, url: null, state: 'open', closed: false, prs: [], severity: null, ...over });
 
-function now({ rows = [], metaByKey = {}, todos = [], later = {}, at = NOW } = {}) {
+function now({ rows = [], metaByKey = {}, todos = [], later = {}, at = NOW, episodes = null } = {}) {
   const nodes = M.sessionNodes({ rows, closed: [], now: at });
+  if (episodes) episodes.observe(nodes, at);
   const view = M.buildView({ nodes, metaByKey, projects: [], now: at, platform: 'win32' });
   return N.buildNow({ nodes, view, todos, later, now: at });
 }
@@ -125,15 +127,32 @@ test.describe('#506 Answer now: which waits, ranked by what they block', () => {
     expect(list[2].doneAt).toBe(NOW);
   });
 
-  test('a second permission prompt in the same turn is a new card: the first one\'s to-do or later never hides it', () => {
-    const at = (last) => row('alpha', { id: 'perm-0000-4000-8000-000000000001', status: 'waiting', waitingFor: 'permission',
-      reason: { kind: 'you', text: 'approve a tool' }, turnAt: NOW - 20 * MIN, lastActivity: last });
-    const first = now({ rows: [at(NOW - 10 * MIN)] }).answerNow[0];
-    // Tool A was approved at the desk and ran; the same turn now asks about tool B.
-    const todos = [{ id: 't-1', cardId: first.id, createdAt: NOW, state: 'done', doneAt: NOW, park: { state: 'none' } }];
-    const second = now({ rows: [at(NOW - 2 * MIN)], todos, later: { [first.id]: { until: NOW + HOUR } } });
+  test('a prompt on screen keeps ONE card id while it is up; the next prompt in the same turn is a new card', () => {
+    const PID = 'perm-0000-4000-8000-000000000001';
+    const at = (last, waiting = true) => row('alpha', { id: PID, status: waiting ? 'waiting' : 'working', waitingFor: waiting ? 'permission' : null,
+      reason: waiting ? { kind: 'you', text: 'approve a tool' } : { kind: 'working', text: '' }, turnAt: NOW - 20 * MIN, lastActivity: last });
+    const episodes = createPromptEpisodes();
+    const first = now({ rows: [at(NOW - 10 * MIN)], episodes, at: NOW - 9 * MIN }).answerNow[0];
+    expect(first).toMatchObject({ kind: 'permission', askedAt: NOW - 10 * MIN, id: `alpha|${PID}|permission:${NOW - 10 * MIN}` });
+    // Parked. A viewer's redraw and Claude's idle Notification move the last activity: same card, still parked.
+    const todos = [{ id: 't-1', cardId: first.id, createdAt: NOW, state: 'open', park: { state: 'none' } }];
+    const redrawn = now({ rows: [at(NOW - 5 * MIN)], episodes, todos, at: NOW - 4 * MIN });
+    expect(redrawn.answerNow).toEqual([]);
+    expect(redrawn.pending[0].id).toBe(first.id);
+    // Tool A was approved at the desk and ran; the same turn now asks about tool B: a new card,
+    // which neither the first one's to-do nor its later hides.
+    now({ rows: [at(NOW - 3 * MIN, false)], episodes, at: NOW - 3 * MIN });
+    const second = now({ rows: [at(NOW - 2 * MIN)], episodes, todos, later: { [first.id]: { until: NOW + HOUR } } });
     expect(second.answerNow).toHaveLength(1);
     expect(second.answerNow[0].id).not.toBe(first.id);
+    expect(second.answerNow[0].askedAt).toBe(NOW - 2 * MIN);
+    // Known limit (docs/mission-control.md): with no view between the two prompts they read as one.
+    const quiet = createPromptEpisodes();
+    const a = now({ rows: [at(NOW - 10 * MIN)], episodes: quiet }).answerNow[0];
+    expect(now({ rows: [at(NOW - 2 * MIN)], episodes: quiet }).answerNow[0].id).toBe(a.id);
+    // Without an episode tracker the turn and the last activity name it.
+    const second0 = now({ rows: [at(NOW - 2 * MIN)] }).answerNow[0];
+    expect(second0.id).toBe(`alpha|${PID}|permission:${NOW - 20 * MIN}.${NOW - 2 * MIN}`);
     // A session with no turn and no activity known still has a card (named by zeros).
     expect(now({ rows: [row('alpha', { status: 'waiting', waitingFor: 'question', reason: { kind: 'you' }, turnAt: null, lastActivity: null })] })
       .answerNow[0].id).toMatch(/\|question:0\.0$/);

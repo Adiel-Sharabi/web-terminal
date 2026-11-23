@@ -81,6 +81,7 @@ const mcSubjects = require('./lib/mc-subjects'); // #504 - one work item across 
 const mcStage = require('./lib/mc-stage'); // #505 - the progress-stage order and evidence rule
 const mcStateLib = require('./lib/mc-state'); // #505 - Mission Control's persisted state (stage history)
 const mcNeeds = require('./lib/mc-needs'); // #506 - Answer now vs My to-do, ranked by what it blocks
+const { createPromptEpisodes } = require('./lib/mc-episodes'); // #506 - a prompt on screen keeps one card id
 const recap = require('./lib/recap');
 // #383 - the model-written summary of one inbox wait. Hot-reload only: nothing in the worker loads it.
 const inboxDigest = require('./lib/inbox-digest');
@@ -6977,6 +6978,7 @@ const MC_PEER_CLOSED_TTL_MS = 30 * 1000;
 const MC_META_WAIT_MS = 1500;
 const _mcPeerClosed = new Map(); // peer url -> {at, closed, ok}
 const _mcViewCache = new Map(); // request user -> {ts, promise}
+const _mcPromptEpisodes = createPromptEpisodes();
 
 /** A peer's closed strip, cached; a failed read keeps the last copy and says it is not ok. */
 async function mcPeerClosed(url, token) {
@@ -7017,6 +7019,8 @@ async function _computeMcView(reqUser) {
   const servers = [{ name: me, ok: true }, ...peerAnswers.map((a) => ({ name: a.name, ok: a.ok }))];
 
   const nodes = mcSubjects.sessionNodes({ rows, closed, now });
+  // #506 - when each prompt on screen came up: its card's one id while it stays up.
+  _mcPromptEpisodes.observe(nodes, now);
   const refs = mcSubjects.trackerKeys(nodes).map((k) => trackerMeta.parseRef(k)).filter((r) => r && !r.unqualified);
   // Start the reads (cold and stale) and wait a little; whatever has not arrived is served
   // as the cache holds it now, and arrives on a later poll.

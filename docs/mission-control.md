@@ -218,11 +218,12 @@ its `reason`, or for a peer too old to send one, status `waiting` or a reported 
 question or permission prompt on screen, a decision card (#492), a reported `you` wait. One card
 per session; the card is `lib/mc-subjects.js` `needsYouCard`, the same as a subject's `needsYou`.
 Its id names the wait: a reported wait (wait, decision) by its `at` (the agent's next report is a
-new card); a prompt on screen by the turn it came up in (`brief.turnAt`) AND the session's last
-activity (`<turnAt>.<lastActivity>`), which every later prompt moves, so a second permission prompt
-in one turn is a new card. A redraw moves it too and a parked card then comes back: wrong toward
-showing, never toward hiding a stuck session. `askedAt` = the wait's `at`, or for a prompt on
-screen the session's last activity. The card's subject is the first item
+new card); a prompt on screen by when it came up (`lib/mc-episodes.js`: an episode opens the first
+time a view sees the session at a prompt, at its last activity then, holds while every view sees it
+at the same kind of prompt in the same turn - redraws and hooks do not move it - and closes the first
+time a view sees it anywhere else, so the next prompt is a new card; kept in memory on the
+authority, so a restart opens new ones and a parked card comes back once; two prompts with no view
+computed between them read as one). `askedAt` = the wait's `at`, or the prompt's episode start. The card's subject is the first item
 the session carries that is not done.
 What it blocks (`why`): the asking session and every LIVE session above it in the tree
 (`lib/mc-tree.js` ancestors: an orchestrator waits on the children it opened), and the work items

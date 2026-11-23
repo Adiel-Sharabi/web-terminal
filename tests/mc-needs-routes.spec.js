@@ -7,6 +7,8 @@
 // (`no-agent`): that is what lets this spec prove the message is ATTEMPTED once, recorded,
 // and never sent again by itself. Delivery to a real claude session (ONE user turn in its
 // transcript) is proven on the rig (scripts/rig), never here.
+const fs = require('fs');
+const path = require('path');
 const { test, expect, request: pwRequest } = require('@playwright/test');
 const { BASE, authCtx, noAuthCtx, readHookToken } = require('./test-helpers');
 
@@ -127,6 +129,46 @@ test.describe('#506 Answer now / My to-do routes', () => {
       body = await nowUntil(ctx, (b) => b.answerNow.some((c) => c.sessionId === id && c.what === 'and now this'));
       expect(body.answerNow.find((c) => c.sessionId === id).id).not.toBe(card.id);
     } finally {
+      await ctx.delete(`/api/sessions/${id}`).catch(() => {});
+      await ctx.dispose();
+    }
+  });
+
+  test('a to-do that cannot be written to disk is refused (500) and nothing is recorded or sent', async () => {
+    const STATE = process.env.WT_MC_STATE_FILE || path.join(__dirname, '..', 'mc-state.test.json');
+    const ctx = await authCtx();
+    const made = await ctx.post('/api/sessions', { data: { name: `mc-needs-w-${Date.now()}`, autoCommand: '' } });
+    const id = (await made.json()).id;
+    const aside = `${STATE}.aside-${Date.now()}`;
+    let blocked = false;
+    try {
+      await report(id, { headline: 'h', items: [{ ref: 'ado:4712', state: 'in-progress' }], wait: { on: 'you', what: 'flash the board' } });
+      const body = await nowUntil(ctx, (b) => b.answerNow.some((c) => c.sessionId === id));
+      const card = body.answerNow.find((c) => c.sessionId === id);
+      // A directory where the state file goes: the write (tmp + rename onto it) fails.
+      if (fs.existsSync(STATE)) fs.renameSync(STATE, aside);
+      fs.mkdirSync(STATE);
+      blocked = true;
+      const r = await ctx.post('/api/mc/todo', { data: { cardId: card.id } });
+      expect(r.status()).toBe(500);
+      expect((await r.json()).error).toBe('could not record the to-do');
+      const after = await (await ctx.get('/api/mc/now')).json();
+      expect(after.answerNow.some((c) => c.id === card.id)).toBe(true);
+      expect(after.todo.some((t) => t.cardId === card.id)).toBe(false);
+      expect((await ctx.post('/api/mc/later', { data: { cardId: card.id, hours: 1 } })).status()).toBe(200);
+      // Writable again: the same card is recorded and its park tried, as the first time.
+      fs.rmdirSync(STATE);
+      if (fs.existsSync(aside)) fs.renameSync(aside, STATE);
+      blocked = false;
+      const ok = await (await ctx.post('/api/mc/todo', { data: { cardId: card.id } })).json();
+      expect(ok.parked).toMatchObject({ delivered: false, refused: 'no-agent' });
+      expect(ok.parked.already).toBeUndefined();
+    } finally {
+      if (blocked) {
+        try { fs.rmdirSync(STATE); } catch { /* not there */ }
+        if (fs.existsSync(aside)) fs.renameSync(aside, STATE);
+      }
+      try { fs.rmSync(`${STATE}.tmp`, { force: true }); } catch { /* best effort */ }
       await ctx.delete(`/api/sessions/${id}`).catch(() => {});
       await ctx.dispose();
     }
