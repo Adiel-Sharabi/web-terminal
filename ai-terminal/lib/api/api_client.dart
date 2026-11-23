@@ -359,18 +359,47 @@ class ApiClient {
     return state;
   }
 
-  /// Approves or dismisses a supervisor recommendation card (#492,
-  /// `POST /api/supervisor/cards/:id`), on the lease authority only. [approve] false
-  /// dismisses. The server refuses with a 409 when the card was already decided or the
-  /// session cannot take it now (`refused`), thrown like any failure with its reason.
-  Future<void> decideSupervisorCard(String id, {required bool approve}) async {
-    final res = await _send('POST', '/api/supervisor/cards/${Uri.encodeComponent(id)}',
-        body: {'decision': approve ? 'approve' : 'dismiss'}, alsoAccept: const {409});
-    if (res.statusCode == 409) {
-      final m = _asMap(_decode(res));
-      final why = m['refused'] ?? m['error'];
-      throw ApiException(409, why is String && why.isNotEmpty ? why : 'refused');
+  /// Answers an escalated supervisor case (#498, `POST /api/supervisor/cases/:id`), on the
+  /// lease authority only. [action] is `write` ([text]: typed into the session through the
+  /// gated prompt; the case closes), `later` ([hours]), `tell` ([note]: to the supervisor,
+  /// whose case it is again) or `resolve` ([how]: "nothing needed"). Refusals are thrown
+  /// like [decideSupervisorCard]'s, with the server's plain-words `reason`.
+  Future<Map<String, dynamic>> decideSupervisorCase(String id,
+      {required String action, String? text, String? note, num? hours, String? how}) async {
+    final res = await _send('POST', '/api/supervisor/cases/${Uri.encodeComponent(id)}',
+        body: {'action': action, 'text': ?text, 'note': ?note, 'hours': ?hours, 'how': ?how}, alsoAccept: const {400, 409});
+    final m = _asMap(_decode(res));
+    if (res.statusCode == 409 || res.statusCode == 400) {
+      final why = m['reason'] ?? m['refused'] ?? m['error'];
+      throw ApiException(res.statusCode, why is String && why.isNotEmpty ? why : 'refused');
     }
+    return m;
+  }
+
+  /// Decides a supervisor recommendation card (#492, #498, `POST /api/supervisor/cards/:id`),
+  /// on the lease authority only. [decision] is `approve`, `dismiss`, `send` (Edit, then
+  /// send: [text] is typed into the session instead), `tell` (Tell the supervisor: [note],
+  /// [dontAsk]) or `later` ([hours]). The server decides what each does and refuses with a
+  /// 409 (the card already decided, the session cannot take it now, the supervisor paused),
+  /// thrown with its plain-words `reason` (an older server: its bare `refused` code). A 400
+  /// (a text the gated prompt refuses) is thrown with the server's error. Returns the answer.
+  Future<Map<String, dynamic>> decideSupervisorCard(String id,
+      {required String decision, String? text, String? note, bool? dontAsk, num? hours}) async {
+    final res = await _send('POST', '/api/supervisor/cards/${Uri.encodeComponent(id)}',
+        body: {
+          'decision': decision,
+          'text': ?text,
+          'note': ?note,
+          'dontAsk': ?dontAsk,
+          'hours': ?hours,
+        },
+        alsoAccept: const {400, 409});
+    final m = _asMap(_decode(res));
+    if (res.statusCode == 409 || res.statusCode == 400) {
+      final why = m['reason'] ?? m['refused'] ?? m['error'];
+      throw ApiException(res.statusCode, why is String && why.isNotEmpty ? why : 'refused');
+    }
+    return m;
   }
 
   /// This machine's Claude login and its saved accounts (`GET /api/claude-account`,

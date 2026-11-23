@@ -408,6 +408,68 @@ proposed.
 - A card pending at night waits for the morning, except under the night-shift rules above,
   once that class is in act mode.
 
+### 12a. What a card says, and what the owner can do with it (#498)
+
+Approve/Dismiss alone was too narrow, and a card that showed only the raw line it would type
+did not say who proposed it or what Approve would do. The server (`lib/supervisor-cases.js`
+`cardView`) now serves every sentence; the app holds no table of classes and only renders:
+
+- **Title**: "The supervisor proposes: *Wake it with a fact*" (one per class).
+- **What Approve does** (`does`): types the supervisor's message into *X* once it is idle with
+  nothing in its box; or closes *X* (its conversation stays on disk); or starts a replacement.
+- **The session**: its first work items and its headline, from the authority's last scan.
+- **Why you are asked** (`why`): the class is in recommend mode ("you set *wake* to ask you
+  first"), or the text **mentions** something only the owner decides, naming the word
+  ("it mentions merging or pushing (\"merge\")"). A word right after a negation (*not*, *never*,
+  *no*, *without*, *n't*, with at most one word between) or written as *pre-* is not a hit.
+- **Details**: the raw text, folded.
+
+The actions, each through the same gated path as before (`supervisorDeliver`, `Close`,
+`Replace`), so every refusal still holds:
+
+| Action | What it does |
+|---|---|
+| Approve | what the card says it does |
+| Edit, then send (*Write to it* for a close or a replacement) | types the owner's own one-line text into the session instead |
+| Later (1, 3 or 8 h) | hides the card until then; it comes back only if still pending |
+| Dismiss | drops it |
+| Tell the supervisor | types the owner's note (and/or "don't ask me about cards like this") into the supervisor's own session; the card is decided |
+
+A refusal comes back as a plain sentence (`refusalText`: "That session has unsent text in its
+box…"), never a bare code.
+
+**A card retires by itself when its session is proven gone** (`cardRetirements`): missing on
+two scans `confirmMs` apart in which the session's own server answered. A session lives on one
+server, so its list is the proof: another peer being down (a sleeping laptop) neither blocks
+nor proves anything. An unreachable own server is "cannot tell" and retires nothing. A session
+that a replacement names in `replaces` retires its cards at once. An approve that the session's
+own server refuses with "session not found" also retires the card. The journal counts retired,
+edited and told cards apart from dismissed ones.
+
+**An escalation says what the owner is asked** (`caseOwnerView`). The owner, on a rules
+escalation shown as "The supervisor asks: Session X is past its own checkBy…": "No question…".
+The authority's own log (14 days) showed why: 16 escalations the rules raised, 15 of them never
+even delivered to the dispatcher (its own session was busy: typing, not idle), and 12 went
+obsolete by themselves. So each escalation now records its cause (`escalationCause`):
+
+| Cause | What the owner sees |
+|---|---|
+| `asked` (the dispatcher's `ask-owner`) | "The supervisor asks" and its question |
+| `blocked` (the dispatcher is off, paused or capped) | "Stuck: *what it is*", what the owner can do about this rule, and why it reached them ("nobody else will act on it") |
+| `untaken` (the dispatcher did not act on it in time) | at first nothing: **the supervisor looks first** (`checking`, `caseChecking`). A case never handed over is still handed to the dispatcher (once), and it stays out of the push and the inbox for one more `CASE_UNTAKEN_MS` (30 min), counted from its last hand-over (an owner's Tell hands it back too), or from the escalation if it was never handed over. If the dispatcher becomes blocked first, it is escalated again as `blocked`. After that window it is the owner's, "Stuck: ...", saying why ("was handed it and did not act on it in time" / "could not get to it in time"): a case is never left with nobody |
+
+An escalated case offers the card set where it applies: **Write to it** (the owner's one line,
+through the gated deliver; closes the case), **Later**, **Nothing needed** (resolves it), and
+**Tell the supervisor** (a note typed into the dispatcher; the case is the dispatcher's again).
+There is no Approve, because a case proposes nothing. Tell on a card the dispatcher proposed with
+its question hands that case back as well, and the note names it. A note that does not fit the
+gated prompt is refused in words ("shorten it by about N characters"), never cut: half a note is
+a different note. A new escalation clears an older Later.
+
+**One "need you".** The dashboard badge and the inbox header count one list (`needYouOf` in the
+companion): the sessions' blocking items, plus the supervisor's cards, escalations and
+`needsYou`. Before, the badge counted the sessions alone (1) while the header said 3.
+
 Phases (each a child issue of #465):
 
 1. **Facts and the journal:** `wait.target`, `goal`, lifecycle events, the gated prompt

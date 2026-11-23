@@ -244,4 +244,121 @@ void main() {
           throwsA(isA<ApiException>().having((e) => e.status, 'status', 0)));
     });
   });
+
+  group('#498 a card that explains itself', () {
+    SupervisorCard card(Map<String, dynamic> extra) =>
+        SupervisorState.fromJson({'role': 'authority', 'enabled': true, 'cards': [{'id': 'k1', 'text': 'Type continue', ...extra}]},
+                receivedAt: DateTime(2026))!
+            .cards
+            .single;
+
+    test("keeps the server's title, what Approve does, the target session and Later's time", () {
+      final c = card({
+        'cls': 'wake',
+        'title': 'Wake it up',
+        'does': 'Approve types the supervisor\'s message into "Alpha".',
+        'laterUntil': 1234,
+        'target': {
+          'status': 'idle',
+          'headline': 'waiting for CI',
+          'items': [
+            {'ref': '#7', 'title': 'Fix the thing', 'state': 'in-progress'},
+            'junk',
+          ],
+        },
+      });
+      expect(c.title, 'Wake it up');
+      expect(c.does, contains('Approve types'));
+      expect(c.targetStatus, 'idle');
+      expect(c.targetHeadline, 'waiting for CI');
+      expect([for (final i in c.targetItems) i.ref], ['#7'], reason: 'a malformed item is dropped, never a crash');
+      expect(c.laterUntil, 1234);
+      expect(c.types, isTrue);
+    });
+
+    test('an older server sends none of it: all "not said", so the card renders as it was', () {
+      final c = card({'cls': 'wake'});
+      expect([c.title, c.does, c.targetStatus, c.targetHeadline, c.laterUntil], everyElement(isNull));
+      expect(c.targetItems, isEmpty);
+      expect(card({'target': 'x', 'does': 3}).does, isNull);
+    });
+
+    test('a close or a replacement types nothing: its "Edit" starts empty', () {
+      expect(card({'cls': 'close'}).types, isFalse);
+      expect(card({'cls': 'spawn'}).types, isFalse);
+      expect(card({'cls': 'nudge'}).types, isTrue);
+    });
+  });
+
+  test('#498 a case keeps what the owner is asked; an older server says none of it', () {
+    SupervisorCase one(Map<String, dynamic> extra) =>
+        SupervisorState.fromJson({'role': 'authority', 'enabled': true, 'cases': [{'id': 'k9', 'line': 'fact', ...extra}]},
+                receivedAt: DateTime(2026))!
+            .cases
+            .single;
+    final c = one({
+      'laterUntil': 77,
+      'owner': {'kind': 'stuck', 'title': 'It is not moving on', 'ask': 'Write to it.', 'whyYou': 'paused', 'checking': true},
+    });
+    expect([c.ownerKind, c.title, c.ask, c.whyYou, c.laterUntil], ['stuck', 'It is not moving on', 'Write to it.', 'paused', 77]);
+    expect(c.checking, isTrue);
+    final old = one({});
+    expect([old.ownerKind, old.title, old.ask, old.whyYou, old.laterUntil], everyElement(isNull));
+    expect(old.checking, isFalse);
+    expect(one({'owner': 'x'}).ownerKind, isNull);
+  });
+
+  test('#498 ApiClient.decideSupervisorCase posts the action with only the fields given', () async {
+    final asked = <(String, String)>[];
+    final c = ApiClient(_office, httpClient: MockClient((req) async {
+      asked.add((req.url.path, req.body));
+      return http.Response('{"ok":true}', 200);
+    }));
+    await c.decideSupervisorCase('k9', action: 'write', text: 'go on');
+    await c.decideSupervisorCase('k9', action: 'later', hours: 1);
+    await c.decideSupervisorCase('k9', action: 'tell', note: 'it waits on me');
+    await c.decideSupervisorCase('k9', action: 'resolve', how: 'nothing needed');
+    expect(asked, [
+      ('/api/supervisor/cases/k9', jsonEncode({'action': 'write', 'text': 'go on'})),
+      ('/api/supervisor/cases/k9', jsonEncode({'action': 'later', 'hours': 1})),
+      ('/api/supervisor/cases/k9', jsonEncode({'action': 'tell', 'note': 'it waits on me'})),
+      ('/api/supervisor/cases/k9', jsonEncode({'action': 'resolve', 'how': 'nothing needed'})),
+    ]);
+    final refuse = ApiClient(_office, httpClient: MockClient((_) async => http.Response(jsonEncode({'reason': 'The supervisor is paused.'}), 409)));
+    await expectLater(refuse.decideSupervisorCase('k9', action: 'tell', note: 'x'),
+        throwsA(isA<ApiException>().having((e) => e.message, 'message', 'The supervisor is paused.')));
+  });
+
+  group('ApiClient.decideSupervisorCard', () {
+    late List<(String, String)> asked;
+    ApiClient client(http.Response answer) => ApiClient(_office, httpClient: MockClient((req) async {
+          asked.add((req.url.path, req.body));
+          return answer;
+        }));
+    setUp(() => asked = []);
+
+    test('posts the decision with only the fields given', () async {
+      final c = client(http.Response('{"ok":true}', 200));
+      await c.decideSupervisorCard('k/1', decision: 'send', text: 'hi there');
+      await c.decideSupervisorCard('k/1', decision: 'tell', note: 'mine', dontAsk: true);
+      await c.decideSupervisorCard('k/1', decision: 'later', hours: 3);
+      expect(asked, [
+        ('/api/supervisor/cards/k%2F1', jsonEncode({'decision': 'send', 'text': 'hi there'})),
+        ('/api/supervisor/cards/k%2F1', jsonEncode({'decision': 'tell', 'note': 'mine', 'dontAsk': true})),
+        ('/api/supervisor/cards/k%2F1', jsonEncode({'decision': 'later', 'hours': 3})),
+      ]);
+    });
+
+    test("a refusal throws the server's plain-words reason, then the bare code from an older server", () async {
+      await expectLater(
+          client(http.Response(jsonEncode({'refused': 'draft', 'reason': 'That session has unsent text in its box.'}), 409))
+              .decideSupervisorCard('k1', decision: 'approve'),
+          throwsA(isA<ApiException>().having((e) => e.message, 'message', 'That session has unsent text in its box.')));
+      await expectLater(client(http.Response(jsonEncode({'refused': 'draft'}), 409)).decideSupervisorCard('k1', decision: 'approve'),
+          throwsA(isA<ApiException>().having((e) => e.message, 'message', 'draft')));
+      await expectLater(
+          client(http.Response(jsonEncode({'error': 'text must be one line'}), 400)).decideSupervisorCard('k1', decision: 'send', text: 'x'),
+          throwsA(isA<ApiException>().having((e) => e.status, 'status', 400)));
+    });
+  });
 }

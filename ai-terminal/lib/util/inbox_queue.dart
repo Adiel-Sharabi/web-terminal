@@ -7,6 +7,7 @@
 import '../api/models.dart';
 import '../api/supervisor_models.dart';
 import 'inbox_items.dart';
+import 'supervisor_authority.dart' show SupervisorFind;
 import 'needs_you.dart';
 
 // ---- the recommended option ---------------------------------------------------------
@@ -62,6 +63,39 @@ Session? _rowOf(List<Session> rows, String? server, String? id) {
   return null;
 }
 
+/// #498 - THE "need you" list: what the inbox header counts and lists first, and what the
+/// dashboard's badge counts - one rule, so the two can never disagree. [sessionItems] are
+/// the sessions' own items (`inboxItemsOf`, dismissals flagged): the blocking ones the
+/// person has not dismissed. The supervisor's owner items ([supervisorItemsOf]: cards,
+/// escalations, the server's `needsYou`) from [sup] join them, but those decided here
+/// ([decided], hidden until the authority catches up), longest wait first.
+List<InboxItem> needYouOf(List<InboxItem> sessionItems, SupervisorFind? sup, List<Session> rows, {Set<String> decided = const {}}) {
+  final blocking = [
+    for (final i in sessionItems)
+      if (i.blocking && !i.dismissed) i,
+  ];
+  final extra = [
+    for (final it in supervisorItemsOf(sup?.state, sup?.server, rows, blockingKeys: {for (final i in blocking) i.key}))
+      if (!decided.contains(it.key)) it,
+  ];
+  if (extra.isEmpty) return blocking;
+  final indexed = [...blocking, ...extra].indexed.toList()
+    ..sort((a, b) {
+      final x = a.$2.since, y = b.$2.since;
+      if (x == null && y == null) return a.$1.compareTo(b.$1);
+      if (x == null) return 1;
+      if (y == null) return -1;
+      final c = x.compareTo(y);
+      return c != 0 ? c : a.$1.compareTo(b.$1);
+    });
+  return [for (final e in indexed) e.$2];
+}
+
+/// The dashboard's inbox badge (#383, #498): how many items [needYouOf] lists for these
+/// [rows], the supervisor's answer [sup] and the person's dismissals [isDismissed].
+int needYouCount(List<Session> rows, {SupervisorFind? sup, InboxDismissed? isDismissed}) =>
+    needYouOf(inboxItemsOf(rows, isDismissed: isDismissed), sup, rows).length;
+
 /// The supervisor's items for the owner (#492): each pending recommendation card, and
 /// each escalated case still open, oldest first. [authority] is the server that served
 /// [state] (and the only one that takes a decision); [rows] are every server's session
@@ -79,8 +113,13 @@ List<InboxItem> supervisorItemsOf(
 }) {
   if (state == null || authority == null || !state.isAuthority || !state.enabled) return const [];
   final out = <InboxItem>[];
+  final nowMs = DateTime.now().millisecondsSinceEpoch;
   for (final c in state.cards) {
     if (!c.pending) continue;
+    // #498 - put off with Later: not the owner's until its time (the authority's clock, read
+    // on ours); it comes back only while still pending.
+    final later = state.local(c.laterUntil);
+    if (later != null && later > nowMs) continue;
     final s = _rowOf(rows, c.server, c.sessionId);
     out.add(InboxItem(
       kind: InboxKind.card,
@@ -94,6 +133,11 @@ List<InboxItem> supervisorItemsOf(
   }
   for (final c in state.cases) {
     if (!c.waitsOnOwner) continue;
+    // #498 - the supervisor still looks at it first (its own session was busy): not the
+    // owner's (the server's push and needsYou leave it out too); Later hides it until then.
+    if (c.checking) continue;
+    final caseLater = state.local(c.laterUntil);
+    if (caseLater != null && caseLater > nowMs) continue;
     final s = _rowOf(rows, c.server, c.sessionId);
     // The server's own predicate for "the rules said it" (`ownerItems`: R4 and auto).
     if (c.rule == 'R4' && c.escalatedAuto && s != null && blockingKeys.contains(sessionKey(s))) continue;
