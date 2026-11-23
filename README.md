@@ -715,6 +715,18 @@ status line's `cost` and context size, sampled per session), and `logs/device-vi
 like the line above). `node scripts/phone-usage-snapshot.js --device <host:port>` keeps the
 companion's daily foreground time from a phone over adb in `logs/phone-usage.jsonl`.
 
+**Mission Control, server side (#501)** — the API a cluster-wide Mission Control view reads:
+- **Work-item details (#502):** `GET /api/work-items/:ref/meta` and `GET /api/work-items/meta?refs=`
+  read an item's title, type, state, severity/priority, author, assignee, area or labels and linked
+  pull requests (with their state) from GitHub or Azure DevOps, cached for 10 minutes and served
+  stale while refreshing. An unreachable tracker or a bad token answers the last copy with `error`
+  and `staleSince`, never a blank.
+- **Projects and areas (#503):** config `projects` groups sessions and work items into projects (by
+  repo, ADO project or folder) and areas (ADO Area Path, a GitHub label or a folder); anything
+  unclaimed lands in **Other**. `GET /api/mc/projects` lists them, answered by the cluster's lease
+  authority (another server answers `409` naming it).
+- Shapes and rules: [docs/mission-control.md](docs/mission-control.md).
+
 **Companion app** — a native Android + Windows client with the chat lens and push that
 works while the app is closed.
 
@@ -732,6 +744,7 @@ Full list: **[docs/FEATURES.md](docs/FEATURES.md)**.
 | **[docs/COMPANION.md](docs/COMPANION.md)** | The Android + Windows companion app |
 | **[docs/TROUBLESHOOTING.md](docs/TROUBLESHOOTING.md)** | Known symptoms and dev tooling |
 | **[docs/ARCHITECTURE.md](docs/ARCHITECTURE.md)** | How the three-process design works |
+| **[docs/mission-control.md](docs/mission-control.md)** | Mission Control's wire contract: work-item details, projects and areas |
 | **[AGENTS.md](AGENTS.md)** | Point an AI agent at this repo and it can install and operate it |
 | **[CONTRIBUTING.md](CONTRIBUTING.md)** | Dev setup and the PR gate |
 | **[SECURITY.md](SECURITY.md)** | Threat model and vulnerability reporting |

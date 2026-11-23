@@ -1,0 +1,23 @@
+{
+  "id": 9001,
+  "fields": {
+    "System.TeamProject": "Contoso",
+    "System.AreaPath": "Contoso\\Video\\Decoder",
+    "System.WorkItemType": "Bug",
+    "System.State": "Resolved",
+    "System.Title": "Decoder drops the first frame",
+    "System.CreatedBy": { "displayName": "Reporter A", "uniqueName": "reporter-a@example.test" },
+    "System.CreatedDate": "2026-02-03T04:05:06.07Z",
+    "System.AssignedTo": { "displayName": "Dev B", "uniqueName": "dev-b@example.test" },
+    "System.Tags": "regression; video ;",
+    "Microsoft.VSTS.Common.Severity": "2 - High",
+    "Microsoft.VSTS.Common.Priority": 1
+  },
+  "relations": [
+    { "rel": "System.LinkTypes.Hierarchy-Reverse", "url": "https://dev.azure.example.test/_apis/wit/workItems/9000" },
+    { "rel": "ArtifactLink", "url": "vstfs:///Git/PullRequestId/proj-guid%2Frepo-guid%2F77", "attributes": { "name": "Pull Request" } },
+    { "rel": "ArtifactLink", "url": "vstfs:///Git/Commit/proj-guid%2Frepo-guid%2Fabc123", "attributes": { "name": "Fixed in Commit" } },
+    { "rel": "ArtifactLink", "url": "vstfs:///Git/PullRequestId/proj-guid%2Frepo-guid%2F78", "attributes": { "name": "Pull Request" } }
+  ],
+  "_links": { "html": { "href": "https://dev.azure.com/fakeorg/Contoso/_workitems/edit/9001" } }
+}
