@@ -29,6 +29,7 @@ import 'package:shared_preferences/shared_preferences.dart';
 
 import '../api/api_client.dart';
 import '../api/models.dart';
+import '../services/launch_settings.dart';
 import '../services/server_store.dart';
 import '../services/speech_service.dart';
 import '../theme/app_theme.dart';
@@ -58,6 +59,7 @@ class SettingsScreen extends StatelessWidget {
         children: [
           const _FontSizeSection(),
           if (SpeechService.supported) const _SpeechRateSection(),
+          const _LaunchSection(),
           const Divider(height: 1),
           Padding(
             padding: const EdgeInsets.fromLTRB(
@@ -720,6 +722,43 @@ class _FontSizeSectionState extends State<_FontSizeSection> {
           ),
         ],
       ),
+    );
+  }
+}
+
+
+/// "Open to the inbox at launch" (#492): [LaunchSettings] holds the choice.
+class _LaunchSection extends StatefulWidget {
+  const _LaunchSection();
+
+  @override
+  State<_LaunchSection> createState() => _LaunchSectionState();
+}
+
+class _LaunchSectionState extends State<_LaunchSection> {
+  bool? _on;
+
+  @override
+  void initState() {
+    super.initState();
+    LaunchSettings.instance.restore().then((v) {
+      if (mounted) setState(() => _on = v);
+    });
+  }
+
+  @override
+  Widget build(BuildContext context) {
+    return SwitchListTile(
+      key: const ValueKey('settings-open-inbox'),
+      title: const Text('Open to the inbox at launch'),
+      subtitle: const Text('Start on what needs you instead of the session list'),
+      value: _on ?? LaunchSettings.instance.platformDefault,
+      onChanged: _on == null
+          ? null
+          : (v) {
+              setState(() => _on = v);
+              LaunchSettings.instance.setEnabled(v);
+            },
     );
   }
 }

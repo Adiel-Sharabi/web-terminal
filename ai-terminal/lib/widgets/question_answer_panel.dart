@@ -15,6 +15,7 @@ import 'package:markdown/markdown.dart' as md;
 
 import '../api/models.dart';
 import '../theme/app_theme.dart';
+import '../util/inbox_queue.dart' show isRecommendedLabel, withoutRecommendedMark;
 import 'compose_bar.dart' show composeUsesSoftKeyboard;
 import 'conversation_view.dart' show markdownStyle, openChatLink;
 import 'directional_text.dart';
@@ -499,6 +500,43 @@ class _QuestionAnswerPanelState extends State<QuestionAnswerPanel> {
     widget.onSend(frames);
   }
 
+  /// Digit keys 1-9 (main row or numpad) pick option N-1 of the current tab, as a tap
+  /// on it does ([_toggle]): select it, or toggle it in a multi-select (#492). Desktop
+  /// only, never with a modifier, and never while a text field holds focus (the digit
+  /// is then text, as the arrows are then the caret's). Builds no frame: Enter sends.
+  KeyEventResult _onDigitKey(FocusNode node, KeyEvent event) {
+    if (event is! KeyDownEvent || composeUsesSoftKeyboard(defaultTargetPlatform)) return KeyEventResult.ignored;
+    final hw = HardwareKeyboard.instance;
+    if (hw.isControlPressed || hw.isAltPressed || hw.isMetaPressed || hw.isShiftPressed) return KeyEventResult.ignored;
+    final n = _digitOf(event.logicalKey);
+    if (n == null) return KeyEventResult.ignored;
+    final focused = FocusManager.instance.primaryFocus?.context;
+    if (focused != null && (focused.widget is EditableText || focused.findAncestorWidgetOfExactType<EditableText>() != null)) {
+      return KeyEventResult.ignored;
+    }
+    final q = widget.question.questions[_tab];
+    if (n < 1 || n > q.options.length) return KeyEventResult.ignored;
+    _toggle(q, n - 1);
+    return KeyEventResult.handled;
+  }
+
+  static int? _digitOf(LogicalKeyboardKey k) {
+    const main = [
+      LogicalKeyboardKey.digit1, LogicalKeyboardKey.digit2, LogicalKeyboardKey.digit3,
+      LogicalKeyboardKey.digit4, LogicalKeyboardKey.digit5, LogicalKeyboardKey.digit6,
+      LogicalKeyboardKey.digit7, LogicalKeyboardKey.digit8, LogicalKeyboardKey.digit9,
+    ];
+    const pad = [
+      LogicalKeyboardKey.numpad1, LogicalKeyboardKey.numpad2, LogicalKeyboardKey.numpad3,
+      LogicalKeyboardKey.numpad4, LogicalKeyboardKey.numpad5, LogicalKeyboardKey.numpad6,
+      LogicalKeyboardKey.numpad7, LogicalKeyboardKey.numpad8, LogicalKeyboardKey.numpad9,
+    ];
+    final i = main.indexOf(k);
+    if (i >= 0) return i + 1;
+    final j = pad.indexOf(k);
+    return j >= 0 ? j + 1 : null;
+  }
+
   @override
   Widget build(BuildContext context) {
     final theme = Theme.of(context);
@@ -577,6 +615,7 @@ class _QuestionAnswerPanelState extends State<QuestionAnswerPanel> {
         // reliable without first requiring a tap inside the overlay.
         child: Focus(
           autofocus: widget.autofocus,
+          onKeyEvent: _onDigitKey,
           child: LayoutBuilder(builder: (context, box) {
             // Size off the space ACTUALLY available (Positioned.fill →
             // SafeArea), never off MediaQuery: with a soft keyboard up
@@ -1278,11 +1317,39 @@ class _QuestionAnswerPanelState extends State<QuestionAnswerPanel> {
                       : theme.colorScheme.onSurfaceVariant,
                 ),
                 const SizedBox(width: 10),
+                if (i < 9 && !composeUsesSoftKeyboard(defaultTargetPlatform))
+                  Padding(
+                    padding: const EdgeInsets.only(right: 8, top: 2),
+                    child: Text('${i + 1}',
+                        key: ValueKey('option-digit-$i'),
+                        style: theme.textTheme.labelMedium?.copyWith(
+                          color: theme.colorScheme.onSurfaceVariant,
+                          fontFeatures: const [FontFeature.tabularFigures()],
+                        )),
+                  ),
                 Expanded(
                   child: Column(
                     crossAxisAlignment: CrossAxisAlignment.start,
                     children: [
-                      DirectionalText(opt.label, style: theme.textTheme.bodyLarge),
+                      if (isRecommendedLabel(opt.label))
+                        Row(children: [
+                          Flexible(
+                              child: DirectionalText(withoutRecommendedMark(opt.label), style: theme.textTheme.bodyLarge)),
+                          const SizedBox(width: 8),
+                          Container(
+                            key: ValueKey('option-recommended-$i'),
+                            padding: const EdgeInsets.symmetric(horizontal: 6, vertical: 1),
+                            decoration: BoxDecoration(
+                              color: theme.colorScheme.primary.withValues(alpha: 0.15),
+                              borderRadius: BorderRadius.circular(AppShape.small),
+                            ),
+                            child: Text('Recommended',
+                                style: theme.textTheme.labelSmall?.copyWith(
+                                    color: theme.colorScheme.primary, fontWeight: FontWeight.w600)),
+                          ),
+                        ])
+                      else
+                        DirectionalText(opt.label, style: theme.textTheme.bodyLarge),
                       if (opt.description.isNotEmpty)
                         Padding(
                           padding: const EdgeInsets.only(top: 2),

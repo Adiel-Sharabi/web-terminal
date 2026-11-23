@@ -445,11 +445,36 @@ class NeedsYouActions extends ChangeNotifier {
       QuestionDraftStore.instance.peek(s.server.baseUrl, s.id)?.flaggedFor(questionSignature(q)) ?? false;
 
   /// A one-press answer: option [index] of [q]'s only question. Refused, with nothing
-  /// written, unless one press IS the whole answer ([quickAnswerable]) and while
-  /// [quickAnswerBlocked]; otherwise [answer] with the overlay's frames.
+  /// written, unless one press IS the whole answer ([quickAnswerable]); otherwise
+  /// [quickAnswerSelections].
   Future<PreWriteVerdict> quickAnswer(Session s, PendingQuestion q, int index,
       {void Function(AnswerSettled outcome)? onSettled}) async {
-    if (!quickAnswerable(q) || index < 0 || index >= q.questions.first.options.length) {
+    if (!quickAnswerable(q)) {
+      say('"${s.name}" needs more than one press to answer - open it, nothing was sent');
+      return PreWriteVerdict.refused;
+    }
+    return quickAnswerSelections(
+        s,
+        q,
+        [
+          {index},
+        ],
+        onSettled: onSettled);
+  }
+
+  /// A whole answer given without opening the question ([selections]: one set of option
+  /// indices per question, as [buildAnswerFrames] takes them - a board button, the
+  /// inbox's "take the recommendation"). Refused, with nothing written, while
+  /// [quickAnswerBlocked] or when [selections] do not fit [q]; otherwise [answer] with
+  /// the overlay's frames. The ONE place these guards live.
+  Future<PreWriteVerdict> quickAnswerSelections(Session s, PendingQuestion q, List<Set<int>> selections,
+      {void Function(AnswerSettled outcome)? onSettled}) async {
+    final fits = selections.length == q.questions.length &&
+        [
+          for (final (i, sel) in selections.indexed)
+            sel.isNotEmpty && sel.every((o) => o >= 0 && o < q.questions[i].options.length),
+        ].every((ok) => ok);
+    if (!fits) {
       say('"${s.name}" needs more than one press to answer - open it, nothing was sent');
       return PreWriteVerdict.refused;
     }
@@ -460,13 +485,7 @@ class NeedsYouActions extends ChangeNotifier {
       _changed();
       return PreWriteVerdict.refused;
     }
-    return answer(
-        s,
-        q,
-        buildAnswerFrames(q.questions, [
-          {index},
-        ]),
-        onSettled: onSettled);
+    return answer(s, q, buildAnswerFrames(q.questions, selections), onSettled: onSettled);
   }
 
   /// A lone Esc: interrupts a working turn, closes a menu over the composer. Only while

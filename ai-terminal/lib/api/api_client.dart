@@ -359,6 +359,20 @@ class ApiClient {
     return state;
   }
 
+  /// Approves or dismisses a supervisor recommendation card (#492,
+  /// `POST /api/supervisor/cards/:id`), on the lease authority only. [approve] false
+  /// dismisses. The server refuses with a 409 when the card was already decided or the
+  /// session cannot take it now (`refused`), thrown like any failure with its reason.
+  Future<void> decideSupervisorCard(String id, {required bool approve}) async {
+    final res = await _send('POST', '/api/supervisor/cards/${Uri.encodeComponent(id)}',
+        body: {'decision': approve ? 'approve' : 'dismiss'}, alsoAccept: const {409});
+    if (res.statusCode == 409) {
+      final m = _asMap(_decode(res));
+      final why = m['refused'] ?? m['error'];
+      throw ApiException(409, why is String && why.isNotEmpty ? why : 'refused');
+    }
+  }
+
   /// This machine's Claude login and its saved accounts (`GET /api/claude-account`,
   /// #389). Only for a server that advertises `claude-account`. Throws [ApiException];
   /// a 409 carries the server's reason (an unreadable login file, say).

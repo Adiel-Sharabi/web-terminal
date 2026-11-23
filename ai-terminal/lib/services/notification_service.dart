@@ -30,14 +30,33 @@ void notificationTapBackground(NotificationResponse response) {
   // Intentionally minimal — the launch payload is read on next app start.
 }
 
+/// A tapped notification: the session it is about and the kind of push that raised it
+/// (`approval`, `owner-wait`, ...). The kind decides where the tap goes (#492).
+class NotificationTap {
+  const NotificationTap(this.sessionId, this.kind);
+  final String sessionId;
+
+  /// Null for a payload from before the kind was carried.
+  final String? kind;
+
+  @override
+  bool operator ==(Object other) => other is NotificationTap && other.sessionId == sessionId && other.kind == kind;
+
+  @override
+  int get hashCode => Object.hash(sessionId, kind);
+
+  @override
+  String toString() => 'NotificationTap($sessionId, $kind)';
+}
+
 /// Creates channels and renders notifications from FCM payloads.
 class NotificationService {
   NotificationService._();
 
   static final FlutterLocalNotificationsPlugin _plugin =
       FlutterLocalNotificationsPlugin();
-  static final StreamController<String> _tapController =
-      StreamController<String>.broadcast();
+  static final StreamController<NotificationTap> _tapController =
+      StreamController<NotificationTap>.broadcast();
   static bool _initialized = false;
 
   /// SharedPreferences key holding the JSON session-name cache map.
@@ -49,12 +68,15 @@ class NotificationService {
   /// API-error channel id (importance HIGH).
   static const String channelApiError = 'wt_api_error';
 
+  /// Owner-wait channel id (#492; importance HIGH): a session waits on the owner.
+  static const String channelOwnerWait = 'wt_owner_wait';
+
   /// Idle/updates channel id (importance LOW, silent).
   static const String channelIdle = 'wt_idle';
 
-  /// Emits the `sessionId` of a tapped notification (foreground taps). Cold-start
-  /// taps are read via [initialTapSessionId].
-  static Stream<String> get onNotificationTap => _tapController.stream;
+  /// Emits a tapped notification (foreground taps). Cold-start taps are read via
+  /// [initialTap].
+  static Stream<NotificationTap> get onNotificationTap => _tapController.stream;
 
   /// Initializes the plugin and creates the notification channels. Idempotent
   /// and safe to call from the background isolate.
@@ -120,7 +142,7 @@ class NotificationService {
           linux: const LinuxNotificationDetails(),
           macOS: const DarwinNotificationDetails(),
         ),
-        payload: jsonEncode({'sessionId': sessionId, 'serverName': serverName}),
+        payload: payloadFor(kind, sessionId, serverName),
       );
     } catch (_) {
       // Best-effort — a desktop toast failure must never break the app.
@@ -172,7 +194,7 @@ class NotificationService {
             styleInformation: BigTextStyleInformation(body),
           ),
         ),
-        payload: jsonEncode({'sessionId': sessionId, 'serverName': serverName}),
+        payload: payloadFor(kind, sessionId, serverName),
       );
     } catch (_) {
       // A malformed/partial push must never crash the background isolate.
@@ -214,6 +236,8 @@ class NotificationService {
         return '$n stopped — API error';
       case 'idle':
         return '$n finished';
+      case 'owner-wait':
+        return '$n waits on you';
       default:
         return n;
     }
@@ -238,9 +262,9 @@ class NotificationService {
     } catch (_) {/* best-effort */}
   }
 
-  /// Returns the `sessionId` of the notification that cold-started the app, or
-  /// `null` if the app was launched normally.
-  static Future<String?> initialTapSessionId() async {
+  /// Returns the notification that cold-started the app, or `null` if the app was
+  /// launched normally.
+  static Future<NotificationTap?> initialTap() async {
     try {
       // Ensure the plugin is initialized first. On Windows the launch-details
       // read throws a StateError until `initialize()` has run, and on a cold
@@ -249,7 +273,7 @@ class NotificationService {
       await init();
       final details = await _plugin.getNotificationAppLaunchDetails();
       if (details?.didNotificationLaunchApp ?? false) {
-        return _sessionIdFromPayload(details!.notificationResponse?.payload);
+        return tapFromPayload(details!.notificationResponse?.payload);
       }
     } catch (_) {/* ignore */}
     return null;
@@ -258,9 +282,9 @@ class NotificationService {
   // --- internals ----------------------------------------------------------
 
   static void _onForegroundTap(NotificationResponse response) {
-    final sessionId = _sessionIdFromPayload(response.payload);
-    if (sessionId != null && !_tapController.isClosed) {
-      _tapController.add(sessionId);
+    final tap = tapFromPayload(response.payload);
+    if (tap != null && !_tapController.isClosed) {
+      _tapController.add(tap);
     }
   }
 
@@ -271,6 +295,21 @@ class NotificationService {
   @visibleForTesting
   static String? sessionIdFromPayload(String? payload) =>
       _sessionIdFromPayload(payload);
+
+  /// The tap a notification [payload] stands for: its `sessionId` and `kind`. Null
+  /// under the same conditions as [sessionIdFromPayload]; a missing or non-string kind
+  /// reads as null.
+  @visibleForTesting
+  static NotificationTap? tapFromPayload(String? payload) {
+    final id = _sessionIdFromPayload(payload);
+    if (id == null) return null;
+    String? kind;
+    try {
+      final j = jsonDecode(payload!);
+      if (j is Map && j['kind'] is String) kind = j['kind'] as String;
+    } catch (_) {/* ignore */}
+    return NotificationTap(id, kind);
+  }
 
   static String? _sessionIdFromPayload(String? payload) {
     if (payload == null || payload.isEmpty) return null;
@@ -329,6 +368,12 @@ class NotificationService {
       ledColor: const Color(0xFFFF2D4B),
     ));
     await android.createNotificationChannel(const AndroidNotificationChannel(
+      channelOwnerWait,
+      'Waiting on you',
+      description: 'A session waits on you, to be opened in the inbox',
+      importance: Importance.high,
+    ));
+    await android.createNotificationChannel(const AndroidNotificationChannel(
       channelIdle,
       'Session Updates',
       description: 'A session finished or went idle',
@@ -336,6 +381,21 @@ class NotificationService {
       playSound: false,
       enableVibration: false,
     ));
+  }
+
+  /// The payload a notification of [kind] carries, which [tapFromPayload] reads back on
+  /// a tap: the kind decides where the tap goes (#492).
+  @visibleForTesting
+  static String payloadFor(String kind, String sessionId, String serverName) =>
+      jsonEncode({'kind': kind, 'sessionId': sessionId, 'serverName': serverName});
+
+  /// The channel and priority a push of [kind] is shown with, or null when none is.
+  @visibleForTesting
+  static ({String channelId, String channelName, Importance importance, Priority priority})? specForKind(String kind) {
+    final s = _specFor(kind);
+    return s == null
+        ? null
+        : (channelId: s.channelId, channelName: s.channelName, importance: s.importance, priority: s.priority);
   }
 
   static _KindSpec? _specFor(String kind) {
@@ -346,6 +406,9 @@ class NotificationService {
       case 'apierror':
         return const _KindSpec(
             channelApiError, 'API Error', Importance.high, Priority.high);
+      case 'owner-wait':
+        return const _KindSpec(
+            channelOwnerWait, 'Waiting on you', Importance.high, Priority.high);
       case 'idle':
         return const _KindSpec(
             channelIdle, 'Session Updates', Importance.low, Priority.low);

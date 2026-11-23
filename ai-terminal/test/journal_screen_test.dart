@@ -170,11 +170,8 @@ void main() {
     expect(find.text('Ready to close (1)'), findsOneWidget);
     expect(find.text('History (2)'), findsOneWidget);
 
-    // Needs you: name, machine, the wait's what, how long it has waited, the goal.
-    expect(inRow('journal-needs-$_n1', 'Alpha'), findsOneWidget);
-    expect(inRow('journal-needs-$_n1', 'Office'), findsOneWidget);
-    expect(inRow('journal-needs-$_n1', 'pick a colour - waiting 12m'), findsOneWidget);
-    expect(inRow('journal-needs-$_n1', 'Goal: Ship the widget'), findsOneWidget);
+    // Needs you (#492): ONE row to the inbox, never a per-session list.
+    expect(inRow('journal-open-inbox', '1 need you - open the inbox'), findsOneWidget);
     // Live: headline (or now), the wait with its target kind, the orphan badges.
     expect(inRow('journal-live-$_n2', 'Running the suite'), findsOneWidget);
     expect(inRow('journal-live-$_n2', 'Waits on external (ci): CI run'), findsOneWidget);
@@ -188,6 +185,53 @@ void main() {
     // The scan line names the authority; a complete scan names nobody silent.
     expect(find.textContaining('on Office'), findsOneWidget);
     expect(find.byKey(const ValueKey('journal-incomplete')), findsNothing);
+    await done(tester);
+  });
+
+  testWidgets('#492: Needs you is one "N need you" row, no per-session rows, and it opens the inbox', (tester) async {
+    final st = _state(DateTime.now().millisecondsSinceEpoch);
+    ((st['sessions'] as List).firstWhere((n) => (n as Map)['id'] == _n2) as Map)['status'] = 'waiting';
+    st['needsYou'] = [_n1, _n2];
+    answers[_office.baseUrl] = st;
+    var opened = 0;
+    tester.view.physicalSize = const Size(900, 2400);
+    tester.view.devicePixelRatio = 1;
+    addTearDown(tester.view.resetPhysicalSize);
+    addTearDown(tester.view.resetDevicePixelRatio);
+    await tester.pumpWidget(MaterialApp(
+        theme: AppTheme.dark,
+        home: JournalScreen(
+          onOpenSession: (_) {},
+          servers: () => const [_home, _office],
+          clientFactory: client,
+          refreshFloor: const Duration(hours: 1),
+          onOpenInbox: () => opened++,
+        )));
+    await tester.pump();
+    await tester.pump();
+    expect(find.text('2 need you - open the inbox'), findsOneWidget);
+    expect(find.byKey(ValueKey('journal-needs-$_n1')), findsNothing);
+    expect(find.byKey(ValueKey('journal-needs-$_n2')), findsNothing);
+    await tester.tap(find.byKey(const ValueKey('journal-open-inbox')));
+    expect(opened, 1);
+    await done(tester);
+  });
+
+  testWidgets('#492: with nothing waiting there is no inbox row, and the empty line says so', (tester) async {
+    final st = _state(DateTime.now().millisecondsSinceEpoch);
+    st['needsYou'] = <String>[];
+    answers[_office.baseUrl] = st;
+    await pump(tester);
+    expect(find.byKey(const ValueKey('journal-open-inbox')), findsNothing);
+    expect(find.text('Nothing is waiting on you.'), findsOneWidget);
+    await done(tester);
+  });
+
+  testWidgets('#492: on a split the row shows the inbox in the pane (the one open-inbox path)', (tester) async {
+    SessionSelection.instance.splitMounted = true;
+    await pump(tester);
+    await tester.tap(find.byKey(const ValueKey('journal-open-inbox')));
+    expect(SessionSelection.instance.inboxShown, isTrue);
     await done(tester);
   });
 
@@ -227,7 +271,7 @@ void main() {
     expect(await search(''), (true, true));
     // The live sections are not filtered by History's search.
     await search('parser');
-    expect(find.byKey(ValueKey('journal-needs-$_n1')), findsOneWidget);
+    expect(find.byKey(const ValueKey('journal-open-inbox')), findsOneWidget);
     await done(tester);
   });
 
@@ -300,7 +344,7 @@ void main() {
     expect(tester.takeException(), isNull);
     expect(inRow('journal-history-Home|h3', 'Eta'), findsOneWidget);
     expect(find.text('Unknown day'), findsOneWidget);
-    expect(inRow('journal-needs-$_n1', 'odd clock'), findsOneWidget);
+    expect(find.byKey(const ValueKey('journal-open-inbox')), findsOneWidget);
     await done(tester);
   });
 

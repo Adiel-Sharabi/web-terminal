@@ -52,7 +52,7 @@ import '../widgets/status_dot.dart';
 import 'journal_screen.dart';
 import 'session_screen.dart';
 import 'settings_screen.dart';
-import 'questions_inbox_screen.dart';
+import '../util/open_inbox.dart';
 import 'work_board_screen.dart';
 
 // #180 — `favoriteToggleAllowed` and the toggle itself moved to
@@ -281,23 +281,7 @@ class _DashboardScreenState extends State<DashboardScreen> {
 
   /// The questions inbox (#383): split view shows it in the detail pane, a phone
   /// pushes it. Opening a session from it works as a tap on its row here does.
-  void _openInbox() {
-    final onShow = widget.onShowInbox;
-    if (onShow != null) {
-      onShow();
-      return;
-    }
-    Navigator.of(context).push(
-      MaterialPageRoute(
-        builder: (ctx) => QuestionsInboxScreen(
-          onOpenSession: (s) {
-            Navigator.of(ctx).pop();
-            _openSession(s);
-          },
-        ),
-      ),
-    );
-  }
+  void _openInbox() => openInbox(Navigator.of(context), showInPane: widget.onShowInbox, openSession: _openSession);
 
   /// The supervisor's journal (#466), placed and opened as the questions inbox is.
   void _openJournal() {

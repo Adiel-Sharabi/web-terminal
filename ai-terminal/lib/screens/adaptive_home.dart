@@ -2,7 +2,11 @@ import 'package:flutter/material.dart';
 import 'package:shared_preferences/shared_preferences.dart';
 
 import '../api/models.dart';
+import '../services/app_config.dart';
+import '../services/launch_settings.dart';
+import '../services/notification_service.dart';
 import '../services/session_selection.dart';
+import '../util/open_inbox.dart';
 import 'dashboard_screen.dart';
 import 'journal_screen.dart';
 import 'questions_inbox_screen.dart';
@@ -21,7 +25,29 @@ import 'work_board_screen.dart';
 /// width is the single source of truth (`_railWidth`), clamped to
 /// [railMinWidth]..[railMaxWidth] and persisted so it survives restarts.
 class AdaptiveHome extends StatefulWidget {
-  const AdaptiveHome({super.key, this.boardBuilder, this.inboxBuilder, this.journalBuilder});
+  const AdaptiveHome({
+    super.key,
+    this.boardBuilder,
+    this.inboxBuilder,
+    this.journalBuilder,
+    this.openInboxAtLaunch,
+    this.launchTap,
+    this.hasServers,
+  });
+
+  /// Test seam: whether a server is configured. Defaults to [AppConfig.servers].
+  @visibleForTesting
+  final bool Function()? hasServers;
+
+  /// Test seam: whether to open the inbox at launch (#492). Defaults to the stored
+  /// setting ([LaunchSettings]).
+  @visibleForTesting
+  final Future<bool> Function()? openInboxAtLaunch;
+
+  /// Test seam: the notification that cold-started the app. Defaults to the plugin's
+  /// launch details.
+  @visibleForTesting
+  final Future<NotificationTap?> Function()? launchTap;
 
   /// Test seam: builds the dashboard the pane shows, given the callback that
   /// opens a session. Defaults to a [WorkBoardScreen] on the shared repository;
@@ -88,6 +114,26 @@ class _AdaptiveHomeState extends State<AdaptiveHome> {
     super.initState();
     _loadRailWidth();
     _selection.pane.addListener(_onSelectionChanged);
+    // After the first frame, so the layout (split or not) is known.
+    WidgetsBinding.instance.addPostFrameCallback((_) => _launchInbox());
+  }
+
+  /// #492: open to the inbox, once, when the setting is on and nothing else was asked
+  /// for - not when a notification tap cold-started the app (that tap opens its own
+  /// target). Wide: the pane shows the inbox, unless a session is already selected.
+  /// Narrow: the inbox is pushed over the dashboard, so Back returns to it.
+  Future<void> _launchInbox() async {
+    final on = await (widget.openInboxAtLaunch ?? LaunchSettings.instance.restore)();
+    if (!on || !mounted) return;
+    final tap = await (widget.launchTap ?? NotificationService.initialTap)();
+    if (tap != null || !mounted) return;
+    // No server yet: the dashboard's own "add a server" is what to show, not an empty inbox.
+    if (!(widget.hasServers ?? () => AppConfig.servers.isNotEmpty)()) return;
+    if (_selection.splitMounted) {
+      if (_selection.boardShown) _selection.showInbox();
+      return;
+    }
+    openInbox(Navigator.of(context));
   }
 
   @override
@@ -134,8 +180,8 @@ class _AdaptiveHomeState extends State<AdaptiveHome> {
   static WorkBoardScreen _defaultBoard(void Function(Session) onOpenSession) => WorkBoardScreen(
       embedded: true, onOpenSession: onOpenSession, onOpenInbox: SessionSelection.instance.showInbox);
 
-  static QuestionsInboxScreen _defaultInbox(void Function(Session) onOpenSession) =>
-      QuestionsInboxScreen(embedded: true, onOpenSession: onOpenSession);
+  QuestionsInboxScreen _defaultInbox(void Function(Session) onOpenSession) => QuestionsInboxScreen(
+      embedded: true, onOpenSession: onOpenSession, focusSessionId: _selection.pane.value.focusSessionId);
 
   static JournalScreen _defaultJournal(void Function(Session) onOpenSession) =>
       JournalScreen(embedded: true, onOpenSession: onOpenSession);

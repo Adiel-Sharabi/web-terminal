@@ -39,18 +39,23 @@ import 'package:xterm/xterm.dart';
 
 import '../api/api_client.dart';
 import '../api/models.dart';
+import '../api/supervisor_models.dart' show SupervisorCard;
 import '../services/app_config.dart';
+import '../services/inbox_seen_store.dart';
 import '../services/needs_you_actions.dart';
 import '../services/question_draft_store.dart';
 import '../services/session_input.dart';
 import '../services/session_repository.dart';
+import '../services/supervisor_lookup.dart';
 import '../theme/app_theme.dart';
 import '../util/agent_turn.dart';
 import '../util/inbox_items.dart';
+import '../util/inbox_queue.dart';
 import '../util/needs_you.dart';
 import '../util/reply_text.dart';
 import '../util/scrollback_window.dart' show scrollbackTailOffset;
 import '../util/session_tree.dart';
+import '../util/supervisor_authority.dart' show SupervisorFind;
 import '../util/terminal_tail.dart';
 import '../util/terminal_write.dart' show safeTerminalWrite;
 import '../util/text_direction.dart';
@@ -60,17 +65,20 @@ import '../widgets/directional_text.dart';
 import '../widgets/format_utils.dart';
 import '../widgets/machine_stripe.dart';
 import '../widgets/question_answer_panel.dart';
-import '../widgets/question_overlay.dart' show AnswerFrame, kWideMinWidth;
+import '../widgets/question_overlay.dart' show AnswerFrame, buildAnswerFrames, kWideMinWidth;
 import '../widgets/reply_box.dart';
 import '../widgets/server_badge.dart';
 import '../widgets/session_family.dart';
 import '../widgets/terminal_tail_strip.dart';
 import '../widgets/timed_snack_bar.dart';
 import 'session_screen.dart' show questionSignature;
-import 'work_board_screen.dart' show BoardColumnView, BoardPalette;
+import 'work_board_screen.dart' show BoardPalette;
 
 /// The width of the list beside the focused item on a wide pane.
 const double kInboxListWidth = 360;
+
+/// The widest the focused view reads at (#492): longer lines are harder to follow.
+const double kInboxReadWidth = 760;
 
 /// How much of a session's scrollback the focused view renders for its terminal tail.
 const int kInboxTailBytes = 32768;
@@ -120,7 +128,13 @@ class QuestionsInboxScreen extends StatefulWidget {
     this.pollInterval = const Duration(seconds: 5),
     this.focusInterval = const Duration(seconds: 4),
     this.agentsInterval = const Duration(seconds: 30),
+    this.seenStore,
+    this.focusSessionId,
   });
+
+  /// #492: the session whose item to focus as soon as it is listed (an owner-wait push
+  /// tap), as a tap on its card would. Null: nothing is asked for.
+  final String? focusSessionId;
 
   /// Opens a session; the caller decides how (the split pane, or a pushed route).
   final void Function(Session session) onOpenSession;
@@ -146,14 +160,17 @@ class QuestionsInboxScreen extends StatefulWidget {
   /// How often the focused item's terminal tail and permission detail are re-read.
   final Duration focusInterval;
 
-  /// How often each server's background agents are re-read.
+  /// How often each server's background agents (and the supervisor's cards) are re-read.
   final Duration agentsInterval;
+
+  /// Injectable for tests; defaults to [PrefsInboxSeenStore] (#492).
+  final InboxSeenStore? seenStore;
 
   @override
   State<QuestionsInboxScreen> createState() => _QuestionsInboxScreenState();
 }
 
-class _QuestionsInboxScreenState extends State<QuestionsInboxScreen> {
+class _QuestionsInboxScreenState extends State<QuestionsInboxScreen> with WidgetsBindingObserver {
   late final SessionRepository _repo = widget.repository ?? SessionRepository.instance;
   StreamSubscription<List<Session>>? _sub;
   Timer? _poll;
@@ -198,6 +215,34 @@ class _QuestionsInboxScreenState extends State<QuestionsInboxScreen> {
   /// Servers whose background-agent route answered 404: not asked again while open.
   final Set<String> _agentsSkip = {};
 
+  /// The supervisor's answer (#492), asked by [askSupervisor] on its own slow timer: its
+  /// pending cards and escalated cases join the blocking queue ([_queue]).
+  SupervisorFind? _supFind;
+  bool _supAsking = false;
+  Timer? _supTick;
+
+  /// The first full load is over (#492): the rows were asked for and the supervisor
+  /// answered or failed. Until then a session asked for ([_wantSession]) may simply not
+  /// be listed yet.
+  bool _firstLoaded = false;
+
+  /// Supervisor cards decided here and not yet gone from the authority's answer: hidden
+  /// at once, so a decided card does not sit there until the next fetch.
+  final Set<String> _decided = {};
+
+  /// Supervisor cards being decided now, by [InboxItem.key]: both buttons are off.
+  final Set<String> _cardBusy = {};
+
+  /// The glance header's filter (#492); tapping the active one returns to [InboxFilter.all].
+  InboxFilter _filter = InboxFilter.all;
+
+  /// "New since you last looked" (#492): what this device last saw, loaded on open
+  /// (null = never looked, so nothing is marked); items opened since are updated in it.
+  late final InboxSeenStore _seenStore = widget.seenStore ?? const PrefsInboxSeenStore();
+  Map<String, String>? _baseline;
+  bool _baselineLoaded = false;
+  bool _firstLookSaved = false;
+
   /// The "Dismissed" section is open (#445). Closed on every visit.
   bool _showDismissed = false;
 
@@ -210,6 +255,10 @@ class _QuestionsInboxScreenState extends State<QuestionsInboxScreen> {
   /// words are typed into it.
   String? _focusKey;
   InboxItem? _snapshot;
+
+  /// A session whose item was asked for ([QuestionsInboxScreen.focusSessionId]) and is
+  /// not listed yet: focused the first build that lists it, then forgotten.
+  String? _wantSession;
 
   /// A focused view is pushed as its own route (a narrow pane).
   bool _routeOpen = false;
@@ -270,6 +319,9 @@ class _QuestionsInboxScreenState extends State<QuestionsInboxScreen> {
   @override
   void initState() {
     super.initState();
+    _wantSession = widget.focusSessionId;
+    WidgetsBinding.instance.addObserver(this);
+    unawaited(_loadBaseline());
     _sessions = _repo.current;
     _notePermissionWaits();
     _needs.addListener(_onNeeds);
@@ -287,14 +339,29 @@ class _QuestionsInboxScreenState extends State<QuestionsInboxScreen> {
     });
     _focusTick = Timer.periodic(widget.focusInterval, (_) => unawaited(_refreshFocused(force: true)));
     _agentsTick = Timer.periodic(widget.agentsInterval, (_) => unawaited(_refreshAgents()));
-    unawaited(_repo.refresh());
+    _supTick = Timer.periodic(widget.agentsInterval, (_) => unawaited(_refreshSupervisor()));
     _fetchAll();
     unawaited(_refreshAgents());
+    unawaited(_firstLoad());
+  }
+
+  /// The rows and the supervisor, once: what [_applyWanted] waits for before it gives
+  /// up on a session that is not listed.
+  Future<void> _firstLoad() async {
+    try {
+      await Future.wait([_repo.refresh(), _refreshSupervisor()]);
+    } catch (_) {/* what failed is just not listed */}
+    if (_disposed) return;
+    _update(() => _firstLoaded = true);
   }
 
   @override
   void dispose() {
+    WidgetsBinding.instance.removeObserver(this);
+    // The person leaves: what is listed now is what they last looked at (#492).
+    if (_baselineLoaded) unawaited(_seenStore.save(mergeSeen(_baseline, _currentSigs())));
     _disposed = true;
+    _supTick?.cancel();
     _poll?.cancel();
     _focusTick?.cancel();
     _agentsTick?.cancel();
@@ -308,6 +375,108 @@ class _QuestionsInboxScreenState extends State<QuestionsInboxScreen> {
     super.dispose();
   }
 
+  @override
+  void didChangeAppLifecycleState(AppLifecycleState state) {
+    if (state == AppLifecycleState.resumed || !_baselineLoaded) return;
+    // The person leaves (the app is hidden, or the window loses focus): what is listed
+    // now is what they last looked at, and what comes after is new again.
+    final sigs = mergeSeen(_baseline, _currentSigs());
+    _baseline = sigs;
+    unawaited(_seenStore.save(sigs));
+  }
+
+  // ---- new since you last looked (#492) ---------------------------------------------
+
+  Future<void> _loadBaseline() async {
+    final seen = await _seenStore.load();
+    if (_disposed) return;
+    _update(() {
+      _baseline = seen;
+      _baselineLoaded = true;
+    });
+    _saveFirstLook();
+  }
+
+  /// The signature of everything the inbox lists now, by key. An ask whose signature
+  /// cannot be told yet ([inboxSeenSig] null) is left out: not new, and the baseline
+  /// keeps what it had.
+  Map<String, String> _currentSigs() => {
+        for (final it in _queue) it.key: ?inboxSeenSig(it),
+        for (final e in _workEntries()) e.key: workItemSeenSig(e),
+      };
+
+  /// The first ever look marks nothing, and saves the baseline as soon as something is
+  /// listed (an empty list saved now would make everything "new" at the next look).
+  void _saveFirstLook() {
+    if (!_baselineLoaded || _baseline != null || _firstLookSaved) return;
+    final sigs = _currentSigs();
+    if (sigs.isEmpty) return;
+    _firstLookSaved = true;
+    unawaited(_seenStore.save(sigs));
+  }
+
+  /// The keys listed now that are new, or changed, since the baseline.
+  Set<String> get _newKeys => changedSince(_baseline, _currentSigs());
+
+  /// The person has this item in front of them: it stops being new.
+  void _noteSeen(InboxItem it) {
+    final b = _baseline;
+    final sig = inboxSeenSig(it);
+    if (b != null && sig != null) b[it.key] = sig;
+  }
+
+  List<WorkItemEntry> _workEntries() => [
+        ...workItemsOf(_sessions, kItemBlocked),
+        ...workItemsOf(_sessions, kItemToTest),
+      ];
+
+  // ---- the supervisor's cards (#492) ----------------------------------------------------
+
+  Future<void> _refreshSupervisor() async {
+    if (_disposed || _supAsking) return;
+    _supAsking = true;
+    try {
+      final find = await askSupervisor(_servers, _client);
+      if (_disposed) return;
+      _supFind = find;
+      // A decided card the authority no longer lists pending needs no local hiding.
+      final pending = {
+        for (final c in find.state?.cards ?? const <SupervisorCard>[])
+          if (c.pending) '${find.server?.baseUrl}|card|${c.id}',
+      };
+      _decided.removeWhere((k) => !pending.contains(k));
+      _changed();
+    } finally {
+      _supAsking = false;
+    }
+  }
+
+  /// Approves or dismisses a supervisor card (#492) on the server that holds it. The
+  /// server decides what approving does and can refuse (409, with its reason).
+  Future<void> _decideCard(InboxItem it, {required bool approve}) async {
+    final card = it.card;
+    final authority = it.authority;
+    if (card == null || authority == null || _cardBusy.contains(it.key)) return;
+    _update(() => _cardBusy.add(it.key));
+    final no = approve ? 'Not approved' : 'Not dismissed';
+    try {
+      await _client(authority).decideSupervisorCard(card.id, approve: approve);
+      _say(approve ? 'Approved' : 'Dismissed');
+      if (!_disposed) {
+        _decided.add(it.key);
+        if (_focusKey == it.key) _moveOn(it.key);
+        _changed();
+      }
+      await _refreshSupervisor();
+    } on ApiException catch (e) {
+      _say('$no: ${e.message}');
+    } catch (e) {
+      _say('$no: $e');
+    } finally {
+      if (!_disposed) _update(() => _cardBusy.remove(it.key));
+    }
+  }
+
   void _update(VoidCallback fn) {
     if (_disposed || !mounted) return;
     setState(fn);
@@ -316,6 +485,7 @@ class _QuestionsInboxScreenState extends State<QuestionsInboxScreen> {
 
   void _changed() {
     _update(() {});
+    _saveFirstLook();
     // Whatever just changed may have made a new wait, or a new stamp for one.
     _refreshDigests();
   }
@@ -347,13 +517,13 @@ class _QuestionsInboxScreenState extends State<QuestionsInboxScreen> {
   /// on screen under a banner is kept), so the maps cannot grow for the app's life.
   void _pruneFocusCaches() {
     final live = {
-      for (final it in _items)
+      for (final it in _queue)
         if (it.session != null) sessionKey(it.session!),
       if (_snapshot?.session != null) sessionKey(_snapshot!.session!),
     };
     _tails.removeWhere((k, _) => !live.contains(k));
     _expanded.removeWhere((k) => !live.contains(k));
-    _cardOpen.removeWhere((k) => !_items.any((it) => it.key == k));
+    _cardOpen.removeWhere((k) => !_queue.any((it) => it.key == k));
   }
 
   /// What a session's current turn is read for, or null when none is needed: a
@@ -696,7 +866,7 @@ class _QuestionsInboxScreenState extends State<QuestionsInboxScreen> {
     if (_disposed) return;
     _pruneDigests();
     var added = false;
-    for (final it in _items) {
+    for (final it in _queue) {
       if (!_digestible(it)) continue;
       final s = it.session!;
       if (!_digestReachable(s)) continue;
@@ -866,11 +1036,38 @@ class _QuestionsInboxScreenState extends State<QuestionsInboxScreen> {
 
   // ---- the items -----------------------------------------------------------------
 
-  /// The items shown with the others: every one but those the person dismissed.
-  List<InboxItem> get _items => [
+  /// The sessions' own items, but those the person dismissed.
+  List<InboxItem> get _sessionItems => [
         for (final it in _allItems)
           if (!it.dismissed) it,
       ];
+
+  /// THE queue (#492): blocking items first (the sessions' waits, and the supervisor's
+  /// cards and escalated cases, longest wait first), then the background ones. One
+  /// list: the build, "next after" and anything that later reads the queue use this.
+  List<InboxItem> get _queue {
+    final base = _sessionItems;
+    final blocking = base.where((i) => i.blocking).toList();
+    final sup = [
+      for (final it in supervisorItemsOf(_supFind?.state, _supFind?.server, _sessions,
+          blockingKeys: {for (final it in blocking) it.key}))
+        if (!_decided.contains(it.key)) it,
+    ];
+    var merged = [...blocking, ...sup];
+    if (sup.isNotEmpty) {
+      final indexed = merged.indexed.toList()
+        ..sort((a, b) {
+          final x = a.$2.since, y = b.$2.since;
+          if (x == null && y == null) return a.$1.compareTo(b.$1);
+          if (x == null) return 1;
+          if (y == null) return -1;
+          final c = x.compareTo(y);
+          return c != 0 ? c : a.$1.compareTo(b.$1);
+        });
+      merged = [for (final e in indexed) e.$2];
+    }
+    return [...merged, ...base.where((i) => !i.blocking)];
+  }
 
   /// Every item, the dismissed ones (#445) flagged, for the "Dismissed" section.
   List<InboxItem> get _allItems => inboxItemsOf(
@@ -888,7 +1085,7 @@ class _QuestionsInboxScreenState extends State<QuestionsInboxScreen> {
 
   /// The item under [key] now, whatever it waits on.
   InboxItem? _itemAt(String key) {
-    for (final it in _items) {
+    for (final it in _queue) {
       if (it.key == key) return it;
     }
     return null;
@@ -941,20 +1138,92 @@ class _QuestionsInboxScreenState extends State<QuestionsInboxScreen> {
     }
   }
 
+  @override
+  void didUpdateWidget(QuestionsInboxScreen old) {
+    super.didUpdateWidget(old);
+    if (widget.focusSessionId != null && widget.focusSessionId != old.focusSessionId) {
+      _wantSession = widget.focusSessionId;
+      // A new request gets its own full load before it gives up: the wait it points
+      // at may be newer than the rows this screen holds.
+      _firstLoaded = false;
+      unawaited(_firstLoad());
+    }
+  }
+
+  /// Opens the item of the asked-for session once it is listed ([_wantSession]). The
+  /// request ends here when it is met; when the person is already in a focused route;
+  /// and when the first full load (rows and supervisor) did not list the session at
+  /// all - an owner-wait push for something the inbox does not show opens the session
+  /// itself, as a push always did.
+  void _applyWanted(List<InboxItem> items, bool wide) {
+    final want = _wantSession;
+    if (want == null) return;
+    if (_routeOpen) {
+      _wantSession = null;
+      return;
+    }
+    final mine = items.where((i) => i.session?.id == want).toList();
+    if (mine.isEmpty) {
+      if (!_firstLoaded) return;
+      _wantSession = null;
+      final row = _sessions.where((s) => s.id == want).firstOrNull;
+      if (row != null) {
+        scheduleMicrotask(() {
+          if (!_disposed && mounted) widget.onOpenSession(row);
+        });
+      }
+      return;
+    }
+    final it = mine.where((i) => i.blocking).firstOrNull ?? mine.first;
+    _wantSession = null;
+    scheduleMicrotask(() {
+      if (!_disposed && mounted) _open(it, wide);
+    });
+  }
+
   void _focus(InboxItem it) {
+    _wantSession = null; // the person chose: a late arrival must not move them
     _update(() {
       _focusKey = it.key;
       _snapshot = it;
+      _noteSeen(it);
     });
     unawaited(_refreshFocused(refocus: true));
     // Its summary, if it is still waiting for a slot, is the next one asked for.
     _refreshDigests();
   }
 
-  /// The next blocking item after [key], or the first item left.
+  /// The items in the order they are DRAWN: the blocking ones grouped by project and
+  /// work item ([groupInbox]), then the background ones.
+  List<InboxItem> _drawnOrder() {
+    final items = _queue;
+    return [
+      for (final g in groupInbox([for (final i in items) if (i.blocking) i])) ...g.items,
+      for (final i in items) if (!i.blocking) i,
+    ];
+  }
+
+  /// The keys as last drawn: where [key] stood when it is gone from the queue already.
+  List<String> _lastDrawn = const [];
+
+  /// The next card after [key] in the order the cards are drawn, a blocking one before a
+  /// background one, wrapping to the first; null when nothing else is listed. An item
+  /// that has left the queue is placed where it was last drawn.
   InboxItem? _nextAfter(String key) {
-    final items = _items.where((i) => i.key != key).toList();
-    return items.where((i) => i.blocking).firstOrNull ?? items.firstOrNull;
+    final now = _drawnOrder();
+    final byKey = {for (final it in now) it.key: it};
+    final order = _lastDrawn.contains(key) ? _lastDrawn : [for (final it in now) it.key];
+    final at = order.indexOf(key);
+    InboxItem? walk(bool Function(InboxItem) take) {
+      for (var i = 1; i <= order.length; i++) {
+        final it = byKey[order[(at + i) % order.length]];
+        if (it != null && it.key != key && take(it)) return it;
+      }
+      return null;
+    }
+
+    if (at < 0) return now.where((i) => i.key != key && i.blocking).firstOrNull ?? now.where((i) => i.key != key).firstOrNull;
+    return walk((i) => i.blocking) ?? walk((_) => true);
   }
 
   /// On from the focused item under [key]: to what that session waits on now, if it
@@ -973,6 +1242,7 @@ class _QuestionsInboxScreenState extends State<QuestionsInboxScreen> {
   }
 
   void _moveOn(String fromKey) {
+    _wantSession = null;
     final next = _nextAfter(fromKey);
     if (_routeOpen) {
       Navigator.of(context).maybePop();
@@ -1004,6 +1274,7 @@ class _QuestionsInboxScreenState extends State<QuestionsInboxScreen> {
   }
 
   void _openSession(Session s) {
+    _wantSession = null;
     if (_routeOpen) Navigator.of(context).maybePop();
     widget.onOpenSession(s);
   }
@@ -1011,16 +1282,31 @@ class _QuestionsInboxScreenState extends State<QuestionsInboxScreen> {
   // ---- the writes ----------------------------------------------------------------
 
   Future<void> _answer(InboxItem it, PendingQuestion q, List<AnswerFrame> frames) async {
+    _wantSession = null;
+    await _needs.answer(it.session!, q, frames, onSettled: _settledAnswer(it));
+  }
+
+  /// What happens when an answer to [it] settles: a "Chat about this" (#423) is said by
+  /// [NeedsYouActions], no answer; either way the card is done with, and a Chat must not
+  /// leave it live on a session that is now replying, where a press would type into that
+  /// reply. Shared by the panel's Send and "take the recommendation".
+  void Function(AnswerSettled) _settledAnswer(InboxItem it) {
     final s = it.session!;
-    await _needs.answer(s, q, frames, onSettled: (outcome) {
+    return (outcome) {
       if (outcome == AnswerSettled.notLanded || _disposed) return;
       _sentTo(s);
-      // A "Chat about this" (#423) is said by NeedsYouActions; it is no answer.
       if (outcome == AnswerSettled.landed) _say('Answered "${s.name}"');
-      // Either way the card is done with: a Chat must not leave it live on a session
-      // that is now replying, where a press would type into that reply.
       if (_focusKey == it.key) _moveOn(it.key);
-    });
+    };
+  }
+
+  /// "Take the recommendation" (#492): the options Claude marked, through
+  /// [NeedsYouActions.quickAnswerSelections] (the ONE place a one-press whole answer is
+  /// guarded: a refused one never types) and then [buildAnswerFrames] -> `answer`, so
+  /// the checks, the draft flags and the move on to the next card are the panel's own.
+  Future<void> _answerRecommended(InboxItem it, PendingQuestion q, List<Set<int>> selections) async {
+    _wantSession = null;
+    await _needs.quickAnswerSelections(it.session!, q, selections, onSettled: _settledAnswer(it));
   }
 
   Future<void> _quickAnswer(InboxItem it, PendingQuestion q, int index) async {
@@ -1167,6 +1453,12 @@ class _QuestionsInboxScreenState extends State<QuestionsInboxScreen> {
       case InboxKind.background:
         final w = it.agent?.waitingFor ?? '';
         return w.isEmpty ? null : w;
+      case InboxKind.card:
+        return it.card?.text;
+      case InboxKind.escalation:
+        return it.supCase?.question;
+      case InboxKind.supervisorNeed:
+        return it.need == null ? null : supervisorNeedText(it.need!);
       case InboxKind.menu || InboxKind.waiting:
         return null;
     }
@@ -1233,21 +1525,17 @@ class _QuestionsInboxScreenState extends State<QuestionsInboxScreen> {
   @override
   Widget build(BuildContext context) {
     final theme = Theme.of(context);
-    final items = _items;
+    final items = _queue;
     final blocking = items.where((i) => i.blocking).toList();
     final background = items.where((i) => !i.blocking).toList();
-    final muted = theme.textTheme.bodySmall?.copyWith(color: theme.colorScheme.onSurfaceVariant);
+    _lastDrawn = [
+      for (final g in groupInbox(blocking)) ...[for (final i in g.items) i.key],
+      for (final i in background) i.key,
+    ];
     return Scaffold(
       appBar: AppBar(
         automaticallyImplyLeading: !widget.embedded,
-        title: Row(crossAxisAlignment: CrossAxisAlignment.baseline, textBaseline: TextBaseline.alphabetic, children: [
-          const Text('Questions'),
-          const SizedBox(width: 12),
-          Flexible(
-            child: Text('${blocking.length} waiting, ${background.length} in background',
-                key: const ValueKey('inbox-counts'), overflow: TextOverflow.ellipsis, style: muted),
-          ),
-        ]),
+        title: const Text('Questions'),
         actions: [
           IconButton(
             key: const ValueKey('inbox-refresh'),
@@ -1256,20 +1544,25 @@ class _QuestionsInboxScreenState extends State<QuestionsInboxScreen> {
             onPressed: () {
               unawaited(_repo.refresh());
               unawaited(_refreshAgents());
+              unawaited(_refreshSupervisor());
             },
           ),
         ],
       ),
       body: LayoutBuilder(builder: (context, box) {
         final wide = box.maxWidth >= kWideMinWidth;
-        final list = _list(context, blocking, background, wide);
-        if (!wide) return list;
-        // A wide pane always shows something beside the list: the oldest wait.
-        if (_focusKey == null && items.isNotEmpty) {
+        _applyWanted(items, wide);
+        // A wide pane always shows something beside the list: the oldest wait. Chosen
+        // before the list is built, so the item in front of the person is not "new".
+        if (wide && _focusKey == null && items.isNotEmpty) {
           _focusKey = items.first.key;
           _snapshot = items.first;
           scheduleMicrotask(() => unawaited(_refreshFocused()));
         }
+        final shown = wide ? _currentFocus() : null;
+        if (shown != null) _noteSeen(shown);
+        final list = _list(context, blocking, background, wide);
+        if (!wide) return list;
         return Row(crossAxisAlignment: CrossAxisAlignment.stretch, children: [
           SizedBox(key: const ValueKey('inbox-list'), width: kInboxListWidth, child: list),
           VerticalDivider(width: 1, color: theme.dividerColor),
@@ -1284,6 +1577,79 @@ class _QuestionsInboxScreenState extends State<QuestionsInboxScreen> {
         for (final sv in _servers)
           if (_repo.serverOfflineConfirmed[sv.baseUrl] == true || _repo.serverNeedsAuth[sv.baseUrl] == true) sv.name,
       ];
+
+  /// The glance header (#492): four counts, each a filter. The active one takes its
+  /// colour and an underline; tapping it again returns to everything.
+  Widget _glanceHeader(BuildContext context, InboxGlance g) {
+    final theme = Theme.of(context);
+    final pal = BoardPalette.of(context);
+    final muted = theme.textTheme.bodySmall?.copyWith(color: theme.colorScheme.onSurfaceVariant);
+    Color colorOf(InboxFilter f) => switch (f) {
+          InboxFilter.needsYou => pal.you,
+          InboxFilter.blocked => AppColors.caution,
+          _ => theme.colorScheme.primary,
+        };
+    Widget seg(InboxFilter f, String label) {
+      final active = _filter == f;
+      final c = active ? colorOf(f) : theme.colorScheme.onSurface;
+      return Semantics(
+        button: true,
+        selected: active,
+        label: '${g.of(f)} $label',
+        excludeSemantics: true,
+        child: InkWell(
+          key: ValueKey('inbox-glance-${f.name}'),
+          borderRadius: BorderRadius.circular(AppShape.small),
+          onTap: () => _update(() {
+            _wantSession = null;
+            _filter = active ? InboxFilter.all : f;
+          }),
+          child: Padding(
+            padding: const EdgeInsets.symmetric(vertical: 4),
+            child: Row(mainAxisSize: MainAxisSize.min, crossAxisAlignment: CrossAxisAlignment.baseline, textBaseline: TextBaseline.alphabetic, children: [
+              Container(
+                decoration: active ? BoxDecoration(border: Border(bottom: BorderSide(color: c, width: 2))) : null,
+                child: Text('${g.of(f)}',
+                    style: theme.textTheme.titleLarge
+                        ?.copyWith(fontWeight: FontWeight.w600, color: c, fontFeatures: const [FontFeature.tabularFigures()])),
+              ),
+              const SizedBox(width: 6),
+              Text(label, style: muted),
+            ]),
+          ),
+        ),
+      );
+    }
+
+    return Padding(
+      padding: const EdgeInsets.fromLTRB(4, 0, 4, 4),
+      child: Wrap(
+        key: const ValueKey('inbox-counts'),
+        spacing: 20,
+        runSpacing: 4,
+        children: [
+          seg(InboxFilter.needsYou, 'need you'),
+          seg(InboxFilter.running, 'running'),
+          seg(InboxFilter.blocked, 'blocked'),
+          seg(InboxFilter.toTest, 'to test'),
+        ],
+      ),
+    );
+  }
+
+  /// A section's title line: sentence case, with its count muted.
+  Widget _sectionHead(BuildContext context, String title, int count, {Key? key}) {
+    final theme = Theme.of(context);
+    return Padding(
+      key: key,
+      padding: const EdgeInsets.fromLTRB(4, 16, 4, 4),
+      child: Row(crossAxisAlignment: CrossAxisAlignment.baseline, textBaseline: TextBaseline.alphabetic, children: [
+        Text(title, style: theme.textTheme.titleMedium?.copyWith(fontWeight: FontWeight.w700)),
+        const SizedBox(width: 8),
+        Text('$count', style: theme.textTheme.bodySmall?.copyWith(color: theme.colorScheme.onSurfaceVariant)),
+      ]),
+    );
+  }
 
   Widget _list(BuildContext context, List<InboxItem> blocking, List<InboxItem> background, bool wide) {
     final theme = Theme.of(context);
@@ -1302,48 +1668,148 @@ class _QuestionsInboxScreenState extends State<QuestionsInboxScreen> {
         if (it.dismissed) it,
     ];
     final hidden = dismissed.isEmpty ? null : _dismissedSection(context, dismissed);
-    if (blocking.isEmpty && background.isEmpty) {
-      return ListView(padding: const EdgeInsets.all(24), children: [
-        Text('Nothing is waiting for you.', key: const ValueKey('inbox-empty'), style: theme.textTheme.titleMedium),
-        if (caveat != null) ...[const SizedBox(height: 8), caveat],
-        if (hidden != null) ...[const SizedBox(height: 16), hidden],
-      ]);
-    }
+    final glance = glanceOf(needYou: blocking.length, rows: _sessions);
+    final f = _filter;
+    final newKeys = _newKeys;
+    final toBlock = workItemsOf(_sessions, kItemBlocked);
+    final toTest = workItemsOf(_sessions, kItemToTest);
+    final running = runningOf(_sessions);
+    final workCount = toBlock.length + toTest.length;
     Widget card(InboxItem it) => _InboxCard(
           key: ValueKey('inbox-card-${it.key}'),
           item: it,
           state: this,
           wide: wide,
           selected: wide && it.key == _focusKey,
+          isNew: newKeys.contains(it.key),
         );
+    final showNeeds = f == InboxFilter.all || f == InboxFilter.needsYou;
+    final nothingElse = background.isEmpty && running.isEmpty && workCount == 0;
+    final children = <Widget>[
+      if (caveat != null) Padding(padding: const EdgeInsets.only(bottom: 8), child: caveat),
+      _glanceHeader(context, glance),
+      if (showNeeds && blocking.isEmpty && (f == InboxFilter.needsYou || nothingElse))
+        Padding(
+          padding: const EdgeInsets.fromLTRB(4, 16, 4, 0),
+          child: Text('Nothing is waiting for you.', key: const ValueKey('inbox-empty'), style: theme.textTheme.titleMedium),
+        ),
+      if (showNeeds && blocking.isNotEmpty)
+        Column(key: const ValueKey('inbox-blocking'), crossAxisAlignment: CrossAxisAlignment.stretch, children: [
+          _sectionHead(context, 'Needs you', blocking.length),
+          for (final g in groupInbox(blocking)) ...[
+            Padding(
+              key: ValueKey('inbox-group-${g.label}'),
+              padding: const EdgeInsets.fromLTRB(4, 16, 4, 6),
+              child: Row(crossAxisAlignment: CrossAxisAlignment.baseline, textBaseline: TextBaseline.alphabetic, children: [
+                Flexible(
+                    child: Text(g.label,
+                        maxLines: 1,
+                        overflow: TextOverflow.ellipsis,
+                        style: theme.textTheme.titleSmall?.copyWith(fontWeight: FontWeight.w600))),
+                const SizedBox(width: 8),
+                Text('${g.items.length} waiting', style: muted),
+              ]),
+            ),
+            for (final it in g.items) Padding(padding: const EdgeInsets.only(bottom: 8), child: card(it)),
+          ],
+        ]),
+      if (f == InboxFilter.all && background.isNotEmpty)
+        Column(key: const ValueKey('inbox-background'), crossAxisAlignment: CrossAxisAlignment.stretch, children: [
+          _sectionHead(context, 'Background', background.length),
+          const SizedBox(height: 4),
+          for (final it in background) Padding(padding: const EdgeInsets.only(bottom: 8), child: card(it)),
+        ]),
+      if (f == InboxFilter.running)
+        Column(key: const ValueKey('inbox-running'), crossAxisAlignment: CrossAxisAlignment.stretch, children: [
+          _sectionHead(context, 'Running', running.length),
+          if (running.isEmpty) Padding(padding: const EdgeInsets.all(4), child: Text('Nothing is running.', style: muted)),
+          for (final s in running) _runningRow(context, s),
+        ]),
+      if (f == InboxFilter.all || f == InboxFilter.blocked || f == InboxFilter.toTest)
+        if ((f == InboxFilter.all && workCount > 0) || f == InboxFilter.blocked || f == InboxFilter.toTest)
+          Column(key: const ValueKey('inbox-workitems'), crossAxisAlignment: CrossAxisAlignment.stretch, children: [
+            _sectionHead(
+                context,
+                f == InboxFilter.blocked
+                    ? 'Blocked'
+                    : f == InboxFilter.toTest
+                        ? 'To test'
+                        : 'Work items',
+                f == InboxFilter.blocked
+                    ? toBlock.length
+                    : f == InboxFilter.toTest
+                        ? toTest.length
+                        : workCount),
+            if ((f == InboxFilter.blocked && toBlock.isEmpty) || (f == InboxFilter.toTest && toTest.isEmpty))
+              Padding(
+                  padding: const EdgeInsets.all(4),
+                  child: Text(f == InboxFilter.blocked ? 'No work item is blocked.' : 'Nothing is ready to test.', style: muted)),
+            if (f != InboxFilter.toTest)
+              for (final e in toBlock) _workRow(context, e, newKeys.contains(e.key)),
+            if (f != InboxFilter.blocked)
+              for (final e in toTest) _workRow(context, e, newKeys.contains(e.key)),
+          ]),
+      if (hidden != null) ...[const SizedBox(height: 12), hidden],
+    ];
     return RefreshIndicator(
-      onRefresh: _repo.refresh,
+      onRefresh: () async {
+        unawaited(_refreshSupervisor());
+        await _repo.refresh();
+      },
       child: ListView(
         physics: const AlwaysScrollableScrollPhysics(),
         padding: const EdgeInsets.fromLTRB(12, 8, 12, 24),
-        children: [
-          if (caveat != null) Padding(padding: const EdgeInsets.only(bottom: 8), child: caveat),
-          BoardColumnView(
-            key: const ValueKey('inbox-blocking'),
-            title: 'Blocking',
-            color: pal.you,
-            count: blocking.length,
-            children: blocking.isEmpty
-                ? [Text('Nothing is blocked on you.', style: muted)]
-                : [for (final it in blocking) card(it)],
-          ),
-          const SizedBox(height: 12),
-          if (background.isNotEmpty)
-            BoardColumnView(
-              key: const ValueKey('inbox-background'),
-              title: 'Background',
-              color: pal.idle,
-              count: background.length,
-              children: [for (final it in background) card(it)],
-            ),
-          if (hidden != null) ...[const SizedBox(height: 12), hidden],
-        ],
+        children: children,
       ),
+    );
+  }
+
+  /// A work item that waits on the owner (#492): its row, the session reporting it
+  /// (muted), and the way into that session. Not blocking: nothing here is answered.
+  Widget _workRow(BuildContext context, WorkItemEntry e, bool isNew) {
+    final theme = Theme.of(context);
+    final muted = theme.textTheme.bodySmall?.copyWith(color: theme.colorScheme.onSurfaceVariant);
+    return Padding(
+      key: ValueKey('inbox-work-${e.key}'),
+      padding: const EdgeInsets.symmetric(horizontal: 4, vertical: 4),
+      child: Column(crossAxisAlignment: CrossAxisAlignment.stretch, children: [
+        Row(children: [
+          if (isNew) _NewMark(markKey: ValueKey('inbox-new-${e.key}')),
+          Expanded(child: BriefItemRow(e.item)),
+        ]),
+        Row(children: [
+          Expanded(child: Text(e.session.name, maxLines: 1, overflow: TextOverflow.ellipsis, style: muted)),
+          TextButton(
+            key: ValueKey('inbox-item-open-${e.key}'),
+            onPressed: () => _openSession(e.session),
+            child: const Text('Open session'),
+          ),
+        ]),
+      ]),
+    );
+  }
+
+  /// A session working now (#492), under the "running" filter.
+  Widget _runningRow(BuildContext context, Session s) {
+    final theme = Theme.of(context);
+    final muted = theme.textTheme.bodySmall?.copyWith(color: theme.colorScheme.onSurfaceVariant);
+    final now = s.brief?.now?.text.trim() ?? '';
+    return Padding(
+      key: ValueKey('inbox-running-${sessionKey(s)}'),
+      padding: const EdgeInsets.symmetric(horizontal: 4, vertical: 4),
+      child: Row(children: [
+        Expanded(
+          child: Column(crossAxisAlignment: CrossAxisAlignment.start, children: [
+            Text(s.name, maxLines: 1, overflow: TextOverflow.ellipsis, style: theme.textTheme.titleSmall?.copyWith(fontWeight: FontWeight.w600)),
+            if (now.isNotEmpty) Text(now, maxLines: 1, overflow: TextOverflow.ellipsis, style: muted),
+          ]),
+        ),
+        TextButton(
+          key: ValueKey('inbox-item-open-${sessionKey(s)}'),
+          onPressed: () => _openSession(s),
+          child: const Text('Open session'),
+        ),
+      ]),
     );
   }
 
@@ -1415,7 +1881,16 @@ class _QuestionsInboxScreenState extends State<QuestionsInboxScreen> {
       // The banner joins ABOVE the view; the view below keeps its element (the list
       // diff matches from the bottom too), so its typed words and caret stay put.
       if (live == null && words.isNotEmpty) _goneBanner(context, it, words),
-      Expanded(child: _FocusView(key: ValueKey('inbox-focus-${_identity(it)}'), item: it, state: this, gone: live == null)),
+      // Reading width (#492): left-aligned, at most 760 wide, on a wide pane.
+      Expanded(
+        child: Align(
+          alignment: Alignment.topLeft,
+          child: ConstrainedBox(
+            constraints: const BoxConstraints(maxWidth: kInboxReadWidth),
+            child: _FocusView(key: ValueKey('inbox-focus-${_identity(it)}'), item: it, state: this, gone: live == null),
+          ),
+        ),
+      ),
     ]);
   }
 
@@ -1525,7 +2000,10 @@ class _Snippet extends StatelessWidget {
               Padding(
                   padding: EdgeInsets.only(top: i == 0 ? 0 : 6), child: _labelled(context, w.label, w.text.trim(), maxLines: null)),
           ])
-        : _labelled(context, label, short, maxLines: null, key: ValueKey('inbox-snippet-${item.key}'));
+        : _labelled(context, label, short,
+            maxLines: 3,
+            key: ValueKey('inbox-snippet-${item.key}'),
+            style: theme.textTheme.bodyLarge?.copyWith(height: 1.4));
     if (!canOpen) return shown;
     return InkWell(
       key: ValueKey('inbox-expand-${item.key}'),
@@ -1787,11 +2265,15 @@ class _DigestSection extends StatelessWidget {
 /// One item in the list: the head every card shares, what it waits on, and the
 /// one-press controls where one press is the whole answer.
 class _InboxCard extends StatelessWidget {
-  const _InboxCard({super.key, required this.item, required this.state, required this.wide, required this.selected});
+  const _InboxCard(
+      {super.key, required this.item, required this.state, required this.wide, required this.selected, this.isNew = false});
   final InboxItem item;
   final _QuestionsInboxScreenState state;
   final bool wide;
   final bool selected;
+
+  /// New, or changed, since the person last looked (#492).
+  final bool isNew;
 
   @override
   Widget build(BuildContext context) {
@@ -1803,7 +2285,7 @@ class _InboxCard extends StatelessWidget {
         ? BorderSide(color: theme.colorScheme.primary, width: 2)
         : BorderSide(color: blocking ? pal.you.withValues(alpha: 0.55) : theme.colorScheme.outlineVariant);
     final body = <Widget>[
-      _InboxHead(item: it, state: state),
+      _InboxHead(item: it, state: state, isNew: isNew),
       ?_workLine(context),
       ..._kindLines(context),
       ..._controls(context),
@@ -1912,6 +2394,26 @@ class _InboxCard extends StatelessWidget {
         ];
       case InboxKind.waiting:
         return [_labelled(context, 'Needs you', 'open it to see what it is waiting on')];
+      case InboxKind.card:
+        final c = it.card!;
+        final theme = Theme.of(context);
+        return [
+          Text(c.text, maxLines: 3, overflow: TextOverflow.ellipsis, style: theme.textTheme.bodyLarge?.copyWith(height: 1.4)),
+          if ((c.why ?? '').isNotEmpty)
+            Text(c.why!,
+                maxLines: 2, overflow: TextOverflow.ellipsis, style: theme.textTheme.bodySmall?.copyWith(color: theme.colorScheme.onSurfaceVariant)),
+        ];
+      case InboxKind.supervisorNeed:
+        return [_labelled(context, 'Needs you', supervisorNeedText(it.need!), maxLines: 3)];
+      case InboxKind.escalation:
+        final c = it.supCase!;
+        final theme = Theme.of(context);
+        return [
+          Text(c.question ?? c.line, maxLines: 3, overflow: TextOverflow.ellipsis, style: theme.textTheme.bodyLarge?.copyWith(height: 1.4)),
+          if (c.line.isNotEmpty && c.line != c.question)
+            Text(c.line,
+                maxLines: 2, overflow: TextOverflow.ellipsis, style: theme.textTheme.bodySmall?.copyWith(color: theme.colorScheme.onSurfaceVariant)),
+        ];
     }
   }
 
@@ -1976,18 +2478,65 @@ class _InboxCard extends StatelessWidget {
             answer,
           ];
         }
+        // Claude's own mark, taken in one press (#492): the recommended option of each
+        // question, through the same answer path as the panel's Send.
+        final rec = recommendedSelections(q);
+        final recFirst = rec == null ? null : recommendedOption(q.questions.first);
+        final recLabel = rec == null
+            ? null
+            : q.questions.length == 1
+                ? withoutRecommendedMark(q.questions.first.options[rec.first.first].label)
+                : 'Take all ${q.questions.length} recommended';
         return [
           Wrap(spacing: 6, runSpacing: 4, children: [
+            if (rec != null)
+              Tooltip(
+                message: 'Claude recommends this',
+                child: FilledButton.icon(
+                  key: ValueKey('inbox-recommended-$idk'),
+                  icon: const Icon(Icons.check, size: 18),
+                  style: FilledButton.styleFrom(visualDensity: VisualDensity.compact, minimumSize: const Size(0, 32)),
+                  onPressed: state._needs.isBusy(s) ? null : () => unawaited(state._answerRecommended(it, q, rec)),
+                  label: Text(recLabel!, textDirection: textDirectionFor(recLabel)),
+                ),
+              ),
             if (quickAnswerable(q))
               for (final (i, o) in q.questions.first.options.indexed)
-                OutlinedButton(
-                  key: ValueKey('inbox-answer-$idk-$i'),
-                  style: _smallOutlined,
-                  onPressed: state._needs.isBusy(s) ? null : () => state._quickAnswer(it, q, i),
-                  child: Text(o.label, textDirection: textDirectionFor(o.label)),
-                ),
+                if (i != recFirst || rec == null)
+                  OutlinedButton(
+                    key: ValueKey('inbox-answer-$idk-$i'),
+                    style: _smallOutlined,
+                    onPressed: state._needs.isBusy(s) ? null : () => state._quickAnswer(it, q, i),
+                    child: Text(withoutRecommendedMark(o.label), textDirection: textDirectionFor(o.label)),
+                  ),
             answer,
           ]),
+        ];
+      case InboxKind.card:
+        return [_cardButtons(context, state, it, large: false)];
+      case InboxKind.supervisorNeed:
+        if (s == null) return const [];
+        return [
+          Align(
+            alignment: AlignmentDirectional.centerStart,
+            child: TextButton(
+              key: ValueKey('inbox-need-open-${it.need!.id}'),
+              onPressed: () => state._openSession(s),
+              child: const Text('Open session'),
+            ),
+          ),
+        ];
+      case InboxKind.escalation:
+        if (s == null) return const [];
+        return [
+          Align(
+            alignment: AlignmentDirectional.centerStart,
+            child: TextButton(
+              key: ValueKey('inbox-case-open-${it.supCase!.id}'),
+              onPressed: () => state._openSession(s),
+              child: const Text('Open session'),
+            ),
+          ),
         ];
       case InboxKind.reported:
         // One reply box per session: the focused view holds it while this card is shown
@@ -2012,9 +2561,12 @@ class _InboxCard extends StatelessWidget {
 /// The head every card and focused view shares: the name, the machine, the age, and
 /// the family marker when the session has relatives listed.
 class _InboxHead extends StatelessWidget {
-  const _InboxHead({required this.item, required this.state});
+  const _InboxHead({required this.item, required this.state, this.isNew = false});
   final InboxItem item;
   final _QuestionsInboxScreenState state;
+
+  /// Marks the card "new since you last looked" (#492); the focused view shows none.
+  final bool isNew;
 
   @override
   Widget build(BuildContext context) {
@@ -2022,8 +2574,9 @@ class _InboxHead extends StatelessWidget {
     final muted = theme.textTheme.bodySmall?.copyWith(color: BoardPalette.of(context).idle);
     final s = item.session;
     final tree = SessionTree(state._sessions);
-    final name = s?.name ?? item.agent?.name ?? item.agent?.cwdTail ?? 'Background agent';
+    final name = s?.name ?? item.card?.name ?? item.supCase?.name ?? item.need?.name ?? item.agent?.name ?? item.agent?.cwdTail ?? 'Background agent';
     return Row(children: [
+      if (isNew) _NewMark(markKey: ValueKey('inbox-new-${item.key}')),
       Expanded(
         child: Text(name,
             maxLines: 1, overflow: TextOverflow.ellipsis, style: theme.textTheme.titleSmall?.copyWith(fontWeight: FontWeight.w700)),
@@ -2043,6 +2596,57 @@ class _InboxHead extends StatelessWidget {
       ],
     ]);
   }
+}
+
+/// "New since you last looked" (#492): a small primary dot and the word, read as such.
+class _NewMark extends StatelessWidget {
+  const _NewMark({required this.markKey});
+  final Key markKey;
+
+  @override
+  Widget build(BuildContext context) {
+    final theme = Theme.of(context);
+    return Semantics(
+      label: 'New since you last looked',
+      excludeSemantics: true,
+      child: Padding(
+        key: markKey,
+        padding: const EdgeInsetsDirectional.only(end: 8),
+        child: Row(mainAxisSize: MainAxisSize.min, children: [
+          Container(width: 8, height: 8, decoration: BoxDecoration(color: theme.colorScheme.primary, shape: BoxShape.circle)),
+          const SizedBox(width: 4),
+          Text('new', style: theme.textTheme.labelSmall?.copyWith(color: theme.colorScheme.primary)),
+        ]),
+      ),
+    );
+  }
+}
+
+/// Approve / Dismiss / Open session for a supervisor card (#492). Both decisions are off
+/// while one is being sent; the server can refuse, and says why in the snack bar.
+Widget _cardButtons(BuildContext context, _QuestionsInboxScreenState state, InboxItem it, {required bool large}) {
+  final c = it.card!;
+  final busy = state._cardBusy.contains(it.key);
+  final s = it.session;
+  return Wrap(spacing: 8, runSpacing: 4, alignment: large ? WrapAlignment.end : WrapAlignment.start, children: [
+    FilledButton(
+      key: ValueKey('inbox-card-approve-${c.id}'),
+      style: large ? null : FilledButton.styleFrom(visualDensity: VisualDensity.compact, minimumSize: const Size(0, 32)),
+      onPressed: busy ? null : () => unawaited(state._decideCard(it, approve: true)),
+      child: const Text('Approve'),
+    ),
+    TextButton(
+      key: ValueKey('inbox-card-dismiss-${c.id}'),
+      onPressed: busy ? null : () => unawaited(state._decideCard(it, approve: false)),
+      child: const Text('Dismiss'),
+    ),
+    if (s != null)
+      TextButton(
+        key: ValueKey('inbox-card-open-${c.id}'),
+        onPressed: () => state._openSession(s),
+        child: const Text('Open session'),
+      ),
+  ]);
 }
 
 /// Where reading happens: one item, whole, with what can be done about it.
@@ -2281,6 +2885,39 @@ class _FocusView extends StatelessWidget {
             Text('Answer it with `claude agents` on ${it.server.name}.',
                 key: const ValueKey('inbox-agent-elsewhere'), style: Theme.of(context).textTheme.bodySmall),
         ];
+      case InboxKind.card:
+        final c = it.card!;
+        final theme = Theme.of(context);
+        return [
+          _label(context, 'The supervisor would'),
+          DirectionalText(c.text, style: theme.textTheme.titleMedium?.copyWith(height: 1.4)),
+          if ((c.why ?? '').isNotEmpty) ...[
+            _label(context, 'Why it asks'),
+            DirectionalText(c.why!, style: theme.textTheme.bodyLarge?.copyWith(height: 1.4)),
+          ],
+        ];
+      case InboxKind.supervisorNeed:
+        final n = it.need!;
+        final theme = Theme.of(context);
+        return [
+          _label(context, 'The supervisor says it needs you'),
+          DirectionalText(supervisorNeedText(n), style: theme.textTheme.titleMedium?.copyWith(height: 1.4)),
+          if ((n.headline ?? '').isNotEmpty && n.headline != supervisorNeedText(n)) ...[
+            _label(context, 'What it is doing'),
+            DirectionalText(n.headline!, style: theme.textTheme.bodyLarge?.copyWith(height: 1.4)),
+          ],
+        ];
+      case InboxKind.escalation:
+        final c = it.supCase!;
+        final theme = Theme.of(context);
+        return [
+          _label(context, 'The supervisor asks'),
+          DirectionalText(c.question ?? c.line, style: theme.textTheme.titleMedium?.copyWith(height: 1.4)),
+          if (c.line.isNotEmpty && c.line != c.question) ...[
+            _label(context, 'What it saw'),
+            DirectionalText(c.line, style: theme.textTheme.bodyLarge?.copyWith(height: 1.4)),
+          ],
+        ];
       case InboxKind.question:
         return const [];
     }
@@ -2374,6 +3011,8 @@ class _FocusView extends StatelessWidget {
             openBtn,
           ]),
         ];
+      case InboxKind.card:
+        return [Padding(padding: pad, child: _cardButtons(context, state, it, large: true))];
       default:
         return [row([openBtn])];
     }

@@ -7,6 +7,7 @@
 import 'dart:convert';
 
 import '../api/models.dart';
+import '../api/supervisor_models.dart';
 import 'agent_turn.dart';
 import 'needs_you.dart';
 import 'reply_text.dart';
@@ -34,6 +35,17 @@ enum InboxKind {
   /// (f) A background agent the CLI lists as waiting. Read-only.
   background,
 
+  /// (g) A supervisor recommendation card (#492): Approve or Dismiss, on the authority.
+  card,
+
+  /// (h) A supervisor case escalated to the owner (#492): read it, open the session.
+  escalation,
+
+  /// (i) A session the SERVER says needs the owner (`needsYou`, #492) that this device's
+  /// own rows do not list as blocking: a close-out, an unsent draft. Read-only: its
+  /// way out is the session.
+  supervisorNeed,
+
   /// A session the board counts as needing you that is none of the above (status
   /// `waiting` with no `waitingFor`). Kept so the inbox's blocking count is the
   /// board's Needs-you count, never fewer.
@@ -51,6 +63,10 @@ class InboxItem {
     this.since,
     this.question,
     this.turn,
+    this.card,
+    this.supCase,
+    this.need,
+    this.authority,
     this.dismissed = false,
   });
 
@@ -80,6 +96,15 @@ class InboxItem {
   /// for (d) what it said when it reported the wait, for (b) the lead-up and the tool
   /// call waiting for permission. Null until read.
   final AgentTurn? turn;
+
+  /// (g) The card, (h) the case; [authority] is the server that holds them (the only
+  /// one that takes a decision).
+  final SupervisorCard? card;
+  final SupervisorCase? supCase;
+  final ServerConfig? authority;
+
+  /// (i) The authority's node for the session it says needs the owner.
+  final SupervisorNode? need;
 
   /// Blocks the agent until the person acts. Prose and background agents do not.
   bool get blocking => kind != InboxKind.prose && kind != InboxKind.background;
