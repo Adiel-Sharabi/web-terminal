@@ -7,14 +7,15 @@ import 'dart:convert';
 import 'dart:io';
 
 import 'package:ai_terminal/api/api_client.dart';
-import 'package:ai_terminal/api/mc_models.dart';
 import 'package:ai_terminal/api/models.dart';
 import 'package:ai_terminal/screens/adaptive_home.dart';
+import 'package:ai_terminal/screens/dashboard_screen.dart';
 import 'package:ai_terminal/screens/home_shell.dart';
 import 'package:ai_terminal/screens/mission_control/machines_view.dart';
 import 'package:ai_terminal/screens/mission_control/mc_home.dart';
 import 'package:ai_terminal/screens/mission_control/now_view.dart';
 import 'package:ai_terminal/screens/settings_screen.dart';
+import 'package:ai_terminal/screens/work_board_screen.dart';
 import 'package:ai_terminal/services/launch_settings.dart';
 import 'package:ai_terminal/services/mc_feed.dart';
 import 'package:ai_terminal/services/server_store.dart';
@@ -27,6 +28,8 @@ import 'package:flutter_test/flutter_test.dart';
 import 'package:http/http.dart' as http;
 import 'package:http/testing.dart';
 import 'package:shared_preferences/shared_preferences.dart';
+
+void _noOpen(Session _) {}
 
 const _a = ServerConfig(name: 'Alpha', baseUrl: 'http://alpha.test:7681', bearerToken: 'ta');
 
@@ -114,8 +117,7 @@ void main() {
       expect(inFirst(find.text('Retry once')), findsOneWidget);
       expect(inFirst(find.text('Refresh first')), findsOneWidget);
       expect(inFirst(find.byKey(const ValueKey('mc-card-answer'))), findsOneWidget);
-      expect(find.descendant(of: second, matching: find.byKey(const ValueKey('mc-card-open'))), findsOneWidget,
-          reason: 'a plain wait opens its session');
+      expect(find.descendant(of: second, matching: find.byKey(const ValueKey('mc-card-open'))), findsOneWidget);
       await tester.pumpWidget(const SizedBox());
     });
 
@@ -124,8 +126,10 @@ void main() {
       await tester.tap(find.descendant(
           of: find.byKey(const ValueKey('mc-card-alpha|s-1|you:pick')), matching: find.byKey(const ValueKey('mc-card-answer'))));
       await tester.tap(find.descendant(
+          of: find.byKey(const ValueKey('mc-card-beta|s-9|you:look')), matching: find.byKey(const ValueKey('mc-card-answer'))));
+      await tester.tap(find.descendant(
           of: find.byKey(const ValueKey('mc-card-beta|s-9|you:look')), matching: find.byKey(const ValueKey('mc-card-open'))));
-      expect(answered, ['alpha|s-1|you:pick']);
+      expect(answered, ['alpha|s-1|you:pick', 'beta|s-9|you:look'], reason: 'a reported wait is answered in the inbox too');
       expect(opened, ['s-9']);
       await tester.pumpWidget(const SizedBox());
     });
@@ -286,6 +290,33 @@ void main() {
       await tester.pumpWidget(const SizedBox());
     });
 
+    testWidgets('hidden, it drops the tabs that poll on their own (Machines, Sessions)', (tester) async {
+      await _size(tester, const Size(1400, 900));
+      final active = ValueNotifier<bool>(true);
+      await tester.pumpWidget(MaterialApp(
+        theme: AppTheme.dark,
+        home: MissionControlHome(
+          feed: feed,
+          onShowSessionsHome: () {},
+          active: active,
+          sessionsBoardBuilder: (open) => const Scaffold(body: Text('the sessions board')),
+        ),
+      ));
+      await tester.tap(find.text('Sessions'));
+      await tester.pump();
+      expect(find.text('the sessions board'), findsOneWidget);
+      active.value = false;
+      await tester.pump();
+      expect(find.text('the sessions board'), findsNothing);
+      active.value = true;
+      await tester.pump();
+      expect(find.text('the sessions board'), findsOneWidget, reason: 'back on the tab it was on');
+      expect(find.byKey(const ValueKey('mc-rail-to-sessions-home')), findsOneWidget,
+          reason: 'the way back is on the rail, so the Sessions tab has it too');
+      active.value = false;
+      await tester.pumpWidget(const SizedBox());
+    });
+
     testWidgets('it polls only while it is the home on screen', (tester) async {
       await _size(tester, const Size(400, 860));
       final active = ValueNotifier<bool>(false);
@@ -307,8 +338,9 @@ void main() {
           theme: AppTheme.dark,
           home: HomeShell(
             launchHome: () async => launch,
-            sessionsHomeBuilder: ({required bool launchInbox, required VoidCallback onOpenMissionControl}) {
+            sessionsHomeBuilder: ({required bool launchInbox, required bool visible, required VoidCallback onOpenMissionControl}) {
               _launchInboxSeen?.add(launchInbox);
+              _visibleSeen.add(visible);
               return _CounterHome(label: 'sessions', onSwitch: onOpenMissionControl);
             },
             missionControlBuilder: ({required VoidCallback onShowSessionsHome, required ValueListenable<bool> active}) {
@@ -392,6 +424,57 @@ void main() {
       await tester.pumpWidget(const SizedBox());
     });
 
+    testWidgets('an ask for what the hidden pane ALREADY shows still brings the sessions home forward', (tester) async {
+      await tester.pumpWidget(shell(AppHome.sessions));
+      await tester.pump();
+      SessionSelection.instance.select('s-1');
+      SessionSelection.instance.showInbox(focusSessionId: 's-2');
+      await tester.tap(find.byKey(const ValueKey('switch-sessions')));
+      await tester.pump();
+      final shell0 = tester.state<HomeShellState>(find.byType(HomeShell));
+      expect(shell0.shown, AppHome.missionControl);
+      // A notification tap for the session the pane already holds: the same value again.
+      SessionSelection.instance.showInbox(focusSessionId: 's-2');
+      await tester.pump();
+      expect(shell0.shown, AppHome.sessions);
+      await tester.tap(find.byKey(const ValueKey('switch-sessions')));
+      await tester.pump();
+      SessionSelection.instance.showInbox(focusSessionId: 's-2');
+      await tester.pump();
+      expect(shell0.shown, AppHome.sessions);
+      await tester.pumpWidget(const SizedBox());
+    });
+
+    testWidgets('the sessions home is told when it is hidden', (tester) async {
+      _visibleSeen.clear();
+      await tester.pumpWidget(shell(AppHome.sessions));
+      await tester.pump();
+      expect(_visibleSeen.last, isTrue);
+      await tester.tap(find.byKey(const ValueKey('switch-sessions')));
+      await tester.pump();
+      expect(_visibleSeen.last, isFalse);
+      await tester.pumpWidget(const SizedBox());
+    });
+
+    testWidgets('hidden, the real sessions home keeps its rail but empties its detail pane', (tester) async {
+      await _size(tester, const Size(1400, 900));
+      Widget home(bool showPane) => MaterialApp(
+            theme: AppTheme.dark,
+            home: AdaptiveHome(
+              showPane: showPane,
+              boardBuilder: (open) => const WorkBoardScreen(onOpenSession: _noOpen, pollInterval: Duration(hours: 1)),
+            ),
+          );
+      await tester.pumpWidget(home(true));
+      await tester.pump();
+      expect(find.byType(WorkBoardScreen), findsOneWidget);
+      await tester.pumpWidget(home(false));
+      await tester.pump();
+      expect(find.byType(WorkBoardScreen), findsNothing, reason: 'no board poll behind Mission Control');
+      expect(find.byType(DashboardScreen), findsOneWidget, reason: 'the rail and its state stay');
+      await tester.pumpWidget(const SizedBox());
+    });
+
     testWidgets('the real sessions home offers the way into Mission Control', (tester) async {
       await _size(tester, const Size(420, 900));
       var opened = 0;
@@ -448,8 +531,9 @@ void main() {
       expect(await LaunchSettings.instance.restoreHome(), AppHome.sessions);
     });
 
-    testWidgets('the settings choice shows the default and persists a change', (tester) async {
-      await _size(tester, const Size(900, 2400));
+    testWidgets('the settings choice shows the default and persists a change, and fits a phone', (tester) async {
+      // 412 px: at 360 the test font already overflows the font-size row above it (not this one).
+      await _size(tester, const Size(412, 2400));
       final store = ServerStore.forTest();
       await store.init();
       await tester.pumpWidget(MaterialApp(theme: AppTheme.dark, home: SettingsScreen(store: store)));
@@ -457,6 +541,8 @@ void main() {
       await tester.pump();
       final seg = find.byKey(const ValueKey('settings-launch-home'));
       expect(tester.widget<SegmentedButton<AppHome>>(seg).selected, {AppHome.sessions});
+      expect(tester.getRect(seg).right, lessThanOrEqualTo(412), reason: 'under the title, inside the screen');
+      expect(tester.getSize(find.text('Home on launch')).width, greaterThan(100), reason: 'the title is not a sliver');
       await tester.tap(find.descendant(of: seg, matching: find.text('Mission Control')));
       await tester.pump();
       await tester.pump();
@@ -468,6 +554,9 @@ void main() {
 
 /// What the shell handed each sessions home it built: whether it runs the launch inbox.
 List<bool>? _launchInboxSeen;
+
+/// Whether the sessions home was told it is on screen, at each build.
+final List<bool> _visibleSeen = [];
 
 /// What the shell's homes are replaced by: a counter (state that must survive a switch)
 /// and the switch it was handed.

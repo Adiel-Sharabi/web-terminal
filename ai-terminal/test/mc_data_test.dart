@@ -39,7 +39,8 @@ void main() {
       expect(c.decision?.options.map((o) => o.label), ['Retry once', 'Refresh first']);
       expect(c.decision?.recommended, 1);
       expect(c.answerable, isTrue);
-      expect(now.answerNow[1].answerable, isFalse, reason: 'a plain wait is opened, not answered');
+      expect(now.answerNow[1].answerable, isTrue, reason: 'the inbox answers a reported wait too (#383)');
+      expect(const McCard(id: 'n').answerable, isFalse, reason: 'no session: nothing to answer in');
       expect(now.todo.map((t) => t.done), [false, true]);
       expect(now.moving.working, 4);
       expect(now.moving.total, 6);
@@ -62,6 +63,23 @@ void main() {
         expect(now.projects, isEmpty);
         expect(now.moving.total, 0);
       }
+    });
+
+    test('a timestamp beyond what a date can hold reads as unknown, never throws', () {
+      final now = McNow.fromJson({
+        'generatedAt': 1e18,
+        'answerNow': [
+          {'id': 'x', 'askedAt': 1e18},
+          {'id': 'y', 'askedAt': 9007199254740993000.0},
+        ],
+        'todo': [
+          {'id': 't', 'createdAt': -5, 'doneAt': 8640000000000001},
+        ],
+      });
+      expect(now.answerNow.map((c) => c.askedAt), [null, null]);
+      expect(now.todo.single.createdAt, isNull);
+      expect(now.todo.single.done, isFalse);
+      expect(now.generatedAt, isNull);
     });
 
     test('stages may come as an ordered map too', () {
@@ -149,12 +167,16 @@ void main() {
   });
 
   group('serverForAuthority', () {
-    test('by url (case, trailing slash and default port insensitive), else by name', () {
+    test('by url only (case, trailing slash and default port insensitive; the path counts)', () {
       expect(serverForAuthority([_a, _b], const McAuthority(url: 'HTTP://Beta.Test:7681/')), _b);
       const https = ServerConfig(name: 'S', baseUrl: 'https://s.test', bearerToken: 't');
       expect(serverForAuthority([_a, https], const McAuthority(url: 'https://s.test:443')), https);
-      expect(serverForAuthority([_a, _b], const McAuthority(name: 'beta', url: 'http://elsewhere:1')), _b);
-      expect(serverForAuthority([_a], const McAuthority(name: 'Beta')), isNull);
+      expect(serverForAuthority([_a, _b], const McAuthority(name: 'Beta', url: 'http://elsewhere:1')), isNull,
+          reason: 'a same-named server elsewhere is another install: never by name');
+      expect(serverForAuthority([_a, _b], const McAuthority(name: 'Beta')), isNull, reason: 'no url: not found');
+      const p1 = ServerConfig(name: 'P1', baseUrl: 'https://h.test/wt1', bearerToken: 't');
+      const p2 = ServerConfig(name: 'P2', baseUrl: 'https://h.test/wt2', bearerToken: 't');
+      expect(serverForAuthority([p1, p2], const McAuthority(url: 'https://h.test/wt2/')), p2);
     });
   });
 
@@ -253,6 +275,24 @@ void main() {
       status = {_a.baseUrl: 200};
       await f.refresh();
       expect(f.message, isNull, reason: 'cleared by the next answer');
+    });
+
+    test('an ask made while one is out runs after it, never dropped', () async {
+      var calls = 0;
+      final f = McFeed(
+        servers: () => [_a],
+        client: (sv) => ApiClient(sv, httpClient: MockClient((req) async {
+          calls++;
+          await Future<void>.delayed(const Duration(milliseconds: 20));
+          return _json(nowFixture(), 200);
+        })),
+      );
+      final first = f.refresh();
+      await f.refresh();
+      await f.refresh();
+      await first;
+      expect(calls, 2, reason: 'the asks made meanwhile fold into ONE more');
+      f.dispose();
     });
 
     test('polls only while active', () async {

@@ -34,8 +34,14 @@ class AdaptiveHome extends StatefulWidget {
     this.launchTap,
     this.hasServers,
     this.launchInbox = true,
+    this.showPane = true,
     this.onOpenMissionControl,
   });
+
+  /// #507: false while Mission Control is on screen in front of this home: the detail
+  /// pane is then empty (no session socket, keyboard hook or board poll behind it). The
+  /// selection is kept, so it shows again when this home comes back.
+  final bool showPane;
 
   /// #507: whether this home runs "open to the inbox at launch" (#492). The shell turns it
   /// off when the app opened on Mission Control, whose Now is its own needs-you view.
@@ -136,7 +142,8 @@ class _AdaptiveHomeState extends State<AdaptiveHome> {
     final on = await (widget.openInboxAtLaunch ?? LaunchSettings.instance.restore)();
     if (!on || !mounted) return;
     final tap = await (widget.launchTap ?? NotificationService.initialTap)();
-    if (tap != null || !mounted) return;
+    // Mission Control opened meanwhile: the person chose where to look.
+    if (tap != null || !mounted || !widget.showPane) return;
     // No server yet: the dashboard's own "add a server" is what to show, not an empty inbox.
     if (!(widget.hasServers ?? () => AppConfig.servers.isNotEmpty)()) return;
     if (_selection.splitMounted) {
@@ -231,7 +238,9 @@ class _AdaptiveHomeState extends State<AdaptiveHome> {
               onDragEnd: _persistRailWidth,
             ),
             Expanded(
-              child: _selection.inboxShown
+              child: !widget.showPane
+                  ? const SizedBox.shrink()
+                  : _selection.inboxShown
                   // The questions inbox (#383), opened from the rail or the board.
                   ? (widget.inboxBuilder ?? _defaultInbox)(_select)
                   : _selection.journalShown

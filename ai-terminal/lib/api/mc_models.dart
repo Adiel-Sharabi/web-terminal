@@ -16,7 +16,7 @@ String? _str(dynamic v) {
   return t.isEmpty ? null : t;
 }
 
-int? _int(dynamic v) => v is int ? v : (v is num && v.isFinite ? v.toInt() : null);
+int? _int(dynamic v) => v is int ? v : (v is num && v.isFinite && v.abs() < 9e18 ? v.toInt() : null);
 
 int _count(dynamic v) {
   final n = _int(v);
@@ -30,9 +30,12 @@ Map<String, dynamic> _map(dynamic v) => v is Map<String, dynamic> ? v : const <S
 List<T> _list<T>(dynamic v, T? Function(dynamic) parse) =>
     v is List ? List<T>.unmodifiable(v.map(parse).whereType<T>()) : List<T>.unmodifiable(const []);
 
+/// The largest instant [DateTime] can hold; beyond it the constructor throws.
+const int _maxMs = 8640000000000000;
+
 DateTime? _at(dynamic v) {
   final ms = _int(v);
-  return ms == null || ms <= 0 ? null : DateTime.fromMillisecondsSinceEpoch(ms);
+  return ms == null || ms <= 0 || ms > _maxMs ? null : DateTime.fromMillisecondsSinceEpoch(ms);
 }
 
 /// A `409 {role: 'peer', authority: {name, url}}` answer: this server is not the one that
@@ -269,8 +272,9 @@ class McCard {
     );
   }
 
-  /// The session's question or decision is answered in the questions inbox.
-  bool get answerable => sessionId != null && (hasQuestion || decision != null || kind == 'question' || kind == 'permission' || kind == 'decision');
+  /// Answered in the questions inbox, which takes every kind of wait on the person (a
+  /// question, a permission, a decision, a reported wait: #383) - so any card with a session.
+  bool get answerable => sessionId != null;
 }
 
 /// One "My to-do" entry: a hands-on thing for the desk, parked by its session.

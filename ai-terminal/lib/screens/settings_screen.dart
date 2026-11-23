@@ -786,10 +786,15 @@ class _HomeSectionState extends State<_HomeSection> {
 
   @override
   Widget build(BuildContext context) {
+    // The choice sits UNDER the words, not beside them: two segments beside a title leave
+    // a phone's title a sliver wide.
     return ListTile(
       title: const Text('Home on launch'),
-      subtitle: const Text('Which home the app opens on. Either one switches to the other in a tap.'),
-      trailing: SegmentedButton<AppHome>(
+      subtitle: Column(crossAxisAlignment: CrossAxisAlignment.start, children: [
+        const Text('Which home the app opens on. Either one switches to the other in a tap. '
+            'Opening to the inbox at launch applies to the Sessions home.'),
+        const SizedBox(height: 8),
+        SegmentedButton<AppHome>(
         key: const ValueKey('settings-launch-home'),
         showSelectedIcon: false,
         segments: const [
@@ -803,7 +808,8 @@ class _HomeSectionState extends State<_HomeSection> {
                 setState(() => _home = v.first);
                 LaunchSettings.instance.setHome(v.first);
               },
-      ),
+        ),
+      ]),
     );
   }
 }

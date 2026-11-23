@@ -9,7 +9,12 @@
 //   that is the home the app opened on. Mission Control's Now is its own needs-you view.
 // * The split's detail pane is the sessions home's: something from OUTSIDE that asks it
 //   to show a session or the inbox (a notification tap on a wide window) while Mission
-//   Control is on screen brings the sessions home forward, so the answer is seen.
+//   Control is on screen brings the sessions home forward, so the answer is seen - also
+//   when the pane already shows it ([SessionSelection.asked], not the pane's value).
+// * A hidden home keeps its state but not its live parts: the sessions home's detail pane
+//   is empty while hidden (no session socket, keyboard hook or 5 s board poll behind
+//   Mission Control; the selection itself is kept and shown again), and Mission Control
+//   drops its Sessions and Machines tabs while hidden (their pollers stop).
 
 import 'package:flutter/foundation.dart';
 import 'package:flutter/material.dart';
@@ -30,7 +35,8 @@ class HomeShell extends StatefulWidget {
   /// Test seam: builds the sessions home, given whether it runs the launch inbox and how
   /// it switches to Mission Control.
   @visibleForTesting
-  final Widget Function({required bool launchInbox, required VoidCallback onOpenMissionControl})? sessionsHomeBuilder;
+  final Widget Function(
+      {required bool launchInbox, required bool visible, required VoidCallback onOpenMissionControl})? sessionsHomeBuilder;
 
   /// Test seam: builds Mission Control, given how it switches back and whether it is on screen.
   @visibleForTesting
@@ -54,7 +60,7 @@ class HomeShellState extends State<HomeShell> {
   @override
   void initState() {
     super.initState();
-    _selection.pane.addListener(_onPane);
+    _selection.asked.addListener(_onAsked);
     (widget.launchHome ?? LaunchSettings.instance.restoreHome)().then((home) {
       if (!mounted) return;
       setState(() => _launch = home);
@@ -64,7 +70,7 @@ class HomeShellState extends State<HomeShell> {
 
   @override
   void dispose() {
-    _selection.pane.removeListener(_onPane);
+    _selection.asked.removeListener(_onAsked);
     _mcActive.dispose();
     super.dispose();
   }
@@ -79,10 +85,8 @@ class HomeShellState extends State<HomeShell> {
     _mcActive.value = home == AppHome.missionControl;
   }
 
-  void _onPane() {
-    if (_shown != AppHome.missionControl) return;
-    if (_selection.pane.value.isBoard) return;
-    show(AppHome.sessions);
+  void _onAsked() {
+    if (_shown == AppHome.missionControl) show(AppHome.sessions);
   }
 
   @override
@@ -111,9 +115,9 @@ class HomeShellState extends State<HomeShell> {
           () => KeyedSubtree(
             key: const ValueKey('home-sessions'),
             child: (widget.sessionsHomeBuilder ??
-                ({required bool launchInbox, required VoidCallback onOpenMissionControl}) =>
-                    AdaptiveHome(launchInbox: launchInbox, onOpenMissionControl: onOpenMissionControl))(
-                launchInbox: launchInbox, onOpenMissionControl: toMc),
+                ({required bool launchInbox, required bool visible, required VoidCallback onOpenMissionControl}) =>
+                    AdaptiveHome(launchInbox: launchInbox, showPane: visible, onOpenMissionControl: onOpenMissionControl))(
+                launchInbox: launchInbox, visible: shown == AppHome.sessions, onOpenMissionControl: toMc),
           ),
         ),
         slot(

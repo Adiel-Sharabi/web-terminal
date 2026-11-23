@@ -87,6 +87,11 @@ class SessionSelection {
   /// What the split view's detail pane shows.
   final ValueNotifier<DetailPane> pane = ValueNotifier<DetailPane>(DetailPane.board);
 
+  /// #507 - ticks on EVERY ask to show a session or the inbox, even one for what the
+  /// pane already shows ([pane] notifies only a change). The home shell reads it: an ask
+  /// while Mission Control is on screen must bring the sessions home forward.
+  final ValueNotifier<int> asked = ValueNotifier<int>(0);
+
   /// The session the split view shows, or null when the board, the inbox or the journal is showing.
   String? get selectedId => pane.value.sessionId;
 
@@ -94,15 +99,20 @@ class SessionSelection {
   bool get boardShown => pane.value.isBoard;
 
   /// Shows session [id] in the pane, replacing whatever was there (the board too).
-  void select(String id) => pane.value = DetailPane.session(id);
+  void select(String id) {
+    pane.value = DetailPane.session(id);
+    asked.value++;
+  }
 
   /// Shows the board in the pane. Already showing it: a no-op, exactly as
   /// selecting the session that is already showing is.
   void showBoard() => pane.value = DetailPane.board;
 
   /// Shows the questions inbox in the pane (#383), with [focusSessionId]'s item focused (#492).
-  void showInbox({String? focusSessionId}) =>
-      pane.value = focusSessionId == null ? DetailPane.inbox : DetailPane.inboxFocus(focusSessionId);
+  void showInbox({String? focusSessionId}) {
+    pane.value = focusSessionId == null ? DetailPane.inbox : DetailPane.inboxFocus(focusSessionId);
+    asked.value++;
+  }
 
   /// Whether the split view's detail pane shows the questions inbox.
   bool get inboxShown => pane.value.isInbox;
@@ -132,6 +142,7 @@ class SessionSelection {
   @visibleForTesting
   void reset() {
     pane.value = DetailPane.board;
+    asked.value = 0;
     splitMounted = false;
   }
 }

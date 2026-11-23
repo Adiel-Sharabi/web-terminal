@@ -55,7 +55,14 @@ class _McMachinesViewState extends State<McMachinesView> {
     super.initState();
     _sessions = _repo.current;
     _sub = _repo.sessions.listen((list) {
-      if (mounted) setState(() => _sessions = list);
+      if (!mounted) return;
+      setState(() => _sessions = list);
+      // A server whose capabilities were not known yet at the first ask: ask it now,
+      // not at the next tick.
+      if (widget.servers().any((sv) =>
+          !_machines.containsKey(sv.baseUrl) && _repo.supportsMachine(sv.baseUrl) && _repo.serverUsable[sv.baseUrl] == true)) {
+        unawaited(_refreshMachines());
+      }
     });
     unawaited(_refreshMachines());
     unawaited(_refreshLeases());

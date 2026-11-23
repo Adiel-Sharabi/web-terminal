@@ -116,14 +116,23 @@ class _MissionControlHomeState extends State<MissionControlHome> {
     super.dispose();
   }
 
-  void _onActive() => _feed.active = widget.active?.value ?? true;
+  bool get _isActive => widget.active?.value ?? true;
+
+  void _onActive() {
+    _feed.active = _isActive;
+    // The Sessions and Machines tabs poll on their own timers: they are dropped while
+    // Mission Control is hidden and built again when it comes back.
+    if (mounted) setState(() {});
+  }
 
   void _openSession(String id, {Session? initial}) =>
       openSessionOnStack(Navigator.of(context), id, initialSession: initial);
 
   void _answer(McCard card) => pushInbox(Navigator.of(context), focusSessionId: card.sessionId);
 
-  Widget _body(McTab tab) => switch (tab) {
+  Widget _body(McTab tab) => !_isActive && (tab == McTab.sessions || tab == McTab.machines)
+      ? const SizedBox.shrink()
+      : switch (tab) {
         McTab.now => McNowView(feed: _feed, onAnswer: _answer, onOpenSession: _openSession),
         McTab.projects => ListenableBuilder(
             listenable: _feed,
@@ -208,6 +217,13 @@ class _MissionControlHomeState extends State<MissionControlHome> {
               key: const ValueKey('mc-rail'),
               selectedIndex: index,
               labelType: NavigationRailLabelType.all,
+              // Reachable from every tab, the Sessions board (which has its own bar) too.
+              trailing: IconButton(
+                key: const ValueKey('mc-rail-to-sessions-home'),
+                tooltip: 'Back to the sessions home',
+                icon: const Icon(Icons.swap_horiz),
+                onPressed: widget.onShowSessionsHome,
+              ),
               onDestinationSelected: (i) => setState(() => _tab = tabs[i]),
               destinations: [
                 for (final t in tabs)

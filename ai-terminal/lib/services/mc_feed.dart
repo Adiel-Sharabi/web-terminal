@@ -42,30 +42,29 @@ enum McStatus {
   unreachable,
 }
 
-/// The configured server [authority] names: url first (scheme, host and port, case- and
-/// trailing-slash-insensitive), else the name (case-insensitive), else null.
+/// The configured server whose url is [authority]'s (scheme, host, port and path; case,
+/// default-port and trailing-slash insensitive), else null. By url ONLY, as the contract
+/// says: a same-named server elsewhere may be another install with its own state, and
+/// to-dos sent there would land in the wrong place.
 ServerConfig? serverForAuthority(List<ServerConfig> servers, McAuthority authority) {
-  final want = _origin(authority.url);
-  if (want != null) {
-    for (final sv in servers) {
-      if (_origin(sv.baseUrl) == want) return sv;
-    }
-  }
-  final name = authority.name?.toLowerCase();
-  if (name != null) {
-    for (final sv in servers) {
-      if (sv.name.toLowerCase() == name) return sv;
-    }
+  final want = _place(authority.url);
+  if (want == null) return null;
+  for (final sv in servers) {
+    if (_place(sv.baseUrl) == want) return sv;
   }
   return null;
 }
 
-String? _origin(String? url) {
+String? _place(String? url) {
   if (url == null) return null;
   final u = Uri.tryParse(url.trim());
   if (u == null || u.host.isEmpty) return null;
   final port = u.hasPort ? u.port : (u.scheme == 'https' ? 443 : 80);
-  return '${u.scheme.toLowerCase()}://${u.host.toLowerCase()}:$port';
+  var path = u.path;
+  while (path.endsWith('/')) {
+    path = path.substring(0, path.length - 1);
+  }
+  return '${u.scheme.toLowerCase()}://${u.host.toLowerCase()}:$port$path';
 }
 
 class McFeed extends ChangeNotifier {
@@ -92,6 +91,7 @@ class McFeed extends ChangeNotifier {
   String? _message;
   DateTime? _at;
   bool _asking = false;
+  bool _again = false;
   bool _active = false;
   bool _disposed = false;
   Timer? _timer;
@@ -125,16 +125,24 @@ class McFeed extends ChangeNotifier {
     }
   }
 
-  /// Asks the servers again (see the file header). One ask at a time.
+  /// Asks the servers again (see the file header). One ask at a time; an ask made while
+  /// one is out (after a to-do or a Later, say) runs once it is back, never dropped.
   Future<void> refresh() async {
-    if (_asking || _disposed) return;
+    if (_disposed) return;
+    if (_asking) {
+      _again = true;
+      return;
+    }
     _asking = true;
     try {
-      await _ask();
+      do {
+        _again = false;
+        await _ask();
+        if (!_disposed) notifyListeners();
+      } while (_again && !_disposed);
     } finally {
       _asking = false;
     }
-    if (!_disposed) notifyListeners();
   }
 
   Future<void> _ask() async {

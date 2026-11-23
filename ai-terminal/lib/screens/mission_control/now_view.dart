@@ -339,8 +339,8 @@ class McAnswerCard extends StatelessWidget {
                 onPressed: onAnswer,
                 icon: const Icon(Icons.reply, size: 18),
                 label: const Text('Answer'),
-              )
-            else if (onOpenSession != null)
+              ),
+            if (onOpenSession != null)
               TextButton.icon(
                 key: const ValueKey('mc-card-open'),
                 onPressed: onOpenSession,
@@ -570,7 +570,10 @@ class McProjectCard extends StatelessWidget {
         child: Column(crossAxisAlignment: CrossAxisAlignment.start, children: [
           Row(children: [
             Expanded(child: Text(p.name, style: theme.textTheme.titleSmall?.copyWith(fontWeight: FontWeight.w600))),
-            if (p.trackerLabel != null) Text(p.trackerLabel!, style: muted),
+            if (p.trackerLabel != null) ...[
+              const SizedBox(width: 8),
+              Flexible(child: Text(p.trackerLabel!, style: muted, overflow: TextOverflow.ellipsis)),
+            ],
           ]),
           const SizedBox(height: 4),
           Text(counts, key: const ValueKey('mc-project-counts'), style: theme.textTheme.bodySmall),
