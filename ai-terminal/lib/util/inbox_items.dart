@@ -304,6 +304,3 @@ List<InboxItem> _oldestFirst(List<InboxItem> list) {
   return [for (final e in indexed) e.$2];
 }
 
-/// The dashboard's inbox badge: the blocking items only, from the session rows alone
-/// (no request). The same rows give the board's Needs-you count.
-int inboxBadgeCount(List<Session> rows) => inboxItemsOf(rows).where((i) => i.blocking).length;

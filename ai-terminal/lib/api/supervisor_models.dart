@@ -238,17 +238,39 @@ class SupervisorCard {
   /// When it was made (authority clock).
   final int? at;
 
-  /// `approve` | `dismiss` once decided; null while it waits on the owner.
+  /// How it ended (`approve`, `dismiss`, `send`, `tell`, `retire`); null while it waits on the owner.
   final String? decision;
 
-  const SupervisorCard({required this.id, this.cls, this.sessionId, this.server, this.name, this.text = '', this.why, this.at, this.decision});
+  /// #498 - what the supervisor proposes, as a short title ("Stand in for its lead").
+  final String? title;
+
+  /// #498 - what Approve does, in plain words, from the server (lib/supervisor-cases.js
+  /// cardDoes). Null from an older server: the card then shows [text] as it always did.
+  final String? does;
+
+  /// #498 - the session as the authority's last scan saw it: its status, its headline and
+  /// its first work items. Null when the scan does not list it.
+  final String? targetStatus;
+  final String? targetHeadline;
+  final List<SupervisorItem> targetItems;
+
+  /// #498 - put off with Later until this time (authority clock); null when not.
+  final int? laterUntil;
+
+  const SupervisorCard({required this.id, this.cls, this.sessionId, this.server, this.name, this.text = '', this.why, this.at, this.decision,
+      this.title, this.does, this.targetStatus, this.targetHeadline, this.targetItems = const [], this.laterUntil});
 
   bool get pending => decision == null;
+
+  /// A card whose Approve types [text] into the session (not a close or a replacement): its
+  /// "Edit, then send" starts from that text.
+  bool get types => cls != 'close' && cls != 'spawn';
 
   static SupervisorCard? fromJson(dynamic j) {
     if (j is! Map) return null;
     final id = _str(j['id']);
     if (id == null) return null;
+    final t = j['target'];
     return SupervisorCard(
       id: id,
       cls: _str(j['cls']),
@@ -259,6 +281,15 @@ class SupervisorCard {
       why: _str(j['why']),
       at: _ms(j['at']),
       decision: _str(j['decision']),
+      title: _str(j['title']),
+      does: _str(j['does']),
+      targetStatus: t is Map ? _str(t['status']) : null,
+      targetHeadline: t is Map ? _str(t['headline']) : null,
+      targetItems: [
+        if (t is Map && t['items'] is List)
+          for (final i in t['items'] as List) ?SupervisorItem.fromJson(i),
+      ],
+      laterUntil: _ms(j['laterUntil']),
     );
   }
 }
@@ -284,8 +315,25 @@ class SupervisorCase {
   final bool escalatedAuto;
   final int? resolvedAt;
 
+  /// #498 - what the owner reads, from the server (lib/supervisor-cases.js caseOwnerView):
+  /// `question` (the supervisor asks [ask]) or `stuck` (the rules raised a fact; [ask] says
+  /// what to do). Null from an older server: the case then shows as it did.
+  final String? ownerKind;
+  final String? title;
+  final String? ask;
+
+  /// Why it reached the owner, in plain words.
+  final String? whyYou;
+
+  /// The supervisor still looks at it first (its own session was busy): not the owner's.
+  final bool checking;
+
+  /// #498 - put off with Later until this time (authority clock).
+  final int? laterUntil;
+
   const SupervisorCase({required this.id, this.rule, this.sessionId, this.server, this.name, this.line = '', this.openedAt,
-      this.question, this.escalatedAt, this.escalatedAuto = false, this.resolvedAt});
+      this.question, this.escalatedAt, this.escalatedAuto = false, this.resolvedAt,
+      this.ownerKind, this.title, this.ask, this.whyYou, this.checking = false, this.laterUntil});
 
   bool get escalated => question != null;
 
@@ -297,6 +345,7 @@ class SupervisorCase {
     final id = _str(j['id']);
     if (id == null) return null;
     final e = j['escalated'];
+    final o = j['owner'];
     final line = _str(j['line']) ?? '';
     return SupervisorCase(
       id: id,
@@ -310,6 +359,12 @@ class SupervisorCase {
       escalatedAt: e is Map ? _ms(e['at']) : null,
       escalatedAuto: e is Map && e['auto'] == true,
       resolvedAt: _ms(j['resolvedAt']),
+      ownerKind: o is Map ? _str(o['kind']) : null,
+      title: o is Map ? _str(o['title']) : null,
+      ask: o is Map ? _str(o['ask']) : null,
+      whyYou: o is Map ? _str(o['whyYou']) : null,
+      checking: o is Map && o['checking'] == true,
+      laterUntil: _ms(j['laterUntil']),
     );
   }
 }

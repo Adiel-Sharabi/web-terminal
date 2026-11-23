@@ -9,6 +9,7 @@ import 'package:ai_terminal/api/models.dart';
 import 'package:ai_terminal/screens/work_board_screen.dart' show BoardColumn, boardColumnOf;
 import 'package:ai_terminal/util/agent_turn.dart';
 import 'package:ai_terminal/util/inbox_items.dart';
+import 'package:ai_terminal/util/inbox_queue.dart' show needYouCount;
 import 'package:ai_terminal/util/text_direction.dart';
 import 'package:flutter/painting.dart';
 import 'package:flutter_test/flutter_test.dart';
@@ -106,7 +107,7 @@ void main() {
     });
   });
 
-  group('inboxBadgeCount (8.2)', () {
+  group('needYouCount (8.2)', () {
     test('counts blocking items only, and equals the board\'s Needs-you count for the same rows', () {
       final rows = [
         _s('q', status: 'waiting', waitingFor: 'question'),
@@ -120,9 +121,9 @@ void main() {
         _s('self', reason: {'kind': 'self', 'text': 'CI', 'source': 'reported'}),
       ];
       final board = rows.where((s) => boardColumnOf(s) == BoardColumn.needsYou).length;
-      expect(inboxBadgeCount(rows), 6);
-      expect(inboxBadgeCount(rows), board);
-      expect(inboxBadgeCount([_s('idle')]), 0);
+      expect(needYouCount(rows), 6);
+      expect(needYouCount(rows), board);
+      expect(needYouCount([_s('idle')]), 0);
     });
   });
 
@@ -215,7 +216,7 @@ void main() {
         expect(inboxDismissSig(it), isNull, reason: '${e.key}');
         expect(inboxItemsOf([e.value], isDismissed: (_, _) => true).single.dismissed, isFalse, reason: '${e.key}');
       }
-      expect(inboxBadgeCount(blockers.values.toList()), blockers.length);
+      expect(needYouCount(blockers.values.toList()), blockers.length);
     });
 
     test('the menu offers each kind only what is safe for it, and never Dismiss for a blocker', () {

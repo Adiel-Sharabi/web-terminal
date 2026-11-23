@@ -86,6 +86,7 @@ void main() {
   late Map<String, dynamic>? supervisor; // /api/supervisor/state body, null = 404
   late List<(String, String)> posts; // path, body
   late int cardStatus;
+  String? cardReason; // #498 the 409's plain-words reason
   late List<(String, String)> sent;
   Completer<void>? gate; // holds /api/sessions while set
   late List<String> opened; // sessions the inbox asked the app to open
@@ -105,9 +106,11 @@ void main() {
           final q = questions[id];
           return _json(q == null ? {'pending': false} : {'pending': true, 'question': q});
         }
-        if (p.startsWith('/api/supervisor/cards/')) {
+        if (p.startsWith('/api/supervisor/cards/') || p.startsWith('/api/supervisor/cases/')) {
           posts.add((p, req.body));
-          return cardStatus == 200 ? _json({'ok': true}) : _json({'refused': 'the session moved on'}, cardStatus);
+          return cardStatus == 200
+              ? _json({'ok': true})
+              : _json({'refused': 'the session moved on', 'reason': ?cardReason}, cardStatus);
         }
         switch (p) {
           case '/api/version':
@@ -142,6 +145,7 @@ void main() {
     supervisor = null;
     posts = [];
     cardStatus = 200;
+    cardReason = null;
     sent = [];
     gate = null;
     opened = [];
@@ -398,6 +402,195 @@ void main() {
     expect(posts, [('/api/supervisor/cards/c1', jsonEncode({'decision': 'approve'}))]);
     expect(find.text('Approved'), findsOneWidget);
     await done(tester);
+  });
+
+  group('#498 a card that explains itself and offers more than Approve/Dismiss', () {
+    Future<void> mountCard(WidgetTester tester, {int? laterUntil}) async {
+      rows = [_row('s1', 'Stuck session', status: 'idle', lastActivity: 5)];
+      final now = DateTime.now().millisecondsSinceEpoch;
+      supervisor = {
+        'role': 'authority',
+        'enabled': true,
+        'now': now,
+        'at': now,
+        'cards': [
+          {
+            'id': 'c1',
+            'cls': 'wake',
+            'sessionId': 's1',
+            'server': 'Home',
+            'name': 'Stuck session',
+            'text': 'Type continue',
+            'why': 'you set "wake" to ask you first',
+            'at': now - 1000,
+            'title': 'Wake it up',
+            'does': 'Approve types the supervisor\'s message into "Stuck session" once it is idle.',
+            'target': {
+              'status': 'idle',
+              'headline': 'waiting for CI',
+              'items': [
+                {'ref': '#7', 'title': 'Fix the widget', 'state': 'in-progress'},
+              ],
+            },
+            'laterUntil': ?laterUntil,
+          },
+        ],
+      };
+      await pump(tester, await repo(), width: 500);
+    }
+
+    Future<void> menu(WidgetTester tester, String open, String pick) async {
+      await tester.tap(k(open));
+      await tester.pump();
+      await tester.pump(const Duration(milliseconds: 400));
+      await tester.tap(k(pick).last);
+      await tester.pump();
+      await tester.pump(const Duration(milliseconds: 400));
+    }
+
+    testWidgets('the card says who proposes what, its work item, and why you are asked', (tester) async {
+      await mountCard(tester);
+      expect(find.text('The supervisor proposes: Wake it up'), findsOneWidget);
+      expect(find.textContaining('Approve types the supervisor'), findsOneWidget);
+      expect(find.textContaining('Fix the widget', findRichText: true), findsWidgets);
+      expect(find.text('Why you are asked: you set "wake" to ask you first'), findsOneWidget);
+      expect(find.text('Type continue'), findsNothing, reason: 'the raw line is folded behind Details, in the focus view only');
+      await done(tester);
+    });
+
+    testWidgets('Edit, then send posts the owner\'s own words, starting from the supervisor\'s', (tester) async {
+      await mountCard(tester);
+      await tester.tap(k('inbox-card-edit-c1'));
+      await tester.pump();
+      await tester.pump(const Duration(milliseconds: 400));
+      final field = k('card-dialog-text');
+      expect(tester.widget<TextField>(field).controller!.text, 'Type continue');
+      // A line break is refused and explained, never stripped behind the owner's back.
+      await tester.enterText(field, 'one\ntwo');
+      await tester.pump();
+      expect(tester.widget<FilledButton>(k('card-dialog-send')).onPressed, isNull);
+      expect(find.textContaining('One line only'), findsOneWidget);
+      await tester.enterText(field, 'Please rerun the failing test');
+      await tester.pump();
+      await tester.tap(k('card-dialog-send'));
+      await settle(tester);
+      expect(posts, [('/api/supervisor/cards/c1', jsonEncode({'decision': 'send', 'text': 'Please rerun the failing test'}))]);
+      expect(find.text('Sent to Stuck session'), findsOneWidget);
+      await done(tester);
+    });
+
+    testWidgets('Later posts the hours picked', (tester) async {
+      await mountCard(tester);
+      await menu(tester, 'inbox-card-later-c1', 'inbox-card-later-8-c1');
+      await settle(tester);
+      expect(posts, [('/api/supervisor/cards/c1', jsonEncode({'decision': 'later', 'hours': 8}))]);
+      expect(find.textContaining('Put off until'), findsOneWidget);
+      await done(tester);
+    });
+
+    testWidgets('Tell the supervisor posts the note and "don\'t ask again"', (tester) async {
+      await mountCard(tester);
+      await menu(tester, 'inbox-card-more-c1', 'inbox-card-tell-c1');
+      await tester.enterText(k('card-dialog-text'), 'that merge is mine');
+      await tester.tap(k('card-dialog-check'));
+      await tester.pump();
+      await tester.tap(k('card-dialog-send'));
+      await settle(tester);
+      expect(posts, [
+        ('/api/supervisor/cards/c1', jsonEncode({'decision': 'tell', 'note': 'that merge is mine', 'dontAsk': true})),
+      ]);
+      await done(tester);
+    });
+
+    testWidgets("a refusal shows the server's plain-words reason", (tester) async {
+      await mountCard(tester);
+      cardStatus = 409;
+      cardReason = 'That session is working. It can take this once its turn ends.';
+      await tester.tap(k('inbox-card-approve-c1'));
+      await settle(tester);
+      expect(find.text('Not approved: That session is working. It can take this once its turn ends.'), findsOneWidget);
+      await done(tester);
+    });
+
+    // The owner, on a rules escalation shown as "The supervisor asks: Session X is past its
+    // own checkBy...": "No question...". It must say what you are asked, and offer actions.
+    Future<void> mountCase(WidgetTester tester, Map<String, dynamic> owner) async {
+      rows = [_row('s1', 'Stuck session', status: 'idle', lastActivity: 5)];
+      final now = DateTime.now().millisecondsSinceEpoch;
+      supervisor = {
+        'role': 'authority',
+        'enabled': true,
+        'now': now,
+        'at': now,
+        'cases': [
+          {
+            'id': 'k9',
+            'rule': 'R3',
+            'sessionId': 's1',
+            'server': 'Home',
+            'name': 'Stuck session',
+            'line': 'Session "Stuck session" is past its own checkBy (120 min) on "CI on PR 12" (target ci, still unknown).',
+            'openedAt': now - 9000,
+            'escalated': {'question': 'Session "Stuck session" is past its own checkBy (120 min)', 'at': now - 5000, 'auto': true},
+            'owner': owner,
+          },
+        ],
+      };
+      await pump(tester, await repo(), width: 500);
+    }
+
+    const stuck = {
+      'kind': 'stuck',
+      'cause': 'blocked',
+      'title': 'It is not moving on',
+      'ask': 'Check whether it still has to wait. Write to it to carry on, or mark it as needing nothing.',
+      'whyYou': 'The supervisor cannot look at it: it is paused, so nobody else will act on it.',
+      'checking': false,
+    };
+
+    testWidgets('a rules escalation reads as "stuck", says what to do and why you, and is no question', (tester) async {
+      await mountCase(tester, stuck);
+      expect(find.text('Stuck: It is not moving on'), findsOneWidget);
+      expect(find.text(stuck['ask']! as String), findsOneWidget);
+      expect(find.textContaining('Why you are asked: The supervisor cannot look at it'), findsOneWidget);
+      expect(find.textContaining('The supervisor asks'), findsNothing);
+      expect(k('inbox-case-write-k9'), findsOneWidget);
+      expect(k('inbox-case-resolve-k9'), findsOneWidget);
+      await done(tester);
+    });
+
+    testWidgets('Write to it posts the owner\'s words; Nothing needed closes the case', (tester) async {
+      await mountCase(tester, stuck);
+      await tester.tap(k('inbox-case-write-k9'));
+      await tester.pump();
+      await tester.pump(const Duration(milliseconds: 400));
+      await tester.enterText(k('card-dialog-text'), 'CI is green, carry on');
+      await tester.pump();
+      await tester.tap(k('card-dialog-send'));
+      await settle(tester);
+      expect(posts, [('/api/supervisor/cases/k9', jsonEncode({'action': 'write', 'text': 'CI is green, carry on'}))]);
+      expect(find.text('Sent to Stuck session'), findsOneWidget);
+      await done(tester);
+      posts.clear();
+      await mountCase(tester, stuck);
+      await tester.tap(k('inbox-case-resolve-k9'));
+      await settle(tester);
+      expect(posts, [('/api/supervisor/cases/k9', jsonEncode({'action': 'resolve', 'how': 'the owner: nothing needed'}))]);
+      await done(tester);
+    });
+
+    testWidgets('a case the supervisor still looks at first is not the owner\'s: not listed', (tester) async {
+      await mountCase(tester, {...stuck, 'cause': 'untaken', 'checking': true});
+      expect(k('inbox-case-write-k9'), findsNothing);
+      expect(find.text('Stuck: It is not moving on'), findsNothing);
+      await done(tester);
+    });
+
+    testWidgets('a card put off until later is not listed', (tester) async {
+      await mountCard(tester, laterUntil: DateTime.now().millisecondsSinceEpoch + 3600000);
+      expect(k('inbox-card-approve-c1'), findsNothing);
+      await done(tester);
+    });
   });
 
   testWidgets("h: a session the server's needsYou names, that is not blocking here, is listed and opens its session", (tester) async {

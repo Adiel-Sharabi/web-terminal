@@ -68,6 +68,7 @@ import '../widgets/question_answer_panel.dart';
 import '../widgets/question_overlay.dart' show AnswerFrame, buildAnswerFrames, kWideMinWidth;
 import '../widgets/reply_box.dart';
 import '../widgets/server_badge.dart';
+import '../widgets/supervisor_card_view.dart';
 import '../widgets/session_family.dart';
 import '../widgets/terminal_tail_strip.dart';
 import '../widgets/timed_snack_bar.dart';
@@ -439,6 +440,7 @@ class _QuestionsInboxScreenState extends State<QuestionsInboxScreen> with Widget
       final find = await askSupervisor(_servers, _client);
       if (_disposed) return;
       _supFind = find;
+      SupervisorFeed.instance.publish(find);
       // A decided card the authority no longer lists pending needs no local hiding.
       final pending = {
         for (final c in find.state?.cards ?? const <SupervisorCard>[])
@@ -451,30 +453,133 @@ class _QuestionsInboxScreenState extends State<QuestionsInboxScreen> with Widget
     }
   }
 
-  /// Approves or dismisses a supervisor card (#492) on the server that holds it. The
-  /// server decides what approving does and can refuse (409, with its reason).
-  Future<void> _decideCard(InboxItem it, {required bool approve}) async {
+  /// Decides a supervisor card (#492, #498) on the server that holds it: `approve`,
+  /// `dismiss`, `send` ([text]: the owner's own words instead), `tell` ([note], [dontAsk])
+  /// or `later` ([hours]). The server decides what each does and can refuse (409), saying
+  /// why in plain words; a card it retired (its session is gone) leaves on the refresh.
+  Future<void> _decideCard(InboxItem it, String decision, {String? text, String? note, bool? dontAsk, int? hours}) async {
     final card = it.card;
     final authority = it.authority;
     if (card == null || authority == null || _cardBusy.contains(it.key)) return;
     _update(() => _cardBusy.add(it.key));
-    final no = approve ? 'Not approved' : 'Not dismissed';
     try {
-      await _client(authority).decideSupervisorCard(card.id, approve: approve);
-      _say(approve ? 'Approved' : 'Dismissed');
+      await _client(authority).decideSupervisorCard(card.id, decision: decision, text: text, note: note, dontAsk: dontAsk, hours: hours);
+      _say(cardDoneText(decision, card.name ?? 'the session', until: hours == null ? null : DateTime.now().add(Duration(hours: hours))));
+      if (!_disposed) {
+        // Later keeps it pending on the server: the refresh hides it, and brings it back in time.
+        if (decision != 'later') _decided.add(it.key);
+        if (_focusKey == it.key) _moveOn(it.key);
+        _changed();
+      }
+    } on ApiException catch (e) {
+      _say('${cardFailText(decision)}: ${e.message}');
+    } catch (e) {
+      _say('${cardFailText(decision)}: $e');
+    } finally {
+      if (!_disposed) _update(() => _cardBusy.remove(it.key));
+    }
+    await _refreshSupervisor();
+  }
+
+  /// Answers an escalated case (#498) on the authority: `write` ([text]), `later` ([hours]),
+  /// `tell` ([note]) or `resolve` ([how]). The server can refuse, in plain words.
+  Future<void> _decideCase(InboxItem it, String action, {String? text, String? note, int? hours, String? how}) async {
+    final c = it.supCase;
+    final authority = it.authority;
+    if (c == null || authority == null || _cardBusy.contains(it.key)) return;
+    _update(() => _cardBusy.add(it.key));
+    final name = c.name ?? 'the session';
+    final until = hours == null ? null : DateTime.now().add(Duration(hours: hours));
+    try {
+      await _client(authority).decideSupervisorCase(c.id, action: action, text: text, note: note, hours: hours, how: how);
+      _say(caseDoneText(action, name, until: until));
       if (!_disposed) {
         _decided.add(it.key);
         if (_focusKey == it.key) _moveOn(it.key);
         _changed();
       }
-      await _refreshSupervisor();
     } on ApiException catch (e) {
-      _say('$no: ${e.message}');
+      _say('${caseFailText(action)}: ${e.message}');
     } catch (e) {
-      _say('$no: $e');
+      _say('${caseFailText(action)}: $e');
     } finally {
       if (!_disposed) _update(() => _cardBusy.remove(it.key));
     }
+    await _refreshSupervisor();
+  }
+
+  /// Write to it (#498): the owner's own words typed into the case's session; the case closes.
+  Future<void> _writeToCase(InboxItem it) async {
+    final c = it.supCase;
+    if (c == null) return;
+    final name = c.name ?? 'the session';
+    final r = await showDialog<({String text, bool checked})>(
+      context: context,
+      builder: (_) => CardTextDialog(
+        title: 'Write to $name',
+        explain: 'Typed into "$name" as you write it here, once the session is idle with nothing in its box. This closes the case.',
+        action: 'Send to $name',
+        hint: 'Your message to $name',
+      ),
+    );
+    if (r == null || !mounted) return;
+    await _decideCase(it, 'write', text: r.text);
+  }
+
+  /// Tell the supervisor (#498): a note about the case; the case is the supervisor's again.
+  Future<void> _tellCase(InboxItem it) async {
+    if (it.supCase == null) return;
+    final r = await showDialog<({String text, bool checked})>(
+      context: context,
+      builder: (_) => const CardTextDialog(
+        title: 'Tell the supervisor',
+        explain: 'Your note goes to the supervisor, and the case is its to act on again. Nothing is typed into the session itself.',
+        action: 'Tell the supervisor',
+        hint: 'For example: CI is green now, let it carry on',
+      ),
+    );
+    if (r == null || !mounted) return;
+    await _decideCase(it, 'tell', note: r.text);
+  }
+
+  /// Edit, then send (#498): the owner's own words typed into the card's session instead of
+  /// the supervisor's, through the same gated prompt. A card that types starts from its text.
+  Future<void> _editAndSend(InboxItem it) async {
+    final c = it.card;
+    if (c == null) return;
+    final name = c.name ?? 'the session';
+    final r = await showDialog<({String text, bool checked})>(
+      context: context,
+      builder: (_) => CardTextDialog(
+        title: c.types ? 'Edit, then send' : 'Write to $name',
+        explain: 'Typed into "$name" as you write it here, instead of what the supervisor proposed, once the session is idle with nothing in its box.',
+        action: 'Send to $name',
+        initial: c.types ? c.text : '',
+        hint: 'Your message to $name',
+      ),
+    );
+    if (r == null || !mounted) return;
+    await _decideCard(it, 'send', text: r.text);
+  }
+
+  /// Tell the supervisor (#498): a note that redirects it, or "do not ask me about cards like
+  /// this". Typed into the supervisor's own session; the card is its to act on again.
+  Future<void> _tellSupervisor(InboxItem it) async {
+    final c = it.card;
+    if (c == null) return;
+    final r = await showDialog<({String text, bool checked})>(
+      context: context,
+      builder: (_) => const CardTextDialog(
+        title: 'Tell the supervisor',
+        explain: 'Your note goes to the supervisor, which acts on this case again with it. Nothing is typed into the session itself.',
+        action: 'Tell the supervisor',
+        hint: 'For example: that merge is mine, leave it',
+        checkLabel: "Don't ask me about cards like this again",
+        allowEmptyWhenChecked: true,
+      ),
+    );
+    if (r == null || !mounted) return;
+    await _decideCard(it, 'tell', note: r.text.isEmpty ? null : r.text, dontAsk: r.checked);
   }
 
   void _update(VoidCallback fn) {
@@ -1047,26 +1152,8 @@ class _QuestionsInboxScreenState extends State<QuestionsInboxScreen> with Widget
   /// list: the build, "next after" and anything that later reads the queue use this.
   List<InboxItem> get _queue {
     final base = _sessionItems;
-    final blocking = base.where((i) => i.blocking).toList();
-    final sup = [
-      for (final it in supervisorItemsOf(_supFind?.state, _supFind?.server, _sessions,
-          blockingKeys: {for (final it in blocking) it.key}))
-        if (!_decided.contains(it.key)) it,
-    ];
-    var merged = [...blocking, ...sup];
-    if (sup.isNotEmpty) {
-      final indexed = merged.indexed.toList()
-        ..sort((a, b) {
-          final x = a.$2.since, y = b.$2.since;
-          if (x == null && y == null) return a.$1.compareTo(b.$1);
-          if (x == null) return 1;
-          if (y == null) return -1;
-          final c = x.compareTo(y);
-          return c != 0 ? c : a.$1.compareTo(b.$1);
-        });
-      merged = [for (final e in indexed) e.$2];
-    }
-    return [...merged, ...base.where((i) => !i.blocking)];
+    // #498 - the one "need you" rule, the same the dashboard's badge counts.
+    return [...needYouOf(base, _supFind, _sessions, decided: _decided), ...base.where((i) => !i.blocking)];
   }
 
   /// Every item, the dismissed ones (#445) flagged, for the "Dismissed" section.
@@ -2518,18 +2605,13 @@ class _InboxCard extends StatelessWidget {
       case InboxKind.waiting:
         return [_labelled(context, 'Needs you', 'open it to see what it is waiting on')];
       case InboxKind.card:
-        final c = it.card!;
-        final theme = Theme.of(context);
-        return [
-          Text(c.text, maxLines: 3, overflow: TextOverflow.ellipsis, style: theme.textTheme.bodyLarge?.copyWith(height: 1.4)),
-          if ((c.why ?? '').isNotEmpty)
-            Text(c.why!,
-                maxLines: 2, overflow: TextOverflow.ellipsis, style: theme.textTheme.bodySmall?.copyWith(color: theme.colorScheme.onSurfaceVariant)),
-        ];
+        return [SupervisorCardSummary(it.card!)];
       case InboxKind.supervisorNeed:
         return [_labelled(context, 'Needs you', supervisorNeedText(it.need!), maxLines: 3)];
       case InboxKind.escalation:
         final c = it.supCase!;
+        // #498 - what the owner is asked, from the server; an older server: as before.
+        if (c.ownerKind != null) return [SupervisorCaseSummary(c)];
         final theme = Theme.of(context);
         return [
           Text(c.question ?? c.line, maxLines: 3, overflow: TextOverflow.ellipsis, style: theme.textTheme.bodyLarge?.copyWith(height: 1.4)),
@@ -2650,6 +2732,7 @@ class _InboxCard extends StatelessWidget {
           ),
         ];
       case InboxKind.escalation:
+        if (it.supCase!.ownerKind != null) return [_caseButtons(context, state, it, large: false)];
         if (s == null) return const [];
         return [
           Align(
@@ -2745,30 +2828,123 @@ class _NewMark extends StatelessWidget {
   }
 }
 
-/// Approve / Dismiss / Open session for a supervisor card (#492). Both decisions are off
-/// while one is being sent; the server can refuse, and says why in the snack bar.
+/// What can be done with a supervisor card (#492, #498): Approve (what the card says it
+/// does), Edit, then send (the owner's own words instead), Later (hidden for some hours;
+/// back only if still pending), Dismiss, and under "More": Tell the supervisor and Open
+/// session. Every decision is off while one is being sent; the server can refuse, and says
+/// why in plain words in the snack bar.
+/// What can be done with an escalated case (#498), the card set where it applies: Write to
+/// it (the owner's own words, through the gated prompt; the case closes), Later, Nothing
+/// needed (closes it), and under "More": Tell the supervisor (the case is its again) and
+/// Open session. Nothing here approves: a case proposes nothing.
+Widget _caseButtons(BuildContext context, _QuestionsInboxScreenState state, InboxItem it, {required bool large}) {
+  final c = it.supCase!;
+  final busy = state._cardBusy.contains(it.key);
+  final s = it.session;
+  final compact = large ? null : VisualDensity.compact;
+  return Wrap(spacing: 8, runSpacing: 4, crossAxisAlignment: WrapCrossAlignment.center, alignment: large ? WrapAlignment.end : WrapAlignment.start, children: [
+    if (c.sessionId != null)
+      FilledButton(
+        key: ValueKey('inbox-case-write-${c.id}'),
+        style: large ? null : FilledButton.styleFrom(visualDensity: VisualDensity.compact, minimumSize: const Size(0, 32)),
+        onPressed: busy ? null : () => unawaited(state._writeToCase(it)),
+        child: const Text('Write to it'),
+      ),
+    PopupMenuButton<int>(
+      key: ValueKey('inbox-case-later-${c.id}'),
+      enabled: !busy,
+      tooltip: 'Hide it for a while; it comes back only if it still applies',
+      onSelected: (h) => unawaited(state._decideCase(it, 'later', hours: h)),
+      itemBuilder: (_) => [
+        for (final h in const [1, 3, 8])
+          PopupMenuItem<int>(key: ValueKey('inbox-case-later-$h-${c.id}'), value: h, child: Text(h == 1 ? 'For 1 hour' : 'For $h hours')),
+      ],
+      child: IgnorePointer(
+        child: TextButton.icon(
+          style: TextButton.styleFrom(visualDensity: compact),
+          onPressed: busy ? null : () {},
+          icon: const Icon(Icons.schedule, size: 18),
+          label: const Text('Later'),
+        ),
+      ),
+    ),
+    TextButton(
+      key: ValueKey('inbox-case-resolve-${c.id}'),
+      style: TextButton.styleFrom(visualDensity: compact),
+      onPressed: busy ? null : () => unawaited(state._decideCase(it, 'resolve', how: 'the owner: nothing needed')),
+      child: const Text('Nothing needed'),
+    ),
+    PopupMenuButton<String>(
+      key: ValueKey('inbox-case-more-${c.id}'),
+      tooltip: 'More',
+      icon: const Icon(Icons.more_horiz),
+      onSelected: (v) {
+        if (v == 'tell') unawaited(state._tellCase(it));
+        if (v == 'open' && s != null) state._openSession(s);
+      },
+      itemBuilder: (_) => [
+        PopupMenuItem(key: ValueKey('inbox-case-tell-${c.id}'), value: 'tell', enabled: !busy, child: const Text('Tell the supervisor...')),
+        if (s != null) PopupMenuItem(key: ValueKey('inbox-case-open-${c.id}'), value: 'open', child: const Text('Open session')),
+      ],
+    ),
+  ]);
+}
+
 Widget _cardButtons(BuildContext context, _QuestionsInboxScreenState state, InboxItem it, {required bool large}) {
   final c = it.card!;
   final busy = state._cardBusy.contains(it.key);
   final s = it.session;
-  return Wrap(spacing: 8, runSpacing: 4, alignment: large ? WrapAlignment.end : WrapAlignment.start, children: [
+  final compact = large ? null : VisualDensity.compact;
+  return Wrap(spacing: 8, runSpacing: 4, crossAxisAlignment: WrapCrossAlignment.center, alignment: large ? WrapAlignment.end : WrapAlignment.start, children: [
     FilledButton(
       key: ValueKey('inbox-card-approve-${c.id}'),
       style: large ? null : FilledButton.styleFrom(visualDensity: VisualDensity.compact, minimumSize: const Size(0, 32)),
-      onPressed: busy ? null : () => unawaited(state._decideCard(it, approve: true)),
+      onPressed: busy ? null : () => unawaited(state._decideCard(it, 'approve')),
       child: const Text('Approve'),
+    ),
+    OutlinedButton(
+      key: ValueKey('inbox-card-edit-${c.id}'),
+      style: OutlinedButton.styleFrom(visualDensity: compact, minimumSize: large ? null : const Size(0, 32)),
+      onPressed: busy ? null : () => unawaited(state._editAndSend(it)),
+      child: Text(c.types ? 'Edit, then send' : 'Write to it'),
+    ),
+    PopupMenuButton<int>(
+      key: ValueKey('inbox-card-later-${c.id}'),
+      enabled: !busy,
+      tooltip: 'Hide it for a while; it comes back only if it still applies',
+      onSelected: (h) => unawaited(state._decideCard(it, 'later', hours: h)),
+      itemBuilder: (_) => [
+        for (final h in const [1, 3, 8])
+          PopupMenuItem<int>(key: ValueKey('inbox-card-later-$h-${c.id}'), value: h, child: Text(h == 1 ? 'For 1 hour' : 'For $h hours')),
+      ],
+      child: IgnorePointer(
+        child: TextButton.icon(
+          style: TextButton.styleFrom(visualDensity: compact),
+          onPressed: busy ? null : () {},
+          icon: const Icon(Icons.schedule, size: 18),
+          label: const Text('Later'),
+        ),
+      ),
     ),
     TextButton(
       key: ValueKey('inbox-card-dismiss-${c.id}'),
-      onPressed: busy ? null : () => unawaited(state._decideCard(it, approve: false)),
+      style: TextButton.styleFrom(visualDensity: compact),
+      onPressed: busy ? null : () => unawaited(state._decideCard(it, 'dismiss')),
       child: const Text('Dismiss'),
     ),
-    if (s != null)
-      TextButton(
-        key: ValueKey('inbox-card-open-${c.id}'),
-        onPressed: () => state._openSession(s),
-        child: const Text('Open session'),
-      ),
+    PopupMenuButton<String>(
+      key: ValueKey('inbox-card-more-${c.id}'),
+      tooltip: 'More',
+      icon: const Icon(Icons.more_horiz),
+      onSelected: (v) {
+        if (v == 'tell') unawaited(state._tellSupervisor(it));
+        if (v == 'open' && s != null) state._openSession(s);
+      },
+      itemBuilder: (_) => [
+        PopupMenuItem(key: ValueKey('inbox-card-tell-${c.id}'), value: 'tell', enabled: !busy, child: const Text('Tell the supervisor...')),
+        if (s != null) PopupMenuItem(key: ValueKey('inbox-card-open-${c.id}'), value: 'open', child: const Text('Open session')),
+      ],
+    ),
   ]);
 }
 
@@ -3020,16 +3196,7 @@ class _FocusView extends StatelessWidget {
                 key: const ValueKey('inbox-agent-elsewhere'), style: Theme.of(context).textTheme.bodySmall),
         ];
       case InboxKind.card:
-        final c = it.card!;
-        final theme = Theme.of(context);
-        return [
-          _label(context, 'The supervisor would'),
-          DirectionalText(c.text, style: theme.textTheme.titleMedium?.copyWith(height: 1.4)),
-          if ((c.why ?? '').isNotEmpty) ...[
-            _label(context, 'Why it asks'),
-            DirectionalText(c.why!, style: theme.textTheme.bodyLarge?.copyWith(height: 1.4)),
-          ],
-        ];
+        return [SupervisorCardDetail(it.card!)];
       case InboxKind.supervisorNeed:
         final n = it.need!;
         final theme = Theme.of(context);
@@ -3043,6 +3210,7 @@ class _FocusView extends StatelessWidget {
         ];
       case InboxKind.escalation:
         final c = it.supCase!;
+        if (c.ownerKind != null) return [SupervisorCaseDetail(c)];
         final theme = Theme.of(context);
         return [
           _label(context, 'The supervisor asks'),
@@ -3147,6 +3315,8 @@ class _FocusView extends StatelessWidget {
         ];
       case InboxKind.card:
         return [Padding(padding: pad, child: _cardButtons(context, state, it, large: true))];
+      case InboxKind.escalation when it.supCase!.ownerKind != null:
+        return [Padding(padding: pad, child: _caseButtons(context, state, it, large: true))];
       default:
         return [row([openBtn])];
     }

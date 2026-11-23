@@ -411,6 +411,26 @@ across hand-offs. It hands itself off like any session and is followed through `
   makes a **card** instead: `POST /api/supervisor/cards/:id {decision: approve|dismiss}` types it
   (through every gate) or drops it; each class's record (approved, dismissed, pending) is in
   `GET /api/supervisor/state` (`cases`, `cards`, `dispatcher`, `autonomy`).
+- **Cards explain themselves (#498, design section 12a).** Each card carries a `title` ("The
+  supervisor proposes: ..."), `does` (what Approve does, in plain words), `target` (its session's
+  status, headline and work items) and `why` (recommend mode, or the owner-only word it
+  mentions; a negated mention is no hit). Besides `approve`/`dismiss` the route takes
+  `send {text}` (Edit, then send: the owner's one-line text, through the same gated deliver),
+  `tell {note, dontAsk}` (a note to the supervisor's own session) and `later {hours}` (1-24,
+  default 3: hidden until then, `laterUntil`). Every 409 carries a plain-words `reason`. A
+  pending card **retires** when its session is proven gone (missing on two scans its own server
+  answered; an unreachable own server retires nothing, another peer down blocks nothing) or
+  replaced; the record counts `edited`, `told` and `retired` apart. A note that does not fit the
+  gated prompt is refused (400, `reason`), never cut.
+- **Escalations say what you are asked (#498).** Each case in `GET /api/supervisor/state` carries
+  `owner` (`kind` question or stuck, `title`, `ask`, `whyYou`, `checking`). A case the rules
+  escalated only because the dispatcher did not act on it in time stays the dispatcher's for one
+  more 30-minute window (still handed to it, out of the push and the inbox), then reaches the
+  owner saying why; one escalated because the dispatcher is off, paused or capped reads
+  "Stuck: ..." with what to do. `POST /api/supervisor/cases/:id` also takes `write {text}`
+  (through the gated deliver; closes the case), `later {hours}` and `tell {note}` (to the
+  dispatcher; the case is its again), only on a case escalated to the owner (else 409). The companion's badge and its inbox header count
+  the same "need you" list.
 - Routes (authority only, behind auth): `POST /api/supervisor/act`, `GET /api/supervisor/cases[/:id]`,
   `POST /api/supervisor/cases/:id {action: resolve|ask-owner}`, `POST /api/supervisor/cards/:id`,
   `POST /api/supervisor/pause {paused}`, `POST /api/supervisor/autonomy {class, mode}`,

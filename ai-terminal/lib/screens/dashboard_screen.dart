@@ -34,7 +34,8 @@ import '../services/resource_monitor.dart';
 import '../services/session_repository.dart';
 import '../theme/app_theme.dart';
 import '../theme/status_colors.dart';
-import '../util/inbox_items.dart' show inboxBadgeCount;
+import '../services/supervisor_lookup.dart' show SupervisorFeed;
+import '../util/inbox_queue.dart' show needYouCount;
 import '../util/session_tree.dart';
 import '../widgets/app_version_label.dart';
 import '../widgets/attention_detail_sheet.dart';
@@ -139,9 +140,26 @@ class _DashboardScreenState extends State<DashboardScreen> {
   /// (and persisted to) [SharedPreferences].
   Map<String, bool> _collapsed = const <String, bool>{};
 
+  /// #498 - asks the supervisor for its owner items, so the badge counts the inbox's own
+  /// "need you" list (`needYouCount`); the inbox publishes its answers to the same feed.
+  Timer? _supFirst;
+  Timer? _supTick;
+
+  void _askSupervisor() =>
+      unawaited(SupervisorFeed.instance.refresh(AppConfig.servers, ApiClient.new).catchError((Object _) {}));
+
+  @override
+  void dispose() {
+    _supFirst?.cancel();
+    _supTick?.cancel();
+    super.dispose();
+  }
+
   @override
   void initState() {
     super.initState();
+    _supFirst = Timer(const Duration(seconds: 2), _askSupervisor);
+    _supTick = Timer.periodic(const Duration(seconds: 30), (_) => _askSupervisor());
     _loadCollapsed();
     _loadAgentCatalog();
     // #152 — restore the remembered resources view. With it off (the default)
@@ -647,10 +665,15 @@ class _DashboardScreenState extends State<DashboardScreen> {
                           },
                         ),
                         // #383 - every question waiting on you, answered in
-                        // one place. The count is the blocking items only, read
-                        // off the rows already here: no request of its own.
-                        Builder(builder: (context) {
-                          final waiting = inboxBadgeCount(sessions ?? const <Session>[]);
+                        // one place. #498: the count is the inbox's own "need
+                        // you" list (needYouOf): the rows' blocking items not
+                        // dismissed, and the supervisor's cards and escalations.
+                        ListenableBuilder(listenable: SupervisorFeed.instance, builder: (context, _) {
+                          final rows = sessions ?? const <Session>[];
+                          final waiting = needYouCount(rows,
+                              sup: SupervisorFeed.instance.find,
+                              isDismissed: (it, sig) =>
+                                  it.session != null && SessionRepository.instance.isInboxDismissed(it.server, it.session!, sig));
                           return IconButton(
                             key: const ValueKey('open-questions-inbox'),
                             icon: Badge(

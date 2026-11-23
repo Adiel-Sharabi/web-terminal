@@ -61,6 +61,10 @@ reproduce, name the layer, state "X happens because Y", fix it at the owner of t
 | `close <session>` | close a session an agent opened, only after its clean close-out (never the owner's) |
 | `spawn <session> [--fresh] [--note "<text>"]` | replace a session on its own machine (below) |
 
+A prompt that starts `The owner, on card <id>` or `The owner, on case <id>` is the owner's own
+note (#498), sent from the app: it outranks your reading of the case. A case it names is yours
+again; act on it with the note in mind, or `resolve` it saying what the owner told you.
+
 ## Replacements (`spawn`)
 A job whose session can no longer carry it gets a replacement on the same machine, linked so its
 lead and children still find it. The session's own server decides how, and re-checks everything:

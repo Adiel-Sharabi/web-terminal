@@ -7,6 +7,7 @@ import 'package:ai_terminal/api/supervisor_models.dart';
 import 'package:ai_terminal/util/agent_turn.dart';
 import 'package:ai_terminal/util/inbox_items.dart';
 import 'package:ai_terminal/util/inbox_queue.dart';
+import 'package:ai_terminal/util/supervisor_authority.dart' show SupervisorFind, SupervisorFindKind;
 import 'package:flutter_test/flutter_test.dart';
 
 const _home = ServerConfig(name: 'Home', baseUrl: 'http://h:7681', bearerToken: 't');
@@ -169,6 +170,71 @@ void main() {
         final items = supervisorItemsOf(st, _office, rows, blockingKeys: {sessionKey(rows[1])});
         expect([for (final i in items) i.need!.id], ['x9']);
       });
+    });
+
+    test('#498 a card put off with Later is hidden until its time, then back while still pending', () {
+      final now = DateTime.now().millisecondsSinceEpoch;
+      List<String> ids(int laterUntil) => [
+            for (final i in supervisorItemsOf(
+                _state({
+                  'cards': [
+                    {'id': 'k1', 'sessionId': 's1', 'server': 'Office', 'text': 't', 'at': 1, 'laterUntil': laterUntil},
+                    {'id': 'k2', 'sessionId': 's1', 'server': 'Office', 'text': 't', 'at': 2},
+                  ],
+                }),
+                _office,
+                rows))
+              i.card!.id,
+          ];
+      expect(ids(now + 3600000), ['k2']);
+      expect(ids(now - 1000), ['k1', 'k2']);
+    });
+
+    test('#498 an escalation the supervisor still looks at first, or put off with Later, is not the owner\'s', () {
+      final now = DateTime.now().millisecondsSinceEpoch;
+      List<String> ids(Map<String, dynamic> extra) => [
+            for (final i in supervisorItemsOf(
+                _state({
+                  'cases': [
+                    {'id': 'c1', 'rule': 'R3', 'sessionId': 's2', 'server': 'Home', 'line': 'past checkBy', 'openedAt': 1,
+                      'escalated': {'question': 'past checkBy', 'at': 2, 'auto': true}, ...extra},
+                  ],
+                }),
+                _office,
+                rows))
+              i.supCase!.id,
+          ];
+      expect(ids({'owner': {'kind': 'stuck', 'checking': false}}), ['c1']);
+      expect(ids({'owner': {'kind': 'stuck', 'checking': true}}), isEmpty);
+      expect(ids({'laterUntil': now + 3600000}), isEmpty);
+      expect(ids({'laterUntil': now - 1000}), ['c1']);
+    });
+
+    test('#498 "need you" has ONE definition: the badge counts what the inbox header counts', () {
+      final rows = [
+        _s('q', status: 'waiting', waitingFor: 'question', lastActivity: 1),
+        _s('d', status: 'waiting', waitingFor: 'question', lastActivity: 2),
+        _s('s1', server: _office),
+        _s('busy', status: 'working'),
+      ];
+      final sup = SupervisorFind(SupervisorFindKind.found,
+          server: _office,
+          state: _state({
+            'cards': [
+              {'id': 'k1', 'sessionId': 's1', 'server': 'Office', 'text': 't', 'at': 5},
+            ],
+            'cases': [
+              {'id': 'c1', 'rule': 'R2', 'sessionId': 's1', 'server': 'Office', 'line': 'lost its lead', 'openedAt': 1,
+                'escalated': {'question': 'Stand in?', 'at': 3}},
+            ],
+          }));
+      final queue = needYouOf(inboxItemsOf(rows), sup, rows);
+      expect([for (final i in queue) i.key.split('|').last], ['q', 'd', 'c1', 'k1'],
+          reason: 'the blocking rows, then the supervisor items, longest wait first');
+      expect(needYouCount(rows, sup: sup), queue.length);
+      expect(needYouCount(rows), 2, reason: 'no supervisor answer: the rows alone');
+      // A decided card is hidden here until the authority catches up.
+      expect(needYouOf(inboxItemsOf(rows), sup, rows, decided: {'${_office.baseUrl}|card|k1'}), hasLength(3));
     });
 
     test('nothing from a peer, a switched-off supervisor or no state', () {

@@ -175,7 +175,7 @@ test.describe.serial('#470 replacement sessions', () => {
     expect((await a.post('/api/supervisor/autonomy', { data: { class: 'spawn', mode: 'recommend' } })).ok()).toBe(true);
     const rec = await a.post('/api/supervisor/spawn', { data: { session: H, note: 'carry on from the last report' } });
     expect(rec.status(), await rec.text()).toBe(200);
-    expect(await rec.json()).toMatchObject({ replaced: false, why: 'spawn is in recommend mode' });
+    expect(await rec.json()).toMatchObject({ replaced: false, why: 'you set "spawn" to ask you first (recommend mode)' });
     expect((await row(H)).handoff?.run ?? null).toBeNull();
     expect((await a.post('/api/supervisor/autonomy', { data: { class: 'spawn', mode: 'act' } })).ok()).toBe(true);
     const r = await a.post('/api/supervisor/spawn', { data: { session: H } });
