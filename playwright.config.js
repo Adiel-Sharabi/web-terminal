@@ -116,6 +116,9 @@ process.env.WT_LEASE_RECORDS_FILE = path.join(__dirname, 'lease-records.test.jso
 // #502 - the tracker-details cache. The suite's fake answers must never land in production's
 // mc-tracker-cache.json (they would be served as real work items); reset per run.
 process.env.WT_MC_TRACKER_CACHE_FILE = path.join(__dirname, 'mc-tracker-cache.test.json');
+// #505 - Mission Control's state (stage history): the suite's subjects must never land in
+// production's mc-state.json; reset per run.
+process.env.WT_MC_STATE_FILE = path.join(__dirname, 'mc-state.test.json');
 // #366 - the binary behind GET /api/dashboard/background-agents. The suite must never launch
 // the real CLI: its listing names every project's sessions on the machine, and a developer
 // box and a CI runner would answer differently. Pointing it at a path that does not exist

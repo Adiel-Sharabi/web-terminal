@@ -725,6 +725,13 @@ companion's daily foreground time from a phone over adb in `logs/phone-usage.jso
   repo, ADO project or folder) and areas (ADO Area Path, a GitHub label or a folder); anything
   unclaimed lands in **Other**. `GET /api/mc/projects` lists them, answered by the cluster's lease
   authority (another server answers `409` naming it).
+- **Progress stage (#505):** a report item may say how far the work got (`triage` ... `merged`,
+  `tested`). Evidence from the tracker wins over a stale report: a merged pull request or a closed
+  work item shows at least Merged, and a stage never moves backwards (its history is kept).
+- **Subjects (#504):** `GET /api/mc/subjects` joins every server's sessions on the work item they
+  report into one subject each (live sessions and the week's closed ones), with its details, stage,
+  what it waits on and the runs (an orchestrator and its helper sessions) that group several;
+  `GET /api/mc/subjects/:key` answers one. `GET /api/mc/projects` counts them per project and area.
 - Shapes and rules: [docs/mission-control.md](docs/mission-control.md).
 
 **Companion app** — a native Android + Windows client with the chat lens and push that
@@ -744,7 +751,7 @@ Full list: **[docs/FEATURES.md](docs/FEATURES.md)**.
 | **[docs/COMPANION.md](docs/COMPANION.md)** | The Android + Windows companion app |
 | **[docs/TROUBLESHOOTING.md](docs/TROUBLESHOOTING.md)** | Known symptoms and dev tooling |
 | **[docs/ARCHITECTURE.md](docs/ARCHITECTURE.md)** | How the three-process design works |
-| **[docs/mission-control.md](docs/mission-control.md)** | Mission Control's wire contract: work-item details, projects and areas |
+| **[docs/mission-control.md](docs/mission-control.md)** | Mission Control's wire contract: work-item details, projects and areas, stage, subjects and runs |
 | **[AGENTS.md](AGENTS.md)** | Point an AI agent at this repo and it can install and operate it |
 | **[CONTRIBUTING.md](CONTRIBUTING.md)** | Dev setup and the PR gate |
 | **[SECURITY.md](SECURITY.md)** | Threat model and vulnerability reporting |

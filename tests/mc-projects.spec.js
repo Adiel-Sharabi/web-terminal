@@ -127,12 +127,12 @@ test.describe('#503 the projects view', () => {
     expect(byId.video).toMatchObject({ name: 'Video product', tracker: { kind: 'github', repo: 'Acme/Video' } });
     expect(byId.video.areas.map((a) => a.name)).toEqual(['GUI', 'Video', 'General']);
     expect(byId.deep).toMatchObject({ tracker: null, areas: [{ id: 'general', name: 'General' }] });
-    expect(byId.tools.counts).toEqual({ active: 0, needsYou: 0, waitsOnOthers: 0, doneWeek: 0, sessions: 2 });
+    expect(byId.tools.counts).toEqual({ active: 0, needsYou: 0, waitsOnOthers: 0, doneWeek: 0, sessions: 2, stages: { triage: 0, reproduced: 0, planned: 0, fixing: 0, 'pr-open': 0, 'in-review': 0, merged: 0, tested: 0 } });
     // A folder-rule project counts its sessions per area.
     expect(Object.fromEntries(byId.tools.areas.map((a) => [a.name, a.counts.sessions]))).toEqual({ CLI: 1, Misc: 1, General: 0 });
     // A repo without areas works as ONE area.
     expect(byId.other).toMatchObject({ name: 'Other', tracker: null, counts: { sessions: 1 } });
-    expect(byId.other.areas).toEqual([{ id: 'general', name: 'General', counts: { active: 0, needsYou: 0, waitsOnOthers: 0, doneWeek: 0, sessions: 1 } }]);
+    expect(byId.other.areas).toEqual([{ id: 'general', name: 'General', counts: { active: 0, needsYou: 0, waitsOnOthers: 0, doneWeek: 0, sessions: 1, stages: { triage: 0, reproduced: 0, planned: 0, fixing: 0, 'pr-open': 0, 'in-review': 0, merged: 0, tested: 0 } } }]);
   });
 
   test('no projects configured: everything is Other', () => {
