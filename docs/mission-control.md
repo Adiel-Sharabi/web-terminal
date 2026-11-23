@@ -9,7 +9,8 @@ are the plan, not a description of the server.
 Landed: Who answers, Work-item meta (#502), Projects and areas (#503), Stage (#505), Subjects
 (#504), Answer now / My to-do (#506), Ask (#511). Advertised in `/api/version` `capabilities`: `work-item-meta`,
 `mission-control` (#502/#503), `mc-subjects` (#504/#505: the subjects routes, `stage` on report
-items, `counts.stages`) and `mc-needs` (#506: `/api/mc/now`, `/api/mc/todo[/:id]`, `/api/mc/later`).
+items, `counts.stages`) and `mc-needs` (#506: `/api/mc/now`, `/api/mc/todo[/:id]`, `/api/mc/later`); Ask has no
+capability of its own (a server without it answers a bare 404).
 
 ## Who answers (one owner for cluster-wide state)
 Mission Control is computed on ONE server per cluster: the same authority the supervisor uses

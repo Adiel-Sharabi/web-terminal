@@ -4,6 +4,7 @@
 // home's phone tab and desktop panel sharing one conversation. Synthetic data only.
 import 'dart:async';
 import 'dart:convert';
+import 'dart:io' show SocketException;
 
 import 'package:ai_terminal/api/api_client.dart';
 import 'package:ai_terminal/api/mc_ask_models.dart';
@@ -93,6 +94,13 @@ void main() {
       await expectLater(c.mcAsk('q', McAskScope.all),
           throwsA(isA<ApiException>().having((e) => e.message, 'message', contains('busy')).having((e) => e.status, 'status', 503)));
     });
+
+    test("Mission Control's own 503 (no authority) shows the server's words, not \"try again\"", () async {
+      final c = ApiClient(_a, httpClient: MockClient((req) async =>
+          http.Response(jsonEncode({'error': 'Mission Control has no authority: leases.authority names no server'}), 503)));
+      await expectLater(c.mcAsk('q', McAskScope.all),
+          throwsA(isA<ApiException>().having((e) => e.message, 'message', contains('leases.authority'))));
+    });
   });
 
   group('McAnalyst finds the server answering Mission Control', () {
@@ -129,6 +137,29 @@ void main() {
       await expectLater(an2.ask('q', const McAskScope.session('x')),
           throwsA(isA<ApiException>().having((e) => e.message, 'm', 'no such session in the cluster')));
       expect(asked, ['alpha.test /api/mc/ask'], reason: 'a real 404 is an answer, not a reason to ask elsewhere');
+    });
+
+    test('a timeout is final: another server is never asked (it would start a second paid run)', () async {
+      final asked = <String>[];
+      final an = McAnalyst(
+        servers: () => const [_a, _b],
+        client: _clients({
+          'alpha.test': (_) => throw TimeoutException('slow'),
+          'beta.test': (_) => http.Response(jsonEncode(_answerJson()), 200),
+        }, asked),
+      );
+      await expectLater(an.ask('q', McAskScope.all), throwsA(isA<ApiException>().having((e) => e.message, 'm', contains('too long'))));
+      expect(asked, ['alpha.test /api/mc/ask']);
+      // An UNREACHABLE server started nothing: the next one is asked.
+      final an2 = McAnalyst(
+        servers: () => const [_a, _b],
+        client: _clients({
+          'alpha.test': (_) => throw const SocketException('refused'),
+          'beta.test': (_) => http.Response(jsonEncode(_answerJson()), 200),
+        }, asked..clear()),
+      );
+      await an2.ask('q', McAskScope.all);
+      expect(asked, ['alpha.test /api/mc/ask', 'beta.test /api/mc/ask']);
     });
 
     test('a server from before Ask (a bare 404) and an unreachable one are skipped', () async {

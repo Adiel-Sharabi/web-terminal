@@ -77,7 +77,8 @@ test.describe('#511 the bundle', () => {
   };
 
   test('every block is timed and carries a source id; sources name the session, report, recap, item and PR', () => {
-    const recaps = new Map([['a', { prompt: { text: 'please fix login' }, reply: { text: 'Done, PR open.', at: NOW - 4 * MIN }, since: { turns: 3, tools: ['Edit ×2', 'Bash'] } }]]);
+    // The real recap shape: `at` is the transcript line's ISO `timestamp` string (lib/recap.js).
+    const recaps = new Map([['a', { prompt: { text: 'please fix login', at: new Date(NOW - 20 * MIN).toISOString() }, reply: { text: 'Done, PR open.', at: new Date(NOW - 4 * MIN).toISOString() }, since: { turns: 3, tools: ['Edit ×2', 'Bash'] } }]]);
     const b = an.buildBundle({ rows: [row('a')], metaOf: (k) => (k === 'acme/web#7' ? meta : null), recaps, now: NOW });
     expect(b.sources.map((s) => [s.id, s.kind])).toEqual([['S1', 'session'], ['S2', 'report'], ['S3', 'recap'], ['S4', 'workitem'], ['S5', 'pr']]);
     expect(b.sources[0]).toEqual({ id: 'S1', kind: 'session', label: 'sess-a', server: 'alpha', sessionId: 'a', at: NOW - 5 * MIN, url: null });
@@ -89,8 +90,17 @@ test.describe('#511 the bundle', () => {
     expect(b.text).toContain(`${new Date(NOW - 10 * MIN).toISOString()}, 10 min ago`);
     expect(b.text).toContain('3 h ago');
     expect(b.text).toContain('Edit ×2, Bash');
+    expect(b.text).toContain(`recap from the transcript (${new Date(NOW - 4 * MIN).toISOString()}, 4 min ago)`);
     expect(b.dataAge).toEqual({ oldestAt: NOW - 3 * 60 * MIN, newestAt: NOW - 4 * MIN });
     expect(b.cut).toBeNull();
+  });
+
+  test('a time a peer sent out of range, or as junk, is "time unknown" - never a throw', () => {
+    const b = an.buildBundle({ rows: [row('a', { lastActivity: 1e20, brief: { headline: 'h', reportAt: 'not a date' } })], now: NOW });
+    expect(b.sources[0].at).toBeNull();
+    expect(b.sources[1].at).toBeNull();
+    expect(b.text).toContain('time unknown');
+    expect(b.dataAge).toEqual({ oldestAt: null, newestAt: null });
   });
 
   test('an item with no cached details says so and keeps the reported link', () => {
@@ -153,6 +163,12 @@ test.describe('#511 the answer', () => {
     expect(an.parseAnswer(wrap({ answer: '  ' }), [])).toBeNull();
     expect(an.parseAnswer('prose only', [])).toBeNull();
     expect(an.parseAnswer(wrap({ answer: 'y'.repeat(an.ANSWER_CAP + 50) }), [])?.answer).toHaveLength(an.ANSWER_CAP);
+    // A cut never leaves half of a surrogate pair.
+    const emoji = String.fromCodePoint(0x1f600);
+    const cut = /** @type {string} */ (an.parseAnswer(wrap({ answer: 'y'.repeat(an.ANSWER_CAP - 2) + emoji + emoji }), [])?.answer);
+    expect(cut.endsWith('…')).toBe(true);
+    const last = cut.charCodeAt(cut.length - 2); // the unit before the ellipsis
+    expect(last >= 0xd800 && last <= 0xdbff).toBe(false);
   });
 });
 
@@ -160,7 +176,8 @@ test.describe('#511 the service over a fake CLI', () => {
   /** @type {string} */
   let dir;
   test.beforeEach(() => { dir = fs.mkdtempSync(path.join(os.tmpdir(), 'wt-analyst-')); });
-  test.afterEach(() => { fs.rmSync(dir, { recursive: true, force: true }); });
+  // A child killed at the timeout can hold the folder for a moment on Windows (EBUSY).
+  test.afterEach(() => { fs.rmSync(dir, { recursive: true, force: true, maxRetries: 20, retryDelay: 100 }); });
 
   const svc = (cfg = {}, extra = {}) => an.createAnalyst({
     getConfig: () => ({ command: [process.execPath, FAKE], ...cfg }),
@@ -204,8 +221,11 @@ test.describe('#511 the service over a fake CLI', () => {
     fs.writeFileSync(path.join(dir, 'mode.json'), JSON.stringify({ mode: 'exit1' }));
     expect((await svc().ask(input())).body).toEqual({ status: 'failed', reason: 'error' });
     fs.writeFileSync(path.join(dir, 'mode.json'), JSON.stringify({ mode: 'sleep', ms: 5000 }));
-    const t = await svc({ timeoutMs: 400 }).ask(input());
+    const slow = svc({ timeoutMs: 400 });
+    const t = await slow.ask(input());
     expect(t).toEqual({ status: 502, body: { status: 'failed', reason: 'timeout' } });
+    // The child it timed out on is killed (by its recorded handle), not left running.
+    await expect.poll(() => slow._stats().children, { timeout: 5000 }).toBe(0);
   });
 
   test('the same question over the same data shares one run; past the slots it is busy', async () => {

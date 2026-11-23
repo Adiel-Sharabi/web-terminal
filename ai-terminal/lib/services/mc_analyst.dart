@@ -3,8 +3,10 @@
 // [McAnalyst] sends a question to the server that answers Mission Control, by the rule the
 // feed uses (lib/services/mc_feed.dart): the server that answered Mission Control last is
 // asked first; a 409 peer answer names the authority, asked next by url
-// ([serverForAuthority]); a transport failure moves on to the next server. Any other answer
-// is final: a 404 naming what is unknown, a 400, a 502/503 with the reason in words.
+// ([serverForAuthority]); a server that cannot be reached moves on to the next one. Any other
+// answer is final: a 404 naming what is unknown, a 400, a 502/503 with the reason in words -
+// and a TIMEOUT: that server may still be running the model, and asking another would start a
+// second, separately billed run over the same question.
 // Later screens (#509's "Ask about this subject", #510's follow-ups) call [McAnalyst.ask]
 // with their own scope.
 //
@@ -67,9 +69,12 @@ class McAnalyst {
         }
         return one(target);
       } on ApiException catch (e) {
-        if (e.isTransport) {
+        if (e.isTransport && e.message != ApiClient.timedOutMessage) {
           lastError = ApiException(0, '${sv.name}: ${e.message}');
           continue;
+        }
+        if (e.isTransport) {
+          throw const ApiException(0, 'The Analyst took too long to answer: try a narrower scope or question');
         }
         // Express's own 404 (no JSON error): a server from before Ask.
         if (e.status == 404 && e.message == 'Not found') {

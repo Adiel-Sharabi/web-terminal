@@ -6966,6 +6966,12 @@ app.get('/api/work-items/:ref/meta', async (req, res) => {
 });
 
 // --- API: #503/#504/#505 Mission Control: subjects, runs, projects and areas ---
+/** A cluster row's git origin, for lib/projects.js: this server's own sessions have one it can
+ *  read; a peer's cwd is on the peer, so its project comes from the items it reported
+ *  (originFromItems). One rule for the Mission Control view and /api/mc/ask. */
+function mcRowOrigin(s) {
+  return s.server === getServerName() && !s.serverUrl ? originForCwd(s.cwd) : null;
+}
 // Answered by the authority only (lib/mc-authority.js); every other server says which one.
 // ONE view feeds every route below: the cluster view (cachedClusterSessions), every server's
 // closed strip (this one's from the brief store, each peer's GET /api/dashboard/closed), the
@@ -7002,11 +7008,7 @@ async function _computeMcView(reqUser) {
   const cluster = await cachedClusterSessions(reqUser);
   const now = Date.now();
   const me = getServerName();
-  // This server's own sessions have a git origin it can read; a peer's cwd is on the peer,
-  // so its project comes from the items it reported (lib/projects.js originFromItems).
-  const rows = (Array.isArray(cluster.sessions) ? cluster.sessions : []).map((s) => ({
-    ...s, origin: s.server === me && !s.serverUrl ? originForCwd(s.cwd) : null,
-  }));
+  const rows = (Array.isArray(cluster.sessions) ? cluster.sessions : []).map((s) => ({ ...s, origin: mcRowOrigin(s) }));
   const closed = briefLib.liveClosed(briefStore().closed, now).map((rec) => ({ server: me, serverUrl: null, rec, origin: originForCwd(rec.cwd) }));
   const tokens = loadClusterTokens();
   const peers = (Array.isArray(cluster.servers) ? cluster.servers : []).filter((s) => s && s.url);
@@ -7297,10 +7299,8 @@ app.post('/api/mc/ask', express.json({ limit: '16kb' }), async (req, res) => {
   let picked;
   try {
     const { sessions } = await cachedClusterSessions(clusterReqUser(req));
-    const me = getServerName();
-    // The project rule is /api/mc/projects' (lib/projects.js): a local cwd's git origin, a peer's items.
     const rows = (Array.isArray(sessions) ? sessions : []).map((s) => ({ ...s,
-      project: projectsLib.projectOfSession({ cwd: s.cwd, origin: s.server === me && !s.serverUrl ? originForCwd(s.cwd) : null, items: s.brief && s.brief.items }, cfg.projects) }));
+      project: projectsLib.projectOfSession({ cwd: s.cwd, origin: mcRowOrigin(s), items: s.brief && s.brief.items }, cfg.projects) }));
     picked = mcAnalyst.selectSessions(rows, v.scope);
   } catch (e) {
     console.error(`[mc] ask: ${e.message}`);

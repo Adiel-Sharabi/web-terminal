@@ -133,6 +133,10 @@ class ApiClient {
 
   final http.Client _http;
   static const Duration _timeout = Duration(seconds: 10);
+
+  /// The [ApiException.message] of a call that got no answer in time (status 0, like an
+  /// unreachable server - but the server may still be working on it).
+  static const String timedOutMessage = 'Request timed out';
   static const Duration _uploadTimeout = Duration(seconds: 30);
 
   /// How long an upload of [bytes] may take before it is called dead.
@@ -218,7 +222,7 @@ class ApiClient {
     } on ApiException {
       rethrow;
     } on TimeoutException {
-      throw const ApiException(0, 'Request timed out');
+      throw const ApiException(0, timedOutMessage);
     } catch (_) {
       throw const ApiException(0, 'Server unreachable');
     } finally {
@@ -477,7 +481,12 @@ class ApiClient {
         timeout: const Duration(seconds: 150),
         alsoAccept: const {400, 409, 502, 503});
     if (res.statusCode == 502 || res.statusCode == 503) {
-      throw ApiException(res.statusCode, McAnswer.failureText(_asMap(_decode(res))['reason']));
+      final m = _asMap(_decode(res));
+      // A run that could not answer says why in `reason`; Mission Control's own refusal (a
+      // `leases.authority` naming no known server) is a 503 with only `error`: show its words.
+      final error = m['error'];
+      throw ApiException(res.statusCode,
+          m['reason'] == null && error is String && error.isNotEmpty ? error : McAnswer.failureText(m['reason']));
     }
     return McAnswer.fromJson(_mcAnswer(res));
   }
@@ -1028,7 +1037,7 @@ class ApiClient {
     } on ApiException {
       rethrow;
     } on TimeoutException {
-      throw const ApiException(0, 'Request timed out');
+      throw const ApiException(0, timedOutMessage);
     } catch (_) {
       throw const ApiException(0, 'Server unreachable');
     }
@@ -1082,7 +1091,7 @@ class ApiClient {
     } on ApiException {
       rethrow;
     } on TimeoutException {
-      throw const ApiException(0, 'Request timed out');
+      throw const ApiException(0, timedOutMessage);
     } catch (_) {
       throw const ApiException(0, 'Server unreachable');
     }
@@ -1162,7 +1171,7 @@ class ApiClient {
     } on ApiException {
       rethrow;
     } on TimeoutException {
-      throw const ApiException(0, 'Request timed out');
+      throw const ApiException(0, timedOutMessage);
     } catch (_) {
       throw const ApiException(0, 'Server unreachable');
     }
