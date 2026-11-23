@@ -161,7 +161,8 @@ Subject = { key, ref, url, title,          // title: meta.title, else the newest
   project, area, meta: Meta|null, stage: Stage,
   sessions: [SessionRef],                  // newest report first
   needsYou: Card|null,                     // until #506: {id, kind, server, serverUrl, sessionId, sessionName,
-                                           //   subjectKey, ref, title, what, askedAt}; kind question|permission|decision|wait
+                                           //   subjectKey, ref, title, what, askedAt, decision}; kind question|permission|decision|wait;
+                                           //   decision = the reported wait's decision (#492) on a decision card, else null
   waitsOn: 'you'|'self'|'external'|'done'|null,
   buckets: ['active'|'doneWeek', 'needsYou'?, 'waitsOnOthers'?],   // the Counts keys it is counted under
   runId: string|null, updatedAt }

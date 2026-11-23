@@ -156,7 +156,8 @@ test.describe('#504 what a subject waits on, and the one bucket rule', () => {
     const d = row('alpha', { items: [{ ref: 'ado:2' }], reason: { kind: 'you', text: 'choose' }, wait: { on: 'you', what: 'choose', decision: { question: 'q', options: [] } } });
     const v = view({ rows: [q, d] });
     expect(v.subjects.find((s) => s.key === 'ado:1').needsYou.kind).toBe('question');
-    expect(v.subjects.find((s) => s.key === 'ado:2').needsYou.kind).toBe('decision');
+    expect(v.subjects.find((s) => s.key === 'ado:2').needsYou).toMatchObject({ kind: 'decision', decision: { question: 'q', options: [] } });
+    expect(v.subjects.find((s) => s.key === 'ado:1').needsYou.decision).toBe(null);
   });
 
   test('a peer too old to send a reason is read from its status and reported wait', () => {
