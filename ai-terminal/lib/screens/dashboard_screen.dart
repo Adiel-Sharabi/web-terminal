@@ -761,7 +761,7 @@ class _DashboardScreenState extends State<DashboardScreen> {
                     ),
                     if (servers.length > 1)
                       SliverToBoxAdapter(
-                        child: _FilterChips(
+                        child: DashboardMachineFilter(
                           servers: servers,
                           value: _filter,
                           onChanged: (v) => setState(() => _filter = v),
@@ -1289,12 +1289,23 @@ class _TitleFilterState extends State<_TitleFilter> {
   }
 }
 
-class _FilterChips extends StatelessWidget {
-  const _FilterChips({
+/// The machine filter row (#487). It WRAPS instead of scrolling sideways: with seven
+/// machines a phone-width row hid half of them off screen. The chips are compact so the
+/// whole set fits in two rows at the S25's 384 dp, and nothing changes width on select
+/// (no checkmark), so picking a chip can never reflow the row onto a third line. A long
+/// machine name is capped and ellipsised (the full name is the tooltip) - one
+/// mDNS-style host name was as wide as three ordinary chips.
+@visibleForTesting
+class DashboardMachineFilter extends StatelessWidget {
+  const DashboardMachineFilter({
+    super.key,
     required this.servers,
     required this.value,
     required this.onChanged,
   });
+
+  /// Widest a machine name may draw before it is ellipsised.
+  static const double maxLabelWidth = 120;
 
   final List<ServerConfig> servers;
   final String value;
@@ -1304,29 +1315,54 @@ class _FilterChips extends StatelessWidget {
   Widget build(BuildContext context) {
     final labels = [_kAllServers, ...servers.map((s) => s.name)];
     return Padding(
-      padding: const EdgeInsets.symmetric(vertical: 4),
-      child: SizedBox(
-        height: 40,
-        child: ListView.separated(
-          scrollDirection: Axis.horizontal,
-          padding: const EdgeInsets.symmetric(
-            horizontal: AppSpacing.screenPadding,
-          ),
-          itemCount: labels.length,
-          separatorBuilder: (_, _) => const SizedBox(width: 8),
-          itemBuilder: (context, i) {
-            final label = labels[i];
-            final sv = i == 0 ? null : servers[i - 1];
-            return ChoiceChip(
-              avatar: sv == null
-                  ? null
-                  : ServerSwatch(color: colorFromHex(SessionRepository.instance.serverColor(sv.baseUrl))),
-              label: Text(label),
-              selected: value == label,
-              onSelected: (_) => onChanged(label),
-            );
-          },
+      padding: const EdgeInsets.fromLTRB(
+        AppSpacing.screenPadding,
+        4,
+        AppSpacing.screenPadding,
+        4,
+      ),
+      child: Wrap(
+        spacing: 6,
+        runSpacing: 6,
+        children: [
+          for (var i = 0; i < labels.length; i++)
+            _chip(labels[i], i == 0 ? null : servers[i - 1]),
+        ],
+      ),
+    );
+  }
+
+  Widget _chip(String label, ServerConfig? sv) {
+    return Tooltip(
+      message: label,
+      excludeFromSemantics: true,
+      child: ChoiceChip(
+        key: ValueKey('machine-filter-chip-$label'),
+        // The swatch rides inside the label, not in `avatar`: the avatar slot costs
+        // 32 dp per chip for an 8 dp square (measured), which alone made a third row.
+        // An unknown colour still reserves the swatch's space, so the colours
+        // arriving later never reflow the row.
+        label: Row(
+          mainAxisSize: MainAxisSize.min,
+          children: [
+            if (sv != null)
+              ServerSwatch(
+                color: colorFromHex(SessionRepository.instance.serverColor(sv.baseUrl)) ??
+                    Colors.transparent,
+              ),
+            ConstrainedBox(
+              constraints: const BoxConstraints(maxWidth: maxLabelWidth),
+              child: Text(label, maxLines: 1, overflow: TextOverflow.ellipsis, softWrap: false),
+            ),
+          ],
         ),
+        showCheckmark: false,
+        visualDensity: VisualDensity.compact,
+        materialTapTargetSize: MaterialTapTargetSize.shrinkWrap,
+        padding: const EdgeInsets.symmetric(horizontal: 4),
+        labelPadding: const EdgeInsets.symmetric(horizontal: 4),
+        selected: value == label,
+        onSelected: (_) => onChanged(label),
       ),
     );
   }
