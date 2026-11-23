@@ -14,6 +14,7 @@ import 'dart:math';
 import 'package:http/http.dart' as http;
 import 'package:web_socket_channel/web_socket_channel.dart';
 
+import 'mc_models.dart';
 import 'models.dart';
 import 'supervisor_models.dart';
 
@@ -37,6 +38,12 @@ class ApiException implements Exception {
 
   @override
   String toString() => 'ApiException($status, $message)';
+}
+
+/// #507 - a server that is not the cluster's Mission Control answered with the one that is.
+class McPeerException extends ApiException {
+  final McAuthority authority;
+  McPeerException(this.authority) : super(409, 'Mission Control is served by ${authority.label}');
 }
 
 /// A file name that can actually ride an HTTP header value.
@@ -400,6 +407,57 @@ class ApiClient {
       throw ApiException(res.statusCode, why is String && why.isNotEmpty ? why : 'refused');
     }
     return m;
+  }
+
+  // --- Mission Control (#507, `docs/mission-control.md`) -------------------
+  //
+  // Computed on ONE server per cluster. Any other server answers every `/api/mc/*` call
+  // `409 {role: 'peer', authority: {name, url}}`, thrown as [McPeerException] so the
+  // caller can ask the authority instead; a server without Mission Control answers 404,
+  // thrown like any failure (`status == 404`).
+
+  /// What needs the person now (`GET /api/mc/now`).
+  Future<McNow> mcNow() async => McNow.fromJson(await _mcGet('/api/mc/now'));
+
+  /// Every project with its areas and counts (`GET /api/mc/projects`).
+  Future<McProjects> mcProjects() async => McProjects.fromJson(await _mcGet('/api/mc/projects'));
+
+  /// Moves Answer-now card [cardId] to My to-do (`POST /api/mc/todo`); the server sends
+  /// its session one park message. [text] is the person's own wording, or null.
+  Future<McTodoResult> mcAddTodo(String cardId, {String? text}) async =>
+      McTodoResult.fromJson(await _mcPost('/api/mc/todo', {'cardId': cardId, 'text': ?text}));
+
+  /// Marks to-do [id] `done`, `reopen`s it, or sends it `back` to Answer now.
+  Future<Map<String, dynamic>> mcTodoAction(String id, String action) =>
+      _mcPost('/api/mc/todo/${Uri.encodeComponent(id)}', {'action': action});
+
+  /// Hides card [cardId] for [hours] (1-24); it comes back only if still pending.
+  Future<Map<String, dynamic>> mcLater(String cardId, int hours) =>
+      _mcPost('/api/mc/later', {'cardId': cardId, 'hours': hours});
+
+  Future<Map<String, dynamic>> _mcGet(String path) async {
+    final res = await _send('GET', path, alsoAccept: const {409});
+    return _mcAnswer(res);
+  }
+
+  Future<Map<String, dynamic>> _mcPost(String path, Map<String, Object?> body) async {
+    final res = await _send('POST', path, body: body, alsoAccept: const {400, 409});
+    return _mcAnswer(res);
+  }
+
+  /// A 2xx body as a map; a 409 peer answer as [McPeerException]; any other 409 or a 400
+  /// thrown with the server's own reason.
+  Map<String, dynamic> _mcAnswer(http.Response res) {
+    final body = _decode(res);
+    if (res.statusCode == 409 || res.statusCode == 400) {
+      final peer = res.statusCode == 409 ? McAuthority.fromPeerAnswer(body) : null;
+      if (peer != null) throw McPeerException(peer);
+      final m = _asMap(body);
+      final why = m['reason'] ?? m['refused'] ?? m['error'];
+      throw ApiException(res.statusCode, why is String && why.isNotEmpty ? why : 'refused');
+    }
+    if (body is! Map<String, dynamic>) throw const ApiException(0, 'Malformed server response');
+    return body;
   }
 
   /// This machine's Claude login and its saved accounts (`GET /api/claude-account`,

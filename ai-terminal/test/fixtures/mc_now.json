@@ -1,0 +1,81 @@
+{
+  "generatedAt": 1767225600000,
+  "answerNow": [
+    {
+      "id": "alpha|s-1|you:pick",
+      "kind": "decision",
+      "server": "alpha",
+      "serverUrl": "http://alpha.test:7681",
+      "sessionId": "s-1",
+      "sessionName": "Fix the login loop",
+      "project": "Web Terminal",
+      "subjectKey": "acme/widgets#41",
+      "ref": "#41",
+      "title": "Login loops after a token refresh",
+      "what": "Which fix should ship?",
+      "why": {
+        "blocks": 3,
+        "blockedSessions": [
+          {"server": "alpha", "id": "s-2", "name": "Child: write the test"},
+          {"server": "beta", "id": "s-3", "name": "Child: check the docs"}
+        ],
+        "severity": 1,
+        "ageMin": 42,
+        "text": "blocks 3 sessions"
+      },
+      "rank": 1,
+      "askedAt": 1767223080000,
+      "decision": {
+        "question": "Which fix should ship?",
+        "context": "Two ways out.",
+        "options": [
+          {"label": "Retry once", "consequence": "small change"},
+          {"label": "Refresh first", "consequence": "touches the client"}
+        ],
+        "recommended": 1
+      },
+      "hasQuestion": false
+    },
+    {
+      "id": "beta|s-9|you:look",
+      "kind": "wait",
+      "server": "beta",
+      "sessionId": "s-9",
+      "sessionName": "Tidy the readme",
+      "project": "Docs",
+      "ref": "ado:1234",
+      "title": "Readme is out of date",
+      "what": "Check the new wording",
+      "why": {"blocks": 0, "ageMin": 5, "text": "waiting 5 min"},
+      "rank": 2,
+      "futureField": {"anything": true}
+    },
+    {"kind": "question", "title": "no id: cannot be addressed, so it is dropped"}
+  ],
+  "todo": [
+    {"id": "t-1", "cardId": "alpha|s-5|you:test", "ref": "#40", "title": "Test on a phone", "project": "Web Terminal", "text": "Try it on the tablet", "server": "alpha", "sessionId": "s-5", "createdAt": 1767222000000, "doneAt": null},
+    {"id": "t-2", "ref": "#39", "title": "Flash the board", "project": "Firmware", "createdAt": 1767100000000, "doneAt": 1767200000000}
+  ],
+  "moving": {"working": 4, "idle": 2, "total": 6},
+  "projects": [
+    {
+      "id": "web-terminal",
+      "name": "Web Terminal",
+      "tracker": {"kind": "github", "repo": "acme/widgets"},
+      "areas": [
+        {"id": "companion", "name": "Companion", "counts": {"active": 3, "needsYou": 1, "waitsOnOthers": 0, "doneWeek": 2, "sessions": 4}},
+        {"id": "server", "name": "Server", "counts": {"active": 2, "needsYou": 0}}
+      ],
+      "counts": {
+        "active": 5, "needsYou": 1, "waitsOnOthers": 1, "doneWeek": 2, "sessions": 6,
+        "stages": [
+          {"stage": "triage", "count": 1},
+          {"stage": "fixing", "count": 2},
+          {"stage": "pr-open", "count": 1, "label": "PR open"},
+          {"stage": "merged", "count": 0}
+        ]
+      }
+    },
+    {"id": "other", "name": "Other", "tracker": null, "areas": [], "counts": {"active": "junk", "sessions": -3}}
+  ]
+}

@@ -60,6 +60,7 @@ class SettingsScreen extends StatelessWidget {
           const _FontSizeSection(),
           if (SpeechService.supported) const _SpeechRateSection(),
           const _LaunchSection(),
+          const _HomeSection(),
           const Divider(height: 1),
           Padding(
             padding: const EdgeInsets.fromLTRB(
@@ -759,6 +760,50 @@ class _LaunchSectionState extends State<_LaunchSection> {
               setState(() => _on = v);
               LaunchSettings.instance.setEnabled(v);
             },
+    );
+  }
+}
+
+/// "Home on launch" (#507): the sessions home or Mission Control. [LaunchSettings] holds
+/// the choice; it takes effect at the next launch (switching now is a tap in either home).
+class _HomeSection extends StatefulWidget {
+  const _HomeSection();
+
+  @override
+  State<_HomeSection> createState() => _HomeSectionState();
+}
+
+class _HomeSectionState extends State<_HomeSection> {
+  AppHome? _home;
+
+  @override
+  void initState() {
+    super.initState();
+    LaunchSettings.instance.restoreHome().then((v) {
+      if (mounted) setState(() => _home = v);
+    });
+  }
+
+  @override
+  Widget build(BuildContext context) {
+    return ListTile(
+      title: const Text('Home on launch'),
+      subtitle: const Text('Which home the app opens on. Either one switches to the other in a tap.'),
+      trailing: SegmentedButton<AppHome>(
+        key: const ValueKey('settings-launch-home'),
+        showSelectedIcon: false,
+        segments: const [
+          ButtonSegment(value: AppHome.sessions, label: Text('Sessions')),
+          ButtonSegment(value: AppHome.missionControl, label: Text('Mission Control')),
+        ],
+        selected: {_home ?? AppHome.sessions},
+        onSelectionChanged: _home == null
+            ? null
+            : (v) {
+                setState(() => _home = v.first);
+                LaunchSettings.instance.setHome(v.first);
+              },
+      ),
     );
   }
 }

@@ -415,24 +415,16 @@ class _WorkBoardScreenState extends State<WorkBoardScreen> {
       return;
     }
     _leasesAsking = true;
-    LeaseListing? got;
-    String? firstError;
+    ({LeaseListing? table, String? down}) got;
     try {
-      for (final sv in usable) {
-        try {
-          got = await _client(sv).leases();
-          break;
-        } on ApiException catch (e) {
-          firstError ??= '${sv.name} says ${e.message}';
-        }
-      }
+      got = await askLeaseTable(usable, _client);
     } finally {
       _leasesAsking = false;
     }
     if (!mounted) return;
     setState(() {
-      _leaseTable = got;
-      _leaseDown = got == null ? firstError : null;
+      _leaseTable = got.table;
+      _leaseDown = got.down;
     });
   }
 
@@ -471,14 +463,8 @@ class _WorkBoardScreenState extends State<WorkBoardScreen> {
 
   /// What a machine card says instead of readings, or null when it has some.
   String? _machineNote(ServerConfig sv) {
-    if (_repo.serverNeedsAuth[sv.baseUrl] == true) return 'needs login';
-    if (_repo.serverOfflineConfirmed[sv.baseUrl] == true) return 'offline';
-    // Its capabilities are not known until a version call has answered.
-    if (_repo.serverVersion(sv.baseUrl) == null) return 'reading…';
-    if (!_repo.supportsMachine(sv.baseUrl)) return 'this server is too old to report its machine';
     final hit = _machines[sv.baseUrl];
-    if (hit?.data != null) return null;
-    return hit?.failed == true ? 'could not read it' : 'reading…';
+    return machineNoteFor(_repo, sv, hasData: hit?.data != null, failed: hit?.failed == true);
   }
 
   void _say(String text, {SnackBarAction? action}) {
@@ -892,6 +878,35 @@ class _WorkBoardScreenState extends State<WorkBoardScreen> {
           padding: EdgeInsetsDirectional.only(start: r.indent),
           child: child,
         );
+}
+
+/// What a machine card says instead of readings, or null when it has some (#331). Shared
+/// by the board's Machines section and Mission Control's Machines tab (#507).
+String? machineNoteFor(SessionRepository repo, ServerConfig sv, {required bool hasData, required bool failed}) {
+  if (repo.serverNeedsAuth[sv.baseUrl] == true) return 'needs login';
+  if (repo.serverOfflineConfirmed[sv.baseUrl] == true) return 'offline';
+  // Its capabilities are not known until a version call has answered.
+  if (repo.serverVersion(sv.baseUrl) == null) return 'reading…';
+  if (!repo.supportsMachine(sv.baseUrl)) return 'this server is too old to report its machine';
+  if (hasData) return null;
+  return failed ? 'could not read it' : 'reading…';
+}
+
+/// #428 - asks the lease-capable [usable] servers in order until one answers: a server
+/// that cannot reach the authority says so (503), and another may still reach it. Every
+/// one failing is the table UNKNOWN ([down] = the first server's reason), never an empty
+/// table. Shared by the board and Mission Control's Machines tab (#507).
+Future<({LeaseListing? table, String? down})> askLeaseTable(
+    List<ServerConfig> usable, ApiClient Function(ServerConfig) client) async {
+  String? firstError;
+  for (final sv in usable) {
+    try {
+      return (table: await client(sv).leases(), down: null);
+    } on ApiException catch (e) {
+      firstError ??= '${sv.name} says ${e.message}';
+    }
+  }
+  return (table: null, down: firstError);
 }
 
 /// What a card or row can do, already bound to its session. A null action means the

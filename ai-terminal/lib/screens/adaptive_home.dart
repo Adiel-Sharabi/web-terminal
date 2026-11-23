@@ -33,7 +33,16 @@ class AdaptiveHome extends StatefulWidget {
     this.openInboxAtLaunch,
     this.launchTap,
     this.hasServers,
+    this.launchInbox = true,
+    this.onOpenMissionControl,
   });
+
+  /// #507: whether this home runs "open to the inbox at launch" (#492). The shell turns it
+  /// off when the app opened on Mission Control, whose Now is its own needs-you view.
+  final bool launchInbox;
+
+  /// #507: switches the app to Mission Control; the session list offers it. Null: no entry.
+  final VoidCallback? onOpenMissionControl;
 
   /// Test seam: whether a server is configured. Defaults to [AppConfig.servers].
   @visibleForTesting
@@ -123,6 +132,7 @@ class _AdaptiveHomeState extends State<AdaptiveHome> {
   /// target). Wide: the pane shows the inbox, unless a session is already selected.
   /// Narrow: the inbox is pushed over the dashboard, so Back returns to it.
   Future<void> _launchInbox() async {
+    if (!widget.launchInbox) return;
     final on = await (widget.openInboxAtLaunch ?? LaunchSettings.instance.restore)();
     if (!on || !mounted) return;
     final tap = await (widget.launchTap ?? NotificationService.initialTap)();
@@ -198,7 +208,7 @@ class _AdaptiveHomeState extends State<AdaptiveHome> {
         _selection.splitMounted = wide;
         if (!wide) {
           // Phone / narrow: the dashboard pushes routes itself.
-          return DashboardScreen(key: _dashboardKey);
+          return DashboardScreen(key: _dashboardKey, onOpenMissionControl: widget.onOpenMissionControl);
         }
         final selectedId = _selection.selectedId;
         return Row(
@@ -212,6 +222,7 @@ class _AdaptiveHomeState extends State<AdaptiveHome> {
                 onShowBoard: _selection.showBoard,
                 onShowInbox: _selection.showInbox,
                 onShowJournal: _selection.showJournal,
+                onOpenMissionControl: widget.onOpenMissionControl,
               ),
             ),
             _RailResizeHandle(

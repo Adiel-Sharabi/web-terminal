@@ -30,6 +30,17 @@ void openInbox(
     selection.showInbox(focusSessionId: focusSessionId);
     return;
   }
+  pushInbox(nav, focusSessionId: focusSessionId, openSession: openSession);
+}
+
+/// Pushes the inbox as a route over [nav], whatever the layout: what [openInbox] does on
+/// a phone, and what Mission Control (#507) always does, since the split's detail pane is
+/// not on screen while it is. [openSession] as in [openInbox].
+void pushInbox(
+  NavigatorState nav, {
+  String? focusSessionId,
+  void Function(Session session)? openSession,
+}) {
   nav.push(
     MaterialPageRoute<void>(
       builder: (ctx) => QuestionsInboxScreen(
