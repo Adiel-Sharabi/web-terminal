@@ -25,6 +25,11 @@ void main() {
           'A session stopped — API error');
     });
 
+    test('owner-wait (#492) says it waits on you', () {
+      expect(NotificationService.buildBody('owner-wait', 'my-proj'), 'my-proj waits on you');
+      expect(NotificationService.buildBody('owner-wait', null), 'A session waits on you');
+    });
+
     test('unknown kind → bare name', () {
       expect(NotificationService.buildBody('mystery', 'x'), 'x');
       expect(NotificationService.buildBody('mystery', null), 'A session');

@@ -25,6 +25,7 @@ import '../api/supervisor_models.dart';
 import '../services/app_config.dart';
 import '../services/session_repository.dart';
 import '../services/supervisor_lookup.dart';
+import '../util/open_inbox.dart';
 import '../util/supervisor_authority.dart';
 import '../widgets/brief_item_row.dart' show briefStateLabel;
 import '../widgets/empty_state.dart';
@@ -69,7 +70,12 @@ class JournalScreen extends StatefulWidget {
     this.clientFactory,
     this.repository,
     this.refreshFloor = const Duration(seconds: 30),
+    this.onOpenInbox,
   });
+
+  /// Test seam: opens the inbox (#492). Defaults to the app's one [openInbox].
+  @visibleForTesting
+  final VoidCallback? onOpenInbox;
 
   /// Opens a session the way a tap on its row in the session list does.
   final void Function(Session session) onOpenSession;
@@ -251,8 +257,9 @@ class _JournalScreenState extends State<JournalScreen> {
         children: [
           _scanLine(theme, find, state, now),
           _Header('Needs you', needs.length, key: const ValueKey('journal-section-needs')),
-          if (needs.isEmpty) const _None('Nothing is waiting on you.'),
-          for (final n in needs) _nodeRow(context, n, now, section: 'needs'),
+          // #492: the inbox is the ONE Needs-you list; the journal keeps only the count
+          // (the supervisor's needsYou, not the inbox's cards) and the way there.
+          if (needs.isEmpty) const _None('Nothing is waiting on you.') else _openInboxRow(theme, needs.length),
           _Header('Live', live.length, key: const ValueKey('journal-section-live')),
           if (live.isEmpty) const _None('No other live session.'),
           for (final n in live) _nodeRow(context, n, now, section: 'live'),
@@ -289,6 +296,24 @@ class _JournalScreenState extends State<JournalScreen> {
       ),
     );
   }
+
+  void _openInbox() {
+    final open = widget.onOpenInbox;
+    if (open != null) {
+      open();
+      return;
+    }
+    openInbox(Navigator.of(context), openSession: widget.onOpenSession);
+  }
+
+  Widget _openInboxRow(ThemeData theme, int n) => ListTile(
+        key: const ValueKey('journal-open-inbox'),
+        dense: true,
+        leading: Icon(Icons.inbox_outlined, color: theme.colorScheme.primary),
+        title: Text('$n need you - open the inbox'),
+        trailing: const Icon(Icons.chevron_right),
+        onTap: _openInbox,
+      );
 
   Widget _scanLine(ThemeData theme, SupervisorFind find, SupervisorState state, DateTime now) {
     final muted = theme.textTheme.bodySmall?.copyWith(color: theme.colorScheme.onSurfaceVariant);

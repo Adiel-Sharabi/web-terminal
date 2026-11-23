@@ -128,7 +128,12 @@ class QuestionsInboxScreen extends StatefulWidget {
     this.focusInterval = const Duration(seconds: 4),
     this.agentsInterval = const Duration(seconds: 30),
     this.seenStore,
+    this.focusSessionId,
   });
+
+  /// #492: the session whose item to focus as soon as it is listed (an owner-wait push
+  /// tap), as a tap on its card would. Null: nothing is asked for.
+  final String? focusSessionId;
 
   /// Opens a session; the caller decides how (the split pane, or a pushed route).
   final void Function(Session session) onOpenSession;
@@ -241,6 +246,10 @@ class _QuestionsInboxScreenState extends State<QuestionsInboxScreen> with Widget
   String? _focusKey;
   InboxItem? _snapshot;
 
+  /// A session whose item was asked for ([QuestionsInboxScreen.focusSessionId]) and is
+  /// not listed yet: focused the first build that lists it, then forgotten.
+  String? _wantSession;
+
   /// A focused view is pushed as its own route (a narrow pane).
   bool _routeOpen = false;
 
@@ -300,6 +309,7 @@ class _QuestionsInboxScreenState extends State<QuestionsInboxScreen> with Widget
   @override
   void initState() {
     super.initState();
+    _wantSession = widget.focusSessionId;
     WidgetsBinding.instance.addObserver(this);
     unawaited(_loadBaseline());
     _sessions = _repo.current;
@@ -1093,7 +1103,29 @@ class _QuestionsInboxScreenState extends State<QuestionsInboxScreen> with Widget
     }
   }
 
+  @override
+  void didUpdateWidget(QuestionsInboxScreen old) {
+    super.didUpdateWidget(old);
+    if (widget.focusSessionId != null && widget.focusSessionId != old.focusSessionId) {
+      _wantSession = widget.focusSessionId;
+    }
+  }
+
+  /// Opens the item of the asked-for session once it is listed ([_wantSession]).
+  void _applyWanted(List<InboxItem> items, bool wide) {
+    final want = _wantSession;
+    if (want == null) return;
+    final mine = items.where((i) => i.session?.id == want).toList();
+    if (mine.isEmpty) return;
+    final it = mine.where((i) => i.blocking).firstOrNull ?? mine.first;
+    _wantSession = null;
+    scheduleMicrotask(() {
+      if (!_disposed && mounted) _open(it, wide);
+    });
+  }
+
   void _focus(InboxItem it) {
+    _wantSession = null; // the person chose: a late arrival must not move them
     _update(() {
       _focusKey = it.key;
       _snapshot = it;
@@ -1418,6 +1450,7 @@ class _QuestionsInboxScreenState extends State<QuestionsInboxScreen> with Widget
       ),
       body: LayoutBuilder(builder: (context, box) {
         final wide = box.maxWidth >= kWideMinWidth;
+        _applyWanted(items, wide);
         // A wide pane always shows something beside the list: the oldest wait. Chosen
         // before the list is built, so the item in front of the person is not "new".
         if (wide && _focusKey == null && items.isNotEmpty) {

@@ -149,7 +149,8 @@ void main() {
     }
   }
 
-  Future<void> pump(WidgetTester tester, SessionRepository r, {double width = 1400, InboxSeenStore? seen}) async {
+  Future<void> pump(WidgetTester tester, SessionRepository r,
+      {double width = 1400, InboxSeenStore? seen, String? focusSessionId}) async {
     tester.view.physicalSize = Size(width, 1000);
     tester.view.devicePixelRatio = 1;
     addTearDown(tester.view.resetPhysicalSize);
@@ -162,6 +163,7 @@ void main() {
         clientFactory: client,
         sessionInput: fakeInput,
         seenStore: seen ?? _FakeSeen(null),
+        focusSessionId: focusSessionId,
         pollInterval: const Duration(hours: 1),
         focusInterval: const Duration(hours: 1),
         agentsInterval: const Duration(hours: 1),
@@ -230,6 +232,57 @@ void main() {
     expect(y('inbox-card-${key('a2')}') < y('inbox-group-beta'), isTrue, reason: 'beta comes after the whole alpha group');
     expect(y('inbox-group-beta') < y('inbox-card-${key('b1')}'), isTrue);
     await done(tester);
+  });
+
+  group('#492 focusSessionId (an owner-wait push tap)', () {
+    void threeWaiting() {
+      rows = [
+        _row('a1', 'A one', status: 'waiting', waitingFor: 'question', lastActivity: 1, cwd: '/w/alpha'),
+        _row('b1', 'B one', status: 'waiting', waitingFor: 'question', lastActivity: 2, cwd: '/w/beta'),
+      ];
+      questions = {for (final id in ['a1', 'b1']) id: _question(['A', 'B'], id: id)};
+    }
+
+    Finder focusOf(String id) => find.byWidgetPredicate((w) {
+          final k = w.key;
+          return k is ValueKey<String> && k.value.startsWith('inbox-focus-${_home.baseUrl}|$id|');
+        });
+
+    testWidgets('wide: the item of that session is focused, not the oldest', (tester) async {
+      threeWaiting();
+      await pump(tester, await repo(), focusSessionId: 'b1');
+      expect(focusOf('b1'), findsOneWidget);
+      expect(focusOf('a1'), findsNothing);
+      await done(tester);
+    });
+
+    testWidgets('control: without it the oldest wait is focused', (tester) async {
+      threeWaiting();
+      await pump(tester, await repo());
+      expect(focusOf('a1'), findsOneWidget);
+      expect(focusOf('b1'), findsNothing);
+      await done(tester);
+    });
+
+    testWidgets('narrow: its focused view is pushed, as a tap on its card does', (tester) async {
+      threeWaiting();
+      await pump(tester, await repo(), width: 500, focusSessionId: 'b1');
+      await tester.pump(const Duration(milliseconds: 600));
+      expect(focusOf('b1'), findsOneWidget);
+      await done(tester);
+    });
+
+    testWidgets('a session not listed yet is focused the build it appears in', (tester) async {
+      rows = [];
+      final r = await repo();
+      await pump(tester, r, focusSessionId: 'b1');
+      expect(focusOf('b1'), findsNothing);
+      threeWaiting();
+      await tester.runAsync(() => r.refresh());
+      await settle(tester);
+      expect(focusOf('b1'), findsOneWidget);
+      await done(tester);
+    });
   });
 
   group('c: the recommended option in one press', () {

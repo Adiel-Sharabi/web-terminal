@@ -9,13 +9,17 @@ import 'package:flutter/foundation.dart';
 /// asked to show a session AND a board at once.
 @immutable
 class DetailPane {
-  const DetailPane._(this.sessionId, {this.isInbox = false, this.isJournal = false});
+  const DetailPane._(this.sessionId, {this.isInbox = false, this.isJournal = false, this.focusSessionId});
 
   /// The sessions board, beside the list (#337). Also the start state.
   static const DetailPane board = DetailPane._(null);
 
   /// The questions inbox, beside the list (#383).
   static const DetailPane inbox = DetailPane._(null, isInbox: true);
+
+  /// The questions inbox with [sessionId]'s item focused (#492: an owner-wait push).
+  /// A different value from [inbox], so asking again for another session notifies.
+  const DetailPane.inboxFocus(String sessionId) : this._(null, isInbox: true, focusSessionId: sessionId);
 
   /// The supervisor's journal, beside the list (#466).
   static const DetailPane journal = DetailPane._(null, isJournal: true);
@@ -29,6 +33,9 @@ class DetailPane {
   /// The pane shows the questions inbox.
   final bool isInbox;
 
+  /// With [isInbox]: the session whose item the inbox should focus, or null.
+  final String? focusSessionId;
+
   /// The pane shows the supervisor's journal.
   final bool isJournal;
 
@@ -36,10 +43,10 @@ class DetailPane {
 
   @override
   bool operator ==(Object other) =>
-      other is DetailPane && other.sessionId == sessionId && other.isInbox == isInbox && other.isJournal == isJournal;
+      other is DetailPane && other.sessionId == sessionId && other.isInbox == isInbox && other.isJournal == isJournal && other.focusSessionId == focusSessionId;
 
   @override
-  int get hashCode => Object.hash(sessionId, isInbox, isJournal);
+  int get hashCode => Object.hash(sessionId, isInbox, isJournal, focusSessionId);
 
   @override
   String toString() => isInbox
@@ -93,8 +100,9 @@ class SessionSelection {
   /// selecting the session that is already showing is.
   void showBoard() => pane.value = DetailPane.board;
 
-  /// Shows the questions inbox in the pane (#383).
-  void showInbox() => pane.value = DetailPane.inbox;
+  /// Shows the questions inbox in the pane (#383), with [focusSessionId]'s item focused (#492).
+  void showInbox({String? focusSessionId}) =>
+      pane.value = focusSessionId == null ? DetailPane.inbox : DetailPane.inboxFocus(focusSessionId);
 
   /// Whether the split view's detail pane shows the questions inbox.
   bool get inboxShown => pane.value.isInbox;

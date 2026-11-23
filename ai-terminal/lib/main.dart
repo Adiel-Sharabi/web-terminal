@@ -25,6 +25,7 @@ export 'screens/session_screen.dart' show sessionRouteName, resolveNotificationS
 import 'services/session_repository.dart';
 import 'services/session_selection.dart';
 import 'theme/app_theme.dart';
+import 'util/open_inbox.dart';
 
 /// Lets the notification-tap listener navigate without a `BuildContext`.
 final navigatorKey = GlobalKey<NavigatorState>();
@@ -50,6 +51,14 @@ enum NotificationOpen {
 
 NotificationOpen planNotificationOpen({required bool splitCanSelect}) =>
     splitCanSelect ? NotificationOpen.selectInSplit : NotificationOpen.pushRoute;
+
+/// Where a notification tap goes (#492): the session it is about, or the one Needs-you
+/// inbox. Only an owner-wait push opens the inbox; every other kind keeps opening its
+/// session. Pure, so the decision is testable without a navigator.
+enum NotificationTarget { session, inbox }
+
+NotificationTarget planNotificationTarget(String? kind) =>
+    kind == 'owner-wait' ? NotificationTarget.inbox : NotificationTarget.session;
 
 /// FCM push + local notifications are mobile-only (firebase_messaging has no
 /// desktop support). On Windows/macOS/Linux the app is a full terminal client
@@ -140,7 +149,7 @@ class AiTerminalApp extends StatefulWidget {
 
 class _AiTerminalAppState extends State<AiTerminalApp>
     with WidgetsBindingObserver {
-  StreamSubscription<String>? _tapSub;
+  StreamSubscription<NotificationTap>? _tapSub;
 
   @override
   void initState() {
@@ -165,12 +174,12 @@ class _AiTerminalAppState extends State<AiTerminalApp>
     }
     SessionRepository.instance.startForeground();
     if (pushSupported) {
-      _tapSub = NotificationService.onNotificationTap.listen(_openSession);
+      _tapSub = NotificationService.onNotificationTap.listen(_openTap);
       // Foreground/background taps arrive on the stream above; a tap that
       // cold-started the app (process was killed) is only recoverable via this
       // one-shot launch-details check.
-      NotificationService.initialTapSessionId().then((id) {
-        if (id != null) _openSession(id);
+      NotificationService.initialTap().then((tap) {
+        if (tap != null) _openTap(tap);
       });
     } else if (DesktopAlertService.supported && widget.detached == null) {
       // Desktop has no FCM (issue #16): raise OS toasts locally from the live
@@ -178,16 +187,29 @@ class _AiTerminalAppState extends State<AiTerminalApp>
       // single-session window (issue #14) skips this — only the main window
       // owns alerting, so events aren't toasted once per open window.
       unawaited(DesktopAlertService.instance.start());
-      _tapSub = NotificationService.onNotificationTap.listen(_openSession);
+      _tapSub = NotificationService.onNotificationTap.listen(_openTap);
       // Issue #20: a toast clicked while the app was CLOSED cold-launches it.
       // The foreground stream above only covers taps while running; the
       // cold-launch payload is recoverable only via this one-shot launch-details
       // check — the desktop branch was missing it, so a closed-app toast click
       // opened the app but routed nowhere.
-      NotificationService.initialTapSessionId().then((id) {
-        if (id != null) _openSession(id);
+      NotificationService.initialTap().then((tap) {
+        if (tap != null) _openTap(tap);
       });
     }
+  }
+
+  void _openTap(NotificationTap tap) {
+    if (planNotificationTarget(tap.kind) == NotificationTarget.session) {
+      _openSession(tap.sessionId);
+      return;
+    }
+    final nav = navigatorKey.currentState;
+    if (nav == null) return;
+    // Reveal what a pushed route (a session opened earlier) would cover, then show the
+    // inbox with that session's item focused (#492).
+    nav.popUntil((route) => route.isFirst);
+    openInbox(nav, focusSessionId: tap.sessionId);
   }
 
   void _openSession(String sessionId) {
