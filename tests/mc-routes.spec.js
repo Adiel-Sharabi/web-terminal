@@ -24,7 +24,7 @@ function fakeTracker() {
   const seen = [];
   const routes = {
     '/gh/repos/acme/widgets/issues/42': [200, fx('gh-issue.json')],
-    '/gh/repos/acme/widgets/issues/42/timeline?per_page=100': [200, fx('gh-timeline.json')],
+    '/gh/repos/acme/widgets/issues/42/timeline?per_page=100&page=1': [200, fx('gh-timeline.json')],
     '/gh/repos/acme/widgets/issues/99': [500, { message: 'boom' }],
     '/ado/fakeorg/_apis/wit/workitems/9001?$expand=relations&api-version=7.1': [200, fx('ado-workitem.json')],
     '/ado/fakeorg/proj-guid/_apis/git/repositories/repo-guid/pullrequests/77?api-version=7.1': [200, fx('ado-pr-77.json')],
@@ -36,7 +36,7 @@ function fakeTracker() {
     res.writeHead(hit ? hit[0] : 404, { 'Content-Type': 'application/json' });
     res.end(JSON.stringify(hit ? hit[1] : { message: 'Not Found' }));
   });
-  return { seen, start: () => new Promise((r) => server.listen(17688, '127.0.0.1', r)), stop: () => new Promise((r) => server.close(r)) };
+  return { seen, start: () => new Promise((r, j) => { server.once('error', j); server.listen(17688, '127.0.0.1', r); }), stop: () => new Promise((r) => server.close(r)) };
 }
 
 /** Write config.test.json (merged over what is there) and wait for the server to read it. */
@@ -116,6 +116,7 @@ test.describe('#502/#503 Mission Control routes', () => {
       [`/api/work-items/${encodeURIComponent('#42')}/meta?repo=bad`, 'not a work-item ref'],
       ['/api/work-items/meta', 'refs is required'],
       [`/api/work-items/meta?refs=${encodeURIComponent('ado:1,nope')}`, 'not a work-item ref: nope'],
+      ['/api/work-items/meta?repo=bad&refs=ado%3A1', 'repo must be owner/repo'],
       [`/api/work-items/meta?refs=${Array.from({ length: 51 }, (_, i) => `ado:${i + 1}`).join(',')}`, 'at most 50'],
     ]) {
       const r = await ctx.get(url);
@@ -168,6 +169,8 @@ test.describe('#502/#503 Mission Control routes', () => {
     } finally {
       for (const id of made) await ctx.delete(`/api/sessions/${id}`).catch(() => {});
       if (before === null) { if (fs.existsSync(CFG_FILE)) fs.unlinkSync(CFG_FILE); } else fs.writeFileSync(CFG_FILE, before);
+      // A just-closed session's shell can still hold its folder; the OS temp cleanup gets it then.
+      try { fs.rmSync(dir, { recursive: true, force: true }); } catch { /* held */ }
       await ctx.dispose();
     }
   });

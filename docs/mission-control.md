@@ -57,16 +57,21 @@ served stale at once while ONE refresh runs (`staleSince` = when the copy went s
 token -> the last cached copy + `{error, staleSince}`; no cache -> 200 with `title:null` and `error`
 set (never a blank 500). After a failed read the tracker is not asked again for 1 minute. A
 failure that is not a tracker answer is shown as "the tracker could not be read" (and logged).
-A batch reads at most 6 refs at once.
+At most 6 tracker reads are in flight per server, cold reads and stale refreshes alike (a
+batch of 50 stale refs answers at once from the cache and refreshes 6 at a time behind it).
 
 ADO: the PAT exactly as the supervisor's `adoPat()` reads it; org from config `mc.ado.org`, else
 `supervisor.ado.org`; one `_apis/wit/workitems/{id}?$expand=relations` call, then each
 `vstfs:///Git/PullRequestId/...` `ArtifactLink` through the Git PR API (`active` -> open,
-`completed` -> merged, `abandoned` -> closed). Redirects are not followed: a sign-in redirect is a
-rejected token. GitHub: REST with a token from `GITHUB_TOKEN`/`GH_TOKEN`, else `gh auth token`
-(execFile, 5 s, cached 10 min), else anonymous; a token GitHub rejects (401) is retried anonymously
-and the answer carries `warning`. PR links from the issue timeline (`cross-referenced` events whose
-source is a pull request).
+`completed` -> merged, `abandoned` -> closed). Redirects are not followed: an ADO sign-in redirect
+(or 203) is a rejected token; a GitHub redirect is an issue or repo that moved ("moved in GitHub",
+ask for its new ref). GitHub: REST with a token from `GITHUB_TOKEN`/`GH_TOKEN`, else
+`gh auth token` (execFile, 5 s, cached 10 min), else anonymous; a token GitHub rejects (401) is
+retried anonymously and the answer carries `warning`; when anonymous cannot read it either (a
+private repo), the error names the token first ("GitHub rejected the token (HTTP 401); without it:
+..."). PR links from the issue timeline (`cross-referenced` events whose source is a pull
+request), read 100 events a page for up to 5 pages; past that `warning` says the rest was not
+read. More than 10 linked PRs keeps the newest 10.
 
 Under `WT_TEST` only: `WT_MC_GITHUB_API` / `WT_MC_ADO_URL` replace the tracker base URLs and
 `WT_MC_GITHUB_TOKEN` / `WT_MC_ADO_PAT` are the only tokens read (the suite never reads a real one).

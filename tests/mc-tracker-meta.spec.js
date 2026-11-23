@@ -105,6 +105,45 @@ test.describe('#502 parsing - GitHub', () => {
     expect(fetchJson.calls.slice(1).every((c) => !c.headers.Authorization)).toBe(true);
   });
 
+  test('a rejected token on a repo anonymous cannot read says the TOKEN is the cause', async () => {
+    const fetchJson = fakeFetch({ '/repos/acme/private/issues/1': (url, h) => (h.Authorization ? { status: 401 } : { status: 404 }) });
+    await expect(tm.readGithub(tm.parseRef('acme/private#1'), { fetchJson, apiBase: 'https://gh.test', token: 'expired' }))
+      .rejects.toThrow(/^GitHub rejected the token \(HTTP 401\); without it: not found in GitHub/);
+  });
+
+  test('a GitHub redirect is a moved issue, never a token problem; an ADO redirect is', async () => {
+    const moved = async () => ({ status: 301, json: null, headers: hdrs() });
+    await expect(tm.readGithub(tm.parseRef('acme/widgets#42'), { fetchJson: moved, apiBase: 'x', token: 't' })).rejects.toThrow(/^moved in GitHub \(HTTP 301\)/);
+    await expect(tm.readAdo(tm.parseRef('ado:1'), { fetchJson: moved, adoBase: 'x', org: 'o', pat: 'p' })).rejects.toThrow(/rejected the token \(HTTP 301\)/);
+  });
+
+  test('the timeline is read page by page; a PR past the first page is found; a capped read says so', async () => {
+    const filler = (n) => Array.from({ length: n }, () => ({ event: 'commented' }));
+    const late = fx('gh-timeline.json').filter((e) => e.event === 'cross-referenced').slice(0, 1);
+    const pages = { 1: filler(100), 2: [...filler(40), ...late] };
+    const fetchJson = fakeFetch({
+      '/timeline': (url) => ({ status: 200, json: pages[Number(/[?&]page=(\d+)/.exec(url)[1])] || [] }),
+      '/repos/acme/widgets/issues/42': { status: 200, json: fx('gh-issue.json') },
+    });
+    const m = await tm.readGithub(tm.parseRef('acme/widgets#42'), { fetchJson, apiBase: 'https://gh.test', token: null });
+    expect(m.prs.map((p) => p.number)).toEqual([43]);
+    expect(m.warning).toBeNull();
+    expect(fetchJson.calls.filter((c) => c.url.includes('/timeline')).length).toBe(2);
+    // Every page full: stop at the cap and say what was not read.
+    const full = fakeFetch({
+      '/timeline': () => ({ status: 200, json: filler(100) }),
+      '/repos/acme/widgets/issues/42': { status: 200, json: fx('gh-issue.json') },
+    });
+    const c = await tm.readGithub(tm.parseRef('acme/widgets#42'), { fetchJson: full, apiBase: 'https://gh.test', token: null });
+    expect(full.calls.filter((x) => x.url.includes('/timeline')).length).toBe(tm.TIMELINE_PAGES);
+    expect(c.warning).toContain(`first ${tm.TIMELINE_PAGES * 100} timeline events`);
+  });
+
+  test('more than 10 linked PRs keeps the NEWEST 10 (the timeline is oldest first)', () => {
+    const ev = (n) => ({ event: 'cross-referenced', source: { issue: { number: n, state: 'open', pull_request: {}, repository: { full_name: 'a/b' } } } });
+    expect(tm.githubPrsFromTimeline(Array.from({ length: 12 }, (_, i) => ev(i + 1))).map((p) => p.number)).toEqual([3, 4, 5, 6, 7, 8, 9, 10, 11, 12]);
+  });
+
   test('a rate limit, a 404 and an unreachable host each throw their own message', async () => {
     const r = tm.parseRef('acme/widgets#42');
     const run = (res) => tm.readGithub(r, { fetchJson: async () => res, apiBase: 'https://gh.test', token: null });
@@ -264,6 +303,40 @@ test.describe('#502 cache', () => {
     const aside = fs.readdirSync(path.dirname(file)).filter((n) => n.startsWith('cache.json.corrupt-'));
     expect(aside.length).toBe(1);
     expect(fs.readFileSync(path.join(path.dirname(file), aside[0]), 'utf8')).toBe('{not json');
+  });
+
+  test('every read shares ONE limit: 20 stale refs never put more than 6 reads in flight', async () => {
+    let clock = 0, live = 0, peak = 0, held = [];
+    const read = () => new Promise((res) => { live += 1; peak = Math.max(peak, live); held.push(() => { live -= 1; res({ title: 't' }); }); });
+    const store = tm.createMetaStore({ file: tmpFile('cache.json'), log: () => {} });
+    const meta = tm.createTrackerMeta({ store, read, now: () => clock, log: () => {} });
+    const refs = Array.from({ length: 20 }, (_, i) => tm.parseRef(`acme/widgets#${i + 1}`));
+    for (const r of refs) store.set(r.key, { meta: { title: 'old' }, fetchedAt: 0, error: null, errorAt: null, readAt: 0 });
+    clock = tm.FRESH_MS + 1;
+    const out = await meta.getMany(refs); // stale: answered at once, 20 refreshes queued behind
+    expect(out.every((m) => m.title === 'old')).toBe(true);
+    // Release whatever is in flight, round by round, until nothing more starts.
+    for (let i = 0; i < 30; i++) {
+      await new Promise((r) => setTimeout(r, 0));
+      expect(peak).toBeLessThanOrEqual(tm.READ_CONCURRENCY);
+      const now = held; held = []; now.forEach((f) => f());
+      if (!now.length) break;
+    }
+    expect(live).toBe(0);
+    expect(peak).toBe(tm.READ_CONCURRENCY);
+    expect((await meta.get(refs[19])).title).toBe('t');
+  });
+
+  test('no copy and a failed read: the tracker is not asked again inside the back-off', async () => {
+    const c = rig();
+    c.answers.push(new tm.TrackerError('GitHub answered HTTP 502'));
+    await c.meta.get(R());
+    c.tick(tm.RETRY_MS - 1);
+    expect((await c.meta.get(R())).error).toBe('GitHub answered HTTP 502');
+    expect(c.reads.length).toBe(1);
+    c.tick(1);
+    await c.meta.get(R());
+    expect(c.reads.length).toBe(2);
   });
 
   test('a batch reads each ref once and keeps the order', async () => {

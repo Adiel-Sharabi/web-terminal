@@ -192,7 +192,7 @@ module.exports = defineConfig({
       // spec can watch a stranded launch expire for real rather than assert around it.
       // Only that one code path reads it.
       WT_BG_TASK_MAX_AGE_MS: '2500',
-      // #502 - both trackers point at the fake tracker tests/mc-tracker-meta-routes.spec.js
+      // #502 - both trackers point at the fake tracker tests/mc-routes.spec.js
       // serves on this port, and the tokens are the suite's own: under WT_TEST the server never
       // reads a real GitHub token or ADO PAT, and nothing in the suite reaches a real tracker.
       WT_MC_GITHUB_API: 'http://127.0.0.1:17688/gh',

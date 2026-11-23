@@ -5430,7 +5430,7 @@ app.get('/api/config', (req, res) => {
 
 const ALLOWED_CONFIG_KEYS = ['projects', 'port', 'host', 'user', 'password', 'shell', 'defaultCwd', 'scanFolders', 'defaultCommand', 'openInNewTab', 'serverName', 'serverColor', 'scrollbackReplayLimit', 'cluster', 'publicUrl', 'claudeHome', 'keepSessionsOpen', 'autoContinueOnApiError', 'autoResumeOnReset', 'autoAnswerBlockingPrompt', 'exclusiveViewer'];
 
-app.put('/api/config', express.json({ limit: '16kb' }), (req, res) => {
+app.put('/api/config', express.json({ limit: '64kb' }), (req, res) => { // 64 KB since #503: room for a projects list
   try {
     // The config exactly as it is ON DISK. Both the password rule below and the merge
     // at the bottom need it, and they must see the same bytes, so it is read once.
@@ -6913,9 +6913,11 @@ app.get('/api/work-items/meta', async (req, res) => {
   const parts = raw.split(',').map((p) => p.trim()).filter(Boolean);
   if (!parts.length) return res.status(400).json({ error: 'refs is required: a comma-separated list of work-item refs' });
   if (parts.length > trackerMeta.MAX_BATCH) return res.status(400).json({ error: `at most ${trackerMeta.MAX_BATCH} refs` });
+  const repo = mcRepoParam(req);
+  if (repo !== undefined && repo !== '' && !trackerMeta.parseRef('#1', { repo })) return res.status(400).json({ error: 'repo must be owner/repo' });
   const refs = [];
   for (const p of parts) {
-    const r = trackerMeta.parseRef(p, { repo: mcRepoParam(req) });
+    const r = trackerMeta.parseRef(p, { repo });
     if (!r) return res.status(400).json({ error: `not a work-item ref: ${p.slice(0, 60)} (ado:123, #123 or owner/repo#123)` });
     if (!refs.some((x) => x.key === r.key)) refs.push(r);
   }
