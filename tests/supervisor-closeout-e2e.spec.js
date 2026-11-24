@@ -170,7 +170,7 @@ test.describe.serial('#469 close-out, then close or mark ready', () => {
     const S = await open('co-pr-sharer');
     await turn(S, DONE);
     await until(async () => (await asks(S)) === 1, 'asked');
-    expect(await screen(S)).toContain('--pr <ref> --owner <its owner>');
+    expect(await screen(S)).toContain('--pr "<ref>" --owner <its owner>');
     // A flag with no value is refused before anything is sent; the server refuses a half answer
     // and naming yourself.
     expect(closeout(S, 'clean', '--pr').status).toBe(2);

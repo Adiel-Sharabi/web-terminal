@@ -4,7 +4,7 @@
 // web-terminal session that reported done, when the Supervisor asks it to close out:
 //
 //   node scripts/wt-closeout.js clean
-//   node scripts/wt-closeout.js clean --pr <ref> --owner <session id or name>
+//   node scripts/wt-closeout.js clean --pr "<ref>" --owner <session id or name>
 //   node scripts/wt-closeout.js blocked "<what is left that you cannot fix>"
 //
 // #543: clean means the session's subject is finished in full - merged, every PR it opened
@@ -18,7 +18,8 @@
 
 const { postJson } = require('../lib/session-post');
 
-const USAGE = 'usage: wt-closeout.js clean [--pr <ref> --owner <session>] | blocked "<what is left that you cannot fix>"';
+// Quote the ref: an unquoted #9 starts a shell comment, and --pr then has no value.
+const USAGE = 'usage: wt-closeout.js clean [--pr "<ref>" --owner <session>] | blocked "<what is left that you cannot fix>"';
 const [state, ...rest] = process.argv.slice(2);
 if (!['clean', 'blocked'].includes(state)) {
   console.error(USAGE);

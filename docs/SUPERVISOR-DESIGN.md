@@ -282,8 +282,12 @@ The owner's rule: a done session cleans up after itself before it is closed.
    the close-out). **A PR shared by several sessions keeps exactly one owner session open**:
    the others answer `clean --pr <ref> --owner <session>`. The answer route refuses an owner
    that is the session itself; R5 marks the sharer ready (and may close it) only while the
-   owner is a live node of the scan (id, `replaces` alias, or a unique name). A complete scan
-   without it is "Needs you" (`owner-gone`); an incomplete one holds (`owner-unknown`).
+   owner is a live node of the scan (id, `replaces` alias, or a unique name) that has not
+   reported done and is not the dispatcher. A complete scan without it is "Needs you"
+   (`owner-gone`), an owner that reported done is too (`owner-done`: two sessions naming each
+   other would otherwise both close), and an incomplete scan holds (`owner-unknown`). The
+   session's own server does not re-check the owner at the kill (it cannot see the cluster);
+   the authority's scan is at most a minute old.
 3. `clean`:
    - **The owner opened it → never closed by the supervisor.** It is marked *ready to
      close* in the journal, with its brief, so the owner can close it quickly. If it is

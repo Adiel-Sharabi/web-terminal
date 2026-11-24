@@ -300,6 +300,16 @@ test.describe('#543 clean means the subject is finished in full; a shared PR kee
     const self = plan([done(1, { name: 'me', closeout: shared(at, 'me') })], due);
     expect(self.ready).toEqual([]);
     expect(self.needs).toEqual([expect.objectContaining({ id: ME, why: 'owns-pr' })]);
+    // #543 review: an owner that reported done watches nothing. Two sessions naming each other
+    // would otherwise both close and leave the PR with no owner; the owner that finished is
+    // asked to check it, and neither sharer is ready or closed.
+    const mutual = plan([me(id(2)), done(2, { closeout: shared(at, ME) })], due);
+    expect(mutual.ready).toEqual([]);
+    expect(mutual.close).toEqual([]);
+    expect(mutual.needs.map((x) => [x.id, x.why])).toEqual([[ME, 'owner-done'], [id(2), 'owner-done']]);
+    expect(plan([me(id(2)), owner(2, { wait: { on: 'done', what: 'merged', at: T0 } })], due).needs.map((x) => x.why)).toEqual(['owner-done']);
+    // The dispatcher is always live, and watches no PR: naming it is naming nobody.
+    expect(plan([me(id(2)), owner(2, { role: 'supervisor' })], due).needs.map((x) => x.why)).toEqual(['owner-gone']);
     // The owner's own session (never closed) is not marked ready either while its owner is gone.
     expect(plan([done(1, { by: 'human', closeout: shared(at, id(2)) })], due).ready).toEqual([]);
   });
@@ -334,11 +344,11 @@ test.describe('#469 the close-out prompt, the template, and the journal state', 
     expect(p.prompt.startsWith('[web-terminal supervisor] Close-out: you reported done.')).toBe(true);
     expect(p.prompt.split(cli)).toHaveLength(2);
     // #543: clean means the subject is finished in full - the prompt says what that is.
-    for (const word of ['Fix what you can', 'finished in full', 'merged, not just pushed', 'every PR you opened completed', 'reviews answered',
-      'tracker item', 'worktree or process you started', 'Your own PR still open: keep watching it', '--pr <ref> --owner <its owner>', 'clean', 'blocked']) expect(p.prompt).toContain(word);
+    for (const word of ['Fix what you can', 'done in full', 'merged, not just pushed', 'every PR you opened completed', 'reviews answered',
+      'tracker item', 'worktree or process you started', 'Your PR still open: watch it', '--pr "<ref>" --owner <its owner>', 'clean', 'blocked']) expect(p.prompt).toContain(word);
     expect(Buffer.byteLength(p.prompt, 'utf8')).toBeLessThanOrEqual(safePrompt.PROMPT_BYTES_MAX);
-    // A path 70 bytes longer still fits (a machine whose checkout lives deeper).
-    expect(Buffer.byteLength(`[web-terminal supervisor] ${co.closeoutText(`D:/${'x'.repeat(70)}/scripts/wt-closeout.js`)}`, 'utf8')).toBeLessThanOrEqual(511);
+    // A checkout path 70 bytes longer than this one still fits (a machine whose checkout lives deeper).
+    expect(Buffer.byteLength(`[web-terminal supervisor] ${co.closeoutText(`C:/dev/web-terminal${'x'.repeat(70)}/scripts/wt-closeout.js`)}`, 'utf8')).toBeLessThanOrEqual(511);
     // An unknown template, or text beside one, is refused: nothing is typed.
     expect(safePrompt.promptOf({ template: 'rm' }, { closeout: 'x' }).error).toMatch(/template must be one of: closeout/);
     expect(safePrompt.promptOf({ template: 'closeout', text: 'x' }, { closeout: 'x' }).error).toMatch(/not both/);
