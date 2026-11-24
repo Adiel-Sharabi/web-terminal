@@ -447,7 +447,25 @@ across hand-offs. The #351 reaper and the check-in leave it alone. Its row carri
   `GET /api/supervisor/tail/:id`. The app's switches live in `handoffs/supervisor-settings.json`.
 - Config `supervisor.dispatcher`: `enabled` (false: every case goes to the owner), `cwd`,
   `autoCommand` (default `claude --dangerously-skip-permissions`), `actionsPerHour`, `hungMin`,
-  `circleMin`. The companion's Supervisor entry, cards and switches are a follow-up.
+  `circleMin`.
+- **The Supervisor entry (#475)** — the dispatcher is the fleet's supervisor, not one of its sessions,
+  so it is out of the regular lists and never hidden. Server: `countedSessions` (everything but the row
+  `isDispatcherRow` names: its `role: "supervisor"`, or the server's own id for it) is THE list of what
+  counts as a session - the machine's session count and soft limit (`/api/machine`) and a replacement's
+  capacity check - and the supervisor's own `live` list leaves it out (Mission Control has its own rule
+  for the row, #532); the check-in scan (#443) never asks it what it waits on
+  (the server types its cases into it and replaces it). Every entry of `actions` in `GET /api/supervisor/state`
+  carries `caseId` (the case it served, else null) and `undo` (how to take back an answer given for the
+  owner, else null; `POST /api/supervisor/act` takes `undo`, and a card keeps it through Approve).
+  Companion: one **Supervisor** row under Mission Control opens its page - the dispatcher's state with
+  Pause / Resume and Talk to it, what waits on you, open cases, the autonomy switches, and the decisions
+  feed with each one's case and undo. The session list and the sessions board read their rows through
+  `listedSessions`, which hides the dispatcher ONLY while the entry stands for it (the authority answered
+  with that dispatcher's id; before the first answer the server's `role` decides): with the supervisor
+  switched off, or the authority moved, its row is an ordinary session the owner can open and close.
+  `app.html` still lists it (its server fields are unchanged). The dispatcher's own wait on the owner
+  (a question, a blocked prompt) shows in the inbox, as the entry's state ("Waiting on a prompt") and, by
+  #532, as an Answer-now card.
 
 **The supervisor, phase 4: close-out, then close or mark ready (#469)** — **R5**: a session that
 reported `done`, is idle, has no viewer at all and nothing live under it is asked to **close out**:

@@ -943,6 +943,8 @@ class SessionRepository {
             // rather than flat until the first refresh moves them.
             'parentId': s.parentId,
             'replaces': s.replaces,
+            // #475: so a cold launch already keeps the dispatcher out of the list.
+            'role': ?s.role,
           },
       ]);
 
@@ -983,6 +985,7 @@ class SessionRepository {
           replaces: e['replaces'] is List
               ? [for (final x in e['replaces'] as List) if (x is String && x.isNotEmpty) x]
               : const <String>[],
+          role: e['role'] is String && (e['role'] as String).isNotEmpty ? e['role'] as String : null,
         ));
       }
       return out;

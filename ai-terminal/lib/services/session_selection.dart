@@ -9,7 +9,7 @@ import 'package:flutter/foundation.dart';
 /// asked to show a session AND a board at once.
 @immutable
 class DetailPane {
-  const DetailPane._(this.sessionId, {this.isInbox = false, this.isJournal = false, this.focusSessionId});
+  const DetailPane._(this.sessionId, {this.isInbox = false, this.isJournal = false, this.isSupervisor = false, this.focusSessionId});
 
   /// The sessions board, beside the list (#337). Also the start state.
   static const DetailPane board = DetailPane._(null);
@@ -23,6 +23,9 @@ class DetailPane {
 
   /// The supervisor's journal, beside the list (#466).
   static const DetailPane journal = DetailPane._(null, isJournal: true);
+
+  /// The Supervisor (#475): its dispatcher, cases, autonomy and decisions, beside the list.
+  static const DetailPane supervisor = DetailPane._(null, isSupervisor: true);
 
   /// One session, by id.
   const DetailPane.session(String id) : this._(id);
@@ -39,20 +42,26 @@ class DetailPane {
   /// The pane shows the supervisor's journal.
   final bool isJournal;
 
-  bool get isBoard => sessionId == null && !isInbox && !isJournal;
+  /// The pane shows the Supervisor (#475).
+  final bool isSupervisor;
+
+  bool get isBoard => sessionId == null && !isInbox && !isJournal && !isSupervisor;
 
   @override
   bool operator ==(Object other) =>
-      other is DetailPane && other.sessionId == sessionId && other.isInbox == isInbox && other.isJournal == isJournal && other.focusSessionId == focusSessionId;
+      other is DetailPane && other.sessionId == sessionId && other.isInbox == isInbox && other.isJournal == isJournal &&
+      other.isSupervisor == isSupervisor && other.focusSessionId == focusSessionId;
 
   @override
-  int get hashCode => Object.hash(sessionId, isInbox, isJournal, focusSessionId);
+  int get hashCode => Object.hash(sessionId, isInbox, isJournal, isSupervisor, focusSessionId);
 
   @override
   String toString() => isInbox
       ? 'DetailPane.inbox'
       : isJournal
           ? 'DetailPane.journal'
+          : isSupervisor
+          ? 'DetailPane.supervisor'
           : (isBoard ? 'DetailPane.board' : 'DetailPane($sessionId)');
 }
 
@@ -122,6 +131,15 @@ class SessionSelection {
 
   /// Whether the split view's detail pane shows the journal.
   bool get journalShown => pane.value.isJournal;
+
+  /// Shows the Supervisor in the pane (#475).
+  void showSupervisor() {
+    pane.value = DetailPane.supervisor;
+    asked.value++;
+  }
+
+  /// Whether the split view's detail pane shows the Supervisor.
+  bool get supervisorShown => pane.value.isSupervisor;
 
   /// No session open any more (it ended): back to the board.
   void clear() => pane.value = DetailPane.board;
