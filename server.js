@@ -7280,7 +7280,8 @@ app.post('/api/mc/actions/done', express.json({ limit: '8kb' }), async (req, res
     // From here to the record on disk nothing awaits: a second press finds the record.
     const now = Date.now();
     const card = mcNeeds.pendingCards({ nodes: v.nodes, view: v, now }).find((c) => c.id === inp.cardId);
-    const before = mcState.actionsDone();
+    // The records /api/mc/now reads (pruned): what the person saw is what Done decides on.
+    const before = mcNeeds.pruneActionsDone(mcState.actionsDone(), now);
     // Own keys only: a cardId of "constructor" must not read the prototype.
     const plan = mcNeeds.actionDonePlan(card, Object.hasOwn(before, inp.cardId) ? before[inp.cardId] : undefined);
     if (plan.error) return res.status(plan.status).json({ error: plan.error });
