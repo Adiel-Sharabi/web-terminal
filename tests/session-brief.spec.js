@@ -836,6 +836,19 @@ test.describe('#523 a session reports its line of work', () => {
     expect(B.buildBrief(B.emptyEntry(), { reporting: true }).line).toBeNull();
   });
 
+  test('a "line" sent with only a wait is refused in words, never dropped', () => {
+    const e = B.applyReport(B.emptyEntry(), B.validateReport({ items: [{ ref: '#1', state: 'in-progress' }] }).report, T0);
+    const r = B.validateReport({ wait: { on: 'self', what: 'ci' }, line: 'Bug hunter' }, e);
+    expect(r.report).toBeUndefined();
+    expect(r.error).toContain('"line" goes with your items');
+  });
+
+  test('THE name rule: a new line\'s name is at most 80; the label kept beside a line id may be a tracker title', () => {
+    expect(B.lineName('x'.repeat(81))).toBeNull();
+    expect(B.lineName('x'.repeat(500), B.LIMITS.lineLabel)).toBe('x'.repeat(500));
+    expect(B.lineName('x'.repeat(501), B.LIMITS.lineLabel)).toBeNull();
+  });
+
   test('the per-prompt note stays inside its budget: the optional line is taught by the refusal, not on every prompt', () => {
     expect(B.instructionText(null, 'CMD')).not.toContain('"line"');
     expect(B.validateReport({ items: [{ ref: '#1', state: 'done' }], line: 7 }).error).toContain('e.g. "Bug hunter"');

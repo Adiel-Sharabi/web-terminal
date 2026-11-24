@@ -17,9 +17,6 @@ import '../../widgets/app_bottom_sheet.dart';
 import 'now_view.dart';
 import 'project_view.dart' show mcSubjectRows;
 
-/// The longest line name the server takes (one line).
-const int kMcLineNameMax = 80;
-
 /// A line's counts in one line: who needs the person, the live sessions, the machines.
 String mcLineCountsLine(McLine l) {
   final k = l.counts;

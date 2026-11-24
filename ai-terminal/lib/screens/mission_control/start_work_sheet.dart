@@ -288,7 +288,7 @@ class _McStartWorkSheetState extends State<McStartWorkSheet> {
               TextField(
                 key: const ValueKey('mc-start-line-new'),
                 controller: _lineName,
-                maxLength: 80,
+                maxLength: kMcLineNameMax,
                 maxLines: 1,
                 decoration: const InputDecoration(labelText: 'New line name'),
               ),

@@ -92,7 +92,7 @@ test.describe('#523 config: projects[].lines', () => {
     expect(L.globMatch('BH worker*', 'old BH worker #3')).toBe(false);
     expect(L.globMatch('*docket*', 'Fix the Docket list')).toBe(true);
     expect(L.globMatch('a.b', 'axb')).toBe(false); // a regex character is literal
-    expect(L.globMatch('cnt32-vm-am8', 'cnt32-vm-am8')).toBe(true);
+    expect(L.globMatch('node7-vm-x2', 'node7-vm-x2')).toBe(true);
   });
 });
 
@@ -153,19 +153,47 @@ test.describe('#523 which line a work item is on (first match wins)', () => {
     const v = view({ rows, metaByKey: {
       'ado:301': meta('ado:301', { parent: { key: 'ado:910', ref: 'ado:910' } }),
       'ado:910': meta('ado:910', { type: 'Product Backlog Item', parent: { key: 'ado:920', ref: 'ado:920' } }),
-      'ado:920': meta('ado:920', { type: 'Feature', title: 'SSCP rollout' }),
+      'ado:920': meta('ado:920', { type: 'Feature', title: 'Gadget rollout' }),
       'ado:302': meta('ado:302', { parent: { key: 'ado:930', ref: 'ado:930' } }),
       'ado:930': meta('ado:930', { type: 'Task', title: 'Some task', parent: { key: 'ado:931', ref: 'ado:931' } }), // 931 not read yet
       'ado:303': meta('ado:303', { parent: { key: 'ado:940', ref: 'ado:940' } }),
       'ado:940': meta('ado:940', { type: 'Feature', title: '[Health] nightly' }) } });
-    expect(lineOf(v, 'ado:301')).toEqual({ id: 'parent:ado:920', name: 'SSCP rollout', project: 'video', kind: 'parent', source: 'parent' });
+    expect(lineOf(v, 'ado:301')).toEqual({ id: 'parent:ado:920', name: 'Gadget rollout', project: 'video', kind: 'parent', source: 'parent' });
     expect(lineOf(v, 'ado:302')).toMatchObject({ id: 'parent:ado:930', name: 'Some task', source: 'parent' });
     expect(lineOf(v, 'ado:303')).toMatchObject({ id: 'video/health', source: 'parent' });
   });
 
   test('3. a parent never read yet is still a line, named by its ref', () => {
     const v = view({ rows: [row('alpha', { items: [{ ref: 'ado:311' }] })], metaByKey: { 'ado:311': meta('ado:311', { parent: { key: 'ado:950', ref: 'ado:950' } }) } });
-    expect(lineOf(v, 'ado:311')).toMatchObject({ id: 'parent:ado:950', name: 'ado:950' });
+    expect(lineOf(v, 'ado:311')).toMatchObject({ id: 'parent:ado:950', name: 'ado:950', partial: true });
+  });
+
+  test('3. a chain that stops at a level never read says partial (a Feature may lie above); a fully read one does not', () => {
+    const rows = ['ado:321', 'ado:322'].map((ref) => row('alpha', { name: `s ${ref}`, items: [{ ref }] }));
+    const v = view({ rows, metaByKey: {
+      'ado:321': meta('ado:321', { parent: { key: 'ado:960', ref: 'ado:960' } }),
+      // read failed, never read before: the cache's blank Meta (fetchedAt null, type null)
+      'ado:960': meta('ado:960', { type: null, title: null, fetchedAt: null, parent: null }),
+      'ado:322': meta('ado:322', { parent: { key: 'ado:961', ref: 'ado:961' } }),
+      'ado:961': meta('ado:961', { type: 'User Story', title: 'A story with no parent' }) } });
+    expect(lineOf(v, 'ado:321')).toEqual({ id: 'parent:ado:960', name: 'ado:960', project: 'video', kind: 'parent', source: 'parent', partial: true });
+    expect(lineOf(v, 'ado:322')).toEqual({ id: 'parent:ado:961', name: 'A story with no parent', project: 'video', kind: 'parent', source: 'parent' });
+  });
+
+  test('3. a parent loop ends: the chain never revisits a key (itself included)', () => {
+    const v = view({ rows: [row('alpha', { items: [{ ref: 'ado:331' }] })], metaByKey: {
+      'ado:331': meta('ado:331', { parent: { key: 'ado:970', ref: 'ado:970' } }),
+      'ado:970': meta('ado:970', { type: 'User Story', parent: { key: 'ado:971', ref: 'ado:971' } }),
+      'ado:971': meta('ado:971', { type: 'User Story', parent: { key: 'ado:970', ref: 'ado:970' } }) } });
+    expect(lineOf(v, 'ado:331')).toMatchObject({ id: 'parent:ado:970', source: 'parent' });
+    expect(lineOf(v, 'ado:331').partial).toBeUndefined();
+  });
+
+  test('1. a session-tree loop ends: no line found up a cycle falls through to the rules', () => {
+    const a = uid('loop'); const b = uid('loop');
+    const rows = [row('alpha', { id: a, name: 'plain a', parentId: b, items: [{ ref: 'ado:341' }] }), row('alpha', { id: b, name: 'plain b', parentId: a })];
+    const v = view({ rows });
+    expect(lineOf(v, 'ado:341')).toMatchObject({ id: 'item:ado:341', source: 'own' });
   });
 
   test('4. otherwise its own line - named after its run, else the work item - never a catch-all', () => {
@@ -251,9 +279,9 @@ test.describe('#523 the lines view', () => {
 test.describe('#523 Move to line: the target', () => {
   test('a target is an existing line id or a new name; anything else is refused in words', () => {
     const p = projects();
-    const known = [{ id: 'parent:ado:920', name: 'SSCP rollout', project: 'video', kind: 'parent' }];
+    const known = [{ id: 'parent:ado:920', name: 'Gadget rollout', project: 'video', kind: 'parent' }];
     expect(L.moveTarget({ line: 'video/health' }, { projects: p, lines: known })).toEqual({ ok: true, line: { id: 'video/health', name: 'Health' } });
-    expect(L.moveTarget({ line: 'parent:ado:920' }, { projects: p, lines: known })).toEqual({ ok: true, line: { id: 'parent:ado:920', name: 'SSCP rollout' } });
+    expect(L.moveTarget({ line: 'parent:ado:920' }, { projects: p, lines: known })).toEqual({ ok: true, line: { id: 'parent:ado:920', name: 'Gadget rollout' } });
     expect(L.moveTarget({ name: '  UI  ' }, { projects: p, lines: known })).toEqual({ ok: true, line: { name: 'UI' } });
     expect(L.moveTarget({ line: null }, { projects: p, lines: known })).toEqual({ ok: true, line: null });
     for (const body of [{}, { line: 'nope' }, { name: '' }, { name: 'x'.repeat(81) }, { name: 'a\nb' }, { line: 'video/health', name: 'x' }, { line: 5 }]) {
@@ -261,5 +289,128 @@ test.describe('#523 Move to line: the target', () => {
       expect(r.ok, JSON.stringify(body)).toBe(false);
       expect(typeof r.error).toBe('string');
     }
+  });
+
+  test('a line the view shows is a valid target whatever its name\'s length (a tracker title names it), and it is kept', () => {
+    const { lineTarget } = require('../lib/mc-binding');
+    const { createMcState } = require('../lib/mc-state');
+    const title = `Feature: ${'x'.repeat(120)}`;
+    const known = [{ id: 'parent:ado:925', name: title, project: 'video', kind: 'parent' }];
+    const t = L.moveTarget({ line: 'parent:ado:925' }, { projects: projects(), lines: known });
+    expect(t).toEqual({ ok: true, line: { id: 'parent:ado:925', name: title } });
+    expect(lineTarget(t.line)).toEqual({ id: 'parent:ado:925', name: title }); // Start work's binding keeps it
+    const st = createMcState({ file: require('path').join(require('os').tmpdir(), `mc-lines-${process.pid}-${Date.now()}.json`), saveDelayMs: 1e9 });
+    expect(st.setLineOverride('ado:301', t.line)).toBe(true); // Move to line saves it
+    expect(st.lineOverrides()['ado:301'].line).toEqual({ id: 'parent:ado:925', name: title });
+    // A NEW line (no id) is still held to the 80-character name rule.
+    expect(lineTarget({ name: 'x'.repeat(81) })).toBeNull();
+  });
+
+  test('a line name in any script is its own line: two Hebrew names are two lines, not one', () => {
+    const p = projects();
+    const a = L.resolveTarget({ name: 'באגים' }, { projects: p, project: 'video' });
+    const b = L.resolveTarget({ name: 'שחרור' }, { projects: p, project: 'video' });
+    expect(a.id).not.toBe(b.id);
+    expect(a).toMatchObject({ id: 'video/~באגים', name: 'באגים', kind: 'named' });
+    // names differing past the old 40-character cut stay apart too
+    expect(L.slug(`${'a'.repeat(40)}one`)).not.toBe(L.slug(`${'a'.repeat(40)}two`));
+  });
+});
+
+test.describe('#523 readParents: the tracker I/O behind the parent rule', () => {
+  const blank = (key) => ({ key, ref: key, title: null, type: null, fetchedAt: null, parent: null });
+  const parseRef = (k) => ({ key: k, ref: k });
+  function tracker(store, { delayMs = 0, fail = new Set() } = {}) {
+    const cache = {};
+    const asked = [];
+    return {
+      asked, cache,
+      getMany: async (refs) => {
+        asked.push(refs.map((r) => r.key));
+        if (delayMs) await new Promise((r) => setTimeout(r, delayMs));
+        for (const r of refs) if (!fail.has(r.key) && store[r.key]) cache[r.key] = store[r.key];
+      },
+      peek: async (r) => cache[r.key] || blank(r.key),
+    };
+  }
+
+  test('it reads each level up the chain (up to PARENT_DEPTH) and the rule then finds the Feature', async () => {
+    const store = {
+      'ado:2': meta('ado:2', { type: 'User Story', parent: { key: 'ado:1', ref: 'ado:1' } }),
+      'ado:1': meta('ado:1', { type: 'Epic', title: 'Top', parent: { key: 'ado:0', ref: 'ado:0' } }),
+      'ado:0': meta('ado:0', { type: 'Epic', title: 'Above the depth', parent: { key: 'ado:-1', ref: 'ado:-1' } }),
+    };
+    const tr = tracker(store);
+    const metaByKey = { 'ado:3': meta('ado:3', { parent: { key: 'ado:2', ref: 'ado:2' } }) };
+    await L.readParents({ metaByKey, parseRef, getMany: tr.getMany, peek: tr.peek, waitMs: 1000 });
+    expect(tr.asked).toEqual([['ado:2'], ['ado:1'], ['ado:0']]);
+    expect(tr.asked.length).toBe(L.PARENT_DEPTH);
+    const v = view({ rows: [row('alpha', { items: [{ ref: 'ado:3' }] })], metaByKey });
+    expect(lineOf(v, 'ado:3')).toEqual({ id: 'parent:ado:1', name: 'Top', project: 'video', kind: 'parent', source: 'parent' });
+  });
+
+  test('a failed read never throws: that level is the blank Meta and the line says partial', async () => {
+    const tr = tracker({ 'ado:12': meta('ado:12', { type: 'Feature' }) }, { fail: new Set(['ado:12']) });
+    const metaByKey = { 'ado:13': meta('ado:13', { parent: { key: 'ado:12', ref: 'ado:12' } }) };
+    const getMany = async (refs) => { await tr.getMany(refs); throw new Error('HTTP 403'); };
+    const logged = [];
+    await L.readParents({ metaByKey, parseRef, getMany, peek: tr.peek, waitMs: 500, log: (m) => logged.push(m) });
+    expect(metaByKey['ado:12'].fetchedAt).toBeNull();
+    expect(logged).toEqual(['HTTP 403']);
+    const v = view({ rows: [row('alpha', { items: [{ ref: 'ado:13' }] })], metaByKey });
+    expect(lineOf(v, 'ado:13')).toMatchObject({ id: 'parent:ado:12', partial: true });
+  });
+
+  test('the wait is ONE deadline for every level: a slow tracker is not waited on per level', async () => {
+    const store = {};
+    for (let i = 20; i < 30; i++) store[`ado:${i}`] = meta(`ado:${i}`, { type: 'Task', parent: { key: `ado:${i + 1}`, ref: `ado:${i + 1}` } });
+    const tr = tracker(store, { delayMs: 400 });
+    const metaByKey = { 'ado:19': meta('ado:19', { parent: { key: 'ado:20', ref: 'ado:20' } }) };
+    const t0 = Date.now();
+    await L.readParents({ metaByKey, parseRef, getMany: tr.getMany, peek: tr.peek, waitMs: 150 });
+    expect(Date.now() - t0).toBeLessThan(350);
+    expect(metaByKey['ado:20'].fetchedAt).toBeNull(); // not arrived: served blank, lands on a later poll
+  });
+});
+
+test.describe('#523 Move-to-line overrides: bounded storage (lib/mc-state.js)', () => {
+  const fs = require('fs');
+  const os = require('os');
+  const path = require('path');
+  const { createMcState, OVERRIDE_KEEP_MS } = require('../lib/mc-state');
+  const tmp = (tag) => path.join(os.tmpdir(), `mc-lines-${tag}-${process.pid}-${Date.now()}.json`);
+  const DAY = 24 * 60 * MIN;
+
+  test('an override is kept 90 days from when it was made, then gone', () => {
+    let t = NOW;
+    const st = createMcState({ file: tmp('age'), now: () => t, saveDelayMs: 1e9 });
+    expect(OVERRIDE_KEEP_MS).toBe(90 * DAY);
+    expect(st.setLineOverride('ado:1', { name: 'UI' })).toBe(true);
+    t = NOW + 90 * DAY;
+    expect(Object.keys(st.lineOverrides())).toEqual(['ado:1']);
+    t = NOW + 90 * DAY + 1;
+    expect(st.lineOverrides()).toEqual({});
+  });
+
+  test('at most maxKeys are kept: a new move drops the oldest', () => {
+    let t = NOW;
+    const st = createMcState({ file: tmp('cap'), now: () => t, maxKeys: 3, saveDelayMs: 1e9 });
+    for (const k of ['ado:1', 'ado:2', 'ado:3', 'ado:4']) { t += MIN; expect(st.setLineOverride(k, { name: 'UI' })).toBe(true); }
+    expect(Object.keys(st.lineOverrides()).sort()).toEqual(['ado:2', 'ado:3', 'ado:4']);
+    t += MIN;
+    expect(st.setLineOverride('ado:2', null)).toBe(true); // back to automatic
+    expect(Object.keys(st.lineOverrides()).sort()).toEqual(['ado:3', 'ado:4']);
+  });
+
+  test('the file is trimmed when it is read, not only on the next move: expired and over-cap entries never load', () => {
+    const file = tmp('load');
+    const lineOverrides = {};
+    for (let i = 0; i < 5; i++) lineOverrides[`ado:${i}`] = { line: { name: 'UI' }, at: NOW - i * MIN };
+    lineOverrides['ado:old'] = { line: { name: 'UI' }, at: NOW - 91 * DAY };
+    lineOverrides['ado:bad'] = { line: { name: 'a\nb' }, at: NOW };
+    fs.writeFileSync(file, JSON.stringify({ lineOverrides }));
+    const st = createMcState({ file, now: () => NOW, maxKeys: 3, saveDelayMs: 1e9 });
+    expect(Object.keys(st.lineOverrides()).sort()).toEqual(['ado:0', 'ado:1', 'ado:2']);
+    fs.rmSync(file, { force: true });
   });
 });

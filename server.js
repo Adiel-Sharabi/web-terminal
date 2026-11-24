@@ -6999,7 +6999,6 @@ const mcState = mcStateLib.createMcState({ file: MC_STATE_FILE });
 const MC_VIEW_TTL_MS = 3000;
 const MC_PEER_CLOSED_TTL_MS = 30 * 1000;
 const MC_META_WAIT_MS = 1500;
-const MC_PARENT_DEPTH = 3; // #523 - tracker parent levels read for the line rule
 const _mcPeerClosed = new Map(); // peer url -> {at, closed, ok}
 const _mcViewCache = new Map(); // request user -> {ts, promise}
 const _mcPromptEpisodes = createPromptEpisodes();
@@ -7053,15 +7052,10 @@ async function _computeMcView(reqUser) {
   await Promise.race([reads, new Promise((r) => { const t = setTimeout(r, MC_META_WAIT_MS); if (t.unref) t.unref(); })]);
   const metaByKey = {};
   for (const m of await Promise.all(refs.map((r) => mcTrackerMeta.peek(r)))) metaByKey[m.key] = m;
-  // #523 - the parent chain (lib/mc-lines.js's parent rule): each level from the cache now, its
-  // reads started behind it, so a parent never read yet arrives on a later poll.
-  for (let depth = 0, level = Object.values(metaByKey); depth < MC_PARENT_DEPTH && level.length; depth++) {
-    const up = [...new Set(level.map((m) => m && m.parent && m.parent.key).filter((k) => typeof k === 'string' && !metaByKey[k]))]
-      .map((k) => trackerMeta.parseRef(k)).filter((r) => r && !r.unqualified);
-    mcTrackerMeta.getMany(up).catch((e) => console.error(`[mc] tracker details (parents): ${e.message}`));
-    level = await Promise.all(up.map((r) => mcTrackerMeta.peek(r)));
-    for (const m of level) metaByKey[m.key] = m;
-  }
+  // #523 - the parent chain the line rule climbs (lib/mc-lines.js readParents): one more short
+  // wait shared by every level; what has not arrived by then lands on a later poll.
+  await mcLines.readParents({ metaByKey, parseRef: trackerMeta.parseRef, getMany: mcTrackerMeta.getMany, peek: mcTrackerMeta.peek,
+    waitMs: MC_META_WAIT_MS, log: (m) => console.error(`[mc] tracker details (parents): ${m}`) });
   const view = mcSubjects.buildView({ nodes, metaByKey, projects: cfg.projects, stageStore: mcState, lineOverrides: mcState.lineOverrides(), now });
   const boundOf = new Map(nodes.map((n) => [n.id, n.boundProject]));
   const sessions = rows.map((s) => ({ cwd: s.cwd, origin: s.origin, items: s.brief && s.brief.items, bound: boundOf.get(s.id) }));

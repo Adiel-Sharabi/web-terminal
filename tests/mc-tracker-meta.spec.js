@@ -180,7 +180,7 @@ test.describe('#502 parsing - Azure DevOps', () => {
     const wi = fx('ado-workitem.json');
     expect(tm.parseAdoWorkItem(wi).parent).toEqual({ key: 'ado:9000', ref: 'ado:9000' });
     expect(tm.parseAdoWorkItem({ ...wi, relations: wi.relations.filter((r) => r.rel !== 'System.LinkTypes.Hierarchy-Reverse') }).parent).toBeNull();
-    // A link to another organisation's host or a non-number id names nothing.
+    // A link whose id is not a number names nothing (the parent is read by its numeric id only).
     expect(tm.parseAdoWorkItem({ ...wi, relations: [{ rel: 'System.LinkTypes.Hierarchy-Reverse', url: 'https://x.test/_apis/wit/workItems/abc' }] }).parent).toBeNull();
     const gh = { ...fx('gh-issue.json'), repository_url: 'https://api.github.com/repos/Acme/Widgets' };
     expect(tm.parseGithubIssue({ ...gh, body: 'no parent here' }, []).parent).toBeNull();

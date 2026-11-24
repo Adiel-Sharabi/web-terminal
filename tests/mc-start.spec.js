@@ -253,11 +253,11 @@ test.describe('#512 a session bound at birth', () => {
 });
 
 test.describe('#523 Start work asks for the line', () => {
-  const LINES = [{ id: 'parent:ado:9', name: 'SSCP rollout', project: 'widgets', kind: 'parent' }];
+  const LINES = [{ id: 'parent:ado:9', name: 'Gadget rollout', project: 'widgets', kind: 'parent' }];
   test('a line id the view knows, or a new line by name; a bad one is refused in words', () => {
     const p = (extra) => S.parseStart({ project: 'widgets', hunt: true, server: 'a', ...extra }, { projects: PROJECTS, parseRef, lines: LINES });
     expect(p({}).value.line).toBeNull();
-    expect(p({ line: 'parent:ado:9' }).value.line).toEqual({ id: 'parent:ado:9', name: 'SSCP rollout' });
+    expect(p({ line: 'parent:ado:9' }).value.line).toEqual({ id: 'parent:ado:9', name: 'Gadget rollout' });
     expect(p({ lineName: 'Docket fixes' }).value.line).toEqual({ name: 'Docket fixes' });
     expect(p({ line: 'nope' }).error).toContain('line');
     expect(p({ line: 'parent:ado:9', lineName: 'x' }).error).toContain('line');
@@ -265,7 +265,7 @@ test.describe('#523 Start work asks for the line', () => {
 
   test('the binding keeps the line; a stored binding without one reads as before', () => {
     expect(B.bindingOf(binding({ line: { name: 'Docket fixes' } })).line).toEqual({ name: 'Docket fixes' });
-    expect(B.bindingOf(binding({ line: { id: 'parent:ado:9', name: 'SSCP rollout' } })).line).toEqual({ id: 'parent:ado:9', name: 'SSCP rollout' });
+    expect(B.bindingOf(binding({ line: { id: 'parent:ado:9', name: 'Gadget rollout' } })).line).toEqual({ id: 'parent:ado:9', name: 'Gadget rollout' });
     expect(B.bindingOf(binding())).not.toHaveProperty('line');
     expect(B.bindingOf(binding({ line: { name: `a${String.fromCodePoint(7)}` } }))).not.toHaveProperty('line');
     const lead = { id: 'lead-1', items: [], replaces: [], parentId: null, createdAt: NOW };

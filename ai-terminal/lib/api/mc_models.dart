@@ -33,6 +33,10 @@ List<T> _list<T>(dynamic v, T? Function(dynamic) parse) =>
 /// The largest instant [DateTime] can hold; beyond it the constructor throws.
 const int _maxMs = 8640000000000000;
 
+/// #523 - the longest NEW line name the server takes (one line): lib/session-brief.js
+/// LIMITS.line, gated by scripts/check-shared-constants.js.
+const int kMcLineNameMax = 80;
+
 DateTime? _at(dynamic v) {
   final ms = _int(v);
   return ms == null || ms <= 0 || ms > _maxMs ? null : DateTime.fromMillisecondsSinceEpoch(ms);

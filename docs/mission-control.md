@@ -442,15 +442,20 @@ Which line a work item is on - first match wins:
 2. the item's project's configured lines in config order: a listed item, a tag, a title prefix, or
    the name of a session on it;
 3. its tracker parent (`Meta.parent`): the nearest Feature/Epic up the chain the tracker details
-   hold (read up to 3 levels behind each poll; a level not read yet arrives on a later one), else
-   the direct parent; a configured rule matching the parent (item, tag, title) names the line;
+   hold (read up to 3 levels per poll, `readParents`, within one more short wait shared by every
+   level; a level not read by then arrives on a later poll), else the direct parent; a configured
+   rule matching the parent (item, tag, title) names the line. When the chain stopped at a level
+   never read (not yet, or its read failed) the line says `partial: true`: it may still move;
 4. otherwise a line of its own: its run's (`run:<root session id>`, named after the root session),
    else the work item's (`item:<subject key>`, named after its title). Never a catch-all.
 A name (a report's, a binding's, a move's) is matched against the project's configured lines by name
-or id, no case; else it is a line of that name, id `<project>/~<slug>`.
+or id, no case; else it is a line of that name, id `<project>/~<slug>` (the slug keeps letters and
+digits in any script, so two Hebrew names are two lines). A new line's NAME is held to 80; a line
+picked by id (a tracker parent's or item's) keeps its name as a label of up to 500, whatever length.
 ```
 Line.ref = { id, name, project, kind: 'config'|'named'|'parent'|'run'|'item',
-  source: 'override'|'session'|'rule'|'parent'|'own' }        // on each Subject: why it is there
+  source: 'override'|'session'|'rule'|'parent'|'own',         // on each Subject: why it is there
+  partial? }                                                  // true: its parent chain is not fully read
 Line = { id, name, kind, project, projectName,                // projectName 'Other' for other
   counts: Counts,                                             // as Projects: the same bucket rule; sessions = LIVE ones
   subjects: [key],                                            // newest first
@@ -467,6 +472,6 @@ are in. Lines are ordered: most needing the person, then those with active work,
 configured line or one `/api/mc/lines` shows now, `null` = back to the rules; `name` = a line of that
 name (one line, at most 80). Exactly one of the two, else `400 {error}`.
 Report: optional top-level `line` (one line, at most 80; anything else refuses the report with the
-reason). A wait-only report keeps it; a full report without it clears it. `brief.line` carries it
+reason; a `line` with only a `wait` is refused too, never dropped). A wait-only report keeps it; a full report without it clears it. `brief.line` carries it
 (null when none) and a closed record keeps it. The per-prompt note does not teach it (its length
 budget); the refusal does.
