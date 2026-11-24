@@ -765,6 +765,33 @@ class BriefDecision {
   }
 }
 
+/// A decision a session holds for the person WITHOUT stopping for it (#526): the wait's decision
+/// shape (question, context, 2-4 options, the agent's recommendation) plus what the server adds -
+/// [id] (the same short name in the card and in the answer typed back), when it was first asked, and
+/// whether a prompt typed since may have answered it. The server owns every rule; this only carries.
+class BriefAsk {
+  final String id;
+  final BriefDecision decision;
+
+  /// Epoch milliseconds it was first asked, or null.
+  final int? at;
+
+  /// A typed prompt arrived after it was asked, so it may be answered; the session says which.
+  final bool maybeAnswered;
+  const BriefAsk({required this.id, required this.decision, this.at, this.maybeAnswered = false});
+
+  String get question => decision.question;
+
+  /// Null (the ask is dropped) when it has no id or no decision the way the server words one.
+  static BriefAsk? fromJson(dynamic json) {
+    if (json is! Map) return null;
+    final id = json['id'];
+    final d = BriefDecision.fromJson(json);
+    if (id is! String || id.isEmpty || d == null) return null;
+    return BriefAsk(id: id, decision: d, at: _asInt(json['at']), maybeAnswered: json['maybeAnswered'] == true);
+  }
+}
+
 /// What a session has told the sessions dashboard about its work (#298), as the
 /// server builds it (`buildBrief` in `lib/session-brief.js`). Every rule — which
 /// items show, pinned-over-reported precedence, when a report is stale — is made
@@ -797,6 +824,13 @@ class SessionBrief {
   /// The decision card of a "waiting on you" report (#492 phase B), or null.
   final BriefDecision? decision;
 
+  /// The decisions the agent holds for the person without stopping for them (#526): a standing
+  /// list that only the person's answer from the card, or the session itself, ends.
+  final List<BriefAsk> asks;
+
+  /// A question the session's last reply may have put that is on none of its lists (#526), or null.
+  final BriefLine? possibleAsk;
+
   const SessionBrief({
     this.reportingOn = true,
     this.items = const <BriefItem>[],
@@ -810,6 +844,8 @@ class SessionBrief {
     this.artifacts = const <BriefArtifact>[],
     this.inboxDismissed = const <String>[],
     this.decision,
+    this.asks = const <BriefAsk>[],
+    this.possibleAsk,
   });
 
   static SessionBrief? fromJson(dynamic json) {
@@ -820,6 +856,10 @@ class SessionBrief {
     final wait = json['wait'];
     return SessionBrief(
       decision: wait is Map && wait['on'] == 'you' ? BriefDecision.fromJson(wait['decision']) : null,
+      asks: json['asks'] is List
+          ? [for (final a in json['asks'] as List) ?BriefAsk.fromJson(a)]
+          : const <BriefAsk>[],
+      possibleAsk: BriefLine.fromJson(json['possibleAsk']),
       reportingOn: json['reporting'] != 'off',
       items: BriefItem.listFromJson(json['items']),
       headline: (headline == null || headline.isEmpty) ? null : headline,

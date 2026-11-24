@@ -7,7 +7,7 @@ Unknown/missing data is `null`, never guessed. Sections below a milestone that h
 are the plan, not a description of the server.
 
 Landed: Who answers, Work-item meta (#502), Projects and areas (#503), Stage (#505), Subjects
-(#504), Answer now / My to-do (#506), Ask (#511), Start work (#512), Questions context (#510), Lines of work (#523). Advertised in `/api/version`
+(#504), Answer now / My to-do (#506), Ask (#511), Start work (#512), Questions context (#510), Lines of work (#523), Asks (#526). Advertised in `/api/version`
 `capabilities`: `work-item-meta`, `mission-control` (#502/#503), `mc-subjects` (#504/#505: the
 subjects routes, `stage` on report items, `counts.stages`), `mc-needs` (#506: `/api/mc/now`,
 `/api/mc/todo[/:id]`, `/api/mc/later`), `mc-start` (#512: `POST /api/mc/start`,
@@ -215,7 +215,10 @@ when waitsOn is you, `waitsOnOthers` when external - the companion's fallback ru
 `GET /api/mc/now` -> `{answerNow: [Card], actions: [Card], todo: [Todo], moving: {working, idle, total}, projects: [Project], generatedAt}`
 ```
 Card = { id,                     // '<server>|<sessionId>|<kind>:<at>' - names the WAIT, not the session (below)
-  kind: 'question'|'permission'|'decision'|'wait'|'action',
+  kind: 'question'|'permission'|'decision'|'wait'|'action'|'ask'|'possible-ask',
+  blocking: bool,                // false for an `ask` / `possible-ask` (#526): the session is not held up by it
+  askId, replyPrefix, maybeAnswered,  // an `ask` (#526): its short name, what an answer typed from the card begins with, may-be-answered
+  supervisor: bool,              // the card is the supervisor dispatcher's own (#532); a to-do on it parks nothing
   server, serverUrl, sessionId, sessionName, project, subjectKey, ref, title,
   what,                          // the reason's text / wait.what
   why: { blocks, blockedSessions: [{server, id, name}], subjects: [key], severity, ageMin, text },
@@ -230,7 +233,7 @@ Todo = { id, cardId, kind, subjectKey, ref, title, project, text, server, sessio
 Answer now = every LIVE session whose wait is `you` by the subjects' own rule (`sessionWaitOn`:
 its `reason`, or for a peer too old to send one, status `waiting` or a reported `you` wait): a
 question or permission prompt on screen, a decision card (#492), a reported `you` wait. One card
-per session; the card is `lib/mc-subjects.js` `needsYouCard`, the same as a subject's `needsYou`.
+per session (plus its asks, below); the card is `lib/mc-subjects.js` `needsYouCard`, the same as a subject's `needsYou`.
 Its id names the wait: a reported wait (wait, decision) by its `at` (the agent's next report is a
 new card); a prompt on screen by when it came up (`lib/mc-episodes.js`: an episode opens the first
 time a view sees the session at a prompt, at its last activity then, holds while every view sees it
@@ -246,6 +249,75 @@ severity of those items, null when none. Rank: blocked sessions desc, then block
 desc, then severity (null last), then age desc (unknown last), then id. `rank` is 1-based.
 `moving`: live sessions owing nothing to the person: `working` (reason working; status for an old
 peer) and `idle` (the rest).
+
+**Asks (#526)** - decisions waiting for the owner that do NOT block the session. A session reports ONE
+wait, and one that also waits on a child session reports `external`, or reports `done` when its work is
+delivered: the decisions it holds for the person had no place to go, and the person never saw them. A
+report may carry `asks` (top level, beside `items` and `wait`; `lib/session-brief.js` owns it): the
+session's STANDING list of open decisions, complete across turns, up to 5, each the wait's decision shape
+(#492) with the `context` REQUIRED - `{question, context, options: [{label, consequence?}] x2-4,
+recommended?}` (a missing context, or any other bad shape, is refused with the right one quoted); two
+of the same question (case and spacing aside) are one. A report that names `asks` REPLACES the list (an
+ask it leaves out is gone), one without it KEEPS it - a `done`, `self` or `external` report, a wait-only
+report, all of them - and `"asks": []` clears it; a report of `asks` alone (`{"asks": [...]}`) updates an
+earlier report and leaves its wait as it was. Each ask keeps the time it was first asked while its
+question stands. `brief.asks` = `[{id, question, context, options, recommended?, at, maybeAnswered}]`
+(`[]` when none or reporting is off; a peer too old to send it has none); `id` is 8 hex of the question
+(`askDigest`).
+A session that holds open asks is never closed under them: the close-out (R5) neither asks, marks nor
+closes it (`openAsks` on the graph node, `open-asks` from the session's own server), and the idle reaper
+keeps it. A card answer typed into a session that is still working is queued by Claude; it reaches the
+UserPromptSubmit hook when the turn takes it (measured, `docs/findings/chat-lens.md`), and that is when the ask clears.
+
+What ends an ask is the owner's answer FROM ITS CARD, never a guess. The app types the answer behind the
+card's `replyPrefix`, `Answer to "<question, 100 chars>" [ask:<id>]: ` (the server words it; the app only
+prepends it), so the typed prompt names the decision it answers: `foldHook` reads it back
+(`askAnswered`, only at the start of the text) and drops exactly that ask - the other asks and the
+reported wait stand. Any OTHER typed prompt (a harness turn does not count) only marks every ask
+`maybeAnswered: true` - the person wrote to the session, what they wrote may or may not have settled a
+decision - and clears the wait it answered, as before. The session re-reports after reading: a list that
+carries an ask makes it open again (the mark is dropped), one that leaves it out ends it. The dashboard
+hook note (`instructionText`) teaches the standing list, quotes it back with the marks, and says a
+decision the reply raises goes in before the session finishes, whatever its wait.
+
+Each ask of a LIVE session is an Answer-now card (`kind: 'ask'`, `blocking: false`), one per decision:
+`what` = the question, `decision` = `{question, context, options, recommended?}`, `askId`, `replyPrefix`,
+`maybeAnswered`, `askedAt` = when it was first asked, id `<server>|<session>|ask:<askedAt>.<id>` (a
+re-report of an open ask is the same card; another decision of the session is another card), `why` =
+`{blocks: 0, blockedSessions: [], subjects: [], severity: its own items', ageMin, text}` with `text`
+naming what the session is doing instead ("the session is still working: this does not hold it up";
+carries on by itself / waits on something else / is idle / also waits on you; a `maybeAnswered` one says
+the person wrote to the session after it asked). A decision the session also reports as its `you` wait is
+that wait's card, not a second one. Asks rank after every wait on the person (they block nothing, a wait
+blocks at least its own session) and a `maybeAnswered` one after the open ones, then by the ordinary
+rule, oldest first. A session that only has asks still counts in `moving`. A to-do on an ask records it
+and tells the session nothing (park `none`, refused `not-blocking`: there is no wait to park); a "later"
+works as for any card. The companion answers through the reply dialog (the questions inbox lists only
+what a session waits on) and the existing reply path (`McPickSender`), which re-reads the session first
+and refuses once it no longer holds that decision.
+
+**Possible unreported question (#526)** - the backstop for a session that wrote a question in its reply
+and left it off `asks` and `wait`. At a Stop the server reads the newest reply from the transcript (the
+same read as the `did` line, once) and `lib/unreported-ask.js` looks at its END - the TL;DR, else the
+last paragraph: a sentence that ends in `?`, or says a decision, answer or approval is owed ("still need
+your answer", "left one question", "until X answers"), is noted (`entry.possibleAsk = {text, at}`); an
+optional offer ("want me to also ...?") and "nothing needs your input" are not. A rule, not a model:
+it runs on every Stop, so it is free and the same every time. `brief.possibleAsk = {text, at}|null`:
+null when reporting is off, when an `ask` or the `you` wait covers the sentence (half its significant
+words in one of them: `coveredBy`), after the owner types a prompt (`foldHook`), and when a later reply
+asks nothing (the note is only set from a turn no newer turn has begun). It is an Answer-now card of kind
+`possible-ask` (`blocking: false`, id `<server>|<session>|possible:<at>`, `what` = the quoted sentence,
+no decision, no reply prefix, `why.text` "its last reply may ask you something it did not report"),
+ranked after the real asks; the person answers it in their own words, and a to-do on it tells the
+session nothing.
+
+**The supervisor's dispatcher (#532)** is the fleet's supervisor, not one of its sessions: its row
+carries `role: 'supervisor'` (the session list's own field, `supervisorRowFields`), and
+`mcSubjects.isSupervisor` is the one place that reads it. Subjects, runs, project and area session
+counts and `moving` leave it out; what it needs from the person does not: its `you` wait and its asks
+are Answer-now cards like any session's (`supervisor: true` on the card, `sessionName` the
+dispatcher's). A to-do on such a card tells it nothing (park `none`, refused `supervisor`): its input
+is the supervisor's own case line, not a place for "carry on".
 
 My to-do = what the person moved to their desk. A to-do (open or done) hides its card; a card
 whose wait has ended is not pending, so it never comes back; a new wait of the same session is a
@@ -316,15 +388,15 @@ Read-only: tools-off model call (the `lib/inbox-digest.js` CLI path), never type
 for an id over 400 characters, a `level` not in the list (absent = `ask`) or a bad follow-up;
 `409`/`503` from `mcRefusal` like every `/api/mc/*` route.
 ```
-Ask = { kind: 'question'|'permission'|'decision'|'wait',
+Ask = { kind: 'question'|'permission'|'decision'|'wait'|'action'|'ask'|'possible-ask',
   questions: [{text, header, multiSelect, hasPreview}],
   options: [{index, question, label, detail, recommended}],   // FLAT across the questions; index is what a follow-up names
   recommended: index|null,      // a decision's `recommended`; an AskUserQuestion option labelled "(Recommended)"
   context: string|null,         // a decision's context
-  canSuggest: bool }            // a decision or a wait (answered by a reply); an AskUserQuestion with ONE compact
+  canSuggest: bool }            // a decision, an ask or a wait (answered by a reply); an AskUserQuestion with ONE compact
                                 // question (its `Other` row; side-by-side has none); never a permission
 ```
-- The ask: a decision card's own decision; a question card's live AskUserQuestion (the
+- The ask: a decision card's (or an `ask`'s) own decision; a question card's live AskUserQuestion (the
   `pending-question` route: in-process for this server's session, a peer's over its route with the
   stored token; unreadable -> the card's words); a wait or a permission -> the card's words, no options.
 - Levels, each a list of `{title, body}` (plain text) and the sources they read: `ask` = The ask,

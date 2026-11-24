@@ -152,7 +152,7 @@ its inputs.
 | R2 | **Orphan.** `spawn.parentId`, followed through `replaces`, is gone cluster-wide. | Mark the session `orphan`. If it waits on its lead → open a dispatcher case ("stand in for the lead"). Otherwise just tell it. |
 | R3 | **No progress.** An untargeted wait gets the same check-in answer twice with no new turn of work in between, or a wait passes `checkBy`. | Open a dispatcher case instead of asking a third time. |
 | R4 | **Waiting on the owner.** `reason.kind = you`, or the dispatcher escalated a case. | Owner channel (§6). |
-| R5 | **Done.** The session reported `done`, is idle, has no viewer and no live work. | Close-out. Then close it if an agent or the supervisor opened it; mark it *ready to close* if the owner did (§7). |
+| R5 | **Done.** The session reported `done`, is idle, has no viewer, no live work and no open asks (#526: closing it would drop them). | Close-out. Then close it if an agent or the supervisor opened it; mark it *ready to close* if the owner did (§7). |
 | R6 | **Hung turn.** `working`, but no hook and no PTY output for N min. | Case. |
 | R7 | **Dead agent.** The agent exited to its shell. Needs #373 (the SessionEnd hook). | Case → usually a replacement (§8). |
 | R8 | **Capacity.** Before any spawn. | Refuse a machine that is at its slot cap or below its free-commit floor. Office lives near its limit: the floor is per machine, in config. |

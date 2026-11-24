@@ -138,7 +138,7 @@ test.describe('did is ONE plain line, stripped at block level', () => {
 test('server.js feeds the brief "did" from the RAW summary and keeps it off /speech (source gate)', () => {
   const src = require('fs').readFileSync(require('path').join(__dirname, '..', 'server.js'), 'utf8');
   const fn = src.slice(src.indexOf('function refreshBriefDid'), src.indexOf('function dashboardHookAnswer'));
-  expect(fn).toContain('const { raw } = speechFromTranscriptPath');
+  expect(fn).toContain('const { raw, reply } = speechFromTranscriptPath');
   expect(fn).toContain('briefLib.clipWords(raw');
   expect(src).toContain('res.json({ text, ts, agent });');
 });

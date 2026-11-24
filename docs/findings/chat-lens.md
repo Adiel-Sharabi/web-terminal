@@ -609,3 +609,6 @@ publishes null and the strip behaves exactly as before #210 there. A screen mark
 Codex is its own separately-measured change — note it would NOT be safe to reuse
 `readiness.composer` for it, because that field also gates submits.
 
+## #526 - a prompt typed MID-TURN runs the UserPromptSubmit hook (measured 2026-11-24)
+
+An ask is dropped by the owner's card answer typed into the session, which the server reads at UserPromptSubmit (`lib/session-brief.js` `askAnswered`). The open question was whether that hook fires for a prompt typed while the turn works - a `queued_command` attachment (#249). **MEASURED** over the live transcript corpus (128 files with one): 254 `queued_command` records with `commandMode: prompt` and `origin.kind: human`; 249 (98%) are followed within 8 records by this repo's own UserPromptSubmit hook record (`hook_additional_context`), 5 are not (not examined: a session without that hook, or a record further away). So a card answer sent to a working session does reach the hook, and the ask clears when the turn takes the queued message, not at the Enter. **Not measured:** that the hook's `prompt` text of a queued message equals the typed text byte for byte (the prefix match reads its start; the unit tests feed the typed text). Re-probe on the rig after a claude release.

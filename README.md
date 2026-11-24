@@ -745,6 +745,15 @@ companion's daily foreground time from a phone over adb in `logs/phone-usage.jso
 - **Answer now / My to-do (#506):** `GET /api/mc/now` lists every session stuck on you (a question,
   a permission prompt, a decision, a reported `you` wait), most blocking first: the sessions waiting
   above it and the work items they carry, then tracker severity, then age, with the reason in words.
+  **Asks (#526):** a session keeps a standing list of decisions it needs from you (`"asks"` in its
+  dashboard report, up to 5, each with its context and 2-4 options), whatever else it waits on. Each
+  is one `ask` card after every wait on you; reporting `done`, `self` or `external` does not clear
+  it. You answer it from the card (the answer is typed into the session as `Answer to "..." [ask:id]:
+  ...` and drops exactly that ask); a prompt you type yourself only dims the cards as **may be
+  answered**, and the session drops them in its next report. A session that ends a reply with a
+  question it never listed shows as a **possible unreported question** (a fixed rule on the reply's
+  end, no model). The supervisor's own dispatcher (#532) is no session of the lists and counts, but
+  what it needs from you is a card like any other.
   **To my to-do** (`POST /api/mc/todo`) parks one for the desk and tells its session once, through
   the gated prompt, to carry on and report that wait as external; a refusal (unsent text in its
   prompt box, a turn running) is shown and sent again only when you ask. A to-do can be ticked done,

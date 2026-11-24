@@ -33,6 +33,7 @@ import '../adaptive_home.dart';
 import '../session_screen.dart' show openSessionOnStack;
 import '../settings_screen.dart';
 import '../work_board_screen.dart';
+import 'ask_reply_dialog.dart';
 import 'ask_view.dart';
 import 'machines_view.dart';
 import 'now_view.dart';
@@ -188,7 +189,19 @@ class _MissionControlHomeState extends State<MissionControlHome> {
   void _openSession(String id, {Session? initial}) =>
       openSessionOnStack(Navigator.of(context), id, initialSession: initial);
 
-  void _answer(McCard card) => pushInbox(Navigator.of(context), focusSessionId: card.sessionId);
+  /// A wait is answered in the questions inbox; an ask (#526) is no wait - its session is moving
+  /// on, so the inbox lists none - and is answered by a reply typed from its card, as is a
+  /// possible unreported question.
+  void _answer(McCard card) {
+    if (card.usesReplyDialog) {
+      showDialog<void>(
+        context: context,
+        builder: (_) => McAskReplyDialog(card: card, onSend: (c, text) => _sendPick(c, text, null)),
+      );
+    } else {
+      pushInbox(Navigator.of(context), focusSessionId: card.sessionId);
+    }
+  }
 
   /// A project tapped on Now: the Projects tab, on that project's page.
   void _openProject(McProject p) {
