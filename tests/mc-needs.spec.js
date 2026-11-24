@@ -58,7 +58,9 @@ test.describe('#506 Answer now: which waits, ranked by what they block', () => {
     const v = now({ rows: [lone, root, mid, leaf] });
     expect(v.answerNow.map((c) => c.sessionName)).toEqual(['leaf', 'lone']);
     const [q, l] = v.answerNow;
-    expect(q).toMatchObject({ kind: 'question', hasQuestion: true, rank: 1, subjectKey: 'ado:3', server: 'beta', sessionId: leaf.id,
+    // #541: a prompt that says nothing of its item is about no item (never the session's first);
+    // what it blocks is still every item of the sessions above it.
+    expect(q).toMatchObject({ kind: 'question', hasQuestion: true, rank: 1, subjectKey: null, ref: null, title: null, server: 'beta', sessionId: leaf.id,
       why: { blocks: 3, subjects: ['ado:3', 'ado:2', 'ado:1'], ageMin: 5, severity: null, text: 'blocks 3 sessions and 3 work items' } });
     expect(q.why.blockedSessions.map((s) => s.name)).toEqual(['leaf', 'lead', 'orchestrator']);
     expect(l).toMatchObject({ kind: 'wait', hasQuestion: false, rank: 2, what: 'pick a schema',
@@ -440,5 +442,58 @@ test.describe('#522 action waits: on My to-do, never Answer now, and their Done'
       fs.writeFileSync(file, JSON.stringify({ v: 1, actionsDone: { a: { state: 5, at: NOW }, b: { state: 'refused', why: 'draft', at: NOW }, c: { state: 'x' } } }));
       expect(createMcState({ file, log: () => {} }).actionsDone()).toEqual({ b: { state: 'refused', why: 'draft', at: NOW } });
     } finally { fs.rmSync(dir, { recursive: true, force: true }); }
+  });
+});
+
+test.describe('#541 a wait card is about the item it names - never the session\'s first item', () => {
+  const A5 = { ref: 'ado:5', title: 'Landscape on a phone' };
+  const B9 = { ref: 'ado:9', title: 'Sensor cap for the DOM readout' };
+  const card = (r) => now({ rows: [r] }).answerNow[0];
+  const face = (c) => [c.subjectKey, c.ref, c.title];
+  const waitOf = (what, items, extra = {}, over = {}) => asking('alpha', what, 3, { items, wait: { on: 'you', what, at: NOW - 3 * MIN, ...extra }, ...over });
+
+  test('the wait\'s own "ref" decides, wherever the item is in the list', () => {
+    expect(face(card(waitOf('Ship it?', [A5, B9], { ref: 'ado:9' })))).toEqual(['ado:9', 'ado:9', 'Sensor cap for the DOM readout']);
+    expect(face(card(waitOf('Ship it?', [A5, B9], { ref: 'ado:5' })))).toEqual(['ado:5', 'ado:5', 'Landscape on a phone']);
+  });
+
+  test('without a ref the wait is about the item that is blocked', () => {
+    expect(face(card(waitOf('Nothing to do with a title', [A5, { ...B9, state: 'blocked' }])))[0]).toBe('ado:9');
+    // Two blocked items say nothing about which one: no subject.
+    expect(face(card(waitOf('Nothing to do with a title', [{ ...A5, state: 'blocked' }, { ...B9, state: 'blocked' }])))).toEqual([null, null, null]);
+    // A finished item is never guessed at: no blocked one and no shared words, so none.
+    expect(face(card(waitOf('Nothing to do with a title', [{ ...A5, state: 'done' }, B9])))).toEqual([null, null, null]);
+  });
+
+  test('without a ref or a blocked item, the wait is about the item whose note shares its words', () => {
+    const noted = { ...A5, note: 'the sensor cap readout waits for a hardware decision' };
+    expect(face(card(waitOf('Which sensor cap readout do you want?', [noted, { ...B9, title: 'Unrelated' }])))[0]).toBe('ado:5');
+    expect(face(card(waitOf('Which colour for the badge?', [noted, B9])))).toEqual([null, null, null]);
+  });
+
+  test('a wait never borrows the first item: a session with one item and a wait about something else has no subject', () => {
+    const c = card(waitOf('Which colour for the badge?', [A5]));
+    expect(face(c)).toEqual([null, null, null]);
+    expect(c.project).toBeNull();
+    // What it blocks is still every item of the session (the ranking is not about the title).
+    expect(c.why).toMatchObject({ blocks: 1, subjects: ['ado:5'], text: 'blocks this session and 1 work item' });
+  });
+
+  test('a question on screen is about the item its text shares words with, else none', () => {
+    const q = (text, items) => row('alpha', { name: 'q', status: 'waiting', waitingFor: 'question', reason: { kind: 'you', text, since: null }, items });
+    expect(face(card(q('Raise the sensor cap readout to 40?', [A5, B9]))).slice(0, 1)).toEqual(['ado:9']);
+    expect(face(card(q('Which colour for the badge?', [A5, B9])))).toEqual([null, null, null]);
+    // A reported wait with a ref does not name an on-screen prompt's item: the prompt is its own card.
+    expect(face(card({ ...q('Which colour for the badge?', [A5, B9]), brief: { ...q('x', [A5, B9]).brief, wait: { on: 'you', what: 'old', ref: 'ado:9', at: NOW - 3 * MIN } } }))).toEqual([null, null, null]);
+  });
+
+  test('the resolver is one function: the wait and the asks use the same rule', () => {
+    const nodes = M.sessionNodes({ rows: [waitOf('x', [A5, B9])], closed: [], now: NOW });
+    const view = M.buildView({ nodes, metaByKey: {}, projects: [], now: NOW, platform: 'win32' });
+    const subjects = new Map(view.subjects.map((s) => [s.key, s]));
+    expect(N.subjectFor(nodes[0], subjects, { ref: 'ado:5' }).title).toBe('Landscape on a phone');
+    expect(N.subjectFor(nodes[0], subjects, { ref: 'ado:99', words: 'Landscape on a phone' })).toBeNull();
+    expect(N.subjectFor(nodes[0], subjects, { words: 'Landscape on a phone' }).key).toBe('ado:5');
+    expect(N.subjectFor(nodes[0], subjects, {})).toBeNull();
   });
 });

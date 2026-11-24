@@ -152,7 +152,7 @@ void main() {
       await pump(tester, McCard.fromJson(_askJson())!, answered: answered);
       expect(find.text('ask'), findsOneWidget);
       expect(find.text('the session is still working: this does not hold it up'), findsOneWidget);
-      expect(find.text('Which database?'), findsWidgets);
+      expect(find.text('Which database?'), findsOneWidget, reason: '#541: the question is on the face once');
       expect(find.text('sqlite'), findsOneWidget, reason: 'its decision options show as on any decision card');
       expect(find.byKey(const ValueKey('mc-card-maybe-answered')), findsNothing);
       await tester.tap(find.byKey(const ValueKey('mc-card-answer')));
