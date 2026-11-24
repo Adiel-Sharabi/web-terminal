@@ -816,6 +816,12 @@ companion's daily foreground time from a phone over adb in `logs/phone-usage.jso
   side by side. None of it reaches the waiting session: only a suggestion you pick and confirm is
   sent, as the answer, through the same path as any answer (a decision's or a wait's reply, a
   question's `Other` row - which exists only for one compact question).
+- **Questions on the card, answered in place (#531):** a question card on Now shows what it asks - each
+  question's header and text, the first two and "+N more" - instead of "answer a question". **Answer**
+  opens an answer sheet inside Mission Control (an AskUserQuestion with the session screen's answer
+  panel, a decision by its options or your own words, a wait by a reply) through the existing
+  server-typed answer path; **Ask about this** on the card puts a question to the Analyst, which now
+  also reads the waiting session's last turns, so it can explain the terms the question uses.
 - Shapes and rules: [docs/mission-control.md](docs/mission-control.md).
 
 **Companion app** — a native Android + Windows client with the chat lens and push that

@@ -224,9 +224,18 @@ Card = { id,                     // '<server>|<sessionId>|<kind>:<at>' - names t
   why: { blocks, blockedSessions: [{server, id, name}], subjects: [key], severity, ageMin, text },
                                  // text e.g. "blocks 3 sessions and 2 work items"
   rank, askedAt, decision: {...}|null, hasQuestion: bool,
+  questions: [{header: string|null, text: string}]|null,  // #531, kind 'question' only: the card face
   action: {steps: [string], where: string|null}|null,   // #522, kind 'action' only
   done: {state, refused, reason, at}|null }             // #522, an action card only (My to-do and a subject's
                                                         // needsYou, lib/mc-needs.js withDone): its Done record
+```
+`questions` (#531): what a question card asks, so the card shows the questions and never only "answer a
+question". The pending AskUserQuestion read as the Ask below reads it (in-process, or a peer's route with
+its stored token), at most 4 questions, each `{header (<= 40 chars, one line)|null, text (<= 400 chars,
+one line)}`; `null` when the question cannot be read (then the card shows that, not a guess). Cached 30 s
+per card id (8 s after a failed read) and waited for at most 1.5 s, so a slow peer costs `questions: null`
+on that card and never a slow Now. A subject's `needsYou` question card carries it too.
+```
 Todo = { id, cardId, kind, subjectKey, ref, title, project, text, server, sessionId, sessionName, createdAt, doneAt|null,
   park: { state: 'sending'|'delivered'|'refused'|'uncertain'|'none', refused: code|null, reason: words|null, at } }
 ```
@@ -403,15 +412,30 @@ Ask = { kind: 'question'|'permission'|'decision'|'wait'|'action'|'ask'|'possible
   Recommendation. `context` adds The work item (the tracker CACHE, `peek`, never a read), What the
   session did (its reported brief), Why it asks (a decision's context), What each answer does, and
   Summary (inbox digest) - the session's digest ONLY as cached (`?peek=1`: never starts a run).
-  `everything` adds Last turns (the recap: up to 3 prompts, the latest reply, the tools since) and
-  Links (the work item, its PRs, the session). No model runs for any level.
+  `everything` adds Last turns (#531: the session's own last turns, oldest first, `You (<age>): ...` /
+  `The agent (<age>): ...`; the recap when its transcript cannot be read) and Links (the work item, its
+  PRs, the session). No model runs for any level.
 - `followup {option: index|null, question: 1-2000 chars}`: the Analyst's bundle for the asking
   session alone (its brief, its recap, its items' cached details) plus one block holding the card's
   question and options - agent text, so inside the data fence; the person's words sit after the
   fence and name the option by NUMBER only. Answer shape and errors as Ask (`502`/`503`).
+  **The waiting session's last turns (#531)** are in that bundle too, as one source (`<session>: last
+  turns`) before the card's own block: the session's real transcript turns (`readTranscriptPage`,
+  the newest 60 read), real prompts and the agent's text only (a task notification, a slash-command
+  echo or a hook's feedback is not a turn), the last 14 at most, each capped at 3000 characters and all
+  at 14000, newest kept; a cut says "(Older turns are not shown.)". Without them the Analyst saw a
+  280-character recap and could not explain the terms of a question that the agent had defined in its
+  earlier text. A session whose transcript cannot be read falls back to the recap.
 - `suggest`: the same bundle; the model proposes 2-4 OTHER answers `{label (one line, <= 80),
   consequence (<= 240)}`; control characters are removed, a label the card already offers (no case)
   or given twice is dropped, none left = `502 bad-output`. `canSend` = the ask's `canSuggest`.
+- **Answered in place, asked in one tap (#531).** The companion's **Answer** on a card opens an answer
+  sheet inside Mission Control (no jump to the old inbox): an AskUserQuestion shows the answer panel
+  the session screen uses, whose frames (`buildAnswerFrames`) go through the existing server-typed
+  `POST /api/sessions/:id/answer` after the same pre-write re-check; a decision offers its options and
+  a box for the person's own words, a reported wait a reply box, a permission only **Open session**.
+  A card also carries **Ask about this** (opens the panel with its box for the whole question ready).
+  No new route: `GET /api/mc/now` gains `questions`, the Analyst's bundle gains the last turns.
 - NOTHING here reaches the waiting session. The companion sends only the person's final pick, after
   a confirm, through the existing answer paths: a decision -> the reply `Decision: <label>` (while
   the session still puts THAT decision), a wait -> the reply, a question -> `buildAnswerFrames` with

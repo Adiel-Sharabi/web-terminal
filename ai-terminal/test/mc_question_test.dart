@@ -347,5 +347,82 @@ void main() {
       expect(McPickSender.runsAsCommand('Use the cache'), isFalse);
       expect(posted, isEmpty);
     });
+
+    // #531 - the card's own AskUserQuestion answered in Mission Control: the frames the answer
+    // panel built (buildAnswerFrames, never re-derived here) through the same pre-write re-check.
+    test('an AskUserQuestion answered in place: the panel\'s frames go out, after the re-check', () async {
+      pending = question();
+      final s = await sender();
+      final shown = PendingQuestion.fromJson({'pending': true, 'question': question()})!;
+      final frames = buildAnswerFrames(shown.questions, [
+        {1},
+      ]);
+      expect(await s.answerQuestion(qCard, shown, frames), isTrue);
+      expect(posted.take(frames.length).toList(), frames.map((f) => f.keys).toList());
+    });
+
+    test('a side-by-side or multi-tab question is answered in place too: the keys are the panel\'s', () async {
+      final two = {
+        ...question(),
+        'questions': [
+          ...(question()['questions'] as List),
+          {'header': 'S', 'question': 'Size?', 'multiSelect': true, 'options': [{'label': 'S'}, {'label': 'L'}]},
+        ],
+      };
+      pending = two;
+      final s = await sender();
+      final shown = PendingQuestion.fromJson({'pending': true, 'question': two})!;
+      final frames = buildAnswerFrames(shown.questions, [
+        {0},
+        {0, 1},
+      ]);
+      expect(await s.answerQuestion(qCard, shown, frames), isTrue);
+      expect(posted.take(frames.length).toList(), frames.map((f) => f.keys).toList());
+    });
+
+    test('the question on screen is not the one the sheet showed: nothing is written, and it is said', () async {
+      final s = await sender();
+      final shown = PendingQuestion.fromJson({'pending': true, 'question': question()})!;
+      pending = {
+        ...question(),
+        'questions': [
+          {...(question()['questions'] as List).first as Map<String, dynamic>, 'question': 'Delete the old table?'},
+        ],
+      };
+      expect(await s.answerQuestion(qCard, shown, buildAnswerFrames(shown.questions, [
+        {1},
+      ])), isFalse);
+      expect(posted, isEmpty);
+      expect(said.single, contains('nothing was sent'));
+      pending = null; // answered somewhere else meanwhile
+      said.clear();
+      expect(await s.answerQuestion(qCard, shown, buildAnswerFrames(shown.questions, [
+        {1},
+      ])), isFalse);
+      expect(posted, isEmpty);
+      expect(said.single, contains('nothing was sent'));
+    });
+
+    test('a session the app does not know: nothing written', () async {
+      pending = question();
+      final s = await sender();
+      final shown = PendingQuestion.fromJson({'pending': true, 'question': question()})!;
+      const other = McCard(id: 'x', kind: 'question', server: 'Home', sessionId: 'nope');
+      expect(await s.answerQuestion(other, shown, buildAnswerFrames(shown.questions, [
+        {0},
+      ])), isFalse);
+      expect(posted, isEmpty);
+      expect(said.single, contains('nothing was sent'));
+    });
+
+    test('pendingQuestion: the card\'s session\'s question on screen, null when none, an error when unreadable', () async {
+      pending = question();
+      final s = await sender();
+      expect((await s.pendingQuestion(qCard))?.questions.single.question, 'Pick a color');
+      pending = null;
+      expect(await s.pendingQuestion(qCard), isNull);
+      await expectLater(s.pendingQuestion(const McCard(id: 'x', kind: 'question', server: 'Home', sessionId: 'nope')),
+          throwsA(isA<ApiException>().having((e) => e.message, 'message', contains('not in this app'))));
+    });
   });
 }
