@@ -20,7 +20,7 @@ const { ROOT, sleep, until, startServer, bearer } = require('./supervisor-rig');
 test.describe.serial('#525 the dispatcher is replaced by a fresh one between cases', () => {
   test.setTimeout(180000);
   const TAG = '[web-terminal supervisor]';
-  const LAUNCH = "printf '\\xe2\\x9d\\xaf\\xc2\\xa0 ready\\n\\x1b[>0q'; echo claude";
+  const LAUNCH = "printf '\\xe2\\x9d\\xaf\\xc2\\xa0 ready\\n\\x1b[>0q'; ./claude";
   const port = 18140 + Math.floor(Math.random() * 40);
   const url = `http://127.0.0.1:${port}`;
   const tok = crypto.randomBytes(32).toString('hex');
@@ -94,7 +94,7 @@ test.describe.serial('#525 the dispatcher is replaced by a fresh one between cas
     const row = await until(async () => { const r = await rowOf(disp); return r?.handoff?.ctxTokens === 600000 ? r : null; }, 'its context on the row');
     expect(row.role).toBe('supervisor');
     // It was launched on Sonnet (the seam's command gets the model as a configured one does).
-    expect(row.autoCommand).toMatch(/echo claude --model sonnet "/);
+    expect(row.autoCommand).toMatch(/\.\/claude --model sonnet "/);
     expect(row.handoff).toMatchObject({ suggest: true, run: null });
     await sleep(3000); // several hand-off scans and supervisor scans
     const now = await rowOf(disp);
@@ -127,7 +127,7 @@ test.describe.serial('#525 the dispatcher is replaced by a fresh one between cas
     const row = await until(() => rowOf(fresh), 'the fresh dispatcher row');
     expect(row.role).toBe('supervisor');
     expect(row.name).toBe('web-terminal supervisor');
-    expect(row.autoCommand).toMatch(/echo claude --model haiku "/);
+    expect(row.autoCommand).toMatch(/\.\/claude --model haiku "/);
     expect(row.autoCommand).toContain(`"${TAG} You are the Supervisor's dispatcher.`);
     const rules = fs.readFileSync(path.join(dir, 'handoffs', 'supervisor', 'CLAUDE.md'), 'utf8');
     expect(rules).toContain('scripts/wt-supervise.js');
