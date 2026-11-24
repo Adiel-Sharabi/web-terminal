@@ -31,6 +31,10 @@ function candidate(idleMin = 120) {
   return { ...row, reason: sessionReason(row) };
 }
 const block = (row, over = {}) => C.checkInBlock(row, { now: T, supported: true, ...over });
+/** #540 - [row] answered a check-in whose baseline is the world as it is NOW (changeSignature). */
+const baselined = (row) => ({ ...row, brief: { ...row.brief, checkIn: { ...row.brief.checkIn, base: C.changeSignature(row) } } });
+/** #540 - something it reports moved since: its work items (a PR opened). */
+const withItems = (row) => ({ ...row, brief: { ...row.brief, items: [{ ref: '#7', state: 'in-progress', stage: 'pr-open' }] } });
 
 test.describe('checkInBlock (#443)', () => {
   test('the perfect candidate may be checked in on', () => {
@@ -202,8 +206,12 @@ test.describe('once per idle period (#443)', () => {
     const again = { ...a, reason: sessionReason(a) };
     expect(again.reason).toMatchObject({ kind: 'self', source: 'reported' });
     expect(block(again, { now: sent + 60000 + 59 * MIN })).toBe('asked');
-    // #463: an hour after its answer it may be asked again (see the #463 block below).
-    expect(block(again, { now: sent + 60000 + 60 * MIN })).toBeNull();
+    // #463: an hour after its answer the CLOCK allows another (see the #463 block below); #540: and
+    // only a change since the answer asks. With no baseline recorded yet, none has been seen.
+    const late = { now: sent + 60000 + 60 * MIN };
+    expect(block(again, late)).toBe('unchanged');
+    expect(block(baselined(again), late)).toBe('unchanged');
+    expect(block(withItems(baselined(again)), late)).toBeNull();
   });
 
   test('the period ends when the session is active again: a later turn re-arms it', () => {
@@ -809,7 +817,7 @@ test.describe('a stuck watcher with no report, and a repeat after the answer (#4
   });
 
   /** Case 2: the [n]th check-in of the period, answered [on] [answeredMin] ago, idle since. */
-  function answered(answeredMin, on = 'self', n = 1, row = null) {
+  function answered(answeredMin, on = 'self', n = 1, row = null, { moved = true } = {}) {
     const r = row || candidate(answeredMin);
     const ended = T - answeredMin * MIN;
     const sent = ended - 2 * MIN;
@@ -817,7 +825,12 @@ test.describe('a stuck watcher with no report, and a repeat after the answer (#4
     const brief = { ...r.brief, checkIn: C.publicRecord(rec), turnAt: sent + 1000, stoppedAt: ended,
       wait: on ? { on, what: 'x', at: ended - 1000 } : r.brief.wait };
     const out = { ...r, brief };
-    return { ...out, reason: sessionReason(out) };
+    const full = { ...out, reason: sessionReason(out) };
+    // #540: the record carries the baseline its answer left. By default the world has MOVED since
+    // (a PR opened), so these tests keep pinning the ladder's clock, count and readings; { moved:
+    // false } is the same session with nothing changed.
+    const based = baselined(full);
+    return moved ? withItems(based) : based;
   }
   /** A session with a fresh watcher listed as running. */
   const watching = (min) => {
@@ -836,6 +849,8 @@ test.describe('a stuck watcher with no report, and a repeat after the answer (#4
     expect(block(answered(240, 'self', 3, watching(240)))).toBeNull();
     // maxPerPeriod (4) asks: no fifth, however long.
     expect(block(answered(60000, 'self', 4, watching(60000)))).toBe('asked');
+    // ...and the clock alone never asks: the same sessions, with nothing moved, are 'unchanged' (#540).
+    for (const m of [60, 120, 240]) expect(block(answered(m, 'self', Math.log2(m / 60) + 1, watching(m), { moved: false }))).toBe('unchanged');
     expect(block(answered(600, 'self', 2, watching(600)), { cfg: C.checkInConfig({ maxPerPeriod: 2 }) })).toBe('asked');
     expect(block(answered(30, 'self', 1, watching(30)), { cfg: C.checkInConfig({ repeatMin: 20, withLiveWorkMin: 20 }) })).toBeNull();
   });
@@ -870,15 +885,30 @@ test.describe('a stuck watcher with no report, and a repeat after the answer (#4
     expect(C.repeatDue(lost, T)).toBe(false);
     expect(block({ ...r, brief: { ...r.brief, checkIn: lost } })).toBe('asked');
     // The same records with an answer that may repeat ARE due: the negatives above are the gate's.
-    expect(C.repeatDue({ ...esc, endedAt: T - 598 * MIN, answer: { on: 'self', what: 'x' } }, T)).toBe(true);
+    const due = { ...esc, endedAt: T - 598 * MIN, answer: { on: 'self', what: 'x' } };
+    expect(C.repeatTimeDue(due, T)).toBe(true);
+    // #540: the clock is not enough. No baseline, or a world that has not moved, is no repeat...
+    expect(C.repeatDue(due, T)).toBe(false);
+    const sig = C.changeSignature(candidate(600));
+    expect(C.repeatDue({ ...due, base: sig }, T, undefined, sig)).toBe(false);
+    // ...and a change since the answer is.
+    expect(C.repeatDue({ ...due, base: sig }, T, undefined, { ...sig, i: 'moved' })).toBe(true);
   });
 
   test('a repeat due also passes the cheap pre-filter; a real turn still ends the period', () => {
     const ended = T - 61 * MIN;
     const rec = { ...C.startRecord(ended - 2 * MIN, 61, 'long-self'), deliveredAt: ended - MIN, endedAt: ended, answer: { on: 'self', what: 'x' } };
     const e = { turnAt: ended - MIN, stoppedAt: ended, reported: { at: ended - 1000, wait: { on: 'self', what: 'x', at: ended - 1000 } }, checkIn: rec };
+    // #540: an answered check-in with no baseline is looked at once, to record it, whatever the clock says...
     expect(C.worthReading(e, { now: T })).toBe(true);
-    expect(C.worthReading(e, { now: T - 2 * MIN })).toBe(false); // repeat not due yet
+    expect(C.worthReading(e, { now: T - 2 * MIN })).toBe(true);
+    // ...then only when the ladder's clock is due, and a session found unchanged is looked at again
+    // every changeCheckMin, not every scan.
+    const based = { ...e, checkIn: { ...rec, base: C.changeSignature(candidate(60)) } };
+    expect(C.worthReading(based, { now: T })).toBe(true);
+    expect(C.worthReading(based, { now: T - 2 * MIN })).toBe(false); // repeat not due yet
+    expect(C.worthReading({ ...based, checkIn: { ...based.checkIn, checkedAt: T - 9 * MIN } }, { now: T })).toBe(false);
+    expect(C.worthReading({ ...based, checkIn: { ...based.checkIn, checkedAt: T - 11 * MIN } }, { now: T })).toBe(true);
     // A later turn (a person, a notification): the period is over, the count starts again.
     expect(C.periodOpen(rec, T - 30 * MIN)).toBe(false);
   });
