@@ -377,6 +377,7 @@ test.describe('#466 the cluster work graph and the orphan rule', () => {
     const g = scan([{ name: 'Office', ok: true, sessions: [
       row(ID(1), wait('you', 50)), row(ID(2), wait('you', 10)), row(ID(3), wait('done', 1)),
       row(ID(4), { ...wait('done', 1), clients: 1 }), row(ID(5), { status: 'working' }), child(ID(6), ID(99)),
+      row(ID(8), { role: 'supervisor' }), // #475: the dispatcher, shown as the Supervisor
     ] }], T0);
     const { verdicts } = SV.noteOrphans({ [ID(6)]: { parentId: ID(99), firstAt: T0 - 10 * MIN, lastAt: T0 - MIN } }, g, cfg);
     const journal = J.foldJournal({ Office: [
@@ -387,6 +388,7 @@ test.describe('#466 the cluster work graph and the orphan rule', () => {
     expect(st.needsYou).toEqual([ID(2), ID(1)]);
     expect(st.readyToClose).toEqual([ID(3)]);
     expect(st.live.sort()).toEqual([ID(4), ID(5), ID(6)].sort());
+    expect(st.sessions.find((n) => n.id === ID(8)).role).toBe('supervisor'); // served, not listed as live
     expect(st.orphans).toEqual([ID(6)]);
     expect(st.history.map((e) => e.id)).toEqual([ID(7)]);
     expect(st.sessions.find((n) => n.id === ID(1)).journal).toEqual({ openedAt: T0 - 5, via: 'api', spawnedBy: 'lead' });

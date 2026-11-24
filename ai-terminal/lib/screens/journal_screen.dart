@@ -27,6 +27,7 @@ import '../services/session_repository.dart';
 import '../services/supervisor_lookup.dart';
 import '../util/open_inbox.dart';
 import '../util/supervisor_authority.dart';
+import '../util/supervisor_session.dart';
 import '../widgets/brief_item_row.dart' show briefStateLabel;
 import '../widgets/empty_state.dart';
 import '../widgets/format_utils.dart' show clockTime, relativeTime;
@@ -46,10 +47,6 @@ bool journalEntryMatches(JournalEntry e, String query) {
 /// would fire at once, every time). An authority that said nothing is read once a minute.
 Duration journalRefreshPeriod(int? everyMs, Duration floor) => Duration(
     milliseconds: math.max(math.min(everyMs ?? 60000, const Duration(days: 1).inMilliseconds), floor.inMilliseconds));
-
-/// A session id as the server mints it. Anything else is never sent back in a URL: a
-/// node comes from the authority, and its id would ride another server's token.
-final RegExp _uuid = RegExp(r'^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$', caseSensitive: false);
 
 /// A wait's length, short: `<1m`, `12m`, `3h`, `2d`.
 String waitedFor(int? sinceMs, DateTime now) {
@@ -149,38 +146,11 @@ class _JournalScreenState extends State<JournalScreen> {
     }
   }
 
-  /// The configured server a node lives on, by the name the authority gave it.
-  ServerConfig? _serverNamed(String? name) {
-    if (name == null) return null;
-    final want = name.toLowerCase();
-    for (final s in _servers) {
-      if (s.name.toLowerCase() == want) return s;
-    }
-    return null;
-  }
-
-  /// The app's own live row for [n], when it has one.
-  Session? _liveRow(SupervisorNode n, ServerConfig server) {
-    for (final s in _repo.current) {
-      if (s.id == n.id && s.server.baseUrl == server.baseUrl) return s;
-    }
-    return null;
-  }
-
-  /// The app's own row for [n] when it has one, else one built from the node. Null when
-  /// its server is not in this app's list, or its id is not a session id: nothing here
-  /// could (or may) reach it.
-  Session? _sessionOf(SupervisorNode n) {
-    final server = _serverNamed(n.server);
-    if (server == null || !_uuid.hasMatch(n.id)) return null;
-    return _liveRow(n, server) ?? Session.fromJson(server, {
-      'id': n.id,
-      'name': n.name ?? n.id,
-      'cwd': n.cwd ?? '',
-      'status': n.status ?? 'idle',
-      'agent': n.agent,
-    });
-  }
+  /// The app's own row for [n] when it has one, else one built from the node; null when
+  /// nothing here could reach it ([supervisedSession]).
+  Session? _sessionOf(SupervisorNode n) => supervisedSession(
+      id: n.id, server: n.server, servers: _servers, current: _repo.current,
+      name: n.name, cwd: n.cwd, status: n.status, agent: n.agent);
 
   Future<void> _close(SupervisorNode n) async {
     final s = _sessionOf(n);

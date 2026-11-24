@@ -11,6 +11,7 @@ import 'dashboard_screen.dart';
 import 'journal_screen.dart';
 import 'questions_inbox_screen.dart';
 import 'session_screen.dart';
+import 'supervisor_screen.dart';
 import 'work_board_screen.dart';
 
 /// Root screen that adapts to width. On a narrow window (phone) it is just the
@@ -30,6 +31,7 @@ class AdaptiveHome extends StatefulWidget {
     this.boardBuilder,
     this.inboxBuilder,
     this.journalBuilder,
+    this.supervisorBuilder,
     this.openInboxAtLaunch,
     this.launchTap,
     this.hasServers,
@@ -77,6 +79,9 @@ class AdaptiveHome extends StatefulWidget {
   /// Test seam: builds the supervisor's journal the pane shows (#466), as [boardBuilder].
   @visibleForTesting
   final JournalScreen Function(void Function(Session session) onOpenSession)? journalBuilder;
+
+  /// Test seam: builds the Supervisor the pane shows (#475), as [journalBuilder].
+  final SupervisorScreen Function(void Function(Session session) onOpenSession)? supervisorBuilder;
 
   /// Below this width we stay single-pane (phone behavior); at or above it we
   /// show the list + detail split.
@@ -203,6 +208,9 @@ class _AdaptiveHomeState extends State<AdaptiveHome> {
   static JournalScreen _defaultJournal(void Function(Session) onOpenSession) =>
       JournalScreen(embedded: true, onOpenSession: onOpenSession);
 
+  static SupervisorScreen _defaultSupervisor(void Function(Session) onOpenSession) =>
+      SupervisorScreen(embedded: true, onOpenSession: onOpenSession, onOpenInbox: SessionSelection.instance.showInbox);
+
   @override
   Widget build(BuildContext context) {
     return LayoutBuilder(
@@ -229,6 +237,7 @@ class _AdaptiveHomeState extends State<AdaptiveHome> {
                 onShowBoard: _selection.showBoard,
                 onShowInbox: _selection.showInbox,
                 onShowJournal: _selection.showJournal,
+                onShowSupervisor: _selection.showSupervisor,
                 onOpenMissionControl: widget.onOpenMissionControl,
               ),
             ),
@@ -246,6 +255,9 @@ class _AdaptiveHomeState extends State<AdaptiveHome> {
                   : _selection.journalShown
                   // The supervisor's journal (#466), opened from the rail.
                   ? (widget.journalBuilder ?? _defaultJournal)(_select)
+                  : _selection.supervisorShown
+                  // The Supervisor (#475), opened from its entry on the rail.
+                  ? (widget.supervisorBuilder ?? _defaultSupervisor)(_select)
                   : selectedId == null
                   // No session open: the board (#337). A board card opens its
                   // session the way a rail tap does, which is also what replaces

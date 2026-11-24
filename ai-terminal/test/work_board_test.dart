@@ -9,12 +9,15 @@ import 'dart:convert';
 
 import 'package:ai_terminal/api/api_client.dart';
 import 'package:ai_terminal/api/models.dart';
+import 'package:ai_terminal/api/supervisor_models.dart';
 import 'package:ai_terminal/screens/session_screen.dart' show buildComposeSubmission;
 import 'package:ai_terminal/screens/work_board_screen.dart';
 import 'package:ai_terminal/services/server_store.dart';
 import 'package:ai_terminal/services/session_repository.dart';
+import 'package:ai_terminal/services/supervisor_lookup.dart';
 import 'package:ai_terminal/theme/app_theme.dart';
 import 'package:ai_terminal/theme/status_colors.dart';
+import 'package:ai_terminal/util/supervisor_authority.dart';
 import 'package:ai_terminal/widgets/question_overlay.dart' show buildAnswerFrames;
 import 'package:flutter/material.dart';
 import 'package:flutter_test/flutter_test.dart';
@@ -53,10 +56,12 @@ Map<String, dynamic> _row(String id, String name,
         bool favorite = false,
         int? rank,
         Object? handoff,
-        String? parentId}) =>
+        String? parentId,
+        String? role}) =>
     {
       'id': id,
       'name': name,
+      'role': ?role,
       'cwd': '/w',
       'status': status,
       'notifyLevel': 'important',
@@ -560,6 +565,33 @@ void main() {
       await pump(tester, r: r);
       await settle(tester);
       expect(inCol('idle', find.text('Holds controller:10.0.0.7')), findsOneWidget);
+    });
+
+    // #475 - the dispatcher is no card while the Supervisor entry stands for it, and a card when
+    // nothing does (the supervisor is off): it is never in no list and behind no entry.
+    testWidgets('#475 the dispatcher the Supervisor entry stands for is no card, wherever its status would put it', (tester) async {
+      addTearDown(SupervisorFeed.instance.resetForTest);
+      SupervisorFeed.instance.resetForTest();
+      SupervisorFeed.instance.publish(SupervisorFind(SupervisorFindKind.found,
+          server: _server,
+          state: SupervisorState.fromJson({
+            'role': 'authority',
+            'enabled': true,
+            'dispatcher': {'enabled': true, 'id': 'sup', 'status': 'waiting', 'state': 'waiting'},
+          }, receivedAt: DateTime.now())));
+      rows = [
+        _row('s1', 'Dictation work', status: 'working'),
+        _row('sup', 'web-terminal supervisor', status: 'waiting', waitingFor: 'permission', role: 'supervisor'),
+      ];
+      final r = await repo();
+      await pump(tester, r: r);
+      expect(find.text('Dictation work'), findsOneWidget);
+      // waiting on a permission, it would be a Needs you card: it is not one
+      expect(find.text('web-terminal supervisor'), findsNothing);
+      // the entry goes (the supervisor is switched off): the board lists it at once
+      SupervisorFeed.instance.publish(const SupervisorFind(SupervisorFindKind.off, message: 'off'));
+      await tester.pump();
+      expect(find.text('web-terminal supervisor'), findsOneWidget, reason: 'with no entry the board is the only way to it');
     });
 
     testWidgets('Leases: a server that does not advertise them is never asked, and there is no section', (tester) async {
