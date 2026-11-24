@@ -92,9 +92,11 @@ test.describe('#512 Start work: the session it starts', () => {
     // Letters in any script survive; control characters do not.
     expect(S.safeText('Fix the שלום case; ok?', 100)).toBe('Fix the שלום case; ok?');
     expect(S.safeText('a\u0000b\u001bc', 100)).toBe('a b c');
-    // A cut never leaves half a surrogate pair.
-    expect(S.safeText('ab\u{1F600}cd', 3)).toBe('ab');
-    expect(S.safeText('ab\u{1F600}cd', 4)).toBe('ab\u{1F600}');
+    // A cut never leaves half a surrogate pair (U+20000 is a letter outside the BMP; an
+    // emoji is a symbol, not a letter, so it is dropped before any cut).
+    expect(S.safeText('ab\u{1F600}cd', 100)).toBe('ab cd');
+    expect(S.safeText('ab\u{20000}cd', 3)).toBe('ab');
+    expect(S.safeText('ab\u{20000}cd', 4)).toBe('ab\u{20000}');
   });
 
   test('a brief is REFUSED, never changed: a character a shell acts on is named; one too long says by how much', () => {
