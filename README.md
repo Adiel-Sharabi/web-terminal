@@ -770,6 +770,15 @@ companion's daily foreground time from a phone over adb in `logs/phone-usage.jso
   session in the project's folder with a name and a brief for its agent, and binds it to the project
   and work items at birth, so it shows under them before its first report; sessions it starts
   inherit the binding. Config `mc.startCommand` sets the launch command.
+- **Lines of work (#523):** a project runs several lines of work side by side (a bug hunt, health
+  checks, a feature, a release cut), and Mission Control shows each line apart, at the top of Now
+  and in the Lines tab, with its stage bar, what needs you, its sessions and machines; the project is
+  a label on the line. A work item's line, first match wins: your **Move to line...** (stored on the
+  authority), the line its session reported (optional report field `line`) or was started for
+  (Start work asks), or that of the orchestrator that started it; then the project's rules in
+  `config.json` `projects[].lines` (listed items, tags, title prefixes, session-name patterns); then
+  its tracker parent Feature/Epic; else a line of its own (its run, or the item) - never a
+  catch-all. `GET /api/mc/lines`, `POST /api/mc/lines/move`, `?line=` on `/api/mc/subjects`.
 - **Questions with context on demand (#510):** **More context** on an Answer-now card (Now, a
   subject) opens it at three levels - **Just the ask** (and the recommendation), **Context** (the
   work item, what the session did, what each answer does, the inbox digest when one is cached) and
@@ -799,7 +808,7 @@ Full list: **[docs/FEATURES.md](docs/FEATURES.md)**.
 | **[docs/COMPANION.md](docs/COMPANION.md)** | The Android + Windows companion app |
 | **[docs/TROUBLESHOOTING.md](docs/TROUBLESHOOTING.md)** | Known symptoms and dev tooling |
 | **[docs/ARCHITECTURE.md](docs/ARCHITECTURE.md)** | How the three-process design works |
-| **[docs/mission-control.md](docs/mission-control.md)** | Mission Control's wire contract: work-item details, projects and areas, stage, subjects and runs, Answer now and My to-do, Ask, Start work, questions with context |
+| **[docs/mission-control.md](docs/mission-control.md)** | Mission Control's wire contract: work-item details, projects and areas, stage, subjects and runs, Answer now and My to-do, Ask, Start work, questions with context, lines of work |
 | **[AGENTS.md](AGENTS.md)** | Point an AI agent at this repo and it can install and operate it |
 | **[CONTRIBUTING.md](CONTRIBUTING.md)** | Dev setup and the PR gate |
 | **[SECURITY.md](SECURITY.md)** | Threat model and vulnerability reporting |

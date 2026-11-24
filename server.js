@@ -85,6 +85,7 @@ const { createPromptEpisodes } = require('./lib/mc-episodes'); // #506 - a promp
 const mcAnalyst = require('./lib/mc-analyst'); // #511 - Ask, a read-only Analyst
 const mcBinding = require('./lib/mc-binding'); // #512 - a session bound to a project and subjects at birth
 const mcStart = require('./lib/mc-start'); // #512 - Start work: the request, the name and brief, the machine
+const mcLines = require('./lib/mc-lines'); // #523 - lines of work: which line a work item is on
 const mcQuestions = require('./lib/mc-questions'); // #510 - questions with context on demand
 const recap = require('./lib/recap');
 // #383 - the model-written summary of one inbox wait. Hot-reload only: nothing in the worker loads it.
@@ -2719,6 +2720,8 @@ function closeBrief(id, at, conversationId, { lost = false, spawn } = {}) {
     ? { id: e.handoff.successorId, name: e.handoff.successorName || null } : null;
   store.closed = briefLib.closeSession(store.closed, {
     id, name: e.name || null, items: b.items, headline: b.headline, did: b.did, artifacts: b.artifacts,
+    // #523 - the line of work it reported, so a finished session keeps its items on it.
+    ...(b.line ? { line: b.line } : {}),
     ...resume, ...(at ? { at } : {}),
     ...(handedOffTo ? { handedOffTo } : {}),
     // #504 - its parent and the ids it replaced, when it had any (lib/mc-tree.js).
@@ -6734,7 +6737,10 @@ function serverCapabilities() {
     // #522 - action waits: GET /api/mc/now `actions` (My to-do) and POST /api/mc/actions/done.
     'mc-actions',
     // #512 - POST /api/mc/start and GET /api/mc/machines (Start work).
-    'mc-start'];
+    'mc-start',
+    // #523 - GET /api/mc/lines, POST /api/mc/lines/move, `line` on subjects, `?line=`, `lines`
+    // on /api/mc/now, a report's optional `line` and Start work's `line`/`lineName`.
+    'mc-lines'];
   // #412/#428 - GET /api/leases (forwarded to the lease authority). The companion's Leases
   // section asks only a server that advertises it: an older one would 404, which must
   // never read as "nobody holds anything". Like 'fcm', only where it is configured: a
@@ -6993,6 +6999,7 @@ const mcState = mcStateLib.createMcState({ file: MC_STATE_FILE });
 const MC_VIEW_TTL_MS = 3000;
 const MC_PEER_CLOSED_TTL_MS = 30 * 1000;
 const MC_META_WAIT_MS = 1500;
+const MC_PARENT_DEPTH = 3; // #523 - tracker parent levels read for the line rule
 const _mcPeerClosed = new Map(); // peer url -> {at, closed, ok}
 const _mcViewCache = new Map(); // request user -> {ts, promise}
 const _mcPromptEpisodes = createPromptEpisodes();
@@ -7046,12 +7053,23 @@ async function _computeMcView(reqUser) {
   await Promise.race([reads, new Promise((r) => { const t = setTimeout(r, MC_META_WAIT_MS); if (t.unref) t.unref(); })]);
   const metaByKey = {};
   for (const m of await Promise.all(refs.map((r) => mcTrackerMeta.peek(r)))) metaByKey[m.key] = m;
-  const view = mcSubjects.buildView({ nodes, metaByKey, projects: cfg.projects, stageStore: mcState, now });
+  // #523 - the parent chain (lib/mc-lines.js's parent rule): each level from the cache now, its
+  // reads started behind it, so a parent never read yet arrives on a later poll.
+  for (let depth = 0, level = Object.values(metaByKey); depth < MC_PARENT_DEPTH && level.length; depth++) {
+    const up = [...new Set(level.map((m) => m && m.parent && m.parent.key).filter((k) => typeof k === 'string' && !metaByKey[k]))]
+      .map((k) => trackerMeta.parseRef(k)).filter((r) => r && !r.unqualified);
+    mcTrackerMeta.getMany(up).catch((e) => console.error(`[mc] tracker details (parents): ${e.message}`));
+    level = await Promise.all(up.map((r) => mcTrackerMeta.peek(r)));
+    for (const m of level) metaByKey[m.key] = m;
+  }
+  const view = mcSubjects.buildView({ nodes, metaByKey, projects: cfg.projects, stageStore: mcState, lineOverrides: mcState.lineOverrides(), now });
   const boundOf = new Map(nodes.map((n) => [n.id, n.boundProject]));
   const sessions = rows.map((s) => ({ cwd: s.cwd, origin: s.origin, items: s.brief && s.brief.items, bound: boundOf.get(s.id) }));
   // Computed once: GET /api/mc/projects serves it, and its area ids are what ?area= takes.
   const projectsOut = projectsLib.projectsView({ projects: cfg.projects, sessions, subjects: view.subjects });
-  return { ...view, nodes, servers, projectsOut, generatedAt: now };
+  // #523 - one row per line of work (GET /api/mc/lines, /api/mc/now).
+  const linesOut = mcLines.linesView({ subjects: view.subjects, projects: cfg.projects });
+  return { ...view, nodes, servers, projectsOut, linesOut, configuredLines: mcLines.configuredLines(cfg.projects), generatedAt: now };
 }
 /** The view through a short cache: one compute in flight at a time, and its answer reused for
  *  MC_VIEW_TTL_MS after it ARRIVES (a slow compute never overlaps the next). */
@@ -7070,9 +7088,9 @@ function cachedMcView(reqUser) {
   return entry.promise;
 }
 /** `?project=` / `?area=`: absent, or one short string. */
-function mcFilterParam(v) {
+function mcFilterParam(v, max = 80) {
   if (v === undefined || v === '') return { ok: true, value: null };
-  if (typeof v !== 'string' || v.length > 80) return { ok: false };
+  if (typeof v !== 'string' || v.length > max) return { ok: false };
   return { ok: true, value: v };
 }
 
@@ -7102,11 +7120,13 @@ app.get('/api/mc/subjects', async (req, res) => {
   if (refused) return res.status(refused.status).json(refused.json);
   const project = mcFilterParam(req.query.project);
   const area = mcFilterParam(req.query.area);
+  const line = mcFilterParam(req.query.line, 300);
   if (!project.ok || !area.ok) return res.status(400).json({ error: 'project and area must each be one id of at most 80 characters' });
+  if (!line.ok) return res.status(400).json({ error: 'line must be one line id of at most 300 characters' });
   try {
     const v = await cachedMcView(clusterReqUser(req));
     if (v.error) return res.status(500).json({ error: v.error });
-    const f = mcSubjects.filterView(v, { project: project.value, area: area.value }, { projectsView: v.projectsOut });
+    const f = mcSubjects.filterView(v, { project: project.value, area: area.value, line: line.value }, { projectsView: v.projectsOut });
     res.json({ subjects: mcSubjectsWithDone(f.subjects), runs: f.runs, servers: v.servers, stages: mcStage.STAGES, generatedAt: v.generatedAt });
   } catch (e) {
     console.error(`[mc] subjects: ${e.message}`);
@@ -7131,6 +7151,53 @@ app.get('/api/mc/subjects/:key', async (req, res) => {
     res.json({ subject: mcSubjectsWithDone([subject])[0], runs: v.runs.filter((x) => x.subjects.includes(subject.key)), stages: mcStage.STAGES, generatedAt: v.generatedAt });
   } catch (e) {
     console.error(`[mc] subject: ${e.message}`);
+    res.status(500).json({ error: 'could not read the cluster sessions' });
+  }
+});
+
+// --- API: #523 Mission Control: lines of work ---
+// The rule is lib/mc-lines.js (which line each work item is on, the lines view, what a Move
+// may target); the lines come from the same view as the subjects (cachedMcView). A Move is the
+// person's override, stored on the authority (mc-state.json lineOverrides) and winning over
+// every rule; `line: null` hands the item back to the rules.
+app.get('/api/mc/lines', async (req, res) => {
+  const refused = mcRefusal(supervisorAuthority());
+  if (refused) return res.status(refused.status).json(refused.json);
+  const project = mcFilterParam(req.query.project);
+  if (!project.ok) return res.status(400).json({ error: 'project must be one id of at most 80 characters' });
+  try {
+    const v = await cachedMcView(clusterReqUser(req));
+    if (v.error) return res.status(500).json({ error: v.error });
+    res.json({ lines: mcLines.filterLines(v.linesOut, { project: project.value }),
+      configured: mcLines.filterLines(v.configuredLines, { project: project.value }), generatedAt: v.generatedAt });
+  } catch (e) {
+    console.error(`[mc] lines: ${e.message}`);
+    res.status(500).json({ error: 'could not read the cluster sessions' });
+  }
+});
+
+app.post('/api/mc/lines/move', express.json({ limit: '4kb' }), async (req, res) => {
+  const refused = mcRefusal(supervisorAuthority());
+  if (refused) return res.status(refused.status).json(refused.json);
+  const b = req.body && typeof req.body === 'object' && !Array.isArray(req.body) ? req.body : {};
+  const raw = typeof b.subject === 'string' ? b.subject : '';
+  if (!raw || raw.length > 300) return res.status(400).json({ error: 'subject is required: a subject key from /api/mc/subjects' });
+  const r = trackerMeta.parseRef(raw);
+  const key = r && !r.unqualified ? r.key : raw;
+  try {
+    const v = await cachedMcView(clusterReqUser(req));
+    if (v.error) return res.status(500).json({ error: v.error });
+    if (!v.subjects.some((s) => s.key === key)) return res.status(404).json({ error: 'no session touched that work item in the last 7 days' });
+    const cfg = projectsLib.validateProjects(liveConfig('projects', undefined));
+    const t = mcLines.moveTarget({ line: b.line, name: b.name }, { projects: cfg.ok ? cfg.projects : [], lines: v.linesOut });
+    if (!t.ok) return res.status(400).json({ error: t.error });
+    if (!mcState.setLineOverride(key, t.line)) return res.status(500).json({ error: 'the move could not be saved' });
+    _mcViewCache.clear();
+    const after = await cachedMcView(clusterReqUser(req));
+    const subject = after.subjects && after.subjects.find((s) => s.key === key);
+    res.json({ subject: key, line: subject ? subject.line : null, generatedAt: Date.now() });
+  } catch (e) {
+    console.error(`[mc] lines move: ${e.message}`);
     res.status(500).json({ error: 'could not read the cluster sessions' });
   }
 });
@@ -7183,7 +7250,7 @@ app.get('/api/mc/now', async (req, res) => {
     const now = Date.now();
     const n = mcNeeds.buildNow({ nodes: v.nodes, view: v, todos: mcState.todos(), later: mcNeeds.pruneLater(mcState.later(), now),
       actionsDone: mcNeeds.pruneActionsDone(mcState.actionsDone(), now), now });
-    res.json({ answerNow: n.answerNow, actions: n.actions, todo: n.todo, moving: n.moving, projects: v.projectsOut, generatedAt: v.generatedAt });
+    res.json({ answerNow: n.answerNow, actions: n.actions, todo: n.todo, moving: n.moving, projects: v.projectsOut, lines: v.linesOut, generatedAt: v.generatedAt });
   } catch (e) {
     console.error(`[mc] now: ${e.message}`);
     res.status(500).json({ error: 'could not read the cluster sessions' });
@@ -7456,7 +7523,13 @@ app.post('/api/mc/start', express.json({ limit: '16kb' }), async (req, res) => {
   if (refused) return res.status(refused.status).json(refused.json);
   const cfg = projectsLib.validateProjects(liveConfig('projects', undefined));
   if (!cfg.ok) return res.status(500).json({ error: `config.json projects is not valid: ${cfg.error}` });
-  const parsed = mcStart.parseStart(req.body, { projects: cfg.projects, parseRef: trackerMeta.parseRef });
+  // #523 - a line the person picked that config does not name (a parent's, a run's) is one the
+  // view shows now: read it only then.
+  let viewLines = [];
+  if (req.body && typeof req.body.line === 'string' && !mcLines.configLineById(cfg.projects, req.body.line)) {
+    try { const lv = await cachedMcView(clusterReqUser(req)); viewLines = (lv && lv.linesOut) || []; } catch { /* unknown lines are refused below */ }
+  }
+  const parsed = mcStart.parseStart(req.body, { projects: cfg.projects, parseRef: trackerMeta.parseRef, lines: viewLines });
   if (parsed.error) return res.status(400).json({ error: parsed.error });
   const v = parsed.value;
   // Where: this server, or a peer of its cluster config by name (never a url from the body).
@@ -7509,7 +7582,7 @@ app.post('/api/mc/start', express.json({ limit: '16kb' }), async (req, res) => {
       }
       created = j;
     }
-    mcState.setBinding(created.id, { project: v.project.id, subjects: v.subjects, hunt: v.hunt, server: peer ? peer.name : me, at: Date.now() });
+    mcState.setBinding(created.id, { project: v.project.id, subjects: v.subjects, hunt: v.hunt, server: peer ? peer.name : me, at: Date.now(), ...(v.line ? { line: v.line } : {}) });
     // The next poll must show it: the cluster view and the MC view are both re-read.
     invalidateClusterSessionsCache();
     _mcViewCache.clear();
@@ -7517,7 +7590,7 @@ app.post('/api/mc/start', express.json({ limit: '16kb' }), async (req, res) => {
     res.json({
       server: peer ? peer.name : me, serverUrl: peer ? peer.url : null, sessionId: created.id,
       name: created.name || plan.name, agent: created.agent ?? null, agentReady: created.agentReady ?? true,
-      project: v.project.id, subjects: v.subjects.map((s) => s.key), hunt: v.hunt, generatedAt: Date.now(),
+      project: v.project.id, subjects: v.subjects.map((s) => s.key), hunt: v.hunt, line: v.line, generatedAt: Date.now(),
     });
   } catch (e) {
     console.error(`[mc] start: ${e.message}`);

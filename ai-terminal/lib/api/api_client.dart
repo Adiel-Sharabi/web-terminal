@@ -448,9 +448,24 @@ class ApiClient {
 
   /// The subjects of [project] (and of [area], when given), with their runs
   /// (`GET /api/mc/subjects?project=&area=`, #508).
-  Future<McSubjects> mcSubjects({String? project, String? area}) async => McSubjects.fromJson(await _mcGet(
-      '/api/mc/subjects',
-      query: {'project': ?project, 'area': ?area}));
+  Future<McSubjects> mcSubjects({String? project, String? area, String? line}) async => McSubjects.fromJson(
+      await _mcGet('/api/mc/subjects', query: {'project': ?project, 'area': ?area, 'line': ?line}));
+
+  /// The lines of work, of [project] when given, with the configured ones for the pickers
+  /// (`GET /api/mc/lines?project=`, #523).
+  Future<McLines> mcLines({String? project}) async =>
+      McLines.fromJson(await _mcGet('/api/mc/lines', query: {'project': ?project}));
+
+  /// Moves [subject] to the line [line] (an id), to a new line called [name], or - with
+  /// neither - back to the rules (`POST /api/mc/lines/move`, #523). A refusal (4xx) is an
+  /// [ApiException] with the server's reason.
+  Future<McMoveResult> mcMoveLine(String subject, {String? line, String? name}) async {
+    assert(line == null || name == null, 'a line or a name, not both');
+    return McMoveResult.fromJson(await _mcPost('/api/mc/lines/move', {
+      'subject': subject,
+      if (name != null) 'name': name else 'line': line,
+    }));
+  }
 
   /// One subject by its key (`GET /api/mc/subjects/:key`, #509); a 404 is an unknown key.
   Future<McSubjectDetail> mcSubject(String key) async =>
@@ -527,6 +542,8 @@ class ApiClient {
     required String server,
     String? name,
     String? brief,
+    String? line,
+    String? lineName,
   }) async {
     final r = McStartResult.fromJson(await _mcPost('/api/mc/start', {
       'project': project,
@@ -535,6 +552,8 @@ class ApiClient {
       'server': server,
       'name': ?name,
       'brief': ?brief,
+      'line': ?line,
+      'lineName': ?lineName,
       // The server may wait on the tracker (1.5 s) and on a peer's create (15 s): the app
       // must not give up first and invite a second start of the same session.
     }, timeout: kMcStartTimeout));

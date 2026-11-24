@@ -25,7 +25,7 @@ const W = { platform: 'win32' };
 test.describe('#503 config validation', () => {
   test('a good list is normalised: missing match lists and areas get defaults', () => {
     const v = pj.validateProjects([{ id: 'a', name: ' A ' }]);
-    expect(v).toEqual({ ok: true, projects: [{ id: 'a', name: 'A', match: { repos: [], adoProjects: [], paths: [] }, areas: { source: 'none', map: {} } }] });
+    expect(v).toEqual({ ok: true, projects: [{ id: 'a', name: 'A', match: { repos: [], adoProjects: [], paths: [] }, areas: { source: 'none', map: {} }, lines: [] }] });
     expect(pj.validateProjects(undefined)).toEqual({ ok: true, projects: [] });
   });
 

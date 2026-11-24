@@ -812,3 +812,32 @@ test.describe('wait.kind action (#522)', () => {
     expect(line).toContain('never with "decision"');
   });
 });
+
+test.describe('#523 a session reports its line of work', () => {
+  test('optional top-level "line": trimmed text of at most 80; anything else refused with the reason', () => {
+    const ok = B.validateReport({ items: [{ ref: '#1', state: 'in-progress' }], line: '  Bug hunter ' });
+    expect(ok.report.line).toBe('Bug hunter');
+    expect(B.validateReport({ items: [{ ref: '#1', state: 'in-progress' }] }).report.line).toBeNull();
+    for (const bad of [5, 'x'.repeat(81), `a${String.fromCodePoint(10)}b`, '   ']) {
+      const r = B.validateReport({ items: [{ ref: '#1', state: 'in-progress' }], line: bad });
+      expect(r.error, String(bad)).toContain('"line"');
+    }
+  });
+
+  test('a wait-only report keeps the line; a new report without one clears it; the brief carries it', () => {
+    let e = B.applyReport(B.emptyEntry(), B.validateReport({ items: [{ ref: '#1', state: 'in-progress' }], line: 'Health' }).report, T0);
+    expect(B.buildBrief(e, { reporting: true }).line).toBe('Health');
+    e = B.applyReport(e, B.validateReport({ wait: { on: 'self', what: 'ci' } }, e).report, T0 + 1);
+    expect(B.buildBrief(e, { reporting: true }).line).toBe('Health');
+    // Shown when reporting is off too (a closed record is built that way), like the headline.
+    expect(B.buildBrief(e, { reporting: false }).line).toBe('Health');
+    e = B.applyReport(e, B.validateReport({ items: [{ ref: '#1', state: 'done' }] }).report, T0 + 2);
+    expect(B.buildBrief(e, { reporting: true }).line).toBeNull();
+    expect(B.buildBrief(B.emptyEntry(), { reporting: true }).line).toBeNull();
+  });
+
+  test('the per-prompt note stays inside its budget: the optional line is taught by the refusal, not on every prompt', () => {
+    expect(B.instructionText(null, 'CMD')).not.toContain('"line"');
+    expect(B.validateReport({ items: [{ ref: '#1', state: 'done' }], line: 7 }).error).toContain('e.g. "Bug hunter"');
+  });
+});

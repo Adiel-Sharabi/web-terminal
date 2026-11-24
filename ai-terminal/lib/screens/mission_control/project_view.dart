@@ -20,6 +20,7 @@ import '../../api/api_client.dart';
 import '../../api/mc_models.dart';
 import '../../services/mc_feed.dart';
 import '../../theme/app_theme.dart';
+import 'lines_view.dart';
 import 'now_view.dart';
 import 'subject_screen.dart';
 import 'subject_widgets.dart';
@@ -69,6 +70,36 @@ class McProjectsNavigatorState extends State<McProjectsNavigator> {
     nav.push(_projectRoute(projectId));
   }
 
+  /// Shows line [lineId]'s page, over the list (#523).
+  void openLine(String lineId) {
+    final nav = _nav.currentState;
+    if (nav == null) return;
+    nav.popUntil((r) => r.isFirst);
+    nav.push(_lineRoute(lineId));
+  }
+
+  Route<void> _subjectRoute(BuildContext context, McSubject s) => MaterialPageRoute<void>(
+        settings: RouteSettings(name: 'mc-subject/${s.key}'),
+        builder: (_) => McSubjectScreen(
+          feed: widget.feed,
+          subjectKey: s.key,
+          initial: s,
+          onAnswer: widget.onAnswer,
+          onOpenSession: widget.onOpenSession,
+          now: widget.now,
+        ),
+      );
+
+  Route<void> _lineRoute(String lineId) => MaterialPageRoute<void>(
+        settings: RouteSettings(name: 'mc-line/$lineId'),
+        builder: (context) => McLineScreen(
+          feed: widget.feed,
+          lineId: lineId,
+          now: widget.now,
+          onOpenSubject: (s) => Navigator.of(context).push(_subjectRoute(context, s)),
+        ),
+      );
+
   Route<void> _projectRoute(String projectId) => MaterialPageRoute<void>(
         settings: RouteSettings(name: 'mc-project/$projectId'),
         builder: (context) => McProjectScreen(
@@ -76,17 +107,7 @@ class McProjectsNavigatorState extends State<McProjectsNavigator> {
           projectId: projectId,
           now: widget.now,
           onStartWork: widget.onStartWork == null ? null : () => widget.onStartWork!(projectId),
-          onOpenSubject: (s) => Navigator.of(context).push(MaterialPageRoute<void>(
-            settings: RouteSettings(name: 'mc-subject/${s.key}'),
-            builder: (_) => McSubjectScreen(
-              feed: widget.feed,
-              subjectKey: s.key,
-              initial: s,
-              onAnswer: widget.onAnswer,
-              onOpenSession: widget.onOpenSession,
-              now: widget.now,
-            ),
-          )),
+          onOpenSubject: (s) => Navigator.of(context).push(_subjectRoute(context, s)),
         ),
       );
 
@@ -100,7 +121,7 @@ class McProjectsNavigatorState extends State<McProjectsNavigator> {
         onGenerateRoute: (settings) => MaterialPageRoute<void>(
           settings: settings,
           builder: (context) => Scaffold(
-            appBar: AppBar(automaticallyImplyLeading: false, title: const Text('Projects'), actions: widget.actions),
+            appBar: AppBar(automaticallyImplyLeading: false, title: Text(widget.feed.now?.lines != null ? 'Lines' : 'Projects'), actions: widget.actions),
             body: ListenableBuilder(
               listenable: widget.feed,
               builder: (context, _) => RefreshIndicator(
@@ -119,10 +140,17 @@ class McProjectsNavigatorState extends State<McProjectsNavigator> {
                     else ...[
                       if (widget.feed.message != null)
                         McStaleBanner(message: widget.feed.message!, at: widget.feed.receivedAt),
-                      McProjectsSection(
-                        projects: widget.feed.now?.projects ?? const [],
-                        onOpen: (p) => Navigator.of(context).push(_projectRoute(p.id)),
-                      ),
+                      // #523: the lines when the server sends them, else the projects.
+                      if (widget.feed.now?.lines != null)
+                        McLinesList(
+                          lines: widget.feed.now!.lines!,
+                          onOpen: (l) => Navigator.of(context).push(_lineRoute(l.id)),
+                        )
+                      else
+                        McProjectsSection(
+                          projects: widget.feed.now?.projects ?? const [],
+                          onOpen: (p) => Navigator.of(context).push(_projectRoute(p.id)),
+                        ),
                     ],
                   ],
                 ),
@@ -376,35 +404,42 @@ class _McProjectScreenState extends State<McProjectScreen> {
         ),
       ];
     }
-    Widget row(McSubject s) => McSubjectRow(
-          key: ValueKey('mc-subject-row-${s.key}'),
-          subject: s,
-          now: widget.now,
-          onTap: () => widget.onOpenSubject(s),
-        );
-    final out = <Widget>[];
-    final placed = <String>{};
-    // Runs first, in the server's order, each with its own subjects under it.
-    for (final r in data.runs) {
-      final mine = [for (final s in shown) if (s.runId == r.id) s];
-      if (mine.isEmpty) continue;
-      out.add(McRunHeader(run: r, now: widget.now));
-      for (final s in mine) {
-        placed.add(s.key);
-        out.add(row(s));
-      }
-    }
-    final rest = [for (final s in shown) if (!placed.contains(s.key)) s];
-    if (rest.isNotEmpty && out.isNotEmpty) {
-      out.add(Padding(
-        key: const ValueKey('mc-project-no-run'),
-        padding: const EdgeInsets.fromLTRB(2, 10, 2, 6),
-        child: Text('Not in a run', style: Theme.of(context).textTheme.titleSmall?.copyWith(fontWeight: FontWeight.w600)),
-      ));
-    }
-    out.addAll(rest.map(row));
-    return out;
+    return mcSubjectRows(context, data, shown, now: widget.now, onOpen: widget.onOpenSubject);
   }
+}
+
+/// The rows of [shown] (a filtered view of [data]'s subjects), grouped by the server's runs
+/// in its order, then the rest under "Not in a run". Shared by the project and line pages.
+List<Widget> mcSubjectRows(BuildContext context, McSubjects data, List<McSubject> shown,
+    {DateTime? now, required void Function(McSubject subject) onOpen}) {
+  Widget row(McSubject s) => McSubjectRow(
+        key: ValueKey('mc-subject-row-${s.key}'),
+        subject: s,
+        now: now,
+        onTap: () => onOpen(s),
+      );
+  final out = <Widget>[];
+  final placed = <String>{};
+  // Runs first, in the server's order, each with its own subjects under it.
+  for (final r in data.runs) {
+    final mine = [for (final s in shown) if (s.runId == r.id) s];
+    if (mine.isEmpty) continue;
+    out.add(McRunHeader(run: r, now: now));
+    for (final s in mine) {
+      placed.add(s.key);
+      out.add(row(s));
+    }
+  }
+  final rest = [for (final s in shown) if (!placed.contains(s.key)) s];
+  if (rest.isNotEmpty && out.isNotEmpty) {
+    out.add(Padding(
+      key: const ValueKey('mc-project-no-run'),
+      padding: const EdgeInsets.fromLTRB(2, 10, 2, 6),
+      child: Text('Not in a run', style: Theme.of(context).textTheme.titleSmall?.copyWith(fontWeight: FontWeight.w600)),
+    ));
+  }
+  out.addAll(rest.map(row));
+  return out;
 }
 
 class _AreaTab extends StatelessWidget {

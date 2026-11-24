@@ -176,6 +176,23 @@ test.describe('#502 parsing - Azure DevOps', () => {
     expect(fetchJson.calls[0].headers.Authorization).toBe(`Basic ${Buffer.from(':p').toString('base64')}`);
   });
 
+  test('#523 the parent: the ADO hierarchy link; the GitHub sub-issue parent, else a leading "Part of #N"', () => {
+    const wi = fx('ado-workitem.json');
+    expect(tm.parseAdoWorkItem(wi).parent).toEqual({ key: 'ado:9000', ref: 'ado:9000' });
+    expect(tm.parseAdoWorkItem({ ...wi, relations: wi.relations.filter((r) => r.rel !== 'System.LinkTypes.Hierarchy-Reverse') }).parent).toBeNull();
+    // A link to another organisation's host or a non-number id names nothing.
+    expect(tm.parseAdoWorkItem({ ...wi, relations: [{ rel: 'System.LinkTypes.Hierarchy-Reverse', url: 'https://x.test/_apis/wit/workItems/abc' }] }).parent).toBeNull();
+    const gh = { ...fx('gh-issue.json'), repository_url: 'https://api.github.com/repos/Acme/Widgets' };
+    expect(tm.parseGithubIssue({ ...gh, body: 'no parent here' }, []).parent).toBeNull();
+    expect(tm.parseGithubIssue({ ...gh, parent_issue_url: 'https://api.github.com/repos/acme/other/issues/7', body: 'Part of #9.' }, []).parent)
+      .toEqual({ key: 'acme/other#7', ref: 'acme/other#7' });
+    expect(tm.parseGithubIssue({ ...gh, body: `${String.fromCodePoint(13, 10)}Part of #501. Builds on #492.` }, []).parent).toEqual({ key: 'acme/widgets#501', ref: 'acme/widgets#501' });
+    expect(tm.parseGithubIssue({ ...gh, body: 'Part of other-org/tools#12' }, []).parent).toEqual({ key: 'other-org/tools#12', ref: 'other-org/tools#12' });
+    // Only the FIRST line counts: a mention further down is prose, not a parent.
+    expect(tm.parseGithubIssue({ ...gh, body: `Summary.${String.fromCodePoint(10)}Part of #501` }, []).parent).toBeNull();
+    expect(tm.blankMeta(tm.parseRef('ado:1')).parent).toBeNull();
+  });
+
   test('closed is Closed/Done/Removed/Resolved only; a PR that cannot be read is kept, unknown', async () => {
     const wi = fx('ado-workitem.json');
     for (const [state, closed] of [['Done', true], ['Removed', true], ['closed', true], ['Active', false], ['Ready for test', false]]) {

@@ -397,29 +397,29 @@ void main() {
       return toSessions;
     }
 
-    testWidgets('desktop: a side nav of Now, Projects, Sessions, Machines', (tester) async {
+    testWidgets('desktop: a side nav of Now, Lines, Sessions, Machines', (tester) async {
       await pump(tester, const Size(1400, 900));
       expect(find.byKey(const ValueKey('mc-rail')), findsOneWidget);
       expect(find.byKey(const ValueKey('mc-bottom-bar')), findsNothing);
-      for (final l in ['Now', 'Projects', 'Sessions', 'Machines']) {
+      for (final l in ['Now', 'Lines', 'Sessions', 'Machines']) {
         expect(find.descendant(of: find.byKey(const ValueKey('mc-rail')), matching: find.text(l)), findsOneWidget);
       }
       expect(find.descendant(of: find.byKey(const ValueKey('mc-rail')), matching: find.text('Ask')), findsNothing);
       await tester.tap(find.text('Sessions'));
       await tester.pump();
       expect(find.text('the sessions board'), findsOneWidget);
-      await tester.tap(find.text('Projects'));
+      await tester.tap(find.text('Lines'));
       await tester.pump();
       expect(find.textContaining('#508'), findsNothing, reason: 'the placeholder is gone: #508 fills the tab');
-      expect(find.byKey(const ValueKey('mc-project-web-terminal')), findsOneWidget, reason: "the projects, as Now's answer has them");
+      expect(find.byKey(const ValueKey('mc-project-web-terminal')), findsOneWidget, reason: "the projects, as Now's answer has them (a server with no lines)");
       await tester.pumpWidget(const SizedBox());
     });
 
-    testWidgets('phone: a bottom bar of Now, Projects, Ask, Machines; Ask is the Ask view (#511)', (tester) async {
+    testWidgets('phone: a bottom bar of Now, Lines, Ask, Machines; Ask is the Ask view (#511)', (tester) async {
       await pump(tester, const Size(400, 860));
       expect(find.byKey(const ValueKey('mc-bottom-bar')), findsOneWidget);
       expect(find.byKey(const ValueKey('mc-rail')), findsNothing);
-      for (final l in ['Now', 'Projects', 'Ask', 'Machines']) {
+      for (final l in ['Now', 'Lines', 'Ask', 'Machines']) {
         expect(find.descendant(of: find.byKey(const ValueKey('mc-bottom-bar')), matching: find.text(l)), findsOneWidget);
       }
       await tester.tap(find.text('Ask'));

@@ -1,9 +1,9 @@
 // #507 - Mission Control, the second home one build runs beside the current one.
 //
-// Desktop (at or above [AdaptiveHome.splitBreakpoint]): a side nav - Now, Projects,
+// Desktop (at or above [AdaptiveHome.splitBreakpoint]): a side nav - Now, Lines,
 // Sessions, Machines - and an Ask panel beside any of them, opened from the nav (#511).
-// Phone: a bottom bar - Now, Projects, Ask, Machines. Projects is the projects, each
-// project's page and each subject's (#508, #509), in its own navigator; Sessions is the
+// Phone: a bottom bar - Now, Lines, Ask, Machines. Lines (#523) is the lines of work, each
+// line's page and each subject's (#508, #509; the projects, on a server with no lines), in its own navigator; Sessions is the
 // current sessions board; Machines is the board's machines and leases view. Ask (both
 // layouts) is one conversation, kept across tabs.
 //
@@ -43,7 +43,7 @@ import 'start_work_sheet.dart';
 /// Every place Mission Control can show. Desktop shows [desktopTabs], a phone [phoneTabs].
 enum McTab {
   now('Now', Icons.bolt_outlined, Icons.bolt),
-  projects('Projects', Icons.folder_outlined, Icons.folder),
+  projects('Lines', Icons.account_tree_outlined, Icons.account_tree),
   sessions('Sessions', Icons.view_list_outlined, Icons.view_list),
   ask('Ask', Icons.forum_outlined, Icons.forum),
   machines('Machines', Icons.dns_outlined, Icons.dns);
@@ -196,11 +196,21 @@ class _MissionControlHomeState extends State<MissionControlHome> {
     WidgetsBinding.instance.addPostFrameCallback((_) => _projects.currentState?.openProject(p.id));
   }
 
+  /// A line tapped on Now: the Lines tab, on that line's page (#523).
+  void _openLine(McLine l) {
+    setState(() => _tab = McTab.projects);
+    WidgetsBinding.instance.addPostFrameCallback((_) => _projects.currentState?.openLine(l.id));
+  }
+
   Widget _body(McTab tab) => !_isActive && (tab == McTab.sessions || tab == McTab.machines)
       ? const SizedBox.shrink()
       : switch (tab) {
         McTab.now => McNowView(
-            feed: _feed, onAnswer: _answer, onOpenSession: _openSession, onOpenProject: _openProject),
+            feed: _feed,
+            onAnswer: _answer,
+            onOpenSession: _openSession,
+            onOpenProject: _openProject,
+            onOpenLine: _openLine),
         McTab.projects => McProjectsNavigator(
             key: _projects,
             feed: _feed,

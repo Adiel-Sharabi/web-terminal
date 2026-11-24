@@ -7,11 +7,11 @@ Unknown/missing data is `null`, never guessed. Sections below a milestone that h
 are the plan, not a description of the server.
 
 Landed: Who answers, Work-item meta (#502), Projects and areas (#503), Stage (#505), Subjects
-(#504), Answer now / My to-do (#506), Ask (#511), Start work (#512), Questions context (#510). Advertised in `/api/version`
+(#504), Answer now / My to-do (#506), Ask (#511), Start work (#512), Questions context (#510), Lines of work (#523). Advertised in `/api/version`
 `capabilities`: `work-item-meta`, `mission-control` (#502/#503), `mc-subjects` (#504/#505: the
 subjects routes, `stage` on report items, `counts.stages`), `mc-needs` (#506: `/api/mc/now`,
-`/api/mc/todo[/:id]`, `/api/mc/later`) and `mc-start` (#512: `POST /api/mc/start`,
-`GET /api/mc/machines`); Ask and the question routes have no
+`/api/mc/todo[/:id]`, `/api/mc/later`), `mc-start` (#512: `POST /api/mc/start`,
+`GET /api/mc/machines`) and `mc-lines` (#523: Lines of work below); Ask and the question routes have no
 capability of their own (a server without them answers a bare 404).
 
 ## Who answers (one owner for cluster-wide state)
@@ -53,6 +53,9 @@ Meta = { key, ref, tracker: 'github'|'ado', url,
   area,                   // ADO System.AreaPath; GH: null
   labels: [string],       // GH labels; ADO System.Tags split on ';'
   prs: [{url, number, repo, state: 'open'|'merged'|'closed'|null, draft: bool}],  // at most 10
+  parent: {key, ref}|null, // #523: ADO's System.LinkTypes.Hierarchy-Reverse link; GitHub's sub-issue
+                          // parent (parent_issue_url), else a FIRST body line "Part of #N" /
+                          // "Part of owner/repo#N" (a mention further down is prose, not a parent)
   repo,                   // GH 'owner/repo'; ADO: null
   adoProject,             // ADO System.TeamProject; GH: null
   fetchedAt, staleSince: ms|null, error: string|null,
@@ -170,7 +173,8 @@ Subject = { key, ref, url, title,          // title: meta.title, else the newest
                                            //   (same id); decision = the reported wait's decision (#492), else null
   waitsOn: 'you'|'self'|'external'|'done'|null,
   buckets: ['active'|'doneWeek', 'needsYou'?, 'waitsOnOthers'?],   // the Counts keys it is counted under
-  runId: string|null, updatedAt }
+  runId: string|null, updatedAt,
+  line: Line.ref }                         // #523: {id, name, project, kind, source} - see Lines of work
 SessionRef = { server, serverUrl, id, name, parentId, status, closed: bool, closedAt,
   bound: bool,                             // #512: on this subject only through its Start work binding (no report of its own yet)
   lastReport: { state, stage, note, headline, at } , wait: {on, what}|null }
@@ -410,3 +414,59 @@ Binding: recorded at birth on the authority (`mc-state.json` `bindings`, by sess
 orchestrator's children inherit it. The PROJECT always comes from the binding (it wins over the git
 origin and the folder, while that project is configured); the SUBJECTS stand in for a report only
 until the session reports items of its own.
+#523: the body may also name the line of work: `line` = a line id from `/api/mc/lines` (`lines` or
+`configured`), or `lineName` = a new line by name (not both; the rules of `POST /api/mc/lines/move`).
+The binding keeps it as `line: {id?, name}`, the answer echoes it as `line` (null when none), and the
+session and its children are on that line until the session reports a `line` of its own.
+
+## Lines of work (#523) - `lib/mc-lines.js`
+A project runs several lines of work side by side (a bug hunt, health checks, a feature, a release
+cut, a docket of fixes); the person follows each apart, and the tracker's Area Path does not follow
+them. Lines replace projects at the top of Mission Control; the project is a label on the line.
+Config, per project (`projects[].lines`, validated with `projects`; a bad one refuses the list whole):
+```
+lines: [{ id,              // [a-z0-9][a-z0-9_-]{0,39}, unique in the project; the line's id is '<project>/<id>'
+  name,                    // one line, at most 80 characters
+  match: { items: ['ado:123', 'owner/repo#4', '#5'],   // a bare #N takes the project's first repo
+           tags: ['health'],                           // tracker tags / labels, no case
+           titlePrefixes: ['[Health'],                 // the item's title starts with it, no case
+           sessionNames: ['BH worker*'] } }]           // a WHOLE session name, no case, * the only wildcard
+```
+Which line a work item is on - first match wins:
+0. the person's **Move to line** (`POST /api/mc/lines/move`), stored on the authority
+   (`mc-state.json` `lineOverrides`, kept 90 days from the move, at most 2000);
+1. the line of a session on it (newest report first) or of the sessions above it (`lib/mc-tree.js`,
+   the run that started it): a `line` the session REPORTED (report field, below), the line Start
+   work BOUND it to, or - for a session above it only - a configured `sessionNames` rule of the
+   item's project, else of that session's own project. An orchestrator's workers inherit its line;
+2. the item's project's configured lines in config order: a listed item, a tag, a title prefix, or
+   the name of a session on it;
+3. its tracker parent (`Meta.parent`): the nearest Feature/Epic up the chain the tracker details
+   hold (read up to 3 levels behind each poll; a level not read yet arrives on a later one), else
+   the direct parent; a configured rule matching the parent (item, tag, title) names the line;
+4. otherwise a line of its own: its run's (`run:<root session id>`, named after the root session),
+   else the work item's (`item:<subject key>`, named after its title). Never a catch-all.
+A name (a report's, a binding's, a move's) is matched against the project's configured lines by name
+or id, no case; else it is a line of that name, id `<project>/~<slug>`.
+```
+Line.ref = { id, name, project, kind: 'config'|'named'|'parent'|'run'|'item',
+  source: 'override'|'session'|'rule'|'parent'|'own' }        // on each Subject: why it is there
+Line = { id, name, kind, project, projectName,                // projectName 'Other' for other
+  counts: Counts,                                             // as Projects: the same bucket rule; sessions = LIVE ones
+  subjects: [key],                                            // newest first
+  machines: [server name],                                    // where its live sessions run, sorted
+  updatedAt }
+```
+A configured or named line's project is its own; any other line's is the project most of its items
+are in. Lines are ordered: most needing the person, then those with active work, then the newest.
+`GET /api/mc/lines?project=` -> `{lines: [Line], configured: [{id, name, project, kind, projectName}], generatedAt}`
+(`configured` = every configured line, items or not, for the pickers). `GET /api/mc/now` gains
+`lines: [Line]`; `GET /api/mc/subjects?line=<id>` keeps that line's subjects (and their runs).
+`POST /api/mc/lines/move {subject, line?, name?}` -> `{subject, line: Line.ref, generatedAt}`:
+`subject` = a subject key in any spelling (404 when no session touched it this week); `line` = a
+configured line or one `/api/mc/lines` shows now, `null` = back to the rules; `name` = a line of that
+name (one line, at most 80). Exactly one of the two, else `400 {error}`.
+Report: optional top-level `line` (one line, at most 80; anything else refuses the report with the
+reason). A wait-only report keeps it; a full report without it clears it. `brief.line` carries it
+(null when none) and a closed record keeps it. The per-prompt note does not teach it (its length
+budget); the refusal does.

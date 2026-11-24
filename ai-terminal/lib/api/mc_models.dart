@@ -415,6 +415,10 @@ class McNow {
   final List<McTodo> todo;
   final McMoving moving;
   final List<McProject> projects;
+
+  /// #523 - the lines of work, which replace the projects at the top. Null: an older
+  /// server sends none, and the screen shows [projects] as before.
+  final List<McLine>? lines;
   final DateTime? generatedAt;
 
   const McNow({
@@ -423,6 +427,7 @@ class McNow {
     this.todo = const [],
     this.moving = const McMoving(),
     this.projects = const [],
+    this.lines,
     this.generatedAt,
   });
 
@@ -434,6 +439,7 @@ class McNow {
       todo: _list(m['todo'], McTodo.fromJson),
       moving: McMoving.fromJson(m['moving']),
       projects: _list(m['projects'], McProject.fromJson),
+      lines: m['lines'] is List ? _list(m['lines'], McLine.fromJson) : null,
       generatedAt: _at(m['generatedAt']),
     );
   }
@@ -855,6 +861,9 @@ class McSubject {
   /// one server rule; read when sent, else null (see [inFilter]).
   final List<String>? buckets;
 
+  /// #523 - the line of work it is on, and why (null from an older server).
+  final McLineRef? line;
+
   const McSubject({
     required this.key,
     this.ref,
@@ -870,6 +879,7 @@ class McSubject {
     this.runId,
     this.updatedAt,
     this.buckets,
+    this.line,
   });
 
   static McSubject? fromJson(dynamic json) {
@@ -891,6 +901,7 @@ class McSubject {
       runId: _str(m['runId']),
       updatedAt: _at(m['updatedAt']),
       buckets: m['buckets'] is List ? _strings(m['buckets']) : null,
+      line: McLineRef.fromJson(m['line']),
     );
   }
 
@@ -1128,5 +1139,138 @@ class McStartResult {
       agent: _str(m['agent']),
       agentReady: m['agentReady'] != false,
     );
+  }
+}
+
+// --- Lines of work (#523): `GET /api/mc/lines`, `POST /api/mc/lines/move` ---------------
+
+/// The line a subject is on (`Line.ref`): [source] says why it is there (`override` is
+/// the person's own Move to line).
+class McLineRef {
+  final String id;
+  final String name;
+  final String? project;
+  final String? kind;
+  final String? source;
+  const McLineRef({required this.id, required this.name, this.project, this.kind, this.source});
+
+  static McLineRef? fromJson(dynamic json) {
+    final m = _map(json);
+    final id = _str(m['id']);
+    if (id == null) return null;
+    return McLineRef(
+        id: id, name: _str(m['name']) ?? id, project: _str(m['project']), kind: _str(m['kind']), source: _str(m['source']));
+  }
+
+  /// The person moved it here themselves.
+  bool get moved => source == 'override';
+}
+
+/// A line of work with its counts (`Line`): the project is a label on it.
+class McLine {
+  final String id;
+  final String name;
+  final String? kind;
+  final String? project;
+  final String? projectName;
+  final McCounts counts;
+
+  /// The subject keys on it, newest first.
+  final List<String> subjects;
+
+  /// Where its live sessions run.
+  final List<String> machines;
+  final DateTime? updatedAt;
+
+  const McLine({
+    required this.id,
+    required this.name,
+    this.kind,
+    this.project,
+    this.projectName,
+    this.counts = const McCounts(),
+    this.subjects = const [],
+    this.machines = const [],
+    this.updatedAt,
+  });
+
+  static McLine? fromJson(dynamic json) {
+    final m = _map(json);
+    final id = _str(m['id']);
+    if (id == null) return null;
+    return McLine(
+      id: id,
+      name: _str(m['name']) ?? id,
+      kind: _str(m['kind']),
+      project: _str(m['project']),
+      projectName: _str(m['projectName']),
+      counts: McCounts.fromJson(m['counts']),
+      subjects: _strings(m['subjects']),
+      machines: _strings(m['machines']),
+      updatedAt: _at(m['updatedAt']),
+    );
+  }
+
+  /// The label beside the name: the project's name, else its id.
+  String? get projectLabel => projectName ?? project;
+}
+
+/// A configured line, listed whether or not it has items (`configured`).
+class McConfiguredLine {
+  final String id;
+  final String name;
+  final String? project;
+  final String? projectName;
+  const McConfiguredLine({required this.id, required this.name, this.project, this.projectName});
+
+  static McConfiguredLine? fromJson(dynamic json) {
+    final m = _map(json);
+    final id = _str(m['id']);
+    if (id == null) return null;
+    return McConfiguredLine(
+        id: id, name: _str(m['name']) ?? id, project: _str(m['project']), projectName: _str(m['projectName']));
+  }
+}
+
+/// `GET /api/mc/lines?project=`.
+class McLines {
+  final List<McLine> lines;
+  final List<McConfiguredLine> configured;
+  final DateTime? generatedAt;
+  const McLines({this.lines = const [], this.configured = const [], this.generatedAt});
+
+  static McLines fromJson(dynamic json) {
+    final m = _map(json);
+    return McLines(
+      lines: _firstOf(_list(m['lines'], McLine.fromJson), (l) => l.id),
+      configured: _firstOf(_list(m['configured'], McConfiguredLine.fromJson), (l) => l.id),
+      generatedAt: _at(m['generatedAt']),
+    );
+  }
+
+  /// What a picker offers: every configured line, then the other current lines, one entry
+  /// per id (as `(id, name, project label)`).
+  List<(String, String, String?)> get choices {
+    final seen = <String>{};
+    return [
+      for (final c in configured)
+        if (seen.add(c.id)) (c.id, c.name, c.projectName ?? c.project),
+      for (final l in lines)
+        if (seen.add(l.id)) (l.id, l.name, l.projectLabel),
+    ];
+  }
+}
+
+/// `POST /api/mc/lines/move`'s answer.
+class McMoveResult {
+  final String? subject;
+
+  /// The line it is on now.
+  final McLineRef? line;
+  const McMoveResult({this.subject, this.line});
+
+  static McMoveResult fromJson(dynamic json) {
+    final m = _map(json);
+    return McMoveResult(subject: _str(m['subject']), line: McLineRef.fromJson(m['line']));
   }
 }
