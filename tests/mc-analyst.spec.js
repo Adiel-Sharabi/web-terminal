@@ -56,6 +56,14 @@ test.describe('#511 which sessions a scope covers', () => {
     expect(an.selectSessions(rows, { kind: 'session', id: 'c' }).map((r) => r.id)).toEqual(['c']);
     expect(an.selectSessions(rows, { kind: 'subject', id: 'acme/web#7' }).map((r) => r.id)).toEqual(['a']);
     expect(an.selectSessions(rows, { kind: 'subject', id: 'ado:5' }).map((r) => r.id)).toEqual(['b']);
+    // #504's subject key, not the raw item key: an item with no tracker key is a subject of
+    // that one session (`<key>@<session id>`), so it never joins another session's `#12`.
+    const local = [
+      row('x', { brief: { items: [{ ref: '#12', key: '#12' }], reportAt: NOW - MIN } }),
+      row('y', { brief: { items: [{ ref: '#12', key: '#12' }], reportAt: NOW - 2 * MIN } }),
+    ];
+    expect(an.selectSessions(local, { kind: 'subject', id: '#12@x' }).map((r) => r.id)).toEqual(['x']);
+    expect(an.selectSessions(local, { kind: 'subject', id: '#12' })).toEqual([]);
     expect(an.selectSessions(rows, { kind: 'project', id: 'web' }).map((r) => r.id)).toEqual(['c', 'a']);
     expect(an.selectSessions(rows, { kind: 'all', id: null }).map((r) => r.id)).toEqual(['b', 'c', 'a']);
     expect(an.selectSessions(rows, { kind: 'session', id: 'nope' })).toEqual([]);

@@ -289,7 +289,8 @@ command, timeoutMs (120000)}` - not settable through `PUT /api/config` (`command
 - Session text sits between two fence lines carrying a random nonce, and the model is told it is
   data; the question sits after the fence. The answer is plain text (the companion renders it as
   text). A double tap of the same question over the same data shares one run.
-- Subjects: grouped by the brief items' `key` inside the bundle only, until `lib/mc-subjects.js` (#504).
+- Subjects: a `subject` scope id is `lib/mc-subjects.js`'s subject key (`subjectKeyOf`; a tracker ref in
+  any spelling is canonicalised first, as `GET /api/mc/subjects/:key` does).
 - Errors: `400 {error}` bad body; `404 {error}` unknown session, subject (no session reports it) or
   project; an empty `all`/project scope is answered by the server (`model: null`, no run);
   `503 {status:'unavailable', reason: disabled|no-cli|busy}`; `502 {status:'failed', reason:
