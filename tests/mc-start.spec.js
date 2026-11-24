@@ -233,8 +233,8 @@ test.describe('#512 a session bound at birth', () => {
       st.setStageHistory('acme/widgets#42', [{ stage: 'fixing', at: NOW, source: 'report', detail: '' }], { changed: true });
       st.flush();
       const disk = JSON.parse(fs.readFileSync(file, 'utf8'));
-      // Its own key, beside #505's stages and #506's to-dos and "later"s.
-      expect(Object.keys(disk)).toEqual(['v', 'stages', 'todos', 'later', 'bindings']);
+      // Its own key, beside #505's stages, #506's to-dos and "later"s and #522's Done records.
+      expect(Object.keys(disk)).toEqual(['v', 'stages', 'todos', 'later', 'actionsDone', 'bindings']);
       const again = createMcState({ file, now: () => NOW });
       expect(again.bindings()).toEqual({ s1: { ...binding(), seenAt: binding().at } });
       expect(again.stageHistory('acme/widgets#42')).toHaveLength(1);
