@@ -544,6 +544,29 @@ test.describe('#541 a card shows the title of the item it is about - never the s
     expect(face(nowOf([tie]).answerNow[0])).toEqual([null, null, null]);
   });
 
+  test('filler words ("this", "that", "with", "should", "would") never make a card about an item, however many they share', () => {
+    const filler = { ref: 'ado:5', title: 'Make this work with the new phone', note: 'that should land today' };
+    const s = row('alpha', { items: [filler, B9], asks: [ask('Should this changelog line start with the date? It would make that list easier to scan')] });
+    expect(face(nowOf([s]).answerNow[0])).toEqual([null, null, null]);
+    // The same item is still found by words that are about it.
+    const real = row('alpha', { items: [filler, B9], asks: [ask('Is the new phone work landing today?')] });
+    expect(face(nowOf([real]).answerNow[0])[0]).toBe('ado:5');
+  });
+
+  test('a session started on ONE item that has reported nothing yet: its cards are about that item (the person said so); once it reports, only a ref or words say', () => {
+    const bound = { key: 'ado:42', ref: 'ado:42', title: null, state: null, bound: true, boundAt: NOW - MIN };
+    const node = { id: 'live-1', items: [bound] };
+    const subj = { key: 'ado:42', ref: 'ado:42', title: 'Widgets login', project: 'widgets' };
+    const subjects = new Map([['ado:42', subj]]);
+    expect(N.subjectFor(node, subjects, { words: 'Approve a tool' })).toBe(subj);
+    expect(N.subjectFor(node, subjects, { words: 'Approve a tool', wait: true })).toBe(subj);
+    // Two items (the session reported more, or was bound to two): never the first.
+    const two = { id: 'live-1', items: [bound, { ...bound, key: 'ado:43', ref: 'ado:43' }] };
+    expect(N.subjectFor(two, subjects, { words: 'Approve a tool' })).toBeNull();
+    // A reported item is not a binding.
+    expect(N.subjectFor({ id: 'live-1', items: [{ ...bound, bound: false, title: 'Other', state: 'in-progress' }] }, subjects, { words: 'Approve a tool' })).toBeNull();
+  });
+
   test('a ref the session no longer reports gives no subject (not the first item, not a word match)', () => {
     const s = row('alpha', { items: [A5, B9], asks: [ask('Raise the sensor cap readout to 40?', 10, { ref: 'ado:99' })] });
     expect(face(nowOf([s]).answerNow[0])).toEqual([null, null, null]);

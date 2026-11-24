@@ -12,10 +12,16 @@ import '../../theme/app_theme.dart';
 /// How long a tapped option can still be taken back before it is sent.
 const Duration kMcUndoWindow = Duration(seconds: 5);
 
+/// How long after a send the card is taken to have been heard: the server drops the ask at once
+/// when the session takes the reply, so a card still here this long after was not taken.
+const Duration kMcSentGrace = Duration(seconds: 20);
+
 /// Sends [text] as the reply to [card]; true when it went out (a refusal is said by the sender).
 typedef McReply = Future<bool> Function(McCard card, String text);
 
-String _words(String s) => s.trim().replaceAll(RegExp(r'\s+'), ' ').toLowerCase();
+/// Lower case, one space between words, and without the ellipsis a clipped line ends on (the
+/// server cuts a wait's own line at 80 characters, so a long question arrives as its start).
+String _words(String s) => s.trim().replaceAll(RegExp(r'\s+'), ' ').replaceAll(RegExp('(${String.fromCharCode(0x2026)}|\\.\\.\\.)+\$'), '').trim().toLowerCase();
 
 /// Whether [a] and [b] put the same question: the same words, or one inside the other (a wait's
 /// own line often is "Decide: the question (why)"). Empty is never the same as anything.

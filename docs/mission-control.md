@@ -256,9 +256,11 @@ session's first item (a session works on several; a question about one showed th
 `"ref"` on the `wait` and on each ask, which `lib/session-brief.js` accepts only when it is one of the session's own items
 (any spelling of it: `gh#5` is `#5`; a report of a wait or asks alone is checked against the items already reported; a
 wrong one is refused, naming the session's refs) and keeps as the session reported it; a name the session no longer reports
-is no subject, not a guess; (2) a `you` wait with no `ref`: the ONE item reported `blocked`; (3) no `ref`: the open item
+is no subject, not a guess; (1b) a session started on ONE item that has reported nothing yet (a bound item, `lib/mc-binding.js`:
+the person said what it is for): that item; (2) a `you` wait with no `ref`: the ONE item reported `blocked`; (3) no `ref`: the open item
 whose title and note share at least two significant words with the card's own (the question and its context, or the wait's
-text; `lib/unreported-ask.js` `wordsOf`) and strictly more than any other item does; (4) else NO subject: `subjectKey`, `ref`,
+text; `lib/unreported-ask.js` `significantWordsOf`: words of four letters or more, cut to five, without the filler every sentence
+has - "this", "that", "with", "should", "would"...) and strictly more than any other item does; (4) else NO subject: `subjectKey`, `ref`,
 `title` and `project` are null, and a client shows the question itself with the session's name beneath. `project` is the
 subject's; an ask's `why.severity` is the subject's tracker severity (null with no subject; what a WAIT blocks, `why.subjects`
 and its severity, is still every item of the sessions it holds up).

@@ -314,8 +314,8 @@ class McAnswerCard extends StatefulWidget {
   final void Function(int hours) onLater;
   final VoidCallback onTodo;
 
-  /// #541 - sends the person's reply to the card's session; null: the scope's
-  /// ([McQuestionScope.onReply]), and with neither the options only explain.
+  /// #541 - sends the person's reply to the card's session; null: the scope's answer port's
+  /// ([McQuestionScope.answerPort]), and with neither the options only explain.
   final McReply? onReply;
   final DateTime? now;
 
@@ -324,8 +324,9 @@ class McAnswerCard extends StatefulWidget {
 }
 
 /// Where a reply from the card stands: nothing yet, an option inside its Undo window, on its
-/// way, or sent.
-enum _McReplyPhase { idle, undo, sending, sent }
+/// way, sent (the card should go), or sent and still here after [kMcSentGrace] (the session did
+/// not take it: the card answers again).
+enum _McReplyPhase { idle, undo, sending, sent, stale }
 
 class _McAnswerCardState extends State<McAnswerCard> {
   bool _open = false;
@@ -341,8 +342,18 @@ class _McAnswerCardState extends State<McAnswerCard> {
   String? _choice;
   final TextEditingController _text = TextEditingController();
 
+  /// The Undo window's own clock: it ends in the send, and only Undo stops it. It is not the toast
+  /// that decides: another toast (a refusal said by the sender, a pick on a second card) hides this
+  /// one at once, and that must not send the pick early. Left running when the card is left (the
+  /// answer was asked for).
+  Timer? _undoTimer;
+
+  /// Runs out [kMcSentGrace] after a send; a card still here then was not taken.
+  Timer? _sentTimer;
+
   @override
   void dispose() {
+    _sentTimer?.cancel();
     _text.dispose();
     super.dispose();
   }
@@ -362,7 +373,7 @@ class _McAnswerCardState extends State<McAnswerCard> {
     return c.kind == 'question' && c.sessionId != null ? McQuestionScope.maybeOf(context)?.answerPort : null;
   }
 
-  bool get _busy => _phase != _McReplyPhase.idle;
+  bool get _busy => _phase != _McReplyPhase.idle && _phase != _McReplyPhase.stale;
 
   /// Context and options to show, a sentence to answer, or a question on its session's screen.
   bool get _expandable => widget.card.decision != null || widget.card.isPossibleAsk || _port != null;
@@ -392,16 +403,16 @@ class _McAnswerCardState extends State<McAnswerCard> {
     _startPick(q.questions.single.options[i].label, () => port.answerQuestion(card, q, buildAnswerFrames(q.questions, [<int>{i}])));
   }
 
-  /// An option tapped: its toast carries the Undo, and [send] runs when the toast ends any way
-  /// but Undo (it times out, is swiped away, or gives way to another). With no messenger there is
-  /// no Undo to offer, so it goes at once. [label] is what the status line says.
+  /// An option tapped: for [kMcUndoWindow] it can be taken back (the toast's Undo, or the card's
+  /// own "Take it back" - the toast may be gone by then), then [send] runs. With no messenger
+  /// there is no Undo to offer, so it goes at once. [label] is what the status line says.
   void _startPick(String label, Future<bool> Function() send) {
     if (_busy) return;
     final toast = showTimedSnackBar(
       context,
       'Answering "$label" - Undo stops it',
       duration: kMcUndoWindow,
-      action: SnackBarAction(label: 'Undo', onPressed: () {}),
+      action: SnackBarAction(label: 'Undo', onPressed: _undoPick),
     );
     if (toast == null) {
       unawaited(_deliver(send, label));
@@ -411,13 +422,20 @@ class _McAnswerCardState extends State<McAnswerCard> {
       _phase = _McReplyPhase.undo;
       _choice = label;
     });
-    toast.closed.then((reason) {
-      if (reason == SnackBarClosedReason.action) {
-        if (mounted) setState(() => _phase = _McReplyPhase.idle);
-      } else {
-        unawaited(_deliver(send, label));
-      }
+    _undoTimer = Timer(kMcUndoWindow, () {
+      _undoTimer = null;
+      unawaited(_deliver(send, label));
     });
+  }
+
+  /// Takes back the pick inside its window; nothing to take back once it went (a late tap on a
+  /// toast that outlived it).
+  void _undoPick() {
+    final t = _undoTimer;
+    if (t == null) return;
+    t.cancel();
+    _undoTimer = null;
+    if (mounted) setState(() => _phase = _McReplyPhase.idle);
   }
 
   /// Runs [send]; true when it went out. A refusal was said by the sender and leaves the card as
@@ -437,6 +455,14 @@ class _McAnswerCardState extends State<McAnswerCard> {
       if (mounted) showTimedSnackBar(context, 'Could not send: ${e is ApiException ? e.message : '$e'}');
     }
     if (mounted) setState(() => _phase = ok ? _McReplyPhase.sent : _McReplyPhase.idle);
+    _sentTimer?.cancel();
+    // The card goes when the server drops the ask. One that is still here after the grace was not
+    // taken (the agent's screen swallowed the line, #179): it answers again, never stays locked.
+    if (ok && mounted) {
+      _sentTimer = Timer(kMcSentGrace, () {
+        if (mounted && _phase == _McReplyPhase.sent) setState(() => _phase = _McReplyPhase.stale);
+      });
+    }
     return ok;
   }
 
@@ -453,9 +479,10 @@ class _McAnswerCardState extends State<McAnswerCard> {
     final w = _choice;
     return switch (_phase) {
       _McReplyPhase.idle => null,
-      _McReplyPhase.undo => 'About to answer "$w" - Undo in the bar below stops it',
+      _McReplyPhase.undo => 'About to answer "$w" - Undo stops it',
       _McReplyPhase.sending => 'Sending "$w"...',
       _McReplyPhase.sent => 'Sent "$w". The card goes once the session has it.',
+      _McReplyPhase.stale => 'Sent "$w", but the card is still here - the session may not have taken it. Answer again if you need to.',
     };
   }
 
@@ -547,6 +574,9 @@ class _McAnswerCardState extends State<McAnswerCard> {
             // A question card's own words ("answer a question") say nothing: its questions follow.
             Text(heading.isNotEmpty ? heading : ((c.kind == 'question' ? null : c.what) ?? c.sessionName ?? 'A session'),
                 key: const ValueKey('mc-card-heading'),
+                // A question for a heading can run to 240 characters: folded, a few lines of it.
+                maxLines: _open ? null : 4,
+                overflow: _open ? TextOverflow.visible : TextOverflow.ellipsis,
                 style: theme.textTheme.titleSmall?.copyWith(fontWeight: FontWeight.w600)),
             // #531: a question card shows the questions themselves; its own words ("answer a
             // question") say nothing about what is asked.
@@ -589,11 +619,21 @@ class _McAnswerCardState extends State<McAnswerCard> {
             ],
             if (status != null) ...[
               const SizedBox(height: 4),
-              Text(status,
-                  key: ValueKey(_phase == _McReplyPhase.sent ? 'mc-card-sent' : 'mc-card-status'),
-                  maxLines: 2,
-                  overflow: TextOverflow.ellipsis,
-                  style: small?.copyWith(color: AppColors.primary)),
+              Row(children: [
+                Expanded(
+                  child: Text(status,
+                      key: ValueKey(_phase == _McReplyPhase.sent ? 'mc-card-sent' : 'mc-card-status'),
+                      maxLines: 3,
+                      overflow: TextOverflow.ellipsis,
+                      style: small?.copyWith(color: AppColors.primary)),
+                ),
+                if (_phase == _McReplyPhase.undo)
+                  TextButton(
+                    key: const ValueKey('mc-card-undo'),
+                    onPressed: _undoPick,
+                    child: const Text('Take it back'),
+                  ),
+              ]),
             ],
             if (why.text != null || blocked.isNotEmpty) ...[
               const SizedBox(height: 4),

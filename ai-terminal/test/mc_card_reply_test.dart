@@ -11,6 +11,7 @@ import 'package:ai_terminal/screens/mission_control/now_view.dart';
 import 'package:ai_terminal/screens/mission_control/question_panel.dart';
 import 'package:ai_terminal/services/mc_analyst.dart';
 import 'package:ai_terminal/theme/app_theme.dart';
+import 'package:ai_terminal/widgets/timed_snack_bar.dart';
 import 'package:flutter/material.dart';
 import 'package:flutter_test/flutter_test.dart';
 
@@ -188,6 +189,53 @@ void main() {
       expect(find.text('sqlite'), findsOneWidget);
     });
 
+    testWidgets('another toast hiding this one does not send the pick early: the window is the card\'s own, and the card can take it back', (tester) async {
+      await pump(tester, _askJson());
+      await tester.tap(key('mc-card-option-1'));
+      await tester.pump();
+      await tester.pump(const Duration(milliseconds: 500));
+      // A refusal said by the sender, or a pick on a second card, replaces the toast with its own.
+      showTimedSnackBar(tester.element(find.byType(Scaffold)), 'something else');
+      await tester.pump();
+      await tester.pump(const Duration(seconds: 1));
+      expect(sent, isEmpty, reason: 'a hidden toast does not end the window');
+      expect(key('mc-card-undo'), findsOneWidget, reason: 'the Undo is on the card too');
+      await tester.tap(key('mc-card-undo'));
+      await _pastUndo(tester);
+      expect(sent, isEmpty);
+      expect(key('mc-card-sent'), findsNothing);
+    });
+
+    testWidgets('a pick whose toast was hidden still goes when its own window has run out - once', (tester) async {
+      await pump(tester, _askJson());
+      await tester.tap(key('mc-card-option-1'));
+      await tester.pump();
+      await tester.pump(const Duration(milliseconds: 500));
+      showTimedSnackBar(tester.element(find.byType(Scaffold)), 'something else');
+      await tester.pump(const Duration(seconds: 2));
+      expect(sent, isEmpty);
+      await _pastUndo(tester);
+      expect(sent.map((s) => s.$2), ['postgres']);
+    });
+
+    testWidgets('a card still here after a send is not locked for good: it answers again once the grace has run out', (tester) async {
+      await pump(tester, _askJson());
+      await tester.tap(key('mc-card-option-0'));
+      await tester.pump();
+      await _pastUndo(tester);
+      expect(sent.map((s) => s.$2), ['sqlite']);
+      expect(key('mc-card-sent'), findsOneWidget);
+      expect(tester.widget<ActionChip>(key('mc-card-option-1')).onPressed, isNull, reason: 'inside the grace the chips stay off');
+      await tester.pump(kMcSentGrace + const Duration(seconds: 1));
+      expect(key('mc-card-sent'), findsNothing);
+      expect(find.textContaining('still here'), findsOneWidget);
+      expect(tester.widget<ActionChip>(key('mc-card-option-1')).onPressed, isNotNull, reason: 'the card answers again');
+      await tester.tap(key('mc-card-option-1'));
+      await tester.pump();
+      await _pastUndo(tester);
+      expect(sent.map((s) => s.$2), ['sqlite', 'postgres']);
+    });
+
     testWidgets('a decision card\'s chips answer too', (tester) async {
       await pump(tester, _decisionJson());
       await tester.tap(key('mc-card-option-0'));
@@ -308,7 +356,20 @@ void main() {
       expect(find.text('Which database?'), findsOneWidget);
     });
 
+    testWidgets('a long question, clipped on the wait line (it ends in an ellipsis), is not printed again beneath it', (tester) async {
+      const q = 'Should the nightly migration move the session store from sqlite to postgres before the release on Thursday?';
+      final clipped = '${q.substring(0, 76)}…';
+      final j = _decisionJson(what: clipped);
+      j['decision'] = {..._decision, 'question': q};
+      await pump(tester, j);
+      expect(find.text(clipped), findsOneWidget);
+      expect(key('mc-card-decision-question'), findsNothing);
+    });
+
     test('the rule: the same words, or one inside the other, are one question', () {
+      expect(mcSameQuestion('Should the nightly migration move…', 'Should the nightly migration move the store?'), isTrue);
+      expect(mcSameQuestion('Should the nightly migration move...', 'Should the nightly migration move the store?'), isTrue);
+      expect(mcSameQuestion('Should the nightly cache move…', 'Should the nightly migration move the store?'), isFalse);
       expect(mcSameQuestion('Which database?', 'which  database?'), isTrue);
       expect(mcSameQuestion('Decide: which database? now', 'Which database?'), isTrue);
       expect(mcSameQuestion('Which database?', 'Which cache?'), isFalse);
