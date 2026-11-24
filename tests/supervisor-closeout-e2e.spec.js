@@ -163,6 +163,42 @@ test.describe.serial('#469 close-out, then close or mark ready', () => {
     expect((await state()).needsYou.includes(B)).toBe(false);
   });
 
+  test('#543 a shared PR: clean only naming its live owner; naming yourself is refused; a gone owner is the owner\'s', async () => {
+    // The owner keeps watching the PR (a wait that is not done): it is never asked to close out.
+    const P = await open('co-pr-owner');
+    await turn(P, { on: 'self', what: 'watching PR #9' });
+    const S = await open('co-pr-sharer');
+    await turn(S, DONE);
+    await until(async () => (await asks(S)) === 1, 'asked');
+    expect(await screen(S)).toContain('--pr <ref> --owner <its owner>');
+    // A flag with no value is refused before anything is sent; the server refuses a half answer
+    // and naming yourself.
+    expect(closeout(S, 'clean', '--pr').status).toBe(2);
+    const half = closeout(S, 'clean', '--pr', '#9');
+    expect(half.status).not.toBe(0);
+    expect(half.stderr + half.stdout).toMatch(/needs both/);
+    const own = closeout(S, 'clean', '--pr', '#9', '--owner', S);
+    expect(own.status).not.toBe(0);
+    expect(own.stderr + own.stdout).toMatch(/you own still open is not clean/);
+    expect((await row(S)).brief.closeout.state).toBeNull();
+    // Named by its session name: recorded, and closed like any clean agent session.
+    const r = closeout(S, 'clean', '--pr', '#9', '--owner', 'co-pr-owner');
+    expect(r.status, r.stderr).toBe(0);
+    expect(r.stdout).toContain('PR #9 is owned by co-pr-owner');
+    await until(async () => !(await row(S)), 'the sharer closed while its owner runs');
+    // An owner nobody is running: the owner's (Needs you), never ready, never closed.
+    const T = await open('co-pr-orphan');
+    await turn(T, DONE);
+    await until(async () => (await asks(T)) === 1, 'asked');
+    expect(closeout(T, 'clean', '--pr', '#9', '--owner', 'no-such-session').status).toBe(0);
+    await until(async () => (await state()).needsYou.includes(T), 'Needs you');
+    expect((await node(T)).closeoutState).toMatchObject({ needs: 'owner-gone' });
+    expect((await state()).readyToClose).not.toContain(T);
+    await sleep(1500); // past closeAfterMin and several scans
+    expect(await row(T)).toBeTruthy();
+    expect(await row(P)).toBeTruthy();
+  });
+
   test('in recommend mode the close is a card; Approve closes it through the gated close', async () => {
     const r = await a.post('/api/supervisor/autonomy', { data: { class: 'close', mode: 'recommend' } });
     expect(r.ok(), await r.text()).toBe(true);

@@ -273,6 +273,17 @@ The owner's rule: a done session cleans up after itself before it is closed.
    This is the `/dds-can-i-close` audit, but answered rather than printed.
 2. **The answer is state, not prose** (the #359 pattern): `wt-closeout.js clean`,
    or `wt-closeout.js blocked "<what is left>"`.
+
+   **`clean` means the subject is finished in full (#543, the owner's rule; the shared
+   `dds-can-i-close` skill states the same):** merged, not just pushed; every PR the session
+   opened completed (open, queued or building is not); review threads answered; leftovers
+   deferred only through a tracker item; nothing it started still running or kept for later.
+   A PR it owns still open keeps the session open, watching it (a wait on the PR, which ends
+   the close-out). **A PR shared by several sessions keeps exactly one owner session open**:
+   the others answer `clean --pr <ref> --owner <session>`. The answer route refuses an owner
+   that is the session itself; R5 marks the sharer ready (and may close it) only while the
+   owner is a live node of the scan (id, `replaces` alias, or a unique name). A complete scan
+   without it is "Needs you" (`owner-gone`); an incomplete one holds (`owner-unknown`).
 3. `clean`:
    - **The owner opened it → never closed by the supervisor.** It is marked *ready to
      close* in the journal, with its brief, so the owner can close it quickly. If it is
