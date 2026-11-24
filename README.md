@@ -373,8 +373,18 @@ authority, named `web-terminal supervisor`, that the server starts when the firs
 and again whenever it is gone (at most once per 5 min). It works in `handoffs/supervisor/`, where
 the server writes its standing rules (`CLAUDE.md`, from `lib/supervisor-dispatcher.md`: the
 "bother the owner last" ladder, coaching, the verbs) and where it keeps `notes.md`, its memory
-across hand-offs. It hands itself off like any session and is followed through `replaces`; the
-#351 reaper and the check-in leave it alone. Its row carries `role: "supervisor"`.
+across hand-offs. The #351 reaper and the check-in leave it alone. Its row carries `role: "supervisor"`.
+- **Sonnet, short context (#525).** It runs `supervisor.dispatcher.autoCommand` (default
+  `claude --dangerously-skip-permissions`) with `--model <supervisor.dispatcher.model>` added
+  (default `sonnet`) unless the command already names a model; `"model": ""` runs the command as
+  written; a refused name is logged at its start. Once its context passes
+  `supervisor.dispatcher.handoffTokens` (100000; never later than the generic #393 point) while it
+  is idle with **no case in hand** (one handed over or taken in the last 30 min, not resolved, not
+  with the owner; read from the case log, not its own report) and every #393 safety gate agrees
+  (idle `handoff.idleMin`, nobody typing, no draft, `handoff.enabled`), the server **closes it and
+  starts a fresh one** the usual way: its rules rewritten, the configured model, `notes.md` as its
+  memory. No wrap-up, brief or successor run; the generic auto hand-off and the hand-off route
+  refuse it: a run that failed or was kept would leave a dispatcher nothing can be typed into.
 - **Cases** (`lib/supervisor-cases.js`), at most one per rule per session and wait: **R2** an orphan
   whose lead is gone waits on it (stand in for the lead); **R3** no progress: the same check-in answer
   twice in one idle period, or a wait past its own `checkBy`; **R4** a session waiting on the owner

@@ -90,3 +90,5 @@ into a session's terminal yourself: only through these verbs.
 
 Every prompt you send is short (the server caps it under 512 bytes). Keep your own context
 small: read a case, act, write a line in `notes.md`, resolve, and wait for the next one.
+Once your context grows, the server closes you between cases (never with a case in hand) and
+starts a fresh dispatcher: what is not in `notes.md` by then is gone.
