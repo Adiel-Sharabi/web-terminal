@@ -6,7 +6,7 @@
 import 'package:flutter/material.dart';
 
 import '../../api/mc_models.dart';
-import '../../api/models.dart' show BriefDecision;
+import '../../api/models.dart' show BriefDecision, PendingQuestion, PendingQuestionItem;
 import '../../theme/app_theme.dart';
 
 /// How long a tapped option can still be taken back before it is sent.
@@ -162,6 +162,51 @@ class McCardDetail extends StatelessWidget {
           ),
         ]),
       ],
+    ]);
+  }
+}
+
+/// #541 - whether a pending AskUserQuestion may be answered from the card: exactly ONE question,
+/// single-select, no preview (a side-by-side layout reads the keys differently) and at least two
+/// options. THE rule: anything else is answered in the sheet, which has the whole panel.
+bool mcSimpleQuestion(PendingQuestion q) {
+  if (q.questions.length != 1) return false;
+  final item = q.questions.single;
+  return !item.multiSelect && !item.hasPreview && item.options.length >= 2;
+}
+
+/// The options of a simple pending question on the expanded card. A tap picks that option BY
+/// INDEX - the answer's keys are built from the index ([buildAnswerFrames]), never from the label,
+/// so two options that read alike can never swap. The question itself is on the card's face above.
+class McQuestionOptions extends StatelessWidget {
+  const McQuestionOptions({super.key, required this.item, required this.onPick, this.enabled = true});
+
+  final PendingQuestionItem item;
+  final void Function(int index) onPick;
+  final bool enabled;
+
+  @override
+  Widget build(BuildContext context) {
+    final theme = Theme.of(context);
+    final muted = theme.textTheme.bodySmall?.copyWith(color: AppColors.onSurfaceVariant);
+    return Column(key: const ValueKey('mc-card-qoptions'), crossAxisAlignment: CrossAxisAlignment.start, children: [
+      for (var i = 0; i < item.options.length; i++)
+        InkWell(
+          key: ValueKey('mc-card-qopt-$i'),
+          borderRadius: BorderRadius.circular(6),
+          onTap: enabled ? () => onPick(i) : null,
+          child: Padding(
+            padding: const EdgeInsets.symmetric(vertical: 5, horizontal: 2),
+            child: Column(crossAxisAlignment: CrossAxisAlignment.start, children: [
+              Text(item.options[i].label, style: theme.textTheme.bodyMedium?.copyWith(fontWeight: FontWeight.w600)),
+              if (item.options[i].description.isNotEmpty) Text(item.options[i].description, style: muted),
+            ]),
+          ),
+        ),
+      Padding(
+        padding: const EdgeInsets.only(top: 2),
+        child: Text('Tap an option to answer with it; it is sent after a few seconds unless you undo it.', style: muted),
+      ),
     ]);
   }
 }

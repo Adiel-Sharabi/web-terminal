@@ -1,10 +1,11 @@
 // #541 - an ask / decision card is answered where it is: an option chip answers at once through
 // the existing reply path after a short Undo window, the card expands in place (context, every
 // option with its consequence, a one-line reply, Send), and its question is printed once.
-// The card sends nothing itself: [McAnswerCard.onReply] is the home's reply path (the same one
+// The card sends nothing itself: [McAnswerCard.onReply] (or the scope's answer port's send) is the home's reply path (the same one
 // the reply dialog used, [McPickSender.send]). From SYNTHETIC rows.
 import 'package:ai_terminal/api/api_client.dart';
 import 'package:ai_terminal/api/mc_models.dart';
+import 'package:ai_terminal/screens/mission_control/answer_sheet.dart';
 import 'package:ai_terminal/screens/mission_control/card_decision.dart';
 import 'package:ai_terminal/screens/mission_control/now_view.dart';
 import 'package:ai_terminal/screens/mission_control/question_panel.dart';
@@ -366,10 +367,15 @@ void main() {
           analyst: McAnalyst(servers: () => const [], client: ApiClient.new),
           onSend: (c, t, shown) async => false,
           onAnswer: (c) {},
-          onReply: (c, text) async {
-            viaScope.add(text);
-            return true;
-          },
+          answerPort: McAnswerPort(
+            pendingQuestion: (c) async => null,
+            answerQuestion: (c, shown, frames) async => false,
+            send: (c, text) async {
+              viaScope.add(text);
+              return true;
+            },
+            openSession: (c) {},
+          ),
           child: Scaffold(
             body: SingleChildScrollView(
               child: McAnswerCard(card: McCard.fromJson(_askJson())!, onAnswer: () {}, onLater: (_) {}, onTodo: () {}),

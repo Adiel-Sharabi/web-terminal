@@ -12,11 +12,14 @@ import 'package:flutter/material.dart';
 
 import '../../api/api_client.dart';
 import '../../api/mc_models.dart';
+import '../../api/models.dart' show PendingQuestion;
 import '../../services/mc_feed.dart';
 import '../../theme/app_theme.dart';
 import '../../widgets/empty_state.dart';
 import '../../widgets/format_utils.dart';
+import '../../widgets/question_overlay.dart' show buildAnswerFrames;
 import '../../widgets/timed_snack_bar.dart';
+import 'answer_sheet.dart' show McAnswerPort;
 import 'card_decision.dart';
 import 'lines_view.dart';
 import 'question_panel.dart';
@@ -328,6 +331,12 @@ class _McAnswerCardState extends State<McAnswerCard> {
   bool _open = false;
   _McReplyPhase _phase = _McReplyPhase.idle;
 
+  /// #541 - the AskUserQuestion on the session's screen, read each time a question card is opened
+  /// (it may have changed since it was last shown); null while the card is folded. The future never
+  /// errors: it starts in a tap and is listened to a frame later, so a read that fails at once
+  /// (an unknown session) would be an unhandled error. A failure is its second value.
+  Future<(PendingQuestion?, Object?)>? _pending;
+
   /// The option's label or the person's words, while [_phase] is not idle.
   String? _choice;
   final TextEditingController _text = TextEditingController();
@@ -344,23 +353,50 @@ class _McAnswerCardState extends State<McAnswerCard> {
     final c = widget.card;
     if (c.sessionId == null) return null;
     if (!(c.isAsk || c.isPossibleAsk || (c.kind == 'decision' && c.decision != null))) return null;
-    return widget.onReply ?? McQuestionScope.maybeOf(context)?.onReply;
+    return widget.onReply ?? McQuestionScope.maybeOf(context)?.answerPort?.send;
+  }
+
+  /// The answer port, for a card that is a pending AskUserQuestion of a session the app can name.
+  McAnswerPort? get _port {
+    final c = widget.card;
+    return c.kind == 'question' && c.sessionId != null ? McQuestionScope.maybeOf(context)?.answerPort : null;
   }
 
   bool get _busy => _phase != _McReplyPhase.idle;
 
-  /// Context and options to show, or a sentence to answer.
-  bool get _expandable => widget.card.decision != null || widget.card.isPossibleAsk;
+  /// Context and options to show, a sentence to answer, or a question on its session's screen.
+  bool get _expandable => widget.card.decision != null || widget.card.isPossibleAsk || _port != null;
 
-  void _toggle() => setState(() => _open = !_open);
+  void _toggle() => setState(() {
+        _open = !_open;
+        final port = _port;
+        _pending = _open && port != null
+            ? port.pendingQuestion(widget.card).then<(PendingQuestion?, Object?)>((q) => (q, null), onError: (Object e) => (null, e))
+            : null;
+      });
 
-  /// An option tapped: its toast carries the Undo, and the reply goes when the toast ends any way
-  /// but Undo (it times out, is swiped away, or gives way to another). With no messenger there is
-  /// no Undo to offer, so it goes at once.
+  /// A decision or ask option tapped: its text is the reply.
   void _pickOption(String label) {
     final send = _reply;
-    if (send == null || _busy) return;
+    if (send == null) return;
     final card = widget.card;
+    _startPick(label, () => send(card, label));
+  }
+
+  /// A pending question's option [i] tapped: the answer is the frames [buildAnswerFrames] makes
+  /// for that pick (the panel's own rule), sent for the question the person was shown.
+  void _pickQuestionOption(PendingQuestion q, int i) {
+    final port = _port;
+    if (port == null) return;
+    final card = widget.card;
+    _startPick(q.questions.single.options[i].label, () => port.answerQuestion(card, q, buildAnswerFrames(q.questions, [<int>{i}])));
+  }
+
+  /// An option tapped: its toast carries the Undo, and [send] runs when the toast ends any way
+  /// but Undo (it times out, is swiped away, or gives way to another). With no messenger there is
+  /// no Undo to offer, so it goes at once. [label] is what the status line says.
+  void _startPick(String label, Future<bool> Function() send) {
+    if (_busy) return;
     final toast = showTimedSnackBar(
       context,
       'Answering "$label" - Undo stops it',
@@ -368,7 +404,7 @@ class _McAnswerCardState extends State<McAnswerCard> {
       action: SnackBarAction(label: 'Undo', onPressed: () {}),
     );
     if (toast == null) {
-      unawaited(_deliver(send, card, label));
+      unawaited(_deliver(send, label));
       return;
     }
     setState(() {
@@ -379,23 +415,24 @@ class _McAnswerCardState extends State<McAnswerCard> {
       if (reason == SnackBarClosedReason.action) {
         if (mounted) setState(() => _phase = _McReplyPhase.idle);
       } else {
-        unawaited(_deliver(send, card, label));
+        unawaited(_deliver(send, label));
       }
     });
   }
 
-  /// Sends [text]; true when it went out. A refusal was said by the sender and leaves the card as
-  /// it was. The card may have been left meanwhile: the reply still goes (it was asked for).
-  Future<bool> _deliver(McReply send, McCard card, String text) async {
+  /// Runs [send]; true when it went out. A refusal was said by the sender and leaves the card as
+  /// it was. The card may have been left meanwhile: the answer still goes (it was asked for).
+  /// [shown] is what the status line says was sent.
+  Future<bool> _deliver(Future<bool> Function() send, String shown) async {
     if (mounted) {
       setState(() {
         _phase = _McReplyPhase.sending;
-        _choice = text;
+        _choice = shown;
       });
     }
     var ok = false;
     try {
-      ok = await send(card, text);
+      ok = await send();
     } catch (e) {
       if (mounted) showTimedSnackBar(context, 'Could not send: ${e is ApiException ? e.message : '$e'}');
     }
@@ -407,7 +444,8 @@ class _McAnswerCardState extends State<McAnswerCard> {
     final send = _reply;
     final words = _text.text.trim();
     if (send == null || words.isEmpty || _busy) return;
-    final ok = await _deliver(send, widget.card, words);
+    final card = widget.card;
+    final ok = await _deliver(() => send(card, words), words);
     if (ok && mounted) _text.clear();
   }
 
@@ -419,6 +457,35 @@ class _McAnswerCardState extends State<McAnswerCard> {
       _McReplyPhase.sending => 'Sending "$w"...',
       _McReplyPhase.sent => 'Sent "$w". The card goes once the session has it.',
     };
+  }
+
+  /// What an opened question card shows of its question: the options of a simple one, to answer
+  /// from here; for any other a line saying it is answered in the sheet; or why it cannot be shown.
+  Widget _questionBody(BuildContext context) {
+    final theme = Theme.of(context);
+    final muted = theme.textTheme.bodySmall?.copyWith(color: AppColors.onSurfaceVariant);
+    return FutureBuilder<(PendingQuestion?, Object?)>(
+      future: _pending,
+      builder: (context, snap) {
+        if (snap.connectionState != ConnectionState.done || snap.data == null) {
+          return const LinearProgressIndicator(key: ValueKey('mc-card-q-loading'));
+        }
+        final (q, e) = snap.data!;
+        if (e != null) {
+          return Text(e is ApiException ? e.message : 'The question could not be read ($e)',
+              key: const ValueKey('mc-card-q-error'), style: TextStyle(color: theme.colorScheme.error));
+        }
+        if (q == null) {
+          return Text('This question is no longer on its screen: it was answered, or the session moved on.',
+              key: const ValueKey('mc-card-q-gone'), style: muted);
+        }
+        if (!mcSimpleQuestion(q)) {
+          return Text('This question has several parts or a layout of its own: Answer opens it.',
+              key: const ValueKey('mc-card-q-sheet'), style: muted);
+        }
+        return McQuestionOptions(item: q.questions.single, enabled: !_busy, onPick: (i) => _pickQuestionOption(q, i));
+      },
+    );
   }
 
   @override
@@ -514,6 +581,11 @@ class _McAnswerCardState extends State<McAnswerCard> {
             ] else if (_open && reply != null) ...[
               const SizedBox(height: 4),
               McCardDetail(decision: null, controller: _text, enabled: !_busy, onPick: null, onSend: _sendTyped),
+            ],
+            // #541: a pending AskUserQuestion, read when the card was opened.
+            if (_open && _pending != null) ...[
+              const SizedBox(height: 4),
+              _questionBody(context),
             ],
             if (status != null) ...[
               const SizedBox(height: 4),

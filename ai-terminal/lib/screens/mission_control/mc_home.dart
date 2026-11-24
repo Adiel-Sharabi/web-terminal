@@ -345,7 +345,7 @@ class _MissionControlHomeState extends State<MissionControlHome> {
   @override
   Widget build(BuildContext context) {
     // #510 - every question card below (Now, a subject) opens its panel through this.
-    return McQuestionScope(analyst: _analyst, onSend: _sendPick, onAnswer: _answer, onReply: _answerPort.send, child: _layout());
+    return McQuestionScope(analyst: _analyst, onSend: _sendPick, onAnswer: _answer, answerPort: _answerPort, child: _layout());
   }
 
   Widget _layout() {

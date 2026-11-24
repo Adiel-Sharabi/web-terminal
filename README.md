@@ -783,7 +783,11 @@ companion's daily foreground time from a phone over adb in `logs/phone-usage.jso
   **Answered on the card (#541, companion):** an ask or decision card prints its question once; a tap
   on an option chip answers through that same reply path after a 5-second Undo, and a tap on the card
   (or its chevron) expands it in place: the context, every option with its consequence (the
-  recommended one starred), and a one-line reply of your own words.
+  recommended one starred), and a one-line reply of your own words. A pending AskUserQuestion card
+  opens the same way: the card reads the question on its session's screen, and a simple one (one
+  question, single choice, no preview, 2+ options) lists its options, a tap answering with the keys
+  the answer panel builds after the same Undo; anything else shows no options and **Answer** opens
+  the sheet.
   **Which item a card is about (#541):** a wait or an ask may name its work item (`"ref"`, one of the
   session's own items; a wrong one is refused with the list). A card shows that item's title; with no
   `ref` it takes the one item reported blocked (a wait) or the item whose title and note share at
