@@ -57,8 +57,16 @@ class McNowView extends StatelessWidget {
           onRefresh: feed.refresh,
           child: LayoutBuilder(builder: (context, box) {
             final wide = box.maxWidth >= kMcNowTwoColumns;
+            // A card names its project by id (as a subject does); the same answer names it.
+            final projectNames = {for (final p in data.projects) p.id: p.name};
             final left = <Widget>[
-              _AnswerNowSection(feed: feed, cards: data.answerNow, onAnswer: onAnswer, onOpenSession: onOpenSession, now: now),
+              _AnswerNowSection(
+                  feed: feed,
+                  cards: data.answerNow,
+                  projectNames: projectNames,
+                  onAnswer: onAnswer,
+                  onOpenSession: onOpenSession,
+                  now: now),
               const SizedBox(height: 16),
               McTodoSection(feed: feed, todos: data.todo, onOpenSession: onOpenSession, now: now),
             ];
@@ -211,10 +219,12 @@ class _AnswerNowSection extends StatelessWidget {
     required this.cards,
     required this.onAnswer,
     required this.onOpenSession,
+    this.projectNames = const {},
     this.now,
   });
   final McFeed feed;
   final List<McCard> cards;
+  final Map<String, String> projectNames;
   final void Function(McCard) onAnswer;
   final void Function(String) onOpenSession;
   final DateTime? now;
@@ -237,6 +247,7 @@ class _AnswerNowSection extends StatelessWidget {
           child: McAnswerCard(
             key: ValueKey('mc-card-${c.id}'),
             card: c,
+            projectName: c.project == null ? null : projectNames[c.project],
             now: now,
             onAnswer: () => onAnswer(c),
             onOpenSession: c.sessionId == null ? null : () => onOpenSession(c.sessionId!),
@@ -258,10 +269,14 @@ class McAnswerCard extends StatelessWidget {
     required this.onLater,
     required this.onTodo,
     this.onOpenSession,
+    this.projectName,
     this.now,
   });
 
   final McCard card;
+
+  /// The project's name, when the answer that carried the card names it; else its id.
+  final String? projectName;
   final VoidCallback onAnswer;
   final VoidCallback? onOpenSession;
   final void Function(int hours) onLater;
@@ -288,7 +303,7 @@ class McAnswerCard extends StatelessWidget {
           Row(crossAxisAlignment: CrossAxisAlignment.start, children: [
             Expanded(
               child: Wrap(spacing: 6, runSpacing: 4, children: [
-                if (c.project != null) McTag(c.project!, key: const ValueKey('mc-card-project')),
+                if (c.project != null) McTag(projectName ?? c.project!, key: const ValueKey('mc-card-project')),
                 McTag(c.kind, muted: true),
                 if (why.severity != null) McTag('severity ${why.severity}', color: AppColors.caution),
               ]),
@@ -461,10 +476,14 @@ class _McTodoSectionState extends State<McTodoSection> {
       ?t.project,
       if (t.createdAt != null) relativeTime(t.createdAt!.millisecondsSinceEpoch, now: widget.now),
     ].join(' · ');
-    void act(String action) => mcRun(context, () async {
-          await widget.feed.todoAction(t, action);
-          return null;
-        });
+    void act(String action) => mcRun(context, () => widget.feed.todoAction(t, action));
+    // The park message, when the session was NOT told: why, and the one way to try again.
+    final park = t.park;
+    final notTold = t.done
+        ? null
+        : park.notSent
+            ? 'Its session was not told: ${park.reason ?? park.refused ?? 'refused'}'
+            : (park.maybeSent ? 'The message may have reached its session' : null);
     return Card(
       key: ValueKey('mc-todo-${t.id}'),
       margin: const EdgeInsets.only(bottom: 6),
@@ -478,11 +497,20 @@ class _McTodoSectionState extends State<McTodoSection> {
                       ? theme.textTheme.bodyMedium?.copyWith(decoration: TextDecoration.lineThrough, color: AppColors.onSurfaceVariant)
                       : theme.textTheme.bodyMedium),
               if (line.isNotEmpty) Text(line, style: muted),
+              if (notTold != null)
+                Text(notTold, key: ValueKey('mc-todo-park-${t.id}'), style: muted?.copyWith(color: AppColors.caution)),
             ]),
           ),
           if (t.done)
             TextButton(key: ValueKey('mc-todo-reopen-${t.id}'), onPressed: () => act('reopen'), child: const Text('Reopen'))
           else ...[
+            if (park.isRefused)
+              IconButton(
+                key: ValueKey('mc-todo-tell-${t.id}'),
+                tooltip: 'Tell its session again',
+                icon: const Icon(Icons.send, size: 18),
+                onPressed: () => act('park'),
+              ),
             if (t.sessionId != null)
               IconButton(
                 tooltip: 'Open its session',

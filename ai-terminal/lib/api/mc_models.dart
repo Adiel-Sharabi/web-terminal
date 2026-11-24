@@ -277,6 +277,32 @@ class McCard {
   bool get answerable => sessionId != null;
 }
 
+/// What became of a to-do's park message (#506): `sending`, `delivered`, `refused` (the
+/// session's gates said no; [reason] says why in plain words, and only the person sends it
+/// again), `uncertain` (it may have landed; never sent again) or `none` (a prompt on its
+/// screen: never sent; [reason] says so). The server's words.
+class McPark {
+  final String? state;
+  final String? refused;
+  final String? reason;
+  final DateTime? at;
+  const McPark({this.state, this.refused, this.reason, this.at});
+
+  static McPark fromJson(dynamic json) {
+    final m = _map(json);
+    return McPark(state: _str(m['state']), refused: _str(m['refused']), reason: _str(m['reason']), at: _at(m['at']));
+  }
+
+  /// The session was not told, and the person may ask again.
+  bool get isRefused => state == 'refused';
+
+  /// The session was not told, and why ([reason]): a refusal, or a prompt on its screen.
+  bool get notSent => state == 'refused' || state == 'none';
+
+  /// It may have reached the session (no answer came, or none yet).
+  bool get maybeSent => state == 'uncertain' || state == 'sending';
+}
+
 /// One "My to-do" entry: a hands-on thing for the desk, parked by its session.
 class McTodo {
   final String id;
@@ -290,6 +316,8 @@ class McTodo {
   final String? sessionId;
   final DateTime? createdAt;
   final DateTime? doneAt;
+  final String? sessionName;
+  final McPark park;
 
   const McTodo({
     required this.id,
@@ -303,6 +331,8 @@ class McTodo {
     this.sessionId,
     this.createdAt,
     this.doneAt,
+    this.sessionName,
+    this.park = const McPark(),
   });
 
   static McTodo? fromJson(dynamic json) {
@@ -321,6 +351,8 @@ class McTodo {
       sessionId: _str(m['sessionId']),
       createdAt: _at(m['createdAt']),
       doneAt: _at(m['doneAt']),
+      sessionName: _str(m['sessionName']),
+      park: McPark.fromJson(m['park']),
     );
   }
 
@@ -380,13 +412,17 @@ class McProjects {
   }
 }
 
-/// `POST /api/mc/todo`: the recorded to-do and whether the park message reached the
-/// session. [refused] is the server's reason when it did not.
+/// `POST /api/mc/todo` (and a to-do's `park` retry): the recorded to-do and whether the
+/// park message reached the session. [refused] is why it did not, in the server's plain
+/// words when it sends them (`reason`), else its code; [uncertain]: it may have landed;
+/// [already]: the card was moved before, so nothing was sent this time.
 class McTodoResult {
   final McTodo? todo;
   final bool delivered;
   final String? refused;
-  const McTodoResult({this.todo, this.delivered = false, this.refused});
+  final bool uncertain;
+  final bool already;
+  const McTodoResult({this.todo, this.delivered = false, this.refused, this.uncertain = false, this.already = false});
 
   static McTodoResult fromJson(dynamic json) {
     final m = _map(json);
@@ -395,7 +431,9 @@ class McTodoResult {
     return McTodoResult(
       todo: McTodo.fromJson(m['todo']),
       delivered: _bool(parked['delivered']),
-      refused: refused is String ? _str(refused) : (refused == true ? 'refused' : null),
+      refused: _str(parked['reason']) ?? (refused is String ? _str(refused) : (refused == true ? 'refused' : null)),
+      uncertain: _bool(parked['uncertain']),
+      already: _bool(parked['already']),
     );
   }
 }

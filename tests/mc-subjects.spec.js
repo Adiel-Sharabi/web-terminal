@@ -146,7 +146,7 @@ test.describe('#504 what a subject waits on, and the one bucket rule', () => {
     const s = view({ rows: [ext, ask] }).subjects[0];
     expect(s.waitsOn).toBe('you');
     expect(s.buckets).toEqual(['active', 'needsYou']);
-    expect(s.needsYou).toMatchObject({ id: `beta|${ask.id}|wait`, kind: 'wait', server: 'beta', sessionId: ask.id, sessionName: 'asker',
+    expect(s.needsYou).toMatchObject({ id: `beta|${ask.id}|wait:${NOW - 3 * MIN}`, kind: 'wait', server: 'beta', sessionId: ask.id, sessionName: 'asker',
       subjectKey: k, what: 'pick a schema', askedAt: NOW - 3 * MIN });
     expect(s.sessions.find((x) => x.id === ask.id).wait).toEqual({ on: 'you', what: 'pick a schema' });
   });
