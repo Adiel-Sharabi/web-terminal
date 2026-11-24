@@ -90,7 +90,7 @@ test.describe('#522 action waits: My to-do and Done', () => {
     await report(id, { headline: 'h', items: [{ ref: 'ado:5221', title: 'Try the build', state: 'in-progress' }], wait: ACTION });
     await report(other, { headline: 'h', wait: { on: 'you', what: 'pick a schema' } });
     const body = await nowUntil((b) => (b.actions || []).some((c) => c.sessionId === id) && b.answerNow.some((c) => c.sessionId === other), 'the two cards');
-    expect(Object.keys(body).sort()).toEqual(['actions', 'answerNow', 'generatedAt', 'moving', 'projects', 'todo']);
+    expect(Object.keys(body).sort()).toEqual(['actions', 'answerNow', 'generatedAt', 'lines', 'moving', 'projects', 'todo']);
     expect(body.answerNow.some((c) => c.sessionId === id)).toBe(false);
     const card = body.actions.find((c) => c.sessionId === id);
     expect(card).toMatchObject({ kind: 'action', what: ACTION.what, hasQuestion: false, subjectKey: 'ado:5221', done: null,
