@@ -17,6 +17,7 @@ import '../../theme/app_theme.dart';
 import '../../widgets/empty_state.dart';
 import '../../widgets/format_utils.dart';
 import '../../widgets/timed_snack_bar.dart';
+import 'card_decision.dart';
 import 'lines_view.dart';
 import 'question_panel.dart';
 
@@ -282,7 +283,13 @@ class _AnswerNowSection extends StatelessWidget {
 
 /// One Answer-now card: project, ref + title, why it ranks, age, the options, and what
 /// can be done with it.
-class McAnswerCard extends StatelessWidget {
+///
+/// #541 - an ask or a decision is answered where it is. An option chip on the face answers at
+/// once through [onReply] (the home's reply path) after a short Undo; a tap on the card (or its
+/// chevron) expands it in place: the context, every option with its consequence, a one-line
+/// reply. The card sends nothing itself and decides nothing: the options, their order, the
+/// recommended one and the question are the server's.
+class McAnswerCard extends StatefulWidget {
   const McAnswerCard({
     super.key,
     required this.card,
@@ -290,6 +297,7 @@ class McAnswerCard extends StatelessWidget {
     required this.onLater,
     required this.onTodo,
     this.onOpenSession,
+    this.onReply,
     this.projectName,
     this.now,
   });
@@ -302,140 +310,285 @@ class McAnswerCard extends StatelessWidget {
   final VoidCallback? onOpenSession;
   final void Function(int hours) onLater;
   final VoidCallback onTodo;
+
+  /// #541 - sends the person's reply to the card's session; null: the scope's
+  /// ([McQuestionScope.onReply]), and with neither the options only explain.
+  final McReply? onReply;
   final DateTime? now;
+
+  @override
+  State<McAnswerCard> createState() => _McAnswerCardState();
+}
+
+/// Where a reply from the card stands: nothing yet, an option inside its Undo window, on its
+/// way, or sent.
+enum _McReplyPhase { idle, undo, sending, sent }
+
+class _McAnswerCardState extends State<McAnswerCard> {
+  bool _open = false;
+  _McReplyPhase _phase = _McReplyPhase.idle;
+
+  /// The option's label or the person's words, while [_phase] is not idle.
+  String? _choice;
+  final TextEditingController _text = TextEditingController();
+
+  @override
+  void dispose() {
+    _text.dispose();
+    super.dispose();
+  }
+
+  /// The reply path, when this card can use one: an ask, a possible unreported question or a
+  /// decision, of a session the app can name.
+  McReply? get _reply {
+    final c = widget.card;
+    if (c.sessionId == null) return null;
+    if (!(c.isAsk || c.isPossibleAsk || (c.kind == 'decision' && c.decision != null))) return null;
+    return widget.onReply ?? McQuestionScope.maybeOf(context)?.onReply;
+  }
+
+  bool get _busy => _phase != _McReplyPhase.idle;
+
+  /// Context and options to show, or a sentence to answer.
+  bool get _expandable => widget.card.decision != null || widget.card.isPossibleAsk;
+
+  void _toggle() => setState(() => _open = !_open);
+
+  /// An option tapped: its toast carries the Undo, and the reply goes when the toast ends any way
+  /// but Undo (it times out, is swiped away, or gives way to another). With no messenger there is
+  /// no Undo to offer, so it goes at once.
+  void _pickOption(String label) {
+    final send = _reply;
+    if (send == null || _busy) return;
+    final card = widget.card;
+    final toast = showTimedSnackBar(
+      context,
+      'Answering "$label" - Undo stops it',
+      duration: kMcUndoWindow,
+      action: SnackBarAction(label: 'Undo', onPressed: () {}),
+    );
+    if (toast == null) {
+      unawaited(_deliver(send, card, label));
+      return;
+    }
+    setState(() {
+      _phase = _McReplyPhase.undo;
+      _choice = label;
+    });
+    toast.closed.then((reason) {
+      if (reason == SnackBarClosedReason.action) {
+        if (mounted) setState(() => _phase = _McReplyPhase.idle);
+      } else {
+        unawaited(_deliver(send, card, label));
+      }
+    });
+  }
+
+  /// Sends [text]; true when it went out. A refusal was said by the sender and leaves the card as
+  /// it was. The card may have been left meanwhile: the reply still goes (it was asked for).
+  Future<bool> _deliver(McReply send, McCard card, String text) async {
+    if (mounted) {
+      setState(() {
+        _phase = _McReplyPhase.sending;
+        _choice = text;
+      });
+    }
+    var ok = false;
+    try {
+      ok = await send(card, text);
+    } catch (e) {
+      if (mounted) showTimedSnackBar(context, 'Could not send: ${e is ApiException ? e.message : '$e'}');
+    }
+    if (mounted) setState(() => _phase = ok ? _McReplyPhase.sent : _McReplyPhase.idle);
+    return ok;
+  }
+
+  Future<void> _sendTyped() async {
+    final send = _reply;
+    final words = _text.text.trim();
+    if (send == null || words.isEmpty || _busy) return;
+    final ok = await _deliver(send, widget.card, words);
+    if (ok && mounted) _text.clear();
+  }
+
+  String? get _status {
+    final w = _choice;
+    return switch (_phase) {
+      _McReplyPhase.idle => null,
+      _McReplyPhase.undo => 'About to answer "$w" - Undo in the bar below stops it',
+      _McReplyPhase.sending => 'Sending "$w"...',
+      _McReplyPhase.sent => 'Sent "$w". The card goes once the session has it.',
+    };
+  }
 
   @override
   Widget build(BuildContext context) {
     final theme = Theme.of(context);
     final small = theme.textTheme.bodySmall;
     final muted = small?.copyWith(color: AppColors.onSurfaceVariant);
-    final c = card;
-    final age = mcCardAge(c, now: now);
+    final c = widget.card;
+    final age = mcCardAge(c, now: widget.now);
     final why = c.why;
     final blocked = [for (final s in why.blockedSessions) ?s.name];
     final heading = [?c.ref, ?c.title].join('  ');
     final session = [?c.sessionName, ?c.server].join(' · ');
     final decision = c.decision;
     final questions = McQuestionScope.maybeOf(context);
+    final reply = _reply;
+    final decisionQuestion = mcDecisionQuestionToShow(c);
+    final status = _status;
+    // The reply box and the rows only answer when a reply path exists.
+    final onPick = reply == null || decision == null ? null : _pickOption;
     return Card(
       margin: EdgeInsets.zero,
-      child: Padding(
-        padding: const EdgeInsets.fromLTRB(12, 10, 12, 6),
-        child: Column(crossAxisAlignment: CrossAxisAlignment.start, children: [
-          Row(crossAxisAlignment: CrossAxisAlignment.start, children: [
-            Expanded(
-              child: Wrap(spacing: 6, runSpacing: 4, children: [
-                if (c.project != null) McTag(projectName ?? c.project!, key: const ValueKey('mc-card-project')),
-                McTag(c.isPossibleAsk ? 'possible unreported question' : c.kind, muted: true),
-                // #526 - a prompt typed into the session since it asked: it may be settled.
-                if (c.maybeAnswered) McTag('may be answered', muted: true, key: const ValueKey('mc-card-maybe-answered')),
-                if (why.severity != null) McTag('severity ${why.severity}', color: AppColors.caution),
-              ]),
-            ),
-            if (age != null) ...[
-              const SizedBox(width: 8),
-              Text(age, key: const ValueKey('mc-card-age'), style: muted),
-            ],
-          ]),
-          const SizedBox(height: 6),
-          Text(heading.isEmpty ? (c.sessionName ?? 'A session') : heading,
-              key: const ValueKey('mc-card-heading'),
-              style: theme.textTheme.titleSmall?.copyWith(fontWeight: FontWeight.w600)),
-          // #531: a question card shows the questions themselves; its own words ("answer a
-          // question") say nothing about what is asked.
-          if (c.kind == 'question') ...[
-            const SizedBox(height: 4),
-            McCardQuestions(questions: c.questions),
-          ] else if (c.what != null) ...[
-            const SizedBox(height: 4),
-            Text(c.what!,
-                key: const ValueKey('mc-card-what'),
-                maxLines: 3,
-                overflow: TextOverflow.ellipsis,
-                style: c.maybeAnswered ? muted : null),
-          ],
-          if (why.text != null || blocked.isNotEmpty) ...[
-            const SizedBox(height: 4),
-            Text(
-              [
-                ?why.text,
-                if (blocked.isNotEmpty) 'waiting: ${blocked.join(', ')}',
-              ].join(' - '),
-              key: const ValueKey('mc-card-why'),
-              // An ask holds nobody up: its line says what the session does instead, not a warning.
-              style: small?.copyWith(color: c.blocking ? AppColors.caution : AppColors.onSurfaceVariant),
-            ),
-          ],
-          if (session.isNotEmpty) ...[
-            const SizedBox(height: 2),
-            Text(session, style: muted),
-          ],
-          if (decision != null) ...[
-            const SizedBox(height: 6),
-            Text(decision.question, style: small),
-            const SizedBox(height: 4),
-            Wrap(spacing: 6, runSpacing: 4, children: [
-              for (var i = 0; i < decision.options.length; i++)
-                Chip(
-                  key: ValueKey('mc-card-option-$i'),
+      clipBehavior: Clip.antiAlias,
+      child: InkWell(
+        onTap: _expandable ? _toggle : null,
+        child: Padding(
+          padding: const EdgeInsets.fromLTRB(12, 10, 12, 6),
+          child: Column(crossAxisAlignment: CrossAxisAlignment.start, children: [
+            Row(crossAxisAlignment: CrossAxisAlignment.start, children: [
+              Expanded(
+                child: Wrap(spacing: 6, runSpacing: 4, children: [
+                  if (c.project != null) McTag(widget.projectName ?? c.project!, key: const ValueKey('mc-card-project')),
+                  McTag(c.isPossibleAsk ? 'possible unreported question' : c.kind, muted: true),
+                  // #526 - a prompt typed into the session since it asked: it may be settled.
+                  if (c.maybeAnswered) McTag('may be answered', muted: true, key: const ValueKey('mc-card-maybe-answered')),
+                  if (why.severity != null) McTag('severity ${why.severity}', color: AppColors.caution),
+                ]),
+              ),
+              if (age != null) ...[
+                const SizedBox(width: 8),
+                Text(age, key: const ValueKey('mc-card-age'), style: muted),
+              ],
+              if (_expandable)
+                IconButton(
+                  key: const ValueKey('mc-card-expand'),
+                  tooltip: _open ? 'Fold the card' : 'Show its context and options',
                   visualDensity: VisualDensity.compact,
-                  avatar: decision.recommended == i ? const Icon(Icons.star, size: 14, color: AppColors.favorite) : null,
-                  label: Text(decision.options[i].label),
+                  iconSize: 20,
+                  padding: EdgeInsets.zero,
+                  constraints: const BoxConstraints(minWidth: 32, minHeight: 28),
+                  icon: Icon(_open ? Icons.expand_less : Icons.expand_more),
+                  onPressed: _toggle,
                 ),
             ]),
-          ],
-          const SizedBox(height: 2),
-          Wrap(spacing: 2, children: [
-            if (c.answerable)
-              TextButton.icon(
-                key: const ValueKey('mc-card-answer'),
-                onPressed: onAnswer,
-                icon: const Icon(Icons.reply, size: 18),
-                label: const Text('Answer'),
+            const SizedBox(height: 6),
+            Text(heading.isEmpty ? (c.sessionName ?? 'A session') : heading,
+                key: const ValueKey('mc-card-heading'),
+                style: theme.textTheme.titleSmall?.copyWith(fontWeight: FontWeight.w600)),
+            // #531: a question card shows the questions themselves; its own words ("answer a
+            // question") say nothing about what is asked.
+            if (c.kind == 'question') ...[
+              const SizedBox(height: 4),
+              McCardQuestions(questions: c.questions),
+            ] else if (c.what != null) ...[
+              const SizedBox(height: 4),
+              Text(c.what!,
+                  key: const ValueKey('mc-card-what'),
+                  maxLines: _open ? null : 3,
+                  overflow: _open ? TextOverflow.visible : TextOverflow.ellipsis,
+                  style: c.maybeAnswered ? muted : null),
+            ],
+            // #541: the decision's own question only when the line above does not already say it.
+            if (decisionQuestion != null) ...[
+              const SizedBox(height: 4),
+              Text(decisionQuestion, key: const ValueKey('mc-card-decision-question'), style: small),
+            ],
+            if (decision != null) ...[
+              const SizedBox(height: 4),
+              if (_open)
+                McCardDetail(
+                  decision: decision,
+                  controller: _text,
+                  enabled: !_busy,
+                  onPick: onPick,
+                  onSend: reply == null ? null : _sendTyped,
+                )
+              else
+                McCardOptionChips(decision: decision, onPick: onPick, enabled: !_busy),
+            ] else if (_open && reply != null) ...[
+              const SizedBox(height: 4),
+              McCardDetail(decision: null, controller: _text, enabled: !_busy, onPick: null, onSend: _sendTyped),
+            ],
+            if (status != null) ...[
+              const SizedBox(height: 4),
+              Text(status,
+                  key: ValueKey(_phase == _McReplyPhase.sent ? 'mc-card-sent' : 'mc-card-status'),
+                  maxLines: 2,
+                  overflow: TextOverflow.ellipsis,
+                  style: small?.copyWith(color: AppColors.primary)),
+            ],
+            if (why.text != null || blocked.isNotEmpty) ...[
+              const SizedBox(height: 4),
+              Text(
+                [
+                  ?why.text,
+                  if (blocked.isNotEmpty) 'waiting: ${blocked.join(', ')}',
+                ].join(' - '),
+                key: const ValueKey('mc-card-why'),
+                // An ask holds nobody up: its line says what the session does instead, not a warning.
+                style: small?.copyWith(color: c.blocking ? AppColors.caution : AppColors.onSurfaceVariant),
               ),
-            if (onOpenSession != null)
-              TextButton.icon(
-                key: const ValueKey('mc-card-open'),
-                onPressed: onOpenSession,
-                icon: const Icon(Icons.open_in_new, size: 18),
-                label: const Text('Open session'),
+            ],
+            if (session.isNotEmpty) ...[
+              const SizedBox(height: 2),
+              Text(session, style: muted),
+            ],
+            const SizedBox(height: 2),
+            Wrap(spacing: 2, children: [
+              if (c.answerable)
+                TextButton.icon(
+                  key: const ValueKey('mc-card-answer'),
+                  // #541: an ask is answered on the card, not in a dialog over it.
+                  onPressed: c.usesReplyDialog && reply != null ? () => setState(() => _open = true) : widget.onAnswer,
+                  icon: const Icon(Icons.reply, size: 18),
+                  label: const Text('Answer'),
+                ),
+              if (widget.onOpenSession != null)
+                TextButton.icon(
+                  key: const ValueKey('mc-card-open'),
+                  onPressed: widget.onOpenSession,
+                  icon: const Icon(Icons.open_in_new, size: 18),
+                  label: const Text('Open session'),
+                ),
+              // #531 - one tap to ask the Analyst about this card; the session never sees it.
+              if (questions != null)
+                TextButton.icon(
+                  key: const ValueKey('mc-card-ask'),
+                  onPressed: () => questions.open(context, c, askFirst: true),
+                  icon: const Icon(Icons.help_outline, size: 18),
+                  label: const Text('Ask about this'),
+                ),
+              // #510 - the card's context at three levels, follow-ups, suggested options.
+              if (questions != null)
+                TextButton(
+                  key: const ValueKey('mc-card-context'),
+                  onPressed: () => questions.open(context, c),
+                  child: const Text('More context'),
+                ),
+              PopupMenuButton<int>(
+                key: const ValueKey('mc-card-later'),
+                tooltip: 'Later: hide it for a while; it comes back if it still waits',
+                onSelected: widget.onLater,
+                itemBuilder: (_) => [
+                  for (final h in kMcLaterHours)
+                    PopupMenuItem(
+                        key: ValueKey('mc-later-$h'), value: h, child: Text(h == 1 ? 'In an hour' : 'In $h hours')),
+                ],
+                child: const Padding(
+                  padding: EdgeInsets.symmetric(horizontal: 12, vertical: 10),
+                  child: Text('Later', style: TextStyle(color: AppColors.primary)),
+                ),
               ),
-            // #531 - one tap to ask the Analyst about this card; the session never sees it.
-            if (questions != null)
-              TextButton.icon(
-                key: const ValueKey('mc-card-ask'),
-                onPressed: () => questions.open(context, c, askFirst: true),
-                icon: const Icon(Icons.help_outline, size: 18),
-                label: const Text('Ask about this'),
-              ),
-            // #510 - the card's context at three levels, follow-ups, suggested options.
-            if (questions != null)
               TextButton(
-                key: const ValueKey('mc-card-context'),
-                onPressed: () => questions.open(context, c),
-                child: const Text('More context'),
+                key: const ValueKey('mc-card-todo'),
+                onPressed: widget.onTodo,
+                child: const Text('To my to-do'),
               ),
-            PopupMenuButton<int>(
-              key: const ValueKey('mc-card-later'),
-              tooltip: 'Later: hide it for a while; it comes back if it still waits',
-              onSelected: onLater,
-              itemBuilder: (_) => [
-                for (final h in kMcLaterHours)
-                  PopupMenuItem(
-                      key: ValueKey('mc-later-$h'), value: h, child: Text(h == 1 ? 'In an hour' : 'In $h hours')),
-              ],
-              child: const Padding(
-                padding: EdgeInsets.symmetric(horizontal: 12, vertical: 10),
-                child: Text('Later', style: TextStyle(color: AppColors.primary)),
-              ),
-            ),
-            TextButton(
-              key: const ValueKey('mc-card-todo'),
-              onPressed: onTodo,
-              child: const Text('To my to-do'),
-            ),
+            ]),
           ]),
-        ]),
+        ),
       ),
     );
   }

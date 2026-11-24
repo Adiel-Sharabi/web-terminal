@@ -780,6 +780,10 @@ companion's daily foreground time from a phone over adb in `logs/phone-usage.jso
   question it never listed shows as a **possible unreported question** (a fixed rule on the reply's
   end, no model). The supervisor's own dispatcher (#532) is no session of the lists and counts, but
   what it needs from you is a card like any other.
+  **Answered on the card (#541, companion):** an ask or decision card prints its question once; a tap
+  on an option chip answers through that same reply path after a 5-second Undo, and a tap on the card
+  (or its chevron) expands it in place: the context, every option with its consequence (the
+  recommended one starred), and a one-line reply of your own words.
   **To my to-do** (`POST /api/mc/todo`) parks one for the desk and tells its session once, through
   the gated prompt, to carry on and report that wait as external; a refusal (unsent text in its
   prompt box, a turn running) is shown and sent again only when you ask. A to-do can be ticked done,

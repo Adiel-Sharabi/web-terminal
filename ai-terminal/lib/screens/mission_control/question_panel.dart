@@ -20,9 +20,15 @@ import '../../theme/app_theme.dart';
 /// What a question card needs to open its panel; placed by Mission Control's home above
 /// every screen that shows an [McCard] (Now, a subject). Absent: no panel is offered.
 class McQuestionScope extends InheritedWidget {
-  const McQuestionScope({super.key, required this.analyst, required this.onSend, required this.onAnswer, required super.child});
+  const McQuestionScope(
+      {super.key, required this.analyst, required this.onSend, required this.onAnswer, this.onReply, required super.child});
 
   final McAnalyst analyst;
+
+  /// #541 - answers an ask or decision card from the card itself (an option's text, or the
+  /// person's words), through the same reply path as [onSend]; true when it went out. Null: the
+  /// cards only explain.
+  final Future<bool> Function(McCard card, String text)? onReply;
 
   /// Sends the person's final pick as the card's answer ([shown]: the ask the panel showed, which
   /// must still be the one asked); true when it went out.
@@ -56,7 +62,7 @@ class McQuestionScope extends InheritedWidget {
   }
 
   @override
-  bool updateShouldNotify(McQuestionScope old) => old.analyst != analyst || old.onSend != onSend || old.onAnswer != onAnswer;
+  bool updateShouldNotify(McQuestionScope old) => old.analyst != analyst || old.onSend != onSend || old.onAnswer != onAnswer || old.onReply != onReply;
 }
 
 class McQuestionPanel extends StatefulWidget {
