@@ -841,6 +841,7 @@ test.describe('#523 a session reports its line of work', () => {
     const r = B.validateReport({ wait: { on: 'self', what: 'ci' }, line: 'Bug hunter' }, e);
     expect(r.report).toBeUndefined();
     expect(r.error).toContain('"line" goes with your items');
+    expect(B.validateReport({ wait: { on: 'self', what: 'ci' }, line: null }, e).report).toEqual({ partial: true, wait: { on: 'self', what: 'ci' } });
   });
 
   test('THE name rule: a new line\'s name is at most 80; the label kept beside a line id may be a tracker title', () => {

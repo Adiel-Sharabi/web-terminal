@@ -304,6 +304,10 @@ test.describe('#523 Move to line: the target', () => {
     expect(st.lineOverrides()['ado:301'].line).toEqual({ id: 'parent:ado:925', name: title });
     // A NEW line (no id) is still held to the 80-character name rule.
     expect(lineTarget({ name: 'x'.repeat(81) })).toBeNull();
+    // A title's tab or line break is a space in the label; a label it cannot keep is the id.
+    expect(lineTarget({ id: 'parent:ado:925', name: `Two${String.fromCodePoint(9)}parts${String.fromCodePoint(13, 10)}here` })).toEqual({ id: 'parent:ado:925', name: 'Two parts here' });
+    expect(lineTarget({ id: 'parent:ado:925', name: `bell${String.fromCodePoint(7)}` })).toEqual({ id: 'parent:ado:925', name: 'parent:ado:925' });
+    expect(lineTarget({ name: `a${String.fromCodePoint(9)}b` })).toBeNull(); // a NEW name is one clean line
   });
 
   test('a line name in any script is its own line: two Hebrew names are two lines, not one', () => {
@@ -312,6 +316,8 @@ test.describe('#523 Move to line: the target', () => {
     const b = L.resolveTarget({ name: 'שחרור' }, { projects: p, project: 'video' });
     expect(a.id).not.toBe(b.id);
     expect(a).toMatchObject({ id: 'video/~באגים', name: 'באגים', kind: 'named' });
+    // a combining mark is part of the name: two names differing only in one are two lines
+    expect(L.slug(`ab${String.fromCodePoint(0x5b4)}`)).not.toBe(L.slug(`ab${String.fromCodePoint(0x5b7)}`));
     // names differing past the old 40-character cut stay apart too
     expect(L.slug(`${'a'.repeat(40)}one`)).not.toBe(L.slug(`${'a'.repeat(40)}two`));
   });
