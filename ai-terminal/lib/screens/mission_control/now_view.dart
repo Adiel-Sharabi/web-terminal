@@ -341,7 +341,12 @@ class McAnswerCard extends StatelessWidget {
           Text(heading.isEmpty ? (c.sessionName ?? 'A session') : heading,
               key: const ValueKey('mc-card-heading'),
               style: theme.textTheme.titleSmall?.copyWith(fontWeight: FontWeight.w600)),
-          if (c.what != null) ...[
+          // #531: a question card shows the questions themselves; its own words ("answer a
+          // question") say nothing about what is asked.
+          if (c.kind == 'question') ...[
+            const SizedBox(height: 4),
+            McCardQuestions(questions: c.questions),
+          ] else if (c.what != null) ...[
             const SizedBox(height: 4),
             Text(c.what!,
                 key: const ValueKey('mc-card-what'),
@@ -395,6 +400,14 @@ class McAnswerCard extends StatelessWidget {
                 icon: const Icon(Icons.open_in_new, size: 18),
                 label: const Text('Open session'),
               ),
+            // #531 - one tap to ask the Analyst about this card; the session never sees it.
+            if (questions != null)
+              TextButton.icon(
+                key: const ValueKey('mc-card-ask'),
+                onPressed: () => questions.open(context, c, askFirst: true),
+                icon: const Icon(Icons.help_outline, size: 18),
+                label: const Text('Ask about this'),
+              ),
             // #510 - the card's context at three levels, follow-ups, suggested options.
             if (questions != null)
               TextButton(
@@ -425,6 +438,45 @@ class McAnswerCard extends StatelessWidget {
         ]),
       ),
     );
+  }
+}
+
+/// How many of a question card's questions its face shows; the rest are counted ("+2 more").
+const int kMcCardQuestionsShown = 2;
+
+/// #531 - what a question card asks: each question's header and text (the server's one line
+/// each), the first [kMcCardQuestionsShown], then "+N more". A card whose question could not
+/// be read says so instead.
+class McCardQuestions extends StatelessWidget {
+  const McCardQuestions({super.key, required this.questions});
+  final List<McCardQuestion> questions;
+
+  @override
+  Widget build(BuildContext context) {
+    final theme = Theme.of(context);
+    final muted = theme.textTheme.bodySmall?.copyWith(color: AppColors.onSurfaceVariant);
+    if (questions.isEmpty) {
+      return Text('A question is on its screen; its text could not be read here.',
+          key: const ValueKey('mc-card-q-unread'), style: muted);
+    }
+    final shown = questions.take(kMcCardQuestionsShown).toList();
+    return Column(crossAxisAlignment: CrossAxisAlignment.start, children: [
+      for (var i = 0; i < shown.length; i++)
+        Padding(
+          key: ValueKey('mc-card-q-$i'),
+          padding: EdgeInsets.only(bottom: i == shown.length - 1 ? 0 : 6),
+          child: Column(crossAxisAlignment: CrossAxisAlignment.start, children: [
+            if (shown[i].header != null)
+              Text(shown[i].header!, style: theme.textTheme.labelMedium?.copyWith(color: AppColors.primary, fontWeight: FontWeight.w600)),
+            Text(shown[i].text, maxLines: 3, overflow: TextOverflow.ellipsis),
+          ]),
+        ),
+      if (questions.length > shown.length)
+        Padding(
+          padding: const EdgeInsets.only(top: 4),
+          child: Text('+${questions.length - shown.length} more', key: const ValueKey('mc-card-q-more'), style: muted),
+        ),
+    ]);
   }
 }
 
