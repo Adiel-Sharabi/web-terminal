@@ -11,16 +11,23 @@
 // session stack and the inbox is pushed as a route, both over Mission Control, so Back
 // returns here.
 
+import 'dart:async';
+
 import 'package:flutter/foundation.dart';
 import 'package:flutter/material.dart';
 
 import '../../api/api_client.dart';
+import '../../api/mc_ask_models.dart';
 import '../../api/mc_models.dart';
 import '../../services/mc_analyst.dart';
 import '../../api/models.dart';
 import '../../services/app_config.dart';
 import '../../services/mc_feed.dart';
+import '../../services/mc_pick_sender.dart';
+import '../../services/needs_you_actions.dart';
+import '../../services/session_input.dart';
 import '../../services/session_repository.dart';
+import '../../widgets/timed_snack_bar.dart';
 import '../../util/open_inbox.dart';
 import '../adaptive_home.dart';
 import '../session_screen.dart' show openSessionOnStack;
@@ -30,6 +37,7 @@ import 'ask_view.dart';
 import 'machines_view.dart';
 import 'now_view.dart';
 import 'project_view.dart';
+import 'question_panel.dart';
 import 'start_work_sheet.dart';
 
 /// Every place Mission Control can show. Desktop shows [desktopTabs], a phone [phoneTabs].
@@ -103,8 +111,39 @@ class _MissionControlHomeState extends State<MissionControlHome> {
   late final McFeed _feed = widget.feed ??
       McFeed(servers: _servers, client: _client, isForeground: () => _repo.isForeground);
 
-  late final McAskThread _ask = McAskThread(
-      widget.analyst ?? McAnalyst(servers: _servers, client: _client, preferred: () => _feed.servedBy));
+  late final McAnalyst _analyst =
+      widget.analyst ?? McAnalyst(servers: _servers, client: _client, preferred: () => _feed.servedBy);
+
+  late final McAskThread _ask = McAskThread(_analyst);
+
+  // #510 - a question card's final pick goes out through the existing answer paths (the
+  // writers the board and the inbox use); the follow-ups and suggestions never come here.
+  late final NeedsYouActions _needs =
+      NeedsYouActions(repository: _repo, client: _client, input: runWithSessionInput, say: _say);
+  late final McPickSender _picks = McPickSender(actions: _needs, sessions: () => _repo.current, currentAsk: _currentAsk);
+  bool _needsMade = false;
+
+  /// #179 for a pick sent as a reply: a CR the agent swallowed is said, as on the board.
+  StreamSubscription<List<Session>>? _unconfirmed;
+
+  /// The card's ask as the server reads it now; null once the card no longer waits.
+  Future<McQuestionAsk?> _currentAsk(McCard card) async {
+    try {
+      return (await _analyst.questionContext(card.id, 'ask')).ask;
+    } catch (_) {
+      return null;
+    }
+  }
+
+  void _say(String text) {
+    if (mounted) showTimedSnackBar(context, text);
+  }
+
+  Future<bool> _sendPick(McCard card, String text, McQuestionAsk? shown) {
+    _needsMade = true;
+    _unconfirmed ??= _repo.sessions.listen(_needs.checkUnconfirmedReplies);
+    return _picks.send(card, text, shown: shown);
+  }
 
   /// Desktop: whether the Ask panel is open beside the tab.
   bool _askPanel = false;
@@ -132,6 +171,8 @@ class _MissionControlHomeState extends State<MissionControlHome> {
     _feed.active = false;
     if (widget.feed == null) _feed.dispose();
     _ask.dispose();
+    _unconfirmed?.cancel();
+    if (_needsMade) _needs.dispose();
     super.dispose();
   }
 
@@ -249,6 +290,11 @@ class _MissionControlHomeState extends State<MissionControlHome> {
 
   @override
   Widget build(BuildContext context) {
+    // #510 - every question card below (Now, a subject) opens its panel through this.
+    return McQuestionScope(analyst: _analyst, onSend: _sendPick, onAnswer: _answer, child: _layout());
+  }
+
+  Widget _layout() {
     return LayoutBuilder(builder: (context, box) {
       final wide = box.maxWidth >= AdaptiveHome.splitBreakpoint;
       final tabs = wide ? McTab.desktopTabs : McTab.phoneTabs;

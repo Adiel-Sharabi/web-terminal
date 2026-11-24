@@ -17,6 +17,7 @@ import '../../theme/app_theme.dart';
 import '../../widgets/empty_state.dart';
 import '../../widgets/format_utils.dart';
 import '../../widgets/timed_snack_bar.dart';
+import 'question_panel.dart';
 
 /// The hours a card can be put off for (`POST /api/mc/later`, 1-24).
 const List<int> kMcLaterHours = [1, 2, 4, 8, 24];
@@ -295,6 +296,7 @@ class McAnswerCard extends StatelessWidget {
     final heading = [?c.ref, ?c.title].join('  ');
     final session = [?c.sessionName, ?c.server].join(' · ');
     final decision = c.decision;
+    final questions = McQuestionScope.maybeOf(context);
     return Card(
       margin: EdgeInsets.zero,
       child: Padding(
@@ -366,20 +368,13 @@ class McAnswerCard extends StatelessWidget {
                 icon: const Icon(Icons.open_in_new, size: 18),
                 label: const Text('Open session'),
               ),
-            TextButton(
-              key: const ValueKey('mc-card-context'),
-              onPressed: () => showDialog<void>(
-                context: context,
-                builder: (ctx) => AlertDialog(
-                  title: const Text('More context'),
-                  content: const Text('Context on demand (just the ask, the context, or everything) '
-                      'comes with #510 (questions with context on demand). Until then, Answer opens the '
-                      'question with what the inbox already shows.'),
-                  actions: [TextButton(onPressed: () => Navigator.of(ctx).pop(), child: const Text('OK'))],
-                ),
+            // #510 - the card's context at three levels, follow-ups, suggested options.
+            if (questions != null)
+              TextButton(
+                key: const ValueKey('mc-card-context'),
+                onPressed: () => questions.open(context, c),
+                child: const Text('More context'),
               ),
-              child: const Text('More context'),
-            ),
             PopupMenuButton<int>(
               key: const ValueKey('mc-card-later'),
               tooltip: 'Later: hide it for a while; it comes back if it still waits',

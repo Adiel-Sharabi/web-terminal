@@ -132,5 +132,124 @@ class McAnswer {
       };
 }
 
+// --- #510 questions with context on demand --------------------------------------------------
+
+/// One option of a question card, numbered across its questions ([index] is what a follow-up
+/// names).
+class McAskOption {
+  final int index;
+
+  /// Which of the card's questions it belongs to (an AskUserQuestion can carry several).
+  final int question;
+  final String label;
+
+  /// What it does: a decision's consequence, an AskUserQuestion option's description.
+  final String? detail;
+  final bool recommended;
+
+  const McAskOption({required this.index, this.question = 0, required this.label, this.detail, this.recommended = false});
+
+  static McAskOption? fromJson(dynamic j) {
+    if (j is! Map || j['index'] is! num || j['label'] is! String) return null;
+    return McAskOption(
+      index: (j['index'] as num).toInt(),
+      question: j['question'] is num ? (j['question'] as num).toInt() : 0,
+      label: j['label'] as String,
+      detail: j['detail'] is String ? j['detail'] as String : null,
+      recommended: j['recommended'] == true,
+    );
+  }
+}
+
+/// What a card puts to the person, as the server read it.
+class McQuestionAsk {
+  /// `question`, `permission`, `decision` or `wait` (the card's kind).
+  final String kind;
+
+  /// The question text of each question, in order.
+  final List<String> questions;
+  final List<McAskOption> options;
+  final int? recommended;
+
+  /// The agent's own words on why it asks (a decision's context).
+  final String? context;
+
+  /// Whether a suggested option can be sent as the answer: a decision or a wait (a reply), an
+  /// AskUserQuestion with one compact question (its `Other` row). The server decides.
+  final bool canSuggest;
+
+  const McQuestionAsk({this.kind = 'wait', this.questions = const [], this.options = const [], this.recommended, this.context, this.canSuggest = false});
+
+  factory McQuestionAsk.fromJson(Map<dynamic, dynamic> m) => McQuestionAsk(
+        kind: m['kind'] is String ? m['kind'] as String : 'wait',
+        questions: [
+          for (final q in (m['questions'] is List ? m['questions'] as List : const []))
+            if (q is Map && q['text'] is String) q['text'] as String,
+        ],
+        options: [for (final o in (m['options'] is List ? m['options'] as List : const [])) ?McAskOption.fromJson(o)],
+        recommended: m['recommended'] is num ? (m['recommended'] as num).toInt() : null,
+        context: m['context'] is String ? m['context'] as String : null,
+        canSuggest: m['canSuggest'] == true,
+      );
+}
+
+/// One section of a card's context: a title and plain text.
+class McContextSection {
+  final String title;
+  final String body;
+  const McContextSection(this.title, this.body);
+}
+
+/// A question card at one level (`GET /api/mc/questions/:cardId/context`).
+class McQuestionContext {
+  /// `ask`, `context` or `everything`.
+  final String level;
+  final String text;
+  final List<McContextSection> sections;
+  final List<McSource> sources;
+  final McQuestionAsk ask;
+
+  const McQuestionContext({required this.level, this.text = '', this.sections = const [], this.sources = const [], this.ask = const McQuestionAsk()});
+
+  factory McQuestionContext.fromJson(Map<String, dynamic> m) => McQuestionContext(
+        level: m['level'] is String ? m['level'] as String : 'ask',
+        text: m['text'] is String ? m['text'] as String : '',
+        sections: [
+          for (final s in (m['sections'] is List ? m['sections'] as List : const []))
+            if (s is Map && s['title'] is String && s['body'] is String) McContextSection(s['title'] as String, s['body'] as String),
+        ],
+        sources: [for (final s in (m['sources'] is List ? m['sources'] as List : const [])) ?McSource.fromJson(s)],
+        ask: McQuestionAsk.fromJson(m['ask'] is Map ? m['ask'] as Map : const {}),
+      );
+}
+
+/// One answer the Analyst suggests: [label] is what would be sent.
+class McSuggestion {
+  final String label;
+  final String? consequence;
+  const McSuggestion(this.label, [this.consequence]);
+}
+
+/// `POST /api/mc/questions/:cardId/suggest`.
+class McSuggestions {
+  final List<McSuggestion> options;
+  final List<McSource> sources;
+
+  /// Whether one can be sent as the answer (the server's `canSend`).
+  final bool canSend;
+
+  const McSuggestions({this.options = const [], this.sources = const [], this.canSend = false});
+
+  factory McSuggestions.fromJson(Map<String, dynamic> m) => McSuggestions(
+        options: [
+          for (final o in (m['options'] is List ? m['options'] as List : const []))
+            if (o is Map && o['label'] is String && (o['label'] as String).trim().isNotEmpty)
+              McSuggestion(o['label'] as String, o['consequence'] is String ? o['consequence'] as String : null),
+        ],
+        sources: [for (final s in (m['sources'] is List ? m['sources'] as List : const [])) ?McSource.fromJson(s)],
+        canSend: m['canSend'] == true,
+      );
+}
+
 DateTime? _ms(Object? v) => v is num ? DateTime.fromMillisecondsSinceEpoch(v.toInt()) : null;
 int _int(Object? v) => v is num ? v.toInt() : 0;

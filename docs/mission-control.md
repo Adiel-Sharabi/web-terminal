@@ -7,11 +7,12 @@ Unknown/missing data is `null`, never guessed. Sections below a milestone that h
 are the plan, not a description of the server.
 
 Landed: Who answers, Work-item meta (#502), Projects and areas (#503), Stage (#505), Subjects
-(#504), Answer now / My to-do (#506), Ask (#511), Start work (#512). Advertised in `/api/version`
+(#504), Answer now / My to-do (#506), Ask (#511), Start work (#512), Questions context (#510). Advertised in `/api/version`
 `capabilities`: `work-item-meta`, `mission-control` (#502/#503), `mc-subjects` (#504/#505: the
 subjects routes, `stage` on report items, `counts.stages`), `mc-needs` (#506: `/api/mc/now`,
 `/api/mc/todo[/:id]`, `/api/mc/later`) and `mc-start` (#512: `POST /api/mc/start`,
-`GET /api/mc/machines`); Ask has no capability of its own (a server without it answers a bare 404).
+`GET /api/mc/machines`); Ask and the question routes have no
+capability of their own (a server without them answers a bare 404).
 
 ## Who answers (one owner for cluster-wide state)
 Mission Control is computed on ONE server per cluster: the same authority the supervisor uses
@@ -265,15 +266,49 @@ none may be sent: `none`) ->
 then, back only if still pending (404 when the card no longer waits). Not the supervisor's later.
 Capability `mc-needs`.
 
-## Questions context (#510) and Ask (#511) - `lib/mc-analyst.js`
-`GET /api/mc/questions/:cardId/context?level=ask|context|everything` -> `{level, text, sections: [{title, body}], sources: [Source], generatedAt}` (built on demand, never on a poll)
+## Questions context (#510) and Ask (#511) - `lib/mc-analyst.js`, `lib/mc-questions.js`
+`GET /api/mc/questions/:cardId/context?level=ask|context|everything` -> `{level, text, sections: [{title, body}], sources: [Source], ask: Ask, cardId, generatedAt}` (built on demand, never on a poll)
 `POST /api/mc/ask {question, scope: {kind: 'all'|'project'|'subject'|'session', id}}` -> `{answer, sources: [Source], dataAge: {oldestAt, newestAt}, cut, scope, model, generatedAt}` (landed, #511)
-`POST /api/mc/questions/:cardId/followup {option, question}` -> same shape as ask
-`POST /api/mc/questions/:cardId/suggest` -> `{options: [{label, consequence}], sources, generatedAt}`
+`POST /api/mc/questions/:cardId/followup {option, question}` -> the ask's shape + `option`
+`POST /api/mc/questions/:cardId/suggest` -> `{options: [{label, consequence}], sources, canSend, model, generatedAt}`
 ```
 Source = { id, kind: 'session'|'report'|'recap'|'pr'|'workitem', label, server, sessionId, at, url }
 ```
 Read-only: tools-off model call (the `lib/inbox-digest.js` CLI path), never types into a session.
+
+**Questions as built (#510).** `cardId` = an Answer-now card's id (`Card.id`, #506), URL-encoded;
+`404 {error}` once that card no longer waits (the same `pendingCards` the Now screen reads), `400`
+for an id over 400 characters, a `level` not in the list (absent = `ask`) or a bad follow-up;
+`409`/`503` from `mcRefusal` like every `/api/mc/*` route.
+```
+Ask = { kind: 'question'|'permission'|'decision'|'wait',
+  questions: [{text, header, multiSelect, hasPreview}],
+  options: [{index, question, label, detail, recommended}],   // FLAT across the questions; index is what a follow-up names
+  recommended: index|null,      // a decision's `recommended`; an AskUserQuestion option labelled "(Recommended)"
+  context: string|null,         // a decision's context
+  canSuggest: bool }            // a decision or a wait (answered by a reply); an AskUserQuestion with ONE compact
+                                // question (its `Other` row; side-by-side has none); never a permission
+```
+- The ask: a decision card's own decision; a question card's live AskUserQuestion (the
+  `pending-question` route: in-process for this server's session, a peer's over its route with the
+  stored token; unreadable -> the card's words); a wait or a permission -> the card's words, no options.
+- Levels, each a list of `{title, body}` (plain text) and the sources they read: `ask` = The ask,
+  Recommendation. `context` adds The work item (the tracker CACHE, `peek`, never a read), What the
+  session did (its reported brief), Why it asks (a decision's context), What each answer does, and
+  Summary (inbox digest) - the session's digest ONLY as cached (`?peek=1`: never starts a run).
+  `everything` adds Last turns (the recap: up to 3 prompts, the latest reply, the tools since) and
+  Links (the work item, its PRs, the session). No model runs for any level.
+- `followup {option: index|null, question: 1-2000 chars}`: the Analyst's bundle for the asking
+  session alone (its brief, its recap, its items' cached details) plus one block holding the card's
+  question and options - agent text, so inside the data fence; the person's words sit after the
+  fence and name the option by NUMBER only. Answer shape and errors as Ask (`502`/`503`).
+- `suggest`: the same bundle; the model proposes 2-4 OTHER answers `{label (one line, <= 80),
+  consequence (<= 240)}`; control characters are removed, a label the card already offers (no case)
+  or given twice is dropped, none left = `502 bad-output`. `canSend` = the ask's `canSuggest`.
+- NOTHING here reaches the waiting session. The companion sends only the person's final pick, after
+  a confirm, through the existing answer paths: a decision -> the reply `Decision: <label>` (while
+  the session still puts THAT decision), a wait -> the reply, a question -> `buildAnswerFrames` with
+  the text as `otherText` (one compact question only) through the pre-write re-check.
 
 **Ask as built (#511).** Chosen over a read-only background session: `claude -p` with every tool,
 setting and MCP server off, prompt on stdin, the run slots, timeout and child handling of

@@ -1,5 +1,5 @@
 'use strict';
-// A stand-in for `claude -p` for the Mission Control Ask specs (#511). The suite never calls
+// A stand-in for `claude -p` for the Mission Control Ask specs (#511) and #510's follow-ups and suggestions. The suite never calls
 // the real model.
 //   1. reads all of stdin (the prompt);
 //   2. records it to FAKE_ANALYST_DIR/run-<pid>-<ms>.json: stdin, argv, cwd, env NAMES;
@@ -31,6 +31,13 @@ process.stdin.on('end', () => {
   const answer = () => {
     if (mode.mode === 'exit1') process.exit(1);
     if (mode.mode === 'bad') return process.stdout.write(JSON.stringify({ is_error: false, result: 'Here is what I found, in prose.' }));
+    // #510: a suggest prompt asks for options; one repeats an option a spec offers ("Ship it as is")
+    // and one repeats another, so the parser's dedupe is exercised.
+    if (stdin.includes('{"options": [{"label": string')) {
+      const opts = [{ label: 'Fake option A', consequence: 'the agent does A' }, { label: 'ship it as is', consequence: 'dup' },
+        { label: 'Fake option A', consequence: 'dup' }, { label: 'Fake option B' }];
+      return process.stdout.write(JSON.stringify({ is_error: false, result: JSON.stringify({ options: opts, sources: [...ids, 'S999'] }) }));
+    }
     const body = { answer: `Fake answer from ${ids.length} blocks [${ids[0] || 'S0'}].`, sources: [...ids, 'S999'] };
     return process.stdout.write(JSON.stringify({ is_error: false, result: JSON.stringify(body) }));
   };
