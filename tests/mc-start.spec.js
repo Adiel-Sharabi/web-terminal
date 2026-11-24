@@ -233,8 +233,8 @@ test.describe('#512 a session bound at birth', () => {
       st.setStageHistory('acme/widgets#42', [{ stage: 'fixing', at: NOW, source: 'report', detail: '' }], { changed: true });
       st.flush();
       const disk = JSON.parse(fs.readFileSync(file, 'utf8'));
-      // Its own key, beside #505's stages, #506's to-dos and "later"s and #522's Done records.
-      expect(Object.keys(disk)).toEqual(['v', 'stages', 'todos', 'later', 'actionsDone', 'bindings']);
+      // Its own key, beside #505's stages, #506's to-dos and "later"s and #522's Done records, and #523's line overrides.
+      expect(Object.keys(disk)).toEqual(['v', 'stages', 'todos', 'later', 'actionsDone', 'bindings', 'lineOverrides']);
       const again = createMcState({ file, now: () => NOW });
       expect(again.bindings()).toEqual({ s1: { ...binding(), seenAt: binding().at } });
       expect(again.stageHistory('acme/widgets#42')).toHaveLength(1);
@@ -246,6 +246,47 @@ test.describe('#512 a session bound at birth', () => {
       live.flush();
       t = NOW + 9 * DAY;
       expect(Object.keys(createMcState({ file, now: () => t }).bindings())).toEqual(['s1']);
+    } finally {
+      fs.rmSync(dir, { recursive: true, force: true });
+    }
+  });
+});
+
+test.describe('#523 Start work asks for the line', () => {
+  const LINES = [{ id: 'parent:ado:9', name: 'Gadget rollout', project: 'widgets', kind: 'parent' }];
+  test('a line id the view knows, or a new line by name; a bad one is refused in words', () => {
+    const p = (extra) => S.parseStart({ project: 'widgets', hunt: true, server: 'a', ...extra }, { projects: PROJECTS, parseRef, lines: LINES });
+    expect(p({}).value.line).toBeNull();
+    expect(p({ line: 'parent:ado:9' }).value.line).toEqual({ id: 'parent:ado:9', name: 'Gadget rollout' });
+    expect(p({ lineName: 'Docket fixes' }).value.line).toEqual({ name: 'Docket fixes' });
+    expect(p({ line: 'nope' }).error).toContain('line');
+    expect(p({ line: 'parent:ado:9', lineName: 'x' }).error).toContain('line');
+  });
+
+  test('the binding keeps the line; a stored binding without one reads as before', () => {
+    expect(B.bindingOf(binding({ line: { name: 'Docket fixes' } })).line).toEqual({ name: 'Docket fixes' });
+    expect(B.bindingOf(binding({ line: { id: 'parent:ado:9', name: 'Gadget rollout' } })).line).toEqual({ id: 'parent:ado:9', name: 'Gadget rollout' });
+    expect(B.bindingOf(binding())).not.toHaveProperty('line');
+    expect(B.bindingOf(binding({ line: { name: `a${String.fromCodePoint(7)}` } }))).not.toHaveProperty('line');
+    const lead = { id: 'lead-1', items: [], replaces: [], parentId: null, createdAt: NOW };
+    const kid = { id: 'kid-1', items: [], replaces: [], parentId: 'lead-1', createdAt: NOW };
+    const out = B.applyBindings([lead, kid], { 'lead-1': B.bindingOf(binding({ line: { name: 'Docket fixes' } })) });
+    expect(out.map((x) => x.boundLine)).toEqual([{ name: 'Docket fixes' }, { name: 'Docket fixes' }]);
+  });
+
+  test('mc-state keeps Move-to-line overrides under their own key, across a restart; null clears one', () => {
+    const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'wt-mc-lines-'));
+    const file = path.join(dir, 'mc-state.json');
+    try {
+      const st = createMcState({ file, now: () => NOW, saveDelayMs: 1 });
+      expect(st.setLineOverride('ado:1', { id: 'video/health', name: 'Health' })).toBe(true);
+      expect(st.setLineOverride('ado:2', { name: 'UI' })).toBe(true);
+      expect(st.setLineOverride('ado:3', { name: '' })).toBe(false);
+      st.flush();
+      const again = createMcState({ file, now: () => NOW });
+      expect(again.lineOverrides()).toEqual({ 'ado:1': { line: { id: 'video/health', name: 'Health' }, at: NOW }, 'ado:2': { line: { name: 'UI' }, at: NOW } });
+      expect(again.setLineOverride('ado:1', null)).toBe(true);
+      expect(Object.keys(again.lineOverrides())).toEqual(['ado:2']);
     } finally {
       fs.rmSync(dir, { recursive: true, force: true });
     }

@@ -17,6 +17,7 @@ import '../../theme/app_theme.dart';
 import '../../widgets/empty_state.dart';
 import '../../widgets/format_utils.dart';
 import '../../widgets/timed_snack_bar.dart';
+import 'lines_view.dart';
 import 'question_panel.dart';
 
 /// The hours a card can be put off for (`POST /api/mc/later`, 1-24).
@@ -34,6 +35,7 @@ class McNowView extends StatelessWidget {
     required this.onAnswer,
     required this.onOpenSession,
     this.onOpenProject,
+    this.onOpenLine,
     this.now,
   });
 
@@ -43,6 +45,9 @@ class McNowView extends StatelessWidget {
 
   /// Opens a project's page (#508); null: the project cards are not tappable.
   final void Function(McProject project)? onOpenProject;
+
+  /// Opens a line's page (#523); null: the line cards are not tappable.
+  final void Function(McLine line)? onOpenLine;
 
   /// Injectable for tests: the clock ages are read against.
   final DateTime? now;
@@ -81,7 +86,11 @@ class McNowView extends StatelessWidget {
             final right = <Widget>[
               McMovingLine(moving: data.moving),
               const SizedBox(height: 16),
-              McProjectsSection(projects: data.projects, onOpen: onOpenProject),
+              // #523: lines replace the projects; an older server sends none.
+              if (data.lines != null)
+                McLinesSection(lines: data.lines!, onOpen: onOpenLine)
+              else
+                McProjectsSection(projects: data.projects, onOpen: onOpenProject),
             ];
             return ListView(
               key: const ValueKey('mc-now-list'),

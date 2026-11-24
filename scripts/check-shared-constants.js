@@ -78,6 +78,14 @@ const SHARED = [
       { file: 'app.html', re: /const\s+WS_INPUT_MAX\s*=\s*([^;]+);/ },
     ],
   },
+  {
+    // #523 - a new line-of-work name: the server refuses longer, the companion's fields stop there.
+    what: 'line-of-work name length (#523)',
+    sites: [
+      { file: 'lib/session-brief.js', re: /\bline:\s*(\d+),\s*lineLabel:/ },
+      { file: 'ai-terminal/lib/api/mc_models.dart', re: /const\s+int\s+kMcLineNameMax\s*=\s*([^;]+);/ },
+    ],
+  },
 ];
 
 // Arithmetic only — digits, `*`, `+`, `-`, `(`, `)`, `_` (Dart's digit separator) and

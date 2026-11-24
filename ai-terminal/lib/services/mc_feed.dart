@@ -293,8 +293,19 @@ class McFeed extends ChangeNotifier {
 
   /// The subjects of [project] (of [area] too, when given). Throws when Mission Control
   /// is not reachable; a 404 is a server without the subjects route yet.
-  Future<McSubjects> subjects({required String project, String? area}) =>
-      _authority().mcSubjects(project: project, area: area);
+  Future<McSubjects> subjects({String? project, String? area, String? line}) =>
+      _authority().mcSubjects(project: project, area: area, line: line);
+
+  /// #523 - the lines of work (of [project] when given) and the configured ones.
+  Future<McLines> lines({String? project}) => _authority().mcLines(project: project);
+
+  /// #523 - moves [subject] to line [line], to a new line [name], or (neither) back to the
+  /// rules. Throws [ApiException] with the server's reason; the next Now answer follows.
+  Future<McMoveResult> moveLine(String subject, {String? line, String? name}) async {
+    final r = await _authority().mcMoveLine(subject, line: line, name: name);
+    unawaited(refresh());
+    return r;
+  }
 
   /// One subject by [key]; a 404 is a key the server does not know (any more).
   Future<McSubjectDetail> subject(String key) => _authority().mcSubject(key);
@@ -312,8 +323,11 @@ class McFeed extends ChangeNotifier {
     bool hunt = false,
     required String server,
     String? brief,
+    String? line,
+    String? lineName,
   }) async {
-    final r = await _authority().mcStart(project: project, subjects: subjects, hunt: hunt, server: server, brief: brief);
+    final r = await _authority()
+        .mcStart(project: project, subjects: subjects, hunt: hunt, server: server, brief: brief, line: line, lineName: lineName);
     unawaited(refresh());
     return r;
   }

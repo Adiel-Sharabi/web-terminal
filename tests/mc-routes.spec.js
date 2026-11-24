@@ -60,11 +60,12 @@ test.describe('#502/#503 Mission Control routes', () => {
   test('every new route needs auth', async () => {
     const ctx = await noAuthCtx();
     for (const url of ['/api/work-items/acme%2Fwidgets%2342/meta', '/api/work-items/meta?refs=ado%3A1', '/api/mc/projects',
-      '/api/mc/subjects', '/api/mc/subjects/ado%3A1', '/api/mc/machines']) {
+      '/api/mc/subjects', '/api/mc/subjects/ado%3A1', '/api/mc/machines', '/api/mc/lines']) {
       const r = await ctx.get(url, { maxRedirects: 0 });
       expect(r.status(), url).toBe(401);
     }
     expect((await ctx.post('/api/mc/start', { data: { project: 'x', hunt: true, server: 'x' }, maxRedirects: 0 })).status()).toBe(401);
+    expect((await ctx.post('/api/mc/lines/move', { data: { subject: 'ado:1', name: 'x' }, maxRedirects: 0 })).status()).toBe(401);
     await ctx.dispose();
     expect(tracker.seen.length).toBe(0);
   });
@@ -235,6 +236,72 @@ test.describe('#502/#503 Mission Control routes', () => {
       }
       expect(ref).toMatchObject({ id, closed: true, status: 'closed' });
       expect(Number.isFinite(ref.closedAt)).toBe(true);
+    } finally {
+      if (!closed) await ctx.delete(`/api/sessions/${id}`).catch(() => {});
+      await ctx.dispose();
+    }
+  });
+
+  test('lines (#523): a reported line groups the item; Move to line wins and null hands it back; a closed session keeps its line', async () => {
+    const ctx = await authCtx();
+    const key = 'ado:9001';
+    const made = await ctx.post('/api/sessions', { data: { name: `mc-line-${Date.now()}`, autoCommand: '' } });
+    expect(made.status()).toBe(200);
+    const id = (await made.json()).id;
+    let closed = false;
+    const subjectOf = async () => {
+      const b = await (await ctx.get('/api/mc/subjects')).json();
+      return b.subjects && b.subjects.find((x) => x.key === key);
+    };
+    try {
+      const c = await pwRequest.newContext({ baseURL: BASE });
+      const bad = await c.post(`/api/session/${id}/report`, { data: { items: [{ ref: key, state: 'in-progress' }], line: 7 },
+        headers: { 'X-WT-Hook-Token': readHookToken() } });
+      expect(bad.status()).toBe(400);
+      expect((await bad.json()).error).toContain('"line"');
+      const rep = await c.post(`/api/session/${id}/report`, { data: { items: [{ ref: key, state: 'in-progress' }], line: 'Docket fixes' },
+        headers: { 'X-WT-Hook-Token': readHookToken() } });
+      expect(rep.status()).toBe(200);
+      expect((await rep.json()).brief.line).toBe('Docket fixes');
+      await c.dispose();
+
+      let s = null;
+      for (let i = 0; i < 40 && !(s && s.line && s.line.name === 'Docket fixes'); i++) { if (i) await sleep(300); s = await subjectOf(); }
+      expect(s.line).toEqual({ id: 'other/~docket-fixes', name: 'Docket fixes', project: 'other', kind: 'named', source: 'session' });
+
+      const lv = await (await ctx.get('/api/mc/lines')).json();
+      const row = lv.lines.find((l) => l.id === 'other/~docket-fixes');
+      expect(row).toMatchObject({ name: 'Docket fixes', kind: 'named', project: 'other', projectName: 'Other', subjects: [key] });
+      // The fake tracker's 9001 is closed: done this week, one live session on the line.
+      expect(row.counts).toMatchObject({ active: 0, doneWeek: 1, sessions: 1 });
+      expect(Array.isArray(lv.configured)).toBe(true);
+      expect((await (await ctx.get(`/api/mc/subjects?line=${encodeURIComponent('other/~docket-fixes')}`)).json()).subjects.map((x) => x.key)).toEqual([key]);
+      expect((await (await ctx.get('/api/mc/subjects?line=nope')).json()).subjects).toEqual([]);
+      expect((await (await ctx.get('/api/mc/now')).json()).lines.some((l) => l.id === 'other/~docket-fixes')).toBe(true);
+
+      // Move to line: a new line by name wins over the session's own; null hands it back.
+      const mv = await ctx.post('/api/mc/lines/move', { data: { subject: 'AB#9001', name: 'UI' } });
+      expect(mv.status()).toBe(200);
+      expect(await mv.json()).toMatchObject({ subject: key, line: { id: 'other/~ui', name: 'UI', source: 'override' } });
+      expect((await subjectOf()).line.id).toBe('other/~ui');
+      expect((await ctx.post('/api/mc/lines/move', { data: { subject: key, line: 'nope' } })).status()).toBe(400);
+      expect((await ctx.post('/api/mc/lines/move', { data: { subject: key } })).status()).toBe(400);
+      expect((await ctx.post('/api/mc/lines/move', { data: { subject: 'ado:987654', name: 'UI' } })).status()).toBe(404);
+      const back = await ctx.post('/api/mc/lines/move', { data: { subject: key, line: null } });
+      expect(back.status()).toBe(200);
+      expect((await back.json()).line).toMatchObject({ id: 'other/~docket-fixes', source: 'session' });
+
+      // Closed: the record keeps the reported line, so the item stays on it.
+      expect((await ctx.delete(`/api/sessions/${id}`)).status()).toBe(200);
+      closed = true;
+      let ref = null;
+      for (let i = 0; i < 40 && !(ref && ref.closed); i++) {
+        await sleep(300);
+        s = await subjectOf();
+        ref = s && s.sessions.find((x) => x.id === id);
+      }
+      expect(ref).toMatchObject({ closed: true });
+      expect(s.line).toMatchObject({ id: 'other/~docket-fixes', source: 'session' });
     } finally {
       if (!closed) await ctx.delete(`/api/sessions/${id}`).catch(() => {});
       await ctx.dispose();

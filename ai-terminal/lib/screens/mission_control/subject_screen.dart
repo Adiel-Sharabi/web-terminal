@@ -23,6 +23,7 @@ import '../../util/terminal_links.dart' show isLaunchableHttpUrl;
 import '../../widgets/conversation_view.dart' show openChatLink;
 import '../../widgets/format_utils.dart';
 import 'ask_view.dart';
+import 'lines_view.dart' show showMoveToLineSheet;
 import 'now_view.dart';
 import 'subject_widgets.dart';
 
@@ -155,6 +156,22 @@ class _McSubjectScreenState extends State<McSubjectScreen> {
     }
   }
 
+  /// #523 - opens the Move to line sheet; after a move the subject is read again.
+  Future<void> _moveLine(McSubject s) async {
+    final moved = await showMoveToLineSheet(context, feed: widget.feed, subject: s);
+    if (moved && mounted) unawaited(_load());
+  }
+
+  /// The line's project as the person knows it: the project's name when Now carries it.
+  String? _lineProject(McLineRef line) {
+    final id = line.project;
+    if (id == null) return null;
+    for (final p in widget.feed.now?.projects ?? const <McProject>[]) {
+      if (p.id == id) return p.name;
+    }
+    return id;
+  }
+
   Future<void> _pause(McSubject s) async {
     final live = s.liveSessions;
     if (live.isEmpty) return;
@@ -255,6 +272,24 @@ class _McSubjectScreenState extends State<McSubjectScreen> {
                       style: theme.textTheme.titleLarge?.copyWith(fontWeight: FontWeight.w600)),
                   const SizedBox(height: 2),
                   Text([s.refLabel, ?s.project, ?s.area].join(' · '), style: muted),
+                  if (s.line != null) ...[
+                    const SizedBox(height: 8),
+                    Row(children: [
+                      Icon(Icons.account_tree_outlined, size: 16, color: AppColors.onSurfaceVariant),
+                      const SizedBox(width: 6),
+                      Expanded(
+                        child: Text([s.line!.name, ?_lineProject(s.line!)].join(' · '),
+                            key: const ValueKey('mc-subject-line'), style: theme.textTheme.bodyMedium),
+                      ),
+                      if (s.line!.moved)
+                        Text('moved by you', key: const ValueKey('mc-subject-line-moved'), style: muted),
+                      TextButton(
+                        key: const ValueKey('mc-subject-move-line'),
+                        onPressed: () => _moveLine(s),
+                        child: const Text('Move to line...'),
+                      ),
+                    ]),
+                  ],
                   const SizedBox(height: 12),
                   // #522: a thing to DO is never shown as a question.
                   if (s.needsYou != null && s.needsYou!.isAction) ...[

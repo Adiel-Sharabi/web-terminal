@@ -58,6 +58,12 @@ class _McStartWorkSheetState extends State<McStartWorkSheet> {
   McMachines? _machines;
   String? _machinesError;
   String? _server;
+
+  /// #523 - the line to bind to: null none, [_newLine] a new name, else a line id.
+  String? _line;
+  static const String _newLine = '+new';
+  final _lineName = TextEditingController();
+  List<(String, String, String?)> _lineChoices = const [];
   bool _busy = false;
   String? _error;
   int _seq = 0;
@@ -72,7 +78,9 @@ class _McStartWorkSheetState extends State<McStartWorkSheet> {
     final ps = _projects;
     _project = ps.any((p) => p.id == widget.projectId) ? widget.projectId : (ps.isEmpty ? null : ps.first.id);
     _refs.addListener(() => setState(() {}));
+    _lineName.addListener(() => setState(() {}));
     _loadSubjects();
+    _loadLines();
     _loadMachines();
   }
 
@@ -80,7 +88,45 @@ class _McStartWorkSheetState extends State<McStartWorkSheet> {
   void dispose() {
     _refs.dispose();
     _brief.dispose();
+    _lineName.dispose();
     super.dispose();
+  }
+
+  int _linesSeq = 0;
+
+  /// The lines of the chosen project to pick from. A server without lines (404) or any
+  /// failure leaves the picker out: starting work never waits on it.
+  Future<void> _loadLines() async {
+    final p = _project;
+    final seq = ++_linesSeq;
+    setState(() {
+      _lineChoices = const [];
+      _line = null;
+      _lineName.clear();
+    });
+    if (p == null) return;
+    try {
+      final r = await widget.feed.lines(project: p);
+      if (!mounted || seq != _linesSeq) return;
+      setState(() => _lineChoices = [
+            for (final c in r.choices)
+              if (_inProject(r, c.$1, p)) c
+          ]);
+    } catch (_) {
+      // No picker: the session starts on the rules' line.
+    }
+  }
+
+  /// Whether line [id] belongs to project [p] (the server filters by project; this only
+  /// keeps a line of another project out of the picker should it send one).
+  static bool _inProject(McLines r, String id, String p) {
+    for (final c in r.configured) {
+      if (c.id == id) return c.project == null || c.project == p;
+    }
+    for (final l in r.lines) {
+      if (l.id == id) return l.project == null || l.project == p;
+    }
+    return true;
   }
 
   Future<void> _loadSubjects() async {
@@ -134,7 +180,10 @@ class _McStartWorkSheetState extends State<McStartWorkSheet> {
     });
     try {
       final brief = _brief.text.trim();
+      final newName = _lineName.text.trim();
       final r = await widget.feed.start(
+        line: _line != null && _line != _newLine ? _line : null,
+        lineName: _line == _newLine && newName.isNotEmpty ? newName : null,
         project: _project!,
         subjects: _chosen,
         hunt: _hunt,
@@ -178,6 +227,7 @@ class _McStartWorkSheetState extends State<McStartWorkSheet> {
               onChanged: (v) {
                 setState(() => _project = v);
                 _loadSubjects();
+                _loadLines();
               },
             ),
           const SizedBox(height: 12),
@@ -217,6 +267,31 @@ class _McStartWorkSheetState extends State<McStartWorkSheet> {
                 hintText: '#123, owner/repo#123, ado:123',
               ),
             ),
+          ],
+          if (_lineChoices.isNotEmpty) ...[
+            const SizedBox(height: 12),
+            DropdownButtonFormField<String?>(
+              key: const ValueKey('mc-start-line'),
+              initialValue: _line,
+              isExpanded: true,
+              decoration: const InputDecoration(labelText: 'Line of work (optional)'),
+              items: [
+                const DropdownMenuItem<String?>(value: null, child: Text('None - the rules choose')),
+                for (final (id, name, project) in _lineChoices)
+                  DropdownMenuItem<String?>(
+                      value: id, child: Text(project == null ? name : '$name ($project)', overflow: TextOverflow.ellipsis)),
+                const DropdownMenuItem<String?>(value: _newLine, child: Text('New line...')),
+              ],
+              onChanged: (v) => setState(() => _line = v),
+            ),
+            if (_line == _newLine)
+              TextField(
+                key: const ValueKey('mc-start-line-new'),
+                controller: _lineName,
+                maxLength: kMcLineNameMax,
+                maxLines: 1,
+                decoration: const InputDecoration(labelText: 'New line name'),
+              ),
           ],
           const SizedBox(height: 12),
           if (_machinesError != null)
