@@ -129,6 +129,21 @@ test.describe('#504 subjects: one work item across the cluster', () => {
     expect(v.subjects.every((s) => s.meta === null)).toBe(true);
   });
 
+  test('#524 a peer session\'s bare-ref subject takes its folder\'s project, not a foreign item\'s repo', () => {
+    const projects = pj.validateProjects([
+      { id: 'maps', name: 'Maps', match: { repos: ['acme/maps'], paths: ['C:\\dev\\maps'] } },
+      { id: 'web', name: 'Web', match: { repos: ['acme/web'], paths: ['C:\\dev\\web'] } },
+    ]).projects;
+    const peer = row('beta', { cwd: 'C:\\dev\\maps', items: [{ ref: '#149', key: '#149' }, { ref: '#39', key: '#39' }, { ref: 'acme/web#7', key: 'acme/web#7' }] });
+    const v = view({ rows: [peer], projects });
+    const by = Object.fromEntries(v.subjects.map((s) => [s.key, s.project]));
+    expect(by).toEqual({ [`#149@${peer.id}`]: 'maps', [`#39@${peer.id}`]: 'maps', 'acme/web#7': 'web' });
+    // In an unconfigured folder the session still follows its items' repo.
+    const lost = row('beta', { cwd: 'E:\\elsewhere', items: [{ ref: '#5', key: '#5' }, { ref: 'acme/web#8', key: 'acme/web#8' }] });
+    const v2 = view({ rows: [lost], projects });
+    expect(v2.subjects.find((s) => s.key === `#5@${lost.id}`).project).toBe('web');
+  });
+
   test('closed sessions stay for 7 days; one listed both live and closed counts once, live', () => {
     const live = row('alpha', { items: [{ ref: 'ado:7' }] });
     const dup = closedRec('alpha', { id: live.id, items: [{ ref: 'ado:7' }] });

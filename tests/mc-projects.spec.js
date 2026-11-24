@@ -79,6 +79,24 @@ test.describe('#503 a session\'s project', () => {
     expect(pj.projectOfSession({ cwd: 'E:\\peer', items: [{ key: 'ado:5', url: 'https://dev.azure.com/org/Contoso/_workitems/edit/5' }] }, P, W)).toBe('video');
   });
 
+  test('#524 a peer session\'s own folder beats a foreign item it merely mentions', () => {
+    const P = valid();
+    // A peer session (no origin) in the tools folder, following bare refs and one qualified
+    // key of another project: it stays in its folder's project.
+    const items = [{ key: '#149@s' }, { key: '#39@s' }, { key: 'acme/web#7' }];
+    expect(pj.projectOfSession({ cwd: 'C:\\dev\\tools\\cli', items }, P, W)).toBe('tools');
+    const ado = [{ key: 'ado:5', url: 'https://dev.azure.com/org/Contoso/_workitems/edit/5' }];
+    expect(pj.projectOfSession({ cwd: 'C:\\dev\\tools', items: ado }, P, W)).toBe('tools');
+    // In an unconfigured folder its items still place it.
+    expect(pj.projectOfSession({ cwd: 'E:\\peer', items }, P, W)).toBe('web');
+    // A known origin no project claims never falls back to its items: that session is "other".
+    expect(pj.projectOfSession({ cwd: 'E:\\notes', origin: { kind: 'github', owner: 'acme', repo: 'notes' }, items }, P, W)).toBe('other');
+    // A real origin still beats the folder (and the items).
+    expect(pj.projectOfSession({ cwd: 'C:\\dev\\tools', origin: { kind: 'github', owner: 'acme', repo: 'video' }, items }, P, W)).toBe('video');
+    // The bound project still beats all of them.
+    expect(pj.projectOfSession({ cwd: 'C:\\dev\\tools', origin: { kind: 'github', owner: 'acme', repo: 'video' }, items, bound: 'deep' }, P, W)).toBe('deep');
+  });
+
   test('anything unclaimed is "other"', () => {
     expect(pj.projectOfSession({ cwd: 'Z:\\nowhere' }, valid(), W)).toBe('other');
     expect(pj.projectOfSession({}, [], W)).toBe('other');
