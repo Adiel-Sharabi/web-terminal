@@ -756,12 +756,24 @@ test.describe('wait.kind action (#522)', () => {
       [act({ where: 7 }), '"where" must be a string'],
       [{ on: 'you', what: 'q', steps: ['a'] }, 'ride only on "kind": "action"'],
       [{ on: 'you', what: 'q', where: 'home' }, 'ride only on "kind": "action"'],
+      [act({ where: '   ' }), '"where" is empty'],
     ];
     for (const [w, why] of cases) {
       const r = v(w);
       expect(r.error, JSON.stringify(w)).toContain(why);
       expect(r.error).toContain('an action wait is {"on": "you", "kind": "action"');
     }
+  });
+
+  test('back-compat: a stray kind on a wait that is not "you" is ignored; null steps/where are absent', () => {
+    // Before #522 a wait's unknown fields were ignored: a report that worked then still does.
+    expect(v({ on: 'external', what: 'CI', kind: 'pr' }).report.wait).toEqual({ on: 'external', what: 'CI' });
+    expect(v({ on: 'self', what: 'build', kind: 'question', steps: ['a'], where: 'x' }).report.wait).toEqual({ on: 'self', what: 'build' });
+    // ...but "action" on such a wait is refused, naming why.
+    expect(v({ on: 'external', what: 'CI', kind: 'action' }).error).toContain('rides only on a "you" wait');
+    // null is absent on both paths.
+    expect(v({ on: 'you', what: 'q', steps: null, where: null }).report.wait).toEqual({ on: 'you', what: 'q' });
+    expect(v(act({ steps: null, where: null })).report.wait).toEqual({ on: 'you', what: 'try on-duty on 0.2.51', kind: 'action' });
   });
 
   test('steps and where over their caps are REFUSED, never cut', () => {

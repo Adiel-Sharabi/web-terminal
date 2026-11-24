@@ -284,10 +284,15 @@ records the Done ON DISK (`mc-state.json` `actionsDone`, `sending`; 500 and noth
 write fails), then sends ONE fixed line through the gated prompt of the session's own server (as the
 park does: supervisor tag, never onto an unsent draft, #479; `expectWaitAt` = the wait's `at`):
 `[Mission Control] Done: <what>. The user did it; carry on.`
-Delivered or uncertain (and `sending`): the card leaves `actions` and is never sent again (pressed
-again: `already`, even after the wait ended). Refused (a draft, a turn running...): kept, its
-`done` says why, and Done may be pressed again. A new wait of the session is a new card. 404 when the
-card no longer waits, 409 for a card that is not an action. Records kept 7 days. Capability `mc-actions`.
+The prompt carries `clearWait: true` (`lib/safe-prompt.js`): once typed, the session's own server
+clears THAT wait (its `at`; never one reported since), because a tagged prompt is a system turn and
+nothing else would - the owner-wait push, the inbox and the subject counts would keep it.
+Delivered: the card leaves `actions`. Sending or uncertain (it may have landed): the card stays while
+the session still blocks, its `done` saying so, with no Done (never sent twice: pressed again it is
+`already`, even after the wait ended). Refused (a draft, a turn running...): kept, its `done` says
+why, and Done may be pressed again. A new wait of the session is a new card. 404 when the card no
+longer waits, 409 for a card that is not an action. Records are kept 7 days (pruned on every read
+and every Done). Capability `mc-actions`.
 
 ## Questions context (#510) and Ask (#511) - `lib/mc-analyst.js`, `lib/mc-questions.js`
 `GET /api/mc/questions/:cardId/context?level=ask|context|everything` -> `{level, text, sections: [{title, body}], sources: [Source], ask: Ask, cardId, generatedAt}` (built on demand, never on a poll)

@@ -103,6 +103,10 @@ test.describe('#522 action waits: My to-do and Done', () => {
     expect((await ctx.post('/api/mc/todo', { data: { cardId: card.id } })).status()).toBe(409);
     expect((await ctx.post('/api/mc/actions/done', { data: { cardId: ask.id } })).status()).toBe(409);
     expect((await ctx.post('/api/mc/actions/done', { data: { cardId: 'alpha|nope|action:1' } })).status()).toBe(404);
+    // An id that names an Object.prototype key is no record: 404, never "already".
+    for (const cardId of ['constructor', '__proto__', 'toString']) {
+      expect((await ctx.post('/api/mc/actions/done', { data: { cardId } })).status(), cardId).toBe(404);
+    }
     expect((await ctx.post('/api/mc/actions/done', { data: {} })).status()).toBe(400);
 
     // Done: tried through the gated prompt (a plain shell refuses: no-agent), kept, and said.
@@ -153,6 +157,9 @@ test.describe('#522 action waits: My to-do and Done', () => {
       expect(ok.done).toEqual({ delivered: true });
       await until(async () => (await (await ctx.get(`/api/sessions/${id}/scrollback`)).text())
         .includes(`${TAG} [Mission Control] Done: ${ACTION.what}. The user did it; carry on.`), 'the Done in the terminal');
+      // The Done ENDED the wait on the session's own server (a tagged prompt is a system turn:
+      // nothing else would clear it, and the owner-wait push and the inbox would keep it).
+      expect((await rowOf(id)).brief.wait).toBeNull();
       // Gone from My to-do; pressed again it is not sent again.
       expect((await (await ctx.get('/api/mc/now')).json()).actions.some((c) => c.id === card.id)).toBe(false);
       expect((await (await ctx.post('/api/mc/actions/done', { data: { cardId: card.id } })).json()).done).toEqual({ delivered: true, already: true });
@@ -160,6 +167,40 @@ test.describe('#522 action waits: My to-do and Done', () => {
       if (ws) ws.close();
       fs.writeFileSync(CFG_FILE, cfgBefore === null ? '{}' : cfgBefore);
       await sleep(5500);
+    }
+  });
+
+  test('a Done that cannot be recorded on disk is refused (500): nothing is sent or recorded', async () => {
+    const STATE = process.env.WT_MC_STATE_FILE || path.join(__dirname, '..', 'mc-state.test.json');
+    const id = (await (await ctx.post('/api/sessions', { data: { name: `mc-act-disk-${Date.now()}`, autoCommand: '' } })).json()).id;
+    made.push(id);
+    const aside = `${STATE}.aside-${Date.now()}`;
+    let blocked = false;
+    try {
+      await report(id, { headline: 'h', wait: ACTION });
+      const body = await nowUntil((b) => (b.actions || []).some((c) => c.sessionId === id), 'the action card');
+      const card = body.actions.find((c) => c.sessionId === id);
+      // A directory where the state file goes: the write (tmp + rename onto it) fails.
+      if (fs.existsSync(STATE)) fs.renameSync(STATE, aside);
+      fs.mkdirSync(STATE);
+      blocked = true;
+      const r = await ctx.post('/api/mc/actions/done', { data: { cardId: card.id } });
+      expect(r.status()).toBe(500);
+      expect((await r.json()).error).toBe('could not record the Done');
+      // Not recorded: the card is there as before, with no Done state.
+      expect((await (await ctx.get('/api/mc/now')).json()).actions.find((c) => c.id === card.id).done).toBeNull();
+      // Writable again: the Done is tried as the first time (a plain shell refuses it: no-agent), never "already".
+      fs.rmdirSync(STATE);
+      if (fs.existsSync(aside)) fs.renameSync(aside, STATE);
+      blocked = false;
+      const ok = await (await ctx.post('/api/mc/actions/done', { data: { cardId: card.id } })).json();
+      expect(ok.done).toEqual({ delivered: false, refused: 'no-agent', reason: 'no agent runs in it' });
+    } finally {
+      if (blocked) {
+        try { fs.rmdirSync(STATE); } catch { /* not there */ }
+        if (fs.existsSync(aside)) fs.renameSync(aside, STATE);
+      }
+      try { fs.rmSync(`${STATE}.tmp`, { force: true }); } catch { /* best effort */ }
     }
   });
 });

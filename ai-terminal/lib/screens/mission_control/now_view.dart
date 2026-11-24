@@ -64,6 +64,7 @@ class McNowView extends StatelessWidget {
               _AnswerNowSection(
                   feed: feed,
                   cards: data.answerNow,
+                  hasActions: data.actions.isNotEmpty,
                   projectNames: projectNames,
                   onAnswer: onAnswer,
                   onOpenSession: onOpenSession,
@@ -226,11 +227,15 @@ class _AnswerNowSection extends StatelessWidget {
     required this.cards,
     required this.onAnswer,
     required this.onOpenSession,
+    this.hasActions = false,
     this.projectNames = const {},
     this.now,
   });
   final McFeed feed;
   final List<McCard> cards;
+
+  /// #522: something to DO waits on My to-do, so "nothing is stuck on you" would be untrue.
+  final bool hasActions;
   final Map<String, String> projectNames;
   final void Function(McCard) onAnswer;
   final void Function(String) onOpenSession;
@@ -245,7 +250,7 @@ class _AnswerNowSection extends StatelessWidget {
         Padding(
           key: const ValueKey('mc-answer-now-empty'),
           padding: const EdgeInsets.symmetric(vertical: 8),
-          child: Text('Nothing is stuck on you.',
+          child: Text(hasActions ? 'No question waits on you.' : 'Nothing is stuck on you.',
               style: Theme.of(context).textTheme.bodyMedium?.copyWith(color: AppColors.onSurfaceVariant)),
         ),
       for (final c in cards)
@@ -598,6 +603,9 @@ class McActionCard extends StatelessWidget {
     final session = [?c.sessionName, ?c.server].join(' · ');
     final done = c.done;
     final notTold = done != null && done.notSent ? 'Its session was not told: ${done.reason ?? done.refused ?? 'refused'}' : null;
+    // It may have landed (no answer came): never sent twice, so no Done; the card goes once
+    // its session's wait ends.
+    final maybeTold = done != null && done.maybeSent;
     final unblocks = c.why.text;
     return Card(
       margin: EdgeInsets.zero,
@@ -649,14 +657,20 @@ class McActionCard extends StatelessWidget {
             const SizedBox(height: 2),
             Text(notTold, key: const ValueKey('mc-action-not-told'), style: small?.copyWith(color: AppColors.caution)),
           ],
+          if (maybeTold) ...[
+            const SizedBox(height: 2),
+            Text('Done was sent; it may have reached its session. It goes once the session carries on.',
+                key: const ValueKey('mc-action-maybe-told'), style: muted),
+          ],
           const SizedBox(height: 4),
           Wrap(spacing: 4, crossAxisAlignment: WrapCrossAlignment.center, children: [
-            FilledButton.tonalIcon(
-              key: const ValueKey('mc-action-done'),
-              onPressed: onDone,
-              icon: const Icon(Icons.check, size: 18),
-              label: const Text('Done'),
-            ),
+            if (!maybeTold)
+              FilledButton.tonalIcon(
+                key: const ValueKey('mc-action-done'),
+                onPressed: onDone,
+                icon: const Icon(Icons.check, size: 18),
+                label: const Text('Done'),
+              ),
             if (onOpenSession != null)
               TextButton.icon(
                 onPressed: onOpenSession,

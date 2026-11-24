@@ -299,6 +299,29 @@ void main() {
       await tester.pump(const Duration(seconds: 5));
     });
 
+    testWidgets('#522 a Done that may have reached its session stays shown, says so, and offers no Done', (tester) async {
+      server.extra = {
+        'answerNow': <Object>[],
+        'actions': [
+          {
+            ...action,
+            'done': {'state': 'uncertain'}
+          }
+        ]
+      };
+      await pump(tester);
+      expect(find.byKey(const ValueKey('mc-action-alpha|s-3|action:1')), findsOneWidget);
+      expect(find.byKey(const ValueKey('mc-action-maybe-told')), findsOneWidget);
+      expect(find.byKey(const ValueKey('mc-action-done')), findsNothing);
+      expect(find.byKey(const ValueKey('mc-action-not-told')), findsNothing);
+      // Answer now is empty, but something waits to be DONE: it never says nothing is stuck.
+      expect(find.text('No question waits on you.'), findsOneWidget);
+      expect(find.text('Nothing is stuck on you.'), findsNothing);
+      expect(server.posts, isEmpty);
+      await tester.pumpWidget(const SizedBox());
+      await tester.pump(const Duration(seconds: 5));
+    });
+
     testWidgets('a to-do whose session was not told says why, and Tell asks the server again (#506)', (tester) async {
       await pump(tester);
       expect(find.byKey(const ValueKey('mc-todo-park-t-1')), findsOneWidget);

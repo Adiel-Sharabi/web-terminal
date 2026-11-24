@@ -11,7 +11,7 @@ const M = require('../lib/mc-subjects');
 const N = require('../lib/mc-needs');
 const { createMcState } = require('../lib/mc-state');
 const { createPromptEpisodes } = require('../lib/mc-episodes');
-const { promptOf, PROMPT_BYTES_MAX } = require('../lib/safe-prompt');
+const { promptOf, PROMPT_BYTES_MAX, clearedWait } = require('../lib/safe-prompt');
 
 const NOW = 1_800_000_000_000;
 const MIN = 60 * 1000;
@@ -326,12 +326,18 @@ test.describe('#522 action waits: on My to-do, never Answer now, and their Done'
     expect(now({ rows: [bare] }).actions[0].action).toEqual({ steps: [], where: null });
   });
 
-  test('Later hides an action until it ends; Done hides it once told (or maybe told), a refusal keeps it with the reason', () => {
+  test('Later hides an action until it ends; Done hides it once told, a maybe-told one stays saying so, a refusal keeps it with the reason', () => {
     const a = acting('alpha', 'try on-duty', 4);
     const id = `alpha|${a.id}|action:${NOW - 4 * MIN}`;
     expect(now({ rows: [a], later: { [id]: { until: NOW + HOUR } } }).actions).toEqual([]);
     expect(now({ rows: [a], later: { [id]: { until: NOW - 1 } } }).actions).toHaveLength(1);
-    for (const state of ['sending', 'delivered', 'uncertain']) expect(nowDone([a], { [id]: { state, why: null, at: NOW } }).actions, state).toEqual([]);
+    expect(nowDone([a], { [id]: { state: 'delivered', why: null, at: NOW } }).actions).toEqual([]);
+    // It may have landed: still shown while the session blocks (fail toward showing), saying so.
+    for (const state of ['sending', 'uncertain']) {
+      const maybe = nowDone([a], { [id]: { state, why: null, at: NOW } }).actions;
+      expect(maybe, state).toHaveLength(1);
+      expect(maybe[0].done, state).toEqual({ state, refused: null, reason: null, at: NOW });
+    }
     const kept = nowDone([a], { [id]: { state: 'refused', why: 'draft', at: NOW } }).actions;
     expect(kept).toHaveLength(1);
     expect(kept[0].done).toEqual({ state: 'refused', refused: 'draft', reason: 'it has unsent text in its prompt box', at: NOW });
@@ -343,9 +349,11 @@ test.describe('#522 action waits: on My to-do, never Answer now, and their Done'
   test('the Done message: one fixed line under 512 bytes with the tag, naming what was done, checking the wait it answers', () => {
     const card = { kind: 'action', what: 'try on-duty on 0.2.51', askedAt: NOW - MIN };
     const body = N.actionDoneBody(card);
-    expect(body).toEqual({ text: '[Mission Control] Done: try on-duty on 0.2.51. The user did it; carry on.', tag: 'supervisor', expectWaitAt: NOW - MIN });
+    // clearWait: the Done ENDS the wait it answers on the session's own server (that wait only).
+    expect(body).toEqual({ text: '[Mission Control] Done: try on-duty on 0.2.51. The user did it; carry on.', tag: 'supervisor', expectWaitAt: NOW - MIN, clearWait: true });
     const p = promptOf(body);
     expect(p.error).toBeUndefined();
+    expect(p).toMatchObject({ expectWaitAt: NOW - MIN, clearWait: true });
     expect(Buffer.byteLength(p.prompt, 'utf8')).toBeLessThanOrEqual(PROMPT_BYTES_MAX);
     // Hostile or long text: one line, cut by code point, still under the cap.
     const nl = String.fromCodePoint(10);
@@ -354,6 +362,21 @@ test.describe('#522 action waits: on My to-do, never Answer now, and their Done'
     expect(/[\u0000-\u001f]/.test(long.text)).toBe(false);
     expect(promptOf(long).error).toBeUndefined();
     expect(N.actionDoneBody({ kind: 'action', what: '', askedAt: null })).toEqual({ text: '[Mission Control] Done: what you asked the user to do. The user did it; carry on.', tag: 'supervisor' });
+  });
+
+  test('the gated prompt clears ONLY the wait it answers (safe-prompt clearWait)', () => {
+    const at = NOW - MIN;
+    const entry = { reported: { headline: 'h', wait: { on: 'you', what: 'try it', at, kind: 'action' } }, pinned: [] };
+    expect(clearedWait(entry, at)).toEqual({ reported: { headline: 'h', wait: null }, pinned: [] });
+    expect(entry.reported.wait).not.toBeNull(); // never mutated
+    expect(clearedWait(entry, at + 1)).toBeNull(); // reported again since: that wait is not ours
+    expect(clearedWait({ reported: { wait: null } }, at)).toBeNull();
+    expect(clearedWait(null, at)).toBeNull();
+    expect(clearedWait(entry, null)).toBeNull();
+    // clearWait is refused without the wait it answers, and must be a boolean.
+    expect(promptOf({ text: 'x', clearWait: true }).error).toContain('clearWait needs expectWaitAt');
+    expect(promptOf({ text: 'x', clearWait: 'yes', expectWaitAt: at }).error).toContain('clearWait must be true');
+    expect(promptOf({ text: 'x', clearWait: false, expectWaitAt: at })).toEqual({ prompt: '[web-terminal supervisor] x', expectWaitAt: at });
   });
 
   test('what Done may do: only an action, once; a refused one may be pressed again', () => {

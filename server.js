@@ -7171,7 +7171,7 @@ app.get('/api/mc/now', async (req, res) => {
     if (v.error) return res.status(500).json({ error: v.error });
     const now = Date.now();
     const n = mcNeeds.buildNow({ nodes: v.nodes, view: v, todos: mcState.todos(), later: mcNeeds.pruneLater(mcState.later(), now),
-      actionsDone: mcState.actionsDone(), now });
+      actionsDone: mcNeeds.pruneActionsDone(mcState.actionsDone(), now), now });
     res.json({ answerNow: n.answerNow, actions: n.actions, todo: n.todo, moving: n.moving, projects: v.projectsOut, generatedAt: v.generatedAt });
   } catch (e) {
     console.error(`[mc] now: ${e.message}`);
@@ -7281,7 +7281,8 @@ app.post('/api/mc/actions/done', express.json({ limit: '8kb' }), async (req, res
     const now = Date.now();
     const card = mcNeeds.pendingCards({ nodes: v.nodes, view: v, now }).find((c) => c.id === inp.cardId);
     const before = mcState.actionsDone();
-    const plan = mcNeeds.actionDonePlan(card, before[inp.cardId]);
+    // Own keys only: a cardId of "constructor" must not read the prototype.
+    const plan = mcNeeds.actionDonePlan(card, Object.hasOwn(before, inp.cardId) ? before[inp.cardId] : undefined);
     if (plan.error) return res.status(plan.status).json({ error: plan.error });
     if (plan.already) return res.json({ cardId: inp.cardId, done: mcNeeds.doneAnswer(plan.already, { already: true }), generatedAt: now });
     if (!mcState.setActionsDone(mcNeeds.pruneActionsDone({ ...before, [inp.cardId]: mcNeeds.actionSending(now) }, now), { now: true })) {
@@ -8119,6 +8120,13 @@ async function gatedPrompt(id, body, by) {
     // #469 - the ask is state on this server's brief: the row carries it to the authority, and
     // the answer route (wt-closeout.js) fills it in.
     if (p.template === 'closeout') setBriefEntry(id, { ...(getBriefEntry(id) || briefLib.emptyEntry()), closeout: closeoutLib.askedRecord(Date.now()) });
+    // #522 - a prompt that ENDS the wait it answers (Mission Control's Done): a tagged prompt is
+    // a system turn, so nothing else clears it, and the owner-wait push, the inbox and the
+    // subject's counts would keep it. Only that wait (its `at`), never one reported since.
+    if (p.clearWait) {
+      const cleared = safePrompt.clearedWait(getBriefEntry(id), p.expectWaitAt);
+      if (cleared) setBriefEntry(id, cleared);
+    }
     // Typed text is input: the check-in and the hand-off scan leave the session alone for their
     // quiet period, so neither types its own prompt behind this one.
     _lastInputAt.set(id, Date.now());
@@ -8488,7 +8496,8 @@ const supervisorDeliver = (a) => deliverGatedPrompt(a, 'supervisor');
  *  in this server's log (the supervisor, #506 Mission Control's park message). */
 async function deliverGatedPrompt(a, by) {
   // #469: a.template names a text the session's own server builds (the close-out).
-  const body = { ...(a.template ? { template: a.template } : { text: a.text }), tag: 'supervisor', ...(a.expectWaitAt ? { expectWaitAt: a.expectWaitAt } : {}) };
+  const body = { ...(a.template ? { template: a.template } : { text: a.text }), tag: 'supervisor', ...(a.expectWaitAt ? { expectWaitAt: a.expectWaitAt } : {}),
+    ...(a.clearWait && a.expectWaitAt ? { clearWait: true } : {}) };
   if (a.server === getServerName()) {
     const out = await gatedPrompt(a.id, body, by);
     return out.json && out.json.delivered ? { delivered: true } : supRefusal(out.status, out.json);
