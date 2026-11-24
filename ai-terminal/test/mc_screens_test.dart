@@ -14,9 +14,11 @@ import 'package:ai_terminal/screens/home_shell.dart';
 import 'package:ai_terminal/screens/mission_control/machines_view.dart';
 import 'package:ai_terminal/screens/mission_control/mc_home.dart';
 import 'package:ai_terminal/screens/mission_control/now_view.dart';
+import 'package:ai_terminal/screens/mission_control/question_panel.dart';
 import 'package:ai_terminal/screens/settings_screen.dart';
 import 'package:ai_terminal/screens/work_board_screen.dart';
 import 'package:ai_terminal/services/launch_settings.dart';
+import 'package:ai_terminal/services/mc_analyst.dart';
 import 'package:ai_terminal/services/mc_feed.dart';
 import 'package:ai_terminal/services/server_store.dart';
 import 'package:ai_terminal/services/session_repository.dart';
@@ -152,13 +154,28 @@ void main() {
       await tester.pump(const Duration(seconds: 5));
     });
 
-    testWidgets('More context says which issue fills it', (tester) async {
+    testWidgets('More context (#510): offered only under a question scope, and opens the question panel', (tester) async {
       await pump(tester);
+      expect(find.byKey(const ValueKey('mc-card-context')), findsNothing, reason: 'no scope: nothing to open');
+      await tester.pumpWidget(const SizedBox());
+      await _size(tester, const Size(1400, 1600));
+      final opened = <String>[];
+      await tester.pumpWidget(MaterialApp(
+        theme: AppTheme.dark,
+        home: McQuestionScope(
+          analyst: McAnalyst(servers: () => const [], client: ApiClient.new),
+          onSend: (c, t) async => false,
+          onAnswer: (c) => opened.add(c.id),
+          child: Scaffold(body: McNowView(feed: feed, onAnswer: (c) {}, onOpenSession: (_) {})),
+        ),
+      ));
+      await feed.refresh();
+      await tester.pump();
       await tester.tap(find.byKey(const ValueKey('mc-card-context')).first);
       await tester.pumpAndSettle();
-      expect(find.textContaining('#510'), findsOneWidget);
-      await tester.tap(find.text('OK'));
-      await tester.pumpAndSettle();
+      expect(find.byKey(const ValueKey('mcq-levels')), findsOneWidget);
+      // No server to read it from: the panel says so instead of a blank.
+      expect(find.byKey(const ValueKey('mcq-context-error')), findsOneWidget);
       await tester.pumpWidget(const SizedBox());
     });
 

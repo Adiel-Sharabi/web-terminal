@@ -3,7 +3,6 @@
 // answered under its option, suggestions sent only after a confirm, Compare), and the pick
 // sender, which uses the existing answer path: an AskUserQuestion's `Other` row through
 // buildAnswerFrames, refused for a side-by-side question. Synthetic data only.
-import 'dart:async';
 import 'dart:convert';
 
 import 'package:ai_terminal/api/api_client.dart';
@@ -282,7 +281,7 @@ void main() {
       final want = buildAnswerFrames(q.questions, [<int>{}], otherText: ['Green']).map((f) => f.keys).toList();
       expect(posted.take(want.length).toList(), want);
       // The frames scripts/rig/verify-mc-question.js sends for its two-option question.
-      expect(want, ['3', '[200~Green[201~', '']);
+      expect(want, ['3', '\x1b[200~Green\x1b[201~', '\r']);
       expect(posted.join(), contains('Green'));
     });
 
