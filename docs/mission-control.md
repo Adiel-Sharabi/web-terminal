@@ -7,9 +7,10 @@ Unknown/missing data is `null`, never guessed. Sections below a milestone that h
 are the plan, not a description of the server.
 
 Landed: Who answers, Work-item meta (#502), Projects and areas (#503), Stage (#505), Subjects
-(#504), Answer now / My to-do (#506). Advertised in `/api/version` `capabilities`: `work-item-meta`,
+(#504), Answer now / My to-do (#506), Ask (#511). Advertised in `/api/version` `capabilities`: `work-item-meta`,
 `mission-control` (#502/#503), `mc-subjects` (#504/#505: the subjects routes, `stage` on report
-items, `counts.stages`) and `mc-needs` (#506: `/api/mc/now`, `/api/mc/todo[/:id]`, `/api/mc/later`).
+items, `counts.stages`) and `mc-needs` (#506: `/api/mc/now`, `/api/mc/todo[/:id]`, `/api/mc/later`); Ask has no
+capability of its own (a server without it answers a bare 404).
 
 ## Who answers (one owner for cluster-wide state)
 Mission Control is computed on ONE server per cluster: the same authority the supervisor uses
@@ -263,13 +264,37 @@ Capability `mc-needs`.
 
 ## Questions context (#510) and Ask (#511) - `lib/mc-analyst.js`
 `GET /api/mc/questions/:cardId/context?level=ask|context|everything` -> `{level, text, sections: [{title, body}], sources: [Source], generatedAt}` (built on demand, never on a poll)
-`POST /api/mc/ask {question, scope: {kind: 'all'|'project'|'subject'|'session', id}}` -> `{answer, sources: [Source], dataAge: {oldestAt, newestAt}, model, generatedAt}`
+`POST /api/mc/ask {question, scope: {kind: 'all'|'project'|'subject'|'session', id}}` -> `{answer, sources: [Source], dataAge: {oldestAt, newestAt}, cut, scope, model, generatedAt}` (landed, #511)
 `POST /api/mc/questions/:cardId/followup {option, question}` -> same shape as ask
 `POST /api/mc/questions/:cardId/suggest` -> `{options: [{label, consequence}], sources, generatedAt}`
 ```
-Source = { kind: 'session'|'report'|'recap'|'pr'|'workitem', label, server, sessionId, at, url }
+Source = { id, kind: 'session'|'report'|'recap'|'pr'|'workitem', label, server, sessionId, at, url }
 ```
 Read-only: tools-off model call (the `lib/inbox-digest.js` CLI path), never types into a session.
+
+**Ask as built (#511).** Chosen over a read-only background session: `claude -p` with every tool,
+setting and MCP server off, prompt on stdin, the run slots, timeout and child handling of
+`lib/model-cli.js` (shared with the inbox digest). Config `mcAnalyst` `{enabled, model ('sonnet'),
+command, timeoutMs (120000)}` - not settable through `PUT /api/config` (`command` is executed).
+- `question`: 1-2000 characters. `scope` missing = `all`; `id` required otherwise: a project id
+  (`other` included), a subject key (`owner/repo#N`, `ado:N` - the brief items' `key`), a session id.
+- The bundle: per session in scope (newest activity first) its reported brief - headline, items,
+  wait, doing-now, last turn's summary, last prompt, each with its time; recaps only for a
+  `session` or `subject` scope, at most 6 (a local one in-process, a peer's over its own recap
+  route); per work item those sessions name, the tracker-meta CACHE only (`peek`, never a tracker
+  read) and its linked PRs. Every block has a source id (`S1`...) the model cites; `sources` holds
+  only ids the bundle offered, in the model's order (an invented id is dropped). Capped at 60000
+  characters by whole blocks; `cut: {omitted, total, itemsOmitted, itemsTotal}` when something did
+  not fit (the model is told to say so), else null. `dataAge` = oldest/newest `at` of the sources offered.
+- Session text sits between two fence lines carrying a random nonce, and the model is told it is
+  data; the question sits after the fence. The answer is plain text (the companion renders it as
+  text). A double tap of the same question over the same data shares one run.
+- Subjects: a `subject` scope id is `lib/mc-subjects.js`'s subject key (`subjectKeyOf`; a tracker ref in
+  any spelling is canonicalised first, as `GET /api/mc/subjects/:key` does).
+- Errors: `400 {error}` bad body; `404 {error}` unknown session, subject (no session reports it) or
+  project; an empty `all`/project scope is answered by the server (`model: null`, no run);
+  `503 {status:'unavailable', reason: disabled|no-cli|busy}`; `502 {status:'failed', reason:
+  timeout|error|bad-output}`; `409`/`503` from `mcRefusal` like every `/api/mc/*` route.
 
 ## Start work (#512)
 `POST /api/mc/start {project, subjects: [ref], hunt: bool, server, name?, brief?}` -> `{server, sessionId}`;

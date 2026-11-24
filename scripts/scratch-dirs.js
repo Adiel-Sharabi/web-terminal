@@ -77,6 +77,8 @@ const DIRS = Object.freeze({
    * the CLI a CLAUDE.md to read and a repo to be confused by.
    */
   digest: process.env.WT_DIGEST_DIR || path.join(PARENT, 'digest-runs'),
+  /** The working directory of Mission Control's Ask runs (#511): the digest's rule, its own folder. */
+  analyst: process.env.WT_ANALYST_DIR || path.join(PARENT, 'analyst-runs'),
 });
 
 /** `C:\dev\x\y` -> `/c/dev/x/y`, the form Git Bash needs. */

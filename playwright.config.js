@@ -132,6 +132,11 @@ process.env.WT_CLAUDE_BIN = path.join(__dirname, 'no-such-claude.test.exe');
 process.env.WT_INBOX_DIGEST_COMMAND = JSON.stringify([process.execPath, path.join(__dirname, 'tests', 'fixtures', 'fake-digest-cli.js')]);
 process.env.FAKE_DIGEST_DIR = path.join(require('./scripts/scratch-dirs').DIRS.tests, 'digest-fake');
 process.env.WT_INBOX_DIGEST_TIMEOUT_MS = '4000';
+// #511 - Mission Control's Ask runs `claude -p` the same way: a fake CLI here too
+// (tests/fixtures/fake-analyst-cli.js), recording into FAKE_ANALYST_DIR.
+process.env.WT_MC_ANALYST_COMMAND = JSON.stringify([process.execPath, path.join(__dirname, 'tests', 'fixtures', 'fake-analyst-cli.js')]);
+process.env.FAKE_ANALYST_DIR = path.join(require('./scripts/scratch-dirs').DIRS.tests, 'analyst-fake');
+process.env.WT_MC_ANALYST_TIMEOUT_MS = '4000';
 // One variable the digest child must NOT inherit by each scrub rule (exact name, WT_ prefix)
 // and one it must keep, so the route-level env assertion cannot pass on a server env that
 // holds none of them (CI's does not).

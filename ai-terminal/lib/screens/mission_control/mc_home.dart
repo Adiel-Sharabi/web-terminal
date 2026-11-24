@@ -1,10 +1,11 @@
 // #507 - Mission Control, the second home one build runs beside the current one.
 //
 // Desktop (at or above [AdaptiveHome.splitBreakpoint]): a side nav - Now, Projects,
-// Sessions, Machines. Phone: a bottom bar - Now, Projects, Ask, Machines. Projects is
-// the projects, each project's page and each subject's (#508, #509), in its own
-// navigator; Ask is filled by a later issue (#511) and says so; Sessions is the current
-// sessions board; Machines is the board's machines and leases view.
+// Sessions, Machines - and an Ask panel beside any of them, opened from the nav (#511).
+// Phone: a bottom bar - Now, Projects, Ask, Machines. Projects is the projects, each
+// project's page and each subject's (#508, #509), in its own navigator; Sessions is the
+// current sessions board; Machines is the board's machines and leases view. Ask (both
+// layouts) is one conversation, kept across tabs.
 //
 // Nothing here touches the current home's split pane: a session opens on the app's one
 // session stack and the inbox is pushed as a route, both over Mission Control, so Back
@@ -15,6 +16,7 @@ import 'package:flutter/material.dart';
 
 import '../../api/api_client.dart';
 import '../../api/mc_models.dart';
+import '../../services/mc_analyst.dart';
 import '../../api/models.dart';
 import '../../services/app_config.dart';
 import '../../services/mc_feed.dart';
@@ -24,6 +26,7 @@ import '../adaptive_home.dart';
 import '../session_screen.dart' show openSessionOnStack;
 import '../settings_screen.dart';
 import '../work_board_screen.dart';
+import 'ask_view.dart';
 import 'machines_view.dart';
 import 'now_view.dart';
 import 'project_view.dart';
@@ -55,6 +58,7 @@ class MissionControlHome extends StatefulWidget {
     this.clientFactory,
     this.repository,
     this.sessionsBoardBuilder,
+    this.analyst,
   });
 
   /// Switches the app to the current sessions home.
@@ -79,6 +83,10 @@ class MissionControlHome extends StatefulWidget {
   @visibleForTesting
   final Widget Function(void Function(Session) onOpenSession)? sessionsBoardBuilder;
 
+  /// Injectable for tests; defaults to an [McAnalyst] over [servers] that asks the
+  /// feed's server first.
+  final McAnalyst? analyst;
+
   @override
   State<MissionControlHome> createState() => _MissionControlHomeState();
 }
@@ -93,6 +101,12 @@ class _MissionControlHomeState extends State<MissionControlHome> {
 
   late final McFeed _feed = widget.feed ??
       McFeed(servers: _servers, client: _client, isForeground: () => _repo.isForeground);
+
+  late final McAskThread _ask = McAskThread(
+      widget.analyst ?? McAnalyst(servers: _servers, client: _client, preferred: () => _feed.servedBy));
+
+  /// Desktop: whether the Ask panel is open beside the tab.
+  bool _askPanel = false;
 
   @override
   void initState() {
@@ -116,6 +130,7 @@ class _MissionControlHomeState extends State<MissionControlHome> {
     widget.active?.removeListener(_onActive);
     _feed.active = false;
     if (widget.feed == null) _feed.dispose();
+    _ask.dispose();
     super.dispose();
   }
 
@@ -158,12 +173,7 @@ class _MissionControlHomeState extends State<MissionControlHome> {
                   onOpenSession: open,
                   onOpenInbox: () => pushInbox(Navigator.of(context)),
                 ))((s) => _openSession(s.id, initial: s)),
-        McTab.ask => const Padding(
-            key: ValueKey('mc-ask-tab'),
-            padding: EdgeInsets.all(16),
-            child: McPlaceholderNote(
-                'Ask a read-only Analyst about sessions and work items, with sources: comes with #511 (Ask).'),
-          ),
+        McTab.ask => KeyedSubtree(key: const ValueKey('mc-ask-tab'), child: _askView()),
         McTab.machines => McMachinesView(
             servers: _servers,
             client: _client,
@@ -171,6 +181,36 @@ class _MissionControlHomeState extends State<MissionControlHome> {
             onOpenSession: (s) => _openSession(s.id, initial: s),
           ),
       };
+
+  /// The one conversation, as the phone's tab or the desktop panel.
+  Widget _askView() => ListenableBuilder(
+        listenable: _feed,
+        builder: (context, _) => McAskView(
+          thread: _ask,
+          projects: _feed.now?.projects ?? const [],
+          onOpenSession: (id) => _openSession(id),
+        ),
+      );
+
+  Widget _askPanelView(BuildContext context) => SizedBox(
+        key: const ValueKey('mc-ask-panel'),
+        width: 440,
+        child: Scaffold(
+          appBar: AppBar(
+            automaticallyImplyLeading: false,
+            title: const Text('Ask'),
+            actions: [
+              IconButton(
+                key: const ValueKey('mc-ask-panel-close'),
+                tooltip: 'Close Ask',
+                icon: const Icon(Icons.close),
+                onPressed: () => setState(() => _askPanel = false),
+              ),
+            ],
+          ),
+          body: _askView(),
+        ),
+      );
 
   List<Widget> _actions() => [
         if (_tab == McTab.now)
@@ -222,12 +262,22 @@ class _MissionControlHomeState extends State<MissionControlHome> {
               selectedIndex: index,
               labelType: NavigationRailLabelType.all,
               // Reachable from every tab, the Sessions board (which has its own bar) too.
-              trailing: IconButton(
-                key: const ValueKey('mc-rail-to-sessions-home'),
-                tooltip: 'Back to the sessions home',
-                icon: const Icon(Icons.swap_horiz),
-                onPressed: widget.onShowSessionsHome,
-              ),
+              trailing: Column(mainAxisSize: MainAxisSize.min, children: [
+                IconButton(
+                  key: const ValueKey('mc-ask-panel-toggle'),
+                  tooltip: _askPanel ? 'Close Ask' : 'Ask a question',
+                  isSelected: _askPanel,
+                  icon: const Icon(Icons.forum_outlined),
+                  selectedIcon: const Icon(Icons.forum),
+                  onPressed: () => setState(() => _askPanel = !_askPanel),
+                ),
+                IconButton(
+                  key: const ValueKey('mc-rail-to-sessions-home'),
+                  tooltip: 'Back to the sessions home',
+                  icon: const Icon(Icons.swap_horiz),
+                  onPressed: widget.onShowSessionsHome,
+                ),
+              ]),
               onDestinationSelected: (i) => setState(() => _tab = tabs[i]),
               destinations: [
                 for (final t in tabs)
@@ -240,6 +290,7 @@ class _MissionControlHomeState extends State<MissionControlHome> {
             ),
             const VerticalDivider(width: 1),
             Expanded(child: body),
+            if (_askPanel) ...[const VerticalDivider(width: 1), _askPanelView(context)],
           ]),
         );
       }

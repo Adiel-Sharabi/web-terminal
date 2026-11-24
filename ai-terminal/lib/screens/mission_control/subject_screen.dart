@@ -14,12 +14,15 @@ import 'dart:async';
 import 'package:flutter/material.dart';
 
 import '../../api/api_client.dart';
+import '../../api/mc_ask_models.dart';
 import '../../api/mc_models.dart';
+import '../../services/mc_analyst.dart';
 import '../../services/mc_feed.dart';
 import '../../theme/app_theme.dart';
 import '../../util/terminal_links.dart' show isLaunchableHttpUrl;
 import '../../widgets/conversation_view.dart' show openChatLink;
 import '../../widgets/format_utils.dart';
+import 'ask_view.dart';
 import 'now_view.dart';
 import 'subject_widgets.dart';
 
@@ -80,10 +83,32 @@ class _McSubjectScreenState extends State<McSubjectScreen> {
     unawaited(_load());
   }
 
+  /// #511 - this subject's conversation with the Analyst, made on the first ask and kept
+  /// while the page lives (asked of the server that answers Mission Control).
+  McAskThread? _ask;
+
   @override
   void dispose() {
     widget.feed.removeListener(_onFeed);
+    _ask?.dispose();
     super.dispose();
+  }
+
+  void _openAsk(McSubject s) {
+    final thread = _ask ??= McAskThread(
+        McAnalyst(servers: widget.feed.servers, client: widget.feed.client, preferred: () => widget.feed.servedBy));
+    Navigator.of(context).push(MaterialPageRoute<void>(
+      builder: (_) => Scaffold(
+        appBar: AppBar(title: Text('Ask about ${s.refLabel}')),
+        body: McAskView(
+          thread: thread,
+          fixedScope: McAskScope.subject(s.key),
+          fixedScopeLabel: s.refLabel,
+          onOpenSession: widget.onOpenSession,
+          onOpenUrl: (u) => _open(u.toString()),
+        ),
+      ),
+    ));
   }
 
   void _onFeed() {
@@ -260,11 +285,14 @@ class _McSubjectScreenState extends State<McSubjectScreen> {
                     McSessionTree(sessions: s.sessions, onOpen: widget.onOpenSession, now: widget.now),
                   const SizedBox(height: 16),
                   mcSectionTitle(context, 'Ask about this subject'),
-                  const TextField(
-                    key: ValueKey('mc-subject-ask'),
-                    enabled: false,
-                    decoration: InputDecoration(
-                      hintText: 'Ask a read-only Analyst about this subject: comes with #511 (Ask)',
+                  // Opens the Ask page for this subject (#511): the answer needs room this list has not.
+                  TextField(
+                    key: const ValueKey('mc-subject-ask'),
+                    readOnly: true,
+                    onTap: () => _openAsk(s),
+                    decoration: const InputDecoration(
+                      hintText: 'Ask a read-only Analyst about this subject',
+                      suffixIcon: Icon(Icons.forum_outlined),
                       border: OutlineInputBorder(),
                     ),
                   ),
