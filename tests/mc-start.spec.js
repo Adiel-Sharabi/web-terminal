@@ -81,21 +81,36 @@ test.describe('#512 Start work: the session it starts', () => {
     expect(named.name).toBe('My run');
   });
 
-  test('nothing a shell acts on inside double quotes reaches the launch command (brief, title, project name)', () => {
+  test('the words the server writes lose what a shell acts on inside double quotes (project name, tracker title)', () => {
     const projects = pj.validateProjects([{ id: 'evil', name: 'Ev$il`x"!%^&|<>\\', match: { repos: ['acme/evil'], paths: ['C:\\e'] } }]).projects;
-    const v = S.parseStart({ project: 'evil', subjects: ['#1'], server: 'a', brief: 'a $(rm -rf /) `id` "q" !! %PATH% ^& b; c | d\nnext' },
-      { projects, parseRef }).value;
-    const plan = S.startPlan(v, { titles: { 'acme/evil#1': 'T $HOME `x`' } });
+    const v = S.parseStart({ project: 'evil', subjects: ['#1'], server: 'a', brief: 'Plain words; ok?' }, { projects, parseRef }).value;
+    const plan = S.startPlan(v, { titles: { 'acme/evil#1': 'T $HOME `x` "q" !! %P% ^& a | b\nc' } });
     const inside = plan.autoCommand.slice(plan.autoCommand.indexOf('"') + 1, -1);
     expect(plan.autoCommand.endsWith('"')).toBe(true);
     expect(inside).not.toMatch(/[`$"\\!%^&|<>\r\n]/);
-    // Letters in any script survive; the words are kept, the operators are not.
+    expect(inside.endsWith('Plain words; ok?')).toBe(true);
+    // Letters in any script survive; control characters do not.
     expect(S.safeText('Fix the שלום case; ok?', 100)).toBe('Fix the שלום case; ok?');
     expect(S.safeText('a\u0000b\u001bc', 100)).toBe('a b c');
-    // The launch command never passes the create route's 500 characters.
-    const long = S.startPlan(parse({ project: 'widgets', hunt: true, server: 'a', brief: 'word '.repeat(100) }).value);
-    expect(long.autoCommand.length).toBeLessThanOrEqual(500);
-    expect(long.autoCommand.endsWith('"')).toBe(true);
+    // A cut never leaves half a surrogate pair.
+    expect(S.safeText('ab\u{1F600}cd', 3)).toBe('ab');
+    expect(S.safeText('ab\u{1F600}cd', 4)).toBe('ab\u{1F600}');
+  });
+
+  test('a brief is REFUSED, never changed: a character a shell acts on is named; one too long says by how much', () => {
+    const bad = parse({ project: 'widgets', hunt: true, server: 'a', brief: 'look at C:\\dev and $env:PATH, "quote" it\nnow' });
+    expect(bad.error).toContain('cannot contain');
+    for (const c of ['\\', '$', '"', 'a line break or control character']) expect(bad.error).toContain(c);
+    expect(parse({ project: 'widgets', hunt: true, server: 'a', brief: 'Keep  it   small' }).value.brief).toBe('Keep it small');
+    // 500 characters pass the field's cap but not the launch command's room beside the task.
+    const v = parse({ project: 'widgets', hunt: true, server: 'a', brief: `${'word '.repeat(99)}END` }).value;
+    const plan = S.startPlan(v);
+    expect(plan.error).toMatch(/^the brief is \d+ characters too long for this start/);
+    expect(plan.autoCommand).toBeUndefined();
+    // One that fits is delivered whole, and the command stays within the create route's 500.
+    const fits = S.startPlan(parse({ project: 'widgets', hunt: true, server: 'a', brief: `${'word '.repeat(60)}END` }).value);
+    expect(fits.autoCommand.endsWith('END"')).toBe(true);
+    expect(fits.autoCommand.length).toBeLessThanOrEqual(500);
   });
 
   test('config mc.startCommand: a plain command line, else the default', () => {
@@ -166,7 +181,9 @@ test.describe('#512 a session bound at birth', () => {
     const stranger = node();
     const loop1 = node({ id: 'loop-a', parentId: 'loop-b' });
     const loop2 = node({ id: 'loop-b', parentId: 'loop-a' });
-    const out = B.applyBindings([lead, child, grand, succ, stranger, loop1, loop2], { [lead.id]: binding({ hunt: true, subjects: [] }) });
+    const used = new Set();
+    const out = B.applyBindings([lead, child, grand, succ, stranger, loop1, loop2], { [lead.id]: binding({ hunt: true, subjects: [] }) }, used);
+    expect([...used]).toEqual([lead.id]); // the store keeps the binding alive while it is in use
     expect(out.map((x) => x.boundProject || null)).toEqual(['widgets', 'widgets', 'widgets', 'widgets', null, null, null]);
     // A hunt has no subjects: nothing stands in for a report.
     expect(out.every((x) => x.items.length === 0)).toBe(true);
@@ -177,11 +194,13 @@ test.describe('#512 a session bound at birth', () => {
 
   test('a stored binding is validated; old ones are pruned, newest kept', () => {
     expect(B.bindingOf({ project: 'widgets', at: 1, subjects: [{ key: 'k' }, { key: 'k' }, { nope: 1 }] })).toEqual(
-      { project: 'widgets', subjects: [{ key: 'k', ref: 'k' }], hunt: false, server: null, at: 1 });
+      { project: 'widgets', subjects: [{ key: 'k', ref: 'k' }], hunt: false, server: null, at: 1, seenAt: 1 });
     expect(B.bindingOf({ project: 'widgets' })).toBe(null);
     expect(B.bindingOf(['x'])).toBe(null);
     const kept = B.pruneBindings({ old: { at: NOW - 9 * DAY }, a: { at: NOW - 2 }, b: { at: NOW - 1 }, c: { at: NOW - 3 } }, NOW, { max: 2 });
     expect(Object.keys(kept)).toEqual(['b', 'a']);
+    // Its age is from when it was last in use, not from the start: a long run keeps it.
+    expect(Object.keys(B.pruneBindings({ run: { at: NOW - 20 * DAY, seenAt: NOW - DAY } }, NOW))).toEqual(['run']);
   });
 
   test('the subject lists a bound session before any report, marked bound, under the project it was started for', () => {
@@ -214,10 +233,16 @@ test.describe('#512 a session bound at birth', () => {
       const disk = JSON.parse(fs.readFileSync(file, 'utf8'));
       expect(Object.keys(disk)).toEqual(['v', 'stages', 'bindings']);
       const again = createMcState({ file, now: () => NOW });
-      expect(again.bindings()).toEqual({ s1: binding() });
+      expect(again.bindings()).toEqual({ s1: { ...binding(), seenAt: binding().at } });
       expect(again.stageHistory('acme/widgets#42')).toHaveLength(1);
-      // Nine days later the binding is gone.
+      // Nine days later the binding is gone - unless it was in use meanwhile.
       expect(createMcState({ file, now: () => NOW + 9 * DAY }).bindings()).toEqual({});
+      let t = NOW + 7 * DAY;
+      const live = createMcState({ file, now: () => t, saveDelayMs: 1 });
+      live.touchBindings(new Set(['s1', 'not-there']));
+      live.flush();
+      t = NOW + 9 * DAY;
+      expect(Object.keys(createMcState({ file, now: () => t }).bindings())).toEqual(['s1']);
     } finally {
       fs.rmSync(dir, { recursive: true, force: true });
     }

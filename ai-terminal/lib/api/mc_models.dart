@@ -1064,12 +1064,24 @@ class McStartResult {
 
   /// Null when the session runs on the authority itself.
   final String? serverUrl;
-  const McStartResult({required this.sessionId, this.name, this.server, this.serverUrl});
+
+  /// The agent the server resolved, and whether it is ready (#147: absent = ready).
+  final String? agent;
+  final bool agentReady;
+  const McStartResult(
+      {required this.sessionId, this.name, this.server, this.serverUrl, this.agent, this.agentReady = true});
 
   static McStartResult? fromJson(dynamic json) {
     final m = _map(json);
     final id = _str(m['sessionId']);
     if (id == null) return null;
-    return McStartResult(sessionId: id, name: _str(m['name']), server: _str(m['server']), serverUrl: _str(m['serverUrl']));
+    return McStartResult(
+      sessionId: id,
+      name: _str(m['name']),
+      server: _str(m['server']),
+      serverUrl: _str(m['serverUrl']),
+      agent: _str(m['agent']),
+      agentReady: m['agentReady'] != false,
+    );
   }
 }

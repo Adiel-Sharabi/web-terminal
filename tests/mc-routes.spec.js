@@ -292,7 +292,7 @@ test.describe('#502/#503 Mission Control routes', () => {
         const here = mv.suggested;
 
         // Refusals say why, and create nothing.
-        for (const [body, words] of [[{ project: 'nope', hunt: true, server: here }, 'no project'],
+        for (const [body, words] of [[{ project: 'widgets', hunt: true, server: here, brief: 'use $HOME' }, 'cannot contain $'],[{ project: 'nope', hunt: true, server: here }, 'no project'],
           [{ project: 'nofolder', hunt: true, server: here }, 'has no folder'],
           [{ project: 'widgets', server: here }, 'pick at least one'],
           [{ project: 'widgets', hunt: true, server: 'no-such-box' }, 'no machine named']]) {
@@ -303,7 +303,7 @@ test.describe('#502/#503 Mission Control routes', () => {
 
         // The tracker title is in the cache, so the name and brief carry it whatever the timing.
         expect((await ctx.get(`/api/work-items/${encodeURIComponent('acme/widgets#42')}/meta`)).status()).toBe(200);
-        const st = await ctx.post('/api/mc/start', { data: { project: 'widgets', subjects: ['#42'], hunt: false, server: here, brief: 'Keep the scroll; $HOME `x`' } });
+        const st = await ctx.post('/api/mc/start', { data: { project: 'widgets', subjects: ['#42'], hunt: false, server: here, brief: 'Keep the scroll; small' } });
         expect(st.status()).toBe(200);
         const started = await st.json();
         made.push(started.sessionId);
@@ -314,7 +314,7 @@ test.describe('#502/#503 Mission Control routes', () => {
         const row = (await (await ctx.get('/api/sessions')).json()).find((x) => x.id === started.sessionId);
         expect(row).toBeTruthy();
         expect(path.resolve(row.cwd).toLowerCase()).toBe(path.resolve(dir).toLowerCase());
-        expect(row.autoCommand).toBe('echo "Fix acme/widgets#42 (Widget list loses its scroll position) in project Widgets. Keep the scroll; HOME x"');
+        expect(row.autoCommand).toBe('echo "Fix acme/widgets#42 (Widget list loses its scroll position) in project Widgets. Keep the scroll; small"');
 
         // The subject lists it at once - no report was made - as bound, in its project.
         const s1 = (await (await ctx.get('/api/mc/subjects?project=widgets')).json()).subjects.find((x) => x.key === 'acme/widgets#42');
@@ -359,6 +359,95 @@ test.describe('#502/#503 Mission Control routes', () => {
         try { fs.rmSync(dir, { recursive: true, force: true }); } catch { /* a closing shell can still hold it */ }
       }
     });
+  });
+
+  test('start work on a PEER (#512): forwarded to its POST /api/sessions with the stored token; its refusals mapped; its hold read', async () => {
+    const PEER = 'http://127.0.0.1:17689';
+    const TOKEN = 'mc512-fake-peer-token';
+    const peer = { seen: [], made: [], next: 'ok', hold: null };
+    const fake = http.createServer((req, res) => {
+      let body = '';
+      req.on('data', (d) => { body += d; });
+      req.on('end', () => {
+        const send = (code, j) => { res.writeHead(code, { 'Content-Type': 'application/json' }); res.end(JSON.stringify(j)); };
+        if (req.method === 'POST' && req.url === '/api/sessions') {
+          peer.seen.push({ auth: req.headers.authorization || null, body: JSON.parse(body || '{}') });
+          if (peer.next === 'refuse') return send(400, { error: 'Folder does not exist: X' });
+          if (peer.next === 'unauth') return send(401, { error: 'Unauthorized' });
+          if (peer.next === 'held') return send(503, { error: 'Restart hold on this machine (update)' });
+          const id = `0000512${peer.made.length}-0000-4000-8000-000000000000`;
+          const j = JSON.parse(body);
+          peer.made.push({ id, name: j.name, cwd: j.cwd, status: 'idle', lastActivity: Date.now() });
+          return send(200, { id, name: j.name, agent: null, agentReady: true });
+        }
+        if (req.url === '/api/sessions') return send(200, peer.made);
+        if (req.url === '/api/version') return send(200, { version: '0.0.0', hash: 'fake', capabilities: [] });
+        if (req.url === '/api/maintenance/status') return send(200, { hold: peer.hold, safeToRestart: null, sessions: [] });
+        if (req.url === '/api/dashboard/closed') return send(200, { closed: [] });
+        return send(404, { error: 'Not found' });
+      });
+    });
+    await new Promise((r, j) => { fake.once('error', j); fake.listen(17689, '127.0.0.1', r); });
+    const TOK_FILE = process.env.WT_CLUSTER_TOKENS_FILE || path.join(__dirname, '..', 'cluster-tokens.test.json');
+    let tokens = {};
+    try { tokens = JSON.parse(fs.readFileSync(TOK_FILE, 'utf8')); } catch { /* first to need it */ }
+    tokens[PEER] = { token: TOKEN, name: 'fakepeer', authenticated: Date.now() };
+    fs.writeFileSync(TOK_FILE, JSON.stringify(tokens, null, 2));
+    const dir = 'C:\\peer\\widgets'; // a folder on the PEER: never checked here
+    try {
+      await withConfig({ projects: [{ id: 'widgets', name: 'Widgets', match: { repos: ['acme/widgets'], paths: [dir] } }],
+        mc: { ado: { org: 'fakeorg' }, startCommand: 'echo' }, cluster: [{ name: 'fakepeer', url: PEER }] }, async () => {
+        const ctx = await authCtx();
+        try {
+          const mv = await (await ctx.get('/api/mc/machines')).json();
+          expect(mv.machines.find((m) => m.name === 'fakepeer')).toMatchObject({ url: PEER, ok: true, why: null, sessions: 0 });
+          peer.hold = { reason: 'update', startedAt: Date.now() };
+          const held = (await (await ctx.get('/api/mc/machines')).json()).machines.find((m) => m.name === 'fakepeer');
+          expect(held).toMatchObject({ ok: false, why: 'restart hold: update' });
+          peer.hold = null;
+
+          const st = await ctx.post('/api/mc/start', { data: { project: 'widgets', subjects: ['#42'], server: 'fakepeer' } });
+          expect(st.status(), await st.text()).toBe(200);
+          const started = await st.json();
+          expect(started).toMatchObject({ server: 'fakepeer', serverUrl: PEER, sessionId: peer.made[0].id });
+          expect(peer.seen[0].auth).toBe(`Bearer ${TOKEN}`);
+          expect(peer.seen[0].body).toMatchObject({ cwd: dir });
+          expect(peer.seen[0].body.autoCommand.startsWith('echo "Fix acme/widgets#42')).toBe(true);
+
+          // Bound on the authority: the peer's session is on its subject before any report.
+          let ref = null;
+          for (let i = 0; i < 20 && !ref; i++) {
+            if (i) await sleep(300);
+            const sj = (await (await ctx.get('/api/mc/subjects/acme%2Fwidgets%2342')).json()).subject;
+            ref = sj && sj.sessions.find((x) => x.id === started.sessionId);
+          }
+          expect(ref).toMatchObject({ server: 'fakepeer', serverUrl: PEER, bound: true });
+
+          // A peer's refusal keeps its code; its 401 (our token) is a 502, never the caller's 401.
+          for (const [next, code, words] of [['refuse', 400, 'fakepeer: Folder does not exist'], ['unauth', 502, 'fakepeer: Unauthorized'],
+            ['held', 503, 'fakepeer: Restart hold']]) {
+            peer.next = next;
+            const r = await ctx.post('/api/mc/start', { data: { project: 'widgets', subjects: ['#42'], server: 'fakepeer' } });
+            expect(r.status(), next).toBe(code);
+            expect((await r.json()).error, next).toContain(words);
+          }
+          // A brief a shell would act on is refused before the peer is asked.
+          const before = peer.seen.length;
+          const bad = await ctx.post('/api/mc/start', { data: { project: 'widgets', hunt: true, server: 'fakepeer', brief: 'a `b`' } });
+          expect(bad.status()).toBe(400);
+          expect(peer.seen.length).toBe(before);
+        } finally {
+          await ctx.dispose();
+        }
+      });
+    } finally {
+      await new Promise((r) => fake.close(r));
+      try {
+        const t = JSON.parse(fs.readFileSync(TOK_FILE, 'utf8'));
+        delete t[PEER];
+        fs.writeFileSync(TOK_FILE, JSON.stringify(t, null, 2));
+      } catch { /* disposable */ }
+    }
   });
 
   test('a server that is not the authority answers 409 naming it; a bad authority is 503; meta still answers', async () => {

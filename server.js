@@ -7026,7 +7026,10 @@ async function _computeMcView(reqUser) {
   const servers = [{ name: me, ok: true }, ...peerAnswers.map((a) => ({ name: a.name, ok: a.ok }))];
 
   // #512 - a session started from Start work is on its project and subjects from birth.
-  const nodes = mcBinding.applyBindings(mcSubjects.sessionNodes({ rows, closed, now }), mcState.bindings());
+  // The bindings that still reach a listed session are kept alive (a long run keeps its own).
+  const usedBindings = new Set();
+  const nodes = mcBinding.applyBindings(mcSubjects.sessionNodes({ rows, closed, now }), mcState.bindings(), usedBindings);
+  mcState.touchBindings(usedBindings);
   // #506 - when each prompt on screen came up: its card's one id while it stays up.
   _mcPromptEpisodes.observe(nodes, now);
   const refs = mcSubjects.trackerKeys(nodes).map((k) => trackerMeta.parseRef(k)).filter((r) => r && !r.unqualified);
@@ -7038,7 +7041,8 @@ async function _computeMcView(reqUser) {
   const metaByKey = {};
   for (const m of await Promise.all(refs.map((r) => mcTrackerMeta.peek(r)))) metaByKey[m.key] = m;
   const view = mcSubjects.buildView({ nodes, metaByKey, projects: cfg.projects, stageStore: mcState, now });
-  const sessions = nodes.filter((n) => !n.closed).map((n) => ({ cwd: n.cwd, origin: n.origin, items: n.items, bound: n.boundProject }));
+  const boundOf = new Map(nodes.map((n) => [n.id, n.boundProject]));
+  const sessions = rows.map((s) => ({ cwd: s.cwd, origin: s.origin, items: s.brief && s.brief.items, bound: boundOf.get(s.id) }));
   // Computed once: GET /api/mc/projects serves it, and its area ids are what ?area= takes.
   const projectsOut = projectsLib.projectsView({ projects: cfg.projects, sessions, subjects: view.subjects });
   return { ...view, nodes, servers, projectsOut, generatedAt: now };
@@ -7410,6 +7414,7 @@ app.post('/api/mc/start', express.json({ limit: '16kb' }), async (req, res) => {
       if (m && m.title) titles[r.key] = m.title;
     }
     const plan = mcStart.startPlan(v, { titles, command: mcStart.startCommand(liveConfig('mc', null)) });
+    if (plan.error) return res.status(400).json({ error: plan.error });
     const body = { name: plan.name, cwd: v.cwd, autoCommand: plan.autoCommand, goal: plan.goal };
     let created;
     if (!peer) {
@@ -7426,15 +7431,16 @@ app.post('/api/mc/start', express.json({ limit: '16kb' }), async (req, res) => {
           body: JSON.stringify(body), timeout: MC_START_PEER_TIMEOUT_MS,
         });
       } catch (e) {
-        return res.status(502).json({ error: `${peer.name} did not answer: ${e.message}` });
+        console.error(`[mc] start on ${peer.name}: ${e.message}`);
+        return res.status(502).json({ error: `${peer.name} did not answer (see this server's log)` });
       }
       let j = null;
       try { j = JSON.parse(r.body); } catch { /* not JSON: said below */ }
       if (!r.ok || !j || typeof j.id !== 'string') {
         const why = (j && typeof j.error === 'string' && j.error.slice(0, 300)) || `HTTP ${r.status}`;
-        // A peer's refusal of the request keeps its code; its 401 (our token) must not read
-        // as the CALLER's sign-in failing, so that and every other failure is a 502.
-        return res.status([400, 404, 409].includes(r.status) ? r.status : 502).json({ error: `${peer.name}: ${why}` });
+        // A peer's refusal of the request keeps its code (503: its restart hold); its 401 (our
+        // token) must not read as the CALLER's sign-in failing, so that and the rest are a 502.
+        return res.status([400, 404, 409, 503].includes(r.status) ? r.status : 502).json({ error: `${peer.name}: ${why}` });
       }
       created = j;
     }

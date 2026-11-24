@@ -27,7 +27,7 @@ authority only (`lib/mc-state.js`: `mc-state.json`, override `WT_MC_STATE_FILE`,
 change by tmp+rename, a corrupt file renamed aside to `.corrupt-<ms>` and logged, as the brief store
 does): each subject's stage history (#505; a subject unseen for 30 days is dropped, at most 2000
 kept), the person's to-dos and "later"s (#506), and the Start work bindings under their own key
-`bindings` (#512; kept 8 days, at most 2000).
+`bindings` (#512; kept until 8 days after a session it reaches was last listed, at most 2000).
 `/api/work-items/:ref/meta` is answered by any server (per-server cache).
 
 ## Work-item meta (#502) - `lib/tracker-meta.js`
@@ -320,20 +320,23 @@ first repo; one it cannot qualify is refused); `hunt` = a bug hunt, which needs 
 it, at least one); `server` = a machine name from `/api/mc/machines` (this server, or a peer of its
 `cluster` config by name - never a url from the body); `name` <= 100, `brief` <= 500. Every refusal
 is `400 {error}` in words meant for a person: an unknown project, one with no `match.paths` ("has no
-folder"), a bad ref, an unknown machine.
+folder"), a bad ref, an unknown machine, a brief holding a character a shell acts on (named in the
+answer) or one too long to share the 500-character launch command with the task (by how much). A
+brief is refused, never changed or cut.
 The session is created through the ordinary create path: this server's own `POST /api/sessions`
 logic, or that route on the peer with the stored cluster token (a peer's 400/404/409 keeps its
-code; anything else, its 401 included, is a 502 naming the peer). It starts in the project's
+and its 503 restart-hold refusal keep their code; anything else, its 401 included, is a 502 naming
+the peer, the detail in this server's log). It starts in the project's
 `match.paths[0]` (a folder missing on that machine is the create route's own "Folder does not
 exist" refusal), named `<project name> <ref>[ +N] <tracker title>` (`<project name> hunt`; the
 title is the tracker's: a cold read is waited on for at most 1.5 s, as a poll waits, then the cache
 answers), with `goal` = the task and
-`autoCommand` = `<command> "<task>[ <brief>]"`: the task is `Fix <keys> (<title>) in project <name>.`
+`autoCommand` = `<command> "<task>[ <brief>]"` (the task, the server's own words, is shortened to fit): the task is `Fix <keys> (<title>) in project <name>.`
 or `Bug hunt in project <name>[, starting from <keys>].`; `<command>` is config `mc.startCommand`
 (letters, digits, space and `.:/\=_-` only), else `claude --dangerously-skip-permissions`. Text
 inside the quotes keeps letters and digits in any script and plain punctuation; every character a
 shell acts on inside double quotes (`` ` $ " \ ! % ^ & | < > ``) and every control character is
-dropped. A restart hold on the chosen machine refuses as its create route does (503 here).
+dropped from the server's words (a tracker title) and refused in the brief. A restart hold on the chosen machine refuses as its create route does (503, here or on a peer).
 Binding: recorded at birth on the authority (`mc-state.json` `bindings`, by session id:
 `{project, subjects: [{key, ref}], hunt, server, at}`), and the MC caches are dropped, so the next
 `/api/mc/subjects` lists the session under each subject (`SessionRef.bound: true`,

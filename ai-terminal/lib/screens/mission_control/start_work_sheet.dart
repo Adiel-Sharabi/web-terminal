@@ -11,15 +11,17 @@ import 'package:flutter/material.dart';
 
 import '../../api/api_client.dart';
 import '../../api/mc_models.dart';
+import '../../api/models.dart';
 import '../../services/mc_feed.dart';
 import '../../theme/app_theme.dart';
 
-/// Opens the Start work sheet; on a start, opens the new session with [onOpenSession].
-/// [projectId] preselects a project (the Project screen passes its own).
+/// Opens the Start work sheet; on a start, opens the new session with [onOpenSession]
+/// (with the session object built from the answer, null when its server is not in this
+/// app's list). [projectId] preselects a project (the Project screen passes its own).
 Future<void> showStartWorkSheet(
   BuildContext context, {
   required McFeed feed,
-  required void Function(String sessionId) onOpenSession,
+  required void Function(String sessionId, Session? initial) onOpenSession,
   String? projectId,
 }) async {
   final started = await showModalBottomSheet<McStartResult>(
@@ -28,7 +30,7 @@ Future<void> showStartWorkSheet(
     useSafeArea: true,
     builder: (_) => McStartWorkSheet(feed: feed, projectId: projectId),
   );
-  if (started != null) onOpenSession(started.sessionId);
+  if (started != null) onOpenSession(started.sessionId, feed.startedSession(started));
 }
 
 /// The refs typed into the free field: split on commas and blanks.
@@ -92,7 +94,12 @@ class _McStartWorkSheetState extends State<McStartWorkSheet> {
     try {
       final r = await widget.feed.subjects(project: p);
       if (!mounted || seq != _seq) return;
-      setState(() => _subjects = [for (final s in r.subjects) if (s.inFilter(McSubjectFilter.active)) s]);
+      // Only a tracker's work item can be started on: a subject of one session alone
+      // (`<key>@<session id>`) names nothing the server could bind to.
+      setState(() => _subjects = [
+            for (final s in r.subjects)
+              if (s.inFilter(McSubjectFilter.active) && !s.key.contains('@')) s
+          ]);
     } on ApiException catch (e) {
       if (mounted && seq == _seq) setState(() => _subjectsError = e.message);
     } catch (e) {

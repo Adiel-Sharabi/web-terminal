@@ -78,7 +78,7 @@ Widget _host(McFeed feed, List<String> opened, {String? projectId}) => MaterialA
         body: Builder(
           builder: (context) => TextButton(
             key: const ValueKey('open'),
-            onPressed: () => showStartWorkSheet(context, feed: feed, projectId: projectId, onOpenSession: opened.add),
+            onPressed: () => showStartWorkSheet(context, feed: feed, projectId: projectId, onOpenSession: (id, initial) => opened.add('$id@${initial?.server.name}@${initial?.agentReady}')),
             child: const Text('open'),
           ),
         ),
@@ -139,13 +139,15 @@ void main() {
           'brief': 'Keep it small',
         }
       ]);
-      expect(opened, ['new-1']);
+      // Started on a peer this app does not list: opened by id alone.
+      expect(opened, ['new-1@null@null']);
       expect(find.byKey(const ValueKey('mc-start-sheet')), findsNothing);
     });
 
     testWidgets('a hunt needs no work item and sends none', (tester) async {
       await _size(tester, const Size(900, 1400));
-      final auth = _Authority();
+      final auth = _Authority()
+        ..start = (200, {'server': 'alpha', 'serverUrl': null, 'sessionId': 'new-2', 'agent': 'claude', 'agentReady': false});
       final feed = auth.feed();
       await feed.refresh();
       final opened = <String>[];
@@ -158,7 +160,9 @@ void main() {
       await tester.tap(find.byKey(const ValueKey('mc-start-go')));
       await tester.pumpAndSettle();
       expect(auth.startBodies.single, {'project': 'web-terminal', 'subjects': <String>[], 'hunt': true, 'server': 'beta'});
-      expect(opened, ['new-1']);
+      // Started on the authority itself: opened with its session object, on the server that
+      // answered, not ready yet (#147).
+      expect(opened, ['new-2@Alpha@false']);
     });
 
     testWidgets('a refusal shows the server reason and opens nothing', (tester) async {

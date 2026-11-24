@@ -307,6 +307,27 @@ class McFeed extends ChangeNotifier {
     return r;
   }
 
+  /// The session [r] started, as this app opens it: on its own server (the one that
+  /// answered when it runs on the authority, else the configured server at its url), with
+  /// the agent and readiness the server resolved (#147), as every other create flow opens
+  /// the session it just made. Null when its server is not in this app's list.
+  Session? startedSession(McStartResult r) {
+    final sv = r.serverUrl == null ? _servedBy : serverForUrl(servers(), r.serverUrl);
+    if (sv == null) return null;
+    return Session(
+      id: r.sessionId,
+      name: r.name ?? '',
+      cwd: '',
+      status: 'idle',
+      claudeSessionId: null,
+      lastActivity: DateTime.now().millisecondsSinceEpoch,
+      notifyLevel: 'important',
+      server: sv,
+      agent: r.agent,
+      agentReady: r.agentReady,
+    );
+  }
+
   /// Tells every session in [sessions] [text], each through the gated prompt on ITS OWN
   /// server (found by url in this app's list), one after the other. Never throws: each
   /// session gets its answer - told, refused with the server's reason, or why it could

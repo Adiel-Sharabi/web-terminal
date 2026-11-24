@@ -216,7 +216,8 @@ class _MissionControlHomeState extends State<MissionControlHome> {
 
   /// #512 - the one Start work entry point; [projectId] preselects a project.
   void _startWork({String? projectId}) =>
-      showStartWorkSheet(context, feed: _feed, projectId: projectId, onOpenSession: _openSession);
+      showStartWorkSheet(context,
+          feed: _feed, projectId: projectId, onOpenSession: (id, initial) => _openSession(id, initial: initial));
 
   List<Widget> _actions() => [
         if (_tab == McTab.now || _tab == McTab.projects)
