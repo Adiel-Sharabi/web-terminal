@@ -80,7 +80,12 @@ test.describe('the verdict (#540)', () => {
     for (const why of ['long-self', 'live-unreported', 'external']) expect(P.effectiveVerdict(why, 'skip')).toBe('skip');
     // The readings that PROVE the session is stranded or cut are never overridden by a model's "still pending".
     for (const why of ['stale-self', 'children-parked', 'api-error']) expect(P.effectiveVerdict(why, 'skip')).toBe('wake');
-    for (const why of ['long-self', 'stale-self', 'external', 'children-parked']) expect(P.effectiveVerdict(why, 'tell')).toBe('tell');
+    for (const why of ['long-self', 'stale-self', 'external', 'children-parked']) expect(P.effectiveVerdict(why, 'tell', { reporting: 'on' })).toBe('tell');
+    // The card is the session's `possibleAsk`, which the brief publishes only while it reports: for a session
+    // that does not (an excluded folder, an opt-out) a "tell" would be invisible, so it is woken instead.
+    for (const reporting of ['off', undefined, null]) expect(P.effectiveVerdict('external', 'tell', { reporting })).toBe('wake');
+    expect(P.effectiveVerdict('external', 'tell')).toBe('wake');
+    expect(P.effectiveVerdict('external', 'skip', { reporting: 'off' })).toBe('skip'); // a skip shows nothing, so it needs no card
     expect(P.effectiveVerdict('external', 'wake')).toBe('wake');
     for (const v of [undefined, null, '', 'maybe', 3]) expect(P.effectiveVerdict('external', v)).toBe('wake');
     // A turn an API error cut is never put to the model at all.
@@ -153,13 +158,13 @@ test.describe('a skip or a tell is a virtual check-in: answered, counted, held q
   }
   const answeredBy = (verdict, r, ageMin) => {
     const at = T - ageMin * MIN;
-    const rec = C.skipRecord(at, 61, 'long-self', 1, { verdict, reason: 'pending', model: 'm', wait: r.brief.wait, baseline: C.changeSignature(r) });
+    const rec = C.skipRecord(at, 61, 'long-self', null, { verdict, reason: 'pending', model: 'm', wait: r.brief.wait, baseline: C.changeSignature(r) });
     return { ...r, brief: { ...r.brief, checkIn: C.publicRecord(rec), turnAt: at - 1000, stoppedAt: at - 500 } };
   };
 
   test('skip: the standing wait is its answer; nothing asks again on the clock alone, a change does', () => {
     const r = row();
-    const rec = C.skipRecord(T, 61, 'long-self', 1, { verdict: 'skip', reason: 'CI still running', model: 'm', wait: r.brief.wait, baseline: C.changeSignature(r) });
+    const rec = C.skipRecord(T, 61, 'long-self', null, { verdict: 'skip', reason: 'CI still running', model: 'm', wait: r.brief.wait, baseline: C.changeSignature(r) });
     expect(rec).toMatchObject({ deliveredAt: T, endedAt: T, answer: { on: 'self', what: 'watch CI' }, pre: { verdict: 'skip', reason: 'CI still running', model: 'm' } });
     expect(C.outcome(rec, r, T)).toBe('skipped');
     expect(C.periodOpen(rec, T - 1000)).toBe(true);
@@ -177,7 +182,7 @@ test.describe('a skip or a tell is a virtual check-in: answered, counted, held q
 
   test('tell: the answer is the owner\'s, so nothing ever repeats it; the record never claims the session spoke', () => {
     const r = row();
-    const rec = C.skipRecord(T, 61, 'long-self', 1, { verdict: 'tell', reason: 'Asks whether to merge', model: 'm', wait: r.brief.wait, baseline: C.changeSignature(r) });
+    const rec = C.skipRecord(T, 61, 'long-self', null, { verdict: 'tell', reason: 'Asks whether to merge', model: 'm', wait: r.brief.wait, baseline: C.changeSignature(r) });
     expect(rec.answer).toEqual({ on: 'you', what: 'Asks whether to merge' });
     expect(C.outcome(rec, r, T)).toBe('told');
     expect(C.repeatPossible(rec)).toBe(false);
@@ -187,7 +192,7 @@ test.describe('a skip or a tell is a virtual check-in: answered, counted, held q
   });
 
   test('a skip with no wait reported has no answer (a live-unreported reading), and control characters never reach a record', () => {
-    const rec = C.skipRecord(T, 61, 'live-unreported', 1, { verdict: 'skip', reason: 'x\u001b[201~y\n\tz', model: 'm', wait: null, baseline: null });
+    const rec = C.skipRecord(T, 61, 'live-unreported', null, { verdict: 'skip', reason: 'x\u001b[201~y\n\tz', model: 'm', wait: null, baseline: null });
     expect(rec.answer).toBeNull();
     expect(rec.pre.reason).toBe('x [201~y z');
     expect(rec.pre.reason).not.toMatch(/[\u0000-\u001f]/);

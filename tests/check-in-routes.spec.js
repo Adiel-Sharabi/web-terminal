@@ -16,6 +16,7 @@ const { test, expect, request: pwRequest } = require('@playwright/test');
 const { BASE, authCtx, readHookToken, claudeProjectsRoot } = require('./test-helpers');
 
 const TAG = '[web-terminal check-in]';
+const SUPERVISOR_TAG = '[web-terminal supervisor]'; // lib/user-turn.js SUPERVISOR_PROMPT_TAG: what the gated prompt route types
 const LAUNCH = "printf '\\xe2\\x9d\\xaf\\xc2\\xa0 ready\\n\\x1b[>0q'; echo claude";
 const HANDOFF_DIR = process.env.WT_HANDOFF_DIR || path.join(__dirname, '..', 'handoffs.test');
 const LOG = path.join(HANDOFF_DIR, 'check-in-log.jsonl');
@@ -459,6 +460,10 @@ test.describe('#443 check-in - server', () => {
       headers: { 'X-WT-Hook-Token': readHookToken() } }).then((r) => r.status())).toBe(200);
     await until(async () => logOf(id).filter((l) => l.event === 'sent').length === 2, 'the repeat after a change', 30000);
     expect(logOf(id).filter((l) => l.event === 'sent').map((l) => l.n)).toEqual([1, 2]);
+    // ...and the ledger line of that repeat says what moved (the first, with nothing before it, names nothing).
+    const woken = ledgerOf(id).filter((l) => l.decision === 'woken');
+    expect(woken[0].changed).toBeUndefined();
+    expect(woken[1].changed).toEqual(['i']);
   });
 
   /** An external wait the check-in may ask about at once, with the pre-check on the fake CLI. */
@@ -472,7 +477,7 @@ test.describe('#443 check-in - server', () => {
     setFake({ mode: 'skip', reason: 'CI is still running on the PR' });
     const id = await externalIdle(`checkin-pre-skip-${Date.now()}`);
     const row = await until(async () => { const r = await rowOf(id); return r?.checkIn?.state === 'skipped' ? r : null; }, 'the skipped check-in');
-    expect(row.brief.checkIn).toMatchObject({ n: 1, why: 'external', answer: { on: 'external' }, pre: { verdict: 'skip', reason: 'CI is still running on the PR', model: 'haiku' } });
+    expect(row.brief.checkIn).toMatchObject({ n: 0, why: 'external', answer: { on: 'external' }, pre: { verdict: 'skip', reason: 'CI is still running on the PR', model: 'haiku' } });
     await sleep(2500);
     expect(await scrollback(id)).not.toContain(TAG);
     expect(logOf(id).filter((l) => l.event === 'sent')).toHaveLength(0);
@@ -544,6 +549,9 @@ test.describe('#443 check-in - server', () => {
     expect(await hook(id, 'Stop', { session_id: conv, transcript_path: tp })).toBe(200);
     expect((await ctx.post('/api/claude-status', { data: { session_id: conv, context_window: { context_window_size: 1_000_000, used_percentage: 80 } } })).status()).toBe(200);
     await until(async () => (await rowOf(id))?.status === 'idle', 'idle');
+    // autoEveryMs 600000 hides the hand-off scan, so a test isolates layer 3's OWN path. Under the default (60 s) the
+    // hand-off scan reaches such a session first - it needs only idleMin - which is why a test of what the two do
+    // TOGETHER passes `autoEveryMs: undefined` (the config then carries no key: the default).
     await setConfig({ ...FAST, handoff: { ...FAST.handoff, idleMin: 0.01, auto: true, autoEveryMs: 600000, ...handoff }, checkIn: { ...FAST.checkIn, externalMin: 0.01, ...config } });
     return id;
   }
@@ -576,6 +584,38 @@ test.describe('#443 check-in - server', () => {
     await until(async () => (await scrollback(c)).includes(TAG), 'the check-in when the hand-off refuses', 60000);
     expect((await rowOf(c)).handoff.run).toBeNull();
     expect(await until(async () => skipsOf(c).find((l) => l.reason === 'handoff-auto-off'), 'the refused hand-off in the skip log')).toMatchObject({ source: 'handoff-instead' });
+  });
+
+  test('#540 layer 3 waits for the hand-off in flight: one run at a time, under the DEFAULT handoff.autoEveryMs', async () => {
+    test.setTimeout(240000);
+    const none = { autoEveryMs: undefined }; // JSON drops it: the config names no interval, so the default (60 s) holds
+    const a = await bigExternalIdle(`checkin-handoff-one-a-${Date.now()}`, { bigIdleMin: 0.01 }, none);
+    // One run starts (the hand-off scan or layer 3, whichever reaches it first) and stays in flight: nothing types its wrap-up.
+    await until(async () => (await rowOf(a))?.handoff?.run, 'the first hand-off', 90000);
+    // A second big idle session, a candidate in every way - and a wake of it would start a SECOND concurrent run.
+    const b = await bigExternalIdle(`checkin-handoff-one-b-${Date.now()}`, { bigIdleMin: 0.01 }, none);
+    await sleep(3000);
+    expect((await rowOf(b)).handoff.run, 'a second run beside the first').toBeNull();
+    await until(async () => skipsOf(b).find((l) => l.reason === 'handoff-busy'), 'the deferral in the skip log', 60000);
+    expect((await rowOf(a)).handoff.run).toMatchObject({ state: 'wrapping' });
+    // Deferred, not typed: neither session was asked, and neither the log nor the ledger says b was woken or handed off.
+    for (const id of [a, b]) expect(await scrollback(id)).not.toContain(TAG);
+    expect(logOf(b).filter((l) => l.event === 'sent' || l.event === 'handed-off')).toHaveLength(0);
+    expect(ledgerOf(b)).toHaveLength(0);
+  });
+
+  test('#540 review: a gated prompt that arrives while a pre-check runs is not refused "busy"', async () => {
+    test.setTimeout(150000);
+    // A session to prompt (it waits on the owner: never checked in on), and one whose pre-check takes 3 s.
+    const quiet = await endedTurn(`checkin-busy-quiet-${Date.now()}`, { on: 'you', what: 'a decision' });
+    setFake({ mode: 'skip', reason: 'CI is still running', delayMs: 3000 }); // the suite's pre-check timeout is 4 s
+    const slow = await externalIdle(`checkin-busy-slow-${Date.now()}`);
+    await until(async () => fakeRuns().length >= 1, 'the pre-check to be running', 60000);
+    // The model is mid-call: nothing is being typed anywhere, so the prompt goes through.
+    const r = await ctx.post(`/api/sessions/${quiet}/prompt`, { data: { text: 'your wait changed' } });
+    expect({ status: r.status(), body: await r.json() }).toEqual({ status: 200, body: { delivered: true } });
+    await until(async () => (await scrollback(quiet)).includes(`${SUPERVISOR_TAG} your wait changed`), 'the prompt in the terminal');
+    await until(async () => (await rowOf(slow))?.checkIn?.state === 'skipped', 'the slow session\'s skipped check-in', 60000);
   });
 
   test('#463 no wait reported since a typed prompt, a watcher still running: asked as live-unreported', async () => {

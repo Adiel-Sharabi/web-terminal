@@ -207,9 +207,10 @@ test.describe('once per idle period (#443)', () => {
     expect(again.reason).toMatchObject({ kind: 'self', source: 'reported' });
     expect(block(again, { now: sent + 60000 + 59 * MIN })).toBe('asked');
     // #463: an hour after its answer the CLOCK allows another (see the #463 block below); #540: and
-    // only a change since the answer asks. With no baseline recorded yet, none has been seen.
+    // only a change since the answer asks. An answer with NO baseline (an older server's) counts as
+    // changed once: nobody saw its world, so the clock alone asks, as before #540.
     const late = { now: sent + 60000 + 60 * MIN };
-    expect(block(again, late)).toBe('unchanged');
+    expect(block(again, late)).toBeNull();
     expect(block(baselined(again), late)).toBe('unchanged');
     expect(block(withItems(baselined(again)), late)).toBeNull();
   });
@@ -887,8 +888,7 @@ test.describe('a stuck watcher with no report, and a repeat after the answer (#4
     // The same records with an answer that may repeat ARE due: the negatives above are the gate's.
     const due = { ...esc, endedAt: T - 598 * MIN, answer: { on: 'self', what: 'x' } };
     expect(C.repeatTimeDue(due, T)).toBe(true);
-    // #540: the clock is not enough. No baseline, or a world that has not moved, is no repeat...
-    expect(C.repeatDue(due, T)).toBe(false);
+    // #540: the clock is not enough: a world that has not moved is no repeat...
     const sig = C.changeSignature(candidate(600));
     expect(C.repeatDue({ ...due, base: sig }, T, undefined, sig)).toBe(false);
     // ...and a change since the answer is.
@@ -899,9 +899,12 @@ test.describe('a stuck watcher with no report, and a repeat after the answer (#4
     const ended = T - 61 * MIN;
     const rec = { ...C.startRecord(ended - 2 * MIN, 61, 'long-self'), deliveredAt: ended - MIN, endedAt: ended, answer: { on: 'self', what: 'x' } };
     const e = { turnAt: ended - MIN, stoppedAt: ended, reported: { at: ended - 1000, wait: { on: 'self', what: 'x', at: ended - 1000 } }, checkIn: rec };
-    // #540: an answered check-in with no baseline is looked at once, to record it, whatever the clock says...
+    // #540: an answered check-in with no baseline is looked at once, to record it, whatever the clock says -
+    // within baselineWithinMin of the answer; a later first look saw a world that may have moved, records
+    // none, and the ladder's clock alone allows the repeat (repeatDue)...
+    expect(C.worthReading(e, { now: ended + 5 * MIN })).toBe(true);
+    expect(C.worthReading(e, { now: ended + 11 * MIN })).toBe(false);
     expect(C.worthReading(e, { now: T })).toBe(true);
-    expect(C.worthReading(e, { now: T - 2 * MIN })).toBe(true);
     // ...then only when the ladder's clock is due, and a session found unchanged is looked at again
     // every changeCheckMin, not every scan.
     const based = { ...e, checkIn: { ...rec, base: C.changeSignature(candidate(60)) } };

@@ -299,8 +299,8 @@ reason at most every 15 minutes; "no reading yet" is not logged.
 **A check-in wakes a whole conversation, so it is asked only when it can learn something (#540).**
 Three layers, cheapest first. (1) **No repeat on an unchanged session:** after an answer, the repeat
 above waits for the session's world to change as well as for the clock: its reported wait, its work
-items, the work listed as running, its child sessions, or the tracker state of its items (a PR
-merged or closed). The first look after an answer records that state; the clock alone never asks
+items, the work listed as running, its child sessions, the tracker state of its items (a PR
+merged or closed), the CI of an open PR finishing, or its wait's deadline (`checkBy`) passing. The first look after an answer records that state; the clock alone never asks
 again. A session whose state cannot be read is never typed to (the same fail-closed rule as before).
 Something that finishes without touching any of those is seen on the next change, not by itself.
 (2) **A cheap pre-check:** before a check-in is typed, a fresh small model (the agent registry's
