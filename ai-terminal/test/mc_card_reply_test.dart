@@ -236,6 +236,23 @@ void main() {
       expect(sent.map((s) => s.$2), ['sqlite', 'postgres']);
     });
 
+    testWidgets('a late tap on the Undo of an earlier pick does not take back a later one', (tester) async {
+      await pump(tester, _askJson());
+      await tester.tap(key('mc-card-option-0'));
+      await tester.pump();
+      await tester.pump(const Duration(milliseconds: 500));
+      final earlierUndo = tester.widget<SnackBarAction>(find.byType(SnackBarAction)).onPressed;
+      await _pastUndo(tester);
+      await tester.pump(kMcSentGrace + const Duration(seconds: 1));
+      await tester.tap(key('mc-card-option-1'));
+      await tester.pump();
+      await tester.pump(const Duration(milliseconds: 500));
+      earlierUndo();
+      await tester.pump();
+      await _pastUndo(tester);
+      expect(sent.map((s) => s.$2), ['sqlite', 'postgres'], reason: 'the later pick was not the earlier one\'s to take back');
+    });
+
     testWidgets('a decision card\'s chips answer too', (tester) async {
       await pump(tester, _decisionJson());
       await tester.tap(key('mc-card-option-0'));

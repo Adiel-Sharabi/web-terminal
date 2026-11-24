@@ -348,6 +348,10 @@ class _McAnswerCardState extends State<McAnswerCard> {
   /// answer was asked for).
   Timer? _undoTimer;
 
+  /// Which pick the Undo window belongs to: a late tap on the toast of an earlier pick must not
+  /// take back a later one.
+  int _pickSeq = 0;
+
   /// Runs out [kMcSentGrace] after a send; a card still here then was not taken.
   Timer? _sentTimer;
 
@@ -408,11 +412,12 @@ class _McAnswerCardState extends State<McAnswerCard> {
   /// there is no Undo to offer, so it goes at once. [label] is what the status line says.
   void _startPick(String label, Future<bool> Function() send) {
     if (_busy) return;
+    final seq = ++_pickSeq;
     final toast = showTimedSnackBar(
       context,
       'Answering "$label" - Undo stops it',
       duration: kMcUndoWindow,
-      action: SnackBarAction(label: 'Undo', onPressed: _undoPick),
+      action: SnackBarAction(label: 'Undo', onPressed: () => _undoPick(seq)),
     );
     if (toast == null) {
       unawaited(_deliver(send, label));
@@ -430,9 +435,9 @@ class _McAnswerCardState extends State<McAnswerCard> {
 
   /// Takes back the pick inside its window; nothing to take back once it went (a late tap on a
   /// toast that outlived it).
-  void _undoPick() {
+  void _undoPick(int seq) {
     final t = _undoTimer;
-    if (t == null) return;
+    if (t == null || seq != _pickSeq) return;
     t.cancel();
     _undoTimer = null;
     if (mounted) setState(() => _phase = _McReplyPhase.idle);
@@ -630,7 +635,7 @@ class _McAnswerCardState extends State<McAnswerCard> {
                 if (_phase == _McReplyPhase.undo)
                   TextButton(
                     key: const ValueKey('mc-card-undo'),
-                    onPressed: _undoPick,
+                    onPressed: () => _undoPick(_pickSeq),
                     child: const Text('Take it back'),
                   ),
               ]),
