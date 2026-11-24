@@ -475,11 +475,27 @@ class ApiClient {
   /// Asks Mission Control's read-only Analyst a question about [scope]
   /// (`POST /api/mc/ask`, #511). A model answers, so this can take a minute or two; a
   /// `502`/`503` is thrown with the server's reason in words ([McAnswer.failureText]).
-  Future<McAnswer> mcAsk(String question, McAskScope scope) async {
-    final res = await _send('POST', '/api/mc/ask',
-        body: {'question': question, 'scope': scope.toJson()},
-        timeout: const Duration(seconds: 150),
-        alsoAccept: const {400, 409, 502, 503});
+  Future<McAnswer> mcAsk(String question, McAskScope scope) async =>
+      McAnswer.fromJson(await _mcModel('/api/mc/ask', {'question': question, 'scope': scope.toJson()}));
+
+  /// #510 - a question card ([cardId], an Answer-now card's id) at one [level]: `ask`,
+  /// `context` or `everything`. Built by the server from what it holds; no model runs.
+  Future<McQuestionContext> mcQuestionContext(String cardId, String level) async => McQuestionContext.fromJson(
+      await _mcGet('/api/mc/questions/${Uri.encodeComponent(cardId)}/context', query: {'level': level}));
+
+  /// #510 - the Analyst answers [question] about option [option] (its index in the card's
+  /// `ask.options`; null: the whole question). Never typed into the waiting session.
+  Future<McAnswer> mcQuestionFollowup(String cardId, int? option, String question) async => McAnswer.fromJson(
+      await _mcModel('/api/mc/questions/${Uri.encodeComponent(cardId)}/followup', {'option': option, 'question': question}));
+
+  /// #510 - the Analyst suggests other answers to the card's question.
+  Future<McSuggestions> mcQuestionSuggest(String cardId) async =>
+      McSuggestions.fromJson(await _mcModel('/api/mc/questions/${Uri.encodeComponent(cardId)}/suggest', const {}));
+
+  /// A POST answered by the Analyst's model run (#511, #510): a 502/503 says why in words.
+  Future<Map<String, dynamic>> _mcModel(String path, Map<String, Object?> body) async {
+    final res = await _send('POST', path,
+        body: body, timeout: const Duration(seconds: 150), alsoAccept: const {400, 409, 502, 503});
     if (res.statusCode == 502 || res.statusCode == 503) {
       final m = _asMap(_decode(res));
       // A run that could not answer says why in `reason`; Mission Control's own refusal (a
@@ -488,7 +504,7 @@ class ApiClient {
       throw ApiException(res.statusCode,
           m['reason'] == null && error is String && error.isNotEmpty ? error : McAnswer.failureText(m['reason']));
     }
-    return McAnswer.fromJson(_mcAnswer(res));
+    return _mcAnswer(res);
   }
 
   /// How long a Start work call is waited on: longer than everything the server waits on.

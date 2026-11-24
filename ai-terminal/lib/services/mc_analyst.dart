@@ -7,8 +7,9 @@
 // answer is final: a 404 naming what is unknown, a 400, a 502/503 with the reason in words -
 // and a TIMEOUT: that server may still be running the model, and asking another would start a
 // second, separately billed run over the same question.
-// Later screens (#509's "Ask about this subject", #510's follow-ups) call [McAnalyst.ask]
-// with their own scope.
+// #509's "Ask about this subject" calls [McAnalyst.ask] with its own scope; #510's question
+// panel calls [McAnalyst.questionContext], [McAnalyst.followup] and [McAnalyst.suggest] - one
+// routing rule for all of them ([McAnalyst._route]).
 //
 // [McAskThread] is one conversation: the questions asked from one place and their answers,
 // kept while the screen that shows them comes and goes.
@@ -35,7 +36,32 @@ class McAnalyst {
   ServerConfig? get answeredBy => _last;
 
   /// Asks [question] about [scope]. Throws [ApiException] with words to show.
-  Future<McAnswer> ask(String question, McAskScope scope) async {
+  Future<McAnswer> ask(String question, McAskScope scope) => _route((c) => c.mcAsk(question, scope),
+      tooLong: 'The Analyst took too long to answer: try a narrower scope or question',
+      tooOld: 'This server has no Ask yet: it arrives with a server update');
+
+  static const String _noQuestions = 'This server has no question context yet: it arrives with a server update';
+
+  /// #510 - the card [cardId] at [level] (`ask`, `context`, `everything`). No model runs.
+  Future<McQuestionContext> questionContext(String cardId, String level) =>
+      _route((c) => c.mcQuestionContext(cardId, level), tooLong: 'Mission Control took too long to answer', tooOld: _noQuestions);
+
+  /// #510 - the Analyst answers [question] about option [option] of card [cardId] (null:
+  /// the whole question). Nothing reaches the waiting session.
+  Future<McAnswer> followup(String cardId, int? option, String question) => _route(
+      (c) => c.mcQuestionFollowup(cardId, option, question),
+      tooLong: 'The Analyst took too long to answer: try a shorter question',
+      tooOld: _noQuestions);
+
+  /// #510 - the Analyst suggests other answers to card [cardId].
+  Future<McSuggestions> suggest(String cardId) => _route((c) => c.mcQuestionSuggest(cardId),
+      tooLong: 'The Analyst took too long to suggest options', tooOld: _noQuestions);
+
+  /// One call on the server that answers Mission Control: the last one first; a 409 peer answer
+  /// names the authority, asked next; an unreachable server moves on. Any other answer is final,
+  /// a TIMEOUT included ([tooLong]): that server may still be running the model. Express's own
+  /// 404 is a server from before the route ([tooOld]).
+  Future<T> _route<T>(Future<T> Function(ApiClient c) call, {required String tooLong, required String tooOld}) async {
     final list = servers();
     if (list.isEmpty) throw const ApiException(0, 'Add a server first: the Analyst reads Mission Control');
     final first = preferred?.call() ?? _last;
@@ -48,9 +74,9 @@ class McAnalyst {
     final tried = <String>{};
     ApiException? lastError;
 
-    Future<McAnswer> one(ServerConfig sv) async {
+    Future<T> one(ServerConfig sv) async {
       tried.add(sv.baseUrl);
-      final a = await client(sv).mcAsk(question, scope);
+      final a = await call(client(sv));
       _last = sv;
       return a;
     }
@@ -73,12 +99,10 @@ class McAnalyst {
           lastError = ApiException(0, '${sv.name}: ${e.message}');
           continue;
         }
-        if (e.isTransport) {
-          throw const ApiException(0, 'The Analyst took too long to answer: try a narrower scope or question');
-        }
-        // Express's own 404 (no JSON error): a server from before Ask.
+        if (e.isTransport) throw ApiException(0, tooLong);
+        // Express's own 404 (no JSON error): a server from before the route.
         if (e.status == 404 && e.message == 'Not found') {
-          lastError = const ApiException(404, 'This server has no Ask yet: it arrives with a server update');
+          lastError = ApiException(404, tooOld);
           continue;
         }
         rethrow;

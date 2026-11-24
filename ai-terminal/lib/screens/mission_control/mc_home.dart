@@ -20,7 +20,11 @@ import '../../services/mc_analyst.dart';
 import '../../api/models.dart';
 import '../../services/app_config.dart';
 import '../../services/mc_feed.dart';
+import '../../services/mc_pick_sender.dart';
+import '../../services/needs_you_actions.dart';
+import '../../services/session_input.dart';
 import '../../services/session_repository.dart';
+import '../../widgets/timed_snack_bar.dart';
 import '../../util/open_inbox.dart';
 import '../adaptive_home.dart';
 import '../session_screen.dart' show openSessionOnStack;
@@ -30,6 +34,7 @@ import 'ask_view.dart';
 import 'machines_view.dart';
 import 'now_view.dart';
 import 'project_view.dart';
+import 'question_panel.dart';
 import 'start_work_sheet.dart';
 
 /// Every place Mission Control can show. Desktop shows [desktopTabs], a phone [phoneTabs].
@@ -103,8 +108,26 @@ class _MissionControlHomeState extends State<MissionControlHome> {
   late final McFeed _feed = widget.feed ??
       McFeed(servers: _servers, client: _client, isForeground: () => _repo.isForeground);
 
-  late final McAskThread _ask = McAskThread(
-      widget.analyst ?? McAnalyst(servers: _servers, client: _client, preferred: () => _feed.servedBy));
+  late final McAnalyst _analyst =
+      widget.analyst ?? McAnalyst(servers: _servers, client: _client, preferred: () => _feed.servedBy);
+
+  late final McAskThread _ask = McAskThread(_analyst);
+
+  // #510 - a question card's final pick goes out through the existing answer paths (the
+  // writers the board and the inbox use); the follow-ups and suggestions never come here.
+  late final NeedsYouActions _needs =
+      NeedsYouActions(repository: _repo, client: _client, input: runWithSessionInput, say: _say);
+  late final McPickSender _picks = McPickSender(actions: _needs, sessions: () => _repo.current);
+  bool _needsMade = false;
+
+  void _say(String text) {
+    if (mounted) showTimedSnackBar(context, text);
+  }
+
+  Future<bool> _sendPick(McCard card, String text) {
+    _needsMade = true;
+    return _picks.send(card, text);
+  }
 
   /// Desktop: whether the Ask panel is open beside the tab.
   bool _askPanel = false;
@@ -132,6 +155,7 @@ class _MissionControlHomeState extends State<MissionControlHome> {
     _feed.active = false;
     if (widget.feed == null) _feed.dispose();
     _ask.dispose();
+    if (_needsMade) _needs.dispose();
     super.dispose();
   }
 
@@ -249,6 +273,11 @@ class _MissionControlHomeState extends State<MissionControlHome> {
 
   @override
   Widget build(BuildContext context) {
+    // #510 - every question card below (Now, a subject) opens its panel through this.
+    return McQuestionScope(analyst: _analyst, onSend: _sendPick, onAnswer: _answer, child: _layout());
+  }
+
+  Widget _layout() {
     return LayoutBuilder(builder: (context, box) {
       final wide = box.maxWidth >= AdaptiveHome.splitBreakpoint;
       final tabs = wide ? McTab.desktopTabs : McTab.phoneTabs;

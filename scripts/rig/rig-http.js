@@ -29,15 +29,17 @@ const agent = new http.Agent({ keepAlive: true, maxSockets: 4 });
 const RETRYABLE = new Set(['ETIMEDOUT', 'ECONNRESET', 'ECONNREFUSED', 'EPIPE']);
 const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
 
-function once(method, path, { cookie, body, contentType } = {}) {
+// [timeout] (ms, default 8 s): a model run behind the route (#510's follow-ups) needs longer.
+// [headers]: extra request headers (a hook token).
+function once(method, path, { cookie, body, contentType, timeout = 8000, headers: extra } = {}) {
   return new Promise((resolve, reject) => {
-    const headers = {};
+    const headers = { ...(extra || {}) };
     if (cookie) headers.Cookie = cookie;
     if (body !== undefined) {
       headers['Content-Type'] = contentType || 'application/json';
       headers['Content-Length'] = Buffer.byteLength(body);
     }
-    const req = http.request({ host: HOST, port: PORT, path, method, headers, agent, timeout: 8000 }, (res) => {
+    const req = http.request({ host: HOST, port: PORT, path, method, headers, agent, timeout }, (res) => {
       let text = '';
       res.setEncoding('utf8');
       res.on('data', (c) => { text += c; });
@@ -75,8 +77,9 @@ async function login() {
 }
 
 /** A JSON API call. Throws on a non-2xx so a verifier fails loudly, never silently. */
-async function api(cookie, method, path, payload) {
+async function api(cookie, method, path, payload, opts = {}) {
   const res = await request(method, path, {
+    ...opts,
     cookie,
     body: payload === undefined ? undefined : JSON.stringify(payload),
   });

@@ -752,6 +752,16 @@ companion's daily foreground time from a phone over adb in `logs/phone-usage.jso
   session in the project's folder with a name and a brief for its agent, and binds it to the project
   and work items at birth, so it shows under them before its first report; sessions it starts
   inherit the binding. Config `mc.startCommand` sets the launch command.
+- **Questions with context on demand (#510):** **More context** on an Answer-now card (Now, a
+  subject) opens it at three levels - **Just the ask** (and the recommendation), **Context** (the
+  work item, what the session did, what each answer does, the inbox digest when one is cached) and
+  **Everything** (the last turns, every link) - built from what the server holds, no model run
+  (`GET /api/mc/questions/:cardId/context?level=`). **Ask about this option** puts a question to
+  the Analyst and shows its answer under that option (`POST .../followup`); **Suggest more
+  options** has it propose other answers (`POST .../suggest`), and **Compare** lays every option
+  side by side. None of it reaches the waiting session: only a suggestion you pick and confirm is
+  sent, as the answer, through the same path as any answer (a decision's or a wait's reply, a
+  question's `Other` row - which exists only for one compact question).
 - Shapes and rules: [docs/mission-control.md](docs/mission-control.md).
 
 **Companion app** — a native Android + Windows client with the chat lens and push that
@@ -771,7 +781,7 @@ Full list: **[docs/FEATURES.md](docs/FEATURES.md)**.
 | **[docs/COMPANION.md](docs/COMPANION.md)** | The Android + Windows companion app |
 | **[docs/TROUBLESHOOTING.md](docs/TROUBLESHOOTING.md)** | Known symptoms and dev tooling |
 | **[docs/ARCHITECTURE.md](docs/ARCHITECTURE.md)** | How the three-process design works |
-| **[docs/mission-control.md](docs/mission-control.md)** | Mission Control's wire contract: work-item details, projects and areas, stage, subjects and runs, Answer now and My to-do, Ask, Start work |
+| **[docs/mission-control.md](docs/mission-control.md)** | Mission Control's wire contract: work-item details, projects and areas, stage, subjects and runs, Answer now and My to-do, Ask, Start work, questions with context |
 | **[AGENTS.md](AGENTS.md)** | Point an AI agent at this repo and it can install and operate it |
 | **[CONTRIBUTING.md](CONTRIBUTING.md)** | Dev setup and the PR gate |
 | **[SECURITY.md](SECURITY.md)** | Threat model and vulnerability reporting |
