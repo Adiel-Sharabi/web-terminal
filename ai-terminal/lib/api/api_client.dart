@@ -437,6 +437,11 @@ class ApiClient {
   Future<McTodoResult> mcTodoAction(String id, String action) async =>
       McTodoResult.fromJson(await _mcPost('/api/mc/todo/${Uri.encodeComponent(id)}', {'action': action}));
 
+  /// #522: tells the session of action card [cardId] the person did it
+  /// (`POST /api/mc/actions/done`), once, through the gated prompt.
+  Future<McTodoResult> mcActionDone(String cardId) async =>
+      McTodoResult.fromDone(await _mcPost('/api/mc/actions/done', {'cardId': cardId}));
+
   /// Hides card [cardId] for [hours] (1-24); it comes back only if still pending.
   Future<Map<String, dynamic>> mcLater(String cardId, int hours) =>
       _mcPost('/api/mc/later', {'cardId': cardId, 'hours': hours});

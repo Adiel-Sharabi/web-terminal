@@ -263,6 +263,17 @@ class McFeed extends ChangeNotifier {
     return 'On your to-do list${mcParkWords(r)}';
   }
 
+  /// #522: the person did action [card]: its session is told once. Returns what to tell the person.
+  Future<String> actionDone(McCard card) async {
+    final r = await _authority().mcActionDone(card.id);
+    unawaited(refresh());
+    final why = r.refused;
+    if (why != null) return 'Not told yet: $why. Press Done again when it can be told';
+    if (r.already) return 'Its session was already told';
+    if (r.uncertain) return 'Marked done; the message may have reached the session';
+    return 'Done - the session was told to carry on';
+  }
+
   /// Hides [card] for [hours].
   Future<String> later(McCard card, int hours) async {
     await _authority().mcLater(card.id, hours);

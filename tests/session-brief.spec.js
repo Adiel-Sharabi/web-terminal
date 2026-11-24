@@ -498,8 +498,8 @@ test.describe('wait and hidden (#313, #314)', () => {
     const cmd = B.reportCommand('C:/dev/web-terminal/scripts/wt-report.js');
     // #466 raised it from 1420 by the one wait-target line (lib/wait-target.js teaches the rest);
     // #492 by the one decision line (the shape is refused with the right one); #505 by the
-    // one stage clause on the States line.
-    expect(B.instructionText(e, cmd).length).toBeLessThanOrEqual(1850);
+    // one stage clause on the States line; #522 by the one action line.
+    expect(B.instructionText(e, cmd).length).toBeLessThanOrEqual(2060);
   });
 });
 
@@ -720,5 +720,95 @@ test.describe('wait.decision (#492)', () => {
   test('the per-prompt note teaches it in one line', () => {
     const t = B.instructionText(null, 'CMD');
     expect(t).toContain('"decision": {"question", "context", "options": [{"label", "consequence"}] x2-4, "recommended": index}');
+  });
+});
+
+// #522 - a "you" wait the person must DO, not answer: kind "action" with its steps and where.
+// Additive: no kind is today's question. The shape is refused WITH the right one, and steps
+// and where are refused when too long, never cut.
+test.describe('wait.kind action (#522)', () => {
+  const v = (wait) => B.validateReport({ headline: 'h', wait });
+  const act = (over = {}) => ({ on: 'you', kind: 'action', what: 'try on-duty on 0.2.51', steps: ['Install 0.2.51', 'Start a shift'], where: 'phone', ...over });
+
+  test('a well-formed action is kept as sent; no kind (or "question") is today\'s wait, unchanged', () => {
+    expect(v(act()).report.wait).toEqual({ on: 'you', what: 'try on-duty on 0.2.51', kind: 'action', steps: ['Install 0.2.51', 'Start a shift'], where: 'phone' });
+    expect(v(act({ steps: undefined, where: undefined })).report.wait).toEqual({ on: 'you', what: 'try on-duty on 0.2.51', kind: 'action' });
+    expect(v({ on: 'you', what: 'say go' }).report.wait).toEqual({ on: 'you', what: 'say go' });
+    expect(v({ on: 'you', what: 'say go', kind: 'question' }).report.wait).toEqual({ on: 'you', what: 'say go' });
+    expect(v(act({ kind: ' Action ' })).report.wait.kind).toBe('action');
+    // Whitespace inside a step or where is folded, never refused.
+    expect(v(act({ steps: [`a${String.fromCodePoint(9)}b  c`], where: ' at  home ' })).report.wait).toMatchObject({ steps: ['a b c'], where: 'at home' });
+  });
+
+  test('a wrong shape is refused WITH the right one', () => {
+    const cases = [
+      [act({ kind: 'todo' }), 'wait "kind" "todo" is not "action"'],
+      [act({ kind: 3 }), 'is not "action"'],
+      [act({ on: 'self' }), 'rides only on a "you" wait'],
+      [act({ on: 'external' }), 'rides only on a "you" wait'],
+      [act({ decision: { question: 'A or B?', options: [{ label: 'A' }, { label: 'B' }] } }), 'cannot go together'],
+      [act({ what: '  ' }), 'needs a "what"'],
+      [act({ steps: [] }), '"steps" must be a list of 1-8 strings'],
+      [act({ steps: 'do it' }), '"steps" must be a list'],
+      [act({ steps: Array.from({ length: 9 }, (_, i) => `s${i}`) }), '"steps" must be a list of 1-8'],
+      [act({ steps: ['ok', 2] }), 'steps[1] must be a string'],
+      [act({ steps: ['ok', ' '] }), 'steps[1] is empty'],
+      [act({ where: 7 }), '"where" must be a string'],
+      [{ on: 'you', what: 'q', steps: ['a'] }, 'ride only on "kind": "action"'],
+      [{ on: 'you', what: 'q', where: 'home' }, 'ride only on "kind": "action"'],
+      [act({ where: '   ' }), '"where" is empty'],
+    ];
+    for (const [w, why] of cases) {
+      const r = v(w);
+      expect(r.error, JSON.stringify(w)).toContain(why);
+      expect(r.error).toContain('an action wait is {"on": "you", "kind": "action"');
+    }
+  });
+
+  test('back-compat: a stray kind on a wait that is not "you" is ignored; null steps/where are absent', () => {
+    // Before #522 a wait's unknown fields were ignored: a report that worked then still does.
+    expect(v({ on: 'external', what: 'CI', kind: 'pr' }).report.wait).toEqual({ on: 'external', what: 'CI' });
+    expect(v({ on: 'self', what: 'build', kind: 'question', steps: ['a'], where: 'x' }).report.wait).toEqual({ on: 'self', what: 'build' });
+    // ...but "action" on such a wait is refused, naming why.
+    expect(v({ on: 'external', what: 'CI', kind: 'action' }).error).toContain('rides only on a "you" wait');
+    // null is absent on both paths.
+    expect(v({ on: 'you', what: 'q', steps: null, where: null }).report.wait).toEqual({ on: 'you', what: 'q' });
+    expect(v(act({ steps: null, where: null })).report.wait).toEqual({ on: 'you', what: 'try on-duty on 0.2.51', kind: 'action' });
+  });
+
+  test('steps and where over their caps are REFUSED, never cut', () => {
+    const r1 = v(act({ steps: ['ok', 'x'.repeat(B.LIMITS.actionStep + 1)] }));
+    expect(r1.error).toContain(`steps[1] is longer than ${B.LIMITS.actionStep} characters`);
+    expect(v(act({ steps: ['x'.repeat(B.LIMITS.actionStep)] })).report.wait.steps[0]).toHaveLength(B.LIMITS.actionStep);
+    expect(v(act({ where: 'y'.repeat(B.LIMITS.actionWhere + 1) })).error).toContain(`longer than ${B.LIMITS.actionWhere} characters`);
+    expect(v(act({ steps: Array.from({ length: B.LIMITS.actionSteps }, (_, i) => `s${i}`) })).report.wait.steps).toHaveLength(B.LIMITS.actionSteps);
+    // Counted in characters (code points), not UTF-16 units: 160 emoji pass, 161 do not.
+    const emoji = String.fromCodePoint(0x1F4F1);
+    expect(v(act({ steps: [emoji.repeat(B.LIMITS.actionStep)], where: emoji.repeat(B.LIMITS.actionWhere) })).error).toBeUndefined();
+    expect(v(act({ steps: [emoji.repeat(B.LIMITS.actionStep + 1)] })).error).toContain('longer than');
+    expect(v(act({ where: emoji.repeat(B.LIMITS.actionWhere + 1) })).error).toContain('longer than');
+  });
+
+  test('control characters are refused in steps and where', () => {
+    const cp = (n) => String.fromCodePoint(n);
+    for (const bad of [cp(27), cp(3), cp(0x7f), cp(0x9b)]) {
+      expect(v(act({ steps: [`a${bad}b`] })).error).toContain('control characters');
+      expect(v(act({ where: `h${bad}` })).error).toContain('control characters');
+    }
+  });
+
+  test('served on the brief\'s wait, and gone with it when the person answers', () => {
+    let e = B.applyReport(B.emptyEntry(), v(act()).report, T0);
+    expect(B.buildBrief(e, { reporting: true }).wait).toMatchObject({ on: 'you', kind: 'action', steps: ['Install 0.2.51', 'Start a shift'], where: 'phone' });
+    e = B.foldHook(e, 'UserPromptSubmit', { prompt: 'done' }, T0 + 1);
+    expect(B.buildBrief(e, { reporting: true }).wait).toBeNull();
+  });
+
+  test('the per-prompt note says when to use it, in one line', () => {
+    const t = B.instructionText(null, 'CMD');
+    const line = t.split('\n').find((l) => l.includes('"kind": "action"'));
+    expect(line).toContain('must DO, not answer');
+    expect(line).toContain('"steps": ["..."], "where": "device or place"');
+    expect(line).toContain('never with "decision"');
   });
 });

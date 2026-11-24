@@ -53,6 +53,9 @@ class _Cluster {
   int subjectsStatus = 200;
   int subjectStatus = 200;
 
+  /// #522: replaces the subject's `needsYou` card when set.
+  Map<String, dynamic>? needsYou;
+
   http.Response _answer(ServerConfig sv, http.Request req) {
     requests.add(req);
     final path = req.url.path;
@@ -83,7 +86,9 @@ class _Cluster {
     }
     if (path.startsWith('/api/mc/subjects/')) {
       if (subjectStatus != 200) return http.Response(jsonEncode({'error': 'unknown subject'}), subjectStatus);
-      return http.Response(jsonEncode(_json('mc_subject.json')), 200);
+      final body = _json('mc_subject.json');
+      if (needsYou != null) (body['subject'] as Map<String, dynamic>)['needsYou'] = needsYou;
+      return http.Response(jsonEncode(body), 200);
     }
     if (req.method == 'POST') return http.Response(jsonEncode({'ok': true}), 200);
     return http.Response(jsonEncode({'error': 'Not found'}), 404);
@@ -437,6 +442,73 @@ void main() {
       await tester.tap(find.byKey(const ValueKey('mc-ask-source-S1')));
       expect(opened, contains('s-1'));
       await tester.pumpWidget(const SizedBox());
+    });
+
+    testWidgets('#522 a subject waiting on an action shows it as a thing to do, with Done, never as a question', (tester) async {
+      cluster.needsYou = {
+        'id': 'beta|s-3|action:5',
+        'kind': 'action',
+        'server': 'beta',
+        'sessionId': 's-3',
+        'sessionName': 'Fix #41',
+        'what': 'try the fix on the tablet',
+        'action': {
+          'steps': ['Install the build', 'Log in twice'],
+          'where': 'tablet'
+        },
+        'why': {'blocks': 2, 'text': 'blocks 2 sessions'},
+      };
+      await pump(tester);
+      expect(find.text('Open question'), findsNothing);
+      expect(find.text('To do'), findsOneWidget);
+      final card = find.byKey(const ValueKey('mc-action-beta|s-3|action:5'));
+      expect(card, findsOneWidget);
+      expect(find.descendant(of: card, matching: find.text('Log in twice')), findsOneWidget);
+      expect(find.descendant(of: card, matching: find.text('tablet')), findsOneWidget);
+      expect(find.descendant(of: card, matching: find.byKey(const ValueKey('mc-card-answer'))), findsNothing);
+      await tester.tap(find.descendant(of: card, matching: find.byKey(const ValueKey('mc-action-done'))));
+      await tester.pump();
+      await tester.pump();
+      final done = cluster.requests.lastWhere((r) => r.url.path == '/api/mc/actions/done');
+      expect(jsonDecode(done.body), {'cardId': 'beta|s-3|action:5'});
+      await tester.pumpWidget(const SizedBox());
+      await tester.pump(const Duration(seconds: 5));
+    });
+
+    testWidgets('#522 a subject\'s action carries its Done record: maybe told offers no Done, as on My to-do', (tester) async {
+      cluster.needsYou = {
+        'id': 'beta|s-3|action:5',
+        'kind': 'action',
+        'server': 'beta',
+        'sessionId': 's-3',
+        'what': 'try the fix on the tablet',
+        'action': {'steps': <String>[], 'where': null},
+        'done': {'state': 'uncertain'},
+      };
+      await pump(tester);
+      final card = find.byKey(const ValueKey('mc-action-beta|s-3|action:5'));
+      expect(card, findsOneWidget);
+      expect(find.descendant(of: card, matching: find.byKey(const ValueKey('mc-action-maybe-told'))), findsOneWidget);
+      expect(find.descendant(of: card, matching: find.byKey(const ValueKey('mc-action-done'))), findsNothing);
+      expect(cluster.requests.where((r) => r.url.path == '/api/mc/actions/done'), isEmpty);
+      await tester.pumpWidget(const SizedBox());
+      await tester.pump(const Duration(seconds: 5));
+    });
+
+    testWidgets('#522 a subject\'s action already told says so and offers no Done', (tester) async {
+      cluster.needsYou = {
+        'id': 'beta|s-3|action:5',
+        'kind': 'action',
+        'server': 'beta',
+        'sessionId': 's-3',
+        'what': 'try the fix on the tablet',
+        'done': {'state': 'delivered'},
+      };
+      await pump(tester);
+      expect(find.byKey(const ValueKey('mc-action-told')), findsOneWidget);
+      expect(find.byKey(const ValueKey('mc-action-done')), findsNothing);
+      await tester.pumpWidget(const SizedBox());
+      await tester.pump(const Duration(seconds: 5));
     });
 
     testWidgets('a subject the server does not know says so instead of a blank page', (tester) async {

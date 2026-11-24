@@ -55,7 +55,7 @@ test.describe('#506 Answer now / My to-do routes', () => {
     try {
       await report(id, { headline: 'h', items: [{ ref: 'ado:4711', title: 'Try the build', state: 'in-progress' }], wait: { on: 'you', what: 'try the build on the desk' } });
       let body = await nowUntil(ctx, (b) => b.answerNow.some((c) => c.sessionId === id));
-      expect(Object.keys(body).sort()).toEqual(['answerNow', 'generatedAt', 'moving', 'projects', 'todo']);
+      expect(Object.keys(body).sort()).toEqual(['actions', 'answerNow', 'generatedAt', 'moving', 'projects', 'todo']);
       const card = body.answerNow.find((c) => c.sessionId === id);
       expect(card).toMatchObject({ kind: 'wait', subjectKey: 'ado:4711', what: 'try the build on the desk', hasQuestion: false, decision: null,
         why: { blocks: 1, subjects: ['ado:4711'], text: 'blocks this session and 1 work item' } });

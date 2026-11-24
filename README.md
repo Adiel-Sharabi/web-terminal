@@ -739,6 +739,14 @@ companion's daily foreground time from a phone over adb in `logs/phone-usage.jso
   the gated prompt, to carry on and report that wait as external; a refusal (unsent text in its
   prompt box, a turn running) is shown and sent again only when you ask. A to-do can be ticked done,
   reopened or sent back; **Later** (`POST /api/mc/later`) hides a card for 1-24 hours.
+- **Action waits (#522):** a session that needs you to DO something (try a build on the phone, be
+  at home for a drone test, plug in a device) reports `wait: {"on": "you", "kind": "action", "what",
+  "steps": [...], "where"}`. It is never shown as a question: it lands at the top of **My to-do**
+  with its steps and the device or place, ranked by what it unblocks. **Done**
+  (`POST /api/mc/actions/done`) tells the session once, through the gated prompt (never onto unsent
+  text in its prompt box), that you did it and it can carry on, and ends that wait, so it no longer
+  pushes or shows in the inbox. If the message may have landed but no answer came, the card stays
+  and says so, with no second Done.
 - **Ask (#511):** `POST /api/mc/ask {question, scope}` - a read-only Analyst answers a question
   about every session, a project, a work item or one session, with the sources it used (sessions,
   their reports and recaps, work items, pull requests) and how old that data is. It is a tools-off

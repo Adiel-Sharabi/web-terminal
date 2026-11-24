@@ -55,6 +55,53 @@ void main() {
       expect(now.generatedAt, isNotNull);
     });
 
+    test('#522: actions are read with their steps, where and a refused Done; an older server has none', () {
+      final now = McNow.fromJson({
+        'answerNow': [
+          {'id': 'q', 'kind': 'wait', 'action': null},
+        ],
+        'actions': [
+          {
+            'id': 'alpha|s-3|action:1',
+            'kind': 'action',
+            'what': 'try on-duty on 0.2.51',
+            'action': {
+              'steps': ['Install 0.2.51', 7, 'Start a shift'],
+              'where': 'phone'
+            },
+            'done': {'state': 'refused', 'refused': 'draft', 'reason': 'it has unsent text in its prompt box'},
+            'why': {'blocks': 1, 'text': 'blocks this session'},
+            'rank': 1,
+          },
+          {'id': 'alpha|s-4|action:2', 'kind': 'action', 'action': {'steps': 'no'}, 'done': null},
+        ],
+      });
+      expect(now.answerNow.single.action, isNull);
+      expect(now.answerNow.single.isAction, isFalse);
+      final a = now.actions.first;
+      expect(a.isAction, isTrue);
+      expect(a.action?.steps, ['Install 0.2.51', 'Start a shift'], reason: 'a step that is not text is dropped');
+      expect(a.action?.where, 'phone');
+      expect(a.done?.notSent, isTrue);
+      expect(a.done?.reason, 'it has unsent text in its prompt box');
+      expect(now.actions[1].action?.steps, isEmpty);
+      expect(now.actions[1].action?.where, isNull);
+      expect(now.actions[1].done, isNull);
+      expect(McNow.fromJson({'answerNow': []}).actions, isEmpty, reason: 'an older server sends no actions');
+    });
+
+    test('#522: the Done answer reads like a park answer', () {
+      final r = McTodoResult.fromDone({
+        'cardId': 'c',
+        'done': {'delivered': false, 'refused': 'draft', 'reason': 'it has unsent text in its prompt box'}
+      });
+      expect([r.delivered, r.refused, r.todo], [false, 'it has unsent text in its prompt box', null]);
+      expect(McTodoResult.fromDone({
+        'done': {'delivered': true, 'already': true}
+      }).already, isTrue);
+      expect(McTodoResult.fromDone('junk').delivered, isFalse);
+    });
+
     test('anything that is not the shape reads as empty, never throws', () {
       for (final body in [null, 'x', 3, <dynamic>[], {'answerNow': 'no', 'todo': {}, 'moving': [], 'projects': 7}]) {
         final now = McNow.fromJson(body);
