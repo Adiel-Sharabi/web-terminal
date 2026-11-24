@@ -500,8 +500,9 @@ test.describe('wait and hidden (#313, #314)', () => {
     // #492 by the one decision line (the shape is refused with the right one); #505 by the
     // one stage clause on the States line; #522 by the one action line; #526 by the one `asks` line (the decisions the session
     // holds for the owner without stopping: without it they live only in the reply text, and a
-    // finished session's open decisions were never seen).
-    expect(B.instructionText(e, cmd).length).toBeLessThanOrEqual(2660);
+    // finished session's open decisions were never seen); #541 by the one `ref` line (without it a card
+    // cannot say which of the session's items it is about, and shows none).
+    expect(B.instructionText(e, cmd).length).toBeLessThanOrEqual(2800);
   });
 });
 
