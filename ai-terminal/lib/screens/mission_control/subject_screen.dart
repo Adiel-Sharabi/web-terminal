@@ -256,7 +256,21 @@ class _McSubjectScreenState extends State<McSubjectScreen> {
                   const SizedBox(height: 2),
                   Text([s.refLabel, ?s.project, ?s.area].join(' · '), style: muted),
                   const SizedBox(height: 12),
-                  if (s.needsYou != null) ...[
+                  // #522: a thing to DO is never shown as a question.
+                  if (s.needsYou != null && s.needsYou!.isAction) ...[
+                    mcSectionTitle(context, 'To do'),
+                    McActionCard(
+                      key: ValueKey('mc-action-${s.needsYou!.id}'),
+                      card: s.needsYou!,
+                      now: widget.now,
+                      onDone: () => mcRun(context, () => widget.feed.actionDone(s.needsYou!)),
+                      onLater: (h) => mcRun(context, () => widget.feed.later(s.needsYou!, h)),
+                      onOpenSession: s.needsYou!.sessionId == null
+                          ? null
+                          : () => widget.onOpenSession(s.needsYou!.sessionId!),
+                    ),
+                    const SizedBox(height: 16),
+                  ] else if (s.needsYou != null) ...[
                     mcSectionTitle(context, 'Open question'),
                     McAnswerCard(
                       key: ValueKey('mc-card-${s.needsYou!.id}'),

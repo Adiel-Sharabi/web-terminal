@@ -69,7 +69,13 @@ class McNowView extends StatelessWidget {
                   onOpenSession: onOpenSession,
                   now: now),
               const SizedBox(height: 16),
-              McTodoSection(feed: feed, todos: data.todo, onOpenSession: onOpenSession, now: now),
+              McTodoSection(
+                  feed: feed,
+                  actions: data.actions,
+                  todos: data.todo,
+                  projectNames: projectNames,
+                  onOpenSession: onOpenSession,
+                  now: now),
             ];
             final right = <Widget>[
               McMovingLine(moving: data.moving),
@@ -421,11 +427,25 @@ class McTag extends StatelessWidget {
   }
 }
 
-/// My to-do: what the person parked for the desk. Open ones first; done ones folded.
+/// My to-do: what sessions wait for the person to DO (#522 actions, ranked by what they
+/// unblock, each with its steps, where and a Done), then what the person parked for the desk.
+/// Open ones first; done ones folded.
 class McTodoSection extends StatefulWidget {
-  const McTodoSection({super.key, required this.feed, required this.todos, required this.onOpenSession, this.now});
+  const McTodoSection({
+    super.key,
+    required this.feed,
+    required this.todos,
+    required this.onOpenSession,
+    this.actions = const [],
+    this.projectNames = const {},
+    this.now,
+  });
   final McFeed feed;
   final List<McTodo> todos;
+
+  /// #522: the action cards, in the server's order.
+  final List<McCard> actions;
+  final Map<String, String> projectNames;
   final void Function(String sessionId) onOpenSession;
   final DateTime? now;
 
@@ -441,14 +461,28 @@ class _McTodoSectionState extends State<McTodoSection> {
     final open = widget.todos.where((t) => !t.done).toList();
     final done = widget.todos.where((t) => t.done).toList();
     final muted = Theme.of(context).textTheme.bodyMedium?.copyWith(color: AppColors.onSurfaceVariant);
+    final actions = widget.actions;
     return Column(crossAxisAlignment: CrossAxisAlignment.stretch, children: [
-      mcSectionTitle(context, 'My to-do (${open.length})',
-          key: const ValueKey('mc-todo-title'), hint: 'hands-on, for the desk; the sessions carry on'),
-      if (open.isEmpty)
+      mcSectionTitle(context, 'My to-do (${actions.length + open.length})',
+          key: const ValueKey('mc-todo-title'), hint: 'things to do; a session waits for the first ones'),
+      if (open.isEmpty && actions.isEmpty)
         Padding(
           key: const ValueKey('mc-todo-empty'),
           padding: const EdgeInsets.symmetric(vertical: 8),
-          child: Text('Nothing parked for the desk.', style: muted),
+          child: Text('Nothing to do.', style: muted),
+        ),
+      for (final c in actions)
+        Padding(
+          padding: const EdgeInsets.only(bottom: 8),
+          child: McActionCard(
+            key: ValueKey('mc-action-${c.id}'),
+            card: c,
+            projectName: c.project == null ? null : widget.projectNames[c.project],
+            now: widget.now,
+            onDone: () => mcRun(context, () => widget.feed.actionDone(c)),
+            onLater: (h) => mcRun(context, () => widget.feed.later(c, h)),
+            onOpenSession: c.sessionId == null ? null : () => widget.onOpenSession(c.sessionId!),
+          ),
         ),
       for (final t in open) _row(t),
       if (done.isNotEmpty)
@@ -525,6 +559,124 @@ class _McTodoSectionState extends State<McTodoSection> {
               onPressed: () => act('done'),
             ),
           ],
+        ]),
+      ),
+    );
+  }
+}
+
+/// #522 - one thing a session waits for the person to DO: what, where, the steps in order,
+/// what it unblocks, and Done (tells the session once) or Not now. Never phrased as a question.
+class McActionCard extends StatelessWidget {
+  const McActionCard({
+    super.key,
+    required this.card,
+    required this.onDone,
+    required this.onLater,
+    this.onOpenSession,
+    this.projectName,
+    this.now,
+  });
+
+  final McCard card;
+  final String? projectName;
+  final VoidCallback onDone;
+  final void Function(int hours) onLater;
+  final VoidCallback? onOpenSession;
+  final DateTime? now;
+
+  @override
+  Widget build(BuildContext context) {
+    final theme = Theme.of(context);
+    final small = theme.textTheme.bodySmall;
+    final muted = small?.copyWith(color: AppColors.onSurfaceVariant);
+    final c = card;
+    final age = mcCardAge(c, now: now);
+    final steps = c.action?.steps ?? const <String>[];
+    final where = c.action?.where;
+    final heading = [?c.ref, ?c.title].join('  ');
+    final session = [?c.sessionName, ?c.server].join(' · ');
+    final done = c.done;
+    final notTold = done != null && done.notSent ? 'Its session was not told: ${done.reason ?? done.refused ?? 'refused'}' : null;
+    final unblocks = c.why.text;
+    return Card(
+      margin: EdgeInsets.zero,
+      child: Padding(
+        padding: const EdgeInsets.fromLTRB(12, 10, 12, 6),
+        child: Column(crossAxisAlignment: CrossAxisAlignment.start, children: [
+          Row(crossAxisAlignment: CrossAxisAlignment.start, children: [
+            Expanded(
+              child: Wrap(spacing: 6, runSpacing: 4, crossAxisAlignment: WrapCrossAlignment.center, children: [
+                if (c.project != null) McTag(projectName ?? c.project!),
+                const McTag('to do', muted: true),
+                if (where != null)
+                  Row(key: const ValueKey('mc-action-where'), mainAxisSize: MainAxisSize.min, children: [
+                    const Icon(Icons.place_outlined, size: 14, color: AppColors.caution),
+                    const SizedBox(width: 2),
+                    Text(where, style: small?.copyWith(color: AppColors.caution, fontWeight: FontWeight.w600)),
+                  ]),
+              ]),
+            ),
+            if (age != null) ...[
+              const SizedBox(width: 8),
+              Text(age, style: muted),
+            ],
+          ]),
+          const SizedBox(height: 6),
+          Text(c.what ?? (heading.isEmpty ? 'Something to do' : heading),
+              key: const ValueKey('mc-action-what'),
+              style: theme.textTheme.titleSmall?.copyWith(fontWeight: FontWeight.w600)),
+          if (c.what != null && heading.isNotEmpty) Text(heading, style: muted),
+          if (steps.isNotEmpty) ...[
+            const SizedBox(height: 6),
+            for (var i = 0; i < steps.length; i++)
+              Padding(
+                key: ValueKey('mc-action-step-$i'),
+                padding: const EdgeInsets.only(bottom: 2),
+                child: Row(crossAxisAlignment: CrossAxisAlignment.start, children: [
+                  SizedBox(width: 22, child: Text('${i + 1}.', style: muted)),
+                  Expanded(child: Text(steps[i], style: theme.textTheme.bodyMedium)),
+                ]),
+              ),
+          ],
+          if (unblocks != null) ...[
+            const SizedBox(height: 4),
+            Text('Done unblocks: ${unblocks.replaceFirst('blocks ', '')}',
+                key: const ValueKey('mc-action-why'), style: small?.copyWith(color: AppColors.caution)),
+          ],
+          if (session.isNotEmpty) Text(session, style: muted),
+          if (notTold != null) ...[
+            const SizedBox(height: 2),
+            Text(notTold, key: const ValueKey('mc-action-not-told'), style: small?.copyWith(color: AppColors.caution)),
+          ],
+          const SizedBox(height: 4),
+          Wrap(spacing: 4, crossAxisAlignment: WrapCrossAlignment.center, children: [
+            FilledButton.tonalIcon(
+              key: const ValueKey('mc-action-done'),
+              onPressed: onDone,
+              icon: const Icon(Icons.check, size: 18),
+              label: const Text('Done'),
+            ),
+            if (onOpenSession != null)
+              TextButton.icon(
+                onPressed: onOpenSession,
+                icon: const Icon(Icons.open_in_new, size: 18),
+                label: const Text('Open session'),
+              ),
+            PopupMenuButton<int>(
+              key: const ValueKey('mc-action-later'),
+              tooltip: 'Not now: hide it for a while; it comes back if the session still waits',
+              onSelected: onLater,
+              itemBuilder: (_) => [
+                for (final h in kMcLaterHours)
+                  PopupMenuItem(value: h, child: Text(h == 1 ? 'In an hour' : 'In $h hours')),
+              ],
+              child: const Padding(
+                padding: EdgeInsets.symmetric(horizontal: 12, vertical: 10),
+                child: Text('Not now', style: TextStyle(color: AppColors.primary)),
+              ),
+            ),
+          ]),
         ]),
       ),
     );

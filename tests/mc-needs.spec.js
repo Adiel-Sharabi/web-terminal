@@ -286,3 +286,120 @@ test.describe('#506 the park message and the to-do actions', () => {
     } finally { fs.rmSync(dir, { recursive: true, force: true }); }
   });
 });
+
+// #522 - a "you" wait the person must DO (kind action): never in Answer now, always on My to-do
+// (`actions`), ranked by the same order, with its steps and where; its Done tells the session
+// once through the gated prompt, and a refusal keeps it with the reason.
+test.describe('#522 action waits: on My to-do, never Answer now, and their Done', () => {
+  /** A session that reported an action wait `ago` minutes back. */
+  const acting = (server, what, ago, over = {}) => asking(server, what, ago, {
+    wait: { on: 'you', what, at: NOW - ago * MIN, kind: 'action', steps: ['Install 0.2.51', 'Start a shift'], where: 'phone' }, ...over });
+  /** buildNow over [rows] with the Done records [actionsDone]. */
+  const nowDone = (rows, actionsDone) => {
+    const nodes = M.sessionNodes({ rows, closed: [], now: NOW });
+    return N.buildNow({ nodes, view: M.buildView({ nodes, metaByKey: {}, projects: [], now: NOW, platform: 'win32' }), actionsDone, now: NOW });
+  };
+
+  test('an action is in `actions` (ranked by what it blocks), never in Answer now, never phrased as a question', () => {
+    const root = working('alpha', { name: 'orchestrator', items: [{ ref: 'ado:1' }] });
+    const big = acting('alpha', 'try on-duty', 5, { name: 'big', parentId: root.id, items: [{ ref: 'ado:2' }] });
+    const lone = acting('beta', 'power the drone', 90, { name: 'lone' });
+    const q = asking('alpha', 'pick a schema', 3, { name: 'asks' });
+    const v = now({ rows: [lone, big, q, root] });
+    expect(v.answerNow.map((c) => c.sessionName)).toEqual(['asks']);
+    expect(v.answerNow[0]).toMatchObject({ kind: 'wait', rank: 1, action: null });
+    // The same order as Answer now: blocked sessions first (big blocks its orchestrator too).
+    expect(v.actions.map((c) => c.sessionName)).toEqual(['big', 'lone']);
+    expect(v.actions.map((c) => c.rank)).toEqual([1, 2]);
+    const [a] = v.actions;
+    expect(a).toMatchObject({ kind: 'action', hasQuestion: false, decision: null, done: null, what: 'try on-duty',
+      action: { steps: ['Install 0.2.51', 'Start a shift'], where: 'phone' },
+      why: { blocks: 2, text: 'blocks 2 sessions and 2 work items' } });
+    expect(a.id).toBe(`alpha|${big.id}|action:${NOW - 5 * MIN}`);
+    // The action's session owes the person something: it is not "moving on its own".
+    expect(v.moving).toEqual({ working: 1, idle: 0, total: 1 });
+    // A prompt on screen outranks the report: that one IS a question.
+    const onScreen = acting('alpha', 'x', 1, { status: 'waiting', waitingFor: 'question', reason: { kind: 'you', text: 'answer a question' } });
+    expect(now({ rows: [onScreen] }).answerNow.map((c) => c.kind)).toEqual(['question']);
+    // A wait with no steps or where is an action all the same.
+    const bare = asking('alpha', 'plug in the rig', 2, { wait: { on: 'you', what: 'plug in the rig', at: NOW - 2 * MIN, kind: 'action' } });
+    expect(now({ rows: [bare] }).actions[0].action).toEqual({ steps: [], where: null });
+  });
+
+  test('Later hides an action until it ends; Done hides it once told (or maybe told), a refusal keeps it with the reason', () => {
+    const a = acting('alpha', 'try on-duty', 4);
+    const id = `alpha|${a.id}|action:${NOW - 4 * MIN}`;
+    expect(now({ rows: [a], later: { [id]: { until: NOW + HOUR } } }).actions).toEqual([]);
+    expect(now({ rows: [a], later: { [id]: { until: NOW - 1 } } }).actions).toHaveLength(1);
+    for (const state of ['sending', 'delivered', 'uncertain']) expect(nowDone([a], { [id]: { state, why: null, at: NOW } }).actions, state).toEqual([]);
+    const kept = nowDone([a], { [id]: { state: 'refused', why: 'draft', at: NOW } }).actions;
+    expect(kept).toHaveLength(1);
+    expect(kept[0].done).toEqual({ state: 'refused', refused: 'draft', reason: 'it has unsent text in its prompt box', at: NOW });
+    // A NEW wait of the same session is a new card: an old Done never hides it.
+    const again = acting('alpha', 'and now this', 1, { id: a.id });
+    expect(nowDone([again], { [id]: { state: 'delivered', at: NOW } }).actions).toHaveLength(1);
+  });
+
+  test('the Done message: one fixed line under 512 bytes with the tag, naming what was done, checking the wait it answers', () => {
+    const card = { kind: 'action', what: 'try on-duty on 0.2.51', askedAt: NOW - MIN };
+    const body = N.actionDoneBody(card);
+    expect(body).toEqual({ text: '[Mission Control] Done: try on-duty on 0.2.51. The user did it; carry on.', tag: 'supervisor', expectWaitAt: NOW - MIN });
+    const p = promptOf(body);
+    expect(p.error).toBeUndefined();
+    expect(Buffer.byteLength(p.prompt, 'utf8')).toBeLessThanOrEqual(PROMPT_BYTES_MAX);
+    // Hostile or long text: one line, cut by code point, still under the cap.
+    const nl = String.fromCodePoint(10);
+    const esc = String.fromCodePoint(27);
+    const long = N.actionDoneBody({ kind: 'action', what: `a${nl}b${esc}[2J${String.fromCodePoint(0x1F600).repeat(200)}`, askedAt: NOW });
+    expect(/[\u0000-\u001f]/.test(long.text)).toBe(false);
+    expect(promptOf(long).error).toBeUndefined();
+    expect(N.actionDoneBody({ kind: 'action', what: '', askedAt: null })).toEqual({ text: '[Mission Control] Done: what you asked the user to do. The user did it; carry on.', tag: 'supervisor' });
+  });
+
+  test('what Done may do: only an action, once; a refused one may be pressed again', () => {
+    const card = { id: 'c', kind: 'action' };
+    expect(N.actionDonePlan(undefined, undefined)).toMatchObject({ status: 404 });
+    expect(N.actionDonePlan({ id: 'c', kind: 'wait' }, undefined)).toMatchObject({ status: 409 });
+    expect(N.actionDonePlan({ id: 'c', kind: 'question' }, undefined)).toMatchObject({ status: 409 });
+    expect(N.actionDonePlan(card, undefined)).toEqual({ send: true });
+    expect(N.actionDonePlan(card, { state: 'refused', why: 'draft' })).toEqual({ send: true });
+    for (const state of ['sending', 'delivered', 'uncertain']) {
+      expect(N.actionDonePlan(card, { state, at: NOW }), state).toEqual({ already: { state, at: NOW } });
+    }
+    // Told once: pressed again it says so, even after the wait has ended.
+    expect(N.actionDonePlan(undefined, { state: 'delivered', at: NOW })).toEqual({ already: { state: 'delivered', at: NOW } });
+    expect(N.actionDonePlan(undefined, { state: 'refused', why: 'draft' })).toMatchObject({ status: 404 });
+    expect(N.actionSending(NOW)).toEqual({ state: 'sending', why: null, at: NOW });
+    expect(N.actionDoneResult({ delivered: true }, NOW)).toEqual({ state: 'delivered', why: null, at: NOW });
+    expect(N.actionDoneResult({ uncertain: true }, NOW)).toEqual({ state: 'uncertain', why: null, at: NOW });
+    expect(N.actionDoneResult({ why: 'draft' }, NOW)).toEqual({ state: 'refused', why: 'draft', at: NOW });
+    expect(N.doneAnswer({ state: 'refused', why: 'draft' })).toEqual({ delivered: false, refused: 'draft', reason: 'it has unsent text in its prompt box' });
+    expect(N.doneAnswer({ state: 'delivered' }, { already: true })).toEqual({ delivered: true, already: true });
+    // An action is never turned into a to-do: it is on My to-do already.
+    expect(N.todoRefusal(card)).toMatchObject({ status: 409 });
+    expect(N.todoRefusal({ kind: 'wait' })).toBeNull();
+    // Inputs, and the records kept a week.
+    expect(N.actionDoneInput(null).error).toBeTruthy();
+    expect(N.actionDoneInput({ cardId: '' }).error).toBeTruthy();
+    expect(N.actionDoneInput({ cardId: 'x'.repeat(401) }).error).toBeTruthy();
+    expect(N.actionDoneInput({ cardId: 'c' })).toEqual({ cardId: 'c' });
+    expect(N.pruneActionsDone({ a: { state: 'delivered', at: NOW - HOUR }, b: { state: 'delivered', at: NOW - 8 * 24 * HOUR }, c: null }, NOW))
+      .toEqual({ a: { state: 'delivered', at: NOW - HOUR } });
+  });
+
+  test('mc-state keeps the Done records across a restart, written at once when asked', () => {
+    const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'mc-actions-'));
+    const file = path.join(dir, 'mc-state.json');
+    try {
+      const s1 = createMcState({ file, log: () => {}, saveDelayMs: 60000 });
+      expect(s1.actionsDone()).toEqual({});
+      expect(s1.setActionsDone({ c: { state: 'sending', why: null, at: NOW } }, { now: true })).toBe(true);
+      expect(JSON.parse(fs.readFileSync(file, 'utf8')).actionsDone).toEqual({ c: { state: 'sending', why: null, at: NOW } });
+      const s2 = createMcState({ file, log: () => {} });
+      expect(s2.actionsDone()).toEqual({ c: { state: 'sending', why: null, at: NOW } });
+      // A record that is not one of ours is dropped on read.
+      fs.writeFileSync(file, JSON.stringify({ v: 1, actionsDone: { a: { state: 5, at: NOW }, b: { state: 'refused', why: 'draft', at: NOW }, c: { state: 'x' } } }));
+      expect(createMcState({ file, log: () => {} }).actionsDone()).toEqual({ b: { state: 'refused', why: 'draft', at: NOW } });
+    } finally { fs.rmSync(dir, { recursive: true, force: true }); }
+  });
+});

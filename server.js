@@ -6728,6 +6728,8 @@ function serverCapabilities() {
     'mc-subjects',
     // #506 - GET /api/mc/now, POST /api/mc/todo[/:id] and POST /api/mc/later (lib/mc-needs.js).
     'mc-needs',
+    // #522 - action waits: GET /api/mc/now `actions` (My to-do) and POST /api/mc/actions/done.
+    'mc-actions',
     // #512 - POST /api/mc/start and GET /api/mc/machines (Start work).
     'mc-start'];
   // #412/#428 - GET /api/leases (forwarded to the lease authority). The companion's Leases
@@ -7168,8 +7170,9 @@ app.get('/api/mc/now', async (req, res) => {
     const v = await cachedMcView(clusterReqUser(req));
     if (v.error) return res.status(500).json({ error: v.error });
     const now = Date.now();
-    const n = mcNeeds.buildNow({ nodes: v.nodes, view: v, todos: mcState.todos(), later: mcNeeds.pruneLater(mcState.later(), now), now });
-    res.json({ answerNow: n.answerNow, todo: n.todo, moving: n.moving, projects: v.projectsOut, generatedAt: v.generatedAt });
+    const n = mcNeeds.buildNow({ nodes: v.nodes, view: v, todos: mcState.todos(), later: mcNeeds.pruneLater(mcState.later(), now),
+      actionsDone: mcState.actionsDone(), now });
+    res.json({ answerNow: n.answerNow, actions: n.actions, todo: n.todo, moving: n.moving, projects: v.projectsOut, generatedAt: v.generatedAt });
   } catch (e) {
     console.error(`[mc] now: ${e.message}`);
     res.status(500).json({ error: 'could not read the cluster sessions' });
@@ -7200,6 +7203,8 @@ app.post('/api/mc/todo', express.json({ limit: '8kb' }), async (req, res) => {
     }
     const card = mcNeeds.pendingCards({ nodes: v.nodes, view: v, now }).find((c) => c.id === inp.cardId);
     if (!card) return res.status(404).json({ error: 'that card no longer waits on you' });
+    const notTodo = mcNeeds.todoRefusal(card);
+    if (notTodo) return res.status(notTodo.status).json({ error: notTodo.error });
     const todo = mcNeeds.newTodo(card, { id: `t-${crypto.randomBytes(8).toString('hex')}`, text: inp.text, now });
     // On disk BEFORE the message goes out; a failed write sends nothing.
     if (!mcState.setTodos(mcNeeds.pruneTodos([...todos, todo], now), { now: true })) {
@@ -7255,6 +7260,47 @@ app.post('/api/mc/later', express.json({ limit: '8kb' }), async (req, res) => {
   } catch (e) {
     console.error(`[mc] later: ${e.message}`);
     res.status(500).json({ error: 'could not put the card off' });
+  }
+});
+
+// --- API: #522 Mission Control: Done on an action (the person did what a session waits for) ---
+// POST /api/mc/actions/done {cardId} -> {cardId, done: {delivered, refused?, reason?, uncertain?,
+// already?}, generatedAt}. The rules are lib/mc-needs.js (actionDonePlan, the fixed text); the
+// message goes through the gated prompt of the session's own server (deliverGatedPrompt, as the
+// park does), so it never lands on an unsent draft (#479). It is recorded ON DISK before it goes
+// out and is never sent twice; a refusal is answered and kept, and Done may be pressed again.
+app.post('/api/mc/actions/done', express.json({ limit: '8kb' }), async (req, res) => {
+  const refused = mcRefusal(supervisorAuthority());
+  if (refused) return res.status(refused.status).json(refused.json);
+  const inp = mcNeeds.actionDoneInput(req.body);
+  if (inp.error) return res.status(400).json({ error: inp.error });
+  try {
+    const v = await cachedMcView(clusterReqUser(req));
+    if (v.error) return res.status(500).json({ error: v.error });
+    // From here to the record on disk nothing awaits: a second press finds the record.
+    const now = Date.now();
+    const card = mcNeeds.pendingCards({ nodes: v.nodes, view: v, now }).find((c) => c.id === inp.cardId);
+    const before = mcState.actionsDone();
+    const plan = mcNeeds.actionDonePlan(card, before[inp.cardId]);
+    if (plan.error) return res.status(plan.status).json({ error: plan.error });
+    if (plan.already) return res.json({ cardId: inp.cardId, done: mcNeeds.doneAnswer(plan.already, { already: true }), generatedAt: now });
+    if (!mcState.setActionsDone(mcNeeds.pruneActionsDone({ ...before, [inp.cardId]: mcNeeds.actionSending(now) }, now), { now: true })) {
+      mcState.setActionsDone(before);
+      return res.status(500).json({ error: 'could not record the Done' });
+    }
+    let out;
+    try {
+      out = await deliverGatedPrompt({ server: card.server, id: card.sessionId, ...mcNeeds.actionDoneBody(card) }, 'mission-control');
+    } catch (e) {
+      console.error(`[mc] done message: ${e.message}`);
+      out = { uncertain: true };
+    }
+    const rec = mcNeeds.actionDoneResult(out, Date.now());
+    mcState.setActionsDone({ ...mcState.actionsDone(), [inp.cardId]: rec }, { now: true });
+    res.json({ cardId: inp.cardId, done: mcNeeds.doneAnswer(rec), generatedAt: Date.now() });
+  } catch (e) {
+    console.error(`[mc] done: ${e.message}`);
+    res.status(500).json({ error: 'could not mark it done' });
   }
 });
 

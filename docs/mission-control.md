@@ -206,15 +206,17 @@ gives. Buckets: `doneWeek` when `meta.closed` or waitsOn is done, else `active`;
 when waitsOn is you, `waitsOnOthers` when external - the companion's fallback rule exactly.
 
 ## Answer now / My to-do (#506) - `lib/mc-needs.js`
-`GET /api/mc/now` -> `{answerNow: [Card], todo: [Todo], moving: {working, idle, total}, projects: [Project], generatedAt}`
+`GET /api/mc/now` -> `{answerNow: [Card], actions: [Card], todo: [Todo], moving: {working, idle, total}, projects: [Project], generatedAt}`
 ```
 Card = { id,                     // '<server>|<sessionId>|<kind>:<at>' - names the WAIT, not the session (below)
-  kind: 'question'|'permission'|'decision'|'wait',
+  kind: 'question'|'permission'|'decision'|'wait'|'action',
   server, serverUrl, sessionId, sessionName, project, subjectKey, ref, title,
   what,                          // the reason's text / wait.what
   why: { blocks, blockedSessions: [{server, id, name}], subjects: [key], severity, ageMin, text },
                                  // text e.g. "blocks 3 sessions and 2 work items"
-  rank, askedAt, decision: {...}|null, hasQuestion: bool }
+  rank, askedAt, decision: {...}|null, hasQuestion: bool,
+  action: {steps: [string], where: string|null}|null,   // #522, kind 'action' only
+  done: {state, refused, reason, at}|null }             // #522, on `actions` only: a refused Done
 Todo = { id, cardId, kind, subjectKey, ref, title, project, text, server, sessionId, sessionName, createdAt, doneAt|null,
   park: { state: 'sending'|'delivered'|'refused'|'uncertain'|'none', refused: code|null, reason: words|null, at } }
 ```
@@ -265,6 +267,27 @@ none may be sent: `none`) ->
 `POST /api/mc/later {cardId, hours: 1-24 whole}` -> `{cardId, until, generatedAt}`: hidden until
 then, back only if still pending (404 when the card no longer waits). Not the supervisor's later.
 Capability `mc-needs`.
+
+### Action waits (#522)
+A reported `you` wait may say the person must DO something, not answer:
+`wait: {"on": "you", "kind": "action", "what": "...", "steps": ["..."], "where": "..."}`
+(`lib/session-brief.js` `_validateAction`). `kind` absent (or `"question"`) is today's wait.
+`steps` 1-8 strings of at most 160 characters, `where` (a device or a place) at most 40: REFUSED
+when longer, never cut; control characters refused; `steps`/`where` only with `kind: "action"`;
+an action needs a `what`, rides only on `you`, and never goes with `decision` (each refusal quotes
+the shape). The per-prompt hook note says when to use it in one line.
+Its card has kind `action` (`needsYouCard`; a prompt on screen still outranks it) and is NEVER in
+`answerNow`: it is in `actions`, the top of My to-do, ranked by the same order (1-based within
+`actions`). Later hides it like any card; `POST /api/mc/todo` refuses it (409: it is on My to-do).
+`POST /api/mc/actions/done {cardId}` -> `{cardId, done: {delivered, refused?, reason?, uncertain?, already?}, generatedAt}`
+records the Done ON DISK (`mc-state.json` `actionsDone`, `sending`; 500 and nothing sent when the
+write fails), then sends ONE fixed line through the gated prompt of the session's own server (as the
+park does: supervisor tag, never onto an unsent draft, #479; `expectWaitAt` = the wait's `at`):
+`[Mission Control] Done: <what>. The user did it; carry on.`
+Delivered or uncertain (and `sending`): the card leaves `actions` and is never sent again (pressed
+again: `already`, even after the wait ended). Refused (a draft, a turn running...): kept, its
+`done` says why, and Done may be pressed again. A new wait of the session is a new card. 404 when the
+card no longer waits, 409 for a card that is not an action. Records kept 7 days. Capability `mc-actions`.
 
 ## Questions context (#510) and Ask (#511) - `lib/mc-analyst.js`, `lib/mc-questions.js`
 `GET /api/mc/questions/:cardId/context?level=ask|context|everything` -> `{level, text, sections: [{title, body}], sources: [Source], ask: Ask, cardId, generatedAt}` (built on demand, never on a poll)

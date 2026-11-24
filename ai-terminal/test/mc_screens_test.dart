@@ -49,6 +49,12 @@ class _Server {
   int nowStatus = 200;
   final List<http.Request> posts = [];
 
+  /// Fields laid over the fixture's answer (#522: `actions`).
+  Map<String, dynamic> extra = const {};
+
+  /// The Done answer's `done` (#522).
+  Map<String, dynamic> done = const {'delivered': true};
+
   McFeed feed() => McFeed(
         servers: () => const [_a],
         client: (sv) => ApiClient(sv, httpClient: MockClient((req) async {
@@ -57,10 +63,13 @@ class _Server {
             if (req.url.path == '/api/mc/todo') {
               return http.Response(jsonEncode({'todo': {'id': 't9'}, 'parked': {'delivered': true}}), 200);
             }
+            if (req.url.path == '/api/mc/actions/done') {
+              return http.Response(jsonEncode({'cardId': 'x', 'done': done}), 200);
+            }
             return http.Response(jsonEncode({'ok': true}), 200);
           }
           if (nowStatus != 200) return http.Response(jsonEncode({'error': 'Not found'}), nowStatus);
-          return http.Response(jsonEncode(_fixture()), 200);
+          return http.Response(jsonEncode({..._fixture(), ...extra}), 200);
         })),
       );
 }
@@ -199,6 +208,95 @@ void main() {
         '/api/mc/todo/t-2 {"action":"reopen"}',
       ]);
       await tester.pumpWidget(const SizedBox());
+    });
+
+    // #522 - a session waiting for the person to DO something: on My to-do with its steps
+    // and where, ranked first, never in Answer now and never phrased as a question.
+    const action = {
+      'id': 'alpha|s-3|action:1',
+      'kind': 'action',
+      'server': 'alpha',
+      'sessionId': 's-3',
+      'sessionName': 'TacticalMap release',
+      'project': 'web-terminal',
+      'what': 'try on-duty on 0.2.51',
+      'action': {
+        'steps': ['Install 0.2.51', 'Start a shift', 'Check the map follows you'],
+        'where': 'phone'
+      },
+      'why': {'blocks': 2, 'text': 'blocks 2 sessions and 1 work item'},
+      'rank': 1,
+      'hasQuestion': false,
+      'done': null,
+    };
+
+    testWidgets('#522 an action is on My to-do with its steps and where, never in Answer now', (tester) async {
+      server.extra = {
+        'actions': [action]
+      };
+      await pump(tester);
+      expect(find.text('Answer now (2)'), findsOneWidget, reason: 'the action is not a question');
+      expect(find.text('My to-do (2)'), findsOneWidget, reason: 'one action, one open to-do');
+      final card = find.byKey(const ValueKey('mc-action-alpha|s-3|action:1'));
+      expect(card, findsOneWidget);
+      expect(find.byKey(const ValueKey('mc-card-alpha|s-3|action:1')), findsNothing);
+      Finder inCard(Finder f) => find.descendant(of: card, matching: f);
+      expect(inCard(find.text('try on-duty on 0.2.51')), findsOneWidget);
+      expect(inCard(find.text('phone')), findsOneWidget);
+      expect(inCard(find.text('Install 0.2.51')), findsOneWidget);
+      expect(inCard(find.text('3.')), findsOneWidget);
+      expect(inCard(find.text('Check the map follows you')), findsOneWidget);
+      expect(inCard(find.text('Done unblocks: 2 sessions and 1 work item')), findsOneWidget);
+      expect(inCard(find.text('Web Terminal')), findsOneWidget);
+      // Never phrased or answered as a question.
+      expect(inCard(find.byKey(const ValueKey('mc-card-answer'))), findsNothing);
+      expect(inCard(find.textContaining('?')), findsNothing);
+      expect(inCard(find.textContaining('nswer')), findsNothing);
+      // Ranked above the parked to-dos.
+      expect(tester.getTopLeft(card).dy, lessThan(tester.getTopLeft(find.text('Try it on the tablet')).dy));
+      await tester.pumpWidget(const SizedBox());
+    });
+
+    testWidgets('#522 Done tells the session through the server; Not now hides it for the hours picked', (tester) async {
+      server.extra = {
+        'actions': [action]
+      };
+      await pump(tester);
+      await tester.tap(find.byKey(const ValueKey('mc-action-done')));
+      await tester.pump();
+      await tester.pump();
+      expect(find.text('Done - the session was told to carry on'), findsOneWidget);
+      await tester.tap(find.byKey(const ValueKey('mc-action-later')));
+      await tester.pumpAndSettle();
+      await tester.tap(find.text('In 2 hours'));
+      await tester.pumpAndSettle();
+      expect(server.posts.map((r) => '${r.url.path} ${r.body}'), [
+        '/api/mc/actions/done {"cardId":"alpha|s-3|action:1"}',
+        '/api/mc/later {"cardId":"alpha|s-3|action:1","hours":2}',
+      ]);
+      await tester.pumpWidget(const SizedBox());
+      await tester.pump(const Duration(seconds: 5));
+    });
+
+    testWidgets('#522 a Done that was refused says why on the card and in the snack bar', (tester) async {
+      server.extra = {
+        'actions': [
+          {
+            ...action,
+            'done': {'state': 'refused', 'refused': 'draft', 'reason': 'it has unsent text in its prompt box'}
+          }
+        ]
+      };
+      server.done = {'delivered': false, 'refused': 'draft', 'reason': 'it has unsent text in its prompt box'};
+      await pump(tester);
+      expect(tester.widget<Text>(find.byKey(const ValueKey('mc-action-not-told'))).data,
+          'Its session was not told: it has unsent text in its prompt box');
+      await tester.tap(find.byKey(const ValueKey('mc-action-done')));
+      await tester.pump();
+      await tester.pump();
+      expect(find.text('Not told yet: it has unsent text in its prompt box. Press Done again when it can be told'), findsOneWidget);
+      await tester.pumpWidget(const SizedBox());
+      await tester.pump(const Duration(seconds: 5));
     });
 
     testWidgets('a to-do whose session was not told says why, and Tell asks the server again (#506)', (tester) async {

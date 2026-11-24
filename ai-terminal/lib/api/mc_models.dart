@@ -206,12 +206,32 @@ class McWhy {
   }
 }
 
+/// #522 - what an action card asks the person to do: the steps, in order, and the device
+/// or place it needs ([where], null when the session did not say).
+class McAction {
+  final List<String> steps;
+  final String? where;
+  const McAction({this.steps = const [], this.where});
+
+  /// Null when the card is not an action (the server sends `action: null`).
+  static McAction? fromJson(dynamic json) {
+    if (json is! Map) return null;
+    final m = _map(json);
+    final steps = m['steps'];
+    return McAction(
+      steps: steps is List ? List<String>.unmodifiable(steps.map(_str).whereType<String>()) : const [],
+      where: _str(m['where']),
+    );
+  }
+}
+
 /// One "Answer now" card: a session stuck on the person. The server ranks them; [rank]
-/// and the list order are its answer.
+/// and the list order are its answer. An `action` card (#522) is the same shape, served in
+/// [McNow.actions] (My to-do) instead, with [action] and, after a refused Done, [done].
 class McCard {
   final String id;
 
-  /// `question`, `permission`, `decision`, `wait` - or any newer kind, kept as sent.
+  /// `question`, `permission`, `decision`, `wait`, `action` - or any newer kind, kept as sent.
   final String kind;
   final String? server;
   final String? serverUrl;
@@ -227,6 +247,13 @@ class McCard {
   final DateTime? askedAt;
   final BriefDecision? decision;
   final bool hasQuestion;
+
+  /// #522: what to do and where, on an `action` card; null on every other kind.
+  final McAction? action;
+
+  /// #522: what became of its Done when the session was NOT told (the server's words); null
+  /// when Done was never pressed. A card told (or maybe told) is not served at all.
+  final McPark? done;
 
   const McCard({
     required this.id,
@@ -245,6 +272,8 @@ class McCard {
     this.askedAt,
     this.decision,
     this.hasQuestion = false,
+    this.action,
+    this.done,
   });
 
   /// Null when it has no id: a card that cannot be addressed cannot be parked or answered.
@@ -269,8 +298,13 @@ class McCard {
       askedAt: _at(m['askedAt']),
       decision: BriefDecision.fromJson(m['decision']),
       hasQuestion: _bool(m['hasQuestion']),
+      action: McAction.fromJson(m['action']),
+      done: m['done'] is Map ? McPark.fromJson(m['done']) : null,
     );
   }
+
+  /// #522: a thing to DO, never phrased or answered as a question.
+  bool get isAction => kind == 'action';
 
   /// Answered in the questions inbox, which takes every kind of wait on the person (a
   /// question, a permission, a decision, a reported wait: #383) - so any card with a session.
@@ -375,6 +409,9 @@ class McMoving {
 /// `GET /api/mc/now`.
 class McNow {
   final List<McCard> answerNow;
+
+  /// #522: the action cards, ranked; the top of My to-do. Empty from an older server.
+  final List<McCard> actions;
   final List<McTodo> todo;
   final McMoving moving;
   final List<McProject> projects;
@@ -382,6 +419,7 @@ class McNow {
 
   const McNow({
     this.answerNow = const [],
+    this.actions = const [],
     this.todo = const [],
     this.moving = const McMoving(),
     this.projects = const [],
@@ -392,6 +430,7 @@ class McNow {
     final m = _map(json);
     return McNow(
       answerNow: _list(m['answerNow'], McCard.fromJson),
+      actions: _list(m['actions'], McCard.fromJson),
       todo: _list(m['todo'], McTodo.fromJson),
       moving: McMoving.fromJson(m['moving']),
       projects: _list(m['projects'], McProject.fromJson),
@@ -426,10 +465,16 @@ class McTodoResult {
 
   static McTodoResult fromJson(dynamic json) {
     final m = _map(json);
-    final parked = _map(m['parked']);
+    return _of(_map(m['parked']), McTodo.fromJson(m['todo']));
+  }
+
+  /// #522: `POST /api/mc/actions/done`'s answer: its `done` is the park answer's shape.
+  static McTodoResult fromDone(dynamic json) => _of(_map(_map(json)['done']), null);
+
+  static McTodoResult _of(Map<String, dynamic> parked, McTodo? todo) {
     final refused = parked['refused'];
     return McTodoResult(
-      todo: McTodo.fromJson(m['todo']),
+      todo: todo,
       delivered: _bool(parked['delivered']),
       refused: _str(parked['reason']) ?? (refused is String ? _str(refused) : (refused == true ? 'refused' : null)),
       uncertain: _bool(parked['uncertain']),
