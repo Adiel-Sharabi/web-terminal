@@ -89,6 +89,8 @@ test.describe('#503 a session\'s project', () => {
     expect(pj.projectOfSession({ cwd: 'C:\\dev\\tools', items: ado }, P, W)).toBe('tools');
     // In an unconfigured folder its items still place it.
     expect(pj.projectOfSession({ cwd: 'E:\\peer', items }, P, W)).toBe('web');
+    // A known origin no project claims never falls back to its items: that session is "other".
+    expect(pj.projectOfSession({ cwd: 'E:\\notes', origin: { kind: 'github', owner: 'acme', repo: 'notes' }, items }, P, W)).toBe('other');
     // A real origin still beats the folder (and the items).
     expect(pj.projectOfSession({ cwd: 'C:\\dev\\tools', origin: { kind: 'github', owner: 'acme', repo: 'video' }, items }, P, W)).toBe('video');
     // The bound project still beats all of them.
