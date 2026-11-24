@@ -3,6 +3,12 @@
 //   - a decision card (#492): the reported-wait reply `Decision: <label>`, sent only while the
 //     session still puts THAT decision (the questions inbox's rule);
 //   - a reported "you" wait: the reply, while [replyStillWanted];
+//   - an ask (#526), a decision the session holds without stopping for it: the reply, behind the
+//     card's own `replyPrefix` (the server's words, naming WHICH decision it answers: the server
+//     ends exactly that ask when the answer arrives), while the session still holds it; a pick
+//     of its option is the label, behind the same prefix;
+//   - a possible unreported question (#526), a guess the server quotes from the session's last
+//     reply: the reply as the person's own words, while the session's reply still ends on it;
 //   - an AskUserQuestion on screen: its `Other` row, through [buildAnswerFrames] with the text
 //     as `otherText` and [NeedsYouActions.answer] (the pre-write re-check, the server-typed
 //     frames, the landing check). `Other` exists only for a COMPACT question (CLAUDE.md
@@ -79,6 +85,26 @@ class McPickSender {
         return actions.reply(s, 'Decision: $words',
             still: (fresh) => replyStillWanted(fresh) && d.sameAsk(fresh.brief?.decision),
             movedOn: '"${s.name}" asks something else now - nothing was sent');
+      case 'ask':
+        final prefix = card.replyPrefix;
+        final askId = card.askId;
+        if (prefix == null || askId == null) {
+          // An answer that does not name its decision would only mark every ask "maybe answered".
+          actions.say('This server does not name the decision to answer - open the session to reply, nothing was sent');
+          return false;
+        }
+        return actions.reply(s, '$prefix$words',
+            still: (fresh) => fresh.brief?.asks.any((a) => a.id == askId) ?? false,
+            movedOn: '"${s.name}" no longer asks that - nothing was sent');
+      case 'possible-ask':
+        if (runsAsCommand(words)) {
+          actions.say('That would run as a command in "${s.name}", not be read as an answer - nothing was sent');
+          return false;
+        }
+        final quoted = card.what;
+        return actions.reply(s, words,
+            still: (fresh) => quoted != null && fresh.brief?.possibleAsk?.text == quoted,
+            movedOn: '"${s.name}" no longer asks that - nothing was sent');
       case 'wait':
         if (runsAsCommand(words)) {
           actions.say('That would run as a command in "${s.name}", not be read as an answer - nothing was sent');

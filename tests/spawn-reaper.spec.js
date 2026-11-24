@@ -48,6 +48,7 @@ test.describe('#351 shouldClose - every gate, alone', () => {
     ['a background command is running', { backgroundTasks: [{ id: 'b1', description: 'build' }] }, 'background-work'],
     ['whether work is running is unknown (fail closed)', { backgroundTasks: null }, 'work-unknown'],
     ['it is a favorite', { favorite: true }, 'favorite'],
+    ['it holds decisions for the owner (open asks, #526)', { openAsks: 2 }, 'open-asks'],
     ['it is sitting out a usage limit', { usageLimit: { waiting: true } }, 'capped'],
     ['the usage-limit read failed (null, fail closed)', { usageLimit: null }, 'usage-unknown'],
     ['it has no usage-limit reading at all (fail closed)', { usageLimit: undefined }, 'usage-unknown'],
@@ -522,6 +523,12 @@ test.describe('#351 server.js wiring (pinned against the source)', () => {
     for (const peer of ['clusterFetch', 'loadClusterTokens', 'getClusterConfig', '/cluster/']) {
       expect(body).not.toContain(peer);
     }
+  });
+
+  test('#526 the sweep tells the reaper how many decisions the session holds for the owner', () => {
+    const sweep = SERVER_SRC.slice(SERVER_SRC.indexOf('async function spawnReaperSweep'));
+    const body = sweep.slice(0, sweep.indexOf('const _spawnReaperTicker'));
+    expect(body).toContain('openAsks: ((sessionBriefField(cur) || {}).asks || []).length');
   });
 
   test('the test-only env knobs are read in ONE place, and only under WT_TEST', () => {

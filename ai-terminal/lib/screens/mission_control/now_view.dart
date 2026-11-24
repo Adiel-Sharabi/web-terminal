@@ -326,7 +326,9 @@ class McAnswerCard extends StatelessWidget {
             Expanded(
               child: Wrap(spacing: 6, runSpacing: 4, children: [
                 if (c.project != null) McTag(projectName ?? c.project!, key: const ValueKey('mc-card-project')),
-                McTag(c.kind, muted: true),
+                McTag(c.isPossibleAsk ? 'possible unreported question' : c.kind, muted: true),
+                // #526 - a prompt typed into the session since it asked: it may be settled.
+                if (c.maybeAnswered) McTag('may be answered', muted: true, key: const ValueKey('mc-card-maybe-answered')),
                 if (why.severity != null) McTag('severity ${why.severity}', color: AppColors.caution),
               ]),
             ),
@@ -341,7 +343,11 @@ class McAnswerCard extends StatelessWidget {
               style: theme.textTheme.titleSmall?.copyWith(fontWeight: FontWeight.w600)),
           if (c.what != null) ...[
             const SizedBox(height: 4),
-            Text(c.what!, key: const ValueKey('mc-card-what'), maxLines: 3, overflow: TextOverflow.ellipsis),
+            Text(c.what!,
+                key: const ValueKey('mc-card-what'),
+                maxLines: 3,
+                overflow: TextOverflow.ellipsis,
+                style: c.maybeAnswered ? muted : null),
           ],
           if (why.text != null || blocked.isNotEmpty) ...[
             const SizedBox(height: 4),
@@ -351,7 +357,8 @@ class McAnswerCard extends StatelessWidget {
                 if (blocked.isNotEmpty) 'waiting: ${blocked.join(', ')}',
               ].join(' - '),
               key: const ValueKey('mc-card-why'),
-              style: small?.copyWith(color: AppColors.caution),
+              // An ask holds nobody up: its line says what the session does instead, not a warning.
+              style: small?.copyWith(color: c.blocking ? AppColors.caution : AppColors.onSurfaceVariant),
             ),
           ],
           if (session.isNotEmpty) ...[

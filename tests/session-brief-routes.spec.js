@@ -120,6 +120,65 @@ test.describe('#298 sessions dashboard — server wiring', () => {
     expect((await briefOf(ctx, id)).wait).toMatchObject({ on: 'you', decision });
   });
 
+  test('asks are a standing list: refused when incomplete, kept by every other report, marked by a typed prompt, ended by the card\'s answer (#526)', async () => {
+    const ask = (question) => ({ question, context: `why ${question}`, options: [{ label: 'A' }, { label: 'B' }] });
+    await hook(id, 'UserPromptSubmit', { prompt: 'go' });
+    const bad = await report(id, { headline: 'h', asks: [{ question: 'which DB?', options: [{ label: 'A' }, { label: 'B' }] }] });
+    expect(bad.status).toBe(400);
+    expect(bad.json.error).toContain('asks[0] needs a "context"');
+    const ok = await report(id, { headline: 'h', wait: { on: 'external', what: 'CI' }, asks: [ask('which DB?'), ask('rename the flag?')] });
+    expect(ok.status).toBe(200);
+    expect(ok.json.brief.asks.map((a) => a.question)).toEqual(['which DB?', 'rename the flag?']);
+    expect(ok.json.brief.asks[0]).toMatchObject({ context: 'why which DB?', options: [{ label: 'A' }, { label: 'B' }], maybeAnswered: false, id: expect.stringMatching(/^[0-9a-f]{8}$/) });
+    // A report that names none keeps them - a self wait, and a done - and the list reaches the session list.
+    for (const wait of [{ on: 'self', what: 'build' }, { on: 'done', what: '' }]) expect((await report(id, { wait })).status).toBe(200);
+    expect((await briefOf(ctx, id)).asks.map((a) => a.question)).toEqual(['which DB?', 'rename the flag?']);
+    // A turn nobody typed changes nothing; a typed prompt only MARKS them, and the report stands.
+    await hook(id, 'UserPromptSubmit', { prompt: '<task-notification><task-id>x</task-id></task-notification>' });
+    expect((await briefOf(ctx, id)).asks.map((a) => a.maybeAnswered)).toEqual([false, false]);
+    await hook(id, 'UserPromptSubmit', { prompt: 'use sqlite' });
+    let b = await briefOf(ctx, id);
+    expect(b.asks.map((a) => a.maybeAnswered)).toEqual([true, true]);
+    expect(b.headline).toBe('h');
+    // The answer typed from one card names it, and ends that one.
+    const prefix = (q) => `Answer to "${q}" [ask:${b.asks.find((a) => a.question === q).id}]: `;
+    await hook(id, 'UserPromptSubmit', { prompt: `${prefix('which DB?')}sqlite` });
+    b = await briefOf(ctx, id);
+    expect(b.asks.map((a) => a.question)).toEqual(['rename the flag?']);
+    // The session ends the rest itself.
+    expect((await report(id, { asks: [] })).status).toBe(200);
+    expect((await briefOf(ctx, id)).asks).toEqual([]);
+  });
+
+  test('a reply that ends on a question the lists do not hold becomes a possible unreported question, until it is covered or answered (#526)', async () => {
+    const dir = path.join(claudeProjectsRoot(), '__wt-test-fixture__');
+    fs.mkdirSync(dir, { recursive: true });
+    const fixture = path.join(dir, `wt_pa_${process.pid}_${Date.now()}.jsonl`);
+    const reply = (text) => JSON.stringify({ type: 'assistant', timestamp: '2026-10-01T09:00:00.000Z', message: { role: 'assistant', content: [{ type: 'text', text }] } }) + '\n';
+    try {
+      await hook(id, 'UserPromptSubmit', { prompt: 'go', transcript_path: fixture });
+      await report(id, { headline: 'h', wait: { on: 'done', what: '' } });
+      fs.writeFileSync(fixture, reply('The work is delivered.\n\n## TL;DR\nDelivered. Should the old endpoint be removed or kept for a release?'), 'utf8');
+      await hook(id, 'Stop', { transcript_path: fixture });
+      await expect.poll(async () => (await briefOf(ctx, id)).possibleAsk, { timeout: 10000 })
+        .toMatchObject({ text: 'Should the old endpoint be removed or kept for a release?' });
+      // The session reports it as a decision: that card is the one that shows.
+      expect((await report(id, { asks: [{ question: 'Remove the old endpoint, or keep it for a release?', context: 'clients may still call it',
+        options: [{ label: 'remove' }, { label: 'keep' }] }] })).status).toBe(200);
+      expect((await briefOf(ctx, id)).possibleAsk).toBeNull();
+      // A later reply that asks nothing: gone for good; a new question: back.
+      await report(id, { asks: [] });
+      expect((await briefOf(ctx, id)).possibleAsk).not.toBeNull();
+      fs.writeFileSync(fixture, reply('## TL;DR\nAll done, nothing else.'), 'utf8');
+      await hook(id, 'UserPromptSubmit', { prompt: '<task-notification><task-id>x</task-id></task-notification>', transcript_path: fixture });
+      await hook(id, 'Stop', { transcript_path: fixture });
+      await expect.poll(async () => (await briefOf(ctx, id)).possibleAsk, { timeout: 10000 }).toBeNull();
+    } finally {
+      try { fs.unlinkSync(fixture); } catch {}
+      try { fs.rmdirSync(dir); } catch {}
+    }
+  });
+
   test('a Stop is blocked on an unreported tracker change — once — and NOT forwarded', async () => {
     await report(id, { items: [{ ref: '#1', state: 'in-progress' }] });
     await hook(id, 'PostToolUse', { tool_name: 'Bash', tool_input: { command: 'gh issue close 77' } });

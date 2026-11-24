@@ -138,6 +138,14 @@ test.describe('#512 Start work: which machine', () => {
   ];
   const free = { held: false };
 
+  test('#532 the supervisor\'s dispatcher is not one of a machine\'s sessions: it adds to no count and shifts no ranking', () => {
+    const only = [{ name: 'alpha', url: null, online: true, needsAuth: false }, { name: 'beta', url: 'https://beta.example.test', online: true, needsAuth: false }];
+    const rs = [{ server: 'alpha', status: 'working', role: 'supervisor' }, { server: 'beta', status: 'working' }];
+    const v = S.machinesView({ servers: only, rows: rs, holds: { alpha: free, beta: free } });
+    expect(v.machines.map((m) => [m.name, m.sessions, m.working])).toEqual([['alpha', 0, 0], ['beta', 1, 1]]);
+    expect(v.suggested).toBe('alpha'); // it would be beta, were the dispatcher counted as work on alpha
+  });
+
   test('the fewest WORKING sessions wins, then the fewest sessions; every machine is listed with why it cannot take one', () => {
     const v = S.machinesView({ servers, rows, holds: { alpha: free, beta: free, gamma: free } });
     expect(v.suggested).toBe('beta');

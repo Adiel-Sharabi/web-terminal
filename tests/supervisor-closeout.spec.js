@@ -36,7 +36,7 @@ test.describe('#469 R5: the close-out plan (lib/closeout.js closeoutPlan)', () =
     expect(plan([done(1)], T0 + CFG.askAfterMs - 1).ask).toEqual([]);
     expect(plan([done(1)], T0 + CFG.askAfterMs - 1).why[id(1)]).toBe('settling');
     for (const over of [{ wait: { on: 'self', what: 'x', at: T0 } }, { wait: null }, { status: 'working' }, { clients: 1 }, { liveWork: 1 },
-      { compacting: true }, { waitingFor: 'answer' }, { capped: true }, { role: 'supervisor' }]) {
+      { compacting: true }, { waitingFor: 'answer' }, { capped: true }, { role: 'supervisor' }, { openAsks: 1 }]) {
       expect(plan([done(1, over)], T0 + CFG.askAfterMs).ask, JSON.stringify(over)).toEqual([]);
     }
     expect(plan([done(1)], T0 + CFG.askAfterMs, { skip: new Set([id(1)]) }).ask).toEqual([]);
@@ -113,6 +113,18 @@ test.describe('#469 R5: the close-out plan (lib/closeout.js closeoutPlan)', () =
     expect(p).toMatchObject({ close: [], ready: [id(1)], needs: [], ask: [] });
   });
 
+  test('#526 a done session that holds open asks is never asked, marked ready, nor closed: closing would drop them', () => {
+    const later = T0 + 30 * 24 * 60 * MIN;
+    const holding = (over = {}) => done(1, { openAsks: 2, closeout: clean(T0), ...over });
+    expect(plan([holding({ closeout: null })], T0 + CFG.askAfterMs)).toMatchObject({ ask: [], close: [], ready: [] });
+    expect(plan([holding()], later)).toMatchObject({ ask: [], close: [], ready: [] });
+    expect(plan([holding({ by: 'human' })], later)).toMatchObject({ ask: [], close: [], ready: [] });
+    // The dispatcher's own close verb holds the same, whatever the plan says of the rest.
+    expect(co.dispatcherClose(holding(), { complete: true, now: later, cfg: CFG }).close).toBeUndefined();
+    // Answered (the list is empty again), the same session closes as before.
+    expect(plan([holding({ openAsks: 0 })], later).close).toHaveLength(1);
+  });
+
   test('switched off, nothing is asked or closed, and ready-to-close is the plain done-and-idle', () => {
     const off = co.closeoutConfig({ enabled: false });
     const p = co.closeoutPlan({ graph: { nodes: [done(1), done(2, { closeout: clean(T0) })], complete: true }, now: T0 + 60 * MIN, cfg: off });
@@ -179,6 +191,9 @@ test.describe('#469 the close-out answer is state, and new work clears it', () =
     const n = sup.nodeOf(row, 'alpha');
     expect(n.closeout).toEqual({ askedAt: T0, state: 'clean', left: '', at: T0 + 1 });
     expect(n.favorite).toBe(true);
+    // #526 - the open asks the brief carries, counted only when they are objects.
+    expect(sup.nodeOf({ ...row, brief: { asks: [{ question: 'q' }, 'junk', null, { question: 'r' }] } }, 'alpha').openAsks).toBe(2);
+    expect(sup.nodeOf({ ...row, brief: {} }, 'alpha').openAsks).toBe(0);
     expect(sup.nodeOf({ ...row, favorite: 'yes', brief: {} }, 'alpha')).toMatchObject({ closeout: null, favorite: false });
   });
 });
@@ -214,12 +229,16 @@ test.describe('#469 the gated close, re-checked by the session\'s own server (cl
     expect(why({ children: 1 })).toBe('live-child');
     expect(why({ work: null })).toBe('work-unknown');
     expect(why({ work: [{ kind: 'command' }] })).toBe('live-work');
+    // #526 - decisions it still holds for the owner: the session's own server refuses too.
+    expect(why({ brief: { ...ok().brief, reported: { ...ok().brief.reported, asks: [{ question: 'q' }] } } })).toBe('open-asks');
+    expect(why({ brief: { ...ok().brief, reported: { ...ok().brief.reported, asks: [] } } })).toBeNull();
   });
 
   test('the ask\'s own gate: still done, and not already asked', () => {
     const b = { reported: { wait: { on: 'done', what: 'x', at: T0 } } };
     expect(co.askRefusal(b)).toBeNull();
     expect(co.askRefusal({ reported: { wait: { on: 'self', what: 'x', at: T0 } } })).toBe('not-done');
+    expect(co.askRefusal({ ...b, reported: { ...b.reported, asks: [{ question: 'q' }] } })).toBe('open-asks'); // #526
     expect(co.askRefusal({ ...b, closeout: co.askedRecord(T0) })).toBe('asked');
     expect(co.askRefusal(null)).toBe('not-done');
   });
