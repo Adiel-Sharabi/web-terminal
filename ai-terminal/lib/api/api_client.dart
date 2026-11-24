@@ -491,13 +491,43 @@ class ApiClient {
     return McAnswer.fromJson(_mcAnswer(res));
   }
 
+  /// How long a Start work call is waited on: longer than everything the server waits on.
+  static const Duration kMcStartTimeout = Duration(seconds: 30);
+
+  /// The machines a session can be started on, the suggested one named (`GET /api/mc/machines`, #512).
+  Future<McMachines> mcMachines() async => McMachines.fromJson(await _mcGet('/api/mc/machines'));
+
+  /// Starts a session bound to [project] and [subjects] (or a [hunt]) on [server]
+  /// (`POST /api/mc/start`, #512). A refusal is an [ApiException] with the server's reason.
+  Future<McStartResult> mcStart({
+    required String project,
+    List<String> subjects = const [],
+    bool hunt = false,
+    required String server,
+    String? name,
+    String? brief,
+  }) async {
+    final r = McStartResult.fromJson(await _mcPost('/api/mc/start', {
+      'project': project,
+      'subjects': subjects,
+      'hunt': hunt,
+      'server': server,
+      'name': ?name,
+      'brief': ?brief,
+      // The server may wait on the tracker (1.5 s) and on a peer's create (15 s): the app
+      // must not give up first and invite a second start of the same session.
+    }, timeout: kMcStartTimeout));
+    if (r == null) throw const ApiException(0, 'Malformed server response');
+    return r;
+  }
+
   Future<Map<String, dynamic>> _mcGet(String path, {Map<String, String>? query}) async {
     final res = await _send('GET', path, query: query == null || query.isEmpty ? null : query, alsoAccept: const {409});
     return _mcAnswer(res);
   }
 
-  Future<Map<String, dynamic>> _mcPost(String path, Map<String, Object?> body) async {
-    final res = await _send('POST', path, body: body, alsoAccept: const {400, 409});
+  Future<Map<String, dynamic>> _mcPost(String path, Map<String, Object?> body, {Duration? timeout}) async {
+    final res = await _send('POST', path, body: body, timeout: timeout, alsoAccept: const {400, 409});
     return _mcAnswer(res);
   }
 

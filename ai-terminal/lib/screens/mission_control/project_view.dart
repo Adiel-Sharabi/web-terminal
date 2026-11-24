@@ -32,6 +32,7 @@ class McProjectsNavigator extends StatefulWidget {
     required this.feed,
     required this.onAnswer,
     required this.onOpenSession,
+    this.onStartWork,
     this.actions = const [],
     this.active = true,
     this.now,
@@ -40,6 +41,9 @@ class McProjectsNavigator extends StatefulWidget {
   final McFeed feed;
   final void Function(McCard card) onAnswer;
   final void Function(String sessionId) onOpenSession;
+
+  /// #512 - opens Start work with a project preselected; null: the project page has no button.
+  final void Function(String projectId)? onStartWork;
   final List<Widget> actions;
 
   /// Whether Mission Control is the home on screen. Hidden, it still sits in the tree
@@ -71,6 +75,7 @@ class McProjectsNavigatorState extends State<McProjectsNavigator> {
           feed: widget.feed,
           projectId: projectId,
           now: widget.now,
+          onStartWork: widget.onStartWork == null ? null : () => widget.onStartWork!(projectId),
           onOpenSubject: (s) => Navigator.of(context).push(MaterialPageRoute<void>(
             settings: RouteSettings(name: 'mc-subject/${s.key}'),
             builder: (_) => McSubjectScreen(
@@ -137,6 +142,7 @@ class McProjectScreen extends StatefulWidget {
     required this.feed,
     required this.projectId,
     required this.onOpenSubject,
+    this.onStartWork,
     this.now,
   });
 
@@ -144,6 +150,9 @@ class McProjectScreen extends StatefulWidget {
   final String projectId;
 
   final void Function(McSubject subject) onOpenSubject;
+
+  /// #512 - Start work in this project; null: no button.
+  final VoidCallback? onStartWork;
   final DateTime? now;
 
   @override
@@ -250,6 +259,13 @@ class _McProjectScreenState extends State<McProjectScreen> {
       appBar: AppBar(
         title: Text(p?.name ?? widget.projectId),
         actions: [
+          if (widget.onStartWork != null)
+            IconButton(
+              key: const ValueKey('mc-project-start-work'),
+              tooltip: 'Start work in this project',
+              icon: const Icon(Icons.play_circle_outline),
+              onPressed: widget.onStartWork,
+            ),
           IconButton(
             key: const ValueKey('mc-project-refresh'),
             tooltip: 'Refresh',

@@ -288,6 +288,46 @@ class McFeed extends ChangeNotifier {
   /// One subject by [key]; a 404 is a key the server does not know (any more).
   Future<McSubjectDetail> subject(String key) => _authority().mcSubject(key);
 
+  // --- Start work (#512): asked of the server that answered ---------------------
+
+  /// The machines a session can be started on, with the one the server suggests.
+  Future<McMachines> machines() => _authority().mcMachines();
+
+  /// Starts a session bound to [project] and [subjects] (or a [hunt]) on [server]; the
+  /// next answer shows it under its subject. Throws [ApiException] with the server's reason.
+  Future<McStartResult> start({
+    required String project,
+    List<String> subjects = const [],
+    bool hunt = false,
+    required String server,
+    String? brief,
+  }) async {
+    final r = await _authority().mcStart(project: project, subjects: subjects, hunt: hunt, server: server, brief: brief);
+    unawaited(refresh());
+    return r;
+  }
+
+  /// The session [r] started, as this app opens it: on its own server (the one that
+  /// answered when it runs on the authority, else the configured server at its url), with
+  /// the agent and readiness the server resolved (#147), as every other create flow opens
+  /// the session it just made. Null when its server is not in this app's list.
+  Session? startedSession(McStartResult r) {
+    final sv = r.serverUrl == null ? _servedBy : serverForUrl(servers(), r.serverUrl);
+    if (sv == null) return null;
+    return Session(
+      id: r.sessionId,
+      name: r.name ?? '',
+      cwd: '',
+      status: 'idle',
+      claudeSessionId: null,
+      lastActivity: DateTime.now().millisecondsSinceEpoch,
+      notifyLevel: 'important',
+      server: sv,
+      agent: r.agent,
+      agentReady: r.agentReady,
+    );
+  }
+
   /// Tells every session in [sessions] [text], each through the gated prompt on ITS OWN
   /// server (found by url in this app's list), one after the other. Never throws: each
   /// session gets its answer - told, refused with the server's reason, or why it could
