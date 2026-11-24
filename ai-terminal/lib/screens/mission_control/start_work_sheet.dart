@@ -14,6 +14,7 @@ import '../../api/mc_models.dart';
 import '../../api/models.dart';
 import '../../services/mc_feed.dart';
 import '../../theme/app_theme.dart';
+import '../../widgets/app_bottom_sheet.dart';
 
 /// Opens the Start work sheet; on a start, opens the new session with [onOpenSession]
 /// (with the session object built from the answer, null when its server is not in this
@@ -24,10 +25,10 @@ Future<void> showStartWorkSheet(
   required void Function(String sessionId, Session? initial) onOpenSession,
   String? projectId,
 }) async {
-  final started = await showModalBottomSheet<McStartResult>(
+  final started = await showAppBottomSheet<McStartResult>(
     context: context,
     isScrollControlled: true,
-    useSafeArea: true,
+    showDragHandle: false,
     builder: (_) => McStartWorkSheet(feed: feed, projectId: projectId),
   );
   if (started != null) onOpenSession(started.sessionId, feed.startedSession(started));
