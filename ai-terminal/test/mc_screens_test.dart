@@ -164,7 +164,7 @@ void main() {
         theme: AppTheme.dark,
         home: McQuestionScope(
           analyst: McAnalyst(servers: () => const [], client: ApiClient.new),
-          onSend: (c, t) async => false,
+          onSend: (c, t, shown) async => false,
           onAnswer: (c) => opened.add(c.id),
           child: Scaffold(body: McNowView(feed: feed, onAnswer: (c) {}, onOpenSession: (_) {})),
         ),

@@ -121,6 +121,7 @@ test.describe('#510 question routes', () => {
     const nonce = /=== DATA ([0-9a-f]+) BEGIN ===/.exec(p)?.[1];
     const close = p.lastIndexOf(`=== DATA ${nonce} END ===`);
     // The card's own words inside the fence; the person's words after it, the option by number.
+    expect(p.indexOf('option 2: "Rewrite auth"')).toBeGreaterThan(p.lastIndexOf(`=== DATA ${nonce} BEGIN ===`));
     expect(p.indexOf('option 2: "Rewrite auth"')).toBeLessThan(close);
     expect(p.slice(close)).toContain(`About option 2 of the waiting question`);
     expect(p.slice(close)).toContain(FOLLOWUP);

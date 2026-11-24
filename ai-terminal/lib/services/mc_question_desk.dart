@@ -70,6 +70,7 @@ class McQuestionDesk extends ChangeNotifier {
     _level = level;
     _contextError = null;
     if (_contexts.containsKey(level)) {
+      _loading = false;
       _changed();
       return;
     }
@@ -82,7 +83,8 @@ class McQuestionDesk extends ChangeNotifier {
     } catch (e) {
       if (_level == level) _contextError = 'The context could not be read ($e)';
     }
-    _loading = false;
+    // Another level picked meanwhile is still loading: only its own answer ends the spinner.
+    if (_level == level) _loading = false;
     _changed();
   }
 

@@ -145,6 +145,7 @@ test.describe('#510 follow-ups and suggestions', () => {
     const esc = String.fromCodePoint(0x1b);
     const out = mq.parseSuggestions(wrap({ options: [
       { label: `Split${nl}it ${esc}[2J up`, consequence: 'two PRs' }, { label: 'patch the form' }, { label: 'Split it [2J up' },
+      { label: '!git push --force' }, { label: '/clear' },
       { label: 'x'.repeat(200), consequence: 'y'.repeat(400) }, { label: 'Ask the owner' }, { label: 'Fifth' },
     ], sources: ['S1', 'S99'] }), ['S1', 'S2'], ['Patch the form', 'Rewrite auth']);
     expect(out && out.options.map((o) => o.label)).toEqual(['Split it [2J up', 'x'.repeat(79) + '…', 'Ask the owner', 'Fifth']);

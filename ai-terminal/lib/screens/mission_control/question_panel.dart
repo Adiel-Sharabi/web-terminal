@@ -22,8 +22,9 @@ class McQuestionScope extends InheritedWidget {
 
   final McAnalyst analyst;
 
-  /// Sends the person's final pick as the card's answer; true when it went out.
-  final Future<bool> Function(McCard card, String text) onSend;
+  /// Sends the person's final pick as the card's answer ([shown]: the ask the panel showed, which
+  /// must still be the one asked); true when it went out.
+  final Future<bool> Function(McCard card, String text, McQuestionAsk? shown) onSend;
 
   /// Opens the card's question where it is answered (the inbox).
   final void Function(McCard card) onAnswer;
@@ -46,7 +47,7 @@ class McQuestionPanel extends StatefulWidget {
 
   final McCard card;
   final McAnalyst analyst;
-  final Future<bool> Function(McCard card, String text) onSend;
+  final Future<bool> Function(McCard card, String text, McQuestionAsk? shown) onSend;
   final VoidCallback? onAnswer;
 
   /// Injectable for tests.
@@ -92,15 +93,19 @@ class _McQuestionPanelState extends State<McQuestionPanel> {
     );
     if (ok != true || !mounted) return;
     setState(() => _sending = true);
-    final sent = await widget.onSend(widget.card, s.label);
-    if (!mounted) return;
-    setState(() => _sending = false);
-    if (sent) Navigator.of(context).pop();
+    var sent = false;
+    try {
+      sent = await widget.onSend(widget.card, s.label, _desk.ask);
+    } finally {
+      if (mounted) setState(() => _sending = false);
+    }
+    if (sent && mounted) Navigator.of(context).pop();
   }
 
   void _ask(int? option) {
     final q = _followup.text;
-    if (q.trim().isEmpty) return;
+    // One follow-up at a time: while one runs, the words stay in the box.
+    if (q.trim().isEmpty || _desk.followupBusy) return;
     _followup.clear();
     _desk.followup(option, q);
   }

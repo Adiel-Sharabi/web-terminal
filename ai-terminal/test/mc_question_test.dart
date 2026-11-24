@@ -141,7 +141,7 @@ void main() {
       addTearDown(tester.view.reset);
       final an = _FakeAnalyst();
       final sent = <String>[];
-      await tester.pumpWidget(_app(McQuestionPanel(card: _card, analyst: an, onSend: (c, t) async {
+      await tester.pumpWidget(_app(McQuestionPanel(card: _card, analyst: an, onSend: (c, t, shown) async {
         sent.add(t);
         return true;
       })));
@@ -193,7 +193,7 @@ void main() {
       tester.view.devicePixelRatio = 1;
       addTearDown(tester.view.reset);
       final an = _FakeAnalyst(canSuggest: false);
-      await tester.pumpWidget(_app(McQuestionPanel(card: _card, analyst: an, onSend: (c, t) async => true)));
+      await tester.pumpWidget(_app(McQuestionPanel(card: _card, analyst: an, onSend: (c, t, shown) async => true)));
       await tester.pumpAndSettle();
       await tester.tap(find.byKey(const ValueKey('mcq-suggest')));
       await tester.pumpAndSettle();
@@ -225,6 +225,9 @@ void main() {
     late Map<String, dynamic>? pending;
     late List<String> posted;
     late List<String> said;
+    // What the server reads the card as now (null: the card no longer waits).
+    McQuestionAsk? nowAsk;
+    const shownAsk = McQuestionAsk(kind: 'question', questions: ['Pick a color'], canSuggest: true);
 
     ApiClient client(ServerConfig s) => ApiClient(s, httpClient: MockClient((req) async {
           if (req.url.path.endsWith('/answer')) {
@@ -263,12 +266,13 @@ void main() {
         questionEvery: Duration.zero,
       );
       addTearDown(a.dispose);
-      return McPickSender(actions: a, sessions: () => [session]);
+      return McPickSender(actions: a, sessions: () => [session], currentAsk: (c) async => nowAsk);
     }
 
     setUp(() {
       posted = [];
       said = [];
+      nowAsk = shownAsk;
     });
 
     const qCard = McCard(id: 'Home|q|question:1', kind: 'question', server: 'Home', sessionId: 'q');
@@ -276,7 +280,7 @@ void main() {
     test('a compact question: the pick goes out as its Other answer, the frames buildAnswerFrames makes', () async {
       pending = question();
       final s = await sender();
-      expect(await s.send(qCard, 'Green'), isTrue);
+      expect(await s.send(qCard, 'Green', shown: shownAsk), isTrue);
       final q = PendingQuestion.fromJson({'pending': true, 'question': question()})!;
       final want = buildAnswerFrames(q.questions, [<int>{}], otherText: ['Green']).map((f) => f.keys).toList();
       expect(posted.take(want.length).toList(), want);
@@ -292,6 +296,55 @@ void main() {
       expect(posted, isEmpty);
       expect(said.single, contains('nothing was sent'));
       expect(await s.send(const McCard(id: 'x', kind: 'question', server: 'Home', sessionId: 'other'), 'Green'), isFalse);
+      expect(posted, isEmpty);
+    });
+
+    test('the card no longer waits, or now asks something else: refused before any key', () async {
+      pending = question();
+      final s = await sender();
+      nowAsk = null; // the card id named an older wait: the server 404s it
+      expect(await s.send(qCard, 'Green', shown: shownAsk), isFalse);
+      nowAsk = const McQuestionAsk(kind: 'question', questions: ['Delete the old table?']);
+      expect(await s.send(qCard, 'Green', shown: shownAsk), isFalse);
+      // The card still reads the same, but the question on screen is a newer one.
+      nowAsk = shownAsk;
+      pending = {
+        ...question(),
+        'questions': [
+          {...(question()['questions'] as List).first as Map<String, dynamic>, 'question': 'Delete the old table?'},
+        ],
+      };
+      expect(await s.send(qCard, 'Green', shown: shownAsk), isFalse);
+      expect(posted, isEmpty);
+      expect(said, everyElement(contains('nothing was sent')));
+      expect(said, hasLength(3));
+    });
+
+    test('two questions on screen: refused; a server name in another case still finds the session', () async {
+      pending = {
+        ...question(),
+        'questions': [
+          ...(question()['questions'] as List),
+          {'header': 'S', 'question': 'Size?', 'multiSelect': false, 'options': [{'label': 'S'}, {'label': 'L'}]},
+        ],
+      };
+      final s = await sender();
+      const lower = McCard(id: 'home|q|question:1', kind: 'question', server: 'home', sessionId: 'q');
+      expect(s.sessionOf(lower), isNotNull);
+      expect(await s.send(lower, 'Green', shown: shownAsk), isFalse);
+      expect(said.single, contains('takes no typed answer'));
+      expect(posted, isEmpty);
+    });
+
+    test('a wait reply that would run as a command (! or /) is refused', () async {
+      final s = await sender();
+      const wait = McCard(id: 'Home|q|wait:1', kind: 'wait', server: 'Home', sessionId: 'q');
+      nowAsk = const McQuestionAsk(questions: ['try the build']);
+      for (final t in ['!git push --force', '/clear']) {
+        expect(await s.send(wait, t), isFalse);
+      }
+      expect(said, everyElement(contains('run as a command')));
+      expect(McPickSender.runsAsCommand('Use the cache'), isFalse);
       expect(posted, isEmpty);
     });
   });
