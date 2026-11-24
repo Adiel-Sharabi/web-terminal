@@ -139,7 +139,7 @@ test.describe('#522 action waits: My to-do and Done', () => {
       expect(await hook(id, 'UserPromptSubmit', { session_id: conv, prompt: 'work' })).toBe(200);
       expect(await hook(id, 'Stop', { session_id: conv })).toBe(200);
       await until(async () => (await rowOf(id))?.status === 'idle', 'the session to go idle');
-      await report(id, { headline: 'h', wait: ACTION });
+      await report(id, { headline: 'h', items: [{ ref: 'ado:5222', title: 'Try the build', state: 'in-progress' }], wait: ACTION });
       const body = await nowUntil((b) => (b.actions || []).some((c) => c.sessionId === id), 'the action card');
       const card = body.actions.find((c) => c.sessionId === id);
 
@@ -153,10 +153,18 @@ test.describe('#522 action waits: My to-do and Done', () => {
       // The person clears their line: Done goes through, once, with the fixed text.
       for (let i = 0; i < 'half a thought'.length; i++) { ws.send(BACKSPACE); await sleep(20); }
       await sleep(1500);
-      const ok = await (await ctx.post('/api/mc/actions/done', { data: { cardId: card.id } })).json();
-      expect(ok.done).toEqual({ delivered: true });
-      await until(async () => (await (await ctx.get(`/api/sessions/${id}/scrollback`)).text())
-        .includes(`${TAG} [Mission Control] Done: ${ACTION.what}. The user did it; carry on.`), 'the Done in the terminal');
+      // The subject screen carries the same Done record as My to-do (withDone): none yet.
+      const subj = await (await ctx.get('/api/mc/subjects/ado:5222')).json();
+      expect(subj.subject.needsYou).toMatchObject({ id: card.id, kind: 'action', done: { state: 'refused', refused: 'draft' } });
+      // Two presses at once: ONE message (the record is on disk before any await), the other "already".
+      const both = await Promise.all([0, 1].map(async () => (await ctx.post('/api/mc/actions/done', { data: { cardId: card.id } })).json()));
+      const dones = both.map((b) => b.done);
+      expect(dones.filter((d) => d.delivered === true && !d.already)).toHaveLength(1);
+      expect(dones.filter((d) => d.already === true)).toHaveLength(1);
+      const line = `${TAG} [Mission Control] Done: ${ACTION.what}. The user did it; carry on.`;
+      await until(async () => (await (await ctx.get(`/api/sessions/${id}/scrollback`)).text()).includes(line), 'the Done in the terminal');
+      await sleep(1500);
+      expect((await (await ctx.get(`/api/sessions/${id}/scrollback`)).text()).split(line).length - 1).toBe(1);
       // The Done ENDED the wait on the session's own server (a tagged prompt is a system turn:
       // nothing else would clear it, and the owner-wait push and the inbox would keep it).
       expect((await rowOf(id)).brief.wait).toBeNull();

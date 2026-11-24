@@ -742,7 +742,7 @@ test.describe('wait.kind action (#522)', () => {
 
   test('a wrong shape is refused WITH the right one', () => {
     const cases = [
-      [act({ kind: 'todo' }), '.kind "todo" is not "action"'],
+      [act({ kind: 'todo' }), 'wait "kind" "todo" is not "action"'],
       [act({ kind: 3 }), 'is not "action"'],
       [act({ on: 'self' }), 'rides only on a "you" wait'],
       [act({ on: 'external' }), 'rides only on a "you" wait'],
@@ -782,6 +782,11 @@ test.describe('wait.kind action (#522)', () => {
     expect(v(act({ steps: ['x'.repeat(B.LIMITS.actionStep)] })).report.wait.steps[0]).toHaveLength(B.LIMITS.actionStep);
     expect(v(act({ where: 'y'.repeat(B.LIMITS.actionWhere + 1) })).error).toContain(`longer than ${B.LIMITS.actionWhere} characters`);
     expect(v(act({ steps: Array.from({ length: B.LIMITS.actionSteps }, (_, i) => `s${i}`) })).report.wait.steps).toHaveLength(B.LIMITS.actionSteps);
+    // Counted in characters (code points), not UTF-16 units: 160 emoji pass, 161 do not.
+    const emoji = String.fromCodePoint(0x1F4F1);
+    expect(v(act({ steps: [emoji.repeat(B.LIMITS.actionStep)], where: emoji.repeat(B.LIMITS.actionWhere) })).error).toBeUndefined();
+    expect(v(act({ steps: [emoji.repeat(B.LIMITS.actionStep + 1)] })).error).toContain('longer than');
+    expect(v(act({ where: emoji.repeat(B.LIMITS.actionWhere + 1) })).error).toContain('longer than');
   });
 
   test('control characters are refused in steps and where', () => {

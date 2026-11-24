@@ -475,6 +475,42 @@ void main() {
       await tester.pump(const Duration(seconds: 5));
     });
 
+    testWidgets('#522 a subject\'s action carries its Done record: maybe told offers no Done, as on My to-do', (tester) async {
+      cluster.needsYou = {
+        'id': 'beta|s-3|action:5',
+        'kind': 'action',
+        'server': 'beta',
+        'sessionId': 's-3',
+        'what': 'try the fix on the tablet',
+        'action': {'steps': <String>[], 'where': null},
+        'done': {'state': 'uncertain'},
+      };
+      await pump(tester);
+      final card = find.byKey(const ValueKey('mc-action-beta|s-3|action:5'));
+      expect(card, findsOneWidget);
+      expect(find.descendant(of: card, matching: find.byKey(const ValueKey('mc-action-maybe-told'))), findsOneWidget);
+      expect(find.descendant(of: card, matching: find.byKey(const ValueKey('mc-action-done'))), findsNothing);
+      expect(cluster.requests.where((r) => r.url.path == '/api/mc/actions/done'), isEmpty);
+      await tester.pumpWidget(const SizedBox());
+      await tester.pump(const Duration(seconds: 5));
+    });
+
+    testWidgets('#522 a subject\'s action already told says so and offers no Done', (tester) async {
+      cluster.needsYou = {
+        'id': 'beta|s-3|action:5',
+        'kind': 'action',
+        'server': 'beta',
+        'sessionId': 's-3',
+        'what': 'try the fix on the tablet',
+        'done': {'state': 'delivered'},
+      };
+      await pump(tester);
+      expect(find.byKey(const ValueKey('mc-action-told')), findsOneWidget);
+      expect(find.byKey(const ValueKey('mc-action-done')), findsNothing);
+      await tester.pumpWidget(const SizedBox());
+      await tester.pump(const Duration(seconds: 5));
+    });
+
     testWidgets('a subject the server does not know says so instead of a blank page', (tester) async {
       cluster.subjectStatus = 404;
       await pump(tester);

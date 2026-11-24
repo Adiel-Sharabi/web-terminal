@@ -606,6 +606,8 @@ class McActionCard extends StatelessWidget {
     // It may have landed (no answer came): never sent twice, so no Done; the card goes once
     // its session's wait ends.
     final maybeTold = done != null && done.maybeSent;
+    // Told (a subject's card until its wait leaves the view): never offered again.
+    final told = done != null && done.state == 'delivered';
     final unblocks = c.why.text;
     return Card(
       margin: EdgeInsets.zero,
@@ -657,6 +659,10 @@ class McActionCard extends StatelessWidget {
             const SizedBox(height: 2),
             Text(notTold, key: const ValueKey('mc-action-not-told'), style: small?.copyWith(color: AppColors.caution)),
           ],
+          if (told) ...[
+            const SizedBox(height: 2),
+            Text('Done: its session was told to carry on.', key: const ValueKey('mc-action-told'), style: muted),
+          ],
           if (maybeTold) ...[
             const SizedBox(height: 2),
             Text('Done was sent; it may have reached its session. It goes once the session carries on.',
@@ -664,7 +670,7 @@ class McActionCard extends StatelessWidget {
           ],
           const SizedBox(height: 4),
           Wrap(spacing: 4, crossAxisAlignment: WrapCrossAlignment.center, children: [
-            if (!maybeTold)
+            if (!maybeTold && !told)
               FilledButton.tonalIcon(
                 key: const ValueKey('mc-action-done'),
                 onPressed: onDone,

@@ -251,8 +251,8 @@ class McCard {
   /// #522: what to do and where, on an `action` card; null on every other kind.
   final McAction? action;
 
-  /// #522: what became of its Done when the session was NOT told (the server's words); null
-  /// when Done was never pressed. A card told (or maybe told) is not served at all.
+  /// #522: what became of its Done (refused with the server's words, maybe told, told); null
+  /// when Done was never pressed. My to-do never serves a told card; a subject may, briefly.
   final McPark? done;
 
   const McCard({

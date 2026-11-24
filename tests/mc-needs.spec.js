@@ -11,7 +11,8 @@ const M = require('../lib/mc-subjects');
 const N = require('../lib/mc-needs');
 const { createMcState } = require('../lib/mc-state');
 const { createPromptEpisodes } = require('../lib/mc-episodes');
-const { promptOf, PROMPT_BYTES_MAX, clearedWait } = require('../lib/safe-prompt');
+const { promptOf, PROMPT_BYTES_MAX } = require('../lib/safe-prompt');
+const { clearWait } = require('../lib/session-brief');
 
 const NOW = 1_800_000_000_000;
 const MIN = 60 * 1000;
@@ -364,15 +365,17 @@ test.describe('#522 action waits: on My to-do, never Answer now, and their Done'
     expect(N.actionDoneBody({ kind: 'action', what: '', askedAt: null })).toEqual({ text: '[Mission Control] Done: what you asked the user to do. The user did it; carry on.', tag: 'supervisor' });
   });
 
-  test('the gated prompt clears ONLY the wait it answers (safe-prompt clearWait)', () => {
+  test('the gated prompt clears ONLY the wait it answers (session-brief clearWait, the one owner)', () => {
     const at = NOW - MIN;
     const entry = { reported: { headline: 'h', wait: { on: 'you', what: 'try it', at, kind: 'action' } }, pinned: [] };
-    expect(clearedWait(entry, at)).toEqual({ reported: { headline: 'h', wait: null }, pinned: [] });
+    expect(clearWait(entry, at)).toEqual({ reported: { headline: 'h', wait: null }, pinned: [] });
     expect(entry.reported.wait).not.toBeNull(); // never mutated
-    expect(clearedWait(entry, at + 1)).toBeNull(); // reported again since: that wait is not ours
-    expect(clearedWait({ reported: { wait: null } }, at)).toBeNull();
-    expect(clearedWait(null, at)).toBeNull();
-    expect(clearedWait(entry, null)).toBeNull();
+    expect(clearWait(entry, at + 1)).toBeNull(); // reported again since: that wait is not ours
+    expect(clearWait({ reported: { wait: null } }, at)).toBeNull();
+    expect(clearWait(null, at)).toBeNull();
+    expect(clearWait(entry, 'x')).toBeNull();
+    // No `at`: a person clearing a wrong wait (#320) clears whatever is reported.
+    expect(clearWait(entry)).toEqual({ reported: { headline: 'h', wait: null }, pinned: [] });
     // clearWait is refused without the wait it answers, and must be a boolean.
     expect(promptOf({ text: 'x', clearWait: true }).error).toContain('clearWait needs expectWaitAt');
     expect(promptOf({ text: 'x', clearWait: 'yes', expectWaitAt: at }).error).toContain('clearWait must be true');
@@ -408,6 +411,19 @@ test.describe('#522 action waits: on My to-do, never Answer now, and their Done'
     expect(N.actionDoneInput({ cardId: 'c' })).toEqual({ cardId: 'c' });
     expect(N.pruneActionsDone({ a: { state: 'delivered', at: NOW - HOUR }, b: { state: 'delivered', at: NOW - 8 * 24 * HOUR }, c: null }, NOW))
       .toEqual({ a: { state: 'delivered', at: NOW - HOUR } });
+  });
+
+  test('every screen carries an action card WITH its Done record (withDone): My to-do and a subject agree', () => {
+    const card = { id: 'alpha|s|action:1', kind: 'action', what: 'x' };
+    expect(N.withDone(card, {})).toEqual({ ...card, done: null });
+    expect(N.withDone(card, { [card.id]: { state: 'uncertain', why: null, at: NOW } }).done).toEqual({ state: 'uncertain', refused: null, reason: null, at: NOW });
+    expect(N.withDone(card, { [card.id]: { state: 'refused', why: 'draft', at: NOW } }).done).toMatchObject({ refused: 'draft', reason: 'it has unsent text in its prompt box' });
+    // Only an action carries one; own keys only; never mutated.
+    const q = { id: 'constructor', kind: 'wait' };
+    expect(N.withDone(q, { constructor: { state: 'delivered' } })).toBe(q);
+    expect(N.withDone({ ...card, id: 'constructor' }, {}).done).toBeNull();
+    expect(N.withDone(null, {})).toBeNull();
+    expect(card).not.toHaveProperty('done');
   });
 
   test('mc-state keeps the Done records across a restart, written at once when asked', () => {

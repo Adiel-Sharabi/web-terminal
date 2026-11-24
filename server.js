@@ -7086,6 +7086,14 @@ app.get('/api/mc/projects', async (req, res) => {
   }
 });
 
+/** #522 - a subject's action card carries its Done record, as My to-do's does
+ *  (lib/mc-needs.js withDone): both screens agree on whether Done is offered. The cached view
+ *  is shared, so this copies, never mutates. */
+function mcSubjectsWithDone(subjects) {
+  const done = mcNeeds.pruneActionsDone(mcState.actionsDone(), Date.now());
+  return subjects.map((s) => (s.needsYou && s.needsYou.kind === 'action' ? { ...s, needsYou: mcNeeds.withDone(s.needsYou, done) } : s));
+}
+
 app.get('/api/mc/subjects', async (req, res) => {
   const refused = mcRefusal(supervisorAuthority());
   if (refused) return res.status(refused.status).json(refused.json);
@@ -7096,7 +7104,7 @@ app.get('/api/mc/subjects', async (req, res) => {
     const v = await cachedMcView(clusterReqUser(req));
     if (v.error) return res.status(500).json({ error: v.error });
     const f = mcSubjects.filterView(v, { project: project.value, area: area.value }, { projectsView: v.projectsOut });
-    res.json({ subjects: f.subjects, runs: f.runs, servers: v.servers, stages: mcStage.STAGES, generatedAt: v.generatedAt });
+    res.json({ subjects: mcSubjectsWithDone(f.subjects), runs: f.runs, servers: v.servers, stages: mcStage.STAGES, generatedAt: v.generatedAt });
   } catch (e) {
     console.error(`[mc] subjects: ${e.message}`);
     res.status(500).json({ error: 'could not read the cluster sessions' });
@@ -7117,7 +7125,7 @@ app.get('/api/mc/subjects/:key', async (req, res) => {
     if (v.error) return res.status(500).json({ error: v.error });
     const subject = v.subjects.find((x) => x.key === key);
     if (!subject) return res.status(404).json({ error: 'no session touched that work item in the last 7 days' });
-    res.json({ subject, runs: v.runs.filter((x) => x.subjects.includes(subject.key)), stages: mcStage.STAGES, generatedAt: v.generatedAt });
+    res.json({ subject: mcSubjectsWithDone([subject])[0], runs: v.runs.filter((x) => x.subjects.includes(subject.key)), stages: mcStage.STAGES, generatedAt: v.generatedAt });
   } catch (e) {
     console.error(`[mc] subject: ${e.message}`);
     res.status(500).json({ error: 'could not read the cluster sessions' });
@@ -8125,7 +8133,7 @@ async function gatedPrompt(id, body, by) {
     // a system turn, so nothing else clears it, and the owner-wait push, the inbox and the
     // subject's counts would keep it. Only that wait (its `at`), never one reported since.
     if (p.clearWait) {
-      const cleared = safePrompt.clearedWait(getBriefEntry(id), p.expectWaitAt);
+      const cleared = briefLib.clearWait(getBriefEntry(id), p.expectWaitAt);
       if (cleared) setBriefEntry(id, cleared);
     }
     // Typed text is input: the check-in and the hand-off scan leave the session alone for their
@@ -10083,7 +10091,7 @@ app.patch('/api/sessions/:id/brief', express.json({ limit: '16kb' }), async (req
   // running turn, a cap or a menu are mechanical and are not this route's to clear.
   if (body.clearWait !== undefined) {
     if (body.clearWait !== true) return res.status(400).json({ error: 'clearWait must be true' });
-    if (entry.reported && entry.reported.wait) entry.reported = { ...entry.reported, wait: null };
+    entry = briefLib.clearWait(entry) || entry;
   }
   // #314 - hide from the dashboard (never from the session list). Stored with the
   // session on the server that owns it, so every device shows the same Hidden tab.

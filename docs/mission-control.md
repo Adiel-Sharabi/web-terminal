@@ -216,7 +216,8 @@ Card = { id,                     // '<server>|<sessionId>|<kind>:<at>' - names t
                                  // text e.g. "blocks 3 sessions and 2 work items"
   rank, askedAt, decision: {...}|null, hasQuestion: bool,
   action: {steps: [string], where: string|null}|null,   // #522, kind 'action' only
-  done: {state, refused, reason, at}|null }             // #522, on `actions` only: a refused Done
+  done: {state, refused, reason, at}|null }             // #522, an action card only (My to-do and a subject's
+                                                        // needsYou, lib/mc-needs.js withDone): its Done record
 Todo = { id, cardId, kind, subjectKey, ref, title, project, text, server, sessionId, sessionName, createdAt, doneAt|null,
   park: { state: 'sending'|'delivered'|'refused'|'uncertain'|'none', refused: code|null, reason: words|null, at } }
 ```
