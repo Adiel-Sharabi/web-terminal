@@ -97,11 +97,13 @@ projects: [{ id,          // [a-z0-9][a-z0-9_-]{0,39}, unique; 'other' is reserv
   areas: { source: 'ado-area'|'gh-label'|'path'|'none',   // default 'none'
            map: { '<area path prefix | label | path prefix>': '<area name>' } } }]
 ```
-A session's project: the git origin of its cwd (`originForCwd`; this server's own sessions only)
-against `repos`/`adoProjects`; a peer's session (its cwd is on another machine) takes the origin
-its reported items name (a GitHub item's `owner/repo#N` key, an ADO item's link); then the cwd
+A session's project, first answer wins (#524): its bound project (below); the git origin of its
+cwd (`originForCwd`; this server's own sessions only) against `repos`/`adoProjects`; then the cwd
 against `paths` (a folder boundary, not a string prefix; the deepest folder wins; case-insensitive
-on Windows and for any path with a drive letter), else `other`. A subject's project: the ref's
+on Windows and for any path with a drive letter); then - for a peer's session (its origin is not
+known here) in an unconfigured folder - the origin its reported items name (a GitHub item's
+`owner/repo#N` key, an ADO item's link); else `other`. A session's own folder beats an item it
+merely mentions. A subject's project: the ref's
 repo / ADO project (`Meta.adoProject`), else the project most of its sessions are in, else `other`.
 A subject's area: from Meta per `areas.source` (`ado-area`: the longest matching prefix in `map`
 at a `\` boundary, else the last segment of the Area Path, a bare project root being `General`;

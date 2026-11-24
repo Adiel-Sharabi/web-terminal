@@ -6983,8 +6983,9 @@ app.get('/api/work-items/:ref/meta', async (req, res) => {
 
 // --- API: #503/#504/#505 Mission Control: subjects, runs, projects and areas ---
 /** A cluster row's git origin, for lib/projects.js: this server's own sessions have one it can
- *  read; a peer's cwd is on the peer, so its project comes from the items it reported
- *  (originFromItems). One rule for the Mission Control view and /api/mc/ask. */
+ *  read; a peer's cwd is on the peer, so its project comes from its folder (`paths`), else from
+ *  the items it reported (originFromItems, #524). One rule for the Mission Control view and
+ *  /api/mc/ask. */
 function mcRowOrigin(s) {
   return s.server === getServerName() && !s.serverUrl ? originForCwd(s.cwd) : null;
 }
