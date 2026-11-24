@@ -473,6 +473,14 @@ check and fix its uncommitted and untracked changes, unpushed branches, worktree
 and sessions it started, and the tracker. It answers as **state**, never prose:
 `node scripts/wt-closeout.js clean`, or `... blocked "<what is left>"` (`POST /api/session/:id/closeout`,
 hook token only). The rules are `lib/closeout.js`.
+- **Clean means the subject is finished in full (#543):** merged, not just pushed; every PR the
+  session opened completed (open, queued or building is not); reviews answered; leftovers only in a
+  tracker item; nothing it started still running. A PR it owns still open keeps it open, watching.
+  A PR **shared** by several sessions keeps exactly one owner open: the others answer
+  `clean --pr "<ref>" --owner <session id or name>`, and are ready to close only while that owner is a
+  live session (an id, a `replaces` alias, or a name one session carries) that has not reported done.
+  Naming itself is refused; an owner a complete scan does not find (`owner-gone`) or one that reported
+  done (`owner-done`) is **Needs you**, never ready, never closed.
 - The prompt is typed through the session's own server's gated prompt as a **template**
   (`{template: "closeout"}`): that server builds the text, naming its own path to `wt-closeout.js`.
   It is asked once per done; a typed prompt, or a report of a wait that is not `done`, is new work
