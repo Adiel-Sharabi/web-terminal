@@ -87,7 +87,8 @@ test.describe('#522 action waits: My to-do and Done', () => {
     made.push(id);
     const other = (await (await ctx.post('/api/sessions', { data: { name: `mc-ask-${Date.now()}`, autoCommand: '' } })).json()).id;
     made.push(other);
-    await report(id, { headline: 'h', items: [{ ref: 'ado:5221', title: 'Try the build', state: 'in-progress' }], wait: ACTION });
+    // #541: the action names its item (a card is never about the session's first item by default).
+    await report(id, { headline: 'h', items: [{ ref: 'ado:5221', title: 'Try the build', state: 'in-progress' }], wait: { ...ACTION, ref: 'ado:5221' } });
     await report(other, { headline: 'h', wait: { on: 'you', what: 'pick a schema' } });
     const body = await nowUntil((b) => (b.actions || []).some((c) => c.sessionId === id) && b.answerNow.some((c) => c.sessionId === other), 'the two cards');
     expect(Object.keys(body).sort()).toEqual(['actions', 'answerNow', 'generatedAt', 'lines', 'moving', 'projects', 'todo']);

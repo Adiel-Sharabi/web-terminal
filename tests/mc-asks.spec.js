@@ -261,7 +261,7 @@ test.describe('#526 asks as Answer-now cards, one per decision', () => {
   test('an `external` wait plus 3 asks gives 3 cards, ranked after a `you` wait', () => {
     const lead = row('alpha', { name: 'lead', items: [{ ref: 'ado:7' }],
       reason: { kind: 'external', text: 'its child on another machine' }, wait: { on: 'external', what: 'child', at: NOW - 30 * MIN },
-      asks: [ask('which DB?', 50), ask('ship the migration?', 20), ask('rename the flag?', 5)] });
+      asks: [ask('which DB?', 50, { ref: 'ado:7' }), ask('ship the migration?', 20, { ref: 'ado:7' }), ask('rename the flag?', 5, { ref: 'ado:7' })] });
     const you = row('beta', { name: 'blocked', items: [{ ref: 'ado:9' }],
       reason: { kind: 'you', text: 'say go', since: NOW - 3 * MIN }, wait: { on: 'you', what: 'say go', at: NOW - 3 * MIN } });
     const v = nowOf([lead, you]);
@@ -433,5 +433,146 @@ test.describe('#526 asks as Answer-now cards, one per decision', () => {
     expect(c).toMatchObject({ kind: 'ask', recommended: 1, canSuggest: true, context: 'because' });
     expect(c.options.map((o) => o.label)).toEqual(['A', 'B']);
     expect(c.questions[0].text).toBe('Which?');
+  });
+});
+
+// --- #541: the item a card is about --------------------------------------------------------
+
+test.describe('#541 an ask or a wait names the item it is about: "ref"', () => {
+  const TWO = { items: [{ ref: '#5', title: 'Landscape on a phone', state: 'in-progress' }, { ref: 'ado:9', title: 'Sensor cap', state: 'blocked' }] };
+
+  test('"ref" is one of the report\'s own items (any spelling of it), kept as the item was reported, on an ask and on a wait', () => {
+    const v = B.validateReport({ ...TWO, wait: { on: 'you', what: 'go?', ref: 'gh#5' }, asks: [A('pick', { ref: 'AB#9' }), A('plain')] });
+    expect(v.error).toBeUndefined();
+    expect(v.report.wait.ref).toBe('#5');
+    expect(v.report.asks[0].ref).toBe('ado:9');
+    // No "ref" named: none is invented.
+    expect(v.report.asks[1]).not.toHaveProperty('ref');
+    expect(B.validateReport({ ...TWO, wait: { on: 'you', what: 'go?' } }).report.wait).not.toHaveProperty('ref');
+    // null is absent, as everywhere else in the report.
+    expect(B.validateReport({ ...TWO, asks: [A('pick', { ref: null })] }).report.asks[0]).not.toHaveProperty('ref');
+  });
+
+  test('the brief publishes it with the ask and the wait', () => {
+    const e = report(B.emptyEntry(), { ...TWO, wait: { on: 'you', what: 'go?', ref: '#5' }, asks: [A('pick', { ref: 'ado:9' })] }, T0);
+    const brief = B.buildBrief(e, { reporting: true });
+    expect(brief.asks[0]).toMatchObject({ question: 'pick', ref: 'ado:9' });
+    expect(brief.wait.ref).toBe('#5');
+    // A report of the asks alone keeps the wait, ref and all.
+    const e2 = report(e, { asks: [A('pick', { ref: 'ado:9' }), A('other')] }, T0 + MIN);
+    expect(B.buildBrief(e2, { reporting: true }).wait.ref).toBe('#5');
+    expect(B.buildBrief(e2, { reporting: true }).asks[1]).not.toHaveProperty('ref');
+  });
+
+  test('a ref that is no item of the session is refused, naming the session\'s refs and the shape', () => {
+    const askErr = B.validateReport({ ...TWO, asks: [A('fine', { ref: '#5' }), A('pick', { ref: '#77' })] }).error;
+    expect(askErr).toContain('asks[1].ref');
+    expect(askErr).toContain('"#77"');
+    expect(askErr).toContain('#5, ado:9');
+    expect(askErr).toContain('leave "ref" out');
+    expect(askErr).toContain('"ref": "#5"');
+    const waitErr = B.validateReport({ ...TWO, wait: { on: 'you', what: 'go?', ref: 'ado:10' } }).error;
+    expect(waitErr).toContain('wait.ref');
+    expect(waitErr).toContain('#5, ado:9');
+    // Not a string: refused the same way.
+    expect(B.validateReport({ ...TWO, asks: [A('pick', { ref: 5 })] }).error).toContain('asks[0].ref');
+    expect(B.validateReport({ ...TWO, wait: { on: 'you', what: 'x', ref: { a: 1 } } }).error).toContain('wait.ref');
+  });
+
+  test('a report with no items has none to name', () => {
+    const err = B.validateReport({ headline: 'h', asks: [A('pick', { ref: '#5' })] }).error;
+    expect(err).toContain('asks[0].ref');
+    expect(err).toContain('names no work item');
+  });
+
+  test('a report of asks or a wait alone is checked against the items already reported', () => {
+    const e = report(B.emptyEntry(), TWO, T0);
+    expect(B.validateReport({ asks: [A('pick', { ref: 'ado:9' })] }, e).report.asks[0].ref).toBe('ado:9');
+    expect(B.validateReport({ wait: { on: 'you', what: 'x', ref: '#5' } }, e).report.wait.ref).toBe('#5');
+    expect(B.validateReport({ asks: [A('pick', { ref: '#6' })] }, e).error).toContain('#5, ado:9');
+    expect(B.validateReport({ wait: { on: 'you', what: 'x', ref: '#6' } }, e).error).toContain('wait.ref');
+  });
+
+  test('the hook note teaches it, in one short sentence', () => {
+    const t = B.instructionText(null, 'CMD');
+    expect(t).toContain('"ref"');
+    expect(t).toMatch(/ask or wait.*"ref"/s);
+  });
+
+  test('a peer\'s ask keeps its ref through the cluster view (a string, at most the ref limit)', () => {
+    const rows = [row('alpha', { items: [{ ref: 'ado:5' }], asks: [ask('which?', 10, { ref: 'ado:5' }), ask('other?', 10, { ref: 'x'.repeat(500) }), ask('none?', 10, { ref: 7 })] })];
+    const [node] = M.sessionNodes({ rows, closed: [], now: NOW });
+    expect(node.asks[0].ref).toBe('ado:5');
+    expect(node.asks[1].ref.length).toBeLessThanOrEqual(B.LIMITS.ref);
+    expect(node.asks[2]).not.toHaveProperty('ref');
+  });
+});
+
+test.describe('#541 a card shows the title of the item it is about - never the session\'s first item', () => {
+  const A5 = { ref: 'ado:5', title: 'Landscape on a phone' };
+  const B9 = { ref: 'ado:9', title: 'Sensor cap for the DOM readout' };
+  const youWait = (what, extra = {}) => ({ reason: { kind: 'you', text: what, since: NOW - 3 * MIN }, wait: { on: 'you', what, at: NOW - 3 * MIN, ...extra } });
+  const byWhat = (v) => Object.fromEntries(v.answerNow.map((c) => [c.what, c]));
+  const face = (c) => [c.subjectKey, c.ref, c.title];
+
+  test('several cards of ONE session carry different titles: a wait with ref B, an ask with ref A, an ask matching B by its words, an ask matching nothing', () => {
+    const s = row('alpha', { name: 'lead', items: [A5, B9], ...youWait('Ship the cap change?', { ref: 'ado:9' }),
+      asks: [ask('Log the drone follow mode?', 30, { ref: 'ado:5' }), ask('Raise the sensor cap readout to 40?', 20), ask('Which colour for the badge?', 10)] });
+    const c = byWhat(nowOf([s]));
+    expect(face(c['Ship the cap change?'])).toEqual(['ado:9', 'ado:9', 'Sensor cap for the DOM readout']);
+    expect(face(c['Log the drone follow mode?'])).toEqual(['ado:5', 'ado:5', 'Landscape on a phone']);
+    expect(face(c['Raise the sensor cap readout to 40?'])).toEqual(['ado:9', 'ado:9', 'Sensor cap for the DOM readout']);
+    // Nothing says what it is about: no title, never the first item's.
+    expect(face(c['Which colour for the badge?'])).toEqual([null, null, null]);
+    expect(c['Which colour for the badge?'].project).toBeNull();
+    expect(new Set(Object.values(c).map((x) => x.title)).size).toBe(3);
+  });
+
+  test('an ask with no ref and no shared words never borrows the first item - one item or many', () => {
+    const one = row('alpha', { items: [A5], asks: [ask('Which colour for the badge?')] });
+    const many = row('alpha', { items: [A5, B9], asks: [ask('Which colour for the badge?')], ...youWait('Anything else?') });
+    for (const s of [one, many]) for (const c of nowOf([s]).answerNow) expect(face(c)).toEqual([null, null, null]);
+  });
+
+  test('a single shared word is not enough (the cost of a wrong title is higher than none), nor a tie between two items', () => {
+    const s = row('alpha', { items: [A5, B9], asks: [ask('Is the phone ready?'), ask('Phone sensor cap readout?')] });
+    const c = byWhat(nowOf([s]));
+    expect(face(c['Is the phone ready?'])).toEqual([null, null, null]);
+    // "sensor cap readout" is B's and "phone" is A's single word: B wins by a clear margin.
+    expect(face(c['Phone sensor cap readout?'])[0]).toBe('ado:9');
+    const tie = row('alpha', { items: [{ ref: 'ado:5', title: 'Sensor cap readout' }, { ref: 'ado:9', title: 'Sensor cap readout' }], asks: [ask('Raise the sensor cap readout?')] });
+    expect(face(nowOf([tie]).answerNow[0])).toEqual([null, null, null]);
+  });
+
+  test('a ref the session no longer reports gives no subject (not the first item, not a word match)', () => {
+    const s = row('alpha', { items: [A5, B9], asks: [ask('Raise the sensor cap readout to 40?', 10, { ref: 'ado:99' })] });
+    expect(face(nowOf([s]).answerNow[0])).toEqual([null, null, null]);
+  });
+
+  test('a finished item is never guessed at from words: only a ref names it', () => {
+    const s = row('alpha', { items: [{ ...A5, state: 'done' }, B9], asks: [ask('Log the landscape on a phone?', 10)] });
+    expect(face(nowOf([s]).answerNow[0])).toEqual([null, null, null]);
+  });
+
+  test('a ref names an item the session has finished too', () => {
+    const s = row('alpha', { items: [{ ...A5, state: 'done' }, B9], asks: [ask('Log it?', 10, { ref: 'ado:5' })] });
+    expect(face(nowOf([s]).answerNow[0])).toEqual(['ado:5', 'ado:5', 'Landscape on a phone']);
+  });
+
+  test('the severity and the project of an ask are those of the item it is about, else none', () => {
+    const metaByKey = { 'ado:5': { key: 'ado:5', title: 'Landscape on a phone', severity: 1 }, 'ado:9': { key: 'ado:9', title: 'Sensor cap', severity: 3 } };
+    const s = row('alpha', { items: [A5, B9], asks: [ask('about five?', 30, { ref: 'ado:5' }), ask('about nine?', 20, { ref: 'ado:9' }), ask('about neither?', 10)] });
+    const c = byWhat(nowOf([s], { metaByKey }));
+    expect(c['about five?'].why.severity).toBe(1);
+    expect(c['about nine?'].why.severity).toBe(3);
+    expect(c['about neither?'].why.severity).toBeNull();
+    expect(c['about five?'].title).toBe('Landscape on a phone');
+  });
+
+  test('a question its reply may have put is about an item only by its words', () => {
+    const s = row('alpha', { items: [A5, B9], possibleAsk: { text: 'Should the sensor cap readout stay at 40?', at: NOW - MIN } });
+    const s2 = row('alpha', { items: [A5, B9], possibleAsk: { text: 'Which colour for the badge?', at: NOW - MIN } });
+    expect(face(nowOf([s]).answerNow[0])[0]).toBe('ado:9');
+    expect(face(nowOf([s2]).answerNow[0])).toEqual([null, null, null]);
   });
 });

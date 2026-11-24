@@ -784,6 +784,11 @@ companion's daily foreground time from a phone over adb in `logs/phone-usage.jso
   on an option chip answers through that same reply path after a 5-second Undo, and a tap on the card
   (or its chevron) expands it in place: the context, every option with its consequence (the
   recommended one starred), and a one-line reply of your own words.
+  **Which item a card is about (#541):** a wait or an ask may name its work item (`"ref"`, one of the
+  session's own items; a wrong one is refused with the list). A card shows that item's title; with no
+  `ref` it takes the one item reported blocked (a wait) or the item whose title and note share at
+  least two words with the question; otherwise it shows the question alone, never the title of the
+  session's first item. Two cards of one session can therefore carry different titles.
   **To my to-do** (`POST /api/mc/todo`) parks one for the desk and tells its session once, through
   the gated prompt, to carry on and report that wait as external; a refusal (unsent text in its
   prompt box, a turn running) is shown and sent again only when you ask. A to-do can be ticked done,

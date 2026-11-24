@@ -153,7 +153,6 @@ class _MissionControlHomeState extends State<MissionControlHome> {
     return _picks.send(card, text, shown: shown);
   }
 
-<<<<<<< HEAD
   /// #531 - what the answer sheet may do: read the question on screen, send the answer panel's
   /// frames, send words, open the session, ask the Analyst. Whatever went out, Now is read again.
   late final McAnswerPort _answerPort = McAnswerPort(
@@ -177,15 +176,6 @@ class _MissionControlHomeState extends State<MissionControlHome> {
     },
     askAbout: (card) => McQuestionScope.openPanel(context, card: card, analyst: _analyst, onSend: _sendPick, askFirst: true),
   );
-=======
-  /// #541 - an ask or decision card answered from the card itself: the reply dialog's own path
-  /// ([_sendPick]), then Now is read again so the card goes as soon as the server drops it.
-  Future<bool> _reply(McCard card, String text) async {
-    final ok = await _sendPick(card, text, null);
-    if (ok) unawaited(_feed.refresh());
-    return ok;
-  }
->>>>>>> 1f4c672 (Mission Control: an ask or decision card is answered in place - option chips answer after an Undo, the card expands to context and consequences, the question is on the face once (#541))
 
   /// Desktop: whether the Ask panel is open beside the tab.
   bool _askPanel = false;
@@ -355,7 +345,7 @@ class _MissionControlHomeState extends State<MissionControlHome> {
   @override
   Widget build(BuildContext context) {
     // #510 - every question card below (Now, a subject) opens its panel through this.
-    return McQuestionScope(analyst: _analyst, onSend: _sendPick, onAnswer: _answer, onReply: _reply, child: _layout());
+    return McQuestionScope(analyst: _analyst, onSend: _sendPick, onAnswer: _answer, onReply: _answerPort.send, child: _layout());
   }
 
   Widget _layout() {

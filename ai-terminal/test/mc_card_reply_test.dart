@@ -315,6 +315,48 @@ void main() {
     });
   });
 
+  // The server says which item a card is about, or none (lib/mc-needs.js subjectFor). With none the
+  // card shows the question itself, never a title borrowed from another item, and the session's
+  // name stands beneath.
+  group('a card about no item', () {
+    Map<String, dynamic> noItem(Map<String, dynamic> j) => {...j, 'ref': null, 'title': null, 'subjectKey': null, 'project': null};
+
+    testWidgets('the question is the heading, printed once, with the session beneath', (tester) async {
+      await pump(tester, noItem(_askJson()));
+      expect(tester.widget<Text>(key('mc-card-heading')).data, 'Which database?');
+      expect(key('mc-card-what'), findsNothing, reason: 'the heading already says it');
+      expect(find.text('Which database?'), findsOneWidget);
+      expect(find.text('Lead · Home'), findsOneWidget);
+      await tester.tap(key('mc-card-expand'));
+      await tester.pump();
+      expect(find.text('Which database?'), findsOneWidget, reason: 'expanded, still once');
+      expect(key('mc-card-what'), findsNothing);
+    });
+
+    testWidgets('a wait with no item says what it waits on as its heading, once', (tester) async {
+      await pump(tester, noItem({..._decisionJson(what: 'Ship the cap change?'), 'decision': null, 'kind': 'wait'}));
+      expect(tester.widget<Text>(key('mc-card-heading')).data, 'Ship the cap change?');
+      expect(find.text('Ship the cap change?'), findsOneWidget);
+    });
+
+    testWidgets('a decision with no item keeps its own question when the wait line says something else', (tester) async {
+      await pump(tester, noItem(_decisionJson()));
+      expect(tester.widget<Text>(key('mc-card-heading')).data, 'Waiting on a storage choice');
+      expect(find.text('Which database?'), findsOneWidget);
+    });
+
+    testWidgets('a card about an item still shows that item as its heading and the question beneath it', (tester) async {
+      await pump(tester, _askJson());
+      expect(tester.widget<Text>(key('mc-card-heading')).data, 'acme/web#7  Fix login');
+      expect(tester.widget<Text>(key('mc-card-what')).data, 'Which database?');
+    });
+
+    testWidgets('a card with no item and no words falls back to the session\'s name', (tester) async {
+      await pump(tester, {...noItem(_askJson()), 'what': null, 'decision': null});
+      expect(tester.widget<Text>(key('mc-card-heading')).data, 'Lead');
+    });
+  });
+
   group('inside Mission Control\'s scope', () {
     testWidgets('a card with no reply of its own answers through the scope\'s', (tester) async {
       final viaScope = <String>[];

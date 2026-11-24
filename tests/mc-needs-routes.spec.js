@@ -53,11 +53,12 @@ test.describe('#506 Answer now / My to-do routes', () => {
     expect(made.status()).toBe(200);
     const id = (await made.json()).id;
     try {
-      await report(id, { headline: 'h', items: [{ ref: 'ado:4711', title: 'Try the build', state: 'in-progress' }], wait: { on: 'you', what: 'try the build on the desk' } });
+      await report(id, { headline: 'h', items: [{ ref: 'ado:4711', title: 'Try the build', state: 'in-progress' }], wait: { on: 'you', what: 'try the build on the desk', ref: 'ado:4711' } });
       let body = await nowUntil(ctx, (b) => b.answerNow.some((c) => c.sessionId === id));
       expect(Object.keys(body).sort()).toEqual(['actions', 'answerNow', 'generatedAt', 'lines', 'moving', 'projects', 'todo']);
       const card = body.answerNow.find((c) => c.sessionId === id);
-      expect(card).toMatchObject({ kind: 'wait', subjectKey: 'ado:4711', what: 'try the build on the desk', hasQuestion: false, decision: null,
+      // #541: the wait names its item ("ref"), through the real report route and validator.
+      expect(card).toMatchObject({ kind: 'wait', subjectKey: 'ado:4711', ref: 'ado:4711', title: 'Try the build', what: 'try the build on the desk', hasQuestion: false, decision: null,
         why: { blocks: 1, subjects: ['ado:4711'], text: 'blocks this session and 1 work item' } });
       expect(card.id).toMatch(new RegExp(`\\|${id}\\|wait:\\d+$`));
       expect(Number.isInteger(card.rank) && card.rank >= 1).toBe(true);

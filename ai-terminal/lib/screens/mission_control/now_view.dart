@@ -474,7 +474,11 @@ class _McAnswerCardState extends State<McAnswerCard> {
                 ),
             ]),
             const SizedBox(height: 6),
-            Text(heading.isEmpty ? (c.sessionName ?? 'A session') : heading,
+            // #541: a card the server says is about no item (no ref, no title) has the question itself
+            // for a heading - never a title borrowed from another item - and the session's name
+            // stands beneath it (the line below); the question is then not printed a second time.
+            // A question card's own words ("answer a question") say nothing: its questions follow.
+            Text(heading.isNotEmpty ? heading : ((c.kind == 'question' ? null : c.what) ?? c.sessionName ?? 'A session'),
                 key: const ValueKey('mc-card-heading'),
                 style: theme.textTheme.titleSmall?.copyWith(fontWeight: FontWeight.w600)),
             // #531: a question card shows the questions themselves; its own words ("answer a
@@ -482,7 +486,7 @@ class _McAnswerCardState extends State<McAnswerCard> {
             if (c.kind == 'question') ...[
               const SizedBox(height: 4),
               McCardQuestions(questions: c.questions),
-            ] else if (c.what != null) ...[
+            ] else if (c.what != null && heading.isNotEmpty) ...[
               const SizedBox(height: 4),
               Text(c.what!,
                   key: const ValueKey('mc-card-what'),
