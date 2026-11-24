@@ -229,6 +229,21 @@ class McAction {
   }
 }
 
+/// #531 - one question of a question card's AskUserQuestion, as the card face shows it: the
+/// server's one line of plain text, with the header the agent gave it (null when none).
+class McCardQuestion {
+  final String? header;
+  final String text;
+  const McCardQuestion({this.header, required this.text});
+
+  /// Null when it has no text: a question with no words says nothing.
+  static McCardQuestion? fromJson(dynamic json) {
+    final m = _map(json);
+    final text = _str(m['text']);
+    return text == null ? null : McCardQuestion(header: _str(m['header']), text: text);
+  }
+}
+
 /// One "Answer now" card: a session stuck on the person. The server ranks them; [rank]
 /// and the list order are its answer. An `action` card (#522) is the same shape, served in
 /// [McNow.actions] (My to-do) instead, with [action] and, after a refused Done, [done].
@@ -266,6 +281,11 @@ class McCard {
   final BriefDecision? decision;
   final bool hasQuestion;
 
+  /// #531: a question card's questions as the server read them off the session's screen (each
+  /// one line of plain text, at most four); empty when the card is not a question or its text
+  /// could not be read - the card face then says so rather than show the wait's generic words.
+  final List<McCardQuestion> questions;
+
   /// #522: what to do and where, on an `action` card; null on every other kind.
   final McAction? action;
 
@@ -294,6 +314,7 @@ class McCard {
     this.askedAt,
     this.decision,
     this.hasQuestion = false,
+    this.questions = const [],
     this.action,
     this.done,
   });
@@ -325,6 +346,7 @@ class McCard {
       askedAt: _at(m['askedAt']),
       decision: BriefDecision.fromJson(m['decision']),
       hasQuestion: _bool(m['hasQuestion']),
+      questions: _list(m['questions'], McCardQuestion.fromJson),
       action: McAction.fromJson(m['action']),
       done: m['done'] is Map ? McPark.fromJson(m['done']) : null,
     );

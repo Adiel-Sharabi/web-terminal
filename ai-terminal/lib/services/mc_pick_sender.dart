@@ -18,12 +18,19 @@
 // the card is read again ([currentAsk]: the card id names the wait, so a newer question or wait
 // is a 404) and must still ask what the panel showed; a question on screen must still read the
 // same. The follow-ups and the suggestions themselves never come here: they are the Analyst's.
+//
+// #531 - the card's OWN question is answered here too, in Mission Control: the answer sheet
+// reads the question on screen ([pendingQuestion]) and sends the frames the answer panel built
+// from the person's picks ([answerQuestion]) - buildAnswerFrames stays the one copy of the key
+// rules, and NeedsYouActions.answer the one writer, with its pre-write re-check of what the
+// person saw against what the session still asks.
 
+import '../api/api_client.dart' show ApiException;
 import '../api/mc_ask_models.dart';
 import '../api/mc_models.dart';
 import '../api/models.dart';
 import '../util/needs_you.dart' show replyStillWanted;
-import '../widgets/question_overlay.dart' show buildAnswerFrames;
+import '../widgets/question_overlay.dart' show AnswerFrame, buildAnswerFrames;
 import 'needs_you_actions.dart';
 
 class McPickSender {
@@ -50,6 +57,34 @@ class McPickSender {
         if (s.id == id && (server == null || s.server.name.toLowerCase() == server)) s,
     ];
     return hits.length == 1 ? hits.single : null;
+  }
+
+  /// The AskUserQuestion on [card]'s session's screen, from the route the session screen's
+  /// overlay reads; null when nothing is pending. Throws [ApiException] when the session is not
+  /// known to this app or the read fails: the answer sheet says so, it never guesses.
+  Future<PendingQuestion?> pendingQuestion(McCard card) async {
+    final s = sessionOf(card);
+    if (s == null) {
+      throw const ApiException(0, "That session is not in this app's list - open it to answer");
+    }
+    return actions.client(s.server).pendingQuestion(s.id);
+  }
+
+  /// Answers [shown] - the question the person saw - with [frames] the answer panel built
+  /// ([buildAnswerFrames]), through [NeedsYouActions.answer]: the question is read again just
+  /// before the first key and compared by content, so an answer to a question that has since
+  /// gone or changed writes nothing. True when the keys went out; otherwise the reason was said.
+  Future<bool> answerQuestion(McCard card, PendingQuestion shown, List<AnswerFrame> frames) async {
+    final s = sessionOf(card);
+    if (s == null) {
+      actions.say("That session is not in this app's list - open it to answer, nothing was sent");
+      return false;
+    }
+    if (actions.quickAnswerBlocked(s, shown)) {
+      actions.say('An answer to "${s.name}" did not land - open it to finish, nothing was sent');
+      return false;
+    }
+    return await actions.answer(s, shown, frames) == PreWriteVerdict.proceed;
   }
 
   /// Whether [text] would run as a command at the agent's prompt rather than be read as words.
