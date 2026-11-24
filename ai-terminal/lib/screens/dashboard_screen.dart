@@ -36,6 +36,8 @@ import '../theme/app_theme.dart';
 import '../theme/status_colors.dart';
 import '../services/supervisor_lookup.dart' show SupervisorFeed;
 import '../util/inbox_queue.dart' show needYouCount;
+import '../util/listed_sessions.dart';
+import '../util/open_supervisor.dart';
 import '../util/session_tree.dart';
 import '../widgets/app_version_label.dart';
 import '../widgets/attention_detail_sheet.dart';
@@ -51,6 +53,7 @@ import '../widgets/session_card.dart';
 import '../widgets/session_family.dart';
 import '../widgets/status_dot.dart';
 import 'journal_screen.dart';
+import 'supervisor_screen.dart' show supervisorStateLine;
 import 'session_screen.dart';
 import 'settings_screen.dart';
 import '../util/open_inbox.dart';
@@ -101,7 +104,12 @@ class DashboardScreen extends StatefulWidget {
     this.onShowInbox,
     this.onShowJournal,
     this.onOpenMissionControl,
+    this.onShowSupervisor,
   });
+
+  /// When set (split view), the Supervisor entry shows the Supervisor in the detail pane
+  /// (#475) instead of pushing it as a full-screen route.
+  final VoidCallback? onShowSupervisor;
 
   /// #507: switches the app to Mission Control. Null (a test, an older shell): no entry.
   final VoidCallback? onOpenMissionControl;
@@ -131,7 +139,7 @@ class DashboardScreen extends StatefulWidget {
   State<DashboardScreen> createState() => _DashboardScreenState();
 }
 
-class _DashboardScreenState extends State<DashboardScreen> {
+class _DashboardScreenState extends State<DashboardScreen> with SupervisorListWatch<DashboardScreen> {
   String _filter = _kAllServers;
 
   /// #327 - the title filter. While it holds text the list is one flat, unordered set
@@ -304,6 +312,9 @@ class _DashboardScreenState extends State<DashboardScreen> {
   /// The questions inbox (#383): split view shows it in the detail pane, a phone
   /// pushes it. Opening a session from it works as a tap on its row here does.
   void _openInbox() => openInbox(Navigator.of(context), showInPane: widget.onShowInbox, openSession: _openSession);
+
+  /// The Supervisor (#475), placed and opened as the journal is.
+  void _openSupervisor() => openSupervisor(Navigator.of(context), showInPane: widget.onShowSupervisor, openSession: _openSession);
 
   /// The supervisor's journal (#466), placed and opened as the questions inbox is.
   void _openJournal() {
@@ -592,7 +603,11 @@ class _DashboardScreenState extends State<DashboardScreen> {
             child: StreamBuilder<List<Session>>(
               stream: SessionRepository.instance.sessions,
               builder: (context, snapshot) {
-                final sessions = snapshot.data;
+                // #475 - the Supervisor's dispatcher is not one of the listed sessions:
+                // the Supervisor entry below the bar opens it. [all] keeps it for the
+                // inbox badge, which counts what the inbox itself lists.
+                final all = snapshot.data;
+                final sessions = all == null ? null : listedSessions(all, find: SupervisorFeed.instance.find);
                 final needsAuth = SessionRepository.instance.serverNeedsAuth;
                 final offlineConfirmed =
                     SessionRepository.instance.serverOfflineConfirmed;
@@ -673,7 +688,7 @@ class _DashboardScreenState extends State<DashboardScreen> {
                         // you" list (needYouOf): the rows' blocking items not
                         // dismissed, and the supervisor's cards and escalations.
                         ListenableBuilder(listenable: SupervisorFeed.instance, builder: (context, _) {
-                          final rows = sessions ?? const <Session>[];
+                          final rows = all ?? const <Session>[];
                           final waiting = needYouCount(rows,
                               sup: SupervisorFeed.instance.find,
                               isDismissed: (it, sig) =>
@@ -766,6 +781,9 @@ class _DashboardScreenState extends State<DashboardScreen> {
                     ),
                     if (widget.onOpenMissionControl != null)
                       SliverToBoxAdapter(child: _MissionControlEntry(onTap: widget.onOpenMissionControl!)),
+                    // #475 - the Supervisor: its dispatcher is no row among the sessions,
+                    // and never hidden either - this one entry opens it.
+                    SliverToBoxAdapter(child: SupervisorEntry(onTap: _openSupervisor)),
                     SliverToBoxAdapter(
                       child: _TitleFilter(
                         value: _query,
@@ -1377,6 +1395,38 @@ class DashboardMachineFilter extends StatelessWidget {
         selected: value == label,
         onSelected: (_) => onChanged(label),
       ),
+    );
+  }
+}
+
+/// #475 - the way to the Supervisor from the session list: one slim row under the bar, shown
+/// while the cluster has a supervisor ([SupervisorFeed], which the list asks every 30 s). Its
+/// line is the dispatcher's state, as the Supervisor page says it.
+class SupervisorEntry extends StatelessWidget {
+  const SupervisorEntry({super.key, required this.onTap});
+  final VoidCallback onTap;
+
+  @override
+  Widget build(BuildContext context) {
+    return ListenableBuilder(
+      listenable: SupervisorFeed.instance,
+      builder: (context, _) {
+        final find = SupervisorFeed.instance.find;
+        final state = find?.state;
+        if (find == null || !find.found || state == null || state.dispatcher == null) return const SizedBox.shrink();
+        final theme = Theme.of(context);
+        final open = state.cases.where((c) => c.open).length;
+        return ListTile(
+          key: const ValueKey('open-supervisor'),
+          dense: true,
+          visualDensity: VisualDensity.compact,
+          leading: Icon(Icons.shield_outlined, color: theme.colorScheme.primary),
+          title: const Text('Supervisor'),
+          subtitle: Text(supervisorStateLine(state.dispatcher, open), maxLines: 1, overflow: TextOverflow.ellipsis),
+          trailing: const Icon(Icons.chevron_right),
+          onTap: onTap,
+        );
+      },
     );
   }
 }

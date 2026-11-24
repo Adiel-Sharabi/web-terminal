@@ -125,6 +125,47 @@ test.describe.serial('#468 the dispatcher takes the cases the rules cannot settl
     expect((await a.post('/api/supervisor/act', { data: { verb: 'wake', session: disp, text: 'hi' } })).status()).toBe(400);
   });
 
+  // #475 - the dispatcher is the fleet's supervisor, not one of its sessions: its row keeps
+  // `role: "supervisor"` for the clients, and the server leaves it out of what counts sessions.
+  test('the dispatcher stays out of the session count, the Live list and Mission Control', async () => {
+    const all = await rows();
+    expect(all.some((s) => s.id === disp)).toBe(true);
+    const others = all.filter((s) => s.id !== disp).length;
+    // The machine's session count is what the soft limit (#421) and Start work read.
+    const m = await (await a.get('/api/machine?part=sessions')).json();
+    expect(m.sessions.count).toBe(others);
+    const st = await state();
+    expect(st.dispatcher.id).toBe(disp);
+    expect(st.live).not.toContain(disp);
+    expect(st.sessions.some((n) => n.id === disp && n.role === 'supervisor')).toBe(true);
+    // Mission Control groups every listed session under a project: never the dispatcher.
+    await until(async () => {
+      const p = await (await a.get('/api/mc/projects')).json();
+      return Array.isArray(p.projects) && p.projects.reduce((n, x) => n + x.counts.sessions, 0) === others;
+    }, 'Mission Control counting every session but the dispatcher');
+    // Start work ranks machines by their sessions: the same count (GET /api/mc/machines).
+    await until(async () => {
+      const mv = await (await a.get('/api/mc/machines')).json();
+      return Array.isArray(mv.machines) && mv.machines.reduce((n, x) => n + x.sessions, 0) === others;
+    }, 'Start work counting every session but the dispatcher');
+  });
+
+  test('a verb logs its case and its undo as their own fields, for the Supervisor feed', async () => {
+    await sleep(1500); // the coaching above was input: the typing quiet period
+    const r = await a.post('/api/supervisor/act', { data: { verb: 'answer', session: W, text: 'take the server side', undo: 'tell it to switch to the client side', case: caseId } });
+    expect(r.status(), await r.text()).toBe(200);
+    const act = (await state()).actions.find((x) => x.rule === 'answer' && x.id === W);
+    expect(act, 'the answer in the feed').toMatchObject({ caseId, undo: 'tell it to switch to the client side' });
+    expect(act.text).toContain('take the server side');
+    // The coaching before it named its case and no undo.
+    const coach = (await state()).actions.find((x) => x.rule === 'coach');
+    expect(coach).toMatchObject({ caseId, undo: null });
+    // A note whose writer names no undo still carries the field, and the case-open note its case.
+    const opened = (await state()).actions.find((x) => x.outcome === 'case' && x.caseId === caseId);
+    expect(opened, 'the note of the case opening names its case').toBeTruthy();
+    expect(opened.undo).toBeNull();
+  });
+
   test('a text only the owner decides becomes a card; it is typed only on Approve, once', async () => {
     await sleep(1500); // the coaching above was input: the typing quiet period
     const r = await a.post('/api/supervisor/act', { data: { verb: 'lead', session: W, text: 'merge the PR to master now', case: caseId } });
@@ -138,6 +179,9 @@ test.describe.serial('#468 the dispatcher takes the cases the rules cannot settl
     const ok = await a.post(`/api/supervisor/cards/${j.card}`, { data: { decision: 'approve' } });
     expect(ok.status(), await ok.text()).toBe(200);
     await until(async () => (await screen(W)).includes(`${TAG} As your stand-in lead: merge the PR to master now`), 'the approved card typed');
+    // The feed's note for the approval names the case the card served (#475).
+    const approved = (await state()).actions.find((x) => x.rule === 'lead' && x.outcome === 'delivered');
+    expect(approved, 'the approval in the feed').toMatchObject({ id: W, caseId, undo: null });
     expect((await a.post(`/api/supervisor/cards/${j.card}`, { data: { decision: 'approve' } })).status()).toBe(409);
   });
 
@@ -151,6 +195,21 @@ test.describe.serial('#468 the dispatcher takes the cases the rules cannot settl
     expect(st.autonomy.wake).toMatchObject({ mode: 'recommend', dismissed: 1 });
     expect(st.autonomy.lead).toMatchObject({ mode: 'act', approved: 1 });
     await a.post('/api/supervisor/autonomy', { data: { class: 'wake', mode: 'act' } });
+  });
+
+  test('an answer in recommend mode is a card that keeps its undo; Approve types it and the feed names case and undo', async () => {
+    await sleep(1500); // the typing quiet period
+    expect((await a.post('/api/supervisor/autonomy', { data: { class: 'answer', mode: 'recommend' } })).status()).toBe(200);
+    const r = await (await a.post('/api/supervisor/act', { data: { verb: 'answer', session: W, text: 'take the client side', undo: 'tell it to take the server side', case: caseId } })).json();
+    expect(r.card).toBeTruthy();
+    const card = (await state()).cards.find((k) => k.id === r.card);
+    expect(card).toMatchObject({ cls: 'answer', caseId });
+    const ok = await a.post(`/api/supervisor/cards/${r.card}`, { data: { decision: 'approve' } });
+    expect(ok.status(), await ok.text()).toBe(200);
+    await until(async () => (await screen(W)).includes('take the client side'), 'the approved answer typed');
+    const noted = (await state()).actions.find((x) => x.rule === 'answer' && x.outcome === 'delivered' && x.text.includes('take the client side'));
+    expect(noted, 'the approved answer in the feed').toMatchObject({ caseId, undo: 'tell it to take the server side' });
+    await a.post('/api/supervisor/autonomy', { data: { class: 'answer', mode: 'act' } });
   });
 
   test('the dispatcher resolves the case through the CLI', async () => {

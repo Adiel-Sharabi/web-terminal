@@ -283,6 +283,14 @@ class Session {
   /// session, so the helper still finds it, on whichever machine it runs.
   final List<String> replaces;
 
+  /// #468/#475 - `supervisor` for the Supervisor's own dispatcher session, else null. That
+  /// row is the fleet's supervisor, not one of its sessions: the lists leave it out
+  /// ([listedSessions]) and the Supervisor entry opens it.
+  final String? role;
+
+  /// The Supervisor's dispatcher (#475): shown under the Supervisor entry, never in a list.
+  bool get isSupervisor => role == 'supervisor';
+
   /// Creates a session value object. [autoCommand] is optional (default `''`)
   /// so existing call sites and tests that predate the field keep compiling.
   const Session({
@@ -315,6 +323,7 @@ class Session {
     this.checkIn,
     this.parentId,
     this.replaces = const <String>[],
+    this.role,
   });
 
   /// This session with a different pinned rank (#124), for the optimistic half of
@@ -354,6 +363,7 @@ class Session {
     checkIn: checkIn,
     parentId: parentId,
     replaces: replaces,
+    role: role,
   );
 
   /// Builds a [Session] from one element of the `GET /api/sessions` array,
@@ -395,6 +405,7 @@ class Session {
       checkIn: SessionCheckIn.fromJson(json['checkIn']),
       parentId: _parentId(json['spawn']),
       replaces: _replaces(json['spawn']),
+      role: json['role'] is String && (json['role'] as String).isNotEmpty ? json['role'] as String : null,
     );
   }
 

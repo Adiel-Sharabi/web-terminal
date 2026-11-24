@@ -43,6 +43,8 @@ import '../services/session_input.dart';
 import '../services/session_repository.dart';
 import '../theme/app_theme.dart';
 import '../theme/status_colors.dart';
+import '../services/supervisor_lookup.dart' show SupervisorFeed;
+import '../util/listed_sessions.dart';
 import '../util/needs_you.dart';
 import '../util/session_tree.dart';
 import '../widgets/brief_item_row.dart';
@@ -207,7 +209,7 @@ class WorkBoardScreen extends StatefulWidget {
   State<WorkBoardScreen> createState() => _WorkBoardScreenState();
 }
 
-class _WorkBoardScreenState extends State<WorkBoardScreen> {
+class _WorkBoardScreenState extends State<WorkBoardScreen> with SupervisorListWatch<WorkBoardScreen> {
   static const _closedEvery = Duration(seconds: 30);
   static const _machineEvery = Duration(seconds: 30);
   static const _leaseEvery = Duration(seconds: 10);
@@ -694,7 +696,8 @@ class _WorkBoardScreenState extends State<WorkBoardScreen> {
     final pal = BoardPalette.of(context);
     final theme = Theme.of(context);
     final muted = theme.textTheme.bodySmall?.copyWith(color: pal.idle);
-    final all = _sessions;
+    // #475 - the Supervisor's dispatcher is no card on the board: the Supervisor entry opens it.
+    final all = listedSessions(_sessions, find: SupervisorFeed.instance.find);
     final servers = _servers;
     final hidden = all.where(boardIsHidden).toList();
     final shown = all.where((s) => !boardIsHidden(s)).toList();

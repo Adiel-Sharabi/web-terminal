@@ -93,6 +93,9 @@ class SupervisorNode {
   /// When the journal saw it open (authority clock), if it did.
   final int? openedAt;
 
+  /// #475 - `supervisor` for the Supervisor's own dispatcher, else null.
+  final String? role;
+
   const SupervisorNode({
     required this.id,
     this.server,
@@ -110,6 +113,7 @@ class SupervisorNode {
     this.wait,
     this.orphan,
     this.openedAt,
+    this.role,
   });
 
   /// The lead is gone from every server (the "lead gone" badge).
@@ -140,6 +144,7 @@ class SupervisorNode {
       wait: SupervisorWait.fromJson(j['wait']),
       orphan: SupervisorOrphan.fromJson(j['orphan']),
       openedAt: journal is Map ? _ms(journal['openedAt']) : null,
+      role: _str(j['role']),
     );
   }
 }
@@ -331,9 +336,17 @@ class SupervisorCase {
   /// #498 - put off with Later until this time (authority clock).
   final int? laterUntil;
 
+  /// #475 - when it was handed to the dispatcher, and when the dispatcher took it (acted on it
+  /// with a verb naming it), authority clock; null until then.
+  final int? deliveredAt;
+  final int? takenAt;
+
   const SupervisorCase({required this.id, this.rule, this.sessionId, this.server, this.name, this.line = '', this.openedAt,
       this.question, this.escalatedAt, this.escalatedAuto = false, this.resolvedAt,
-      this.ownerKind, this.title, this.ask, this.whyYou, this.checking = false, this.laterUntil});
+      this.ownerKind, this.title, this.ask, this.whyYou, this.checking = false, this.laterUntil, this.deliveredAt, this.takenAt});
+
+  /// Still open: not resolved by the dispatcher, the rules or the owner.
+  bool get open => resolvedAt == null;
 
   bool get escalated => question != null;
 
@@ -365,7 +378,132 @@ class SupervisorCase {
       whyYou: o is Map ? _str(o['whyYou']) : null,
       checking: o is Map && o['checking'] == true,
       laterUntil: _ms(j['laterUntil']),
+      deliveredAt: _ms(j['deliveredAt']),
+      takenAt: _ms(j['takenAt']),
     );
+  }
+}
+
+/// #475 - the dispatcher (`dispatcher` in the state): the Supervisor's own Claude Code session
+/// on the authority, which the server starts when a case needs it.
+class SupervisorDispatcher {
+  /// The dispatcher is switched on in the authority's config.
+  final bool enabled;
+
+  /// The owner paused it (`POST /api/supervisor/pause`): new cases go straight to the owner.
+  final bool paused;
+
+  /// Its session id, null while it is not running.
+  final String? id;
+
+  /// Its session's status (`working`, `idle`, ...), null while it is not running.
+  final String? status;
+
+  /// It is at its usage cap.
+  final bool capped;
+
+  /// When the server last started it (authority clock).
+  final int? startedAt;
+
+  /// The server's one word for it: `off`, `paused`, `capped`, `not running` or its status.
+  final String state;
+
+  const SupervisorDispatcher({this.enabled = false, this.paused = false, this.id, this.status, this.capped = false, this.startedAt, this.state = ''});
+
+  static SupervisorDispatcher? fromJson(dynamic j) {
+    if (j is! Map) return null;
+    return SupervisorDispatcher(
+      enabled: j['enabled'] == true,
+      paused: j['paused'] == true,
+      id: _str(j['id']),
+      status: _str(j['status']),
+      capped: j['capped'] == true,
+      startedAt: _ms(j['startedAt']),
+      state: _str(j['state']) ?? '',
+    );
+  }
+}
+
+/// #475 - one class of action the supervisor takes (`autonomy` in the state, keyed by class):
+/// whether it acts on its own (`act`) or makes a card for the owner (`recommend`), and what
+/// the owner did with its cards.
+class SupervisorAutonomy {
+  final String cls;
+
+  /// `act` or `recommend`.
+  final String mode;
+  final int approved;
+  final int dismissed;
+  final int pending;
+  final int edited;
+  final int told;
+  final int retired;
+
+  const SupervisorAutonomy({required this.cls, required this.mode, this.approved = 0, this.dismissed = 0, this.pending = 0,
+      this.edited = 0, this.told = 0, this.retired = 0});
+
+  bool get acts => mode == 'act';
+
+  /// Every class the server served, in the served order; an entry with no mode is skipped.
+  static List<SupervisorAutonomy> listFromJson(dynamic j) {
+    if (j is! Map) return const [];
+    return List.unmodifiable([
+      for (final e in j.entries)
+        if (e.key is String && e.value is Map && _str((e.value as Map)['mode']) != null)
+          SupervisorAutonomy(
+            cls: e.key as String,
+            mode: _str((e.value as Map)['mode'])!,
+            approved: _int((e.value as Map)['approved']) ?? 0,
+            dismissed: _int((e.value as Map)['dismissed']) ?? 0,
+            pending: _int((e.value as Map)['pending']) ?? 0,
+            edited: _int((e.value as Map)['edited']) ?? 0,
+            told: _int((e.value as Map)['told']) ?? 0,
+            retired: _int((e.value as Map)['retired']) ?? 0,
+          ),
+    ]);
+  }
+}
+
+/// #475 - one thing the supervisor did (`actions` in the state, newest first): a rule's act,
+/// a dispatcher verb, a card made or decided, a case opened or resolved.
+class SupervisorAction {
+  /// When (authority clock).
+  final int? at;
+
+  /// The session it touched.
+  final String? sessionId;
+  final String? server;
+
+  /// The rule or verb class (`R2`, `wake`, `coach`, `answer`, `owner`, `resolve`, ...).
+  final String? rule;
+
+  /// What it did, in its own words (the line it typed, the case it opened, ...).
+  final String text;
+
+  /// How it went (`delivered`, `card`, `case`, `resolved`, ...).
+  final String? outcome;
+
+  /// The case it served, when it served one.
+  final String? caseId;
+
+  /// For an answer given for the owner: how to undo it.
+  final String? undo;
+
+  const SupervisorAction({this.at, this.sessionId, this.server, this.rule, this.text = '', this.outcome, this.caseId, this.undo});
+
+  static SupervisorAction? fromJson(dynamic j) {
+    if (j is! Map) return null;
+    final a = SupervisorAction(
+      at: _ms(j['at']),
+      sessionId: _str(j['id']),
+      server: _str(j['server']),
+      rule: _str(j['rule']),
+      text: _str(j['text']) ?? '',
+      outcome: _str(j['outcome']),
+      caseId: _str(j['caseId']),
+      undo: _str(j['undo']),
+    );
+    return a.text.isEmpty && a.rule == null ? null : a;
   }
 }
 
@@ -398,6 +536,12 @@ class SupervisorState {
   /// This device's clock minus the authority's, from the served `now`; 0 when unsaid.
   final int skewMs;
 
+  /// #475 - the dispatcher, each class's autonomy and what the supervisor did (newest first).
+  /// Null / empty from a server older than #468.
+  final SupervisorDispatcher? dispatcher;
+  final List<SupervisorAutonomy> autonomy;
+  final List<SupervisorAction> actions;
+
   const SupervisorState({
     required this.role,
     this.enabled = true,
@@ -414,6 +558,9 @@ class SupervisorState {
     this.cards = const [],
     this.cases = const [],
     this.skewMs = 0,
+    this.dispatcher,
+    this.autonomy = const [],
+    this.actions = const [],
   });
 
   bool get isAuthority => role == 'authority';
@@ -458,6 +605,9 @@ class SupervisorState {
       cards: _list(j['cards'], SupervisorCard.fromJson),
       cases: _list(j['cases'], SupervisorCase.fromJson),
       skewMs: now == null ? 0 : receivedAt.millisecondsSinceEpoch - now,
+      dispatcher: SupervisorDispatcher.fromJson(j['dispatcher']),
+      autonomy: SupervisorAutonomy.listFromJson(j['autonomy']),
+      actions: _list(j['actions'], SupervisorAction.fromJson),
     );
   }
 }

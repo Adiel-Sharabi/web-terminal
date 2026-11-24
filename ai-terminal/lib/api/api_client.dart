@@ -371,6 +371,24 @@ class ApiClient {
     return state;
   }
 
+  /// #475 - pauses or resumes the Supervisor's dispatcher (`POST /api/supervisor/pause`), on
+  /// the lease authority only (409 elsewhere, thrown like any failure). Paused, the cases it
+  /// would take go straight to the owner. Returns the paused state the server recorded.
+  Future<bool> setSupervisorPaused(bool paused) async {
+    final res = await _send('POST', '/api/supervisor/pause', body: {'paused': paused});
+    return _asMap(_decode(res))['paused'] == true;
+  }
+
+  /// #475 - sets one class of the supervisor's actions ([cls]: `wake`, `coach`, `answer`,
+  /// `lead`, `close`, `spawn`) to act on its own (`act`) or to make a card for the owner
+  /// (`recommend`), through `POST /api/supervisor/autonomy`, on the lease authority only.
+  /// Returns the mode the server recorded.
+  Future<String?> setSupervisorAutonomy(String cls, String mode) async {
+    final res = await _send('POST', '/api/supervisor/autonomy', body: {'class': cls, 'mode': mode});
+    final m = _asMap(_decode(res))['mode'];
+    return m is String ? m : null;
+  }
+
   /// Answers an escalated supervisor case (#498, `POST /api/supervisor/cases/:id`), on the
   /// lease authority only. [action] is `write` ([text]: typed into the session through the
   /// gated prompt; the case closes), `later` ([hours]), `tell` ([note]: to the supervisor,

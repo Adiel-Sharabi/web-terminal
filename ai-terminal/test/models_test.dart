@@ -770,9 +770,11 @@ void main() {
         checkIn: const SessionCheckIn(sentAt: 1700000000000, idleMin: 95, state: 'done'),
         parentId: 'parent-7',
         replaces: const ['old-1'],
+        role: 'supervisor',
       );
 
       final moved = original.withFavoriteRank(999);
+      expect(moved.role, 'supervisor', reason: '#475: a dropped role puts the dispatcher back in the session list');
 
       expect(moved.favoriteRank, 999);
       expect(moved.id, original.id);
