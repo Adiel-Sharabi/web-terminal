@@ -235,8 +235,22 @@ class McAction {
 class McCard {
   final String id;
 
-  /// `question`, `permission`, `decision`, `wait`, `action` - or any newer kind, kept as sent.
+  /// `question`, `permission`, `decision`, `wait`, `action`, `ask`, `possible-ask` - or any newer kind, kept as sent.
   final String kind;
+
+  /// False for an `ask` or a `possible-ask` (#526): a decision the session works around, so it is
+  /// not held up by it. Absent (an older server): true.
+  final bool blocking;
+
+  /// An `ask` (#526): the short name of the decision, the same one the answer typed back carries.
+  final String? askId;
+
+  /// An `ask`: what an answer typed from the card begins with, so the session can tell WHICH
+  /// decision it answers. The server words it; the app only prepends it.
+  final String? replyPrefix;
+
+  /// An `ask` the person may have answered by typing into the session (the card is dimmed).
+  final bool maybeAnswered;
   final String? server;
   final String? serverUrl;
   final String? sessionId;
@@ -262,6 +276,10 @@ class McCard {
   const McCard({
     required this.id,
     this.kind = 'wait',
+    this.blocking = true,
+    this.askId,
+    this.replyPrefix,
+    this.maybeAnswered = false,
     this.server,
     this.serverUrl,
     this.sessionId,
@@ -288,6 +306,11 @@ class McCard {
     return McCard(
       id: id,
       kind: _str(m['kind']) ?? 'wait',
+      blocking: m['blocking'] != false,
+      askId: _str(m['askId']),
+      // Kept as sent: its trailing space is part of the words the server chose (_str trims).
+      replyPrefix: m['replyPrefix'] is String && (m['replyPrefix'] as String).trim().isNotEmpty ? m['replyPrefix'] as String : null,
+      maybeAnswered: _bool(m['maybeAnswered']),
       server: _str(m['server']),
       serverUrl: _str(m['serverUrl']),
       sessionId: _str(m['sessionId']),
@@ -313,6 +336,17 @@ class McCard {
   /// Answered in the questions inbox, which takes every kind of wait on the person (a
   /// question, a permission, a decision, a reported wait: #383) - so any card with a session.
   bool get answerable => sessionId != null;
+
+  /// An ask is no wait: the inbox lists none (its session is moving on), so it is answered by a
+  /// reply typed from the card itself (#526).
+  bool get isAsk => kind == 'ask';
+
+  /// A question a session's last reply may have put that it never reported (#526): a guess the
+  /// server quotes, answered in the person's own words.
+  bool get isPossibleAsk => kind == 'possible-ask';
+
+  /// Answered by the reply dialog rather than the questions inbox.
+  bool get usesReplyDialog => isAsk || isPossibleAsk;
 }
 
 /// What became of a to-do's park message (#506): `sending`, `delivered`, `refused` (the

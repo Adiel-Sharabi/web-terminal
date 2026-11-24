@@ -498,8 +498,10 @@ test.describe('wait and hidden (#313, #314)', () => {
     const cmd = B.reportCommand('C:/dev/web-terminal/scripts/wt-report.js');
     // #466 raised it from 1420 by the one wait-target line (lib/wait-target.js teaches the rest);
     // #492 by the one decision line (the shape is refused with the right one); #505 by the
-    // one stage clause on the States line; #522 by the one action line.
-    expect(B.instructionText(e, cmd).length).toBeLessThanOrEqual(2060);
+    // one stage clause on the States line; #522 by the one action line; #526 by the one `asks` line (the decisions the session
+    // holds for the owner without stopping: without it they live only in the reply text, and a
+    // finished session's open decisions were never seen).
+    expect(B.instructionText(e, cmd).length).toBeLessThanOrEqual(2660);
   });
 });
 
@@ -841,6 +843,9 @@ test.describe('#523 a session reports its line of work', () => {
     const r = B.validateReport({ wait: { on: 'self', what: 'ci' }, line: 'Bug hunter' }, e);
     expect(r.report).toBeUndefined();
     expect(r.error).toContain('"line" goes with your items');
+    // #526: the same for a report of asks alone - refused in words, never silently dropped.
+    const asked = B.validateReport({ asks: [{ question: 'q?', context: 'c', options: [{ label: 'a' }, { label: 'b' }] }], line: 'Bug hunter' }, e);
+    expect(asked.error).toContain('"line" goes with your items');
     expect(B.validateReport({ wait: { on: 'self', what: 'ci' }, line: null }, e).report).toEqual({ partial: true, wait: { on: 'self', what: 'ci' } });
   });
 
